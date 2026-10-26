@@ -1703,7 +1703,7 @@
             "id": 48,
             "type": "timeseries",
             "title": "Redis contract reservations / s",
-            "description": "Reservation operations by outcome, including token replays; not committed contract throughput. Creation reserves with reserve-pending and reserve-pending-full before its transaction begins, and a request that published nothing releases with release-pending; reserve-owned and reserve-owned-full come only from releases that reserve inside the transaction and go flat once those are retired. The second query counts creation transactions that refused to publish a pending reservation, by reason (window_expired, released).",
+            "description": "Reservation operations by outcome, including token replays; not committed contract throughput. Creation reserves with reserve-pending and reserve-pending-full before its transaction begins, and a request that published nothing releases with release-pending; reserve-owned and reserve-owned-full come only from releases that reserve inside the transaction and go flat once those are retired. After a request's first refusal, selection probes the remaining grants read-only (reserve-probe: empty, available, undecided, error) and counts each reservation a probe proves refused as skipped instead of sending it. The second query counts creation transactions that refused to publish a pending reservation, by reason (window_expired, released).",
             "gridPos": {
                 "h": 8,
                 "w": 12,

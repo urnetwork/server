@@ -49,6 +49,8 @@ CREATE TEMP TABLE transfer_balance (
     network_id uuid, pro boolean, start_time timestamptz, end_time timestamptz
 );
 CREATE TEMP TABLE solana_unfulfilled_payment (reason text, record_time timestamptz);
+CREATE TEMP TABLE apple_subscription_transaction (transaction_id text);
+CREATE TEMP TABLE play_purchase_binding (purchase_token text);
 `))
 }
 
@@ -91,25 +93,40 @@ VALUES ($1, $2, $3, $4, $5::json, $6, now() - $7::bigint * interval '1 second')`
 
 // The S11 webhook tuple must reach its existing WARN through the actual payment
 // failure SELECT, including when reconciliation repeats the same invoice.
+// Unowned App Store and Play purchases form their own store groups; every
+// group must still classify and keep private evidence out of its WARN.
 func paymentReconciliationAuditSqlRequireWarn(t testing.TB, conn server.PgConn) {
 	t.Helper()
-	var kind, store string
-	var count, oldestAge, newestAge int64
-	server.Raise(conn.QueryRow(t.Context(), paymentFailuresQuery).Scan(
-		&kind, &store, &count, &oldestAge, &newestAge,
-	))
-	if kind != "credit_unfulfillable" || store != "stripe" || count != 1 {
-		t.Fatal("the payment failure query lost the distinct unresolved invoice")
-	}
-	issue, err := paymentFailureFinding(kind, store, count, oldestAge, newestAge)
-	if err != nil || issue.class != "payment-credit-unfulfillable" || issue.tier != tierWarn {
-		t.Fatal("the unresolved payment no longer retains its separate WARN")
-	}
-	rendered := alertFromFinding(syntheticSettings(&syntheticSource{}), "2.22", "payment-failures", "Payment failures", issue).Markdown()
-	for _, forbidden := range []string{"in_private_audit", "synthetic-private-details", "payer@example.invalid"} {
-		if strings.Contains(rendered, forbidden) {
-			t.Fatal("private payment evidence escaped the aggregate WARN")
+	stripeGroups := 0
+	result, err := conn.Query(t.Context(), paymentFailuresQuery)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var kind, store string
+			var count, oldestAge, newestAge int64
+			server.Raise(result.Scan(&kind, &store, &count, &oldestAge, &newestAge))
+			issue, err := paymentFailureFinding(kind, store, count, oldestAge, newestAge)
+			if err != nil {
+				t.Fatal("the payment failure query returned an unclassifiable group")
+			}
+			if kind == "credit_unfulfillable" && store == "stripe" {
+				stripeGroups += 1
+				if count != 1 {
+					t.Fatal("the payment failure query lost the distinct unresolved invoice")
+				}
+				if issue.class != "payment-credit-unfulfillable" || issue.tier != tierWarn {
+					t.Fatal("the unresolved payment no longer retains its separate WARN")
+				}
+			}
+			rendered := alertFromFinding(syntheticSettings(&syntheticSource{}), "2.22", "payment-failures", "Payment failures", issue).Markdown()
+			for _, forbidden := range []string{"in_private_audit", "in_other_private_audit", "synthetic-private-details", "payer@example.invalid"} {
+				if strings.Contains(rendered, forbidden) {
+					t.Fatal("private payment evidence escaped the aggregate WARN")
+				}
+			}
 		}
+	})
+	if stripeGroups != 1 {
+		t.Fatal("the payment failure query lost the distinct unresolved invoice")
 	}
 }
 
@@ -223,6 +240,56 @@ func TestPaymentReconciliationWebhookAuditSqlMixedWritersAndScope(t *testing.T) 
 			issue, err = paymentReconciliationUnfulfillableFinding([]pgRow{row})
 			if err != nil || issue == nil || issue.class != "payment-reconciliation-credit-unfulfillable-invalid" || strings.Join(row[:4], ",") != "1,3,3,1" {
 				t.Fatal("a valid webhook hid a same-invoice malformed record")
+			}
+		})
+	})
+}
+
+// Unowned App Store and Play purchases reach the payment failure WARN as their
+// own store groups through the actual SELECT. A purchase the app later bound
+// and credited (its transaction in the App Store ledger, its token in the Play
+// binding) drops out; a Play purchase bound to another network stays, since its
+// binding is the conflict itself. Dry-run and stale rows stay outside.
+func TestPaymentFailuresSqlCountsUnownedStorePurchases(t *testing.T) {
+	(&server.TestEnv{ApplyDbMigrations: false, RerunCount: 0}).Run(t, func(t testing.TB) {
+		server.Db(t.Context(), func(conn server.PgConn) {
+			paymentReconciliationAuditSqlFixture(t, conn)
+			unresolvedWebhook := map[string]any{"reason": "destination_unresolved", "leg": "webhook"}
+			paymentReconciliationAuditSqlInsert(t, conn, "apple_unowned", unresolvedWebhook, "apple", "credit_unfulfillable", false, 120)
+			paymentReconciliationAuditSqlInsert(t, conn, "apple_unowned", unresolvedWebhook, "apple", "credit_unfulfillable", false, 60)
+			paymentReconciliationAuditSqlInsert(t, conn, "apple_credited_later", unresolvedWebhook, "apple", "credit_unfulfillable", false, 60)
+			paymentReconciliationAuditSqlInsert(t, conn, "apple_dry_run", unresolvedWebhook, "apple", "credit_unfulfillable", true, 60)
+			paymentReconciliationAuditSqlInsert(t, conn, "apple_stale", unresolvedWebhook, "apple", "credit_unfulfillable", false, 25*60*60)
+			paymentReconciliationAuditSqlInsert(t, conn, "play_unowned", unresolvedWebhook, "google", "credit_unfulfillable", false, 60)
+			paymentReconciliationAuditSqlInsert(t, conn, "play_bound_later", unresolvedWebhook, "google", "credit_unfulfillable", false, 60)
+			paymentReconciliationAuditSqlInsert(t, conn, "play_bound_elsewhere", map[string]any{"reason": "bound_to_another_network", "leg": "credit"}, "google", "credit_unfulfillable", false, 60)
+			server.RaisePgResult(conn.Exec(t.Context(), `
+INSERT INTO apple_subscription_transaction (transaction_id) VALUES ('apple_credited_later');
+INSERT INTO play_purchase_binding (purchase_token) VALUES ('play_bound_later'), ('play_bound_elsewhere');
+`))
+
+			counts := map[string]int64{}
+			result, err := conn.Query(t.Context(), paymentFailuresQuery)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					var kind, store string
+					var count, oldestAge, newestAge int64
+					server.Raise(result.Scan(&kind, &store, &count, &oldestAge, &newestAge))
+					issue, err := paymentFailureFinding(kind, store, count, oldestAge, newestAge)
+					if err != nil || issue.class != "payment-credit-unfulfillable" || issue.tier != tierWarn {
+						t.Fatalf("%s/%s did not classify as the credit-unfulfillable WARN", kind, store)
+					}
+					rendered := alertFromFinding(syntheticSettings(&syntheticSource{}), "2.22", "payment-failures", "Payment failures", issue).Markdown()
+					for _, forbidden := range []string{"apple_unowned", "play_unowned", "play_bound_elsewhere"} {
+						if strings.Contains(rendered, forbidden) {
+							t.Fatal("private payment evidence escaped the aggregate WARN")
+						}
+					}
+					counts[kind+"/"+store] = count
+				}
+			})
+			if counts["credit_unfulfillable/apple"] != 1 || counts["credit_unfulfillable/google"] != 2 || len(counts) != 2 {
+				t.Fatalf("unowned store purchase groups = %v; want apple 1 (unowned) and google 2 (unowned, bound elsewhere)", counts)
 			}
 		})
 	})

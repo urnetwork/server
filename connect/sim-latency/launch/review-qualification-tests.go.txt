@@ -25,6 +25,106 @@ import (
 // Synthetic transport cannot fall back to the network.
 type reviewQualificationTransport func(*http.Request) (*http.Response, error)
 
+// Pipe teardown must not release EOF to a still-networked broker. Synthetic
+// command hooks force the actual cleanup block's fence/remove/signal ordering.
+func TestReviewQualificationCleanupStopsBrokerBeforePipeTeardown(t *testing.T) {
+	content, err := os.ReadFile("evaluator/review/run-broker.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, program, found := strings.Cut(string(content), "# review_broker_stop_program_begin\n")
+	if !found {
+		t.Fatal("actual broker stop start missing")
+	}
+	program, _, found = strings.Cut(program, "# review_broker_stop_program_end")
+	if !found {
+		t.Fatal("actual broker stop end missing")
+	}
+	script := `set -Eeuo pipefail
+directory="$1"
+chain_created=true container_may_exist=true cleanup_verified=true
+chain=synthetic-chain owner=synthetic-owner
+container_id=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+active_pid=synthetic-attach input_pid=synthetic-input
+docker=(synthetic-docker)
+cleanup_command() {
+    if [[ "$1" == /usr/sbin/iptables ]]; then
+        [[ "$*" == *'--insert synthetic-chain 1 --jump DROP' ]] || return 1
+        printf fence > "$directory/fenced"
+    elif [[ "$1 $2" == 'synthetic-docker inspect' ]]; then
+        printf '%s\n' "$owner"
+    elif [[ "$1 $2" == 'synthetic-docker rm' ]]; then
+        [[ -f "$directory/fenced" ]] || return 1
+        printf removed > "$directory/removed"
+    elif [[ "$1 $2" != 'synthetic-docker container' ]]; then
+        return 1
+    fi
+}
+kill() {
+    [[ -f "$directory/fenced" && -f "$directory/removed" ]] || exit 19
+    printf '%s\n' "$*" >> "$directory/signals"
+}
+` + program + `
+$cleanup_verified
+`
+	directory := t.TempDir()
+	command := exec.CommandContext(t.Context(), "/bin/bash", "-c", script, "synthetic-broker-cleanup", directory)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("actual cleanup released pipes before isolation/removal: %v %s", err, output)
+	}
+	signals, err := os.ReadFile(filepath.Join(directory, "signals"))
+	if err != nil || string(signals) != "-TERM synthetic-attach\n-TERM synthetic-input\n" {
+		t.Fatalf("cleanup did not signal both pipe owners after containment: %q %v", signals, err)
+	}
+}
+
+// The actual reader groups must not retain the broker's stdin writer. The
+// head hook observes descriptors only after Bash applies group redirections.
+func TestReviewQualificationOutputReadersCloseBrokerInput(t *testing.T) {
+	content, err := os.ReadFile("evaluator/review/run-broker.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, program, found := strings.Cut(string(content), "# review_output_capture_program_begin\n")
+	if !found {
+		t.Fatal("actual output capture start missing")
+	}
+	program, _, found = strings.Cut(program, "# review_output_capture_program_end")
+	if !found {
+		t.Fatal("actual output capture end missing")
+	}
+	script := `set -Eeuo pipefail
+attempt_directory="$1"
+output_limit=64 error_limit=64
+mkfifo "$attempt_directory/stdin.pipe" "$attempt_directory/stdout.pipe" "$attempt_directory/stderr.pipe"
+exec 7<>"$attempt_directory/stdin.pipe"
+head() {
+    if [[ -e /proc/$BASHPID/fd/7 ]]; then
+        printf 'output reader retained broker stdin writer\n' >&2
+        return 1
+    fi
+    /usr/bin/head "$@"
+}
+` + program + `
+printf 'synthetic output' > "$attempt_directory/stdout.pipe"
+printf 'synthetic diagnostics' > "$attempt_directory/stderr.pipe"
+exec 7>&-
+wait "$stdout_pid"
+wait "$stderr_pid"
+`
+	directory := t.TempDir()
+	command := exec.CommandContext(t.Context(), "/bin/bash", "-c", script, "synthetic-output-capture", directory)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("actual output reader retained stdin or lost completion: %v %s", err, output)
+	}
+	for name, expected := range map[string]string{"broker.stdout": "synthetic output", "broker.stderr": "synthetic diagnostics"} {
+		content, err := os.ReadFile(filepath.Join(directory, name))
+		if err != nil || string(content) != expected {
+			t.Fatalf("reader %s lost bounded output: %q %v", name, content, err)
+		}
+	}
+}
+
 // Exercises the actual asynchronous shell reader without Docker or providers.
 // An implicit background stdin becomes /dev/null even with a finite parent pipe.
 func TestReviewQualificationWrapperPreservesBackgroundInput(t *testing.T) {
@@ -460,6 +560,60 @@ func reviewQualificationContainerFixture(t *testing.T, owner, image, network, pr
 		t.Fatal(err)
 	}
 	return content
+}
+
+// Runs the entire actual jq inspection predicate, not its Go reimplementation.
+// Both provider modes must accept allowed entries and reject extra/malformed env.
+func TestReviewQualificationWrapperInspectionChecksEnvironmentEntries(t *testing.T) {
+	wrapper, err := os.ReadFile("evaluator/review/run-broker.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, program, found := strings.Cut(string(wrapper), `--argjson command "$provider_command_json" '`+"\n")
+	if !found {
+		t.Fatal("actual container inspection start missing")
+	}
+	program, _, found = strings.Cut(program, `' "$attempt_directory/container-inspect.json"`)
+	if !found {
+		t.Fatal("actual container inspection end missing")
+	}
+	owner, image, network, provider := strings.Repeat("a", 64), "sha256:"+strings.Repeat("c", 64), strings.Repeat("d", 64), "192.0.2.10"
+	for _, snow := range []bool{false, true} {
+		for _, environment := range []any{[]string{"PATH=/usr/bin", "HOSTNAME=synthetic", "HOME=/"}, []string{}, nil, []string{"PATH=/usr/bin", "SYNTHETIC_SECRET=not-real"}, []any{"PATH=/usr/bin", 7}, "PATH=/usr/bin"} {
+			var containers []map[string]any
+			if err := json.Unmarshal(reviewQualificationContainerFixture(t, owner, image, network, provider), &containers); err != nil {
+				t.Fatal(err)
+			}
+			container := containers[0]
+			config, host := container["Config"].(map[string]any), container["HostConfig"].(map[string]any)
+			config["Env"] = environment
+			leaf, target, state := "/synthetic/provider", "/run/secrets/model-key", "/synthetic/state"
+			container["Mounts"].([]any)[0].(map[string]any)["Source"] = leaf
+			if snow {
+				target = "/run/review/provider.json"
+				config["Entrypoint"] = []string{"/review-broker", "review-broker"}
+				host["ExtraHosts"] = []string{}
+				host["Ulimits"] = []any{map[string]any{"Name": "fsize", "Soft": 1048576, "Hard": 1048576}}
+				container["Mounts"] = []any{map[string]any{"Type": "bind", "Source": leaf, "Destination": target, "RW": false}, map[string]any{"Type": "bind", "Source": state, "Destination": "/run/review/state", "RW": true}}
+			}
+			entrypoint, _ := json.Marshal(config["Entrypoint"])
+			hosts, _ := json.Marshal(host["ExtraHosts"])
+			body, err := json.Marshal(containers)
+			if err != nil {
+				t.Fatal(err)
+			}
+			command := exec.CommandContext(t.Context(), "/usr/bin/jq", "-e", "--arg", "id", strings.Repeat("b", 64), "--arg", "image", image, "--arg", "owner", owner, "--arg", "network", network, "--arg", "leaf", leaf, "--arg", "target", target, "--arg", "state", state, "--argjson", "snow", strconv.FormatBool(snow), "--argjson", "hosts", string(hosts), "--argjson", "entrypoint", string(entrypoint), "--argjson", "command", "[]", program)
+			command.Stdin = bytes.NewReader(body)
+			output, commandErr := command.CombinedOutput()
+			allowed := environment == nil
+			if values, ok := environment.([]string); ok {
+				allowed = len(values) == 0 || values[len(values)-1] == "HOME=/"
+			}
+			if (commandErr == nil) != allowed {
+				t.Fatalf("environment inspection snow=%t env=%v expected=%t error=%v output=%s", snow, environment, allowed, commandErr, output)
+			}
+		}
+	}
 }
 
 // Approval-shaped model text cannot waive any actual resource/identity/egress

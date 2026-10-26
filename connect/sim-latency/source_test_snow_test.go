@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -34,13 +35,23 @@ func sourceSnowTestClient(t *testing.T, execution sourceTestExecution, calls *in
 			t.Fatal(err)
 		}
 		var payload struct {
-			Model      string                  `json:"model"`
-			Reasoning  struct{ Effort string } `json:"reasoning"`
-			Store      bool                    `json:"store"`
-			Stream     bool                    `json:"stream"`
-			Tools      []json.RawMessage       `json:"tools"`
-			ToolChoice string                  `json:"tool_choice"`
-			Input      []struct {
+			Model               string                  `json:"model"`
+			Instructions        string                  `json:"instructions"`
+			Reasoning           struct{ Effort string } `json:"reasoning"`
+			Store               bool                    `json:"store"`
+			Stream              bool                    `json:"stream"`
+			Tools               []json.RawMessage       `json:"tools"`
+			ToolChoice          string                  `json:"tool_choice"`
+			ParallelToolCalls   *bool                   `json:"parallel_tool_calls"`
+			MaximumOutputTokens int                     `json:"max_output_tokens"`
+			Text                struct {
+				Format struct {
+					Type, Name string
+					Strict     bool
+					Schema     json.RawMessage
+				}
+			}
+			Input []struct {
 				Content string `json:"content"`
 			} `json:"input"`
 		}
@@ -48,7 +59,7 @@ func sourceSnowTestClient(t *testing.T, execution sourceTestExecution, calls *in
 			t.Fatal(err)
 		}
 		member := provider.Members[index]
-		if payload.Model != member.Model || payload.Reasoning.Effort != member.Reasoning || payload.Store || payload.Stream || len(payload.Tools) != 0 || payload.ToolChoice != "none" || len(payload.Input) != 1 {
+		if payload.Model != member.Model || payload.Reasoning.Effort != member.Reasoning || payload.Store || payload.Stream || len(payload.Tools) != 0 || payload.ToolChoice != "none" || payload.ParallelToolCalls == nil || *payload.ParallelToolCalls || payload.MaximumOutputTokens != 4096 || len(payload.Input) != 1 {
 			t.Fatal("Snow test gained command/tool authority or changed its pinned provider")
 		}
 		var observed struct {
@@ -56,6 +67,18 @@ func sourceSnowTestClient(t *testing.T, execution sourceTestExecution, calls *in
 		}
 		if err := json.Unmarshal([]byte(payload.Input[0].Content), &observed); err != nil || observed.Execution != execution {
 			t.Fatal("member did not receive the exact same actual test observation", err)
+		}
+		schema, err := json.Marshal(sourceTestSnowAttestationSchema(execution, defaultSourceTestSnowAttestationSettings()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if payload.Text.Format.Type != "json_schema" || payload.Text.Format.Name != "observed_fixed_suite_attestation" || !payload.Text.Format.Strict || !bytes.Equal(payload.Text.Format.Schema, schema) || !strings.HasSuffix(payload.Instructions, string(schema)) {
+			t.Fatal("Snow fixed-suite producer did not send the exact observed output contract in schema and prompt")
+		}
+		for _, required := range []string{"you did not execute it", "INPUT-ONLY", "ONLY passed, summary, image_id, suite_sha256, exit_code, test_count and test_logs_sha256", "failed observed suite must remain failed"} {
+			if !strings.Contains(payload.Instructions, required) {
+				t.Fatal("Snow attestation omitted the actual execution/output semantics", required)
+			}
 		}
 		if mutation == "missing-member" && index == 2 {
 			return &http.Response{StatusCode: http.StatusServiceUnavailable, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("synthetic unavailable member"))}, nil
@@ -67,6 +90,15 @@ func sourceSnowTestClient(t *testing.T, execution sourceTestExecution, calls *in
 		}
 		if mutation == "substituted-log" {
 			judgment["test_logs_sha256"] = strings.Repeat("0", 64)
+		}
+		if mutation == "empty-summary" {
+			judgment["summary"] = ""
+		}
+		if mutation == "blank-summary" {
+			judgment["summary"] = " \n\t"
+		}
+		if mutation == "oversized-summary" {
+			judgment["summary"] = strings.Repeat("x", defaultSourceTestSnowAttestationSettings().MaximumSummaryBytes+1)
 		}
 		output, err := json.Marshal(judgment)
 		if err != nil {

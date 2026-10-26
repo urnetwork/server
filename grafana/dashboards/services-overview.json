@@ -2,6 +2,12 @@
     "uid": "urnetwork-services",
     "title": "urnetwork / services overview",
     "tags": ["urnetwork"],
+    "links": [
+        {"title": "postgres", "url": "/d/urnetwork-postgres", "type": "link", "keepTime": true, "includeVars": false},
+        {"title": "redis cluster", "url": "/d/urnetwork-redis-cluster", "type": "link", "keepTime": true, "includeVars": false},
+        {"title": "proxy", "url": "/d/urnetwork-proxy", "type": "link", "keepTime": true, "includeVars": false},
+        {"title": "host metrics", "url": "/d/urnetwork-hosts", "type": "link", "keepTime": true, "includeVars": false}
+    ],
     "timezone": "browser",
     "schemaVersion": 39,
     "refresh": "30s",
@@ -57,10 +63,681 @@
     },
     "panels": [
         {
+            "id": 16,
+            "type": "row",
+            "title": "incident signals (SIGNALS.md section 26): database backlog and contract-creation storm",
+            "collapsed": false,
+            "gridPos": {
+                "h": 1,
+                "w": 24,
+                "x": 0,
+                "y": 0
+            },
+            "panels": []
+        },
+        {
+            "id": 17,
+            "type": "stat",
+            "title": "PgBouncer clients waiting (5m avg)",
+            "description": "Clients queued for a PgBouncer server connection, summed over every pool of every instance in the env and averaged over five minutes (pgbouncer_pool_clients_waiting, SHOW POOLS cl_waiting read every 15 s). Normal is 0. Orange from 100, red from 1,000 (SIGNALS.md section 26): the WARN needs 10 minutes above 100, or the oldest wait above 0.5 s for 10 minutes; the PAGE needs 5 minutes above 1,000. Bursts past 100 for 5-6 minutes happen without an incident. On 2026-10-26 it held thousands for hours while every server connection was busy and PostgreSQL sat idle in transaction, waiting on CPU-starved clients. Detail: the postgres dashboard's backlog row. Fleet-wide in the selected env; the service, block and host pickers do not apply.",
+            "gridPos": {
+                "h": 4,
+                "w": 6,
+                "x": 0,
+                "y": 1
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "decimals": 0,
+                    "color": {
+                        "mode": "thresholds"
+                    },
+                    "thresholds": {
+                        "mode": "absolute",
+                        "steps": [
+                            {
+                                "color": "green",
+                                "value": null
+                            },
+                            {
+                                "color": "orange",
+                                "value": 100
+                            },
+                            {
+                                "color": "red",
+                                "value": 1000
+                            }
+                        ]
+                    }
+                },
+                "overrides": []
+            },
+            "options": {
+                "reduceOptions": {
+                    "calcs": [
+                        "lastNotNull"
+                    ],
+                    "fields": "",
+                    "values": false
+                },
+                "colorMode": "background",
+                "graphMode": "area",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "textMode": "auto",
+                "wideLayout": true
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum(avg_over_time(pgbouncer_pool_clients_waiting{env=\"$env\",job=\"pgbouncer\"}[5m]))"
+                }
+            ]
+        },
+        {
+            "id": 18,
+            "type": "stat",
+            "title": "highest service DB acquire wait",
+            "description": "Mean time a service waited to check out a PostgreSQL connection from its default pool over five minutes: acquire wait seconds over successful acquires, summed over the service's processes, highest service shown. Orange from 100 ms: the WARN of SIGNALS.md section 26 needs 5 minutes above it. A service with few acquires (alt, gossip, mcp) can swing on a handful of slow ones, and abandoned acquires are not timed. Detail: the postgres dashboard's backlog row. Fleet-wide in the selected env; the service, block and host pickers do not apply.",
+            "gridPos": {
+                "h": 4,
+                "w": 6,
+                "x": 6,
+                "y": 1
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "s",
+                    "color": {
+                        "mode": "thresholds"
+                    },
+                    "thresholds": {
+                        "mode": "absolute",
+                        "steps": [
+                            {
+                                "color": "green",
+                                "value": null
+                            },
+                            {
+                                "color": "orange",
+                                "value": 0.1
+                            }
+                        ]
+                    }
+                },
+                "overrides": []
+            },
+            "options": {
+                "reduceOptions": {
+                    "calcs": [
+                        "lastNotNull"
+                    ],
+                    "fields": "",
+                    "values": false
+                },
+                "colorMode": "background",
+                "graphMode": "area",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "textMode": "auto",
+                "wideLayout": true
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "max(sum by (service) (rate(urnetwork_pg_pool_acquire_duration_seconds_total{env=\"$env\",pool=\"default\",instance!=\"\"}[5m])) / (sum by (service) (rate(urnetwork_pg_pool_acquires_total{env=\"$env\",pool=\"default\",outcome=\"acquired\",instance!=\"\"}[5m])) > 0))"
+                }
+            ]
+        },
+        {
+            "id": 19,
+            "type": "stat",
+            "title": "services-edge CPU: 4 edges and busiest",
+            "description": "Busy share (neither idle nor I/O wait, summed over the CPUs before dividing) over five minutes of the hosts that run connect, the services edges that also run api and taskworker: the four together, orange from 80%, and the busiest edge, orange from 85%. WARN (SIGNALS.md section 26) when the four together stay above 80% for 10 minutes, or one edge above 85% for 30 minutes; a placement hot spot can hold one edge high for hours without a fault, hence the longer hold. On 2026-10-26 the four together held 82% through the night, and their CPU-starved clients held PgBouncer server connections idle in transaction. Detail: the postgres dashboard's backlog row. Fleet-wide in the selected env; the service, block and host pickers do not apply.",
+            "gridPos": {
+                "h": 4,
+                "w": 6,
+                "x": 12,
+                "y": 1
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "percentunit",
+                    "decimals": 0,
+                    "min": 0,
+                    "max": 1,
+                    "color": {
+                        "mode": "thresholds"
+                    },
+                    "thresholds": {
+                        "mode": "absolute",
+                        "steps": [
+                            {
+                                "color": "green",
+                                "value": null
+                            },
+                            {
+                                "color": "orange",
+                                "value": 0.8
+                            }
+                        ]
+                    }
+                },
+                "overrides": [
+                    {
+                        "matcher": {
+                            "id": "byName",
+                            "options": "busiest edge"
+                        },
+                        "properties": [
+                            {
+                                "id": "thresholds",
+                                "value": {
+                                    "mode": "absolute",
+                                    "steps": [
+                                        {
+                                            "color": "green",
+                                            "value": null
+                                        },
+                                        {
+                                            "color": "orange",
+                                            "value": 0.85
+                                        }
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                ]
+            },
+            "options": {
+                "reduceOptions": {
+                    "calcs": [
+                        "lastNotNull"
+                    ],
+                    "fields": "",
+                    "values": false
+                },
+                "colorMode": "background",
+                "graphMode": "area",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "textMode": "value_and_name",
+                "wideLayout": true
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "1 - sum(sum by (host) (rate(node_cpu_seconds_total{env=\"$env\",job=\"node\",mode=~\"idle|iowait\"}[5m])) and on (host) count by (host) (go_goroutines{env=\"$env\",service=\"connect\",instance!=\"\"})) / sum(sum by (host) (rate(node_cpu_seconds_total{env=\"$env\",job=\"node\"}[5m])) and on (host) count by (host) (go_goroutines{env=\"$env\",service=\"connect\",instance!=\"\"}))",
+                    "legendFormat": "4 edges"
+                },
+                {
+                    "refId": "B",
+                    "expr": "max(1 - sum by (host) (rate(node_cpu_seconds_total{env=\"$env\",job=\"node\",mode=~\"idle|iowait\"}[5m])) / sum by (host) (rate(node_cpu_seconds_total{env=\"$env\",job=\"node\"}[5m])) and on (host) count by (host) (go_goroutines{env=\"$env\",service=\"connect\",instance!=\"\"}))",
+                    "legendFormat": "busiest edge"
+                }
+            ]
+        },
+        {
+            "id": 20,
+            "type": "stat",
+            "title": "busiest proxy host CPU",
+            "description": "Busy share (neither idle nor I/O wait) over five minutes of the busiest host running the proxy. Orange from 85%: the WARN of SIGNALS.md section 26 needs 10 minutes above it. Healthy is 9-51%; the proxy hosts ran 89-96% busy in the 2026-10-26 contract-creation storm. Detail: the proxy dashboard's contract creation storm row. Fleet-wide in the selected env; the service, block and host pickers do not apply.",
+            "gridPos": {
+                "h": 4,
+                "w": 6,
+                "x": 18,
+                "y": 1
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "percentunit",
+                    "decimals": 0,
+                    "min": 0,
+                    "max": 1,
+                    "color": {
+                        "mode": "thresholds"
+                    },
+                    "thresholds": {
+                        "mode": "absolute",
+                        "steps": [
+                            {
+                                "color": "green",
+                                "value": null
+                            },
+                            {
+                                "color": "orange",
+                                "value": 0.85
+                            }
+                        ]
+                    }
+                },
+                "overrides": []
+            },
+            "options": {
+                "reduceOptions": {
+                    "calcs": [
+                        "lastNotNull"
+                    ],
+                    "fields": "",
+                    "values": false
+                },
+                "colorMode": "background",
+                "graphMode": "area",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "textMode": "auto",
+                "wideLayout": true
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "max(1 - sum by (host) (rate(node_cpu_seconds_total{env=\"$env\",job=\"node\",mode=~\"idle|iowait\"}[5m])) / sum by (host) (rate(node_cpu_seconds_total{env=\"$env\",job=\"node\"}[5m])) and on (host) count by (host) (go_goroutines{env=\"$env\",service=\"proxy\",instance!=\"\"}))"
+                }
+            ]
+        },
+        {
+            "id": 21,
+            "type": "stat",
+            "title": "stuck contract creations, busiest process",
+            "description": "CreateContract calls in stage other in the busiest process of any service, as each process's two-minute maximum. Stage other counts the time no stage instruments; in the 2026-10-26 storm each proxy process held about 9k failed calls there, waiting out their reservation cleanup. Red from 1,000: the PAGE of SIGNALS.md section 26 needs 5 minutes above it. Healthy is at most 30. Fleet-wide in the selected env; the service, block and host pickers do not apply.",
+            "gridPos": {
+                "h": 4,
+                "w": 4,
+                "x": 0,
+                "y": 5
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "decimals": 0,
+                    "color": {
+                        "mode": "thresholds"
+                    },
+                    "thresholds": {
+                        "mode": "absolute",
+                        "steps": [
+                            {
+                                "color": "green",
+                                "value": null
+                            },
+                            {
+                                "color": "red",
+                                "value": 1000
+                            }
+                        ]
+                    }
+                },
+                "overrides": []
+            },
+            "options": {
+                "reduceOptions": {
+                    "calcs": [
+                        "lastNotNull"
+                    ],
+                    "fields": "",
+                    "values": false
+                },
+                "colorMode": "background",
+                "graphMode": "area",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "textMode": "auto",
+                "wideLayout": true
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "max(sum by (service, host, block, instance) (max_over_time(urnetwork_contract_creation_stage_inflight{env=\"$env\",stage=\"other\",instance!=\"\"}[2m])))"
+                }
+            ]
+        },
+        {
+            "id": 22,
+            "type": "stat",
+            "title": "highest contract-creation failure share",
+            "description": "(canceled + panic) over (contract_reply + canceled + panic) per service over five minutes, as SIGNALS.md section 25.1 defines it, for services returning at least 20 such calls/s; highest service shown. protocol_reject stays out, since it would swamp the share. Orange from 5% (the WARN, 10 minutes), red from 20% (the PAGE of SIGNALS.md section 26, 5 minutes). Healthy is 0-1.3%; the proxy reached 92-97% in the 2026-10-26 storm. Fleet-wide in the selected env; the service, block and host pickers do not apply.",
+            "gridPos": {
+                "h": 4,
+                "w": 4,
+                "x": 4,
+                "y": 5
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "percentunit",
+                    "decimals": 1,
+                    "color": {
+                        "mode": "thresholds"
+                    },
+                    "thresholds": {
+                        "mode": "absolute",
+                        "steps": [
+                            {
+                                "color": "green",
+                                "value": null
+                            },
+                            {
+                                "color": "orange",
+                                "value": 0.05
+                            },
+                            {
+                                "color": "red",
+                                "value": 0.2
+                            }
+                        ]
+                    }
+                },
+                "overrides": []
+            },
+            "options": {
+                "reduceOptions": {
+                    "calcs": [
+                        "lastNotNull"
+                    ],
+                    "fields": "",
+                    "values": false
+                },
+                "colorMode": "background",
+                "graphMode": "area",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "textMode": "auto",
+                "wideLayout": true
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "max(sum by (service) (rate(urnetwork_contract_creation_completed_total{env=\"$env\",instance!=\"\",outcome=~\"canceled|panic\"}[5m])) / (sum by (service) (rate(urnetwork_contract_creation_completed_total{env=\"$env\",instance!=\"\",outcome=~\"contract_reply|canceled|panic\"}[5m])) >= 20))"
+                }
+            ]
+        },
+        {
+            "id": 23,
+            "type": "stat",
+            "title": "highest release-pending errors / s",
+            "description": "Redis release-pending calls that failed, per second over five minutes, for the service with the most: reservation cleanup that could not reach Redis. Orange from 10/s: the WARN of SIGNALS.md section 26 needs 5 minutes above it. Healthy is at most 0.6/s; 86k/s at the 2026-10-26 storm's peak. Fleet-wide in the selected env; the service, block and host pickers do not apply.",
+            "gridPos": {
+                "h": 4,
+                "w": 4,
+                "x": 8,
+                "y": 5
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "ops",
+                    "color": {
+                        "mode": "thresholds"
+                    },
+                    "thresholds": {
+                        "mode": "absolute",
+                        "steps": [
+                            {
+                                "color": "green",
+                                "value": null
+                            },
+                            {
+                                "color": "orange",
+                                "value": 10
+                            }
+                        ]
+                    }
+                },
+                "overrides": []
+            },
+            "options": {
+                "reduceOptions": {
+                    "calcs": [
+                        "lastNotNull"
+                    ],
+                    "fields": "",
+                    "values": false
+                },
+                "colorMode": "background",
+                "graphMode": "area",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "textMode": "auto",
+                "wideLayout": true
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "max(sum by (service) (rate(urnetwork_redis_contract_reservation_total{env=\"$env\",operation=\"release-pending\",result=\"error\",instance!=\"\"}[5m])))"
+                }
+            ]
+        },
+        {
+            "id": 24,
+            "type": "stat",
+            "title": "highest Redis pool timeouts / s",
+            "description": "Highest rate of go-redis pool timeouts of any service over five minutes (urnetwork_redis_pool_timeouts_total, summed over the service's processes): commands that waited past the pool timeout for a connection. Orange from 10/s, the WARN of SIGNALS.md section 26 after 5 minutes; red from 1,000/s, the PAGE of SIGNALS.md section 3.5b. Healthy is 0. The proxy reached 12-14k/s in the 2026-10-26 storm. Fleet-wide in the selected env; the service, block and host pickers do not apply.",
+            "gridPos": {
+                "h": 4,
+                "w": 4,
+                "x": 12,
+                "y": 5
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "ops",
+                    "color": {
+                        "mode": "thresholds"
+                    },
+                    "thresholds": {
+                        "mode": "absolute",
+                        "steps": [
+                            {
+                                "color": "green",
+                                "value": null
+                            },
+                            {
+                                "color": "orange",
+                                "value": 10
+                            },
+                            {
+                                "color": "red",
+                                "value": 1000
+                            }
+                        ]
+                    }
+                },
+                "overrides": []
+            },
+            "options": {
+                "reduceOptions": {
+                    "calcs": [
+                        "lastNotNull"
+                    ],
+                    "fields": "",
+                    "values": false
+                },
+                "colorMode": "background",
+                "graphMode": "area",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "textMode": "auto",
+                "wideLayout": true
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "max(sum by (service) (rate(urnetwork_redis_pool_timeouts_total{env=\"$env\",instance!=\"\"}[5m])))"
+                }
+            ]
+        },
+        {
+            "id": 25,
+            "type": "stat",
+            "title": "busiest Redis main thread",
+            "description": "Highest main-thread CPU of any Redis node: user plus system seconds per second of the thread that runs commands and accepts connections, over five minutes (1.0 is one full core, all that thread can use). Orange from 0.85: the WARN of SIGNALS.md section 26 needs 10 minutes above it. Healthy is at most 0.64. In the 2026-10-26 storm single nodes ran 0.97-0.98, mostly on connection handling. Fleet-wide in the selected env; the service, block and host pickers do not apply.",
+            "gridPos": {
+                "h": 4,
+                "w": 4,
+                "x": 16,
+                "y": 5
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "percentunit",
+                    "decimals": 0,
+                    "min": 0,
+                    "max": 1,
+                    "color": {
+                        "mode": "thresholds"
+                    },
+                    "thresholds": {
+                        "mode": "absolute",
+                        "steps": [
+                            {
+                                "color": "green",
+                                "value": null
+                            },
+                            {
+                                "color": "orange",
+                                "value": 0.85
+                            }
+                        ]
+                    }
+                },
+                "overrides": []
+            },
+            "options": {
+                "reduceOptions": {
+                    "calcs": [
+                        "lastNotNull"
+                    ],
+                    "fields": "",
+                    "values": false
+                },
+                "colorMode": "background",
+                "graphMode": "area",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "textMode": "auto",
+                "wideLayout": true
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "max(sum by (host, node) (rate(redis_cpu_user_main_thread_seconds_total{env=\"$env\"}[5m])) + sum by (host, node) (rate(redis_cpu_sys_main_thread_seconds_total{env=\"$env\"}[5m])))"
+                }
+            ]
+        },
+        {
+            "id": 26,
+            "type": "stat",
+            "title": "highest Redis HELLO rate",
+            "description": "Highest per-node rate of HELLO over five minutes. go-redis opens every new connection with HELLO, so this is connection churn. Orange from 500/s: the WARN of SIGNALS.md section 26 needs 5 minutes above it. Healthy is at most 12/s; thousands per second on single nodes in the 2026-10-26 storm, when the proxies' Redis clients reconnected after timeouts. Fleet-wide in the selected env; the service, block and host pickers do not apply.",
+            "gridPos": {
+                "h": 4,
+                "w": 4,
+                "x": 20,
+                "y": 5
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "ops",
+                    "color": {
+                        "mode": "thresholds"
+                    },
+                    "thresholds": {
+                        "mode": "absolute",
+                        "steps": [
+                            {
+                                "color": "green",
+                                "value": null
+                            },
+                            {
+                                "color": "orange",
+                                "value": 500
+                            }
+                        ]
+                    }
+                },
+                "overrides": []
+            },
+            "options": {
+                "reduceOptions": {
+                    "calcs": [
+                        "lastNotNull"
+                    ],
+                    "fields": "",
+                    "values": false
+                },
+                "colorMode": "background",
+                "graphMode": "area",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "textMode": "auto",
+                "wideLayout": true
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "max(rate(redis_commands_total{env=\"$env\",cmd=\"hello\"}[5m]))"
+                }
+            ]
+        },
+        {
+            "id": 27,
+            "type": "row",
+            "title": "service processes",
+            "collapsed": false,
+            "gridPos": {
+                "h": 1,
+                "w": 24,
+                "x": 0,
+                "y": 9
+            },
+            "panels": []
+        },
+        {
             "id": 1,
             "type": "timeseries",
             "title": "cpu (cores)",
-            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 10},
             "datasource": {"type": "prometheus", "uid": "warp-mimir"},
             "fieldConfig": {"defaults": {"unit": "none"}, "overrides": []},
             "targets": [
@@ -75,7 +752,7 @@
             "id": 2,
             "type": "timeseries",
             "title": "memory (rss)",
-            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 10},
             "datasource": {"type": "prometheus", "uid": "warp-mimir"},
             "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []},
             "targets": [
@@ -90,7 +767,7 @@
             "id": 3,
             "type": "timeseries",
             "title": "goroutines",
-            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 18},
             "datasource": {"type": "prometheus", "uid": "warp-mimir"},
             "fieldConfig": {"defaults": {"unit": "none"}, "overrides": []},
             "targets": [
@@ -105,7 +782,7 @@
             "id": 4,
             "type": "timeseries",
             "title": "open file descriptors",
-            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 18},
             "datasource": {"type": "prometheus", "uid": "warp-mimir"},
             "fieldConfig": {"defaults": {"unit": "none"}, "overrides": []},
             "targets": [
@@ -120,7 +797,7 @@
             "id": 5,
             "type": "table",
             "title": "running versions",
-            "gridPos": {"h": 7, "w": 24, "x": 0, "y": 16},
+            "gridPos": {"h": 7, "w": 24, "x": 0, "y": 26},
             "datasource": {"type": "prometheus", "uid": "warp-mimir"},
             "fieldConfig": {"defaults": {}, "overrides": []},
             "options": {},
@@ -156,7 +833,7 @@
             "type": "table",
             "title": "running source revisions",
             "description": "Full Go VCS revision, modified state, and immutable image digest reported by each selected service process. Use this beside the release version table to distinguish two images or dirty builds carrying the same version label.",
-            "gridPos": {"h": 7, "w": 24, "x": 0, "y": 23},
+            "gridPos": {"h": 7, "w": 24, "x": 0, "y": 33},
             "datasource": {"type": "prometheus", "uid": "warp-mimir"},
             "fieldConfig": {"defaults": {}, "overrides": []},
             "options": {},
@@ -196,7 +873,7 @@
                 "h": 8,
                 "w": 12,
                 "x": 0,
-                "y": 30
+                "y": 40
             },
             "datasource": {
                 "type": "prometheus",
@@ -247,7 +924,7 @@
                 "h": 8,
                 "w": 12,
                 "x": 12,
-                "y": 30
+                "y": 40
             },
             "datasource": {
                 "type": "prometheus",
@@ -293,7 +970,7 @@
                 "h": 8,
                 "w": 24,
                 "x": 0,
-                "y": 38
+                "y": 48
             },
             "datasource": {
                 "type": "prometheus",
@@ -344,7 +1021,7 @@
                 "h": 8,
                 "w": 12,
                 "x": 0,
-                "y": 46
+                "y": 56
             },
             "datasource": {
                 "type": "prometheus",
@@ -385,7 +1062,7 @@
                 "h": 8,
                 "w": 12,
                 "x": 12,
-                "y": 46
+                "y": 56
             },
             "datasource": {
                 "type": "prometheus",
@@ -426,7 +1103,7 @@
                 "h": 8,
                 "w": 12,
                 "x": 12,
-                "y": 54
+                "y": 64
             },
             "datasource": {
                 "type": "prometheus",
@@ -467,7 +1144,7 @@
                 "h": 8,
                 "w": 12,
                 "x": 0,
-                "y": 54
+                "y": 64
             },
             "datasource": {
                 "type": "prometheus",
@@ -508,7 +1185,7 @@
                 "h": 8,
                 "w": 12,
                 "x": 0,
-                "y": 62
+                "y": 72
             },
             "datasource": {
                 "type": "prometheus",
@@ -549,7 +1226,7 @@
                 "h": 8,
                 "w": 12,
                 "x": 12,
-                "y": 62
+                "y": 72
             },
             "datasource": {
                 "type": "prometheus",

@@ -258,12 +258,9 @@ func (self *sourceSupervisorRuntime) reviewWinner(ctx context.Context, _ model.C
 	// Preserve an accepted judgment before its API write. A lost response must
 	// retry identical bytes, not pay for another model answer under the same key.
 	judgmentPath := filepath.Join(self.stateDirectory, fmt.Sprintf("winner-review-%s-%s-%d.json", request.RoundId.String(), request.JobId.String(), request.RewardRevision))
-	output, err := readSourceFile(judgmentPath)
-	if errors.Is(err, os.ErrNotExist) {
-		output, err = winnerReviewCompletedResponse(judgmentPath+".broker-response", broker, func() ([]byte, error) {
-			return runSourceSupervisorProgram(reviewCtx, self.reviewCommand, self.reviewSha256, broker, []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C"})
-		})
-	}
+	output, originalBroker, err := winnerReviewResponse(judgmentPath, broker, func() ([]byte, error) {
+		return runSourceSupervisorProgram(reviewCtx, self.reviewCommand, self.reviewSha256, broker, []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C"})
+	})
 	if err != nil {
 		return err
 	}
@@ -274,7 +271,7 @@ func (self *sourceSupervisorRuntime) reviewWinner(ctx context.Context, _ model.C
 	if err := decodeStrictJSONBytes(output, &result, "elected winner review"); err != nil {
 		return err
 	}
-	if err := validateWinnerReviewBrokerResult(&result, template, request.Policy, broker); err != nil {
+	if err := validateWinnerReviewBrokerResult(&result, template, request.Policy, originalBroker); err != nil {
 		return err
 	}
 	if err := cacheWinnerReviewJudgment(judgmentPath, output); err != nil {
@@ -312,49 +309,98 @@ func (self *sourceSupervisorRuntime) reviewWinner(ctx context.Context, _ model.C
 	return writePrivateReviewFile(filepath.Join(root, "review-receipt.json"), content)
 }
 
+// An accepted Snow judgment must retain the exact completed response and its
+// original authenticated input. Missing metadata holds without another call.
+func winnerReviewResponse(path string, request winnerReviewBrokerRequest, run func() ([]byte, error)) ([]byte, winnerReviewBrokerRequest, error) {
+	output, err := readSourceFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return winnerReviewCompletedResponse(path+".broker-response", request, run)
+	}
+	if err != nil || request.Request.Policy.WinnerReviewPolicy != model.CompetitionSnowWinnerReviewPolicy {
+		return output, request, err
+	}
+	completed, original, err := winnerReviewCompletedResponse(path+".broker-response", request, nil)
+	if err != nil {
+		return nil, request, err
+	}
+	if !bytes.Equal(output, completed) {
+		return nil, request, errors.New("accepted Snow judgment differs from its original completed response")
+	}
+	return output, original, nil
+}
+
+// Clock metadata plus the full original digest recover the exact request only
+// after every non-clock field has matched. Pointer fields refuse absent clocks.
+type winnerReviewCachedRequest struct {
+	StartedAt *time.Time `json:"started_at"`
+	Deadline  *time.Time `json:"deadline"`
+	Sha256    string     `json:"sha256"`
+}
+
 // Retain even unresolved or malformed completed responses separately from
 // accepted judgments. Retrying must not sample the model until it approves.
 // Transport failures remain retryable; completed uncertainty needs intervention.
-func winnerReviewCompletedResponse(path string, request winnerReviewBrokerRequest, run func() ([]byte, error)) ([]byte, error) {
+func winnerReviewCompletedResponse(path string, request winnerReviewBrokerRequest, run func() ([]byte, error)) ([]byte, winnerReviewBrokerRequest, error) {
+	original, err := json.Marshal(request)
+	if err != nil {
+		return nil, request, err
+	}
+	originalDigest := sha256.Sum256(original)
+	startedAt, deadline := request.Request.StartedAt, request.Request.Deadline
 	// The supervisor may renew the execution window without changing the sealed
 	// candidate. Those clocks cannot authorize a different answer for its revision.
-	request.Request.StartedAt = time.Time{}
-	request.Request.Deadline = time.Time{}
-	identity, err := json.Marshal(request)
+	identityRequest := request
+	identityRequest.Request.StartedAt = time.Time{}
+	identityRequest.Request.Deadline = time.Time{}
+	identity, err := json.Marshal(identityRequest)
 	if err != nil {
-		return nil, err
+		return nil, request, err
 	}
 	digest := sha256.Sum256(identity)
 	requestSha256 := hex.EncodeToString(digest[:])
 	type completedResponse struct {
-		Schema        int    `json:"schema"`
-		RequestSha256 string `json:"request_sha256"`
-		Output        []byte `json:"output"`
+		Schema          int                        `json:"schema"`
+		RequestSha256   string                     `json:"request_sha256"`
+		OriginalRequest *winnerReviewCachedRequest `json:"original_request"`
+		Output          []byte                     `json:"output"`
 	}
 	content, err := readSourceFile(path)
 	if errors.Is(err, os.ErrNotExist) {
+		if run == nil {
+			return nil, request, errors.New("original completed winner review is unavailable; operator intervention required")
+		}
 		output, runErr := run()
 		if runErr != nil {
-			return nil, runErr
+			return nil, request, runErr
 		}
-		content, err = json.Marshal(completedResponse{Schema: 1, RequestSha256: requestSha256, Output: output})
+		content, err = json.Marshal(completedResponse{Schema: 2, RequestSha256: requestSha256,
+			OriginalRequest: &winnerReviewCachedRequest{StartedAt: &startedAt, Deadline: &deadline, Sha256: hex.EncodeToString(originalDigest[:])}, Output: output})
 		if err != nil {
-			return nil, err
+			return nil, request, err
 		}
 		if err := cacheWinnerReviewJudgment(path, content); err != nil {
-			return nil, err
+			return nil, request, err
 		}
 	} else if err != nil {
-		return nil, err
+		return nil, request, err
 	}
 	var response completedResponse
 	if err := decodeStrictJSONBytes(content, &response, "completed winner broker response"); err != nil {
-		return nil, err
+		return nil, request, err
 	}
-	if response.Schema != 1 || response.RequestSha256 != requestSha256 {
-		return nil, errors.New("completed winner review belongs to different authenticated context; operator intervention required")
+	if response.Schema != 2 || response.RequestSha256 != requestSha256 || response.OriginalRequest == nil || response.OriginalRequest.StartedAt == nil || response.OriginalRequest.Deadline == nil || !validSha256(response.OriginalRequest.Sha256) {
+		return nil, request, errors.New("completed winner review belongs to different or unavailable authenticated context; operator intervention required")
 	}
-	return response.Output, nil
+	request.Request.StartedAt, request.Request.Deadline = *response.OriginalRequest.StartedAt, *response.OriginalRequest.Deadline
+	recovered, err := json.Marshal(request)
+	if err != nil {
+		return nil, request, err
+	}
+	recoveredDigest := sha256.Sum256(recovered)
+	if hex.EncodeToString(recoveredDigest[:]) != response.OriginalRequest.Sha256 {
+		return nil, request, errors.New("completed winner review original request digest differs; operator intervention required")
+	}
+	return response.Output, request, nil
 }
 
 // Go's JSON decoder folds typed field names. Static review contracts must not

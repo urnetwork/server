@@ -30,6 +30,8 @@ type winnerModelSettings struct {
 	MaximumOutputTokens       int
 	MaximumRefusalBytes       int64
 	MaximumMemberJournalBytes int
+	// Per-field byte bound, default 128; nonpositive redacts every protocol atom.
+	MaximumDiagnosticFieldBytes int
 }
 
 // Explicit provider snapshot for the new Mini policy. The policy's family name
@@ -47,7 +49,7 @@ func winnerReviewProviderModelName(policyModel string) string {
 // Large reasoning budgets do not enlarge source, response or execution access.
 func defaultWinnerModelSettings() winnerModelSettings {
 	return winnerModelSettings{RequestTimeout: 30 * time.Minute, MaximumInputBytes: 4 * 1024 * 1024,
-		MaximumStreamBytes: 16 * 1024 * 1024, MaximumEventBytes: 1024 * 1024, MaximumOutputTokens: 65536, MaximumRefusalBytes: 64 * 1024, MaximumMemberJournalBytes: 1024 * 1024}
+		MaximumStreamBytes: 16 * 1024 * 1024, MaximumEventBytes: 1024 * 1024, MaximumOutputTokens: 65536, MaximumRefusalBytes: 64 * 1024, MaximumMemberJournalBytes: 1024 * 1024, MaximumDiagnosticFieldBytes: 128}
 }
 
 // The model chooses findings, never authenticated identities or publication rights.
@@ -170,7 +172,7 @@ func readWinnerModelResponseForModel(reader io.Reader, settings winnerModelSetti
 	}
 	var response winnerModelResponse
 	if err := json.Unmarshal(content, &response); err != nil {
-		return nil, err
+		return nil, winnerModelResponseFailure("malformed_response_output", "response.completed", content, modelName, settings)
 	}
 	return &response, nil
 }
@@ -188,6 +190,8 @@ func readPinnedModelResponse(reader io.Reader, settings winnerModelSettings, mod
 	scanner := bufio.NewScanner(limited)
 	scanner.Buffer(make([]byte, min(4096, settings.MaximumEventBytes)), settings.MaximumEventBytes)
 	var completed json.RawMessage
+	var latest json.RawMessage
+	terminalEvent := ""
 	for scanner.Scan() {
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data:") {
@@ -202,21 +206,37 @@ func readPinnedModelResponse(reader io.Reader, settings winnerModelSettings, mod
 			Response json.RawMessage `json:"response"`
 		}
 		if err := json.Unmarshal([]byte(data), &event); err != nil {
-			return nil, errors.New("review provider stream is malformed")
+			return nil, winnerModelResponseFailure("malformed_sse_event", terminalEvent, latest, modelName, settings)
+		}
+		if len(event.Response) > 0 {
+			latest = event.Response
 		}
 		switch event.Type {
 		case "response.completed":
-			if completed != nil {
-				return nil, errors.New("review provider emitted multiple completed responses")
+			if terminalEvent != "" {
+				return nil, winnerModelResponseFailure("multiple_terminal_responses", event.Type, latest, modelName, settings)
 			}
 			completed = event.Response
+			terminalEvent = event.Type
 		case "error", "response.failed", "response.incomplete":
-			return nil, errors.New("review provider did not complete its judgment")
+			return nil, winnerModelResponseFailure("provider_terminal_failure", event.Type, latest, modelName, settings)
 		}
 	}
-	var identity struct{ Status, Model, Id string }
-	if scanner.Err() != nil || limited.N <= 0 || completed == nil || json.Unmarshal(completed, &identity) != nil || identity.Status != "completed" || identity.Model != modelName || identity.Id == "" {
-		return nil, errors.New("review provider response is incomplete, oversized or unpinned")
+	if limited.N <= 0 {
+		return nil, winnerModelResponseFailure("stream_size_limit", terminalEvent, latest, modelName, settings)
+	}
+	if err := scanner.Err(); err != nil {
+		cause := "stream_read_failed"
+		if errors.Is(err, bufio.ErrTooLong) {
+			cause = "event_size_limit"
+		}
+		return nil, winnerModelResponseFailure(cause, terminalEvent, latest, modelName, settings)
+	}
+	if terminalEvent == "" {
+		return nil, winnerModelResponseFailure("missing_terminal_response", terminalEvent, latest, modelName, settings)
+	}
+	if err := validateWinnerModelResponseIdentity(completed, modelName, terminalEvent, settings); err != nil {
+		return nil, err
 	}
 	return completed, nil
 }

@@ -70,7 +70,6 @@ func TestCompetitionHostQualificationUsesOnlyTrustedCommentPatch(t *testing.T) {
 		{path: "connect/outside-policy.go", data: source},
 		{path: "../example.go", data: source},
 		{path: "connect/example.go", data: nil},
-		{path: "connect/example.go", data: []byte("package synthetic")},
 		{path: "connect/example.go", data: []byte("package synthetic\x00\n")},
 		{path: "connect/example.go", data: []byte("package synthetic\r\n")},
 	} {
@@ -90,7 +89,8 @@ func TestCompetitionHostQualificationRoutesMonoRootSource(t *testing.T) {
 	for _, repository := range model.CompetitionSourceRepositoryNames() {
 		policy.AllowedPaths = append(policy.AllowedPaths, repository+"/**")
 	}
-	path, sourcePath, err := competitionQualificationSourcePaths(policy)
+	tree := []byte("100644 blob " + strings.Repeat("a", 40) + "\tconnect/resident_contract_manager.go\x00")
+	path, sourcePath, err := competitionQualificationSourcePaths(policy, tree, defaultCompetitionQualificationSourceSettings())
 	if err != nil || path != "server/connect/resident_contract_manager.go" || sourcePath != "connect/resident_contract_manager.go" {
 		t.Fatalf("broad source routing path=%q source=%q error=%v", path, sourcePath, err)
 	}
@@ -110,15 +110,16 @@ func TestCompetitionHostQualificationRoutesMonoRootSource(t *testing.T) {
 func TestCompetitionHostQualificationSourcePathsPreserveLegacy(t *testing.T) {
 	policy := validSettings().PatchPolicy
 	policy.AllowedPaths = []string{"connect/second.go", "connect/example.go"}
-	path, sourcePath, err := competitionQualificationSourcePaths(policy)
+	path, sourcePath, err := competitionQualificationSourcePaths(policy, nil, defaultCompetitionQualificationSourceSettings())
 	if err != nil || path != "connect/example.go" || sourcePath != path {
 		t.Fatalf("legacy source routing path=%q source=%q error=%v", path, sourcePath, err)
 	}
 }
 
-// Choosing a fixed trusted file grants no policy exception. Missing server
+// Choosing a committed source blob grants no policy exception. Missing server
 // authority, explicit denial and unknown path modes still refuse the probe.
 func TestCompetitionHostQualificationSourcePathsRefuseMissingSurface(t *testing.T) {
+	tree := []byte("100644 blob " + strings.Repeat("a", 40) + "\tconnect/resident_contract_manager.go\x00")
 	for _, sample := range []struct {
 		name   string
 		policy PatchPolicy
@@ -131,8 +132,79 @@ func TestCompetitionHostQualificationSourcePathsRefuseMissingSurface(t *testing.
 		{name: "explicit denial", policy: PatchPolicy{PathBase: competitionMonoRootPathBase, AllowedPaths: []string{"server/**"}, ForbiddenPaths: []string{"server/connect/resident_contract_manager.go"}}},
 		{name: "protected-only permission", policy: PatchPolicy{PathBase: competitionMonoRootPathBase, AllowedPaths: []string{"server/connect/sim-latency/**"}}},
 	} {
-		if path, sourcePath, err := competitionQualificationSourcePaths(sample.policy); err == nil {
+		if path, sourcePath, err := competitionQualificationSourcePaths(sample.policy, tree, defaultCompetitionQualificationSourceSettings()); err == nil {
 			t.Fatalf("%s source permission accepted: patch=%q source=%q", sample.name, path, sourcePath)
+		}
+	}
+}
+
+// A valid winning source may remove or rename RMC. Discovery uses its current
+// regular committed Go blobs, never an executable bit, symlink or test file as
+// permission to cross the independent policy and protected-instrument guard.
+func TestCompetitionHostQualificationDiscoversRenamedRegularSource(t *testing.T) {
+	policy := PatchPolicy{PathBase: competitionMonoRootPathBase, MaxPatchBytes: 262144,
+		AllowedPaths: []string{"server/**"}, ForbiddenPaths: []string{"server/connect/sim-latency/**"}}
+	object := strings.Repeat("a", 40)
+	tree := []byte(strings.Join([]string{
+		"100644 blob " + object + "\tconnect/zz.go",
+		"100644 blob " + object + "\tconnect/sim-latency/a_protected.go",
+		"100644 blob " + object + "\tconnect/a_test.go",
+		"100644 blob " + object + "\tconnect/_ignored.go",
+		"120000 blob " + object + "\tconnect/b_symlink.go",
+		"160000 commit " + object + "\tconnect/c_submodule.go",
+		"100755 blob " + object + "\tconnect/moved_manager.go",
+		"",
+	}, "\x00"))
+	path, sourcePath, err := competitionQualificationSourcePaths(policy, tree, defaultCompetitionQualificationSourceSettings())
+	if err != nil || path != "server/connect/moved_manager.go" || sourcePath != "connect/moved_manager.go" {
+		t.Fatalf("renamed source path=%q source=%q error=%v", path, sourcePath, err)
+	}
+	patch, err := competitionQualificationPatch(path, []byte("package synthetic\n"), policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routed, patchError := SplitCompetitionRepositoryPatch(string(patch.Bytes), policy)
+	if patchError != nil || len(routed) != 1 || !bytes.Contains(routed["server"], []byte("+++ b/"+sourcePath+"\n")) {
+		t.Fatalf("renamed regular source did not preserve canonical routing: %v", patchError)
+	}
+}
+
+// Raw NUL-delimited Git output must be complete, bounded and structurally
+// exact before any blob is selected or a source-read command can be formed.
+func TestCompetitionHostQualificationRejectsMalformedCommittedTree(t *testing.T) {
+	policy := PatchPolicy{PathBase: competitionMonoRootPathBase, AllowedPaths: []string{"server/**"}, ForbiddenPaths: []string{"server/connect/sim-latency/**"}}
+	object := strings.Repeat("a", 40)
+	regular := "100644 blob " + object + "\tconnect/example.go\x00"
+	for _, sample := range []struct {
+		name     string
+		tree     []byte
+		settings *competitionQualificationSourceSettings
+	}{
+		{name: "empty"},
+		{name: "unterminated", tree: []byte(strings.TrimSuffix(regular, "\x00"))},
+		{name: "duplicate", tree: []byte(regular + regular)},
+		{name: "wrong mode", tree: []byte(strings.Replace(regular, "100644", "100600", 1))},
+		{name: "wrong type", tree: []byte(strings.Replace(regular, "blob", "commit", 1))},
+		{name: "wrong object", tree: []byte(strings.Replace(regular, object, "not-an-object", 1))},
+		{name: "missing metadata", tree: []byte("connect/example.go\x00")},
+		{name: "traversal", tree: []byte(strings.Replace(regular, "connect/example.go", "../example.go", 1))},
+		{name: "whitespace", tree: []byte(strings.Replace(regular, "connect/example.go", "connect/two words.go", 1))},
+		{name: "quoted", tree: []byte(strings.Replace(regular, "connect/example.go", "connect/\"example.go", 1))},
+		{name: "invalid UTF-8", tree: []byte(strings.Replace(regular, "connect/example.go", "connect/\xff.go", 1))},
+		{name: "protected only", tree: []byte(strings.Replace(regular, "connect/example.go", "connect/sim-latency/example.go", 1))},
+		{name: "tests only", tree: []byte(strings.Replace(regular, "connect/example.go", "connect/example_test.go", 1))},
+		{name: "too many entries", tree: []byte(regular + strings.Replace(regular, "example.go", "second.go", 1)),
+			settings: &competitionQualificationSourceSettings{MaximumTreeBytes: len(regular) * 3, MaximumTreeEntries: 1}},
+		{name: "too many bytes", tree: []byte(regular),
+			settings: &competitionQualificationSourceSettings{MaximumTreeBytes: len(regular) - 1, MaximumTreeEntries: 1}},
+		{name: "missing budget", tree: []byte(regular), settings: &competitionQualificationSourceSettings{}},
+	} {
+		settings := defaultCompetitionQualificationSourceSettings()
+		if sample.settings != nil {
+			settings = *sample.settings
+		}
+		if path, _, err := competitionQualificationSourcePaths(policy, sample.tree, settings); err == nil {
+			t.Fatalf("%s committed tree accepted: %q", sample.name, path)
 		}
 	}
 }

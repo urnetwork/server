@@ -26,9 +26,14 @@ func TestConnectDashboardShowsPendingReservationsAndRefusals(t *testing.T) {
 			t.Errorf("query lost its environment scope or counter rate: %s", query)
 		}
 	}
-	for _, operation := range []string{"reserve-pending", "reserve-pending-full", "release-pending", "reserve-owned"} {
+	for _, operation := range []string{"reserve-pending", "reserve-pending-full", "release-pending", "reserve-owned", "reserve-probe"} {
 		if !strings.Contains(panel.Description, operation) {
 			t.Errorf("panel description does not explain %s", operation)
 		}
+	}
+	// A probe-proven refusal is counted, not sent: refused plus skipped is the
+	// refusal rate before probing.
+	if !strings.Contains(panel.Description, "skipped") {
+		t.Error("panel description does not explain skipped reservations")
 	}
 }

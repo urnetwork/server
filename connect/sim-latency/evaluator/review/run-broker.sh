@@ -96,8 +96,11 @@ finish() {
         local bound=$((remaining<3?remaining:3))
         timeout --signal=TERM --kill-after=1s "${bound}s" "$@"
     }
-    if [[ -n "$active_pid" ]]; then kill -TERM "$active_pid" 2>/dev/null; fi
-    if [[ -n "$input_pid" ]]; then kill -TERM "$input_pid" 2>/dev/null; fi
+    # review_broker_stop_program_begin
+    # Fence egress before pipe teardown can release a blocked stdin reader.
+    if $chain_created; then
+        cleanup_command /usr/sbin/iptables --wait 1 --insert "$chain" 1 --jump DROP || cleanup_verified=false
+    fi
     if $container_may_exist; then
         if [[ -z "$container_id" ]]; then container_id="$(cleanup_command "${docker[@]}" inspect --format '{{.Id}}' "$container_name")"; fi
         if [[ "$container_id" =~ ^[0-9a-f]{64}$ ]] &&
@@ -107,6 +110,11 @@ finish() {
             [[ $? == 0 && -z "$residual" ]] || cleanup_verified=false
         else cleanup_verified=false; fi
     fi
+    # Stop the owned broker before closing its attach/input processes. Closing
+    # those first could release EOF and begin provider work during cleanup.
+    if [[ -n "$active_pid" ]]; then kill -TERM "$active_pid" 2>/dev/null; fi
+    if [[ -n "$input_pid" ]]; then kill -TERM "$input_pid" 2>/dev/null; fi
+    # review_broker_stop_program_end
     for reader_pid in "$stdout_pid" "$stderr_pid"; do
         [[ -z "$reader_pid" ]] || { kill -TERM "$reader_pid" 2>/dev/null; wait "$reader_pid" 2>/dev/null; }
     done
@@ -283,11 +291,13 @@ jq -e --arg id "$container_id" --arg image "$image" --arg owner "$owner" --arg n
  ((.[0].HostConfig.Devices//[])|length)==0 and ((.[0].HostConfig.DeviceRequests//[])|length)==0 and
  ((.[0].HostConfig.Binds//[])|length)==0 and ((.[0].HostConfig.VolumesFrom//[])|length)==0 and
  ((.[0].HostConfig.PortBindings//{})|length)==0 and ((.[0].HostConfig.Tmpfs//{})|length)==0 and
- all(.[0].Config.Env//[]; test("^(PATH|HOSTNAME|HOME)="))' "$attempt_directory/container-inspect.json" >/dev/null
+ all((.[0].Config.Env//[])[]; type=="string" and test("^(PATH|HOSTNAME|HOME)="))' "$attempt_directory/container-inspect.json" >/dev/null
 mkfifo -m 0600 "$attempt_directory/stdin.pipe" "$attempt_directory/stdout.pipe" "$attempt_directory/stderr.pipe"
 exec 7<>"$attempt_directory/stdin.pipe"
-{ head -c "$((output_limit+1))"; cat >/dev/null; } < "$attempt_directory/stdout.pipe" > "$attempt_directory/broker.stdout" & stdout_pid=$!
-{ head -c "$((error_limit+1))"; cat >/dev/null; } < "$attempt_directory/stderr.pipe" > "$attempt_directory/broker.stderr" & stderr_pid=$!
+# review_output_capture_program_begin
+{ head -c "$((output_limit+1))"; cat >/dev/null; } < "$attempt_directory/stdout.pipe" > "$attempt_directory/broker.stdout" 7>&- & stdout_pid=$!
+{ head -c "$((error_limit+1))"; cat >/dev/null; } < "$attempt_directory/stderr.pipe" > "$attempt_directory/broker.stderr" 7>&- & stderr_pid=$!
+# review_output_capture_program_end
 remaining=$((deadline_epoch-$(date -u +%s)))
 ((remaining>0))
 timeout --signal=TERM --kill-after=5s "${remaining}s" "${docker[@]}" start --attach --interactive "$container_id" < "$attempt_directory/stdin.pipe" 7>&- > "$attempt_directory/stdout.pipe" 2> "$attempt_directory/stderr.pipe" &

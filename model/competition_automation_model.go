@@ -450,7 +450,7 @@ func ValidateCompetitionIntegrityReview(request CompetitionIntegrityReviewReques
 		}
 	}
 	allowedReasonKVs := map[string]bool{}
-	for _, code := range []string{"APPROVED", "SCORE_TAMPERING", "MEASUREMENT_FABRICATION", "WORKLOAD_SPECIAL_CASING", "BENCHMARK_DETECTION", "SANDBOX_ESCAPE", "SECRET_ACCESS", "EXFILTRATION", "UNSAFE_BEHAVIOR", "PERSISTENCE", "DENIAL_OF_SERVICE", "PATCH_POLICY_VIOLATION", "UNRELATED_CHANGE", "REWARD_DUPLICATE", "REWARD_RULE_EVASION", "SOURCE_NOT_READY", "PRODUCT_INTEGRATION_RISK", "EVALUATION_INTEGRITY_INCIDENT", "APPEAL_UPHELD"} {
+	for _, code := range CompetitionIntegrityReviewReasonCodes() {
 		allowedReasonKVs[code] = true
 	}
 	if len(request.ReasonCodes) == 0 || len(request.ReasonCodes) > 16 {
@@ -513,6 +513,12 @@ func ValidateCompetitionIntegrityReview(request CompetitionIntegrityReviewReques
 		return errors.New("elected-winner disqualification requires a failed honesty or safety finding")
 	}
 	return nil
+}
+
+// Shared protocol vocabulary for native validation and provider schemas. Each
+// caller receives an owned slice; disposition and policy checks remain separate.
+func CompetitionIntegrityReviewReasonCodes() []string {
+	return []string{"APPROVED", "SCORE_TAMPERING", "MEASUREMENT_FABRICATION", "WORKLOAD_SPECIAL_CASING", "BENCHMARK_DETECTION", "SANDBOX_ESCAPE", "SECRET_ACCESS", "EXFILTRATION", "UNSAFE_BEHAVIOR", "PERSISTENCE", "DENIAL_OF_SERVICE", "PATCH_POLICY_VIOLATION", "UNRELATED_CHANGE", "REWARD_DUPLICATE", "REWARD_RULE_EVASION", "SOURCE_NOT_READY", "PRODUCT_INTEGRATION_RISK", "EVALUATION_INTEGRITY_INCIDENT", "APPEAL_UPHELD"}
 }
 
 // The cursor orders durable insertion; the payload binds every scope and revision.

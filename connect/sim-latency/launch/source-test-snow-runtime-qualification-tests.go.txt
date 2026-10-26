@@ -1,0 +1,304 @@
+// Offline guards for the opt-in synthetic Go observer never contact Docker or
+// Snow. Provider fixtures intercept the actual native three-member adapter.
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/urnetwork/server/model"
+)
+
+// Isolate the process-wide umask in one child, never in the shared Go test
+// process. Check the actual helper output and its unchanged host-private owner.
+func TestSourceTestSnowRuntimeFixtureTraversableWithPrivateUmask(t *testing.T) {
+	root := os.Getenv("SIM_LATENCY_SOURCE_TEST_RUNTIME_UMASK_ROOT")
+	if os.Getenv("SIM_LATENCY_SOURCE_TEST_RUNTIME_UMASK_CHILD") == "1" {
+		previous := syscall.Umask(0o077)
+		defer syscall.Umask(previous)
+		ownerRoot := filepath.Join(root, strings.Repeat("a", 64))
+		if err := os.Mkdir(ownerRoot, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		input := sourceBuildSandboxInput{SourceDirectory: filepath.Join(ownerRoot, "source"), MetadataDirectory: filepath.Join(ownerRoot, "correctness", "metadata"), OutputDirectory: filepath.Join(ownerRoot, "correctness", "output")}
+		if err := prepareSourceTestSnowRuntimeFixture(input); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	root = filepath.Join(t.TempDir(), "private-fixture")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ownerRoot := filepath.Join(root, strings.Repeat("a", 64))
+	t.Cleanup(func() {
+		for _, path := range []string{filepath.Join(ownerRoot, "source", "server"), filepath.Join(ownerRoot, "source"), filepath.Join(ownerRoot, "correctness", "metadata")} {
+			if err := os.Chmod(path, 0o700); err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Error("restore private fixture cleanup permissions", err)
+			}
+		}
+	})
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := defaultSourceTestSnowRuntimeSettings()
+	ctx, cancel := context.WithTimeout(t.Context(), settings.Sandbox.CleanupTimeout)
+	defer cancel()
+	command := exec.CommandContext(ctx, executable, "-test.run=^TestSourceTestSnowRuntimeFixtureTraversableWithPrivateUmask$", "-test.count=1")
+	command.WaitDelay = settings.Sandbox.CleanupTimeout
+	for _, variable := range os.Environ() {
+		if !strings.HasPrefix(variable, "SIM_LATENCY_SOURCE_TEST_RUNTIME_UMASK_ROOT=") && !strings.HasPrefix(variable, "SIM_LATENCY_SOURCE_TEST_RUNTIME_UMASK_CHILD=") {
+			command.Env = append(command.Env, variable)
+		}
+	}
+	command.Env = append(command.Env, "SIM_LATENCY_SOURCE_TEST_RUNTIME_UMASK_ROOT="+root, "SIM_LATENCY_SOURCE_TEST_RUNTIME_UMASK_CHILD=1")
+	output := &sourceSupervisorOutput{limit: settings.Sandbox.OutputBytes}
+	command.Stdout, command.Stderr = output, output
+	if err := command.Run(); err != nil || output.exceeded {
+		t.Fatalf("private-umask fixture child failed: %v: %s", err, output.content)
+	}
+	for _, entry := range []struct {
+		path string
+		mode os.FileMode
+	}{
+		{root, 0o700}, {ownerRoot, 0o700}, {filepath.Join(ownerRoot, "correctness"), 0o700},
+		{filepath.Join(ownerRoot, "source"), 0o555}, {filepath.Join(ownerRoot, "source", "server"), 0o555}, {filepath.Join(ownerRoot, "correctness", "metadata"), 0o555},
+		{filepath.Join(ownerRoot, "source", "server", "go.mod"), 0o444}, {filepath.Join(ownerRoot, "source", "server", "fixture_test.go"), 0o444},
+	} {
+		info, err := os.Lstat(entry.path)
+		if err != nil || info.Mode().Perm() != entry.mode || info.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid()) {
+			t.Fatalf("fixture ownership/mode mismatch: %s want=%04o err=%v", entry.path, entry.mode, err)
+		}
+	}
+}
+
+func sourceTestSnowRuntimeEvents(t *testing.T, action string) []byte {
+	t.Helper()
+	var output bytes.Buffer
+	encoder := json.NewEncoder(&output)
+	for _, event := range []map[string]string{
+		{"Action": "start", "Package": "urnetwork.invalid/source-test-snow-runtime-qualification"},
+		{"Action": "run", "Package": "urnetwork.invalid/source-test-snow-runtime-qualification", "Test": "TestObservedRuntimeAttestation"},
+		{"Action": "output", "Package": "urnetwork.invalid/source-test-snow-runtime-qualification", "Test": "TestObservedRuntimeAttestation", "Output": map[string]string{"pass": "=== RUN   TestObservedRuntimeAttestation\n", "fail": "intentional source-test provider qualification failure\n"}[action]},
+		{"Action": action, "Package": "urnetwork.invalid/source-test-snow-runtime-qualification", "Test": "TestObservedRuntimeAttestation"},
+		{"Action": action, "Package": "urnetwork.invalid/source-test-snow-runtime-qualification"},
+	} {
+		if err := encoder.Encode(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return output.Bytes()
+}
+
+func TestSourceTestSnowRuntimeObservedPassAndDeliberateFail(t *testing.T) {
+	for _, entry := range []struct {
+		name, action string
+		exit         int
+	}{{"observed-pass", "pass", 0}, {"deliberate-fail", "fail", 1}} {
+		count, err := observeSourceTestSnowRuntime(sourceTestSnowRuntimeEvents(t, entry.action), []byte("observed_toolchain=go1.27.3\n"), entry.exit, entry.name)
+		if err != nil || count != 1 {
+			t.Fatalf("%s: authentic one-test observation refused: count=%d err=%v", entry.name, count, err)
+		}
+	}
+}
+
+func TestSourceTestSnowRuntimeRejectsInventedOrIncompleteObservations(t *testing.T) {
+	good := string(sourceTestSnowRuntimeEvents(t, "pass"))
+	failed := string(sourceTestSnowRuntimeEvents(t, "fail"))
+	for _, entry := range []struct {
+		name, content, stderr, caseName string
+		exit                            int
+	}{
+		{"wrong-exit", good, "observed_toolchain=go1.27.3\n", "observed-pass", 1},
+		{"false-pass", good, "observed_toolchain=go1.27.3\n", "deliberate-fail", 1},
+		{"false-fail", failed, "observed_toolchain=go1.27.3\n", "observed-pass", 0},
+		{"missing-toolchain", good, "", "observed-pass", 0},
+		{"wrong-toolchain", good, "observed_toolchain=go1.26.0\n", "observed-pass", 0},
+		{"compiler-stderr", good, "observed_toolchain=go1.27.3\ncompiler failed\n", "observed-pass", 0},
+		{"wrong-test", strings.ReplaceAll(good, "TestObservedRuntimeAttestation", "TestOther"), "observed_toolchain=go1.27.3\n", "observed-pass", 0},
+		{"wrong-package", strings.ReplaceAll(good, "urnetwork.invalid/source-test-snow-runtime-qualification", "urnetwork.invalid/other"), "observed_toolchain=go1.27.3\n", "observed-pass", 0},
+		{"duplicate-run", good + good, "observed_toolchain=go1.27.3\n", "observed-pass", 0},
+		{"missing-terminal", strings.ReplaceAll(good, `"Action":"pass"`, `"Action":"output"`), "observed_toolchain=go1.27.3\n", "observed-pass", 0},
+		{"skipped", strings.ReplaceAll(good, `"Action":"pass"`, `"Action":"skip"`), "observed_toolchain=go1.27.3\n", "observed-pass", 0},
+		{"missing-failure-marker", strings.ReplaceAll(failed, "intentional source-test provider qualification failure", "unrelated panic"), "observed_toolchain=go1.27.3\n", "deliberate-fail", 1},
+		{"truncated-json", good + "{", "observed_toolchain=go1.27.3\n", "observed-pass", 0},
+		{"empty-json", "", "observed_toolchain=go1.27.3\n", "observed-pass", 0},
+		{"unknown-case", good, "observed_toolchain=go1.27.3\n", "unknown", 0},
+	} {
+		if _, err := observeSourceTestSnowRuntime([]byte(entry.content), []byte(entry.stderr), entry.exit, entry.caseName); err == nil {
+			t.Errorf("%s: non-authentic observation was accepted", entry.name)
+		}
+	}
+}
+
+func TestSourceTestSnowRuntimeFixedOfflineSandboxAndSeparateSuite(t *testing.T) {
+	settings := defaultSourceTestSnowRuntimeSettings()
+	settings.Sandbox.StateDirectory = "/var/lib/urnetwork/source-test-snow-runtime-synthetic"
+	owner := strings.Repeat("a", 64)
+	root := filepath.Join(settings.Sandbox.StateDirectory, owner)
+	input := sourceBuildSandboxInput{Owner: owner, Phase: "correctness", ImageId: "sha256:" + strings.Repeat("b", 64), Commit: strings.Repeat("c", 40),
+		SourceDirectory: filepath.Join(root, "source"), MetadataDirectory: filepath.Join(root, "correctness", "metadata"), OutputDirectory: filepath.Join(root, "correctness", "output")}
+	for _, caseName := range []string{"observed-pass", "deliberate-fail"} {
+		args, err := sourceTestSnowRuntimeArguments(input, settings.Sandbox, caseName, strings.Repeat("d", 64))
+		if err != nil {
+			t.Fatal(caseName, err)
+		}
+		joined := strings.Join(args, "\n")
+		for _, required := range []string{"--network=none", "--read-only", "--user=65532:65532", "--cap-drop=ALL", "--security-opt=no-new-privileges:true", "--cpuset-cpus=20,22", "--cpus=2", "--env=GOPROXY=off", "--env=GOTOOLCHAIN=local", "--env=SOURCE_TEST_QUALIFICATION_CASE=" + caseName} {
+			if !strings.Contains(joined, required+"\n") {
+				t.Error(caseName, "required containment missing", required)
+			}
+		}
+		_, _, script := sourceTestSnowRuntimeFixture()
+		if args[len(args)-1] != script || strings.Contains(script, "go test ./connect") || strings.Contains(joined, "docker.sock") || !strings.Contains(script, "exec go test -json -count=1 -run '^TestObservedRuntimeAttestation$' .") {
+			t.Fatal(caseName, "qualification command gained candidate command or production suite authority")
+		}
+	}
+	if _, err := sourceTestSnowRuntimeArguments(input, settings.Sandbox, "another-case", strings.Repeat("d", 64)); err == nil {
+		t.Fatal("unknown runtime case accepted")
+	}
+	if !validSha256(sourceTestSnowRuntimeSuiteSha256()) || sourceTestSnowRuntimeSuiteSha256() == sourceCorrectnessSuiteDigest() {
+		t.Fatal("runtime probe identity must not claim the complete prescribed winner suite")
+	}
+	modelSettings := defaultSourceTestModelSettings()
+	if modelSettings.RequestTimeout != 5*time.Minute || modelSettings.TotalTimeout != 3*time.Hour || modelSettings.MaximumOutputTokens != 4096 {
+		t.Fatal("provider qualification changed native broker time/token budgets")
+	}
+}
+
+func TestSourceTestSnowRuntimeTransportHasSixPostsAndNoOtherAuthority(t *testing.T) {
+	provider := defaultWinnerSnowProviderSettings()
+	calls := 0
+	transport := &sourceTestSnowRuntimeTransport{Provider: provider, Base: winnerReviewTransport(func(*http.Request) (*http.Response, error) {
+		calls++
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("synthetic intercepted response"))}, nil
+	})}
+	for index := 0; index < 6; index++ {
+		request, _ := http.NewRequest(http.MethodPost, provider.Endpoint, nil)
+		response, err := transport.RoundTrip(request)
+		if err != nil {
+			t.Fatal(index, err)
+		}
+		response.Body.Close()
+	}
+	for _, entry := range []struct{ name, method, endpoint, authorization string }{
+		{"seventh", http.MethodPost, provider.Endpoint, ""},
+		{"key", http.MethodPost, provider.Endpoint, "synthetic forbidden credential"},
+		{"external", http.MethodPost, "https://api.openai.com/v1/responses", ""},
+		{"another-method", http.MethodGet, provider.Endpoint, ""},
+	} {
+		selected := transport
+		if entry.name != "seventh" {
+			selected = &sourceTestSnowRuntimeTransport{Provider: provider, Base: transport.Base}
+		}
+		request, _ := http.NewRequest(entry.method, entry.endpoint, nil)
+		request.Header.Set("Authorization", entry.authorization)
+		if _, err := selected.RoundTrip(request); err == nil {
+			t.Error(entry.name, "forbidden authority accepted")
+		}
+	}
+	if calls != 6 || transport.Posts != 6 {
+		t.Fatal("forbidden request reached underlying transport", calls, transport.Posts)
+	}
+}
+
+func TestSourceTestSnowRuntimeActualContainmentRefusesDrift(t *testing.T) {
+	settings := defaultSourceTestSnowRuntimeSettings().Sandbox
+	settings.StateDirectory = "/var/lib/urnetwork/source-test-snow-runtime-synthetic"
+	owner, rawLock, id := strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64)
+	input := sourceBuildSandboxInput{Owner: owner, Phase: "correctness", ImageId: "sha256:" + strings.Repeat("d", 64), Commit: strings.Repeat("e", 40),
+		SourceDirectory: filepath.Join(settings.StateDirectory, owner, "source"), MetadataDirectory: filepath.Join(settings.StateDirectory, owner, "correctness", "metadata"), OutputDirectory: filepath.Join(settings.StateDirectory, owner, "correctness", "output")}
+	_, _, script := sourceTestSnowRuntimeFixture()
+	makeFixture := func() map[string]any {
+		return map[string]any{"Id": id, "Image": input.ImageId,
+			"Config": map[string]any{"User": "65532:65532", "Entrypoint": []string{"/bin/bash"}, "Cmd": []string{"-ceu", script},
+				"Env":    []string{"SOURCE_TEST_QUALIFICATION_CASE=observed-pass", "SOURCE_TEST_QUALIFICATION_RAW_LOCK=" + rawLock, "SOURCE_BUILD_COMMIT=" + input.Commit, "GOPROXY=off", "GOSUMDB=off", "GOTOOLCHAIN=local"},
+				"Labels": map[string]string{"com.urnetwork.review-build.owner": owner, "com.urnetwork.review-build.phase": "correctness"}},
+			"HostConfig": map[string]any{"NetworkMode": "none", "CpusetCpus": settings.CpuSet, "CgroupParent": settings.CgroupParent, "CgroupnsMode": "private", "Privileged": false, "ReadonlyRootfs": true,
+				"Init": true, "NanoCpus": int64(2_000_000_000), "Memory": settings.MemoryBytes, "MemorySwap": settings.MemoryBytes, "PidsLimit": settings.Pids,
+				"CapDrop": []string{"ALL"}, "SecurityOpt": []string{"no-new-privileges:true"},
+				"Tmpfs": map[string]string{"/work": fmt.Sprintf("rw,exec,nosuid,nodev,uid=65532,gid=65532,mode=0700,size=%d", settings.WorkBytes), "/tmp": fmt.Sprintf("rw,nosuid,nodev,noexec,uid=65532,gid=65532,mode=1770,size=%d", settings.TmpBytes), "/opt/urnetwork/go/pkg/mod/cache/download/github.com/urnetwork/server/@v": fmt.Sprintf("rw,nosuid,nodev,noexec,uid=65532,gid=65532,mode=0700,size=%d", settings.MetadataBytes)}},
+			"Mounts": []map[string]any{{"Type": "bind", "Source": input.SourceDirectory, "Destination": "/workspace", "RW": false}, {"Type": "bind", "Source": input.MetadataDirectory, "Destination": "/input/server-metadata", "RW": false}}}
+	}
+	content, _ := json.Marshal([]any{makeFixture()})
+	if err := validateSourceTestSnowRuntimeContainer(content, id, input, settings, "observed-pass", rawLock); err != nil {
+		t.Fatal("authentic actual containment refused", err)
+	}
+	for _, entry := range []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{"privileged", func(value map[string]any) { value["HostConfig"].(map[string]any)["Privileged"] = true }},
+		{"network", func(value map[string]any) { value["HostConfig"].(map[string]any)["NetworkMode"] = "bridge" }},
+		{"root-user", func(value map[string]any) { value["Config"].(map[string]any)["User"] = "0:0" }},
+		{"wrong-image", func(value map[string]any) { value["Image"] = "sha256:" + strings.Repeat("f", 64) }},
+		{"writable-source", func(value map[string]any) { value["Mounts"].([]map[string]any)[0]["RW"] = true }},
+		{"extra-host-mount", func(value map[string]any) {
+			value["Mounts"] = append(value["Mounts"].([]map[string]any), map[string]any{"Type": "bind", "Source": "/var/run/docker.sock", "Destination": "/var/run/docker.sock", "RW": false})
+		}},
+		{"extra-tmpfs", func(value map[string]any) {
+			value["HostConfig"].(map[string]any)["Tmpfs"].(map[string]string)["/other"] = "rw"
+		}},
+		{"changed-command", func(value map[string]any) { value["Config"].(map[string]any)["Cmd"] = []string{"-c", "true"} }},
+	} {
+		fixture := makeFixture()
+		entry.mutate(fixture)
+		content, _ := json.Marshal([]any{fixture})
+		if err := validateSourceTestSnowRuntimeContainer(content, id, input, settings, "observed-pass", rawLock); err == nil {
+			t.Error(entry.name, "actual containment drift accepted")
+		}
+	}
+}
+
+func TestSourceTestSnowRuntimeCachedNativeJournalsDoNotRerunOrResample(t *testing.T) {
+	fixture := newSourceTestJournalFixture(t)
+	fixture.Plan.WinnerReviewPolicy = model.CompetitionSnowWinnerReviewPolicy
+	fixture.Plan.SuiteSha256, fixture.Execution.SuiteSha256 = sourceTestSnowRuntimeSuiteSha256(), sourceTestSnowRuntimeSuiteSha256()
+	provider := defaultWinnerSnowProviderSettings()
+	settings := defaultSourceTestModelSettings()
+	settings.SnowProvider = &provider
+	settings.ResponseJournalDirectory = filepath.Join(filepath.Dir(fixture.Directory), "independent-model-journal")
+	requests, executions := 0, 0
+	client := sourceSnowTestClient(t, fixture.Execution, &requests, "")
+	ctx, cancel := context.WithTimeout(t.Context(), settings.TotalTimeout)
+	defer cancel()
+	run := func(ctx context.Context) (sourceTestExecution, error) {
+		observation, err := executeJournaledSourceTest(ctx, fixture.Directory, fixture.Plan, fixture.Now.Add(time.Hour), fixture.Settings,
+			func(context.Context) (*sourceTestExecution, error) {
+				executions++
+				value := fixture.Execution
+				return &value, nil
+			}, fixture.verify)
+		if err != nil {
+			return sourceTestExecution{}, err
+		}
+		return *observation, nil
+	}
+	first, err := executeSourceTestModel(ctx, client, "", fixture.Plan, settings, run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := executeSourceTestModel(ctx, client, "", fixture.Plan, settings, run)
+	if err != nil || !reflect.DeepEqual(first, second) || requests != 3 || executions != 1 {
+		t.Fatal("cached native execution/provider journals reran or sampled", requests, executions, err)
+	}
+	interrupted := errors.New("synthetic callback must never run")
+	_, err = executeSourceTestModel(ctx, client, "", fixture.Plan, settings, func(context.Context) (sourceTestExecution, error) { return sourceTestExecution{}, interrupted })
+	if !errors.Is(err, interrupted) || requests != 3 {
+		t.Fatal("provider replay ignored the trusted observation callback", requests, err)
+	}
+}
