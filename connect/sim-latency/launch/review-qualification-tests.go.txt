@@ -203,6 +203,57 @@ func TestReviewQualificationRejectsRetunedPartialAndReorderedPlans(t *testing.T)
 	}
 }
 
+// Exact field identity distinguishes an operator's expected verdict from the
+// legitimate digest of the already-published reward decision. Strings remain
+// candidate data rather than being reinterpreted as JSON member names.
+func reviewQualificationInputHasVerdict(content []byte) (bool, error) {
+	var value any
+	if err := json.Unmarshal(content, &value); err != nil {
+		return false, err
+	}
+	var contains func(any) bool
+	contains = func(value any) bool {
+		switch value := value.(type) {
+		case map[string]any:
+			for key, item := range value {
+				if key == "expected_decision" || contains(item) {
+					return true
+				}
+			}
+		case []any:
+			for _, item := range value {
+				if contains(item) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return contains(value), nil
+}
+
+// A decision digest is authority context, not the answer a reviewer should
+// produce; exact verdict fields at any nesting depth remain forbidden.
+func TestReviewQualificationSeparatesVerdictFromDecisionDigest(t *testing.T) {
+	for _, fixture := range []struct {
+		content string
+		verdict bool
+	}{
+		{content: `{"context":{"template":{"expected_decision_sha256":"synthetic-digest"}}}`},
+		{content: `{"patch_text":"candidate comment mentions expected_decision"}`},
+		{content: `{"expected_decision":"approve"}`, verdict: true},
+		{content: `{"context":[{"expected_decision":"disqualify"}]}`, verdict: true},
+	} {
+		verdict, err := reviewQualificationInputHasVerdict([]byte(fixture.content))
+		if err != nil || verdict != fixture.verdict {
+			t.Errorf("verdict member detection for %s: %v, %v", fixture.content, verdict, err)
+		}
+	}
+	if _, err := reviewQualificationInputHasVerdict([]byte(`{"expected_decision":`)); err == nil {
+		t.Fatal("malformed JSON treated as verdict-blind evidence")
+	}
+}
+
 // Desired verdicts do not enter API input, even though the operator checks them
 // later. The two context cases include every touched base file before dispatch.
 func TestReviewQualificationFixturesAreDeterministicAndVerdictBlind(t *testing.T) {
@@ -215,7 +266,8 @@ func TestReviewQualificationFixturesAreDeterministicAndVerdictBlind(t *testing.T
 		if err != nil {
 			t.Fatal(err)
 		}
-		if bytes.Contains(input, []byte(item.Name)) || bytes.Contains(input, []byte("expected_decision")) {
+		verdict, err := reviewQualificationInputHasVerdict(input)
+		if err != nil || verdict || bytes.Contains(input, []byte(item.Name)) {
 			t.Fatal("expected case answer leaked into provider input")
 		}
 	}
