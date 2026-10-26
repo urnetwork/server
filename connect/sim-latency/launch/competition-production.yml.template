@@ -1,0 +1,111 @@
+# PREPARATION ONLY. Not a deployable config and not qualification evidence.
+# Resolve EVERY ${...} from authenticated receipts/explicit approval, then run
+# the real settings and launch preflight before promoting to config/main.
+# Neither enabled flag may be changed during the user-confirmed maintenance hold.
+# No shell expansion of this file is prescribed; do not source it or use eval.
+# Admission time belongs to bootstrap-source --opens-at=2026-10-28T00:00:00Z,
+# not an invented top-level opens_at setting. Bootstrap only after readiness.
+enabled: false
+competition_id: sim-latency-season-1
+base_sha: c1f9dda603d6279666fca5d92b99c5663306c5f7
+evaluator_image_digest: sha256:002c39040ce23dee27b171c7e657f749c6a6d05b1e9b97d90ac87336470dbaf3
+artifact_root: /var/lib/urnetwork/competition
+artifact_bucket: competition
+
+# Exact synthetic local leaves only: never main/all or either parent directory.
+config_local_directory: ${QUALIFIED_CONFIG_LOCAL_DIRECTORY}
+vault_local_directory: ${QUALIFIED_VAULT_LOCAL_DIRECTORY}
+
+# These are outer bounds, not permission to truncate accepted FIFO work or one
+# of the six full weekly windows. Size/review them for post-close drain delays.
+season_ends_at: ${APPROVED_SEASON_END_UTC}
+retain_until: ${APPROVED_RETAIN_UNTIL_UTC}
+
+automation_policy:
+  enabled: false
+  version: 2
+  staging: false
+  environment: main
+  season_id: sim-latency-production-20261028
+  election_rule: raw_latency_g1_g6_welch_v1
+  required_api_capability: competition.reward.v2.runtime-blob.v1
+  policy_approval_sha256: ${APPROVED_PRODUCTION_POLICY_SHA256}
+  source_generation: 0
+  source_activation_generation: 1
+  source_lock_sha256: 5e00bf5ee7b4708be94ac1ebc6daf5c024f4afe467ca30c35024f65f96b6c90e
+  source_choice_delay_seconds: 0
+  settlement_mode: live
+  review_criteria_version: ${APPROVED_REVIEW_CRITERIA_VERSION}
+  settlement_policy_version: ${APPROVED_SETTLEMENT_POLICY_VERSION}
+  burn_policy_version: ${APPROVED_BURN_POLICY_VERSION}
+  repeat_reward_policy: ${APPROVED_REPEAT_REWARD_POLICY}
+  winner_review_policy: elected_winner_sol61max_v1
+  winner_review_timeout_seconds: 1800
+
+season_policy:
+  epoch_count: 6
+  submission_window_seconds: 604800
+  preparation_window_seconds: 0
+  submission_fee_usd: 20
+
+worker_lease_seconds: 90
+worker_heartbeat_seconds: 20
+host_heartbeat_max_age_seconds: 60
+max_infrastructure_attempts: 3
+
+# Publish/protect the exact commands and retain their actual hashes. Moving
+# operator main is not a substitute for runtime-envelope authentication.
+simulator_command: ${QUALIFIED_SIMULATOR_COMMAND}
+evaluator_command: /usr/local/libexec/urnetwork/competition-737dd2371-go1273-isolated-v1/container/evaluator.sh
+evaluator_command_sha256: 263ee68ab058889c22de51d47d8779d95fd219e92ea7642430f61740d15d8d5e
+self_check_command: ${QUALIFIED_SELF_CHECK_COMMAND}
+self_check_command_sha256: ${QUALIFIED_SELF_CHECK_COMMAND_SHA256}
+
+# This is deliberately unresolved. Do not silently promote staging's single-
+# file allowlist, or broaden it, before the public scope is explicitly settled.
+# The resolved value must be a real YAML sequence, not a placeholder string.
+patch_policy:
+  max_patch_bytes: 262144
+  allowed_paths: ${APPROVED_PRODUCT_PATH_ALLOWLIST}
+  forbidden_paths:
+    - connect/sim-latency/**
+    - stats/**
+    - db_migrations.go
+    - db_migrations_*.go
+    - go.mod
+    - go.sum
+    - vendor/**
+    - .github/**
+
+# Proposed measured scale: only final after all frozen calibration acceptance
+# rules pass. Never substitute the old staging 1800-provider/zero-margin policy.
+# Compiler is enforced by build/runtime metadata: exactly Go 1.27.3.
+evaluation_policy:
+  hardware_id: sille-macpro6-1-single-host
+  host_qualification_sha256: ${QUALIFIED_IMAGE_HOST_RECEIPT_SHA256}
+  config_local_sha256: b8a0996c29195cad1839fa6f7e32933f01f812d573df6e3bb5f9e7b6276430b7
+  vault_local_sha256: a68c0e07eaa6d831c9a562128950237e76b0cd0f942afd1fec3d7a32b3aed7c7
+  simulator_sha256: 6c8587be62b8292c5d4ec27a8b5c3353e84a8121a6054ba3755d022d2372e9a3
+  scorer_sha256: 6c8587be62b8292c5d4ec27a8b5c3353e84a8121a6054ba3755d022d2372e9a3
+  provider_count: 3600
+  client_pool_size: 200
+  arrivals_per_minute: 80
+  quality_window_size: 2
+  exchange_hosts: 4
+  fleet_shards: 4
+  site_listen: 127.0.0.1:0
+  api_port: 7640
+  ramp_ms: 60000
+  prewarm_ms: 46800000
+  settle_ms: 60000
+  client_warmup_timeout_ms: 1200000
+  duration_ms: 180000
+  request_timeout_ms: 120000
+  pipeline_interval_ms: 10000
+  test_timeout_ms: 3000
+  announce_timeout_ms: 2000
+  impairment_enabled: true
+  replicates: 9
+  takeover_margin: ${ACCEPTED_INITIAL_MARGIN}
+  queue_limit: 0
+  score_timeout_seconds: 10800

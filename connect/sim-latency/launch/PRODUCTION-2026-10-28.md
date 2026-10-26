@@ -1,6 +1,35 @@
 # Production launch — October 28, 2026, 00:00 UTC
 
-## Current preparation pointer — October 25, 15:31 UTC
+## Current preparation pointer — October 26
+
+Use [LAUNCH-ACCEPTANCE.md](LAUNCH-ACCEPTANCE.md) and the actual live process,
+not the older journal entries below. Corrected-release formal cohort 1 passed
+and its full original evidence is preserved. Cohort 2 is running its original
+attempt, with a fixed **2026-10-26T02:23:57Z** deadline; cohorts 3–5 remain
+unstarted. The snapshot reference passed its separate directional pilot, but
+was not statistically significant; independent held-out ordering remains open.
+No pilot measurements enter the five-cohort A/A sample.
+
+The active `config/main/competition.yml` is still staging. The separate
+[production template](competition-production.yml.template) records six weekly
+epochs, $20 admission, an unbounded FIFO, R9, a three-hour evaluation bound,
+the proposed corrected source/image and the adopted automated elected-winner
+review flow. It is **not deployable or accepted configuration**: unresolved
+tokens must be filled from authenticated qualification/approval records,
+including the final calibrated margin, host receipt, exact runtime commands,
+economic-policy identities, retention bounds and public editable-code scope.
+Both enable flags remain false. Do not activate it during maintenance or treat
+its proposed scale as already qualified. No main configuration was changed.
+
+Bootstrap must separately bind the fixed public opening
+`2026-10-28T00:00:00Z` after live readiness succeeds; it must not open early.
+The production ledger, credentials and runtime manifests must remain distinct
+from staging. Source-test/review qualification still needs the dedicated key.
+
+## Earlier preparation pointer — October 25, 15:31 UTC
+
+The following dated section is historical; its live-position statements are
+superseded by the current pointer and acceptance index above.
 
 The authoritative acceptance index is [LAUNCH-ACCEPTANCE.md](LAUNCH-ACCEPTANCE.md).
 The [current-state.json](current-state.json) handoff binds the current process;
