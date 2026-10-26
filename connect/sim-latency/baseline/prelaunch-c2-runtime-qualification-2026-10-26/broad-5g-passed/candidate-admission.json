@@ -1,0 +1,1 @@
+{"schema":1,"base_sha":"a9e8e1a710b24c749e6499a0606938252c83e136","patch_sha256":"1685325bd0246cf9ae81f83de53b8dca3581d5876d6894ba88a95757ab0de090","policy_sha256":"861349e1a972fa9373436aaaf70b0923638e254087dcdd4bcaaf763282af7b16","paths":["connect/subprotocol.go","server/connect/resident_contract_manager.go"]}

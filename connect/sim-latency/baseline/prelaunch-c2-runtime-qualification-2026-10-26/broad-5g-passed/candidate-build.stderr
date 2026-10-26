@@ -1,0 +1,88 @@
+[env]glog not configured from command line. Using default configuration.
+I1026 17:05:09.359184  675650 env.go:1202] [env]try /srv/warp/config, [settings.yml]
+I1026 17:05:09.359745  675650 env.go:1202] [env]try /srv/warp/site, [settings.yml]
+I1026 17:05:09.359793  675650 env.go:81] [env]settings loaded
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile.submission
+#1 transferring dockerfile: 8.79kB done
+#1 DONE 0.1s
+
+#2 [internal] load metadata for docker.io/urnetwork/sim-latency-evaluator-base-id:b1632a55b415f823871c60b220a194947d280894111c9fa765ad88100e206f24
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.1s
+
+#4 [source-prep 1/7] FROM docker.io/urnetwork/sim-latency-evaluator-base-id:b1632a55b415f823871c60b220a194947d280894111c9fa765ad88100e206f24
+#4 DONE 0.9s
+
+#5 [internal] load build context
+#5 transferring context: 81.66MB 1.2s done
+#5 DONE 1.3s
+
+#6 [source-prep 2/7] COPY --chmod=0444 canonical.patch /opt/urnetwork/submission/canonical.patch
+#6 DONE 1.3s
+
+#7 [source-prep 3/7] COPY --chmod=0444 policy.json /opt/urnetwork/submission/policy.json
+#7 DONE 0.5s
+
+#8 [source-prep 4/7] COPY --chmod=0555 competitionpatch /opt/urnetwork/submission/competitionpatch
+#8 DONE 0.7s
+
+#9 [source-prep 5/7] COPY --chmod=0444 original-source.json /opt/urnetwork/submission/original-source.json
+#9 DONE 0.6s
+
+#10 [source-prep 6/7] COPY --chmod=0444 candidate-commits.json /opt/urnetwork/submission/candidate-commits.json
+#10 DONE 0.6s
+
+#11 [source-prep 7/7] RUN --network=none set -eu;     test "$(sha256sum /opt/urnetwork/submission/competitionpatch | awk '{print $1}')" = "3d161d76bace48bff6536164a84f330b1618c82f319775b8551c19872b937e54";     test "$(sha256sum /opt/urnetwork/submission/original-source.json | awk '{print $1}')" = "6fd78777cf0c84a381aaf93f31149d24b3086f6259d12fa06051cc566e8317f5";     test "$(sha256sum /opt/urnetwork/submission/candidate-commits.json | awk '{print $1}')" = "48e64c1e5558e3b5ebc2d98fcc0f396bdbb2599020d45852d351da3c5c56e8a3";     test "$(sha256sum /opt/urnetwork/source-lock.json | awk '{print $1}')" = "$(jq -er '.source_lock_sha256' /opt/urnetwork/submission/original-source.json)";     jq -e --slurpfile original /opt/urnetwork/submission/original-source.json         --slurpfile policy /opt/urnetwork/submission/policy.json         '.repositories == $original[0].repositories and          (($policy[0].path_base // "") == "" or           (($policy[0].path_base // "") == "mono_root_v1" and .candidate_path_base == "mono_root_v1" and            $original[0].candidate_path_base == .candidate_path_base))'         /opt/urnetwork/source-lock.json >/dev/null;     chmod 0700 /workspace;     timeout --signal=TERM --kill-after=5s 70s /opt/urnetwork/submission/competitionpatch         --base-sha "a9e8e1a710b24c749e6499a0606938252c83e136"         --patch /opt/urnetwork/submission/canonical.patch         --expected-patch-sha256 "1685325bd0246cf9ae81f83de53b8dca3581d5876d6894ba88a95757ab0de090"         --policy /opt/urnetwork/submission/policy.json         --expected-policy-sha256 "861349e1a972fa9373436aaaf70b0923638e254087dcdd4bcaaf763282af7b16"         --apply-source-root /workspace         --source-identity /opt/urnetwork/submission/original-source.json         --expected-source-identity-sha256 "6fd78777cf0c84a381aaf93f31149d24b3086f6259d12fa06051cc566e8317f5"         > /opt/urnetwork/submission/validated-identity.json;     jq -e --arg candidate_sha "bee54b79e4add9d9de46167a9aa3bca774e19af2"         --slurpfile expected /opt/urnetwork/submission/candidate-commits.json         '.candidate_commits == $expected[0] and .candidate_commits.server == $candidate_sha'         /opt/urnetwork/submission/validated-identity.json >/dev/null;     chmod 0755 /workspace
+#11 1.215 [env]glog not configured from command line. Using default configuration.
+#11 1.216 I1026 17:05:16.728212      23 env.go:1202] [env]try /srv/warp/config, [settings.yml]
+#11 1.216 I1026 17:05:16.729412      23 env.go:1202] [env]try /srv/warp/site, [settings.yml]
+#11 1.216 I1026 17:05:16.729446      23 env.go:81] [env]settings loaded
+#11 DONE 14.1s
+
+#12 [candidate-check 1/4] RUN chown 65532:65532 /opt/urnetwork/go/pkg/mod/cache/download/github.com/urnetwork/server/@v     && install -d -o 65532 -g 65532 -m 0700         /opt/urnetwork/candidate-check         /opt/urnetwork/candidate-check/cache         /opt/urnetwork/candidate-check/tmp
+#12 DONE 0.3s
+
+#13 [candidate-check 2/4] RUN --network=none     GOCACHE=/opt/urnetwork/candidate-check/cache     GOTMPDIR=/opt/urnetwork/candidate-check/tmp     TMPDIR=/opt/urnetwork/candidate-check/tmp     GOFLAGS=-mod=readonly GOPROXY=off GOSUMDB=off     go vet ./connect/...
+#13 DONE 94.7s
+
+#14 [candidate-check 3/4] RUN --network=none     GOCACHE=/opt/urnetwork/candidate-check/cache     GOTMPDIR=/opt/urnetwork/candidate-check/tmp     TMPDIR=/opt/urnetwork/candidate-check/tmp     GOFLAGS=-mod=readonly GOPROXY=off GOSUMDB=off     go test -run '^$' ./connect/...
+#14 17.25 ok  	github.com/urnetwork/server/connect	0.060s [no tests to run]
+#14 17.25 ok  	github.com/urnetwork/server/connect/connectgen	0.003s [no tests to run]
+#14 17.34 ok  	github.com/urnetwork/server/connect/perfvar	0.061s [no tests to run]
+#14 17.34 ok  	github.com/urnetwork/server/connect/perfvar/flightgate	0.003s [no tests to run]
+#14 17.34 ok  	github.com/urnetwork/server/connect/sim-latency	0.060s [no tests to run]
+#14 17.34 ?   	github.com/urnetwork/server/connect/sim-latency/old/cmd/baseline-samples	[no test files]
+#14 DONE 17.9s
+
+#15 [candidate-check 4/4] RUN install -m 0444 /dev/null /opt/urnetwork/candidate-check/passed
+#15 DONE 0.2s
+
+#16 [candidate-binary 1/3] COPY --from=candidate-check --chown=0:0 --chmod=0444     /opt/urnetwork/candidate-check/passed     /opt/urnetwork/candidate-check.passed
+#16 DONE 0.1s
+
+#17 [candidate-binary 2/3] RUN test -f /opt/urnetwork/candidate-check.passed     && chown 65532:65532 /opt/urnetwork/go/pkg/mod/cache/download/github.com/urnetwork/server/@v     && install -d -o 65532 -g 65532 -m 0700         /opt/urnetwork/candidate-build         /opt/urnetwork/candidate-build/cache         /opt/urnetwork/candidate-build/tmp         /opt/urnetwork/candidate-build/output
+#17 DONE 0.3s
+
+#18 [candidate-binary 3/3] RUN --network=none     GOCACHE=/opt/urnetwork/candidate-build/cache     GOTMPDIR=/opt/urnetwork/candidate-build/tmp     TMPDIR=/opt/urnetwork/candidate-build/tmp     GOFLAGS=-mod=readonly GOPROXY=off GOSUMDB=off     go build -trimpath -o /opt/urnetwork/candidate-build/output/sim-latency ./connect/sim-latency     && test "$(go version -m /opt/urnetwork/candidate-build/output/sim-latency | sed -n 's/.*vcs.revision=//p')" = "bee54b79e4add9d9de46167a9aa3bca774e19af2"     && test "$(go version -m /opt/urnetwork/candidate-build/output/sim-latency | sed -n 's/.*vcs.modified=//p')" = false
+#18 DONE 89.3s
+
+#19 [final 1/3] COPY --from=candidate-binary --chown=0:0 --chmod=0555     /opt/urnetwork/candidate-build/output/sim-latency     /opt/urnetwork/bin/sim-latency
+#19 DONE 0.5s
+
+#20 [final 2/3] RUN test "$(go version -m /opt/urnetwork/bin/sim-latency | sed -n 's/.*vcs.revision=//p')" = "bee54b79e4add9d9de46167a9aa3bca774e19af2"     && test "$(go version -m /opt/urnetwork/bin/sim-latency | sed -n 's/.*vcs.modified=//p')" = false     && source_status="$(git status --porcelain --untracked-files=all)"     && test -z "$source_status"
+#20 DONE 0.4s
+
+#21 [final 3/3] RUN --network=none jq         --arg build_sha "bee54b79e4add9d9de46167a9aa3bca774e19af2"         --arg builder_sha256 "fbbf8010750d23f1f94a164780a56f40472a3325bc758d221dd2968bb0010b6e"         --arg image_key "ff73af21add2d6fa1ab3345b497455ec2d92d5e38bc619298243838ec1e32c3f"         --arg patch_validator_sha256 "3d161d76bace48bff6536164a84f330b1618c82f319775b8551c19872b937e54"         --arg candidate_commits_sha256 "48e64c1e5558e3b5ebc2d98fcc0f396bdbb2599020d45852d351da3c5c56e8a3"         --arg original_source_identity_sha256 "6fd78777cf0c84a381aaf93f31149d24b3086f6259d12fa06051cc566e8317f5"         --arg simulator_sha256 "$(sha256sum /opt/urnetwork/bin/sim-latency | awk '{print $1}')"         '. + {image_kind: "submission", build_sha: $build_sha, builder_sha256: $builder_sha256, image_key: $image_key, simulator_sha256: $simulator_sha256,           patch_validator_sha256:$patch_validator_sha256,candidate_commits_sha256:$candidate_commits_sha256,           original_source_identity_sha256:$original_source_identity_sha256}'         /opt/urnetwork/submission/validated-identity.json         > /opt/urnetwork/image-identity.json.new     && mv /opt/urnetwork/image-identity.json.new /opt/urnetwork/image-identity.json     && chmod 0444 /opt/urnetwork/image-identity.json /opt/urnetwork/submission/validated-identity.json     && chmod -R a-w /opt/urnetwork/submission     && source_status="$(git status --porcelain --untracked-files=all)"     && test -z "$source_status"
+#21 DONE 1.2s
+
+#22 exporting to image
+#22 exporting layers
+#22 exporting layers 1.5s done
+#22 writing image sha256:2aaea2d83fdfdf348f96e9991318087ea4dcf4b7385c1f7a411620af4083d202 0.0s done
+#22 naming to docker.io/urnetwork/sim-latency-submission:c2-broad-capability-1685325b-79e96f0ed-evidence5g-v2 0.0s done
+#22 DONE 1.6s

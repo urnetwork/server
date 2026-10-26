@@ -25,3 +25,18 @@ It failed before candidate building or scoring: projected use was 4,391,722,866
 bytes against the 4,294,967,296-byte hard cap. Cleanup completed. This failure
 is not omitted, retried under the same profile, or counted as a passing runtime
 qualification. A prospective five-GiB profile must qualify independently.
+
+## Actual five-GiB container qualification passed
+
+`broad-5g-passed/` retains the distinct prospective attempt, which completed
+at 2026-10-26T17:09:02Z in 277 seconds with exit 0 and verified cleanup.
+The same observed 4,391,722,866-byte capacity projection fits its 5,368,709,120-byte
+cap, leaving 976,986,254 bytes. Container ceilings and management reserve were
+not reduced. The old failed attempt above remains unchanged.
+
+The real offline builder ran vet, required tests and compilation, authenticated
+all ten candidate commits, verified direct server/connect descendants and the
+protected instrument tree, and passed the actual unprivileged C2 source check.
+Candidate image: `sha256:2aaea2d83fdfdf348f96e9991318087ea4dcf4b7385c1f7a411620af4083d202`.
+No evaluator controls, scoring or provider inference ran. This qualifies the
+tested broad build/source path, not statistical calibration or launch readiness.
