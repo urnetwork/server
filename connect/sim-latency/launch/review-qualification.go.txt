@@ -466,6 +466,11 @@ func executeReviewQualification(ctx context.Context, directory string, plan revi
 			return report, err
 		}
 		request := item.Request
+		if plan.Kind == "winner-review-snow-provider-qualification-plan" {
+			// A new, independently qualified wrapper release has its own fixed
+			// qualification claim. Repeating the same release still cannot reroll.
+			request.Template.IdempotencyKey += ":" + plan.BrokerSha256
+		}
 		now := hooks.Now().UTC()
 		request.Request.StartedAt, request.Request.Deadline = now, now.Add(settings.CaseTimeout)
 		input, err := json.Marshal(request)
