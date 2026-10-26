@@ -594,7 +594,8 @@ b6a66eb6de9d358a5b91adab521c03cc39302827486a5adb38d8187033e77f8b  prelaunch-snow
 6fed80c21e91759987b4af96e34b1cbc3ec8c5c9426694ff44763b64cb719e6e  prelaunch-snow-core-qualification-2026-10-26/sql-passed/pass-3.stdout
 6e7e667728c703e39dab9c984f35224ec2b9739598234436b46954f03a5dc366  prelaunch-snow-core-qualification-2026-10-26/sql-passed/run.sh
 ef76663c3d15e34909b108d8388434ad842301a6e710cdc0d3f789cc52af190a  prelaunch-snow-core-qualification-2026-10-26/sql-passed/source-receipt.sha256
-980ac21cbf21bdf32a5ecad261513e24e1fe47287c41004039a67e776416f8c1  prelaunch-snow-review-2026-10-26/INDEX.json
+6cf0f44169456d1c9a037ae13e9760fd909b3638400f6dbd57494c4de6b57750  prelaunch-snow-review-2026-10-26/INDEX.json
+e63bc1e8fc6069c4b7850bf6ef7d09268eb58d137c8f4525ebd0ea21fff35be2  prelaunch-snow-review-2026-10-26/native-plan.json
 992d5fa307fd3f20942274d9d080304fd0e8a86d052795599860db13d181d794  prelaunch-snow-review-2026-10-26/plan.json
 a4ad04ab33259fd74395dbe6afc3f3a01d4509fc0872ef3e8a97c1387ff0728d  prelaunch-three-pair-analysis-2026-10-26/INDEX.json
 ac758e9747264a9028e114f75766b13bb7920e88e78e01addf9a901f28fff682  prelaunch-three-pair-analysis-2026-10-26/README.md

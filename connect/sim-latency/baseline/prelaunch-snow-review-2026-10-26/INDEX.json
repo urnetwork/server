@@ -3,6 +3,8 @@
   "kind": "snow-live-review-qualification-precommit",
   "official_performance_measurements": false,
   "plan_sha256": "992d5fa307fd3f20942274d9d080304fd0e8a86d052795599860db13d181d794",
+  "native_plan_sha256": "e63bc1e8fc6069c4b7850bf6ef7d09268eb58d137c8f4525ebd0ea21fff35be2",
+  "serialization_difference": "native-plan.json omits exactly the export helper's single trailing LF; all JSON values and semantic request digests are identical",
   "native_driver_source": "2268c1f52",
   "native_driver_sha256": "f322ad91278684fd565adedc3155b08b013a9c95721edab549dd873b45c9aab8",
   "review_broker_image_id": "sha256:115a91f9322fa8b76dd32a2186289054d53bdc32f40f87b9be01c6c4b15981fb",
