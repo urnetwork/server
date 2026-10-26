@@ -47,6 +47,10 @@ a2b35f860c755b4e56eaad81c3e1fdb692d23f8eff7bd2c4bfe4ed31aa91f6eb  prelaunch-2026
 8ff6ab43d80d119b305b17b2938026984de13e6d8523f427583b2a5cbfb289a8  prelaunch-2026-10-24/runs/baseline-9.run.json.complete.json
 db7d7da3158c5525e1eb74b05a986997dd3bfbb5c4236e5ca10903f01c5bd82f  prelaunch-2026-10-24/source-manifest.yml
 b1ef358a1f6aa393ea441f6e3ddb384bbf026a1355b80b8d43766188340d2a05  prelaunch-2026-10-24/source-record.json
+36b1b619fba72c46a2bc4345e2136bafed95354f1556d54a74003d1a0a0c6434  prelaunch-c2-bridge-2026-10-26/README.md
+b6b307c47231b41c420ec6fe205fc63999b4b13ac93887ca5106c63c4e0fc15a  prelaunch-c2-bridge-2026-10-26/bridge-plan.json
+4ecd354c239afb5c2bd71387e6688a73a81774f0ade5770d510e706b4a784c44  prelaunch-c2-bridge-2026-10-26/c2-instrument-release.json
+d264f48d38a1ab6bea44342cdbcf5e13cebf6e4c2811506e8086995e4600b646  prelaunch-c2-bridge-2026-10-26/margin-freeze.json
 7db7229bcb77fcb794c9d1cc14184944671fafaf71ce594311bbb9b267714043  prelaunch-c2-runtime-qualification-2026-10-26/INDEX.json
 e32570b6ad514a3337d0680f81eb992ee4208e45f862f6ba3118b94967ee15a7  prelaunch-c2-runtime-qualification-2026-10-26/README.md
 7942911f7790bddfdbcd96fcd9a1f54577769c57b75717faac6359b37296e264  prelaunch-c2-runtime-qualification-2026-10-26/broad-4g-failed/admission-layer.txt

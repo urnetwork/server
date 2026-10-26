@@ -1,0 +1,53 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-prospective-c2-instrument",
+  "protocol": "launch-3a-bridge-3b-2026-10-26-v1",
+  "protocol_approval_sha256": "a794618968d840163952b7b2058100fd87b71ef7ccc44919ba590c5a253f643c",
+  "original_plan_sha256": "24f9b6ea9fe6fbfb4381ca29535b81a1cd4966b397c701b04f5b09ac74eb11d8",
+  "original_base_sha": "c1f9dda603d6279666fca5d92b99c5663306c5f7",
+  "original_image_id": "sha256:002c39040ce23dee27b171c7e657f749c6a6d05b1e9b97d90ac87336470dbaf3",
+  "original_source_lock_sha256": "5e00bf5ee7b4708be94ac1ebc6daf5c024f4afe467ca30c35024f65f96b6c90e",
+  "base_sha": "a9e8e1a710b24c749e6499a0606938252c83e136",
+  "evaluator_image_id": "sha256:b1632a55b415f823871c60b220a194947d280894111c9fa765ad88100e206f24",
+  "pristine_binary_sha256": "efd1077d56f2435027d8358e01f29d43355a4ec1a45917e72602fcee8cce6727",
+  "source_lock_sha256": "ec322ed2db023e15ea5dc3eea60a6ca5989661bba737c340fea3477d8d1300cf",
+  "evaluation_policy_sha256": "9ae215229cf367705866b2b7a01a75d0f817c6c8ab5657596339ed08c30ce188",
+  "analyzer_source": "186b2664b02bba6ec7e9995432a18f7768954cea",
+  "source_repository": "/home/by/urnetwork/temp/c2-bridge-20261026.UJH2e2mk/source-auth-server",
+  "original_source_lock": {
+    "path": "/home/by/urnetwork/temp/mono-root-c2-release-20261026.PUHdHLML/c1-typed-lock.json",
+    "sha256": "195fd2deb8c6f5be4a57386e2134af5b322daee6f38a4365cb72767dc2a2841d"
+  },
+  "source_lock": {
+    "path": "/home/by/urnetwork/temp/mono-root-c2-release-20261026.PUHdHLML/source-lock.json",
+    "sha256": "239cea7fe6f77f989b75ba6efa677e8731640ba2fdd3690a35e6fe72103f3d11"
+  },
+  "minimal_source_delta": {
+    "path": "/home/by/urnetwork/temp/mono-root-c2-release-20261026.PUHdHLML/source-delta.patch",
+    "sha256": "c457bf3598e1e5dbd83b384d51f8c7b153c7dea452e62e85d1cd85c8b7cd9357"
+  },
+  "qualification": {
+    "path": "/home/by/urnetwork/temp/c2-bridge-20261026.UJH2e2mk/instrument-qualification.json",
+    "sha256": "203225b2904374b2fdce867b09799d0f97429de7dea173ec61d0f057f6cfc14a"
+  },
+  "runtime_release": {
+    "control_revision": "79e96f0eddf784038d4ed7601da8cc12d3d94e41",
+    "validator_source_revision": "7c4dc74e5d53d7b42e22e059565d778b35bee83e",
+    "evidence_memory_limit_bytes": 5368709120,
+    "script_directory": "/usr/local/libexec/urnetwork/competition-c2-a9e8e1a7-control-79e96f0ed-go1273-evidence5g-v2/container",
+    "release_manifest": {
+      "path": "/usr/local/libexec/urnetwork/competition-c2-a9e8e1a7-control-79e96f0ed-go1273-evidence5g-v2/release.json",
+      "sha256": "20ad995d806bca7a9aba18a50f6e60ee2fba0b9ae038f3a484285c6d60e799d0"
+    },
+    "builder_sha256": "fbbf8010750d23f1f94a164780a56f40472a3325bc758d221dd2968bb0010b6e",
+    "patch_validator_sha256": "3d161d76bace48bff6536164a84f330b1618c82f319775b8551c19872b937e54",
+    "bridge_runner": {
+      "path": "/usr/local/libexec/urnetwork/competition-calibration-c2-a9e8e1a7-evidence5g-v2/cohort-runner.sh",
+      "sha256": "f691eca1a83edce8f961fd512b4d9320778f507e603a0c553d98afb9256a686d"
+    },
+    "bridge_runner_manifest": {
+      "path": "/usr/local/libexec/urnetwork/competition-calibration-c2-a9e8e1a7-evidence5g-v2/release.json",
+      "sha256": "7edd2ee4dcc840734fe27abca8eb35777294344f169a0e61dab734330f3ddc1e"
+    }
+  }
+}
