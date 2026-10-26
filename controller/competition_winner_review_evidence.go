@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
 )
 
 // The exact immutable version is private; the public review exposes its digest.
@@ -25,7 +26,11 @@ type CompetitionWinnerReviewEvidence struct {
 // Runs outside database transactions and refuses local/unprotected storage.
 // The report is bounded and content-addressed under its exact round and job.
 func RetainCompetitionWinnerReviewEvidence(ctx context.Context, settings *Settings, roundId, jobId server.Id, content []byte, expected string) (*CompetitionWinnerReviewEvidence, error) {
-	if settings == nil || roundId == (server.Id{}) || jobId == (server.Id{}) || len(content) == 0 || len(content) > 64*1024 {
+	maximumEvidenceBytes := 64 * 1024
+	if settings != nil && settings.AutomationPolicy.WinnerReviewPolicy == model.CompetitionSnowWinnerReviewPolicy {
+		maximumEvidenceBytes = 512 * 1024
+	}
+	if settings == nil || roundId == (server.Id{}) || jobId == (server.Id{}) || len(content) == 0 || len(content) > maximumEvidenceBytes {
 		return nil, errors.New("winner review evidence identity or size is invalid")
 	}
 	for _, scope := range []string{settings.CompetitionId, settings.AutomationPolicy.Environment, settings.AutomationPolicy.SeasonId} {

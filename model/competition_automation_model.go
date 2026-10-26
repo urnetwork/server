@@ -24,6 +24,10 @@ const (
 	CompetitionWinnerReviewPolicy    = "elected_winner_gpt54mini_xhigh_v1"
 	CompetitionWinnerReviewModel     = "gpt-5.4-mini"
 	CompetitionWinnerReviewReasoning = "xhigh"
+	// The aggregate is a versioned union, not a fabricated individual model.
+	CompetitionSnowWinnerReviewPolicy    = "elected_winner_snow_union_v1"
+	CompetitionSnowWinnerReviewModel     = "snow-qwen-gemma-muse-union"
+	CompetitionSnowWinnerReviewReasoning = "provider-default"
 	// Historical policy identity remains bound to its original provider.
 	CompetitionLegacyWinnerReviewPolicy    = "elected_winner_sol61max_v1"
 	CompetitionLegacyWinnerReviewModel     = "gpt-6.1-sol"
@@ -109,6 +113,8 @@ func ValidateCompetitionAutomationPolicy(policy CompetitionAutomationPolicy) err
 // or candidate text. Historical reviews cannot be relabeled after a migration.
 func CompetitionWinnerReviewProvider(policy string) (modelName string, reasoning string, supported bool) {
 	switch policy {
+	case CompetitionSnowWinnerReviewPolicy:
+		return CompetitionSnowWinnerReviewModel, CompetitionSnowWinnerReviewReasoning, true
 	case CompetitionWinnerReviewPolicy:
 		return CompetitionWinnerReviewModel, CompetitionWinnerReviewReasoning, true
 	case CompetitionLegacyWinnerReviewPolicy:
@@ -118,11 +124,17 @@ func CompetitionWinnerReviewProvider(policy string) (modelName string, reasoning
 	}
 }
 
-// Both versions retain the same elected-winner lifecycle and strict evidence
+// Every version retains the same elected-winner lifecycle and strict evidence
 // semantics; their provider provenance remains separate.
 func IsCompetitionWinnerReviewPolicy(policy string) bool {
 	_, _, supported := CompetitionWinnerReviewProvider(policy)
 	return supported
+}
+
+// Each member keeps its complete six-criterion findings; callers cannot mutate
+// this census or silently substitute another checkpoint alias.
+func CompetitionSnowWinnerReviewModels() []string {
+	return []string{"qwen3.8-27b", "gemma-4-26b-a4b", "muse-glimmer-30b"}
 }
 
 // Both contracts preserve v2 reward semantics; the blob contract additionally
@@ -350,6 +362,7 @@ func SelectCompetitionReward(entries []CompetitionSealedEntry, disqualifiedJobId
 
 // Findings carry bounded public explanations and private evidence identities, never secret content.
 type CompetitionReviewFinding struct {
+	Model          string `json:"model,omitempty"`
 	Criterion      string `json:"criterion"`
 	Disposition    string `json:"disposition"`
 	ReasonCode     string `json:"reason_code"`
@@ -431,6 +444,10 @@ func ValidateCompetitionIntegrityReview(request CompetitionIntegrityReviewReques
 		if (request.RewardDisposition == "approved" || request.RewardDisposition == "restored") && request.SourceDisposition != "approved" {
 			return errors.New("affirmative winner review must approve the same source")
 		}
+		if policy.WinnerReviewPolicy == CompetitionSnowWinnerReviewPolicy &&
+			(request.RewardDisposition == "unchanged" || request.SourceDisposition == "deferred" || request.SourceDisposition == "unchanged") {
+			return errors.New("an uncertain Snow union cannot confer review authority")
+		}
 	}
 	allowedReasonKVs := map[string]bool{}
 	for _, code := range []string{"APPROVED", "SCORE_TAMPERING", "MEASUREMENT_FABRICATION", "WORKLOAD_SPECIAL_CASING", "BENCHMARK_DETECTION", "SANDBOX_ESCAPE", "SECRET_ACCESS", "EXFILTRATION", "UNSAFE_BEHAVIOR", "PERSISTENCE", "DENIAL_OF_SERVICE", "PATCH_POLICY_VIOLATION", "UNRELATED_CHANGE", "REWARD_DUPLICATE", "REWARD_RULE_EVASION", "SOURCE_NOT_READY", "PRODUCT_INTEGRATION_RISK", "EVALUATION_INTEGRITY_INCIDENT", "APPEAL_UPHELD"} {
@@ -450,7 +467,20 @@ func ValidateCompetitionIntegrityReview(request CompetitionIntegrityReviewReques
 			return errors.New("repeat exclusion was not prospectively adopted")
 		}
 	}
-	criteriaKVs := map[string]bool{"measurement_integrity": false, "workload_generalization": false, "containment": false, "patch_scope": false, "reproducibility": false, "source_safety": false}
+	snowReview := policy.WinnerReviewPolicy == CompetitionSnowWinnerReviewPolicy
+	models := []string{""}
+	if snowReview {
+		models = CompetitionSnowWinnerReviewModels()
+	}
+	criteriaKVs := map[string]bool{}
+	for _, modelName := range models {
+		for _, criterion := range []string{"measurement_integrity", "workload_generalization", "containment", "patch_scope", "reproducibility", "source_safety"} {
+			criteriaKVs[modelName+"\x00"+criterion] = false
+		}
+	}
+	if len(request.Findings) != len(criteriaKVs) {
+		return errors.New("review requires the exact policy-specific finding census")
+	}
 	failedFinding := false
 	supportedFailure := false
 	for _, finding := range request.Findings {
@@ -460,17 +490,19 @@ func ValidateCompetitionIntegrityReview(request CompetitionIntegrityReviewReques
 				supportedFailure = supportedFailure || reason == finding.ReasonCode
 			}
 		}
-		seen, ok := criteriaKVs[finding.Criterion]
+		findingKey := finding.Model + "\x00" + finding.Criterion
+		seen, ok := criteriaKVs[findingKey]
 		if !ok || seen || !competitionAutomationSha256.MatchString(finding.EvidenceSha256) || finding.Explanation == "" || len(finding.Explanation) > 4096 || !allowedReasonKVs[finding.ReasonCode] {
 			return errors.New("invalid or duplicate structured finding")
 		}
-		if finding.Disposition != "pass" && finding.Disposition != "fail" && finding.Disposition != "not_applicable" {
+		uncertainRejection := snowReview && finding.Disposition == "uncertain" && request.RewardDisposition == "disqualified" && request.SourceDisposition == "rejected"
+		if finding.Disposition != "pass" && finding.Disposition != "fail" && finding.Disposition != "not_applicable" && !uncertainRejection {
 			return errors.New("invalid finding disposition")
 		}
-		if request.SourceDisposition == "approved" && finding.Disposition == "fail" {
+		if request.SourceDisposition == "approved" && (finding.Disposition == "fail" || finding.Disposition == "uncertain") {
 			return errors.New("failed finding cannot authorize source promotion")
 		}
-		criteriaKVs[finding.Criterion] = true
+		criteriaKVs[findingKey] = true
 	}
 	for _, seen := range criteriaKVs {
 		if !seen {

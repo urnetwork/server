@@ -88,6 +88,7 @@ Usage:
   sim-latency bootstrap-source --enable-automation --owner-id=<id> --state-dir=<dir> --manifest-commit=<sha> [--opens-at=<time>] [--source-config=<path>] [--repos-root=<dir>]
   sim-latency source-review-packet --round-id=<id> --job-id=<id> --out-dir=<dir>
   sim-latency review-broker --model-key-file=<path>
+  sim-latency review-broker --review-provider-settings=<path> --review-provider-settings-sha256=<sha256> --review-state-directory=<path>
   sim-latency source-build-broker --build-settings=<path> --build-settings-sha256=<digest>
   sim-latency source-qualify-build --qualification-settings=<path> --qualification-settings-sha256=<digest>
   sim-latency launch-preflight --epoch=<n> --evaluator-image=<digest> --operator-token-file=<path> --grafana-url=<url> --grafana-token-file=<path> --metrics-url=<url> --metrics-token-file=<path> [--api-url=<url>] [--openapi=<path>] [--artifact-capacity-bytes=<n>] [--preflight-timeout=<d>] [--source-config=<path>] [--repos-root=<dir>] [--out=<path>]
@@ -115,6 +116,9 @@ Options:
   --build-settings=<path> Private deployment settings for the isolated source build broker.
   --build-settings-sha256=<digest> Immutable installed build-settings digest.
   --model-key-file=<path> Dedicated OpenAI API key leaf; no main credentials belong in the broker.
+  --review-provider-settings=<path> Immutable public Snow provider settings leaf.
+  --review-provider-settings-sha256=<sha256> Authenticated provider settings digest.
+  --review-state-directory=<path> Private durable member journal directory.
   --opens-at=<time>      Pin the initial automation opening (RFC3339; immutable on recovery).
   --staging             Require an explicitly staging v2 manifest and staging source refs.
   -h --help              Show this screen.

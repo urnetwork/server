@@ -331,10 +331,6 @@ func runWinnerReviewBroker(opts docopt.Opts) {
 	if err := decodeStrictJSONBytes(input, &request, "winner review broker input"); err != nil {
 		fatalf("%s", err)
 	}
-	key, err := readPrivateToken(optString(opts, "--model-key-file", ""))
-	if err != nil {
-		fatalf("dedicated review key is unavailable")
-	}
 	ctx, cancel := signalContext()
 	defer cancel()
 	ctx, deadlineCancel := context.WithDeadline(ctx, request.Request.Deadline)
@@ -342,7 +338,21 @@ func runWinnerReviewBroker(opts docopt.Opts) {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
 	defer transport.CloseIdleConnections()
-	result, err := executeWinnerModel(ctx, &http.Client{Transport: transport}, key, request, settings)
+	var result *winnerReviewBrokerResult
+	if request.Request.Policy.WinnerReviewPolicy == model.CompetitionSnowWinnerReviewPolicy {
+		providerDigest := optString(opts, "--review-provider-settings-sha256", "")
+		provider, providerErr := loadWinnerSnowProviderSettings(optString(opts, "--review-provider-settings", ""), providerDigest)
+		if providerErr != nil {
+			fatalf("Snow provider settings are unavailable or changed")
+		}
+		result, err = executeWinnerSnow(ctx, &http.Client{Transport: transport}, request, defaultWinnerSnowModelSettings(), provider, providerDigest, optString(opts, "--review-state-directory", ""))
+	} else {
+		key, keyErr := readPrivateToken(optString(opts, "--model-key-file", ""))
+		if keyErr != nil {
+			fatalf("dedicated review key is unavailable")
+		}
+		result, err = executeWinnerModel(ctx, &http.Client{Transport: transport}, key, request, settings)
+	}
 	if err != nil {
 		var refusal *winnerReviewProviderRefusal
 		if errors.As(err, &refusal) {

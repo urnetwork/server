@@ -127,10 +127,14 @@ type winnerReviewBrokerResult struct {
 
 // Rejects stale/cross-candidate responses and unfinished judgments before any
 // API mutation. Infrastructure/uncertainty is not a dishonest-submission verdict.
-func validateWinnerReviewBrokerResult(result *winnerReviewBrokerResult, template model.CompetitionIntegrityReviewRequest, policy model.CompetitionAutomationPolicy) error {
+func validateWinnerReviewBrokerResult(result *winnerReviewBrokerResult, template model.CompetitionIntegrityReviewRequest, policy model.CompetitionAutomationPolicy, original ...winnerReviewBrokerRequest) error {
+	maximumEvidenceBytes := 64 * 1024
+	if policy.WinnerReviewPolicy == model.CompetitionSnowWinnerReviewPolicy {
+		maximumEvidenceBytes = 512 * 1024
+	}
 	modelName, reasoning, supported := model.CompetitionWinnerReviewProvider(policy.WinnerReviewPolicy)
 	if !supported || result == nil || result.Schema != 1 || result.Model != modelName || result.Reasoning != reasoning || !result.NoMainCredentials || !result.NoCandidateExecution ||
-		len(result.PrivateEvidence) == 0 || len(result.PrivateEvidence) > 64*1024 {
+		len(result.PrivateEvidence) == 0 || len(result.PrivateEvidence) > maximumEvidenceBytes {
 		return errors.New("winner review requires its frozen provider provenance and bounded evidence")
 	}
 	review := result.Review
@@ -147,6 +151,14 @@ func validateWinnerReviewBrokerResult(result *winnerReviewBrokerResult, template
 	digest := sha256.Sum256([]byte(result.PrivateEvidence))
 	if hex.EncodeToString(digest[:]) != review.PrivateEvidenceSha256 {
 		return errors.New("winner review private evidence digest does not match")
+	}
+	if policy.WinnerReviewPolicy == model.CompetitionSnowWinnerReviewPolicy {
+		if len(original) != 1 {
+			return errors.New("Snow review requires its original authenticated input")
+		}
+		if err := validateWinnerSnowEvidence(result, original[0]); err != nil {
+			return err
+		}
 	}
 	return model.ValidateCompetitionIntegrityReview(review, policy)
 }
@@ -262,7 +274,7 @@ func (self *sourceSupervisorRuntime) reviewWinner(ctx context.Context, _ model.C
 	if err := decodeStrictJSONBytes(output, &result, "elected winner review"); err != nil {
 		return err
 	}
-	if err := validateWinnerReviewBrokerResult(&result, template, request.Policy); err != nil {
+	if err := validateWinnerReviewBrokerResult(&result, template, request.Policy, broker); err != nil {
 		return err
 	}
 	if err := cacheWinnerReviewJudgment(judgmentPath, output); err != nil {
