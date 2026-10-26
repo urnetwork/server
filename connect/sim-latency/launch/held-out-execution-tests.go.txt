@@ -1,0 +1,504 @@
+// Synthetic composed execution tests. Process/host/replay hooks are explicit;
+// no test claims actual measured controls, live containment or reference pilots.
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+)
+
+// Owns an explicitly advanced clock and deterministic process callbacks. The
+// absolute base only keeps real context deadlines in the future; all asserted
+// ordering/budget changes are synchronous, never sleeps or scheduling luck.
+type heldOutExecFixture struct {
+	Preparation *heldOutOpFixture
+	Plan        *heldOutPrivatePlan
+	Config      heldOutExecutionConfig
+	Clock       time.Time
+	Hooks       heldOutExecutionHooks
+	Invocations []heldOutJobStart
+	Controls    map[string]*heldOutFrozenControl
+}
+
+// A native-format valid baseline shape is sufficient to exercise provenance
+// consumption. It is synthetic, not a measured/replayed official control.
+func newHeldOutExecControl(t *testing.T, fixture *heldOutExecFixture, round heldOutPrivateRound, job heldOutPlannedJob) *heldOutFrozenControl {
+	t.Helper()
+	plan, release := fixture.Plan, fixture.Preparation.Release
+	root := heldOutJobRoot(plan.Config.PrivateRoot, round.Public, job)
+	artifacts := filepath.Join(root, "artifacts")
+	replicates := []ScoreBaselineReplicate{}
+	for i := 0; i < plan.Policy.Replicates; i++ {
+		metrics := map[string]MetricSummary{}
+		for _, name := range scoreLiveMetricNames {
+			metrics[name] = MetricSummary{Value: 1, N: 10}
+		}
+		replicates = append(replicates, ScoreBaselineReplicate{RawScore: 10, SuccessRate: 1, RequestCount: 100, ReceivedBytes: 1024,
+			FindProvidersLoadP95Ms: 1, FindProvidersPoolP05: 10, FindProvidersSampleSpanFraction: 1, LiveMetrics: metrics})
+	}
+	baseline := scoreBaselineFromReplicates(round.Public.RoundId, round.Public.ProvidersSha256, plan.Policy.RequestTimeoutMs, map[string]string{"duration": "1s"}, plan.Margin, replicates)
+	baselinePin := heldOutOpJson(t, filepath.Join(artifacts, "baseline.json"), baseline)
+	baselineBytes, err := os.ReadFile(baselinePin.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inputPin := heldOutOpWrite(t, filepath.Join(artifacts, "evidence", "scorer-input", "baseline.json"), baselineBytes)
+	evidence := []calibrationArtifactBinding{{Path: "evidence/scorer-input/baseline.json", Sha256: inputPin.Sha256, Bytes: int64(len(baselineBytes))}}
+	evidencePin := heldOutOpJson(t, filepath.Join(artifacts, "evidence-manifest.json"), map[string]any{
+		"schema": 1, "kind": "sim-latency-evidence-manifest", "job_id": job.JobId, "round_id": round.Public.RoundId, "artifacts": evidence})
+	complete := heldOutCompletion{Schema: 1, Kind: "sim-latency-worker-evaluation-complete", JobId: job.JobId, RoundId: round.Public.RoundId, Attempt: 1,
+		BaseImageId: release.ImageId, ProvidersSha256: round.Public.ProvidersSha256, CleanupComplete: true,
+		Artifacts: map[string]string{"baseline": baselinePin.Sha256, "evidence_manifest": evidencePin.Sha256}}
+	completePin := heldOutOpJson(t, filepath.Join(artifacts, "evaluation.complete.json"), complete)
+	control := &heldOutFrozenControl{Schema: 1, Kind: "sim-latency-held-out-first-control", RoundId: round.Public.RoundId, SourceJobId: job.JobId,
+		BaseSha: release.BaseSha, ImageId: release.ImageId, SourceLockSha256: release.SourceLockSha256, PolicySha256: plan.PolicySha256,
+		ProvidersSha256: round.Public.ProvidersSha256, ScorerVersion: officialScorerVersion, HardwareId: plan.Policy.HardwareId,
+		HostQualificationSha256: plan.Policy.HostQualificationSha256, Margin: plan.Margin, Replicates: plan.Policy.Replicates,
+		Baseline: baselinePin, EvidenceManifest: evidencePin, Completion: completePin, Evidence: evidence, ControlEvaluationIds: []string{}}
+	for i := 0; i < plan.Policy.Replicates; i++ {
+		control.ControlEvaluationIds = append(control.ControlEvaluationIds, fmt.Sprintf("synthetic-control-%02d-%02d", round.Public.Position, i))
+	}
+	return control
+}
+
+// Hook output retains exact p-values and fresh ids while exposing no service
+// process or backing database. The core still performs real private I/O,
+// baseline authentication, immutable late binding and append-only journaling.
+func newHeldOutExecFixture(t *testing.T) *heldOutExecFixture {
+	t.Helper()
+	preparation := newHeldOutOpFixture(t)
+	plan := preparation.prepare(t)
+	fixture := &heldOutExecFixture{Preparation: preparation, Plan: plan, Config: heldOutExecutionConfig{Schema: 1, Kind: "sim-latency-held-out-execution",
+		PrivatePlan: preparation.PrivatePin, PublicPlan: preparation.PublicPin, Publication: heldOutPinnedFile{Path: filepath.Join(preparation.Root, "publication.json"), Sha256: strings.Repeat("d", 64)}},
+		Clock: time.Now().UTC().Add(24 * time.Hour).Truncate(time.Second), Controls: map[string]*heldOutFrozenControl{}, Invocations: []heldOutJobStart{}}
+	fixture.Hooks = heldOutExecutionHooks{Now: func() time.Time { return fixture.Clock },
+		CheckHost: func(context.Context, heldOutPrivatePlan) (string, error) {
+			return heldOutDigest([]byte("synthetic unchanged original-only inventory")), nil
+		},
+		Invoke: func(ctx context.Context, root string, start heldOutJobStart) error {
+			deadline, ok := ctx.Deadline()
+			if !ok || !deadline.Equal(start.Deadline) || start.Attempt != 1 || start.Deadline.Sub(start.StartedAt) != 10800*time.Second {
+				return errors.New("original whole-job deadline not propagated")
+			}
+			fixture.Invocations = append(fixture.Invocations, start)
+			fixture.Clock = fixture.Clock.Add(2 * time.Second)
+			terminal := fmt.Sprintf("start_utc=%s\ndeadline_utc=%s\nevaluator_exit=0 duration_seconds=2\nend_utc=%s\n", start.StartedAt.Format(time.RFC3339), start.Deadline.Format(time.RFC3339), fixture.Clock.Format(time.RFC3339))
+			return writeHeldOutExclusive(filepath.Join(root, "manager-terminal.log"), []byte(terminal), 0600)
+		},
+		Authenticate: func(_ context.Context, _ heldOutPrivatePlan, round heldOutPrivateRound, job heldOutPlannedJob, request heldOutRequest, control *heldOutFrozenControl) (heldOutJobOutcome, *heldOutFrozenControl, error) {
+			if control == nil {
+				control = newHeldOutExecControl(t, fixture, round, job)
+				fixture.Controls[round.Public.RoundId] = control
+			}
+			pValue := 0.5
+			outcome := heldOutJobOutcome{JobId: job.JobId, RoundId: round.Public.RoundId, Role: job.Role, Complete: true, RawScore: map[string]float64{"better": 8, "no-op": 10, "worse": 12}[job.Role],
+				Placeable: true, Significance: &ScoreSignificance{OneSidedPValue: &pValue}, BaselineSha256: control.Baseline.Sha256, CandidateEvaluationIds: []string{}}
+			for i := 0; i < plan.Policy.Replicates; i++ {
+				outcome.CandidateEvaluationIds = append(outcome.CandidateEvaluationIds, fmt.Sprintf("synthetic-candidate-%s-%02d", job.JobId, i))
+			}
+			return outcome, control, nil
+		}}
+	return fixture
+}
+
+// Executes all fifteen fake processes in the precommitted order, while the
+// real core freezes five controls and finalizes the other ten requests only.
+func TestHeldOutExecutionCompletesAllJobsWithOneControlPerRound(t *testing.T) {
+	fixture := newHeldOutExecFixture(t)
+	result, err := executeHeldOutCampaign(t.Context(), fixture.Config, *fixture.Plan, fixture.Preparation.Release, fixture.Preparation.Settings, fixture.Hooks)
+	if err != nil || !result.Complete || !result.Accepted || result.OrderedSeeds != 5 || len(fixture.Invocations) != 15 || len(fixture.Controls) != 5 {
+		t.Fatalf("composed fixed screen failed: %+v %v", result, err)
+	}
+	index := 0
+	for _, round := range fixture.Plan.Rounds {
+		for _, job := range round.Public.Jobs {
+			if fixture.Invocations[index].JobId != job.JobId {
+				t.Fatal("committed reference order changed")
+			}
+			index++
+			root := heldOutJobRoot(fixture.Plan.Config.PrivateRoot, round.Public, job)
+			original, err := os.ReadFile(filepath.Join(root, "artifacts", "precommitted-request.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			final, err := os.ReadFile(filepath.Join(root, "artifacts", "worker-request.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if job.Position == 1 {
+				if !bytes.Equal(original, final) {
+					t.Fatal("first job changed its request or supplied a prior control")
+				}
+			} else {
+				var request heldOutRequest
+				if err := json.Unmarshal(final, &request); err != nil {
+					t.Fatal(err)
+				}
+				expected, err := finalizeHeldOutRequest(original, job.RequestSha256, round.Public.RoundId, filepath.Join(root, "artifacts", "round-baseline.json"), fixture.Controls[round.Public.RoundId].Baseline.Sha256)
+				if err != nil || !bytes.Equal(final, expected) || request.RoundBaselineSha256 != fixture.Controls[round.Public.RoundId].Baseline.Sha256 {
+					t.Fatal("later job changed more than its deferred baseline fields")
+				}
+			}
+		}
+	}
+}
+
+// A nonplaceable no-op is kept and fails final acceptance; it never triggers a
+// retry, seed replacement or optional stopping of the other fourteen positions.
+func TestHeldOutExecutionRetainsGateFailureAndRunsEveryPosition(t *testing.T) {
+	fixture := newHeldOutExecFixture(t)
+	authenticate := fixture.Hooks.Authenticate
+	fixture.Hooks.Authenticate = func(ctx context.Context, plan heldOutPrivatePlan, round heldOutPrivateRound, job heldOutPlannedJob, request heldOutRequest, control *heldOutFrozenControl) (heldOutJobOutcome, *heldOutFrozenControl, error) {
+		outcome, frozen, err := authenticate(ctx, plan, round, job, request, control)
+		if round.Public.Position == 1 && job.Role == "no-op" {
+			outcome.Placeable = false
+		}
+		return outcome, frozen, err
+	}
+	result, err := executeHeldOutCampaign(t.Context(), fixture.Config, *fixture.Plan, fixture.Preparation.Release, fixture.Preparation.Settings, fixture.Hooks)
+	if err != nil || !result.Complete || result.Accepted || len(result.Outcomes) != 15 || len(fixture.Invocations) != 15 {
+		t.Fatalf("gate failure discarded or stopped sample: %+v %v", result, err)
+	}
+}
+
+// A statistically significant no-op still has to be reported, even when its
+// practical margin prevents takeover. Significance alone is not a retry trigger.
+func TestHeldOutExecutionRetainsSignificantMarginBlockedNoop(t *testing.T) {
+	fixture := newHeldOutExecFixture(t)
+	authenticate := fixture.Hooks.Authenticate
+	fixture.Hooks.Authenticate = func(ctx context.Context, plan heldOutPrivatePlan, round heldOutPrivateRound, job heldOutPlannedJob, request heldOutRequest, control *heldOutFrozenControl) (heldOutJobOutcome, *heldOutFrozenControl, error) {
+		outcome, frozen, err := authenticate(ctx, plan, round, job, request, control)
+		if job.Role == "no-op" {
+			p := 0.001
+			outcome.Significance.OneSidedPValue = &p
+			outcome.Significance.StatisticallySignificant = true
+		}
+		return outcome, frozen, err
+	}
+	result, err := executeHeldOutCampaign(t.Context(), fixture.Config, *fixture.Plan, fixture.Preparation.Release, fixture.Preparation.Settings, fixture.Hooks)
+	if err != nil || !result.Accepted || len(fixture.Invocations) != 15 {
+		t.Fatalf("significant margin-blocked no-op improperly rejected/rerolled: %v", err)
+	}
+	for _, outcome := range result.Outcomes {
+		if outcome.Role == "no-op" && (!outcome.Significance.StatisticallySignificant || *outcome.Significance.OneSidedPValue != 0.001 || outcome.TakeoverEligible) {
+			t.Fatal("exact no-op significance was hidden")
+		}
+	}
+}
+
+// Deadline exhaustion is forced by an explicit clock transition. Reinvocation
+// refuses the append-only campaign/start files without another evaluator call.
+func TestHeldOutExecutionOriginalDeadlineCannotRestart(t *testing.T) {
+	fixture := newHeldOutExecFixture(t)
+	invoke := fixture.Hooks.Invoke
+	fixture.Hooks.Invoke = func(ctx context.Context, root string, start heldOutJobStart) error {
+		err := invoke(ctx, root, start)
+		fixture.Clock = start.Deadline.Add(time.Second)
+		return err
+	}
+	result, err := executeHeldOutCampaign(t.Context(), fixture.Config, *fixture.Plan, fixture.Preparation.Release, fixture.Preparation.Settings, fixture.Hooks)
+	if err == nil || !strings.Contains(err.Error(), "three-hour budget exceeded") || result.Complete || len(fixture.Invocations) != 1 {
+		t.Fatalf("forced original deadline reset or ignored: %+v %v", result, err)
+	}
+	if _, err := executeHeldOutCampaign(t.Context(), fixture.Config, *fixture.Plan, fixture.Preparation.Release, fixture.Preparation.Settings, fixture.Hooks); err == nil || len(fixture.Invocations) != 1 {
+		t.Fatal("second invocation restarted the original deadline")
+	}
+}
+
+// Infrastructure failure is retained once, with its original immutable start,
+// rather than using a second job/seed/reference as a replacement control.
+func TestHeldOutExecutionDoesNotRetryInfrastructureFailure(t *testing.T) {
+	fixture := newHeldOutExecFixture(t)
+	invoke := fixture.Hooks.Invoke
+	fixture.Hooks.Invoke = func(ctx context.Context, root string, start heldOutJobStart) error {
+		if err := invoke(ctx, root, start); err != nil {
+			return err
+		}
+		return errors.New("synthetic diagnosed infrastructure failure")
+	}
+	result, err := executeHeldOutCampaign(t.Context(), fixture.Config, *fixture.Plan, fixture.Preparation.Release, fixture.Preparation.Settings, fixture.Hooks)
+	if err == nil || result.Complete || result.Accepted || len(fixture.Invocations) != 1 || len(result.Outcomes) != 1 {
+		t.Fatalf("infrastructure failure retried or lost: %+v %v", result, err)
+	}
+	if _, err := os.Stat(filepath.Join(fixture.Plan.Config.PrivateRoot, "campaign-result.json")); err != nil {
+		t.Fatal("failed campaign result not retained")
+	}
+}
+
+// Complete candidate execution ids must remain independent across reference
+// jobs; a reused execution cannot count toward the declared fresh R9 sample.
+func TestHeldOutExecutionRejectsCrossJobCandidateReuse(t *testing.T) {
+	fixture := newHeldOutExecFixture(t)
+	authenticate := fixture.Hooks.Authenticate
+	var repeated string
+	fixture.Hooks.Authenticate = func(ctx context.Context, plan heldOutPrivatePlan, round heldOutPrivateRound, job heldOutPlannedJob, request heldOutRequest, control *heldOutFrozenControl) (heldOutJobOutcome, *heldOutFrozenControl, error) {
+		outcome, frozen, err := authenticate(ctx, plan, round, job, request, control)
+		if repeated == "" {
+			repeated = outcome.CandidateEvaluationIds[0]
+		} else {
+			outcome.CandidateEvaluationIds[0] = repeated
+		}
+		return outcome, frozen, err
+	}
+	_, err := executeHeldOutCampaign(t.Context(), fixture.Config, *fixture.Plan, fixture.Preparation.Release, fixture.Preparation.Settings, fixture.Hooks)
+	if err == nil || !strings.Contains(err.Error(), "execution reused") || len(fixture.Invocations) != 2 {
+		t.Fatalf("cross-job reused measurement accepted: %v", err)
+	}
+}
+
+// A later callback cannot substitute another first-control record, even if its
+// own candidate is otherwise complete and favorably ordered.
+func TestHeldOutExecutionRejectsReplacedFirstControlRecord(t *testing.T) {
+	fixture := newHeldOutExecFixture(t)
+	authenticate := fixture.Hooks.Authenticate
+	fixture.Hooks.Authenticate = func(ctx context.Context, plan heldOutPrivatePlan, round heldOutPrivateRound, job heldOutPlannedJob, request heldOutRequest, control *heldOutFrozenControl) (heldOutJobOutcome, *heldOutFrozenControl, error) {
+		outcome, frozen, err := authenticate(ctx, plan, round, job, request, control)
+		if job.Position == 2 {
+			changed := *frozen
+			changed.SourceJobId = heldOutOpId(999)
+			frozen = &changed
+		}
+		return outcome, frozen, err
+	}
+	_, err := executeHeldOutCampaign(t.Context(), fixture.Config, *fixture.Plan, fixture.Preparation.Release, fixture.Preparation.Settings, fixture.Hooks)
+	if err == nil || !strings.Contains(err.Error(), "replaced first-control") || len(fixture.Invocations) != 2 {
+		t.Fatalf("substituted shared control accepted: %v", err)
+	}
+}
+
+// Proves positive frozen-control authentication before each independent
+// cross-round/source/policy/R9/owner substitution is tested at that boundary.
+func TestHeldOutExecutionFrozenControlRejectsIdentitySubstitution(t *testing.T) {
+	fixture := newHeldOutExecFixture(t)
+	round := fixture.Plan.Rounds[0]
+	control := newHeldOutExecControl(t, fixture, round, round.Public.Jobs[0])
+	if _, err := authenticateHeldOutFrozenControl(*control, *fixture.Plan, round, fixture.Preparation.Release, fixture.Preparation.Settings); err != nil {
+		t.Fatal(err)
+	}
+	for _, mutate := range []func(*heldOutFrozenControl){func(c *heldOutFrozenControl) { c.RoundId = fixture.Plan.Rounds[1].Public.RoundId }, func(c *heldOutFrozenControl) { c.SourceJobId = round.Public.Jobs[1].JobId }, func(c *heldOutFrozenControl) { c.BaseSha = strings.Repeat("f", 40) }, func(c *heldOutFrozenControl) { c.PolicySha256 = strings.Repeat("f", 64) }, func(c *heldOutFrozenControl) { c.Replicates = 3 }, func(c *heldOutFrozenControl) { c.ProvidersSha256 = strings.Repeat("f", 64) }} {
+		changed := *control
+		mutate(&changed)
+		if _, err := authenticateHeldOutFrozenControl(changed, *fixture.Plan, round, fixture.Preparation.Release, fixture.Preparation.Settings); err == nil || !strings.Contains(err.Error(), "provenance") {
+			t.Fatalf("first-control identity substitution accepted: %v", err)
+		}
+	}
+}
+
+// Neither complete baseline bytes nor a complete source receipt are enough if
+// the original control/evidence bytes changed after first-job authentication.
+func TestHeldOutExecutionFrozenControlRejectsChangedOriginalBytes(t *testing.T) {
+	fixture := newHeldOutExecFixture(t)
+	round := fixture.Plan.Rounds[0]
+	control := newHeldOutExecControl(t, fixture, round, round.Public.Jobs[0])
+	content, err := os.ReadFile(control.Baseline.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	heldOutOpWrite(t, control.Baseline.Path, append(content, '\n'))
+	if _, err := authenticateHeldOutFrozenControl(*control, *fixture.Plan, round, fixture.Preparation.Release, fixture.Preparation.Settings); err == nil || !strings.Contains(err.Error(), "bytes changed") {
+		t.Fatalf("changed original control accepted: %v", err)
+	}
+}
+
+// Re-pinning an unrelated census in a first-control record cannot detach it from
+// the original complete manifest's exact artifact list.
+func TestHeldOutExecutionFrozenControlRejectsDetachedEvidenceCensus(t *testing.T) {
+	fixture := newHeldOutExecFixture(t)
+	round := fixture.Plan.Rounds[0]
+	control := newHeldOutExecControl(t, fixture, round, round.Public.Jobs[0])
+	control.Evidence = []calibrationArtifactBinding{}
+	if _, err := authenticateHeldOutFrozenControl(*control, *fixture.Plan, round, fixture.Preparation.Release, fixture.Preparation.Settings); err == nil || !strings.Contains(err.Error(), "census changed") {
+		t.Fatalf("detached control evidence accepted: %v", err)
+	}
+}
+
+// Four-of-five is the authorized compromise; the fifth full seed is retained
+// and reported unfavorable, not replaced or silently promoted to twenty seeds.
+func TestHeldOutExecutionAcceptsExactlyFourOrderedSeeds(t *testing.T) {
+	fixture := newHeldOutExecFixture(t)
+	authenticate := fixture.Hooks.Authenticate
+	fixture.Hooks.Authenticate = func(ctx context.Context, plan heldOutPrivatePlan, round heldOutPrivateRound, job heldOutPlannedJob, request heldOutRequest, control *heldOutFrozenControl) (heldOutJobOutcome, *heldOutFrozenControl, error) {
+		outcome, frozen, err := authenticate(ctx, plan, round, job, request, control)
+		if round.Public.Position == 5 && job.Role == "better" {
+			outcome.RawScore = 11
+		}
+		return outcome, frozen, err
+	}
+	result, err := executeHeldOutCampaign(t.Context(), fixture.Config, *fixture.Plan, fixture.Preparation.Release, fixture.Preparation.Settings, fixture.Hooks)
+	if err != nil || !result.Accepted || result.OrderedSeeds != 4 || len(fixture.Invocations) != 15 {
+		t.Fatalf("four-of-five boundary changed: %+v %v", result, err)
+	}
+	mutated := append([]heldOutJobOutcome{}, result.Outcomes...)
+	for i := range mutated {
+		if mutated[i].Role == "no-op" {
+			mutated[i].TakeoverEligible = true
+			break
+		}
+	}
+	if accepted, _, _ := acceptHeldOutOutcomes(fixture.Plan.Rounds, mutated); accepted {
+		t.Fatal("takeover-eligible no-op accepted")
+	}
+}
+
+// A completed failure/incomplete R9 reference cannot be hidden behind four
+// other correctly ordered seeds or a favorable no-op margin.
+func TestHeldOutExecutionRejectsIncompleteReferenceDespiteFourOrderedSeeds(t *testing.T) {
+	fixture := newHeldOutExecFixture(t)
+	result, err := executeHeldOutCampaign(t.Context(), fixture.Config, *fixture.Plan, fixture.Preparation.Release, fixture.Preparation.Settings, fixture.Hooks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range result.Outcomes {
+		if result.Outcomes[i].Role == "better" {
+			result.Outcomes[i].Complete = false
+			result.Outcomes[i].FailureCode = "candidate_build_failed"
+			break
+		}
+	}
+	accepted, ordered, reasons := acceptHeldOutOutcomes(fixture.Plan.Rounds, result.Outcomes)
+	if accepted || ordered != 4 || len(reasons) == 0 {
+		t.Fatal("incomplete reference hidden behind four ordered seeds")
+	}
+}
+
+// The publication reader sees only the known commit:path and ancestry checks;
+// neither seed material nor a candidate command enters any process argument.
+func TestHeldOutExecutionAuthenticatesPublishedFullPlanBeforeResults(t *testing.T) {
+	fixture := newHeldOutExecFixture(t)
+	publication := heldOutPublication{Schema: 1, Kind: "sim-latency-held-out-plan-publication", PlanSha256: fixture.Config.PublicPlan.Sha256,
+		PublishedAt: fixture.Plan.PreparedAt.Add(time.Second), Commit: strings.Repeat("c", 40), Repository: fixture.Preparation.Root,
+		PlanPath: "public/commitments.json", RemoteRef: "refs/remotes/origin/synthetic", PulledPushed: true, Evidence: []heldOutPinnedFile{fixture.Plan.Config.Qualification}}
+	fixture.Config.Publication = heldOutOpJson(t, fixture.Config.Publication.Path, publication)
+	publicBytes, err := os.ReadFile(fixture.Config.PublicPlan.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	reader := func(_ context.Context, program string, args ...string) ([]byte, error) {
+		calls++
+		if program != "/usr/bin/git" {
+			return nil, errors.New("unexpected command")
+		}
+		if calls == 1 {
+			if !strings.Contains(strings.Join(args, " "), "show "+publication.Commit+":"+publication.PlanPath) {
+				return nil, errors.New("wrong publication command")
+			}
+			return publicBytes, nil
+		}
+		return nil, nil
+	}
+	if err := authenticateHeldOutPublication(t.Context(), fixture.Config, *fixture.Plan, fixture.Preparation.Settings, reader); err != nil || calls != 2 {
+		t.Fatalf("complete publication refused: %v calls=%d", err, calls)
+	}
+	publication.PlanSha256 = strings.Repeat("f", 64)
+	fixture.Config.Publication = heldOutOpJson(t, fixture.Config.Publication.Path, publication)
+	calls = 0
+	if err := authenticateHeldOutPublication(t.Context(), fixture.Config, *fixture.Plan, fixture.Preparation.Settings, reader); err == nil || calls != 0 {
+		t.Fatal("wrong plan publication reached Git or execution")
+	}
+}
+
+// Exact raw/effective seeds appear only in an explicitly requested reveal after
+// the independent terminal result and closure receipt have both been pinned.
+func TestHeldOutExecutionRevealRequiresExplicitClosedCampaign(t *testing.T) {
+	fixture := newHeldOutExecFixture(t)
+	closed := fixture.Plan.PreparedAt.Add(time.Minute)
+	result := heldOutCampaignResult{Schema: 1, Kind: "sim-latency-held-out-screen", CampaignId: fixture.Plan.CampaignId, PlanSha256: fixture.Config.PublicPlan.Sha256,
+		Reasons: []string{"synthetic aborted campaign"}, Outcomes: []heldOutJobOutcome{}, ClosedAt: closed}
+	resultPin := heldOutOpJson(t, filepath.Join(fixture.Plan.Config.PrivateRoot, "campaign-result.json"), result)
+	closure := heldOutClosure{Schema: 1, Kind: "sim-latency-held-out-campaign-closure", CampaignId: fixture.Plan.CampaignId,
+		PublicPlanSha256: fixture.Config.PublicPlan.Sha256, ResultSha256: resultPin.Sha256, ClosedAt: closed, NoFurtherEvaluations: false,
+		Reason: "synthetic explicit abort; all evidence retained", Evidence: []heldOutPinnedFile{fixture.Plan.Config.Qualification}}
+	config := heldOutRevealConfig{Schema: 1, Kind: "sim-latency-held-out-reveal", Execution: fixture.Config, Result: resultPin,
+		Closure: heldOutOpJson(t, filepath.Join(fixture.Preparation.Root, "closure.json"), closure), RevealPath: filepath.Join(fixture.Preparation.Root, "public", "reveal.json")}
+	if _, err := revealHeldOutCampaign(config, *fixture.Plan, fixture.Preparation.Release, fixture.Preparation.Settings); err == nil {
+		t.Fatal("unclosed campaign seed reveal accepted")
+	}
+	closure.NoFurtherEvaluations = true
+	config.Closure = heldOutOpJson(t, config.Closure.Path, closure)
+	if _, err := revealHeldOutCampaign(config, *fixture.Plan, fixture.Preparation.Release, fixture.Preparation.Settings); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(config.RevealPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, round := range fixture.Plan.Rounds {
+		if !bytes.Contains(content, []byte(round.PrivateSeedHex)) {
+			t.Fatal("reveal replaced an original committed seed")
+		}
+	}
+	if _, err := revealHeldOutCampaign(config, *fixture.Plan, fixture.Preparation.Release, fixture.Preparation.Settings); err == nil {
+		t.Fatal("published seed reveal overwritten")
+	}
+}
+
+// All workload/public-order commitments change when any of source, accepted
+// report, margin, provider digest, order or precommitted request identity changes.
+func TestHeldOutExecutionCommitmentBindsEveryFrozenDependency(t *testing.T) {
+	fixture := newHeldOutExecFixture(t)
+	original := fixture.Plan.Rounds[0]
+	for _, mutate := range []func(*heldOutPrivatePlan, *heldOutPublicRound, *heldOutRelease){
+		func(p *heldOutPrivatePlan, r *heldOutPublicRound, s *heldOutRelease) { p.Margin += 0.001 },
+		func(p *heldOutPrivatePlan, r *heldOutPublicRound, s *heldOutRelease) {
+			p.Config.StageAReport.Sha256 = strings.Repeat("f", 64)
+		},
+		func(p *heldOutPrivatePlan, r *heldOutPublicRound, s *heldOutRelease) {
+			s.BaseSha = strings.Repeat("f", 40)
+		},
+		func(p *heldOutPrivatePlan, r *heldOutPublicRound, s *heldOutRelease) {
+			r.ProvidersSha256 = strings.Repeat("f", 64)
+		},
+		func(p *heldOutPrivatePlan, r *heldOutPublicRound, s *heldOutRelease) {
+			r.Order[0], r.Order[1] = r.Order[1], r.Order[0]
+		},
+		func(p *heldOutPrivatePlan, r *heldOutPublicRound, s *heldOutRelease) {
+			r.Jobs[0].RequestSha256 = strings.Repeat("f", 64)
+		},
+	} {
+		plan, round, release := *fixture.Plan, original.Public, fixture.Preparation.Release
+		round.Jobs = append([]heldOutPlannedJob{}, round.Jobs...)
+		mutate(&plan, &round, &release)
+		commitment, err := heldOutRoundCommitment(original.PrivateSeedHex, round, plan, release)
+		if err != nil || commitment == original.Public.SeedCommitment {
+			t.Fatal("frozen commitment dependency omitted")
+		}
+	}
+	if !reflect.DeepEqual(original.Public, fixture.Plan.Rounds[0].Public) {
+		t.Fatal("commitment verifier mutated the original plan")
+	}
+}
+
+// A bounded log retains its prefix but acknowledges every byte so a noisy
+// evaluator cannot block on a full pipe; overflow still makes the job fail.
+func TestHeldOutExecutionBoundedLogsDrainWithoutLosingOverflowVerdict(t *testing.T) {
+	root := newCalibrationFileRoot(t)
+	path := filepath.Join(root, "synthetic.log")
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := &heldOutBoundedLog{File: file, Remaining: 4}
+	if n, err := writer.Write([]byte("abcdef")); err != nil || n != 6 || !writer.Exceeded || writer.Remaining != 0 {
+		t.Fatalf("bounded log did not drain: n=%d err=%v", n, err)
+	}
+	if n, err := writer.Write([]byte("more")); err != nil || n != 4 {
+		t.Fatal("overflowing log blocked or refused its producer")
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil || string(content) != "abcd" {
+		t.Fatal("bounded retained log prefix changed")
+	}
+}
