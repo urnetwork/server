@@ -1,0 +1,4 @@
+=== RUN   TestReviewQualificationWrapperPreservesBackgroundInput
+    review_qualification_tests_draft_test.go:50: background reader lost request bytes: got "" want "{\"operation\":\"synthetic_cancel\"}"; read=<nil> command=<nil> output=
+--- FAIL: TestReviewQualificationWrapperPreservesBackgroundInput (0.01s)
+FAIL

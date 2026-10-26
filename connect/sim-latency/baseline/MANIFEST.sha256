@@ -597,6 +597,15 @@ ef76663c3d15e34909b108d8388434ad842301a6e710cdc0d3f789cc52af190a  prelaunch-snow
 6cf0f44169456d1c9a037ae13e9760fd909b3638400f6dbd57494c4de6b57750  prelaunch-snow-review-2026-10-26/INDEX.json
 e63bc1e8fc6069c4b7850bf6ef7d09268eb58d137c8f4525ebd0ea21fff35be2  prelaunch-snow-review-2026-10-26/native-plan.json
 992d5fa307fd3f20942274d9d080304fd0e8a86d052795599860db13d181d794  prelaunch-snow-review-2026-10-26/plan.json
+f54f9c123c652a5bb8e0b7aa443054db90909e5e493d8c7fb22d8fa029c6690c  prelaunch-snow-review-2026-10-26/stdin-regression/INDEX.json
+6808214ac38c5983a407dd01f18d485bd4b0a9f4af58bbcd814432e1d08c5bb9  prelaunch-snow-review-2026-10-26/stdin-regression/green-1.stderr
+d09461e45855b39cbceabcdd5231fe3a6c72eba51d001ef2b1d8d3525a48a695  prelaunch-snow-review-2026-10-26/stdin-regression/green-1.stdout
+d4870c5c538c375f7afcc868aab51e4421c2dab5933570750a48711fdd7d50b2  prelaunch-snow-review-2026-10-26/stdin-regression/green-2.stderr
+a653ff06a51aa4664dc341792dd8e3fc4b3a9f8ebdf1cf9eeb8c5ca56e9e7d11  prelaunch-snow-review-2026-10-26/stdin-regression/green-2.stdout
+3e4e4424222db174e95741810c9d56ab1f308b67e4c37c0d14a2131d75ee6469  prelaunch-snow-review-2026-10-26/stdin-regression/green-3.stderr
+39ac6a046572ab1b26aab683aa44e76b6709f18cacbe4da51fe0a60859c0a948  prelaunch-snow-review-2026-10-26/stdin-regression/green-3.stdout
+581c84af0de85ad088bbf30ae0d5ce9a6cc294d703900335828c22d9bd82bda7  prelaunch-snow-review-2026-10-26/stdin-regression/red.stderr
+33a8a5693e70fa4e01c4c375b46f2e8bd9dff2544a401a54d6d7b536c6046a82  prelaunch-snow-review-2026-10-26/stdin-regression/red.stdout
 a4ad04ab33259fd74395dbe6afc3f3a01d4509fc0872ef3e8a97c1387ff0728d  prelaunch-three-pair-analysis-2026-10-26/INDEX.json
 ac758e9747264a9028e114f75766b13bb7920e88e78e01addf9a901f28fff682  prelaunch-three-pair-analysis-2026-10-26/README.md
 abf5fb1656358e6c1f2f41bc965ae5fd5e8a4faf510c95f3d5c251a10b392c94  prelaunch-three-pair-analysis-2026-10-26/analysis-inputs-three-a-v1.json

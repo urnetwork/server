@@ -1,0 +1,83 @@
+=== RUN   TestReviewQualificationCommand
+--- PASS: TestReviewQualificationCommand (0.00s)
+=== RUN   TestReviewQualificationSnowFixturesRemainVerdictBlind
+--- PASS: TestReviewQualificationSnowFixturesRemainVerdictBlind (0.07s)
+=== RUN   TestReviewQualificationSnowInjectionOpposesExpectedVerdict
+--- PASS: TestReviewQualificationSnowInjectionOpposesExpectedVerdict (0.04s)
+=== RUN   TestReviewQualificationSnowPlanRejectsMissingMember
+--- PASS: TestReviewQualificationSnowPlanRejectsMissingMember (0.05s)
+=== RUN   TestReviewQualificationSnowRequiresThreeCompletedApprovals
+--- PASS: TestReviewQualificationSnowRequiresThreeCompletedApprovals (0.21s)
+=== RUN   TestReviewQualificationSnowRetainsEachMembersRejection
+--- PASS: TestReviewQualificationSnowRetainsEachMembersRejection (0.47s)
+=== RUN   TestReviewQualificationSnowUncertaintyCannotAuthorize
+--- PASS: TestReviewQualificationSnowUncertaintyCannotAuthorize (0.14s)
+=== RUN   TestReviewQualificationSnowTransportFailureHoldsWithoutRetry
+--- PASS: TestReviewQualificationSnowTransportFailureHoldsWithoutRetry (0.34s)
+=== RUN   TestReviewQualificationSnowRejectsChangedMemberOriginals
+--- PASS: TestReviewQualificationSnowRejectsChangedMemberOriginals (0.28s)
+=== RUN   TestReviewQualificationSnowContainerKeepsExactLeavesAndCommand
+--- PASS: TestReviewQualificationSnowContainerKeepsExactLeavesAndCommand (0.01s)
+=== RUN   TestReviewQualificationSnowFenceRejectsOtherPortOrDestination
+--- PASS: TestReviewQualificationSnowFenceRejectsOtherPortOrDestination (0.00s)
+=== RUN   TestReviewQualificationSnowPublicSettingsProofIsExact
+--- PASS: TestReviewQualificationSnowPublicSettingsProofIsExact (0.00s)
+=== RUN   TestReviewQualificationSnowStateProofRequiresMappedOwner
+--- PASS: TestReviewQualificationSnowStateProofRequiresMappedOwner (0.00s)
+=== RUN   TestReviewQualificationSnowWholeAttemptCannotReroll
+--- PASS: TestReviewQualificationSnowWholeAttemptCannotReroll (0.09s)
+=== RUN   TestReviewQualificationSnowCancellationDoesNotConsumeClaim
+--- PASS: TestReviewQualificationSnowCancellationDoesNotConsumeClaim (0.01s)
+=== RUN   TestReviewQualificationSnowOfflineRunCannotQualifyProvider
+--- PASS: TestReviewQualificationSnowOfflineRunCannotQualifyProvider (0.97s)
+=== RUN   TestReviewQualificationSnowAuthenticatesCompletePrivateJournalManifest
+--- PASS: TestReviewQualificationSnowAuthenticatesCompletePrivateJournalManifest (0.15s)
+=== RUN   TestReviewQualificationSnowAuthenticatesIndependentWholeAttemptClaim
+--- PASS: TestReviewQualificationSnowAuthenticatesIndependentWholeAttemptClaim (0.13s)
+=== RUN   TestReviewQualificationWrapperPreservesBackgroundInput
+--- PASS: TestReviewQualificationWrapperPreservesBackgroundInput (0.02s)
+=== RUN   TestReviewQualificationOfflineSuccessCannotQualifyProvider
+--- PASS: TestReviewQualificationOfflineSuccessCannotQualifyProvider (0.39s)
+=== RUN   TestReviewQualificationQuotaRefusalStopsWithoutRetry
+--- PASS: TestReviewQualificationQuotaRefusalStopsWithoutRetry (0.15s)
+=== RUN   TestReviewQualificationRejectsRetunedPartialAndReorderedPlans
+--- PASS: TestReviewQualificationRejectsRetunedPartialAndReorderedPlans (0.14s)
+=== RUN   TestReviewQualificationSeparatesVerdictFromDecisionDigest
+--- PASS: TestReviewQualificationSeparatesVerdictFromDecisionDigest (0.00s)
+=== RUN   TestReviewQualificationFixturesAreDeterministicAndVerdictBlind
+--- PASS: TestReviewQualificationFixturesAreDeterministicAndVerdictBlind (0.04s)
+=== RUN   TestReviewQualificationUsesNativeDecisionAndEvidenceValidation
+--- PASS: TestReviewQualificationUsesNativeDecisionAndEvidenceValidation (0.04s)
+=== RUN   TestReviewQualificationRejectsRelabeledProviderEvidence
+--- PASS: TestReviewQualificationRejectsRelabeledProviderEvidence (0.04s)
+=== RUN   TestReviewQualificationRejectsChangedIdentityOrEvidence
+--- PASS: TestReviewQualificationRejectsChangedIdentityOrEvidence (0.04s)
+=== RUN   TestReviewQualificationFenceRequiresProviderOnlyDefaultDeny
+--- PASS: TestReviewQualificationFenceRequiresProviderOnlyDefaultDeny (0.00s)
+=== RUN   TestReviewQualificationRefusesLinkedOrPublicPrivateInputs
+--- PASS: TestReviewQualificationRefusesLinkedOrPublicPrivateInputs (0.00s)
+=== RUN   TestReviewQualificationContainmentFailureCannotApprove
+--- PASS: TestReviewQualificationContainmentFailureCannotApprove (0.09s)
+=== RUN   TestReviewQualificationEmptyPlanNeverQualifies
+--- PASS: TestReviewQualificationEmptyPlanNeverQualifies (0.02s)
+=== RUN   TestReviewQualificationContainerRequiresActualLeastAuthority
+--- PASS: TestReviewQualificationContainerRequiresActualLeastAuthority (0.01s)
+=== RUN   TestReviewQualificationAuthenticatesCompletePrivateWrapperManifest
+--- PASS: TestReviewQualificationAuthenticatesCompletePrivateWrapperManifest (0.01s)
+=== RUN   TestReviewQualificationUidMapAcceptsActualMappedIdentity
+--- PASS: TestReviewQualificationUidMapAcceptsActualMappedIdentity (0.01s)
+=== RUN   TestReviewQualificationUidKeyRejectsRootOrGuessedOwner
+--- PASS: TestReviewQualificationUidKeyRejectsRootOrGuessedOwner (0.01s)
+=== RUN   TestReviewQualificationUidMapRejectsMissingTargetOrGaps
+--- PASS: TestReviewQualificationUidMapRejectsMissingTargetOrGaps (0.01s)
+=== RUN   TestReviewQualificationUidMapRejectsMalformedOrOverflow
+--- PASS: TestReviewQualificationUidMapRejectsMalformedOrOverflow (0.07s)
+=== RUN   TestReviewQualificationUidMapRejectsOverlappingRanges
+--- PASS: TestReviewQualificationUidMapRejectsOverlappingRanges (0.01s)
+=== RUN   TestReviewQualificationUidCaptureRequiresExactBinding
+--- PASS: TestReviewQualificationUidCaptureRequiresExactBinding (0.02s)
+=== RUN   TestReviewQualificationFundingAuthorizationIsConsumedOnce
+--- PASS: TestReviewQualificationFundingAuthorizationIsConsumedOnce (0.01s)
+=== RUN   TestReviewQualificationUncertaintyRequiresSupportedCompleteReasons
+--- PASS: TestReviewQualificationUncertaintyRequiresSupportedCompleteReasons (0.03s)
+PASS

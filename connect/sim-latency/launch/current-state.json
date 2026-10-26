@@ -41,7 +41,13 @@
     "failure": "asynchronous shell reader inherited /dev/null instead of parent stdin",
     "fix_commit": "43a691219",
     "regression_test": "TestReviewQualificationWrapperPreservesBackgroundInput",
-    "fix_qualified": false,
+    "fix_qualified": true,
+    "fix_old_behavior_deterministically_reproduced": true,
+    "fix_tests_per_run": 41,
+    "fix_consecutive_green_runs": 3,
+    "fix_test_skips": 0,
+    "fix_driver_sha256": "9e6e92a30aef4898f6e12929dc46428f54bc79d289091b5082c26beeb3d071ae",
+    "fix_evidence": "server/connect/sim-latency/baseline/prelaunch-snow-review-2026-10-26/stdin-regression/INDEX.json",
     "automatic_retry_performed": false
   },
   "bridge_precommit_authentication": {

@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "kind": "review-wrapper-background-stdin-regression",
+  "source_commit": "43a691219",
+  "driver_sha256": "9e6e92a30aef4898f6e12929dc46428f54bc79d289091b5082c26beeb3d071ae",
+  "wrapper_sha256": "c6ab0e41dec1de0b5f90828c7fe91045311bed1cc9aa5f85852552eda30bde7b",
+  "root_cause": "non-interactive Bash substitutes /dev/null for asynchronous stdin without explicit redirection",
+  "old_behavior_reproduced": true,
+  "mutation": "remove only explicit <&0 from actual extracted wrapper capture program",
+  "regression_test": "TestReviewQualificationWrapperPreservesBackgroundInput",
+  "consecutive_green_runs": 3,
+  "tests_per_run": 41,
+  "total_green_passes": 123,
+  "skips": 0,
+  "race_enabled": true,
+  "go_version": "go1.27.3",
+  "real_provider_optins_unset": true,
+  "model_calls": 0,
+  "official_performance_measurements": false,
+  "live_provider_qualified": false
+}
