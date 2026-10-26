@@ -1,0 +1,180 @@
+// Draft workload-binding core, not an operator command or permission to create
+// real held-out inputs. Copy as _test.go only in an isolated frozen workspace.
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
+	"math"
+	"os"
+	"runtime"
+
+	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/model"
+	"gopkg.in/yaml.v3"
+)
+
+// Defaults belong to this preparation operation. The eventual operator wrapper
+// must use the frozen five-seed protocol, never a caller-selected reduced count.
+type heldOutWorkloadSettings struct {
+	SeedCount        int
+	MaxProviderBytes int64
+}
+
+// Full frozen seed count and a bounded input allocation; no measurement knobs.
+func defaultHeldOutWorkloadSettings() heldOutWorkloadSettings {
+	return heldOutWorkloadSettings{SeedCount: 5, MaxProviderBytes: 128 * 1024 * 1024}
+}
+
+// Sensitive seed/provider fields are omitted even from accidental JSON output.
+// A future private-request writer must handle them explicitly, never log them.
+type heldOutGeneratedWorkload struct {
+	PrivateSeedHex  string `json:"-"`
+	EffectiveSeed   int64  `json:"-"`
+	ProviderBytes   []byte `json:"-"`
+	ProvidersSha256 string `json:"providers_sha256"`
+}
+
+// Independently reproduces the frozen native domain-separated seed mapping.
+// The domain is a versioned format fact, not a tunable or truncated seed label.
+func heldOutEffectiveSeed(seedHex string) (int64, error) {
+	seed, err := hex.DecodeString(seedHex)
+	if err != nil || len(seed) != 32 || hex.EncodeToString(seed) != seedHex {
+		return 0, errors.New("private seed must be canonical 32-byte hex")
+	}
+	defer clear(seed)
+	digest := sha256.New()
+	_, _ = digest.Write([]byte("urnetwork-sim-latency-generator-v1\x00"))
+	_, _ = digest.Write(seed)
+	value := binary.BigEndian.Uint64(digest.Sum(nil)[:8]) & math.MaxInt64
+	if value == 0 {
+		value = 1
+	}
+	return int64(value), nil
+}
+
+// Rejects stale provider bytes even when a request's private seed label changes.
+func validateHeldOutWorkload(workload heldOutGeneratedWorkload, policy model.CompetitionEvaluationPolicy, settings heldOutWorkloadSettings) error {
+	if settings.SeedCount <= 0 || settings.MaxProviderBytes <= 0 || policy.ProviderCount <= 0 || policy.ClientPoolSize <= 0 || policy.ArrivalsPerMinute <= 0 || policy.QualityWindowSize <= 0 {
+		return errors.New("invalid workload preparation settings")
+	}
+	seed, err := heldOutEffectiveSeed(workload.PrivateSeedHex)
+	if err != nil {
+		return err
+	}
+	if workload.EffectiveSeed != seed || len(workload.ProviderBytes) == 0 || int64(len(workload.ProviderBytes)) > settings.MaxProviderBytes {
+		return errors.New("effective seed or bounded provider input mismatch")
+	}
+	digest := sha256.Sum256(workload.ProviderBytes)
+	if workload.ProvidersSha256 != hex.EncodeToString(digest[:]) {
+		return errors.New("provider digest does not bind actual bytes")
+	}
+	var config Config
+	if err := yaml.Unmarshal(workload.ProviderBytes, &config); err != nil {
+		return errors.New("generated workload cannot be decoded")
+	}
+	if config.Seed != seed {
+		return errors.New("generated workload seed does not match private seed")
+	}
+	if config.Providers.Count != policy.ProviderCount || len(config.Fleet) != policy.ProviderCount || config.Clients.PoolSize != policy.ClientPoolSize || config.Clients.MeanPerMinute != float64(policy.ArrivalsPerMinute) || config.Clients.QualityWindowSize != policy.QualityWindowSize {
+		return errors.New("generated workload differs from frozen fleet/client policy")
+	}
+	expected, err := controller.GenerateSimLatencyWorkload(seed, policy.ProviderCount, policy.ClientPoolSize, float64(policy.ArrivalsPerMinute), policy.QualityWindowSize)
+	if err != nil {
+		return errors.New("native workload reconstruction failed")
+	}
+	defer clear(expected)
+	if !bytes.Equal(workload.ProviderBytes, expected) {
+		return errors.New("workload bytes differ from frozen native generator")
+	}
+	return nil
+}
+
+// Census precedes individual reconstruction so repeated effective seeds and
+// payload digests are directly testable, without finding cryptographic collisions.
+func validateHeldOutWorkloadSet(workloads []heldOutGeneratedWorkload, excludedSeeds []int64, policy model.CompetitionEvaluationPolicy, settings heldOutWorkloadSettings) error {
+	if settings.SeedCount <= 0 || len(workloads) != settings.SeedCount {
+		return errors.New("exact frozen held-out seed count required")
+	}
+	excluded := map[int64]bool{}
+	for _, seed := range excludedSeeds {
+		excluded[seed] = true
+	}
+	privateSeeds, providerDigests := map[string]bool{}, map[string]bool{}
+	effectiveSeeds := map[int64]bool{}
+	for _, workload := range workloads {
+		if privateSeeds[workload.PrivateSeedHex] {
+			return errors.New("duplicate private seed")
+		}
+		if effectiveSeeds[workload.EffectiveSeed] || excluded[workload.EffectiveSeed] {
+			return errors.New("repeated or excluded effective seed")
+		}
+		if providerDigests[workload.ProvidersSha256] {
+			return errors.New("repeated provider bytes across held-out seeds")
+		}
+		privateSeeds[workload.PrivateSeedHex], effectiveSeeds[workload.EffectiveSeed], providerDigests[workload.ProvidersSha256] = true, true, true
+	}
+	for _, workload := range workloads {
+		if err := validateHeldOutWorkload(workload, policy, settings); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Calls the actual frozen control-plane generator, not a hand-encoded YAML
+// approximation. Its own private temporary file is removed after bounded reads.
+func generateHeldOutWorkload(ctx context.Context, seedHex string, policy model.CompetitionEvaluationPolicy, settings heldOutWorkloadSettings) (result *heldOutGeneratedWorkload, resultErr error) {
+	if runtime.Version() != "go1.27.3" {
+		return nil, errors.New("workload preparation requires actual Go 1.27.3")
+	}
+	if settings.MaxProviderBytes <= 0 {
+		return nil, errors.New("positive provider byte bound required")
+	}
+	seed, err := heldOutEffectiveSeed(seedHex)
+	if err != nil {
+		return nil, err
+	}
+	artifact, err := (controller.ControlPlaneWorkloadGenerator{}).Generate(ctx, &controller.Settings{EvaluationPolicy: policy}, server.Id{}, seedHex)
+	if err != nil {
+		return nil, errors.New("native workload generation failed")
+	}
+	if !artifact.RemoveAfterUse {
+		return nil, errors.New("native generator did not return an owned temporary file")
+	}
+	defer func() {
+		if err := os.Remove(artifact.Path); err != nil {
+			result, resultErr = nil, errors.New("generated temporary workload cleanup failed")
+		}
+	}()
+	info, err := os.Lstat(artifact.Path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || info.Size() <= 0 || info.Size() > settings.MaxProviderBytes || info.Size() != artifact.Bytes {
+		return nil, errors.New("native generator file metadata mismatch")
+	}
+	file, err := os.Open(artifact.Path)
+	if err != nil {
+		return nil, errors.New("native generator file unavailable")
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(info, opened) {
+		return nil, errors.New("native generator file identity changed")
+	}
+	content, err := io.ReadAll(io.LimitReader(file, settings.MaxProviderBytes+1))
+	if err != nil || int64(len(content)) != artifact.Bytes {
+		return nil, errors.New("native generator file length changed")
+	}
+	workload := heldOutGeneratedWorkload{PrivateSeedHex: seedHex, EffectiveSeed: seed, ProviderBytes: content, ProvidersSha256: artifact.Sha256}
+	if err := validateHeldOutWorkload(workload, policy, settings); err != nil {
+		clear(content)
+		return nil, fmt.Errorf("native generated workload rejected: %w", err)
+	}
+	return &workload, nil
+}

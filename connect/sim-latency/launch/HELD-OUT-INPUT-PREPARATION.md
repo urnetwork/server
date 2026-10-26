@@ -71,3 +71,35 @@ favorable-draw retries or post-result patch/margin tuning.
 No Stage B generator or input set is qualified by this checklist. Its purpose
 is to make the next executable preparation bind real independent workloads
 and the deliberately shared same-round control correctly.
+
+## Unqualified binding-core draft
+
+The [Go binding core](held-out-workload-binding.go.txt) and its
+[13 deterministic test drafts](held-out-workload-binding-tests.go.txt) are
+**uncompiled and unexecuted**. They are preparation only, not an operator
+command or authorization to generate real hidden seeds during Stage A.
+
+The core calls the frozen `ControlPlaneWorkloadGenerator.Generate`, checks its
+owned temporary file and digest, independently derives the effective seed,
+decodes the actual YAML fleet/client/seed and requires byte identity with the
+frozen native encoder. Set validation rejects repeated private/effective seeds,
+excluded effective seeds, repeated provider digests and incomplete cardinality.
+Sensitive seed/effective-seed/YAML fields are excluded from default JSON
+serialization. Temporary native files are removed even when bounded reads refuse.
+
+At a future exclusive idle slot, copy both drafts as `_test.go` files into a
+separate frozen **c1** simulator checkout/workspace, with actual Go 1.27.3/local,
+root and management CPUs 20,22. Explicitly select `^TestHeldOutBinding`, preserve
+all failures and require three consecutive complete race passes with zero skips.
+These tests use only fixed synthetic seeds and a small native encoder profile;
+they are not held-out measurements. Never run them alongside timed evaluation.
+
+This core is not the complete preparation tool. The operator wrapper still must
+authenticate and pin the accepted real Stage A analysis/input manifests, use
+the frozen five-seed count and policy, acquire fresh cryptographic entropy,
+generate all round/job identities and randomized reference orders, bind exact
+reference patches/builds, write exclusive private files and a non-leaking public
+commitment plan, and enforce same-round baseline late binding. Its own positive,
+ordering/refusal, publication and baseline-substitution tests remain required.
+No real seeds, provider inputs, finalized requests or accepted margins have
+been created by these drafts.

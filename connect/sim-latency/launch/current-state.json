@@ -701,7 +701,7 @@
     "snapshot_pilot_final_manifest_check_sha256": "219edbba4341afb46feefca1b7026d3eb6507776f916fddb357099e06caee930",
     "snapshot_pilot_final_freeze_check_sha256": "c99c980cd298f58784a1c78a8859b547873c798d007debb76d368cef8c0525ca",
     "held_out_input_checklist": "server/connect/sim-latency/launch/HELD-OUT-INPUT-PREPARATION.md",
-    "held_out_input_status": "Future Stage B generator must bind native derived workload seed/provider bytes, not only request seed labels. Exact same-round baseline digest is deliberately late-bound from first R9 control. No generator or held-out inputs qualified yet; Stage A and reference screens remain required.",
+    "held_out_input_status": "Uncompiled workload-binding core/test drafts prepared: source617a7a51f2c24596e9ed8f7ceffecfec79d133cdf40d502ea2d9034ca1f6eb00 and13-test sourced171234379bef0e29ab5b25411835bfed3e91d87a86a09e700cd9df4c2b48256. They bind native-generated actualseed/providerbytes and rejectstale/duplicate inputs. No tests/builds duringlive03; qualify onlyfutureidle. Fulloperatorwrapper/acceptedanalysis authentication/cryptographicseeds/publicplan/referenceorders/baselinelatebinding stillpending. No realheldoutinputs or acceptedmargin generated.",
     "assembly_helper": "server/connect/sim-latency/launch/calibration-input-assembly.go.txt",
     "assembly_helper_sha256": "618a6e00a2545e404b275547c656cd888d892f444e5cac393ddc9eb32030f250",
     "assembly_status": "Draft only; synthetic qualification required before use, final assembly only after all five frozen positions complete. Native analyzer remains unchanged.",
