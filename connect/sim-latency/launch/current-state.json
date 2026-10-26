@@ -1,10 +1,10 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-26T02:33:10Z",
+  "observed_at": "2026-10-26T03:30:46Z",
   "objective": "Ready to launch at 2026-10-28T00:00:00Z",
   "production_activated": false,
-  "status": "formal_stage_a_two_of_five_completed_phase_publication_pending",
+  "status": "two_of_five_completed_preparation_tool_units_passed_awaiting_publication_then_original_cohort03",
   "authority_warning": "This is a preparation snapshot, not runtime/score authority. Verify the live process/session and current artifacts before acting; never restart because an observation times out.",
   "replacement_campaign_preparation": {
     "status": "two_fixed_cohorts_completed_passed_preserved",
@@ -27,7 +27,8 @@
     "first_cohort_also_functional_qualification": true,
     "policy_identity_update_required": "Bind both simulator/scorer digests to new pristine binary6c8587be; all other policy fields stay identical. Canonical policy hash must therefore be regenerated, not copied from old image.",
     "first_cohort_phase_commit": "3d6c35d29",
-    "next_action": "Second fixed cohort terminal0/10300s; all originals archived and independently verified. Publish this phase before idle-slot assembly/DNS tool qualification, then authorize only predeclared position3. Positions3-5 remain unstarted. Pilot measurements never enter Stage A. No automaticretry/substitution or activation during main maintenance."
+    "second_cohort_phase_commit": "a16396abf",
+    "next_action": "Second cohort phase a16396abf pushed. Assembly guards passed14race tests3times; DNS7race tests passedinitial+3final with2behavioral oldbodyFAILproofs; referencebuildidentities readbackverified withoutappexecution. Publish tool evidence, then start only original predeclared position3. No extra intermission workloads. No actualassembly/hiddeninputs/nativeanalysis/DNSruntimeproof/productionactivation."
   },
   "latest_external_read_only_probe": {
     "observed_at": "2026-10-26T02:33:10Z",
@@ -66,7 +67,21 @@
   },
   "active_attempt": null,
   "idle_preparation_tools": {
-    "status": "drafts_uncompiled_unexecuted_awaiting_published_phase_and_exclusive_idle_authorization",
+    "status": "assembly_and_dns_unit_guards_qualified_no_real_assembly_or_dns_runtime_proof",
+    "qualification_record": "server/connect/sim-latency/launch/INPUT-TOOL-QUALIFICATION-2026-10-26.md",
+    "payload_files_verified": 36,
+    "payload_verification_log_sha256": "2430c00e3c80b47739282a184713c928cd411b5a1ddf25e7c4923a1bc1189fbc",
+    "baseline_manifest_files_verified": 3157,
+    "baseline_manifest_verification_log_sha256": "b6ac46ffb5cdbab1f563314d89f9f84cf513c52ce7a7a4a1f8ef75f48d770478",
+    "preserved_dataset": "server/connect/sim-latency/baseline/prelaunch-input-tool-qualification-2026-10-26",
+    "assembly_tests_per_pass": 14,
+    "assembly_consecutive_race_passes": 3,
+    "dns_tests_per_pass": 7,
+    "dns_initial_race_passes": 1,
+    "dns_final_consecutive_race_passes": 3,
+    "dns_expected_behavioral_failure_proofs": 2,
+    "dns_probe_binary_sha256": "43a9771b2bbdfd30d8b4ded0d6182a1d1e32a211ac0c95ed8d18ac9830c3bab0",
+    "dns_runtime_proof": false,
     "assembly_helper": "server/connect/sim-latency/launch/calibration-input-assembly.go.txt",
     "assembly_helper_sha256": "618a6e00a2545e404b275547c656cd888d892f444e5cac393ddc9eb32030f250",
     "assembly_qualification_draft": "server/connect/sim-latency/launch/calibration-input-assembly-qualification.go.txt",

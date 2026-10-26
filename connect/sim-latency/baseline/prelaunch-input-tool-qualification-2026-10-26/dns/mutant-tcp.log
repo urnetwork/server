@@ -1,0 +1,6 @@
+=== RUN   TestServeTcpRecordsQueryWhenResponseWriteFails
+    main_test.go:134: failed response write concealed a received nonce query
+--- FAIL: TestServeTcpRecordsQueryWhenResponseWriteFails (0.00s)
+FAIL
+FAIL	github.com/urnetwork/server/dns_probe_qualification	0.014s
+FAIL

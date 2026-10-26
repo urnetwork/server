@@ -1,0 +1,16 @@
+=== RUN   TestNonceAnswerAcceptsCompressedResponse
+--- PASS: TestNonceAnswerAcceptsCompressedResponse (0.00s)
+=== RUN   TestNonceAnswerAcceptsUncompressedEquivalent
+--- PASS: TestNonceAnswerAcceptsUncompressedEquivalent (0.00s)
+=== RUN   TestNonceAnswerAcceptsChangedTtl
+--- PASS: TestNonceAnswerAcceptsChangedTtl (0.00s)
+=== RUN   TestNonceAnswerAcceptsEquivalentQuestionCase
+--- PASS: TestNonceAnswerAcceptsEquivalentQuestionCase (0.00s)
+=== RUN   TestNonceAnswerRejectsUnrelatedOrMalformedResponse
+--- PASS: TestNonceAnswerRejectsUnrelatedOrMalformedResponse (0.00s)
+=== RUN   TestObservedAnswerCountsReceivedNonceForBothTransports
+--- PASS: TestObservedAnswerCountsReceivedNonceForBothTransports (0.00s)
+=== RUN   TestServeTcpRecordsQueryWhenResponseWriteFails
+--- PASS: TestServeTcpRecordsQueryWhenResponseWriteFails (0.00s)
+PASS
+ok  	github.com/urnetwork/server/dns_probe_qualification	1.015s

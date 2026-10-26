@@ -1,8 +1,13 @@
 # DNS proof preparation — not executed qualification
 
-The [probe draft](dns-boundary-probe.go.txt) and
-[deterministic tests](dns-boundary-probe-tests.go.txt) are **uncompiled and
-unexecuted**. They do not change the evaluator, installed scripts, host resolver,
+The [probe source](dns-boundary-probe.go.txt) and
+[deterministic tests](dns-boundary-probe-tests.go.txt) passed unit qualification:
+seven race tests initially, two intended old-body failures, exact restoration
+and three consecutive final seven-test passes, zero skips. The probe built
+with Go 1.27.3 and CGO disabled. See
+[the qualification record](INPUT-TOOL-QUALIFICATION-2026-10-26.md).
+**Runtime DNS containment is not qualified by these tests.** They do not change
+the evaluator, installed scripts, host resolver,
 daemon configuration or active calibration. The original private uncompiled
 draft remains preserved separately; its SHA-256 was
 `fecaaa438dd06f0681bc6eb293182f69d96b7a037c74ce08f45a5e17f819b848`.
@@ -26,7 +31,7 @@ nor a zero counter from an unready/dead server proves containment.
 
 ## Idle-slot qualification
 
-After the current scoring attempt is terminal and preserved, use an isolated
+For requalification after any source change, use an isolated
 checkout/workspace of the frozen source, actual Go 1.27.3/local, management CPUs
 20,22 and the canonical exclusive scoring slot. Do not run these tests, builds,
 listeners or Docker probes concurrently with measured evaluation.
@@ -36,7 +41,7 @@ that isolated module, as `main.go` and `main_test.go`. Do not copy the probe's
 `main` into the simulator package. Use the existing offline module cache;
 do not update go.mod/go.sum or fetch another dependency graph.
 
-Run all seven top-level tests with race instrumentation three consecutive times.
+Run all seven top-level tests with race instrumentation as a positive control.
 They use synthetic packets and an in-process `net.Pipe`, not host DNS. Preserve
 each command, exit status, count, duration and full log digest. Demonstrate two
 expected failures in separate retained runs:
@@ -46,8 +51,9 @@ expected failures in separate retained runs:
 2. Restoring TCP observation only after a successful response write must fail
    `TestServeTcpRecordsQueryWhenResponseWriteFails`.
 
-Restore and verify the exact revised source after each proof; rerun the normal
-tests before building a CGO-disabled Linux probe. An opt-in skip, compilation,
+Restore and verify the exact revised source after each proof; run three
+consecutive complete normal passes before building a CGO-disabled Linux probe.
+An opt-in skip, compilation,
 static review or expected-failure run is not a passing runtime proof.
 
 ## Runtime scope and remaining default-resolver proof

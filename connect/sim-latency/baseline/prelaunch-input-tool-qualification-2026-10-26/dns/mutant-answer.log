@@ -1,0 +1,6 @@
+=== RUN   TestNonceAnswerAcceptsUncompressedEquivalent
+    main_test.go:42: re-encoded owned answer was misclassified as denied
+--- FAIL: TestNonceAnswerAcceptsUncompressedEquivalent (0.00s)
+FAIL
+FAIL	github.com/urnetwork/server/dns_probe_qualification	0.013s
+FAIL

@@ -1,0 +1,11 @@
+Unit-only DNS probe qualification; session 42950, exit 0.
+Actual Go1.27.3; frozen c1 module/workspace; x/net v0.60.0; root management CPUs20,22/GOMAXPROCS2/-p2/GOPROXYoff. Canonical slot held through tests, mutations, restoration and build.
+Commands: go test -race -count=1 -timeout=2m -v . -run PATTERN (outer300s TERM/15sKILL).
+initial: ^Test, exit0,7passes,0skips,1s.
+mutant-answer: ^TestNonceAnswerAcceptsUncompressedEquivalent$, exit1, intended re-encoded-answer assertion,1s; mutated source SHA2ba426960a6186b2300a66c206fbd12c1f669e86d76d8fc3e6b78734d0e5ee48.
+mutant-tcp: ^TestServeTcpRecordsQueryWhenResponseWriteFails$, exit1, intended concealed-query assertion,0s; mutated source SHA96883145baefa1f62b94c35b0b3dd5560d23456a39d37c0b97dae54e9ad3aec9.
+Exact original main.go restored after each mutant:1dbfd7099643b2f0f71f2273248d277296f22001246779e674129401afabe193; tests1d110e7c6c1c983ac93c9d3b4d751189254b87abee925160586f55c1258c8ce3.
+restored-1/-2/-3: ^Test, exit0 each,7passes/0skips each,1/2/1s. Initial plus restored total28passing test executions;2expected behavioral failures, no compile failure.
+Build: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o dns-probe . ; exit0.
+BinarySHA43a9771b2bbdfd30d8b4ded0d6182a1d1e32a211ac0c95ed8d18ac9830c3bab0. Buildinfo recorded separately. vcs.modified=true is expected because these qualification-only package files are untracked in the private c1 checkout; evaluated/operator source and installed binaries were not modified.
+No runtime DNS, listener, container probe, actual seed, scorer, analyzer or cohort03 execution. Tests use synthetic packets and net.Pipe only.
