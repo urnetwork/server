@@ -597,6 +597,8 @@ ef76663c3d15e34909b108d8388434ad842301a6e710cdc0d3f789cc52af190a  prelaunch-snow
 6cf0f44169456d1c9a037ae13e9760fd909b3638400f6dbd57494c4de6b57750  prelaunch-snow-review-2026-10-26/INDEX.json
 e63bc1e8fc6069c4b7850bf6ef7d09268eb58d137c8f4525ebd0ea21fff35be2  prelaunch-snow-review-2026-10-26/native-plan.json
 992d5fa307fd3f20942274d9d080304fd0e8a86d052795599860db13d181d794  prelaunch-snow-review-2026-10-26/plan.json
+28e7adf572a0f8a284e17c816a8de6d29d78ff61fb557a9333adaa27a931b8dc  prelaunch-snow-review-2026-10-26/stdin-fixed-precommit/INDEX.json
+e471c756984dfe9ec9ec839646459b450b3705d264c4dc8d0f89de532229eddf  prelaunch-snow-review-2026-10-26/stdin-fixed-precommit/native-plan.json
 f54f9c123c652a5bb8e0b7aa443054db90909e5e493d8c7fb22d8fa029c6690c  prelaunch-snow-review-2026-10-26/stdin-regression/INDEX.json
 6808214ac38c5983a407dd01f18d485bd4b0a9f4af58bbcd814432e1d08c5bb9  prelaunch-snow-review-2026-10-26/stdin-regression/green-1.stderr
 d09461e45855b39cbceabcdd5231fe3a6c72eba51d001ef2b1d8d3525a48a695  prelaunch-snow-review-2026-10-26/stdin-regression/green-1.stdout
