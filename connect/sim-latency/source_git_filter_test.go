@@ -17,7 +17,16 @@ import (
 // Global drivers are ignored; local drivers are an explicit qualification
 // refusal. Neither case executes the candidate-selected attribute driver.
 func TestSourceLocalGitCannotExecuteConfiguredAttributeFilters(t *testing.T) {
+	globalConfig, hadGlobalConfig := os.LookupEnv("GIT_CONFIG_GLOBAL")
 	for _, localDriver := range []bool{false, true} {
+		// t.Setenv restores only at whole-test cleanup, not loop boundaries.
+		// Fixture commits need the original configured identity before each case.
+		t.Setenv("GIT_CONFIG_GLOBAL", globalConfig)
+		if !hadGlobalConfig {
+			if err := os.Unsetenv("GIT_CONFIG_GLOBAL"); err != nil {
+				t.Fatal(err)
+			}
+		}
 		root := t.TempDir()
 		sourceTestRepository(t, root, "control")
 		base := sourceTestRepository(t, root, "connect")

@@ -17,10 +17,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Fixture identity is synthetic and independent of ambient Git configuration.
+// Fixture commands retain the explicitly configured global Git identity.
 func sourceTestGit(t *testing.T, repositoryRoot string, args ...string) string {
 	t.Helper()
-	commandArgs := append([]string{"-C", repositoryRoot, "-c", "user.name=Synthetic Source", "-c", "user.email=source@account.example"}, args...)
+	commandArgs := append([]string{"-C", repositoryRoot}, args...)
 	command := exec.Command("git", commandArgs...)
 	output, err := command.CombinedOutput()
 	if err != nil {
