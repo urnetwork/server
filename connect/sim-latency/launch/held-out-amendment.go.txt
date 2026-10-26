@@ -39,25 +39,26 @@ type heldOutSourceLock struct {
 
 // Published after qualification, not a knob for relabeling original A data.
 type heldOutAmendedRelease struct {
-	Schema                   int               `json:"schema"`
-	Kind                     string            `json:"kind"`
-	Protocol                 string            `json:"protocol"`
-	ApprovalSha256           string            `json:"protocol_approval_sha256"`
-	OriginalPlanSha256       string            `json:"original_plan_sha256"`
-	OriginalBaseSha          string            `json:"original_base_sha"`
-	OriginalImageId          string            `json:"original_image_id"`
-	OriginalSourceLockSha256 string            `json:"original_source_lock_sha256"`
-	BaseSha                  string            `json:"base_sha"`
-	ImageId                  string            `json:"evaluator_image_id"`
-	BinarySha256             string            `json:"pristine_binary_sha256"`
-	SourceLockSha256         string            `json:"source_lock_sha256"`
-	PolicySha256             string            `json:"evaluation_policy_sha256"`
-	AnalyzerSource           string            `json:"analyzer_source"`
-	Repository               string            `json:"source_repository"`
-	OriginalSourceLock       heldOutPinnedFile `json:"original_source_lock"`
-	SourceLock               heldOutPinnedFile `json:"source_lock"`
-	SourceDelta              heldOutPinnedFile `json:"minimal_source_delta"`
-	Qualification            heldOutPinnedFile `json:"qualification"`
+	Schema                   int                   `json:"schema"`
+	Kind                     string                `json:"kind"`
+	Protocol                 string                `json:"protocol"`
+	ApprovalSha256           string                `json:"protocol_approval_sha256"`
+	OriginalPlanSha256       string                `json:"original_plan_sha256"`
+	OriginalBaseSha          string                `json:"original_base_sha"`
+	OriginalImageId          string                `json:"original_image_id"`
+	OriginalSourceLockSha256 string                `json:"original_source_lock_sha256"`
+	BaseSha                  string                `json:"base_sha"`
+	ImageId                  string                `json:"evaluator_image_id"`
+	BinarySha256             string                `json:"pristine_binary_sha256"`
+	SourceLockSha256         string                `json:"source_lock_sha256"`
+	PolicySha256             string                `json:"evaluation_policy_sha256"`
+	AnalyzerSource           string                `json:"analyzer_source"`
+	Repository               string                `json:"source_repository"`
+	OriginalSourceLock       heldOutPinnedFile     `json:"original_source_lock"`
+	SourceLock               heldOutPinnedFile     `json:"source_lock"`
+	SourceDelta              heldOutPinnedFile     `json:"minimal_source_delta"`
+	Qualification            heldOutPinnedFile     `json:"qualification"`
+	Runtime                  heldOutRuntimeRelease `json:"runtime_release"`
 }
 
 // Exact source, image, test and build evidence are separately pinned. This
@@ -307,6 +308,12 @@ func authenticateHeldOutAmendedRelease(ctx context.Context, pin heldOutPinnedFil
 	}
 	release := old
 	release.BaseSha, release.ImageId, release.BinarySha256, release.SourceLockSha256, release.StageAPolicySha256, release.AnalyzerSource = descriptor.BaseSha, descriptor.ImageId, descriptor.BinarySha256, descriptor.SourceLockSha256, descriptor.PolicySha256, descriptor.AnalyzerSource
+	if err := selectHeldOutAmendedRuntime(&release, descriptor.Runtime, frozenHeldOutAmendedRuntime()); err != nil {
+		return old, err
+	}
+	if err := authenticateHeldOutRuntimeFiles(release, settings); err != nil {
+		return old, err
+	}
 	return release, nil
 }
 
@@ -406,6 +413,9 @@ func heldOutCommandContext(ctx context.Context, operation string, content []byte
 		}
 		if plan.SourceLock != descriptor.SourceLock {
 			return old, settings, errors.New("bridge source lock differs from qualified C2 instrument")
+		}
+		if err := validateHeldOutBridgeRuntime(*plan, release); err != nil {
+			return old, settings, err
 		}
 		return release, settings, nil
 	case "freeze-margin":

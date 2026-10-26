@@ -427,15 +427,65 @@ main transplant; the prescribed test-file bytes are pinned too. All other nine
 repository commits remain identical. The new raw source lock must explicitly
 contain `candidate_path_base:"mono_root_v1"`; C1's omission is preserved.
 Existing installed scripts, management bounds and scoring lock cannot be
-redirected through this descriptor.
+redirected through this descriptor. The named amendment does **not** inherit
+the historical C1 `263ee68a` bundle. Its mandatory `runtime_release` is exactly:
+
+```json
+{
+  "control_revision": "7c4dc74e5d53d7b42e22e059565d778b35bee83e",
+  "script_directory": "/usr/local/libexec/urnetwork/competition-c2-a9e8e1a7-control-7c4dc74e5-go1273-v1/container",
+  "release_manifest": {
+    "path": "/usr/local/libexec/urnetwork/competition-c2-a9e8e1a7-control-7c4dc74e5-go1273-v1/release.json",
+    "sha256": "68f980abea7fc2b7a8405c988525f670f2172da3cc7b285af4e3b198808afec8"
+  },
+  "builder_sha256": "22f60ee6f0ec26f229fb0c1cfe8df3a0c900a4326cc41a8226e7db9a82e7f63c",
+  "patch_validator_sha256": "3d161d76bace48bff6536164a84f330b1618c82f319775b8551c19872b937e54",
+  "bridge_runner": {
+    "path": "/usr/local/libexec/urnetwork/competition-calibration-c2-a9e8e1a7-isolated-v1/cohort-runner.sh",
+    "sha256": "ea40be40e0382e464836f7d6befde349f96f8d4b743324df3be53eac1e970883"
+  },
+  "bridge_runner_manifest": {
+    "path": "/usr/local/libexec/urnetwork/competition-calibration-c2-a9e8e1a7-isolated-v1/release.json",
+    "sha256": "a5e00e537342e63909820ee99039ec010c47c0c4803c04c126dfd84a0cb1b8a9"
+  }
+}
+```
+
+The operator checks all protected root-owned ancestry, exact immutable leaf
+modes, both complete installation manifests, all sixteen host-side runtime
+components, the validator's LF-terminated sidecar, and the recomputed existing
+builder identity. The actual new evaluator hash is
+`a6908739dc854bc9d81c8136361d8012eb0c479dedf4460a04b9987607bff6f5`.
+Installed receipts remain `qualified:false` / `activated:false`; they are
+installation provenance, not passed runtime gates. Reference and executed
+native build records must match this exact composite builder. Original A
+analysis continues using its original C1 image and scripts unchanged.
 
 The public `heldOutBridgePlan` binds original A, margin freeze, new release,
-source lock, exact complete fresh no-op request/build and margin. Supply a
+source lock, exact complete fresh no-op request/build and margin. It also has
+mandatory `bridge_runner` and `bridge_runner_manifest` file pins identical to
+the descriptor above. Supply a
 separate pushed-publication receipt using the existing publication schema.
 The existing qualified one-attempt evaluator runner, not this verifier, owns
 the fresh R9/R9 execution and its original 10,800-second deadline. Freeze the
 plan/publication before invocation; no old job/round/control may be reused.
 The bridge uses the unchanged public workload/profile, not a hidden B seed.
+After all independent release/host gates and explicit invocation authority,
+the existing runner's exact CLI is:
+
+```bash
+taskset -c 20,22 /usr/local/libexec/urnetwork/competition-calibration-c2-a9e8e1a7-isolated-v1/cohort-runner.sh \
+  /absolute/new/precommitted/bridge-cohort EXPECTED_REQUEST_SHA256
+```
+
+The first argument must already contain `artifacts/worker-request.json`; the
+second is its independently published SHA-256, not a digest inferred from
+results. Do not wrap this command in another independent scoring-lock holder:
+the runner owns its canonical slot. Do not run it from this preparation doc.
+The bridge verifier requires the actual manager's unique C2 instrument,
+builder, validator and request digest lines, and binds both installation
+manifests and runner into the compatibility receipt. These bindings supplement
+the retained manager execution observations, not replace them.
 
 `verify-bridge` consumes schema 1, kind
 `sim-latency-prospective-c2-bridge-verification`, exact `bridge_plan`,
@@ -467,15 +517,32 @@ except simulator/scorer binary identities and the already selected margin.
 The exact operator qualification receipt also binds the named protocol and
 approval/original-plan pins. No old executable qualification covers new bytes.
 
-Copy all **nineteen** current `held-out-*.go.txt` files as `*_test.go` into an
+Copy all **twenty-one** current `held-out-*.go.txt` files as `*_test.go` into an
 isolated qualified analyzer checkout with the committed named-protocol native
 files. Preserve a new source/binary/workspace census; do not overwrite the old
 fourteen-file/62-test qualification snapshot. Run the same newly built race
 binary three consecutive times with `^TestHeldOut`, all real operation/assembly
-variables unset: expected **87 passes**, 85 substantive guards plus two inert
+variables unset: expected **102 passes**, 100 substantive guards plus two inert
 commands, zero skips. The native `^TestCalibration` selection separately has
 64 tests, including the nine named-protocol guards; validate it three times too.
 Do not compile or test while a timed evaluation is active.
+
+The previous nineteen-file/87-test three-pass qualification is retained for
+its exact bytes. For the narrowly revised runtime integration, the minimum
+new race-binary selection is **39 tests**, three consecutive passes, with all
+real-operation variables unset:
+
+```text
+^TestHeldOut(Runtime.*|Amendment.*|Bridge.*|OperatorPreparesCompleteNativeFiveRoundPlan|ExecutionCompletesAllJobsWithOneControlPerRound|ExecutionOriginalDeadlineCannotRestart|ExecutionDoesNotRetryInfrastructureFailure)$
+```
+
+This includes fifteen new runtime guards, all twenty amended/bridge guards,
+and four composed legacy preparation/execution/deadline/no-retry guards.
+Preserve the new source census and exact compiled binary pin; the old 87-test
+binary cannot execute the revised semantics. No new seed, build, Docker or
+provider action is authorized by this unit qualification. B execution invokes
+the authenticated new evaluator directly under the campaign-owned canonical
+slot and original per-job deadline, not the bridge runner with a nested flock.
 
 Successful preparation draws exactly three fresh cryptographic seeds, calls
 the actual native generator for each, checks all exclusion/uniqueness/canonical

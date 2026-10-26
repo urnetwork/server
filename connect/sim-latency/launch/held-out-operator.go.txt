@@ -27,6 +27,7 @@ type heldOutRelease struct {
 	BaseSha, SourceLockSha256, ImageId, BinarySha256, StageAPolicySha256 string
 	AnalyzerSource, ScoringLock, ScriptDirectory                         string
 	ScriptDigests                                                        map[string]string
+	Runtime                                                              *heldOutRuntimeRelease
 }
 
 // A new release requires a new explicit protocol, not a changed input file.
@@ -570,6 +571,9 @@ func authenticateHeldOutReferences(content []byte, release heldOutRelease, setti
 		if native.Schema != 1 || native.ImageId != reference.ImageId || native.BaseImageId != release.ImageId || native.BaseSha != release.BaseSha || native.CandidateSha != reference.CandidateSha || native.PatchSha256 != reference.Patch.Sha256 || !validSha256(native.PolicySha256) || !validSha256(native.BuilderSha256) || !validSha256(native.ImageKey) || native.Image == "" {
 			return nil, nil, errors.New("native reference build does not bind committed patch/source/policy")
 		}
+		if err := validateHeldOutRuntimeBuilderPin(native, release); err != nil {
+			return nil, nil, err
+		}
 		for _, qualification := range []struct {
 			kind string
 			pin  heldOutPinnedFile
@@ -800,18 +804,35 @@ func authenticateHeldOutPreparation(config heldOutPreparationConfig, release hel
 // The fourth helper is pinned by the reviewed configuration. The three known
 // release hashes and installed directory cannot be redirected by that config.
 func authenticateHeldOutScripts(scripts []heldOutPinnedFile, release heldOutRelease, settings heldOutOperatorSettings) error {
-	seen := map[string]bool{}
-	for _, pin := range scripts {
-		name := filepath.Base(pin.Path)
-		if seen[name] || filepath.Dir(pin.Path) != release.ScriptDirectory || (name != "hash-local-mount.sh" && release.ScriptDigests[name] == "") || (name != "hash-local-mount.sh" && release.ScriptDigests[name] != pin.Sha256) {
-			return errors.New("installed held-out script identity mismatch")
+	if err := validateHeldOutScriptProjection(scripts, release); err != nil {
+		return err
+	}
+	if release.Runtime != nil {
+		if err := authenticateHeldOutRuntimeFiles(release, settings); err != nil {
+			return err
 		}
+	}
+	for _, pin := range scripts {
 		if _, err := readHeldOutPinned(pin, settings.MaximumBytes, false); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// The complete C2 component map cannot broaden the legacy four-file handoff
+// projection or permit another helper to replace a required script.
+func validateHeldOutScriptProjection(scripts []heldOutPinnedFile, release heldOutRelease) error {
+	required := map[string]bool{"evaluator.sh": true, "network-boundary.sh": true, "compose.yml": true, "hash-local-mount.sh": true}
+	seen := map[string]bool{}
+	for _, pin := range scripts {
+		name := filepath.Base(pin.Path)
+		if !required[name] || seen[name] || filepath.Dir(pin.Path) != release.ScriptDirectory || (name != "hash-local-mount.sh" && release.ScriptDigests[name] == "") || (name != "hash-local-mount.sh" && release.ScriptDigests[name] != pin.Sha256) || (release.Runtime != nil && name == "hash-local-mount.sh" && release.ScriptDigests[name] != pin.Sha256) {
+			return errors.New("installed held-out script identity mismatch")
+		}
 		seen[name] = true
 	}
-	if len(seen) != 4 {
+	if len(seen) != len(required) {
 		return errors.New("complete installed script bundle required")
 	}
 	return nil

@@ -529,6 +529,9 @@ func authenticateHeldOutJob(ctx context.Context, plan heldOutPrivatePlan, round 
 		if !reflect.DeepEqual(actualBuild, committedBuild) {
 			return outcome, nil, errors.New("executed held-out build differs from its full committed build identity")
 		}
+		if err := validateHeldOutRuntimeBuilderPin(actualBuild, release); err != nil {
+			return outcome, nil, err
+		}
 		policyBytes, _, err := readHeldOutProduced(artifacts, "evidence/policy.json", settings.MaximumBytes)
 		if err != nil {
 			return outcome, nil, err
@@ -1079,6 +1082,11 @@ func checkHeldOutHost(ctx context.Context, plan heldOutPrivatePlan, release held
 // deadline. Cancellation first signals the whole process group; kill grace is
 // cleanup time only and never turns an over-deadline job into a successful one.
 func invokeHeldOutEvaluator(ctx context.Context, root string, start heldOutJobStart, release heldOutRelease, settings heldOutOperatorSettings) error {
+	if release.Runtime != nil {
+		if err := authenticateHeldOutRuntimeFiles(release, settings); err != nil {
+			return err
+		}
+	}
 	logs := []*heldOutBoundedLog{}
 	for _, name := range []string{"evaluator.stdout", "evaluator.stderr"} {
 		file, err := os.OpenFile(filepath.Join(root, name), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
@@ -1099,7 +1107,11 @@ func invokeHeldOutEvaluator(ctx context.Context, root string, start heldOutJobSt
 	if _, err := readHeldOutPinned(heldOutPinnedFile{Path: requestPath, Sha256: start.RequestSha256}, settings.MaximumBytes, true); err != nil {
 		return err
 	}
-	command := exec.Command(filepath.Join(release.ScriptDirectory, "evaluator.sh"), "--request", requestPath, "--result", filepath.Join(root, "artifacts", "worker-result.json"))
+	program, arguments, err := heldOutEvaluatorInvocation(release, requestPath, filepath.Join(root, "artifacts", "worker-result.json"))
+	if err != nil {
+		return err
+	}
+	command := exec.Command(program, arguments...)
 	command.Env = []string{"PATH=/home/by/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.27.3.linux-amd64/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C", "GOTOOLCHAIN=local", "GOMAXPROCS=2", "GOFLAGS=-p=2"}
 	command.Stdout, command.Stderr, command.SysProcAttr = logs[0], logs[1], &syscall.SysProcAttr{Setpgid: true}
 	if err := ctx.Err(); err != nil {

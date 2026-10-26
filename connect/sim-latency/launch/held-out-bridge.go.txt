@@ -46,17 +46,19 @@ type heldOutMarginFreeze struct {
 // All request, source and no-op identities are published before invocation.
 // Results and their digests occur only in the later verification configuration.
 type heldOutBridgePlan struct {
-	Schema       int                       `json:"schema"`
-	Kind         string                    `json:"kind"`
-	Protocol     string                    `json:"protocol"`
-	PreparedAt   time.Time                 `json:"prepared_at"`
-	OriginalA    heldOutMarginFreezeConfig `json:"original_a"`
-	MarginFreeze heldOutPinnedFile         `json:"margin_freeze"`
-	Release      heldOutPinnedFile         `json:"new_release"`
-	SourceLock   heldOutPinnedFile         `json:"source_lock"`
-	Request      heldOutPinnedFile         `json:"request"`
-	Noop         heldOutReference          `json:"no_op"`
-	Margin       float64                   `json:"accepted_margin"`
+	Schema         int                       `json:"schema"`
+	Kind           string                    `json:"kind"`
+	Protocol       string                    `json:"protocol"`
+	PreparedAt     time.Time                 `json:"prepared_at"`
+	OriginalA      heldOutMarginFreezeConfig `json:"original_a"`
+	MarginFreeze   heldOutPinnedFile         `json:"margin_freeze"`
+	Release        heldOutPinnedFile         `json:"new_release"`
+	Runner         heldOutPinnedFile         `json:"bridge_runner"`
+	RunnerManifest heldOutPinnedFile         `json:"bridge_runner_manifest"`
+	SourceLock     heldOutPinnedFile         `json:"source_lock"`
+	Request        heldOutPinnedFile         `json:"request"`
+	Noop           heldOutReference          `json:"no_op"`
+	Margin         float64                   `json:"accepted_margin"`
 }
 
 // A different verification target cannot revise the published bridge request.
@@ -85,6 +87,11 @@ type heldOutBridgeCompatibility struct {
 	StageAInputsSha256      string                         `json:"stage_a_inputs_sha256"`
 	MarginFreezeSha256      string                         `json:"margin_freeze_sha256"`
 	ReleaseSha256           string                         `json:"new_release_sha256"`
+	RuntimeManifestSha256   string                         `json:"runtime_release_manifest_sha256"`
+	BuilderSha256           string                         `json:"builder_sha256"`
+	ValidatorSha256         string                         `json:"patch_validator_sha256"`
+	RunnerSha256            string                         `json:"bridge_runner_sha256"`
+	RunnerManifestSha256    string                         `json:"bridge_runner_manifest_sha256"`
 	BridgePlanSha256        string                         `json:"bridge_plan_sha256"`
 	BridgePublicationSha256 string                         `json:"bridge_publication_sha256"`
 	BridgeInputsSha256      string                         `json:"bridge_inputs_sha256"`
@@ -390,6 +397,12 @@ func verifyHeldOutBridge(ctx context.Context, config heldOutBridgeVerificationCo
 	if err != nil {
 		return nil, err
 	}
+	if err := validateHeldOutBridgeRuntime(*plan, release); err != nil {
+		return nil, err
+	}
+	if err := authenticateHeldOutRuntimeFiles(release, settings); err != nil {
+		return nil, err
+	}
 	if err := authenticateHeldOutPublication(ctx, heldOutExecutionConfig{PublicPlan: config.Plan, Publication: config.Publication}, heldOutPrivatePlan{PreparedAt: plan.PreparedAt}, settings, run); err != nil {
 		return nil, err
 	}
@@ -455,6 +468,9 @@ func verifyHeldOutBridge(ctx context.Context, config heldOutBridgeVerificationCo
 	if err != nil {
 		return nil, err
 	}
+	if err := validateHeldOutBridgeRuntimeTerminal(terminal, release, plan.Request.Sha256); err != nil {
+		return nil, err
+	}
 	start, end, err := heldOutBridgeInterval(terminal, settingsBridge.ExecutionLimitSeconds)
 	if err != nil {
 		return nil, err
@@ -513,6 +529,7 @@ func verifyHeldOutBridge(ctx context.Context, config heldOutBridgeVerificationCo
 	acceptedErr := validateHeldOutBridgeCohort(cohort, settingsBridge, prior)
 	receipt := &heldOutBridgeCompatibility{Schema: 1, Kind: "sim-latency-one-fresh-c2-bridge-compatibility", Protocol: plan.Protocol, Claim: "operational-compatibility-witness-not-statistical-equivalence", Accepted: acceptedErr == nil, Reasons: []string{}, VerifiedAt: now().UTC(),
 		ApprovalSha256: plan.OriginalA.Approval.Sha256, OriginalPlanSha256: plan.OriginalA.OriginalPlan.Sha256, StageAReportSha256: plan.OriginalA.StageAReport.Sha256, StageAInputsSha256: plan.OriginalA.StageAInputs.Sha256, MarginFreezeSha256: plan.MarginFreeze.Sha256, ReleaseSha256: plan.Release.Sha256,
+		RuntimeManifestSha256: release.Runtime.Manifest.Sha256, BuilderSha256: release.Runtime.BuilderSha256, ValidatorSha256: release.Runtime.ValidatorSha256, RunnerSha256: plan.Runner.Sha256, RunnerManifestSha256: plan.RunnerManifest.Sha256,
 		BridgePlanSha256: config.Plan.Sha256, BridgePublicationSha256: config.Publication.Sha256, BridgeInputsSha256: config.Inputs.Sha256, RequestSha256: plan.Request.Sha256, BaseSha: release.BaseSha, ImageId: release.ImageId, PolicySha256: release.StageAPolicySha256, Margin: freeze.Margin,
 		StartedAt: start, CompletedAt: end, WorkerBindings: 7, EvidenceBindings: 465, CompletionBindings: 5, ControlEvaluationIds: append([]string{}, cohort.ControlEvaluationIds...), Score: cohort.Result, Replays: observations()}
 	if acceptedErr != nil {
@@ -547,6 +564,12 @@ func authenticateHeldOutBridge(config heldOutPreparationConfig, release heldOutR
 	if err != nil {
 		return err
 	}
+	if err := validateHeldOutBridgeRuntime(*plan, release); err != nil {
+		return err
+	}
+	if err := authenticateHeldOutRuntimeFiles(release, settings); err != nil {
+		return err
+	}
 	if plan.OriginalA.Approval != pins.Approval || plan.OriginalA.OriginalPlan != pins.OriginalPlan || plan.OriginalA.StageAReport != config.StageAReport || plan.OriginalA.StageAInputs != config.StageAInputs || plan.MarginFreeze != pins.MarginFreeze || plan.Release != pins.Release || plan.SourceLock != config.SourceLock || plan.Request != config.Template || plan.Margin != margin || freeze.Margin != margin {
 		return errors.New("B changed original A, new C2, bridge precommit or frozen margin")
 	}
@@ -560,6 +583,9 @@ func authenticateHeldOutBridge(config heldOutPreparationConfig, release heldOutR
 	}
 	if receipt.Schema != 1 || receipt.Kind != "sim-latency-one-fresh-c2-bridge-compatibility" || receipt.Protocol != config.Protocol || receipt.Claim != "operational-compatibility-witness-not-statistical-equivalence" || !receipt.Accepted || len(receipt.Reasons) != 0 || receipt.VerifiedAt.IsZero() || receipt.VerifiedAt.Before(receipt.CompletedAt) || receipt.ApprovalSha256 != pins.Approval.Sha256 || receipt.OriginalPlanSha256 != pins.OriginalPlan.Sha256 || receipt.StageAReportSha256 != config.StageAReport.Sha256 || receipt.StageAInputsSha256 != config.StageAInputs.Sha256 || receipt.MarginFreezeSha256 != pins.MarginFreeze.Sha256 || receipt.ReleaseSha256 != pins.Release.Sha256 || receipt.BridgePlanSha256 != pins.BridgePlan.Sha256 || receipt.BridgePublicationSha256 != pins.BridgePublication.Sha256 || receipt.BridgeInputsSha256 != pins.BridgeInputs.Sha256 || receipt.RequestSha256 != config.Template.Sha256 || receipt.BaseSha != release.BaseSha || receipt.ImageId != release.ImageId || receipt.PolicySha256 != release.StageAPolicySha256 || receipt.Margin != margin || receipt.WorkerBindings != 7 || receipt.EvidenceBindings != 465 || receipt.CompletionBindings != 5 {
 		return errors.New("successful bridge receipt does not bind accepted old A and this exact new release")
+	}
+	if err := validateHeldOutBridgeRuntimeReceipt(receipt, *plan, release); err != nil {
+		return err
 	}
 	if err := validateHeldOutBridgeReplays(receipt.Replays, release.ImageId); err != nil {
 		return err
@@ -617,6 +643,9 @@ func authenticateHeldOutBridge(config heldOutPreparationConfig, release heldOutR
 	}
 	terminal, err := readCalibrationArtifact(filepath.Dir(input.ArtifactDirectory), "manager-terminal.log", input.TerminalSha256)
 	if err != nil {
+		return err
+	}
+	if err := validateHeldOutBridgeRuntimeTerminal(terminal, release, plan.Request.Sha256); err != nil {
 		return err
 	}
 	start, end, err := heldOutBridgeInterval(terminal, analysisSettings.ExecutionLimitSeconds)
