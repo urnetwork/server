@@ -362,6 +362,7 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		model.NewLegacyProviderTotalsTaskTarget(),
 		model.NewLegacyNetEscrowMirrorTaskTarget(),
 		model.NewQuarantineReservationReleaseTaskTarget(),
+		model.NewClosePayerDueContractsTaskTarget(),
 		task.NewTaskTargetWithPost(
 			model.RemoveNetworkClientsTask,
 			model.RemoveNetworkClientsTaskPost,

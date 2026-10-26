@@ -218,6 +218,12 @@ func SubscriptionBalance(session *session.ClientSession) (*SubscriptionBalanceRe
 	// at a grant boundary the old grant is still active through its grace; the
 	// summary counts only the new one (see model.SummarizeTransferBalances)
 	transferBalanceSummary := model.GetTransferBalanceSummary(session.Ctx, session.ByJwt.NetworkId)
+	if 0 < transferBalanceSummary.StrandedTransferByteCount {
+		// Pending that no current grant reserves belongs to contracts past their
+		// deadline. Retire them now rather than when a closer reaches them, so
+		// Pending returns while the user is looking (gated per payer).
+		model.RequestPayerDueContractClose(session.Ctx, session.ByJwt.NetworkId)
+	}
 
 	// Pro comes from pro_model, the single place it is tracked. It is NOT "has a
 	// paid balance": a data code is paid but data-only, so that test would report

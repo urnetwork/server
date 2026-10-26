@@ -114,6 +114,7 @@ Usage:
     bringyourctl contracts close-expired [-c <count>]
     bringyourctl contracts close --contract_id=<contract_id> --target_id=<target_id> --used_transfer_byte_count=<used_transfer_byte_count>
     bringyourctl contracts reconcile-net-escrow [--network_id=<network_id>] [--dry-run]
+    bringyourctl contracts close-due --network_id=<network_id> [--dry-run]
     bringyourctl streams expire-leaked-ttls
     bringyourctl task ls
     bringyourctl task rm <task_id>
@@ -427,6 +428,14 @@ func main() {
 		}
 		if reconcile, _ := opts.Bool("reconcile-net-escrow"); reconcile {
 			reconcileNetEscrow(opts)
+		}
+		if closeDue, _ := opts.Bool("close-due"); closeDue {
+			networkIdStr, err := opts.String("--network_id")
+			server.Raise(err)
+			networkId, err := server.ParseId(networkIdStr)
+			server.Raise(err)
+			dryRun, _ := opts.Bool("--dry-run")
+			os.Exit(runPayerDueContractClose(context.Background(), os.Stdout, networkId, dryRun, defaultPayerDueContractCloseOps()))
 		}
 	} else if streams, _ := opts.Bool("streams"); streams {
 		if expireLeakedTtls, _ := opts.Bool("expire-leaked-ttls"); expireLeakedTtls {

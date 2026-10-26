@@ -45,6 +45,10 @@ func taskWorkerSettingsForProfile(settings *task.TaskWorkerSettings, profile Wor
 		ownerSettings.TargetClaimLimits = map[string]int{}
 	}
 	ownerSettings.TargetClaimLimits[task.NewTaskTarget(model.ApplyLegacyNetEscrowMirror).TargetFunctionName()] = 1
+	// A payer drain writes in owner turns like the deadline pass. One per
+	// worker bounds the closes payers' requests add to the primary, whatever
+	// the number of payers waiting.
+	ownerSettings.TargetClaimLimits[model.NewClosePayerDueContractsTaskTarget().TargetFunctionName()] = 1
 	// Every paid close queues one provider total, and the older close backlog
 	// fills every ordinary claim. The totals lane alone, one turn in about 200
 	// claims on Main, applied a few rows a second while hundreds a second were

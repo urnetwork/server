@@ -457,6 +457,12 @@ func reserveRedisTransferEscrowBeforeTx(ctx context.Context, sourceNetworkId, so
 	}()
 	selected, priority, err := selectRedisTransferBalances(ctx, admission, reservation, payerNetworkId, payerClientId, requested)
 	if err != nil {
+		if errors.Is(err, errRedisReservationInsufficient) {
+			// Contracts of the payer that outlived their deadline can hold the
+			// credit this request lacks until a closer reaches them. Ask for
+			// the payer's own due contracts now; the request is gated per payer.
+			RequestPayerDueContractClose(ctx, payerNetworkId)
+		}
 		return ctx, func() {}, err
 	}
 	reservation.selected, reservation.priority = selected, priority
