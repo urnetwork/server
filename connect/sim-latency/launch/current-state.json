@@ -1,10 +1,48 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-26T17:13:00Z",
+  "observed_at": "2026-10-26T18:10:00Z",
   "objective": "Ready to launch at 2026-10-28T00:00:00Z",
   "production_activated": false,
-  "status": "new_5g_broad_qualification_passed_calibration_tool_checks_next_snow_provider_pending",
+  "status": "calibration_tool_264_passes_margin_receipt_frozen_reference_images_built_snow_live_qualification_pending",
+  "latest_native_margin_freeze": {
+    "margin": 0.269,
+    "receipt_sha256": "d264f48d38a1ab6bea44342cdbcf5e13cebf6e4c2811506e8086995e4600b646",
+    "path": "/home/by/urnetwork/temp/c2-bridge-20261026.UJH2e2mk/margin-freeze.json",
+    "reanalysis_performed": false,
+    "fresh_bridge_started": false
+  },
+  "latest_review_and_runtime_tool": {
+    "source_commit": "95b7923bd95e9c5b96eef7ae71a99a5aa8281abb",
+    "binary_sha256": "247808f5baee5419bb503f5497e0d05d83ec499ac59bee42bd0d042e36f94f87",
+    "review_guards_per_pass": 39,
+    "runtime_guards_per_pass": 49,
+    "consecutive_passes_each": 3,
+    "total_passes": 264,
+    "skips": 0,
+    "new_bridge_precommit_command_qualified": false,
+    "live_provider_calls": 0
+  },
+  "prospective_snow_broker_artifact": {
+    "source_commit": "95b7923bd95e9c5b96eef7ae71a99a5aa8281abb",
+    "image_id": "sha256:115a91f9322fa8b76dd32a2186289054d53bdc32f40f87b9be01c6c4b15981fb",
+    "binary_sha256": "457bf64d8a755126d6d62b893a1e7945806d044e14a5f551eb2ea7b436da9d84",
+    "go_version": "go1.27.3",
+    "vcs_modified": false,
+    "oci_binary_readback_matches": true,
+    "restricted_offline_help_passed": true,
+    "live_provider_qualified": false
+  },
+  "prospective_c2_reference_builds": {
+    "no_op_image_id": "sha256:33f0b7c967d7e5548c4194406bf04ac110a18f46dad46febd8f2dd0809f6ec7c",
+    "better_image_id": "sha256:64ecbe43a47ab0431a9006efb121df726800d111bb23f2f70b5a789f7cbfe6d9",
+    "worse_image_id": "sha256:c42d14bed277304b95f76c20539c17106434782d39cca13befa45330193f9933",
+    "offline_vet_test_compilation_build_and_readback_passed": true,
+    "assertion_tests_executed_by_build": 0,
+    "fresh_c2_direction_measured": false,
+    "old_direction_evidence_retains_actual_old_source_and_image": true,
+    "scored": false
+  },
   "latest_qualification": {
     "cli_tests": 20,
     "builder_tests": 19,
