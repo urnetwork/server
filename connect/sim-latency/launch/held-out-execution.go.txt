@@ -563,7 +563,11 @@ func authenticateHeldOutJob(ctx context.Context, plan heldOutPrivatePlan, round 
 	if err != nil {
 		return outcome, nil, err
 	}
-	workload, err := readHeldOutPinned(heldOutPinnedFile{Path: request.ProvidersPath, Sha256: request.ProvidersSha256}, settings.MaximumBytes, true)
+	privateWorkload := true
+	if plan.Config.Kind == "sim-latency-prospective-c2-bridge-plan" && plan.Config.Protocol == calibrationProtocolThreeABridgeThreeB {
+		privateWorkload = false
+	}
+	workload, err := readHeldOutPinned(heldOutPinnedFile{Path: request.ProvidersPath, Sha256: request.ProvidersSha256}, settings.MaximumBytes, privateWorkload)
 	if err != nil {
 		return outcome, nil, err
 	}
@@ -869,24 +873,39 @@ func executeHeldOutCampaign(ctx context.Context, config heldOutExecutionConfig, 
 		}
 	}
 	result.Complete = true
-	result.Accepted, result.OrderedSeeds, result.Reasons = acceptHeldOutOutcomes(plan.Rounds, result.Outcomes)
+	result.Accepted, result.OrderedSeeds, result.Reasons = acceptHeldOutOutcomesForProtocol(plan.Config.Protocol, plan.Rounds, result.Outcomes)
 	return result, nil
 }
 
 // Applies only the prospectively frozen four-of-five ordering and all-no-op
 // requirements. P-values remain in every original outcome, including no-ops.
 func acceptHeldOutOutcomes(rounds []heldOutPrivateRound, outcomes []heldOutJobOutcome) (bool, int, []string) {
+	return acceptHeldOutOutcomesForProtocol("", rounds, outcomes)
+}
+
+// Only the separately approved named amendment changes five/four to three/all.
+func acceptHeldOutOutcomesForProtocol(protocol string, rounds []heldOutPrivateRound, outcomes []heldOutJobOutcome) (bool, int, []string) {
 	reasons := []string{}
-	if len(rounds) != defaultHeldOutWorkloadSettings().SeedCount || len(outcomes) != len(rounds)*3 {
+	settings, err := heldOutSettingsForProtocol(protocol)
+	if err != nil {
+		return false, 0, []string{"unapproved_held_out_protocol"}
+	}
+	if len(rounds) != settings.Workload.SeedCount || len(outcomes) != len(rounds)*3 {
 		return false, 0, []string{"incomplete_fixed_screen"}
 	}
 	ordered := 0
 	for roundIndex, round := range rounds {
+		if len(round.Public.Jobs) != 3 {
+			return false, ordered, []string{"incomplete_fixed_reference_set"}
+		}
 		byRole := map[string]heldOutJobOutcome{}
 		for jobIndex, job := range round.Public.Jobs {
 			outcome := outcomes[roundIndex*3+jobIndex]
 			if outcome.JobId != job.JobId || outcome.RoundId != round.Public.RoundId || outcome.Role != job.Role {
 				return false, ordered, []string{"outcome_identity_or_order_changed"}
+			}
+			if _, duplicate := byRole[outcome.Role]; duplicate || (outcome.Role != "no-op" && outcome.Role != "better" && outcome.Role != "worse") {
+				return false, ordered, []string{"changed_fixed_reference_roles"}
 			}
 			byRole[outcome.Role] = outcome
 			if !outcome.Complete || outcome.FailureCode != "" || !finitePositive(outcome.RawScore) || outcome.Significance == nil || outcome.Significance.OneSidedPValue == nil || !finite(*outcome.Significance.OneSidedPValue) || *outcome.Significance.OneSidedPValue < 0 || *outcome.Significance.OneSidedPValue > 1 {
@@ -902,8 +921,16 @@ func acceptHeldOutOutcomes(rounds []heldOutPrivateRound, outcomes []heldOutJobOu
 		}
 	}
 	// Four of five is a predeclared acceptance fact, not a configurable knob.
-	if ordered < 4 {
-		reasons = append(reasons, "fewer_than_four_of_five_correctly_ordered_seeds")
+	required := 4
+	if protocol == calibrationProtocolThreeABridgeThreeB {
+		required = 3
+	}
+	if ordered < required {
+		reason := "fewer_than_four_of_five_correctly_ordered_seeds"
+		if protocol == calibrationProtocolThreeABridgeThreeB {
+			reason = "not_all_three_correctly_ordered_seeds"
+		}
+		reasons = append(reasons, reason)
 	}
 	return len(reasons) == 0, ordered, reasons
 }

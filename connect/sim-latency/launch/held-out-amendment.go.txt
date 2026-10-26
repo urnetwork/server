@@ -1,0 +1,417 @@
+// The separately approved deadline amendment keeps original A provenance and
+// requires a prospective, narrowly changed instrument plus one fresh bridge.
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"path/filepath"
+	"reflect"
+	"strings"
+
+	"github.com/urnetwork/server/model"
+)
+
+// No amendment metadata is implied by input cardinality or an accepted flag.
+type heldOutAmendmentPins struct {
+	Approval          heldOutPinnedFile `json:"approval"`
+	OriginalPlan      heldOutPinnedFile `json:"original_plan"`
+	OriginalBaseSha   string            `json:"original_base_sha"`
+	OriginalImageId   string            `json:"original_image_id"`
+	Release           heldOutPinnedFile `json:"new_release"`
+	MarginFreeze      heldOutPinnedFile `json:"margin_freeze"`
+	BridgePlan        heldOutPinnedFile `json:"bridge_plan"`
+	BridgePublication heldOutPinnedFile `json:"bridge_publication"`
+	BridgeInputs      heldOutPinnedFile `json:"bridge_inputs"`
+	BridgeReceipt     heldOutPinnedFile `json:"bridge_compatibility_receipt"`
+}
+
+// A local mirror avoids depending on whether the analyzer checkout has the new
+// optional lock field. The C1 absence and C2 explicit capability stay distinct.
+type heldOutSourceLock struct {
+	Schema              int               `json:"schema"`
+	DevelopmentSnapshot bool              `json:"development_snapshot"`
+	CandidatePathBase   string            `json:"candidate_path_base,omitempty"`
+	Repositories        map[string]string `json:"repositories"`
+}
+
+// Published after qualification, not a knob for relabeling original A data.
+type heldOutAmendedRelease struct {
+	Schema                   int               `json:"schema"`
+	Kind                     string            `json:"kind"`
+	Protocol                 string            `json:"protocol"`
+	ApprovalSha256           string            `json:"protocol_approval_sha256"`
+	OriginalPlanSha256       string            `json:"original_plan_sha256"`
+	OriginalBaseSha          string            `json:"original_base_sha"`
+	OriginalImageId          string            `json:"original_image_id"`
+	OriginalSourceLockSha256 string            `json:"original_source_lock_sha256"`
+	BaseSha                  string            `json:"base_sha"`
+	ImageId                  string            `json:"evaluator_image_id"`
+	BinarySha256             string            `json:"pristine_binary_sha256"`
+	SourceLockSha256         string            `json:"source_lock_sha256"`
+	PolicySha256             string            `json:"evaluation_policy_sha256"`
+	AnalyzerSource           string            `json:"analyzer_source"`
+	Repository               string            `json:"source_repository"`
+	OriginalSourceLock       heldOutPinnedFile `json:"original_source_lock"`
+	SourceLock               heldOutPinnedFile `json:"source_lock"`
+	SourceDelta              heldOutPinnedFile `json:"minimal_source_delta"`
+	Qualification            heldOutPinnedFile `json:"qualification"`
+}
+
+// Exact source, image, test and build evidence are separately pinned. This
+// receipt is never a substitute for the direct old/new tree comparison below.
+type heldOutInstrumentQualification struct {
+	Schema            int                 `json:"schema"`
+	Kind              string              `json:"kind"`
+	Protocol          string              `json:"protocol"`
+	Accepted          bool                `json:"accepted"`
+	BaseSha           string              `json:"base_sha"`
+	ImageId           string              `json:"evaluator_image_id"`
+	BinarySha256      string              `json:"pristine_binary_sha256"`
+	SourceLockSha256  string              `json:"source_lock_sha256"`
+	SourceDeltaSha256 string              `json:"minimal_source_delta_sha256"`
+	GoVersion         string              `json:"go_version"`
+	Race              bool                `json:"race"`
+	ConsecutivePasses int                 `json:"consecutive_passes"`
+	TestsPerPass      int                 `json:"tests_per_pass"`
+	Skips             int                 `json:"skips"`
+	Evidence          []heldOutPinnedFile `json:"evidence"`
+}
+
+// The old five/four contract remains the empty selector's sole interpretation.
+func heldOutSettingsForProtocol(protocol string) (heldOutOperatorSettings, error) {
+	settings := defaultHeldOutOperatorSettings()
+	switch protocol {
+	case "":
+		return settings, nil
+	case calibrationProtocolThreeABridgeThreeB:
+		settings.Workload.SeedCount = 3
+		return settings, nil
+	default:
+		return settings, errors.New("unknown held-out prospective protocol")
+	}
+}
+
+// Only this explicitly named amendment may change the number of hidden seeds.
+func validateHeldOutProtocolSettings(config heldOutPreparationConfig, settings heldOutOperatorSettings) error {
+	expected, err := heldOutSettingsForProtocol(config.Protocol)
+	if err != nil {
+		return err
+	}
+	if settings.Workload.SeedCount != expected.Workload.SeedCount {
+		return errors.New("held-out seed count does not match the explicit protocol")
+	}
+	if (config.Protocol == "") != (config.Amendment == nil) {
+		return errors.New("held-out amendment pins and explicit protocol must occur together")
+	}
+	return nil
+}
+
+// The approval and original five-position publication authenticate old A,
+// independently of any new C2 release, bridge or hidden-seed preparation.
+func heldOutStageASettings(config heldOutPreparationConfig) (calibrationAnalysisSettings, error) {
+	settings, err := calibrationSettingsForProtocol(config.Protocol)
+	if err != nil {
+		return settings, err
+	}
+	if config.Protocol == "" {
+		if config.Amendment != nil {
+			return settings, errors.New("historical Stage A cannot carry amendment metadata")
+		}
+		return settings, nil
+	}
+	if config.Amendment == nil {
+		return settings, errors.New("named amendment is missing independent publication pins")
+	}
+	pins := config.Amendment
+	settings, err = bindCalibrationProtocolPublications(settings, pins.Approval.Path, pins.Approval.Sha256, pins.OriginalPlan.Path, pins.OriginalPlan.Sha256)
+	if err != nil {
+		return settings, err
+	}
+	if pins.OriginalBaseSha != settings.OriginalBaseSha || pins.OriginalImageId != settings.OriginalImageDigest {
+		return settings, errors.New("original A release identity differs from its original publication")
+	}
+	return settings, nil
+}
+
+// The bridge changes binary identity and the previously accepted margin only;
+// all workload, timers, resources, gate inputs and R9 policy remain identical.
+func validateHeldOutBridgePolicy(original, revised model.CompetitionEvaluationPolicy, release heldOutRelease, margin float64) error {
+	expected := original
+	expected.SimulatorSha256, expected.ScorerSha256, expected.TakeoverMargin = release.BinarySha256, release.BinarySha256, margin
+	if !reflect.DeepEqual(expected, revised) {
+		return errors.New("prospective bridge changed a frozen non-identity evaluation-policy field")
+	}
+	return nil
+}
+
+// These four exact replacements are the prospective identity capability from
+// the approved change, not intervening staging/significance relaxations.
+func heldOutProspectiveSourceEpoch(original []byte) ([]byte, error) {
+	changes := [][2]string{
+		{"type evaluatorSourceLock struct {\n\tSchema              int               `json:\"schema\"`\n\tDevelopmentSnapshot bool              `json:\"development_snapshot\"`\n\tRepositories        map[string]string `json:\"repositories\"`\n}", "type evaluatorSourceLock struct {\n\tSchema              int  `json:\"schema\"`\n\tDevelopmentSnapshot bool `json:\"development_snapshot\"`\n\t// Only a newly qualified trusted image may opt into repository-wide\n\t// candidates. Omission preserves every historical server-only identity.\n\tCandidatePathBase string            `json:\"candidate_path_base,omitempty\"`\n\tRepositories      map[string]string `json:\"repositories\"`\n}"},
+		{"\tif lock.DevelopmentSnapshot {\n\t\treturn nil, errors.New(\"development snapshot cannot be used for an epoch-bound evaluation\")\n\t}\n\trepositoryNames := sourceRepositoryNamesForMode(staging)", "\tif lock.DevelopmentSnapshot {\n\t\treturn nil, errors.New(\"development snapshot cannot be used for an epoch-bound evaluation\")\n\t}\n\tif lock.CandidatePathBase != \"\" && lock.CandidatePathBase != \"mono_root_v1\" {\n\t\treturn nil, errors.New(\"evaluator source lock candidate path base is unsupported\")\n\t}\n\trepositoryNames := sourceRepositoryNamesForMode(staging)"},
+		{"\t\tif repository != \"server\" {\n\t\t\treturn fmt.Errorf(\"evaluator repository %s head does not match its authenticated source lock\", repository)", "\t\tif repository != \"server\" && sourceLock.CandidatePathBase != \"mono_root_v1\" {\n\t\t\treturn fmt.Errorf(\"evaluator repository %s head does not match its authenticated source lock\", repository)"},
+		{"\t\t\treturn errors.New(\"candidate server commit is not exactly one commit above its configured epoch base\")", "\t\t\treturn fmt.Errorf(\"candidate %s commit is not exactly one commit above its configured epoch base\", repository)"},
+	}
+	content := string(original)
+	for _, change := range changes {
+		if strings.Count(content, change[0]) != 1 {
+			return nil, errors.New("C1 source identity text does not match the four approved changes")
+		}
+		content = strings.Replace(content, change[0], change[1], 1)
+	}
+	return []byte(content), nil
+}
+
+// Only the server commit changes. A new marker is mandatory, and the unchanged
+// nine-repository census remains bound to the actual old canonical lock.
+func validateHeldOutInstrumentLocks(original, revised heldOutSourceLock, descriptor heldOutAmendedRelease, old heldOutRelease) error {
+	originalDigest, err := model.CompetitionSourceLockDigest(original.Repositories)
+	if err != nil {
+		return err
+	}
+	revisedDigest, err := model.CompetitionSourceLockDigest(revised.Repositories)
+	if err != nil {
+		return err
+	}
+	if original.Schema != 1 || revised.Schema != 1 || original.DevelopmentSnapshot || revised.DevelopmentSnapshot || original.CandidatePathBase != "" || revised.CandidatePathBase != "mono_root_v1" || original.Repositories["server"] != old.BaseSha || originalDigest != old.SourceLockSha256 || descriptor.OriginalSourceLockSha256 != old.SourceLockSha256 || revisedDigest != descriptor.SourceLockSha256 || revised.Repositories["server"] != descriptor.BaseSha || descriptor.BaseSha == old.BaseSha {
+		return errors.New("C2 instrument lock identity/capability invalid")
+	}
+	if len(original.Repositories) != 10 || len(revised.Repositories) != 10 {
+		return errors.New("C2 instrument must preserve the full ten-repository census")
+	}
+	for name, commit := range original.Repositories {
+		if name != "server" && revised.Repositories[name] != commit {
+			return errors.New("C2 instrument changed a locked dependency")
+		}
+	}
+	return nil
+}
+
+// Read-only git objects prove the exact one-parent C1 child and the only two
+// allowed paths. This never checks out code, executes candidates or runs tests.
+func authenticateHeldOutInstrumentSource(ctx context.Context, descriptor heldOutAmendedRelease, old heldOutRelease, settings heldOutOperatorSettings, run func(context.Context, string, ...string) ([]byte, error)) error {
+	if !filepath.IsAbs(descriptor.Repository) || filepath.Clean(descriptor.Repository) != descriptor.Repository || run == nil {
+		return errors.New("canonical retained C2 source repository required")
+	}
+	git := func(args ...string) ([]byte, error) {
+		return run(ctx, "git", append([]string{"-C", descriptor.Repository, "-c", "core.hooksPath=/dev/null", "-c", "core.attributesFile=/dev/null"}, args...)...)
+	}
+	parents, err := git("rev-list", "--parents", "-n", "1", descriptor.BaseSha)
+	if err != nil {
+		return err
+	}
+	if !reflect.DeepEqual(strings.Fields(string(parents)), []string{descriptor.BaseSha, old.BaseSha}) {
+		return errors.New("C2 instrument must be exactly one direct C1 child")
+	}
+	paths, err := git("diff-tree", "--no-commit-id", "--name-only", "-r", old.BaseSha, descriptor.BaseSha)
+	if err != nil {
+		return err
+	}
+	if !reflect.DeepEqual(strings.Fields(string(paths)), []string{"connect/sim-latency/source_epoch.go", "connect/sim-latency/source_epoch_mono_test.go"}) {
+		return errors.New("C2 instrument changed code outside the identity capability and its tests")
+	}
+	original, err := git("cat-file", "blob", old.BaseSha+":connect/sim-latency/source_epoch.go")
+	if err != nil {
+		return err
+	}
+	if heldOutDigest(original) != "c4b7af437d7bcce01b83d180265858a444c5af8002f6206ed869706d8d316108" {
+		return errors.New("original C1 source_epoch.go identity changed")
+	}
+	expected, err := heldOutProspectiveSourceEpoch(original)
+	if err != nil {
+		return err
+	}
+	revised, err := git("cat-file", "blob", descriptor.BaseSha+":connect/sim-latency/source_epoch.go")
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(expected, revised) {
+		return errors.New("C2 source_epoch.go contains changes beyond the four approved hunks")
+	}
+	unit, err := git("cat-file", "blob", descriptor.BaseSha+":connect/sim-latency/source_epoch_mono_test.go")
+	if err != nil {
+		return err
+	}
+	if heldOutDigest(unit) != "373ee1a94643e65280cdbd25ac9aabb3539680318cf1a01525699c2d254a9389" {
+		return errors.New("C2 identity capability tests differ from the prescribed source")
+	}
+	delta, err := readHeldOutPinned(descriptor.SourceDelta, settings.MaximumBytes, false)
+	if err != nil {
+		return err
+	}
+	actual, err := git("diff", "--binary", "--no-ext-diff", "--no-textconv", old.BaseSha, descriptor.BaseSha, "--", "connect/sim-latency/source_epoch.go", "connect/sim-latency/source_epoch_mono_test.go")
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(delta, actual) {
+		return errors.New("C2 retained source delta does not match the committed tree")
+	}
+	return nil
+}
+
+// Immutable release evidence is independently supplied and pinned before the
+// bridge. The old application image and statistical observations stay intact.
+func authenticateHeldOutAmendedRelease(ctx context.Context, pin heldOutPinnedFile, pins heldOutAmendmentPins, old heldOutRelease, settings heldOutOperatorSettings, run func(context.Context, string, ...string) ([]byte, error)) (heldOutRelease, error) {
+	content, err := readHeldOutPinned(pin, settings.MaximumBytes, false)
+	if err != nil {
+		return old, err
+	}
+	var descriptor heldOutAmendedRelease
+	if err := decodeHeldOutComplete(content, &descriptor, "prospective C2 instrument release"); err != nil {
+		return old, err
+	}
+	if descriptor.Schema != 1 || descriptor.Kind != "sim-latency-prospective-c2-instrument" || descriptor.Protocol != calibrationProtocolThreeABridgeThreeB || descriptor.ApprovalSha256 != pins.Approval.Sha256 || descriptor.OriginalPlanSha256 != pins.OriginalPlan.Sha256 || descriptor.OriginalBaseSha != old.BaseSha || descriptor.OriginalImageId != old.ImageId || descriptor.OriginalSourceLockSha256 != old.SourceLockSha256 || !sourceGitShaPattern.MatchString(descriptor.BaseSha) || descriptor.ImageId == old.ImageId || !strings.HasPrefix(descriptor.ImageId, "sha256:") || !validSha256(strings.TrimPrefix(descriptor.ImageId, "sha256:")) || !validSha256(descriptor.BinarySha256) || descriptor.BinarySha256 == old.BinarySha256 || !validSha256(descriptor.SourceLockSha256) || !validSha256(descriptor.PolicySha256) || !sourceGitShaPattern.MatchString(descriptor.AnalyzerSource) {
+		return old, errors.New("new instrument release is not explicitly linked to original C1")
+	}
+	if pins.OriginalBaseSha != old.BaseSha || pins.OriginalImageId != old.ImageId {
+		return old, errors.New("prospective instrument cannot change original A provenance")
+	}
+	var original, revised heldOutSourceLock
+	for _, item := range []struct {
+		pin heldOutPinnedFile
+		out *heldOutSourceLock
+	}{{pin: descriptor.OriginalSourceLock, out: &original}, {pin: descriptor.SourceLock, out: &revised}} {
+		content, err := readHeldOutPinned(item.pin, settings.MaximumBytes, false)
+		if err != nil {
+			return old, err
+		}
+		if err := decodeHeldOutComplete(content, item.out, "instrument source lock"); err != nil {
+			return old, err
+		}
+	}
+	if err := validateHeldOutInstrumentLocks(original, revised, descriptor, old); err != nil {
+		return old, err
+	}
+	if err := authenticateHeldOutInstrumentSource(ctx, descriptor, old, settings, run); err != nil {
+		return old, err
+	}
+	qualificationBytes, err := readHeldOutPinned(descriptor.Qualification, settings.MaximumBytes, false)
+	if err != nil {
+		return old, err
+	}
+	var qualification heldOutInstrumentQualification
+	if err := decodeHeldOutComplete(qualificationBytes, &qualification, "C2 instrument qualification"); err != nil {
+		return old, err
+	}
+	if qualification.Schema != 1 || qualification.Kind != "sim-latency-prospective-c2-instrument-qualification" || qualification.Protocol != descriptor.Protocol || !qualification.Accepted || qualification.BaseSha != descriptor.BaseSha || qualification.ImageId != descriptor.ImageId || qualification.BinarySha256 != descriptor.BinarySha256 || qualification.SourceLockSha256 != descriptor.SourceLockSha256 || qualification.SourceDeltaSha256 != descriptor.SourceDelta.Sha256 || qualification.GoVersion != "go1.27.3" || !qualification.Race || qualification.ConsecutivePasses != settings.RequiredPasses || qualification.TestsPerPass < 2 || qualification.Skips != 0 || len(qualification.Evidence) < settings.RequiredPasses {
+		return old, errors.New("prospective C2 source/image qualification incomplete")
+	}
+	for _, evidence := range qualification.Evidence {
+		if _, err := readHeldOutPinned(evidence, settings.MaximumBytes, false); err != nil {
+			return old, err
+		}
+	}
+	release := old
+	release.BaseSha, release.ImageId, release.BinarySha256, release.SourceLockSha256, release.StageAPolicySha256, release.AnalyzerSource = descriptor.BaseSha, descriptor.ImageId, descriptor.BinarySha256, descriptor.SourceLockSha256, descriptor.PolicySha256, descriptor.AnalyzerSource
+	return release, nil
+}
+
+// Configuration selects only the original contract or the named approved C2
+// instrument, never a caller-selected generic release or reduced seed count.
+func heldOutContextForPreparation(ctx context.Context, config heldOutPreparationConfig, settings heldOutOperatorSettings) (heldOutRelease, heldOutOperatorSettings, error) {
+	selected, err := heldOutSettingsForProtocol(config.Protocol)
+	old := frozenHeldOutRelease()
+	if err != nil {
+		return old, settings, err
+	}
+	settings.Workload.SeedCount = selected.Workload.SeedCount
+	if err := validateHeldOutProtocolSettings(config, settings); err != nil {
+		return old, settings, err
+	}
+	if config.Protocol == "" {
+		return old, settings, nil
+	}
+	if _, err := heldOutStageASettings(config); err != nil {
+		return old, settings, err
+	}
+	release, err := authenticateHeldOutAmendedRelease(ctx, config.Amendment.Release, *config.Amendment, old, settings, func(ctx context.Context, program string, args ...string) ([]byte, error) {
+		return runHeldOutReadOnly(ctx, settings, program, args...)
+	})
+	if err != nil {
+		return old, settings, err
+	}
+	content, err := readHeldOutPinned(config.Amendment.Release, settings.MaximumBytes, false)
+	if err != nil {
+		return old, settings, err
+	}
+	var descriptor heldOutAmendedRelease
+	if err := json.Unmarshal(content, &descriptor); err != nil {
+		return old, settings, err
+	}
+	if config.SourceLock != descriptor.SourceLock {
+		return old, settings, errors.New("B source lock differs from the qualified new instrument")
+	}
+	return release, settings, nil
+}
+
+// Reads only pinned handoff bytes to select the explicit release before taking
+// the unchanged canonical scoring slot. Verification subsequently rereads them.
+func heldOutCommandContext(ctx context.Context, operation string, content []byte, settings heldOutOperatorSettings) (heldOutRelease, heldOutOperatorSettings, error) {
+	old := frozenHeldOutRelease()
+	var preparation heldOutPreparationConfig
+	switch operation {
+	case "prepare":
+		if err := decodeHeldOutComplete(content, &preparation, "held-out preparation context"); err != nil {
+			return old, settings, err
+		}
+	case "verify", "execute", "reveal":
+		var execution heldOutExecutionConfig
+		if operation == "reveal" {
+			var reveal heldOutRevealConfig
+			if err := decodeHeldOutComplete(content, &reveal, "held-out reveal context"); err != nil {
+				return old, settings, err
+			}
+			execution = reveal.Execution
+		} else if err := decodeHeldOutComplete(content, &execution, "held-out execution context"); err != nil {
+			return old, settings, err
+		}
+		private, err := readHeldOutPinned(execution.PrivatePlan, settings.MaximumBytes, true)
+		if err != nil {
+			return old, settings, err
+		}
+		defer clear(private)
+		var plan heldOutPrivatePlan
+		if err := decodeHeldOutComplete(private, &plan, "held-out private context"); err != nil {
+			return old, settings, err
+		}
+		preparation = plan.Config
+	case "verify-bridge":
+		var config heldOutBridgeVerificationConfig
+		if err := decodeHeldOutComplete(content, &config, "bridge context"); err != nil {
+			return old, settings, err
+		}
+		plan, _, err := readHeldOutBridgePlan(config.Plan, settings)
+		if err != nil {
+			return old, settings, err
+		}
+		pins := heldOutAmendmentPins{Approval: plan.OriginalA.Approval, OriginalPlan: plan.OriginalA.OriginalPlan, OriginalBaseSha: plan.OriginalA.OriginalBaseSha, OriginalImageId: plan.OriginalA.OriginalImageId, Release: plan.Release}
+		settings.Workload.SeedCount = 3
+		release, err := authenticateHeldOutAmendedRelease(ctx, plan.Release, pins, old, settings, func(ctx context.Context, program string, args ...string) ([]byte, error) {
+			return runHeldOutReadOnly(ctx, settings, program, args...)
+		})
+		if err != nil {
+			return old, settings, err
+		}
+		descriptorBytes, err := readHeldOutPinned(plan.Release, settings.MaximumBytes, false)
+		if err != nil {
+			return old, settings, err
+		}
+		var descriptor heldOutAmendedRelease
+		if err := json.Unmarshal(descriptorBytes, &descriptor); err != nil {
+			return old, settings, err
+		}
+		if plan.SourceLock != descriptor.SourceLock {
+			return old, settings, errors.New("bridge source lock differs from qualified C2 instrument")
+		}
+		return release, settings, nil
+	case "freeze-margin":
+		return old, settings, nil
+	default:
+		return old, settings, errors.New("unknown held-out operation")
+	}
+	return heldOutContextForPreparation(ctx, preparation, settings)
+}

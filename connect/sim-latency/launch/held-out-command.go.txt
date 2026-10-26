@@ -76,7 +76,7 @@ func revealHeldOutCampaign(config heldOutRevealConfig, plan heldOutPrivatePlan, 
 		}
 	}
 	if result.Complete {
-		accepted, ordered, reasons := acceptHeldOutOutcomes(plan.Rounds, result.Outcomes)
+		accepted, ordered, reasons := acceptHeldOutOutcomesForProtocol(plan.Config.Protocol, plan.Rounds, result.Outcomes)
 		if result.Accepted != accepted || result.OrderedSeeds != ordered || !reflect.DeepEqual(result.Reasons, reasons) {
 			return "", errors.New("closed held-out acceptance does not reproduce the fixed screen")
 		}
@@ -133,9 +133,50 @@ func TestHeldOutOperatorCommand(t *testing.T) {
 	defer clear(content)
 	ctx, cancel := signal.NotifyContext(t.Context(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	release, settings, err = heldOutCommandContext(ctx, operation, content, settings)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var summary string
 	_, err = withCalibrationScoringSlot(release.ScoringLock, func() (*calibrationAnalysisReport, error) {
 		switch operation {
+		case "freeze-margin":
+			var config heldOutMarginFreezeConfig
+			if err := decodeHeldOutComplete(content, &config, "amended original-A margin freeze"); err != nil {
+				return nil, err
+			}
+			receipt, err := freezeHeldOutMargin(config, settings, time.Now)
+			if err != nil {
+				return nil, err
+			}
+			summary = fmt.Sprintf("froze accepted original three-pair margin=%g before any bridge; no measurements", receipt.Margin)
+			return nil, nil
+		case "verify-bridge":
+			var config heldOutBridgeVerificationConfig
+			if err := decodeHeldOutComplete(content, &config, "single precommitted bridge verification"); err != nil {
+				return nil, err
+			}
+			bridge, _, err := readHeldOutBridgePlan(config.Plan, settings)
+			if err != nil {
+				return nil, err
+			}
+			analysisSettings := defaultCalibrationAnalysisSettings()
+			analysisSettings.Cohorts = 1
+			analysisSettings.MarginFloor = bridge.Margin
+			replaySettings := defaultCalibrationReplaySettings()
+			replaySettings.CpuSet = settings.ManagementCpus
+			observations := []calibrationReplayObservation{}
+			replaySettings.Observe = func(observation calibrationReplayObservation) { observations = append(observations, observation) }
+			receipt, err := verifyHeldOutBridge(ctx, config, release, settings, func(ctx context.Context, root string, inputs ScoreInputs, image, round string, baseline bool) ([]byte, error) {
+				return replayCalibrationBundle(ctx, root, inputs, image, round, baseline, analysisSettings, replaySettings, runSourceBuildDocker)
+			}, func() []calibrationReplayObservation { return observations }, time.Now, func(ctx context.Context, program string, args ...string) ([]byte, error) {
+				return runHeldOutReadOnly(ctx, settings, program, args...)
+			})
+			if err != nil {
+				return nil, err
+			}
+			summary = heldOutBridgeSummary(receipt)
+			return nil, nil
 		case "prepare":
 			var config heldOutPreparationConfig
 			if err := decodeHeldOutComplete(content, &config, "held-out preparation configuration"); err != nil {
@@ -167,7 +208,7 @@ func TestHeldOutOperatorCommand(t *testing.T) {
 				return nil, err
 			}
 			publicBytes, _ := json.MarshalIndent(public, "", "  ")
-			summary = fmt.Sprintf("prepared all five rounds / fifteen jobs; no measurements; public_plan_sha256=%s private_plan_sha256=%s", heldOutDigest(publicBytes), public.PrivatePlanSha256)
+			summary = fmt.Sprintf("prepared all %d rounds / %d jobs; no measurements; public_plan_sha256=%s private_plan_sha256=%s", len(public.Rounds), len(public.Rounds)*3, heldOutDigest(publicBytes), public.PrivatePlanSha256)
 			return nil, nil
 		case "verify", "execute":
 			var config heldOutExecutionConfig
@@ -182,7 +223,7 @@ func TestHeldOutOperatorCommand(t *testing.T) {
 				return nil, err
 			}
 			if operation == "verify" {
-				summary = "verified all five rounds / fifteen exact precommitted requests; no execution"
+				summary = fmt.Sprintf("verified all %d rounds / %d exact precommitted requests; no execution", len(plan.Rounds), len(plan.Rounds)*3)
 				return nil, nil
 			}
 			if err := authenticateHeldOutPublication(ctx, config, *plan, settings, func(ctx context.Context, program string, args ...string) ([]byte, error) {
@@ -215,7 +256,7 @@ func TestHeldOutOperatorCommand(t *testing.T) {
 			if err != nil {
 				return nil, err
 			}
-			summary = fmt.Sprintf("completed fixed fifteen-job screen; accepted=%t correctly_ordered_seeds=%d; no production activation", result.Accepted, result.OrderedSeeds)
+			summary = fmt.Sprintf("completed fixed %d-job screen; accepted=%t correctly_ordered_seeds=%d; no production activation", len(plan.Rounds)*3, result.Accepted, result.OrderedSeeds)
 			return nil, nil
 		case "reveal":
 			var config heldOutRevealConfig
@@ -233,7 +274,7 @@ func TestHeldOutOperatorCommand(t *testing.T) {
 			summary = "revealed original committed seeds after authenticated closure; reveal_sha256=" + digest
 			return nil, nil
 		default:
-			return nil, errors.New("held-out command must be prepare, verify, execute or reveal")
+			return nil, errors.New("held-out command must be freeze-margin, verify-bridge, prepare, verify, execute or reveal")
 		}
 	})
 	if err != nil {

@@ -7,11 +7,15 @@ import (
 	"encoding/hex"
 	"errors"
 	"math"
+	"reflect"
 )
 
 // Expected identities come from the published native analysis receipt. A caller
 // must not derive the expected report digest from the same untrusted input.
 type heldOutMarginPins struct {
+	Protocol               string
+	ProtocolApprovalSha256 string
+	OriginalPlanSha256     string
 	ReportSha256           string
 	InputManifestSha256    string
 	EvaluationPolicySha256 string
@@ -21,7 +25,10 @@ type heldOutMarginPins struct {
 // analysis or a non-protocol result. Does not authenticate the underlying files,
 // replay results, select a margin, or permit measurement by itself.
 func pinnedHeldOutMargin(content []byte, pins heldOutMarginPins) (float64, error) {
-	settings := defaultCalibrationAnalysisSettings()
+	settings, err := calibrationSettingsForProtocol(pins.Protocol)
+	if err != nil {
+		return 0, err
+	}
 	if !validSha256(pins.ReportSha256) || !validSha256(pins.InputManifestSha256) || !validSha256(pins.EvaluationPolicySha256) || len(content) == 0 || int64(len(content)) > settings.MaximumArtifactBytes {
 		return 0, errors.New("accepted-analysis pins or bounded bytes missing")
 	}
@@ -32,6 +39,16 @@ func pinnedHeldOutMargin(content []byte, pins heldOutMarginPins) (float64, error
 	var report calibrationAnalysisReport
 	if err := decodeStrictJSONBytes(content, &report, "accepted calibration analysis"); err != nil {
 		return 0, err
+	}
+	if report.Protocol != pins.Protocol {
+		return 0, errors.New("accepted-analysis protocol changed")
+	}
+	if pins.Protocol != "" {
+		if !validSha256(pins.ProtocolApprovalSha256) || !validSha256(pins.OriginalPlanSha256) || report.ProtocolApprovalSha256 != pins.ProtocolApprovalSha256 || report.OriginalPlanSha256 != pins.OriginalPlanSha256 || !reflect.DeepEqual(report.OriginalPositions, []int{1, 2, 3}) || !sourceGitShaPattern.MatchString(report.OriginalBaseSha) || report.OriginalImageDigest == "" {
+			return 0, errors.New("amended accepted-analysis approval/original-position binding missing")
+		}
+	} else if report.ProtocolApprovalSha256 != "" || report.OriginalPlanSha256 != "" || len(report.OriginalPositions) != 0 || report.OriginalBaseSha != "" || report.OriginalImageDigest != "" {
+		return 0, errors.New("amended accepted-analysis cannot use the historical protocol")
 	}
 	if report.Kind != "sim-latency-calibration-analysis" || !report.Accepted || len(report.Reasons) != 0 || report.Cohorts != settings.Cohorts || report.ObservedReplicates != settings.Cohorts*settings.Replicates*2 || report.BootstrapDraws != settings.BootstrapDraws || report.InputManifestSha256 != pins.InputManifestSha256 || report.EvaluationPolicySha256 != pins.EvaluationPolicySha256 {
 		return 0, errors.New("analysis is not the pinned accepted full Stage A result")
