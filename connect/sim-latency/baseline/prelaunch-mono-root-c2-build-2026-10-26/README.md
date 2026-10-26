@@ -14,6 +14,10 @@ binds the already-frozen **26.9%** margin and the accepted old-C1 analysis repor
 it does not claim that old observations measured C2 or that the fresh bridge
 has passed. Build definitions, inputs, original logs and actual inspected image
 metadata are retained here; source is reproducible from the pinned Git objects.
+At 15:20:42 UTC, the server `sim-latency` branch was fast-forwarded from C1
+to C2 without force. The before/after ten-repository remote readback is retained
+in `source-publication-receipt.json`; the other nine refs were unchanged. This
+publishes the source objects for fresh isolated checkouts, not live readiness.
 
 Independent source-lock tests passed six selected cases three times (18 passes,
 zero skips). These do not substitute for runtime image/validator/composed

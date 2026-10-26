@@ -353,7 +353,7 @@ f9ed4fbb7e43a25dbb74f9fac280ec66cbfdbc3fa876f41ffb31a872aa291379  prelaunch-inpu
 ae3957d6a609a707b890c6c73ebab841a802e9ef70a64c285a9e6e7459da3301  prelaunch-mono-root-c2-build-2026-10-26/.dockerignore
 80858c0f4fe791e6c65d5550ccd4fde524093f08e596c78cf283eb5397729ee7  prelaunch-mono-root-c2-build-2026-10-26/Dockerfile
 ed880ce407598c7ec36ed09c10eab6c1cac6cc75675927f37f87ac65b895a527  prelaunch-mono-root-c2-build-2026-10-26/INDEX.json
-1989aa9af92634bdb3f43b1b2755e2279c0075adc4fabbe91eda691f5b53bed3  prelaunch-mono-root-c2-build-2026-10-26/README.md
+84f8c986ef9d223a0b4ee2768342ee64fc68e9bbd8c24507992fe77ca52079fc  prelaunch-mono-root-c2-build-2026-10-26/README.md
 ac32f925c1743195270ea4e36339dbce141a28a8e949daf1c0984aa564840aae  prelaunch-mono-root-c2-build-2026-10-26/build-inputs.sha256
 8a2a08d219b7598a2fc2bd81c65c300c1d80e8f427bdb00332a8e0be59ced286  prelaunch-mono-root-c2-build-2026-10-26/build-outputs.sha256
 8dd2d214dbabea6039ae073c8299684635e259fb2a73024d17893975412d89dd  prelaunch-mono-root-c2-build-2026-10-26/build.started
@@ -366,10 +366,13 @@ d77af3a7b167f1251e97062210633a51da34e6d7c507109e44be92f1536d7fad  prelaunch-mono
 6e86068e16f22f32a7fe88d69c4c8b60263be2eb6a4a5d5eec3ba0c9b5d5eea1  prelaunch-mono-root-c2-build-2026-10-26/image-readback.json
 859b17239df5bceaeae470f495e434a48245077f4b51c1f3acad88a86e523897  prelaunch-mono-root-c2-build-2026-10-26/image-record.json
 756a0414b0805ecf8f64aa404d8ca664279f716d9d7ce290ebed4f261a9161c8  prelaunch-mono-root-c2-build-2026-10-26/preparation.json
+24bcb2bf8fdb6b32c9d63d8c4e85c9d5b93403384f1062f9fc5b8de45d63ab5b  prelaunch-mono-root-c2-build-2026-10-26/publish-source.sh
 367dedc579be8fe9fb5c31ca9ec6bdc5c318186285b5e622088fe3793bf149a7  prelaunch-mono-root-c2-build-2026-10-26/run-build.sh
 589ab624be8301c22e01571ac33b3e1b44e419ffb68009a577e6d520c0bb8995  prelaunch-mono-root-c2-build-2026-10-26/sim-latency.yml
 c457bf3598e1e5dbd83b384d51f8c7b153c7dea452e62e85d1cd85c8b7cd9357  prelaunch-mono-root-c2-build-2026-10-26/source-delta.patch
 239cea7fe6f77f989b75ba6efa677e8731640ba2fdd3690a35e6fe72103f3d11  prelaunch-mono-root-c2-build-2026-10-26/source-lock.json
+8aafee5e352cff973948508ed21f98507c445381761fd57afb708ebcd87ffd83  prelaunch-mono-root-c2-build-2026-10-26/source-publication-receipt.json
+86769c49568b4b55636abcc2472d411f7dea1335d913af701e24885a43361ce8  prelaunch-mono-root-c2-build-2026-10-26/source-publication.started
 c34cd1e47a420eba56a3ff3340fbad96e6c6ee50b2f2c9d4833daf61ecd25083  prelaunch-mono-root-c2-build-2026-10-26/source-unit-qualification/c2-1.stderr
 9d787073231e1b128de43c1b93475100451b87d84276febbd31ba986bcd5c0a3  prelaunch-mono-root-c2-build-2026-10-26/source-unit-qualification/c2-1.stdout
 13aac0b96aa9b756c082a9385b1d44141e1805cce5174c28c4d6fae39133440d  prelaunch-mono-root-c2-build-2026-10-26/source-unit-qualification/c2-2.stderr
