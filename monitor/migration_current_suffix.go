@@ -815,7 +815,8 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	},
 	[]snMainnetMigrationContract{
 		migrationCurrentSuffix(891, "provider-aware winner review and scheduled round guards", competitionMigration891ArtifactQuery).removedAt(892),
-		migrationCurrentSuffix(892, "reviewed repository patch source and winner guard custody", competitionMigration892ArtifactQuery),
+		migrationCurrentSuffix(892, "reviewed repository patch source and winner guard custody", competitionMigration892ArtifactQuery).removedAt(893),
+		migrationCurrentSuffix(893, "provider union review, identity and retained source custody", competitionMigration893ArtifactQuery),
 	},
 )
 

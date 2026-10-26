@@ -43,7 +43,7 @@ func TestMigrationsCompetitionSuccessorContractLifetimes(t *testing.T) {
 			t.Fatalf("published head %d artifact %d drift=%t, want %t", test.head, test.badVersion, got, test.drift)
 		}
 	}
-	for version, removed := range map[int]int{859: 891, 891: 892, 892: 0} {
+	for version, removed := range map[int]int{859: 891, 891: 892, 892: 893} {
 		artifact := migrationCurrentSuffixTestContract(t, version).artifact
 		if artifact.rowColumn != version-589 || artifact.removedVersion != removed {
 			t.Fatalf("version %d has wrong column or lifetime", version)

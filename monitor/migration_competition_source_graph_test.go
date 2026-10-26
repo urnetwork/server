@@ -44,9 +44,9 @@ func TestMigrationsSourceGraphHistoricalAuthorityCustody(t *testing.T) {
 	}
 }
 
-// Successors through v892 republish the v855 guards; current-head faults belong to
+// Successors through v893 republish the v855 guards; current-head faults belong to
 // the last published successor, while historical prefixes retain their owner.
-const competitionSourceGuardsHeadOwner = "reviewed repository patch source and winner guard custody@v892"
+const competitionSourceGuardsHeadOwner = "provider union review, identity and retained source custody@v893"
 
 // Numeric head, matching names, old legitimate bodies and unchanged source
 // functions cannot substitute for the exact published successor graph.
@@ -111,7 +111,8 @@ func TestMigrationsSourceGuardPublishedOwnerTransfers(t *testing.T) {
 		{858, 859, "production and staging source authorization of the ten live repositories@v858"},
 		{859, 891, "scheduled round opening bound to its intent@v859"},
 		{891, 892, "provider-aware winner review and scheduled round guards@v891"},
-		{892, 0, competitionSourceGuardsHeadOwner},
+		{892, 893, "reviewed repository patch source and winner guard custody@v892"},
+		{893, 0, competitionSourceGuardsHeadOwner},
 	}
 	faults := []struct {
 		name string
