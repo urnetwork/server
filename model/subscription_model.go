@@ -1936,7 +1936,7 @@ func lockActiveContractClientsInTx(
 		ctx,
 		`
 			/* contract_lifecycle_write_boundary */
-			SELECT client_id, network_id, active
+			SELECT client_id, network_id, active, source_client_id
 			FROM network_client
 			WHERE client_id = ANY($1)
 			ORDER BY client_id
@@ -1949,8 +1949,11 @@ func lockActiveContractClientsInTx(
 	for result.Next() {
 		var clientId server.Id
 		var lifecycle contractClientLifecycle
-		server.Raise(result.Scan(&clientId, &lifecycle.networkId, &lifecycle.active))
+		var sourceClientId *server.Id
+		server.Raise(result.Scan(&clientId, &lifecycle.networkId, &lifecycle.active, &sourceClientId))
 		clientLifecycles[clientId] = lifecycle
+		// the contract-usage stamp after commit keys its gate by this identity
+		rememberContractClientTopLevel(clientId, sourceClientId)
 	}
 	server.Raise(result.Err())
 

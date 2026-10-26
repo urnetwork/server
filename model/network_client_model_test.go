@@ -2480,9 +2480,11 @@ func TestConnectNetworkClientAuthTimeThrottle(t *testing.T) {
 		connect.AssertEqual(t, authTime().Equal(initialAuthTime), true)
 
 		// a stale auth_time (older than `clientAuthTimeRefreshMinInterval`) is
-		// refreshed to ~now on connect
+		// refreshed to ~now on connect. Moving auth_time backward is something
+		// only a test does, so the process forgets what the first connect saw.
 		staleAuthTime := server.NowUtc().Add(-2 * clientAuthTimeRefreshMinInterval)
 		setAuthTime(staleAuthTime)
+		Testing_ResetClientAuthTimeGate()
 		_, _, _, _, err = ConnectNetworkClient(ctx, clientId, "192.0.2.1:20001", server.NewId())
 		connect.AssertEqual(t, err, nil)
 		refreshedAuthTime := authTime()
