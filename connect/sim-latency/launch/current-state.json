@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-26T20:09:34Z",
+  "observed_at": "2026-10-26T20:39:37Z",
   "objective": "Ready to launch at 2026-10-28T00:00:00Z",
   "storage_verification": {
     "operations_compliance_receipt_sha256": "c6b8b5348633270939395b7a585e1978b3a83c679b2552eccd8ab2a4690edc3f",
@@ -29,7 +29,36 @@
     "native_readonly_deletions": 0
   },
   "production_activated": false,
-  "status": "snow_pipe_descriptor_and_cleanup_fix_under_independent_regression_test",
+  "status": "snow_pipe_fix_45_tests_three_passes_actual_provider_qualification_live",
+  "current_snow_qualification": {
+    "started_at": "2026-10-26T20:38:34Z",
+    "process_verified_at": "2026-10-26T20:39:37Z",
+    "driver_pid": 1087692,
+    "observation_session": 35158,
+    "directory": "/home/by/urnetwork/temp/snow-pipe-preparation-20261026.vYvgXxeJ/attempt-01",
+    "native_plan_sha256": "413edce6f166404cb093a4496c3b734cf4a7b03b3711b612135c8bfd22aaa039",
+    "driver_sha256": "8eb45d3cb355059d08255b34f16ccc32f30c5a4ea418f9c5ab1785e89e5c6a15",
+    "wrapper_sha256": "7732b18d1e308c0842756da92e8ad98245c9e1f5aad982fd2f8cce87879aed66",
+    "unit_receipt_sha256": "b78b933d5db5dd5557e9f9e645c2a6fe3a0e90d44a7faf435542573d397f4b0a",
+    "cancellation_case_passed": true,
+    "active_case_at_observation": "case-02 benign comment",
+    "qwen_member_started_journal_exists": true,
+    "actual_provider_tcp_connection_established": true,
+    "independent_red_controls": 3,
+    "unit_tests_per_run": 45,
+    "consecutive_unit_passes": 3,
+    "unit_skips": 0,
+    "qualified": false,
+    "official_performance_measurements": false
+  },
+  "independent_seed_exclusion_preparation": {
+    "reviewed_catalog": "/var/lib/urnetwork/competition-held-out-c2-a9e8e1a7-b-inputs-20261026-v1/exclusions.REVIEWED.json",
+    "sha256": "bc3b97cdf2669324574302daf7929bf98e31099c5c1b32a4eb933cb9320493e5",
+    "retained_preparation_scope_reviewed": true,
+    "global_all_host_scan_claimed": false,
+    "new_seed_draws": 0,
+    "bridge_acceptance_still_required_before_draw": true
+  },
   "live_snow_qualification": {
     "started_at": "2026-10-26T20:09:02Z",
     "process_verified_at": "2026-10-26T20:09:34Z",
