@@ -1,10 +1,10 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-26T16:56:00Z",
+  "observed_at": "2026-10-26T17:06:00Z",
   "objective": "Ready to launch at 2026-10-28T00:00:00Z",
   "production_activated": false,
-  "status": "c2_unit_groups_passed_broad_capacity_failed_new_5g_profile_preparing_snow_review_pending",
+  "status": "new_5g_broad_qualification_active_snow_native_51_passed_provider_qualification_pending",
   "latest_qualification": {
     "cli_tests": 20,
     "builder_tests": 19,
@@ -28,6 +28,16 @@
     "new_profile_qualified": false,
     "snow_review_models": ["qwen3.8-27b", "gemma-4-26b-a4b", "muse-glimmer-30b"],
     "snow_live_review_qualified": false,
+    "snow_native_sim_tests_per_pass": 12,
+    "snow_native_model_tests_per_pass": 5,
+    "snow_native_consecutive_passes": 3,
+    "snow_native_skips": 0,
+    "snow_native_tested_commit": "74a456bcb2ebe42fc11b233cb9517c9e262aa148",
+    "snow_native_evidence": "server/connect/sim-latency/baseline/prelaunch-snow-core-qualification-2026-10-26/INDEX.json",
+    "prospective_5g_broad_session": 53616,
+    "prospective_5g_broad_script_sha256": "25d4d6e851e324accf78c0af30fce1900e8566e744d9abd02b1fe163d1c19dbc",
+    "prospective_5g_broad_process_verified_live": true,
+    "prospective_5g_capacity_headroom_bytes": 976986254,
     "provider_credit_required_for_selected_policy": false
   },
   "accepted_three_a_reduction": {
