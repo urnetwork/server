@@ -1,0 +1,45 @@
+// Draft order selection for the held-out preparation tool. Not an operator
+// command; no real campaign entropy or commitments are created by this file.
+package main
+
+import (
+	"errors"
+	"io"
+)
+
+// Bounds entropy-source refusal; the eventual operator uses crypto/rand.Reader.
+// Tests inject fixed bytes, never a seeded pseudo-random production source.
+type heldOutOrderSettings struct {
+	MaxEntropyDraws int
+}
+
+// A failed entropy source stops preparation, never selects a fallback order.
+func defaultHeldOutOrderSettings() heldOutOrderSettings {
+	return heldOutOrderSettings{MaxEntropyDraws: 64}
+}
+
+// Uses rejection sampling over all six permutations. Accepting byte%6 without
+// rejecting 252..255 would favor four orders. Returned arrays cannot alias.
+func drawHeldOutReferenceOrder(entropy io.Reader, settings heldOutOrderSettings) ([3]string, error) {
+	if entropy == nil || settings.MaxEntropyDraws <= 0 {
+		return [3]string{}, errors.New("bounded entropy source required")
+	}
+	orders := [6][3]string{
+		{"no-op", "better", "worse"},
+		{"no-op", "worse", "better"},
+		{"better", "no-op", "worse"},
+		{"better", "worse", "no-op"},
+		{"worse", "no-op", "better"},
+		{"worse", "better", "no-op"},
+	}
+	var draw [1]byte
+	for attempt := 0; attempt < settings.MaxEntropyDraws; attempt++ {
+		if _, err := io.ReadFull(entropy, draw[:]); err != nil {
+			return [3]string{}, errors.New("reference-order entropy unavailable")
+		}
+		if draw[0] < 252 {
+			return orders[int(draw[0])%len(orders)], nil
+		}
+	}
+	return [3]string{}, errors.New("reference-order entropy rejection bound reached")
+}

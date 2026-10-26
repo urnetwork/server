@@ -120,3 +120,20 @@ commitment plan, and enforce same-round baseline late binding. Its own positive,
 ordering/refusal, publication and baseline-substitution tests remain required.
 No real seeds, provider inputs, finalized requests or accepted margins have
 been created by these drafts.
+
+## Unqualified reference-order draft
+
+The [order-selection core](held-out-reference-order.go.txt) and
+[six deterministic test drafts](held-out-reference-order-tests.go.txt) are also
+uncompiled and unexecuted. They select all six reference permutations using
+bounded rejection sampling, refusing entropy exhaustion without a fallback.
+The exhaustive accepted-byte test checks equal permutation counts; adjacent
+tests cover surplus-byte rejection, the configured rejection bound, missing
+sources, invalid settings and independently owned return values.
+
+Qualify both as `_test.go` files in the same exclusive frozen workspace and
+actual Go 1.27.3 environment, selecting `^TestHeldOutOrder` for three complete
+race passes with zero skips. Preserve all attempts. The eventual operator must
+inject `crypto/rand.Reader`, commit the complete five-round order before the
+first result and refuse order changes; this helper alone does none of those
+publication or request-binding steps. No tests may overlap a timed evaluation.
