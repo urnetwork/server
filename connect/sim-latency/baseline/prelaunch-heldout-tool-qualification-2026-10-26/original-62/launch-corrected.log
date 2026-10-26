@@ -1,0 +1,21 @@
+go version go1.27.3 linux/amd64
+compile_start=2026-10-26T13:34:25Z
+compile_exit=0
+daccb6c357e751546e1942d0885a7781f61e4fd4a90d24af0d3822991dc5b7c4  /home/by/urnetwork/temp/heldout-qualification-20261026.vFI2XdtL/heldout.test
+[env]glog not configured from command line. Using default configuration.
+I1026 13:36:06.314107  386261 env.go:1202] [env]try /srv/warp/config, [settings.yml]
+I1026 13:36:06.314527  386261 env.go:1202] [env]try /home/by/urnetwork/temp/warm-readers-negative-qualification-20261025.15cNHvs8/services/server-fixture-4220696557/site, [settings.yml]
+I1026 13:36:06.314685  386261 env.go:81] [env]settings loaded
+command=/home/by/urnetwork/temp/heldout-qualification-20261026.vFI2XdtL/heldout.test -test.run ^TestHeldOut -test.count=1 -test.timeout=15m -test.v
+pass=1 exit=0 duration_seconds=572
+2be0e0b03fab48a590bca5bfc6341dda8558cfc0a39f9f56d8e7b74d299c2efb  /home/by/urnetwork/temp/heldout-qualification-20261026.vFI2XdtL/pass-1.stdout
+1acff18b7bec992935d164119ed4795a11e93824dc459c06099d528c6b794521  /home/by/urnetwork/temp/heldout-qualification-20261026.vFI2XdtL/pass-1.stderr
+command=/home/by/urnetwork/temp/heldout-qualification-20261026.vFI2XdtL/heldout.test -test.run ^TestHeldOut -test.count=1 -test.timeout=15m -test.v
+pass=2 exit=0 duration_seconds=573
+f78b5a70ef4cc86cc6c8f94226d398a15da8de1a09fcfca41e6c269e5bef45e2  /home/by/urnetwork/temp/heldout-qualification-20261026.vFI2XdtL/pass-2.stdout
+89038c6cbb9fa618543577c40ddf9cd6c86d80a34245af767c4a617e69fa0432  /home/by/urnetwork/temp/heldout-qualification-20261026.vFI2XdtL/pass-2.stderr
+command=/home/by/urnetwork/temp/heldout-qualification-20261026.vFI2XdtL/heldout.test -test.run ^TestHeldOut -test.count=1 -test.timeout=15m -test.v
+pass=3 exit=0 duration_seconds=572
+9289d7cd61fb02cdab89065e21399a2fd83c3e09376c66cdd034fcd1e9e15434  /home/by/urnetwork/temp/heldout-qualification-20261026.vFI2XdtL/pass-3.stdout
+2971d1f7385e152a5b4581f0bc6f6dc593595d1e32311af6b3ce094146621741  /home/by/urnetwork/temp/heldout-qualification-20261026.vFI2XdtL/pass-3.stderr
+PASS_three_same_binary_62_tests

@@ -28,6 +28,12 @@
   },
   "additional_datasets": [
     {
+      "id": "prelaunch-heldout-tool-qualification-2026-10-26",
+      "official": false,
+      "index_path": "prelaunch-heldout-tool-qualification-2026-10-26/INDEX.json",
+      "index_sha256": "b76d034df4036ac895d97ec52ddb673d7b7ee805241f548414b7d32a4eea54b2"
+    },
+    {
       "id": "prelaunch-input-tool-qualification-2026-10-26",
       "official": false,
       "index_path": "prelaunch-input-tool-qualification-2026-10-26/INDEX.json",
