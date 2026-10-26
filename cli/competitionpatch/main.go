@@ -1,10 +1,11 @@
 // competitionpatch revalidates the exact patch bytes used to build a
-// competition submission image. It is compiled into the trusted evaluator
-// base image; submissions cannot replace it.
+// competition submission image. The immutable trusted builder release supplies
+// its pinned binary independently of candidate files and old base images.
 package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -13,9 +14,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"syscall"
 
 	"github.com/urnetwork/server/controller"
 )
@@ -57,13 +60,30 @@ type repositoryPatchIdentity struct {
 }
 
 func main() {
-	if err := run(os.Args[1:], os.Stdout); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	if err := runContext(ctx, os.Args[1:], os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		os.Exit(competitionPatchExitCode(err))
 	}
 }
 
+// Canonical patch refusals remain exit one. Trusted source/application failure
+// is infrastructure, never unsupported evidence of candidate wrongdoing.
+func competitionPatchExitCode(err error) int {
+	var applicationError *repositoryApplicationError
+	if errors.As(err, &applicationError) {
+		return 2
+	}
+	return 1
+}
+
 func run(args []string, stdout io.Writer) error {
+	return runContext(context.Background(), args, stdout)
+}
+
+// Signal/deadline ownership continues through the complete source application.
+func runContext(ctx context.Context, args []string, stdout io.Writer) error {
 	flags := flag.NewFlagSet("competitionpatch", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	var opts options
@@ -138,22 +158,28 @@ func run(args []string, stdout io.Writer) error {
 	if opts.sourceRoot != "" {
 		patches, routingError := controller.SplitCompetitionRepositoryPatch(string(patchBytes), policy)
 		if routingError != nil {
-			return errors.New("source application requires exact routed patch bytes")
+			return &repositoryApplicationError{cause: errors.New("source application requires exact routed patch bytes")}
 		}
 		identityBytes, err := readRegularFile(opts.sourceIdentityPath, maxPolicyBytes)
 		if err != nil {
-			return errors.New("original source identity is unavailable")
+			return &repositoryApplicationError{cause: errors.New("original source identity is unavailable")}
 		}
-		identity.CandidateCommits, err = applyRepositoryPatches(opts.sourceRoot, identityBytes, opts.expectedSourceIdentitySha256, opts.baseSha, patch.Sha256, patches, defaultRepositoryApplySettings())
+		identity.CandidateCommits, err = applyRepositoryPatchesContext(ctx, opts.sourceRoot, identityBytes, opts.expectedSourceIdentitySha256, opts.baseSha, patch.Sha256, policy.PathBase, patches, defaultRepositoryApplySettings())
 		if err != nil {
-			return err
+			return &repositoryApplicationError{cause: err}
 		}
 	} else if opts.sourceIdentityPath != "" || opts.expectedSourceIdentitySha256 != "" {
 		return errors.New("source identity options require --apply-source-root")
 	}
 	encoder := json.NewEncoder(stdout)
 	encoder.SetEscapeHTML(false)
-	return encoder.Encode(identity)
+	if err := encoder.Encode(identity); err != nil {
+		if opts.sourceRoot != "" {
+			return &repositoryApplicationError{cause: errors.New("source application receipt could not be written")}
+		}
+		return err
+	}
+	return nil
 }
 
 // Exclusive creation avoids replacing prior evidence or following a directory

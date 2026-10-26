@@ -52,7 +52,7 @@ func repositoryApplyFixture(t *testing.T) (string, []byte, string, map[string]st
 		repositoryApplyTestGit(t, path, "commit", "--quiet", "-m", "synthetic base")
 		commits[repository] = repositoryApplyTestGit(t, path, "rev-parse", "HEAD")
 	}
-	identity := repositorySourceIdentity{Schema: 1, Kind: "sim-latency-evaluation-source", Temporary: true, BaseImageId: "sha256:" + strings.Repeat("a", 64), BaseSha: commits["server"], Branch: "sim-latency", SourceLockSha256: strings.Repeat("b", 64), Repositories: commits}
+	identity := repositorySourceIdentity{Schema: 1, Kind: "sim-latency-evaluation-source", Temporary: true, BaseImageId: "sha256:" + strings.Repeat("a", 64), BaseSha: commits["server"], Branch: "sim-latency", SourceLockSha256: strings.Repeat("b", 64), CandidatePathBase: "mono_root_v1", Repositories: commits}
 	content, err := json.Marshal(identity)
 	if err != nil {
 		t.Fatal(err)
@@ -65,7 +65,7 @@ func repositoryApplyFixture(t *testing.T) (string, []byte, string, map[string]st
 func TestRepositorySourceAppliesDependencyPatchesAndRetainsFrozenHeads(t *testing.T) {
 	root, content, digest, original := repositoryApplyFixture(t)
 	patch := []byte("diff --git a/source.txt b/source.txt\n--- a/source.txt\n+++ b/source.txt\n@@ -1 +1 @@\n-original\n+improved\n")
-	commits, err := applyRepositoryPatches(root, content, digest, original["server"], strings.Repeat("c", 64), map[string][]byte{"connect": patch, "sdk": patch}, defaultRepositoryApplySettings())
+	commits, err := applyRepositoryPatches(root, content, digest, original["server"], strings.Repeat("c", 64), "mono_root_v1", map[string][]byte{"connect": patch, "sdk": patch}, defaultRepositoryApplySettings())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestRepositorySourceAppliesDependencyPatchesAndRetainsFrozenHeads(t *testin
 			t.Fatalf("unbound resulting head: %s", repository)
 		}
 	}
-	if _, err := applyRepositoryPatches(root, content, digest, original["server"], strings.Repeat("c", 64), map[string][]byte{"connect": patch}, defaultRepositoryApplySettings()); err == nil {
+	if _, err := applyRepositoryPatches(root, content, digest, original["server"], strings.Repeat("c", 64), "mono_root_v1", map[string][]byte{"connect": patch}, defaultRepositoryApplySettings()); err == nil {
 		t.Fatal("previously applied source accepted as pristine")
 	}
 }
@@ -90,7 +90,7 @@ func TestRepositorySourceDirtySiblingRefusesBeforeAnyMutation(t *testing.T) {
 		t.Fatal(err)
 	}
 	patch := []byte("diff --git a/source.txt b/source.txt\n--- a/source.txt\n+++ b/source.txt\n@@ -1 +1 @@\n-original\n+improved\n")
-	if _, err := applyRepositoryPatches(root, content, digest, original["server"], strings.Repeat("c", 64), map[string][]byte{"connect": patch}, defaultRepositoryApplySettings()); err == nil {
+	if _, err := applyRepositoryPatches(root, content, digest, original["server"], strings.Repeat("c", 64), "mono_root_v1", map[string][]byte{"connect": patch}, defaultRepositoryApplySettings()); err == nil {
 		t.Fatal("dirty sibling graph accepted")
 	}
 	if status := repositoryApplyTestGit(t, filepath.Join(root, "connect"), "status", "--porcelain=v1"); status != "" {
@@ -107,7 +107,7 @@ func TestRepositorySourceIgnoresInheritedGitIndexOverride(t *testing.T) {
 	}
 	t.Setenv("GIT_INDEX_FILE", outside)
 	patch := []byte("diff --git a/source.txt b/source.txt\n--- a/source.txt\n+++ b/source.txt\n@@ -1 +1 @@\n-original\n+improved\n")
-	if _, err := applyRepositoryPatches(root, content, digest, original["server"], strings.Repeat("c", 64), map[string][]byte{"connect": patch}, defaultRepositoryApplySettings()); err != nil {
+	if _, err := applyRepositoryPatches(root, content, digest, original["server"], strings.Repeat("c", 64), "mono_root_v1", map[string][]byte{"connect": patch}, defaultRepositoryApplySettings()); err != nil {
 		t.Fatal(err)
 	}
 	actual, err := os.ReadFile(outside)

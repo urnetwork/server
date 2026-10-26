@@ -216,14 +216,19 @@ sudo -n docker run --rm --network none --read-only --cap-drop ALL \
      test ! -e /opt/urnetwork/candidate-check.passed
      test ! -e /opt/urnetwork/candidate-build'
 
+builder_identity="$("$SCRIPT_DIR/submission-builder-identity.sh")"
+builder_sha256="$(jq -er '.builder_sha256' <<<"$builder_identity")"
+[ "$(jq -er '.builder_sha256' <<<"$build_json")" = "$builder_sha256" ]
 jq -n \
     --arg base_image_id "$base_image_id" \
     --arg candidate_image_id "$candidate_image_id" \
     --arg patch_sha256 "$patch_sha256" \
-    --arg builder_sha256 "$(sha256sum "$SCRIPT_DIR/Dockerfile.submission" | awk '{print $1}')" \
+    --arg builder_sha256 "$builder_sha256" \
+    --arg patch_validator_sha256 "$(jq -er '.patch_validator_sha256' <<<"$builder_identity")" \
     --argjson protected_path_count "${#protected_paths[@]}" \
     '{schema:1,status:"passed",base_image_id:$base_image_id,
       candidate_image_id:$candidate_image_id,patch_sha256:$patch_sha256,
-      builder_sha256:$builder_sha256,checks_executed_unprivileged:true,
+      builder_sha256:$builder_sha256,patch_validator_sha256:$patch_validator_sha256,
+      checks_executed_unprivileged:true,
       check_stage_discarded:true,simulator_tree_immutable:true,
       protected_path_count:$protected_path_count}'

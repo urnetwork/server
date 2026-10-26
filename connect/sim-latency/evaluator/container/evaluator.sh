@@ -82,6 +82,39 @@ require_command() { command -v "$1" >/dev/null 2>&1 || die "required command mis
 sha256_file() { sha256sum "$1" | awk '{print $1}'; }
 file_bytes() { stat -c '%s' "$1"; }
 
+# The caller is already trusted; authenticate the fixed helper before executing
+# it so a writable helper cannot grant itself release authority after launch.
+submission_builder_identity() {
+    local current="$SCRIPT_DIR/submission-builder-identity.sh" owner permissions
+    [[ -f "$current" && -x "$current" && ! -L "$current" ]] || return 1
+    while :; do
+        [[ ! -L "$current" ]] || return 1
+        owner="$(stat -c %u "$current")" || return 1
+        permissions="$(stat -c %a "$current")" || return 1
+        [[ "$owner" == 0 && "$permissions" =~ ^[0-7]{3,4}$ ]] || return 1
+        (( (8#$permissions & 8#022) == 0 )) || return 1
+        [[ "$current" != / ]] || break
+        current="$(dirname "$current")"
+        [[ -d "$current" ]] || return 1
+    done
+    "$SCRIPT_DIR/submission-builder-identity.sh"
+}
+
+# Refuse mismatched image capability before any baseline control runs. The
+# preparer authenticated this optional field against the raw image source lock.
+validate_prepared_source_identity() {
+    jq -e --arg base_image_id "$base_image_id" --arg base_sha "$base_sha" \
+        --argjson source_epoch "$source_epoch" --arg path_base "$patch_path_base" \
+        --argjson staging "$staging" --arg branch "$source_branch" \
+        '.schema == 1 and .kind == "sim-latency-evaluation-source" and
+         .temporary == true and .base_image_id == $base_image_id and
+         .base_sha == $base_sha and .source_epoch == $source_epoch and
+         .branch == $branch and ((.staging // false) == $staging) and .candidate_patch_sha256 == null and
+         ((.candidate_path_base // "") == "" or .candidate_path_base == "mono_root_v1") and
+         ($path_base == "" or ($path_base == "mono_root_v1" and .candidate_path_base == $path_base))' \
+        <<<"$1" >/dev/null
+}
+
 local_tree_sha256() {
     "$HASH_LOCAL_MOUNT" "$1"
 }
@@ -281,6 +314,7 @@ if [ "$staging" = true ]; then
 fi
 REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor)
 readonly REPOSITORIES
+repository_names_json="$(printf '%s\n' "${REPOSITORIES[@]}" | jq -Rsc 'split("\n")[:-1]')"
 round_id="$(jq -er '.round_id' "$request_path")"
 source_epoch="$(jq -er '.source_epoch' "$request_path")"
 attempt="$(jq -er '.attempt' "$request_path")"
@@ -438,7 +472,16 @@ policy_path="$work_dir/policy.json"
 jq -S '.patch_policy' "$request_path" > "$policy_path"
 chmod 0400 "$policy_path"
 policy_sha256="$(sha256_file "$policy_path")"
-builder_sha256="$(sha256_file "$SCRIPT_DIR/Dockerfile.submission")"
+patch_path_base="$(jq -er '.path_base // ""' "$policy_path")"
+case "$patch_path_base" in
+    ''|mono_root_v1) ;;
+    *) die "unsupported frozen patch path base" ;;
+esac
+builder_identity="$(submission_builder_identity)" || die "trusted builder release identity is unavailable"
+builder_sha256="$(jq -er '.builder_sha256 | select(test("^[0-9a-f]{64}$"))' <<<"$builder_identity")"
+patch_validator_sha256="$(jq -er '.patch_validator_sha256 | select(test("^[0-9a-f]{64}$"))' <<<"$builder_identity")"
+printf '%s\n' "$builder_identity" > "$work_dir/builder-identity.json"
+chmod 0400 "$work_dir/builder-identity.json"
 base_image_id="$(sudo -n docker image inspect --format '{{.Id}}' "$base_image")" || die "base image is unavailable offline"
 [ "$base_image_id" = "$base_image" ] || die "base image id does not match frozen digest"
 docker_id_map_json="$($DOCKER_ID_MAP --image "$base_image_id" --uid 65532 --gid 65532)" ||
@@ -502,15 +545,10 @@ baseline_source_identity="$($PREPARE_EVALUATION_SOURCE \
 candidate_source_identity="$($PREPARE_EVALUATION_SOURCE \
     "${source_mode_args[@]}" --base-image "$base_image_id" --destination "$candidate_source_root")" ||
     die "could not prepare the temporary candidate source checkout"
+candidate_original_source_identity_sha256="$(sha256_file "$candidate_source_root/.evaluation-source.json")"
+install -m 0400 "$candidate_source_root/.evaluation-source.json" "$work_dir/candidate-original-source.json"
 for prepared_identity in "$baseline_source_identity" "$candidate_source_identity"; do
-    jq -e --arg base_image_id "$base_image_id" --arg base_sha "$base_sha" \
-        --argjson source_epoch "$source_epoch" \
-        --argjson staging "$staging" --arg branch "$source_branch" \
-        '.schema == 1 and .kind == "sim-latency-evaluation-source" and
-         .temporary == true and .base_image_id == $base_image_id and
-         .base_sha == $base_sha and .source_epoch == $source_epoch and
-         .branch == $branch and ((.staging // false) == $staging) and .candidate_patch_sha256 == null' \
-        <<<"$prepared_identity" >/dev/null || die "temporary evaluation source identity is invalid"
+    validate_prepared_source_identity "$prepared_identity" || die "temporary evaluation source identity or image capability is invalid"
 done
 source_evidence_path="$work_dir/evaluation-sources.json"
 write_source_evidence() {
@@ -1502,8 +1540,9 @@ if [ "$candidate_build_status" -ne 0 ]; then
     exit 0
 fi
 chmod 0400 "$candidate_build_json" "$candidate_build_log"
-readonly candidate_build_keys='["base_image_id","base_sha","builder_sha256","candidate_sha","image","image_id","image_key","patch_sha256","policy_sha256","schema"]'
+readonly candidate_build_keys='["base_image_id","base_sha","builder_sha256","candidate_commits","candidate_commits_sha256","candidate_sha","image","image_id","image_key","original_source_identity_sha256","patch_sha256","patch_validator_sha256","policy_sha256","schema"]'
 jq -e --argjson candidate_build_keys "$candidate_build_keys" \
+    --argjson repositories "$repository_names_json" \
     'type == "object" and .schema == 1 and ((keys | sort) == $candidate_build_keys) and
      (.image | type == "string" and length > 0) and
      (.image_id | type == "string" and test("^sha256:[0-9a-f]{64}$")) and
@@ -1513,6 +1552,11 @@ jq -e --argjson candidate_build_keys "$candidate_build_keys" \
      (.patch_sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
      (.policy_sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
      (.builder_sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
+     (.patch_validator_sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
+     (.candidate_commits_sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
+     (.original_source_identity_sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
+     ((.candidate_commits | keys) == ($repositories | sort)) and
+     (.candidate_commits | all(.[]; type == "string" and test("^[0-9a-f]{40}$"))) and
      (.image_key | type == "string" and test("^[0-9a-f]{64}$"))' \
     "$candidate_build_json" >/dev/null || die "candidate build record is invalid"
 candidate_image_id="$(jq -er '.image_id' "$candidate_build_json")"
@@ -1522,6 +1566,13 @@ candidate_sha="$(jq -er '.candidate_sha' "$candidate_build_json")"
 [ "$(jq -er '.patch_sha256' "$candidate_build_json")" = "$patch_sha256" ] || die "candidate patch identity mismatch"
 [ "$(jq -er '.policy_sha256' "$candidate_build_json")" = "$policy_sha256" ] || die "candidate policy identity mismatch"
 [ "$(jq -er '.builder_sha256' "$candidate_build_json")" = "$builder_sha256" ] || die "candidate builder identity mismatch"
+[ "$(jq -er '.patch_validator_sha256' "$candidate_build_json")" = "$patch_validator_sha256" ] || die "candidate patch-validator identity mismatch"
+[ "$(jq -er '.original_source_identity_sha256' "$candidate_build_json")" = "$candidate_original_source_identity_sha256" ] || die "candidate original source identity mismatch"
+candidate_commits_json="$(jq -cS '.candidate_commits' "$candidate_build_json")"
+candidate_commits_sha256="$(jq -S '.candidate_commits' "$candidate_build_json" | sha256sum | awk '{print $1}')"
+[ "$(jq -er '.candidate_commits_sha256' "$candidate_build_json")" = "$candidate_commits_sha256" ] || die "candidate commit-map digest mismatch"
+jq -e --argjson commits "$candidate_commits_json" '.repositories == $commits' \
+    "$candidate_source_root/.evaluation-source.json" >/dev/null || die "temporary candidate commit map does not match its image"
 [ "$(jq -er '.image_key' "$candidate_build_json")" = "$image_key" ] || die "candidate image key mismatch"
 [ "$(jq -er '.repositories.server' "$candidate_source_root/.evaluation-source.json")" = "$candidate_sha" ] ||
     die "temporary candidate checkout does not match the candidate image"
@@ -1535,10 +1586,18 @@ candidate_simulator_sha256="$(jq -er '.simulator_sha256' <<<"$candidate_identity
 jq -e --arg base_sha "$base_sha" --arg build_sha "$candidate_sha" \
     --arg patch_sha "$patch_sha256" --arg policy_sha "$policy_sha256" \
     --arg builder_sha "$builder_sha256" --arg image_key "$image_key" \
+    --arg patch_validator_sha256 "$patch_validator_sha256" \
+    --arg candidate_commits_sha256 "$candidate_commits_sha256" \
+    --arg original_source_identity_sha256 "$candidate_original_source_identity_sha256" \
+    --argjson candidate_commits "$candidate_commits_json" \
     '.schema == 1 and .image_kind == "submission" and .base_sha == $base_sha and
      .build_sha == $build_sha and .patch_sha256 == $patch_sha and
      .policy_sha256 == $policy_sha and .builder_sha256 == $builder_sha and
      .image_key == $image_key and (.simulator_sha256 | test("^[0-9a-f]{64}$")) and
+     .patch_validator_sha256 == $patch_validator_sha256 and
+     .candidate_commits_sha256 == $candidate_commits_sha256 and
+     .original_source_identity_sha256 == $original_source_identity_sha256 and
+     .candidate_commits == $candidate_commits and
      (.paths | type == "array")' \
     <<<"$candidate_identity" >/dev/null || die "candidate image identity is invalid"
 authenticate_protected_simulator_tree
