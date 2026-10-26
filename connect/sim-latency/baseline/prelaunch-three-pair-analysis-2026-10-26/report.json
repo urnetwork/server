@@ -1,0 +1,104 @@
+{
+  "kind": "sim-latency-calibration-analysis",
+  "cohorts": 3,
+  "validated_observed_replicates": 54,
+  "bootstrap_draws": 100000,
+  "bootstrap_placeability": 0.99525,
+  "bootstrap_gate_pass_rates": {
+    "G1_success": 1,
+    "G2_volume": 0.99581,
+    "G3_path_integrity": 1,
+    "G4_matchmaking": 0.99944,
+    "G5_stability": 1,
+    "G6_resources": 1
+  },
+  "margin_terms": {
+    "cohort_1_recommendation": 0.161,
+    "cohort_1_required": 0.161,
+    "cohort_2_recommendation": 0.161,
+    "cohort_2_required": 0.161,
+    "cohort_3_recommendation": 0.161,
+    "cohort_3_required": 0.161,
+    "control_noise": 0.2687716400543205,
+    "noop_improvement_p95": 0.10870218313555347,
+    "noop_noise": 0.221446230519281,
+    "preparation_floor": 0.161
+  },
+  "recommended_margin": 0.269,
+  "accepted": true,
+  "reasons": [],
+  "input_manifest_sha256": "abf5fb1656358e6c1f2f41bc965ae5fd5e8a4faf510c95f3d5c251a10b392c94",
+  "evaluation_policy_sha256": "d6f22dc1b4b420b4b6724183c7f93b4b92f42c787d754b4a677fd3599f92f2a7",
+  "replay_observations": [
+    {
+      "image_id": "sha256:002c39040ce23dee27b171c7e657f749c6a6d05b1e9b97d90ac87336470dbaf3",
+      "container_id": "2121275c8f40ad3d23a4068cd76b46727f25fa8227607953d4596516ef64b649",
+      "owner": "a0b296d1d8c1c8f31a4786b89eb0e6a086723762e0b7e2527820a5dee7fdc3dc",
+      "inspection_sha256": "6e9298069e57260ab739a1d6020b46405e9c68d554711208fb764d8644ba126e",
+      "terminal_sha256": "5145a7e79bc0a61453b2898cd391f68a2b21b903c0a67b7d0d15b36f942adbaa",
+      "container_cleanup_verified": true,
+      "corpus_directory": "/tmp/sim-latency-calibration-replay-709551319",
+      "corpus_retained": false
+    },
+    {
+      "image_id": "sha256:002c39040ce23dee27b171c7e657f749c6a6d05b1e9b97d90ac87336470dbaf3",
+      "container_id": "198fb6e3c964dfb3179668297f6656098165bb6159f80e962148425223c5f5d2",
+      "owner": "4e72830980dd8fbe3acca92b2e17d107100b44dc8efd591098abc16e2f3a3c3e",
+      "inspection_sha256": "2518690181058e722c4ed274bfd9f9939749199ac378f7b2887e796b4d22bf2e",
+      "terminal_sha256": "0f19f1180b329ab5aaa0bbf459507246e32f19d7823d3e15cab689a3b62eb85d",
+      "container_cleanup_verified": true,
+      "corpus_directory": "/tmp/sim-latency-calibration-replay-3586867780",
+      "corpus_retained": false
+    },
+    {
+      "image_id": "sha256:002c39040ce23dee27b171c7e657f749c6a6d05b1e9b97d90ac87336470dbaf3",
+      "container_id": "a131a9aa158bf767e46a059b1d59024b40cdeb3931dc678fb26c65636dfe0cdc",
+      "owner": "1ae05da00055bc6ebbfd73f8e4485d41fc3bd29d15bdca4b0cd758287f0b53c8",
+      "inspection_sha256": "ecad8e9771354b7d1913dd044094a69dd977c4c8cad3fbec94fa292a401237e3",
+      "terminal_sha256": "42ef7343e544e62c4ef811ae608ff99ce9078a625c0a22cfc5859a6984789cfa",
+      "container_cleanup_verified": true,
+      "corpus_directory": "/tmp/sim-latency-calibration-replay-678229358",
+      "corpus_retained": false
+    },
+    {
+      "image_id": "sha256:002c39040ce23dee27b171c7e657f749c6a6d05b1e9b97d90ac87336470dbaf3",
+      "container_id": "4a2998dea01a4992290d586890932dc2b12c29e43caef8df42a9ce0454702f3e",
+      "owner": "4877d8b5d38bb51ac16952ba47e47d852f48ca5521b20359e6bee36b99d01954",
+      "inspection_sha256": "b44b504540f769203b90efe9fb08ff75e69862453a36494d12b98c763b074421",
+      "terminal_sha256": "738ddb0e878e2bbed42dab5f37eb16aacd1fa82aef755a507c7928f08d137f73",
+      "container_cleanup_verified": true,
+      "corpus_directory": "/tmp/sim-latency-calibration-replay-2070963537",
+      "corpus_retained": false
+    },
+    {
+      "image_id": "sha256:002c39040ce23dee27b171c7e657f749c6a6d05b1e9b97d90ac87336470dbaf3",
+      "container_id": "f4dcd1e190369657cc949d0f890b4b4f2eed27f378eb7a2a328036885c5b2db9",
+      "owner": "d8ac644b471bc459545278a1bc3c24f01ac6df2a6bf399df053fd2c5110dfa03",
+      "inspection_sha256": "4ba7f9e337fa2a2125fcf261350efc5382d7c09b6b1cfbb88c6718891a0d8ccd",
+      "terminal_sha256": "3cb7b0d4de5eaf4dbc07cf86d7cc9bf17ea81b85390f05548a7a07090990690c",
+      "container_cleanup_verified": true,
+      "corpus_directory": "/tmp/sim-latency-calibration-replay-2049143831",
+      "corpus_retained": false
+    },
+    {
+      "image_id": "sha256:002c39040ce23dee27b171c7e657f749c6a6d05b1e9b97d90ac87336470dbaf3",
+      "container_id": "85c1a856aa78f56f42e10df0fbac5f52e9a2c95abeb29b2eef04efa2d690b189",
+      "owner": "d36ccb369f25d124c1e62941f8f2597084ae01597dd01e872351a7ab6b6c5380",
+      "inspection_sha256": "0cfcb9276a010de2f4de7fe7004eade21a28849761f6bee19670ea24f7c604da",
+      "terminal_sha256": "5f5292c5ecb57633f25e412cf9578f2daeeb97c0c7262e84db6cde26e829a9a9",
+      "container_cleanup_verified": true,
+      "corpus_directory": "/tmp/sim-latency-calibration-replay-2661179751",
+      "corpus_retained": false
+    }
+  ],
+  "protocol": "launch-3a-bridge-3b-2026-10-26-v1",
+  "protocol_approval_sha256": "a794618968d840163952b7b2058100fd87b71ef7ccc44919ba590c5a253f643c",
+  "original_plan_sha256": "24f9b6ea9fe6fbfb4381ca29535b81a1cd4966b397c701b04f5b09ac74eb11d8",
+  "original_positions": [
+    1,
+    2,
+    3
+  ],
+  "original_base_sha": "c1f9dda603d6279666fca5d92b99c5663306c5f7",
+  "original_evaluator_image_digest": "sha256:002c39040ce23dee27b171c7e657f749c6a6d05b1e9b97d90ac87336470dbaf3"
+}

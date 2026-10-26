@@ -1,0 +1,9 @@
+start_utc=2026-10-26T14:51:46Z
+[env]glog not configured from command line. Using default configuration.
+I1026 14:51:47.096593  478637 env.go:1202] [env]try /srv/warp/config, [settings.yml]
+I1026 14:51:47.098628  478637 env.go:1202] [env]try /home/by/urnetwork/temp/main-targeted-2f46-corrected-20261026.3Nd6V666/fixture-provisioned/services/server-fixture-371604642/site, [settings.yml]
+I1026 14:51:47.098776  478637 env.go:81] [env]settings loaded
+=== RUN   TestHeldOutThreeAAssemblyCommand
+    held_out_three_a_assembly_draft_test.go:120: original five-position request inventory not retained
+--- FAIL: TestHeldOutThreeAAssemblyCommand (0.00s)
+FAIL

@@ -1,0 +1,19 @@
+f777c06469031581428e013cca044fb879e40427adc14caad7c2e886bf3d2206  connect/sim-latency/calibration_protocol.go
+c6600986244d1b5ca1b8fe07ac8516af67ae57c4072f4ca0333f4efbab838e13  connect/sim-latency/calibration_protocol_test.go
+0df475abb1c1cf2f71d678cf63438a89b1ff789303723d034baa6c0dd5787b48  connect/sim-latency/held_out_three_a_assembly_draft_test.go
+433367dd93706fd7822c767d5cc0d1890e07da3e5ab3dcebe8a291c5314cc957  connect/sim-latency/held_out_three_a_assembly_qualification_test.go
+e55fb25b2927664353d5fcc0ca68775ffbf74b69e4a168ccf2002c294d984860  /home/by/urnetwork/temp/calibration-path-fix-20261026.ne1Lrvte/manager.work
+c59378a6f55c95629afc7f5060d6ba53a8e1b9de68e5ec28708fac550fd1d7ad  /home/by/urnetwork/temp/calibration-path-fix-20261026.ne1Lrvte/sim.test
+pass=1 exit=0 seconds=2
+5a9e9449855bd73878f8b4862f9f46194b3ad0dc9249977a9eb6d88f0e3cf6fa  /home/by/urnetwork/temp/calibration-path-fix-20261026.ne1Lrvte/fixed-1.stdout
+a7d200e7570cbb71df59665b88c2ee93d6872aa91915079873bd440b29c3c774  /home/by/urnetwork/temp/calibration-path-fix-20261026.ne1Lrvte/fixed-1.stderr
+pass=2 exit=0 seconds=1
+cdb3ffafee9c28897a6dc8cb4dc7d27404ed08a46c6162374595a2e740d8675e  /home/by/urnetwork/temp/calibration-path-fix-20261026.ne1Lrvte/fixed-2.stdout
+19e3e08fd12509b108489234f7238bf5d26eb01eb7aab6dbfbbf7215d7ee8d18  /home/by/urnetwork/temp/calibration-path-fix-20261026.ne1Lrvte/fixed-2.stderr
+pass=3 exit=0 seconds=2
+b1dbd97a79543b65a651056dea8edf3ee5ef107b487fcef774d2f0b141f7faf5  /home/by/urnetwork/temp/calibration-path-fix-20261026.ne1Lrvte/fixed-3.stdout
+f8136485951187d84c8cc65f17fe93a00f54a9be4896bd6fb717a01b79e63c27  /home/by/urnetwork/temp/calibration-path-fix-20261026.ne1Lrvte/fixed-3.stderr
+	build	vcs.modified=false
+ab51c1fc39be2ec89ec9797c60a809bfa23d3f2c44a7c80db3077853f0e936a2  /home/by/urnetwork/temp/calibration-path-fix-20261026.ne1Lrvte/sim-latency-native-clean
+1d6bbd82262250b839bba1b5da210f4697a99d8e60a0cbce359a74d1319a64b9  /home/by/urnetwork/temp/calibration-path-fix-20261026.ne1Lrvte/native-buildinfo.txt
+PASS_fixed14_three_and_clean_native

@@ -28,6 +28,12 @@
   },
   "additional_datasets": [
     {
+      "id": "prelaunch-three-pair-analysis-2026-10-26",
+      "official": false,
+      "index_path": "prelaunch-three-pair-analysis-2026-10-26/INDEX.json",
+      "index_sha256": "a4ad04ab33259fd74395dbe6afc3f3a01d4509fc0872ef3e8a97c1387ff0728d"
+    },
+    {
       "id": "prelaunch-heldout-tool-qualification-2026-10-26",
       "official": false,
       "index_path": "prelaunch-heldout-tool-qualification-2026-10-26/INDEX.json",
