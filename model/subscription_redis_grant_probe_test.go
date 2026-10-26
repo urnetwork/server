@@ -511,6 +511,45 @@ func TestRedisGrantSelectionProbeKeepsFundingAndRecovery(t *testing.T) {
 	})
 }
 
+// Every grant is reserved, one of them by a dead request. The skipped grant
+// holding its marker stays in recovery discovery, so the refused request's
+// recovery releases the dead token and the same request is funded on its
+// rerun, as it was when every grant was reserved.
+func TestRedisGrantSelectionProbeKeepsRecoveryRerun(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		clients := newEscrowSelectionTestClients(t, ctx)
+		ids := redisSelectionTestGrants(t, ctx, clients, 2, 1000, false)
+		redisGrantProbeToken(t, ctx, ids[0], 1000, 1000)
+		dead := server.NewId()
+		if reserved, err := redisContractReservation(ctx, "reserve-pending", ids[1], dead, 1000, 1000, redisContractReservationLease); err != nil || reserved != 1000 {
+			t.Fatal("dead request setup", reserved, err)
+		}
+		redisRecoveryAgePendingMarker(t, ctx, ids[1], dead)
+
+		escrow, owner, counts, err := redisGrantProbeCreate(ctx, clients, 29)
+		if err != nil || escrow == nil || escrow.ContractId != owner.contractId || len(escrow.Balances) != 1 || escrow.Balances[0].BalanceId != ids[1] || escrow.Balances[0].BalanceByteCount != 29 {
+			t.Fatal("recovery of the skipped grant did not fund the same request", escrow, err)
+		}
+		if got := Testing_NetEscrowByteCount(ctx, ids[1]); got != 29 {
+			t.Fatal("the dead token was not released or custody was duplicated", got)
+		}
+		if got := Testing_NetEscrowByteCount(ctx, ids[0]); got != 1000 {
+			t.Fatal("recovery changed a live grant", got)
+		}
+		redisGrantProbeRequireCounts(t, "recovered after refusal", counts, map[string]float64{
+			// each run refuses the first grant; the first skips the second
+			"reserve-pending refused":  2,
+			"reserve-pending skipped":  1,
+			"reserve-pending accepted": 1,
+			"reserve-probe empty":      1,
+			"reserve-probe available":  1,
+		})
+	})
+}
+
 // States only a reservation can decide are reserved, never skipped: an
 // expired lease still funds the request, and an invalid counter still holds
 // the census instead of becoming an exhausted refusal.
