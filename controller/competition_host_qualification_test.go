@@ -70,7 +70,6 @@ func TestCompetitionHostQualificationUsesOnlyTrustedCommentPatch(t *testing.T) {
 		{path: "connect/outside-policy.go", data: source},
 		{path: "../example.go", data: source},
 		{path: "connect/example.go", data: nil},
-		{path: "connect/example.go", data: []byte("package synthetic")},
 		{path: "connect/example.go", data: []byte("package synthetic\x00\n")},
 		{path: "connect/example.go", data: []byte("package synthetic\r\n")},
 	} {

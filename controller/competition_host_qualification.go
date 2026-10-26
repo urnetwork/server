@@ -314,16 +314,24 @@ func readCompetitionQualificationHostConfig(path string, settings *Settings) (*c
 // into executable syntax. Source bytes come only from the authenticated image.
 func competitionQualificationPatch(path string, source []byte, policy PatchPolicy) (*CanonicalPatch, error) {
 	if err := validateRepositoryPath(path); err != nil || filepath.Ext(path) != ".go" || len(source) == 0 || len(source) > 1024*1024 ||
-		source[len(source)-1] != '\n' || bytes.ContainsAny(source, "\x00\r") {
-		return nil, errors.New("qualification source must be a bounded newline-terminated Go file")
+		bytes.ContainsAny(source, "\x00\r") {
+		return nil, errors.New("qualification source must be a bounded Go text file")
 	}
+	finalLf := source[len(source)-1] == '\n'
 	lines := strings.Split(strings.TrimSuffix(string(source), "\n"), "\n")
 	count := min(3, len(lines))
 	start := len(lines) - count + 1
 	var patch strings.Builder
 	fmt.Fprintf(&patch, "diff --git a/%s b/%s\n--- a/%s\n+++ b/%s\n@@ -%d,%d +%d,%d @@\n", path, path, path, path, start, count, start, count+2)
-	for _, line := range lines[len(lines)-count:] {
-		fmt.Fprintf(&patch, " %s\n", line)
+	for index, line := range lines[len(lines)-count:] {
+		if !finalLf && index == count-1 {
+			// Re-emit the identical old last line with LF before appending the
+			// comment. A context-only no-newline marker would incorrectly
+			// claim that the new file still ended at that context line.
+			fmt.Fprintf(&patch, "-%s\n\\ No newline at end of file\n+%s\n", line, line)
+		} else {
+			fmt.Fprintf(&patch, " %s\n", line)
+		}
 	}
 	fmt.Fprintf(&patch, "+\n+%s\n", competitionHostQualificationComment)
 	canonical, evalError := ValidateAndCanonicalizePatch(patch.String(), policy)
@@ -331,6 +339,17 @@ func competitionQualificationPatch(path string, source []byte, policy PatchPolic
 		return nil, errors.New("trusted qualification comment is not allowed by the frozen patch policy")
 	}
 	return canonical, nil
+}
+
+// Go ignores testdata and every dot/underscore path component during package
+// discovery. Such fixtures need not contain compilable or nonempty Go source.
+func competitionQualificationVisibleGoPath(path string) bool {
+	for _, component := range strings.Split(path, "/") {
+		if component == "testdata" || strings.HasPrefix(component, ".") || strings.HasPrefix(component, "_") {
+			return false
+		}
+	}
+	return !strings.HasSuffix(path, "_test.go")
 }
 
 // The broad allowlist names repository subtrees, not literal Go files. Select
@@ -360,8 +379,7 @@ func competitionQualificationTreeSourcePath(policy PatchPolicy, tree []byte, set
 		if !regular && !(fields[0] == "120000" && fields[1] == "blob") && !(fields[0] == "160000" && fields[1] == "commit") {
 			return "", errors.New("host qualification committed tree has an unsupported mode or type")
 		}
-		if !regular || filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go") ||
-			strings.HasPrefix(filepath.Base(path), ".") || strings.HasPrefix(filepath.Base(path), "_") || !pathAllowed("server/"+path, policy) {
+		if !regular || filepath.Ext(path) != ".go" || !competitionQualificationVisibleGoPath(path) || !pathAllowed("server/"+path, policy) {
 			continue
 		}
 		if selected == "" || path < selected {

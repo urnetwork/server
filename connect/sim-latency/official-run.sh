@@ -85,6 +85,48 @@ verify_binary_revision() {
     [ "$modified" = false ] || die "$label was built from a modified worktree"
 }
 
+# Only percent/fraction metadata conversion gets two binary64 epsilons of
+# representation slack. Scoring and significance still use the exact margin.
+validate_source_epoch_margin() {
+    jq -e --argjson margin "$APEX_TAKEOVER_MARGIN" --argjson epoch "$APEX_EPOCH" '
+        def equivalent_percent($percent; $fraction):
+            ($fraction * 100) as $converted |
+            if $percent == 0 or $converted == 0 then $percent == $converted
+            else ([1, ($percent | fabs), ($converted | fabs)] | max) as $scale |
+                (($percent - $converted) | fabs) <= (2 * 2.220446049250313e-16 * $scale)
+            end;
+        type == "object" and .schema == 1 and
+        (.epoch | type == "number" and isfinite and . >= 0 and . <= 6 and . % 1 == 0) and
+        .epoch == $epoch and
+        ($margin | type == "number" and isfinite and . >= 0 and . < 1) and
+        (.significant_improvement_percent | type == "number" and isfinite and . >= 0 and . < 100) and
+        equivalent_percent(.significant_improvement_percent; $margin)
+        ' <<<"$1" >/dev/null ||
+        die "takeover margin does not match the configured source epoch"
+}
+
+# This read-only action authenticates the built-in source metadata without
+# services, candidate initialization or simulation; hosts call it before R runs.
+source_margin_preflight() {
+    local name source_epoch
+    for name in APEX_SIM_BIN APEX_SIM_SHA256 APEX_EPOCH APEX_TAKEOVER_MARGIN; do require_var "$name"; done
+    require_command jq
+    require_command sha256sum
+    require_sha256 "$APEX_SIM_SHA256"
+    [[ "$APEX_EPOCH" =~ ^[0-6]$ ]] || die "APEX_EPOCH must be an integer in 0..6"
+    [[ "$APEX_TAKEOVER_MARGIN" =~ ^0\.[0-9]+$ ]] || die "APEX_TAKEOVER_MARGIN must be a decimal fraction"
+    [ -x "$APEX_SIM_BIN" ] || die "simulator binary is not executable"
+    [ "$(sha256_file "$APEX_SIM_BIN")" = "$APEX_SIM_SHA256" ] || die "simulator binary hash mismatch"
+    source_epoch="$(
+        "$APEX_SIM_BIN" source-check \
+            --epoch "$APEX_EPOCH" \
+            --source-config /opt/urnetwork/sim-latency.yml \
+            --repos-root /workspace \
+            --json
+    )" || die "source epoch threshold preflight failed"
+    validate_source_epoch_margin "$source_epoch"
+}
+
 preflight() {
     require_common
     require_command go
@@ -264,19 +306,7 @@ build_baseline_bundle() {
     [ "$(sha256_file "$APEX_SCORER_BIN")" = "$APEX_SCORER_SHA256" ] ||
         die "scorer binary hash mismatch"
 
-    local source_epoch
-    source_epoch="$(
-        "$APEX_SIM_BIN" source-check \
-            --epoch "$APEX_EPOCH" \
-            --source-config /opt/urnetwork/sim-latency.yml \
-            --repos-root /workspace \
-            --json
-    )" || die "source epoch threshold preflight failed"
-    jq -e --argjson margin "$APEX_TAKEOVER_MARGIN" \
-        '.schema == 1 and .epoch >= 0 and
-         .significant_improvement_percent == ($margin * 100)' \
-        <<<"$source_epoch" >/dev/null ||
-        die "takeover margin does not match the configured source epoch"
+    source_margin_preflight
 
     "$APEX_SCORER_BIN" score-baseline \
         --run "$APEX_BASELINE_RUNS" \
@@ -504,6 +534,7 @@ finalize_bundle() {
 usage() {
     printf '%s\n' \
         'usage: official-run.sh preflight' \
+        '       official-run.sh margin-preflight' \
         '       official-run.sh run' \
         '       official-run.sh baseline' \
         '       official-run.sh score' \
@@ -511,6 +542,7 @@ usage() {
 }
 
 case "${1:-}" in
+    margin-preflight) source_margin_preflight ;;
     preflight) preflight ;;
     run)       run_one ;;
     baseline)  build_baseline_bundle ;;

@@ -82,22 +82,29 @@ func snowReviewQualificationMockResponse(t *testing.T, request winnerReviewBroke
 // O_EXCL member files without ever invoking the real wrapper or server.
 type snowReviewQualificationMockOptions struct{ StateDirectory, ProviderSettingsSha256 string }
 
-// Correctness fixes may qualify a new immutable wrapper, but changing output
-// directories or invocation time must never bypass a release's one-shot claim.
+// A genuine wrapper/image/provider fix has a new authenticated release, but
+// changing output directories or time cannot bypass the same release's claim.
 func TestReviewQualificationSnowClaimsBindWrapperRelease(t *testing.T) {
 	provider := defaultWinnerSnowProviderSettings()
 	observed := []string{}
-	for _, digest := range []string{strings.Repeat("b", 64), strings.Repeat("b", 64), strings.Repeat("e", 64)} {
+	for _, release := range []struct{ broker, image, settings string }{
+		{broker: "b", image: "c", settings: "a"},
+		{broker: "b", image: "c", settings: "a"},
+		{broker: "e", image: "c", settings: "a"},
+		{broker: "b", image: "e", settings: "a"},
+		{broker: "b", image: "c", settings: "e"},
+	} {
+		brokerDigest, imageDigest, settingsDigest := strings.Repeat(release.broker, 64), strings.Repeat(release.image, 64), strings.Repeat(release.settings, 64)
 		cases, err := frozenSnowReviewQualificationCases()
 		if err != nil {
 			t.Fatal(err)
 		}
 		plan := reviewQualificationPlan{Schema: 1, Kind: "winner-review-snow-provider-qualification-plan", PolicyModel: model.CompetitionSnowWinnerReviewModel, ProviderModel: model.CompetitionSnowWinnerReviewModel, Reasoning: model.CompetitionSnowWinnerReviewReasoning,
-			BrokerSha256: digest, ImageReceiptSha256: strings.Repeat("c", 64), ProviderSettingsSha256: strings.Repeat("a", 64), Members: provider.Members, Cases: cases}
+			BrokerSha256: brokerDigest, ImageReceiptSha256: imageDigest, ProviderSettingsSha256: settingsDigest, Members: provider.Members, Cases: cases}
 		calls := 0
 		hooks := reviewQualificationHooks{Mode: "offline_unit_mock", Now: time.Now,
 			ValidatePlan: func(plan reviewQualificationPlan) error {
-				return validateSnowReviewQualificationPlan(plan, provider, strings.Repeat("a", 64))
+				return validateSnowReviewQualificationPlan(plan, provider, settingsDigest)
 			},
 			AuthenticateContainment: func([]byte, []byte, []byte, bool) (string, error) { return strings.Repeat("d", 64), nil },
 			Invoke: func(_ context.Context, input []byte) ([]byte, []byte, error) {
@@ -115,12 +122,20 @@ func TestReviewQualificationSnowClaimsBindWrapperRelease(t *testing.T) {
 		if err == nil || report.Qualified || calls != 2 {
 			t.Fatalf("mock transport stop unexpectedly qualified or changed calls: %+v %v calls=%d", report, err, calls)
 		}
-		if observed[len(observed)-1] != cases[1].Request.Template.IdempotencyKey+":"+digest {
-			t.Fatal("qualification claim is not bound to the authenticated immutable wrapper")
+		expectedPins := fmt.Sprintf(`{"broker_sha256":"%s","image_receipt_sha256":"%s","provider_settings_sha256":"%s"}`, brokerDigest, imageDigest, settingsDigest)
+		if observed[len(observed)-1] != cases[1].Request.Template.IdempotencyKey+":"+reviewQualificationHash([]byte(expectedPins)) {
+			t.Fatal("qualification claim is not bound to all authenticated immutable release pins")
 		}
 	}
 	if observed[0] != observed[1] || observed[0] == observed[2] {
 		t.Fatal("same release can reroll, or a genuinely changed release cannot qualify")
+	}
+	seen := map[string]bool{observed[0]: true}
+	for _, key := range observed[2:] {
+		if seen[key] {
+			t.Fatal("distinct authenticated releases collided")
+		}
+		seen[key] = true
 	}
 }
 
