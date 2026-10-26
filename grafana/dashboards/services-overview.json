@@ -79,7 +79,7 @@
             "id": 17,
             "type": "stat",
             "title": "PgBouncer clients waiting (5m avg)",
-            "description": "Clients queued for a PgBouncer server connection, summed over every pool of every instance in the env and averaged over five minutes (pgbouncer_pool_clients_waiting, SHOW POOLS cl_waiting read every 15 s). Normal is 0. Orange at 100 (warn) and red at 1,000 (page), the SIGNALS.md section 26 thresholds. On 2026-10-26 it held thousands for hours while every server connection was busy and PostgreSQL sat idle in transaction, waiting on CPU-starved clients. Detail: the postgres dashboard's backlog row. Fleet-wide in the selected env; the service, block and host pickers do not apply.",
+            "description": "Clients queued for a PgBouncer server connection, summed over every pool of every instance in the env and averaged over five minutes (pgbouncer_pool_clients_waiting, SHOW POOLS cl_waiting read every 15 s). Normal is 0. Orange from 100, red from 1,000 (SIGNALS.md section 26): the WARN needs 10 minutes above 100, or the oldest wait above 0.5 s for 10 minutes; the PAGE needs 5 minutes above 1,000. Bursts past 100 for 5-6 minutes happen without an incident. On 2026-10-26 it held thousands for hours while every server connection was busy and PostgreSQL sat idle in transaction, waiting on CPU-starved clients. Detail: the postgres dashboard's backlog row. Fleet-wide in the selected env; the service, block and host pickers do not apply.",
             "gridPos": {
                 "h": 4,
                 "w": 6,
@@ -143,7 +143,7 @@
             "id": 18,
             "type": "stat",
             "title": "highest service DB acquire wait",
-            "description": "Mean time a service waited to check out a PostgreSQL connection from its default pool over five minutes: acquire wait seconds over successful acquires, summed over the service's processes, highest service shown. Red at 100 ms (SIGNALS.md section 26). It climbs when PgBouncer queues or a pool is fully checked out; acquires abandoned before a connection came are not in the mean. Detail: the postgres dashboard's backlog row. Fleet-wide in the selected env; the service, block and host pickers do not apply.",
+            "description": "Mean time a service waited to check out a PostgreSQL connection from its default pool over five minutes: acquire wait seconds over successful acquires, summed over the service's processes, highest service shown. Orange from 100 ms: the WARN of SIGNALS.md section 26 needs 5 minutes above it. A service with few acquires (alt, gossip, mcp) can swing on a handful of slow ones, and abandoned acquires are not timed. Detail: the postgres dashboard's backlog row. Fleet-wide in the selected env; the service, block and host pickers do not apply.",
             "gridPos": {
                 "h": 4,
                 "w": 6,
@@ -168,7 +168,7 @@
                                 "value": null
                             },
                             {
-                                "color": "red",
+                                "color": "orange",
                                 "value": 0.1
                             }
                         ]
@@ -201,8 +201,8 @@
         {
             "id": 19,
             "type": "stat",
-            "title": "busiest services-edge CPU",
-            "description": "Busy share of all cores (1 - idle) over five minutes on the busiest host running connect, the services edges that also run api and taskworker. Red at 85% (SIGNALS.md section 26). On 2026-10-26 the edges ran 82-90% busy, and their CPU-starved clients held PgBouncer server connections idle in transaction. Detail: host metrics, and cpu (cores) below with service connect. Fleet-wide in the selected env; the service, block and host pickers do not apply.",
+            "title": "services-edge CPU: 4 edges and busiest",
+            "description": "Busy share (neither idle nor I/O wait, summed over the CPUs before dividing) over five minutes of the hosts that run connect, the services edges that also run api and taskworker: the four together, orange from 80%, and the busiest edge, orange from 85%. WARN (SIGNALS.md section 26) when the four together stay above 80% for 10 minutes, or one edge above 85% for 30 minutes; a placement hot spot can hold one edge high for hours without a fault, hence the longer hold. On 2026-10-26 the four together held 82% through the night, and their CPU-starved clients held PgBouncer server connections idle in transaction. Detail: the postgres dashboard's backlog row. Fleet-wide in the selected env; the service, block and host pickers do not apply.",
             "gridPos": {
                 "h": 4,
                 "w": 6,
@@ -230,13 +230,38 @@
                                 "value": null
                             },
                             {
-                                "color": "red",
-                                "value": 0.85
+                                "color": "orange",
+                                "value": 0.8
                             }
                         ]
                     }
                 },
-                "overrides": []
+                "overrides": [
+                    {
+                        "matcher": {
+                            "id": "byName",
+                            "options": "busiest edge"
+                        },
+                        "properties": [
+                            {
+                                "id": "thresholds",
+                                "value": {
+                                    "mode": "absolute",
+                                    "steps": [
+                                        {
+                                            "color": "green",
+                                            "value": null
+                                        },
+                                        {
+                                            "color": "orange",
+                                            "value": 0.85
+                                        }
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                ]
             },
             "options": {
                 "reduceOptions": {
@@ -250,13 +275,19 @@
                 "graphMode": "area",
                 "justifyMode": "auto",
                 "orientation": "auto",
-                "textMode": "auto",
+                "textMode": "value_and_name",
                 "wideLayout": true
             },
             "targets": [
                 {
                     "refId": "A",
-                    "expr": "max((1 - avg by (host) (rate(node_cpu_seconds_total{env=\"$env\",job=\"node\",mode=\"idle\"}[5m]))) and on (host) count by (host) (go_goroutines{env=\"$env\",service=\"connect\",instance!=\"\"}))"
+                    "expr": "1 - sum(sum by (host) (rate(node_cpu_seconds_total{env=\"$env\",job=\"node\",mode=~\"idle|iowait\"}[5m])) and on (host) count by (host) (go_goroutines{env=\"$env\",service=\"connect\",instance!=\"\"})) / sum(sum by (host) (rate(node_cpu_seconds_total{env=\"$env\",job=\"node\"}[5m])) and on (host) count by (host) (go_goroutines{env=\"$env\",service=\"connect\",instance!=\"\"}))",
+                    "legendFormat": "4 edges"
+                },
+                {
+                    "refId": "B",
+                    "expr": "max(1 - sum by (host) (rate(node_cpu_seconds_total{env=\"$env\",job=\"node\",mode=~\"idle|iowait\"}[5m])) / sum by (host) (rate(node_cpu_seconds_total{env=\"$env\",job=\"node\"}[5m])) and on (host) count by (host) (go_goroutines{env=\"$env\",service=\"connect\",instance!=\"\"}))",
+                    "legendFormat": "busiest edge"
                 }
             ]
         },
@@ -264,7 +295,7 @@
             "id": 20,
             "type": "stat",
             "title": "busiest proxy host CPU",
-            "description": "Busy share of all cores (1 - idle) over five minutes on the busiest host running the proxy. Red at 85% (SIGNALS.md section 26). The proxy hosts ran above 90% busy in the 2026-10-26 contract-creation storm. Detail: the proxy dashboard's contract creation storm row. Fleet-wide in the selected env; the service, block and host pickers do not apply.",
+            "description": "Busy share (neither idle nor I/O wait) over five minutes of the busiest host running the proxy. Orange from 85%: the WARN of SIGNALS.md section 26 needs 10 minutes above it. Healthy is 9-51%; the proxy hosts ran 89-96% busy in the 2026-10-26 contract-creation storm. Detail: the proxy dashboard's contract creation storm row. Fleet-wide in the selected env; the service, block and host pickers do not apply.",
             "gridPos": {
                 "h": 4,
                 "w": 6,
@@ -292,7 +323,7 @@
                                 "value": null
                             },
                             {
-                                "color": "red",
+                                "color": "orange",
                                 "value": 0.85
                             }
                         ]
@@ -318,7 +349,7 @@
             "targets": [
                 {
                     "refId": "A",
-                    "expr": "max((1 - avg by (host) (rate(node_cpu_seconds_total{env=\"$env\",job=\"node\",mode=\"idle\"}[5m]))) and on (host) count by (host) (go_goroutines{env=\"$env\",service=\"proxy\",instance!=\"\"}))"
+                    "expr": "max(1 - sum by (host) (rate(node_cpu_seconds_total{env=\"$env\",job=\"node\",mode=~\"idle|iowait\"}[5m])) / sum by (host) (rate(node_cpu_seconds_total{env=\"$env\",job=\"node\"}[5m])) and on (host) count by (host) (go_goroutines{env=\"$env\",service=\"proxy\",instance!=\"\"}))"
                 }
             ]
         },
@@ -326,7 +357,7 @@
             "id": 21,
             "type": "stat",
             "title": "stuck contract creations, busiest process",
-            "description": "CreateContract calls now in stage other in the busiest process of any service. Stage other counts the time no stage instruments; in the 2026-10-26 storm each proxy process held about 9k failed calls there, waiting out their reservation cleanup. Red at 1,000 per process (SIGNALS.md section 26). Fleet-wide in the selected env; the service, block and host pickers do not apply.",
+            "description": "CreateContract calls in stage other in the busiest process of any service, as each process's two-minute maximum. Stage other counts the time no stage instruments; in the 2026-10-26 storm each proxy process held about 9k failed calls there, waiting out their reservation cleanup. Red from 1,000: the PAGE of SIGNALS.md section 26 needs 5 minutes above it. Healthy is at most 30. Fleet-wide in the selected env; the service, block and host pickers do not apply.",
             "gridPos": {
                 "h": 4,
                 "w": 4,
@@ -378,15 +409,15 @@
             "targets": [
                 {
                     "refId": "A",
-                    "expr": "max(sum by (service, host, block, instance) (urnetwork_contract_creation_stage_inflight{env=\"$env\",stage=\"other\",instance!=\"\"}))"
+                    "expr": "max(sum by (service, host, block, instance) (max_over_time(urnetwork_contract_creation_stage_inflight{env=\"$env\",stage=\"other\",instance!=\"\"}[2m])))"
                 }
             ]
         },
         {
             "id": 22,
             "type": "stat",
-            "title": "highest contract-creation cancel ratio",
-            "description": "Share of returned CreateContract calls that ended canceled over five minutes, per service, highest service shown; services returning under 1 call/s are left out. Red at 20% (SIGNALS.md section 26). The proxy reached 78% in the 2026-10-26 storm. Fleet-wide in the selected env; the service, block and host pickers do not apply.",
+            "title": "highest contract-creation failure share",
+            "description": "(canceled + panic) over (contract_reply + canceled + panic) per service over five minutes, as SIGNALS.md section 25.1 defines it, for services returning at least 20 such calls/s; highest service shown. protocol_reject stays out, since it would swamp the share. Orange from 5% (the WARN, 10 minutes), red from 20% (the PAGE of SIGNALS.md section 26, 5 minutes). Healthy is 0-1.3%; the proxy reached 92-97% in the 2026-10-26 storm. Fleet-wide in the selected env; the service, block and host pickers do not apply.",
             "gridPos": {
                 "h": 4,
                 "w": 4,
@@ -410,6 +441,10 @@
                             {
                                 "color": "green",
                                 "value": null
+                            },
+                            {
+                                "color": "orange",
+                                "value": 0.05
                             },
                             {
                                 "color": "red",
@@ -438,15 +473,15 @@
             "targets": [
                 {
                     "refId": "A",
-                    "expr": "max(sum by (service) (rate(urnetwork_contract_creation_completed_total{env=\"$env\",outcome=\"canceled\",instance!=\"\"}[5m])) / (sum by (service) (rate(urnetwork_contract_creation_completed_total{env=\"$env\",instance!=\"\"}[5m])) > 1))"
+                    "expr": "max(sum by (service) (rate(urnetwork_contract_creation_completed_total{env=\"$env\",instance!=\"\",outcome=~\"canceled|panic\"}[5m])) / (sum by (service) (rate(urnetwork_contract_creation_completed_total{env=\"$env\",instance!=\"\",outcome=~\"contract_reply|canceled|panic\"}[5m])) >= 20))"
                 }
             ]
         },
         {
             "id": 23,
             "type": "stat",
-            "title": "release-pending errors / s",
-            "description": "Redis release-pending calls that failed, per second over five minutes, all services: reservation cleanup that could not reach Redis. Red at 10/s (SIGNALS.md section 26). None all day before the 2026-10-26 storm; 86k/s at its peak. Fleet-wide in the selected env; the service, block and host pickers do not apply.",
+            "title": "highest release-pending errors / s",
+            "description": "Redis release-pending calls that failed, per second over five minutes, for the service with the most: reservation cleanup that could not reach Redis. Orange from 10/s: the WARN of SIGNALS.md section 26 needs 5 minutes above it. Healthy is at most 0.6/s; 86k/s at the 2026-10-26 storm's peak. Fleet-wide in the selected env; the service, block and host pickers do not apply.",
             "gridPos": {
                 "h": 4,
                 "w": 4,
@@ -471,7 +506,7 @@
                                 "value": null
                             },
                             {
-                                "color": "red",
+                                "color": "orange",
                                 "value": 10
                             }
                         ]
@@ -497,7 +532,7 @@
             "targets": [
                 {
                     "refId": "A",
-                    "expr": "sum(rate(urnetwork_redis_contract_reservation_total{env=\"$env\",operation=\"release-pending\",result=\"error\",instance!=\"\"}[5m]))"
+                    "expr": "max(sum by (service) (rate(urnetwork_redis_contract_reservation_total{env=\"$env\",operation=\"release-pending\",result=\"error\",instance!=\"\"}[5m])))"
                 }
             ]
         },
@@ -505,7 +540,7 @@
             "id": 24,
             "type": "stat",
             "title": "highest Redis pool timeouts / s",
-            "description": "Highest rate of go-redis pool timeouts of any service over five minutes (urnetwork_redis_pool_timeouts_total, summed over the service's processes): commands that waited past the pool timeout for a connection. Red at 10/s (SIGNALS.md section 26). The proxy reached 12-14k/s in the 2026-10-26 storm. Fleet-wide in the selected env; the service, block and host pickers do not apply.",
+            "description": "Highest rate of go-redis pool timeouts of any service over five minutes (urnetwork_redis_pool_timeouts_total, summed over the service's processes): commands that waited past the pool timeout for a connection. Orange from 10/s, the WARN of SIGNALS.md section 26 after 5 minutes; red from 1,000/s, the PAGE of SIGNALS.md section 3.5b. Healthy is 0. The proxy reached 12-14k/s in the 2026-10-26 storm. Fleet-wide in the selected env; the service, block and host pickers do not apply.",
             "gridPos": {
                 "h": 4,
                 "w": 4,
@@ -530,8 +565,12 @@
                                 "value": null
                             },
                             {
-                                "color": "red",
+                                "color": "orange",
                                 "value": 10
+                            },
+                            {
+                                "color": "red",
+                                "value": 1000
                             }
                         ]
                     }
@@ -564,7 +603,7 @@
             "id": 25,
             "type": "stat",
             "title": "busiest Redis main thread",
-            "description": "Highest main-thread CPU of any Redis node: user plus system seconds per second of the thread that runs commands and accepts connections, over five minutes (1.0 is one full core, all that thread can use). Red at 0.85 (SIGNALS.md section 26). Normal is 0.4-0.5. In the 2026-10-26 storm single nodes ran 0.97-0.98, mostly on connection handling. Fleet-wide in the selected env; the service, block and host pickers do not apply.",
+            "description": "Highest main-thread CPU of any Redis node: user plus system seconds per second of the thread that runs commands and accepts connections, over five minutes (1.0 is one full core, all that thread can use). Orange from 0.85: the WARN of SIGNALS.md section 26 needs 10 minutes above it. Healthy is at most 0.64. In the 2026-10-26 storm single nodes ran 0.97-0.98, mostly on connection handling. Fleet-wide in the selected env; the service, block and host pickers do not apply.",
             "gridPos": {
                 "h": 4,
                 "w": 4,
@@ -592,7 +631,7 @@
                                 "value": null
                             },
                             {
-                                "color": "red",
+                                "color": "orange",
                                 "value": 0.85
                             }
                         ]
@@ -626,7 +665,7 @@
             "id": 26,
             "type": "stat",
             "title": "highest Redis HELLO rate",
-            "description": "Highest per-node rate of HELLO over five minutes. go-redis opens every new connection with HELLO, so this is connection churn. Red at 500/s (SIGNALS.md section 26). Near 0 normally; thousands per second on single nodes in the 2026-10-26 storm, when the proxies' Redis clients reconnected after timeouts. Fleet-wide in the selected env; the service, block and host pickers do not apply.",
+            "description": "Highest per-node rate of HELLO over five minutes. go-redis opens every new connection with HELLO, so this is connection churn. Orange from 500/s: the WARN of SIGNALS.md section 26 needs 5 minutes above it. Healthy is at most 12/s; thousands per second on single nodes in the 2026-10-26 storm, when the proxies' Redis clients reconnected after timeouts. Fleet-wide in the selected env; the service, block and host pickers do not apply.",
             "gridPos": {
                 "h": 4,
                 "w": 4,
@@ -651,7 +690,7 @@
                                 "value": null
                             },
                             {
-                                "color": "red",
+                                "color": "orange",
                                 "value": 500
                             }
                         ]
