@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/urnetwork/server"
@@ -216,15 +214,38 @@ func countProvidersByCountry(ctx context.Context, conn server.PgConn) []Provider
 
 // process-local stamp throttle: skips the db probe entirely on the
 // contract hot path (`createTransferEscrowInTx` runs before every transfer
-// pair). The db-side predicate remains the authority — after a process
-// restart the worst case is one extra probe per paying client.
-var contractTimeStampGate sync.Map // payer client id -> last stamp time.Time
-var contractTimeStampGateCount atomic.Int64
+// pair). It is keyed by the top-level identity a stamp writes, so every
+// child of one top-level client shares one entry: a hosted proxy's payers are
+// its per-window children, and a gate keyed by payer never hit for them. The
+// recorded time is the marker the database last reported, so the gate skips
+// only a stamp the db-side predicate would skip too. After a process restart
+// the worst case is one extra probe per top-level identity.
+var contractTimeStampGate = newBoundedClientMap[time.Time](contractTimeStampGateMaxCount)
 
-// bounds the gate map: paying client ids churn (window clients are
-// per-stream), so entries accumulate for the process lifetime. A wholesale
-// clear costs one extra db probe per client.
+// bounds the gate map: top-level identities are few, but a payer whose
+// top-level identity this process has not seen keys the gate by itself
 const contractTimeStampGateMaxCount = 100_000
+
+// The top-level identity of each contract client this process share-locked at
+// a contract's lifecycle boundary (`lockActiveContractClientsInTx`), so the
+// stamp after commit keys its gate without a round trip. source_client_id
+// never changes once a client exists, so an entry stays true for the row's
+// life.
+var contractClientTopLevels = newBoundedClientMap[server.Id](contractClientTopLevelsMaxCount)
+
+// An entry is needed only from the lifecycle read to the stamp after commit;
+// the bound keeps per-window churn small.
+const contractClientTopLevelsMaxCount = 16_384
+
+// Remembers the top-level identity of a client read at a contract's lifecycle
+// boundary: its source client, or the client itself when it is top-level.
+func rememberContractClientTopLevel(clientId server.Id, sourceClientId *server.Id) {
+	topLevelClientId := clientId
+	if sourceClientId != nil {
+		topLevelClientId = *sourceClientId
+	}
+	contractClientTopLevels.Store(clientId, topLevelClientId)
+}
 
 // StampTopLevelClientContractTime records contract-creating usage for the
 // top-level identity of payerClientId: it sets contract_time = now on the
@@ -236,15 +257,18 @@ const contractTimeStampGateMaxCount = 100_000
 // within the hour).
 func StampTopLevelClientContractTime(ctx context.Context, payerClientId server.Id) {
 	now := server.NowUtc()
-	if last, ok := contractTimeStampGate.Load(payerClientId); ok {
-		if now.Sub(last.(time.Time)) < clientAuthTimeRefreshMinInterval {
-			return
-		}
-	} else if contractTimeStampGateMaxCount < contractTimeStampGateCount.Add(1) {
-		contractTimeStampGate.Clear()
-		contractTimeStampGateCount.Store(1)
+	// a payer this process has not seen at a lifecycle boundary keys the gate
+	// by itself, which is exact for a top-level payer
+	topLevelClientId, ok := contractClientTopLevels.Load(payerClientId)
+	if !ok {
+		topLevelClientId = payerClientId
 	}
-	contractTimeStampGate.Store(payerClientId, now)
+	if stampedTime, ok := contractTimeStampGate.Load(topLevelClientId); ok && now.Sub(stampedTime) < clientAuthTimeRefreshMinInterval {
+		return
+	}
+	// claimed before the write, so concurrent contracts of one identity do
+	// not all probe
+	contractTimeStampGate.Store(topLevelClientId, now)
 
 	server.HandleError(func() {
 		defer func() {
@@ -252,31 +276,61 @@ func StampTopLevelClientContractTime(ctx context.Context, payerClientId server.I
 				if err, ok := r.(error); ok && server.IsLockTimeout(err) {
 					// the row's lockers held it past the bound: a later
 					// contract stamps it after the retry interval, not the hour
-					contractTimeStampGate.Store(payerClientId, now.Add(contractTimeStampRetryInterval-clientAuthTimeRefreshMinInterval))
+					contractTimeStampGate.Store(topLevelClientId, now.Add(contractTimeStampRetryInterval-clientAuthTimeRefreshMinInterval))
 					return
 				}
 				panic(r)
 			}
 		}()
+		var stampedTopLevelClientId server.Id
+		var contractTime *time.Time
+		found := false
 		// a bounded wait, so the stamp never pins a pooled server behind the
 		// row's lockers (every contract creation share-locks client rows)
 		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(
+			found = false
+			result, err := tx.Query(
 				ctx,
 				`
-	                UPDATE network_client AS top
-	                SET contract_time = $2
-	                FROM network_client AS payer
-	                WHERE
-	                    payer.client_id = $1 AND
-	                    top.client_id = COALESCE(payer.source_client_id, payer.client_id) AND
-	                    (top.contract_time IS NULL OR top.contract_time < $3)
-	            `,
+					WITH top_level AS (
+						SELECT top.client_id, top.contract_time
+						FROM network_client AS payer
+						INNER JOIN network_client AS top ON
+							top.client_id = COALESCE(payer.source_client_id, payer.client_id)
+						WHERE payer.client_id = $1
+					),
+					stamp AS (
+						UPDATE network_client
+						SET contract_time = $2
+						FROM top_level
+						WHERE
+							network_client.client_id = top_level.client_id AND
+							(network_client.contract_time IS NULL OR network_client.contract_time < $3)
+						RETURNING network_client.contract_time
+					)
+					SELECT
+						top_level.client_id,
+						COALESCE((SELECT stamp.contract_time FROM stamp), top_level.contract_time)
+					FROM top_level
+				`,
 				payerClientId,
 				now,
 				now.Add(-clientAuthTimeRefreshMinInterval),
-			))
+			)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(&stampedTopLevelClientId, &contractTime))
+					found = true
+				}
+			})
 		}, server.TxReadCommitted, server.TxLockTimeout(contractTimeStampLockTimeout))
+		if found && contractTime != nil {
+			// the marker the database holds: no later than the true marker,
+			// which only moves forward, so the gate never skips a stamp the
+			// db-side predicate would make
+			contractClientTopLevels.Store(payerClientId, stampedTopLevelClientId)
+			contractTimeStampGate.Store(stampedTopLevelClientId, *contractTime)
+		}
 	})
 }
 
@@ -292,7 +346,7 @@ const contractTimeStampRetryInterval = time.Minute
 // throttle so a test can observe consecutive stamps.
 func Testing_ResetContractTimeStampGate() {
 	contractTimeStampGate.Clear()
-	contractTimeStampGateCount.Store(0)
+	contractClientTopLevels.Clear()
 }
 
 // CountTopLevelClientsWithContractSince returns the number of unique
