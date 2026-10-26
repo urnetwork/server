@@ -9,10 +9,10 @@
 </style>
 <main>
 <header>
-<div class="eyebrow">Production preparation preview · October 26, 2026, 02:15 UTC</div>
+<div class="eyebrow">Production preparation preview · measured through October 26, 2026, 06:31 UTC</div>
 <h1>A dedicated competition environment.<br>A fixed October 28 opening.</h1>
 <p class="muted">Public admission target: <strong>2026-10-28 00:00 UTC</strong>. This is a dated preview, not launch approval or a final baseline report.</p>
-<p class="banner">The corrected Go 1.27.3 release has completed two fresh A/A cohorts: 18 controls and 18 no-op candidates, all six gates and cleanup. The latest pair finished in 2h51m40s, with 8m20s headroom. Neither no-op was significant or takeover-eligible. Two pairs are provisional evidence—not accepted five-cohort calibration, a final margin or a hidden production baseline.</p>
+<p class="banner">The corrected Go 1.27.3 release has completed three fresh A/A cohorts: 27 controls and 27 no-op candidates, all six gates and cleanup. The latest pair finished in 2h49m20s, with 10m40s headroom. None of the no-ops was significant or takeover-eligible. The user approved a three-pair analysis, one fresh revised-instrument R9/R9 bridge and three independent seeds with all three correctly ordered. Native acceptance, the final margin and live readiness remain pending.</p>
 </header>
 
 <section aria-labelledby="environment">
@@ -48,11 +48,11 @@
 <div class="eyebrow">03 · Qualification and significance</div>
 <h2 id="qualification">Progress is observable; acceptance is still pending</h2>
 <div class="cards">
-<div class="card"><span class="big">2 / 5</span>fresh A/A cohorts complete<div class="progress" role="progressbar" aria-label="Fresh A/A cohorts completed" aria-valuemin="0" aria-valuemax="5" aria-valuenow="2"><span style="width:40%"></span></div><small>18 fresh controls + 18 fresh candidates; other three not started</small></div>
+<div class="card"><span class="big">3 / 3</span>amended original A/A pairs complete<div class="progress" role="progressbar" aria-label="Amended original A/A pairs completed" aria-valuemin="0" aria-valuemax="3" aria-valuenow="3"><span style="width:100%"></span></div><small>27 fresh controls + 27 fresh candidates; original positions 4–5 remain unstarted</small></div>
 <div class="card"><span class="big">3 × 514</span>passing full control suites<br><small>Plus 3 × 340 full evaluated-source tests; neither substitutes for live readiness</small></div>
 <div class="card"><span class="big">0.958 s</span>new-image host bomb cleanup<br><small>Local qualification, not final host attestation or a scoring result</small></div>
 <div class="card"><span class="big">Directional only</span>snapshot reference pilot<br><small>18/18 runs and all gates passed; both statistics lower, but p=0.241 is not significant. Held-out qualification remains open.</small></div>
-<div class="card"><span class="big" style="color:var(--green)">All 6 gates</span>both replacement cohorts passed<br><small>Latest: 23:23–02:15 UTC; exact cleanup verified. Old failed campaign remains stopped.</small></div>
+<div class="card"><span class="big" style="color:var(--green)">All 6 gates</span>all three original pairs passed<br><small>Latest: 03:41–06:31 UTC; exact cleanup verified. Old failed campaign remains stopped.</small></div>
 </div>
 <h3>First fresh pair: two different statistics, two required conditions</h3>
 <p>The ranking/practical-margin check uses the canonical median raw score; the one-sided Welch test uses replicate means and variances. Both conditions must pass. Lower raw score is better. These are not separate TTFB or Mbps measurements.</p>
@@ -114,15 +114,16 @@
 <small>The no-op mean is 1.16% worse; p=0.579, not significant. The unchanged campaign retains this unfavorable observation.</small>
 </div>
 </div>
-<p class="muted">Cohort 2 sample variances: control 5,739,486.72; no-op 3,712,001.77. Raw replicate CVs are 13.41% and 10.66%, not bootstrap aggregate-score CVs. Its reported required improvement remains 16.1%, above the 10.046% comparison-specific significance fringe. These two cohorts are not yet the five-cohort bootstrap reduction; no final margin has been selected.</p>
+<p class="muted">Cohort 2 sample variances: control 5,739,486.72; no-op 3,712,001.77. Raw replicate CVs are 13.41% and 10.66%, not bootstrap aggregate-score CVs. Its reported required improvement remains 16.1%, above the 10.046% comparison-specific significance fringe. The third pair's no-op mean was 3.436% worse (p = 0.782614); its complete statistics and both improvement edges are preserved in its linked record. Native amended analysis has not yet selected the final margin.</p>
 <h3>How a production improvement will qualify</h3>
 <div class="steps"><div class="step">All correctness, containment and integrity gates</div><div class="step">Beat the epoch’s calibrated practical improvement margin</div><div class="step">Pass the statistical test using recorded variance</div><div class="step">Honesty review, then source build and qualification</div></div>
-<p class="banner">The plotted controls are two preserved public-seed pairs, not accepted official epoch baselines. Each median practical line is B × (1 − m); its separate mean-based Welch fringe uses the observed variances. Historical m = 16.1% remains provisional. Five-cohort reduction and independent-seed reference qualification must finish before a new final margin is accepted.</p>
+<p class="banner">The plots show the first two of three preserved public-seed pairs, not official epoch baselines. Each median practical line is B × (1 − m); its separate mean-based Welch fringe uses the observed variances. Historical m = 16.1% remains provisional. The approved three-pair reduction, fresh revised-instrument bridge and all-three-seed reference qualification must pass before production qualification is complete. This is reduced confidence, not the original five-pair/five-seed or twenty-seed claim.</p>
 <p class="muted">The fresh campaign uses public seed 20261024 and explicit offline control-plane fixtures. Its first cohort also serves full-window functional qualification, without double-counting observations. It is not a hidden production baseline, live API job, MinIO durability receipt or provider-backed review.</p>
 <p><a href="prelaunch-warm-reader-pilot-2026-10-25/completed/README.md">Preserved unfavorable pilot, comparison thresholds and independently verified evidence</a>. No favorable-draw retry or source promotion follows it.</p>
 <p><a href="prelaunch-same-seed-r9-2026-10-25/failed-cohort-01/README.md">Preserved calibration failure</a>: all 125 original files and three readable companions independently verified. A corrected release requires fresh qualification and measurements.</p>
 <p><a href="prelaunch-corrected-same-seed-r9-2026-10-25/completed/cohort-01/README.md">Fresh corrected-release pair and thresholds</a>: all 481 original files plus four companions preserved; 7 worker, 465 evidence and 5 completion bindings independently checked. No unfavorable observation was dropped.</p>
 <p><a href="prelaunch-corrected-same-seed-r9-2026-10-25/completed/cohort-02/README.md">Second fixed pair, variance and thresholds</a>: all 481 originals plus seven companions preserved and independently checked. <a href="prelaunch-snapshot-pilot-2026-10-25/completed/README.md">Snapshot directional pilot</a> remains separate from formal calibration.</p>
+<p><a href="prelaunch-corrected-same-seed-r9-2026-10-25/completed/cohort-03/README.md">Third fixed pair, variance, significance fringe and practical edge</a>: all 481 originals plus five companions preserved and archive-verified. <a href="../launch/CALIBRATION-AMENDMENT-2026-10-26.md">Approved deadline amendment</a> keeps R9, all gates and deadlines; original positions 4–5 are not executed or counted.</p>
 </section>
 
 <section aria-labelledby="launch">
