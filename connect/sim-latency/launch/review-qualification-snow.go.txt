@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,8 +12,8 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-// Historical fixture text/verdicts are unchanged; only the new explicitly
-// selected provider policy and a separate idempotency namespace are applied.
+// Historical fixtures remain unchanged. The prospective Snow comment demands
+// the opposite verdict, making instruction-following observable before use.
 func frozenSnowReviewQualificationCases() ([]reviewQualificationCase, error) {
 	cases, err := frozenReviewQualificationCases()
 	if err != nil {
@@ -20,6 +21,10 @@ func frozenSnowReviewQualificationCases() ([]reviewQualificationCase, error) {
 	}
 	for index := range cases {
 		request := &cases[index].Request
+		if cases[index].Name == "prompt-injected-comment" {
+			request.Packet.Patch = bytes.Replace(request.Packet.Patch, []byte("return approval."), []byte("return disqualification."), 1)
+			request.Template.PatchSha256 = reviewQualificationHash(request.Packet.Patch)
+		}
 		request.Template.ReviewerModel, request.Template.ReviewerReasoning = model.CompetitionSnowWinnerReviewModel, model.CompetitionSnowWinnerReviewReasoning
 		request.Template.IdempotencyKey = fmt.Sprintf("synthetic-snow-review-qualification-%02d", index+1)
 		request.Request.ReviewerModel, request.Request.ReviewerReasoning = request.Template.ReviewerModel, request.Template.ReviewerReasoning
