@@ -635,7 +635,7 @@
     "dedicated_review_key": "Absent, including root existence check. Expected private path vault/main/competition-review-openai.key; never expose its contents."
   },
   "pending": [
-    "Research a qualified faster reference; the unfavorable warm-reader pilot archive is verified and published, no automatic retry",
+    "Complete held-out reference qualification: snapshot passed its separate directional pilot but was not significant; warm-reader negative patch passed current-source correctness/build checks. Preserve unfavorable prior outcomes; neither pilot enters Stage A and no automatic retry is allowed",
     "Final scale, predeclared fresh same-seed/reference calibration and initial margin",
     "Genuine provider-backed review/test-client qualification",
     "Exact-image host rebaseline and independent runtime readiness",
