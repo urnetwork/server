@@ -19,8 +19,8 @@ the same local gVisor sibling, whose revision is locked by the same file. Frozen
 PERF arms therefore use their own captured source. The release builder converts
 this local replacement to the checked-out fork's immutable module revision when
 preparing published modules.
-The source gate also compiles the taskworker and `bringyourctl` commands and the
-payout regression packages against the locked siblings. It uses the populated
+The source gate also compiles the API, taskworker and `bringyourctl` commands and
+their regression packages against the locked siblings. It uses the populated
 module cache without fetching from the network or starting the applications or
 integration fixtures.
 

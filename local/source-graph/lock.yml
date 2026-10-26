@@ -31,7 +31,7 @@ siblings:
     ref: 142b48b4553e819537a17b108ce3824d0547857e
   - repository: urfoundation/sn
     path: sn
-    ref: 5ddaa4ac2f151a68ed23d1e3a1399283babc06df
+    ref: ddeb1a55dede0c0ded74ada249c5b443b502ad77
   # Server and SN's fixture generator use this same reviewed fork. Published
   # release modules receive an immutable replacement from the builder.
   - repository: urnetwork/gvisor
