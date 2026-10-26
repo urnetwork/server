@@ -117,7 +117,7 @@ func bindCalibrationProtocolPublications(settings calibrationAnalysisSettings, a
 		}
 		seenIdBools[position.JobId], seenIdBools[position.RoundId] = true, true
 		seenRootBools[position.Root] = true
-		if _, err := readCalibrationArtifact(position.Root, "worker-request.json", position.RequestSha256); err != nil {
+		if _, err := readCalibrationArtifact(filepath.Join(position.Root, "artifacts"), "worker-request.json", position.RequestSha256); err != nil {
 			return settings, errors.New("original five-position request inventory not retained")
 		}
 		if _, err := readCalibrationArtifact(position.Root, "fixture-provenance.json", position.ProvenanceSha256); err != nil {

@@ -36,8 +36,11 @@ func newCalibrationProtocolFixture(t *testing.T) (calibrationAnalysisSettings, c
 		if err := os.Mkdir(positionRoot, 0700); err != nil {
 			t.Fatal(err)
 		}
+		if err := os.Mkdir(filepath.Join(positionRoot, "artifacts"), 0700); err != nil {
+			t.Fatal(err)
+		}
 		positions = append(positions, calibrationOriginalPosition{Position: index, JobId: fmt.Sprintf("synthetic-job-%d", index), RoundId: fmt.Sprintf("synthetic-round-%d", index), Root: positionRoot,
-			RequestSha256: write(filepath.Join(positionRoot, "worker-request.json"), []byte(fmt.Sprintf("synthetic original request %d", index))), ProvenanceSha256: write(filepath.Join(positionRoot, "fixture-provenance.json"), []byte(fmt.Sprintf("synthetic provenance %d", index)))})
+			RequestSha256: write(filepath.Join(positionRoot, "artifacts", "worker-request.json"), []byte(fmt.Sprintf("synthetic original request %d", index))), ProvenanceSha256: write(filepath.Join(positionRoot, "fixture-provenance.json"), []byte(fmt.Sprintf("synthetic provenance %d", index)))})
 	}
 	plan := map[string]any{"schema": 1, "kind": "prepared-corrected-release-five-cohort-aa-plan", "ordered_cohorts": positions, "base_sha": strings.Repeat("a", 40), "evaluator_image_digest": "sha256:" + strings.Repeat("b", 64), "evaluation_policy_sha256": strings.Repeat("c", 64)}
 	planBytes, err := json.Marshal(plan)
@@ -59,6 +62,28 @@ func newCalibrationProtocolFixture(t *testing.T) (calibrationAnalysisSettings, c
 		manifest.Cohorts = append(manifest.Cohorts, calibrationFileCohort{JobId: position.JobId, RoundId: position.RoundId, ArtifactDirectory: filepath.Join(position.Root, "artifacts"), RequestSha256: position.RequestSha256})
 	}
 	return settings, manifest, approval, approvalDigest, planPath, planDigest
+}
+
+// Published cohort roots own provenance; requests belong to their artifact
+// leaf. A root-level duplicate must never mask a missing authenticated leaf.
+func TestCalibrationProtocolAuthenticatesArtifactRequestInventory(t *testing.T) {
+	settings, _, approval, approvalDigest, plan, planDigest := newCalibrationProtocolFixture(t)
+	if _, err := bindCalibrationProtocolPublications(settings, approval, approvalDigest, plan, planDigest); err != nil {
+		t.Fatalf("original-shaped artifact request inventory refused: %v", err)
+	}
+	for _, position := range settings.OriginalPositions {
+		artifactPath := filepath.Join(position.Root, "artifacts", "worker-request.json")
+		rootPath := filepath.Join(position.Root, "worker-request.json")
+		if err := os.Rename(artifactPath, rootPath); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := bindCalibrationProtocolPublications(settings, approval, approvalDigest, plan, planDigest); err == nil {
+			t.Error("root-level duplicate replaced missing artifact request")
+		}
+		if err := os.Rename(rootPath, artifactPath); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 // The sole statistical change is explicitly named three-cohort cardinality.
