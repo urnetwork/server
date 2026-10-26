@@ -150,10 +150,14 @@ func StoreStClientKeyRegistration(ctx context.Context, input StClientKeyRegistra
 	}()
 	server.Tx(ctx, func(tx server.PgTx) {
 		result = nil
-		// The authenticated client row serializes first insertion as well as
-		// rotations, and the delete trigger retires this head in the same lock.
+		// The client's custody lock serializes first insertion, rotations and
+		// work owner retention. The client row's lock only keeps the client
+		// active until commit: deactivation and the DELETE whose trigger
+		// retires this head take FOR UPDATE and wait, while contract creations
+		// sharing the row do not.
+		lockClientKeyCustodyInTx(ctx, tx, [16]byte(input.ClientID))
 		var networkID server.Id
-		server.Raise(tx.QueryRow(ctx, `SELECT network_id FROM network_client WHERE client_id = $1 AND active = true FOR UPDATE`, input.ClientID).Scan(&networkID))
+		server.Raise(tx.QueryRow(ctx, `SELECT network_id FROM network_client WHERE client_id = $1 AND active = true FOR KEY SHARE`, input.ClientID).Scan(&networkID))
 		var priorRegistration *protocol.ClientKeyRegistration
 		var storedDomain, registrationHash, evidenceBytes []byte
 		var storedNetworkID server.Id
