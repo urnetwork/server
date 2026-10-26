@@ -39,11 +39,11 @@ func competitionSnowWinnerReviewMigration() string {
 	identity = strings.Replace(identity, "CREATE FUNCTION", "CREATE OR REPLACE FUNCTION", 1)
 	identity = replace(identity,
 		"  OR jsonb_array_length(request->'findings')<>6\n  OR (SELECT count(DISTINCT f->>'criterion') FROM jsonb_array_elements(request->'findings') f WHERE f->>'criterion' IN ('measurement_integrity','workload_generalization','containment','patch_scope','reproducibility','source_safety'))<>6",
-		`  OR CASE WHEN round_policy->'automation_policy'->>'winner_review_policy'='elected_winner_snow_union_v1'
+		`  OR (CASE WHEN round_policy->'automation_policy'->>'winner_review_policy'='elected_winner_snow_union_v1'
    THEN NOT competition_v2_snow_review_findings_valid(request)
    ELSE jsonb_array_length(request->'findings')<>6
     OR (SELECT count(DISTINCT f->>'criterion') FROM jsonb_array_elements(request->'findings') f WHERE f->>'criterion' IN ('measurement_integrity','workload_generalization','containment','patch_scope','reproducibility','source_safety'))<>6
-    OR EXISTS(SELECT 1 FROM jsonb_array_elements(request->'findings') f WHERE COALESCE(f->>'model','')<>'') END`, 1)
+    OR EXISTS(SELECT 1 FROM jsonb_array_elements(request->'findings') f WHERE COALESCE(f->>'model','')<>'') END)`, 1)
 	return competitionSnowReviewFindingsSql + provider + "\n" + identity
 }
 

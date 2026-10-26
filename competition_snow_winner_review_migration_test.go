@@ -7,6 +7,17 @@ import (
 	"testing"
 )
 
+// An IF condition's unparenthesized CASE exposes its inner THEN to PL/pgSQL's
+// expression terminator. Keep it grouped; the database test compiles this body.
+func TestCompetitionSnowReviewMigrationGroupsConditionalCase(t *testing.T) {
+	sql := competitionSnowWinnerReviewMigration()
+	if !strings.Contains(sql, "OR (CASE WHEN round_policy->'automation_policy'") ||
+		!strings.Contains(sql, "COALESCE(f->>'model','')<>'') END)") ||
+		strings.Contains(sql, "OR CASE WHEN round_policy->'automation_policy'") {
+		t.Fatal("Snow identity IF condition contains an ungrouped CASE expression")
+	}
+}
+
 // Scope changes replace guards, never historical rows, the source graph or triggers.
 func TestCompetitionSnowReviewMigrationPreservesHistoricalAndSourceGuards(t *testing.T) {
 	historical := competitionWinnerReviewProviderMigration()
