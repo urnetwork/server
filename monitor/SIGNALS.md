@@ -19608,11 +19608,13 @@ The shared controller also exports
 `urnetwork_contract_creation_completed_stage_seconds_total{ingress,stage}`,
 `urnetwork_contract_creation_stage_inflight{ingress,stage}`,
 `urnetwork_contract_creation_completed_total{ingress,outcome}`, and capability
-`urnetwork_contract_creation_stage_timing_enabled=1`. The 17 stage labels are
+`urnetwork_contract_creation_stage_timing_enabled=1`. The 20 stage labels are
 `other`, `relationship`, `provide_modes`, `provide_secret`, `metadata`,
 `endpoint_lookup`, `companion_origin`, `payer_gate`, `transaction`,
 `shard_fence`, `grant_selection`, `reservation_snapshot`, `client_fence`,
-`post_commit`, `client_stamp`, `stream`, and `response`. Every fixed cell is
+`post_commit`, `client_stamp`, `stream`, `response`,
+`companion_plain_origin_read`, `companion_fallback_origin_read`, and
+`companion_origin_precheck_read`. Every fixed cell is
 exported at zero. An older executable's missing collector is unavailable,
 not zero work. HTTP ingress comes from the existing server context marker.
 
@@ -45766,19 +45768,35 @@ the final rule windows.
 
 ### 25.1 Contract-creation failures per service — the share and the reply floor
 
-Status: proposed 2026-10-26; the per-service share and the seasonal floor are
-missing. §1.1 (`contract-rate`) counts committed contracts in SQL against a
-trailing-hour median, and §2.30 (`contract-stage-latency`) measures the mean
-time per reply across every service.
+Probe: `contract-failure-share` (private implementation candidate; seasonal
+`contract-reply-floor` remains proposed).
+
+The per-service share reads one bounded Mimir range query every minute, evaluated
+two minutes behind the monitor clock. Each point uses a five-minute counter
+rate. PAGE requires all six requested one-minute points spanning five minutes at
+or above 20%; WARN requires all eleven points spanning ten minutes at or above
+5%. The traffic floor is 20 eligible returned calls/s at every point, using the
+same three-outcome denominator as the ratio. Cadence and policy live in owning
+settings; emitted baseline/recovery guidance states effective configured values.
+These are sampled history holds,
+not evidence of continuous scrapes or delivery. §1.1 (`contract-rate`) counts
+committed contracts in SQL; §2.30 measures application wall time per reply.
+The separate Grafana rule/contact-point delivery requirement above is still
+external and unverified; monitor implementation alone does not complete it.
 
 Source (exists): `urnetwork_contract_creation_completed_total{job,outcome}`
 from every service that creates contracts (api, proxy, connect, taskworker,
-alt), with outcomes `contract_reply`, `canceled`, `panic` and
-`protocol_reject`.
+alt), with eagerly initialized outcomes `contract_reply`, `canceled`, `panic`,
+`protocol_reject` and `error` for both internal/http ingresses. One timing owner
+records one disposition when it finishes; ended context takes cancellation
+precedence. A generated reply does not establish client delivery.
 
 - Failure share per job over 5 minutes: (`canceled` + `panic`) ÷
   (`contract_reply` + `canceled` + `panic`). `protocol_reject` stays out of
-  both sides: it ran at about 2,350/s on the api in steady state on 10-26,
+  both sides. The producer's fifth outcome, `error`, is also outside this
+  explicitly authored three-state ratio; both excluded rates are disclosed,
+  never silently added to its denominator. Protocol rejection ran at about
+  2,350/s on the api in steady state on 10-26,
   and at 15–19k/s for days before 10-19 with almost no row work (10-19
   postmortem), so it would swamp the denominator. Track it on its own.
 - Reply floor per job: `contract_reply`/s against the median of the same
@@ -45825,10 +45843,40 @@ service whose callers stop calling shows no failures. The floor needs 7 days
 of history, so a new rule is unknown, not healthy, for its first week; the
 median absorbs up to three bad days.
 
-ACTION: the split names the boundary. Every service at once points to the
-database path (§2.11b, §2.11a, §5.6). The proxy alone points to Redis
-(§3.5b), escrow admission (§2.6b; the 10-24 single-slot path) or the proxy
-hosts. Then read §2.30 for the stage.
+Source authority and closure: active placement defines desired service/host/block
+slots; an optional unplaced alt is not required. Every required slot must have
+exactly one publisher, both ingresses and every eager outcome at every requested
+step. Current/prior original sample clocks must be fresh, the same process must
+predate the rate window, and its counters must have at least two samples and no
+reported reset in that window. A missing entire job, missing eager zero,
+overlapping publisher, reset, stale source, partial history or refused/capped
+read is unknown, never zero. This qualifies observed process accounting; it does
+not establish artifacts, authentic source identity or complete intra-step scrape
+coverage. More than one legitimate process per declared slot is conservatively
+unknown. Per-service incidents survive a sibling's source loss; visibility
+uncertainty can conservatively hold sibling clears too.
+
+Below-floor jobs supply scoped clear holds, not healthy recovery. A ratio
+incident clears only after every point of a complete eligible ten-minute hold
+is below 5%. A new qualified five-minute PAGE survives older WARN-history gaps.
+Missing or low traffic never clears an armed incident. Qualified source rates use deterministic compensated accumulation
+before the unchanged inclusive comparisons, so source/map ordering cannot shift
+a rounded total across a band. No epsilon broadens the traffic floor or shares. `error` failures,
+unfinished calls and stopped callers can evade this ratio; the unimplemented
+seasonal reply floor remains a separate coverage gap.
+
+Cost: one query_range, nine fixed expression branches and eleven evaluation
+points, retaining at most 54 series per current process (594 points/slot before
+partial/overlap series). The response is capped at 4 MiB and 65,536 total points;
+overflow is cannot-observe, not truncated health. The explicit range/lookback reaches fifteen
+minutes before the delayed evaluation; instant-selector lookback also applies,
+and original sample ages are qualified separately. No extra request or producer
+change is introduced.
+
+ACTION: the split identifies the affected observed service cohort, not its
+cause. Compare rollout drain and client departure with §2.30, PgBouncer queue
+context (§2.11b/§2.11a), CPU pressure (§8.14a), Redis (§3.5b) and escrow admission
+(§2.6b) before selecting a repair. Preserve the existing external owners.
 
 ### 25.2 Connect handshake refusals and acceptance
 
@@ -46955,3 +47003,22 @@ transaction. Failed required batches, body rollback and retried attempts do not
 publish; an unknown commit reply remains an observation gap. Optional posts run
 after publication. Counters reset with process lifetime and are not crash-durable
 history; no IDs, task names, args or private result text become labels.
+
+
+### 26 Current Proxy OTHER-stage occupancy
+
+Probe: `contract-stage-inflight`
+
+Source: `urnetwork_contract_creation_stage_inflight{job="proxy",stage="other",ingress="internal"|"http"}` and `urnetwork_contract_creation_stage_timing_enabled=1`, joined to the same current process start and original scrape timestamps. This is current synchronous exclusive stage occupancy, including unfinished calls; it does not depend on completed-call counters. Begin enters OTHER, nested stage entry moves one owner, and completion/cancellation/panic finalization releases it. Async work without the timing owner is outside this signal. §2.30 remains returned-stage means and §25.1 returned outcomes; neither replaces this current gauge.
+
+Policy: WARN `contract-stage-inflight-high` when internal+HTTP OTHER owners are strictly greater than **1000 calls per qualified Proxy process**, at **two consecutive fresh, distinct source-clock observations of that same process generation**. No PAGE band or escalation. This is Root's operational monitor-policy selection from the postmortem's authored 1000/process benchmark and rollout reference, not a claim of an already user-approved alert threshold. Calibration remains pending. `ContractStageInflightSettings.WarnCalls` is a whole positive call count; zero selects 1000, not disabled. `Sustain` is a source-observation count; zero selects 2 and values below 2 are invalid. Custom bands retain all source/coverage/recovery requirements.
+
+The nominal signal cadence is one minute; the production global minimum of **15 minutes** still applies. Two observations are not two minutes or continuous persistence, and cannot promise detection within the reported 300-second cancellation lag. Source-clock maturity is enforced by the owning reducer; a mature alert has generic gate Sustain=1 so the generic tick gate does not add a second two-run hold. A fresh new generation starts over. Missing/partial/stale/duplicate/reset/repeated clocks and ambiguous generation selection are UNKNOWN; they cannot mature or clear an incident. Repeated clocks break the high streak.
+
+The bounded one-vector query returns start, capability, both exact ingress cells and their original sample timestamps without aggregation across processes. All four timestamps must agree, be fresh within 90 seconds (future skew at most 30 seconds), and follow the process start; both counts must be exact finite nonnegative integers. Both ingress cells are exported even at zero. Expected active host/block slots come from the configured Proxy inventory; absent or mismatched scope is UNKNOWN. Every observed candidate is considered before newest-generation selection; equal newest starts or missing starts are UNKNOWN. Freshness does not independently prove that a process is still alive or inventory is complete.
+
+The query uses the existing byte-bounded Mimir gateway adapter: one vector, maximum 4 MiB, at most 4096 series, curl max-time 20 seconds and the existing signal/global owner budgets. No pool, producer, storage, application timeout, production probe floor or concurrency limit changes. Arbitrary response errors/labels and private process nonces are not rendered. Targets use inventory-owned slots. `contract-stage-inflight-unobservable` is visibility and prevents absence credit; positive complete sibling processes remain visible beside a gap. A first high sample silently holds the original class rather than granting absence. Fresh below-band complete scope permits the normal notifier complete-run recovery hold; replacement or unknown evidence cannot certify recovery.
+
+False positives: legitimate high turnover, uninstrumented synchronous work or a transient occupancy burst can exceed the band; two sampled observations do not establish an individual hung call. False negatives: per-process counts below the band can sum to a large fleet population; work in other instrumented stages, deferred async compensation or missing publishers is not measured as OTHER. Low OTHER does not prove compensation queues drained, healthy Redis/PG, low CPU or customer recovery. Correlate the same process generation and bounded owner/stage evidence before any repair. Do not raise pools or restart based on this gauge.
+
+Synthetic controls cover public constructor → bounded vector → source-clock reducer → actual cadence gate/in-memory notifier; strict count threshold and ingress sum; no completed calls; repeated/stale/missing/invalid source cells; equal/newer generation ambiguity; cancellation with no baseline commit; independent positive siblings; default/custom/invalid policy; fixed private-label omission; and unknown/replacement versus complete below-band recovery. No Main or network execution is required for those controls.
