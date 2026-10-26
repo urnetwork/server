@@ -124,16 +124,16 @@ func (self *redisGrantProbe) forget() {
 	self.verdicts = nil
 }
 
-// Reads the next candidates of the batch, starting at the next attempt, in
-// one pipeline once the request has a refusal. Each candidate is read at most
-// once per batch; a failed read leaves an inexact verdict and its reservation
-// decides.
-func (self *redisGrantProbe) observe(ctx context.Context, upcoming []*escrowTransferBalance) {
+// Chooses the grants the next probe pipeline reads, starting at the next
+// attempt, once the request has a refusal, and records each as observed with
+// an inexact verdict until its read returns. A grant is chosen at most once
+// per batch.
+func (self *redisGrantProbe) take(upcoming []*escrowTransferBalance) []*escrowTransferBalance {
 	if !self.active || len(upcoming) == 0 {
-		return
+		return nil
 	}
 	if _, observed := self.verdicts[upcoming[0].balanceId]; observed {
-		return
+		return nil
 	}
 	if self.verdicts == nil {
 		self.verdicts = map[server.Id]redisGrantProbeVerdict{}
@@ -152,10 +152,19 @@ func (self *redisGrantProbe) observe(ctx context.Context, upcoming []*escrowTran
 			probed = append(probed, balance)
 		}
 	}
+	if len(probed) != 0 {
+		self.width = min(2*self.width, redisGrantPageRows)
+	}
+	return probed
+}
+
+// Reads the grants take chooses in one pipeline. A failed read leaves an
+// inexact verdict and its reservation decides.
+func (self *redisGrantProbe) observe(ctx context.Context, upcoming []*escrowTransferBalance) {
+	probed := self.take(upcoming)
 	if len(probed) == 0 {
 		return
 	}
-	self.width = min(2*self.width, redisGrantPageRows)
 	bounded, cancel := context.WithTimeout(ctx, redisContractAdmissionTimeout)
 	defer cancel()
 	commands := make([]*redis.Cmd, len(probed))

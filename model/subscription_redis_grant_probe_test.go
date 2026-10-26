@@ -45,6 +45,68 @@ func TestRedisGrantProbeVerdictProvesOnlyExactRefusals(t *testing.T) {
 	}
 }
 
+// Reads start after the first refusal with one grant and double each time,
+// skip grants without durable credit, never read a grant twice in one batch,
+// and keep their width across batches up to one page.
+func TestRedisGrantProbeReadsDoubleAfterTheFirstRefusal(t *testing.T) {
+	balances := make([]*escrowTransferBalance, 12)
+	for index := range balances {
+		balances[index] = &escrowTransferBalance{balanceId: server.NewId(), balanceByteCount: 1000}
+	}
+	balances[2].balanceByteCount = 0
+	ids := func(probed []*escrowTransferBalance) []server.Id {
+		result := []server.Id{}
+		for _, balance := range probed {
+			result = append(result, balance.balanceId)
+		}
+		return result
+	}
+	want := func(indexes ...int) []server.Id {
+		result := []server.Id{}
+		for _, index := range indexes {
+			result = append(result, balances[index].balanceId)
+		}
+		return result
+	}
+	probe := redisGrantProbe{contractId: server.NewId()}
+	if probed := probe.take(balances); len(probed) != 0 {
+		t.Fatal("a request without a refusal probed", len(probed))
+	}
+	probe.noteRefusal()
+	for _, step := range []struct {
+		next int
+		want []server.Id
+	}{
+		{next: 0, want: want(0)},
+		{next: 0, want: want()},
+		{next: 1, want: want(1, 3)},
+		{next: 2, want: want()},
+		{next: 3, want: want()},
+		{next: 4, want: want(4, 5, 6, 7)},
+		{next: 8, want: want(8, 9, 10, 11)},
+	} {
+		if got := ids(probe.take(balances[step.next:])); !slices.Equal(got, step.want) {
+			t.Fatalf("attempt %d probed %d grants, want %d", step.next, len(got), len(step.want))
+		}
+	}
+	// A read in flight or failed is inexact and never skips a reservation.
+	if refused, idle := probe.refuses(balances[11].balanceId, 1, false); refused || idle {
+		t.Fatal("an unread grant was treated as refused")
+	}
+	probe.noteRefusal()
+	probe.forget()
+	if got := ids(probe.take(balances)); !slices.Equal(got, want(0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11)) {
+		t.Fatal("a new batch did not keep the grown width", len(got))
+	}
+	for range 8 {
+		probe.forget()
+		probe.take(balances)
+	}
+	if probe.width != redisGrantPageRows {
+		t.Fatal("probe width exceeded one keyset page", probe.width)
+	}
+}
+
 func TestRedisGrantProbeRepliesDeferUnlessExact(t *testing.T) {
 	for _, test := range []struct {
 		reply   []any
