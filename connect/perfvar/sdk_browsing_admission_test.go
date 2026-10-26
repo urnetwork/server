@@ -241,11 +241,14 @@ func (self *sdkBrowsingScenario) beforePage(ctx context.Context, page int, close
 	if err != nil {
 		return err
 	}
-	if socket == nil || socket.ordinal < 0 || socket.ordinal >= 4 || self.cssClientBytes.Load() != nativeBrowsingHeldPrefixBytes || self.cssGotConn.Load() != 1 || self.cssServerFinished.Load() || self.fixture.providers[4].ready.Load() || self.fixture.providers[4].client != nil {
+	if socket == nil || socket.ordinal < 0 || socket.ordinal >= 4 || self.cssClientBytes.Load() != nativeBrowsingHeldPrefixBytes || self.cssGotConn.Load() != 1 || self.cssServerFinished.Load() {
 		return errors.New("SDK_BROWSING_CSS_ORIGINAL_OWNERSHIP")
 	}
-	snapshot := self.snapshot()
-	if ready, err := sdkBrowsingSetupReady(snapshot, self.fixture.discovery.snapshot().InitialExcludedEmpty); !ready || err != nil {
+	snapshot, locations := self.snapshotForOwnership()
+	self.stateLock.Lock()
+	self.atTap = snapshot
+	self.stateLock.Unlock()
+	if err := self.validateOwnedPhase(snapshot, locations, sdkBrowsingPremiseTap); err != nil {
 		return fmt.Errorf("SDK_BROWSING_FULL_WINDOW_AT_TAP: %s: %v", snapshot, err)
 	}
 	owner, flows, err := self.cssOwnerSnapshot(nil)
@@ -253,7 +256,7 @@ func (self *sdkBrowsingScenario) beforePage(ctx context.Context, page int, close
 		return err
 	}
 	self.stateLock.Lock()
-	self.atTap, self.cssOwner, self.cssFlowsBefore = snapshot, owner, flows
+	self.cssOwner, self.cssFlowsBefore = owner, flows
 	self.lateStarted = true
 	self.stateLock.Unlock()
 	self.rejectNew.Store(true)
@@ -301,11 +304,15 @@ func (self *sdkBrowsingScenario) buildLate(ctx context.Context) {
 		self.recordError(ctx.Err())
 		return
 	}
-	snapshot := self.snapshot()
+	if err := ctx.Err(); err != nil {
+		self.recordError(err)
+		return
+	}
+	snapshot, locations := self.snapshotForOwnership()
 	self.stateLock.Lock()
 	self.afterFirstRefusal = snapshot
 	self.stateLock.Unlock()
-	if ready, err := sdkBrowsingSetupReady(snapshot, self.fixture.discovery.snapshot().InitialExcludedEmpty); !ready || err != nil {
+	if err := self.validateOwnedPhase(snapshot, locations, sdkBrowsingPremiseAfterRefusal); err != nil {
 		self.recordError(fmt.Errorf("SDK_BROWSING_FULL_WINDOW_AFTER_REFUSAL: %s: %v", snapshot, err))
 		return
 	}
@@ -363,11 +370,11 @@ func (self *sdkBrowsingScenario) wrapHandler(handler http.Handler) http.Handler 
 			http.Error(writer, "unowned CSS", http.StatusServiceUnavailable)
 			return
 		}
-		snapshot := self.snapshot()
+		snapshot, locations := self.snapshotForOwnership()
 		self.stateLock.Lock()
 		self.cssSocket, self.atCss = socket, snapshot
 		self.stateLock.Unlock()
-		if ready, err := sdkBrowsingSetupReady(snapshot, self.fixture.discovery.snapshot().InitialExcludedEmpty); !ready || err != nil {
+		if err := self.validateOwnedPhase(snapshot, locations, sdkBrowsingPremiseCss); err != nil {
 			self.recordError(fmt.Errorf("SDK_BROWSING_FULL_WINDOW_AT_CSS: %s: %v", snapshot, err))
 		}
 		handler.ServeHTTP(&sdkBrowsingCssWriter{ResponseWriter: writer, ctx: request.Context(), scenario: self}, request)
