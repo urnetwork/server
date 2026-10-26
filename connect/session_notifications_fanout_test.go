@@ -139,6 +139,60 @@ func TestSessionEventRechecksEveryListenerOfItsNetwork(t *testing.T) {
 	})
 }
 
+// Main 2026-10-26: each network's corrective 60 second pass rechecked every
+// lease of the network, while each lease also rechecks on its own 60 second
+// timer, so every connection cost two authoritative PostgreSQL checks a
+// minute (connect's untagged state queries ran at 7.9k/s for 203k
+// connections). The pass refreshes hints; the lease timers keep the minute
+// bound, and session events still recheck at once.
+func TestSessionCorrectivePassRefreshesHintsWithoutRechecks(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		var revisionReads atomic.Int64
+		subscriber := newSessionFanoutSubscriber(ctx, &revisionReads)
+
+		networkId := server.NewId()
+		const listenerCount = 3
+		rechecks := make([]atomic.Int64, listenerCount)
+		var hints atomic.Int64
+		removes := []func(){
+			subscriber.AddSessionListener(networkId, nil, func(*protocol.NetworkSessionsChanged) { hints.Add(1) }),
+		}
+		for i := range listenerCount {
+			removes = append(removes, subscriber.AddSessionListener(networkId, func() { rechecks[i].Add(1) }, nil))
+		}
+		synctest.Wait()
+		hintsBefore := hints.Load()
+
+		// three corrective passes
+		time.Sleep(3*time.Minute + 30*time.Second)
+		synctest.Wait()
+
+		for i := range listenerCount {
+			if got := rechecks[i].Load(); got != 1 {
+				t.Errorf("listener %d rechecked %d times over three corrective passes; want only its registration recheck", i, got)
+			}
+		}
+		if got := hints.Load() - hintsBefore; got < 3 {
+			t.Errorf("hint listener received %d hints over three corrective passes; want at least 3", got)
+		}
+
+		// a session event still rechecks each listener of the network once
+		subscriber.dispatch("__keyspace@0__:{ns_"+networkId.String()+"}eid", "incr")
+		synctest.Wait()
+		for i := range listenerCount {
+			if got := rechecks[i].Load(); got != 2 {
+				t.Errorf("listener %d rechecked %d times after a session event; want 2", i, got)
+			}
+		}
+
+		for _, remove := range removes {
+			remove()
+		}
+	})
+}
+
 // The revision read exists only to produce hints. Transport listeners register
 // no hint callback, so the read returned every live session of the network to
 // no consumer, and its prune could publish a session event that rechecks every
