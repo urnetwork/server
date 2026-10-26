@@ -152,7 +152,8 @@
     "passed": true,
     "receipt_sha256": "2a012f79b0bad14576c5cf9ad1a7e59a0e4579f126bec090423bef70673f4747",
     "receipt": "/home/by/urnetwork/temp/c2-bridge-20261026.UJH2e2mk/precommit-authentication.json",
-    "measurements_started": false
+    "measurements_started_at_precommit": false,
+    "measurements_started_after_precommit": true
   },
   "current_boot_resource_bomb_qualification": {
     "passed": true,
@@ -165,7 +166,7 @@
     "receipt_sha256": "d264f48d38a1ab6bea44342cdbcf5e13cebf6e4c2811506e8086995e4600b646",
     "path": "/home/by/urnetwork/temp/c2-bridge-20261026.UJH2e2mk/margin-freeze.json",
     "reanalysis_performed": false,
-    "fresh_bridge_started": false
+    "fresh_bridge_started": true
   },
   "latest_review_and_runtime_tool": {
     "source_commit": "95b7923bd95e9c5b96eef7ae71a99a5aa8281abb",
