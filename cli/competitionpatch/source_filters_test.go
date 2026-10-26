@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -61,7 +60,7 @@ func TestCompetitionPatchCliRefusesLocalAttributeFiltersBeforeStatus(t *testing.
 		"--expected-policy-sha256", hex.EncodeToString(policyDigest[:]), "--patch", patchPath,
 		"--expected-patch-sha256", hex.EncodeToString(patchDigest[:]), "--apply-source-root", root,
 		"--source-identity", identityPath, "--expected-source-identity-sha256", hex.EncodeToString(identityDigest[:])}, &output)
-	if err == nil || competitionPatchExitCode(err) != 2 || !strings.Contains(err.Error(), "filter configuration") || output.Len() != 0 {
+	if err == nil || competitionPatchExitCode(err) != 2 || err.Error() != "trusted source application failed: source repository differs from its pristine frozen identity" || output.Len() != 0 {
 		t.Fatalf("configured filter reached source application: %v %q", err, output.String())
 	}
 	if _, err := os.Lstat(marker); !os.IsNotExist(err) {
