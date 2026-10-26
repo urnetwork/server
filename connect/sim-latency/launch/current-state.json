@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-26T19:52:45Z",
+  "observed_at": "2026-10-26T20:09:34Z",
   "objective": "Ready to launch at 2026-10-28T00:00:00Z",
   "storage_verification": {
     "operations_compliance_receipt_sha256": "c6b8b5348633270939395b7a585e1978b3a83c679b2552eccd8ab2a4690edc3f",
@@ -29,7 +29,38 @@
     "native_readonly_deletions": 0
   },
   "production_activated": false,
-  "status": "bridge_precommit_authenticated_snow_cancellation_stdin_fix_under_independent_test",
+  "status": "snow_actual_provider_qualification_live_cancellation_passed_first_model_case_active",
+  "live_snow_qualification": {
+    "started_at": "2026-10-26T20:09:02Z",
+    "process_verified_at": "2026-10-26T20:09:34Z",
+    "manager_pid": 1049416,
+    "observation_session": 34985,
+    "directory": "/home/by/urnetwork/temp/snow-env-preparation-20261026.ZeqXfz6W/attempt-01",
+    "native_plan_sha256": "cb46255b04d3bc3558a87ea8caf7b55a4c9d0005d5ef3d2ac0ce6b18f0f97be1",
+    "driver_sha256": "3bd44115e18aecee92db53119f53b4ca8b19bad39e42dfc5935e0c319e51341a",
+    "wrapper_sha256": "8f24b7da39106767aaa77be2cee6f76a28e266669e5640ca6dc305184b3f4dce",
+    "cancellation_case_passed": true,
+    "active_case_at_observation": "case-02 benign comment",
+    "same_six_case_requests_preserved": true,
+    "unit_tests_per_run": 42,
+    "consecutive_unit_passes": 3,
+    "unit_skips": 0,
+    "qualified": false,
+    "official_performance_measurements": false
+  },
+  "snow_second_wrapper_failure": {
+    "evidence_directory": "/var/lib/urnetwork/competition-review/attempts/invocation.TYIVMhK0",
+    "wrapper_exit": 5,
+    "provider_input_released": false,
+    "cleanup_verified": true,
+    "root_cause": "jq all() received an environment array instead of its entry stream",
+    "fix_commit": "e331f5021",
+    "old_predicate_deterministically_failed": true,
+    "entire_actual_jq_predicate_tested": true,
+    "green_tests_per_run": 42,
+    "consecutive_green_runs": 3,
+    "skips": 0
+  },
   "snow_first_qualification_attempt": {
     "terminal": true,
     "qualified": false,
