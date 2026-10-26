@@ -3022,10 +3022,31 @@ func init() {
 // Every applied provide still records a provide_key_change row, changed or
 // not: the announce loop counts each as a provide change for reliability
 // (connect/transport_announce.go), and that policy is not a key write.
+//
+// It declares no capabilities; see SetProvideWithCapabilities.
 func SetProvide(
 	ctx context.Context,
 	clientId server.Id,
 	secretKeys map[ProvideMode][]byte,
+) {
+	SetProvideWithCapabilities(ctx, clientId, secretKeys, ProvideCapabilities{})
+}
+
+// SetProvide that also records the capabilities the provide declares
+// (provide_capability_model.go), in the same transaction and under the same
+// locks, so the last provide to commit also wins the declaration. Only a
+// provide that registers a Public or Network key, the keys discovery offers a
+// provider for, touches the declaration: one that declares a capability writes
+// the client's row when it differs, and one that declares none deletes it. A
+// provide with neither key, as a window client's return-traffic provide,
+// writes nothing there, so most provides add no write. A row a deactivation
+// leaves behind is inert: discovery reads it only for active providers with
+// keys, and the provider's next provide with such a key replaces or deletes it.
+func SetProvideWithCapabilities(
+	ctx context.Context,
+	clientId server.Id,
+	secretKeys map[ProvideMode][]byte,
+	capabilities ProvideCapabilities,
 ) {
 	var inactive bool
 
@@ -3129,6 +3150,40 @@ func SetProvide(
 						)
 					}
 				})
+			}
+		}
+		_, providePublic := secretKeys[ProvideModePublic]
+		_, provideNetwork := secretKeys[ProvideModeNetwork]
+		if providePublic || provideNetwork {
+			if capabilities == (ProvideCapabilities{}) {
+				server.RaisePgResult(tx.Exec(
+					ctx,
+					`
+					DELETE FROM provide_capability
+					WHERE client_id = $1
+					`,
+					clientId,
+				))
+			} else {
+				server.RaisePgResult(tx.Exec(
+					ctx,
+					`
+					INSERT INTO provide_capability (
+						client_id,
+						post_quantum_encryption,
+						change_time
+					) VALUES ($1, $2, $3)
+					ON CONFLICT (client_id) DO UPDATE
+					SET
+						post_quantum_encryption = EXCLUDED.post_quantum_encryption,
+						change_time = EXCLUDED.change_time
+					WHERE
+						provide_capability.post_quantum_encryption IS DISTINCT FROM EXCLUDED.post_quantum_encryption
+					`,
+					clientId,
+					capabilities.PostQuantumEncryption,
+					changeTime,
+				))
 			}
 		}
 		server.RaisePgResult(tx.Exec(
