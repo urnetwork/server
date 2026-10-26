@@ -67,6 +67,34 @@ func TestRedisCleanupBoundsMalformedCausesAndRetainsPendingPeer(t *testing.T) {
 	}
 }
 
+// Compensation that cannot reach Redis gives up after the short cleanup budget
+// instead of holding its failed CreateContract caller for minutes. On
+// 2026-10-26 a 300 s budget kept about 170k failed proxy calls retrying
+// release-pending every second, and their pool waits failed the next creations.
+func TestRedisCleanupBudgetBoundsUnreachableRelease(t *testing.T) {
+	request, balance := server.NewId(), server.NewId()
+	now := time.Unix(1, 0)
+	calls, waits := 0, 0
+	cleanup := redisReservationCleanup{now: func() time.Time { return now },
+		recover: func(context.Context, server.Id, server.Id) error {
+			calls++
+			return context.DeadlineExceeded
+		},
+		wait: func(_ context.Context, delay time.Duration) error {
+			waits++
+			now = now.Add(delay)
+			return nil
+		},
+	}
+	err := cleanup.run(t.Context(), request, []server.Id{balance})
+	if !errors.Is(err, errRedisReservationCleanupPending) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal("unreachable release was not reported as pending compensation", err)
+	}
+	if 10*time.Second < redisReservationCleanupBudget || 10 < calls || calls < 2 {
+		t.Fatal("cleanup retried outside a short bounded budget", redisReservationCleanupBudget, calls, waits)
+	}
+}
+
 // A canceled original request does not cancel the independent cleanup owner.
 func TestRedisCleanupPreservesIndependentTransientCancellationPolicy(t *testing.T) {
 	caller, cancel := context.WithCancel(t.Context())
@@ -80,7 +108,7 @@ func TestRedisCleanupPreservesIndependentTransientCancellationPolicy(t *testing.
 				t.Fatal("cleanup owner or exact obligation changed")
 			}
 			calls++
-			if calls <= 65 {
+			if calls <= 3 {
 				return errors.Join(context.Canceled, context.DeadlineExceeded)
 			}
 			return nil
@@ -94,7 +122,7 @@ func TestRedisCleanupPreservesIndependentTransientCancellationPolicy(t *testing.
 			return nil
 		},
 	}
-	if err := cleanup.run(caller, request, []server.Id{balance}); err != nil || calls != 66 || waits != 65 {
+	if err := cleanup.run(caller, request, []server.Id{balance}); err != nil || calls != 4 || waits != 3 {
 		t.Fatal("typed transient cleanup failed within original budget", calls, waits, err)
 	}
 	if redisReservationRecoveryRetryable(errors.Join(context.Canceled, errRedisReservationRecoveryIdentity)) {
