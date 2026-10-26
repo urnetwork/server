@@ -595,8 +595,14 @@ func DefaultExchangeSettingsWithBufferSize(bufferSize int) *ExchangeSettings {
 		ForwardIdleTimeout: 15 * time.Minute,
 		ControlMinTimeout:  5 * time.Millisecond,
 
-		ExchangeConnectTimeout:             15 * time.Second,
-		ExchangePingTimeout:                connectionHandlerSettings.MinPingTimeout,
+		ExchangeConnectTimeout: 15 * time.Second,
+		// An exchange ping only keeps the peer's read deadline and the
+		// resident's activity TTL from lapsing on an idle connection, so a
+		// third of the read deadline leaves room for two late pings. It was
+		// the clients' 1 s minimum ping, inherited by a rename, which made
+		// pings three quarters of all exchange frames. Every version reads
+		// with the same 30 s deadline, so mixed versions interoperate.
+		ExchangePingTimeout:                connectionHandlerSettings.ReadTimeout / 3,
 		ExchangeReadTimeout:                connectionHandlerSettings.ReadTimeout,
 		ExchangeReadHeaderTimeout:          exchangeResidentWaitTimeout,
 		ExchangeWriteHeaderTimeout:         exchangeResidentWaitTimeout,
@@ -1763,15 +1769,20 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 			defer handleCancel()
 
 			sendBuffer := NewDefaultExchangeBuffer(self.settings)
+			// this side of a forward sends only pings, so it is always idle:
+			// one reused timer paces them, an interval after each ping
+			pingTimer := time.NewTimer(self.settings.ExchangePingTimeout)
+			defer pingTimer.Stop()
 			for {
 				select {
 				case <-handleCtx.Done():
 					return
-				case <-time.After(self.settings.ExchangePingTimeout):
+				case <-pingTimer.C:
 					// send a ping
 					if err := sendBuffer.WriteMessage(conn, make([]byte, 0)); err != nil {
 						return
 					}
+					pingTimer.Reset(self.settings.ExchangePingTimeout)
 				}
 			}
 		})
