@@ -115,6 +115,29 @@ validate_prepared_source_identity() {
         <<<"$1" >/dev/null
 }
 
+# Legacy requests retain their exact three-key policy. A broad policy must
+# explicitly select the one qualified repository-relative path convention.
+validate_worker_request_schema() {
+    local request_keys='["api_image_digest","artifact_directory","attempt","base_sha","competition_id","config_local_directory","evaluation_policy","evaluator_image_digest","job_id","patch_path","patch_policy","patch_sha256","providers_path","providers_sha256","round_baseline_path","round_baseline_sha256","round_id","round_seed_hex","schema","scorer_version","source_epoch","vault_local_directory","worker_image_digest"]'
+    local patch_policy_keys='["allowed_paths","forbidden_paths","max_patch_bytes"]'
+    local evaluation_policy_keys='["announce_timeout_ms","api_port","arrivals_per_minute","client_pool_size","client_warmup_timeout_ms","config_local_sha256","duration_ms","exchange_hosts","fleet_shards","hardware_id","host_qualification_sha256","impairment_enabled","pipeline_interval_ms","prewarm_ms","provider_count","quality_window_size","queue_limit","ramp_ms","replicates","request_timeout_ms","score_timeout_seconds","scorer_sha256","settle_ms","simulator_sha256","site_listen","takeover_margin","test_timeout_ms","vault_local_sha256"]'
+    jq -e \
+        --argjson request_keys "$request_keys" \
+        --argjson patch_policy_keys "$patch_policy_keys" \
+        --argjson evaluation_policy_keys "$evaluation_policy_keys" \
+        'type == "object" and (.schema == 1) and
+         ((keys - ["staging"] | sort) == $request_keys) and
+         ((has("staging") | not) or (.staging | type == "boolean")) and
+         (if .staging == true then .evaluation_policy.takeover_margin == 0 else true end) and
+         (.patch_policy | type == "object" and
+           (if has("path_base") then
+              ((keys | sort) == ($patch_policy_keys + ["path_base"] | sort)) and
+              .path_base == "mono_root_v1"
+            else (keys | sort) == $patch_policy_keys end)) and
+         (.evaluation_policy | type == "object" and ((keys | sort) == $evaluation_policy_keys))' \
+        "$1" >/dev/null
+}
+
 local_tree_sha256() {
     "$HASH_LOCAL_MOUNT" "$1"
 }
@@ -289,20 +312,7 @@ request_path="$(realpath -e "$request_path")"
 artifact_dir="$(dirname "$request_path")"
 [ "$result_path" = "$artifact_dir/worker-result.json" ] || die "result path is outside the attempt directory"
 
-readonly request_keys='["api_image_digest","artifact_directory","attempt","base_sha","competition_id","config_local_directory","evaluation_policy","evaluator_image_digest","job_id","patch_path","patch_policy","patch_sha256","providers_path","providers_sha256","round_baseline_path","round_baseline_sha256","round_id","round_seed_hex","schema","scorer_version","source_epoch","vault_local_directory","worker_image_digest"]'
-readonly patch_policy_keys='["allowed_paths","forbidden_paths","max_patch_bytes"]'
-readonly evaluation_policy_keys='["announce_timeout_ms","api_port","arrivals_per_minute","client_pool_size","client_warmup_timeout_ms","config_local_sha256","duration_ms","exchange_hosts","fleet_shards","hardware_id","host_qualification_sha256","impairment_enabled","pipeline_interval_ms","prewarm_ms","provider_count","quality_window_size","queue_limit","ramp_ms","replicates","request_timeout_ms","score_timeout_seconds","scorer_sha256","settle_ms","simulator_sha256","site_listen","takeover_margin","test_timeout_ms","vault_local_sha256"]'
-jq -e \
-    --argjson request_keys "$request_keys" \
-    --argjson patch_policy_keys "$patch_policy_keys" \
-    --argjson evaluation_policy_keys "$evaluation_policy_keys" \
-    'type == "object" and (.schema == 1) and
-     ((keys - ["staging"] | sort) == $request_keys) and
-     ((has("staging") | not) or (.staging | type == "boolean")) and
-     (if .staging == true then .evaluation_policy.takeover_margin == 0 else true end) and
-     (.patch_policy | type == "object" and ((keys | sort) == $patch_policy_keys)) and
-     (.evaluation_policy | type == "object" and ((keys | sort) == $evaluation_policy_keys))' \
-    "$request_path" >/dev/null || die "request schema or fields are invalid"
+validate_worker_request_schema "$request_path" || die "request schema or fields are invalid"
 
 job_id="$(jq -er '.job_id' "$request_path")"
 staging="$(jq -r '.staging // false' "$request_path")"
