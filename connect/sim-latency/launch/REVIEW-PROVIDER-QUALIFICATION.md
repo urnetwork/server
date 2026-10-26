@@ -171,7 +171,7 @@ must never enter any retained body or ordinary error string.
    done
    ```
 
-   Use a fail-fast shell. The new UID-map revision requires **22 top-level passes** each time (21 substantive
+   Use a fail-fast shell. The UID-map/verdict-key revision requires **23 top-level passes** each time (22 substantive
    deterministic guards plus the inert command helper), zero skips/failures and
    an overall package pass. Preserve every failed attempt. Recheck the same
    executable/source/workspace bytes after the third pass. No unit mock result
