@@ -85,3 +85,18 @@ func ProviderWorkSessionPartitionBodiesSql() (admitFloor, sessionAppend, receipt
 		strings.Split(providerWorkSessionReceiptReferenceSql, "$receipt_reference$")[1],
 		strings.Split(providerWorkSessionEventDropGuardSql, "$event_drop_guard$")[1]
 }
+
+// Read-only consumers pin the provider successor's exact bodies without
+// changing any historical migration or reproducing its replacement logic.
+func CompetitionWinnerReviewProviderBodiesSql() (provider, roundInsertGuard, winnerSourceAuthorized, winnerReviewGuard string) {
+	migration := competitionWinnerReviewProviderMigration()
+	return strings.Split(migration, "$provider$")[1],
+		strings.Split(migration, "$guard$")[1],
+		strings.Split(migration, "$winner_source$")[1],
+		strings.Split(migration, "$winner_review$")[1]
+}
+
+// The reviewed repository successor changes only the source authorization.
+func CompetitionRepositoryPatchSourceBodySql() string {
+	return strings.Split(competitionRepositoryPatchMigration(), "$source$")[1]
+}

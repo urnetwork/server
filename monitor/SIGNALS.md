@@ -29453,6 +29453,20 @@ layouts themselves and inject each of these faults;
 `TestMigrationsContractPartitionedLegacySettlementKeyClones` checks the legacy
 settlement key's clones one version before the queue's retirement.
 
+
+Published competition successor contracts preserve exact catalog custody across
+versions 859, 891 and 892. The v859 body predicate remains required before
+891; 891 retires it and requires the provider-aware winner/round guards plus
+the unchanged source and checkpoint guards. Version 892 retires 891's source
+body and republishes the complete guard set with the reviewed-repository
+source body. The provider function's full body, argument names, volatility,
+parallel safety and trigger custody are catalog authority. Numeric migration
+head alone does not establish these artifacts. Coherent published prefixes
+and rolled-back body/metadata/trigger faults are deterministic acceptance
+controls. Catalog source failures or malformed observations are not health;
+these checks do not prove runtime review activity or deployed application
+adoption, and deliberately retired body text is not schema drift.
+
 ### 8.10 Client-reliability covering-index drift after partition cutover
 Probe: `reliability-index`
 
