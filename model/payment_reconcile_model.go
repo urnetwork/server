@@ -168,8 +168,16 @@ func AddPaymentReconciliationEventOnce(
 	ctx context.Context,
 	event *PaymentReconciliationEvent,
 ) (added bool, err error) {
+	return AddPaymentReconciliationEventOnceInConn(nil, ctx, event)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func AddPaymentReconciliationEventOnceInConn(connOwner server.PgConn,
+	ctx context.Context,
+	event *PaymentReconciliationEvent,
+) (added bool, err error) {
 	server.HandleError(func() {
-		server.Tx(ctx, func(tx server.PgTx) {
+		server.TxInConn(ctx, connOwner, func(tx server.PgTx) {
 			added = false
 			result, queryErr := tx.Query(
 				ctx,
@@ -955,6 +963,55 @@ func GetAppleTransactionNetworkIdInConn(connOwner server.PgConn,
 				ok = true
 			}
 		})
+	})
+	return
+}
+
+// HasPreLedgerAppleRenewalInTx reports whether the network already holds the
+// App Store supporter window ending at endTime from the notification handler
+// that predates the apple_subscription_transaction ledger (before 2026-08).
+// That handler credited a transaction without a ledger row, keyed its renewal
+// on the app transaction id, started it at processing time and ended it at
+// expiresDate truncated to whole seconds plus the grace period. The ledger
+// therefore cannot see such a credit, and crediting the same transaction again
+// adds a second Pro balance for one paid window. endTime is the ledger path's
+// end (expiresDate in milliseconds plus the same grace), so the earlier end
+// lies in (endTime - 1s, endTime]. Renewals written by the ledger path name a
+// ledger transaction and never match.
+func HasPreLedgerAppleRenewalInTx(
+	tx server.PgTx,
+	ctx context.Context,
+	networkId server.Id,
+	endTime time.Time,
+) (exists bool) {
+	result, err := tx.Query(
+		ctx,
+		`
+		SELECT EXISTS (
+			SELECT 1
+			FROM subscription_renewal renewal
+			WHERE renewal.network_id = $1
+			  AND renewal.subscription_type = $2
+			  AND renewal.market = $3
+			  AND $4 < renewal.end_time
+			  AND renewal.end_time <= $5
+			  AND NOT EXISTS (
+				SELECT 1
+				FROM apple_subscription_transaction ledger
+				WHERE ledger.transaction_id = renewal.transaction_id
+			  )
+		)
+		`,
+		networkId,
+		SubscriptionTypeSupporter,
+		SubscriptionMarketApple,
+		endTime.Add(-1*time.Second),
+		endTime,
+	)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			server.Raise(result.Scan(&exists))
+		}
 	})
 	return
 }
