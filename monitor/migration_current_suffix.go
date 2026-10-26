@@ -744,7 +744,7 @@ var migrationCurrentSuffixContracts = slices.Concat(
 		migrationCurrentSuffix(857, "close evidence custody with age-bounded retention deletes",
 			contractCloseEvidenceRetentionArtifactQuery).removedAt(contractCloseEvidenceMoveGuardMigrationVersion),
 		migrationCurrentSuffix(858, "production and staging source authorization of the ten live repositories", competitionMigration858ArtifactQuery).removedAt(859),
-		migrationCurrentSuffix(859, "scheduled round opening bound to its intent", competitionMigration859ArtifactQuery),
+		migrationCurrentSuffix(859, "scheduled round opening bound to its intent", competitionMigration859ArtifactQuery).removedAt(891),
 		migrationCurrentSuffix(860, "raw table and index bloat measurements", dbBloatMeasurementArtifactQuery),
 		migrationCurrentSuffix(contractCloseEvidenceMoveGuardMigrationVersion, "close evidence custody with moves into its partitions",
 			contractCloseEvidenceMoveArtifactQuery),
@@ -812,6 +812,10 @@ var migrationCurrentSuffixContracts = slices.Concat(
 		// Part B); its version follows the migration's position
 		migrationCurrentSuffix(server.LegacySettlementIntentRetirementMigrationVersion(),
 			legacySettlementIntentRetirementArtifactName, legacySettlementIntentRetirementArtifactQuery),
+	},
+	[]snMainnetMigrationContract{
+		migrationCurrentSuffix(891, "provider-aware winner review and scheduled round guards", competitionMigration891ArtifactQuery).removedAt(892),
+		migrationCurrentSuffix(892, "reviewed repository patch source and winner guard custody", competitionMigration892ArtifactQuery),
 	},
 )
 
