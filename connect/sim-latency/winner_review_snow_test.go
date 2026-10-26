@@ -56,6 +56,17 @@ func TestWinnerSnowUnionRejectsDuplicateProviderReceipt(t *testing.T) {
 	}
 }
 
+// Identity alone is insufficient: each reviewer needs actual token accounting.
+func TestWinnerSnowUnionRejectsMissingMemberUsage(t *testing.T) {
+	request, members := winnerSnowMemberFixture(t)
+	for _, usage := range []json.RawMessage{nil, json.RawMessage(`{}`), json.RawMessage(`{"input_tokens":10,"output_tokens":0}`)} {
+		members[2].Usage = usage
+		if aggregateWinnerSnow(members, defaultWinnerSnowProviderSettings(), request).Decision != "uncertain" {
+			t.Fatal("member without genuine token accounting authorized approval")
+		}
+	}
+}
+
 // The exact production journal operation must refuse a second intent even when
 // the requested content changes; a crash is not a fresh review opportunity.
 func TestWinnerSnowMemberJournalCannotReroll(t *testing.T) {
