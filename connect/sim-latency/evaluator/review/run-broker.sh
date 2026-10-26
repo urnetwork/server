@@ -283,7 +283,7 @@ jq -e --arg id "$container_id" --arg image "$image" --arg owner "$owner" --arg n
  ((.[0].HostConfig.Devices//[])|length)==0 and ((.[0].HostConfig.DeviceRequests//[])|length)==0 and
  ((.[0].HostConfig.Binds//[])|length)==0 and ((.[0].HostConfig.VolumesFrom//[])|length)==0 and
  ((.[0].HostConfig.PortBindings//{})|length)==0 and ((.[0].HostConfig.Tmpfs//{})|length)==0 and
- all(.[0].Config.Env//[]; test("^(PATH|HOSTNAME|HOME)="))' "$attempt_directory/container-inspect.json" >/dev/null
+ all((.[0].Config.Env//[])[]; type=="string" and test("^(PATH|HOSTNAME|HOME)="))' "$attempt_directory/container-inspect.json" >/dev/null
 mkfifo -m 0600 "$attempt_directory/stdin.pipe" "$attempt_directory/stdout.pipe" "$attempt_directory/stderr.pipe"
 exec 7<>"$attempt_directory/stdin.pipe"
 { head -c "$((output_limit+1))"; cat >/dev/null; } < "$attempt_directory/stdout.pipe" > "$attempt_directory/broker.stdout" & stdout_pid=$!

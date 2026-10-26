@@ -462,6 +462,60 @@ func reviewQualificationContainerFixture(t *testing.T, owner, image, network, pr
 	return content
 }
 
+// Runs the entire actual jq inspection predicate, not its Go reimplementation.
+// Both provider modes must accept minimal authority and reject extra env/mounts.
+func TestReviewQualificationWrapperInspectionChecksEnvironmentEntries(t *testing.T) {
+	wrapper, err := os.ReadFile("evaluator/review/run-broker.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, program, found := strings.Cut(string(wrapper), `--argjson command "$provider_command_json" '`+"\n")
+	if !found {
+		t.Fatal("actual container inspection start missing")
+	}
+	program, _, found = strings.Cut(program, `' "$attempt_directory/container-inspect.json"`)
+	if !found {
+		t.Fatal("actual container inspection end missing")
+	}
+	owner, image, network, provider := strings.Repeat("a", 64), "sha256:"+strings.Repeat("c", 64), strings.Repeat("d", 64), "192.0.2.10"
+	for _, snow := range []bool{false, true} {
+		for _, environment := range []any{[]string{"PATH=/usr/bin", "HOSTNAME=synthetic", "HOME=/"}, []string{}, nil, []string{"PATH=/usr/bin", "SYNTHETIC_SECRET=not-real"}, []any{"PATH=/usr/bin", 7}, "PATH=/usr/bin"} {
+			var containers []map[string]any
+			if err := json.Unmarshal(reviewQualificationContainerFixture(t, owner, image, network, provider), &containers); err != nil {
+				t.Fatal(err)
+			}
+			container := containers[0]
+			config, host := container["Config"].(map[string]any), container["HostConfig"].(map[string]any)
+			config["Env"] = environment
+			leaf, target, state := "/synthetic/provider", "/run/secrets/model-key", "/synthetic/state"
+			container["Mounts"].([]any)[0].(map[string]any)["Source"] = leaf
+			if snow {
+				target = "/run/review/provider.json"
+				config["Entrypoint"] = []string{"/review-broker", "review-broker"}
+				host["ExtraHosts"] = []string{}
+				host["Ulimits"] = []any{map[string]any{"Name": "fsize", "Soft": 1048576, "Hard": 1048576}}
+				container["Mounts"] = []any{map[string]any{"Type": "bind", "Source": leaf, "Destination": target, "RW": false}, map[string]any{"Type": "bind", "Source": state, "Destination": "/run/review/state", "RW": true}}
+			}
+			entrypoint, _ := json.Marshal(config["Entrypoint"])
+			hosts, _ := json.Marshal(host["ExtraHosts"])
+			body, err := json.Marshal(containers)
+			if err != nil {
+				t.Fatal(err)
+			}
+			command := exec.CommandContext(t.Context(), "/usr/bin/jq", "-e", "--arg", "id", strings.Repeat("b", 64), "--arg", "image", image, "--arg", "owner", owner, "--arg", "network", network, "--arg", "leaf", leaf, "--arg", "target", target, "--arg", "state", state, "--argjson", "snow", strconv.FormatBool(snow), "--argjson", "hosts", string(hosts), "--argjson", "entrypoint", string(entrypoint), "--argjson", "command", "[]", program)
+			command.Stdin = bytes.NewReader(body)
+			output, commandErr := command.CombinedOutput()
+			allowed := environment == nil
+			if values, ok := environment.([]string); ok {
+				allowed = len(values) == 0 || values[len(values)-1] == "HOME=/"
+			}
+			if (commandErr == nil) != allowed {
+				t.Fatalf("environment inspection snow=%t env=%v expected=%t error=%v output=%s", snow, environment, allowed, commandErr, output)
+			}
+		}
+	}
+}
+
 // Approval-shaped model text cannot waive any actual resource/identity/egress
 // or key-only mount condition in the independent Docker inspection.
 func TestReviewQualificationContainerRequiresActualLeastAuthority(t *testing.T) {
