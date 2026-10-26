@@ -28,6 +28,12 @@
   },
   "additional_datasets": [
     {
+      "id": "prelaunch-snow-core-qualification-2026-10-26",
+      "official": false,
+      "index_path": "prelaunch-snow-core-qualification-2026-10-26/INDEX.json",
+      "index_sha256": "f6b122808e9b44f393d6cb5ec30da4a2bba5a43e3be1d4c0199f5a2a2aac4c51"
+    },
+    {
       "id": "prelaunch-c2-runtime-qualification-2026-10-26",
       "official": false,
       "index_path": "prelaunch-c2-runtime-qualification-2026-10-26/INDEX.json",
