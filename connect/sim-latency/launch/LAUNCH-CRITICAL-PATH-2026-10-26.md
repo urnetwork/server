@@ -36,10 +36,12 @@ Do not generate replacement inputs after seeing held-out outcomes. Publish
 completed evidence promptly and keep intermissions limited to required
 authentication, preservation, qualification and launch preparation.
 
-Independent control-plane deployment and provisioning can proceed once the
-maintenance hold is explicitly cleared. They must not inject builds, tests or
-pressure workloads into this measurement host. Required external inputs remain
-the dedicated review-provider key and an approved public patch-edit scope.
+Independent control-plane deployment and provisioning can proceed: the user has
+explicitly cleared maintenance, provisioned the dedicated review key and approved
+all ten repository roots (excluding the protected instrument/metadata boundary).
+GPT-5.4 mini model access returned HTTP 200; real xhigh review qualification is
+still required. These resolved inputs do not authorize activation. Deployment
+must not inject builds, tests or pressure workloads into this measurement host.
 
 ## Final release boundary
 

@@ -735,7 +735,7 @@ func (self *Settings) Validate() error {
 	}
 	p := self.EvaluationPolicy
 	season := self.SeasonPolicy
-	if self.AutomationPolicy.WinnerReviewPolicy == model.CompetitionWinnerReviewPolicy && season.PreparationWindowSeconds != 0 {
+	if model.IsCompetitionWinnerReviewPolicy(self.AutomationPolicy.WinnerReviewPolicy) && season.PreparationWindowSeconds != 0 {
 		return errors.New("elected-winner closing waits for actual qualification rather than a fixed preparation delay")
 	}
 	if self.AutomationPolicy.Enabled && self.AutomationPolicy.Staging {

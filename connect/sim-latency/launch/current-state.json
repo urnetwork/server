@@ -6,6 +6,28 @@
   "production_activated": false,
   "status": "formal_stage_a_original_cohort03_running_two_of_five_completed",
   "authority_warning": "This is a preparation snapshot, not runtime/score authority. Verify the live process/session and current artifacts before acting; never restart because an observation times out.",
+  "operator_inputs": {
+    "observed_at": "2026-10-26T05:23:17Z",
+    "source": "Explicit user confirmations and parent-verified private-key/model-access readbacks; no new scoring observation.",
+    "main_maintenance_hold": false,
+    "public_patch_path_base": "mono_root_v1",
+    "public_patch_repository_roots": ["server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "warp", "gvisor"],
+    "public_patch_scope": "Any file in the ten locked repositories, excluding server/connect/sim-latency/** and repository metadata. Broad parser/build/promotion qualification remains required; frozen Stage A/reference policies are unchanged.",
+    "dedicated_review_provider_key_present": true,
+    "dedicated_review_provider_key_path": "vault/main/competition-review-openai.key",
+    "dedicated_review_provider_key_mode": "0600",
+    "review_model": "gpt-5.4-mini",
+    "review_reasoning": "xhigh",
+    "review_policy": "elected_winner_gpt54mini_xhigh_v1",
+    "review_model_access_http": 200,
+    "review_inference_http": 429,
+    "review_inference_error_code": "credit_balance_exhausted",
+    "review_inference_evidence_root": "/home/by/urnetwork/temp/gpt54mini-integration-review-20261026.81jp6RkQ",
+    "review_inference_patch_sha256": "3f71c85969b5365b1be991cea77e4a2dc2afe4894b348413b67d6f0feaba0dd3",
+    "review_inference_response_sha256": "48d9f03c6f9b357bc078fb3eb43d1a51aaa9a2c3257727dc310158e50b086fa3",
+    "provider_review_qualified": false,
+    "production_activated": false
+  },
   "replacement_campaign_preparation": {
     "status": "original_third_cohort_running_two_completed_preserved",
     "root": "/home/by/urnetwork/temp/canceled-stop-calibration-20261025.0G7LKkuh",
@@ -32,6 +54,7 @@
     "next_action": "Cohort02phasea163 andqualifiedtoolphase33e41 pushed. Observe SAMEoriginalcohort03/session62445/PIDs2358606,2358634,2358765 throughterminal. No tests/builds/probes/other scoring whilelive; no04orautomaticretry. Preserveeveryoutcome andallbinding/budget/cleanup receipts beforepublishingnextphase. No actualassembly/hiddeninputs/nativeanalysis/DNSruntimeproof/productionactivation."
   },
   "latest_external_read_only_probe": {
+    "superseded_operator_inputs": "Key-presence and maintenance fields below are the historical 02:33 observation; current user-confirmed inputs are in operator_inputs.",
     "observed_at": "2026-10-26T02:33:10Z",
     "competition_info_http": 503,
     "competition_info_code": "source_not_ready",
@@ -717,12 +740,13 @@
     "priority": "First cohort passed and originals/report independently verified; phase3d6c35d29 published. Reference screen authorized during scoring intermission; then continue remaining predeclared work serially. No parallel tests/builds/probes during scoring."
   },
   "external_holds": {
-    "main_maintenance": "User-confirmed. No main DB/control-plane mutations, activation or service restart until user confirms maintenance ended.",
+    "main_maintenance": "Cleared explicitly by the user on October 26. Coordinate main control-plane changes; production activation still requires every release gate and no measurement interference.",
     "last_check_at": "2026-10-25T23:18:30Z",
     "api_info_http": 503,
-    "api_info_observation": "Read-only GET23:18UTC returns typed infrastructure/source_not_ready: exact runtime source envelope unavailable, retriabletrue. API is responding; this is not proof of DB outage or MinIO transport failure. Underlying envelope/protection prerequisite is deliberately not disclosed publicly. Qualify/install the exact intended envelope and readiness acknowledgments after maintenance clearance; do not bypass guards or restart from this response alone.",
+    "api_info_observation": "The original dated check below and parent-reported October26 04:53UTC check return typed infrastructure/source_not_ready: exact runtime source envelope unavailable, retriabletrue. This is an implementation/deployment readiness gate, not an unresolved maintenance input or proof of DB outage/MinIO transport failure. Qualify/install the exact intended envelope and independent readiness acknowledgments; do not bypass guards or restart from this response alone.",
     "minio_health": "Configured172.28.208.176:23900 returned200. Old .177 probe was stale, not proof current MinIO unavailable. Authenticated durability/retention/capacity/replication acceptance remains pending.",
-    "dedicated_review_key": "Absent, including root existence check. Expected private path vault/main/competition-review-openai.key; never expose its contents."
+    "dedicated_review_key": "Provided by user and moved to private vault/main/competition-review-openai.key, mode0600 and excluded from Git. Model metadata access HTTP200, but the actual gpt-5.4-mini/xhigh Responses request returned HTTP429 credit_balance_exhausted. User asked to fund the credited project or replace its dedicated key. Do not retry quota refusals blindly or substitute another model. Actual review-provider qualification remains blocked; never expose key bytes.",
+    "public_edit_scope": "Resolved by user: any file in all ten locked competition repositories, except protected simulator/evaluator/scorer/containment instrument and repository metadata; new mono_root_v1 implementation remains unqualified."
   },
   "pending": [
     "Complete held-out reference qualification: snapshot passed its separate directional pilot but was not significant; warm-reader negative patch passed current-source correctness/build checks. Preserve unfavorable prior outcomes; neither pilot enters Stage A and no automatic retry is allowed",
@@ -737,7 +761,7 @@
     "The cold attempt is terminal. Keep subsequent scoring serial under the shared slot; never overlap scoring with tests/builds/bombs.",
     "Keep evaluated branches/image/config unchanged; tests, builds and replay only while the scoring slot is idle and exclusively held.",
     "Keep every failed/incomplete outcome; never label a synthetic fixture as a live readiness receipt.",
-    "Current editable surface remains connect/resident_contract_manager.go unless explicitly changed.",
+    "Frozen calibration/reference policies remain server-relative connect/resident_contract_manager.go. User-approved production scope is separately mono_root_v1 across all ten locked repositories; qualify its complete parser/build/review/promotion path before activation.",
     "16.1% remains historical/provisional, not a fresh calibrated noise estimate."
   ]
 }

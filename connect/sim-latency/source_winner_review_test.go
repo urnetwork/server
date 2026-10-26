@@ -115,7 +115,7 @@ func winnerBrokerFixture() (winnerReviewBrokerResult, model.CompetitionIntegrity
 	digest := sha256.Sum256([]byte(evidence))
 	template := model.CompetitionIntegrityReviewRequest{JobId: server.NewId(), ExpectedRevision: 1, IdempotencyKey: "test-winner-review", CriteriaVersion: "review/v2",
 		PatchSha256: strings.Repeat("a", 64), BaseSourceLockSha256: strings.Repeat("b", 64), ScoreSha256: strings.Repeat("c", 64), BaselineSha256: strings.Repeat("d", 64), ArtifactManifestSha256: strings.Repeat("e", 64),
-		ExpectedDecisionSha256: strings.Repeat("f", 64), ReviewerModel: "gpt-6.1-sol", ReviewerReasoning: "max"}
+		ExpectedDecisionSha256: strings.Repeat("f", 64), ReviewerModel: model.CompetitionWinnerReviewModel, ReviewerReasoning: model.CompetitionWinnerReviewReasoning}
 	review := template
 	review.RewardDisposition, review.SourceDisposition = "approved", "approved"
 	review.PublicExplanation, review.WithheldEvidenceExplanation = "All six synthetic criteria passed.", "Detailed analysis retained privately."
@@ -124,7 +124,7 @@ func winnerBrokerFixture() (winnerReviewBrokerResult, model.CompetitionIntegrity
 	for _, criterion := range []string{"measurement_integrity", "workload_generalization", "containment", "patch_scope", "reproducibility", "source_safety"} {
 		review.Findings = append(review.Findings, model.CompetitionReviewFinding{Criterion: criterion, Disposition: "pass", ReasonCode: "APPROVED", Explanation: "Synthetic criterion evidence was reviewed.", EvidenceSha256: review.PrivateEvidenceSha256})
 	}
-	return winnerReviewBrokerResult{Schema: 1, Model: "gpt-6.1-sol", Reasoning: "max", NoMainCredentials: true, NoCandidateExecution: true, Review: review, PrivateEvidence: evidence}, template,
+	return winnerReviewBrokerResult{Schema: 1, Model: model.CompetitionWinnerReviewModel, Reasoning: model.CompetitionWinnerReviewReasoning, NoMainCredentials: true, NoCandidateExecution: true, Review: review, PrivateEvidence: evidence}, template,
 		model.CompetitionAutomationPolicy{ReviewCriteriaVersion: "review/v2", RepeatRewardPolicy: "allow", WinnerReviewPolicy: model.CompetitionWinnerReviewPolicy}
 }
 

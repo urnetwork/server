@@ -126,6 +126,10 @@ func (self *winnerClosingFixture) ReviewWinner(_ context.Context, _ model.Compet
 		return nil, errors.New("synthetic unavailable reviewer")
 	}
 	state := self.snapshot.WinnerReview
+	modelName, reasoning, supported := model.CompetitionWinnerReviewProvider(state.Policy.WinnerReviewPolicy)
+	if !supported || request.ReviewerModel != modelName || request.ReviewerReasoning != reasoning {
+		return nil, errors.New("synthetic review received changed frozen provider")
+	}
 	if self.rejectAll || self.rejectFirst {
 		self.rejectFirst = false
 		state.CurrentDecision.Revision++
@@ -142,7 +146,7 @@ func (self *winnerClosingFixture) ReviewWinner(_ context.Context, _ model.Compet
 	state.ApprovedReviewId = &id
 	state.ApprovedReview = &model.CompetitionIntegrityReviewResult{ReviewId: id, RoundId: request.RoundId, CreatedAt: self.now,
 		Request: model.CompetitionIntegrityReviewRequest{JobId: request.JobId, ExpectedDecisionSha256: request.RewardDecisionSha256, ExpectedRevision: request.RewardRevision,
-			RewardDisposition: "approved", SourceDisposition: "approved", ReviewerModel: model.CompetitionWinnerReviewModel, ReviewerReasoning: model.CompetitionWinnerReviewReasoning}}
+			RewardDisposition: "approved", SourceDisposition: "approved", ReviewerModel: request.ReviewerModel, ReviewerReasoning: request.ReviewerReasoning}}
 	return state, nil
 }
 func (self *winnerClosingFixture) ChooseSource(_ context.Context, _ model.CompetitionSupervisorLease, snapshot *CompetitionSupervisorSnapshot, next model.CompetitionSupervisorTransition) (*model.CompetitionSourceActivation, error) {
@@ -150,7 +154,7 @@ func (self *winnerClosingFixture) ChooseSource(_ context.Context, _ model.Compet
 	if self.failBuild {
 		return nil, errors.New("synthetic failed source build")
 	}
-	intent := &model.CompetitionSourceActivation{Generation: snapshot.CurrentSource.Generation + 1, ExpectedGeneration: snapshot.CurrentSource.Generation, SourceGeneration: snapshot.CurrentSource.SourceGeneration, TargetEpoch: next.TargetEpoch, PreparedAt: self.now, WinnerReviewPolicy: model.CompetitionWinnerReviewPolicy, WinnerReview: next.WinnerReview, Kind: "reviewed_source_carry_forward", Reason: "no_reward_winner"}
+	intent := &model.CompetitionSourceActivation{Generation: snapshot.CurrentSource.Generation + 1, ExpectedGeneration: snapshot.CurrentSource.Generation, SourceGeneration: snapshot.CurrentSource.SourceGeneration, TargetEpoch: next.TargetEpoch, PreparedAt: self.now, WinnerReviewPolicy: snapshot.WinnerReview.Policy.WinnerReviewPolicy, WinnerReview: next.WinnerReview, Kind: "reviewed_source_carry_forward", Reason: "no_reward_winner"}
 	if snapshot.WinnerReview.CurrentDecision.SelectedJobId != nil {
 		self.builds++
 		intent.Kind = "reviewed_source_promotion"
@@ -241,6 +245,20 @@ func TestWinnerClosingApprovesBuildsQualifiesAndOpens(t *testing.T) {
 	}
 	if f.reviews != 1 || f.builds != 1 || f.opens != 1 || f.fallbacks != 0 {
 		t.Fatalf("unexpected closing effects: %+v", f)
+	}
+}
+
+// A new control binary resumes an explicitly historical closing policy with
+// its original provider; default migration cannot relabel existing approvals.
+func TestWinnerClosingPreservesHistoricalProviderThroughActivation(t *testing.T) {
+	f := newWinnerClosingFixture()
+	f.snapshot.WinnerReview.Policy.WinnerReviewPolicy = model.CompetitionLegacyWinnerReviewPolicy
+	for _, state := range []string{"winner_review_pending", "winner_review_pending", "winner_review_recorded", "source_choice_pending", "source_publication_pending", "preparation_pending", "source_active", "round_created"} {
+		f.step(t, state, false)
+	}
+	review := f.snapshot.WinnerReview.ApprovedReview
+	if f.reviews != 1 || f.opens != 1 || review == nil || review.Request.ReviewerModel != "gpt-6.1-sol" || review.Request.ReviewerReasoning != "max" {
+		t.Fatalf("historical provider was changed: %+v", review)
 	}
 }
 
@@ -363,17 +381,18 @@ func TestWinnerClosingProjectionIgnoresOtherCandidatesAndRevocation(t *testing.T
 	result := &model.CompetitionV2RoundResult{Decisions: []model.CompetitionRewardDecision{{SelectedJobId: &job}}}
 	review := model.CompetitionIntegrityReviewResult{ReviewId: reviewId, Request: model.CompetitionIntegrityReviewRequest{JobId: other, RewardDisposition: "approved", SourceDisposition: "approved", ReviewerModel: model.CompetitionWinnerReviewModel, ReviewerReasoning: model.CompetitionWinnerReviewReasoning}}
 	result.IntegrityReviews = []model.CompetitionIntegrityReviewResult{review}
-	state, err := winnerReviewState(result, model.CompetitionAutomationPolicy{})
+	policy := model.CompetitionAutomationPolicy{WinnerReviewPolicy: model.CompetitionWinnerReviewPolicy}
+	state, err := winnerReviewState(result, policy)
 	if err != nil || state.ApprovedReviewId != nil {
 		t.Fatal("different candidate's approval was accepted", err)
 	}
 	result.IntegrityReviews[0].Request.JobId = job
-	state, err = winnerReviewState(result, model.CompetitionAutomationPolicy{})
+	state, err = winnerReviewState(result, policy)
 	if err != nil || state.ApprovedReviewId == nil {
 		t.Fatal("same elected candidate approval was lost", err)
 	}
 	result.IntegrityReviews = append(result.IntegrityReviews, model.CompetitionIntegrityReviewResult{Request: model.CompetitionIntegrityReviewRequest{JobId: job, RewardDisposition: "disqualified", SourceDisposition: "rejected"}})
-	state, err = winnerReviewState(result, model.CompetitionAutomationPolicy{})
+	state, err = winnerReviewState(result, policy)
 	if err != nil || state.ApprovedReviewId != nil {
 		t.Fatal("revoked approval still authorized source", err)
 	}

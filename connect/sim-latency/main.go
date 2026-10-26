@@ -90,7 +90,7 @@ Usage:
   sim-latency review-broker --model-key-file=<path>
   sim-latency source-build-broker --build-settings=<path> --build-settings-sha256=<digest>
   sim-latency source-qualify-build --qualification-settings=<path> --qualification-settings-sha256=<digest>
-  sim-latency launch-preflight --epoch=<n> --evaluator-image=<digest> --operator-token-file=<path> --grafana-url=<url> --grafana-token-file=<path> --metrics-url=<url> --metrics-token-file=<path> [--api-url=<url>] [--openapi=<path>] [--artifact-capacity-bytes=<n>] [--source-config=<path>] [--repos-root=<dir>] [--out=<path>]
+  sim-latency launch-preflight --epoch=<n> --evaluator-image=<digest> --operator-token-file=<path> --grafana-url=<url> --grafana-token-file=<path> --metrics-url=<url> --metrics-token-file=<path> [--api-url=<url>] [--openapi=<path>] [--artifact-capacity-bytes=<n>] [--preflight-timeout=<d>] [--source-config=<path>] [--repos-root=<dir>] [--out=<path>]
   sim-latency handoff-manifest --epoch=<n> --evaluator-image=<digest> --openapi=<path> --baseline-manifest=<path> --preflight=<path> [--staging-evidence=<paths>] [--source-config=<path>] [--repos-root=<dir>] [--out=<path>]
   sim-latency credentials generate --vault=<path> --delivery=<path> --submitter-name=<name> --operator-name=<name>
   sim-latency credentials rotate-token --vault=<path> --delivery=<path> --role=<role> --name=<name> [--environment=<env> --competition-id=<id> --season-id=<id>]
@@ -133,7 +133,7 @@ Options:
   --worker-sha256=<digest> Exact SHA-256 of the trusted worker launcher executable.
   --prepare-command=<path> Absolute trusted runtime propagation and qualification executable.
   --prepare-sha256=<digest> Exact SHA-256 of the trusted preparation executable.
-  --review-command=<path> Qualified isolated Sol 6.1 max review broker executable.
+  --review-command=<path> Qualified isolated GPT-5.4 mini xhigh review broker executable.
   --review-sha256=<digest> Exact SHA-256 of the trusted review broker.
   --reviewer-token-file=<path> Scoped reviewer credential; never passed to the model broker.
   --review-api-url=<url> HTTPS reviewer API origin [default: https://api.bringyour.com].
@@ -150,6 +150,7 @@ Options:
   --metrics-token-file=<path>  Private file containing a Mimir query token.
   --openapi=<path>        Competition OpenAPI source file.
   --artifact-capacity-bytes=<n>  Approved MinIO allocation [default: 1099511627776].
+  --preflight-timeout=<d>  Positive bound for the complete launch proof; default 10m.
   --baseline-manifest=<path>  Versioned baseline evidence manifest.
   --preflight=<path>      Passing launch-preflight JSON evidence.
   --staging-evidence=<paths>  Comma-separated Apex staging evidence files.

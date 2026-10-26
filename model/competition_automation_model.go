@@ -21,9 +21,13 @@ const (
 	CompetitionAutomationCapability  = "competition.reward.v2"
 	CompetitionRuntimeBlobCapability = "competition.reward.v2.runtime-blob.v1"
 	CompetitionElectionRule          = "raw_latency_g1_g6_welch_v1"
-	CompetitionWinnerReviewPolicy    = "elected_winner_sol61max_v1"
-	CompetitionWinnerReviewModel     = "gpt-6.1-sol"
-	CompetitionWinnerReviewReasoning = "max"
+	CompetitionWinnerReviewPolicy    = "elected_winner_gpt54mini_xhigh_v1"
+	CompetitionWinnerReviewModel     = "gpt-5.4-mini"
+	CompetitionWinnerReviewReasoning = "xhigh"
+	// Historical policy identity remains bound to its original provider.
+	CompetitionLegacyWinnerReviewPolicy    = "elected_winner_sol61max_v1"
+	CompetitionLegacyWinnerReviewModel     = "gpt-6.1-sol"
+	CompetitionLegacyWinnerReviewReasoning = "max"
 )
 
 var competitionAutomationSha256 = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -91,7 +95,7 @@ func ValidateCompetitionAutomationPolicy(policy CompetitionAutomationPolicy) err
 		if policy.WinnerReviewTimeoutSeconds != 0 {
 			return errors.New("winner review timeout requires an explicit frozen policy")
 		}
-	} else if policy.WinnerReviewPolicy != CompetitionWinnerReviewPolicy || policy.WinnerReviewTimeoutSeconds < 60 || policy.WinnerReviewTimeoutSeconds > 86400 {
+	} else if !IsCompetitionWinnerReviewPolicy(policy.WinnerReviewPolicy) || policy.WinnerReviewTimeoutSeconds < 60 || policy.WinnerReviewTimeoutSeconds > 86400 {
 		return errors.New("winner review requires the supported policy and a bounded timeout")
 	} else if policy.SourceChoiceDelaySeconds != 0 {
 		return errors.New("elected-winner progression cannot use the legacy independent source-choice delay")
@@ -99,6 +103,26 @@ func ValidateCompetitionAutomationPolicy(policy CompetitionAutomationPolicy) err
 		return errors.New("elected-winner progression requires readiness rather than a fixed staging delay")
 	}
 	return nil
+}
+
+// Selection comes only from the immutable round policy, never provider output
+// or candidate text. Historical reviews cannot be relabeled after a migration.
+func CompetitionWinnerReviewProvider(policy string) (modelName string, reasoning string, supported bool) {
+	switch policy {
+	case CompetitionWinnerReviewPolicy:
+		return CompetitionWinnerReviewModel, CompetitionWinnerReviewReasoning, true
+	case CompetitionLegacyWinnerReviewPolicy:
+		return CompetitionLegacyWinnerReviewModel, CompetitionLegacyWinnerReviewReasoning, true
+	default:
+		return "", "", false
+	}
+}
+
+// Both versions retain the same elected-winner lifecycle and strict evidence
+// semantics; their provider provenance remains separate.
+func IsCompetitionWinnerReviewPolicy(policy string) bool {
+	_, _, supported := CompetitionWinnerReviewProvider(policy)
+	return supported
 }
 
 // Both contracts preserve v2 reward semantics; the blob contract additionally
@@ -396,8 +420,9 @@ func ValidateCompetitionIntegrityReview(request CompetitionIntegrityReviewReques
 	if request.SourceDisposition == "approved" && request.RewardDisposition != "approved" && request.RewardDisposition != "restored" {
 		return errors.New("source approval requires an affirmative integrity review")
 	}
-	if policy.WinnerReviewPolicy == CompetitionWinnerReviewPolicy {
-		if request.ReviewerModel != CompetitionWinnerReviewModel || request.ReviewerReasoning != CompetitionWinnerReviewReasoning || !competitionAutomationSha256.MatchString(request.ExpectedDecisionSha256) {
+	if policy.WinnerReviewPolicy != "" {
+		modelName, reasoning, supported := CompetitionWinnerReviewProvider(policy.WinnerReviewPolicy)
+		if !supported || request.ReviewerModel != modelName || request.ReviewerReasoning != reasoning || !competitionAutomationSha256.MatchString(request.ExpectedDecisionSha256) {
 			return errors.New("winner review requires the elected decision identity and pinned reviewer policy")
 		}
 		if request.SourceDisposition == "rejected" && request.RewardDisposition != "disqualified" || request.RewardDisposition == "disqualified" && request.SourceDisposition != "rejected" {
@@ -452,7 +477,7 @@ func ValidateCompetitionIntegrityReview(request CompetitionIntegrityReviewReques
 			return errors.New("review is missing a required criterion")
 		}
 	}
-	if policy.WinnerReviewPolicy == CompetitionWinnerReviewPolicy && request.RewardDisposition == "disqualified" && (!failedFinding || !supportedFailure) {
+	if IsCompetitionWinnerReviewPolicy(policy.WinnerReviewPolicy) && request.RewardDisposition == "disqualified" && (!failedFinding || !supportedFailure) {
 		return errors.New("elected-winner disqualification requires a failed honesty or safety finding")
 	}
 	return nil

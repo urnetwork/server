@@ -2,6 +2,16 @@
 
 ## Current preparation pointer — October 26
 
+User-confirmed operator inputs are now resolved: maintenance is cleared, broad
+ten-repository editable scope is approved outside the protected instrument and
+repository metadata, and the dedicated review key is provisioned privately.
+The latest required honesty/code reviewer is **GPT-5.4 mini at xhigh**, under
+new prospective policy `elected_winner_gpt54mini_xhigh_v1`; Sol 6.1 low test
+ownership is unchanged. Model-access HTTP 200 is not provider qualification.
+The [template](competition-production.yml.template) records this scope/provider
+but remains disabled and unqualified. Older journal hold/model statements below
+describe their observation time, not these current user-confirmed inputs.
+
 Use [LAUNCH-ACCEPTANCE.md](LAUNCH-ACCEPTANCE.md) and the actual live process,
 not the older journal entries below. Corrected-release formal cohort 1 passed
 and its full original evidence is preserved. Cohort 2 also completed and its
