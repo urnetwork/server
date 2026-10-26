@@ -194,6 +194,32 @@ until their 24-hour lease. `urnetwork_redis_contract_reservation_total` gains
 the operations `reserve-pending`, `reserve-pending-full` and
 `release-pending`; `reserve-owned` no longer counts creation.
 
+## Refusal probes for reserved grants
+
+A refused reservation costs a preflight PING and the whole reservation script
+(a 5.8 KB EVAL with up to five replicated writes), and its grant joins the
+request's recovery page. A payer whose grants are all held by open
+reservations pays that for every grant on every request before it is refused
+or, while the degradation valve is open, given a zero escrow contract.
+
+After a request's first refused reservation, selection reads the remaining
+candidates of each spread window or keyset page with one read-only script per
+grant, pipelined and without a preflight PING. The probe proves a refusal only
+in the reservation script's plain state: a valid counter generation, no
+expired lease and no token of this request. There, credit minus legacy and
+reserved bytes is the reservation's own availability, so selection skips a
+partial reservation with nothing left and a whole one with less than the
+request. Any other state, or a failed probe, leaves the decision to the
+reservation. Attempt order and the grants considered do not change. A skipped
+grant holding a recovery or pending marker stays in the request's recovery
+page, as a refused one does; a grant with neither leaves it, since its page
+would find nothing.
+
+`urnetwork_redis_contract_reservation_total` gains `result=skipped` on
+`reserve-pending` and `reserve-pending-full` (`refused` plus `skipped` is the
+former `refused`), and `operation=reserve-probe` with
+`result=empty|available|undecided|error`.
+
 ## Asynchronous settlement writeback (migration 758)
 
 Current Redis-reserved contracts commit their terminal outcome and exact payer
