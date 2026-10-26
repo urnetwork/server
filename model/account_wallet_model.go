@@ -2,7 +2,6 @@ package model
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -68,30 +67,42 @@ func CreateAccountWalletExternal(
 		active := true
 		createTime := server.NowUtc()
 
-		// First try to find an existing wallet with the same network_id and wallet_address
-		var existingWalletId server.Id
-		existingRow := tx.QueryRow(
+		// First try to find an existing wallet with the same network_id and
+		// wallet_address on the same chain. A row stored before addresses were
+		// validated can hold the address on another chain (a Solana key saved
+		// as a Polygon wallet, support inbox 8045). Returning or reactivating
+		// that row kept the address on the wrong chain while the request,
+		// validated on its own chain, reported success, so the requested chain
+		// gets its own row. An active row is reused before an inactive one,
+		// then the oldest. A failed statement raises, which ends the
+		// transaction at once. It used to be taken for "no wallet", and the
+		// insert below then failed too, after which the transaction went on to
+		// a commit that server.Tx retried for a minute.
+		var existingWalletId *server.Id
+		existingResult, err := tx.Query(
 			session.Ctx,
 			`
-					SELECT wallet_id
+					SELECT wallet_id, blockchain
 					FROM account_wallet
 					WHERE network_id = $1 AND wallet_address = $2
+					ORDER BY active DESC, wallet_id
 			`,
 			createAccountWallet.NetworkId,
 			createAccountWallet.WalletAddress,
 		)
+		server.WithPgResult(existingResult, err, func() {
+			for existingResult.Next() {
+				var rowWalletId server.Id
+				var rowBlockchain string
+				server.Raise(existingResult.Scan(&rowWalletId, &rowBlockchain))
+				if existingWalletId == nil && sameBlockchain(rowBlockchain, createAccountWallet.Blockchain) {
+					existingWalletId = &rowWalletId
+				}
+			}
+		})
+		if existingWalletId != nil {
 
-		err := existingRow.Scan(&existingWalletId)
-		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			// a failed statement ends the transaction at once. It used to be
-			// taken for "no wallet", and the insert below then failed too,
-			// after which the transaction went on to a commit that server.Tx
-			// retried for a minute.
-			server.Raise(err)
-		}
-		if err == nil {
-
-			glog.Infof("[wm][%s]found existing wallet %s for address %s", createAccountWallet.NetworkId, existingWalletId, createAccountWallet.WalletAddress)
+			glog.Infof("[wm][%s]found existing wallet %s for address %s", createAccountWallet.NetworkId, *existingWalletId, createAccountWallet.WalletAddress)
 
 			// Found an existing wallet - update active = true
 			_ = server.RaisePgResult(tx.Exec(
@@ -101,10 +112,10 @@ func CreateAccountWalletExternal(
 									SET active = true
 									WHERE wallet_id = $1 AND NOT active
 							`,
-				existingWalletId,
+				*existingWalletId,
 			))
 
-			walletId = &existingWalletId
+			walletId = existingWalletId
 			return
 		}
 
@@ -434,7 +445,8 @@ func RemoveWallet(id server.Id, session *session.ClientSession) *RemoveWalletRes
 			`
 				SELECT
 						wallet_id,
-						blockchain
+						blockchain,
+						wallet_address
 				FROM account_wallet
 				WHERE
 						network_id = $1 AND
@@ -448,7 +460,7 @@ func RemoveWallet(id server.Id, session *session.ClientSession) *RemoveWalletRes
 		server.WithPgResult(candidateResult, err, func() {
 			for candidateResult.Next() {
 				candidate := &payoutWalletCandidate{}
-				server.Raise(candidateResult.Scan(&candidate.walletId, &candidate.blockchain))
+				server.Raise(candidateResult.Scan(&candidate.walletId, &candidate.blockchain, &candidate.walletAddress))
 				candidates = append(candidates, candidate)
 			}
 		})

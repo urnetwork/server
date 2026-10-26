@@ -20,8 +20,9 @@ type AccountErrorMessage string
 
 // 400s: the router answers the status and logs nothing for client input
 var (
-	ErrInvalidBlockchain       = errors.New("400 invalid blockchain, use SOL, MATIC, or TAO")
-	ErrInvalidWalletAddress    = errors.New("400 invalid wallet address")
+	ErrInvalidBlockchain = errors.New("400 invalid blockchain, use SOL, MATIC, or TAO")
+	// every address refusal wraps it, with what the address is instead
+	ErrInvalidWalletAddress    = model.ErrInvalidWalletAddress
 	ErrInvalidDefaultTokenType = errors.New("400 invalid default token type")
 )
 
@@ -55,20 +56,13 @@ func CreateAccountWalletExternal(
 		return nil, ErrInvalidDefaultTokenType
 	}
 
-	walletValidateAddressArgs := WalletValidateAddressArgs{
-		Address: wallet.WalletAddress,
-		Chain:   wallet.Blockchain,
-	}
-	validationResult, err := WalletValidateAddress(&walletValidateAddressArgs, session)
-	if err != nil {
+	// the address must be an address on the chain; the refusal says what it
+	// is instead (a Solana key offered as a Polygon wallet, support inbox 8045)
+	if err := model.ValidateWalletAddress(blockchain, wallet.WalletAddress); err != nil {
 		return nil, err
 	}
 
 	wallet.NetworkId = session.ByJwt.NetworkId
-
-	if !validationResult.Valid {
-		return nil, ErrInvalidWalletAddress
-	}
 
 	walletId := model.CreateAccountWalletExternal(session, wallet)
 

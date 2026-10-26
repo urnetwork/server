@@ -62,7 +62,7 @@ func TestAccountWallet(t *testing.T) {
 			WalletAddress: "1234",
 		}, ownerSession)
 		connect.AssertEqual(t, result, nil)
-		connect.AssertEqual(t, err, ErrInvalidWalletAddress)
+		connect.AssertEqual(t, errors.Is(err, ErrInvalidWalletAddress), true)
 
 		// should have 0 wallets associated with this session
 		walletResults, err := GetAccountWallets(ownerSession)
