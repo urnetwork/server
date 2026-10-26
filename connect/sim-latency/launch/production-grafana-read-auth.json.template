@@ -1,0 +1,6 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-launch-basic-credential",
+  "username": "admin",
+  "password": "${EXISTING_SCOPED_GRAFANA_ADMIN_PASSWORD}"
+}

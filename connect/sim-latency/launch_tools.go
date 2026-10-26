@@ -34,12 +34,16 @@ import (
 )
 
 const (
-	launchEvidenceSchema          = 1
-	launchHttpResponseLimit       = 4 * 1024 * 1024
-	defaultArtifactCapacityBytes  = int64(1024 * 1024 * 1024 * 1024)
-	artifactCapacityStopPercent   = 90.0
-	runnerHeartbeatMaximumSeconds = 30.0
+	launchEvidenceSchema = 1
 )
+
+// Operational proof gates are invocation-owned, not global tunables.
+type launchGateSettings struct{ ArtifactCapacityStopPercent, RunnerHeartbeatMaximumSeconds float64 }
+
+// Frozen launch thresholds remain unchanged; no new CLI override is exposed.
+func defaultLaunchGateSettings() launchGateSettings {
+	return launchGateSettings{ArtifactCapacityStopPercent: 90, RunnerHeartbeatMaximumSeconds: 30}
+}
 
 var mandatoryLaunchChecks = []string{
 	"frozen_source",
@@ -82,8 +86,10 @@ type launchPreflightConfig struct {
 	OperatorToken         string
 	GrafanaUrl            string
 	GrafanaToken          string
+	GrafanaCredential     *launchHttpCredential
 	MetricsUrl            string
 	MetricsToken          string
+	MetricsCredential     *launchHttpCredential
 	ArtifactCapacityBytes int64
 	OutputPath            string
 	Now                   func() time.Time
@@ -91,7 +97,16 @@ type launchPreflightConfig struct {
 
 // Defaults belong to the invocation; callers may shorten them for diagnostics.
 func defaultLaunchPreflightConfig() *launchPreflightConfig {
-	return &launchPreflightConfig{Timeout: 10 * time.Minute, SubprocessWaitDelay: 5 * time.Second}
+	return &launchPreflightConfig{Timeout: 10 * time.Minute, SubprocessWaitDelay: 5 * time.Second, ArtifactCapacityBytes: 10_000_000_000_000}
+}
+
+// The user's allocation is an upper bound, not permission for an arbitrary
+// command-line denominator that could make a full namespace look empty.
+func validateLaunchArtifactAllocation(capacityBytes int64) error {
+	if capacityBytes <= 0 || capacityBytes > defaultLaunchPreflightConfig().ArtifactCapacityBytes {
+		return errors.New("artifact allocation must be positive and at most the approved decimal 10 TB")
+	}
+	return nil
 }
 
 type handoffEvidence struct {
@@ -171,9 +186,9 @@ func launchPreflightConfigFromOptions(opts docopt.Opts) (*launchPreflightConfig,
 	if err != nil {
 		return nil, err
 	}
-	capacityBytes, err := strconv.ParseInt(optString(opts, "--artifact-capacity-bytes", strconv.FormatInt(defaultArtifactCapacityBytes, 10)), 10, 64)
-	if err != nil || capacityBytes <= 0 {
-		return nil, errors.New("--artifact-capacity-bytes must be a positive integer")
+	capacityBytes, err := strconv.ParseInt(optString(opts, "--artifact-capacity-bytes", strconv.FormatInt(defaults.ArtifactCapacityBytes, 10)), 10, 64)
+	if err != nil || validateLaunchArtifactAllocation(capacityBytes) != nil {
+		return nil, errors.New("--artifact-capacity-bytes exceeds the approved allocation or is invalid")
 	}
 	readToken := func(option string) (string, error) {
 		filePath := optString(opts, option, "")
@@ -186,11 +201,18 @@ func launchPreflightConfigFromOptions(opts docopt.Opts) (*launchPreflightConfig,
 	if err != nil {
 		return nil, err
 	}
-	grafanaToken, err := readToken("--grafana-token-file")
+	readMonitoringCredential := func(option string) (launchHttpCredential, error) {
+		path := optString(opts, option, "")
+		if path == "" {
+			return launchHttpCredential{}, fmt.Errorf("%s is required", option)
+		}
+		return readLaunchHttpCredential(path, defaultLaunchHttpCredentialSettings())
+	}
+	grafanaCredential, err := readMonitoringCredential("--grafana-token-file")
 	if err != nil {
 		return nil, err
 	}
-	metricsToken, err := readToken("--metrics-token-file")
+	metricsCredential, err := readMonitoringCredential("--metrics-token-file")
 	if err != nil {
 		return nil, err
 	}
@@ -205,9 +227,9 @@ func launchPreflightConfigFromOptions(opts docopt.Opts) (*launchPreflightConfig,
 		ApiUrl:                optString(opts, "--api-url", "https://api.bringyour.com"),
 		OperatorToken:         operatorToken,
 		GrafanaUrl:            optString(opts, "--grafana-url", ""),
-		GrafanaToken:          grafanaToken,
+		GrafanaCredential:     &grafanaCredential,
 		MetricsUrl:            optString(opts, "--metrics-url", ""),
-		MetricsToken:          metricsToken,
+		MetricsCredential:     &metricsCredential,
 		ArtifactCapacityBytes: capacityBytes,
 		OutputPath:            optString(opts, "--out", ""),
 		Now:                   server.NowUtc,
@@ -568,8 +590,28 @@ func checkCompetitionMinio(ctx context.Context, info *controller.InfoResult, cap
 	if info == nil {
 		return nil, errors.New("competition API identity is unavailable")
 	}
-	store, ok := server.LoadBlobStore()
-	if !ok || strings.HasPrefix(store.Authority(), "local:") {
+	settings, err := controller.LoadSettings()
+	if err != nil {
+		return nil, errors.New("configured competition archive settings are unavailable")
+	}
+	if settings.CompetitionId != info.CompetitionId {
+		return nil, errors.New("competition API and configured archive scopes differ")
+	}
+	store, bucket, err := settings.CompetitionArtifactStore()
+	if err != nil {
+		return nil, err
+	}
+	return checkCompetitionMinioStore(ctx, info, capacityBytes, store, bucket)
+}
+
+// The configured competition namespace includes every archive version and
+// scope, including v2 runtime/host/review records. Charging extra competition
+// history is conservative; charging only v1 would hide real allocation usage.
+func checkCompetitionMinioStore(ctx context.Context, info *controller.InfoResult, capacityBytes int64, store server.BlobStore, bucket string) (map[string]any, error) {
+	if err := validateLaunchArtifactAllocation(capacityBytes); err != nil {
+		return nil, err
+	}
+	if info == nil || store == nil || bucket == "" || store.Bucket() != bucket || strings.HasPrefix(store.Authority(), "local:") {
 		return nil, errors.New("production MinIO blob store is unavailable")
 	}
 	retainedStore, ok := store.(server.ProtectedBlobStore)
@@ -580,19 +622,31 @@ func checkCompetitionMinio(ctx context.Context, info *controller.InfoResult, cap
 	if err != nil {
 		return nil, err
 	}
-	prefix := path.Join(store.Prefix(), "competition", "v1", info.CompetitionId)
-	usage, err := server.MeasureBlobUsageAtPrefix(ctx, store, prefix, capacityBytes)
+	if protection == nil || protection.Authority != store.Authority() || protection.Bucket != bucket || protection.ObjectLock != "COMPLIANCE" || !protection.Versioning || len(protection.ReplicationTargets) == 0 {
+		return nil, errors.New("configured competition archive protection proof is incomplete")
+	}
+	for _, target := range protection.ReplicationTargets {
+		if strings.TrimSpace(target) == "" {
+			return nil, errors.New("configured competition replication target is empty")
+		}
+	}
+	prefix := path.Join(store.Prefix(), "competition") + "/"
+	usage, err := server.MeasureBlobVersionUsageAtPrefix(ctx, store, prefix, capacityBytes)
 	if err != nil {
 		return nil, err
 	}
-	if artifactCapacityStopPercent <= usage.UsedPercent {
+	if defaultLaunchGateSettings().ArtifactCapacityStopPercent <= usage.UsedPercent {
 		return map[string]any{"usage": usage}, fmt.Errorf("competition evidence allocation is %.2f%% used", usage.UsedPercent)
 	}
-	return map[string]any{"protection": protection, "usage": usage}, nil
+	return map[string]any{"protection": protection, "usage": usage, "usage_scope": "configured_competition_namespace_v1_v2_and_object_versions", "requested_competition_id": info.CompetitionId}, nil
 }
 
 func checkCompetitionGrafana(ctx context.Context, config *launchPreflightConfig) (map[string]any, error) {
 	client := newLaunchHttpClient()
+	credential, err := selectLaunchHttpCredential(config.GrafanaCredential, config.GrafanaToken)
+	if err != nil {
+		return nil, err
+	}
 	requests := []struct {
 		path     string
 		required []string
@@ -606,7 +660,7 @@ func checkCompetitionGrafana(ctx context.Context, config *launchPreflightConfig)
 		{path: "/api/v1/provisioning/policies", required: []string{"sim-latency-support", "severity"}},
 	}
 	for _, probe := range requests {
-		body, err := getLaunchBytes(ctx, client, config.GrafanaUrl, probe.path, config.GrafanaToken)
+		body, err := getLaunchBytesWithCredential(ctx, client, config.GrafanaUrl, probe.path, credential)
 		if err != nil {
 			return nil, err
 		}
@@ -625,28 +679,32 @@ func checkCompetitionGrafana(ctx context.Context, config *launchPreflightConfig)
 }
 
 func checkCompetitionMetrics(ctx context.Context, config *launchPreflightConfig) (map[string]any, error) {
-	heartbeatAge, err := queryPrometheusScalar(
+	credential, err := selectLaunchHttpCredential(config.MetricsCredential, config.MetricsToken)
+	if err != nil {
+		return nil, err
+	}
+	heartbeatAge, err := queryPrometheusScalarWithCredential(
 		ctx,
 		config.MetricsUrl,
-		config.MetricsToken,
+		credential,
 		"time() - max(urnetwork_competition_runner_heartbeat_timestamp_seconds)",
 	)
 	if err != nil {
 		return nil, err
 	}
-	if heartbeatAge < 0 || runnerHeartbeatMaximumSeconds < heartbeatAge {
+	if heartbeatAge < 0 || defaultLaunchGateSettings().RunnerHeartbeatMaximumSeconds < heartbeatAge {
 		return nil, fmt.Errorf("sim-latency runner heartbeat is %.1f seconds old", heartbeatAge)
 	}
-	minioUsedPercent, err := queryPrometheusScalar(
+	minioUsedPercent, err := queryPrometheusScalarWithCredential(
 		ctx,
 		config.MetricsUrl,
-		config.MetricsToken,
+		credential,
 		`100 * (1 - max(minio_cluster_health_capacity_usable_free_bytes{job="minio"}) / max(minio_cluster_health_capacity_usable_total_bytes{job="minio"}))`,
 	)
 	if err != nil {
 		return nil, err
 	}
-	if minioUsedPercent < 0 || artifactCapacityStopPercent <= minioUsedPercent {
+	if minioUsedPercent < 0 || defaultLaunchGateSettings().ArtifactCapacityStopPercent <= minioUsedPercent {
 		return nil, fmt.Errorf("MinIO cluster is %.2f%% used", minioUsedPercent)
 	}
 	return map[string]any{
@@ -656,6 +714,12 @@ func checkCompetitionMetrics(ctx context.Context, config *launchPreflightConfig)
 }
 
 func queryPrometheusScalar(ctx context.Context, baseUrl string, token string, query string) (float64, error) {
+	return queryPrometheusScalarWithCredential(ctx, baseUrl, launchHttpCredential{bearerToken: token}, query)
+}
+
+// The deployed Mimir /prometheus route uses its existing query-scoped Basic
+// identity; bearer remains supported without sharing credentials with Grafana.
+func queryPrometheusScalarWithCredential(ctx context.Context, baseUrl string, credential launchHttpCredential, query string) (float64, error) {
 	parsed, err := url.Parse(baseUrl)
 	if err != nil {
 		return 0, errors.New("metrics URL must be an absolute URL")
@@ -671,19 +735,20 @@ func queryPrometheusScalar(ctx context.Context, baseUrl string, token string, qu
 	if err != nil {
 		return 0, err
 	}
-	if token != "" {
-		request.Header.Set("Authorization", "Bearer "+token)
+	if err := credential.apply(request); err != nil {
+		return 0, err
 	}
 	response, err := newLaunchHttpClient().Do(request)
 	if err != nil {
 		return 0, err
 	}
 	defer response.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(response.Body, launchHttpResponseLimit+1))
+	maximumBytes := defaultLaunchHttpReadSettings().MaximumResponseBytes
+	body, err := io.ReadAll(io.LimitReader(response.Body, maximumBytes+1))
 	if err != nil {
 		return 0, err
 	}
-	if response.StatusCode != http.StatusOK || launchHttpResponseLimit < len(body) {
+	if response.StatusCode != http.StatusOK || maximumBytes < int64(len(body)) {
 		return 0, fmt.Errorf("metrics query returned HTTP %d", response.StatusCode)
 	}
 	var result struct {
@@ -744,8 +809,11 @@ func validateLaunchEndpoint(parsed *url.URL) error {
 // Refuses redirects so no credential can cross the configured endpoint
 // boundary, including redirects that Go would otherwise consider related.
 func newLaunchHttpClient() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
 	return &http.Client{
-		Timeout: 20 * time.Second,
+		Transport: transport,
+		Timeout:   defaultLaunchHttpReadSettings().RequestTimeout,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
@@ -753,6 +821,12 @@ func newLaunchHttpClient() *http.Client {
 }
 
 func getLaunchBytes(ctx context.Context, client *http.Client, baseUrl string, requestPath string, token string) ([]byte, error) {
+	return getLaunchBytesWithCredential(ctx, client, baseUrl, requestPath, launchHttpCredential{bearerToken: token})
+}
+
+// Credential selection is typed private process state, not userinfo, an
+// arbitrary supplied header or a field copied into the public proof envelope.
+func getLaunchBytesWithCredential(ctx context.Context, client *http.Client, baseUrl, requestPath string, credential launchHttpCredential) ([]byte, error) {
 	parsed, err := url.Parse(baseUrl)
 	if err != nil {
 		return nil, errors.New("launch endpoint must be an absolute URL without userinfo")
@@ -772,22 +846,23 @@ func getLaunchBytes(ctx context.Context, client *http.Client, baseUrl string, re
 	if err != nil {
 		return nil, err
 	}
-	if token != "" {
-		request.Header.Set("Authorization", "Bearer "+token)
+	if err := credential.apply(request); err != nil {
+		return nil, err
 	}
 	response, err := client.Do(request)
 	if err != nil {
 		return nil, err
 	}
 	defer response.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(response.Body, launchHttpResponseLimit+1))
+	maximumBytes := defaultLaunchHttpReadSettings().MaximumResponseBytes
+	body, err := io.ReadAll(io.LimitReader(response.Body, maximumBytes+1))
 	if err != nil {
 		return nil, err
 	}
 	if response.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("GET %s returned HTTP %d", requestPath, response.StatusCode)
 	}
-	if launchHttpResponseLimit < len(body) {
+	if maximumBytes < int64(len(body)) {
 		return nil, errors.New("launch HTTP response exceeded the size limit")
 	}
 	return body, nil

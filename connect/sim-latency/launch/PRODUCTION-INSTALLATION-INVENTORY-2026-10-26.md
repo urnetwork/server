@@ -1,10 +1,91 @@
 # Production installation inventory — October 26
 
-Preparation only, inspected against server `87e1489b6` and actual root-owned
-inventory schemas. No deployed service/config/credential/database was changed; no build,
-test, runtime probe or provider request ran for this inventory. Commands below
+Preparation only, initially inspected against server `87e1489b6` and root-owned
+inventory schemas. No deployed service/config/credential/database was changed.
+The later addendum records read-only HTTP diagnostics, not builds, tests,
+scoring or provider requests. Commands below
 are prospective, subject to root's release and exclusive-slot authorization.
 Public opening remains **2026-10-28T00:00:00Z**.
+
+## October 26 17:12 read-only proof addendum
+
+The inventory below retains its earlier inspection/policy history. The later
+user-selected production review policy is now Snow's three-model union; see
+[the current primary runbook](../RUN-MAIN.md) and
+[Snow qualification](REVIEW-PROVIDER-QUALIFICATION.md). Historical Mini/Sol
+metadata/funding observations below are not the new production model policy.
+
+The user-approved competition allocation is **10,000,000,000,000 bytes**
+(decimal10TB, not10TiB), not physical MinIO cluster capacity. Keep the90% stop
+gate and independent physical-free guard unchanged. New preflight selects the
+authoritative configured `competition` bucket, not the default `blob` bucket.
+It streams all S3 object versions, including noncurrent retained bodies, under
+the whole `PREFIX/competition/` namespace, including v1/v2 and other retained
+competition history conservatively against that same allocation. Delete
+markers count in the census with zero body bytes. Existing `List` semantics
+are unchanged; missing version-aware capability fails closed.
+
+Actual read-only HTTP observations are retained as private0600 bodies/digests
+under `temp/storage-monitoring-proof-prep-20261026.W0hxLkao`:
+
+- Grafana health/dashboard/alert rules/contact points/policies allHTTP200.
+  Dashboard `urnetwork-competition`, all seven competition rules, contact
+  `sim-latency-support-email` / `sim-latency-support` / `support@ur.xyz`, and
+  service=`sim-latency`, severity=`warn|page` child routing are present. No
+  notification was fired; configured routing is not proof of SMTP delivery.
+- Mimir `/prometheus/api/v1/query` accepts existing query-scoped `warpctl`
+  Basic auth. Heartbeat0 with sample age0.19s proves recent ingestion, not a
+  running worker. Do not invent a heartbeat or call this ingestion failure.
+- Queried global MinIO free17,118,956,814,336 / total23,033,283,698,688 bytes
+  (~25.66%used) does not prove competition namespace usage,10TB allocation
+  enforcement or retained object-version bytes.
+- MinIO `/minio/health/ready` wasHTTP200, but signed competition bucket GETs
+  for versioning/object-lock/replication allHTTP429 `TooManyRequests`; the
+  unrelated defaultblob bucket also429. No retry loop or remote write ran.
+  Protection, replication validation and exact-version restore remain unproved.
+- The `/etc/urnetwork/competition-api/credentials.json` operator is stale401.
+  The registered legacy operator delivery matched current vault name/role/hash
+  in protected memory and authenticated: readyz503 with **only**
+  `checks.frozen_source_activation:false`. This branch returns before storage
+  checks; absent `artifact_storage`/`artifact_archive` is not pass. Info503 also
+  reports unavailable source envelope; health200 identifies only API version.
+
+The existing monitoring `*-token-file` flags now accept their historical raw
+bearer leaf or a typed private Basic JSON. No credential-bearing URL/userinfo,
+ambient proxy or redirect forwarding is allowed. Render only new root0400
+files in the protected production directory, without printing secrets:
+
+- [Grafana read auth](production-grafana-read-auth.json.template): existing
+  `vault/main/grafana.yml` `grafana.admin_password`. A separately provisioned
+  read-only service-account bearer remains supported; do not manufacture one.
+- [Mimir query auth](production-mimir-read-auth.json.template): existing vault
+  `warpctl` password; ordinary config grants it `query` permission.
+
+After actual source activation, release qualification and explicit authority:
+
+```bash
+taskset -c 20,22 "$production_control_directory/sim-latency" launch-preflight \
+  --epoch=0 --evaluator-image="$qualified_evaluator_image_id" \
+  --operator-token-file=/etc/urnetwork/competition-production-20261028/operator.token \
+  --grafana-url=https://main-grafana.bringyour.com \
+  --grafana-token-file=/etc/urnetwork/competition-production-20261028/grafana-read-auth.json \
+  --metrics-url=https://main-grafana.bringyour.com/prometheus \
+  --metrics-token-file=/etc/urnetwork/competition-production-20261028/mimir-read-auth.json \
+  --artifact-capacity-bytes=10000000000000 --preflight-timeout=10m \
+  --source-config=/home/by/urnetwork/config/main/sim-latency.yml \
+  --repos-root=/home/by/urnetwork --openapi=/home/by/urnetwork/sn/api/competition.yml \
+  --out=/absolute/new/private/launch-preflight.json
+```
+
+Do not run whole preflight to bypass source activation. It also verifies remote
+Git ancestry and must stay away from timed scoring. No standalone native
+restore command exists. The safe existing Go operation is
+`RetainedBlobStore.GetVersion(ctx,key,versionId)` into a new private O_EXCL
+local file, with bounded bytes and independently supplied expectedSHA/size from
+an authenticated retained manifest. It performs no remote PUT/DELETE. Missing
+inputs are the exact key/version/SHA/bytes/COMPLIANCE-expiry receipt and scoped
+replica read access. Configured replication is not independent replica restore;
+never substitute a latest-object sample or a new retention write for this proof.
 
 ## Actual installation is still old staging
 
@@ -338,7 +419,7 @@ taskset -c 20,22 "$production_control_directory/sim-latency" launch-preflight \
   --grafana-url="$approved_grafana_origin" --grafana-token-file="$private_grafana_token_file" \
   --metrics-url="$approved_mimir_query_origin" --metrics-token-file="$private_metrics_token_file" \
   --openapi=/home/by/urnetwork/sn/api/competition.yml \
-  --artifact-capacity-bytes=1099511627776 --preflight-timeout=10m \
+  --artifact-capacity-bytes=10000000000000 --preflight-timeout=10m \
   --out="$new_production_preflight_file"
 ```
 

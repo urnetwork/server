@@ -158,7 +158,7 @@ Options:
   --metrics-url=<url>     Main Prometheus-compatible Mimir query origin.
   --metrics-token-file=<path>  Private file containing a Mimir query token.
   --openapi=<path>        Competition OpenAPI source file.
-  --artifact-capacity-bytes=<n>  Approved MinIO allocation [default: 1099511627776].
+  --artifact-capacity-bytes=<n>  Approved MinIO allocation [default: 10000000000000].
   --preflight-timeout=<d>  Positive bound for the complete launch proof; default 10m.
   --baseline-manifest=<path>  Versioned baseline evidence manifest.
   --preflight=<path>      Passing launch-preflight JSON evidence.
