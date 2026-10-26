@@ -10,7 +10,24 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
+
+// Local configuration inspection has an independent bounded budget. Transport
+// commands retain the deadline of their network/source owner.
+type sourceGitExecutionSettings struct {
+	// Positive local-config read deadline; default two minutes.
+	ConfigurationTimeout time.Duration
+	// Positive combined configuration-key/output cap; default 64 KiB.
+	MaximumConfigurationBytes int
+	// Positive descendant/pipe drain bound; default five seconds.
+	WaitDelay time.Duration
+}
+
+// Shared Git subprocess defaults do not reset a caller's total source budget.
+func defaultSourceGitExecutionSettings() sourceGitExecutionSettings {
+	return sourceGitExecutionSettings{ConfigurationTimeout: 2 * time.Minute, MaximumConfigurationBytes: 64 * 1024, WaitDelay: 5 * time.Second}
+}
 
 // Discovers ordinary and bare repository roots without asking Git to trust an
 // owner first. Linked worktrees, symlink aliases and world-writable metadata fail closed.
@@ -79,8 +96,8 @@ func sourceGitMetadataSafe(root string) bool {
 	return errors.Is(err, os.ErrNotExist)
 }
 
-// Keeps credential/SSH configuration while rejecting inherited repository
-// redirection. Hooks and filesystem-monitor programs cannot run in host staging.
+// Credential-capable transport boundary, used only at explicit clone/fetch/
+// push/ls-remote call sites. Local untrusted-source commands use the helper below.
 func sourceGitCommand(ctx context.Context, directory string, args ...string) (*exec.Cmd, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -96,8 +113,9 @@ func sourceGitCommand(ctx context.Context, directory string, args ...string) (*e
 		}
 		commandArgs = append(commandArgs, "-c", "safe.directory="+repositoryRoot)
 	}
-	commandArgs = append(commandArgs, "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-C", directory)
+	commandArgs = append(commandArgs, "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "commit.gpgSign=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "-c", "submodule.recurse=false", "-c", "fetch.recurseSubmodules=false", "-C", directory)
 	command := exec.CommandContext(ctx, "git", append(commandArgs, args...)...)
+	configureLaunchSourceCommand(command, defaultSourceGitExecutionSettings().WaitDelay)
 	for _, entry := range os.Environ() {
 		name, _, _ := strings.Cut(entry, "=")
 		switch name {
@@ -107,6 +125,50 @@ func sourceGitCommand(ctx context.Context, directory string, args ...string) (*e
 		command.Env = append(command.Env, entry)
 	}
 	return command, nil
+}
+
+// No global/system Git config, credentials, filter programs, hooks, signing,
+// automatic maintenance or implicit network can reach untrusted local source.
+// Local filter configuration is a qualification error, not candidate wrongdoing.
+func sourceGitLocalCommand(ctx context.Context, directory string, args ...string) (*exec.Cmd, error) {
+	settings := defaultSourceGitExecutionSettings()
+	_, repositoryRoot, err := sourceGitRoots(directory)
+	if err != nil {
+		return nil, err
+	}
+	local := func(ctx context.Context, arguments ...string) (*exec.Cmd, error) {
+		arguments = append([]string{"--no-pager", "-c", "protocol.allow=never", "-c", "core.attributesFile=/dev/null", "-c", "credential.helper=", "-c", "credential.interactive=false"}, arguments...)
+		command, err := sourceGitCommand(ctx, directory, arguments...)
+		if err != nil {
+			return nil, err
+		}
+		filtered := command.Env[:0]
+		for _, entry := range command.Env {
+			name, _, _ := strings.Cut(entry, "=")
+			if strings.HasPrefix(name, "GIT_") || name == "SSH_AUTH_SOCK" || name == "SSH_AGENT_PID" || name == "SSH_ASKPASS" {
+				continue
+			}
+			filtered = append(filtered, entry)
+		}
+		command.Env = append(filtered, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0")
+		return command, nil
+	}
+	if repositoryRoot != "" {
+		readCtx, cancel := context.WithTimeout(ctx, settings.ConfigurationTimeout)
+		defer cancel()
+		query, err := local(readCtx, "config", "--local", "--includes", "--name-only", "--get-regexp", `^filter\.`)
+		if err != nil {
+			return nil, err
+		}
+		output := &sourceBoundedWriter{limit: settings.MaximumConfigurationBytes}
+		query.Stdout, query.Stderr = output, output
+		err = query.Run()
+		var exitError *exec.ExitError
+		if !errors.As(err, &exitError) || exitError.ExitCode() != 1 || len(output.content) != 0 {
+			return nil, errors.Join(readCtx.Err(), errors.New("local source Git filter configuration is present or could not be inspected"))
+		}
+	}
+	return local(ctx, args...)
 }
 
 // Resolves every configured origin before allocating a source attempt. Read

@@ -2,6 +2,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -11,8 +12,30 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
 )
+
+// Existing private-applier fixtures describe only source.txt modifications.
+// Full CLI tests exercise the real canonical parser and all operation modes.
+func applyRepositoryPatches(root string, identityBytes []byte, expectedIdentitySha256 string, baseSha string, patchSha256 string, pathBase string, patches map[string][]byte, settings repositoryApplySettings) (map[string]string, error) {
+	canonical := repositoryApplyTestMetadata(pathBase, patches, patchSha256)
+	return applyRepositoryPatchesContext(context.Background(), root, identityBytes, expectedIdentitySha256, baseSha, patchSha256, controller.PatchPolicy{PathBase: pathBase}, canonical, patches, settings)
+}
+
+// Supplies trusted metadata for the Git-only source.txt fixtures above.
+func repositoryApplyTestMetadata(pathBase string, patches map[string][]byte, digest string) *controller.CanonicalPatch {
+	canonical := &controller.CanonicalPatch{Sha256: digest, FileOperations: map[string]controller.CompetitionPatchFileOperation{}}
+	for repository := range patches {
+		path := "source.txt"
+		if pathBase != "" {
+			path = repository + "/" + path
+		}
+		canonical.Paths = append(canonical.Paths, path)
+		canonical.FileOperations[path] = controller.CompetitionPatchFileOperation{Operation: "modify"}
+	}
+	return canonical
+}
 
 // Explicit local identity avoids depending on the machine owner's Git settings.
 func repositoryApplyTestGit(t *testing.T, root string, args ...string) string {

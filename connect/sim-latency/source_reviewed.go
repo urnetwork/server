@@ -257,7 +257,7 @@ func runStageReviewedSource(opts docopt.Opts) {
 	for _, repository := range sourceRepositoryNamesForMode(current.Staging) {
 		origin := origins[repository]
 		stagedRoot := filepath.Join(root, repository)
-		if _, err := sourceGitText(ctx, root, "-c", "core.fsync=all", "clone", "--quiet", "--no-checkout", origin, stagedRoot); err != nil {
+		if _, err := sourceGitNetworkText(ctx, root, "-c", "core.fsync=all", "clone", "--template=", "--quiet", "--no-checkout", origin, stagedRoot); err != nil {
 			fatalf("source clone: %s", err)
 		}
 		if err := os.Chmod(stagedRoot, 0o700); err != nil {
@@ -273,6 +273,9 @@ func runStageReviewedSource(opts docopt.Opts) {
 			}
 		}
 		if repositoryPatch, changed := repositoryPatches[repository]; changed {
+			if err := validateSourcePatchBase(ctx, stagedRoot, current.Commits[repository], repository, patch, approved.PatchPolicy); err != nil {
+				fatalf("source patch pinned base: %s", err)
+			}
 			routedPath := filepath.Join(root, repository+".patch")
 			if err := writePrivateReviewFile(routedPath, repositoryPatch); err != nil {
 				fatalf("private repository patch: %s", err)

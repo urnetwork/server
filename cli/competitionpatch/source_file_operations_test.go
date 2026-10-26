@@ -9,13 +9,20 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
 // Both ordinary text and standard empty-file metadata must produce one direct
 // candidate commit per touched repository while leaving server at its base.
 func TestCompetitionPatchCliAppliesTextAndEmptyFileCreationDeletion(t *testing.T) {
-	for _, empty := range []bool{false, true} {
+	for _, fixture := range []struct {
+		empty bool
+		mode  string
+	}{
+		{mode: "100644"}, {mode: "100755"}, {empty: true, mode: "100644"}, {empty: true, mode: "100755"},
+	} {
+		empty := fixture.empty
 		root, content, identityDigest, original := repositoryApplyFixture(t)
 		deletedPath := "source.txt"
 		creation := "new file mode 100644\n--- /dev/null\n+++ b/connect/new.txt\n@@ -0,0 +1 @@\n+created\n"
@@ -25,8 +32,17 @@ func TestCompetitionPatchCliAppliesTextAndEmptyFileCreationDeletion(t *testing.T
 			if err := os.WriteFile(filepath.Join(root, "sdk", deletedPath), nil, 0o600); err != nil {
 				t.Fatal(err)
 			}
+			creation = "new file mode 100644\nindex 0000000..e69de29\n"
+			deletion = "deleted file mode 100644\nindex e69de29..0000000\n"
+		}
+		if fixture.mode == "100755" {
+			if err := os.Chmod(filepath.Join(root, "sdk", deletedPath), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if empty || fixture.mode == "100755" {
 			repositoryApplyTestGit(t, filepath.Join(root, "sdk"), "add", "--", deletedPath)
-			repositoryApplyTestGit(t, filepath.Join(root, "sdk"), "commit", "--quiet", "--no-gpg-sign", "-m", "synthetic empty base")
+			repositoryApplyTestGit(t, filepath.Join(root, "sdk"), "commit", "--quiet", "--no-gpg-sign", "-m", "synthetic regular mode base")
 			original["sdk"] = repositoryApplyTestGit(t, filepath.Join(root, "sdk"), "rev-parse", "HEAD")
 			var identity repositorySourceIdentity
 			if err := json.Unmarshal(content, &identity); err != nil {
@@ -40,9 +56,9 @@ func TestCompetitionPatchCliAppliesTextAndEmptyFileCreationDeletion(t *testing.T
 			}
 			digest := sha256.Sum256(content)
 			identityDigest = hex.EncodeToString(digest[:])
-			creation = "new file mode 100644\nindex 0000000..e69de29\n"
-			deletion = "deleted file mode 100644\nindex e69de29..0000000\n"
 		}
+		creation = strings.ReplaceAll(creation, "100644", fixture.mode)
+		deletion = strings.ReplaceAll(deletion, "100644", fixture.mode)
 		patch := []byte("diff --git a/connect/new.txt b/connect/new.txt\n" + creation + "diff --git a/sdk/" + deletedPath + " b/sdk/" + deletedPath + "\n" + deletion)
 		policy := []byte(`{"path_base":"mono_root_v1","max_patch_bytes":4096,"allowed_paths":["connect/**","sdk/**"],"forbidden_paths":["server/connect/sim-latency/**"]}`)
 		policyDigest, patchDigest := sha256.Sum256(policy), sha256.Sum256(patch)
@@ -73,6 +89,10 @@ func TestCompetitionPatchCliAppliesTextAndEmptyFileCreationDeletion(t *testing.T
 		created, err := os.ReadFile(filepath.Join(root, "connect", "new.txt"))
 		if err != nil || empty && len(created) != 0 || !empty && string(created) != "created\n" {
 			t.Fatalf("empty=%t: created bytes=%q error=%v", empty, created, err)
+		}
+		info, err := os.Stat(filepath.Join(root, "connect", "new.txt"))
+		if err != nil || (info.Mode().Perm()&0o111 != 0) != (fixture.mode == "100755") {
+			t.Fatal("creation did not retain its regular Git execute mode", err)
 		}
 		if _, err := os.Lstat(filepath.Join(root, "sdk", deletedPath)); !os.IsNotExist(err) {
 			t.Fatal("deleted candidate file survived", err)

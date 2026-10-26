@@ -164,7 +164,7 @@ func runContext(ctx context.Context, args []string, stdout io.Writer) error {
 		if err != nil {
 			return &repositoryApplicationError{cause: errors.New("original source identity is unavailable")}
 		}
-		identity.CandidateCommits, err = applyRepositoryPatchesContext(ctx, opts.sourceRoot, identityBytes, opts.expectedSourceIdentitySha256, opts.baseSha, patch.Sha256, policy.PathBase, patches, defaultRepositoryApplySettings())
+		identity.CandidateCommits, err = applyRepositoryPatchesContext(ctx, opts.sourceRoot, identityBytes, opts.expectedSourceIdentitySha256, opts.baseSha, patch.Sha256, policy, patch, patches, defaultRepositoryApplySettings())
 		if err != nil {
 			return &repositoryApplicationError{cause: err}
 		}

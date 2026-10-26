@@ -75,7 +75,7 @@ func sourceGitReadAtCommit(ctx context.Context, repositoryRoot, commit string, s
 		if err := os.Chmod(privateRoot, 0o700); err != nil {
 			return nil, fmt.Errorf("secure private pinned Git repository: %w", err)
 		}
-		if _, err := sourceGitText(readCtx, privateRoot, "-c", "core.fsync=all", "fetch", "--quiet", "--no-tags", "--depth=1", "--", origin, commit); err != nil {
+		if _, err := sourceGitNetworkText(readCtx, privateRoot, "-c", "core.fsync=all", "fetch", "--quiet", "--no-tags", "--depth=1", "--", origin, commit); err != nil {
 			if readCtx.Err() != nil {
 				return nil, fmt.Errorf("fetch exact pinned Git commit: %w", readCtx.Err())
 			}

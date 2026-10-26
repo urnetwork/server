@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/urnetwork/server/controller"
 )
 
 // Runs only as the synthetic Git executable or its inherited-pipe descendant.
@@ -85,7 +87,9 @@ func TestRepositorySourceCancellationRetiresGitProcessGroup(t *testing.T) {
 	finished := make(chan error, 1)
 	go func() {
 		patch := []byte("diff --git a/source.txt b/source.txt\n--- a/source.txt\n+++ b/source.txt\n@@ -1 +1 @@\n-original\n+changed\n")
-		_, err := applyRepositoryPatchesContext(ctx, root, content, digest, original["server"], strings.Repeat("c", 64), "mono_root_v1", map[string][]byte{"connect": patch}, defaultRepositoryApplySettings())
+		patches := map[string][]byte{"connect": patch}
+		patchDigest := strings.Repeat("c", 64)
+		_, err := applyRepositoryPatchesContext(ctx, root, content, digest, original["server"], patchDigest, controller.PatchPolicy{PathBase: "mono_root_v1"}, repositoryApplyTestMetadata("mono_root_v1", patches, patchDigest), patches, defaultRepositoryApplySettings())
 		finished <- err
 	}()
 	connections := map[string]net.Conn{}

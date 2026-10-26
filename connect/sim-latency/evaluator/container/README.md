@@ -227,6 +227,24 @@ the scoped process group and disables automatic background maintenance.
 A dependency-only patch may leave the server revision unchanged. Existing
 cache images without the complete new identity labels are rejected.
 
+Broad-mode source text may retain regular Git mode `100644` or `100755`, including
+creation/deletion of ordinary text scripts. The execute bit is not permission
+to run code on the host: candidate checks still execute only in the discarded
+unprivileged sandbox. Mode changes, symlinks, submodules and binary diffs remain
+refused. Before applying a patch, the CLI, reviewed staging and publication replay
+check each target against its exact pinned Git tree, including when index modes
+are omitted. Creation requires successful proven absence, not a Git read error.
+Prospective source images seal regular files as `0444` or `0555` from committed
+Git modes, preserving clean VCS identity without trusting incidental mode bits.
+
+Host local Git commands are credentialless: global/system configuration and
+inherited Git overrides are disabled, and local filter-driver configuration is
+an explicit qualification failure. Candidate `.gitattributes` cannot select a
+host filter program. Only fixed clone/fetch/push/ls-remote call sites retain
+operator transport authentication; clone templates, hooks, filesystem monitors,
+signing, recursive submodule transport and background maintenance are disabled.
+Existing operator Git configuration is never silently removed to pass this gate.
+
 Qualify both legacy and broad fixtures from the new installed release,
 including dependency-only/multi-repository candidates, cache readback, protected
 tree/metadata rejection, cancellation and inherited-pipe cleanup, build-init

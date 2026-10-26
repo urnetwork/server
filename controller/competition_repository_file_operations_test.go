@@ -73,7 +73,6 @@ func TestCompetitionRepositoryFileOperationsRejectAmbiguousOrUnsafeMetadata(t *t
 	addition := competitionFileOperationFixture("connect/new.txt", true, "0000000..1111111")
 	deletion := competitionFileOperationFixture("sdk/old.txt", false, "2222222..0000000")
 	for _, raw := range []string{
-		strings.Replace(addition, "100644", "100755", 1),
 		strings.Replace(addition, "100644", "120000", 1),
 		strings.Replace(deletion, "100644", "160000", 1),
 		strings.Replace(addition, "new file mode 100644\n", "new file mode 100644\nnew file mode 100644\n", 1),

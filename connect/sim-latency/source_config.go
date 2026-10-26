@@ -38,7 +38,7 @@ func stageFreshSourceConfig(ctx context.Context, origin, stagedRoot string, curr
 	if _, err := os.Lstat(stagedRoot); !errors.Is(err, os.ErrNotExist) {
 		return "", "", errors.New("fresh config staging requires a new private path")
 	}
-	if _, err := sourceGitText(ctx, filepath.Dir(stagedRoot), "-c", "core.fsync=all", "clone", "--quiet", "--no-checkout", "--no-hardlinks", origin, stagedRoot); err != nil {
+	if _, err := sourceGitNetworkText(ctx, filepath.Dir(stagedRoot), "-c", "core.fsync=all", "clone", "--template=", "--quiet", "--no-checkout", "--no-hardlinks", origin, stagedRoot); err != nil {
 		return "", "", err
 	}
 	if err := os.Chmod(stagedRoot, 0o700); err != nil {
@@ -46,7 +46,7 @@ func stageFreshSourceConfig(ctx context.Context, origin, stagedRoot string, curr
 	}
 	// Fetch the named branch rather than relying on origin's default branch or
 	// the clone's earlier snapshot. Later drift is rejected by publication.
-	if _, err := sourceGitText(ctx, stagedRoot, "-c", "core.fsync=all", "fetch", "--quiet", "--no-tags", "origin", "refs/heads/main"); err != nil {
+	if _, err := sourceGitNetworkText(ctx, stagedRoot, "-c", "core.fsync=all", "fetch", "--quiet", "--no-tags", "origin", "refs/heads/main"); err != nil {
 		return "", "", err
 	}
 	parent, err := sourceGitText(ctx, stagedRoot, "rev-parse", "--verify", "FETCH_HEAD^{commit}")

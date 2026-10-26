@@ -368,10 +368,13 @@ func verifyRemoteSourceEpochModeContext(
 		cloneRoot := filepath.Join(temporaryRoot, repositoryName+".git")
 		// Most checks pin the advertised tip and need no history or file blobs.
 		// Older checkpoints deepen only their own branch before ancestry proof.
-		cloneArgs := []string{"clone", "--quiet", "--bare", "--single-branch", "--no-tags", "--branch", branch,
+		cloneArgs := []string{"clone", "--template=", "--quiet", "--bare", "--single-branch", "--no-tags", "--branch", branch,
 			"--depth=1", "--filter=blob:none"}
 		cloneArgs = append(cloneArgs, origin, cloneRoot)
-		command := exec.CommandContext(ctx, "git", cloneArgs...)
+		command, err := sourceGitCommand(ctx, temporaryRoot, cloneArgs...)
+		if err != nil {
+			return err
+		}
 		configureLaunchSourceCommand(command, waitDelay)
 		output := &sourceBoundedWriter{limit: maximumSourceConfigBytes}
 		command.Stdout, command.Stderr = output, output
@@ -401,7 +404,7 @@ func verifyRemoteSourceEpochModeContext(
 				return fmt.Errorf("repository %s shallow history state is unavailable", repositoryName)
 			}
 			if shallow == "true" {
-				if _, err := launchSourceGitText(ctx, waitDelay, cloneRoot, "fetch", "--quiet", "--unshallow", "--filter=blob:none", "origin", branch); err != nil {
+				if _, err := launchSourceGitNetworkText(ctx, waitDelay, cloneRoot, "fetch", "--quiet", "--unshallow", "--filter=blob:none", "origin", branch); err != nil {
 					return fmt.Errorf("repository %s checkpoint history unavailable: %w", repositoryName, err)
 				}
 			}
@@ -417,7 +420,7 @@ func verifyRemoteSourceEpochModeContext(
 
 // Reuses exact-root Git trust while bounding output and inherited-pipe drain.
 func launchSourceGitText(ctx context.Context, waitDelay time.Duration, repositoryRoot string, args ...string) (string, error) {
-	command, err := sourceGitCommand(ctx, repositoryRoot, args...)
+	command, err := sourceGitLocalCommand(ctx, repositoryRoot, args...)
 	if err != nil {
 		return "", err
 	}
@@ -426,6 +429,22 @@ func launchSourceGitText(ctx context.Context, waitDelay time.Duration, repositor
 	command.Stdout, command.Stderr = output, &sourceBoundedWriter{limit: 4096}
 	if err := command.Run(); err != nil {
 		return "", fmt.Errorf("launch source Git command failed: %w", errors.Join(ctx.Err(), err))
+	}
+	return strings.TrimSpace(string(output.content)), nil
+}
+
+// Explicit transport calls retain operator authentication; local object reads
+// cannot gain it by changing their argv or candidate-controlled attributes.
+func launchSourceGitNetworkText(ctx context.Context, waitDelay time.Duration, repositoryRoot string, args ...string) (string, error) {
+	command, err := sourceGitCommand(ctx, repositoryRoot, args...)
+	if err != nil {
+		return "", err
+	}
+	configureLaunchSourceCommand(command, waitDelay)
+	output := &sourceBoundedWriter{limit: maximumSourceConfigBytes}
+	command.Stdout, command.Stderr = output, &sourceBoundedWriter{limit: 4096}
+	if err := command.Run(); err != nil {
+		return "", fmt.Errorf("launch source Git transport failed: %w", errors.Join(ctx.Err(), err))
 	}
 	return strings.TrimSpace(string(output.content)), nil
 }
