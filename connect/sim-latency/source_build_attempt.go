@@ -217,7 +217,7 @@ func executeJournaledSourceBuildBroker(ctx context.Context, request reviewedSour
 		if err != nil {
 			return receipt, err
 		}
-		if err := validateReviewedSourceBuildForMode(receipt, request.Proposal.ReviewId, request.Proposal.PatchSha256, request.Proposal.SourceLockSha256, request.Proposal.Staging); err != nil {
+		if err := validateReviewedSourceBuildForPolicy(receipt, request.Proposal.ReviewId, request.Proposal.PatchSha256, request.Proposal.SourceLockSha256, request.Proposal.Staging, request.Proposal.WinnerReviewPolicy); err != nil {
 			return receipt, err
 		}
 		if receipt.EvaluatorImageDigest != qualification.Artifacts.ImageId || receipt.SandboxId != reservation.Owner {

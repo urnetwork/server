@@ -101,6 +101,9 @@ func validateSourceBuildRequest(request reviewedSourceBuildRequest) error {
 	if proposal.CandidatePathBase != "" && proposal.CandidatePathBase != "mono_root_v1" {
 		return errors.New("source build candidate path base is unsupported")
 	}
+	if proposal.WinnerReviewPolicy != "" && !model.IsCompetitionWinnerReviewPolicy(proposal.WinnerReviewPolicy) {
+		return errors.New("source build review policy is unsupported")
+	}
 	manifest, err := decodeSourceManifest(request.SourceManifest)
 	if err != nil {
 		return err

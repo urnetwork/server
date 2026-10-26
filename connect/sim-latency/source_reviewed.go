@@ -44,6 +44,7 @@ type reviewedSourceProposal struct {
 	PatchPath            string                     `json:"patch_path"`
 	PatchSha256          string                     `json:"patch_sha256"`
 	CandidatePathBase    string                     `json:"candidate_path_base,omitempty"`
+	WinnerReviewPolicy   string                     `json:"winner_review_policy,omitempty"`
 	Significance         *sourceSignificance        `json:"significance"`
 	RawScore             float64                    `json:"raw_score"`
 	EvaluatedImageDigest string                     `json:"evaluated_image_digest"`
@@ -85,6 +86,11 @@ func validateReviewedSourceBuildForMode(receipt reviewedSourceBuildReceipt, revi
 	return controller.ValidateCompetitionReviewedSourceBuildReceipt(receipt, reviewId, patchDigest, lockDigest, staging)
 }
 
+// The prospective policy is authenticated by the source API, never by a model.
+func validateReviewedSourceBuildForPolicy(receipt reviewedSourceBuildReceipt, reviewId server.Id, patchDigest, lockDigest string, staging bool, policy string) error {
+	return controller.ValidateCompetitionReviewedSourceBuildReceiptForPolicy(receipt, reviewId, patchDigest, lockDigest, staging, policy)
+}
+
 // Selects only a completed, applicable proposal at the frozen deadline. Exact
 // raw score, admission time, and job id retain the original sealed ranking.
 func selectReviewedSourceProposal(proposals []reviewedSourceProposal, current *model.CompetitionSourceActivation, deadline time.Time) *reviewedSourceProposal {
@@ -101,7 +107,7 @@ func selectReviewedSourceProposal(proposals []reviewedSourceProposal, current *m
 			continue
 		}
 		lockDigest, err := model.CompetitionSourceLockDigestForMode(proposal.Commits, current.Staging)
-		if err != nil || lockDigest != proposal.SourceLockSha256 || validateReviewedSourceBuildForMode(proposal.BuildReceipt, proposal.ReviewId, proposal.PatchSha256, lockDigest, current.Staging) != nil {
+		if err != nil || lockDigest != proposal.SourceLockSha256 || (current.WinnerReviewPolicy == model.CompetitionSnowWinnerReviewPolicy && proposal.WinnerReviewPolicy != current.WinnerReviewPolicy) || validateReviewedSourceBuildForPolicy(proposal.BuildReceipt, proposal.ReviewId, proposal.PatchSha256, lockDigest, current.Staging, proposal.WinnerReviewPolicy) != nil {
 			continue
 		}
 		applicable := false
@@ -253,7 +259,7 @@ func runStageReviewedSource(opts docopt.Opts) {
 		fatalf("source patch: %s", err)
 	}
 	proposal := &reviewedSourceProposal{Schema: 2, Staging: current.Staging, ReviewId: reviewId, JobId: approved.Review.Request.JobId, SubmittedAt: approved.SubmittedAt, ReviewDecisionDigest: approved.Review.RequestSha256, ReviewedAt: approved.Review.CreatedAt,
-		BaseSourceLockSha256: current.SourceLockSha256, Commits: map[string]string{}, StagedRoots: map[string]string{}, PatchPath: patchPath, PatchSha256: patch.Sha256, CandidatePathBase: approved.PatchPolicy.PathBase, EvaluatedImageDigest: approved.EvaluatedImageDigest}
+		BaseSourceLockSha256: current.SourceLockSha256, Commits: map[string]string{}, StagedRoots: map[string]string{}, PatchPath: patchPath, PatchSha256: patch.Sha256, CandidatePathBase: approved.PatchPolicy.PathBase, EvaluatedImageDigest: approved.EvaluatedImageDigest, WinnerReviewPolicy: approved.WinnerReviewPolicy}
 	for _, repository := range sourceRepositoryNamesForMode(current.Staging) {
 		origin := origins[repository]
 		stagedRoot := filepath.Join(root, repository)
@@ -318,7 +324,7 @@ func runStageReviewedSource(opts docopt.Opts) {
 	if err := decodeStrictJSONBytes(output, &proposal.BuildReceipt, "isolated build receipt"); err != nil {
 		fatalf("source build receipt: %s", err)
 	}
-	if err := validateReviewedSourceBuildForMode(proposal.BuildReceipt, reviewId, patch.Sha256, proposal.SourceLockSha256, current.Staging); err != nil {
+	if err := validateReviewedSourceBuildForPolicy(proposal.BuildReceipt, reviewId, patch.Sha256, proposal.SourceLockSha256, current.Staging, proposal.WinnerReviewPolicy); err != nil {
 		fatalf("source build readiness: %s", err)
 	}
 	// The trusted local completion time prevents an adapter from backdating a

@@ -40,7 +40,7 @@ func competitionReviewedHostInstallContent(settings *Settings, intent *model.Com
 		intent.EvaluatorImageDigest != settings.EvaluatorImageDigest || intent.HostQualificationSha256 != settings.EvaluationPolicy.HostQualificationSha256 {
 		return nil, errors.New("host identity change requires the exact approved promoted source")
 	}
-	if err := ValidateCompetitionReviewedSourceBuildReceipt(receipt, *intent.ReviewId, intent.ApprovedPatchSha256, intent.SourceLockSha256, intent.Staging); err != nil {
+	if err := ValidateCompetitionReviewedSourceBuildReceiptForPolicy(receipt, *intent.ReviewId, intent.ApprovedPatchSha256, intent.SourceLockSha256, intent.Staging, intent.WinnerReviewPolicy); err != nil {
 		return nil, err
 	}
 	if receipt.EvaluatorImageDigest != intent.EvaluatorImageDigest || receipt.HostQualificationSha256 != intent.HostQualificationSha256 ||

@@ -29,6 +29,7 @@ type CompetitionReviewedSource struct {
 	PatchPolicy          PatchPolicy                            `json:"patch_policy"`
 	BaseSha              string                                 `json:"base_sha"`
 	EvaluatedImageDigest string                                 `json:"evaluated_image_digest"`
+	WinnerReviewPolicy   string                                 `json:"winner_review_policy,omitempty"`
 }
 
 // Source review cannot make an originally ineligible evaluation promotable.
@@ -102,7 +103,7 @@ func (self PostgresStore) ReviewedSource(ctx context.Context, settings *Settings
 			server.Raise(json.Unmarshal(sealJson, &seal))
 			entry, entryErr := reviewedSourceSealedEntry(review, &seal, patch)
 			server.Raise(entryErr)
-			result = &CompetitionReviewedSource{Review: review, Patch: patch, Score: *entry.Score, ScoreSha256: entry.ScoreSha256, SubmittedAt: entry.SubmittedAt, PatchPolicy: policy.PatchPolicy, BaseSha: policy.BaseSha, EvaluatedImageDigest: policy.EvaluatorImageDigest}
+			result = &CompetitionReviewedSource{Review: review, Patch: patch, Score: *entry.Score, ScoreSha256: entry.ScoreSha256, SubmittedAt: entry.SubmittedAt, PatchPolicy: policy.PatchPolicy, BaseSha: policy.BaseSha, EvaluatedImageDigest: policy.EvaluatorImageDigest, WinnerReviewPolicy: policy.AutomationPolicy.WinnerReviewPolicy}
 		})
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
