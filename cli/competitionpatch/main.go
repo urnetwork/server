@@ -13,7 +13,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"regexp"
+	"sort"
 
 	"github.com/urnetwork/server/controller"
 )
@@ -26,19 +28,32 @@ var (
 )
 
 type options struct {
-	baseSha              string
-	expectedPatchSha256  string
-	expectedPolicySha256 string
-	patchPath            string
-	policyPath           string
+	baseSha                      string
+	expectedPatchSha256          string
+	expectedPolicySha256         string
+	patchPath                    string
+	policyPath                   string
+	repositoryPatchDirectory     string
+	sourceRoot                   string
+	sourceIdentityPath           string
+	expectedSourceIdentitySha256 string
 }
 
 type imageIdentity struct {
-	Schema       int      `json:"schema"`
-	BaseSha      string   `json:"base_sha"`
-	PatchSha256  string   `json:"patch_sha256"`
-	PolicySha256 string   `json:"policy_sha256"`
-	Paths        []string `json:"paths"`
+	Schema            int                                `json:"schema"`
+	BaseSha           string                             `json:"base_sha"`
+	PatchSha256       string                             `json:"patch_sha256"`
+	PolicySha256      string                             `json:"policy_sha256"`
+	Paths             []string                           `json:"paths"`
+	RepositoryPatches map[string]repositoryPatchIdentity `json:"repository_patches,omitempty"`
+	CandidateCommits  map[string]string                  `json:"candidate_commits,omitempty"`
+}
+
+// Digests bind routed bytes to the original screened patch and policy receipt.
+type repositoryPatchIdentity struct {
+	Path   string `json:"path"`
+	Sha256 string `json:"sha256"`
+	Bytes  int    `json:"bytes"`
 }
 
 func main() {
@@ -57,6 +72,10 @@ func run(args []string, stdout io.Writer) error {
 	flags.StringVar(&opts.expectedPolicySha256, "expected-policy-sha256", "", "expected policy-file SHA-256")
 	flags.StringVar(&opts.patchPath, "patch", "", "canonical patch path")
 	flags.StringVar(&opts.policyPath, "policy", "", "patch policy JSON path")
+	flags.StringVar(&opts.repositoryPatchDirectory, "repository-patch-directory", "", "exclusively create private routed patch directory")
+	flags.StringVar(&opts.sourceRoot, "apply-source-root", "", "apply validated patches only to authenticated private source checkouts")
+	flags.StringVar(&opts.sourceIdentityPath, "source-identity", "", "trusted original source identity JSON")
+	flags.StringVar(&opts.expectedSourceIdentitySha256, "expected-source-identity-sha256", "", "exact original source identity digest")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
 		return errors.New("usage: competitionpatch --base-sha SHA --patch FILE --expected-patch-sha256 SHA256 --policy FILE --expected-policy-sha256 SHA256")
 	}
@@ -106,9 +125,84 @@ func run(args []string, stdout io.Writer) error {
 		PolicySha256: opts.expectedPolicySha256,
 		Paths:        patch.Paths,
 	}
+	if opts.repositoryPatchDirectory != "" {
+		patches, evalError := controller.SplitCompetitionRepositoryPatch(string(patchBytes), policy)
+		if evalError != nil {
+			return fmt.Errorf("route canonical patch: %s", evalError.Code)
+		}
+		identity.RepositoryPatches, err = writeRepositoryPatches(opts.repositoryPatchDirectory, patches)
+		if err != nil {
+			return fmt.Errorf("write routed patches: %w", err)
+		}
+	}
+	if opts.sourceRoot != "" {
+		patches, routingError := controller.SplitCompetitionRepositoryPatch(string(patchBytes), policy)
+		if routingError != nil {
+			return errors.New("source application requires exact routed patch bytes")
+		}
+		identityBytes, err := readRegularFile(opts.sourceIdentityPath, maxPolicyBytes)
+		if err != nil {
+			return errors.New("original source identity is unavailable")
+		}
+		identity.CandidateCommits, err = applyRepositoryPatches(opts.sourceRoot, identityBytes, opts.expectedSourceIdentitySha256, opts.baseSha, patch.Sha256, patches, defaultRepositoryApplySettings())
+		if err != nil {
+			return err
+		}
+	} else if opts.sourceIdentityPath != "" || opts.expectedSourceIdentitySha256 != "" {
+		return errors.New("source identity options require --apply-source-root")
+	}
 	encoder := json.NewEncoder(stdout)
 	encoder.SetEscapeHTML(false)
 	return encoder.Encode(identity)
+}
+
+// Exclusive creation avoids replacing prior evidence or following a directory
+// symlink. Partial output on error is retained, but no successful receipt emits.
+func writeRepositoryPatches(directory string, patches map[string][]byte) (map[string]repositoryPatchIdentity, error) {
+	if !filepath.IsAbs(directory) || filepath.Clean(directory) != directory || directory == string(filepath.Separator) || len(patches) == 0 {
+		return nil, errors.New("canonical absolute private output directory required")
+	}
+	parent := filepath.Dir(directory)
+	resolved, err := filepath.EvalSymlinks(parent)
+	if err != nil || resolved != parent {
+		return nil, errors.New("output parent is unavailable or redirected")
+	}
+	if err := os.Mkdir(directory, 0700); err != nil {
+		return nil, err
+	}
+	identities := map[string]repositoryPatchIdentity{}
+	repositories := make([]string, 0, len(patches))
+	for repository := range patches {
+		if repository == "" || filepath.Base(repository) != repository || repository == "." || repository == ".." {
+			return nil, errors.New("unsafe repository output name")
+		}
+		repositories = append(repositories, repository)
+	}
+	sort.Strings(repositories)
+	for _, repository := range repositories {
+		content := patches[repository]
+		if len(content) == 0 {
+			return nil, errors.New("empty routed patch")
+		}
+		name := repository + ".patch"
+		file, err := os.OpenFile(filepath.Join(directory, name), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+		if err != nil {
+			return nil, err
+		}
+		_, writeErr := file.Write(content)
+		syncErr := file.Sync()
+		closeErr := file.Close()
+		if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
+			return nil, err
+		}
+		digest := sha256.Sum256(content)
+		identities[repository] = repositoryPatchIdentity{Path: name, Sha256: hex.EncodeToString(digest[:]), Bytes: len(content)}
+	}
+	file, err := os.Open(directory)
+	if err != nil {
+		return nil, err
+	}
+	return identities, errors.Join(file.Sync(), file.Close())
 }
 
 func readRegularFile(path string, maxBytes int64) ([]byte, error) {

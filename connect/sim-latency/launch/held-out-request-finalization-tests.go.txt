@@ -1,0 +1,105 @@
+// Draft late-binding tests use synthetic identities and no real requests/files.
+package main
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"strings"
+	"testing"
+)
+
+// This is deliberately a minimal structural fixture, not a valid worker request.
+func heldOutFinalizationFixture() ([]byte, string) {
+	content := []byte(`{"round_id":"synthetic-round","round_baseline_path":"","round_baseline_sha256":"","job_id":"synthetic-job","round_seed_hex":"synthetic-private-seed","evaluation_policy":{"replicates":9},"patch_sha256":"synthetic-patch"}`)
+	digest := sha256.Sum256(content)
+	return content, hex.EncodeToString(digest[:])
+}
+
+// Every field outside the two declared deferred fields remains unchanged.
+func TestHeldOutFinalizationChangesOnlyDeferredFields(t *testing.T) {
+	original, pin := heldOutFinalizationFixture()
+	retained := append([]byte{}, original...)
+	digest := strings.Repeat("5", 64)
+	result, err := finalizeHeldOutRequest(original, pin, "synthetic-round", "/synthetic/round-baseline.json", digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var before, after map[string]json.RawMessage
+	if err := json.Unmarshal(original, &before); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(result, &after); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"round_baseline_path", "round_baseline_sha256"} {
+		delete(before, key)
+		delete(after, key)
+	}
+	a, _ := json.Marshal(before)
+	b, _ := json.Marshal(after)
+	if !bytes.Equal(a, b) || !bytes.Equal(original, retained) {
+		t.Fatal("late binding changed the immutable request or input ownership")
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(result, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if fields["round_baseline_path"] != "/synthetic/round-baseline.json" || fields["round_baseline_sha256"] != digest {
+		t.Fatal("deferred bindings not installed")
+	}
+}
+
+// Neither another round nor changed precommitted bytes may supply the control.
+func TestHeldOutFinalizationRefusesChangedRequestAndCrossRoundBinding(t *testing.T) {
+	original, pin := heldOutFinalizationFixture()
+	digest := strings.Repeat("5", 64)
+	if _, err := finalizeHeldOutRequest(original, pin, "different-round", "/synthetic/baseline.json", digest); err == nil {
+		t.Fatal("cross-round binding accepted")
+	}
+	if _, err := finalizeHeldOutRequest(append(original, '\n'), pin, "synthetic-round", "/synthetic/baseline.json", digest); err == nil {
+		t.Fatal("changed request accepted")
+	}
+}
+
+// A finalized request is not a new placeholder; repeated binding must refuse.
+func TestHeldOutFinalizationRefusesSecondBinding(t *testing.T) {
+	original, pin := heldOutFinalizationFixture()
+	digest := strings.Repeat("5", 64)
+	result, err := finalizeHeldOutRequest(original, pin, "synthetic-round", "/synthetic/baseline.json", digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := sha256.Sum256(result)
+	if _, err := finalizeHeldOutRequest(result, hex.EncodeToString(hash[:]), "synthetic-round", "/synthetic/other.json", strings.Repeat("6", 64)); err == nil {
+		t.Fatal("second control binding accepted")
+	}
+}
+
+// Refuse path aliases rather than writing a request with ambiguous provenance.
+func TestHeldOutFinalizationRefusesNoncanonicalPaths(t *testing.T) {
+	original, pin := heldOutFinalizationFixture()
+	for _, path := range []string{"", "relative.json", "/synthetic/../other.json", "/synthetic//baseline.json"} {
+		if _, err := finalizeHeldOutRequest(original, pin, "synthetic-round", path, strings.Repeat("5", 64)); err == nil {
+			t.Fatalf("ambiguous baseline path accepted: %q", path)
+		}
+	}
+}
+
+// A signed ambiguous object must not be interpreted differently by verifiers.
+func TestHeldOutFinalizationRefusesAmbiguousPlaceholders(t *testing.T) {
+	fixtures := []string{
+		`{"round_id":"synthetic-round","round_baseline_sha256":""}`,
+		`{"round_id":"synthetic-round","round_baseline_path":null,"round_baseline_sha256":""}`,
+		`{"round_id":"synthetic-round","round_baseline_path":"","round_baseline_sha256":"","round_id":"synthetic-round"}`,
+		`{"round_id":"synthetic-round","round_baseline_path":"","round_baseline_sha256":"","evaluation_policy":{"replicates":9,"replicates":1}}`,
+	}
+	for i, fixture := range fixtures {
+		content := []byte(fixture)
+		digest := sha256.Sum256(content)
+		if _, err := finalizeHeldOutRequest(content, hex.EncodeToString(digest[:]), "synthetic-round", "/synthetic/baseline.json", strings.Repeat("5", 64)); err == nil {
+			t.Fatalf("ambiguous fixture %d accepted", i)
+		}
+	}
+}

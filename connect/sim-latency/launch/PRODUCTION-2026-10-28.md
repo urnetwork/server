@@ -2,11 +2,26 @@
 
 ## Current preparation pointer — October 26
 
+User-confirmed operator inputs are now resolved: maintenance is cleared, broad
+ten-repository editable scope is approved outside the protected instrument and
+repository metadata, and the dedicated review key is provisioned privately.
+The latest required honesty/code reviewer is **GPT-5.4 mini at xhigh**, under
+new prospective policy `elected_winner_gpt54mini_xhigh_v1`; Sol 6.1 low test
+ownership is unchanged. Model-access HTTP 200 is not provider qualification.
+The [template](competition-production.yml.template) records this scope/provider
+but remains disabled and unqualified. Older journal hold/model statements below
+describe their observation time, not these current user-confirmed inputs.
+
 Use [LAUNCH-ACCEPTANCE.md](LAUNCH-ACCEPTANCE.md) and the actual live process,
 not the older journal entries below. Corrected-release formal cohort 1 passed
-and its full original evidence is preserved. Cohort 2 is running its original
-attempt, with a fixed **2026-10-26T02:23:57Z** deadline; cohorts 3–5 remain
-unstarted. The snapshot reference passed its separate directional pilot, but
+and its full original evidence is preserved. Cohort 2 also completed and its
+full archive was independently verified: 9+9, all gates, 10,300 seconds,
+cleanup passed, no significance or takeover. Its mean was worse; that outcome
+is retained without filtering. Cohort 3 started its original attempt at
+**03:41:45 UTC**, with deadline **06:41:45 UTC**; 4–5 remain unstarted.
+The completed pair and preparation-tool qualifications are pushed as
+`a16396abf` and `33e41d6f6`. No tests/builds/probes may overlap the live cohort.
+The snapshot reference passed its separate directional pilot, but
 was not statistically significant; independent held-out ordering remains open.
 No pilot measurements enter the five-cohort A/A sample.
 

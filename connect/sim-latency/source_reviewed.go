@@ -103,11 +103,9 @@ func selectReviewedSourceProposal(proposals []reviewedSourceProposal, current *m
 		if err != nil || lockDigest != proposal.SourceLockSha256 || validateReviewedSourceBuildForMode(proposal.BuildReceipt, proposal.ReviewId, proposal.PatchSha256, lockDigest, current.Staging) != nil {
 			continue
 		}
-		applicable := proposal.Commits["server"] != current.Commits["server"]
+		applicable := false
 		for repository, commit := range current.Commits {
-			if repository != "server" && proposal.Commits[repository] != commit {
-				applicable = false
-			}
+			applicable = applicable || proposal.Commits[repository] != commit
 		}
 		if applicable {
 			eligible = append(eligible, proposal)
@@ -223,6 +221,10 @@ func runStageReviewedSource(opts docopt.Opts) {
 	if patchErr != nil || patch.Sha256 != approved.Review.Request.PatchSha256 {
 		fatalf("approved source patch is not canonical or allowed")
 	}
+	repositoryPatches, patchErr := controller.SplitCompetitionRepositoryPatch(string(approved.Patch), approved.PatchPolicy)
+	if patchErr != nil {
+		fatalf("approved repository patch routing failed")
+	}
 	stateDirectory, err := filepath.Abs(optString(opts, "--state-dir", ""))
 	if err != nil || optString(opts, "--state-dir", "") == "" {
 		fatalf("source stage requires --state-dir")
@@ -268,7 +270,13 @@ func runStageReviewedSource(opts docopt.Opts) {
 			if err := verifyFrozenSourceGraphForMode(ctx, stagedRoot, current.Commits[repository], current.Staging); err != nil {
 				fatalf("reviewed measured dependency graph: %s", err)
 			}
-			if _, err := sourceGitText(ctx, stagedRoot, "apply", "--index", "--whitespace=error-all", patchPath); err != nil {
+		}
+		if repositoryPatch, changed := repositoryPatches[repository]; changed {
+			routedPath := filepath.Join(root, repository+".patch")
+			if err := writePrivateReviewFile(routedPath, repositoryPatch); err != nil {
+				fatalf("private repository patch: %s", err)
+			}
+			if _, err := sourceGitText(ctx, stagedRoot, "apply", "--index", "--whitespace=error-all", routedPath); err != nil {
 				fatalf("source patch apply: %s", err)
 			}
 			proposal.Commits[repository], err = commitReviewedSource(ctx, stagedRoot, reviewId, approved.Review.CreatedAt)
@@ -276,7 +284,7 @@ func runStageReviewedSource(opts docopt.Opts) {
 				fatalf("source commit identity: %s", err)
 			}
 			backend := &gitSourcePublicationBackend{patchPolicy: approved.PatchPolicy}
-			if err := backend.Verify(ctx, sourcePublicationRef{Repository: "server", Branch: sourceBranch(current.Staging), ExpectedCommit: current.Commits[repository], Commit: proposal.Commits[repository], StagedRoot: stagedRoot}, &sourcePublicationIntent{Staging: current.Staging, ApprovedPatchPath: patchPath, ApprovedPatchSha256: patch.Sha256}); err != nil {
+			if err := backend.Verify(ctx, sourcePublicationRef{Repository: repository, Branch: sourceBranch(current.Staging), ExpectedCommit: current.Commits[repository], Commit: proposal.Commits[repository], StagedRoot: stagedRoot}, &sourcePublicationIntent{Staging: current.Staging, ApprovedPatchPath: patchPath, ApprovedPatchSha256: patch.Sha256}); err != nil {
 				fatalf("exact approved source tree: %s", err)
 			}
 		}

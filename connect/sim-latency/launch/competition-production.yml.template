@@ -1,10 +1,14 @@
 # PREPARATION ONLY. Not a deployable config and not qualification evidence.
 # Resolve EVERY ${...} from authenticated receipts/explicit approval, then run
-# the real settings and launch preflight before promoting to config/main.
-# Neither enabled flag may be changed during the user-confirmed maintenance hold.
+# strict settings validation before a controlled promotion to config/main.
+# launch-preflight authenticates the installed scheduled round after fenced
+# preparation/activation, before public admission; it is not a bootstrap bypass.
+# Maintenance is cleared; both flags still await every production release gate.
 # No shell expansion of this file is prescribed; do not source it or use eval.
 # Admission time belongs to bootstrap-source --opens-at=2026-10-28T00:00:00Z,
-# not an invented top-level opens_at setting. Bootstrap only after readiness.
+# not an invented top-level opens_at setting. Bootstrap reserves an immutable
+# intent/round identity; the supervisor still requires independent readiness
+# before pointer activation and creation of the scheduled full-window round.
 enabled: false
 competition_id: sim-latency-season-1
 base_sha: c1f9dda603d6279666fca5d92b99c5663306c5f7
@@ -39,7 +43,7 @@ automation_policy:
   settlement_policy_version: ${APPROVED_SETTLEMENT_POLICY_VERSION}
   burn_policy_version: ${APPROVED_BURN_POLICY_VERSION}
   repeat_reward_policy: ${APPROVED_REPEAT_REWARD_POLICY}
-  winner_review_policy: elected_winner_sol61max_v1
+  winner_review_policy: elected_winner_gpt54mini_xhigh_v1
   winner_review_timeout_seconds: 1800
 
 season_policy:
@@ -61,21 +65,28 @@ evaluator_command_sha256: 263ee68ab058889c22de51d47d8779d95fd219e92ea7642430f617
 self_check_command: ${QUALIFIED_SELF_CHECK_COMMAND}
 self_check_command_sha256: ${QUALIFIED_SELF_CHECK_COMMAND_SHA256}
 
-# This is deliberately unresolved. Do not silently promote staging's single-
-# file allowlist, or broaden it, before the public scope is explicitly settled.
-# The resolved value must be a real YAML sequence, not a placeholder string.
+# User-approved scope: any file in the ten locked competition repositories,
+# except the trusted simulator/evaluator/scorer/containment instrument below.
+# Mono-root patch validation, offline application and multi-repository promotion
+# still require their own correctness/build/runtime qualification before enablement.
+# Repository metadata (.git/.hg/.svn at every depth) is independently forbidden.
+# The frozen Stage A/reference policies remain unchanged and server-relative.
 patch_policy:
   max_patch_bytes: 262144
-  allowed_paths: ${APPROVED_PRODUCT_PATH_ALLOWLIST}
+  path_base: mono_root_v1
+  allowed_paths:
+    - server/**
+    - connect/**
+    - sdk/**
+    - proxy/**
+    - glog/**
+    - goidenticons/**
+    - userwireguard/**
+    - sn/**
+    - warp/**
+    - gvisor/**
   forbidden_paths:
-    - connect/sim-latency/**
-    - stats/**
-    - db_migrations.go
-    - db_migrations_*.go
-    - go.mod
-    - go.sum
-    - vendor/**
-    - .github/**
+    - server/connect/sim-latency/**
 
 # Proposed measured scale: only final after all frozen calibration acceptance
 # rules pass. Never substitute the old staging 1800-provider/zero-margin policy.

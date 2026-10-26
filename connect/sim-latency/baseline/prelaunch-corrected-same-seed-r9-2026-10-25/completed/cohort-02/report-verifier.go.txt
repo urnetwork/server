@@ -1,0 +1,99 @@
+package main
+
+import (
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
+	"math"
+	"os"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"strings"
+)
+
+func must(e error) {
+	if e != nil {
+		panic(e)
+	}
+}
+func check(b bool, s string) {
+	if !b {
+		panic(s)
+	}
+}
+func read(p string) []byte        { b, e := os.ReadFile(p); must(e); return b }
+func hash(p string) string        { return fmt.Sprintf("%x", sha256.Sum256(read(p))) }
+func obj(p string) map[string]any { var m map[string]any; must(json.Unmarshal(read(p), &m)); return m }
+func comma(v float64) string {
+	s := fmt.Sprintf("%.2f", v)
+	p := strings.Split(s, ".")
+	n := p[0]
+	for i := len(n) - 3; i > 0; i -= 3 {
+		n = n[:i] + "," + n[i:]
+	}
+	return n + "." + p[1]
+}
+func main() {
+	check(runtime.Version() == "go1.27.3", "actual Go1.27.3 required")
+	root := os.Args[1]
+	dataset := root + "/prelaunch-corrected-same-seed-r9-2026-10-25"
+	parent := obj(root + "/INDEX.json")
+	index := obj(dataset + "/INDEX.json")
+	found := false
+	for _, x := range parent["additional_datasets"].([]any) {
+		m := x.(map[string]any)
+		if m["id"] == "prelaunch-corrected-same-seed-r9-2026-10-25" {
+			check(m["index_sha256"] == hash(dataset+"/INDEX.json") && m["official"] == false, "parent index binding")
+			found = true
+		}
+	}
+	check(found, "parent dataset present")
+	html := ""
+	for i := 0; i < 2; i++ {
+		pair := fmt.Sprintf("%s/completed/cohort-%02d", dataset, i+1)
+		summary := obj(pair + "/pair-summary.json")
+		score := obj(pair + "/score.json")
+		sig := score["significance"].(map[string]any)
+		diag := score["diagnostics"].(map[string]any)
+		base := diag["baseline"].(map[string]any)
+		fields := map[string]any{"candidate_median": score["raw_score"], "control_median": base["raw_score"], "control_mean": sig["baseline_mean_raw_score"], "candidate_mean": sig["candidate_mean_raw_score"], "control_sample_variance": sig["baseline_sample_variance"], "candidate_sample_variance": sig["candidate_sample_variance"], "observed_mean_improvement_percent": sig["observed_improvement_percent"], "one_sided_welch_p_value": sig["one_sided_p_value"], "provisional_floor_percent": sig["takeover_margin_percent"], "welch_minimum_significant_improvement_fringe_percent": sig["minimum_significant_improvement_percent"], "required_improvement_percent": sig["required_improvement_percent"]}
+		for k, v := range fields {
+			check(summary[k] == v, "summary number "+k)
+		}
+		outcome := index["outcomes"].([]any)[i].(map[string]any)
+		check(outcome["summary_sha256"] == hash(pair+"/pair-summary.json") && outcome["duration_seconds"] == summary["duration_seconds"] && index["completed_cohorts"] == float64(2), "dataset summary binding")
+		html = string(read(root + "/final-preview.html"))
+		check(strings.Count(html, "<section ") == 4 && strings.Count(html, "</section>") == 4, "four sections")
+		check(strings.Count(html, "<svg ") == 4 && strings.Count(html, "</svg>") == 4, "four threshold SVGs")
+		for _, token := range []string{"<script", "<iframe", "<link", "<img", "url(", "https://", "http://", "src="} {
+			check(!strings.Contains(strings.ToLower(html), token), "external/active asset "+token)
+		}
+		for _, m := range regexp.MustCompile(`href="([^"]+)"`).FindAllStringSubmatch(html, -1) {
+			_, e := os.Stat(filepath.Join(root, m[1]))
+			must(e)
+		}
+		n := func(k string) float64 { return summary[k].(float64) }
+		practical := n("control_median") * (1 - n("provisional_floor_percent")/100)
+		fringe := n("control_mean") * (1 - n("welch_minimum_significant_improvement_fringe_percent")/100)
+		for _, v := range []float64{n("control_median"), n("candidate_median"), n("control_mean"), n("candidate_mean"), n("control_sample_variance"), n("candidate_sample_variance"), practical, fringe} {
+			check(strings.Contains(html, comma(v)), "rounded report value "+comma(v))
+		}
+		for _, v := range []float64{n("control_median"), n("candidate_median"), n("control_mean"), n("candidate_mean")} {
+			check(strings.Contains(html, fmt.Sprintf(`width="%.2f"`, 300*v/22000)), "SVG scale width")
+		}
+		for _, v := range []float64{practical, fringe} {
+			check(strings.Contains(html, fmt.Sprintf("M%.2f 40V145", 65+300*v/22000)), "SVG threshold geometry")
+		}
+		check(strings.Contains(html, fmt.Sprintf("%.2f%% lower", 100*(1-n("candidate_median")/n("control_median")))) && strings.Contains(html, fmt.Sprintf("p=%.3f", n("one_sided_welch_p_value"))), "median/pvalue labels")
+		if n("observed_mean_improvement_percent") < 0 {
+			check(strings.Contains(html, fmt.Sprintf("mean is %.2f%% worse", -n("observed_mean_improvement_percent"))), "retained worse mean label")
+		} else {
+			check(strings.Contains(html, fmt.Sprintf("mean improved %.2f%%", n("observed_mean_improvement_percent"))), "mean improvement label")
+		}
+		check(strings.Contains(html, fmt.Sprintf("%.2f%% and %.2f%%", 100*math.Sqrt(n("control_sample_variance"))/n("control_mean"), 100*math.Sqrt(n("candidate_sample_variance"))/n("candidate_mean"))), "replicate CV labels")
+	}
+	check(strings.Contains(html, "10,300 s; 500 s headroom") && strings.Contains(html, "2 / 5") && strings.Contains(html, "not accepted five-cohort calibration") && strings.Contains(html, "required for official admission"), "qualification disclaimers")
+	check(hash(root+"/final-baseline.html") == "cc460708ca7049298a3ef62a765345d1eb651ef6b112683fd1268a4e468744b9", "historical report unchanged")
+	fmt.Printf("PASS parent_index_binding dataset_summary_bindings=2 exact_summary_numeric_fields=22 sections=4 inline_threshold_svgs=4 external_assets=0 local_links_valid=true historical_report_unchanged=true practical_and_welch_geometry_verified=true\n")
+}

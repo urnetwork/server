@@ -245,7 +245,7 @@ func (self *PostgresCompetitionSupervisorDriver) Snapshot(ctx context.Context, l
 			if decodeErr != nil {
 				return nil, decodeErr
 			}
-			if policy.AutomationPolicy != nil && policy.AutomationPolicy.WinnerReviewPolicy == model.CompetitionWinnerReviewPolicy {
+			if policy.AutomationPolicy != nil && model.IsCompetitionWinnerReviewPolicy(policy.AutomationPolicy.WinnerReviewPolicy) {
 				snapshot.WinnerReview, err = self.Store.WinnerReviewState(ctx, self.Settings, round.RoundId)
 				if err != nil {
 					return nil, err

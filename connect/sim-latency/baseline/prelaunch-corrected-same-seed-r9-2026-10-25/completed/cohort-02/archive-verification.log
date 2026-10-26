@@ -1,0 +1,7 @@
+chunk=cohort.tar.gz.part-00 bytes=33554432 sha256=363294c6c7091bf8d56c4aec63a0c2718791abbd5d1d41c5755b049fd290477a
+chunk=cohort.tar.gz.part-01 bytes=33554432 sha256=fbbb53ec96c76fff46f5ace328b9f9cbf53f3fbb67030f257fcd3058d2747589
+chunk=cohort.tar.gz.part-02 bytes=33554432 sha256=f0e2157612e14d465d9a637db5670e5ac9917dd193cfd868c8877580376c0083
+chunk=cohort.tar.gz.part-03 bytes=22728230 sha256=4ff55b3c17bab7addc5773a63679ab9b1ba9ac77b187b7f66b7238dbf3c4ec77
+verified worker-result.json bindings=7
+verified evidence-manifest.json bindings=465
+PASS original_cohort_files=481 archived_files=488 companions=7 readable_copies=14 chunks=4 gzip_sha256=c9ec070a4a801c55ed755059d9d859a22aee486977c075f1342b49aad8ff5c5d gates=6 controls=9 candidates=9

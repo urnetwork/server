@@ -43,7 +43,7 @@ Each seed's first reference invocation creates its one fresh R9 baseline.
 That baseline's content digest cannot be known before measurement. Predeclare
 this dependency rather than inventing a digest or claiming every final request
 hash existed beforehand: the other two requests may bind only the exact
-successful first invocation's baseline bytes in that same round. Preserve
+authenticated first invocation's baseline bytes in that same round. Preserve
 their finalized request/provenance hashes before invoking them. No late-bound
 field may change the seed, patch, reference order, policy, workload or source.
 
@@ -53,6 +53,23 @@ Require each consuming request's `round_baseline_sha256` and emitted baseline
 digest to match the original. Never remeasure, replace or choose a favorable
 control for a later reference. Retain all original control artifacts as well
 as the shared baseline manifest.
+
+Candidate success is not a condition for choosing the control. A slow,
+non-placeable or non-significant first candidate does not authorize discarding
+its authenticated control or generating another one. If the first invocation
+does not yield a complete authenticated control and the required evidence,
+stop for diagnosis under the frozen retry/deadline rules; do not silently
+advance to another reference to obtain a replacement control. A recovered
+baseline alone does not turn a failed candidate into a completed reference.
+
+The live worker's validation and append-only storage are separate steps:
+`controller/competition_controller.go` validates baseline bytes against the
+frozen round in `validateRoundBaselineJson`, authenticates returned artifacts
+before accepting them in the evaluator path, and freezes supplied baseline
+bytes independently of candidate eligibility in the completion transaction.
+The offline Stage B wrapper must enforce equivalent provenance and first-control
+identity; mere existence of `baseline.json` is insufficient. These source
+observations are design constraints, not a qualified offline implementation.
 
 ## Qualification and serial execution
 
@@ -71,3 +88,90 @@ favorable-draw retries or post-result patch/margin tuning.
 No Stage B generator or input set is qualified by this checklist. Its purpose
 is to make the next executable preparation bind real independent workloads
 and the deliberately shared same-round control correctly.
+
+## Unqualified binding-core draft
+
+The [Go binding core](held-out-workload-binding.go.txt) and its
+[13 deterministic test drafts](held-out-workload-binding-tests.go.txt) are
+**uncompiled and unexecuted**. They are preparation only, not an operator
+command or authorization to generate real hidden seeds during Stage A.
+
+The core calls the frozen `ControlPlaneWorkloadGenerator.Generate`, checks its
+owned temporary file and digest, independently derives the effective seed,
+decodes the actual YAML fleet/client/seed and requires byte identity with the
+frozen native encoder. Set validation rejects repeated private/effective seeds,
+excluded effective seeds, repeated provider digests and incomplete cardinality.
+Sensitive seed/effective-seed/YAML fields are excluded from default JSON
+serialization. Temporary native files are removed even when bounded reads refuse.
+
+At a future exclusive idle slot, copy both drafts as `_test.go` files into a
+separate frozen **c1** simulator checkout/workspace, with actual Go 1.27.3/local,
+root and management CPUs 20,22. Explicitly select `^TestHeldOutBinding`, preserve
+all failures and require three consecutive complete race passes with zero skips.
+These tests use only fixed synthetic seeds and a small native encoder profile;
+they are not held-out measurements. Never run them alongside timed evaluation.
+
+This core is not the complete preparation tool. The operator wrapper still must
+authenticate and pin the accepted real Stage A analysis/input manifests, use
+the frozen five-seed count and policy, acquire fresh cryptographic entropy,
+generate all round/job identities and randomized reference orders, bind exact
+reference patches/builds, write exclusive private files and a non-leaking public
+commitment plan, and enforce same-round baseline late binding. Its own positive,
+ordering/refusal, publication and baseline-substitution tests remain required.
+No real seeds, provider inputs, finalized requests or accepted margins have
+been created by these drafts.
+
+## Unqualified reference-order draft
+
+The [order-selection core](held-out-reference-order.go.txt) and
+[six deterministic test drafts](held-out-reference-order-tests.go.txt) are also
+uncompiled and unexecuted. They select all six reference permutations using
+bounded rejection sampling, refusing entropy exhaustion without a fallback.
+The exhaustive accepted-byte test checks equal permutation counts; adjacent
+tests cover surplus-byte rejection, the configured rejection bound, missing
+sources, invalid settings and independently owned return values.
+
+Qualify both as `_test.go` files in the same exclusive frozen workspace and
+actual Go 1.27.3 environment, selecting `^TestHeldOutOrder` for three complete
+race passes with zero skips. Preserve all attempts. The eventual operator must
+inject `crypto/rand.Reader`, commit the complete five-round order before the
+first result and refuse order changes; this helper alone does none of those
+publication or request-binding steps. No tests may overlap a timed evaluation.
+
+## Unqualified accepted-margin pin draft
+
+The [margin-pin core](held-out-margin-pin.go.txt) and
+[five deterministic test drafts](held-out-margin-pin-tests.go.txt) authenticate
+exact analysis bytes against an independently supplied publication digest,
+strictly decode the existing native report type, and check full sample counts,
+acceptance, input/policy bindings, placeability and the supported margin grid.
+They do not calculate or lower a margin. Synthetic accepted-shape fixtures are
+not native replay evidence. These drafts are uncompiled and unexecuted.
+
+Qualify them as `_test.go` files in the exclusive frozen workspace with actual
+Go 1.27.3, selecting `^TestHeldOutMargin` for three complete race passes with
+zero skips. Preserve failures. The wrapper must obtain the expected digest from
+the published genuine analyzer receipt, never compute both its expected pin and
+input from the same untrusted file. It must separately authenticate the input
+manifest, template policy and original artifacts; this narrow pin does not
+replace the native analyzer's full replay or the wrapper's source/request
+binding. No actual Stage A report has been accepted by these drafts.
+
+## Unqualified request-finalization draft
+
+The [request-finalization core](held-out-request-finalization.go.txt) and
+[five deterministic test drafts](held-out-request-finalization-tests.go.txt)
+fill only the two declared baseline fields of exact precommitted request bytes.
+They refuse changed input bytes, cross-round identity, missing/null/previously
+filled placeholders, noncanonical paths and duplicate JSON keys at any depth.
+All other request fields are retained without caller-supplied replacements.
+
+These drafts are uncompiled/unexecuted. Qualify as `_test.go` files with
+`^TestHeldOutFinalization`, three complete race passes and zero skips in the
+exclusive frozen Go 1.27.3 workspace. Fixtures are minimal structural objects,
+not valid production requests. This core neither authenticates baseline
+artifacts nor resolves symlinks or checks path ownership: the wrapper must do
+those checks, authenticate same-round source/workload/policy/R9 provenance and
+the original control digest, and persist finalized request/provenance hashes
+before execution. Returned bytes contain private seeds and must never be
+published with the public commitment plan. No actual request is finalized here.

@@ -1,0 +1,15 @@
+/home/by/urnetwork/temp/dns-unit-qualification-20261026.2y0PibAV/dns-probe: go1.27.3
+	path	github.com/urnetwork/server/dns_probe_qualification
+	mod	github.com/urnetwork/server	v0.0.0-20261025121228-c1f9dda603d6+dirty	
+	dep	golang.org/x/net	v0.60.0	h1:79p50tfZlm0J9YfoDsSi639qSXNGVwEzOPLCxM2FsYU=
+	build	-buildmode=exe
+	build	-compiler=gc
+	build	-trimpath=true
+	build	CGO_ENABLED=0
+	build	GOARCH=amd64
+	build	GOOS=linux
+	build	GOAMD64=v1
+	build	vcs=git
+	build	vcs.revision=c1f9dda603d6279666fca5d92b99c5663306c5f7
+	build	vcs.time=2026-10-25T12:12:28Z
+	build	vcs.modified=true

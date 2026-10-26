@@ -10,6 +10,11 @@ import (
 
 var competitionSourceCommitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
+// Returns an independently owned list of the complete active competition graph.
+func CompetitionSourceRepositoryNames() []string {
+	return []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "warp", "gvisor"}
+}
+
 // The complete active graph is identical in production and staging. Execution
 // mode remains separately authenticated by the source activation protocol.
 func CompetitionSourceLockDigest(commits map[string]string) (string, error) {
@@ -19,7 +24,7 @@ func CompetitionSourceLockDigest(commits map[string]string) (string, error) {
 // Requires the ten live dependencies in either mode. Historical evidence is
 // retained unchanged; an obsolete extra repository cannot authorize new work.
 func CompetitionSourceLockDigestForMode(commits map[string]string, _ bool) (string, error) {
-	repositoryNames := []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "warp", "gvisor"}
+	repositoryNames := CompetitionSourceRepositoryNames()
 	if len(commits) != len(repositoryNames) {
 		return "", fmt.Errorf("source lock requires exactly %d frozen repositories", len(repositoryNames))
 	}

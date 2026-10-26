@@ -226,7 +226,7 @@ func validateCompetitionQualificationConfig(settings *Settings, config Competiti
 		len(bootId) != 36 || config.ResourceBombBootId != bootId || !sha256Pattern.MatchString(config.ResourceBombSha256) {
 		return errors.New("qualification scope, actual worker image or current-boot bomb evidence does not match")
 	}
-	if settings.AutomationPolicy.WinnerReviewPolicy == model.CompetitionWinnerReviewPolicy && config.ReviewedBuildStateDirectory == "" {
+	if model.IsCompetitionWinnerReviewPolicy(settings.AutomationPolicy.WinnerReviewPolicy) && config.ReviewedBuildStateDirectory == "" {
 		return errors.New("automatic winner-source preparation requires its private reviewed-build inventory")
 	}
 	if config.ReviewedBuildStateDirectory != "" {

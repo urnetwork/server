@@ -58,7 +58,7 @@ Optional environment:
   SIM_LATENCY_WORKER_SHA256        pinned worker launcher digest
   SIM_LATENCY_PREPARE_COMMAND      absolute trusted runtime propagation adapter
   SIM_LATENCY_PREPARE_SHA256       pinned propagation/qualification adapter digest
-  SIM_LATENCY_REVIEW_COMMAND       qualified isolated Sol 6.1 max review broker
+  SIM_LATENCY_REVIEW_COMMAND       qualified isolated GPT-5.4 mini xhigh review broker
   SIM_LATENCY_REVIEW_SHA256        pinned review broker digest
   SIM_LATENCY_REVIEWER_TOKEN_FILE  scoped reviewer token, never sent to the broker
   SIM_LATENCY_BUILD_COMMAND        qualified isolated source-build/test broker

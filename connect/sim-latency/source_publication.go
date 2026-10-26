@@ -224,6 +224,8 @@ func (self *gitSourcePublicationBackend) Verify(ctx context.Context, ref sourceP
 			if previousErr != nil || candidateErr != nil || previousTree != candidateTree {
 				return errors.New("source publication modifies the protected evaluator tree")
 			}
+		}
+		if ref.Repository != "config" {
 			patchInfo, err := os.Lstat(intent.ApprovedPatchPath)
 			if err != nil || !patchInfo.Mode().IsRegular() || patchInfo.Mode().Perm()&0o077 != 0 {
 				return errors.New("approved patch must remain a private regular file")
@@ -236,11 +238,19 @@ func (self *gitSourcePublicationBackend) Verify(ctx context.Context, ref sourceP
 			if patchErr != nil || patch.Sha256 != intent.ApprovedPatchSha256 || string(patch.Bytes) != string(patchBytes) {
 				return errors.New("approved canonical patch digest or allowed surface does not match")
 			}
+			patches, routingError := controller.SplitCompetitionRepositoryPatch(string(patchBytes), self.patchPolicy)
+			if routingError != nil || len(patches[ref.Repository]) == 0 {
+				return errors.New("changed repository is absent from the exact approved patch")
+			}
 			indexRoot, err := os.MkdirTemp("", "sim-latency-source-verify-")
 			if err != nil {
 				return err
 			}
 			defer os.RemoveAll(indexRoot)
+			patchPath := filepath.Join(indexRoot, "approved.patch")
+			if err := writePrivateReviewFile(patchPath, patches[ref.Repository]); err != nil {
+				return err
+			}
 			indexPath := filepath.Join(indexRoot, "index")
 			runIndex := func(args ...string) ([]byte, error) {
 				command, err := sourceGitCommand(ctx, ref.StagedRoot, args...)
@@ -259,7 +269,7 @@ func (self *gitSourcePublicationBackend) Verify(ctx context.Context, ref sourceP
 			if _, err := runIndex("read-tree", ref.ExpectedCommit); err != nil {
 				return err
 			}
-			if _, err := runIndex("apply", "--cached", "--whitespace=error-all", intent.ApprovedPatchPath); err != nil {
+			if _, err := runIndex("apply", "--cached", "--whitespace=error-all", patchPath); err != nil {
 				return err
 			}
 			approvedTree, err := runIndex("write-tree")

@@ -10997,4 +10997,12 @@ var migrations = []any{
 	// table stays until a later release, because the previous release still
 	// reads it (see legacySettlementIntentRetirementSql).
 	newSqlMigration(legacySettlementIntentRetirementSql),
+
+	// Add the explicitly selected mini/xhigh reviewer prospectively. Existing
+	// Sol/max policy records keep their original provider and review digests.
+	newSqlMigration(competitionWinnerReviewProviderMigration()),
+
+	// Only an explicitly broad evaluated-round policy permits a reviewed change
+	// in a locked dependency repository; legacy approval remains server-only.
+	newSqlMigration(competitionRepositoryPatchMigration()),
 }

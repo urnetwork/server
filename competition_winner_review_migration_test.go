@@ -27,6 +27,12 @@ func TestCompetitionWinnerReviewMigrationPreservesLegacyAndBindsWinner(t *testin
 // No ports, host paths, main configuration, or existing database are used.
 // SQL exceptions force wrong-winner/deadline/fallback cases without timing luck.
 func TestCompetitionWinnerReviewDatabaseGuards(t *testing.T) {
+	testCompetitionWinnerReviewDatabaseGuards(t, competitionWinnerReviewMigration(), winnerReviewSqlAssertions)
+}
+
+// Each caller installs only into its own fresh, networkless fixture database.
+func testCompetitionWinnerReviewDatabaseGuards(t *testing.T, migration, assertions string) {
+	t.Helper()
 	if os.Getenv("COMPETITION_WINNER_REVIEW_SQL_TEST") != "true" {
 		t.Skip("set COMPETITION_WINNER_REVIEW_SQL_TEST=true for isolated PostgreSQL guards")
 	}
@@ -59,7 +65,7 @@ func TestCompetitionWinnerReviewDatabaseGuards(t *testing.T) {
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
-	output, err = run(winnerReviewSqlFixture+competitionWinnerReviewMigration()+winnerReviewSqlAssertions, "exec", "--interactive", name, "psql", "--host=localhost", "-U", "postgres", "-d", "competition_test_winner", "--no-psqlrc", "--set=ON_ERROR_STOP=1")
+	output, err = run(winnerReviewSqlFixture+migration+assertions, "exec", "--interactive", name, "psql", "--host=localhost", "-U", "postgres", "-d", "competition_test_winner", "--no-psqlrc", "--set=ON_ERROR_STOP=1")
 	if err != nil {
 		t.Fatalf("SQL winner authority regression: %s %v", output, err)
 	}

@@ -31,6 +31,9 @@ type CompetitionReadinessResult struct {
 }
 
 type CompetitionPatchPolicy struct {
+	// Empty retains historical server-relative literal-file policies. The explicit
+	// mono-root mode prefixes every patch path with its locked repository name.
+	PathBase       string   `json:"path_base,omitempty" yaml:"path_base,omitempty"`
 	MaxPatchBytes  int      `json:"max_patch_bytes" yaml:"max_patch_bytes"`
 	AllowedPaths   []string `json:"allowed_paths" yaml:"allowed_paths"`
 	ForbiddenPaths []string `json:"forbidden_paths" yaml:"forbidden_paths"`

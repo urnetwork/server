@@ -1,6 +1,6 @@
 # Isolated elected-winner review broker
 
-This is the real tool-free Responses API client for `gpt-6.1-sol` at `max`
+This is the real tool-free Responses API client for `gpt-5.4-mini` at `xhigh`
 reasoning, not a template-approval emulator. Its strict judgment passes through
 the manager's authenticated six-criterion validation before any main API write.
 The model chooses findings, never identity fields or publication credentials.
@@ -9,7 +9,13 @@ before a provider request. Stream/event sizes and request lifetime are bounded.
 Provider identity, token usage, and concise findings are retained privately;
 hidden chain-of-thought is neither requested nor used as an audit artifact.
 
-The client follows the official [model contract](https://developers.openai.com/api/docs/models/gpt-6.1-sol)
+The new season freezes `elected_winner_gpt54mini_xhigh_v1`; `xhigh` is the
+highest supported effort. Historical `elected_winner_sol61max_v1` records retain
+their original Sol/max provenance and cannot be relabeled as mini reviews.
+Independent prescribed tests still use Sol 6.1 low; the shared stream framing
+does not select or migrate their model.
+
+The client follows the official [model contract](https://developers.openai.com/api/docs/models/gpt-5.4-mini)
 and [structured output contract](https://developers.openai.com/api/docs/guides/structured-outputs).
 It has no model tools, shell, subprocess invocation, API redirect, configurable
 provider endpoint, or ambient proxy. All candidate text is untrusted input.

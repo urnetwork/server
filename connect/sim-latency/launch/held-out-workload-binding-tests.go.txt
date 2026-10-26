@@ -1,0 +1,174 @@
+// Draft deterministic workload-binding tests. These use only fixed synthetic
+// seeds and small native-generated fixtures, never real held-out campaign inputs.
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"runtime"
+	"strings"
+	"testing"
+
+	"github.com/urnetwork/server/model"
+)
+
+// Uses the same small native profile already covered by the encoder golden test.
+func heldOutBindingFixturePolicy() model.CompetitionEvaluationPolicy {
+	return model.CompetitionEvaluationPolicy{ProviderCount: 25, ClientPoolSize: 5, ArrivalsPerMinute: 8, QualityWindowSize: 2}
+}
+
+// Native generation is temporary-file I/O only; no backing service or network.
+func newHeldOutBindingFixtures(t *testing.T) ([]heldOutGeneratedWorkload, model.CompetitionEvaluationPolicy, heldOutWorkloadSettings) {
+	t.Helper()
+	if runtime.Version() != "go1.27.3" {
+		t.Fatal("workload qualification requires actual Go 1.27.3")
+	}
+	t.Setenv("TMPDIR", t.TempDir())
+	policy, settings := heldOutBindingFixturePolicy(), defaultHeldOutWorkloadSettings()
+	workloads := []heldOutGeneratedWorkload{}
+	for i := 0; i < settings.SeedCount; i++ {
+		workload, err := generateHeldOutWorkload(t.Context(), fmt.Sprintf("%064x", i+1), policy, settings)
+		if err != nil {
+			t.Fatalf("synthetic native workload failed: %v", err)
+		}
+		workloads = append(workloads, *workload)
+	}
+	return workloads, policy, settings
+}
+
+// Every decoded seed and payload digest must differ across the full fixed set.
+func TestHeldOutBindingAcceptsFiveNativeWorkloads(t *testing.T) {
+	workloads, policy, settings := newHeldOutBindingFixtures(t)
+	if err := validateHeldOutWorkloadSet(workloads, nil, policy, settings); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The request can carry a different valid seed while the copied providers file
+// still describes the old workload. Identity fields alone cannot detect that.
+func TestHeldOutBindingRejectsChangedSeedWithOldProviderBytes(t *testing.T) {
+	workloads, policy, settings := newHeldOutBindingFixtures(t)
+	workloads[0].PrivateSeedHex = fmt.Sprintf("%064x", 99)
+	seed, err := heldOutEffectiveSeed(workloads[0].PrivateSeedHex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workloads[0].EffectiveSeed = seed
+	if err := validateHeldOutWorkloadSet(workloads, nil, policy, settings); err == nil || !strings.Contains(err.Error(), "workload seed does not match") {
+		t.Fatalf("stale provider bytes were not refused at the seed boundary: %v", err)
+	}
+}
+
+// Explicit census tests do not need to discover a real 63-bit hash collision.
+func TestHeldOutBindingRejectsRepeatedEffectiveSeed(t *testing.T) {
+	workloads, policy, settings := newHeldOutBindingFixtures(t)
+	workloads[1].EffectiveSeed = workloads[0].EffectiveSeed
+	if err := validateHeldOutWorkloadSet(workloads, nil, policy, settings); err == nil || !strings.Contains(err.Error(), "repeated or excluded effective seed") {
+		t.Fatalf("repeated effective seed accepted: %v", err)
+	}
+}
+
+// A full copied fixture is not an independent seed even with another round label.
+func TestHeldOutBindingRejectsRepeatedPrivateSeed(t *testing.T) {
+	workloads, policy, settings := newHeldOutBindingFixtures(t)
+	workloads[1] = workloads[0]
+	if err := validateHeldOutWorkloadSet(workloads, nil, policy, settings); err == nil || !strings.Contains(err.Error(), "duplicate private seed") {
+		t.Fatalf("repeated private seed accepted: %v", err)
+	}
+}
+
+// Distinct seed labels cannot conceal reused provider payloads.
+func TestHeldOutBindingRejectsRepeatedProviderPayload(t *testing.T) {
+	workloads, policy, settings := newHeldOutBindingFixtures(t)
+	workloads[1].ProviderBytes = workloads[0].ProviderBytes
+	workloads[1].ProvidersSha256 = workloads[0].ProvidersSha256
+	if err := validateHeldOutWorkloadSet(workloads, nil, policy, settings); err == nil || !strings.Contains(err.Error(), "repeated provider bytes") {
+		t.Fatalf("reused provider payload accepted: %v", err)
+	}
+}
+
+// Prior public/pilot/workload values are caller-supplied exclusions, not globals.
+func TestHeldOutBindingRejectsExcludedEffectiveSeed(t *testing.T) {
+	workloads, policy, settings := newHeldOutBindingFixtures(t)
+	if err := validateHeldOutWorkloadSet(workloads, []int64{workloads[0].EffectiveSeed}, policy, settings); err == nil || !strings.Contains(err.Error(), "repeated or excluded effective seed") {
+		t.Fatalf("excluded effective seed accepted: %v", err)
+	}
+}
+
+// A complete count is mandatory even if all remaining rows are individually valid.
+func TestHeldOutBindingRejectsPartialSeedSet(t *testing.T) {
+	workloads, policy, settings := newHeldOutBindingFixtures(t)
+	if err := validateHeldOutWorkloadSet(workloads[:len(workloads)-1], nil, policy, settings); err == nil || !strings.Contains(err.Error(), "exact frozen") {
+		t.Fatalf("partial seed set accepted: %v", err)
+	}
+}
+
+// Hashes authenticate the actual bytes rather than another row's claimed digest.
+func TestHeldOutBindingRejectsWrongProviderDigest(t *testing.T) {
+	workloads, policy, settings := newHeldOutBindingFixtures(t)
+	workloads[0].ProvidersSha256 = strings.Repeat("f", 64)
+	if err := validateHeldOutWorkloadSet(workloads, nil, policy, settings); err == nil || !strings.Contains(err.Error(), "provider digest") {
+		t.Fatalf("wrong provider digest accepted: %v", err)
+	}
+}
+
+// The encoder's fleet/client policy is not interchangeable with a nearby scale.
+func TestHeldOutBindingRejectsChangedClientPolicy(t *testing.T) {
+	workloads, policy, settings := newHeldOutBindingFixtures(t)
+	policy.ClientPoolSize++
+	if err := validateHeldOutWorkloadSet(workloads, nil, policy, settings); err == nil || !strings.Contains(err.Error(), "frozen fleet/client policy") {
+		t.Fatalf("wrong client policy accepted: %v", err)
+	}
+}
+
+// Middle bytes must affect derivation; slicing the first/last eight is not native.
+func TestHeldOutBindingSeedDerivationUsesMiddleBytes(t *testing.T) {
+	first := strings.Repeat("0", 64)
+	second := first[:32] + "1" + first[33:]
+	a, err := heldOutEffectiveSeed(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := heldOutEffectiveSeed(second)
+	if err != nil || a == b || a <= 0 || b <= 0 {
+		t.Fatalf("full private seed was not used: %v", err)
+	}
+}
+
+// Hex representation is canonical before it is committed or copied to requests.
+func TestHeldOutBindingRejectsNoncanonicalPrivateSeed(t *testing.T) {
+	for _, seed := range []string{"", "ab", strings.Repeat("A", 64), strings.Repeat("g", 64)} {
+		if _, err := heldOutEffectiveSeed(seed); err == nil {
+			t.Fatal("noncanonical private seed accepted")
+		}
+	}
+}
+
+// Accidental JSON marshaling must not reveal raw seed, effective seed or YAML.
+func TestHeldOutBindingPublicJsonOmitsSensitiveWorkload(t *testing.T) {
+	workloads, _, _ := newHeldOutBindingFixtures(t)
+	content, err := json.Marshal(workloads[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(content, &fields); err != nil || len(fields) != 1 || fields["providers_sha256"] == nil {
+		t.Fatal("public serialization contains sensitive workload fields")
+	}
+}
+
+// A refused oversized result must still remove the native temporary file.
+func TestHeldOutBindingBoundedReadCleansGeneratedTemporaryFile(t *testing.T) {
+	temporary := t.TempDir()
+	t.Setenv("TMPDIR", temporary)
+	settings := defaultHeldOutWorkloadSettings()
+	settings.MaxProviderBytes = 1
+	if _, err := generateHeldOutWorkload(t.Context(), fmt.Sprintf("%064x", 1), heldOutBindingFixturePolicy(), settings); err == nil {
+		t.Fatal("oversized generated provider input accepted")
+	}
+	entries, err := os.ReadDir(temporary)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("refused native temporary file was retained: %v", err)
+	}
+}

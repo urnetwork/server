@@ -578,7 +578,7 @@ func runSourceSupervisor(opts docopt.Opts) {
 		reviewerTokenFile: optString(opts, "--reviewer-token-file", ""), reviewApiUrl: optString(opts, "--review-api-url", "https://api.bringyour.com"),
 		buildCommand: optString(opts, "--build-command", ""), buildSha256: optString(opts, "--build-sha256", ""),
 	}
-	if settings.AutomationPolicy.WinnerReviewPolicy == model.CompetitionWinnerReviewPolicy {
+	if model.IsCompetitionWinnerReviewPolicy(settings.AutomationPolicy.WinnerReviewPolicy) {
 		if runtime.reviewCommand == "" || !validSha256(runtime.reviewSha256) || runtime.buildCommand == "" || !validSha256(runtime.buildSha256) {
 			fatalf("elected-winner supervision requires qualified pinned review and build brokers")
 		}

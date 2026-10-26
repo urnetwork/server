@@ -132,7 +132,7 @@ This closes the three-suite release gate, not calibration or live readiness.
 ## External DNS follow-up: exact engine source review
 
 The [probe preparation record](DNS-PROBE-PREPARATION.md) preserves the revised,
-uncompiled Go probe and deterministic test drafts. It corrects response-encoding
+unit-qualified Go probe and deterministic tests. It corrects response-encoding
 and receive-versus-write observation weaknesses before future runtime use; it
 does not claim that either DNS branch has passed new runtime qualification.
 
