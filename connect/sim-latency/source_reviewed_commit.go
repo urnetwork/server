@@ -19,7 +19,7 @@ func commitReviewedSource(ctx context.Context, directory string, reviewId server
 	if reviewId == (server.Id{}) || reviewedAt.IsZero() {
 		return "", errors.New("reviewed source commit requires its authenticated review identity and timestamp")
 	}
-	command, err := sourceGitCommand(ctx, directory, "-c", "core.fsync=all", "-c", "i18n.commitEncoding=UTF-8",
+	command, err := sourceGitLocalCommand(ctx, directory, "-c", "core.fsync=all", "-c", "i18n.commitEncoding=UTF-8",
 		"commit", "--quiet", "--no-gpg-sign", "--cleanup=verbatim", "-m", "competition: separately reviewed source "+reviewId.String())
 	if err != nil {
 		return "", err

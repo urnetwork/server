@@ -1,0 +1,504 @@
+// Synthetic amendment/bridge guards are not formal review, native measurement,
+// C2 qualification or authorization to create actual held-out seeds.
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/urnetwork/server/model"
+)
+
+// Changed seed counts require an explicit separately named protocol.
+func TestHeldOutAmendmentKeepsFiveSeedDefault(t *testing.T) {
+	legacy, err := heldOutSettingsForProtocol("")
+	if err != nil || !reflect.DeepEqual(legacy, defaultHeldOutOperatorSettings()) {
+		t.Fatalf("historical settings changed: %v", err)
+	}
+	amended, err := heldOutSettingsForProtocol(calibrationProtocolThreeABridgeThreeB)
+	if err != nil || amended.Workload.SeedCount != 3 {
+		t.Fatalf("named amendment rejected: %v", err)
+	}
+	amended.Workload.SeedCount = 5
+	if !reflect.DeepEqual(amended, legacy) {
+		t.Fatal("non-cardinality held-out settings changed")
+	}
+	if _, err := heldOutSettingsForProtocol("synthetic-unapproved-protocol"); err == nil {
+		t.Fatal("unapproved protocol accepted")
+	}
+	if err := validateHeldOutProtocolSettings(heldOutPreparationConfig{}, amended); err != nil {
+		t.Fatal(err)
+	}
+	amended.Workload.SeedCount = 3
+	if err := validateHeldOutProtocolSettings(heldOutPreparationConfig{}, amended); err == nil {
+		t.Fatal("cardinality silently selected an amendment")
+	}
+}
+
+// A genuine amended report remains explicitly three pairs/54 observations.
+func TestHeldOutAmendmentMarginPinsRetainOriginalProtocol(t *testing.T) {
+	report, pins := heldOutMarginFixture()
+	pins.Protocol = calibrationProtocolThreeABridgeThreeB
+	pins.ProtocolApprovalSha256 = strings.Repeat("a", 64)
+	pins.OriginalPlanSha256 = strings.Repeat("b", 64)
+	report.Protocol = pins.Protocol
+	report.ProtocolApprovalSha256 = pins.ProtocolApprovalSha256
+	report.OriginalPlanSha256 = pins.OriginalPlanSha256
+	report.OriginalPositions = []int{1, 2, 3}
+	report.OriginalBaseSha = strings.Repeat("c", 40)
+	report.OriginalImageDigest = "sha256:" + strings.Repeat("d", 64)
+	report.Cohorts = 3
+	report.ObservedReplicates = 54
+	content, pins := heldOutMarginFixtureBytes(t, report, pins)
+	margin, err := pinnedHeldOutMargin(content, pins)
+	if err != nil || margin != report.RecommendedMargin {
+		t.Fatalf("explicit amended margin rejected: %v", err)
+	}
+	legacyPins := pins
+	legacyPins.Protocol = ""
+	legacyPins.ProtocolApprovalSha256 = ""
+	legacyPins.OriginalPlanSha256 = ""
+	if _, err := pinnedHeldOutMargin(content, legacyPins); err == nil {
+		t.Fatal("three-pair report relabeled as historical five-pair result")
+	}
+	for _, mutate := range []func(*calibrationAnalysisReport){func(r *calibrationAnalysisReport) { r.Protocol = "" }, func(r *calibrationAnalysisReport) { r.Cohorts = 5; r.ObservedReplicates = 90 }, func(r *calibrationAnalysisReport) { r.OriginalPositions = []int{1, 2, 4} }, func(r *calibrationAnalysisReport) { r.ProtocolApprovalSha256 = strings.Repeat("e", 64) }, func(r *calibrationAnalysisReport) { r.OriginalPlanSha256 = "" }} {
+		mutated := report
+		mutate(&mutated)
+		content, updated := heldOutMarginFixtureBytes(t, mutated, pins)
+		if _, err := pinnedHeldOutMargin(content, updated); err == nil {
+			t.Error("amendment identity mutation accepted")
+		}
+	}
+}
+
+// Builds fixed healthy ordered outcomes without entropy, native generation,
+// process hooks, network services or an executable candidate.
+func newHeldOutAmendedOutcomes(count int) ([]heldOutPrivateRound, []heldOutJobOutcome) {
+	rounds := []heldOutPrivateRound{}
+	outcomes := []heldOutJobOutcome{}
+	for index := 0; index < count; index++ {
+		round := heldOutPrivateRound{Public: heldOutPublicRound{Position: index + 1, RoundId: fmt.Sprintf("synthetic-round-%d", index), Order: [3]string{"worse", "no-op", "better"}, Jobs: []heldOutPlannedJob{}}}
+		for jobIndex, role := range round.Public.Order {
+			job := heldOutPlannedJob{Position: jobIndex + 1, Role: role, JobId: fmt.Sprintf("synthetic-job-%d-%d", index, jobIndex)}
+			round.Public.Jobs = append(round.Public.Jobs, job)
+			pValue := 0.5
+			outcomes = append(outcomes, heldOutJobOutcome{JobId: job.JobId, RoundId: round.Public.RoundId, Role: role, Complete: true, RawScore: map[string]float64{"better": 10, "no-op": 20, "worse": 30}[role], Placeable: true, Significance: &ScoreSignificance{OneSidedPValue: &pValue}})
+		}
+		rounds = append(rounds, round)
+	}
+	return rounds, outcomes
+}
+
+// Every amended seed must order correctly; two successes cannot replace three.
+func TestHeldOutAmendmentRequiresAllThreeOrderedSeeds(t *testing.T) {
+	rounds, outcomes := newHeldOutAmendedOutcomes(3)
+	accepted, ordered, reasons := acceptHeldOutOutcomesForProtocol(calibrationProtocolThreeABridgeThreeB, rounds, outcomes)
+	if !accepted || ordered != 3 || len(reasons) != 0 {
+		t.Fatalf("complete amended ordering rejected: %d %v", ordered, reasons)
+	}
+	outcomes[8].RawScore = 25
+	accepted, ordered, reasons = acceptHeldOutOutcomesForProtocol(calibrationProtocolThreeABridgeThreeB, rounds, outcomes)
+	if accepted || ordered != 2 || !reflect.DeepEqual(reasons, []string{"not_all_three_correctly_ordered_seeds"}) {
+		t.Fatalf("two of three accepted: %d %v", ordered, reasons)
+	}
+}
+
+// The published historical four-of-five rule remains usable only as itself.
+func TestHeldOutAmendmentDoesNotRewriteFiveSeedHistory(t *testing.T) {
+	rounds, outcomes := newHeldOutAmendedOutcomes(5)
+	outcomes[14].RawScore = 25
+	accepted, ordered, reasons := acceptHeldOutOutcomes(rounds, outcomes)
+	if !accepted || ordered != 4 || len(reasons) != 0 {
+		t.Fatalf("historical four-of-five changed: %d %v", ordered, reasons)
+	}
+	if accepted, _, _ := acceptHeldOutOutcomesForProtocol(calibrationProtocolThreeABridgeThreeB, rounds, outcomes); accepted {
+		t.Fatal("historical five seeds relabeled as amended screen")
+	}
+	rounds, outcomes = newHeldOutAmendedOutcomes(3)
+	if accepted, _, _ := acceptHeldOutOutcomes(rounds, outcomes); accepted {
+		t.Fatal("three seeds implicitly selected amendment")
+	}
+}
+
+// All no-ops must remain placeable without takeover regardless of ordering.
+func TestHeldOutAmendmentRetainsAllNoopGates(t *testing.T) {
+	for _, takeover := range []bool{false, true} {
+		rounds, outcomes := newHeldOutAmendedOutcomes(3)
+		if takeover {
+			outcomes[4].TakeoverEligible = true
+		} else {
+			outcomes[4].Placeable = false
+		}
+		if accepted, ordered, _ := acceptHeldOutOutcomesForProtocol(calibrationProtocolThreeABridgeThreeB, rounds, outcomes); accepted || ordered != 3 {
+			t.Fatalf("no-op failure discarded; takeover=%t ordered=%d", takeover, ordered)
+		}
+	}
+}
+
+// Malformed per-round counts must refuse before indexing flattened outcomes.
+func TestHeldOutAmendmentRejectsReferenceCardinalityWithoutPanic(t *testing.T) {
+	for _, count := range []int{2, 4} {
+		rounds, outcomes := newHeldOutAmendedOutcomes(3)
+		if count == 2 {
+			rounds[0].Public.Jobs = rounds[0].Public.Jobs[:2]
+		} else {
+			rounds[0].Public.Jobs = append(rounds[0].Public.Jobs, rounds[0].Public.Jobs[0])
+		}
+		if accepted, _, _ := acceptHeldOutOutcomesForProtocol(calibrationProtocolThreeABridgeThreeB, rounds, outcomes); accepted {
+			t.Errorf("reference count %d accepted", count)
+		}
+	}
+}
+
+// New release, original A, margin and operational bridge pins are public while
+// private seed representations, provider bytes and private paths remain absent.
+func TestHeldOutAmendmentPublicProjectionBindsBothInstruments(t *testing.T) {
+	plan := heldOutPrivatePlan{Config: heldOutPreparationConfig{Protocol: calibrationProtocolThreeABridgeThreeB, PrivateRoot: "/synthetic/private-secret-path", Amendment: &heldOutAmendmentPins{OriginalBaseSha: strings.Repeat("1", 40), OriginalImageId: "sha256:" + strings.Repeat("2", 64), Approval: heldOutPinnedFile{Sha256: strings.Repeat("3", 64)}, OriginalPlan: heldOutPinnedFile{Sha256: strings.Repeat("4", 64)}, Release: heldOutPinnedFile{Sha256: strings.Repeat("5", 64)}, MarginFreeze: heldOutPinnedFile{Sha256: strings.Repeat("6", 64)}, BridgePlan: heldOutPinnedFile{Sha256: strings.Repeat("7", 64)}, BridgeInputs: heldOutPinnedFile{Sha256: strings.Repeat("8", 64)}, BridgeReceipt: heldOutPinnedFile{Sha256: strings.Repeat("9", 64)}}}, Rounds: []heldOutPrivateRound{{PrivateSeedHex: "synthetic-secret-seed-absent", EffectiveSeed: 987654321}}}
+	public := publicHeldOutPlan(plan, strings.Repeat("a", 64), heldOutRelease{BaseSha: strings.Repeat("b", 40), ImageId: "sha256:" + strings.Repeat("c", 64)})
+	if public.Protocol != plan.Config.Protocol || public.RequiredOrderedSeeds != 3 || public.OriginalABaseSha != plan.Config.Amendment.OriginalBaseSha || public.EvaluatorImageId == public.OriginalAImageId || public.BridgeReceiptSha256 != plan.Config.Amendment.BridgeReceipt.Sha256 {
+		t.Fatal("amended public provenance incomplete")
+	}
+	content, err := json.Marshal(public)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"synthetic-secret-seed-absent", "987654321", "private-secret-path", "effective_seed", "private_seed_hex", "provider_bytes"} {
+		if strings.Contains(string(content), secret) {
+			t.Fatalf("public amended projection exposed %s", secret)
+		}
+	}
+}
+
+// The private seed commitment itself binds the exact published amendment,
+// old-A approval, new release, margin freeze and successful operational bridge.
+func TestHeldOutAmendmentSeedCommitmentBindsBridgeProvenance(t *testing.T) {
+	plan := heldOutPrivatePlan{CampaignId: "synthetic-campaign", Margin: 0.2, Config: heldOutPreparationConfig{Protocol: calibrationProtocolThreeABridgeThreeB, Amendment: &heldOutAmendmentPins{Approval: heldOutPinnedFile{Sha256: strings.Repeat("1", 64)}, OriginalPlan: heldOutPinnedFile{Sha256: strings.Repeat("2", 64)}, MarginFreeze: heldOutPinnedFile{Sha256: strings.Repeat("3", 64)}, BridgePlan: heldOutPinnedFile{Sha256: strings.Repeat("4", 64)}, BridgeReceipt: heldOutPinnedFile{Sha256: strings.Repeat("5", 64)}, Release: heldOutPinnedFile{Sha256: strings.Repeat("6", 64)}}}}
+	round := heldOutPublicRound{RoundId: "synthetic-round", Order: [3]string{"better", "no-op", "worse"}}
+	seed := fmt.Sprintf("%064x", 17)
+	release := heldOutRelease{BaseSha: strings.Repeat("a", 40)}
+	first, err := heldOutRoundCommitment(seed, round, plan, release)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mutate := range []func(*heldOutAmendmentPins){func(p *heldOutAmendmentPins) { p.Approval.Sha256 = strings.Repeat("f", 64) }, func(p *heldOutAmendmentPins) { p.OriginalPlan.Sha256 = strings.Repeat("f", 64) }, func(p *heldOutAmendmentPins) { p.MarginFreeze.Sha256 = strings.Repeat("f", 64) }, func(p *heldOutAmendmentPins) { p.BridgePlan.Sha256 = strings.Repeat("f", 64) }, func(p *heldOutAmendmentPins) { p.BridgeReceipt.Sha256 = strings.Repeat("f", 64) }, func(p *heldOutAmendmentPins) { p.Release.Sha256 = strings.Repeat("f", 64) }} {
+		changed := plan
+		pins := *plan.Config.Amendment
+		changed.Config.Amendment = &pins
+		mutate(&pins)
+		digest, err := heldOutRoundCommitment(seed, round, changed, release)
+		if err != nil || digest == first {
+			t.Fatal("changed bridge/publication provenance retained the seed commitment")
+		}
+	}
+}
+
+// A new binary and fixed accepted margin cannot weaken any original workload,
+// timing, R9 or environment policy field under the compatibility assumption.
+func TestHeldOutBridgePreservesFullOriginalEvaluationPolicy(t *testing.T) {
+	original := heldOutBindingFixturePolicy()
+	original.Replicates = 9
+	original.ScoreTimeoutSeconds = 10800
+	original.TakeoverMargin = 0.161
+	release := heldOutRelease{BinarySha256: strings.Repeat("b", 64)}
+	revised := original
+	revised.SimulatorSha256, revised.ScorerSha256, revised.TakeoverMargin = release.BinarySha256, release.BinarySha256, 0.2
+	if err := validateHeldOutBridgePolicy(original, revised, release, 0.2); err != nil {
+		t.Fatal(err)
+	}
+	for _, mutate := range []func(*model.CompetitionEvaluationPolicy){func(p *model.CompetitionEvaluationPolicy) { p.Replicates = 7 }, func(p *model.CompetitionEvaluationPolicy) { p.ScoreTimeoutSeconds = 10801 }, func(p *model.CompetitionEvaluationPolicy) { p.DurationMs-- }, func(p *model.CompetitionEvaluationPolicy) { p.ProviderCount-- }, func(p *model.CompetitionEvaluationPolicy) { p.ImpairmentEnabled = !p.ImpairmentEnabled }, func(p *model.CompetitionEvaluationPolicy) { p.HostQualificationSha256 = strings.Repeat("f", 64) }} {
+		changed := revised
+		mutate(&changed)
+		if err := validateHeldOutBridgePolicy(original, changed, release, 0.2); err == nil {
+			t.Fatal("bridge changed a frozen non-identity policy field")
+		}
+	}
+}
+
+// Synthetic source text contains precisely the four required old anchors and
+// an unrelated policy sentinel that the prospective transformation preserves.
+func TestHeldOutAmendmentSourceTransformIsExactlyFourHunks(t *testing.T) {
+	original := []byte("// synthetic unrelated policy sentinel\n" +
+		"type evaluatorSourceLock struct {\n\tSchema              int               `json:\"schema\"`\n\tDevelopmentSnapshot bool              `json:\"development_snapshot\"`\n\tRepositories        map[string]string `json:\"repositories\"`\n}\n" +
+		"\tif lock.DevelopmentSnapshot {\n\t\treturn nil, errors.New(\"development snapshot cannot be used for an epoch-bound evaluation\")\n\t}\n\trepositoryNames := sourceRepositoryNamesForMode(staging)\n" +
+		"\t\tif repository != \"server\" {\n\t\t\treturn fmt.Errorf(\"evaluator repository %s head does not match its authenticated source lock\", repository)\n" +
+		"\t\t\treturn errors.New(\"candidate server commit is not exactly one commit above its configured epoch base\")\n// synthetic final sentinel\n")
+	revised, err := heldOutProspectiveSourceEpoch(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(revised)
+	if !strings.HasPrefix(text, "// synthetic unrelated policy sentinel\n") || !strings.HasSuffix(text, "// synthetic final sentinel\n") || strings.Count(text, "CandidatePathBase") != 4 || !strings.Contains(text, "candidate %s commit is not exactly one commit above its configured epoch base") {
+		t.Fatal("approved prospective source transformation drifted")
+	}
+	if _, err := heldOutProspectiveSourceEpoch(revised); err == nil {
+		t.Fatal("already changed source accepted as a pristine C1 transformation")
+	}
+	duplicated := append(append([]byte{}, original...), []byte("\t\t\treturn errors.New(\"candidate server commit is not exactly one commit above its configured epoch base\")")...)
+	if _, err := heldOutProspectiveSourceEpoch(duplicated); err == nil {
+		t.Fatal("ambiguous duplicate source anchor accepted")
+	}
+}
+
+// Ten synthetic repository identities exercise capability and dependency pins.
+func newHeldOutInstrumentLockFixture(t *testing.T) (heldOutSourceLock, heldOutSourceLock, heldOutAmendedRelease, heldOutRelease) {
+	t.Helper()
+	original := heldOutSourceLock{Schema: 1, Repositories: map[string]string{}}
+	revised := heldOutSourceLock{Schema: 1, CandidatePathBase: "mono_root_v1", Repositories: map[string]string{}}
+	for index, name := range []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "warp", "gvisor"} {
+		original.Repositories[name] = fmt.Sprintf("%040x", index+1)
+		revised.Repositories[name] = original.Repositories[name]
+	}
+	originalDigest, err := model.CompetitionSourceLockDigest(original.Repositories)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revised.Repositories["server"] = strings.Repeat("f", 40)
+	revisedDigest, err := model.CompetitionSourceLockDigest(revised.Repositories)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := heldOutRelease{BaseSha: original.Repositories["server"], SourceLockSha256: originalDigest}
+	descriptor := heldOutAmendedRelease{BaseSha: revised.Repositories["server"], SourceLockSha256: revisedDigest, OriginalSourceLockSha256: originalDigest}
+	return original, revised, descriptor, old
+}
+
+// A valid new canonical digest cannot hide an unauthorized dependency change.
+func TestHeldOutAmendmentInstrumentPreservesNineDependencyPins(t *testing.T) {
+	original, revised, descriptor, old := newHeldOutInstrumentLockFixture(t)
+	if err := validateHeldOutInstrumentLocks(original, revised, descriptor, old); err != nil {
+		t.Fatal(err)
+	}
+	revised.Repositories["connect"] = strings.Repeat("e", 40)
+	descriptor.SourceLockSha256, _ = model.CompetitionSourceLockDigest(revised.Repositories)
+	if err := validateHeldOutInstrumentLocks(original, revised, descriptor, old); err == nil {
+		t.Fatal("changed locked dependency accepted under a recomputed digest")
+	}
+}
+
+// The historical absent capability and prospective explicit capability cannot
+// be swapped, omitted or enabled on a development snapshot.
+func TestHeldOutAmendmentInstrumentRequiresProspectiveCapability(t *testing.T) {
+	for _, mutate := range []func(*heldOutSourceLock, *heldOutSourceLock){func(o, n *heldOutSourceLock) { n.CandidatePathBase = "" }, func(o, n *heldOutSourceLock) { n.CandidatePathBase = "synthetic-unknown-mode" }, func(o, n *heldOutSourceLock) { o.CandidatePathBase = "mono_root_v1" }, func(o, n *heldOutSourceLock) { n.DevelopmentSnapshot = true }} {
+		original, revised, descriptor, old := newHeldOutInstrumentLockFixture(t)
+		mutate(&original, &revised)
+		if err := validateHeldOutInstrumentLocks(original, revised, descriptor, old); err == nil {
+			t.Fatal("invalid prospective source capability accepted")
+		}
+	}
+}
+
+// Direct tree checks reject non-child commits and unrelated changed files
+// before any source object, executable or candidate can be consumed.
+func TestHeldOutAmendmentInstrumentRejectsUnrelatedTreeChanges(t *testing.T) {
+	for _, badParent := range []bool{false, true} {
+		descriptor := heldOutAmendedRelease{Repository: "/synthetic/source", BaseSha: strings.Repeat("b", 40)}
+		old := heldOutRelease{BaseSha: strings.Repeat("a", 40)}
+		calls := 0
+		err := authenticateHeldOutInstrumentSource(context.Background(), descriptor, old, defaultHeldOutOperatorSettings(), func(_ context.Context, program string, args ...string) ([]byte, error) {
+			calls++
+			joined := strings.Join(args, " ")
+			if strings.Contains(joined, "rev-list") {
+				if badParent {
+					return []byte(descriptor.BaseSha + " " + strings.Repeat("c", 40)), nil
+				}
+				return []byte(descriptor.BaseSha + " " + old.BaseSha), nil
+			}
+			if strings.Contains(joined, "diff-tree") {
+				return []byte("connect/sim-latency/score.go\nconnect/sim-latency/source_epoch.go\n"), nil
+			}
+			t.Fatal("unapproved tree reached source/candidate consumption")
+			return nil, nil
+		})
+		if err == nil || calls < 1 || calls > 2 {
+			t.Fatalf("unapproved tree accepted; badParent=%t calls=%d err=%v", badParent, calls, err)
+		}
+	}
+}
+
+// A native-format single cohort exercises unchanged gate/significance reducers.
+func newHeldOutBridgeCohortFixture() (calibrationAnalysisCohort, calibrationAnalysisSettings) {
+	settings := defaultCalibrationAnalysisSettings()
+	settings.Cohorts = 1
+	settings.MarginFloor = 0.2
+	cohort := newCalibrationAnalysisFixture(settings)[0]
+	takeover := false
+	cohort.Result.Diagnostics.BaselineTakeoverEligible = &takeover
+	cohort.Result.Diagnostics.TakeoverMargin = settings.MarginFloor
+	return cohort, settings
+}
+
+// An adverse/noisy no-op remains usable if the exact original gates pass and
+// its native takeover verdict remains false at the unchanged selected margin.
+func TestHeldOutBridgeUsesFrozenMarginWithoutNewAnalysis(t *testing.T) {
+	cohort, settings := newHeldOutBridgeCohortFixture()
+	for index := range cohort.Candidates {
+		cohort.Candidates[index].diagnostics.RawScore = 130 + float64(index)
+	}
+	rebuildCalibrationAnalysisFixture(&cohort)
+	takeover := false
+	cohort.Result.Diagnostics.BaselineTakeoverEligible = &takeover
+	cohort.Result.Diagnostics.TakeoverMargin = settings.MarginFloor
+	if err := validateHeldOutBridgeCohort(cohort, settings, nil); err != nil {
+		t.Fatal(err)
+	}
+	if settings.MarginFloor != 0.2 || cohort.Result.Significance.CandidateMeanRawScore <= cohort.Result.Significance.BaselineMeanRawScore {
+		t.Fatal("adverse no-op changed frozen margin or lost its sign")
+	}
+}
+
+// A low p-value or favorable ordering never overrides no-op takeover/gates.
+func TestHeldOutBridgeRejectsTakeoverOrGateFailure(t *testing.T) {
+	for _, takeover := range []bool{false, true} {
+		cohort, settings := newHeldOutBridgeCohortFixture()
+		if takeover {
+			eligible := true
+			cohort.Result.Diagnostics.BaselineTakeoverEligible = &eligible
+		} else {
+			cohort.Candidates[0].resourcesOK = false
+			rebuildCalibrationAnalysisFixture(&cohort)
+			eligible := false
+			cohort.Result.Diagnostics.BaselineTakeoverEligible = &eligible
+		}
+		if err := validateHeldOutBridgeCohort(cohort, settings, nil); err == nil {
+			t.Fatalf("bridge gate/takeover failure accepted: takeover=%t", takeover)
+		}
+	}
+}
+
+// Neither a new request label nor a new baseline digest creates a fresh run.
+func TestHeldOutBridgeRejectsPriorOrRepeatedExecutionIds(t *testing.T) {
+	for _, control := range []bool{false, true} {
+		cohort, settings := newHeldOutBridgeCohortFixture()
+		id := cohort.Candidates[0].diagnostics.EvaluationId
+		if control {
+			id = cohort.ControlEvaluationIds[0]
+		}
+		if err := validateHeldOutBridgeCohort(cohort, settings, map[string]bool{id: true}); err == nil {
+			t.Fatalf("prior observation reused; control=%t", control)
+		}
+	}
+	cohort, settings := newHeldOutBridgeCohortFixture()
+	cohort.ControlEvaluationIds[0] = cohort.Candidates[0].diagnostics.EvaluationId
+	if err := validateHeldOutBridgeCohort(cohort, settings, nil); err == nil {
+		t.Fatal("one execution accepted on both bridge sides")
+	}
+}
+
+// The original whole invocation, including cleanup, remains capped at 10800.
+func TestHeldOutBridgeRequiresOriginalBoundedTerminal(t *testing.T) {
+	start := time.Unix(1600000000, 0).UTC()
+	valid := func(duration int, cleanup bool) []byte {
+		marker := ""
+		if cleanup {
+			marker = "terminal_cleanup_verified\n"
+		}
+		return []byte(fmt.Sprintf("start_utc=%s\nend_utc=%s\nevaluator_exit=0 duration_seconds=%d\n%s", start.Format(time.RFC3339), start.Add(time.Duration(duration)*time.Second).Format(time.RFC3339), duration, marker))
+	}
+	first, last, err := heldOutBridgeInterval(valid(10800, true), 10800)
+	if err != nil || first != start || last.Sub(first) != 10800*time.Second {
+		t.Fatalf("original deadline boundary rejected: %v", err)
+	}
+	for _, content := range [][]byte{valid(10801, true), valid(100, false), append(valid(100, true), []byte("start_utc="+start.Format(time.RFC3339)+"\n")...)} {
+		if _, _, err := heldOutBridgeInterval(content, 10800); err == nil {
+			t.Fatal("reset/over-budget/incomplete terminal accepted")
+		}
+	}
+}
+
+// Two successful native observations are mandatory and cannot be replaced by
+// reused owners, failed cleanup or a relabeled old image.
+func TestHeldOutBridgeRequiresActualIndependentReplayReceipts(t *testing.T) {
+	image := "sha256:" + strings.Repeat("a", 64)
+	original := []calibrationReplayObservation{}
+	for index := 1; index <= 2; index++ {
+		original = append(original, calibrationReplayObservation{ImageId: image, ContainerId: fmt.Sprintf("%064x", index), Owner: fmt.Sprintf("%064x", index+10), InspectionSha256: strings.Repeat("b", 64), TerminalSha256: strings.Repeat("c", 64), ContainerCleanupVerified: true})
+	}
+	if err := validateHeldOutBridgeReplays(original, image); err != nil {
+		t.Fatal(err)
+	}
+	for _, mutate := range []func([]calibrationReplayObservation){func(o []calibrationReplayObservation) { o[1] = o[0] }, func(o []calibrationReplayObservation) { o[1].Owner = o[0].Owner }, func(o []calibrationReplayObservation) { o[0].ImageId = "sha256:" + strings.Repeat("d", 64) }, func(o []calibrationReplayObservation) { o[0].ContainerCleanupVerified = false }, func(o []calibrationReplayObservation) { o[0].CorpusRetained = true }, func(o []calibrationReplayObservation) { o[0].Failure = "synthetic_replay_failure" }} {
+		changed := append([]calibrationReplayObservation{}, original...)
+		mutate(changed)
+		if err := validateHeldOutBridgeReplays(changed, image); err == nil {
+			t.Fatal("incomplete/reused replay evidence accepted")
+		}
+	}
+	if err := validateHeldOutBridgeReplays(original[:1], image); err == nil {
+		t.Fatal("single replay claimed both bridge sides")
+	}
+}
+
+// Synthetic raw bindings reproduce the native fixed 465/5 evidence census.
+func newHeldOutBridgeCensusFixture(t *testing.T) (calibrationFileCohort, heldOutRelease, heldOutRequest, calibrationAnalysisSettings) {
+	t.Helper()
+	root := newCalibrationFileRoot(t)
+	settings := defaultCalibrationAnalysisSettings()
+	input := calibrationFileCohort{ArtifactDirectory: root, JobId: "synthetic-bridge-job", RoundId: "synthetic-bridge-round"}
+	release := heldOutRelease{ImageId: "sha256:" + strings.Repeat("1", 64)}
+	request := heldOutRequest{PatchSha256: strings.Repeat("2", 64), ProvidersSha256: strings.Repeat("3", 64)}
+	bindings := []calibrationArtifactBinding{}
+	pins := map[string]heldOutPinnedFile{}
+	for index := 0; index < 465; index++ {
+		name := fmt.Sprintf("evidence/synthetic-%03d.json", index)
+		if index < 5 {
+			name = []string{"accounting.json", "baseline.json", "resources.json", "score.json", "evaluation-progress.json"}[index]
+		}
+		content := []byte("{}\n")
+		if index == 4 {
+			content = []byte(`{"phase":"complete","baseline_completed":9,"candidate_completed":9}`)
+		}
+		pin := heldOutOpWrite(t, filepath.Join(root, name), content)
+		pins[name] = pin
+		bindings = append(bindings, calibrationArtifactBinding{Path: name, Sha256: pin.Sha256, Bytes: int64(len(content))})
+	}
+	evidence := heldOutOpJson(t, filepath.Join(root, "evidence-manifest.json"), map[string]any{"artifacts": bindings})
+	input.EvidenceManifestSha256 = evidence.Sha256
+	pins["evidence-manifest.json"] = evidence
+	candidate := "sha256:" + strings.Repeat("4", 64)
+	complete := heldOutCompletion{Schema: 1, Kind: "sim-latency-worker-evaluation-complete", JobId: input.JobId, RoundId: input.RoundId, Attempt: 1, BaseImageId: release.ImageId, CandidateImageId: &candidate, PatchSha256: request.PatchSha256, ProvidersSha256: request.ProvidersSha256, CleanupComplete: true, Artifacts: map[string]string{}}
+	for key, path := range map[string]string{"accounting": "accounting.json", "baseline": "baseline.json", "resources": "resources.json", "score": "score.json", "evidence_manifest": "evidence-manifest.json"} {
+		complete.Artifacts[key] = pins[path].Sha256
+	}
+	heldOutOpJson(t, filepath.Join(root, "evaluation.complete.json"), complete)
+	return input, release, request, settings
+}
+
+// Fixed map/cardinality claims do not replace authenticating every raw byte.
+func TestHeldOutBridgeAuthenticatesWholeNativeCensus(t *testing.T) {
+	input, release, request, settings := newHeldOutBridgeCensusFixture(t)
+	if err := authenticateHeldOutBridgeCensus(input, release, request, settings); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(input.ArtifactDirectory, "evidence", "synthetic-464.json"), []byte("changed synthetic bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := authenticateHeldOutBridgeCensus(input, release, request, settings); err == nil {
+		t.Fatal("self-reported census hid changed raw evidence")
+	}
+}
+
+// Completion artifacts are a keyed map, not an array or a partial green flag.
+func TestHeldOutBridgeRejectsChangedCompletionMapCoverage(t *testing.T) {
+	input, release, request, settings := newHeldOutBridgeCensusFixture(t)
+	path := filepath.Join(input.ArtifactDirectory, "evaluation.complete.json")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var complete heldOutCompletion
+	if err := json.Unmarshal(content, &complete); err != nil {
+		t.Fatal(err)
+	}
+	delete(complete.Artifacts, "resources")
+	heldOutOpJson(t, path, complete)
+	if err := authenticateHeldOutBridgeCensus(input, release, request, settings); err == nil {
+		t.Fatal("four-item completion map accepted as five native artifact bindings")
+	}
+}

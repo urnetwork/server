@@ -2876,7 +2876,7 @@ func refreshOperationalMetrics(ctx context.Context, settings *Settings) error {
 
 var (
 	hunkHeaderPattern = regexp.MustCompile(`^@@ -([0-9]+)(?:,([0-9]+))? \+([0-9]+)(?:,([0-9]+))? @@(?: .*)?$`)
-	indexLinePattern  = regexp.MustCompile(`^index [0-9a-f]{7,64}\.\.[0-9a-f]{7,64}(?: 100644)?$`)
+	indexLinePattern  = regexp.MustCompile(`^index ([0-9a-f]{7,64})\.\.([0-9a-f]{7,64})(?: (100644|100755))?$`)
 )
 
 const protectedSimulatorTreePattern = "connect/sim-latency/**"
@@ -2901,12 +2901,18 @@ var hardForbiddenPatchPaths = []string{
 	"stats/**",
 }
 
+// Exact authenticated bytes and paths; additions are parsed once so consumers
+// cannot infer absent base files from failed Git reads or a second diff parser.
 type CanonicalPatch struct {
-	Bytes  []byte
-	Sha256 string
-	Paths  []string
+	Bytes          []byte
+	Sha256         string
+	Paths          []string
+	AddedPaths     []string
+	FileOperations map[string]CompetitionPatchFileOperation
 }
 
+// Validates canonical text without rewriting its receipt-bound bytes. Explicit
+// mono-root mode additionally permits regular text/empty creation and deletion.
 func ValidateAndCanonicalizePatch(raw string, policy PatchPolicy) (*CanonicalPatch, *CompetitionError) {
 	if policy.PathBase != "" && policy.PathBase != competitionMonoRootPathBase {
 		return nil, submissionError("unsupported_patch_policy", "patch path base is not supported")
@@ -2940,17 +2946,39 @@ func ValidateAndCanonicalizePatch(raw string, policy PatchPolicy) (*CanonicalPat
 		return nil, submissionError("invalid_patch_structure", "patch must start with a diff --git header")
 	}
 	paths := []string{}
+	addedPaths := []string{}
+	fileOperations := map[string]CompetitionPatchFileOperation{}
 	seen := map[string]bool{}
 	currentPath := ""
+	const (
+		modifyFile = "modify"
+		createFile = "create"
+		deleteFile = "delete"
+	)
+	fileOperation := modifyFile
+	fileMode, indexMode := "", ""
+	indexSeen, emptyFileIndex := false, false
 	oldHeaderSeen, newHeaderSeen, hunkSeen := false, false, false
 	oldRemaining, newRemaining := 0, 0
 	lastHunkContent := false
 	finishSection := func() *CompetitionError {
-		if currentPath != "" && (!oldHeaderSeen || !newHeaderSeen || !hunkSeen) {
+		// Standard Git empty-file operations contain only mode and index metadata.
+		emptyOperation := fileOperation != modifyFile && emptyFileIndex && !oldHeaderSeen && !newHeaderSeen && !hunkSeen
+		if currentPath != "" && (!oldHeaderSeen || !newHeaderSeen || !hunkSeen) && !emptyOperation {
 			return submissionError("invalid_patch_structure", fmt.Sprintf("path %q is missing canonical file headers or a hunk", currentPath))
 		}
 		if hunkSeen && (oldRemaining != 0 || newRemaining != 0) {
 			return submissionError("invalid_patch_structure", fmt.Sprintf("path %q has a hunk whose declared line counts do not match its body", currentPath))
+		}
+		if currentPath != "" && fileOperation == createFile {
+			addedPaths = append(addedPaths, currentPath)
+		}
+		if currentPath != "" {
+			mode := fileMode
+			if fileOperation == modifyFile {
+				mode = indexMode
+			}
+			fileOperations[currentPath] = CompetitionPatchFileOperation{Operation: fileOperation, Mode: mode}
 		}
 		return nil
 	}
@@ -2974,16 +3002,27 @@ func ValidateAndCanonicalizePatch(raw string, policy PatchPolicy) (*CanonicalPat
 			seen[filePath] = true
 			paths = append(paths, filePath)
 			currentPath = filePath
+			fileOperation = modifyFile
+			fileMode, indexMode = "", ""
+			indexSeen, emptyFileIndex = false, false
 			oldHeaderSeen, newHeaderSeen, hunkSeen = false, false, false
 		case strings.HasPrefix(line, "diff "):
 			return nil, submissionError("invalid_patch_structure", fmt.Sprintf("line %d: only diff --git file headers are accepted", i+1))
 		case !hunkSeen && strings.HasPrefix(line, "--- "):
-			if currentPath == "" || oldHeaderSeen || line != "--- a/"+currentPath {
+			expected := "--- a/" + currentPath
+			if fileOperation == createFile {
+				expected = "--- /dev/null"
+			}
+			if currentPath == "" || oldHeaderSeen || line != expected {
 				return nil, submissionError("invalid_patch_structure", fmt.Sprintf("line %d: old-file header does not match diff path", i+1))
 			}
 			oldHeaderSeen = true
 		case !hunkSeen && strings.HasPrefix(line, "+++ "):
-			if currentPath == "" || !oldHeaderSeen || newHeaderSeen || line != "+++ b/"+currentPath {
+			expected := "+++ b/" + currentPath
+			if fileOperation == deleteFile {
+				expected = "+++ /dev/null"
+			}
+			if currentPath == "" || !oldHeaderSeen || newHeaderSeen || line != expected {
 				return nil, submissionError("invalid_patch_structure", fmt.Sprintf("line %d: new-file header does not match diff path", i+1))
 			}
 			newHeaderSeen = true
@@ -2999,22 +3038,65 @@ func ValidateAndCanonicalizePatch(raw string, policy PatchPolicy) (*CanonicalPat
 			if err != nil {
 				return nil, submissionError("invalid_patch_structure", fmt.Sprintf("line %d: %s", i+1, err))
 			}
+			if fileOperation != modifyFile {
+				coordinates := hunkHeaderPattern.FindStringSubmatch(line)
+				if hunkSeen || emptyFileIndex ||
+					fileOperation == createFile && (oldRemaining != 0 || newRemaining <= 0 || coordinates[1] != "0" || coordinates[3] != "1") ||
+					fileOperation == deleteFile && (newRemaining != 0 || oldRemaining <= 0 || coordinates[1] != "1" || coordinates[3] != "0") {
+					return nil, submissionError("invalid_patch_structure", "new/deleted text files require one complete hunk with canonical zero-side coordinates")
+				}
+			}
 			hunkSeen = true
 			lastHunkContent = false
 		case strings.HasPrefix(line, "@@@"):
 			return nil, submissionError("invalid_patch_structure", "combined diffs are not accepted")
 		case !hunkSeen && strings.HasPrefix(line, "index "):
-			if currentPath == "" || !indexLinePattern.MatchString(line) {
-				return nil, submissionError("unsupported_patch_operation", "only regular 100644 file indexes are accepted")
+			index := indexLinePattern.FindStringSubmatch(line)
+			if currentPath == "" || index == nil || policy.PathBase == "" && index[3] == "100755" {
+				return nil, submissionError("unsupported_patch_operation", "only regular source-file indexes are accepted")
 			}
+			indexMode = index[3]
+			if policy.PathBase == competitionMonoRootPathBase {
+				if indexSeen || oldHeaderSeen || newHeaderSeen {
+					return nil, submissionError("unsupported_patch_operation", "duplicate or misplaced file indexes are not accepted")
+				}
+				if fileOperation != modifyFile {
+					if indexMode != "" && indexMode != fileMode {
+						return nil, submissionError("unsupported_patch_operation", "file index mode contradicts its declared creation/deletion mode")
+					}
+					absent, present := index[1], index[2]
+					if fileOperation == deleteFile {
+						absent, present = present, absent
+					}
+					if len(absent) != len(present) || 40 < len(present) || strings.Trim(absent, "0") != "" || strings.Trim(present, "0") == "" {
+						return nil, submissionError("unsupported_patch_operation", "new/deleted file indexes must identify exactly one absent SHA-1 blob")
+					}
+					const emptyBlobSha1 = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+					emptyFileIndex = strings.HasPrefix(emptyBlobSha1, present)
+				}
+			}
+			indexSeen = true
 		case !hunkSeen && strings.HasPrefix(line, "Binary files "), line == "GIT binary patch":
 			return nil, submissionError("binary_patch", "binary patches are not accepted")
-		case !hunkSeen && (strings.HasPrefix(line, "new file mode ") || strings.HasPrefix(line, "deleted file mode ") ||
-			strings.HasPrefix(line, "old mode ") || strings.HasPrefix(line, "new mode ") ||
+		case !hunkSeen && (strings.HasPrefix(line, "new file mode ") || strings.HasPrefix(line, "deleted file mode ")):
+			if policy.PathBase != competitionMonoRootPathBase {
+				return nil, submissionError("unsupported_patch_operation", "new/deleted files, renames, copies, and mode changes are not accepted")
+			}
+			if currentPath == "" || fileOperation != modifyFile || indexSeen || oldHeaderSeen || newHeaderSeen ||
+				line != "new file mode 100644" && line != "deleted file mode 100644" && line != "new file mode 100755" && line != "deleted file mode 100755" {
+				return nil, submissionError("unsupported_patch_operation", "new/deleted files require one canonical regular mode before file headers")
+			}
+			fileMode = strings.TrimPrefix(strings.TrimPrefix(line, "new file mode "), "deleted file mode ")
+			if strings.HasPrefix(line, "new file mode ") {
+				fileOperation = createFile
+			} else {
+				fileOperation = deleteFile
+			}
+		case !hunkSeen && (strings.HasPrefix(line, "old mode ") || strings.HasPrefix(line, "new mode ") ||
 			strings.HasPrefix(line, "rename from ") || strings.HasPrefix(line, "rename to ") ||
 			strings.HasPrefix(line, "copy from ") || strings.HasPrefix(line, "copy to ") ||
 			strings.HasPrefix(line, "similarity index ") || strings.HasPrefix(line, "dissimilarity index ")):
-			return nil, submissionError("unsupported_patch_operation", "new/deleted files, renames, copies, and mode changes are not accepted")
+			return nil, submissionError("unsupported_patch_operation", "renames, copies, and mode changes are not accepted")
 		case strings.Contains(lower, "subproject commit"):
 			return nil, submissionError("submodule_patch", "submodule changes are not accepted")
 		case policy.PathBase == "" && (strings.HasPrefix(line, "+") || strings.HasPrefix(line, "-")) &&
@@ -3054,7 +3136,7 @@ func ValidateAndCanonicalizePatch(raw string, policy PatchPolicy) (*CanonicalPat
 		return nil, submissionError("noncanonical_patch", "file sections must be sorted by path")
 	}
 	hash := sha256.Sum256(bytes)
-	return &CanonicalPatch{Bytes: bytes, Sha256: hex.EncodeToString(hash[:]), Paths: paths}, nil
+	return &CanonicalPatch{Bytes: bytes, Sha256: hex.EncodeToString(hash[:]), Paths: paths, AddedPaths: addedPaths, FileOperations: fileOperations}, nil
 }
 
 func parseHunkHeader(line string) (int, int, error) {

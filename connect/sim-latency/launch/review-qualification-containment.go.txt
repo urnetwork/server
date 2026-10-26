@@ -1,0 +1,515 @@
+// Independently reads actual wrapper/cgroup/firewall/Docker evidence. A model's
+// no-tools assertion or an app-fixed URL alone is never a network fence proof.
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strconv"
+	"strings"
+	"syscall"
+)
+
+// Allocation/count bounds belong to this evidence reader, not model input.
+type reviewQualificationUidSettings struct {
+	MaximumBytes, MaximumRanges int
+	MaximumKeyBytes             int64
+}
+
+// Matches the bounded shell capture and existing private-token reader.
+func defaultReviewQualificationUidSettings() reviewQualificationUidSettings {
+	return reviewQualificationUidSettings{MaximumBytes: 16 * 1024, MaximumRanges: 340, MaximumKeyBytes: 4096}
+}
+
+// Linux uid_map ranges are exact unsigned decimals, bounded and nonoverlapping
+// on both sides. A missing UID must not fall back to identity mapping.
+func reviewQualificationMappedUid(content []byte, uid uint64) (uint64, error) {
+	const limit = uint64(4294967295)
+	settings := defaultReviewQualificationUidSettings()
+	if len(content) == 0 || len(content) > settings.MaximumBytes || uid >= limit {
+		return 0, errors.New("broker UID map is empty, oversized or outside Linux UID bounds")
+	}
+	for _, c := range content {
+		if (c < '0' || c > '9') && c != ' ' && c != '\t' && c != '\n' {
+			return 0, errors.New("broker UID map contains noncanonical characters")
+		}
+	}
+	lines := strings.Split(string(content), "\n")
+	if lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	if len(lines) == 0 || len(lines) > settings.MaximumRanges {
+		return 0, errors.New("broker UID map range count invalid")
+	}
+	type uidRange struct{ start, host, count uint64 }
+	ranges := []uidRange{}
+	mapped, found := uint64(0), false
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) != 3 {
+			return 0, errors.New("broker UID map range is malformed")
+		}
+		values := make([]uint64, 3)
+		for index, field := range fields {
+			value, err := strconv.ParseUint(field, 10, 32)
+			if err != nil || strconv.FormatUint(value, 10) != field {
+				return 0, errors.New("broker UID map decimal is invalid")
+			}
+			values[index] = value
+		}
+		next := uidRange{start: values[0], host: values[1], count: values[2]}
+		if next.start >= limit || next.host >= limit || next.count == 0 || next.count > limit || next.start+next.count > limit || next.host+next.count > limit {
+			return 0, errors.New("broker UID map range overflows Linux UID bounds")
+		}
+		for _, previous := range ranges {
+			if (next.start < previous.start+previous.count && previous.start < next.start+next.count) || (next.host < previous.host+previous.count && previous.host < next.host+next.count) {
+				return 0, errors.New("broker UID map ranges overlap")
+			}
+		}
+		ranges = append(ranges, next)
+		if next.start <= uid && uid-next.start < next.count {
+			if found {
+				return 0, errors.New("broker UID has an ambiguous host mapping")
+			}
+			mapped, found = next.host+uid-next.start, true
+		}
+	}
+	if !found {
+		return 0, errors.New("broker container UID is not mapped")
+	}
+	return mapped, nil
+}
+
+// Only stat metadata is captured. Key contents, a daemon-name mapping guess or
+// caller self-reported readability cannot authorize provider input.
+func validateReviewQualificationKeyOwnership(uidMap, content []byte, owner, container string, pid int) error {
+	settings := defaultReviewQualificationUidSettings()
+	if err := rejectWinnerReviewCaseAliases(content); err != nil {
+		return err
+	}
+	mapped, err := reviewQualificationMappedUid(uidMap, 65532)
+	if err != nil {
+		return err
+	}
+	var key struct {
+		Schema        int `json:"schema"`
+		Kind, Owner   string
+		ContainerId   string `json:"container_id"`
+		Pid           int    `json:"container_pid"`
+		Path          string
+		ContainerUid  uint64 `json:"container_uid"`
+		MappedUid     uint64 `json:"mapped_host_uid"`
+		Uid           uint64 `json:"host_uid"`
+		Gid           uint64 `json:"host_gid"`
+		Mode          string
+		Bytes         int64
+		Links         int
+		Device, Inode string
+		UidMapSha256  string `json:"uid_map_sha256"`
+		ParentUid     uint64 `json:"parent_owner_uid"`
+		ParentMode    string `json:"parent_mode"`
+		BeforeInput   bool   `json:"observed_before_provider_input"`
+	}
+	if err := decodeStrictJSONBytes(content, &key, "actual review key ownership metadata"); err != nil {
+		return err
+	}
+	device, deviceErr := strconv.ParseUint(key.Device, 10, 64)
+	inode, inodeErr := strconv.ParseUint(key.Inode, 10, 64)
+	if key.Schema != 1 || key.Kind != "winner-review-key-ownership" || key.Owner != owner || !validSha256(owner) || key.ContainerId != container || !validSha256(container) || key.Pid != pid || pid < 1 || key.Path != "/var/lib/urnetwork/competition-review/model.key" || key.ContainerUid != 65532 || key.MappedUid != mapped || mapped == 0 || key.Uid != mapped || key.Gid >= 4294967295 || key.Mode != "0400" || key.Bytes < 1 || key.Bytes > settings.MaximumKeyBytes || key.Links != 1 || deviceErr != nil || inodeErr != nil || key.Device != strconv.FormatUint(device, 10) || key.Inode != strconv.FormatUint(inode, 10) || inode == 0 || key.UidMapSha256 != reviewQualificationHash(uidMap) || key.ParentUid != 0 || key.ParentMode != "0700" || !key.BeforeInput {
+		return errors.New("dedicated review key is not privately readable by the actual mapped broker UID")
+	}
+	return nil
+}
+
+// The wrapper emits this last stderr line only after owned cleanup completes.
+type reviewQualificationWrapperReceipt struct {
+	Schema           int    `json:"schema"`
+	Kind             string `json:"kind"`
+	Owner            string `json:"owner"`
+	AttemptDirectory string `json:"attempt_directory"`
+	ManifestSha256   string `json:"evidence_manifest_sha256"`
+	WrapperExit      int    `json:"wrapper_exit"`
+	CleanupVerified  bool   `json:"cleanup_verified"`
+}
+
+// Digests bind only relative ordinary files in the private per-invocation tree.
+type reviewQualificationBinding struct {
+	Path   string `json:"path"`
+	Sha256 string `json:"sha256"`
+	Bytes  int64  `json:"bytes"`
+}
+
+// Authenticates root-owned private paths, not candidate-selected host aliases.
+func reviewQualificationPrivateRoot(path string) error {
+	resolved, err := filepath.EvalSymlinks(path)
+	info, statErr := os.Lstat(path)
+	if err != nil || statErr != nil || !filepath.IsAbs(path) || filepath.Clean(path) != path || resolved != path || !info.IsDir() || info.Mode().Perm() != 0700 || info.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid()) {
+		return errors.New("review qualification needs an owned canonical 0700 directory")
+	}
+	return nil
+}
+
+// Decodes the actual single-key container, never a desired-command template.
+func validateReviewQualificationContainer(content []byte, owner, image, network, providerIp string) error {
+	return validateReviewQualificationContainerForProvider(content, owner, image, network, reviewQualificationProviderProfile{ProviderIp: providerIp, ProviderHost: "api.openai.com", ProviderPort: 443})
+}
+
+// Shared limits stay identical; only the explicit historical-key or Snow-public
+// settings leaf, immutable entrypoint/Cmd and provider network identity differ.
+func validateReviewQualificationContainerForProvider(content []byte, owner, image, network string, profile reviewQualificationProviderProfile) error {
+	var containers []struct {
+		Id, Image string
+		Config    struct {
+			User                 string
+			Entrypoint, Cmd, Env []string
+			Labels               map[string]string
+		}
+		HostConfig struct {
+			NetworkMode                                                       string
+			ReadonlyRootfs, Privileged, Init                                  bool
+			CgroupnsMode, CpusetCpus, PidMode, IpcMode, UTSMode               string
+			NanoCpus, Memory, MemorySwap                                      int64
+			PidsLimit                                                         int
+			CapDrop, CapAdd, SecurityOpt, Dns, ExtraHosts, VolumesFrom, Binds []string
+			Sysctls                                                           map[string]string
+			Devices, DeviceRequests                                           []json.RawMessage
+			Tmpfs, PortBindings                                               map[string]json.RawMessage
+			Ulimits                                                           []struct {
+				Name       string
+				Soft, Hard int64
+			}
+		}
+		Mounts []struct {
+			Type, Source, Destination string
+			Rw                        bool `json:"RW"`
+		}
+	}
+	if json.Unmarshal(content, &containers) != nil || len(containers) != 1 {
+		return errors.New("actual review container inspection invalid")
+	}
+	container := containers[0]
+	host := container.HostConfig
+	entrypoint := []string{"/review-broker", "review-broker", "--model-key-file=/run/secrets/model-key"}
+	command := []string{}
+	hosts := []string{"api.openai.com:" + profile.ProviderIp}
+	mountSource, mountDestination := "/var/lib/urnetwork/competition-review/model.key", "/run/secrets/model-key"
+	if profile.Snow {
+		entrypoint = []string{"/review-broker", "review-broker"}
+		command = []string{"--review-provider-settings=/run/review/provider.json", "--review-provider-settings-sha256=" + profile.Settings.Sha256, "--review-state-directory=/run/review/state"}
+		hosts = []string{}
+		mountSource, mountDestination = profile.Settings.Path, "/run/review/provider.json"
+	}
+	if host.ExtraHosts == nil {
+		host.ExtraHosts = []string{}
+	}
+	if container.Config.Cmd == nil {
+		container.Config.Cmd = []string{}
+	}
+	noPrivilege := false
+	for _, option := range host.SecurityOpt {
+		noPrivilege = noPrivilege || option == "no-new-privileges:true"
+	}
+	expectedMounts := 1
+	if profile.Snow {
+		expectedMounts = 2
+	}
+	if !validSha256(container.Id) || container.Image != image || container.Config.Labels["com.urnetwork.review.owner"] != owner || container.Config.User != "65532:65532" || !reflect.DeepEqual(container.Config.Entrypoint, entrypoint) || !reflect.DeepEqual(container.Config.Cmd, command) || host.NetworkMode != network || !host.ReadonlyRootfs || host.Privileged || !host.Init || host.CgroupnsMode != "private" || host.CpusetCpus != "20,22" || host.NanoCpus != 1000000000 || host.Memory != 2147483648 || host.MemorySwap != 2147483648 || host.PidsLimit != 64 || !reflect.DeepEqual(host.CapDrop, []string{"ALL"}) || len(host.CapAdd) != 0 || !noPrivilege || !reflect.DeepEqual(host.Dns, []string{"127.0.0.1"}) || !reflect.DeepEqual(host.ExtraHosts, hosts) || host.Sysctls["net.ipv6.conf.all.disable_ipv6"] != "1" || host.Sysctls["net.ipv6.conf.default.disable_ipv6"] != "1" || host.PidMode != "" || host.IpcMode != "private" || host.UTSMode != "" || len(host.Devices) != 0 || len(host.DeviceRequests) != 0 || len(host.Binds) != 0 || len(host.VolumesFrom) != 0 || len(host.Tmpfs) != 0 || len(host.PortBindings) != 0 || len(container.Mounts) != expectedMounts {
+		return errors.New("actual review container gained authority or lost resource/network bounds")
+	}
+	providerMount, stateMount := false, false
+	for _, mount := range container.Mounts {
+		if mount.Type == "bind" && mount.Source == mountSource && mount.Destination == mountDestination && !mount.Rw && !providerMount {
+			providerMount = true
+			continue
+		}
+		if profile.Snow && mount.Type == "bind" && profile.StateDirectory != "" && mount.Source == profile.StateDirectory && mount.Destination == "/run/review/state" && mount.Rw && !stateMount {
+			stateMount = true
+			continue
+		}
+		return errors.New("actual broker gained an unapproved writable leaf or provider mount")
+	}
+	if !providerMount || (profile.Snow && !stateMount) {
+		return errors.New("actual broker omitted the required provider/state leaf")
+	}
+	if profile.Snow {
+		boundedFiles := false
+		for _, limit := range host.Ulimits {
+			if limit.Name == "fsize" && limit.Soft == defaultReviewQualificationSettings().MaximumMemberJournalBytes && limit.Hard == limit.Soft {
+				boundedFiles = true
+			}
+		}
+		if !boundedFiles {
+			return errors.New("actual Snow journal files lack the independent hard size bound")
+		}
+	}
+	for _, entry := range container.Config.Env {
+		if !strings.HasPrefix(entry, "PATH=") && !strings.HasPrefix(entry, "HOME=") && !strings.HasPrefix(entry, "HOSTNAME=") {
+			return errors.New("actual review container inherited ambient environment")
+		}
+	}
+	return nil
+}
+
+// The sole forwarding acceptance is provider IPv4:443; every other source
+// packet drops, and the first host-input rule denies the whole owned subnet.
+func validateReviewQualificationFence(chainContent, forwardContent, inputContent []byte, owner, subnet, providerIp string) error {
+	return validateReviewQualificationFenceForProvider(chainContent, forwardContent, inputContent, owner, subnet, providerIp, 443)
+}
+
+// One exact destination/port is allowed; this does not claim TLS or a hostname
+// proxy for the explicitly unauthenticated Snow LAN HTTP frontend.
+func validateReviewQualificationFenceForProvider(chainContent, forwardContent, inputContent []byte, owner, subnet, providerIp string, providerPort int) error {
+	if !validSha256(owner) {
+		return errors.New("provider fence owner identity invalid")
+	}
+	chain := "URRV_" + owner[:16]
+	comment := "urnetwork-review-" + owner
+	rows := func(content []byte, prefix string) []string {
+		out := []string{}
+		for _, line := range strings.Split(strings.ReplaceAll(string(content), "\"", ""), "\n") {
+			if strings.HasPrefix(line, prefix) {
+				out = append(out, line)
+			}
+		}
+		return out
+	}
+	forwardRows, inputRows := rows(forwardContent, "-A DOCKER-USER "), rows(inputContent, "-A INPUT ")
+	if len(forwardRows) == 0 || len(inputRows) == 0 || forwardRows[0] != fmt.Sprintf("-A DOCKER-USER -s %s -m comment --comment %s -j %s", subnet, comment, chain) || inputRows[0] != fmt.Sprintf("-A INPUT -s %s -m comment --comment %s -j DROP", subnet, comment) {
+		return errors.New("actual review fence is not first in forwarded/host-input paths")
+	}
+	chainRows := rows(chainContent, "-A "+chain+" ")
+	if len(chainRows) != 2 || chainRows[1] != "-A "+chain+" -j DROP" {
+		return errors.New("actual provider fence is not default deny")
+	}
+	fields := strings.Fields(chainRows[0])
+	if len(fields) < 2 || fields[0] != "-A" || fields[1] != chain {
+		return errors.New("provider fence chain identity invalid")
+	}
+	values := map[string]string{}
+	for i := 2; i < len(fields); i += 2 {
+		if i+1 >= len(fields) || values[fields[i]] != "" {
+			return errors.New("provider fence conditions ambiguous")
+		}
+		values[fields[i]] = fields[i+1]
+	}
+	if values["-d"] != providerIp+"/32" || values["-p"] != "tcp" || values["--dport"] != strconv.Itoa(providerPort) || values["-j"] != "ACCEPT" || (values["-m"] != "" && values["-m"] != "tcp") || len(values) < 4 || len(values) > 5 {
+		return errors.New("actual provider fence allows an unexpected destination/protocol")
+	}
+	return nil
+}
+
+// Verifies captured wrapper outputs against its independently read original
+// manifest, exact input, owner/network ids, actual Docker limits, running cgroup
+// and kernel rule snapshots. Nothing here trusts a model's containment claims.
+func authenticateReviewQualificationContainment(input, output, diagnostics []byte, canceled bool, image string, settings reviewQualificationSettings) (string, error) {
+	return authenticateReviewQualificationContainmentForProvider(input, output, diagnostics, canceled, image, settings, reviewQualificationProviderProfile{ProviderHost: "api.openai.com", ProviderPort: 443})
+}
+
+// Snow has a public settings/map proof, never a model-key ownership exception.
+// Historical coverage remains 16/15; Snow requires its distinct 17/16 census.
+func authenticateReviewQualificationContainmentForProvider(input, output, diagnostics []byte, canceled bool, image string, settings reviewQualificationSettings, profile reviewQualificationProviderProfile) (string, error) {
+	lines := bytes.Split(bytes.TrimSpace(diagnostics), []byte("\n"))
+	if len(lines) == 0 {
+		return "", errors.New("wrapper containment receipt missing")
+	}
+	var receipt reviewQualificationWrapperReceipt
+	if err := decodeStrictJSONBytes(lines[len(lines)-1], &receipt, "actual wrapper receipt"); err != nil {
+		return "", err
+	}
+	if receipt.Schema != 1 || receipt.Kind != "winner-review-container-receipt" || !validSha256(receipt.Owner) || !receipt.CleanupVerified || !strings.HasPrefix(receipt.AttemptDirectory, settings.StateRoot+"/invocation.") {
+		return "", errors.New("actual wrapper owner/cleanup receipt invalid")
+	}
+	if err := reviewQualificationPrivateRoot(receipt.AttemptDirectory); err != nil {
+		return "", err
+	}
+	manifestBytes, err := readReviewQualificationPin(reviewQualificationPin{Path: filepath.Join(receipt.AttemptDirectory, "evidence-manifest.json"), Sha256: receipt.ManifestSha256}, settings.MaximumBytes, true)
+	if err != nil {
+		return "", err
+	}
+	var manifest struct {
+		Schema    int                          `json:"schema"`
+		Kind      string                       `json:"kind"`
+		Artifacts []reviewQualificationBinding `json:"artifacts"`
+	}
+	if err := decodeStrictJSONBytes(manifestBytes, &manifest, "actual broker evidence manifest"); err != nil {
+		return "", err
+	}
+	maximumArtifacts := 16
+	if profile.Snow {
+		maximumArtifacts = 25
+	}
+	if manifest.Schema != 1 || manifest.Kind != "winner-review-container-evidence" || len(manifest.Artifacts) > maximumArtifacts {
+		return "", errors.New("actual wrapper evidence manifest invalid")
+	}
+	expectedArtifacts := maximumArtifacts
+	if canceled {
+		if profile.Snow {
+			expectedArtifacts = 17
+		} else {
+			expectedArtifacts--
+		}
+	}
+	if len(manifest.Artifacts) != expectedArtifacts {
+		return "", errors.New("actual wrapper evidence coverage changed")
+	}
+	artifacts := map[string][]byte{}
+	for _, binding := range manifest.Artifacts {
+		if binding.Path == "" || filepath.Base(binding.Path) != binding.Path || artifacts[binding.Path] != nil || binding.Bytes < 0 || binding.Bytes > settings.MaximumBytes {
+			return "", errors.New("actual wrapper evidence binding invalid")
+		}
+		content, err := readReviewQualificationPin(reviewQualificationPin{Path: filepath.Join(receipt.AttemptDirectory, binding.Path), Sha256: binding.Sha256}, settings.MaximumBytes, true)
+		if err != nil || int64(len(content)) != binding.Bytes {
+			return "", errors.New("actual wrapper evidence bytes changed")
+		}
+		artifacts[binding.Path] = content
+	}
+	requiredArtifacts := []string{"input.json", "image-inspect.json", "network-inspect.json", "container-inspect.json", "cgroup.json", "uid-map.txt", "provider-address.txt", "fence.json", "fence-forward.txt", "fence-input.txt", "fence-chain.txt", "broker.stdout", "broker.stderr", "terminal.json"}
+	if profile.Snow {
+		requiredArtifacts = append(requiredArtifacts, "provider-settings.json", "provider-settings-ownership.json", "member-state-ownership.json")
+		if !canceled {
+			requiredArtifacts = append(requiredArtifacts, "attempt-claim.json")
+			for index := 1; index <= 3; index++ {
+				requiredArtifacts = append(requiredArtifacts, fmt.Sprintf("member-%02d.started.json", index), fmt.Sprintf("member-%02d.complete.json", index))
+			}
+		}
+	} else {
+		requiredArtifacts = append(requiredArtifacts, "key-ownership.json")
+	}
+	for _, required := range requiredArtifacts {
+		if _, present := artifacts[required]; !present {
+			return "", errors.New("actual wrapper omitted required containment evidence")
+		}
+	}
+	if !bytes.Equal(artifacts["input.json"], input) || !bytes.Equal(artifacts["broker.stdout"], output) {
+		return "", errors.New("wrapper containment receipt belongs to different request/output bytes")
+	}
+	var terminal struct {
+		Schema                int    `json:"schema"`
+		Kind                  string `json:"kind"`
+		Owner                 string `json:"owner"`
+		ImageId               string `json:"image_id"`
+		ContainerId           string `json:"container_id"`
+		NetworkId             string `json:"network_id"`
+		WrapperExit           int    `json:"wrapper_exit"`
+		BrokerExit            *int   `json:"broker_exit"`
+		BrokerExitObserved    bool   `json:"broker_exit_observed"`
+		CleanupVerified       bool   `json:"cleanup_verified"`
+		ProviderInputReleased bool   `json:"provider_input_released"`
+	}
+	if err := decodeStrictJSONBytes(artifacts["terminal.json"], &terminal, "actual review terminal"); err != nil {
+		return "", err
+	}
+	if terminal.Schema != 1 || terminal.Kind != "winner-review-container-terminal" || terminal.Owner != receipt.Owner || terminal.ImageId != image || !validSha256(terminal.ContainerId) || !validSha256(terminal.NetworkId) || terminal.WrapperExit != receipt.WrapperExit || !terminal.CleanupVerified || terminal.ProviderInputReleased == canceled {
+		return "", errors.New("actual review terminal identity/cancellation invalid")
+	}
+	if canceled && (terminal.BrokerExit != nil || terminal.BrokerExitObserved || receipt.WrapperExit != 143) {
+		return "", errors.New("actual cancellation did not preserve its nonzero terminal status")
+	}
+	var imageInspections []struct{ Id string }
+	if json.Unmarshal(artifacts["image-inspect.json"], &imageInspections) != nil || len(imageInspections) != 1 || imageInspections[0].Id != image {
+		return "", errors.New("actual broker image inspection differs from qualified image")
+	}
+	var containerIdentities []struct{ Id string }
+	if json.Unmarshal(artifacts["container-inspect.json"], &containerIdentities) != nil || len(containerIdentities) != 1 || containerIdentities[0].Id != terminal.ContainerId {
+		return "", errors.New("actual broker container receipt substituted another child")
+	}
+	if !canceled {
+		var state struct {
+			Status    string
+			Running   bool
+			ExitCode  int
+			OomKilled bool `json:"OOMKilled"`
+		}
+		if json.Unmarshal(artifacts["container-state.json"], &state) != nil || state.Status != "exited" || state.Running || state.OomKilled || !terminal.BrokerExitObserved || terminal.BrokerExit == nil || state.ExitCode != *terminal.BrokerExit {
+			return "", errors.New("actual broker terminal process state invalid")
+		}
+	}
+	var networks []struct {
+		Id, Driver, Scope                string
+		Internal, EnableIPv6, Attachable bool
+		Labels, Options                  map[string]string
+		IPAM                             struct{ Config []struct{ Subnet string } }
+	}
+	if json.Unmarshal(artifacts["network-inspect.json"], &networks) != nil || len(networks) != 1 {
+		return "", errors.New("actual review network inspection invalid")
+	}
+	network := networks[0]
+	if network.Id != terminal.NetworkId || network.Driver != "bridge" || network.Scope != "local" || network.Internal || network.EnableIPv6 || network.Attachable || network.Labels["com.urnetwork.review.owner"] != receipt.Owner || network.Options["com.docker.network.bridge.enable_icc"] != "false" || len(network.IPAM.Config) != 1 {
+		return "", errors.New("actual review network escaped its owner/isolation plan")
+	}
+	subnet := network.IPAM.Config[0].Subnet
+	address, _, err := net.ParseCIDR(subnet)
+	if err != nil || !address.IsPrivate() {
+		return "", errors.New("actual review network subnet invalid")
+	}
+	var fence struct {
+		Schema               int    `json:"schema"`
+		Kind                 string `json:"kind"`
+		Owner, Chain         string
+		SourceSubnet         string `json:"source_subnet"`
+		ProviderHost         string `json:"provider_host"`
+		ProviderIp           string `json:"provider_ipv4"`
+		ProviderPort         int    `json:"provider_port"`
+		ExternalDns          bool   `json:"external_dns"`
+		HostInputDenied      bool   `json:"host_input_denied"`
+		DefaultDeny          bool   `json:"default_deny"`
+		InstalledBeforeStart bool   `json:"installed_before_start"`
+	}
+	if json.Unmarshal(artifacts["fence.json"], &fence) != nil || fence.Schema != 1 || fence.Kind != "winner-review-provider-egress-fence" || fence.Owner != receipt.Owner || fence.Chain != "URRV_"+receipt.Owner[:16] || fence.SourceSubnet != subnet || fence.ProviderHost != profile.ProviderHost || fence.ProviderPort != profile.ProviderPort || fence.ExternalDns || !fence.HostInputDenied || !fence.DefaultDeny || !fence.InstalledBeforeStart {
+		return "", errors.New("actual provider fence metadata invalid")
+	}
+	provider := net.ParseIP(fence.ProviderIp)
+	if provider == nil || provider.To4() == nil || (!profile.Snow && (!provider.IsGlobalUnicast() || provider.IsPrivate())) || (profile.Snow && fence.ProviderIp != profile.ProviderIp) || strings.TrimSpace(string(artifacts["provider-address.txt"])) != fence.ProviderIp {
+		return "", errors.New("actual provider address invalid")
+	}
+	if err := validateReviewQualificationFenceForProvider(artifacts["fence-chain.txt"], artifacts["fence-forward.txt"], artifacts["fence-input.txt"], receipt.Owner, subnet, fence.ProviderIp, profile.ProviderPort); err != nil {
+		return "", err
+	}
+	profile.ProviderIp = fence.ProviderIp
+	if profile.Snow {
+		profile.StateDirectory = filepath.Join(receipt.AttemptDirectory, "member-state")
+	}
+	if err := validateReviewQualificationContainerForProvider(artifacts["container-inspect.json"], receipt.Owner, image, terminal.NetworkId, profile); err != nil {
+		return "", err
+	}
+	var cgroup struct {
+		Schema      int `json:"schema"`
+		Pid         int `json:"container_pid"`
+		Kind, Path  string
+		MemoryMax   string `json:"memory_max"`
+		SwapMax     string `json:"memory_swap_max"`
+		PidsMax     string `json:"pids_max"`
+		CpuMax      string `json:"cpu_max"`
+		CpuSet      string `json:"cpuset_cpus"`
+		BeforeInput bool   `json:"observed_before_provider_input"`
+	}
+	if json.Unmarshal(artifacts["cgroup.json"], &cgroup) != nil || cgroup.Schema != 1 || cgroup.Pid < 1 || cgroup.Kind != "winner-review-running-cgroup" || !strings.HasPrefix(cgroup.Path, "/") || cgroup.MemoryMax != "2147483648" || cgroup.SwapMax != "0" || cgroup.PidsMax != "64" || cgroup.CpuMax != "100000 100000" || cgroup.CpuSet != "20,22" || !cgroup.BeforeInput {
+		return "", errors.New("actual running broker cgroup limits were not observed before provider input")
+	}
+	if profile.Snow {
+		if err := validateSnowReviewQualificationSettingsOwnership(artifacts["uid-map.txt"], artifacts["provider-settings.json"], artifacts["provider-settings-ownership.json"], profile.Settings, receipt.Owner, terminal.ContainerId, cgroup.Pid); err != nil {
+			return "", err
+		}
+		if err := validateSnowReviewQualificationStateOwnership(artifacts["uid-map.txt"], artifacts["member-state-ownership.json"], profile.StateDirectory, receipt.Owner, terminal.ContainerId, cgroup.Pid); err != nil {
+			return "", err
+		}
+		if !canceled {
+			if err := validateSnowReviewQualificationJournals(artifacts, profile.Settings, receipt.Owner, receipt.AttemptDirectory, settings); err != nil {
+				return "", err
+			}
+		} else if err := validateSnowReviewQualificationStateCensus(profile.StateDirectory, 0); err != nil {
+			return "", err
+		}
+	} else {
+		if err := validateReviewQualificationKeyOwnership(artifacts["uid-map.txt"], artifacts["key-ownership.json"], receipt.Owner, terminal.ContainerId, cgroup.Pid); err != nil {
+			return "", err
+		}
+	}
+	return reviewQualificationHash(lines[len(lines)-1]), nil
+}

@@ -43,7 +43,7 @@ automation_policy:
   settlement_policy_version: ${APPROVED_SETTLEMENT_POLICY_VERSION}
   burn_policy_version: ${APPROVED_BURN_POLICY_VERSION}
   repeat_reward_policy: ${APPROVED_REPEAT_REWARD_POLICY}
-  winner_review_policy: elected_winner_gpt54mini_xhigh_v1
+  winner_review_policy: elected_winner_snow_union_v1
   winner_review_timeout_seconds: 1800
 
 season_policy:

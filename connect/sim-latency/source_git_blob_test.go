@@ -154,3 +154,29 @@ func TestPinnedSourceBlobPreservesContextCancellation(t *testing.T) {
 		t.Fatalf("pinned Git read lost cancellation identity: %v", err)
 	}
 }
+
+// New-file absence may need a remote-only approved pin just as existing blob
+// reads do. Neither query may import the commit or alter the control checkout.
+func TestPinnedSourceAbsenceReadsExactRemoteCommitPrivately(t *testing.T) {
+	fixture := newPinnedSourceBlobFixture(t, "server")
+	pin := fixture.publish(t, "empty.txt", nil)
+	refsBefore := sourceTestGit(t, fixture.controlRoot, "for-each-ref", "--format=%(refname) %(objectname)")
+	for _, item := range []struct {
+		path   string
+		absent bool
+	}{
+		{path: "empty.txt"},
+		{path: "new.txt", absent: true},
+	} {
+		absent, err := sourceGitPathAbsentAtCommit(context.Background(), fixture.controlRoot, pin, item.path, 4096)
+		if err != nil || absent != item.absent {
+			t.Fatalf("exact remote path %q: absent=%t error=%v", item.path, absent, err)
+		}
+	}
+	if _, err := sourceGitText(context.Background(), fixture.controlRoot, "cat-file", "-e", pin+"^{commit}"); err == nil {
+		t.Fatal("absence query imported remote objects into the control checkout")
+	}
+	if refs := sourceTestGit(t, fixture.controlRoot, "for-each-ref", "--format=%(refname) %(objectname)"); refs != refsBefore {
+		t.Fatal("absence query changed control refs")
+	}
+}

@@ -11005,4 +11005,8 @@ var migrations = []any{
 	// Only an explicitly broad evaluated-round policy permits a reviewed change
 	// in a locked dependency repository; legacy approval remains server-only.
 	newSqlMigration(competitionRepositoryPatchMigration()),
+
+	// The Snow three-model union is a new policy, never a relabeling of any
+	// retained Sol/mini review. Each member's complete findings stay attributed.
+	newSqlMigration(competitionSnowWinnerReviewMigration()),
 }

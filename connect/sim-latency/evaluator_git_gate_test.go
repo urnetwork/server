@@ -87,7 +87,9 @@ func TestEvaluatorBuildStatusGatesFailClosed(t *testing.T) {
 		gateCount int
 	}{
 		{name: "Dockerfile.base", gateCount: 4},
-		{name: "Dockerfile.submission", gateCount: 5},
+		// Pristine/application checks now run in the separately pinned validator;
+		// the two post-compilation cleanliness gates remain in this Dockerfile.
+		{name: "Dockerfile.submission", gateCount: 2},
 		{name: "test-build-isolation.sh", gateCount: 2},
 	} {
 		gates := sourceGitStatusGates(t, file.name)

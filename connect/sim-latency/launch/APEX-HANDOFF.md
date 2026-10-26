@@ -3,13 +3,16 @@
 The non-standard external-evaluator design is approved by Macrocosmos. Approval
 does not itself prove a newly built release's live readiness.
 
-## Current v2 production handoff — October 25, 2026
+## Current v2 production handoff — October 26, 2026
 
 Public opening is **2026-10-28 00:00 UTC**. Current qualification and exact
 artifact evidence are in [PRODUCTION-2026-10-28.md](PRODUCTION-2026-10-28.md).
-The new Go 1.27.3 checkpoint has no accepted official baseline or final scale
-yet. Historical release identities and throughput figures below are not its
-qualification evidence.
+The original-three calibration reduction passed and prospectively froze a
+26.9% practical margin for the 3,600-provider/200-client qualification profile.
+The minimal revised-instrument image is built, but its fresh bridge, all-three
+independent reference orderings and live readiness remain open. This is not an
+accepted hidden epoch baseline or activation. See the [exact freeze](CALIBRATION-THREE-A-FREEZE-2026-10-26.md).
+Historical release identities and throughput figures below are not new evidence.
 
 Use discovery's exact `decision_mode` and `required_api_capability`. For an
 advertised v2 round, preflight and submit through `/competition/v2/score/...`,
@@ -20,14 +23,19 @@ The exact endpoint/value sets are in the
 [current README contract](../README.md#macrocosmos-integration-v2-contract)
 and [OpenAPI](../../../../sn/api/competition.yml).
 
-The adopted production policy is `elected_winner_sol61max_v1`: close and drain,
+The prospective production policy is `elected_winner_gpt54mini_xhigh_v1`: close and drain,
 seal and reveal, publish the provisional reward winner, automatically review
-with qualified Sol 6.1 max, revoke/re-elect with reasons if rejected, then build,
+with qualified GPT-5.4 mini/xhigh, revoke/re-elect with reasons if rejected, then build,
 qualify and promote the approved winner before opening the next epoch. Only no
 eligible winner permits incumbent carry-forward. Missing review or failed
 qualification blocks and alerts instead of silently substituting source.
 Reward revision, integrity review, source approval and settlement are distinct;
 do not treat a provisional recipient as source approval or proof of payment.
+Legacy `elected_winner_sol61max_v1` records retain their original model identity.
+Production scope is mono-root patches across all ten locked repositories,
+excluding `server/connect/sim-latency/**` and repository metadata. Examples such
+as `server/connect/resident_contract_manager.go` now include the repository root;
+do not assume the historical one-file server-relative allowlist applies.
 
 The sections explicitly marked historical below describe the old v1 contract
 and September staging records, not instructions for new v2 admissions.
@@ -51,12 +59,14 @@ Before production publication, update:
 
 - Compiler/runtime: prospective production requires exact Go **1.27.3**,
   evidenced by the new evaluator artifact, not the historical staging version.
-- Closing: qualified automatic Sol 6.1 max review follows provisional reward
+- Closing: qualified automatic GPT-5.4 mini/xhigh review follows provisional reward
   publication. Pending review does not start a new epoch on the incumbent;
   approved-winner build/readiness gates progression, and only exhausted eligible
   ranking permits carry-forward. Existing historical seasons stay unchanged.
-- Scale/margin: new-checkpoint qualification is still pending; historical
-  1,800-provider/16.1% values are not a new final release confirmation.
+- Scale/margin/scope: use the prospective 3,600-provider/200-client profile,
+  frozen 26.9% margin and ten-repository mono-root policy only after the remaining
+  bridge/reference/live acceptance. Historical 1,800-provider/16.1% and one-file
+  scope are not the new production settings.
 - Local example: keep generated workload/CSV/metadata/markers outside the clean
   checkout; distinguish an unchanged-baseline run from isolated candidate
   evaluation. The prior RC reviews contain the detailed reproduction.

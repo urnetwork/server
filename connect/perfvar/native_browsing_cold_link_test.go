@@ -93,6 +93,9 @@ type nativeBrowsingColdRequest struct {
 
 // Fixed receipts bound all500 original requests; socket identities stay private.
 type nativeBrowsingColdLinkObservation struct {
+	InitialWindow            sdkBrowsingSetupSnapshot       `json:"initial_window"`
+	ColdEdgeWindow           sdkBrowsingSetupSnapshot       `json:"cold_edge_window"`
+	ColdEdgeWindowObserved   bool                           `json:"cold_edge_window_observed"`
 	Protocol                 string                         `json:"inner_protocol"`
 	ColdEdges                int                            `json:"cold_edges"`
 	VisitedDestinationEdges  int                            `json:"visited_destination_edges"`
@@ -143,6 +146,11 @@ func newNativeBrowsingColdLinkWitness(scenario *sdkBrowsingScenario, pressure *n
 		row: nativeBrowsingColdLinkObservation{Protocol: "http/1.1", ColdServerProvider: -1, AdmissionChain: "UNEXERCISED_ADMISSION_CHAIN", PhysicalPauseAttribution: "UNKNOWN"}}
 	if http2 {
 		self.row.Protocol = "h2"
+	}
+	if scenario != nil {
+		scenario.stateLock.Lock()
+		self.row.InitialWindow = scenario.initial
+		scenario.stateLock.Unlock()
 	}
 	self.requests[0][0].bodyGate = self.css.gate
 	for page := range self.js {
@@ -255,9 +263,13 @@ func (self *nativeBrowsingColdLinkWitness) beforeNavigation(ctx context.Context,
 		if err := self.checkHold(&self.css, nativeBrowsingColdCss); err != nil {
 			return err
 		}
-		snapshot := self.scenario.snapshot()
-		if ready, err := sdkBrowsingSetupReady(snapshot, self.scenario.fixture.discovery.snapshot().InitialExcludedEmpty); !ready || err != nil {
-			return fmt.Errorf("cold-link initial public full window: %s: %v", snapshot, err)
+		device := self.scenario.fixture.device
+		exits, status := device.GetExits(), device.GetWindowStatus()
+		locations := device.GetConnectedProviderLocations()
+		snapshot := sdkBrowsingSetupSnapshotFrom(exits, status, locations, self.scenario.fixture.readyProviderIds())
+		self.recordColdEdgeWindow(snapshot)
+		if err := self.validateInitialCohort(snapshot, locations); err != nil {
+			return err
 		}
 		owner, flows, err := self.scenario.cssOwnerSnapshot(nil)
 		if err != nil {

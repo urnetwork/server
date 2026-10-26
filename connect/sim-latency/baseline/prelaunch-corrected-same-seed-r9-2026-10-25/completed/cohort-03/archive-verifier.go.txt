@@ -1,0 +1,197 @@
+package main
+
+import (
+	"archive/tar"
+	"compress/gzip"
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"path"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+)
+
+type entry struct {
+	Path   string `json:"path"`
+	Source string `json:"source"`
+	Bytes  int64  `json:"bytes"`
+	SHA    string `json:"sha256"`
+}
+type identity struct {
+	Sha   string
+	Bytes int64
+}
+type binding struct {
+	Path  string `json:"path"`
+	Sha   string `json:"sha256"`
+	Bytes int64  `json:"bytes"`
+}
+
+func must(e error) {
+	if e != nil {
+		panic(e)
+	}
+}
+func check(b bool, s string) {
+	if !b {
+		panic(s)
+	}
+}
+func digest(r io.Reader) identity {
+	h := sha256.New()
+	n, e := io.Copy(h, r)
+	must(e)
+	return identity{fmt.Sprintf("%x", h.Sum(nil)), n}
+}
+func file(p string) identity      { f, e := os.Open(p); must(e); defer f.Close(); return digest(f) }
+func read(p string) []byte        { b, e := os.ReadFile(p); must(e); return b }
+func obj(p string) map[string]any { var m map[string]any; must(json.Unmarshal(read(p), &m)); return m }
+func main() {
+	dst := os.Args[1]
+	src := os.Args[2]
+	var inventory []entry
+	must(json.Unmarshal(read(dst+"/original-inventory.json"), &inventory))
+	expected := map[string]identity{}
+	sources := map[string]bool{}
+	companions := 0
+	for _, v := range inventory {
+		if strings.HasPrefix(v.Path, "companions/") {
+			companions++
+		}
+		check(path.Clean(v.Path) == v.Path && !path.IsAbs(v.Path) && !strings.Contains(v.Path, "\\") && !strings.HasPrefix(v.Path, "../"), "unsafe inventory")
+		check(!sources[v.Source], "duplicate original")
+		sources[v.Source] = true
+		want := identity{v.SHA, v.Bytes}
+		check(file(v.Source) == want, "source reread "+v.Path)
+		expected[v.Path] = want
+	}
+	originals := 0
+	must(filepath.WalkDir(src, func(p string, d os.DirEntry, e error) error {
+		if e != nil {
+			return e
+		}
+		check(d.Type()&os.ModeSymlink == 0, "source link")
+		if d.IsDir() {
+			return nil
+		}
+		check(d.Type().IsRegular() && sources[p], "source missing/special")
+		originals++
+		return nil
+	}))
+	check(len(inventory) == originals+companions, "inventory coverage")
+	parts, e := filepath.Glob(dst + "/cohort.tar.gz.part-*")
+	must(e)
+	check(len(parts) > 0, "chunks")
+	var readers []io.Reader
+	for i, p := range parts {
+		check(filepath.Base(p) == fmt.Sprintf("cohort.tar.gz.part-%02d", i), "chunk gap")
+		s, e := os.Stat(p)
+		must(e)
+		check(s.Size() > 0 && s.Size() <= 33554432, "chunk max")
+		if i < len(parts)-1 {
+			check(s.Size() == 33554432, "intermediate chunk")
+		}
+		f, e := os.Open(p)
+		must(e)
+		defer f.Close()
+		readers = append(readers, f)
+		fmt.Printf("chunk=%s bytes=%d sha256=%s\n", filepath.Base(p), s.Size(), file(p).Sha)
+	}
+	compressed := sha256.New()
+	stream := io.TeeReader(io.MultiReader(readers...), compressed)
+	gz, e := gzip.NewReader(stream)
+	must(e)
+	tr := tar.NewReader(gz)
+	seen := map[string]bool{}
+	for {
+		h, e := tr.Next()
+		if e == io.EOF {
+			break
+		}
+		must(e)
+		check(h.Typeflag == tar.TypeReg || h.Typeflag == tar.TypeRegA, "link/special archive entry")
+		n := h.Name
+		check(path.Clean(n) == n && !path.IsAbs(n) && !strings.Contains(n, "\\") && !strings.HasPrefix(n, "../") && !seen[n], "unsafe/duplicate archive")
+		want, ok := expected[n]
+		check(ok, "extra archive")
+		check(digest(tr) == want && h.Size == want.Bytes, "archive mismatch")
+		seen[n] = true
+	}
+	_, e = io.Copy(io.Discard, gz)
+	must(e)
+	must(gz.Close())
+	_, e = io.Copy(io.Discard, stream)
+	must(e)
+	check(len(seen) == len(expected), "archive missing")
+	for _, n := range []string{"worker-result.json", "evidence-manifest.json"} {
+		var r struct {
+			Artifacts []binding `json:"artifacts"`
+		}
+		must(json.Unmarshal(read(src+"/artifacts/"+n), &r))
+		want := 465
+		if n == "worker-result.json" {
+			want = 7
+		}
+		check(len(r.Artifacts) == want, "binding count")
+		for _, b := range r.Artifacts {
+			check(expected["cohort/artifacts/"+b.Path] == (identity{b.Sha, b.Bytes}), "artifact binding "+b.Path)
+		}
+		fmt.Printf("verified %s bindings=%d\n", n, want)
+	}
+	marker := obj(src + "/artifacts/evaluation.complete.json")
+	check(marker["cleanup_complete"] == true, "cleanup marker")
+	maps := marker["artifacts"].(map[string]any)
+	check(len(maps) == 5, "marker count")
+	for k, v := range maps {
+		check(expected["cohort/artifacts/"+strings.ReplaceAll(k, "_", "-")+".json"].Sha == v, "marker binding")
+	}
+	copies := map[string]string{"worker-result.json": src + "/artifacts/worker-result.json", "baseline.json": src + "/artifacts/baseline.json", "score.json": src + "/artifacts/score.json", "evaluation.complete.json": src + "/artifacts/evaluation.complete.json", "evidence-manifest.json": src + "/artifacts/evidence-manifest.json", "fixture-provenance.json": src + "/fixture-provenance.json", "manager-terminal.log": src + "/manager-terminal.log"}
+	for _, v := range inventory {
+		if strings.HasPrefix(v.Path, "companions/") {
+			copies[path.Base(v.Path)] = v.Source
+		}
+	}
+	for n, p := range copies {
+		check(file(dst+"/"+n) == file(p), "readable companion "+n)
+	}
+	result := obj(src + "/artifacts/worker-result.json")
+	errValue, exists := result["eval_error"]
+	check(exists && errValue == nil, "evaluation error")
+	score := result["score"].(map[string]any)
+	check(score["placeable"] == true, "placeability")
+	gates := score["gates"].(map[string]any)
+	check(len(gates) == 6, "gates")
+	for k, v := range gates {
+		check(v.(map[string]any)["passed"] == true, "gate "+k)
+	}
+	progress := obj(src + "/artifacts/evaluation-progress.json")
+	check(progress["phase"] == "complete" && progress["baseline_completed"] == float64(9) && progress["candidate_completed"] == float64(9), "9+9")
+	terminal := string(read(src + "/manager-terminal.log"))
+	field := func(pattern string) string {
+		matches := regexp.MustCompile(pattern).FindAllStringSubmatch(terminal, -1)
+		check(len(matches) == 1, "terminal field cardinality")
+		return matches[0][1]
+	}
+	duration, e := strconv.Atoi(field(`(?m)^evaluator_exit=0 duration_seconds=(\d+)$`))
+	must(e)
+	start, e := time.Parse(time.RFC3339, field(`(?m)^start_utc=(.+)$`))
+	must(e)
+	end, e := time.Parse(time.RFC3339, field(`(?m)^end_utc=(.+)$`))
+	must(e)
+	check(duration >= 0 && duration <= 10800 && end.Sub(start) == time.Duration(duration)*time.Second && strings.Contains(terminal, "\nterminal_cleanup_verified\n"), "bounded terminal and cleanup")
+	check(result["security"].(map[string]any)["cleanup_complete"] == true, "worker cleanup")
+	sum := fmt.Sprintf("%x", compressed.Sum(nil))
+	summary := map[string]any{"schema": 1, "status": "completed_predeclared_" + strings.ReplaceAll(filepath.Base(src), "-", "_"), "official_epoch_baseline": false, "accepted_five_cohort_calibration": false, "production_activated": false, "controls": 9, "candidates": 9, "all_six_gates_passed": true, "placeable": true, "duration_seconds": duration, "gzip_sha256": sum, "original_cohort_regular_files": originals, "additional_companions": companions, "archived_regular_files": len(seen), "chunks": len(parts), "readable_copies": len(copies), "worker_bindings": 7, "evidence_bindings": 465, "marker_bindings": 5, "score": score, "terminal_verification": "actual_eval_error_and_all_7_465_5_bindings"}
+	out, e := os.OpenFile(dst+"/summary.json", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+	must(e)
+	encoder := json.NewEncoder(out)
+	encoder.SetIndent("", "  ")
+	must(encoder.Encode(summary))
+	must(out.Close())
+	fmt.Printf("PASS original_cohort_files=%d archived_files=%d companions=%d readable_copies=%d chunks=%d gzip_sha256=%s gates=6 controls=9 candidates=9\n", originals, len(seen), companions, len(copies), len(parts), sum)
+}

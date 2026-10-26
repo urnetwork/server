@@ -58,6 +58,15 @@ type BlobObject struct {
 	Size int64
 }
 
+// A version is a separate retained storage charge, including a noncurrent
+// version of the same key. Delete markers carry no object-body bytes.
+type BlobObjectVersion struct {
+	Key          string
+	Size         int64
+	VersionId    string
+	DeleteMarker bool
+}
+
 // Immutable retention proof returned for a write that the backend protects
 // through the requested absolute date. Production MinIO writes use compliance
 // object lock and name the exact retained object version. The local backend is
@@ -74,14 +83,15 @@ type BlobRetention struct {
 // operator allocation for the configured prefix, not an estimate of the whole
 // MinIO cluster; cluster free-space alerts remain sourced from MinIO metrics.
 type BlobUsage struct {
-	Authority     string  `json:"authority"`
-	Bucket        string  `json:"bucket"`
-	Prefix        string  `json:"prefix"`
-	ObjectCount   int     `json:"object_count"`
-	UsedBytes     int64   `json:"used_bytes"`
-	CapacityBytes int64   `json:"capacity_bytes"`
-	FreeBytes     int64   `json:"free_bytes"`
-	UsedPercent   float64 `json:"used_percent"`
+	Authority              string  `json:"authority"`
+	Bucket                 string  `json:"bucket"`
+	Prefix                 string  `json:"prefix"`
+	ObjectCount            int     `json:"object_count"`
+	UsedBytes              int64   `json:"used_bytes"`
+	CapacityBytes          int64   `json:"capacity_bytes"`
+	FreeBytes              int64   `json:"free_bytes"`
+	UsedPercent            float64 `json:"used_percent"`
+	IncludesObjectVersions bool    `json:"includes_object_versions,omitempty"`
 }
 
 // BlobProtection is the non-secret production proof for one immutable
@@ -187,6 +197,51 @@ type RetainedBlobStore interface {
 type ProtectedBlobStore interface {
 	RetainedBlobStore
 	CheckProtection(ctx context.Context) (*BlobProtection, error)
+}
+
+// Optional streaming capability leaves current-object List semantics intact.
+// A callback error stops discovery; implementations cancel owned iterators so
+// partial capacity evidence cannot leak a goroutine or qualify a launch.
+type VersionedBlobStore interface {
+	BlobStore
+	ListVersions(ctx context.Context, keyPrefix string, visit func(BlobObjectVersion) error) error
+}
+
+// Charges every physical version with constant accumulator memory, never just
+// the mutable latest object. Unsupported backends fail closed rather than
+// silently substituting a current-only listing for WORM allocation proof.
+func MeasureBlobVersionUsageAtPrefix(ctx context.Context, store BlobStore, keyPrefix string, capacityBytes int64) (*BlobUsage, error) {
+	versioned, ok := store.(VersionedBlobStore)
+	if !ok || store == nil || capacityBytes <= 0 {
+		return nil, errors.New("version-aware blob capacity proof is unavailable")
+	}
+	keyPrefix = strings.TrimSpace(keyPrefix)
+	if keyPrefix == "" || !strings.HasPrefix(keyPrefix, store.Prefix()) {
+		return nil, errors.New("versioned blob usage prefix is outside its namespace")
+	}
+	usedBytes, objectCount := int64(0), 0
+	err := versioned.ListVersions(ctx, keyPrefix, func(object BlobObjectVersion) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if !strings.HasPrefix(object.Key, keyPrefix) || object.Size < 0 || (object.DeleteMarker && object.Size != 0) || math.MaxInt64-usedBytes < object.Size || objectCount == int(^uint(0)>>1) {
+			return errors.New("versioned blob usage metadata is invalid or overflows")
+		}
+		usedBytes += object.Size
+		objectCount++
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	freeBytes := capacityBytes - usedBytes
+	if freeBytes < 0 {
+		freeBytes = 0
+	}
+	return &BlobUsage{Authority: store.Authority(), Bucket: store.Bucket(), Prefix: keyPrefix, ObjectCount: objectCount, UsedBytes: usedBytes, CapacityBytes: capacityBytes, FreeBytes: freeBytes, UsedPercent: 100 * float64(usedBytes) / float64(capacityBytes), IncludesObjectVersions: true}, nil
 }
 
 // MeasureBlobUsage authenticates the current object sizes under one store
@@ -541,6 +596,52 @@ func (self *minioBlobStore) List(ctx context.Context, keyPrefix string) ([]BlobO
 		objects = append(objects, BlobObject{Key: object.Key, Size: object.Size})
 	}
 	return objects, nil
+}
+
+// MinIO's version iterator includes noncurrent bodies and delete markers.
+// The separately owned context drains no more pages after a callback refusal.
+func (self *minioBlobStore) ListVersions(ctx context.Context, keyPrefix string, visit func(BlobObjectVersion) error) error {
+	if visit == nil {
+		return errors.New("blob version visitor is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	listCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	for object := range self.client.ListObjects(listCtx, self.bucket, minio.ListObjectsOptions{Prefix: keyPrefix, Recursive: true, WithVersions: true}) {
+		if object.Err != nil {
+			return object.Err
+		}
+		if object.VersionID == "" {
+			return errors.New("MinIO version listing omitted a version identity")
+		}
+		if err := visit(BlobObjectVersion{Key: object.Key, Size: object.Size, VersionId: object.VersionID, DeleteMarker: object.IsDeleteMarker}); err != nil {
+			return err
+		}
+	}
+	return ctx.Err()
+}
+
+// The development backend has one physical body per key and no noncurrent
+// object history. Its already bounded local List remains the source of truth.
+func (self *localBlobStore) ListVersions(ctx context.Context, keyPrefix string, visit func(BlobObjectVersion) error) error {
+	if visit == nil {
+		return errors.New("blob version visitor is required")
+	}
+	objects, err := self.List(ctx, keyPrefix)
+	if err != nil {
+		return err
+	}
+	for _, object := range objects {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := visit(BlobObjectVersion{Key: object.Key, Size: object.Size}); err != nil {
+			return err
+		}
+	}
+	return ctx.Err()
 }
 
 // ListPage uses a separately cancelable MinIO iterator so discovery stops as

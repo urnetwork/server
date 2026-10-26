@@ -20,9 +20,21 @@ The pinned evaluator uses the fixed files in
 `connect/sim-latency/evaluator/container`. The
 season publishes one digest-pinned evaluator base, and the evaluator derives
 one candidate image for each `(base image digest, canonical patch SHA-256,
-patch-policy SHA-256, trusted Dockerfile SHA-256)` identity. It never accepts a
-submission Dockerfile, repository URL, build command, dependency change, or
-entrypoint.
+patch-policy SHA-256, trusted builder SHA-256)` identity. Historical releases
+used the Dockerfile digest as their builder identity; their retained evidence
+does not change. Prospective broad-repository releases use the composite
+installed-release digest documented in [the container guide](container/README.md#prospective-broad-repository-release),
+including the fixed validator artifact. They never accept a submission
+Dockerfile, repository URL, build command, tool artifact, or entrypoint.
+
+Only a newly qualified image whose authenticated raw source lock explicitly
+sets `candidate_path_base: mono_root_v1`, together with a frozen policy using
+that same mode, may change independently locked repositories. Omitted mode
+retains historical server-relative semantics. Host and Docker source application
+must bind identical original source-identity bytes and every resulting commit;
+a server revision alone is insufficient for a dependency-only submission.
+This is an explicit prospective instrument revision, not authority to rewrite
+old measurements, manifests, image labels, or calibration rules.
 
 Before any candidate process runs, the pinned evaluator must:
 

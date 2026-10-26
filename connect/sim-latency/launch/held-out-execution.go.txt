@@ -1,0 +1,1172 @@
+// Unqualified serial held-out execution and authentication. Existing evaluator
+// source/scripts/images remain untouched; every job is invoked once only.
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"reflect"
+	"sort"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/urnetwork/server/model"
+)
+
+// The independently pinned publication receipt is supplied only after the full
+// seed-free plan is committed/pulled/pushed. It cannot revise the private plan.
+type heldOutExecutionConfig struct {
+	Schema      int               `json:"schema"`
+	Kind        string            `json:"kind"`
+	PrivatePlan heldOutPinnedFile `json:"private_plan"`
+	PublicPlan  heldOutPinnedFile `json:"public_plan"`
+	Publication heldOutPinnedFile `json:"publication"`
+}
+
+// The external publication process records its own evidence, not an operator
+// assertion that a local uncommitted file was already public before results.
+type heldOutPublication struct {
+	Schema       int                 `json:"schema"`
+	Kind         string              `json:"kind"`
+	PlanSha256   string              `json:"plan_sha256"`
+	PublishedAt  time.Time           `json:"published_at"`
+	Commit       string              `json:"commit"`
+	Repository   string              `json:"repository"`
+	PlanPath     string              `json:"plan_path"`
+	RemoteRef    string              `json:"remote_ref"`
+	PulledPushed bool                `json:"pulled_and_pushed"`
+	Evidence     []heldOutPinnedFile `json:"evidence"`
+}
+
+// The start/deadline is persisted before the evaluator. Reinvocation refuses
+// every started job, so neither a crash nor a bad score restarts its clock.
+type heldOutJobStart struct {
+	Schema        int       `json:"schema"`
+	JobId         string    `json:"job_id"`
+	RoundId       string    `json:"round_id"`
+	RequestSha256 string    `json:"request_sha256"`
+	Attempt       int       `json:"attempt"`
+	StartedAt     time.Time `json:"started_at"`
+	Deadline      time.Time `json:"original_deadline"`
+}
+
+// Freezes the first control independently of candidate placeability, direction
+// or takeover. Complete original control evidence remains at its original path.
+type heldOutFrozenControl struct {
+	Schema                  int                          `json:"schema"`
+	Kind                    string                       `json:"kind"`
+	RoundId                 string                       `json:"round_id"`
+	SourceJobId             string                       `json:"source_job_id"`
+	BaseSha                 string                       `json:"base_sha"`
+	ImageId                 string                       `json:"image_id"`
+	SourceLockSha256        string                       `json:"source_lock_sha256"`
+	PolicySha256            string                       `json:"evaluation_policy_sha256"`
+	ProvidersSha256         string                       `json:"providers_sha256"`
+	ScorerVersion           string                       `json:"scorer_version"`
+	HardwareId              string                       `json:"hardware_id"`
+	HostQualificationSha256 string                       `json:"host_qualification_sha256"`
+	Margin                  float64                      `json:"margin"`
+	Replicates              int                          `json:"replicates"`
+	Baseline                heldOutPinnedFile            `json:"baseline"`
+	EvidenceManifest        heldOutPinnedFile            `json:"evidence_manifest"`
+	Completion              heldOutPinnedFile            `json:"completion"`
+	ControlEvaluationIds    []string                     `json:"control_evaluation_ids"`
+	Evidence                []calibrationArtifactBinding `json:"evidence"`
+}
+
+// Retains unsuccessful, nonplaceable and statistically significant outcomes.
+// No failed job is removed from the fixed fifteen-position screen.
+type heldOutJobOutcome struct {
+	JobId                  string             `json:"job_id"`
+	RoundId                string             `json:"round_id"`
+	Role                   string             `json:"role"`
+	Complete               bool               `json:"complete_r9_candidate"`
+	FailureCode            string             `json:"failure_code"`
+	RawScore               float64            `json:"median_raw_score"`
+	Placeable              bool               `json:"placeable"`
+	TakeoverEligible       bool               `json:"takeover_eligible"`
+	Significance           *ScoreSignificance `json:"significance"`
+	RequestSha256          string             `json:"final_request_sha256"`
+	BaselineSha256         string             `json:"baseline_sha256"`
+	WorkerSha256           string             `json:"worker_result_sha256"`
+	EvidenceSha256         string             `json:"evidence_manifest_sha256"`
+	ScoreSha256            string             `json:"score_sha256"`
+	CandidateEvaluationIds []string           `json:"candidate_evaluation_ids"`
+	TerminalSha256         string             `json:"terminal_sha256"`
+	CleanupSha256          string             `json:"cleanup_sha256"`
+}
+
+// Separates a completed failed screen from interruption/infrastructure failure.
+// Neither accepted statistical results nor this file activate production.
+type heldOutCampaignResult struct {
+	Schema       int                 `json:"schema"`
+	Kind         string              `json:"kind"`
+	CampaignId   string              `json:"campaign_id"`
+	PlanSha256   string              `json:"public_plan_sha256"`
+	Complete     bool                `json:"complete"`
+	Accepted     bool                `json:"accepted"`
+	OrderedSeeds int                 `json:"correctly_ordered_seeds"`
+	Reasons      []string            `json:"reasons"`
+	Outcomes     []heldOutJobOutcome `json:"outcomes"`
+	ClosedAt     time.Time           `json:"closed_at"`
+}
+
+// The trusted evaluator emits this exact envelope for success/build refusal.
+type heldOutCompletion struct {
+	Schema           int               `json:"schema"`
+	Kind             string            `json:"kind"`
+	JobId            string            `json:"job_id"`
+	RoundId          string            `json:"round_id"`
+	Attempt          int               `json:"attempt"`
+	BaseImageId      string            `json:"base_image_id"`
+	CandidateImageId *string           `json:"candidate_image_id"`
+	PatchSha256      string            `json:"patch_sha256"`
+	ProvidersSha256  string            `json:"providers_sha256"`
+	CleanupComplete  bool              `json:"cleanup_complete"`
+	TerminalError    string            `json:"terminal_error,omitempty"`
+	Artifacts        map[string]string `json:"artifacts"`
+}
+
+// Existing native build record, not a new build or an application execution.
+type heldOutNativeBuild struct {
+	Schema                       int               `json:"schema"`
+	Image                        string            `json:"image"`
+	ImageId                      string            `json:"image_id"`
+	BaseImageId                  string            `json:"base_image_id"`
+	BaseSha                      string            `json:"base_sha"`
+	CandidateSha                 string            `json:"candidate_sha"`
+	PatchSha256                  string            `json:"patch_sha256"`
+	PolicySha256                 string            `json:"policy_sha256"`
+	BuilderSha256                string            `json:"builder_sha256"`
+	ImageKey                     string            `json:"image_key"`
+	PatchValidatorSha256         string            `json:"patch_validator_sha256,omitempty"`
+	CandidateCommitsSha256       string            `json:"candidate_commits_sha256,omitempty"`
+	OriginalSourceIdentitySha256 string            `json:"original_source_identity_sha256,omitempty"`
+	CandidateCommits             map[string]string `json:"candidate_commits,omitempty"`
+}
+
+// Hooks permit deterministic composed tests without starting services or
+// Docker. Only the real command constructs the trusted subprocess hooks.
+type heldOutExecutionHooks struct {
+	Now          func() time.Time
+	CheckHost    func(context.Context, heldOutPrivatePlan) (string, error)
+	Invoke       func(context.Context, string, heldOutJobStart) error
+	Authenticate func(context.Context, heldOutPrivatePlan, heldOutPrivateRound, heldOutPlannedJob, heldOutRequest, *heldOutFrozenControl) (heldOutJobOutcome, *heldOutFrozenControl, error)
+}
+
+// Appends a mode-0600 JSON record; existing outcomes/starts cannot be replaced.
+func writeHeldOutRecord(path string, value any) error {
+	content, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeHeldOutExclusive(path, content, 0600)
+}
+
+// Produced files are trusted only after provenance and evidence authentication.
+// Their freshly recorded digest is not presented as an independent source pin.
+func readHeldOutProduced(root string, relative string, maximumBytes int64) ([]byte, heldOutPinnedFile, error) {
+	path, err := calibrationArtifactPath(root, relative)
+	if err != nil {
+		return nil, heldOutPinnedFile{}, err
+	}
+	content, err := readBoundedFile(path, "held-out produced artifact")
+	if err != nil || int64(len(content)) > maximumBytes {
+		return nil, heldOutPinnedFile{}, errors.New("held-out produced artifact unavailable or oversized")
+	}
+	return content, heldOutPinnedFile{Path: path, Sha256: heldOutDigest(content)}, nil
+}
+
+// Authenticates publication bytes and a read-only Git view of the pushed
+// commit. The independently pinned receipt/evidence supplies remote provenance;
+// no fetch, commit, push or other external mutation is done by this operator.
+func authenticateHeldOutPublication(ctx context.Context, config heldOutExecutionConfig, plan heldOutPrivatePlan,
+	settings heldOutOperatorSettings, command func(context.Context, string, ...string) ([]byte, error)) error {
+	content, err := readHeldOutPinned(config.Publication, settings.MaximumBytes, false)
+	if err != nil {
+		return err
+	}
+	var publication heldOutPublication
+	if err := decodeHeldOutComplete(content, &publication, "held-out publication"); err != nil {
+		return err
+	}
+	if publication.Schema != 1 || publication.Kind != "sim-latency-held-out-plan-publication" || publication.PlanSha256 != config.PublicPlan.Sha256 || !sourceGitShaPattern.MatchString(publication.Commit) || publication.PublishedAt.Before(plan.PreparedAt) || publication.PublishedAt.After(time.Now()) || !publication.PulledPushed || len(publication.Evidence) == 0 || !filepath.IsAbs(publication.Repository) || filepath.Clean(publication.Repository) != publication.Repository || publication.PlanPath == "" || filepath.IsAbs(publication.PlanPath) || filepath.Clean(publication.PlanPath) != publication.PlanPath || strings.HasPrefix(publication.PlanPath, "..") || strings.ContainsAny(publication.PlanPath, ":\x00\r\n") || !strings.HasPrefix(publication.RemoteRef, "refs/remotes/origin/") || strings.ContainsAny(publication.RemoteRef, " \t\x00\r\n~^:?*[\\") {
+		return errors.New("published complete-plan receipt invalid")
+	}
+	resolved, err := filepath.EvalSymlinks(publication.Repository)
+	if err != nil || resolved != publication.Repository || command == nil {
+		return errors.New("publication repository redirected or reader missing")
+	}
+	for _, pin := range publication.Evidence {
+		if _, err := readHeldOutPinned(pin, settings.MaximumBytes, false); err != nil {
+			return err
+		}
+	}
+	committed, err := command(ctx, "/usr/bin/git", "-c", "safe.directory="+publication.Repository, "-C", publication.Repository, "show", publication.Commit+":"+publication.PlanPath)
+	if err != nil || heldOutDigest(committed) != config.PublicPlan.Sha256 {
+		return errors.New("held-out full public plan is not in the published commit")
+	}
+	if _, err := command(ctx, "/usr/bin/git", "-c", "safe.directory="+publication.Repository, "-C", publication.Repository, "merge-base", "--is-ancestor", publication.Commit, publication.RemoteRef); err != nil {
+		return errors.New("held-out publication is not on the independently receipted remote ref")
+	}
+	return nil
+}
+
+// Discovers only the frozen evaluator's original namespace, never arbitrary
+// sidecar paths. Later references must have zero newly measured control runs.
+func discoverHeldOutScoreInputs(artifacts string, bound map[string]bool, first bool, settings calibrationAnalysisSettings) (ScoreInputs, ScoreInputs, error) {
+	candidate, control := ScoreInputs{}, ScoreInputs{}
+	corpus, err := calibrationArtifactPath(artifacts, filepath.Join("evidence", "scorer-input"))
+	if err != nil {
+		return candidate, control, err
+	}
+	entries, err := os.ReadDir(corpus)
+	if err != nil || len(entries) > settings.MaximumTraversalEntries {
+		return candidate, control, errors.New("held-out scorer corpus unavailable or excessive")
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		var bundle *ScoreInputs
+		if strings.HasPrefix(entry.Name(), "baseline-") {
+			bundle = &control
+		} else if strings.HasPrefix(entry.Name(), "candidate-") {
+			bundle = &candidate
+		} else {
+			return candidate, control, errors.New("unknown held-out scorer corpus directory")
+		}
+		relative := filepath.Join("evidence", "scorer-input", entry.Name())
+		run, err := calibrationArtifactPath(artifacts, filepath.Join(relative, "results.csv"))
+		if err != nil {
+			return candidate, control, err
+		}
+		stats, _, err := readOfficialRunSidecar(run)
+		if err != nil {
+			return candidate, control, err
+		}
+		original := func(path string) (string, error) {
+			if !strings.HasPrefix(path, "/artifacts/") || filepath.Clean(path) != path || strings.ContainsAny(path, "\x00\r\n") {
+				return "", errors.New("held-out sidecar escaped its original scorer namespace")
+			}
+			return filepath.Join("evidence", "scorer-input", strings.TrimPrefix(path, "/artifacts/")), nil
+		}
+		bundle.Runs, bundle.Stderr = append(bundle.Runs, filepath.Join(relative, "results.csv")), append(bundle.Stderr, filepath.Join(relative, "stderr.log"))
+		for _, field := range []struct {
+			path  string
+			paths *[]string
+		}{
+			{path: stats.AccountingReport, paths: &bundle.Accounting}, {path: stats.StatsRoot, paths: &bundle.Samples},
+			{path: stats.ResourceReport, paths: &bundle.ResourceReports}, {path: stats.FinalMarker, paths: &bundle.Markers},
+		} {
+			path, err := original(field.path)
+			if err != nil {
+				return candidate, control, err
+			}
+			*field.paths = append(*field.paths, path)
+		}
+		bundle.BaselineManifest = filepath.Join("evidence", "scorer-input", "baseline.json")
+	}
+	if first {
+		if err := validateInputCardinality(control, settings.Replicates); err != nil {
+			return candidate, control, errors.New("first held-out job lacks a complete fresh R9 control")
+		}
+	} else if len(control.Runs) != 0 {
+		return candidate, control, errors.New("later reference remeasured or replaced the round control")
+	}
+	if len(candidate.Runs) != 0 {
+		candidate, err = resolveCalibrationScoreInputs(artifacts, candidate, bound, settings)
+		if err != nil {
+			return candidate, control, err
+		}
+	}
+	if first {
+		control, err = resolveCalibrationScoreInputs(artifacts, control, bound, settings)
+	}
+	return candidate, control, err
+}
+
+// The scorer's complete baseline validator plus required live metrics/R9 form
+// the same frozen-round acceptance boundary as the production worker.
+func validateHeldOutBaseline(content []byte, roundId string, providersSha256 string, policy model.CompetitionEvaluationPolicy) (*ScoreBaselineManifest, error) {
+	var baseline ScoreBaselineManifest
+	if err := decodeStrictJSONBytes(content, &baseline, "held-out round baseline"); err != nil {
+		return nil, err
+	}
+	if err := validateScoreBaseline(&baseline); err != nil {
+		return nil, err
+	}
+	if baseline.RoundId != roundId || baseline.ConfigSha256 != providersSha256 || baseline.RequestTimeoutMs != policy.RequestTimeoutMs || baseline.TakeoverMargin != policy.TakeoverMargin || len(baseline.Replicates) != policy.Replicates {
+		return nil, errors.New("held-out baseline round/workload/policy/R9 mismatch")
+	}
+	for _, replicate := range baseline.Replicates {
+		if err := validateScoreLiveMetrics(replicate.LiveMetrics); err != nil {
+			return nil, err
+		}
+	}
+	return &baseline, nil
+}
+
+// An original first-job control record must remain authenticated when consumed.
+// A baseline from another round/job/source/policy cannot be relabeled by path.
+func authenticateHeldOutFrozenControl(control heldOutFrozenControl, plan heldOutPrivatePlan, round heldOutPrivateRound,
+	release heldOutRelease, settings heldOutOperatorSettings) ([]byte, error) {
+	if control.Schema != 1 || control.Kind != "sim-latency-held-out-first-control" || len(round.Public.Jobs) != 3 || control.SourceJobId != round.Public.Jobs[0].JobId || control.RoundId != round.Public.RoundId || control.BaseSha != release.BaseSha || control.ImageId != release.ImageId || control.SourceLockSha256 != release.SourceLockSha256 || control.PolicySha256 != plan.PolicySha256 || control.ProvidersSha256 != round.Public.ProvidersSha256 || control.ScorerVersion != officialScorerVersion || control.Margin != plan.Margin || control.Replicates != plan.Policy.Replicates || control.HardwareId != plan.Policy.HardwareId || control.HostQualificationSha256 != plan.Policy.HostQualificationSha256 || len(control.ControlEvaluationIds) != plan.Policy.Replicates {
+		return nil, errors.New("frozen first-control provenance does not match the committed round")
+	}
+	firstRoot := heldOutJobRoot(plan.Config.PrivateRoot, round.Public, round.Public.Jobs[0])
+	if control.Baseline.Path != filepath.Join(firstRoot, "artifacts", "baseline.json") || control.EvidenceManifest.Path != filepath.Join(firstRoot, "artifacts", "evidence-manifest.json") || control.Completion.Path != filepath.Join(firstRoot, "artifacts", "evaluation.complete.json") {
+		return nil, errors.New("frozen first-control provenance was substituted")
+	}
+	for _, pin := range []heldOutPinnedFile{control.EvidenceManifest, control.Completion} {
+		if _, err := readHeldOutPinned(pin, settings.MaximumBytes, false); err != nil {
+			return nil, err
+		}
+	}
+	evidenceContent, err := readHeldOutPinned(control.EvidenceManifest, settings.MaximumBytes, false)
+	if err != nil {
+		return nil, err
+	}
+	var evidence struct {
+		Schema    int                          `json:"schema"`
+		Kind      string                       `json:"kind"`
+		JobId     string                       `json:"job_id"`
+		RoundId   string                       `json:"round_id"`
+		Artifacts []calibrationArtifactBinding `json:"artifacts"`
+	}
+	if err := decodeStrictJSONBytes(evidenceContent, &evidence, "frozen first-control evidence"); err != nil {
+		return nil, err
+	}
+	if evidence.Schema != 1 || evidence.Kind != "sim-latency-evidence-manifest" || evidence.JobId != control.SourceJobId || evidence.RoundId != control.RoundId || !reflect.DeepEqual(evidence.Artifacts, control.Evidence) {
+		return nil, errors.New("frozen first-control evidence census changed")
+	}
+	completeContent, err := readHeldOutPinned(control.Completion, settings.MaximumBytes, false)
+	if err != nil {
+		return nil, err
+	}
+	var complete heldOutCompletion
+	if err := decodeStrictJSONBytes(completeContent, &complete, "frozen first-control completion"); err != nil {
+		return nil, err
+	}
+	if complete.Schema != 1 || complete.Kind != "sim-latency-worker-evaluation-complete" || complete.JobId != control.SourceJobId || complete.RoundId != control.RoundId || complete.Attempt != 1 || complete.BaseImageId != release.ImageId || complete.ProvidersSha256 != control.ProvidersSha256 || !complete.CleanupComplete || complete.Artifacts["baseline"] != control.Baseline.Sha256 || complete.Artifacts["evidence_manifest"] != control.EvidenceManifest.Sha256 {
+		return nil, errors.New("frozen first-control completion changed")
+	}
+	if _, err := verifyCalibrationArtifactBindings(filepath.Join(firstRoot, "artifacts"), control.Evidence, defaultCalibrationAnalysisSettings()); err != nil {
+		return nil, err
+	}
+	content, err := readHeldOutPinned(control.Baseline, settings.MaximumBytes, false)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := validateHeldOutBaseline(content, round.Public.RoundId, round.Public.ProvidersSha256, plan.Policy); err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	for _, id := range control.ControlEvaluationIds {
+		if id == "" || seen[id] {
+			return nil, errors.New("frozen first-control execution identities duplicated")
+		}
+		seen[id] = true
+	}
+	return content, nil
+}
+
+// Authenticates the complete trusted worker record, including failure envelopes.
+// Candidate gate failure is retained; it is never a reason to choose a control.
+func validateHeldOutWorker(content []byte, root string, jobId string, score *ScoreResult, buildFailed bool, settings calibrationAnalysisSettings) error {
+	if score != nil && score.EvalError == nil {
+		return validateCalibrationWorkerResult(content, root, jobId, score, settings)
+	}
+	var worker struct {
+		Schema    int             `json:"schema"`
+		JobId     string          `json:"job_id"`
+		Score     json.RawMessage `json:"score"`
+		EvalError struct {
+			Kind      string `json:"kind"`
+			Code      string `json:"code"`
+			Message   string `json:"message"`
+			Retriable bool   `json:"retriable"`
+		} `json:"eval_error"`
+		Security  map[string]json.RawMessage   `json:"security"`
+		Artifacts []calibrationArtifactBinding `json:"artifacts"`
+	}
+	if err := decodeStrictJSONBytes(content, &worker, "held-out failed worker result"); err != nil {
+		return err
+	}
+	if worker.Schema != 1 || worker.JobId != jobId || !bytes.Equal(bytes.TrimSpace(worker.Score), []byte("null")) || worker.EvalError.Kind == "" || worker.EvalError.Code == "" {
+		return errors.New("held-out failed worker envelope invalid")
+	}
+	if buildFailed {
+		if worker.EvalError.Kind != "submission" || worker.EvalError.Code != "candidate_build_failed" || worker.EvalError.Retriable {
+			return errors.New("held-out candidate build refusal mismatch")
+		}
+	} else if score == nil || score.EvalError == nil || worker.EvalError.Kind != score.EvalError.Kind || worker.EvalError.Code != score.EvalError.Code || worker.EvalError.Message != score.EvalError.Message {
+		return errors.New("held-out worker failure differs from exact native replay")
+	}
+	requiredSecurity := []string{"management_cpu_reserved", "management_memory_reserved", "default_deny_network", "offline_build", "offline_build_resource_limits", "no_production_secrets", "structural_patch_check", "cleanup_complete", "immutable_reports"}
+	if !buildFailed {
+		requiredSecurity = append(requiredSecurity, "template_database_reset", "redis_reset", "cgroup_contained", "resource_limits", "accounting_complete", "resource_report_complete")
+	}
+	for _, key := range requiredSecurity {
+		var passed bool
+		if json.Unmarshal(worker.Security[key], &passed) != nil || !passed {
+			return errors.New("held-out failed worker containment incomplete")
+		}
+	}
+	bound, err := verifyCalibrationArtifactBindings(root, worker.Artifacts, settings)
+	if err != nil {
+		return err
+	}
+	required := []string{"baseline.json", "submission-error.json", "evaluation-progress.json", "evaluation.complete.json", "evidence-manifest.json"}
+	if !buildFailed {
+		required = []string{"accounting.json", "baseline.json", "resources.json", "score.json", "evaluation-progress.json", "evaluation.complete.json", "evidence-manifest.json"}
+	}
+	if len(bound) != len(required) {
+		return errors.New("held-out failed worker artifact coverage invalid")
+	}
+	for _, name := range required {
+		if !bound[name] {
+			return errors.New("held-out failed worker artifact missing")
+		}
+	}
+	return nil
+}
+
+// Reconstructs the first control with the native frozen scorer; later jobs use
+// exactly those retained bytes and have no new baseline measurements. Every
+// candidate is replayed by the immutable evaluator image, not an approximation.
+func authenticateHeldOutJob(ctx context.Context, plan heldOutPrivatePlan, round heldOutPrivateRound, job heldOutPlannedJob,
+	request heldOutRequest, frozen *heldOutFrozenControl, release heldOutRelease, settings heldOutOperatorSettings,
+	replay calibrationScoreReplay) (heldOutJobOutcome, *heldOutFrozenControl, error) {
+	outcome := heldOutJobOutcome{JobId: job.JobId, RoundId: round.Public.RoundId, Role: job.Role}
+	artifacts := request.ArtifactDirectory
+	analysisSettings := defaultCalibrationAnalysisSettings()
+	analysisSettings.MarginFloor = plan.Margin
+	workerBytes, workerPin, err := readHeldOutProduced(artifacts, "worker-result.json", settings.MaximumBytes)
+	if err != nil {
+		return outcome, nil, err
+	}
+	completeBytes, completePin, err := readHeldOutProduced(artifacts, "evaluation.complete.json", settings.MaximumBytes)
+	if err != nil {
+		return outcome, nil, err
+	}
+	var complete heldOutCompletion
+	if err := decodeStrictJSONBytes(completeBytes, &complete, "held-out completion"); err != nil {
+		return outcome, nil, err
+	}
+	if complete.Schema != 1 || complete.Kind != "sim-latency-worker-evaluation-complete" || complete.JobId != job.JobId || complete.RoundId != round.Public.RoundId || complete.Attempt != 1 || complete.BaseImageId != release.ImageId || complete.PatchSha256 != request.PatchSha256 || complete.ProvidersSha256 != round.Public.ProvidersSha256 || !complete.CleanupComplete {
+		return outcome, nil, errors.New("held-out completion release/workload/patch identity mismatch")
+	}
+	buildFailed := complete.TerminalError == "candidate_build_failed"
+	if complete.TerminalError != "" && !buildFailed {
+		return outcome, nil, errors.New("unknown held-out terminal failure")
+	}
+	var reference heldOutReference
+	for _, candidate := range plan.References {
+		if candidate.Role == job.Role {
+			reference = candidate
+		}
+	}
+	if reference.Role == "" || (!buildFailed && (complete.CandidateImageId == nil || *complete.CandidateImageId != reference.ImageId)) || (buildFailed && complete.CandidateImageId != nil) {
+		return outcome, nil, errors.New("held-out candidate differs from the precommitted build")
+	}
+	completeArtifacts := map[string]string{"baseline": "baseline.json", "submission_error": "submission-error.json", "evidence_manifest": "evidence-manifest.json"}
+	if !buildFailed {
+		completeArtifacts = map[string]string{"accounting": "accounting.json", "baseline": "baseline.json", "resources": "resources.json", "score": "score.json", "evidence_manifest": "evidence-manifest.json"}
+	}
+	if len(complete.Artifacts) != len(completeArtifacts) {
+		return outcome, nil, errors.New("held-out completion artifact coverage changed")
+	}
+	for key, path := range completeArtifacts {
+		_, pin, err := readHeldOutProduced(artifacts, path, settings.MaximumBytes)
+		if err != nil || pin.Sha256 != complete.Artifacts[key] {
+			return outcome, nil, errors.New("held-out completion artifact digest mismatch")
+		}
+	}
+	evidenceBytes, evidencePin, err := readHeldOutProduced(artifacts, "evidence-manifest.json", settings.MaximumBytes)
+	if err != nil || complete.Artifacts["evidence_manifest"] != evidencePin.Sha256 {
+		return outcome, nil, errors.New("held-out evidence completion binding invalid")
+	}
+	var evidence struct {
+		Schema    int                          `json:"schema"`
+		Kind      string                       `json:"kind"`
+		JobId     string                       `json:"job_id"`
+		RoundId   string                       `json:"round_id"`
+		Artifacts []calibrationArtifactBinding `json:"artifacts"`
+	}
+	if err := decodeStrictJSONBytes(evidenceBytes, &evidence, "held-out evidence"); err != nil {
+		return outcome, nil, err
+	}
+	if evidence.Schema != 1 || evidence.Kind != "sim-latency-evidence-manifest" || evidence.JobId != job.JobId || evidence.RoundId != round.Public.RoundId {
+		return outcome, nil, errors.New("held-out evidence job/round mismatch")
+	}
+	bound, err := verifyCalibrationArtifactBindings(artifacts, evidence.Artifacts, analysisSettings)
+	if err != nil {
+		return outcome, nil, err
+	}
+	var executedBuild *heldOutNativeBuild
+	if !buildFailed {
+		if !bound["evidence/candidate-build.json"] || !bound["evidence/policy.json"] {
+			return outcome, nil, errors.New("held-out candidate build/policy evidence missing")
+		}
+		buildBytes, _, err := readHeldOutProduced(artifacts, "evidence/candidate-build.json", settings.MaximumBytes)
+		if err != nil {
+			return outcome, nil, err
+		}
+		committedBytes, err := readHeldOutPinned(reference.NativeBuild, settings.MaximumBytes, false)
+		if err != nil {
+			return outcome, nil, err
+		}
+		var actualBuild, committedBuild heldOutNativeBuild
+		if err := decodeHeldOutComplete(buildBytes, &actualBuild, "executed held-out native build"); err != nil {
+			return outcome, nil, err
+		}
+		if err := decodeHeldOutComplete(committedBytes, &committedBuild, "committed held-out native build"); err != nil {
+			return outcome, nil, err
+		}
+		if !reflect.DeepEqual(actualBuild, committedBuild) {
+			return outcome, nil, errors.New("executed held-out build differs from its full committed build identity")
+		}
+		if err := validateHeldOutRuntimeBuilderPin(actualBuild, release); err != nil {
+			return outcome, nil, err
+		}
+		if err := authenticateHeldOutRuntimeBuildEvidence(artifacts, bound, actualBuild, request, plan.Config.SourceLock.Sha256, release, settings); err != nil {
+			return outcome, nil, err
+		}
+		executedBuild = &actualBuild
+		policyBytes, _, err := readHeldOutProduced(artifacts, "evidence/policy.json", settings.MaximumBytes)
+		if err != nil {
+			return outcome, nil, err
+		}
+		var patchPolicy model.CompetitionPatchPolicy
+		if err := decodeHeldOutComplete(policyBytes, &patchPolicy, "executed held-out patch policy"); err != nil {
+			return outcome, nil, err
+		}
+		if !reflect.DeepEqual(patchPolicy, request.PatchPolicy) || heldOutDigest(policyBytes) != actualBuild.PolicySha256 {
+			return outcome, nil, errors.New("held-out build changed the frozen patch policy")
+		}
+	}
+	baselineBytes, baselinePin, err := readHeldOutProduced(artifacts, "baseline.json", settings.MaximumBytes)
+	if err != nil || complete.Artifacts["baseline"] != baselinePin.Sha256 {
+		return outcome, nil, errors.New("held-out baseline completion binding invalid")
+	}
+	baseline, err := validateHeldOutBaseline(baselineBytes, round.Public.RoundId, round.Public.ProvidersSha256, plan.Policy)
+	if err != nil {
+		return outcome, nil, err
+	}
+	first := job.Position == 1
+	if first != (frozen == nil) {
+		return outcome, nil, errors.New("held-out first-control dependency violated")
+	}
+	if !first {
+		original, err := authenticateHeldOutFrozenControl(*frozen, plan, round, release, settings)
+		if err != nil || !bytes.Equal(original, baselineBytes) || request.RoundBaselineSha256 != frozen.Baseline.Sha256 {
+			return outcome, nil, errors.New("held-out consuming job substituted its shared control")
+		}
+	}
+	candidateInputs, controlInputs, err := discoverHeldOutScoreInputs(artifacts, bound, first, analysisSettings)
+	if err != nil {
+		return outcome, nil, err
+	}
+	privateWorkload := true
+	if plan.Config.Kind == "sim-latency-prospective-c2-bridge-plan" && plan.Config.Protocol == calibrationProtocolThreeABridgeThreeB {
+		privateWorkload = false
+	}
+	workload, err := readHeldOutPinned(heldOutPinnedFile{Path: request.ProvidersPath, Sha256: request.ProvidersSha256}, settings.MaximumBytes, privateWorkload)
+	if err != nil {
+		return outcome, nil, err
+	}
+	defer clear(workload)
+	requestBytes, err := json.Marshal(request)
+	if err != nil {
+		return outcome, nil, err
+	}
+	if err := validateCalibrationWorkload(requestBytes, workload, baseline, candidateInputs, controlInputs); err != nil {
+		return outcome, nil, err
+	}
+	// The complete source projection is digest-bound by the evidence manifest.
+	if !bound["evidence/evaluation-sources.json"] {
+		return outcome, nil, errors.New("held-out source provenance is missing")
+	}
+	sourceBytes, _, err := readHeldOutProduced(artifacts, "evidence/evaluation-sources.json", settings.MaximumBytes)
+	if err != nil {
+		return outcome, nil, err
+	}
+	var sources struct {
+		Schema               int             `json:"schema"`
+		Kind                 string          `json:"kind"`
+		Origin               string          `json:"origin"`
+		HostRepositoriesUsed bool            `json:"host_repositories_used"`
+		RuntimeTarget        string          `json:"runtime_target"`
+		ReadOnlyMount        bool            `json:"read_only_mount"`
+		Baseline             json.RawMessage `json:"baseline"`
+		Candidate            json.RawMessage `json:"candidate"`
+		CleanupComplete      bool            `json:"cleanup_complete"`
+	}
+	if err := decodeStrictJSONBytes(sourceBytes, &sources, "held-out source provenance"); err != nil {
+		return outcome, nil, err
+	}
+	if sources.Schema != 1 || sources.Kind != "sim-latency-temporary-evaluation-sources" || sources.Origin != "authenticated_evaluator_image" || sources.HostRepositoriesUsed || sources.RuntimeTarget != "/workspace" || !sources.ReadOnlyMount || !sources.CleanupComplete {
+		return outcome, nil, errors.New("held-out source containment provenance invalid")
+	}
+	for _, source := range []struct {
+		content   json.RawMessage
+		candidate bool
+	}{{content: sources.Baseline}, {content: sources.Candidate, candidate: true}} {
+		if release.Runtime != nil {
+			var commits map[string]string
+			patchSha256 := ""
+			if source.candidate && !buildFailed {
+				commits, patchSha256 = executedBuild.CandidateCommits, request.PatchSha256
+			}
+			if _, err := validateHeldOutRuntimeSource(source.content, release, plan.Config.SourceLock.Sha256, patchSha256, commits); err != nil {
+				return outcome, nil, err
+			}
+		}
+		var projection struct {
+			Repositories         map[string]string `json:"repositories"`
+			CandidatePatchSha256 string            `json:"candidate_patch_sha256"`
+		}
+		// The nested native snapshot has extra provenance; strict decoding above
+		// authenticates its outer schema, and exact evidence pins bind all bytes.
+		if json.Unmarshal(source.content, &projection) != nil {
+			return outcome, nil, errors.New("held-out source projection malformed")
+		}
+		if source.candidate && !buildFailed {
+			if projection.Repositories["server"] != reference.CandidateSha || projection.CandidatePatchSha256 != reference.Patch.Sha256 {
+				return outcome, nil, errors.New("held-out candidate source differs from committed patch/build")
+			}
+			projection.Repositories["server"] = release.BaseSha
+		}
+		lockDigest, err := model.CompetitionSourceLockDigest(projection.Repositories)
+		if err != nil || lockDigest != release.SourceLockSha256 {
+			return outcome, nil, errors.New("held-out source does not match the frozen ten-repository lock")
+		}
+	}
+	seenEvaluationIds := map[string]bool{}
+	controlIds := []string{}
+	if frozen != nil {
+		controlIds = append(controlIds, frozen.ControlEvaluationIds...)
+		for _, id := range controlIds {
+			seenEvaluationIds[id] = true
+		}
+	}
+	for _, bundle := range []struct {
+		inputs   ScoreInputs
+		revision string
+		control  bool
+	}{
+		{inputs: controlInputs, revision: release.BaseSha, control: true}, {inputs: candidateInputs, revision: reference.CandidateSha},
+	} {
+		for _, run := range bundle.inputs.Runs {
+			stats, _, err := readOfficialRunSidecar(run)
+			if err != nil || stats.BuildRevision != bundle.revision || stats.BuildModified || stats.Seed != round.EffectiveSeed || stats.EvaluationId == "" || seenEvaluationIds[stats.EvaluationId] {
+				return outcome, nil, errors.New("held-out run source/effective-seed/execution identity mismatch")
+			}
+			seenEvaluationIds[stats.EvaluationId] = true
+			if bundle.control {
+				controlIds = append(controlIds, stats.EvaluationId)
+			}
+		}
+	}
+	if replay == nil {
+		return outcome, nil, errors.New("native immutable-image replay required")
+	}
+	if first {
+		replayed, err := replay(ctx, artifacts, controlInputs, release.ImageId, round.Public.RoundId, true)
+		if err != nil || !bytes.Equal(replayed, baselineBytes) {
+			return outcome, nil, errors.New("first held-out control does not reproduce its native R9 baseline")
+		}
+		frozen = &heldOutFrozenControl{Schema: 1, Kind: "sim-latency-held-out-first-control", RoundId: round.Public.RoundId,
+			SourceJobId: job.JobId, BaseSha: release.BaseSha, ImageId: release.ImageId, SourceLockSha256: release.SourceLockSha256,
+			PolicySha256: plan.PolicySha256, ProvidersSha256: round.Public.ProvidersSha256, ScorerVersion: officialScorerVersion,
+			HardwareId: plan.Policy.HardwareId, HostQualificationSha256: plan.Policy.HostQualificationSha256, Margin: plan.Margin,
+			Replicates: plan.Policy.Replicates, Baseline: baselinePin, EvidenceManifest: evidencePin, Completion: completePin,
+			ControlEvaluationIds: controlIds, Evidence: evidence.Artifacts}
+	}
+	var score *ScoreResult
+	if buildFailed {
+		if len(candidateInputs.Runs) != 0 {
+			return outcome, nil, errors.New("failed build unexpectedly includes candidate measurements")
+		}
+		outcome.FailureCode = "candidate_build_failed"
+	} else {
+		if err := validateInputCardinality(candidateInputs, plan.Policy.Replicates); err != nil {
+			return outcome, nil, err
+		}
+		scoreBytes, scorePin, err := readHeldOutProduced(artifacts, "score.json", settings.MaximumBytes)
+		if err != nil || complete.Artifacts["score"] != scorePin.Sha256 {
+			return outcome, nil, errors.New("held-out score completion binding invalid")
+		}
+		replayed, err := replay(ctx, artifacts, candidateInputs, release.ImageId, round.Public.RoundId, false)
+		if err != nil || !bytes.Equal(scoreBytes, replayed) {
+			return outcome, nil, errors.New("held-out candidate does not reproduce its exact native score")
+		}
+		score = &ScoreResult{}
+		if err := decodeStrictJSONBytes(replayed, score, "held-out native candidate score"); err != nil {
+			return outcome, nil, err
+		}
+		if score.Diagnostics.RoundId != round.Public.RoundId || score.Diagnostics.BaselineSha256 != baselinePin.Sha256 || score.Diagnostics.ReplicateCount != plan.Policy.Replicates || len(score.Diagnostics.Replicates) != plan.Policy.Replicates || score.Diagnostics.TakeoverMargin != plan.Margin || score.Diagnostics.BaselineTakeoverEligible == nil {
+			return outcome, nil, errors.New("held-out native score has a changed baseline/policy/R9 contract")
+		}
+		outcome.Complete, outcome.RawScore, outcome.Placeable, outcome.TakeoverEligible = true, score.RawScore, score.Placeable, *score.Diagnostics.BaselineTakeoverEligible
+		outcome.Significance, outcome.ScoreSha256 = score.Significance, scorePin.Sha256
+		for _, replicate := range score.Diagnostics.Replicates {
+			outcome.CandidateEvaluationIds = append(outcome.CandidateEvaluationIds, replicate.EvaluationId)
+		}
+		if score.EvalError != nil {
+			outcome.FailureCode = score.EvalError.Code
+		}
+	}
+	if err := validateHeldOutWorker(workerBytes, artifacts, job.JobId, score, buildFailed, analysisSettings); err != nil {
+		return outcome, nil, err
+	}
+	if _, err := verifyCalibrationArtifactBindings(artifacts, evidence.Artifacts, analysisSettings); err != nil {
+		return outcome, nil, err
+	}
+	for _, pin := range []heldOutPinnedFile{workerPin, completePin, evidencePin, baselinePin} {
+		if _, err := readHeldOutPinned(pin, settings.MaximumBytes, false); err != nil {
+			return outcome, nil, err
+		}
+	}
+	outcome.BaselineSha256, outcome.WorkerSha256, outcome.EvidenceSha256 = baselinePin.Sha256, workerPin.Sha256, evidencePin.Sha256
+	return outcome, frozen, nil
+}
+
+// Serial one-attempt execution is deliberately conservative: this command never
+// retries any failure. A diagnosed infrastructure recovery needs separate review
+// and can never replace a seed/control or restart the immutable original budget.
+// Statistical failures do not stop or replace positions; all fifteen are kept.
+func executeHeldOutCampaign(ctx context.Context, config heldOutExecutionConfig, plan heldOutPrivatePlan, release heldOutRelease,
+	settings heldOutOperatorSettings, hooks heldOutExecutionHooks) (result *heldOutCampaignResult, resultErr error) {
+	if hooks.Now == nil || hooks.CheckHost == nil || hooks.Invoke == nil || hooks.Authenticate == nil || len(plan.Rounds) != settings.Workload.SeedCount {
+		return nil, errors.New("complete held-out execution dependencies required")
+	}
+	result = &heldOutCampaignResult{Schema: 1, Kind: "sim-latency-held-out-screen", CampaignId: plan.CampaignId,
+		PlanSha256: config.PublicPlan.Sha256, Reasons: []string{}, Outcomes: []heldOutJobOutcome{}}
+	startedPath := filepath.Join(plan.Config.PrivateRoot, "execution.started.json")
+	if err := writeHeldOutRecord(startedPath, map[string]any{"schema": 1, "campaign_id": plan.CampaignId,
+		"public_plan_sha256": config.PublicPlan.Sha256, "publication_sha256": config.Publication.Sha256,
+		"started_at": hooks.Now().UTC(), "retry_policy": "no automatic retries; original deadline never resets"}); err != nil {
+		return nil, err
+	}
+	defer func() {
+		result.ClosedAt = hooks.Now().UTC()
+		if resultErr != nil {
+			result.Accepted = false
+			result.Reasons = append(result.Reasons, "execution_or_authentication_interrupted; retain all positions and original deadlines")
+		}
+		if err := writeHeldOutRecord(filepath.Join(plan.Config.PrivateRoot, "campaign-result.json"), result); err != nil {
+			resultErr = errors.Join(resultErr, err)
+		}
+	}()
+	seenEvaluationIds := map[string]bool{}
+	for _, round := range plan.Rounds {
+		var control *heldOutFrozenControl
+		for _, job := range round.Public.Jobs {
+			if err := ctx.Err(); err != nil {
+				return result, err
+			}
+			jobRoot := heldOutJobRoot(plan.Config.PrivateRoot, round.Public, job)
+			artifacts := filepath.Join(jobRoot, "artifacts")
+			original, err := readHeldOutPinned(heldOutPinnedFile{Path: filepath.Join(artifacts, "precommitted-request.json"), Sha256: job.RequestSha256}, settings.MaximumBytes, true)
+			if err != nil {
+				return result, err
+			}
+			final := original
+			if job.Position != 1 {
+				if control == nil {
+					return result, errors.New("first reference did not establish its authenticated control")
+				}
+				baseline, err := authenticateHeldOutFrozenControl(*control, plan, round, release, settings)
+				if err != nil {
+					return result, err
+				}
+				baselinePath := filepath.Join(artifacts, "round-baseline.json")
+				if err := writeHeldOutExclusive(baselinePath, baseline, 0600); err != nil {
+					return result, err
+				}
+				final, err = finalizeHeldOutRequest(original, job.RequestSha256, round.Public.RoundId, baselinePath, control.Baseline.Sha256)
+				if err != nil {
+					return result, err
+				}
+			}
+			var request heldOutRequest
+			if err := decodeHeldOutComplete(final, &request, "held-out finalized request"); err != nil {
+				return result, err
+			}
+			if err := writeHeldOutRecord(filepath.Join(jobRoot, "finalization.json"), map[string]any{
+				"schema": 1, "round_id": round.Public.RoundId, "job_id": job.JobId,
+				"precommitted_request_sha256": job.RequestSha256, "final_request_sha256": heldOutDigest(final),
+				"baseline_sha256": request.RoundBaselineSha256, "source_control_job_id": round.Public.Jobs[0].JobId,
+				"only_deferred_fields_changed": true}); err != nil {
+				return result, err
+			}
+			if err := writeHeldOutExclusive(filepath.Join(artifacts, "worker-request.json"), final, 0600); err != nil {
+				return result, err
+			}
+			inventory, err := hooks.CheckHost(ctx, plan)
+			if err != nil {
+				return result, err
+			}
+			start := hooks.Now().UTC().Truncate(time.Second)
+			state := heldOutJobStart{Schema: 1, JobId: job.JobId, RoundId: round.Public.RoundId,
+				RequestSha256: heldOutDigest(final), Attempt: 1, StartedAt: start,
+				Deadline: start.Add(time.Duration(plan.Policy.ScoreTimeoutSeconds) * time.Second)}
+			if err := writeHeldOutRecord(filepath.Join(jobRoot, "started.json"), state); err != nil {
+				return result, err
+			}
+			jobCtx, cancel := context.WithDeadline(ctx, state.Deadline)
+			invokeErr := hooks.Invoke(jobCtx, jobRoot, state)
+			outcome := heldOutJobOutcome{JobId: job.JobId, RoundId: round.Public.RoundId, Role: job.Role,
+				RequestSha256: state.RequestSha256, FailureCode: "invocation_or_integrity_failure"}
+			if invokeErr == nil {
+				var authenticated *heldOutFrozenControl
+				outcome, authenticated, err = hooks.Authenticate(jobCtx, plan, round, job, request, control)
+				if err == nil {
+					if job.Position == 1 {
+						control = authenticated
+						if control == nil {
+							err = errors.New("first job did not return its authenticated control")
+						}
+						if err == nil {
+							err = writeHeldOutRecord(filepath.Join(filepath.Dir(jobRoot), "first-control.json"), control)
+						}
+					} else if authenticated == nil || !reflect.DeepEqual(control, authenticated) {
+						err = errors.New("later reference replaced first-control provenance")
+					}
+				}
+			}
+			outcome.RequestSha256 = state.RequestSha256
+			deadlineErr := jobCtx.Err()
+			cancel()
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), settings.CommandTimeout)
+			afterInventory, cleanupErr := hooks.CheckHost(cleanupCtx, plan)
+			cleanupCancel()
+			if cleanupErr == nil && inventory != afterInventory {
+				cleanupErr = errors.New("original host resource inventory changed")
+			}
+			cleanupRecord := map[string]any{"schema": 1, "job_id": job.JobId, "before_inventory_sha256": inventory, "after_inventory_sha256": afterInventory, "cleanup_verified": cleanupErr == nil}
+			cleanupBytes, marshalErr := json.MarshalIndent(cleanupRecord, "", "  ")
+			cleanupPath := filepath.Join(jobRoot, "cleanup.json")
+			if marshalErr == nil {
+				marshalErr = writeHeldOutExclusive(cleanupPath, cleanupBytes, 0600)
+			}
+			cleanupErr = errors.Join(cleanupErr, marshalErr)
+			outcome.CleanupSha256 = heldOutDigest(cleanupBytes)
+			terminalBytes, terminalPin, terminalErr := readHeldOutProduced(jobRoot, "manager-terminal.log", settings.MaximumBytes)
+			if terminalErr == nil && cleanupErr == nil {
+				terminalErr = validateCalibrationTerminal(append(append([]byte{}, terminalBytes...), []byte("\nterminal_cleanup_verified\n")...), plan.Policy.ScoreTimeoutSeconds)
+			}
+			outcome.TerminalSha256 = terminalPin.Sha256
+			err = errors.Join(err, terminalErr)
+			if !hooks.Now().Before(state.Deadline.Add(time.Nanosecond)) {
+				deadlineErr = errors.New("original whole-job three-hour budget exceeded")
+			}
+			// The global census prevents reuse across seeds, roles or control and
+			// candidate sides, in addition to each native scorer's local census.
+			freshIds := append([]string{}, outcome.CandidateEvaluationIds...)
+			if job.Position == 1 && control != nil {
+				freshIds = append(freshIds, control.ControlEvaluationIds...)
+			}
+			if outcome.Complete && len(outcome.CandidateEvaluationIds) != plan.Policy.Replicates {
+				err = errors.Join(err, errors.New("held-out candidate execution census incomplete"))
+			}
+			for _, id := range freshIds {
+				if id == "" || seenEvaluationIds[id] {
+					err = errors.Join(err, errors.New("execution reused across held-out controls/candidates/jobs"))
+				}
+				seenEvaluationIds[id] = true
+			}
+			result.Outcomes = append(result.Outcomes, outcome)
+			if writeErr := writeHeldOutRecord(filepath.Join(jobRoot, "outcome.json"), outcome); writeErr != nil {
+				err = errors.Join(err, writeErr)
+			}
+			if err := errors.Join(invokeErr, err, deadlineErr, cleanupErr); err != nil {
+				return result, err
+			}
+		}
+	}
+	result.Complete = true
+	result.Accepted, result.OrderedSeeds, result.Reasons = acceptHeldOutOutcomesForProtocol(plan.Config.Protocol, plan.Rounds, result.Outcomes)
+	return result, nil
+}
+
+// Applies only the prospectively frozen four-of-five ordering and all-no-op
+// requirements. P-values remain in every original outcome, including no-ops.
+func acceptHeldOutOutcomes(rounds []heldOutPrivateRound, outcomes []heldOutJobOutcome) (bool, int, []string) {
+	return acceptHeldOutOutcomesForProtocol("", rounds, outcomes)
+}
+
+// Only the separately approved named amendment changes five/four to three/all.
+func acceptHeldOutOutcomesForProtocol(protocol string, rounds []heldOutPrivateRound, outcomes []heldOutJobOutcome) (bool, int, []string) {
+	reasons := []string{}
+	settings, err := heldOutSettingsForProtocol(protocol)
+	if err != nil {
+		return false, 0, []string{"unapproved_held_out_protocol"}
+	}
+	if len(rounds) != settings.Workload.SeedCount || len(outcomes) != len(rounds)*3 {
+		return false, 0, []string{"incomplete_fixed_screen"}
+	}
+	ordered := 0
+	for roundIndex, round := range rounds {
+		if len(round.Public.Jobs) != 3 {
+			return false, ordered, []string{"incomplete_fixed_reference_set"}
+		}
+		byRole := map[string]heldOutJobOutcome{}
+		for jobIndex, job := range round.Public.Jobs {
+			outcome := outcomes[roundIndex*3+jobIndex]
+			if outcome.JobId != job.JobId || outcome.RoundId != round.Public.RoundId || outcome.Role != job.Role {
+				return false, ordered, []string{"outcome_identity_or_order_changed"}
+			}
+			if _, duplicate := byRole[outcome.Role]; duplicate || (outcome.Role != "no-op" && outcome.Role != "better" && outcome.Role != "worse") {
+				return false, ordered, []string{"changed_fixed_reference_roles"}
+			}
+			byRole[outcome.Role] = outcome
+			if !outcome.Complete || outcome.FailureCode != "" || !finitePositive(outcome.RawScore) || outcome.Significance == nil || outcome.Significance.OneSidedPValue == nil || !finite(*outcome.Significance.OneSidedPValue) || *outcome.Significance.OneSidedPValue < 0 || *outcome.Significance.OneSidedPValue > 1 {
+				reasons = append(reasons, fmt.Sprintf("round_%02d_job_%02d_incomplete_or_failed", roundIndex+1, jobIndex+1))
+			}
+		}
+		noop, better, worse := byRole["no-op"], byRole["better"], byRole["worse"]
+		if !noop.Complete || noop.FailureCode != "" || !noop.Placeable || noop.TakeoverEligible {
+			reasons = append(reasons, fmt.Sprintf("round_%02d_noop_not_accepted", roundIndex+1))
+		}
+		if better.Complete && noop.Complete && worse.Complete && better.FailureCode == "" && noop.FailureCode == "" && worse.FailureCode == "" && finitePositive(better.RawScore) && finitePositive(noop.RawScore) && finitePositive(worse.RawScore) && better.RawScore < noop.RawScore && noop.RawScore < worse.RawScore {
+			ordered++
+		}
+	}
+	// Four of five is a predeclared acceptance fact, not a configurable knob.
+	required := 4
+	if protocol == calibrationProtocolThreeABridgeThreeB {
+		required = 3
+	}
+	if ordered < required {
+		reason := "fewer_than_four_of_five_correctly_ordered_seeds"
+		if protocol == calibrationProtocolThreeABridgeThreeB {
+			reason = "not_all_three_correctly_ordered_seeds"
+		}
+		reasons = append(reasons, reason)
+	}
+	return len(reasons) == 0, ordered, reasons
+}
+
+// Drains output after the retained byte bound, then makes the invocation fail.
+// It never lets a full logging pipe stall the evaluator or alter measurements.
+type heldOutBoundedLog struct {
+	File      *os.File
+	Remaining int64
+	Exceeded  bool
+}
+
+// Uses one writer per stdout/stderr stream; instances are not concurrent-safe.
+func (self *heldOutBoundedLog) Write(content []byte) (int, error) {
+	retained := len(content)
+	if int64(retained) > self.Remaining {
+		retained, self.Exceeded = int(self.Remaining), true
+	}
+	if retained > 0 {
+		if _, err := self.File.Write(content[:retained]); err != nil {
+			return 0, err
+		}
+		self.Remaining -= int64(retained)
+	}
+	return len(content), nil
+}
+
+// Read-only commands run with a small explicit environment and time/output
+// bounds. No shell interprets operator-controlled paths or secret request bytes.
+func runHeldOutReadOnly(ctx context.Context, settings heldOutOperatorSettings, program string, arguments ...string) ([]byte, error) {
+	commandCtx, cancel := context.WithTimeout(ctx, settings.CommandTimeout)
+	defer cancel()
+	command := exec.CommandContext(commandCtx, program, arguments...)
+	command.Env = []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C", "GOTOOLCHAIN=local", "GOMAXPROCS=2", "GOFLAGS=-p=2"}
+	stdout, stderr := &sourceSupervisorOutput{limit: int(settings.MaximumLogBytes)}, &sourceSupervisorOutput{limit: int(settings.MaximumLogBytes)}
+	command.Stdout, command.Stderr = stdout, stderr
+	err := command.Run()
+	if stdout.exceeded || stderr.exceeded {
+		return nil, errors.New("held-out read-only command output exceeded bound")
+	}
+	if err != nil {
+		return nil, errors.New("held-out read-only prerequisite refused")
+	}
+	return stdout.content, nil
+}
+
+// Requires original-only containers/networks and unchanged local fixture
+// digests. Actual complete inventory bytes are compared before and after jobs.
+func checkHeldOutHost(ctx context.Context, plan heldOutPrivatePlan, release heldOutRelease, settings heldOutOperatorSettings) (string, error) {
+	if err := validateHeldOutOperatorRuntime(); err != nil {
+		return "", err
+	}
+	if err := authenticateHeldOutScripts(plan.Config.Scripts, release, settings); err != nil {
+		return "", err
+	}
+	margin, err := authenticateHeldOutMargin(plan.Config, release, settings)
+	if err != nil || margin != plan.Margin {
+		return "", errors.New("accepted Stage A pin or margin changed before/after a job")
+	}
+	read := func(program string, arguments ...string) ([]byte, error) {
+		return runHeldOutReadOnly(ctx, settings, program, arguments...)
+	}
+	state, err := read("/usr/bin/systemctl", "show", "--property=ActiveState", "--value", "competition-v2-staging.service")
+	if err != nil || (strings.TrimSpace(string(state)) != "inactive" && strings.TrimSpace(string(state)) != "failed") {
+		return "", errors.New("scoring service is not inactive")
+	}
+	image, err := read("/usr/bin/docker", "image", "inspect", release.ImageId, "--format", "{{.Id}}")
+	if err != nil || strings.TrimSpace(string(image)) != release.ImageId {
+		return "", errors.New("frozen evaluator image unavailable")
+	}
+	for _, reference := range plan.References {
+		image, err := read("/usr/bin/docker", "image", "inspect", reference.ImageId, "--format", "{{.Id}}")
+		if err != nil || strings.TrimSpace(string(image)) != reference.ImageId {
+			return "", errors.New("precommitted reference image unavailable")
+		}
+	}
+	templateBytes, err := readHeldOutPinned(plan.Config.Template, settings.MaximumBytes, false)
+	if err != nil {
+		return "", err
+	}
+	var template heldOutRequest
+	if err := decodeHeldOutComplete(templateBytes, &template, "held-out mount template"); err != nil {
+		return "", err
+	}
+	for _, mount := range []struct{ path, digest string }{{path: template.ConfigLocalDirectory, digest: plan.Policy.ConfigLocalSha256}, {path: template.VaultLocalDirectory, digest: plan.Policy.VaultLocalSha256}} {
+		digest, err := read(filepath.Join(release.ScriptDirectory, "hash-local-mount.sh"), mount.path)
+		if err != nil || strings.TrimSpace(string(digest)) != mount.digest {
+			return "", errors.New("offline fixture mount identity changed")
+		}
+	}
+	containers, err := read("/usr/bin/docker", "ps", "--all", "--no-trunc", "--format", "{{.ID}}\t{{.Names}}")
+	if err != nil {
+		return "", err
+	}
+	networks, err := read("/usr/bin/docker", "network", "ls", "--no-trunc", "--format", "{{.ID}}\t{{.Name}}")
+	if err != nil {
+		return "", err
+	}
+	canonical := func(content []byte, expected []string) (string, error) {
+		lines := strings.Split(strings.TrimSpace(string(content)), "\n")
+		if len(lines) != len(expected) {
+			return "", errors.New("host contains non-original resources")
+		}
+		names := []string{}
+		for _, line := range lines {
+			fields := strings.Split(line, "\t")
+			if len(fields) != 2 || fields[0] == "" {
+				return "", errors.New("host resource identity malformed")
+			}
+			names = append(names, fields[1])
+		}
+		sort.Strings(names)
+		sort.Strings(expected)
+		sort.Strings(lines)
+		if !reflect.DeepEqual(names, expected) {
+			return "", errors.New("host original resource names changed")
+		}
+		return strings.Join(lines, "\n"), nil
+	}
+	containerInventory, err := canonical(containers, []string{"buildx_buildkit_warp-multiarch0", "urnetwork-local-pg", "urnetwork-local-redis"})
+	if err != nil {
+		return "", err
+	}
+	networkInventory, err := canonical(networks, []string{"bridge", "host", "none", "urnetwork-local"})
+	if err != nil {
+		return "", err
+	}
+	mounts, err := read("/usr/bin/findmnt", "--raw", "--noheadings", "--output", "TARGET")
+	if err != nil {
+		return "", err
+	}
+	for _, round := range plan.Rounds {
+		for _, job := range round.Public.Jobs {
+			pendingMount := filepath.Join(heldOutJobRoot(plan.Config.PrivateRoot, round.Public, job), "artifacts", ".evidence-runtime")
+			for _, mount := range strings.Split(string(mounts), "\n") {
+				if mount == pendingMount {
+					return "", errors.New("held-out runtime evidence mount survived cleanup")
+				}
+			}
+		}
+	}
+	return heldOutDigest([]byte(containerInventory + "\nnetworks\n" + networkInventory)), nil
+}
+
+// Supervises only the exact installed script, preserving the original job
+// deadline. Cancellation first signals the whole process group; kill grace is
+// cleanup time only and never turns an over-deadline job into a successful one.
+func invokeHeldOutEvaluator(ctx context.Context, root string, start heldOutJobStart, release heldOutRelease, settings heldOutOperatorSettings) error {
+	if release.Runtime != nil {
+		if err := authenticateHeldOutRuntimeFiles(release, settings); err != nil {
+			return err
+		}
+	}
+	logs := []*heldOutBoundedLog{}
+	for _, name := range []string{"evaluator.stdout", "evaluator.stderr"} {
+		file, err := os.OpenFile(filepath.Join(root, name), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+		if err != nil {
+			for _, log := range logs {
+				_ = log.File.Close()
+			}
+			return err
+		}
+		logs = append(logs, &heldOutBoundedLog{File: file, Remaining: settings.MaximumLogBytes})
+	}
+	defer func() {
+		for _, log := range logs {
+			_ = log.File.Close()
+		}
+	}()
+	requestPath := filepath.Join(root, "artifacts", "worker-request.json")
+	if _, err := readHeldOutPinned(heldOutPinnedFile{Path: requestPath, Sha256: start.RequestSha256}, settings.MaximumBytes, true); err != nil {
+		return err
+	}
+	program, arguments, err := heldOutEvaluatorInvocation(release, requestPath, filepath.Join(root, "artifacts", "worker-result.json"))
+	if err != nil {
+		return err
+	}
+	command := exec.Command(program, arguments...)
+	command.Env = []string{"PATH=/home/by/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.27.3.linux-amd64/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C", "GOTOOLCHAIN=local", "GOMAXPROCS=2", "GOFLAGS=-p=2"}
+	command.Stdout, command.Stderr, command.SysProcAttr = logs[0], logs[1], &syscall.SysProcAttr{Setpgid: true}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := command.Start(); err != nil {
+		return err
+	}
+	joined := make(chan error, 1)
+	go func() { joined <- command.Wait() }()
+	var processErr error
+	select {
+	case processErr = <-joined:
+	case <-ctx.Done():
+		_ = syscall.Kill(-command.Process.Pid, syscall.SIGTERM)
+		select {
+		case processErr = <-joined:
+		case <-time.After(settings.KillGrace):
+			_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+			processErr = <-joined
+		}
+		processErr = errors.Join(processErr, ctx.Err())
+	}
+	for _, log := range logs {
+		if log.Exceeded {
+			processErr = errors.Join(processErr, errors.New("held-out evaluator log exceeded bound"))
+		}
+		processErr = errors.Join(processErr, log.File.Sync())
+	}
+	end := time.Now().UTC().Truncate(time.Second)
+	exitCode := 0
+	if processErr != nil {
+		exitCode = 1
+	}
+	terminal := fmt.Sprintf("start_utc=%s\ndeadline_utc=%s\nrequest_sha256=%s\nevaluator_exit=%d duration_seconds=%d\nend_utc=%s\n",
+		start.StartedAt.Format(time.RFC3339), start.Deadline.Format(time.RFC3339), start.RequestSha256, exitCode,
+		int(end.Sub(start.StartedAt)/time.Second), end.Format(time.RFC3339))
+	return errors.Join(processErr, writeHeldOutExclusive(filepath.Join(root, "manager-terminal.log"), []byte(terminal), 0600))
+}

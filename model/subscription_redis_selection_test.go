@@ -233,6 +233,7 @@ func TestRedisGrantSelectedCapacityCompensatesEveryPartialToken(t *testing.T) {
 		if escrow != nil || !errors.As(err, &capacity) || capacity.Selected != 2 {
 			t.Fatal("selected capacity was not an explicit partial-allocation hold", escrow, err)
 		}
+		drainRedisContractCompensations(t, ctx)
 		for _, id := range ids {
 			if got := Testing_NetEscrowByteCount(ctx, id); got != 0 {
 				t.Fatal("selection capacity retained a refused partial token", got)
@@ -347,6 +348,7 @@ func TestRedisGrantPostWaitExpiryRefusesAndCompensates(t *testing.T) {
 		case <-ctx.Done():
 			t.Fatal("post-wait expiry did not join", ctx.Err())
 		}
+		drainRedisContractCompensations(t, ctx)
 		if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != 17 {
 			t.Fatal("post-wait expiry changed existing reservation or kept refused bytes", got)
 		}

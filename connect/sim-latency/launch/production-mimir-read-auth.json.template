@@ -1,0 +1,6 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-launch-basic-credential",
+  "username": "warpctl",
+  "password": "${EXISTING_GRAFANA_VAULT_WARPCTL_QUERY_PASSWORD}"
+}

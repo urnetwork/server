@@ -1,0 +1,11 @@
+=== RUN   TestSnowWinnerPolicyIsAdditiveAndPinsAllThreeMembers
+--- PASS: TestSnowWinnerPolicyIsAdditiveAndPinsAllThreeMembers (0.00s)
+=== RUN   TestSnowWinnerReviewAcceptsCompleteThreeMemberApproval
+--- PASS: TestSnowWinnerReviewAcceptsCompleteThreeMemberApproval (0.00s)
+=== RUN   TestSnowWinnerReviewRejectsIncompleteOrCrossProviderFindings
+--- PASS: TestSnowWinnerReviewRejectsIncompleteOrCrossProviderFindings (0.01s)
+=== RUN   TestSnowWinnerReviewRetainsUncertaintyAlongsideSubstantiatedRejection
+--- PASS: TestSnowWinnerReviewRetainsUncertaintyAlongsideSubstantiatedRejection (0.00s)
+=== RUN   TestSnowWinnerReviewDoesNotRelabelHistoricalSingleModelReviews
+--- PASS: TestSnowWinnerReviewDoesNotRelabelHistoricalSingleModelReviews (0.00s)
+PASS

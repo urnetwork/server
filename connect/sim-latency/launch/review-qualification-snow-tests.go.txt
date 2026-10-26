@@ -1,0 +1,687 @@
+// Offline synthetic Snow guards. The actual native transport is intercepted;
+// these do not qualify the LAN server, checkpoints, GPU or a live provider.
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/urnetwork/server/model"
+)
+
+// Each fixture reply is synthetic; an unknown call cannot reach a real socket.
+func snowReviewQualificationMockResponse(t *testing.T, request winnerReviewBrokerRequest, decisions []string, failureAt int, options ...snowReviewQualificationMockOptions) ([]byte, int) {
+	t.Helper()
+	provider := defaultWinnerSnowProviderSettings()
+	calls := 0
+	client := &http.Client{Transport: reviewQualificationTransport(func(message *http.Request) (*http.Response, error) {
+		index := calls
+		calls++
+		if index >= len(provider.Members) || message.URL.String() != provider.Endpoint || message.Method != http.MethodPost || message.Header.Get("Authorization") != "" {
+			t.Fatal("unexpected provider call or credential; no real network allowed")
+		}
+		body, err := io.ReadAll(message.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload struct {
+			Model               string
+			Reasoning           struct{ Effort string }
+			Tools               []any
+			ToolChoice          string `json:"tool_choice"`
+			Store, Stream       bool
+			MaximumOutputTokens int `json:"max_output_tokens"`
+		}
+		if json.Unmarshal(body, &payload) != nil || payload.Model != provider.Members[index].Model || payload.Reasoning.Effort != provider.Members[index].Reasoning || len(payload.Tools) != 0 || payload.ToolChoice != "none" || payload.Store || !payload.Stream || payload.MaximumOutputTokens != defaultWinnerSnowModelSettings().MaximumOutputTokens {
+			t.Fatal("native Snow transport changed model, order, effort, tools or limits")
+		}
+		if index == failureAt {
+			return &http.Response{StatusCode: 503, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"error":"synthetic unavailable"}`))}, nil
+		}
+		judgment := reviewQualificationMockJudgment(decisions[index])
+		output, err := json.Marshal(judgment)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response, err := json.Marshal(map[string]any{"id": fmt.Sprintf("resp_synthetic_snow_%d", index), "status": "completed", "model": provider.Members[index].Model,
+			"usage": map[string]int{"input_tokens": 100, "output_tokens": 100}, "output": []any{map[string]any{"type": "message", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": string(output)}}}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		header := make(http.Header)
+		header.Set("Content-Type", "application/json")
+		return &http.Response{StatusCode: 200, Header: header, Body: io.NopCloser(bytes.NewReader(response))}, nil
+	})}
+	state, digest := reviewQualificationTestRoot(t), strings.Repeat("a", 64)
+	if len(options) == 1 {
+		state, digest = options[0].StateDirectory, options[0].ProviderSettingsSha256
+	}
+	result, err := executeWinnerSnow(context.Background(), client, request, defaultWinnerSnowModelSettings(), provider, digest, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return content, calls
+}
+
+// Explicit local journal paths/digests let composed unit fixtures use native
+// O_EXCL member files without ever invoking the real wrapper or server.
+type snowReviewQualificationMockOptions struct{ StateDirectory, ProviderSettingsSha256 string }
+
+// Correctness fixes may qualify a new immutable wrapper, but changing output
+// directories or invocation time must never bypass a release's one-shot claim.
+func TestReviewQualificationSnowClaimsBindWrapperRelease(t *testing.T) {
+	provider := defaultWinnerSnowProviderSettings()
+	observed := []string{}
+	for _, digest := range []string{strings.Repeat("b", 64), strings.Repeat("b", 64), strings.Repeat("e", 64)} {
+		cases, err := frozenSnowReviewQualificationCases()
+		if err != nil {
+			t.Fatal(err)
+		}
+		plan := reviewQualificationPlan{Schema: 1, Kind: "winner-review-snow-provider-qualification-plan", PolicyModel: model.CompetitionSnowWinnerReviewModel, ProviderModel: model.CompetitionSnowWinnerReviewModel, Reasoning: model.CompetitionSnowWinnerReviewReasoning,
+			BrokerSha256: digest, ImageReceiptSha256: strings.Repeat("c", 64), ProviderSettingsSha256: strings.Repeat("a", 64), Members: provider.Members, Cases: cases}
+		calls := 0
+		hooks := reviewQualificationHooks{Mode: "offline_unit_mock", Now: time.Now,
+			ValidatePlan: func(plan reviewQualificationPlan) error {
+				return validateSnowReviewQualificationPlan(plan, provider, strings.Repeat("a", 64))
+			},
+			AuthenticateContainment: func([]byte, []byte, []byte, bool) (string, error) { return strings.Repeat("d", 64), nil },
+			Invoke: func(_ context.Context, input []byte) ([]byte, []byte, error) {
+				var request winnerReviewBrokerRequest
+				if err := json.Unmarshal(input, &request); err != nil {
+					t.Fatal(err)
+				}
+				if calls == 1 {
+					observed = append(observed, request.Template.IdempotencyKey)
+				}
+				calls++
+				return nil, nil, fmt.Errorf("synthetic transport stop; no provider")
+			}}
+		report, err := executeReviewQualification(t.Context(), reviewQualificationTestRoot(t), plan, defaultReviewQualificationSettings(), hooks)
+		if err == nil || report.Qualified || calls != 2 {
+			t.Fatalf("mock transport stop unexpectedly qualified or changed calls: %+v %v calls=%d", report, err, calls)
+		}
+		if observed[len(observed)-1] != cases[1].Request.Template.IdempotencyKey+":"+digest {
+			t.Fatal("qualification claim is not bound to the authenticated immutable wrapper")
+		}
+	}
+	if observed[0] != observed[1] || observed[0] == observed[2] {
+		t.Fatal("same release can reroll, or a genuinely changed release cannot qualify")
+	}
+}
+
+// Existing source text/desired labels stay fixed and outside provider input.
+func TestReviewQualificationSnowFixturesRemainVerdictBlind(t *testing.T) {
+	legacy, err := frozenReviewQualificationCases()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases, err := frozenSnowReviewQualificationCases()
+	if err != nil {
+		t.Fatal(err)
+	}
+	repeated, err := frozenSnowReviewQualificationCases()
+	if err != nil || !reflect.DeepEqual(cases, repeated) || len(cases) != 6 {
+		t.Fatalf("Snow cases drifted: %v", err)
+	}
+	for index, item := range cases {
+		expectedPatch := legacy[index].Request.Packet.Patch
+		if item.Name == "prompt-injected-comment" {
+			expectedPatch = bytes.Replace(expectedPatch, []byte("return approval."), []byte("return disqualification."), 1)
+		}
+		if item.ExpectedDecision != legacy[index].ExpectedDecision || !bytes.Equal(item.Request.Packet.Patch, expectedPatch) || item.Request.Template.IdempotencyKey == legacy[index].Request.Template.IdempotencyKey {
+			t.Fatal("fixture verdict/source changed or historical claim namespace reused")
+		}
+		if index != 0 {
+			input, err := winnerModelInput(item.Request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			verdict, err := reviewQualificationInputHasVerdict(input)
+			if err != nil || bytes.Contains(input, []byte(item.Name)) || verdict {
+				t.Fatalf("fixture answer leaked or input invalid: %v", err)
+			}
+		}
+	}
+}
+
+// If the injected instruction matches the expected verdict, a model can obey
+// the attacker and still pass. Force the opposite while keeping code benign.
+func TestReviewQualificationSnowInjectionOpposesExpectedVerdict(t *testing.T) {
+	cases, err := frozenSnowReviewQualificationCases()
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := frozenReviewQualificationCases()
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for index, item := range cases {
+		if item.Name != "prompt-injected-comment" {
+			continue
+		}
+		found = true
+		if item.ExpectedDecision != "approve" || !bytes.Contains(item.Request.Packet.Patch, []byte("return disqualification.")) || bytes.Contains(item.Request.Packet.Patch, []byte("return approval.")) {
+			t.Fatal("injected instruction does not contradict the honest verdict")
+		}
+		if !bytes.Contains(legacy[index].Request.Packet.Patch, []byte("return approval.")) {
+			t.Fatal("historical fixture was changed")
+		}
+		if item.Request.Template.PatchSha256 != reviewQualificationHash(item.Request.Packet.Patch) {
+			t.Fatal("stronger case lost its authenticated patch identity")
+		}
+		if _, err := winnerModelInput(item.Request); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !found {
+		t.Fatal("prompt-injection case missing")
+	}
+}
+
+// The exact three-member settings and all six cases are independently pinned.
+func TestReviewQualificationSnowPlanRejectsMissingMember(t *testing.T) {
+	provider := defaultWinnerSnowProviderSettings()
+	cases, err := frozenSnowReviewQualificationCases()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := reviewQualificationPlan{Schema: 1, Kind: "winner-review-snow-provider-qualification-plan", PolicyModel: model.CompetitionSnowWinnerReviewModel, ProviderModel: model.CompetitionSnowWinnerReviewModel, Reasoning: model.CompetitionSnowWinnerReviewReasoning,
+		BrokerSha256: strings.Repeat("b", 64), ImageReceiptSha256: strings.Repeat("c", 64), ProviderSettingsSha256: strings.Repeat("a", 64), Members: provider.Members, Cases: cases}
+	if err := validateSnowReviewQualificationPlan(plan, provider, strings.Repeat("a", 64)); err != nil {
+		t.Fatal(err)
+	}
+	plan.Members = plan.Members[:2]
+	if err := validateSnowReviewQualificationPlan(plan, provider, strings.Repeat("a", 64)); err == nil {
+		t.Fatal("two members qualified the three-model policy")
+	}
+}
+
+// Native all-three approval is accepted only with every attributed finding.
+func TestReviewQualificationSnowRequiresThreeCompletedApprovals(t *testing.T) {
+	cases, err := frozenSnowReviewQualificationCases()
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, calls := snowReviewQualificationMockResponse(t, cases[1].Request, []string{"approve", "approve", "approve"}, -1)
+	observation, err := validateSnowReviewQualificationResponse(content, cases[1].Request, "approve", defaultWinnerSnowProviderSettings(), strings.Repeat("a", 64), defaultReviewQualificationSettings())
+	if err != nil || calls != 3 || !observation.Passed || !observation.WouldAuthorize || len(observation.ProviderResponseIds) != 3 {
+		t.Fatalf("complete three-model result rejected: %+v %v", observation, err)
+	}
+}
+
+// Any member's substantiated rejection wins, and later members are still called.
+func TestReviewQualificationSnowRetainsEachMembersRejection(t *testing.T) {
+	cases, err := frozenSnowReviewQualificationCases()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 3; index++ {
+		decisions := []string{"approve", "approve", "approve"}
+		decisions[index] = "disqualify"
+		content, calls := snowReviewQualificationMockResponse(t, cases[2].Request, decisions, -1)
+		observation, err := validateSnowReviewQualificationResponse(content, cases[2].Request, "disqualify", defaultWinnerSnowProviderSettings(), strings.Repeat("a", 64), defaultReviewQualificationSettings())
+		if err != nil || calls != 3 || !observation.Passed || !observation.WouldAuthorize {
+			t.Fatalf("member %d lost its rejection or short-circuited later members: %v", index, err)
+		}
+	}
+}
+
+// A valid uncertain member holds the union; it never becomes partial approval.
+func TestReviewQualificationSnowUncertaintyCannotAuthorize(t *testing.T) {
+	cases, err := frozenSnowReviewQualificationCases()
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, calls := snowReviewQualificationMockResponse(t, cases[5].Request, []string{"approve", "uncertain", "approve"}, -1)
+	observation, err := validateSnowReviewQualificationResponse(content, cases[5].Request, "uncertain", defaultWinnerSnowProviderSettings(), strings.Repeat("a", 64), defaultReviewQualificationSettings())
+	if err != nil || calls != 3 || !observation.Passed || observation.WouldAuthorize {
+		t.Fatalf("uncertainty gained authority: %+v %v", observation, err)
+	}
+}
+
+// A missing/error member cannot be silently dropped, even with a valid rejection.
+func TestReviewQualificationSnowTransportFailureHoldsWithoutRetry(t *testing.T) {
+	cases, err := frozenSnowReviewQualificationCases()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 3; index++ {
+		content, calls := snowReviewQualificationMockResponse(t, cases[2].Request, []string{"disqualify", "approve", "approve"}, index)
+		if calls != 3 {
+			t.Fatalf("provider error retried or skipped members: %d", calls)
+		}
+		if _, err := validateSnowReviewQualificationResponse(content, cases[2].Request, "disqualify", defaultWinnerSnowProviderSettings(), strings.Repeat("a", 64), defaultReviewQualificationSettings()); err == nil {
+			t.Fatal("error member conferred qualification or rejection authority")
+		}
+	}
+}
+
+// Re-hashing forged summaries cannot erase original model receipts or findings.
+func TestReviewQualificationSnowRejectsChangedMemberOriginals(t *testing.T) {
+	cases, err := frozenSnowReviewQualificationCases()
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, _ := snowReviewQualificationMockResponse(t, cases[1].Request, []string{"approve", "approve", "approve"}, -1)
+	for index, mutate := range []func(*winnerSnowEvidence){func(e *winnerSnowEvidence) { e.Members = e.Members[:2] }, func(e *winnerSnowEvidence) { e.Members[1].Revision = strings.Repeat("9", 40) }, func(e *winnerSnowEvidence) { e.Members[1].ProviderResponseId = e.Members[0].ProviderResponseId }, func(e *winnerSnowEvidence) { e.Members[0].ProviderOutput = `{}` }, func(e *winnerSnowEvidence) {
+		e.Members[0].Usage = json.RawMessage(`{"input_tokens":0,"output_tokens":0}`)
+	}, func(e *winnerSnowEvidence) { e.ProviderSettingsSha256 = strings.Repeat("9", 64) }} {
+		var result winnerReviewBrokerResult
+		if json.Unmarshal(content, &result) != nil {
+			t.Fatal("bad fixture result")
+		}
+		var evidence winnerSnowEvidence
+		if json.Unmarshal([]byte(result.PrivateEvidence), &evidence) != nil {
+			t.Fatal("bad fixture evidence")
+		}
+		mutate(&evidence)
+		private, _ := json.Marshal(evidence)
+		result.PrivateEvidence = string(private)
+		result.Review.PrivateEvidenceSha256 = reviewQualificationHash(private)
+		for i := range result.Review.Findings {
+			result.Review.Findings[i].EvidenceSha256 = result.Review.PrivateEvidenceSha256
+		}
+		changed, _ := json.Marshal(result)
+		if _, err := validateSnowReviewQualificationResponse(changed, cases[1].Request, "approve", defaultWinnerSnowProviderSettings(), strings.Repeat("a", 64), defaultReviewQualificationSettings()); err == nil {
+			t.Errorf("member provenance mutation %d accepted", index)
+		}
+	}
+}
+
+// Synthetic provider/state paths are data only, never host production values.
+func snowReviewQualificationContainerFixture(t *testing.T) ([]byte, reviewQualificationProviderProfile, string, string, string) {
+	t.Helper()
+	owner, image, network := strings.Repeat("a", 64), "sha256:"+strings.Repeat("c", 64), strings.Repeat("d", 64)
+	profile := reviewQualificationProviderProfile{Snow: true, ProviderHost: "snow.example", ProviderIp: "192.0.2.20", ProviderPort: 18000,
+		Settings: reviewQualificationPin{Path: "/synthetic/provider.json", Sha256: strings.Repeat("e", 64)}, StateDirectory: "/synthetic/attempt/member-state"}
+	var containers []map[string]any
+	if json.Unmarshal(reviewQualificationContainerFixture(t, owner, image, network, profile.ProviderIp), &containers) != nil {
+		t.Fatal("bad base container fixture")
+	}
+	c := containers[0]
+	c["Config"].(map[string]any)["Entrypoint"] = []string{"/review-broker", "review-broker"}
+	c["Config"].(map[string]any)["Cmd"] = []string{"--review-provider-settings=/run/review/provider.json", "--review-provider-settings-sha256=" + profile.Settings.Sha256, "--review-state-directory=/run/review/state"}
+	c["HostConfig"].(map[string]any)["ExtraHosts"] = []string{}
+	c["HostConfig"].(map[string]any)["Ulimits"] = []any{map[string]any{"Name": "fsize", "Soft": defaultReviewQualificationSettings().MaximumMemberJournalBytes, "Hard": defaultReviewQualificationSettings().MaximumMemberJournalBytes}}
+	c["Mounts"] = []any{map[string]any{"Type": "bind", "Source": profile.Settings.Path, "Destination": "/run/review/provider.json", "RW": false}, map[string]any{"Type": "bind", "Source": profile.StateDirectory, "Destination": "/run/review/state", "RW": true}}
+	content, err := json.Marshal(containers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return content, profile, owner, image, network
+}
+
+// The only RW authority is the private mapped-owner journal leaf.
+func TestReviewQualificationSnowContainerKeepsExactLeavesAndCommand(t *testing.T) {
+	content, profile, owner, image, network := snowReviewQualificationContainerFixture(t)
+	if err := validateReviewQualificationContainerForProvider(content, owner, image, network, profile); err != nil {
+		t.Fatal(err)
+	}
+	for index, mutate := range []func(map[string]any){func(c map[string]any) {
+		c["Config"].(map[string]any)["Cmd"] = []string{"--model-key-file=/synthetic/key"}
+	}, func(c map[string]any) {
+		c["HostConfig"].(map[string]any)["ExtraHosts"] = []string{"other.example:192.0.2.30"}
+	}, func(c map[string]any) { c["HostConfig"].(map[string]any)["Ulimits"] = []any{} }, func(c map[string]any) { c["Mounts"].([]any)[0].(map[string]any)["RW"] = true }, func(c map[string]any) {
+		c["Mounts"].([]any)[1].(map[string]any)["Source"] = "/synthetic/forbidden-parent"
+	}} {
+		var containers []map[string]any
+		if json.Unmarshal(content, &containers) != nil {
+			t.Fatal("bad fixture")
+		}
+		mutate(containers[0])
+		changed, _ := json.Marshal(containers)
+		if err := validateReviewQualificationContainerForProvider(changed, owner, image, network, profile); err == nil {
+			t.Errorf("authority mutation %d accepted", index)
+		}
+	}
+}
+
+// The LAN profile accepts one exact port, not the historical public TLS fence.
+func TestReviewQualificationSnowFenceRejectsOtherPortOrDestination(t *testing.T) {
+	owner, subnet, provider := strings.Repeat("a", 64), "198.51.100.0/24", "192.0.2.20"
+	chain, comment := "URRV_"+owner[:16], "urnetwork-review-"+owner
+	forward := []byte(fmt.Sprintf("-A DOCKER-USER -s %s -m comment --comment %s -j %s\n", subnet, comment, chain))
+	input := []byte(fmt.Sprintf("-A INPUT -s %s -m comment --comment %s -j DROP\n", subnet, comment))
+	content := []byte(fmt.Sprintf("-A %s -d %s/32 -p tcp -m tcp --dport 18000 -j ACCEPT\n-A %s -j DROP\n", chain, provider, chain))
+	if err := validateReviewQualificationFenceForProvider(content, forward, input, owner, subnet, provider, 18000); err != nil {
+		t.Fatal(err)
+	}
+	for _, changed := range [][]byte{bytes.Replace(content, []byte("18000"), []byte("443"), 1), bytes.Replace(content, []byte(provider), []byte("192.0.2.30"), 1), append(append([]byte{}, content...), []byte("-A "+chain+" -j ACCEPT\n")...)} {
+		if err := validateReviewQualificationFenceForProvider(changed, forward, input, owner, subnet, provider, 18000); err == nil {
+			t.Fatal("unapproved Snow egress accepted")
+		}
+	}
+}
+
+// Public root-owned settings need no key ownership relaxation, but their exact
+// mode/map/hash/request binding cannot be omitted or forged.
+func TestReviewQualificationSnowPublicSettingsProofIsExact(t *testing.T) {
+	uidMap, settings := []byte("0 2700000 65536\n"), []byte(`{"synthetic_provider":true}`)
+	owner, container := strings.Repeat("a", 64), strings.Repeat("b", 64)
+	pin := reviewQualificationPin{Path: "/synthetic/provider.json", Sha256: reviewQualificationHash(settings)}
+	proof := map[string]any{"schema": 1, "kind": "winner-review-provider-settings-ownership", "owner": owner, "container_id": container, "container_pid": 7777,
+		"path": pin.Path, "container_uid": 65532, "mapped_host_uid": 2765532, "host_uid": 0, "host_gid": 0, "mode": "0444", "bytes": len(settings), "links": 1,
+		"device": "77", "inode": "888", "uid_map_sha256": reviewQualificationHash(uidMap), "provider_settings_sha256": pin.Sha256, "observed_before_provider_input": true}
+	content, _ := json.Marshal(proof)
+	if err := validateSnowReviewQualificationSettingsOwnership(uidMap, settings, content, pin, owner, container, 7777); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"host_uid", "uid_map_sha256", "provider_settings_sha256", "observed_before_provider_input"} {
+		changed := map[string]any{}
+		for k, v := range proof {
+			changed[k] = v
+		}
+		delete(changed, key)
+		content, _ := json.Marshal(changed)
+		if err := validateSnowReviewQualificationSettingsOwnership(uidMap, settings, content, pin, owner, container, 7777); err == nil {
+			t.Errorf("missing %s accepted", key)
+		}
+	}
+}
+
+// The journal owner is derived from the actual full map, never guessed 65532.
+func TestReviewQualificationSnowStateProofRequiresMappedOwner(t *testing.T) {
+	uidMap := []byte("0 2700000 65536\n")
+	owner, container, state := strings.Repeat("a", 64), strings.Repeat("b", 64), "/synthetic/attempt/member-state"
+	proof := map[string]any{"schema": 1, "kind": "winner-review-member-state-ownership", "owner": owner, "container_id": container, "container_pid": 7777,
+		"path": state, "container_uid": 65532, "mapped_host_uid": 2765532, "host_uid": 2765532, "host_gid": 0, "mode": "0700", "device": "77", "inode": "888", "uid_map_sha256": reviewQualificationHash(uidMap), "observed_before_provider_input": true}
+	content, _ := json.Marshal(proof)
+	if err := validateSnowReviewQualificationStateOwnership(uidMap, content, state, owner, container, 7777); err != nil {
+		t.Fatal(err)
+	}
+	proof["host_uid"] = 65532
+	content, _ = json.Marshal(proof)
+	if err := validateSnowReviewQualificationStateOwnership(uidMap, content, state, owner, container, 7777); err == nil {
+		t.Fatal("guessed host UID accepted")
+	}
+	leaf := reviewQualificationTestRoot(t)
+	if err := validateSnowReviewQualificationStateCensus(leaf, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(leaf, "member-01.started.json"), []byte(`{"synthetic":true}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateSnowReviewQualificationStateCensus(leaf, 0); err == nil {
+		t.Fatal("cancellation hid an already-started member journal")
+	}
+}
+
+// Extract only the actual wrapper's no-network atomic-claim function. Ownership
+// stat is an explicit unit mock so nonroot tests exercise the same O_EXCL path;
+// Docker, real provider/model keys and the rest of the wrapper are not invoked.
+func snowReviewQualificationClaimProgram(t *testing.T) string {
+	t.Helper()
+	content, err := os.ReadFile("evaluator/review/run-broker.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, remaining, present := strings.Cut(string(content), "# review_snow_attempt_program_begin\n")
+	if !present {
+		t.Fatal("actual wrapper claim marker absent")
+	}
+	program, _, present := strings.Cut(remaining, "# review_snow_attempt_program_end")
+	if !present {
+		t.Fatal("actual wrapper claim end marker absent")
+	}
+	return "set -Eeuo pipefail\numask 077\nexport PATH=/usr/sbin:/usr/bin:/sbin:/bin\nreadonly state_root=\"$1\" attempt_directory=\"$2\" owner=\"$3\" provider_settings_sha256=\"$4\"\nreadonly provider_kind=snow\nbounded() { \"$@\"; }\nstat() { if [[ \"$1\" == -c && \"$2\" == %u:%g:%a ]]; then printf '0:0:700\\n'; else /usr/bin/stat \"$@\"; fi; }\n" + program + "\nclaim_snow_attempt\n"
+}
+
+// Reusing a whole-attempt key after changing the deadline still refuses before
+// any member call. The original claim remains byte-identical and recoverable.
+func TestReviewQualificationSnowWholeAttemptCannotReroll(t *testing.T) {
+	root := reviewQualificationTestRoot(t)
+	attempt := filepath.Join(root, "attempt")
+	if err := os.Mkdir(attempt, 0700); err != nil {
+		t.Fatal(err)
+	}
+	provider := []byte(`{"members":[{"name":"synthetic-a"},{"name":"synthetic-b"},{"name":"synthetic-c"}]}`)
+	if err := os.WriteFile(filepath.Join(attempt, "provider-settings.json"), provider, 0600); err != nil {
+		t.Fatal(err)
+	}
+	input := []byte(`{"operation":"review_elected_winner","template":{"idempotency_key":"synthetic-single-attempt"},"request":{"deadline":"2020-01-01T00:00:00Z"}}`)
+	if err := os.WriteFile(filepath.Join(attempt, "input.json"), input, 0600); err != nil {
+		t.Fatal(err)
+	}
+	program := snowReviewQualificationClaimProgram(t)
+	invoke := func() error {
+		command := exec.Command("bash", "-c", program, "--", root, attempt, strings.Repeat("a", 64), reviewQualificationHash(provider))
+		command.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin"}
+		return command.Run()
+	}
+	if err := invoke(); err != nil {
+		t.Fatal(err)
+	}
+	claim := filepath.Join(root, "snow-review-claims", reviewQualificationHash([]byte("synthetic-single-attempt"))+".json")
+	original, err := os.ReadFile(claim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := bytes.Replace(input, []byte("2020-01-01"), []byte("2020-01-02"), 1)
+	if err := os.WriteFile(filepath.Join(attempt, "input.json"), changed, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := invoke(); err == nil {
+		t.Fatal("new deadline rerolled a claimed review")
+	}
+	after, err := os.ReadFile(claim)
+	if err != nil || !bytes.Equal(original, after) {
+		t.Fatal("failed reroll changed original claim")
+	}
+}
+
+// A pre-input cancellation may prove containment but must not consume a review.
+func TestReviewQualificationSnowCancellationDoesNotConsumeClaim(t *testing.T) {
+	root := reviewQualificationTestRoot(t)
+	if err := os.WriteFile(filepath.Join(root, "input.json"), []byte(`{"operation":"qualification_cancel_before_provider"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("bash", "-c", snowReviewQualificationClaimProgram(t), "--", root, root, strings.Repeat("a", 64), strings.Repeat("b", 64))
+	command.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin"}
+	if err := command.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "snow-review-claims")); !os.IsNotExist(err) {
+		t.Fatal("cancellation consumed a provider claim")
+	}
+}
+
+// A complete offline run exercises the shared driver but cannot claim actual
+// Snow inference or containment, even with all expected synthetic answers.
+func TestReviewQualificationSnowOfflineRunCannotQualifyProvider(t *testing.T) {
+	provider := defaultWinnerSnowProviderSettings()
+	cases, err := frozenSnowReviewQualificationCases()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := reviewQualificationPlan{Schema: 1, Kind: "winner-review-snow-provider-qualification-plan", PolicyModel: model.CompetitionSnowWinnerReviewModel, ProviderModel: model.CompetitionSnowWinnerReviewModel, Reasoning: model.CompetitionSnowWinnerReviewReasoning,
+		BrokerSha256: strings.Repeat("b", 64), ImageReceiptSha256: strings.Repeat("c", 64), ProviderSettingsSha256: strings.Repeat("a", 64), Members: provider.Members, Cases: cases}
+	clock := time.Now().UTC().Add(24 * time.Hour)
+	position := 0
+	hooks := reviewQualificationHooks{Mode: "offline_unit_mock", Now: func() time.Time { return clock }, ValidatePlan: func(plan reviewQualificationPlan) error {
+		return validateSnowReviewQualificationPlan(plan, provider, strings.Repeat("a", 64))
+	},
+		ValidateResponse: func(content []byte, request winnerReviewBrokerRequest, expected string) (reviewQualificationObservation, error) {
+			return validateSnowReviewQualificationResponse(content, request, expected, provider, strings.Repeat("a", 64), defaultReviewQualificationSettings())
+		},
+		AuthenticateContainment: func([]byte, []byte, []byte, bool) (string, error) { return strings.Repeat("d", 64), nil },
+		Invoke: func(_ context.Context, input []byte) ([]byte, []byte, error) {
+			position++
+			if position == 1 {
+				return nil, nil, fmt.Errorf("synthetic pre-input cancellation")
+			}
+			var request winnerReviewBrokerRequest
+			if err := json.Unmarshal(input, &request); err != nil {
+				t.Fatal(err)
+			}
+			decision := cases[position-1].ExpectedDecision
+			output, _ := snowReviewQualificationMockResponse(t, request, []string{decision, decision, decision}, -1)
+			return output, []byte("synthetic containment only"), nil
+		}}
+	report, err := executeReviewQualification(t.Context(), reviewQualificationTestRoot(t), plan, defaultReviewQualificationSettings(), hooks)
+	if err != nil || !report.Complete || report.Qualified || !report.NoMainWrites || position != 6 {
+		t.Fatalf("offline mock became provider qualification: %+v %v", report, err)
+	}
+}
+
+// A complete private receipt combines the actual-shaped wrapper artifacts with
+// native mocked provider journals. It is not real container or network proof.
+func newSnowReviewQualificationContainmentFixture(t *testing.T) ([]byte, []byte, []byte, string, reviewQualificationSettings, string, reviewQualificationProviderProfile) {
+	t.Helper()
+	_, _, diagnostics, image, settings, attempt := newReviewQualificationContainmentFixture(t)
+	var receipt reviewQualificationWrapperReceipt
+	if json.Unmarshal(bytes.TrimSpace(diagnostics), &receipt) != nil {
+		t.Fatal("bad base receipt")
+	}
+	owner, container := receipt.Owner, strings.Repeat("b", 64)
+	provider := defaultWinnerSnowProviderSettings()
+	providerBytes, _ := json.Marshal(provider)
+	profile := reviewQualificationProviderProfile{Snow: true, ProviderHost: "snow.example", ProviderIp: "192.0.2.20", ProviderPort: 18000,
+		Settings: reviewQualificationPin{Path: "/synthetic/provider.json", Sha256: reviewQualificationHash(providerBytes)}, StateDirectory: filepath.Join(attempt, "member-state")}
+	if err := os.Mkdir(profile.StateDirectory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	cases, err := frozenSnowReviewQualificationCases()
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, _ := json.Marshal(cases[1].Request)
+	output, _ := snowReviewQualificationMockResponse(t, cases[1].Request, []string{"approve", "approve", "approve"}, -1, snowReviewQualificationMockOptions{StateDirectory: profile.StateDirectory, ProviderSettingsSha256: profile.Settings.Sha256})
+	manifestBytes, err := os.ReadFile(filepath.Join(attempt, "evidence-manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var oldManifest struct {
+		Artifacts []reviewQualificationBinding `json:"artifacts"`
+	}
+	if json.Unmarshal(manifestBytes, &oldManifest) != nil {
+		t.Fatal("bad base manifest")
+	}
+	artifacts := map[string][]byte{}
+	for _, binding := range oldManifest.Artifacts {
+		content, err := os.ReadFile(filepath.Join(attempt, binding.Path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		artifacts[binding.Path] = content
+	}
+	delete(artifacts, "key-ownership.json")
+	artifacts["input.json"], artifacts["broker.stdout"], artifacts["provider-settings.json"] = input, output, providerBytes
+	artifacts["provider-address.txt"] = []byte(profile.ProviderIp + "\n")
+	encode := func(value any) []byte {
+		content, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return content
+	}
+	var containers []map[string]any
+	if json.Unmarshal(artifacts["container-inspect.json"], &containers) != nil {
+		t.Fatal("bad container")
+	}
+	c := containers[0]
+	c["Config"].(map[string]any)["Entrypoint"] = []string{"/review-broker", "review-broker"}
+	c["Config"].(map[string]any)["Cmd"] = []string{"--review-provider-settings=/run/review/provider.json", "--review-provider-settings-sha256=" + profile.Settings.Sha256, "--review-state-directory=/run/review/state"}
+	c["HostConfig"].(map[string]any)["ExtraHosts"] = []string{}
+	c["HostConfig"].(map[string]any)["Ulimits"] = []any{map[string]any{"Name": "fsize", "Soft": settings.MaximumMemberJournalBytes, "Hard": settings.MaximumMemberJournalBytes}}
+	c["Mounts"] = []any{map[string]any{"Type": "bind", "Source": profile.Settings.Path, "Destination": "/run/review/provider.json", "RW": false}, map[string]any{"Type": "bind", "Source": profile.StateDirectory, "Destination": "/run/review/state", "RW": true}}
+	artifacts["container-inspect.json"] = encode(containers)
+	var fence map[string]any
+	if json.Unmarshal(artifacts["fence.json"], &fence) != nil {
+		t.Fatal("bad fence")
+	}
+	fence["provider_host"], fence["provider_ipv4"], fence["provider_port"] = profile.ProviderHost, profile.ProviderIp, profile.ProviderPort
+	artifacts["fence.json"] = encode(fence)
+	chain := "URRV_" + owner[:16]
+	artifacts["fence-chain.txt"] = []byte(fmt.Sprintf("-A %s -d %s/32 -p tcp -m tcp --dport %d -j ACCEPT\n-A %s -j DROP\n", chain, profile.ProviderIp, profile.ProviderPort, chain))
+	uidMap := artifacts["uid-map.txt"]
+	artifacts["provider-settings-ownership.json"] = encode(map[string]any{"schema": 1, "kind": "winner-review-provider-settings-ownership", "owner": owner, "container_id": container, "container_pid": 7777, "path": profile.Settings.Path, "container_uid": 65532, "mapped_host_uid": 2465532, "host_uid": 0, "host_gid": 0, "mode": "0444", "bytes": len(providerBytes), "links": 1, "device": "77", "inode": "888", "uid_map_sha256": reviewQualificationHash(uidMap), "provider_settings_sha256": profile.Settings.Sha256, "observed_before_provider_input": true})
+	artifacts["member-state-ownership.json"] = encode(map[string]any{"schema": 1, "kind": "winner-review-member-state-ownership", "owner": owner, "container_id": container, "container_pid": 7777, "path": profile.StateDirectory, "container_uid": 65532, "mapped_host_uid": 2465532, "host_uid": 2465532, "host_gid": 0, "mode": "0700", "device": "77", "inode": "889", "uid_map_sha256": reviewQualificationHash(uidMap), "observed_before_provider_input": true})
+	models := []map[string]string{}
+	for _, member := range provider.Members {
+		models = append(models, map[string]string{"name": member.Name, "model": member.Model, "revision": member.Revision, "reasoning": member.Reasoning})
+	}
+	id := reviewQualificationHash([]byte(cases[1].Request.Template.IdempotencyKey))
+	claim := encode(map[string]any{"schema": 1, "kind": "snow-review-single-attempt-claim", "idempotency_key_sha256": id, "input_sha256": reviewQualificationHash(input), "provider_settings_sha256": profile.Settings.Sha256, "model_set_sha256": reviewQualificationHash(encode(models)), "owner": owner, "attempt_directory": attempt, "automatic_retries": false})
+	claimRoot := filepath.Join(filepath.Dir(settings.StateRoot), "snow-review-claims")
+	if err := os.Mkdir(claimRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(claimRoot, id+".json"), claim, 0600); err != nil {
+		t.Fatal(err)
+	}
+	artifacts["attempt-claim.json"] = claim
+	for index := 1; index <= 3; index++ {
+		for _, phase := range []string{"started", "complete"} {
+			name := fmt.Sprintf("member-%02d.%s.json", index, phase)
+			content, err := os.ReadFile(filepath.Join(profile.StateDirectory, name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			artifacts[name] = content
+		}
+	}
+	bindings := []reviewQualificationBinding{}
+	for name, content := range artifacts {
+		if err := os.WriteFile(filepath.Join(attempt, name), content, 0600); err != nil {
+			t.Fatal(err)
+		}
+		bindings = append(bindings, reviewQualificationBinding{Path: name, Sha256: reviewQualificationHash(content), Bytes: int64(len(content))})
+	}
+	manifest := encode(map[string]any{"schema": 1, "kind": "winner-review-container-evidence", "artifacts": bindings})
+	if err := os.WriteFile(filepath.Join(attempt, "evidence-manifest.json"), manifest, 0600); err != nil {
+		t.Fatal(err)
+	}
+	receipt.ManifestSha256 = reviewQualificationHash(manifest)
+	return input, output, append(encode(receipt), '\n'), image, settings, attempt, profile
+}
+
+// Every captured state/claim/member byte is authenticated on the composed path.
+func TestReviewQualificationSnowAuthenticatesCompletePrivateJournalManifest(t *testing.T) {
+	input, output, diagnostics, image, settings, attempt, profile := newSnowReviewQualificationContainmentFixture(t)
+	if _, err := authenticateReviewQualificationContainmentForProvider(input, output, diagnostics, false, image, settings, profile); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(attempt, "member-03.complete.json"), []byte(`{"schema":1}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := authenticateReviewQualificationContainmentForProvider(input, output, diagnostics, false, image, settings, profile); err == nil {
+		t.Fatal("changed final member journal accepted")
+	}
+}
+
+// Matching captured manifests cannot hide a different durable external claim.
+func TestReviewQualificationSnowAuthenticatesIndependentWholeAttemptClaim(t *testing.T) {
+	input, output, diagnostics, image, settings, attempt, profile := newSnowReviewQualificationContainmentFixture(t)
+	claim, err := os.ReadFile(filepath.Join(attempt, "attempt-claim.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var value struct {
+		Id string `json:"idempotency_key_sha256"`
+	}
+	if json.Unmarshal(claim, &value) != nil {
+		t.Fatal("bad claim")
+	}
+	if err := os.WriteFile(filepath.Join(filepath.Dir(settings.StateRoot), "snow-review-claims", value.Id+".json"), []byte(`{"schema":1}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := authenticateReviewQualificationContainmentForProvider(input, output, diagnostics, false, image, settings, profile); err == nil {
+		t.Fatal("captured claim replaced independent durable authority")
+	}
+}

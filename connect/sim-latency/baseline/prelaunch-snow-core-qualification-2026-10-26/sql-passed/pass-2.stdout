@@ -1,0 +1,7 @@
+=== RUN   TestCompetitionSnowReviewMigrationGroupsConditionalCase
+--- PASS: TestCompetitionSnowReviewMigrationGroupsConditionalCase (0.00s)
+=== RUN   TestCompetitionSnowReviewMigrationPreservesHistoricalAndSourceGuards
+--- PASS: TestCompetitionSnowReviewMigrationPreservesHistoricalAndSourceGuards (0.00s)
+=== RUN   TestCompetitionSnowReviewDatabaseProviderAndFindingGuards
+--- PASS: TestCompetitionSnowReviewDatabaseProviderAndFindingGuards (3.93s)
+PASS

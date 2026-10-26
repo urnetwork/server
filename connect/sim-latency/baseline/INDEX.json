@@ -28,6 +28,36 @@
   },
   "additional_datasets": [
     {
+      "id": "prelaunch-snow-core-qualification-2026-10-26",
+      "official": false,
+      "index_path": "prelaunch-snow-core-qualification-2026-10-26/INDEX.json",
+      "index_sha256": "f6b122808e9b44f393d6cb5ec30da4a2bba5a43e3be1d4c0199f5a2a2aac4c51"
+    },
+    {
+      "id": "prelaunch-c2-runtime-qualification-2026-10-26",
+      "official": false,
+      "index_path": "prelaunch-c2-runtime-qualification-2026-10-26/INDEX.json",
+      "index_sha256": "7db7229bcb77fcb794c9d1cc14184944671fafaf71ce594311bbb9b267714043"
+    },
+    {
+      "id": "prelaunch-mono-root-c2-build-2026-10-26",
+      "official": false,
+      "index_path": "prelaunch-mono-root-c2-build-2026-10-26/INDEX.json",
+      "index_sha256": "ed880ce407598c7ec36ed09c10eab6c1cac6cc75675927f37f87ac65b895a527"
+    },
+    {
+      "id": "prelaunch-three-pair-analysis-2026-10-26",
+      "official": false,
+      "index_path": "prelaunch-three-pair-analysis-2026-10-26/INDEX.json",
+      "index_sha256": "a4ad04ab33259fd74395dbe6afc3f3a01d4509fc0872ef3e8a97c1387ff0728d"
+    },
+    {
+      "id": "prelaunch-heldout-tool-qualification-2026-10-26",
+      "official": false,
+      "index_path": "prelaunch-heldout-tool-qualification-2026-10-26/INDEX.json",
+      "index_sha256": "b76d034df4036ac895d97ec52ddb673d7b7ee805241f548414b7d32a4eea54b2"
+    },
+    {
       "id": "prelaunch-input-tool-qualification-2026-10-26",
       "official": false,
       "index_path": "prelaunch-input-tool-qualification-2026-10-26/INDEX.json",
@@ -57,7 +87,7 @@
       "id": "prelaunch-corrected-same-seed-r9-2026-10-25",
       "official": false,
       "index_path": "prelaunch-corrected-same-seed-r9-2026-10-25/INDEX.json",
-      "index_sha256": "bc1a40f0cc12a2f86d31206a097c4a8d2736ed0139f640fe21daa2ef1ddf5ce4"
+      "index_sha256": "46a30ebad9e3cb4ede196ccf074616a2fcfca8c4ff3d87447d44532c2eff4a9e"
     },
     {
       "id": "prelaunch-same-seed-r9-2026-10-25",

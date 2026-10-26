@@ -38,6 +38,7 @@ func TestRedisAdmissionPublicRefusalPreservesOtherReservations(t *testing.T) {
 			if escrow != nil || !errors.Is(err, want) {
 				t.Fatalf("%s did not reach actual client refusal: escrow=%+v err=%v", mode, escrow, err)
 			}
+			drainRedisContractCompensations(t, ctx)
 			if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != 17 {
 				t.Fatalf("%s retained refused bytes or released its neighbor: %d", mode, got)
 			}
@@ -64,6 +65,7 @@ func TestRedisAdmissionPartialReserveErrorCompensatesKnownTokens(t *testing.T) {
 		if escrow != nil || err == nil || !strings.Contains(err.Error(), "invalid reservation counter") {
 			t.Fatalf("second reservation did not produce its intended error: escrow=%+v err=%v", escrow, err)
 		}
+		drainRedisContractCompensations(t, ctx)
 		if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != 17 {
 			t.Fatalf("partial reservation error retained first token: %d", got)
 		}
@@ -123,6 +125,7 @@ func TestRedisAdmissionPublicCanceledFenceCompensatesWithoutCaller(t *testing.T)
 		if err == nil || !errors.Is(err, context.Canceled) {
 			t.Fatal("actual canceled SQL read lost its cause", err)
 		}
+		drainRedisContractCompensations(t, ctx)
 		if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != 17 {
 			t.Fatal("canceled caller prevented exact-token compensation", got)
 		}

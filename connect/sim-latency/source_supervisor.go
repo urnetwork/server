@@ -344,7 +344,7 @@ func (self *sourceSupervisorRuntime) chooseSource(ctx context.Context, lease mod
 				return nil, errors.New("reviewed proposal lost its private source clone")
 			}
 		}
-		if _, err := sourceGitText(ctx, root, "-c", "core.fsync=all", "clone", "--quiet", "--no-checkout", "--no-hardlinks", cloneSource, stagedRoot); err != nil {
+		if _, err := sourceGitNetworkText(ctx, root, "-c", "core.fsync=all", "clone", "--template=", "--quiet", "--no-checkout", "--no-hardlinks", cloneSource, stagedRoot); err != nil {
 			return nil, err
 		}
 		if _, err := sourceGitText(ctx, stagedRoot, "remote", "set-url", "origin", origin); err != nil {

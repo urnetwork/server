@@ -1,0 +1,33 @@
+go version go1.27.3 linux/amd64
+74a456bcb2ebe42fc11b233cb9517c9e262aa148
+compile_selection=sim start_utc=2026-10-26T16:59:27Z
+71c9a3bee36bf1038e3ce981d02cb13e6e7d78e95e9d1f7b0443d9a07bb44b56  /home/by/urnetwork/temp/snow-core-qualification-20261026.rPRAxV8K/sim.test
+[env]glog not configured from command line. Using default configuration.
+I1026 17:01:24.399319  668813 env.go:1202] [env]try /srv/warp/config, [settings.yml]
+I1026 17:01:24.399707  668813 env.go:1202] [env]try /home/by/urnetwork/temp/main-targeted-2f46-corrected-20261026.3Nd6V666/fixture-provisioned/services/server-fixture-371604642/site, [settings.yml]
+I1026 17:01:24.399856  668813 env.go:81] [env]settings loaded
+selection=sim pass=1 exit=0 seconds=2
+bd9a4fd11f8d773b48a606a30d220ac627bc43ab2a27274352d71e74b81d8341  /home/by/urnetwork/temp/snow-core-qualification-20261026.rPRAxV8K/sim-1.stdout
+339322e811e20593c216e8b85fb3f8d97495150f3397c9df883d3dd0a9710d82  /home/by/urnetwork/temp/snow-core-qualification-20261026.rPRAxV8K/sim-1.stderr
+selection=sim pass=2 exit=0 seconds=2
+48ff2666494aaf4def79e4a03f5a15c50bb38665b9a8fa8092bec4f1b7fda5ca  /home/by/urnetwork/temp/snow-core-qualification-20261026.rPRAxV8K/sim-2.stdout
+9ba5ac26230c5a2a41c40654a6ef81f8a6a75cf726b7138058d04ad9876211ad  /home/by/urnetwork/temp/snow-core-qualification-20261026.rPRAxV8K/sim-2.stderr
+selection=sim pass=3 exit=0 seconds=2
+ddb15fa9bc817af87e78f3d1f5125bf51088eb4f39c1e60964007ae030077b82  /home/by/urnetwork/temp/snow-core-qualification-20261026.rPRAxV8K/sim-3.stdout
+dad582df21fc489c202699ee170fa47163404e45535691de492686601288d7d8  /home/by/urnetwork/temp/snow-core-qualification-20261026.rPRAxV8K/sim-3.stderr
+compile_selection=model start_utc=2026-10-26T17:01:31Z
+1638c43512b25aaecc6194e190711a4d9fdd8a803fc2a41e9f518cee803d2345  /home/by/urnetwork/temp/snow-core-qualification-20261026.rPRAxV8K/model.test
+[env]glog not configured from command line. Using default configuration.
+I1026 17:03:24.090342  671683 env.go:1202] [env]try /srv/warp/config, [settings.yml]
+I1026 17:03:24.090743  671683 env.go:1202] [env]try /home/by/urnetwork/temp/main-targeted-2f46-corrected-20261026.3Nd6V666/fixture-provisioned/services/server-fixture-371604642/site, [settings.yml]
+I1026 17:03:24.090907  671683 env.go:81] [env]settings loaded
+selection=model pass=1 exit=0 seconds=1
+0c7f9d2e03afe3e70ccc84f8e7869dbe211e6e5e7d865fbd3b641f78fd42273f  /home/by/urnetwork/temp/snow-core-qualification-20261026.rPRAxV8K/model-1.stdout
+40d2307b5821f2e4931d3ee8d8c4075ef29530ee419698bb756b3b277c5b6820  /home/by/urnetwork/temp/snow-core-qualification-20261026.rPRAxV8K/model-1.stderr
+selection=model pass=2 exit=0 seconds=1
+0c7f9d2e03afe3e70ccc84f8e7869dbe211e6e5e7d865fbd3b641f78fd42273f  /home/by/urnetwork/temp/snow-core-qualification-20261026.rPRAxV8K/model-2.stdout
+c518a161bf28fbd6744ec295603effbb8e4d95e5a746b6adc40db3328996fe50  /home/by/urnetwork/temp/snow-core-qualification-20261026.rPRAxV8K/model-2.stderr
+selection=model pass=3 exit=0 seconds=1
+0c7f9d2e03afe3e70ccc84f8e7869dbe211e6e5e7d865fbd3b641f78fd42273f  /home/by/urnetwork/temp/snow-core-qualification-20261026.rPRAxV8K/model-3.stdout
+e6350c5577ab7f5cb2c4d6af2ba4332567cdfc0ff7d11408df49ae484e02d9f5  /home/by/urnetwork/temp/snow-core-qualification-20261026.rPRAxV8K/model-3.stderr
+PASS_snow_sim12_model5_three

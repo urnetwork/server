@@ -128,7 +128,10 @@ func (self *keyEventSubscriber) runSessionNotifications(networkId server.Id, gro
 			return
 		case <-group.kick:
 		case <-ticker.C:
-			self.kickSession(networkId)
+			// The corrective pass refreshes hints only. Each lease rechecks
+			// on its own timer at most a minute apart, and session events and
+			// resubscribe resyncs still recheck at once; rechecking every
+			// lease here checked each connection twice a minute.
 		}
 		if delay := time.Until(last.Add(5 * time.Second)); delay > 0 {
 			timer := time.NewTimer(delay)

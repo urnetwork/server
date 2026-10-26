@@ -150,9 +150,12 @@ type sourceManifest struct {
 }
 
 type evaluatorSourceLock struct {
-	Schema              int               `json:"schema"`
-	DevelopmentSnapshot bool              `json:"development_snapshot"`
-	Repositories        map[string]string `json:"repositories"`
+	Schema              int  `json:"schema"`
+	DevelopmentSnapshot bool `json:"development_snapshot"`
+	// Only a newly qualified trusted image may opt into repository-wide
+	// candidates. Omission preserves every historical server-only identity.
+	CandidatePathBase string            `json:"candidate_path_base,omitempty"`
+	Repositories      map[string]string `json:"repositories"`
 }
 
 type sourceRecord struct {
@@ -449,6 +452,9 @@ func loadEvaluatorSourceLockForMode(path string, staging bool) (*evaluatorSource
 	if lock.DevelopmentSnapshot {
 		return nil, errors.New("development snapshot cannot be used for an epoch-bound evaluation")
 	}
+	if lock.CandidatePathBase != "" && lock.CandidatePathBase != "mono_root_v1" {
+		return nil, errors.New("evaluator source lock candidate path base is unsupported")
+	}
 	repositoryNames := sourceRepositoryNamesForMode(staging)
 	if len(lock.Repositories) != len(repositoryNames) {
 		return nil, errors.New("evaluator source lock must contain the complete repository set")
@@ -505,7 +511,7 @@ func verifySourceEpoch(manifest *sourceManifest, epochNumber int, repositoriesRo
 		if head == expectedCommit {
 			continue
 		}
-		if repository != "server" {
+		if repository != "server" && sourceLock.CandidatePathBase != "mono_root_v1" {
 			return fmt.Errorf("evaluator repository %s head does not match its authenticated source lock", repository)
 		}
 		parents, parentErr := gitOutput(repositoryRoot, "rev-list", "--parents", "-n", "1", "HEAD")
@@ -514,7 +520,7 @@ func verifySourceEpoch(manifest *sourceManifest, epochNumber int, repositoriesRo
 		}
 		parentFields := strings.Fields(parents)
 		if len(parentFields) != 2 || parentFields[1] != expectedCommit {
-			return errors.New("candidate server commit is not exactly one commit above its configured epoch base")
+			return fmt.Errorf("candidate %s commit is not exactly one commit above its configured epoch base", repository)
 		}
 	}
 	return nil

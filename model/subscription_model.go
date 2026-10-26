@@ -1928,19 +1928,22 @@ func lockActiveContractClientsInTx(
 		return a.Cmp(b)
 	})
 
-	// Contract creations may share these rows, while lifecycle UPDATE and
-	// DELETE must wait. Stable order prevents opposite-direction contracts
-	// from acquiring the same pair in opposite orders.
+	// Contract creations share these rows with each other and with non-key
+	// writes such as auth and contract time stamps. Deactivation and DELETE
+	// must wait: every lifecycle writer locks its rows FOR UPDATE before it
+	// writes (TestNetworkClientLifecycleWritesFollowExplicitRowLocks), which
+	// conflicts with this lock. Stable order prevents opposite-direction
+	// contracts from acquiring the same pair in opposite orders.
 	clientLifecycles := map[server.Id]contractClientLifecycle{}
 	result, err := tx.Query(
 		ctx,
 		`
 			/* contract_lifecycle_write_boundary */
-			SELECT client_id, network_id, active
+			SELECT client_id, network_id, active, source_client_id
 			FROM network_client
 			WHERE client_id = ANY($1)
 			ORDER BY client_id
-			FOR SHARE
+			FOR KEY SHARE
 		`,
 		clientIds,
 	)
@@ -1949,8 +1952,11 @@ func lockActiveContractClientsInTx(
 	for result.Next() {
 		var clientId server.Id
 		var lifecycle contractClientLifecycle
-		server.Raise(result.Scan(&clientId, &lifecycle.networkId, &lifecycle.active))
+		var sourceClientId *server.Id
+		server.Raise(result.Scan(&clientId, &lifecycle.networkId, &lifecycle.active, &sourceClientId))
 		clientLifecycles[clientId] = lifecycle
+		// the contract-usage stamp after commit keys its gate by this identity
+		rememberContractClientTopLevel(clientId, sourceClientId)
 	}
 	server.Raise(result.Err())
 

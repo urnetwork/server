@@ -17,16 +17,20 @@ import (
 	"time"
 
 	"github.com/docopt/docopt-go"
+	"github.com/urnetwork/server/model"
 )
 
 // The installed wrapper pins these exact bytes. No request can select a key,
 // host checker, container allocation or qualification deadline.
 type sourceBuildQualifierSettings struct {
-	Sandbox             sourceBuildSandboxSettings `json:"sandbox"`
-	Host                sourceHostProbeSettings    `json:"host"`
-	ModelKeyFile        string                     `json:"model_key_file"`
-	Timeout             time.Duration              `json:"timeout"`
-	MaximumRequestBytes int                        `json:"maximum_request_bytes"`
+	Sandbox             sourceBuildSandboxSettings  `json:"sandbox"`
+	Host                sourceHostProbeSettings     `json:"host"`
+	ModelKeyFile        string                      `json:"model_key_file"`
+	SnowProviderFile    string                      `json:"snow_provider_file,omitempty"`
+	SnowProviderSha256  string                      `json:"snow_provider_sha256,omitempty"`
+	SnowProvider        *winnerSnowProviderSettings `json:"-"`
+	Timeout             time.Duration               `json:"timeout"`
+	MaximumRequestBytes int                         `json:"maximum_request_bytes"`
 }
 
 // Build and test deadlines remain bounded by the earlier broker context too.
@@ -50,7 +54,7 @@ func executeSourceBuildQualifier(ctx context.Context, qualification sourceBuildQ
 	}
 	if qualification.Operation != "qualify_exact_reviewed_source_image" || settings.Timeout <= 0 || settings.MaximumRequestBytes <= 0 ||
 		!validSha256(qualification.Owner) || qualification.Artifacts.Directory != filepath.Join(settings.Sandbox.StateDirectory, qualification.Owner) ||
-		client == nil || key == "" || docker == nil || hostProfile == nil {
+		client == nil || (key == "" && qualification.Build.Proposal != nil && qualification.Build.Proposal.WinnerReviewPolicy != model.CompetitionSnowWinnerReviewPolicy) || docker == nil || hostProfile == nil {
 		return nil, errors.New("source qualifier requires its exact private build and independent observations")
 	}
 	if err := validateSourceBuildRequest(qualification.Build); err != nil {
@@ -58,14 +62,36 @@ func executeSourceBuildQualifier(ctx context.Context, qualification sourceBuildQ
 	}
 	ctx, cancel := context.WithTimeout(ctx, settings.Timeout)
 	defer cancel()
+	testSettings := defaultSourceTestModelSettings()
+	snowPolicy := qualification.Build.Proposal.WinnerReviewPolicy == model.CompetitionSnowWinnerReviewPolicy
+	if snowPolicy {
+		if settings.SnowProvider == nil || validateWinnerSnowProviderSettings(*settings.SnowProvider) != nil {
+			return nil, errors.New("Snow source tests require their pinned provider settings")
+		}
+		testSettings.SnowProvider = settings.SnowProvider
+	}
 	tests, testDigest, err := executeSourceBuildIndependentTests(ctx, client, key, qualification.Build, qualification.Artifacts, qualification.Owner,
-		settings.Sandbox, defaultSourceTestModelSettings(), defaultSourceTestJournalSettings(), docker)
+		settings.Sandbox, testSettings, defaultSourceTestJournalSettings(), docker)
 	if err != nil {
 		return nil, err
 	}
-	if tests == nil || !tests.Passed || tests.Model != "gpt-6.1-sol" || tests.Reasoning != "low" || tests.ProviderResponseId == "" || tests.CompletionId == "" ||
-		!validSha256(testDigest) {
+	if tests == nil || !tests.Passed || !validSha256(testDigest) {
 		return nil, errors.New("source qualification lacks genuine complete independent test evidence")
+	}
+	if snowPolicy {
+		if tests.WinnerReviewPolicy != model.CompetitionSnowWinnerReviewPolicy || tests.Model != model.CompetitionSnowWinnerReviewModel ||
+			tests.Reasoning != model.CompetitionSnowWinnerReviewReasoning || len(tests.Members) != len(settings.SnowProvider.Members) {
+			return nil, errors.New("Snow source qualification lacks all three actual member attestations")
+		}
+		for index, member := range settings.SnowProvider.Members {
+			actual := tests.Members[index]
+			if actual.Name != member.Name || actual.Model != member.Model || actual.Revision != member.Revision || actual.Reasoning != member.Reasoning ||
+				actual.ProviderResponseId == "" || !actual.Passed || !validSha256(actual.RequestSha256) || !validSha256(actual.ResponseSha256) {
+				return nil, errors.New("Snow source qualification has substituted member evidence")
+			}
+		}
+	} else if tests.WinnerReviewPolicy != "" || len(tests.Members) != 0 || tests.Model != "gpt-6.1-sol" || tests.Reasoning != "low" || tests.ProviderResponseId == "" || tests.CompletionId == "" {
+		return nil, errors.New("legacy source qualification lacks its original independent test evidence")
 	}
 	input := sourceBuildSandboxInput{Owner: qualification.Owner, Phase: "correctness", ImageId: qualification.Artifacts.ImageId,
 		Commit: qualification.Build.Proposal.Commits["server"], SourceDirectory: filepath.Join(qualification.Artifacts.Directory, "source"),
@@ -99,8 +125,8 @@ func executeSourceBuildQualifier(ctx context.Context, qualification sourceBuildQ
 		SourceLockSha256: proposal.SourceLockSha256, EvaluatorImageDigest: qualification.Artifacts.ImageId,
 		HostQualificationSha256: profile.QualificationSha256, ContainmentSha256: containmentDigest, TestEvidenceSha256: testDigest,
 		SandboxId: qualification.Owner, Offline: true, NoMainCredentials: true, ReadOnlySource: true, Passed: true,
-		TestModel: tests.Model, TestReasoning: tests.Reasoning}
-	if err := validateReviewedSourceBuildForMode(receipt, proposal.ReviewId, proposal.PatchSha256, proposal.SourceLockSha256, proposal.Staging); err != nil {
+		TestModel: tests.Model, TestReasoning: tests.Reasoning, WinnerReviewPolicy: tests.WinnerReviewPolicy}
+	if err := validateReviewedSourceBuildForPolicy(receipt, proposal.ReviewId, proposal.PatchSha256, proposal.SourceLockSha256, proposal.Staging, proposal.WinnerReviewPolicy); err != nil {
 		return nil, err
 	}
 	if err := ctx.Err(); err != nil {
@@ -147,13 +173,6 @@ func runSourceBuildQualifier(opts docopt.Opts) {
 	if err := verifySourceSupervisorProgram(settings.Host.Command, settings.Host.CommandSha256); err != nil {
 		fatalf("source qualifier host checker differs from its installed pin")
 	}
-	if err := validateSourceHostTrustedPath(settings.ModelKeyFile, os.Lstat); err != nil {
-		fatalf("dedicated source-test provider key is not protected")
-	}
-	key, err := readPrivateToken(settings.ModelKeyFile)
-	if err != nil {
-		fatalf("dedicated source-test provider key is unavailable")
-	}
 	input, err := io.ReadAll(io.LimitReader(os.Stdin, int64(settings.MaximumRequestBytes)+1))
 	if err != nil || len(input) > settings.MaximumRequestBytes {
 		fatalf("source qualification request exceeds its input budget")
@@ -161,6 +180,28 @@ func runSourceBuildQualifier(opts docopt.Opts) {
 	var request sourceBuildQualificationRequest
 	if err := decodeStrictJSONBytes(input, &request, "source qualification request"); err != nil {
 		fatalf("source qualification request is malformed")
+	}
+	if err := validateSourceBuildRequest(request.Build); err != nil {
+		fatalf("source qualification request is not authenticated: %s", err)
+	}
+	key := ""
+	if request.Build.Proposal.WinnerReviewPolicy == model.CompetitionSnowWinnerReviewPolicy {
+		provider, err := loadWinnerSnowProviderSettings(settings.SnowProviderFile, settings.SnowProviderSha256)
+		if err != nil {
+			fatalf("Snow source-test provider settings are unavailable: %s", err)
+		}
+		settings.SnowProvider = &provider
+	} else {
+		if settings.SnowProviderFile != "" || settings.SnowProviderSha256 != "" {
+			fatalf("Snow qualifier cannot fall back to the historical provider")
+		}
+		if err := validateSourceHostTrustedPath(settings.ModelKeyFile, os.Lstat); err != nil {
+			fatalf("dedicated historical source-test provider key is not protected")
+		}
+		key, err = readPrivateToken(settings.ModelKeyFile)
+		if err != nil {
+			fatalf("dedicated historical source-test provider key is unavailable")
+		}
 	}
 	ctx, stop := signalContext()
 	defer stop()

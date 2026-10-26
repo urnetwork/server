@@ -10,11 +10,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/urnetwork/server/model"
 )
 
 // Prescribed test execution is independent of the honesty-review policy.
@@ -22,11 +23,12 @@ const sourceTestModelName = "gpt-6.1-sol"
 
 // Only immutable identities are sent, not main configuration or patch comments.
 type sourceTestPlan struct {
-	Owner            string `json:"owner"`
-	ImageId          string `json:"image_id"`
-	SourceLockSha256 string `json:"source_lock_sha256"`
-	PatchSha256      string `json:"patch_sha256"`
-	SuiteSha256      string `json:"suite_sha256"`
+	WinnerReviewPolicy string `json:"winner_review_policy,omitempty"`
+	Owner              string `json:"owner"`
+	ImageId            string `json:"image_id"`
+	SourceLockSha256   string `json:"source_lock_sha256"`
+	PatchSha256        string `json:"patch_sha256"`
+	SuiteSha256        string `json:"suite_sha256"`
 }
 
 // The trusted fixed-suite executor supplies these observed results. A model
@@ -41,17 +43,19 @@ type sourceTestExecution struct {
 }
 
 type sourceTestModelEvidence struct {
-	Model              string              `json:"model"`
-	Reasoning          string              `json:"reasoning"`
-	ProviderResponseId string              `json:"provider_response_id"`
-	CompletionId       string              `json:"completion_id"`
-	PlanSha256         string              `json:"plan_sha256"`
-	CallId             string              `json:"call_id"`
-	Execution          sourceTestExecution `json:"execution"`
-	ProviderUsage      json.RawMessage     `json:"provider_usage"`
-	CompletionUsage    json.RawMessage     `json:"completion_usage"`
-	Passed             bool                `json:"passed"`
-	Summary            string              `json:"summary"`
+	WinnerReviewPolicy string                         `json:"winner_review_policy,omitempty"`
+	Members            []sourceTestSnowMemberEvidence `json:"members,omitempty"`
+	Model              string                         `json:"model"`
+	Reasoning          string                         `json:"reasoning"`
+	ProviderResponseId string                         `json:"provider_response_id"`
+	CompletionId       string                         `json:"completion_id"`
+	PlanSha256         string                         `json:"plan_sha256"`
+	CallId             string                         `json:"call_id"`
+	Execution          sourceTestExecution            `json:"execution"`
+	ProviderUsage      json.RawMessage                `json:"provider_usage"`
+	CompletionUsage    json.RawMessage                `json:"completion_usage"`
+	Passed             bool                           `json:"passed"`
+	Summary            string                         `json:"summary"`
 }
 
 // Provider calls have short independent deadlines; prescribed tests retain
@@ -62,18 +66,31 @@ type sourceTestModelSettings struct {
 	// Installed qualifiers must set the private owner/independent-model-journal
 	// path. Empty is only the non-durable isolated client/test interface.
 	ResponseJournalDirectory string
+	// Non-nil only for the explicit Snow policy; omitted preserves old journals.
+	SnowProvider *winnerSnowProviderSettings `json:"snow_provider,omitempty"`
 }
 
 // Lower test-agent budgets are independent of the safety-review provider.
 func defaultSourceTestModelSettings() sourceTestModelSettings {
-	return sourceTestModelSettings{winnerModelSettings: winnerModelSettings{RequestTimeout: 5 * time.Minute, MaximumInputBytes: 64 * 1024,
-		MaximumStreamBytes: 1024 * 1024, MaximumEventBytes: 512 * 1024, MaximumOutputTokens: 4096}, TotalTimeout: 3 * time.Hour}
+	settings := defaultWinnerModelSettings()
+	settings.RequestTimeout = 5 * time.Minute
+	settings.MaximumInputBytes = 64 * 1024
+	settings.MaximumStreamBytes = 1024 * 1024
+	settings.MaximumEventBytes = 512 * 1024
+	settings.MaximumOutputTokens = 4096
+	return sourceTestModelSettings{winnerModelSettings: settings, TotalTimeout: 3 * time.Hour}
 }
 
 // Keep this separate from authority-bearing receipts. The caller persists the
 // returned evidence before using its digest; errors never authorize promotion.
 func executeSourceTestModel(ctx context.Context, client *http.Client, key string, plan sourceTestPlan, settings sourceTestModelSettings,
 	runPrescribed func(context.Context) (sourceTestExecution, error)) (*sourceTestModelEvidence, error) {
+	if plan.WinnerReviewPolicy == model.CompetitionSnowWinnerReviewPolicy {
+		return executeSourceTestSnow(ctx, client, plan, settings, runPrescribed)
+	}
+	if plan.WinnerReviewPolicy != "" || settings.SnowProvider != nil {
+		return nil, errors.New("independent test provider policy is unsupported or cross-provider")
+	}
 	if client == nil || runPrescribed == nil || key == "" || strings.ContainsAny(key, "\r\n\x00") ||
 		!validSha256(plan.Owner) || !validSha256(plan.SourceLockSha256) || !validSha256(plan.PatchSha256) || !validSha256(plan.SuiteSha256) ||
 		!strings.HasPrefix(plan.ImageId, "sha256:") || !validSha256(strings.TrimPrefix(plan.ImageId, "sha256:")) ||
@@ -131,7 +148,7 @@ func executeSourceTestModel(ctx context.Context, client *http.Client, key string
 			}
 			defer response.Body.Close()
 			if response.StatusCode != http.StatusOK {
-				return nil, fmt.Errorf("independent test provider refused request (HTTP %d)", response.StatusCode)
+				return nil, readWinnerModelRefusal(response, key, settings.winnerModelSettings)
 			}
 			stream, err := io.ReadAll(io.LimitReader(response.Body, settings.MaximumStreamBytes+1))
 			if err != nil || int64(len(stream)) > settings.MaximumStreamBytes {

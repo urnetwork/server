@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "kind": "minimal-c2-image-build/v1",
+  "c2_commit": "a9e8e1a710b24c749e6499a0606938252c83e136",
+  "base_image_id": "sha256:002c39040ce23dee27b171c7e657f749c6a6d05b1e9b97d90ac87336470dbaf3",
+  "image": "urnetwork/sim-latency-evaluator-base:mono-root-c2-a9e8e1a7-go1273",
+  "image_id": "sha256:b1632a55b415f823871c60b220a194947d280894111c9fa765ad88100e206f24",
+  "canonical_source_lock_sha256": "ec322ed2db023e15ea5dc3eea60a6ca5989661bba737c340fea3477d8d1300cf",
+  "raw_source_lock_sha256": "239cea7fe6f77f989b75ba6efa677e8731640ba2fdd3690a35e6fe72103f3d11",
+  "source_config_sha256": "589ab624be8301c22e01571ac33b3e1b44e419ffb68009a577e6d520c0bb8995",
+  "tests_executed_by_builder": false,
+  "qualified": false,
+  "scoring_authorized": false
+}

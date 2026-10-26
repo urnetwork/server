@@ -17,7 +17,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// sourceTestGit inherits the existing global Git identity.
+// Fixture commands retain the explicitly configured global Git identity.
 func sourceTestGit(t *testing.T, repositoryRoot string, args ...string) string {
 	t.Helper()
 	commandArgs := append([]string{"-C", repositoryRoot}, args...)

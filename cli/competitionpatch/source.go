@@ -16,20 +16,53 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
+	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
 )
 
 // Source operations consume one total bounded budget, not one reset per Git call.
 type repositoryApplySettings struct {
-	Timeout            time.Duration
+	// Positive whole-operation deadline; default one minute, never per Git call.
+	Timeout time.Duration
+	// Positive post-cancellation pipe-drain bound; default five seconds.
+	WaitDelay time.Duration
+	// Positive per-command combined-output cap; default 64 KiB.
 	MaximumOutputBytes int
+}
+
+// Keeps a typed boundary without classifying Git stderr or an empty diff. A
+// future genuine patch-nonapplication classification may narrow this safely.
+type repositoryApplicationError struct {
+	cause error
+}
+
+// A typed process result permits only Git config's documented no-match exit
+// without guessing from stderr or misreading an I/O failure as empty settings.
+type repositoryGitExitError struct {
+	exitCode int
+}
+
+// Command output is never exposed as a public error message.
+func (self *repositoryGitExitError) Error() string {
+	return "bounded trusted source Git operation failed"
+}
+
+// The message contains no command output, original identity bytes or secrets.
+func (self *repositoryApplicationError) Error() string {
+	return "trusted source application failed: " + self.cause.Error()
+}
+
+// Preserve ordinary errors.Is/As behavior for deterministic owner assertions.
+func (self *repositoryApplicationError) Unwrap() error {
+	return self.cause
 }
 
 // The whole Docker build remains bounded separately by its owning evaluator.
 func defaultRepositoryApplySettings() repositoryApplySettings {
-	return repositoryApplySettings{Timeout: time.Minute, MaximumOutputBytes: 64 * 1024}
+	return repositoryApplySettings{Timeout: time.Minute, WaitDelay: 5 * time.Second, MaximumOutputBytes: 64 * 1024}
 }
 
 // Exactly the trusted preparer's schema; no candidate-derived source paths.
@@ -43,6 +76,7 @@ type repositorySourceIdentity struct {
 	Staging              bool              `json:"staging"`
 	Branch               string            `json:"branch"`
 	SourceLockSha256     string            `json:"source_lock_sha256"`
+	CandidatePathBase    string            `json:"candidate_path_base,omitempty"`
 	Repositories         map[string]string `json:"repositories"`
 	CandidatePatchSha256 *string           `json:"candidate_patch_sha256"`
 }
@@ -61,10 +95,13 @@ func (self *repositoryGitOutput) Write(content []byte) (int, error) {
 	return self.content.Write(content)
 }
 
-// Pins all clean source heads and branches before any patch is applied. The
-// canonical input digest authenticates the preparer's original identity bytes.
-func applyRepositoryPatches(root string, identityBytes []byte, expectedIdentitySha256 string, baseSha string, patchSha256 string, patches map[string][]byte, settings repositoryApplySettings) (map[string]string, error) {
-	if settings.Timeout <= 0 || settings.MaximumOutputBytes <= 0 || !sha256Pattern.MatchString(expectedIdentitySha256) || !gitShaPattern.MatchString(baseSha) || !sha256Pattern.MatchString(patchSha256) || len(patches) == 0 || !filepath.IsAbs(root) || filepath.Clean(root) != root || root == string(filepath.Separator) {
+// Parent cancellation and the one total operation deadline retire the entire
+// Git process group; a descendant cannot keep inherited pipes alive forever.
+func applyRepositoryPatchesContext(ctx context.Context, root string, identityBytes []byte, expectedIdentitySha256 string, baseSha string, patchSha256 string, policy controller.PatchPolicy, canonical *controller.CanonicalPatch, patches map[string][]byte, settings repositoryApplySettings) (candidateCommits map[string]string, operationErr error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if settings.Timeout <= 0 || settings.WaitDelay <= 0 || settings.MaximumOutputBytes <= 0 || !sha256Pattern.MatchString(expectedIdentitySha256) || !gitShaPattern.MatchString(baseSha) || !sha256Pattern.MatchString(patchSha256) || canonical == nil || canonical.Sha256 != patchSha256 || len(patches) == 0 || !filepath.IsAbs(root) || filepath.Clean(root) != root || root == string(filepath.Separator) {
 		return nil, errors.New("bounded authenticated source application required")
 	}
 	digest := sha256.Sum256(identityBytes)
@@ -72,6 +109,7 @@ func applyRepositoryPatches(root string, identityBytes []byte, expectedIdentityS
 		return nil, errors.New("original source identity bytes changed")
 	}
 	var identity repositorySourceIdentity
+	pathBase := policy.PathBase
 	decoder := json.NewDecoder(bytes.NewReader(identityBytes))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&identity); err != nil {
@@ -87,6 +125,9 @@ func applyRepositoryPatches(root string, identityBytes []byte, expectedIdentityS
 	if identity.Schema != 1 || identity.Kind != "sim-latency-evaluation-source" || !identity.Temporary || identity.BaseSha != baseSha || identity.Repositories["server"] != baseSha || identity.CandidatePatchSha256 != nil || identity.Branch != branch || !sha256Pattern.MatchString(identity.SourceLockSha256) {
 		return nil, errors.New("original source identity does not name pristine competition checkouts")
 	}
+	if identity.CandidatePathBase != "" && identity.CandidatePathBase != "mono_root_v1" || pathBase != "" && pathBase != "mono_root_v1" || pathBase != "" && identity.CandidatePathBase != pathBase {
+		return nil, errors.New("source image does not support the frozen candidate path base")
+	}
 	if _, err := model.CompetitionSourceLockDigest(identity.Repositories); err != nil {
 		return nil, err
 	}
@@ -94,30 +135,59 @@ func applyRepositoryPatches(root string, identityBytes []byte, expectedIdentityS
 		if _, exists := identity.Repositories[repository]; !exists || len(patch) == 0 {
 			return nil, errors.New("routed patch names an absent repository")
 		}
+		if pathBase == "" && repository != "server" {
+			return nil, errors.New("legacy source application cannot change a dependency repository")
+		}
 	}
 	resolved, err := filepath.EvalSymlinks(root)
 	info, statErr := os.Lstat(root)
 	if err != nil || statErr != nil || resolved != root || !info.IsDir() || info.Mode().Perm()&0077 != 0 {
 		return nil, errors.New("source root is not a private canonical directory")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), settings.Timeout)
+	ctx, cancel := context.WithTimeout(ctx, settings.Timeout)
 	defer cancel()
-	runGit := func(repository string, args ...string) (string, error) {
+	defer func() {
+		if err := ctx.Err(); err != nil {
+			operationErr = errors.Join(err, operationErr)
+		}
+	}()
+	runGitRaw := func(repository string, args ...string) (string, error) {
 		repositoryRoot := filepath.Join(root, repository)
-		commandArgs := []string{"-C", repositoryRoot, "-c", "safe.directory=" + repositoryRoot, "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "commit.gpgSign=false", "-c", "protocol.allow=never"}
+		commandArgs := []string{"-C", repositoryRoot, "-c", "safe.directory=" + repositoryRoot, "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "commit.gpgSign=false", "-c", "protocol.allow=never", "-c", "gc.auto=0", "-c", "maintenance.auto=false"}
 		command := exec.CommandContext(ctx, "git", append(commandArgs, args...)...)
+		command.WaitDelay = settings.WaitDelay
+		command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		command.Cancel = func() error {
+			if err := syscall.Kill(-command.Process.Pid, syscall.SIGKILL); errors.Is(err, syscall.ESRCH) {
+				return os.ErrProcessDone
+			} else {
+				return err
+			}
+		}
 		for _, value := range os.Environ() {
 			if !strings.HasPrefix(value, "GIT_") {
 				command.Env = append(command.Env, value)
 			}
 		}
-		command.Env = append(command.Env, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_TERMINAL_PROMPT=0", "GIT_AUTHOR_NAME=URnetwork Competition", "GIT_AUTHOR_EMAIL=competition@invalid", "GIT_COMMITTER_NAME=URnetwork Competition", "GIT_COMMITTER_EMAIL=competition@invalid", "GIT_AUTHOR_DATE=2000-01-01T00:00:00Z", "GIT_COMMITTER_DATE=2000-01-01T00:00:00Z", "LANG=C", "LC_ALL=C")
+		command.Env = append(command.Env, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0", "GIT_AUTHOR_NAME=URnetwork Competition", "GIT_AUTHOR_EMAIL=competition@invalid", "GIT_COMMITTER_NAME=URnetwork Competition", "GIT_COMMITTER_EMAIL=competition@invalid", "GIT_AUTHOR_DATE=2000-01-01T00:00:00Z", "GIT_COMMITTER_DATE=2000-01-01T00:00:00Z", "LANG=C", "LC_ALL=C")
 		output := &repositoryGitOutput{limit: settings.MaximumOutputBytes}
 		command.Stdout, command.Stderr = output, output
 		if err := command.Run(); err != nil {
-			return "", errors.New("bounded trusted source Git operation failed")
+			var exitError *exec.ExitError
+			if errors.As(err, &exitError) {
+				return output.content.String(), errors.Join(ctx.Err(), &repositoryGitExitError{exitCode: exitError.ExitCode()})
+			}
+			return "", errors.Join(ctx.Err(), errors.New("bounded trusted source Git operation failed"))
 		}
 		return strings.TrimSpace(output.content.String()), nil
+	}
+	runGit := func(repository string, args ...string) (string, error) {
+		configured, err := runGitRaw(repository, "config", "--local", "--includes", "--name-only", "--get-regexp", `^filter\.`)
+		var exitError *repositoryGitExitError
+		if !errors.As(err, &exitError) || exitError.exitCode != 1 || configured != "" {
+			return "", errors.Join(ctx.Err(), errors.New("trusted source Git filter configuration is present or unreadable"))
+		}
+		return runGitRaw(repository, args...)
 	}
 	repositories := model.CompetitionSourceRepositoryNames()
 	sort.Strings(repositories)
@@ -153,6 +223,12 @@ func applyRepositoryPatches(root string, identityBytes []byte, expectedIdentityS
 	}
 	for _, repository := range repositories {
 		if _, exists := patches[repository]; exists {
+			if err := controller.ValidateCompetitionRepositoryPatchBase(canonical, policy, repository, func(relative string) ([]byte, error) {
+				entry, err := runGit(repository, "--literal-pathspecs", "ls-tree", "-z", "--full-tree", identity.Repositories[repository], "--", relative)
+				return []byte(entry), err
+			}); err != nil {
+				return nil, err
+			}
 			if _, err := runGit(repository, "apply", "--check", "--whitespace=error-all", filepath.Join(patchDirectory, "patches", repository+".patch")); err != nil {
 				return nil, err
 			}

@@ -1,0 +1,29 @@
+=== RUN   TestCalibrationProtocolAuthenticatesArtifactRequestInventory
+--- PASS: TestCalibrationProtocolAuthenticatesArtifactRequestInventory (0.02s)
+=== RUN   TestCalibrationProtocolPreservesHistoricalSettings
+--- PASS: TestCalibrationProtocolPreservesHistoricalSettings (0.00s)
+=== RUN   TestCalibrationProtocolThreePairsKeepsDeterministicReduction
+--- PASS: TestCalibrationProtocolThreePairsKeepsDeterministicReduction (0.01s)
+=== RUN   TestCalibrationProtocolRejectsOriginalPositionSubstitution
+--- PASS: TestCalibrationProtocolRejectsOriginalPositionSubstitution (0.01s)
+=== RUN   TestCalibrationProtocolRequiresIndependentPublicationPins
+--- PASS: TestCalibrationProtocolRequiresIndependentPublicationPins (0.01s)
+=== RUN   TestCalibrationProtocolRejectsExecutionInUnusedOriginalPositions
+--- PASS: TestCalibrationProtocolRejectsExecutionInUnusedOriginalPositions (0.04s)
+=== RUN   TestCalibrationProtocolRequiresRetainedUnusedOriginalInventory
+--- PASS: TestCalibrationProtocolRequiresRetainedUnusedOriginalInventory (0.01s)
+=== RUN   TestCalibrationProtocolDefaultRejectsAmendedManifest
+--- PASS: TestCalibrationProtocolDefaultRejectsAmendedManifest (0.01s)
+=== RUN   TestCalibrationProtocolCommandParsesExplicitPublicationPins
+--- PASS: TestCalibrationProtocolCommandParsesExplicitPublicationPins (0.17s)
+=== RUN   TestHeldOutThreeAAssemblyCommand
+--- PASS: TestHeldOutThreeAAssemblyCommand (0.00s)
+=== RUN   TestHeldOutThreeAAssemblyKeepsOriginalPositionsAndMetadata
+--- PASS: TestHeldOutThreeAAssemblyKeepsOriginalPositionsAndMetadata (0.00s)
+=== RUN   TestHeldOutThreeAAssemblyRejectsChangedFixedInputs
+--- PASS: TestHeldOutThreeAAssemblyRejectsChangedFixedInputs (0.00s)
+=== RUN   TestHeldOutThreeAAssemblyRequiresExplicitNamedProtocol
+--- PASS: TestHeldOutThreeAAssemblyRequiresExplicitNamedProtocol (0.00s)
+=== RUN   TestHeldOutThreeAAssemblyNeverOverwritesPreviousOutput
+--- PASS: TestHeldOutThreeAAssemblyNeverOverwritesPreviousOutput (0.01s)
+PASS

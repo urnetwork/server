@@ -1,0 +1,169 @@
+// Separately selectable original-three input assembly reuses the qualified
+// retained layout discovery. It never replays, bootstraps or selects a margin.
+package main
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"reflect"
+	"runtime"
+	"syscall"
+	"testing"
+)
+
+// The fixed first three positions, not a successful-result search, determine
+// the only input set. Discovery remains distinct from native score replay.
+func assembleHeldOutOriginalThreeA(settings calibrationAnalysisSettings, discover func(string) (calibrationFileManifest, calibrationFileCohort, error)) (calibrationFileManifest, error) {
+	if settings.Protocol != calibrationProtocolThreeABridgeThreeB || settings.Cohorts != 3 || len(settings.OriginalPositions) != 3 || discover == nil {
+		return calibrationFileManifest{}, errors.New("explicit approved original-three assembly settings required")
+	}
+	var common calibrationFileManifest
+	cohorts := []calibrationFileCohort{}
+	campaignRoot := filepath.Dir(settings.OriginalPositions[0].Root)
+	for index, position := range settings.OriginalPositions {
+		if position.Position != index+1 || position.Root != filepath.Join(campaignRoot, fmt.Sprintf("cohort-%02d", index+1)) {
+			return common, errors.New("original-three assembly changed its fixed position root")
+		}
+		manifest, cohort, err := discover(position.Root)
+		if err != nil {
+			return common, err
+		}
+		if cohort.JobId != position.JobId || cohort.RoundId != position.RoundId || cohort.RequestSha256 != position.RequestSha256 || cohort.ArtifactDirectory != filepath.Join(position.Root, "artifacts") || cohort.FailureCode != "" || len(cohort.Inputs.Runs) != settings.Replicates || len(cohort.BaselineInputs.Runs) != settings.Replicates {
+			return common, errors.New("original-three assembly changed identity or omitted a fresh R9 side")
+		}
+		for _, digest := range []string{cohort.BaselineSha256, cohort.ScoreSha256, cohort.WorkerResultSha256, cohort.EvidenceManifestSha256, cohort.TerminalSha256} {
+			if !validSha256(digest) {
+				return common, errors.New("original-three assembly completion identity missing")
+			}
+		}
+		manifest.Cohorts = nil
+		if index == 0 {
+			common = manifest
+		} else if !reflect.DeepEqual(common, manifest) {
+			return common, errors.New("original-three assembly mixed source/workload/policy contracts")
+		}
+		cohorts = append(cohorts, cohort)
+	}
+	common.Cohorts = cohorts
+	common.Protocol = settings.Protocol
+	common.ProtocolApprovalSha256 = settings.ProtocolApprovalSha256
+	common.OriginalPlanSha256 = settings.OriginalPlanSha256
+	common.OriginalPositions = []int{1, 2, 3}
+	if err := validateCalibrationProtocolManifest(common, settings); err != nil {
+		return common, err
+	}
+	return common, nil
+}
+
+// New immutable output is synced before returning its exact byte digest. A
+// failed or previous output is retained, never truncated or silently retried.
+func writeHeldOutOriginalThreeA(path string, manifest calibrationFileManifest) (string, error) {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return "", errors.New("canonical original-three manifest output path required")
+	}
+	parent := filepath.Dir(path)
+	resolved, err := filepath.EvalSymlinks(parent)
+	info, statErr := os.Lstat(parent)
+	if err != nil || statErr != nil || resolved != parent || !info.IsDir() || info.Mode().Perm()&0077 != 0 {
+		return "", errors.New("original-three output parent must be canonical and private")
+	}
+	content, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	content = append(content, '\n')
+	fd, err := syscall.Open(path, syscall.O_WRONLY|syscall.O_CREAT|syscall.O_EXCL|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0400)
+	if err != nil {
+		return "", err
+	}
+	file := os.NewFile(uintptr(fd), path)
+	_, writeErr := file.Write(content)
+	syncErr, closeErr := file.Sync(), file.Close()
+	if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
+		return "", err
+	}
+	directory, err := os.Open(parent)
+	if err != nil {
+		return "", err
+	}
+	syncErr, closeErr = directory.Sync(), directory.Close()
+	if err := errors.Join(syncErr, closeErr); err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(content)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+// Inert unless selected explicitly. Only root, actual Go 1.27.3, independently
+// published pins and the canonical existing scoring slot can assemble real A.
+func TestHeldOutThreeAAssemblyCommand(t *testing.T) {
+	protocol := os.Getenv("SIM_LATENCY_ASSEMBLE_THREE_A_PROTOCOL")
+	if protocol == "" {
+		return
+	}
+	if protocol != calibrationProtocolThreeABridgeThreeB || os.Geteuid() != 0 || runtime.Version() != "go1.27.3" {
+		t.Fatal("original-three assembly requires explicit approved protocol, root and actual Go 1.27.3")
+	}
+	settings, err := calibrationSettingsForProtocol(protocol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	approval, approvalSha, plan, planSha := os.Getenv("SIM_LATENCY_ASSEMBLE_THREE_A_APPROVAL"), os.Getenv("SIM_LATENCY_ASSEMBLE_THREE_A_APPROVAL_SHA256"), os.Getenv("SIM_LATENCY_ASSEMBLE_THREE_A_PLAN"), os.Getenv("SIM_LATENCY_ASSEMBLE_THREE_A_PLAN_SHA256")
+	settings, err = bindCalibrationProtocolPublications(settings, approval, approvalSha, plan, planSha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = withCalibrationScoringSlot(os.Getenv("SIM_LATENCY_ASSEMBLE_THREE_A_LOCK"), func() (*calibrationAnalysisReport, error) {
+		manifest, err := assembleHeldOutOriginalThreeA(settings, func(root string) (calibrationFileManifest, calibrationFileCohort, error) {
+			manifest, input := retainedCalibrationQualificationInputs(t, root)
+			terminal, err := readCalibrationArtifact(root, "manager-terminal.log", input.TerminalSha256)
+			if err != nil {
+				return manifest, input, err
+			}
+			if err := validateCalibrationTerminal(terminal, settings.ExecutionLimitSeconds); err != nil {
+				return manifest, input, err
+			}
+			workerBytes, err := readCalibrationArtifact(input.ArtifactDirectory, "worker-result.json", input.WorkerResultSha256)
+			if err != nil {
+				return manifest, input, err
+			}
+			var worker map[string]json.RawMessage
+			if err := decodeStrictJSONBytes(workerBytes, &worker, "original-three typed worker completion"); err != nil {
+				return manifest, input, err
+			}
+			var jobId string
+			var score struct {
+				Placeable bool `json:"placeable"`
+			}
+			var security struct {
+				CleanupComplete bool `json:"cleanup_complete"`
+			}
+			if json.Unmarshal(worker["job_id"], &jobId) != nil || jobId != input.JobId || !bytes.Equal(bytes.TrimSpace(worker["eval_error"]), []byte("null")) || json.Unmarshal(worker["score"], &score) != nil || !score.Placeable || json.Unmarshal(worker["security"], &security) != nil || !security.CleanupComplete {
+				return manifest, input, errors.New("original-three incomplete, nonplaceable or failed worker cannot enter accepted input assembly")
+			}
+			return manifest, input, nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		if _, err := bindCalibrationProtocolPublications(settings, approval, approvalSha, plan, planSha); err != nil {
+			return nil, err
+		}
+		output := filepath.Join(filepath.Dir(settings.OriginalPositions[0].Root), "analysis-inputs-three-a-v1.json")
+		digest, err := writeHeldOutOriginalThreeA(output, manifest)
+		if err != nil {
+			return nil, err
+		}
+		t.Logf("assembled exactly original positions 01/02/03; manifest=%s sha256=%s; no replay, margin or acceptance performed", output, digest)
+		return &calibrationAnalysisReport{}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}

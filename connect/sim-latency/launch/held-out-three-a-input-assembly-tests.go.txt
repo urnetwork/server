@@ -1,0 +1,125 @@
+// Synthetic discovery and immutable-output guards qualify assembly separately
+// from native original-scorer replay and actual three-pair analysis.
+package main
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+)
+
+// Builds synthetic fixed publication identities without any production data.
+func newHeldOutThreeAAssemblyFixture(t *testing.T) (calibrationAnalysisSettings, map[string]calibrationFileManifest, map[string]calibrationFileCohort) {
+	t.Helper()
+	root := newCalibrationFileRoot(t)
+	settings, _ := calibrationSettingsForProtocol(calibrationProtocolThreeABridgeThreeB)
+	settings.ProtocolApprovalSha256 = strings.Repeat("a", 64)
+	settings.OriginalPlanSha256 = strings.Repeat("b", 64)
+	settings.OriginalBaseSha = strings.Repeat("c", 40)
+	settings.OriginalImageDigest = "sha256:" + strings.Repeat("d", 64)
+	settings.OriginalPolicySha256 = strings.Repeat("e", 64)
+	headers := map[string]calibrationFileManifest{}
+	inputs := map[string]calibrationFileCohort{}
+	for index := 1; index <= 3; index++ {
+		position := calibrationOriginalPosition{Position: index, Root: filepath.Join(root, fmt.Sprintf("cohort-%02d", index)), JobId: fmt.Sprintf("synthetic-job-%d", index), RoundId: fmt.Sprintf("synthetic-round-%d", index), RequestSha256: fmt.Sprintf("%064x", index), ProvenanceSha256: strings.Repeat("f", 64)}
+		settings.OriginalPositions = append(settings.OriginalPositions, position)
+		headers[position.Root] = calibrationFileManifest{Schema: 1, Kind: "sim-latency-same-seed-calibration-inputs", BaseSha: settings.OriginalBaseSha, EvaluatorImageDigest: settings.OriginalImageDigest, EvaluationPolicySha256: settings.OriginalPolicySha256, ProvidersSha256: strings.Repeat("1", 64), NoopPatchSha256: strings.Repeat("2", 64), RoundSeedHex: strings.Repeat("3", 64)}
+		input := calibrationFileCohort{JobId: position.JobId, RoundId: position.RoundId, ArtifactDirectory: filepath.Join(position.Root, "artifacts"), RequestSha256: position.RequestSha256, BaselineSha256: strings.Repeat("4", 64), ScoreSha256: strings.Repeat("5", 64), WorkerResultSha256: strings.Repeat("6", 64), EvidenceManifestSha256: strings.Repeat("7", 64), TerminalSha256: strings.Repeat("8", 64)}
+		for replicate := 0; replicate < 9; replicate++ {
+			input.Inputs.Runs = append(input.Inputs.Runs, fmt.Sprintf("candidate-%d.csv", replicate))
+			input.BaselineInputs.Runs = append(input.BaselineInputs.Runs, fmt.Sprintf("baseline-%d.csv", replicate))
+		}
+		inputs[position.Root] = input
+	}
+	return settings, headers, inputs
+}
+
+// Fixed first-three identities become explicit amended metadata, never an
+// implicit historical five-pair manifest with a smaller sample.
+func TestHeldOutThreeAAssemblyKeepsOriginalPositionsAndMetadata(t *testing.T) {
+	settings, headers, inputs := newHeldOutThreeAAssemblyFixture(t)
+	visited := []string{}
+	manifest, err := assembleHeldOutOriginalThreeA(settings, func(root string) (calibrationFileManifest, calibrationFileCohort, error) {
+		visited = append(visited, root)
+		return headers[root], inputs[root], nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Protocol != settings.Protocol || manifest.ProtocolApprovalSha256 != settings.ProtocolApprovalSha256 || manifest.OriginalPlanSha256 != settings.OriginalPlanSha256 || !reflect.DeepEqual(manifest.OriginalPositions, []int{1, 2, 3}) || len(manifest.Cohorts) != 3 {
+		t.Fatal("amended original-three metadata missing")
+	}
+	for index, position := range settings.OriginalPositions {
+		if visited[index] != position.Root || manifest.Cohorts[index].JobId != position.JobId {
+			t.Fatal("assembly selected a favorable/reordered position")
+		}
+	}
+}
+
+// Identity substitutions, shortened sides and changed shared policy all stop
+// before an output can be published; no successful later result is substituted.
+func TestHeldOutThreeAAssemblyRejectsChangedFixedInputs(t *testing.T) {
+	for _, mutate := range []func(*calibrationFileManifest, *calibrationFileCohort){func(m *calibrationFileManifest, c *calibrationFileCohort) { c.JobId = "synthetic-substitute" }, func(m *calibrationFileManifest, c *calibrationFileCohort) { c.RoundId = "synthetic-substitute" }, func(m *calibrationFileManifest, c *calibrationFileCohort) { c.Inputs.Runs = c.Inputs.Runs[:8] }, func(m *calibrationFileManifest, c *calibrationFileCohort) {
+		c.BaselineInputs.Runs = c.BaselineInputs.Runs[:8]
+	}, func(m *calibrationFileManifest, c *calibrationFileCohort) { c.FailureCode = "synthetic_failure" }, func(m *calibrationFileManifest, c *calibrationFileCohort) {
+		m.EvaluationPolicySha256 = strings.Repeat("9", 64)
+	}} {
+		settings, headers, inputs := newHeldOutThreeAAssemblyFixture(t)
+		target := settings.OriginalPositions[1].Root
+		header, input := headers[target], inputs[target]
+		mutate(&header, &input)
+		headers[target], inputs[target] = header, input
+		if _, err := assembleHeldOutOriginalThreeA(settings, func(root string) (calibrationFileManifest, calibrationFileCohort, error) {
+			return headers[root], inputs[root], nil
+		}); err == nil {
+			t.Fatal("changed original-three assembly accepted")
+		}
+	}
+}
+
+// Default five-cohort settings and incomplete first-three publications refuse.
+func TestHeldOutThreeAAssemblyRequiresExplicitNamedProtocol(t *testing.T) {
+	for _, mutate := range []func(*calibrationAnalysisSettings){func(s *calibrationAnalysisSettings) { s.Protocol = "" }, func(s *calibrationAnalysisSettings) { s.Cohorts = 5 }, func(s *calibrationAnalysisSettings) { s.OriginalPositions = s.OriginalPositions[:2] }, func(s *calibrationAnalysisSettings) { s.ProtocolApprovalSha256 = "" }} {
+		settings, headers, inputs := newHeldOutThreeAAssemblyFixture(t)
+		mutate(&settings)
+		if _, err := assembleHeldOutOriginalThreeA(settings, func(root string) (calibrationFileManifest, calibrationFileCohort, error) {
+			return headers[root], inputs[root], nil
+		}); err == nil {
+			t.Fatal("missing/implicit amendment accepted by assembly")
+		}
+	}
+}
+
+// A first append-only publication cannot be overwritten by a second assembly.
+func TestHeldOutThreeAAssemblyNeverOverwritesPreviousOutput(t *testing.T) {
+	settings, headers, inputs := newHeldOutThreeAAssemblyFixture(t)
+	manifest, err := assembleHeldOutOriginalThreeA(settings, func(root string) (calibrationFileManifest, calibrationFileCohort, error) {
+		return headers[root], inputs[root], nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(newCalibrationFileRoot(t), "analysis-inputs-three-a-v1.json")
+	digest, err := writeHeldOutOriginalThreeA(path, manifest)
+	if err != nil || !validSha256(digest) {
+		t.Fatalf("exclusive assembly publication failed: %v", err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().Perm() != 0400 {
+		t.Fatalf("assembly output not immutable private mode 0400: %v", err)
+	}
+	if _, err := writeHeldOutOriginalThreeA(path, manifest); err == nil {
+		t.Fatal("second assembly overwrote existing output")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !reflect.DeepEqual(before, after) {
+		t.Fatal("failed overwrite changed first manifest")
+	}
+}

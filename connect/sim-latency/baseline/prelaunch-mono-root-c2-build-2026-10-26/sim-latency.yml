@@ -1,0 +1,44 @@
+# Private C2 instrument source identity; not activation or qualification.
+# Uses the accepted original three-pair A margin; C1-to-C2 compatibility remains
+# pending the fresh revised-instrument R9/R9 bridge. No old C1 source-round
+# activation digest is relabeled as C2 authority.
+schema: 2
+staging: false
+frozen_at: 2026-10-26T15:01:22Z
+
+evaluation_source:
+  branch: sim-latency
+  generations:
+    - generation: 0
+      kind: baseline
+      source_lock_sha256: ec322ed2db023e15ea5dc3eea60a6ca5989661bba737c340fea3477d8d1300cf
+      significant_improvement_percent: 26.9
+      threshold_evidence_sha256: e78c1a965d485d0a183f95f72797aa75c5c0ba22e52acbcf28749cfe6ecb3adb
+      repositories:
+          server:
+            commit: a9e8e1a710b24c749e6499a0606938252c83e136
+          connect:
+            commit: e90d59eb404f973dba6e9d0689ecd94e2718c10e
+          sdk:
+            commit: d3824aa98c02e3c16ff7abcfe7a7088c8a470cdb
+          proxy:
+            commit: af1d364fe34b807c31936642bff7d3fd849ab2a4
+          glog:
+            commit: 1c4954b017d9e8140a4e7020f914eb27410a41c6
+          goidenticons:
+            commit: 39ccec1b69db3a6f67e7346d6f44863499e6241d
+          userwireguard:
+            commit: f9a92f0e5f5577a80d358065c4d39ca21f971a1c
+          sn:
+            commit: 6e686aabd53b7c45b154051fd268138988224eba
+          warp:
+            commit: 8dfa405ec380a60307952778921f05bba1c59a33
+          gvisor:
+            commit: 57c9e137f7407ad6cd41dcca1ba304a446e09c79
+
+control_plane_identity:
+  api_branch: main
+  worker_branch: main
+  runtime_image_digest_environment: WARP_IMAGE_DIGEST
+  persist_per_evaluation: true
+  freeze_main_commits: false

@@ -1,0 +1,29 @@
+c0ee14903e8f0b72b3c77dd0c9ae1a1e206c66a8
+b1bbfd19a4f0aa4922163a6c26bf823e83c83b3c127aa82666bae1a1623f0318  /home/by/urnetwork/temp/global-identity-runtime-20261026.2vFN6RfP/sim.test
+[env]glog not configured from command line. Using default configuration.
+I1026 16:45:01.298682  632748 env.go:1202] [env]try /srv/warp/config, [settings.yml]
+I1026 16:45:01.299084  632748 env.go:1202] [env]try /home/by/urnetwork/temp/main-targeted-2f46-corrected-20261026.3Nd6V666/fixture-provisioned/services/server-fixture-371604642/site, [settings.yml]
+I1026 16:45:01.299230  632748 env.go:81] [env]settings loaded
+selection=builder pass=1 exit=0 seconds=9
+ccf2bcd344f25ba41c26722b4456aba7fe875ec85e4d5f9fd28b7e4a8b9deb88  /home/by/urnetwork/temp/global-identity-runtime-20261026.2vFN6RfP/builder-1.stdout
+b1aa3ae0eecb13c69a0a5b410f5f0d00a581bc13452ac35110568d34f5822a2e  /home/by/urnetwork/temp/global-identity-runtime-20261026.2vFN6RfP/builder-1.stderr
+selection=builder pass=2 exit=0 seconds=9
+de9e148e209ede44588f0e96e5e1028e5d1ee04a66128fbda8f38742e7195106  /home/by/urnetwork/temp/global-identity-runtime-20261026.2vFN6RfP/builder-2.stdout
+da6d8fd062e5685b4f317fad7c9116d06a2e40cd5d6afd829ada8cb13fa39f14  /home/by/urnetwork/temp/global-identity-runtime-20261026.2vFN6RfP/builder-2.stderr
+selection=builder pass=3 exit=0 seconds=10
+849e27c37d45efaf83c36a3f49d8171b7cb3641a1955868f79d52ba990048174  /home/by/urnetwork/temp/global-identity-runtime-20261026.2vFN6RfP/builder-3.stdout
+449e0bc1f0f8a2e07812ef0aeed38c49bdf55cc69695368ebb34ebd7f471cf2c  /home/by/urnetwork/temp/global-identity-runtime-20261026.2vFN6RfP/builder-3.stderr
+[env]glog not configured from command line. Using default configuration.
+I1026 16:45:30.254705  644251 env.go:1202] [env]try /srv/warp/config, [settings.yml]
+I1026 16:45:30.255100  644251 env.go:1202] [env]try /home/by/urnetwork/temp/main-targeted-2f46-corrected-20261026.3Nd6V666/fixture-provisioned/services/server-fixture-371604642/site, [settings.yml]
+I1026 16:45:30.255249  644251 env.go:81] [env]settings loaded
+selection=runtime pass=1 exit=0 seconds=115
+27bd2d796a80e365f898db199d9382ca66d76c8d675b0241314f7027cff1f876  /home/by/urnetwork/temp/global-identity-runtime-20261026.2vFN6RfP/runtime-1.stdout
+468a6cd536b8744b60635f7be169d1013c99b3c9d3ad750b6019561ee1ffe3b0  /home/by/urnetwork/temp/global-identity-runtime-20261026.2vFN6RfP/runtime-1.stderr
+selection=runtime pass=2 exit=0 seconds=115
+0d47147f844d81ab7890fdafbe4478bde368d9862c7c6b7c0a9260c9cf037195  /home/by/urnetwork/temp/global-identity-runtime-20261026.2vFN6RfP/runtime-2.stdout
+6dc101e62ff0b70db95b489305fb63f5a90706a862cc323f9703c4c79e31187a  /home/by/urnetwork/temp/global-identity-runtime-20261026.2vFN6RfP/runtime-2.stderr
+selection=runtime pass=3 exit=0 seconds=116
+4ff53100e0b3b06a0c8b74d211d4522ff0c1d6e7a77aff806447d2faf9a43c0f  /home/by/urnetwork/temp/global-identity-runtime-20261026.2vFN6RfP/runtime-3.stdout
+ea27cd7fe9c8ad113f424b7fbe01fd3388eafa2b054f8c92aa70d4b108068475  /home/by/urnetwork/temp/global-identity-runtime-20261026.2vFN6RfP/runtime-3.stderr
+PASS_builder19_runtime39_three

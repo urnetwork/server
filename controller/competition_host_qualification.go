@@ -18,6 +18,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
@@ -26,6 +28,18 @@ import (
 const competitionHostQualificationProfile = "sim-latency-host-readiness/v1"
 const competitionHostQualificationTimeout = 15 * time.Minute
 const competitionHostQualificationComment = "// competitionHostReadinessProbe exercises the authenticated evaluator without changing behavior."
+
+// Tree discovery has an independent private budget, not new mutable policy or
+// a public deployment knob. Tests override these small structural bounds.
+type competitionQualificationSourceSettings struct {
+	MaximumTreeBytes   int
+	MaximumTreeEntries int
+}
+
+// The current server tree fits comfortably inside both fixed-owner defaults.
+func defaultCompetitionQualificationSourceSettings() competitionQualificationSourceSettings {
+	return competitionQualificationSourceSettings{MaximumTreeBytes: 4 * 1024 * 1024, MaximumTreeEntries: 16384}
+}
 
 // These independent root-provisioned pins are not accepted through the
 // supervisor request. The bomb report must belong to the current Linux boot.
@@ -319,22 +333,102 @@ func competitionQualificationPatch(path string, source []byte, policy PatchPolic
 	return canonical, nil
 }
 
+// The broad allowlist names repository subtrees, not literal Go files. Select
+// a deterministic regular Go blob from the actual pinned server tree, so a
+// legitimate file deletion or rename cannot leave an assumed probe path.
+func competitionQualificationTreeSourcePath(policy PatchPolicy, tree []byte, settings competitionQualificationSourceSettings) (string, error) {
+	if settings.MaximumTreeBytes <= 0 || settings.MaximumTreeEntries <= 0 || len(tree) == 0 || len(tree) > settings.MaximumTreeBytes || tree[len(tree)-1] != 0 {
+		return "", errors.New("host qualification requires a complete bounded committed tree")
+	}
+	entries := bytes.Split(tree[:len(tree)-1], []byte{0})
+	if len(entries) > settings.MaximumTreeEntries {
+		return "", errors.New("host qualification committed tree exceeds its entry budget")
+	}
+	selected := ""
+	seen := map[string]bool{}
+	for _, entry := range entries {
+		metadata, name, found := bytes.Cut(entry, []byte{'\t'})
+		fields := strings.Split(string(metadata), " ")
+		path := string(name)
+		if !found || len(fields) != 3 || !gitShaPattern.MatchString(fields[2]) || !utf8.ValidString(path) ||
+			validateRepositoryPath(path) != nil || strings.ContainsAny(path, `"'\\`) ||
+			strings.IndexFunc(path, func(value rune) bool { return unicode.IsSpace(value) || unicode.IsControl(value) }) >= 0 || seen[path] {
+			return "", errors.New("host qualification committed tree entry is malformed")
+		}
+		seen[path] = true
+		regular := (fields[0] == "100644" || fields[0] == "100755") && fields[1] == "blob"
+		if !regular && !(fields[0] == "120000" && fields[1] == "blob") && !(fields[0] == "160000" && fields[1] == "commit") {
+			return "", errors.New("host qualification committed tree has an unsupported mode or type")
+		}
+		if !regular || filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go") ||
+			strings.HasPrefix(filepath.Base(path), ".") || strings.HasPrefix(filepath.Base(path), "_") || !pathAllowed("server/"+path, policy) {
+			continue
+		}
+		if selected == "" || path < selected {
+			selected = path
+		}
+	}
+	if selected == "" {
+		return "", errors.New("host qualification has no approved regular Go source blob")
+	}
+	return selected, nil
+}
+
+// Legacy inventories retain the first sorted literal path. In broad mode only
+// the canonical patch gains its repository prefix; Git still reads the exact
+// pinned server tree rather than a working-tree path or a dependency checkout.
+func competitionQualificationSourcePaths(policy PatchPolicy, tree []byte, settings competitionQualificationSourceSettings) (string, string, error) {
+	if len(policy.AllowedPaths) == 0 || validateCompetitionAllowedPaths(policy) != nil {
+		return "", "", errors.New("host qualification has no approved Go patch surface")
+	}
+	path, sourcePath := "", ""
+	if policy.PathBase == competitionMonoRootPathBase {
+		relative, err := competitionQualificationTreeSourcePath(policy, tree, settings)
+		if err != nil {
+			return "", "", err
+		}
+		path, sourcePath = "server/"+relative, relative
+	} else {
+		paths := append([]string(nil), policy.AllowedPaths...)
+		sort.Strings(paths)
+		path, sourcePath = paths[0], paths[0]
+	}
+	if err := validateRepositoryPath(path); err != nil || filepath.Ext(path) != ".go" || !pathAllowed(path, policy) {
+		return "", "", errors.New("host qualification patch path is invalid or outside the approved policy")
+	}
+	return path, sourcePath, nil
+}
+
 // Reads a committed blob, not an arbitrary image working-tree path. The real
 // evaluator independently verifies the image/source lock before applying it.
 func readCompetitionQualificationSource(ctx context.Context, directory string, settings *Settings) (string, []byte, error) {
-	paths := append([]string(nil), settings.PatchPolicy.AllowedPaths...)
-	sort.Strings(paths)
-	if len(paths) == 0 {
-		return "", nil, errors.New("host qualification has no approved Go patch surface")
+	if settings == nil {
+		return "", nil, errors.New("host qualification source settings are missing")
 	}
-	path := paths[0]
-	if err := validateRepositoryPath(path); err != nil || filepath.Ext(path) != ".go" {
-		return "", nil, errors.New("host qualification patch path is invalid")
+	sourceSettings := defaultCompetitionQualificationSourceSettings()
+	var tree []byte
+	if settings.PatchPolicy.PathBase == competitionMonoRootPathBase {
+		if len(settings.PatchPolicy.AllowedPaths) == 0 || validateCompetitionAllowedPaths(settings.PatchPolicy) != nil {
+			return "", nil, errors.New("host qualification source policy is invalid")
+		}
+		stdout, stderr := &boundedBuffer{limit: sourceSettings.MaximumTreeBytes}, &boundedBuffer{limit: 64 * 1024}
+		exitCode, err := runContainedCommand(ctx, directory, "/usr/bin/docker", []string{
+			"run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
+			"--entrypoint", "/usr/bin/git", settings.EvaluatorImageDigest, "-C", "/workspace/server", "ls-tree", "-r", "-z", "--full-tree", settings.BaseSha,
+		}, stdout, stderr)
+		if err != nil || exitCode != 0 {
+			return "", nil, errors.New("could not read the bounded committed evaluator source tree")
+		}
+		tree = stdout.Bytes()
+	}
+	path, sourcePath, err := competitionQualificationSourcePaths(settings.PatchPolicy, tree, sourceSettings)
+	if err != nil {
+		return "", nil, err
 	}
 	stdout, stderr := &boundedBuffer{limit: 1024 * 1024}, &boundedBuffer{limit: 64 * 1024}
 	exitCode, err := runContainedCommand(ctx, directory, "/usr/bin/docker", []string{
 		"run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
-		"--entrypoint", "/usr/bin/git", settings.EvaluatorImageDigest, "-C", "/workspace/server", "show", settings.BaseSha + ":" + path,
+		"--entrypoint", "/usr/bin/git", settings.EvaluatorImageDigest, "-C", "/workspace/server", "show", settings.BaseSha + ":" + sourcePath,
 	}, stdout, stderr)
 	if err != nil || exitCode != 0 {
 		return "", nil, errors.New("could not read the locked Go source from the evaluator image")

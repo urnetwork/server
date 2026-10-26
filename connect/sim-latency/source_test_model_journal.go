@@ -36,6 +36,9 @@ type sourceTestProviderObservation struct {
 // Byte slices use base64 in journal JSON, preserving exact opaque provider
 // bytes without accepting their nested keys as local authority fields.
 func sourceTestProviderRecordLimit(settings sourceTestModelSettings) int64 {
+	if settings.SnowProvider != nil {
+		return 2*int64(len(settings.SnowProvider.Members))*settings.MaximumStreamBytes + settings.MaximumInputBytes
+	}
 	return 2*settings.MaximumStreamBytes + settings.MaximumInputBytes
 }
 
@@ -91,7 +94,7 @@ func sourceTestModelJournalContext(ctx context.Context, plan sourceTestPlan, set
 	limit := sourceTestProviderRecordLimit(settings)
 	if err := readSourceTestRecord(path, limit, &reservation); errors.Is(err, os.ErrNotExist) {
 		// A missing plan cannot reset authority while any phase evidence exists.
-		for _, phase := range []string{"invocation", "completion"} {
+		for _, phase := range []string{"invocation", "completion", "snow-qwen", "snow-gemma", "snow-muse"} {
 			for _, suffix := range []string{"-reservation.json", "-observation.json"} {
 				if _, err := os.Lstat(filepath.Join(directory, phase+suffix)); !errors.Is(err, os.ErrNotExist) {
 					return nil, nil, errors.New("independent provider evidence has no original model plan")
@@ -136,7 +139,11 @@ func journalSourceTestProviderStream(ctx context.Context, phase string, payload 
 	if settings.ResponseJournalDirectory == "" {
 		return send()
 	}
-	if phase != "invocation" && phase != "completion" || send == nil {
+	allowedPhase := phase == "invocation" || phase == "completion"
+	if settings.SnowProvider != nil {
+		allowedPhase = phase == "snow-qwen" || phase == "snow-gemma" || phase == "snow-muse"
+	}
+	if !allowedPhase || send == nil {
 		return nil, errors.New("independent provider journal phase is invalid")
 	}
 	if err := ctx.Err(); err != nil {

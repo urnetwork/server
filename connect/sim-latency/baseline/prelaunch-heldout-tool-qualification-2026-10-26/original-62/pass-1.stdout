@@ -1,0 +1,125 @@
+=== RUN   TestHeldOutOperatorCommand
+--- PASS: TestHeldOutOperatorCommand (0.00s)
+=== RUN   TestHeldOutExecutionCompletesAllJobsWithOneControlPerRound
+--- PASS: TestHeldOutExecutionCompletesAllJobsWithOneControlPerRound (24.38s)
+=== RUN   TestHeldOutExecutionRetainsGateFailureAndRunsEveryPosition
+--- PASS: TestHeldOutExecutionRetainsGateFailureAndRunsEveryPosition (24.50s)
+=== RUN   TestHeldOutExecutionRetainsSignificantMarginBlockedNoop
+--- PASS: TestHeldOutExecutionRetainsSignificantMarginBlockedNoop (24.37s)
+=== RUN   TestHeldOutExecutionOriginalDeadlineCannotRestart
+--- PASS: TestHeldOutExecutionOriginalDeadlineCannotRestart (23.28s)
+=== RUN   TestHeldOutExecutionDoesNotRetryInfrastructureFailure
+--- PASS: TestHeldOutExecutionDoesNotRetryInfrastructureFailure (23.30s)
+=== RUN   TestHeldOutExecutionRejectsCrossJobCandidateReuse
+--- PASS: TestHeldOutExecutionRejectsCrossJobCandidateReuse (23.56s)
+=== RUN   TestHeldOutExecutionRejectsReplacedFirstControlRecord
+--- PASS: TestHeldOutExecutionRejectsReplacedFirstControlRecord (23.54s)
+=== RUN   TestHeldOutExecutionFrozenControlRejectsIdentitySubstitution
+--- PASS: TestHeldOutExecutionFrozenControlRejectsIdentitySubstitution (23.35s)
+=== RUN   TestHeldOutExecutionFrozenControlRejectsChangedOriginalBytes
+--- PASS: TestHeldOutExecutionFrozenControlRejectsChangedOriginalBytes (23.28s)
+=== RUN   TestHeldOutExecutionFrozenControlRejectsDetachedEvidenceCensus
+--- PASS: TestHeldOutExecutionFrozenControlRejectsDetachedEvidenceCensus (23.20s)
+=== RUN   TestHeldOutExecutionAcceptsExactlyFourOrderedSeeds
+--- PASS: TestHeldOutExecutionAcceptsExactlyFourOrderedSeeds (24.21s)
+=== RUN   TestHeldOutExecutionRejectsIncompleteReferenceDespiteFourOrderedSeeds
+--- PASS: TestHeldOutExecutionRejectsIncompleteReferenceDespiteFourOrderedSeeds (24.28s)
+=== RUN   TestHeldOutExecutionAuthenticatesPublishedFullPlanBeforeResults
+--- PASS: TestHeldOutExecutionAuthenticatesPublishedFullPlanBeforeResults (23.19s)
+=== RUN   TestHeldOutExecutionRevealRequiresExplicitClosedCampaign
+--- PASS: TestHeldOutExecutionRevealRequiresExplicitClosedCampaign (23.35s)
+=== RUN   TestHeldOutExecutionCommitmentBindsEveryFrozenDependency
+--- PASS: TestHeldOutExecutionCommitmentBindsEveryFrozenDependency (23.45s)
+=== RUN   TestHeldOutExecutionBoundedLogsDrainWithoutLosingOverflowVerdict
+--- PASS: TestHeldOutExecutionBoundedLogsDrainWithoutLosingOverflowVerdict (0.00s)
+=== RUN   TestHeldOutMarginAcceptsPinnedFullReport
+--- PASS: TestHeldOutMarginAcceptsPinnedFullReport (0.00s)
+=== RUN   TestHeldOutMarginRejectsChangedReportBytes
+--- PASS: TestHeldOutMarginRejectsChangedReportBytes (0.00s)
+=== RUN   TestHeldOutMarginRejectsIncompleteOrUnboundReports
+--- PASS: TestHeldOutMarginRejectsIncompleteOrUnboundReports (0.00s)
+=== RUN   TestHeldOutMarginAcceptsFrozenGridBoundaries
+--- PASS: TestHeldOutMarginAcceptsFrozenGridBoundaries (0.00s)
+=== RUN   TestHeldOutMarginRejectsTrailingDataAndUnknownFields
+--- PASS: TestHeldOutMarginRejectsTrailingDataAndUnknownFields (0.00s)
+=== RUN   TestHeldOutOperatorPreparesCompleteNativeFiveRoundPlan
+--- PASS: TestHeldOutOperatorPreparesCompleteNativeFiveRoundPlan (29.12s)
+=== RUN   TestHeldOutOperatorPublicPlanOmitsAllPrivateMaterial
+--- PASS: TestHeldOutOperatorPublicPlanOmitsAllPrivateMaterial (23.11s)
+=== RUN   TestHeldOutOperatorRefusesChangedReportAtFinalPublication
+--- PASS: TestHeldOutOperatorRefusesChangedReportAtFinalPublication (12.17s)
+=== RUN   TestHeldOutOperatorEntropyFailureCannotRerollRoot
+--- PASS: TestHeldOutOperatorEntropyFailureCannotRerollRoot (11.04s)
+=== RUN   TestHeldOutOperatorRejectsRepeatedEffectiveWorkload
+--- PASS: TestHeldOutOperatorRejectsRepeatedEffectiveWorkload (11.47s)
+=== RUN   TestHeldOutOperatorNeverOverwritesPublicCommitments
+--- PASS: TestHeldOutOperatorNeverOverwritesPublicCommitments (11.12s)
+=== RUN   TestHeldOutOperatorRejectsIncompleteStageAReplayReceipts
+--- PASS: TestHeldOutOperatorRejectsIncompleteStageAReplayReceipts (11.05s)
+=== RUN   TestHeldOutOperatorRejectsChangedFrozenGeneratorSource
+--- PASS: TestHeldOutOperatorRejectsChangedFrozenGeneratorSource (10.99s)
+=== RUN   TestHeldOutOperatorRejectsUnqualifiedExecutableReceipt
+--- PASS: TestHeldOutOperatorRejectsUnqualifiedExecutableReceipt (16.56s)
+=== RUN   TestHeldOutOperatorRefusesLinkedSpecialAndPublicPrivateInputs
+--- PASS: TestHeldOutOperatorRefusesLinkedSpecialAndPublicPrivateInputs (0.00s)
+=== RUN   TestHeldOutOperatorRejectsRepinnedReferenceReordering
+--- PASS: TestHeldOutOperatorRejectsRepinnedReferenceReordering (23.17s)
+=== RUN   TestHeldOutOperatorRejectsChangedPrecommittedRequest
+--- PASS: TestHeldOutOperatorRejectsChangedPrecommittedRequest (28.77s)
+=== RUN   TestHeldOutOperatorExcludesKnownPrivateSeedDerivations
+--- PASS: TestHeldOutOperatorExcludesKnownPrivateSeedDerivations (0.44s)
+=== RUN   TestHeldOutOperatorAuthenticatesEveryExclusionSourceIdentity
+--- PASS: TestHeldOutOperatorAuthenticatesEveryExclusionSourceIdentity (10.96s)
+=== RUN   TestHeldOutOperatorExclusionCensusPreservesInt64Precision
+--- PASS: TestHeldOutOperatorExclusionCensusPreservesInt64Precision (10.98s)
+=== RUN   TestHeldOutOperatorRejectsNonExactCommittedOrderArrayLengths
+--- PASS: TestHeldOutOperatorRejectsNonExactCommittedOrderArrayLengths (0.00s)
+=== RUN   TestHeldOutOrderUniformAcceptedByteSpace
+--- PASS: TestHeldOutOrderUniformAcceptedByteSpace (0.00s)
+=== RUN   TestHeldOutOrderRejectsSurplusByteValues
+--- PASS: TestHeldOutOrderRejectsSurplusByteValues (0.00s)
+=== RUN   TestHeldOutOrderStopsAtConfiguredRejectionBound
+--- PASS: TestHeldOutOrderStopsAtConfiguredRejectionBound (0.00s)
+=== RUN   TestHeldOutOrderRefusesExhaustedEntropy
+--- PASS: TestHeldOutOrderRefusesExhaustedEntropy (0.00s)
+=== RUN   TestHeldOutOrderRefusesMissingSourceAndInvalidSettings
+--- PASS: TestHeldOutOrderRefusesMissingSourceAndInvalidSettings (0.00s)
+=== RUN   TestHeldOutOrderReturnedValueHasIndependentOwnership
+--- PASS: TestHeldOutOrderReturnedValueHasIndependentOwnership (0.00s)
+=== RUN   TestHeldOutFinalizationChangesOnlyDeferredFields
+--- PASS: TestHeldOutFinalizationChangesOnlyDeferredFields (0.00s)
+=== RUN   TestHeldOutFinalizationRefusesChangedRequestAndCrossRoundBinding
+--- PASS: TestHeldOutFinalizationRefusesChangedRequestAndCrossRoundBinding (0.00s)
+=== RUN   TestHeldOutFinalizationRefusesSecondBinding
+--- PASS: TestHeldOutFinalizationRefusesSecondBinding (0.00s)
+=== RUN   TestHeldOutFinalizationRefusesNoncanonicalPaths
+--- PASS: TestHeldOutFinalizationRefusesNoncanonicalPaths (0.00s)
+=== RUN   TestHeldOutFinalizationRefusesAmbiguousPlaceholders
+--- PASS: TestHeldOutFinalizationRefusesAmbiguousPlaceholders (0.00s)
+=== RUN   TestHeldOutBindingAcceptsFiveNativeWorkloads
+--- PASS: TestHeldOutBindingAcceptsFiveNativeWorkloads (0.73s)
+=== RUN   TestHeldOutBindingRejectsChangedSeedWithOldProviderBytes
+--- PASS: TestHeldOutBindingRejectsChangedSeedWithOldProviderBytes (0.47s)
+=== RUN   TestHeldOutBindingRejectsRepeatedEffectiveSeed
+--- PASS: TestHeldOutBindingRejectsRepeatedEffectiveSeed (0.44s)
+=== RUN   TestHeldOutBindingRejectsRepeatedPrivateSeed
+--- PASS: TestHeldOutBindingRejectsRepeatedPrivateSeed (0.44s)
+=== RUN   TestHeldOutBindingRejectsRepeatedProviderPayload
+--- PASS: TestHeldOutBindingRejectsRepeatedProviderPayload (0.43s)
+=== RUN   TestHeldOutBindingRejectsExcludedEffectiveSeed
+--- PASS: TestHeldOutBindingRejectsExcludedEffectiveSeed (0.44s)
+=== RUN   TestHeldOutBindingRejectsPartialSeedSet
+--- PASS: TestHeldOutBindingRejectsPartialSeedSet (0.44s)
+=== RUN   TestHeldOutBindingRejectsWrongProviderDigest
+--- PASS: TestHeldOutBindingRejectsWrongProviderDigest (0.43s)
+=== RUN   TestHeldOutBindingRejectsChangedClientPolicy
+--- PASS: TestHeldOutBindingRejectsChangedClientPolicy (0.47s)
+=== RUN   TestHeldOutBindingSeedDerivationUsesMiddleBytes
+--- PASS: TestHeldOutBindingSeedDerivationUsesMiddleBytes (0.00s)
+=== RUN   TestHeldOutBindingRejectsNoncanonicalPrivateSeed
+--- PASS: TestHeldOutBindingRejectsNoncanonicalPrivateSeed (0.00s)
+=== RUN   TestHeldOutBindingPublicJsonOmitsSensitiveWorkload
+--- PASS: TestHeldOutBindingPublicJsonOmitsSensitiveWorkload (0.44s)
+=== RUN   TestHeldOutBindingBoundedReadCleansGeneratedTemporaryFile
+--- PASS: TestHeldOutBindingBoundedReadCleansGeneratedTemporaryFile (0.03s)
+PASS

@@ -1,0 +1,39 @@
+=== RUN   TestSubmissionBuilderAuthenticatesWholeCandidateIdentity
+--- PASS: TestSubmissionBuilderAuthenticatesWholeCandidateIdentity (0.11s)
+=== RUN   TestSubmissionBuilderRequiresAuthenticatedBroadImageBeforeApplication
+--- PASS: TestSubmissionBuilderRequiresAuthenticatedBroadImageBeforeApplication (0.20s)
+=== RUN   TestSubmissionBuilderReleaseIdentityBindsAllTrustedTools
+--- PASS: TestSubmissionBuilderReleaseIdentityBindsAllTrustedTools (1.02s)
+=== RUN   TestSubmissionBuilderAuthenticatesUnchangedProtectedSource
+--- PASS: TestSubmissionBuilderAuthenticatesUnchangedProtectedSource (0.35s)
+=== RUN   TestSubmissionBuilderClassifiesSourceGitFailuresAsInfrastructure
+--- PASS: TestSubmissionBuilderClassifiesSourceGitFailuresAsInfrastructure (2.14s)
+=== RUN   TestSubmissionBuilderRejectsProtectedSourceChanges
+--- PASS: TestSubmissionBuilderRejectsProtectedSourceChanges (0.32s)
+=== RUN   TestSourceBuildSandboxCloneExcludesIgnoredSecretsAndOriginCredentials
+--- PASS: TestSourceBuildSandboxCloneExcludesIgnoredSecretsAndOriginCredentials (0.09s)
+=== RUN   TestSourceBuildSandboxCloneRejectsDirtyOrMismatchedSource
+--- PASS: TestSourceBuildSandboxCloneRejectsDirtyOrMismatchedSource (0.05s)
+=== RUN   TestSourceBuildSandboxContextAuthenticatesAndSealsCompleteCensus
+--- PASS: TestSourceBuildSandboxContextAuthenticatesAndSealsCompleteCensus (1.14s)
+=== RUN   TestSourceBuildSandboxContextRejectsChangedStatisticsAndLocalScope
+--- PASS: TestSourceBuildSandboxContextRejectsChangedStatisticsAndLocalScope (0.22s)
+=== RUN   TestSourceBuildSealsExecutableBitsFromGitTree
+--- PASS: TestSourceBuildSealsExecutableBitsFromGitTree (0.35s)
+=== RUN   TestSourceGitFixtureRetainsExplicitGlobalIdentity
+--- PASS: TestSourceGitFixtureRetainsExplicitGlobalIdentity (0.02s)
+=== RUN   TestSourceFixtureGitUsesGlobalIdentity
+--- PASS: TestSourceFixtureGitUsesGlobalIdentity (1.51s)
+=== RUN   TestSourceLocalGitCannotExecuteConfiguredAttributeFilters
+--- PASS: TestSourceLocalGitCannotExecuteConfiguredAttributeFilters (0.11s)
+=== RUN   TestSourceGitSeparatesLocalAndTransportConfiguration
+--- PASS: TestSourceGitSeparatesLocalAndTransportConfiguration (0.02s)
+=== RUN   TestSourceGitReadsForeignOwnedRootAndSubdirectory
+--- PASS: TestSourceGitReadsForeignOwnedRootAndSubdirectory (0.05s)
+=== RUN   TestSourceGitScopesExecutionWithoutDroppingTransportEnvironment
+--- PASS: TestSourceGitScopesExecutionWithoutDroppingTransportEnvironment (0.07s)
+=== RUN   TestSourceGitRejectsAmbiguousRepositoryPaths
+--- PASS: TestSourceGitRejectsAmbiguousRepositoryPaths (0.03s)
+=== RUN   TestReviewedSourceChecksRealPinnedModesForStagingAndPublication
+--- PASS: TestReviewedSourceChecksRealPinnedModesForStagingAndPublication (0.25s)
+PASS

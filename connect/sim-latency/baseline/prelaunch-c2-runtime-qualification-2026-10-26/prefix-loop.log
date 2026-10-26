@@ -1,0 +1,24 @@
+8c59a39db629160b7cb0af9edafd652f74529763758a1682e394170c7a9e47f8  connect/sim-latency/source_git_filter_test.go
+3c7753cf82fee2f86653947b342d7da1084d8d4b3876f38436f11f3d194f29b3  connect/sim-latency/source_epoch_test.go
+[env]glog not configured from command line. Using default configuration.
+I1026 16:43:59.184984  631389 env.go:1202] [env]try /srv/warp/config, [settings.yml]
+I1026 16:43:59.185383  631389 env.go:1202] [env]try /home/by/urnetwork/temp/main-targeted-2f46-corrected-20261026.3Nd6V666/fixture-provisioned/services/server-fixture-371604642/site, [settings.yml]
+I1026 16:43:59.185553  631389 env.go:81] [env]settings loaded
+=== RUN   TestSourceLocalGitCannotExecuteConfiguredAttributeFilters
+    source_git_filter_test.go:22: git commit --quiet --no-gpg-sign -m source base: exit status 128: Author identity unknown
+        
+        *** Please tell me who you are.
+        
+        Run
+        
+          git config --global user.email "you@example.com"
+          git config --global user.name "Your Name"
+        
+        to set your account's default identity.
+        Omit --global to set the identity only in this repository.
+        
+        fatal: unable to auto-detect email address (got 'root@sille.(none)')
+--- FAIL: TestSourceLocalGitCannotExecuteConfiguredAttributeFilters (0.08s)
+FAIL
+FAIL	github.com/urnetwork/server/connect/sim-latency	0.374s
+FAIL

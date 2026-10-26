@@ -1,0 +1,281 @@
+{
+  "accepted_five_cohort_calibration": false,
+  "additional_companions": 5,
+  "all_six_gates_passed": true,
+  "archived_regular_files": 486,
+  "candidates": 9,
+  "chunks": 4,
+  "controls": 9,
+  "duration_seconds": 10160,
+  "evidence_bindings": 465,
+  "gzip_sha256": "889ab8e59e304352dafaca77715e85dea62339c429c9e2dfa0284b6325f1d566",
+  "marker_bindings": 5,
+  "official_epoch_baseline": false,
+  "original_cohort_regular_files": 481,
+  "placeable": true,
+  "production_activated": false,
+  "readable_copies": 12,
+  "schema": 1,
+  "score": {
+    "diagnostics": {
+      "baseline": {
+        "findproviders_load_p95_ms": 32.92131023406982,
+        "findproviders_pool_p05": 2518,
+        "findproviders_sample_span_fraction": 0.9392555555555555,
+        "raw_score": 17417.496099999993,
+        "received_bytes": 3096620488,
+        "request_count": 2443,
+        "success_rate": 1
+      },
+      "baseline_sha256": "3dedeac4c21c9686d3907ce042d175bdd5f0aa7e44b9330da9f55ca97f252ae0",
+      "baseline_takeover_eligible": false,
+      "baseline_takeover_raw_max": 14613.279227899993,
+      "candidate": {
+        "accounting_coverage": 1.138412034698107,
+        "findproviders_load_p95_ms": 33.09297733306879,
+        "findproviders_pool_p05": 2518,
+        "findproviders_sample_span_fraction": 0.9360444444444445,
+        "raw_score": 18055.805199999988,
+        "received_bytes": 3088165434,
+        "request_count": 2419,
+        "success_rate": 1
+      },
+      "replicate_count": 9,
+      "replicates": [
+        {
+          "accounting_coverage": 1.230282250615347,
+          "evaluation_id": "candidate-01-0f2f95e7",
+          "findproviders_empty_pools": 0,
+          "findproviders_load_p95_ms": 27.8564284324646,
+          "findproviders_pool_p05": 2518,
+          "findproviders_sample_span_fraction": 0.9360444444444445,
+          "findproviders_samples": 218,
+          "provider_egress_bytes": 3672891400,
+          "raw_score": 16044.442999999997,
+          "received_bytes": 2985405502,
+          "request_count": 2365,
+          "resource_findings": [],
+          "stability_findings": [],
+          "success_rate": 1
+        },
+        {
+          "accounting_coverage": 1.138412034698107,
+          "evaluation_id": "candidate-02-0f2f95e7",
+          "findproviders_empty_pools": 0,
+          "findproviders_load_p95_ms": 35.75471305847163,
+          "findproviders_pool_p05": 2519,
+          "findproviders_sample_span_fraction": 0.9403111111111111,
+          "findproviders_samples": 218,
+          "provider_egress_bytes": 3653325727,
+          "raw_score": 19559.666199999996,
+          "received_bytes": 3209141871,
+          "request_count": 2509,
+          "resource_findings": [],
+          "stability_findings": [],
+          "success_rate": 0.9988043045037863
+        },
+        {
+          "accounting_coverage": 1.1892834511802999,
+          "evaluation_id": "candidate-03-0f2f95e7",
+          "findproviders_empty_pools": 0,
+          "findproviders_load_p95_ms": 33.09297733306879,
+          "findproviders_pool_p05": 2518,
+          "findproviders_sample_span_fraction": 0.9400555555555555,
+          "findproviders_samples": 218,
+          "provider_egress_bytes": 3673219615,
+          "raw_score": 15974.150199999991,
+          "received_bytes": 3088598947,
+          "request_count": 2447,
+          "resource_findings": [],
+          "stability_findings": [],
+          "success_rate": 1
+        },
+        {
+          "accounting_coverage": 1.2179677163048273,
+          "evaluation_id": "candidate-04-0f2f95e7",
+          "findproviders_empty_pools": 0,
+          "findproviders_load_p95_ms": 43.35999755859369,
+          "findproviders_pool_p05": 2518,
+          "findproviders_sample_span_fraction": 0.9399388888888889,
+          "findproviders_samples": 218,
+          "provider_egress_bytes": 3668773726,
+          "raw_score": 18856.9765,
+          "received_bytes": 3012209336,
+          "request_count": 2376,
+          "resource_findings": [],
+          "stability_findings": [],
+          "success_rate": 0.9974747474747475
+        },
+        {
+          "accounting_coverage": 1.2112205426971119,
+          "evaluation_id": "candidate-05-0f2f95e7",
+          "findproviders_empty_pools": 0,
+          "findproviders_load_p95_ms": 36.37945766448971,
+          "findproviders_pool_p05": 2518,
+          "findproviders_sample_span_fraction": 0.9403777777777778,
+          "findproviders_samples": 218,
+          "provider_egress_bytes": 3656240052,
+          "raw_score": 19096.915,
+          "received_bytes": 3018641051,
+          "request_count": 2371,
+          "resource_findings": [],
+          "stability_findings": [],
+          "success_rate": 0.9995782370307887
+        },
+        {
+          "accounting_coverage": 1.2035033702318931,
+          "evaluation_id": "candidate-06-0f2f95e7",
+          "findproviders_empty_pools": 0,
+          "findproviders_load_p95_ms": 32.05427293777463,
+          "findproviders_pool_p05": 2520,
+          "findproviders_sample_span_fraction": 0.9395,
+          "findproviders_samples": 218,
+          "provider_egress_bytes": 3673625527,
+          "raw_score": 16914.486999999994,
+          "received_bytes": 3052443074,
+          "request_count": 2397,
+          "resource_findings": [],
+          "stability_findings": [],
+          "success_rate": 1
+        },
+        {
+          "accounting_coverage": 1.1694374266925391,
+          "evaluation_id": "candidate-07-0f2f95e7",
+          "findproviders_empty_pools": 0,
+          "findproviders_load_p95_ms": 29.471589851379377,
+          "findproviders_pool_p05": 2518,
+          "findproviders_sample_span_fraction": 0.9401944444444444,
+          "findproviders_samples": 218,
+          "provider_egress_bytes": 3675161372,
+          "raw_score": 16517.908349999983,
+          "received_bytes": 3142674664,
+          "request_count": 2470,
+          "resource_findings": [],
+          "stability_findings": [],
+          "success_rate": 1
+        },
+        {
+          "accounting_coverage": 1.1770203580174925,
+          "evaluation_id": "candidate-08-0f2f95e7",
+          "findproviders_empty_pools": 0,
+          "findproviders_load_p95_ms": 28.56533699035639,
+          "findproviders_pool_p05": 2518,
+          "findproviders_sample_span_fraction": 0.9398944444444445,
+          "findproviders_samples": 218,
+          "provider_egress_bytes": 3673904526,
+          "raw_score": 18914.273,
+          "received_bytes": 3121360222,
+          "request_count": 2461,
+          "resource_findings": [],
+          "stability_findings": [],
+          "success_rate": 0.9975619666802112
+        },
+        {
+          "accounting_coverage": 1.1893733277891485,
+          "evaluation_id": "candidate-09-0f2f95e7",
+          "findproviders_empty_pools": 0,
+          "findproviders_load_p95_ms": 33.25801486968994,
+          "findproviders_pool_p05": 2520,
+          "findproviders_sample_span_fraction": 0.9399222222222222,
+          "findproviders_samples": 218,
+          "provider_egress_bytes": 3672981599,
+          "raw_score": 18055.805199999988,
+          "received_bytes": 3088165434,
+          "request_count": 2419,
+          "resource_findings": [],
+          "stability_findings": [],
+          "success_rate": 1
+        }
+      ],
+      "request_timeout_ms": 120000,
+      "round_id": "d3ee1e9e-fd82-46ce-83f3-8d61acb007ee",
+      "takeover_margin": 0.161
+    },
+    "gates": {
+      "G1_success": {
+        "details": {
+          "absolute_min_inclusive": 0.97,
+          "baseline": 1,
+          "baseline_minus_max": 0.99,
+          "candidate": 1
+        },
+        "passed": true
+      },
+      "G2_volume": {
+        "details": {
+          "bytes_max": 3251451512.4,
+          "bytes_min": 2941789463.6,
+          "candidate_bytes": 3088165434,
+          "candidate_requests": 2419,
+          "request_max": 2565.15,
+          "request_min": 2320.85
+        },
+        "passed": true
+      },
+      "G3_path_integrity": {
+        "details": {
+          "minimum_inclusive": 0.95,
+          "minimum_replicate_coverage": 1.138412034698107
+        },
+        "passed": true
+      },
+      "G4_matchmaking": {
+        "details": {
+          "all_pools_nonempty": true,
+          "all_replicates_have_samples": true,
+          "all_replicates_span_at_least_minimum": true,
+          "baseline_load_p95_ms": 32.92131023406982,
+          "baseline_minimum_replicate_sample_span_fraction": 0.9392555555555555,
+          "baseline_pool_p05": 2518,
+          "candidate_load_p95_ms": 33.09297733306879,
+          "candidate_pool_p05": 2518,
+          "maximum_inclusive_ms": 41.15163779258728,
+          "minimum_replicate_sample_span_fraction": 0.9360444444444445,
+          "pool_minimum_inclusive": 2266.2000000000003,
+          "sample_span_minimum_inclusive": 0.9
+        },
+        "passed": true
+      },
+      "G5_stability": {
+        "details": {
+          "all_replicates_clean": true
+        },
+        "passed": true
+      },
+      "G6_resources": {
+        "details": {
+          "all_replicates_within_limits": true
+        },
+        "passed": true
+      }
+    },
+    "normalized_score": 96.46479847932788,
+    "placeable": true,
+    "raw_score": 18055.805199999988,
+    "score_schema": 1,
+    "significance": {
+      "alpha": 0.05,
+      "baseline_mean_raw_score": 17180.233138888878,
+      "baseline_sample_variance": 2872787.5030349414,
+      "candidate_mean_raw_score": 17770.513827777773,
+      "candidate_sample_variance": 2004803.603560338,
+      "method": "one-sided-welch-t",
+      "minimum_significant_improvement_percent": 7.4956956291349925,
+      "next_epoch_minimum_improvement_percent": 6.984528225366181,
+      "observed_improvement_percent": -3.4358130306901726,
+      "one_sided_p_value": 0.782614396486979,
+      "recommended_next_epoch_takeover_margin_percent": 16.1,
+      "recommended_next_epoch_takeover_margin_supported": true,
+      "replicate_count": 9,
+      "required_improvement_percent": 16.1,
+      "statistically_significant": false,
+      "takeover_margin_percent": 16.1,
+      "welch_degrees_of_freedom": 15.508874109666428,
+      "welch_t": -0.8018204621663585
+    },
+    "takeover_eligible": false
+  },
+  "status": "completed_predeclared_cohort_03",
+  "terminal_verification": "actual_eval_error_and_all_7_465_5_bindings",
+  "worker_bindings": 7
+}

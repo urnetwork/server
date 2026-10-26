@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/urnetwork/server/model"
 )
 
 type sourceTestJournalSettings struct {
@@ -277,6 +279,9 @@ func executeJournaledSourceCorrectness(ctx context.Context, request reviewedSour
 		return nil, errors.New("journaled correctness requires the exact private build context")
 	}
 	plan := sourceTestPlan{Owner: owner, ImageId: artifacts.ImageId, SourceLockSha256: request.Proposal.SourceLockSha256, PatchSha256: request.Proposal.PatchSha256, SuiteSha256: sourceCorrectnessSuiteDigest()}
+	if request.Proposal.WinnerReviewPolicy == model.CompetitionSnowWinnerReviewPolicy {
+		plan.WinnerReviewPolicy = request.Proposal.WinnerReviewPolicy
+	}
 	return executeJournaledSourceTest(ctx, filepath.Join(artifacts.Directory, "independent-test-journal"), plan, settings.Now().Add(sandbox.Timeout), settings,
 		func(testCtx context.Context) (*sourceTestExecution, error) {
 			return executeSourceCorrectnessSuite(testCtx, request, artifacts, owner, sandbox, docker)

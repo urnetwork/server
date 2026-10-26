@@ -1,0 +1,30 @@
+{
+  "base_sha": "a9e8e1a710b24c749e6499a0606938252c83e136",
+  "build_sha": "bee54b79e4add9d9de46167a9aa3bca774e19af2",
+  "builder_sha256": "fbbf8010750d23f1f94a164780a56f40472a3325bc758d221dd2968bb0010b6e",
+  "candidate_commits": {
+    "connect": "6513e205a9179e04498d12ce9a5d5ef12db38761",
+    "glog": "1c4954b017d9e8140a4e7020f914eb27410a41c6",
+    "goidenticons": "39ccec1b69db3a6f67e7346d6f44863499e6241d",
+    "gvisor": "57c9e137f7407ad6cd41dcca1ba304a446e09c79",
+    "proxy": "af1d364fe34b807c31936642bff7d3fd849ab2a4",
+    "sdk": "d3824aa98c02e3c16ff7abcfe7a7088c8a470cdb",
+    "server": "bee54b79e4add9d9de46167a9aa3bca774e19af2",
+    "sn": "6e686aabd53b7c45b154051fd268138988224eba",
+    "userwireguard": "f9a92f0e5f5577a80d358065c4d39ca21f971a1c",
+    "warp": "8dfa405ec380a60307952778921f05bba1c59a33"
+  },
+  "candidate_commits_sha256": "48e64c1e5558e3b5ebc2d98fcc0f396bdbb2599020d45852d351da3c5c56e8a3",
+  "image_key": "ff73af21add2d6fa1ab3345b497455ec2d92d5e38bc619298243838ec1e32c3f",
+  "image_kind": "submission",
+  "original_source_identity_sha256": "6fd78777cf0c84a381aaf93f31149d24b3086f6259d12fa06051cc566e8317f5",
+  "patch_sha256": "1685325bd0246cf9ae81f83de53b8dca3581d5876d6894ba88a95757ab0de090",
+  "patch_validator_sha256": "3d161d76bace48bff6536164a84f330b1618c82f319775b8551c19872b937e54",
+  "paths": [
+    "connect/subprotocol.go",
+    "server/connect/resident_contract_manager.go"
+  ],
+  "policy_sha256": "861349e1a972fa9373436aaaf70b0923638e254087dcdd4bcaaf763282af7b16",
+  "schema": 1,
+  "simulator_sha256": "6adb8db6c9bb1eb4307b5af9928c616019e96c5bda21174fa0beecd7b6d3fc26"
+}

@@ -1,0 +1,689 @@
+// The named prospective amendment authenticates a separately installed control
+// release. It never relabels historical C1 scripts or supplies a generic override.
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"syscall"
+
+	"github.com/urnetwork/server/model"
+)
+
+// These public byte identities are mandatory in the C2 instrument descriptor.
+// The inactive installation receipts do not claim runtime qualification.
+type heldOutRuntimeRelease struct {
+	ControlRevision          string            `json:"control_revision"`
+	ValidatorSourceRevision  string            `json:"validator_source_revision"`
+	EvidenceMemoryLimitBytes int64             `json:"evidence_memory_limit_bytes"`
+	ScriptDirectory          string            `json:"script_directory"`
+	Manifest                 heldOutPinnedFile `json:"release_manifest"`
+	BuilderSha256            string            `json:"builder_sha256"`
+	ValidatorSha256          string            `json:"patch_validator_sha256"`
+	Runner                   heldOutPinnedFile `json:"bridge_runner"`
+	RunnerManifest           heldOutPinnedFile `json:"bridge_runner_manifest"`
+}
+
+// Actual installed facts, not user-selected executables or changeable policy.
+func frozenHeldOutAmendedRuntime() heldOutRuntimeRelease {
+	return heldOutRuntimeRelease{
+		ControlRevision:          "79e96f0eddf784038d4ed7601da8cc12d3d94e41",
+		ValidatorSourceRevision:  "7c4dc74e5d53d7b42e22e059565d778b35bee83e",
+		EvidenceMemoryLimitBytes: 5 * 1024 * 1024 * 1024,
+		ScriptDirectory:          "/usr/local/libexec/urnetwork/competition-c2-a9e8e1a7-control-79e96f0ed-go1273-evidence5g-v2/container",
+		Manifest:                 heldOutPinnedFile{Path: "/usr/local/libexec/urnetwork/competition-c2-a9e8e1a7-control-79e96f0ed-go1273-evidence5g-v2/release.json", Sha256: "20ad995d806bca7a9aba18a50f6e60ee2fba0b9ae038f3a484285c6d60e799d0"},
+		BuilderSha256:            "fbbf8010750d23f1f94a164780a56f40472a3325bc758d221dd2968bb0010b6e",
+		ValidatorSha256:          "3d161d76bace48bff6536164a84f330b1618c82f319775b8551c19872b937e54",
+		Runner:                   heldOutPinnedFile{Path: "/usr/local/libexec/urnetwork/competition-calibration-c2-a9e8e1a7-evidence5g-v2/cohort-runner.sh", Sha256: "f691eca1a83edce8f961fd512b4d9320778f507e603a0c553d98afb9256a686d"},
+		RunnerManifest:           heldOutPinnedFile{Path: "/usr/local/libexec/urnetwork/competition-calibration-c2-a9e8e1a7-evidence5g-v2/release.json", Sha256: "7edd2ee4dcc840734fe27abca8eb35777294344f169a0e61dab734330f3ddc1e"},
+	}
+}
+
+// Authenticates every host-side executable/configuration reached by the new
+// evaluator or builder; candidate/image contents retain their separate pins.
+func heldOutRuntimeComponentDigests() map[string]string {
+	return map[string]string{
+		"evaluator.sh":                   "d2b03b5b7d45bdb3943f594d410f7b5e955d5529553e1475bb1db7f9d313772a",
+		"network-boundary.sh":            "9ab82a9a8bb2272934461472509c15df4242f14859351dadd6dfcb2a1cd27cb7",
+		"compose.yml":                    "f4ca3a5eedfd5f081fbb507fc0102fa03ce11c095b406bcc0f7dc0119b5e0464",
+		"hash-local-mount.sh":            "94ee94b9cc42dfe2f7236d49cc24e26b7bd79e9b63c5d582315b7fd1878dcb86",
+		"docker-id-map.sh":               "0babbcce2d286bf861827c9c11fa02d841d487b33c23765c96916ee1063d854c",
+		"resource-boundary.sh":           "14909d09069d0ee329a2779796bf003b12765fa4fad435c0aeb784c316ccbd03",
+		"retain-failure-evidence.sh":     "f3f119c06b12662c1f2d1dae433be40de7a7b222fc42f55aba8b75a3cd14c4d1",
+		"postgres-init.sh":               "653b81b0fcf2fdaf4a3f4421a252a582484581e3a03463c0fad03186ee14d77c",
+		"timeout-budget.sh":              "7f3298edaca3bd31f4e5a02d17fd88ccb66f961e9d8493d9b047426d8fab476d",
+		"entrypoint.sh":                  "428a147c9372b98ea969d969e19b4ee47ac66d2c92c6605e837a9759329efccc",
+		"build-submission.sh":            "4a998275ffe94d322462ec9d7876af1ff288c3e8ba85f0c3278b4b512baa0172",
+		"submission-builder-identity.sh": "1764b7a97f1f99d33aa201c7e721dcce37ed3f58c5aeed8c99b50644706b8c19",
+		"prepare-evaluation-source.sh":   "a2445db1aa6e8655da12ca8ec810eda86c5e93df84801887c76ed490f232d4b6",
+		"Dockerfile.submission":          "255d1827494c22482bb851323ee13d8ee03fb407fbf40348531b7d2ec32fc034",
+		"competitionpatch":               "3d161d76bace48bff6536164a84f330b1618c82f319775b8551c19872b937e54",
+		"competitionpatch.sha256":        "560358c0192972f71e715144289b8871fc4c3566d382cd30a9b7d3deb74c6df7",
+	}
+}
+
+// Only the named constructor above can select the new runtime. The old map is
+// replaced, never mutated through the shallow release copy shared with C1.
+func selectHeldOutAmendedRuntime(release *heldOutRelease, supplied, expected heldOutRuntimeRelease) error {
+	if release == nil || !reflect.DeepEqual(supplied, expected) || !sourceGitShaPattern.MatchString(expected.ControlRevision) || !sourceGitShaPattern.MatchString(expected.ValidatorSourceRevision) || expected.EvidenceMemoryLimitBytes != 5*1024*1024*1024 || !validSha256(expected.BuilderSha256) || !validSha256(expected.ValidatorSha256) || expected.ScriptDirectory != filepath.Join(filepath.Dir(expected.Manifest.Path), "container") || filepath.Dir(expected.Runner.Path) != filepath.Dir(expected.RunnerManifest.Path) {
+		return errors.New("named C2 runtime release differs from its immutable installation")
+	}
+	release.ScriptDirectory, release.Runtime = supplied.ScriptDirectory, &supplied
+	release.ScriptDigests = heldOutRuntimeComponentDigests()
+	return nil
+}
+
+// New receipts bind the complete repository map and validator, while omitted
+// additive fields retain the historical ten-field codec and admission rules.
+func validateHeldOutRuntimeBuilderPin(build heldOutNativeBuild, release heldOutRelease) error {
+	if release.Runtime == nil {
+		if build.PatchValidatorSha256 != "" || build.CandidateCommitsSha256 != "" || build.OriginalSourceIdentitySha256 != "" || len(build.CandidateCommits) != 0 {
+			return errors.New("historical native build cannot inherit C2 metadata")
+		}
+		return nil
+	}
+	if build.BuilderSha256 != release.Runtime.BuilderSha256 || build.PatchValidatorSha256 != release.Runtime.ValidatorSha256 {
+		return errors.New("native build belongs to another trusted control release")
+	}
+	if !sourceGitShaPattern.MatchString(build.CandidateSha) || !validSha256(build.CandidateCommitsSha256) || !validSha256(build.OriginalSourceIdentitySha256) || build.CandidateCommits["server"] != build.CandidateSha {
+		return errors.New("C2 native build omits its source-map identity")
+	}
+	commits := map[string]string{}
+	for name, commit := range build.CandidateCommits {
+		commits[name] = commit
+	}
+	commits["server"] = release.BaseSha
+	lockDigest, err := model.CompetitionSourceLockDigest(commits)
+	if err != nil || lockDigest != release.SourceLockSha256 {
+		return errors.New("native reference changed the frozen ten-repository source map")
+	}
+	content, err := json.MarshalIndent(build.CandidateCommits, "", "  ")
+	if err != nil || heldOutDigest(append(content, '\n')) != build.CandidateCommitsSha256 {
+		return errors.New("native build candidate map digest mismatch")
+	}
+	imageKey := heldOutDigest([]byte(strings.Join([]string{build.BaseImageId, build.PatchSha256, build.PolicySha256, build.BuilderSha256}, "\x00")))
+	if build.ImageKey != imageKey || build.Image != "urnetwork/sim-latency-submission:"+imageKey[:32] {
+		return errors.New("native reference does not use the evaluator's deterministic image cache identity")
+	}
+	return nil
+}
+
+// The trusted preparer's complete native projection has one explicitly
+// nullable field: pristine sources must encode candidate_patch_sha256:null.
+type heldOutRuntimeSource struct {
+	Schema               int               `json:"schema"`
+	Kind                 string            `json:"kind"`
+	Temporary            bool              `json:"temporary"`
+	BaseImageId          string            `json:"base_image_id"`
+	BaseSha              string            `json:"base_sha"`
+	SourceEpoch          int               `json:"source_epoch"`
+	Staging              bool              `json:"staging"`
+	Branch               string            `json:"branch"`
+	SourceLockSha256     string            `json:"source_lock_sha256"`
+	CandidatePathBase    string            `json:"candidate_path_base"`
+	Repositories         map[string]string `json:"repositories"`
+	CandidatePatchSha256 *string           `json:"candidate_patch_sha256"`
+}
+
+// Raw lock bytes bind the C2 capability separately from the canonical commits-
+// only lock. Every false/zero/null field is required, not inferred by decoding.
+func validateHeldOutRuntimeSource(content []byte, release heldOutRelease, rawLockSha256, patchSha256 string, expectedCommits map[string]string) (*heldOutRuntimeSource, error) {
+	var source heldOutRuntimeSource
+	if err := decodeStrictJSONBytes(content, &source, "C2 native source identity"); err != nil {
+		return nil, err
+	}
+	canonical, err := json.Marshal(source)
+	if err != nil {
+		return nil, err
+	}
+	var recorded, expected map[string]json.RawMessage
+	if json.Unmarshal(content, &recorded) != nil || json.Unmarshal(canonical, &expected) != nil || len(recorded) != len(expected) {
+		return nil, errors.New("C2 source identity fields incomplete")
+	}
+	for name := range expected {
+		value, present := recorded[name]
+		if !present || (name != "candidate_patch_sha256" && bytes.Equal(bytes.TrimSpace(value), []byte("null"))) {
+			return nil, errors.New("C2 source identity contains a missing/null field")
+		}
+	}
+	if source.Schema != 1 || source.Kind != "sim-latency-evaluation-source" || !source.Temporary || source.BaseImageId != release.ImageId || source.BaseSha != release.BaseSha || source.SourceEpoch != 0 || source.Staging || source.Branch != "sim-latency" || !validSha256(rawLockSha256) || source.SourceLockSha256 != rawLockSha256 || source.CandidatePathBase != "mono_root_v1" {
+		return nil, errors.New("C2 source identity differs from the authenticated image and raw source lock")
+	}
+	if patchSha256 == "" {
+		if source.CandidatePatchSha256 != nil {
+			return nil, errors.New("pristine C2 source unexpectedly contains a candidate patch")
+		}
+	} else if !validSha256(patchSha256) || source.CandidatePatchSha256 == nil || *source.CandidatePatchSha256 != patchSha256 || !reflect.DeepEqual(source.Repositories, expectedCommits) {
+		return nil, errors.New("C2 candidate source differs from its authenticated build map and patch")
+	}
+	commits := map[string]string{}
+	for name, commit := range source.Repositories {
+		commits[name] = commit
+	}
+	if patchSha256 != "" {
+		commits["server"] = release.BaseSha
+	}
+	digest, err := model.CompetitionSourceLockDigest(commits)
+	if err != nil || digest != release.SourceLockSha256 {
+		return nil, errors.New("C2 source identity changed the frozen ten-repository lock")
+	}
+	return &source, nil
+}
+
+// Actual evaluator sidecars are evidence-manifest-bound before this read. A
+// new-format receipt cannot substitute its original source or control helper.
+func authenticateHeldOutRuntimeBuildEvidence(artifacts string, bound map[string]bool, build heldOutNativeBuild, request heldOutRequest, rawLockSha256 string, release heldOutRelease, settings heldOutOperatorSettings) error {
+	if release.Runtime == nil {
+		return nil
+	}
+	if build.Schema != 1 || build.BaseImageId != release.ImageId || build.BaseSha != release.BaseSha || build.PatchSha256 != request.PatchSha256 || !sourceGitShaPattern.MatchString(build.CandidateSha) || !bound["evidence/candidate-original-source.json"] || !bound["evidence/builder-identity.json"] {
+		return errors.New("C2 native build request/original-source/builder evidence missing or changed")
+	}
+	originalBytes, originalPin, err := readHeldOutProduced(artifacts, "evidence/candidate-original-source.json", settings.MaximumBytes)
+	if err != nil || originalPin.Sha256 != build.OriginalSourceIdentitySha256 {
+		return errors.New("C2 native build original source digest mismatch")
+	}
+	if _, err := validateHeldOutRuntimeSource(originalBytes, release, rawLockSha256, "", nil); err != nil {
+		return err
+	}
+	builderBytes, _, err := readHeldOutProduced(artifacts, "evidence/builder-identity.json", settings.MaximumBytes)
+	if err != nil {
+		return err
+	}
+	var builder heldOutRuntimeBuilder
+	if err := decodeHeldOutComplete(builderBytes, &builder, "executed C2 builder identity"); err != nil {
+		return err
+	}
+	digest, err := heldOutRuntimeBuilderDigest(builder)
+	if err != nil || builder.Schema != 1 || builder.Kind != "sim-latency-submission-builder/v2" || digest != build.BuilderSha256 || builder.BuilderSha256 != digest || builder.PatchValidatorSha256 != build.PatchValidatorSha256 {
+		return errors.New("executed C2 builder does not match its authenticated native receipt")
+	}
+	for name, digest := range map[string]string{"competitionpatch": builder.PatchValidatorSha256, "Dockerfile.submission": builder.DockerfileSha256, "build-submission.sh": builder.BuildScriptSha256, "submission-builder-identity.sh": builder.IdentityHelperSha256, "competitionpatch.sha256": builder.ValidatorPinSha256, "evaluator.sh": builder.EvaluatorSha256, "prepare-evaluation-source.sh": builder.SourcePreparerSha256} {
+		if release.ScriptDigests[name] != digest || !validSha256(digest) {
+			return errors.New("executed C2 builder component changed")
+		}
+	}
+	return nil
+}
+
+// Only authenticated C1-to-C2 instrument selection creates this internal
+// capability. It is not serialized or accepted from a qualification receipt.
+type heldOutReferenceInstrument struct {
+	OriginalBaseSha string
+	Repository      string
+	SourceDelta     heldOutPinnedFile
+}
+
+// Prior public pilots select an expected label, not a new measured C2 result.
+// The original tuple and prior-to-C1 changes remain explicit and digest-bound.
+type heldOutReferenceTransfer struct {
+	Schema                   int               `json:"schema"`
+	Kind                     string            `json:"kind"`
+	Protocol                 string            `json:"protocol"`
+	Claim                    string            `json:"claim"`
+	PriorBuild               heldOutPinnedFile `json:"prior_native_build"`
+	PriorDirection           heldOutPinnedFile `json:"prior_direction_evidence"`
+	PriorDirectionMeasured   bool              `json:"prior_direction_measured"`
+	TargetPath               string            `json:"target_path"`
+	TargetBlobSha256         string            `json:"unchanged_target_blob_sha256"`
+	PriorToC1DiffPaths       []string          `json:"prior_to_c1_changed_paths"`
+	InstrumentSourceDelta    heldOutPinnedFile `json:"c1_to_c2_instrument_delta"`
+	FreshBridgeRequired      bool              `json:"fresh_c2_bridge_required"`
+	AllThreeOrderedBRequired bool              `json:"all_three_ordered_c2_b_required"`
+}
+
+// Legacy measured-direction receipts keep their meaning. The named new basis
+// authenticates historical tuples and unchanged target bytes, while leaving
+// fresh C2 bridge/all-three-B ordering as separate mandatory acceptance gates.
+func authenticateHeldOutReferenceDirection(receipt heldOutReferenceQualification, reference heldOutReference, release heldOutRelease, settings heldOutOperatorSettings, run func(context.Context, string, ...string) ([]byte, error)) error {
+	expectedDirection := map[string]string{"better": "faster", "worse": "slower", "no-op": "no-op"}[reference.Role]
+	if receipt.EvidenceBasis == "" && receipt.ExpectedDirection == "" && receipt.PriorReference == nil {
+		if receipt.Direction != expectedDirection {
+			return errors.New("reference independent directional qualification missing")
+		}
+		return nil
+	}
+	transfer, instrument := receipt.PriorReference, release.ReferenceInstrument
+	if release.Runtime == nil || instrument == nil || run == nil || receipt.EvidenceBasis != "prior_public_reference_expected_direction" || receipt.ExpectedDirection != expectedDirection || receipt.Direction != "" || transfer == nil {
+		return errors.New("explicit prospective prior-reference evidence basis required")
+	}
+	if transfer.Schema != 1 || transfer.Kind != "sim-latency-prior-public-reference-direction-transfer" || transfer.Protocol != calibrationProtocolThreeABridgeThreeB || transfer.Claim != "expected-direction-hypothesis-not-new-c2-measurement" || transfer.TargetPath != "connect/resident_contract_manager.go" || !validSha256(transfer.TargetBlobSha256) || !transfer.FreshBridgeRequired || !transfer.AllThreeOrderedBRequired || transfer.InstrumentSourceDelta != instrument.SourceDelta || !validSha256(instrument.SourceDelta.Sha256) || !sourceGitShaPattern.MatchString(instrument.OriginalBaseSha) || !filepath.IsAbs(instrument.Repository) || filepath.Clean(instrument.Repository) != instrument.Repository || transfer.PriorDirectionMeasured != (reference.Role != "no-op") {
+		return errors.New("prior-reference transfer changed its claim, target or authenticated instrument delta")
+	}
+	priorBytes, err := readHeldOutPinned(transfer.PriorDirection, settings.MaximumBytes, false)
+	if err != nil {
+		return err
+	}
+	var prior heldOutReferenceQualification
+	if err := decodeHeldOutComplete(priorBytes, &prior, "original prior-reference direction evidence"); err != nil {
+		return err
+	}
+	if prior.Schema != 1 || prior.Kind != "sim-latency-held-out-reference-direction" || !prior.Accepted || prior.Role != reference.Role || prior.Direction != expectedDirection || prior.ExpectedDirection != "" || prior.EvidenceBasis != "" || prior.PriorReference != nil || prior.PatchSha256 != reference.Patch.Sha256 || prior.GoVersion != "go1.27.3" || prior.VcsModified || prior.BaseSha == release.BaseSha || prior.BaseImageId == release.ImageId || !sourceGitShaPattern.MatchString(prior.BaseSha) || !sourceGitShaPattern.MatchString(prior.CandidateSha) || !validSha256(prior.SourceLockSha256) || !validSha256(prior.BinarySha256) || !strings.HasPrefix(prior.BaseImageId, "sha256:") || !validSha256(strings.TrimPrefix(prior.BaseImageId, "sha256:")) || len(prior.Evidence) == 0 {
+		return errors.New("prior-reference direction tuple/patch changed or was relabeled as C2")
+	}
+	nativeBytes, err := readHeldOutPinned(transfer.PriorBuild, settings.MaximumBytes, false)
+	if err != nil {
+		return err
+	}
+	var native heldOutNativeBuild
+	if err := decodeHeldOutComplete(nativeBytes, &native, "original prior-reference native build"); err != nil {
+		return err
+	}
+	if native.Schema != 1 || native.BaseSha != prior.BaseSha || native.BaseImageId != prior.BaseImageId || native.CandidateSha != prior.CandidateSha || native.ImageId != prior.ImageId || native.PatchSha256 != prior.PatchSha256 || !validSha256(native.PolicySha256) || !validSha256(native.BuilderSha256) || !validSha256(native.ImageKey) || native.Image == "" || !strings.HasPrefix(prior.ImageId, "sha256:") || !validSha256(strings.TrimPrefix(prior.ImageId, "sha256:")) {
+		return errors.New("prior-reference direction evidence differs from its actual native build")
+	}
+	if err := validateHeldOutRuntimeBuilderPin(native, heldOutRelease{}); err != nil {
+		return err
+	}
+	for _, pin := range append(append([]heldOutPinnedFile{}, prior.Evidence...), instrument.SourceDelta) {
+		if _, err := readHeldOutPinned(pin, settings.MaximumBytes, false); err != nil {
+			return err
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), settings.CommandTimeout)
+	defer cancel()
+	git := func(args ...string) ([]byte, error) {
+		return run(ctx, "git", append([]string{"-C", instrument.Repository, "-c", "core.hooksPath=/dev/null", "-c", "core.attributesFile=/dev/null"}, args...)...)
+	}
+	for _, revision := range []string{prior.BaseSha, instrument.OriginalBaseSha, release.BaseSha} {
+		content, err := git("cat-file", "blob", revision+":"+transfer.TargetPath)
+		if err != nil || heldOutDigest(content) != transfer.TargetBlobSha256 {
+			return errors.New("prior/C1/C2 reference target blobs are not identical")
+		}
+	}
+	paths, err := git("diff", "--name-only", "--no-ext-diff", "--no-textconv", prior.BaseSha, instrument.OriginalBaseSha)
+	if err != nil || !reflect.DeepEqual(append([]string{}, strings.Fields(string(paths))...), append([]string{}, transfer.PriorToC1DiffPaths...)) {
+		return errors.New("prior-to-C1 source changes were not fully disclosed")
+	}
+	return nil
+}
+
+// This closed C2 projection excludes unrelated controller admission/review
+// changes, never generator declarations, imports, wrapper types or constants.
+// The complete transitive workload generator file is still compared verbatim.
+func heldOutControllerGeneratorProjection(content []byte) ([]byte, error) {
+	files := token.NewFileSet()
+	parsed, err := parser.ParseFile(files, "competition_controller.go", content, parser.ParseComments)
+	if err != nil || parsed.Name.Name != "controller" {
+		return nil, errors.New("native controller generator source malformed")
+	}
+	required := map[string]bool{"imports": false, "constants": false, "workloadArtifact": false, "WorkloadGenerator": false, "ControlPlaneWorkloadGenerator": false, "Generate": false, "generateRoundWorkload": false, "workloadSeed": false}
+	declarations := map[string]string{}
+	add := func(name string, node ast.Node) error {
+		if required[name] {
+			return errors.New("native generator declaration duplicated")
+		}
+		required[name] = true
+		declarations[name] = string(content[files.Position(node.Pos()).Offset:files.Position(node.End()).Offset])
+		return nil
+	}
+	for _, declaration := range parsed.Decls {
+		switch value := declaration.(type) {
+		case *ast.GenDecl:
+			if value.Tok == token.IMPORT {
+				if err := add("imports", value); err != nil {
+					return nil, err
+				}
+			}
+			for _, spec := range value.Specs {
+				switch spec := spec.(type) {
+				case *ast.TypeSpec:
+					if _, selected := required[spec.Name.Name]; selected {
+						if err := add(spec.Name.Name, spec); err != nil {
+							return nil, err
+						}
+					}
+				case *ast.ValueSpec:
+					selected := false
+					for _, name := range spec.Names {
+						selected = selected || name.Name == "workloadSeedDomain" || name.Name == "maxProvidersFileSize"
+					}
+					if selected && !required["constants"] {
+						if value.Tok != token.CONST || len(value.Specs) != 2 {
+							return nil, errors.New("native generator constants moved or changed shape")
+						}
+						for _, constant := range value.Specs {
+							constant, ok := constant.(*ast.ValueSpec)
+							if !ok || len(constant.Names) != 1 || len(constant.Values) != 1 || constant.Names[0].Name != "workloadSeedDomain" && constant.Names[0].Name != "maxProvidersFileSize" {
+								return nil, errors.New("native generator constant census changed")
+							}
+						}
+						if err := add("constants", value); err != nil {
+							return nil, err
+						}
+					}
+				}
+			}
+		case *ast.FuncDecl:
+			selected := (value.Name.Name == "workloadSeed" || value.Name.Name == "generateRoundWorkload") && value.Recv == nil
+			if value.Name.Name == "Generate" && value.Recv != nil && len(value.Recv.List) == 1 {
+				receiver, ok := value.Recv.List[0].Type.(*ast.Ident)
+				selected = ok && receiver.Name == "ControlPlaneWorkloadGenerator"
+			}
+			if selected {
+				if err := add(value.Name.Name, value); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+	for _, present := range required {
+		if !present {
+			return nil, errors.New("native generator declaration missing")
+		}
+	}
+	return json.Marshal(declarations)
+}
+
+// Legacy releases require both whole files. Only explicit C2 uses the closed
+// controller projection; its full generator implementation remains byte-exact.
+func authenticateHeldOutGeneratorFiles(pairs []heldOutGeneratorFile, release heldOutRelease, settings heldOutOperatorSettings) error {
+	if len(pairs) != 2 {
+		return errors.New("exact native generator provenance pair required")
+	}
+	nativeFiles := map[string]bool{"competition_controller.go": false, "competition_sim_latency_controller.go": false}
+	for _, pair := range pairs {
+		name := filepath.Base(pair.Analyzer.Path)
+		seen, present := nativeFiles[name]
+		if !present || seen || filepath.Base(pair.Frozen.Path) != name {
+			return errors.New("native generator provenance file set invalid")
+		}
+		analyzer, err := readHeldOutPinned(pair.Analyzer, settings.MaximumBytes, false)
+		if err != nil {
+			return err
+		}
+		frozen, err := readHeldOutPinned(pair.Frozen, settings.MaximumBytes, false)
+		if err != nil {
+			return err
+		}
+		if release.Runtime != nil && name == "competition_controller.go" {
+			analyzer, err = heldOutControllerGeneratorProjection(analyzer)
+			if err != nil {
+				return err
+			}
+			frozen, err = heldOutControllerGeneratorProjection(frozen)
+			if err != nil {
+				return err
+			}
+		}
+		if !bytes.Equal(analyzer, frozen) {
+			return errors.New("native generator differs from evaluated source")
+		}
+		nativeFiles[name] = true
+	}
+	return nil
+}
+
+// This projection prevents a nested runner flock: B already owns the campaign
+// slot and original job deadline; only the fresh bridge uses the cohort runner.
+func heldOutEvaluatorInvocation(release heldOutRelease, request, result string) (string, []string, error) {
+	if !filepath.IsAbs(release.ScriptDirectory) || filepath.Clean(release.ScriptDirectory) != release.ScriptDirectory || (release.Runtime != nil && release.ScriptDirectory != release.Runtime.ScriptDirectory) {
+		return "", nil, errors.New("held-out evaluator runtime selection changed")
+	}
+	return filepath.Join(release.ScriptDirectory, "evaluator.sh"), []string{"--request", request, "--result", result}, nil
+}
+
+// Minimal stat projection permits deterministic ownership/path regression
+// tests without requiring Docker, a root temp directory or real credentials.
+type heldOutRootPathMetadata struct {
+	Mode  os.FileMode
+	Uid   uint32
+	Gid   uint32
+	Links uint64
+}
+
+// Every ancestor is checked with lstat, including the filesystem root. Leaves
+// are single-link read-only root files; a writable ancestor is never trusted.
+func validateHeldOutRootPath(path string, mode os.FileMode, stat func(string) (heldOutRootPathMetadata, error)) error {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path || stat == nil {
+		return errors.New("canonical protected runtime path required")
+	}
+	for current := path; ; current = filepath.Dir(current) {
+		metadata, err := stat(current)
+		if err != nil || metadata.Uid != 0 || metadata.Gid != 0 || metadata.Mode.Perm()&0022 != 0 || metadata.Mode&os.ModeSymlink != 0 {
+			return errors.New("runtime path has an untrusted owner, writable ancestor or symlink")
+		}
+		if current == path {
+			if !metadata.Mode.IsRegular() || metadata.Mode.Perm() != mode || metadata.Mode&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 || metadata.Links != 1 {
+				return errors.New("runtime leaf must be a single-link read-only root file")
+			}
+		} else if !metadata.Mode.IsDir() {
+			return errors.New("runtime path ancestor is not a directory")
+		}
+		if current == string(filepath.Separator) {
+			return nil
+		}
+	}
+}
+
+// Checks protected ancestry both sides of the bounded inode/digest read.
+func readHeldOutRootPinned(pin heldOutPinnedFile, mode os.FileMode, maximumBytes int64) ([]byte, error) {
+	stat := func(path string) (heldOutRootPathMetadata, error) {
+		info, err := os.Lstat(path)
+		if err != nil {
+			return heldOutRootPathMetadata{}, err
+		}
+		metadata, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			return heldOutRootPathMetadata{}, errors.New("runtime stat identity unavailable")
+		}
+		return heldOutRootPathMetadata{Mode: info.Mode(), Uid: metadata.Uid, Gid: metadata.Gid, Links: metadata.Nlink}, nil
+	}
+	if err := validateHeldOutRootPath(pin.Path, mode, stat); err != nil {
+		return nil, err
+	}
+	content, err := readHeldOutPinned(pin, maximumBytes, false)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateHeldOutRootPath(pin.Path, mode, stat); err != nil {
+		clear(content)
+		return nil, err
+	}
+	return content, nil
+}
+
+// Mirrors the existing builder helper's complete immutable identity schema.
+type heldOutRuntimeBuilder struct {
+	Schema               int    `json:"schema"`
+	Kind                 string `json:"kind"`
+	PatchValidatorSha256 string `json:"patch_validator_sha256"`
+	DockerfileSha256     string `json:"dockerfile_sha256"`
+	BuildScriptSha256    string `json:"build_script_sha256"`
+	IdentityHelperSha256 string `json:"identity_helper_sha256"`
+	ValidatorPinSha256   string `json:"validator_pin_sha256"`
+	EvaluatorSha256      string `json:"evaluator_sha256"`
+	SourcePreparerSha256 string `json:"source_preparer_sha256"`
+	BuilderSha256        string `json:"builder_sha256"`
+}
+
+// Sorted compact JSON matches jq -nSc before its builder_sha256 addition.
+func heldOutRuntimeBuilderDigest(builder heldOutRuntimeBuilder) (string, error) {
+	content, err := json.Marshal(map[string]any{"schema": builder.Schema, "kind": builder.Kind,
+		"patch_validator_sha256": builder.PatchValidatorSha256, "dockerfile_sha256": builder.DockerfileSha256,
+		"build_script_sha256": builder.BuildScriptSha256, "identity_helper_sha256": builder.IdentityHelperSha256,
+		"validator_pin_sha256": builder.ValidatorPinSha256, "evaluator_sha256": builder.EvaluatorSha256,
+		"source_preparer_sha256": builder.SourcePreparerSha256})
+	if err != nil {
+		return "", err
+	}
+	return heldOutDigest(content), nil
+}
+
+// The root installation is deliberately still inactive and unqualified.
+type heldOutRuntimeManifest struct {
+	Schema                              int                   `json:"schema"`
+	Kind                                string                `json:"kind"`
+	ControlRevision                     string                `json:"control_revision"`
+	ValidatorSourceRevision             string                `json:"validator_source_revision"`
+	EvidenceMemoryLimitBytes            int64                 `json:"evidence_memory_limit_bytes"`
+	ActiveMemoryLimitBytes              int64                 `json:"active_memory_limit_bytes"`
+	MinimumManagementMemoryReserveBytes int64                 `json:"minimum_management_memory_reserve_bytes"`
+	ExpectedHostMemoryBytes             int64                 `json:"expected_host_memory_bytes"`
+	ExpectedCapacityReserveBytes        int64                 `json:"expected_capacity_reserve_bytes"`
+	ImageId                             string                `json:"evaluator_image_digest"`
+	InstalledAt                         string                `json:"installed_at"`
+	BaseSha                             string                `json:"measured_source_revision"`
+	OldReleasesModified                 bool                  `json:"old_releases_modified"`
+	Qualified                           bool                  `json:"qualified"`
+	Activated                           bool                  `json:"activated"`
+	ReleaseDirectory                    string                `json:"release_directory"`
+	ValidatorSha256                     string                `json:"validator_sha256"`
+	Builder                             heldOutRuntimeBuilder `json:"builder"`
+}
+
+// The runner receipt is installation evidence, never an execution observation.
+type heldOutRuntimeRunnerManifest struct {
+	Schema                   int    `json:"schema"`
+	Kind                     string `json:"kind"`
+	InstalledAt              string `json:"installed_at"`
+	Path                     string `json:"path"`
+	Sha256                   string `json:"sha256"`
+	Uid                      int    `json:"uid"`
+	Gid                      int    `json:"gid"`
+	Mode                     string `json:"mode"`
+	BuilderSha256            string `json:"builder_sha256"`
+	ValidatorSha256          string `json:"patch_validator_sha256"`
+	EvaluatorSha256          string `json:"evaluator_sha256"`
+	ControlRevision          string `json:"control_revision"`
+	ValidatorSourceRevision  string `json:"validator_source_revision"`
+	EvidenceMemoryLimitBytes int64  `json:"evidence_memory_limit_bytes"`
+	ResourceBoundarySha256   string `json:"resource_boundary_sha256"`
+	BaseSha                  string `json:"source_revision"`
+	ImageId                  string `json:"image"`
+	OldReleaseModified       bool   `json:"old_release_modified"`
+	Executed                 bool   `json:"executed"`
+	Qualified                bool   `json:"qualified"`
+	Activated                bool   `json:"activated"`
+}
+
+// Complete exact schemas, linked source/image and recomputed composite prevent
+// a valid-looking manifest from authorizing another binary or older builder.
+func validateHeldOutRuntimeManifests(bundleBytes, runnerBytes []byte, runtime heldOutRuntimeRelease, release heldOutRelease, components map[string]string) error {
+	var bundle heldOutRuntimeManifest
+	var runner heldOutRuntimeRunnerManifest
+	if err := decodeHeldOutComplete(bundleBytes, &bundle, "C2 inactive builder release"); err != nil {
+		return err
+	}
+	if err := decodeHeldOutComplete(runnerBytes, &runner, "C2 inactive bridge runner release"); err != nil {
+		return err
+	}
+	if bundle.Schema != 1 || bundle.Kind != "sim-latency-c2-inactive-builder-release" || bundle.ControlRevision != runtime.ControlRevision || bundle.ImageId != release.ImageId || bundle.BaseSha != release.BaseSha || bundle.InstalledAt == "" || bundle.OldReleasesModified || bundle.Qualified || bundle.Activated || bundle.ReleaseDirectory != filepath.Dir(runtime.ScriptDirectory) || bundle.ValidatorSha256 != runtime.ValidatorSha256 {
+		return errors.New("C2 builder installation receipt source/control identity changed")
+	}
+	if bundle.ValidatorSourceRevision != runtime.ValidatorSourceRevision || bundle.EvidenceMemoryLimitBytes != runtime.EvidenceMemoryLimitBytes ||
+		bundle.EvidenceMemoryLimitBytes != 5*1024*1024*1024 || bundle.ActiveMemoryLimitBytes != 96*1024*1024*1024 || bundle.MinimumManagementMemoryReserveBytes != 24*1024*1024*1024 ||
+		bundle.ExpectedHostMemoryBytes-bundle.ActiveMemoryLimitBytes-bundle.EvidenceMemoryLimitBytes != bundle.ExpectedCapacityReserveBytes || bundle.ExpectedCapacityReserveBytes < bundle.MinimumManagementMemoryReserveBytes {
+		return errors.New("C2 prospective evidence profile weakened source or host management reserve")
+	}
+	builder := bundle.Builder
+	digest, err := heldOutRuntimeBuilderDigest(builder)
+	if err != nil || builder.Schema != 1 || builder.Kind != "sim-latency-submission-builder/v2" || builder.BuilderSha256 != runtime.BuilderSha256 || digest != runtime.BuilderSha256 || builder.PatchValidatorSha256 != runtime.ValidatorSha256 {
+		return errors.New("C2 composite builder identity changed")
+	}
+	for name, digest := range map[string]string{"competitionpatch": builder.PatchValidatorSha256, "Dockerfile.submission": builder.DockerfileSha256, "build-submission.sh": builder.BuildScriptSha256, "submission-builder-identity.sh": builder.IdentityHelperSha256, "competitionpatch.sha256": builder.ValidatorPinSha256, "evaluator.sh": builder.EvaluatorSha256, "prepare-evaluation-source.sh": builder.SourcePreparerSha256} {
+		if !validSha256(digest) || components[name] != digest {
+			return errors.New("C2 builder component differs from the pinned execution release")
+		}
+	}
+	if runner.Schema != 1 || runner.Kind != "sim-latency-c2-inactive-cohort-runner-release" || runner.InstalledAt == "" || runner.Path != runtime.Runner.Path || runner.Sha256 != runtime.Runner.Sha256 || runner.Uid != 0 || runner.Gid != 0 || runner.Mode != "0555" || runner.BuilderSha256 != runtime.BuilderSha256 || runner.ValidatorSha256 != runtime.ValidatorSha256 || runner.EvaluatorSha256 != builder.EvaluatorSha256 || runner.ControlRevision != runtime.ControlRevision || runner.BaseSha != release.BaseSha || runner.ImageId != release.ImageId || runner.OldReleaseModified || runner.Executed || runner.Qualified || runner.Activated {
+		return errors.New("C2 bridge runner installation receipt changed")
+	}
+	if runner.ValidatorSourceRevision != runtime.ValidatorSourceRevision || runner.EvidenceMemoryLimitBytes != runtime.EvidenceMemoryLimitBytes ||
+		!validSha256(runner.ResourceBoundarySha256) || runner.ResourceBoundarySha256 != components["resource-boundary.sh"] {
+		return errors.New("C2 runner differs from the prospective evidence profile")
+	}
+	return nil
+}
+
+// Rechecked before preparation, every B invocation and bridge authentication.
+// Nothing here executes the helper, CLI, runner, candidate or provider.
+func authenticateHeldOutRuntimeFiles(release heldOutRelease, settings heldOutOperatorSettings) error {
+	if release.Runtime == nil || !reflect.DeepEqual(*release.Runtime, frozenHeldOutAmendedRuntime()) || release.ScriptDirectory != release.Runtime.ScriptDirectory || !reflect.DeepEqual(release.ScriptDigests, heldOutRuntimeComponentDigests()) {
+		return errors.New("explicit immutable C2 runtime selection required")
+	}
+	runtime := *release.Runtime
+	bundleBytes, err := readHeldOutRootPinned(runtime.Manifest, 0444, settings.MaximumBytes)
+	if err != nil {
+		return err
+	}
+	runnerBytes, err := readHeldOutRootPinned(runtime.RunnerManifest, 0444, settings.MaximumBytes)
+	if err != nil {
+		return err
+	}
+	components := heldOutRuntimeComponentDigests()
+	if err := validateHeldOutRuntimeManifests(bundleBytes, runnerBytes, runtime, release, components); err != nil {
+		return err
+	}
+	for name, digest := range components {
+		mode, bound := os.FileMode(0555), settings.MaximumBytes
+		if name == "compose.yml" || name == "Dockerfile.submission" || name == "competitionpatch.sha256" {
+			mode = 0444
+		}
+		if name == "competitionpatch" {
+			bound = settings.MaximumExecutableBytes
+		}
+		content, err := readHeldOutRootPinned(heldOutPinnedFile{Path: filepath.Join(runtime.ScriptDirectory, name), Sha256: digest}, mode, bound)
+		if err != nil {
+			return err
+		}
+		if name == "competitionpatch.sha256" && !bytes.Equal(content, []byte(runtime.ValidatorSha256+"\n")) {
+			return errors.New("C2 trusted validator sidecar is not the exact LF-terminated pin")
+		}
+	}
+	_, err = readHeldOutRootPinned(runtime.Runner, 0555, settings.MaximumBytes)
+	return err
+}
+
+// The bridge's separately managed single-attempt command is fixed before any
+// result. B does not invoke it while holding the same canonical scoring slot.
+func validateHeldOutBridgeRuntime(plan heldOutBridgePlan, release heldOutRelease) error {
+	if release.Runtime == nil || plan.Runner != release.Runtime.Runner || plan.RunnerManifest != release.Runtime.RunnerManifest {
+		return errors.New("bridge precommit does not pin the explicit C2 cohort runner")
+	}
+	return nil
+}
+
+// Only keys emitted by the installed immutable runner are interpreted. These
+// bindings supplement, not replace, actual manager observations/raw artifacts.
+func validateHeldOutBridgeRuntimeTerminal(content []byte, release heldOutRelease, requestSha256 string) error {
+	if release.Runtime == nil || !validSha256(requestSha256) {
+		return errors.New("bridge terminal lacks an explicit C2 runtime")
+	}
+	expected := map[string]string{"instrument_revision": "C2", "builder_sha256": release.Runtime.BuilderSha256, "validator_sha256": release.Runtime.ValidatorSha256, "request_sha256": requestSha256}
+	seen := map[string]bool{}
+	for _, line := range strings.Split(string(content), "\n") {
+		key, value, found := strings.Cut(line, "=")
+		if want, bound := expected[key]; bound && found {
+			if seen[key] || value != want {
+				return errors.New("bridge terminal changed or repeated its control release binding")
+			}
+			seen[key] = true
+		}
+	}
+	if len(seen) != len(expected) {
+		return errors.New("bridge terminal omitted its installed C2 control release binding")
+	}
+	return nil
+}
+
+// The accepted witness cannot detach runtime installation pins from the
+// precommitted bridge or replace the builder without a new named protocol.
+func validateHeldOutBridgeRuntimeReceipt(receipt heldOutBridgeCompatibility, plan heldOutBridgePlan, release heldOutRelease) error {
+	if err := validateHeldOutBridgeRuntime(plan, release); err != nil {
+		return err
+	}
+	if receipt.RuntimeManifestSha256 != release.Runtime.Manifest.Sha256 || receipt.BuilderSha256 != release.Runtime.BuilderSha256 || receipt.ValidatorSha256 != release.Runtime.ValidatorSha256 || receipt.RunnerSha256 != plan.Runner.Sha256 || receipt.RunnerManifestSha256 != plan.RunnerManifest.Sha256 {
+		return errors.New("successful bridge receipt changed its immutable runtime release")
+	}
+	return nil
+}

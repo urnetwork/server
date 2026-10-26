@@ -1,0 +1,16 @@
+{
+  "environment": "main",
+  "competition_id": "sim-latency-season-1",
+  "season_id": "sim-latency-production-20261028",
+  "staging": false,
+  "api_base_url": "https://api.bringyour.com",
+  "api_image_digest": "",
+  "source_promoter_token_file": "/etc/urnetwork/competition-production-20261028/source-promoter.token",
+  "qualification_command": "${QUALIFIED_CONTROL_DIRECTORY}/competitionqualify",
+  "qualification_sha256": "${QUALIFIED_COMPETITIONQUALIFY_SHA256}",
+  "worker_command": "${QUALIFIED_CONTROL_DIRECTORY}/competitionworker",
+  "worker_sha256": "${QUALIFIED_COMPETITIONWORKER_SHA256}",
+  "worker_id": "sille-production-20261028-worker",
+  "worker_image_digest": "${ACTUAL_WORKER_OCI_IMAGE_ID}",
+  "timeout_seconds": 1500
+}

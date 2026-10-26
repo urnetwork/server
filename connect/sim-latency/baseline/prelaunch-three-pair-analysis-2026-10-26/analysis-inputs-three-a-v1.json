@@ -1,0 +1,468 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-same-seed-calibration-inputs",
+  "base_sha": "c1f9dda603d6279666fca5d92b99c5663306c5f7",
+  "evaluator_image_digest": "sha256:002c39040ce23dee27b171c7e657f749c6a6d05b1e9b97d90ac87336470dbaf3",
+  "providers_sha256": "b25405bce172db69b1f98b5c51fba4ff8051bf0ca9e688624131d36d251354ac",
+  "noop_patch_sha256": "1076be3ed61df0e14ae90c13bbe4c35442de6371064fd7d78f61ed6834e170f1",
+  "evaluation_policy_sha256": "d6f22dc1b4b420b4b6724183c7f93b4b92f42c787d754b4a677fd3599f92f2a7",
+  "round_seed_hex": "00000000000000000000000000000000000000000000000000000000013528a0",
+  "source_epoch": 0,
+  "cohorts": [
+    {
+      "job_id": "eb5458d2-27bc-4c10-9233-b7c8be1692b5",
+      "round_id": "c8193705-e5e7-415f-988b-bc0c9d2978ac",
+      "artifact_directory": "/home/by/urnetwork/temp/canceled-stop-calibration-20261025.0G7LKkuh/cohort-01/artifacts",
+      "request_sha256": "515090059fdaa753f56e03d8d925f09de8df26ad8dd979189e153571243f032d",
+      "baseline_sha256": "fcb1909bba75e920333eaac2ab6c7265310841e7825a16e607b54f8798f2d7cb",
+      "score_sha256": "54e14cda0a3c1db4a6304a968ae1e8a739316c355376a96220ef9b409ed98005",
+      "worker_result_sha256": "4549273f2b7c065ff6152274cf7150d2efbd8afb04bff49f0aab2e4fd5a54ea2",
+      "evidence_manifest_sha256": "87c028b071510c1dbc00b3fca2a07347e35305f5b42ca4c8b9c34a0763f5af06",
+      "terminal_sha256": "232b488535f05367bbe77ba21c85b72274bb1e7e79e9e26f8c8e2f10cac69842",
+      "inputs": {
+        "Runs": [
+          "evidence/scorer-input/candidate-01-eb5458d2/results.csv",
+          "evidence/scorer-input/candidate-02-eb5458d2/results.csv",
+          "evidence/scorer-input/candidate-03-eb5458d2/results.csv",
+          "evidence/scorer-input/candidate-04-eb5458d2/results.csv",
+          "evidence/scorer-input/candidate-05-eb5458d2/results.csv",
+          "evidence/scorer-input/candidate-06-eb5458d2/results.csv",
+          "evidence/scorer-input/candidate-07-eb5458d2/results.csv",
+          "evidence/scorer-input/candidate-08-eb5458d2/results.csv",
+          "evidence/scorer-input/candidate-09-eb5458d2/results.csv"
+        ],
+        "Stderr": [
+          "evidence/scorer-input/candidate-01-eb5458d2/stderr.log",
+          "evidence/scorer-input/candidate-02-eb5458d2/stderr.log",
+          "evidence/scorer-input/candidate-03-eb5458d2/stderr.log",
+          "evidence/scorer-input/candidate-04-eb5458d2/stderr.log",
+          "evidence/scorer-input/candidate-05-eb5458d2/stderr.log",
+          "evidence/scorer-input/candidate-06-eb5458d2/stderr.log",
+          "evidence/scorer-input/candidate-07-eb5458d2/stderr.log",
+          "evidence/scorer-input/candidate-08-eb5458d2/stderr.log",
+          "evidence/scorer-input/candidate-09-eb5458d2/stderr.log"
+        ],
+        "Accounting": [
+          "evidence/scorer-input/candidate-01-eb5458d2/accounting.json",
+          "evidence/scorer-input/candidate-02-eb5458d2/accounting.json",
+          "evidence/scorer-input/candidate-03-eb5458d2/accounting.json",
+          "evidence/scorer-input/candidate-04-eb5458d2/accounting.json",
+          "evidence/scorer-input/candidate-05-eb5458d2/accounting.json",
+          "evidence/scorer-input/candidate-06-eb5458d2/accounting.json",
+          "evidence/scorer-input/candidate-07-eb5458d2/accounting.json",
+          "evidence/scorer-input/candidate-08-eb5458d2/accounting.json",
+          "evidence/scorer-input/candidate-09-eb5458d2/accounting.json"
+        ],
+        "Samples": [
+          "evidence/scorer-input/candidate-01-eb5458d2/site/stats/local/sim-127.0.0.1-01a173ff-e8bd-2d3f-064a-e05479ebe235",
+          "evidence/scorer-input/candidate-02-eb5458d2/site/stats/local/sim-127.0.0.1-01a17408-809b-7de6-d2ce-805a35fd7ec8",
+          "evidence/scorer-input/candidate-03-eb5458d2/site/stats/local/sim-127.0.0.1-01a17411-61c7-7246-bc79-58ba3b629c9f",
+          "evidence/scorer-input/candidate-04-eb5458d2/site/stats/local/sim-127.0.0.1-01a17419-e485-96d2-6e22-c2c947b3adbb",
+          "evidence/scorer-input/candidate-05-eb5458d2/site/stats/local/sim-127.0.0.1-01a17422-c145-9adb-7b9b-e283029a9c32",
+          "evidence/scorer-input/candidate-06-eb5458d2/site/stats/local/sim-127.0.0.1-01a1742b-583e-f989-9f09-0a94d91173ae",
+          "evidence/scorer-input/candidate-07-eb5458d2/site/stats/local/sim-127.0.0.1-01a17433-e250-104b-4df4-a23fe4f25cad",
+          "evidence/scorer-input/candidate-08-eb5458d2/site/stats/local/sim-127.0.0.1-01a1743c-77b0-ac17-972a-12a426081844",
+          "evidence/scorer-input/candidate-09-eb5458d2/site/stats/local/sim-127.0.0.1-01a17444-edc8-3209-a13b-65c8e19307a5"
+        ],
+        "ResourceReports": [
+          "evidence/scorer-input/candidate-01-eb5458d2/resources.json",
+          "evidence/scorer-input/candidate-02-eb5458d2/resources.json",
+          "evidence/scorer-input/candidate-03-eb5458d2/resources.json",
+          "evidence/scorer-input/candidate-04-eb5458d2/resources.json",
+          "evidence/scorer-input/candidate-05-eb5458d2/resources.json",
+          "evidence/scorer-input/candidate-06-eb5458d2/resources.json",
+          "evidence/scorer-input/candidate-07-eb5458d2/resources.json",
+          "evidence/scorer-input/candidate-08-eb5458d2/resources.json",
+          "evidence/scorer-input/candidate-09-eb5458d2/resources.json"
+        ],
+        "Markers": [
+          "evidence/scorer-input/candidate-01-eb5458d2/run.complete.json",
+          "evidence/scorer-input/candidate-02-eb5458d2/run.complete.json",
+          "evidence/scorer-input/candidate-03-eb5458d2/run.complete.json",
+          "evidence/scorer-input/candidate-04-eb5458d2/run.complete.json",
+          "evidence/scorer-input/candidate-05-eb5458d2/run.complete.json",
+          "evidence/scorer-input/candidate-06-eb5458d2/run.complete.json",
+          "evidence/scorer-input/candidate-07-eb5458d2/run.complete.json",
+          "evidence/scorer-input/candidate-08-eb5458d2/run.complete.json",
+          "evidence/scorer-input/candidate-09-eb5458d2/run.complete.json"
+        ],
+        "BaselineManifest": "evidence/scorer-input/baseline.json"
+      },
+      "baseline_inputs": {
+        "Runs": [
+          "evidence/scorer-input/baseline-01-eb5458d2/results.csv",
+          "evidence/scorer-input/baseline-02-eb5458d2/results.csv",
+          "evidence/scorer-input/baseline-03-eb5458d2/results.csv",
+          "evidence/scorer-input/baseline-04-eb5458d2/results.csv",
+          "evidence/scorer-input/baseline-05-eb5458d2/results.csv",
+          "evidence/scorer-input/baseline-06-eb5458d2/results.csv",
+          "evidence/scorer-input/baseline-07-eb5458d2/results.csv",
+          "evidence/scorer-input/baseline-08-eb5458d2/results.csv",
+          "evidence/scorer-input/baseline-09-eb5458d2/results.csv"
+        ],
+        "Stderr": [
+          "evidence/scorer-input/baseline-01-eb5458d2/stderr.log",
+          "evidence/scorer-input/baseline-02-eb5458d2/stderr.log",
+          "evidence/scorer-input/baseline-03-eb5458d2/stderr.log",
+          "evidence/scorer-input/baseline-04-eb5458d2/stderr.log",
+          "evidence/scorer-input/baseline-05-eb5458d2/stderr.log",
+          "evidence/scorer-input/baseline-06-eb5458d2/stderr.log",
+          "evidence/scorer-input/baseline-07-eb5458d2/stderr.log",
+          "evidence/scorer-input/baseline-08-eb5458d2/stderr.log",
+          "evidence/scorer-input/baseline-09-eb5458d2/stderr.log"
+        ],
+        "Accounting": [
+          "evidence/scorer-input/baseline-01-eb5458d2/accounting.json",
+          "evidence/scorer-input/baseline-02-eb5458d2/accounting.json",
+          "evidence/scorer-input/baseline-03-eb5458d2/accounting.json",
+          "evidence/scorer-input/baseline-04-eb5458d2/accounting.json",
+          "evidence/scorer-input/baseline-05-eb5458d2/accounting.json",
+          "evidence/scorer-input/baseline-06-eb5458d2/accounting.json",
+          "evidence/scorer-input/baseline-07-eb5458d2/accounting.json",
+          "evidence/scorer-input/baseline-08-eb5458d2/accounting.json",
+          "evidence/scorer-input/baseline-09-eb5458d2/accounting.json"
+        ],
+        "Samples": [
+          "evidence/scorer-input/baseline-01-eb5458d2/site/stats/local/sim-127.0.0.1-01a173ae-4e8f-e3a8-76b9-e31d8e09be6d",
+          "evidence/scorer-input/baseline-02-eb5458d2/site/stats/local/sim-127.0.0.1-01a173b6-ea75-c9c5-4aef-e57a2e4fe41e",
+          "evidence/scorer-input/baseline-03-eb5458d2/site/stats/local/sim-127.0.0.1-01a173bf-6d37-7f05-ee13-2a61fbbbc03a",
+          "evidence/scorer-input/baseline-04-eb5458d2/site/stats/local/sim-127.0.0.1-01a173c8-83df-e741-7ca6-dc77b0aaae4a",
+          "evidence/scorer-input/baseline-05-eb5458d2/site/stats/local/sim-127.0.0.1-01a173d1-1686-b5ef-b52d-71f55f88a7ee",
+          "evidence/scorer-input/baseline-06-eb5458d2/site/stats/local/sim-127.0.0.1-01a173da-2580-e0fa-8dcc-0b0b66da3c12",
+          "evidence/scorer-input/baseline-07-eb5458d2/site/stats/local/sim-127.0.0.1-01a173e2-c425-0911-e7d4-b8bd57ebf163",
+          "evidence/scorer-input/baseline-08-eb5458d2/site/stats/local/sim-127.0.0.1-01a173eb-2f80-3f73-cd95-dafcde4c92c7",
+          "evidence/scorer-input/baseline-09-eb5458d2/site/stats/local/sim-127.0.0.1-01a173f3-a4c6-0a0b-22c2-1cfd07085205"
+        ],
+        "ResourceReports": [
+          "evidence/scorer-input/baseline-01-eb5458d2/resources.json",
+          "evidence/scorer-input/baseline-02-eb5458d2/resources.json",
+          "evidence/scorer-input/baseline-03-eb5458d2/resources.json",
+          "evidence/scorer-input/baseline-04-eb5458d2/resources.json",
+          "evidence/scorer-input/baseline-05-eb5458d2/resources.json",
+          "evidence/scorer-input/baseline-06-eb5458d2/resources.json",
+          "evidence/scorer-input/baseline-07-eb5458d2/resources.json",
+          "evidence/scorer-input/baseline-08-eb5458d2/resources.json",
+          "evidence/scorer-input/baseline-09-eb5458d2/resources.json"
+        ],
+        "Markers": [
+          "evidence/scorer-input/baseline-01-eb5458d2/run.complete.json",
+          "evidence/scorer-input/baseline-02-eb5458d2/run.complete.json",
+          "evidence/scorer-input/baseline-03-eb5458d2/run.complete.json",
+          "evidence/scorer-input/baseline-04-eb5458d2/run.complete.json",
+          "evidence/scorer-input/baseline-05-eb5458d2/run.complete.json",
+          "evidence/scorer-input/baseline-06-eb5458d2/run.complete.json",
+          "evidence/scorer-input/baseline-07-eb5458d2/run.complete.json",
+          "evidence/scorer-input/baseline-08-eb5458d2/run.complete.json",
+          "evidence/scorer-input/baseline-09-eb5458d2/run.complete.json"
+        ],
+        "BaselineManifest": "evidence/scorer-input/baseline.json"
+      }
+    },
+    {
+      "job_id": "8cd8edae-c30c-407f-b611-bda14dfe2764",
+      "round_id": "9dfa6395-6c81-4a74-94bc-d8538fabb169",
+      "artifact_directory": "/home/by/urnetwork/temp/canceled-stop-calibration-20261025.0G7LKkuh/cohort-02/artifacts",
+      "request_sha256": "457b783eff0eb584cf283809ef9bc3d8223f37525259ded700a721c31a001ea0",
+      "baseline_sha256": "2e688a73fbe522252d4a99c90aaf9951d0c7c70236e14fc36200e5675d02be98",
+      "score_sha256": "ad7ec94df88dacb90c3c575fb3e6118b533c5f29ff15664295ef6621bc36be71",
+      "worker_result_sha256": "605ce62afb8e5558b4a8f20b68e1e0049c1a3e681e47a14a6a3d9f0fcb23a4a7",
+      "evidence_manifest_sha256": "7971fca2cb6ad418e25fbd6de30a59c8319ee3fd874c0f882777710f8a14e316",
+      "terminal_sha256": "0180b31d5ec13c7a8dd3f284df11d04ff24e6f844f9aa9c49820b15a27ae803f",
+      "inputs": {
+        "Runs": [
+          "evidence/scorer-input/candidate-01-8cd8edae/results.csv",
+          "evidence/scorer-input/candidate-02-8cd8edae/results.csv",
+          "evidence/scorer-input/candidate-03-8cd8edae/results.csv",
+          "evidence/scorer-input/candidate-04-8cd8edae/results.csv",
+          "evidence/scorer-input/candidate-05-8cd8edae/results.csv",
+          "evidence/scorer-input/candidate-06-8cd8edae/results.csv",
+          "evidence/scorer-input/candidate-07-8cd8edae/results.csv",
+          "evidence/scorer-input/candidate-08-8cd8edae/results.csv",
+          "evidence/scorer-input/candidate-09-8cd8edae/results.csv"
+        ],
+        "Stderr": [
+          "evidence/scorer-input/candidate-01-8cd8edae/stderr.log",
+          "evidence/scorer-input/candidate-02-8cd8edae/stderr.log",
+          "evidence/scorer-input/candidate-03-8cd8edae/stderr.log",
+          "evidence/scorer-input/candidate-04-8cd8edae/stderr.log",
+          "evidence/scorer-input/candidate-05-8cd8edae/stderr.log",
+          "evidence/scorer-input/candidate-06-8cd8edae/stderr.log",
+          "evidence/scorer-input/candidate-07-8cd8edae/stderr.log",
+          "evidence/scorer-input/candidate-08-8cd8edae/stderr.log",
+          "evidence/scorer-input/candidate-09-8cd8edae/stderr.log"
+        ],
+        "Accounting": [
+          "evidence/scorer-input/candidate-01-8cd8edae/accounting.json",
+          "evidence/scorer-input/candidate-02-8cd8edae/accounting.json",
+          "evidence/scorer-input/candidate-03-8cd8edae/accounting.json",
+          "evidence/scorer-input/candidate-04-8cd8edae/accounting.json",
+          "evidence/scorer-input/candidate-05-8cd8edae/accounting.json",
+          "evidence/scorer-input/candidate-06-8cd8edae/accounting.json",
+          "evidence/scorer-input/candidate-07-8cd8edae/accounting.json",
+          "evidence/scorer-input/candidate-08-8cd8edae/accounting.json",
+          "evidence/scorer-input/candidate-09-8cd8edae/accounting.json"
+        ],
+        "Samples": [
+          "evidence/scorer-input/candidate-01-8cd8edae/site/stats/local/sim-127.0.0.1-01a175af-88cd-e322-356d-ee4c8a355f1a",
+          "evidence/scorer-input/candidate-02-8cd8edae/site/stats/local/sim-127.0.0.1-01a175b8-36d4-c10e-446b-ef5f77267354",
+          "evidence/scorer-input/candidate-03-8cd8edae/site/stats/local/sim-127.0.0.1-01a175c1-09e4-a6bc-fd84-fd133d284a9d",
+          "evidence/scorer-input/candidate-04-8cd8edae/site/stats/local/sim-127.0.0.1-01a175c9-c4a9-3cdf-2725-02afca055c13",
+          "evidence/scorer-input/candidate-05-8cd8edae/site/stats/local/sim-127.0.0.1-01a175d2-8953-36a5-c5fa-5d48ac80f5d3",
+          "evidence/scorer-input/candidate-06-8cd8edae/site/stats/local/sim-127.0.0.1-01a175db-2050-7a88-796a-b714bce4a50b",
+          "evidence/scorer-input/candidate-07-8cd8edae/site/stats/local/sim-127.0.0.1-01a175e4-2fd8-d9e0-bf3f-b77608bcad40",
+          "evidence/scorer-input/candidate-08-8cd8edae/site/stats/local/sim-127.0.0.1-01a175ec-91f5-033f-d2fd-50a8c2b6ba9c",
+          "evidence/scorer-input/candidate-09-8cd8edae/site/stats/local/sim-127.0.0.1-01a175f5-04ea-7913-c5cc-556c69f363ae"
+        ],
+        "ResourceReports": [
+          "evidence/scorer-input/candidate-01-8cd8edae/resources.json",
+          "evidence/scorer-input/candidate-02-8cd8edae/resources.json",
+          "evidence/scorer-input/candidate-03-8cd8edae/resources.json",
+          "evidence/scorer-input/candidate-04-8cd8edae/resources.json",
+          "evidence/scorer-input/candidate-05-8cd8edae/resources.json",
+          "evidence/scorer-input/candidate-06-8cd8edae/resources.json",
+          "evidence/scorer-input/candidate-07-8cd8edae/resources.json",
+          "evidence/scorer-input/candidate-08-8cd8edae/resources.json",
+          "evidence/scorer-input/candidate-09-8cd8edae/resources.json"
+        ],
+        "Markers": [
+          "evidence/scorer-input/candidate-01-8cd8edae/run.complete.json",
+          "evidence/scorer-input/candidate-02-8cd8edae/run.complete.json",
+          "evidence/scorer-input/candidate-03-8cd8edae/run.complete.json",
+          "evidence/scorer-input/candidate-04-8cd8edae/run.complete.json",
+          "evidence/scorer-input/candidate-05-8cd8edae/run.complete.json",
+          "evidence/scorer-input/candidate-06-8cd8edae/run.complete.json",
+          "evidence/scorer-input/candidate-07-8cd8edae/run.complete.json",
+          "evidence/scorer-input/candidate-08-8cd8edae/run.complete.json",
+          "evidence/scorer-input/candidate-09-8cd8edae/run.complete.json"
+        ],
+        "BaselineManifest": "evidence/scorer-input/baseline.json"
+      },
+      "baseline_inputs": {
+        "Runs": [
+          "evidence/scorer-input/baseline-01-8cd8edae/results.csv",
+          "evidence/scorer-input/baseline-02-8cd8edae/results.csv",
+          "evidence/scorer-input/baseline-03-8cd8edae/results.csv",
+          "evidence/scorer-input/baseline-04-8cd8edae/results.csv",
+          "evidence/scorer-input/baseline-05-8cd8edae/results.csv",
+          "evidence/scorer-input/baseline-06-8cd8edae/results.csv",
+          "evidence/scorer-input/baseline-07-8cd8edae/results.csv",
+          "evidence/scorer-input/baseline-08-8cd8edae/results.csv",
+          "evidence/scorer-input/baseline-09-8cd8edae/results.csv"
+        ],
+        "Stderr": [
+          "evidence/scorer-input/baseline-01-8cd8edae/stderr.log",
+          "evidence/scorer-input/baseline-02-8cd8edae/stderr.log",
+          "evidence/scorer-input/baseline-03-8cd8edae/stderr.log",
+          "evidence/scorer-input/baseline-04-8cd8edae/stderr.log",
+          "evidence/scorer-input/baseline-05-8cd8edae/stderr.log",
+          "evidence/scorer-input/baseline-06-8cd8edae/stderr.log",
+          "evidence/scorer-input/baseline-07-8cd8edae/stderr.log",
+          "evidence/scorer-input/baseline-08-8cd8edae/stderr.log",
+          "evidence/scorer-input/baseline-09-8cd8edae/stderr.log"
+        ],
+        "Accounting": [
+          "evidence/scorer-input/baseline-01-8cd8edae/accounting.json",
+          "evidence/scorer-input/baseline-02-8cd8edae/accounting.json",
+          "evidence/scorer-input/baseline-03-8cd8edae/accounting.json",
+          "evidence/scorer-input/baseline-04-8cd8edae/accounting.json",
+          "evidence/scorer-input/baseline-05-8cd8edae/accounting.json",
+          "evidence/scorer-input/baseline-06-8cd8edae/accounting.json",
+          "evidence/scorer-input/baseline-07-8cd8edae/accounting.json",
+          "evidence/scorer-input/baseline-08-8cd8edae/accounting.json",
+          "evidence/scorer-input/baseline-09-8cd8edae/accounting.json"
+        ],
+        "Samples": [
+          "evidence/scorer-input/baseline-01-8cd8edae/site/stats/local/sim-127.0.0.1-01a17561-f118-1586-8c30-7279ce945fe2",
+          "evidence/scorer-input/baseline-02-8cd8edae/site/stats/local/sim-127.0.0.1-01a1756a-428b-8a62-7fdc-2a01e6cbaac8",
+          "evidence/scorer-input/baseline-03-8cd8edae/site/stats/local/sim-127.0.0.1-01a17572-b538-c337-0828-c9a21365ea9c",
+          "evidence/scorer-input/baseline-04-8cd8edae/site/stats/local/sim-127.0.0.1-01a1757b-1963-de02-0d81-6ec02ad07a36",
+          "evidence/scorer-input/baseline-05-8cd8edae/site/stats/local/sim-127.0.0.1-01a17583-b888-ccf1-46cc-5aa256dc02e6",
+          "evidence/scorer-input/baseline-06-8cd8edae/site/stats/local/sim-127.0.0.1-01a1758c-4e83-21ad-f880-e8dacf6afb42",
+          "evidence/scorer-input/baseline-07-8cd8edae/site/stats/local/sim-127.0.0.1-01a17595-0a4b-b1cd-7505-0790401dffe2",
+          "evidence/scorer-input/baseline-08-8cd8edae/site/stats/local/sim-127.0.0.1-01a1759d-7d0e-d1db-ab9c-2d017e68f5eb",
+          "evidence/scorer-input/baseline-09-8cd8edae/site/stats/local/sim-127.0.0.1-01a175a6-a9c2-bb44-cbb9-05c9fd530f75"
+        ],
+        "ResourceReports": [
+          "evidence/scorer-input/baseline-01-8cd8edae/resources.json",
+          "evidence/scorer-input/baseline-02-8cd8edae/resources.json",
+          "evidence/scorer-input/baseline-03-8cd8edae/resources.json",
+          "evidence/scorer-input/baseline-04-8cd8edae/resources.json",
+          "evidence/scorer-input/baseline-05-8cd8edae/resources.json",
+          "evidence/scorer-input/baseline-06-8cd8edae/resources.json",
+          "evidence/scorer-input/baseline-07-8cd8edae/resources.json",
+          "evidence/scorer-input/baseline-08-8cd8edae/resources.json",
+          "evidence/scorer-input/baseline-09-8cd8edae/resources.json"
+        ],
+        "Markers": [
+          "evidence/scorer-input/baseline-01-8cd8edae/run.complete.json",
+          "evidence/scorer-input/baseline-02-8cd8edae/run.complete.json",
+          "evidence/scorer-input/baseline-03-8cd8edae/run.complete.json",
+          "evidence/scorer-input/baseline-04-8cd8edae/run.complete.json",
+          "evidence/scorer-input/baseline-05-8cd8edae/run.complete.json",
+          "evidence/scorer-input/baseline-06-8cd8edae/run.complete.json",
+          "evidence/scorer-input/baseline-07-8cd8edae/run.complete.json",
+          "evidence/scorer-input/baseline-08-8cd8edae/run.complete.json",
+          "evidence/scorer-input/baseline-09-8cd8edae/run.complete.json"
+        ],
+        "BaselineManifest": "evidence/scorer-input/baseline.json"
+      }
+    },
+    {
+      "job_id": "0f2f95e7-abd1-4d30-9f3e-133eab0e5781",
+      "round_id": "d3ee1e9e-fd82-46ce-83f3-8d61acb007ee",
+      "artifact_directory": "/home/by/urnetwork/temp/canceled-stop-calibration-20261025.0G7LKkuh/cohort-03/artifacts",
+      "request_sha256": "b33d0e3589494a2d75dc2aac3f52bf6aecf165d181ab283fafc9f838705d6283",
+      "baseline_sha256": "3dedeac4c21c9686d3907ce042d175bdd5f0aa7e44b9330da9f55ca97f252ae0",
+      "score_sha256": "179a06a1abe721e84a884806682517d6172b09c2a46d35f0c2bcf53c5d492553",
+      "worker_result_sha256": "89633bd3798cc2bbb59757bd318fc2bc27af81bdcaab1c8c22137dbf65b709e4",
+      "evidence_manifest_sha256": "ee6b957c9fcfcdb5942c05636ba79717a2ca8855bd5545c9c8ba436e01f0e054",
+      "terminal_sha256": "ddd25375a53ff633bb963d6433b86af60f9a559103a9c1ea65caaea7224e4a46",
+      "inputs": {
+        "Runs": [
+          "evidence/scorer-input/candidate-01-0f2f95e7/results.csv",
+          "evidence/scorer-input/candidate-02-0f2f95e7/results.csv",
+          "evidence/scorer-input/candidate-03-0f2f95e7/results.csv",
+          "evidence/scorer-input/candidate-04-0f2f95e7/results.csv",
+          "evidence/scorer-input/candidate-05-0f2f95e7/results.csv",
+          "evidence/scorer-input/candidate-06-0f2f95e7/results.csv",
+          "evidence/scorer-input/candidate-07-0f2f95e7/results.csv",
+          "evidence/scorer-input/candidate-08-0f2f95e7/results.csv",
+          "evidence/scorer-input/candidate-09-0f2f95e7/results.csv"
+        ],
+        "Stderr": [
+          "evidence/scorer-input/candidate-01-0f2f95e7/stderr.log",
+          "evidence/scorer-input/candidate-02-0f2f95e7/stderr.log",
+          "evidence/scorer-input/candidate-03-0f2f95e7/stderr.log",
+          "evidence/scorer-input/candidate-04-0f2f95e7/stderr.log",
+          "evidence/scorer-input/candidate-05-0f2f95e7/stderr.log",
+          "evidence/scorer-input/candidate-06-0f2f95e7/stderr.log",
+          "evidence/scorer-input/candidate-07-0f2f95e7/stderr.log",
+          "evidence/scorer-input/candidate-08-0f2f95e7/stderr.log",
+          "evidence/scorer-input/candidate-09-0f2f95e7/stderr.log"
+        ],
+        "Accounting": [
+          "evidence/scorer-input/candidate-01-0f2f95e7/accounting.json",
+          "evidence/scorer-input/candidate-02-0f2f95e7/accounting.json",
+          "evidence/scorer-input/candidate-03-0f2f95e7/accounting.json",
+          "evidence/scorer-input/candidate-04-0f2f95e7/accounting.json",
+          "evidence/scorer-input/candidate-05-0f2f95e7/accounting.json",
+          "evidence/scorer-input/candidate-06-0f2f95e7/accounting.json",
+          "evidence/scorer-input/candidate-07-0f2f95e7/accounting.json",
+          "evidence/scorer-input/candidate-08-0f2f95e7/accounting.json",
+          "evidence/scorer-input/candidate-09-0f2f95e7/accounting.json"
+        ],
+        "Samples": [
+          "evidence/scorer-input/candidate-01-0f2f95e7/site/stats/local/sim-127.0.0.1-01a1769b-4302-472b-a8bd-e9662364215a",
+          "evidence/scorer-input/candidate-02-0f2f95e7/site/stats/local/sim-127.0.0.1-01a176a3-df29-77f7-1e19-cd633b312664",
+          "evidence/scorer-input/candidate-03-0f2f95e7/site/stats/local/sim-127.0.0.1-01a176ac-3157-ce8e-279b-af55f07d8174",
+          "evidence/scorer-input/candidate-04-0f2f95e7/site/stats/local/sim-127.0.0.1-01a176b4-cbf0-db56-e15b-fb9aa52540ea",
+          "evidence/scorer-input/candidate-05-0f2f95e7/site/stats/local/sim-127.0.0.1-01a176bd-6bec-5c8e-9291-97815ea683bb",
+          "evidence/scorer-input/candidate-06-0f2f95e7/site/stats/local/sim-127.0.0.1-01a176c5-c3d1-a3f7-a595-2e09ec8bc0c6",
+          "evidence/scorer-input/candidate-07-0f2f95e7/site/stats/local/sim-127.0.0.1-01a176ce-5823-9bd8-ac09-b9a140cccca8",
+          "evidence/scorer-input/candidate-08-0f2f95e7/site/stats/local/sim-127.0.0.1-01a176d6-f772-82f5-84df-9863d7f3f7bb",
+          "evidence/scorer-input/candidate-09-0f2f95e7/site/stats/local/sim-127.0.0.1-01a176df-a365-37c6-cf25-2c4dc9f2eae7"
+        ],
+        "ResourceReports": [
+          "evidence/scorer-input/candidate-01-0f2f95e7/resources.json",
+          "evidence/scorer-input/candidate-02-0f2f95e7/resources.json",
+          "evidence/scorer-input/candidate-03-0f2f95e7/resources.json",
+          "evidence/scorer-input/candidate-04-0f2f95e7/resources.json",
+          "evidence/scorer-input/candidate-05-0f2f95e7/resources.json",
+          "evidence/scorer-input/candidate-06-0f2f95e7/resources.json",
+          "evidence/scorer-input/candidate-07-0f2f95e7/resources.json",
+          "evidence/scorer-input/candidate-08-0f2f95e7/resources.json",
+          "evidence/scorer-input/candidate-09-0f2f95e7/resources.json"
+        ],
+        "Markers": [
+          "evidence/scorer-input/candidate-01-0f2f95e7/run.complete.json",
+          "evidence/scorer-input/candidate-02-0f2f95e7/run.complete.json",
+          "evidence/scorer-input/candidate-03-0f2f95e7/run.complete.json",
+          "evidence/scorer-input/candidate-04-0f2f95e7/run.complete.json",
+          "evidence/scorer-input/candidate-05-0f2f95e7/run.complete.json",
+          "evidence/scorer-input/candidate-06-0f2f95e7/run.complete.json",
+          "evidence/scorer-input/candidate-07-0f2f95e7/run.complete.json",
+          "evidence/scorer-input/candidate-08-0f2f95e7/run.complete.json",
+          "evidence/scorer-input/candidate-09-0f2f95e7/run.complete.json"
+        ],
+        "BaselineManifest": "evidence/scorer-input/baseline.json"
+      },
+      "baseline_inputs": {
+        "Runs": [
+          "evidence/scorer-input/baseline-01-0f2f95e7/results.csv",
+          "evidence/scorer-input/baseline-02-0f2f95e7/results.csv",
+          "evidence/scorer-input/baseline-03-0f2f95e7/results.csv",
+          "evidence/scorer-input/baseline-04-0f2f95e7/results.csv",
+          "evidence/scorer-input/baseline-05-0f2f95e7/results.csv",
+          "evidence/scorer-input/baseline-06-0f2f95e7/results.csv",
+          "evidence/scorer-input/baseline-07-0f2f95e7/results.csv",
+          "evidence/scorer-input/baseline-08-0f2f95e7/results.csv",
+          "evidence/scorer-input/baseline-09-0f2f95e7/results.csv"
+        ],
+        "Stderr": [
+          "evidence/scorer-input/baseline-01-0f2f95e7/stderr.log",
+          "evidence/scorer-input/baseline-02-0f2f95e7/stderr.log",
+          "evidence/scorer-input/baseline-03-0f2f95e7/stderr.log",
+          "evidence/scorer-input/baseline-04-0f2f95e7/stderr.log",
+          "evidence/scorer-input/baseline-05-0f2f95e7/stderr.log",
+          "evidence/scorer-input/baseline-06-0f2f95e7/stderr.log",
+          "evidence/scorer-input/baseline-07-0f2f95e7/stderr.log",
+          "evidence/scorer-input/baseline-08-0f2f95e7/stderr.log",
+          "evidence/scorer-input/baseline-09-0f2f95e7/stderr.log"
+        ],
+        "Accounting": [
+          "evidence/scorer-input/baseline-01-0f2f95e7/accounting.json",
+          "evidence/scorer-input/baseline-02-0f2f95e7/accounting.json",
+          "evidence/scorer-input/baseline-03-0f2f95e7/accounting.json",
+          "evidence/scorer-input/baseline-04-0f2f95e7/accounting.json",
+          "evidence/scorer-input/baseline-05-0f2f95e7/accounting.json",
+          "evidence/scorer-input/baseline-06-0f2f95e7/accounting.json",
+          "evidence/scorer-input/baseline-07-0f2f95e7/accounting.json",
+          "evidence/scorer-input/baseline-08-0f2f95e7/accounting.json",
+          "evidence/scorer-input/baseline-09-0f2f95e7/accounting.json"
+        ],
+        "Samples": [
+          "evidence/scorer-input/baseline-01-0f2f95e7/site/stats/local/sim-127.0.0.1-01a1764d-f389-9c63-d048-ab8bb36f8e68",
+          "evidence/scorer-input/baseline-02-0f2f95e7/site/stats/local/sim-127.0.0.1-01a17656-fecf-8b42-fc1d-cbd5a41f8997",
+          "evidence/scorer-input/baseline-03-0f2f95e7/site/stats/local/sim-127.0.0.1-01a1765f-8b1b-e53d-ba1e-148a837a4908",
+          "evidence/scorer-input/baseline-04-0f2f95e7/site/stats/local/sim-127.0.0.1-01a17668-1a2f-a74c-dbfc-b0a0f52061e5",
+          "evidence/scorer-input/baseline-05-0f2f95e7/site/stats/local/sim-127.0.0.1-01a17670-8b2f-032b-5807-be8e3e2f498c",
+          "evidence/scorer-input/baseline-06-0f2f95e7/site/stats/local/sim-127.0.0.1-01a17679-03b1-6d5d-c955-ce34c5aa0db0",
+          "evidence/scorer-input/baseline-07-0f2f95e7/site/stats/local/sim-127.0.0.1-01a17681-79b6-0026-f3d9-b942926e2230",
+          "evidence/scorer-input/baseline-08-0f2f95e7/site/stats/local/sim-127.0.0.1-01a1768a-168a-dcca-7e60-87e94a05eaed",
+          "evidence/scorer-input/baseline-09-0f2f95e7/site/stats/local/sim-127.0.0.1-01a17692-97dd-7f9c-bbe8-f57481329c0e"
+        ],
+        "ResourceReports": [
+          "evidence/scorer-input/baseline-01-0f2f95e7/resources.json",
+          "evidence/scorer-input/baseline-02-0f2f95e7/resources.json",
+          "evidence/scorer-input/baseline-03-0f2f95e7/resources.json",
+          "evidence/scorer-input/baseline-04-0f2f95e7/resources.json",
+          "evidence/scorer-input/baseline-05-0f2f95e7/resources.json",
+          "evidence/scorer-input/baseline-06-0f2f95e7/resources.json",
+          "evidence/scorer-input/baseline-07-0f2f95e7/resources.json",
+          "evidence/scorer-input/baseline-08-0f2f95e7/resources.json",
+          "evidence/scorer-input/baseline-09-0f2f95e7/resources.json"
+        ],
+        "Markers": [
+          "evidence/scorer-input/baseline-01-0f2f95e7/run.complete.json",
+          "evidence/scorer-input/baseline-02-0f2f95e7/run.complete.json",
+          "evidence/scorer-input/baseline-03-0f2f95e7/run.complete.json",
+          "evidence/scorer-input/baseline-04-0f2f95e7/run.complete.json",
+          "evidence/scorer-input/baseline-05-0f2f95e7/run.complete.json",
+          "evidence/scorer-input/baseline-06-0f2f95e7/run.complete.json",
+          "evidence/scorer-input/baseline-07-0f2f95e7/run.complete.json",
+          "evidence/scorer-input/baseline-08-0f2f95e7/run.complete.json",
+          "evidence/scorer-input/baseline-09-0f2f95e7/run.complete.json"
+        ],
+        "BaselineManifest": "evidence/scorer-input/baseline.json"
+      }
+    }
+  ],
+  "protocol": "launch-3a-bridge-3b-2026-10-26-v1",
+  "protocol_approval_sha256": "a794618968d840163952b7b2058100fd87b71ef7ccc44919ba590c5a253f643c",
+  "original_plan_sha256": "24f9b6ea9fe6fbfb4381ca29535b81a1cd4966b397c701b04f5b09ac74eb11d8",
+  "original_positions": [
+    1,
+    2,
+    3
+  ]
+}

@@ -1,21 +1,26 @@
 # Container evaluator
 
 The evaluator uses one immutable image per canonical submission patch. It does
-not accept a miner Dockerfile, build command, repository URL, dependency
-change, or runtime command.
+not accept a miner Dockerfile, build command, repository URL, tool artifact,
+or runtime command. Prospective `mono_root_v1` rounds accept screened source
+changes across all ten locked repositories; an omitted `path_base` retains the
+historical server-relative policy.
 
 The trusted release builds a base image containing clean pinned source clones,
 the Go toolchain, a warmed module cache, the simulator/scorer, the structural
-patch validator, and the fixed entrypoint. `build-submission.sh` derives a
+patch validator, and the fixed entrypoint. The current builder additionally
+requires its own pinned validator from its immutable host release, so an old
+base-image validator cannot silently choose patch semantics. `build-submission.sh` derives a
 candidate from that base using only `canonical.patch` and `policy.json`. Every
 candidate build step has `network=none`, revalidates both input hashes, applies
 the patch, creates a deterministic clean Git commit, runs the frozen compile
 checks, and records the base/patch/policy/builder/build identities in OCI
 labels and `/opt/urnetwork/image-identity.json`. Its cache key covers the base
-image id, canonical patch, patch policy, and fixed submission Dockerfile; an
+image id, canonical patch, patch policy, and composite trusted builder release; an
 existing tag is reused only after every identity label authenticates.
 
-`connect/sim-latency/**` is a protected evaluator tree, not submission code.
+`server/connect/sim-latency/**` is a protected evaluator tree, not submission code
+(`connect/sim-latency/**` under the historical server-relative policy).
 The API validator rejects it from a hard-coded denylist even if a malformed
 operator policy allowlists a file there, the frozen policy must repeat that
 deny rule explicitly, and the builder requires the directory's Git tree id to
@@ -130,7 +135,7 @@ image ids, exit/OOM state, and accounting after every stage.
    frozen policy into a new build context. `build-submission.sh` patches only
    the temporary candidate checkout and produces one content-addressed image.
    Cache reuse is permitted only for the same base image id, patch SHA-256,
-   policy SHA-256, and trusted Dockerfile SHA-256. Candidate builds disable
+   policy SHA-256, and composite trusted builder SHA-256. Candidate builds disable
    BuildKit's variable default attestation and retain the authenticated build
    identity in the worker's immutable evidence instead.
 3. A pristine base-image stack measures baseline replicates in its own Compose
@@ -168,10 +173,10 @@ Build a submission from API-authenticated files:
 
 ```bash
 attempt_source="$(mktemp -d /var/lib/urnetwork/competition/source.XXXXXXXX)"
-./connect/sim-latency/evaluator/container/prepare-evaluation-source.sh \
+/absolute/root-owned/release/prepare-evaluation-source.sh \
   --base-image registry.example/urnetwork/sim-latency-evaluator-base@sha256:... \
   --destination "$attempt_source/candidate"
-./connect/sim-latency/evaluator/container/build-submission.sh \
+/absolute/root-owned/release/build-submission.sh \
   --base-image registry.example/urnetwork/sim-latency-evaluator-base@sha256:... \
   --source-root "$attempt_source/candidate" \
   --patch /var/lib/urnetwork/jobs/JOB/canonical.patch \
@@ -182,7 +187,71 @@ attempt_source="$(mktemp -d /var/lib/urnetwork/competition/source.XXXXXXXX)"
 The production form refuses a tag-only base. `--allow-local-base` exists for a
 daemon-local smoke image. The script emits strict JSON containing the image
 id/key, base SHA, deterministic candidate SHA, patch SHA-256, policy SHA-256,
-and trusted Dockerfile SHA-256.
+the complete ten-repository candidate commit map and its digest, original
+source-identity digest, validator digest, and composite builder digest.
+
+### Prospective broad-repository release
+
+This code is preparation, not an installed or qualified evaluator revision.
+Do not replace files in a running release or relabel an existing calibration.
+`mono_root_v1` requires a new approved image whose actual, SHA-bound
+`/opt/urnetwork/source-lock.json` contains `candidate_path_base: mono_root_v1`,
+plus its corresponding runtime verifier and fresh protocol qualification.
+Omitted capability remains legacy; a new worker policy cannot upgrade an old
+image. The preparer retains those exact raw lock bytes beside its original
+source identity. Broad submission building refuses absent or changed evidence
+before invoking the validator.
+
+After independent code tests and explicit authorization for an idle-host
+qualification window, compile `./cli/competitionpatch` with the pinned toolchain
+and `CGO_ENABLED=0 GOOS=linux GOARCH=amd64`
+from the reviewed control revision. Install that executable as `competitionpatch`
+and a file containing its lowercase raw SHA-256 plus optional newline as
+`competitionpatch.sha256` in a **new** immutable root-owned release directory.
+Also install `submission-builder-identity.sh`, `build-submission.sh`,
+`Dockerfile.submission`, `evaluator.sh`, and `prepare-evaluation-source.sh`, along
+with the existing complete evaluator bundle. Files and every ancestor must be
+root-owned, non-symlinked, and not group/world writable; scripts and the
+validator must be executable. Never source a validator from a job directory,
+candidate tree, environment override, or mutable base-image binary.
+
+Run the fixed `submission-builder-identity.sh` from that installed directory to
+retain its composite manifest; it hashes the validator, pin file, Dockerfile,
+builder, identity helper, evaluator, and preparer. Its digest is the builder
+cache identity and appears in build/runtime/isolation receipts. The host and
+Docker independently apply the same canonical patch, frozen policy, and
+authenticated original identity, then require identical full candidate maps.
+A single one-minute Git-operation budget, five-second pipe-drain bound, and
+70-second TERM/KILL wrapper bound the trusted application; the Git owner retires
+the scoped process group and disables automatic background maintenance.
+A dependency-only patch may leave the server revision unchanged. Existing
+cache images without the complete new identity labels are rejected.
+
+Broad-mode source text may retain regular Git mode `100644` or `100755`, including
+creation/deletion of ordinary text scripts. The execute bit is not permission
+to run code on the host: candidate checks still execute only in the discarded
+unprivileged sandbox. Mode changes, symlinks, submodules and binary diffs remain
+refused. Before applying a patch, the CLI, reviewed staging and publication replay
+check each target against its exact pinned Git tree, including when index modes
+are omitted. Creation requires successful proven absence, not a Git read error.
+Prospective source images seal regular files as `0444` or `0555` from committed
+Git modes, preserving clean VCS identity without trusting incidental mode bits.
+
+Host local Git commands are credentialless: global/system configuration and
+inherited Git overrides are disabled, and local filter-driver configuration is
+an explicit qualification failure. Candidate `.gitattributes` cannot select a
+host filter program. Only fixed clone/fetch/push/ls-remote call sites retain
+operator transport authentication; clone templates, hooks, filesystem monitors,
+signing, recursive submodule transport and background maintenance are disabled.
+Existing operator Git configuration is never silently removed to pass this gate.
+
+Qualify both legacy and broad fixtures from the new installed release,
+including dependency-only/multi-repository candidates, cache readback, protected
+tree/metadata rejection, cancellation and inherited-pipe cleanup, build-init
+isolation, and actual runtime source-lock checks. Preserve original calibration
+data and record the separately approved prospective instrument/protocol and
+statistical bridge or restart decision. None of those runtime gates is satisfied
+by a static regression or an identity manifest alone.
 
 ## Run
 

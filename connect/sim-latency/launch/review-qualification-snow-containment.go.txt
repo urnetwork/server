@@ -1,0 +1,253 @@
+// Snow's public settings leaf replaces the historical secret mount. This
+// independently authenticates its actual child/map proof before provider input.
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strconv"
+)
+
+// The qualification plan retains each exact real served id/revision/effort,
+// independently from the public aggregate policy label.
+type snowReviewQualificationMember = winnerSnowMember
+
+// Flat proof schemas require explicit root-owned zero fields as well as
+// nonzero identities; omitted/null metadata cannot inherit Go defaults.
+func decodeSnowReviewQualificationProof(content []byte, target any) error {
+	if err := decodeStrictJSONBytes(content, target, "Snow provider settings proof"); err != nil {
+		return err
+	}
+	canonical, err := json.Marshal(target)
+	if err != nil {
+		return err
+	}
+	var supplied, required map[string]json.RawMessage
+	if json.Unmarshal(content, &supplied) != nil || json.Unmarshal(canonical, &required) != nil || len(supplied) != len(required) {
+		return errors.New("Snow settings proof has incomplete fields")
+	}
+	for key := range required {
+		if value, present := supplied[key]; !present || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			return errors.New("Snow settings proof has missing/null metadata")
+		}
+	}
+	return nil
+}
+
+// Selected by trusted qualification code, never by candidate JSON or a model.
+// Synthetic unit fixtures supply reserved addresses instead of live identities.
+type reviewQualificationProviderProfile struct {
+	Snow                     bool
+	ProviderIp, ProviderHost string
+	ProviderPort             int
+	Settings                 reviewQualificationPin
+	StateDirectory           string
+}
+
+// The only prospective production fence is the operator-confirmed Snow LAN
+// frontend. A settings JSON cannot authorize any other host, port or protocol.
+func snowReviewQualificationProfile(settings reviewQualificationPin) reviewQualificationProviderProfile {
+	return reviewQualificationProviderProfile{Snow: true, ProviderIp: "192.168.1.162", ProviderHost: "192.168.1.162", ProviderPort: 8000, Settings: settings}
+}
+
+// Unlike an API key, this intentionally public root-owned mode-0444 file is
+// readable by uid 65532 through its sole bind mount without ownership changes.
+func validateSnowReviewQualificationSettingsOwnership(uidMap, settings, content []byte, pin reviewQualificationPin, owner, container string, pid int) error {
+	mapped, err := reviewQualificationMappedUid(uidMap, 65532)
+	if err != nil {
+		return err
+	}
+	var capture struct {
+		Schema         int    `json:"schema"`
+		Kind           string `json:"kind"`
+		Owner          string `json:"owner"`
+		ContainerId    string `json:"container_id"`
+		Pid            int    `json:"container_pid"`
+		Path           string `json:"path"`
+		ContainerUid   uint64 `json:"container_uid"`
+		MappedUid      uint64 `json:"mapped_host_uid"`
+		Uid            uint64 `json:"host_uid"`
+		Gid            uint64 `json:"host_gid"`
+		Mode           string `json:"mode"`
+		Bytes          int64  `json:"bytes"`
+		Links          uint64 `json:"links"`
+		Device         string `json:"device"`
+		Inode          string `json:"inode"`
+		UidMapSha256   string `json:"uid_map_sha256"`
+		SettingsSha256 string `json:"provider_settings_sha256"`
+		BeforeInput    bool   `json:"observed_before_provider_input"`
+	}
+	if err := decodeSnowReviewQualificationProof(content, &capture); err != nil {
+		return err
+	}
+	device, deviceErr := strconv.ParseUint(capture.Device, 10, 64)
+	inode, inodeErr := strconv.ParseUint(capture.Inode, 10, 64)
+	if capture.Schema != 1 || capture.Kind != "winner-review-provider-settings-ownership" || capture.Owner != owner || !validSha256(owner) || capture.ContainerId != container || !validSha256(container) || capture.Pid != pid || pid < 1 || capture.Path != pin.Path || capture.ContainerUid != 65532 || mapped == 0 || capture.MappedUid != mapped || capture.Uid != 0 || capture.Gid != 0 || capture.Mode != "0444" || capture.Bytes < 1 || capture.Bytes != int64(len(settings)) || capture.Bytes > defaultReviewQualificationSettings().MaximumProviderSettingsBytes || capture.Links != 1 || deviceErr != nil || inodeErr != nil || capture.Device != strconv.FormatUint(device, 10) || capture.Inode != strconv.FormatUint(inode, 10) || inode == 0 || capture.UidMapSha256 != reviewQualificationHash(uidMap) || !validSha256(pin.Sha256) || capture.SettingsSha256 != pin.Sha256 || reviewQualificationHash(settings) != pin.Sha256 || !capture.BeforeInput {
+		return errors.New("Snow public settings/map proof does not bind this exact private invocation")
+	}
+	return nil
+}
+
+// Only the newly created journal leaf changes ownership after observing the
+// running uid map. No credential, config parent or host root becomes writable.
+func validateSnowReviewQualificationStateOwnership(uidMap, content []byte, state, owner, container string, pid int) error {
+	mapped, err := reviewQualificationMappedUid(uidMap, 65532)
+	if err != nil {
+		return err
+	}
+	var capture struct {
+		Schema       int    `json:"schema"`
+		Kind         string `json:"kind"`
+		Owner        string `json:"owner"`
+		ContainerId  string `json:"container_id"`
+		Pid          int    `json:"container_pid"`
+		Path         string `json:"path"`
+		ContainerUid uint64 `json:"container_uid"`
+		MappedUid    uint64 `json:"mapped_host_uid"`
+		Uid          uint64 `json:"host_uid"`
+		Gid          uint64 `json:"host_gid"`
+		Mode         string `json:"mode"`
+		Device       string `json:"device"`
+		Inode        string `json:"inode"`
+		UidMapSha256 string `json:"uid_map_sha256"`
+		BeforeInput  bool   `json:"observed_before_provider_input"`
+	}
+	if err := decodeSnowReviewQualificationProof(content, &capture); err != nil {
+		return err
+	}
+	device, deviceErr := strconv.ParseUint(capture.Device, 10, 64)
+	inode, inodeErr := strconv.ParseUint(capture.Inode, 10, 64)
+	if capture.Schema != 1 || capture.Kind != "winner-review-member-state-ownership" || capture.Owner != owner || !validSha256(owner) || capture.ContainerId != container || !validSha256(container) || capture.Pid != pid || pid < 1 || !filepath.IsAbs(state) || filepath.Clean(state) != state || capture.Path != state || capture.ContainerUid != 65532 || mapped == 0 || capture.MappedUid != mapped || capture.Uid != mapped || capture.Gid != 0 || capture.Mode != "0700" || capture.UidMapSha256 != reviewQualificationHash(uidMap) || deviceErr != nil || inodeErr != nil || capture.Device != strconv.FormatUint(device, 10) || capture.Inode != strconv.FormatUint(inode, 10) || inode == 0 || !capture.BeforeInput {
+		return errors.New("Snow journal leaf does not bind the observed nonroot mapping")
+	}
+	return nil
+}
+
+// Cancellation must leave an actually empty leaf, not merely omit journals
+// from its captured manifest. Completed calls retain exactly six fixed files.
+func validateSnowReviewQualificationStateCensus(path string, expected int) error {
+	info, err := os.Lstat(path)
+	if err != nil || !info.IsDir() || info.Mode().Perm() != 0700 {
+		return errors.New("Snow journal leaf is absent or redirected")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	names, err := file.Readdirnames(expected + 1)
+	if (err != nil && !errors.Is(err, io.EOF)) || len(names) != expected {
+		return errors.New("Snow journal directory has an unexpected file census")
+	}
+	return nil
+}
+
+// Root claims are independently reread outside the captured attempt directory;
+// each fixed started/complete pair must bind the same original native input,
+// settings/member/model request and exact retained member observation.
+func validateSnowReviewQualificationJournals(artifacts map[string][]byte, pin reviewQualificationPin, owner, attempt string, settings reviewQualificationSettings) error {
+	var request winnerReviewBrokerRequest
+	if err := decodeStrictJSONBytes(artifacts["input.json"], &request, "Snow journal original request"); err != nil {
+		return err
+	}
+	if request.Template.IdempotencyKey == "" {
+		return errors.New("Snow request lacks its durable idempotency key")
+	}
+	input, err := winnerModelInput(request)
+	if err != nil {
+		return err
+	}
+	var provider winnerSnowProviderSettings
+	if err := decodeStrictJSONBytes(artifacts["provider-settings.json"], &provider, "Snow journal provider settings"); err != nil {
+		return err
+	}
+	if err := validateWinnerSnowProviderSettings(provider); err != nil {
+		return err
+	}
+	models := []map[string]string{}
+	for _, member := range provider.Members {
+		models = append(models, map[string]string{"name": member.Name, "model": member.Model, "revision": member.Revision, "reasoning": member.Reasoning})
+	}
+	modelBytes, err := json.Marshal(models)
+	if err != nil {
+		return err
+	}
+	var claim struct {
+		Schema            int    `json:"schema"`
+		Kind              string `json:"kind"`
+		IdempotencySha256 string `json:"idempotency_key_sha256"`
+		InputSha256       string `json:"input_sha256"`
+		SettingsSha256    string `json:"provider_settings_sha256"`
+		ModelsSha256      string `json:"model_set_sha256"`
+		Owner             string `json:"owner"`
+		Attempt           string `json:"attempt_directory"`
+		AutomaticRetries  bool   `json:"automatic_retries"`
+	}
+	if err := decodeSnowReviewQualificationProof(artifacts["attempt-claim.json"], &claim); err != nil {
+		return err
+	}
+	if claim.Schema != 1 || claim.Kind != "snow-review-single-attempt-claim" || claim.IdempotencySha256 != reviewQualificationHash([]byte(request.Template.IdempotencyKey)) || claim.InputSha256 != reviewQualificationHash(artifacts["input.json"]) || claim.SettingsSha256 != pin.Sha256 || claim.ModelsSha256 != reviewQualificationHash(modelBytes) || claim.Owner != owner || claim.Attempt != attempt || claim.AutomaticRetries {
+		return errors.New("Snow durable whole-attempt claim belongs to another request/provider")
+	}
+	claimDirectory := filepath.Join(filepath.Dir(settings.StateRoot), "snow-review-claims")
+	if err := reviewQualificationPrivateRoot(claimDirectory); err != nil {
+		return err
+	}
+	if _, err := readReviewQualificationPin(reviewQualificationPin{Path: filepath.Join(claimDirectory, claim.IdempotencySha256+".json"), Sha256: reviewQualificationHash(artifacts["attempt-claim.json"])}, settings.MaximumBytes, true); err != nil {
+		return err
+	}
+	var result winnerReviewBrokerResult
+	if err := decodeStrictJSONBytes(artifacts["broker.stdout"], &result, "Snow journal broker output"); err != nil {
+		return err
+	}
+	var evidence winnerSnowEvidence
+	if err := decodeStrictJSONBytes([]byte(result.PrivateEvidence), &evidence, "Snow journal member observations"); err != nil {
+		return err
+	}
+	if len(evidence.Members) != len(provider.Members) || len(evidence.Members) != 3 {
+		return errors.New("Snow journal output lost an original member")
+	}
+	state := filepath.Join(attempt, "member-state")
+	if err := validateSnowReviewQualificationStateCensus(state, len(provider.Members)*2); err != nil {
+		return err
+	}
+	for index, member := range provider.Members {
+		started, complete := artifacts[fmt.Sprintf("member-%02d.started.json", index+1)], artifacts[fmt.Sprintf("member-%02d.complete.json", index+1)]
+		if len(started) == 0 || len(complete) == 0 || int64(len(started)) > settings.MaximumMemberJournalBytes || int64(len(complete)) > settings.MaximumMemberJournalBytes {
+			return errors.New("Snow fixed member journal is missing or oversized")
+		}
+		for _, phase := range []string{"started", "complete"} {
+			name := fmt.Sprintf("member-%02d.%s.json", index+1, phase)
+			if _, err := readReviewQualificationPin(reviewQualificationPin{Path: filepath.Join(state, name), Sha256: reviewQualificationHash(artifacts[name])}, settings.MaximumMemberJournalBytes, false); err != nil {
+				return err
+			}
+		}
+		var begin struct {
+			Schema         int    `json:"schema"`
+			InputSha256    string `json:"input_sha256"`
+			SettingsSha256 string `json:"provider_settings_sha256"`
+			Model          string `json:"model"`
+			RequestSha256  string `json:"request_sha256"`
+		}
+		if err := decodeSnowReviewQualificationProof(started, &begin); err != nil {
+			return err
+		}
+		var end struct {
+			Schema      int                      `json:"schema"`
+			Observation winnerSnowMemberEvidence `json:"observation"`
+		}
+		if err := decodeStrictJSONBytes(complete, &end, "Snow completed member journal"); err != nil {
+			return err
+		}
+		if begin.Schema != 1 || begin.InputSha256 != reviewQualificationHash(input) || begin.SettingsSha256 != pin.Sha256 || begin.Model != member.Model || begin.RequestSha256 != end.Observation.RequestSha256 || !validSha256(begin.RequestSha256) || end.Schema != 1 || !reflect.DeepEqual(end.Observation, evidence.Members[index]) {
+			return errors.New("Snow journal changed member order, source or completed observation")
+		}
+	}
+	return nil
+}

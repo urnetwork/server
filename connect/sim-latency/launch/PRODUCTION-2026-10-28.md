@@ -13,17 +13,26 @@ but remains disabled and unqualified. Older journal hold/model statements below
 describe their observation time, not these current user-confirmed inputs.
 
 Use [LAUNCH-ACCEPTANCE.md](LAUNCH-ACCEPTANCE.md) and the actual live process,
-not the older journal entries below. Corrected-release formal cohort 1 passed
-and its full original evidence is preserved. Cohort 2 also completed and its
-full archive was independently verified: 9+9, all gates, 10,300 seconds,
-cleanup passed, no significance or takeover. Its mean was worse; that outcome
-is retained without filtering. Cohort 3 started its original attempt at
-**03:41:45 UTC**, with deadline **06:41:45 UTC**; 4–5 remain unstarted.
-The completed pair and preparation-tool qualifications are pushed as
-`a16396abf` and `33e41d6f6`. No tests/builds/probes may overlap the live cohort.
+not the older journal entries below. All three original corrected-release
+R9/R9 pairs passed and their complete archives are verified and pushed through
+`f27606218`. Cohort 3 ended at **06:31:05 UTC** in **10,160 seconds**, with all
+gates and cleanup, no significance/takeover, and a 3.4358% worse no-op mean.
+No scoring is active at this observation. The user approved the
+[named deadline amendment](CALIBRATION-AMENDMENT-2026-10-26.md): reduce all
+three original pairs, freeze the margin, pass one fresh minimal-C2 bridge, then
+require correct reference ordering on all three independent seeds. Original
+positions 4–5 remain unstarted. This reduces confidence without changing R9,
+gates, significance, integrity or original per-job deadlines. The corrected
+amended analyzer passed three 14-test runs and actual native reduction at
+15:01:22 UTC: 54 measurements, six replay/cleanup receipts, 99.525% bootstrap
+placeability. The [prospective practical margin is frozen at 26.9%](CALIBRATION-THREE-A-FREEZE-2026-10-26.md),
+before any C2 bridge or independent result. The minimal C2 image build started
+15:03:34 UTC; image, bridge and held-out qualification are still pending.
 The snapshot reference passed its separate directional pilot, but
 was not statistically significant; independent held-out ordering remains open.
-No pilot measurements enter the five-cohort A/A sample.
+No pilot measurements enter the amended A/A sample. A real Mini inference
+request failed with `credit_balance_exhausted`; genuine review qualification
+remains blocked on provider funding, despite model-metadata access.
 
 The active `config/main/competition.yml` is still staging. The separate
 [production template](competition-production.yml.template) records six weekly

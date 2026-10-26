@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
 )
 
 // A completed independent build binds its reviewed patch, exact image and
@@ -29,14 +30,30 @@ type CompetitionReviewedSourceBuildReceipt struct {
 	Passed                  bool      `json:"passed"`
 	TestModel               string    `json:"test_model"`
 	TestReasoning           string    `json:"test_reasoning"`
+	WinnerReviewPolicy      string    `json:"winner_review_policy,omitempty"`
 }
 
 // A review approval is not permission to bypass genuine independent build,
 // test and isolation evidence. Both producer and consumer use this contract.
 func ValidateCompetitionReviewedSourceBuildReceipt(receipt CompetitionReviewedSourceBuildReceipt, reviewId server.Id, patchDigest, lockDigest string, staging bool) error {
+	return ValidateCompetitionReviewedSourceBuildReceiptForPolicy(receipt, reviewId, patchDigest, lockDigest, staging, "")
+}
+
+// New Snow intent consumers require its aggregate; historical receipts retain
+// their original Sol/low contract and cannot be silently used for Snow source.
+func ValidateCompetitionReviewedSourceBuildReceiptForPolicy(receipt CompetitionReviewedSourceBuildReceipt, reviewId server.Id, patchDigest, lockDigest string, staging bool, policy string) error {
+	testModel, testReasoning := "gpt-6.1-sol", "low"
+	if policy == model.CompetitionSnowWinnerReviewPolicy {
+		if receipt.WinnerReviewPolicy != policy {
+			return errors.New("Snow source qualification lacks its frozen review policy")
+		}
+		testModel, testReasoning = model.CompetitionSnowWinnerReviewModel, model.CompetitionSnowWinnerReviewReasoning
+	} else if receipt.WinnerReviewPolicy != "" || (policy != "" && !model.IsCompetitionWinnerReviewPolicy(policy)) {
+		return errors.New("source qualification policy is unsupported or cross-provider")
+	}
 	if receipt.Schema != 1 || receipt.Staging != staging || receipt.ReviewId != reviewId || receipt.PatchSha256 != patchDigest || receipt.SourceLockSha256 != lockDigest ||
 		!receipt.Passed || !receipt.Offline || !receipt.NoMainCredentials || !receipt.ReadOnlySource || receipt.SandboxId == "" ||
-		receipt.TestModel != "gpt-6.1-sol" || receipt.TestReasoning != "low" || !imageDigestPattern.MatchString(receipt.EvaluatorImageDigest) ||
+		receipt.TestModel != testModel || receipt.TestReasoning != testReasoning || !imageDigestPattern.MatchString(receipt.EvaluatorImageDigest) ||
 		!sha256Pattern.MatchString(receipt.HostQualificationSha256) || !sha256Pattern.MatchString(receipt.ContainmentSha256) || !sha256Pattern.MatchString(receipt.TestEvidenceSha256) {
 		return errors.New("reviewed source requires exact independent isolated build/test and containment evidence")
 	}

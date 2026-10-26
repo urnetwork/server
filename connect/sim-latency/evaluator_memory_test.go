@@ -44,11 +44,39 @@ func evaluatorMemoryBudget(t *testing.T, hostBytes int64) ([]byte, error) {
 // The separately retained evidence cap cannot consume the management reserve.
 func TestEvaluatorMemoryBudgetCountsEvidence(t *testing.T) {
 	const gib = int64(1024 * 1024 * 1024)
-	for _, hostBytes := range []int64{120 * gib, 123 * gib, 124*gib - 1} {
+	for _, hostBytes := range []int64{120 * gib, 124 * gib, 125*gib - 1} {
 		output, err := evaluatorMemoryBudget(t, hostBytes)
 		if err == nil {
-			t.Errorf("host capacity %d accepted without space for 96 GiB containers + 4 GiB evidence + 24 GiB reserve: %s", hostBytes, output)
+			t.Errorf("host capacity %d accepted without space for 96 GiB containers + 5 GiB evidence + 24 GiB reserve: %s", hostBytes, output)
 		}
+	}
+}
+
+// Ten-repository source copies need more than the old four-GiB workspace.
+// Exercise real shell admission, then compare both profiles to the retained
+// incident's synthetic-size reproduction without reading live host identity.
+func TestEvaluatorMemoryBudgetFitsBroadSourceEvidence(t *testing.T) {
+	const gib = int64(1024 * 1024 * 1024)
+	const twoSourceCopies = int64(4001275904)
+	const observedEvidence = int64(380473344)
+	const boundedExtras = int64(5517170 + 4194304 + 262144)
+	required := twoSourceCopies + observedEvidence + boundedExtras
+	if required <= 4*gib || required >= 5*gib {
+		t.Fatal("capacity regression no longer distinguishes old and new profiles")
+	}
+	output, err := evaluatorMemoryBudget(t, 126*gib)
+	if err != nil {
+		t.Fatalf("new budget refused: %v: %s", err, output)
+	}
+	var report struct {
+		EvidenceMemoryLimitBytes int64 `json:"evidence_memory_limit_bytes"`
+		CapacityReserveBytes     int64 `json:"capacity_reserve_bytes"`
+	}
+	if err := json.Unmarshal(output, &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.EvidenceMemoryLimitBytes <= required || report.CapacityReserveBytes < 24*gib {
+		t.Fatal("broad source capacity or management reserve insufficient")
 	}
 }
 
@@ -56,7 +84,7 @@ func TestEvaluatorMemoryBudgetCountsEvidence(t *testing.T) {
 // CPU qualification and cannot be mistaken for its attestation JSON.
 func TestEvaluatorMemoryBudgetBoundaryAndPureDiagnostic(t *testing.T) {
 	const gib = int64(1024 * 1024 * 1024)
-	for _, hostBytes := range []int64{124 * gib, 128 * gib} {
+	for _, hostBytes := range []int64{125 * gib, 128 * gib} {
 		output, err := evaluatorMemoryBudget(t, hostBytes)
 		if err != nil {
 			t.Fatalf("host capacity %d: %v: %s", hostBytes, err, output)
@@ -68,10 +96,10 @@ func TestEvaluatorMemoryBudgetBoundaryAndPureDiagnostic(t *testing.T) {
 		for field, want := range map[string]int64{
 			"host_memory_bytes":                       hostBytes,
 			"active_memory_limit_bytes":               96 * gib,
-			"evidence_memory_limit_bytes":             4 * gib,
-			"total_evaluation_memory_limit_bytes":     100 * gib,
+			"evidence_memory_limit_bytes":             5 * gib,
+			"total_evaluation_memory_limit_bytes":     101 * gib,
 			"minimum_management_memory_reserve_bytes": 24 * gib,
-			"capacity_reserve_bytes":                  hostBytes - 100*gib,
+			"capacity_reserve_bytes":                  hostBytes - 101*gib,
 		} {
 			var actual int64
 			if err := json.Unmarshal(report[field], &actual); err != nil || actual != want {
@@ -93,7 +121,7 @@ func TestEvaluatorMemoryBudgetBoundaryAndPureDiagnostic(t *testing.T) {
 func TestEvaluatorMemoryBudgetMatchesRuntimeAndQualification(t *testing.T) {
 	for path, required := range map[string][]string{
 		"evaluator/container/evaluator.sh": {
-			"readonly EVIDENCE_WORK_LIMIT=4g", "readonly EVIDENCE_WORK_BYTES=4294967296",
+			"readonly EVIDENCE_WORK_LIMIT=5g", "readonly EVIDENCE_WORK_BYTES=5368709120",
 			".evidence_memory_limit_bytes == $evidence_memory_bytes",
 			".total_evaluation_memory_limit_bytes == ($active_memory_bytes + $evidence_memory_bytes)",
 		},
@@ -128,9 +156,9 @@ func TestEvaluatorMemoryBudgetMatchesRuntimeAndQualification(t *testing.T) {
 			t.Fatal(err)
 		}
 		for field, expected := range map[string]string{
-			"evidence_memory_limit_bytes":         "4294967296",
-			"total_evaluation_memory_limit_bytes": "107374182400",
-			"artifact_quota_bytes":                "4294967296",
+			"evidence_memory_limit_bytes":         "5368709120",
+			"total_evaluation_memory_limit_bytes": "108447924224",
+			"artifact_quota_bytes":                "5368709120",
 		} {
 			if string(report[field]) != expected {
 				t.Errorf("%s %s = %s, want %s", path, field, report[field], expected)

@@ -27,6 +27,14 @@ type ProviderWorkOwnerIndex struct {
 	Owners [][]byte `json:"owners"`
 }
 
+// One transaction at a time changes a client's key custody: its first key,
+// a rotation, or a retained work owner. The key keeps the spelling the work
+// owner lock always had, so these writers also serialize with the release
+// before them during a rolling deploy.
+func lockClientKeyCustodyInTx(ctx context.Context, tx server.PgTx, clientId [16]byte) {
+	server.RaisePgResult(tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, fmt.Sprintf("provider-work-owner/%x", clientId)))
+}
+
 // A previously retained statement survives key rotation and client deletion.
 // New statements serialize with actual client-key mutation and require its
 // independently signed current head; no anonymous key can consume custody.
@@ -52,7 +60,7 @@ func RetainProviderWorkOwner(ctx context.Context, raw []byte, domain [32]byte, r
 	}
 	digest := sha256.Sum256(raw)
 	server.Tx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, fmt.Sprintf("provider-work-owner/%x", owner.ClientId)))
+		lockClientKeyCustodyInTx(ctx, tx, owner.ClientId)
 		var prior, priorHash []byte
 		err := tx.QueryRow(ctx, `SELECT original,owner_hash FROM provider_work_owner WHERE domain_hash=$1 AND client_id=$2 AND generation=$3`, domain[:], owner.ClientId[:], owner.Generation[:]).Scan(&prior, &priorHash)
 		if err == nil {
@@ -65,7 +73,11 @@ func RetainProviderWorkOwner(ctx context.Context, raw []byte, domain [32]byte, r
 			server.Raise(err)
 		}
 		var networkId server.Id
-		err = tx.QueryRow(ctx, `SELECT network_id FROM network_client WHERE client_id=$1 AND active=true FOR UPDATE`, server.Id(owner.ClientId)).Scan(&networkId)
+		// The custody lock serializes this client's key mutation. This lock
+		// only keeps the client active until commit: deactivation and DELETE
+		// take FOR UPDATE and wait, while contract creations to the provider,
+		// which share its row, do not.
+		err = tx.QueryRow(ctx, `SELECT network_id FROM network_client WHERE client_id=$1 AND active=true FOR KEY SHARE`, server.Id(owner.ClientId)).Scan(&networkId)
 		if errors.Is(err, pgx.ErrNoRows) {
 			panic(ErrProviderWorkOwnerPending)
 		}
