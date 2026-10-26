@@ -15,6 +15,21 @@ their original Sol/max provenance and cannot be relabeled as mini reviews.
 Independent prescribed tests still use Sol 6.1 low; the shared stream framing
 does not select or migrate their model.
 
+The Mini policy requests the documented immutable provider snapshot
+`gpt-5.4-mini-2026-03-17`, not a floating API alias. Private evidence separately
+records `policy_model`, `requested_model` and the actual returned `model`.
+Returned identity must match the requested snapshot exactly; another revision
+is not silently accepted. Legacy policy requests retain their original identity.
+
+An HTTP refusal is not a review. The broker exits nonzero and emits a distinct
+private `review_provider_refusal` envelope with bounded status/code/type,
+request identity and capture digest; complete JSON bodies are credential-redacted.
+Truncated/malformed bodies retain a digest only. No provider refusal triggers
+an automatic retry, test execution, approval or disqualification. In particular,
+model metadata access HTTP 200 does not prove funded inference: the October 26
+actual Mini request returned HTTP 429 `credit_balance_exhausted` and remains
+unqualified until credits and genuine broker tests pass.
+
 The client follows the official [model contract](https://developers.openai.com/api/docs/models/gpt-5.4-mini)
 and [structured output contract](https://developers.openai.com/api/docs/guides/structured-outputs).
 It has no model tools, shell, subprocess invocation, API redirect, configurable

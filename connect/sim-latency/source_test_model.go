@@ -10,7 +10,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -66,8 +65,13 @@ type sourceTestModelSettings struct {
 
 // Lower test-agent budgets are independent of the safety-review provider.
 func defaultSourceTestModelSettings() sourceTestModelSettings {
-	return sourceTestModelSettings{winnerModelSettings: winnerModelSettings{RequestTimeout: 5 * time.Minute, MaximumInputBytes: 64 * 1024,
-		MaximumStreamBytes: 1024 * 1024, MaximumEventBytes: 512 * 1024, MaximumOutputTokens: 4096}, TotalTimeout: 3 * time.Hour}
+	settings := defaultWinnerModelSettings()
+	settings.RequestTimeout = 5 * time.Minute
+	settings.MaximumInputBytes = 64 * 1024
+	settings.MaximumStreamBytes = 1024 * 1024
+	settings.MaximumEventBytes = 512 * 1024
+	settings.MaximumOutputTokens = 4096
+	return sourceTestModelSettings{winnerModelSettings: settings, TotalTimeout: 3 * time.Hour}
 }
 
 // Keep this separate from authority-bearing receipts. The caller persists the
@@ -131,7 +135,7 @@ func executeSourceTestModel(ctx context.Context, client *http.Client, key string
 			}
 			defer response.Body.Close()
 			if response.StatusCode != http.StatusOK {
-				return nil, fmt.Errorf("independent test provider refused request (HTTP %d)", response.StatusCode)
+				return nil, readWinnerModelRefusal(response, key, settings.winnerModelSettings)
 			}
 			stream, err := io.ReadAll(io.LimitReader(response.Body, settings.MaximumStreamBytes+1))
 			if err != nil || int64(len(stream)) > settings.MaximumStreamBytes {
