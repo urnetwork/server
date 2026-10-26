@@ -5,11 +5,13 @@ checklist is the acceptance index for the new release, not an authorization to
 activate production. Historical v1 checkmarks do not qualify a different source,
 image, host manifest, policy or review provider.
 
-## Current checkpoint — October 26, 23:41 UTC
+## Current checkpoint — October 26, 23:58 UTC
 
 - The frozen performance source is C2 server `a9e8e1a7`, ten-repository lock
   `ec322ed2…`, image `sha256:b1632a55…`, actual Go **1.27.3**. Operator-proxy
   is not a dependency. The new control-plane fixes do not change that source.
+  All ten remote `sim-latency` branch heads were independently checked against
+  that checkpoint at 23:44 UTC; see the [remote branch receipt](FROZEN-SOURCE-CHECKPOINT-2026-10-26.json).
 - The three original C1 pairs are accepted evidence for the **26.9%** margin.
   The single fresh C2 R9/R9 bridge **failed**, exit 1 at **22:22:15 UTC** after
   5,239 seconds; exact cleanup is verified. All nine baseline simulations
@@ -43,7 +45,8 @@ image, host manifest, policy or review provider.
   cache and host-probe fixes passed a 173-test smoke run and six compiled
   pre-fix regression controls. Current clean-main simulator/controller/model
   scopes passed three times (145/19/10 tests per pass; zero skips); the separate
-  60-test native scope is still completing its three passes. Fixes are pushed
+  60-test native scope also passed three times. That is 702 selected test
+  executions, not real provider or calibration runs. Fixes are pushed
   through `ebf0b61ce`. Scratch image `sha256:c5afcdc7…` passed actual non-root
   offline startup after an explicit COPY-mode fix; this is image qualification,
   not genuine review-provider qualification.

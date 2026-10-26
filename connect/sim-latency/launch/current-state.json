@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-26T23:41:29Z",
+  "observed_at": "2026-10-26T23:58:53Z",
   "objective": "Ready to launch at 2026-10-28T00:00:00Z",
   "storage_verification": {
     "operations_compliance_receipt_sha256": "c6b8b5348633270939395b7a585e1978b3a83c679b2552eccd8ab2a4690edc3f",
@@ -50,8 +50,11 @@
     "three_pass_model_tests_per_pass": 10,
     "three_pass_skips": 0,
     "native_tests_per_pass": 60,
-    "native_consecutive_passes_observed": 1,
-    "native_three_pass_qualification_complete": false,
+    "native_consecutive_passes_observed": 3,
+    "native_three_pass_qualification_complete": true,
+    "complete_selected_test_executions": 702,
+    "complete_qualification_summary": "/home/by/urnetwork/temp/clean-green-ebf-20261026.QdADtVUD/qualification-summary.json",
+    "complete_qualification_summary_sha256": "4a57a5996d8fcffe9a5e364d5bc5e54bac34520f175048e5a1d35bd4f0ec1378",
     "unit_receipt": "/home/by/urnetwork/temp/clean-green-ebf-20261026.QdADtVUD/unit-qualification.json",
     "unit_receipt_sha256": "1711857d3f3de376b9d91bf433b51f5049e452f21af8e9f02b2de7116dd57d9f",
     "review_scratch_image": "sha256:c5afcdc72c16f78d33d411740737367125b031d863313ea504e333e9250f444d",
