@@ -389,12 +389,22 @@ func heldOutCommandContext(ctx context.Context, operation string, content []byte
 			return old, settings, err
 		}
 		preparation = plan.Config
-	case "verify-bridge":
-		var config heldOutBridgeVerificationConfig
-		if err := decodeHeldOutComplete(content, &config, "bridge context"); err != nil {
-			return old, settings, err
+	case "verify-bridge", "verify-bridge-precommit":
+		var planPin heldOutPinnedFile
+		if operation == "verify-bridge-precommit" {
+			var config heldOutBridgePrecommitConfig
+			if err := decodeHeldOutComplete(content, &config, "bridge precommit context"); err != nil {
+				return old, settings, err
+			}
+			planPin = config.Plan
+		} else {
+			var config heldOutBridgeVerificationConfig
+			if err := decodeHeldOutComplete(content, &config, "bridge context"); err != nil {
+				return old, settings, err
+			}
+			planPin = config.Plan
 		}
-		plan, _, err := readHeldOutBridgePlan(config.Plan, settings)
+		plan, _, err := readHeldOutBridgePlan(planPin, settings)
 		if err != nil {
 			return old, settings, err
 		}

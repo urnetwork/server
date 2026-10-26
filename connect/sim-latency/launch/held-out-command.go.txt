@@ -151,6 +151,30 @@ func TestHeldOutOperatorCommand(t *testing.T) {
 			}
 			summary = fmt.Sprintf("froze accepted original three-pair margin=%g before any bridge; no measurements", receipt.Margin)
 			return nil, nil
+		case "verify-bridge-precommit":
+			var config heldOutBridgePrecommitConfig
+			if err := decodeHeldOutComplete(content, &config, "read-only bridge precommit authentication"); err != nil {
+				return nil, err
+			}
+			if !filepath.IsAbs(config.ReceiptPath) || filepath.Clean(config.ReceiptPath) != config.ReceiptPath {
+				return nil, errors.New("canonical new precommit authentication receipt required")
+			}
+			precommit, err := authenticateHeldOutBridgePrecommit(ctx, config, release, settings, func(ctx context.Context, program string, args ...string) ([]byte, error) {
+				return runHeldOutReadOnly(ctx, settings, program, args...)
+			})
+			if err != nil {
+				return nil, err
+			}
+			receipt := heldOutBridgePrecommitAuthentication{Schema: 1, Kind: "sim-latency-c2-precommit-reference-authentication-only",
+				Claim: "precommit-and-reference-authentication-not-compatibility-or-scoring", AuthenticatedAt: time.Now().UTC(),
+				PlanSha256: config.Plan.Sha256, PublicationSha256: config.Publication.Sha256, RequestSha256: precommit.Plan.Request.Sha256,
+				NativeBuildSha256: precommit.Plan.Noop.NativeBuild.Sha256, BuilderSha256: release.Runtime.BuilderSha256,
+				ValidatorSha256: release.Runtime.ValidatorSha256, GeneratorAuthenticated: true}
+			if err := writeHeldOutRecord(config.ReceiptPath, receipt); err != nil {
+				return nil, err
+			}
+			summary = "authenticated precommit/native reference/generator only; no compatibility, score replay or measurements"
+			return nil, nil
 		case "verify-bridge":
 			var config heldOutBridgeVerificationConfig
 			if err := decodeHeldOutComplete(content, &config, "single precommitted bridge verification"); err != nil {

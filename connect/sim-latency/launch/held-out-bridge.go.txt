@@ -59,6 +59,45 @@ type heldOutBridgePlan struct {
 	Request        heldOutPinnedFile         `json:"request"`
 	Noop           heldOutReference          `json:"no_op"`
 	Margin         float64                   `json:"accepted_margin"`
+	GeneratorFiles []heldOutGeneratorFile    `json:"generator_files,omitempty"`
+}
+
+// This opt-in reads only precommitted inputs. It cannot accept measurements,
+// replace a control, replay a score or manufacture a compatibility witness.
+type heldOutBridgePrecommitConfig struct {
+	Schema      int               `json:"schema"`
+	Kind        string            `json:"kind"`
+	Plan        heldOutPinnedFile `json:"bridge_plan"`
+	Publication heldOutPinnedFile `json:"bridge_publication"`
+	ReceiptPath string            `json:"receipt_path"`
+}
+
+// Shared pre/post execution facts exclude all future measured artifacts.
+type heldOutBridgePrecommit struct {
+	Plan        *heldOutBridgePlan
+	Freeze      *heldOutMarginFreeze
+	Request     heldOutRequest
+	Publication heldOutPublication
+	OldSettings calibrationAnalysisSettings
+}
+
+// The distinct kind and explicit false fields prevent this read-only receipt
+// from being consumed as measured C2 compatibility or a positive host gate.
+type heldOutBridgePrecommitAuthentication struct {
+	Schema                 int       `json:"schema"`
+	Kind                   string    `json:"kind"`
+	Claim                  string    `json:"claim"`
+	AuthenticatedAt        time.Time `json:"authenticated_at"`
+	PlanSha256             string    `json:"bridge_plan_sha256"`
+	PublicationSha256      string    `json:"bridge_publication_sha256"`
+	RequestSha256          string    `json:"request_sha256"`
+	NativeBuildSha256      string    `json:"reference_native_build_sha256"`
+	BuilderSha256          string    `json:"builder_sha256"`
+	ValidatorSha256        string    `json:"patch_validator_sha256"`
+	GeneratorAuthenticated bool      `json:"generator_authenticated"`
+	CompatibilityAssessed  bool      `json:"compatibility_assessed"`
+	ScoreReplayed          bool      `json:"score_replayed"`
+	MeasurementsRun        int       `json:"measurements_run"`
 }
 
 // A different verification target cannot revise the published bridge request.
@@ -296,8 +335,17 @@ func validateHeldOutBridgeCohort(cohort calibrationAnalysisCohort, settings cali
 	return nil
 }
 
-// The unchanged evaluator defines seven worker bindings, all 465 complete
-// evidence entries and five completion-map bindings. Every raw file is hashed.
+// The prospective C2 script adds exactly its native builder identity and
+// original-source identity sidecars; historical C1 retains its 465-entry shape.
+func heldOutBridgeEvidenceBindings(release heldOutRelease) int {
+	if release.Runtime != nil {
+		return 467
+	}
+	return 465
+}
+
+// Each selected immutable script defines an exact full evidence census, seven
+// worker bindings and five completion-map bindings. Every raw file is hashed.
 func authenticateHeldOutBridgeCensus(input calibrationFileCohort, release heldOutRelease, request heldOutRequest, settings calibrationAnalysisSettings) error {
 	content, err := readCalibrationArtifact(input.ArtifactDirectory, "evidence-manifest.json", input.EvidenceManifestSha256)
 	if err != nil {
@@ -309,11 +357,15 @@ func authenticateHeldOutBridgeCensus(input calibrationFileCohort, release heldOu
 	if err := json.Unmarshal(content, &evidence); err != nil {
 		return err
 	}
-	if len(evidence.Artifacts) != 465 {
-		return errors.New("bridge full evidence inventory differs from frozen 465-entry script contract")
+	if len(evidence.Artifacts) != heldOutBridgeEvidenceBindings(release) {
+		return errors.New("bridge full evidence inventory differs from its exact selected script contract")
 	}
-	if _, err := verifyCalibrationArtifactBindings(input.ArtifactDirectory, evidence.Artifacts, settings); err != nil {
+	bound, err := verifyCalibrationArtifactBindings(input.ArtifactDirectory, evidence.Artifacts, settings)
+	if err != nil {
 		return err
+	}
+	if release.Runtime != nil && (!bound["evidence/builder-identity.json"] || !bound["evidence/candidate-original-source.json"]) {
+		return errors.New("C2 bridge evidence omitted a required native builder/source sidecar")
 	}
 	content, _, err = readHeldOutProduced(input.ArtifactDirectory, "evaluation.complete.json", settings.MaximumArtifactBytes)
 	if err != nil {
@@ -387,8 +439,6 @@ func readHeldOutBridgePlan(pin heldOutPinnedFile, settings heldOutOperatorSettin
 	return &plan, freeze, nil
 }
 
-// Verifies the exact one-cohort native artifact schema, immutable-image replay,
-// source/build evidence and native artifact census, retaining rejected results.
 // The shared authenticator must receive the bridge's raw source-lock pin as
 // well as its canonical release digest; they bind different C2 properties.
 func heldOutBridgeExecutionPlan(plan heldOutBridgePlan, request heldOutRequest, margin float64, release heldOutRelease) heldOutPrivatePlan {
@@ -396,11 +446,11 @@ func heldOutBridgeExecutionPlan(plan heldOutBridgePlan, request heldOutRequest, 
 		Policy: request.EvaluationPolicy, PolicySha256: release.StageAPolicySha256, Margin: margin, References: []heldOutReference{plan.Noop}}
 }
 
-// Verifies the exact one-cohort native artifact schema, immutable-image replay,
-// source/build evidence and native artifact census, retaining rejected results.
-func verifyHeldOutBridge(ctx context.Context, config heldOutBridgeVerificationConfig, release heldOutRelease, settings heldOutOperatorSettings, replay calibrationScoreReplay, observations func() []calibrationReplayObservation, now func() time.Time, run func(context.Context, string, ...string) ([]byte, error)) (*heldOutBridgeCompatibility, error) {
-	if config.Schema != 1 || config.Kind != "sim-latency-prospective-c2-bridge-verification" || replay == nil || observations == nil || now == nil {
-		return nil, errors.New("complete native bridge verification dependencies required")
+// Shared by the read-only command and post-run verification. No score/replay
+// callback is available here; only existing native input validators are used.
+func authenticateHeldOutBridgePrecommit(ctx context.Context, config heldOutBridgePrecommitConfig, release heldOutRelease, settings heldOutOperatorSettings, run func(context.Context, string, ...string) ([]byte, error)) (*heldOutBridgePrecommit, error) {
+	if config.Schema != 1 || config.Kind != "sim-latency-prospective-c2-bridge-precommit-verification" || run == nil {
+		return nil, errors.New("explicit read-only bridge precommit configuration required")
 	}
 	plan, freeze, err := readHeldOutBridgePlan(config.Plan, settings)
 	if err != nil {
@@ -459,9 +509,80 @@ func verifyHeldOutBridge(ctx context.Context, config heldOutBridgeVerificationCo
 	if err != nil {
 		return nil, err
 	}
-	if request.Schema != 1 || request.Attempt != 1 || request.BaseSha != release.BaseSha || request.EvaluatorImageDigest != release.ImageId || request.ScorerVersion != officialScorerVersion || request.SourceEpoch != 0 || request.RoundBaselinePath != "" || request.RoundBaselineSha256 != "" || heldOutDigest(policyBytes) != release.StageAPolicySha256 || request.EvaluationPolicy.TakeoverMargin != freeze.Margin || request.EvaluationPolicy.SimulatorSha256 != release.BinarySha256 || request.EvaluationPolicy.ScorerSha256 != release.BinarySha256 || request.ProvidersSha256 != originalManifest.ProvidersSha256 || request.RoundSeedHex != originalManifest.RoundSeedHex || request.PatchSha256 != plan.Noop.Patch.Sha256 {
+	if !reflect.DeepEqual(originalRequest.PatchPolicy, request.PatchPolicy) || request.Schema != 1 || request.Attempt != 1 || request.BaseSha != release.BaseSha || request.EvaluatorImageDigest != release.ImageId || request.ScorerVersion != officialScorerVersion || request.SourceEpoch != 0 || request.RoundBaselinePath != "" || request.RoundBaselineSha256 != "" || heldOutDigest(policyBytes) != release.StageAPolicySha256 || request.EvaluationPolicy.TakeoverMargin != freeze.Margin || request.EvaluationPolicy.SimulatorSha256 != release.BinarySha256 || request.EvaluationPolicy.ScorerSha256 != release.BinarySha256 || request.ProvidersSha256 != originalManifest.ProvidersSha256 || request.RoundSeedHex != originalManifest.RoundSeedHex || request.PatchSha256 != plan.Noop.Patch.Sha256 {
 		return nil, errors.New("bridge request changed new release, public workload, no-op or frozen margin")
 	}
+	if err := authenticateHeldOutGeneratorFiles(plan.GeneratorFiles, release, settings); err != nil {
+		return nil, err
+	}
+	if err := authenticateHeldOutPrebuiltReference(plan.Noop, request, plan.SourceLock.Sha256, release, settings); err != nil {
+		return nil, err
+	}
+	return &heldOutBridgePrecommit{Plan: plan, Freeze: freeze, Request: request, Publication: publication, OldSettings: oldSettings}, nil
+}
+
+// Authenticates the exact same prebuilt native source/builder sidecar schemas
+// later consumed from the actual job, using pinned qualification evidence now.
+func authenticateHeldOutPrebuiltReference(reference heldOutReference, request heldOutRequest, rawLockSha256 string, release heldOutRelease, settings heldOutOperatorSettings) error {
+	if _, err := authenticateHeldOutReference(reference, release, settings); err != nil {
+		return err
+	}
+	if release.Runtime == nil {
+		return nil
+	}
+	nativeBytes, err := readHeldOutPinned(reference.NativeBuild, settings.MaximumBytes, false)
+	if err != nil {
+		return err
+	}
+	var build heldOutNativeBuild
+	if err := decodeHeldOutComplete(nativeBytes, &build, "prebuilt bridge native reference"); err != nil {
+		return err
+	}
+	policyBytes, err := json.Marshal(request.PatchPolicy)
+	if err != nil {
+		return err
+	}
+	var policy map[string]json.RawMessage
+	if err := json.Unmarshal(policyBytes, &policy); err != nil {
+		return err
+	}
+	policyBytes, err = json.MarshalIndent(policy, "", "  ")
+	if err != nil || heldOutDigest(append(policyBytes, '\n')) != build.PolicySha256 || build.PatchSha256 != request.PatchSha256 {
+		return errors.New("prebuilt reference differs from exact evaluator request patch/policy bytes")
+	}
+	qualificationBytes, err := readHeldOutPinned(reference.Build, settings.MaximumBytes, false)
+	if err != nil {
+		return err
+	}
+	var qualification heldOutReferenceQualification
+	if err := decodeHeldOutComplete(qualificationBytes, &qualification, "prebuilt reference qualification"); err != nil {
+		return err
+	}
+	root := filepath.Dir(reference.NativeBuild.Path)
+	bound := map[string]bool{}
+	for _, name := range []string{"evidence/candidate-original-source.json", "evidence/builder-identity.json"} {
+		for _, pin := range qualification.Evidence {
+			if pin.Path == filepath.Join(root, name) {
+				if _, err := readHeldOutPinned(pin, settings.MaximumBytes, false); err != nil {
+					return err
+				}
+				bound[name] = true
+			}
+		}
+	}
+	return authenticateHeldOutRuntimeBuildEvidence(root, bound, build, request, rawLockSha256, release, settings)
+}
+
+// Post-run verification additionally authenticates and replays all measured artifacts.
+func verifyHeldOutBridge(ctx context.Context, config heldOutBridgeVerificationConfig, release heldOutRelease, settings heldOutOperatorSettings, replay calibrationScoreReplay, observations func() []calibrationReplayObservation, now func() time.Time, run func(context.Context, string, ...string) ([]byte, error)) (*heldOutBridgeCompatibility, error) {
+	if config.Schema != 1 || config.Kind != "sim-latency-prospective-c2-bridge-verification" || replay == nil || observations == nil || now == nil {
+		return nil, errors.New("complete native bridge verification dependencies required")
+	}
+	precommit, err := authenticateHeldOutBridgePrecommit(ctx, heldOutBridgePrecommitConfig{Schema: 1, Kind: "sim-latency-prospective-c2-bridge-precommit-verification", Plan: config.Plan, Publication: config.Publication}, release, settings, run)
+	if err != nil {
+		return nil, err
+	}
+	plan, freeze, request, publication, oldSettings := precommit.Plan, precommit.Freeze, precommit.Request, precommit.Publication, precommit.OldSettings
 	settingsBridge := defaultCalibrationAnalysisSettings()
 	settingsBridge.Cohorts = 1
 	settingsBridge.MarginFloor = freeze.Margin
@@ -540,7 +661,7 @@ func verifyHeldOutBridge(ctx context.Context, config heldOutBridgeVerificationCo
 		ApprovalSha256: plan.OriginalA.Approval.Sha256, OriginalPlanSha256: plan.OriginalA.OriginalPlan.Sha256, StageAReportSha256: plan.OriginalA.StageAReport.Sha256, StageAInputsSha256: plan.OriginalA.StageAInputs.Sha256, MarginFreezeSha256: plan.MarginFreeze.Sha256, ReleaseSha256: plan.Release.Sha256,
 		RuntimeManifestSha256: release.Runtime.Manifest.Sha256, BuilderSha256: release.Runtime.BuilderSha256, ValidatorSha256: release.Runtime.ValidatorSha256, RunnerSha256: plan.Runner.Sha256, RunnerManifestSha256: plan.RunnerManifest.Sha256,
 		BridgePlanSha256: config.Plan.Sha256, BridgePublicationSha256: config.Publication.Sha256, BridgeInputsSha256: config.Inputs.Sha256, RequestSha256: plan.Request.Sha256, BaseSha: release.BaseSha, ImageId: release.ImageId, PolicySha256: release.StageAPolicySha256, Margin: freeze.Margin,
-		StartedAt: start, CompletedAt: end, WorkerBindings: 7, EvidenceBindings: 465, CompletionBindings: 5, ControlEvaluationIds: append([]string{}, cohort.ControlEvaluationIds...), Score: cohort.Result, Replays: observations()}
+		StartedAt: start, CompletedAt: end, WorkerBindings: 7, EvidenceBindings: heldOutBridgeEvidenceBindings(release), CompletionBindings: 5, ControlEvaluationIds: append([]string{}, cohort.ControlEvaluationIds...), Score: cohort.Result, Replays: observations()}
 	if acceptedErr != nil {
 		receipt.Reasons = append(receipt.Reasons, acceptedErr.Error())
 	}
@@ -590,7 +711,7 @@ func authenticateHeldOutBridge(config heldOutPreparationConfig, release heldOutR
 	if err := decodeHeldOutComplete(content, &receipt, "accepted one-bridge compatibility witness"); err != nil {
 		return err
 	}
-	if receipt.Schema != 1 || receipt.Kind != "sim-latency-one-fresh-c2-bridge-compatibility" || receipt.Protocol != config.Protocol || receipt.Claim != "operational-compatibility-witness-not-statistical-equivalence" || !receipt.Accepted || len(receipt.Reasons) != 0 || receipt.VerifiedAt.IsZero() || receipt.VerifiedAt.Before(receipt.CompletedAt) || receipt.ApprovalSha256 != pins.Approval.Sha256 || receipt.OriginalPlanSha256 != pins.OriginalPlan.Sha256 || receipt.StageAReportSha256 != config.StageAReport.Sha256 || receipt.StageAInputsSha256 != config.StageAInputs.Sha256 || receipt.MarginFreezeSha256 != pins.MarginFreeze.Sha256 || receipt.ReleaseSha256 != pins.Release.Sha256 || receipt.BridgePlanSha256 != pins.BridgePlan.Sha256 || receipt.BridgePublicationSha256 != pins.BridgePublication.Sha256 || receipt.BridgeInputsSha256 != pins.BridgeInputs.Sha256 || receipt.RequestSha256 != config.Template.Sha256 || receipt.BaseSha != release.BaseSha || receipt.ImageId != release.ImageId || receipt.PolicySha256 != release.StageAPolicySha256 || receipt.Margin != margin || receipt.WorkerBindings != 7 || receipt.EvidenceBindings != 465 || receipt.CompletionBindings != 5 {
+	if receipt.Schema != 1 || receipt.Kind != "sim-latency-one-fresh-c2-bridge-compatibility" || receipt.Protocol != config.Protocol || receipt.Claim != "operational-compatibility-witness-not-statistical-equivalence" || !receipt.Accepted || len(receipt.Reasons) != 0 || receipt.VerifiedAt.IsZero() || receipt.VerifiedAt.Before(receipt.CompletedAt) || receipt.ApprovalSha256 != pins.Approval.Sha256 || receipt.OriginalPlanSha256 != pins.OriginalPlan.Sha256 || receipt.StageAReportSha256 != config.StageAReport.Sha256 || receipt.StageAInputsSha256 != config.StageAInputs.Sha256 || receipt.MarginFreezeSha256 != pins.MarginFreeze.Sha256 || receipt.ReleaseSha256 != pins.Release.Sha256 || receipt.BridgePlanSha256 != pins.BridgePlan.Sha256 || receipt.BridgePublicationSha256 != pins.BridgePublication.Sha256 || receipt.BridgeInputsSha256 != pins.BridgeInputs.Sha256 || receipt.RequestSha256 != config.Template.Sha256 || receipt.BaseSha != release.BaseSha || receipt.ImageId != release.ImageId || receipt.PolicySha256 != release.StageAPolicySha256 || receipt.Margin != margin || receipt.WorkerBindings != 7 || receipt.EvidenceBindings != heldOutBridgeEvidenceBindings(release) || receipt.CompletionBindings != 5 {
 		return errors.New("successful bridge receipt does not bind accepted old A and this exact new release")
 	}
 	if err := validateHeldOutBridgeRuntimeReceipt(receipt, *plan, release); err != nil {

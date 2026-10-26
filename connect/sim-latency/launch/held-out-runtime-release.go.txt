@@ -7,6 +7,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -300,6 +303,122 @@ func authenticateHeldOutReferenceDirection(receipt heldOutReferenceQualification
 	paths, err := git("diff", "--name-only", "--no-ext-diff", "--no-textconv", prior.BaseSha, instrument.OriginalBaseSha)
 	if err != nil || !reflect.DeepEqual(append([]string{}, strings.Fields(string(paths))...), append([]string{}, transfer.PriorToC1DiffPaths...)) {
 		return errors.New("prior-to-C1 source changes were not fully disclosed")
+	}
+	return nil
+}
+
+// This closed C2 projection excludes unrelated controller admission/review
+// changes, never generator declarations, imports, wrapper types or constants.
+// The complete transitive workload generator file is still compared verbatim.
+func heldOutControllerGeneratorProjection(content []byte) ([]byte, error) {
+	files := token.NewFileSet()
+	parsed, err := parser.ParseFile(files, "competition_controller.go", content, parser.ParseComments)
+	if err != nil || parsed.Name.Name != "controller" {
+		return nil, errors.New("native controller generator source malformed")
+	}
+	required := map[string]bool{"imports": false, "constants": false, "workloadArtifact": false, "WorkloadGenerator": false, "ControlPlaneWorkloadGenerator": false, "Generate": false, "generateRoundWorkload": false, "workloadSeed": false}
+	declarations := map[string]string{}
+	add := func(name string, node ast.Node) error {
+		if required[name] {
+			return errors.New("native generator declaration duplicated")
+		}
+		required[name] = true
+		declarations[name] = string(content[files.Position(node.Pos()).Offset:files.Position(node.End()).Offset])
+		return nil
+	}
+	for _, declaration := range parsed.Decls {
+		switch value := declaration.(type) {
+		case *ast.GenDecl:
+			if value.Tok == token.IMPORT {
+				if err := add("imports", value); err != nil {
+					return nil, err
+				}
+			}
+			for _, spec := range value.Specs {
+				switch spec := spec.(type) {
+				case *ast.TypeSpec:
+					if _, selected := required[spec.Name.Name]; selected {
+						if err := add(spec.Name.Name, spec); err != nil {
+							return nil, err
+						}
+					}
+				case *ast.ValueSpec:
+					selected := false
+					for _, name := range spec.Names {
+						selected = selected || name.Name == "workloadSeedDomain" || name.Name == "maxProvidersFileSize"
+					}
+					if selected && !required["constants"] {
+						if value.Tok != token.CONST || len(value.Specs) != 2 {
+							return nil, errors.New("native generator constants moved or changed shape")
+						}
+						for _, constant := range value.Specs {
+							constant, ok := constant.(*ast.ValueSpec)
+							if !ok || len(constant.Names) != 1 || len(constant.Values) != 1 || constant.Names[0].Name != "workloadSeedDomain" && constant.Names[0].Name != "maxProvidersFileSize" {
+								return nil, errors.New("native generator constant census changed")
+							}
+						}
+						if err := add("constants", value); err != nil {
+							return nil, err
+						}
+					}
+				}
+			}
+		case *ast.FuncDecl:
+			selected := (value.Name.Name == "workloadSeed" || value.Name.Name == "generateRoundWorkload") && value.Recv == nil
+			if value.Name.Name == "Generate" && value.Recv != nil && len(value.Recv.List) == 1 {
+				receiver, ok := value.Recv.List[0].Type.(*ast.Ident)
+				selected = ok && receiver.Name == "ControlPlaneWorkloadGenerator"
+			}
+			if selected {
+				if err := add(value.Name.Name, value); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+	for _, present := range required {
+		if !present {
+			return nil, errors.New("native generator declaration missing")
+		}
+	}
+	return json.Marshal(declarations)
+}
+
+// Legacy releases require both whole files. Only explicit C2 uses the closed
+// controller projection; its full generator implementation remains byte-exact.
+func authenticateHeldOutGeneratorFiles(pairs []heldOutGeneratorFile, release heldOutRelease, settings heldOutOperatorSettings) error {
+	if len(pairs) != 2 {
+		return errors.New("exact native generator provenance pair required")
+	}
+	nativeFiles := map[string]bool{"competition_controller.go": false, "competition_sim_latency_controller.go": false}
+	for _, pair := range pairs {
+		name := filepath.Base(pair.Analyzer.Path)
+		seen, present := nativeFiles[name]
+		if !present || seen || filepath.Base(pair.Frozen.Path) != name {
+			return errors.New("native generator provenance file set invalid")
+		}
+		analyzer, err := readHeldOutPinned(pair.Analyzer, settings.MaximumBytes, false)
+		if err != nil {
+			return err
+		}
+		frozen, err := readHeldOutPinned(pair.Frozen, settings.MaximumBytes, false)
+		if err != nil {
+			return err
+		}
+		if release.Runtime != nil && name == "competition_controller.go" {
+			analyzer, err = heldOutControllerGeneratorProjection(analyzer)
+			if err != nil {
+				return err
+			}
+			frozen, err = heldOutControllerGeneratorProjection(frozen)
+			if err != nil {
+				return err
+			}
+		}
+		if !bytes.Equal(analyzer, frozen) {
+			return errors.New("native generator differs from evaluated source")
+		}
+		nativeFiles[name] = true
 	}
 	return nil
 }

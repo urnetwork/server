@@ -555,63 +555,76 @@ func authenticateHeldOutReferences(content []byte, release heldOutRelease, setti
 	}
 	patches, roles, images, binaries := map[string][]byte{}, map[string]bool{}, map[string]bool{}, map[string]bool{}
 	for _, reference := range references {
-		if roles[reference.Role] || (reference.Role != "no-op" && reference.Role != "better" && reference.Role != "worse") || !sourceGitShaPattern.MatchString(reference.CandidateSha) || !validSha256(strings.TrimPrefix(reference.ImageId, "sha256:")) || !strings.HasPrefix(reference.ImageId, "sha256:") || !validSha256(reference.BinarySha256) || images[reference.ImageId] || binaries[reference.BinarySha256] {
+		if roles[reference.Role] || images[reference.ImageId] || binaries[reference.BinarySha256] {
 			return nil, nil, errors.New("reference role or independent build identity invalid")
 		}
-		roles[reference.Role], images[reference.ImageId], binaries[reference.BinarySha256] = true, true, true
-		patch, err := readHeldOutPinned(reference.Patch, settings.MaximumBytes, false)
-		if err != nil || len(patch) == 0 {
-			return nil, nil, errors.New("reference patch unavailable or changed")
-		}
-		patches[reference.Role] = patch
-		nativeContent, err := readHeldOutPinned(reference.NativeBuild, settings.MaximumBytes, false)
+		patch, err := authenticateHeldOutReference(reference, release, settings)
 		if err != nil {
 			return nil, nil, err
 		}
-		var native heldOutNativeBuild
-		if err := decodeHeldOutComplete(nativeContent, &native, "committed native reference build"); err != nil {
-			return nil, nil, err
+		roles[reference.Role], images[reference.ImageId], binaries[reference.BinarySha256] = true, true, true
+		patches[reference.Role] = patch
+	}
+	return references, patches, nil
+}
+
+// The same single-reference authenticator serves pre-bridge no-op admission
+// and the complete B set; no partial or copied receipt validator is substituted.
+func authenticateHeldOutReference(reference heldOutReference, release heldOutRelease, settings heldOutOperatorSettings) ([]byte, error) {
+	if (reference.Role != "no-op" && reference.Role != "better" && reference.Role != "worse") || !sourceGitShaPattern.MatchString(reference.CandidateSha) || !validSha256(strings.TrimPrefix(reference.ImageId, "sha256:")) || !strings.HasPrefix(reference.ImageId, "sha256:") || !validSha256(reference.BinarySha256) {
+		return nil, errors.New("reference role or independent build identity invalid")
+	}
+	patch, err := readHeldOutPinned(reference.Patch, settings.MaximumBytes, false)
+	if err != nil || len(patch) == 0 {
+		return nil, errors.New("reference patch unavailable or changed")
+	}
+	nativeContent, err := readHeldOutPinned(reference.NativeBuild, settings.MaximumBytes, false)
+	if err != nil {
+		return nil, err
+	}
+	var native heldOutNativeBuild
+	if err := decodeHeldOutComplete(nativeContent, &native, "committed native reference build"); err != nil {
+		return nil, err
+	}
+	if native.Schema != 1 || native.ImageId != reference.ImageId || native.BaseImageId != release.ImageId || native.BaseSha != release.BaseSha || native.CandidateSha != reference.CandidateSha || native.PatchSha256 != reference.Patch.Sha256 || !validSha256(native.PolicySha256) || !validSha256(native.BuilderSha256) || !validSha256(native.ImageKey) || native.Image == "" {
+		return nil, errors.New("native reference build does not bind committed patch/source/policy")
+	}
+	if err := validateHeldOutRuntimeBuilderPin(native, release); err != nil {
+		return nil, err
+	}
+	for _, qualification := range []struct {
+		kind string
+		pin  heldOutPinnedFile
+	}{
+		{kind: "build", pin: reference.Build}, {kind: "correctness", pin: reference.Correctness}, {kind: "direction", pin: reference.Direction},
+	} {
+		content, err := readHeldOutPinned(qualification.pin, settings.MaximumBytes, false)
+		if err != nil {
+			return nil, err
 		}
-		if native.Schema != 1 || native.ImageId != reference.ImageId || native.BaseImageId != release.ImageId || native.BaseSha != release.BaseSha || native.CandidateSha != reference.CandidateSha || native.PatchSha256 != reference.Patch.Sha256 || !validSha256(native.PolicySha256) || !validSha256(native.BuilderSha256) || !validSha256(native.ImageKey) || native.Image == "" {
-			return nil, nil, errors.New("native reference build does not bind committed patch/source/policy")
+		var receipt heldOutReferenceQualification
+		if err := decodeHeldOutComplete(content, &receipt, "held-out reference qualification"); err != nil {
+			return nil, err
 		}
-		if err := validateHeldOutRuntimeBuilderPin(native, release); err != nil {
-			return nil, nil, err
+		if receipt.Schema != 1 || receipt.Kind != "sim-latency-held-out-reference-"+qualification.kind || !receipt.Accepted || receipt.Role != reference.Role || receipt.BaseSha != release.BaseSha || receipt.SourceLockSha256 != release.SourceLockSha256 || receipt.BaseImageId != release.ImageId || receipt.PatchSha256 != reference.Patch.Sha256 || receipt.CandidateSha != reference.CandidateSha || receipt.ImageId != reference.ImageId || receipt.BinarySha256 != reference.BinarySha256 || receipt.GoVersion != "go1.27.3" || receipt.VcsModified || len(receipt.Evidence) == 0 {
+			return nil, errors.New("reference qualification does not bind the frozen build/source")
 		}
-		for _, qualification := range []struct {
-			kind string
-			pin  heldOutPinnedFile
-		}{
-			{kind: "build", pin: reference.Build}, {kind: "correctness", pin: reference.Correctness}, {kind: "direction", pin: reference.Direction},
-		} {
-			content, err := readHeldOutPinned(qualification.pin, settings.MaximumBytes, false)
-			if err != nil {
-				return nil, nil, err
+		if qualification.kind == "direction" {
+			if err := authenticateHeldOutReferenceDirection(receipt, reference, release, settings, func(ctx context.Context, program string, args ...string) ([]byte, error) {
+				return runHeldOutReadOnly(ctx, settings, program, args...)
+			}); err != nil {
+				return nil, err
 			}
-			var receipt heldOutReferenceQualification
-			if err := decodeHeldOutComplete(content, &receipt, "held-out reference qualification"); err != nil {
-				return nil, nil, err
-			}
-			if receipt.Schema != 1 || receipt.Kind != "sim-latency-held-out-reference-"+qualification.kind || !receipt.Accepted || receipt.Role != reference.Role || receipt.BaseSha != release.BaseSha || receipt.SourceLockSha256 != release.SourceLockSha256 || receipt.BaseImageId != release.ImageId || receipt.PatchSha256 != reference.Patch.Sha256 || receipt.CandidateSha != reference.CandidateSha || receipt.ImageId != reference.ImageId || receipt.BinarySha256 != reference.BinarySha256 || receipt.GoVersion != "go1.27.3" || receipt.VcsModified || len(receipt.Evidence) == 0 {
-				return nil, nil, errors.New("reference qualification does not bind the frozen build/source")
-			}
-			if qualification.kind == "direction" {
-				if err := authenticateHeldOutReferenceDirection(receipt, reference, release, settings, func(ctx context.Context, program string, args ...string) ([]byte, error) {
-					return runHeldOutReadOnly(ctx, settings, program, args...)
-				}); err != nil {
-					return nil, nil, err
-				}
-			} else if receipt.EvidenceBasis != "" || receipt.ExpectedDirection != "" || receipt.PriorReference != nil {
-				return nil, nil, errors.New("build/correctness receipt cannot inherit directional evidence")
-			}
-			for _, pin := range receipt.Evidence {
-				if _, err := readHeldOutPinned(pin, settings.MaximumBytes, false); err != nil {
-					return nil, nil, err
-				}
+		} else if receipt.EvidenceBasis != "" || receipt.ExpectedDirection != "" || receipt.PriorReference != nil {
+			return nil, errors.New("build/correctness receipt cannot inherit directional evidence")
+		}
+		for _, pin := range receipt.Evidence {
+			if _, err := readHeldOutPinned(pin, settings.MaximumBytes, false); err != nil {
+				return nil, err
 			}
 		}
 	}
-	return references, patches, nil
+	return patch, nil
 }
 
 // A pinned accepted report and its full five-position input manifest must
@@ -737,22 +750,8 @@ func authenticateHeldOutPreparation(config heldOutPreparationConfig, release hel
 	if (config.Protocol == "" && lock.CandidatePathBase != "") || (config.Protocol != "" && lock.CandidatePathBase != "mono_root_v1") {
 		return nil, errors.New("held-out release source capability does not match its explicit protocol")
 	}
-	nativeFiles := map[string]bool{"competition_controller.go": false, "competition_sim_latency_controller.go": false}
-	for _, pair := range config.GeneratorFiles {
-		name := filepath.Base(pair.Analyzer.Path)
-		seen, present := nativeFiles[name]
-		if !present || seen || filepath.Base(pair.Frozen.Path) != name {
-			return nil, errors.New("native generator provenance file set invalid")
-		}
-		analyzer, err := readHeldOutPinned(pair.Analyzer, settings.MaximumBytes, false)
-		if err != nil {
-			return nil, err
-		}
-		frozen, err := readHeldOutPinned(pair.Frozen, settings.MaximumBytes, false)
-		if err != nil || !bytes.Equal(analyzer, frozen) {
-			return nil, errors.New("native generator differs from evaluated source")
-		}
-		nativeFiles[name] = true
+	if err := authenticateHeldOutGeneratorFiles(config.GeneratorFiles, release, settings); err != nil {
+		return nil, err
 	}
 	if err := authenticateHeldOutScripts(config.Scripts, release, settings); err != nil {
 		return nil, err
