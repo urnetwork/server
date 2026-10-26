@@ -130,6 +130,12 @@ func correctLegacyProviderPaymentAttempts(
 	payoutWalletId func(blockchain string) (string, error),
 	now func() time.Time,
 ) (*LegacyProviderPaymentCorrectionResult, error) {
+	if !settings.DryRun {
+		// an applied correction releases replacements for the sender
+		if err := RequireUsdcPaymentsOn(); err != nil {
+			return nil, err
+		}
+	}
 	ctx := clientSession.Ctx
 	result := &LegacyProviderPaymentCorrectionResult{}
 	policy := settings.Policy

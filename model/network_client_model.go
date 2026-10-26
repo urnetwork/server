@@ -3299,6 +3299,143 @@ func IsIpConnectedToNetwork(
 // nothing: skip the write entirely while auth_time is fresh.
 const clientAuthTimeRefreshMinInterval = time.Hour
 
+// The auth_time values a connect's refresh left in place, as the database
+// reported them, with the client's source client.
+type clientAuthTimeRefresh struct {
+	clientId       server.Id
+	authTime       *time.Time
+	parentClientId *server.Id
+	parentAuthTime *time.Time
+}
+
+// A client's source client as a refresh found it: a top-level client has
+// none.
+type clientAuthParent struct {
+	parentClientId server.Id
+	hasParent      bool
+}
+
+// Process-local knowledge of auth_time values the database reported after a
+// committed connect, so a later connect of a client whose own and parent rows
+// this process knows are fresh skips the refresh statement. auth_time only
+// moves forward (every write sets the writer's now, and the refresh writes
+// only a stale row), so a recorded value is never later than the row's, and a
+// skip happens only where the refresh's predicate would match nothing.
+// source_client_id never changes once a client exists.
+type clientAuthTimeGate struct {
+	authTimes *boundedClientMap[time.Time]
+	parents   *boundedClientMap[clientAuthParent]
+}
+
+func newClientAuthTimeGate(maxCount int64) *clientAuthTimeGate {
+	return &clientAuthTimeGate{
+		authTimes: newBoundedClientMap[time.Time](maxCount),
+		parents:   newBoundedClientMap[clientAuthParent](maxCount),
+	}
+}
+
+// Whether a refresh at connectTime would match no row: the client's and its
+// source client's recorded auth_time are both within the refresh interval.
+func (self *clientAuthTimeGate) KnownFresh(clientId server.Id, connectTime time.Time) bool {
+	if !self.knownFreshAuthTime(clientId, connectTime) {
+		return false
+	}
+	parent, ok := self.parents.Load(clientId)
+	if !ok {
+		return false
+	}
+	return !parent.hasParent || self.knownFreshAuthTime(parent.parentClientId, connectTime)
+}
+
+func (self *clientAuthTimeGate) knownFreshAuthTime(clientId server.Id, connectTime time.Time) bool {
+	authTime, ok := self.authTimes.Load(clientId)
+	return ok && connectTime.Sub(authTime) < clientAuthTimeRefreshMinInterval
+}
+
+// Records what a committed refresh reported.
+func (self *clientAuthTimeGate) Record(refresh *clientAuthTimeRefresh) {
+	if refresh.authTime == nil {
+		return
+	}
+	self.authTimes.Store(refresh.clientId, *refresh.authTime)
+	if refresh.parentClientId == nil {
+		self.parents.Store(refresh.clientId, clientAuthParent{})
+		return
+	}
+	self.parents.Store(refresh.clientId, clientAuthParent{parentClientId: *refresh.parentClientId, hasParent: true})
+	if refresh.parentAuthTime != nil {
+		self.authTimes.Store(*refresh.parentClientId, *refresh.parentAuthTime)
+	}
+}
+
+// Forgets every recorded value.
+func (self *clientAuthTimeGate) Reset() {
+	self.authTimes.Clear()
+	self.parents.Clear()
+}
+
+// clients recorded per process, about 45 minutes of one process's connects; a
+// clear costs one refresh statement per client
+const clientAuthTimeGateMaxCount = 32_768
+
+var clientAuthTimes = newClientAuthTimeGate(clientAuthTimeGateMaxCount)
+
+// Testing_ResetClientAuthTimeGate forgets the auth_time values this process
+// recorded, for a test that moves auth_time backward, which nothing else does.
+func Testing_ResetClientAuthTimeGate() {
+	clientAuthTimes.Reset()
+}
+
+// Refreshes the client's auth_time and its source client's in one statement,
+// each only when at least `clientAuthTimeRefreshMinInterval` stale, and
+// returns each row's auth_time afterward. A missing client returns nil.
+func refreshClientAuthTimesInTx(ctx context.Context, tx server.PgTx, clientId server.Id, connectTime time.Time) (refresh *clientAuthTimeRefresh) {
+	result, err := tx.Query(
+		ctx,
+		`
+			WITH client AS (
+				SELECT client_id, source_client_id, auth_time
+				FROM network_client
+				WHERE client_id = $1
+			),
+			client_refresh AS (
+				UPDATE network_client
+				SET auth_time = $2
+				FROM client
+				WHERE
+					network_client.client_id = client.client_id AND
+					network_client.auth_time < $3
+				RETURNING network_client.auth_time
+			),
+			parent_refresh AS (
+				UPDATE network_client
+				SET auth_time = $2
+				FROM client
+				WHERE
+					network_client.client_id = client.source_client_id AND
+					network_client.auth_time < $3
+				RETURNING network_client.auth_time
+			)
+			SELECT
+				COALESCE((SELECT auth_time FROM client_refresh), client.auth_time),
+				client.source_client_id,
+				COALESCE((SELECT auth_time FROM parent_refresh), parent.auth_time)
+			FROM client
+			LEFT JOIN network_client AS parent ON parent.client_id = client.source_client_id
+		`,
+		clientId,
+		connectTime,
+		connectTime.Add(-clientAuthTimeRefreshMinInterval),
+	)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			refresh = &clientAuthTimeRefresh{clientId: clientId}
+			server.Raise(result.Scan(&refresh.authTime, &refresh.parentClientId, &refresh.parentAuthTime))
+		}
+	})
+	return
+}
+
 // a client_id can have multiple connections to the platform
 // each connection forms a transmit for the resident transport
 // there is one resident transport
@@ -3387,6 +3524,7 @@ func ConnectNetworkClientWithIpFamily(
 	}
 
 	connectTime := server.NowUtc()
+	var authTimeRefresh *clientAuthTimeRefresh
 	server.Tx(ctx, func(tx server.PgTx) {
 		err = nil
 		var admissionDeadline *time.Time
@@ -3456,45 +3594,28 @@ func ConnectNetworkClientWithIpFamily(
 		// the refresh is throttled: only write when auth_time is at least
 		// `clientAuthTimeRefreshMinInterval` stale (see the const for why).
 		// a throttled (or missing-row) connect matches zero rows, which is fine.
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-				UPDATE network_client
-				SET auth_time = $2
-				WHERE client_id = $1 AND auth_time < $3
-			`,
-			clientId,
-			connectTime,
-			connectTime.Add(-clientAuthTimeRefreshMinInterval),
-		))
-
 		// a child's connect is also evidence its top-level identity is alive:
-		// bump the parent's auth_time under the same throttle. A hosted proxy
-		// client's only platform footprint is its child clients — the proxy
-		// client id itself never opens a connect websocket — so without this
-		// the top-level idle deactivate (`RemoveDisconnectedNetworkClients`)
-		// marks an in-use proxy inactive 30 days after creation: its own row
-		// never auths, connects, or holds connection rows.
-		// a top-level connect (source_client_id IS NULL) matches zero rows.
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-				UPDATE network_client AS parent
-				SET auth_time = $2
-				FROM network_client AS child
-				WHERE
-					child.client_id = $1 AND
-					parent.client_id = child.source_client_id AND
-					parent.auth_time < $3
-			`,
-			clientId,
-			connectTime,
-			connectTime.Add(-clientAuthTimeRefreshMinInterval),
-		))
+		// the same statement bumps the parent's auth_time under the same
+		// throttle. A hosted proxy client's only platform footprint is its
+		// child clients — the proxy client id itself never opens a connect
+		// websocket — so without this the top-level idle deactivate
+		// (`RemoveDisconnectedNetworkClients`) marks an in-use proxy inactive
+		// 30 days after creation: its own row never auths, connects, or holds
+		// connection rows. a top-level connect has no parent row to match.
+		// a connect whose rows this process knows are fresh skips the
+		// statement, which would match nothing.
+		authTimeRefresh = nil
+		if !clientAuthTimes.KnownFresh(clientId, connectTime) {
+			authTimeRefresh = refreshClientAuthTimesInTx(ctx, tx, clientId, connectTime)
+		}
 	}, server.TxReadCommitted)
 
 	if err != nil {
 		return
+	}
+	// recorded only once committed: a rolled back refresh left the rows stale
+	if authTimeRefresh != nil {
+		clientAuthTimes.Record(authTimeRefresh)
 	}
 	// the durable connection history for the onboarding results: one
 	// connect.day event per network per UTC day, deduplicated per network
