@@ -458,17 +458,16 @@ func TestCreateContractNoEscrowSerializesWithDestinationDeactivation(t *testing.
 			}
 			deactivationConn.Release()
 		}()
-		if _, err := deactivationTx.Exec(
+		// The deactivation as production writes it, held open: the marked
+		// FOR UPDATE and then the locked write. Contract creation locks the
+		// row FOR KEY SHARE, which only that FOR UPDATE can make it wait for.
+		if rowCount, err := deactivateNetworkClientsInTx(
 			ctx,
-			`
-				UPDATE network_client
-				SET active = false, deactivate_time = $2
-				WHERE client_id = $1
-			`,
-			destinationId,
-			server.NowUtc(),
-		); err != nil {
-			t.Fatal(err)
+			deactivationTx,
+			[]server.Id{destinationId},
+			destinationNetworkId,
+		); err != nil || rowCount != 1 {
+			t.Fatalf("held deactivation rows = %d, err = %v", rowCount, err)
 		}
 		deactivationPid := contractLifecycleTestBackendPid(t, ctx, deactivationTx)
 
@@ -700,17 +699,16 @@ func TestCreateTransferEscrowSerializesWithDestinationDeactivation(t *testing.T)
 			}
 			deactivationConn.Release()
 		}()
-		if _, err := deactivationTx.Exec(
+		// The deactivation as production writes it, held open: the marked
+		// FOR UPDATE and then the locked write. Contract creation locks the
+		// row FOR KEY SHARE, which only that FOR UPDATE can make it wait for.
+		if rowCount, err := deactivateNetworkClientsInTx(
 			ctx,
-			`
-				UPDATE network_client
-				SET active = false, deactivate_time = $2
-				WHERE client_id = $1
-			`,
-			destinationId,
-			server.NowUtc(),
-		); err != nil {
-			t.Fatal(err)
+			deactivationTx,
+			[]server.Id{destinationId},
+			destinationNetworkId,
+		); err != nil || rowCount != 1 {
+			t.Fatalf("held deactivation rows = %d, err = %v", rowCount, err)
 		}
 		deactivationPid := contractLifecycleTestBackendPid(t, ctx, deactivationTx)
 
@@ -840,34 +838,10 @@ func TestDeactivationTimestampFollowsLifecycleLock(t *testing.T) {
 				_ = readerTx.Rollback(context.Background())
 			}
 		}()
-		result, err := readerTx.Query(
-			ctx,
-			`
-				SELECT client_id
-				FROM network_client
-				WHERE client_id = ANY($1)
-				ORDER BY client_id
-				FOR SHARE
-			`,
-			clientIds,
-		)
-		if err != nil {
+		// The contract boundary itself holds both rows, as an in-flight
+		// contract creation between them does.
+		if err := lockActiveContractClientsInTx(ctx, readerTx, networkId, clientIds[0], networkId, clientIds[1]); err != nil {
 			t.Fatal(err)
-		}
-		lockedCount := 0
-		for result.Next() {
-			var clientId server.Id
-			if err := result.Scan(&clientId); err != nil {
-				t.Fatal(err)
-			}
-			lockedCount++
-		}
-		if err := result.Err(); err != nil {
-			t.Fatal(err)
-		}
-		result.Close()
-		if lockedCount != len(clientIds) {
-			t.Fatalf("reader locked %d clients, want %d", lockedCount, len(clientIds))
 		}
 		readerPid := contractLifecycleTestBackendPid(t, ctx, readerTx)
 
