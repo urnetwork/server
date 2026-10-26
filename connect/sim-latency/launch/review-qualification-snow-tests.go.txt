@@ -82,6 +82,48 @@ func snowReviewQualificationMockResponse(t *testing.T, request winnerReviewBroke
 // O_EXCL member files without ever invoking the real wrapper or server.
 type snowReviewQualificationMockOptions struct{ StateDirectory, ProviderSettingsSha256 string }
 
+// Correctness fixes may qualify a new immutable wrapper, but changing output
+// directories or invocation time must never bypass a release's one-shot claim.
+func TestReviewQualificationSnowClaimsBindWrapperRelease(t *testing.T) {
+	provider := defaultWinnerSnowProviderSettings()
+	observed := []string{}
+	for _, digest := range []string{strings.Repeat("b", 64), strings.Repeat("b", 64), strings.Repeat("e", 64)} {
+		cases, err := frozenSnowReviewQualificationCases()
+		if err != nil {
+			t.Fatal(err)
+		}
+		plan := reviewQualificationPlan{Schema: 1, Kind: "winner-review-snow-provider-qualification-plan", PolicyModel: model.CompetitionSnowWinnerReviewModel, ProviderModel: model.CompetitionSnowWinnerReviewModel, Reasoning: model.CompetitionSnowWinnerReviewReasoning,
+			BrokerSha256: digest, ImageReceiptSha256: strings.Repeat("c", 64), ProviderSettingsSha256: strings.Repeat("a", 64), Members: provider.Members, Cases: cases}
+		calls := 0
+		hooks := reviewQualificationHooks{Mode: "offline_unit_mock", Now: time.Now,
+			ValidatePlan: func(plan reviewQualificationPlan) error {
+				return validateSnowReviewQualificationPlan(plan, provider, strings.Repeat("a", 64))
+			},
+			AuthenticateContainment: func([]byte, []byte, []byte, bool) (string, error) { return strings.Repeat("d", 64), nil },
+			Invoke: func(_ context.Context, input []byte) ([]byte, []byte, error) {
+				var request winnerReviewBrokerRequest
+				if err := json.Unmarshal(input, &request); err != nil {
+					t.Fatal(err)
+				}
+				if calls == 1 {
+					observed = append(observed, request.Template.IdempotencyKey)
+				}
+				calls++
+				return nil, nil, fmt.Errorf("synthetic transport stop; no provider")
+			}}
+		report, err := executeReviewQualification(t.Context(), reviewQualificationTestRoot(t), plan, defaultReviewQualificationSettings(), hooks)
+		if err == nil || report.Qualified || calls != 2 {
+			t.Fatalf("mock transport stop unexpectedly qualified or changed calls: %+v %v calls=%d", report, err, calls)
+		}
+		if observed[len(observed)-1] != cases[1].Request.Template.IdempotencyKey+":"+digest {
+			t.Fatal("qualification claim is not bound to the authenticated immutable wrapper")
+		}
+	}
+	if observed[0] != observed[1] || observed[0] == observed[2] {
+		t.Fatal("same release can reroll, or a genuinely changed release cannot qualify")
+	}
+}
+
 // Existing source text/desired labels stay fixed and outside provider input.
 func TestReviewQualificationSnowFixturesRemainVerdictBlind(t *testing.T) {
 	legacy, err := frozenReviewQualificationCases()

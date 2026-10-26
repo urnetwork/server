@@ -29,7 +29,7 @@
     "native_readonly_deletions": 0
   },
   "production_activated": false,
-  "status": "snow_actual_provider_qualification_live_cancellation_passed_first_model_case_active",
+  "status": "snow_pipe_descriptor_and_cleanup_fix_under_independent_regression_test",
   "live_snow_qualification": {
     "started_at": "2026-10-26T20:09:02Z",
     "process_verified_at": "2026-10-26T20:09:34Z",
@@ -41,6 +41,14 @@
     "wrapper_sha256": "8f24b7da39106767aaa77be2cee6f76a28e266669e5640ca6dc305184b3f4dce",
     "cancellation_case_passed": true,
     "active_case_at_observation": "case-02 benign comment",
+    "terminal_at": "2026-10-26T20:12:29Z",
+    "terminal_exit": 1,
+    "cleanup_verified": true,
+    "model_request_path_attempts": 2,
+    "successful_model_verdicts": 0,
+    "failure": "output readers retained stdin FIFO writer descriptor 7, blocking broker EOF",
+    "stop_consequence": "two member started/completed journals reported Snow review transport failed; zero HTTP attempts cannot be claimed",
+    "fix_commit": "2f12a7609",
     "same_six_case_requests_preserved": true,
     "unit_tests_per_run": 42,
     "consecutive_unit_passes": 3,
