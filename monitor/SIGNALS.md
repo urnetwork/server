@@ -205,6 +205,19 @@ contract-creation stage latency, §5.14 database-disk-filling playbook, the §7
 2026-10-22 emission rules, §11.6b MinIO drive runway and accounting
 divergence, and §14.8 hosted identity churn.
 
+Updated 2026-10-26 after a review of the October postmortems for how customer
+impact was detected. The owner or customers found the 10-10, 10-19, 10-21,
+10-24 and 10-25 outages, and a status request found the 10-25/26 database
+saturation: the signals that existed measured internals or paged into a
+monitor that ran on demand. New entries: §25 customer-impact signals
+(contract-creation failure share and reply floor per service, Connect
+handshake refusals, API errors on customer routes, delivered traffic, and an
+external customer journey), §2.11b PgBouncer saturation with every server busy
+(the queue §2.11a's starvation predicate cannot see), §2.11c the nginx stream
+frontend in front of PgBouncer, §8.14c TCP retransmission timeouts on the
+services hosts, and the §7 2026-10-26 rows. None is implemented; their
+thresholds were replayed against Mimir history from 10-17 to 10-26.
+
 Historical evidence reviewed 2026-10-16: the
 [October outage postmortem](../../factury/postmortem/2026-10-10.md) and its
 [visual timeline](../../factury/postmortem/2026-10-10-timeline.html), the
@@ -252,6 +265,8 @@ active missing capability and must not be read as green.
 | 2.2b | Conditional reader | `pg-freeze` reduces qualified native PG18 JSON duration records; existing JSON/verbose source prerequisites and full-window coverage are required. Missing prerequisites or partial coverage remain unknown. |
 | 2.5b | Runbook | `migrations` pins the retired queue: its guards and contract key dropped, its empty table kept until a later release drops it. The legacy settlement probe retired with the queue on 2026-10-24 (PARTITION-MAINTENANCE-PLAN.md, Part B). |
 | 2.5c | Runbook | `contract-rate`, `transfer-debits`, `open-contracts`, `task-health`, `migrations`, `pg-cpu`, `active-queries`, `wait-events`; exact target visitation and complete post-commit projection remain separately qualified evidence, not automatic probe coverage. |
+| 2.11b | Coverage gap | `pgbouncer-pool-starvation` reads the same exporter but alerts only on pools with no server; the busy-pool queue predicate and an exported wait time are missing |
+| 2.11c | Coverage gap | `pgbouncer-stalls` checks that 6432 accepts a connection; the listener-count, per-worker balance, overflow and hop-latency reads are missing |
 | 5.1 | Runbook | `contract-rate`, `provider-connections`, `task-canaries`, `redis-cluster`, `connection-rate`, `log-errors` |
 | 5.2 | Runbook | `redis-cluster`, `redis-process`, `log-errors` |
 | 5.3 | Runbook | `redis-cluster`, `log-errors` |
@@ -272,6 +287,7 @@ active missing capability and must not be read as green.
 | 8.4 | Runbook | `provenance`, `rollout-guard`; a deploy annotation is not an alert |
 | 8.5 | Shared contract | `reboot-collision`, `rollout-guard`, `hostpower` |
 | 8.6 | Shared contract | `provenance`, `rollout-guard`, `connection-rate`, `log-errors` |
+| 8.14c | Coverage gap | `host-pressure` and `host-load` read CPU; the TCP retransmission-timeout read is missing |
 | 10.1 | Runbook | `rollout-guard`, `provenance`, `log-errors`, `key-publication` |
 | 10.2 | Shared contract | `rollout-guard`, `log-errors`, `connection-rate` |
 | 10.3 | Shared contract | `reliability-drift`, `selection-freshness`, `connection-rate` |
@@ -320,6 +336,11 @@ active missing capability and must not be read as green.
 | 17.4 | Runbook | `subtensor`, `subtensor-convergence`, `provenance` |
 | 22.10 | Coverage gap | `subnet-coverage` and the registered family readers share the executable evidence, retention and recovery acceptance tests; testnet campaign qualification and on-chain peer review before production paging are missing |
 | 14.7e | Runbook | `control-route-pressure`, `proxy-runtime`, `provenance`; actual local-authority/no-HTTP tests are release controls, not a production fallback detector |
+| 25.1 | Coverage gap | `contract-rate` counts committed contracts and `contract-stage-latency` measures mean latency; the per-service failure share and the seasonal reply floor are missing |
+| 25.2 | Coverage gap | `connection-rate` counts connections PostgreSQL recorded; the Connect handshake-outcome reader is missing |
+| 25.3 | Coverage gap | `log-errors` classifies service error logs; the per-route API error share and request-rate floor are missing |
+| 25.4 | Coverage gap | `provider-connections` watches provider supply; the delivered-traffic floor is missing |
+| 25.5 | Coverage gap | `provider-picker`, `proxy-path` and `egress-outcomes` cover parts of the journey; the external end-to-end probe is missing |
 <!-- numbered-coverage-end -->
 
 Cadence mode starts each probe immediately, but admits at most four concurrent
@@ -13910,6 +13931,128 @@ the checked central pipeline does not establish a native PgBouncer log route.
 Any new read requires separate review; no restart, tuning, deployed reader,
 capacity clearance or current recovery follows from this historical result.
 
+### 2.11b PgBouncer saturation with every server busy — the queue customers wait in
+
+Status: proposed 2026-10-26; no probe implements it. `pgbouncer-pool-starvation`
+(§2.11a) reads the same exporter but alerts only on a pool with no server.
+
+§2.11a pages a pool that has queued clients and no server. The commoner
+failure keeps every server busy behind a standing queue: each pool holds its
+20 servers, `cl_waiting` stays in the thousands, and no pool is ever starved.
+On 10-21 and on 10-25/26 that state lasted hours without an alert; the
+10-21 postmortem's detection table names exactly this gap ("Queueing with
+servers present does not trip starvation").
+
+Source (exists): `pgbouncer_pool_clients_waiting` and `pgbouncer_pool_servers`
+from the §2.11a exporter (15 s readings, job `pgbouncer`). Capacity is
+`default_pool_size` × instances: 20 × 32 = 640 on Main.
+
+Predicate, on 10-minute averages of the summed gauges:
+- WARN `pgbouncer-saturated`: waiting above 500 while servers are at or above
+  95% of capacity (608).
+- PAGE: waiting above 2,000 under the same server condition.
+
+Healthy: waiting 0–135 (30-minute averages, 10-17 to 10-26 outside incidents),
+with servers anywhere from 550 to 640. Servers fill under load and stay, so the
+server count alone is no fault.
+
+| Episode | First WARN (replayed) | First PAGE | What customers saw |
+|---|---|---|---|
+| 10-21 churn | 14:30Z: 723 waiting, 633 servers | 14:45Z: 3,108, 640 | the egress prober's ok share fell to 70% at 15:00Z; contracts about 25 times slower |
+| 10-25 second degradation (10-23 postmortem) | 00:15Z: 1,648, 637 | 01:00Z: 2,451, 639; again from 02:15Z | contracts about 1.7 s per reply; found by a status pass at 03:38Z |
+| 10-25 registration convoy | — | 07:15Z: 14,272, 615 | platform down for apps until 14:08Z |
+| 10-25/26 saturation | 20:00Z: 1,173, 623 | 22:30Z: 2,252, 640 | proxy contracts about 2 s with 14–16 cancellations/s; found by a status request at about 02:30Z |
+
+The 10-25 morning queue had cleared by 06:22Z (the convoy postmortem's healthy
+06:22–06:52Z window), so it did not foreshadow the convoy; it was the escrow
+outage's second degradation.
+
+Attribution from the native console (§2.11a recipe), read on 10-26 03:19Z:
+`SHOW POOLS` summed to 640 active servers, 0 idle and 3,887 waiting clients.
+`SHOW STATS` averaged 42.8k transactions/s with `avg_wait_time` 53.65 ms and
+`avg_xact_time` 67.8 ms. Both averages must include the queue wait: 42.8k/s ×
+67.8 ms would need about 2,900 servers against 640. Without the wait each
+transaction held its server about 14 ms, which matches 640 servers by Little's
+law. Direct 5432 showed 624 of the 640 server backends idle in transaction,
+waiting on their clients. Shorten that hold (CPU-starved clients §8.14a,
+Redis I/O inside transaction scope §5.6, the frontend hop §2.11c); raising
+timeouts only lengthens the queue.
+
+Reserve-pool qualifier: `reserve_pool_size = 4` per instance never engages on
+Main. Its default `reserve_pool_timeout` is 5 s, longer than
+`query_wait_timeout = 4`, so PgBouncer drops a queued client before it would
+grant a reserve server; the 10-26 reading had exactly 32 × 20 servers active.
+A `reserve_pool_timeout` below the queue timeout would add up to 128 servers
+in a burst. PostgreSQL had about 140 free client slots then (`max_connections`
+1024, 3 superuser-reserved, about 880 in use); the §1.3a capacity read must
+agree before anyone changes it.
+
+Companion: `query_wait_timeout` disconnects are this queue's customer-visible
+failures (`log-errors` class `pgbouncer-query-wait`, §4). They start only once
+waits pass 4 s, well after this signal.
+
+False-positive qualifier: a deploy or reconnect wave can queue briefly;
+require the full 10-minute average and read `rollout-guard`. A planned
+PostgreSQL stop starves pools (§5.13), which is §2.11a, not this signal.
+False-negative qualifier: the fleet sum hides one hot instance, and a 15 s
+reading misses shorter bursts; read the per-instance maximum alongside. A
+short but slow queue needs `avg_wait_time`, which the exporter does not
+publish. A console that stops answering drops its series (§2.11a): unknown,
+not zero.
+
+ACTION: read §1.3's idle-in-transaction groups and §8.14a on the services
+hosts, then §2.11c. Hold deploys and fleet-wide restarts: each restart
+reconnects every pool. Verify with waiting under 135 for 30 minutes, and
+record the console's `avg_wait_time` with it; no healthy reading of that
+average has been recorded yet.
+
+### 2.11c PgBouncer frontend balance — the nginx stream workers on 6432
+
+Status: proposed 2026-10-26; the reads below are missing from every probe.
+`pgbouncer-stalls` checks only that 6432 accepts a TCP connection.
+
+On edge-2, 6432 is an nginx stream proxy in front of the 32 PgBouncer
+instances (6433–6464, §2.11 step 2), with one worker per instance. Until xops
+`dff7502` (reloaded 10-26 03:15Z) it listened on one socket that every worker
+shared, with `multi_accept on`, so the first worker to wake took every pending
+connection.
+
+| Reading | Before (10-26 02:40–03:00Z) | After (03:26Z) |
+|---|---|---|
+| listeners on 6432 | 2 (one per address family) | 64 (one per worker and family) |
+| client connections per worker | 3,178, 2,487, 1,821, 1,308 … 9, 9, 5, 3; four workers held 61% of 14.5k | 383–450 |
+| busiest worker | 71% of a core | not yet read |
+| SELECT 1 from edge-2 | 10.9 ms via 6432, 7.4 ms on one PgBouncer port, 0.067 ms on 5432 | not yet read |
+| accept-queue overflows | 446,649 since boot, backlog 511 | backlog 4,096 per worker |
+
+Each statement through a hot worker waited behind its event loop. A
+transaction makes several round trips while it holds a PgBouncer server, so
+the frontend's delay lengthened every server hold that §2.11b measures.
+
+Proposed measurement, read-only on edge-2 by SSH like §8.14a: the listener
+count from `ss -ltnH '( sport = :6432 )'`; established client connections per
+nginx worker process; the listen-overflow delta over the probe interval; and,
+through the monitor's existing PostgreSQL transport, the median of several
+`SELECT 1` round trips on fresh connections via 6432 and via one PgBouncer
+port.
+
+- WARN `pgbouncer-frontend-imbalance`: fewer listeners than twice the worker
+  count (reuseport lost), the busiest worker holding more than three times the
+  mean for 15 minutes, overflows growing over 10 minutes, or the 6432 median
+  more than 2 ms above the PgBouncer-port median for 10 minutes. There is no
+  PAGE: §2.11b and §25 measure the customer impact.
+
+False-positive qualifier: after a reload the replaced workers keep their
+sessions until `worker_shutdown_timeout` (10 minutes since `dff7502`) closes
+them, so imbalance is expected for 10 minutes. A fresh connection lands on
+whichever worker accepts it; take the median of several. False-negative
+qualifier: an even spread does not prove the workers have CPU headroom; read
+per-worker CPU over the same interval. One slow PgBouncer instance distorts a
+single-port comparison, so rotate the port.
+
+ACTION: re-run `run-dbs.sh --pgbouncer-only`, which checks the file with
+`nginx -t`, reloads and verifies 64 listeners. Never restart nginx under load.
+
 ### 2.12 Taskworker allocated-heap skew — the local executor discriminator
 Probe: `worker-memory`
 
@@ -27090,6 +27233,14 @@ Catalog rows from this incident, none implemented when it closed on 2026-10-22; 
 | identity-churn / identity-churn-loop / identity-churn-unobservable | Mimir proxy metrics + pg | §14.8, implemented by `identity-churn` | WARN on per-device mints, retire/mint ratio, refusals, unresolved discovery or short-lived identities; PAGE when combined with PgBouncer waiting over 500 or §2.30 over 1 s |
 | modern-gate-readiness-unknown / modern-gate-decision-missing | Mimir + alert log | §2.29 addendum | PAGE |
 
+### 2026-10-26 customer-impact rows
+
+Proposed rows from the review of the October postmortems, none implemented:
+§25's summary table, with §2.11b `pgbouncer-saturated`, §2.11c
+`pgbouncer-frontend-imbalance` and §8.14c `services-tcp-timeouts`. Each
+customer-impact PAGE goes to the delivery route of rule 4 above and needs an
+acknowledgement.
+
 ---
 
 ## 8. Deployment state — the source of truth for "what changed"
@@ -30575,6 +30726,52 @@ failed per-node read is unknown, not healthy.
 
 ACTION: reserve the pool at boot, then confirm `huge_pages_status` and the page
 tables. Plan any primary restart with §5.13.
+
+### 8.14c TCP retransmission timeouts on the services hosts
+
+Status: proposed 2026-10-26; the read is missing. The node exporter's netstat
+families exist in Mimir by name but had no fresh samples on 10-26, and
+`host-pressure` (§8.14a) reads only CPU pressure.
+
+A CPU-starved host processes ACKs late and deschedules senders, so its TCP
+connections stall on retransmission timeouts of at least 200 ms each. On a
+services host that includes every database and Redis round trip: a timeout
+inside a transaction holds a PgBouncer server for as long as it lasts (§2.11b).
+
+Read on 10-26 02:40–03:00Z with `nstat` over 10–20 s windows, while CPU
+pressure on edge-0, edge-1, edge-3 and edge-4 was 30–48% (§8.14a):
+
+| Host | Retransmitted segments/s | Retransmission timeouts/s | Tail-loss probes/s |
+|---|---|---|---|
+| edge-0 | 67k | 28k | 35k |
+| edge-1 | 36k | 9.8k | 22k |
+| edge-3 | 46k | 16k | 27k |
+| edge-4 | 38k | 11k | 24k |
+| edge-2 (database) | 2.6k, 0.42% of 629k segments/s out | 157 | 2.5k |
+
+On edge-2, 12,630 of the 14,482 client sockets on 6432, all from those four
+hosts over the LAN, had retransmitted at least once, with a mean smoothed RTT
+of 10 ms. Edge-2's NIC dropped nothing in the window.
+
+Proposed measurement: every minute, by SSH like §8.14a, the 30-second delta
+of `TcpExtTCPTimeouts`, `TcpRetransSegs`, `TcpOutSegs` and
+`TcpExtListenOverflows` per host; on edge-2, also the share of LAN sockets on
+6432 and the Redis ports that retransmitted in the window (`ss -ti`). No
+baseline exists. Report only until two weeks of readings exist, then WARN
+`services-tcp-timeouts` when timeouts/s exceed twice the host's median for
+the same hour of the week for 15 minutes.
+
+False-positive qualifier: Connect hosts hold hundreds of thousands of
+internet-facing client sockets, and dead mobile clients produce timeouts with
+no fault of ours. Split LAN peers (the host addresses in
+`config/main/settings.yml`, the host-to-host ground truth) from public ones
+before attributing anything. False-negative qualifier: host counters cannot
+say where a packet was lost. On 10-25 about 1% of edge-to-Redis connects
+needed a SYN retransmit while every host counter was clean; that needs the
+switch's port counters.
+
+ACTION: read §8.14a and per-service CPU, then reduce load on the hot hosts
+(§24 placement, capacity). Do not tune TCP timers to quiet the signal.
 
 ### 8.15 Per-service runtime runaway
 
@@ -45477,6 +45674,315 @@ resident's intent sends the legacy migrate without one and counts no drain
 move for that client (`sendDrainResidentMove`; an earlier reading here, that
 it counts `capable="false"`, does not match the code). The straggler sweep,
 not the deadline, closes such a client, so neither count of §24.3 sees it.
+
+## 25. Customer-impact signals — from the October postmortems
+
+The owner or customers found most of the October outages before the monitor
+did:
+
+| Outage | How it was found | After onset |
+|---|---|---|
+| 10-10 provider collapse | the owner, relaying user reports | about 24 h |
+| 10-19 PgBouncer livelock | the owner's report at about 12:50Z | about 2 h 55 min |
+| 10-21 provider-gate churn | the owner: the app could not connect | unverified |
+| 10-24 contract escrow outage | the owner's report at about 19:30Z | unverified |
+| 10-25 registration lock convoy | the owner: "My app is not able to connect" | about 6–7 h |
+| 10-25/26 database saturation | a status request | about 6.5 h |
+
+Two reasons recur. The signals that existed measured internals (latency,
+queues, rates against their own recent history) and either did not page or
+paged into a monitor that ran only on demand; the 10-25 postmortem records
+"No continuous probe reached the owner". And what a customer experiences
+(handshakes refused, contract creations failing, API routes erroring, bytes
+not delivered) had metrics in Mimir but no rule.
+
+Delivery: implement each signal first as a Grafana rule on Mimir whose contact
+point reaches a person (§2.11a records that Grafana had no working contact
+point on 10-13), then as a monitor probe. A customer-impact PAGE is
+acknowledged by a person, per §7's 2026-10-22 rule 4.
+
+| § | Proposed class | Source (in Mimir?) | WARN | PAGE | Would have paged (replayed) |
+|---|---|---|---|---|---|
+| 25.1 | `contract-failure-share`, `contract-reply-floor` | `urnetwork_contract_creation_completed_total` (yes) | failure share ≥ 5% for 10 min | ≥ 20% for 5 min; replies under 30% of the 7-day same-window median for 10 min | 10-25 07:10Z, 5 min after onset, as a new class beside §2.30's standing page; the proxy-only aftershock |
+| 25.2 | `connect-handshake-refusals` | `urnetwork_connect_h1_handshake_results_total` (yes) | `auth_dependency` ≥ 20/s for 5 min; acceptance under 50% for 15 min | ≥ 100/s for 5 min; acceptance under 30% for 10 min | 10-19 10:15Z, about 2 h 35 min before the owner; 10-25 07:10Z; 10-24 WARN by 18:15Z |
+| 25.3 | `api-route-errors` | `urnetwork_http_requests_total` (yes) | a customer route ≥ 2% 5xx for 10 min; fleet ≥ 1% | a route ≥ 10% for 5 min; fleet ≥ 5%; customer-route requests under 40% of the 7-day median | 10-23 11Z; 10-25 07Z; 10-19 by route at 10:30Z while the fleet share was 0.05% |
+| 25.4 | `delivered-traffic-floor` | `urnetwork_connect_exchange_io_bytes_total`, `urnetwork_proxy_session_bytes_total` (yes) | under 50% of the 7-day same-window median for 15 min | under 25% for 10 min | 10-19 WARN at 11Z, PAGE at 12Z; 10-25 08Z |
+| 25.5 | `customer-journey` | external probe (missing) | a step failing 2 of 5 minutes; median over 5 s | a step failing 3 consecutive minutes from both vantage points; median over 10 s | each outage above, by construction |
+| 2.11b | `pgbouncer-saturated` | `pgbouncer_pool_clients_waiting`, `pgbouncer_pool_servers` (yes) | waiting over 500 with servers ≥ 608 | waiting over 2,000 | 10-21 14:45Z; 10-25 01:00Z; 10-26 22:30Z |
+| 2.11c | `pgbouncer-frontend-imbalance` | SSH read on edge-2 (missing) | reuseport lost, worker skew over 3×, overflows, hop over 2 ms | — | 10-26 before xops `dff7502` |
+| 8.14c | `services-tcp-timeouts` | SSH `nstat` (missing; netstat is not shipped) | twice the hour-of-week median, once a baseline exists | — | 10-26: 10–28k timeouts/s per services host |
+
+Replays read Mimir at 5- to 30-minute resolution; exact firing times depend on
+the final rule windows.
+
+### 25.1 Contract-creation failures per service — the share and the reply floor
+
+Status: proposed 2026-10-26; the per-service share and the seasonal floor are
+missing. §1.1 (`contract-rate`) counts committed contracts in SQL against a
+trailing-hour median, and §2.30 (`contract-stage-latency`) measures the mean
+time per reply across every service.
+
+Source (exists): `urnetwork_contract_creation_completed_total{job,outcome}`
+from every service that creates contracts (api, proxy, connect, taskworker,
+alt), with outcomes `contract_reply`, `canceled`, `panic` and
+`protocol_reject`.
+
+- Failure share per job over 5 minutes: (`canceled` + `panic`) ÷
+  (`contract_reply` + `canceled` + `panic`). `protocol_reject` stays out of
+  both sides: it ran at about 2,350/s on the api in steady state on 10-26,
+  and at 15–19k/s for days before 10-19 with almost no row work (10-19
+  postmortem), so it would swamp the denominator. Track it on its own.
+- Reply floor per job: `contract_reply`/s against the median of the same
+  30-minute window on each of the previous 7 days.
+
+Healthy (30-minute windows, 10-17 to 10-26 outside incidents): api 0.0–0.8%,
+proxy 0.0–1.3%, rising to 3–5% in the proxy's busiest hours (10-22 05–19Z).
+
+Thresholds, each only with at least 20 creations/s on that job, so alt's
+1–2/s cannot page:
+- WARN `contract-failure-share`: at or above 5% for 10 minutes.
+- PAGE: at or above 20% for 5 minutes.
+- PAGE `contract-reply-floor`: replies below 30% of the 7-day same-window
+  median for 10 minutes.
+
+Evidence:
+- 10-25 convoy: over the 5 minutes to 07:05Z the share was 0.4% on the api
+  and 2.0% on the proxy; to 07:10Z 74.8% and 70.7%; to 07:15Z 87.0% and 100%.
+  §2.30 had paged since 05:30Z for earlier CPU-driven slowness, so it "did not
+  mark the 07:07Z collapse as new" (that postmortem's Detection). A separate
+  class would have. Replies then fell to 1–33/s on the api against about 300.
+- 10-25 aftershock: 92–95% on the proxy from 15:00Z to 17:50Z while the api
+  stayed at 0.7%. Only the per-service split shows it.
+- 10-18 livelock episodes: 63.9–87.6% on the api in eight 30-minute windows.
+- 10-24 reduced LB capacity: 76–79% on the proxy at 13–15Z.
+- 10-25/26 saturation: 2.4–2.6% on the proxy over 30 minutes, with 2-minute
+  bursts of 13–17% (36–49 cancellations/s against about 245 replies/s) at
+  02:50, 02:56 and 03:04Z. That is a WARN at most; §2.30 and §2.11b carry it.
+
+Not caught: 10-19 (at most 1.2% on the api and 2–5% on the proxy; §25.2 and
+§25.4 catch it) and the 10-24 evening escrow outage (0.4–1.8% on the proxy
+with one 24% five-minute spike, while §2.30's mean reached 17–326 s per proxy
+reply).
+
+False-positive qualifiers: a rollout's drain cancels in-flight creations (the
+proxy's 38/s and 16/s blips at 23:02Z and 23:12Z on 10-25, probably old
+containers finishing their drains); hold the full window and read
+`rollout-guard`. `canceled` also counts clients that hang up, so a client
+release or one network's mass disconnect raises it without a server fault.
+Server-side slowness raises every §2.30 stage; a client cancel wave does not.
+False-negative qualifiers: the share counts only calls that returned, so
+hung calls are invisible until they return; the floor and §2.30 see them. A
+service whose callers stop calling shows no failures. The floor needs 7 days
+of history, so a new rule is unknown, not healthy, for its first week; the
+median absorbs up to three bad days.
+
+ACTION: the split names the boundary. Every service at once points to the
+database path (§2.11b, §2.11a, §5.6). The proxy alone points to Redis
+(§3.5b), escrow admission (§2.6b; the 10-24 single-slot path) or the proxy
+hosts. Then read §2.30 for the stage.
+
+### 25.2 Connect handshake refusals and acceptance
+
+Status: proposed 2026-10-26; the reader is missing. §2.7 (`connection-rate`)
+counts connections PostgreSQL recorded, which stops when the database path
+does.
+
+Source (exists): `urnetwork_connect_h1_handshake_results_total{result}` from
+every Connect process. Results seen 10-17 to 10-26: `accepted`,
+`client_canceled`, `auth_dependency`, `auth_frame`, `state_refused`,
+`auth_deadline`, `auth_read`, `jwt_refused`, `rate_limit`, `draining`,
+`upgrade_error`, `client_missing`, `auth_echo` and `unclassified`.
+
+- `auth_dependency` refusals/s: Connect could not reach what authentication
+  needs.
+- Acceptance share: `accepted` ÷ all results, over 5 minutes.
+
+Healthy (30-minute windows outside incidents): `auth_dependency` 0–3/s;
+acceptance mostly 62–83%, with `client_canceled` making up most of the rest
+(about 107/s against 393/s accepted on 10-26 03:30Z).
+
+Thresholds:
+- WARN `connect-handshake-refusals`: `auth_dependency` at or above 20/s for
+  5 minutes, or acceptance under 50% for 15 minutes.
+- PAGE: `auth_dependency` at or above 100/s for 5 minutes, or acceptance
+  under 30% for 10 minutes.
+
+Evidence:
+- 10-19 livelock, onset 09:56Z: `auth_dependency` 43/s and acceptance 43%
+  over the 5 minutes to 10:00Z, 159/s and 20% to 10:15Z, and 388–1,148/s with
+  0–12% acceptance from 10:20Z. That is a WARN at 10:00Z and a PAGE at 10:15Z,
+  about 2 h 35 min before the owner's report and 46 minutes before the
+  replayed contract-rate page (11:01Z).
+- 10-25 convoy: from 0 to 171/s between 07:05Z and 07:10Z.
+- 10-23 disk-full outage: 228–427/s from 11Z.
+- 10-22 churn: acceptance 31–38% from 01Z to 11Z, with `auth_dependency` at
+  30–130/s.
+- 10-24 escrow outage: acceptance 42–50% at each 15-minute sample from 17:45Z
+  to 18:30Z, a WARN about an hour before the 19:30Z report.
+- 10-18: 149–313/s through the livelock episodes.
+
+False-positive qualifiers: a deploy's drain refuses with `draining`, which
+neither rule counts as a refusal. A client release that hangs up early raises
+`client_canceled` and lowers acceptance with no server fault; when the drop is
+`client_canceled` alone, look at client versions. One block's dependency
+failure shows on that block's series, so split by host and block.
+False-negative qualifiers: this counter covers the H1 carrier; H3/QUIC and
+H1+ have their own counters (§16.3, §23.1) and need the same rules. A Connect
+process that is down publishes nothing, which is unknown (§8.14), not zero.
+An accepted handshake can still fail at contract creation (§25.1).
+
+ACTION: for `auth_dependency`, read Connect's logs for the dependency that
+failed: the database path (§2.11b, §2.11a, §1.3a) or Redis (§1.4, §3.5b).
+Then §5.1.
+
+### 25.3 API errors on customer routes
+
+Status: proposed 2026-10-26; the per-route share and the request-rate floor
+are missing. `log-errors` classifies service error logs.
+
+Source (exists): `urnetwork_http_requests_total{job,route,status}`, with the
+`urnetwork_http_request_duration_seconds` histogram for latency.
+
+Customer routes are the ones an app or the hosted proxy depends on:
+`POST ^/connect/control$` (about 4.9k requests/s on 10-26 03Z),
+`POST ^/network/auth-client$` (93/s), `POST ^/network/find-providers2$`
+(8/s), `GET ^/network/provider-locations$`, `GET ^/auth/refresh$`,
+`GET ^/network/user$`, `GET ^/subscription/balance$` and the account login
+routes. Leave out `GET ^/hello$` (690/s of health checks) and the prober's
+`^/network/provider-egress-*` routes, which §2.19 owns.
+
+- 5xx share per customer route over 5 and 10 minutes, with at least 1
+  request/s on the route.
+- The fleet 5xx share.
+- Customer-route requests/s against the median of the same 30-minute window
+  on the previous 7 days.
+
+Healthy: fleet 5xx 0.01–0.16% (30-minute windows, 10-17 to 10-26 outside
+incidents).
+
+Thresholds:
+- WARN `api-route-errors`: a customer route at or above 2% for 10 minutes, or
+  the fleet at or above 1% for 10 minutes.
+- PAGE: a customer route at or above 10% for 5 minutes, the fleet at or above
+  5% for 5 minutes, or customer-route requests below 40% of their 7-day
+  same-window median for 10 minutes.
+
+Evidence:
+- 10-23 disk-full outage: fleet 33–82% from 11Z.
+- 10-25 convoy: fleet 7.2–11.6% from 07Z.
+- 10-18 livelock episodes: fleet 4.1–21.1%.
+- 10-24 escrow outage: fleet 1.2–2.3% from 19Z, a WARN.
+- 10-19 livelock: the fleet share stayed at 0.03–0.17%, because `/hello` and
+  routes that never touch the database kept answering. Over the 10 minutes to
+  10:30Z, `GET ^/network/reliability$` was at 10.1%, `GET ^/network/user$` at
+  1.9% and `GET ^/auth/refresh$` at 1.0%. Total requests fell from 8.5k/s at
+  09:30Z to 3.4k/s at 11:00Z and 2.4k/s at 11:30Z: fewer requests completed,
+  whether they hung or clients stopped sending. The per-route rule and the
+  rate floor see this; the fleet share cannot.
+
+False-positive qualifiers: a client bug that calls one route wrongly produces
+4xx, not 5xx, but one customer's malformed requests can still produce 5xx on
+one route; read that route's request rate and caller spread. §13.3 expects no
+client impact from API deploys, so a 5xx burst during a rollout is a drain
+defect to investigate, not to suppress. False-negative qualifiers: a request
+that times out at the client is never recorded (the rate floor covers it). An
+error answered as 200 with an error body is invisible here (§2.9a and §2.9b
+read provider results). alt embeds its own API router and needs the same rule
+on its job.
+
+ACTION: the routes that fail name the dependency: authentication and user
+routes the database path, `find-providers2` the score cache (§2.8, §2.9),
+`/connect/control` contract creation (§25.1, §2.30).
+
+### 25.4 Delivered traffic against the same window last week
+
+Status: proposed 2026-10-26; the floor is missing. §1.1a
+(`provider-connections`) watches provider supply; nothing watches the bytes
+customers receive.
+
+Source (exists): `urnetwork_connect_exchange_io_bytes_total` for all Connect
+traffic and `urnetwork_proxy_session_bytes_total` for hosted proxy sessions.
+Compare bytes/s from each with the median of the same 30-minute window on
+each of the previous 7 days.
+
+- WARN `delivered-traffic-floor`: below 50% of that median for 15 minutes.
+- PAGE: below 25% for 10 minutes.
+
+Evidence, Connect exchange traffic:
+- 10-19: 3.7–4.0 Gb/s at 09–10Z, 1.6 Gb/s at 11Z, 0.07–0.08 Gb/s at 12–13Z.
+- 10-25: 3.4–4.8 Gb/s at 05–07Z, then 0.23–0.28 Gb/s from 08Z to 14Z, 7% of
+  the previous day. Hosted proxy sessions fell from 8–12 Mb/s to 0–0.4 Mb/s
+  over the same hours.
+- 10-22 edge reboots: 1.1 Gb/s at 00Z against 3.8–5.4 Gb/s before.
+
+Not caught: 10-21 (5.0–5.4 Gb/s through 20Z while new connections failed,
+because established sessions kept carrying traffic) and the 10-24 evening
+outage (2.5–3.7 Gb/s). This signal sees outages that stop traffic, not ones
+that only refuse new sessions; §25.2 and §25.5 see those.
+
+False-positive qualifiers: traffic grew about threefold in the week to 10-26
+(connected clients from 67k on 10-23 to 202k, exchange frames from 0.26M/s to
+3.4M/s), so a fall against a rising median is real. A planned capacity change
+or one large customer leaving can still halve it without a fault; read §25.2
+and §25.1 before paging on traffic alone. False-negative qualifiers: growth
+hides partial loss. The exchange counter measures bytes through Connect's
+exchange, not bytes the customer's application received.
+
+ACTION: confirm with §25.2 and §1.1a, then follow §5.1.
+
+### 25.5 Synthetic customer journey from outside the datacenter
+
+Status: proposed 2026-10-26; the probe is missing. Partial journeys exist: the
+egress prober inside the datacenter (`egress-outcomes`, and the
+`urnetwork_egress_probe_attempts_total{result}` ok share in Mimir), the app
+location picker (`provider-picker`, §2.9b) and the hosted proxy's public path
+(`proxy-path`, §14.5).
+
+Every minute, a dedicated monitor network runs these steps from at least two
+vantage points outside the Main network, for example an off-site host and a
+cloud VM:
+1. DNS and TLS to the public API and Connect names (§18.1 and §18.3 check the
+   edges themselves);
+2. client authentication (`POST ^/network/auth-client$` or a token refresh);
+3. `FindProviders2` for a fixed common location, requiring a non-empty
+   result;
+4. a Connect session over H1 and H3, a contract to one of the returned
+   providers, and a fixed small HTTP fetch through it, timed to first byte;
+5. the same fetch through the hosted proxy's public endpoint.
+
+Each step reports success and latency, and a failure names its step.
+
+- WARN `customer-journey`: any step failing in 2 of the last 5 minutes, or
+  the end-to-end median above 5 s over 10 minutes.
+- PAGE: a step failing for 3 consecutive minutes from both vantage points, or
+  the median above 10 s.
+
+It would have caught each outage in §25's table, because each broke one of
+these steps: providers missing or unreachable (10-10), authentication and
+connects failing (10-19, 10-25), connects taking a median of 14 s (10-21),
+contracts admitted but no traffic (10-24), and contracts taking about 2 s
+(10-25/26, step 4's latency). The in-datacenter prober shows why the journey
+must include the customer's admission path: its ok share (healthy 96–100%)
+fell to 0–69% on 10-25 07–13Z and to 62–92% on 10-21/22, but stayed at
+99–100% through the 10-24 evening outage, because it tests providers, not
+contract admission.
+
+False-positive qualifiers: the monitor network's own state (balance, client
+limit, a revoked token) fails every step, so run a control step that needs no
+provider. One provider failing is not an outage; try a second provider before
+counting a failure. A vantage point's own network loss is not ours: require
+both. False-negative qualifiers: one network exercises one shard and slot,
+and the 10-24 escrow outage hit one network's slot, so the journey proves the
+shared path, not every tenant's. It does not exercise paid and free admission
+unless monitor networks of both kinds run.
+
+Privacy: use only the probe's own account. Record step classes, counts and
+latencies, never provider identities or addresses.
+
+ACTION: the failing step names the boundary: steps 1–2 ingress and
+authentication (§18, §25.3), step 3 the score cache (§2.8, §2.9), step 4
+Connect and contract creation (§25.2, §25.1, §2.30), step 5 the hosted proxy
+(§14).
 
 ## Shared provider-egress dashboard refresh
 
