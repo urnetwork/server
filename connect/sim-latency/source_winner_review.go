@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -25,9 +26,10 @@ import (
 // Complete base files accompany the exact patch, rather than misleading hunks
 // alone. A broker can request operator assistance instead of guessing approval.
 type winnerReviewSourceFile struct {
-	Path    string `json:"path"`
-	Sha256  string `json:"sha256"`
-	Content string `json:"content"`
+	Path         string `json:"path"`
+	Sha256       string `json:"sha256"`
+	Content      string `json:"content"`
+	AbsentAtBase bool   `json:"absent_at_base,omitempty"`
 }
 
 // Source context is bounded separately from provider input and output.
@@ -73,16 +75,29 @@ func loadWinnerReviewSourceFiles(ctx context.Context, repositoriesRoot string, p
 				return nil, errors.New("winner review path does not select a locked source file")
 			}
 		}
-		content, err := sourceGitBlobAtCommit(ctx, filepath.Join(repositoriesRoot, repository), commit, relative, settings.MaximumFileBytes)
-		if err != nil {
-			return nil, err
+		absentAtBase := slices.Contains(patch.AddedPaths, path)
+		var content []byte
+		if absentAtBase {
+			absent, err := sourceGitPathAbsentAtCommit(ctx, filepath.Join(repositoriesRoot, repository), commit, relative, settings.MaximumFileBytes)
+			if err != nil {
+				return nil, err
+			}
+			if !absent {
+				return nil, errors.New("winner review creation path already exists at its frozen base")
+			}
+		} else {
+			var err error
+			content, err = sourceGitBlobAtCommit(ctx, filepath.Join(repositoriesRoot, repository), commit, relative, settings.MaximumFileBytes)
+			if err != nil {
+				return nil, err
+			}
 		}
 		contextBytes += len(content)
 		if contextBytes > settings.MaximumBytes {
 			return nil, errors.New("winner review source context exceeds its byte bound")
 		}
 		digest := sha256.Sum256(content)
-		files = append(files, winnerReviewSourceFile{Path: path, Sha256: hex.EncodeToString(digest[:]), Content: string(content)})
+		files = append(files, winnerReviewSourceFile{Path: path, Sha256: hex.EncodeToString(digest[:]), Content: string(content), AbsentAtBase: absentAtBase})
 	}
 	return files, nil
 }

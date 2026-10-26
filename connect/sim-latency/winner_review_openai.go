@@ -120,16 +120,21 @@ func winnerModelInput(request winnerReviewBrokerRequest) ([]byte, error) {
 		}
 	}
 	paths := map[string]bool{}
+	patchRecord, patchErr := controller.ValidateAndCanonicalizePatch(string(request.Packet.Patch), request.Packet.PatchPolicy)
+	if patchErr != nil || patchRecord.Sha256 != request.Template.PatchSha256 || len(request.SourceFiles) != len(patchRecord.Paths) {
+		return nil, errors.New("review broker requires allowed patch and complete touched-file base context")
+	}
+	addedPaths := map[string]bool{}
+	for _, path := range patchRecord.AddedPaths {
+		addedPaths[path] = true
+	}
 	for _, file := range request.SourceFiles {
 		digest := sha256.Sum256([]byte(file.Content))
-		if file.Path == "" || paths[file.Path] || hex.EncodeToString(digest[:]) != file.Sha256 {
+		if file.Path == "" || paths[file.Path] || hex.EncodeToString(digest[:]) != file.Sha256 ||
+			file.AbsentAtBase != addedPaths[file.Path] || file.AbsentAtBase && file.Content != "" {
 			return nil, errors.New("review broker base context is duplicated or unauthenticated")
 		}
 		paths[file.Path] = true
-	}
-	patchRecord, patchErr := controller.ValidateAndCanonicalizePatch(string(request.Packet.Patch), request.Packet.PatchPolicy)
-	if patchErr != nil || patchRecord.Sha256 != request.Template.PatchSha256 || len(paths) != len(patchRecord.Paths) {
-		return nil, errors.New("review broker requires allowed patch and complete touched-file base context")
 	}
 	for _, path := range patchRecord.Paths {
 		if !paths[path] {
