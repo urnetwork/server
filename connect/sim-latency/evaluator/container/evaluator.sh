@@ -23,8 +23,8 @@ readonly EMPTY_PATCH_SHA256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495
 readonly MAX_REQUEST_BYTES=$((2 * 1024 * 1024))
 readonly MAX_PROVIDERS_BYTES=$((1024 * 1024 * 1024))
 readonly MAX_BUILD_LOG_BYTES=$((4 * 1024 * 1024))
-readonly EVIDENCE_WORK_LIMIT=4g
-readonly EVIDENCE_WORK_BYTES=4294967296
+readonly EVIDENCE_WORK_LIMIT=5g
+readonly EVIDENCE_WORK_BYTES=5368709120
 
 # Season-frozen container ceilings. Host qualification verifies that their sum
 # plus the host reserve fits the physical box.
