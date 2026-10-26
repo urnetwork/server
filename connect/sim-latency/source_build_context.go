@@ -98,6 +98,9 @@ func validateSourceBuildRequest(request reviewedSourceBuildRequest) error {
 		!strings.HasPrefix(proposal.EvaluatedImageDigest, "sha256:") || !validSha256(strings.TrimPrefix(proposal.EvaluatedImageDigest, "sha256:")) {
 		return errors.New("source build requires the authenticated reviewed-source protocol")
 	}
+	if proposal.CandidatePathBase != "" && proposal.CandidatePathBase != "mono_root_v1" {
+		return errors.New("source build candidate path base is unsupported")
+	}
 	manifest, err := decodeSourceManifest(request.SourceManifest)
 	if err != nil {
 		return err
@@ -197,7 +200,7 @@ func prepareSourceBuildContext(ctx context.Context, request reviewedSourceBuildR
 	if err := verifyFrozenSourceGraphForMode(ctx, filepath.Join(result.SourceDirectory, "server"), request.Proposal.Commits["server"], request.Proposal.Staging); err != nil {
 		return nil, err
 	}
-	lockBytes, err := json.MarshalIndent(evaluatorSourceLock{Schema: 1, Repositories: request.Proposal.Commits}, "", "  ")
+	lockBytes, err := json.MarshalIndent(evaluatorSourceLock{Schema: 1, CandidatePathBase: request.Proposal.CandidatePathBase, Repositories: request.Proposal.Commits}, "", "  ")
 	if err != nil {
 		return nil, err
 	}

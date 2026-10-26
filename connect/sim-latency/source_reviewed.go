@@ -43,6 +43,7 @@ type reviewedSourceProposal struct {
 	StagedRoots          map[string]string          `json:"staged_roots"`
 	PatchPath            string                     `json:"patch_path"`
 	PatchSha256          string                     `json:"patch_sha256"`
+	CandidatePathBase    string                     `json:"candidate_path_base,omitempty"`
 	Significance         *sourceSignificance        `json:"significance"`
 	RawScore             float64                    `json:"raw_score"`
 	EvaluatedImageDigest string                     `json:"evaluated_image_digest"`
@@ -252,7 +253,7 @@ func runStageReviewedSource(opts docopt.Opts) {
 		fatalf("source patch: %s", err)
 	}
 	proposal := &reviewedSourceProposal{Schema: 2, Staging: current.Staging, ReviewId: reviewId, JobId: approved.Review.Request.JobId, SubmittedAt: approved.SubmittedAt, ReviewDecisionDigest: approved.Review.RequestSha256, ReviewedAt: approved.Review.CreatedAt,
-		BaseSourceLockSha256: current.SourceLockSha256, Commits: map[string]string{}, StagedRoots: map[string]string{}, PatchPath: patchPath, PatchSha256: patch.Sha256, EvaluatedImageDigest: approved.EvaluatedImageDigest}
+		BaseSourceLockSha256: current.SourceLockSha256, Commits: map[string]string{}, StagedRoots: map[string]string{}, PatchPath: patchPath, PatchSha256: patch.Sha256, CandidatePathBase: approved.PatchPolicy.PathBase, EvaluatedImageDigest: approved.EvaluatedImageDigest}
 	for _, repository := range sourceRepositoryNamesForMode(current.Staging) {
 		origin := origins[repository]
 		stagedRoot := filepath.Join(root, repository)
