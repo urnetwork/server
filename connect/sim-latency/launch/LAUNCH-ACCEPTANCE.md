@@ -26,8 +26,11 @@ placeability, typed completion and exact cleanup passed. Its mean was 1.16%
 worse despite a lower median; p=0.579, not significant or takeover-eligible.
 All [481 originals and 7 companions](../baseline/prelaunch-corrected-same-seed-r9-2026-10-25/completed/cohort-02/README.md)
 are archived and independently verified, including all 7/465/5 artifact
-bindings. This is **2/5 cohorts**, not accepted calibration. Positions 3–5 remain
-unstarted; tool qualification follows phase publication. The latest read-only
+bindings. This is **2/5 cohorts**, not accepted calibration. Position 3 started
+its original attempt at **03:41:45 UTC**, with deadline **06:41:45 UTC**;
+positions 4–5 remain unstarted. Assembly/DNS unit guards and reference readbacks
+passed in the idle slot and were published as `33e41d6f6`; this does not prove
+runtime DNS containment or accept calibration. The latest read-only
 API probe returned HTTP 503 and the dedicated review-provider key remains
 absent. Current Sille config selects MinIO `172.28.208.176:23900`, which returns
 HTTP 200 at `/minio/health/ready`. Earlier `.177` refusals tested the obsolete

@@ -7,9 +7,11 @@ not the older journal entries below. Corrected-release formal cohort 1 passed
 and its full original evidence is preserved. Cohort 2 also completed and its
 full archive was independently verified: 9+9, all gates, 10,300 seconds,
 cleanup passed, no significance or takeover. Its mean was worse; that outcome
-is retained without filtering. Cohorts 3–5 remain unstarted. Publish this phase,
-then qualify the prepared helper/probe tools in the exclusive idle slot before
-continuing. The snapshot reference passed its separate directional pilot, but
+is retained without filtering. Cohort 3 started its original attempt at
+**03:41:45 UTC**, with deadline **06:41:45 UTC**; 4–5 remain unstarted.
+The completed pair and preparation-tool qualifications are pushed as
+`a16396abf` and `33e41d6f6`. No tests/builds/probes may overlap the live cohort.
+The snapshot reference passed its separate directional pilot, but
 was not statistically significant; independent held-out ordering remains open.
 No pilot measurements enter the five-cohort A/A sample.
 
