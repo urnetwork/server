@@ -256,7 +256,7 @@ func (self *ClientSession) authenticate(ctx context.Context, req *http.Request, 
 					if answer(stateCtx, *byJwt.ClientId) {
 						return true, nil
 					}
-					if err := validateByJwtStateRemembered(stateCtx, byJwt, nil); err != nil {
+					if err := validateByJwtStateAfterBeforeQuery(stateCtx, byJwt); err != nil {
 						return false, err
 					}
 				} else if err := ValidateByJwtState(stateCtx, byJwt, false); err != nil {

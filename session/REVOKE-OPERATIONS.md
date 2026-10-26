@@ -84,3 +84,20 @@ Local fixture environment: Go 1.27.2, PostgreSQL and Redis 8 containers, 2026-10
 The maximum-state profile includes 1,000 live sessions and 10,000 retained IDs, including 9,000 real markers. Redis keys used 2,717,332 bytes; complete list was 26.884ms and atomic bulk revoke 20.790ms. A sequential 1,000-client common SQL/Redis validation pass took 1.082s (p50 1.017ms, p99 2.064ms). A 1,000-stream two-endpoint grant renewal pass took 1.577s (p50 1.292ms, p99 3.941ms). Repeat these gates against deployment Redis topology, database pool sizes, fleet fan-out and scheduling load before enablement; local figures do not establish fleet capacity.
 
 The unrestricted full session suite encounters the pre-existing live Apple JWK fetch wait in `TestAppleJwk` and timed out; affected offline/local tests pass. Root server-package tests on this macOS host have pre-existing Linux-only ARIN helper references. No production rollout, external SSO verification or whole-repository integration-suite success is claimed.
+
+## Redis revocation authority (2026-10-26)
+
+The owner decided on 2026-10-26 that Redis becomes the authority (REVOKE-FINAL.md §14). A tagged credential's state check reads one revocation record, and the SQL state query answers only what the record cannot.
+
+**Enablement.** Set vault `auth.yml` `revocation_record_enabled: true` only after every writer is deployed: api, connect, proxy, alt and taskworker. Writers always write. Each process reads the setting once at start.
+
+**Metrics:**
+- `urnetwork_jwt_state_record_checks_total{caller,operation,credential,outcome}`: `record_valid` and `record_refused` are answered by Redis, `record_miss` went to the SQL fallback, and `record_unavailable` was refused with 503. Expect misses at about one per active credential per hour once projections are warm. `urnetwork_jwt_state_queries_total` should fall by the same amount.
+- `urnetwork_session_revocation_record_writes_total{kind,outcome}`: a `failure` is a revocation that did not commit. A `stale` projection is harmless; it only leaves the next check to SQL.
+
+**Failure modes.**
+- **Redis down.** Tagged checks answer 503, and removals, password resets, network deletions and session revocations fail and are retried; nothing commits without its record. Leases stay held, unverified, as before.
+- **Redis data loss.** Checks miss and the SQL fallback rebuilds the record. Watch the miss rate spike; no acceptance is lost or restored.
+- **Spurious tombstone** (a write succeeded but its commit failed). The client is refused for at most ten minutes, then SQL answers. A spurious `n:del` or `n:cred` lasts until the key expires (25 hours), and only an intended deletion or rotation can write it.
+
+**Rollback.** Clear `revocation_record_enabled` and restart. Readers return to SQL; writers keep writing.

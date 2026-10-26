@@ -1327,6 +1327,12 @@ func deactivateLockedNetworkClientsInTx(ctx context.Context, tx server.PgTx, loc
 		return 0, nil
 	}
 
+	// The revocation records refuse these clients before the deactivation can
+	// commit; a failed write fails the deactivation (revocation_record.go).
+	if err := session.RevokeClientRecordsInTx(ctx, tx, networkId, lockedClientIds); err != nil {
+		return 0, err
+	}
+
 	// Read the primary database clock in the UPDATE only after every target row
 	// is locked. A concurrent contract holding FOR SHARE must remain ordered
 	// before this deactivation in both database state and recorded time, even
@@ -3983,6 +3989,7 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 			// an attempt that does not commit marked nothing
 			batchCount = 0
 			clientIds := []server.Id{}
+			clientNetworkIds := map[server.Id]server.Id{}
 			result, err := tx.Query(
 				ctx,
 				`
@@ -4000,7 +4007,7 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 						ORDER BY network_client.auth_time ASC, network_client.client_id ASC
 						LIMIT $2
 					)
-					SELECT network_client.client_id
+					SELECT network_client.client_id, network_client.network_id
 					FROM network_client
 					JOIN candidate ON candidate.client_id = network_client.client_id
 					LEFT JOIN network_client_connection ON
@@ -4019,14 +4026,18 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 			)
 			server.WithPgResult(result, err, func() {
 				for result.Next() {
-					var clientId server.Id
-					server.Raise(result.Scan(&clientId))
+					var clientId, networkId server.Id
+					server.Raise(result.Scan(&clientId, &networkId))
 					clientIds = append(clientIds, clientId)
+					clientNetworkIds[clientId] = networkId
 				}
 			})
 			if len(clientIds) == 0 {
 				return
 			}
+			// as every deactivation (deactivateLockedNetworkClientsInTx): the
+			// revocation records refuse the clients before the marking commits
+			server.Raise(session.RevokeNetworkClientRecordsInTx(ctx, tx, clientNetworkIds))
 
 			// The ordered FOR UPDATE above completes before the UPDATE reads the
 			// primary database clock, so a lifecycle reader that won the row lock
@@ -4205,12 +4216,27 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 					LIMIT $2
 				) t
 				WHERE network_client.client_id = t.client_id
-				RETURNING network_client.client_id, network_client.device_id
+				RETURNING network_client.client_id, network_client.device_id, network_client.network_id, network_client.source_client_id
 				`,
 				minClientTime.UTC(),
 				reapChildBatchCount,
 			)
-			batchClientIds, batchDeviceIds = collectReaped(rows, err)
+			// this reap removes active children too, so the revocation
+			// records refuse every removed row before the batch commits
+			retired := []session.RetiredClient{}
+			server.WithPgResult(rows, err, func() {
+				for rows.Next() {
+					var clientId, networkId server.Id
+					var deviceId, sourceClientId *server.Id
+					server.Raise(rows.Scan(&clientId, &deviceId, &networkId, &sourceClientId))
+					batchClientIds = append(batchClientIds, clientId)
+					if deviceId != nil {
+						batchDeviceIds = append(batchDeviceIds, *deviceId)
+					}
+					retired = append(retired, session.RetiredClient{ClientId: clientId, NetworkId: networkId, SourceClientId: sourceClientId})
+				}
+			})
+			server.Raise(session.RevokeRetiredClientRecordsInTx(ctx, tx, retired))
 		}, server.TxReadCommitted)
 		reapedClientIds = append(reapedClientIds, batchClientIds...)
 		reapedDeviceIds = append(reapedDeviceIds, batchDeviceIds...)
