@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-c2-runtime-tool-qualification",
+  "official": false,
+  "scored": false,
+  "production_activated": false,
+  "source_commit": "c0ee14903e8f0b72b3c77dd0c9ae1a1e206c66a8",
+  "binary_sha256": "b1bbfd19a4f0aa4922163a6c26bf823e83c83b3c127aa82666bae1a1623f0318",
+  "builder_tests_per_pass": 19,
+  "runtime_tests_per_pass": 39,
+  "consecutive_passes_each": 3,
+  "skips": 0,
+  "expected_pre_fix_failure": "second fixture loses configured global Git identity",
+  "qualification_scope": "Native builder/Git fixture regressions and C2 runtime-release tools; not actual broad Docker capacity or timed calibration"
+}

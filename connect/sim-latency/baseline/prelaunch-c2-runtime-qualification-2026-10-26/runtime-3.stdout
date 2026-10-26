@@ -1,0 +1,79 @@
+=== RUN   TestHeldOutAmendmentKeepsFiveSeedDefault
+--- PASS: TestHeldOutAmendmentKeepsFiveSeedDefault (0.00s)
+=== RUN   TestHeldOutAmendmentMarginPinsRetainOriginalProtocol
+--- PASS: TestHeldOutAmendmentMarginPinsRetainOriginalProtocol (0.00s)
+=== RUN   TestHeldOutAmendmentRequiresAllThreeOrderedSeeds
+--- PASS: TestHeldOutAmendmentRequiresAllThreeOrderedSeeds (0.00s)
+=== RUN   TestHeldOutAmendmentDoesNotRewriteFiveSeedHistory
+--- PASS: TestHeldOutAmendmentDoesNotRewriteFiveSeedHistory (0.00s)
+=== RUN   TestHeldOutAmendmentRetainsAllNoopGates
+--- PASS: TestHeldOutAmendmentRetainsAllNoopGates (0.00s)
+=== RUN   TestHeldOutAmendmentRejectsReferenceCardinalityWithoutPanic
+--- PASS: TestHeldOutAmendmentRejectsReferenceCardinalityWithoutPanic (0.00s)
+=== RUN   TestHeldOutAmendmentPublicProjectionBindsBothInstruments
+--- PASS: TestHeldOutAmendmentPublicProjectionBindsBothInstruments (0.00s)
+=== RUN   TestHeldOutAmendmentSeedCommitmentBindsBridgeProvenance
+--- PASS: TestHeldOutAmendmentSeedCommitmentBindsBridgeProvenance (0.00s)
+=== RUN   TestHeldOutBridgePreservesFullOriginalEvaluationPolicy
+--- PASS: TestHeldOutBridgePreservesFullOriginalEvaluationPolicy (0.00s)
+=== RUN   TestHeldOutAmendmentSourceTransformIsExactlyFourHunks
+--- PASS: TestHeldOutAmendmentSourceTransformIsExactlyFourHunks (0.00s)
+=== RUN   TestHeldOutAmendmentInstrumentPreservesNineDependencyPins
+--- PASS: TestHeldOutAmendmentInstrumentPreservesNineDependencyPins (0.00s)
+=== RUN   TestHeldOutAmendmentInstrumentRequiresProspectiveCapability
+--- PASS: TestHeldOutAmendmentInstrumentRequiresProspectiveCapability (0.00s)
+=== RUN   TestHeldOutAmendmentInstrumentRejectsUnrelatedTreeChanges
+--- PASS: TestHeldOutAmendmentInstrumentRejectsUnrelatedTreeChanges (0.00s)
+=== RUN   TestHeldOutBridgeUsesFrozenMarginWithoutNewAnalysis
+--- PASS: TestHeldOutBridgeUsesFrozenMarginWithoutNewAnalysis (0.00s)
+=== RUN   TestHeldOutBridgeRejectsTakeoverOrGateFailure
+--- PASS: TestHeldOutBridgeRejectsTakeoverOrGateFailure (0.00s)
+=== RUN   TestHeldOutBridgeRejectsPriorOrRepeatedExecutionIds
+--- PASS: TestHeldOutBridgeRejectsPriorOrRepeatedExecutionIds (0.00s)
+=== RUN   TestHeldOutBridgeRequiresOriginalBoundedTerminal
+--- PASS: TestHeldOutBridgeRequiresOriginalBoundedTerminal (0.00s)
+=== RUN   TestHeldOutBridgeRequiresActualIndependentReplayReceipts
+--- PASS: TestHeldOutBridgeRequiresActualIndependentReplayReceipts (0.00s)
+=== RUN   TestHeldOutBridgeAuthenticatesWholeNativeCensus
+--- PASS: TestHeldOutBridgeAuthenticatesWholeNativeCensus (0.20s)
+=== RUN   TestHeldOutBridgeRejectsChangedCompletionMapCoverage
+--- PASS: TestHeldOutBridgeRejectsChangedCompletionMapCoverage (0.13s)
+=== RUN   TestHeldOutExecutionCompletesAllJobsWithOneControlPerRound
+--- PASS: TestHeldOutExecutionCompletesAllJobsWithOneControlPerRound (25.59s)
+=== RUN   TestHeldOutExecutionOriginalDeadlineCannotRestart
+--- PASS: TestHeldOutExecutionOriginalDeadlineCannotRestart (23.78s)
+=== RUN   TestHeldOutExecutionDoesNotRetryInfrastructureFailure
+--- PASS: TestHeldOutExecutionDoesNotRetryInfrastructureFailure (23.86s)
+=== RUN   TestHeldOutOperatorPreparesCompleteNativeFiveRoundPlan
+--- PASS: TestHeldOutOperatorPreparesCompleteNativeFiveRoundPlan (29.47s)
+=== RUN   TestHeldOutRuntimeSelectsExplicitNewEvaluator
+--- PASS: TestHeldOutRuntimeSelectsExplicitNewEvaluator (0.00s)
+=== RUN   TestHeldOutRuntimeRejectsOldOrChangedRelease
+--- PASS: TestHeldOutRuntimeRejectsOldOrChangedRelease (0.00s)
+=== RUN   TestHeldOutRuntimeAuthenticatesCompleteInstallManifests
+--- PASS: TestHeldOutRuntimeAuthenticatesCompleteInstallManifests (0.01s)
+=== RUN   TestHeldOutRuntimeRejectsRelabeledBundleManifest
+--- PASS: TestHeldOutRuntimeRejectsRelabeledBundleManifest (0.02s)
+=== RUN   TestHeldOutRuntimeRejectsChangedBuilderComponents
+--- PASS: TestHeldOutRuntimeRejectsChangedBuilderComponents (0.03s)
+=== RUN   TestHeldOutRuntimeCompositeUsesExistingBuilderEncoding
+--- PASS: TestHeldOutRuntimeCompositeUsesExistingBuilderEncoding (0.00s)
+=== RUN   TestHeldOutRuntimeRejectsChangedRunnerManifest
+--- PASS: TestHeldOutRuntimeRejectsChangedRunnerManifest (0.03s)
+=== RUN   TestHeldOutRuntimeRequiresProtectedRootAncestry
+--- PASS: TestHeldOutRuntimeRequiresProtectedRootAncestry (0.00s)
+=== RUN   TestHeldOutRuntimeRejectsUnsafeRootLeaf
+--- PASS: TestHeldOutRuntimeRejectsUnsafeRootLeaf (0.00s)
+=== RUN   TestHeldOutRuntimeRejectsNativeBuildFromOtherBuilder
+--- PASS: TestHeldOutRuntimeRejectsNativeBuildFromOtherBuilder (0.00s)
+=== RUN   TestHeldOutRuntimeReferenceAdmissionUsesPinnedBuilder
+--- PASS: TestHeldOutRuntimeReferenceAdmissionUsesPinnedBuilder (11.13s)
+=== RUN   TestHeldOutRuntimeScriptProjectionKeepsFourRequiredFiles
+--- PASS: TestHeldOutRuntimeScriptProjectionKeepsFourRequiredFiles (0.00s)
+=== RUN   TestHeldOutRuntimeBridgePlanPinsInstalledRunner
+--- PASS: TestHeldOutRuntimeBridgePlanPinsInstalledRunner (0.00s)
+=== RUN   TestHeldOutRuntimeBridgeTerminalBindsRequestAndControl
+--- PASS: TestHeldOutRuntimeBridgeTerminalBindsRequestAndControl (0.00s)
+=== RUN   TestHeldOutRuntimeBridgeReceiptBindsCompleteRelease
+--- PASS: TestHeldOutRuntimeBridgeReceiptBindsCompleteRelease (0.00s)
+PASS
