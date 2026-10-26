@@ -463,7 +463,7 @@ func reviewQualificationContainerFixture(t *testing.T, owner, image, network, pr
 }
 
 // Runs the entire actual jq inspection predicate, not its Go reimplementation.
-// Both provider modes must accept minimal authority and reject extra env/mounts.
+// Both provider modes must accept allowed entries and reject extra/malformed env.
 func TestReviewQualificationWrapperInspectionChecksEnvironmentEntries(t *testing.T) {
 	wrapper, err := os.ReadFile("evaluator/review/run-broker.sh")
 	if err != nil {
