@@ -11,6 +11,8 @@ import (
 	"reflect"
 	"strings"
 	"syscall"
+
+	"github.com/urnetwork/server/model"
 )
 
 // These public byte identities are mandatory in the C2 instrument descriptor.
@@ -76,10 +78,135 @@ func selectHeldOutAmendedRuntime(release *heldOutRelease, supplied, expected hel
 	return nil
 }
 
-// Native receipts must name the exact independently authenticated builder.
+// New receipts bind the complete repository map and validator, while omitted
+// additive fields retain the historical ten-field codec and admission rules.
 func validateHeldOutRuntimeBuilderPin(build heldOutNativeBuild, release heldOutRelease) error {
-	if release.Runtime != nil && build.BuilderSha256 != release.Runtime.BuilderSha256 {
+	if release.Runtime == nil {
+		if build.PatchValidatorSha256 != "" || build.CandidateCommitsSha256 != "" || build.OriginalSourceIdentitySha256 != "" || len(build.CandidateCommits) != 0 {
+			return errors.New("historical native build cannot inherit C2 metadata")
+		}
+		return nil
+	}
+	if build.BuilderSha256 != release.Runtime.BuilderSha256 || build.PatchValidatorSha256 != release.Runtime.ValidatorSha256 {
 		return errors.New("native build belongs to another trusted control release")
+	}
+	if !sourceGitShaPattern.MatchString(build.CandidateSha) || !validSha256(build.CandidateCommitsSha256) || !validSha256(build.OriginalSourceIdentitySha256) || build.CandidateCommits["server"] != build.CandidateSha {
+		return errors.New("C2 native build omits its source-map identity")
+	}
+	commits := map[string]string{}
+	for name, commit := range build.CandidateCommits {
+		commits[name] = commit
+	}
+	commits["server"] = release.BaseSha
+	lockDigest, err := model.CompetitionSourceLockDigest(commits)
+	if err != nil || lockDigest != release.SourceLockSha256 {
+		return errors.New("native reference changed the frozen ten-repository source map")
+	}
+	content, err := json.MarshalIndent(build.CandidateCommits, "", "  ")
+	if err != nil || heldOutDigest(append(content, '\n')) != build.CandidateCommitsSha256 {
+		return errors.New("native build candidate map digest mismatch")
+	}
+	imageKey := heldOutDigest([]byte(strings.Join([]string{build.BaseImageId, build.PatchSha256, build.PolicySha256, build.BuilderSha256}, "\x00")))
+	if build.ImageKey != imageKey || build.Image != "urnetwork/sim-latency-submission:"+imageKey[:32] {
+		return errors.New("native reference does not use the evaluator's deterministic image cache identity")
+	}
+	return nil
+}
+
+// The trusted preparer's complete native projection has one explicitly
+// nullable field: pristine sources must encode candidate_patch_sha256:null.
+type heldOutRuntimeSource struct {
+	Schema               int               `json:"schema"`
+	Kind                 string            `json:"kind"`
+	Temporary            bool              `json:"temporary"`
+	BaseImageId          string            `json:"base_image_id"`
+	BaseSha              string            `json:"base_sha"`
+	SourceEpoch          int               `json:"source_epoch"`
+	Staging              bool              `json:"staging"`
+	Branch               string            `json:"branch"`
+	SourceLockSha256     string            `json:"source_lock_sha256"`
+	CandidatePathBase    string            `json:"candidate_path_base"`
+	Repositories         map[string]string `json:"repositories"`
+	CandidatePatchSha256 *string           `json:"candidate_patch_sha256"`
+}
+
+// Raw lock bytes bind the C2 capability separately from the canonical commits-
+// only lock. Every false/zero/null field is required, not inferred by decoding.
+func validateHeldOutRuntimeSource(content []byte, release heldOutRelease, rawLockSha256, patchSha256 string, expectedCommits map[string]string) (*heldOutRuntimeSource, error) {
+	var source heldOutRuntimeSource
+	if err := decodeStrictJSONBytes(content, &source, "C2 native source identity"); err != nil {
+		return nil, err
+	}
+	canonical, err := json.Marshal(source)
+	if err != nil {
+		return nil, err
+	}
+	var recorded, expected map[string]json.RawMessage
+	if json.Unmarshal(content, &recorded) != nil || json.Unmarshal(canonical, &expected) != nil || len(recorded) != len(expected) {
+		return nil, errors.New("C2 source identity fields incomplete")
+	}
+	for name := range expected {
+		value, present := recorded[name]
+		if !present || (name != "candidate_patch_sha256" && bytes.Equal(bytes.TrimSpace(value), []byte("null"))) {
+			return nil, errors.New("C2 source identity contains a missing/null field")
+		}
+	}
+	if source.Schema != 1 || source.Kind != "sim-latency-evaluation-source" || !source.Temporary || source.BaseImageId != release.ImageId || source.BaseSha != release.BaseSha || source.SourceEpoch != 0 || source.Staging || source.Branch != "sim-latency" || !validSha256(rawLockSha256) || source.SourceLockSha256 != rawLockSha256 || source.CandidatePathBase != "mono_root_v1" {
+		return nil, errors.New("C2 source identity differs from the authenticated image and raw source lock")
+	}
+	if patchSha256 == "" {
+		if source.CandidatePatchSha256 != nil {
+			return nil, errors.New("pristine C2 source unexpectedly contains a candidate patch")
+		}
+	} else if !validSha256(patchSha256) || source.CandidatePatchSha256 == nil || *source.CandidatePatchSha256 != patchSha256 || !reflect.DeepEqual(source.Repositories, expectedCommits) {
+		return nil, errors.New("C2 candidate source differs from its authenticated build map and patch")
+	}
+	commits := map[string]string{}
+	for name, commit := range source.Repositories {
+		commits[name] = commit
+	}
+	if patchSha256 != "" {
+		commits["server"] = release.BaseSha
+	}
+	digest, err := model.CompetitionSourceLockDigest(commits)
+	if err != nil || digest != release.SourceLockSha256 {
+		return nil, errors.New("C2 source identity changed the frozen ten-repository lock")
+	}
+	return &source, nil
+}
+
+// Actual evaluator sidecars are evidence-manifest-bound before this read. A
+// new-format receipt cannot substitute its original source or control helper.
+func authenticateHeldOutRuntimeBuildEvidence(artifacts string, bound map[string]bool, build heldOutNativeBuild, request heldOutRequest, rawLockSha256 string, release heldOutRelease, settings heldOutOperatorSettings) error {
+	if release.Runtime == nil {
+		return nil
+	}
+	if build.Schema != 1 || build.BaseImageId != release.ImageId || build.BaseSha != release.BaseSha || build.PatchSha256 != request.PatchSha256 || !sourceGitShaPattern.MatchString(build.CandidateSha) || !bound["evidence/candidate-original-source.json"] || !bound["evidence/builder-identity.json"] {
+		return errors.New("C2 native build request/original-source/builder evidence missing or changed")
+	}
+	originalBytes, originalPin, err := readHeldOutProduced(artifacts, "evidence/candidate-original-source.json", settings.MaximumBytes)
+	if err != nil || originalPin.Sha256 != build.OriginalSourceIdentitySha256 {
+		return errors.New("C2 native build original source digest mismatch")
+	}
+	if _, err := validateHeldOutRuntimeSource(originalBytes, release, rawLockSha256, "", nil); err != nil {
+		return err
+	}
+	builderBytes, _, err := readHeldOutProduced(artifacts, "evidence/builder-identity.json", settings.MaximumBytes)
+	if err != nil {
+		return err
+	}
+	var builder heldOutRuntimeBuilder
+	if err := decodeHeldOutComplete(builderBytes, &builder, "executed C2 builder identity"); err != nil {
+		return err
+	}
+	digest, err := heldOutRuntimeBuilderDigest(builder)
+	if err != nil || builder.Schema != 1 || builder.Kind != "sim-latency-submission-builder/v2" || digest != build.BuilderSha256 || builder.BuilderSha256 != digest || builder.PatchValidatorSha256 != build.PatchValidatorSha256 {
+		return errors.New("executed C2 builder does not match its authenticated native receipt")
+	}
+	for name, digest := range map[string]string{"competitionpatch": builder.PatchValidatorSha256, "Dockerfile.submission": builder.DockerfileSha256, "build-submission.sh": builder.BuildScriptSha256, "submission-builder-identity.sh": builder.IdentityHelperSha256, "competitionpatch.sha256": builder.ValidatorPinSha256, "evaluator.sh": builder.EvaluatorSha256, "prepare-evaluation-source.sh": builder.SourcePreparerSha256} {
+		if release.ScriptDigests[name] != digest || !validSha256(digest) {
+			return errors.New("executed C2 builder component changed")
+		}
 	}
 	return nil
 }

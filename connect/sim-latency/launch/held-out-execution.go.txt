@@ -136,16 +136,20 @@ type heldOutCompletion struct {
 
 // Existing native build record, not a new build or an application execution.
 type heldOutNativeBuild struct {
-	Schema        int    `json:"schema"`
-	Image         string `json:"image"`
-	ImageId       string `json:"image_id"`
-	BaseImageId   string `json:"base_image_id"`
-	BaseSha       string `json:"base_sha"`
-	CandidateSha  string `json:"candidate_sha"`
-	PatchSha256   string `json:"patch_sha256"`
-	PolicySha256  string `json:"policy_sha256"`
-	BuilderSha256 string `json:"builder_sha256"`
-	ImageKey      string `json:"image_key"`
+	Schema                       int               `json:"schema"`
+	Image                        string            `json:"image"`
+	ImageId                      string            `json:"image_id"`
+	BaseImageId                  string            `json:"base_image_id"`
+	BaseSha                      string            `json:"base_sha"`
+	CandidateSha                 string            `json:"candidate_sha"`
+	PatchSha256                  string            `json:"patch_sha256"`
+	PolicySha256                 string            `json:"policy_sha256"`
+	BuilderSha256                string            `json:"builder_sha256"`
+	ImageKey                     string            `json:"image_key"`
+	PatchValidatorSha256         string            `json:"patch_validator_sha256,omitempty"`
+	CandidateCommitsSha256       string            `json:"candidate_commits_sha256,omitempty"`
+	OriginalSourceIdentitySha256 string            `json:"original_source_identity_sha256,omitempty"`
+	CandidateCommits             map[string]string `json:"candidate_commits,omitempty"`
 }
 
 // Hooks permit deterministic composed tests without starting services or
@@ -507,6 +511,7 @@ func authenticateHeldOutJob(ctx context.Context, plan heldOutPrivatePlan, round 
 	if err != nil {
 		return outcome, nil, err
 	}
+	var executedBuild *heldOutNativeBuild
 	if !buildFailed {
 		if !bound["evidence/candidate-build.json"] || !bound["evidence/policy.json"] {
 			return outcome, nil, errors.New("held-out candidate build/policy evidence missing")
@@ -532,6 +537,10 @@ func authenticateHeldOutJob(ctx context.Context, plan heldOutPrivatePlan, round 
 		if err := validateHeldOutRuntimeBuilderPin(actualBuild, release); err != nil {
 			return outcome, nil, err
 		}
+		if err := authenticateHeldOutRuntimeBuildEvidence(artifacts, bound, actualBuild, request, plan.Config.SourceLock.Sha256, release, settings); err != nil {
+			return outcome, nil, err
+		}
+		executedBuild = &actualBuild
 		policyBytes, _, err := readHeldOutProduced(artifacts, "evidence/policy.json", settings.MaximumBytes)
 		if err != nil {
 			return outcome, nil, err
@@ -611,6 +620,16 @@ func authenticateHeldOutJob(ctx context.Context, plan heldOutPrivatePlan, round 
 		content   json.RawMessage
 		candidate bool
 	}{{content: sources.Baseline}, {content: sources.Candidate, candidate: true}} {
+		if release.Runtime != nil {
+			var commits map[string]string
+			patchSha256 := ""
+			if source.candidate && !buildFailed {
+				commits, patchSha256 = executedBuild.CandidateCommits, request.PatchSha256
+			}
+			if _, err := validateHeldOutRuntimeSource(source.content, release, plan.Config.SourceLock.Sha256, patchSha256, commits); err != nil {
+				return outcome, nil, err
+			}
+		}
 		var projection struct {
 			Repositories         map[string]string `json:"repositories"`
 			CandidatePatchSha256 string            `json:"candidate_patch_sha256"`

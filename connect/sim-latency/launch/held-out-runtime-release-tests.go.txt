@@ -5,11 +5,14 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/urnetwork/server/model"
 )
 
 // All identities and paths are generated test-only values, not deployment pins.
@@ -43,7 +46,44 @@ func newHeldOutRuntimeFixture(t *testing.T) (heldOutRuntimeRelease, heldOutRelea
 		"build-submission.sh": builder.BuildScriptSha256, "submission-builder-identity.sh": builder.IdentityHelperSha256,
 		"competitionpatch.sha256": builder.ValidatorPinSha256, "evaluator.sh": builder.EvaluatorSha256, "prepare-evaluation-source.sh": builder.SourcePreparerSha256,
 		"resource-boundary.sh": runner.ResourceBoundarySha256}
+	release.ScriptDigests = components
 	return runtime, release, bundle, runner, components
+}
+
+// Reproduces the actual jq sorted map, nullable pristine source and default
+// image-tag encodings with a complete synthetic ten-repository source map.
+func newHeldOutRuntimeNativeFixture(t *testing.T) (heldOutNativeBuild, heldOutRuntimeSource, heldOutRelease, heldOutRuntimeBuilder) {
+	t.Helper()
+	runtime, release, bundle, _, _ := newHeldOutRuntimeFixture(t)
+	commits := map[string]string{}
+	for index, name := range model.CompetitionSourceRepositoryNames() {
+		commits[name] = fmt.Sprintf("%040x", index+1)
+	}
+	release.BaseSha = commits["server"]
+	var err error
+	release.SourceLockSha256, err = model.CompetitionSourceLockDigest(commits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := heldOutRuntimeSource{Schema: 1, Kind: "sim-latency-evaluation-source", Temporary: true,
+		BaseImageId: release.ImageId, BaseSha: release.BaseSha, Branch: "sim-latency", SourceLockSha256: strings.Repeat("8", 64),
+		CandidatePathBase: "mono_root_v1", Repositories: commits}
+	build := heldOutNativeBuild{Schema: 1, BaseImageId: release.ImageId, BaseSha: release.BaseSha,
+		CandidateSha: strings.Repeat("a", 40), ImageId: "sha256:" + strings.Repeat("9", 64), PatchSha256: strings.Repeat("b", 64),
+		PolicySha256: strings.Repeat("c", 64), BuilderSha256: runtime.BuilderSha256, PatchValidatorSha256: runtime.ValidatorSha256,
+		OriginalSourceIdentitySha256: heldOutDigest(heldOutRuntimeJson(t, source)), CandidateCommits: map[string]string{}}
+	for name, commit := range commits {
+		build.CandidateCommits[name] = commit
+	}
+	build.CandidateCommits["server"] = build.CandidateSha
+	content, err := json.MarshalIndent(build.CandidateCommits, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	build.CandidateCommitsSha256 = heldOutDigest(append(content, '\n'))
+	build.ImageKey = heldOutDigest([]byte(strings.Join([]string{build.BaseImageId, build.PatchSha256, build.PolicySha256, build.BuilderSha256}, "\x00")))
+	build.Image = "urnetwork/sim-latency-submission:" + build.ImageKey[:32]
+	return build, source, release, bundle.Builder
 }
 
 // Encoding preserves every explicit false/zero installation field.
@@ -269,8 +309,7 @@ func TestHeldOutRuntimeRejectsUnsafeRootLeaf(t *testing.T) {
 // The actual native-build admission path enforces the new composite, while an
 // old-format release still retains its existing separate build validation.
 func TestHeldOutRuntimeRejectsNativeBuildFromOtherBuilder(t *testing.T) {
-	runtime, release, _, _, _ := newHeldOutRuntimeFixture(t)
-	build := heldOutNativeBuild{BuilderSha256: runtime.BuilderSha256}
+	build, _, release, _ := newHeldOutRuntimeNativeFixture(t)
 	if err := validateHeldOutRuntimeBuilderPin(build, release); err != nil {
 		t.Fatal(err)
 	}
@@ -278,7 +317,7 @@ func TestHeldOutRuntimeRejectsNativeBuildFromOtherBuilder(t *testing.T) {
 	if err := validateHeldOutRuntimeBuilderPin(build, release); err == nil {
 		t.Fatal("old builder accepted by amended native build admission")
 	}
-	if err := validateHeldOutRuntimeBuilderPin(build, heldOutRelease{}); err != nil {
+	if err := validateHeldOutRuntimeBuilderPin(heldOutNativeBuild{BuilderSha256: build.BuilderSha256}, heldOutRelease{}); err != nil {
 		t.Fatal("historical build schema changed")
 	}
 }
@@ -291,13 +330,176 @@ func TestHeldOutRuntimeReferenceAdmissionUsesPinnedBuilder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixture.Release.Runtime = &heldOutRuntimeRelease{BuilderSha256: strings.Repeat("6", 64)}
+	fixture.Release.Runtime = &heldOutRuntimeRelease{BuilderSha256: strings.Repeat("6", 64), ValidatorSha256: strings.Repeat("7", 64)}
+	var references []heldOutReference
+	if err := json.Unmarshal(content, &references); err != nil {
+		t.Fatal(err)
+	}
+	lockBytes, err := os.ReadFile(fixture.Config.SourceLock.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lock heldOutSourceLock
+	if err := json.Unmarshal(lockBytes, &lock); err != nil {
+		t.Fatal(err)
+	}
+	for index := range references {
+		reference := &references[index]
+		nativeBytes, err := os.ReadFile(reference.NativeBuild.Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var build heldOutNativeBuild
+		if err := json.Unmarshal(nativeBytes, &build); err != nil {
+			t.Fatal(err)
+		}
+		build.PatchValidatorSha256, build.OriginalSourceIdentitySha256 = fixture.Release.Runtime.ValidatorSha256, strings.Repeat("8", 64)
+		build.CandidateCommits = map[string]string{}
+		for name, commit := range lock.Repositories {
+			build.CandidateCommits[name] = commit
+		}
+		build.CandidateCommits["server"] = build.CandidateSha
+		mapBytes, err := json.MarshalIndent(build.CandidateCommits, "", "  ")
+		if err != nil {
+			t.Fatal(err)
+		}
+		build.CandidateCommitsSha256 = heldOutDigest(append(mapBytes, '\n'))
+		build.ImageKey = heldOutDigest([]byte(strings.Join([]string{build.BaseImageId, build.PatchSha256, build.PolicySha256, build.BuilderSha256}, "\x00")))
+		build.Image = "urnetwork/sim-latency-submission:" + build.ImageKey[:32]
+		reference.NativeBuild = heldOutOpJson(t, reference.NativeBuild.Path, build)
+	}
+	content = heldOutRuntimeJson(t, references)
 	if _, _, err := authenticateHeldOutReferences(content, fixture.Release, fixture.Settings); err != nil {
 		t.Fatal(err)
 	}
 	fixture.Release.Runtime.BuilderSha256 = strings.Repeat("9", 64)
 	if _, _, err := authenticateHeldOutReferences(content, fixture.Release, fixture.Settings); err == nil {
 		t.Fatal("real reference admission accepted a different builder")
+	}
+}
+
+// The actual strict native decoder accepts both complete formats without
+// adding new keys to historical JSON or dropping any C2 metadata key.
+func TestHeldOutRuntimeNativeBuildCodecPreservesLegacyAndRequiresNewFields(t *testing.T) {
+	build, _, release, _ := newHeldOutRuntimeNativeFixture(t)
+	var decoded heldOutNativeBuild
+	if err := decodeHeldOutComplete(heldOutRuntimeJson(t, build), &decoded, "synthetic C2 native build"); err != nil || !reflect.DeepEqual(decoded, build) {
+		t.Fatalf("actual fourteen-field native format refused: %v", err)
+	}
+	legacy := heldOutNativeBuild{Schema: 1, Image: "synthetic-legacy", ImageId: build.ImageId, BaseImageId: build.BaseImageId,
+		BaseSha: build.BaseSha, CandidateSha: build.CandidateSha, PatchSha256: build.PatchSha256, PolicySha256: build.PolicySha256,
+		BuilderSha256: build.BuilderSha256, ImageKey: build.ImageKey}
+	var oldFields map[string]json.RawMessage
+	if err := json.Unmarshal(heldOutRuntimeJson(t, legacy), &oldFields); err != nil || len(oldFields) != 10 {
+		t.Fatalf("legacy ten-field codec changed: %v", err)
+	}
+	decoded = heldOutNativeBuild{}
+	if err := decodeHeldOutComplete(heldOutRuntimeJson(t, legacy), &decoded, "synthetic legacy native build"); err != nil || validateHeldOutRuntimeBuilderPin(legacy, heldOutRelease{}) != nil {
+		t.Fatalf("legacy format refused: %v", err)
+	}
+	for _, name := range []string{"patch_validator_sha256", "candidate_commits_sha256", "original_source_identity_sha256", "candidate_commits"} {
+		var fields map[string]any
+		if err := json.Unmarshal(heldOutRuntimeJson(t, build), &fields); err != nil {
+			t.Fatal(err)
+		}
+		delete(fields, name)
+		decoded = heldOutNativeBuild{}
+		err := decodeHeldOutComplete(heldOutRuntimeJson(t, fields), &decoded, "synthetic incomplete C2 native build")
+		if err == nil && validateHeldOutRuntimeBuilderPin(decoded, release) == nil {
+			t.Errorf("C2 native field %s silently omitted", name)
+		}
+	}
+}
+
+// Validator, complete map, its exact jq bytes and deterministic cache tag are
+// all authoritative; a self-consistent map cannot alter a frozen dependency.
+func TestHeldOutRuntimeRejectsChangedNativeMetadata(t *testing.T) {
+	for index, mutate := range []func(*heldOutNativeBuild){
+		func(b *heldOutNativeBuild) { b.PatchValidatorSha256 = strings.Repeat("9", 64) },
+		func(b *heldOutNativeBuild) { b.CandidateCommitsSha256 = strings.Repeat("9", 64) },
+		func(b *heldOutNativeBuild) { b.OriginalSourceIdentitySha256 = "" },
+		func(b *heldOutNativeBuild) { delete(b.CandidateCommits, "sn") },
+		func(b *heldOutNativeBuild) { b.CandidateCommits["connect"] = strings.Repeat("9", 40) },
+		func(b *heldOutNativeBuild) { b.CandidateCommits["server"] = b.BaseSha },
+		func(b *heldOutNativeBuild) { b.ImageKey = strings.Repeat("9", 64) },
+		func(b *heldOutNativeBuild) { b.Image = "synthetic-custom-tag" },
+	} {
+		build, _, release, _ := newHeldOutRuntimeNativeFixture(t)
+		mutate(&build)
+		if err := validateHeldOutRuntimeBuilderPin(build, release); err == nil {
+			t.Errorf("changed native metadata %d accepted", index)
+		}
+	}
+}
+
+// Explicit pristine null and zero/false fields are required. Candidate source
+// identity must match the full committed map, not merely its server entry.
+func TestHeldOutRuntimeSourceAuthenticatesAllNativeFields(t *testing.T) {
+	build, source, release, _ := newHeldOutRuntimeNativeFixture(t)
+	if _, err := validateHeldOutRuntimeSource(heldOutRuntimeJson(t, source), release, source.SourceLockSha256, "", nil); err != nil {
+		t.Fatal(err)
+	}
+	candidate := source
+	candidate.Repositories, candidate.CandidatePatchSha256 = build.CandidateCommits, &build.PatchSha256
+	if _, err := validateHeldOutRuntimeSource(heldOutRuntimeJson(t, candidate), release, source.SourceLockSha256, build.PatchSha256, build.CandidateCommits); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"schema", "kind", "temporary", "base_image_id", "base_sha", "source_epoch", "staging", "branch", "source_lock_sha256", "candidate_path_base", "repositories", "candidate_patch_sha256"} {
+		var fields map[string]any
+		if err := json.Unmarshal(heldOutRuntimeJson(t, source), &fields); err != nil {
+			t.Fatal(err)
+		}
+		delete(fields, name)
+		if _, err := validateHeldOutRuntimeSource(heldOutRuntimeJson(t, fields), release, source.SourceLockSha256, "", nil); err == nil {
+			t.Errorf("native source omitted %s", name)
+		}
+	}
+	for index, mutate := range []func(*heldOutRuntimeSource){
+		func(s *heldOutRuntimeSource) { s.CandidatePathBase = "" },
+		func(s *heldOutRuntimeSource) { s.SourceLockSha256 = strings.Repeat("9", 64) },
+		func(s *heldOutRuntimeSource) { s.Staging = true },
+		func(s *heldOutRuntimeSource) { s.SourceEpoch = 1 },
+		func(s *heldOutRuntimeSource) { s.CandidatePatchSha256 = &build.PatchSha256 },
+		func(s *heldOutRuntimeSource) { s.Repositories = build.CandidateCommits },
+	} {
+		changed := source
+		mutate(&changed)
+		if _, err := validateHeldOutRuntimeSource(heldOutRuntimeJson(t, changed), release, source.SourceLockSha256, "", nil); err == nil {
+			t.Errorf("native source mutation %d accepted", index)
+		}
+	}
+}
+
+// The real retained-artifact reader binds the original-source hash and builder
+// components before interpreting them; a manifest omission is never repaired.
+func TestHeldOutRuntimeBuildEvidenceBindsOriginalSourceAndBuilder(t *testing.T) {
+	build, source, release, builder := newHeldOutRuntimeNativeFixture(t)
+	root := newCalibrationFileRoot(t)
+	originalPath, builderPath := filepath.Join(root, "evidence", "candidate-original-source.json"), filepath.Join(root, "evidence", "builder-identity.json")
+	heldOutOpWrite(t, originalPath, heldOutRuntimeJson(t, source))
+	heldOutOpWrite(t, builderPath, heldOutRuntimeJson(t, builder))
+	bound := map[string]bool{"evidence/candidate-original-source.json": true, "evidence/builder-identity.json": true}
+	request := heldOutRequest{PatchSha256: build.PatchSha256}
+	settings := defaultHeldOutOperatorSettings()
+	if err := authenticateHeldOutRuntimeBuildEvidence(root, bound, build, request, source.SourceLockSha256, release, settings); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"evidence/candidate-original-source.json", "evidence/builder-identity.json"} {
+		bound[name] = false
+		if err := authenticateHeldOutRuntimeBuildEvidence(root, bound, build, request, source.SourceLockSha256, release, settings); err == nil {
+			t.Errorf("unbound C2 evidence %s accepted", name)
+		}
+		bound[name] = true
+	}
+	changed := build
+	changed.OriginalSourceIdentitySha256 = strings.Repeat("9", 64)
+	if err := authenticateHeldOutRuntimeBuildEvidence(root, bound, changed, request, source.SourceLockSha256, release, settings); err == nil {
+		t.Fatal("substituted original source accepted")
+	}
+	builder.EvaluatorSha256 = strings.Repeat("9", 64)
+	heldOutOpWrite(t, builderPath, heldOutRuntimeJson(t, builder))
+	if err := authenticateHeldOutRuntimeBuildEvidence(root, bound, build, request, source.SourceLockSha256, release, settings); err == nil {
+		t.Fatal("substituted executed builder accepted")
 	}
 }
 
