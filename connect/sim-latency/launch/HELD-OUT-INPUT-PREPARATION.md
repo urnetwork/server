@@ -43,7 +43,7 @@ Each seed's first reference invocation creates its one fresh R9 baseline.
 That baseline's content digest cannot be known before measurement. Predeclare
 this dependency rather than inventing a digest or claiming every final request
 hash existed beforehand: the other two requests may bind only the exact
-successful first invocation's baseline bytes in that same round. Preserve
+authenticated first invocation's baseline bytes in that same round. Preserve
 their finalized request/provenance hashes before invoking them. No late-bound
 field may change the seed, patch, reference order, policy, workload or source.
 
@@ -53,6 +53,23 @@ Require each consuming request's `round_baseline_sha256` and emitted baseline
 digest to match the original. Never remeasure, replace or choose a favorable
 control for a later reference. Retain all original control artifacts as well
 as the shared baseline manifest.
+
+Candidate success is not a condition for choosing the control. A slow,
+non-placeable or non-significant first candidate does not authorize discarding
+its authenticated control or generating another one. If the first invocation
+does not yield a complete authenticated control and the required evidence,
+stop for diagnosis under the frozen retry/deadline rules; do not silently
+advance to another reference to obtain a replacement control. A recovered
+baseline alone does not turn a failed candidate into a completed reference.
+
+The live worker's validation and append-only storage are separate steps:
+`controller/competition_controller.go` validates baseline bytes against the
+frozen round in `validateRoundBaselineJson`, authenticates returned artifacts
+before accepting them in the evaluator path, and freezes supplied baseline
+bytes independently of candidate eligibility in the completion transaction.
+The offline Stage B wrapper must enforce equivalent provenance and first-control
+identity; mere existence of `baseline.json` is insufficient. These source
+observations are design constraints, not a qualified offline implementation.
 
 ## Qualification and serial execution
 
