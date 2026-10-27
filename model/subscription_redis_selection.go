@@ -359,7 +359,7 @@ func selectRedisTransferBalances(ctx context.Context, admission *redisContractAd
 							proberOutcome = "selected_extended"
 						}
 					}
-					exhaustedRedisPayers.forget(payerNetworkId)
+					exhaustedRedisPayers.forget(payerNetworkId, time.Now())
 					return selected, priority, nil
 				}
 			}
@@ -418,7 +418,7 @@ func selectRedisTransferBalances(ctx context.Context, admission *redisContractAd
 				return nil, 0, err
 			}
 			if done {
-				exhaustedRedisPayers.forget(payerNetworkId)
+				exhaustedRedisPayers.forget(payerNetworkId, time.Now())
 				return selected, priority / Priority(len(selected)), nil
 			}
 		}
@@ -429,7 +429,7 @@ func selectRedisTransferBalances(ctx context.Context, admission *redisContractAd
 			// Only a complete bounded census can authorize shrink-to-fit. A
 			// capacity refusal or unknown counter is not proof of less funding.
 			if _, ok := grantTransferEscrowByteCount(requested, requested-remaining); ok && len(selected) != 0 {
-				exhaustedRedisPayers.forget(payerNetworkId)
+				exhaustedRedisPayers.forget(payerNetworkId, time.Now())
 				return selected, priority / Priority(len(selected)), nil
 			}
 			// The internal prober keeps its census and selection outcomes.

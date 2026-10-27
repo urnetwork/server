@@ -18,9 +18,9 @@ import (
 )
 
 // A payer stays listed for its hold and leaves when funded. A proof that
-// decided nothing keeps the payer with the census for its hold, which a
-// refusing census does not cut short. A full list neither grows nor scans
-// more than once per hold.
+// decided nothing keeps the payer with the census for its hold, which neither
+// a refusing nor a funded census cuts short. A full list neither grows nor
+// scans more than once per hold.
 func TestRedisExhaustedPayersHoldForgetAndBound(t *testing.T) {
 	start := time.Unix(1_000_000, 0)
 	payers := newRedisExhaustedPayers(5*time.Second, 2)
@@ -39,8 +39,8 @@ func TestRedisExhaustedPayersHoldForgetAndBound(t *testing.T) {
 		t.Fatal("an expired read kept its payer", len(payers.payerIdHolds))
 	}
 	payers.note(first, start)
-	payers.forget(first)
-	if payers.recent(first, start) {
+	payers.forget(first, start)
+	if payers.recent(first, start) || len(payers.payerIdHolds) != 0 {
 		t.Fatal("a funded payer stayed listed")
 	}
 
@@ -54,13 +54,18 @@ func TestRedisExhaustedPayersHoldForgetAndBound(t *testing.T) {
 	if !payers.recent(first, start.Add(6*time.Second)) {
 		t.Fatal("a refusing census did not list the payer after its unproven hold")
 	}
+	// a funded census keeps the payer with the census for the rest of the
+	// hold: the next refusal in it does not list the payer for a proof
 	payers.noteUnproven(first, start.Add(7*time.Second))
-	payers.forget(first)
-	payers.note(first, start.Add(7*time.Second))
-	if !payers.recent(first, start.Add(7*time.Second)) {
-		t.Fatal("funding did not end the unproven hold")
+	payers.forget(first, start.Add(8*time.Second))
+	payers.note(first, start.Add(9*time.Second))
+	if payers.recent(first, start.Add(9*time.Second)) {
+		t.Fatal("funding ended the unproven hold")
 	}
-	payers.forget(first)
+	payers.forget(first, start.Add(12*time.Second))
+	if _, ok := payers.payerIdHolds[first]; ok {
+		t.Fatal("funding after the unproven hold kept the payer")
+	}
 
 	payers.note(first, start)
 	payers.note(second, start)
@@ -477,7 +482,8 @@ func TestRedisExhaustedPayerProofKeepsRecoveryRerun(t *testing.T) {
 
 // Only a complete census that refuses an ordinary payer lists it: funding,
 // an unknown counter, a selection limit and the internal prober's census do
-// not. A proof that decides nothing is not tried again within its hold.
+// not. A proof that decides nothing is not tried again within its hold, even
+// after a funded request.
 func TestRedisExhaustedPayersFollowCensusOutcomes(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -524,26 +530,32 @@ func TestRedisExhaustedPayersFollowCensusOutcomes(t *testing.T) {
 		drainRedisContractCompensations(t, ctx)
 
 		// A payer whose grants could reach the census's row limit is beyond
-		// the proof: one proof decides nothing, and the payer's refusals stay
-		// with the census for the hold.
+		// the proof: one proof decides nothing, and the payer stays with the
+		// census for the hold, through refusals and a funding alike.
 		unprovable := newEscrowSelectionTestClients(t, ctx)
 		for _, id := range redisSelectionTestGrants(t, ctx, unprovable, 2, 1000, false) {
 			redisGrantProbeToken(t, ctx, id, 1000, 1000)
 		}
 		rowBound := context.WithValue(ctx, redisGrantSelectionContextKey{}, redisGrantSelectionLimits{MaxRows: 64, MaxSelected: 64})
-		for attempt := range 3 {
-			_, _, counts, _, err := redisExhaustionCreate(t, rowBound, unprovable, 512)
-			if !errors.Is(err, ErrContractBalanceExhausted) {
-				t.Fatal("the unprovable payer was not refused", attempt, err)
+		request := func(name string, funded bool, proofs float64) {
+			t.Helper()
+			escrow, _, counts, _, err := redisExhaustionCreate(t, rowBound, unprovable, 512)
+			if funded != (err == nil && escrow != nil) || !funded && !errors.Is(err, ErrContractBalanceExhausted) {
+				t.Fatal(name, "outcome", escrow, err)
 			}
-			want := 0.0
-			if attempt == 1 {
-				want = 1
-			}
-			if counts["exhaustion-proof unproven"] != want || counts["exhaustion-proof proven"] != 0 {
-				t.Fatal("the unprovable payer's proofs", attempt, counts)
+			if counts["exhaustion-proof unproven"] != proofs || counts["exhaustion-proof proven"] != 0 {
+				t.Fatal(name, "proofs", counts)
 			}
 		}
+		request("first refusal", false, 0)
+		request("first proof", false, 1)
+		request("refusal in the hold", false, 0)
+		// new credit funds the next request, and the one after takes the room
+		// left and is refused: still no second proof in the hold
+		redisSelectionTestGrants(t, ctx, unprovable, 1, 1000, false)
+		request("funded in the hold", true, 0)
+		request("refused after the funding", false, 0)
+		request("refused again", false, 0)
 
 		prober := newEscrowSelectionTestClients(t, ctx)
 		setDynamicProberIdentityForTest(t, ctx, prober)

@@ -262,9 +262,9 @@ the grants fit the row limit after the spread windows, the request is refused
 with the census's own error and total, and the payer stays listed. Nothing is
 reserved, so nothing is compensated, and only grants holding a recovery or
 pending marker join the recovery page. Any other result runs the census
-unchanged and keeps the payer with the census for five seconds, so a state
-the proof cannot decide costs at most one proof per process every five
-seconds. A refused request whose recovery page released bytes reruns the
+unchanged and keeps the payer with the census for five seconds, through
+refusals and fundings alike, so a state the proof cannot decide costs at most
+one proof per process every five seconds. A refused request whose recovery page released bytes reruns the
 census directly.
 
 The proof is the census at one instant: in the reservation script's plain

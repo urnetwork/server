@@ -55,10 +55,11 @@ const redisGrantWindowRows = proberGrantFirstCount + proberGrantExtendedCount
 
 // The payers this process last found exhausted, each until a hold after its
 // last refusing census or proof. A payer whose proof decided nothing stays
-// with the census for its hold, so a state the proof cannot decide, such as
-// grants near a selection limit or a failing probe read, costs at most one
-// proof per hold. A full list drops its expired payers at most once per hold
-// and otherwise adds none. Safe for concurrent use.
+// with the census for its hold, through refusals and fundings alike, so a
+// state the proof cannot decide, such as grants near a selection limit or a
+// failing probe read, costs at most one proof per hold. Which path a request
+// takes never changes its outcome. A full list drops its expired payers at
+// most once per hold and otherwise adds none. Safe for concurrent use.
 type redisExhaustedPayers struct {
 	hold     time.Duration
 	capacity int
@@ -138,10 +139,16 @@ func (self *redisExhaustedPayers) holdWithLock(payerNetworkId server.Id, hold re
 	self.payerIdHolds[payerNetworkId] = hold
 }
 
-// Removes the payer, which a census just funded.
-func (self *redisExhaustedPayers) forget(payerNetworkId server.Id) {
+// Removes the payer, which a census just funded. A payer whose proof decided
+// nothing stays with the census for the rest of that hold, so a payer that
+// alternates between funding and refusal near a limit pays one proof per hold
+// rather than one per refusal.
+func (self *redisExhaustedPayers) forget(payerNetworkId server.Id, now time.Time) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
+	if hold, ok := self.payerIdHolds[payerNetworkId]; ok && hold.unproven && now.Before(hold.until) {
+		return
+	}
 	delete(self.payerIdHolds, payerNetworkId)
 }
 
