@@ -48,7 +48,9 @@ func defaultWinnerSnowProviderSettings() winnerSnowProviderSettings {
 // Keep transport/output bounds owned and explicit; all calls share one deadline.
 func defaultWinnerSnowModelSettings() winnerModelSettings {
 	settings := defaultWinnerModelSettings()
-	settings.MaximumOutputTokens = 8192
+	// Leave room for the final native judgment after provider reasoning without
+	// enlarging the shared case deadline or independent response/journal bounds.
+	settings.MaximumOutputTokens = 32768
 	return settings
 }
 
