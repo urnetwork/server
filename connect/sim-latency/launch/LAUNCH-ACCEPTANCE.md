@@ -5,7 +5,33 @@ checklist is the acceptance index for the new release, not an authorization to
 activate production. Historical v1 checkmarks do not qualify a different source,
 image, host manifest, policy or review provider.
 
-## Current checkpoint — October 26, 23:58 UTC
+## Current checkpoint — October 27, 01:29 UTC
+
+The following supersedes the provider and baseline-preparation progress in the
+dated bullets below; those bullets retain the earlier qualification history.
+
+- Genuine seven-key test-result attestation passed: two actual isolated Go
+  executions (one passing, one deliberately failing), then six provider calls.
+  Receipt SHA-256 `0784336a82e4fa899aa3c61d7961774135cb5c738d48a15e68af90eed82f591f`.
+  This proves mechanical observation attestation, not winner honesty or the
+  full winner test suite.
+- A subsequent review qualification exposed inconsistent member/global reason
+  handling. Fix `b316e0d406349bd4c281473b4692fb02eb6aacaa` preserves the original
+  findings and applies the same disqualification reason projection at both
+  validation boundaries. Deterministic pre-fix controls and 444 selected test
+  executions passed before the fresh attempt. Its immutable precommit is
+  `SNOW-REVIEW-QUALIFICATION-PRECOMMIT-2026-10-27.json` (published in `9f7a29329`).
+  Native PID **2349800** was verified live at 01:28 UTC; no successful complete
+  six-case qualification is claimed yet. The earlier HTTP-200 response lacking
+  a retained terminal object remains inconclusive, not evidence of token
+  exhaustion or a valid model identity.
+- Shared-baseline preparation before the first submission clock is committed
+  in `cf22d1a05`, with 19 smoke tests passing, including real isolated PostgreSQL
+  cases. Independent review then found a claim/reservation race. Its correction
+  and deterministic transaction-boundary regressions are in progress; the
+  feature is still opt-in, not installed or production-qualified.
+- Replacement bridge authorization and the independent-seed amendment remain
+  unresolved. No corrected bridge or independent-seed scoring has started.
 
 - The frozen performance source is C2 server `a9e8e1a7`, ten-repository lock
   `ec322ed2…`, image `sha256:b1632a55…`, actual Go **1.27.3**. Operator-proxy

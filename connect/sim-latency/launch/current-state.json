@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-26T23:58:53Z",
+  "observed_at": "2026-10-27T01:29:00Z",
   "objective": "Ready to launch at 2026-10-28T00:00:00Z",
   "storage_verification": {
     "operations_compliance_receipt_sha256": "c6b8b5348633270939395b7a585e1978b3a83c679b2552eccd8ab2a4690edc3f",
@@ -37,6 +37,32 @@
     "native_readonly_deletions": 0
   },
   "production_activated": false,
+  "current_provider_qualification": {
+    "source_test_attestation_qualified": true,
+    "source_test_receipt": "/var/lib/urnetwork/competition-model-qualification-ed028-20261027-v1/source-test/attempt-01/qualification.json",
+    "source_test_receipt_sha256": "0784336a82e4fa899aa3c61d7961774135cb5c738d48a15e68af90eed82f591f",
+    "source_test_actual_go_executions": 2,
+    "source_test_actual_provider_posts": 6,
+    "source_test_scope": "Mechanical observed-result attestation, not winner honesty or the full winner test suite",
+    "review_source_fix_commit": "b316e0d406349bd4c281473b4692fb02eb6aacaa",
+    "review_precommit_commit": "9f7a29329b162ce8ffd61ba2cb29c5ec0232a665",
+    "review_plan_sha256": "12128503bc3291c51dcde4fa08f1bf6568a8c787a91f66f72631ab64b1608238",
+    "review_process_pid": 2349800,
+    "review_process_verified_live_at": "2026-10-27T01:28:55Z",
+    "review_observation_session": 66417,
+    "review_directory": "/var/lib/urnetwork/competition-review-qualification-b316-20261027-v3",
+    "review_qualified": false,
+    "historical_missing_terminal_response": "Inconclusive; HTTP 200 does not establish completed status, incomplete reason or returned model"
+  },
+  "current_baseline_preparation_fix": {
+    "feature_commit": "cf22d1a05f9d7d0bafd000d88770248adfbaf0d9",
+    "feature_smoke_tests_passed": 19,
+    "independent_review_found_claim_reservation_race": true,
+    "claim_transaction_fix_status": "Frozen for independent compile and deterministic SQL regression execution",
+    "production_installed": false,
+    "production_qualified": false,
+    "submission_deadline_seconds_unchanged": 10800
+  },
   "latest_control_fix_qualification": {
     "source_fix_commit": "ed028faa9595d47bf2aadbb093995723c9423cf1",
     "packaging_and_runtime_pin_commit": "23c3fa886f3a72332d01f5b4e807798c03518549",
