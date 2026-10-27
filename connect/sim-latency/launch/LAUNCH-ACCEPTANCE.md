@@ -5,7 +5,7 @@ checklist is the acceptance index for the new release, not an authorization to
 activate production. Historical v1 checkmarks do not qualify a different source,
 image, host manifest, policy or review provider.
 
-## Current checkpoint — October 27, 03:07 UTC
+## Current checkpoint — October 27, 05:10 UTC
 
 The following supersedes the provider and baseline-preparation progress in the
 dated bullets below; those bullets retain the earlier qualification history.
@@ -16,20 +16,39 @@ dated bullets below; those bullets retain the earlier qualification history.
   are inactive genuine-command entry returns; 801 are other test cases. This
   is not real provider qualification. Canonical unit receipt `a219218d…` binds
   the exact tested driver; extended summary `bcab5db2…` preserves the scope.
-- The v4 genuine review attempt began at **03:05:34 UTC**, native PID
-  **2488711**, session **99560**. Cancellation passed and benign review is
-  running. The [published precommit](SNOW-REVIEW-QUALIFICATION-PRECOMMIT-2026-10-27-V4.json)
-  is pushed as `9bb1384a7`. Actual new review image `sha256:97e5453d…` passed
-  byte readback and nonroot/offline help. All six cases, three models, prompts,
-  token bounds and expected outcomes are unchanged; no automatic retry or
-  overlapping scoring is authorized.
+- The v4 genuine review attempt is **terminal, failed**, exit 1 after 1,866.25
+  seconds; cleanup is verified. Cancellation, benign review and fabrication
+  rejection passed. The fourth case retained Qwen's terminal
+  `status: incomplete`, `incomplete_reason: max_output_tokens` at the requested
+  8,192-token cap; the union correctly refused authority. Cases five and six
+  did not run. Report SHA-256 `98eb3aa7a85152f24f7dfae82fa2e06f62d8e0cc1eb03abde091b281c77430d8`.
+  Its [published precommit](SNOW-REVIEW-QUALIFICATION-PRECOMMIT-2026-10-27-V4.json)
+  remains immutable. This retained response does not resolve the different,
+  historical HTTP-200 response whose terminal object was lost.
+- The review-only cap correction to **32,768** is pushed in `100dfdd66`.
+  Actual old-cap payload assertions failed, restored-source smoke passed,
+  and the distinct source-test attestation cap remains 4,096. Completed-status,
+  exact-model, strict schema, unanimous approval, request deadlines and stream
+  bounds are unchanged. Three-pass qualification, a new image and a new public
+  precommit must precede one fresh genuine attempt; none has started.
+- Alert-routing, preflight and finite 4/5 GiB host-profile regressions passed
+  **69 smoke tests, zero skips**, including compiled old-source failures.
+  Server fixes are pushed through `fb5054121`; Warp owner/transport changes
+  through `1ea3a31`. Exact smoke receipt SHA-256
+  `42aa17b86db5927877f49f74f06ee8826d342e11326b1cbd57e44202890768e9`.
+  Independent three-pass validation is underway. No live route change or
+  successful Slack notification is claimed.
 - All five main control binaries are built from clean `1a1bf5ae6`; worker OCI
   `sha256:1996ccd1…` has byte-identical native/readback worker `395bce92…`.
   This is release provenance, not production-host readiness or a claim that the
   real worker runs inside Docker. No actual production worker has started.
-- The Sille-only native loopback metrics forwarder is installed. Its repeated
-  anonymous GET checks pass; authenticated signal ingestion and notification
-  delivery are still unproved. The old staging supervisor is disabled for
+- The Sille-only native loopback metrics forwarder is installed. One isolated
+  synthetic metric was accepted by the native publisher and read back exactly
+  from Mimir; receipt `0d14ffc4…`. This is not a real runner heartbeat.
+  The one email test failed; main Grafana deliberately has no SMTP. The
+  corrected managed routes use its existing native main Slack receiver, with
+  `support@ur.xyz` retained as incident owner. Actual notification delivery
+  remains unproved. The old staging supervisor is disabled for
   autostart, with its unit and historical state preserved. Main DB migrations
   891–893 still awaited deployment at the last read-only check, **02:27 UTC**.
 

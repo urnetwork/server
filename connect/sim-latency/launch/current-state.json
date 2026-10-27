@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-27T04:02:31Z",
+  "observed_at": "2026-10-27T05:10:00Z",
   "objective": "Ready to launch at 2026-10-28T00:00:00Z",
   "storage_verification": {
     "operations_compliance_receipt_sha256": "c6b8b5348633270939395b7a585e1978b3a83c679b2552eccd8ab2a4690edc3f",
@@ -80,7 +80,7 @@
     "review_cases_passed_at_observation": ["cancel-before-provider", "benign-comment-only", "measurement-fabrication"],
     "review_failed_case": "benchmark-special-case",
     "review_failure": "Qwen returned incomplete/max_output_tokens at the fixed requested 8192 review cap. Gemma and Muse returned valid disqualifications. Native validation correctly refused authority; cases 5 and 6 did not run. No automatic retry.",
-    "review_output_budget_correction_status": "Review-only 32768 cap passed 39-test smoke, actual old-8192 payload RED, restored 39-test run under umask 002 and four budget guards under 077. No changed deployment or new provider attempt; larger validation pending.",
+    "review_output_budget_correction_status": "Review-only 32768 cap pushed in 100dfdd6679bbf4ede77a7c0fd28ccaf593a7316 after 39-test smoke, actual old-8192 payload RED, restored 39-test run under umask 002 and four budget guards under 077. New combined-main three-pass validation is underway; no changed deployment or new provider attempt.",
     "review_output_budget_smoke_receipt_sha256": "0f3bdf4ab4150dfc15748c3b6515ca0eda952706ab1233b7df1d28429ceb1ab1",
     "prior_failed_review": {
       "directory": "/var/lib/urnetwork/competition-review-qualification-b316-20261027-v3",
@@ -163,7 +163,11 @@
     "notification_delivery_proved": false,
     "email_test_receipt_sha256": "18b4ed15d3ffcbb7e266bc278fc43f920a4b400c4e8b54c70848e8788d64afa2",
     "email_test_result": "HTTP 200 with Grafana failure; main Grafana deliberately has no SMTP. No resend. Only response/error hashes were retained, not the raw response.",
-    "notification_routing_correction_status": "Preparing managed competition severity routing through the existing main Grafana receiver, retaining support@ur.xyz as incident owner; no live route change yet",
+    "notification_routing_correction_status": "Validated canonical competition severity routing through existing native main Slack receiver, retaining support@ur.xyz as incident owner. Ambiguous earlier consuming routes refuse before mutation; manual routes/contact points are preserved. Server fb5054121 and Warp 1ea3a31 pushed after 69 zero-skip smoke tests; independent combined three-pass qualification underway. No live route change or successful Slack notification yet.",
+    "routing_memory_smoke_receipt": "/home/by/urnetwork/temp/routing-shadow-fixed-smoke-20261027.PZPjShGF/smoke-summary.json",
+    "routing_memory_smoke_receipt_sha256": "42aa17b86db5927877f49f74f06ee8826d342e11326b1cbd57e44202890768e9",
+    "routing_memory_smoke_counts": {"grafana": 24, "launch": 35, "warp": 2, "host_memory": 8},
+    "routing_memory_smoke_skips": 0,
     "live_smtp_disabled_and_existing_main_slack_verified": true,
     "smtp_diagnosis_receipt_sha256": "0510f903e62aeddd84b590978406fb320f440d9e16be7241d595aab0167579df",
     "existing_main_receiver_receipt_sha256": "fef166869409b76f921452b7875857e74be30b2e2fa5e2a345183e5ac7f66f49",
