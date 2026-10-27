@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "kind": "source-test-snow-runtime-driver-unit-qualification",
+  "accepted": false,
+  "source_commit": "",
+  "program_sha256": "",
+  "race": true,
+  "consecutive_passes": 0,
+  "skips": 0,
+  "sources": [],
+  "logs": []
+}

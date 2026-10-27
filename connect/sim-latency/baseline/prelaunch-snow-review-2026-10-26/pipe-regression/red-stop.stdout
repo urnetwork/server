@@ -1,0 +1,4 @@
+=== RUN   TestReviewQualificationCleanupStopsBrokerBeforePipeTeardown
+    review_qualification_tests_draft_test.go:73: actual cleanup released pipes before isolation/removal: exit status 19 
+--- FAIL: TestReviewQualificationCleanupStopsBrokerBeforePipeTeardown (0.00s)
+FAIL

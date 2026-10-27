@@ -142,8 +142,8 @@ func TestPaymentCreditUnfulfillableNeverSuggestsEmailAuthority(t *testing.T) {
 			t.Fatalf("unfulfillable credit alert missing %q:\n%s", want, markdown)
 		}
 	}
-	if _, err := paymentFailureFinding("credit_unfulfillable", "apple", 1, 1800, 1800); err == nil {
-		t.Fatal("unfulfillable credit accepted a non-stripe store")
+	if _, err := paymentFailureFinding("credit_unfulfillable", "solana", 1, 1800, 1800); err == nil {
+		t.Fatal("unfulfillable credit accepted a store with no unfulfillable-credit writer")
 	}
 	if _, err := paymentFailureFinding("email_fallback", "stripe", 1, 1800, 1800); err == nil {
 		t.Fatal("the retired email_fallback kind is still accepted")
@@ -173,5 +173,68 @@ func TestPaymentFailuresRejectsUnknownOrMalformedAggregate(t *testing.T) {
 				t.Fatal("invalid aggregate error = nil")
 			}
 		})
+	}
+}
+
+// Paid App Store and Play purchases that no live network can be credited for
+// are now recorded as credit_unfulfillable (the webhooks and the reconciler).
+// The aggregate must page them as a WARN with store-specific disposition
+// guidance, and drop a purchase the app later bound and credited.
+func TestPaymentCreditUnfulfillableCoversStorePurchases(t *testing.T) {
+	for _, want := range []string{
+		"event.store IN ('apple', 'google', 'stripe')",
+		"FROM apple_subscription_transaction ledger",
+		"WHERE ledger.transaction_id = event.evidence",
+		"FROM play_purchase_binding binding",
+		"COALESCE(event.details::jsonb ->> 'reason', '') = 'destination_unresolved'",
+	} {
+		if !strings.Contains(paymentFailuresQuery, want) {
+			t.Fatalf("payment failures query missing %q", want)
+		}
+	}
+
+	source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
+		return []Row{
+			{"credit_unfulfillable", "apple", "2", "900", "300"},
+			{"credit_unfulfillable", "google", "1", "600", "600"},
+		}, nil
+	}}
+	alerts, err := NewPaymentFailuresSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count := requireAlertClassCount(alerts, "payment-credit-unfulfillable"); count != 2 {
+		t.Fatalf("store credit-unfulfillable alerts = %d, want 2", count)
+	}
+	for _, alert := range alerts {
+		if alert.Severity != SeverityWarn {
+			t.Fatalf("store credit-unfulfillable severity = %s, want warn", alert.Severity)
+		}
+		requireAlertOmits(t, alert, "synthetic-network-id", "synthetic-provider-token")
+	}
+
+	for target, wants := range map[string][]string{
+		"apple":  {"paid App Store purchase(s)", "no appAccountToken and no offer-code binding", "App Store Connect order lookup", "Never credit a network on an email or name match"},
+		"google": {"paid Google Play purchase(s)", "bound to a different network", "order id on the customer's receipt", "Never credit a network on an email or name match"},
+	} {
+		unfulfillable, err := paymentFailureFinding("credit_unfulfillable", target, 1, 1800, 1800)
+		if err != nil {
+			t.Fatalf("%s: %v", target, err)
+		}
+		markdown := alertFromFinding(
+			syntheticSettings(&syntheticSource{}),
+			"2.22",
+			"payment-failures",
+			"Durable payment and entitlement failures",
+			unfulfillable,
+		).Markdown()
+		for _, want := range wants {
+			if !strings.Contains(markdown, want) {
+				t.Fatalf("%s credit-unfulfillable alert missing %q:\n%s", target, want, markdown)
+			}
+		}
+		if strings.Contains(markdown, "set network_id metadata on the Stripe subscription") {
+			t.Fatalf("%s credit-unfulfillable alert carries Stripe-only guidance:\n%s", target, markdown)
+		}
 	}
 }

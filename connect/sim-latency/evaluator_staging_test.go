@@ -96,20 +96,30 @@ func TestEvaluatorSmokeMarginBindsExplicitModeAndSourceBranch(t *testing.T) {
 // comparison. Only its source-check process and binary hash I/O are synthetic.
 func officialBaselineMarginFixture(t *testing.T) string {
 	t.Helper()
-	guard := sourceGitScriptSection(t, "../../official-run.sh", "    [[ \"$APEX_TAKEOVER_MARGIN\"", "\n    \"$APEX_SCORER_BIN\" score-baseline")
-	return `
+	helpers := sourceGitScriptSection(t, "../../official-run.sh", "log() {", "\npreflight() {")
+	baseline := sourceGitScriptSection(t, "../../official-run.sh", "build_baseline_bundle() {", "\n    \"$APEX_SCORER_BIN\" score-baseline")
+	start := strings.Index(baseline, "    [[ \"$APEX_TAKEOVER_MARGIN\"")
+	if start < 0 {
+		t.Fatal("official baseline decimal margin guard is missing")
+	}
+	guard := baseline[start:]
+	simulatorPath := filepath.Join(t.TempDir(), "synthetic-sim")
+	if err := os.WriteFile(simulatorPath, []byte(`#!/usr/bin/env bash
+set -Eeuo pipefail
+[ "$*" = 'source-check --epoch 0 --source-config /opt/urnetwork/sim-latency.yml --repos-root /workspace --json' ] || exit 97
+jq '. + {epoch: 0}' <<<"$base_source_record"
+`), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return "\n" + helpers + "\nAPEX_SIM_BIN=" + strconv.Quote(simulatorPath) + `
 APEX_TAKEOVER_MARGIN="$takeover_margin"
 APEX_BASELINE_MANIFEST="$SOURCE_TEST_ROOT/baseline.json"
 APEX_SCORER_BIN=/synthetic/scorer
-APEX_SCORER_SHA256=synthetic-scorer-digest
-APEX_SIM_BIN=synthetic_source_check
+APEX_SCORER_SHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+APEX_SIM_SHA256="$APEX_SCORER_SHA256"
 APEX_EPOCH=0
 die() { printf '%s\n' "$*" >&2; exit 1; }
 sha256_file() { printf '%s\n' "$APEX_SCORER_SHA256"; }
-synthetic_source_check() {
-    [ "$*" = 'source-check --epoch 0 --source-config /opt/urnetwork/sim-latency.yml --repos-root /workspace --json' ] || exit 97
-    jq '. + {epoch: 0}' <<<"$base_source_record"
-}
 check_official_baseline_margin() {
 ` + guard + "\n}\ncheck_official_baseline_margin\n"
 }

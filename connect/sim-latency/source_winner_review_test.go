@@ -44,7 +44,7 @@ func TestWinnerReviewCompletedUncertaintyCannotBeResampled(t *testing.T) {
 	for i := range 2 {
 		request.Request.StartedAt = request.Request.StartedAt.Add(time.Duration(i) * time.Hour)
 		request.Request.Deadline = request.Request.Deadline.Add(time.Duration(i) * time.Hour)
-		output, err := winnerReviewCompletedResponse(path, request, run)
+		output, _, err := winnerReviewCompletedResponse(path, request, run)
 		if err != nil || string(output) != string(content) {
 			t.Fatal("completed uncertainty was not retained", err)
 		}
@@ -68,7 +68,7 @@ func TestWinnerReviewCompletedMalformedResponsesAreRetained(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "completed.json")
 		request := winnerReviewBrokerRequest{Operation: "review_elected_winner"}
 		for i := range 2 {
-			output, err := winnerReviewCompletedResponse(path, request, func() ([]byte, error) {
+			output, _, err := winnerReviewCompletedResponse(path, request, func() ([]byte, error) {
 				if i != 0 {
 					t.Fatal("malformed completed response was sampled again")
 				}
@@ -87,7 +87,7 @@ func TestWinnerReviewCompletedResponseBindsContextAndRetriesTransport(t *testing
 	path := filepath.Join(t.TempDir(), "completed.json")
 	request := winnerReviewBrokerRequest{Operation: "review_elected_winner"}
 	transportErr := errors.New("synthetic transport unavailable")
-	if _, err := winnerReviewCompletedResponse(path, request, func() ([]byte, error) {
+	if _, _, err := winnerReviewCompletedResponse(path, request, func() ([]byte, error) {
 		return nil, transportErr
 	}); !errors.Is(err, transportErr) {
 		t.Fatal("transport error was lost", err)
@@ -95,13 +95,13 @@ func TestWinnerReviewCompletedResponseBindsContextAndRetriesTransport(t *testing
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("transport failure cached as a completed judgment", err)
 	}
-	if _, err := winnerReviewCompletedResponse(path, request, func() ([]byte, error) {
+	if _, _, err := winnerReviewCompletedResponse(path, request, func() ([]byte, error) {
 		return []byte("synthetic completed response"), nil
 	}); err != nil {
 		t.Fatal(err)
 	}
 	request.Instructions = "changed trusted instructions"
-	if _, err := winnerReviewCompletedResponse(path, request, func() ([]byte, error) {
+	if _, _, err := winnerReviewCompletedResponse(path, request, func() ([]byte, error) {
 		t.Fatal("different request reused the response identity")
 		return nil, nil
 	}); err == nil {

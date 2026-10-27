@@ -19,7 +19,7 @@ func ReserveProviderPaymentRequest(ctx context.Context, payment *AccountPayment,
 		payment.CircleIdempotencyKey != nil || math.IsNaN(amount) || math.IsInf(amount, 0) || amount <= 0 || network == "" {
 		return nil, ErrProviderPaymentBasisChanged
 	}
-	if err := RequireProviderUsdcPayment(ctx, payment.PaymentId); err != nil {
+	if err := requireProviderUsdcPayment(ctx, payment.PaymentId, &amount); err != nil {
 		return nil, err
 	}
 	defer func() {
@@ -91,7 +91,7 @@ func RequireProviderPaymentRequest(ctx context.Context, basis *ProviderPaymentBa
 	if basis == nil || math.IsNaN(amount) || math.IsInf(amount, 0) || amount <= 0 || network == "" {
 		return ErrProviderPaymentBasisChanged
 	}
-	if err := RequireProviderUsdcPayment(ctx, basis.PaymentId); err != nil {
+	if err := requireProviderUsdcPayment(ctx, basis.PaymentId, &amount); err != nil {
 		return err
 	}
 	details, err := json.Marshal(ProviderPaymentRequest{Basis: *basis, Amount: amount, Network: network})

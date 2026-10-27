@@ -39,6 +39,9 @@ type playWebhookTestEnv struct {
 	// ACKNOWLEDGEMENT_STATE_ACKNOWLEDGED answers 400 (the unverified Play
 	// behavior a renewal RTDN would hit, UPGRADE.md S5)
 	rejectReacknowledge bool
+	// purchase token -> extra top-level fields the subscription GET serves
+	// beside the encoded PlaySubscription (fields the struct may not decode)
+	extraFields map[string]map[string]any
 
 	testServer *httptest.Server
 }
@@ -66,6 +69,16 @@ func newPlayWebhookTestEnv(t testing.TB, skus map[string]*Sku) *playWebhookTestE
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
+			if extra := env.extraFields[r.PathValue("token")]; extra != nil {
+				subJson, _ := json.Marshal(sub)
+				fields := map[string]any{}
+				json.Unmarshal(subJson, &fields)
+				for key, value := range extra {
+					fields[key] = value
+				}
+				json.NewEncoder(w).Encode(fields)
+				return
+			}
 			json.NewEncoder(w).Encode(sub)
 		},
 	)

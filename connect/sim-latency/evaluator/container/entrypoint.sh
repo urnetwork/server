@@ -100,12 +100,12 @@ case "${1:-}" in
         export APEX_SERVER_ROOT=/workspace/server
         exec "$OFFICIAL_RUN" "$1"
         ;;
-    preflight|baseline|score|finalize)
+    margin-preflight|preflight|baseline|score|finalize)
         export APEX_SERVER_ROOT=/workspace/server
         exec "$OFFICIAL_RUN" "$1"
         ;;
     *)
-        printf '%s\n' 'usage: competition-container {identity|migrate|preflight|run|baseline|score|finalize}' >&2
+        printf '%s\n' 'usage: competition-container {identity|migrate|margin-preflight|preflight|run|baseline|score|finalize}' >&2
         exit 2
         ;;
 esac
