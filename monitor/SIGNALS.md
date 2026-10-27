@@ -45890,7 +45890,14 @@ incident clears only after every point of a complete eligible ten-minute hold
 is below 5%. A new qualified five-minute PAGE survives older WARN-history gaps.
 Missing or low traffic never clears an armed incident. Qualified source rates use deterministic compensated accumulation
 before the unchanged inclusive comparisons, so source/map ordering cannot shift
-a rounded total across a band. No epsilon broadens the traffic floor or shares. `error` failures,
+a rounded total across a band. No epsilon broadens the traffic floor or shares. A failed range read retains
+`reason=source_unavailable` plus the shared fixed observation error class and any
+code-owned local admission/execution-boundary set. Joined markers may describe
+independent gateway branches; they establish no attempt count, ordering, remote
+execution, HTTP status or backend cause. An unmarked error gains no invented
+boundary. Raw errors, commands, source labels and response bytes are not rendered;
+a retired parent publishes no findings. Earlier reason-only alerts cannot recover
+their discarded error classification or local phase from this prospective change. `error` failures,
 unfinished calls and stopped callers can evade this ratio; the unimplemented
 seasonal reply floor remains a separate coverage gap.
 
