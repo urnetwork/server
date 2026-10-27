@@ -7,7 +7,6 @@ import (
 	"slices"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/redis/go-redis/v9"
 	"github.com/urnetwork/server"
@@ -62,9 +61,7 @@ func TestRedisAmbiguousCompensationKeepsActualReplyOwnership(t *testing.T) {
 				if mode == "canceled-zero-reply" {
 					hook.cancel = cancel
 				}
-				bounded, stop := context.WithTimeout(ctx, time.Second)
-				server.Raise(server.RedisWithDeadline(bounded, func(client server.RedisClient) error { client.AddHook(hook); return nil }))
-				stop()
+				addRedisDeadlinePoolsHook(ctx, hook)
 				var reservationErr error
 				_ = server.HandleError(func() {
 					_, _, reservationErr = selectRedisTransferBalances(owned, owner, nil, clients.payerNetworkId, clients.payerId, 23)

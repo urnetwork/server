@@ -39,7 +39,7 @@ func winnerSnowResolvedSchema(t *testing.T, schema map[string]any) *jsonschema.R
 // The previous schema accepted empty reasons, explanations and private evidence.
 // Those same synthetic fields must now fail the provider contract, not be filled in.
 func TestWinnerSnowSchemaRejectsEmptyRequiredEvidence(t *testing.T) {
-	request, judgment := winnerModelFixture()
+	request, judgment := winnerSnowJudgmentFixture()
 	judgment.ReasonCodes, judgment.PrivateEvidence = []string{}, ""
 	for index := range judgment.Findings {
 		judgment.Findings[index].ReasonCode, judgment.Findings[index].Explanation, judgment.Findings[index].EvidenceSha256 = "", "", ""
@@ -132,7 +132,7 @@ func TestWinnerSnowSchemaConstrainsCompleteJudgmentShape(t *testing.T) {
 // Even completed uncertainty must contain genuine nonempty attributed evidence;
 // schema bypass or whitespace cannot be normalized into a usable member.
 func TestWinnerSnowUncertaintyRequiresCompleteNativeEvidence(t *testing.T) {
-	request, judgment := winnerModelFixture()
+	request, judgment := winnerSnowJudgmentFixture()
 	judgment.Decision, judgment.ReasonCodes = "uncertain", []string{"SOURCE_NOT_READY"}
 	content, err := json.Marshal(judgment)
 	if err != nil {
@@ -202,7 +202,7 @@ func TestWinnerSnowTransportSendsExplicitJudgmentContract(t *testing.T) {
 		if err := json.NewDecoder(message.Body).Decode(&payload); err != nil {
 			t.Fatal(err)
 		}
-		if payload.Model != provider.Members[index].Model || payload.Reasoning.Effort != provider.Members[index].Reasoning || payload.MaximumOutputTokens != 8192 || len(payload.Tools) != 0 || payload.ToolChoice != "none" || payload.Text.Format.Type != "json_schema" || !payload.Text.Format.Strict || !bytes.Equal(payload.Text.Format.Schema, schemaBytes) || !strings.HasSuffix(payload.Instructions, string(schemaBytes)) {
+		if payload.Model != provider.Members[index].Model || payload.Reasoning.Effort != provider.Members[index].Reasoning || payload.MaximumOutputTokens != 32768 || len(payload.Tools) != 0 || payload.ToolChoice != "none" || payload.Text.Format.Type != "json_schema" || !payload.Text.Format.Strict || !bytes.Equal(payload.Text.Format.Schema, schemaBytes) || !strings.HasSuffix(payload.Instructions, string(schemaBytes)) {
 			t.Fatal("native output contract lost its explicit schema, effort or token bound")
 		}
 		for _, required := range []string{"context.template is INPUT-ONLY", "ONLY decision, reason_codes, public_explanation, private_evidence and findings", "not a request to run or certify performance tests yourself", "Missing context", "NEVER approve/disqualify"} {

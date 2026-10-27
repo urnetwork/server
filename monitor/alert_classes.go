@@ -474,6 +474,7 @@ var alertClassKinds = map[string]alertClassKind{
 	"payment-refund-unmatched":                            incidentAlertClass,
 	"payment-renewal-orphan":                              incidentAlertClass,
 	"payment-solana-unfulfilled":                          incidentAlertClass,
+	"payment-webhook-refused":                             incidentAlertClass,
 	"payout-invalid-destination":                          incidentAlertClass,
 	"payout-invalid-destination-reset-failed":             incidentAlertClass,
 	"payout-retry-microburst":                             incidentAlertClass,

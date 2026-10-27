@@ -1,3 +1,4 @@
+// Dashboard-loading fixtures separate dashboard ownership from fail-closed native alert routing and never model an unconfigured receiver as a successful full load.
 package main
 
 import (
@@ -22,6 +23,7 @@ type grafanaLoadDefaultsFake struct {
 	stateLock            sync.Mutex
 	dashboardPosts       int
 	provisioningRequests int
+	provisioningWrites   int
 }
 
 func newGrafanaLoadDefaultsFake(t *testing.T) (*grafanaLoadDefaultsFake, string) {
@@ -39,6 +41,9 @@ func (self *grafanaLoadDefaultsFake) serve(response http.ResponseWriter, request
 	switch {
 	case strings.HasPrefix(request.URL.Path, "/api/v1/provisioning/"):
 		self.provisioningRequests += 1
+		if request.Method != http.MethodGet && request.Method != http.MethodHead {
+			self.provisioningWrites += 1
+		}
 		switch {
 		case request.Method == http.MethodGet && request.URL.Path == "/api/v1/provisioning/contact-points":
 			_, _ = io.WriteString(response, `[]`)
@@ -73,6 +78,13 @@ func (self *grafanaLoadDefaultsFake) provisioningRequestCount() int {
 	return self.provisioningRequests
 }
 
+// Dashboard upserts are deliberately separate from notification-policy and contact mutations.
+func (self *grafanaLoadDefaultsFake) provisioningWriteCount() int {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.provisioningWrites
+}
+
 // A dashboards-only load upserts every default dashboard and sends nothing to
 // the alerting provisioning API, so the alert routing another owner manages is
 // left as it is. A full load still reconciles the routing.
@@ -93,11 +105,32 @@ func TestGrafanaLoadDefaultsDashboardsOnlyLeavesAlertRoutingUntouched(t *testing
 	}
 
 	full, fullUrl := newGrafanaLoadDefaultsFake(t)
-	if err := grafanaLoadDefaultsTo(context.Background(), io.Discard, fullUrl, "secret", true, grafana.AlertRoutingSettings{}); err != nil {
+	if err := grafanaLoadDefaultsTo(context.Background(), io.Discard, fullUrl, "secret", true, grafana.AlertRoutingSettings{SlackWebhookUrl: "https://hooks.slack.example/services/synthetic-fixture-only"}); err != nil {
 		t.Fatal(err)
 	}
 	if full.provisioningRequestCount() == 0 {
 		t.Fatal("a full load did not reconcile the alert routing")
+	}
+	if got := full.provisioningWriteCount(); got != 2 {
+		t.Fatalf("configured full load alerting writes = %d, want one contact and one policy", got)
+	}
+}
+
+// An unconfigured full load can update dashboards before routing refuses, but cannot mutate a contact or policy or report routing success.
+func TestGrafanaLoadDefaultsUnconfiguredRoutingRefusesPolicyWrites(t *testing.T) {
+	fake, grafanaUrl := newGrafanaLoadDefaultsFake(t)
+	var out bytes.Buffer
+	if err := grafanaLoadDefaultsTo(context.Background(), &out, grafanaUrl, "secret", true, grafana.AlertRoutingSettings{}); err == nil {
+		t.Fatal("unconfigured full-load routing was accepted")
+	}
+	if fake.dashboardPostCount() == 0 {
+		t.Fatal("fixture did not reach routing after the existing dashboard-upsert phase")
+	}
+	if got := fake.provisioningWriteCount(); got != 0 {
+		t.Fatalf("unconfigured full load mutated alerting %d times", got)
+	}
+	if strings.Contains(out.String(), "Competition warn/page") {
+		t.Fatalf("unconfigured full load reported routing success: %q", out.String())
 	}
 }
 

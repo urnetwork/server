@@ -347,7 +347,7 @@ func (self contractFailureShareProbe) check(ctx context.Context, env *probeEnv) 
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return contractFailureUnavailable(env.cfg.env, inventory, "source_unavailable"), nil
+		return contractFailureUnavailable(env.cfg.env, inventory, "source_unavailable "+observationFailureDetails(err, classifyObservationError(err))), nil
 	}
 	series, err := parseFleetSeries(raw, start, at, settings.HoldStep, settings.FleetReadSettings)
 	if err != nil {

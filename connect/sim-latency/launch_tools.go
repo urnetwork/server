@@ -30,6 +30,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
+	servergrafana "github.com/urnetwork/server/grafana"
 	"github.com/urnetwork/server/model"
 )
 
@@ -641,6 +642,7 @@ func checkCompetitionMinioStore(ctx context.Context, info *controller.InfoResult
 	return map[string]any{"protection": protection, "usage": usage, "usage_scope": "configured_competition_namespace_v1_v2_and_object_versions", "requested_competition_id": info.CompetitionId}, nil
 }
 
+// Read-only configuration proof checks the actual integration and canonical route, never inferred email delivery from a contact-name substring.
 func checkCompetitionGrafana(ctx context.Context, config *launchPreflightConfig) (map[string]any, error) {
 	client := newLaunchHttpClient()
 	credential, err := selectLaunchHttpCredential(config.GrafanaCredential, config.GrafanaToken)
@@ -656,13 +658,20 @@ func checkCompetitionGrafana(ctx context.Context, config *launchPreflightConfig)
 		{path: "/api/v1/provisioning/alert-rules", required: []string{
 			"competition-runner-heartbeat-stale", "competition-minio-capacity-warning", "competition-minio-capacity-critical",
 		}},
-		{path: "/api/v1/provisioning/contact-points", required: []string{"sim-latency-support", "support@ur.xyz"}},
-		{path: "/api/v1/provisioning/policies", required: []string{"sim-latency-support", "severity"}},
+		{path: "/api/v1/provisioning/contact-points"},
+		{path: "/api/v1/provisioning/policies"},
 	}
+	var contactsJson, policyJson []byte
 	for _, probe := range requests {
 		body, err := getLaunchBytesWithCredential(ctx, client, config.GrafanaUrl, probe.path, credential)
 		if err != nil {
 			return nil, err
+		}
+		switch probe.path {
+		case "/api/v1/provisioning/contact-points":
+			contactsJson = body
+		case "/api/v1/provisioning/policies":
+			policyJson = body
 		}
 		compact := strings.ReplaceAll(strings.ReplaceAll(string(body), " ", ""), "\n", "")
 		for _, required := range probe.required {
@@ -671,10 +680,19 @@ func checkCompetitionGrafana(ctx context.Context, config *launchPreflightConfig)
 			}
 		}
 	}
+	if err := servergrafana.ValidateCompetitionAlertRouting(contactsJson, policyJson); err != nil {
+		return nil, err
+	}
 	return map[string]any{
-		"dashboard_uid":    "urnetwork-competition",
-		"contact_point":    "sim-latency-support",
-		"incident_contact": "support@ur.xyz",
+		"dashboard_uid":                "urnetwork-competition",
+		"contact_point":                servergrafana.DefaultAlertContactName,
+		"contact_integration_uid":      servergrafana.DefaultAlertContactUid,
+		"incident_contact":             servergrafana.CompetitionIncidentContact,
+		"incident_owner":               servergrafana.CompetitionIncidentContact,
+		"notification_transport":       "existing_main_slack_receiver",
+		"notification_delivery_proven": false,
+		"contact_response_sha256":      fmt.Sprintf("%x", sha256.Sum256(contactsJson)),
+		"policy_response_sha256":       fmt.Sprintf("%x", sha256.Sum256(policyJson)),
 	}, nil
 }
 
