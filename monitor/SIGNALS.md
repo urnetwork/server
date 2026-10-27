@@ -8783,6 +8783,19 @@ owner signals. Require consecutive exports to return toward baseline after
 those taskworker fixes; do not rewrite or disable a successful public-stats
 export from one correlated duration.
 
+The current task-health diagnostic preserves completed overlap as coincident
+history only. Its bounded query selects the latest completed ExportStats
+interval, which need not be one of the intervals contributing to the flagged
+last-hour mean. A task name, an overlapping interval or even a large completed
+duration does not establish a companion overrun, artifact, causal load owner or
+SQL wait edge. Require the exact flagged export intervals and companion
+baselines, evaluator outcomes and immutable artifact evidence before directing
+a repair to an existing owner. Ordinary 20-second close or one-second NetEscrow
+completions must not acquire the historical incident's repair prescription.
+The export regression trigger, hourly cadence, ten-minute bound and original
+outlier/overlap evidence are unchanged; missing attribution is not a healthy
+export or recovery observation.
+
 ### 2.5a Asynchronous payer debit recovery
 Probe: `transfer-debits`
 Classes: `debit-writeback-lag`, `debit-worker-missing`.
@@ -29847,6 +29860,32 @@ provided by the `reliability-index` catalog probe.
 
 ### 8.11 Fleet rollout serialization and worker freshness
 Probe: `rollout-guard`
+
+**Producer observation envelope:** each systemctl unit-list, Environment and
+worker-start read retains at most 64 KiB of stdout, with one additional byte
+used only to detect overflow, before shell-variable conversion. A private FIFO
+and reader cap the raw per-read file at N+1; a ten-second producer deadline
+with two-second forced-stop grace and joined reader/owner handles bound a
+stalled read. The collector shell owns both child PIDs directly; a caught signal to that
+collector joins those owned children and removes the
+private capture. These are observer costs, not service/unit-count limits, whole
+process RSS bounds or a generic SSH transport guarantee. Existing command and
+parent lifetimes remain separate, and uncaught process termination is not
+claimed to execute shell cleanup.
+
+Only complete successful bounded stdout is used. A failed or oversized unit
+discovery cannot certify an unmanaged empty host. A failed or oversized
+Environment read is visibility unknown and cannot establish its disabling
+setting absent; a failed worker-start read retains the existing unverifiable
+worker finding. Raw Environment and diagnostic bodies are not emitted.
+Independent complete unsafe hosts remain reported beside observation gaps;
+cutoff does not silently authorize health, recovery, a restart or a larger
+service limit. Sequential per-unit reads and intermediate unit-name lists are
+bounded by the two capped discovery results; the per-read byte bound is not a
+claim that the entire observer reads only N bytes or that SSH diagnostics are
+bounded by this leaf. Synthetic at-cap/N+1 controls distinguish excessive
+materialization from production memory failure. A budget cutoff can hide a
+real disabling unit and therefore supplies no absence authority.
 
 The host rollout lock is executed by every long-running Warp service worker,
 not by proxy alone. Installing a corrected `/usr/local/sbin/warpctl` does not
