@@ -9,9 +9,39 @@ import (
 	"testing"
 	"time"
 
+	"github.com/docopt/docopt-go"
+
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 )
+
+// The command lines of the dry run and the drain parse to the close-due
+// command with its network and dry-run flag, not to contracts close, and one
+// without a network is refused.
+func TestPayerDueContractCloseCommandLineParses(t *testing.T) {
+	parser := &docopt.Parser{HelpHandler: docopt.NoHelpHandler}
+	networkId := server.NewId()
+	for _, dryRun := range []bool{false, true} {
+		args := []string{"contracts", "close-due", "--network_id=" + networkId.String()}
+		if dryRun {
+			args = append(args, "--dry-run")
+		}
+		opts, err := parser.ParseArgs(bringyourctlUsage, args, "synthetic")
+		if err != nil {
+			t.Fatal(args, err)
+		}
+		closeDue, _ := opts.Bool("close-due")
+		closeOne, _ := opts.Bool("close")
+		parsedDryRun, _ := opts.Bool("--dry-run")
+		parsedNetworkId, _ := opts.String("--network_id")
+		if !closeDue || closeOne || parsedDryRun != dryRun || parsedNetworkId != networkId.String() {
+			t.Fatal(args, opts)
+		}
+	}
+	if _, err := parser.ParseArgs(bringyourctlUsage, []string{"contracts", "close-due"}, "synthetic"); err == nil {
+		t.Fatal("close-due parsed without a network")
+	}
+}
 
 // Fake drain runs in order, and the due contracts each summary reports.
 type fakePayerDueContractClose struct {
