@@ -634,11 +634,12 @@ func TestSnReconcileStuckRowsReplanEvidence(t *testing.T) {
 		ctx := context.Background()
 		created := payoutTestCutoff.Add(-5 * 24 * time.Hour)
 		day := 24 * time.Hour
-		// Every row records an epoch so no bound is raised by a missing one.
+		// Every row records an epoch so no bound is raised by a missing one. Each
+		// contract id is minted at the contract's creation, as connect.NewId mints it.
 		row := func(cohort *payoutTransitionCohort, at time.Time, epoch time.Time, closes ...time.Time) server.Id {
 			contracts := []server.Id{}
 			for _, closed := range closes {
-				contracts = append(contracts, cohort.insert(t, ctx, closed.Add(-time.Hour), &closed, closed, 10, UsdToNanoCents(1)))
+				contracts = append(contracts, cohort.insertMinted(t, ctx, closed.Add(-time.Hour), &closed, closed, 10, UsdToNanoCents(1)))
 			}
 			paymentId := snReconcileTestPayment(t, ctx, cohort.network, nil, at, contracts...)
 			snReconcileTestEpoch(t, ctx, paymentId, epoch)

@@ -65,7 +65,18 @@ func newPayoutTransitionCohort(t testing.TB, ctx context.Context) *payoutTransit
 
 func (self *payoutTransitionCohort) insert(t testing.TB, ctx context.Context, created time.Time, closed *time.Time, swept time.Time, bytes ByteCount, revenue NanoCents) server.Id {
 	t.Helper()
-	id := server.NewId()
+	return self.insertWithId(t, ctx, server.NewId(), created, closed, swept, bytes, revenue)
+}
+
+// The contract with its id minted at `created`, as connect.NewId mints every
+// contract's id at its creation, for reads bounded by contract id.
+func (self *payoutTransitionCohort) insertMinted(t testing.TB, ctx context.Context, created time.Time, closed *time.Time, swept time.Time, bytes ByteCount, revenue NanoCents) server.Id {
+	t.Helper()
+	return self.insertWithId(t, ctx, contractIdMintedAt(created), created, closed, swept, bytes, revenue)
+}
+
+func (self *payoutTransitionCohort) insertWithId(t testing.TB, ctx context.Context, id server.Id, created time.Time, closed *time.Time, swept time.Time, bytes ByteCount, revenue NanoCents) server.Id {
+	t.Helper()
 	var outcome *string
 	var usage *contractUsageSnapshot
 	if closed != nil {
