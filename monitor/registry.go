@@ -214,6 +214,16 @@ func NewSignals() []Signal {
 		NewMoveOutcomesSignal(),
 		NewMoverSignal(),
 		NewDrainMovesSignal(),
+		NewPgBouncerBacklogSignal(),
+		NewServicesCpuSignal(),
+		NewDbAcquireWaitSignal(),
+		NewContractCreationsStuckSignal(),
+		NewReservationReleaseSignal(),
+		NewRedisPoolTimeoutsSignal(),
+		NewRedisMainThreadSignal(),
+		NewProxyHostCpuSignal(),
+		NewContractReplyCollapseSignal(),
+		NewHostedContractCapSignal(),
 		NewContractStageInflightSignal(),
 	}
 }
