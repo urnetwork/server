@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
@@ -19,6 +20,12 @@ func TestEmailTemplatesRender(t *testing.T) {
 	// the one link that legitimately leaves ur.io is the UR protocol site the
 	// epoch earnings email points at
 	const protocolSite = "https://ur.xyz"
+	// and, in the payment-failed notice only, the invoice's Stripe-hosted page,
+	// where another card pays it at once (owner request 2026-10-26)
+	templateLinkPrefixes := map[string]string{
+		(&SubscriptionPaymentFailedTemplate{}).Name(): stripeHostedInvoiceUrlPrefix,
+	}
+	paymentFailedNextAttempt := server.NowUtc().Add(3 * 24 * time.Hour)
 	samples := []struct {
 		template Template
 		// sms is whether the template carries its own short body for phone accounts
@@ -62,6 +69,19 @@ func TestEmailTemplatesRender(t *testing.T) {
 			Pro:              true,
 			BalanceByteCount: model.Tib,
 		}, false},
+		{&SubscriptionPaymentFailedTemplate{
+			HostedInvoiceUrl: "https://invoice.stripe.com/i/acct_synthetic/live_synthetic?s=ap",
+			AmountDue:        4000,
+			Currency:         "usd",
+			NextAttemptTime:  &paymentFailedNextAttempt,
+		}, true},
+		{&SubscriptionPaymentFailedTemplate{
+			Final:            true,
+			HostedInvoiceUrl: "https://invoice.stripe.com/i/acct_synthetic/live_synthetic?s=ap",
+			AmountDue:        500,
+			Currency:         "usd",
+		}, true},
+		{&SubscriptionPaymentFailedTemplate{AmountDue: 1999, Currency: "eur"}, true},
 	}
 
 	imageSrc := regexp.MustCompile(`src="([^"]+)"`)
@@ -104,6 +124,9 @@ func TestEmailTemplatesRender(t *testing.T) {
 			}
 		}
 		for _, match := range linkHref.FindAllStringSubmatch(bodyHtml, -1) {
+			if prefix, ok := templateLinkPrefixes[name]; ok && strings.HasPrefix(match[1], prefix) {
+				continue
+			}
 			if !allowedLink(match[1]) {
 				t.Errorf("%s: link %q leaves ur.io", name, match[1])
 			}

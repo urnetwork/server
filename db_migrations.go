@@ -11009,4 +11009,10 @@ var migrations = []any{
 	// The Snow three-model union is a new policy, never a relabeling of any
 	// retained Sol/mini review. Each member's complete findings stay attributed.
 	newSqlMigration(competitionSnowWinnerReviewMigration()),
+
+	// The failed-renewal ledger of Stripe subscription invoices
+	// (db_stripe_invoice_payment_failure.go): the payment-failed notices each
+	// invoice owes, and the in-app past-due notice. A new table: nothing is
+	// rewritten, and older binaries never read it.
+	newSqlMigration(stripeInvoicePaymentFailureSchemaSql),
 }
