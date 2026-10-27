@@ -688,8 +688,9 @@ func TestSnReconcileEarlyHolders(t *testing.T) {
 		closed := payoutTestCutoff.Add(-10 * 24 * time.Hour)
 		late := payoutTestCutoff.Add(-6 * 24 * time.Hour)
 		created := payoutTestCutoff.Add(-5 * 24 * time.Hour)
+		// each contract id is minted at the contract's creation, as connect.NewId mints it
 		contract := func(at time.Time, revenue NanoCents) server.Id {
-			return f.insert(t, ctx, at.Add(-time.Hour), &at, at, 10, revenue)
+			return f.insertMinted(t, ctx, at.Add(-time.Hour), &at, at, 10, revenue)
 		}
 		holder := func(offset time.Duration, contracts ...server.Id) server.Id {
 			paymentId := snReconcileTestPayment(t, ctx, f.network, wallet, created.Add(offset), contracts...)
@@ -753,7 +754,7 @@ func TestSnReconcileEarlyEarningsFollowThePlanner(t *testing.T) {
 		}
 		contract := func(created int, closed int, revenue NanoCents) {
 			closeTime := at(closed)
-			f.insert(t, ctx, at(created), &closeTime, closeTime, 10, revenue)
+			f.insertMinted(t, ctx, at(created), &closeTime, closeTime, 10, revenue)
 		}
 		plan := func() *PaymentPlan {
 			plan, err := CreatePaymentPlan(ctx, snReconcileTestPlanConfig(0), false, 0)
@@ -795,7 +796,7 @@ func TestSnReconcileEarlyEarningsAfterPlanWithoutEpoch(t *testing.T) {
 		f := newPayoutTransitionCohort(t, ctx)
 		now := server.NowUtc().Truncate(time.Microsecond)
 		contract := func(created time.Time, closed time.Time, revenue NanoCents) {
-			f.insert(t, ctx, created, &closed, closed, 10, revenue)
+			f.insertMinted(t, ctx, created, &closed, closed, 10, revenue)
 		}
 		contract(now.Add(-7*time.Hour), now.Add(-6*time.Hour), UsdToNanoCents(2))
 		short, err := CreatePaymentPlan(ctx, snReconcileTestPlanConfig(30*24*time.Hour), false, 0)
@@ -826,7 +827,7 @@ func TestSnReconcileEarlyEarningsNotInDrainSlices(t *testing.T) {
 		base := server.NowUtc().Truncate(time.Microsecond).Add(-4 * 24 * time.Hour)
 		contract := func(created int, closed int) {
 			closeTime := base.Add(time.Duration(closed) * time.Hour)
-			f.insert(t, ctx, base.Add(time.Duration(created)*time.Hour), &closeTime, closeTime, 10, UsdToNanoCents(1))
+			f.insertMinted(t, ctx, base.Add(time.Duration(created)*time.Hour), &closeTime, closeTime, 10, UsdToNanoCents(1))
 		}
 		contract(0, 1)
 		if _, err := CreatePaymentPlan(ctx, snReconcileTestPlanConfig(0), false, 0); err != nil {

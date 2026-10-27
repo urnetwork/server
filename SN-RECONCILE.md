@@ -304,3 +304,31 @@ contract whose id ran ahead of its close by the margin or more would be
 missed (`TestSnReconcileStuckListingIdBoundBoundary`); the partition audit's
 largest skew was 4.8 s. The listing returns the same rows and values as both
 earlier listings (`TestSnReconcileStuckListingIdBoundMatchesReference`).
+
+## Note (2026-10-27): the duplicates read is bounded too
+
+The duplicates read (§6) read every sweep of all 454,429 pending or safely
+canceled rows with its contract. On main it hit the 15-minute statement
+timeout, so the dry run produced no report. It now reads each row's sweeps the
+way the listing reads a later row's:
+- With a bound of 'infinity', every sweep is early, and the sweeps are summed
+  without their contracts.
+- Below the row's close bound (the floor of its bound plus a day), each sweep
+  is read with its contract.
+- Between the close bound and the contract floor (2026-08-01, or
+  `ContractRetention` before the run, whichever is later), only a missing
+  contract makes a sweep early. It is found by an index probe of the key.
+- From the close bound up, a contract with an outcome and no close time makes
+  its sweeps early. Those contracts are read once, from their own index.
+
+The read returns the same rows and values
+(`TestSnReconcileHoldersMatchReference`). Four facts make that exact, and
+`snReconcileHoldersSql` gives the argument:
+- Every contract's id is minted before it closes.
+- Since release v2026.7.15, contract retention has deleted a contract's sweeps
+  together with it.
+- A dispute always writes a close time.
+- A contract that holds a sweep has an outcome, so it is never open.
+`TestSnReconcileHoldersBoundary` documents what the read would miss if one
+failed. Main holds about 174M open contracts, so the read does not enumerate
+them.
