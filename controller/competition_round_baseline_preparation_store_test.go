@@ -1,17 +1,92 @@
 // The native database guard must see a genuine running job in the same
 // transaction that publishes a prepared baseline; no fake job/FK bypass exists.
+// Scanner failures cannot manufacture a nonnil baseline for a cold claim.
 package controller
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/urnetwork/server"
 )
+
+// Models the exact pgx row boundary without a database or scheduler dependency.
+type roundBaselinePreparationScanRow func(...any) error
+
+// A row may populate a prefix of its destinations before reporting failure.
+func (self roundBaselinePreparationScanRow) Scan(destinations ...any) error {
+	return self(destinations...)
+}
+
+// A missing SQL row must stay absent when the final Claim gate checks cold work.
+func TestCompetitionRoundBaselinePreparationScanMissingReturnsNil(t *testing.T) {
+	calls := 0
+	row := roundBaselinePreparationScanRow(func(...any) error {
+		calls++
+		return pgx.ErrNoRows
+	})
+	baseline, err := scanRoundBaseline(row)
+	if baseline != nil || !errors.Is(err, pgx.ErrNoRows) || calls != 1 {
+		t.Fatal("absent baseline acquired an allocated identity", baseline, err, calls)
+	}
+}
+
+// The no-row fix must not expose a partially decoded identity on other errors.
+func TestCompetitionRoundBaselinePreparationScanPartialFailureReturnsNil(t *testing.T) {
+	scanErr := errors.New("synthetic partial baseline scan")
+	row := roundBaselinePreparationScanRow(func(destinations ...any) error {
+		if len(destinations) != 13 {
+			t.Fatalf("unexpected baseline scan field count: %d", len(destinations))
+		}
+		*destinations[0].(*server.Id) = server.Id{1}
+		*destinations[1].(*[]byte) = []byte("synthetic incomplete control")
+		return scanErr
+	})
+	baseline, err := scanRoundBaseline(row)
+	if baseline != nil || !errors.Is(err, scanErr) {
+		t.Fatal("partially scanned baseline escaped its error", baseline, err)
+	}
+}
+
+// Successful decoding preserves every stored field and leaves validation to
+// the existing caller; no zero-row or error path gains baseline authority.
+func TestCompetitionRoundBaselinePreparationScanSuccessPreservesRecord(t *testing.T) {
+	want := &roundBaselineRecord{RoundId: server.Id{1}, Json: []byte(`{"synthetic":"control"}`),
+		Sha256: strings.Repeat("a", 64), SourceJobId: server.Id{2}, SourceAttempt: 3,
+		SourceArtifactManifestSha256: strings.Repeat("b", 64), BaseSha: strings.Repeat("c", 40),
+		ProvidersSha256: strings.Repeat("d", 64), EvaluatorImageDigest: "sha256:" + strings.Repeat("e", 64),
+		ScorerVersion: "synthetic-scorer", HardwareId: "synthetic-hardware", HostQualificationSha256: strings.Repeat("f", 64),
+		CreatedAt: time.Date(2040, time.January, 2, 3, 4, 5, 0, time.UTC)}
+	row := roundBaselinePreparationScanRow(func(destinations ...any) error {
+		if len(destinations) != 13 {
+			t.Fatalf("unexpected baseline scan field count: %d", len(destinations))
+		}
+		*destinations[0].(*server.Id) = want.RoundId
+		*destinations[1].(*[]byte) = append([]byte(nil), want.Json...)
+		*destinations[2].(*string) = want.Sha256
+		*destinations[3].(*server.Id) = want.SourceJobId
+		*destinations[4].(*int) = want.SourceAttempt
+		*destinations[5].(*string) = want.SourceArtifactManifestSha256
+		*destinations[6].(*string) = want.BaseSha
+		*destinations[7].(*string) = want.ProvidersSha256
+		*destinations[8].(*string) = want.EvaluatorImageDigest
+		*destinations[9].(*string) = want.ScorerVersion
+		*destinations[10].(*string) = want.HardwareId
+		*destinations[11].(*string) = want.HostQualificationSha256
+		*destinations[12].(*time.Time) = want.CreatedAt
+		return nil
+	})
+	baseline, err := scanRoundBaseline(row)
+	if err != nil || !reflect.DeepEqual(baseline, want) {
+		t.Fatalf("successful baseline scan changed fields: actual=%#v expected=%#v err=%v", baseline, want, err)
+	}
+}
 
 // Exercises the actual existing FK/trigger and append-only event table. The
 // producer and retained-object proof remain deterministic synthetic fixtures.
@@ -287,5 +362,213 @@ func TestCompetitionRoundBaselinePreparationLateAdmissionDoesNotInvalidateOwner(
 				t.Fatal("round resampled", reservations)
 			}
 		})
+	})
+}
+
+// Holds the real worker at the gap between its completed Reserve transaction
+// and ordinary Claim. All database methods remain the actual PostgresStore.
+type roundBaselinePreparationClaimBarrierStore struct {
+	PostgresStore
+	reserved chan struct{}
+	resume   chan struct{}
+}
+
+// A nil result may mean a busy owner, a warm round, or no queued work; none
+// grants authority to skip Claim's final locked preparation/HOLD gate.
+func (self *roundBaselinePreparationClaimBarrierStore) ReserveRoundBaseline(ctx context.Context, settings *Settings, workerId, workerImage string) (*roundBaselinePreparation, error) {
+	preparation, err := self.PostgresStore.ReserveRoundBaseline(ctx, settings, workerId, workerImage)
+	if err == nil && preparation == nil {
+		close(self.reserved)
+		select {
+		case <-self.resume:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return preparation, err
+}
+
+// Source controls are synthetic SQL/retention fixtures; no provider, host
+// command, candidate evaluator or native control producer is invoked.
+func roundBaselinePreparationClaimRaceFixture(t testing.TB, suffix string) (*Settings, PostgresStore, *roundRecord) {
+	t.Helper()
+	settings := validSettings()
+	settings.CompetitionId += suffix
+	settings.EvaluationPolicy.Replicates = 9
+	settings.ArtifactRoot = t.TempDir()
+	settings.roundBaselinePreparation = &roundBaselinePreparationProfile{Settings: defaultRoundBaselinePreparationSettings()}
+	now := server.NowUtc().Truncate(time.Second)
+	settings.SeasonEndsAt = now.Add(60 * 24 * time.Hour)
+	settings.RetainUntil = settings.SeasonEndsAt.Add(30 * 24 * time.Hour)
+	store := PostgresStore{now: func() time.Time { return now }}
+	round, err := store.CreateStagingRound(context.Background(), settings, GenerateRoundArgs{OpensAt: now.Add(-time.Minute), ClosesAt: now.Add(time.Hour), RevealAt: now.Add(time.Hour)}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return settings, store, round
+}
+
+// The old two-transaction fallback could start a held cold job immediately
+// after its original owner released the slot. Drive that exact interleaving.
+func TestCompetitionRoundBaselinePreparationColdFallbackCannotBypassHold(t *testing.T) {
+	testEnv := server.DefaultTestEnv()
+	testEnv.RerunCount = 0
+	testEnv.Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		settings, store, round := roundBaselinePreparationClaimRaceFixture(t, "-baseline-cold-claim-race")
+		patch, patchErr := ValidateAndCanonicalizePatch(testPatch("cold-fallback-held"), settings.PatchPolicy)
+		if patchErr != nil {
+			t.Fatal(patchErr)
+		}
+		source, _, err := store.Enqueue(ctx, settings, round.RoundId, patch, "synthetic-miner", testApiImageDigest())
+		if err != nil {
+			t.Fatal(err)
+		}
+		owner, err := store.ReserveRoundBaseline(ctx, settings, "owner-worker", testWorkerImageDigest())
+		if err != nil || owner == nil {
+			t.Fatal("source reservation", owner, err)
+		}
+		barrier := &roundBaselinePreparationClaimBarrierStore{PostgresStore: store, reserved: make(chan struct{}), resume: make(chan struct{})}
+		producerCalls := 0
+		producer := roundBaselinePreparationTestProducer{run: func(context.Context, *roundBaselinePreparation) (*preparedRoundBaseline, error) {
+			producerCalls++
+			return nil, errors.New("unexpected producer rerun")
+		}}
+		worker := &Worker{settings: settings, store: barrier, evaluator: producer, workerId: "waiting-worker", workerImageDigest: testWorkerImageDigest()}
+		type result struct {
+			job *queuedJob
+			err error
+		}
+		done := make(chan result, 1)
+		go func() {
+			defer close(done)
+			job, err := worker.claimWithPreparedRoundBaseline(ctx, HostSelfCheck{})
+			done <- result{job: job, err: err}
+		}()
+		defer func() { cancel(); awaitRoundBaselinePreparationTest(t, done) }()
+		awaitRoundBaselinePreparationTest(t, barrier.reserved)
+		if err := store.HoldRoundBaselinePreparation(ctx, settings, owner, roundBaselinePreparationHold{Stage: "synthetic_original_owner_failure"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.ReleaseRoundBaselinePreparation(ctx, owner); err != nil {
+			t.Fatal(err)
+		}
+		close(barrier.resume)
+		actual := awaitRoundBaselinePreparationTest(t, done)
+		if actual.job != nil || !errors.Is(actual.err, errRoundBaselinePreparationHeld) || producerCalls != 0 {
+			t.Fatal("busy-owner fallback bypassed durable cold hold", actual.job, actual.err, producerCalls)
+		}
+		server.Db(ctx, func(conn server.PgConn) {
+			var state string
+			var start *time.Time
+			var attempts int
+			server.Raise(conn.QueryRow(ctx, `SELECT state,started_at,attempt_count FROM competition_job WHERE job_id=$1`, source.JobId).Scan(&state, &start, &attempts))
+			if state != "queued" || start != nil || attempts != 0 {
+				t.Fatal("cold fallback consumed a real attempt", state, start, attempts)
+			}
+		})
+	})
+}
+
+// A completed warm peek is not a permit that survives a new HOLD. The hold's
+// source job differs from the FIFO job, exercising the shared singleton lock.
+func TestCompetitionRoundBaselinePreparationWarmFallbackRechecksNewHold(t *testing.T) {
+	testEnv := server.DefaultTestEnv()
+	testEnv.RerunCount = 0
+	testEnv.Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		settings, store, round := roundBaselinePreparationClaimRaceFixture(t, "-baseline-warm-claim-race")
+		jobs := []*queuedJob{}
+		for _, name := range []string{"warm-source", "warm-next"} {
+			patch, patchErr := ValidateAndCanonicalizePatch(testPatch(name), settings.PatchPolicy)
+			if patchErr != nil {
+				t.Fatal(patchErr)
+			}
+			job, _, err := store.Enqueue(ctx, settings, round.RoundId, patch, "synthetic-"+name, testApiImageDigest())
+			if err != nil {
+				t.Fatal(err)
+			}
+			jobs = append(jobs, job)
+		}
+		owner, err := store.ReserveRoundBaseline(ctx, settings, "source-worker", testWorkerImageDigest())
+		if err != nil || owner == nil {
+			t.Fatal(owner, err)
+		}
+		prepared := preparedRoundBaselineTest(t, settings, owner)
+		claimed, err := store.ClaimPreparedRoundBaseline(ctx, settings, owner, prepared)
+		if err != nil || claimed == nil {
+			t.Fatal(claimed, err)
+		}
+		outcome := EvaluationOutcome{Error: submissionError("run_unstable", "synthetic genuine candidate terminal result"), ArtifactManifest: json.RawMessage(`{"schema":1}`), RoundBaselineJson: prepared.BaselineJson, RoundBaselineSha256: prepared.BaselineSha256}
+		if retry, err := store.Complete(ctx, settings, owner.WorkerId, claimed.JobId, outcome); err != nil || retry {
+			t.Fatal(retry, err)
+		}
+		barrier := &roundBaselinePreparationClaimBarrierStore{PostgresStore: store, reserved: make(chan struct{}), resume: make(chan struct{})}
+		producerCalls := 0
+		producer := roundBaselinePreparationTestProducer{run: func(context.Context, *roundBaselinePreparation) (*preparedRoundBaseline, error) {
+			producerCalls++
+			return nil, errors.New("warm controls were resampled")
+		}}
+		worker := &Worker{settings: settings, store: barrier, evaluator: producer, workerId: "warm-waiting-worker", workerImageDigest: testWorkerImageDigest()}
+		type result struct {
+			job *queuedJob
+			err error
+		}
+		done := make(chan result, 1)
+		go func() {
+			defer close(done)
+			job, err := worker.claimWithPreparedRoundBaseline(ctx, HostSelfCheck{})
+			done <- result{job: job, err: err}
+		}()
+		defer func() { cancel(); awaitRoundBaselinePreparationTest(t, done) }()
+		awaitRoundBaselinePreparationTest(t, barrier.reserved)
+		if err := store.HoldRoundBaselinePreparation(ctx, settings, owner, roundBaselinePreparationHold{Stage: "synthetic_late_publication_hold"}); err != nil {
+			t.Fatal(err)
+		}
+		close(barrier.resume)
+		actual := awaitRoundBaselinePreparationTest(t, done)
+		if actual.job != nil || !errors.Is(actual.err, errRoundBaselinePreparationHeld) || producerCalls != 0 {
+			t.Fatal("warm fallback ignored new hold", actual.job, actual.err, producerCalls)
+		}
+		server.Db(ctx, func(conn server.PgConn) {
+			var state string
+			var start *time.Time
+			var attempts int
+			server.Raise(conn.QueryRow(ctx, `SELECT state,started_at,attempt_count FROM competition_job WHERE job_id=$1`, jobs[1].JobId).Scan(&state, &start, &attempts))
+			if state != "queued" || start != nil || attempts != 0 {
+				t.Fatal("warm fallback started after a durable hold", state, start, attempts)
+			}
+		})
+	})
+}
+
+// New work can also appear after an empty Reserve transaction. It must wait
+// for its own first reservation, not fall through to a timed cold Claim.
+func TestCompetitionRoundBaselinePreparationEmptyFallbackWaitsForNewColdAdmission(t *testing.T) {
+	testEnv := server.DefaultTestEnv()
+	testEnv.RerunCount = 0
+	testEnv.Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		settings, store, round := roundBaselinePreparationClaimRaceFixture(t, "-baseline-empty-claim-race")
+		if preparation, err := store.ReserveRoundBaseline(ctx, settings, "empty-worker", testWorkerImageDigest()); err != nil || preparation != nil {
+			t.Fatal(preparation, err)
+		}
+		patch, patchErr := ValidateAndCanonicalizePatch(testPatch("arrived-after-empty-peek"), settings.PatchPolicy)
+		if patchErr != nil {
+			t.Fatal(patchErr)
+		}
+		queued, _, err := store.Enqueue(ctx, settings, round.RoundId, patch, "new-synthetic-miner", testApiImageDigest())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if job, err := store.Claim(ctx, settings, "empty-worker", testWorkerImageDigest()); err != nil || job != nil {
+			t.Fatal("new cold admission bypassed its own preparation", job, err)
+		}
+		preparation, err := store.ReserveRoundBaseline(ctx, settings, "empty-worker", testWorkerImageDigest())
+		if err != nil || preparation == nil || preparation.JobId != queued.JobId || preparation.SourceJob.StartedAt != nil || preparation.SourceJob.AttemptCount != 0 {
+			t.Fatal("new cold admission was not prepared once while still queued", preparation, err)
+		}
 	})
 }

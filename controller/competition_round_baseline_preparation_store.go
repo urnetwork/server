@@ -69,6 +69,38 @@ func readRoundBaselinePreparationEvent(ctx context.Context, tx server.PgTx, roun
 	return &preparation, nil
 }
 
+// Reserve returning nil is not a claim capability: another owner can fail or
+// a new job can arrive before Claim begins. The ordinary claim's singleton/job
+// locks serialize this final baseline/HOLD check with publication and holds.
+func (self PostgresStore) allowPreparedRoundBaselineClaimInTx(ctx context.Context, tx server.PgTx, settings *Settings, job *queuedJob, baseline *roundBaselineRecord) (bool, error) {
+	reserved, err := readRoundBaselinePreparationEvent(ctx, tx, job.RoundId, settings.roundBaselinePreparation.Settings.MaximumRecordBytes)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return false, err
+	}
+	if reserved != nil {
+		var held bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM competition_job_event WHERE job_id=$1 AND event_type='round_baseline_preparation_held' AND payload_json->>'owner'=$2)`, reserved.JobId, reserved.Owner).Scan(&held); err != nil {
+			return false, err
+		}
+		if held || baseline == nil {
+			return false, errRoundBaselinePreparationHeld
+		}
+	}
+	if baseline == nil {
+		// A newly committed cold admission goes back through Reserve on the next
+		// poll; no clock/attempt is started merely because a prior peek was empty.
+		return false, nil
+	}
+	frozen, err := settingsForFrozenRound(settings, &job.Round)
+	if err != nil {
+		return false, err
+	}
+	if err := validateRoundBaselineRecord(frozen, &job.Round, baseline); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // Reservation changes only the singleton and append-only audit events. In
 // particular, job.state, attempt_count and started_at remain untouched.
 func (self PostgresStore) ReserveRoundBaseline(ctx context.Context, settings *Settings, workerId, workerImage string) (preparation *roundBaselinePreparation, resultErr error) {
@@ -213,6 +245,10 @@ func (self PostgresStore) CheckRoundBaselinePreparation(ctx context.Context, set
 func (self PostgresStore) HoldRoundBaselinePreparation(ctx context.Context, settings *Settings, preparation *roundBaselinePreparation, hold roundBaselinePreparationHold) error {
 	return captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
+			// Match Claim/Check/publication lock order, including when its source
+			// job is not the queued job selected by a concurrent warm claim.
+			var slotId int
+			server.Raise(tx.QueryRow(ctx, `SELECT slot_id FROM competition_worker_slot WHERE slot_id=1 FOR UPDATE`).Scan(&slotId))
 			var sourceJobId server.Id
 			server.Raise(tx.QueryRow(ctx, `SELECT job_id FROM competition_job WHERE job_id=$1 AND round_id=$2 FOR UPDATE`, preparation.JobId, preparation.RoundId).Scan(&sourceJobId))
 			reserved, err := readRoundBaselinePreparationEvent(ctx, tx, preparation.RoundId, settings.roundBaselinePreparation.Settings.MaximumRecordBytes)

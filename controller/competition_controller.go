@@ -5784,7 +5784,8 @@ func scanJob(row pgx.Row, includePatch bool, now time.Time) (*queuedJob, error) 
 	return job, nil
 }
 
-// Reads the append-only round control without accepting partial identities.
+// Only a complete row represents the append-only round control. Absence and
+// partial scan failures return nil, never an allocated but unusable identity.
 func scanRoundBaseline(row pgx.Row) (*roundBaselineRecord, error) {
 	baseline := &roundBaselineRecord{}
 	err := row.Scan(
@@ -5802,7 +5803,10 @@ func scanRoundBaseline(row pgx.Row) (*roundBaselineRecord, error) {
 		&baseline.HostQualificationSha256,
 		&baseline.CreatedAt,
 	)
-	return baseline, err
+	if err != nil {
+		return nil, err
+	}
+	return baseline, nil
 }
 
 func (self PostgresStore) GetJob(ctx context.Context, settings *Settings, jobId server.Id, principal *Principal) (job *queuedJob, err error) {
@@ -6043,6 +6047,17 @@ func (self PostgresStore) Claim(ctx context.Context, settings *Settings, workerI
 				job.RoundBaseline = baseline
 			} else if !errors.Is(baselineErr, pgx.ErrNoRows) {
 				server.Raise(baselineErr)
+			}
+			if settings.roundBaselinePreparation != nil {
+				allowed, gateErr := self.allowPreparedRoundBaselineClaimInTx(ctx, tx, settings, job, job.RoundBaseline)
+				if gateErr != nil {
+					job = nil
+				}
+				server.Raise(gateErr)
+				if !allowed {
+					job = nil
+					return
+				}
 			}
 			server.RaisePgResult(tx.Exec(ctx, `
 				UPDATE competition_job SET state = 'running', started_at = COALESCE(started_at, $2),

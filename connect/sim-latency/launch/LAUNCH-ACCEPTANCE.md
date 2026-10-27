@@ -21,17 +21,35 @@ dated bullets below; those bullets retain the earlier qualification history.
   validation boundaries. Deterministic pre-fix controls and 444 selected test
   executions passed before the fresh attempt. Its immutable precommit is
   `SNOW-REVIEW-QUALIFICATION-PRECOMMIT-2026-10-27.json` (published in `9f7a29329`).
-  Native PID **2349800** was verified live at 01:28 UTC; no successful complete
-  six-case qualification is claimed yet. The earlier HTTP-200 response lacking
+  That attempt stopped at its first failure after 1,208.82 seconds, exit 1,
+  cleanup verified. Cancellation and benign approval passed; the fabrication
+  case exposed another member-validation projection error: a supported
+  fabrication rejection with one uncertain criterion was passed to the legacy
+  finding validator. The original findings and failed attempt are preserved;
+  no retry or complete six-case qualification is claimed. Report SHA-256
+  `347920e25e3af5fc45ab7500c36a9379bbea63081ee332ace6d7054b572f64d1`.
+  The earlier HTTP-200 response lacking
   a retained terminal object remains inconclusive, not evidence of token
   exhaustion or a valid model identity.
 - Shared-baseline preparation before the first submission clock is committed
   in `cf22d1a05`, with 19 smoke tests passing, including real isolated PostgreSQL
   cases. Independent review then found a claim/reservation race. Its correction
   and deterministic transaction-boundary regressions are in progress; the
-  feature is still opt-in, not installed or production-qualified.
+  feature is still opt-in, not installed or production-qualified. Its corrected
+  claim/scanner smoke subsequently passed 23 controller tests plus two shell
+  guards, zero skips, with original container/network inventories restored.
+  Compiled old-source controls reproduced all three races and both failed-scan
+  pointer defects. Larger validation remains pending.
 - Replacement bridge authorization and the independent-seed amendment remain
   unresolved. No corrected bridge or independent-seed scoring has started.
+- Actual main PostgreSQL was audited at 01:33:35 UTC in a verified read-only,
+  repeatable-read transaction. All 890 deployed migration identities match;
+  migrations **891–893** (mini provider, multi-repository promotion, Snow union)
+  remain pending normal deployment. All 12 existing rounds are staging, all 35
+  jobs are terminal, and the global worker slot is unowned. The intended
+  production namespace is empty. Recheck these facts before bootstrap; the
+  audit neither creates a round nor authorizes deleting historical state.
+  Receipt SHA-256: `a30144529f1b657f4dfa1fab79ba394f3689541e8cb752aad0fb081d8c5fe1ea`.
 
 - The frozen performance source is C2 server `a9e8e1a7`, ten-repository lock
   `ec322ed2…`, image `sha256:b1632a55…`, actual Go **1.27.3**. Operator-proxy

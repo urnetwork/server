@@ -81,6 +81,13 @@ An ambiguous publication commit requires authoritative reconciliation: it may
 already have started the genuine job and attached its baseline. A durable HOLD
 also gates warm claims, so transport ambiguity cannot automatically consume a
 second candidate attempt or reset the already committed original clock.
+An empty reservation result is not a claim capability. The ordinary claim
+transaction must recheck the selected round's exact frozen baseline and durable
+reservation/HOLD under its singleton/job locks before setting started_at or
+incrementing attempt_count. A newly arrived cold job waits for its own reservation;
+an owner failure or new HOLD between the peek and claim cannot fall through to
+the legacy cold evaluator. HOLD publication takes the same singleton-first lock
+order even when its source job differs from the current FIFO job.
 
 Safe raw failures use a separate baseline-preparation-hold-manifest.json, never a
 successful baseline or candidate result. Failed remote retention preserves local
@@ -96,6 +103,9 @@ Required qualification (no execution authority supplied by this document)
 Run deterministic worker-clock, cancellation/join, fence/publication race,
 host-liveness, native evidence/retention, malicious-path/link/size, and actual
 existing-FK transaction tests. Include the late earlier admission upload barrier.
+Include Reserve-to-Claim barriers for a cold owner failing/releasing, a new HOLD
+after a warm peek, and a new cold admission after an empty peek. Each must leave
+the waiting submission queued, unstarted and without a consumed attempt.
 Run the actual shell prefix/completion/EXIT-cleanup fragments with strict external
 stubs, not a simplified rewritten script. These tests do not run genuine controls.
 Any real preparation/DB write/provider/timed run remains separately authorized.

@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-27T01:29:00Z",
+  "observed_at": "2026-10-27T01:45:16Z",
   "objective": "Ready to launch at 2026-10-28T00:00:00Z",
   "storage_verification": {
     "operations_compliance_receipt_sha256": "c6b8b5348633270939395b7a585e1978b3a83c679b2552eccd8ab2a4690edc3f",
@@ -37,6 +37,25 @@
     "native_readonly_deletions": 0
   },
   "production_activated": false,
+  "main_database_readonly_audit": {
+    "observed_at": "2026-10-27T01:33:35Z",
+    "receipt": "/home/by/urnetwork/temp/production-readonly-audit-20261027.XPvbnJAa/audit.json",
+    "receipt_sha256": "a30144529f1b657f4dfa1fab79ba394f3689541e8cb752aad0fb081d8c5fe1ea",
+    "transaction_read_only_verified": true,
+    "transaction_isolation": "repeatable read",
+    "deployed_migration_count": 890,
+    "current_catalog_migration_count": 893,
+    "deployed_migration_identity_mismatches": 0,
+    "pending_migrations": [891, 892, 893],
+    "pending_migration_scope": "Mini review provider, multi-repository promotion, Snow review union",
+    "existing_staging_rounds": 12,
+    "existing_nonstaging_rounds": 0,
+    "all_35_existing_jobs_terminal": true,
+    "global_worker_slot_unowned": true,
+    "production_namespace_empty": true,
+    "namespace_recheck_required_before_bootstrap": true,
+    "main_writes_performed": 0
+  },
   "current_provider_qualification": {
     "source_test_attestation_qualified": true,
     "source_test_receipt": "/var/lib/urnetwork/competition-model-qualification-ed028-20261027-v1/source-test/attempt-01/qualification.json",
@@ -51,6 +70,12 @@
     "review_process_verified_live_at": "2026-10-27T01:28:55Z",
     "review_observation_session": 66417,
     "review_directory": "/var/lib/urnetwork/competition-review-qualification-b316-20261027-v3",
+    "review_terminal": true,
+    "review_terminal_exit": 1,
+    "review_duration_seconds": 1208.82,
+    "review_cleanup_verified": true,
+    "review_report_sha256": "347920e25e3af5fc45ab7500c36a9379bbea63081ee332ace6d7054b572f64d1",
+    "review_failure": "Case 3 Muse supported fabrication rejection included one uncertain criterion; legacy member-validation projection rejected invalid finding disposition. Preserved without retry; diagnosis in progress.",
     "review_qualified": false,
     "historical_missing_terminal_response": "Inconclusive; HTTP 200 does not establish completed status, incomplete reason or returned model"
   },
@@ -58,7 +83,12 @@
     "feature_commit": "cf22d1a05f9d7d0bafd000d88770248adfbaf0d9",
     "feature_smoke_tests_passed": 19,
     "independent_review_found_claim_reservation_race": true,
-    "claim_transaction_fix_status": "Frozen for independent compile and deterministic SQL regression execution",
+    "claim_transaction_fix_status": "Smoke passed: 23 controller tests plus two shell guards; old-source race and scanner controls reproduced failures; larger validation pending",
+    "claim_fix_smoke_tests_passed": 25,
+    "claim_fix_smoke_skips": 0,
+    "claim_fix_smoke_directory": "/home/by/urnetwork/temp/baseline-p1-final-smoke-20261027.gqc9D6RQ",
+    "claim_fix_controller_stdout_sha256": "7a1b2047c9ca40a59479772979a0d54f2d3ba88a46a8f84faf7af387e27166a4",
+    "claim_fix_smoke_original_container_network_inventory_restored": true,
     "production_installed": false,
     "production_qualified": false,
     "submission_deadline_seconds_unchanged": 10800
