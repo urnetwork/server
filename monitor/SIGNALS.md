@@ -45005,8 +45005,10 @@ Probe: `subnet-artifacts`
 `signal_subnet_artifacts.go` implements current retrieval of up to four
 independently enrolled immutable payout objects through both configured HTTPS
 API origins, using the actual public `GET /sn/artifact?hash=sha256:...` handler.
-This is a partial §22.8 component. The full-family coverage sentinel remains
-**0/9**; no chain inclusion, complete paged index, accepted tampering,
+This is a partial §22.8 component. It does not count as a full family in the
+registration sentinel. The current registry contains all nine family readers;
+registration does not establish their source, campaign or live qualification
+(§22.10). No chain inclusion, complete paged index, accepted tampering,
 all-copy loss, independent storage, retention census, or secretless audit replay
 is inferred from these reads. Two API names may use the same MinIO or cache.
 
