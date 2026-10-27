@@ -198,10 +198,12 @@ as the request's own page would have, unless an attempt of the request is in
 flight or has started publication (read under the request's pending lock when
 the handoff runs). The next page on the balance then releases the token
 through the fenced SQL custody check at once. A full owner drops the
-compensation without blocking, and the proxy's before-exit hook quiesces the
-owner. A dropped token, one the quiesce ended or one the owner could not hand
-off stays reserved under its pending marker: any page on the balance takes it
-once it is ten minutes old, and its 24-hour lease ends it at last.
+compensation without blocking. The proxy's before-exit hook quiesces the owner,
+as do the api once its HTTP drain returns and the taskworker once its tasks have
+handed back their claims. A dropped token, one the quiesce ended or one the
+owner could not hand off stays reserved under its pending marker: any page on
+the balance takes it once it is ten minutes old, and its 24-hour lease ends it
+at last.
 `urnetwork_redis_contract_reservation_total` counts
 `operation="compensation"` with the results `completed` and `pending` when a
 compensation ends, `deferred` when the owner takes one, `expired` when its
