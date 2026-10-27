@@ -8899,6 +8899,17 @@ connection errors and failed rollback or unlock still require disposal. This con
 it does not establish the timer's cause or close the two historical failures
 without emitter, phase/remaining-budget and journal-custody evidence.
 
+The cached forward52 flush sample adds `error_type=*pgconn.PgError` and
+`sqlstate=57014` (`query_canceled`). Its aggregate/function views overlap;
+they do not identify two incidents or bind older unknown-type cohorts.
+The original server message, ordered raising frames, source event clock and
+immutable Taskworker artifact remain absent. Type/code alone selects no
+cancellation initiator, acquisition/admission/session-validation or transaction
+stage, and establishes no durable financial outcome. Reuse one retained original
+with the same-event effective settings, caller-stop and query-entry/remaining-
+budget evidence before selecting a cause or repair. A user-request reason alone
+does not name the canceller. Prior repairs and cohort distinctions remain.
+
 False-positive qualifier: this recovered panic boundary is not process death or
 proof of a lost debit. A post-commit cleanup failure can coexist with a correct
 financial debit and Redis release. Deterministic controls hold the actual balance
@@ -9310,6 +9321,15 @@ ambiguity; the mirror is rebuilt from durable revisions; mixed Redis reservation
 leases and stream memberships retain their existing bounded expiry/reconciliation.
 No replay of a non-idempotent Redis increment is added. A quiet error log or low
 CPU does not establish complete recovery or current provider payout success.
+
+`AddClockTransferByteCount` uses `RedisDoOnce` so neither callback nor go-redis
+command retries can replay its non-idempotent `INCRBY`. `OptNoRetry` alone
+disables only callback retries. A reply lost after application surfaces an
+error and leaves the same-operation counter outcome ambiguous. The scalar clock
+and aggregate backfill cannot establish per-contract application or repair an
+ambiguous increment exactly. This local correction does not attribute a retained
+normalized-owner panic to that mechanism, bind its emitting artifact or prove
+runtime recovery.
 
 Provider-total projection reader prerequisite (2026-10-05): the existing task
 queue can durably carry an exact provider-total allocation independently of the
