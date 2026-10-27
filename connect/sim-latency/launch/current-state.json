@@ -90,7 +90,15 @@
     "main_writes_performed": 0
   },
   "trusted_corrected_bridge": {
-    "state": "completed_exit_zero_native_acceptance_pending",
+    "state": "native_accepted_operational_witness_independent_seeds_pending",
+    "native_compatibility_receipt": "/var/lib/urnetwork/competition-bridge-singleton-manifest-20261027-v1/bridge-compatibility.json",
+    "native_compatibility_receipt_sha256": "2af963f0ca0cecef740744da974bd2d0c65a41a24b5d68cac277d076fe84c930",
+    "native_verified_at": "2026-10-27T12:53:09.650905081Z",
+    "native_claim": "operational-compatibility-witness-not-statistical-equivalence",
+    "native_score_replays": 2,
+    "native_worker_bindings": 7,
+    "native_full_evidence_bindings": 467,
+    "native_completion_bindings": 5,
     "session": 14145,
     "runner_pid": 3094175,
     "process_verified_live_at": "2026-10-27T11:49:40Z",
@@ -111,7 +119,7 @@
     "worker_result_sha256": "c82fd41d70dd61a232d8d71d4b150f7b57c5c462f39bd58cae9523b6b7096ef3",
     "score_sha256": "d19101d53fab7d2387f73ff11d339694bfd3333c892b124912809967bd3c9bfa",
     "evidence_manifest_sha256": "281db6f1e3b23c433eeeab104b0f5bd68c6dbe0fa9e923f461bac88c4cbed340",
-    "recorded_score_summary_not_independently_accepted": {
+    "native_verified_score_summary": {
       "all_six_gates_passed": true,
       "placeable": true,
       "baseline_mean_raw_score": 18178.883088888884,
