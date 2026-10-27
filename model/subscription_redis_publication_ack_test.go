@@ -229,10 +229,14 @@ func (self *redisPublicationReplyHook) require(t testing.TB, owners ...int) {
 	}
 }
 
+// The page acknowledges its own publication on the late-reply pool; recovery
+// publishes inside its transaction on the deadline pool. Hook both.
 func installRedisPublicationHook(t testing.TB, ctx context.Context, hook *redisPublicationReplyHook) {
 	t.Helper()
-	if err := server.RedisWithDeadline(ctx, func(client server.RedisClient) error { client.AddHook(hook); return nil }); err != nil {
-		t.Fatal(err)
+	for _, options := range [][]any{nil, {server.OptRedisKeepLateReplies()}} {
+		if err := server.RedisWithDeadline(ctx, func(client server.RedisClient) error { client.AddHook(hook); return nil }, options...); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
