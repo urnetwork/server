@@ -48,7 +48,24 @@ untrusted local-source Git operations continue stripping transport credentials.
 
 The updated **unexecuted** launcher is retained at
 `/home/by/urnetwork/temp/production-bootstrap-static-20261027.v1/bootstrap-once.PROPOSED.sh`,
-SHA-256 `de46ad7566e597203e561ae3d25031f9cfd0377d990ab0cc11415126c0bb06bf`.
+SHA-256 `bcc9c66df6f05444760ee58ea8a76c39730e3cbcdf4266bf92ef9fa4f1955229`
+(read back at approximately 22:02 UTC).
 It still needs root's execution authorization, finished qualification, fresh
 ref/config checks and the canonical scoring slot. Config/main publication
 requires its exact expected head; do not reset or overwrite unrelated updates.
+
+## Opening-time constraint
+
+The prepared launcher requires execution before `2026-10-28T00:00:00Z`.
+The native `bootstrapSourceOpening` also requires a new explicit opening to
+be in the future; only an already durable intent may recover its original
+opening after that time. No initial production intent has been proved here.
+The calibration scoring lock prevents this launcher's clone load from
+overlapping the active reference screen. The recovered first-seed screen
+started at 21:28 UTC and is not expected to finish before midnight.
+
+Consequently this prepared path cannot prove midnight readiness. Do not
+remove the lock, fabricate an earlier intent, relabel a late activation as
+on-time, or silently change the opening. Actual calibration acceptance,
+Snow qualification, runtime qualification and both readiness acknowledgments
+remain required before activation.
