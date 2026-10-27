@@ -245,9 +245,9 @@ func TestRedisDeferredCompensationCallerWaitsForOnePass(t *testing.T) {
 }
 
 // However many requests fail together, retries run on the deferred owner's
-// workers only, each request's budget bounds its passes by backoff, and the
-// owner hands each exhausted request's token to recovery once, after its last
-// pass.
+// workers only, and each request's budget bounds its passes by backoff. Their
+// releases time out, as in a storm on a slow node, so the owner hands none of
+// their tokens to recovery: each is counted slow, once, after its last pass.
 func TestRedisDeferredCompensationBoundsRetriesAcrossRequests(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -267,9 +267,6 @@ func TestRedisDeferredCompensationBoundsRetriesAcrossRequests(t *testing.T) {
 			cleanup.handoff = func(_ context.Context, _, request server.Id) error {
 				stateLock.Lock()
 				defer stateLock.Unlock()
-				if handoffs[request] == 0 && attempts[request] < 2 {
-					t.Error("the owner gave up before its deferred pass", request)
-				}
 				handoffs[request]++
 				return nil
 			}
@@ -300,6 +297,7 @@ func TestRedisDeferredCompensationBoundsRetriesAcrossRequests(t *testing.T) {
 			return cleanup
 		}
 		takenBefore, pendingBefore := redisCompensationTestCount("deferred"), redisCompensationTestCount("pending")
+		slowBefore := testutil.ToFloat64(redisContractReservationResults.WithLabelValues("handoff", "slow"))
 		errs := make(chan error, requests)
 		var joined sync.WaitGroup
 		for range requests {
@@ -330,8 +328,8 @@ func TestRedisDeferredCompensationBoundsRetriesAcrossRequests(t *testing.T) {
 			if count < 2 || maxPasses < count {
 				t.Fatalf("request %s made %d compensation passes in its budget; backoff allows at most %d", request, count, maxPasses)
 			}
-			if handoffs[request] != 1 {
-				t.Fatalf("request %s handed its exhausted token to recovery %d times", request, handoffs[request])
+			if handoffs[request] != 0 {
+				t.Fatalf("request %s handed its token to recovery %d times while its releases timed out", request, handoffs[request])
 			}
 		}
 		if taken := redisCompensationTestCount("deferred") - takenBefore; taken != requests {
@@ -339,6 +337,9 @@ func TestRedisDeferredCompensationBoundsRetriesAcrossRequests(t *testing.T) {
 		}
 		if pending := redisCompensationTestCount("pending") - pendingBefore; pending != requests {
 			t.Fatal("an exhausted compensation was not counted pending", pending)
+		}
+		if slow := testutil.ToFloat64(redisContractReservationResults.WithLabelValues("handoff", "slow")) - slowBefore; slow != requests {
+			t.Fatal("each token held back from the handoff was not counted slow once", slow)
 		}
 	})
 }

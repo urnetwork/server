@@ -10,6 +10,7 @@ import (
 	"math"
 	mathrand "math/rand"
 	"net"
+	"os"
 	"runtime"
 	"strconv"
 	"strings"
@@ -22,6 +23,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 	"github.com/urnetwork/server"
+	"gopkg.in/yaml.v3"
 )
 
 const redisReservationRecoveryBatch = 32
@@ -51,6 +53,50 @@ const redisDeferredCompensationBalances = 1024
 
 // How long a test environment reset waits for the deferred owner's workers.
 const redisDeferredCompensationQuiesceTimeout = 5 * time.Second
+
+// After one of the deferred owner's release or handoff calls ends in a
+// timeout, the owner hands no given-up token to recovery for this long. A
+// timeout means a slow Redis node or PostgreSQL pool, and the page that
+// releases a handed-off token holds one of the process's PostgreSQL
+// connections through its Redis release: in a storm the handoff would move
+// every given-up token into such a page at once.
+const redisDeferredCompensationHandoffQuiet = 30 * time.Second
+
+// The operator switch for the deferred owner's give-up handoff, read on each
+// give-up, so that a config push applies to the next one without a restart:
+//
+//	handoff: false  # leave given-up tokens pending for the 10-minute age gate
+//
+// Only an explicit false turns the handoff off. An absent file, one without
+// the key, or one that does not decode keeps it on.
+const redisContractCompensationResourceName = "redis_contract_compensation.yml"
+
+type redisContractCompensationConfig struct {
+	Handoff *bool `yaml:"handoff"`
+}
+
+// The switch decoded once per config version.
+var redisCompensationHandoffSwitch server.ResourceValueCache[server.ResourceVersion, bool]
+
+// Whether the operator switch leaves the give-up handoff on.
+func redisCompensationHandoffEnabled() bool {
+	resource, err := server.Config.SimpleResource(redisContractCompensationResourceName)
+	if err != nil {
+		return true
+	}
+	return redisCompensationHandoffSwitch.Get(resource.Version(), nil, func() (bool, bool) {
+		data, err := resource.BytesE()
+		if err != nil {
+			// a failed read is retried by the next give-up
+			return true, false
+		}
+		var config redisContractCompensationConfig
+		if err := yaml.Unmarshal(data, &config); err != nil {
+			return true, true
+		}
+		return config.Handoff == nil || *config.Handoff, true
+	})
+}
 
 var errRedisReservationCleanupPending = errors.New("Redis reservation compensation remains pending in retained v2 markers")
 var errRedisReservationRecoveryIdentity = errors.New("Redis reservation marker or SQL custody does not match")
@@ -718,7 +764,12 @@ func (self *redisReservationCompensation) step(owner context.Context) (time.Dura
 // handoff misses, or one a quiesce reaches first, keeps its pending marker for
 // aged recovery.
 func (self *redisReservationCompensation) handOff(owner context.Context) {
-	if self.cleanup.handoff == nil {
+	if self.cleanup.handoff == nil || len(self.pending) == 0 {
+		return
+	}
+	if refusal := self.cleanup.deferred.handoffRefusal(); refusal != "" {
+		// counted per balance, as each handoff is
+		redisContractReservationResults.WithLabelValues("handoff", refusal).Add(float64(len(self.pending)))
 		return
 	}
 	bounded, cancel := context.WithTimeout(owner, redisContractAdmissionTimeout)
@@ -895,6 +946,10 @@ type redisDeferredCompensations struct {
 	start    sync.Once
 	// release and handoff calls its workers are making
 	calls atomic.Int64
+	// the clock of the handoff's quiet period after a timeout
+	now func() time.Time
+	// when one of its calls last ended in a timeout, in Unix nanoseconds
+	lastTimeout atomic.Int64
 
 	stateLock sync.Mutex
 	// signaled when a compensation falls due or the workers stop
@@ -969,6 +1024,7 @@ func newRedisDeferredCompensations(workers, capacity int) *redisDeferredCompensa
 	deferred := &redisDeferredCompensations{
 		workers:    workers,
 		capacity:   capacity,
+		now:        time.Now,
 		idle:       idle,
 		generation: generation,
 		cancel:     cancel,
@@ -1017,6 +1073,7 @@ func (self *redisDeferredCompensations) hold(ctx context.Context, compensation *
 	deferred := &redisDeferredCompensation{owner: owner, balances: balances, compensation: compensation}
 	compensation.cleanup.recover = self.counted(compensation.cleanup.recover)
 	compensation.cleanup.handoff = self.counted(compensation.cleanup.handoff)
+	compensation.cleanup.deferred = self
 	unlink := context.AfterFunc(self.generation, func() {
 		cancel()
 		self.unschedule(deferred)
@@ -1029,7 +1086,8 @@ func (self *redisDeferredCompensations) hold(ctx context.Context, compensation *
 	return deferred
 }
 
-// Counts one of the owner's release or handoff calls while it runs.
+// Counts one of the owner's release or handoff calls while it runs, and notes
+// when one ends in a timeout.
 func (self *redisDeferredCompensations) counted(call func(context.Context, server.Id, server.Id) error) func(context.Context, server.Id, server.Id) error {
 	if call == nil {
 		return nil
@@ -1037,8 +1095,29 @@ func (self *redisDeferredCompensations) counted(call func(context.Context, serve
 	return func(ctx context.Context, balanceId, contractId server.Id) error {
 		self.calls.Add(1)
 		defer self.calls.Add(-1)
-		return call(ctx, balanceId, contractId)
+		err := call(ctx, balanceId, contractId)
+		if redisReservationTimedOut(err) {
+			self.lastTimeout.Store(self.now().UnixNano())
+		}
+		return err
 	}
+}
+
+// Why the owner hands no given-up token to recovery now, or "" when it may:
+// the operator switch is off, or one of its calls timed out within
+// redisDeferredCompensationHandoffQuiet. Without an owner, only the switch
+// applies.
+func (self *redisDeferredCompensations) handoffRefusal() string {
+	if !redisCompensationHandoffEnabled() {
+		return "disabled"
+	}
+	if self == nil {
+		return ""
+	}
+	if last := self.lastTimeout.Load(); last != 0 && self.now().Before(time.Unix(0, last).Add(redisDeferredCompensationHandoffQuiet)) {
+		return "slow"
+	}
+	return ""
 }
 
 // Times the compensation's next pass after delay, and reports whether it did:
@@ -1242,6 +1321,28 @@ func (self *redisDeferredCompensations) stopWorkers() {
 	defer self.stateLock.Unlock()
 	self.stopped = true
 	self.wake.Broadcast()
+}
+
+// Whether a release or handoff call ended in a timeout: a slow Redis node, or a
+// deadline-pool or PostgreSQL wait that outlived the call. Any observed leaf
+// cause decides, in a bounded inspection.
+func redisReservationTimedOut(err error) bool {
+	if err == nil {
+		return false
+	}
+	for _, node := range server.InspectErrorCauses(err).Nodes {
+		if !node.Leaf {
+			continue
+		}
+		cause := node.Err
+		if cause == context.DeadlineExceeded || cause == os.ErrDeadlineExceeded || cause == syscall.ETIMEDOUT {
+			return true
+		}
+		if timeout, ok := cause.(net.Error); ok && timeout.Timeout() {
+			return true
+		}
+	}
+	return false
 }
 
 // All joined leaf causes must be transient. A schema, ownership, corrupt-token
