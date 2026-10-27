@@ -254,8 +254,10 @@ rounds still open after actual review/build/readiness, not on a guessed date.
 Bootstrap registers generation 1/source generation 0 for epoch 1 and persists
 recovery material. It does not activate a pointer, create a round, or invent a
 review. Repeating the same command resumes the exact commit. The supervisor below
-performs the same runtime acknowledgments and historical full 16-hour preparation gate for
-this baseline as for later transitions. Use the same state directory and owner.
+performs the same runtime acknowledgments and the frozen policy's preparation
+interval for this baseline as for later transitions. The adopted elected-winner
+policy permits a zero interval; the historical fixed 16-hour delay is not an
+additional requirement. Use the same state directory and owner.
 These examples do not authorize enabling an existing live season:
 
 ```sh
@@ -276,6 +278,26 @@ Resolve/build trusted binaries once per reviewed release, not once per poll.
 Do not leave a reviewer agent acting as the scheduler. The supervisor's default
 choice is safe carry-forward; separately prepared promotion intents require the
 real source-review, exact-base, patch and deadline interlocks before selection.
+
+#### Preparation-only qualification boundary — pending release qualification
+
+The new native CLI adds `supervise --once --prepare-only` for one explicit
+reconciliation of an **already reserved** source intent. This is not ordinary
+`--once`: ordinary reconciliation may activate ready source immediately when
+the frozen preparation interval is zero. Preparation-only may publish the exact
+intent and obtain genuine API/worker readiness, but stops before activation,
+round creation, source election/review, or ordinary evaluation. Repeating mode
+without `--once` is refused. Do not infer that a `preparation_ready` journal
+entry proves all launch gates or grants activation permission.
+
+This flag is currently unqualified and must not be used until its exact native
+release and regression tests pass. Older installed CLIs and the current shell
+wrapper do not support it; do not relabel their digests or assume forwarding.
+Use only the qualified native CLI with all required pinned worker/preparation
+arguments. Preserve the exact bootstrap intent, state directory and owner.
+After independent phase-two acceptance, normal supervision still performs its
+unchanged fenced activation checks. A preparation-only invocation cannot stand
+in for provider, calibration, actual-round rebaseline, or readiness evidence.
 
 ### Isolated v2 staging
 
