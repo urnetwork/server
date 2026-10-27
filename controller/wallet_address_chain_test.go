@@ -92,11 +92,13 @@ func TestCreateAccountWalletRefusalNamesWhatTheAddressIs(t *testing.T) {
 	}
 }
 
-// A Solana key saved as a Polygon wallet stays as it is: adding the key as a
-// Solana wallet creates the Solana wallet. It never returns the Polygon row,
-// or reactivates it after the network removed it, which kept the key on the
-// wrong chain while the request reported success. A mistyped checksum is
-// refused before anything is written.
+// A network has one wallet per address (unique_network_wallet_address). A
+// Solana key saved as a Polygon wallet stays as it is: adding the key as a
+// Solana wallet is refused with a 400 and writes nothing. It used to return
+// the Polygon row, or reactivate it after the network removed it, which kept
+// the key on the wrong chain while the request reported success. A wallet on
+// its chain is still returned, and reactivated after removal. A mistyped
+// checksum is refused before anything is written.
 func TestCreateAccountWalletOnItsChainDoesNotReuseAnotherChainsRow(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		ctx := tb.Context()
@@ -113,30 +115,24 @@ func TestCreateAccountWalletOnItsChainDoesNotReuseAnotherChainsRow(t *testing.T)
 			tb.Fatal(err)
 		}
 
+		const onAnotherChain = "the address is already a wallet of the network on another blockchain"
 		args := func() *model.CreateAccountWalletExternalArgs {
 			return &model.CreateAccountWalletExternalArgs{Blockchain: "SOL", WalletAddress: solanaAddress, DefaultTokenType: "USDC"}
 		}
+		before := len(model.GetActiveAccountWallets(owner).Wallets)
 		created, err := CreateAccountWalletExternal(args(), owner)
-		if err != nil {
-			tb.Fatal(err)
-		}
-		if created.WalletId == *legacyId {
+		if created != nil && created.WalletId == *legacyId {
 			tb.Fatal("adding the key as a Solana wallet returned the Polygon row")
 		}
-		if wallet := model.GetAccountWallet(ctx, created.WalletId); wallet == nil || wallet.Blockchain != "SOL" || wallet.WalletAddress != solanaAddress || !wallet.Active {
-			tb.Fatal("the Solana wallet was not created", wallet)
+		requireRefusalAnswer(tb, err, http.StatusBadRequest, onAnotherChain)
+		if after := len(model.GetActiveAccountWallets(owner).Wallets); after != before {
+			tb.Fatal("a refused address was stored", before, after)
 		}
-		if legacy := model.GetAccountWallet(ctx, *legacyId); legacy == nil || legacy.Blockchain != "MATIC" || !legacy.Active {
+		if legacy := model.GetAccountWallet(ctx, *legacyId); legacy == nil || legacy.Blockchain != "MATIC" || legacy.WalletAddress != solanaAddress || !legacy.Active {
 			tb.Fatal("the legacy row changed", legacy)
 		}
-		// create selects a payout wallet only when the network has none
 		if payoutWalletId := model.GetPayoutWalletId(ctx, networkId); payoutWalletId == nil || *payoutWalletId != *legacyId {
-			tb.Fatal("create moved the existing payout wallet", payoutWalletId)
-		}
-		// adding the key on its chain again returns the same wallet
-		again, err := CreateAccountWalletExternal(args(), owner)
-		if err != nil || again.WalletId != created.WalletId {
-			tb.Fatal("adding the Solana wallet again did not return it", again, err)
+			tb.Fatal("the refusal moved the payout wallet", payoutWalletId)
 		}
 
 		// a removed legacy row is not reactivated by adding the key on its chain
@@ -151,20 +147,45 @@ func TestCreateAccountWalletOnItsChainDoesNotReuseAnotherChainsRow(t *testing.T)
 			tb.Fatal("legacy wallet fixture was not removed")
 		}
 		readded, err := CreateAccountWalletExternal(args(), removedOwner)
-		if err != nil {
-			tb.Fatal(err)
-		}
-		if readded.WalletId == *removedLegacyId {
+		if readded != nil && readded.WalletId == *removedLegacyId {
 			tb.Fatal("adding the key as a Solana wallet reactivated the removed Polygon row")
 		}
+		requireRefusalAnswer(tb, err, http.StatusBadRequest, onAnotherChain)
 		if legacy := model.GetAccountWallet(ctx, *removedLegacyId); legacy == nil || legacy.Blockchain != "MATIC" || legacy.Active {
 			tb.Fatal("the removed legacy row changed", legacy)
 		}
-		if wallet := model.GetAccountWallet(ctx, readded.WalletId); wallet == nil || wallet.Blockchain != "SOL" || !wallet.Active {
+		if payoutWalletId := model.GetPayoutWalletId(ctx, removedNetworkId); payoutWalletId != nil {
+			tb.Fatal("the refusal selected a payout wallet", payoutWalletId)
+		}
+
+		// another key is added on its chain, returned when added again, and
+		// reactivated when added after its removal
+		otherArgs := func() *model.CreateAccountWalletExternalArgs {
+			return &model.CreateAccountWalletExternalArgs{Blockchain: "SOL", WalletAddress: walletAddressTestSolana("other"), DefaultTokenType: "USDC"}
+		}
+		other, err := CreateAccountWalletExternal(otherArgs(), removedOwner)
+		if err != nil {
+			tb.Fatal(err)
+		}
+		if wallet := model.GetAccountWallet(ctx, other.WalletId); wallet == nil || wallet.Blockchain != "SOL" || !wallet.Active {
 			tb.Fatal("the Solana wallet was not created", wallet)
 		}
-		if payoutWalletId := model.GetPayoutWalletId(ctx, removedNetworkId); payoutWalletId == nil || *payoutWalletId != readded.WalletId {
+		if payoutWalletId := model.GetPayoutWalletId(ctx, removedNetworkId); payoutWalletId == nil || *payoutWalletId != other.WalletId {
 			tb.Fatal("the new Solana wallet did not become the payout wallet of a network without one", payoutWalletId)
+		}
+		again, err := CreateAccountWalletExternal(otherArgs(), removedOwner)
+		if err != nil || again.WalletId != other.WalletId {
+			tb.Fatal("adding the Solana wallet again did not return it", again, err)
+		}
+		if result := model.RemoveWallet(other.WalletId, removedOwner); !result.Success {
+			tb.Fatal("the Solana wallet was not removed")
+		}
+		reactivated, err := CreateAccountWalletExternal(otherArgs(), removedOwner)
+		if err != nil || reactivated.WalletId != other.WalletId {
+			tb.Fatal("adding the removed Solana wallet again did not reactivate it", reactivated, err)
+		}
+		if wallet := model.GetAccountWallet(ctx, other.WalletId); wallet == nil || !wallet.Active {
+			tb.Fatal("the Solana wallet was not reactivated", wallet)
 		}
 
 		// a mixed-case Polygon address with a mistyped checksum writes nothing
@@ -178,7 +199,7 @@ func TestCreateAccountWalletOnItsChainDoesNotReuseAnotherChainsRow(t *testing.T)
 			}
 			return unicode.ToUpper(r)
 		}, polygonAddress[2:])
-		before := len(model.GetActiveAccountWallets(owner).Wallets)
+		before = len(model.GetActiveAccountWallets(owner).Wallets)
 		_, err = CreateAccountWalletExternal(&model.CreateAccountWalletExternalArgs{Blockchain: "MATIC", WalletAddress: mistyped, DefaultTokenType: "USDC"}, owner)
 		requireRefusalAnswer(tb, err, http.StatusBadRequest, "invalid wallet address: the mixed-case checksum of this Polygon address does not match; check it for a typo")
 		if after := len(model.GetActiveAccountWallets(owner).Wallets); after != before {

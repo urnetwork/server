@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -56,6 +57,14 @@ type CreateAccountWalletResult struct {
 	WalletId server.Id `json:"wallet_id"`
 }
 
+// The network's wallet with the address on the chain: an existing one is
+// returned, and reactivated when it was removed. A network has one wallet per
+// address (unique_network_wallet_address), so the result is nil, and nothing is
+// written, when the network has the address on another chain: a row stored
+// before addresses were validated (a Solana key saved as a Polygon wallet,
+// support inbox 8045). Returning or reactivating that row reported success
+// while the address stayed on the wrong chain, and changing its chain would
+// alter a stored wallet, so it is left as it is.
 func CreateAccountWalletExternal(
 	session *session.ClientSession,
 	createAccountWallet *CreateAccountWalletExternalArgs,
@@ -67,42 +76,35 @@ func CreateAccountWalletExternal(
 		active := true
 		createTime := server.NowUtc()
 
-		// First try to find an existing wallet with the same network_id and
-		// wallet_address on the same chain. A row stored before addresses were
-		// validated can hold the address on another chain (a Solana key saved
-		// as a Polygon wallet, support inbox 8045). Returning or reactivating
-		// that row kept the address on the wrong chain while the request,
-		// validated on its own chain, reported success, so the requested chain
-		// gets its own row. An active row is reused before an inactive one,
-		// then the oldest. A failed statement raises, which ends the
-		// transaction at once. It used to be taken for "no wallet", and the
-		// insert below then failed too, after which the transaction went on to
-		// a commit that server.Tx retried for a minute.
-		var existingWalletId *server.Id
-		existingResult, err := tx.Query(
+		// First try to find an existing wallet with the same network_id and wallet_address
+		var existingWalletId server.Id
+		var existingBlockchain string
+		existingRow := tx.QueryRow(
 			session.Ctx,
 			`
 					SELECT wallet_id, blockchain
 					FROM account_wallet
 					WHERE network_id = $1 AND wallet_address = $2
-					ORDER BY active DESC, wallet_id
 			`,
 			createAccountWallet.NetworkId,
 			createAccountWallet.WalletAddress,
 		)
-		server.WithPgResult(existingResult, err, func() {
-			for existingResult.Next() {
-				var rowWalletId server.Id
-				var rowBlockchain string
-				server.Raise(existingResult.Scan(&rowWalletId, &rowBlockchain))
-				if existingWalletId == nil && sameBlockchain(rowBlockchain, createAccountWallet.Blockchain) {
-					existingWalletId = &rowWalletId
-				}
-			}
-		})
-		if existingWalletId != nil {
 
-			glog.Infof("[wm][%s]found existing wallet %s for address %s", createAccountWallet.NetworkId, *existingWalletId, createAccountWallet.WalletAddress)
+		err := existingRow.Scan(&existingWalletId, &existingBlockchain)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			// a failed statement ends the transaction at once. It used to be
+			// taken for "no wallet", and the insert below then failed too,
+			// after which the transaction went on to a commit that server.Tx
+			// retried for a minute.
+			server.Raise(err)
+		}
+		if err == nil {
+			if !sameBlockchain(existingBlockchain, createAccountWallet.Blockchain) {
+				glog.Infof("[wm][%s]address %s is wallet %s on %s, not %s", createAccountWallet.NetworkId, createAccountWallet.WalletAddress, existingWalletId, existingBlockchain, createAccountWallet.Blockchain)
+				return
+			}
+
+			glog.Infof("[wm][%s]found existing wallet %s for address %s", createAccountWallet.NetworkId, existingWalletId, createAccountWallet.WalletAddress)
 
 			// Found an existing wallet - update active = true
 			_ = server.RaisePgResult(tx.Exec(
@@ -112,10 +114,10 @@ func CreateAccountWalletExternal(
 									SET active = true
 									WHERE wallet_id = $1 AND NOT active
 							`,
-				*existingWalletId,
+				existingWalletId,
 			))
 
-			walletId = existingWalletId
+			walletId = &existingWalletId
 			return
 		}
 
