@@ -11009,4 +11009,20 @@ var migrations = []any{
 	// The Snow three-model union is a new policy, never a relabeling of any
 	// retained Sol/mini review. Each member's complete findings stay attributed.
 	newSqlMigration(competitionSnowWinnerReviewMigration()),
+
+	// 894: the capabilities a provider declares in its provide beyond its keys
+	// (connect `Provide.post_quantum_encryption`), one row for each client
+	// whose latest provide with a Public or Network key declared one
+	// (SetProvideWithCapabilities). FindProviders2 reads it for a request that
+	// requires post-quantum encryption. A new table needs no lock_timeout, and
+	// the release running when it applies never reads or writes it.
+	newSqlMigration(`
+		CREATE TABLE provide_capability (
+			client_id uuid NOT NULL,
+			post_quantum_encryption bool NOT NULL,
+			change_time timestamp NOT NULL,
+
+			PRIMARY KEY (client_id)
+		)
+	`),
 }

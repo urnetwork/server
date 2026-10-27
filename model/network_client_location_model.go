@@ -4970,6 +4970,12 @@ type FindProviders2Args struct {
 	// "dualstack", "v4-only", "v6-only". See ipFamilyFacetsForFilter. An
 	// online request draws the families a filter names without preference.
 	IpFamily string `json:"ip_family"`
+	// PostQuantumEncryption keeps only providers whose latest provide with a
+	// Public or Network key declared post-quantum encryption sessions
+	// (provide_capability_model.go), in every draw of the request, named
+	// providers included. A provider that never declared it, as none before
+	// the field did, is left out. Unset keeps the capability-blind answer.
+	PostQuantumEncryption bool `json:"post_quantum_encryption"`
 }
 
 type FindProviders2Result struct {
@@ -6225,6 +6231,11 @@ func FindProviders2(
 		// stays where its spec put it. Nothing outside the request keeps the
 		// verdict.
 		offlineClientIds := map[server.Id]bool{}
+		// For a request that requires post-quantum encryption, the candidates
+		// whose latest provide did not declare it (provide_capability_model.go).
+		// Each leaves every draw of this request, named providers included.
+		// Like offline, nothing outside the request keeps the verdict.
+		incapableClientIds := map[server.Id]bool{}
 		exclusionReadClientIds := map[server.Id]bool{}
 		qualityReadClientIds := map[server.Id]bool{}
 		var nativeClientScores map[server.Id]*ClientScore
@@ -6254,7 +6265,7 @@ func FindProviders2(
 			rejectedSelection := func(clientId server.Id) bool {
 				if offlineClientIds[clientId] {
 					offlineSelections[clientId] = true
-				} else if !hardExcludedClientIds[clientId] {
+				} else if !hardExcludedClientIds[clientId] && !incapableClientIds[clientId] {
 					return false
 				}
 				delete(clientScores, clientId)
@@ -6264,7 +6275,7 @@ func FindProviders2(
 			clientIds = slices.DeleteFunc(clientIds, rejectedSelection)
 			borrowedClientIds = slices.DeleteFunc(borrowedClientIds, rejectedSelection)
 			providers = slices.DeleteFunc(providers, func(provider *FindProvidersProvider) bool {
-				return hardExcludedClientIds[provider.ClientId] || offlineSelections[provider.ClientId]
+				return hardExcludedClientIds[provider.ClientId] || offlineSelections[provider.ClientId] || incapableClientIds[provider.ClientId]
 			})
 			observation.explicitReturned = len(providers) - len(clientIds) - len(borrowedClientIds)
 		}
@@ -6304,6 +6315,23 @@ func FindProviders2(
 					candidateClientIds = append(candidateClientIds, clientId)
 				}
 			}
+			// Read first for a request that requires post-quantum
+			// encryption, so the reads below are only of declaring providers.
+			// An undeclared candidate is read once and leaves every draw.
+			if findProviders2.PostQuantumEncryption {
+				capableClientIds, err := readProvidePostQuantumEncryption(session.Ctx, candidateClientIds)
+				if err != nil {
+					return err
+				}
+				candidateClientIds = slices.DeleteFunc(candidateClientIds, func(clientId server.Id) bool {
+					if capableClientIds[clientId] {
+						return false
+					}
+					incapableClientIds[clientId] = true
+					exclusionReadClientIds[clientId] = true
+					return true
+				})
+			}
 			excluded, err := getProviderHardExclusions(session.Ctx, candidateClientIds)
 			if err != nil {
 				return err
@@ -6337,7 +6365,7 @@ func FindProviders2(
 			qualityClientIds := []server.Id{}
 			if rankMode == RankModeQuality {
 				for _, id := range namedClientIds {
-					if !hardExcludedClientIds[id] && !qualityReadClientIds[id] {
+					if !hardExcludedClientIds[id] && !incapableClientIds[id] && !qualityReadClientIds[id] {
 						qualityClientIds = append(qualityClientIds, id)
 					}
 				}
@@ -6374,6 +6402,7 @@ func FindProviders2(
 		if rankMode == RankModeQuality {
 			maps.Copy(namedExcludedClientIds, qualityExcludedClientIds)
 		}
+		maps.Copy(namedExcludedClientIds, incapableClientIds)
 		appendSpecProviders(namedExcludedClientIds)
 
 		// drop providers this caller cannot contract with.
@@ -6441,6 +6470,10 @@ func FindProviders2(
 			}
 			// read without a live connection: out of every pool of this request
 			for clientId := range offlineClientIds {
+				delete(clientScores, clientId)
+			}
+			// undeclared under a post-quantum request: out of every pool too
+			for clientId := range incapableClientIds {
 				delete(clientScores, clientId)
 			}
 			for clientId := range qualityExcludedClientIds {
@@ -6864,6 +6897,19 @@ func FindProviders2(
 		hardExcludedClientIds, err := getProviderRequestExclusions(session.Ctx, specClientIds, rankMode)
 		if err != nil {
 			return nil, err
+		}
+		// a named provider that did not declare post-quantum encryption is
+		// not answered to a request that requires it, as in discovery
+		if findProviders2.PostQuantumEncryption {
+			capableClientIds, err := readProvidePostQuantumEncryption(session.Ctx, specClientIds)
+			if err != nil {
+				return nil, err
+			}
+			for _, clientId := range specClientIds {
+				if !capableClientIds[clientId] {
+					hardExcludedClientIds[clientId] = true
+				}
+			}
 		}
 		appendSpecProviders(hardExcludedClientIds)
 	}
