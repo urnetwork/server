@@ -5,11 +5,29 @@ checklist is the acceptance index for the new release, not an authorization to
 activate production. Historical v1 checkmarks do not qualify a different source,
 image, host manifest, policy or review provider.
 
-## Current checkpoint — October 27, 05:36 UTC
+## Current checkpoint — October 27, 06:17 UTC
 
 The following supersedes the provider and baseline-preparation progress in the
 dated bullets below; those bullets retain the earlier qualification history.
 
+- The owner approved the [deadline-compatible calibration amendment](CALIBRATION-AMENDMENT-2026-10-27.md):
+  one corrected fresh R9/R9 bridge, then two independent seeds with correct
+  reference ordering on both. R9, the 26.9% margin, significance, all gates and
+  the three-hour submission cap remain unchanged. Three accepted original A/A
+  pairs remain preserved. The native two-seed tool is not yet qualified: its
+  first full test run exposed a synthetic publication fixture with null
+  required evidence; strict validation correctly refused it. No real draw or
+  corrected bridge has started. Production repeat rewards are explicitly
+  `allow`; same-round duplicate reuse and fresh per-epoch assessment remain.
+- The [V5 review precommit](SNOW-REVIEW-QUALIFICATION-PRECOMMIT-2026-10-27-V5.json)
+  is pushed in `3e36b2432`. The sole genuine attempt started at **06:03:33 UTC**,
+  native PID **2763522**, session **81168**. Its independently generated full
+  plan matches the public precommit byte-for-byte. Cancellation passed without
+  approval and all three models approved the benign fixture; fabrication review
+  is running at the observation. This is **not yet
+  provider qualification**. A preceding OS launcher syntax error exited before
+  native execution or provider calls; its logs remain separate and preserved.
+  No automatic provider retry or timed-scoring overlap is authorized.
 - Clean control source `fb5054121` with Warp `1ea3a31` completed three race
   passes: simulator 200, controller 42, model 13, native helpers 60, Grafana 24
   and Warp ownership 2 per pass, zero skips, exact original container/network
@@ -40,8 +58,8 @@ dated bullets below; those bullets retain the earlier qualification history.
   archives with honest `buildvcs=false` provenance. Independent image byte
   readback and nonroot/read-only/offline startup passed; evidence `f0b17b2d…`,
   exact executable match and original container/network inventory restored.
-  A new public precommit must precede one fresh genuine attempt; none has
-  started.
+  Publication and the separate genuine attempt are recorded above; the V4
+  failed outcome is not relabeled as the new attempt.
 - Alert-routing, preflight and finite 4/5 GiB host-profile regressions passed
   **69 smoke tests, zero skips**, including compiled old-source failures.
   Server fixes are pushed through `fb5054121`; Warp owner/transport changes
@@ -50,8 +68,7 @@ dated bullets below; those bullets retain the earlier qualification history.
   Independent three-pass validation is complete as above. The new exact
   seven-file C2 host-checker bundle is installed **inactive**; manifest
   `a3ea6dfa…`, installation receipt `16503195…`. No full checker or host
-  qualification ran, live configuration is unchanged, and no live route change
-  or successful Slack notification is claimed.
+  qualification ran and active host configuration is unchanged.
 - All five main control binaries are built from clean `1a1bf5ae6`; worker OCI
   `sha256:1996ccd1…` has byte-identical native/readback worker `395bce92…`.
   This is release provenance, not production-host readiness or a claim that the
@@ -60,9 +77,15 @@ dated bullets below; those bullets retain the earlier qualification history.
   synthetic metric was accepted by the native publisher and read back exactly
   from Mimir; receipt `0d14ffc4…`. This is not a real runner heartbeat.
   The one email test failed; main Grafana deliberately has no SMTP. The
-  corrected managed routes use its existing native main Slack receiver, with
-  `support@ur.xyz` retained as incident owner. Actual notification delivery
-  remains unproved. The old staging supervisor is disabled for
+  corrected managed route now uses its existing native main Slack receiver,
+  with `support@ur.xyz` retained as incident owner. One native stored-contact
+  test returned Grafana `success` in **282 ms**; receipt `bebc4729…` and separate
+  readback `0e155877…` prove policy/contacts stayed unchanged. This is integration
+  acknowledgment, not human channel confirmation, a real runner heartbeat or
+  a rule-triggered alert. All seven live rule expressions/thresholds/timing and
+  the 15-second/30-second dashboard refresh/warning match. Their new `owner`
+  labels still require normal Warp/Grafana deployment containing `1ea3a31`;
+  file-provisioned rules were not overwritten through the API. The old staging supervisor is disabled for
   autostart, with its unit and historical state preserved. Main DB migrations
   891–893 still awaited deployment at the last read-only check, **05:14 UTC**.
 
@@ -109,8 +132,9 @@ dated bullets below; those bullets retain the earlier qualification history.
   installed inactive: 17 root-owned read-only artifacts, unchanged v3 dependency
   hashes, no helper or worker execution and no service activation. Installation
   receipt SHA-256 `e51f219353e2f1c912c4beda8a9d12f0394e1524b3efba0b9036ff3d76d47db7`.
-- Replacement bridge authorization and the independent-seed amendment remain
-  unresolved. No corrected bridge or independent-seed scoring has started.
+- Replacement bridge and two-seed scope are approved as above. Native-tool
+  qualification and authenticated executable/plan publication remain gates;
+  no corrected bridge or independent-seed scoring has started.
 - Actual main PostgreSQL was audited at 01:33:35 UTC in a verified read-only,
   repeatable-read transaction. All 890 deployed migration identities match;
   migrations **891–893** (mini provider, multi-repository promotion, Snow union)
