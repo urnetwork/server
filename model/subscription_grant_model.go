@@ -238,6 +238,11 @@ type TransferBalanceSummary struct {
 	BalanceByteCount ByteCount
 	// pending: what open contracts reserve
 	OpenTransferByteCount ByteCount
+	// The part of pending that no current grant reserves: open contracts whose
+	// grant has ended or whose reservation outlived its lease. Their deadline
+	// has passed, and only a closer releases them (see
+	// RequestPayerDueContractClose).
+	StrandedTransferByteCount ByteCount
 	// every active balance, superseded grants included
 	ActiveTransferBalances []*TransferBalance
 }
@@ -257,7 +262,9 @@ func GetTransferBalanceSummary(ctx context.Context, networkId server.Id) *Transf
 // reads today's grant with nothing used, instead of yesterday's and today's grants
 // added together. Spending is unchanged: the superseded grant ends first, so its
 // leftover is still drawn first, and until it ends the summary understates what is
-// available by that leftover.
+// available by that leftover. Pending beyond what the current grants reserve is
+// stranded: a grant that ended no longer lists its contracts' reservations, and a
+// reservation that outlived its lease left its grant's counter.
 func SummarizeTransferBalances(
 	transferBalances []*TransferBalance,
 	openTransferByteCount ByteCount,
@@ -268,6 +275,7 @@ func SummarizeTransferBalances(
 		ActiveTransferBalances: transferBalances,
 	}
 	supersededBalanceIds := SupersededGrants(transferBalances)
+	currentReservedByteCount := ByteCount(0)
 	for _, transferBalance := range transferBalances {
 		if !transferBalance.EndTime.After(now) {
 			continue
@@ -278,9 +286,11 @@ func SummarizeTransferBalances(
 		}
 		summary.BalanceByteCount += transferBalance.BalanceByteCount
 		summary.StartBalanceByteCount += transferBalance.StartBalanceByteCount
+		currentReservedByteCount += transferBalance.reservedByteCount
 	}
 	// the reservations come from the per-balance escrow counters and the open
 	// total from the contracts, which can drift apart
 	summary.OpenTransferByteCount = max(0, summary.OpenTransferByteCount)
+	summary.StrandedTransferByteCount = max(0, summary.OpenTransferByteCount-currentReservedByteCount)
 	return summary
 }

@@ -5,7 +5,7 @@ checklist is the acceptance index for the new release, not an authorization to
 activate production. Historical v1 checkmarks do not qualify a different source,
 image, host manifest, policy or review provider.
 
-## Current checkpoint — October 27, 10:00 UTC
+## Current checkpoint — October 27, 11:00 UTC
 
 The following supersedes the provider and baseline-preparation progress in the
 dated bullets below; those bullets retain the earlier qualification history.
@@ -13,7 +13,7 @@ dated bullets below; those bullets retain the earlier qualification history.
 - The trusted corrected **R9/R9 bridge is now running**, started **09:32:21
   UTC**, deadline **12:32:21 UTC**, session **14145**, runner **3094175**.
   Native precommit authentication `128fc974…` passed before the one-shot launch.
-  At this checkpoint the runner is verified live and has completed **2/9
+  At this checkpoint the runner is verified live and has completed **9/9
   controls**, **0/9 candidates**. It uses exact request `2114953f…`, frozen
   evaluator `98c…` / scorer `efd…`, 3,600 providers, client pool 200 and margin
   26.9%. No unrelated compilation, tests, fixture execution or model calls may
@@ -47,7 +47,8 @@ dated bullets below; those bullets retain the earlier qualification history.
   publication authentication remains required. Trusted operator-authored
   calibration may precede pending reviewer qualification under the documented
   [phase-order separation](PRELAUNCH-PHASE-ORDER-2026-10-27.md); every final
-  review/launch gate remains mandatory. No corrected bridge or B seed has run.
+  review/launch gate remains mandatory. The corrected bridge is in progress;
+  no completed bridge acceptance or independent B-seed measurement is claimed.
 - Precommit authentication exposed a reference-sidecar packaging mismatch:
   genuine flat source/builder sidecars were not pinned under the verifier's
   required `evidence/` layout. [Byte-verified views](REFERENCE-EVIDENCE-LAYOUT-2026-10-27.json)
@@ -378,12 +379,12 @@ substitute for formal calibration or live readiness.
 
 | Gate | Evidence required for acceptance | Current evidence / remaining action |
 | --- | --- | --- |
-| Evaluated source and compiler | Exact ten-repository commits, canonical lock, actual binary build metadata and Go 1.27.3; no operator-proxy dependency | C2 server `a9e8e1a7`, image `b1632a55…`, binary `efd1077d…`, actual Go 1.27.3 and canonical lock `ec322ed2…` are recorded in the [bridge precommit](../baseline/prelaunch-c2-bridge-2026-10-26/README.md). C1 identities remain historical A evidence, never relabeled C2. |
+| Evaluated source and compiler | Exact ten-repository commits, canonical lock, actual binary build metadata and Go 1.27.3; no operator-proxy dependency | Current C2 server `a9e8e1a7`, image `98c9061c…`, binary `efd1077d…`, actual Go 1.27.3 and canonical lock `ec322ed2…` are bound by the [fresh V2 bridge plan](FRESH-BRIDGE-PLAN-2026-10-27-V2.json) and current-state receipts. Earlier C2 images and C1 identities retain their own historical evidence; none is relabeled as this release. |
 | Full cold evaluation | Nine fresh controls, nine fresh no-op candidates, authenticated score and unchanged G1–G6 inputs, resource/accounting reports, actual total wall time within three hours, exact cleanup | Passed the prospectively declared corrected-release first cohort: 10,498 seconds, all gates and exact cleanup. Complete [original evidence](../baseline/prelaunch-corrected-same-seed-r9-2026-10-25/completed/cohort-01/README.md) is verified. It is one observation serving two checks, not two independent cohorts; other seeds are not yet qualified. |
-| Statistical calibration | Approved named three-pair/bridge/three-seed protocol; unchanged R9, algorithm, gates, significance, integrity and deadlines; retained outcomes and measured variance | Three-pair native reduction accepted; 99.525% bootstrap placeability; prospective practical margin frozen at **26.9%**. Original means changed −2.80%, +1.16%, +3.44%; p=0.297/0.579/0.783; comparison-specific fringes 9.018%, 10.046%, 7.496%, no significance/takeover. C2 bridge failed after nine complete but **unscored** baseline simulations, zero candidates: shell binary64 metadata comparison, not a wrong source margin. Raw byte/sidecar authentication passed, without semantic scoring. No continuation or resampling is authorized; a new protocol decision remains open. Bridge acceptance and all-three independent reference orderings remain open. The floor was 16.1%, not the selected margin. Reduced confidence is explicit; production qualification is incomplete. |
+| Statistical calibration | Approved named three-pair/bridge/two-seed protocol; unchanged R9, algorithm, gates, significance, integrity and deadlines; retained outcomes and measured variance | Three-pair native reduction accepted; 99.525% bootstrap placeability; prospective practical margin frozen at **26.9%**. Original means changed −2.80%, +1.16%, +3.44%; p=0.297/0.579/0.783; comparison-specific fringes 9.018%, 10.046%, 7.496%, no significance/takeover. The failed metadata-comparison bridge and its nine unscored controls remain preserved and unused. The fresh corrected bridge is running under its published plan, with 9/9 controls complete at 11:00 UTC; acceptance remains pending. The [approved amendment](CALIBRATION-AMENDMENT-2026-10-27.md) requires correct reference ordering on both independent seeds. A further one-seed request is not approved. The floor was 16.1%, not the selected margin. Reduced confidence is explicit; production qualification is incomplete. |
 | Reference patches | Correctness checks, exact patch/build identities and measured no-op/worse/better behavior; separate pilot and held-out seeds | The [snapshot pilot](SNAPSHOT-PILOT-2026-10-25.md) completed fresh 9+9 with all gates and cleanup in 10,562 seconds. Both predeclared directional conditions passed: mean 19,053.39→18,206.07 ms (4.45% lower), median 18,903.60→18,285.95 ms. Welch p=0.2407: not significant or a takeover; this is a proposed better reference, not held-out qualification. The unfavorable [warm-reader pilot](../baseline/prelaunch-warm-reader-pilot-2026-10-25/completed/README.md) remains preserved. Its unchanged patch has now passed [current-source negative-reference correctness/build qualification](../evaluator/references/2026-10-25/NEGATIVE-QUALIFICATION.md), but fresh independent-seed ordering still must pass. Neither pilot enters Stage A. |
-| Host containment and rebaseline | Exact-image host fingerprint, reserved management capacity, network/mount containment, adversarial cleanup and independently authenticated readiness | Current-boot production-size CPU/memory-bomb cleanup passed in 653 ms; 5 GiB broad-build workspace passed. Final C2 image/actual-round host rebaseline, production metadata binding and readiness remain unverified. Calibration fixture hardware labels are not positive host attestations. |
-| Honesty and source-test providers | Genuine Snow three-member review/test-broker qualification; maintainer tests on Sol 6.1 low; retained acceptance/rejection/uncertainty/unsafe/prompt-injection evidence | No key/credit dependency. Latest wrapper passed 45 guards three times plus three deterministic failure controls. Real cancellation passed, but Qwen response identity/status was rejected, Gemma supplied incomplete evidence, and Muse returned the wrong judgment shape. All were retained and held; fixed schema/diagnostics/cache need tests, new broker image and fresh full qualification. No model/effort/timeout downgrade. |
+| Host containment and rebaseline | Exact-image host fingerprint, reserved management capacity, network/mount containment, adversarial cleanup and independently authenticated readiness | Latest current-boot hostile fixture exercised all ten evaluation cores and 72 GiB memory; OOM exit 137 and joined cleanup passed in 775 ms with original container/network inventory restored. This separate hostile fixture is not exact evaluator-image execution. The current C2 negative self-check records its actual fingerprint without granting readiness. Actual reserved-round C2 R1, production metadata binding and positive readiness remain unverified. Calibration fixture hardware labels are not positive host attestations. |
+| Honesty and source-test providers | Genuine Snow three-member review/test-broker qualification; maintainer tests on Sol 6.1 low; retained acceptance/rejection/uncertainty/unsafe/prompt-injection evidence | Qualified control source `09cc510d`, hardened image `d9006e2f…` and three-pass offline receipts are retained. V6 cancellation passed, but the benign fixture held: Qwen/Gemma approved and Muse withheld reproducibility because the supplied context truthfully reported no executed tests. All three responses were complete and pinned; this was not a transport/schema failure. Actual deterministic fixture-test evidence is prepared but unexecuted during timed scoring. A new driver, qualification receipt, precommit and genuine attempt remain required; no uncertainty override, model downgrade or automatic retry is permitted. |
 | Automated epoch lifecycle | Real evaluation → provisional decision → review/reject-and-advance → approved source build/qualification → next weekly round; exhaustion carries incumbent, uncertainty pauses; restart recovery | Control suites passed at their recorded revisions in [control validation](CONTROL-VALIDATION-2026-10-25.md). Genuine provider and live runtime lifecycle acceptance remains open; do not equate unit tests with deployed proof. |
 | Production policy and timing | New production season and scoped credentials, $20 fee, unbounded FIFO, three-hour job bound, one authenticated R9 control per epoch, six full weekly windows, no early admission | Prepared source ledger is not activation. Inspect deployed policy, API advertisement, supervisor journal and readiness acknowledgments after maintenance ends. Never reinterpret an old staging round as production. |
 | Artifact durability and distribution | Exact image/archive digest and retained distribution/readback record; live MinIO locking/versioning, replication, capacity and retention proof | Source and replica exact-version payload/COMPLIANCE-retention readback passed; native bucket-protection proof passed. Replica is co-located, not off-site. Ordinary replica access remains denied; verified administrative restore did not broaden it. Version-aware accounting passed: 464 versions / 39,153,130 bytes against the approved decimal 10 TB allocation (not a physical quota/free-space proof). Final retained publication and control-image distribution remain open. `support@ur.xyz` owns post-retention deletion. |
@@ -396,12 +397,11 @@ substitute for formal calibration or live readiness.
 1. Publish the completed cold phase and preserved outcomes before the next
    larger validation. Keep every subsequent scoring attempt serial under the
    shared slot; do not overlap it with builds, tests or resource-pressure work.
-2. Qualify the metadata-precision shell correction and preserve the completed
-   read-only byte/sidecar authentication of nine unscored bridge baselines.
-   Obtain an explicit new protocol
-   decision before any scoring; this failure authorizes no rerun or resampling.
-   A thin overlay may change only the reviewed shell files, with the frozen
-   application binary verified unchanged; publish its new immutable identity.
+2. Preserve the failed bridge and its nine unscored controls without reuse.
+   The qualified metadata-only correction and fresh V2 precommit now govern the
+   running corrected bridge; do not restart, extend or resample it. Authenticate
+   its terminal measurements, score replay and cleanup before acceptance, then
+   prepare the two approved independent seeds under their own precommit.
    Bridge and independent reference acceptance still require genuine evidence.
 3. Main maintenance is cleared. Complete exact-image host and artifact proofs,
    genuine provider qualification, scoped policy and independent readiness.

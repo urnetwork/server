@@ -2004,9 +2004,12 @@ func CreateTransferEscrow(
 ) (transferEscrow *TransferEscrow, returnErr error) {
 	// Keep one authority, including absence, across admission recovery reruns.
 	ctx = providerWorkSessionContext(ctx)
-	return runRedisContractAdmission(ctx, func(ctx context.Context) (*TransferEscrow, error) {
+	transferEscrow, returnErr = runRedisContractAdmission(ctx, func(ctx context.Context) (*TransferEscrow, error) {
 		return createTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, contractTransferByteCount)
 	})
+	// source is payer
+	requestPayerDueContractCloseAfterRefusal(ctx, sourceNetworkId, returnErr)
+	return
 }
 
 // Shared transaction owner; public entry points always supply Redis admission.
@@ -2191,9 +2194,12 @@ func CreateCompanionTransferEscrow(
 ) (transferEscrow *TransferEscrow, returnErr error) {
 	// Recovery reruns and payer handoffs retain the operation's pinned source.
 	ctx = providerWorkSessionContext(ctx)
-	return runRedisContractAdmission(ctx, func(ctx context.Context) (*TransferEscrow, error) {
+	transferEscrow, returnErr = runRedisContractAdmission(ctx, func(ctx context.Context) (*TransferEscrow, error) {
 		return createCompanionTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, contractTransferByteCount, originContractTimeout)
 	})
+	// the destination pays a companion, except a prober's handed-off payer
+	requestPayerDueContractCloseAfterRefusal(ctx, destinationNetworkId, returnErr)
+	return
 }
 
 // Shared transaction owner; public entry points always supply Redis admission.
