@@ -621,7 +621,7 @@
       "id": 47,
       "type": "stat",
       "title": "cap refusals / s, busiest process",
-      "description": "Contract creations the per-process cap (HostedContractConcurrency, 256 by default) refused at once, per second over five minutes, in the busiest selected process. A process counts only once it has run 30 minutes: a block's own restart brings 12-21 minutes of expected refusals. Orange from 50/s: the WARN of SIGNALS.md section 26 needs 10 minutes above it. Refusals mean creations are not returning; the cap protects the process but does not end a storm.",
+      "description": "Contract creations the per-process cap (proxy.yml hosted_contract_concurrency, 256 by default) refused at once, per second over five minutes, in the busiest selected process. A process counts only once it has run 30 minutes: a block's own restart brings 12-21 minutes of expected refusals. Orange from 50/s: the WARN of SIGNALS.md section 26 needs 10 minutes above it. Refusals mean creations are not returning; the cap protects the process but does not end a storm.",
       "gridPos": {
         "h": 4,
         "w": 4,
@@ -740,7 +740,7 @@
       "id": 49,
       "type": "timeseries",
       "title": "calls in stage other per process",
-      "description": "Each process's two-minute maximum of calls in stage other, for the busiest process of each block on each host (a rollout's old and new process show as one line). The line is the PAGE of SIGNALS.md section 26: 1,000 for 5 minutes. A process under the per-process cap stays near 256 (HostedContractConcurrency); then the cap refusals carry the storm.",
+      "description": "Each process's two-minute maximum of calls in stage other, for the busiest process of each block on each host (a rollout's old and new process show as one line). The line is the PAGE of SIGNALS.md section 26: 1,000 for 5 minutes. A process under the per-process cap stays near its capacity (proxy.yml hosted_contract_concurrency, 256 by default); then the cap refusals carry the storm.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -1112,7 +1112,7 @@
       "description": "Protocol rejections generated for CreateContract, by cause. deadline is a creation that ran out of time inside the server: 0-0.6/s when healthy, about 1.9k/s at the 2026-10-26 storm's peak. insufficient_balance follows a daily pattern and is not by itself a storm signal.",
       "gridPos": {
         "h": 8,
-        "w": 12,
+        "w": 8,
         "x": 0,
         "y": 31
       },
@@ -1186,14 +1186,113 @@
       ]
     },
     {
+      "id": 62,
+      "type": "timeseries",
+      "title": "cap slots in use against capacity per process",
+      "description": "Each process's two-minute maximum of contract creation slots in use, for the busiest process of each block on each host (a rollout's old and new process show as one line), against the slots its cap has (dashed, in the tooltip but not the legend). A slot is one control call made only of CreateContract frames, held until the call returns. The cap is proxy.yml hosted_contract_concurrency, 256 by default, read when a process starts; a value that is not a positive integer keeps 256. A line at its capacity refuses creations (cap refusals, beside it); the gap below is the headroom. With the grant probe (2026-10-26 22:06Z) a process held at most 32 creations in flight from its 30th minute on, and came near its cap only in the first 5 minutes after a restart. Processes without the gauges export nothing.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 31
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".* capacity"
+            },
+            "properties": [
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    10,
+                    10
+                  ]
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              },
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": false,
+                  "viz": false
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (host, block) (max_over_time(urnetwork_hosted_contract_admission_in_use{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[2m]))",
+          "legendFormat": "{{host}} {{block}} in use"
+        },
+        {
+          "refId": "B",
+          "expr": "max by (host, block) (urnetwork_hosted_contract_admission_capacity{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "{{host}} {{block}} capacity"
+        }
+      ]
+    },
+    {
       "id": 53,
       "type": "timeseries",
       "title": "cap refusals / s per process, after 30 minutes",
-      "description": "Contract creations refused at once by each process's cap (HostedContractConcurrency, 256 by default), for the processes of each block that have run 30 minutes or more: a block's own restart brings 12-21 minutes of expected refusals, which this leaves out. The line is the WARN of SIGNALS.md section 26: 50/s for 10 minutes. A refusal costs no credential, database or Redis work. Processes without the cap export nothing.",
+      "description": "Contract creations refused at once by each process's cap (proxy.yml hosted_contract_concurrency, 256 by default), for the processes of each block that have run 30 minutes or more: a block's own restart brings 12-21 minutes of expected refusals, which this leaves out. The line is the WARN of SIGNALS.md section 26: 50/s for 10 minutes. A refusal costs no credential, database or Redis work. Processes without the cap export nothing.",
       "gridPos": {
         "h": 8,
-        "w": 12,
-        "x": 12,
+        "w": 8,
+        "x": 16,
         "y": 31
       },
       "datasource": {
