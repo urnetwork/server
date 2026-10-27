@@ -21,7 +21,8 @@ enabled: true
 
 facilitator:
   url: ""
-  api_key: ""
+  api_key_id: ""
+  api_key_secret: ""
 
 pay_to: {}
 
@@ -115,12 +116,14 @@ func TestX402BlankConfigNoops(t *testing.T) {
 // The rule: a MISSING piece means off. Not "off for the missing part" -- off entirely.
 // Half configured is worse than off, because it looks live.
 func TestX402ConfigUsable(t *testing.T) {
+	facilitator := x402TestFacilitator(t)
 	full := func() *X402Config {
 		return &X402Config{
 			Enabled:     true,
-			Facilitator: x402FacilitatorConfig{Url: "https://x402.stripe.com", ApiKey: "sk_test_x"},
-			PayTo:       map[string]string{"base": "0xmerchant"},
+			Facilitator: facilitator,
+			PayTo:       map[string]string{"base": x402CdpTestPayToBase},
 			Networks:    []string{"base"},
+			Asset:       "usdc",
 		}
 	}
 
@@ -129,11 +132,12 @@ func TestX402ConfigUsable(t *testing.T) {
 
 	// ...and every way of being half-filled turns it off
 	for name, breakIt := range map[string]func(*X402Config){
-		"blank facilitator url":     func(c *X402Config) { c.Facilitator.Url = "" },
-		"blank facilitator api key": func(c *X402Config) { c.Facilitator.ApiKey = "" },
-		"blank pay_to":              func(c *X402Config) { c.PayTo = nil },
+		"blank facilitator url":        func(c *X402Config) { c.Facilitator.Url = "" },
+		"blank facilitator api key id": func(c *X402Config) { c.Facilitator.ApiKeyId = "" },
+		"blank facilitator api secret": func(c *X402Config) { c.Facilitator.ApiKeySecret = "" },
+		"blank pay_to":                 func(c *X402Config) { c.PayTo = nil },
 		"pay_to missing this network": func(c *X402Config) {
-			c.PayTo = map[string]string{"solana": "SoLmerchant"}
+			c.PayTo = map[string]string{"solana": x402CdpTestPayToSolana}
 		},
 		"a second network with no pay_to": func(c *X402Config) {
 			c.Networks = []string{"base", "solana"}

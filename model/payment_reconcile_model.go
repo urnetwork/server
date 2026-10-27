@@ -600,36 +600,49 @@ func GetReconcileSubscriptionRenewalsInConn(connOwner server.PgConn,
 	return renewals
 }
 
-// EndReconciledEntitlement is the "store says it is already over" repair:
-// refund, revocation, or an expiry the end-of-period task missed. It ends --
-// AT now, never retroactively -- the market's active supporter renewals and
+// EndReconciledEntitlementForNetworkTransactions is the "store says it is
+// already over" repair: refund, revocation, or an expiry the end-of-period
+// task missed. It ends -- AT now, never retroactively -- the network's active
+// supporter renewals in the market that the given store transactions paid
+// for (Stripe invoice ids, App Store transaction ids, Solana references) and
 // the pro transfer balances those renewals granted, then refreshes the pro
 // cache. The balances are matched by their exact window end: every store
 // crediting path writes the renewal and its balance with the SAME end_time,
-// so this claws back only what the ended subscription granted and leaves
+// so this claws back only what the ended purchase granted and leaves
 // balances from other purchases (other markets, data codes) untouched.
+//
+// The scope is the store object the store reported over, never the whole
+// market: a network can hold more than one subscription in a market (two
+// Stripe checkouts, two Apple IDs), and ending one must leave the others'
+// paid windows alone. An empty scope ends nothing.
 //
 // Callers must apply the cancelled ≠ expired rule BEFORE calling: a
 // cancel-at-period-end with time remaining is paid-through and is never
 // ended here.
-func EndReconciledEntitlement(
+func EndReconciledEntitlementForNetworkTransactions(
 	ctx context.Context,
 	networkId server.Id,
 	market SubscriptionMarket,
+	transactionIds []string,
 	now time.Time,
 ) (ended bool, err error) {
-	return EndReconciledEntitlementInConn(nil, ctx, networkId, market, now)
+	return EndReconciledEntitlementForNetworkTransactionsInConn(nil, ctx, networkId, market, transactionIds, now)
 }
 
 // Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
-func EndReconciledEntitlementInConn(connOwner server.PgConn,
+func EndReconciledEntitlementForNetworkTransactionsInConn(connOwner server.PgConn,
 	ctx context.Context,
 	networkId server.Id,
 	market SubscriptionMarket,
+	transactionIds []string,
 	now time.Time,
 ) (ended bool, err error) {
+	if len(transactionIds) == 0 {
+		// an empty scope must never mean "every purchase on the network"
+		return false, nil
+	}
 	server.TxInConn(ctx, connOwner, func(tx server.PgTx) {
-		ended = 0 < len(endReconciledEntitlementInTx(tx, ctx, &networkId, market, nil, "", now))
+		ended = 0 < len(endReconciledEntitlementInTx(tx, ctx, &networkId, market, transactionIds, "", now))
 	}, server.TxReadCommitted, server.OptNoRetry())
 
 	if ended {
@@ -642,9 +655,9 @@ func EndReconciledEntitlementInConn(connOwner server.PgConn,
 
 // EndReconciledEntitlementForTransactions ends the market's active supporter
 // renewals for the given store transaction ids (Stripe invoice ids, Apple
-// transaction ids) and the pro balances they granted -- the
-// EndReconciledEntitlement shape scoped to specific purchases, for the
-// real-time refund/revocation handlers. Returns the networks whose
+// transaction ids) and the pro balances they granted, on whichever network
+// holds them -- the EndReconciledEntitlementForNetworkTransactions shape for
+// the real-time refund/revocation handlers. Returns the networks whose
 // entitlement was ended (their pro cache is refreshed here).
 func EndReconciledEntitlementForTransactions(
 	ctx context.Context,

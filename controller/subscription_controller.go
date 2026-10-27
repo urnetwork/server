@@ -2259,7 +2259,7 @@ type HeliusWebhookResult struct {
 	Message string `json:"message,omitempty"`
 }
 
-const solanaUsdcMint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+const solanaUsdcMint = model.SolanaUsdcMint
 
 // The one source of where a Solana Pay payment goes. The webhook credits a
 // USDC transfer to any of these; the first is the one every intent path

@@ -6663,6 +6663,19 @@ affected tables share one cleanup and deployment boundary, so the probe emits
 one aggregate alert with bounded samples rather than repeating identical
 guidance for every table.
 
+Numeric observation errors: the six count/byte cells must parse as nonnegative
+64-bit integers. A malformed numeric cell yields a fixed invalid-response error
+with the source-owned field name; the rejected value is never copied into the
+reusable signal's returned error, alert Markdown or JSONL. The monitor reports
+`cannot-observe` with `observation-invalid-response`, not confirmed debris or a
+healthy catalog. False-positive qualifier: malformed numbers do not establish
+inactive indexes or authorize cleanup. False-negative qualifier: a rejected
+catalog cannot certify absence or recovery of a preceding debris finding; restore
+qualified source evidence. Valid owner/index/progress context and the existing
+confirmed-versus-obscured classification remain separate contracts. These
+synthetic privacy controls do not prove PostgreSQL permissions, native source
+truth, a runtime disclosure, or cleanup/reclamation.
+
 The 2026-09-01 incident established the causal chain. At 11:15Z, Connect login
 receives against PgBouncer timed out across many blocks while PgBouncer's
 one-minute average transaction and wait times rose from milliseconds to
@@ -9868,6 +9881,18 @@ without repeatedly scanning tens of millions of rows during an incident.
 There is no automatic unbounded count fallback. The normal read-only transport's
 30-second statement timeout still bounds a slow scan: a row cap limits visible
 rows, not dead-index traversal, heap visibility checks, or wall-clock cost.
+
+Parent cancellation refuses the observation before it changes the local adjacent
+count, even if the count source returns successful rows. The context is checked
+again under the trend lock before an exact update or capped reset. The next live
+sample compares with the preceding accepted exact count; a canceled first sample
+cannot consume warmup, and a canceled capped sample cannot reset an established
+pair. False-positive qualifier: a canceled low count must not manufacture a later
+rise. False-negative qualifier: a canceled high count must not suppress a real
+rise, and a canceled cap hit must not substitute warmup for that exact comparison.
+An accepted cap hit still breaks the pair and makes trend unknown. This is local
+observation ownership, not evidence of a PostgreSQL failure or production backlog
+recovery; source errors and malformed aggregates remain unavailable.
 
 The separate Taskworker stats collector no longer calls the exact unbounded
 `CountContracts`/`CountOpenContracts` path. Its open and disputed populations
@@ -29548,6 +29573,15 @@ required. Prefix 892 still detects an altered historical identity body, and
 893 still detects altered retained source or scope-lock custody. These are
 catalog checks, not proof that a reviewer ran or any model output is valid.
 
+
+Version 894 adds `provide_capability`, the provider capability declarations
+that find-providers2 reads for a request requiring post-quantum encryption:
+`client_id uuid`, `post_quantum_encryption boolean` and `change_time
+timestamp`, all NOT NULL with no defaults, keyed by `PRIMARY KEY
+(client_id)`. A missing table, a nullable declaration or a missing key is
+schema drift at 894. The probe reads the catalog only; it does not show how
+many providers declare the capability.
+
 ### 8.10 Client-reliability covering-index drift after partition cutover
 Probe: `reliability-index`
 
@@ -32147,6 +32181,20 @@ history-key copy for client-key evidence and a lifecycle rule for the existing
 copies). Run backups only with room for two generations above the reserve. Add
 drives: a new pool needs at least 4 drives to keep 2+2 parity. VERIFY: two
 consecutive complete observations outside every band.
+
+
+A drive's remembered recent decline is staged while the current range is
+reduced and published only after the later backup-unit/slot callbacks finish
+and the invocation is still live at the owning checkpoint. A canceled late
+flat result cannot replace an earlier fast decline, and a canceled decline
+cannot seed or refresh later unknown-runway severity. Valid completed flat
+and declining observations still commit, including independently measured
+drive risk beside ordinary backup visibility loss or incomplete census.
+Source refusal does not manufacture a risk sample. The shared estimator and
+risk-memory helper, thresholds, time windows and backup policy are unchanged.
+Cancellation after this checkpoint has no rollback guarantee. The source
+counterexample concerns future remembered-risk classification, not an observed
+outage or a canceled RunLoop notification/clear.
 
 ### 11.7 Redeploy poll DEADLOCK (structural, warpctl)
 On a host with a lingering old container, the new one never converges: the journal
@@ -45006,8 +45054,10 @@ Probe: `subnet-artifacts`
 `signal_subnet_artifacts.go` implements current retrieval of up to four
 independently enrolled immutable payout objects through both configured HTTPS
 API origins, using the actual public `GET /sn/artifact?hash=sha256:...` handler.
-This is a partial §22.8 component. The full-family coverage sentinel remains
-**0/9**; no chain inclusion, complete paged index, accepted tampering,
+This is a partial §22.8 component. It does not count as a full family in the
+registration sentinel. The current registry contains all nine family readers;
+registration does not establish their source, campaign or live qualification
+(§22.10). No chain inclusion, complete paged index, accepted tampering,
 all-copy loss, independent storage, retention census, or secretless audit replay
 is inferred from these reads. Two API names may use the same MinIO or cache.
 

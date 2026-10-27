@@ -819,6 +819,17 @@ var migrationCurrentSuffixContracts = slices.Concat(
 		migrationCurrentSuffix(893, "provider union review, identity and retained source custody", competitionMigration893ArtifactQuery),
 	},
 	[]snMainnetMigrationContract{
+		// the post-quantum declaration that find-providers2 reads for a
+		// request that requires post-quantum encryption
+		migrationCurrentSuffix(894, "provider capability declarations",
+			migrationFp2Table("provide_capability"),
+			snMainnetMigrationColumns("provide_capability",
+				snMainnetMigrationColumn{name: "client_id", kind: "uuid", notNull: true},
+				snMainnetMigrationColumn{name: "post_quantum_encryption", kind: "boolean", notNull: true},
+				snMainnetMigrationColumn{name: "change_time", kind: "timestamp without time zone", notNull: true}),
+			snMainnetMigrationConstraints("provide_capability", "PRIMARY KEY (client_id)")),
+	},
+	[]snMainnetMigrationContract{
 		// the failed-renewal ledger of Stripe subscription invoices; its version
 		// follows the migration's position. The past-due notice reads the open
 		// rows of a network, and an ended subscription resolves its open rows,
