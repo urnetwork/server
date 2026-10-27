@@ -5,33 +5,89 @@ checklist is the acceptance index for the new release, not an authorization to
 activate production. Historical v1 checkmarks do not qualify a different source,
 image, host manifest, policy or review provider.
 
-## Current checkpoint — October 27, 03:07 UTC
+## Current checkpoint — October 27, 06:17 UTC
 
 The following supersedes the provider and baseline-preparation progress in the
 dated bullets below; those bullets retain the earlier qualification history.
 
-- Clean control source `1a1bf5ae6` completed three race passes: simulator 151,
-  controller 42, model 13, native helpers 60 and shell guards 2 per pass, zero
-  skips, exact original container/network cleanup. Of 804 pass entries, three
-  are inactive genuine-command entry returns; 801 are other test cases. This
-  is not real provider qualification. Canonical unit receipt `a219218d…` binds
-  the exact tested driver; extended summary `bcab5db2…` preserves the scope.
-- The v4 genuine review attempt began at **03:05:34 UTC**, native PID
-  **2488711**, session **99560**. Cancellation passed and benign review is
-  running. The [published precommit](SNOW-REVIEW-QUALIFICATION-PRECOMMIT-2026-10-27-V4.json)
-  is pushed as `9bb1384a7`. Actual new review image `sha256:97e5453d…` passed
-  byte readback and nonroot/offline help. All six cases, three models, prompts,
-  token bounds and expected outcomes are unchanged; no automatic retry or
-  overlapping scoring is authorized.
+- The owner approved the [deadline-compatible calibration amendment](CALIBRATION-AMENDMENT-2026-10-27.md):
+  one corrected fresh R9/R9 bridge, then two independent seeds with correct
+  reference ordering on both. R9, the 26.9% margin, significance, all gates and
+  the three-hour submission cap remain unchanged. Three accepted original A/A
+  pairs remain preserved. The native two-seed tool is not yet qualified: its
+  first full test run exposed a synthetic publication fixture with null
+  required evidence; strict validation correctly refused it. No real draw or
+  corrected bridge has started. Production repeat rewards are explicitly
+  `allow`; same-round duplicate reuse and fresh per-epoch assessment remain.
+- The [V5 review precommit](SNOW-REVIEW-QUALIFICATION-PRECOMMIT-2026-10-27-V5.json)
+  is pushed in `3e36b2432`. The sole genuine attempt started at **06:03:33 UTC**,
+  native PID **2763522**, session **81168**. Its independently generated full
+  plan matches the public precommit byte-for-byte. Cancellation passed without
+  approval and all three models approved the benign fixture; fabrication review
+  is running at the observation. This is **not yet
+  provider qualification**. A preceding OS launcher syntax error exited before
+  native execution or provider calls; its logs remain separate and preserved.
+  No automatic provider retry or timed-scoring overlap is authorized.
+- Clean control source `fb5054121` with Warp `1ea3a31` completed three race
+  passes: simulator 200, controller 42, model 13, native helpers 60, Grafana 24
+  and Warp ownership 2 per pass, zero skips, exact original container/network
+  cleanup. Of 1,023 pass entries, three are inactive genuine-command entry
+  returns; 1,020 are other test cases. This is not real provider qualification.
+  Canonical unit receipt `550d6d38…` binds exact tested driver `1e7e8d65…`;
+  extended summary `554538ea…` preserves the scope and setup/logging incident.
+  The initial archive lacked Git metadata; a complete shallow exact-commit
+  fixture corrected setup, without code/test changes, before the three passes.
+  Retry redirection overwrote the complete initial failed stdout/stderr;
+  original terminal/launch records and a tool-observed failure excerpt remain,
+  not reconstructed raw logs. No measurement or model output was overwritten.
+- The v4 genuine review attempt is **terminal, failed**, exit 1 after 1,866.25
+  seconds; cleanup is verified. Cancellation, benign review and fabrication
+  rejection passed. The fourth case retained Qwen's terminal
+  `status: incomplete`, `incomplete_reason: max_output_tokens` at the requested
+  8,192-token cap; the union correctly refused authority. Cases five and six
+  did not run. Report SHA-256 `98eb3aa7a85152f24f7dfae82fa2e06f62d8e0cc1eb03abde091b281c77430d8`.
+  Its [published precommit](SNOW-REVIEW-QUALIFICATION-PRECOMMIT-2026-10-27-V4.json)
+  remains immutable. This retained response does not resolve the different,
+  historical HTTP-200 response whose terminal object was lost.
+- The review-only cap correction to **32,768** is pushed in `100dfdd66`.
+  Actual old-cap payload assertions failed, restored-source smoke passed,
+  and the distinct source-test attestation cap remains 4,096. Completed-status,
+  exact-model, strict schema, unanimous approval, request deadlines and stream
+  bounds are unchanged. Three-pass qualification is complete. New broker
+  `ddd8cda0…` and image `sha256:5ea22763…` are built from authenticated source
+  archives with honest `buildvcs=false` provenance. Independent image byte
+  readback and nonroot/read-only/offline startup passed; evidence `f0b17b2d…`,
+  exact executable match and original container/network inventory restored.
+  Publication and the separate genuine attempt are recorded above; the V4
+  failed outcome is not relabeled as the new attempt.
+- Alert-routing, preflight and finite 4/5 GiB host-profile regressions passed
+  **69 smoke tests, zero skips**, including compiled old-source failures.
+  Server fixes are pushed through `fb5054121`; Warp owner/transport changes
+  through `1ea3a31`. Exact smoke receipt SHA-256
+  `42aa17b86db5927877f49f74f06ee8826d342e11326b1cbd57e44202890768e9`.
+  Independent three-pass validation is complete as above. The new exact
+  seven-file C2 host-checker bundle is installed **inactive**; manifest
+  `a3ea6dfa…`, installation receipt `16503195…`. No full checker or host
+  qualification ran and active host configuration is unchanged.
 - All five main control binaries are built from clean `1a1bf5ae6`; worker OCI
   `sha256:1996ccd1…` has byte-identical native/readback worker `395bce92…`.
   This is release provenance, not production-host readiness or a claim that the
   real worker runs inside Docker. No actual production worker has started.
-- The Sille-only native loopback metrics forwarder is installed. Its repeated
-  anonymous GET checks pass; authenticated signal ingestion and notification
-  delivery are still unproved. The old staging supervisor is disabled for
+- The Sille-only native loopback metrics forwarder is installed. One isolated
+  synthetic metric was accepted by the native publisher and read back exactly
+  from Mimir; receipt `0d14ffc4…`. This is not a real runner heartbeat.
+  The one email test failed; main Grafana deliberately has no SMTP. The
+  corrected managed route now uses its existing native main Slack receiver,
+  with `support@ur.xyz` retained as incident owner. One native stored-contact
+  test returned Grafana `success` in **282 ms**; receipt `bebc4729…` and separate
+  readback `0e155877…` prove policy/contacts stayed unchanged. This is integration
+  acknowledgment, not human channel confirmation, a real runner heartbeat or
+  a rule-triggered alert. All seven live rule expressions/thresholds/timing and
+  the 15-second/30-second dashboard refresh/warning match. Their new `owner`
+  labels still require normal Warp/Grafana deployment containing `1ea3a31`;
+  file-provisioned rules were not overwritten through the API. The old staging supervisor is disabled for
   autostart, with its unit and historical state preserved. Main DB migrations
-  891–893 still awaited deployment at the last read-only check, **02:27 UTC**.
+  891–893 still awaited deployment at the last read-only check, **05:14 UTC**.
 
 - Genuine seven-key test-result attestation passed: two actual isolated Go
   executions (one passing, one deliberately failing), then six provider calls.
@@ -76,8 +132,9 @@ dated bullets below; those bullets retain the earlier qualification history.
   installed inactive: 17 root-owned read-only artifacts, unchanged v3 dependency
   hashes, no helper or worker execution and no service activation. Installation
   receipt SHA-256 `e51f219353e2f1c912c4beda8a9d12f0394e1524b3efba0b9036ff3d76d47db7`.
-- Replacement bridge authorization and the independent-seed amendment remain
-  unresolved. No corrected bridge or independent-seed scoring has started.
+- Replacement bridge and two-seed scope are approved as above. Native-tool
+  qualification and authenticated executable/plan publication remain gates;
+  no corrected bridge or independent-seed scoring has started.
 - Actual main PostgreSQL was audited at 01:33:35 UTC in a verified read-only,
   repeatable-read transaction. All 890 deployed migration identities match;
   migrations **891–893** (mini provider, multi-repository promotion, Snow union)
