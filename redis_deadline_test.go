@@ -28,6 +28,8 @@ type deadlineRedisPeer struct {
 	commands    sync.Map
 	stall       string
 	redirect    bool
+	// replies to each named command this much later
+	late map[string]time.Duration
 }
 
 func newDeadlineRedisPeer(t *testing.T, stall string) *deadlineRedisPeer {
@@ -102,6 +104,13 @@ func (p *deadlineRedisPeer) dial(context.Context, string, string) (net.Conn, err
 			if command == p.stall {
 				<-p.stop
 				return
+			}
+			if delay, ok := p.late[command]; ok {
+				select {
+				case <-p.stop:
+					return
+				case <-time.After(delay):
+				}
 			}
 			reply := "+OK\r\n"
 			switch command {
@@ -203,9 +212,30 @@ func TestRedisWithDeadlineKeepsOrdinaryPoolsUnchanged(t *testing.T) {
 		if err == nil || calls != 1 {
 			t.Fatal("optional callback failure was retried or swallowed")
 		}
+		// The late-reply pool differs only in leaving the deadline off its
+		// sockets, and is a pool of its own.
+		lateCalls := 0
+		err = RedisWithDeadline(ctx, func(client RedisClient) error {
+			lateCalls++
+			if client == safeDeadlineClient.current() {
+				t.Fatal("late-reply work reused the deadline pool")
+			}
+			r, ok := client.(*redis.Client)
+			if !ok {
+				t.Fatalf("unexpected late-reply pool %T", client)
+			}
+			o := r.Options()
+			if o.ContextTimeoutEnabled || o.MaxRetries != 0 || o.DialerRetries != 1 || o.MinIdleConns != 0 || o.PoolSize > 8 || o.ReadTimeout != time.Second || o.WriteTimeout != time.Second || o.PoolTimeout != time.Second || o.DialTimeout != time.Second {
+				t.Fatal("late-reply standalone pool lost finite policy")
+			}
+			return errors.New("synthetic late-reply operation failure")
+		}, OptRedisKeepLateReplies())
+		if err == nil || lateCalls != 1 {
+			t.Fatal("late-reply callback failure was retried or swallowed")
+		}
 		for _, pool := range []*safeRedisClient{safeClient, safeNoCommandRetryClient} {
 			client := pool.open()
-			if client == safeDeadlineClient.current() {
+			if client == safeDeadlineClient.current() || client == safeLateReplyClient.current() {
 				t.Fatal("optional work reused ordinary pool")
 			}
 			switch r := client.(type) {
@@ -220,7 +250,7 @@ func TestRedisWithDeadlineKeepsOrdinaryPoolsUnchanged(t *testing.T) {
 			}
 		}
 		RedisReset()
-		if safeDeadlineClient.current() != nil {
+		if safeDeadlineClient.current() != nil || safeLateReplyClient.current() != nil {
 			t.Fatal("reset retained optional pool")
 		}
 	})
@@ -376,18 +406,26 @@ func TestRedisWithDeadlineClusterStateWaitHonorsContext(t *testing.T) {
 // first command; policy/timeout/retry/cap fields remain producer-owned.
 func deadlineTestClusterOptions(t *testing.T, peer *deadlineRedisPeer) *redis.ClusterOptions {
 	t.Helper()
+	options := deadlineTestClusterPolicyOptions(t, &safeRedisClient{disableCommandRetry: true, contextTimeoutEnabled: true})
+	options.Dialer = peer.dial
+	return options
+}
+
+// The production cluster options of a deadline-bound pool, with every
+// transport field synthetic except the dialer, which the caller supplies.
+func deadlineTestClusterPolicyOptions(t *testing.T, pool *safeRedisClient) *redis.ClusterOptions {
+	t.Helper()
 	popVault := Vault.PushSimpleResource("redis.yml", []byte("cluster: true\nauthority: 127.0.0.1:1\npassword: synthetic\ndb: 0\n"))
 	defer popVault()
 	popConfig := Config.PushSimpleResource("redis.yml", []byte("min_connections: 0\nmax_connections: 0\n"))
 	defer popConfig()
-	pool := &safeRedisClient{disableCommandRetry: true, contextTimeoutEnabled: true}
 	constructed, ok := pool.open().(*redis.ClusterClient)
 	if !ok {
 		t.Fatal("production optional cluster constructor changed type")
 	}
 	options := *constructed.Options()
 	pool.close()
-	if !options.ContextTimeoutEnabled || !options.DisableRoutingPolicies || options.MaxRedirects != 0 || options.MaxRetries > 0 || options.DialerRetries != 1 || options.MinIdleConns != 0 || options.PoolSize < 1 || options.PoolSize > 8 || options.MaxActiveConns < 1 || options.MaxActiveConns > 8 || options.ReadTimeout != time.Second || options.WriteTimeout != time.Second || options.PoolTimeout != time.Second || options.DialTimeout != time.Second {
+	if options.ContextTimeoutEnabled != pool.socketDeadlineFromContext() || !options.DisableRoutingPolicies || options.MaxRedirects != 0 || options.MaxRetries > 0 || options.DialerRetries != 1 || options.MinIdleConns != 0 || options.PoolSize < 1 || options.PoolSize > 8 || options.MaxActiveConns < 1 || options.MaxActiveConns > 8 || options.ReadTimeout != time.Second || options.WriteTimeout != time.Second || options.PoolTimeout != time.Second || options.DialTimeout != time.Second {
 		t.Fatal("actual production cluster options lost the bounded optional policy")
 	}
 	// open() already normalized zero redirects. Reconstructing a client
@@ -395,7 +433,6 @@ func deadlineTestClusterOptions(t *testing.T, peer *deadlineRedisPeer) *redis.Cl
 	options.MaxRedirects = -1
 	options.Protocol, options.DisableIdentity = 2, true // synthetic RESP peer only
 	options.Password = ""                               // synthetic peer has no auth; no real secret is read
-	options.Dialer = peer.dial
 	// PING has no key and can select a bootstrap node. Use the same synthetic
 	// node for bootstrap and slots so one logical node owns both PING and GET.
 	// A non-loopback address also avoids slot-origin loopback rewriting.

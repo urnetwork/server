@@ -459,7 +459,7 @@ func TestExtenderActivateRateLimitsPerClient(t *testing.T) {
 		args.Carriers = []string{connect.ExtenderCarrierTcp}
 
 		clientSession := newTestExtenderSession(t, ctx, fixture.clientAddress("127.0.0.1"))
-		for i := range ExtenderActivateRateLimit {
+		for i := range DefaultExtenderActivateSettings().ClientRateLimit {
 			result, err := ExtenderActivate(args, clientSession)
 			if err != nil {
 				t.Fatal(err)
@@ -477,6 +477,158 @@ func TestExtenderActivateRateLimitsPerClient(t *testing.T) {
 		connect.AssertEqual(t, result.Activated, false)
 		if !strings.Contains(result.Error, "attempt") {
 			t.Fatalf("the seventh attempt was not rate limited: %q", result.Error)
+		}
+	})
+}
+
+// The activation budget is each client's own (connect/EXTENDER.md C2): one
+// client spending it does not refuse another client of the same account. It
+// was keyed by the account, so every provider of an account shared six
+// activations an hour, and a second device was refused "for this action
+// today" by the first one's retries (inbox 8051). The refusal names the action
+// and its hourly window.
+func TestExtenderActivateRateLimitIsPerClient(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		fixture := newTestExtenderFixture(t)
+		installTestExtenderConfig(t, fixture.api)
+
+		// a closed tcp port on the caller's own address, so every attempt is
+		// refused at once and spends one attempt of the budget
+		closedListener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		closedPort := closedListener.Addr().(*net.TCPAddr).Port
+		closedListener.Close()
+
+		args := fixture.activateArgs()
+		args.TcpPort = closedPort
+		args.Carriers = []string{connect.ExtenderCarrierTcp}
+
+		firstSession := newTestExtenderSession(t, ctx, fixture.clientAddress("127.0.0.1"))
+		secondSession := newTestExtenderAccountSession(ctx, firstSession)
+
+		rateLimited := func(result *ExtenderActivateResult) bool {
+			return strings.Contains(result.Error, "maximum number of attempts")
+		}
+
+		// the first client spends its whole budget
+		refusal := ""
+		for range 64 {
+			result, err := ExtenderActivate(args, firstSession)
+			if err != nil {
+				t.Fatal(err)
+			}
+			connect.AssertEqual(t, result.Activated, false)
+			if rateLimited(result) {
+				refusal = result.Error
+				break
+			}
+		}
+		if refusal == "" {
+			t.Fatalf("the first client was never rate limited")
+		}
+		if !strings.Contains(refusal, "activating an extender") || !strings.Contains(refusal, "in the last hour") {
+			t.Errorf("the refusal does not name the action and its window: %q", refusal)
+		}
+
+		result, err := ExtenderActivate(args, secondSession)
+		if err != nil {
+			t.Fatal(err)
+		}
+		connect.AssertEqual(t, result.Activated, false)
+		if rateLimited(result) {
+			t.Fatalf("the second client was refused for the first client's activations: %q", result.Error)
+		}
+	})
+}
+
+// Another client of the account of clientSession, at the same address.
+func newTestExtenderAccountSession(
+	ctx context.Context,
+	clientSession *session.ClientSession,
+) *session.ClientSession {
+	deviceId := server.NewId()
+	clientId := server.NewId()
+	model.Testing_CreateDevice(
+		ctx,
+		clientSession.ByJwt.NetworkId,
+		deviceId,
+		clientId,
+		"extender",
+		"extender-test",
+	)
+	accountSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
+		NetworkId: clientSession.ByJwt.NetworkId,
+		UserId:    clientSession.ByJwt.UserId,
+		DeviceId:  &deviceId,
+		ClientId:  &clientId,
+	})
+	accountSession.ClientAddress = clientSession.ClientAddress
+	return accountSession
+}
+
+// The account keeps a budget over all of its clients, so making more clients
+// does not multiply what one account can have the operator probe. A client
+// refused by its own budget does not spend the account's.
+func TestExtenderActivateRateLimitIsCappedPerAccount(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		fixture := newTestExtenderFixture(t)
+		installTestExtenderConfig(t, fixture.api)
+
+		// a closed tcp port on the caller's own address, so every attempt is
+		// refused at once and spends one attempt of the budget
+		closedListener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		closedPort := closedListener.Addr().(*net.TCPAddr).Port
+		closedListener.Close()
+
+		args := fixture.activateArgs()
+		args.TcpPort = closedPort
+		args.Carriers = []string{connect.ExtenderCarrierTcp}
+
+		settings := &ExtenderActivateSettings{
+			ClientRateLimit:  2,
+			AccountRateLimit: 3,
+			RateLimitWindow:  time.Hour,
+		}
+		activate := func(clientSession *session.ClientSession) string {
+			result, err := extenderActivate(args, clientSession, settings)
+			if err != nil {
+				t.Fatal(err)
+			}
+			connect.AssertEqual(t, result.Activated, false)
+			return result.Error
+		}
+		const clientRefusal = "maximum number of attempts for activating an extender in the last hour"
+		const accountRefusal = "maximum number of attempts for activating your account's extenders in the last hour"
+
+		firstSession := newTestExtenderSession(t, ctx, fixture.clientAddress("127.0.0.1"))
+		for i := range 2 {
+			if refusal := activate(firstSession); strings.Contains(refusal, "maximum number of attempts") {
+				t.Fatalf("attempt %d was rate limited early: %q", i+1, refusal)
+			}
+		}
+		// refused by its own budget, which leaves the account's two of three
+		// spent
+		if refusal := activate(firstSession); !strings.Contains(refusal, clientRefusal) {
+			t.Fatalf("the first client's third attempt was not refused by its own budget: %q", refusal)
+		}
+
+		secondSession := newTestExtenderAccountSession(ctx, firstSession)
+		if refusal := activate(secondSession); strings.Contains(refusal, "maximum number of attempts") {
+			t.Fatalf("the second client's first attempt was refused: %q", refusal)
+		}
+		if refusal := activate(secondSession); !strings.Contains(refusal, accountRefusal) {
+			t.Fatalf("the account's fourth attempt was not refused by the account budget: %q", refusal)
+		}
+		thirdSession := newTestExtenderAccountSession(ctx, firstSession)
+		if refusal := activate(thirdSession); !strings.Contains(refusal, accountRefusal) {
+			t.Fatalf("a new client of the account was not refused by the account budget: %q", refusal)
 		}
 	})
 }

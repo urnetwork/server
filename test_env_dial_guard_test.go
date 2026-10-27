@@ -560,6 +560,7 @@ func TestRedisPoolOpenDialsThroughProcessGuard(t *testing.T) {
 		{},
 		{disableCommandRetry: true},
 		{disableCommandRetry: true, contextTimeoutEnabled: true},
+		{disableCommandRetry: true, contextTimeoutEnabled: true, keepLateReplies: true},
 		{disableCommandRetry: true, contextTimeoutEnabled: true, authentication: true},
 	}
 	for index, pool := range pools {
