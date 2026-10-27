@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -10,7 +9,10 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/url"
+	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,10 +34,14 @@ import (
 // with an `X-PAYMENT` header. The server verifies and settles that payment through
 // the facilitator, then fulfills. No human in the loop.
 //
-// We settle through Stripe's x402 facilitator, which keeps us CHAIN-NEUTRAL: we
-// quote one term per supported network and the agent pays on whichever chain it
-// holds funds. See vault/<env>/x402.yml for the config (facilitator, pay-to,
-// networks, prices).
+// The money lands in Stripe crypto deposit addresses, and settles through the
+// Coinbase Developer Platform (CDP) facilitator, the one Stripe's x402 guide uses
+// for mainnet (docs.stripe.com/payments/machine/x402); after settlement the
+// payment is recorded in Stripe (x402_stripe_record.go). We quote one term per
+// configured network and the agent pays on whichever chain it holds funds. See
+// vault/<env>/x402.yml for the config (facilitator, pay-to, networks, prices),
+// x402_networks.go for the networks and tokens, and x402_facilitator.go for the
+// facilitator protocol.
 //
 // The whole surface is inert until x402.yml exists AND sets enabled: true.
 
@@ -67,54 +73,104 @@ type x402ReceiptConfig struct {
 }
 
 type x402FacilitatorConfig struct {
-	Url    string `yaml:"url"`
-	ApiKey string `yaml:"api_key"`
+	// The facilitator's base url; /verify, /settle and /supported are under
+	// it. CDP: https://api.cdp.coinbase.com/platform/v2/x402
+	Url string `yaml:"url"`
+	// The CDP secret API key (portal.cdp.coinbase.com): its id, and its
+	// secret, an Ed25519 key in base64 or an EC private key in PEM. Each
+	// request carries a JWT signed with it, minted for that request
+	// (x402_facilitator.go). There is no static bearer: the CDP facilitator
+	// accepts only these JWTs.
+	ApiKeyId     string `yaml:"api_key_id"`
+	ApiKeySecret string `yaml:"api_key_secret"`
 }
 
 type X402Config struct {
 	Enabled     bool                  `yaml:"enabled"`
 	Facilitator x402FacilitatorConfig `yaml:"facilitator"`
 	// PayTo is the settlement address PER NETWORK, keyed by the same names as
-	// Networks.
+	// Networks: the Stripe crypto deposit address created for that network.
 	//
 	// It is a map and not one string because the address is network-specific
-	// and the forms are not interchangeable: Base and Tempo settle to an EVM
-	// 0x address, Solana to a base58 account. Quoting one string across all
-	// three would hand an agent an address that does not exist on two of the
-	// chains it was offered, and USDC sent there is gone. A network with no
-	// entry here is not quoted at all.
-	PayTo         map[string]string        `yaml:"pay_to"`
-	Networks      []string                 `yaml:"networks"`
+	// and the forms are not interchangeable: Base settles to an EVM 0x
+	// address, Solana to a base58 account. Quoting one string across both
+	// would hand an agent an address that does not exist on one of the
+	// chains it was offered, and USDC sent there is gone.
+	PayTo    map[string]string `yaml:"pay_to"`
+	Networks []string          `yaml:"networks"`
+	// Asset is the token symbol, "usdc". The terms quote the token's address
+	// on each network, from x402_networks.go.
 	Asset         string                   `yaml:"asset"`
 	Skus          map[string]x402SkuConfig `yaml:"skus"`
 	MaxPaymentUsd float64                  `yaml:"max_payment_usd"`
 	Receipt       x402ReceiptConfig        `yaml:"receipt"`
 }
 
-// x402ConfigUsable reports whether a config is complete enough to actually take
-// money. Being HALF configured is worse than being off: a blank pay_to would quote
-// terms that settle nowhere, and a blank facilitator would accept payments we never
-// verify. So anything missing means x402 stays off.
-func x402ConfigUsable(c *X402Config) bool {
+// x402ConfigProblem says why a config cannot take money, or nil when it can.
+// Being HALF configured is worse than being off: a blank pay_to would quote
+// terms that settle nowhere, a facilitator we cannot authenticate to would
+// verify nothing, and a network without a known token address would be quoted
+// a guess. So anything missing or wrong means x402 stays off.
+//
+// The reasons name fields, never their values.
+func x402ConfigProblem(c *X402Config) error {
 	if !c.Enabled {
-		return false
+		return errors.New("enabled is false")
 	}
-	if c.Facilitator.Url == "" || c.Facilitator.ApiKey == "" {
-		return false
+
+	facilitatorUrl, err := url.Parse(c.Facilitator.Url)
+	if c.Facilitator.Url == "" || err != nil || facilitatorUrl.Scheme != "https" || facilitatorUrl.Host == "" {
+		return errors.New(
+			"facilitator.url must be the facilitator's https url (CDP: https://api.cdp.coinbase.com/platform/v2/x402)",
+		)
 	}
+	if c.Facilitator.ApiKeyId == "" || c.Facilitator.ApiKeySecret == "" {
+		return errors.New(
+			"facilitator.api_key_id and facilitator.api_key_secret, a CDP secret API key, are required " +
+				"(the static facilitator.api_key is no longer used)",
+		)
+	}
+	// the secret must be a key CDP's JWT signing takes, or every request
+	// would fail at payment time instead of here
+	supportedUrl, err := x402FacilitatorEndpoint(c, "/supported")
+	if err != nil {
+		return err
+	}
+	if _, err := x402FacilitatorAuthorization(c, http.MethodGet, supportedUrl); err != nil {
+		return errors.New(
+			"facilitator.api_key_secret is not a CDP API key secret " +
+				"(an Ed25519 key in base64, or an EC private key in PEM with real newlines)",
+		)
+	}
+
 	if len(c.Networks) == 0 {
-		return false
+		return errors.New("networks is empty")
 	}
-	// Every network we would quote needs its own settlement address. Missing
-	// one is not a network we quietly drop -- it means the operator believes
-	// they configured a chain they did not, so the whole feature stays off
-	// rather than silently offering fewer chains than the vault lists.
+	// Every listed network needs a token address for the asset and its own
+	// settlement address in that network's form. A network that fails either
+	// is not one we quietly drop -- it means the operator believes they
+	// configured a chain they did not, so the whole feature stays off rather
+	// than silently offering fewer chains than the vault lists.
 	for _, network := range c.Networks {
-		if c.PayTo[network] == "" {
-			return false
+		token, err := x402TokenFor(network, c.Asset)
+		if err != nil {
+			return err
+		}
+		payTo := c.PayTo[network]
+		if payTo == "" {
+			return fmt.Errorf("pay_to.%s (the Stripe deposit address for %s) is missing", network, network)
+		}
+		if !x402AddressValid(token.addressKind, payTo) {
+			return fmt.Errorf("pay_to.%s is not an address of the %s network's form", network, network)
 		}
 	}
-	return true
+	return nil
+}
+
+// x402ConfigUsable reports whether a config is complete enough to actually take
+// money. See x402ConfigProblem.
+func x402ConfigUsable(c *X402Config) bool {
+	return x402ConfigProblem(c) == nil
 }
 
 // X402PayTo is the settlement address for one network, or empty when that
@@ -135,13 +191,15 @@ var x402Config = sync.OnceValue(func() *X402Config {
 	}
 	resource.UnmarshalYaml(c)
 
-	if c.Enabled && !x402ConfigUsable(c) {
-		glog.Errorf(
-			"[x402]enabled but not fully configured " +
-				"(facilitator.url, facilitator.api_key, networks, and a pay_to " +
-				"address for every network); x402 is off\n",
-		)
-		c.Enabled = false
+	if c.Enabled {
+		if err := x402ConfigProblem(c); err != nil {
+			glog.Errorf("[x402]enabled but not usable, so x402 is off: %s\n", err)
+			c.Enabled = false
+		} else if _, err := server.Domain(); err != nil {
+			// the terms name their resource as a url on this api's domain
+			glog.Errorf("[x402]enabled but WARP_DOMAIN is not set, so terms cannot name a resource url; x402 is off\n")
+			c.Enabled = false
+		}
 	}
 
 	return c
@@ -170,18 +228,26 @@ func X402Enabled() bool {
 
 // ----- payment terms -----
 
-// X402Accept is one quoted way to pay: a scheme+network+amount+destination. We quote
-// one per supported network and let the agent choose.
+// X402Accept is one quoted way to pay: a scheme+network+amount+destination, the
+// x402 v1 PaymentRequirements (specs/x402-specification-v1.md 5.1.2). We quote one
+// per supported network and let the agent choose.
 type X402Accept struct {
 	Scheme            string `json:"scheme"`
 	Network           string `json:"network"`
 	MaxAmountRequired string `json:"maxAmountRequired"`
-	Resource          string `json:"resource"`
-	Description       string `json:"description"`
-	MimeType          string `json:"mimeType"`
-	PayTo             string `json:"payTo"`
+	// Resource is a url: v1 clients refuse terms whose resource is not one
+	Resource    string `json:"resource"`
+	Description string `json:"description"`
+	MimeType    string `json:"mimeType"`
+	PayTo       string `json:"payTo"`
+	// Asset is the token's address on the network (contract or mint), never
+	// its symbol
 	Asset             string `json:"asset"`
 	MaxTimeoutSeconds int    `json:"maxTimeoutSeconds"`
+	// Extra is what the scheme needs to build the payment on this network:
+	// the token's EIP-712 domain {name, version} for EVM exact, the
+	// facilitator's {feePayer} for Solana exact
+	Extra map[string]any `json:"extra,omitempty"`
 }
 
 // X402PaymentRequired is the 402 body: what the agent must pay to proceed.
@@ -330,21 +396,50 @@ func x402PaymentRequiredForConfig(
 		)
 	}
 
+	resourceUrl, err := x402ResourceUrl(resource)
+	if err != nil {
+		return nil, err
+	}
+
 	maxAmountRequired := usdToAtomic(sku.PriceUsd)
 
 	accepts := []X402Accept{}
 	for _, network := range c.Networks {
+		token, err := x402TokenFor(network, c.Asset)
+		if err != nil {
+			// The loader refuses such a config (x402ConfigProblem). One set
+			// some other way is refused here rather than quoted a guess.
+			return nil, err
+		}
+		extra := map[string]any{}
+		if token.eip712Name != "" {
+			extra["name"] = token.eip712Name
+			extra["version"] = token.eip712Version
+		}
+		if token.feePayerRequired {
+			feePayer, ok := x402FeePayer(c, network)
+			if !ok {
+				// no client can build this payment without the fee payer, so
+				// this network sits out until the facilitator names one
+				continue
+			}
+			extra["feePayer"] = feePayer
+		}
 		accepts = append(accepts, X402Accept{
 			Scheme:            "exact",
 			Network:           network,
 			MaxAmountRequired: maxAmountRequired,
-			Resource:          resource,
+			Resource:          resourceUrl,
 			Description:       sku.Description,
 			MimeType:          "application/json",
 			PayTo:             c.PayTo[network],
-			Asset:             c.Asset,
+			Asset:             token.address,
 			MaxTimeoutSeconds: 300,
+			Extra:             extra,
 		})
+	}
+	if len(accepts) == 0 {
+		return nil, fmt.Errorf("x402 has no network it can quote now")
 	}
 
 	if reason == "" {
@@ -356,6 +451,28 @@ func x402PaymentRequiredForConfig(
 		Error:       reason,
 		Accepts:     accepts,
 	}, nil
+}
+
+// x402ResourceUrl is the `resource` the terms quote. x402 v1 requires a url there
+// (specs/x402-specification-v1.md 5.1.2), and v1 clients check that it is one
+// before they pay: the legacy fetch and axios clients parse each term with a zod
+// schema whose resource is z.string().url(), which refuses a bare path. A path is
+// served by this API, so it gets the API's public origin, https://api.<WARP_DOMAIN>,
+// the same origin the other services reach the API on. A resource that is already
+// a url (mcp:fetch) is quoted as it is.
+func x402ResourceUrl(resource string) (string, error) {
+	if strings.HasPrefix(resource, "/") {
+		domain, err := server.Domain()
+		if err != nil {
+			return "", fmt.Errorf("x402 cannot quote %s as a url: %w", resource, err)
+		}
+		return "https://api." + domain + resource, nil
+	}
+	parsed, err := url.Parse(resource)
+	if err != nil || parsed.Scheme == "" {
+		return "", fmt.Errorf("x402 resource %q is not a url", resource)
+	}
+	return resource, nil
 }
 
 // WriteX402PaymentRequired writes a 402 response with payment terms. This is the one
@@ -375,11 +492,12 @@ func WriteX402PaymentRequired(w http.ResponseWriter, paymentRequired *X402Paymen
 
 // x402FacilitatorRequest is what we send to /verify and /settle: the agent's signed
 // payment plus the exact terms we quoted, so the facilitator can check the payment
-// matches what we asked for.
+// matches what we asked for (specs/x402-specification-v1.md 7.1). The payment is the
+// decoded PaymentPayload object, not the X-PAYMENT header string.
 type x402FacilitatorRequest struct {
-	X402Version         int        `json:"x402Version"`
-	PaymentPayload      string     `json:"paymentPayload"`
-	PaymentRequirements X402Accept `json:"paymentRequirements"`
+	X402Version         int                 `json:"x402Version"`
+	PaymentPayload      *x402PaymentPayload `json:"paymentPayload"`
+	PaymentRequirements X402Accept          `json:"paymentRequirements"`
 }
 
 type X402VerifyResponse struct {
@@ -396,61 +514,26 @@ type X402SettleResponse struct {
 	Payer       string `json:"payer,omitempty"`
 }
 
-func x402FacilitatorPost(ctx context.Context, path string, request any, response any) error {
-	c := X402()
-
-	// Refuse before any http. This is unreachable today -- every entry point is behind
-	// X402Enabled(), and the loader forces enabled = false when these are blank -- but
-	// this is the function that VERIFIES AND SETTLES MONEY, so it does not get to rely on
-	// a caller upstream having checked. With a blank url the request would otherwise go
-	// out as a relative "/settle" and come back "unsupported protocol scheme", which is a
-	// confusing way to learn that a payment was never actually settled.
-	if c.Facilitator.Url == "" || c.Facilitator.ApiKey == "" {
-		return fmt.Errorf("x402 facilitator is not configured (facilitator.url, facilitator.api_key)")
+// X402Verify asks the facilitator whether a signed payment (an X-PAYMENT header) is
+// valid for the terms we quoted. Verify BEFORE settling so a bad payment costs
+// nothing. A payment the facilitator rejects is an answer (IsValid false, with its
+// reason), not an error.
+func X402Verify(ctx context.Context, payment string, requirements X402Accept) (*X402VerifyResponse, error) {
+	if !x402FacilitatorConfigured(X402()) {
+		return nil, errX402FacilitatorNotConfigured
 	}
-
-	body, err := json.Marshal(request)
+	paymentPayload, err := x402DecodePaymentFor(payment, requirements)
 	if err != nil {
-		return err
+		return nil, err
 	}
-
-	req, err := http.NewRequestWithContext(
-		ctx,
-		"POST",
-		fmt.Sprintf("%s%s", c.Facilitator.Url, path),
-		bytes.NewReader(body),
-	)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.Facilitator.ApiKey))
-
-	client := server.NewHttpClient(30 * time.Second)
-	res, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer res.Body.Close()
-
-	resBody, err := io.ReadAll(res.Body)
-	if err != nil {
-		return err
-	}
-	if res.StatusCode < 200 || 300 <= res.StatusCode {
-		return fmt.Errorf("facilitator %s: %d %s", path, res.StatusCode, string(resBody))
-	}
-
-	return json.Unmarshal(resBody, response)
+	return x402Verify(ctx, paymentPayload, requirements)
 }
 
-// X402Verify asks the facilitator whether a signed payment is valid for the terms we
-// quoted. Verify BEFORE settling so a bad payment costs nothing.
-func X402Verify(ctx context.Context, payment string, requirements X402Accept) (*X402VerifyResponse, error) {
+func x402Verify(ctx context.Context, paymentPayload *x402PaymentPayload, requirements X402Accept) (*X402VerifyResponse, error) {
 	verifyResponse := &X402VerifyResponse{}
 	err := x402FacilitatorPost(ctx, "/verify", &x402FacilitatorRequest{
 		X402Version:         X402Version,
-		PaymentPayload:      payment,
+		PaymentPayload:      paymentPayload,
 		PaymentRequirements: requirements,
 	}, verifyResponse)
 	if err != nil {
@@ -460,18 +543,66 @@ func X402Verify(ctx context.Context, payment string, requirements X402Accept) (*
 }
 
 // X402Settle moves the funds. Only call this after X402Verify succeeds, and only
-// grant the entitlement after this succeeds.
+// grant the entitlement after this succeeds. A settlement the facilitator rejects is
+// an answer (Success false, with its reason), not an error.
 func X402Settle(ctx context.Context, payment string, requirements X402Accept) (*X402SettleResponse, error) {
+	if !x402FacilitatorConfigured(X402()) {
+		return nil, errX402FacilitatorNotConfigured
+	}
+	paymentPayload, err := x402DecodePaymentFor(payment, requirements)
+	if err != nil {
+		return nil, err
+	}
+	return x402Settle(ctx, paymentPayload, requirements)
+}
+
+func x402Settle(ctx context.Context, paymentPayload *x402PaymentPayload, requirements X402Accept) (*X402SettleResponse, error) {
 	settleResponse := &X402SettleResponse{}
 	err := x402FacilitatorPost(ctx, "/settle", &x402FacilitatorRequest{
 		X402Version:         X402Version,
-		PaymentPayload:      payment,
+		PaymentPayload:      paymentPayload,
 		PaymentRequirements: requirements,
 	}, settleResponse)
 	if err != nil {
 		return nil, err
 	}
 	return settleResponse, nil
+}
+
+// x402ReasonPattern is the form of an x402 error code (specs/x402-specification-v1.md 9).
+var x402ReasonPattern = regexp.MustCompile(`^[a-z0-9_]{1,128}$`)
+
+// x402ReasonText is a facilitator's rejection reason as the agent may see it: an
+// x402 error code passes, anything else from the facilitator stays in the log.
+func x402ReasonText(reason string) string {
+	if x402ReasonPattern.MatchString(reason) {
+		return reason
+	}
+	return "rejected"
+}
+
+// x402SettlementResponse is what X-PAYMENT-RESPONSE carries after a payment settles:
+// the x402 v1 SettlementResponse (specs/x402-specification-v1.md 5.3), as base64 of
+// its JSON (specs/transports-v1/http.md, "Settlement Response Delivery").
+type x402SettlementResponse struct {
+	Success     bool   `json:"success"`
+	Transaction string `json:"transaction"`
+	Network     string `json:"network"`
+	Payer       string `json:"payer"`
+}
+
+// x402PaymentResponseHeader is the X-PAYMENT-RESPONSE value for a settled purchase.
+func x402PaymentResponseHeader(result *X402PurchaseResult) string {
+	settlement, err := json.Marshal(&x402SettlementResponse{
+		Success:     true,
+		Transaction: result.Transaction,
+		Network:     result.Network,
+		Payer:       result.Payer,
+	})
+	if err != nil {
+		return ""
+	}
+	return base64.StdEncoding.EncodeToString(settlement)
 }
 
 // ----- purchase -----
@@ -492,6 +623,8 @@ type X402PurchaseResult struct {
 	ByteCount   model.ByteCount `json:"byte_count,omitempty"`
 	Transaction string          `json:"transaction,omitempty"`
 	Network     string          `json:"network,omitempty"`
+	// the paying wallet, as the facilitator reported it
+	Payer string `json:"payer,omitempty"`
 }
 
 // X402Purchase settles a signed payment and grants what was bought.
@@ -524,35 +657,45 @@ func X402Purchase(
 		return nil, err
 	}
 
-	// the agent may name the network explicitly; otherwise read it out of the signed
-	// payload, which is where the x402 spec puts it
+	// the X-PAYMENT header is base64 of the signed PaymentPayload; one that is not an
+	// x402 v1 exact payment never reaches the facilitator
+	paymentPayload, err := x402DecodePayment(payment)
+	if err != nil {
+		return nil, err
+	}
+
+	// the agent may name the network explicitly; otherwise it is the one the payment
+	// was signed for, which is where the x402 spec puts it
 	network := purchase.Network
 	if network == "" {
-		network = x402PaymentNetwork(payment)
+		network = paymentPayload.Network
 	}
 
 	requirements, err := x402RequirementsForNetwork(paymentRequired, network)
 	if err != nil {
 		return nil, err
 	}
+	if paymentPayload.Network != requirements.Network {
+		return nil, fmt.Errorf("x402 payment is for network %s, not %s", paymentPayload.Network, requirements.Network)
+	}
 
-	verifyResponse, err := X402Verify(ctx, payment, *requirements)
+	verifyResponse, err := x402Verify(ctx, paymentPayload, *requirements)
 	if err != nil {
 		// the facilitator's error quotes its answer, which stays in the log
 		glog.Errorf("[x402]verify failed network=%s sku=%s: %s\n", networkId, sku.SkuId, err)
 		return nil, errors.New("x402 verify failed")
 	}
 	if !verifyResponse.IsValid {
-		return nil, fmt.Errorf("x402 payment invalid: %s", verifyResponse.InvalidReason)
+		return nil, fmt.Errorf("x402 payment invalid: %s", x402ReasonText(verifyResponse.InvalidReason))
 	}
 
-	settleResponse, err := X402Settle(ctx, payment, *requirements)
+	settleResponse, err := x402Settle(ctx, paymentPayload, *requirements)
 	if err != nil {
 		glog.Errorf("[x402]settle failed network=%s sku=%s: %s\n", networkId, sku.SkuId, err)
 		return nil, errors.New("x402 settle failed")
 	}
 	if !settleResponse.Success {
-		return nil, fmt.Errorf("x402 settlement failed: %s", settleResponse.ErrorReason)
+		return nil, fmt.Errorf("x402 settlement failed: %s", x402ReasonText(settleResponse.ErrorReason))
 	}
 
 	// paid. grant it. The receipt, when one was asked for, commits with the
@@ -579,13 +722,22 @@ func X402Purchase(
 		networkId, sku.SkuId, settleResponse.Transaction, settleResponse.Network,
 	)
 
+	settledNetwork := settleResponse.Network
+	if settledNetwork == "" {
+		settledNetwork = requirements.Network
+	}
+	payer := settleResponse.Payer
+	if payer == "" {
+		payer = verifyResponse.Payer
+	}
 	return &X402PurchaseResult{
 		Complete:    true,
 		SkuId:       sku.SkuId,
 		Pro:         sku.Pro,
 		ByteCount:   sku.ByteCount,
 		Transaction: settleResponse.Transaction,
-		Network:     settleResponse.Network,
+		Network:     settledNetwork,
+		Payer:       payer,
 	}, nil
 }
 
@@ -687,26 +839,6 @@ func x402TransactionGrantedInConn(connOwner server.PgConn, ctx context.Context, 
 	return
 }
 
-// x402PaymentNetwork reads the network out of the signed payment payload. Per the
-// x402 spec the X-PAYMENT header is base64(JSON) and the payload names the network
-// it was signed for; we use that to pick which quoted terms to check it against.
-//
-// Returns "" when it cannot be read, in which case the caller falls back to the
-// single quoted network (and refuses if several were quoted, rather than guessing).
-func x402PaymentNetwork(payment string) string {
-	raw, err := base64.StdEncoding.DecodeString(payment)
-	if err != nil {
-		return ""
-	}
-	var payload struct {
-		Network string `json:"network"`
-	}
-	if err := json.Unmarshal(raw, &payload); err != nil {
-		return ""
-	}
-	return payload.Network
-}
-
 // WriteX402UpgradeRequired turns an "upgrade required" auth result into a 402 with
 // payment terms, so an agent can pay for a Pro month inline and retry the SAME
 // request. Returns true when it wrote the response.
@@ -780,9 +912,7 @@ func X402SettleInlineUpgrade(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 
-	if receipt, err := json.Marshal(result); err == nil {
-		w.Header().Set(X402PaymentResponseHeader, string(receipt))
-	}
+	w.Header().Set(X402PaymentResponseHeader, x402PaymentResponseHeader(result))
 
 	return true
 }
@@ -1141,12 +1271,12 @@ func X402PurchaseHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	receipt, err := json.Marshal(result)
-	if err == nil {
-		w.Header().Set(X402PaymentResponseHeader, string(receipt))
-	}
+	// paid and granted by now, so the answer is 200 whatever else happens
+	w.Header().Set(X402PaymentResponseHeader, x402PaymentResponseHeader(result))
 	w.Header().Set("Content-Type", "application/json")
-	w.Write(receipt)
+	if body, err := json.Marshal(result); err == nil {
+		w.Write(body)
+	}
 }
 
 // X402SkusHandler lists what an agent can buy and for how much, so a skill can

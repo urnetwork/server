@@ -20,23 +20,39 @@ func TestX402OffByDefault(t *testing.T) {
 	connect.AssertNotEqual(t, err, nil)
 }
 
+// x402TestFacilitator is a facilitator config with a real (throwaway) CDP key, so
+// the config checks that sign with it pass.
+func x402TestFacilitator(t testing.TB) x402FacilitatorConfig {
+	key := newX402CdpTestEd25519Key(t)
+	return x402FacilitatorConfig{
+		Url:          "https://api.cdp.coinbase.com/platform/v2/x402",
+		ApiKeyId:     key.id,
+		ApiKeySecret: key.secret,
+	}
+}
+
 // TestX402RefusesHalfConfigured pins the guard that a filled-in `enabled: true` with
 // missing credentials must NOT go live. A blank pay_to would quote terms that settle
 // nowhere; a blank facilitator would accept payments we never verify. Both are worse
 // than being off, so the loader turns x402 back off.
 func TestX402RefusesHalfConfigured(t *testing.T) {
+	facilitator := x402TestFacilitator(t)
+	noKey := facilitator
+	noKey.ApiKeySecret = ""
+
 	// enabled, but no facilitator/pay_to -> must not be usable
 	for _, c := range []*X402Config{
-		{Enabled: true, PayTo: map[string]string{"base": "0xmerchant"}, Networks: []string{"base"}},
-		{Enabled: true, Facilitator: x402FacilitatorConfig{Url: "https://f", ApiKey: "sk"}, Networks: []string{"base"}},
-		{Enabled: true, Facilitator: x402FacilitatorConfig{Url: "https://f"}, PayTo: map[string]string{"base": "0xmerchant"}, Networks: []string{"base"}},
-		{Enabled: true, Facilitator: x402FacilitatorConfig{Url: "https://f", ApiKey: "sk"}, PayTo: map[string]string{"base": "0xmerchant"}},
+		{Enabled: true, Asset: "usdc", PayTo: map[string]string{"base": x402CdpTestPayToBase}, Networks: []string{"base"}},
+		{Enabled: true, Asset: "usdc", Facilitator: facilitator, Networks: []string{"base"}},
+		{Enabled: true, Asset: "usdc", Facilitator: noKey, PayTo: map[string]string{"base": x402CdpTestPayToBase}, Networks: []string{"base"}},
+		{Enabled: true, Asset: "usdc", Facilitator: facilitator, PayTo: map[string]string{"base": x402CdpTestPayToBase}},
 		// a quoted network with no settlement address of its own: quoting it
 		// would hand an agent an address that does not exist on that chain
 		{
 			Enabled:     true,
-			Facilitator: x402FacilitatorConfig{Url: "https://f", ApiKey: "sk"},
-			PayTo:       map[string]string{"base": "0xmerchant"},
+			Asset:       "usdc",
+			Facilitator: facilitator,
+			PayTo:       map[string]string{"base": x402CdpTestPayToBase},
 			Networks:    []string{"base", "solana"},
 		},
 	} {
@@ -46,8 +62,9 @@ func TestX402RefusesHalfConfigured(t *testing.T) {
 	// fully configured -> usable
 	connect.AssertEqual(t, x402ConfigUsable(&X402Config{
 		Enabled:     true,
-		Facilitator: x402FacilitatorConfig{Url: "https://f", ApiKey: "sk"},
-		PayTo:       map[string]string{"base": "0xmerchant", "solana": "SoLmerchant"},
+		Asset:       "usdc",
+		Facilitator: facilitator,
+		PayTo:       map[string]string{"base": x402CdpTestPayToBase, "solana": x402CdpTestPayToSolana},
 		Networks:    []string{"base"},
 	}), true)
 }
@@ -64,49 +81,46 @@ func TestUsdToAtomic(t *testing.T) {
 }
 
 // TestX402PaymentRequiredQuotesEveryNetwork pins chain-neutrality: we quote one term
-// per configured network, each to ITS OWN settlement address, at the same amount,
-// and the agent picks.
+// per configured network, each to ITS OWN settlement address and in its own token,
+// at the same amount, and the agent picks.
 //
-// The per-network address is the load-bearing part. Base and Tempo settle to an EVM
-// 0x address and Solana to a base58 account, so quoting one address across all three
-// hands an agent an address that does not exist on two of the chains it was offered.
-// USDC sent there is unrecoverable.
+// The per-network address is the load-bearing part. Base settles to an EVM 0x
+// address and Solana to a base58 account, so quoting one address across both hands
+// an agent an address that does not exist on one of the chains it was offered. USDC
+// sent there is unrecoverable.
 func TestX402PaymentRequiredQuotesEveryNetwork(t *testing.T) {
-	skipWithoutProYml(t)
+	x402CdpTestPrices(t)
+	t.Setenv("WARP_DOMAIN", "x402.example")
 
+	key := newX402CdpTestEd25519Key(t)
+	facilitator := newX402CdpTestFacilitator(t, key)
+	c := x402CdpTestConfig(t, x402CdpTestDocument(facilitator.url, key, "base", "solana"))
 	payTo := map[string]string{
-		"base":   "0xmerchantbase",
-		"solana": "SoLmerchantsolana",
-		"tempo":  "0xmerchanttempo",
+		"base":   x402CdpTestPayToBase,
+		"solana": x402CdpTestPayToSolana,
 	}
-	c := &X402Config{
-		Enabled:       true,
-		Facilitator:   x402FacilitatorConfig{Url: "https://f", ApiKey: "sk"},
-		PayTo:         payTo,
-		Networks:      []string{"base", "solana", "tempo"},
-		Asset:         "usdc",
-		MaxPaymentUsd: 100,
-		Skus:          map[string]x402SkuConfig{X402SkuData1Tib: {PriceUsd: 5}},
+	asset := map[string]string{
+		"base":   x402CdpTestUsdcBase,
+		"solana": x402CdpTestUsdcSolana,
 	}
 
 	paymentRequired, err := x402PaymentRequiredForConfig(c, "/x402/purchase", X402SkuData1Tib, "")
 	connect.AssertEqual(t, err, nil)
 	connect.AssertEqual(t, paymentRequired.X402Version, X402Version)
-	connect.AssertEqual(t, len(paymentRequired.Accepts), 3)
+	connect.AssertEqual(t, len(paymentRequired.Accepts), 2)
 
 	for _, accept := range paymentRequired.Accepts {
 		connect.AssertEqual(t, accept.Scheme, "exact")
 		connect.AssertEqual(t, accept.PayTo, payTo[accept.Network])
-		connect.AssertEqual(t, accept.Asset, "usdc")
+		connect.AssertEqual(t, accept.Asset, asset[accept.Network])
 		connect.AssertEqual(t, accept.MaxAmountRequired, "3000000")
-		connect.AssertEqual(t, accept.Resource, "/x402/purchase")
+		connect.AssertEqual(t, accept.Resource, "https://api.x402.example/x402/purchase")
 	}
 	// Each address really is distinct, so the assertion above cannot pass by
 	// every network sharing one string again.
 	connect.AssertNotEqual(t, paymentRequired.Accepts[0].PayTo, paymentRequired.Accepts[1].PayTo)
 	connect.AssertEqual(t, paymentRequired.Accepts[0].Network, "base")
 	connect.AssertEqual(t, paymentRequired.Accepts[1].Network, "solana")
-	connect.AssertEqual(t, paymentRequired.Accepts[2].Network, "tempo")
 }
 
 // TestX402RefusesToQuoteBadSku pins the guards around quoting: we would rather refuse
@@ -117,11 +131,12 @@ func TestX402PaymentRequiredQuotesEveryNetwork(t *testing.T) {
 // second price to forget to update.
 func TestX402RefusesToQuoteBadSku(t *testing.T) {
 	skipWithoutProYml(t)
+	t.Setenv("WARP_DOMAIN", "x402.example")
 
 	c := &X402Config{
 		Enabled:       true,
-		Facilitator:   x402FacilitatorConfig{Url: "https://f", ApiKey: "sk"},
-		PayTo:         map[string]string{"base": "0xmerchant", "solana": "SoLmerchant"},
+		Facilitator:   x402TestFacilitator(t),
+		PayTo:         map[string]string{"base": x402CdpTestPayToBase, "solana": x402CdpTestPayToSolana},
 		Networks:      []string{"base"},
 		Asset:         "usdc",
 		MaxPaymentUsd: 10,
@@ -158,8 +173,8 @@ func TestX402PricesComeFromProYml(t *testing.T) {
 
 	c := &X402Config{
 		Enabled:     true,
-		Facilitator: x402FacilitatorConfig{Url: "https://f", ApiKey: "sk"},
-		PayTo:       map[string]string{"base": "0xmerchant", "solana": "SoLmerchant"},
+		Facilitator: x402TestFacilitator(t),
+		PayTo:       map[string]string{"base": x402CdpTestPayToBase, "solana": x402CdpTestPayToSolana},
 		Networks:    []string{"base"},
 		Asset:       "usdc",
 		Skus: map[string]x402SkuConfig{
