@@ -144,6 +144,25 @@ func TestRedisResetClosesLateReplyPool(t *testing.T) {
 	})
 }
 
+// The pool telemetry counts the late-reply pool with the others.
+func TestRedisPoolStatsCountLateReplyPool(t *testing.T) {
+	options := deadlineTestPolicyOptions(t, lateReplyTestPool())
+	synctest.Test(t, func(t *testing.T) {
+		peer := newDeadlineRedisPeer(t, "")
+		options.Dialer = peer.dial
+		installLateReplyTestClient(t, redis.NewClient(&options))
+		conns := func(stats *redis.PoolStats) float64 { return float64(stats.TotalConns) }
+		misses := func(stats *redis.PoolStats) float64 { return float64(stats.Misses) }
+		connsBefore, missesBefore := redisPoolStat(conns), redisPoolStat(misses)
+		if _, err := deadlineTestLateGet(t, OptRedisKeepLateReplies()); err != nil {
+			t.Fatal(err)
+		}
+		if gotConns, gotMisses := redisPoolStat(conns)-connsBefore, redisPoolStat(misses)-missesBefore; gotConns != 1 || gotMisses != 1 {
+			t.Fatalf("pool telemetry missed the late-reply pool: conns +%v misses +%v, want +1 and +1", gotConns, gotMisses)
+		}
+	})
+}
+
 // The deadline pool keeps its callers' deadlines on its sockets, which the
 // handler cache's renewal and the liveness leases rely on: a late reply
 // returns the caller at its deadline, and costs the connection.

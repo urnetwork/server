@@ -374,13 +374,7 @@ var redisKeyEventMergeDrops = prometheus.NewCounter(prometheus.CounterOpts{
 func init() {
 	poolStat := func(f func(*redis.PoolStats) float64) func() float64 {
 		return func() float64 {
-			value := float64(0)
-			for _, pool := range []*safeRedisClient{safeClient, safeNoCommandRetryClient, safeDeadlineClient, safeLateReplyClient, safeAuthClient} {
-				if client := pool.current(); client != nil {
-					value += f(client.PoolStats())
-				}
-			}
-			return value
+			return redisPoolStat(f)
 		}
 	}
 	prometheus.MustRegister(
@@ -408,14 +402,28 @@ func init() {
 	)
 }
 
+// Every pool the process opens, for reset and pool telemetry.
+func redisPools() []*safeRedisClient {
+	return []*safeRedisClient{safeClient, safeNoCommandRetryClient, safeDeadlineClient, safeLateReplyClient, safeAuthClient}
+}
+
+// One pool statistic summed over the open pools.
+func redisPoolStat(stat func(*redis.PoolStats) float64) float64 {
+	value := float64(0)
+	for _, pool := range redisPools() {
+		if client := pool.current(); client != nil {
+			value += stat(client.PoolStats())
+		}
+	}
+	return value
+}
+
 // resets the connection pool
 // call this after changes to the env
 func RedisReset() {
-	safeClient.reset()
-	safeNoCommandRetryClient.reset()
-	safeDeadlineClient.reset()
-	safeLateReplyClient.reset()
-	safeAuthClient.reset()
+	for _, pool := range redisPools() {
+		pool.reset()
+	}
 }
 
 // func client() redis.UniversalClient {
