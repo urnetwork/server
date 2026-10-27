@@ -251,6 +251,7 @@ func runRedisContractAdmission(ctx context.Context, action func(context.Context)
 		recoveryAttempted = true
 		if admission.recoverRetained(ctx) && ctx.Err() == nil {
 			compensatedCurrent = false
+			admission.noteRecoveryRerun()
 			return action(ctx)
 		}
 	}

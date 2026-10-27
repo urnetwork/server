@@ -26,7 +26,7 @@ func TestConnectDashboardShowsPendingReservationsAndRefusals(t *testing.T) {
 			t.Errorf("query lost its environment scope or counter rate: %s", query)
 		}
 	}
-	for _, operation := range []string{"reserve-pending", "reserve-pending-full", "release-pending", "reserve-owned", "reserve-probe"} {
+	for _, operation := range []string{"reserve-pending", "reserve-pending-full", "release-pending", "reserve-owned", "reserve-probe", "exhaustion-proof"} {
 		if !strings.Contains(panel.Description, operation) {
 			t.Errorf("panel description does not explain %s", operation)
 		}
