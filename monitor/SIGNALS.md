@@ -29548,6 +29548,15 @@ required. Prefix 892 still detects an altered historical identity body, and
 893 still detects altered retained source or scope-lock custody. These are
 catalog checks, not proof that a reviewer ran or any model output is valid.
 
+
+Version 894 adds `provide_capability`, the provider capability declarations
+that find-providers2 reads for a request requiring post-quantum encryption:
+`client_id uuid`, `post_quantum_encryption boolean` and `change_time
+timestamp`, all NOT NULL with no defaults, keyed by `PRIMARY KEY
+(client_id)`. A missing table, a nullable declaration or a missing key is
+schema drift at 894. The probe reads the catalog only; it does not show how
+many providers declare the capability.
+
 ### 8.10 Client-reliability covering-index drift after partition cutover
 Probe: `reliability-index`
 
@@ -45006,8 +45015,10 @@ Probe: `subnet-artifacts`
 `signal_subnet_artifacts.go` implements current retrieval of up to four
 independently enrolled immutable payout objects through both configured HTTPS
 API origins, using the actual public `GET /sn/artifact?hash=sha256:...` handler.
-This is a partial §22.8 component. The full-family coverage sentinel remains
-**0/9**; no chain inclusion, complete paged index, accepted tampering,
+This is a partial §22.8 component. It does not count as a full family in the
+registration sentinel. The current registry contains all nine family readers;
+registration does not establish their source, campaign or live qualification
+(§22.10). No chain inclusion, complete paged index, accepted tampering,
 all-copy loss, independent storage, retention census, or secretless audit replay
 is inferred from these reads. Two API names may use the same MinIO or cache.
 
