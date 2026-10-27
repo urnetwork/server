@@ -1617,6 +1617,16 @@ seal_evaluation_source "$candidate_source_root" "$candidate_sha" "$patch_sha256"
 
 seal_evaluation_source "$baseline_source_root" "$base_sha" ""
 
+# Refuse source-percent/request-fraction mismatches before paying for any
+# baseline run. The pristine image performs this metadata-only check offline.
+sudo -n docker run --rm --network none --read-only --cap-drop ALL \
+    --security-opt no-new-privileges:true --cpuset-cpus "$management_cpuset" \
+    --memory "$SCORER_MEMORY_LIMIT" --memory-swap "$SCORER_MEMORY_LIMIT" --pids-limit "$SCORER_PIDS_LIMIT" \
+    --env APEX_SIM_BIN=/opt/urnetwork/bin/sim-latency \
+    --env "APEX_SIM_SHA256=$base_simulator_sha256" \
+    --env "APEX_EPOCH=$source_epoch" --env "APEX_TAKEOVER_MARGIN=$takeover_margin" \
+    "$base_image_id" margin-preflight >&2 || die "source epoch takeover margin preflight failed"
+
 if [ -n "$round_baseline_path" ]; then
     jq -e --arg round_id "$round_id" --arg providers_sha256 "$providers_sha256" \
         --arg scorer_version "$scorer_version" --argjson replicates "$replicates" \

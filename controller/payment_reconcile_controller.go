@@ -52,6 +52,17 @@ import (
 // renewal or a missed revocation hides.
 const paymentReconcileWindow = 48 * time.Hour
 
+// paymentReconcileLapsedWindow is how far back the App Store and Play legs
+// re-check a subscription whose last credited window has already ended. A
+// renewal that neither its notification nor a run inside paymentReconcileWindow
+// credited (a refused notification, a store or credential outage longer than
+// two days, a billing retry or account hold that recovers weeks after expiry)
+// is still paid, and the store's status for the subscription names it. Within
+// this window the subscriber keeps being checked instead of being forgotten
+// two days after the lapse. A lapsed row can only be credited: the end
+// direction acts only on a window that is still open.
+const paymentReconcileLapsedWindow = 90 * 24 * time.Hour
+
 // paymentReconcileApiBudget caps the reconciler-initiated store API requests
 // per store per run. Work left over is picked up by the next hourly run.
 // Replaceable by tests.
@@ -527,6 +538,41 @@ func (self *paymentReconcileRun) recordCreditUnfulfillableDetails(store string, 
 		evidence,
 		details,
 	) {
+		self.errors += 1
+		self.storeResult(store).Errors += 1
+	}
+}
+
+var addPaymentReconciliationEventOnce = model.AddPaymentReconciliationEventOnceInConn
+
+// recordCreditUnfulfillableOnce records a paid store purchase whose owner the
+// reconciler cannot establish (details must carry "reason"). The reconciler
+// never guesses an owner; the event is the durable handle the owner acts on.
+// It is a disposition, not a per-run failure, so it is written once per store
+// object: later runs that see the same purchase add nothing. A dry run writes
+// its dry_run row like every dry-run event.
+func (self *paymentReconcileRun) recordCreditUnfulfillableOnce(
+	store string,
+	networkId *server.Id,
+	evidence string,
+	details map[string]any,
+) {
+	details["leg"] = "credit"
+	if self.dryRun {
+		self.record(store, model.PaymentReconcileActionCreditUnfulfillable, networkId, evidence, details)
+		return
+	}
+	if _, err := addPaymentReconciliationEventOnce(self.connOwner, self.clientSession.Ctx, &model.PaymentReconciliationEvent{
+		RunId:     self.runId,
+		Store:     store,
+		NetworkId: networkId,
+		Action:    model.PaymentReconcileActionCreditUnfulfillable,
+		Evidence:  evidence,
+		Details:   details,
+	}); err != nil {
+		// the only durable handle was not written: count a store error so the
+		// run shows it and the next run writes it
+		glog.Errorf("[reconcile]could not record %s/%s event: %s\n", store, model.PaymentReconcileActionCreditUnfulfillable, err)
 		self.errors += 1
 		self.storeResult(store).Errors += 1
 	}
@@ -1171,6 +1217,11 @@ func stripeRenewalMatchesInvoiceInConn(connOwner server.PgConn,
 //	2 expired / 3 billing retry / 5 revoked, renewal active  -> end
 //	1 active with auto-renew off (cancel at period end)      -> nothing (status
 //	    stays 1 until expiry; the rule falls out of the status itself)
+//
+// Subscriptions whose last credited window ended up to
+// paymentReconcileLapsedWindow ago are checked too; a lapsed row is only ever
+// credited, never ended. A transaction the pre-ledger handler already
+// credited is never credited again (appleCreditSubscriptionTransactionInTx).
 func reconcileApple(run *paymentReconcileRun, since time.Time) (bool, error) {
 	ctx := run.clientSession.Ctx
 	store := model.SubscriptionMarketApple
@@ -1180,10 +1231,12 @@ func reconcileApple(run *paymentReconcileRun, since time.Time) (bool, error) {
 		return false, errors.New("apple credentials disappeared mid-run")
 	}
 
+	// lapsed subscriptions too: a renewal the store charged but nothing
+	// credited stays visible after the last credited window ends
 	renewals := model.GetReconcileSubscriptionRenewalsInConn(run.connOwner,
 		ctx,
 		store,
-		run.now.Add(-paymentReconcileWindow),
+		run.now.Add(-paymentReconcileLapsedWindow),
 		paymentReconcileRenewalLimit,
 	)
 	seenNetworkIds := map[server.Id]bool{}
@@ -1274,6 +1327,19 @@ func reconcileApple(run *paymentReconcileRun, since time.Time) (bool, error) {
 				true,
 			)
 			if err != nil {
+				entitledTransactionId, _ := appleControllerStringClaim(claims, "transactionId")
+				if errors.Is(err, errAppleAccountTokenInvalid) && entitledTransactionId != "" {
+					// entitled and paid, but nothing names its network (no
+					// account token and no offer-code binding): never credit
+					// the renewal row's network on a guess
+					run.recordCreditUnfulfillableOnce(
+						store,
+						&renewal.NetworkId,
+						entitledTransactionId,
+						map[string]any{"reason": "destination_unresolved", "status": entitledTransaction.Status},
+					)
+					continue
+				}
 				run.record(
 					store,
 					model.PaymentReconcileActionError,
@@ -1297,6 +1363,17 @@ func reconcileApple(run *paymentReconcileRun, since time.Time) (bool, error) {
 				continue
 			}
 			credited, networkId, err := appleReconcileCreditTransactionInConn(run.connOwner, ctx, claims, creds.ProductIds, run.dryRun)
+			if errors.Is(err, errAppleAccountNetworkMissing) {
+				// the paid transaction belongs to a deleted network: never move
+				// it to the renewal row's network on a guess
+				run.recordCreditUnfulfillableOnce(
+					store,
+					&networkId,
+					transactionId,
+					map[string]any{"reason": "destination_deleted", "status": entitledTransaction.Status},
+				)
+				continue
+			}
 			if err != nil {
 				run.record(
 					store,
@@ -1388,11 +1465,13 @@ func appleReconcileCreditTransactionInConn(connOwner server.PgConn,
 
 	server.TxInConn(ctx, connOwner, func(tx server.PgTx) {
 		if !appleNetworkExistsInTx(tx, ctx, transaction.networkId) {
-			returnErr = errors.New("App Store account token does not name an existing network")
+			returnErr = errAppleAccountNetworkMissing
 			return
 		}
 		if dryRun {
-			credited = true
+			// the credit gate's own read: a window the pre-ledger handler
+			// already credited would not be credited again
+			credited = !appleTransactionCreditedBeforeLedgerInTx(tx, ctx, transaction)
 			return
 		}
 		credited = appleCreditSubscriptionTransactionInTx(tx, ctx, server.NewId(), transaction)
@@ -1411,21 +1490,28 @@ func appleReconcileCreditTransactionInConn(connOwner server.PgConn,
 //
 // decision table (Play subscriptionsv2 state -> action):
 //
-//	ACTIVE -> run the existing PlaySubscriptionRenewal credit path (advisory
-//	    lock + in-tx overlap re-check); Renewed = a missed renewal repaired
+//	ACTIVE, or CANCELED with expiry in the future (cancel at period end,
+//	    paid through) -> run the existing PlaySubscriptionRenewal credit path
+//	    (advisory lock + in-tx overlap re-check); Renewed = a missed renewal
+//	    repaired. Never ended.
 //	EXPIRED / PENDING_PURCHASE_CANCELED / 410 Gone, renewal active -> end
-//	CANCELED with expiry in the future (cancel at period end)      -> nothing
 //	CANCELED with expiry passed, renewal active                    -> end
 //	PAUSED / ON_HOLD / GRACE / PENDING                             -> nothing
+//
+// Purchases whose last credited window ended up to
+// paymentReconcileLapsedWindow ago are checked too; a lapsed row is only ever
+// credited, never ended.
 func reconcilePlay(run *paymentReconcileRun, since time.Time) (bool, error) {
 	ctx := run.clientSession.Ctx
 	store := model.SubscriptionMarketGoogle
 	packageName := playPackageNameFunc()
 
+	// lapsed purchases too: an account-hold recovery or a renewal whose RTDN
+	// and scheduled poll both missed stays visible after the window ends
 	renewals := model.GetReconcileSubscriptionRenewalsInConn(run.connOwner,
 		ctx,
 		store,
-		run.now.Add(-paymentReconcileWindow),
+		run.now.Add(-paymentReconcileLapsedWindow),
 		paymentReconcileRenewalLimit,
 	)
 	seenPurchaseTokens := map[string]bool{}
@@ -1499,16 +1585,22 @@ func reconcilePlay(run *paymentReconcileRun, since time.Time) (bool, error) {
 			continue
 		}
 
-		if sub.SubscriptionState == "SUBSCRIPTION_STATE_ACTIVE" {
+		// not over: a CANCELED purchase here is paid through maxExpiryTime and
+		// its period is entitled exactly like an active one
+		if sub.SubscriptionState == "SUBSCRIPTION_STATE_ACTIVE" || sub.SubscriptionState == "SUBSCRIPTION_STATE_CANCELED" {
 			if playUnlinkedBoundElsewhereInConn(run.connOwner, run.clientSession, sub, renewal) {
 				// a purchase without an account link is bound to a different
-				// network than this renewal row: never credit the row's network
-				run.record(
+				// network than this renewal row: never credit the row's
+				// network, and never pick one -- record it once for the owner
+				run.recordCreditUnfulfillableOnce(
 					store,
-					model.PaymentReconcileActionError,
 					&renewal.NetworkId,
 					purchaseToken,
-					map[string]any{"error": "purchase is bound to another network", "leg": "validate"},
+					map[string]any{
+						"reason":             "bound_to_another_network",
+						"subscription_state": sub.SubscriptionState,
+						"expiry_time":        maxExpiryTime.UTC().Format(time.RFC3339),
+					},
 				)
 				continue
 			}

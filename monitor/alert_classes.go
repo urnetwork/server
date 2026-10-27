@@ -24,6 +24,10 @@ const (
 )
 
 var alertClassKinds = map[string]alertClassKind{
+	"contract-failure-share":               incidentAlertClass,
+	"contract-failure-share-unobservable":  visibilityAlertClass,
+	"contract-stage-inflight-high":         incidentAlertClass,
+	"contract-stage-inflight-unobservable": visibilityAlertClass,
 	// unknown states
 	"drain-moves-not-deployed":                         visibilityAlertClass,
 	"drain-moves-telemetry-incomplete":                 visibilityAlertClass,

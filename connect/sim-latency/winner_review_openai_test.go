@@ -37,8 +37,15 @@ func winnerModelFixture() (winnerReviewBrokerRequest, winnerModelJudgment) {
 // Emit one real-shape Responses terminal event, not pre-decoded model data.
 func winnerModelFixtureStream(t *testing.T, output string) string {
 	t.Helper()
+	return winnerModelFixtureStreamForModel(t, output, winnerReviewProviderModelName(model.CompetitionWinnerReviewModel))
+}
+
+// Model-specific consumers must receive the identity they actually requested;
+// winner-review fixtures must not mask the independent tester's validation.
+func winnerModelFixtureStreamForModel(t *testing.T, output string, providerModel string) string {
+	t.Helper()
 	content, err := json.Marshal(map[string]any{"type": "response.completed", "response": map[string]any{
-		"id": "resp_synthetic", "status": "completed", "model": winnerReviewProviderModelName(model.CompetitionWinnerReviewModel),
+		"id": "resp_synthetic", "status": "completed", "model": providerModel,
 		"usage":  map[string]int{"input_tokens": 100, "output_tokens": 100},
 		"output": []any{map[string]any{"type": "message", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": output}}}},
 	}})

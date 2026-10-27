@@ -316,6 +316,530 @@
       ]
     },
     {
+      "id": 20,
+      "type": "stat",
+      "title": "busiest main thread",
+      "description": "Highest main-thread CPU of any Redis node: user plus system seconds per second of the thread that runs commands and accepts connections, over five minutes (1.0 is one full core, all that thread can use). Orange from 0.85: the WARN of SIGNALS.md section 26 needs 10 minutes above it. Healthy is at most 0.64. In the 2026-10-26 storm single nodes ran 0.97-0.98, mostly on connection handling.",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 0,
+          "min": 0,
+          "max": 1,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.85
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(sum by (host, node) (rate(redis_cpu_user_main_thread_seconds_total{env=\"$env\"}[5m])) + sum by (host, node) (rate(redis_cpu_sys_main_thread_seconds_total{env=\"$env\"}[5m])))"
+        }
+      ]
+    },
+    {
+      "id": 21,
+      "type": "stat",
+      "title": "highest HELLO rate on one node",
+      "description": "Highest per-node rate of HELLO over five minutes. go-redis opens every new connection with HELLO, so this is connection churn. Orange from 500/s: the WARN of SIGNALS.md section 26 needs 5 minutes above it. Healthy is at most 12/s; thousands per second on single nodes in the 2026-10-26 storm, when the proxies' Redis clients reconnected after timeouts.",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 500
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(rate(redis_commands_total{env=\"$env\",cmd=\"hello\"}[5m]))"
+        }
+      ]
+    },
+    {
+      "id": 22,
+      "type": "stat",
+      "title": "highest client pool timeouts (one service)",
+      "description": "Highest rate of go-redis pool timeouts of any service over five minutes (urnetwork_redis_pool_timeouts_total, summed over the service's processes): commands that waited past the pool timeout for a connection. Orange from 10/s, the WARN of SIGNALS.md section 26 after 5 minutes; red from 1,000/s, the PAGE of SIGNALS.md section 3.5b. Healthy is 0. The proxy reached 12-14k/s in the 2026-10-26 storm.",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 10
+              },
+              {
+                "color": "red",
+                "value": 1000
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(sum by (service) (rate(urnetwork_redis_pool_timeouts_total{env=\"$env\",instance!=\"\"}[5m])))"
+        }
+      ]
+    },
+    {
+      "id": 23,
+      "type": "stat",
+      "title": "highest client pool misses (one service)",
+      "description": "Highest rate of pool checkouts of any service that found no idle connection and dialed a new one, over five minutes. Tens per second or less is normal; thousands per second means a service is reconnecting, which the nodes show as HELLO and accepted connections. No SIGNALS.md section 26 threshold.",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(sum by (service) (rate(urnetwork_redis_pool_misses_total{env=\"$env\",instance!=\"\"}[5m])))"
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "type": "row",
+      "title": "main thread and connection churn",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 9
+      },
+      "panels": []
+    },
+    {
+      "id": 25,
+      "type": "timeseries",
+      "title": "main-thread CPU per node",
+      "description": "Per-node main-thread CPU, user plus system seconds per second over five minutes (redis_cpu_user/sys_main_thread_seconds_total); 1.0 is one full core, all the main thread can use. The line is the WARN of SIGNALS.md section 26: 0.85 for 10 minutes. A saturated main thread delays every command on its node, whether the time goes to commands or to accepting connections: compare ops / s and HELLO / s.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 10
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.85
+              }
+            ]
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (host, node) (rate(redis_cpu_user_main_thread_seconds_total{env=\"$env\",host=~\"$host\",node=~\"$node\"}[5m])) + sum by (host, node) (rate(redis_cpu_sys_main_thread_seconds_total{env=\"$env\",host=~\"$host\",node=~\"$node\"}[5m]))",
+          "legendFormat": "{{host}} {{node}}"
+        }
+      ]
+    },
+    {
+      "id": 26,
+      "type": "timeseries",
+      "title": "HELLO / s per node",
+      "description": "HELLO commands per node per second over five minutes. go-redis opens every new connection with HELLO, so this is connection churn. The line is the WARN of SIGNALS.md section 26: 500/s for 5 minutes. Reconnect storms, from timeouts that close connections or from pool misses, show here before the main thread saturates.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 10
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 500
+              }
+            ]
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (host, node) (rate(redis_commands_total{env=\"$env\",host=~\"$host\",node=~\"$node\",cmd=\"hello\"}[5m]))",
+          "legendFormat": "{{host}} {{node}}"
+        }
+      ]
+    },
+    {
+      "id": 27,
+      "type": "timeseries",
+      "title": "connections accepted / s per node",
+      "description": "New client connections each node accepted per second over five minutes (redis_connections_received_total). For go-redis clients it tracks HELLO; accepted connections well above HELLO are connections that closed before their handshake.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 18
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (host, node) (rate(redis_connections_received_total{env=\"$env\",host=~\"$host\",node=~\"$node\"}[5m]))",
+          "legendFormat": "{{host}} {{node}}"
+        }
+      ]
+    },
+    {
+      "id": 28,
+      "type": "timeseries",
+      "title": "client pool misses / s by service",
+      "description": "Checkouts that found no idle pooled connection and dialed a new one, per service (urnetwork_redis_pool_misses_total). Each miss is a new connection on some node, so the service whose misses rise with the nodes' HELLO and accepted connections is the one churning.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 18
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (service) (rate(urnetwork_redis_pool_misses_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{service}}"
+        }
+      ]
+    },
+    {
       "id": 6,
       "type": "row",
       "title": "per node",
@@ -324,7 +848,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 5
+        "y": 26
       },
       "panels": []
     },
@@ -337,7 +861,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 6
+        "y": 27
       },
       "datasource": {
         "type": "prometheus",
@@ -418,7 +942,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 6
+        "y": 27
       },
       "datasource": {
         "type": "prometheus",
@@ -494,7 +1018,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 14
+        "y": 35
       },
       "datasource": {
         "type": "prometheus",
@@ -554,7 +1078,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 14
+        "y": 35
       },
       "datasource": {
         "type": "prometheus",
@@ -623,7 +1147,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 22
+        "y": 43
       },
       "datasource": {
         "type": "prometheus",
@@ -692,7 +1216,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 22
+        "y": 43
       },
       "datasource": {
         "type": "prometheus",
@@ -768,7 +1292,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 30
+        "y": 51
       },
       "datasource": {
         "type": "prometheus",
@@ -854,7 +1378,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 30
+        "y": 51
       },
       "datasource": {
         "type": "prometheus",
@@ -914,7 +1438,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 38
+        "y": 59
       },
       "panels": []
     },
@@ -922,12 +1446,12 @@
       "id": 16,
       "type": "timeseries",
       "title": "pool timeouts / s by service",
-      "description": "go-redis pool timeouts per second by service (urnetwork_redis_pool_timeouts_total, pushed by the services). Any sustained nonzero rate means the app is waiting on pool connections and warns.",
+      "description": "go-redis pool timeouts per second by service (urnetwork_redis_pool_timeouts_total, pushed by the services). Any sustained nonzero rate means the app is waiting on pool connections and warns. The lines are the WARN of SIGNALS.md section 26 at 10/s per service (5 minutes) and the PAGE of SIGNALS.md section 3.5b at 1,000/s.",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 39
+        "y": 60
       },
       "datasource": {
         "type": "prometheus",
@@ -946,9 +1470,29 @@
             "fillOpacity": 10,
             "showPoints": "never",
             "spanNulls": false,
-            "axisPlacement": "auto"
+            "axisPlacement": "auto",
+            "thresholdsStyle": {
+              "mode": "line"
+            }
           },
-          "min": 0
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 10
+              },
+              {
+                "color": "red",
+                "value": 1000
+              }
+            ]
+          }
         },
         "overrides": []
       },
@@ -987,7 +1531,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 39
+        "y": 60
       },
       "datasource": {
         "type": "prometheus",
@@ -1056,7 +1600,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 47
+        "y": 68
       },
       "datasource": {
         "type": "prometheus",
@@ -1125,7 +1669,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 55
+        "y": 76
       },
       "datasource": {
         "type": "prometheus",

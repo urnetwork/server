@@ -1,0 +1,689 @@
+// Opt-in provider qualification observes two real offline Go executions before
+// asking Snow to attest them. It cannot create a reviewed build or source approval.
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"os/exec"
+	"os/signal"
+	"path/filepath"
+	"reflect"
+	"runtime"
+	"sort"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/urnetwork/server/model"
+)
+
+// Bounds concern only this tiny synthetic observer; production broker defaults
+// remain the unchanged five-minute request and three-hour total deadlines.
+type sourceTestSnowRuntimeSettings struct {
+	MaximumBytes                                   int64
+	Sandbox                                        sourceBuildSandboxSettings
+	ScoringLock, EvaluatorImageId, EvaluatorCommit string
+	RawSourceLockSha256, SourceLockSha256          string
+}
+
+func defaultSourceTestSnowRuntimeSettings() sourceTestSnowRuntimeSettings {
+	sandbox := defaultSourceBuildSandboxSettings()
+	sandbox.CpuSet = "20,22"
+	sandbox.MemoryBytes = 2 * 1024 * 1024 * 1024
+	sandbox.WorkBytes = 512 * 1024 * 1024
+	sandbox.TmpBytes = 64 * 1024 * 1024
+	sandbox.Pids, sandbox.NoFile = 128, 1024
+	sandbox.Timeout, sandbox.OutputBytes = 5*time.Minute, 2*1024*1024
+	return sourceTestSnowRuntimeSettings{MaximumBytes: 16 * 1024 * 1024, Sandbox: sandbox,
+		ScoringLock:      "/home/by/urnetwork/temp/production-frontier-20261024.63AtMXS5/scoring.lock",
+		EvaluatorImageId: "sha256:98c9061c4a43a25e7b581a5193ca6e7f48e49e7b7fc03b7c1b6190a029befee2", EvaluatorCommit: "a9e8e1a710b24c749e6499a0606938252c83e136",
+		RawSourceLockSha256: "239cea7fe6f77f989b75ba6efa677e8731640ba2fdd3690a35e6fe72103f3d11", SourceLockSha256: "ec322ed2db023e15ea5dc3eea60a6ca5989661bba737c340fea3477d8d1300cf"}
+}
+
+// All leaves are separately pinned, immutable root-owned inputs. No command,
+// model, output schema, HTTP budget, or candidate request is configurable.
+type sourceTestSnowRuntimeConfig struct {
+	Schema            int                    `json:"schema"`
+	Kind              string                 `json:"kind"`
+	OutputDirectory   string                 `json:"output_directory"`
+	Program           reviewQualificationPin `json:"program"`
+	SourceCommit      string                 `json:"source_commit"`
+	UnitQualification reviewQualificationPin `json:"unit_qualification"`
+	ProviderSettings  reviewQualificationPin `json:"provider_settings"`
+	Authorization     reviewQualificationPin `json:"authorization"`
+	SourceLock        reviewQualificationPin `json:"source_lock"`
+	SourceLockSha256  string                 `json:"source_lock_sha256"`
+	EvaluatorImageId  string                 `json:"evaluator_image_id"`
+	EvaluatorCommit   string                 `json:"evaluator_commit"`
+}
+
+type sourceTestSnowRuntimeAuthorization struct {
+	Schema                 int       `json:"schema"`
+	Kind                   string    `json:"kind"`
+	AuthorizedAt           time.Time `json:"authorized_at"`
+	ConfigurationDirectory string    `json:"configuration_directory"`
+	ProviderSettingsSha256 string    `json:"provider_settings_sha256"`
+	MaximumProviderPosts   int       `json:"maximum_provider_posts"`
+	MaximumGoExecutions    int       `json:"maximum_go_executions"`
+	SingleAttempt          bool      `json:"single_attempt"`
+	NoApprovalAuthority    bool      `json:"no_approval_authority"`
+}
+
+type sourceTestSnowRuntimeUnitReceipt struct {
+	Schema            int                      `json:"schema"`
+	Kind              string                   `json:"kind"`
+	Accepted          bool                     `json:"accepted"`
+	SourceCommit      string                   `json:"source_commit"`
+	ProgramSha256     string                   `json:"program_sha256"`
+	Race              bool                     `json:"race"`
+	ConsecutivePasses int                      `json:"consecutive_passes"`
+	Skips             int                      `json:"skips"`
+	Sources           []reviewQualificationPin `json:"sources"`
+	Logs              []reviewQualificationPin `json:"logs"`
+}
+
+// This module has no dependency or competition package. Both cases run the
+// identical fixed Go command exactly once, with only a closed case label.
+func sourceTestSnowRuntimeFixture() (string, string, string) {
+	module := "module urnetwork.invalid/source-test-snow-runtime-qualification\n\ngo 1.27.3\n"
+	source := "package qualification\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\nfunc TestObservedRuntimeAttestation(t *testing.T) {\n\tswitch os.Getenv(\"SOURCE_TEST_QUALIFICATION_CASE\") {\n\tcase \"observed-pass\":\n\tcase \"deliberate-fail\":\n\t\tt.Fatal(\"intentional source-test provider qualification failure\")\n\tdefault:\n\t\tt.Fatal(\"unknown source-test provider qualification case\")\n\t}\n}\n"
+	script := "test \"$(go env GOVERSION)\" = go1.27.3; printf 'observed_toolchain=%s\\n' \"$(go env GOVERSION)\" >&2; test \"$(sha256sum /opt/urnetwork/source-lock.json | cut -d' ' -f1)\" = \"$SOURCE_TEST_QUALIFICATION_RAW_LOCK\"; mkdir -p /work/cache /work/tmp; cd /workspace/server; export GOWORK=off GOMAXPROCS=2 CGO_ENABLED=0; export GOFLAGS='-mod=readonly -p=2'; exec go test -json -count=1 -run '^TestObservedRuntimeAttestation$' ."
+	return module, source, script
+}
+
+// The suite identity deliberately differs from the full prescribed winner
+// suite. A passing provider probe can never be mistaken for that qualification.
+func sourceTestSnowRuntimeSuiteSha256() string {
+	module, source, script := sourceTestSnowRuntimeFixture()
+	content, _ := json.Marshal(struct {
+		Protocol, Module, Source, Script string
+		Cases                            []string
+	}{"source-test-snow-runtime-observer-v1", module, source, script, []string{"observed-pass", "deliberate-fail"}})
+	return reviewQualificationHash(content)
+}
+
+// Require protected ancestry as well as an immutable root leaf; a by-owned
+// parent cannot swap an authorized program or configuration after admission.
+func sourceTestSnowRuntimeProtected(path string, executable bool) error {
+	resolved, err := filepath.EvalSymlinks(path)
+	info, statErr := os.Lstat(path)
+	if err != nil || statErr != nil || resolved != path || !filepath.IsAbs(path) || filepath.Clean(path) != path || !info.Mode().IsRegular() || info.Sys().(*syscall.Stat_t).Uid != 0 || info.Sys().(*syscall.Stat_t).Nlink != 1 || info.Mode().Perm()&0o222 != 0 || executable && info.Mode().Perm()&0o111 == 0 {
+		return errors.New("source-test runtime input is not a protected root-owned leaf")
+	}
+	for parent := filepath.Dir(path); ; parent = filepath.Dir(parent) {
+		info, err := os.Lstat(parent)
+		if err != nil || !info.IsDir() || info.Sys().(*syscall.Stat_t).Uid != 0 || info.Mode().Perm()&0o022 != 0 {
+			return errors.New("source-test runtime input ancestry is mutable")
+		}
+		if parent == "/" {
+			return nil
+		}
+	}
+}
+
+func authenticateSourceTestSnowRuntime(config sourceTestSnowRuntimeConfig, settings sourceTestSnowRuntimeSettings) (winnerSnowProviderSettings, error) {
+	var provider winnerSnowProviderSettings
+	if os.Geteuid() != 0 || runtime.Version() != "go1.27.3" || config.Schema != 1 || config.Kind != "source-test-snow-runtime-qualification-config" || !sourceGitShaPattern.MatchString(config.SourceCommit) || !sourceGitShaPattern.MatchString(config.EvaluatorCommit) || !validSha256(config.SourceLockSha256) || !strings.HasPrefix(config.EvaluatorImageId, "sha256:") || !validSha256(strings.TrimPrefix(config.EvaluatorImageId, "sha256:")) || !filepath.IsAbs(config.OutputDirectory) || filepath.Clean(config.OutputDirectory) != config.OutputDirectory || config.OutputDirectory == "/" || filepath.Dir(config.OutputDirectory) != filepath.Dir(config.Authorization.Path) {
+		return provider, errors.New("source-test runtime qualification identity is invalid")
+	}
+	if config.EvaluatorImageId != settings.EvaluatorImageId || config.EvaluatorCommit != settings.EvaluatorCommit || config.SourceLock.Sha256 != settings.RawSourceLockSha256 || config.SourceLockSha256 != settings.SourceLockSha256 {
+		return provider, errors.New("source-test runtime qualification must use the exact frozen C2 image and source tuple")
+	}
+	if err := reviewQualificationPrivateRoot(filepath.Dir(config.OutputDirectory)); err != nil {
+		return provider, err
+	}
+	executable, err := os.Executable()
+	if err != nil || executable != config.Program.Path {
+		return provider, errors.New("source-test runtime driver differs from its authenticated program")
+	}
+	if err := sourceTestSnowRuntimeProtected(config.Program.Path, true); err != nil {
+		return provider, err
+	}
+	if err := verifySourceSupervisorProgram(config.Program.Path, config.Program.Sha256); err != nil {
+		return provider, err
+	}
+	for _, pin := range []reviewQualificationPin{config.UnitQualification, config.ProviderSettings, config.Authorization, config.SourceLock} {
+		if err := sourceTestSnowRuntimeProtected(pin.Path, false); err != nil {
+			return provider, err
+		}
+		if _, err := readReviewQualificationPin(pin, settings.MaximumBytes, false); err != nil {
+			return provider, err
+		}
+	}
+	unitBytes, err := readReviewQualificationPin(config.UnitQualification, settings.MaximumBytes, false)
+	if err != nil {
+		return provider, err
+	}
+	var unit sourceTestSnowRuntimeUnitReceipt
+	if err := decodeSnowReviewQualificationProof(unitBytes, &unit); err != nil {
+		return provider, err
+	}
+	if unit.Schema != 1 || unit.Kind != "source-test-snow-runtime-driver-unit-qualification" || !unit.Accepted || unit.SourceCommit != config.SourceCommit || unit.ProgramSha256 != config.Program.Sha256 || !unit.Race || unit.ConsecutivePasses != 3 || unit.Skips != 0 || len(unit.Logs) != 3 || len(unit.Sources) == 0 {
+		return provider, errors.New("source-test runtime driver needs its own exact three-pass qualification")
+	}
+	for _, pin := range append(append([]reviewQualificationPin{}, unit.Sources...), unit.Logs...) {
+		if err := sourceTestSnowRuntimeProtected(pin.Path, false); err != nil {
+			return provider, err
+		}
+		if _, err := readReviewQualificationPin(pin, settings.MaximumBytes, false); err != nil {
+			return provider, err
+		}
+	}
+	provider, err = loadWinnerSnowProviderSettings(config.ProviderSettings.Path, config.ProviderSettings.Sha256)
+	if err != nil {
+		return provider, err
+	}
+	lock, err := loadEvaluatorSourceLock(config.SourceLock.Path)
+	if err != nil || lock.Repositories["server"] != config.EvaluatorCommit || lock.CandidatePathBase != "mono_root_v1" {
+		return provider, errors.New("source-test runtime image requires the genuine C2 source lock")
+	}
+	canonical, err := model.CompetitionSourceLockDigest(lock.Repositories)
+	if err != nil || canonical != config.SourceLockSha256 {
+		return provider, errors.New("source-test runtime typed source lock does not match")
+	}
+	authorizationBytes, err := readReviewQualificationPin(config.Authorization, settings.MaximumBytes, true)
+	if err != nil {
+		return provider, err
+	}
+	var authorization sourceTestSnowRuntimeAuthorization
+	if err := decodeSnowReviewQualificationProof(authorizationBytes, &authorization); err != nil {
+		return provider, err
+	}
+	if authorization.Schema != 1 || authorization.Kind != "source-test-snow-runtime-qualification-authorization" || authorization.AuthorizedAt.IsZero() || authorization.AuthorizedAt.After(time.Now().UTC()) || authorization.ConfigurationDirectory != filepath.Dir(config.OutputDirectory) || authorization.ProviderSettingsSha256 != config.ProviderSettings.Sha256 || authorization.MaximumProviderPosts != 6 || authorization.MaximumGoExecutions != 2 || !authorization.SingleAttempt || !authorization.NoApprovalAuthority {
+		return provider, errors.New("source-test runtime qualification requires explicit two-run/six-POST authorization")
+	}
+	return provider, nil
+}
+
+// Parse real go-test JSON rather than accepting a caller-authored count or
+// converting a compiler/transport failure into the deliberate failing test.
+func observeSourceTestSnowRuntime(stdout, stderr []byte, exitCode int, caseName string) (int, error) {
+	expectedAction, expectedExit := "pass", 0
+	if caseName == "deliberate-fail" {
+		expectedAction, expectedExit = "fail", 1
+	} else if caseName != "observed-pass" {
+		return 0, errors.New("unknown source-test runtime case")
+	}
+	if exitCode != expectedExit || string(stderr) != "observed_toolchain=go1.27.3\n" {
+		return 0, errors.New("source-test runtime did not observe the expected real Go tool/exit")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(stdout))
+	runs, terminals, packages := 0, 0, 0
+	intentionalFailure := false
+	for {
+		var event struct{ Action, Package, Test, Output string }
+		if err := decoder.Decode(&event); errors.Is(err, io.EOF) {
+			break
+		} else if err != nil {
+			return 0, errors.New("source-test runtime Go output is incomplete")
+		}
+		if event.Package != "urnetwork.invalid/source-test-snow-runtime-qualification" || event.Test != "" && event.Test != "TestObservedRuntimeAttestation" || event.Action == "skip" {
+			return 0, errors.New("source-test runtime observed another or skipped test")
+		}
+		if event.Test != "" && event.Action == "run" {
+			runs++
+		}
+		if event.Action == "pass" || event.Action == "fail" {
+			if event.Action != expectedAction {
+				return 0, errors.New("source-test runtime Go terminal disagrees with its case")
+			}
+			if event.Test == "" {
+				packages++
+			} else {
+				terminals++
+			}
+		}
+		intentionalFailure = intentionalFailure || strings.Contains(event.Output, "intentional source-test provider qualification failure")
+	}
+	if runs != 1 || terminals != 1 || packages != 1 || caseName == "deliberate-fail" && !intentionalFailure || caseName == "observed-pass" && intentionalFailure {
+		return 0, errors.New("source-test runtime lacks exactly one authentic case outcome")
+	}
+	return terminals, nil
+}
+
+// Keep the production sandbox's fixed containment arguments; only this closed,
+// trusted synthetic script replaces its full prescribed-correctness script.
+func sourceTestSnowRuntimeArguments(input sourceBuildSandboxInput, settings sourceBuildSandboxSettings, caseName, rawLockSha256 string) ([]string, error) {
+	if caseName != "observed-pass" && caseName != "deliberate-fail" || !validSha256(rawLockSha256) {
+		return nil, errors.New("source-test runtime case or raw source lock invalid")
+	}
+	args, err := sourceBuildSandboxArguments(input, settings)
+	if err != nil {
+		return nil, err
+	}
+	_, _, script := sourceTestSnowRuntimeFixture()
+	args[len(args)-1] = script
+	imageIndex := len(args) - 3
+	extra := []string{"--cpus=2", "--env=SOURCE_TEST_QUALIFICATION_CASE=" + caseName, "--env=SOURCE_TEST_QUALIFICATION_RAW_LOCK=" + rawLockSha256}
+	return append(append(append([]string{}, args[:imageIndex]...), extra...), args[imageIndex:]...), nil
+}
+
+// Authenticate daemon readback before starting the isolated Go producer, not
+// merely the desired argv. Every bind is read-only and belongs to this owner.
+func validateSourceTestSnowRuntimeContainer(content []byte, id string, input sourceBuildSandboxInput, settings sourceBuildSandboxSettings, caseName, rawLockSha256 string) error {
+	var containers []struct {
+		Id, Image string
+		Config    struct {
+			User                 string
+			Entrypoint, Cmd, Env []string
+			Labels               map[string]string
+		}
+		HostConfig struct {
+			NetworkMode, CpusetCpus, CgroupParent, CgroupnsMode string
+			Privileged, ReadonlyRootfs                          bool
+			Init                                                *bool
+			NanoCpus, Memory, MemorySwap, PidsLimit             int64
+			CapDrop, CapAdd, SecurityOpt                        []string
+			Devices, DeviceRequests                             []json.RawMessage
+			PortBindings                                        map[string]json.RawMessage
+			Tmpfs                                               map[string]string
+		}
+		Mounts []struct {
+			Type, Source, Destination string
+			Rw                        bool `json:"RW"`
+		}
+	}
+	if json.Unmarshal(content, &containers) != nil || len(containers) != 1 {
+		return errors.New("source-test runtime container readback malformed")
+	}
+	actual := containers[0]
+	_, _, script := sourceTestSnowRuntimeFixture()
+	host := actual.HostConfig
+	if actual.Id != id || actual.Image != input.ImageId || actual.Config.User != "65532:65532" || !reflect.DeepEqual(actual.Config.Entrypoint, []string{"/bin/bash"}) || !reflect.DeepEqual(actual.Config.Cmd, []string{"-ceu", script}) || actual.Config.Labels["com.urnetwork.review-build.owner"] != input.Owner || actual.Config.Labels["com.urnetwork.review-build.phase"] != input.Phase || host.NetworkMode != "none" || host.Privileged || !host.ReadonlyRootfs || host.Init == nil || !*host.Init || host.CgroupnsMode != "private" || host.CgroupParent != settings.CgroupParent || host.CpusetCpus != settings.CpuSet || host.NanoCpus != 2_000_000_000 || host.Memory != settings.MemoryBytes || host.MemorySwap != settings.MemoryBytes || host.PidsLimit != int64(settings.Pids) || !reflect.DeepEqual(host.CapDrop, []string{"ALL"}) || len(host.CapAdd) != 0 || !reflect.DeepEqual(host.SecurityOpt, []string{"no-new-privileges:true"}) || len(host.Devices) != 0 || len(host.DeviceRequests) != 0 || len(host.PortBindings) != 0 {
+		return errors.New("source-test runtime actual container containment differs")
+	}
+	expectedTmpfs := map[string]string{
+		"/work": fmt.Sprintf("rw,exec,nosuid,nodev,uid=65532,gid=65532,mode=0700,size=%d", settings.WorkBytes),
+		"/tmp":  fmt.Sprintf("rw,nosuid,nodev,noexec,uid=65532,gid=65532,mode=1770,size=%d", settings.TmpBytes),
+		"/opt/urnetwork/go/pkg/mod/cache/download/github.com/urnetwork/server/@v": fmt.Sprintf("rw,nosuid,nodev,noexec,uid=65532,gid=65532,mode=0700,size=%d", settings.MetadataBytes),
+	}
+	if !reflect.DeepEqual(host.Tmpfs, expectedTmpfs) {
+		return errors.New("source-test runtime writable tmpfs boundaries differ")
+	}
+	environment := map[string]string{}
+	for _, value := range actual.Config.Env {
+		key, content, ok := strings.Cut(value, "=")
+		if !ok {
+			return errors.New("source-test runtime container environment malformed")
+		}
+		if _, exists := environment[key]; exists {
+			return errors.New("source-test runtime container environment duplicated")
+		}
+		environment[key] = content
+	}
+	if environment["SOURCE_TEST_QUALIFICATION_CASE"] != caseName || environment["SOURCE_TEST_QUALIFICATION_RAW_LOCK"] != rawLockSha256 || environment["SOURCE_BUILD_COMMIT"] != input.Commit || environment["GOPROXY"] != "off" || environment["GOSUMDB"] != "off" || environment["GOTOOLCHAIN"] != "local" {
+		return errors.New("source-test runtime actual toolchain/case environment differs")
+	}
+	binds := map[string]string{"/workspace": input.SourceDirectory, "/input/server-metadata": input.MetadataDirectory}
+	for _, mount := range actual.Mounts {
+		if mount.Type != "bind" {
+			if mount.Type != "tmpfs" || mount.Destination != "/work" && mount.Destination != "/tmp" && mount.Destination != "/opt/urnetwork/go/pkg/mod/cache/download/github.com/urnetwork/server/@v" {
+				return errors.New("source-test runtime unexpected mount")
+			}
+			continue
+		}
+		if source, ok := binds[mount.Destination]; !ok || source != mount.Source || mount.Rw {
+			return errors.New("source-test runtime bind differs or is writable")
+		}
+		delete(binds, mount.Destination)
+	}
+	if len(binds) != 0 {
+		return errors.New("source-test runtime missing immutable fixture bind")
+	}
+	return nil
+}
+
+// Make only the container-visible bind roots traversable, independently of
+// the caller's restrictive umask. The enclosing private owner stays0700.
+func prepareSourceTestSnowRuntimeFixture(input sourceBuildSandboxInput) error {
+	for _, path := range []string{filepath.Join(input.SourceDirectory, "server"), input.MetadataDirectory, input.OutputDirectory} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			return err
+		}
+	}
+	module, source, _ := sourceTestSnowRuntimeFixture()
+	for name, content := range map[string]string{"go.mod": module, "fixture_test.go": source} {
+		path := filepath.Join(input.SourceDirectory, "server", name)
+		if err := writePrivateReviewFile(path, []byte(content)); err != nil {
+			return err
+		}
+		if err := os.Chmod(path, 0o444); err != nil {
+			return err
+		}
+	}
+	for _, path := range []string{input.SourceDirectory, filepath.Join(input.SourceDirectory, "server"), input.MetadataDirectory} {
+		if err := os.Chmod(path, 0o555); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// A deliberate exit 1 is accepted only after actual terminal Docker state and
+// complete Go JSON agree. Creation/transport/OOM/cancellation never become data.
+func executeSourceTestSnowRuntimeGo(ctx context.Context, directory string, plan sourceTestPlan, config sourceTestSnowRuntimeConfig, settings sourceTestSnowRuntimeSettings, caseName string) (execution *sourceTestExecution, resultErr error) {
+	ownerRoot := filepath.Join(directory, plan.Owner)
+	sandbox := settings.Sandbox
+	sandbox.StateDirectory = directory
+	input := sourceBuildSandboxInput{Owner: plan.Owner, Phase: "correctness", ImageId: plan.ImageId, Commit: config.EvaluatorCommit,
+		SourceDirectory: filepath.Join(ownerRoot, "source"), MetadataDirectory: filepath.Join(ownerRoot, "correctness", "metadata"), OutputDirectory: filepath.Join(ownerRoot, "correctness", "output")}
+	args, err := sourceTestSnowRuntimeArguments(input, sandbox, caseName, config.SourceLock.Sha256)
+	if err != nil {
+		return nil, err
+	}
+	if err := prepareSourceTestSnowRuntimeFixture(input); err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, sandbox.Timeout)
+	defer cancel()
+	docker := runSourceBuildDocker
+	name := "urnetwork-reviewed-" + plan.Owner + "-correctness"
+	id := ""
+	defer func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), sandbox.CleanupTimeout)
+		defer cleanupCancel()
+		if id == "" {
+			var recovered bytes.Buffer
+			if err := docker(cleanupCtx, []string{"inspect", "--format", "{{.Id}}", name}, &recovered, io.Discard); err != nil {
+				resultErr = errors.Join(resultErr, errors.New("source-test runtime cleanup cannot resolve creation"))
+				return
+			}
+			id = strings.TrimSpace(recovered.String())
+		}
+		var labels bytes.Buffer
+		var owned map[string]string
+		if !validSha256(id) || docker(cleanupCtx, []string{"inspect", "--format", "{{json .Config.Labels}}", id}, &labels, io.Discard) != nil || json.Unmarshal(labels.Bytes(), &owned) != nil || owned["com.urnetwork.review-build.owner"] != plan.Owner || owned["com.urnetwork.review-build.phase"] != "correctness" {
+			resultErr = errors.Join(resultErr, errors.New("source-test runtime cleanup owner unauthenticated"))
+			return
+		}
+		if err := docker(cleanupCtx, []string{"rm", "--force", "--volumes", id}, io.Discard, io.Discard); err != nil {
+			resultErr = errors.Join(resultErr, errors.New("source-test runtime cleanup failed"))
+			return
+		}
+		var remaining bytes.Buffer
+		if docker(cleanupCtx, []string{"container", "ls", "--all", "--no-trunc", "--quiet", "--filter", "id=" + id}, &remaining, io.Discard) != nil || strings.TrimSpace(remaining.String()) != "" {
+			resultErr = errors.Join(resultErr, errors.New("source-test runtime container remained after cleanup"))
+		}
+	}()
+	identity, diagnostics := &sourceSupervisorOutput{limit: sandbox.OutputBytes}, &sourceSupervisorOutput{limit: sandbox.OutputBytes}
+	if err := docker(ctx, args, identity, diagnostics); err != nil {
+		return nil, errors.New("source-test runtime container creation failed")
+	}
+	id = strings.TrimSpace(string(identity.content))
+	if !validSha256(id) || identity.exceeded || diagnostics.exceeded {
+		id = ""
+		return nil, errors.New("source-test runtime container identity invalid")
+	}
+	var inspect bytes.Buffer
+	if err := docker(ctx, []string{"inspect", id}, &inspect, io.Discard); err != nil {
+		return nil, err
+	}
+	if err := validateSourceTestSnowRuntimeContainer(inspect.Bytes(), id, input, sandbox, caseName, config.SourceLock.Sha256); err != nil {
+		return nil, err
+	}
+	if err := publishSourceTestRecord(filepath.Join(ownerRoot, "container-before-start.json"), inspect.Bytes()); err != nil {
+		return nil, err
+	}
+	stdout, stderr := &sourceSupervisorOutput{limit: sandbox.OutputBytes}, &sourceSupervisorOutput{limit: sandbox.OutputBytes}
+	started := time.Now()
+	startErr := docker(ctx, []string{"start", "--attach", id}, stdout, stderr)
+	duration := time.Since(started)
+	var stateBytes bytes.Buffer
+	var state struct {
+		Status    string
+		Running   bool
+		ExitCode  int
+		OomKilled bool `json:"OOMKilled"`
+	}
+	if err := docker(ctx, []string{"inspect", "--format", "{{json .State}}", id}, &stateBytes, io.Discard); err != nil || json.Unmarshal(stateBytes.Bytes(), &state) != nil || state.Status != "exited" || state.Running || state.OomKilled || stdout.exceeded || stderr.exceeded || ctx.Err() != nil {
+		return nil, errors.New("source-test runtime lacks a bounded clean terminal observation")
+	}
+	if startErr != nil {
+		var exit *exec.ExitError
+		if !errors.As(startErr, &exit) || exit.ExitCode() != state.ExitCode || state.ExitCode != 1 {
+			return nil, errors.New("source-test runtime Docker attachment failed")
+		}
+	} else if state.ExitCode != 0 {
+		return nil, errors.New("source-test runtime attachment and terminal exit disagree")
+	}
+	count, err := observeSourceTestSnowRuntime(stdout.content, stderr.content, state.ExitCode, caseName)
+	if err != nil {
+		return nil, err
+	}
+	logs, err := json.Marshal(struct {
+		Stdout []byte `json:"stdout"`
+		Stderr []byte `json:"stderr"`
+	}{stdout.content, stderr.content})
+	if err != nil {
+		return nil, err
+	}
+	for name, content := range map[string][]byte{"go-test.jsonl": stdout.content, "go-test.stderr": stderr.content, "test-logs.json": logs, "container-terminal-state.json": stateBytes.Bytes()} {
+		if err := publishSourceTestRecord(filepath.Join(ownerRoot, name), content); err != nil {
+			return nil, err
+		}
+	}
+	return &sourceTestExecution{ImageId: plan.ImageId, SuiteSha256: plan.SuiteSha256, ExitCode: state.ExitCode, TestCount: count, DurationMillis: duration.Milliseconds(), TestLogsSha256: reviewQualificationHash(logs)}, nil
+}
+
+// Count only actual dispatches; the existing durable native provider journal
+// prevents both automatic retries and rerunning Go after process replacement.
+type sourceTestSnowRuntimeTransport struct {
+	Provider winnerSnowProviderSettings
+	Base     http.RoundTripper
+	Posts    int
+}
+
+// Read actual host identities only while this native command owns the sole
+// slot. The tiny probe creates no network and must restore the original 3/4.
+func sourceTestSnowRuntimeCensus(ctx context.Context, settings sourceTestSnowRuntimeSettings) (map[string][]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, settings.Sandbox.CleanupTimeout)
+	defer cancel()
+	result := map[string][]string{}
+	for _, entry := range []struct {
+		kind string
+		args []string
+		want map[string]bool
+	}{
+		{"containers", []string{"container", "ls", "--all", "--no-trunc", "--format", "{{.ID}}\t{{.Names}}"}, map[string]bool{"buildx_buildkit_warp-multiarch0": true, "urnetwork-local-pg": true, "urnetwork-local-redis": true}},
+		{"networks", []string{"network", "ls", "--no-trunc", "--format", "{{.ID}}\t{{.Name}}"}, map[string]bool{"bridge": true, "host": true, "none": true, "urnetwork-local": true}},
+	} {
+		output := &sourceSupervisorOutput{limit: settings.Sandbox.OutputBytes}
+		if err := runSourceBuildDocker(ctx, entry.args, output, io.Discard); err != nil || output.exceeded {
+			return nil, errors.New("source-test runtime census unavailable or oversized")
+		}
+		for _, line := range strings.Split(strings.TrimSpace(string(output.content)), "\n") {
+			id, name, ok := strings.Cut(line, "\t")
+			if !ok || !validSha256(id) || !entry.want[name] {
+				return nil, errors.New("source-test runtime original container/network inventory differs")
+			}
+			delete(entry.want, name)
+			result[entry.kind] = append(result[entry.kind], line)
+		}
+		if len(entry.want) != 0 {
+			return nil, errors.New("source-test runtime original container/network inventory incomplete")
+		}
+		sort.Strings(result[entry.kind])
+	}
+	return result, nil
+}
+
+func (transport *sourceTestSnowRuntimeTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	if request.Method != http.MethodPost || request.URL.String() != transport.Provider.Endpoint || request.Header.Get("Authorization") != "" || transport.Posts >= 6 {
+		return nil, errors.New("source-test runtime transport denied endpoint/auth/method or seventh POST")
+	}
+	transport.Posts++
+	return transport.Base.RoundTrip(request)
+}
+
+// Ordinary unit runs cannot make real calls. This entry point is injected only
+// into the separately qualified native operator, never the evaluated C2 app.
+func TestSourceTestSnowRuntimeQualificationCommand(t *testing.T) {
+	if os.Getenv("SIM_LATENCY_SOURCE_TEST_SNOW_RUNTIME_OPT_IN") != "1" {
+		t.Skip("explicit postbridge source-test Snow runtime qualification only")
+	}
+	settings := defaultSourceTestSnowRuntimeSettings()
+	configurationPin := reviewQualificationPin{Path: os.Getenv("SIM_LATENCY_SOURCE_TEST_SNOW_RUNTIME_CONFIG"), Sha256: os.Getenv("SIM_LATENCY_SOURCE_TEST_SNOW_RUNTIME_CONFIG_SHA256")}
+	if err := sourceTestSnowRuntimeProtected(configurationPin.Path, false); err != nil {
+		t.Fatal(err)
+	}
+	content, err := readReviewQualificationPin(configurationPin, settings.MaximumBytes, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config sourceTestSnowRuntimeConfig
+	if err := decodeSnowReviewQualificationProof(content, &config); err != nil {
+		t.Fatal(err)
+	}
+	ctx, stop := signal.NotifyContext(t.Context(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	_, err = withCalibrationScoringSlot(settings.ScoringLock, func() (*calibrationAnalysisReport, error) {
+		provider, err := authenticateSourceTestSnowRuntime(config, settings)
+		if err != nil {
+			return nil, err
+		}
+		if err := os.Mkdir(config.OutputDirectory, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+			return nil, err
+		}
+		if err := reviewQualificationPrivateRoot(config.OutputDirectory); err != nil {
+			return nil, err
+		}
+		// The authorization can bind only one configuration/output, including
+		// across process replacement or a request for another fresh directory.
+		attemptPath := filepath.Join(filepath.Dir(config.OutputDirectory), config.Authorization.Sha256+".attempt.json")
+		var attempt struct {
+			ConfigurationSha256 string    `json:"configuration_sha256"`
+			StartedAt           time.Time `json:"started_at"`
+			Deadline            time.Time `json:"deadline"`
+		}
+		if err := readSourceTestRecord(attemptPath, settings.MaximumBytes, &attempt); errors.Is(err, os.ErrNotExist) {
+			attempt.ConfigurationSha256, attempt.StartedAt = configurationPin.Sha256, time.Now().UTC()
+			attempt.Deadline = attempt.StartedAt.Add(defaultSourceTestModelSettings().TotalTimeout)
+			data, _ := json.Marshal(attempt)
+			if err := publishSourceTestRecord(attemptPath, data); err != nil {
+				return nil, err
+			}
+		} else if err != nil {
+			return nil, err
+		}
+		if attempt.ConfigurationSha256 != configurationPin.Sha256 || attempt.StartedAt.IsZero() || attempt.Deadline.Sub(attempt.StartedAt) != defaultSourceTestModelSettings().TotalTimeout {
+			return nil, errors.New("source-test runtime attempt cannot change inputs or reset deadline")
+		}
+		ctx, cancel := context.WithDeadline(ctx, attempt.Deadline)
+		defer cancel()
+		before, err := sourceTestSnowRuntimeCensus(ctx, settings)
+		if err != nil {
+			return nil, err
+		}
+		transport := &sourceTestSnowRuntimeTransport{Provider: provider, Base: &http.Transport{Proxy: nil, DisableKeepAlives: true}}
+		client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error {
+			return errors.New("source-test runtime redirects forbidden")
+		}}
+		defer transport.Base.(*http.Transport).CloseIdleConnections()
+		evidence := []*sourceTestModelEvidence{}
+		goExecutions := 0
+		prepared := []struct {
+			Name, OwnerRoot string
+			Plan            sourceTestPlan
+			Journal         func(context.Context) (sourceTestExecution, error)
+		}{}
+		for _, caseName := range []string{"observed-pass", "deliberate-fail"} {
+			owner := reviewQualificationHash([]byte(configurationPin.Sha256 + ":" + caseName))
+			ownerRoot := filepath.Join(config.OutputDirectory, owner)
+			if err := os.Mkdir(ownerRoot, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+				return nil, err
+			}
+			if err := reviewQualificationPrivateRoot(ownerRoot); err != nil {
+				return nil, err
+			}
+			plan := sourceTestPlan{WinnerReviewPolicy: model.CompetitionSnowWinnerReviewPolicy, Owner: owner, ImageId: config.EvaluatorImageId, SourceLockSha256: config.SourceLockSha256,
+				PatchSha256: sourceTestSnowRuntimeSuiteSha256(), SuiteSha256: sourceTestSnowRuntimeSuiteSha256()}
+			journal := func(runCtx context.Context) (sourceTestExecution, error) {
+				observed, err := executeJournaledSourceTest(runCtx, filepath.Join(ownerRoot, "independent-test-journal"), plan, attempt.Deadline, defaultSourceTestJournalSettings(),
+					func(runCtx context.Context) (*sourceTestExecution, error) {
+						goExecutions++
+						return executeSourceTestSnowRuntimeGo(runCtx, config.OutputDirectory, plan, config, settings, caseName)
+					}, func(observation *sourceTestExecution) error {
+						if observation == nil || observation.TestCount != 1 {
+							return errors.New("source-test runtime observation is missing")
+						}
+						path := filepath.Join(ownerRoot, "test-logs.json")
+						if err := verifySourceTestLogBundle(path, observation.TestLogsSha256, settings.MaximumBytes); err != nil {
+							return err
+						}
+						var logs struct {
+							Stdout []byte `json:"stdout"`
+							Stderr []byte `json:"stderr"`
+						}
+						if err := readSourceTestRecord(path, settings.MaximumBytes, &logs); err != nil {
+							return err
+						}
+						_, err := observeSourceTestSnowRuntime(logs.Stdout, logs.Stderr, observation.ExitCode, caseName)
+						return err
+					})
+				if err != nil {
+					return sourceTestExecution{}, err
+				}
+				return *observed, nil
+			}
+			if _, err := journal(ctx); err != nil {
+				return nil, err
+			}
+			prepared = append(prepared, struct {
+				Name, OwnerRoot string
+				Plan            sourceTestPlan
+				Journal         func(context.Context) (sourceTestExecution, error)
+			}{caseName, ownerRoot, plan, journal})
+		}
+		// Both genuine Go outcomes are durable before the first provider POST.
+		for _, entry := range prepared {
+			modelSettings := defaultSourceTestModelSettings()
+			modelSettings.SnowProvider = &provider
+			modelSettings.ResponseJournalDirectory = filepath.Join(entry.OwnerRoot, "independent-model-journal")
+			result, err := executeSourceTestModel(ctx, client, "", entry.Plan, modelSettings, entry.Journal)
+			if err != nil {
+				return nil, fmt.Errorf("source-test runtime %s held: %w", entry.Name, err)
+			}
+			if result.Passed != (entry.Name == "observed-pass") || len(result.Members) != len(provider.Members) || result.Execution.TestCount != 1 {
+				return nil, errors.New("source-test runtime attestation disagrees with the real case")
+			}
+			data, err := json.Marshal(result)
+			if err != nil {
+				return nil, err
+			}
+			attestationPath := filepath.Join(entry.OwnerRoot, "attestation-evidence.json")
+			if err := publishSourceTestRecord(attestationPath, data); errors.Is(err, os.ErrExist) {
+				if _, err := readReviewQualificationPin(reviewQualificationPin{Path: attestationPath, Sha256: reviewQualificationHash(data)}, settings.MaximumBytes, true); err != nil {
+					return nil, err
+				}
+			} else if err != nil {
+				return nil, err
+			}
+			evidence = append(evidence, result)
+		}
+		after, err := sourceTestSnowRuntimeCensus(ctx, settings)
+		if err != nil || !reflect.DeepEqual(before, after) {
+			return nil, errors.New("source-test runtime did not restore exact original host inventory")
+		}
+		return nil, writeReviewQualificationJson(filepath.Join(config.OutputDirectory, "qualification.json"), map[string]any{
+			"schema": 1, "kind": "source-test-snow-runtime-provider-qualification", "accepted": true,
+			"configuration_sha256": configurationPin.Sha256, "program_sha256": config.Program.Sha256, "source_commit": config.SourceCommit,
+			"provider_settings_sha256": config.ProviderSettings.Sha256, "evaluator_image_id": config.EvaluatorImageId,
+			"suite_sha256": sourceTestSnowRuntimeSuiteSha256(), "case_count": len(evidence), "case_evidence": evidence,
+			"case_names":                     []string{"observed-pass", "deliberate-fail"},
+			"new_go_executions_this_process": goExecutions, "new_provider_posts_this_process": transport.Posts,
+			"original_inventory_before": before, "original_inventory_after": after, "cleanup_verified": true,
+			"winner_suite_qualified": false, "winner_approved": false, "source_approved": false, "promotion_performed": false,
+			"qualification_scope": "seven-key observed-result attestation only; every real winner still needs its complete prescribed Go suite"})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}

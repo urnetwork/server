@@ -25,6 +25,106 @@ import (
 // Synthetic transport cannot fall back to the network.
 type reviewQualificationTransport func(*http.Request) (*http.Response, error)
 
+// Pipe teardown must not release EOF to a still-networked broker. Synthetic
+// command hooks force the actual cleanup block's fence/remove/signal ordering.
+func TestReviewQualificationCleanupStopsBrokerBeforePipeTeardown(t *testing.T) {
+	content, err := os.ReadFile("evaluator/review/run-broker.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, program, found := strings.Cut(string(content), "# review_broker_stop_program_begin\n")
+	if !found {
+		t.Fatal("actual broker stop start missing")
+	}
+	program, _, found = strings.Cut(program, "# review_broker_stop_program_end")
+	if !found {
+		t.Fatal("actual broker stop end missing")
+	}
+	script := `set -Eeuo pipefail
+directory="$1"
+chain_created=true container_may_exist=true cleanup_verified=true
+chain=synthetic-chain owner=synthetic-owner
+container_id=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+active_pid=synthetic-attach input_pid=synthetic-input
+docker=(synthetic-docker)
+cleanup_command() {
+    if [[ "$1" == /usr/sbin/iptables ]]; then
+        [[ "$*" == *'--insert synthetic-chain 1 --jump DROP' ]] || return 1
+        printf fence > "$directory/fenced"
+    elif [[ "$1 $2" == 'synthetic-docker inspect' ]]; then
+        printf '%s\n' "$owner"
+    elif [[ "$1 $2" == 'synthetic-docker rm' ]]; then
+        [[ -f "$directory/fenced" ]] || return 1
+        printf removed > "$directory/removed"
+    elif [[ "$1 $2" != 'synthetic-docker container' ]]; then
+        return 1
+    fi
+}
+kill() {
+    [[ -f "$directory/fenced" && -f "$directory/removed" ]] || exit 19
+    printf '%s\n' "$*" >> "$directory/signals"
+}
+` + program + `
+$cleanup_verified
+`
+	directory := t.TempDir()
+	command := exec.CommandContext(t.Context(), "/bin/bash", "-c", script, "synthetic-broker-cleanup", directory)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("actual cleanup released pipes before isolation/removal: %v %s", err, output)
+	}
+	signals, err := os.ReadFile(filepath.Join(directory, "signals"))
+	if err != nil || string(signals) != "-TERM synthetic-attach\n-TERM synthetic-input\n" {
+		t.Fatalf("cleanup did not signal both pipe owners after containment: %q %v", signals, err)
+	}
+}
+
+// The actual reader groups must not retain the broker's stdin writer. The
+// head hook observes descriptors only after Bash applies group redirections.
+func TestReviewQualificationOutputReadersCloseBrokerInput(t *testing.T) {
+	content, err := os.ReadFile("evaluator/review/run-broker.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, program, found := strings.Cut(string(content), "# review_output_capture_program_begin\n")
+	if !found {
+		t.Fatal("actual output capture start missing")
+	}
+	program, _, found = strings.Cut(program, "# review_output_capture_program_end")
+	if !found {
+		t.Fatal("actual output capture end missing")
+	}
+	script := `set -Eeuo pipefail
+attempt_directory="$1"
+output_limit=64 error_limit=64
+mkfifo "$attempt_directory/stdin.pipe" "$attempt_directory/stdout.pipe" "$attempt_directory/stderr.pipe"
+exec 7<>"$attempt_directory/stdin.pipe"
+head() {
+    if [[ -e /proc/$BASHPID/fd/7 ]]; then
+        printf 'output reader retained broker stdin writer\n' >&2
+        return 1
+    fi
+    /usr/bin/head "$@"
+}
+` + program + `
+printf 'synthetic output' > "$attempt_directory/stdout.pipe"
+printf 'synthetic diagnostics' > "$attempt_directory/stderr.pipe"
+exec 7>&-
+wait "$stdout_pid"
+wait "$stderr_pid"
+`
+	directory := t.TempDir()
+	command := exec.CommandContext(t.Context(), "/bin/bash", "-c", script, "synthetic-output-capture", directory)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("actual output reader retained stdin or lost completion: %v %s", err, output)
+	}
+	for name, expected := range map[string]string{"broker.stdout": "synthetic output", "broker.stderr": "synthetic diagnostics"} {
+		content, err := os.ReadFile(filepath.Join(directory, name))
+		if err != nil || string(content) != expected {
+			t.Fatalf("reader %s lost bounded output: %q %v", name, content, err)
+		}
+	}
+}
+
 // Exercises the actual asynchronous shell reader without Docker or providers.
 // An implicit background stdin becomes /dev/null even with a finite parent pipe.
 func TestReviewQualificationWrapperPreservesBackgroundInput(t *testing.T) {

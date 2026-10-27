@@ -1,0 +1,126 @@
+POSTBRIDGE PREPARATION ONLY -- NOT EXECUTED OR QUALIFIED
+
+This distinct seven-key source-test attestation is not covered by the honesty
+review cases. No model is allowed to choose commands, rerun tests or approve a
+winner/source. The genuine runtime qualification makes at most six additional
+Snow POSTs, separate from the honesty-review request budget.
+
+Native entry point
+  TestSourceTestSnowRuntimeQualificationCommand
+  source-test-snow-runtime-qualification.go.txt
+  source-test-snow-runtime-qualification-tests.go.txt
+
+There is no standalone test-model CLI in the current native tool. The existing
+source-qualify-build CLI requires a genuine reviewed source build and produces
+authority-bearing evidence. Do NOT synthesize its request/approval/host proof
+for this probe. These inert _test.go driver texts instead call the actual
+executeSourceTestModel, executeJournaledSourceTest and native provider journals.
+
+POSTBRIDGE sequence -- root coordinates the sole slot and low executes tests
+
+1. Wait for authoritative bridge terminal, joined cleanup and canonical slot
+   release. Do not compile, clone, inspect Docker, run Go or call Snow before it.
+
+2. Root finishes the Snow producer/diagnostic fixes and records their exact
+   current-control commit. Low creates a fresh private operator checkout at
+   that commit with the same authenticated nine operator dependencies; frozen
+   C2 evaluated app source remains a9e8e1a7 and is not transplanted from main.
+   Inject the same eight review-qualification driver/support draft files in
+   low's prepared source manifest plus these two texts as uniquely named
+   *_test.go files. No held-out execution draft is needed by this command.
+   The latter two have no production CLI registration and are inactive without
+   their distinct explicit opt-in. Required shared helpers come from
+   review-qualification.go.txt, review-qualification-containment.go.txt and
+   review-qualification-snow-containment.go.txt; the complete eight-file review
+   helper set supplies their own referenced types/functions.
+
+3. Build the native test driver with exact Go1.27.3, race, taskset20,22,
+   GOTOOLCHAIN=local/GOMAXPROCS=2/GOFLAGS=-p=2 and the populated offline caches.
+   Low runs the seven new offline guards three times, zero skips, with the real
+   native Snow contract/adapter/journal tests affected by the final source
+   changes. Exclude the opt-in Command itself from offline prefix selection:
+
+   ^TestSourceTestSnowRuntime(FixtureTraversableWithPrivateUmask|ObservedPassAndDeliberateFail|RejectsInventedOrIncompleteObservations|FixedOfflineSandboxAndSeparateSuite|TransportHasSixPostsAndNoOtherAuthority|ActualContainmentRefusesDrift|CachedNativeJournalsDoNotRerunOrResample)$
+
+   These guards use no real Docker, HTTP or candidate process. Existing native
+   TestSourceTestSnow* guards additionally cover missing members, false passes,
+   schema exactness, held/errors and all-three journal replay. Keep actual
+   three-pass logs/census, exact binary SHA, source receipt and dependency graph.
+
+4. Root publishes a NEW protected release, never replacing C1/C2 app/bundles:
+   /usr/local/libexec/urnetwork/competition-source-test-snow-runtime-qualification-20261027-v1/operator.test
+   The exact qualified binary is root-owned0555 with protected root ancestry.
+   Root creates the canonical root0700 state parent:
+   /var/lib/urnetwork/competition-source-test-snow-runtime-qualification-20261027-v1
+   Copy raw C2 source-lock.json byte-for-byte, exact unit/source/log evidence,
+   and finalized config/authorization leaves as root0400 single-link files.
+   The existing public provider settings remain exact root0444 and separately
+   pinned. All formal transitive evidence paths must be protected root leaves,
+   not mutable by-owned preparation paths. The unit receipt kind is distinct
+   and must report actual accepted=true/race/three passes/zero skips; preserve
+   the unqualified templates and partial failures rather than editing history.
+
+5. Only after independent offline qualification and explicit root approval,
+   finalize authorization.json with actual UTC and exact provider-settings SHA;
+   then render the exact config, hash it and retain the precommitted bytes.
+   Authorization is bound durably to one config/output; a replacement process
+   inherits the original deadline and journals. No fresh-directory resampling.
+   The raw lock SHA is239cea7f...; typed commits-only SHA isec322ed2... . They
+   are different identities and the native driver checks both independently.
+
+6. Low executes the actual new script once, under explicit root coordination:
+
+   AUTHORIZE_SOURCE_TEST_SNOW_RUNTIME_QUALIFICATION=yes \
+     /bin/bash /ROOT-PROTECTED-RELEASE/qualify-source-test-snow-runtime.sh \
+     /var/lib/urnetwork/competition-source-test-snow-runtime-qualification-20261027-v1/config.json \
+     EXACT_FINAL_CONFIG_SHA256
+
+   No API/DB/main token/OpenAI key/source approval or promotion is used. Never
+   overlap this native Go/model work with bridge/B/scoring. Its own canonical
+   flock refuses an occupied slot, and the wrapper passes a clean environment.
+
+Actual observations and bounded scope
+
+Each closed case uses the SAME synthetic stdlib-only module and fixed command:
+  go test -json -count=1 -run '^TestObservedRuntimeAttestation$' .
+
+observed-pass succeeds; deliberate-fail calls t.Fatal with an explicit fixture
+failure marker. Each Go suite executes exactly once in its fresh offline C2
+container, UID65532, no network, readonly source/root, dropped capabilities,
+no-new-privileges, private cgroup, two management CPUs,2GiB memory, PID128 and
+bounded fresh work/tmpfs/output. No daemon socket/credential enters it. The
+Go producer verifies actual Go1.27.3 and the raw C2 lock inside the actual
+pinned C2 image. Native readback authenticates actual containment before start.
+Explicit0555 modes make only the source/server and metadata bind roots readable
+and traversable despite wrapper umask077; enclosing host owner/ancestry remain
+private0700. The isolated subprocess regression never changes the shared test
+process's umask and checks actual ownership/modes after real preparation.
+
+The observer parses real Go JSON, counts exactly one named test, authenticates
+the actual terminal Docker state, refuses OOM/deadline/transport/compiler
+failures, retains stdout/stderr plus their native JSON log-bundle SHA, and
+journals the real image/suite/exit/count/duration. The deliberate exit1 is DATA
+only in this explicitly synthetic probe: production winner correctness still
+short-circuits on failed tests and cannot produce a passing build receipt.
+
+The real native Snow adapter receives each exact observed tuple and serially
+requests qwen,gemma,muse attestations using the immutable configured revisions
+and efforts. All seven output fields are schema/validator-bound. A failure
+must remain passed=false under every member. Existing unchanged limits remain
+5min per request,3h original total,4096 output tokens/member. No redirects,
+auth headers, seventh POST, fallback provider or model-selected tool is allowed.
+
+Stop at the first unexpected error; preserve attempt, execution reservation,
+observation, raw provider evidence, diagnostics and any partial directory. Do
+not retry provider failures without explicit reconciliation/new authority.
+Completed durable journals replay facts without another Go execution or POST;
+interrupted reservations hold. The native command checks exact original three
+containers/four networks before and after, and verifies each own-container
+cleanup by immutable ID/owner labels. Low independently reaps the command and
+checks canonical slot release after terminal before the next workload.
+
+Only an actual successful narrow receipt at attempt/qualification.json is
+provider qualification. It explicitly records winner_suite_qualified=false,
+winner_approved=false,source_approved=false,promotion_performed=false. Every
+real elected winner still requires the entire existing prescribed Go suite
+exactly once and all three attestations of that genuine candidate execution.
