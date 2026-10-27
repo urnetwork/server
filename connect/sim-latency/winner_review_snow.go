@@ -298,9 +298,7 @@ func validateWinnerSnowMember(judgment winnerModelJudgment, request winnerReview
 	} else {
 		probe.RewardDisposition, probe.SourceDisposition = "disqualified", "rejected"
 	}
-	policy := request.Request.Policy
-	policy.WinnerReviewPolicy, policy.WinnerReviewTimeoutSeconds = "", 0
-	if err := model.ValidateCompetitionIntegrityReview(probe, policy); err != nil {
+	if err := model.ValidateCompetitionSnowMemberContent(probe, request.Request.Policy); err != nil {
 		return err
 	}
 	if judgment.Decision == "disqualify" {

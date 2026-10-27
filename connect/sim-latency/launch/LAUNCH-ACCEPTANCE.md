@@ -5,7 +5,7 @@ checklist is the acceptance index for the new release, not an authorization to
 activate production. Historical v1 checkmarks do not qualify a different source,
 image, host manifest, policy or review provider.
 
-## Current checkpoint — October 27, 01:29 UTC
+## Current checkpoint — October 27, 02:08 UTC
 
 The following supersedes the provider and baseline-preparation progress in the
 dated bullets below; those bullets retain the earlier qualification history.
@@ -31,6 +31,13 @@ dated bullets below; those bullets retain the earlier qualification history.
   The earlier HTTP-200 response lacking
   a retained terminal object remains inconclusive, not evidence of token
   exhaustion or a valid model identity.
+- The mixed-uncertainty correction now shares strict Snow validation while
+  distinguishing one member's six unattributed findings from the public union's
+  eighteen attributed findings. Independent review found no blocker; 12 model
+  and 35 simulator smoke tests passed with zero skips. A compiled old-projection
+  control reproduced the exact failure, then restored-source tests passed again.
+  Receipt SHA-256 `25d969c22eb793d594173593f726c95bb2df49f4d561b3c37c8a2173a41a4abc`.
+  Three-pass and genuine-provider qualification remain pending.
 - Shared-baseline preparation before the first submission clock is committed
   in `cf22d1a05`, with 19 smoke tests passing, including real isolated PostgreSQL
   cases. Independent review then found a claim/reservation race. Its correction
@@ -40,6 +47,10 @@ dated bullets below; those bullets retain the earlier qualification history.
   guards, zero skips, with original container/network inventories restored.
   Compiled old-source controls reproduced all three races and both failed-scan
   pointer defects. Larger validation remains pending.
+  Fixes are pushed in `c37f9cea0`. The separate v4 helper and exact profile are
+  installed inactive: 17 root-owned read-only artifacts, unchanged v3 dependency
+  hashes, no helper or worker execution and no service activation. Installation
+  receipt SHA-256 `e51f219353e2f1c912c4beda8a9d12f0394e1524b3efba0b9036ff3d76d47db7`.
 - Replacement bridge authorization and the independent-seed amendment remain
   unresolved. No corrected bridge or independent-seed scoring has started.
 - Actual main PostgreSQL was audited at 01:33:35 UTC in a verified read-only,

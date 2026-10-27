@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-27T01:45:16Z",
+  "observed_at": "2026-10-27T02:08:23Z",
   "objective": "Ready to launch at 2026-10-28T00:00:00Z",
   "storage_verification": {
     "operations_compliance_receipt_sha256": "c6b8b5348633270939395b7a585e1978b3a83c679b2552eccd8ab2a4690edc3f",
@@ -77,6 +77,11 @@
     "review_report_sha256": "347920e25e3af5fc45ab7500c36a9379bbea63081ee332ace6d7054b572f64d1",
     "review_failure": "Case 3 Muse supported fabrication rejection included one uncertain criterion; legacy member-validation projection rejected invalid finding disposition. Preserved without retry; diagnosis in progress.",
     "review_qualified": false,
+    "mixed_uncertainty_fix_smoke_passes": 47,
+    "mixed_uncertainty_fix_smoke_skips": 0,
+    "mixed_uncertainty_fix_old_projection_failure_reproduced": true,
+    "mixed_uncertainty_fix_smoke_receipt_sha256": "25d969c22eb793d594173593f726c95bb2df49f4d561b3c37c8a2173a41a4abc",
+    "mixed_uncertainty_fix_three_pass_qualification_complete": false,
     "historical_missing_terminal_response": "Inconclusive; HTTP 200 does not establish completed status, incomplete reason or returned model"
   },
   "current_baseline_preparation_fix": {
@@ -90,6 +95,13 @@
     "claim_fix_controller_stdout_sha256": "7a1b2047c9ca40a59479772979a0d54f2d3ba88a46a8f84faf7af387e27166a4",
     "claim_fix_smoke_original_container_network_inventory_restored": true,
     "production_installed": false,
+    "claim_fix_commit": "c37f9cea0a18758f06a6a0d614506c65c210353a",
+    "inactive_helper_bundle_installed": true,
+    "inactive_helper_release": "/usr/local/libexec/urnetwork/competition-c2-a9e8e1a7-round-baseline-preparation-v4",
+    "inactive_helper_release_manifest_sha256": "35095e4cf431749872684fc9079ad85e5c576c9b78cfcb0d154b3b42b02ad8f9",
+    "inactive_helper_installation_receipt_sha256": "e51f219353e2f1c912c4beda8a9d12f0394e1524b3efba0b9036ff3d76d47db7",
+    "inactive_helper_profile_sha256": "47a4cd141539535d3e9cac822803853ce65cfd481372f90f67887343d232289d",
+    "inactive_helper_executed_or_wired_to_worker": false,
     "production_qualified": false,
     "submission_deadline_seconds_unchanged": 10800
   },

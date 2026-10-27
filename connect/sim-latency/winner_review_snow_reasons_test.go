@@ -14,7 +14,7 @@ import (
 // The old direct projection rejected a substantiated fraud finding merely
 // because the same model also summarized its passing criteria as APPROVED.
 func TestWinnerSnowMemberProjectsMixedReasonsWithoutChangingEvidence(t *testing.T) {
-	request, judgment := winnerModelFixture()
+	request, judgment := winnerSnowJudgmentFixture()
 	judgment.Decision = "disqualify"
 	judgment.ReasonCodes = []string{"MEASUREMENT_FABRICATION", "APPROVED"}
 	judgment.Findings[0].Disposition, judgment.Findings[0].ReasonCode = "fail", "MEASUREMENT_FABRICATION"
@@ -60,7 +60,7 @@ func TestWinnerSnowMemberProjectionCannotInventRewardDisqualification(t *testing
 		{name: "unsupported failure", criterion: 0, disposition: "fail", finding: "MEASUREMENT_FABRICATION", reasons: []string{"SCORE_TAMPERING", "APPROVED"}},
 		{name: "no failed finding", criterion: 0, disposition: "pass", finding: "APPROVED", reasons: []string{"MEASUREMENT_FABRICATION", "APPROVED"}},
 	} {
-		request, judgment := winnerModelFixture()
+		request, judgment := winnerSnowJudgmentFixture()
 		judgment.Decision, judgment.ReasonCodes = "disqualify", fixture.reasons
 		judgment.Findings[fixture.criterion].Disposition = fixture.disposition
 		judgment.Findings[fixture.criterion].ReasonCode = fixture.finding
