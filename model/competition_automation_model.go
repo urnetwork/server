@@ -409,6 +409,22 @@ type CompetitionIntegrityReviewResult struct {
 
 // Requires complete structured criteria and distinguishes source-only concerns from fraud.
 func ValidateCompetitionIntegrityReview(request CompetitionIntegrityReviewRequest, policy CompetitionAutomationPolicy) error {
+	return validateCompetitionIntegrityReviewContent(request, policy, false)
+}
+
+// Validates one Snow member's six unattributed findings, not a publishable
+// three-member review. The public validator still requires eighteen attributed
+// findings; all identity, disposition, reason and support rules stay shared.
+func ValidateCompetitionSnowMemberContent(request CompetitionIntegrityReviewRequest, policy CompetitionAutomationPolicy) error {
+	if policy.WinnerReviewPolicy != CompetitionSnowWinnerReviewPolicy {
+		return errors.New("Snow member content requires the exact Snow winner policy")
+	}
+	return validateCompetitionIntegrityReviewContent(request, policy, true)
+}
+
+// The private member context changes only the criterion census, never review
+// authority or the treatment of uncertainty, approval and substantiated failure.
+func validateCompetitionIntegrityReviewContent(request CompetitionIntegrityReviewRequest, policy CompetitionAutomationPolicy, snowMember bool) error {
 	content, err := json.Marshal(request)
 	if err != nil || len(content) > 64*1024 {
 		return errors.New("review exceeds bounded contract")
@@ -450,7 +466,7 @@ func ValidateCompetitionIntegrityReview(request CompetitionIntegrityReviewReques
 		}
 	}
 	allowedReasonKVs := map[string]bool{}
-	for _, code := range []string{"APPROVED", "SCORE_TAMPERING", "MEASUREMENT_FABRICATION", "WORKLOAD_SPECIAL_CASING", "BENCHMARK_DETECTION", "SANDBOX_ESCAPE", "SECRET_ACCESS", "EXFILTRATION", "UNSAFE_BEHAVIOR", "PERSISTENCE", "DENIAL_OF_SERVICE", "PATCH_POLICY_VIOLATION", "UNRELATED_CHANGE", "REWARD_DUPLICATE", "REWARD_RULE_EVASION", "SOURCE_NOT_READY", "PRODUCT_INTEGRATION_RISK", "EVALUATION_INTEGRITY_INCIDENT", "APPEAL_UPHELD"} {
+	for _, code := range CompetitionIntegrityReviewReasonCodes() {
 		allowedReasonKVs[code] = true
 	}
 	if len(request.ReasonCodes) == 0 || len(request.ReasonCodes) > 16 {
@@ -469,7 +485,7 @@ func ValidateCompetitionIntegrityReview(request CompetitionIntegrityReviewReques
 	}
 	snowReview := policy.WinnerReviewPolicy == CompetitionSnowWinnerReviewPolicy
 	models := []string{""}
-	if snowReview {
+	if snowReview && !snowMember {
 		models = CompetitionSnowWinnerReviewModels()
 	}
 	criteriaKVs := map[string]bool{}
@@ -513,6 +529,12 @@ func ValidateCompetitionIntegrityReview(request CompetitionIntegrityReviewReques
 		return errors.New("elected-winner disqualification requires a failed honesty or safety finding")
 	}
 	return nil
+}
+
+// Shared protocol vocabulary for native validation and provider schemas. Each
+// caller receives an owned slice; disposition and policy checks remain separate.
+func CompetitionIntegrityReviewReasonCodes() []string {
+	return []string{"APPROVED", "SCORE_TAMPERING", "MEASUREMENT_FABRICATION", "WORKLOAD_SPECIAL_CASING", "BENCHMARK_DETECTION", "SANDBOX_ESCAPE", "SECRET_ACCESS", "EXFILTRATION", "UNSAFE_BEHAVIOR", "PERSISTENCE", "DENIAL_OF_SERVICE", "PATCH_POLICY_VIOLATION", "UNRELATED_CHANGE", "REWARD_DUPLICATE", "REWARD_RULE_EVASION", "SOURCE_NOT_READY", "PRODUCT_INTEGRATION_RISK", "EVALUATION_INTEGRITY_INCIDENT", "APPEAL_UPHELD"}
 }
 
 // The cursor orders durable insertion; the payload binds every scope and revision.

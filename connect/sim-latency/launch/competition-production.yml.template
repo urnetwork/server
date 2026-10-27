@@ -11,8 +11,8 @@
 # before pointer activation and creation of the scheduled full-window round.
 enabled: false
 competition_id: sim-latency-season-1
-base_sha: c1f9dda603d6279666fca5d92b99c5663306c5f7
-evaluator_image_digest: sha256:002c39040ce23dee27b171c7e657f749c6a6d05b1e9b97d90ac87336470dbaf3
+base_sha: a9e8e1a710b24c749e6499a0606938252c83e136
+evaluator_image_digest: sha256:98c9061c4a43a25e7b581a5193ca6e7f48e49e7b7fc03b7c1b6190a029befee2
 artifact_root: /var/lib/urnetwork/competition
 artifact_bucket: competition
 
@@ -36,7 +36,7 @@ automation_policy:
   policy_approval_sha256: ${APPROVED_PRODUCTION_POLICY_SHA256}
   source_generation: 0
   source_activation_generation: 1
-  source_lock_sha256: 5e00bf5ee7b4708be94ac1ebc6daf5c024f4afe467ca30c35024f65f96b6c90e
+  source_lock_sha256: ec322ed2db023e15ea5dc3eea60a6ca5989661bba737c340fea3477d8d1300cf
   source_choice_delay_seconds: 0
   settlement_mode: live
   review_criteria_version: ${APPROVED_REVIEW_CRITERIA_VERSION}
@@ -60,8 +60,8 @@ max_infrastructure_attempts: 3
 # Publish/protect the exact commands and retain their actual hashes. Moving
 # operator main is not a substitute for runtime-envelope authentication.
 simulator_command: ${QUALIFIED_SIMULATOR_COMMAND}
-evaluator_command: /usr/local/libexec/urnetwork/competition-737dd2371-go1273-isolated-v1/container/evaluator.sh
-evaluator_command_sha256: 263ee68ab058889c22de51d47d8779d95fd219e92ea7642430f61740d15d8d5e
+evaluator_command: /usr/local/libexec/urnetwork/competition-c2-a9e8e1a7-metadata-fbb2566b-evidence5g-v3/container/evaluator.sh
+evaluator_command_sha256: 0cccda1d1dcc227f30fda800ddb9bbb28e29dd48cc62885da637fcd4eb4eb00b
 self_check_command: ${QUALIFIED_SELF_CHECK_COMMAND}
 self_check_command_sha256: ${QUALIFIED_SELF_CHECK_COMMAND_SHA256}
 
@@ -91,13 +91,18 @@ patch_policy:
 # Proposed measured scale: only final after all frozen calibration acceptance
 # rules pass. Never substitute the old staging 1800-provider/zero-margin policy.
 # Compiler is enforced by build/runtime metadata: exactly Go 1.27.3.
+# A/bridge/B retain their offline fixture hardware label and qualification SHA;
+# none is a positive production-host attestation. Bind the real Sille identity
+# below through separately approved, metadata-only policy transfer and genuine
+# current-boot C2 host qualification. No scoring/workload field may change.
 evaluation_policy:
   hardware_id: sille-macpro6-1-single-host
-  host_qualification_sha256: ${QUALIFIED_IMAGE_HOST_RECEIPT_SHA256}
+  # Actual qualification_sha256 fact fingerprint, NOT the full report-file SHA.
+  host_qualification_sha256: ${QUALIFIED_IMAGE_HOST_FACTS_SHA256}
   config_local_sha256: b8a0996c29195cad1839fa6f7e32933f01f812d573df6e3bb5f9e7b6276430b7
   vault_local_sha256: a68c0e07eaa6d831c9a562128950237e76b0cd0f942afd1fec3d7a32b3aed7c7
-  simulator_sha256: 6c8587be62b8292c5d4ec27a8b5c3353e84a8121a6054ba3755d022d2372e9a3
-  scorer_sha256: 6c8587be62b8292c5d4ec27a8b5c3353e84a8121a6054ba3755d022d2372e9a3
+  simulator_sha256: efd1077d56f2435027d8358e01f29d43355a4ec1a45917e72602fcee8cce6727
+  scorer_sha256: efd1077d56f2435027d8358e01f29d43355a4ec1a45917e72602fcee8cce6727
   provider_count: 3600
   client_pool_size: 200
   arrivals_per_minute: 80
@@ -117,6 +122,7 @@ evaluation_policy:
   announce_timeout_ms: 2000
   impairment_enabled: true
   replicates: 9
-  takeover_margin: ${ACCEPTED_INITIAL_MARGIN}
+  # Frozen accepted-three-A margin; bridge and all three ordered B remain gates.
+  takeover_margin: 0.269
   queue_limit: 0
   score_timeout_seconds: 10800

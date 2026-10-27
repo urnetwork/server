@@ -58,17 +58,34 @@ WITH active_supporter AS (
     FROM solana_unfulfilled_payment
     GROUP BY reason
 ), payment_audit AS (
-    SELECT store AS target,
-           action AS kind,
-           count(DISTINCT evidence)::bigint AS issue_count,
-           extract(epoch FROM now() - min(event_time))::bigint AS oldest_age,
-           extract(epoch FROM now() - max(event_time))::bigint AS newest_age
-    FROM payment_reconciliation_event
-    WHERE (action = 'refund_unmatched'
-           OR (action = 'credit_unfulfillable' AND store = 'stripe'))
-      AND NOT dry_run
-      AND event_time >= now() - interval '24 hours'
-    GROUP BY store, action
+    SELECT event.store AS target,
+           event.action AS kind,
+           count(DISTINCT event.evidence)::bigint AS issue_count,
+           extract(epoch FROM now() - min(event.event_time))::bigint AS oldest_age,
+           extract(epoch FROM now() - max(event.event_time))::bigint AS newest_age
+    FROM payment_reconciliation_event event
+    WHERE (event.action = 'refund_unmatched'
+           OR (event.action = 'credit_unfulfillable' AND event.store IN ('apple', 'google', 'stripe')))
+      AND NOT event.dry_run
+      AND event.event_time >= now() - interval '24 hours'
+      -- a store purchase recorded before its owner was known and credited
+      -- later (an offer or promo code the app bound) is resolved
+      AND NOT (
+          event.store = 'apple'
+          AND EXISTS (
+              SELECT 1 FROM apple_subscription_transaction ledger
+              WHERE ledger.transaction_id = event.evidence
+          )
+      )
+      AND NOT (
+          event.store = 'google'
+          AND COALESCE(event.details::jsonb ->> 'reason', '') = 'destination_unresolved'
+          AND EXISTS (
+              SELECT 1 FROM play_purchase_binding binding
+              WHERE binding.purchase_token = event.evidence
+          )
+      )
+    GROUP BY event.store, event.action
 )
 SELECT 'entitlement_missing' AS kind, target, issue_count, oldest_age, newest_age
 FROM missing_entitlement
@@ -192,11 +209,20 @@ func paymentFailureFinding(kind, target string, count, oldestAge, newestAge int6
 		common.action = "Correlate the processor object with the immutable Stripe invoice/data-pack ledger using privileged tooling, repair the missing identity link, and apply the normal idempotent clawback. Do not guess from email or manually edit balances."
 		common.verify = "Each unmatched event has an authorized resolution, future refunds resolve through immutable IDs, and the 24-hour aggregate returns to zero without duplicate clawback."
 	case "credit_unfulfillable":
-		if target != "stripe" {
+		if !map[string]bool{"apple": true, "google": true, "stripe": true}[target] {
 			return finding{}, fmt.Errorf("payment failures returned an unknown unfulfillable-credit store")
 		}
 		common.tier = tierWarn
 		common.class = "payment-credit-unfulfillable"
+		if target != "stripe" {
+			storeName := map[string]string{"apple": "App Store", "google": "Google Play"}[target]
+			common.symptom = fmt.Sprintf("%d paid %s purchase(s) were not credited because no live account can be credited for them, in 24 hours", count, storeName)
+			common.mechanism = "The store confirmed a paid purchase that names no live network: an App Store transaction with no appAccountToken and no offer-code binding, or a token naming a deleted network; a Play purchase with no account identifiers and no binding, an account link naming a deleted network, or a purchase bound to a different network than the one it renewed for. The server credits nobody on a guess; the notification webhook or the payment reconciler recorded the purchase once. A purchase the app later binds and credits (an offer or promo code) drops out of this count. Family-shared App Store transactions are not the customer's own purchase and are not recorded."
+			common.context = "The durable event (payment_reconciliation_event, store=apple or google, action=credit_unfulfillable, evidence=transaction id or purchase token) carries the reason (destination_unresolved, destination_deleted or bound_to_another_network), product and dates; Play events carry the order id on the customer's receipt. The count is distinct purchases."
+			common.action = "Match the purchase to its payer with authorized store tooling (App Store Connect order lookup, Play Console order id) and the support thread. For a verified owner, have the customer restore or re-verify the purchase from the app while signed in to that network, or refund it in the store. Never credit a network on an email or name match, and never edit balances by hand."
+			common.verify = "Each recorded purchase is credited once through its store ledger after the owner restores it, or has a documented refund or support disposition. The aggregate can remain until its 24-hour window expires; aging out does not prove disposition."
+			break
+		}
 		common.symptom = fmt.Sprintf("%d paid Stripe invoice(s) were not credited because they name no live account, in 24 hours", count)
 		common.mechanism = "invoice.paid resolves the account only from the subscription's network_id metadata or the checkout session's client_reference_id. The customer-email fallback is removed (UPGRADE.md S11). After complete authority reads find neither destination, the webhook durably records destination_unresolved with leg=webhook before acknowledging delivery. Reconciliation also records unresolved destinations, or destination_deleted when the named network is absent under the credit lifecycle lock. This aggregate does not distinguish those reasons, establish account deletion, or prove a provider failure."
 		common.context = "The durable event (payment_reconciliation_event, store=stripe, action=credit_unfulfillable, evidence=invoice id) retains the payment for support. Unresolved-webhook details carry the subscription, customer, customer email, amount and paid period. The count is distinct invoices; the webhook and the reconciler may both record one. The complete unresolved-webhook tuple belongs to this WARN; malformed records remain a separate §2.21 PAGE."

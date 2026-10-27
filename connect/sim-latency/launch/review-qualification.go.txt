@@ -467,9 +467,18 @@ func executeReviewQualification(ctx context.Context, directory string, plan revi
 		}
 		request := item.Request
 		if plan.Kind == "winner-review-snow-provider-qualification-plan" {
-			// A new, independently qualified wrapper release has its own fixed
-			// qualification claim. Repeating the same release still cannot reroll.
-			request.Template.IdempotencyKey += ":" + plan.BrokerSha256
+			// The image receipt authenticates the exact broker image/binary. A
+			// genuine new image or provider release can qualify without a cosmetic
+			// wrapper edit; identical pins still cannot reroll by changing clocks.
+			release, err := json.Marshal(struct {
+				BrokerSha256           string `json:"broker_sha256"`
+				ImageReceiptSha256     string `json:"image_receipt_sha256"`
+				ProviderSettingsSha256 string `json:"provider_settings_sha256"`
+			}{BrokerSha256: plan.BrokerSha256, ImageReceiptSha256: plan.ImageReceiptSha256, ProviderSettingsSha256: plan.ProviderSettingsSha256})
+			if err != nil {
+				return report, err
+			}
+			request.Template.IdempotencyKey += ":" + reviewQualificationHash(release)
 		}
 		now := hooks.Now().UTC()
 		request.Request.StartedAt, request.Request.Deadline = now, now.Add(settings.CaseTimeout)

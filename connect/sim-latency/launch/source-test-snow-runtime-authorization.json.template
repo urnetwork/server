@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "kind": "source-test-snow-runtime-qualification-authorization",
+  "authorized_at": "",
+  "configuration_directory": "/var/lib/urnetwork/competition-source-test-snow-runtime-qualification-20261027-v1",
+  "provider_settings_sha256": "",
+  "maximum_provider_posts": 6,
+  "maximum_go_executions": 2,
+  "single_attempt": true,
+  "no_approval_authority": true
+}
