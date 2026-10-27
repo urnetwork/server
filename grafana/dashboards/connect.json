@@ -2303,6 +2303,52 @@
             ]
         },
         {
+            "id": 76,
+            "type": "timeseries",
+            "title": "handler expiry verdicts and handler retirements / min",
+            "description": "Handler expiry (model.CloseExpiredNetworkClientHandlers, a once-a-minute task on a taskworker) judges each connect handler whose heartbeat is older than the expiry cutoff: expired, deleted with its connection rows retired; deferred_stamped, kept because its process still stamps the provider liveness writer set; deferred_fleet, kept because the set could not vouch and fewer handlers heartbeat than went stale. Retirement is what a connect or alt process did on finding its own handler gone: detected, a heartbeat found the row gone; unanswered, a confirmation read the database did not answer, which starts the confirmation again; restored, the row was back and heartbeats resumed; shutdown, the retirement was confirmed and the process shut down so its providers register again. Expired with no detected is a handler whose process had already ended. Detected or deferred_fleet on many hosts at once is a heartbeat path failing for every process together, as on 2026-10-19. The host and block filters apply to the retirement series only.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 217
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "opm",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (verdict) (rate(urnetwork_network_client_handler_expiry_total{env=\"$env\",instance!=\"\"}[$__rate_interval])) * 60",
+                    "legendFormat": "expiry {{verdict}}"
+                },
+                {
+                    "refId": "B",
+                    "expr": "sum by (service, event) (rate(urnetwork_connect_handler_retirement_total{env=\"$env\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval])) * 60",
+                    "legendFormat": "retirement {{service}} {{event}}"
+                }
+            ]
+        },
+        {
             "id": 61,
             "type": "row",
             "title": "placement: server-directed moves (connect/MOVE.md)",
@@ -2948,6 +2994,180 @@
                     "refId": "B",
                     "expr": "sum by (capable) (rate(urnetwork_connect_drain_moves_sent_total{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval])) * 60",
                     "legendFormat": "drain moves capable={{capable}}"
+                }
+            ]
+        },
+        {
+            "id": 77,
+            "type": "timeseries",
+            "title": "platform-hosted dials placed and left to DNS / min",
+            "description": "Edge placement (connect/MOVE.md 13, server/edgeplacement): the hosted proxy's windows (service proxy) and the URL and capability probes (service taskworker) run on the platform, so each of their dials to the platform host asks the load model the mover reads for an edge instead of leaving the edge to DNS. Placed: dials given an edge, by edge host; hosts are drawn by their headroom to the band edge. Left to DNS: dials answered none, by reason: model, no snapshot yet or the snapshot is older than its two-minute bound; off, the {connect_move}control placement is off; host, the dial is for a host other than the platform host; no_host, no host has an address that is not held after a failed dial. These processes are not connect's, so the host and block filters do not apply.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 282
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "opm",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (service, edge_host) (rate(urnetwork_edge_placement_placements_total{env=\"$env\",instance!=\"\"}[$__rate_interval])) * 60",
+                    "legendFormat": "placed {{service}} {{edge_host}}"
+                },
+                {
+                    "refId": "B",
+                    "expr": "sum by (service, reason) (rate(urnetwork_edge_placement_misses_total{env=\"$env\",instance!=\"\"}[$__rate_interval])) * 60",
+                    "legendFormat": "left to DNS {{service}} {{reason}}"
+                }
+            ]
+        },
+        {
+            "id": 78,
+            "type": "timeseries",
+            "title": "placed dials that failed / min by edge host",
+            "description": "Placed addresses whose dial failed, by the edge host the process's snapshot maps the address to (unknown: an address the snapshot does not know). The dialing client reports each failed placed address, and the process then holds it from all of its clients for two minutes (FailHold). Failures concentrated on one edge host point at that edge's interface or listener; failures spread over every host point at the dialing side.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 282
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "opm",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (service, edge_host) (rate(urnetwork_edge_placement_dial_failures_total{env=\"$env\",instance!=\"\"}[$__rate_interval])) * 60",
+                    "legendFormat": "{{service}} {{edge_host}}"
+                }
+            ]
+        },
+        {
+            "id": 79,
+            "type": "timeseries",
+            "title": "load model reads / min by outcome",
+            "description": "Each placing process reads the {connect_move}control and the {connect_load} table every ten seconds, and the services.yml edge inventory every five minutes: ok, or the read that failed (inventory_failed, control_failed, load_failed). A failed read keeps the last snapshot, which stops placing once it is two minutes old (left to DNS with reason model); a failed inventory load keeps the last inventory.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 290
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "opm",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (service, outcome) (rate(urnetwork_edge_placement_model_reads_total{env=\"$env\",instance!=\"\"}[$__rate_interval])) * 60",
+                    "legendFormat": "{{service}} {{outcome}}"
+                }
+            ]
+        },
+        {
+            "id": 80,
+            "type": "timeseries",
+            "title": "edge hosts open to placement",
+            "description": "Edge hosts in each placing process's latest snapshot of the load model: a fresh load record from a connect process that is not draining, capacity in the inventory, not evacuated, and a placeable interface. The CPU ceiling (MaxCpu, 0.8) applies to each dial, not to this count. Shown as the fewest and the most across each service's processes, which differ while processes hold different snapshots; a process reports 0 before its first read. Fewer hosts than the services edges put every platform-hosted dial on the rest.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 290
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "min by (service) (urnetwork_edge_placement_hosts{env=\"$env\",instance!=\"\"})",
+                    "legendFormat": "fewest {{service}}"
+                },
+                {
+                    "refId": "B",
+                    "expr": "max by (service) (urnetwork_edge_placement_hosts{env=\"$env\",instance!=\"\"})",
+                    "legendFormat": "most {{service}}"
                 }
             ]
         }
