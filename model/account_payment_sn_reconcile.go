@@ -391,21 +391,114 @@ type SnReconcileHolder struct {
 	EarlyBonus         NanoCents `json:"early_bonus_nano_cents"`
 }
 
-var snReconcileHoldersSql = `SELECT p.payment_id,p.payment_plan_id,p.network_id,
-	CASE WHEN p.canceled THEN 'safely_canceled' WHEN p.tx_hash IS NOT NULL THEN 'on_chain' WHEN p.payment_record IS NOT NULL THEN 'submitted'
-		WHEN p.circle_idempotency_key IS NOT NULL THEN 'reserved' ELSE 'planned' END,
-	p.payout_nano_cents,p.payout_byte_count,p.subsidy_payout_nano_cents,p.reliability_subsidy_nano_cents,early.revenue,early.bytes,bonus.amount
+// A2: a sweep whose contract id is at or above the floor of this time has its
+// contract. A sweep loses its contract only when the contract is deleted and
+// the sweep is not:
+//   - From release v2026.7.15 (5f7035fa1, 00b171d05), contract retention
+//     deletes a contract's sweeps in the same transaction as the contract.
+//   - Before it, RemoveCompletedContracts deleted contracts and, in a later
+//     transaction that could time out, the sweeps left without one. It also
+//     deleted closed contracts without sweeps, while a sweep could still be
+//     written for one.
+//   - A contract is deleted after it was created, so such a sweep's contract id
+//     is below the floor of the last run of an older release. The two weeks
+//     after the release cover its rollout.
+//
+// After the partition cutover, retiring a week deletes its contracts before it
+// drops the week's sweeps (retireExpiredContractWeeks), and a safely canceled
+// row does not hold the week. Every retired week ended more than
+// server.ContractRetention ago, so the holders read also reads every sweep
+// below that age's floor (snReconcileSweepContractIdFloorSql).
+var snReconcileSweepContractRetainedTime = time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+
+// A2: every sweep whose contract id is at or above this floor has its contract
+// (snReconcileSweepContractRetainedTime). The retention interval has no day
+// part, so the session time zone changes nothing.
+var snReconcileSweepContractIdFloorSql = `GREATEST(` + contractIdFloorSql(fmt.Sprintf(`'%s'::timestamptz`, snReconcileSweepContractRetainedTime.Format(time.RFC3339))) + `,
+	` + contractIdFloorSql(fmt.Sprintf(`statement_timestamp() - interval '%d milliseconds'`, server.ContractRetention.Milliseconds())) + `)`
+
+// A2 (§6): each pending or safely canceled row's early sweeps, read without
+// reading every sweep's contract. A sweep is early unless its contract exists
+// with a known close after the row's bound (snReconcileEarlySweepsSql).
+//
+// The read is exact:
+//   - With a bound of 'infinity' or NULL, every sweep is early, so the row's
+//     sweeps are summed without their contracts.
+//   - Otherwise the sweeps whose contract id is below the row's id bound are
+//     read with their contracts and the same test. The id bound is the floor
+//     of the bound plus snReconcileContractIdMargin, raised to
+//     snReconcileSweepContractIdFloorSql. A '-infinity' bound has no
+//     millisecond, so the id bound is that floor alone.
+//   - At or above the id bound, a sweep has its contract
+//     (snReconcileSweepContractRetainedTime). A known close is after the bound:
+//     a contract that closed at or before it has an id below the floor of the
+//     bound plus the margin (snReconcileLaterSweepIdBoundSql gives that
+//     argument and each contract-id source). So only a contract without a
+//     close time makes such a sweep early. Those contracts are read from
+//     their own indexes: one with an outcome by transfer_contract_closed_usage,
+//     whose key leads with close_time, and an open one by
+//     transfer_contract_open_partial_create_time, which holds only open
+//     contracts. A disputed contract without an outcome always has a close
+//     time: the dispute writes one, and no statement clears one.
+//
+// The plan's shape is fixed by the query:
+//   - Each row's bound is read once.
+//   - The row's sweeps are read by its own lateral scans, by the
+//     (payment_id, contract_id) index below the id bound. A scalar subquery
+//     reads each sweep's contract by its key; PostgreSQL never makes one a
+//     join.
+//   - The contracts without a close time read their sweeps by contract id.
+//
+// Reading every sweep's contract for each of 454,429 rows did not finish on
+// main within the 15-minute statement timeout.
+var snReconcileHoldersSql = `WITH candidate AS MATERIALIZED (
+	SELECT p.payment_id,p.payment_plan_id,p.network_id,p.create_time,p.canceled,p.tx_hash,p.payment_record,p.circle_idempotency_key,
+		p.payout_nano_cents,p.payout_byte_count,p.subsidy_payout_nano_cents,p.reliability_subsidy_nano_cents
 	FROM account_payment p
-	CROSS JOIN LATERAL (SELECT ` + fmt.Sprintf(snReconcileEarlyBoundSql, "p") + ` AS bound) eb
-	CROSS JOIN LATERAL (SELECT COUNT(*) n,COALESCE(SUM(s.payout_net_revenue_nano_cents),0)::bigint revenue,COALESCE(SUM(s.payout_byte_count),0)::bigint bytes
-		FROM ` + fmt.Sprintf(snReconcileEarlySweepsSql, "p", "eb.bound") + `) early
-	CROSS JOIN LATERAL (SELECT COUNT(*) n,COALESCE(SUM(b.amount_nano_cents),0)::bigint amount FROM account_payment_bonus b
-		WHERE b.payment_id=p.payment_id AND b.origin_payment_id<>p.payment_id) bonus
 	WHERE NOT p.completed AND (
 		(p.canceled AND p.circle_idempotency_key IS NULL AND p.payment_record IS NULL AND p.tx_hash IS NULL) OR
 		(NOT p.canceled AND NOT (p.circle_idempotency_key IS NOT NULL AND p.payment_record IS NULL AND p.tx_hash IS NULL
 		AND NOT EXISTS (SELECT 1 FROM audit_account_payment a WHERE a.event_id=p.circle_idempotency_key))))
-	AND 0<early.n+bonus.n
+), bounded AS MATERIALIZED (
+	SELECT p.payment_id,eb.bound,eb.bound IS NULL OR eb.bound='infinity'::timestamp AS every_early,
+		CASE WHEN isfinite(eb.bound) THEN GREATEST(` + snReconcileSweepContractIdFloorSql + `,
+			` + contractIdFloorSql(fmt.Sprintf(`(eb.bound AT TIME ZONE 'UTC') + interval '%d milliseconds'`, snReconcileContractIdMargin.Milliseconds())) + `)
+		ELSE ` + snReconcileSweepContractIdFloorSql + ` END AS id_bound
+	FROM candidate p CROSS JOIN LATERAL (SELECT ` + fmt.Sprintf(snReconcileEarlyBoundSql, "p") + ` AS bound) eb
+), unknown_close AS MATERIALIZED (
+	SELECT s.payment_id,s.contract_id,s.payout_net_revenue_nano_cents,s.payout_byte_count FROM (
+		SELECT c.contract_id FROM transfer_contract c WHERE c.outcome IS NOT NULL AND c.close_time IS NULL
+		UNION ALL
+		SELECT c.contract_id FROM transfer_contract c WHERE c.open AND c.close_time IS NULL
+	) c CROSS JOIN LATERAL (SELECT s.payment_id,s.contract_id,s.payout_net_revenue_nano_cents,s.payout_byte_count
+		FROM transfer_escrow_sweep s WHERE s.contract_id=c.contract_id) s
+), early AS MATERIALIZED (
+	SELECT x.payment_id,COUNT(*) n,COALESCE(SUM(x.revenue),0)::bigint revenue,COALESCE(SUM(x.bytes),0)::bigint bytes FROM (
+		SELECT p.payment_id,s.revenue,s.bytes FROM bounded p CROSS JOIN LATERAL (
+			SELECT s.payout_net_revenue_nano_cents revenue,s.payout_byte_count bytes FROM transfer_escrow_sweep s
+			WHERE p.every_early AND s.payment_id=p.payment_id
+			UNION ALL
+			SELECT s.payout_net_revenue_nano_cents,s.payout_byte_count FROM transfer_escrow_sweep s
+			WHERE NOT p.every_early AND s.payment_id=p.payment_id AND s.contract_id<p.id_bound
+			AND COALESCE((SELECT c.close_time FROM transfer_contract c WHERE c.contract_id=s.contract_id)<=p.bound,true)
+		) s
+		UNION ALL
+		SELECT u.payment_id,u.payout_net_revenue_nano_cents,u.payout_byte_count FROM unknown_close u
+		JOIN bounded p ON p.payment_id=u.payment_id WHERE NOT p.every_early AND p.id_bound<=u.contract_id
+	) x GROUP BY x.payment_id
+), bonus AS MATERIALIZED (
+	SELECT b.payment_id,COUNT(*) n,COALESCE(SUM(b.amount_nano_cents),0)::bigint amount FROM account_payment_bonus b
+	WHERE b.origin_payment_id<>b.payment_id GROUP BY b.payment_id
+)
+	SELECT p.payment_id,p.payment_plan_id,p.network_id,
+	CASE WHEN p.canceled THEN 'safely_canceled' WHEN p.tx_hash IS NOT NULL THEN 'on_chain' WHEN p.payment_record IS NOT NULL THEN 'submitted'
+		WHEN p.circle_idempotency_key IS NOT NULL THEN 'reserved' ELSE 'planned' END,
+	p.payout_nano_cents,p.payout_byte_count,p.subsidy_payout_nano_cents,p.reliability_subsidy_nano_cents,
+	COALESCE(early.revenue,0),COALESCE(early.bytes,0),COALESCE(bonus.amount,0)
+	FROM candidate p
+	LEFT JOIN early ON early.payment_id=p.payment_id
+	LEFT JOIN bonus ON bonus.payment_id=p.payment_id
+	WHERE 0<COALESCE(early.n,0)+COALESCE(bonus.n,0)
 	ORDER BY p.network_id,p.create_time,p.payment_id`
 
 // A2 (§6): every pending or safely canceled row with early earnings, by
