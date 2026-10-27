@@ -42,6 +42,13 @@ func init() {
 	prometheus.MustRegister(reservedUploadStartupFailedGauge)
 }
 
+// Ends the contract compensations the process's routes deferred, as the proxy
+// does before exit: their tokens stay pending for recovery. A test observes the
+// call through this seam.
+var quiesceContractCompensations = model.QuiesceRedisContractCompensations
+
+const contractCompensationQuiesceTimeout = 5 * time.Second
+
 type RunOptions struct {
 	Port int
 	// Optional owners for a process composing multiple service runners.
@@ -248,6 +255,13 @@ func runWithDependencies(
 	if err != nil && !errors.As(err, &drainCut) {
 		return err
 	}
+	// The drained routes defer no more compensations, and the final metrics
+	// push below carries the outcomes of those this ends.
+	func() {
+		quiesced, stop := context.WithTimeout(context.Background(), contractCompensationQuiesceTimeout)
+		defer stop()
+		quiesceContractCompensations(quiesced)
+	}()
 	apiRouter.FlushStats()
 	flushStats()
 	glog.Infof("[api]close\n")

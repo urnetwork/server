@@ -16,6 +16,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
 	"github.com/urnetwork/server/task"
 )
@@ -51,6 +52,13 @@ var drainCanceledGauge = prometheus.NewGauge(prometheus.GaugeOpts{
 func init() {
 	prometheus.MustRegister(readyGauge, drainInflightGauge, drainSecondsGauge, drainCanceledGauge)
 }
+
+// Ends the contract compensations the process's tasks deferred, as the proxy
+// does before exit: their tokens stay pending for recovery. A test observes the
+// call through this seam.
+var quiesceContractCompensations = model.QuiesceRedisContractCompensations
+
+const contractCompensationQuiesceTimeout = 5 * time.Second
 
 type RunOptions struct {
 	Port            int
@@ -272,6 +280,15 @@ func runWithStartupWait(
 			}
 			drainSecondsGauge.Set(time.Since(drainStart).Seconds())
 			drainCanceledGauge.Set(float64(worker.DrainCanceledCount()))
+			// The drained tasks defer no more compensations, and the final
+			// metrics push below carries the outcomes of those this ends. A
+			// task still running past the handback grace may defer one more,
+			// which ends with the process, as at any exit.
+			func() {
+				quiesced, stop := context.WithTimeout(context.Background(), contractCompensationQuiesceTimeout)
+				defer stop()
+				quiesceContractCompensations(quiesced)
+			}()
 		}
 		cancel()
 	}()

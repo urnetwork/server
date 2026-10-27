@@ -118,6 +118,60 @@ func TestRunRejectedAPIPreservesStatusWithoutPublishingMetrics(t *testing.T) {
 	}
 }
 
+// Once the HTTP drain has returned, even one that cut connections, the contract
+// compensations the routes deferred end within a bound. A listener failure
+// returns at once.
+func TestRunQuiescesContractCompensationsAfterHttpDrain(t *testing.T) {
+	for key, value := range map[string]string{
+		"WARP_ENV": "test", "WARP_VERSION": "2026.9.4+1037600680",
+		"WARP_HOST": "synthetic-host", "WARP_SERVICE": "api", "WARP_BLOCK": "g1",
+		"WARP_HOST_IPV4": "127.0.0.1", "WARP_HOST_IPV6": "", "WARP_PORTS": "8080:8080",
+	} {
+		t.Setenv(key, value)
+	}
+	t.Cleanup(router.SetWarpStatusReady)
+	original := quiesceContractCompensations
+	t.Cleanup(func() { quiesceContractCompensations = original })
+	served, quiesces := false, 0
+	quiesceContractCompensations = func(ctx context.Context) {
+		if _, bounded := ctx.Deadline(); !bounded {
+			t.Error("the compensation quiesce has no bound")
+		}
+		if !served {
+			t.Error("compensations were quiesced before the HTTP drain returned")
+		}
+		quiesces++
+	}
+	listenerFailure := errors.New("synthetic listener failure")
+	for _, drain := range []struct {
+		name     string
+		err      error
+		quiesces int
+	}{
+		{"a complete drain", nil, 1},
+		{"a drain that cut connections", &server.HttpDrainCutError{CutConnectionCount: 1}, 1},
+		{"a listener failure", listenerFailure, 0},
+	} {
+		served, quiesces = false, 0
+		// a candidate that serves only its status keeps the test off the
+		// activation's dependencies; the drain is the same
+		err := runWithDependencies(context.Background(), RunOptions{Port: 8080},
+			func(context.Context) error { return errors.New("synthetic readiness refusal") },
+			func(context.Context) func() { return func() {} },
+			func(_ context.Context, _ string, _ http.Handler, _ bool, _ server.HttpServerOptions) error {
+				served = true
+				return drain.err
+			},
+		)
+		if (err != nil) != (drain.err == listenerFailure) {
+			t.Fatalf("%s returned %v", drain.name, err)
+		}
+		if quiesces != drain.quiesces {
+			t.Fatalf("%s quiesced the contract compensations %d times, want %d", drain.name, quiesces, drain.quiesces)
+		}
+	}
+}
+
 func TestReservedUploadStartupFailureDisablesOnlyTheReservedLane(t *testing.T) {
 	t.Cleanup(func() { reservedUploadStartupFailedGauge.Set(0) })
 	failed := startReservedAttemptUpload(context.Background(), func(context.Context) (*controller.StReservedAttemptUpload, error) {

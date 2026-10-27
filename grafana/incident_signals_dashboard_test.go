@@ -234,6 +234,8 @@ func TestServicesOverviewIncidentRowIsFleetWideAndFirst(t *testing.T) {
 // The reservation panel highlights the results that leave tokens reserved or
 // mean Redis was unreachable, and the compensation panel names the deferred
 // owner's outcomes, which read no data until a build carrying them is deployed.
+// Beside them, on their own right axis, it shows how full the busiest process's
+// owner is: the balances it holds and the release calls it has in flight.
 func TestProxyStormRowHighlightsFailedReservations(t *testing.T) {
 	dashboard := readTestDashboard(t, "proxy.json")
 	reservations := dashboardPanelById(dashboard, 54)
@@ -253,7 +255,7 @@ func TestProxyStormRowHighlightsFailedReservations(t *testing.T) {
 		t.Errorf("reservation results do not highlight error, dropped, expired and pending: %v", highlighted)
 	}
 	compensation := dashboardPanelById(dashboard, 55)
-	if compensation == nil || len(compensation.Targets) != 2 ||
+	if compensation == nil || len(compensation.Targets) != 4 ||
 		!strings.Contains(compensation.Targets[0].Expr, `operation="compensation"`) ||
 		compensation.Targets[0].LegendFormat != "{{result}}" {
 		t.Fatal("proxy compensation results panel is missing")
@@ -265,6 +267,35 @@ func TestProxyStormRowHighlightsFailedReservations(t *testing.T) {
 	for _, result := range []string{"completed", "deferred", "pending", "dropped", "expired"} {
 		if !slices.Contains(named, result) || !strings.Contains(compensation.Description, result) {
 			t.Errorf("compensation panel does not name result %s", result)
+		}
+	}
+	if !strings.Contains(compensation.Description, "handoff") {
+		t.Error("compensation panel does not explain the give-up handoff")
+	}
+	for index, gauge := range []struct{ metric, bound string }{
+		{"urnetwork_redis_contract_compensation_balances_held", "1,024"},
+		{"urnetwork_redis_contract_compensation_calls_inflight", "4 workers"},
+	} {
+		target := compensation.Targets[2+index]
+		// a per-process bound, so the busiest process, not the fleet's sum
+		if !strings.HasPrefix(target.Expr, "max("+gauge.metric+"{") || !strings.Contains(target.Expr, `service="proxy"`) ||
+			!strings.Contains(target.Expr, `env="$env"`) || !strings.Contains(target.Expr, `instance!=""`) {
+			t.Errorf("compensation panel does not read the busiest process's %s: %s", gauge.metric, target.Expr)
+			continue
+		}
+		if !strings.Contains(compensation.Description, gauge.bound) {
+			t.Errorf("compensation panel does not give the %s bound %s", gauge.metric, gauge.bound)
+		}
+		properties := map[string]string{}
+		for _, override := range compensation.FieldConfig.Overrides {
+			if override.Matcher.Options == target.LegendFormat {
+				for _, property := range override.Properties {
+					properties[property.Id] = string(property.Value)
+				}
+			}
+		}
+		if properties["custom.axisPlacement"] != `"right"` || properties["unit"] != `"short"` || !strings.Contains(properties["custom.scaleDistribution"], `"linear"`) {
+			t.Errorf("%s is not a count on its own linear right axis: %v", gauge.metric, properties)
 		}
 	}
 }

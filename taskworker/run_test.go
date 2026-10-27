@@ -152,3 +152,67 @@ func TestRunFlushesMetricsAfterFinalTaskHandback(t *testing.T) {
 		t.Fatalf("terminal lifecycle stage = %d, want flushed stage 3", got)
 	}
 }
+
+// The contract compensations the tasks deferred end after the final handback,
+// within a bound, and before the final metrics push that reports them.
+func TestRunQuiescesContractCompensationsAfterFinalTaskHandback(t *testing.T) {
+	for key, value := range map[string]string{
+		"WARP_ENV": "test", "WARP_VERSION": "2026.9.4+1037600680",
+		"WARP_HOST": "fixture.example", "WARP_SERVICE": "taskworker", "WARP_BLOCK": "g1",
+		"WARP_HOST_IPV4": "192.0.2.10", "WARP_HOST_IPV6": "", "WARP_PORTS": "8080:8080",
+	} {
+		t.Setenv(key, value)
+	}
+	t.Cleanup(router.SetWarpStatusReady)
+	original := quiesceContractCompensations
+	t.Cleanup(func() { quiesceContractCompensations = original })
+	var quiesces atomic.Int32
+	runtime := &taskworkerLifecycleRuntime{
+		drainStarted: make(chan struct{}),
+		handbackDone: make(chan struct{}),
+	}
+	quiesceContractCompensations = func(ctx context.Context) {
+		if _, bounded := ctx.Deadline(); !bounded {
+			t.Error("the compensation quiesce has no bound")
+		}
+		if got := runtime.stage.Load(); got != 2 {
+			t.Errorf("compensations were quiesced at lifecycle stage %d, want after the final handback", got)
+		}
+		quiesces.Add(1)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	flushDone := make(chan struct{})
+	started := make(chan struct{})
+	err := runWithDependencies(
+		ctx,
+		RunOptions{Port: 8080, Count: 1, BatchSize: 1},
+		func(context.Context) error { return nil },
+		func(context.Context) func() {
+			return func() {
+				if quiesces.Load() != 1 {
+					t.Error("metrics flushed before the compensations were quiesced")
+				}
+				close(flushDone)
+			}
+		},
+		func(_ context.Context, _ string, _ http.Handler, _ bool, _ server.HttpServerOptions) error {
+			<-started
+			cancel()
+			<-runtime.drainStarted
+			<-runtime.handbackDone
+			return nil
+		},
+		func(context.Context, context.Context, context.CancelFunc, RunOptions) (taskworkerRuntime, error) {
+			close(started)
+			return runtime, nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-flushDone
+	if quiesces.Load() != 1 {
+		t.Fatal("the drain did not quiesce the contract compensations once", quiesces.Load())
+	}
+}
