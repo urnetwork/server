@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -119,6 +120,12 @@ func TestAccountActionConstantsAreDistinctAndHaveDisplayNames(t *testing.T) {
 		AccountActionChangeNetworkName,
 		AccountActionGenerateSeedphrase,
 		AccountActionRegenerateSeedphrase,
+		AccountActionVerifyStorePurchase,
+		AccountActionExtenderActivate,
+		AccountActionExtenderActivateAccount,
+		AccountActionExtenderPingReport,
+		AccountActionExtenderLatencyReport,
+		AccountActionExtenderBlockReport,
 	}
 
 	seen := map[string]bool{}
@@ -132,9 +139,94 @@ func TestAccountActionConstantsAreDistinctAndHaveDisplayNames(t *testing.T) {
 		// error message -- the fallback "this action" wording should only
 		// ever be reached for a caller-supplied action string that isn't
 		// one of the real constants, never for a real one
-		err := maxAccountActionAttemptsError(action)
-		assert.NotEqual(t, err.Error(), maxAccountActionAttemptsError("not_a_real_action").Error())
+		err := maxAccountActionAttemptsError(action, AccountActionDailyWindow)
+		assert.NotEqual(t, err.Error(), maxAccountActionAttemptsError("not_a_real_action", AccountActionDailyWindow).Error())
+		if strings.Contains(err.Error(), "this action") {
+			t.Errorf("%s has no display name: %q", action, err.Error())
+		}
 	}
+}
+
+// The window a refusal names is the budget's own trailing window.
+func TestAccountActionWindowText(t *testing.T) {
+	cases := []struct {
+		window time.Duration
+		want   string
+	}{
+		{window: time.Hour, want: "in the last hour"},
+		{window: 24 * time.Hour, want: "in the last 24 hours"},
+		{window: 30 * time.Minute, want: "in the last 30 minutes"},
+		{window: time.Minute, want: "in the last minute"},
+		{window: 90 * time.Second, want: "in the last 1m30s"},
+	}
+	for _, c := range cases {
+		message := maxAccountActionAttemptsError(AccountActionExtenderActivate, c.window).Error()
+		if !strings.Contains(message, c.want) || strings.Contains(message, "today") {
+			t.Errorf("window %s: %q does not say %q", c.window, message, c.want)
+		}
+	}
+}
+
+// A refusal names the action whose budget is spent and the trailing window the
+// budget counts. It said "today" whatever the window, and an action without a
+// display name read "this action": an extender activation, whose budget is six
+// an hour, was refused "for this action today" (inbox 8051).
+func TestAccountActionRefusalNamesTheActionAndItsWindow(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		cases := []struct {
+			action     string
+			window     time.Duration
+			wantName   string
+			wantWindow string
+		}{
+			{
+				action:     "extender_activate",
+				window:     time.Hour,
+				wantName:   "activating an extender",
+				wantWindow: "in the last hour",
+			},
+			{
+				action:     "verify_store_purchase",
+				window:     time.Hour,
+				wantName:   "verifying a store purchase",
+				wantWindow: "in the last hour",
+			},
+			{
+				action:     "add_auth",
+				window:     24 * time.Hour,
+				wantName:   "adding a sign-in method",
+				wantWindow: "in the last 24 hours",
+			},
+		}
+		for _, c := range cases {
+			userId := server.NewId()
+			err := CheckAndRecordAccountActionRateLimit(ctx, userId, c.action, 1, c.window)
+			if err != nil {
+				t.Fatalf("%s: the first attempt was refused: %s", c.action, err)
+			}
+			for _, check := range []func() error{
+				func() error {
+					return CheckAndRecordAccountActionRateLimit(ctx, userId, c.action, 1, c.window)
+				},
+				func() error {
+					return CheckAccountActionRateLimit(ctx, userId, c.action, 1, c.window)
+				},
+			} {
+				err := check()
+				if err == nil {
+					t.Fatalf("%s: the attempt over the limit was not refused", c.action)
+				}
+				message := err.Error()
+				if !strings.Contains(message, c.wantName) ||
+					!strings.Contains(message, c.wantWindow) ||
+					strings.Contains(message, "today") {
+					t.Errorf("%s: the refusal %q does not name %q and %q", c.action, message, c.wantName, c.wantWindow)
+				}
+			}
+		}
+	})
 }
 
 func TestClaimAndChangeNetworkNameHaveIndependentCounters(t *testing.T) {

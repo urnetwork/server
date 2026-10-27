@@ -421,6 +421,39 @@
         {"refId": "A", "expr": "100 * (1 - avg by (host) (rate(node_cpu_seconds_total{env=\"$env\",host=~\"$host\",job=\"node\",mode=\"idle\"}[$__rate_interval])))", "legendFormat": "{{host}} cpu", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}},
         {"refId": "B", "expr": "100 * (1 - node_memory_MemAvailable_bytes{env=\"$env\",host=~\"$host\",job=\"node\"} / node_memory_MemTotal_bytes{env=\"$env\",host=~\"$host\",job=\"node\"})", "legendFormat": "{{host}} memory", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}
       ]
+    },
+    {
+      "id": 33,
+      "title": "churn-table vacuums: the taskworker's hot vacuum (PARTITION-MAINTENANCE-PLAN.md A1)",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 90},
+      "panels": []
+    },
+    {
+      "id": 34,
+      "title": "churn-table vacuums finished per hour by table",
+      "description": "The taskworker's hot vacuum (db_maintenance_hot_vacuum.go) runs an explicit VACUUM (SKIP_LOCKED) over each churn table every few minutes, because six autovacuum workers serving the large tables leave these small, constantly rewritten tables waiting for hours. Vacuums whose VERBOSE summary reported them finished, per table, counted over the trailing hour: one per run that reached the table. A table that falls away here while the others hold is not being vacuumed; the panel beside it says why. The series come from the taskworker processes, so the host and database filters do not apply.",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 91},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0, "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 0, "showPoints": "never", "spanNulls": false, "axisPlacement": "auto", "stacking": {"mode": "none", "group": "A"}}}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull", "max"], "sortBy": "Max", "sortDesc": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"refId": "A", "expr": "sum by (table) (increase(urnetwork_db_hot_vacuum_attempts_total{env=\"$env\",service=\"taskworker\",outcome=\"vacuumed\",instance!=\"\"}[1h]))", "legendFormat": "{{table}}", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+    },
+    {
+      "id": 35,
+      "title": "churn-table vacuums not finished, and stale tables, per hour",
+      "description": "Vacuum turns that did not finish, per table and outcome, counted over the trailing hour: skipped, another session held the table (SKIP_LOCKED) or it was dropped meanwhile; timed_out, the statement reached its statement_timeout; out_of_budget, the run's budget ended the statement and the table keeps its turn; interrupted, the run was stopped and the table keeps its turn; failed; unreported, the statement completed without a summary for the table. Stale counts runs that found a table with no finished vacuum for an hour (StaleAfter); each such run also logs a warning naming the table, since a vacuum that started is not one that finished. No data: nothing failed to finish and no table went stale.",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 91},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0, "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 0, "showPoints": "never", "spanNulls": false, "axisPlacement": "auto", "stacking": {"mode": "none", "group": "A"}}}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull", "max"], "sortBy": "Max", "sortDesc": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"refId": "A", "expr": "sum by (table, outcome) (increase(urnetwork_db_hot_vacuum_attempts_total{env=\"$env\",service=\"taskworker\",outcome!=\"vacuumed\",instance!=\"\"}[1h]))", "legendFormat": "{{table}} {{outcome}}", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}},
+        {"refId": "B", "expr": "sum by (table) (increase(urnetwork_db_hot_vacuum_stale_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[1h]))", "legendFormat": "stale {{table}}", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}
+      ]
     }
   ]
 }

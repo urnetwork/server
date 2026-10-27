@@ -8,7 +8,7 @@ Proposal page with live mockups of the eight templates (paper and dark, desktop 
 
 ## 1. What ships today
 
-Ten templates. Each is three embedded files (`<name>.subject.txt`, `<name>.html`, `<name>.txt`) rendered by `RenderEmailTemplate` with `html/template` and `text/template` against a small struct. Everything is sent as `URnetwork <support@ur.io>` (config/main/email.yml) through SES v1 `SendEmail` in us-west-1 with no configuration set. `SendAccountMessageTemplate` routes by user auth type: phone accounts get the `.txt` body as an SMS, so four text parts are held to SMS length.
+Ten templates. Each is three embedded files (`<name>.subject.txt`, `<name>.html`, `<name>.txt`) rendered by `RenderEmailTemplate` with `html/template` and `text/template` against a small struct. Everything is sent as `URnetwork <support@ur.io>` (config/main/email.yml) through SES v1 `SendEmail` in us-west-1 with no configuration set. `SendAccountMessageTemplate` routes by user auth type: phone accounts get the `.txt` body as an SMS, so four text parts are held to SMS length. Since 2026-10-27 a phone account receives only account security by SMS (`auth_verify`, `auth_password_reset`, `auth_password_set`; `smsTemplateNames` in `controller/aws_controller.go`), and every other template is email-only. AWS SMS Trust & Safety paused sending after the welcome email went out as a text (AWS case 177660552500706).
 
 | Template | Sent when | Subject today | Brand and links | Images |
 | --- | --- | --- | --- | --- |
@@ -139,7 +139,7 @@ Phase A. Authentication and feedback (before the templates ship; DNS and SES con
 Phase B. Templates and send path (code, with the new templates)
 
 1. Templates as proposed (section 3): `_layout.html` and `_layout.txt` in `email_templates/`, each template a set of `{{define}}` blocks (title, preheader, eyebrow, accent, headline, content, why). `RenderEmailTemplate` parses `_layout.html` + `<name>.html` with `ParseFS` and executes `_layout.html`; same for text. Message size stays under 15 KB.
-2. SMS split: `RenderSmsTemplate` reads `<name>.sms.txt` when present, else `.txt`. Six templates can reach a phone account (verify, reset, password set, welcome, payout, missing wallet).
+2. SMS split: `RenderSmsTemplate` reads `<name>.sms.txt` when present, else `.txt`. Six templates could reach a phone account (verify, reset, password set, welcome, payout, missing wallet). Since 2026-10-27 only verify, reset and password set are sent by SMS.
 3. Move sending to SESv2 `SendEmail` (aws-sdk-go-v2 sesv2): `ConfigurationSetName=account-mail`, `ReplyToAddresses=[support@ur.io]`, `EmailTags=[template=<name>]`, subject `TrimSpace` and reject on newline, a per-template flag that adds `List-Unsubscribe` and `List-Unsubscribe-Post` headers, unused until a subscribed message type exists. Retry with backoff on TooManyRequests only. Log MessageId with the network id.
 4. Feedback consumer: SNS to HTTPS endpoint (or SQS drained by taskworker). Hard bounce marks the user_auth undeliverable, stops non-critical mail, and prompts in-app to fix the address. Complaint sets ProductUpdates=false and suppresses all but security mail.
 5. Deferred until the feedback system: one-click unsubscribe endpoint (RFC 8058) wired to ProductUpdates: opaque per-recipient token; POST unsubscribes immediately, no confirmation, no redirect; GET renders a confirmation page.

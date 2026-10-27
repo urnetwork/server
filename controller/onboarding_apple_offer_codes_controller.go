@@ -129,7 +129,7 @@ func DecideAppleOfferCodeTopUp(cfg model.OnboardingAppleOfferCodesConfig, hasCre
 	}
 	days := cfg.ExpiryDays
 	if days <= 0 {
-		days = 5
+		days = model.OnboardingAppleOfferCodeExpiryDaysDefault
 	}
 	return AppleOfferCodeTopUpDecision{
 		Generate:  true,
@@ -291,7 +291,13 @@ func AppleOfferCodeTopUp(
 ) (*AppleOfferCodeTopUpResult, error) {
 	ctx := clientSession.Ctx
 	now := server.NowUtc()
-	available := model.CountAvailableAppleOfferCodes(ctx, now)
+	cfg := model.Onboarding()
+	// a code is handed only to an offer it outlives: count the codes an offer
+	// issued before the next top-up can still take. A code that is unexpired
+	// but expires sooner serves no one, and counting it held off the next
+	// batch until the whole pool had expired.
+	assignableAfter := now.Add(cfg.OfferValidity() + model.OnboardingAppleOfferCodeTopUpInterval)
+	available := model.CountAvailableAppleOfferCodes(ctx, assignableAfter)
 	onboardingAppleOfferCodesAvailable.Set(float64(available))
 	result := &AppleOfferCodeTopUpResult{Available: available}
 
@@ -301,14 +307,17 @@ func AppleOfferCodeTopUp(
 		return result, nil
 	}
 	creds := appStoreConnectCredentialsFunc()
-	decision := DecideAppleOfferCodeTopUp(model.Onboarding().Offer.Apple, creds != nil, available, now)
+	// the batch expiry outlives the offers it serves, whatever the config says
+	appleConfig := cfg.Offer.Apple
+	appleConfig.ExpiryDays = cfg.AppleOfferCodeExpiryDays()
+	decision := DecideAppleOfferCodeTopUp(appleConfig, creds != nil, available, now)
 	if !decision.Generate {
 		result.Reason = decision.Reason
 		onboardingAppleOfferCodeBatchesTotal.WithLabelValues("skipped").Inc()
 		glog.Warningf("[onboarding]apple offer code top-up skipped: %s (the custom offer code stays the App Store path)\n", decision.Reason)
 		return result, nil
 	}
-	codes, err := generateAppleOfferCodeBatch(ctx, creds, model.Onboarding().Offer.Apple.OfferCodeId, decision.BatchSize, decision.ExpiresAt)
+	codes, err := generateAppleOfferCodeBatch(ctx, creds, appleConfig.OfferCodeId, decision.BatchSize, decision.ExpiresAt)
 	if err != nil {
 		onboardingAppleOfferCodeBatchesTotal.WithLabelValues("failed").Inc()
 		return nil, err
@@ -320,7 +329,7 @@ func AppleOfferCodeTopUp(
 	}
 	onboardingAppleOfferCodeBatchesTotal.WithLabelValues("created").Inc()
 	result.Added = added
-	onboardingAppleOfferCodesAvailable.Set(float64(model.CountAvailableAppleOfferCodes(ctx, now)))
+	onboardingAppleOfferCodesAvailable.Set(float64(model.CountAvailableAppleOfferCodes(ctx, assignableAfter)))
 	glog.Infof("[onboarding]apple offer code top-up: %d codes in batch, %d new, expiring %s\n", len(codes), added, decision.ExpiresAt.Format("2006-01-02"))
 	return result, nil
 }
@@ -331,6 +340,6 @@ func AppleOfferCodeTopUpPost(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
-	ScheduleAppleOfferCodeTopUp(clientSession, tx, server.NowUtc().Add(24*time.Hour))
+	ScheduleAppleOfferCodeTopUp(clientSession, tx, server.NowUtc().Add(model.OnboardingAppleOfferCodeTopUpInterval))
 	return nil
 }

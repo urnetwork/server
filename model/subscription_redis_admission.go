@@ -86,6 +86,9 @@ type redisContractAdmission struct {
 	attemptedBalanceKVs  map[server.Id]bool
 	compensationAttempts map[server.Id]uint64
 	publicationStarted   bool
+	// the insufficient-balance rerun after this request's recovery page made
+	// progress
+	rerunAfterRecovery bool
 
 	// Serializes an attempt starting a pending reservation with this
 	// request's own releases and enrollments of its pending tokens, which
@@ -136,6 +139,20 @@ func (self *redisContractAdmission) notePublication() {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	self.publicationStarted = true
+}
+
+func (self *redisContractAdmission) noteRecoveryRerun() {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.rerunAfterRecovery = true
+}
+
+// Whether this attempt is the rerun after the request's recovery page released
+// bytes, which its census can find without first proving exhaustion.
+func (self *redisContractAdmission) recoveryRerun() bool {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.rerunAfterRecovery
 }
 
 func redisAdmissionFromContext(ctx context.Context) *redisContractAdmission {
@@ -286,11 +303,19 @@ redis.call('PEXPIRE',KEYS[6],90000000)
 return amount
 `
 
+// A call outside a PostgreSQL transaction passes
+// server.OptRedisKeepLateReplies, so that a reply after its deadline does not
+// cost the connection; one inside a transaction keeps its deadline on the
+// socket.
 func redisContractReservation(ctx context.Context, operation string, balanceId, contractId server.Id,
-	credit, requested ByteCount, lease time.Duration) (ByteCount, error) {
+	credit, requested ByteCount, lease time.Duration, options ...any) (ByteCount, error) {
 	bounded, cancel := context.WithTimeout(ctx, redisContractAdmissionTimeout)
 	defer cancel()
 	var amount ByteCount
+	// No preflight PING: neither go-redis nor the deadline pool replays the
+	// script, so a PING of an arbitrary node decides nothing about it. It cost
+	// each reservation, release and recovery a round trip and a pool turn on
+	// that node, and a slow node failed the call there.
 	err := server.RedisWithDeadline(bounded, func(r server.RedisClient) error {
 		value, err := r.Eval(bounded, redisContractReservationScript, redisContractReservationKeys(balanceId),
 			operation, contractId.String(), strconv.FormatInt(credit, 10), strconv.FormatInt(requested, 10), lease.Milliseconds()).Text()
@@ -306,7 +331,7 @@ func redisContractReservation(ctx context.Context, operation string, balanceId, 
 			return fmt.Errorf("invalid reservation response")
 		}
 		return nil
-	})
+	}, append([]any{server.OptRedisNoPreflight()}, options...)...)
 	result := "accepted"
 	if err != nil {
 		result = "error"

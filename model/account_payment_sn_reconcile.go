@@ -49,6 +49,57 @@ const snReconcileEarlyBoundSql = `CASE WHEN NOT EXISTS (SELECT 1 FROM subsidy_pa
 		(SELECT MAX(earlier.create_time) FROM account_payment earlier WHERE earlier.network_id=%[1]s.network_id AND earlier.create_time<%[1]s.create_time
 		AND NOT EXISTS (SELECT 1 FROM subsidy_payment earlier_epoch WHERE earlier_epoch.payment_plan_id=earlier.payment_plan_id))) END`
 
+// A5, A10: how far a contract's id time may run ahead of its close time while
+// the census still reads its sweep as evidence (snReconcileLaterSweepIdBoundSql).
+const snReconcileContractIdMargin = 24 * time.Hour
+
+// A5, A10: the census reads a later row's sweeps only below this contract id:
+// the id floor of the millisecond a margin after the stuck row's creation or
+// the later row's bound, whichever is earlier. It reads `p.create_time` and
+// `later.bound`. The bound is a timestamp in UTC; AT TIME ZONE makes it the
+// timestamptz contractIdFloorSql takes, and the margin has no day part, so the
+// session time zone changes nothing. With an 'infinity' bound or a NULL one,
+// LEAST is the stuck row's creation.
+//
+// The bound is exact: it skips no sweep that is evidence.
+//   - Evidence is a sweep whose contract closed before the stuck row was
+//     created and at or before the later row's bound, so at or before T, the
+//     earlier of the two. A NULL bound admits no sweep.
+//   - A contract id leads with the 48-bit big-endian millisecond its creation
+//     minted it at: connect.NewId writes it into bytes 0-5, and before
+//     2026-06-24 ulid.Make wrote the same. PostgreSQL compares uuids bytewise,
+//     so an id is below the floor of a millisecond exactly when it was minted
+//     in an earlier one.
+//   - server.NewId mints every contract's id before its row is inserted, on
+//     each of the four paths that insert one: createTransferEscrowInTx,
+//     createContractNoEscrowInTx, createZeroEscrowContractInTx and
+//     createRedisTransferEscrowInTx, whose id withRedisContractAdmission
+//     minted (a retry reuses it, minted earlier still). contract_id has no
+//     default. No migration, backfill or import inserts contracts, and the
+//     partition cutover attaches the table without copying a row
+//     (db_contract_partition_cutover.go). No statement updates contract_id,
+//     and the usage guard refuses it once a contract has usage or an outcome
+//     (db_contract_usage_guard.go).
+//   - Every write of close_time is an UPDATE of the inserted row with the
+//     writer's own clock at that moment, clock_timestamp() or server.NowUtc().
+//   - So a contract's id time runs ahead of its close time only by the skew
+//     between the minting clock and the closing one, plus how far connect.NewId
+//     ran ahead of its wall clock after a backward step: it keeps the
+//     millisecond non-decreasing. In a sample of 4,664 contracts the partition
+//     audit found no id more than 60 s from its creation time, the largest
+//     4.8 s (CONTRACT-PARTITION.md).
+//   - Hence a contract that closed at or before T has an id below the bound,
+//     unless its id's millisecond is the margin or more after its close
+//     (TestSnReconcileStuckListingIdBoundBoundary).
+//
+// Creation and epoch times come from real clocks. A '-infinity' bound, or an
+// infinite creation time, has no millisecond: the listing would fail with an
+// error, never return a wrong evidence value.
+var snReconcileLaterSweepIdBoundSql = contractIdFloorSql(fmt.Sprintf(
+	`(LEAST(p.create_time,later.bound) AT TIME ZONE 'UTC') + interval '%d milliseconds'`,
+	snReconcileContractIdMargin.Milliseconds(),
+))
+
 // The sweeps (alias s, contract alias c) of row `%[1]s` that are early against
 // the row's bound `%[2]s`. An unknown close time counts as early.
 const snReconcileEarlySweepsSql = `transfer_escrow_sweep s LEFT JOIN transfer_contract c ON c.contract_id=s.contract_id
@@ -110,26 +161,45 @@ type SnReconcileEvidence struct {
 
 // A5, A10: a stuck row without sweeps has replan evidence when a later row of
 // its network holds a sweep that closed before the stuck row was created and at
-// or before the later row's early bound. A later row holds such a sweep exactly
-// when its earliest contract close does, so that close and the bound are read
-// once per later row (`later_close`), whatever the number of stuck rows of its
-// network, and each stuck row compares its own times with them. Reading every
-// later row's sweeps again for each stuck row took hours where a network holds
-// millions of sweeps.
+// or before the later row's early bound. Each later row's bound is read once
+// (`later_bounds`). Each pair of a stuck row and a later row then reads only the
+// later row's sweeps below the contract id bound (snReconcileLaterSweepIdBoundSql),
+// which skips no evidence, and stops at the first that is evidence.
+//
+// The plan's shape is fixed by the query, not left to the statistics:
+//   - The pair's EXISTS is in the target list of `replan_evidence`, so it runs
+//     once per pair with the pair's values. It is never planned as a join over
+//     every sweep.
+//   - Within it, the only relation is the sweeps, read by their
+//     (payment_id, contract_id) index below the bound. A scalar subquery checks
+//     each sweep's contract by its key; PostgreSQL never makes one a join. As a
+//     join, the fast-start EXISTS was planned in a test database as a merge join
+//     that read every contract for each pair.
+//   - Whether a stuck row holds sweeps is read once (`sweepless`).
+//
+// Reading each later row's earliest contract close instead read every sweep
+// of every later row, with one contract read each: more than 149M sweeps on
+// main, where two dry runs had not finished after 45 minutes and two hours.
 var snReconcileStuckSql = `WITH stuck AS MATERIALIZED (
 	SELECT p.* FROM account_payment p
 	WHERE NOT p.completed AND NOT ` + legacyProviderPaymentReplacedSql("p.payment_id") + ` AND (
 		(p.canceled AND (p.circle_idempotency_key IS NOT NULL OR p.payment_record IS NOT NULL OR p.tx_hash IS NOT NULL)) OR
 		(NOT p.canceled AND p.circle_idempotency_key IS NOT NULL AND p.payment_record IS NULL AND p.tx_hash IS NULL
 		AND NOT EXISTS (SELECT 1 FROM audit_account_payment a WHERE a.event_id=p.circle_idempotency_key)))
-), later_rows AS MATERIALIZED (
-	SELECT DISTINCT later.payment_id,later.payment_plan_id,later.network_id,later.create_time FROM stuck p
-	JOIN account_payment later ON later.network_id=p.network_id AND later.create_time>COALESCE(p.cancel_time,p.create_time)
+), sweepless AS MATERIALIZED (
+	SELECT p.payment_id,p.network_id,p.create_time,p.cancel_time FROM stuck p
 	WHERE NOT EXISTS (SELECT 1 FROM transfer_escrow_sweep s WHERE s.payment_id=p.payment_id)
-), later_close AS MATERIALIZED (
-	SELECT later.network_id,later.create_time,later_bound.bound,
-		(SELECT MIN(c.close_time) FROM transfer_escrow_sweep s JOIN transfer_contract c ON c.contract_id=s.contract_id WHERE s.payment_id=later.payment_id) AS earliest_close
+), later_rows AS MATERIALIZED (
+	SELECT DISTINCT later.payment_id,later.payment_plan_id,later.network_id,later.create_time FROM sweepless p
+	JOIN account_payment later ON later.network_id=p.network_id AND later.create_time>COALESCE(p.cancel_time,p.create_time)
+), later_bounds AS MATERIALIZED (
+	SELECT later.payment_id,later.network_id,later.create_time,later_bound.bound
 	FROM later_rows later CROSS JOIN LATERAL (SELECT ` + fmt.Sprintf(snReconcileEarlyBoundSql, "later") + ` AS bound) later_bound
+), replan_evidence AS MATERIALIZED (
+	SELECT p.payment_id,EXISTS (SELECT 1 FROM transfer_escrow_sweep s
+		WHERE s.payment_id=later.payment_id AND s.contract_id<` + snReconcileLaterSweepIdBoundSql + `
+		AND (SELECT c.close_time<p.create_time AND c.close_time<=later.bound FROM transfer_contract c WHERE c.contract_id=s.contract_id)) AS evidence
+	FROM sweepless p JOIN later_bounds later ON later.network_id=p.network_id AND later.create_time>COALESCE(p.cancel_time,p.create_time)
 )
 	SELECT p.payment_id,p.payment_plan_id,p.network_id,p.wallet_id,p.payout_byte_count,p.payout_nano_cents,
 	p.subsidy_payout_nano_cents,p.reliability_subsidy_nano_cents,p.bonus_payout_nano_cents,p.attribution_review_required,
@@ -140,8 +210,7 @@ var snReconcileStuckSql = `WITH stuck AS MATERIALIZED (
 	EXISTS (SELECT 1 FROM ` + fmt.Sprintf(snReconcileEarlySweepsSql, "p", "eb.bound") + `)
 	OR EXISTS (SELECT 1 FROM account_payment_bonus b WHERE b.payment_id=p.payment_id AND b.origin_payment_id<>p.payment_id),
 	CASE WHEN EXISTS (SELECT 1 FROM transfer_escrow_sweep s WHERE s.payment_id=p.payment_id) THEN false ELSE EXISTS (
-		SELECT 1 FROM later_close later WHERE later.network_id=p.network_id AND later.create_time>COALESCE(p.cancel_time,p.create_time)
-		AND later.earliest_close<p.create_time AND later.earliest_close<=later.bound) END,
+		SELECT 1 FROM replan_evidence r WHERE r.payment_id=p.payment_id AND r.evidence) END,
 	CASE WHEN EXISTS (SELECT 1 FROM transfer_escrow_sweep s WHERE s.payment_id=p.payment_id) THEN false ELSE EXISTS (
 		SELECT 1 FROM account_payment later WHERE later.network_id=p.network_id
 		AND later.create_time>COALESCE(p.cancel_time,p.create_time) AND later.create_time<=$1) END

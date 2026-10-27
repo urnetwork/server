@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
 )
@@ -25,9 +26,16 @@ func winnerModelFixture() (winnerReviewBrokerRequest, winnerModelJudgment) {
 	sourceDigest := sha256.Sum256([]byte(source))
 	patchDigest, scoreDigest := sha256.Sum256(patch), sha256.Sum256(score)
 	template.PatchSha256, template.ScoreSha256 = hex.EncodeToString(patchDigest[:]), hex.EncodeToString(scoreDigest[:])
+	roundId, sealSha256 := server.Id{0: 23, 15: 2}, strings.Repeat("1", 64)
 	request := winnerReviewBrokerRequest{Operation: "review_elected_winner", Template: template,
-		Request: controller.CompetitionWinnerReviewRequest{Policy: policy, ReviewerModel: model.CompetitionWinnerReviewModel, ReviewerReasoning: model.CompetitionWinnerReviewReasoning},
+		Request: controller.CompetitionWinnerReviewRequest{RoundId: roundId, JobId: template.JobId, SealSha256: sealSha256,
+			RewardRevision: template.ExpectedRevision, RewardDecisionSha256: template.ExpectedDecisionSha256, CriteriaVersion: template.CriteriaVersion,
+			Policy: policy, ReviewerModel: model.CompetitionWinnerReviewModel, ReviewerReasoning: model.CompetitionWinnerReviewReasoning},
 		Packet: &controller.CompetitionSourceReviewPacket{Patch: patch, Score: score,
+			RewardRevision: template.ExpectedRevision, ReviewCriteriaVersion: template.CriteriaVersion,
+			Seal: model.CompetitionEvaluationSeal{RoundId: roundId, SealSha256: sealSha256, BaselineSha256: template.BaselineSha256},
+			Entry: model.CompetitionSealedEntry{JobId: template.JobId, State: "succeeded", Eligible: true,
+				PatchSha256: template.PatchSha256, ScoreSha256: template.ScoreSha256, BaseSourceLockSha256: template.BaseSourceLockSha256, ArtifactManifestSha256: template.ArtifactManifestSha256},
 			PatchPolicy: controller.PatchPolicy{MaxPatchBytes: 4096, AllowedPaths: []string{"connect/example.go"}}},
 		SourceFiles: []winnerReviewSourceFile{{Path: "connect/example.go", Sha256: hex.EncodeToString(sourceDigest[:]), Content: source}}}
 	return request, winnerModelJudgment{Decision: "approve", ReasonCodes: result.Review.ReasonCodes,
@@ -188,8 +196,10 @@ func TestWinnerReviewModelAuthenticatesCompleteMonoRootSourceMap(t *testing.T) {
 		t.Fatal(err)
 	}
 	request.Template.BaseSourceLockSha256 = lock
+	request.Packet.Entry.BaseSourceLockSha256 = lock
 	patchDigest := sha256.Sum256(request.Packet.Patch)
 	request.Template.PatchSha256 = hex.EncodeToString(patchDigest[:])
+	request.Packet.Entry.PatchSha256 = request.Template.PatchSha256
 	if _, err := winnerModelInput(request); err != nil {
 		t.Fatal("complete mono-root context was refused:", err)
 	}

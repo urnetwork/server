@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -42,6 +43,84 @@ var snReconcileStuckReferenceSql = `SELECT p.payment_id,p.payment_plan_id,p.netw
 		AND NOT EXISTS (SELECT 1 FROM audit_account_payment a WHERE a.event_id=p.circle_idempotency_key)))
 	ORDER BY p.create_time,p.payment_id`
 
+// The listing as it read through 2026-10-27: each later row's earliest
+// contract close was read once, over every sweep of the row. Kept verbatim as
+// the reference the id-bounded listing must match row for row.
+var snReconcileStuckEarliestCloseReferenceSql = `WITH stuck AS MATERIALIZED (
+	SELECT p.* FROM account_payment p
+	WHERE NOT p.completed AND NOT ` + legacyProviderPaymentReplacedSql("p.payment_id") + ` AND (
+		(p.canceled AND (p.circle_idempotency_key IS NOT NULL OR p.payment_record IS NOT NULL OR p.tx_hash IS NOT NULL)) OR
+		(NOT p.canceled AND p.circle_idempotency_key IS NOT NULL AND p.payment_record IS NULL AND p.tx_hash IS NULL
+		AND NOT EXISTS (SELECT 1 FROM audit_account_payment a WHERE a.event_id=p.circle_idempotency_key)))
+), later_rows AS MATERIALIZED (
+	SELECT DISTINCT later.payment_id,later.payment_plan_id,later.network_id,later.create_time FROM stuck p
+	JOIN account_payment later ON later.network_id=p.network_id AND later.create_time>COALESCE(p.cancel_time,p.create_time)
+	WHERE NOT EXISTS (SELECT 1 FROM transfer_escrow_sweep s WHERE s.payment_id=p.payment_id)
+), later_close AS MATERIALIZED (
+	SELECT later.network_id,later.create_time,later_bound.bound,
+		(SELECT MIN(c.close_time) FROM transfer_escrow_sweep s JOIN transfer_contract c ON c.contract_id=s.contract_id WHERE s.payment_id=later.payment_id) AS earliest_close
+	FROM later_rows later CROSS JOIN LATERAL (SELECT ` + fmt.Sprintf(snReconcileEarlyBoundSql, "later") + ` AS bound) later_bound
+)
+	SELECT p.payment_id,p.payment_plan_id,p.network_id,p.wallet_id,p.payout_byte_count,p.payout_nano_cents,
+	p.subsidy_payout_nano_cents,p.reliability_subsidy_nano_cents,p.bonus_payout_nano_cents,p.attribution_review_required,
+	p.create_time,p.canceled,p.cancel_time,p.circle_idempotency_key,p.payment_record,p.tx_hash,p.token_type,p.token_amount,
+	p.payment_time,p.payment_receipt,pinned.wallet_address,payout.wallet_id,payout.wallet_address,payout.blockchain,
+	COALESCE(payout.active,false),(SELECT COUNT(*) FROM transfer_escrow_sweep s WHERE s.payment_id=p.payment_id),
+	(SELECT MIN(c.close_time) FROM transfer_escrow_sweep s JOIN transfer_contract c ON c.contract_id=s.contract_id WHERE s.payment_id=p.payment_id),
+	EXISTS (SELECT 1 FROM ` + fmt.Sprintf(snReconcileEarlySweepsSql, "p", "eb.bound") + `)
+	OR EXISTS (SELECT 1 FROM account_payment_bonus b WHERE b.payment_id=p.payment_id AND b.origin_payment_id<>p.payment_id),
+	CASE WHEN EXISTS (SELECT 1 FROM transfer_escrow_sweep s WHERE s.payment_id=p.payment_id) THEN false ELSE EXISTS (
+		SELECT 1 FROM later_close later WHERE later.network_id=p.network_id AND later.create_time>COALESCE(p.cancel_time,p.create_time)
+		AND later.earliest_close<p.create_time AND later.earliest_close<=later.bound) END,
+	CASE WHEN EXISTS (SELECT 1 FROM transfer_escrow_sweep s WHERE s.payment_id=p.payment_id) THEN false ELSE EXISTS (
+		SELECT 1 FROM account_payment later WHERE later.network_id=p.network_id
+		AND later.create_time>COALESCE(p.cancel_time,p.create_time) AND later.create_time<=$1) END
+	FROM stuck p
+	CROSS JOIN LATERAL (SELECT ` + fmt.Sprintf(snReconcileEarlyBoundSql, "p") + ` AS bound) eb
+	LEFT JOIN account_wallet pinned ON pinned.wallet_id=p.wallet_id
+	LEFT JOIN payout_wallet pw ON pw.network_id=p.network_id
+	LEFT JOIN account_wallet payout ON payout.wallet_id=pw.wallet_id AND payout.network_id=p.network_id
+	ORDER BY p.create_time,p.payment_id`
+
+// The listing returns every column of every row exactly as both references do.
+func snReconcileTestRequireReferenceListing(t testing.TB, ctx context.Context) {
+	t.Helper()
+	got := snReconcileTestListing(t, ctx, snReconcileStuckSql)
+	for name, sql := range map[string]string{"per-row": snReconcileStuckReferenceSql, "earliest-close": snReconcileStuckEarliestCloseReferenceSql} {
+		want := snReconcileTestListing(t, ctx, sql)
+		if len(got) != len(want) {
+			t.Fatalf("listing has %d rows, the %s reference %d", len(got), name, len(want))
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("row %d differs from the %s reference:\n got %s\nwant %s", i, name, got[i], want[i])
+			}
+		}
+	}
+}
+
+// A5: each listed row's replan evidence as `sql` reads it.
+func snReconcileTestReplanEvidence(t testing.TB, ctx context.Context, sql string) map[server.Id]bool {
+	t.Helper()
+	evidence := map[server.Id]bool{}
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(ctx, `SELECT l.payment_id,l.replan_evidence FROM (`+sql+`) l(payment_id,payment_plan_id,network_id,wallet_id,payout_byte_count,
+			payout_nano_cents,subsidy_payout_nano_cents,reliability_subsidy_nano_cents,bonus_payout_nano_cents,attribution_review_required,create_time,canceled,
+			cancel_time,circle_idempotency_key,payment_record,tx_hash,token_type,token_amount,payment_time,payment_receipt,pinned_wallet_address,payout_wallet_id,
+			payout_wallet_address,payout_wallet_blockchain,payout_wallet_active,sweep_count,earliest_close,early_earnings,replan_evidence,replanned_before_fix)`,
+			SnReconcileReplanFixTime)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var paymentId server.Id
+				var replanEvidence bool
+				server.Raise(result.Scan(&paymentId, &replanEvidence))
+				evidence[paymentId] = replanEvidence
+			}
+		})
+	})
+	return evidence
+}
+
 // Every column of every listed row, in order, as text.
 func snReconcileTestListing(t testing.TB, ctx context.Context, sql string) []string {
 	t.Helper()
@@ -63,17 +142,13 @@ func snReconcileTestListing(t testing.TB, ctx context.Context, sql string) []str
 	return rows
 }
 
-// The sweep rows a listing joined to their contracts, over every loop: the
-// sweep rows of each join whose inputs also read transfer_contract, counted at
-// the innermost such join. That join is the listing's cost on main, one
-// contract read per sweep. A subplan or CTE is a query of its own, so a scan
-// of sweeps alone, such as the hashed check whether a row holds sweeps that a
-// small table invites, is not counted.
-func snReconcileTestSweepsJoinedToContracts(t testing.TB, ctx context.Context, sql string) (joined float64) {
+// The root of the plan EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ran for the
+// listing `sql`.
+func snReconcileTestAnalyzedPlan(t testing.TB, ctx context.Context, sql string) map[string]any {
 	t.Helper()
 	var plan string
 	server.Db(ctx, func(conn server.PgConn) {
-		server.Raise(conn.QueryRow(ctx, `EXPLAIN (ANALYZE, FORMAT JSON) `+sql, SnReconcileReplanFixTime).Scan(&plan))
+		server.Raise(conn.QueryRow(ctx, `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) `+sql, SnReconcileReplanFixTime).Scan(&plan))
 	})
 	var explained []struct {
 		Plan map[string]any `json:"Plan"`
@@ -81,41 +156,99 @@ func snReconcileTestSweepsJoinedToContracts(t testing.TB, ctx context.Context, s
 	if err := json.Unmarshal([]byte(plan), &explained); err != nil || len(explained) != 1 {
 		t.Fatal("explain", err, plan)
 	}
-	// the sweep rows of the subtree not yet counted, and whether it reads contracts
-	var visit func(node map[string]any) (float64, bool)
-	visit = func(node map[string]any) (sweeps float64, contracts bool) {
-		switch node["Relation Name"] {
-		case "transfer_escrow_sweep":
-			sweeps = node["Actual Rows"].(float64) * node["Actual Loops"].(float64)
-		case "transfer_contract":
-			contracts = true
+	return explained[0].Plan
+}
+
+// The listing `sql`'s plan as text, for a failure message.
+func snReconcileTestPlanText(t testing.TB, ctx context.Context, sql string) string {
+	t.Helper()
+	lines := []string{}
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(ctx, `EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF) `+sql, SnReconcileReplanFixTime)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var line string
+				server.Raise(result.Scan(&line))
+				lines = append(lines, line)
+			}
+		})
+	})
+	return strings.Join(lines, "\n")
+}
+
+// The rows a scan returned and the rows its filters removed, over every loop.
+// EXPLAIN shows each per loop and rounded, so the total is exact when every
+// loop of the scan reads the same number of rows.
+func snReconcileTestRowsRead(node map[string]any) float64 {
+	perLoop := 0.0
+	for _, key := range []string{"Actual Rows", "Rows Removed by Filter", "Rows Removed by Index Recheck"} {
+		value, _ := node[key].(float64)
+		perLoop += value
+	}
+	loops, _ := node["Actual Loops"].(float64)
+	return perLoop * loops
+}
+
+// Whether a plan node or any node below it reads transfer_contract.
+func snReconcileTestReadsContracts(node map[string]any) bool {
+	if node["Relation Name"] == "transfer_contract" {
+		return true
+	}
+	children, _ := node["Plans"].([]any)
+	for _, child := range children {
+		if snReconcileTestReadsContracts(child.(map[string]any)) {
+			return true
+		}
+	}
+	return false
+}
+
+// The transfer_contract rows a plan read, over every loop and every scan of
+// the table. Reading one contract per sweep was the listing's cost on main.
+func snReconcileTestContractRowsRead(plan map[string]any) float64 {
+	var visit func(node map[string]any) float64
+	visit = func(node map[string]any) (read float64) {
+		if node["Relation Name"] == "transfer_contract" {
+			read += snReconcileTestRowsRead(node)
 		}
 		children, _ := node["Plans"].([]any)
-		for _, value := range children {
-			child := value.(map[string]any)
-			childSweeps, childContracts := visit(child)
-			if relationship := child["Parent Relationship"]; relationship == "SubPlan" || relationship == "InitPlan" {
-				continue
-			}
-			sweeps += childSweeps
-			contracts = contracts || childContracts
-		}
-		nodeType, _ := node["Node Type"].(string)
-		if contracts && (nodeType == "Nested Loop" || strings.HasSuffix(nodeType, " Join")) {
-			joined += sweeps
-			sweeps = 0
+		for _, child := range children {
+			read += visit(child.(map[string]any))
 		}
 		return
 	}
-	visit(explained[0].Plan)
-	return
+	return math.Round(visit(plan))
+}
+
+// The sweep rows a plan read to check their contracts, over every loop: the
+// rows read by each scan of transfer_escrow_sweep whose subplan reads
+// transfer_contract.
+func snReconcileTestSweepRowsProbed(plan map[string]any) float64 {
+	var visit func(node map[string]any) float64
+	visit = func(node map[string]any) (probed float64) {
+		children, _ := node["Plans"].([]any)
+		if node["Relation Name"] == "transfer_escrow_sweep" {
+			for _, value := range children {
+				if child := value.(map[string]any); child["Parent Relationship"] == "SubPlan" && snReconcileTestReadsContracts(child) {
+					probed += snReconcileTestRowsRead(node)
+					break
+				}
+			}
+		}
+		for _, child := range children {
+			probed += visit(child.(map[string]any))
+		}
+		return
+	}
+	return math.Round(visit(plan))
 }
 
 // A5, A10, A8, RC-1, RC-2 and RC-22: the listing returns every column of every
-// row exactly as the per-row listing did, over each way a row is listed or
-// left out and each way a later row bears on its evidence. A later row's
-// earliest close lying between two stuck rows' creations is the case the
-// shared read must keep apart.
+// row exactly as the per-row and earliest-close listings did, over each way a
+// row is listed or left out and each way a later row bears on its evidence. A
+// later row's earliest close lying between two stuck rows' creations is the
+// case a shared read must keep apart. Every contract id is minted at the
+// contract's creation, as connect.NewId mints it.
 func TestSnReconcileStuckListingMatchesReference(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -123,7 +256,7 @@ func TestSnReconcileStuckListingMatchesReference(t *testing.T) {
 		july := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
 		sept := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
 		closedAt := func(cohort *payoutTransitionCohort, at time.Time) server.Id {
-			return cohort.insert(t, ctx, at.Add(-time.Hour), &at, at, 10, UsdToNanoCents(1))
+			return cohort.insertMinted(t, ctx, at.Add(-time.Hour), &at, at, 10, UsdToNanoCents(1))
 		}
 		payment := func(cohort *payoutTransitionCohort, at time.Time, contracts ...server.Id) server.Id {
 			return snReconcileTestPayment(t, ctx, cohort.network, nil, at, contracts...)
@@ -193,9 +326,9 @@ func TestSnReconcileStuckListingMatchesReference(t *testing.T) {
 		unclosed := payment(f, sept.Add(day))
 		snReconcileTestEpoch(t, ctx, unclosed, sept.Add(-30*day))
 		cancelWithRecord(unclosed, sept.Add(2*day))
-		unclosedLater := payment(f, sept.Add(10*day), f.insert(t, ctx, sept.Add(-6*day), nil, sept.Add(-5*day), 10, UsdToNanoCents(1)))
+		unclosedLater := payment(f, sept.Add(10*day), f.insertMinted(t, ctx, sept.Add(-6*day), nil, sept.Add(-5*day), 10, UsdToNanoCents(1)))
 		snReconcileTestExec(t, ctx, `INSERT INTO transfer_escrow_sweep(contract_id,balance_id,network_id,destination_id,payout_byte_count,payout_net_revenue_nano_cents,sweep_time,payment_id)
-			VALUES($1,$2,$3,$4,10,1,$5,$6)`, server.NewId(), f.balance, f.network, f.client, sept.Add(-5*day), unclosedLater)
+			VALUES($1,$2,$3,$4,10,1,$5,$6)`, contractIdMintedAt(sept.Add(-6*day)), f.balance, f.network, f.client, sept.Add(-5*day), unclosedLater)
 
 		// Only a row created before the cancellation, and a row of another
 		// network, hold early sweeps.
@@ -251,15 +384,7 @@ func TestSnReconcileStuckListingMatchesReference(t *testing.T) {
 		reserveKey(inFlight)
 		snReconcileTestExec(t, ctx, `UPDATE account_payment SET payment_record='in-flight' WHERE payment_id=$1`, inFlight)
 
-		got, want := snReconcileTestListing(t, ctx, snReconcileStuckSql), snReconcileTestListing(t, ctx, snReconcileStuckReferenceSql)
-		if len(got) != len(want) {
-			t.Fatalf("listing has %d rows, the reference %d", len(got), len(want))
-		}
-		for i := range want {
-			if got[i] != want[i] {
-				t.Fatalf("row %d differs:\n got %s\nwant %s", i, got[i], want[i])
-			}
-		}
+		snReconcileTestRequireReferenceListing(t, ctx)
 
 		// The fixture reaches every branch it claims to.
 		rows := snReconcileTestStuckById(t, ctx)
@@ -288,30 +413,238 @@ func TestSnReconcileStuckListingMatchesReference(t *testing.T) {
 	})
 }
 
-// A5, A10: the listing reads each later row's sweeps once, however many stuck
-// rows its network holds. Six stuck rows without sweeps share one later row of
-// 60 sweeps that closed before any of them was created, all after the later
-// row's own epoch started, so none is evidence: the per-row listing joined
-// every one of those sweeps to its contract again for each stuck row.
-func TestSnReconcileStuckListingReadsLaterSweepsOnce(t *testing.T) {
+// A5, A10: the listing reads a later row's sweeps only below the contract id
+// bound (snReconcileLaterSweepIdBoundSql), and returns every column of every
+// row exactly as the per-row and earliest-close listings did, over each case
+// the bound must keep: a sweep that closed at its later row's bound, from the
+// epoch's start, before the stuck row was created; one that closed a
+// millisecond after the bound; a contract that never closed and a sweep without
+// a contract; a later row without an epoch, whose bound is 'infinity', with a
+// sweep that closed a millisecond before the stuck row was created and one
+// that closed when it was; a bound raised by an earlier row without an epoch;
+// two later rows of which only the second holds the early sweep; and a
+// contract whose id ran ahead of its close by a millisecond less than the
+// margin.
+func TestSnReconcileStuckListingIdBoundMatchesReference(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
+		day := 24 * time.Hour
+		sept := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+		created := sept.Add(day)
+		bound := sept.Add(-10 * day)
+		// A settled contract created an hour before it closed at `closed`, with
+		// its id minted at `minted`.
+		mintedAt := func(cohort *payoutTransitionCohort, minted time.Time, closed time.Time) server.Id {
+			return cohort.insertWithId(t, ctx, contractIdMintedAt(minted), closed.Add(-time.Hour), &closed, closed, 10, UsdToNanoCents(1))
+		}
+		closedAt := func(cohort *payoutTransitionCohort, closed time.Time) server.Id {
+			return mintedAt(cohort, closed.Add(-time.Hour), closed)
+		}
+		payment := func(cohort *payoutTransitionCohort, at time.Time, contracts ...server.Id) server.Id {
+			return snReconcileTestPayment(t, ctx, cohort.network, nil, at, contracts...)
+		}
+		// A row created at `at` whose plan's epoch started at `epoch`.
+		planned := func(cohort *payoutTransitionCohort, at time.Time, epoch time.Time, contracts ...server.Id) server.Id {
+			paymentId := payment(cohort, at, contracts...)
+			snReconcileTestEpoch(t, ctx, paymentId, epoch)
+			return paymentId
+		}
+		// A stuck row without sweeps, created at `created` and canceled with a
+		// record a day later. Its own epoch raises no later row's bound.
+		stuck := func(cohort *payoutTransitionCohort) server.Id {
+			paymentId := planned(cohort, created, sept.Add(-30*day))
+			snReconcileTestExec(t, ctx, `UPDATE account_payment SET canceled=true,cancel_time=$2,payment_record='record-'||payment_id WHERE payment_id=$1`, paymentId, created.Add(day))
+			return paymentId
+		}
+
+		// The later row's epoch started at the bound, when its early sweep closed.
+		a := newPayoutTransitionCohort(t, ctx)
+		atBound := stuck(a)
+		planned(a, sept.Add(10*day), bound, closedAt(a, bound), closedAt(a, bound.Add(5*day)))
+
+		// Its sweep closed a millisecond after the bound.
+		b := newPayoutTransitionCohort(t, ctx)
+		afterBound := stuck(b)
+		planned(b, sept.Add(10*day), bound, closedAt(b, bound.Add(time.Millisecond)), closedAt(b, bound.Add(5*day)))
+
+		// The later row's contract never closed, and another sweep has no contract.
+		c := newPayoutTransitionCohort(t, ctx)
+		unclosed := stuck(c)
+		unclosedLater := planned(c, sept.Add(10*day), bound, c.insertMinted(t, ctx, bound.Add(-2*day), nil, bound.Add(-day), 10, UsdToNanoCents(1)))
+		snReconcileTestExec(t, ctx, `INSERT INTO transfer_escrow_sweep(contract_id,balance_id,network_id,destination_id,payout_byte_count,payout_net_revenue_nano_cents,sweep_time,payment_id)
+			VALUES($1,$2,$3,$4,10,1,$5,$6)`, contractIdMintedAt(bound.Add(-2*day)), c.balance, c.network, c.client, bound.Add(-day), unclosedLater)
+
+		// The later row's plan recorded no epoch, so its bound is 'infinity' and
+		// the stuck row's creation bounds the read.
+		d, dAt := newPayoutTransitionCohort(t, ctx), newPayoutTransitionCohort(t, ctx)
+		withoutEpoch := stuck(d)
+		payment(d, sept.Add(10*day), closedAt(d, created.Add(-time.Millisecond)))
+		withoutEpochAtCreation := stuck(dAt)
+		payment(dAt, sept.Add(10*day), closedAt(dAt, created))
+
+		// An earlier row without an epoch raises the later row's bound from its
+		// epoch's start to that row's creation, when the sweep closed.
+		e := newPayoutTransitionCohort(t, ctx)
+		raised := stuck(e)
+		payment(e, sept.Add(-3*day))
+		planned(e, sept.Add(10*day), sept.Add(-20*day), closedAt(e, sept.Add(-3*day)))
+
+		// Of two later rows only the second holds the early sweep. The first holds
+		// one created within a day after its bound, so read, that closed after it.
+		g := newPayoutTransitionCohort(t, ctx)
+		secondLater := stuck(g)
+		planned(g, sept.Add(10*day), bound, closedAt(g, bound.Add(2*time.Hour)), closedAt(g, bound.Add(5*day)))
+		planned(g, sept.Add(20*day), sept.Add(10*day), closedAt(g, bound.Add(12*time.Hour)), closedAt(g, sept.Add(15*day)))
+
+		// The early sweep's contract id ran a millisecond less than the margin
+		// ahead of its close, at the bound.
+		h := newPayoutTransitionCohort(t, ctx)
+		ahead := stuck(h)
+		planned(h, sept.Add(10*day), bound, mintedAt(h, bound.Add(snReconcileContractIdMargin-time.Millisecond), bound))
+
+		snReconcileTestRequireReferenceListing(t, ctx)
+		rows := snReconcileTestStuckById(t, ctx)
+		for paymentId, want := range map[server.Id]bool{atBound: true, afterBound: false, unclosed: false, withoutEpoch: true,
+			withoutEpochAtCreation: false, raised: true, secondLater: true, ahead: true} {
+			if rows[paymentId] == nil || rows[paymentId].ReplanEvidence != want || rows[paymentId].ReplannedBeforeFix {
+				t.Fatal("replan evidence", paymentId, rows[paymentId], want)
+			}
+		}
+	})
+}
+
+// A5, A10: the documented boundary of the contract id bound. Each stuck row's
+// later row holds one sweep that closed at the later row's bound, before the
+// stuck row was created, so the listing reads ids below the floor of the
+// bound plus the margin. A sweep whose contract id ran ahead of its close by
+// the margin, or by more, is not read: the listing finds no evidence where
+// both references find it. One that ran a millisecond less ahead is read.
+func TestSnReconcileStuckListingIdBoundBoundary(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		day := 24 * time.Hour
+		sept := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+		bound := sept.Add(-10 * day)
+		holder := func(ahead time.Duration) server.Id {
+			cohort := newPayoutTransitionCohort(t, ctx)
+			paymentId := snReconcileTestPayment(t, ctx, cohort.network, nil, sept.Add(day))
+			snReconcileTestEpoch(t, ctx, paymentId, sept.Add(-30*day))
+			snReconcileTestExec(t, ctx, `UPDATE account_payment SET canceled=true,cancel_time=$2,payment_record='record-'||payment_id WHERE payment_id=$1`, paymentId, sept.Add(2*day))
+			contractId := cohort.insertWithId(t, ctx, contractIdMintedAt(bound.Add(ahead)), bound.Add(-time.Hour), &bound, bound, 10, UsdToNanoCents(1))
+			later := snReconcileTestPayment(t, ctx, cohort.network, nil, sept.Add(10*day), contractId)
+			snReconcileTestEpoch(t, ctx, later, bound)
+			return paymentId
+		}
+		inside := holder(snReconcileContractIdMargin - time.Millisecond)
+		atMargin := holder(snReconcileContractIdMargin)
+		beyond := holder(snReconcileContractIdMargin + time.Hour)
+
+		for name, sql := range map[string]string{"per-row": snReconcileStuckReferenceSql, "earliest-close": snReconcileStuckEarliestCloseReferenceSql} {
+			reference := snReconcileTestReplanEvidence(t, ctx, sql)
+			if !reference[inside] || !reference[atMargin] || !reference[beyond] {
+				t.Fatal("the "+name+" reference's evidence", reference[inside], reference[atMargin], reference[beyond])
+			}
+		}
+		listed := snReconcileTestReplanEvidence(t, ctx, snReconcileStuckSql)
+		if !listed[inside] || listed[atMargin] || listed[beyond] {
+			t.Fatal("the listing's evidence across the boundary", listed[inside], listed[atMargin], listed[beyond])
+		}
+	})
+}
+
+// A5, A10: the bound is the id floor of the millisecond a margin after the
+// earlier of the stuck row's creation and the later row's bound, in UTC
+// whatever the session time zone. An 'infinity' bound or a NULL one leaves the
+// stuck row's creation.
+func TestSnReconcileLaterSweepIdBound(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		created := time.Date(2026, 9, 1, 12, 30, 15, 987654000, time.UTC)
+		earlier := created.Add(-10*24*time.Hour + 500*time.Microsecond)
+		text := func(at time.Time) *string {
+			value := at.Format("2006-01-02 15:04:05.999999")
+			return &value
+		}
+		infinity := "infinity"
+		for _, test := range []struct {
+			bound *string
+			want  time.Time
+		}{
+			{bound: text(earlier), want: earlier},
+			{bound: text(created), want: created},
+			{bound: text(created.Add(time.Hour)), want: created},
+			{bound: &infinity, want: created},
+			{bound: nil, want: created},
+		} {
+			for _, timeZone := range []string{"UTC", "America/Chicago"} {
+				var bound server.Id
+				server.Tx(ctx, func(tx server.PgTx) {
+					server.RaisePgResult(tx.Exec(ctx, fmt.Sprintf(`SET LOCAL TIME ZONE '%s'`, timeZone)))
+					server.Raise(tx.QueryRow(ctx, `SELECT `+snReconcileLaterSweepIdBoundSql+`
+						FROM (SELECT $1::timestamp AS create_time) p, (SELECT $2::text::timestamp AS bound) later`, created, test.bound).Scan(&bound))
+				})
+				if want := ContractIdTimeBound(test.want.Add(snReconcileContractIdMargin)); bound != want {
+					t.Fatalf("%s: bound %v gives %s, want %s", timeZone, test.bound, bound, want)
+				}
+			}
+		}
+	})
+}
+
+// A5, A10: the listing reads a later row's sweeps only below the contract id
+// bound, so the size of the later row does not matter. Three stuck rows
+// without sweeps, created an hour apart from `start` and canceled a day after
+// it, share one later row whose plan's epoch started 20 days before `start`:
+// its bound. 50,000 of its sweeps are of contracts created from two days
+// after the bound, which closed after the bound and before any stuck row was
+// created: on main most of a later row's sweeps lie between the two. Five more
+// are of contracts created within a day after the bound, which also closed
+// after it. None is evidence. 2,000 sweeps of other payments give the
+// statistics main has, where a payment holds few of the sweeps. The listing
+// reads the five sweeps and their contracts once per stuck row, 15 of each;
+// the earliest-close listing read a contract for each of the 50,005.
+func TestSnReconcileStuckListingReadsLaterSweepsBelowIdBound(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		day := 24 * time.Hour
 		f := newPayoutTransitionCohort(t, ctx)
 		start := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
-		const stuckCount, sweepCount = 6, 60
+		epoch := start.Add(-20 * day)
+		const stuckCount, inRangeCount, pastCount, otherCount = 3, 5, 50000, 2000
 		for i := range stuckCount {
 			paymentId := snReconcileTestPayment(t, ctx, f.network, nil, start.Add(time.Duration(i)*time.Hour))
 			// an epoch of its own, so the stuck row raises no later bound
-			snReconcileTestEpoch(t, ctx, paymentId, start.Add(-30*24*time.Hour))
-			snReconcileTestExec(t, ctx, `UPDATE account_payment SET canceled=true,cancel_time=create_time,payment_record='record-'||payment_id WHERE payment_id=$1`, paymentId)
+			snReconcileTestEpoch(t, ctx, paymentId, start.Add(-30*day))
+			// canceled after every stuck row was created, so none is later than another
+			snReconcileTestExec(t, ctx, `UPDATE account_payment SET canceled=true,cancel_time=$2,payment_record='record-'||payment_id WHERE payment_id=$1`, paymentId, start.Add(day))
 		}
 		contracts := []server.Id{}
-		for i := range sweepCount {
-			closed := start.Add(-5*24*time.Hour + time.Duration(i)*time.Minute)
-			contracts = append(contracts, f.insert(t, ctx, closed.Add(-time.Hour), &closed, closed, 10, UsdToNanoCents(1)))
+		for i := range inRangeCount {
+			created := epoch.Add(time.Duration(i+1) * time.Hour)
+			closed := created.Add(time.Hour)
+			contracts = append(contracts, f.insertMinted(t, ctx, created, &closed, closed, 10, UsdToNanoCents(1)))
 		}
-		later := snReconcileTestPayment(t, ctx, f.network, nil, start.Add(48*time.Hour), contracts...)
-		snReconcileTestEpoch(t, ctx, later, start.Add(-10*24*time.Hour))
+		later := snReconcileTestPayment(t, ctx, f.network, nil, start.Add(2*day), contracts...)
+		snReconcileTestEpoch(t, ctx, later, epoch)
+		// One contract every 30 seconds, each minted at its creation and closed an
+		// hour after it. The last closes about 14 hours before `start`.
+		usage := &contractUsageSnapshot{Version: 1, ByteCount: 10, Providers: []contractProviderUsage{{ClientId: f.client, NetworkId: f.network, ByteCount: 10}}}
+		snReconcileTestExec(t, ctx, `WITH minted AS (
+				INSERT INTO transfer_contract(contract_id,source_network_id,source_id,destination_network_id,destination_id,transfer_byte_count,create_time,close_time,outcome,provider_usage,usage_origin_is_source)
+				SELECT (lpad(to_hex(floor(extract(epoch FROM created AT TIME ZONE 'UTC')*1000)::bigint),12,'0')||lpad(to_hex(n),20,'0'))::uuid,
+					$1,$2,$3,$4,10,created,created+interval '1 hour','settled',$5,true
+				FROM (SELECT n,$6::timestamp+n*interval '30 seconds' AS created FROM generate_series(0,$7::int-1) n) contract
+				RETURNING contract_id,close_time
+			)
+			INSERT INTO transfer_escrow_sweep(contract_id,balance_id,network_id,destination_id,payout_byte_count,payout_net_revenue_nano_cents,sweep_time,payment_id)
+			SELECT contract_id,$8,$3,$4,10,1,close_time,$9 FROM minted`,
+			f.sourceNetwork, f.source, f.network, f.client, usage, epoch.Add(2*day), pastCount, f.balance, later)
+		// one sweep each of other payments, with ids minted over the same days
+		snReconcileTestExec(t, ctx, `INSERT INTO transfer_escrow_sweep(contract_id,balance_id,network_id,destination_id,payout_byte_count,payout_net_revenue_nano_cents,sweep_time,payment_id)
+			SELECT (lpad(to_hex(floor(extract(epoch FROM swept AT TIME ZONE 'UTC')*1000)::bigint),12,'0')||'ffff'||lpad(to_hex(n),16,'0'))::uuid,$1,$2,$3,10,1,swept,gen_random_uuid()
+			FROM (SELECT n,$4::timestamp+n*interval '10 minutes' AS swept FROM generate_series(0,$5::int-1) n) other`,
+			f.balance, f.network, f.client, epoch, otherCount)
+		snReconcileTestExec(t, ctx, `ANALYZE transfer_contract,transfer_escrow_sweep,account_payment,subsidy_payment`)
 
 		rows := snReconcileTestStuck(t, ctx)
 		if len(rows) != stuckCount {
@@ -322,23 +655,19 @@ func TestSnReconcileStuckListingReadsLaterSweepsOnce(t *testing.T) {
 				t.Fatal("a stuck row has evidence", row)
 			}
 		}
-		plan := func(options string) string {
-			lines := []string{}
-			server.Db(ctx, func(conn server.PgConn) {
-				result, err := conn.Query(ctx, `EXPLAIN (`+options+`) `+snReconcileStuckSql, SnReconcileReplanFixTime)
-				server.WithPgResult(result, err, func() {
-					for result.Next() {
-						var line string
-						server.Raise(result.Scan(&line))
-						lines = append(lines, line)
-					}
-				})
-			})
-			return strings.Join(lines, "\n")
+		got, want := snReconcileTestListing(t, ctx, snReconcileStuckSql), snReconcileTestListing(t, ctx, snReconcileStuckEarliestCloseReferenceSql)
+		if strings.Join(got, "\n") != strings.Join(want, "\n") {
+			t.Fatalf("the listing differs from the earliest-close reference:\n got %s\nwant %s", got, want)
 		}
-		if joined := snReconcileTestSweepsJoinedToContracts(t, ctx, snReconcileStuckSql); joined != sweepCount {
-			t.Fatalf("the listing joined %v sweep rows to their contracts for one later row of %d:\n%s", joined, sweepCount, plan("ANALYZE, COSTS OFF, TIMING OFF"))
+		if read := snReconcileTestContractRowsRead(snReconcileTestAnalyzedPlan(t, ctx, snReconcileStuckEarliestCloseReferenceSql)); read < inRangeCount+pastCount {
+			t.Fatalf("the earliest-close listing read %v contract rows, fewer than the later row's %d sweeps", read, inRangeCount+pastCount)
 		}
-		t.Log("plan:\n" + plan("COSTS OFF"))
+		plan := snReconcileTestAnalyzedPlan(t, ctx, snReconcileStuckSql)
+		probed, read := snReconcileTestSweepRowsProbed(plan), snReconcileTestContractRowsRead(plan)
+		if probed != stuckCount*inRangeCount || read != stuckCount*inRangeCount {
+			t.Fatalf("the listing read %v sweep rows to check their contracts and %v contract rows, want %d of each:\n%s",
+				probed, read, stuckCount*inRangeCount, snReconcileTestPlanText(t, ctx, snReconcileStuckSql))
+		}
+		t.Log("plan:\n" + snReconcileTestPlanText(t, ctx, snReconcileStuckSql))
 	})
 }

@@ -226,19 +226,20 @@ func testEnvReferencePgPoolConfig(t *testing.T) *pgxpool.Config {
 	return reference
 }
 
-// The four Redis pools the process builds.
+// The five Redis pools the process builds.
 func testEnvRedisPools() []*safeRedisClient {
 	return []*safeRedisClient{
 		{},
 		{disableCommandRetry: true},
 		{disableCommandRetry: true, contextTimeoutEnabled: true},
+		{disableCommandRetry: true, contextTimeoutEnabled: true, keepLateReplies: true},
 		{disableCommandRetry: true, contextTimeoutEnabled: true, authentication: true},
 	}
 }
 
 // In a WARP_ENV=main process the real PostgreSQL pool constructor yields a
 // configuration equal, field by field and function by function, to the
-// pre-guard producer chain, and the real PostgreSQL pool and all four real
+// pre-guard producer chain, and the real PostgreSQL pool and all five real
 // Redis pools dial through the plain net.Dialer (a canceled context, so no
 // socket). The same calls in a local process without an attestation are
 // refused, so the check can tell the two apart.

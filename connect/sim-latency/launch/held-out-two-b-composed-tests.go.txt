@@ -1,0 +1,866 @@
+// PRIVATE UNQUALIFIED DRAFT: composed synthetic-domain authentication only.
+// Root metadata/component bytes are explicit captures, not physical installed
+// root authentication, measurements, provider calls or statistical authority.
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/urnetwork/server/model"
+)
+
+// Counts only explicit deterministic fixture reads; no crypto/rand source is
+// reachable through this fixture or its fake process hooks.
+type heldOutTwoBFixtureEntropy struct {
+	Reader io.Reader
+	Calls  int
+}
+
+// The reader is instance-owned and used serially by the preparation core.
+func (self *heldOutTwoBFixtureEntropy) Read(content []byte) (int, error) {
+	self.Calls++
+	return self.Reader.Read(content)
+}
+
+// Owns every synthetic file, captured root entry and process record. The real
+// preparation/bridge/reference/commitment validators consume these exact bytes.
+type heldOutTwoBCompositionFixture struct {
+	Preparation            *heldOutOpFixture
+	Contract               heldOutRuntimeContract
+	RuntimeContentBytesKVs map[string][]byte
+	RootMetadataKVs        map[string]heldOutRootPathMetadata
+	Declaration            heldOutTwoBAddendum
+	Qualification          heldOutToolQualification
+	References             []heldOutReference
+	Entropy                *heldOutTwoBFixtureEntropy
+	RuntimeReads           int
+	Invocations            int
+	Reauthentications      int
+}
+
+// Captured root entries are checked by the unchanged full-ancestry validator
+// before and after an independently bounded/digest-checked fixture read.
+func (self *heldOutTwoBCompositionFixture) readRootPin(pin heldOutPinnedFile, mode os.FileMode, maximum int64) ([]byte, error) {
+	self.RuntimeReads++
+	stat := func(path string) (heldOutRootPathMetadata, error) {
+		metadata, ok := self.RootMetadataKVs[path]
+		if !ok {
+			return heldOutRootPathMetadata{}, errors.New("synthetic root entry absent")
+		}
+		return metadata, nil
+	}
+	if err := validateHeldOutRootPath(pin.Path, mode, stat); err != nil {
+		return nil, err
+	}
+	content, ok := self.RuntimeContentBytesKVs[pin.Path]
+	if !ok || maximum <= 0 || int64(len(content)) > maximum || heldOutDigest(content) != pin.Sha256 {
+		return nil, errors.New("synthetic root bytes changed or exceed their bound")
+	}
+	if err := validateHeldOutRootPath(pin.Path, mode, stat); err != nil {
+		return nil, err
+	}
+	return bytes.Clone(content), nil
+}
+
+// Files also exist in the fixture tree for ordinary script-pin validation.
+// Captured metadata is deliberately separate from real t.TempDir ancestry.
+func (self *heldOutTwoBCompositionFixture) captureRootFile(t *testing.T, path string, content []byte, mode os.FileMode) heldOutPinnedFile {
+	t.Helper()
+	pin := heldOutOpWrite(t, path, content)
+	self.RuntimeContentBytesKVs[path] = bytes.Clone(content)
+	self.RootMetadataKVs[path] = heldOutRootPathMetadata{Mode: mode, Uid: 0, Gid: 0, Links: 1}
+	for parent := filepath.Dir(path); ; parent = filepath.Dir(parent) {
+		self.RootMetadataKVs[parent] = heldOutRootPathMetadata{Mode: os.ModeDir | 0555, Uid: 0, Gid: 0, Links: 2}
+		if parent == string(filepath.Separator) {
+			break
+		}
+	}
+	return pin
+}
+
+// The expected synthetic contract has the same complete component names and
+// resource profile, with hashes derived from actual owned bytes, not preimages.
+func (self *heldOutTwoBCompositionFixture) configureRuntime(t *testing.T) {
+	t.Helper()
+	op := self.Preparation
+	directory := filepath.Join(op.Root, "synthetic-runtime", "container")
+	components := map[string]string{}
+	for name := range heldOutRuntimeComponentDigests() {
+		if name == "competitionpatch.sha256" {
+			continue
+		}
+		mode := os.FileMode(0555)
+		if name == "compose.yml" || name == "Dockerfile.submission" {
+			mode = 0444
+		}
+		pin := self.captureRootFile(t, filepath.Join(directory, name), []byte("synthetic nonexecuted component "+name+"\n"), mode)
+		components[name] = pin.Sha256
+	}
+	validatorPin := self.captureRootFile(t, filepath.Join(directory, "competitionpatch.sha256"), []byte(components["competitionpatch"]+"\n"), 0444)
+	components["competitionpatch.sha256"] = validatorPin.Sha256
+	runtime := heldOutRuntimeRelease{ControlRevision: strings.Repeat("a", 40), ValidatorSourceRevision: strings.Repeat("b", 40),
+		ScriptDirectory: directory, EvidenceMemoryLimitBytes: 5 * 1024 * 1024 * 1024, ValidatorSha256: components["competitionpatch"]}
+	builder := heldOutRuntimeBuilder{Schema: 1, Kind: "sim-latency-submission-builder/v2", PatchValidatorSha256: runtime.ValidatorSha256,
+		DockerfileSha256: components["Dockerfile.submission"], BuildScriptSha256: components["build-submission.sh"], IdentityHelperSha256: components["submission-builder-identity.sh"],
+		ValidatorPinSha256: validatorPin.Sha256, EvaluatorSha256: components["evaluator.sh"], SourcePreparerSha256: components["prepare-evaluation-source.sh"]}
+	var err error
+	builder.BuilderSha256, err = heldOutRuntimeBuilderDigest(builder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.BuilderSha256 = builder.BuilderSha256
+	runtime.Runner = self.captureRootFile(t, filepath.Join(op.Root, "synthetic-runner", "cohort-runner.sh"), []byte("synthetic nonexecuted runner\n"), 0555)
+	bundle := heldOutRuntimeManifest{Schema: 1, Kind: "sim-latency-c2-inactive-builder-release", ControlRevision: runtime.ControlRevision,
+		ValidatorSourceRevision: runtime.ValidatorSourceRevision, EvidenceMemoryLimitBytes: runtime.EvidenceMemoryLimitBytes, ActiveMemoryLimitBytes: 96 * 1024 * 1024 * 1024,
+		MinimumManagementMemoryReserveBytes: 24 * 1024 * 1024 * 1024, ExpectedHostMemoryBytes: 128 * 1024 * 1024 * 1024, ExpectedCapacityReserveBytes: 27 * 1024 * 1024 * 1024,
+		ImageId: op.Release.ImageId, InstalledAt: "2020-01-01T00:00:00Z", BaseSha: op.Release.BaseSha, ReleaseDirectory: filepath.Dir(directory), ValidatorSha256: runtime.ValidatorSha256, Builder: builder}
+	runtime.Manifest = self.captureRootFile(t, filepath.Join(filepath.Dir(directory), "release.json"), heldOutRuntimeJson(t, bundle), 0444)
+	runner := heldOutRuntimeRunnerManifest{Schema: 1, Kind: "sim-latency-c2-inactive-cohort-runner-release", InstalledAt: "2020-01-01T00:00:00Z",
+		Path: runtime.Runner.Path, Sha256: runtime.Runner.Sha256, Mode: "0555", BuilderSha256: runtime.BuilderSha256, ValidatorSha256: runtime.ValidatorSha256,
+		EvaluatorSha256: builder.EvaluatorSha256, ControlRevision: runtime.ControlRevision, ValidatorSourceRevision: runtime.ValidatorSourceRevision,
+		EvidenceMemoryLimitBytes: runtime.EvidenceMemoryLimitBytes, ResourceBoundarySha256: components["resource-boundary.sh"], BaseSha: op.Release.BaseSha, ImageId: op.Release.ImageId}
+	runtime.RunnerManifest = self.captureRootFile(t, filepath.Join(filepath.Dir(runtime.Runner.Path), "release.json"), heldOutRuntimeJson(t, runner), 0444)
+	op.Release.Runtime, op.Release.ScriptDirectory, op.Release.ScriptDigests = &runtime, directory, components
+	op.Config.Scripts = nil
+	for _, name := range []string{"evaluator.sh", "network-boundary.sh", "compose.yml", "hash-local-mount.sh"} {
+		op.Config.Scripts = append(op.Config.Scripts, heldOutPinnedFile{Path: filepath.Join(directory, name), Sha256: components[name]})
+	}
+	self.Contract = heldOutRuntimeContract{expectedRuntime: runtime, componentSha256KVs: components, readRootPin: self.readRootPin}
+	for _, pair := range op.Config.GeneratorFiles {
+		if filepath.Base(pair.Analyzer.Path) == "competition_controller.go" {
+			content := []byte(heldOutBridgeGeneratorSource())
+			analyzer := heldOutOpWrite(t, pair.Analyzer.Path, content)
+			frozen := heldOutOpWrite(t, pair.Frozen.Path, content)
+			for index := range op.Config.GeneratorFiles {
+				if op.Config.GeneratorFiles[index].Analyzer.Path == pair.Analyzer.Path {
+					op.Config.GeneratorFiles[index] = heldOutGeneratorFile{Analyzer: analyzer, Frozen: frozen}
+				}
+			}
+		}
+	}
+}
+
+// Original A remains three selected positions of its retained five-position
+// publication and the frozen original instrument, never relabeled as two-B.
+func (self *heldOutTwoBCompositionFixture) configureOriginalA(t *testing.T) {
+	t.Helper()
+	op, old := self.Preparation, frozenHeldOutRelease()
+	pins := op.Config.Amendment
+	positions := []calibrationOriginalPosition{}
+	for index := 1; index <= 5; index++ {
+		root := filepath.Join(op.Root, "original-five", fmt.Sprintf("cohort-%02d", index))
+		request := heldOutOpWrite(t, filepath.Join(root, "artifacts", "worker-request.json"), []byte(fmt.Sprintf("synthetic original request %d\n", index)))
+		provenance := heldOutOpWrite(t, filepath.Join(root, "fixture-provenance.json"), []byte(fmt.Sprintf("synthetic original provenance %d\n", index)))
+		positions = append(positions, calibrationOriginalPosition{Position: index, JobId: heldOutOpId(700 + index), RoundId: heldOutOpId(710 + index), Root: root, RequestSha256: request.Sha256, ProvenanceSha256: provenance.Sha256})
+	}
+	pins.Approval = heldOutOpWrite(t, filepath.Join(op.Root, "inputs", "old-three-approval.txt"), []byte("synthetic unchanged three-A one-bridge three-B publication\n"))
+	pins.OriginalPlan = heldOutOpJson(t, filepath.Join(op.Root, "inputs", "original-five-plan.json"), map[string]any{"schema": 1,
+		"kind": "prepared-corrected-release-five-cohort-aa-plan", "ordered_cohorts": positions, "base_sha": old.BaseSha, "evaluator_image_digest": old.ImageId, "evaluation_policy_sha256": old.StageAPolicySha256})
+	pins.OriginalBaseSha, pins.OriginalImageId = old.BaseSha, old.ImageId
+	manifest := calibrationFileManifest{Schema: 1, Kind: "sim-latency-same-seed-calibration-inputs", BaseSha: old.BaseSha,
+		EvaluatorImageDigest: old.ImageId, EvaluationPolicySha256: old.StageAPolicySha256, ProvidersSha256: strings.Repeat("1", 64), NoopPatchSha256: strings.Repeat("2", 64), RoundSeedHex: strings.Repeat("3", 64),
+		Protocol: calibrationProtocolThreeABridgeThreeB, ProtocolApprovalSha256: pins.Approval.Sha256, OriginalPlanSha256: pins.OriginalPlan.Sha256, OriginalPositions: []int{1, 2, 3}}
+	for _, position := range positions[:3] {
+		manifest.Cohorts = append(manifest.Cohorts, calibrationFileCohort{JobId: position.JobId, RoundId: position.RoundId, ArtifactDirectory: filepath.Join(position.Root, "artifacts"), RequestSha256: position.RequestSha256,
+			BaselineSha256: strings.Repeat("4", 64), ScoreSha256: strings.Repeat("5", 64), WorkerResultSha256: strings.Repeat("6", 64), EvidenceManifestSha256: strings.Repeat("7", 64), TerminalSha256: strings.Repeat("8", 64)})
+	}
+	op.Config.StageAInputs = heldOutOpJson(t, filepath.Join(op.Root, "inputs", "original-three-inputs.json"), manifest)
+	settingsA, _ := calibrationSettingsForProtocol(calibrationProtocolThreeABridgeThreeB)
+	report := calibrationAnalysisReport{Kind: "sim-latency-calibration-analysis", Protocol: manifest.Protocol, ProtocolApprovalSha256: pins.Approval.Sha256,
+		OriginalPlanSha256: pins.OriginalPlan.Sha256, OriginalPositions: []int{1, 2, 3}, OriginalBaseSha: old.BaseSha, OriginalImageDigest: old.ImageId,
+		Cohorts: 3, ObservedReplicates: 54, BootstrapDraws: settingsA.BootstrapDraws, Placeability: 1, RecommendedMargin: .2, Accepted: true, Reasons: []string{},
+		InputManifestSha256: op.Config.StageAInputs.Sha256, EvaluationPolicySha256: old.StageAPolicySha256, ReplayObservations: []calibrationReplayObservation{}}
+	for index := 0; index < 6; index++ {
+		report.ReplayObservations = append(report.ReplayObservations, calibrationReplayObservation{ImageId: old.ImageId, ContainerId: fmt.Sprintf("%064x", index+801), Owner: fmt.Sprintf("%064x", index+811),
+			InspectionSha256: strings.Repeat("9", 64), TerminalSha256: strings.Repeat("a", 64), ContainerCleanupVerified: true})
+	}
+	op.Config.StageAReport = heldOutOpJson(t, filepath.Join(op.Root, "inputs", "original-three-report.json"), report)
+}
+
+// C2 builder fields are recomputed over the fixture's exact source map and
+// component contract. Existing native admission validates every reference.
+func (self *heldOutTwoBCompositionFixture) configureReferences(t *testing.T) {
+	t.Helper()
+	op := self.Preparation
+	var lock heldOutSourceLock
+	content, err := readHeldOutPinned(op.Config.SourceLock, op.Settings.MaximumBytes, false)
+	if err != nil || json.Unmarshal(content, &lock) != nil {
+		t.Fatal("synthetic source lock unavailable", err)
+	}
+	lock.CandidatePathBase = "mono_root_v1"
+	op.Config.SourceLock = heldOutOpJson(t, filepath.Join(op.Root, "inputs", "two-b-source-lock.json"), lock)
+	content, err = readHeldOutPinned(op.Config.References, op.Settings.MaximumBytes, false)
+	if err != nil || json.Unmarshal(content, &self.References) != nil {
+		t.Fatal("synthetic reference bundle unavailable", err)
+	}
+	for _, reference := range self.References {
+		var build heldOutNativeBuild
+		content, err := readHeldOutPinned(reference.NativeBuild, op.Settings.MaximumBytes, false)
+		if err != nil || json.Unmarshal(content, &build) != nil {
+			t.Fatal("synthetic native build unavailable", err)
+		}
+		build.BuilderSha256, build.PatchValidatorSha256 = op.Release.Runtime.BuilderSha256, op.Release.Runtime.ValidatorSha256
+		build.CandidateCommits = map[string]string{}
+		for name, revision := range lock.Repositories {
+			build.CandidateCommits[name] = revision
+		}
+		build.CandidateCommits["server"] = build.CandidateSha
+		commits, err := json.MarshalIndent(build.CandidateCommits, "", "  ")
+		if err != nil {
+			t.Fatal(err)
+		}
+		build.CandidateCommitsSha256 = heldOutDigest(append(commits, '\n'))
+		build.OriginalSourceIdentitySha256 = heldOutDigest([]byte("synthetic pristine C2 source " + reference.Role))
+		build.ImageKey = heldOutDigest([]byte(strings.Join([]string{build.BaseImageId, build.PatchSha256, build.PolicySha256, build.BuilderSha256}, "\x00")))
+		build.Image = "urnetwork/sim-latency-submission:" + build.ImageKey[:32]
+		pin := heldOutOpJson(t, reference.NativeBuild.Path, build)
+		for index := range self.References {
+			if self.References[index].Role == reference.Role {
+				self.References[index].NativeBuild = pin
+			}
+		}
+	}
+	op.Config.References = heldOutOpJson(t, op.Config.References.Path, self.References)
+}
+
+// The retained bridge uses the real fixed 467/7/5 artifact validators,
+// production reducers over synthetic scalars, and the unchanged old protocol.
+func (self *heldOutTwoBCompositionFixture) configureBridge(t *testing.T, request heldOutRequest) {
+	t.Helper()
+	op, pins := self.Preparation, self.Preparation.Config.Amendment
+	base := time.Unix(1600000000, 0).UTC()
+	original := heldOutMarginFreezeConfig{Schema: 1, Kind: "sim-latency-amended-margin-freeze", Protocol: calibrationProtocolThreeABridgeThreeB,
+		Approval: pins.Approval, OriginalPlan: pins.OriginalPlan, OriginalBaseSha: pins.OriginalBaseSha, OriginalImageId: pins.OriginalImageId,
+		StageAReport: op.Config.StageAReport, StageAInputs: op.Config.StageAInputs, OutputPath: filepath.Join(op.Root, "inputs", "margin-freeze.json")}
+	freeze := heldOutMarginFreeze{Schema: 1, Kind: "sim-latency-accepted-original-three-pair-margin", Protocol: original.Protocol,
+		ApprovalSha256: pins.Approval.Sha256, OriginalPlanSha256: pins.OriginalPlan.Sha256, StageAReportSha256: op.Config.StageAReport.Sha256, StageAInputsSha256: op.Config.StageAInputs.Sha256,
+		OriginalBaseSha: pins.OriginalBaseSha, OriginalImageId: pins.OriginalImageId, Margin: .2, FrozenAt: base.Add(10 * time.Second)}
+	pins.MarginFreeze = heldOutOpJson(t, original.OutputPath, freeze)
+	plan := heldOutBridgePlan{Schema: 1, Kind: "sim-latency-prospective-c2-bridge-plan", Protocol: original.Protocol, PreparedAt: base.Add(20 * time.Second),
+		OriginalA: original, MarginFreeze: pins.MarginFreeze, Release: pins.Release, Runner: op.Release.Runtime.Runner, RunnerManifest: op.Release.Runtime.RunnerManifest,
+		SourceLock: op.Config.SourceLock, Request: op.Config.Template, Noop: self.References[0], Margin: .2}
+	pins.BridgePlan = heldOutOpJson(t, filepath.Join(op.Root, "inputs", "bridge-plan.json"), plan)
+	pins.BridgePublication = heldOutOpJson(t, filepath.Join(op.Root, "inputs", "bridge-publication.json"), heldOutPublication{Schema: 1, Kind: "sim-latency-held-out-plan-publication", PlanSha256: pins.BridgePlan.Sha256,
+		PublishedAt: base.Add(21 * time.Second), PulledPushed: true, Evidence: []heldOutPinnedFile{pins.BridgePlan}})
+	root := filepath.Join(op.Root, "synthetic-bridge", "artifacts")
+	cohort, _ := newHeldOutBridgeCohortFixture()
+	cohort.Baseline.RoundId, cohort.Baseline.ConfigSha256, cohort.Baseline.RequestTimeoutMs = heldOutOpId(900), request.ProvidersSha256, request.EvaluationPolicy.RequestTimeoutMs
+	cohort.Baseline.RunFlags = map[string]string{"duration": "1s", "impairment": "true"}
+	baselinePin := heldOutOpJson(t, filepath.Join(root, "baseline.json"), cohort.Baseline)
+	cohort.BaselineSha256 = baselinePin.Sha256
+	rebuildCalibrationAnalysisFixture(&cohort)
+	cohort.Result.NormalizedScore = 100
+	takeover := false
+	cohort.Result.Diagnostics.BaselineTakeoverEligible, cohort.Result.Diagnostics.TakeoverMargin = &takeover, .2
+	scorePin := heldOutOpJson(t, filepath.Join(root, "score.json"), cohort.Result)
+	accounting := heldOutOpJson(t, filepath.Join(root, "accounting.json"), map[string]any{"synthetic": true})
+	resources := heldOutOpJson(t, filepath.Join(root, "resources.json"), map[string]any{"synthetic": true})
+	progress := heldOutOpJson(t, filepath.Join(root, "evaluation-progress.json"), map[string]any{"phase": "complete", "baseline_completed": 9, "candidate_completed": 9})
+	bindings := []calibrationArtifactBinding{}
+	bind := func(pin heldOutPinnedFile) {
+		content, err := os.ReadFile(pin.Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		relative, err := filepath.Rel(root, pin.Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bindings = append(bindings, calibrationArtifactBinding{Path: relative, Sha256: pin.Sha256, Bytes: int64(len(content))})
+	}
+	for _, pin := range []heldOutPinnedFile{baselinePin, scorePin, accounting, resources, progress} {
+		bind(pin)
+	}
+	for index := 0; index < 460; index++ {
+		bind(heldOutOpWrite(t, filepath.Join(root, "evidence", fmt.Sprintf("synthetic-%03d.json", index)), []byte("{}\n")))
+	}
+	for _, name := range []string{"builder-identity.json", "candidate-original-source.json"} {
+		bind(heldOutOpWrite(t, filepath.Join(root, "evidence", name), []byte("{}\n")))
+	}
+	evidence := heldOutOpJson(t, filepath.Join(root, "evidence-manifest.json"), map[string]any{"schema": 1, "kind": "sim-latency-evidence-manifest", "artifacts": bindings})
+	jobId := heldOutOpId(901)
+	candidate := self.References[0].ImageId
+	complete := heldOutCompletion{Schema: 1, Kind: "sim-latency-worker-evaluation-complete", JobId: jobId, RoundId: cohort.Baseline.RoundId, Attempt: 1,
+		BaseImageId: op.Release.ImageId, CandidateImageId: &candidate, PatchSha256: request.PatchSha256, ProvidersSha256: request.ProvidersSha256, CleanupComplete: true,
+		Artifacts: map[string]string{"baseline": baselinePin.Sha256, "score": scorePin.Sha256, "accounting": accounting.Sha256, "resources": resources.Sha256, "evidence_manifest": evidence.Sha256}}
+	completion := heldOutOpJson(t, filepath.Join(root, "evaluation.complete.json"), complete)
+	workerBindings := []calibrationArtifactBinding{}
+	for _, pin := range []heldOutPinnedFile{baselinePin, scorePin, accounting, resources, progress, evidence, completion} {
+		content, err := os.ReadFile(pin.Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		workerBindings = append(workerBindings, calibrationArtifactBinding{Path: filepath.Base(pin.Path), Sha256: pin.Sha256, Bytes: int64(len(content))})
+	}
+	security := map[string]any{}
+	for _, name := range []string{"template_database_reset", "redis_reset", "cgroup_contained", "resource_limits", "management_cpu_reserved", "management_memory_reserved", "default_deny_network", "offline_build", "offline_build_resource_limits", "no_production_secrets", "structural_patch_check", "accounting_complete", "resource_report_complete", "cleanup_complete", "immutable_reports"} {
+		security[name] = true
+	}
+	for _, name := range []string{"cgroup_id", "template_database_id", "redis_generation_id"} {
+		security[name] = "synthetic-isolation-not-a-live-resource"
+	}
+	encodedScore, err := json.Marshal(cohort.Result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var workerScore model.CompetitionScoreResult
+	if err := json.Unmarshal(encodedScore, &workerScore); err != nil {
+		t.Fatal(err)
+	}
+	worker := heldOutOpJson(t, filepath.Join(root, "worker-result.json"), map[string]any{"schema": 1, "job_id": jobId, "score": workerScore, "eval_error": nil, "security": security, "artifacts": workerBindings})
+	start, end := base.Add(30*time.Second), base.Add(31*time.Second)
+	terminal := heldOutOpWrite(t, filepath.Join(filepath.Dir(root), "manager-terminal.log"), []byte(fmt.Sprintf("start_utc=%s\ndeadline_utc=%s\nevaluator_exit=0 duration_seconds=1\nend_utc=%s\nterminal_cleanup_verified\ninstrument_revision=C2\nbuilder_sha256=%s\nvalidator_sha256=%s\nrequest_sha256=%s\n",
+		start.Format(time.RFC3339), start.Add(3*time.Hour).Format(time.RFC3339), end.Format(time.RFC3339), op.Release.Runtime.BuilderSha256, op.Release.Runtime.ValidatorSha256, op.Config.Template.Sha256)))
+	input := calibrationFileCohort{JobId: jobId, RoundId: cohort.Baseline.RoundId, ArtifactDirectory: root, RequestSha256: op.Config.Template.Sha256,
+		BaselineSha256: baselinePin.Sha256, ScoreSha256: scorePin.Sha256, WorkerResultSha256: worker.Sha256, EvidenceManifestSha256: evidence.Sha256, TerminalSha256: terminal.Sha256}
+	manifest := calibrationFileManifest{Schema: 1, Kind: "sim-latency-same-seed-calibration-inputs", BaseSha: op.Release.BaseSha, EvaluatorImageDigest: op.Release.ImageId,
+		EvaluationPolicySha256: op.Release.StageAPolicySha256, ProvidersSha256: request.ProvidersSha256, NoopPatchSha256: request.PatchSha256, RoundSeedHex: request.RoundSeedHex, Cohorts: []calibrationFileCohort{input}}
+	pins.BridgeInputs = heldOutOpJson(t, filepath.Join(op.Root, "inputs", "bridge-inputs.json"), manifest)
+	receipt := heldOutBridgeCompatibility{Schema: 1, Kind: "sim-latency-one-fresh-c2-bridge-compatibility", Protocol: original.Protocol, Claim: "operational-compatibility-witness-not-statistical-equivalence", Accepted: true, Reasons: []string{}, VerifiedAt: base.Add(40 * time.Second),
+		ApprovalSha256: pins.Approval.Sha256, OriginalPlanSha256: pins.OriginalPlan.Sha256, StageAReportSha256: op.Config.StageAReport.Sha256, StageAInputsSha256: op.Config.StageAInputs.Sha256,
+		MarginFreezeSha256: pins.MarginFreeze.Sha256, ReleaseSha256: pins.Release.Sha256, RuntimeManifestSha256: op.Release.Runtime.Manifest.Sha256, BuilderSha256: op.Release.Runtime.BuilderSha256, ValidatorSha256: op.Release.Runtime.ValidatorSha256,
+		RunnerSha256: plan.Runner.Sha256, RunnerManifestSha256: plan.RunnerManifest.Sha256, BridgePlanSha256: pins.BridgePlan.Sha256, BridgePublicationSha256: pins.BridgePublication.Sha256, BridgeInputsSha256: pins.BridgeInputs.Sha256,
+		RequestSha256: op.Config.Template.Sha256, BaseSha: op.Release.BaseSha, ImageId: op.Release.ImageId, PolicySha256: op.Release.StageAPolicySha256, Margin: .2, StartedAt: start, CompletedAt: end,
+		WorkerBindings: 7, EvidenceBindings: 467, CompletionBindings: 5, ControlEvaluationIds: cohort.ControlEvaluationIds, Score: cohort.Result}
+	for index := 0; index < 2; index++ {
+		receipt.Replays = append(receipt.Replays, calibrationReplayObservation{ImageId: op.Release.ImageId, ContainerId: fmt.Sprintf("%064x", index+1001), Owner: fmt.Sprintf("%064x", index+1011),
+			InspectionSha256: strings.Repeat("d", 64), TerminalSha256: strings.Repeat("e", 64), ContainerCleanupVerified: true})
+	}
+	pins.BridgeReceipt = heldOutOpJson(t, filepath.Join(op.Root, "inputs", "bridge-receipt.json"), receipt)
+}
+
+// A newly pinned declaration/tool receipt follows fixture mutations. This
+// makes semantic negatives reach actual old-A/bridge/reference validators.
+func (self *heldOutTwoBCompositionFixture) refreshDeclaration(t *testing.T) {
+	t.Helper()
+	op, pins := self.Preparation, self.Preparation.Config.Amendment
+	d := &self.Declaration
+	d.ApprovalSha256, d.OriginalApprovalSha256, d.OriginalPlanSha256 = op.Config.TwoBAddendum.Approval.Sha256, pins.Approval.Sha256, pins.OriginalPlan.Sha256
+	d.StageAReportSha256, d.StageAInputsSha256, d.MarginFreezeSha256 = op.Config.StageAReport.Sha256, op.Config.StageAInputs.Sha256, pins.MarginFreeze.Sha256
+	d.BridgePlanSha256, d.BridgePublicationSha256, d.BridgeInputsSha256, d.BridgeReceiptSha256 = pins.BridgePlan.Sha256, pins.BridgePublication.Sha256, pins.BridgeInputs.Sha256, pins.BridgeReceipt.Sha256
+	d.ReleaseSha256, d.SourceLockSha256, d.ReferencesSha256, d.ExclusionsSha256 = pins.Release.Sha256, op.Config.SourceLock.Sha256, op.Config.References.Sha256, op.Config.Exclusions.Sha256
+	d.ReferenceTransfers = nil
+	for _, reference := range self.References {
+		d.ReferenceTransfers = append(d.ReferenceTransfers, heldOutTwoBReferenceTransfer{Role: reference.Role, PatchSha256: reference.Patch.Sha256, OriginalDirectionSha256: reference.Direction.Sha256,
+			ExpectedDirection: map[string]string{"no-op": "no-op", "better": "faster", "worse": "slower"}[reference.Role], Claim: "expected-direction-hypothesis-not-new-c2-measurement", FreshBridgeRequired: true, AllTwoOrderedBRequired: true})
+	}
+	op.Config.TwoBAddendum.Declaration = heldOutOpJson(t, filepath.Join(op.Root, "inputs", "two-b-declaration.json"), self.Declaration)
+	self.Qualification.Protocol, self.Qualification.ProtocolApprovalSha256, self.Qualification.OriginalPlanSha256 = op.Config.Protocol, d.ApprovalSha256, d.OriginalPlanSha256
+	self.Qualification.TwoBAddendumSha256 = op.Config.TwoBAddendum.Declaration.Sha256
+	op.Config.Qualification = heldOutOpJson(t, op.Config.Qualification.Path, self.Qualification)
+	op.refreshConfig(t)
+}
+
+// No installed bundle is read: a complete captured contract is passed only to
+// internal validators. The unchanged native wrappers reject this fake runtime.
+func newHeldOutTwoBCompositionFixture(t *testing.T) *heldOutTwoBCompositionFixture {
+	t.Helper()
+	op := newHeldOutOpFixture(t)
+	self := &heldOutTwoBCompositionFixture{Preparation: op, RuntimeContentBytesKVs: map[string][]byte{}, RootMetadataKVs: map[string]heldOutRootPathMetadata{}}
+	op.Config.Protocol = heldOutProtocolThreeABridgeTwoB
+	op.Settings, _ = heldOutSettingsForProtocol(op.Config.Protocol)
+	op.Config.Amendment = &heldOutAmendmentPins{Release: heldOutOpWrite(t, filepath.Join(op.Root, "inputs", "synthetic-release.txt"), []byte("synthetic C2 source capability; not deployment evidence\n"))}
+	op.Config.TwoBAddendum = &heldOutTwoBAddendumPins{Approval: heldOutOpWrite(t, filepath.Join(op.Root, "inputs", "new-two-b-approval.txt"), []byte("synthetic distinct two-B-only approval\n"))}
+	self.configureRuntime(t)
+	self.configureOriginalA(t)
+	self.configureReferences(t)
+	var request heldOutRequest
+	content, err := readHeldOutPinned(op.Config.Template, op.Settings.MaximumBytes, false)
+	if err != nil || json.Unmarshal(content, &request) != nil {
+		t.Fatal("synthetic template unavailable", err)
+	}
+	request.EvaluationPolicy.TakeoverMargin = .2
+	policy, err := json.Marshal(request.EvaluationPolicy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	op.Release.StageAPolicySha256 = heldOutDigest(policy)
+	op.Config.Template = heldOutOpJson(t, op.Config.Template.Path, request)
+	self.configureBridge(t, request)
+	content, err = readHeldOutPinned(op.Config.Qualification, op.Settings.MaximumBytes, false)
+	if err != nil || json.Unmarshal(content, &self.Qualification) != nil {
+		t.Fatal("synthetic tool qualification unavailable", err)
+	}
+	self.Declaration = heldOutTwoBAddendum{Schema: 1, Kind: "sim-latency-held-out-two-b-addendum", Protocol: op.Config.Protocol, BaseProtocol: calibrationProtocolThreeABridgeThreeB,
+		PublishedAt: time.Unix(1600000050, 0).UTC(), Margin: .2, SeedCount: 2, RequiredOrderedSeeds: 2, ControlReplicates: 9, CandidateReplicates: 9, ExecutionLimitSeconds: 10800,
+		FreshSeedsRequired: true, AllOutcomesRetained: true, NoReplacement: true}
+	self.refreshDeclaration(t)
+	self.Entropy = &heldOutTwoBFixtureEntropy{Reader: op.Hooks.Entropy}
+	op.Hooks.Entropy = self.Entropy
+	if _, err := self.authenticate(); err != nil {
+		t.Fatal("complete synthetic base failed its real validation body", err)
+	}
+	return self
+}
+
+// All old-A/bridge/runtime/reference/tool checks run before the producer gets
+// its typed inputs; no test callback substitutes a successful authentication.
+func (self *heldOutTwoBCompositionFixture) authenticate() (*heldOutPreparationInputs, error) {
+	op := self.Preparation
+	return authenticateHeldOutPreparationWithContract(op.Config, op.Release, op.Settings, &self.Contract)
+}
+
+// This mirrors native preparation's initial and final immutable-input fences.
+func (self *heldOutTwoBCompositionFixture) prepare(t *testing.T) (*heldOutPrivatePlan, error) {
+	t.Helper()
+	op := self.Preparation
+	inputs, err := self.authenticate()
+	if err != nil {
+		return nil, err
+	}
+	op.refreshConfig(t)
+	public, err := prepareHeldOutCampaign(t.Context(), op.Config, heldOutDigest(op.ConfigBytes), *inputs, op.Release, op.Settings, op.Hooks, func() error {
+		self.Reauthentications++
+		again, err := self.authenticate()
+		if err != nil {
+			return err
+		}
+		if !reflect.DeepEqual(again, inputs) {
+			return errors.New("synthetic authenticated inputs changed")
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	op.PrivatePin = heldOutPinnedFile{Path: filepath.Join(op.Config.PrivateRoot, "private-plan.json"), Sha256: public.PrivatePlanSha256}
+	content, err := os.ReadFile(op.Config.PublicPlanPath)
+	if err != nil {
+		return nil, err
+	}
+	op.PublicPin = heldOutPinnedFile{Path: op.Config.PublicPlanPath, Sha256: heldOutDigest(content)}
+	return verifyHeldOutPlanWithContract(op.PrivatePin, op.PublicPin, op.Release, op.Settings, &self.Contract)
+}
+
+// Real execution journaling/finalization/control reuse is retained; only the
+// process/host observation hooks are deterministic synthetic substitutes.
+func (self *heldOutTwoBCompositionFixture) execute(t *testing.T, plan *heldOutPrivatePlan) (*heldOutCampaignResult, *heldOutExecFixture, error) {
+	t.Helper()
+	op := self.Preparation
+	verified, err := verifyHeldOutPlanWithContract(op.PrivatePin, op.PublicPin, op.Release, op.Settings, &self.Contract)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !reflect.DeepEqual(plan, verified) {
+		return nil, nil, errors.New("synthetic verified plan changed")
+	}
+	fixture := &heldOutExecFixture{Preparation: op, Plan: verified, Clock: time.Now().UTC().Add(24 * time.Hour).Truncate(time.Second), Controls: map[string]*heldOutFrozenControl{},
+		Config: heldOutExecutionConfig{Schema: 1, Kind: "sim-latency-held-out-execution", PrivatePlan: op.PrivatePin, PublicPlan: op.PublicPin}}
+	publication := heldOutPublication{Schema: 1, Kind: "sim-latency-held-out-plan-publication", PlanSha256: op.PublicPin.Sha256, PublishedAt: plan.PreparedAt.Add(time.Second),
+		Commit: strings.Repeat("c", 40), Repository: op.Root, PlanPath: "public/commitments.json", RemoteRef: "refs/remotes/origin/synthetic", PulledPushed: true, Evidence: []heldOutPinnedFile{op.Config.TwoBAddendum.Declaration}}
+	fixture.Config.Publication = heldOutOpJson(t, filepath.Join(op.Root, "synthetic-publication.json"), publication)
+	publicBytes, err := os.ReadFile(op.PublicPin.Path)
+	if err != nil {
+		return nil, nil, err
+	}
+	reads := 0
+	if err := authenticateHeldOutPublication(t.Context(), fixture.Config, *verified, op.Settings, func(_ context.Context, program string, args ...string) ([]byte, error) {
+		reads++
+		if program != "/usr/bin/git" {
+			return nil, errors.New("synthetic reader refused a non-Git command")
+		}
+		if reads == 1 && strings.Contains(strings.Join(args, " "), "show "+publication.Commit+":"+publication.PlanPath) {
+			return publicBytes, nil
+		}
+		if reads == 2 && strings.Contains(strings.Join(args, " "), "merge-base --is-ancestor "+publication.Commit+" "+publication.RemoteRef) {
+			return nil, nil
+		}
+		return nil, errors.New("synthetic publication command changed")
+	}); err != nil || reads != 2 {
+		return nil, nil, errors.Join(err, errors.New("synthetic complete publication not authenticated"))
+	}
+	fixture.Hooks = heldOutExecutionHooks{Now: func() time.Time { return fixture.Clock }, CheckHost: func(context.Context, heldOutPrivatePlan) (string, error) {
+		return heldOutDigest([]byte("synthetic unchanged inventory")), nil
+	}, Invoke: func(ctx context.Context, root string, start heldOutJobStart) error {
+		deadline, ok := ctx.Deadline()
+		if !ok || !deadline.Equal(start.Deadline) || start.Deadline.Sub(start.StartedAt) != 3*time.Hour {
+			return errors.New("synthetic invocation lost its original deadline")
+		}
+		self.Invocations++
+		fixture.Invocations = append(fixture.Invocations, start)
+		fixture.Clock = fixture.Clock.Add(2 * time.Second)
+		return writeHeldOutExclusive(filepath.Join(root, "manager-terminal.log"), []byte(fmt.Sprintf("start_utc=%s\ndeadline_utc=%s\nevaluator_exit=0 duration_seconds=2\nend_utc=%s\n", start.StartedAt.Format(time.RFC3339), start.Deadline.Format(time.RFC3339), fixture.Clock.Format(time.RFC3339))), 0600)
+	}, Authenticate: func(_ context.Context, _ heldOutPrivatePlan, round heldOutPrivateRound, job heldOutPlannedJob, _ heldOutRequest, control *heldOutFrozenControl) (heldOutJobOutcome, *heldOutFrozenControl, error) {
+		if control == nil {
+			control = newHeldOutExecControl(t, fixture, round, job)
+			fixture.Controls[round.Public.RoundId] = control
+		}
+		pValue := .5
+		outcome := heldOutJobOutcome{JobId: job.JobId, RoundId: round.Public.RoundId, Role: job.Role, Complete: true, RawScore: map[string]float64{"better": 8, "no-op": 10, "worse": 12}[job.Role], Placeable: true,
+			Significance: &ScoreSignificance{OneSidedPValue: &pValue}, BaselineSha256: control.Baseline.Sha256}
+		for index := 0; index < verified.Policy.Replicates; index++ {
+			outcome.CandidateEvaluationIds = append(outcome.CandidateEvaluationIds, fmt.Sprintf("synthetic-two-b-%s-%02d", job.JobId, index))
+		}
+		return outcome, control, nil
+	}}
+	result, err := executeHeldOutCampaign(t.Context(), fixture.Config, *verified, op.Release, op.Settings, fixture.Hooks)
+	return result, fixture, err
+}
+
+// Invalid input must fail in the same composed entry before a private attempt,
+// deterministic entropy read or fake process can be consumed.
+func (self *heldOutTwoBCompositionFixture) requireRefusedBeforeDraw(t *testing.T, label string) error {
+	t.Helper()
+	plan, err := self.prepare(t)
+	if err == nil || plan != nil || self.Entropy.Calls != 0 || self.Preparation.Generated != 0 || self.Invocations != 0 {
+		t.Fatalf("%s reached preparation or invocation: plan=%v reads=%d generated=%d invoked=%d err=%v", label, plan != nil, self.Entropy.Calls, self.Preparation.Generated, self.Invocations, err)
+	}
+	for _, path := range []string{self.Preparation.Config.PrivateRoot, self.Preparation.Config.PublicPlanPath} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s reserved or published an invalid campaign: %s %v", label, path, err)
+		}
+	}
+	return err
+}
+
+// The whole synthetic domain authenticates old A and fresh bridge, prepares
+// exactly two native workloads, executes six fake jobs, and reveals only closure.
+func TestHeldOutTwoBComposedPreparesVerifiesExecutesAndReveals(t *testing.T) {
+	fixture := newHeldOutTwoBCompositionFixture(t)
+	op := fixture.Preparation
+	publicationBytes, err := os.ReadFile(op.Config.Amendment.BridgePublication.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var publication heldOutPublication
+	if err := decodeHeldOutComplete(publicationBytes, &publication, "synthetic bridge publication"); err != nil || !reflect.DeepEqual(publication.Evidence, []heldOutPinnedFile{op.Config.Amendment.BridgePlan}) {
+		t.Fatal("synthetic base lost its explicit owned publication evidence", err)
+	}
+	plan, err := fixture.prepare(t)
+	if err != nil {
+		t.Fatal("synthetic two-B preparation failed", err)
+	}
+	if op.Generated != 2 || fixture.Reauthentications != 2 || len(plan.Rounds) != 2 || fixture.Entropy.Calls == 0 || fixture.Invocations != 0 {
+		t.Fatal("two-B did not preserve preparation cardinality and immutable-input fences")
+	}
+	var public heldOutPublicPlan
+	publicBytes, err := os.ReadFile(op.PublicPin.Path)
+	if err != nil || json.Unmarshal(publicBytes, &public) != nil {
+		t.Fatal("prepared two-B public plan unavailable", err)
+	}
+	if public.Protocol != heldOutProtocolThreeABridgeTwoB || public.RequiredOrderedSeeds != 2 || public.BaseProtocol != calibrationProtocolThreeABridgeThreeB || public.BaseProtocolApprovalSha256 != op.Config.Amendment.Approval.Sha256 || public.ProtocolApprovalSha256 != op.Config.TwoBAddendum.Approval.Sha256 || public.TwoBAddendumSha256 != op.Config.TwoBAddendum.Declaration.Sha256 || public.ControlReplicates != 9 || public.CandidateReplicates != 9 || public.ExecutionLimitSeconds != 10800 {
+		t.Fatal("public plan detached the all-two screen from original provenance")
+	}
+	for _, round := range plan.Rounds {
+		if bytes.Contains(publicBytes, []byte(round.PrivateSeedHex)) || bytes.Contains(publicBytes, []byte(op.Config.PrivateRoot)) {
+			t.Fatal("public commitment exposed private workload material")
+		}
+	}
+	draws := fixture.Entropy.Calls
+	result, execution, err := fixture.execute(t, plan)
+	if err != nil {
+		t.Fatal("synthetic two-B execution failed", err)
+	}
+	if result == nil || !result.Complete || !result.Accepted || result.OrderedSeeds != 2 || len(result.Outcomes) != 6 || fixture.Invocations != 6 || len(execution.Controls) != 2 {
+		t.Fatal("two-B did not retain all six ordered positions and both controls")
+	}
+	position := 0
+	for _, round := range plan.Rounds {
+		control := execution.Controls[round.Public.RoundId]
+		if control == nil || control.Replicates != 9 || len(control.ControlEvaluationIds) != 9 {
+			t.Fatal("two-B changed the fixed per-round control census")
+		}
+		for _, job := range round.Public.Jobs {
+			if execution.Invocations[position].JobId != job.JobId || len(result.Outcomes[position].CandidateEvaluationIds) != 9 {
+				t.Fatal("two-B changed precommitted order or candidate replicates")
+			}
+			position++
+			root := heldOutJobRoot(plan.Config.PrivateRoot, round.Public, job)
+			original, err := os.ReadFile(filepath.Join(root, "artifacts", "precommitted-request.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			final, err := os.ReadFile(filepath.Join(root, "artifacts", "worker-request.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if job.Position == 1 {
+				if !bytes.Equal(original, final) {
+					t.Fatal("first two-B job substituted an earlier control")
+				}
+			} else {
+				expected, err := finalizeHeldOutRequest(original, job.RequestSha256, round.Public.RoundId, filepath.Join(root, "artifacts", "round-baseline.json"), control.Baseline.Sha256)
+				if err != nil || !bytes.Equal(final, expected) {
+					t.Fatal("two-B changed more than its two deferred baseline fields", err)
+				}
+			}
+		}
+	}
+	resultPath := filepath.Join(plan.Config.PrivateRoot, "campaign-result.json")
+	resultBytes, err := os.ReadFile(resultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resultPin := heldOutPinnedFile{Path: resultPath, Sha256: heldOutDigest(resultBytes)}
+	closure := heldOutClosure{Schema: 1, Kind: "sim-latency-held-out-campaign-closure", CampaignId: plan.CampaignId,
+		PublicPlanSha256: execution.Config.PublicPlan.Sha256, ResultSha256: resultPin.Sha256, ClosedAt: result.ClosedAt.Add(time.Second), NoFurtherEvaluations: true,
+		Reason: "synthetic completed all-two campaign; no real measurements authorized", Evidence: []heldOutPinnedFile{op.Config.TwoBAddendum.Declaration, op.Config.Qualification}}
+	revealConfig := heldOutRevealConfig{Schema: 1, Kind: "sim-latency-held-out-reveal", Execution: execution.Config, Result: resultPin,
+		Closure: heldOutOpJson(t, filepath.Join(op.Root, "synthetic-closure.json"), closure), RevealPath: filepath.Join(op.Root, "public", "synthetic-reveal.json")}
+	if _, err := revealHeldOutCampaign(revealConfig, *plan, op.Release, op.Settings); err != nil {
+		t.Fatal("closed original two-B seeds were not revealable", err)
+	}
+	content, err := os.ReadFile(revealConfig.RevealPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reveal struct {
+		Rounds             []heldOutPrivateRound `json:"revealed_rounds"`
+		TwoBProtocol       string                `json:"two_b_protocol"`
+		TwoBApprovalSha256 string                `json:"two_b_approval_sha256"`
+		TwoBAddendumSha256 string                `json:"two_b_addendum_sha256"`
+	}
+	if json.Unmarshal(content, &reveal) != nil || !reflect.DeepEqual(reveal.Rounds, plan.Rounds) || reveal.TwoBProtocol != plan.Config.Protocol || reveal.TwoBApprovalSha256 != op.Config.TwoBAddendum.Approval.Sha256 || reveal.TwoBAddendumSha256 != op.Config.TwoBAddendum.Declaration.Sha256 {
+		t.Fatal("reveal replaced seeds or detached its explicit addendum")
+	}
+	if _, err := revealHeldOutCampaign(revealConfig, *plan, op.Release, op.Settings); err == nil || fixture.Entropy.Calls != draws || fixture.Invocations != 6 {
+		t.Fatal("reveal overwrote publication or created another draw/invocation")
+	}
+}
+
+// Byte substitution cannot be rescued by a still-valid declaration. Every
+// mutation starts with a fully authenticated base, not placeholder approval.
+func TestHeldOutTwoBComposedRejectsCorruptAuthorityBeforeEntropyAndInvoke(t *testing.T) {
+	cases := []struct {
+		name string
+		pin  func(*heldOutTwoBCompositionFixture) heldOutPinnedFile
+	}{
+		{name: "new approval", pin: func(f *heldOutTwoBCompositionFixture) heldOutPinnedFile {
+			return f.Preparation.Config.TwoBAddendum.Approval
+		}},
+		{name: "original approval", pin: func(f *heldOutTwoBCompositionFixture) heldOutPinnedFile {
+			return f.Preparation.Config.Amendment.Approval
+		}},
+		{name: "addendum", pin: func(f *heldOutTwoBCompositionFixture) heldOutPinnedFile {
+			return f.Preparation.Config.TwoBAddendum.Declaration
+		}},
+		{name: "original five-position plan", pin: func(f *heldOutTwoBCompositionFixture) heldOutPinnedFile {
+			return f.Preparation.Config.Amendment.OriginalPlan
+		}},
+		{name: "reference patch", pin: func(f *heldOutTwoBCompositionFixture) heldOutPinnedFile { return f.References[1].Patch }},
+		{name: "reference direction", pin: func(f *heldOutTwoBCompositionFixture) heldOutPinnedFile { return f.References[1].Direction }},
+		{name: "reference bundle", pin: func(f *heldOutTwoBCompositionFixture) heldOutPinnedFile { return f.Preparation.Config.References }},
+		{name: "fresh bridge plan", pin: func(f *heldOutTwoBCompositionFixture) heldOutPinnedFile {
+			return f.Preparation.Config.Amendment.BridgePlan
+		}},
+		{name: "fresh bridge receipt", pin: func(f *heldOutTwoBCompositionFixture) heldOutPinnedFile {
+			return f.Preparation.Config.Amendment.BridgeReceipt
+		}},
+	}
+	for _, testCase := range cases {
+		fixture := newHeldOutTwoBCompositionFixture(t)
+		pin := testCase.pin(fixture)
+		content, err := os.ReadFile(pin.Path)
+		if err != nil {
+			t.Fatal(testCase.name, err)
+		}
+		heldOutOpWrite(t, pin.Path, append(content, '\n'))
+		fixture.requireRefusedBeforeDraw(t, testCase.name)
+	}
+}
+
+// Re-pinning the new declaration and tool qualification cannot repair a
+// semantically invalid old approval, reference build or prospective bridge.
+func TestHeldOutTwoBComposedRejectsRepinnedBaseBeforeEntropyAndInvoke(t *testing.T) {
+	cases := []struct {
+		name          string
+		mutate        func(*testing.T, *heldOutTwoBCompositionFixture)
+		errorContains string
+	}{
+		{name: "old approval reused as new authority", mutate: func(t *testing.T, f *heldOutTwoBCompositionFixture) {
+			f.Preparation.Config.TwoBAddendum.Approval = f.Preparation.Config.Amendment.Approval
+		}},
+		{name: "original approval replaced", mutate: func(t *testing.T, f *heldOutTwoBCompositionFixture) {
+			pins := f.Preparation.Config.Amendment
+			pins.Approval = heldOutOpWrite(t, pins.Approval.Path, []byte("synthetic replacement original approval\n"))
+		}},
+		{name: "reference patch detached from admitted build", mutate: func(t *testing.T, f *heldOutTwoBCompositionFixture) {
+			f.References[1].Patch = heldOutOpWrite(t, f.References[1].Patch.Path, []byte("synthetic replacement reference patch\n"))
+			f.Preparation.Config.References = heldOutOpJson(t, f.Preparation.Config.References.Path, f.References)
+		}},
+		{name: "bridge explicitly rejected", mutate: func(t *testing.T, f *heldOutTwoBCompositionFixture) {
+			pins := f.Preparation.Config.Amendment
+			content, err := os.ReadFile(pins.BridgeReceipt.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var receipt heldOutBridgeCompatibility
+			if err := json.Unmarshal(content, &receipt); err != nil {
+				t.Fatal(err)
+			}
+			receipt.Accepted, receipt.Reasons = false, []string{"synthetic bridge gate failure retained"}
+			pins.BridgeReceipt = heldOutOpJson(t, pins.BridgeReceipt.Path, receipt)
+		}},
+		{name: "bridge request substituted", mutate: func(t *testing.T, f *heldOutTwoBCompositionFixture) {
+			pins := f.Preparation.Config.Amendment
+			content, err := os.ReadFile(pins.BridgePlan.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var plan heldOutBridgePlan
+			if err := json.Unmarshal(content, &plan); err != nil {
+				t.Fatal(err)
+			}
+			plan.Request.Sha256 = strings.Repeat("f", 64)
+			pins.BridgePlan = heldOutOpJson(t, pins.BridgePlan.Path, plan)
+		}},
+		{name: "bridge publication null evidence", errorContains: "held-out object contains missing/null field", mutate: func(t *testing.T, f *heldOutTwoBCompositionFixture) {
+			pins := f.Preparation.Config.Amendment
+			content, err := os.ReadFile(pins.BridgePublication.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var publication heldOutPublication
+			if err := json.Unmarshal(content, &publication); err != nil {
+				t.Fatal(err)
+			}
+			publication.Evidence = nil
+			pins.BridgePublication = heldOutOpJson(t, pins.BridgePublication.Path, publication)
+			content, err = os.ReadFile(pins.BridgeReceipt.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var receipt heldOutBridgeCompatibility
+			if err := json.Unmarshal(content, &receipt); err != nil {
+				t.Fatal(err)
+			}
+			receipt.BridgePublicationSha256 = pins.BridgePublication.Sha256
+			pins.BridgeReceipt = heldOutOpJson(t, pins.BridgeReceipt.Path, receipt)
+		}},
+	}
+	for _, testCase := range cases {
+		fixture := newHeldOutTwoBCompositionFixture(t)
+		testCase.mutate(t, fixture)
+		fixture.refreshDeclaration(t)
+		err := fixture.requireRefusedBeforeDraw(t, testCase.name)
+		if testCase.errorContains != "" && !strings.Contains(err.Error(), testCase.errorContains) {
+			t.Fatalf("%s rejected by a different guard: %v", testCase.name, err)
+		}
+	}
+}
+
+// A synthetic internal contract never becomes a native release selector.
+// Captured component bytes and full ancestor metadata remain independently gated.
+func TestHeldOutTwoBComposedRejectsRuntimeDriftAndNativeMockContract(t *testing.T) {
+	fixture := newHeldOutTwoBCompositionFixture(t)
+	reads := fixture.RuntimeReads
+	if _, err := authenticateHeldOutPreparation(fixture.Preparation.Config, fixture.Preparation.Release, fixture.Preparation.Settings); err == nil || !strings.Contains(err.Error(), "runtime differs from both named immutable C2 installations") || fixture.RuntimeReads != reads || fixture.Entropy.Calls != 0 || fixture.Invocations != 0 {
+		t.Fatal("native entry accepted or read the synthetic internal contract", err)
+	}
+	cases := []struct {
+		name   string
+		mutate func(*heldOutTwoBCompositionFixture)
+	}{
+		{name: "component digest", mutate: func(f *heldOutTwoBCompositionFixture) {
+			path := filepath.Join(f.Preparation.Release.ScriptDirectory, "evaluator.sh")
+			f.RuntimeContentBytesKVs[path] = append(bytes.Clone(f.RuntimeContentBytesKVs[path]), '\n')
+		}},
+		{name: "root leaf owner", mutate: func(f *heldOutTwoBCompositionFixture) {
+			path := f.Preparation.Release.Runtime.Manifest.Path
+			metadata := f.RootMetadataKVs[path]
+			metadata.Uid = 1000
+			f.RootMetadataKVs[path] = metadata
+		}},
+		{name: "root leaf link count", mutate: func(f *heldOutTwoBCompositionFixture) {
+			path := f.Preparation.Release.Runtime.RunnerManifest.Path
+			metadata := f.RootMetadataKVs[path]
+			metadata.Links = 2
+			f.RootMetadataKVs[path] = metadata
+		}},
+		{name: "writable ancestor", mutate: func(f *heldOutTwoBCompositionFixture) {
+			path := filepath.Dir(f.Preparation.Release.Runtime.Manifest.Path)
+			metadata := f.RootMetadataKVs[path]
+			metadata.Mode = os.ModeDir | 0775
+			f.RootMetadataKVs[path] = metadata
+		}},
+		{name: "symlink leaf", mutate: func(f *heldOutTwoBCompositionFixture) {
+			path := f.Preparation.Release.Runtime.Manifest.Path
+			metadata := f.RootMetadataKVs[path]
+			metadata.Mode = os.ModeSymlink | 0444
+			f.RootMetadataKVs[path] = metadata
+		}},
+	}
+	for _, testCase := range cases {
+		fixture := newHeldOutTwoBCompositionFixture(t)
+		testCase.mutate(fixture)
+		fixture.requireRefusedBeforeDraw(t, testCase.name)
+	}
+}
+
+// The second immutable-input fence follows generation and private-plan write.
+// A late replacement keeps that exact failed attempt without public output/reroll.
+func TestHeldOutTwoBComposedRetainsLateReplacementWithoutReroll(t *testing.T) {
+	cases := []struct {
+		name string
+		pin  func(*heldOutTwoBCompositionFixture) heldOutPinnedFile
+	}{
+		{name: "approval", pin: func(f *heldOutTwoBCompositionFixture) heldOutPinnedFile {
+			return f.Preparation.Config.TwoBAddendum.Approval
+		}},
+		{name: "reference", pin: func(f *heldOutTwoBCompositionFixture) heldOutPinnedFile { return f.References[1].Direction }},
+		{name: "bridge", pin: func(f *heldOutTwoBCompositionFixture) heldOutPinnedFile {
+			return f.Preparation.Config.Amendment.BridgeReceipt
+		}},
+	}
+	for _, testCase := range cases {
+		fixture := newHeldOutTwoBCompositionFixture(t)
+		op := fixture.Preparation
+		inputs, err := fixture.authenticate()
+		if err != nil {
+			t.Fatal(testCase.name, err)
+		}
+		pin := testCase.pin(fixture)
+		original, err := os.ReadFile(pin.Path)
+		if err != nil {
+			t.Fatal(testCase.name, err)
+		}
+		checks := 0
+		public, err := prepareHeldOutCampaign(t.Context(), op.Config, heldOutDigest(op.ConfigBytes), *inputs, op.Release, op.Settings, op.Hooks, func() error {
+			checks++
+			if checks == 2 {
+				heldOutOpWrite(t, pin.Path, append(bytes.Clone(original), '\n'))
+			}
+			again, err := fixture.authenticate()
+			if err != nil {
+				return err
+			}
+			if !reflect.DeepEqual(again, inputs) {
+				return errors.New("late replacement changed authenticated inputs")
+			}
+			return nil
+		})
+		if err == nil || public != nil || checks != 2 || fixture.Entropy.Calls == 0 || op.Generated != 2 || fixture.Invocations != 0 {
+			t.Fatalf("%s late substitution did not fail the final fence: checks=%d generated=%d invoked=%d err=%v", testCase.name, checks, op.Generated, fixture.Invocations, err)
+		}
+		for _, name := range []string{"preparation.started", "configuration.json", "private-plan.json"} {
+			if _, err := os.Lstat(filepath.Join(op.Config.PrivateRoot, name)); err != nil {
+				t.Fatal(testCase.name, "lost its exact failed private attempt", name, err)
+			}
+		}
+		if _, err := os.Lstat(op.Config.PublicPlanPath); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(testCase.name, "published a changed-input campaign", err)
+		}
+		draws := fixture.Entropy.Calls
+		heldOutOpWrite(t, pin.Path, original)
+		if _, err := fixture.authenticate(); err != nil {
+			t.Fatal(testCase.name, "did not restore the original base", err)
+		}
+		if _, err := prepareHeldOutCampaign(t.Context(), op.Config, heldOutDigest(op.ConfigBytes), *inputs, op.Release, op.Settings, op.Hooks, func() error {
+			_, err := fixture.authenticate()
+			return err
+		}); err == nil || fixture.Entropy.Calls != draws || op.Generated != 2 || fixture.Invocations != 0 {
+			t.Fatal(testCase.name, "restored approval silently permitted a replacement draw", err)
+		}
+	}
+}

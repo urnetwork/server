@@ -572,8 +572,30 @@ func SendAccountSms(phoneNumber string, template Template) error {
 	return (&AWSMessageSender{}).sendSmsTemplate(phoneNumber, template)
 }
 
-// Renders the template's SMS body and sends it as one text.
+// The account messages a phone number receives by SMS: account security only.
+// AWS SMS Trust & Safety paused the account's sending in May 2026 after the
+// welcome email went out as a text (AWS case 177660552500706). Every other
+// account message (the welcome, earnings, payout, subscription and purchase
+// notices) is email-only, so a phone-number account does not receive it.
+var smsTemplateNames = map[string]bool{
+	(&AuthVerifyTemplate{}).Name():        true,
+	(&AuthPasswordResetTemplate{}).Name(): true,
+	(&AuthPasswordSetTemplate{}).Name():   true,
+}
+
+// SmsAllowed reports whether a phone-number account receives the template by SMS.
+func SmsAllowed(template Template) bool {
+	return smsTemplateNames[template.Name()]
+}
+
+// Renders the template's SMS body and sends it as one text. A template that is
+// not account security is not sent by SMS at all: the call returns nil without
+// contacting AWS, the same as a delivered message for its callers.
 func (self *AWSMessageSender) sendSmsTemplate(phoneNumber string, template Template) error {
+	if !SmsAllowed(template) {
+		glog.V(1).Infof("[aws]account message %s is not sent by sms\n", template.Name())
+		return nil
+	}
 	bodyText, err := RenderSmsTemplate(template)
 	if err != nil {
 		return err

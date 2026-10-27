@@ -89,17 +89,26 @@ func revealHeldOutCampaign(config heldOutRevealConfig, plan heldOutPrivatePlan, 
 			return "", errors.New("held-out reveal commitment mismatch")
 		}
 	}
+	twoBProtocol, twoBApproval, twoBDeclaration := "", "", ""
+	if plan.Config.Protocol == heldOutProtocolThreeABridgeTwoB {
+		twoBProtocol = plan.Config.Protocol
+		twoBApproval = heldOutProtocolApproval(plan.Config)
+		_, _, twoBDeclaration = heldOutTwoBBindings(plan.Config)
+	}
 	reveal := struct {
-		Schema           int                   `json:"schema"`
-		Kind             string                `json:"kind"`
-		CampaignId       string                `json:"campaign_id"`
-		PublicPlanSha256 string                `json:"public_plan_sha256"`
-		ResultSha256     string                `json:"result_sha256"`
-		ClosureSha256    string                `json:"closure_sha256"`
-		Rounds           []heldOutPrivateRound `json:"revealed_rounds"`
+		Schema             int                   `json:"schema"`
+		Kind               string                `json:"kind"`
+		CampaignId         string                `json:"campaign_id"`
+		PublicPlanSha256   string                `json:"public_plan_sha256"`
+		ResultSha256       string                `json:"result_sha256"`
+		ClosureSha256      string                `json:"closure_sha256"`
+		Rounds             []heldOutPrivateRound `json:"revealed_rounds"`
+		TwoBProtocol       string                `json:"two_b_protocol,omitempty"`
+		TwoBApprovalSha256 string                `json:"two_b_approval_sha256,omitempty"`
+		TwoBAddendumSha256 string                `json:"two_b_addendum_sha256,omitempty"`
 	}{Schema: 1, Kind: "sim-latency-held-out-seed-reveal", CampaignId: plan.CampaignId,
 		PublicPlanSha256: config.Execution.PublicPlan.Sha256, ResultSha256: config.Result.Sha256,
-		ClosureSha256: config.Closure.Sha256, Rounds: plan.Rounds}
+		ClosureSha256: config.Closure.Sha256, Rounds: plan.Rounds, TwoBProtocol: twoBProtocol, TwoBApprovalSha256: twoBApproval, TwoBAddendumSha256: twoBDeclaration}
 	content, err := json.MarshalIndent(reveal, "", "  ")
 	if err != nil {
 		return "", err

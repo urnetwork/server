@@ -1,0 +1,91 @@
+{
+  "schema": 1,
+  "kind": "prebuilt-reference-evidence-layout-view",
+  "original_reference_bundle": {
+    "path": "/home/by/urnetwork/temp/c2-metadata-reference-builds-20261026.1Dxn7bbh/references.json",
+    "sha256": "82f76c8565d59c993c41d6b59f9f864e7b8b19bf67b43a94eaec8e4638450d32"
+  },
+  "normalized_reference_bundle": {
+    "path": "/var/lib/urnetwork/competition-reference-evidence-views-20261027-v1/references.json",
+    "sha256": "001feb8c46fcfc4571bd68841de28855c3ba2506c56fa07ade7734865fbdae51"
+  },
+  "changes": [
+    {
+      "role": "no-op",
+      "original_qualification": {
+        "path": "/home/by/urnetwork/temp/c2-metadata-reference-builds-20261026.1Dxn7bbh/no-op/build-qualification.json",
+        "sha256": "fd491b8a94d06ed128c729fe22794d685c6573debfef3da280ea97aa20472c5e"
+      },
+      "original_native_build": {
+        "path": "/home/by/urnetwork/temp/c2-metadata-reference-builds-20261026.1Dxn7bbh/no-op/native-build.json",
+        "sha256": "71446b64294031e224e4f79207a6d54f2fb967c09b1a2b35baeec1a2ae8ff2ef"
+      },
+      "view_qualification": {
+        "path": "/var/lib/urnetwork/competition-reference-evidence-views-20261027-v1/no-op/build-qualification.json",
+        "sha256": "9a340460e0ad4d40b63506c02b7cfb78f88011f9b12137525af035ea61217cff"
+      },
+      "view_native_build": {
+        "path": "/var/lib/urnetwork/competition-reference-evidence-views-20261027-v1/no-op/native-build.json",
+        "sha256": "71446b64294031e224e4f79207a6d54f2fb967c09b1a2b35baeec1a2ae8ff2ef"
+      },
+      "patch_sha256": "1076be3ed61df0e14ae90c13bbe4c35442de6371064fd7d78f61ed6834e170f1",
+      "image_id": "sha256:8385ae6f9d4379985cfbb612e8432ea830b2af0bf94c0265ddd315542486ba1d",
+      "binary_sha256": "b232bd355f90b44aa1838419f3375454009a337931c458641b1351b571bb0872",
+      "source_and_builder_bytes_identical": true
+    },
+    {
+      "role": "better",
+      "original_qualification": {
+        "path": "/home/by/urnetwork/temp/c2-metadata-reference-builds-20261026.1Dxn7bbh/better/build-qualification.json",
+        "sha256": "d7ad646f0998b4b8e14607480bffaea2d9bc384acb28ca74e462a4118d1c95f6"
+      },
+      "original_native_build": {
+        "path": "/home/by/urnetwork/temp/c2-metadata-reference-builds-20261026.1Dxn7bbh/better/native-build.json",
+        "sha256": "0984af205708a843b0506152ad964fa7b72e28c74161cedb31741ff5ae3eb21f"
+      },
+      "view_qualification": {
+        "path": "/var/lib/urnetwork/competition-reference-evidence-views-20261027-v1/better/build-qualification.json",
+        "sha256": "898aa388b423785287cb5d78e7994a9ca65edf47d42812ddf2e070112df1b969"
+      },
+      "view_native_build": {
+        "path": "/var/lib/urnetwork/competition-reference-evidence-views-20261027-v1/better/native-build.json",
+        "sha256": "0984af205708a843b0506152ad964fa7b72e28c74161cedb31741ff5ae3eb21f"
+      },
+      "patch_sha256": "46bc95e3f2719f26f939be7a86c274d0b98bb2b1027f1ef4537d61de4c4ec924",
+      "image_id": "sha256:761a605dd804b436ca20062153fa799f1b2002f5668c252bac2ac292a238c5a3",
+      "binary_sha256": "3c9967f81fbd3c617e92655ba2e4be7ec4289ebc29db3b9aa3a8234723231588",
+      "source_and_builder_bytes_identical": true
+    },
+    {
+      "role": "worse",
+      "original_qualification": {
+        "path": "/home/by/urnetwork/temp/c2-metadata-reference-builds-20261026.1Dxn7bbh/worse/build-qualification.json",
+        "sha256": "1f2542df2bc8a31def12896eff2012f95018e2842fd027bae87a7b9507c5d635"
+      },
+      "original_native_build": {
+        "path": "/home/by/urnetwork/temp/c2-metadata-reference-builds-20261026.1Dxn7bbh/worse/native-build.json",
+        "sha256": "81dc0725dccda2d0545e4fc582ed0cd6a1bd3fa8eab67f34c25718ee291f29f2"
+      },
+      "view_qualification": {
+        "path": "/var/lib/urnetwork/competition-reference-evidence-views-20261027-v1/worse/build-qualification.json",
+        "sha256": "47d2532ebb93b458263a10b0fd22c4a30c342f9bddae03f2e74e904ee1afa444"
+      },
+      "view_native_build": {
+        "path": "/var/lib/urnetwork/competition-reference-evidence-views-20261027-v1/worse/native-build.json",
+        "sha256": "81dc0725dccda2d0545e4fc582ed0cd6a1bd3fa8eab67f34c25718ee291f29f2"
+      },
+      "patch_sha256": "2957ef507f7edc9dadcb09abd6425664e88748612917959a9a65243a0365ebe4",
+      "image_id": "sha256:de5a27d664de9d9158289d89d85fe3c949400c61bfddf59cf48d64e097286992",
+      "binary_sha256": "87e2846e56690811462f6968e82a8b0d03afbd940c6e6d4967a8b9543d74493f",
+      "source_and_builder_bytes_identical": true
+    }
+  ],
+  "native_operator_unchanged": "244d54214899c9db523b563b0f9550a3a019d9e50e222a2c8712e7d4f9922e6b",
+  "original_files_changed": false,
+  "reference_code_or_patch_or_image_or_binary_changed": false,
+  "builds_reexecuted": 0,
+  "measurements": 0,
+  "native_precommit_authentication_pending": true,
+  "original_bridge_plan_sha256": "ebfd06c2cfc35b48caf9d451e0f8600f4effdca7a005b1873da0c4409cc39866",
+  "reason": "The private reference builder retained genuine sidecars at flat filenames. The unchanged native verifier requires the same bytes under evidence/candidate-original-source.json and evidence/builder-identity.json and requires those exact paths to be pinned. These new views only copy and pin those genuine bytes; all original proof remains retained."
+}

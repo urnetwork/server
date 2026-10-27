@@ -946,11 +946,15 @@ func acceptHeldOutOutcomesForProtocol(protocol string, rounds []heldOutPrivateRo
 	required := 4
 	if protocol == calibrationProtocolThreeABridgeThreeB {
 		required = 3
+	} else if protocol == heldOutProtocolThreeABridgeTwoB {
+		required = 2
 	}
 	if ordered < required {
 		reason := "fewer_than_four_of_five_correctly_ordered_seeds"
 		if protocol == calibrationProtocolThreeABridgeThreeB {
 			reason = "not_all_three_correctly_ordered_seeds"
+		} else if protocol == heldOutProtocolThreeABridgeTwoB {
+			reason = "not_all_two_correctly_ordered_seeds"
 		}
 		reasons = append(reasons, reason)
 	}
