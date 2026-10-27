@@ -197,13 +197,27 @@ up and moves each token still pending to the recovery marker in one Redis call,
 as the request's own page would have, unless an attempt of the request is in
 flight or has started publication (read under the request's pending lock when
 the handoff runs). The next page on the balance then releases the token
-through the fenced SQL custody check at once. A full owner drops the
-compensation without blocking. The proxy's before-exit hook quiesces the owner,
-as do the api once its HTTP drain returns and the taskworker once its tasks have
-handed back their claims. A dropped token, one the quiesce ended or one the
-owner could not hand off stays reserved under its pending marker: any page on
-the balance takes it once it is ten minutes old, and its 24-hour lease ends it
-at last.
+through the fenced SQL custody check at once.
+
+That page holds one of its process's PostgreSQL connections through the Redis
+release, so the handoff would move reclamation into a storm on a slow node.
+Two things hold it back. For 30 seconds after any of the owner's release or
+handoff calls times out (a slow Redis node, or a deadline-pool or PostgreSQL
+wait that outlived its call), the owner hands nothing off. And operators can
+turn the handoff off without a restart, with `handoff: false` in the config
+resource `redis_contract_compensation.yml`. Each give-up reads it, so a config
+push applies to the next give-up. Only a false value turns it off (`off` and
+`no` count too): an absent file, a missing key, or one that does not decode
+keeps the handoff on, and `operation="handoff",result="disabled"` confirms the
+switch took. Either way, a given-up token then waits out the ten-minute age
+gate, as before the handoff.
+
+A full owner drops the compensation without blocking. The proxy's before-exit
+hook quiesces the owner, as do the api once its HTTP drain returns and the
+taskworker once its tasks have handed back their claims. A dropped token, one
+the quiesce ended or one the owner did not hand off stays reserved under its
+pending marker: any page on the balance takes it once it is ten minutes old,
+and its 24-hour lease ends it at last.
 `urnetwork_redis_contract_reservation_total` counts
 `operation="compensation"` with the results `completed` and `pending` when a
 compensation ends, `deferred` when the owner takes one, `expired` when its
@@ -211,7 +225,8 @@ budget left the owner no pass (no retry fit in it, or it ended while the
 compensation waited for a worker) and `dropped` when the owner is full. It
 counts each given-up token's `operation="handoff"` as `moved`, `absent` (no
 pending marker was left), `skipped` (an attempt was in flight or publication
-had started) or `error` (left to the ten-minute age). Two gauges show how full
+had started), `disabled` (the switch was off), `slow` (a recent timeout held it
+back) or `error` (left to the ten-minute age). Two gauges show how full
 each process's owner is: `urnetwork_redis_contract_compensation_balances_held`
 counts the balances it holds, waiting for a retry or in a pass (it drops new
 compensations past 1024), and
