@@ -99,16 +99,16 @@ func AddClockTransferByteCount(ctx context.Context, byteCount ByteCount) {
 	if byteCount <= 0 {
 		return
 	}
-	server.Redis(ctx, func(r server.RedisClient) {
+	server.RedisDoOnce(ctx, func(r server.RedisClient) {
 		_, err := r.IncrBy(ctx, clockTransferByteCountRedisKey, byteCount).Result()
 		server.Raise(err)
-	}, server.OptNoRetry())
+	})
 }
 
-// clockTransferPost detaches the Redis projection from request cancellation.
+// Detaches the Redis projection from request cancellation.
 // Settlement is already committed when posts run, so losing the caller must
-// not discard the clock update. Failures are contained by server.RunPosts and
-// repaired by the backfill task.
+// not discard the clock update. server.RunPosts contains failures; aggregate
+// backfill cannot establish or repair an ambiguous increment exactly.
 func clockTransferPost(ctx context.Context, byteCount ByteCount) server.PostFunction {
 	return func() any {
 		clockCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)

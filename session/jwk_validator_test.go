@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sync"
 	"testing"
 
@@ -64,6 +65,18 @@ func TestSsoJwkValidatorsUseProviderKeySets(t *testing.T) {
 // never start the live key set fetch.
 func TestSetSsoJwkKeysVerifiesWithoutTheLiveKeySets(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
+		// The parsers refuse every audience that google.yml or apple.yml does
+		// not list, and no test vault has either file. Each list is read once
+		// per process, so set them before the first parse. No other test in
+		// this package parses through them.
+		googleAudience := testingGoogleClaims()["aud"].(string)
+		appleAudience := testingAppleClaims()["aud"].(string)
+		defer server.Vault.PushSimpleResource("google.yml", []byte("client_id: ["+googleAudience+"]\n"))()
+		defer server.Vault.PushSimpleResource("apple.yml", []byte("client_id: ["+appleAudience+"]\n"))()
+		if !slices.Equal(googleSsoClientIds(), []string{googleAudience}) || !slices.Equal(appleSsoClientIds(), []string{appleAudience}) {
+			t.Fatal("the sso audiences were read before this test set them")
+		}
+
 		key := testingSsoKey(t)
 		pop := Testing_SetSsoJwkKeys([]any{&key.PublicKey})
 

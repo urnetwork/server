@@ -46,7 +46,8 @@ func TestTaskHealthSignalExplainsBoundedRetentionCatchup(t *testing.T) {
 	}
 }
 
-func TestTaskHealthSignalAttributesExportStatsToKnownOverruns(t *testing.T) {
+// Large completed companion rows preserve correlation without inventing causal authority.
+func TestTaskHealthSignalRetainsCompletedOverlapWithoutOwnerAttribution(t *testing.T) {
 	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 		if strings.Contains(query, "WITH latest_export AS") {
 			return []Row{
@@ -63,16 +64,20 @@ func TestTaskHealthSignalAttributesExportStatsToKnownOverruns(t *testing.T) {
 	markdown := requireAlertClass(t, alerts, "task-duration-regression").Markdown()
 	for _, want := range []string{
 		"four read-heavy 90-day aggregates",
-		"shared primary load",
-		"Temporal overlap is attribution evidence",
+		"not necessarily an interval contributing to the flagged hourly mean",
+		"do not establish an overrun, deployed artifact or causal load owner",
+		"Temporal overlap is coincident evidence",
 		"CloseExpiredContracts duration=870s overlap=187s",
 		"ReconcileNetEscrow duration=317s overlap=121s",
 		"Keep ExportStats on its hourly cadence",
-		"bounded-lateral NetEscrow calls",
+		"matching companion baselines, evaluator outcomes and deployed artifacts",
 	} {
 		if !strings.Contains(markdown, want) {
-			t.Fatalf("ExportStats attribution lost %q:\n%s", want, markdown)
+			t.Fatalf("completed ExportStats overlap lost a required diagnostic")
 		}
+	}
+	if strings.Contains(markdown, "already-proven") || strings.Contains(markdown, "Deploy and verify the bounded close") {
+		t.Fatal("large completed overlap acquired unsupported causal owner or repair")
 	}
 }
 

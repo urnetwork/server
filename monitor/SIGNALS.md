@@ -8783,6 +8783,19 @@ owner signals. Require consecutive exports to return toward baseline after
 those taskworker fixes; do not rewrite or disable a successful public-stats
 export from one correlated duration.
 
+The current task-health diagnostic preserves completed overlap as coincident
+history only. Its bounded query selects the latest completed ExportStats
+interval, which need not be one of the intervals contributing to the flagged
+last-hour mean. A task name, an overlapping interval or even a large completed
+duration does not establish a companion overrun, artifact, causal load owner or
+SQL wait edge. Require the exact flagged export intervals and companion
+baselines, evaluator outcomes and immutable artifact evidence before directing
+a repair to an existing owner. Ordinary 20-second close or one-second NetEscrow
+completions must not acquire the historical incident's repair prescription.
+The export regression trigger, hourly cadence, ten-minute bound and original
+outlier/overlap evidence are unchanged; missing attribution is not a healthy
+export or recovery observation.
+
 ### 2.5a Asynchronous payer debit recovery
 Probe: `transfer-debits`
 Classes: `debit-writeback-lag`, `debit-worker-missing`.
@@ -8885,6 +8898,17 @@ deadline as an error. Closed, busy, non-idle or uncertain sessions, server
 connection errors and failed rollback or unlock still require disposal. This contains connection churn;
 it does not establish the timer's cause or close the two historical failures
 without emitter, phase/remaining-budget and journal-custody evidence.
+
+The cached forward52 flush sample adds `error_type=*pgconn.PgError` and
+`sqlstate=57014` (`query_canceled`). Its aggregate/function views overlap;
+they do not identify two incidents or bind older unknown-type cohorts.
+The original server message, ordered raising frames, source event clock and
+immutable Taskworker artifact remain absent. Type/code alone selects no
+cancellation initiator, acquisition/admission/session-validation or transaction
+stage, and establishes no durable financial outcome. Reuse one retained original
+with the same-event effective settings, caller-stop and query-entry/remaining-
+budget evidence before selecting a cause or repair. A user-request reason alone
+does not name the canceller. Prior repairs and cohort distinctions remain.
 
 False-positive qualifier: this recovered panic boundary is not process death or
 proof of a lost debit. A post-commit cleanup failure can coexist with a correct
@@ -9297,6 +9321,15 @@ ambiguity; the mirror is rebuilt from durable revisions; mixed Redis reservation
 leases and stream memberships retain their existing bounded expiry/reconciliation.
 No replay of a non-idempotent Redis increment is added. A quiet error log or low
 CPU does not establish complete recovery or current provider payout success.
+
+`AddClockTransferByteCount` uses `RedisDoOnce` so neither callback nor go-redis
+command retries can replay its non-idempotent `INCRBY`. `OptNoRetry` alone
+disables only callback retries. A reply lost after application surfaces an
+error and leaves the same-operation counter outcome ambiguous. The scalar clock
+and aggregate backfill cannot establish per-contract application or repair an
+ambiguous increment exactly. This local correction does not attribute a retained
+normalized-owner panic to that mechanism, bind its emitting artifact or prove
+runtime recovery.
 
 Provider-total projection reader prerequisite (2026-10-05): the existing task
 queue can durably carry an exact provider-total allocation independently of the
@@ -29848,6 +29881,32 @@ provided by the `reliability-index` catalog probe.
 ### 8.11 Fleet rollout serialization and worker freshness
 Probe: `rollout-guard`
 
+**Producer observation envelope:** each systemctl unit-list, Environment and
+worker-start read retains at most 64 KiB of stdout, with one additional byte
+used only to detect overflow, before shell-variable conversion. A private FIFO
+and reader cap the raw per-read file at N+1; a ten-second producer deadline
+with two-second forced-stop grace and joined reader/owner handles bound a
+stalled read. The collector shell owns both child PIDs directly; a caught signal to that
+collector joins those owned children and removes the
+private capture. These are observer costs, not service/unit-count limits, whole
+process RSS bounds or a generic SSH transport guarantee. Existing command and
+parent lifetimes remain separate, and uncaught process termination is not
+claimed to execute shell cleanup.
+
+Only complete successful bounded stdout is used. A failed or oversized unit
+discovery cannot certify an unmanaged empty host. A failed or oversized
+Environment read is visibility unknown and cannot establish its disabling
+setting absent; a failed worker-start read retains the existing unverifiable
+worker finding. Raw Environment and diagnostic bodies are not emitted.
+Independent complete unsafe hosts remain reported beside observation gaps;
+cutoff does not silently authorize health, recovery, a restart or a larger
+service limit. Sequential per-unit reads and intermediate unit-name lists are
+bounded by the two capped discovery results; the per-read byte bound is not a
+claim that the entire observer reads only N bytes or that SSH diagnostics are
+bounded by this leaf. Synthetic at-cap/N+1 controls distinguish excessive
+materialization from production memory failure. A budget cutoff can hide a
+real disabling unit and therefore supplies no absence authority.
+
 The host rollout lock is executed by every long-running Warp service worker,
 not by proxy alone. Installing a corrected `/usr/local/sbin/warpctl` does not
 change code already mapped by API, Connect, taskworker, proxy, or another
@@ -45505,6 +45564,22 @@ an unknown tag, a label or label value outside the code's closed sets, a
 non-finite value or a repeated series rejects the answer. Only inventory host
 and block names, fixed label values and counts reach an alert; process
 instance nonces, control values and response bodies do not.
+
+`drain-moves` requires the producer's initialized refusal children, both
+drain-move children, drain gauge and compulsory-close counter when judging a
+process known to run that code. Missing eager companions emit
+`drain-moves-telemetry-incomplete`; they cannot become healthy zeros or clear
+retained incidents. A partial process does not erase independent positive
+findings. Both absent drain-move children retain the legacy-build interpretation;
+the mover's lazy compulsory-send child can be absent without inventing a source
+failure when drain-code companions are complete.
+
+Historical drain ranges can outlive process-start series. Their host/block
+labels must still match desired inventory slots. An out-of-inventory range is
+withheld and makes the observation incomplete, while valid positive siblings
+remain visible. Only fixed missing/invalid counts are exported; instance nonces
+and unrecognized labels stay private. These source controls do not establish
+full movement qualification, deployed adoption or historical incident recovery.
 
 A fleet without the move code, or a rule with nothing to judge because the
 mover is off, in dry run or not sending, is a standing state of its own:

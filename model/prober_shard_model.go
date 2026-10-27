@@ -477,6 +477,9 @@ func ReapProberShard(ctx context.Context, key ProberShardKey) (deleted bool, ret
 			speeds AS (DELETE FROM network_client_speed WHERE connection_id IN (SELECT connection_id FROM connections))
 			DELETE FROM network_client_connection WHERE client_id=ANY($1)`, clients))
 			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM provide_key WHERE client_id=ANY($1)`, clients))
+			// every revocation record of the network refuses its clients
+			// before the deletion commits
+			server.Raise(session.RetireNetworkRecords(ctx, owner.NetworkId))
 			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM network_client WHERE network_id=$1`, owner.NetworkId))
 			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM device WHERE network_id=$1`, owner.NetworkId))
 			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM transfer_balance WHERE balance_id=$1 AND network_id=$2`, owner.BalanceId, owner.NetworkId))

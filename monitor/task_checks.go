@@ -1342,19 +1342,13 @@ func (self taskDurationProbe) check(ctx context.Context, env *probeEnv) ([]findi
 			verify = "Each run finishes before the task deadline, contract_retention_pending and duration fall on consecutive 30-minute runs, the legacy multi-million-row payment update stays absent, and no RemoveCompletedContracts reschedule error returns."
 			playbook = "SIGNALS.md §2.5, §2.10, and §8.9"
 		} else if task == "ExportStats" {
-			overlapEvidence, knownOwner, overlapErr := exportStatsOverlapEvidence(ctx, env)
+			overlapEvidence, overlapErr := exportStatsOverlapEvidence(ctx, env)
 			if overlapErr != nil {
 				overlapEvidence = "ExportStats overlap attribution failed; error_class=" + classifyObservationError(overlapErr)
 			}
-			if knownOwner {
-				mechanism = "ExportStats runs four read-heavy 90-day aggregates against ReplicaDb, which currently resolves to the primary. Its latest flagged interval overlapped already-proven CloseExpiredContracts and/or ReconcileNetEscrow overruns, making shared primary load the leading owner of this completed outlier rather than a new export execution defect. Temporal overlap is attribution evidence, not proof that one specific query blocked another."
-				action = "Deploy and verify the bounded close, score, and NetEscrow owners already identified by their dedicated signals. Keep ExportStats on its hourly cadence with the existing ten-minute bound; do not rewrite or disable a successfully completed export from this correlated sample."
-				verify = "After the owning taskworker fixes are active, consecutive ExportStats runs return toward the historical band while close checkpoints finish below 120s and bounded-lateral NetEscrow calls replace the legacy ANY scan. No ExportStats cancellation or immediate recomputation appears."
-			} else {
-				mechanism = "ExportStats runs four read-heavy 90-day aggregates against ReplicaDb, which currently resolves to the primary. The overlap snapshot did not identify a known close or NetEscrow overrun, so this completed outlier remains an export-query or unobserved-primary-load investigation rather than an attributed owner."
-				action = "Compare the four audit aggregate statements and PostgreSQL waits during the next run. Keep the hourly cadence and ten-minute task bound; do not disable the public stats export or infer a planner regression from one completed duration alone."
-				verify = "Two consecutive exports return toward the historical band, all four aggregate statements complete without a new plan or wait regression, and no ExportStats cancellation or immediate recomputation appears."
-			}
+			mechanism = "ExportStats runs four read-heavy 90-day aggregates against ReplicaDb, which currently resolves to the primary. The bounded overlap snapshot describes the latest completed export, not necessarily an interval contributing to the flagged hourly mean. Companion task names and completed durations do not establish an overrun, deployed artifact or causal load owner. Temporal overlap is coincident evidence, not proof that one specific query blocked another."
+			action = "Compare the exact flagged-hour export intervals, the four aggregate statements and PostgreSQL waits with matching companion baselines, evaluator outcomes and deployed artifacts before assigning a repair owner. Keep ExportStats on its hourly cadence with the existing ten-minute bound; do not rewrite, disable or recompute a successfully completed export, or deploy companion repairs from temporal overlap alone."
+			verify = "Two consecutive exports return toward the historical band, all four aggregate statements complete without a new plan or wait regression, and any companion repair is supported by its own qualified evidence. No ExportStats cancellation or immediate recomputation appears."
 			context = overlapEvidence
 			playbook = "SIGNALS.md §2.5, §2.6, and §5.11"
 		}
@@ -1378,11 +1372,11 @@ func (self taskDurationProbe) check(ctx context.Context, env *probeEnv) ([]findi
 	return findings, nil
 }
 
-// exportStatsOverlapEvidence retains the latest flagged export's task-level
-// concurrency boundary. finished_task cannot prove a SQL wait edge, but it can
-// distinguish a standalone export regression from an interval jointly occupied
-// by the already-attributed close and NetEscrow scans.
-func exportStatsOverlapEvidence(ctx context.Context, env *probeEnv) (string, bool, error) {
+// A bounded snapshot retains task-level concurrency around the latest completed
+// export, which need not be the interval that raised the hourly regression.
+// Task names and durations alone prove neither a companion overrun nor its
+// artifact, causal owner or SQL wait edge.
+func exportStatsOverlapEvidence(ctx context.Context, env *probeEnv) (string, error) {
 	rows, err := env.runner.pg(ctx, `
 		WITH latest_export AS (
 			SELECT run_start_time, run_end_time
@@ -1404,19 +1398,15 @@ func exportStatsOverlapEvidence(ctx context.Context, env *probeEnv) (string, boo
 		LIMIT 8;
 	`)
 	if err != nil {
-		return "", false, err
+		return "", err
 	}
 	if len(rows) == 0 {
-		return "latest ExportStats interval had no completed overlapping task rows", false, nil
+		return "latest ExportStats interval had no completed overlapping task rows", nil
 	}
 	lines := []string{"completed tasks overlapping the latest ExportStats interval:"}
-	knownOwner := false
 	for _, row := range rows {
 		task := row.str(0)
-		if task == "CloseExpiredContracts" || task == "ReconcileNetEscrow" {
-			knownOwner = true
-		}
 		lines = append(lines, fmt.Sprintf("  %s duration=%ss overlap=%ss", task, row.str(1), row.str(2)))
 	}
-	return strings.Join(lines, "\n"), knownOwner, nil
+	return strings.Join(lines, "\n"), nil
 }

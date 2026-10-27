@@ -119,14 +119,59 @@ func (rolloutGuardProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 	return findings, nil
 }
 
+// Each systemctl result is bounded before shell-variable materialization.
+// The cap is an observer envelope, not a service or configured-unit limit.
+const rolloutGuardCaptureMaxBytes = 64 * 1024
+
 const rolloutGuardScript = `set -u
+capture_dir=
+capture_reader=
+capture_owner=
+capture_value=
+rollout_capture_cleanup() {
+  if [ -n "$capture_reader" ]; then kill "$capture_reader" 2>/dev/null || :; fi
+  if [ -n "$capture_owner" ]; then kill "$capture_owner" 2>/dev/null || :; fi
+  if [ -n "$capture_reader" ]; then wait "$capture_reader" 2>/dev/null || :; capture_reader=; fi
+  if [ -n "$capture_owner" ]; then wait "$capture_owner" 2>/dev/null || :; capture_owner=; fi
+  if [ -n "$capture_dir" ]; then rm -rf -- "$capture_dir"; capture_dir=; fi
+}
+trap rollout_capture_cleanup EXIT
+trap 'trap "" HUP INT TERM; exit 1' HUP INT TERM
+rollout_capture() {
+  # The collector owns both children directly, even when only it is signaled.
+  rollout_capture_cleanup
+  capture_value=
+  umask 077
+  capture_dir=$(mktemp -d) || return 1
+  if ! mkfifo "$capture_dir/stdout"; then rollout_capture_cleanup; return 1; fi
+  timeout --kill-after=2s 10s "$@" >"$capture_dir/stdout" 2>/dev/null &
+  capture_owner=$!
+  head -c 65537 <"$capture_dir/stdout" >"$capture_dir/raw" &
+  capture_reader=$!
+  if wait "$capture_reader"; then reader_status=0; else reader_status=$?; fi
+  capture_reader=
+  if wait "$capture_owner"; then owner_status=0; else owner_status=$?; fi
+  capture_owner=
+  capture_bytes=$(wc -c <"$capture_dir/raw" | tr -d '[:space:]')
+  case "$capture_bytes" in ''|*[!0-9]*) rollout_capture_cleanup; return 1 ;; esac
+  if [ "$reader_status" -ne 0 ] || [ "$owner_status" -ne 0 ] || [ "$capture_bytes" -gt 65536 ]; then
+    rollout_capture_cleanup
+    return 1
+  fi
+  # Only a complete successful bounded file enters the result variable.
+  if ! capture_value=$(cat "$capture_dir/raw"); then rollout_capture_cleanup; return 1; fi
+  rollout_capture_cleanup
+  return 0
+}
 # A successful empty census is unmanaged; a failed producer is unknown.
-if ! unit_file_rows=$(systemctl list-unit-files --type=service --no-legend --no-pager "$rollout_unit_pattern" 2>/dev/null); then
+if ! rollout_capture systemctl list-unit-files --type=service --no-legend --no-pager "$rollout_unit_pattern"; then
   exit 1
 fi
-if ! running_unit_rows=$(systemctl list-units --type=service --state=running --no-legend --no-pager --plain "$rollout_unit_pattern" 2>/dev/null); then
+unit_file_rows=$capture_value
+if ! rollout_capture systemctl list-units --type=service --state=running --no-legend --no-pager --plain "$rollout_unit_pattern"; then
   exit 1
 fi
+running_unit_rows=$capture_value
 running_unit_names=$(printf '%s\n' "$running_unit_rows" | awk '$1 ~ /[.]service$/ {print $1}') || exit 1
 enabled_units=$(printf '%s\n' "$unit_file_rows" | awk '$2 ~ /^enabled/ {n++} END {print n+0}') || exit 1
 running_units=$(printf '%s\n' "$running_unit_names" | awk 'NF {n++} END {print n+0}') || exit 1
@@ -142,7 +187,9 @@ guard_disabled_units=0
 environment_unobserved_units=0
 guard_disabled_names=
 for unit in $known_unit_names; do
-  if unit_environment=$(systemctl show "$unit" -p Environment --value 2>/dev/null); then
+  unit_environment=
+  if rollout_capture systemctl show "$unit" -p Environment --value; then
+    unit_environment=$capture_value
     case "$unit_environment" in
       *WARPCTL_STAGGER_HOST_DRAIN=0*)
         guard_disabled_units=$((guard_disabled_units+1))
@@ -181,7 +228,8 @@ unverifiable_worker_names=
 oldest_worker_start_epoch=0
 newest_worker_start_epoch=0
 for unit in $running_unit_names; do
-  start_text=$(systemctl show "$unit" -p ExecMainStartTimestamp --value 2>/dev/null || true)
+  start_text=
+  if rollout_capture systemctl show "$unit" -p ExecMainStartTimestamp --value; then start_text=$capture_value; fi
   start_epoch=
   if [ -n "$start_text" ]; then
     start_epoch=$(LC_ALL=C date -d "$start_text" +%s 2>/dev/null || true)
