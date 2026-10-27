@@ -287,7 +287,7 @@ func validateWinnerSnowMember(judgment winnerModelJudgment, request winnerReview
 		return nil
 	}
 	probe := request.Template
-	probe.ReasonCodes, probe.PublicExplanation, probe.Findings = judgment.ReasonCodes, judgment.PublicExplanation, append([]model.CompetitionReviewFinding{}, judgment.Findings...)
+	probe.ReasonCodes, probe.PublicExplanation, probe.Findings = winnerSnowDispositionReasons(judgment.Decision, judgment.ReasonCodes), judgment.PublicExplanation, append([]model.CompetitionReviewFinding{}, judgment.Findings...)
 	probe.PrivateEvidenceSha256 = strings.Repeat("0", 64)
 	probe.WithheldEvidenceExplanation = "Native validation of standalone six-criterion content; no provider authority is conferred."
 	for i := range probe.Findings {
@@ -298,15 +298,13 @@ func validateWinnerSnowMember(judgment winnerModelJudgment, request winnerReview
 	} else {
 		probe.RewardDisposition, probe.SourceDisposition = "disqualified", "rejected"
 	}
-	policy := request.Request.Policy
-	policy.WinnerReviewPolicy, policy.WinnerReviewTimeoutSeconds = "", 0
-	if err := model.ValidateCompetitionIntegrityReview(probe, policy); err != nil {
+	if err := model.ValidateCompetitionSnowMemberContent(probe, request.Request.Policy); err != nil {
 		return err
 	}
 	if judgment.Decision == "disqualify" {
 		supported := false
 		for _, finding := range judgment.Findings {
-			for _, reason := range judgment.ReasonCodes {
+			for _, reason := range probe.ReasonCodes {
 				supported = supported || finding.Disposition == "fail" && finding.ReasonCode == reason
 			}
 		}
@@ -315,6 +313,20 @@ func validateWinnerSnowMember(judgment winnerModelJudgment, request winnerReview
 		}
 	}
 	return nil
+}
+
+// Member originals retain reasons for passing criteria too. Only the native
+// reward-disposition projection removes non-disqualifying summary reasons;
+// a rejection still needs its original substantiated failed finding.
+func winnerSnowDispositionReasons(decision string, reasons []string) []string {
+	compatible := make([]string, 0, len(reasons))
+	for _, reason := range reasons {
+		if decision == "disqualify" && (reason == "APPROVED" || reason == "SOURCE_NOT_READY" || reason == "PRODUCT_INTEGRATION_RISK" || reason == "EVALUATION_INTEGRITY_INCIDENT" || reason == "APPEAL_UPHELD") {
+			continue
+		}
+		compatible = append(compatible, reason)
+	}
+	return compatible
 }
 
 // Authority requires all exact members. Global disposition-compatible reasons
@@ -375,11 +387,9 @@ func aggregateWinnerSnow(members []winnerSnowMemberEvidence, provider winnerSnow
 		}
 	}
 	for reason := range reasons {
-		if combined.Decision == "disqualify" && (reason == "APPROVED" || reason == "SOURCE_NOT_READY" || reason == "PRODUCT_INTEGRATION_RISK" || reason == "EVALUATION_INTEGRITY_INCIDENT" || reason == "APPEAL_UPHELD") {
-			continue
-		}
 		combined.ReasonCodes = append(combined.ReasonCodes, reason)
 	}
+	combined.ReasonCodes = winnerSnowDispositionReasons(combined.Decision, combined.ReasonCodes)
 	sort.Strings(combined.ReasonCodes)
 	if combined.Decision == "uncertain" {
 		combined.ReasonCodes = []string{"SOURCE_NOT_READY"}

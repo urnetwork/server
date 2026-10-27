@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "kind": "competition-frozen-source-remote-branch-observation",
+  "observed_utc_minute": "2026-10-26T23:44Z",
+  "branch": "sim-latency",
+  "source_lock_sha256": "ec322ed2db023e15ea5dc3eea60a6ca5989661bba737c340fea3477d8d1300cf",
+  "all_ten_remote_branch_heads_match_frozen_checkpoint": true,
+  "scope": "Read-only git ls-remote observations; not image, hardware, calibration or provider qualification. Main API and worker releases remain on main, separately from these evaluation source branches.",
+  "repositories": {
+    "server": {"url": "https://github.com/urnetwork/server", "commit": "a9e8e1a710b24c749e6499a0606938252c83e136"},
+    "connect": {"url": "https://github.com/urnetwork/connect", "commit": "e90d59eb404f973dba6e9d0689ecd94e2718c10e"},
+    "sdk": {"url": "https://github.com/urnetwork/sdk", "commit": "d3824aa98c02e3c16ff7abcfe7a7088c8a470cdb"},
+    "proxy": {"url": "https://github.com/urnetwork/proxy", "commit": "af1d364fe34b807c31936642bff7d3fd849ab2a4"},
+    "glog": {"url": "https://github.com/urnetwork/glog", "commit": "1c4954b017d9e8140a4e7020f914eb27410a41c6"},
+    "goidenticons": {"url": "https://github.com/urnetwork/goidenticons", "commit": "39ccec1b69db3a6f67e7346d6f44863499e6241d"},
+    "userwireguard": {"url": "https://github.com/urnetwork/userwireguard", "commit": "f9a92f0e5f5577a80d358065c4d39ca21f971a1c"},
+    "sn": {"url": "https://github.com/urfoundation/sn", "commit": "6e686aabd53b7c45b154051fd268138988224eba"},
+    "warp": {"url": "https://github.com/urnetwork/warp", "commit": "8dfa405ec380a60307952778921f05bba1c59a33"},
+    "gvisor": {"url": "https://github.com/urnetwork/gvisor", "commit": "57c9e137f7407ad6cd41dcca1ba304a446e09c79"}
+  }
+}

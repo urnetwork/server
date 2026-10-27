@@ -39,7 +39,7 @@ func winnerSnowResolvedSchema(t *testing.T, schema map[string]any) *jsonschema.R
 // The previous schema accepted empty reasons, explanations and private evidence.
 // Those same synthetic fields must now fail the provider contract, not be filled in.
 func TestWinnerSnowSchemaRejectsEmptyRequiredEvidence(t *testing.T) {
-	request, judgment := winnerModelFixture()
+	request, judgment := winnerSnowJudgmentFixture()
 	judgment.ReasonCodes, judgment.PrivateEvidence = []string{}, ""
 	for index := range judgment.Findings {
 		judgment.Findings[index].ReasonCode, judgment.Findings[index].Explanation, judgment.Findings[index].EvidenceSha256 = "", "", ""
@@ -132,7 +132,7 @@ func TestWinnerSnowSchemaConstrainsCompleteJudgmentShape(t *testing.T) {
 // Even completed uncertainty must contain genuine nonempty attributed evidence;
 // schema bypass or whitespace cannot be normalized into a usable member.
 func TestWinnerSnowUncertaintyRequiresCompleteNativeEvidence(t *testing.T) {
-	request, judgment := winnerModelFixture()
+	request, judgment := winnerSnowJudgmentFixture()
 	judgment.Decision, judgment.ReasonCodes = "uncertain", []string{"SOURCE_NOT_READY"}
 	content, err := json.Marshal(judgment)
 	if err != nil {
