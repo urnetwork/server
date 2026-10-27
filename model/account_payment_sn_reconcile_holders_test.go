@@ -171,13 +171,13 @@ func snReconcileTestSweepContractFloor() time.Time {
 //   - a bound from the epoch's start, with a sweep that closed at it, one that
 //     closed after it within the id bound, and one past the id bound;
 //   - a bound raised by an earlier row without an epoch;
-//   - past the id bound, a contract with an outcome and no close time, an open
-//     contract, and one without a close time whose two sweeps are early in two
-//     networks' rows;
+//   - past the close bound, a contract with an outcome and no close time, and
+//     one whose two sweeps are early in two networks' rows;
 //   - within it, a contract without a close time, counted once;
 //   - an id a millisecond short of the margin ahead of its close;
-//   - a bound before the contract floor, with a sweep without its contract
-//     between the id bound and the floor;
+//   - a bound before the contract floor, with a sweep without its contract and
+//     a contract without a close time between the close bound and the floor,
+//     each counted once;
 //   - a completed row holding a sweep without a close time, a bonus moved
 //     from another row, and rows without early sweeps.
 //
@@ -221,11 +221,10 @@ func TestSnReconcileHoldersMatchReference(t *testing.T) {
 		payment(c, bound.Add(3*day))
 		raised := planned(c, now.Add(-day), bound, closedAt(c, bound.Add(2*day), UsdToNanoCents(1)), closedAt(c, bound.Add(5*day), UsdToNanoCents(2)))
 
-		// Past the id bound: a settled contract without a close time and an open
-		// contract are early.
+		// Past the close bound: a settled contract without a close time is early.
 		d := newPayoutTransitionCohort(t, ctx)
 		unknownPast := planned(d, now.Add(-day), bound, snReconcileTestUnclosedSettled(t, ctx, d, bound.Add(3*day), bound.Add(3*day), UsdToNanoCents(1)),
-			snReconcileTestOpenSwept(t, ctx, d, bound.Add(4*day), bound.Add(4*day), UsdToNanoCents(2)), closedAt(d, bound.Add(5*day), UsdToNanoCents(4)))
+			closedAt(d, bound.Add(5*day), UsdToNanoCents(4)))
 
 		// One contract without a close time with a sweep in each of two networks.
 		e, e2 := newPayoutTransitionCohort(t, ctx), newPayoutTransitionCohort(t, ctx)
@@ -246,11 +245,13 @@ func TestSnReconcileHoldersMatchReference(t *testing.T) {
 			bound.Add(-time.Hour), &bound, bound, 10, UsdToNanoCents(1)))
 
 		// A bound before the contract floor: below the floor a sweep may lack its
-		// contract, and that sweep is early.
+		// contract, and that sweep is early, as is a settled contract without a
+		// close time there.
 		k := newPayoutTransitionCohort(t, ctx)
 		old := floor.Add(-60 * day)
 		belowFloor := planned(k, now.Add(-day), old, snReconcileTestOrphanSweep(t, ctx, k, contractIdMintedAt(floor.Add(-10*day)), floor.Add(-10*day), UsdToNanoCents(1)),
-			closedAt(k, floor.Add(-5*day), UsdToNanoCents(2)), closedAt(k, floor.Add(5*day), UsdToNanoCents(4)))
+			closedAt(k, floor.Add(-5*day), UsdToNanoCents(2)), closedAt(k, floor.Add(5*day), UsdToNanoCents(4)),
+			snReconcileTestUnclosedSettled(t, ctx, k, floor.Add(-8*day), floor.Add(-8*day), UsdToNanoCents(8)))
 
 		// Not listed: a completed row, rows without early sweeps or any sweep; and
 		// a bonus moved from another row is listed.
@@ -267,8 +268,8 @@ func TestSnReconcileHoldersMatchReference(t *testing.T) {
 		// The fixture reaches every branch it claims to.
 		early := snReconcileTestHoldersEarlyRevenue(t, ctx, snReconcileHoldersSql)
 		for paymentId, want := range map[server.Id]NanoCents{infinite: UsdToNanoCents(7), atBound: UsdToNanoCents(1), raised: UsdToNanoCents(1),
-			unknownPast: UsdToNanoCents(3), sharedFirst: UsdToNanoCents(1), sharedSecond: UsdToNanoCents(2), unknownWithin: UsdToNanoCents(1),
-			ahead: UsdToNanoCents(1), belowFloor: UsdToNanoCents(1), bonusTarget: 0} {
+			unknownPast: UsdToNanoCents(1), sharedFirst: UsdToNanoCents(1), sharedSecond: UsdToNanoCents(2), unknownWithin: UsdToNanoCents(1),
+			ahead: UsdToNanoCents(1), belowFloor: UsdToNanoCents(9), bonusTarget: 0} {
 			if got, listed := early[paymentId]; !listed || got != want {
 				t.Fatal("early revenue", paymentId, listed, got, want)
 			}
@@ -289,7 +290,8 @@ func TestSnReconcileHoldersMatchReference(t *testing.T) {
 //   - its contract closed at the bound with an id the margin ahead of its
 //     close, which no contract's id runs (snReconcileLaterSweepIdBoundSql);
 //   - its contract is disputed without a close time, which the dispute never
-//     leaves.
+//     leaves;
+//   - its contract is open, which a contract holding a sweep never is.
 //
 // A contract id a millisecond short of the margin ahead is still read.
 func TestSnReconcileHoldersBoundary(t *testing.T) {
@@ -321,8 +323,12 @@ func TestSnReconcileHoldersBoundary(t *testing.T) {
 			return contractId
 		})
 
+		open := holder(func(cohort *payoutTransitionCohort) server.Id {
+			return snReconcileTestOpenSwept(t, ctx, cohort, bound.Add(3*day), bound.Add(3*day), UsdToNanoCents(1))
+		})
+
 		reference, listed := snReconcileTestHoldersEarlyRevenue(t, ctx, snReconcileHoldersReferenceSql), snReconcileTestHoldersEarlyRevenue(t, ctx, snReconcileHoldersSql)
-		for _, paymentId := range []server.Id{orphan, atMargin, inside, disputed} {
+		for _, paymentId := range []server.Id{orphan, atMargin, inside, disputed, open} {
 			if reference[paymentId] != UsdToNanoCents(1) {
 				t.Fatal("the reference does not find the early sweep", paymentId, reference)
 			}
@@ -338,9 +344,8 @@ func TestSnReconcileHoldersBoundary(t *testing.T) {
 // plan's epoch started 20 days ago holds 50,000 sweeps of contracts created
 // from two days after its epoch started, each closed an hour after its
 // creation. Five more are of contracts created within the day after the
-// epoch started, which closed after it. Three settled contracts without a
-// close time and one open contract, created later, hold its four early
-// sweeps. 2,000 sweeps of other payments give the statistics main has, where
+// epoch started, which closed after it. Four settled contracts without a
+// close time, created later, hold its four early sweeps. 2,000 sweeps of other payments give the statistics main has, where
 // a payment holds few of the sweeps. The read checks the five sweeps against
 // their contracts and reads the four contracts without a close time, 9
 // contract rows in all; the reference read a contract for each of the 50,009.
@@ -358,11 +363,10 @@ func TestSnReconcileHoldersReadsBoundedSweeps(t *testing.T) {
 			closed := created.Add(time.Hour)
 			contracts = append(contracts, f.insertMinted(t, ctx, created, &closed, closed, 10, UsdToNanoCents(1)))
 		}
-		for i := range unknownCount - 1 {
+		for i := range unknownCount {
 			at := epoch.Add(3*day + time.Duration(i)*time.Hour)
 			contracts = append(contracts, snReconcileTestUnclosedSettled(t, ctx, f, at, at, UsdToNanoCents(2)))
 		}
-		contracts = append(contracts, snReconcileTestOpenSwept(t, ctx, f, epoch.Add(4*day), epoch.Add(4*day), UsdToNanoCents(2)))
 		holder := snReconcileTestPayment(t, ctx, f.network, nil, now.Add(-day), contracts...)
 		snReconcileTestEpoch(t, ctx, holder, epoch)
 		// One contract every 30 seconds, each minted at its creation and closed an
