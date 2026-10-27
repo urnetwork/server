@@ -206,6 +206,20 @@
     "ordinary_competition_worker_started": false,
     "production_activated": false
   },
+  "initial_c2_host_installation": {
+    "state": "file_only_installed_not_eligible",
+    "host_configuration_sha256": "8df2d636c8745a8fc0ec10f1a75ee2d042eba4f5f1bd019a9f1cc856f4ed6b2f",
+    "receipt": "/var/lib/urnetwork/competition-production-initial-host-provisioning-20261028-v1/installation-receipt.json",
+    "receipt_sha256": "c8841c80c2f202183122736d459628f55f4cbb36e117e8590bec636144442b57",
+    "old_staging_configuration_backed_up": true,
+    "readiness_markers_created": 0,
+    "preparation_wrapper_sha256": "37ca9bd47a177339c9e04cfa9b1702665fd7f3affd9509c66d0ce693880f23fa",
+    "preparation_configuration_sha256": "8031dd2bdb508ea964a351fe0360166293a58323d68e3ec235adc5a22c59cb05",
+    "qualification_configuration_sha256": "5411b30e76ce2639f7ea85b3d5e6917750737ce8d7ff30451e10d7a3f319b08c",
+    "preparation_invoked": false,
+    "host_eligible": false,
+    "production_activated": false
+  },
   "current_provider_qualification": {
     "review_qualified": false,
     "latest_attempt": "v7",

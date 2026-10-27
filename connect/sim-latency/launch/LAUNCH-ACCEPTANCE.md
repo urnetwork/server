@@ -29,8 +29,9 @@ This checkpoint supersedes conflicting progress statements in the historical
   consecutive times (42 passes, zero skips). A compiled old-count control
   failed at the exact stale-two-seed assertion. Native policy generation is
   authorized only for a new private namespace; the prior sealed `f6967287…`
-  two-seed preimage must not be relabeled. Published config `038333e…` still
-  needs a superseding one-seed policy before activation.
+  two-seed preimage must not be relabeled. Superseding config `62a29a783…`
+  and approval `ff32e907…` are pushed; deployment and API reload are requested
+  but not yet verified.
 - V7 review qualification terminated unqualified: cancellation passed, but
   the benign case's Muse judgment lacked its final JSON brace. Qwen and Gemma
   returned valid approvals; the union correctly withheld authority. Report
@@ -43,9 +44,16 @@ This checkpoint supersedes conflicting progress statements in the historical
   curated baseline passed both local and global manifests.
 - Preparation-only manager `0a396c4a…` is installed inactive and its CLI help
   is verified. No production bootstrap, target-round R1, API/worker readiness
-  quorum, source activation or admission is claimed. Current deployment is
-  being rechecked; the last completed read-only DB audit still showed
-  migrations 891–893 pending.
+  quorum, source activation or admission is claimed. The 15:08:43 read-only
+  DB audit sees head 895 and all required identities 0–892 matching; its older
+  binary cannot identity-validate later indices 893–894. The production
+  namespace is empty. Public info still returns `source_not_ready`.
+- Initial C2 host configuration `8df2d636…` is now installed with its original
+  staging configuration backed up. Receipt `c8841c80…` records a file-only
+  change: no marker, checker, qualifier, worker, API call or DB write. This is
+  **not** host eligibility. Exact fixed-context preparation wrapper `37ca9bd4…`
+  and profiles `8031dd2b…` / `5411b30e…` are installed inactive; no preparation
+  command has been invoked.
 
 ## Historical checkpoint — October 27, 12:24 UTC
 
