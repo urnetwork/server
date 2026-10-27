@@ -965,12 +965,13 @@ func (self *redisDeferredCompensations) offer(ctx context.Context, compensation 
 	if deferred == nil {
 		return false
 	}
-	if delay, ok := compensation.NextDeferredRetry(); ok {
-		self.schedule(deferred, delay)
-	} else {
+	if delay, ok := compensation.NextDeferredRetry(); !ok {
 		// No deferred pass fits in the budget: a worker ends it at once.
 		compensation.exhausted = true
 		self.fall(deferred)
+	} else if !self.schedule(deferred, delay) {
+		// a quiesce came first
+		self.quiesced(deferred)
 	}
 	return true
 }
@@ -1001,9 +1002,10 @@ func (self *redisDeferredCompensations) hold(ctx context.Context, compensation *
 	return deferred
 }
 
-// Times the compensation's next pass after delay. Until it falls due it holds
+// Times the compensation's next pass after delay, and reports whether it did:
+// not once a quiesce has come. Until the retry falls due the compensation holds
 // no worker, and a quiesce ends it.
-func (self *redisDeferredCompensations) schedule(deferred *redisDeferredCompensation, delay time.Duration) {
+func (self *redisDeferredCompensations) schedule(deferred *redisDeferredCompensation, delay time.Duration) bool {
 	retry := func() *redisDeferredRetry {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
@@ -1016,9 +1018,7 @@ func (self *redisDeferredCompensations) schedule(deferred *redisDeferredCompensa
 		return deferred.retry
 	}()
 	if retry == nil {
-		// a quiesce came first
-		self.quiesced(deferred)
-		return
+		return false
 	}
 	stop := deferred.compensation.cleanup.after(delay, func() { self.fire(deferred, retry) })
 	kept := func() bool {
@@ -1034,6 +1034,7 @@ func (self *redisDeferredCompensations) schedule(deferred *redisDeferredCompensa
 		// the retry fell due, or a quiesce ended it, before its timer was kept
 		stop()
 	}
+	return true
 }
 
 // The retry's timer fired: the compensation waits for the next free worker.
@@ -1084,12 +1085,14 @@ func (self *redisDeferredCompensations) unschedule(deferred *redisDeferredCompen
 	self.quiesced(deferred)
 }
 
-// Ends a compensation a quiesce reached. Its tokens stay pending, as at
+// Ends a compensation a quiesce reached, once. Its tokens stay pending, as at
 // process exit.
 func (self *redisDeferredCompensations) quiesced(deferred *redisDeferredCompensation) {
 	defer self.end(deferred)
-	deferred.compensation.failures = append(deferred.compensation.failures, context.Canceled)
-	deferred.compensation.finish()
+	server.HandleError(func() {
+		deferred.compensation.failures = append(deferred.compensation.failures, context.Canceled)
+		deferred.compensation.finish()
+	})
 }
 
 func (self *redisDeferredCompensations) work() {
@@ -1118,8 +1121,9 @@ func (self *redisDeferredCompensations) next() *redisDeferredCompensation {
 	return deferred
 }
 
-// The compensation's turn on a worker: a pass, then its next retry or its end.
-// A raise ends the compensation pending, and the worker goes on.
+// The compensation's turn on a worker: a pass, then its next retry or its end,
+// which happens exactly once. A raise ends the compensation pending, and the
+// worker goes on.
 func (self *redisDeferredCompensations) run(deferred *redisDeferredCompensation) {
 	var delay time.Duration
 	retry := false
@@ -1128,10 +1132,12 @@ func (self *redisDeferredCompensations) run(deferred *redisDeferredCompensation)
 	}, func() {
 		redisContractReservationResults.WithLabelValues("compensation", "pending").Inc()
 	})
-	if retry {
-		self.schedule(deferred, delay)
-	} else {
+	switch {
+	case !retry:
 		self.end(deferred)
+	case !self.schedule(deferred, delay):
+		// a quiesce came first
+		self.quiesced(deferred)
 	}
 }
 
