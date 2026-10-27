@@ -206,6 +206,13 @@ type SubscriptionBalanceResult struct {
 	// Monero or Zcash) whose grace has not ended. Apps show the renewal notice
 	// while term_end_time <= now < grace_end_time, and never before.
 	CryptoTerm *CryptoTerm `json:"crypto_term,omitempty"`
+
+	// ----- failed renewals (subscription_stripe_dunning.go) -----
+	// PaymentPastDue is set while a store retries a renewal whose payment did
+	// not go through. Apps show the past-due notice while it is present, with
+	// an action that opens its update_payment_url. Omitted otherwise, and from
+	// an older server.
+	PaymentPastDue *PaymentPastDue `json:"payment_past_due,omitempty"`
 }
 
 type Subscription struct {
@@ -218,6 +225,12 @@ func SubscriptionBalance(session *session.ClientSession) (*SubscriptionBalanceRe
 	// at a grant boundary the old grant is still active through its grace; the
 	// summary counts only the new one (see model.SummarizeTransferBalances)
 	transferBalanceSummary := model.GetTransferBalanceSummary(session.Ctx, session.ByJwt.NetworkId)
+	if 0 < transferBalanceSummary.StrandedTransferByteCount {
+		// Pending that no current grant reserves belongs to contracts past their
+		// deadline. Retire them now rather than when a closer reaches them, so
+		// Pending returns while the user is looking (gated per payer).
+		model.RequestPayerDueContractClose(session.Ctx, session.ByJwt.NetworkId)
+	}
 
 	// Pro comes from pro_model, the single place it is tracked. It is NOT "has a
 	// paid balance": a data code is paid but data-only, so that test would report
@@ -266,6 +279,7 @@ func SubscriptionBalance(session *session.ClientSession) (*SubscriptionBalanceRe
 		PendingPayoutUsdNanoCents: pendingPayout,
 		UpdateTime:                server.NowUtc(),
 		Guest:                     isGuestNetwork(session, model.HasAnyAuthMethod),
+		PaymentPastDue:            paymentPastDueForNetwork(session.Ctx, session.ByJwt.NetworkId, stripeDunningNow(), stripeDunningSettingsFunc()),
 	}, nil
 }
 

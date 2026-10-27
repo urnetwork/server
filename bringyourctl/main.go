@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"math/big"
 	"os"
@@ -89,6 +90,7 @@ Usage:
     bringyourctl onboarding rollup [--from=<from>] [--to=<to>]
     bringyourctl onboarding experiments [--resume | --pause] [--experiment=<experiment>] [--variant=<variant>] [--reason=<reason>]
     bringyourctl payments reconcile [--dry-run] [--store=<store>]
+    bringyourctl payments stripe-dunning [--send]
     bringyourctl crypto list [--asset=<asset>] [--state=<state>] [--limit=<n>]
     bringyourctl crypto show --intent=<intent_id>
     bringyourctl crypto credit --intent=<intent_id>
@@ -115,6 +117,7 @@ Usage:
     bringyourctl contracts close-expired [-c <count>]
     bringyourctl contracts close --contract_id=<contract_id> --target_id=<target_id> --used_transfer_byte_count=<used_transfer_byte_count>
     bringyourctl contracts reconcile-net-escrow [--network_id=<network_id>] [--dry-run]
+    bringyourctl contracts close-due --network_id=<network_id> [--dry-run]
     bringyourctl streams expire-leaked-ttls
     bringyourctl task ls
     bringyourctl task rm <task_id>
@@ -348,6 +351,8 @@ func main() {
 	} else if payments, _ := opts.Bool("payments"); payments {
 		if reconcile, _ := opts.Bool("reconcile"); reconcile {
 			paymentsReconcile(opts)
+		} else if stripeDunning, _ := opts.Bool("stripe-dunning"); stripeDunning {
+			os.Exit(paymentsStripeDunning(opts, os.Stdout))
 		}
 	} else if crypto, _ := opts.Bool("crypto"); crypto {
 		os.Exit(cryptoCommand(opts, os.Stdout))
@@ -431,6 +436,14 @@ func main() {
 		}
 		if reconcile, _ := opts.Bool("reconcile-net-escrow"); reconcile {
 			reconcileNetEscrow(opts)
+		}
+		if closeDue, _ := opts.Bool("close-due"); closeDue {
+			networkIdStr, err := opts.String("--network_id")
+			server.Raise(err)
+			networkId, err := server.ParseId(networkIdStr)
+			server.Raise(err)
+			dryRun, _ := opts.Bool("--dry-run")
+			os.Exit(runPayerDueContractClose(context.Background(), os.Stdout, networkId, dryRun, defaultPayerDueContractCloseOps()))
 		}
 	} else if streams, _ := opts.Bool("streams"); streams {
 		if expireLeakedTtls, _ := opts.Bool("expire-leaked-ttls"); expireLeakedTtls {
@@ -1946,6 +1959,61 @@ func payoutPlanApplyBonus(opts docopt.Opts) error {
 		return err
 	}
 	return model.PayoutPlanApplyBonus(ctx, planId, amountNanoCents, operationId, reason)
+}
+
+// paymentsStripeDunning lists every subscription Stripe is retrying (past_due,
+// unpaid) with what the failed-payment follow-up owes its latest invoice now
+// (controller/subscription_stripe_dunning.go): the network, whether the account
+// has an email, the invoice, the amount, the attempt count and the notice. It
+// only reads Stripe and the database. --send owes those notices, through the
+// same processing as the invoice.payment_failed webhook, so an invoice the
+// webhook already noticed gets nothing more; the account message delivery task
+// sends them within a minute. Exits non-zero when a subscription could not be
+// read.
+func paymentsStripeDunning(opts docopt.Opts, out io.Writer) int {
+	ctx := context.Background()
+	send, _ := opts.Bool("--send")
+	rows, err := controller.StripeDunningReport(ctx, send)
+	if err != nil {
+		fmt.Fprintf(out, "stripe dunning failed: %s\n", err)
+		return 1
+	}
+	if send {
+		fmt.Fprintf(out, "stripe dunning SEND: the notices below are owed and queued\n")
+	} else {
+		fmt.Fprintf(out, "stripe dunning DRY RUN: nothing was written or sent; --send owes the notices below\n")
+	}
+	fmt.Fprintf(out, "%-30s %-9s %-38s %-5s %-29s %10s %8s %-17s %-6s %s\n",
+		"subscription", "status", "network", "email", "invoice", "amount", "attempts", "next attempt", "notice", "note")
+	failed := 0
+	for _, row := range rows {
+		networkId := "-"
+		if row.NetworkId != nil {
+			networkId = row.NetworkId.String()
+		}
+		email := "no"
+		if row.HasEmail {
+			email = "yes"
+		}
+		nextAttempt := "-"
+		if row.NextAttemptTime != nil {
+			nextAttempt = row.NextAttemptTime.UTC().Format("2006-01-02 15:04")
+		}
+		notice := row.Notice
+		if notice == "" {
+			notice = "none"
+		}
+		if strings.HasPrefix(row.Skip, "error: ") {
+			failed += 1
+		}
+		fmt.Fprintf(out, "%-30s %-9s %-38s %-5s %-29s %10s %8d %-17s %-6s %s\n",
+			row.SubscriptionId, row.SubscriptionStatus, networkId, email, row.InvoiceId, row.Amount(), row.AttemptCount, nextAttempt, notice, row.Skip)
+	}
+	fmt.Fprintf(out, "%d subscriptions, %d could not be read\n", len(rows), failed)
+	if 0 < failed {
+		return 1
+	}
+	return 0
 }
 
 // paymentsReconcile runs one payment reconciliation pass (UPGRADE.md §8) by

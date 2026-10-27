@@ -301,10 +301,43 @@ func StripeWebhook(
 			return nil, fmt.Errorf("failed to parse invoice: %v", err)
 		}
 
+		// a renewal that failed before is paid now: its failure resolves and
+		// the payment-failed notices still unsent are withdrawn
+		// (subscription_stripe_dunning.go)
+		stripeResolveInvoicePaymentFailureFunc(
+			clientSession.Ctx,
+			invoiceObject.Id,
+			model.StripeInvoicePaymentFailureResolvePaid,
+			stripeDunningNow(),
+		)
+
 		return stripeHandleInvoicePaidWithOnboarding(
 			&invoiceObject,
 			clientSession,
 		)
+
+	} else if stripeWebhook.Type == "invoice.payment_failed" && stripeWebhook.Data != nil {
+
+		/**
+		 * a renewal charge failed: ask the account to pay the invoice or update
+		 * the payment method (subscription_stripe_dunning.go)
+		 */
+
+		glog.Infof("type: invoice.payment_failed")
+
+		return stripeHandleInvoicePaymentFailed(stripeWebhook.Data.Object, clientSession)
+
+	} else if stripeWebhook.Type == "invoice.voided" && stripeWebhook.Data != nil {
+
+		glog.Infof("type: invoice.voided")
+
+		return stripeHandleInvoiceResolved(stripeWebhook.Data.Object, model.StripeInvoicePaymentFailureResolveVoided, clientSession)
+
+	} else if stripeWebhook.Type == "invoice.marked_uncollectible" && stripeWebhook.Data != nil {
+
+		glog.Infof("type: invoice.marked_uncollectible")
+
+		return stripeHandleInvoiceResolved(stripeWebhook.Data.Object, model.StripeInvoicePaymentFailureResolveUncollectible, clientSession)
 
 	} else if stripeWebhook.Type == "charge.refunded" && stripeWebhook.Data != nil {
 
@@ -380,6 +413,10 @@ func StripeWebhook(
 		 */
 
 		glog.Infof("type: customer.subscription.deleted")
+
+		// an ended subscription's failed renewals are over: paying them would
+		// not bring it back (subscription_stripe_dunning.go)
+		stripeResolveDeletedSubscriptionPaymentFailures(stripeWebhook.Data.Object, clientSession)
 
 		return stripeHandleSubscriptionDeleted(stripeWebhook.Data.Object, clientSession)
 
@@ -738,45 +775,9 @@ func stripeResolveInvoiceCredit(
 
 		// check for client_reference_id in the checkout session: it names the
 		// exact network the checkout was started from.
-
-		// Get the checkout session using the subscription ID
-		sessionsUrl := fmt.Sprintf("%s/v1/checkout/sessions?subscription=%s&limit=100", stripeApiBaseUrl, url.QueryEscape(subscriptionId))
-		type checkoutSessionList struct {
-			Data []*struct {
-				Id                string  `json:"id"`
-				ClientReferenceId *string `json:"client_reference_id"`
-			} `json:"data"`
-			HasMore *bool `json:"has_more"`
-		}
-		sessionsResp, err := server.HttpGetRequireStatusOk[*checkoutSessionList](
-			clientSession.Ctx,
-			sessionsUrl,
-			func(header http.Header) {
-				header.Add("Authorization", fmt.Sprintf("Bearer %s", stripeApiTokenFunc()))
-			},
-			server.ResponseJsonObject[*checkoutSessionList],
-		)
+		networkId, err = stripeCheckoutSessionNetworkId(clientSession.Ctx, subscriptionId)
 		if err != nil {
-			return nil, fmt.Errorf("failed to fetch checkout session: %v", err)
-		}
-
-		if sessionsResp == nil || sessionsResp.Data == nil || sessionsResp.HasMore == nil || *sessionsResp.HasMore {
-			return nil, errors.New("incomplete Stripe checkout session destination evidence")
-		}
-		for _, checkout := range sessionsResp.Data {
-			if checkout == nil || checkout.Id == "" {
-				return nil, errors.New("missing Stripe checkout session destination evidence")
-			}
-			if checkout.ClientReferenceId != nil && *checkout.ClientReferenceId != "" {
-				id, err := server.ParseId(*checkout.ClientReferenceId)
-				if err != nil {
-					return nil, fmt.Errorf("invalid Stripe checkout session destination: %w", err)
-				}
-				if networkId != nil && *networkId != id {
-					return nil, errors.New("conflicting Stripe checkout session destinations")
-				}
-				networkId = &id
-			}
+			return nil, err
 		}
 	}
 
@@ -803,6 +804,53 @@ func stripeResolveInvoiceCredit(
 		endTime:        time.Unix(periodEnd, 0).Add(manualPaymentGracePeriod),
 	}
 	return credit, nil
+}
+
+// The network named by the client_reference_id of the checkout sessions that
+// started the subscription, nil when none names one. Every session must be
+// listed and agree: a partial page or two different networks is an error, never
+// a guess.
+func stripeCheckoutSessionNetworkId(ctx context.Context, subscriptionId string) (*server.Id, error) {
+	sessionsUrl := fmt.Sprintf("%s/v1/checkout/sessions?subscription=%s&limit=100", stripeApiBaseUrl, url.QueryEscape(subscriptionId))
+	type checkoutSessionList struct {
+		Data []*struct {
+			Id                string  `json:"id"`
+			ClientReferenceId *string `json:"client_reference_id"`
+		} `json:"data"`
+		HasMore *bool `json:"has_more"`
+	}
+	sessionsResp, err := server.HttpGetRequireStatusOk[*checkoutSessionList](
+		ctx,
+		sessionsUrl,
+		func(header http.Header) {
+			header.Add("Authorization", fmt.Sprintf("Bearer %s", stripeApiTokenFunc()))
+		},
+		server.ResponseJsonObject[*checkoutSessionList],
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch checkout session: %v", err)
+	}
+
+	if sessionsResp == nil || sessionsResp.Data == nil || sessionsResp.HasMore == nil || *sessionsResp.HasMore {
+		return nil, errors.New("incomplete Stripe checkout session destination evidence")
+	}
+	var networkId *server.Id
+	for _, checkout := range sessionsResp.Data {
+		if checkout == nil || checkout.Id == "" {
+			return nil, errors.New("missing Stripe checkout session destination evidence")
+		}
+		if checkout.ClientReferenceId != nil && *checkout.ClientReferenceId != "" {
+			id, err := server.ParseId(*checkout.ClientReferenceId)
+			if err != nil {
+				return nil, fmt.Errorf("invalid Stripe checkout session destination: %w", err)
+			}
+			if networkId != nil && *networkId != id {
+				return nil, errors.New("conflicting Stripe checkout session destinations")
+			}
+			networkId = &id
+		}
+	}
+	return networkId, nil
 }
 
 // Credits through the same lifecycle and invoice ledger gate for webhook and
@@ -1514,18 +1562,43 @@ type StripeCreateCustomerPortalResult struct {
 	Error *StripeCreateCustomerPortalError `json:"error,omitempty"`
 }
 
-type StripeCreateCustomerPortalArgs struct{}
+// The portal flow that opens straight on updating the payment method
+// (StripeCreateCustomerPortalArgs.Flow).
+const StripeCustomerPortalFlowPaymentMethodUpdate = "payment_method_update"
+
+type StripeCreateCustomerPortalArgs struct {
+	// "payment_method_update" opens the portal on updating the payment method,
+	// and returns to Manage Subscription once it is saved; anything else opens
+	// the portal's home. Added after the empty args; older clients send none.
+	Flow string `json:"flow,omitempty"`
+}
 
 /**
- * Used to create a Stripe URL for the customer to manage their subscription
+ * Used to create a Stripe URL for the customer to manage their subscription.
+ *
+ * The session is for the caller's own network's customer only: it is found
+ * from what the server recorded for that network (stripeCustomerIdForNetwork),
+ * never from the request. A session link expires minutes after it is made, so
+ * it is made on each tap and never sent anywhere.
  */
 func StripeCreateCustomerPortal(
 	args *StripeCreateCustomerPortalArgs,
 	session *session.ClientSession,
 ) (*StripeCreateCustomerPortalResult, error) {
 
-	stripeCustomerId, err := model.GetStripeCustomer(session)
-	if err != nil || stripeCustomerId == nil {
+	settings := stripeDunningSettingsFunc()
+	networkId := session.ByJwt.NetworkId
+	stripeCustomerId, err := stripeCustomerIdForNetwork(session.Ctx, networkId, stripeDunningNow(), settings)
+	if err != nil {
+		glog.Errorf("[stripe]could not find the Stripe customer of network %s: %v\n", networkId, err)
+		return &StripeCreateCustomerPortalResult{
+			Error: &StripeCreateCustomerPortalError{
+				Code:    SubscriptionErrorCodeStoreUnavailable,
+				Message: "Could not open the billing portal. Please try again.",
+			},
+		}, nil
+	}
+	if stripeCustomerId == "" {
 		return &StripeCreateCustomerPortalResult{
 			Error: &StripeCreateCustomerPortalError{
 				Code:    SubscriptionErrorCodeNoCustomer,
@@ -1537,15 +1610,33 @@ func StripeCreateCustomerPortal(
 	stripe.Key = stripeApiToken()
 
 	params := &stripe.BillingPortalSessionParams{
-		Customer: stripeCustomerId,
-		// ReturnURL: stripe.String("https://example.com/account"),
+		Customer:  stripe.String(stripeCustomerId),
+		ReturnURL: stripe.String(settings.PortalReturnUrl),
+	}
+	if args != nil && args.Flow == StripeCustomerPortalFlowPaymentMethodUpdate {
+		params.FlowData = &stripe.BillingPortalSessionFlowDataParams{
+			Type: stripe.String(string(stripe.BillingPortalSessionFlowTypePaymentMethodUpdate)),
+			AfterCompletion: &stripe.BillingPortalSessionFlowDataAfterCompletionParams{
+				Type: stripe.String(string(stripe.BillingPortalSessionFlowAfterCompletionTypeRedirect)),
+				Redirect: &stripe.BillingPortalSessionFlowDataAfterCompletionRedirectParams{
+					ReturnURL: stripe.String(settings.PortalReturnUrl),
+				},
+			},
+		}
 	}
 
 	result, err := stripesession.New(params)
+	if err != nil && params.FlowData != nil {
+		// the portal's configuration may not offer the flow; its home still
+		// lists the payment method and the open invoices
+		glog.Warningf("[stripe]could not create the payment method update session for network %s, opening the portal home: %v\n", networkId, err)
+		params.FlowData = nil
+		result, err = stripesession.New(params)
+	}
 
 	if err != nil {
 		// Stripe's own words stay in the log
-		glog.Errorf("[stripe]could not create the customer portal session for network %s: %v\n", session.ByJwt.NetworkId, err)
+		glog.Errorf("[stripe]could not create the customer portal session for network %s: %v\n", networkId, err)
 		return &StripeCreateCustomerPortalResult{
 			Error: &StripeCreateCustomerPortalError{
 				Code:    SubscriptionErrorCodeStoreUnavailable,

@@ -11,6 +11,13 @@
 // retry or the backlog pass leaves open is left to the queued closes, their
 // steals and the expiry sweep.
 //
+// A run whose new-deadline pass used its whole budget gives the next run's lead
+// to the retry and backlog passes; that run's new-deadline pass gets what
+// budget remains and leaves the rest for a retry. On Main in October 2026 new
+// deadlines arrived faster than one run closed them, so every run spent its
+// budget on them, the retry pass never moved and the contracts it held, most of
+// each minute's contracts, waited days for the expiry sweep.
+//
 // The backlog also closes the legacy contracts it passes, rows without a stored
 // deadline. The startup pass queues closes only for the legacy contracts it
 // reaches before a long run of pages without one, so a legacy contract left
@@ -86,6 +93,8 @@ type ContractDeadlineSpan struct {
 // open or never reached, and Pending collects the next one. A pass span's upper
 // bound moves down as it proceeds. BacklogStart is where the backlog pass
 // started; the legacy contracts below it are the backlog's.
+// RetryLead is set when the previous run's new-deadline pass used its whole
+// budget: this run walks the retry and backlog passes first.
 type CloseContractDeadlinesArgs struct {
 	Version      int                   `json:"version,omitempty"`
 	Fresh        server.Id             `json:"fresh"`
@@ -93,6 +102,7 @@ type CloseContractDeadlinesArgs struct {
 	Pending      *ContractDeadlineSpan `json:"pending,omitempty"`
 	Backlog      *ContractDeadlineSpan `json:"backlog,omitempty"`
 	BacklogStart server.Id             `json:"backlog_start"`
+	RetryLead    bool                  `json:"retry_lead,omitempty"`
 }
 
 // Next is the successor's position. Closed counts contracts newly closed by
@@ -431,19 +441,22 @@ func closeContractDeadlines(ctx context.Context, args *CloseContractDeadlinesArg
 
 	// Positions only cover complete pages, so a failed read stops the run and
 	// the successor retries the rest after the idle delay.
-	runErr := func() error {
-		if next.Fresh.Cmp(edge) < 0 {
-			upper, done, err := walk(ContractDeadlineSpan{Lower: next.Fresh, Upper: edge}, contractDeadlinePassFresh)
-			if !done {
-				// The unvisited part of the new deadlines waits for a retry.
-				leaveSpan(next.Fresh, upper)
-				result.Exhausted = err == nil
-			}
-			next.Fresh = edge
-			if err != nil {
-				return err
-			}
+	freshCut := false
+	walkFresh := func() error {
+		if next.Fresh.Cmp(edge) >= 0 {
+			return nil
 		}
+		upper, done, err := walk(ContractDeadlineSpan{Lower: next.Fresh, Upper: edge}, contractDeadlinePassFresh)
+		if !done {
+			// The unvisited part of the new deadlines waits for a retry.
+			leaveSpan(next.Fresh, upper)
+			result.Exhausted = err == nil
+			freshCut = err == nil
+		}
+		next.Fresh = edge
+		return err
+	}
+	walkEarlier := func() error {
 		passes := []struct {
 			span **ContractDeadlineSpan
 			kind contractDeadlinePass
@@ -464,14 +477,30 @@ func closeContractDeadlines(ctx context.Context, args *CloseContractDeadlinesArg
 			}
 		}
 		return nil
+	}
+	runErr := func() error {
+		if args.RetryLead {
+			if err := walkEarlier(); err != nil {
+				return err
+			}
+			return walkFresh()
+		}
+		if err := walkFresh(); err != nil {
+			return err
+		}
+		return walkEarlier()
 	}()
+	// New deadlines that used the whole budget would otherwise keep it every
+	// run. The earlier passes lead the next run while they have work; the run
+	// after that leads with new deadlines again.
+	next.RetryLead = !args.RetryLead && freshCut && (next.Retry != nil || next.Pending != nil || next.Backlog != nil)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if runErr != nil {
 		glog.Infof("[close-deadline]run stopped: %v\n", runErr)
 	}
-	glog.Infof("[close-deadline]visited=%d closed=%d legacy_closed=%d dropped=%d exhausted=%t\n",
-		result.Visited, result.Closed, result.LegacyClosed, result.Dropped, result.Exhausted)
+	glog.Infof("[close-deadline]visited=%d closed=%d legacy_closed=%d dropped=%d exhausted=%t retry_lead=%t\n",
+		result.Visited, result.Closed, result.LegacyClosed, result.Dropped, result.Exhausted, args.RetryLead)
 	return result, nil
 }

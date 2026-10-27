@@ -243,6 +243,51 @@ func (self *SubscriptionEndedTemplate) Name() string {
 	return "subscription_ended"
 }
 
+// The notice that a UR Pro renewal billed through Stripe did not go through
+// (subscription_stripe_dunning.go): the first when the renewal first fails, the
+// final when Stripe's retries are about to run out. It links the invoice's
+// Stripe-hosted page, where another card pays it at once, and ur.io's Manage
+// Subscription, whose "Update payment method" opens Stripe's billing portal. The
+// hosted link is sent only when it is on Stripe's invoice domain
+// (stripeHostedInvoiceUrlAllowed); otherwise the email offers the update alone.
+type SubscriptionPaymentFailedTemplate struct {
+	// the final notice rather than the first
+	Final bool
+	// the invoice's Stripe-hosted payment page, or ""
+	HostedInvoiceUrl string
+	// the amount due in the currency's minor unit, and its ISO code
+	AmountDue int64
+	Currency  string
+	// Stripe's next automatic attempt; nil when it will not retry again
+	NextAttemptTime *time.Time
+	BaseTemplate
+}
+
+func (self *SubscriptionPaymentFailedTemplate) Name() string {
+	return "subscription_payment_failed"
+}
+
+// The page where the customer updates the payment method: ur.io's Manage
+// Subscription, which opens a billing portal session made for the signed-in
+// network. A portal session link expires in minutes, so emails never carry one.
+func (self *SubscriptionPaymentFailedTemplate) UpdatePaymentUrl() string {
+	return StripeUpdatePaymentMethodUrl
+}
+
+// The amount due as the templates print it: "$40.00" in US dollars, "40.00 EUR"
+// in another currency with cents, and "4000 JPY" in one without.
+func (self *SubscriptionPaymentFailedTemplate) Amount() string {
+	return stripeFormatAmount(self.AmountDue, self.Currency)
+}
+
+// The date of the next automatic attempt in UTC ("October 30, 2026"), or "".
+func (self *SubscriptionPaymentFailedTemplate) NextAttemptDate() string {
+	if self.NextAttemptTime == nil || self.NextAttemptTime.IsZero() {
+		return ""
+	}
+	return self.NextAttemptTime.UTC().Format("January 2, 2006")
+}
+
 // The notice that a network's USDC payout is withheld for want of a Solana
 // wallet. Payout is the withheld total, which the account message outbox sums
 // over the slices of one payout run.

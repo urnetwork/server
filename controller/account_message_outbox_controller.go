@@ -76,6 +76,12 @@ var accountMessageTemplates = map[string]func() Template{
 	(&SubscriptionEndedTemplate{}).Name(): func() Template {
 		return &SubscriptionEndedTemplate{}
 	},
+	// a Stripe renewal that did not go through, owed with its failed-renewal
+	// ledger row and withdrawn when the invoice is paid
+	// (subscription_stripe_dunning.go)
+	(&SubscriptionPaymentFailedTemplate{}).Name(): func() Template {
+		return &SubscriptionPaymentFailedTemplate{}
+	},
 	(&SubscriptionDataAppliedTemplate{}).Name(): func() Template {
 		return &SubscriptionDataAppliedTemplate{}
 	},

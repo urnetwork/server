@@ -1,0 +1,22 @@
+{{define "title"}}Your payment didn't go through{{end}}
+{{define "preheader"}}{{if .Final}}Last reminder: pay the invoice or update your payment method before your UR Pro subscription ends.{{else}}We couldn't renew UR Pro with your payment method. Pay the invoice or update your payment method to keep UR Pro.{{end}}{{end}}
+{{define "eyebrow"}}{{if .Final}}Final notice{{else}}Action needed{{end}}{{end}}
+{{define "accent"}}#eff7bb{{end}}
+{{define "headline"}}Your payment didn't go through{{end}}
+{{define "why"}}Sent to the address on your URnetwork account when a UR Pro renewal billed through Stripe doesn't go through. You get at most two of these for each payment: one when it first fails, and one before the subscription ends.{{end}}
+{{define "content"}}
+<div class="ur-big ur-ink" style="margin:20px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:40px; line-height:44px; font-weight:700; letter-spacing:-0.02em; color:#101010; font-variant-numeric:tabular-nums;">{{.Amount}} due</div>
+{{if .Final}}<p class="ur-text" style="margin:16px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:16px; line-height:26px; color:#2b3036;">We still couldn't collect {{.Amount}} for your UR Pro renewal. This is our last reminder: if the payment doesn't go through, your UR Pro subscription will end.{{if .NextAttemptDate}} The next automatic attempt is on {{.NextAttemptDate}}.{{end}}</p>
+{{else}}<p class="ur-text" style="margin:16px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:16px; line-height:26px; color:#2b3036;">We tried to renew your UR Pro subscription, but the payment of {{.Amount}} didn't go through.{{if .NextAttemptDate}} We'll try again automatically on {{.NextAttemptDate}}.{{end}} To keep UR Pro, pay the invoice with another card, or update your payment method.</p>
+{{end}}{{if .HostedInvoiceUrl}}
+<table role="presentation" class="ur-btn-t" cellpadding="0" cellspacing="0" border="0" style="margin:28px 0 0;"><tr>
+<td class="ur-btn" style="border-radius:100px; background-color:#0039de; mso-padding-alt:14px 32px;"><a class="ur-btn-a" href="{{.HostedInvoiceUrl}}" style="display:inline-block; padding:14px 32px; font-family:Geist, Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:16px; line-height:20px; font-weight:600; color:#ffffff; text-decoration:none; border-radius:100px;">Pay invoice</a></td>
+</tr></table>
+<p class="ur-text" style="margin:20px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:16px; line-height:26px; color:#2b3036;">Or <a class="ur-link" href="{{.UpdatePaymentUrl}}" style="color:#0039de; text-decoration:underline;">update your payment method</a> before the next attempt.</p>
+{{else}}
+<table role="presentation" class="ur-btn-t" cellpadding="0" cellspacing="0" border="0" style="margin:28px 0 0;"><tr>
+<td class="ur-btn" style="border-radius:100px; background-color:#0039de; mso-padding-alt:14px 32px;"><a class="ur-btn-a" href="{{.UpdatePaymentUrl}}" style="display:inline-block; padding:14px 32px; font-family:Geist, Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:16px; line-height:20px; font-weight:600; color:#ffffff; text-decoration:none; border-radius:100px;">Update payment method</a></td>
+</tr></table>
+{{end}}
+<p class="ur-muted" style="margin:20px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:13px; line-height:20px; color:#5f6a74;">{{if .HostedInvoiceUrl}}The invoice opens on Stripe, our payment processor. {{end}}To update your payment method, sign in at ur.io, open Manage Subscription and choose "Update payment method". If you already paid, you can ignore this email. Questions? Contact <a class="ur-link" href="mailto:support@ur.io" style="color:#0039de; text-decoration:underline;">support@ur.io</a>.</p>
+{{end}}

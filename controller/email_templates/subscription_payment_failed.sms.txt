@@ -1,0 +1,1 @@
+URnetwork: your UR Pro payment of {{.Amount}} didn't go through. Update your payment method at {{.UpdatePaymentUrl}}

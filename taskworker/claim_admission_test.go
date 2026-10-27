@@ -29,15 +29,17 @@ func withProbePlacementGeometry(t testing.TB, shardCount int, concurrency int, i
 	t.Cleanup(server.Config.PushSimpleResource(model.ProviderEgressProbeResourceName, []byte(resource)))
 }
 
-// Probe placement is production-only; mirror repair is bounded in both
-// profiles that can produce it. Other worker settings retain their values.
+// Probe placement is production-only; mirror repair and the payer drain are
+// bounded in both profiles that can produce them. Other worker settings retain
+// their values.
 func TestProviderProbeClaimAdmissionIsProductionOnly(t *testing.T) {
 	withProbePlacementGeometry(t, 8, 64, 0)
 	settings := task.DefaultTaskWorkerSettings()
 	production := taskWorkerSettingsForProfile(settings, WorkloadProfileProduction)
 	name := task.NewTaskTarget(work.ProviderEgressProbe).TargetFunctionName()
 	mirror := task.NewTaskTarget(model.ApplyLegacyNetEscrowMirror).TargetFunctionName()
-	if !reflect.DeepEqual(production.TargetClaimLimits, map[string]int{name: 2, mirror: 1}) || settings.TargetClaimLimits != nil {
+	drain := model.NewClosePayerDueContractsTaskTarget().TargetFunctionName()
+	if !reflect.DeepEqual(production.TargetClaimLimits, map[string]int{name: 2, mirror: 1, drain: 1}) || settings.TargetClaimLimits != nil {
 		t.Fatal("production target placement differs or mutated its caller", production.TargetClaimLimits)
 	}
 	production.TargetClaimLimits = nil
@@ -58,8 +60,8 @@ func TestProviderProbeClaimAdmissionIsProductionOnly(t *testing.T) {
 		t.Fatal("probe placement changed ordinary worker settings")
 	}
 	operator := taskWorkerSettingsForProfile(settings, WorkloadProfileSubnetOperator)
-	if !reflect.DeepEqual(operator.TargetClaimLimits, map[string]int{mirror: 1}) || !operator.ClaimRegisteredTargetsOnly {
-		t.Fatal("independent profile did not retain mirror-only placement")
+	if !reflect.DeepEqual(operator.TargetClaimLimits, map[string]int{mirror: 1, drain: 1}) || !operator.ClaimRegisteredTargetsOnly {
+		t.Fatal("independent profile did not retain its mirror and drain placement", operator.TargetClaimLimits)
 	}
 	if !reflect.DeepEqual(operator.TargetClaimShares, shares) {
 		t.Fatal("independent profile lost the claim shares", operator.TargetClaimShares)

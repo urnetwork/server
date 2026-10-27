@@ -26,11 +26,12 @@ const financialOwnerClaimSharePeriod = 8
 // Provider-probe shard passes per instance follow the configured URL geometry,
 // so co-located tunnel pools stay within one instance's URL concurrency while
 // every configured shard can run on fewer instances than shards. One legacy
-// mirror repair bounds cold history work moved off the financial page. Each
-// worker has independent capacity, and caller-owned settings and maps remain
-// unchanged. A saturated limit makes every claim filter that target's rows out
-// of the oldest-first candidate scan, so only targets that never dominate the
-// queue are limited.
+// mirror repair bounds cold history work moved off the financial page, and one
+// payer drain bounds the closes payers' requests add. Each worker has
+// independent capacity, and caller-owned settings and maps remain unchanged. A
+// saturated limit makes every claim filter that target's rows out of the
+// oldest-first candidate scan, so only targets that never dominate the queue
+// are limited.
 func taskWorkerSettingsForProfile(settings *task.TaskWorkerSettings, profile WorkloadProfile) *task.TaskWorkerSettings {
 	if settings == nil {
 		settings = task.DefaultTaskWorkerSettings()
@@ -45,6 +46,10 @@ func taskWorkerSettingsForProfile(settings *task.TaskWorkerSettings, profile Wor
 		ownerSettings.TargetClaimLimits = map[string]int{}
 	}
 	ownerSettings.TargetClaimLimits[task.NewTaskTarget(model.ApplyLegacyNetEscrowMirror).TargetFunctionName()] = 1
+	// A payer drain writes in owner turns like the deadline pass. One per
+	// worker bounds the closes payers' requests add to the primary, whatever
+	// the number of payers waiting.
+	ownerSettings.TargetClaimLimits[model.NewClosePayerDueContractsTaskTarget().TargetFunctionName()] = 1
 	// Every paid close queues one provider total, and the older close backlog
 	// fills every ordinary claim. The totals lane alone, one turn in about 200
 	// claims on Main, applied a few rows a second while hundreds a second were

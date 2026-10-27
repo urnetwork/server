@@ -71,11 +71,22 @@ type SubscriptionDetail struct {
 	// id (apple), purchase token (google), payment reference (solana), invoice
 	// id (monero, zcash)
 	TransactionId string `json:"transaction_id,omitempty"`
+	// the store is retrying a renewal whose payment did not go through (Stripe
+	// past_due or unpaid): the customer should update the payment method
+	// (POST /stripe/customer-portal with flow payment_method_update) or pay
+	// PaymentUrl
+	PastDue bool `json:"past_due"`
+	// the failing renewal's Stripe-hosted invoice page, where another card pays
+	// it at once; "" when none is on file
+	PaymentUrl string `json:"payment_url,omitempty"`
 }
 
 type SubscriptionDetailsResult struct {
 	Subscriptions []*SubscriptionDetail `json:"subscriptions"`
-	// gate for the Stripe billing portal link: the portal errors without one
+	// gate for the Stripe billing portal link: the portal errors without one.
+	// True when the server can name the network's Stripe customer
+	// (stripeNetworkHasCustomer), including a checkout's customer that has no
+	// stripe_customer row.
 	HasStripeCustomer bool      `json:"has_stripe_customer"`
 	UpdateTime        time.Time `json:"update_time"`
 }
@@ -91,6 +102,8 @@ type subscriptionStoreState struct {
 	StoreSubscriptionId string
 	// the store still bills this (Stripe status active/trialing/past_due)
 	Active bool
+	// the store is retrying a failed renewal (Stripe status past_due/unpaid)
+	PastDue bool
 }
 
 // subscriptionStoreLookupSet are the per-store questions. Replaceable by tests;
@@ -211,8 +224,34 @@ func SubscriptionDetails(clientSession *session.ClientSession) (*SubscriptionDet
 		model.SubscriptionMarketStripe,
 	)
 	result := buildSubscriptionDetails(clientSession.Ctx, renewals, lastStripeRenewal, stripeCustomerId, &subscriptionStoreLookups)
+	settings := stripeDunningSettingsFunc()
+	now := stripeDunningNow()
+	applyStripePaymentFailure(
+		result,
+		model.GetOpenStripeInvoicePaymentFailure(clientSession.Ctx, networkId, now.Add(-settings.PastDueNoticeMaxAge)),
+	)
+	if !result.HasStripeCustomer {
+		result.HasStripeCustomer = stripeNetworkHasCustomer(clientSession.Ctx, networkId, now, settings)
+	}
 	setSubscriptionDetailsCachedIfCurrent(clientSession.Ctx, networkId, generation, result)
 	return result, nil
+}
+
+// Folds the network's open failed Stripe renewal (nil when none) into the
+// Stripe entry: it is past due, with the invoice's payment page. The store
+// lookup marks it past due as well, from Stripe's status; the ledger also covers
+// a lookup that failed, and is the only record of the payment page.
+func applyStripePaymentFailure(result *SubscriptionDetailsResult, failure *model.StripeInvoicePaymentFailure) {
+	if failure == nil {
+		return
+	}
+	result.HasStripeCustomer = result.HasStripeCustomer || failure.CustomerId != ""
+	for _, detail := range result.Subscriptions {
+		if detail.Store == model.SubscriptionMarketStripe {
+			detail.PastDue = true
+			detail.PaymentUrl = failure.HostedInvoiceUrl
+		}
+	}
 }
 
 // buildSubscriptionDetails collapses the active renewal rows to one entry per
@@ -351,6 +390,7 @@ func applySubscriptionStoreState(detail *SubscriptionDetail, state *subscription
 	if state != nil {
 		detail.AutoRenew = state.AutoRenew
 		detail.CancelAtPeriodEnd = state.CancelAtPeriodEnd
+		detail.PastDue = state.PastDue
 		if state.EndTime != nil && !state.EndTime.IsZero() {
 			detail.EndTime = *state.EndTime
 		}
@@ -480,6 +520,7 @@ func stripeSubscriptionState(sub *stripeCustomerSubscription) *subscriptionStore
 		Cadence:             sub.cadence(),
 		StoreSubscriptionId: sub.Id,
 		Active:              active,
+		PastDue:             stripeSubscriptionRetrying(sub.Status),
 	}
 }
 
