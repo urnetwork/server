@@ -18,6 +18,8 @@ type SetPayoutWalletResult struct{}
 var (
 	ErrPayoutWalletBittensor = errors.New("Bittensor wallets cannot be the payout wallet.")
 	ErrPayoutWalletNotOwned  = errors.New("Wallet must be an active wallet owned by the network.")
+	// a row stored before addresses were validated (PayoutWalletAddressValid)
+	ErrPayoutWalletAddress = errors.New("The wallet's address is not an address on its blockchain, so it cannot be the payout wallet.")
 )
 
 // the wallet must be an active wallet owned by the network,
@@ -89,21 +91,26 @@ func setPayoutWalletInTx(ctx context.Context, tx server.PgTx, networkId server.I
 
 // an active wallet that could take over as the payout wallet
 type payoutWalletCandidate struct {
-	walletId   server.Id
-	blockchain string
+	walletId      server.Id
+	blockchain    string
+	walletAddress string
 }
 
 // Picks from candidates, newest first, the wallet to promote: only a Solana or
 // Polygon wallet can receive payouts (never a Bittensor or Ethereum wallet, the
 // same rule as adding a wallet), and the removed wallet's chain wins over a
 // newer wallet on the other chain. Stored chain names vary in case and
-// spelling, so they are parsed.
+// spelling, so they are parsed. A wallet whose address is not an address on
+// its chain, stored before addresses were validated, is never promoted.
 func choosePromotedPayoutWallet(removedBlockchain string, candidates []*payoutWalletCandidate) *server.Id {
 	removedChain, removedErr := ParseBlockchain(removedBlockchain)
 	var promotedWalletId *server.Id
 	for _, candidate := range candidates {
 		chain, err := ParseBlockchain(candidate.blockchain)
 		if err != nil || (chain != SOL && chain != MATIC) {
+			continue
+		}
+		if ValidateWalletAddress(chain, candidate.walletAddress) != nil {
 			continue
 		}
 		walletId := candidate.walletId

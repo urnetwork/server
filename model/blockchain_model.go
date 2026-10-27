@@ -45,3 +45,15 @@ func ParseBlockchain(s string) (Blockchain, error) {
 		return -1, fmt.Errorf("invalid Blockchain: %s", s)
 	}
 }
+
+// Whether two stored chain names name the same chain. Stored names vary in
+// case and spelling, so both are parsed; a name that does not parse matches
+// only itself.
+func sameBlockchain(a string, b string) bool {
+	chainA, errA := ParseBlockchain(a)
+	chainB, errB := ParseBlockchain(b)
+	if errA != nil || errB != nil {
+		return a == b
+	}
+	return chainA == chainB
+}

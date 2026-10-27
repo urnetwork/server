@@ -57,6 +57,14 @@ type CreateAccountWalletResult struct {
 	WalletId server.Id `json:"wallet_id"`
 }
 
+// The network's wallet with the address on the chain: an existing one is
+// returned, and reactivated when it was removed. A network has one wallet per
+// address (unique_network_wallet_address), so the result is nil, and nothing is
+// written, when the network has the address on another chain: a row stored
+// before addresses were validated (a Solana key saved as a Polygon wallet,
+// support inbox 8045). Returning or reactivating that row reported success
+// while the address stayed on the wrong chain, and changing its chain would
+// alter a stored wallet, so it is left as it is.
 func CreateAccountWalletExternal(
 	session *session.ClientSession,
 	createAccountWallet *CreateAccountWalletExternalArgs,
@@ -70,10 +78,11 @@ func CreateAccountWalletExternal(
 
 		// First try to find an existing wallet with the same network_id and wallet_address
 		var existingWalletId server.Id
+		var existingBlockchain string
 		existingRow := tx.QueryRow(
 			session.Ctx,
 			`
-					SELECT wallet_id
+					SELECT wallet_id, blockchain
 					FROM account_wallet
 					WHERE network_id = $1 AND wallet_address = $2
 			`,
@@ -81,7 +90,7 @@ func CreateAccountWalletExternal(
 			createAccountWallet.WalletAddress,
 		)
 
-		err := existingRow.Scan(&existingWalletId)
+		err := existingRow.Scan(&existingWalletId, &existingBlockchain)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			// a failed statement ends the transaction at once. It used to be
 			// taken for "no wallet", and the insert below then failed too,
@@ -90,6 +99,10 @@ func CreateAccountWalletExternal(
 			server.Raise(err)
 		}
 		if err == nil {
+			if !sameBlockchain(existingBlockchain, createAccountWallet.Blockchain) {
+				glog.Infof("[wm][%s]address %s is wallet %s on %s, not %s", createAccountWallet.NetworkId, createAccountWallet.WalletAddress, existingWalletId, existingBlockchain, createAccountWallet.Blockchain)
+				return
+			}
 
 			glog.Infof("[wm][%s]found existing wallet %s for address %s", createAccountWallet.NetworkId, existingWalletId, createAccountWallet.WalletAddress)
 
@@ -434,7 +447,8 @@ func RemoveWallet(id server.Id, session *session.ClientSession) *RemoveWalletRes
 			`
 				SELECT
 						wallet_id,
-						blockchain
+						blockchain,
+						wallet_address
 				FROM account_wallet
 				WHERE
 						network_id = $1 AND
@@ -448,7 +462,7 @@ func RemoveWallet(id server.Id, session *session.ClientSession) *RemoveWalletRes
 		server.WithPgResult(candidateResult, err, func() {
 			for candidateResult.Next() {
 				candidate := &payoutWalletCandidate{}
-				server.Raise(candidateResult.Scan(&candidate.walletId, &candidate.blockchain))
+				server.Raise(candidateResult.Scan(&candidate.walletId, &candidate.blockchain, &candidate.walletAddress))
 				candidates = append(candidates, candidate)
 			}
 		})
