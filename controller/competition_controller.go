@@ -581,6 +581,7 @@ type Settings struct {
 	automationLease            *model.CompetitionSupervisorLease
 	automationRoundId          server.Id
 	automationTargetRoundId    server.Id
+	roundBaselinePreparation   *roundBaselinePreparationProfile
 }
 
 type settingsFile struct {
@@ -6669,7 +6670,7 @@ func (self *Worker) Run(ctx context.Context) error {
 		if finished {
 			return nil
 		}
-		job, err := self.store.Claim(ctx, self.settings, self.workerId, self.workerImageDigest)
+		job, err := self.claimWithPreparedRoundBaseline(ctx, hostCheck)
 		if err != nil {
 			return fmt.Errorf("claim competition job: %w", err)
 		}
