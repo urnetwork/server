@@ -47,10 +47,11 @@ const usdcAtomicPerCent = 10_000
 // An explicit map, not a pass-through: a name we have not confirmed with Stripe
 // would be rejected at the far end with a message about a field, long after the
 // money moved. Better to refuse here and say which network we could not record.
+// It covers every network x402 quotes (x402_networks.go). Tempo is not one:
+// Stripe takes Tempo payments through MPP.
 var x402StripeNetworks = map[string]string{
-	"base":   "base",
-	"solana": "solana",
-	"tempo":  "tempo",
+	X402NetworkBase:   "base",
+	X402NetworkSolana: "solana",
 }
 
 // x402StripeRecordEnabled is the seam hermetic tests use to keep this out of
