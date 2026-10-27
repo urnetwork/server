@@ -177,25 +177,33 @@ is in flight and none has started publishing; otherwise the fenced SQL custody
 check decides.
 
 A refused request's caller waits for one compensation pass, bounded like an
-admission round trip (one second). Until 2026-10-26 the caller retried once a
-second for up to a 300-second cleanup budget, and a Redis pool outage turned
-that into a self-sustaining storm of retry loops; that day's interim fix cut
-the budget to five seconds. Balances the pass leaves pending go to a
-process-wide deferred owner: four workers, on the same no-retry deadline pool,
-and a queue of up to 1024 balances. It retries each request's balances with
-backoff (one second doubling to a 30-second cap, jittered) for the rest of that
-request's five-second budget, through the same release, which reads the
-request's attempts when it runs. That request's own recovery page does not run,
-so its pending tokens stay with the owner rather than moving to the recovery
-marker. A full queue drops the compensation without blocking, and the proxy's
-before-exit hook quiesces the owner. A dropped token, one the quiesce ended or
-one still pending when its budget ends stays reserved under its pending
-marker: any page on the balance takes it once it is ten minutes old, and its
-24-hour lease ends it at last. `urnetwork_redis_contract_reservation_total`
-counts `operation="compensation"` with the results `completed` and `pending`
-when a compensation ends, `deferred` when the owner takes one, `expired` when
-its budget ended in the queue and `dropped` when the queue is full. A sustained
-`dropped` rate means Redis refuses releases faster than the owner retries them.
+admission round trip (one second). That pass ignores the request's shared
+budget, so the compensation after an insufficient-balance rerun that spent the
+budget still makes it. Until 2026-10-26 the caller retried once a second for up
+to a 300-second cleanup budget, and a Redis pool outage turned that into a
+self-sustaining storm of retry loops; that day's interim fix cut the budget to
+five seconds. Balances the pass leaves pending go to a process-wide deferred
+owner: four workers, on the same no-retry deadline pool, holding up to 1024
+balances. It retries each request's balances with backoff (one second doubling
+to a 30-second cap, jittered) for the rest of that request's five-second
+budget, through the same release, which reads the request's attempts when it
+runs. A compensation waits out each backoff on a timer, not on a worker: a
+worker is held only while release calls run, so the owner's throughput is
+bounded by its four concurrent calls rather than by backoff, and the owner does
+not wait for a retry its budget cannot reach. That request's own recovery page
+does not run, so its pending tokens stay with the owner rather than moving to
+the recovery marker. A full owner drops the compensation without blocking, and
+the proxy's before-exit hook quiesces the owner. A dropped token, one the
+quiesce ended or one still pending when its budget ends stays reserved under
+its pending marker: any page on the balance takes it once it is ten minutes
+old, and its 24-hour lease ends it at last.
+`urnetwork_redis_contract_reservation_total` counts
+`operation="compensation"` with the results `completed` and `pending` when a
+compensation ends, `deferred` when the owner takes one, `expired` when its
+budget left the owner no pass (no retry fit in it, or it ended while the
+compensation waited for a worker) and `dropped` when the owner is full. A
+sustained `dropped` rate means Redis refuses releases faster than the owner
+retries them.
 
 `urnetwork_redis_contract_publication_refusals_total{reason}` counts the
 transactions that refused to publish: `window_expired` and `released`. The

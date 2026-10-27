@@ -41,8 +41,9 @@ const redisReservationCleanupRetryCap = 30 * time.Second
 // A request's own compensation is one pass, bounded like any admission round
 // trip. What it leaves pending passes to one process-wide deferred owner
 // (redisDeferredCompensations): a few workers, beside the deadline pool's
-// eight connections per node that every reservation shares, and a queue of a
-// bounded number of balances.
+// eight connections per node that every reservation shares, and room for a
+// bounded number of balances. A worker is held only while a compensation's
+// release calls run; between passes the compensation waits on a timer.
 const redisDeferredCompensationWorkers = 4
 const redisDeferredCompensationBalances = 1024
 
@@ -456,8 +457,12 @@ func recoverRedisReservationRequest(ctx context.Context, balanceId, contractId s
 // clock/transport to prove long transient intervals without wall-clock sleeps,
 // and an owned deferred owner.
 type redisReservationCleanup struct {
-	now      func() time.Time
-	wait     func(context.Context, time.Duration) error
+	now  func() time.Time
+	wait func(context.Context, time.Duration) error
+	// Calls fire once delay has passed, holding no goroutine meanwhile, and
+	// returns what cancels that call. The deferred owner times each retry with
+	// it, so a compensation waiting out its backoff holds no worker.
+	after    func(time.Duration, func()) func() bool
 	recover  func(context.Context, server.Id, server.Id) error
 	deferred *redisDeferredCompensations
 }
@@ -532,7 +537,11 @@ func defaultRedisReservationCleanup() redisReservationCleanup {
 			case <-time.After(delay):
 				return nil
 			}
-		}, deferred: deferredRedisCompensations}
+		},
+		after: func(delay time.Duration, fire func()) func() bool {
+			return time.AfterFunc(delay, fire).Stop
+		},
+		deferred: deferredRedisCompensations}
 }
 
 func (self redisReservationCleanup) run(ctx context.Context, contractId server.Id, ids []server.Id) error {
@@ -557,6 +566,10 @@ type redisReservationCompensation struct {
 	failures       []error
 	lastAttemptErr error
 	retries        int
+	// passes the deferred owner has made
+	deferredPasses int
+	// no deferred pass fits in the budget
+	exhausted bool
 }
 
 func (self redisReservationCleanup) compensation(contractId server.Id, ids []server.Id, end time.Time) *redisReservationCompensation {
@@ -590,17 +603,40 @@ func (self *redisReservationCompensation) run(owner context.Context) error {
 	return self.finish()
 }
 
-// Continues after the request's own pass: every later pass follows a backoff.
-// A compensation whose budget ended while it was queued makes no pass.
-func (self *redisReservationCompensation) resume(owner context.Context) error {
-	if !self.cleanup.now().Before(self.end) {
+// The deferred owner's turn of the compensation, on a worker: a pass while the
+// budget allows one, then the delay before the next pass, or false once the
+// compensation has ended, counted by its outcome. Every deferred pass follows
+// a backoff after the one before, the request's own pass first. A
+// compensation whose budget left the owner no pass, because no retry fit in it
+// or it ended while the compensation waited for a worker, is counted expired.
+func (self *redisReservationCompensation) step(owner context.Context) (time.Duration, bool) {
+	select {
+	case <-owner.Done():
+		// A quiesce leaves the tokens pending, as process exit does.
+		self.failures = append(self.failures, owner.Err())
+		self.finish()
+		return 0, false
+	default:
+	}
+	if !self.exhausted && self.cleanup.now().Before(self.end) {
+		self.deferredPasses++
+		self.attempt(owner)
+		if len(self.pending) == 0 {
+			self.finish()
+			return 0, false
+		}
+		if delay, ok := self.NextDeferredRetry(); ok {
+			return delay, true
+		}
+	}
+	// The budget leaves no further pass.
+	if self.deferredPasses == 0 {
 		redisContractReservationResults.WithLabelValues("compensation", "expired").Inc()
-		return self.err()
+		return 0, false
 	}
-	if !self.backOff(owner) {
-		return self.finish()
-	}
-	return self.run(owner)
+	self.failures = append(self.failures, context.DeadlineExceeded)
+	self.finish()
+	return 0, false
 }
 
 // One pass within the request's budget: each pending balance the pass did not
@@ -661,6 +697,15 @@ func (self *redisReservationCompensation) NextRetryTimeout() time.Duration {
 	delay := redisReservationCleanupRetryDelay(self.retries, mathrand.Float64())
 	self.retries++
 	return min(delay, self.end.Sub(self.cleanup.now()))
+}
+
+// Each call advances the retry: the backoff before the next deferred pass, and
+// whether that pass falls within the budget. The deferred owner does not wait
+// for a pass the budget cannot reach.
+func (self *redisReservationCompensation) NextDeferredRetry() (time.Duration, bool) {
+	delay := redisReservationCleanupRetryDelay(self.retries, mathrand.Float64())
+	self.retries++
+	return delay, self.cleanup.now().Add(delay).Before(self.end)
 }
 
 // The delay before retry number retry, from zero. The nominal delay doubles
@@ -724,15 +769,17 @@ func (self *redisReservationCompensation) attemptOrDefer(ctx context.Context) (b
 }
 
 // The process-wide owner of the compensations that their requests' own passes
-// left pending. Each worker retries one compensation at a time, with its
-// backoff and within its request's budget, so however many requests fail, a
-// failing Redis sees at most one compensation call per worker beyond each
-// request's own pass, on the same deadline pool. The queue holds a bounded
-// number of balances, since one request can hold one per selected grant. A
-// compensation the owner takes counts deferred, then completed, pending, or
-// expired when its budget ended in the queue.
+// left pending. Its workers are its slots: a worker holds a compensation only
+// for a pass, while its release calls run, and between passes the compensation
+// waits on a timer for its backoff, holding no worker or goroutine. So however
+// many requests fail, a failing Redis sees at most one compensation call per
+// worker beyond each request's own pass, on the same deadline pool, and the
+// owner's throughput is bounded by those concurrent calls, never by backoff.
+// The owner holds a bounded number of balances, since one request can hold one
+// per selected grant. A compensation the owner takes counts deferred, then
+// completed, pending, or expired when its budget left the owner no pass.
 //
-// A full queue drops a compensation, counted dropped, without blocking or
+// A full owner drops a compensation, counted dropped, without blocking or
 // starting a goroutine, and a quiesce ends those it holds, as process exit
 // does. That only defers the release, as a compensation that ends pending
 // does: each token stays reserved, which can under-admit its payer but never
@@ -744,10 +791,14 @@ func (self *redisReservationCompensation) attemptOrDefer(ctx context.Context) (b
 type redisDeferredCompensations struct {
 	workers  int
 	capacity int
-	queue    chan redisDeferredCompensation
 	start    sync.Once
 
 	stateLock sync.Mutex
+	// signaled when a compensation falls due or the workers stop
+	wake *sync.Cond
+	// compensations due for a pass, in the order they fell due
+	due     []*redisDeferredCompensation
+	stopped bool
 	// balances offered and not yet ended
 	held int
 	// closed while held is zero
@@ -762,6 +813,16 @@ type redisDeferredCompensation struct {
 	stop         func()
 	balances     int
 	compensation *redisReservationCompensation
+	// the retry the compensation waits for, guarded by the owner's state lock
+	retry *redisDeferredRetry
+}
+
+// One timed retry of a deferred compensation. Its timer makes the compensation
+// due, unless a quiesce ends the retry first; whichever comes first ends it.
+type redisDeferredRetry struct {
+	// guarded by the owner's state lock
+	ended bool
+	stop  func() bool
 }
 
 var deferredRedisCompensations = newRedisDeferredCompensations(redisDeferredCompensationWorkers, redisDeferredCompensationBalances)
@@ -787,73 +848,207 @@ func newRedisDeferredCompensations(workers, capacity int) *redisDeferredCompensa
 	idle := make(chan struct{})
 	close(idle)
 	generation, cancel := context.WithCancel(context.Background())
-	return &redisDeferredCompensations{
+	deferred := &redisDeferredCompensations{
 		workers:    workers,
 		capacity:   capacity,
-		queue:      make(chan redisDeferredCompensation, capacity),
 		idle:       idle,
 		generation: generation,
 		cancel:     cancel,
 	}
+	deferred.wake = sync.NewCond(&deferred.stateLock)
+	return deferred
 }
 
-// Reports whether a worker will run the compensation, within its budget. The
-// first offer starts the workers, which run for the life of the process.
+// Reports whether the owner will run the compensation, within its budget. The
+// first offer starts the workers, which run for the life of the process. The
+// first deferred pass follows a backoff after the request's own pass.
 func (self *redisDeferredCompensations) offer(ctx context.Context, compensation *redisReservationCompensation) bool {
 	self.start.Do(func() {
 		for range self.workers {
 			go self.work()
 		}
 	})
+	deferred := self.hold(ctx, compensation)
+	if deferred == nil {
+		return false
+	}
+	if delay, ok := compensation.NextDeferredRetry(); ok {
+		self.schedule(deferred, delay)
+	} else {
+		// No deferred pass fits in the budget: a worker ends it at once.
+		compensation.exhausted = true
+		self.fall(deferred)
+	}
+	return true
+}
+
+// Takes the compensation's balances if they fit; nil when the owner is full.
+func (self *redisDeferredCompensations) hold(ctx context.Context, compensation *redisReservationCompensation) *redisDeferredCompensation {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	balances := len(compensation.pending)
 	if self.capacity < self.held+balances {
-		return false
+		return nil
 	}
 	// The request's values stay; its cancellation and synchronous stage
-	// timing end when its caller returns. The budget ends its passes and
-	// waits, and a quiesce ends it early.
+	// timing end when its caller returns. The budget ends its passes, and a
+	// quiesce ends it early: at once while it waits for a retry, otherwise
+	// when its worker finds its owner ended.
 	owner, cancel := context.WithCancel(server.WithoutContractCreationTiming(context.WithoutCancel(ctx)))
-	unlink := context.AfterFunc(self.generation, cancel)
-	deferred := redisDeferredCompensation{
-		owner:        owner,
-		stop:         func() { unlink(); cancel() },
-		balances:     balances,
-		compensation: compensation,
-	}
-	// Every queued compensation holds a balance, so the queue has room.
-	select {
-	case self.queue <- deferred:
-	default:
-		deferred.stop()
-		return false
-	}
+	deferred := &redisDeferredCompensation{owner: owner, balances: balances, compensation: compensation}
+	unlink := context.AfterFunc(self.generation, func() {
+		cancel()
+		self.unschedule(deferred)
+	})
+	deferred.stop = func() { unlink(); cancel() }
 	if self.held == 0 {
 		self.idle = make(chan struct{})
 	}
 	self.held += balances
-	return true
+	return deferred
+}
+
+// Times the compensation's next pass after delay. Until it falls due it holds
+// no worker, and a quiesce ends it.
+func (self *redisDeferredCompensations) schedule(deferred *redisDeferredCompensation, delay time.Duration) {
+	retry := func() *redisDeferredRetry {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		select {
+		case <-deferred.owner.Done():
+			return nil
+		default:
+		}
+		deferred.retry = &redisDeferredRetry{}
+		return deferred.retry
+	}()
+	if retry == nil {
+		// a quiesce came first
+		self.quiesced(deferred)
+		return
+	}
+	stop := deferred.compensation.cleanup.after(delay, func() { self.fire(deferred, retry) })
+	kept := func() bool {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		if retry.ended {
+			return false
+		}
+		retry.stop = stop
+		return true
+	}()
+	if !kept {
+		// the retry fell due, or a quiesce ended it, before its timer was kept
+		stop()
+	}
+}
+
+// The retry's timer fired: the compensation waits for the next free worker.
+func (self *redisDeferredCompensations) fire(deferred *redisDeferredCompensation, retry *redisDeferredRetry) {
+	due := func() bool {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		if retry.ended {
+			return false
+		}
+		retry.ended = true
+		deferred.retry = nil
+		return true
+	}()
+	if due {
+		self.fall(deferred)
+	}
+}
+
+// Makes the compensation due for the next free worker.
+func (self *redisDeferredCompensations) fall(deferred *redisDeferredCompensation) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.due = append(self.due, deferred)
+	self.wake.Signal()
+}
+
+// A quiesce ends a compensation that waits for its retry at once. One that is
+// due or in a pass ends when its worker finds its owner ended.
+func (self *redisDeferredCompensations) unschedule(deferred *redisDeferredCompensation) {
+	stop, waiting := func() (func() bool, bool) {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		retry := deferred.retry
+		if retry == nil || retry.ended {
+			return nil, false
+		}
+		retry.ended = true
+		deferred.retry = nil
+		return retry.stop, true
+	}()
+	if !waiting {
+		return
+	}
+	if stop != nil {
+		stop()
+	}
+	self.quiesced(deferred)
+}
+
+// Ends a compensation a quiesce reached. Its tokens stay pending, as at
+// process exit.
+func (self *redisDeferredCompensations) quiesced(deferred *redisDeferredCompensation) {
+	defer self.end(deferred)
+	deferred.compensation.failures = append(deferred.compensation.failures, context.Canceled)
+	deferred.compensation.finish()
 }
 
 func (self *redisDeferredCompensations) work() {
-	for deferred := range self.queue {
+	for {
+		deferred := self.next()
+		if deferred == nil {
+			return
+		}
 		self.run(deferred)
 	}
 }
 
+// Waits for the next compensation due for a pass; nil once the workers stop.
+func (self *redisDeferredCompensations) next() *redisDeferredCompensation {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	for len(self.due) == 0 && !self.stopped {
+		self.wake.Wait()
+	}
+	if len(self.due) == 0 {
+		return nil
+	}
+	deferred := self.due[0]
+	self.due[0] = nil
+	self.due = self.due[1:]
+	return deferred
+}
+
+// The compensation's turn on a worker: a pass, then its next retry or its end.
 // A raise ends the compensation pending, and the worker goes on.
-func (self *redisDeferredCompensations) run(deferred redisDeferredCompensation) {
-	defer self.end(deferred.balances)
-	defer deferred.stop()
+func (self *redisDeferredCompensations) run(deferred *redisDeferredCompensation) {
+	var delay time.Duration
+	retry := false
 	server.HandleError(func() {
-		deferred.compensation.resume(deferred.owner)
+		delay, retry = deferred.compensation.step(deferred.owner)
 	}, func() {
 		redisContractReservationResults.WithLabelValues("compensation", "pending").Inc()
 	})
+	if retry {
+		self.schedule(deferred, delay)
+	} else {
+		self.end(deferred)
+	}
 }
 
-func (self *redisDeferredCompensations) end(balances int) {
+// Lets the compensation go.
+func (self *redisDeferredCompensations) end(deferred *redisDeferredCompensation) {
+	deferred.stop()
+	self.release(deferred.balances)
+}
+
+func (self *redisDeferredCompensations) release(balances int) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	self.held -= balances
@@ -887,6 +1082,15 @@ func (self *redisDeferredCompensations) quiesce(ctx context.Context) error {
 		self.generation, self.cancel = context.WithCancel(context.Background())
 	}()
 	return self.drain(ctx)
+}
+
+// Stops the workers once no compensation is due. Only a test stops its own
+// owner; the process-wide owner's workers run for the life of the process.
+func (self *redisDeferredCompensations) stopWorkers() {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.stopped = true
+	self.wake.Broadcast()
 }
 
 // All joined leaf causes must be transient. A schema, ownership, corrupt-token

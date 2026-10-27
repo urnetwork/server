@@ -1,7 +1,8 @@
 // A request's caller waits for one bounded compensation pass; the deferred
-// owner retries the rest with bounded concurrency, backoff and queue. Seam
-// tests give each request a logical clock, a transport that fails on demand
-// and a private deferred owner; custody tests use the fixture PG and Redis.
+// owner retries the rest with bounded concurrency, backoff on timers and a
+// bounded number of balances. Seam tests give each request a logical clock, a
+// transport that fails on demand and a private deferred owner; custody tests
+// use the fixture PG and Redis.
 package model
 
 import (
@@ -43,6 +44,48 @@ func (self *redisCompensationTestClock) Wait(ctx context.Context, delay time.Dur
 	return nil
 }
 
+// Times fire on the logical clock: the clock advances by the delay and fire
+// runs at once, as a timer's would once that delay had passed.
+func (self *redisCompensationTestClock) After(delay time.Duration, fire func()) func() bool {
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.now = self.now.Add(delay)
+	}()
+	fire()
+	return func() bool { return false }
+}
+
+// Times fire on the logical clock once gate opens, unless the returned stop
+// comes first: the clock then advances by the delay and fire runs. A nil gate
+// never opens. Each timed retry sends to armed, when it has room.
+func (self *redisCompensationTestClock) AfterGate(gate <-chan struct{}, armed chan<- struct{}) func(time.Duration, func()) func() bool {
+	return func(delay time.Duration, fire func()) func() bool {
+		stopped := make(chan struct{})
+		stop := sync.OnceValue(func() bool {
+			close(stopped)
+			return true
+		})
+		select {
+		case armed <- struct{}{}:
+		default:
+		}
+		go func() {
+			select {
+			case <-gate:
+			case <-stopped:
+				return
+			}
+			select {
+			case <-stopped:
+			default:
+				self.After(delay, fire)
+			}
+		}()
+		return stop
+	}
+}
+
 func redisCompensationTestCount(result string) float64 {
 	return testutil.ToFloat64(redisContractReservationResults.WithLabelValues("compensation", result))
 }
@@ -55,16 +98,18 @@ func newRedisDeferredCompensationsForTest(t testing.TB, workers, balances int) *
 		ctx, cancel := context.WithTimeout(context.Background(), redisDeferredCompensationQuiesceTimeout)
 		defer cancel()
 		_ = deferred.quiesce(ctx)
-		close(deferred.queue)
+		deferred.stopWorkers()
 	})
 	return deferred
 }
 
 // Waits for the process-wide deferred owner to end every compensation, so a
-// test observes a release that its request's own pass left to that owner.
+// test observes a release that its request's own pass left to that owner. A
+// compensation ends within its budget, plus a release call begun before the
+// budget ended and the give-up that follows it.
 func drainRedisContractCompensations(t testing.TB, ctx context.Context) {
 	t.Helper()
-	bounded, cancel := context.WithTimeout(ctx, redisReservationCleanupBudget)
+	bounded, cancel := context.WithTimeout(ctx, redisReservationCleanupBudget+2*redisContractAdmissionTimeout)
 	defer cancel()
 	if err := deferredRedisCompensations.drain(bounded); err != nil {
 		t.Fatal("the deferred compensations did not end", err)
@@ -140,14 +185,7 @@ func TestRedisDeferredCompensationCallerWaitsForOnePass(t *testing.T) {
 		var requests []server.Id
 		observe := func(cleanup redisReservationCleanup) redisReservationCleanup {
 			cleanup.now = clock.Now
-			cleanup.wait = func(ctx context.Context, delay time.Duration) error {
-				select {
-				case <-retry:
-				case <-ctx.Done():
-					return ctx.Err()
-				}
-				return clock.Wait(ctx, delay)
-			}
+			cleanup.after = clock.AfterGate(retry, nil)
 			cleanup.recover = func(_ context.Context, id, request server.Id) error {
 				func() {
 					stateLock.Lock()
@@ -220,7 +258,7 @@ func TestRedisDeferredCompensationBoundsRetriesAcrossRequests(t *testing.T) {
 		retrying, maxRetrying := 0, 0
 		observe := func(cleanup redisReservationCleanup) redisReservationCleanup {
 			clock := &redisCompensationTestClock{now: time.Unix(1, 0)}
-			cleanup.now, cleanup.wait = clock.Now, clock.Wait
+			cleanup.now, cleanup.after = clock.Now, clock.After
 			cleanup.recover = func(_ context.Context, _, request server.Id) error {
 				first := func() bool {
 					stateLock.Lock()
@@ -288,7 +326,105 @@ func TestRedisDeferredCompensationBoundsRetriesAcrossRequests(t *testing.T) {
 	})
 }
 
-// The deferred owner's queue holds a bounded number of balances. Past it a
+// A compensation waiting out its backoff holds no worker: while one waits for
+// its retry, another's due pass runs at once on the owner's only worker.
+func TestRedisDeferredCompensationWaitingRetryHoldsNoWorker(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	deferred := newRedisDeferredCompensationsForTest(t, 1, 2)
+	// The first compensation's backoff does not end while the test runs.
+	never := make(chan struct{})
+	waiting := make(chan struct{}, 1)
+	first := &redisCompensationTestClock{now: time.Unix(1, 0)}
+	held := redisReservationCleanup{now: first.Now, after: first.AfterGate(never, waiting), deferred: deferred,
+		// as an owner whose workers sleep through backoff would wait
+		wait: func(ctx context.Context, delay time.Duration) error {
+			select {
+			case waiting <- struct{}{}:
+			default:
+			}
+			select {
+			case <-never:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			return first.Wait(ctx, delay)
+		},
+		recover: func(context.Context, server.Id, server.Id) error {
+			return context.DeadlineExceeded
+		}}
+	// The second's retry falls due at once, and its release succeeds.
+	second := &redisCompensationTestClock{now: time.Unix(1, 0)}
+	passed := make(chan struct{})
+	pass := sync.OnceFunc(func() { close(passed) })
+	ready := redisReservationCleanup{now: second.Now, wait: second.Wait, after: second.After, deferred: deferred,
+		recover: func(context.Context, server.Id, server.Id) error {
+			pass()
+			return nil
+		}}
+	if !deferred.offer(ctx, held.compensation(server.NewId(), []server.Id{server.NewId()}, first.Now().Add(redisReservationCleanupBudget))) {
+		t.Fatal("the deferred owner refused a compensation it had room for")
+	}
+	select {
+	case <-waiting:
+	case <-ctx.Done():
+		t.Fatal("the first compensation did not wait for its retry", ctx.Err())
+	}
+	completedBefore := redisCompensationTestCount("completed")
+	if !deferred.offer(ctx, ready.compensation(server.NewId(), []server.Id{server.NewId()}, second.Now().Add(redisReservationCleanupBudget))) {
+		t.Fatal("the deferred owner refused a compensation it had room for")
+	}
+	select {
+	case <-passed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("a compensation waiting for its retry held the owner's only worker")
+	}
+	for redisCompensationTestCount("completed") == completedBefore {
+		select {
+		case <-ctx.Done():
+			t.Fatal("the second compensation did not complete", ctx.Err())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+// The owner's throughput is bounded by its concurrent release calls, not by
+// backoff: with one worker and real timers, every compensation of a burst
+// makes its deferred pass within its budget, all waiting out their backoff at
+// once. A worker that slept through each backoff served one compensation per
+// backoff, so the end of the burst expired unattempted.
+func TestRedisDeferredCompensationRetriesOnTimersNotWorkers(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+	const burst = 16
+	deferred := newRedisDeferredCompensationsForTest(t, 1, burst)
+	cleanup := defaultRedisReservationCleanup()
+	var passes atomic.Int32
+	cleanup.recover = func(context.Context, server.Id, server.Id) error {
+		passes.Add(1)
+		return nil
+	}
+	cleanup.deferred = deferred
+	completedBefore, expiredBefore := redisCompensationTestCount("completed"), redisCompensationTestCount("expired")
+	for range burst {
+		// each request's own pass has just left its one balance pending
+		compensation := cleanup.compensation(server.NewId(), []server.Id{server.NewId()}, time.Now().Add(redisReservationCleanupBudget))
+		if !deferred.offer(ctx, compensation) {
+			t.Fatal("the deferred owner refused a compensation it had room for")
+		}
+	}
+	if err := deferred.drain(ctx); err != nil {
+		t.Fatal("the deferred owner did not end the burst", err)
+	}
+	if expired := redisCompensationTestCount("expired") - expiredBefore; expired != 0 {
+		t.Fatalf("%d of %d compensations expired before the owner's one worker reached them", int(expired), burst)
+	}
+	if completed := redisCompensationTestCount("completed") - completedBefore; completed != burst || passes.Load() != burst {
+		t.Fatal("the burst's deferred passes did not each complete once", completed, passes.Load())
+	}
+}
+
+// The deferred owner holds a bounded number of balances. Past it a
 // compensation is dropped to retained recovery: its caller neither blocks nor
 // starts a goroutine, and the drop is counted.
 func TestRedisDeferredCompensationOverflowDropsWithoutBlocking(t *testing.T) {
@@ -307,18 +443,7 @@ func TestRedisDeferredCompensationOverflowDropsWithoutBlocking(t *testing.T) {
 		observe := func(cleanup redisReservationCleanup) redisReservationCleanup {
 			clock := &redisCompensationTestClock{now: time.Unix(1, 0)}
 			cleanup.now = clock.Now
-			cleanup.wait = func(ctx context.Context, delay time.Duration) error {
-				select {
-				case holding <- struct{}{}:
-				default:
-				}
-				select {
-				case <-hold:
-				case <-ctx.Done():
-					return ctx.Err()
-				}
-				return clock.Wait(ctx, delay)
-			}
+			cleanup.after = clock.AfterGate(hold, holding)
 			cleanup.recover = func(context.Context, server.Id, server.Id) error {
 				return context.DeadlineExceeded
 			}
@@ -335,25 +460,26 @@ func TestRedisDeferredCompensationOverflowDropsWithoutBlocking(t *testing.T) {
 			})
 		}
 		takenBefore, droppedBefore, pendingBefore := redisCompensationTestCount("deferred"), redisCompensationTestCount("dropped"), redisCompensationTestCount("pending")
-		// One balance holds the one worker in its backoff...
+		// One balance waits for its retry...
 		if err := request(1); !errors.Is(err, refusal) || errors.Is(err, errRedisReservationCleanupPending) {
 			t.Fatal("the first deferred compensation changed its caller's result", err)
 		}
 		select {
 		case <-holding:
 		case <-ctx.Done():
-			t.Fatal("the deferred worker did not take the first compensation", ctx.Err())
+			t.Fatal("the deferred owner did not take the first compensation", ctx.Err())
 		}
-		// ...three more would exceed the queue, though a compensation would fit...
+		// ...three more would exceed the owner's balances, though a
+		// compensation would fit...
 		if err := request(3); !errors.Is(err, refusal) || !errors.Is(err, errRedisReservationCleanupPending) {
-			t.Fatal("a compensation beyond the queue's balances was not dropped", err)
+			t.Fatal("a compensation beyond the owner's balances was not dropped", err)
 		}
 		// ...and two more fill it.
 		if err := request(2); !errors.Is(err, refusal) || errors.Is(err, errRedisReservationCleanupPending) {
-			t.Fatal("the queued compensation changed its caller's result", err)
+			t.Fatal("the held compensation changed its caller's result", err)
 		}
 		if taken := redisCompensationTestCount("deferred") - takenBefore; taken != 2 {
-			t.Fatal("the worker and queue did not take the compensations that fit", taken)
+			t.Fatal("the owner did not take the compensations that fit", taken)
 		}
 
 		const overflow = 64
@@ -368,10 +494,10 @@ func TestRedisDeferredCompensationOverflowDropsWithoutBlocking(t *testing.T) {
 			t.Fatalf("%d dropped compensations grew the process by %d goroutines", overflow, grown)
 		}
 		if dropped := redisCompensationTestCount("dropped") - droppedBefore; dropped != 1+overflow {
-			t.Fatal("the full queue did not count each dropped compensation", dropped)
+			t.Fatal("the full owner did not count each dropped compensation", dropped)
 		}
 		if taken := redisCompensationTestCount("deferred") - takenBefore; taken != 2 {
-			t.Fatal("a full queue took another compensation", taken)
+			t.Fatal("a full owner took another compensation", taken)
 		}
 
 		release()
@@ -401,14 +527,7 @@ func TestRedisInsufficientRefusalSkipsRerunWhileCompensationPends(t *testing.T) 
 		var recovered atomic.Int32
 		observe := func(cleanup redisReservationCleanup) redisReservationCleanup {
 			cleanup.now = clock.Now
-			cleanup.wait = func(ctx context.Context, delay time.Duration) error {
-				select {
-				case <-retry:
-				case <-ctx.Done():
-					return ctx.Err()
-				}
-				return clock.Wait(ctx, delay)
-			}
+			cleanup.after = clock.AfterGate(retry, nil)
 			cleanup.recover = func(owner context.Context, _, _ server.Id) error {
 				recovered.Add(1)
 				if healthy.Load() {
@@ -489,7 +608,7 @@ func TestRedisRerunCompensationMakesItsOwnPassAfterTheBudget(t *testing.T) {
 		clock := &redisCompensationTestClock{now: time.Unix(1, 0)}
 		var recovered atomic.Int32
 		observe := func(cleanup redisReservationCleanup) redisReservationCleanup {
-			cleanup.now, cleanup.wait = clock.Now, clock.Wait
+			cleanup.now, cleanup.after = clock.Now, clock.After
 			cleanup.recover = func(context.Context, server.Id, server.Id) error {
 				recovered.Add(1)
 				return nil
@@ -537,7 +656,7 @@ func TestRedisDeferredCompensationWorkerSurvivesPanic(t *testing.T) {
 	deferred := newRedisDeferredCompensationsForTest(t, 1, 2)
 	clock := &redisCompensationTestClock{now: time.Unix(1, 0)}
 	poisoned, healthy := server.NewId(), server.NewId()
-	cleanup := redisReservationCleanup{now: clock.Now, wait: clock.Wait, deferred: deferred,
+	cleanup := redisReservationCleanup{now: clock.Now, after: clock.After, deferred: deferred,
 		recover: func(_ context.Context, id, _ server.Id) error {
 			if id == poisoned {
 				// a programming error in the release path
@@ -564,33 +683,43 @@ func TestRedisDeferredCompensationWorkerSurvivesPanic(t *testing.T) {
 	}
 }
 
-// A compensation whose budget ended while it was queued makes no pass and is
-// counted expired, not pending.
+// A compensation whose budget leaves the deferred owner no pass makes none
+// and is counted expired, not pending: one whose budget ends as its request's
+// own pass leaves it pending, and one whose budget ends while it waits for a
+// worker after its retry fell due.
 func TestRedisDeferredCompensationExpiredInQueueMakesNoPass(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
-	deferred := newRedisDeferredCompensationsForTest(t, 1, 1)
-	clock := &redisCompensationTestClock{now: time.Unix(1, 0)}
+	deferred := newRedisDeferredCompensationsForTest(t, 1, 2)
 	var calls atomic.Int32
-	cleanup := redisReservationCleanup{now: clock.Now, wait: clock.Wait, deferred: deferred,
-		recover: func(context.Context, server.Id, server.Id) error {
-			calls.Add(1)
-			return nil
-		}}
+	recover := func(context.Context, server.Id, server.Id) error {
+		calls.Add(1)
+		return nil
+	}
 	expiredBefore, completedBefore, pendingBefore := redisCompensationTestCount("expired"), redisCompensationTestCount("completed"), redisCompensationTestCount("pending")
 	// the budget ends as the request's own pass leaves the balance pending
-	compensation := cleanup.compensation(server.NewId(), []server.Id{server.NewId()}, clock.Now())
-	if !deferred.offer(ctx, compensation) {
+	ended := &redisCompensationTestClock{now: time.Unix(1, 0)}
+	cleanup := redisReservationCleanup{now: ended.Now, after: ended.After, deferred: deferred, recover: recover}
+	if !deferred.offer(ctx, cleanup.compensation(server.NewId(), []server.Id{server.NewId()}, ended.Now())) {
+		t.Fatal("the deferred owner refused a compensation it had room for")
+	}
+	// the budget ends while the compensation waits for a worker
+	late := &redisCompensationTestClock{now: time.Unix(1, 0)}
+	queued := redisReservationCleanup{now: late.Now, deferred: deferred, recover: recover,
+		after: func(delay time.Duration, fire func()) func() bool {
+			return late.After(delay+redisReservationCleanupBudget, fire)
+		}}
+	if !deferred.offer(ctx, queued.compensation(server.NewId(), []server.Id{server.NewId()}, late.Now().Add(redisReservationCleanupBudget))) {
 		t.Fatal("the deferred owner refused a compensation it had room for")
 	}
 	if err := deferred.drain(ctx); err != nil {
-		t.Fatal("the deferred owner did not end the expired compensation", err)
+		t.Fatal("the deferred owner did not end the expired compensations", err)
 	}
 	if calls.Load() != 0 {
 		t.Fatal("an expired compensation made a pass", calls.Load())
 	}
-	if expired := redisCompensationTestCount("expired") - expiredBefore; expired != 1 {
-		t.Fatal("the expired compensation was not counted expired", expired)
+	if expired := redisCompensationTestCount("expired") - expiredBefore; expired != 2 {
+		t.Fatal("the expired compensations were not counted expired", expired)
 	}
 	if redisCompensationTestCount("completed") != completedBefore || redisCompensationTestCount("pending") != pendingBefore {
 		t.Fatal("an expired compensation was counted as another outcome")
@@ -604,17 +733,10 @@ func TestRedisContractCompensationQuiesceEndsHeldCompensations(t *testing.T) {
 	defer cancel()
 	clock := &redisCompensationTestClock{now: time.Unix(1, 0)}
 	holding := make(chan struct{}, 1)
-	cleanup := redisReservationCleanup{now: clock.Now, deferred: deferredRedisCompensations,
+	// its retry never falls due
+	cleanup := redisReservationCleanup{now: clock.Now, after: clock.AfterGate(nil, holding), deferred: deferredRedisCompensations,
 		recover: func(context.Context, server.Id, server.Id) error {
 			return context.DeadlineExceeded
-		},
-		wait: func(ctx context.Context, _ time.Duration) error {
-			select {
-			case holding <- struct{}{}:
-			default:
-			}
-			<-ctx.Done()
-			return ctx.Err()
 		}}
 	pendingBefore := redisCompensationTestCount("pending")
 	compensation := cleanup.compensation(server.NewId(), []server.Id{server.NewId()}, clock.Now().Add(redisReservationCleanupBudget))
@@ -624,7 +746,7 @@ func TestRedisContractCompensationQuiesceEndsHeldCompensations(t *testing.T) {
 	select {
 	case <-holding:
 	case <-ctx.Done():
-		t.Fatal("the deferred worker did not take the compensation", ctx.Err())
+		t.Fatal("the deferred owner did not take the compensation", ctx.Err())
 	}
 	quiesced, stop := context.WithTimeout(ctx, redisDeferredCompensationQuiesceTimeout)
 	defer stop()
@@ -664,14 +786,7 @@ func TestRedisDeferredCompensationRereadsPublicationWhenItRuns(t *testing.T) {
 				return release(owner, balance, request)
 			}
 			cleanup.now = clock.Now
-			cleanup.wait = func(ctx context.Context, delay time.Duration) error {
-				select {
-				case <-retry:
-				case <-ctx.Done():
-					return ctx.Err()
-				}
-				return clock.Wait(ctx, delay)
-			}
+			cleanup.after = clock.AfterGate(retry, nil)
 			cleanup.deferred = deferred
 			return cleanup
 		}
@@ -743,18 +858,13 @@ func TestRedisDeferredCompensationQuiesceLeavesTokensToAgedRecovery(t *testing.T
 		_ = createRedisAdmissionTest(ctx, f, 17)
 		deferred := newRedisDeferredCompensationsForTest(t, 1, 1)
 		holding := make(chan struct{}, 1)
+		clock := &redisCompensationTestClock{now: time.Unix(1, 0)}
 		observe := func(cleanup redisReservationCleanup) redisReservationCleanup {
 			cleanup.recover = func(context.Context, server.Id, server.Id) error {
 				return context.DeadlineExceeded
 			}
-			cleanup.wait = func(ctx context.Context, _ time.Duration) error {
-				select {
-				case holding <- struct{}{}:
-				default:
-				}
-				<-ctx.Done()
-				return ctx.Err()
-			}
+			// its retry never falls due
+			cleanup.now, cleanup.after = clock.Now, clock.AfterGate(nil, holding)
 			cleanup.deferred = deferred
 			return cleanup
 		}
@@ -775,7 +885,7 @@ func TestRedisDeferredCompensationQuiesceLeavesTokensToAgedRecovery(t *testing.T
 		select {
 		case <-holding:
 		case <-ctx.Done():
-			t.Fatal("the deferred worker did not take the compensation", ctx.Err())
+			t.Fatal("the deferred owner did not take the compensation", ctx.Err())
 		}
 		pendingBefore := redisCompensationTestCount("pending")
 		quiesced, stop := context.WithTimeout(ctx, redisDeferredCompensationQuiesceTimeout)
