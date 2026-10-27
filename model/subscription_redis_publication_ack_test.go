@@ -229,10 +229,14 @@ func (self *redisPublicationReplyHook) require(t testing.TB, owners ...int) {
 	}
 }
 
+// The page acknowledges its own publication on the late-reply pool; recovery
+// publishes inside its transaction on the deadline pool. Hook both.
 func installRedisPublicationHook(t testing.TB, ctx context.Context, hook *redisPublicationReplyHook) {
 	t.Helper()
-	if err := server.RedisWithDeadline(ctx, func(client server.RedisClient) error { client.AddHook(hook); return nil }); err != nil {
-		t.Fatal(err)
+	for _, options := range [][]any{nil, {server.OptRedisKeepLateReplies()}} {
+		if err := server.RedisWithDeadline(ctx, func(client server.RedisClient) error { client.AddHook(hook); return nil }, options...); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -257,8 +261,13 @@ func requireRedisPublicationCustody(t testing.TB, ctx context.Context, fixture n
 		keys := redisContractReservationKeys(fixture.balanceId)
 		values, err := client.HGetAll(ctx, keys[1]).Result()
 		server.Raise(err)
-		if len(values) != tokens || values[neighbor.String()] != "17" || values[own.String()] != "23" {
-			t.Fatal("acknowledgement changed an exact live token")
+		if values[neighbor.String()] != "17" || values[own.String()] != "23" {
+			t.Fatalf("acknowledgement changed an exact live token: neighbor=%q own=%q", values[neighbor.String()], values[own.String()])
+		}
+		// More tokens than expected are ones recovery did not release, such as
+		// those a page that ran out of time keeps for a later page.
+		if len(values) != tokens {
+			t.Fatalf("live tokens=%d; want %d", len(values), tokens)
 		}
 		expiry, err = client.ZScore(ctx, keys[2], own.String()).Result()
 		server.Raise(err)
@@ -476,7 +485,11 @@ func TestRedisConfirmedPublicationStillRecoversUnrelatedMarker(t *testing.T) {
 }
 
 // Filtering one own candidate must not admit a 33rd candidate, even when
-// acknowledged publication leaves room in the pending SQL slice.
+// acknowledged publication leaves room in the pending SQL slice. The test owns
+// the page's deadline, as recoverRetainedPage allows: a public request's page
+// has one second for these 31 fenced custody checks, which a loaded test host
+// outlasts, and a page that runs out of time keeps the rest for a later page.
+// The page gets the joined escrow that the public owner would pass it.
 func TestRedisConfirmedPublicationPreservesCollectedPageBound(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -496,24 +509,23 @@ func TestRedisConfirmedPublicationPreservesCollectedPageBound(t *testing.T) {
 		observer, observed, closeObservation := observeRedisPublication(t, ctx)
 		defer closeObservation()
 		completedBefore := testutil.ToFloat64(redisContractReservationResults.WithLabelValues("recovery", "completed"))
-		escrow, err := runRedisContractAdmission(observed, func(owned context.Context) (*TransferEscrow, error) {
-			created, err := createTransferEscrow(owned, fixture.sourceNetworkId, fixture.sourceId, fixture.destinationNetworkId, fixture.destinationId, 23)
-			if err != nil || created == nil {
-				return created, err
-			}
-			// The real creator has joined its confirmed transaction here. Set
-			// marker rotation order, leaving token amounts and leases untouched.
-			server.Redis(ctx, func(client server.RedisClient) {
-				ordered := []redis.Z{{Score: -1, Member: created.ContractId.String()}}
-				for index, peer := range peers {
-					ordered = append(ordered, redis.Z{Score: float64(index), Member: peer.String()})
-				}
-				server.Raise(client.ZAdd(ctx, redisContractReservationKeys(fixture.balanceId)[4], ordered...).Err())
-			})
-			return created, nil
-		})
+		owned := withRedisContractAdmission(observed)
+		escrow, err := createTransferEscrow(owned, fixture.sourceNetworkId, fixture.sourceId, fixture.destinationNetworkId, fixture.destinationId, 23)
 		if err != nil || escrow == nil {
 			t.Fatal("bounded page creation failed", err)
+		}
+		// The real creator has joined its confirmed transaction here. Set
+		// marker rotation order, leaving token amounts and leases untouched.
+		server.Redis(ctx, func(client server.RedisClient) {
+			ordered := []redis.Z{{Score: -1, Member: escrow.ContractId.String()}}
+			for index, peer := range peers {
+				ordered = append(ordered, redis.Z{Score: float64(index), Member: peer.String()})
+			}
+			server.Raise(client.ZAdd(ctx, redisContractReservationKeys(fixture.balanceId)[4], ordered...).Err())
+		})
+		// The page runs within this test's deadline.
+		if !redisAdmissionFromContext(owned).recoverRetainedPageWithPublication(owned, escrow) {
+			t.Fatal("bounded page released no abandoned peer")
 		}
 		requireRedisPublicationCustody(t, ctx, fixture, neighbor.ContractId, escrow.ContractId, 41, 3)
 		for index, peer := range peers {
