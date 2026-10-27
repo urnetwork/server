@@ -5,7 +5,49 @@ checklist is the acceptance index for the new release, not an authorization to
 activate production. Historical v1 checkmarks do not qualify a different source,
 image, host manifest, policy or review provider.
 
-## Current checkpoint — October 27, 12:24 UTC
+## Current checkpoint — October 27, 15:10 UTC
+
+This checkpoint supersedes conflicting progress statements in the historical
+12:24 record below; it does not erase its evidence or failures.
+
+- The corrected bridge has native acceptance (`2af963f0…`): all nine controls
+  and nine candidates, exact frozen-image score replay and artifact bindings
+  passed. It is an operational compatibility witness, not statistical
+  equivalence. The no-op improvement was −3.055%, one-sided p = 0.66085;
+  the significant-improvement fringe was 12.625% and practical margin 26.9%.
+- Both independent seeds were prepared and published in `40a27c5fb`, and the
+  original six-job plan passed native verification. **Neither was measured**
+  when the owner prospectively approved
+  [first committed seed only](CALIBRATION-AMENDMENT-2026-10-27-FIRST-SEED.md).
+  Position 1 and its three unchanged jobs are the entire new measurement
+  scope; position 2 remains committed and unstarted. No new seed draw,
+  replacement, or selection based on results is allowed. Confidence is lower
+  than the preceding two-seed plan. R9, all gates, significance, practical
+  margin and deadlines remain unchanged. The named execution path is under
+  independent qualification; this is not a claim that measurement has started.
+- The revised one-seed policy passed fourteen race-enabled guards three
+  consecutive times (42 passes, zero skips). A compiled old-count control
+  failed at the exact stale-two-seed assertion. Native policy generation is
+  authorized only for a new private namespace; the prior sealed `f6967287…`
+  two-seed preimage must not be relabeled. Published config `038333e…` still
+  needs a superseding one-seed policy before activation.
+- V7 review qualification terminated unqualified: cancellation passed, but
+  the benign case's Muse judgment lacked its final JSON brace. Qwen and Gemma
+  returned valid approvals; the union correctly withheld authority. Report
+  `19a916de…` is retained. There is no output repair, ignored member or blind
+  reroll. Snow structured-output enforcement remains an unresolved gate.
+- The complete 381,931,520-byte bridge archive is retained in MinIO by exact
+  version `68f6bf2e-72ae-41a4-8605-4ac0710dd297`, SHA `b9fa2303…`, under
+  COMPLIANCE through 2028-01-01, with full exact-version readback. This
+  archive's replica delivery has not been verified. The separately versioned
+  curated baseline passed both local and global manifests.
+- Preparation-only manager `0a396c4a…` is installed inactive and its CLI help
+  is verified. No production bootstrap, target-round R1, API/worker readiness
+  quorum, source activation or admission is claimed. Current deployment is
+  being rechecked; the last completed read-only DB audit still showed
+  migrations 891–893 pending.
+
+## Historical checkpoint — October 27, 12:24 UTC
 
 The following supersedes the provider and baseline-preparation progress in the
 dated bullets below; those bullets retain the earlier qualification history.
