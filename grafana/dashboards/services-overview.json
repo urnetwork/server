@@ -1257,6 +1257,88 @@
                     "legendFormat": "{{service}} {{slot}}"
                 }
             ]
+        },
+        {
+            "id": 28,
+            "type": "timeseries",
+            "title": "lock-timeout refusals recovered / s",
+            "description": "Lock waits ended by their bound (SQLSTATE 55P03, lock_timeout) that HandleError recovered as expected backpressure, without an unexpected-error report, like the contention refusals above. The refused work is left to the lock's holder or a later attempt. A rate that keeps rising is a lock queue forming behind a busy holder: read the holder (pg_locks, wait events) rather than the refused callers.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 80
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (service) (rate(urnetwork_lock_timeout_refusals_recovered_total{env=\"$env\",service=~\"$service\",block=~\"$block\",host=~\"$host\"}[$__rate_interval]))",
+                    "legendFormat": "{{service}}"
+                }
+            ]
+        },
+        {
+            "id": 29,
+            "type": "timeseries",
+            "title": "provide messages refused for inactive clients / s",
+            "description": "Provide messages (a client announcing the keys it provides with) refused because the client is inactive: its deactivation deleted its provide keys, and a provide does not restore them. The message is the client's own, so only verbose logs show one; this rate is the record. A steady trickle is deactivated clients that still run; a burst follows a mass deactivation.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 80
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (service) (rate(urnetwork_provide_inactive_client_refusals_total{env=\"$env\",service=~\"$service\",block=~\"$block\",host=~\"$host\"}[$__rate_interval]))",
+                    "legendFormat": "{{service}}"
+                }
+            ]
         }
     ]
 }

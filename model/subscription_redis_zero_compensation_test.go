@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/urnetwork/server"
 )
 
@@ -14,9 +15,13 @@ import (
 // held. The unchanged public admission owner then unwinds concurrently. Known
 // zero reservations (and missing origins) must not need a second PG connection.
 // The barrier is released even on the old implementation, so the RED control
-// joins its cleanup rather than leaving detached workers behind.
+// joins its cleanup rather than leaving detached workers behind. In
+// proven-zero the payer is listed as exhausted, so every request is refused by
+// the exhaustion proof (subscription_redis_exhaustion.go), which reserves
+// nothing and leaves an unmarked grant out of recovery discovery; the other
+// modes pin the census's own zero reservations.
 func TestRedisZeroCompensationReturnsWhilePostgresIsOccupied(t *testing.T) {
-	for _, mode := range []string{"ordinary-zero", "preferred-zero", "canceled-zero", "missing-origin"} {
+	for _, mode := range []string{"ordinary-zero", "preferred-zero", "canceled-zero", "missing-origin", "proven-zero"} {
 		t.Run(mode, func(t *testing.T) {
 			env := server.DefaultTestEnv()
 			env.RerunCount = 0
@@ -26,6 +31,12 @@ func TestRedisZeroCompensationReturnsWhilePostgresIsOccupied(t *testing.T) {
 				defer func() { server.PgReset(); pop() }()
 				ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 				defer cancel()
+				proven := mode == "proven-zero"
+				if proven {
+					withRedisExhaustedPayersForTest(t)
+				} else {
+					withoutRedisExhaustedPayersForTest(t)
+				}
 				clients := newEscrowSelectionTestClients(t, ctx)
 				preferred := mode == "preferred-zero"
 				if preferred {
@@ -38,6 +49,18 @@ func TestRedisZeroCompensationReturnsWhilePostgresIsOccupied(t *testing.T) {
 				} else {
 					redisSelectionReserveLegacy(t, ctx, clients, ids, 100)
 				}
+				if proven {
+					// a census refusal lists the payer and leaves the grant's
+					// reservation counters for the proofs to read
+					_, err := runRedisContractAdmission(ctx, func(owned context.Context) (*TransferEscrow, error) {
+						return createCompanionTransferEscrow(owned, clients.providerNetworkId, clients.providerId,
+							clients.payerNetworkId, clients.payerId, 17, time.Hour)
+					})
+					if !errors.Is(err, want) {
+						t.Fatal("the listing census did not refuse", err)
+					}
+				}
+				provenBefore := testutil.ToFloat64(redisContractReservationResults.WithLabelValues("exhaustion-proof", "proven"))
 				requestCtx, stopRequests := context.WithCancel(ctx)
 				defer stopRequests()
 				const concurrent = 16
@@ -108,11 +131,19 @@ func TestRedisZeroCompensationReturnsWhilePostgresIsOccupied(t *testing.T) {
 				if returnedWhileHeld != concurrent {
 					t.Errorf("conclusive zero cleanup waited for PostgreSQL: returned %d/%d while the sole slot was held", returnedWhileHeld, concurrent)
 				}
+				// a proof keeps only a grant holding a marker in discovery
+				attempted := 1
+				if proven {
+					attempted = 0
+					if got := testutil.ToFloat64(redisContractReservationResults.WithLabelValues("exhaustion-proof", "proven")) - provenBefore; got != concurrent {
+						t.Error("not every request was refused by the proof", got)
+					}
+				}
 				for _, result := range outcomes {
 					if !errors.Is(result.err, want) || result.owner == nil {
 						t.Fatal("companion refusal changed", result.err)
 					}
-					if mode != "missing-origin" && len(result.owner.attemptedBalanceIds) != 1 {
+					if mode != "missing-origin" && len(result.owner.attemptedBalanceIds) != attempted {
 						t.Fatal("zero reservation lost retained-marker discovery")
 					}
 					redisRecoveryRequireMarker(t, ctx, ids[0], result.owner.contractId, false)

@@ -241,6 +241,46 @@ would find nothing.
 former `refused`), and `operation=reserve-probe` with
 `result=empty|available|undecided|error`.
 
+## Exhausted payers
+
+Probes still leave an exhausted payer's census its other costs on every
+request: up to three discovery queries, one real refused reservation and a
+probe pipeline per spread window or doubling batch, the reservation of
+whatever room a grant has left, that room's release in the refusal's
+compensation, and a recovery page call for each grant the census attempted.
+On 2026-10-26 the platform's own proxy network, with thirty-two grants, paid
+this on hundreds of refused requests a second, and the compensations of those
+refusals failed on the deadline pool every reservation shares.
+
+After a complete census refuses an ordinary payer as exhausted, its process
+lists the payer for five seconds; a funded census removes it. A listed
+payer's request first reads its grants with the census's keyset query and
+probes every grant with credit in one pipeline per page of 64. When every
+probe is exact, no grant has room for the rest of the request, the total room
+is below the shrink floor, fewer grants have room than the selected limit and
+the grants fit the row limit after the spread windows, the request is refused
+with the census's own error and total, and the payer stays listed. Nothing is
+reserved, so nothing is compensated, and only grants holding a recovery or
+pending marker join the recovery page. Any other result runs the census
+unchanged and keeps the payer with the census for five seconds, through
+refusals and fundings alike, so a state the proof cannot decide costs at most
+one proof per process every five seconds. A refused request whose recovery page released bytes reruns the
+census directly.
+
+The proof is the census at one instant: in the reservation script's plain
+state a whole reservation reserves only a grant with room for the whole
+request and a partial one reserves the room left, so a census reading each
+grant when the proof read it refuses with the same total, then releases that
+room. The list only chooses the proof, per process and in memory: a stale or
+missing entry costs at most one extra read and probe pipeline, or the census.
+The internal prober is never listed, and its census keeps its selection
+outcomes.
+
+`urnetwork_redis_contract_reservation_total` gains
+`operation=exhaustion-proof` with `result=proven|unproven`. A proven refusal
+counts its probes as `reserve-probe` results and no `reserve-pending`,
+`reserve-pending-full`, `release-pending` or `compensation` result.
+
 ## Asynchronous settlement writeback (migration 758)
 
 Current Redis-reserved contracts commit their terminal outcome and exact payer

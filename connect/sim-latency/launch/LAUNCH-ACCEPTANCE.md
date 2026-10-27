@@ -5,11 +5,53 @@ checklist is the acceptance index for the new release, not an authorization to
 activate production. Historical v1 checkmarks do not qualify a different source,
 image, host manifest, policy or review provider.
 
-## Current checkpoint — October 27, 07:28 UTC
+## Current checkpoint — October 27, 09:18 UTC
 
 The following supersedes the provider and baseline-preparation progress in the
 dated bullets below; those bullets retain the earlier qualification history.
 
+- The [V6 review precommit](SNOW-REVIEW-QUALIFICATION-PRECOMMIT-2026-10-27-V6.json)
+  is pushed through `bab6a7a30`. Its sole genuine attempt started at **08:26:51
+  UTC**, native PID **3017379**, session **9955**. It terminated with exit 1
+  after **544.95 seconds**: cancellation passed; on the benign fixture Qwen and
+  Gemma approved, while Muse withheld reproducibility because the synthetic
+  context explicitly states no tests or official measurements ran. All three
+  members completed without transport/schema errors. The union correctly held;
+  report `121365eb…` and original judgments remain retained. Real recorded Go
+  fixture evidence is being prepared without changing the six expected answers
+  or ignoring uncertainty. There is no automatic retry. Its independently
+  written full native plan matches fresh
+  export `43b2d804…` byte-for-byte. All selected control scopes at exact source
+  `09cc510d` passed three times: 216 simulator, 42 controller, 13 model, 60
+  native, 24 Grafana and 2 Warp tests per pass; zero skips, exact cleanup.
+  Receipt `86171c8e…` / summary `e4f45214…` disclose three inactive command
+  entries among 1,071 passes. New trusted review image `d9006e2f…` passed
+  independent binary readback and hardened offline startup. These tests/image
+  checks are **not yet genuine provider qualification**. The evaluator image
+  `98c9061c…` and frozen application checkpoint are unchanged. No timed scoring
+  or second model attempt may overlap; no automatic provider retry is allowed.
+- The exact corrected bridge plan is now [published before measurement](FRESH-BRIDGE-PLAN-2026-10-27.json),
+  SHA `ebfd06c2…`, with [operator authority provenance](FRESH-BRIDGE-AUTHORITY-2026-10-27.json).
+  Its qualified `244d5421…` operator retains source-base-plus-overlay provenance,
+  the original A/bridge protocol and the accepted 26.9% margin. Actual Git
+  publication authentication remains required. Trusted operator-authored
+  calibration may precede pending reviewer qualification under the documented
+  [phase-order separation](PRELAUNCH-PHASE-ORDER-2026-10-27.md); every final
+  review/launch gate remains mandatory. No corrected bridge or B seed has run.
+- Precommit authentication exposed a reference-sidecar packaging mismatch:
+  genuine flat source/builder sidecars were not pinned under the verifier's
+  required `evidence/` layout. [Byte-verified views](REFERENCE-EVIDENCE-LAYOUT-2026-10-27.json)
+  preserve all original files and patch/image/binary identities; the
+  [V2 bridge plan](FRESH-BRIDGE-PLAN-2026-10-27-V2.json) selects those views.
+  No native validator was weakened, no reference was rebuilt, and no failed
+  control measurements are reused. The original plans/authentication failures
+  remain retained. V2 publication and native authentication precede any run.
+- Matching review-input consumer `ad846565…` is installed inactive at the
+  protected `competition-production-operator-09cc510d-20261028-v2` release.
+  Old 1a/fb505 consumers cannot replay the new `source_files_semantics` input
+  hash and must not be started with the new broker. Existing worker `395b…` /
+  provenance image `1996…`, evaluator `98c…` and frozen scorer `efd…` are separate
+  and unchanged.
 - A fresh current-boot containment proof passed at **07:28:32 UTC**: simultaneous
   CPU saturation of all ten evaluation cores and a 72 GiB memory bomb ended in
   the expected cgroup OOM exit 137. Reserved-core cleanup took **775 ms** against
