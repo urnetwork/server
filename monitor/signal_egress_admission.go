@@ -350,6 +350,8 @@ func (self *egressAdmissionProbe) observe(ctx context.Context, now time.Time, pr
 	}
 	unobservable, complete := 0, 0
 	deltas := map[string]float64{}
+	apiIntervals, workerIntervals := 0, 0
+	dueTraffic, healthAcknowledged, attemptAcknowledged, fullSubmitted := true, true, true, true
 	observerAdvanced := !self.observedAt.IsZero() && now.After(self.observedAt)
 	for identity, pair := range processes {
 		block := identity
@@ -381,6 +383,18 @@ func (self *egressAdmissionProbe) observe(ctx context.Context, now time.Time, pr
 		if reset || (selectedDelta > 0 && snapshot.counters["requests"] == previous.counters["requests"]) {
 			unobservable++
 			continue
+		}
+		// Absence credit requires positive work from every observed complete
+		// process of the relevant role, never traffic borrowed from a sibling.
+		delta := func(key string) float64 { return snapshot.counters[key] - previous.counters[key] }
+		if identity.job == "api" {
+			apiIntervals++
+			dueTraffic = dueTraffic && delta("requests") > 0
+		} else if identity.job == "taskworker" {
+			workerIntervals++
+			healthAcknowledged = healthAcknowledged && delta("submission/health/acknowledged") > 0
+			attemptAcknowledged = attemptAcknowledged && delta("submission/attempt/acknowledged") > 0
+			fullSubmitted = fullSubmitted && delta("full/attempted") > 0 && delta("full/submitted") > 0
 		}
 		complete++
 		for key, value := range snapshot.counters {
@@ -476,12 +490,40 @@ func (self *egressAdmissionProbe) observe(ctx context.Context, now time.Time, pr
 			playbook:  "SIGNALS.md §2.19a, §2.23, §2.9a, and §1.2",
 		})
 	}
+	// Idle native intervals are observable but cannot clear an already-open
+	// incident. Generic notifier identity ignores frames, so both submission
+	// kinds must be exercised before that shared class has absence authority.
+	sourceComplete := unobservable == 0 && roles["api"] > 0 && roles["taskworker"] > 0
+	dueReady := sourceComplete && apiIntervals > 0 && dueTraffic
+	reporterReady := sourceComplete && workerIntervals > 0 && healthAcknowledged && attemptAcknowledged
+	fullReady := reporterReady && fullSubmitted
+	findings = append(findings, egressAdmissionRecoveryHolds(dueReady, reporterReady, fullReady)...)
 	for i := range findings {
 		if findings[i].context == "" {
 			findings[i].context = egressAdmissionIntervalScope
 		}
 	}
 	return findings, nil
+}
+
+// Holds supply no alert or new reporting owner. They prevent silent or merely
+// unobserved work from satisfying the owning classes' traffic-bearing recovery.
+func egressAdmissionRecoveryHolds(dueReady, reporterReady, fullReady bool) []finding {
+	findings := []finding{}
+	if !dueReady {
+		findings = append(findings, finding{probeId: "runtime/egress-admission", class: "egress-admission-expired", target: "egress-fleet", clearHold: true})
+	}
+	if !reporterReady {
+		findings = append(findings, finding{probeId: "runtime/egress-admission", class: "egress-submission-unacknowledged", target: "egress-fleet", clearHold: true})
+	}
+	if !fullReady {
+		findings = append(findings,
+			finding{probeId: "runtime/egress-admission", class: "egress-full-no-submission", target: "egress-fleet", clearHold: true},
+			finding{probeId: "runtime/egress-admission", class: "egress-prober-unfunded", target: "egress-fleet", clearHold: true},
+			finding{probeId: "runtime/egress-admission", class: "egress-prober-funding-unobservable", target: "egress-fleet", clearHold: true},
+		)
+	}
+	return findings
 }
 
 // Fixed evidence describes a visibility boundary, never a healthy rollout or a

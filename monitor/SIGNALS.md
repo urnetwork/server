@@ -18415,7 +18415,22 @@ time outside the one-request source pair unsampled. A complete clean pair ends
 current visibility loss for that sampled interval; it does not establish that
 the residual gap was healthy or retrospectively clear an old incident. Existing
 recovery still requires two fresh clean traffic-bearing native intervals plus
-the direct deadline/submission controls after the repaired boundary. Those
+the direct deadline/submission controls after the repaired boundary.
+The probe now supplies silent exact-class clear holds when observed complete
+process intervals contain no relevant positive work. Expired-selection absence
+requires due-request activity from every complete observed API. Reporter-return
+absence requires health and attempt acknowledgments from every complete observed
+Taskworker; notifier identity ignores the kind frame, so an unexercised kind holds
+the existing shared class. Full-no-submission and funding-class absence also require
+positive full attempted and submitted work on each such Taskworker. There is no
+new volume threshold or alert on idle work. Missing/partial evidence keeps its
+visibility warning, and independent confirmed failures still report normally.
+Two clean positively exercised executions can then satisfy the existing notifier
+recovery streak; unknown or silent work resets it. A legitimately idle worker or
+kind can conservatively hold an old incident until it is exercised or receives an
+explicit owner disposition. Entirely absent-process discovery, unsampled time and
+independent direct deadline/product controls remain separate authority limits;
+these counter-based absence checks do not certify delivery or fleet-wide health. Those
 controls can close the current symptom while the historical gap remains an
 immutable unknown, rather than an impossible requirement to reconstruct lost
 history. Events already present at the historical native point are not new
@@ -22049,7 +22064,16 @@ causal attribution or a corrective change; thresholds and due-window
 handling do not change.
 
 Low current-attempt volume and an unobserved population are not independent
-faults: successful providers legitimately probe less often. Use §2.19 for
+faults: successful providers legitimately probe less often. With zero current
+success/failure outcomes, this detector stays silent on first observation and
+withholds absence credit for each otherwise quiet outcome class. This includes
+an empty eligible cohort: losing the measured population cannot clear an
+already-open incident. An independently measured inconsistent outcome remains
+positive. Two consecutive later complete observations with current measured
+outcomes can clear the detector's incident; they do not establish the broader
+operational recovery and due-cycle requirements below. Partial measured
+populations keep the existing denominator, evidence floor and positive rules;
+this zero-outcome hold does not invent a new scarcity or visibility alert. Use §2.19 for
 durable shard geometry, due work, and advancement. Likewise, alert absence is
 not sufficient recovery: failed rows legitimately remain deferred for six
 hours, while simply aging past that backoff can turn them into `unobserved`.
@@ -41013,6 +41037,24 @@ that the container is current, peered, syncing, or reachable through nginx.
 ### 17.1 Listener and deployment identity — SUBTENSOR1
 
 Probe: `subtensor`
+
+Gateway RPC failures retain the same `subtensor-gateway` PAGE identity and
+two-observation gate. Public `Observed` carries the numeric gateway HTTP
+status and only the fixed failed-method names (`healthz`, `chain`, `genesis`,
+`head`, `runtime`, and the current-runtime `evm_chain_id`/`eth_get_logs` gates).
+RPC error-message values are untrusted remote input and must not enter Alert
+fields, Markdown, JSON or JSONL. A status-only failure reports
+`failed_methods=none`; this does not claim that RPC methods succeeded.
+
+False-positive qualifier: a failed method/status does not identify the error's
+cause, a faulty proxy hop or a failed chain database. The same historical
+versus current-runtime method requirements still apply; unsupported historical
+methods do not become current-runtime failures. False-negative qualifier:
+method names deliberately omit detailed causes, and missing/partial runtime
+or generation authority remains unknown. Restore a complete qualified gateway
+and direct/reference comparison before claiming recovery. This narrow error
+projection does not qualify other identity/deployment fields or native helper
+output and does not establish any production exposure or deployed correction.
 
 Run these together on snow:
 ```

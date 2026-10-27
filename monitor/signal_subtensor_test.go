@@ -876,7 +876,7 @@ func TestSubtensorSignalFailsClosedOnCurrentGatewayMethodErrors(t *testing.T) {
 				t.Fatal(err)
 			}
 			gateway := requireAlertClass(t, alerts, "subtensor-gateway")
-			if gateway.Frame != "archive" || !strings.Contains(gateway.Observed, key+"=synthetic method failure") {
+			if gateway.Frame != "archive" || gateway.Observed != "gateway_http=200 failed_methods="+key {
 				t.Fatalf("gateway method failure %q was not preserved: %+v", key, gateway)
 			}
 		})
@@ -1008,8 +1008,20 @@ func TestSubtensorSignalHistoricalGatewayStillRequiresRuntimeIdentity(t *testing
 			t.Fatal(err)
 		}
 		gateway := requireAlertClass(t, alerts, "subtensor-gateway")
-		if gateway.Frame != "archive" || !strings.Contains(gateway.Observed, "runtime=synthetic runtime method failure") {
-			t.Fatalf("historical gateway runtime failure was not preserved: %+v", gateway)
+		if gateway.SignalID != "subtensor/node-health" || gateway.Target != "chain.example.test" || gateway.Frame != "archive" ||
+			gateway.Severity != SeverityPage || gateway.Sustain != 2 || gateway.Observed != "gateway_http=200 failed_methods=runtime" {
+			t.Fatal("historical runtime method failure lost its fixed gateway metadata")
+		}
+		requireAlertOmits(t, gateway, "synthetic runtime method failure")
+		runtimeUnknown := false
+		for _, alert := range alerts {
+			if alert.SignalID == "monitor/visibility" && alert.Class == "cannot-observe" &&
+				alert.Target == "chain.example.test/archive/gateway-runtime" && alert.unobservable {
+				runtimeUnknown = true
+			}
+		}
+		if !runtimeUnknown {
+			t.Fatal("historical runtime method error gained runtime identity authority")
 		}
 	})
 
