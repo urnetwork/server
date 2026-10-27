@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Native preparation/qualification uses the target worker's release context,
+# not the different source-supervisor binary's image provenance. This is not OCI execution.
+set -Eeuo pipefail
+readonly REQUIRED_UID=0
+readonly TRUSTED_ROOT=/
+readonly NATIVE=/usr/local/libexec/urnetwork/competition-production-control-1a1bf5ae-20261028-v1/competitionprepare
+readonly NATIVE_SHA=527549eb92655afb82a752cdbc46caf3ec4f790171b190c21a9e44a202e8fe86
+readonly CONFIG=/etc/urnetwork/competition-production-20261028/preparation.json
+readonly QUALIFICATION_CONFIG=/etc/urnetwork/competition-production-20261028/qualification.json
+readonly CONTROL_SOURCE=1a1bf5ae64215c0800a71cd43b994516d0eb5d9f
+readonly WORKER_IMAGE=sha256:1996ccd1e5f6477d9a4da294eebbf16a39a9a60a7fb71823ac19129ae40abc25
+readonly RUNTIME_ENVIRONMENT=main
+readonly RUNTIME_HOST=sille
+readonly RUNTIME_HOME=/home/by/urnetwork
+
+[[ $(id -u) == "$REQUIRED_UID" && $# == 0 ]] || exit 2
+
+# Fixed root authority has no environment or caller override. Tests copy these
+# exact checks into an isolated synthetic owner/root, never change live authority.
+protected_path() {
+    local path="$1" permission="$2" current mode
+    [[ "$path" == /* && $(realpath -e "$path") == "$path" && -f "$path" && ! -L "$path" ]] || return 1
+    [[ $(stat -c '%u:%a:%h' "$path") == "$REQUIRED_UID:$permission:1" ]] || return 1
+    if [[ "$TRUSTED_ROOT" != / && "$path" != "$TRUSTED_ROOT/"* ]]; then
+        return 1
+    fi
+    current=$(dirname "$path")
+    while :; do
+        [[ -d "$current" && ! -L "$current" && $(stat -c %u "$current") == "$REQUIRED_UID" ]] || return 1
+        mode=$(stat -c %a "$current")
+        (( (8#$mode & 0022) == 0 )) || return 1
+        [[ "$current" != "$TRUSTED_ROOT" ]] || break
+        [[ "$current" != / ]] || return 1
+        current=$(dirname "$current")
+    done
+}
+
+protected_path "$NATIVE" 555 || exit 2
+protected_path "$CONFIG" 400 || exit 2
+protected_path "$QUALIFICATION_CONFIG" 400 || exit 2
+[[ $(sha256sum "$NATIVE" | cut -d' ' -f1) == "$NATIVE_SHA" ]] || exit 2
+
+export WARP_ENV="$RUNTIME_ENVIRONMENT" WARP_HOST="$RUNTIME_HOST" WARP_HOME="$RUNTIME_HOME"
+export WARP_SERVICE=competitionworker WARP_BLOCK=competition
+export WARP_VERSION="$CONTROL_SOURCE" WARP_IMAGE_DIGEST="$WORKER_IMAGE"
+export SIM_LATENCY_PREPARATION_CONFIG="$CONFIG" SIM_LATENCY_QUALIFICATION_CONFIG="$QUALIFICATION_CONFIG"
+export PATH=/home/by/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.27.3.linux-amd64/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export GOTOOLCHAIN=local GOMAXPROCS=2 GOFLAGS=-p=2
+unset URNETWORK_TEST_REAL_VAULT
+# Exec retains the supervisor's request pipe and cancellation owner. Native
+# preparation verifies the live fence, API evidence, actual R1 and worker ACK.
+exec "$NATIVE" --config="$CONFIG"
