@@ -1,0 +1,236 @@
+// PRIVATE DRAFT ONLY: a separately approved B-only two-seed addendum keeps
+// original-three A and the accepted fresh bridge as their unchanged base facts.
+package main
+
+import (
+	"errors"
+	"time"
+)
+
+// This is a new closed selector, never inferred from a short outcome list.
+const heldOutProtocolThreeABridgeTwoB = "launch-3a-bridge-2b-2026-10-27-v1"
+
+// The new approval and its machine-readable declaration are independent pins;
+// neither replaces or relabels the original A/bridge approval publication.
+type heldOutTwoBAddendumPins struct {
+	Approval    heldOutPinnedFile `json:"approval"`
+	Declaration heldOutPinnedFile `json:"declaration"`
+}
+
+// This explicitly supersedes only the prior transfer's all-three-B requirement.
+// The prior direction remains an authenticated hypothesis, not new measurement.
+type heldOutTwoBReferenceTransfer struct {
+	Role                    string `json:"role"`
+	PatchSha256             string `json:"patch_sha256"`
+	OriginalDirectionSha256 string `json:"original_direction_sha256"`
+	ExpectedDirection       string `json:"expected_direction"`
+	Claim                   string `json:"claim"`
+	FreshBridgeRequired     bool   `json:"fresh_c2_bridge_required"`
+	AllTwoOrderedBRequired  bool   `json:"all_two_ordered_c2_b_required"`
+}
+
+// Every preexisting source/workload/reference/provenance pin stays fixed. No
+// margin, gate, R9 or timeout override is accepted through this new declaration.
+type heldOutTwoBAddendum struct {
+	Schema                  int                            `json:"schema"`
+	Kind                    string                         `json:"kind"`
+	Protocol                string                         `json:"protocol"`
+	BaseProtocol            string                         `json:"base_protocol"`
+	PublishedAt             time.Time                      `json:"published_at"`
+	ApprovalSha256          string                         `json:"protocol_approval_sha256"`
+	OriginalApprovalSha256  string                         `json:"original_protocol_approval_sha256"`
+	OriginalPlanSha256      string                         `json:"original_plan_sha256"`
+	StageAReportSha256      string                         `json:"accepted_stage_a_report_sha256"`
+	StageAInputsSha256      string                         `json:"stage_a_inputs_sha256"`
+	MarginFreezeSha256      string                         `json:"margin_freeze_sha256"`
+	BridgePlanSha256        string                         `json:"bridge_plan_sha256"`
+	BridgePublicationSha256 string                         `json:"bridge_publication_sha256"`
+	BridgeInputsSha256      string                         `json:"bridge_inputs_sha256"`
+	BridgeReceiptSha256     string                         `json:"bridge_compatibility_receipt_sha256"`
+	ReleaseSha256           string                         `json:"new_release_sha256"`
+	SourceLockSha256        string                         `json:"source_lock_sha256"`
+	ReferencesSha256        string                         `json:"reference_bundle_sha256"`
+	ExclusionsSha256        string                         `json:"exclusions_sha256"`
+	Margin                  float64                        `json:"accepted_margin"`
+	SeedCount               int                            `json:"hidden_b_seed_count"`
+	RequiredOrderedSeeds    int                            `json:"required_correctly_ordered_seeds"`
+	ControlReplicates       int                            `json:"control_replicates"`
+	CandidateReplicates     int                            `json:"candidate_replicates"`
+	ExecutionLimitSeconds   int64                          `json:"execution_limit_seconds"`
+	FreshSeedsRequired      bool                           `json:"fresh_hidden_b_seeds_required"`
+	AllOutcomesRetained     bool                           `json:"all_outcomes_retained"`
+	NoReplacement           bool                           `json:"no_replacement_or_resampling"`
+	ReferenceTransfers      []heldOutTwoBReferenceTransfer `json:"reference_transfers"`
+}
+
+// The unchanged original-three A and fresh bridge remain under their original
+// protocol. This projection is used only to authenticate those historical facts.
+func heldOutBaseProvenanceConfiguration(config heldOutPreparationConfig) (heldOutPreparationConfig, error) {
+	if config.Protocol == heldOutProtocolThreeABridgeTwoB {
+		if config.TwoBAddendum == nil || config.Amendment == nil {
+			return config, errors.New("two-B addendum and unchanged base provenance are both required")
+		}
+		base := config
+		base.Protocol = calibrationProtocolThreeABridgeThreeB
+		base.TwoBAddendum = nil
+		return base, nil
+	}
+	if config.Protocol != "" && config.Protocol != calibrationProtocolThreeABridgeThreeB {
+		return config, errors.New("unknown held-out prospective protocol")
+	}
+	if config.TwoBAddendum != nil {
+		return config, errors.New("two-B addendum cannot alter historical or three-B protocol semantics")
+	}
+	return config, nil
+}
+
+// The B approval is distinct from the unchanged original A approval.
+func heldOutProtocolApproval(config heldOutPreparationConfig) string {
+	if config.Protocol == heldOutProtocolThreeABridgeTwoB && config.TwoBAddendum != nil {
+		return config.TwoBAddendum.Approval.Sha256
+	}
+	if config.Amendment != nil {
+		return config.Amendment.Approval.Sha256
+	}
+	return ""
+}
+
+// Old JSON encodings omit these fields completely, preserving old commitments.
+func heldOutTwoBBindings(config heldOutPreparationConfig) (string, string, string) {
+	if config.Protocol != heldOutProtocolThreeABridgeTwoB || config.TwoBAddendum == nil || config.Amendment == nil {
+		return "", "", ""
+	}
+	return calibrationProtocolThreeABridgeThreeB, config.Amendment.Approval.Sha256, config.TwoBAddendum.Declaration.Sha256
+}
+
+// This pure gate verifies the exact separately published amendment. Passing
+// it alone does not accept the old A, the bridge, any reference or a B outcome.
+func validateHeldOutTwoBAddendum(declaration heldOutTwoBAddendum, config heldOutPreparationConfig, margin *float64) error {
+	if config.Protocol != heldOutProtocolThreeABridgeTwoB || config.TwoBAddendum == nil || config.Amendment == nil {
+		return errors.New("explicit two-B addendum configuration required")
+	}
+	pins := config.Amendment
+	if config.TwoBAddendum.Approval.Sha256 == pins.Approval.Sha256 {
+		return errors.New("two-B requires a distinct new approval, not the old three-B publication")
+	}
+	if declaration.Schema != 1 || declaration.Kind != "sim-latency-held-out-two-b-addendum" || declaration.Protocol != config.Protocol || declaration.BaseProtocol != calibrationProtocolThreeABridgeThreeB || declaration.PublishedAt.IsZero() ||
+		declaration.SeedCount != 2 || declaration.RequiredOrderedSeeds != 2 || declaration.ControlReplicates != 9 || declaration.CandidateReplicates != 9 || declaration.ExecutionLimitSeconds != 3*60*60 || !declaration.FreshSeedsRequired || !declaration.AllOutcomesRetained || !declaration.NoReplacement || !finitePositive(declaration.Margin) || margin != nil && declaration.Margin != *margin {
+		return errors.New("two-B declaration changed its fixed cardinality, R9, margin, gates or lifetime")
+	}
+	expected := map[string]string{
+		"approval": config.TwoBAddendum.Approval.Sha256, "original_approval": pins.Approval.Sha256, "original_plan": pins.OriginalPlan.Sha256, "stage_a_report": config.StageAReport.Sha256, "stage_a_inputs": config.StageAInputs.Sha256,
+		"margin_freeze": pins.MarginFreeze.Sha256, "bridge_plan": pins.BridgePlan.Sha256, "bridge_publication": pins.BridgePublication.Sha256, "bridge_inputs": pins.BridgeInputs.Sha256, "bridge_receipt": pins.BridgeReceipt.Sha256,
+		"release": pins.Release.Sha256, "source_lock": config.SourceLock.Sha256, "references": config.References.Sha256, "exclusions": config.Exclusions.Sha256,
+	}
+	actual := map[string]string{"approval": declaration.ApprovalSha256, "original_approval": declaration.OriginalApprovalSha256, "original_plan": declaration.OriginalPlanSha256, "stage_a_report": declaration.StageAReportSha256, "stage_a_inputs": declaration.StageAInputsSha256,
+		"margin_freeze": declaration.MarginFreezeSha256, "bridge_plan": declaration.BridgePlanSha256, "bridge_publication": declaration.BridgePublicationSha256, "bridge_inputs": declaration.BridgeInputsSha256, "bridge_receipt": declaration.BridgeReceiptSha256,
+		"release": declaration.ReleaseSha256, "source_lock": declaration.SourceLockSha256, "references": declaration.ReferencesSha256, "exclusions": declaration.ExclusionsSha256}
+	for name, digest := range expected {
+		if !validSha256(digest) || actual[name] != digest {
+			return errors.New("two-B declaration changed an independently pinned base fact")
+		}
+	}
+	if len(declaration.ReferenceTransfers) != 3 {
+		return errors.New("two-B transfer requires all three fixed reference roles")
+	}
+	seen := map[string]bool{}
+	for _, transfer := range declaration.ReferenceTransfers {
+		direction, ok := map[string]string{"no-op": "no-op", "better": "faster", "worse": "slower"}[transfer.Role]
+		if !ok || seen[transfer.Role] || !validSha256(transfer.PatchSha256) || !validSha256(transfer.OriginalDirectionSha256) || transfer.ExpectedDirection != direction || transfer.Claim != "expected-direction-hypothesis-not-new-c2-measurement" || !transfer.FreshBridgeRequired || !transfer.AllTwoOrderedBRequired {
+			return errors.New("two-B reference transfer changed its fixed role or all-two claim")
+		}
+		seen[transfer.Role] = true
+	}
+	return nil
+}
+
+// Pins are authenticated before entropy, at verification/execution, and during
+// reveal through the ordinary prepared-plan verifier. No file grants authority
+// by existence or cardinality, and no old artifact is rewritten as the new kind.
+func authenticateHeldOutTwoBAddendum(config heldOutPreparationConfig, settings heldOutOperatorSettings, margin *float64) (*heldOutTwoBAddendum, error) {
+	if config.Protocol != heldOutProtocolThreeABridgeTwoB {
+		if config.TwoBAddendum != nil {
+			return nil, errors.New("unexpected two-B addendum on another protocol")
+		}
+		return nil, nil
+	}
+	if config.TwoBAddendum == nil {
+		return nil, errors.New("two-B addendum pins missing")
+	}
+	if _, err := readHeldOutPinned(config.TwoBAddendum.Approval, settings.MaximumBytes, false); err != nil {
+		return nil, err
+	}
+	content, err := readHeldOutPinned(config.TwoBAddendum.Declaration, settings.MaximumBytes, false)
+	if err != nil {
+		return nil, err
+	}
+	var declaration heldOutTwoBAddendum
+	if err := decodeHeldOutComplete(content, &declaration, "separately approved two-B declaration"); err != nil {
+		return nil, err
+	}
+	if err := validateHeldOutTwoBAddendum(declaration, config, margin); err != nil {
+		return nil, err
+	}
+	return &declaration, nil
+}
+
+// Base acceptance is still evaluated by the original closed bridge verifier.
+// The supplement cannot turn a rejected or missing bridge into acceptance.
+func authenticateHeldOutProtocolBridge(config heldOutPreparationConfig, release heldOutRelease, settings heldOutOperatorSettings, margin float64) error {
+	return authenticateHeldOutProtocolBridgeWithContract(config, release, settings, margin, nil)
+}
+
+// Only internal composed tests select a synthetic I/O contract; the complete
+// original A/bridge and new addendum checks stay common to both callers.
+func authenticateHeldOutProtocolBridgeWithContract(config heldOutPreparationConfig, release heldOutRelease, settings heldOutOperatorSettings, margin float64, contract *heldOutRuntimeContract) error {
+	base, err := heldOutBaseProvenanceConfiguration(config)
+	if err != nil {
+		return err
+	}
+	if _, err := authenticateHeldOutTwoBAddendum(config, settings, &margin); err != nil {
+		return err
+	}
+	return authenticateHeldOutBridgeWithContract(base, release, settings, margin, contract)
+}
+
+// The new all-two requirement explicitly transfers every exact original
+// direction receipt; no reference can be dropped, replaced or relabeled.
+func authenticateHeldOutTwoBReferences(config heldOutPreparationConfig, settings heldOutOperatorSettings, margin float64, references []heldOutReference) error {
+	declaration, err := authenticateHeldOutTwoBAddendum(config, settings, &margin)
+	if err != nil {
+		return err
+	}
+	if declaration == nil {
+		return nil
+	}
+	expected := map[string]heldOutTwoBReferenceTransfer{}
+	for _, transfer := range declaration.ReferenceTransfers {
+		expected[transfer.Role] = transfer
+	}
+	if len(references) != 3 {
+		return errors.New("two-B reference census changed")
+	}
+	for _, reference := range references {
+		transfer, ok := expected[reference.Role]
+		if !ok || transfer.PatchSha256 != reference.Patch.Sha256 || transfer.OriginalDirectionSha256 != reference.Direction.Sha256 {
+			return errors.New("two-B reference changed its pinned prior direction or patch")
+		}
+		delete(expected, reference.Role)
+	}
+	if len(expected) != 0 {
+		return errors.New("two-B reference census is incomplete")
+	}
+	return nil
+}
+
+// Qualifier outputs for old protocols keep their old empty additional fields.
+func validateHeldOutTwoBToolBinding(config heldOutPreparationConfig, qualification heldOutToolQualification) error {
+	_, _, declaration := heldOutTwoBBindings(config)
+	if qualification.TwoBAddendumSha256 != declaration {
+		return errors.New("host tool qualification does not bind this exact two-B addendum")
+	}
+	if config.Protocol == heldOutProtocolThreeABridgeTwoB && (qualification.Protocol != config.Protocol || qualification.ProtocolApprovalSha256 != heldOutProtocolApproval(config) || qualification.OriginalPlanSha256 != config.Amendment.OriginalPlan.Sha256) {
+		return errors.New("host tool qualification does not bind the separately approved two-B scope")
+	}
+	return nil
+}

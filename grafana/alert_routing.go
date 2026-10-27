@@ -9,8 +9,9 @@ package grafana
 // which is also the rollback path.
 //
 // Two pieces are managed:
-//   - the competition email contact point and its child route for
-//     service=sim-latency warn and page alerts;
+//   - the canonical child route for service=sim-latency warn and page alerts,
+//     through the existing native main receiver, never an unconfigured email
+//     transport; the support address identifies incident ownership;
 //   - the Slack default contact point, when vault monitor.yml carries
 //     alerts.slack_webhook_url. It becomes the root receiver, so every alert
 //     that matches no child route reaches Slack. Before it, the root routed to
@@ -45,6 +46,8 @@ import (
 )
 
 const (
+	// Historical email identities remain readable, but reconciliation neither
+	// creates nor rewrites this contact point. Only its exact old route migrates.
 	CompetitionAlertContactUid  = "sim-latency-support-email"
 	CompetitionAlertContactName = "sim-latency-support"
 	CompetitionIncidentContact  = "support@ur.xyz"
@@ -74,11 +77,12 @@ type grafanaProvisioningClient struct {
 }
 
 type grafanaContactPoint struct {
-	Uid                   string         `json:"uid"`
-	Name                  string         `json:"name"`
-	Type                  string         `json:"type"`
-	Settings              map[string]any `json:"settings"`
-	DisableResolveMessage bool           `json:"disableResolveMessage"`
+	Uid                   string          `json:"uid"`
+	Name                  string          `json:"name"`
+	Type                  string          `json:"type"`
+	Settings              map[string]any  `json:"settings"`
+	SecureFields          map[string]bool `json:"secureFields,omitempty"`
+	DisableResolveMessage bool            `json:"disableResolveMessage"`
 }
 
 // Optional integrations for the reconcile. An empty SlackWebhookUrl leaves the
@@ -128,10 +132,14 @@ func AlertRoutingSettingsFromMonitorVault(data []byte) (AlertRoutingSettings, er
 // ReconcileAlertRouting converges the managed contact points and the live
 // notification-policy tree. It reads and preserves every unrelated contact
 // point and route, then replaces the tree through Grafana's atomic policy
-// endpoint. With a Slack webhook, the Slack default contact point is written
+// endpoint. Competition alerts use the existing configured native main Slack
+// integration; unrelated and historical email contacts are left unchanged.
+// With a Slack webhook, the Slack default contact point is written
 // (always: Grafana redacts the stored URL, so a changed vault URL cannot be
 // detected) and becomes the root receiver. Without one, the root receiver is
-// unchanged and the result reports whether it has any integration.
+// unchanged and the result reports whether it has any integration. Without a
+// configured native main integration, competition reconciliation refuses
+// before policy mutation instead of creating an unusable email destination.
 func ReconcileAlertRouting(
 	ctx context.Context,
 	grafanaUrl string,
@@ -158,18 +166,50 @@ func ReconcileAlertRouting(
 	if err != nil {
 		return AlertRoutingResult{}, err
 	}
-	if err := client.reconcileCompetitionContact(ctx, contacts); err != nil {
+	defaultReceiver := ""
+	plannedContacts := contacts
+	if slackWebhookUrl != "" {
+		defaultReceiver = DefaultAlertContactName
+		plannedContacts = make([]grafanaContactPoint, 0, len(contacts)+1)
+		found := false
+		for _, contact := range contacts {
+			if contact.Uid == DefaultAlertContactUid {
+				if found {
+					return AlertRoutingResult{}, errors.New("Grafana managed main integration identity is duplicated")
+				}
+				found = true
+				plannedContacts = append(plannedContacts, defaultSlackContact(slackWebhookUrl))
+			} else {
+				plannedContacts = append(plannedContacts, contact)
+			}
+		}
+		if !found {
+			plannedContacts = append(plannedContacts, defaultSlackContact(slackWebhookUrl))
+		}
+	} else if !configuredDefaultAlertContact(contacts) {
+		return AlertRoutingResult{}, errors.New("competition alerts require the configured existing main Slack integration")
+	}
+	policy, previousDefaultReceiver, err := client.competitionPolicy(ctx, defaultReceiver)
+	if err != nil {
 		return AlertRoutingResult{}, err
 	}
-	defaultReceiver := ""
+	contactsJson, err := json.Marshal(plannedContacts)
+	if err != nil {
+		return AlertRoutingResult{}, errors.New("Grafana planned integrations cannot be encoded")
+	}
+	policyJson, err := json.Marshal(policy)
+	if err != nil {
+		return AlertRoutingResult{}, errors.New("Grafana planned policy cannot be encoded")
+	}
+	if err := ValidateCompetitionAlertRouting(contactsJson, policyJson); err != nil {
+		return AlertRoutingResult{}, err
+	}
 	if slackWebhookUrl != "" {
 		if err := client.reconcileDefaultSlackContact(ctx, contacts, slackWebhookUrl); err != nil {
 			return AlertRoutingResult{}, err
 		}
-		defaultReceiver = DefaultAlertContactName
 	}
-	previousDefaultReceiver, err := client.reconcilePolicy(ctx, defaultReceiver)
-	if err != nil {
+	if err := client.writeCompetitionPolicy(ctx, policy); err != nil {
 		return AlertRoutingResult{}, err
 	}
 	result := AlertRoutingResult{
@@ -182,8 +222,6 @@ func ReconcileAlertRouting(
 		result.DefaultReceiverHasIntegrations = true
 		return result, nil
 	}
-	// the competition contact point may have been created above
-	result.DefaultReceiverHasIntegrations = result.DefaultReceiver == CompetitionAlertContactName
 	for _, contact := range contacts {
 		if contact.Name == result.DefaultReceiver {
 			result.DefaultReceiverHasIntegrations = true
@@ -330,43 +368,23 @@ func (self *grafanaProvisioningClient) readContactPoints(ctx context.Context) ([
 	return contacts, nil
 }
 
-func (self *grafanaProvisioningClient) reconcileCompetitionContact(ctx context.Context, contacts []grafanaContactPoint) error {
-	desired := grafanaContactPoint{
-		Uid:                   CompetitionAlertContactUid,
-		Name:                  CompetitionAlertContactName,
-		Type:                  "email",
-		Settings:              map[string]any{"addresses": CompetitionIncidentContact},
-		DisableResolveMessage: false,
-	}
+// Stored secure-field markers and nonempty redacted URLs prove configuration
+// without loading a webhook or assigning an operator-owned integration.
+func configuredDefaultAlertContact(contacts []grafanaContactPoint) bool {
 	found := false
-	needsUpdate := false
+	configured := false
 	for _, contact := range contacts {
-		if contact.Name == CompetitionAlertContactName && contact.Uid != CompetitionAlertContactUid {
-			return fmt.Errorf("Grafana contact point name %q is owned by uid %q", CompetitionAlertContactName, contact.Uid)
+		if contact.Uid != DefaultAlertContactUid {
+			continue
 		}
-		if contact.Uid == CompetitionAlertContactUid {
-			found = true
-			needsUpdate = contact.Name != desired.Name || contact.Type != desired.Type ||
-				contact.Settings["addresses"] != CompetitionIncidentContact || contact.DisableResolveMessage
+		if found || contact.Name != DefaultAlertContactName || contact.Type != "slack" {
+			return false
 		}
+		found = true
+		storedUrl, _ := contact.Settings["url"].(string)
+		configured = strings.TrimSpace(storedUrl) != "" || contact.SecureFields["url"]
 	}
-	if found && !needsUpdate {
-		return nil
-	}
-	method := http.MethodPost
-	requestPath := "/api/v1/provisioning/contact-points"
-	if found {
-		method = http.MethodPut
-		requestPath += "/" + CompetitionAlertContactUid
-	}
-	status, body, err := self.request(ctx, method, requestPath, desired)
-	if err != nil {
-		return err
-	}
-	if status < 200 || 300 <= status {
-		return fmt.Errorf("write Grafana competition contact point: HTTP %d: %s", status, strings.TrimSpace(string(body)))
-	}
-	return nil
+	return found && configured
 }
 
 // Upserts the Slack integration of the default contact point. Resolve messages
@@ -374,13 +392,7 @@ func (self *grafanaProvisioningClient) reconcileCompetitionContact(ctx context.C
 // uid is managed: another integration an operator adds under the same name is
 // part of the same receiver and is kept.
 func (self *grafanaProvisioningClient) reconcileDefaultSlackContact(ctx context.Context, contacts []grafanaContactPoint, slackWebhookUrl string) error {
-	desired := grafanaContactPoint{
-		Uid:                   DefaultAlertContactUid,
-		Name:                  DefaultAlertContactName,
-		Type:                  "slack",
-		Settings:              map[string]any{"url": slackWebhookUrl},
-		DisableResolveMessage: false,
-	}
+	desired := defaultSlackContact(slackWebhookUrl)
 	found := false
 	for _, contact := range contacts {
 		if contact.Uid == DefaultAlertContactUid {
@@ -403,32 +415,46 @@ func (self *grafanaProvisioningClient) reconcileDefaultSlackContact(ctx context.
 	return nil
 }
 
-// Replaces the managed competition child route and, when defaultReceiver is
-// set, the root receiver. Returns the root receiver found before the write.
-func (self *grafanaProvisioningClient) reconcilePolicy(ctx context.Context, defaultReceiver string) (string, error) {
+// Planning and the existing native upsert share exactly one managed integration shape.
+func defaultSlackContact(slackWebhookUrl string) grafanaContactPoint {
+	return grafanaContactPoint{
+		Uid:                   DefaultAlertContactUid,
+		Name:                  DefaultAlertContactName,
+		Type:                  "slack",
+		Settings:              map[string]any{"url": slackWebhookUrl},
+		DisableResolveMessage: false,
+	}
+}
+
+// Plans the managed change without mutations so reachability is proved before even a contact write.
+func (self *grafanaProvisioningClient) competitionPolicy(ctx context.Context, defaultReceiver string) (map[string]any, string, error) {
 	status, body, err := self.request(ctx, http.MethodGet, "/api/v1/provisioning/policies", nil)
 	if err != nil {
-		return "", err
+		return nil, "", err
 	}
 	if status != http.StatusOK {
-		return "", fmt.Errorf("read Grafana notification policy: HTTP %d", status)
+		return nil, "", fmt.Errorf("read Grafana notification policy: HTTP %d", status)
 	}
 	policy := map[string]any{}
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.UseNumber()
 	if err := decoder.Decode(&policy); err != nil {
-		return "", fmt.Errorf("decode Grafana notification policy: %w", err)
+		return nil, "", fmt.Errorf("decode Grafana notification policy: %w", err)
+	}
+	var trailing any
+	if decoder.Decode(&trailing) != io.EOF {
+		return nil, "", errors.New("Grafana notification policy has trailing JSON")
 	}
 	previousDefaultReceiver, ok := policy["receiver"].(string)
 	if !ok || previousDefaultReceiver == "" {
-		return "", errors.New("Grafana notification policy has no default receiver")
+		return nil, "", errors.New("Grafana notification policy has no default receiver")
 	}
 	routes := []any{}
 	if value, ok := policy["routes"]; ok {
 		var routesOk bool
 		routes, routesOk = value.([]any)
 		if !routesOk {
-			return "", errors.New("Grafana notification policy routes are malformed")
+			return nil, "", errors.New("Grafana notification policy routes are malformed")
 		}
 	}
 	kept := make([]any, 0, len(routes)+1)
@@ -438,7 +464,7 @@ func (self *grafanaProvisioningClient) reconcilePolicy(ctx context.Context, defa
 		}
 	}
 	kept = append(kept, map[string]any{
-		"receiver": CompetitionAlertContactName,
+		"receiver": DefaultAlertContactName,
 		"object_matchers": [][]string{
 			{"service", "=", "sim-latency"},
 			{"severity", "=~", "warn|page"},
@@ -448,41 +474,55 @@ func (self *grafanaProvisioningClient) reconcilePolicy(ctx context.Context, defa
 	if defaultReceiver != "" {
 		policy["receiver"] = defaultReceiver
 	}
-	status, body, err = self.request(ctx, http.MethodPut, "/api/v1/provisioning/policies", policy)
-	if err != nil {
-		return "", err
-	}
-	if status < 200 || 300 <= status {
-		return "", fmt.Errorf("write Grafana notification policy: HTTP %d: %s", status, strings.TrimSpace(string(body)))
-	}
-	return previousDefaultReceiver, nil
+	return policy, previousDefaultReceiver, nil
 }
 
+// Commits only a completely validated plan; caller validation also precedes any native contact upsert.
+func (self *grafanaProvisioningClient) writeCompetitionPolicy(ctx context.Context, policy map[string]any) error {
+	status, body, err := self.request(ctx, http.MethodPut, "/api/v1/provisioning/policies", policy)
+	if err != nil {
+		return err
+	}
+	if status < 200 || 300 <= status {
+		return fmt.Errorf("write Grafana notification policy: HTTP %d: %s", status, strings.TrimSpace(string(body)))
+	}
+	return nil
+}
+
+// Only exact canonical old-email/new-main signatures are controller-owned;
+// extra matchers, grouping, timing, continuation or child routes are manual.
 func managedCompetitionRoute(value any) bool {
 	route, ok := value.(map[string]any)
-	if !ok {
+	if !ok || len(route) != 2 {
 		return false
 	}
-	if receiver, _ := route["receiver"].(string); receiver == CompetitionAlertContactName {
-		return true
+	receiver, _ := route["receiver"].(string)
+	if receiver != CompetitionAlertContactName && receiver != DefaultAlertContactName {
+		return false
 	}
 	matchers, ok := route["object_matchers"].([]any)
-	if !ok {
+	if !ok || len(matchers) != 2 {
 		return false
 	}
+	service, severity := false, false
 	for _, matcherValue := range matchers {
 		matcher, ok := matcherValue.([]any)
 		if !ok || len(matcher) != 3 {
-			continue
+			return false
 		}
 		name, _ := matcher[0].(string)
 		operator, _ := matcher[1].(string)
 		value, _ := matcher[2].(string)
-		if name == "service" && operator == "=" && value == "sim-latency" {
-			return true
+		switch {
+		case !service && name == "service" && operator == "=" && value == "sim-latency":
+			service = true
+		case !severity && name == "severity" && operator == "=~" && value == "warn|page":
+			severity = true
+		default:
+			return false
 		}
 	}
-	return false
+	return service && severity
 }
 
 func (self *grafanaProvisioningClient) request(ctx context.Context, method string, requestPath string, requestBody any) (int, []byte, error) {

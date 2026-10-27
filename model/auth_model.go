@@ -1389,6 +1389,27 @@ func (self *pgUserAuthUserIdLookup) legacyUserAuthUserId(userAuth string) *serve
 	)
 }
 
+// passwordAuthUnverified reports whether the email or phone sign-in at
+// userAuth exists and was never verified.
+func (self *pgUserAuthUserIdLookup) passwordAuthUnverified(userAuth string) (unverified bool) {
+	result, err := self.conn.Query(
+		self.ctx,
+		`
+			SELECT EXISTS (
+				SELECT 1 FROM network_user_auth_password
+				WHERE user_auth = $1 AND verified = false
+			)
+		`,
+		userAuth,
+	)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			server.Raise(result.Scan(&unverified))
+		}
+	})
+	return
+}
+
 type AuthVerifyCreateCodeArgs struct {
 	UserAuth string `json:"user_auth"`
 	CodeType VerifyCodeType
@@ -1427,6 +1448,7 @@ func AuthVerifyCreateCode(
 
 	created := false
 	var verifyCode string
+	var sendErr error
 
 	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
 		userId := findUserIdByUserAuth(
@@ -1435,6 +1457,13 @@ func AuthVerifyCreateCode(
 		)
 
 		if userId == nil {
+			return
+		}
+
+		// the address's daily budget (auth_code_send_limit.go), spent before
+		// the code already sent is replaced, so a refusal leaves it usable
+		sendErr = spendUserAuthCodeSendInTx(clientSession.Ctx, tx, *userAuth, AccountActionVerifyCodeSend)
+		if sendErr != nil {
 			return
 		}
 
@@ -1468,6 +1497,9 @@ func AuthVerifyCreateCode(
 		))
 	})
 
+	if sendErr != nil {
+		return nil, sendErr
+	}
 	if created {
 		result := &AuthVerifyCreateCodeResult{
 			VerifyCode: &verifyCode,
@@ -1491,6 +1523,10 @@ type AuthPasswordResetCreateCodeResult struct {
 type AuthPasswordResetCreateCodeError struct {
 	Message string `json:"message"`
 }
+
+// the refusal of a password reset code for an email or phone that was never
+// verified
+const AuthPasswordResetUnverifiedMessage = "This email or phone has not been verified, so a password reset code cannot be sent to it."
 
 func AuthPasswordResetCreateCode(
 	resetCreateCode AuthPasswordResetCreateCodeArgs,
@@ -1516,14 +1552,31 @@ func AuthPasswordResetCreateCode(
 
 	created := false
 	var resetCode string
+	var sendErr error
 
 	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
-		userId := findUserIdByUserAuth(
-			&pgUserAuthUserIdLookup{ctx: clientSession.Ctx, conn: tx},
-			*userAuth,
-		)
+		lookup := &pgUserAuthUserIdLookup{ctx: clientSession.Ctx, conn: tx}
+		userId := findUserIdByUserAuth(lookup, *userAuth)
 
 		if userId == nil {
+			return
+		}
+
+		// a reset code goes only to an email or phone the account verified. A
+		// sign-up with someone else's address is never verified, and its
+		// address was sent a reset code on every request (support inbox 835).
+		// An address that is only the identity the account was created with,
+		// such as a Google or Apple account's email, has no sign-in row to
+		// check and is sent its code as before.
+		if lookup.passwordAuthUnverified(*userAuth) {
+			sendErr = errors.New("400 " + AuthPasswordResetUnverifiedMessage)
+			return
+		}
+
+		// the address's daily budget (auth_code_send_limit.go), spent before
+		// the code already sent is replaced, so a refusal leaves it usable
+		sendErr = spendUserAuthCodeSendInTx(clientSession.Ctx, tx, *userAuth, AccountActionResetCodeSend)
+		if sendErr != nil {
 			return
 		}
 
@@ -1554,6 +1607,9 @@ func AuthPasswordResetCreateCode(
 		))
 	})
 
+	if sendErr != nil {
+		return nil, sendErr
+	}
 	if created {
 		result := &AuthPasswordResetCreateCodeResult{
 			ResetCode: &resetCode,

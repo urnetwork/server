@@ -49,7 +49,8 @@ type Authority struct {
 }
 
 // Owner-supplied bounds. The owner constructs them once and shares them with
-// every authority it creates; nil keeps the unbounded legacy behavior.
+// every authority it creates, and closes the contract creation bound once
+// those authorities have stopped; nil keeps the unbounded legacy behavior.
 type AuthoritySettings struct {
 	MintAdmission     *MintAdmission
 	ContractAdmission *ContractAdmission

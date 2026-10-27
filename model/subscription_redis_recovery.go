@@ -109,6 +109,7 @@ func redisReservationRecoveryPage(ctx context.Context, balanceId server.Id, own 
 	bounded, cancel := context.WithTimeout(ctx, redisContractAdmissionTimeout)
 	defer cancel()
 	var result []redisReservationRecoveryCandidate
+	// no preflight PING, as for redisContractReservation, and outside a transaction
 	err := server.RedisWithDeadline(bounded, func(client server.RedisClient) error {
 		values, err := client.Eval(bounded, redisReservationRecoveryPageScript, redisContractReservationKeys(balanceId),
 			redisPendingRecoveryAge.Milliseconds(), own).StringSlice()
@@ -128,7 +129,7 @@ func redisReservationRecoveryPage(ctx context.Context, balanceId server.Id, own 
 			result = append(result, redisReservationRecoveryCandidate{contractId: id, amount: amount})
 		}
 		return nil
-	})
+	}, server.OptRedisNoPreflight(), server.OptRedisKeepLateReplies())
 	return result, err
 }
 
@@ -359,7 +360,8 @@ func (self *redisContractAdmission) recoverRetainedPageWithPublication(page cont
 		if publication != nil && publication.ContractId == self.contractId && item.candidate.contractId == self.contractId {
 			for _, balance := range publication.Balances {
 				if balance != nil && balance.BalanceId == item.balanceId && balance.BalanceByteCount == item.candidate.amount {
-					_, err := redisContractReservation(page, "published", item.balanceId, item.candidate.contractId, 0, item.candidate.amount, redisContractReservationLease)
+					_, err := redisContractReservation(page, "published", item.balanceId, item.candidate.contractId, 0, item.candidate.amount, redisContractReservationLease,
+						server.OptRedisKeepLateReplies())
 					acknowledged = err == nil
 					break
 				}
@@ -427,6 +429,7 @@ func recoverRedisReservationRequest(ctx context.Context, balanceId, contractId s
 			return
 		}
 		var amount ByteCount
+		// no preflight PING, as for redisContractReservation, inside the transaction
 		returnErr = server.RedisWithDeadline(attempt, func(client server.RedisClient) error {
 			value, err := client.Eval(attempt, `return redis.call('HGET',KEYS[2],ARGV[1])`, redisContractReservationKeys(balanceId), contractId.String()).Text()
 			if errors.Is(err, redis.Nil) {
@@ -440,7 +443,7 @@ func recoverRedisReservationRequest(ctx context.Context, balanceId, contractId s
 				return errRedisReservationRecoveryIdentity
 			}
 			return nil
-		})
+		}, server.OptRedisNoPreflight())
 		if returnErr == nil && amount != 0 {
 			_, returnErr = recoverRedisReservationWithFenceInTx(attempt, tx, balanceId, redisReservationRecoveryCandidate{contractId: contractId, amount: amount})
 		}
@@ -503,7 +506,8 @@ func (self *redisContractAdmission) reservationCleanup() redisReservationCleanup
 func (self *redisContractAdmission) releaseReservation(ctx context.Context, balanceId server.Id) error {
 	return self.retirePending(func(inFlight bool) error {
 		if !inFlight && !self.publicationHasStarted() {
-			_, err := redisContractReservation(ctx, "release-pending", balanceId, self.contractId, 0, math.MaxInt64, redisContractReservationLease)
+			_, err := redisContractReservation(ctx, "release-pending", balanceId, self.contractId, 0, math.MaxInt64, redisContractReservationLease,
+				server.OptRedisKeepLateReplies())
 			if !errors.Is(err, errRedisReservationNotPending) {
 				return err
 			}
