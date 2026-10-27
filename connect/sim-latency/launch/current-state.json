@@ -139,8 +139,13 @@
     "old_failed_controls_reused": false,
     "unrelated_build_test_fixture_or_model_overlap_allowed": false,
     "reviewer_qualification_still_required_before_launch": true,
-    "one_seed_compromise_owner_approval": "requested_not_received",
-    "current_approved_independent_seed_count": 2,
+    "one_seed_compromise_owner_approval": "approved_first_committed_seed_only_before_any_B_measurement",
+    "one_seed_owner_amendment_sha256": "a2bb5e018dc88cf2dc01dea65422d94fbba68b49accdc5af072479272b8abfe9",
+    "current_approved_independent_seed_count": 1,
+    "prepared_independent_seed_count": 2,
+    "selected_committed_seed_position": 1,
+    "second_committed_seed_must_remain_unstarted": true,
+    "reduced_calibration_confidence_explicitly_accepted": true,
     "production_activated": false
   },
   "next_provider_qualification_v7_preparation": {
@@ -180,6 +185,7 @@
     "automatic_provider_retries": false
   },
   "conditional_production_preparation_deployment": {
+    "requires_superseding_first_committed_seed_policy_before_activation": true,
     "config_commit": "038333e4c983c4647ea20d7a604e6d840ca248d2",
     "config_pushed": true,
     "policy_approval_sha256": "f69672873a9d7fee71d60287c0921becbebd463560105229644824d13f375294",
