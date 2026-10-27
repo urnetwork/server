@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-27T10:00:22Z",
+  "observed_at": "2026-10-27T11:00:05Z",
   "objective": "Ready to launch at 2026-10-28T00:00:00Z",
   "storage_verification": {
     "operations_compliance_receipt_sha256": "c6b8b5348633270939395b7a585e1978b3a83c679b2552eccd8ab2a4690edc3f",
@@ -93,14 +93,14 @@
     "state": "running_not_yet_accepted",
     "session": 14145,
     "runner_pid": 3094175,
-    "process_verified_live_at": "2026-10-27T10:00:22Z",
+    "process_verified_live_at": "2026-10-27T11:00:05Z",
     "started_at": "2026-10-27T09:32:21Z",
     "deadline_at": "2026-10-27T12:32:21Z",
     "root": "/home/by/urnetwork/temp/c2-metadata-bridge-preparation-20261026.KNG6TfgM",
     "frozen_request_sha256": "2114953f2f86218b9e92674a1f318d822a62e6663a8ae5e0e5375a806a655ec6",
     "published_plan_sha256": "c70f5dfbad281c7d0ca70235043e400ca2a3b7fa49f2cf3be8ed8636b419723c",
     "native_precommit_authentication_sha256": "128fc974447492ddaca94a5153b943010ef93599f2a0bd8855f8ae482ed38140",
-    "progress_observed": {"phase": "baseline", "baseline_completed": 2, "candidate_completed": 0, "replicates_per_side": 9},
+    "progress_observed": {"phase": "building", "baseline_completed": 9, "candidate_completed": 0, "replicates_per_side": 9},
     "provider_count": 3600,
     "client_pool_size": 200,
     "takeover_margin": 0.269,
@@ -801,6 +801,16 @@
       4,
       5
     ]
+  },
+  "public_api_probe_20261027": {
+    "observed_at": "2026-10-27T11:00:23Z",
+    "competition_info_http": 503,
+    "competition_info_code": "source_not_ready",
+    "competition_info_message": "the exact runtime source envelope is unavailable",
+    "unauthenticated_readyz_http": 401,
+    "readiness_verified": false,
+    "interpretation": "Public information still fails closed; the production runtime source envelope and activation are not yet installed. An unauthenticated readyz refusal is not a readiness result.",
+    "main_writes_performed": 0
   },
   "latest_external_read_only_probe": {
     "superseded_operator_inputs": "Key-presence and maintenance fields below are the historical 02:33 observation; current user-confirmed inputs are in operator_inputs.",

@@ -5,7 +5,7 @@ checklist is the acceptance index for the new release, not an authorization to
 activate production. Historical v1 checkmarks do not qualify a different source,
 image, host manifest, policy or review provider.
 
-## Current checkpoint — October 27, 10:00 UTC
+## Current checkpoint — October 27, 11:00 UTC
 
 The following supersedes the provider and baseline-preparation progress in the
 dated bullets below; those bullets retain the earlier qualification history.
@@ -13,7 +13,7 @@ dated bullets below; those bullets retain the earlier qualification history.
 - The trusted corrected **R9/R9 bridge is now running**, started **09:32:21
   UTC**, deadline **12:32:21 UTC**, session **14145**, runner **3094175**.
   Native precommit authentication `128fc974…` passed before the one-shot launch.
-  At this checkpoint the runner is verified live and has completed **2/9
+  At this checkpoint the runner is verified live and has completed **9/9
   controls**, **0/9 candidates**. It uses exact request `2114953f…`, frozen
   evaluator `98c…` / scorer `efd…`, 3,600 providers, client pool 200 and margin
   26.9%. No unrelated compilation, tests, fixture execution or model calls may
@@ -47,7 +47,8 @@ dated bullets below; those bullets retain the earlier qualification history.
   publication authentication remains required. Trusted operator-authored
   calibration may precede pending reviewer qualification under the documented
   [phase-order separation](PRELAUNCH-PHASE-ORDER-2026-10-27.md); every final
-  review/launch gate remains mandatory. No corrected bridge or B seed has run.
+  review/launch gate remains mandatory. The corrected bridge is in progress;
+  no completed bridge acceptance or independent B-seed measurement is claimed.
 - Precommit authentication exposed a reference-sidecar packaging mismatch:
   genuine flat source/builder sidecars were not pinned under the verifier's
   required `evidence/` layout. [Byte-verified views](REFERENCE-EVIDENCE-LAYOUT-2026-10-27.json)

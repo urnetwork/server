@@ -1,6 +1,6 @@
 # Sim-latency competition live-deployment playbook
 
-## Current production preparation — October 26, 2026
+## Current production preparation — October 27, 2026
 
 Public opening is fixed at **October 28, 2026, 00:00 UTC**. The current launch
 checklist and exact prepared source/image identities are maintained in
@@ -21,17 +21,22 @@ Published source pins alone do not mean the competition is ready or active.
 
 The new season uses six weekly admission windows and automatic FIFO scoring.
 After close and authoritative drain, publish the provisional reward decision,
-perform the isolated GPT-5.4 mini/xhigh honesty/safety review under
-`elected_winner_gpt54mini_xhigh_v1`, replace substantiated
+perform the isolated three-model Snow honesty/safety review under
+`elected_winner_snow_union_v1`, replace substantiated
 dishonest winners in rank order, and build/qualify/promote the approved elected
 winner before opening the next round. Exhaustion carries the incumbent forward;
 uncertainty or infrastructure failure pauses and alerts instead of fabricating
 a decision. Review and promotion do not require an agent to poll a running job.
-Historical Sol/max policy records remain unchanged. Independent tests use Sol
+Qwen, Gemma and Muse must all approve; retain the union of their findings.
+Historical Mini and Sol/max policy records remain unchanged. Independent tests use Sol
 6.1 low; implementation/debugging/merges use Sol 6.1 max. The accepted
 three-pair reduction freezes 26.9% prospectively; the fresh instrument bridge,
-three independent seeds and live readiness remain required. See the
-[margin freeze](launch/CALIBRATION-THREE-A-FREEZE-2026-10-26.md).
+two independent seeds with correct reference ordering on both, and live readiness
+remain required. See the
+[margin freeze](launch/CALIBRATION-THREE-A-FREEZE-2026-10-26.md) and the approved
+[two-seed amendment](launch/CALIBRATION-AMENDMENT-2026-10-27.md).
+The corrected bridge is running, not accepted. A further one-seed amendment has
+been requested but is not approved; do not silently reduce the required evidence.
 
 Production admission costs $20 and has no submission-count ceiling. Each round
 gets one authenticated nine-run control baseline shared by all its submissions;
