@@ -18,6 +18,13 @@ dated bullets below; those bullets retain the earlier qualification history.
   immutable fixture-image/binary readback. This is the separate hostile fixture,
   **not** evaluator image `98c9061c…`, and does not grant full host rebaseline,
   scoring qualification or production activation.
+- Native collection of the actual evaluator-image host facts also completed
+  with the **required negative exit 1**. Fingerprint `08ee3a5a…` binds actual
+  hardware/runtime, 5 GiB evidence profile and the permanent synthetic local
+  leaves. Receipt `128ef88f…` / supplement `5f0260e8…` prove unchanged boot,
+  inventories and active host configuration. No round marker or rebaseline was
+  fabricated: host eligibility and readiness remain false until the real
+  target-round R1/R1 proof passes.
 - The owner approved the [deadline-compatible calibration amendment](CALIBRATION-AMENDMENT-2026-10-27.md):
   one corrected fresh R9/R9 bridge, then two independent seeds with correct
   reference ordering on both. R9, the 26.9% margin, significance, all gates and
@@ -25,8 +32,12 @@ dated bullets below; those bullets retain the earlier qualification history.
   pairs remain preserved. The native two-seed tool is not yet qualified: its
   first full test run exposed a synthetic publication fixture with null
   required evidence; strict validation correctly refused it. After correcting
-  that fixture, two full 134-test passes completed with zero skips; the third
-  is running in session 30432. No real draw or
+  that fixture, three full 134-test passes completed with zero skips (402 pass
+  entries). Offline qualification receipt `1f4b19a9…` binds exact tested binary
+  `244d5421…`, source base `29b44380…` plus the nine-fragment patch `043b8366…`.
+  Those exact source changes are published in `e31347823`; no different whole-main
+  compiler provenance is claimed. Context-bound native qualification and the
+  final public execution plan remain required. No real draw or
   corrected bridge has started. Production repeat rewards are explicitly
   `allow`; same-round duplicate reuse and fresh per-epoch assessment remain.
 - The [V5 review precommit](SNOW-REVIEW-QUALIFICATION-PRECOMMIT-2026-10-27-V5.json)
