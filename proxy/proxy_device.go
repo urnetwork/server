@@ -711,6 +711,8 @@ func (self *ProxyDeviceManager) Close() {
 		go func() {
 			self.openWorkers.Wait()
 			self.deviceWorkers.Wait()
+			// every device's authority has stopped creating contracts
+			self.contractAdmission.Close()
 			// Prevent a test-only direct lazy lookup from constructing an owned
 			// session after all admitted production opens have drained.
 			self.networkSpaceOnce.Do(func() {})
