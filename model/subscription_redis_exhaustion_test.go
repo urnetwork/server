@@ -99,6 +99,15 @@ func withRedisExhaustedPayersForTest(t testing.TB) {
 	t.Cleanup(func() { exhaustedRedisPayers = previous })
 }
 
+// Gives the test a list that never lists a payer, so every refusal is the
+// census's own.
+func withoutRedisExhaustedPayersForTest(t testing.TB) {
+	t.Helper()
+	previous := exhaustedRedisPayers
+	exhaustedRedisPayers = newRedisExhaustedPayers(0, redisExhaustedPayerCapacity)
+	t.Cleanup(func() { exhaustedRedisPayers = previous })
+}
+
 // Every counter an exhausted request can move.
 func redisExhaustionCounts() map[string]float64 {
 	counts := redisGrantProbeCounts()
