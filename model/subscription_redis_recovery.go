@@ -469,7 +469,9 @@ return 1
 // recovery marker. Only the request's own live admission may call this, with
 // its attempts read under its pending lock (handOffReservation): Redis cannot
 // tell an abandoned pending token from one a live attempt may still publish.
-// The call is idempotent, so it skips the deadline pool's preflight round trip.
+// It runs outside any PostgreSQL transaction, so as redisContractReservation
+// does there, it sends no preflight PING and waits out a late reply on the
+// late-reply pool rather than closing the connection.
 func redisReservationHandoff(ctx context.Context, balanceId, contractId server.Id) (bool, error) {
 	bounded, cancel := context.WithTimeout(ctx, redisContractAdmissionTimeout)
 	defer cancel()
@@ -481,7 +483,7 @@ func redisReservationHandoff(ctx context.Context, balanceId, contractId server.I
 		}
 		moved = value == 1
 		return nil
-	}, server.OptRedisNoPreflight())
+	}, server.OptRedisNoPreflight(), server.OptRedisKeepLateReplies())
 	return moved, err
 }
 
@@ -708,7 +710,8 @@ func (self *redisReservationCompensation) step(owner context.Context) (time.Dura
 
 // Passes each balance still pending to the recovery marker once the owner
 // gives up on it, so the next page on the balance takes it at once: one call
-// per balance, all within one admission round trip's bound. A balance the
+// per balance, each begun within one admission round trip's bound (a late
+// reply can end the last up to a socket timeout after it). A balance the
 // handoff misses, or one a quiesce reaches first, keeps its pending marker for
 // aged recovery.
 func (self *redisReservationCompensation) handOff(owner context.Context) {

@@ -251,9 +251,22 @@ func TestRedisReservationHandoffReplayChangesNothing(t *testing.T) {
 			t.Fatal("the token has no pending marker")
 		}
 
+		// The handoff runs outside any transaction, so as the reservation
+		// calls do there, it sends its one script with no preflight PING on
+		// the late-reply pool.
+		deadline := installRedisPreflightCountHook(ctx)
+		late := installRedisPreflightCountHook(ctx, server.OptRedisKeepLateReplies())
+		deadline.armed.Store(true)
+		late.armed.Store(true)
 		moved, err := redisReservationHandoff(ctx, f.balanceId, dead)
+		deadline.armed.Store(false)
+		late.armed.Store(false)
 		if err != nil || !moved {
 			t.Fatal("the handoff did not move the pending marker", moved, err)
+		}
+		if late.scripts.Load() != 1 || late.pings.Load() != 0 || deadline.scripts.Load() != 0 || deadline.pings.Load() != 0 {
+			t.Fatalf("the handoff sent %d scripts and %d PINGs on the late-reply pool and %d and %d on the deadline pool; want one script on the late-reply pool alone",
+				late.scripts.Load(), late.pings.Load(), deadline.scripts.Load(), deadline.pings.Load())
 		}
 		redisPendingRequireMarkers(t, ctx, f.balanceId, dead, false, true)
 		handedOff := redisHandoffTestState(t, ctx, f.balanceId)

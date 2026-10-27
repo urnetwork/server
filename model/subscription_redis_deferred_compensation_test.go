@@ -106,10 +106,11 @@ func newRedisDeferredCompensationsForTest(t testing.TB, workers, balances int) *
 // Waits for the process-wide deferred owner to end every compensation, so a
 // test observes a release that its request's own pass left to that owner. A
 // compensation ends within its budget, plus a release call begun before the
-// budget ended and the give-up that follows it.
+// budget ended and the give-up that follows it, each of which a late reply can
+// stretch by a socket timeout.
 func drainRedisContractCompensations(t testing.TB, ctx context.Context) {
 	t.Helper()
-	bounded, cancel := context.WithTimeout(ctx, redisReservationCleanupBudget+2*redisContractAdmissionTimeout)
+	bounded, cancel := context.WithTimeout(ctx, redisReservationCleanupBudget+4*redisContractAdmissionTimeout)
 	defer cancel()
 	if err := deferredRedisCompensations.drain(bounded); err != nil {
 		t.Fatal("the deferred compensations did not end", err)
