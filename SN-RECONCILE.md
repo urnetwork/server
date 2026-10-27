@@ -279,3 +279,28 @@ re-plan their sweeps, unlike a hung cancellation.
 Keyed or recorded rows are never closed this way; their reconciliation decides
 them. A dry run reports counts by plan week and reason (wallet-less, dust,
 review-held) before anything is written.
+
+## Note (2026-10-27): the listing reads later sweeps below a contract id bound
+
+The 2026-10-26 listing still read every sweep of every later row in the stuck
+rows' networks, with one contract read each. On main that is more than 149M
+sweeps of 1,185 later rows, and two dry runs had not finished after 45
+minutes and two hours.
+
+Each pair of a stuck row and a later row now reads only the later row's
+sweeps whose contract id is below the id floor of the earlier of the stuck
+row's creation and the later row's early bound, plus one day
+(`snReconcileContractIdMargin`). Evaluated that way on main (read only,
+2026-10-27), the 1,785 pairs took about 1.3 s: 153 pairs had evidence,
+covering 107 of the 120 stuck rows that have later rows. A one-hour margin
+gave the same result.
+
+The bound skips no evidence while no contract's id runs a day or more ahead
+of its close time. A contract id leads with the millisecond its creation
+minted it, every contract's id is minted before its row is inserted, and
+every close time is written later from the closing clock. The full argument,
+with each contract-id source, is on `snReconcileLaterSweepIdBoundSql`. A
+contract whose id ran ahead of its close by the margin or more would be
+missed (`TestSnReconcileStuckListingIdBoundBoundary`); the partition audit's
+largest skew was 4.8 s. The listing returns the same rows and values as both
+earlier listings (`TestSnReconcileStuckListingIdBoundMatchesReference`).

@@ -233,13 +233,25 @@ func TestChoosePromotedPayoutWallet(t *testing.T) {
 		{name: "removed chain unknown", removed: "", candidates: []string{"unknown:DOGE", "matic:MATIC", "sol:SOL"}, want: "matic"},
 		{name: "only bittensor and ethereum", removed: "SOL", candidates: []string{"tao:bittensor", "eth:ETH"}, want: ""},
 		{name: "no candidates", removed: "SOL", candidates: nil, want: ""},
+		// a "legacy-" wallet holds an address of the other chain, stored
+		// before addresses were validated (support inbox 8045)
+		{name: "same chain past a newer polygon holding a solana key", removed: "MATIC", candidates: []string{"legacy-matic:MATIC", "sol-older:SOL"}, want: "sol-older"},
+		{name: "same chain past a newer solana holding a polygon address", removed: "SOL", candidates: []string{"legacy-sol:SOL", "sol-older:SOL"}, want: "sol-older"},
+		{name: "only wallets holding another chain's address", removed: "SOL", candidates: []string{"legacy-sol:SOL", "legacy-matic:polygon"}, want: ""},
 	} {
 		nameWalletIds := map[string]server.Id{}
 		candidates := []*payoutWalletCandidate{}
 		for _, nameBlockchain := range c.candidates {
 			name, blockchain, _ := strings.Cut(nameBlockchain, ":")
 			nameWalletIds[name] = server.NewId()
-			candidates = append(candidates, &payoutWalletCandidate{walletId: nameWalletIds[name], blockchain: blockchain})
+			walletAddress := payoutWalletTestAddress(blockchain, name)
+			if strings.HasPrefix(name, "legacy-") {
+				walletAddress = payoutWalletTestSolana(name)
+				if chain, err := ParseBlockchain(blockchain); err == nil && chain == SOL {
+					walletAddress = payoutWalletTestPolygon(name)
+				}
+			}
+			candidates = append(candidates, &payoutWalletCandidate{walletId: nameWalletIds[name], blockchain: blockchain, walletAddress: walletAddress})
 		}
 		promotedWalletId := choosePromotedPayoutWallet(c.removed, candidates)
 		if c.want == "" {
@@ -272,8 +284,10 @@ func TestRemoveWalletPromotesActivePayoutWallet(t *testing.T) {
 				ClientId:  &clientId,
 			})
 		}
-		// a wallet created `minute` minutes after startTime, so newest is explicit
-		addWallet := func(clientSession *session.ClientSession, blockchain string, address string, minute int) server.Id {
+		// a wallet created `minute` minutes after startTime, so newest is
+		// explicit, at an address on its chain derived from the seed
+		addWallet := func(clientSession *session.ClientSession, blockchain string, seed string, minute int) server.Id {
+			address := payoutWalletTestAddress(blockchain, seed)
 			walletId := CreateAccountWalletExternal(clientSession, &CreateAccountWalletExternalArgs{
 				NetworkId:        clientSession.ByJwt.NetworkId,
 				Blockchain:       blockchain,

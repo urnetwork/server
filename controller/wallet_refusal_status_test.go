@@ -21,7 +21,7 @@ func TestCreateAccountWalletRefusesInvalidWalletsAsBadRequest(t *testing.T) {
 		_, err := CreateAccountWalletExternal(&model.CreateAccountWalletExternalArgs{Blockchain: "BTC"}, clientSession)
 		requireRefusalAnswer(tb, err, http.StatusBadRequest, "invalid blockchain, use SOL, MATIC, or TAO")
 		_, err = CreateAccountWalletExternal(&model.CreateAccountWalletExternalArgs{Blockchain: "SOL", WalletAddress: "1234"}, clientSession)
-		requireRefusalAnswer(tb, err, http.StatusBadRequest, "invalid wallet address")
+		requireRefusalAnswer(tb, err, http.StatusBadRequest, "invalid wallet address: a Solana address is a base58 public key of 32 bytes")
 	})
 }
 

@@ -670,21 +670,43 @@ func (self *paymentReconcileRun) repairEntitlement(
 	self.record(store, action, &renewal.NetworkId, evidence, details)
 }
 
-// end applies the "store says it is already over" repair -- or, in a dry run,
-// records the would_end without touching anything. Callers apply the
-// cancelled ≠ expired rule and the end_time > now check BEFORE calling, so a
-// would_end names exactly the entitlement a real run would have ended.
+// paymentReconcileEndScope names the one store object the store reported
+// over: the transactions it paid with (Stripe invoice ids, App Store
+// transaction ids, Solana references) or its Play purchase token. An end
+// touches only the renewals that object paid for; a network's other
+// subscriptions in the same market keep their paid windows.
+type paymentReconcileEndScope struct {
+	transactionIds []string
+	purchaseToken  string
+}
+
+// end applies the "store says it is already over" repair to exactly the
+// scoped store object -- or, in a dry run, records the would_end without
+// touching anything. Callers apply the cancelled ≠ expired rule and the
+// end_time > now check BEFORE calling, so a would_end names exactly the
+// entitlement a real run would have ended.
 func (self *paymentReconcileRun) end(
 	store string,
 	networkId server.Id,
+	scope paymentReconcileEndScope,
 	evidence string,
 	details map[string]any,
 ) {
+	// the audit row names exactly what the end touched
+	if 0 < len(scope.transactionIds) {
+		details["transaction_ids"] = scope.transactionIds
+	}
 	if self.dryRun {
 		self.record(store, model.PaymentReconcileActionWouldEnd, &networkId, evidence, details)
 		return
 	}
-	ended, err := model.EndReconciledEntitlementInConn(self.connOwner, self.clientSession.Ctx, networkId, store, self.now)
+	var ended bool
+	var err error
+	if scope.purchaseToken != "" {
+		ended, err = model.EndReconciledEntitlementForNetworkPurchaseTokenInConn(self.connOwner, self.clientSession.Ctx, networkId, store, scope.purchaseToken, self.now)
+	} else {
+		ended, err = model.EndReconciledEntitlementForNetworkTransactionsInConn(self.connOwner, self.clientSession.Ctx, networkId, store, scope.transactionIds, self.now)
+	}
 	if err != nil {
 		self.record(
 			store,
@@ -967,6 +989,8 @@ func runPaymentReconciliation(
 //	paid subscription invoice since watermark, not in stripe_invoice ledger -> credit
 //	    (through stripeHandleInvoicePaid, gated by the ledger)
 //	subscription status canceled / incomplete_expired / unpaid, renewal active -> end
+//	    that invoice's renewal only (every open renewal is checked against its
+//	    own invoice's subscription; a network's other subscriptions keep theirs)
 //	status active + cancel_at_period_end (time remaining)                      -> nothing
 //	anything else                                                              -> nothing
 func reconcileStripe(run *paymentReconcileRun, since time.Time) (bool, error) {
@@ -1071,20 +1095,24 @@ func reconcileStripe(run *paymentReconcileRun, since time.Time) (bool, error) {
 		startingAfter = invoiceList.Data[len(invoiceList.Data)-1].Id
 	}
 
-	// leg 2: server-side -- for networks we think are actively subscribed,
-	// does Stripe agree the subscription is still alive?
+	// leg 2: server-side -- for every open renewal, does Stripe agree the
+	// subscription that paid for it is still alive? Each renewal is checked
+	// against its own invoice: a network can hold several subscriptions at
+	// once, and one subscription's end must never close another's paid window.
+	// An invoice can also sit on more than one network (a subscription moved
+	// by support), so each network's renewal is checked on its own.
 	renewals := model.GetReconcileSubscriptionRenewalsInConn(run.connOwner,
 		ctx,
 		store,
 		run.now.Add(-paymentReconcileWindow),
 		paymentReconcileRenewalLimit,
 	)
-	seenNetworkIds := map[server.Id]bool{}
+	type stripeRenewalInvoice struct {
+		networkId server.Id
+		invoiceId string
+	}
+	checkedRenewalInvoices := map[stripeRenewalInvoice]bool{}
 	for _, renewal := range renewals {
-		if seenNetworkIds[renewal.NetworkId] {
-			continue
-		}
-		seenNetworkIds[renewal.NetworkId] = true
 		if !renewal.EndTime.After(run.now) {
 			// already over on our side -- nothing to end
 			continue
@@ -1092,6 +1120,11 @@ func reconcileStripe(run *paymentReconcileRun, since time.Time) (bool, error) {
 		if renewal.TransactionId == "" {
 			continue
 		}
+		renewalInvoice := stripeRenewalInvoice{networkId: renewal.NetworkId, invoiceId: renewal.TransactionId}
+		if checkedRenewalInvoices[renewalInvoice] {
+			continue
+		}
+		checkedRenewalInvoices[renewalInvoice] = true
 		run.examine(store)
 		if !run.spend(store) {
 			return false, nil
@@ -1135,9 +1168,12 @@ func reconcileStripe(run *paymentReconcileRun, since time.Time) (bool, error) {
 			continue
 		}
 		if stripeSubscriptionOver(fullInvoice.Subscription.Status) {
+			// only the window this invoice paid for; the subscription's other
+			// open invoices are checked on their own
 			run.end(
 				store,
 				renewal.NetworkId,
+				paymentReconcileEndScope{transactionIds: []string{renewal.TransactionId}},
 				fullInvoice.Subscription.Id,
 				map[string]any{"subscription_status": fullInvoice.Subscription.Status},
 			)
@@ -1215,6 +1251,8 @@ func stripeRenewalMatchesInvoiceInConn(connOwner server.PgConn,
 //	1 active / 4 grace, latest transaction not in the ledger -> credit (through
 //	    the apple_subscription_transaction gate)
 //	2 expired / 3 billing retry / 5 revoked, renewal active  -> end
+//	    that renewal's paid window only (with its pre-ledger twin row); the
+//	    network's other App Store subscriptions keep theirs
 //	1 active with auto-renew off (cancel at period end)      -> nothing (status
 //	    stays 1 until expiry; the rule falls out of the status itself)
 //
@@ -1406,11 +1444,14 @@ func reconcileApple(run *paymentReconcileRun, since time.Time) (bool, error) {
 			continue
 		}
 
-		// end direction: the store says the entitlement is already over
+		// end direction: the store says the entitlement is already over --
+		// for the paid window this renewal's transaction belongs to, never the
+		// network's other App Store subscriptions
 		if renewal.EndTime.After(run.now) {
 			run.end(
 				store,
 				renewal.NetworkId,
+				paymentReconcileEndScope{transactionIds: appleWindowTransactionIds(renewals, renewal)},
 				renewal.TransactionId,
 				map[string]any{"status": lastStatus},
 			)
@@ -1418,6 +1459,30 @@ func reconcileApple(run *paymentReconcileRun, since time.Time) (bool, error) {
 	}
 
 	return true, nil
+}
+
+// appleWindowTransactionIds names the renewals that hold the renewal's paid
+// window on its network: the renewal itself and, for a window the pre-ledger
+// notification handler also credited, that handler's row keyed on the app
+// transaction id, whose end lies within a second of the ledger row's
+// (HasPreLedgerAppleRenewalInTx). Ending one without the other would leave
+// the window's second renewal and Pro balance open.
+func appleWindowTransactionIds(
+	renewals []*model.ReconcileSubscriptionRenewal,
+	renewal *model.ReconcileSubscriptionRenewal,
+) []string {
+	transactionIds := []string{renewal.TransactionId}
+	for _, other := range renewals {
+		if other.NetworkId != renewal.NetworkId ||
+			other.TransactionId == "" ||
+			slices.Contains(transactionIds, other.TransactionId) {
+			continue
+		}
+		if delta := other.EndTime.Sub(renewal.EndTime); -time.Second < delta && delta < time.Second {
+			transactionIds = append(transactionIds, other.TransactionId)
+		}
+	}
+	return transactionIds
 }
 
 func appleRenewalMatchesTransaction(
@@ -1544,7 +1609,7 @@ func reconcilePlay(run *paymentReconcileRun, since time.Time) (bool, error) {
 			if v, ok := err.(*server.HttpStatusError); ok && v.StatusCode == 410 {
 				// the purchase is gone from the store entirely
 				if renewal.EndTime.After(run.now) {
-					run.end(store, renewal.NetworkId, purchaseToken, map[string]any{"subscription_state": "GONE"})
+					run.end(store, renewal.NetworkId, paymentReconcileEndScope{purchaseToken: purchaseToken}, purchaseToken, map[string]any{"subscription_state": "GONE"})
 				}
 				continue
 			}
@@ -1580,7 +1645,7 @@ func reconcilePlay(run *paymentReconcileRun, since time.Time) (bool, error) {
 
 		if over {
 			if renewal.EndTime.After(run.now) {
-				run.end(store, renewal.NetworkId, purchaseToken, map[string]any{"subscription_state": sub.SubscriptionState})
+				run.end(store, renewal.NetworkId, paymentReconcileEndScope{purchaseToken: purchaseToken}, purchaseToken, map[string]any{"subscription_state": sub.SubscriptionState})
 			}
 			continue
 		}
@@ -1932,9 +1997,11 @@ func reconcileSolana(run *paymentReconcileRun, since time.Time) (bool, error) {
 				}
 				continue
 			}
+			// only the purchase this vanished transaction paid for
 			run.end(
 				store,
 				target.renewal.NetworkId,
+				paymentReconcileEndScope{transactionIds: []string{target.renewal.TransactionId}},
 				target.signature,
 				map[string]any{
 					"reason":    "tx_signature_not_found_on_chain",

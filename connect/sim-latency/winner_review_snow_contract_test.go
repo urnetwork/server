@@ -55,7 +55,7 @@ func TestWinnerSnowSchemaRejectsEmptyRequiredEvidence(t *testing.T) {
 	if err := winnerSnowResolvedSchema(t, winnerModelSchema()).Validate(instance); err != nil {
 		t.Fatal("synthetic regression no longer reproduces the weak schema", err)
 	}
-	if winnerSnowResolvedSchema(t, winnerSnowModelSchema()).Validate(instance) == nil || validateWinnerSnowMember(judgment, request) == nil {
+	if winnerSnowResolvedSchema(t, winnerSnowModelSchema(request.Request.Policy)).Validate(instance) == nil || validateWinnerSnowMember(judgment, request) == nil {
 		t.Fatal("empty schema-valid model evidence became a native judgment")
 	}
 }
@@ -67,7 +67,7 @@ func TestWinnerSnowSchemaConstrainsCompleteJudgmentShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, judgment := winnerModelFixture()
+	request, judgment := winnerModelFixture()
 	for index := range judgment.Findings {
 		judgment.Findings[index].EvidenceSha256 = ""
 	}
@@ -75,7 +75,7 @@ func TestWinnerSnowSchemaConstrainsCompleteJudgmentShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	schema := winnerSnowResolvedSchema(t, winnerSnowModelSchema())
+	schema := winnerSnowResolvedSchema(t, winnerSnowModelSchema(request.Request.Policy))
 	var valid any
 	if err := json.Unmarshal(content, &valid); err != nil {
 		t.Fatal(err)
@@ -175,7 +175,7 @@ func TestWinnerSnowTransportSendsExplicitJudgmentContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	provider, calls := defaultWinnerSnowProviderSettings(), 0
-	schemaBytes, err := json.Marshal(winnerSnowModelSchema())
+	schemaBytes, err := json.Marshal(winnerSnowModelSchema(request.Request.Policy))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +205,7 @@ func TestWinnerSnowTransportSendsExplicitJudgmentContract(t *testing.T) {
 		if payload.Model != provider.Members[index].Model || payload.Reasoning.Effort != provider.Members[index].Reasoning || payload.MaximumOutputTokens != 32768 || len(payload.Tools) != 0 || payload.ToolChoice != "none" || payload.Text.Format.Type != "json_schema" || !payload.Text.Format.Strict || !bytes.Equal(payload.Text.Format.Schema, schemaBytes) || !strings.HasSuffix(payload.Instructions, string(schemaBytes)) {
 			t.Fatal("native output contract lost its explicit schema, effort or token bound")
 		}
-		for _, required := range []string{"context.template is INPUT-ONLY", "ONLY decision, reason_codes, public_explanation, private_evidence and findings", "not a request to run or certify performance tests yourself", "Missing context", "NEVER approve/disqualify"} {
+		for _, required := range []string{"context.template is INPUT-ONLY", "ONLY decision, reason_codes, public_explanation, private_evidence and findings", "not a request to run or certify performance tests yourself", "Missing context", "NEVER approve/disqualify", "not evidence that tests ran", "Mere wording or suspected intent", "Language directives and strings consumed by privileged code are not automatically inert", "Global incident declarations and appeal restorations belong to the operator"} {
 			if !strings.Contains(payload.Instructions, required) {
 				t.Fatal("native output instructions omitted contract semantics", required)
 			}
@@ -219,7 +219,7 @@ func TestWinnerSnowTransportSendsExplicitJudgmentContract(t *testing.T) {
 		if err := json.Unmarshal(output, &original); err != nil {
 			t.Fatal(err)
 		}
-		if err := winnerSnowResolvedSchema(t, winnerSnowModelSchema()).Validate(original); err != nil {
+		if err := winnerSnowResolvedSchema(t, winnerSnowModelSchema(request.Request.Policy)).Validate(original); err != nil {
 			t.Fatal("synthetic frontend response violated the actual sent schema", err)
 		}
 		response := map[string]any{"id": fmt.Sprintf("synthetic-contract-%d", index), "status": "completed", "model": payload.Model,
@@ -252,9 +252,10 @@ func TestWinnerSnowTransportSendsExplicitJudgmentContract(t *testing.T) {
 	if err := validateWinnerReviewBrokerResult(result, request.Template, request.Request.Policy, request); err != nil {
 		t.Fatal("explicit-contract result lost native union validation", err)
 	}
-	properties := winnerSnowModelSchema()["properties"].(map[string]any)
+	properties := winnerSnowModelSchema(request.Request.Policy)["properties"].(map[string]any)
 	reasons := properties["reason_codes"].(map[string]any)["items"].(map[string]any)["enum"]
-	if !reflect.DeepEqual(reasons, model.CompetitionIntegrityReviewReasonCodes()) {
-		t.Fatal("provider enum diverged from native reason vocabulary")
+	expectedReasons := []string{"APPROVED", "SCORE_TAMPERING", "MEASUREMENT_FABRICATION", "WORKLOAD_SPECIAL_CASING", "BENCHMARK_DETECTION", "SANDBOX_ESCAPE", "SECRET_ACCESS", "EXFILTRATION", "UNSAFE_BEHAVIOR", "PERSISTENCE", "DENIAL_OF_SERVICE", "PATCH_POLICY_VIOLATION", "UNRELATED_CHANGE", "SOURCE_NOT_READY", "PRODUCT_INTEGRATION_RISK"}
+	if !reflect.DeepEqual(reasons, expectedReasons) {
+		t.Fatal("provider enum does not match its frozen model authority")
 	}
 }

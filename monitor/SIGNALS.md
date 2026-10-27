@@ -341,6 +341,7 @@ active missing capability and must not be read as green.
 | 25.3 | Coverage gap | `log-errors` classifies service error logs; the per-route API error share and request-rate floor are missing |
 | 25.4 | Coverage gap | `provider-connections` watches provider supply; the delivered-traffic floor is missing |
 | 25.5 | Coverage gap | `provider-picker`, `proxy-path` and `egress-outcomes` cover parts of the journey; the external end-to-end probe is missing |
+| 26.5 | Shared contract | `contract-failure-share` (§25.1) is this rule: PAGE at 20% or more for 5 minutes with at least 20 creations/s, read from Mimir history at one-minute steps |
 <!-- numbered-coverage-end -->
 
 Cadence mode starts each probe immediately, but admits at most four concurrent
@@ -28177,15 +28178,40 @@ inventory's own field list and requires that webhook's verifier to accept it,
 so a verifier that starts reading a new field fails the build until the
 inventory lists it.
 
+Payment webhook readiness also follows the verifier's scalar contract:
+Play publisher email and audience, Stripe signing secret, Coinbase shared
+secret, and Helius authorization must be nonblank string scalars. A number,
+boolean, mapping or sequence cannot establish readiness even if it is nonempty;
+report the existing `credential-fields-missing` class with field names only.
+The inventory-to-verifier controls must exercise rejected shapes as well as
+accepted strings. These checks establish local resource shape only: they do
+not establish correct provider audience/secret values, API adoption of the
+resource generation, successful verification of a signed request, backlog
+recovery or payment delivery. Generic numeric and structured requirements
+retain their own consumer contracts. Present incomplete optional resources
+remain WARN, while wholly absent optional resources remain a no-op.
+
 The refusal itself was invisible to `log-errors`: the warning
 `[<webhook>]webhook refused, verification <secret|publisher|audience>
-unavailable: <resource>: <field> is missing` contains no error-shaped word, so
-it was neither classified nor novel. The `payment-webhook-refused` log class
-pages on one line, framed by webhook (play, stripe, coinbase, helius). Its
-sample omits the resource and field. One line is one refused delivery attempt,
-not one payment: providers retry with backoff. A default Pub/Sub subscription
-drops an unacknowledged event after seven days, and hourly reconciliation
-repairs only purchases the server already knows.
+unavailable: <detail>` can contain no error-shaped word. The
+`payment-webhook-refused` class pages on one matching line, framed only by
+play, stripe, coinbase or helius. Its fixed verification-input sample omits all
+resource, field and loader-error details, without relabeling publisher/audience
+failures as missing secrets. The refusal header takes precedence over generic
+resource/transport signatures in its suffix; a plain unrelated resource or
+transport line retains its existing class. Nonmatching webhook logs remain out
+of this class. Existing notifier resolution groups by probe/class/service,
+ignoring frame; a vendor frame is diagnostic attribution, not an independent
+payment or delivery identity.
+
+One matching line is a refusal diagnostic; retries can repeat one event. It
+reports the producer's unavailable-verification path and intended 503, not a
+successfully delivered HTTP status, unique payment or financial loss. Wrong-type,
+malformed-resource and loader failures can also produce the header. A clear
+credential inventory does not establish the mounted consumer's source generation
+or eliminate route-specific failure. Provider retry/retention, backlog and
+reconciliation coverage require their own evidence. Missing/capped/failed log
+coverage is unknown; quiet logs or a sibling 2xx cannot certify recovery.
 
 The 2026-10-16 source audit found a readiness false negative: the generic
 nonempty-value check accepted nonstring YAML values that the Google browser
@@ -46192,7 +46218,7 @@ refusing up to 923 packs/s.
 | Entry | Proposed class | Source (in Mimir?) | WARN | PAGE | First firing, replayed |
 |---|---|---|---|---|---|
 | PgBouncer backlog | `pgbouncer-backlog` | `pgbouncer_pool_clients_waiting`, `pgbouncer_pool_maxwait_seconds` (yes) | waiting over 100 for 10 min; oldest wait over 0.5 s for 10 min | waiting over 1,000 for 5 min | A: WARN 19:29Z, PAGE 20:03Z |
-| Services-tier CPU | `services-cpu-busy` | `node_cpu_seconds_total` (yes) | the four edges together over 80% for 10 min; one over 85% for 30 min | — | A: 19:50Z |
+| Services-tier CPU | `services-cpu-busy` | `node_cpu_seconds_total` (yes) | the four edges together over 80% for 10 min; one over 85% for 30 min | — | A: 19:51Z |
 | Database acquire wait | `db-acquire-wait` | `urnetwork_pg_pool_acquire_duration_seconds_total`, `urnetwork_pg_pool_acquires_total` (yes) | a service's mean over 100 ms for 5 min | — | A: 20:08Z, the proxy |
 | Stuck creations | `contract-creations-stuck` | `urnetwork_contract_creation_stage_inflight` (yes) | — | a process over 1,000 in stage `other` for 5 min | B: 14:51Z |
 | Cancellation share | §25.1 `contract-failure-share` | `urnetwork_contract_creation_completed_total` (yes) | §25.1 | 20% or more for 5 min | B: 14:52Z |
@@ -46223,9 +46249,27 @@ acknowledged by a person (§7, 2026-10-22 rule 4). These signals watch the
 services and Redis, where both incidents started; §25's watch what customers
 see.
 
-### PgBouncer backlog — clients waiting and the oldest wait
+Monitor probes: 26.1–26.4 and 26.6–26.11 each have their own probe, and 26.5
+is §25.1's `contract-failure-share`. Each reads its entry's PromQL at every
+one-minute step of one bounded Mimir range read through a services host's
+loopback Mimir, ending two minutes behind now, so a watcher that runs it
+every 15 minutes still judges every minute of the hold
+(`storm_history.go`). A band fires when every evaluation of its hold is
+beyond its level and clears only when every one has a value within it; a
+hold the series broke, or an evaluation without a value, opens nothing and
+keeps an open incident open. A missing source is unknown, never zero. No
+Grafana rule implements any of these entries yet.
 
-Status: proposed 2026-10-26; no rule or probe implements it. Use it in place
+### 26.1 PgBouncer backlog — clients waiting and the oldest wait
+
+Probe: `pgbouncer-backlog`
+
+The probe also counts the PgBouncer instances each expression covers
+against the inventory's `pgbouncer_instances`. A sum over fewer pools can
+only be lower, so a held band stands; a clear needs every instance at every
+evaluation, and a gap reports `pgbouncer-backlog-unobservable`.
+
+Status: proposed 2026-10-26; the probe above implements it. Use it in place
 of §2.11b's `pgbouncer-saturated` levels (WARN 500 and PAGE 2,000 on 10-minute
 averages, with servers at or above 608). It drops the server condition: since
 14:08–14:17Z on 10-26 each of the 32 pools has 22 servers (704 in all), so 608
@@ -46284,9 +46328,16 @@ waves made A's cancellation peaks at 21:10Z and 23:00Z. Follow-up: add both
 predicates to `pgbouncer-pool-starvation` (§2.11a), which reads these gauges
 every minute.
 
-### Services-tier CPU — the four services edges together and each one
+### 26.2 Services-tier CPU — the four services edges together and each one
 
-Status: proposed 2026-10-26; no rule or probe implements it. §8.14's
+Probe: `services-cpu`
+
+The services edges are the hosts the active placement runs api, connect and
+taskworker on (edge-0, edge-1, edge-3 and edge-4 today), matched by name. The
+edges together count only at evaluations where every edge answered; a
+missing edge reports `services-cpu-unobservable`.
+
+Status: proposed 2026-10-26; the probe above implements it. §8.14's
 `host-cpu-saturation` pages at 90% execution with load at 1.25 per CPU for two
 probes, which A's hosts held only in bursts, and the monitor that owns it ran
 only on demand (§25); §8.14a's `host-pressure` reads run-queue delay by SSH.
@@ -46314,8 +46365,8 @@ Thresholds:
 - No PAGE: the PgBouncer backlog pages the effect on customers.
 
 Evidence:
-- A: the four together fired at 19:50Z on 10-25 (82.4% median through the
-  night, 90% at 21:05Z), 6 h 35 min before A was found, and held until 14:12Z
+- A: the four together fired at 19:51Z on 10-25 (82.4% median through the
+  night, 90% at 21:05Z), 6 h 34 min before A was found, and held until 14:12Z
   on 10-26; edge-3 alone fired at 20:14Z. The medians were 76% on edge-0,
   83% on edge-1, 86% on edge-3 and 87.5% on edge-4. §8.14's 90% held only in
   bursts: edge-3 at 21:00–21:09Z (95.4%, load 1.7–4.7 per CPU) and
@@ -46344,9 +46395,17 @@ and §8.14a. Hold connect and alt rollouts. Reduce load (connect's `cores`,
 §24 placement, capacity) rather than restarting. Follow-up: add both
 predicates to `host-load` (§8.14), which reads this family every minute.
 
-### Service database pool acquire wait
+### 26.3 Service database pool acquire wait
 
-Status: proposed 2026-10-26; no rule or probe implements it. The mover
+Probe: `db-acquire-wait`
+
+A service with no acquisitions in the window has no mean and reads within
+the band. Every placed service among api, connect, proxy, taskworker, alt,
+gossip and mcp must answer at every evaluation, and a gap reports
+`db-acquire-wait-unobservable`. Each finding carries the service's canceled
+acquisitions beside its mean.
+
+Status: proposed 2026-10-26; the probe above implements it. The mover
 already pauses on the same mean above 50 ms (`db_paused`, §24.5).
 
 Source (exists): `urnetwork_pg_pool_acquire_duration_seconds_total{pool}`, the
@@ -46389,9 +46448,18 @@ backlog and services-tier CPU entries. Follow-up: add it to the Mimir read of
 `contract-stage-latency` (§2.30), which already takes PgBouncer context every
 minute.
 
-### Stuck contract creations — stage `other` in flight per process
+### 26.4 Stuck contract creations — stage `other` in flight per process
 
-Status: proposed 2026-10-26; no rule or probe implements it. §2.30's
+Probe: `contract-creations-stuck`
+
+The probe also reads each service's total and which placed slots answered.
+A maximum over fewer processes can only be lower, so a held band stands; a
+clear needs every placed slot at every evaluation, and a gap reports
+`contract-creations-stuck-unobservable`. `contract-stage-inflight` (the
+whole-number §26 entry at the end of this file) warns on the raw gauge with
+its own policy.
+
+Status: proposed 2026-10-26; the probe above implements it. §2.30's
 `contract-stage-latency` reads completed stage seconds, which count a stuck
 call only once it returns.
 
@@ -46449,7 +46517,7 @@ restarts of 16:00–16:29Z, about 60k calls were stuck again by 16:33Z.
 Follow-up: add the gauge to `contract-stage-latency` (§2.30), which reads the
 same family.
 
-### Cancellation share — §25.1's rule, and why it lags
+### 26.5 Cancellation share — §25.1's rule, and why it lags
 
 Status: §25.1's `contract-failure-share` (PAGE at 20% or more for 5 minutes,
 with at least 20 creations/s) is this rule; build it as §25.1 specifies. Its
@@ -46473,9 +46541,19 @@ as a protocol reject is never counted (B's Detection). The 5 s budget
 (`6ba9d88af`), on the proxies from 18:00Z on 10-26, shortens the lag but
 does not remove it.
 
-### Reservation release errors and compensation outcomes
+### 26.6 Reservation release errors and compensation outcomes
 
-Status: proposed 2026-10-26; no rule or probe implements it. §1.3c defines the
+Probe: `reservation-release`
+
+Result children appear on first use, so in a service that publishes an
+operation a missing `error`, `dropped` or `expired` child is zero events. The
+api and the proxy publish both operations at every minute, so a minute
+either publishes nothing reports `reservation-release-unobservable`; other
+services (alt, taskworker) are judged while they publish. A build without
+the deferred owner emits neither `dropped` nor `expired`, so the
+compensation arm reads zero there.
+
+Status: proposed 2026-10-26; the probe above implements it. §1.3c defines the
 counter's operations and results.
 
 Source (exists): `urnetwork_redis_contract_reservation_total` by `operation`
@@ -46528,11 +46606,18 @@ ACTION: B's: read the pool-timeout and HELLO entries for the node, and hold
 connect, alt and proxy rollouts. Follow-up: add both to `redis-pool` (§3.5b),
 which reads service Redis counters from Mimir.
 
-### Redis client pool timeouts per service — an earlier band
+### 26.7 Redis client pool timeouts per service — an earlier band
+
+Probe: `redis-pool-timeouts`
+
+The band is its own class beside `redis-pool`'s. The counters are
+registered with every pool, so a placed service among api, connect, proxy,
+taskworker, alt, gossip and mcp that stops publishing reports
+`redis-pool-timeouts-unobservable`.
 
 Status: proposed 2026-10-26 as a lower band for `redis-pool` (§3.5b), which
-warns at a 10-minute floor of 50 timeouts/s and pages at 1,000/s; neither the
-band nor its class is implemented.
+warns at a 10-minute floor of 50 timeouts/s and pages at 1,000/s; the probe
+above implements the band and its class.
 
 Source (exists): `urnetwork_redis_pool_timeouts_total` and
 `urnetwork_redis_pool_misses_total` (§3.5b).
@@ -46569,9 +46654,16 @@ not raise pool sizes or timeouts. For the proxy, see B's follow-ups 3 and 4
 (a connection closed on every timeout, a PING per callback). Follow-up: add
 the band to `redis-pool`.
 
-### Redis node main thread and connection churn
+### 26.8 Redis node main thread and connection churn
 
-Status: proposed 2026-10-26; no rule or probe implements either. §3.4's
+Probe: `redis-main-thread`
+
+Every node the inventory lists on a `redis-cluster` host must answer at
+every evaluation, and a gap reports `redis-main-thread-unobservable`. A node
+whose scrape answers without a HELLO count has had no HELLO since it started
+and reads zero.
+
+Status: proposed 2026-10-26; the probe above implements both. §3.4's
 `redis-cpu-sustained` samples whole-process CPU above 200%, which a saturated
 main thread with idle io-threads never reaches.
 
@@ -46629,9 +46721,15 @@ reconnects; for the proxy, see B's follow-ups 3 and 4. Do not run
 a Mimir reader beside `redis-pool` (§3.5b); `redis-process` (§3.4) samples
 process CPU over SSH, not the main thread.
 
-### Proxy host CPU
+### 26.9 Proxy host CPU
 
-Status: proposed 2026-10-26; no rule or probe implements it.
+Probe: `proxy-host-cpu`
+
+The proxy hosts are the hosts the active placement runs the proxy on
+(crisp and fireside today), matched by name; a missing host reports
+`proxy-host-cpu-unobservable`.
+
+Status: proposed 2026-10-26; the probe above implements it.
 
 Source (exists): `node_cpu_seconds_total{mode}` on crisp and fireside, 24 CPUs
 each. Each host runs 10 proxy processes at GOMAXPROCS 8, up to 80 cores of
@@ -46669,9 +46767,15 @@ stuck-creation entry; same-image proxy restarts held for minutes only.
 Follow-up: a per-role band in `host-load` (§8.14), which reads this family
 for every host.
 
-### Proxy contract replies against their previous two hours
+### 26.10 Proxy contract replies against their previous two hours
 
-Status: proposed 2026-10-26; no rule or probe implements it.
+Probe: `contract-reply-collapse`
+
+With no replies in its reference there is nothing to collapse from, so a
+zero median reads within the band; an evaluation without a ratio otherwise
+reports `contract-reply-collapse-unobservable`.
+
+Status: proposed 2026-10-26; the probe above implements it.
 
 Source (exists): the proxy's
 `urnetwork_contract_creation_completed_total{outcome="contract_reply"}`.
@@ -46710,9 +46814,18 @@ needs §25.1's floor.
 
 ACTION: as §25.1. Follow-up: build it with §25.1's reader.
 
-### Hosted contract admission cap
+### 26.11 Hosted contract admission cap
 
-Status: proposed 2026-10-26; no rule or probe implements it. The cap
+Probe: `hosted-contract-cap`
+
+The probe also reads which blocks export the counter and each block's
+newest process's uptime. An evaluation the uptime condition drops counts as
+neither beyond nor within the band, so a block's restart neither fires nor
+clears it; a block that does not export the counter runs no cap and reads
+zero. A placed block with no process reports
+`hosted-contract-cap-unobservable`.
+
+Status: proposed 2026-10-26; the probe above implements it. The cap
 (`88117cc03`) runs on proxy g4–g10 since 18:35–19:04Z on 10-26; g1–g3 run the
 5 s budget without it.
 

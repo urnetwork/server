@@ -202,7 +202,20 @@ func (self *snReconcileTestFixture) network(blockchain string) (server.Id, serve
 // A settled contract opened an hour before it closed at `closed`, whose sweep
 // is not yet planned.
 func (self *snReconcileTestFixture) contract(networkId server.Id, closed time.Time, revenue model.NanoCents) server.Id {
-	contractId, clientId := server.NewId(), self.clients[networkId]
+	return self.contractWithId(server.NewId(), networkId, closed, revenue)
+}
+
+// The same contract with its id minted when it opened, as connect.NewId mints
+// every contract's id. The listing reads a later row's sweeps by contract id
+// (A5), so a later row's early sweep needs one.
+func (self *snReconcileTestFixture) mintedContract(networkId server.Id, closed time.Time, revenue model.NanoCents) server.Id {
+	contractId, opened := server.NewId(), model.ContractIdTimeBound(closed.Add(-time.Hour))
+	copy(contractId[0:6], opened[0:6])
+	return self.contractWithId(contractId, networkId, closed, revenue)
+}
+
+func (self *snReconcileTestFixture) contractWithId(contractId server.Id, networkId server.Id, closed time.Time, revenue model.NanoCents) server.Id {
+	clientId := self.clients[networkId]
 	usage := fmt.Sprintf(`{"version":1,"byte_count":100,"providers":[{"client_id":%q,"network_id":%q,"byte_count":100}]}`, clientId.String(), networkId.String())
 	self.exec(`INSERT INTO transfer_contract(contract_id,source_network_id,source_id,destination_network_id,destination_id,transfer_byte_count,create_time,close_time,outcome,provider_usage,usage_origin_is_source)
 		VALUES($1,$2,$3,$4,$5,100,$6,$7,'settled',$8,true)`, contractId, self.sourceNetwork, self.source, networkId, clientId, closed.Add(-time.Hour), closed, usage)
@@ -1776,7 +1789,7 @@ func TestSnReconcileReapedRowIsNotReplanned(t *testing.T) {
 			return f.payment(networkId, &walletId, created, model.UsdToNanoCents(2)), networkId, walletId
 		}
 		laterHolder := func(networkId server.Id, walletId server.Id, closed time.Time) {
-			f.epoch(f.payment(networkId, &walletId, later, 0, f.contract(networkId, closed, model.UsdToNanoCents(2))), later)
+			f.epoch(f.payment(networkId, &walletId, later, 0, f.mintedContract(networkId, closed, model.UsdToNanoCents(2))), later)
 		}
 		replanned, networkA, walletA := reaped()
 		f.cancelWithRecord(replanned, "FAILED", "")

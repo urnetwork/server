@@ -139,6 +139,7 @@ type heldOutReferenceQualification struct {
 // Pins this exact executable, all draft sources, the actual toolchain and the
 // independently retained three-pass qualification, not a compile-only check.
 type heldOutToolQualification struct {
+	TwoBAddendumSha256     string              `json:"two_b_addendum_sha256,omitempty"`
 	Protocol               string              `json:"protocol,omitempty"`
 	ProtocolApprovalSha256 string              `json:"protocol_approval_sha256,omitempty"`
 	OriginalPlanSha256     string              `json:"original_plan_sha256,omitempty"`
@@ -161,21 +162,22 @@ type heldOutToolQualification struct {
 // Every file pin is supplied before entropy or publication. PrivateRoot must
 // not exist; its parent must already be private and owned by the operator.
 type heldOutPreparationConfig struct {
-	Protocol       string                 `json:"protocol,omitempty"`
-	Amendment      *heldOutAmendmentPins  `json:"amendment,omitempty"`
-	Schema         int                    `json:"schema"`
-	Kind           string                 `json:"kind"`
-	PrivateRoot    string                 `json:"private_root"`
-	PublicPlanPath string                 `json:"public_plan_path"`
-	Template       heldOutPinnedFile      `json:"template"`
-	StageAReport   heldOutPinnedFile      `json:"stage_a_report"`
-	StageAInputs   heldOutPinnedFile      `json:"stage_a_inputs"`
-	SourceLock     heldOutPinnedFile      `json:"source_lock"`
-	Exclusions     heldOutPinnedFile      `json:"exclusions"`
-	References     heldOutPinnedFile      `json:"references"`
-	Qualification  heldOutPinnedFile      `json:"qualification"`
-	GeneratorFiles []heldOutGeneratorFile `json:"generator_files"`
-	Scripts        []heldOutPinnedFile    `json:"scripts"`
+	TwoBAddendum   *heldOutTwoBAddendumPins `json:"two_b_addendum,omitempty"`
+	Protocol       string                   `json:"protocol,omitempty"`
+	Amendment      *heldOutAmendmentPins    `json:"amendment,omitempty"`
+	Schema         int                      `json:"schema"`
+	Kind           string                   `json:"kind"`
+	PrivateRoot    string                   `json:"private_root"`
+	PublicPlanPath string                   `json:"public_plan_path"`
+	Template       heldOutPinnedFile        `json:"template"`
+	StageAReport   heldOutPinnedFile        `json:"stage_a_report"`
+	StageAInputs   heldOutPinnedFile        `json:"stage_a_inputs"`
+	SourceLock     heldOutPinnedFile        `json:"source_lock"`
+	Exclusions     heldOutPinnedFile        `json:"exclusions"`
+	References     heldOutPinnedFile        `json:"references"`
+	Qualification  heldOutPinnedFile        `json:"qualification"`
+	GeneratorFiles []heldOutGeneratorFile   `json:"generator_files"`
+	Scripts        []heldOutPinnedFile      `json:"scripts"`
 }
 
 // Matches the complete evaluator schema, including deliberately deferred
@@ -251,38 +253,41 @@ type heldOutPrivatePlan struct {
 
 // Only this allowlisted shape is ever written to the public plan destination.
 type heldOutPublicPlan struct {
-	Protocol               string               `json:"protocol,omitempty"`
-	ProtocolApprovalSha256 string               `json:"protocol_approval_sha256,omitempty"`
-	OriginalPlanSha256     string               `json:"original_plan_sha256,omitempty"`
-	OriginalABaseSha       string               `json:"original_a_base_sha,omitempty"`
-	OriginalAImageId       string               `json:"original_a_evaluator_image_id,omitempty"`
-	NewReleaseSha256       string               `json:"new_release_sha256,omitempty"`
-	MarginFreezeSha256     string               `json:"margin_freeze_sha256,omitempty"`
-	BridgePlanSha256       string               `json:"bridge_plan_sha256,omitempty"`
-	BridgeInputsSha256     string               `json:"bridge_inputs_sha256,omitempty"`
-	BridgeReceiptSha256    string               `json:"bridge_compatibility_receipt_sha256,omitempty"`
-	RequiredOrderedSeeds   int                  `json:"required_correctly_ordered_seeds,omitempty"`
-	Schema                 int                  `json:"schema"`
-	Kind                   string               `json:"kind"`
-	CampaignId             string               `json:"campaign_id"`
-	PreparedAt             time.Time            `json:"prepared_at"`
-	PrivatePlanSha256      string               `json:"private_plan_sha256"`
-	ConfigSha256           string               `json:"configuration_sha256"`
-	BaseSha                string               `json:"base_sha"`
-	SourceLockSha256       string               `json:"source_lock_sha256"`
-	EvaluatorImageId       string               `json:"evaluator_image_id"`
-	StageAReportSha256     string               `json:"accepted_stage_a_report_sha256"`
-	StageAInputsSha256     string               `json:"stage_a_inputs_sha256"`
-	PolicySha256           string               `json:"evaluation_policy_sha256"`
-	Margin                 float64              `json:"accepted_margin"`
-	ReferenceSha256        string               `json:"reference_bundle_sha256"`
-	ExclusionsSha256       string               `json:"exclusions_sha256"`
-	QualificationSha256    string               `json:"qualification_sha256"`
-	ControlReplicates      int                  `json:"control_replicates_per_round"`
-	CandidateReplicates    int                  `json:"candidate_replicates_per_job"`
-	ExecutionLimitSeconds  int                  `json:"original_job_limit_seconds"`
-	DeferredFields         []string             `json:"deferred_request_fields"`
-	Rounds                 []heldOutPublicRound `json:"rounds"`
+	BaseProtocol               string               `json:"base_protocol,omitempty"`
+	BaseProtocolApprovalSha256 string               `json:"base_protocol_approval_sha256,omitempty"`
+	TwoBAddendumSha256         string               `json:"two_b_addendum_sha256,omitempty"`
+	Protocol                   string               `json:"protocol,omitempty"`
+	ProtocolApprovalSha256     string               `json:"protocol_approval_sha256,omitempty"`
+	OriginalPlanSha256         string               `json:"original_plan_sha256,omitempty"`
+	OriginalABaseSha           string               `json:"original_a_base_sha,omitempty"`
+	OriginalAImageId           string               `json:"original_a_evaluator_image_id,omitempty"`
+	NewReleaseSha256           string               `json:"new_release_sha256,omitempty"`
+	MarginFreezeSha256         string               `json:"margin_freeze_sha256,omitempty"`
+	BridgePlanSha256           string               `json:"bridge_plan_sha256,omitempty"`
+	BridgeInputsSha256         string               `json:"bridge_inputs_sha256,omitempty"`
+	BridgeReceiptSha256        string               `json:"bridge_compatibility_receipt_sha256,omitempty"`
+	RequiredOrderedSeeds       int                  `json:"required_correctly_ordered_seeds,omitempty"`
+	Schema                     int                  `json:"schema"`
+	Kind                       string               `json:"kind"`
+	CampaignId                 string               `json:"campaign_id"`
+	PreparedAt                 time.Time            `json:"prepared_at"`
+	PrivatePlanSha256          string               `json:"private_plan_sha256"`
+	ConfigSha256               string               `json:"configuration_sha256"`
+	BaseSha                    string               `json:"base_sha"`
+	SourceLockSha256           string               `json:"source_lock_sha256"`
+	EvaluatorImageId           string               `json:"evaluator_image_id"`
+	StageAReportSha256         string               `json:"accepted_stage_a_report_sha256"`
+	StageAInputsSha256         string               `json:"stage_a_inputs_sha256"`
+	PolicySha256               string               `json:"evaluation_policy_sha256"`
+	Margin                     float64              `json:"accepted_margin"`
+	ReferenceSha256            string               `json:"reference_bundle_sha256"`
+	ExclusionsSha256           string               `json:"exclusions_sha256"`
+	QualificationSha256        string               `json:"qualification_sha256"`
+	ControlReplicates          int                  `json:"control_replicates_per_round"`
+	CandidateReplicates        int                  `json:"candidate_replicates_per_job"`
+	ExecutionLimitSeconds      int                  `json:"original_job_limit_seconds"`
+	DeferredFields             []string             `json:"deferred_request_fields"`
+	Rounds                     []heldOutPublicRound `json:"rounds"`
 }
 
 // Owns already authenticated bytes so a mutable source cannot change a patch
@@ -479,14 +484,15 @@ func heldOutRoundCommitment(seedHex string, round heldOutPublicRound, plan heldO
 	round.SeedCommitment = ""
 	protocol, approval, originalPlan, marginFreeze, bridgePlan, bridgeReceipt, newRelease := "", "", "", "", "", "", ""
 	if plan.Config.Protocol != "" {
-		if plan.Config.Protocol != calibrationProtocolThreeABridgeThreeB || plan.Config.Amendment == nil {
+		if _, err := heldOutBaseProvenanceConfiguration(plan.Config); err != nil || plan.Config.Amendment == nil {
 			return "", errors.New("held-out commitment amendment metadata missing")
 		}
 		pins := plan.Config.Amendment
-		protocol, approval, originalPlan, marginFreeze, bridgePlan, bridgeReceipt, newRelease = plan.Config.Protocol, pins.Approval.Sha256, pins.OriginalPlan.Sha256, pins.MarginFreeze.Sha256, pins.BridgePlan.Sha256, pins.BridgeReceipt.Sha256, pins.Release.Sha256
-	} else if plan.Config.Amendment != nil {
+		protocol, approval, originalPlan, marginFreeze, bridgePlan, bridgeReceipt, newRelease = plan.Config.Protocol, heldOutProtocolApproval(plan.Config), pins.OriginalPlan.Sha256, pins.MarginFreeze.Sha256, pins.BridgePlan.Sha256, pins.BridgeReceipt.Sha256, pins.Release.Sha256
+	} else if plan.Config.Amendment != nil || plan.Config.TwoBAddendum != nil {
 		return "", errors.New("held-out historical commitment cannot carry amendment metadata")
 	}
+	baseProtocol, baseApproval, twoBDeclaration := heldOutTwoBBindings(plan.Config)
 	content, err := json.Marshal(struct {
 		Domain                                          string             `json:"domain"`
 		CampaignId                                      string             `json:"campaign_id"`
@@ -500,9 +506,13 @@ func heldOutRoundCommitment(seedHex string, round heldOutPublicRound, plan heldO
 		BridgePlan                                      string  `json:"bridge_plan_sha256,omitempty"`
 		BridgeReceipt                                   string  `json:"bridge_receipt_sha256,omitempty"`
 		NewRelease                                      string  `json:"new_release_sha256,omitempty"`
+		BaseProtocol                                    string  `json:"base_protocol,omitempty"`
+		BaseApproval                                    string  `json:"base_protocol_approval_sha256,omitempty"`
+		TwoBDeclaration                                 string  `json:"two_b_addendum_sha256,omitempty"`
 	}{Domain: "urnetwork-held-out-stage-b-v1", CampaignId: plan.CampaignId, Round: round, Source: release.BaseSha,
 		Image: release.ImageId, Lock: release.SourceLockSha256, Policy: plan.PolicySha256, Report: plan.Config.StageAReport.Sha256,
-		References: plan.Config.References.Sha256, Margin: plan.Margin, Protocol: protocol, Approval: approval, OriginalPlan: originalPlan, MarginFreeze: marginFreeze, BridgePlan: bridgePlan, BridgeReceipt: bridgeReceipt, NewRelease: newRelease})
+		References: plan.Config.References.Sha256, Margin: plan.Margin, Protocol: protocol, Approval: approval, OriginalPlan: originalPlan, MarginFreeze: marginFreeze, BridgePlan: bridgePlan, BridgeReceipt: bridgeReceipt, NewRelease: newRelease,
+		BaseProtocol: baseProtocol, BaseApproval: baseApproval, TwoBDeclaration: twoBDeclaration})
 	if err != nil {
 		return "", err
 	}
@@ -643,7 +653,7 @@ func authenticateHeldOutMargin(config heldOutPreparationConfig, release heldOutR
 		return 0, err
 	}
 	margin, err := pinnedHeldOutMargin(report, heldOutMarginPins{ReportSha256: config.StageAReport.Sha256,
-		InputManifestSha256: config.StageAInputs.Sha256, EvaluationPolicySha256: policySha, Protocol: config.Protocol,
+		InputManifestSha256: config.StageAInputs.Sha256, EvaluationPolicySha256: policySha, Protocol: settingsA.Protocol,
 		ProtocolApprovalSha256: settingsA.ProtocolApprovalSha256, OriginalPlanSha256: settingsA.OriginalPlanSha256})
 	if err != nil {
 		return 0, err
@@ -683,6 +693,12 @@ func authenticateHeldOutMargin(config heldOutPreparationConfig, release heldOutR
 // Verifies byte-exact generator provenance, the native ten-repository digest,
 // full typed template policy, reference receipts and this executable's receipt.
 func authenticateHeldOutPreparation(config heldOutPreparationConfig, release heldOutRelease, settings heldOutOperatorSettings) (*heldOutPreparationInputs, error) {
+	return authenticateHeldOutPreparationWithContract(config, release, settings, nil)
+}
+
+// Native callers always use the nil/real-I/O wrapper. The explicit internal
+// contract permits deterministic composed tests without a physical installation.
+func authenticateHeldOutPreparationWithContract(config heldOutPreparationConfig, release heldOutRelease, settings heldOutOperatorSettings, contract *heldOutRuntimeContract) (*heldOutPreparationInputs, error) {
 	if config.Schema != 1 || config.Kind != "sim-latency-held-out-preparation" || len(config.GeneratorFiles) != 2 || len(config.Scripts) != 4 {
 		return nil, errors.New("held-out preparation schema or provenance incomplete")
 	}
@@ -695,7 +711,7 @@ func authenticateHeldOutPreparation(config heldOutPreparationConfig, release hel
 	}
 	minimumPreparedAt := time.Time{}
 	if config.Protocol != "" {
-		if err := authenticateHeldOutBridge(config, release, settings, margin); err != nil {
+		if err := authenticateHeldOutProtocolBridgeWithContract(config, release, settings, margin, contract); err != nil {
 			return nil, err
 		}
 		content, err := readHeldOutPinned(config.Amendment.BridgeReceipt, settings.MaximumBytes, false)
@@ -707,6 +723,11 @@ func authenticateHeldOutPreparation(config heldOutPreparationConfig, release hel
 			return nil, err
 		}
 		minimumPreparedAt = bridge.VerifiedAt
+		if declaration, err := authenticateHeldOutTwoBAddendum(config, settings, &margin); err != nil {
+			return nil, err
+		} else if declaration != nil && minimumPreparedAt.Before(declaration.PublishedAt) {
+			minimumPreparedAt = declaration.PublishedAt
+		}
 	}
 	templateBytes, err := readHeldOutPinned(config.Template, settings.MaximumBytes, false)
 	if err != nil {
@@ -753,7 +774,7 @@ func authenticateHeldOutPreparation(config heldOutPreparationConfig, release hel
 	if err := authenticateHeldOutGeneratorFiles(config.GeneratorFiles, release, settings); err != nil {
 		return nil, err
 	}
-	if err := authenticateHeldOutScripts(config.Scripts, release, settings); err != nil {
+	if err := authenticateHeldOutScriptsWithContract(config.Scripts, release, settings, contract); err != nil {
 		return nil, err
 	}
 	qualificationBytes, err := readHeldOutPinned(config.Qualification, settings.MaximumBytes, false)
@@ -767,8 +788,11 @@ func authenticateHeldOutPreparation(config heldOutPreparationConfig, release hel
 	if qualification.Schema != 1 || qualification.Kind != "sim-latency-held-out-operator-qualification" || !qualification.Accepted || qualification.AnalyzerSource != release.AnalyzerSource || qualification.BaseSha != release.BaseSha || qualification.SourceLockSha256 != release.SourceLockSha256 || qualification.GoVersion != "go1.27.3" || !qualification.Race || qualification.ConsecutivePasses != settings.RequiredPasses || qualification.TestsPerPass <= 0 || qualification.Skips != 0 || len(qualification.Sources) == 0 || len(qualification.Evidence) != settings.RequiredPasses {
 		return nil, errors.New("exact three-pass held-out operator qualification missing")
 	}
-	if qualification.Protocol != config.Protocol || (config.Protocol != "" && (qualification.ProtocolApprovalSha256 != config.Amendment.Approval.Sha256 || qualification.OriginalPlanSha256 != config.Amendment.OriginalPlan.Sha256)) {
+	if qualification.Protocol != config.Protocol || (config.Protocol != "" && (qualification.ProtocolApprovalSha256 != heldOutProtocolApproval(config) || qualification.OriginalPlanSha256 != config.Amendment.OriginalPlan.Sha256)) {
 		return nil, errors.New("held-out qualification does not cover the explicit amended protocol")
+	}
+	if err := validateHeldOutTwoBToolBinding(config, qualification); err != nil {
+		return nil, err
 	}
 	executable, err := os.Executable()
 	if err != nil {
@@ -801,6 +825,9 @@ func authenticateHeldOutPreparation(config heldOutPreparationConfig, release hel
 	if err != nil {
 		return nil, err
 	}
+	if err := authenticateHeldOutTwoBReferences(config, settings, margin, references); err != nil {
+		return nil, err
+	}
 	for _, patch := range patches {
 		if len(patch) > template.PatchPolicy.MaxPatchBytes {
 			return nil, errors.New("reference exceeds frozen patch size policy")
@@ -812,11 +839,16 @@ func authenticateHeldOutPreparation(config heldOutPreparationConfig, release hel
 // The fourth helper is pinned by the reviewed configuration. The three known
 // release hashes and installed directory cannot be redirected by that config.
 func authenticateHeldOutScripts(scripts []heldOutPinnedFile, release heldOutRelease, settings heldOutOperatorSettings) error {
+	return authenticateHeldOutScriptsWithContract(scripts, release, settings, nil)
+}
+
+// Shares exact script projection and runtime validation with the native wrapper.
+func authenticateHeldOutScriptsWithContract(scripts []heldOutPinnedFile, release heldOutRelease, settings heldOutOperatorSettings, contract *heldOutRuntimeContract) error {
 	if err := validateHeldOutScriptProjection(scripts, release); err != nil {
 		return err
 	}
 	if release.Runtime != nil {
-		if err := authenticateHeldOutRuntimeFiles(release, settings); err != nil {
+		if err := authenticateHeldOutRuntimeForContract(release, settings, contract); err != nil {
 			return err
 		}
 	}
@@ -1036,12 +1068,16 @@ func publicHeldOutPlan(plan heldOutPrivatePlan, privateDigest string, release he
 		ExclusionsSha256: plan.Config.Exclusions.Sha256, QualificationSha256: plan.Config.Qualification.Sha256,
 		ControlReplicates: settingsA.Replicates, CandidateReplicates: settingsA.Replicates, ExecutionLimitSeconds: settingsA.ExecutionLimitSeconds,
 		DeferredFields: []string{"round_baseline_path", "round_baseline_sha256"}, Rounds: []heldOutPublicRound{}}
-	if plan.Config.Protocol == calibrationProtocolThreeABridgeThreeB && plan.Config.Amendment != nil {
+	if (plan.Config.Protocol == calibrationProtocolThreeABridgeThreeB || plan.Config.Protocol == heldOutProtocolThreeABridgeTwoB) && plan.Config.Amendment != nil {
 		pins := plan.Config.Amendment
-		public.Protocol, public.ProtocolApprovalSha256, public.OriginalPlanSha256 = plan.Config.Protocol, pins.Approval.Sha256, pins.OriginalPlan.Sha256
+		public.Protocol, public.ProtocolApprovalSha256, public.OriginalPlanSha256 = plan.Config.Protocol, heldOutProtocolApproval(plan.Config), pins.OriginalPlan.Sha256
 		public.NewReleaseSha256, public.MarginFreezeSha256, public.BridgePlanSha256, public.BridgeInputsSha256, public.BridgeReceiptSha256 = pins.Release.Sha256, pins.MarginFreeze.Sha256, pins.BridgePlan.Sha256, pins.BridgeInputs.Sha256, pins.BridgeReceipt.Sha256
 		public.OriginalABaseSha, public.OriginalAImageId = pins.OriginalBaseSha, pins.OriginalImageId
 		public.RequiredOrderedSeeds = 3
+		if plan.Config.Protocol == heldOutProtocolThreeABridgeTwoB {
+			public.RequiredOrderedSeeds = 2
+			public.BaseProtocol, public.BaseProtocolApprovalSha256, public.TwoBAddendumSha256 = heldOutTwoBBindings(plan.Config)
+		}
 	}
 	for _, round := range plan.Rounds {
 		public.Rounds = append(public.Rounds, round.Public)
@@ -1053,6 +1089,12 @@ func publicHeldOutPlan(plan heldOutPrivatePlan, privateDigest string, release he
 // commitments, every original request, private modes and the native workloads.
 // No evaluator, analysis or entropy source is called by this verification.
 func verifyHeldOutPlan(privatePin heldOutPinnedFile, publicPin heldOutPinnedFile, release heldOutRelease, settings heldOutOperatorSettings) (*heldOutPrivatePlan, error) {
+	return verifyHeldOutPlanWithContract(privatePin, publicPin, release, settings, nil)
+}
+
+// The native verification wrapper always selects real closed I/O. Synthetic
+// tests reauthenticate the same complete plan with explicit contract bytes.
+func verifyHeldOutPlanWithContract(privatePin heldOutPinnedFile, publicPin heldOutPinnedFile, release heldOutRelease, settings heldOutOperatorSettings, contract *heldOutRuntimeContract) (*heldOutPrivatePlan, error) {
 	privateBytes, err := readHeldOutPinned(privatePin, settings.MaximumBytes, true)
 	if err != nil {
 		return nil, err
@@ -1090,7 +1132,7 @@ func verifyHeldOutPlan(privatePin heldOutPinnedFile, publicPin heldOutPinnedFile
 	if !reflect.DeepEqual(public, publicHeldOutPlan(plan, privatePin.Sha256, release)) {
 		return nil, errors.New("held-out public/private plan mismatch or reordered references")
 	}
-	inputs, err := authenticateHeldOutPreparation(plan.Config, release, settings)
+	inputs, err := authenticateHeldOutPreparationWithContract(plan.Config, release, settings, contract)
 	if err != nil {
 		return nil, err
 	}

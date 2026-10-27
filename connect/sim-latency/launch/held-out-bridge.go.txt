@@ -686,6 +686,12 @@ func verifyHeldOutBridge(ctx context.Context, config heldOutBridgeVerificationCo
 // B consumes the successful original witness, never reanalyzes it or accepts a
 // replacement. Raw native artifact bindings remain independently authenticated.
 func authenticateHeldOutBridge(config heldOutPreparationConfig, release heldOutRelease, settings heldOutOperatorSettings, margin float64) error {
+	return authenticateHeldOutBridgeWithContract(config, release, settings, margin, nil)
+}
+
+// Production's wrapper cannot select a synthetic contract. Internal composed
+// tests use this same base/provenance/artifact validator with captured I/O.
+func authenticateHeldOutBridgeWithContract(config heldOutPreparationConfig, release heldOutRelease, settings heldOutOperatorSettings, margin float64, contract *heldOutRuntimeContract) error {
 	if config.Protocol != calibrationProtocolThreeABridgeThreeB || config.Amendment == nil {
 		return errors.New("explicit amended bridge provenance required")
 	}
@@ -697,7 +703,7 @@ func authenticateHeldOutBridge(config heldOutPreparationConfig, release heldOutR
 	if err := validateHeldOutBridgeRuntime(*plan, release); err != nil {
 		return err
 	}
-	if err := authenticateHeldOutRuntimeFiles(release, settings); err != nil {
+	if err := authenticateHeldOutRuntimeForContract(release, settings, contract); err != nil {
 		return err
 	}
 	if plan.OriginalA.Approval != pins.Approval || plan.OriginalA.OriginalPlan != pins.OriginalPlan || plan.OriginalA.StageAReport != config.StageAReport || plan.OriginalA.StageAInputs != config.StageAInputs || plan.MarginFreeze != pins.MarginFreeze || plan.Release != pins.Release || plan.SourceLock != config.SourceLock || plan.Request != config.Template || plan.Margin != margin || freeze.Margin != margin {

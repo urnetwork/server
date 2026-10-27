@@ -1,0 +1,65 @@
+{
+  "accepted_margin": 0.269,
+  "actual_bridge_executed": false,
+  "actual_offline_unit_qualification": {
+    "path": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/offline-unit-qualification.json",
+    "sha256": "1f4b19a95c989883e522dd248d7c08cfe57ef8fdf917b6f50e7c67022df02793"
+  },
+  "actual_operator_binary_sha256": "244d54214899c9db523b563b0f9550a3a019d9e50e222a2c8712e7d4f9922e6b",
+  "actual_source_base": "29b44380e2e521c2895429737b38c9e350842cd8",
+  "all_gates_and_significance_unchanged": true,
+  "api_or_main_config_changed": false,
+  "bridge_accepted": false,
+  "bridge_plan": {
+    "path": "/home/by/urnetwork/temp/fresh-bridge-authority-generation-20261027.T70SkVMC/bridge-authority/bridge-plan.json",
+    "sha256": "ebfd06c2cfc35b48caf9d451e0f8600f4effdca7a005b1873da0c4409cc39866"
+  },
+  "candidate_replicates": 9,
+  "control_replicates": 9,
+  "exact_nine_fragment_publication": "e31347823727b3c3ba2e9a14ff4ca3054dda95af",
+  "execution_limit_seconds": 10800,
+  "generator_projection": {
+    "path": "/home/by/urnetwork/temp/fresh-bridge-authority-generation-20261027.T70SkVMC/bridge-authority/generator-projection-proof.json",
+    "sha256": "87d339c2587493a71b0b866cce6adbb2a025adedd2da83f108ddf7d0af11b61e"
+  },
+  "host_readiness_claimed": false,
+  "kind": "fresh-corrected-c2-bridge-authority-precommit",
+  "new_seed_draws": 0,
+  "old_failed_controls_reused": false,
+  "operator_qualification": {
+    "path": "/home/by/urnetwork/temp/fresh-bridge-authority-generation-20261027.T70SkVMC/bridge-authority/bridge-operator-qualification.json",
+    "sha256": "8074e50a10896c7f0df0920cf9973256ae60cc403d064a15001f4ff0bb25d043"
+  },
+  "original_a_and_margin_unchanged": true,
+  "original_approval": {
+    "path": "/usr/local/libexec/urnetwork/competition-calibration-3a-2f46d3cc6/approval.md",
+    "sha256": "a794618968d840163952b7b2058100fd87b71ef7ccc44919ba590c5a253f643c"
+  },
+  "original_plan": {
+    "path": "/usr/local/libexec/urnetwork/competition-calibration-3a-2f46d3cc6/original-plan.json",
+    "sha256": "24f9b6ea9fe6fbfb4381ca29535b81a1cd4966b397c701b04f5b09ac74eb11d8"
+  },
+  "previous_unstarted_plan_retained": {
+    "path": "/home/by/urnetwork/temp/c2-metadata-bridge-preparation-20261026.KNG6TfgM/bridge-plan.json",
+    "sha256": "00366cfef7cfdc1a2cb26974f8a6f47629485f2fc93e99e156b4ff95934c5f98"
+  },
+  "production_activated": false,
+  "protocol": "launch-3a-bridge-3b-2026-10-26-v1",
+  "provider_qualification_claimed": false,
+  "request_noop_workload_source_image_policy_runtime_unchanged": true,
+  "runner_invocation_inputs": {
+    "path": "/home/by/urnetwork/temp/fresh-bridge-authority-generation-20261027.T70SkVMC/bridge-authority/runner-invocation.PREPARED.json",
+    "sha256": "7f2503aa5d221fdbe0e79c6ee84e0198f63cd9b3c42021f55385bb4918fd5654"
+  },
+  "schema": 1,
+  "separate_owner_fresh_bridge_and_two_b_approval": {
+    "path": "/home/by/urnetwork/temp/fresh-bridge-authority-preparation-20261027.m6oV9eiN/owner-approval.md",
+    "sha256": "b36e51b6a9253acdcc6ab912d28e00849d683c36c8f951023c770b7f3f928684"
+  },
+  "source_descriptor": {
+    "path": "/home/by/urnetwork/temp/c2-metadata-bridge-preparation-20261026.KNG6TfgM/c2-instrument-release.json",
+    "sha256": "5a1504cbad9787f84c91ac87bc719abd6337a64723733d6cf7d052660753b850"
+  },
+  "state": "prepared-awaiting-actual-publication-and-root-launch-callback",
+  "two_b_preparation_or_draw_authorized": false
+}
