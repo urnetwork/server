@@ -90,6 +90,9 @@ func heldOutSettingsForProtocol(protocol string) (heldOutOperatorSettings, error
 	case calibrationProtocolThreeABridgeThreeB:
 		settings.Workload.SeedCount = 3
 		return settings, nil
+	case heldOutProtocolThreeABridgeTwoB:
+		settings.Workload.SeedCount = 2
+		return settings, nil
 	default:
 		return settings, errors.New("unknown held-out prospective protocol")
 	}
@@ -107,12 +110,20 @@ func validateHeldOutProtocolSettings(config heldOutPreparationConfig, settings h
 	if (config.Protocol == "") != (config.Amendment == nil) {
 		return errors.New("held-out amendment pins and explicit protocol must occur together")
 	}
+	if _, err := heldOutBaseProvenanceConfiguration(config); err != nil {
+		return err
+	}
 	return nil
 }
 
 // The approval and original five-position publication authenticate old A,
 // independently of any new C2 release, bridge or hidden-seed preparation.
 func heldOutStageASettings(config heldOutPreparationConfig) (calibrationAnalysisSettings, error) {
+	base, baseErr := heldOutBaseProvenanceConfiguration(config)
+	if baseErr != nil {
+		return calibrationAnalysisSettings{}, baseErr
+	}
+	config = base
 	settings, err := calibrationSettingsForProtocol(config.Protocol)
 	if err != nil {
 		return settings, err
@@ -330,6 +341,9 @@ func heldOutContextForPreparation(ctx context.Context, config heldOutPreparation
 	}
 	settings.Workload.SeedCount = selected.Workload.SeedCount
 	if err := validateHeldOutProtocolSettings(config, settings); err != nil {
+		return old, settings, err
+	}
+	if _, err := authenticateHeldOutTwoBAddendum(config, settings, nil); err != nil {
 		return old, settings, err
 	}
 	if config.Protocol == "" {
