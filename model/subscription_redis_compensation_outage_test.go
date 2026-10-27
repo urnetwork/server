@@ -59,9 +59,7 @@ func TestRedisAdmissionCompensationOutageReturnsAndReleasesLater(t *testing.T) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE network_client SET active=false, deactivate_time=$2 WHERE client_id=$1`, f.destinationId, server.NowUtc()))
 		})
 		hook := &redisCompensationOutageHook{key: redisContractReservationKeys(f.balanceId)[0]}
-		bounded, stop := context.WithTimeout(ctx, time.Second)
-		server.Raise(server.RedisWithDeadline(bounded, func(client server.RedisClient) error { client.AddHook(hook); return nil }))
-		stop()
+		addRedisDeadlinePoolsHook(ctx, hook)
 		hook.armed.Store(true)
 		deferredBefore := testutil.ToFloat64(redisContractReservationResults.WithLabelValues("compensation", "deferred"))
 		completedBefore := testutil.ToFloat64(redisContractReservationResults.WithLabelValues("compensation", "completed"))

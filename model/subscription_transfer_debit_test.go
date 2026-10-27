@@ -102,9 +102,7 @@ func TestAsyncDebitRollbackCannotPublishOrConsume(t *testing.T) {
 }
 
 func asyncDebitInstallHook(ctx context.Context, hook *asyncDebitReleaseHook) {
-	bounded, cancel := context.WithTimeout(ctx, time.Second)
-	defer cancel()
-	server.Raise(server.RedisWithDeadline(bounded, func(r server.RedisClient) error { r.AddHook(hook); return nil }))
+	addRedisDeadlinePoolsHook(ctx, hook)
 }
 
 type asyncDebitReleaseHook struct {

@@ -36,7 +36,7 @@ import (
 const (
 	// Block reports per user per hour. A report is one line about one
 	// extender; a client in trouble names a handful, not hundreds.
-	ExtenderBlockReportRateLimitAction = "extender_block_report"
+	ExtenderBlockReportRateLimitAction = model.AccountActionExtenderBlockReport
 	ExtenderBlockReportRateLimit       = 64
 	ExtenderBlockReportRateLimitWindow = time.Hour
 )
