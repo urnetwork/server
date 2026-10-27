@@ -583,10 +583,10 @@ type RedisPreflightOptions struct {
 	skip bool
 }
 
-// Skips the preflight PING of the non-retrying and deadline-bound pools, for
-// idempotent commands whose results are judged one by one: the PING reaches an
-// arbitrary node, never necessarily the one a command routes to, and costs a
-// round trip per call.
+// Skips the preflight PING of the non-retrying and deadline-bound pools. Neither
+// pool replays a command, in go-redis or in the callback wrapper, so the PING
+// guards no command's outcome: it reaches an arbitrary node, never necessarily
+// the one a command routes to, and costs a round trip and a pool turn per call.
 func OptRedisNoPreflight() RedisPreflightOptions {
 	return RedisPreflightOptions{skip: true}
 }

@@ -293,6 +293,7 @@ func flushTransferDebitBalance(ctx context.Context, balanceId server.Id) (applie
 		// until every release was acknowledged; the applied flag prevents re-debit.
 		bounded, cancel := context.WithTimeout(ctx, time.Second)
 		defer cancel()
+		// no preflight PING, as for redisContractReservation, and outside a transaction
 		server.Raise(server.RedisWithDeadline(bounded, func(r server.RedisClient) error {
 			_, err := r.Pipelined(bounded, func(pipe redis.Pipeliner) error {
 				for _, record := range records {
@@ -302,7 +303,7 @@ func flushTransferDebitBalance(ctx context.Context, balanceId server.Id) (applie
 				return nil
 			})
 			return err
-		}))
+		}, server.OptRedisNoPreflight(), server.OptRedisKeepLateReplies()))
 		ids := make([]server.Id, 0, len(records))
 		for _, record := range records {
 			ids = append(ids, record.contractId)
