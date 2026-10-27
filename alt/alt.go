@@ -498,11 +498,39 @@ func (self *Alt) Close() {
 	}
 	drainCtx, drainCancel := context.WithTimeout(context.Background(), drainTimeout)
 	defer drainCancel()
-	if err := self.apiServer.Shutdown(drainCtx); err != nil {
-		glog.Infof("[alt]api shutdown err = %s\n", err)
-	}
+	self.closeApiFront(drainCtx)
 	self.connectHandler.Close()
 	if !self.connectHandler.WaitForIdle(drainCtx) {
 		glog.Infof("[alt]connect did not finish within the drain timeout\n")
+	}
+}
+
+// The api front closes; it never shuts down gracefully. Nothing drains the
+// api before the cancel (the exchange drain is connect's), and the cancel stops
+// every listener, whose transport close destroys its connections at once, so a
+// GOAWAY grace period never reaches a client. A graceful shutdown instead turns
+// http3's accept loop into a spin for as long as a destroyed connection is
+// closed but not yet done, starting one GOAWAY writer per pass (quic-go v0.61.0
+// http3/server.go:493-538): the old alt's exit burst of at least 700k
+// goroutines (10-24 to 10-26).
+//
+// Close cancels each connection's requests and, as Shutdown did, waits for
+// their handlers to return, so the api router's owners close after the last
+// request. The wait is bounded by the drain timeout; Shutdown's fallback to
+// Close past its deadline had no bound. A handler still running past the
+// bound overlaps the owners' close and the process exit, as one does on the
+// lb-fronted api past its shutdown timeout.
+func (self *Alt) closeApiFront(drainCtx context.Context) {
+	apiClosed := make(chan struct{})
+	go server.HandleError(func() {
+		defer close(apiClosed)
+		if err := self.apiServer.Close(); err != nil {
+			glog.Infof("[alt]api close err = %s\n", err)
+		}
+	})
+	select {
+	case <-apiClosed:
+	case <-drainCtx.Done():
+		glog.Infof("[alt]api requests did not finish within the drain timeout\n")
 	}
 }
