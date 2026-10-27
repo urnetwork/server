@@ -59,8 +59,19 @@ Root requested an explicit owner exception to restart **the same first committed
 seed**, only after proving zero measurements and preserving all failed-start
 evidence. That would give the corrected first job a fresh three-hour deadline;
 it is **not** represented as retaining the old absolute deadline. Approval has
-not yet been received. The second seed stays unstarted. No retry or clock reset
-has occurred.
+was subsequently received explicitly from the owner. The approval is recorded
+in `UNMEASURED-RECOVERY-OWNER-APPROVAL-2026-10-27.json`, SHA-256
+`56735963a107e2ad8e4700acd1939a0a3024a755d45a4eded80209a021981c8e`.
+The second seed stays unstarted.
+
+The one-use recovery applied successfully on October 27 at approximately
+21:26 UTC. Both original start hashes match their archived copies under
+`unmeasured-recovery-forensics-000001`; all failed artifacts remain retained.
+Only the original three input files were restored to the first job. The
+unchanged native executor was launched at 21:26:55 UTC in the approved 8 GiB
+management scope after its actual memory preflight passed. Its new first-job
+start/deadline must be read from the native record; launcher time is not the
+measurement start.
 
 An inactive, Go-only administrative gate passed independent source and actual
 configuration/proof review. The security-fixed tests passed 31 cases in each

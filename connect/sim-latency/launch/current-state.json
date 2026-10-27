@@ -1,12 +1,16 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-27T17:41:50Z",
+  "observed_at": "2026-10-27T21:26:55Z",
   "unmeasured_recovery": {
-    "status": "dry_run_passed_owner_fresh_clock_exception_pending",
+    "status": "owner_approved_recovery_applied_native_executor_running",
     "measurements_observed": 0,
-    "owner_restart_approval_received": false,
-    "applied": false,
+    "owner_restart_approval_received": true,
+    "applied": true,
+    "owner_approval_sha256": "56735963a107e2ad8e4700acd1939a0a3024a755d45a4eded80209a021981c8e",
+    "recovered_execution_session": 27905,
+    "recovered_execution_scope": "urnetwork-first-committed-recovered-execution-20261027-v1.scope",
+    "recovered_execution_launched_at": "2026-10-27T21:26:55Z",
     "original_first_job_deadline": "2026-10-27T19:34:06Z",
     "proposed_management_memory_bytes": 8589934592,
     "failure_proof_sha256": "a1d7cf7f79871ad5a9b7c4fe8197e6180dcc7723fd6b1cf82ceba2ea0da98e0e",
@@ -516,7 +520,7 @@
     "round_baseline_preparation_budget_fix_in_progress": true,
     "submission_deadline_seconds_unchanged": 10800
   },
-  "status": "first_committed_launcher_management_oom_before_measurements_recovery_owner_exception_pending",
+  "status": "first_committed_owner_authorized_recovery_applied_native_execution_active",
   "current_bridge_measurement": {
     "started_at": "2026-10-26T20:54:56Z",
     "original_deadline": "2026-10-26T23:54:56Z",
