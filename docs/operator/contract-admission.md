@@ -209,8 +209,15 @@ budget left the owner no pass (no retry fit in it, or it ended while the
 compensation waited for a worker) and `dropped` when the owner is full. It
 counts each given-up token's `operation="handoff"` as `moved`, `absent` (no
 pending marker was left), `skipped` (an attempt was in flight or publication
-had started) or `error` (left to the ten-minute age). A sustained `dropped`
-rate means Redis refuses releases faster than the owner retries them.
+had started) or `error` (left to the ten-minute age). Two gauges show how full
+each process's owner is: `urnetwork_redis_contract_compensation_balances_held`
+counts the balances it holds, waiting for a retry or in a pass (it drops new
+compensations past 1024), and
+`urnetwork_redis_contract_compensation_calls_inflight` the release and handoff
+calls its workers are making (at most four). The proxy dashboard's
+compensation panel draws the busiest process's value of each. A sustained
+`dropped` rate, or held balances near 1024, means Redis refuses releases faster
+than the owner retries them.
 
 `urnetwork_redis_contract_publication_refusals_total{reason}` counts the
 transactions that refused to publish: `window_expired` and `released`. The

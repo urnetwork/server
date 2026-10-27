@@ -14,10 +14,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 	"github.com/urnetwork/server"
 )
@@ -885,6 +887,8 @@ type redisDeferredCompensations struct {
 	workers  int
 	capacity int
 	start    sync.Once
+	// release and handoff calls its workers are making
+	calls atomic.Int64
 
 	stateLock sync.Mutex
 	// signaled when a compensation falls due or the workers stop
@@ -920,10 +924,25 @@ type redisDeferredRetry struct {
 
 var deferredRedisCompensations = newRedisDeferredCompensations(redisDeferredCompensationWorkers, redisDeferredCompensationBalances)
 
+var redisDeferredCompensationBalancesHeld = prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+	Name: "urnetwork_redis_contract_compensation_balances_held",
+	Help: "Balances the process-wide deferred compensation owner holds, waiting for a retry, due, or in a pass. It drops new compensations past 1024.",
+}, func() float64 {
+	return float64(deferredRedisCompensations.heldBalances())
+})
+
+var redisDeferredCompensationCallsInflight = prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+	Name: "urnetwork_redis_contract_compensation_calls_inflight",
+	Help: "Release and handoff calls the process-wide deferred compensation owner's workers are making, at most one per worker (4).",
+}, func() float64 {
+	return float64(deferredRedisCompensations.calls.Load())
+})
+
 // A test environment reset ends the deferred compensations before its Redis and
 // PostgreSQL go away, as process exit would, so none runs in the next one. A
 // worker still blocked past the bound is abandoned, as at exit.
 func init() {
+	prometheus.MustRegister(redisDeferredCompensationBalancesHeld, redisDeferredCompensationCallsInflight)
 	server.OnReset(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), redisDeferredCompensationQuiesceTimeout)
 		defer cancel()
@@ -990,6 +1009,8 @@ func (self *redisDeferredCompensations) hold(ctx context.Context, compensation *
 	// when its worker finds its owner ended.
 	owner, cancel := context.WithCancel(server.WithoutContractCreationTiming(context.WithoutCancel(ctx)))
 	deferred := &redisDeferredCompensation{owner: owner, balances: balances, compensation: compensation}
+	compensation.cleanup.recover = self.counted(compensation.cleanup.recover)
+	compensation.cleanup.handoff = self.counted(compensation.cleanup.handoff)
 	unlink := context.AfterFunc(self.generation, func() {
 		cancel()
 		self.unschedule(deferred)
@@ -1000,6 +1021,18 @@ func (self *redisDeferredCompensations) hold(ctx context.Context, compensation *
 	}
 	self.held += balances
 	return deferred
+}
+
+// Counts one of the owner's release or handoff calls while it runs.
+func (self *redisDeferredCompensations) counted(call func(context.Context, server.Id, server.Id) error) func(context.Context, server.Id, server.Id) error {
+	if call == nil {
+		return nil
+	}
+	return func(ctx context.Context, balanceId, contractId server.Id) error {
+		self.calls.Add(1)
+		defer self.calls.Add(-1)
+		return call(ctx, balanceId, contractId)
+	}
 }
 
 // Times the compensation's next pass after delay, and reports whether it did:
@@ -1154,6 +1187,13 @@ func (self *redisDeferredCompensations) release(balances int) {
 	if self.held == 0 {
 		close(self.idle)
 	}
+}
+
+// The balances offered and not yet ended.
+func (self *redisDeferredCompensations) heldBalances() int {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.held
 }
 
 // Waits within ctx until no compensation is held.

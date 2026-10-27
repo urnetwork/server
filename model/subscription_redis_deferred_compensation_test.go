@@ -774,6 +774,68 @@ func TestRedisContractCompensationQuiesceEndsHeldCompensations(t *testing.T) {
 	}
 }
 
+// The owner's gauges read the process-wide owner: the balances it holds,
+// waiting for a retry or in a pass, and the release calls its workers are
+// making, one per worker at most.
+func TestRedisDeferredCompensationGaugesReadTheProcessWideOwner(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	if err := deferredRedisCompensations.drain(ctx); err != nil {
+		t.Fatal("an earlier compensation is still held", err)
+	}
+	held := func() float64 { return testutil.ToFloat64(redisDeferredCompensationBalancesHeld) }
+	calls := func() float64 { return testutil.ToFloat64(redisDeferredCompensationCallsInflight) }
+	if held() != 0 || calls() != 0 {
+		t.Fatal("an idle owner reported held balances or calls", held(), calls())
+	}
+	clock := &redisCompensationTestClock{now: time.Unix(1, 0)}
+	retry := make(chan struct{})
+	armed := make(chan struct{}, 1)
+	calling := make(chan struct{})
+	call := sync.OnceFunc(func() { close(calling) })
+	release := make(chan struct{})
+	cleanup := redisReservationCleanup{now: clock.Now, after: clock.AfterGate(retry, armed), deferred: deferredRedisCompensations,
+		recover: func(ctx context.Context, _, _ server.Id) error {
+			call()
+			select {
+			case <-release:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}}
+	balances := []server.Id{server.NewId(), server.NewId(), server.NewId()}
+	if !deferredRedisCompensations.offer(ctx, cleanup.compensation(server.NewId(), balances, clock.Now().Add(redisReservationCleanupBudget))) {
+		t.Fatal("the process-wide deferred owner refused a compensation")
+	}
+	select {
+	case <-armed:
+	case <-ctx.Done():
+		t.Fatal("the compensation did not wait for its retry", ctx.Err())
+	}
+	// waiting for its retry: every balance held, no call
+	if held() != 3 || calls() != 0 {
+		t.Fatal("the gauges did not show a compensation waiting for its retry", held(), calls())
+	}
+	close(retry)
+	select {
+	case <-calling:
+	case <-ctx.Done():
+		t.Fatal("the compensation's retry made no call", ctx.Err())
+	}
+	// in its pass, one release call at a time
+	if held() != 3 || calls() != 1 {
+		t.Fatal("the gauges did not show the pass's release call", held(), calls())
+	}
+	close(release)
+	if err := deferredRedisCompensations.drain(ctx); err != nil {
+		t.Fatal("the deferred owner did not end the compensation", err)
+	}
+	if held() != 0 || calls() != 0 {
+		t.Fatal("the gauges did not return to zero", held(), calls())
+	}
+}
+
 // A compensation the deferred owner holds reads its request's attempts when it
 // runs, not when it was deferred: a token its request has published meanwhile
 // is acknowledged through the fenced SQL custody check, never released.
