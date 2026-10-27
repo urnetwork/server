@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -437,6 +438,40 @@ func TestRedisDeferredCompensationRetriesOnTimersNotWorkers(t *testing.T) {
 	}
 	if completed := redisCompensationTestCount("completed") - completedBefore; completed != burst || passes.Load() != burst {
 		t.Fatal("the burst's deferred passes did not each complete once", completed, passes.Load())
+	}
+}
+
+// A cleanup made without a timer times its deferred retries on the runtime's
+// timers: the first from the offer, and the next from a worker, outside the
+// worker's recovery, where a raise would end the process.
+func TestRedisDeferredCompensationWithoutTimerRetriesOnRuntimeTimers(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	deferred := newRedisDeferredCompensationsForTest(t, 1, 1)
+	var passes atomic.Int32
+	cleanup := redisReservationCleanup{now: time.Now, deferred: deferred,
+		recover: func(context.Context, server.Id, server.Id) error {
+			if passes.Add(1) == 1 {
+				// the first deferred pass fails, so a worker times the next
+				return syscall.ECONNRESET
+			}
+			return nil
+		}}
+	completedBefore := redisCompensationTestCount("completed")
+	offered := false
+	if value := server.HandleError(func() {
+		offered = deferred.offer(ctx, cleanup.compensation(server.NewId(), []server.Id{server.NewId()}, time.Now().Add(redisReservationCleanupBudget)))
+	}); value != nil {
+		t.Fatal("offering a compensation made without a timer raised", value)
+	}
+	if !offered {
+		t.Fatal("the deferred owner refused a compensation it had room for")
+	}
+	if err := deferred.drain(ctx); err != nil {
+		t.Fatal("the deferred owner did not end the compensation", err)
+	}
+	if passes.Load() != 2 || redisCompensationTestCount("completed")-completedBefore != 1 {
+		t.Fatal("the compensation's retries did not run on the runtime's timers", passes.Load())
 	}
 }
 

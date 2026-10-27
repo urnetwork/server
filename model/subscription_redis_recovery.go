@@ -606,10 +606,13 @@ func defaultRedisReservationCleanup() redisReservationCleanup {
 				return nil
 			}
 		},
-		after: func(delay time.Duration, fire func()) func() bool {
-			return time.AfterFunc(delay, fire).Stop
-		},
+		after:    redisReservationAfter,
 		deferred: deferredRedisCompensations}
+}
+
+// Times a deferred retry on the runtime's timers, which hold no goroutine.
+func redisReservationAfter(delay time.Duration, fire func()) func() bool {
+	return time.AfterFunc(delay, fire).Stop
 }
 
 func (self redisReservationCleanup) run(ctx context.Context, contractId server.Id, ids []server.Id) error {
@@ -1056,7 +1059,13 @@ func (self *redisDeferredCompensations) schedule(deferred *redisDeferredCompensa
 	if retry == nil {
 		return false
 	}
-	stop := deferred.compensation.cleanup.after(delay, func() { self.fire(deferred, retry) })
+	after := deferred.compensation.cleanup.after
+	if after == nil {
+		// A cleanup made without a timer must not raise here, outside the
+		// worker's recovery, which would end the process.
+		after = redisReservationAfter
+	}
+	stop := after(delay, func() { self.fire(deferred, retry) })
 	kept := func() bool {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
