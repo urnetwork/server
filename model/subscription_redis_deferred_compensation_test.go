@@ -468,6 +468,67 @@ func TestRedisInsufficientRefusalSkipsRerunWhileCompensationPends(t *testing.T) 
 	})
 }
 
+// The compensation after an insufficient-balance rerun still makes the
+// request's own pass, bounded by its own deadline alone, however much of the
+// request's shared budget the rerun spent.
+func TestRedisRerunCompensationMakesItsOwnPassAfterTheBudget(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+		defer cancel()
+		f := newNetEscrowOrderingTestFixture(t, ctx)
+		// A dead request's aged token, which the refused request's page
+		// releases, so that the request reruns.
+		dead := server.NewId()
+		if reserved, err := redisContractReservation(ctx, "reserve-pending", f.balanceId, dead, 1000, 5, redisContractReservationLease); err != nil || reserved != 5 {
+			t.Fatal("dead request setup", reserved, err)
+		}
+		redisRecoveryAgePendingMarker(t, ctx, f.balanceId, dead)
+		deferred := newRedisDeferredCompensationsForTest(t, 1, 1)
+		clock := &redisCompensationTestClock{now: time.Unix(1, 0)}
+		var recovered atomic.Int32
+		observe := func(cleanup redisReservationCleanup) redisReservationCleanup {
+			cleanup.now, cleanup.wait = clock.Now, clock.Wait
+			cleanup.recover = func(context.Context, server.Id, server.Id) error {
+				recovered.Add(1)
+				return nil
+			}
+			cleanup.deferred = deferred
+			return cleanup
+		}
+		refusal := errors.New("synthetic refusal of the rerun")
+		var actions atomic.Int32
+		takenBefore, completedBefore := redisCompensationTestCount("deferred"), redisCompensationTestCount("completed")
+		_, err := runRedisContractAdmission(context.WithValue(ctx, redisReservationCleanupContextKey{}, observe), func(owned context.Context) (*TransferEscrow, error) {
+			redisAdmissionFromContext(owned).noteBalance(f.balanceId)
+			if actions.Add(1) == 1 {
+				return nil, fmt.Errorf("%w (%d).", errRedisReservationInsufficient, 0)
+			}
+			// the rerun outlasts the request's whole compensation budget
+			if err := clock.Wait(owned, redisReservationCleanupBudget); err != nil {
+				return nil, err
+			}
+			return nil, refusal
+		})
+		if actions.Load() != 2 || !errors.Is(err, refusal) {
+			t.Fatal("the refusal did not rerun after its page released the dead token", actions.Load(), err)
+		}
+		if recovered.Load() != 2 {
+			t.Fatal("the compensation after the rerun made no pass of its own", recovered.Load())
+		}
+		if taken := redisCompensationTestCount("deferred") - takenBefore; taken != 0 {
+			t.Fatal("a compensation its own pass completed passed to the deferred owner", taken)
+		}
+		if completed := redisCompensationTestCount("completed") - completedBefore; completed != 2 {
+			t.Fatal("the request's compensations did not both complete", completed)
+		}
+		if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != 0 {
+			t.Fatal("the page did not release the dead token", got)
+		}
+	})
+}
+
 // A raise inside a deferred compensation, even a runtime error, ends only that
 // compensation, counted pending; the worker goes on with the next.
 func TestRedisDeferredCompensationWorkerSurvivesPanic(t *testing.T) {

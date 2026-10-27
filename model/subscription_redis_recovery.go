@@ -603,13 +603,33 @@ func (self *redisReservationCompensation) resume(owner context.Context) error {
 	return self.run(owner)
 }
 
-// One pass tries each pending balance once. A transient failure stays pending,
-// as does each balance the pass did not reach before its owner or the budget
-// ended. Any other failure leaves its balance to retained recovery.
+// One pass within the request's budget: each pending balance the pass did not
+// reach before its owner or the budget ended stays pending.
 func (self *redisReservationCompensation) attempt(owner context.Context) {
+	self.attemptUntil(owner, func() bool { return self.ended(owner) })
+}
+
+// The request's own pass ends with its own deadline alone, not with the shared
+// budget: an insufficient-balance rerun may have spent that budget, and the
+// compensation after it still makes this pass.
+func (self *redisReservationCompensation) attemptOwn(pass context.Context) {
+	self.attemptUntil(pass, func() bool {
+		select {
+		case <-pass.Done():
+			return true
+		default:
+			return false
+		}
+	})
+}
+
+// One pass tries each pending balance once. A transient failure stays pending,
+// as does each balance the pass did not reach before over reported its end.
+// Any other failure leaves its balance to retained recovery.
+func (self *redisReservationCompensation) attemptUntil(owner context.Context, over func() bool) {
 	next := make([]server.Id, 0, len(self.pending))
 	for index, id := range self.pending {
-		if self.ended(owner) {
+		if over() {
 			next = append(next, self.pending[index:]...)
 			break
 		}
@@ -685,7 +705,7 @@ func (self *redisReservationCompensation) finish() error {
 // left to recovery.
 func (self *redisReservationCompensation) attemptOrDefer(ctx context.Context) (bool, error) {
 	pass, cancel := context.WithTimeout(context.WithoutCancel(ctx), redisContractAdmissionTimeout)
-	self.attempt(pass)
+	self.attemptOwn(pass)
 	cancel()
 	if len(self.pending) == 0 {
 		return false, self.finish()
