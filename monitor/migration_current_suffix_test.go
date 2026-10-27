@@ -231,6 +231,9 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{name: "invented device client version time", version: 852, sql: `ALTER TABLE device ALTER COLUMN client_version_time SET DEFAULT now()`},
 		{name: "elected-winner review guard dropped", version: 893, sql: `DROP TRIGGER competition_v2_winner_review_before_insert ON competition_integrity_review`},
 		{name: "elected-winner checkpoint guard dropped", version: 893, sql: `DROP TRIGGER competition_v2_winner_checkpoint_before_insert ON competition_supervisor_transition`},
+		{name: "missing provider capability declarations", version: 894, sql: `DROP TABLE provide_capability`},
+		{name: "nullable post-quantum declaration", version: 894, sql: `ALTER TABLE provide_capability ALTER COLUMN post_quantum_encryption DROP NOT NULL`},
+		{name: "provider capability declarations without their key", version: 894, sql: `ALTER TABLE provide_capability DROP CONSTRAINT provide_capability_pkey`},
 		{name: "contract id floor made stable", version: 856, sql: `ALTER FUNCTION contract_id_floor(timestamptz) STABLE`},
 		{name: "close evidence guard refuses retention again", version: contractCloseEvidenceMoveGuardMigrationVersion, sql: `CREATE OR REPLACE FUNCTION contract_close_report_evidence_guard() RETURNS trigger
 			LANGUAGE plpgsql AS 'BEGIN RAISE EXCEPTION ''original contract close reports are immutable''; END'`},

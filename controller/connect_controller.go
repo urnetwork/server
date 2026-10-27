@@ -1555,6 +1555,10 @@ func newContract(
 	return
 }
 
+// Provide registers the client's provide keys, and the capabilities the provide
+// declares: post-quantum encryption sessions, which discovery requires of the
+// providers it offers a client that requires post-quantum encryption. A provide
+// from a release before the field declares none.
 func Provide(
 	ctx context.Context,
 	clientId server.Id,
@@ -1564,7 +1568,9 @@ func Provide(
 	for _, provideKey := range provide.Keys {
 		secretKeys[model.ProvideMode(provideKey.Mode)] = provideKey.ProvideSecretKey
 	}
-	model.SetProvide(ctx, clientId, secretKeys)
+	model.SetProvideWithCapabilities(ctx, clientId, secretKeys, model.ProvideCapabilities{
+		PostQuantumEncryption: provide.PostQuantumEncryption,
+	})
 	return nil
 }
 
