@@ -1,0 +1,9 @@
+{
+  "exit_code": 0,
+  "oom_killed": false,
+  "runner_oom_kills": 0,
+  "backing_oom_kills": 0,
+  "runner_oom_killed": false,
+  "hard_killed": false,
+  "limit_escape": false
+}

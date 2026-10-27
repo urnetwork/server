@@ -28,6 +28,13 @@
   },
   "additional_datasets": [
     {
+      "id": "prelaunch-corrected-c2-bridge-2026-10-27",
+      "official": false,
+      "claim": "operational compatibility witness, not statistical equivalence or an official epoch baseline",
+      "index_path": "prelaunch-corrected-c2-bridge-2026-10-27/INDEX.json",
+      "index_sha256": "bac1c3f75f7b0061c454192c9ef2711fa50009df991f44faa0367d30616c9bb2"
+    },
+    {
       "id": "prelaunch-snow-core-qualification-2026-10-26",
       "official": false,
       "index_path": "prelaunch-snow-core-qualification-2026-10-26/INDEX.json",

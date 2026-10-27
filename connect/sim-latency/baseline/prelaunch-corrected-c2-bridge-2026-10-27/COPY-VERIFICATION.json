@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "kind": "mechanical-bridge-data-copy-sha256-verification",
+  "scope": "file-copy integrity only; not a new scorer replay, measurement, provider qualification or launch authorization",
+  "source_inventory": "ORIGINAL-ARTIFACTS.json",
+  "source_inventory_sha256": "e33a2ca2058ee64a6cf8826c415958f98ab1563bc0f22591561dbe833f34bd88",
+  "original_regular_files_rechecked_after_copy": 479,
+  "original_bytes_rechecked_after_copy": 380987722,
+  "selected_original_files_checked": 279,
+  "selected_original_bytes_checked": 56369948,
+  "original_and_selected_sha256_checks_passed": true,
+  "omitted_files_with_verified_identical_counterparts": 182,
+  "unique_verbose_log_files_retained_only_in_original_tree": 18,
+  "selected_raw_csv_files": 18,
+  "selected_raw_findproviders_segments": 36,
+  "original_files_changed_or_deleted": false,
+  "native_proof_rewritten": false,
+  "new_scorer_or_go_executions": 0,
+  "new_provider_calls": 0,
+  "private_archive_uploads": 0
+}

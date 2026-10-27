@@ -1,0 +1,11 @@
+start_utc=2026-10-27T09:32:21Z
+deadline_utc=2026-10-27T12:32:21Z
+request_sha256=2114953f2f86218b9e92674a1f318d822a62e6663a8ae5e0e5375a806a655ec6
+execution_budget_seconds=10800
+kill_grace_seconds=45
+instrument_revision=C2
+builder_sha256=ca3c84c64762450a72013c705438610bf465f78fb57bcba901a573c1005d743d
+validator_sha256=3d161d76bace48bff6536164a84f330b1618c82f319775b8551c19872b937e54
+terminal_cleanup_verified
+evaluator_exit=0 duration_seconds=10290
+end_utc=2026-10-27T12:23:51Z

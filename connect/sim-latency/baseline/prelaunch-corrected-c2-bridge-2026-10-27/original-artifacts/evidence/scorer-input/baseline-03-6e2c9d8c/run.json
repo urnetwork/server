@@ -1,0 +1,106 @@
+{
+  "schema": 2,
+  "kind": "sim-latency-run",
+  "config_sha256": "b25405bce172db69b1f98b5c51fba4ff8051bf0ca9e688624131d36d251354ac",
+  "seed": 20261024,
+  "build_revision": "a9e8e1a710b24c749e6499a0606938252c83e136",
+  "hostname": "03ddaed70b84",
+  "os": "linux",
+  "arch": "amd64",
+  "num_cpu": 10,
+  "flags": {
+    "announce_timeout": "2s",
+    "api_port": "7640",
+    "client_warmup_timeout": "20m0s",
+    "duration": "3m0s",
+    "exchange_port_base": "7750",
+    "fleet_shards": "4",
+    "forward_idle_timeout": "5s",
+    "hosts": "4",
+    "impair": "true",
+    "matchmaking_probe_interval": "10s",
+    "matchmaking_sample_span_minimum": "0.90",
+    "pipeline_interval": "10s",
+    "prewarm": "13h0m0s",
+    "ramp": "1m0s",
+    "request_timeout": "2m0s",
+    "reset": "true",
+    "settle": "1m0s",
+    "site_listen": "127.0.0.1:0",
+    "test_timeout": "3s",
+    "ws_port_base": "7650"
+  },
+  "source_epoch": 0,
+  "score_schema": 1,
+  "scorer_version": "sim-latency-score/1",
+  "evaluation_id": "baseline-03-6e2c9d8c",
+  "official": true,
+  "request_timeout_ms": 120000,
+  "stats_root": "/artifacts/baseline-03-6e2c9d8c/site/stats/local/sim-127.0.0.1-01a17cc6-c684-04b0-c8cc-02bffeb191ea",
+  "stats_instance_id": "01a17cc6-c684-04b0-c8cc-02bffeb191ea",
+  "results_csv_sha256": "5d1fda3b7638d63aafae6a774c36fa88c42613e420d78da04c83b0238e379e01",
+  "results_csv_bytes": 297861,
+  "resource_report_path": "/artifacts/baseline-03-6e2c9d8c/resources.json",
+  "accounting_snapshot_path": "/artifacts/baseline-03-6e2c9d8c/accounting.json",
+  "accounting_source_path": "/artifacts/baseline-03-6e2c9d8c/accounting.source.json",
+  "accounting_source_sha256": "53a6dd6aaf30003965cb7bb34a0ad737ea626a7966edd27da606749bddd0b42f",
+  "accounting_source_bytes": 371,
+  "final_marker_path": "/artifacts/baseline-03-6e2c9d8c/run.complete.json",
+  "completion_state": "complete",
+  "completed_unix_ms": 1793095273150,
+  "measure_start_ms": 1793095057805,
+  "measure_end_ms": 1793095237805,
+  "clients_pool": 200,
+  "clients_established": 200,
+  "rows": 2744,
+  "rows_in_window": 2392,
+  "failures": 0,
+  "block_count": 8,
+  "block_seconds": 22.5,
+  "metrics": {
+    "fail_rate": {
+      "value": 0,
+      "n": 2392
+    },
+    "goodput_bytes_per_s": {
+      "value": 16809425.983333334,
+      "n": 2392,
+      "block_se": 1085290.6533475404
+    },
+    "throughput_p05_bytes_per_s": {
+      "value": 134588.4161402958,
+      "n": 606,
+      "block_se": 13060.36843791418
+    },
+    "throughput_p50_bytes_per_s": {
+      "value": 618390.2623537706,
+      "n": 606,
+      "block_se": 114168.41227049925
+    },
+    "throughput_p95_bytes_per_s": {
+      "value": 28178959.81399189,
+      "n": 606,
+      "block_se": 5051236.06762664
+    },
+    "total_p50_ms": {
+      "value": 960.096,
+      "n": 2392,
+      "block_se": 156.86221454359168
+    },
+    "total_p95_ms": {
+      "value": 16556.345149999986,
+      "n": 2392,
+      "block_se": 2426.189543378538
+    },
+    "ttfb_p50_ms": {
+      "value": 169.0275,
+      "n": 2392,
+      "block_se": 33.74830926756139
+    },
+    "ttfb_p95_ms": {
+      "value": 1426.4674499999994,
+      "n": 2392,
+      "block_se": 152.56011051252977
+    }
+  }
+}

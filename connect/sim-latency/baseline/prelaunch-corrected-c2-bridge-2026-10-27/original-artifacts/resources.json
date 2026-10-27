@@ -1,0 +1,171 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-evaluation-resources",
+  "job_id": "6e2c9d8c-e5df-4c86-a3ce-4309dfe0f115",
+  "round_id": "6cc0f09c-3853-4245-bb32-d26d17098caa",
+  "complete": true,
+  "runs": [
+    {
+      "evaluation_id": "baseline-01-6e2c9d8c",
+      "role": "baseline",
+      "path": "/artifacts/baseline-01-6e2c9d8c/resources.json",
+      "sha256": "28ef9881deed059daf91064765f8fc4e09e347e3fd5db6c6c87bb725b5e9ddbd",
+      "bytes": 477,
+      "cpu_seconds": 2619.668637,
+      "peak_rss_bytes": 13886144512
+    },
+    {
+      "evaluation_id": "baseline-02-6e2c9d8c",
+      "role": "baseline",
+      "path": "/artifacts/baseline-02-6e2c9d8c/resources.json",
+      "sha256": "ab9e5d560e5bfcf6cf5d682e8b1e534fca4a71d1d6deb4bcd96592a914fb8507",
+      "bytes": 477,
+      "cpu_seconds": 2545.355797,
+      "peak_rss_bytes": 14101643264
+    },
+    {
+      "evaluation_id": "baseline-03-6e2c9d8c",
+      "role": "baseline",
+      "path": "/artifacts/baseline-03-6e2c9d8c/resources.json",
+      "sha256": "67e48dc82169805c436ecada9c48d5d6ecb3c48522801b8b0c45bf8e9fd92f31",
+      "bytes": 477,
+      "cpu_seconds": 2525.303838,
+      "peak_rss_bytes": 13506129920
+    },
+    {
+      "evaluation_id": "baseline-04-6e2c9d8c",
+      "role": "baseline",
+      "path": "/artifacts/baseline-04-6e2c9d8c/resources.json",
+      "sha256": "56185e621330e6327fbeb309e109947a562da4d2b98999e35a8e994c94af5576",
+      "bytes": 477,
+      "cpu_seconds": 2618.798640,
+      "peak_rss_bytes": 13718208512
+    },
+    {
+      "evaluation_id": "baseline-05-6e2c9d8c",
+      "role": "baseline",
+      "path": "/artifacts/baseline-05-6e2c9d8c/resources.json",
+      "sha256": "6bfbdf1555ca7e847f0716749ff0d3342a5663eaad1e8e61eff535700b7ee730",
+      "bytes": 477,
+      "cpu_seconds": 2611.065811,
+      "peak_rss_bytes": 13956739072
+    },
+    {
+      "evaluation_id": "baseline-06-6e2c9d8c",
+      "role": "baseline",
+      "path": "/artifacts/baseline-06-6e2c9d8c/resources.json",
+      "sha256": "a3939e78b46251ab72adcd4fcc4a169dd36d5b7bcd99daeea2d7536ad6a83def",
+      "bytes": 477,
+      "cpu_seconds": 2585.385129,
+      "peak_rss_bytes": 13975314432
+    },
+    {
+      "evaluation_id": "baseline-07-6e2c9d8c",
+      "role": "baseline",
+      "path": "/artifacts/baseline-07-6e2c9d8c/resources.json",
+      "sha256": "c849bb3d402684e2a77840f29fa9d222be865d4e444a43c0123c6bc54006c636",
+      "bytes": 477,
+      "cpu_seconds": 2603.879574,
+      "peak_rss_bytes": 13820620800
+    },
+    {
+      "evaluation_id": "baseline-08-6e2c9d8c",
+      "role": "baseline",
+      "path": "/artifacts/baseline-08-6e2c9d8c/resources.json",
+      "sha256": "0a75eb309d6e1c08b0794a343896e1b8fe234cc78e07bff0e6c1b7cba39fd7de",
+      "bytes": 477,
+      "cpu_seconds": 2684.497998,
+      "peak_rss_bytes": 13763837952
+    },
+    {
+      "evaluation_id": "baseline-09-6e2c9d8c",
+      "role": "baseline",
+      "path": "/artifacts/baseline-09-6e2c9d8c/resources.json",
+      "sha256": "c4213ad4f67aacfc714bb3ad39c746962342e3fb7a29418540efa21ac44afd20",
+      "bytes": 477,
+      "cpu_seconds": 2657.474960,
+      "peak_rss_bytes": 14012444672
+    },
+    {
+      "evaluation_id": "candidate-01-6e2c9d8c",
+      "role": "candidate",
+      "path": "/artifacts/candidate-01-6e2c9d8c/resources.json",
+      "sha256": "1e51700919dafee77d527b1c77cf0615f6de3f49e889de8e8b30fa4996961f4b",
+      "bytes": 479,
+      "cpu_seconds": 2620.705007,
+      "peak_rss_bytes": 13965303808
+    },
+    {
+      "evaluation_id": "candidate-02-6e2c9d8c",
+      "role": "candidate",
+      "path": "/artifacts/candidate-02-6e2c9d8c/resources.json",
+      "sha256": "c5ea7816115e2c2eba041435e4b53cb6b0f3eed70a0248e9b8c5240847f3dbc8",
+      "bytes": 479,
+      "cpu_seconds": 2670.448789,
+      "peak_rss_bytes": 13970247680
+    },
+    {
+      "evaluation_id": "candidate-03-6e2c9d8c",
+      "role": "candidate",
+      "path": "/artifacts/candidate-03-6e2c9d8c/resources.json",
+      "sha256": "857421ae31985d8420a817d848e5ddd0210dc10f3d2190e582ebe4535ab1af7b",
+      "bytes": 479,
+      "cpu_seconds": 2598.182670,
+      "peak_rss_bytes": 13752832000
+    },
+    {
+      "evaluation_id": "candidate-04-6e2c9d8c",
+      "role": "candidate",
+      "path": "/artifacts/candidate-04-6e2c9d8c/resources.json",
+      "sha256": "d228402922f52e38530ccc6cdacb30d0070dc085bf3e4d4737c3484d5bcd7dcf",
+      "bytes": 479,
+      "cpu_seconds": 2543.372725,
+      "peak_rss_bytes": 13748854784
+    },
+    {
+      "evaluation_id": "candidate-05-6e2c9d8c",
+      "role": "candidate",
+      "path": "/artifacts/candidate-05-6e2c9d8c/resources.json",
+      "sha256": "731f5c286adcc14467e957b53e86a43ee4f1c9c06fcb57b6b4e0b7288e7ca317",
+      "bytes": 479,
+      "cpu_seconds": 2564.464623,
+      "peak_rss_bytes": 13802311680
+    },
+    {
+      "evaluation_id": "candidate-06-6e2c9d8c",
+      "role": "candidate",
+      "path": "/artifacts/candidate-06-6e2c9d8c/resources.json",
+      "sha256": "87ee10c980cd4caf752bb10e21330845add2aa30fa53e72bb51018df013b3ae3",
+      "bytes": 479,
+      "cpu_seconds": 2574.416450,
+      "peak_rss_bytes": 13877882880
+    },
+    {
+      "evaluation_id": "candidate-07-6e2c9d8c",
+      "role": "candidate",
+      "path": "/artifacts/candidate-07-6e2c9d8c/resources.json",
+      "sha256": "99f3f48c94b50ac929ef5bc36dd196c73a7d1ef67c24d533ca0dc01c0f00326d",
+      "bytes": 479,
+      "cpu_seconds": 2576.416258,
+      "peak_rss_bytes": 13727145984
+    },
+    {
+      "evaluation_id": "candidate-08-6e2c9d8c",
+      "role": "candidate",
+      "path": "/artifacts/candidate-08-6e2c9d8c/resources.json",
+      "sha256": "645fde798cd770923e899aa375b5d73e0c068ab357b3ca6863fa21834ddcbbab",
+      "bytes": 479,
+      "cpu_seconds": 2599.859755,
+      "peak_rss_bytes": 13951049728
+    },
+    {
+      "evaluation_id": "candidate-09-6e2c9d8c",
+      "role": "candidate",
+      "path": "/artifacts/candidate-09-6e2c9d8c/resources.json",
+      "sha256": "5a4c182cfd9e7951ac90ce792b0f6aacdb1a35a367d1d5cb2c4942a06d61d1be",
+      "bytes": 479,
+      "cpu_seconds": 2621.118746,
+      "peak_rss_bytes": 14047916032
+    }
+  ]
+}
