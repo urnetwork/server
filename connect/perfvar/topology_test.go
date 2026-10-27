@@ -172,6 +172,8 @@ type fullTunPath struct {
 	nativeIngressForTest bool
 	// Borrows the actual gVisor output before its native ownership handoff.
 	beforeBridgeSendBatchForTest func([][]byte)
+	// Takes ownership only of outputs from the real application TUN read.
+	nativeBridgeReadBatchForTest func([][]byte) (int, error)
 
 	// workloadProgressBytes counts application payload bytes delivered by the
 	// measured TCP workloads (client reads on download, server reads on
@@ -4361,6 +4363,9 @@ func (self *fullTunPath) startBridge(
 	resources tunResourceProfile,
 	readBatch func([][]byte) (int, error),
 ) {
+	if self.nativeIngressForTest && self.nativeBridgeReadBatchForTest != nil {
+		readBatch = self.nativeBridgeReadBatchForTest
+	}
 	self.bridgeWaitGroup.Add(1)
 	go func() {
 		defer self.bridgeWaitGroup.Done()

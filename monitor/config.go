@@ -794,7 +794,10 @@ func loadCredentialRequirements(environment string, stConfiguredEnabled bool, se
 		{
 			key: "google-payment", resource: "google.yml", purpose: "Google Play subscription notification and reconciliation", required: required,
 			fields: []credentialFieldSpec{
-				field("webhook.publisher_email", "webhook", "publisher_email"),
+				{name: "webhook.publisher_email", path: []string{"webhook", "publisher_email"}, present: credentialStringPresent},
+				// the Play webhook binds each Pub/Sub push token to this
+				// audience and refuses every push without it
+				{name: "webhook.audience", path: []string{"webhook", "audience"}, present: credentialStringPresent},
 				field("webhook.package_name", "webhook", "package_name"),
 				field("oauth.client_id", "oauth", "client_id"),
 				field("oauth.client_secret", "oauth", "client_secret"),
@@ -806,14 +809,14 @@ func loadCredentialRequirements(environment string, stConfiguredEnabled bool, se
 			fields: []credentialFieldSpec{
 				field("api.token", "api", "token"),
 				field("api.publishable_key", "api", "publishable_key"),
-				field("webhook.signing_secret", "webhook", "signing_secret"),
+				{name: "webhook.signing_secret", path: []string{"webhook", "signing_secret"}, present: credentialStringPresent},
 			},
 		},
 		{
 			key: "solana-payment", resource: "helius.yml", purpose: "Solana payment webhook verification and reconciliation", required: required,
 			fields: []credentialFieldSpec{
 				field("helius.api_key", "helius", "api_key"),
-				field("helius.webhook_auth_header", "helius", "webhook_auth_header"),
+				{name: "helius.webhook_auth_header", path: []string{"helius", "webhook_auth_header"}, present: credentialStringPresent},
 			},
 		},
 		{
@@ -843,7 +846,7 @@ func loadCredentialRequirements(environment string, stConfiguredEnabled bool, se
 				// only api.host. account_id, key_name, and private_key are retained
 				// legacy configuration, not runtime credential prerequisites.
 				field("api.host", "api", "host"),
-				field("webhook.shared_secret", "webhook", "shared_secret"),
+				{name: "webhook.shared_secret", path: []string{"webhook", "shared_secret"}, present: credentialStringPresent},
 			},
 		},
 		{

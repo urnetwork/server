@@ -161,6 +161,11 @@ func runWithDependencies(
 		return err
 	}
 
+	// opt-in (URNETWORK_ALT_EXIT_PROFILE). Stopped last, so its samples cover
+	// every close below.
+	exitProfile := newExitProfileFromEnv()
+	defer exitProfile.Stop()
+
 	runCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -243,8 +248,7 @@ func runWithDependencies(
 		select {
 		case <-ctx.Done():
 			router.SetWarpStatusDrainingIfReady()
-			exchange.Drain()
-			cancel()
+			exitAfterDrain(exchange.Drain, cancel, exitProfile)
 		case <-draining:
 		}
 	}()
@@ -285,4 +289,14 @@ func runWithDependencies(
 	flushStats()
 	glog.Infof("[alt]close\n")
 	return runErr
+}
+
+// The exchange drains first so residents migrate, then one cancel releases
+// every front. The exit profile brackets the cancel: what survived the drain,
+// then what the cancel sets off.
+func exitAfterDrain(drain func(), cancel context.CancelFunc, exitProfile *exitProfile) {
+	drain()
+	exitProfile.TakeBaseline()
+	cancel()
+	exitProfile.StartAfterCancel()
 }

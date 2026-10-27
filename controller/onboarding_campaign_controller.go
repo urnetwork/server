@@ -64,7 +64,7 @@ var onboardingAppleOfferCodesAvailable = prometheus.NewGauge(prometheus.GaugeOpt
 	Namespace: "urnetwork",
 	Subsystem: "onboarding",
 	Name:      "apple_offer_codes_available",
-	Help:      "Unexpired, unassigned App Store one-time offer codes in the pool (set by the daily top-up task).",
+	Help:      "Unassigned App Store one-time offer codes that an offer issued before the next daily top-up can still take, i.e. that outlive it (set by the top-up task).",
 })
 
 var onboardingAppleOfferCodeBatchesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{

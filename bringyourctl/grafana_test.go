@@ -51,18 +51,17 @@ func newGrafanaAlertingFake(t *testing.T) *httptest.Server {
 	return server
 }
 
-// The commands print routing names and verdicts, never the webhook, and an
-// empty webhook warns that unrouted alerts reach no one.
+// The commands print routing names and verdicts, never the webhook. An absent
+// existing main integration fails closed instead of printing routing success.
 func TestGrafanaAlertingCommandsNeverPrintTheWebhook(t *testing.T) {
 	webhookUrl := "https://hooks.slack.example/services/T0/B0/" + grafanaTestWebhookSecret
 
-	var skipped bytes.Buffer
-	if err := grafanaReconcileAlerting(context.Background(), &skipped, newGrafanaAlertingFake(t).URL, "secret", grafana.AlertRoutingSettings{}); err != nil {
-		t.Fatal(err)
+	var refused bytes.Buffer
+	if err := grafanaReconcileAlerting(context.Background(), &refused, newGrafanaAlertingFake(t).URL, "secret", grafana.AlertRoutingSettings{}); err == nil {
+		t.Fatal("unconfigured existing receiver was accepted")
 	}
-	if !strings.Contains(skipped.String(), "alerts.slack_webhook_url is empty") ||
-		!strings.Contains(skipped.String(), "WARNING: the default receiver empty has no integrations") {
-		t.Fatalf("empty-webhook output = %q", skipped.String())
+	if refused.Len() != 0 {
+		t.Fatalf("unconfigured-receiver output = %q", refused.String())
 	}
 
 	grafanaUrl := newGrafanaAlertingFake(t).URL
@@ -79,7 +78,7 @@ func TestGrafanaAlertingCommandsNeverPrintTheWebhook(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "i/o timeout") {
 		t.Fatalf("test-alert error = %v", err)
 	}
-	for _, output := range []string{skipped.String(), configured.String(), tested.String(), err.Error()} {
+	for _, output := range []string{refused.String(), configured.String(), tested.String(), err.Error()} {
 		if strings.Contains(output, grafanaTestWebhookSecret) || strings.Contains(output, "hooks.slack.example") {
 			t.Fatalf("output quotes the webhook: %q", output)
 		}

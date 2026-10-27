@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"google.golang.org/protobuf/proto"
 
@@ -241,6 +242,7 @@ func TestAuthorityContractAdmissionLifecycleBeforeRefusal(t *testing.T) {
 		t.Fatal("a fresh bound refused its first slot")
 	}
 	refusals := testutil.ToFloat64(contractAdmissionRefusals)
+	inUse := contractAdmissionGauge(t, contractAdmissionInUseName)
 	ended, cancel := context.WithCancel(t.Context())
 	cancel()
 	if _, err := authority.ConnectControl(ended, "", args); !errors.Is(err, context.Canceled) {
@@ -252,6 +254,9 @@ func TestAuthorityContractAdmissionLifecycleBeforeRefusal(t *testing.T) {
 	}
 	if counted := testutil.ToFloat64(contractAdmissionRefusals) - refusals; counted != 0 {
 		t.Fatalf("lifecycle answers counted %v refusals", counted)
+	}
+	if held := contractAdmissionGauge(t, contractAdmissionInUseName) - inUse; held != 0 {
+		t.Fatalf("lifecycle answers moved the slots in use by %v", held)
 	}
 	admission.release()
 	if !admission.tryAcquire() {
@@ -349,5 +354,176 @@ func TestAuthorityContractAdmissionRefusalIsOneFailedRoundTripForTheDevice(t *te
 	}
 	if calls := control.calls.Load(); calls != 1 {
 		t.Fatalf("one requested contract made %d control calls", calls)
+	}
+}
+
+const contractAdmissionInUseName = "urnetwork_hosted_contract_admission_in_use"
+const contractAdmissionCapacityName = "urnetwork_hosted_contract_admission_capacity"
+
+// A process-wide hosted admission gauge, read from the default registry by the
+// name the proxy dashboard queries.
+func contractAdmissionGauge(t testing.TB, name string) float64 {
+	t.Helper()
+	// a collector that fails to gather still leaves every other family
+	families, err := prometheus.DefaultGatherer.Gather()
+	for _, family := range families {
+		if family.GetName() != name {
+			continue
+		}
+		metrics := family.GetMetric()
+		if len(metrics) != 1 || metrics[0].GetGauge() == nil {
+			t.Fatalf("%s is not a single gauge", name)
+		}
+		return metrics[0].GetGauge().GetValue()
+	}
+	t.Fatalf("%s is not exported (gather: %v)", name, err)
+	return 0
+}
+
+// A slot counts in use from its acquire to its release and a refused acquire
+// counts none. The bound's slots count toward the process capacity until it is
+// closed, once.
+func TestContractAdmissionGaugesCountSlotsAndCapacity(t *testing.T) {
+	inUse := contractAdmissionGauge(t, contractAdmissionInUseName)
+	capacity := contractAdmissionGauge(t, contractAdmissionCapacityName)
+	expect := func(what string, wantInUse float64, wantCapacity float64) {
+		t.Helper()
+		if got := contractAdmissionGauge(t, contractAdmissionInUseName) - inUse; got != wantInUse {
+			t.Fatalf("%s: %v slots in use, want %v", what, got, wantInUse)
+		}
+		if got := contractAdmissionGauge(t, contractAdmissionCapacityName) - capacity; got != wantCapacity {
+			t.Fatalf("%s: capacity %v, want %v", what, got, wantCapacity)
+		}
+	}
+	admission := NewContractAdmission(2)
+	defer admission.Close()
+	expect("a new bound", 0, 2)
+	if !admission.tryAcquire() || !admission.tryAcquire() {
+		t.Fatal("a fresh bound of two refused a slot")
+	}
+	expect("both slots taken", 2, 2)
+	refusals := testutil.ToFloat64(contractAdmissionRefusals)
+	if admission.tryAcquire() {
+		t.Fatal("a full bound admitted a third slot")
+	}
+	if counted := testutil.ToFloat64(contractAdmissionRefusals) - refusals; counted != 1 {
+		t.Fatalf("one refusal was counted %v times", counted)
+	}
+	expect("a refused acquire", 2, 2)
+	admission.release()
+	expect("one slot released", 1, 2)
+	admission.release()
+	expect("both slots released", 0, 2)
+	admission.Close()
+	expect("a closed bound", 0, 0)
+	admission.Close()
+	expect("a bound closed twice", 0, 0)
+}
+
+// No bound has no slots: a nil admission counts nothing in use or in capacity,
+// and closing it does nothing.
+func TestContractAdmissionNilCountsNoSlots(t *testing.T) {
+	inUse := contractAdmissionGauge(t, contractAdmissionInUseName)
+	capacity := contractAdmissionGauge(t, contractAdmissionCapacityName)
+	admission := NewContractAdmission(0)
+	if admission != nil {
+		t.Fatal("a nonpositive bound built an admission")
+	}
+	if !admission.tryAcquire() {
+		t.Fatal("no bound refused a creation")
+	}
+	admission.release()
+	admission.Close()
+	if admission.Testing_Capacity() != 0 {
+		t.Fatalf("no bound reports %d slots", admission.Testing_Capacity())
+	}
+	if got := contractAdmissionGauge(t, contractAdmissionInUseName) - inUse; got != 0 {
+		t.Fatalf("no bound moved the slots in use by %v", got)
+	}
+	if got := contractAdmissionGauge(t, contractAdmissionCapacityName) - capacity; got != 0 {
+		t.Fatalf("no bound moved the capacity by %v", got)
+	}
+}
+
+// An admitted creation counts in use for its whole control call, up to its
+// return; a creation refused meanwhile counts nothing.
+func TestAuthorityContractAdmissionGaugeHoldsSlotForTheCall(t *testing.T) {
+	admission := NewContractAdmission(1)
+	defer admission.Close()
+	authority := contractAdmissionTestAuthority(admission)
+	args := contractAdmissionTestArgs(t, contractAdmissionTestCreate())
+	inUse := contractAdmissionGauge(t, contractAdmissionInUseName)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	// a failed assertion still releases the held call
+	releaseHeld := sync.OnceFunc(func() { close(release) })
+	defer releaseHeld()
+	var admitted atomic.Int32
+	authority.afterContractAdmissionForTest = func() {
+		if admitted.Add(1) == 1 {
+			entered <- struct{}{}
+			<-release
+		}
+	}
+	results := make(chan error, 1)
+	go func() {
+		_, err := authority.ConnectControl(context.Background(), "", args)
+		results <- err
+	}()
+	contractAdmissionReceive(t, entered, "the admitted creation")
+	if held := contractAdmissionGauge(t, contractAdmissionInUseName) - inUse; held != 1 {
+		t.Fatalf("a creation inside its control call holds %v slots in use, want 1", held)
+	}
+
+	_, err := authority.ConnectControl(t.Context(), "", args)
+	contractAdmissionExpectStatus(t, err, http.StatusTooManyRequests, "a creation with the slot held")
+	if held := contractAdmissionGauge(t, contractAdmissionInUseName) - inUse; held != 1 {
+		t.Fatalf("a refused creation left %v slots in use, want 1", held)
+	}
+
+	releaseHeld()
+	err = contractAdmissionReceive(t, results, "the held creation to return")
+	contractAdmissionExpectStatus(t, err, http.StatusUnauthorized, "the held creation")
+	if held := contractAdmissionGauge(t, contractAdmissionInUseName) - inUse; held != 0 {
+		t.Fatalf("a returned creation left %v slots in use", held)
+	}
+}
+
+// A control call that panics after admission releases its slot as the panic
+// unwinds, so the slots in use return to where they were and repeated panics
+// never fill the bound.
+func TestAuthorityContractAdmissionGaugeReleasesSlotOnPanic(t *testing.T) {
+	const bound = 2
+	admission := NewContractAdmission(bound)
+	defer admission.Close()
+	authority := contractAdmissionTestAuthority(admission)
+	args := contractAdmissionTestArgs(t, contractAdmissionTestCreate())
+	inUse := contractAdmissionGauge(t, contractAdmissionInUseName)
+	raised := errors.New("controller raised after admission")
+	var held float64
+	authority.afterContractAdmissionForTest = func() {
+		held = contractAdmissionGauge(t, contractAdmissionInUseName) - inUse
+		panic(raised)
+	}
+	for range bound + 1 {
+		held = -1
+		_, err := authority.ConnectControl(t.Context(), "", args)
+		if !errors.Is(err, raised) {
+			t.Fatalf("a call that panicked after admission answered %v, want its raise", err)
+		}
+		if held != 1 {
+			t.Fatalf("the panicking call held %v slots in use, want 1", held)
+		}
+		if left := contractAdmissionGauge(t, contractAdmissionInUseName) - inUse; left != 0 {
+			t.Fatalf("a call that panicked left %v slots in use", left)
+		}
+	}
+	for range bound {
+		if !admission.tryAcquire() {
+			t.Fatal("a call that panicked kept its slot")
+		}
+	}
+	for range bound {
+		admission.release()
 	}
 }

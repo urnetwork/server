@@ -35,7 +35,7 @@ import (
 // providers' claims (D14), and is then removed with its table.
 
 // The action the latency report's rate limit is recorded under.
-const ExtenderLatencyReportRateLimitAction = "extender_latency_report"
+const ExtenderLatencyReportRateLimitAction = model.AccountActionExtenderLatencyReport
 
 // The limits of the latency report, and how long what it stores is kept.
 type ExtenderLatencyReportSettings struct {

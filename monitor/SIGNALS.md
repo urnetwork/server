@@ -28163,6 +28163,55 @@ Vault rollout, a fresh API process, and a state/nonce/audience-checked browser
 round trip; `/hello` and a successful native mobile login are not controls for
 the browser code-exchange path.
 
+The 2026-10-26 production config audit found a payment false negative.
+Server 49b11f84e (2026-10-16) made the Google Play webhook bind each Pub/Sub
+push token to `google.yml` `webhook.audience`, and refuse every push while that
+field is missing or blank. The inventory's `google-payment` requirement did not
+list the field. Main's `google.yml` had none, so from the 2026-10-19 API roll
+every Play notification at `POST /pay/play` was answered 503 (about 74,000
+refusals and no acceptance in seven days) while `credentials` stayed clear.
+`google-payment` now requires `webhook.audience`. That value must equal the
+audience on the authenticated push subscription; Google defaults it to the push
+endpoint URL. A control builds each payment webhook's resource from the
+inventory's own field list and requires that webhook's verifier to accept it,
+so a verifier that starts reading a new field fails the build until the
+inventory lists it.
+
+Payment webhook readiness also follows the verifier's scalar contract:
+Play publisher email and audience, Stripe signing secret, Coinbase shared
+secret, and Helius authorization must be nonblank string scalars. A number,
+boolean, mapping or sequence cannot establish readiness even if it is nonempty;
+report the existing `credential-fields-missing` class with field names only.
+The inventory-to-verifier controls must exercise rejected shapes as well as
+accepted strings. These checks establish local resource shape only: they do
+not establish correct provider audience/secret values, API adoption of the
+resource generation, successful verification of a signed request, backlog
+recovery or payment delivery. Generic numeric and structured requirements
+retain their own consumer contracts. Present incomplete optional resources
+remain WARN, while wholly absent optional resources remain a no-op.
+
+The refusal itself was invisible to `log-errors`: the warning
+`[<webhook>]webhook refused, verification <secret|publisher|audience>
+unavailable: <detail>` can contain no error-shaped word. The
+`payment-webhook-refused` class pages on one matching line, framed only by
+play, stripe, coinbase or helius. Its fixed verification-input sample omits all
+resource, field and loader-error details, without relabeling publisher/audience
+failures as missing secrets. The refusal header takes precedence over generic
+resource/transport signatures in its suffix; a plain unrelated resource or
+transport line retains its existing class. Nonmatching webhook logs remain out
+of this class. Existing notifier resolution groups by probe/class/service,
+ignoring frame; a vendor frame is diagnostic attribution, not an independent
+payment or delivery identity.
+
+One matching line is a refusal diagnostic; retries can repeat one event. It
+reports the producer's unavailable-verification path and intended 503, not a
+successfully delivered HTTP status, unique payment or financial loss. Wrong-type,
+malformed-resource and loader failures can also produce the header. A clear
+credential inventory does not establish the mounted consumer's source generation
+or eliminate route-specific failure. Provider retry/retention, backlog and
+reconciliation coverage require their own evidence. Missing/capped/failed log
+coverage is unknown; quiet logs or a sibling 2xx cannot certify recovery.
+
 The 2026-10-16 source audit found a readiness false negative: the generic
 nonempty-value check accepted nonstring YAML values that the Google browser
 exchange rejects. Its `sign_in_oauth.client_id` and `client_secret` must each
@@ -45890,7 +45939,14 @@ incident clears only after every point of a complete eligible ten-minute hold
 is below 5%. A new qualified five-minute PAGE survives older WARN-history gaps.
 Missing or low traffic never clears an armed incident. Qualified source rates use deterministic compensated accumulation
 before the unchanged inclusive comparisons, so source/map ordering cannot shift
-a rounded total across a band. No epsilon broadens the traffic floor or shares. `error` failures,
+a rounded total across a band. No epsilon broadens the traffic floor or shares. A failed range read retains
+`reason=source_unavailable` plus the shared fixed observation error class and any
+code-owned local admission/execution-boundary set. Joined markers may describe
+independent gateway branches; they establish no attempt count, ordering, remote
+execution, HTTP status or backend cause. An unmarked error gains no invented
+boundary. Raw errors, commands, source labels and response bytes are not rendered;
+a retired parent publishes no findings. Earlier reason-only alerts cannot recover
+their discarded error classification or local phase from this prospective change. `error` failures,
 unfinished calls and stopped callers can evade this ratio; the unimplemented
 seasonal reply floor remains a separate coverage gap.
 

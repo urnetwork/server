@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-round-baseline-preparation-config",
+  "program": {
+    "path": "/usr/local/libexec/urnetwork/competition-c2-a9e8e1a7-round-baseline-preparation-v4/container/prepare-round-baseline.sh",
+    "sha256": "10089144d58b419549d2f8ffd8cc7294a771f271e2622a1149696e82ddf18592"
+  },
+  "dependencies": [
+    {"path":"/usr/local/libexec/urnetwork/competition-c2-a9e8e1a7-round-baseline-preparation-v4/container/evaluator.sh","sha256":"0cccda1d1dcc227f30fda800ddb9bbb28e29dd48cc62885da637fcd4eb4eb00b"},
+    {"path":"/usr/local/libexec/urnetwork/competition-c2-a9e8e1a7-round-baseline-preparation-v4/container/network-boundary.sh","sha256":"9ab82a9a8bb2272934461472509c15df4242f14859351dadd6dfcb2a1cd27cb7"},
+    {"path":"/usr/local/libexec/urnetwork/competition-c2-a9e8e1a7-round-baseline-preparation-v4/container/compose.yml","sha256":"f4ca3a5eedfd5f081fbb507fc0102fa03ce11c095b406bcc0f7dc0119b5e0464"},
+    {"path":"/usr/local/libexec/urnetwork/competition-c2-a9e8e1a7-round-baseline-preparation-v4/container/hash-local-mount.sh","sha256":"94ee94b9cc42dfe2f7236d49cc24e26b7bd79e9b63c5d582315b7fd1878dcb86"},
+    {"path":"/usr/local/libexec/urnetwork/competition-c2-a9e8e1a7-round-baseline-preparation-v4/container/docker-id-map.sh","sha256":"0babbcce2d286bf861827c9c11fa02d841d487b33c23765c96916ee1063d854c"},
+    {"path":"/usr/local/libexec/urnetwork/competition-c2-a9e8e1a7-round-baseline-preparation-v4/container/resource-boundary.sh","sha256":"14909d09069d0ee329a2779796bf003b12765fa4fad435c0aeb784c316ccbd03"},
+    {"path":"/usr/local/libexec/urnetwork/competition-c2-a9e8e1a7-round-baseline-preparation-v4/container/retain-failure-evidence.sh","sha256":"f3f119c06b12662c1f2d1dae433be40de7a7b222fc42f55aba8b75a3cd14c4d1"},
+    {"path":"/usr/local/libexec/urnetwork/competition-c2-a9e8e1a7-round-baseline-preparation-v4/container/postgres-init.sh","sha256":"653b81b0fcf2fdaf4a3f4421a252a582484581e3a03463c0fad03186ee14d77c"},
+    {"path":"/usr/local/libexec/urnetwork/competition-c2-a9e8e1a7-round-baseline-preparation-v4/container/timeout-budget.sh","sha256":"7f3298edaca3bd31f4e5a02d17fd88ccb66f961e9d8493d9b047426d8fab476d"},
+    {"path":"/usr/local/libexec/urnetwork/competition-c2-a9e8e1a7-round-baseline-preparation-v4/container/entrypoint.sh","sha256":"efbfe1a8dd8fb58b4fef8e57bea205e819dfdf21a85ec31d71d85365cf467758"},
+    {"path":"/usr/local/libexec/urnetwork/competition-c2-a9e8e1a7-round-baseline-preparation-v4/container/build-submission.sh","sha256":"4a998275ffe94d322462ec9d7876af1ff288c3e8ba85f0c3278b4b512baa0172"},
+    {"path":"/usr/local/libexec/urnetwork/competition-c2-a9e8e1a7-round-baseline-preparation-v4/container/submission-builder-identity.sh","sha256":"1764b7a97f1f99d33aa201c7e721dcce37ed3f58c5aeed8c99b50644706b8c19"},
+    {"path":"/usr/local/libexec/urnetwork/competition-c2-a9e8e1a7-round-baseline-preparation-v4/container/prepare-evaluation-source.sh","sha256":"a2445db1aa6e8655da12ca8ec810eda86c5e93df84801887c76ed490f232d4b6"},
+    {"path":"/usr/local/libexec/urnetwork/competition-c2-a9e8e1a7-round-baseline-preparation-v4/container/Dockerfile.submission","sha256":"255d1827494c22482bb851323ee13d8ee03fb407fbf40348531b7d2ec32fc034"},
+    {"path":"/usr/local/libexec/urnetwork/competition-c2-a9e8e1a7-round-baseline-preparation-v4/container/competitionpatch","sha256":"3d161d76bace48bff6536164a84f330b1618c82f319775b8551c19872b937e54"},
+    {"path":"/usr/local/libexec/urnetwork/competition-c2-a9e8e1a7-round-baseline-preparation-v4/container/competitionpatch.sha256","sha256":"560358c0192972f71e715144289b8871fc4c3566d382cd30a9b7d3deb74c6df7"}
+  ]
+}

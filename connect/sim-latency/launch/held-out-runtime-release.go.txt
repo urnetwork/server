@@ -48,6 +48,19 @@ func frozenHeldOutAmendedRuntime() heldOutRuntimeRelease {
 	}
 }
 
+// The named metadata-preflight overlay keeps the C2 app/source and all ceilings.
+// It is a new immutable installation, never a replacement for historical v2.
+func frozenHeldOutMetadataPreflightRuntime() heldOutRuntimeRelease {
+	runtime := frozenHeldOutAmendedRuntime()
+	runtime.ControlRevision = "ed028faa9595d47bf2aadbb093995723c9423cf1"
+	runtime.ScriptDirectory = "/usr/local/libexec/urnetwork/competition-c2-a9e8e1a7-metadata-fbb2566b-evidence5g-v3/container"
+	runtime.Manifest = heldOutPinnedFile{Path: filepath.Join(filepath.Dir(runtime.ScriptDirectory), "release.json"), Sha256: "8fc856103e2b38719a80c496ca8e6b3970f24fe666b57ccfaec4781fbc2ae774"}
+	runtime.BuilderSha256 = "ca3c84c64762450a72013c705438610bf465f78fb57bcba901a573c1005d743d"
+	runtime.Runner = heldOutPinnedFile{Path: "/usr/local/libexec/urnetwork/competition-calibration-c2-a9e8e1a7-metadata-fbb2566b-evidence5g-v3/cohort-runner.sh", Sha256: "187444b7f394d3a947c72dd38c480dedeedb55beaa6e40eb7ba2b4e912333728"}
+	runtime.RunnerManifest = heldOutPinnedFile{Path: filepath.Join(filepath.Dir(runtime.Runner.Path), "release.json"), Sha256: "1041281881a5f19f467b101fd55d52cce2297e042d8446d87bc8bdd752d4914b"}
+	return runtime
+}
+
 // Authenticates every host-side executable/configuration reached by the new
 // evaluator or builder; candidate/image contents retain their separate pins.
 func heldOutRuntimeComponentDigests() map[string]string {
@@ -71,14 +84,43 @@ func heldOutRuntimeComponentDigests() map[string]string {
 	}
 }
 
+// These are the only two changed host components; the image additionally carries
+// its separately authenticated official-run metadata-preflight script.
+func heldOutMetadataPreflightRuntimeComponentDigests() map[string]string {
+	components := heldOutRuntimeComponentDigests()
+	components["evaluator.sh"] = "0cccda1d1dcc227f30fda800ddb9bbb28e29dd48cc62885da637fcd4eb4eb00b"
+	components["entrypoint.sh"] = "efbfe1a8dd8fb58b4fef8e57bea205e819dfdf21a85ec31d71d85365cf467758"
+	return components
+}
+
+// Runtime JSON can select only these two complete named installations. No path,
+// composite hash or component override is derived from the caller's fields.
+func heldOutRuntimeExecutionComponentDigests(runtime heldOutRuntimeRelease) (map[string]string, error) {
+	if reflect.DeepEqual(runtime, frozenHeldOutAmendedRuntime()) {
+		return heldOutRuntimeComponentDigests(), nil
+	}
+	if reflect.DeepEqual(runtime, frozenHeldOutMetadataPreflightRuntime()) {
+		return heldOutMetadataPreflightRuntimeComponentDigests(), nil
+	}
+	return nil, errors.New("runtime differs from both named immutable C2 installations")
+}
+
 // Only the named constructor above can select the new runtime. The old map is
 // replaced, never mutated through the shallow release copy shared with C1.
 func selectHeldOutAmendedRuntime(release *heldOutRelease, supplied, expected heldOutRuntimeRelease) error {
+	// The amendment authenticator keeps its historical expected constructor.
+	// Only the entire exact named overlay may select the prospective v3 pins.
+	if reflect.DeepEqual(expected, frozenHeldOutAmendedRuntime()) && reflect.DeepEqual(supplied, frozenHeldOutMetadataPreflightRuntime()) {
+		expected = frozenHeldOutMetadataPreflightRuntime()
+	}
 	if release == nil || !reflect.DeepEqual(supplied, expected) || !sourceGitShaPattern.MatchString(expected.ControlRevision) || !sourceGitShaPattern.MatchString(expected.ValidatorSourceRevision) || expected.EvidenceMemoryLimitBytes != 5*1024*1024*1024 || !validSha256(expected.BuilderSha256) || !validSha256(expected.ValidatorSha256) || expected.ScriptDirectory != filepath.Join(filepath.Dir(expected.Manifest.Path), "container") || filepath.Dir(expected.Runner.Path) != filepath.Dir(expected.RunnerManifest.Path) {
 		return errors.New("named C2 runtime release differs from its immutable installation")
 	}
 	release.ScriptDirectory, release.Runtime = supplied.ScriptDirectory, &supplied
 	release.ScriptDigests = heldOutRuntimeComponentDigests()
+	if reflect.DeepEqual(expected, frozenHeldOutMetadataPreflightRuntime()) {
+		release.ScriptDigests = heldOutMetadataPreflightRuntimeComponentDigests()
+	}
 	return nil
 }
 
@@ -605,22 +647,56 @@ func validateHeldOutRuntimeManifests(bundleBytes, runnerBytes []byte, runtime he
 	return nil
 }
 
+// Explicit internal I/O contract permits synthetic-domain composition tests.
+// No JSON, environment or global hook can supply this value to native commands.
+type heldOutRuntimeContract struct {
+	expectedRuntime    heldOutRuntimeRelease
+	componentSha256KVs map[string]string
+	readRootPin        func(heldOutPinnedFile, os.FileMode, int64) ([]byte, error)
+}
+
 // Rechecked before preparation, every B invocation and bridge authentication.
-// Nothing here executes the helper, CLI, runner, candidate or provider.
+// Production always selects one frozen contract and the real root-pin reader.
 func authenticateHeldOutRuntimeFiles(release heldOutRelease, settings heldOutOperatorSettings) error {
-	if release.Runtime == nil || !reflect.DeepEqual(*release.Runtime, frozenHeldOutAmendedRuntime()) || release.ScriptDirectory != release.Runtime.ScriptDirectory || !reflect.DeepEqual(release.ScriptDigests, heldOutRuntimeComponentDigests()) {
+	if release.Runtime == nil || release.ScriptDirectory != release.Runtime.ScriptDirectory {
 		return errors.New("explicit immutable C2 runtime selection required")
 	}
 	runtime := *release.Runtime
-	bundleBytes, err := readHeldOutRootPinned(runtime.Manifest, 0444, settings.MaximumBytes)
+	components, err := heldOutRuntimeExecutionComponentDigests(runtime)
 	if err != nil {
 		return err
 	}
-	runnerBytes, err := readHeldOutRootPinned(runtime.RunnerManifest, 0444, settings.MaximumBytes)
+	return authenticateHeldOutRuntimeFilesWithContract(release, settings, heldOutRuntimeContract{
+		expectedRuntime: runtime, componentSha256KVs: components, readRootPin: readHeldOutRootPinned})
+}
+
+// Nil keeps the production closed-selector path. Only internal tests supply
+// an explicit synthetic bytes/metadata contract; no successful-auth callback.
+func authenticateHeldOutRuntimeForContract(release heldOutRelease, settings heldOutOperatorSettings, contract *heldOutRuntimeContract) error {
+	if contract == nil {
+		return authenticateHeldOutRuntimeFiles(release, settings)
+	}
+	return authenticateHeldOutRuntimeFilesWithContract(release, settings, *contract)
+}
+
+// The full existing manifest/component validation body is shared unchanged;
+// the contract changes only the expected identities and their bounded reader.
+func authenticateHeldOutRuntimeFilesWithContract(release heldOutRelease, settings heldOutOperatorSettings, contract heldOutRuntimeContract) error {
+	if release.Runtime == nil || release.ScriptDirectory != release.Runtime.ScriptDirectory || contract.readRootPin == nil || !reflect.DeepEqual(*release.Runtime, contract.expectedRuntime) {
+		return errors.New("explicit immutable C2 runtime selection required")
+	}
+	runtime, components := *release.Runtime, contract.componentSha256KVs
+	if !reflect.DeepEqual(release.ScriptDigests, components) {
+		return errors.New("explicit immutable C2 runtime component selection required")
+	}
+	bundleBytes, err := contract.readRootPin(runtime.Manifest, 0444, settings.MaximumBytes)
 	if err != nil {
 		return err
 	}
-	components := heldOutRuntimeComponentDigests()
+	runnerBytes, err := contract.readRootPin(runtime.RunnerManifest, 0444, settings.MaximumBytes)
+	if err != nil {
+		return err
+	}
 	if err := validateHeldOutRuntimeManifests(bundleBytes, runnerBytes, runtime, release, components); err != nil {
 		return err
 	}
@@ -632,7 +708,7 @@ func authenticateHeldOutRuntimeFiles(release heldOutRelease, settings heldOutOpe
 		if name == "competitionpatch" {
 			bound = settings.MaximumExecutableBytes
 		}
-		content, err := readHeldOutRootPinned(heldOutPinnedFile{Path: filepath.Join(runtime.ScriptDirectory, name), Sha256: digest}, mode, bound)
+		content, err := contract.readRootPin(heldOutPinnedFile{Path: filepath.Join(runtime.ScriptDirectory, name), Sha256: digest}, mode, bound)
 		if err != nil {
 			return err
 		}
@@ -640,7 +716,7 @@ func authenticateHeldOutRuntimeFiles(release heldOutRelease, settings heldOutOpe
 			return errors.New("C2 trusted validator sidecar is not the exact LF-terminated pin")
 		}
 	}
-	_, err = readHeldOutRootPinned(runtime.Runner, 0555, settings.MaximumBytes)
+	_, err = contract.readRootPin(runtime.Runner, 0555, settings.MaximumBytes)
 	return err
 }
 

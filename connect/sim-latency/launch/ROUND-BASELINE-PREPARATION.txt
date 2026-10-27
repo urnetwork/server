@@ -1,0 +1,111 @@
+Full-R9 round baseline preparation (worker-only opt-in; unqualified until QA)
+==========================================================================
+
+Purpose
+-------
+The first admitted real queued job reserves its round's one full native R9
+control before its submission execution clock starts. This is not the tiny
+host-readiness probe, a calibration bridge, an extra candidate attempt, or
+permission to use controls/hidden workloads from another round.
+
+No API wire/schema/migration change is required. Deploy a separately qualified
+competitionworker binary/wrapper and a new root-owned v4 host-helper directory.
+The C2 evaluator application/source/image, installed v3 bundle, bridge contract,
+replication, margin, seed policy, gates and three-hour submission cap do not change.
+Do not modify an installed v3 bundle or rebuild its frozen application binary.
+
+Explicit installation
+---------------------
+Copy prepare-round-baseline.sh and the exact sixteen sealed v3 dependencies
+listed by round-baseline-preparation.template.json into a NEW protected release
+directory. Qualify the actual files before publishing its root-pinned config.
+All ancestry must be root-owned, non-symlink and not group/world writable;
+dependency files must be read-only and the program executable. The configured
+artifact root must already exist, belong to the actual worker uid, and not be
+group/world writable. Preparation creates only its own private descendants.
+
+The supervisor's newly qualified worker wrapper must add BOTH fixed CLI flags:
+  --baseline-preparation-config=/ROOT-PROTECTED/CONFIG.json
+  --baseline-preparation-sha256=EXACT-CONFIG-SHA256
+Pass through the existing --supervisor-request/--source-readiness arguments.
+No environment variable or caller request enables this role. Absent both flags,
+historical worker behavior is unchanged. Do not run mixed old/new workers on a
+round with a preparation reservation: an old binary does not know this fence.
+
+Lifetime and publication
+------------------------
+Preparation begins only after the first real queued admission; not before opens.
+Its existing singleton slot has job_id NULL and a distinct baseline.* owner.
+An append-only round-wide reservation event is committed BEFORE any producer
+dispatch. The source job stays queued, attempt_count=0 and started_at=NULL.
+Reservation linearizes FIFO selection: an earlier timestamp whose upload commits
+later remains queued for the next ordinary claim, not a reason to discard controls.
+
+The independently bounded three-hour producer runs the exact sealed v3 prefix
+through baseline scoring and stops before build_candidate. Only clean frozen
+source is prepared; no submitted patch is applied/built/executed. The normal EXIT
+trap still joins containment cleanup, sanitizes failed output and unmounts tmpfs.
+It never publishes worker-result.json, evaluation.complete.json, a candidate score
+or the ordinary aggregate result maps. Its sole success receipt explicitly says
+submission_started=false, candidate_executed=false, cleanup_complete=true.
+
+The worker authenticates all nine native marker/run/CSV/accounting/resource/sample
+chains, then retains known bounded raw files privately through the existing WORM
+backend with upload readback. Its namespace is:
+  .../rounds/ROUND/baseline-preparation/OWNER/
+It is never .../jobs/JOB/attempt-01/. Hidden inputs, worker-request.json, source
+checkouts, credentials and arbitrary files are excluded. Native raw logs remain
+bounded by the evidence policy; the outer log retains at most 4MiB and records
+observed/retained bytes plus an explicit truncation flag.
+
+The owner/source/supervisor fence covers production AND archive retries. Retries
+persist the identical authenticated artifact bytes, never re-enter the producer.
+Normal host/slot heartbeats continue without renewing the fixed preparation
+deadline. Stop and JOIN this observer before publication. The short transaction
+then rechecks the original owner, source job, round and deadline; starts the real
+job exactly once; inserts its baseline referencing that now-running real FK job;
+and transfers the singleton to the ordinary worker/job lease. Only then do build
+and candidate execution receive their unchanged full three-hour submission budget.
+The outer supervisor remains lease/cancellation-owned, not submission-time-owned.
+
+Infrastructure hold and manual reconciliation
+---------------------------------------------
+Before atomic publication, any canceled, failed, unfenced or unretained preparation
+leaves the real job unstarted and consumes no candidate attempt. Its reservation blocks
+automatic resampling even after slot expiry, host replacement, or later admissions.
+One idempotent round_baseline_preparation_held event records the bounded stage and,
+when retained, its private hold-manifest SHA. The worker exits with a bounded
+infrastructure-hold error for existing worker/heartbeat alerting; no season-wide
+hold authority is added. Re-dispatch refuses before producer work or hold spam.
+An ambiguous publication commit requires authoritative reconciliation: it may
+already have started the genuine job and attached its baseline. A durable HOLD
+also gates warm claims, so transport ambiguity cannot automatically consume a
+second candidate attempt or reset the already committed original clock.
+An empty reservation result is not a claim capability. The ordinary claim
+transaction must recheck the selected round's exact frozen baseline and durable
+reservation/HOLD under its singleton/job locks before setting started_at or
+incrementing attempt_count. A newly arrived cold job waits for its own reservation;
+an owner failure or new HOLD between the peek and claim cannot fall through to
+the legacy cold evaluator. HOLD publication takes the same singleton-first lock
+order even when its source job differs from the current FIFO job.
+
+Safe raw failures use a separate baseline-preparation-hold-manifest.json, never a
+successful baseline or candidate result. Failed remote retention preserves local
+bytes at ARTIFACT_ROOT/baseline-preparations/ROUND/OWNER; reconcile original evidence,
+archive availability and cleanup before any separately authorized next action.
+Do not delete/rewrite reservation events, reset a submission clock, invent a fake
+source job, rescore/reuse bridge controls, or silently rerun the native producer.
+Automatic recovery/resampling is deliberately absent. Any replacement round must
+use the existing separately authorized cancellation/replacement workflow.
+
+Required qualification (no execution authority supplied by this document)
+-------------------------------------------------------------------------
+Run deterministic worker-clock, cancellation/join, fence/publication race,
+host-liveness, native evidence/retention, malicious-path/link/size, and actual
+existing-FK transaction tests. Include the late earlier admission upload barrier.
+Include Reserve-to-Claim barriers for a cold owner failing/releasing, a new HOLD
+after a warm peek, and a new cold admission after an empty peek. Each must leave
+the waiting submission queued, unstarted and without a consumed attempt.
+Run the actual shell prefix/completion/EXIT-cleanup fragments with strict external
+stubs, not a simplified rewritten script. These tests do not run genuine controls.
+Any real preparation/DB write/provider/timed run remains separately authorized.
