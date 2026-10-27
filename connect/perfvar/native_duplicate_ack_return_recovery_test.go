@@ -206,6 +206,12 @@ func TestFullTunNativeDownloadDuplicateAcksRepairBeforeRto(t *testing.T) {
 // is separate from SDK memory qualification and historical browsing attribution.
 func testFullTunNativeDownloadDuplicateAckRecovery(t *testing.T, loss bool) {
 	t.Helper()
+	testFullTunNativeDownloadDuplicateAckRecoveryMode(t, loss, false)
+}
+
+// The controlled broker is opt-in; existing recovery tests retain their path.
+func testFullTunNativeDownloadDuplicateAckRecoveryMode(t *testing.T, loss bool, controlledMixed bool) {
+	t.Helper()
 	if testing.Short() {
 		t.Skip("full H1/TUN recovery topology")
 	}
@@ -213,16 +219,31 @@ func testFullTunNativeDownloadDuplicateAckRecovery(t *testing.T, loss bool) {
 	var deferredCausalFailure string
 	testEnvironment.Run(t, func(t testing.TB) {
 		state := &nativeDuplicateAckRecoveryState{loss: loss}
+		var mixedBroker *nativeMixedAckBroker
+		if controlledMixed {
+			mixedBroker = newNativeMixedAckBroker(state, loss)
+		}
 		var returnResendTimeout time.Duration
 		var tcpGro bool
 		hooks := &fullTunConstructionTestHooks{
 			configureProviderLocalNatSettings: func(settings *clientconnect.LocalUserNatSettings) {
 				returnResendTimeout = settings.TcpBufferSettings.ReturnResendTimeout
+				if mixedBroker != nil {
+					mixedBroker.returnResendTimeout = returnResendTimeout
+				}
 			},
-			configureApplicationTunSettings: func(settings *clientconnect.TunSettings) { tcpGro = settings.TcpGro },
+			configureApplicationTunSettings: func(settings *clientconnect.TunSettings) {
+				tcpGro = settings.TcpGro
+				if mixedBroker != nil {
+					mixedBroker.applicationMtu = settings.Mtu
+				}
+			},
 			afterStage: func(stage fullTunConstructionStage, path *fullTunPath) error {
 				if stage == fullTunConstructionStageMultiClient {
 					path.nativeIngressForTest = true
+					if mixedBroker != nil {
+						mixedBroker.bind(path)
+					}
 					path.beforeBridgeSendBatchForTest = func(packets [][]byte) {
 						for _, packet := range packets {
 							state.observeOutgoing(packet, false)
@@ -241,6 +262,9 @@ func testFullTunNativeDownloadDuplicateAckRecovery(t *testing.T, loss bool) {
 		}
 		defer func() {
 			fixture.close()
+			if mixedBroker != nil {
+				mixedBroker.reportAfterClose(t, loss)
+			}
 			if after, balanced := routeMessagePoolBalance(poolBefore); !balanced {
 				t.Errorf("joined full-TUN pool ownership: %d -> %d classes=%v", poolBefore, after.outstanding, after.classes)
 			}
@@ -280,19 +304,34 @@ func testFullTunNativeDownloadDuplicateAckRecovery(t *testing.T, loss bool) {
 					}
 					packet = message.(*protocol.IpPacketToProvider).IpPacket.PacketBytes
 				}
+				if mixedBroker != nil {
+					mixedBroker.observeProvider(packet)
+				}
 				state.observeOutgoing(packet, true)
 			}
 		})
-		defer unsub()
+		if mixedBroker != nil {
+			mixedBroker.unsubscribe = unsub
+		} else {
+			defer unsub()
+		}
 		path.multiClient.SetReceivePacketCallback(func(_ clientconnect.TransferPath, _ protocol.ProvideMode, _ *clientconnect.IpPath, packet []byte) {
-			if state.admitReturn(packet) {
+			admitted := state.admitReturn(packet)
+			if mixedBroker != nil {
+				mixedBroker.observeReturn(packet)
+			}
+			if admitted {
 				_, _ = path.appTun.Write(packet)
 			}
 		})
 		path.multiClient.SetReceivePacketsCallback(func(_ clientconnect.TransferPath, _ protocol.ProvideMode, _ *clientconnect.IpPath, packets [][]byte) {
 			admittedPackets := make([][]byte, 0, len(packets))
 			for _, packet := range packets {
-				if state.admitReturn(packet) {
+				admitted := state.admitReturn(packet)
+				if mixedBroker != nil {
+					mixedBroker.observeReturn(packet)
+				}
+				if admitted {
 					admittedPackets = append(admittedPackets, packet)
 				}
 			}
@@ -303,12 +342,31 @@ func testFullTunNativeDownloadDuplicateAckRecovery(t *testing.T, loss bool) {
 			func(ctx context.Context, path *fullTunPath) (workloadResult, error) {
 				previousDatagramAllowance := path.setAllowProviderDatagramPackFailures(true)
 				defer path.setAllowProviderDatagramPackFailures(previousDatagramAllowance)
-				result, err := measureFullTunLatencyUnderLoadDirectionWithStartHook(ctx, path, bulkByteCount, false, state.start)
+				start := func() error {
+					if mixedBroker != nil {
+						if err := mixedBroker.waitCovered(ctx); err != nil {
+							return err
+						}
+					}
+					if err := state.start(); err != nil {
+						return err
+					}
+					if mixedBroker != nil {
+						return mixedBroker.arm()
+					}
+					return nil
+				}
+				result, err := measureFullTunLatencyUnderLoadDirectionWithStartHook(ctx, path, bulkByteCount, false, start)
 				if err == nil {
 					err = path.waitForPostWorkloadBoundary(ctx)
 				}
 				return result, err
 			})
+		var mixedObservation *nativeMixedAckBrokerObservation
+		if mixedBroker != nil {
+			observation := mixedBroker.snapshot()
+			mixedObservation = &observation
+		}
 		state.stateLock.Lock()
 		dropAfterStart, repairAfterStart, blockedUntilRepair := time.Duration(0), time.Duration(0), time.Duration(0)
 		if !state.firstDrop.IsZero() {
@@ -342,6 +400,7 @@ func testFullTunNativeDownloadDuplicateAckRecovery(t *testing.T, loss bool) {
 			LegacyFrames                   int
 			InvalidFrames                  int
 			Invalid                        bool
+			MixedBroker                    *nativeMixedAckBrokerObservation `json:"mixed_broker,omitempty"`
 		}{
 			Loss:                           loss,
 			Native:                         native,
@@ -366,6 +425,7 @@ func testFullTunNativeDownloadDuplicateAckRecovery(t *testing.T, loss bool) {
 			LegacyFrames:                   state.legacyFrames,
 			InvalidFrames:                  state.invalidFrames,
 			Invalid:                        state.invalid,
+			MixedBroker:                    mixedObservation,
 		}
 		state.stateLock.Unlock()
 		encoded, _ := json.Marshal(census)
@@ -382,6 +442,14 @@ func testFullTunNativeDownloadDuplicateAckRecovery(t *testing.T, loss bool) {
 		if census.Invalid || census.InvalidFrames != 0 || census.DataBeforeOriginRelease != 0 {
 			t.Fatal("fresh measured flow provenance was invalid")
 		}
+		if mixedObservation != nil {
+			if mixedObservation.Invalid || !mixedObservation.CoveredBeforeOriginRelease ||
+				(loss && (mixedObservation.SameControlAckOffersBeforeRto < 3 ||
+					mixedObservation.SameControlAckAcceptedBeforeRto+mixedObservation.SameControlAckRefusedBeforeRto < 3 ||
+					mixedObservation.DataAcceptedBeforeReplay != 0 || mixedObservation.ReturnPureAcksBeforeReplay != 0)) {
+				t.Fatal("controlled mixed native premise NOT_EXERCISED: need covered data and three unmodified data-driven ACK offers before the unchanged return timer")
+			}
+		}
 		if !loss {
 			if census.ForcedDrops != 0 || census.FirstSegmentCopies != 1 {
 				t.Fatal("healthy control dropped or replayed its first response segment")
@@ -391,6 +459,22 @@ func testFullTunNativeDownloadDuplicateAckRecovery(t *testing.T, loss bool) {
 		if census.ForcedDrops != 1 || census.FirstSegmentCopies < 2 || census.LaterReturnPackets < 3 ||
 			census.GeneratedSame < 3 || census.GeneratedChanged != 0 || census.ProviderChanged != 0 {
 			t.Fatal("mechanism NOT_EXERCISED: need one first-segment loss and three real unchanged gVisor ACKs with no changing-control repair")
+		}
+		if mixedObservation != nil {
+			providerBeforeTimer := 0
+			for index := 0; index < min(census.ProviderSame, len(census.ProviderAckAfterOriginRelease)); index++ {
+				if census.ProviderAckAfterOriginRelease[index] < returnResendTimeout {
+					providerBeforeTimer++
+				}
+			}
+			// Retention starts the provider timer before original Transfer delivery.
+			// Origin release precedes retention; the later receiver drop cannot
+			// define a full-RTO interval. Keep its measured hole without that gate.
+			if mixedObservation.SameControlAckRefusedBeforeRto >= 3 && mixedObservation.SameControlAckAcceptedBeforeRto == 0 &&
+				providerBeforeTimer == 0 && returnResendTimeout <= repairAfterStart {
+				deferredCausalFailure = fmt.Sprintf("controlled mixed native ACKs starved before return timer: offered=%d refused=%d provider_before_timer=%d origin_to_replay_ns=%d hole_ns=%d", mixedObservation.SameControlAckOffersBeforeRto, mixedObservation.SameControlAckRefusedBeforeRto, providerBeforeTimer, repairAfterStart.Nanoseconds(), blockedUntilRepair.Nanoseconds())
+				return
+			}
 		}
 		if census.ProviderSame < 3 {
 			deferredCausalFailure = fmt.Sprintf("real duplicate ACKs disappeared between native bridge and provider ingress: generated=%d provider=%d", census.GeneratedSame, census.ProviderSame)

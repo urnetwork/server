@@ -5,7 +5,106 @@ checklist is the acceptance index for the new release, not an authorization to
 activate production. Historical v1 checkmarks do not qualify a different source,
 image, host manifest, policy or review provider.
 
-## Current checkpoint — October 26, 23:58 UTC
+## Current checkpoint — October 27, 05:10 UTC
+
+The following supersedes the provider and baseline-preparation progress in the
+dated bullets below; those bullets retain the earlier qualification history.
+
+- Clean control source `1a1bf5ae6` completed three race passes: simulator 151,
+  controller 42, model 13, native helpers 60 and shell guards 2 per pass, zero
+  skips, exact original container/network cleanup. Of 804 pass entries, three
+  are inactive genuine-command entry returns; 801 are other test cases. This
+  is not real provider qualification. Canonical unit receipt `a219218d…` binds
+  the exact tested driver; extended summary `bcab5db2…` preserves the scope.
+- The v4 genuine review attempt is **terminal, failed**, exit 1 after 1,866.25
+  seconds; cleanup is verified. Cancellation, benign review and fabrication
+  rejection passed. The fourth case retained Qwen's terminal
+  `status: incomplete`, `incomplete_reason: max_output_tokens` at the requested
+  8,192-token cap; the union correctly refused authority. Cases five and six
+  did not run. Report SHA-256 `98eb3aa7a85152f24f7dfae82fa2e06f62d8e0cc1eb03abde091b281c77430d8`.
+  Its [published precommit](SNOW-REVIEW-QUALIFICATION-PRECOMMIT-2026-10-27-V4.json)
+  remains immutable. This retained response does not resolve the different,
+  historical HTTP-200 response whose terminal object was lost.
+- The review-only cap correction to **32,768** is pushed in `100dfdd66`.
+  Actual old-cap payload assertions failed, restored-source smoke passed,
+  and the distinct source-test attestation cap remains 4,096. Completed-status,
+  exact-model, strict schema, unanimous approval, request deadlines and stream
+  bounds are unchanged. Three-pass qualification, a new image and a new public
+  precommit must precede one fresh genuine attempt; none has started.
+- Alert-routing, preflight and finite 4/5 GiB host-profile regressions passed
+  **69 smoke tests, zero skips**, including compiled old-source failures.
+  Server fixes are pushed through `fb5054121`; Warp owner/transport changes
+  through `1ea3a31`. Exact smoke receipt SHA-256
+  `42aa17b86db5927877f49f74f06ee8826d342e11326b1cbd57e44202890768e9`.
+  Independent three-pass validation is underway. No live route change or
+  successful Slack notification is claimed.
+- All five main control binaries are built from clean `1a1bf5ae6`; worker OCI
+  `sha256:1996ccd1…` has byte-identical native/readback worker `395bce92…`.
+  This is release provenance, not production-host readiness or a claim that the
+  real worker runs inside Docker. No actual production worker has started.
+- The Sille-only native loopback metrics forwarder is installed. One isolated
+  synthetic metric was accepted by the native publisher and read back exactly
+  from Mimir; receipt `0d14ffc4…`. This is not a real runner heartbeat.
+  The one email test failed; main Grafana deliberately has no SMTP. The
+  corrected managed routes use its existing native main Slack receiver, with
+  `support@ur.xyz` retained as incident owner. Actual notification delivery
+  remains unproved. The old staging supervisor is disabled for
+  autostart, with its unit and historical state preserved. Main DB migrations
+  891–893 still awaited deployment at the last read-only check, **02:27 UTC**.
+
+- Genuine seven-key test-result attestation passed: two actual isolated Go
+  executions (one passing, one deliberately failing), then six provider calls.
+  Receipt SHA-256 `0784336a82e4fa899aa3c61d7961774135cb5c738d48a15e68af90eed82f591f`.
+  This proves mechanical observation attestation, not winner honesty or the
+  full winner test suite.
+- A subsequent review qualification exposed inconsistent member/global reason
+  handling. Fix `b316e0d406349bd4c281473b4692fb02eb6aacaa` preserves the original
+  findings and applies the same disqualification reason projection at both
+  validation boundaries. Deterministic pre-fix controls and 444 selected test
+  executions passed before the fresh attempt. Its immutable precommit is
+  `SNOW-REVIEW-QUALIFICATION-PRECOMMIT-2026-10-27.json` (published in `9f7a29329`).
+  That attempt stopped at its first failure after 1,208.82 seconds, exit 1,
+  cleanup verified. Cancellation and benign approval passed; the fabrication
+  case exposed another member-validation projection error: a supported
+  fabrication rejection with one uncertain criterion was passed to the legacy
+  finding validator. The original findings and failed attempt are preserved;
+  no retry or complete six-case qualification is claimed. Report SHA-256
+  `347920e25e3af5fc45ab7500c36a9379bbea63081ee332ace6d7054b572f64d1`.
+  The earlier HTTP-200 response lacking
+  a retained terminal object remains inconclusive, not evidence of token
+  exhaustion or a valid model identity.
+- The mixed-uncertainty correction now shares strict Snow validation while
+  distinguishing one member's six unattributed findings from the public union's
+  eighteen attributed findings. Independent review found no blocker; 12 model
+  and 35 simulator smoke tests passed with zero skips. A compiled old-projection
+  control reproduced the exact failure, then restored-source tests passed again.
+  Receipt SHA-256 `25d969c22eb793d594173593f726c95bb2df49f4d561b3c37c8a2173a41a4abc`.
+  Three-pass validation subsequently completed as above; genuine-provider
+  qualification remains pending.
+- Shared-baseline preparation before the first submission clock is committed
+  in `cf22d1a05`, with 19 smoke tests passing, including real isolated PostgreSQL
+  cases. Independent review then found a claim/reservation race. Its correction
+  and deterministic transaction-boundary regressions are in progress; the
+  feature is still opt-in, not installed or production-qualified. Its corrected
+  claim/scanner smoke subsequently passed 23 controller tests plus two shell
+  guards, zero skips, with original container/network inventories restored.
+  Compiled old-source controls reproduced all three races and both failed-scan
+  pointer defects. Three-pass validation subsequently completed; actual full
+  baseline preparation and production runtime qualification remain pending.
+  Fixes are pushed in `c37f9cea0`. The separate v4 helper and exact profile are
+  installed inactive: 17 root-owned read-only artifacts, unchanged v3 dependency
+  hashes, no helper or worker execution and no service activation. Installation
+  receipt SHA-256 `e51f219353e2f1c912c4beda8a9d12f0394e1524b3efba0b9036ff3d76d47db7`.
+- Replacement bridge authorization and the independent-seed amendment remain
+  unresolved. No corrected bridge or independent-seed scoring has started.
+- Actual main PostgreSQL was audited at 01:33:35 UTC in a verified read-only,
+  repeatable-read transaction. All 890 deployed migration identities match;
+  migrations **891–893** (mini provider, multi-repository promotion, Snow union)
+  remain pending normal deployment. All 12 existing rounds are staging, all 35
+  jobs are terminal, and the global worker slot is unowned. The intended
+  production namespace is empty. Recheck these facts before bootstrap; the
+  audit neither creates a round nor authorizes deleting historical state.
+  Receipt SHA-256: `a30144529f1b657f4dfa1fab79ba394f3689541e8cb752aad0fb081d8c5fe1ea`.
 
 - The frozen performance source is C2 server `a9e8e1a7`, ten-repository lock
   `ec322ed2…`, image `sha256:b1632a55…`, actual Go **1.27.3**. Operator-proxy

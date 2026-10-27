@@ -1022,6 +1022,8 @@ func TestProxyDashboardCoversBoundedServiceTrafficAndCapacity(t *testing.T) {
 		"urnetwork_proxy_wireguard_return_backpressure_total",
 		"urnetwork_proxy_lock_cache_entries",
 		"urnetwork_hosted_contract_admission_refusals_total",
+		"urnetwork_hosted_contract_admission_in_use",
+		"urnetwork_hosted_contract_admission_capacity",
 		"urnetwork_http_requests_total",
 		"urnetwork_pg_pool_connections",
 		"process_resident_memory_bytes",

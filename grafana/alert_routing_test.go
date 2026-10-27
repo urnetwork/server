@@ -1,3 +1,4 @@
+// Local synthetic Grafana fixtures exercise native reconciliation, secret redaction and one-shot notification transport without external calls.
 package grafana
 
 import (
@@ -36,9 +37,6 @@ type fakeAlertingGrafana struct {
 	// status and body forced on writes to the default Slack contact point
 	slackContactStatus int
 	slackContactBody   string
-	// status and body forced on writes to the competition contact point
-	competitionContactStatus int
-	competitionContactBody   string
 	// status and body forced on policy writes
 	policyStatus int
 	policyBody   string
@@ -97,7 +95,7 @@ func (self *fakeAlertingGrafana) serve(response http.ResponseWriter, request *ht
 			for key, value := range contact.Settings {
 				settings[key] = value
 			}
-			if contact.Type == "slack" {
+			if storedUrl, ok := settings["url"].(string); contact.Type == "slack" && ok && storedUrl != "" {
 				settings["url"] = "[REDACTED]"
 			}
 			contact.Settings = settings
@@ -109,11 +107,6 @@ func (self *fakeAlertingGrafana) serve(response http.ResponseWriter, request *ht
 		if contact.Uid == DefaultAlertContactUid && self.slackContactStatus != 0 {
 			response.WriteHeader(self.slackContactStatus)
 			_, _ = io.WriteString(response, self.slackContactBody)
-			return
-		}
-		if contact.Uid == CompetitionAlertContactUid && self.competitionContactStatus != 0 {
-			response.WriteHeader(self.competitionContactStatus)
-			_, _ = io.WriteString(response, self.competitionContactBody)
 			return
 		}
 		self.contacts = append(self.contacts, contact)
@@ -203,13 +196,6 @@ func (self *fakeAlertingGrafana) failSlackContactWrites(status int, body string)
 	self.slackContactBody = body
 }
 
-func (self *fakeAlertingGrafana) failCompetitionContactWrites(status int, body string) {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	self.competitionContactStatus = status
-	self.competitionContactBody = body
-}
-
 func (self *fakeAlertingGrafana) failPolicyWrites(status int, body string) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
@@ -223,8 +209,8 @@ func (self *fakeAlertingGrafana) respondToTests(body string) {
 	self.testResponse = body
 }
 
-// The live Main shape on 2026-10-13: the root routes to "empty", which has no
-// integrations (Grafana lists no contact point for it).
+// Synthetic unmatched alerts have no integration; the unrelated team route
+// explicitly excludes competition so readiness need not invent team labels.
 func unroutedToNobodyPolicy() map[string]any {
 	return map[string]any{
 		"receiver": "empty",
@@ -232,7 +218,7 @@ func unroutedToNobodyPolicy() map[string]any {
 		"routes": []any{
 			map[string]any{
 				"receiver":        "team-core",
-				"object_matchers": []any{[]any{"team", "=", "core"}},
+				"object_matchers": []any{[]any{"team", "=", "core"}, []any{"service", "!=", "sim-latency"}},
 			},
 		},
 	}
@@ -247,6 +233,7 @@ func teamCoreContacts() []grafanaContactPoint {
 func TestCompetitionAlertRoutingPreservesTheMainPolicyTree(t *testing.T) {
 	contacts := []grafanaContactPoint{
 		{Uid: "main-on-call", Name: "main-on-call", Type: "webhook", Settings: map[string]any{"url": "https://alerts.invalid/main"}},
+		{Uid: DefaultAlertContactUid, Name: DefaultAlertContactName, Type: "slack", Settings: map[string]any{"url": syntheticSlackWebhookUrl}},
 	}
 	policy := map[string]any{
 		"receiver": "main-on-call",
@@ -254,7 +241,7 @@ func TestCompetitionAlertRoutingPreservesTheMainPolicyTree(t *testing.T) {
 		"routes": []any{
 			map[string]any{
 				"receiver":        "main-on-call",
-				"object_matchers": []any{[]any{"team", "=", "core"}},
+				"object_matchers": []any{[]any{"team", "=", "core"}, []any{"service", "!=", "sim-latency"}},
 			},
 		},
 	}
@@ -279,12 +266,12 @@ func TestCompetitionAlertRoutingPreservesTheMainPolicyTree(t *testing.T) {
 			policyWrites++
 		}
 	}
-	if contactWrites != 1 || policyWrites != 2 {
+	if contactWrites != 0 || policyWrites != 2 {
 		t.Fatalf("contact writes = %d, policy writes = %d", contactWrites, policyWrites)
 	}
 	storedContacts, storedPolicy, _ := fake.snapshot()
-	if len(storedContacts) != 2 || storedContacts[1].Uid != CompetitionAlertContactUid ||
-		storedContacts[1].Settings["addresses"] != CompetitionIncidentContact {
+	if len(storedContacts) != 2 || storedContacts[1].Uid != DefaultAlertContactUid ||
+		storedContacts[1].Settings["url"] != syntheticSlackWebhookUrl {
 		t.Fatalf("contacts = %+v", storedContacts)
 	}
 	routes, ok := storedPolicy["routes"].([]any)
@@ -293,7 +280,7 @@ func TestCompetitionAlertRoutingPreservesTheMainPolicyTree(t *testing.T) {
 	}
 	unrelated, _ := routes[0].(map[string]any)
 	managed, _ := routes[1].(map[string]any)
-	if unrelated["receiver"] != "main-on-call" || managed["receiver"] != CompetitionAlertContactName ||
+	if unrelated["receiver"] != "main-on-call" || managed["receiver"] != DefaultAlertContactName ||
 		storedPolicy["receiver"] != "main-on-call" {
 		t.Fatalf("policy = %#v", storedPolicy)
 	}
@@ -306,14 +293,24 @@ func TestCompetitionAlertRoutingPreservesTheMainPolicyTree(t *testing.T) {
 	}
 }
 
-func TestCompetitionAlertRoutingRejectsOwnedNameCollision(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		response.Header().Set("Content-Type", "application/json")
-		_, _ = response.Write([]byte(`[{"uid":"someone-else","name":"sim-latency-support","type":"email","settings":{"addresses":"other@example.com"}}]`))
-	}))
-	defer server.Close()
-	if _, err := ReconcileAlertRouting(context.Background(), server.URL, "admin", "secret", AlertRoutingSettings{}); err == nil {
-		t.Fatal("contact-point name collision was accepted")
+// The retired email name is no longer managed; an operator-owned integration remains untouched.
+func TestCompetitionAlertRoutingPreservesLegacyNameCollision(t *testing.T) {
+	contacts := []grafanaContactPoint{
+		{Uid: "synthetic-other-integration", Name: CompetitionAlertContactName, Type: "email", Settings: map[string]any{"addresses": "operator@notify.example"}},
+		{Uid: DefaultAlertContactUid, Name: DefaultAlertContactName, Type: "slack", Settings: map[string]any{"url": syntheticSlackWebhookUrl}},
+	}
+	fake, server := newFakeAlertingGrafana(t, contacts, map[string]any{"receiver": DefaultAlertContactName})
+	if _, err := ReconcileAlertRouting(context.Background(), server.URL, "admin", "secret", AlertRoutingSettings{}); err != nil {
+		t.Fatal(err)
+	}
+	stored, _, _ := fake.snapshot()
+	if len(stored) != len(contacts) || stored[0].Uid != contacts[0].Uid || stored[0].Settings["addresses"] != contacts[0].Settings["addresses"] {
+		t.Fatal("unmanaged email integration changed")
+	}
+	for _, write := range fake.recordedWrites() {
+		if write.path != "/api/v1/provisioning/policies" {
+			t.Fatalf("contact write: %+v", write)
+		}
 	}
 }
 
@@ -382,7 +379,7 @@ func TestAlertRoutingRoutesUnmatchedAlertsToSlack(t *testing.T) {
 	group, _ := json.Marshal(storedPolicy["group_by"])
 	routes, _ := json.Marshal(storedPolicy["routes"])
 	if string(group) != `["grafana_folder","alertname"]` ||
-		string(routes) != `[{"object_matchers":[["team","=","core"]],"receiver":"team-core"},{"object_matchers":[["service","=","sim-latency"],["severity","=~","warn|page"]],"receiver":"sim-latency-support"}]` {
+		string(routes) != `[{"object_matchers":[["team","=","core"],["service","!=","sim-latency"]],"receiver":"team-core"},{"object_matchers":[["service","=","sim-latency"],["severity","=~","warn|page"]],"receiver":"urnetwork-default"}]` {
 		t.Fatalf("policy = %#v", storedPolicy)
 	}
 
@@ -406,7 +403,8 @@ func TestAlertRoutingRoutesUnmatchedAlertsToSlack(t *testing.T) {
 // Slack contact point, and the result must say that unrouted alerts reach no
 // one so the operator sees it.
 func TestAlertRoutingWithoutSlackWebhookKeepsDefaultReceiver(t *testing.T) {
-	fake, server := newFakeAlertingGrafana(t, teamCoreContacts(), unroutedToNobodyPolicy())
+	contacts := append(teamCoreContacts(), grafanaContactPoint{Uid: DefaultAlertContactUid, Name: DefaultAlertContactName, Type: "slack", Settings: map[string]any{"url": syntheticSlackWebhookUrl}})
+	fake, server := newFakeAlertingGrafana(t, contacts, unroutedToNobodyPolicy())
 
 	result, err := ReconcileAlertRouting(context.Background(), server.URL, "admin", "secret", AlertRoutingSettings{SlackWebhookUrl: "  "})
 	if err != nil {
@@ -496,8 +494,8 @@ func TestAlertRoutingRedactsTheSlackWebhookFromErrors(t *testing.T) {
 }
 
 // Every error ReconcileAlertRouting returns is redacted at its boundary,
-// whichever Grafana write failed: the competition contact point and policy
-// writes quote Grafana's body as well. Redaction comes before the bound, so a
+// whichever Grafana write failed: the native Slack contact point and policy
+// writes quote Grafana's body. Redaction comes before the bound, so a
 // webhook that a 512-byte cut would split is not left half quoted.
 func TestAlertRoutingRedactsEveryErrorAtTheBoundary(t *testing.T) {
 	parsed, err := url.Parse(syntheticSlackWebhookUrl)
@@ -512,9 +510,6 @@ func TestAlertRoutingRedactsEveryErrorAtTheBoundary(t *testing.T) {
 		name string
 		fail func(*fakeAlertingGrafana)
 	}{
-		{name: "competition contact point", fail: func(fake *fakeAlertingGrafana) {
-			fake.failCompetitionContactWrites(http.StatusBadRequest, quoting)
-		}},
 		{name: "policy", fail: func(fake *fakeAlertingGrafana) { fake.failPolicyWrites(http.StatusBadRequest, quoting) }},
 		{name: "long policy", fail: func(fake *fakeAlertingGrafana) { fake.failPolicyWrites(http.StatusBadRequest, split) }},
 		{name: "long Slack contact point", fail: func(fake *fakeAlertingGrafana) {
