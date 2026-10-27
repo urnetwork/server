@@ -42,7 +42,7 @@ import (
 // nothing and is refused.
 
 // The action the ping report's rate limit is recorded under.
-const PingReportRateLimitAction = "ping_report"
+const PingReportRateLimitAction = model.AccountActionExtenderPingReport
 
 // The limits of the ping report, the clock skews it accepts, and how long
 // what it stores is kept and measured (GEOMAP §5.7, D18). The spans

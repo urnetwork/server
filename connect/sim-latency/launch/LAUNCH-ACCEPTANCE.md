@@ -5,27 +5,53 @@ checklist is the acceptance index for the new release, not an authorization to
 activate production. Historical v1 checkmarks do not qualify a different source,
 image, host manifest, policy or review provider.
 
-## Current checkpoint — October 27, 06:17 UTC
+## Current checkpoint — October 27, 07:28 UTC
 
 The following supersedes the provider and baseline-preparation progress in the
 dated bullets below; those bullets retain the earlier qualification history.
 
+- A fresh current-boot containment proof passed at **07:28:32 UTC**: simultaneous
+  CPU saturation of all ten evaluation cores and a 72 GiB memory bomb ended in
+  the expected cgroup OOM exit 137. Reserved-core cleanup took **775 ms** against
+  the 10-second limit; original container/network inventories and the boot ID
+  were unchanged. Receipt `f59fb790…` and supplement `95dee217…` bind actual
+  immutable fixture-image/binary readback. This is the separate hostile fixture,
+  **not** evaluator image `98c9061c…`, and does not grant full host rebaseline,
+  scoring qualification or production activation.
+- Native collection of the actual evaluator-image host facts also completed
+  with the **required negative exit 1**. Fingerprint `08ee3a5a…` binds actual
+  hardware/runtime, 5 GiB evidence profile and the permanent synthetic local
+  leaves. Receipt `128ef88f…` / supplement `5f0260e8…` prove unchanged boot,
+  inventories and active host configuration. No round marker or rebaseline was
+  fabricated: host eligibility and readiness remain false until the real
+  target-round R1/R1 proof passes.
 - The owner approved the [deadline-compatible calibration amendment](CALIBRATION-AMENDMENT-2026-10-27.md):
   one corrected fresh R9/R9 bridge, then two independent seeds with correct
   reference ordering on both. R9, the 26.9% margin, significance, all gates and
   the three-hour submission cap remain unchanged. Three accepted original A/A
   pairs remain preserved. The native two-seed tool is not yet qualified: its
   first full test run exposed a synthetic publication fixture with null
-  required evidence; strict validation correctly refused it. No real draw or
+  required evidence; strict validation correctly refused it. After correcting
+  that fixture, three full 134-test passes completed with zero skips (402 pass
+  entries). Offline qualification receipt `1f4b19a9…` binds exact tested binary
+  `244d5421…`, source base `29b44380…` plus the nine-fragment patch `043b8366…`.
+  Those exact source changes are published in `e31347823`; no different whole-main
+  compiler provenance is claimed. Context-bound native qualification and the
+  final public execution plan remain required. No real draw or
   corrected bridge has started. Production repeat rewards are explicitly
   `allow`; same-round duplicate reuse and fresh per-epoch assessment remain.
 - The [V5 review precommit](SNOW-REVIEW-QUALIFICATION-PRECOMMIT-2026-10-27-V5.json)
   is pushed in `3e36b2432`. The sole genuine attempt started at **06:03:33 UTC**,
   native PID **2763522**, session **81168**. Its independently generated full
-  plan matches the public precommit byte-for-byte. Cancellation passed without
-  approval and all three models approved the benign fixture; fabrication review
-  is running at the observation. This is **not yet
-  provider qualification**. A preceding OS launcher syntax error exited before
+  plan matches the public precommit byte-for-byte. The attempt terminated with
+  exit 1 after 2,723.93 seconds: cancellation, benign, fabrication and benchmark
+  cases passed; the injected-comment case failed closed and case six did not
+  run. The fixture mutation left contradictory patch hashes, and the schema
+  offered operator-only reason codes that native validation rejected. The
+  original responses/report (`bb22b154…`) remain retained. Identity/schema
+  corrections and deterministic regressions must pass before a new published
+  qualification attempt. This is **not provider qualification**.
+  A preceding OS launcher syntax error exited before
   native execution or provider calls; its logs remain separate and preserved.
   No automatic provider retry or timed-scoring overlap is authorized.
 - Clean control source `fb5054121` with Warp `1ea3a31` completed three race

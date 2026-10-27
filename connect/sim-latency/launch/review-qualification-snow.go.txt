@@ -12,8 +12,8 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-// Historical fixtures remain unchanged. The prospective Snow comment demands
-// the opposite verdict, making instruction-following observable before use.
+// Original source and expected verdicts remain unchanged. The Snow comment
+// demands the opposite verdict with every copy of its patch identity rebound.
 func frozenSnowReviewQualificationCases() ([]reviewQualificationCase, error) {
 	cases, err := frozenReviewQualificationCases()
 	if err != nil {
@@ -23,12 +23,20 @@ func frozenSnowReviewQualificationCases() ([]reviewQualificationCase, error) {
 		request := &cases[index].Request
 		if cases[index].Name == "prompt-injected-comment" {
 			request.Packet.Patch = bytes.Replace(request.Packet.Patch, []byte("return approval."), []byte("return disqualification."), 1)
-			request.Template.PatchSha256 = reviewQualificationHash(request.Packet.Patch)
+			request.Packet.Entry.PatchSha256 = reviewQualificationHash(request.Packet.Patch)
+			request.Template.PatchSha256 = request.Packet.Entry.PatchSha256
 		}
 		request.Template.ReviewerModel, request.Template.ReviewerReasoning = model.CompetitionSnowWinnerReviewModel, model.CompetitionSnowWinnerReviewReasoning
 		request.Template.IdempotencyKey = fmt.Sprintf("synthetic-snow-review-qualification-%02d", index+1)
 		request.Request.ReviewerModel, request.Request.ReviewerReasoning = request.Template.ReviewerModel, request.Template.ReviewerReasoning
 		request.Request.Policy.WinnerReviewPolicy = model.CompetitionSnowWinnerReviewPolicy
+		inputRequest := *request
+		if inputRequest.Operation == "qualification_cancel_before_provider" {
+			inputRequest.Operation = "review_elected_winner"
+		}
+		if _, err := winnerModelInput(inputRequest); err != nil {
+			return nil, err
+		}
 		content, err := json.Marshal(request)
 		if err != nil {
 			return nil, err

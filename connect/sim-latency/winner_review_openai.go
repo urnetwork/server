@@ -13,10 +13,12 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"reflect"
 	"strings"
 	"time"
 
 	"github.com/docopt/docopt-go"
+	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
 )
@@ -104,6 +106,9 @@ func winnerModelInput(request winnerReviewBrokerRequest) ([]byte, error) {
 		request.Template.ReviewerModel != modelName || request.Template.ReviewerReasoning != reasoning {
 		return nil, errors.New("review broker requires the pinned authenticated protocol")
 	}
+	if err := validateWinnerModelInputIdentity(request); err != nil {
+		return nil, err
+	}
 	if request.Packet.PatchPolicy.PathBase != "" {
 		lockDigest, err := model.CompetitionSourceLockDigestForMode(request.Packet.SourceCommits, request.Packet.Seal.Staging)
 		if request.Packet.PatchPolicy.PathBase != "mono_root_v1" || err != nil || lockDigest != request.Template.BaseSourceLockSha256 || request.Packet.SourceCommits["server"] != request.Packet.BaseSha {
@@ -152,10 +157,70 @@ func winnerModelInput(request winnerReviewBrokerRequest) ([]byte, error) {
 	metadata.Patch, metadata.Score = nil, nil
 	request.Packet = &metadata
 	return json.Marshal(struct {
-		Context winnerReviewBrokerRequest `json:"context"`
-		Patch   string                    `json:"patch_text"`
-		Score   json.RawMessage           `json:"score"`
-	}{Context: request, Patch: patch, Score: score})
+		Context             winnerReviewBrokerRequest `json:"context"`
+		SourceFileSemantics string                    `json:"source_files_semantics"`
+		Patch               string                    `json:"patch_text"`
+		Score               json.RawMessage           `json:"score"`
+	}{Context: request, SourceFileSemantics: "context.source_files contains authenticated pristine source at the frozen base, before patch_text is applied. It is not post-patch candidate source. Added or changed lines are expected to be absent from pristine base content. absent_at_base marks a file that did not exist at that base.", Patch: patch, Score: score})
+}
+
+// Duplicate authenticated identities must agree before either provider sees
+// evidence. This is consistency validation, not a substitute for parent trust.
+func validateWinnerModelInputIdentity(request winnerReviewBrokerRequest) error {
+	packet, template, review := request.Packet, request.Template, request.Request
+	if packet == nil || review.RoundId == (server.Id{}) || review.JobId == (server.Id{}) ||
+		review.RoundId != packet.Seal.RoundId || review.JobId != packet.Entry.JobId || review.JobId != template.JobId ||
+		!packet.Entry.Eligible || packet.Entry.State != "succeeded" || packet.Entry.IneligibilityReason != "" ||
+		review.RewardRevision <= 0 || review.RewardRevision != packet.RewardRevision || review.RewardRevision != template.ExpectedRevision ||
+		!validSha256(review.SealSha256) || review.SealSha256 != packet.Seal.SealSha256 ||
+		!validSha256(review.RewardDecisionSha256) || review.RewardDecisionSha256 != template.ExpectedDecisionSha256 ||
+		review.CriteriaVersion == "" || review.CriteriaVersion != packet.ReviewCriteriaVersion || review.CriteriaVersion != template.CriteriaVersion || review.CriteriaVersion != review.Policy.ReviewCriteriaVersion {
+		return errors.New("review broker selected entry and elected request identity are inconsistent")
+	}
+	for _, pair := range []struct{ entry, template string }{
+		{entry: packet.Entry.PatchSha256, template: template.PatchSha256},
+		{entry: packet.Entry.ScoreSha256, template: template.ScoreSha256},
+		{entry: packet.Entry.BaseSourceLockSha256, template: template.BaseSourceLockSha256},
+		{entry: packet.Entry.ArtifactManifestSha256, template: template.ArtifactManifestSha256},
+		{entry: packet.Seal.BaselineSha256, template: template.BaselineSha256},
+	} {
+		if !validSha256(pair.entry) || pair.entry != pair.template {
+			return errors.New("review broker selected entry evidence identity is inconsistent")
+		}
+	}
+	if len(packet.Seal.Entries) != 0 {
+		matches := 0
+		for _, entry := range packet.Seal.Entries {
+			if entry.JobId == review.JobId {
+				matches++
+				if !reflect.DeepEqual(entry, packet.Entry) {
+					return errors.New("review broker selected entry differs from its sealed inventory")
+				}
+			}
+		}
+		if matches != 1 {
+			return errors.New("review broker selected entry is absent or duplicated in its sealed inventory")
+		}
+	}
+	if packet.Entry.Score != nil {
+		var score model.CompetitionScoreResult
+		if json.Unmarshal(packet.Score, &score) != nil {
+			return errors.New("review broker sealed score differs from its authenticated bytes")
+		}
+		actual, actualErr := model.CompetitionAutomationDigest(score)
+		expected, expectedErr := model.CompetitionAutomationDigest(packet.Entry.Score)
+		if actualErr != nil || expectedErr != nil || actual != expected {
+			return errors.New("review broker sealed score differs from its authenticated bytes")
+		}
+		for key, expected := range map[string]string{"round_id": review.RoundId.String(), "baseline_sha256": template.BaselineSha256} {
+			if value, present := score.Diagnostics[key]; present {
+				if actual, ok := value.(string); !ok || actual != expected {
+					return errors.New("review broker score diagnostics contradict the elected round or baseline")
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // Reads streamed events within independent total and per-event bounds. Only a

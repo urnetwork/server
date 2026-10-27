@@ -65,12 +65,10 @@ const (
 	// still leave four seconds of the activation budget for the rest.
 	ExtenderActivateDnsPortProbeTimeout = 3 * time.Second
 
-	// Activation attempts per client per hour (C2). An activation costs the
-	// operator several dials back to the caller, so the budget is what stops
-	// one client from using the api as a probe engine.
-	ExtenderActivateRateLimitAction = "extender_activate"
-	ExtenderActivateRateLimit       = 6
-	ExtenderActivateRateLimitWindow = time.Hour
+	// The actions the activation budgets are recorded under
+	// (ExtenderActivateSettings): the calling client's, and its account's.
+	ExtenderActivateRateLimitAction        = model.AccountActionExtenderActivate
+	ExtenderActivateAccountRateLimitAction = model.AccountActionExtenderActivateAccount
 
 	// Records of other extenders returned with an activation (C2).
 	ExtenderBootstrapCount = 8
@@ -81,6 +79,36 @@ const (
 	// test.
 	ExtenderProbeDestinationPort = 443
 )
+
+// The activation budgets (C2). An activation costs the operator several dials
+// back to the caller, so the budgets are what stop a client, or an account's
+// many clients, from using the api as a probe engine.
+//
+// The budget C2 specifies is each client's own. It was keyed by the account,
+// so all of an account's providers shared six activations an hour: each
+// activates both families on its own schedule, and a second device was
+// refused for the first one's retries, "for this action today" (support inbox
+// 8051). The account keeps a budget of its own, ten clients' worth, so
+// creating more clients does not multiply what one account can probe.
+type ExtenderActivateSettings struct {
+	// activations per client per window. A client posts one activation per
+	// family a pass, and a refused pass backs off ten minutes doubling
+	// (connect/net_extender_activate.go), so a dual-stack client that keeps
+	// failing posts six in its first hour and fewer after
+	ClientRateLimit int
+	// activations per account per window, over all of its clients. A client
+	// refused by its own budget does not spend this one.
+	AccountRateLimit int
+	RateLimitWindow  time.Duration
+}
+
+func DefaultExtenderActivateSettings() *ExtenderActivateSettings {
+	return &ExtenderActivateSettings{
+		ClientRateLimit:  6,
+		AccountRateLimit: 60,
+		RateLimitWindow:  time.Hour,
+	}
+}
 
 // Probe dial settings, built once: they carry the platform tls roots, which
 // are expensive to load and identical for every probe.
@@ -332,6 +360,14 @@ func ExtenderActivate(
 	args *ExtenderActivateArgs,
 	clientSession *session.ClientSession,
 ) (*ExtenderActivateResult, error) {
+	return extenderActivate(args, clientSession, DefaultExtenderActivateSettings())
+}
+
+func extenderActivate(
+	args *ExtenderActivateArgs,
+	clientSession *session.ClientSession,
+	settings *ExtenderActivateSettings,
+) (*ExtenderActivateResult, error) {
 	refuse := func(message string) (*ExtenderActivateResult, error) {
 		return &ExtenderActivateResult{
 			Activated: false,
@@ -450,12 +486,22 @@ func ExtenderActivate(
 		return refuse(extenderConfigRefusal(err))
 	}
 
+	// the calling client's budget, then its account's (ExtenderActivateSettings)
+	if err := model.CheckAndRecordAccountActionRateLimit(
+		clientSession.Ctx,
+		*clientSession.ByJwt.ClientId,
+		ExtenderActivateRateLimitAction,
+		settings.ClientRateLimit,
+		settings.RateLimitWindow,
+	); err != nil {
+		return refuse(err.Error())
+	}
 	if err := model.CheckAndRecordAccountActionRateLimit(
 		clientSession.Ctx,
 		clientSession.ByJwt.UserId,
-		ExtenderActivateRateLimitAction,
-		ExtenderActivateRateLimit,
-		ExtenderActivateRateLimitWindow,
+		ExtenderActivateAccountRateLimitAction,
+		settings.AccountRateLimit,
+		settings.RateLimitWindow,
 	); err != nil {
 		return refuse(err.Error())
 	}

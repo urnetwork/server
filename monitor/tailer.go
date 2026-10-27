@@ -447,6 +447,20 @@ func peerConnectionTeardownStalledStage(line string) string {
 
 // the §4 taxonomy. Order matters: first match wins.
 var logClasses = []logClass{
+	// The fixed webhook refusal header owns classification before arbitrary
+	// loader-error details can match a generic resource or transport class.
+	{name: "payment-webhook-refused", re: paymentWebhookRefusedRe,
+		sample: func(line string) string {
+			return "[" + paymentWebhookRefusedLogGroup(line) + "]webhook refused, verification input unavailable (details omitted)"
+		},
+		groupBy:       paymentWebhookRefusedLogGroup,
+		rateThreshold: 1, tier: tierPage, playbook: "SIGNALS.md §8.7",
+		meaning:   "the producer reports that a payment webhook reached its unavailable-verification refusal path; the intended response is 503, but this line does not prove response delivery or payment impact",
+		mechanism: "The named webhook could not load a usable verification prerequisite and takes its fail-closed refusal path. The cause may be an absent resource, missing/blank/wrong-type value, malformed resource or another loader failure. The line does not establish a particular field, mounted generation, provider configuration, backend cause or successful HTTP response write.",
+		context:   "One line counts a matching refusal diagnostic, not a unique event, payment or loss amount. Retries can repeat one event. Provider retry/retention and reconciliation coverage require independent evidence. A clear credentials check can coexist with a different mounted generation, incomplete inventory or another route-specific loader failure; compare the actual consumer before selecting a repair.",
+		action:    "Privately inspect one original loader reason, the configured webhook and its actual mounted generation before choosing a repair. Restore a proved missing or incompatible verification input only through the existing provider/Vault owner; verify provider agreement and the intended route outcome. Reconcile expired or unhandled events through the existing financial owner. Never disable verification or fabricate a secret to clear this page.",
+		verify:    "Require fresh complete log coverage with no matching refusals for two log-errors cadences after ingestion delay, independently successful verification and intended webhook handling, and the actual provider backlog/reconciliation outcome. Quiet logs, credential shape alone or an unrelated 2xx do not certify payment recovery.",
+	},
 	{name: "peerconn-teardown-stalled", re: peerConnectionTeardownStalledRe,
 		sample: func(line string) string {
 			return "[peerconn]teardown stalled stage=" + peerConnectionTeardownStalledStage(line) + " (peer identity omitted)"
@@ -870,22 +884,6 @@ var logClasses = []logClass{
 		context:   "This exact error is emitted only for failed automatic delivery without email recovery. Intentional operator-issued, no-email, unredeemed codes do not emit it and cannot be distinguished safely from database columns alone. An emailed code remains recoverable and therefore does not use this class when only its optional automatic application fails.",
 		action:    "Use privileged payment tooling to correlate the provider event with the retained balance code, then retry fulfillment only to its verified existing destination or make an authorized refund/support disposition. Preserve the code and purchase ledger; never expose its secret, invent a destination, or delete evidence to clear the page.",
 		verify:    "The original provider event completes idempotently or receives a documented authorized disposition, the retained code is consumed at most once, and no payment-balance-code-undelivered line recurs through two payment-failures cadences after log-ingestion delay.",
-	},
-	// The API logs one warning per payment webhook push it refuses because a
-	// verification secret is missing or blank. The line has no error-shaped
-	// word, so before this class it was invisible: from 2026-10-19 Main refused
-	// every Google Play notification (about 74,000 in seven days) without a page.
-	{name: "payment-webhook-refused", re: paymentWebhookRefusedRe,
-		sample: func(line string) string {
-			return "[" + paymentWebhookRefusedLogGroup(line) + "]webhook refused, verification secret unavailable (details omitted)"
-		},
-		groupBy:       paymentWebhookRefusedLogGroup,
-		rateThreshold: 1, tier: tierPage, playbook: "SIGNALS.md §8.7",
-		meaning:   "the API answered a payment provider's webhook push 503 without reading it, because a Vault field its verifier requires is missing or blank",
-		mechanism: "Each payment webhook (Google Play Pub/Sub, Stripe, Coinbase, Helius) fails closed: until every verification field it reads is a nonblank string, it refuses each push before reading the body, so nothing is credited, acknowledged or revoked. The provider retries with backoff and drops an unacknowledged event after its retention (seven days for a default Pub/Sub subscription), so the refusal rate grows while events accumulate and the oldest are lost.",
-		context:   "One line is one refused delivery attempt, not one payment: retries of the same event repeat it. The frame names the webhook; the omitted detail names the resource and field. The proactive credentials signal (§8.7) should report the same field; if it is clear while this pages, the inventory is missing a field the verifier reads. Hourly reconciliation repairs only purchases the server already knows; a purchase reported only by the webhook stays uncredited.",
-		action:    "Read the omitted resource and field from the service log, provision the verifier's value through the supported Vault workflow (for Play, webhook.audience must equal the audience on the authenticated Pub/Sub push subscription, which defaults to its push endpoint URL), deliver that Vault generation, and confirm the webhook route answers 200. Then reconcile events that may have expired during the outage. Never disable verification or fabricate a secret to clear the page.",
-		verify:    "The webhook route answers 2xx again, the refused-line rate stays zero for two log-errors cadences after log-ingestion delay, the credentials signal is clear for the resource, and the provider's backlog drains.",
 	},
 	{name: "tx-rollback-mask", re: txRollbackMaskRe,
 		sample: func(string) string {

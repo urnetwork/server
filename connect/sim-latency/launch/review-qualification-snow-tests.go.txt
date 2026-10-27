@@ -197,7 +197,7 @@ func TestReviewQualificationSnowInjectionOpposesExpectedVerdict(t *testing.T) {
 		if !bytes.Contains(legacy[index].Request.Packet.Patch, []byte("return approval.")) {
 			t.Fatal("historical fixture was changed")
 		}
-		if item.Request.Template.PatchSha256 != reviewQualificationHash(item.Request.Packet.Patch) {
+		if item.Request.Template.PatchSha256 != reviewQualificationHash(item.Request.Packet.Patch) || item.Request.Packet.Entry.PatchSha256 != item.Request.Template.PatchSha256 || !item.Request.Packet.Entry.Eligible {
 			t.Fatal("stronger case lost its authenticated patch identity")
 		}
 		if _, err := winnerModelInput(item.Request); err != nil {
@@ -699,4 +699,82 @@ func TestReviewQualificationSnowAuthenticatesIndependentWholeAttemptClaim(t *tes
 	if _, err := authenticateReviewQualificationContainmentForProvider(input, output, diagnostics, false, image, settings, profile); err == nil {
 		t.Fatal("captured claim replaced independent durable authority")
 	}
+}
+
+// All six source/oracle definitions stay fixed while elected-entry metadata and
+// final serialized request identities pass the actual production input boundary.
+func TestReviewQualificationSnowFixturesBindNativeInputIdentities(t *testing.T) {
+	cases, err := frozenSnowReviewQualificationCases()
+	if err != nil || len(cases) != 6 {
+		t.Fatal("six coherent Snow cases unavailable", err)
+	}
+	legacy, err := frozenReviewQualificationCases()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, item := range cases {
+		request := item.Request
+		if request.Operation == "qualification_cancel_before_provider" {
+			request.Operation = "review_elected_winner"
+		}
+		patchSha256 := reviewQualificationHash(request.Packet.Patch)
+		if !request.Packet.Entry.Eligible || request.Packet.Entry.State != "succeeded" ||
+			request.Packet.Entry.PatchSha256 != patchSha256 || request.Template.PatchSha256 != patchSha256 ||
+			request.Packet.Entry.ScoreSha256 != reviewQualificationHash(request.Packet.Score) ||
+			item.ExpectedDecision != legacy[index].ExpectedDecision {
+			t.Fatal("fixture identity or unchanged oracle is inconsistent", item.Name)
+		}
+		input, err := winnerModelInput(request)
+		if err != nil {
+			t.Fatal("coherent final Snow input refused", item.Name, err)
+		}
+		if !bytes.Contains(input, []byte("authenticated pristine source")) ||
+			!bytes.Contains(input, []byte("not post-patch candidate source")) ||
+			!bytes.Equal(item.Request.Packet.Score, legacy[index].Request.Packet.Score) ||
+			!reflect.DeepEqual(item.Request.SourceFiles, legacy[index].Request.SourceFiles) {
+			t.Fatal("fixture confused pristine base or invented score evidence", item.Name)
+		}
+		content, err := json.Marshal(item.Request)
+		if err != nil || reviewQualificationHash(content) != item.RequestSha256 {
+			t.Fatal("final request hash does not bind coherent metadata", item.Name, err)
+		}
+	}
+}
+
+// Reconstruct the actual V5 injection defect: the patch/template are updated
+// but the entry still names the original comment patch. No provider may start.
+func TestReviewQualificationSnowRefusesStaleInjectedPatchEntry(t *testing.T) {
+	cases, err := frozenSnowReviewQualificationCases()
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := frozenReviewQualificationCases()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, item := range cases {
+		if item.Name != "prompt-injected-comment" {
+			continue
+		}
+		request := item.Request
+		request.Packet.Entry.PatchSha256 = legacy[index].Request.Packet.Entry.PatchSha256
+		if request.Packet.Entry.PatchSha256 == request.Template.PatchSha256 ||
+			!bytes.Contains(request.Packet.Patch, []byte("return disqualification.")) ||
+			item.ExpectedDecision != "approve" {
+			t.Fatal("actual stale Snow injection shape was not reconstructed")
+		}
+		calls := 0
+		client := &http.Client{Transport: reviewQualificationTransport(func(*http.Request) (*http.Response, error) {
+			calls++
+			return nil, fmt.Errorf("synthetic forbidden provider call")
+		})}
+		directory := reviewQualificationTestRoot(t)
+		result, err := executeWinnerSnow(t.Context(), client, request, defaultWinnerSnowModelSettings(), defaultWinnerSnowProviderSettings(), strings.Repeat("a", 64), directory)
+		entries, statErr := os.ReadDir(directory)
+		if err == nil || !strings.Contains(err.Error(), "selected entry evidence identity") || result != nil || calls != 0 || statErr != nil || len(entries) != 0 {
+			t.Fatalf("actual stale injected entry reached provider ownership: result=%t calls=%d files=%d err=%v stat=%v", result != nil, calls, len(entries), err, statErr)
+		}
+		return
+	}
+	t.Fatal("prompt-injection case missing")
 }

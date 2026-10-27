@@ -177,7 +177,7 @@ func TestWinnerSnowReviewBudgetReachesLoopbackFrontend(t *testing.T) {
 	if err != nil || result == nil || len(captures) != 3 {
 		t.Fatal("serial synthetic producer did not complete exactly three calls", err)
 	}
-	schema, err := json.Marshal(winnerSnowModelSchema())
+	schema, err := json.Marshal(winnerSnowModelSchema(request.Request.Policy))
 	if err != nil {
 		t.Fatal(err)
 	}

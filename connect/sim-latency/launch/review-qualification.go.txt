@@ -268,7 +268,7 @@ func frozenReviewQualificationCases() ([]reviewQualificationCase, error) {
 		jobId, roundId := server.Id{0: byte(index + 1), 15: 1}, server.Id{0: byte(index + 1), 15: 2}
 		packet := &controller.CompetitionSourceReviewPacket{Patch: patch, Score: score, PatchPolicy: policy, BaseSha: commits["server"], SourceCommits: commits, ReviewCriteriaVersion: "review/v2", RewardRevision: 1,
 			Seal:  model.CompetitionEvaluationSeal{RoundId: roundId, Environment: "synthetic-review-qualification", CompetitionId: "synthetic-review-qualification", BaselineSha256: reviewQualificationHash([]byte("synthetic-control")), SealSha256: reviewQualificationHash([]byte(fmt.Sprintf("synthetic-seal-%02d", index)))},
-			Entry: model.CompetitionSealedEntry{JobId: jobId, PatchSha256: reviewQualificationHash(patch), ScoreSha256: reviewQualificationHash(score), BaseSourceLockSha256: lock, ArtifactManifestSha256: reviewQualificationHash([]byte("synthetic-artifact-manifest"))}}
+			Entry: model.CompetitionSealedEntry{JobId: jobId, State: "succeeded", Eligible: true, PatchSha256: reviewQualificationHash(patch), ScoreSha256: reviewQualificationHash(score), BaseSourceLockSha256: lock, ArtifactManifestSha256: reviewQualificationHash([]byte("synthetic-artifact-manifest"))}}
 		template := sourceReviewTemplate(packet)
 		template.IdempotencyKey = fmt.Sprintf("synthetic-review-qualification-%02d", index+1)
 		template.ExpectedDecisionSha256 = reviewQualificationHash([]byte(fmt.Sprintf("synthetic-decision-%02d", index+1)))
