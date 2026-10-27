@@ -30,13 +30,20 @@ a decision. Review and promotion do not require an agent to poll a running job.
 Qwen, Gemma and Muse must all approve; retain the union of their findings.
 Historical Mini and Sol/max policy records remain unchanged. Independent tests use Sol
 6.1 low; implementation/debugging/merges use Sol 6.1 max. The accepted
-three-pair reduction freezes 26.9% prospectively; the fresh instrument bridge,
-two independent seeds with correct reference ordering on both, and live readiness
-remain required. See the
+three-pair reduction freezes 26.9% prospectively. The corrected R9/R9 bridge
+has native acceptance as an operational witness, not proof of statistical
+equivalence. The owner approved measuring only the first of two prospectively
+committed independent seeds; all three reference jobs and correct ordering on that seed and
+live readiness remain required. See the
 [margin freeze](launch/CALIBRATION-THREE-A-FREEZE-2026-10-26.md) and the approved
-[two-seed amendment](launch/CALIBRATION-AMENDMENT-2026-10-27.md).
-The corrected bridge is running, not accepted. A further one-seed amendment has
-been requested but is not approved; do not silently reduce the required evidence.
+[first-seed amendment](launch/CALIBRATION-AMENDMENT-2026-10-27-FIRST-SEED.md).
+The second seed remains unstarted. The first attempt failed during source
+extraction before measurements because its management cap was too small.
+The owner explicitly approved the independently qualified, artifact-preserving
+[recovery](launch/UNMEASURED-MANAGEMENT-OOM-2026-10-27.md), an 8 GiB management
+cap, and a fresh three-hour first-job deadline. The recovered run is active;
+its nine controls are complete, but the reference screen is not yet accepted.
+R9, all evaluation gates, significance and the practical margin are unchanged.
 
 Production admission costs $20 and has no submission-count ceiling. Each round
 gets one authenticated nine-run control baseline shared by all its submissions;
@@ -53,6 +60,15 @@ before that instant. Later rounds receive full weekly windows after actual
 review/build/readiness, not speculative fixed start dates. Production activation,
 fresh calibration, genuine review/build-broker qualification, artifact and
 monitoring verification, and adapter acceptance remain explicit launch gates.
+The prepared bootstrap requires reserving that initial opening before midnight
+and cannot overlap the active timed calibration. The current qualified path
+cannot establish readiness by the requested opening; do not backdate activation
+or silently change the schedule. See the
+[verified bootstrap constraints](launch/BOOTSTRAP-PREPARATION-NOTES-2026-10-27.md).
+For automated v2, six completed epochs and their queue drains/reviews determine
+completion; the configured January 1 season date is not a guarantee that an
+unbounded grading backlog has finished by then. Each successor receives a full
+seven-day intake window after actual preparation.
 Historical successful tests or qualification do not satisfy a new exact image.
 
 Runtime policy authority is `config/main/competition.yml`; source/threshold
