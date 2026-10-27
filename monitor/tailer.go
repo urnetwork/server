@@ -871,6 +871,22 @@ var logClasses = []logClass{
 		action:    "Use privileged payment tooling to correlate the provider event with the retained balance code, then retry fulfillment only to its verified existing destination or make an authorized refund/support disposition. Preserve the code and purchase ledger; never expose its secret, invent a destination, or delete evidence to clear the page.",
 		verify:    "The original provider event completes idempotently or receives a documented authorized disposition, the retained code is consumed at most once, and no payment-balance-code-undelivered line recurs through two payment-failures cadences after log-ingestion delay.",
 	},
+	// The API logs one warning per payment webhook push it refuses because a
+	// verification secret is missing or blank. The line has no error-shaped
+	// word, so before this class it was invisible: from 2026-10-19 Main refused
+	// every Google Play notification (about 74,000 in seven days) without a page.
+	{name: "payment-webhook-refused", re: paymentWebhookRefusedRe,
+		sample: func(line string) string {
+			return "[" + paymentWebhookRefusedLogGroup(line) + "]webhook refused, verification secret unavailable (details omitted)"
+		},
+		groupBy:       paymentWebhookRefusedLogGroup,
+		rateThreshold: 1, tier: tierPage, playbook: "SIGNALS.md §8.7",
+		meaning:   "the API answered a payment provider's webhook push 503 without reading it, because a Vault field its verifier requires is missing or blank",
+		mechanism: "Each payment webhook (Google Play Pub/Sub, Stripe, Coinbase, Helius) fails closed: until every verification field it reads is a nonblank string, it refuses each push before reading the body, so nothing is credited, acknowledged or revoked. The provider retries with backoff and drops an unacknowledged event after its retention (seven days for a default Pub/Sub subscription), so the refusal rate grows while events accumulate and the oldest are lost.",
+		context:   "One line is one refused delivery attempt, not one payment: retries of the same event repeat it. The frame names the webhook; the omitted detail names the resource and field. The proactive credentials signal (§8.7) should report the same field; if it is clear while this pages, the inventory is missing a field the verifier reads. Hourly reconciliation repairs only purchases the server already knows; a purchase reported only by the webhook stays uncredited.",
+		action:    "Read the omitted resource and field from the service log, provision the verifier's value through the supported Vault workflow (for Play, webhook.audience must equal the audience on the authenticated Pub/Sub push subscription, which defaults to its push endpoint URL), deliver that Vault generation, and confirm the webhook route answers 200. Then reconcile events that may have expired during the outage. Never disable verification or fabricate a secret to clear the page.",
+		verify:    "The webhook route answers 2xx again, the refused-line rate stays zero for two log-errors cadences after log-ingestion delay, the credentials signal is clear for the resource, and the provider's backlog drains.",
+	},
 	{name: "tx-rollback-mask", re: txRollbackMaskRe,
 		sample: func(string) string {
 			return "txWithPool rollback cleanup replaced an existing transaction error (details omitted)"
@@ -1416,6 +1432,19 @@ func logTimestampSecond(line string) string {
 
 var requiredVaultResourceRe = regexp.MustCompile(`Resource not found in vault \(([^\)]+\.yml)\)`)
 var requiredVaultRouteRe = regexp.MustCompile(`route ([A-Z]+) \^?([^$:\s]+)\$?:`)
+
+// subscription_handlers.go webhookVerifiable and the webhook body verifiers:
+// `[<webhook>]webhook refused, verification <secret|publisher|audience> unavailable: ...`
+var paymentWebhookRefusedRe = regexp.MustCompile(`\[(play|stripe|coinbase|helius)\]webhook refused, verification [a-z]+ unavailable`)
+
+// The refused webhook's bounded name; the resource and field stay in the service log.
+func paymentWebhookRefusedLogGroup(line string) string {
+	if match := paymentWebhookRefusedRe.FindStringSubmatch(line); len(match) > 1 {
+		return match[1]
+	}
+	return "unknown"
+}
+
 var netEscrowNegativeSiteRe = regexp.MustCompile(`\[netescrow\]negative counter after ([a-z][a-z -]{0,40}):`)
 var netEscrowClampMarkerRe = regexp.MustCompile(`\bclamped_to=[^\s]+`)
 var lokiTailBackendAddrRe = regexp.MustCompile(`[[:space:]]addr=("[^"]+"|[^[:space:]]+)`)

@@ -9,11 +9,17 @@
 // refusal as a failed control round trip, which also feeds its process-wide
 // degraded-backend gate, and its send sequence asks again on its own 1 to 5 s
 // schedule. Control that closes or settles state is never refused.
+//
+// The process exports the slots its creations hold and the slots its bounds
+// have, summed over the bounds its owners have open, so a dashboard reads the
+// headroom beside the refusals. A slot counts from its acquire to its release,
+// a release run by a panic's unwinding included.
 package localclient
 
 import (
 	"encoding/base64"
 	"net/http"
+	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/protobuf/proto"
@@ -31,24 +37,59 @@ var contractAdmissionRefusals = prometheus.NewCounter(
 	},
 )
 
+var contractAdmissionInUse = prometheus.NewGauge(
+	prometheus.GaugeOpts{
+		Namespace: "urnetwork",
+		Subsystem: "hosted",
+		Name:      "contract_admission_in_use",
+		Help:      "Hosted contract creation control calls holding a slot of their owner's concurrent contract creation bound",
+	},
+)
+
+var contractAdmissionCapacity = prometheus.NewGauge(
+	prometheus.GaugeOpts{
+		Namespace: "urnetwork",
+		Subsystem: "hosted",
+		Name:      "contract_admission_capacity",
+		Help:      "Slots of the concurrent contract creation bounds that this process's hosted owners have open",
+	},
+)
+
 func init() {
 	prometheus.MustRegister(contractAdmissionRefusals)
+	prometheus.MustRegister(contractAdmissionInUse)
+	prometheus.MustRegister(contractAdmissionCapacity)
 }
 
 // The concurrent contract creation bound shared by the authorities of one
 // owner. A nil admission admits everything. Safe for concurrent use.
 type ContractAdmission struct {
-	slots chan struct{}
+	slots     chan struct{}
+	closeOnce sync.Once
 }
 
-// Nonpositive `maxConcurrentCount` returns nil, which admits everything.
+// Nonpositive `maxConcurrentCount` returns nil, which admits everything. The
+// bound's slots count toward the process capacity until Close.
 func NewContractAdmission(maxConcurrentCount int) *ContractAdmission {
 	if maxConcurrentCount <= 0 {
 		return nil
 	}
+	contractAdmissionCapacity.Add(float64(maxConcurrentCount))
 	return &ContractAdmission{
 		slots: make(chan struct{}, maxConcurrentCount),
 	}
+}
+
+// Withdraws the bound's slots from the process capacity. The owner calls it
+// once every authority that creates contracts through the bound has stopped;
+// a later creation is still bounded and counted in use. Idempotent.
+func (self *ContractAdmission) Close() {
+	if self == nil {
+		return
+	}
+	self.closeOnce.Do(func() {
+		contractAdmissionCapacity.Sub(float64(cap(self.slots)))
+	})
 }
 
 // Takes a slot without waiting. A true return must be paired with release.
@@ -58,6 +99,7 @@ func (self *ContractAdmission) tryAcquire() bool {
 	}
 	select {
 	case self.slots <- struct{}{}:
+		contractAdmissionInUse.Inc()
 		return true
 	default:
 		contractAdmissionRefusals.Inc()
@@ -70,6 +112,7 @@ func (self *ContractAdmission) release() {
 		return
 	}
 	<-self.slots
+	contractAdmissionInUse.Dec()
 }
 
 // A pack is bounded only when every frame creates a contract. A close, a
@@ -107,4 +150,12 @@ func contractAdmissionRefusedError() error {
 // tests.
 func (self *Authority) Testing_ContractAdmission() *ContractAdmission {
 	return self.contractAdmission
+}
+
+// The bound's slots, zero for nil (no bound), for owner wiring tests.
+func (self *ContractAdmission) Testing_Capacity() int {
+	if self == nil {
+		return 0
+	}
+	return cap(self.slots)
 }
