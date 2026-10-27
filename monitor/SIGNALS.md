@@ -28163,6 +28163,30 @@ Vault rollout, a fresh API process, and a state/nonce/audience-checked browser
 round trip; `/hello` and a successful native mobile login are not controls for
 the browser code-exchange path.
 
+The 2026-10-26 production config audit found a payment false negative.
+Server 49b11f84e (2026-10-16) made the Google Play webhook bind each Pub/Sub
+push token to `google.yml` `webhook.audience`, and refuse every push while that
+field is missing or blank. The inventory's `google-payment` requirement did not
+list the field. Main's `google.yml` had none, so from the 2026-10-19 API roll
+every Play notification at `POST /pay/play` was answered 503 (about 74,000
+refusals and no acceptance in seven days) while `credentials` stayed clear.
+`google-payment` now requires `webhook.audience`. That value must equal the
+audience on the authenticated push subscription; Google defaults it to the push
+endpoint URL. A control builds each payment webhook's resource from the
+inventory's own field list and requires that webhook's verifier to accept it,
+so a verifier that starts reading a new field fails the build until the
+inventory lists it.
+
+The refusal itself was invisible to `log-errors`: the warning
+`[<webhook>]webhook refused, verification <secret|publisher|audience>
+unavailable: <resource>: <field> is missing` contains no error-shaped word, so
+it was neither classified nor novel. The `payment-webhook-refused` log class
+pages on one line, framed by webhook (play, stripe, coinbase, helius). Its
+sample omits the resource and field. One line is one refused delivery attempt,
+not one payment: providers retry with backoff. A default Pub/Sub subscription
+drops an unacknowledged event after seven days, and hourly reconciliation
+repairs only purchases the server already knows.
+
 The 2026-10-16 source audit found a readiness false negative: the generic
 nonempty-value check accepted nonstring YAML values that the Google browser
 exchange rejects. Its `sign_in_oauth.client_id` and `client_secret` must each

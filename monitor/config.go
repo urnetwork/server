@@ -795,6 +795,9 @@ func loadCredentialRequirements(environment string, stConfiguredEnabled bool, se
 			key: "google-payment", resource: "google.yml", purpose: "Google Play subscription notification and reconciliation", required: required,
 			fields: []credentialFieldSpec{
 				field("webhook.publisher_email", "webhook", "publisher_email"),
+				// the Play webhook binds each Pub/Sub push token to this
+				// audience and refuses every push without it
+				field("webhook.audience", "webhook", "audience"),
 				field("webhook.package_name", "webhook", "package_name"),
 				field("oauth.client_id", "oauth", "client_id"),
 				field("oauth.client_secret", "oauth", "client_secret"),
