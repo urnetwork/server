@@ -156,15 +156,15 @@ func TestX402StripeRecordFallsBackToTheQuotedNetwork(t *testing.T) {
 	x402RecordStripePayment(
 		context.Background(),
 		x402TestSku(),
-		x402TestTerms("tempo", "3000000"),
-		&X402SettleResponse{Success: true, Transaction: "tx-tempo"},
+		x402TestTerms("base", "3000000"),
+		&X402SettleResponse{Success: true, Transaction: "tx-base"},
 	)
 
 	calls := fixture.recorded()
 	connect.AssertEqual(t, len(calls), 1)
 	connect.AssertEqual(t,
 		calls[0].form.Get("payment_method_options[crypto][transaction_verification_options][network]"),
-		"tempo")
+		"base")
 }
 
 // Everything that must produce NO call, because there is nothing Stripe could
@@ -287,9 +287,12 @@ func TestX402StripeAmountCents(t *testing.T) {
 // Every network we quote has to be recordable, or a purchase on it settles and
 // then silently fails to book.
 func TestEveryQuotedNetworkIsRecordable(t *testing.T) {
-	for _, network := range []string{"base", "solana", "tempo"} {
+	for network := range x402Tokens {
 		if _, ok := x402StripeNetworks[network]; !ok {
 			t.Errorf("network %q is quoted but has no Stripe mapping", network)
 		}
+	}
+	if len(x402Tokens) == 0 {
+		t.Error("no network is quotable")
 	}
 }

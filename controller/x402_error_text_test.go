@@ -7,7 +7,6 @@ package controller
 
 import (
 	"bytes"
-	"encoding/base64"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -24,10 +23,11 @@ import (
 // priced skus.
 func x402ErrorTextConfig(t testing.TB, facilitatorUrl string) {
 	t.Helper()
+	key := newX402CdpTestEd25519Key(t)
 	SetX402Config(&X402Config{
 		Enabled:     true,
-		Facilitator: x402FacilitatorConfig{Url: facilitatorUrl, ApiKey: "synthetic-facilitator-key"},
-		PayTo:       map[string]string{"base": "0xsynthetic"},
+		Facilitator: x402FacilitatorConfig{Url: facilitatorUrl, ApiKeyId: key.id, ApiKeySecret: key.secret},
+		PayTo:       map[string]string{"base": x402CdpTestPayToBase},
 		Networks:    []string{"base"},
 		Asset:       "usdc",
 		Skus:        map[string]x402SkuConfig{X402SkuProMonth: {}, X402SkuData1Tib: {}},
@@ -62,7 +62,8 @@ func newX402ErrorTextRequest(tb testing.TB, target string, body string) *http.Re
 	request := httptest.NewRequest(http.MethodPost, target, bytes.NewReader([]byte(body)))
 	request.RemoteAddr = "192.0.2.53:4500"
 	request.Header.Set("Authorization", "Bearer "+session.NewByJwt(networkId, userId, "x402errortext", false, false).Testing_Sign())
-	request.Header.Set(X402PaymentHeader, base64.StdEncoding.EncodeToString([]byte(`{"network":"base"}`)))
+	payment, _ := x402CdpTestEvmPayment(tb, "base", x402CdpTestPayToBase, "10000000")
+	request.Header.Set(X402PaymentHeader, payment)
 	return request
 }
 

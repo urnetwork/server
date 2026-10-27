@@ -1,6 +1,7 @@
 package monitor
 
 import (
+	"bytes"
 	"context"
 	"strings"
 	"testing"
@@ -217,5 +218,90 @@ func TestReindexDebrisSignalRejectsMissingOrImpossibleProgressDetail(t *testing.
 				t.Fatalf("progress-detail error = %v, want %q", err, test.want)
 			}
 		})
+	}
+}
+
+// A successful source response still has no public authority for malformed
+// numeric cells. Exercise the reusable signal and the monitor's visibility path.
+func TestReindexDebrisMalformedNumericCellRemainsPrivate(t *testing.T) {
+	const privateCell = "synthetic-private-numeric-cell person@example.invalid"
+	for _, column := range []int{1, 2, 3, 5, 6, 7} {
+		for _, value := range []string{privateCell, "", "-1", "0.5", "9223372036854775808"} {
+			row := Row{"transfer_escrow", "2", "1", "1024", "public.transfer_escrow_idx_ccnew", "0", "0", "0", "", ""}
+			row[column] = value
+			calls := 0
+			source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+				calls++
+				if query != reindexDebrisCatalogQuery {
+					t.Fatal("numeric privacy fixture missed the owning catalog query")
+				}
+				return []Row{row}, nil
+			}}
+			settings := syntheticSettings(source)
+			alerts, err := NewReindexDebrisSignal().Run(context.Background(), settings)
+			if calls != 1 || err == nil || len(alerts) != 0 {
+				t.Fatal("malformed numeric cell did not fail one owning public observation")
+			}
+			if strings.Contains(err.Error(), privateCell) || strings.Contains(err.Error(), "person@example.invalid") {
+				t.Fatal("malformed reindex numeric cell entered the public error")
+			}
+			if classifyObservationError(err) != observationErrorClassInvalidResponse {
+				t.Fatal("malformed numeric cell lost its fixed invalid-response classification")
+			}
+
+			calls = 0
+			alerts, err = NewWithSignals(settings, NewReindexDebrisSignal()).Run(context.Background())
+			if calls != 1 || err == nil || len(alerts) != 1 {
+				t.Fatal("malformed numeric cell did not remain one monitor visibility failure")
+			}
+			alert := requireAlertClass(t, alerts, "cannot-observe")
+			if !alert.unobservable || alert.Severity != SeverityWarn || alert.Sustain != 2 ||
+				alert.Observed != "error_class="+observationErrorClassInvalidResponse {
+				t.Fatal("malformed numeric cell acquired debris or recovery authority")
+			}
+			requireAlertOmits(t, alert, privateCell, "person@example.invalid")
+			var jsonl bytes.Buffer
+			if writeErr := WriteAlertsJSONL(&jsonl, alerts); writeErr != nil {
+				t.Fatal("could not render the synthetic numeric visibility finding")
+			}
+			if strings.Contains(jsonl.String(), privateCell) || strings.Contains(jsonl.String(), "person@example.invalid") ||
+				strings.Contains(err.Error(), privateCell) || strings.Contains(err.Error(), "person@example.invalid") {
+				t.Fatal("malformed reindex numeric cell entered monitor output")
+			}
+		}
+	}
+}
+
+// Valid catalog context keeps its existing evidence contract; complete empty
+// catalogs remain healthy. Neither control depends on malformed-cell filtering.
+func TestReindexDebrisNumericPrivacyKeepsQualifiedControls(t *testing.T) {
+	for _, present := range []bool{false, true} {
+		calls := 0
+		source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
+			calls++
+			if !present {
+				return nil, nil
+			}
+			return []Row{{"transfer_escrow", "2", "1", "1024", "public.transfer_escrow_idx_ccnew", "0", "0", "0", "", ""}}, nil
+		}}
+		alerts, err := NewReindexDebrisSignal().Run(context.Background(), syntheticSettings(source))
+		if calls != 1 || err != nil {
+			t.Fatal("qualified catalog control lost its owning source observation")
+		}
+		if !present {
+			if len(alerts) != 0 {
+				t.Fatal("complete empty catalog lost its healthy control")
+			}
+			continue
+		}
+		if len(alerts) != 1 {
+			t.Fatal("confirmed catalog control changed finding cardinality")
+		}
+		alert := requireAlertClass(t, alerts, "reindex-debris")
+		if alert.Severity != SeverityWarn || alert.Sustain != 1 || alert.Frame != "catalog" || alert.unobservable ||
+			!strings.Contains(alert.Observed, "incomplete_indexes=2 write_ready_indexes=1 bytes=1024") ||
+			!strings.Contains(alert.Evidence, "transfer_escrow: indexes=2 write_ready=1 bytes=1024 samples=public.transfer_escrow_idx_ccnew") {
+			t.Fatal("numeric privacy filtering changed valid contextual catalog evidence")
+		}
 	}
 }
