@@ -1,0 +1,5 @@
+[env]glog not configured from command line. Using default configuration.
+I1027 12:23:34.425390      19 env.go:1202] [env]try /srv/warp/config, [settings.yml]
+I1027 12:23:34.425574      19 env.go:1202] [env]try /srv/warp/site, [settings.yml]
+I1027 12:23:34.425607      19 env.go:81] [env]settings loaded
+[official-run] score written to /score-output/score.json

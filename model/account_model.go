@@ -370,6 +370,9 @@ func RemoveNetworkWithStoreSnapshot(
 		})
 
 		server.Raise(session.JournalSessionRetirementInTx(ctx, tx, networkId, retirementId, "delete", server.NowUtc()))
+		// every revocation record of the network refuses it before the
+		// deletion commits
+		server.Raise(session.RetireNetworkRecords(ctx, networkId))
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`

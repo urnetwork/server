@@ -1,0 +1,103 @@
+{
+  "base_protocol": "launch-3a-bridge-3b-2026-10-26-v1",
+  "base_protocol_approval_sha256": "a794618968d840163952b7b2058100fd87b71ef7ccc44919ba590c5a253f643c",
+  "two_b_addendum_sha256": "69202c5938c226faac9eeb6f90037869e1a391587e010d2a9787101efdc60c44",
+  "protocol": "launch-3a-bridge-2b-2026-10-27-v1",
+  "protocol_approval_sha256": "b36e51b6a9253acdcc6ab912d28e00849d683c36c8f951023c770b7f3f928684",
+  "original_plan_sha256": "24f9b6ea9fe6fbfb4381ca29535b81a1cd4966b397c701b04f5b09ac74eb11d8",
+  "original_a_base_sha": "c1f9dda603d6279666fca5d92b99c5663306c5f7",
+  "original_a_evaluator_image_id": "sha256:002c39040ce23dee27b171c7e657f749c6a6d05b1e9b97d90ac87336470dbaf3",
+  "new_release_sha256": "5a1504cbad9787f84c91ac87bc719abd6337a64723733d6cf7d052660753b850",
+  "margin_freeze_sha256": "d264f48d38a1ab6bea44342cdbcf5e13cebf6e4c2811506e8086995e4600b646",
+  "bridge_plan_sha256": "c70f5dfbad281c7d0ca70235043e400ca2a3b7fa49f2cf3be8ed8636b419723c",
+  "bridge_inputs_sha256": "85cf983b773102ac5ad706ba1eff612330261baf54589f07a2eae95937c000ec",
+  "bridge_compatibility_receipt_sha256": "2af963f0ca0cecef740744da974bd2d0c65a41a24b5d68cac277d076fe84c930",
+  "required_correctly_ordered_seeds": 2,
+  "schema": 1,
+  "kind": "sim-latency-held-out-public-plan",
+  "campaign_id": "639fd188-10e4-4e81-82b8-e433bc728d11",
+  "prepared_at": "2026-10-27T14:00:33.990519959Z",
+  "private_plan_sha256": "0b8c65e3186d631782c6247d18e2369b9994851effced026037ed032401c6abb",
+  "configuration_sha256": "5f16032bc518f9a8c32f6e086341b2680162baffb5d436d02f59235b2f59baeb",
+  "base_sha": "a9e8e1a710b24c749e6499a0606938252c83e136",
+  "source_lock_sha256": "ec322ed2db023e15ea5dc3eea60a6ca5989661bba737c340fea3477d8d1300cf",
+  "evaluator_image_id": "sha256:98c9061c4a43a25e7b581a5193ca6e7f48e49e7b7fc03b7c1b6190a029befee2",
+  "accepted_stage_a_report_sha256": "e78c1a965d485d0a183f95f72797aa75c5c0ba22e52acbcf28749cfe6ecb3adb",
+  "stage_a_inputs_sha256": "abf5fb1656358e6c1f2f41bc965ae5fd5e8a4faf510c95f3d5c251a10b392c94",
+  "evaluation_policy_sha256": "9ae215229cf367705866b2b7a01a75d0f817c6c8ab5657596339ed08c30ce188",
+  "accepted_margin": 0.269,
+  "reference_bundle_sha256": "001feb8c46fcfc4571bd68841de28855c3ba2506c56fa07ade7734865fbdae51",
+  "exclusions_sha256": "bc3b97cdf2669324574302daf7929bf98e31099c5c1b32a4eb933cb9320493e5",
+  "qualification_sha256": "73cadc4de70b2bdfe6024f7dee530e6034ab19d0719ef694ccf9abfa3d509ad3",
+  "control_replicates_per_round": 9,
+  "candidate_replicates_per_job": 9,
+  "original_job_limit_seconds": 10800,
+  "deferred_request_fields": [
+    "round_baseline_path",
+    "round_baseline_sha256"
+  ],
+  "rounds": [
+    {
+      "position": 1,
+      "round_id": "74ea5b76-6308-48f5-bd55-8f852a17d215",
+      "seed_commitment": "0157ed99c436772ed60fb6cf5dae964fbb9b05bd169fcc68ae79075bed5ad082",
+      "providers_sha256": "2957b0432b4aeac720c51ffe4ebff73361f97af94bf961d54de0ccbdfce97ee7",
+      "reference_order": [
+        "better",
+        "worse",
+        "no-op"
+      ],
+      "jobs": [
+        {
+          "position": 1,
+          "role": "better",
+          "job_id": "d11e4ae4-c3f8-4687-b481-3b02bc336130",
+          "precommitted_request_sha256": "42a78bc1a3ab58dda5b4d1ed589865b1ad10c82c32a433170803305c94a64c8b"
+        },
+        {
+          "position": 2,
+          "role": "worse",
+          "job_id": "23fc7aeb-20ee-40d6-9ad4-2ef495671dda",
+          "precommitted_request_sha256": "f5611a49e40402628df3ecf6acf1b0ec1a33af01d24985b8a1dd1ebef34b304d"
+        },
+        {
+          "position": 3,
+          "role": "no-op",
+          "job_id": "8422293a-07f4-43c7-99a2-4bcee8ebd283",
+          "precommitted_request_sha256": "52de05d84bb2a5947b74662e876ea6c6fdd797ab245ad3f1e37542367c54f18f"
+        }
+      ]
+    },
+    {
+      "position": 2,
+      "round_id": "9c8bc5b9-d5d5-44fd-98df-7ca7f449efc5",
+      "seed_commitment": "228cb6255fa231a1a2857119f9c9672617e070698b42f2a74d88ab17b4973b9e",
+      "providers_sha256": "76a877cc9e98fd450494d5744fe8db64da40989d14a42910e62a8f2d049338f7",
+      "reference_order": [
+        "worse",
+        "no-op",
+        "better"
+      ],
+      "jobs": [
+        {
+          "position": 1,
+          "role": "worse",
+          "job_id": "ce6131bb-2b55-488a-b78f-d8eb197eb20e",
+          "precommitted_request_sha256": "93e7dc407394802279fe96568a2e88f45e365b80b30883a4a742ab8b29552dce"
+        },
+        {
+          "position": 2,
+          "role": "no-op",
+          "job_id": "5da03b60-16ea-474c-a327-cc01176e473e",
+          "precommitted_request_sha256": "208be3d0c6a76d5a2e1f484126add73f79388604797815ce19a6cbb91829dbd1"
+        },
+        {
+          "position": 3,
+          "role": "better",
+          "job_id": "fb5f33c9-a5e4-4a15-b362-8a101d1f120e",
+          "precommitted_request_sha256": "fe7de28ef0108bd60fb673613fa9dd0eda4f1c35b56f5b53cc149056fcfa0b42"
+        }
+      ]
+    }
+  ]
+}

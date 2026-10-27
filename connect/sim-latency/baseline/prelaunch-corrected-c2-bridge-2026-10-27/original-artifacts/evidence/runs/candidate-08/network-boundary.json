@@ -1,0 +1,95 @@
+{
+  "schema": 1,
+  "network": {
+    "Name": "urnetwork-eval-dd93a270bda2d89800a9135854a4f04f-candidate-08_evaluation",
+    "Id": "f2a91ef219f003017254197850b4a8e8bf639da833e015952e83d4b7ba5fefca",
+    "Created": "2026-10-27T12:04:56.161216908Z",
+    "Scope": "local",
+    "Driver": "bridge",
+    "EnableIPv4": true,
+    "EnableIPv6": false,
+    "IPAM": {
+      "Driver": "default",
+      "Options": null,
+      "Config": [
+        {
+          "Subnet": "172.18.0.0/16"
+        }
+      ]
+    },
+    "Internal": true,
+    "Attachable": false,
+    "Ingress": false,
+    "ConfigFrom": {
+      "Network": ""
+    },
+    "ConfigOnly": false,
+    "Options": {
+      "com.docker.network.bridge.gateway_mode_ipv4": "isolated",
+      "com.docker.network.bridge.gateway_mode_ipv6": "isolated"
+    },
+    "Labels": {
+      "com.docker.compose.config-hash": "4b4462620cd24100b4cb0ba6251d25b59349d1807e6ad81fd7b50521ec44520a",
+      "com.docker.compose.network": "evaluation",
+      "com.docker.compose.project": "urnetwork-eval-dd93a270bda2d89800a9135854a4f04f-candidate-08",
+      "com.docker.compose.version": "5.6.0",
+      "com.urnetwork.competition.job-id": "6e2c9d8c-e5df-4c86-a3ce-4309dfe0f115",
+      "com.urnetwork.competition.round-id": "6cc0f09c-3853-4245-bb32-d26d17098caa",
+      "com.urnetwork.competition.stage": "candidate"
+    },
+    "Containers": {
+      "6eef6a92862a9440b8601b6b1f30ef75f1d6d04d5cd030d172a727b694fc3bd6": {
+        "Name": "urnetwork-eval-dd93a270bda2d89800a9135854a4f04f-candidate-08-postgres-1",
+        "EndpointID": "103045a44c688c0466e2c7a2dd198836c150c9fbe22f52e5362a8c7c0223a3c3",
+        "MacAddress": "e6:74:2b:d6:4a:f3",
+        "IPv4Address": "172.18.0.2/16",
+        "IPv6Address": ""
+      },
+      "bae5a99ac1c8a1e8eaf15fa9477b10807e2338642b2c13e4b07e7b67217538f7": {
+        "Name": "urnetwork-eval-dd93a270bda2d89800a9135854a4f04f-candidate-08-redis-1",
+        "EndpointID": "a1c854a215114ecc7e1d195549322a7d66c011d02c38603884a787b29011c574",
+        "MacAddress": "ba:d3:5e:85:2c:5c",
+        "IPv4Address": "172.18.0.1/16",
+        "IPv6Address": ""
+      }
+    },
+    "Status": {
+      "IPAM": {
+        "Subnets": {
+          "172.18.0.0/16": {
+            "IPsInUse": 4,
+            "DynamicIPsAvailable": 65532
+          }
+        }
+      }
+    }
+  },
+  "host_bridge": {
+    "ifindex": 3176,
+    "ifname": "br-f2a91ef219f0",
+    "flags": [
+      "BROADCAST",
+      "MULTICAST",
+      "UP",
+      "LOWER_UP"
+    ],
+    "mtu": 1500,
+    "qdisc": "noqueue",
+    "operstate": "UP",
+    "group": "default",
+    "link_type": "ether",
+    "address": "c6:5a:bc:9a:52:e6",
+    "broadcast": "ff:ff:ff:ff:ff:ff",
+    "addr_info": [
+      {
+        "family": "inet6",
+        "local": "fe80::c45a:bcff:fe9a:52e6",
+        "prefixlen": 64,
+        "scope": "link",
+        "valid_life_time": 4294967295,
+        "preferred_life_time": 4294967295
+      }
+    ]
+  },
+  "isolated_gateway": true
+}

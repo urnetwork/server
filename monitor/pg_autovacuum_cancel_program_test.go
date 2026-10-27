@@ -44,12 +44,19 @@ func pgAutovacuumCancelCollect(t *testing.T, now time.Time, body, harness string
 			t.Fatal("cannot create private structured-source fixture")
 		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	// The deadline only keeps a hung child finite. At the row ceiling the
+	// collector spends about three seconds of CPU, which a loaded test host
+	// stretched past a 25 s deadline. Its CPU time, not the host's wall time,
+	// must fit the production command's 20 s timeout (pgAutovacuumCancelCommand).
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	command := exec.CommandContext(ctx, "python3", "-c", harness, program, cluster, bootPath, fmt.Sprint(now.UnixMicro()), replacement, logPath, indexPath)
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatal("structured cancellation collector did not complete successfully")
+	}
+	if cpu := command.ProcessState.UserTime() + command.ProcessState.SystemTime(); cpu > 20*time.Second {
+		t.Fatal("structured cancellation collector exceeded the production command timeout in CPU time", cpu)
 	}
 	for _, canary := range []string{"private-source-canary", "private-sql-canary", "private-client-canary", logPath, indexPath} {
 		if strings.Contains(string(output), canary) {

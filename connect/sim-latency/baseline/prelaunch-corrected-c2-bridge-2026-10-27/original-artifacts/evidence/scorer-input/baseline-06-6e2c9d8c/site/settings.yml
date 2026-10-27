@@ -1,0 +1,15 @@
+ip_overrides:
+    - city: Sim
+      country: Sim
+      country_code: zz
+      hosting: false
+      region: Sim
+      subnet: 198.18.0.0/15
+    - city: Sim
+      country: Sim
+      country_code: zz
+      hosting: false
+      region: Sim
+      subnet: 198.20.0.0/16
+stats_findproviders2_max_candidates: 2000
+stats_findproviders2_sample_fraction: 1

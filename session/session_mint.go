@@ -203,15 +203,32 @@ func ValidateSessionReplayInTx(ctx context.Context, tx server.PgTx, credential *
 
 // Durable terminal operations outlive their finite authentication projections.
 func validateHostedSessionJournalInTx(ctx context.Context, tx server.PgTx, networkId, sessionId server.Id, lineage *time.Time) error {
+	return sessionJournalFence(ctx, tx, networkId, sessionId, lineage)
+}
+
+// The journal's verdict on one session: refused once an enforced operation
+// retired it, unavailable while a prepared one may apply to it. The revocation
+// record's SQL fallback reads it too, so lost Redis state cannot revive a
+// session the journal still retains.
+func sessionJournalFence(ctx context.Context, conn server.PgCanQuery, networkId, sessionId server.Id, lineage *time.Time) error {
 	var retired, pending bool
-	err := tx.QueryRow(ctx, `SELECT
+	rows, err := conn.Query(ctx, `SELECT
 		EXISTS(SELECT 1 FROM network_session_operation WHERE network_id=$1
 			AND status IN ('enforced','complete') AND target_session_ids ? $2),
 		EXISTS(SELECT 1 FROM network_session_operation WHERE network_id=$1 AND status='prepared'
 			AND ((action='single' AND target_session_id=$2::uuid)
 				OR (action='others' AND kept_session_id IS DISTINCT FROM $2::uuid)
 				OR action='delete' OR (action='reset' AND ($3::timestamp IS NULL OR credential_epoch>$3))))`,
-		networkId, sessionId.String(), lineage).Scan(&retired, &pending)
+		networkId, sessionId.String(), lineage)
+	if err == nil {
+		if rows.Next() {
+			err = rows.Scan(&retired, &pending)
+		}
+		rows.Close()
+		if err == nil {
+			err = rows.Err()
+		}
+	}
 	if err != nil {
 		return errors.Join(ErrAuthUnavailable, err)
 	}

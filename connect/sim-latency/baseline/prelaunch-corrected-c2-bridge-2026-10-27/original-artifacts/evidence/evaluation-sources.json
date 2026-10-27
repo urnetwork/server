@@ -1,0 +1,59 @@
+{
+  "baseline": {
+    "base_image_id": "sha256:98c9061c4a43a25e7b581a5193ca6e7f48e49e7b7fc03b7c1b6190a029befee2",
+    "base_sha": "a9e8e1a710b24c749e6499a0606938252c83e136",
+    "branch": "sim-latency",
+    "candidate_patch_sha256": null,
+    "candidate_path_base": "mono_root_v1",
+    "kind": "sim-latency-evaluation-source",
+    "repositories": {
+      "connect": "e90d59eb404f973dba6e9d0689ecd94e2718c10e",
+      "glog": "1c4954b017d9e8140a4e7020f914eb27410a41c6",
+      "goidenticons": "39ccec1b69db3a6f67e7346d6f44863499e6241d",
+      "gvisor": "57c9e137f7407ad6cd41dcca1ba304a446e09c79",
+      "proxy": "af1d364fe34b807c31936642bff7d3fd849ab2a4",
+      "sdk": "d3824aa98c02e3c16ff7abcfe7a7088c8a470cdb",
+      "server": "a9e8e1a710b24c749e6499a0606938252c83e136",
+      "sn": "6e686aabd53b7c45b154051fd268138988224eba",
+      "userwireguard": "f9a92f0e5f5577a80d358065c4d39ca21f971a1c",
+      "warp": "8dfa405ec380a60307952778921f05bba1c59a33"
+    },
+    "schema": 1,
+    "source_epoch": 0,
+    "source_lock_sha256": "239cea7fe6f77f989b75ba6efa677e8731640ba2fdd3690a35e6fe72103f3d11",
+    "staging": false,
+    "temporary": true
+  },
+  "candidate": {
+    "base_image_id": "sha256:98c9061c4a43a25e7b581a5193ca6e7f48e49e7b7fc03b7c1b6190a029befee2",
+    "base_sha": "a9e8e1a710b24c749e6499a0606938252c83e136",
+    "branch": "sim-latency",
+    "candidate_patch_sha256": "1076be3ed61df0e14ae90c13bbe4c35442de6371064fd7d78f61ed6834e170f1",
+    "candidate_path_base": "mono_root_v1",
+    "kind": "sim-latency-evaluation-source",
+    "repositories": {
+      "connect": "e90d59eb404f973dba6e9d0689ecd94e2718c10e",
+      "glog": "1c4954b017d9e8140a4e7020f914eb27410a41c6",
+      "goidenticons": "39ccec1b69db3a6f67e7346d6f44863499e6241d",
+      "gvisor": "57c9e137f7407ad6cd41dcca1ba304a446e09c79",
+      "proxy": "af1d364fe34b807c31936642bff7d3fd849ab2a4",
+      "sdk": "d3824aa98c02e3c16ff7abcfe7a7088c8a470cdb",
+      "server": "28e5f2f823008394cc51d1405750daf5decd0915",
+      "sn": "6e686aabd53b7c45b154051fd268138988224eba",
+      "userwireguard": "f9a92f0e5f5577a80d358065c4d39ca21f971a1c",
+      "warp": "8dfa405ec380a60307952778921f05bba1c59a33"
+    },
+    "schema": 1,
+    "source_epoch": 0,
+    "source_lock_sha256": "239cea7fe6f77f989b75ba6efa677e8731640ba2fdd3690a35e6fe72103f3d11",
+    "staging": false,
+    "temporary": true
+  },
+  "cleanup_complete": true,
+  "host_repositories_used": false,
+  "kind": "sim-latency-temporary-evaluation-sources",
+  "origin": "authenticated_evaluator_image",
+  "read_only_mount": true,
+  "runtime_target": "/workspace",
+  "schema": 1
+}

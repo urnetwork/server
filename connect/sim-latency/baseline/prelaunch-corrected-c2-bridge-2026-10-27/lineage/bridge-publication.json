@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-held-out-plan-publication",
+  "plan_sha256": "c70f5dfbad281c7d0ca70235043e400ca2a3b7fa49f2cf3be8ed8636b419723c",
+  "published_at": "2026-10-27T09:21:00Z",
+  "commit": "89ddc7184a87901aeaf90c2f71b1ff3a37b3931c",
+  "repository": "/home/by/urnetwork/server",
+  "plan_path": "connect/sim-latency/launch/FRESH-BRIDGE-PLAN-2026-10-27-V2.json",
+  "remote_ref": "refs/remotes/origin/main",
+  "pulled_and_pushed": true,
+  "evidence": [
+    {
+      "path": "/home/by/urnetwork/temp/fresh-bridge-authority-generation-20261027.T70SkVMC/bridge-authority/bridge-operator-qualification.json",
+      "sha256": "8074e50a10896c7f0df0920cf9973256ae60cc403d064a15001f4ff0bb25d043"
+    },
+    {
+      "path": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/offline-unit-qualification.json",
+      "sha256": "1f4b19a95c989883e522dd248d7c08cfe57ef8fdf917b6f50e7c67022df02793"
+    },
+    {
+      "path": "/home/by/urnetwork/temp/fresh-bridge-authority-generation-20261027.T70SkVMC/bridge-authority/generator-projection-proof.json",
+      "sha256": "87d339c2587493a71b0b866cce6adbb2a025adedd2da83f108ddf7d0af11b61e"
+    },
+    {
+      "path": "/home/by/urnetwork/temp/fresh-bridge-authority-preparation-20261027.m6oV9eiN/owner-approval.md",
+      "sha256": "b36e51b6a9253acdcc6ab912d28e00849d683c36c8f951023c770b7f3f928684"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-reference-evidence-views-20261027-v1/normalization-proof.json",
+      "sha256": "8b35b9401a0c09f9ff14955bee5588040452d3a71f8c556ba5b7d53fd6994480"
+    }
+  ]
+}

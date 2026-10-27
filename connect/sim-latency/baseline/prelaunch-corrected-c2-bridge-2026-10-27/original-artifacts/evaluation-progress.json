@@ -1,0 +1,733 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-evaluation-progress",
+  "job_id": "6e2c9d8c-e5df-4c86-a3ce-4309dfe0f115",
+  "round_id": "6cc0f09c-3853-4245-bb32-d26d17098caa",
+  "phase": "complete",
+  "replicate_count": 9,
+  "baseline_completed": 9,
+  "candidate_completed": 9,
+  "updated_unix_ms": 1793103830881,
+  "metrics": [
+    {
+      "role": "baseline",
+      "replicate": 1,
+      "metric": "ttfb_p50_ms",
+      "quantile": "p50",
+      "value": 172.989,
+      "p_improvement": null,
+      "p_regression": null,
+      "significance": "baseline"
+    },
+    {
+      "role": "baseline",
+      "replicate": 1,
+      "metric": "ttfb_p95_ms",
+      "quantile": "p95",
+      "value": 1597.4493999999997,
+      "p_improvement": null,
+      "p_regression": null,
+      "significance": "baseline"
+    },
+    {
+      "role": "baseline",
+      "replicate": 1,
+      "metric": "throughput_p50_bytes_per_s",
+      "quantile": "p50",
+      "value": 609027.1839605342,
+      "p_improvement": null,
+      "p_regression": null,
+      "significance": "baseline"
+    },
+    {
+      "role": "baseline",
+      "replicate": 1,
+      "metric": "throughput_p95_bytes_per_s",
+      "quantile": "p95",
+      "value": 21384407.04828661,
+      "p_improvement": null,
+      "p_regression": null,
+      "significance": "baseline"
+    },
+    {
+      "role": "baseline",
+      "replicate": 2,
+      "metric": "ttfb_p50_ms",
+      "quantile": "p50",
+      "value": 157.7935,
+      "p_improvement": null,
+      "p_regression": null,
+      "significance": "baseline"
+    },
+    {
+      "role": "baseline",
+      "replicate": 2,
+      "metric": "ttfb_p95_ms",
+      "quantile": "p95",
+      "value": 1555.65805,
+      "p_improvement": null,
+      "p_regression": null,
+      "significance": "baseline"
+    },
+    {
+      "role": "baseline",
+      "replicate": 2,
+      "metric": "throughput_p50_bytes_per_s",
+      "quantile": "p50",
+      "value": 654177.8732500838,
+      "p_improvement": null,
+      "p_regression": null,
+      "significance": "baseline"
+    },
+    {
+      "role": "baseline",
+      "replicate": 2,
+      "metric": "throughput_p95_bytes_per_s",
+      "quantile": "p95",
+      "value": 22030381.5146143,
+      "p_improvement": null,
+      "p_regression": null,
+      "significance": "baseline"
+    },
+    {
+      "role": "baseline",
+      "replicate": 3,
+      "metric": "ttfb_p50_ms",
+      "quantile": "p50",
+      "value": 169.0275,
+      "p_improvement": null,
+      "p_regression": null,
+      "significance": "baseline"
+    },
+    {
+      "role": "baseline",
+      "replicate": 3,
+      "metric": "ttfb_p95_ms",
+      "quantile": "p95",
+      "value": 1426.4674499999994,
+      "p_improvement": null,
+      "p_regression": null,
+      "significance": "baseline"
+    },
+    {
+      "role": "baseline",
+      "replicate": 3,
+      "metric": "throughput_p50_bytes_per_s",
+      "quantile": "p50",
+      "value": 618390.2623537706,
+      "p_improvement": null,
+      "p_regression": null,
+      "significance": "baseline"
+    },
+    {
+      "role": "baseline",
+      "replicate": 3,
+      "metric": "throughput_p95_bytes_per_s",
+      "quantile": "p95",
+      "value": 28178959.81399189,
+      "p_improvement": null,
+      "p_regression": null,
+      "significance": "baseline"
+    },
+    {
+      "role": "baseline",
+      "replicate": 4,
+      "metric": "ttfb_p50_ms",
+      "quantile": "p50",
+      "value": 119.2245,
+      "p_improvement": null,
+      "p_regression": null,
+      "significance": "baseline"
+    },
+    {
+      "role": "baseline",
+      "replicate": 4,
+      "metric": "ttfb_p95_ms",
+      "quantile": "p95",
+      "value": 1454.6935499999984,
+      "p_improvement": null,
+      "p_regression": null,
+      "significance": "baseline"
+    },
+    {
+      "role": "baseline",
+      "replicate": 4,
+      "metric": "throughput_p50_bytes_per_s",
+      "quantile": "p50",
+      "value": 650928.8661325009,
+      "p_improvement": null,
+      "p_regression": null,
+      "significance": "baseline"
+    },
+    {
+      "role": "baseline",
+      "replicate": 4,
+      "metric": "throughput_p95_bytes_per_s",
+      "quantile": "p95",
+      "value": 21755869.421244413,
+      "p_improvement": null,
+      "p_regression": null,
+      "significance": "baseline"
+    },
+    {
+      "role": "baseline",
+      "replicate": 5,
+      "metric": "ttfb_p50_ms",
+      "quantile": "p50",
+      "value": 193.386,
+      "p_improvement": null,
+      "p_regression": null,
+      "significance": "baseline"
+    },
+    {
+      "role": "baseline",
+      "replicate": 5,
+      "metric": "ttfb_p95_ms",
+      "quantile": "p95",
+      "value": 1830.8650000000002,
+      "p_improvement": null,
+      "p_regression": null,
+      "significance": "baseline"
+    },
+    {
+      "role": "baseline",
+      "replicate": 5,
+      "metric": "throughput_p50_bytes_per_s",
+      "quantile": "p50",
+      "value": 493455.786138657,
+      "p_improvement": null,
+      "p_regression": null,
+      "significance": "baseline"
+    },
+    {
+      "role": "baseline",
+      "replicate": 5,
+      "metric": "throughput_p95_bytes_per_s",
+      "quantile": "p95",
+      "value": 27340448.619541936,
+      "p_improvement": null,
+      "p_regression": null,
+      "significance": "baseline"
+    },
+    {
+      "role": "baseline",
+      "replicate": 6,
+      "metric": "ttfb_p50_ms",
+      "quantile": "p50",
+      "value": 179.692,
+      "p_improvement": null,
+      "p_regression": null,
+      "significance": "baseline"
+    },
+    {
+      "role": "baseline",
+      "replicate": 6,
+      "metric": "ttfb_p95_ms",
+      "quantile": "p95",
+      "value": 1633.8498000000009,
+      "p_improvement": null,
+      "p_regression": null,
+      "significance": "baseline"
+    },
+    {
+      "role": "baseline",
+      "replicate": 6,
+      "metric": "throughput_p50_bytes_per_s",
+      "quantile": "p50",
+      "value": 530319.5360412371,
+      "p_improvement": null,
+      "p_regression": null,
+      "significance": "baseline"
+    },
+    {
+      "role": "baseline",
+      "replicate": 6,
+      "metric": "throughput_p95_bytes_per_s",
+      "quantile": "p95",
+      "value": 24375263.277226567,
+      "p_improvement": null,
+      "p_regression": null,
+      "significance": "baseline"
+    },
+    {
+      "role": "baseline",
+      "replicate": 7,
+      "metric": "ttfb_p50_ms",
+      "quantile": "p50",
+      "value": 211.624,
+      "p_improvement": null,
+      "p_regression": null,
+      "significance": "baseline"
+    },
+    {
+      "role": "baseline",
+      "replicate": 7,
+      "metric": "ttfb_p95_ms",
+      "quantile": "p95",
+      "value": 1830.3709499999998,
+      "p_improvement": null,
+      "p_regression": null,
+      "significance": "baseline"
+    },
+    {
+      "role": "baseline",
+      "replicate": 7,
+      "metric": "throughput_p50_bytes_per_s",
+      "quantile": "p50",
+      "value": 466014.00089412765,
+      "p_improvement": null,
+      "p_regression": null,
+      "significance": "baseline"
+    },
+    {
+      "role": "baseline",
+      "replicate": 7,
+      "metric": "throughput_p95_bytes_per_s",
+      "quantile": "p95",
+      "value": 17619147.671903715,
+      "p_improvement": null,
+      "p_regression": null,
+      "significance": "baseline"
+    },
+    {
+      "role": "baseline",
+      "replicate": 8,
+      "metric": "ttfb_p50_ms",
+      "quantile": "p50",
+      "value": 188.31150000000002,
+      "p_improvement": null,
+      "p_regression": null,
+      "significance": "baseline"
+    },
+    {
+      "role": "baseline",
+      "replicate": 8,
+      "metric": "ttfb_p95_ms",
+      "quantile": "p95",
+      "value": 1816.031,
+      "p_improvement": null,
+      "p_regression": null,
+      "significance": "baseline"
+    },
+    {
+      "role": "baseline",
+      "replicate": 8,
+      "metric": "throughput_p50_bytes_per_s",
+      "quantile": "p50",
+      "value": 601925.0004966096,
+      "p_improvement": null,
+      "p_regression": null,
+      "significance": "baseline"
+    },
+    {
+      "role": "baseline",
+      "replicate": 8,
+      "metric": "throughput_p95_bytes_per_s",
+      "quantile": "p95",
+      "value": 24314170.39496951,
+      "p_improvement": null,
+      "p_regression": null,
+      "significance": "baseline"
+    },
+    {
+      "role": "baseline",
+      "replicate": 9,
+      "metric": "ttfb_p50_ms",
+      "quantile": "p50",
+      "value": 175.95850000000002,
+      "p_improvement": null,
+      "p_regression": null,
+      "significance": "baseline"
+    },
+    {
+      "role": "baseline",
+      "replicate": 9,
+      "metric": "ttfb_p95_ms",
+      "quantile": "p95",
+      "value": 2392.59375,
+      "p_improvement": null,
+      "p_regression": null,
+      "significance": "baseline"
+    },
+    {
+      "role": "baseline",
+      "replicate": 9,
+      "metric": "throughput_p50_bytes_per_s",
+      "quantile": "p50",
+      "value": 451088.10559133143,
+      "p_improvement": null,
+      "p_regression": null,
+      "significance": "baseline"
+    },
+    {
+      "role": "baseline",
+      "replicate": 9,
+      "metric": "throughput_p95_bytes_per_s",
+      "quantile": "p95",
+      "value": 19667910.16086569,
+      "p_improvement": null,
+      "p_regression": null,
+      "significance": "baseline"
+    },
+    {
+      "role": "candidate",
+      "replicate": 1,
+      "metric": "ttfb_p50_ms",
+      "quantile": "p50",
+      "value": 148.84300000000002,
+      "p_improvement": 0.2279279259562072,
+      "p_regression": 0.7720720740437927,
+      "significance": "not_significant"
+    },
+    {
+      "role": "candidate",
+      "replicate": 1,
+      "metric": "ttfb_p95_ms",
+      "quantile": "p95",
+      "value": 1767.8950499999992,
+      "p_improvement": 0.5576678034969631,
+      "p_regression": 0.4423321965030369,
+      "significance": "not_significant"
+    },
+    {
+      "role": "candidate",
+      "replicate": 1,
+      "metric": "throughput_p50_bytes_per_s",
+      "quantile": "p50",
+      "value": 542980.2896066281,
+      "p_improvement": 0.6127263547482846,
+      "p_regression": 0.3872736452517154,
+      "significance": "not_significant"
+    },
+    {
+      "role": "candidate",
+      "replicate": 1,
+      "metric": "throughput_p95_bytes_per_s",
+      "quantile": "p95",
+      "value": 21760759.568070687,
+      "p_improvement": 0.6408884657128977,
+      "p_regression": 0.3591115342871023,
+      "significance": "not_significant"
+    },
+    {
+      "role": "candidate",
+      "replicate": 2,
+      "metric": "ttfb_p50_ms",
+      "quantile": "p50",
+      "value": 157.015,
+      "p_improvement": 0.026816227782858373,
+      "p_regression": 0.9731837722171416,
+      "significance": "improved"
+    },
+    {
+      "role": "candidate",
+      "replicate": 2,
+      "metric": "ttfb_p95_ms",
+      "quantile": "p95",
+      "value": 2319.7277999999956,
+      "p_improvement": 0.7786164001952521,
+      "p_regression": 0.22138359980474787,
+      "significance": "not_significant"
+    },
+    {
+      "role": "candidate",
+      "replicate": 2,
+      "metric": "throughput_p50_bytes_per_s",
+      "quantile": "p50",
+      "value": 476726.8040215569,
+      "p_improvement": 0.8470460039986005,
+      "p_regression": 0.15295399600139947,
+      "significance": "not_significant"
+    },
+    {
+      "role": "candidate",
+      "replicate": 2,
+      "metric": "throughput_p95_bytes_per_s",
+      "quantile": "p95",
+      "value": 22702403.530197863,
+      "p_improvement": 0.7152854891227018,
+      "p_regression": 0.28471451087729815,
+      "significance": "not_significant"
+    },
+    {
+      "role": "candidate",
+      "replicate": 3,
+      "metric": "ttfb_p50_ms",
+      "quantile": "p50",
+      "value": 159.609,
+      "p_improvement": 0.032848615768012186,
+      "p_regression": 0.9671513842319878,
+      "significance": "improved"
+    },
+    {
+      "role": "candidate",
+      "replicate": 3,
+      "metric": "ttfb_p95_ms",
+      "quantile": "p95",
+      "value": 1581.4481000000003,
+      "p_improvement": 0.7242757817771371,
+      "p_regression": 0.27572421822286286,
+      "significance": "not_significant"
+    },
+    {
+      "role": "candidate",
+      "replicate": 3,
+      "metric": "throughput_p50_bytes_per_s",
+      "quantile": "p50",
+      "value": 547997.5735100551,
+      "p_improvement": 0.862908325039764,
+      "p_regression": 0.13709167496023594,
+      "significance": "not_significant"
+    },
+    {
+      "role": "candidate",
+      "replicate": 3,
+      "metric": "throughput_p95_bytes_per_s",
+      "quantile": "p95",
+      "value": 24849085.48294156,
+      "p_improvement": 0.4627899457306281,
+      "p_regression": 0.5372100542693719,
+      "significance": "not_significant"
+    },
+    {
+      "role": "candidate",
+      "replicate": 4,
+      "metric": "ttfb_p50_ms",
+      "quantile": "p50",
+      "value": 153.738,
+      "p_improvement": 0.02840348514967372,
+      "p_regression": 0.9715965148503263,
+      "significance": "improved"
+    },
+    {
+      "role": "candidate",
+      "replicate": 4,
+      "metric": "ttfb_p95_ms",
+      "quantile": "p95",
+      "value": 1562.5387999999982,
+      "p_improvement": 0.6481171704886013,
+      "p_regression": 0.3518828295113987,
+      "significance": "not_significant"
+    },
+    {
+      "role": "candidate",
+      "replicate": 4,
+      "metric": "throughput_p50_bytes_per_s",
+      "quantile": "p50",
+      "value": 577861.0241459804,
+      "p_improvement": 0.7816629572778029,
+      "p_regression": 0.21833704272219717,
+      "significance": "not_significant"
+    },
+    {
+      "role": "candidate",
+      "replicate": 4,
+      "metric": "throughput_p95_bytes_per_s",
+      "quantile": "p95",
+      "value": 21728576.496618807,
+      "p_improvement": 0.5579392265970423,
+      "p_regression": 0.4420607734029577,
+      "significance": "not_significant"
+    },
+    {
+      "role": "candidate",
+      "replicate": 5,
+      "metric": "ttfb_p50_ms",
+      "quantile": "p50",
+      "value": 144.191,
+      "p_improvement": 0.01970754711565783,
+      "p_regression": 0.9802924528843422,
+      "significance": "improved"
+    },
+    {
+      "role": "candidate",
+      "replicate": 5,
+      "metric": "ttfb_p95_ms",
+      "quantile": "p95",
+      "value": 1801.4325000000015,
+      "p_improvement": 0.676674268323942,
+      "p_regression": 0.323325731676058,
+      "significance": "not_significant"
+    },
+    {
+      "role": "candidate",
+      "replicate": 5,
+      "metric": "throughput_p50_bytes_per_s",
+      "quantile": "p50",
+      "value": 692151.7989057946,
+      "p_improvement": 0.4682673454657732,
+      "p_regression": 0.5317326545342268,
+      "significance": "not_significant"
+    },
+    {
+      "role": "candidate",
+      "replicate": 5,
+      "metric": "throughput_p95_bytes_per_s",
+      "quantile": "p95",
+      "value": 21160952.794651408,
+      "p_improvement": 0.6506097009417303,
+      "p_regression": 0.3493902990582697,
+      "significance": "not_significant"
+    },
+    {
+      "role": "candidate",
+      "replicate": 6,
+      "metric": "ttfb_p50_ms",
+      "quantile": "p50",
+      "value": 153.383,
+      "p_improvement": 0.019513083613269935,
+      "p_regression": 0.98048691638673,
+      "significance": "improved"
+    },
+    {
+      "role": "candidate",
+      "replicate": 6,
+      "metric": "ttfb_p95_ms",
+      "quantile": "p95",
+      "value": 1735.4413999999983,
+      "p_improvement": 0.6721826400348414,
+      "p_regression": 0.3278173599651586,
+      "significance": "not_significant"
+    },
+    {
+      "role": "candidate",
+      "replicate": 6,
+      "metric": "throughput_p50_bytes_per_s",
+      "quantile": "p50",
+      "value": 630246.0741458513,
+      "p_improvement": 0.3673501367472854,
+      "p_regression": 0.6326498632527147,
+      "significance": "not_significant"
+    },
+    {
+      "role": "candidate",
+      "replicate": 6,
+      "metric": "throughput_p95_bytes_per_s",
+      "quantile": "p95",
+      "value": 23573752.587561868,
+      "p_improvement": 0.6007544509186362,
+      "p_regression": 0.3992455490813637,
+      "significance": "not_significant"
+    },
+    {
+      "role": "candidate",
+      "replicate": 7,
+      "metric": "ttfb_p50_ms",
+      "quantile": "p50",
+      "value": 170.79,
+      "p_improvement": 0.03330826816740804,
+      "p_regression": 0.9666917318325919,
+      "significance": "improved"
+    },
+    {
+      "role": "candidate",
+      "replicate": 7,
+      "metric": "ttfb_p95_ms",
+      "quantile": "p95",
+      "value": 1584.7247000000002,
+      "p_improvement": 0.605912313472508,
+      "p_regression": 0.394087686527492,
+      "significance": "not_significant"
+    },
+    {
+      "role": "candidate",
+      "replicate": 7,
+      "metric": "throughput_p50_bytes_per_s",
+      "quantile": "p50",
+      "value": 558419.5053238892,
+      "p_improvement": 0.3830553758526894,
+      "p_regression": 0.6169446241473107,
+      "significance": "not_significant"
+    },
+    {
+      "role": "candidate",
+      "replicate": 7,
+      "metric": "throughput_p95_bytes_per_s",
+      "quantile": "p95",
+      "value": 26284021.715620063,
+      "p_improvement": 0.44542224137961284,
+      "p_regression": 0.5545777586203872,
+      "significance": "not_significant"
+    },
+    {
+      "role": "candidate",
+      "replicate": 8,
+      "metric": "ttfb_p50_ms",
+      "quantile": "p50",
+      "value": 179.369,
+      "p_improvement": 0.06154899883806233,
+      "p_regression": 0.9384510011619377,
+      "significance": "not_significant"
+    },
+    {
+      "role": "candidate",
+      "replicate": 8,
+      "metric": "ttfb_p95_ms",
+      "quantile": "p95",
+      "value": 1438.6313999999975,
+      "p_improvement": 0.492939537125544,
+      "p_regression": 0.5070604628744559,
+      "significance": "not_significant"
+    },
+    {
+      "role": "candidate",
+      "replicate": 8,
+      "metric": "throughput_p50_bytes_per_s",
+      "quantile": "p50",
+      "value": 493428.8970810597,
+      "p_improvement": 0.48862811706088694,
+      "p_regression": 0.5113718829391131,
+      "significance": "not_significant"
+    },
+    {
+      "role": "candidate",
+      "replicate": 8,
+      "metric": "throughput_p95_bytes_per_s",
+      "quantile": "p95",
+      "value": 15208569.122858334,
+      "p_improvement": 0.6850931016425185,
+      "p_regression": 0.31490689835748154,
+      "significance": "not_significant"
+    },
+    {
+      "role": "candidate",
+      "replicate": 9,
+      "metric": "ttfb_p50_ms",
+      "quantile": "p50",
+      "value": 182.995,
+      "p_improvement": 0.10079678968291017,
+      "p_regression": 0.8992032103170898,
+      "significance": "not_significant"
+    },
+    {
+      "role": "candidate",
+      "replicate": 9,
+      "metric": "ttfb_p95_ms",
+      "quantile": "p95",
+      "value": 1860.5258,
+      "p_improvement": 0.5382971529218168,
+      "p_regression": 0.4617028470781832,
+      "significance": "not_significant"
+    },
+    {
+      "role": "candidate",
+      "replicate": 9,
+      "metric": "throughput_p50_bytes_per_s",
+      "quantile": "p50",
+      "value": 497753.54916513007,
+      "p_improvement": 0.5712881934330647,
+      "p_regression": 0.4287118065669353,
+      "significance": "not_significant"
+    },
+    {
+      "role": "candidate",
+      "replicate": 9,
+      "metric": "throughput_p95_bytes_per_s",
+      "quantile": "p95",
+      "value": 25609406.534359686,
+      "p_improvement": 0.6029439301909694,
+      "p_regression": 0.39705606980903063,
+      "significance": "not_significant"
+    }
+  ]
+}

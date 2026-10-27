@@ -83,7 +83,7 @@ Usage:
   sim-latency staging-review --epoch=<n> next [--out-dir=<dir>]
   sim-latency staging-review --epoch=<n> approve --job-id=<id> --reviewer=<id> --reason=<text> --evidence=<path>
   sim-latency promote --epoch=<n> (--winner=<dir> --winner-job-id=<id> | --no-winner) [--message=<text>] [--source-config=<path>] [--repos-root=<dir>] [--dry-run]
-  sim-latency supervise --enable-automation --owner-id=<id> --state-dir=<dir> --worker-command=<path> --worker-sha256=<digest> --prepare-command=<path> --prepare-sha256=<digest> [--review-command=<path>] [--review-sha256=<digest>] [--reviewer-token-file=<path>] [--review-api-url=<url>] [--build-command=<path>] [--build-sha256=<digest>] [--source-config=<path>] [--repos-root=<dir>] [--once]
+  sim-latency supervise --enable-automation --owner-id=<id> --state-dir=<dir> --worker-command=<path> --worker-sha256=<digest> --prepare-command=<path> --prepare-sha256=<digest> [--review-command=<path>] [--review-sha256=<digest>] [--reviewer-token-file=<path>] [--review-api-url=<url>] [--build-command=<path>] [--build-sha256=<digest>] [--source-config=<path>] [--repos-root=<dir>] [--once] [--prepare-only]
   sim-latency stage-reviewed-source --review-id=<id> --state-dir=<dir> --build-command=<path> --build-sha256=<digest> [--source-config=<path>] [--repos-root=<dir>]
   sim-latency bootstrap-source --enable-automation --owner-id=<id> --state-dir=<dir> --manifest-commit=<sha> [--opens-at=<time>] [--source-config=<path>] [--repos-root=<dir>]
   sim-latency source-review-packet --round-id=<id> --job-id=<id> --out-dir=<dir>
@@ -142,11 +142,12 @@ Options:
   --worker-sha256=<digest> Exact SHA-256 of the trusted worker launcher executable.
   --prepare-command=<path> Absolute trusted runtime propagation and qualification executable.
   --prepare-sha256=<digest> Exact SHA-256 of the trusted preparation executable.
-  --review-command=<path> Qualified isolated GPT-5.4 mini xhigh review broker executable.
+  --review-command=<path> Qualified isolated elected-winner review broker executable.
   --review-sha256=<digest> Exact SHA-256 of the trusted review broker.
   --reviewer-token-file=<path> Scoped reviewer credential; never passed to the model broker.
   --review-api-url=<url> HTTPS reviewer API origin [default: https://api.bringyour.com].
   --once                 Reconcile one durable supervisor step and exit.
+  --prepare-only         With --once, prepare an existing intent without activation, round creation or ordinary evaluation.
   --review-id=<id>        Exact persisted, genuinely approved v2 source review identity.
   --build-command=<path> Pinned isolated source build/test broker; never a candidate host command.
   --build-sha256=<digest> SHA-256 of the qualified isolated build/test broker.

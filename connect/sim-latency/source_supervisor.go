@@ -542,9 +542,23 @@ func (self *sourceSupervisorRuntime) prepareSource(ctx context.Context, lease mo
 	}{Operation: "propagate_and_qualify", Intent: intent, Lease: lease})
 }
 
+// Preparation-only is an explicit one-step boundary, never a continuously
+// running supervisor whose later reconciliation could activate prepared source.
+func sourceSupervisorPreparationMode(opts docopt.Opts) (bool, error) {
+	preparationOnly := optBool(opts, "--prepare-only")
+	if preparationOnly && !optBool(opts, "--once") {
+		return false, errors.New("--prepare-only requires --once")
+	}
+	return preparationOnly, nil
+}
+
 // Starts only after explicit enablement and frozen v2 policy approval. Command
 // digests are deployment settings, never content provided by a candidate.
 func runSourceSupervisor(opts docopt.Opts) {
+	preparationOnly, modeErr := sourceSupervisorPreparationMode(opts)
+	if modeErr != nil {
+		fatalf("supervisor mode: %s", modeErr)
+	}
 	if !optBool(opts, "--enable-automation") {
 		fatalf("supervisor is disabled; explicit --enable-automation and approved v2 configuration are required")
 	}
@@ -578,7 +592,7 @@ func runSourceSupervisor(opts docopt.Opts) {
 		reviewerTokenFile: optString(opts, "--reviewer-token-file", ""), reviewApiUrl: optString(opts, "--review-api-url", "https://api.bringyour.com"),
 		buildCommand: optString(opts, "--build-command", ""), buildSha256: optString(opts, "--build-sha256", ""),
 	}
-	if model.IsCompetitionWinnerReviewPolicy(settings.AutomationPolicy.WinnerReviewPolicy) {
+	if model.IsCompetitionWinnerReviewPolicy(settings.AutomationPolicy.WinnerReviewPolicy) && !preparationOnly {
 		if runtime.reviewCommand == "" || !validSha256(runtime.reviewSha256) || runtime.buildCommand == "" || !validSha256(runtime.buildSha256) {
 			fatalf("elected-winner supervision requires qualified pinned review and build brokers")
 		}
@@ -593,7 +607,7 @@ func runSourceSupervisor(opts docopt.Opts) {
 			return runSourceSupervisorWorkerCommand(ctx, runtime.workerCommand, runtime.workerSha256, controller.CompetitionSupervisorWorkerRequest{Operation: "run_one_epoch", Round: round, Lease: lease})
 		},
 	}}
-	supervisor := &controller.CompetitionSupervisor{Enabled: true, OwnerId: optString(opts, "--owner-id", ""), Driver: driver}
+	supervisor := &controller.CompetitionSupervisor{Enabled: true, PreparationOnly: preparationOnly, OwnerId: optString(opts, "--owner-id", ""), Driver: driver}
 	ctx, cancel := signalContext()
 	defer cancel()
 	report := func(state string, err error) {

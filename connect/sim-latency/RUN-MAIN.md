@@ -279,7 +279,7 @@ Do not leave a reviewer agent acting as the scheduler. The supervisor's default
 choice is safe carry-forward; separately prepared promotion intents require the
 real source-review, exact-base, patch and deadline interlocks before selection.
 
-#### Preparation-only qualification boundary — pending release qualification
+#### Preparation-only qualification boundary — native installation pending
 
 The new native CLI adds `supervise --once --prepare-only` for one explicit
 reconciliation of an **already reserved** source intent. This is not ordinary
@@ -290,9 +290,11 @@ round creation, source election/review, or ordinary evaluation. Repeating mode
 without `--once` is refused. Do not infer that a `preparation_ready` journal
 entry proves all launch gates or grants activation permission.
 
-This flag is currently unqualified and must not be used until its exact native
-release and regression tests pass. Older installed CLIs and the current shell
-wrapper do not support it; do not relabel their digests or assume forwarding.
+The 25 incremental controller/CLI/private-policy guards passed three consecutive
+runs with zero skips; a compiled old-behavior control reproduced seven unsafe
+failures. This does not qualify an installed native release or repeat the older
+full control suite. Older installed CLIs and the current shell wrapper do not
+support the flag; do not relabel their digests or assume forwarding.
 Use only the qualified native CLI with all required pinned worker/preparation
 arguments. Preserve the exact bootstrap intent, state directory and owner.
 After independent phase-two acceptance, normal supervision still performs its

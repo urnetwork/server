@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "image": "urnetwork/sim-latency-submission:068be8f3eb1b58394443c30d48298bae",
+  "image_id": "sha256:8385ae6f9d4379985cfbb612e8432ea830b2af0bf94c0265ddd315542486ba1d",
+  "base_image_id": "sha256:98c9061c4a43a25e7b581a5193ca6e7f48e49e7b7fc03b7c1b6190a029befee2",
+  "base_sha": "a9e8e1a710b24c749e6499a0606938252c83e136",
+  "candidate_sha": "28e5f2f823008394cc51d1405750daf5decd0915",
+  "patch_sha256": "1076be3ed61df0e14ae90c13bbe4c35442de6371064fd7d78f61ed6834e170f1",
+  "policy_sha256": "0a1cb9032ee630042f1a1fe585493fba6f7b3fc10b71b697de39cebe43e00a1e",
+  "builder_sha256": "ca3c84c64762450a72013c705438610bf465f78fb57bcba901a573c1005d743d",
+  "image_key": "068be8f3eb1b58394443c30d48298baefc6f95dc96ddff5cfb630f70ea56b0b2",
+  "patch_validator_sha256": "3d161d76bace48bff6536164a84f330b1618c82f319775b8551c19872b937e54",
+  "candidate_commits_sha256": "e06201ee836bc52a449bfdf9d31eeebde8d514581b7dac131569617611600128",
+  "original_source_identity_sha256": "b5eb9057910459f3bc08d4a6a136e7fdfe0c095e1ea73e97f2dfdbd6d64deb48",
+  "candidate_commits": {
+    "connect": "e90d59eb404f973dba6e9d0689ecd94e2718c10e",
+    "glog": "1c4954b017d9e8140a4e7020f914eb27410a41c6",
+    "goidenticons": "39ccec1b69db3a6f67e7346d6f44863499e6241d",
+    "gvisor": "57c9e137f7407ad6cd41dcca1ba304a446e09c79",
+    "proxy": "af1d364fe34b807c31936642bff7d3fd849ab2a4",
+    "sdk": "d3824aa98c02e3c16ff7abcfe7a7088c8a470cdb",
+    "server": "28e5f2f823008394cc51d1405750daf5decd0915",
+    "sn": "6e686aabd53b7c45b154051fd268138988224eba",
+    "userwireguard": "f9a92f0e5f5577a80d358065c4d39ca21f971a1c",
+    "warp": "8dfa405ec380a60307952778921f05bba1c59a33"
+  }
+}

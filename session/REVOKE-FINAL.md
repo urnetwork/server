@@ -390,3 +390,47 @@ Input fingerprints:
 - `REVOKE.md`: `a92ceeb9d54fdfce301e2f3ad30a3612076192dbdf95c03157dbeafe1686cb5d`.
 - `REVOKE-REVIEW.md`: `e8f16634aa0d21b2235156993c1c0e91755d6c4291ecb008baabb7b893e27472`.
 - Inspected server HEAD: `269acffb57b315e7ee9446d9155a8858469e5ecf`; connect HEAD: `64e433f47cb5ac9f32e71a5b6d5aff659bc00623`; SDK HEAD: `f2aa25f6af5aee4780cad2e67c0e25a6d2364495`. The shared workspace may advance independently; recheck these paths before implementation.
+
+## 14. Decision note, 2026-10-26: Redis becomes the authority
+
+The owner chose "Redis becomes the authority" on 2026-10-26, when asked whether to keep this plan's denylist posture. For tagged credentials this reverses §1 ("successful Redis validation never replaces the SQL requirements") and §4 ("Redis is a denylist authority … not a durable allowlist consulted on every request"). It also reverses §6's rule that a password change commits whatever Redis does. The sections above stay as the record of the earlier decision.
+
+The reason was load. On 2026-10-26 the per-check SQL state query cost about 17k standalone transactions a second, about 40% of PgBouncer's load, while PgBouncer's 640 server connections were the platform's bottleneck. See factury `postmortem/2026-10-26-services-cpu-pgbouncer-queue.md`.
+
+**Scope.** A tagged credential is either a client credential with `root_client_id` or a network credential with `session_id`; both require `exp`. Its state check is one `HMGET` on its revocation record. Untagged credentials keep the SQL state query, and `ValidateByJwtStateInTx` keeps SQL.
+
+**Record.** The key is `{rv_<network>_<k>}`, with `k` = FNV-1a of the lineage, mod 64. The lineage is the root client for a client credential and the session for a network credential.
+
+| Field | Value |
+|---|---|
+| `n:user` | the network's admin user |
+| `n:cred` | the credential cutoff in Unix microseconds; only rises |
+| `n:del` | the network was deleted |
+| `c:<client>` | `a <device> <source client>` |
+| `r:<root>` | `a` |
+| `s:<session>` | `a` |
+| any revoked entry | the tombstone `x` |
+
+**Missing fields.** A missing field never means "no revocation". The check falls back to the SQL state query and projects a valid answer. For a session credential it first checks the network marker and the session operation journal.
+- A positive projection lives one hour.
+- A projection is refused if its read is older than one minute by Redis time.
+- A projection never overwrites a live tombstone.
+
+**Writes.** Every revocation writes the record inside its transaction, before commit, and fails the change if it cannot.
+
+| Revocation | Record write |
+|---|---|
+| client deactivation, including the abandoned top-level mark and the stale-child reap | tombstone `c:`, plus `r:` for a root |
+| session enforcement | `s:` in all 64 shards, before the operation is enforced and before a status read reports an applied receipt |
+| password reset | `n:cred` in every shard of the user's networks |
+| network deletion | `n:del` in every shard |
+
+A commit that fails after its write is a spurious revocation, never a missed one. Tombstones live ten minutes. After that the absent field sends checks to SQL, which already refuses.
+
+**Unavailable Redis.** A check refuses with 503 (`ErrAuthUnavailable`) and never falls back to SQL. Leases keep the 2026-10-11 rule: no answer, no retirement. Lease rechecks and session-event wakes read the record; the 60-second cadence is unchanged.
+
+**Loss.** Losing a record costs a query, not authority. SQL refuses deactivated clients, deleted networks and rotated credentials. The journal refuses, or holds unavailable, a session whose network marker was lost too.
+
+**Rollout.** Readers trust the record only when vault `auth.yml` sets `revocation_record_enabled: true`; writers always write. Deploy every process that deactivates clients, rotates credentials, deletes networks or enforces session operations before enabling (api, connect, proxy, alt, taskworker). Clearing the setting returns readers to SQL.
+
+The implementation is `session/revocation_record.go`. Its guard is `model/revocation_record_writer_guard_test.go`: every statement that ends a credential's state must write the record, or name why it ends no live credential.

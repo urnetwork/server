@@ -1,0 +1,8 @@
+# Native evidence is byte-authenticated; do not normalize line endings.
+original-artifacts/** -text -diff
+native/** -text -diff
+lineage/** -text -diff
+evaluator.stderr -text -diff
+manager-terminal.log -text -diff
+ORIGINAL-ARTIFACTS.json -diff
+MANIFEST.sha256 -diff

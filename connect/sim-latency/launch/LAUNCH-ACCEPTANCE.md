@@ -5,19 +5,23 @@ checklist is the acceptance index for the new release, not an authorization to
 activate production. Historical v1 checkmarks do not qualify a different source,
 image, host manifest, policy or review provider.
 
-## Current checkpoint — October 27, 11:00 UTC
+## Current checkpoint — October 27, 12:24 UTC
 
 The following supersedes the provider and baseline-preparation progress in the
 dated bullets below; those bullets retain the earlier qualification history.
 
-- The trusted corrected **R9/R9 bridge is now running**, started **09:32:21
-  UTC**, deadline **12:32:21 UTC**, session **14145**, runner **3094175**.
+- The trusted corrected **R9/R9 bridge completed with exit 0**, started **09:32:21
+  UTC**, ended **12:23:51 UTC**, duration **10,290 seconds**, before the
+  **12:32:21 UTC** deadline. Session **14145** is reaped and runner **3094175**
+  is gone; all **9 controls and 9 candidates** completed. Original three-container
+  and four-network inventories are restored, with no residual evidence mount.
   Native precommit authentication `128fc974…` passed before the one-shot launch.
-  At this checkpoint the runner is verified live and has completed **9/9
-  controls**, **0/9 candidates**. It uses exact request `2114953f…`, frozen
+  It used exact request `2114953f…`, frozen
   evaluator `98c…` / scorer `efd…`, 3,600 providers, client pool 200 and margin
   26.9%. No unrelated compilation, tests, fixture execution or model calls may
-  overlap. No bridge acceptance or production activation is claimed. The
+  overlap with timed measurements. Timed execution has ended; queued tests may
+  now run. Native artifact authentication and score replay remain pending;
+  no bridge acceptance or production activation is claimed. The
   requested one-independent-seed compromise is **not approved**; the currently
   authorized calibration still requires two.
 - The [V6 review precommit](SNOW-REVIEW-QUALIFICATION-PRECOMMIT-2026-10-27-V6.json)

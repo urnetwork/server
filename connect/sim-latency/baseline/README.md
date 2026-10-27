@@ -1,5 +1,15 @@
 # Sim-latency baseline preservation
 
+The [October 27 corrected C2 bridge](prelaunch-corrected-c2-bridge-2026-10-27/README.md)
+completed fresh R9/R9 in 10,290 seconds with all gates and cleanup. Independent
+native verification accepted it as operational compatibility evidence, not
+statistical equivalence. Its versioned public subset retains all 18 CSVs and
+36 compressed statistics segments; excluded verbose logs remain private and
+the full native replay tree still needs retained MinIO archival. This is not
+an official production epoch baseline or completed independent-seed calibration.
+The comparison's significance fringe was 12.6246%; the practical takeover
+margin remains 26.9%, and both requirements still apply.
+
 The dated four-section [production environment preview](final-preview.html)
 summarizes the proposed environment, all eight exploratory frontier points and
 the remaining acceptance gates. It is not a final baseline or launch approval;

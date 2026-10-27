@@ -1,0 +1,59 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-held-out-two-b-addendum",
+  "protocol": "launch-3a-bridge-2b-2026-10-27-v1",
+  "base_protocol": "launch-3a-bridge-3b-2026-10-26-v1",
+  "published_at": "2026-10-27T13:45:33Z",
+  "protocol_approval_sha256": "b36e51b6a9253acdcc6ab912d28e00849d683c36c8f951023c770b7f3f928684",
+  "original_protocol_approval_sha256": "a794618968d840163952b7b2058100fd87b71ef7ccc44919ba590c5a253f643c",
+  "original_plan_sha256": "24f9b6ea9fe6fbfb4381ca29535b81a1cd4966b397c701b04f5b09ac74eb11d8",
+  "accepted_stage_a_report_sha256": "e78c1a965d485d0a183f95f72797aa75c5c0ba22e52acbcf28749cfe6ecb3adb",
+  "stage_a_inputs_sha256": "abf5fb1656358e6c1f2f41bc965ae5fd5e8a4faf510c95f3d5c251a10b392c94",
+  "margin_freeze_sha256": "d264f48d38a1ab6bea44342cdbcf5e13cebf6e4c2811506e8086995e4600b646",
+  "bridge_plan_sha256": "c70f5dfbad281c7d0ca70235043e400ca2a3b7fa49f2cf3be8ed8636b419723c",
+  "bridge_publication_sha256": "3f9654a6b46699b6348029f6f904aaa34de1b110d2cc97599c485bffaa00dc50",
+  "bridge_inputs_sha256": "85cf983b773102ac5ad706ba1eff612330261baf54589f07a2eae95937c000ec",
+  "bridge_compatibility_receipt_sha256": "2af963f0ca0cecef740744da974bd2d0c65a41a24b5d68cac277d076fe84c930",
+  "new_release_sha256": "5a1504cbad9787f84c91ac87bc719abd6337a64723733d6cf7d052660753b850",
+  "source_lock_sha256": "239cea7fe6f77f989b75ba6efa677e8731640ba2fdd3690a35e6fe72103f3d11",
+  "reference_bundle_sha256": "001feb8c46fcfc4571bd68841de28855c3ba2506c56fa07ade7734865fbdae51",
+  "exclusions_sha256": "bc3b97cdf2669324574302daf7929bf98e31099c5c1b32a4eb933cb9320493e5",
+  "accepted_margin": 0.269,
+  "hidden_b_seed_count": 2,
+  "required_correctly_ordered_seeds": 2,
+  "control_replicates": 9,
+  "candidate_replicates": 9,
+  "execution_limit_seconds": 10800,
+  "fresh_hidden_b_seeds_required": true,
+  "all_outcomes_retained": true,
+  "no_replacement_or_resampling": true,
+  "reference_transfers": [
+    {
+      "role": "no-op",
+      "patch_sha256": "1076be3ed61df0e14ae90c13bbe4c35442de6371064fd7d78f61ed6834e170f1",
+      "original_direction_sha256": "dd75d727ff7edb8428bd438b0290ca6b26926294b73edf8d71879a4064b6fd35",
+      "expected_direction": "no-op",
+      "claim": "expected-direction-hypothesis-not-new-c2-measurement",
+      "fresh_c2_bridge_required": true,
+      "all_two_ordered_c2_b_required": true
+    },
+    {
+      "role": "better",
+      "patch_sha256": "46bc95e3f2719f26f939be7a86c274d0b98bb2b1027f1ef4537d61de4c4ec924",
+      "original_direction_sha256": "6107119a2bac2339bda127535c217bd323cb7d785c3a1ac21979b3162178fd4f",
+      "expected_direction": "faster",
+      "claim": "expected-direction-hypothesis-not-new-c2-measurement",
+      "fresh_c2_bridge_required": true,
+      "all_two_ordered_c2_b_required": true
+    },
+    {
+      "role": "worse",
+      "patch_sha256": "2957ef507f7edc9dadcb09abd6425664e88748612917959a9a65243a0365ebe4",
+      "original_direction_sha256": "20f95f88728ceec01ae88fc54f5f5fd054bb14675fc6aca7e63fcf648b91a2f3",
+      "expected_direction": "slower",
+      "claim": "expected-direction-hypothesis-not-new-c2-measurement",
+      "fresh_c2_bridge_required": true,
+      "all_two_ordered_c2_b_required": true
+    }
+  ]
+}

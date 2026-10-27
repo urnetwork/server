@@ -175,6 +175,10 @@ type CompetitionSupervisor struct {
 	Now           func() time.Time
 	PollInterval  time.Duration
 	LeaseDuration time.Duration
+
+	// Preparation-only reconciliation may publish an existing intent and obtain
+	// real role evidence, but never activates source or runs ordinary evaluation.
+	PreparationOnly bool
 }
 
 // Deployment-owned callbacks are pinned by the executable harness. They may
@@ -409,6 +413,9 @@ func (self *CompetitionSupervisor) Reconcile(ctx context.Context) (state string,
 		if snapshot.Round.DecisionMode != model.CompetitionDecisionModeV2 {
 			return "legacy_mode", errors.New("supervisor cannot convert or advance a legacy round")
 		}
+		if self.PreparationOnly {
+			return "preparation_only", nil
+		}
 		if err := self.Driver.RunWorker(operationCtx, *lease, *snapshot.Round); err != nil {
 			return "evaluation_blocked", err
 		}
@@ -431,6 +438,9 @@ func (self *CompetitionSupervisor) Reconcile(ctx context.Context) (state string,
 	}
 	transition := snapshot.Transition
 	if transition == nil {
+		if self.PreparationOnly {
+			return "preparation_blocked", errors.New("preparation-only reconciliation requires an already reserved source intent")
+		}
 		initialState := "source_choice_pending"
 		if snapshot.WinnerReview != nil {
 			initialState = "winner_review_pending"
@@ -446,7 +456,19 @@ func (self *CompetitionSupervisor) Reconcile(ctx context.Context) (state string,
 	if transition.TargetEpoch != targetEpoch {
 		return "blocked", errors.New("supervisor checkpoint belongs to another epoch")
 	}
-	if snapshot.WinnerReview != nil {
+	if self.PreparationOnly {
+		switch transition.State {
+		case "source_publication_pending", "publication_blocked", "preparation_pending", "preparation_blocked", "preparation_ready":
+			if snapshot.Intent == nil {
+				return "preparation_blocked", errors.New("preparation-only reconciliation requires an already reserved source intent")
+			}
+		case "source_active", "round_created":
+			return "preparation_only", nil
+		default:
+			return "preparation_blocked", errors.New("preparation-only reconciliation cannot choose or review a new source")
+		}
+	}
+	if snapshot.WinnerReview != nil && !self.PreparationOnly {
 		updated, reviewState, reviewErr, stop := self.reconcileWinnerReview(operationCtx, *lease, snapshot, transition, now)
 		if stop {
 			return reviewState, reviewErr
@@ -471,7 +493,7 @@ func (self *CompetitionSupervisor) Reconcile(ctx context.Context) (state string,
 		return result.State, nil
 	}
 	fallback := func(reason string) (bool, string, error) {
-		if snapshot.WinnerReview != nil {
+		if self.PreparationOnly || snapshot.WinnerReview != nil {
 			return false, "", nil
 		}
 		if snapshot.Intent == nil || snapshot.Intent.Kind != "reviewed_source_promotion" {
@@ -551,7 +573,7 @@ func (self *CompetitionSupervisor) Reconcile(ctx context.Context) (state string,
 			}
 			return state, prepareErr
 		}
-		if now.Before(snapshot.Intent.PreparedAt.Add(sourcePreparationInterval(snapshot.Intent))) {
+		if self.PreparationOnly || now.Before(snapshot.Intent.PreparedAt.Add(sourcePreparationInterval(snapshot.Intent))) {
 			return checkpoint("preparation_ready", "", snapshot.Intent, time.Time{})
 		}
 		if activationErr := self.Driver.ActivateSource(operationCtx, *lease, snapshot.Intent); activationErr != nil {
@@ -562,7 +584,7 @@ func (self *CompetitionSupervisor) Reconcile(ctx context.Context) (state string,
 		if snapshot.Intent == nil {
 			return "preparation_blocked", errors.New("durable source intent is missing")
 		}
-		if now.Before(snapshot.Intent.PreparedAt.Add(sourcePreparationInterval(snapshot.Intent))) {
+		if self.PreparationOnly || now.Before(snapshot.Intent.PreparedAt.Add(sourcePreparationInterval(snapshot.Intent))) {
 			return "preparation_ready", nil
 		}
 		if activationErr := self.Driver.ActivateSource(operationCtx, *lease, snapshot.Intent); activationErr != nil {
@@ -602,6 +624,9 @@ func (self *CompetitionSupervisor) Reconcile(ctx context.Context) (state string,
 // Rate-limits both stable and failing states; cancellation joins every renewal
 // owner. Report receives redacted states, never unpublished evaluation details.
 func (self *CompetitionSupervisor) Run(ctx context.Context, report func(string, error)) error {
+	if self.PreparationOnly {
+		return errors.New("preparation-only supervision requires one explicit reconciliation")
+	}
 	interval := self.PollInterval
 	if interval == 0 {
 		interval = 15 * time.Second
