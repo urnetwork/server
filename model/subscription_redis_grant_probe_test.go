@@ -339,6 +339,11 @@ func redisGrantProbeCounts() map[string]float64 {
 	for _, result := range []string{"empty", "available", "undecided", "error"} {
 		counts["reserve-probe "+result] = testutil.ToFloat64(redisContractReservationResults.WithLabelValues("reserve-probe", result))
 	}
+	// an unlisted payer never tries to prove its exhaustion
+	// (subscription_redis_exhaustion.go)
+	for _, result := range []string{"proven", "unproven"} {
+		counts["exhaustion-proof "+result] = testutil.ToFloat64(redisContractReservationResults.WithLabelValues("exhaustion-proof", result))
+	}
 	return counts
 }
 
