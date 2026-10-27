@@ -1,12 +1,14 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-27T22:28:15Z",
+  "observed_at": "2026-10-27T22:58:20Z",
   "unmeasured_recovery": {
     "status": "owner_approved_recovery_applied_native_executor_running",
     "failed_attempt_measurements_observed": 0,
-    "recovered_baseline_completed": 6,
+    "recovered_baseline_completed": 9,
     "recovered_candidate_completed": 0,
+    "recovered_candidate_build_passed": true,
+    "recovered_candidate_replicate_running": 1,
     "recovered_first_job_started_at": "2026-10-27T21:28:07Z",
     "recovered_first_job_deadline": "2026-10-28T00:28:07Z",
     "production_control_authentication_http_status": 401,
