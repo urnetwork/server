@@ -122,7 +122,7 @@ func TestReviewQualificationSnowClaimsBindWrapperRelease(t *testing.T) {
 		if err == nil || report.Qualified || calls != 2 {
 			t.Fatalf("mock transport stop unexpectedly qualified or changed calls: %+v %v calls=%d", report, err, calls)
 		}
-		expectedPins := fmt.Sprintf(`{"broker_sha256":"%s","image_receipt_sha256":"%s","provider_settings_sha256":"%s"}`, brokerDigest, imageDigest, settingsDigest)
+		expectedPins := fmt.Sprintf(`{"broker_sha256":"%s","image_receipt_sha256":"%s","provider_settings_sha256":"%s","semantic_request_sha256":"%s"}`, brokerDigest, imageDigest, settingsDigest, cases[1].RequestSha256)
 		if observed[len(observed)-1] != cases[1].Request.Template.IdempotencyKey+":"+reviewQualificationHash([]byte(expectedPins)) {
 			t.Fatal("qualification claim is not bound to all authenticated immutable release pins")
 		}
@@ -730,7 +730,9 @@ func TestReviewQualificationSnowFixturesBindNativeInputIdentities(t *testing.T) 
 		}
 		if !bytes.Contains(input, []byte("authenticated pristine source")) ||
 			!bytes.Contains(input, []byte("not post-patch candidate source")) ||
-			!bytes.Equal(item.Request.Packet.Score, legacy[index].Request.Packet.Score) ||
+			bytes.Contains(item.Request.Packet.Score, []byte("canonical_median_raw_score")) ||
+			!bytes.Contains(item.Request.Packet.Score, []byte(`"official_measurement":false`)) ||
+			!bytes.Contains(item.Request.Packet.Score, []byte(`"source_plan_sha256"`)) ||
 			!reflect.DeepEqual(item.Request.SourceFiles, legacy[index].Request.SourceFiles) {
 			t.Fatal("fixture confused pristine base or invented score evidence", item.Name)
 		}

@@ -175,6 +175,25 @@ func reviewQualificationHash(content []byte) string {
 	return hex.EncodeToString(digest[:])
 }
 
+// The semantic request excludes only clocks finalized later by the executor.
+// A changed directory or clock cannot reroll the same authenticated input.
+func reviewQualificationSnowClaimKey(plan reviewQualificationPlan, item reviewQualificationCase) (string, error) {
+	content, err := json.Marshal(item.Request)
+	if err != nil || reviewQualificationHash(content) != item.RequestSha256 {
+		return "", errors.New("Snow claim semantic request is not independently pinned")
+	}
+	release, err := json.Marshal(struct {
+		BrokerSha256           string `json:"broker_sha256"`
+		ImageReceiptSha256     string `json:"image_receipt_sha256"`
+		ProviderSettingsSha256 string `json:"provider_settings_sha256"`
+		SemanticRequestSha256  string `json:"semantic_request_sha256"`
+	}{BrokerSha256: plan.BrokerSha256, ImageReceiptSha256: plan.ImageReceiptSha256, ProviderSettingsSha256: plan.ProviderSettingsSha256, SemanticRequestSha256: item.RequestSha256})
+	if err != nil {
+		return "", err
+	}
+	return item.Request.Template.IdempotencyKey + ":" + reviewQualificationHash(release), nil
+}
+
 // Canonical regular-file reads refuse links, special files, writable public
 // inputs and private owner/mode drift before bounded allocation.
 func readReviewQualificationPin(pin reviewQualificationPin, maximum int64, private bool) ([]byte, error) {
@@ -467,18 +486,13 @@ func executeReviewQualification(ctx context.Context, directory string, plan revi
 		}
 		request := item.Request
 		if plan.Kind == "winner-review-snow-provider-qualification-plan" {
-			// The image receipt authenticates the exact broker image/binary. A
-			// genuine new image or provider release can qualify without a cosmetic
-			// wrapper edit; identical pins still cannot reroll by changing clocks.
-			release, err := json.Marshal(struct {
-				BrokerSha256           string `json:"broker_sha256"`
-				ImageReceiptSha256     string `json:"image_receipt_sha256"`
-				ProviderSettingsSha256 string `json:"provider_settings_sha256"`
-			}{BrokerSha256: plan.BrokerSha256, ImageReceiptSha256: plan.ImageReceiptSha256, ProviderSettingsSha256: plan.ProviderSettingsSha256})
+			// Changed authenticated source evidence is a different input, not a
+			// time/directory-based retry of the same model request.
+			claimKey, err := reviewQualificationSnowClaimKey(plan, item)
 			if err != nil {
 				return report, err
 			}
-			request.Template.IdempotencyKey += ":" + reviewQualificationHash(release)
+			request.Template.IdempotencyKey = claimKey
 		}
 		now := hooks.Now().UTC()
 		request.Request.StartedAt, request.Request.Deadline = now, now.Add(settings.CaseTimeout)

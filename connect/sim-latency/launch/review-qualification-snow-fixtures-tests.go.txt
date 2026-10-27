@@ -1,0 +1,283 @@
+// Deterministic guards distinguish real source checks from official timing and
+// keep repeated model input one-shot despite incidental Go log timestamps.
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"io"
+	"reflect"
+	"strings"
+	"testing"
+
+	"github.com/urnetwork/server/model"
+)
+
+// Read only the independently observed immutable receipt, never a passing mock.
+func snowReviewFixtureEvidenceForTest(t *testing.T) snowReviewFixtureEvidence {
+	t.Helper()
+	var evidence snowReviewFixtureEvidence
+	if err := decodeStrictJSONBytes(frozenSnowReviewFixtureEvidenceJson(), &evidence, "immutable actual fixture receipt"); err != nil {
+		t.Fatal(err)
+	}
+	return evidence
+}
+
+// The old synthetic score explicitly lacked execution and invented a nominal
+// score. The corrected Snow packet claims only actual scoped source checks.
+func TestReviewQualificationSnowFixtureEvidenceIsActualAndScoped(t *testing.T) {
+	evidence := snowReviewFixtureEvidenceForTest(t)
+	cases, err := frozenSnowReviewQualificationCases()
+	if err != nil || len(cases) != 6 || len(evidence.Runs) != 12 {
+		t.Fatal("complete actual source-check evidence required", err)
+	}
+	legacy, err := snowReviewQualificationSourceCases()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, item := range cases {
+		if !bytes.Contains(legacy[index].Request.Packet.Score, []byte(`"tests_executed":false`)) || !strings.Contains(legacy[index].Request.Instructions, "No tests have executed") {
+			t.Fatal("old missing-execution control no longer reproduces")
+		}
+		var score struct {
+			Official    bool                     `json:"official_measurement"`
+			Performance bool                     `json:"performance_measured"`
+			AstEqual    bool                     `json:"comment_free_ast_equal"`
+			Probe       string                   `json:"source_check_probe"`
+			Base        snowReviewFixtureSummary `json:"pristine_base_checks"`
+			Candidate   snowReviewFixtureSummary `json:"patched_source_checks"`
+		}
+		if json.Unmarshal(item.Request.Packet.Score, &score) != nil || score.Official || score.Performance || bytes.Contains(item.Request.Packet.Score, []byte("canonical_median_raw_score")) || strings.Contains(item.Request.Instructions, "No tests have executed") || item.ExpectedDecision != legacy[index].ExpectedDecision || !bytes.Equal(item.Request.Packet.Patch, legacy[index].Request.Packet.Patch) || !reflect.DeepEqual(item.Request.SourceFiles, legacy[index].Request.SourceFiles) {
+			t.Fatal("source checks invented timing, changed code/oracle or lost context", item.Name)
+		}
+		if index == 5 {
+			if score.Base.ExitCode != 1 || score.Candidate.ExitCode != 1 || score.Base.TestsRun != 0 || score.Candidate.TestsRun != 0 || !strings.Contains(score.Candidate.CompilerOutput, "undefined: opaqueTransform") || score.Candidate.BuildFailures != 1 {
+				t.Fatal("missing transitive definition was supplied or its compiler failure concealed")
+			}
+		} else if score.Base.ExitCode != 0 || score.Candidate.ExitCode != 0 || score.Base.TestsRun != 1 || score.Candidate.TestsRun != 1 || score.Base.TestsPassed != 1 || score.Candidate.TestsPassed != 1 {
+			t.Fatal("closed source checks lack actual one-test outcomes", item.Name)
+		}
+		if score.AstEqual != (index == 0 || index == 1 || index == 4) {
+			t.Fatal("comment-free syntax comparison disagrees with the unchanged fixed code", item.Name)
+		}
+		if !strings.Contains(score.Probe, "func TestFixtureRepeatability") || reviewQualificationHash([]byte(score.Probe)) != score.Base.ProbeSha256 || score.Base.ProbeSha256 != score.Candidate.ProbeSha256 {
+			t.Fatal("actual executed probe content is missing or inconsistent", item.Name)
+		}
+	}
+}
+
+// Comment text and line positions do not alter the digest; executable syntax
+// does. No claimed equivalence is inferred from tests merely returning pass.
+func TestReviewQualificationSnowFixtureAstIgnoresOnlyCommentsAndPositions(t *testing.T) {
+	source := []byte("package reviewfixture\nfunc Value(value float64) float64 { return value }\n")
+	commented := []byte("// arbitrary untrusted comment\npackage reviewfixture\n\n// changed spacing\nfunc Value(value float64) float64 { return value }\n")
+	changed := []byte("package reviewfixture\nfunc Value(value float64) float64 { return 1 }\n")
+	before, err := snowReviewFixtureAstSha256(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	comments, err := snowReviewFixtureAstSha256(commented)
+	if err != nil || comments != before {
+		t.Fatal("comments or positions changed syntax digest", err)
+	}
+	after, err := snowReviewFixtureAstSha256(changed)
+	if err != nil || after == before {
+		t.Fatal("executable syntax change disappeared", err)
+	}
+	if _, err := snowReviewFixtureAstSha256([]byte("package !")); err == nil {
+		t.Fatal("invalid Go syntax acquired an identity")
+	}
+}
+
+// The producer cannot broaden its fixed file into context/multi-file patches,
+// nor execute replacement source that differs from the authenticated packet.
+func TestReviewQualificationSnowFixturePatchDecoderIsClosed(t *testing.T) {
+	cases, err := snowReviewQualificationSourceCases()
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := cases[1]
+	patch := item.Request.Packet.Patch
+	pristine := item.Request.SourceFiles[0].Content
+	before, after, err := snowReviewFixtureSources(patch, pristine)
+	if err != nil || string(before) != pristine || bytes.Equal(before, after) {
+		t.Fatal("actual whole-file fixture diff was not reconstructed", err)
+	}
+	for _, mutation := range [][]byte{
+		bytes.TrimSuffix(patch, []byte("\n")),
+		append(append([]byte{}, patch...), []byte("diff --git a/other.go b/other.go\n")...),
+		bytes.Replace(patch, []byte("@@ -1,"), []byte("@@ -2,"), 1),
+		bytes.Replace(patch, []byte("-package"), []byte(" package"), 1),
+		bytes.ReplaceAll(patch, []byte("server/connect/review_qualification_fixture.go"), []byte("../other.go")),
+	} {
+		if _, _, err := snowReviewFixtureSources(mutation, pristine); err == nil {
+			t.Fatal("broadened or partial fixture patch was executable")
+		}
+	}
+	if _, _, err := snowReviewFixtureSources(patch, pristine+"\n"); err == nil {
+		t.Fatal("unauthenticated pristine source was accepted")
+	}
+}
+
+// Repinning a malformed receipt is insufficient: every exact source, probe,
+// log hash and observed Go terminal must still pass the real validation body.
+func TestReviewQualificationSnowFixtureEvidenceRejectsContradictions(t *testing.T) {
+	original := snowReviewFixtureEvidenceForTest(t)
+	for _, mutate := range []func(*snowReviewFixtureEvidence){
+		func(value *snowReviewFixtureEvidence) { value.GoVersion = "go0.0.0" },
+		func(value *snowReviewFixtureEvidence) { value.SourcePlanSha256 = strings.Repeat("a", 64) },
+		func(value *snowReviewFixtureEvidence) { value.Runs = value.Runs[:11] },
+		func(value *snowReviewFixtureEvidence) { value.Runs[1] = value.Runs[0] },
+		func(value *snowReviewFixtureEvidence) { value.Runs[0].SourceSha256 = strings.Repeat("a", 64) },
+		func(value *snowReviewFixtureEvidence) { value.Runs[0].AstSha256 = strings.Repeat("a", 64) },
+		func(value *snowReviewFixtureEvidence) { value.Runs[0].ProbeSha256 = strings.Repeat("a", 64) },
+		func(value *snowReviewFixtureEvidence) { value.Runs[0].StdoutSha256 = strings.Repeat("a", 64) },
+		func(value *snowReviewFixtureEvidence) { value.Runs[0].StderrSha256 = strings.Repeat("a", 64) },
+		func(value *snowReviewFixtureEvidence) { value.Runs[0].ExitCode = 1 },
+		func(value *snowReviewFixtureEvidence) {
+			value.Runs[0].Stdout += "{"
+			value.Runs[0].StdoutSha256 = reviewQualificationHash([]byte(value.Runs[0].Stdout))
+		},
+		func(value *snowReviewFixtureEvidence) {
+			value.Runs[0].Stdout = strings.ReplaceAll(value.Runs[0].Stdout, "TestFixtureRepeatability", "TestAnotherSyntheticTest")
+			value.Runs[0].StdoutSha256 = reviewQualificationHash([]byte(value.Runs[0].Stdout))
+		},
+		func(value *snowReviewFixtureEvidence) {
+			value.Runs[0].Stdout = strings.ReplaceAll(value.Runs[0].Stdout, "command-line-arguments", "another-synthetic-package")
+			value.Runs[0].StdoutSha256 = reviewQualificationHash([]byte(value.Runs[0].Stdout))
+		},
+		func(value *snowReviewFixtureEvidence) { value.Runs[10].ExitCode = 0 },
+	} {
+		serialized, err := json.Marshal(original)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var changed snowReviewFixtureEvidence
+		if err := json.Unmarshal(serialized, &changed); err != nil {
+			t.Fatal(err)
+		}
+		mutate(&changed)
+		content, err := json.Marshal(changed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cases, err := snowReviewQualificationSourceCases()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := bindSnowReviewFixtureEvidence(cases, content); err == nil {
+			t.Fatal("repinned contradictory fixture evidence was accepted")
+		}
+	}
+	for _, content := range [][]byte{nil, []byte(`{}`), append(append([]byte{}, frozenSnowReviewFixtureEvidenceJson()...), []byte(`{}`)...)} {
+		cases, err := snowReviewQualificationSourceCases()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := bindSnowReviewFixtureEvidence(cases, content); err == nil {
+			t.Fatal("missing, empty or trailing evidence was accepted")
+		}
+	}
+}
+
+// Actual Go log timestamps and runner elapsed text are retained privately but
+// cannot create new semantic model input or a fresh single-attempt claim.
+func TestReviewQualificationSnowFixtureLogClocksCannotRerollClaims(t *testing.T) {
+	evidence := snowReviewFixtureEvidenceForTest(t)
+	original, err := frozenSnowReviewQualificationCases()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := range evidence.Runs {
+		decoder := json.NewDecoder(strings.NewReader(evidence.Runs[index].Stdout))
+		var content bytes.Buffer
+		encoder := json.NewEncoder(&content)
+		for {
+			var event map[string]any
+			if err := decoder.Decode(&event); errors.Is(err, io.EOF) {
+				break
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			event["Time"], event["Elapsed"] = "2000-01-01T00:00:00Z", 12345
+			if output, ok := event["Output"].(string); ok && (strings.HasPrefix(output, "--- PASS:") || strings.HasPrefix(output, "PASS\n") || strings.HasPrefix(output, "ok\t")) {
+				event["Output"] = "changed runner elapsed text; no function observation\n"
+			}
+			if err := encoder.Encode(event); err != nil {
+				t.Fatal(err)
+			}
+		}
+		evidence.Runs[index].Stdout = content.String()
+		evidence.Runs[index].StdoutSha256 = reviewQualificationHash(content.Bytes())
+	}
+	content, err := json.Marshal(evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sources, err := snowReviewQualificationSourceCases()
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed, err := bindSnowReviewFixtureEvidence(sources, content)
+	if err != nil || !reflect.DeepEqual(original, changed) {
+		t.Fatal("incidental Go clocks changed semantic qualification input", err)
+	}
+	plan := reviewQualificationPlan{BrokerSha256: strings.Repeat("a", 64), ImageReceiptSha256: strings.Repeat("b", 64), ProviderSettingsSha256: strings.Repeat("c", 64)}
+	first, err := reviewQualificationSnowClaimKey(plan, original[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := reviewQualificationSnowClaimKey(plan, changed[1])
+	if err != nil || first != second {
+		t.Fatal("Go timestamps permitted another model attempt", err)
+	}
+}
+
+// Genuine new authenticated source-check input has a distinct claim; changing
+// only a digest field without changing its request is rejected independently.
+func TestReviewQualificationSnowClaimsBindObservedSemanticInput(t *testing.T) {
+	oldCases, err := snowReviewQualificationSourceCases()
+	if err != nil {
+		t.Fatal(err)
+	}
+	newCases, err := frozenSnowReviewQualificationCases()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := reviewQualificationPlan{BrokerSha256: strings.Repeat("a", 64), ImageReceiptSha256: strings.Repeat("b", 64), ProviderSettingsSha256: strings.Repeat("c", 64)}
+	oldKey, err := reviewQualificationSnowClaimKey(plan, oldCases[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	newKey, err := reviewQualificationSnowClaimKey(plan, newCases[1])
+	if err != nil || oldKey == newKey {
+		t.Fatal("actual new source evidence reused the old attempted input", err)
+	}
+	changed := newCases[1]
+	changed.RequestSha256 = oldCases[1].RequestSha256
+	if _, err := reviewQualificationSnowClaimKey(plan, changed); err == nil {
+		t.Fatal("caller-authored digest changed a claim without its authenticated input")
+	}
+}
+
+// The closed frozen plan rejects arbitrary request/evidence changes before
+// producing any broker invocation; the semantic key is not new retry authority.
+func TestReviewQualificationSnowPlanRejectsUnpinnedSemanticChanges(t *testing.T) {
+	cases, err := frozenSnowReviewQualificationCases()
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := defaultWinnerSnowProviderSettings()
+	digest := strings.Repeat("a", 64)
+	plan := reviewQualificationPlan{Schema: 1, Kind: "winner-review-snow-provider-qualification-plan", PolicyModel: model.CompetitionSnowWinnerReviewModel, ProviderModel: model.CompetitionSnowWinnerReviewModel, Reasoning: model.CompetitionSnowWinnerReviewReasoning, BrokerSha256: strings.Repeat("b", 64), ImageReceiptSha256: strings.Repeat("c", 64), ProviderSettingsSha256: digest, Members: provider.Members, Cases: cases}
+	plan.Cases[1].Request.Instructions += " changed unpinned context"
+	content, err := json.Marshal(plan.Cases[1].Request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.Cases[1].RequestSha256 = reviewQualificationHash(content)
+	if err := validateSnowReviewQualificationPlan(plan, provider, digest); err == nil {
+		t.Fatal("repinned arbitrary semantic input was an eligible new attempt")
+	}
+}

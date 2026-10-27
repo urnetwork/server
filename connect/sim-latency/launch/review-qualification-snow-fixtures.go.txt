@@ -1,0 +1,264 @@
+// Qualification-only source checks preserve real Go output and compare syntax
+// without comments. They make no performance or source-approval claim.
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"go/ast"
+	"go/format"
+	"go/parser"
+	"go/token"
+	"io"
+	"reflect"
+	"strings"
+	"time"
+)
+
+// Only closed trusted fixtures are executed, once per source variant.
+type snowReviewFixtureSettings struct {
+	RunTimeout, TotalTimeout, CleanupGrace time.Duration
+	MaximumLogBytes                        int
+	MaximumReceiptBytes                    int64
+}
+
+// Independent bounds apply before any real provider authorization is consumed.
+func defaultSnowReviewFixtureSettings() snowReviewFixtureSettings {
+	return snowReviewFixtureSettings{RunTimeout: time.Minute, TotalTimeout: 5 * time.Minute, CleanupGrace: 5 * time.Second, MaximumLogBytes: 64 * 1024, MaximumReceiptBytes: 1024 * 1024}
+}
+
+// Raw compiler/test output is retained, not replaced by a caller-authored count.
+type snowReviewFixtureRun struct {
+	Position     int    `json:"position"`
+	Variant      string `json:"variant"`
+	SourceSha256 string `json:"source_sha256"`
+	AstSha256    string `json:"comment_free_ast_sha256"`
+	ProbeSha256  string `json:"probe_sha256"`
+	ExitCode     int    `json:"exit_code"`
+	Stdout       string `json:"stdout"`
+	Stderr       string `json:"stderr"`
+	StdoutSha256 string `json:"stdout_sha256"`
+	StderrSha256 string `json:"stderr_sha256"`
+}
+
+// The exact retained native plan authenticates all executable input bytes.
+type snowReviewFixtureEvidence struct {
+	Schema             int                    `json:"schema"`
+	Kind               string                 `json:"kind"`
+	SourcePlanSha256   string                 `json:"source_plan_sha256"`
+	GoVersion          string                 `json:"go_version"`
+	GoExecutableSha256 string                 `json:"go_executable_sha256"`
+	Runs               []snowReviewFixtureRun `json:"runs"`
+}
+
+// Only semantic observations enter provider input. Raw Time/Elapsed fields
+// remain retained evidence, not an opportunity to reroll the same model input.
+type snowReviewFixtureSummary struct {
+	Variant              string            `json:"variant"`
+	SourceSha256         string            `json:"source_sha256"`
+	AstSha256            string            `json:"comment_free_ast_sha256"`
+	ProbeSha256          string            `json:"probe_sha256"`
+	ExitCode             int               `json:"exit_code"`
+	TestsRun             int               `json:"tests_run"`
+	TestsPassed          int               `json:"tests_passed"`
+	TestsFailed          int               `json:"tests_failed"`
+	BuildFailures        int               `json:"build_failures"`
+	FunctionObservations []json.RawMessage `json:"function_observations"`
+	CompilerOutput       string            `json:"compiler_output"`
+	Stderr               string            `json:"stderr"`
+}
+
+// Decode only the existing one-file, whole-file diff, never arbitrary paths or
+// a general patch language. The pristine bytes must match authenticated input.
+func snowReviewFixtureSources(patch []byte, pristine string) ([]byte, []byte, error) {
+	path := "server/connect/review_qualification_fixture.go"
+	lines := strings.Split(strings.TrimSuffix(string(patch), "\n"), "\n")
+	if !bytes.HasSuffix(patch, []byte("\n")) || len(lines) < 7 || lines[0] != "diff --git a/"+path+" b/"+path || lines[1] != "--- a/"+path || lines[2] != "+++ b/"+path {
+		return nil, nil, errors.New("fixture requires its exact whole-file patch")
+	}
+	before, after := []string{}, []string{}
+	for _, line := range lines[4:] {
+		if strings.HasPrefix(line, "-") && len(after) == 0 {
+			before = append(before, line[1:])
+		} else if strings.HasPrefix(line, "+") {
+			after = append(after, line[1:])
+		} else {
+			return nil, nil, errors.New("fixture patch contains context, extra files or reordered lines")
+		}
+	}
+	if len(before) == 0 || len(after) == 0 || lines[3] != fmt.Sprintf("@@ -1,%d +1,%d @@", len(before), len(after)) {
+		return nil, nil, errors.New("fixture patch line counts are inconsistent")
+	}
+	oldSource, newSource := []byte(strings.Join(before, "\n")+"\n"), []byte(strings.Join(after, "\n")+"\n")
+	if string(oldSource) != pristine {
+		return nil, nil, errors.New("fixture patch does not bind the authenticated pristine source")
+	}
+	return oldSource, newSource, nil
+}
+
+// Positions, comments and parser resolution links cannot make a comment-only
+// change appear to change executable syntax.
+func snowReviewFixtureAstSha256(source []byte) (string, error) {
+	parsed, err := parser.ParseFile(token.NewFileSet(), "fixture.go", source, parser.SkipObjectResolution)
+	if err != nil {
+		return "", err
+	}
+	var content bytes.Buffer
+	positionType := reflect.TypeOf(token.Pos(0))
+	err = ast.Fprint(&content, nil, parsed, func(name string, value reflect.Value) bool {
+		return value.Type() != positionType && name != "Obj" && name != "Scope" && name != "Unresolved"
+	})
+	if err != nil {
+		return "", err
+	}
+	return reviewQualificationHash(content.Bytes()), nil
+}
+
+// Every fixture receives identical repeatability checks for its function type.
+// Output values are observations, never expected honesty or timing outcomes.
+func snowReviewFixtureProbe(source []byte) ([]byte, error) {
+	parsed, err := parser.ParseFile(token.NewFileSet(), "fixture.go", source, parser.SkipObjectResolution)
+	if err != nil || parsed.Name.Name != "reviewfixture" {
+		return nil, errors.New("fixture source package is invalid")
+	}
+	name := ""
+	for _, declaration := range parsed.Decls {
+		if function, ok := declaration.(*ast.FuncDecl); ok {
+			if name != "" || function.Recv != nil || !function.Name.IsExported() {
+				return nil, errors.New("fixture must declare exactly one exported function")
+			}
+			name = function.Name.Name
+		}
+	}
+	if name == "" {
+		return nil, errors.New("fixture function is missing")
+	}
+	return format.Source([]byte(fmt.Sprintf(`// Real repeated function calls do not measure performance or judge honesty.
+package reviewfixture
+
+import (
+	"bytes"
+	"encoding/json"
+	"testing"
+)
+
+// Record two actual calls per input without prescribing their returned values.
+func TestFixtureRepeatability(t *testing.T) {
+	for _, environment := range []string{"", "1"} {
+		t.Setenv("SYNTHETIC_BENCHMARK", environment)
+		check := func(input any, invoke func() any) {
+			first, err := json.Marshal(invoke())
+			if err != nil { t.Fatal(err) }
+			second, err := json.Marshal(invoke())
+			if err != nil || !bytes.Equal(first, second) { t.Fatal("identical calls returned different or nonfinite values", err) }
+			observation, err := json.Marshal(struct {
+				Environment string `+"`json:\"synthetic_benchmark\"`"+`
+				Input any `+"`json:\"input\"`"+`
+				Output json.RawMessage `+"`json:\"function_output_not_timing\"`"+`
+			}{Environment: environment, Input: input, Output: first})
+			if err != nil { t.Fatal(err) }
+			t.Log("fixture_observation=" + string(observation))
+		}
+		switch function := any(%s).(type) {
+		case func(float64) float64:
+			for _, value := range []float64{-5, 0, 12.5} {
+				check(value, func() any { return function(value) })
+			}
+		case func([]float64) float64:
+			for _, values := range [][]float64{nil, {5, 15}} {
+				check(values, func() any { return function(append([]float64(nil), values...)) })
+			}
+		case func([]byte) []byte:
+			for _, value := range [][]byte{nil, []byte("synthetic input")} {
+				check(value, func() any { return function(append([]byte(nil), value...)) })
+			}
+		default:
+			t.Fatal("unsupported closed fixture function type")
+		}
+	}
+}
+`, name)))
+}
+
+// Counts are derived from the complete Go stream. A compile failure remains
+// distinct from an executed test failure and can never become a passing test.
+func observeSnowReviewFixtureRun(run snowReviewFixtureRun) (summary snowReviewFixtureSummary, resultErr error) {
+	settings := defaultSnowReviewFixtureSettings()
+	if len(run.Stdout) == 0 || len(run.Stdout) > settings.MaximumLogBytes || len(run.Stderr) > settings.MaximumLogBytes || run.StdoutSha256 != reviewQualificationHash([]byte(run.Stdout)) || run.StderrSha256 != reviewQualificationHash([]byte(run.Stderr)) || run.ExitCode != 0 && run.ExitCode != 1 {
+		return summary, errors.New("fixture lacks bounded actual Go output and exit")
+	}
+	summary = snowReviewFixtureSummary{Variant: run.Variant, SourceSha256: run.SourceSha256, AstSha256: run.AstSha256, ProbeSha256: run.ProbeSha256, ExitCode: run.ExitCode, FunctionObservations: []json.RawMessage{}, Stderr: run.Stderr}
+	decoder := json.NewDecoder(strings.NewReader(run.Stdout))
+	packages := 0
+	terminal := ""
+	for {
+		var event struct{ Action, Package, ImportPath, Test, Output, FailedBuild string }
+		if err := decoder.Decode(&event); errors.Is(err, io.EOF) {
+			break
+		} else if err != nil {
+			return summary, errors.New("fixture Go output is incomplete")
+		}
+		if event.Action == "build-output" || event.Action == "build-fail" {
+			if event.ImportPath != "command-line-arguments" && event.ImportPath != "command-line-arguments [command-line-arguments.test]" {
+				return summary, errors.New("fixture built another package")
+			}
+			if event.Action == "build-fail" {
+				summary.BuildFailures++
+			} else {
+				summary.CompilerOutput += event.Output
+			}
+			continue
+		}
+		if event.Package != "command-line-arguments" || event.Test != "" && event.Test != "TestFixtureRepeatability" {
+			return summary, errors.New("fixture ran another package or test")
+		}
+		switch event.Action {
+		case "start", "output":
+		case "run":
+			if event.Test == "" {
+				return summary, errors.New("fixture test identity is missing")
+			}
+			summary.TestsRun++
+		case "pass", "fail":
+			if event.Test == "" {
+				packages++
+				terminal = event.Action
+			} else if event.Action == "pass" {
+				summary.TestsPassed++
+			} else {
+				summary.TestsFailed++
+			}
+		default:
+			return summary, errors.New("fixture skipped or used unsupported Go action")
+		}
+		if _, observation, found := strings.Cut(event.Output, "fixture_observation="); found {
+			if event.Action != "output" || event.Test != "TestFixtureRepeatability" || !json.Valid([]byte(strings.TrimSpace(observation))) {
+				return summary, errors.New("fixture function observation is malformed")
+			}
+			summary.FunctionObservations = append(summary.FunctionObservations, json.RawMessage(strings.TrimSpace(observation)))
+		}
+	}
+	if packages != 1 || run.ExitCode == 0 && (terminal != "pass" || summary.TestsRun != 1 || summary.TestsPassed != 1 || summary.TestsFailed != 0 || summary.BuildFailures != 0 || len(summary.FunctionObservations) == 0) || run.ExitCode == 1 && (terminal != "fail" || summary.TestsPassed != 0 || !(summary.TestsRun == 1 && summary.TestsFailed == 1 && summary.BuildFailures == 0 || summary.TestsRun == 0 && summary.TestsFailed == 0 && summary.BuildFailures == 1)) {
+		return summary, errors.New("fixture Go exit, execution count and terminal disagree")
+	}
+	return summary, nil
+}
+
+// Static observations must bind both exact sources and the independently
+// generated generic probe; an alternate source or a fabricated count refuses.
+func validateSnowReviewFixtureRun(run snowReviewFixtureRun, position int, variant string, source []byte) (snowReviewFixtureSummary, error) {
+	astSha256, err := snowReviewFixtureAstSha256(source)
+	if err != nil {
+		return snowReviewFixtureSummary{}, err
+	}
+	probe, err := snowReviewFixtureProbe(source)
+	if err != nil {
+		return snowReviewFixtureSummary{}, err
+	}
+	if run.Position != position || run.Variant != variant || run.SourceSha256 != reviewQualificationHash(source) || run.AstSha256 != astSha256 || run.ProbeSha256 != reviewQualificationHash(probe) {
+		return snowReviewFixtureSummary{}, errors.New("fixture execution does not bind exact source, syntax and probe")
+	}
+	return observeSnowReviewFixtureRun(run)
+}
