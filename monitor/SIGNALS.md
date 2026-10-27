@@ -28177,15 +28177,40 @@ inventory's own field list and requires that webhook's verifier to accept it,
 so a verifier that starts reading a new field fails the build until the
 inventory lists it.
 
+Payment webhook readiness also follows the verifier's scalar contract:
+Play publisher email and audience, Stripe signing secret, Coinbase shared
+secret, and Helius authorization must be nonblank string scalars. A number,
+boolean, mapping or sequence cannot establish readiness even if it is nonempty;
+report the existing `credential-fields-missing` class with field names only.
+The inventory-to-verifier controls must exercise rejected shapes as well as
+accepted strings. These checks establish local resource shape only: they do
+not establish correct provider audience/secret values, API adoption of the
+resource generation, successful verification of a signed request, backlog
+recovery or payment delivery. Generic numeric and structured requirements
+retain their own consumer contracts. Present incomplete optional resources
+remain WARN, while wholly absent optional resources remain a no-op.
+
 The refusal itself was invisible to `log-errors`: the warning
 `[<webhook>]webhook refused, verification <secret|publisher|audience>
-unavailable: <resource>: <field> is missing` contains no error-shaped word, so
-it was neither classified nor novel. The `payment-webhook-refused` log class
-pages on one line, framed by webhook (play, stripe, coinbase, helius). Its
-sample omits the resource and field. One line is one refused delivery attempt,
-not one payment: providers retry with backoff. A default Pub/Sub subscription
-drops an unacknowledged event after seven days, and hourly reconciliation
-repairs only purchases the server already knows.
+unavailable: <detail>` can contain no error-shaped word. The
+`payment-webhook-refused` class pages on one matching line, framed only by
+play, stripe, coinbase or helius. Its fixed verification-input sample omits all
+resource, field and loader-error details, without relabeling publisher/audience
+failures as missing secrets. The refusal header takes precedence over generic
+resource/transport signatures in its suffix; a plain unrelated resource or
+transport line retains its existing class. Nonmatching webhook logs remain out
+of this class. Existing notifier resolution groups by probe/class/service,
+ignoring frame; a vendor frame is diagnostic attribution, not an independent
+payment or delivery identity.
+
+One matching line is a refusal diagnostic; retries can repeat one event. It
+reports the producer's unavailable-verification path and intended 503, not a
+successfully delivered HTTP status, unique payment or financial loss. Wrong-type,
+malformed-resource and loader failures can also produce the header. A clear
+credential inventory does not establish the mounted consumer's source generation
+or eliminate route-specific failure. Provider retry/retention, backlog and
+reconciliation coverage require their own evidence. Missing/capped/failed log
+coverage is unknown; quiet logs or a sibling 2xx cannot certify recovery.
 
 The 2026-10-16 source audit found a readiness false negative: the generic
 nonempty-value check accepted nonstring YAML values that the Google browser
