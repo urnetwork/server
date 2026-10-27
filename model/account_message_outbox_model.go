@@ -302,6 +302,46 @@ func AbandonAccountMessage(ctx context.Context, messageId server.Id, claimId ser
 	return
 }
 
+// Gives up the unsent messages of the template with the writer keys, in the
+// caller's transaction, because the state that owed them changed (a payment
+// reminder for an invoice paid since). A given-up message keeps its key, so the
+// writer cannot owe it again. A message whose claim is in flight is left to that
+// attempt, which may still send it. Returns how many messages it gave up.
+func WithdrawAccountMessagesInTx(
+	ctx context.Context,
+	tx server.PgTx,
+	templateName string,
+	keys []string,
+	withdrawTime time.Time,
+	reason string,
+) (withdrawnCount int64) {
+	if len(keys) == 0 {
+		return 0
+	}
+	messageKeys := []string{}
+	for _, key := range keys {
+		messageKeys = append(messageKeys, AccountMessageKey(templateName, key))
+	}
+	tag := server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			UPDATE account_message_outbox
+			SET
+				abandon_time = $2,
+				last_error = $3
+			WHERE
+				message_key = ANY($1) AND
+				sent_time IS NULL AND
+				abandon_time IS NULL AND
+				(claim_until IS NULL OR claim_until <= $2)
+		`,
+		messageKeys,
+		withdrawTime,
+		boundedAccountMessageError(reason),
+	))
+	return tag.RowsAffected()
+}
+
 // The error as stored: at most the column's length, on a rune boundary.
 func boundedAccountMessageError(lastError string) string {
 	if len(lastError) <= accountMessageLastErrorMaxLength {

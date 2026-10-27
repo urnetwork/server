@@ -829,6 +829,34 @@ var migrationCurrentSuffixContracts = slices.Concat(
 				snMainnetMigrationColumn{name: "change_time", kind: "timestamp without time zone", notNull: true}),
 			snMainnetMigrationConstraints("provide_capability", "PRIMARY KEY (client_id)")),
 	},
+	[]snMainnetMigrationContract{
+		// the failed-renewal ledger of Stripe subscription invoices; its version
+		// follows the migration's position. The past-due notice reads the open
+		// rows of a network, and an ended subscription resolves its open rows,
+		// each through its own partial index.
+		migrationCurrentSuffix(server.StripeInvoicePaymentFailureMigrationVersion(), "stripe failed-renewal notice ledger",
+			migrationFp2Table("stripe_invoice_payment_failure"),
+			snMainnetMigrationColumns("stripe_invoice_payment_failure",
+				snMainnetMigrationColumn{name: "invoice_id", kind: "character varying(128)", notNull: true},
+				snMainnetMigrationColumn{name: "network_id", kind: "uuid", notNull: true},
+				snMainnetMigrationColumn{name: "customer_id", kind: "character varying(128)", notNull: true},
+				snMainnetMigrationColumn{name: "subscription_id", kind: "character varying(128)", notNull: true},
+				snMainnetMigrationColumn{name: "hosted_invoice_url", kind: "character varying(2048)", notNull: true},
+				snMainnetMigrationColumn{name: "attempt_count", kind: "integer", notNull: true},
+				snMainnetMigrationColumn{name: "first_fail_time", kind: "timestamp without time zone", notNull: true},
+				snMainnetMigrationColumn{name: "last_fail_time", kind: "timestamp without time zone", notNull: true},
+				snMainnetMigrationColumn{name: "first_notice_time", kind: "timestamp without time zone"},
+				snMainnetMigrationColumn{name: "final_notice_time", kind: "timestamp without time zone"},
+				snMainnetMigrationColumn{name: "resolve_time", kind: "timestamp without time zone"},
+				snMainnetMigrationColumn{name: "resolve_reason", kind: "character varying(32)"}),
+			snMainnetMigrationConstraints("stripe_invoice_payment_failure",
+				"PRIMARY KEY (invoice_id)",
+				"CHECK ((attempt_count >= 0))"),
+			snMainnetMigrationPartialIndex("stripe_invoice_payment_failure", "stripe_invoice_payment_failure_network_open",
+				"network_id, last_fail_time", "(resolve_time IS NULL)"),
+			snMainnetMigrationPartialIndex("stripe_invoice_payment_failure", "stripe_invoice_payment_failure_subscription_open",
+				"subscription_id", "(resolve_time IS NULL)")),
+	},
 )
 
 // Free space a table keeps on every page it writes, so an update of an

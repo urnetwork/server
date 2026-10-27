@@ -1,0 +1,31 @@
+{{define "headline"}}YOUR PAYMENT DIDN'T GO THROUGH{{end}}
+{{define "why"}}Sent to the address on your URnetwork account when a UR Pro
+renewal billed through Stripe doesn't go through. You get at most two of
+these for each payment: one when it first fails, and one before the
+subscription ends.{{end}}
+{{define "content"}}
+{{.Amount}} due
+{{if .Final}}
+We still couldn't collect {{.Amount}} for your UR Pro renewal. This is
+our last reminder: if the payment doesn't go through, your UR Pro
+subscription will end.{{if .NextAttemptDate}} The next automatic attempt is on
+{{.NextAttemptDate}}.{{end}}
+{{else}}
+We tried to renew your UR Pro subscription, but the payment of
+{{.Amount}} didn't go through.{{if .NextAttemptDate}} We'll try again automatically on
+{{.NextAttemptDate}}.{{end}} To keep UR Pro, pay the invoice with another
+card, or update your payment method.
+{{end}}{{if .HostedInvoiceUrl}}
+Pay the invoice: {{.HostedInvoiceUrl}}
+
+Or update your payment method before the next attempt:
+{{.UpdatePaymentUrl}}
+
+The invoice opens on Stripe, our payment processor.
+{{else}}
+Update your payment method: {{.UpdatePaymentUrl}}
+{{end}}
+To update your payment method, sign in at ur.io, open Manage
+Subscription and choose "Update payment method". If you already paid,
+you can ignore this email. Questions? Contact support@ur.io.
+{{end}}
