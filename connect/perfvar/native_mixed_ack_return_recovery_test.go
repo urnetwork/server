@@ -1,6 +1,5 @@
-// Private source draft, not formatted, compiled or run. This controlled native
-// coalescing experiment reuses genuine gVisor request data and acknowledgements.
-// It localizes mixed-group starvation; it is not a browser reproduction.
+// Controlled native mixed-data and ACK recovery tests use genuine gVisor
+// request data and acknowledgements through the real H1/TUN path.
 package perfvar
 
 import (
