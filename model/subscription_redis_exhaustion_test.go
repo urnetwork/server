@@ -7,6 +7,7 @@ package model
 import (
 	"context"
 	"errors"
+	"maps"
 	"slices"
 	"testing"
 	"time"
@@ -84,6 +85,15 @@ func TestRedisExhaustedPayersHoldForgetAndBound(t *testing.T) {
 	}
 }
 
+// Gives the test its own list, with a hold no request on a loaded test host
+// outlives, so a payer a test lists stays listed for its next request.
+func withRedisExhaustedPayersForTest(t testing.TB) {
+	t.Helper()
+	previous := exhaustedRedisPayers
+	exhaustedRedisPayers = newRedisExhaustedPayers(10*time.Minute, redisExhaustedPayerCapacity)
+	t.Cleanup(func() { exhaustedRedisPayers = previous })
+}
+
 // Every counter an exhausted request can move.
 func redisExhaustionCounts() map[string]float64 {
 	counts := redisGrantProbeCounts()
@@ -138,6 +148,7 @@ func TestRedisExhaustedPayerRefusalReservesNothing(t *testing.T) {
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		ctx := t.Context()
+		withRedisExhaustedPayersForTest(t)
 		for _, spread := range []bool{false, true} {
 			clients := newEscrowSelectionTestClients(t, ctx)
 			ids := redisSelectionTestGrants(t, ctx, clients, 6, 1000, spread)
@@ -196,38 +207,143 @@ type redisExhaustionScenario struct {
 	credit  ByteCount
 	request ByteCount
 	limits  *redisGrantSelectionLimits
-	// the room left on each grant, or a custom state
-	room  []ByteCount
+	// the room left on a grant, by grant index; every other grant is held
+	room map[int]ByteCount
+	// a custom state instead of room
 	setup func(t testing.TB, ctx context.Context, ids []server.Id)
 	// whether the listed twin is decided by the proof
 	proven bool
+	// when set, the census's outcome: refused, funded or capacity
+	outcome string
+	// when set, the bytes the census funds from each grant index
+	funded map[int]ByteCount
+}
+
+// One request for each twin of the scenario, in identical states: the listed
+// twin's process has just refused its payer as exhausted, the other's has not.
+// Requires the same outcome: the same refusal or capacity hold, or the same
+// grants, amounts and priority, and the same bytes held afterwards. The
+// listed twin is decided by the proof exactly when the scenario says so.
+func requireRedisExhaustionTwinsAgree(t testing.TB, ctx context.Context, scenario redisExhaustionScenario) {
+	t.Helper()
+	type outcome struct {
+		escrow *TransferEscrow
+		err    error
+		held   []ByteCount
+		// funded grant index -> bytes
+		funded map[int]ByteCount
+		counts map[string]float64
+	}
+	run := func(listed bool) outcome {
+		clients := newEscrowSelectionTestClients(t, ctx)
+		ids := []server.Id{}
+		if 0 < scenario.grants {
+			ids = redisSelectionTestGrants(t, ctx, clients, scenario.grants, scenario.credit, scenario.spread)
+		}
+		if scenario.setup != nil {
+			scenario.setup(t, ctx, ids)
+		} else {
+			for index, id := range ids {
+				if amount := scenario.credit - scenario.room[index]; 0 < amount {
+					redisGrantProbeToken(t, ctx, id, scenario.credit, amount)
+				}
+			}
+		}
+		if listed {
+			exhaustedRedisPayers.note(clients.payerNetworkId, time.Now())
+		}
+		request := ctx
+		if scenario.limits != nil {
+			request = context.WithValue(ctx, redisGrantSelectionContextKey{}, *scenario.limits)
+		}
+		var result outcome
+		if value := server.HandleError(func() {
+			result.escrow, _, result.counts, _, result.err = redisExhaustionCreate(t, request, clients, scenario.request)
+		}); value != nil {
+			t.Fatal(scenario.name, "admission panicked", value)
+		}
+		result.held = redisExhaustionHeld(ctx, ids)
+		if result.escrow != nil {
+			result.funded = map[int]ByteCount{}
+			for _, balance := range result.escrow.Balances {
+				result.funded[slices.Index(ids, balance.BalanceId)] = balance.BalanceByteCount
+			}
+		}
+		return result
+	}
+	census, listed := run(false), run(true)
+
+	switch scenario.outcome {
+	case "":
+	case "refused":
+		if !errors.Is(census.err, ErrContractBalanceExhausted) {
+			t.Fatalf("%s: the census did not refuse: %v", scenario.name, census.err)
+		}
+	case "funded":
+		if census.err != nil || census.escrow == nil {
+			t.Fatalf("%s: the census did not fund: %v", scenario.name, census.err)
+		}
+	case "capacity":
+		if !errors.Is(census.err, errRedisGrantSelectionCapacity) {
+			t.Fatalf("%s: the census did not stop at a selection limit: %v", scenario.name, census.err)
+		}
+	default:
+		t.Fatalf("%s: unknown outcome %q", scenario.name, scenario.outcome)
+	}
+	if scenario.funded != nil && !maps.Equal(census.funded, scenario.funded) {
+		t.Fatalf("%s: the census funded %v, want %v", scenario.name, census.funded, scenario.funded)
+	}
+
+	if (census.err == nil) != (listed.err == nil) ||
+		errors.Is(census.err, ErrContractBalanceExhausted) != errors.Is(listed.err, ErrContractBalanceExhausted) ||
+		errors.Is(census.err, errRedisGrantSelectionCapacity) != errors.Is(listed.err, errRedisGrantSelectionCapacity) {
+		t.Fatalf("%s: outcomes differ: census %v, listed %v", scenario.name, census.err, listed.err)
+	}
+	if errors.Is(census.err, ErrContractBalanceExhausted) && census.err.Error() != listed.err.Error() {
+		t.Errorf("%s: refusals differ: %q and %q", scenario.name, census.err, listed.err)
+	}
+	if (census.escrow == nil) != (listed.escrow == nil) {
+		t.Fatalf("%s: funding differs: %v and %v", scenario.name, census.escrow, listed.escrow)
+	}
+	if census.escrow != nil && (census.escrow.TransferByteCount != listed.escrow.TransferByteCount ||
+		census.escrow.Priority != listed.escrow.Priority || !maps.Equal(census.funded, listed.funded)) {
+		t.Errorf("%s: funded contracts differ: %v and %v", scenario.name, census.funded, listed.funded)
+	}
+	if !slices.Equal(census.held, listed.held) {
+		t.Errorf("%s: held bytes differ: %v and %v", scenario.name, census.held, listed.held)
+	}
+	if census.counts["exhaustion-proof proven"] != 0 || census.counts["exhaustion-proof unproven"] != 0 {
+		t.Errorf("%s: an unlisted payer tried the proof", scenario.name)
+	}
+	proven, unproven := listed.counts["exhaustion-proof proven"], listed.counts["exhaustion-proof unproven"]
+	if scenario.proven && (proven != 1 || unproven != 0) || !scenario.proven && (proven != 0 || unproven != 1) {
+		t.Errorf("%s: proof proven=%v unproven=%v, want proven %t", scenario.name, proven, unproven, scenario.proven)
+	}
+	if scenario.proven {
+		for _, name := range []string{"reserve-pending accepted", "reserve-pending refused", "reserve-pending-full accepted", "reserve-pending-full refused", "release-pending accepted"} {
+			if listed.counts[name] != 0 {
+				t.Errorf("%s: the proven refusal still did %s", scenario.name, name)
+			}
+		}
+	}
 }
 
 // The listed payer and its unlisted twin, in identical states, reach the same
-// outcome: the same refusal or capacity hold, or the same grants, amounts and
-// priority, and the same bytes held afterwards. The proof decides only the
-// exhausted states; it leaves the rest to the census.
+// outcome. The proof decides only the exhausted states; it leaves the rest to
+// the census.
 func TestRedisExhaustedPayerProofKeepsCensusOutcomes(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		ctx := t.Context()
-		reserved := func(credit ByteCount, room []ByteCount) func(t testing.TB, ctx context.Context, ids []server.Id) {
-			return func(t testing.TB, ctx context.Context, ids []server.Id) {
-				for index, id := range ids {
-					if amount := credit - room[index]; 0 < amount {
-						redisGrantProbeToken(t, ctx, id, credit, amount)
-					}
-				}
-			}
-		}
+		withRedisExhaustedPayersForTest(t)
 		for _, scenario := range []redisExhaustionScenario{
-			{name: "every grant held", grants: 4, credit: 1000, request: 512, room: []ByteCount{0, 0, 0, 0}, proven: true},
-			{name: "room below the request", grants: 4, credit: 1000, request: 512, room: []ByteCount{0, 200, 0, 311}, proven: true},
-			{name: "room below the shrink floor", grants: 4, credit: 4 * Mib, request: 2 * Mib, room: []ByteCount{0, 512 * Kib, 0, 512*Kib - 1}, proven: true},
-			{name: "spread payer held", spread: true, grants: 6, credit: 1000, request: 512, room: []ByteCount{0, 100, 0, 0, 100, 0}, proven: true},
-			{name: "no grants", grants: 0, credit: 1000, request: 512, proven: true},
-			{name: "legacy debt holds a grant", grants: 2, credit: 1000, request: 512, proven: true,
+			{name: "every grant held", grants: 4, credit: 1000, request: 512, proven: true, outcome: "refused"},
+			{name: "room below the request", grants: 4, credit: 1000, request: 512, room: map[int]ByteCount{1: 200, 3: 311}, proven: true, outcome: "refused"},
+			{name: "room below the shrink floor", grants: 4, credit: 4 * Mib, request: 2 * Mib, room: map[int]ByteCount{1: 512 * Kib, 3: 512*Kib - 1}, proven: true, outcome: "refused"},
+			{name: "spread payer held", spread: true, grants: 6, credit: 1000, request: 512, room: map[int]ByteCount{1: 100, 4: 100}, proven: true, outcome: "refused"},
+			{name: "no grants", grants: 0, credit: 1000, request: 512, proven: true, outcome: "refused"},
+			{name: "legacy debt holds a grant", grants: 2, credit: 1000, request: 512, proven: true, outcome: "refused",
 				setup: func(t testing.TB, ctx context.Context, ids []server.Id) {
 					redisGrantProbeToken(t, ctx, ids[0], 1000, 1000)
 					redisGrantProbeToken(t, ctx, ids[1], 1000, 400)
@@ -235,7 +351,7 @@ func TestRedisExhaustedPayerProofKeepsCensusOutcomes(t *testing.T) {
 						server.Raise(client.Set(ctx, netEscrowKey(ids[1]), 600, time.Hour).Err())
 					})
 				}},
-			{name: "a marker without a token", grants: 2, credit: 1000, request: 512, proven: true,
+			{name: "a marker without a token", grants: 2, credit: 1000, request: 512, proven: true, outcome: "refused",
 				setup: func(t testing.TB, ctx context.Context, ids []server.Id) {
 					redisGrantProbeToken(t, ctx, ids[0], 1000, 1000)
 					redisGrantProbeToken(t, ctx, ids[1], 1000, 1000)
@@ -243,15 +359,15 @@ func TestRedisExhaustedPayerProofKeepsCensusOutcomes(t *testing.T) {
 						server.Raise(client.ZAdd(ctx, redisContractReservationKeys(ids[1])[4], redis.Z{Score: 1, Member: server.NewId().String()}).Err())
 					})
 				}},
-			{name: "room reaches the shrink floor", grants: 4, credit: 4 * Mib, request: 2 * Mib, room: []ByteCount{0, 512 * Kib, 0, 512 * Kib}},
-			{name: "room across grants covers the request", grants: 4, credit: 1000, request: 512, room: []ByteCount{0, 300, 0, 300}},
-			{name: "one grant covers the request", grants: 4, credit: 1000, request: 512, room: []ByteCount{0, 0, 600, 0}},
-			{name: "spread grant covers the request", spread: true, grants: 6, credit: 1000, request: 512, room: []ByteCount{0, 0, 0, 0, 1000, 0}},
-			{name: "a fresh grant", grants: 2, credit: 1000, request: 512,
+			{name: "room reaches the shrink floor", grants: 4, credit: 4 * Mib, request: 2 * Mib, room: map[int]ByteCount{1: 512 * Kib, 3: 512 * Kib}, outcome: "funded"},
+			{name: "room across grants covers the request", grants: 4, credit: 1000, request: 512, room: map[int]ByteCount{1: 300, 3: 300}, outcome: "funded"},
+			{name: "one grant covers the request", grants: 4, credit: 1000, request: 512, room: map[int]ByteCount{2: 600}, outcome: "funded"},
+			{name: "spread grant covers the request", spread: true, grants: 6, credit: 1000, request: 512, room: map[int]ByteCount{4: 1000}, outcome: "funded"},
+			{name: "a fresh grant", grants: 2, credit: 1000, request: 512, outcome: "funded",
 				setup: func(t testing.TB, ctx context.Context, ids []server.Id) {
 					redisGrantProbeToken(t, ctx, ids[0], 1000, 1000)
 				}},
-			{name: "an expired lease", grants: 2, credit: 1000, request: 512,
+			{name: "an expired lease", grants: 2, credit: 1000, request: 512, outcome: "funded",
 				setup: func(t testing.TB, ctx context.Context, ids []server.Id) {
 					redisGrantProbeToken(t, ctx, ids[0], 1000, 1000)
 					redisGrantProbeExpireLease(t, ctx, ids[1], redisGrantProbeToken(t, ctx, ids[1], 1000, 1000))
@@ -263,92 +379,52 @@ func TestRedisExhaustedPayerProofKeepsCensusOutcomes(t *testing.T) {
 						server.Raise(client.Set(ctx, redisContractReservationKeys(ids[1])[0], "malformed", time.Hour).Err())
 					})
 				}},
-			{name: "the selected limit", grants: 4, credit: 1000, request: 512, room: []ByteCount{100, 100, 0, 0},
+			{name: "the selected limit", grants: 4, credit: 1000, request: 512, room: map[int]ByteCount{0: 100, 1: 100}, outcome: "capacity",
 				limits: &redisGrantSelectionLimits{MaxRows: 4096, MaxSelected: 2}},
-			{name: "the row limit", grants: 4, credit: 1000, request: 512, room: []ByteCount{0, 0, 0, 0},
+			{name: "the row limit", grants: 4, credit: 1000, request: 512, outcome: "refused",
 				limits: &redisGrantSelectionLimits{MaxRows: 64, MaxSelected: 64}},
 		} {
-			type outcome struct {
-				escrow *TransferEscrow
-				err    error
-				held   []ByteCount
-				// funded grant index -> bytes
-				funded map[int]ByteCount
-				counts map[string]float64
-			}
-			run := func(listed bool) outcome {
-				clients := newEscrowSelectionTestClients(t, ctx)
-				ids := []server.Id{}
-				if 0 < scenario.grants {
-					ids = redisSelectionTestGrants(t, ctx, clients, scenario.grants, scenario.credit, scenario.spread)
-				}
-				setup := scenario.setup
-				if setup == nil {
-					setup = reserved(scenario.credit, scenario.room)
-				}
-				setup(t, ctx, ids)
-				exhaustedRedisPayers.forget(clients.payerNetworkId)
-				if listed {
-					exhaustedRedisPayers.note(clients.payerNetworkId, time.Now())
-				}
-				request := ctx
-				if scenario.limits != nil {
-					request = context.WithValue(ctx, redisGrantSelectionContextKey{}, *scenario.limits)
-				}
-				var result outcome
-				if value := server.HandleError(func() {
-					result.escrow, _, result.counts, _, result.err = redisExhaustionCreate(t, request, clients, scenario.request)
-				}); value != nil {
-					t.Fatal(scenario.name, "admission panicked", value)
-				}
-				result.held = redisExhaustionHeld(ctx, ids)
-				if result.escrow != nil {
-					result.funded = map[int]ByteCount{}
-					for _, balance := range result.escrow.Balances {
-						result.funded[slices.Index(ids, balance.BalanceId)] = balance.BalanceByteCount
-					}
-				}
-				return result
-			}
-			census, listed := run(false), run(true)
+			requireRedisExhaustionTwinsAgree(t, ctx, scenario)
+		}
+	})
+}
 
-			if (census.err == nil) != (listed.err == nil) ||
-				errors.Is(census.err, ErrContractBalanceExhausted) != errors.Is(listed.err, ErrContractBalanceExhausted) ||
-				errors.Is(census.err, errRedisGrantSelectionCapacity) != errors.Is(listed.err, errRedisGrantSelectionCapacity) {
-				t.Fatalf("%s: outcomes differ: census %v, listed %v", scenario.name, census.err, listed.err)
-			}
-			if errors.Is(census.err, ErrContractBalanceExhausted) && census.err.Error() != listed.err.Error() {
-				t.Errorf("%s: refusals differ: %q and %q", scenario.name, census.err, listed.err)
-			}
-			if (census.escrow == nil) != (listed.escrow == nil) {
-				t.Fatalf("%s: funding differs: %v and %v", scenario.name, census.escrow, listed.escrow)
-			}
-			if census.escrow != nil && (census.escrow.TransferByteCount != listed.escrow.TransferByteCount ||
-				census.escrow.Priority != listed.escrow.Priority || len(census.funded) != len(listed.funded)) {
-				t.Errorf("%s: funded contracts differ: %+v and %+v", scenario.name, census.escrow, listed.escrow)
-			}
-			for index, bytes := range census.funded {
-				if listed.funded[index] != bytes {
-					t.Errorf("%s: grant %d funded %d bytes, its twin %d", scenario.name, index, listed.funded[index], bytes)
-				}
-			}
-			if !slices.Equal(census.held, listed.held) {
-				t.Errorf("%s: held bytes differ: %v and %v", scenario.name, census.held, listed.held)
-			}
-			if census.counts["exhaustion-proof proven"] != 0 || census.counts["exhaustion-proof unproven"] != 0 {
-				t.Errorf("%s: an unlisted payer tried the proof", scenario.name)
-			}
-			proven, unproven := listed.counts["exhaustion-proof proven"], listed.counts["exhaustion-proof unproven"]
-			if scenario.proven && (proven != 1 || unproven != 0) || !scenario.proven && (proven != 0 || unproven != 1) {
-				t.Errorf("%s: proof proven=%v unproven=%v, want proven %t", scenario.name, proven, unproven, scenario.proven)
-			}
-			if scenario.proven {
-				for _, name := range []string{"reserve-pending accepted", "reserve-pending refused", "reserve-pending-full accepted", "reserve-pending-full refused", "release-pending accepted"} {
-					if listed.counts[name] != 0 {
-						t.Errorf("%s: the proven refusal still did %s", scenario.name, name)
-					}
-				}
-			}
+// More grants than one keyset page. The proof reads every page and carries
+// its room across them; a grant that fits on any page leaves the request to
+// the census; and the census's row limit, after the spread windows' 64 rows,
+// bounds the proof: a payer one row past it is the census's capacity hold.
+// Grant i starts i ms after grant 0 and ends 2 h after it starts, so the
+// keyset pages hold grants 0-63, 64-127 and 128-129, and the spread windows
+// read the 64 newest, 66-129.
+func TestRedisExhaustedPayerProofKeepsCensusOutcomesAcrossPages(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		withRedisExhaustedPayersForTest(t)
+		const grants = 2*redisGrantPageRows + 2
+		for _, scenario := range []redisExhaustionScenario{
+			{name: "room on every page below the request", grants: grants, credit: 1000, request: 512,
+				room: map[int]ByteCount{10: 150, 70: 150, 129: 150}, proven: true, outcome: "refused"},
+			{name: "room on every page covers the request", grants: grants, credit: 1000, request: 512,
+				room: map[int]ByteCount{10: 200, 70: 200, 129: 200}, outcome: "funded",
+				funded: map[int]ByteCount{10: 200, 70: 200, 129: 112}},
+			{name: "room on both sides of a page boundary", grants: grants, credit: 1000, request: 512,
+				room: map[int]ByteCount{63: 150, 64: 150}, proven: true, outcome: "refused"},
+			{name: "the only fitting grant opens the second page", grants: grants, credit: 1000, request: 512,
+				room: map[int]ByteCount{64: 1000}, outcome: "funded", funded: map[int]ByteCount{64: 512}},
+			{name: "the only fitting grant opens the third page", grants: grants, credit: 1000, request: 512,
+				room: map[int]ByteCount{128: 600}, outcome: "funded", funded: map[int]ByteCount{128: 512}},
+			{name: "spread payer held on every page", spread: true, grants: grants, credit: 1000, request: 512,
+				room: map[int]ByteCount{5: 100, 100: 100}, proven: true, outcome: "refused"},
+			{name: "spread payer fits outside its windows", spread: true, grants: grants, credit: 1000, request: 512,
+				room: map[int]ByteCount{65: 1000}, outcome: "funded", funded: map[int]ByteCount{65: 512}},
+			{name: "spread payer at the row limit after its windows", spread: true, grants: grants, credit: 1000, request: 512,
+				limits: &redisGrantSelectionLimits{MaxRows: grants + redisGrantWindowRows + 1, MaxSelected: 64}, proven: true, outcome: "refused"},
+			{name: "spread payer one row past it", spread: true, grants: grants, credit: 1000, request: 512,
+				limits: &redisGrantSelectionLimits{MaxRows: grants + redisGrantWindowRows, MaxSelected: 64}, outcome: "capacity"},
+		} {
+			requireRedisExhaustionTwinsAgree(t, ctx, scenario)
 		}
 	})
 }
@@ -363,6 +439,7 @@ func TestRedisExhaustedPayerProofKeepsRecoveryRerun(t *testing.T) {
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		ctx := t.Context()
+		withRedisExhaustedPayersForTest(t)
 		clients := newEscrowSelectionTestClients(t, ctx)
 		ids := redisSelectionTestGrants(t, ctx, clients, 2, 1000, false)
 		redisGrantProbeToken(t, ctx, ids[0], 1000, 1000)
@@ -406,6 +483,7 @@ func TestRedisExhaustedPayersFollowCensusOutcomes(t *testing.T) {
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		ctx := t.Context()
+		withRedisExhaustedPayersForTest(t)
 		listed := func(clients escrowSelectionTestClients) bool {
 			return exhaustedRedisPayers.recent(clients.payerNetworkId, time.Now())
 		}
