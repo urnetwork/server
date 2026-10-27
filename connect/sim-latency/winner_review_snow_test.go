@@ -8,12 +8,24 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/urnetwork/server/model"
 )
+
+// Snow-specific guards use the real pinned Snow request rather than clearing
+// another policy to obtain a legacy six-finding validation context.
+func winnerSnowJudgmentFixture() (winnerReviewBrokerRequest, winnerModelJudgment) {
+	request, judgment := winnerModelFixture()
+	request.Request.Policy.WinnerReviewPolicy = model.CompetitionSnowWinnerReviewPolicy
+	request.Request.ReviewerModel, request.Request.ReviewerReasoning = model.CompetitionSnowWinnerReviewModel, model.CompetitionSnowWinnerReviewReasoning
+	request.Template.ReviewerModel, request.Template.ReviewerReasoning = request.Request.ReviewerModel, request.Request.ReviewerReasoning
+	return request, judgment
+}
 
 // Reuse authenticated synthetic source context without calling any provider.
 func winnerSnowMemberFixture(t *testing.T) (winnerReviewBrokerRequest, []winnerSnowMemberEvidence) {
 	t.Helper()
-	request, judgment := winnerModelFixture()
+	request, judgment := winnerSnowJudgmentFixture()
 	content, err := json.Marshal(judgment)
 	if err != nil {
 		t.Fatal(err)

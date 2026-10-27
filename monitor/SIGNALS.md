@@ -20159,6 +20159,25 @@ qualifier: an absent boundary marker remains unknown, and an unavailable census
 cannot clear prior quota/security findings or certify recovery. A later valid
 census is a visibility control and needs its own fresh source identity and clocks.
 
+A separately bound single-attempt diagnostic can refine this source failure
+when it retains an actual native SSH exit 255 and the existing exact
+client-connect-timeout discriminator for its selected address, while caller and
+command contexts remain live. This is the SSH client's connect report, not a
+command-owner deadline, successful authentication, remote command entry or
+Mimir completion. Elapsed time alone cannot select that phase. Fixed remote
+markers remain unknown when the bounded intake discards stderr; absence is not
+proof that no remote work ran. A later diagnostic must not be joined to the
+original joined gateway errors without same-attempt authority.
+
+A local route lookup and up selected VPN link are point metadata, not a current
+peer/session, packet-delivery or remote-listener control. Preserve unknown
+namespace, UID-rule, source-address, mark and VRF equivalence. Prioritize the
+proved observer transport boundary before interpreting missing URL metrics;
+do not raise budgets, bypass admission, substitute keys, change routes or clear
+quota/security findings from unknown source data. A successful later query
+still needs its own complete schema, generation, inventory and source-clock
+checks before it can qualify a census or recovery.
+
 First admission waits for current reliability history: URL admission needs a
 one hour (`lookback_index=1`) `client_connection_reliability_score` row unless
 intent priority admits the provider. The lookbacks nest (5 minutes, one hour,
@@ -45856,12 +45875,29 @@ coverage. More than one legitimate process per declared slot is conservatively
 unknown. Per-service incidents survive a sibling's source loss; visibility
 uncertainty can conservatively hold sibling clears too.
 
+Visibility class `contract-failure-share-unobservable` is WARN with generic
+Sustain 2. It reports missing, stale, reset, overlapping, incomplete or refused
+source history, not a measured failure share or a zero. Fixed reason codes
+identify the source-qualification boundary without exposing raw labels or
+response errors. The visibility classification prevents absence credit for
+existing ratio incidents; independently qualified sibling findings remain.
+Restore complete eligible history before accepting recovery. Sustain counts
+monitor observations, not elapsed minutes; the production cadence floor still
+applies. The separate seasonal reply-floor capability remains unimplemented.
+
 Below-floor jobs supply scoped clear holds, not healthy recovery. A ratio
 incident clears only after every point of a complete eligible ten-minute hold
 is below 5%. A new qualified five-minute PAGE survives older WARN-history gaps.
 Missing or low traffic never clears an armed incident. Qualified source rates use deterministic compensated accumulation
 before the unchanged inclusive comparisons, so source/map ordering cannot shift
-a rounded total across a band. No epsilon broadens the traffic floor or shares. `error` failures,
+a rounded total across a band. No epsilon broadens the traffic floor or shares. A failed range read retains
+`reason=source_unavailable` plus the shared fixed observation error class and any
+code-owned local admission/execution-boundary set. Joined markers may describe
+independent gateway branches; they establish no attempt count, ordering, remote
+execution, HTTP status or backend cause. An unmarked error gains no invented
+boundary. Raw errors, commands, source labels and response bytes are not rendered;
+a retired parent publishes no findings. Earlier reason-only alerts cannot recover
+their discarded error classification or local phase from this prospective change. `error` failures,
 unfinished calls and stopped callers can evade this ratio; the unimplemented
 seasonal reply floor remains a separate coverage gap.
 

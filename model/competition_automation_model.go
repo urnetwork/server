@@ -409,6 +409,22 @@ type CompetitionIntegrityReviewResult struct {
 
 // Requires complete structured criteria and distinguishes source-only concerns from fraud.
 func ValidateCompetitionIntegrityReview(request CompetitionIntegrityReviewRequest, policy CompetitionAutomationPolicy) error {
+	return validateCompetitionIntegrityReviewContent(request, policy, false)
+}
+
+// Validates one Snow member's six unattributed findings, not a publishable
+// three-member review. The public validator still requires eighteen attributed
+// findings; all identity, disposition, reason and support rules stay shared.
+func ValidateCompetitionSnowMemberContent(request CompetitionIntegrityReviewRequest, policy CompetitionAutomationPolicy) error {
+	if policy.WinnerReviewPolicy != CompetitionSnowWinnerReviewPolicy {
+		return errors.New("Snow member content requires the exact Snow winner policy")
+	}
+	return validateCompetitionIntegrityReviewContent(request, policy, true)
+}
+
+// The private member context changes only the criterion census, never review
+// authority or the treatment of uncertainty, approval and substantiated failure.
+func validateCompetitionIntegrityReviewContent(request CompetitionIntegrityReviewRequest, policy CompetitionAutomationPolicy, snowMember bool) error {
 	content, err := json.Marshal(request)
 	if err != nil || len(content) > 64*1024 {
 		return errors.New("review exceeds bounded contract")
@@ -469,7 +485,7 @@ func ValidateCompetitionIntegrityReview(request CompetitionIntegrityReviewReques
 	}
 	snowReview := policy.WinnerReviewPolicy == CompetitionSnowWinnerReviewPolicy
 	models := []string{""}
-	if snowReview {
+	if snowReview && !snowMember {
 		models = CompetitionSnowWinnerReviewModels()
 	}
 	criteriaKVs := map[string]bool{}

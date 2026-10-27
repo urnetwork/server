@@ -132,6 +132,125 @@ func TestHeldOutRuntimeRejectsOldOrChangedRelease(t *testing.T) {
 	}
 }
 
+// Reproduces the old selector's refusal of the exact prospective release while
+// proving that adding it cannot mutate historical v2 or the measured identity.
+func TestHeldOutRuntimeMetadataPreflightSelectsOnlyNamedOverlay(t *testing.T) {
+	historical := frozenHeldOutAmendedRuntime()
+	metadata := frozenHeldOutMetadataPreflightRuntime()
+	oldComponents := heldOutRuntimeComponentDigests()
+	original := heldOutRelease{BaseSha: strings.Repeat("1", 40), ImageId: "sha256:" + strings.Repeat("2", 64),
+		BinarySha256: strings.Repeat("3", 64), SourceLockSha256: strings.Repeat("4", 64),
+		ScriptDirectory: historical.ScriptDirectory, ScriptDigests: oldComponents, Runtime: &historical}
+	revised := original
+	if err := selectHeldOutAmendedRuntime(&revised, metadata, historical); err != nil {
+		t.Fatal("exact named metadata-preflight overlay refused", err)
+	}
+	if revised.Runtime == nil || !reflect.DeepEqual(*revised.Runtime, metadata) || revised.ScriptDirectory != metadata.ScriptDirectory ||
+		!reflect.DeepEqual(revised.ScriptDigests, heldOutMetadataPreflightRuntimeComponentDigests()) ||
+		revised.BaseSha != original.BaseSha || revised.ImageId != original.ImageId || revised.BinarySha256 != original.BinarySha256 || revised.SourceLockSha256 != original.SourceLockSha256 ||
+		!reflect.DeepEqual(historical, frozenHeldOutAmendedRuntime()) || !reflect.DeepEqual(original.ScriptDigests, heldOutRuntimeComponentDigests()) {
+		t.Fatal("metadata selection changed a measured identity or historical installation")
+	}
+	legacy := original
+	if err := selectHeldOutAmendedRuntime(&legacy, historical, historical); err != nil || !reflect.DeepEqual(legacy.Runtime, original.Runtime) || !reflect.DeepEqual(legacy.ScriptDigests, oldComponents) {
+		t.Fatal("historical C2 runtime no longer selects its original exact components", err)
+	}
+}
+
+// Only evaluator and entrypoint change on the host. Maps are private copies;
+// no later selection may modify the release already bound to historical v2.
+func TestHeldOutRuntimeMetadataPreflightChangesExactlyTwoComponents(t *testing.T) {
+	historical := heldOutRuntimeComponentDigests()
+	metadata := heldOutMetadataPreflightRuntimeComponentDigests()
+	wantChanges := map[string]bool{"evaluator.sh": true, "entrypoint.sh": true}
+	if len(historical) != len(metadata) {
+		t.Fatal("metadata overlay added or removed a host component")
+	}
+	for name, digest := range historical {
+		if digest != metadata[name] {
+			if !wantChanges[name] {
+				t.Error("metadata overlay changed an unrelated component", name)
+			}
+			delete(wantChanges, name)
+		}
+	}
+	if len(wantChanges) != 0 {
+		t.Fatal("metadata overlay omitted a required changed component", wantChanges)
+	}
+	metadata["evaluator.sh"] = strings.Repeat("9", 64)
+	if !reflect.DeepEqual(historical, heldOutRuntimeComponentDigests()) || reflect.DeepEqual(metadata, heldOutMetadataPreflightRuntimeComponentDigests()) {
+		t.Fatal("component maps alias historical or future runtime selections")
+	}
+}
+
+// A near-match or a mixture of valid v2/v3 pins is not a third supported runtime.
+// Refusals occur in pure selection before reading files or invoking a workload.
+func TestHeldOutRuntimeMetadataPreflightRejectsChangedOrMixedPins(t *testing.T) {
+	historical, metadata := frozenHeldOutAmendedRuntime(), frozenHeldOutMetadataPreflightRuntime()
+	for index, mutate := range []func(*heldOutRuntimeRelease){
+		func(r *heldOutRuntimeRelease) { r.ControlRevision = strings.Repeat("9", 40) },
+		func(r *heldOutRuntimeRelease) { r.ValidatorSourceRevision = strings.Repeat("9", 40) },
+		func(r *heldOutRuntimeRelease) { r.EvidenceMemoryLimitBytes++ },
+		func(r *heldOutRuntimeRelease) { r.ScriptDirectory = historical.ScriptDirectory },
+		func(r *heldOutRuntimeRelease) { r.Manifest = historical.Manifest },
+		func(r *heldOutRuntimeRelease) { r.Manifest.Sha256 = strings.Repeat("9", 64) },
+		func(r *heldOutRuntimeRelease) { r.BuilderSha256 = historical.BuilderSha256 },
+		func(r *heldOutRuntimeRelease) { r.ValidatorSha256 = strings.Repeat("9", 64) },
+		func(r *heldOutRuntimeRelease) { r.Runner = historical.Runner },
+		func(r *heldOutRuntimeRelease) { r.Runner.Sha256 = strings.Repeat("9", 64) },
+		func(r *heldOutRuntimeRelease) { r.RunnerManifest = historical.RunnerManifest },
+		func(r *heldOutRuntimeRelease) { r.RunnerManifest.Sha256 = strings.Repeat("9", 64) },
+	} {
+		changed := metadata
+		mutate(&changed)
+		release := heldOutRelease{}
+		if err := selectHeldOutAmendedRuntime(&release, changed, historical); err == nil {
+			t.Errorf("metadata runtime mutation %d selected", index)
+		}
+		if _, err := heldOutRuntimeExecutionComponentDigests(changed); err == nil {
+			t.Errorf("metadata runtime mutation %d acquired execution components", index)
+		}
+	}
+	for _, runtime := range []heldOutRuntimeRelease{historical, metadata} {
+		components, err := heldOutRuntimeExecutionComponentDigests(runtime)
+		if err != nil || len(components) != len(heldOutRuntimeComponentDigests()) {
+			t.Fatal("an exact named runtime could not recover its closed component set", err)
+		}
+	}
+	changedMap := heldOutMetadataPreflightRuntimeComponentDigests()
+	changedMap["evaluator.sh"] = heldOutRuntimeComponentDigests()["evaluator.sh"]
+	release := heldOutRelease{Runtime: &metadata, ScriptDirectory: metadata.ScriptDirectory, ScriptDigests: changedMap}
+	err := authenticateHeldOutRuntimeFiles(release, defaultHeldOutOperatorSettings())
+	if err == nil || err.Error() != "explicit immutable C2 runtime component selection required" {
+		t.Fatal("mixed component map reached live installation reads", err)
+	}
+}
+
+// A successful prospective receipt stays bound to its prospective runner and
+// installation; a historical valid runner cannot be relabeled after a failure.
+func TestHeldOutRuntimeMetadataPreflightBindsProspectiveBridgeRunner(t *testing.T) {
+	historical, metadata := frozenHeldOutAmendedRuntime(), frozenHeldOutMetadataPreflightRuntime()
+	release := heldOutRelease{Runtime: &metadata}
+	plan := heldOutBridgePlan{Runner: metadata.Runner, RunnerManifest: metadata.RunnerManifest}
+	receipt := heldOutBridgeCompatibility{RuntimeManifestSha256: metadata.Manifest.Sha256, BuilderSha256: metadata.BuilderSha256,
+		ValidatorSha256: metadata.ValidatorSha256, RunnerSha256: metadata.Runner.Sha256, RunnerManifestSha256: metadata.RunnerManifest.Sha256}
+	if err := validateHeldOutBridgeRuntimeReceipt(receipt, plan, release); err != nil {
+		t.Fatal("named prospective bridge receipt refused", err)
+	}
+	for _, mutate := range []func(*heldOutBridgeCompatibility){
+		func(r *heldOutBridgeCompatibility) { r.RuntimeManifestSha256 = historical.Manifest.Sha256 },
+		func(r *heldOutBridgeCompatibility) { r.BuilderSha256 = historical.BuilderSha256 },
+		func(r *heldOutBridgeCompatibility) { r.RunnerSha256 = historical.Runner.Sha256 },
+		func(r *heldOutBridgeCompatibility) { r.RunnerManifestSha256 = historical.RunnerManifest.Sha256 },
+	} {
+		changed := receipt
+		mutate(&changed)
+		if err := validateHeldOutBridgeRuntimeReceipt(changed, plan, release); err == nil {
+			t.Fatal("historical runtime pins accepted in a prospective bridge receipt")
+		}
+	}
+}
+
 // The inactive manifest is usable provenance, not a fabricated passed gate.
 func TestHeldOutRuntimeAuthenticatesCompleteInstallManifests(t *testing.T) {
 	runtime, release, bundle, runner, components := newHeldOutRuntimeFixture(t)

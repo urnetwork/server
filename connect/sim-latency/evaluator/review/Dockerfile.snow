@@ -2,7 +2,7 @@
 # The wrapper supplies pinned settings and a private journal leaf as inspected Cmd.
 # No model key, repository root, config/vault parent or candidate is in context.
 FROM scratch
-COPY sim-latency /review-broker
-COPY ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --chmod=0555 sim-latency /review-broker
+COPY --chmod=0444 ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 USER 65532:65532
 ENTRYPOINT ["/review-broker", "review-broker"]

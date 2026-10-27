@@ -33,10 +33,10 @@ passing every gate, or no winner. It never pauses for honesty review or
 promotes source.
 
 Usage:
-  competitionworker [--worker_id=<id>]
-  competitionworker --check [--worker_id=<id>]
-  competitionworker --supervisor-request [--worker_id=<id>]
-  competitionworker --source-readiness=<generation> [--worker_id=<id>]
+  competitionworker [--worker_id=<id>] [--baseline-preparation-config=<path> --baseline-preparation-sha256=<sha>]
+  competitionworker --check [--worker_id=<id>] [--baseline-preparation-config=<path> --baseline-preparation-sha256=<sha>]
+  competitionworker --supervisor-request [--worker_id=<id>] [--baseline-preparation-config=<path> --baseline-preparation-sha256=<sha>]
+  competitionworker --source-readiness=<generation> [--worker_id=<id>] [--baseline-preparation-config=<path> --baseline-preparation-sha256=<sha>]
   competitionworker -h | --help
   competitionworker --version
 
@@ -46,6 +46,8 @@ Options:
   --check            Verify the host and database without claiming work.
   --supervisor-request  Read strict fenced v2 round identity from stdin; never select another round.
   --source-readiness=<generation>  Probe and acknowledge this exact installed v2 source generation.
+  --baseline-preparation-config=<path>  Root-pinned full-R9 preparation role; does not change API or submission budget.
+  --baseline-preparation-sha256=<sha>  Exact immutable preparation configuration SHA-256.
   --worker_id=<id>   Stable evaluator identity; defaults to hostname.`
 
 	opts, err := docopt.ParseArgs(usage, os.Args[1:], server.RequireVersion())
@@ -62,6 +64,16 @@ Options:
 	settings, err := controller.LoadSettings()
 	if err != nil {
 		panic(err)
+	}
+	baselineConfig, _ := opts.String("--baseline-preparation-config")
+	baselineDigest, _ := opts.String("--baseline-preparation-sha256")
+	if (baselineConfig == "") != (baselineDigest == "") {
+		panic("baseline preparation requires both the config path and its exact SHA-256")
+	}
+	if baselineConfig != "" {
+		if err := controller.ConfigureCompetitionRoundBaselinePreparation(settings, baselineConfig, baselineDigest); err != nil {
+			panic(err)
+		}
 	}
 	supervised, _ := opts.Bool("--supervisor-request")
 	readinessGeneration, _ := opts.String("--source-readiness")
