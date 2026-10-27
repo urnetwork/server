@@ -123,7 +123,7 @@ func grafanaReconcileAlerting(ctx context.Context, out io.Writer, grafanaUrl str
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "Competition warn/page alerts route to %s\n", grafana.CompetitionIncidentContact)
+	fmt.Fprintf(out, "Competition warn/page alerts use existing main receiver %s; incident owner %s.\n", grafana.DefaultAlertContactName, grafana.CompetitionIncidentContact)
 	if result.SlackConfigured {
 		fmt.Fprintf(out, "Unrouted alerts go to Slack: default receiver %s (was %s)\n", result.DefaultReceiver, result.PreviousDefaultReceiver)
 		fmt.Fprintf(out, "Send a test notification with: bringyourctl grafana test-alert\n")

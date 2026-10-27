@@ -228,7 +228,8 @@ func selectRedisTransferBalances(ctx context.Context, admission *redisContractAd
 		}
 		admission.noteBalance(balance.balanceId)
 		reservation.noteReservationRequest()
-		amount, err := redisContractReservation(ctx, operation, balance.balanceId, admission.contractId, balance.balanceByteCount, remaining, redisContractReservationLease)
+		amount, err := redisContractReservation(ctx, operation, balance.balanceId, admission.contractId, balance.balanceByteCount, remaining, redisContractReservationLease,
+			server.OptRedisKeepLateReplies())
 		if err != nil {
 			if redisGrantCounterHeld(err) {
 				heldBalanceIds[balance.balanceId] = true

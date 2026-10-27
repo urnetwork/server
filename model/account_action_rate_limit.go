@@ -190,3 +190,51 @@ func RemoveExpiredAccountActionAttempts(ctx context.Context, minTime time.Time) 
 		))
 	})
 }
+
+// checkAndRecordAccountActionRateLimitInTx is CheckAndRecordAccountActionRateLimit
+// in the caller's transaction, for a budget that must be spent together with
+// what it guards. A refusal records nothing and returns how long until the
+// oldest attempt it counted leaves the window, when the budget has room again.
+func checkAndRecordAccountActionRateLimitInTx(
+	ctx context.Context,
+	tx server.PgTx,
+	userId server.Id,
+	action string,
+	limit int,
+	window time.Duration,
+) (allow bool, retryAfter time.Duration) {
+	// a utc cutoff computed here, as in countRecentAccountActionAttempts
+	now := server.NowUtc()
+	var count int
+	var oldestTime *time.Time
+	result, err := tx.Query(
+		ctx,
+		`
+		SELECT COUNT(*), MIN(create_time) FROM network_user_action_attempt
+		WHERE user_id = $1 AND action = $2
+		  AND $3 <= create_time
+		`,
+		userId, action, now.Add(-window),
+	)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			server.Raise(result.Scan(&count, &oldestTime))
+		}
+	})
+	if limit <= count {
+		retryAfter = window
+		if oldestTime != nil {
+			retryAfter = oldestTime.Add(window).Sub(now)
+		}
+		return false, min(max(retryAfter, time.Second), window)
+	}
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+		INSERT INTO network_user_action_attempt (network_user_action_attempt_id, user_id, action, create_time)
+		VALUES ($1, $2, $3, $4)
+		`,
+		server.NewId(), userId, action, now,
+	))
+	return true, 0
+}

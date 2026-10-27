@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/urnetwork/connect"
+	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/proxy"
 )
 
@@ -57,6 +58,16 @@ func TestResizeProxyMessagePoolsCapsAllClassesAtEightGiB(t *testing.T) {
 	}
 	if largeCapacity > largeBudget || largeBudget-largeCapacity >= connect.ByteCount(12<<10) {
 		t.Fatalf("large-object capacity = %d, want budget %d within rounding", largeCapacity, largeBudget)
+	}
+}
+
+// The binary builds its device manager with the contract creation bound from
+// proxy.yml, so a host changes it with its config and a restart, not a build.
+func TestProxyMainReadsHostedContractConcurrencyFromConfig(t *testing.T) {
+	popConfig := server.Config.PushSimpleResource("proxy.yml", []byte("hosted_contract_concurrency: 384\n"))
+	defer popConfig()
+	if bound := newProxyDeviceManagerSettings(proxy.DefaultProxySettings(), nil).HostedContractConcurrency; bound != 384 {
+		t.Fatalf("the proxy builds a contract creation bound of %d, want the configured 384", bound)
 	}
 }
 
