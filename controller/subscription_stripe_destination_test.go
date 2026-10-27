@@ -37,6 +37,9 @@ type stripeDestinationTestEnv struct {
 	subscriptionCheckoutSessions map[string][]map[string]any
 	recordedEvents               []*model.PaymentReconciliationEvent
 	recordErr                    error
+	// the failed-renewal resolutions the webhook asked for, as
+	// "<invoice id> <reason>" (the ledger is the database's)
+	resolvedPaymentFailures []string
 }
 
 func newStripeDestinationTestEnv(t *testing.T) *stripeDestinationTestEnv {
@@ -76,6 +79,7 @@ func newStripeDestinationTestEnv(t *testing.T) *stripeDestinationTestEnv {
 	previousToken := stripeApiToken
 	previousBackend := stripe.GetBackend(stripe.APIBackend)
 	previousRecord := stripeRecordUnresolvedInvoice
+	previousResolve := stripeResolveInvoicePaymentFailureFunc
 	stripeApiBaseUrl = testServer.URL
 	stripeApiTokenFunc = func() string { return "sk_test_destination" }
 	stripeApiToken = func() string { return "sk_test_destination" }
@@ -97,12 +101,18 @@ func newStripeDestinationTestEnv(t *testing.T) *stripeDestinationTestEnv {
 		env.recordedEvents = append(env.recordedEvents, event)
 		return true, nil
 	}
+	// invoice.paid resolves the invoice's failed renewal, if it had one, in the
+	// dunning ledger (subscription_stripe_dunning.go), observed in memory
+	stripeResolveInvoicePaymentFailureFunc = func(ctx context.Context, invoiceId string, reason string, now time.Time) {
+		env.resolvedPaymentFailures = append(env.resolvedPaymentFailures, invoiceId+" "+reason)
+	}
 	t.Cleanup(func() {
 		stripeApiBaseUrl = previousBaseUrl
 		stripeApiTokenFunc = previousTokenFunc
 		stripeApiToken = previousToken
 		stripe.SetBackend(stripe.APIBackend, previousBackend)
 		stripeRecordUnresolvedInvoice = previousRecord
+		stripeResolveInvoicePaymentFailureFunc = previousResolve
 		testServer.Close()
 	})
 	return env
@@ -232,6 +242,15 @@ func TestStripeWebhookUnresolvedInvoiceIsRecordedAndAcknowledged(t *testing.T) {
 				t.Fatalf("unresolved invoice.paid must be acknowledged (2xx) so Stripe does not retry for 72h: result=%v err=%v", result, err)
 			}
 		}
+		// every delivery resolves the invoice's failed renewal, if it had one:
+		// the invoice is paid whether or not a network is credited
+		resolvedCount := 0
+		for _, resolution := range env.resolvedPaymentFailures {
+			if resolution == invoiceId+" "+model.StripeInvoicePaymentFailureResolvePaid {
+				resolvedCount += 1
+			}
+		}
+		connect.AssertEqual(t, resolvedCount, 2)
 
 		var events []*model.PaymentReconciliationEvent
 		for _, event := range env.recordedEvents {

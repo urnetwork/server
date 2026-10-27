@@ -323,9 +323,11 @@ func TestSubscriptionDetailsDbStaleBuildCannotOverwriteAnInvalidation(t *testing
 // A Stripe renewal whose payment is failing is retried (status past_due) after
 // the last window it paid for, and that window's grace, have ended: no renewal
 // row covers now, yet Stripe keeps charging the card (support inbox item
-// 7873). The network bought through web checkout, so no Stripe customer is on
-// file; the last Stripe window's invoice still names the subscription. The
-// screen lists it, and the cancel reaches it.
+// 7873). The network bought through web checkout, so no stripe_customer row is
+// on file; the last Stripe window's invoice still names the subscription and
+// its customer. The screen lists it as past due, offers the billing portal
+// (whose customer is read from that invoice) to update the payment method, and
+// the cancel reaches it.
 func TestSubscriptionDetailsDbListsAStripeRenewalStillBeingRetried(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -363,8 +365,8 @@ func TestSubscriptionDetailsDbListsAStripeRenewalStillBeingRetried(t *testing.T)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if details.HasStripeCustomer {
-			t.Fatal("a web checkout network has no stripe customer on file")
+		if !details.HasStripeCustomer {
+			t.Fatal("the billing portal must open for a web checkout network's customer, to update the failing payment method")
 		}
 		if len(details.Subscriptions) != 1 {
 			t.Fatalf("the stripe subscription still being retried must be listed, got %d entries: %+v", len(details.Subscriptions), details.Subscriptions)
@@ -372,6 +374,9 @@ func TestSubscriptionDetailsDbListsAStripeRenewalStillBeingRetried(t *testing.T)
 		stripe := details.Subscriptions[0]
 		if stripe.Store != model.SubscriptionMarketStripe || !stripe.CanCancel || stripe.TransactionId != "in_checkoutretry" {
 			t.Fatalf("stripe entry: %+v", stripe)
+		}
+		if !stripe.PastDue {
+			t.Fatalf("stripe is retrying the renewal, so the entry is past due: %+v", stripe)
 		}
 		// stripe still renews it, through the period it is collecting for
 		if stripe.AutoRenew == nil || !*stripe.AutoRenew || stripe.CancelAtPeriodEnd || !stripe.EndTime.Equal(periodEnd) {

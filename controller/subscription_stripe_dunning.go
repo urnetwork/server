@@ -117,6 +117,12 @@ func defaultStripeDunningSettings() *stripeDunningSettings {
 var stripeDunningSettingsFunc = defaultStripeDunningSettings
 var stripeDunningNow = server.NowUtc
 
+// The database writes the webhooks resolve failed renewals with. Replaceable
+// only by hermetic tests (no database in that env), which drive invoice.paid
+// through StripeWebhook; production never mutates them.
+var stripeResolveInvoicePaymentFailureFunc = stripeResolveInvoicePaymentFailure
+var stripeResolveSubscriptionPaymentFailuresFunc = stripeResolveSubscriptionPaymentFailures
+
 // The fields of a Stripe invoice the dunning reads. The subscription id is read
 // in both API shapes (stripeInvoiceSubscriptionRef).
 type stripeDunningInvoice struct {
@@ -601,7 +607,7 @@ func stripeHandleInvoiceResolved(object json.RawMessage, reason string, clientSe
 		glog.Warningf("[stripe]dunning: could not parse the %s invoice: %s\n", reason, err)
 		return &StripeWebhookResult{}, nil
 	}
-	stripeResolveInvoicePaymentFailure(clientSession.Ctx, invoice.Id, reason, stripeDunningNow())
+	stripeResolveInvoicePaymentFailureFunc(clientSession.Ctx, invoice.Id, reason, stripeDunningNow())
 	return &StripeWebhookResult{}, nil
 }
 
@@ -616,7 +622,7 @@ func stripeResolveDeletedSubscriptionPaymentFailures(object json.RawMessage, cli
 		glog.Warningf("[stripe]dunning: could not parse the deleted subscription: %s\n", err)
 		return
 	}
-	stripeResolveSubscriptionPaymentFailures(clientSession.Ctx, sub.Id, model.StripeInvoicePaymentFailureResolveSubscriptionEnded, stripeDunningNow())
+	stripeResolveSubscriptionPaymentFailuresFunc(clientSession.Ctx, sub.Id, model.StripeInvoicePaymentFailureResolveSubscriptionEnded, stripeDunningNow())
 }
 
 // Logs what one failed renewal decided. The address is never logged.

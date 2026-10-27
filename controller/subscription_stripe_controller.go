@@ -304,7 +304,7 @@ func StripeWebhook(
 		// a renewal that failed before is paid now: its failure resolves and
 		// the payment-failed notices still unsent are withdrawn
 		// (subscription_stripe_dunning.go)
-		stripeResolveInvoicePaymentFailure(
+		stripeResolveInvoicePaymentFailureFunc(
 			clientSession.Ctx,
 			invoiceObject.Id,
 			model.StripeInvoicePaymentFailureResolvePaid,
