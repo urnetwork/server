@@ -8,8 +8,10 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// Account-based (not IP-based) daily rate limits on sensitive account-mutation
-// actions. Each action has its own independent daily counter, keyed by userId.
+// Account-based (not IP-based) rate limits on sensitive actions. Each action
+// has its own independent counter over its own trailing window, keyed by the
+// id its caller passes: the user for an account action, the calling client for
+// a per-client budget such as an extender activation.
 
 const (
 	AccountActionAddAuth              = "add_auth"
@@ -19,6 +21,13 @@ const (
 	AccountActionGenerateSeedphrase   = "generate_seedphrase"
 	AccountActionRegenerateSeedphrase = "regenerate_seedphrase"
 	AccountActionVerifyStorePurchase  = "verify_store_purchase"
+	// the extender endpoints' budgets (controller/extender_*.go), named here
+	// so a refusal says which budget was spent
+	AccountActionExtenderActivate        = "extender_activate"
+	AccountActionExtenderActivateAccount = "extender_activate_account"
+	AccountActionExtenderPingReport      = "ping_report"
+	AccountActionExtenderLatencyReport   = "extender_latency_report"
+	AccountActionExtenderBlockReport     = "extender_block_report"
 )
 
 const (
@@ -44,23 +53,52 @@ const (
 
 // actionDisplayNames gives each action a human-readable name for the
 // rate-limit error message, so a client can tell which of the several
-// daily limits it hit instead of seeing one generic message for all of them.
+// limits it hit instead of seeing one generic message for all of them.
 var actionDisplayNames = map[string]string{
-	AccountActionAddAuth:              "adding a sign-in method",
-	AccountActionRemoveAuth:           "removing a sign-in method",
-	AccountActionClaimNetworkName:     "setting your network name",
-	AccountActionChangeNetworkName:    "changing your network name",
-	AccountActionGenerateSeedphrase:   "generating a seedphrase",
-	AccountActionRegenerateSeedphrase: "regenerating a seedphrase",
-	AccountActionVerifyStorePurchase:  "verifying a store purchase",
+	AccountActionAddAuth:                 "adding a sign-in method",
+	AccountActionRemoveAuth:              "removing a sign-in method",
+	AccountActionClaimNetworkName:        "setting your network name",
+	AccountActionChangeNetworkName:       "changing your network name",
+	AccountActionGenerateSeedphrase:      "generating a seedphrase",
+	AccountActionRegenerateSeedphrase:    "regenerating a seedphrase",
+	AccountActionVerifyStorePurchase:     "verifying a store purchase",
+	AccountActionExtenderActivate:        "activating an extender",
+	AccountActionExtenderActivateAccount: "activating your account's extenders",
+	AccountActionExtenderPingReport:      "reporting extender pings",
+	AccountActionExtenderLatencyReport:   "reporting extender latency",
+	AccountActionExtenderBlockReport:     "reporting a blocked extender",
 }
 
-func maxAccountActionAttemptsError(action string) error {
+// The refusal of an action whose budget is spent, naming the action and the
+// trailing window the budget counts. It used to say "today" whatever the
+// window, and an action without a display name read "this action", so an
+// extender activation (six an hour) was refused "for this action today".
+func maxAccountActionAttemptsError(action string, window time.Duration) error {
 	name, ok := actionDisplayNames[action]
 	if !ok {
 		name = "this action"
 	}
-	return fmt.Errorf("You have reached the maximum number of attempts for %s today. Please try again later.", name)
+	return fmt.Errorf(
+		"You have reached the maximum number of attempts for %s in the last %s. Please try again later.",
+		name,
+		accountActionWindowText(window),
+	)
+}
+
+// The trailing window of a budget as words: "hour", "24 hours", "30 minutes".
+func accountActionWindowText(window time.Duration) string {
+	switch {
+	case window == time.Hour:
+		return "hour"
+	case window == time.Minute:
+		return "minute"
+	case 0 < window && window%time.Hour == 0:
+		return fmt.Sprintf("%d hours", window/time.Hour)
+	case 0 < window && window%time.Minute == 0:
+		return fmt.Sprintf("%d minutes", window/time.Minute)
+	default:
+		return window.String()
+	}
 }
 
 func countRecentAccountActionAttempts(
@@ -126,7 +164,7 @@ func CheckAccountActionRateLimit(
 		})
 	})
 	if limit <= count {
-		return maxAccountActionAttemptsError(action)
+		return maxAccountActionAttemptsError(action, window)
 	}
 	return nil
 }
@@ -175,7 +213,7 @@ func CheckAndRecordAccountActionRateLimit(
 		))
 	})
 	if limit <= count {
-		return maxAccountActionAttemptsError(action)
+		return maxAccountActionAttemptsError(action, window)
 	}
 	return nil
 }
