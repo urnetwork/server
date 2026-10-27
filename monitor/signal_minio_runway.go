@@ -329,10 +329,11 @@ func (self *minioRunwayProbe) check(ctx context.Context, env *probeEnv) ([]findi
 	observations := reduceMinioRunway(seriesList, env.cfg.env, hostNames, pattern)
 
 	findings := []finding{}
+	pendingRiskSamples := map[string]storageRunwaySample{}
 	for _, configured := range minioHosts {
 		observation := observations[configured.name]
 		drives, census, censusReason := self.driveEstimates(observation, grid.end)
-		findings = append(findings, self.driveRunway(configured.name, drives, census, censusReason, now, gateway.name)...)
+		findings = append(findings, self.driveRunway(configured.name, drives, census, censusReason, now, gateway.name, pendingRiskSamples)...)
 		findings = append(findings, self.accounting(configured.name, observation, drives, census, censusReason, grid.end, gateway.name)...)
 		findings = append(findings, self.putSurge(configured.name, observation, grid, gateway.name)...)
 		backup, err := self.backup(ctx, env, configured, drives, census, censusReason)
@@ -340,6 +341,14 @@ func (self *minioRunwayProbe) check(ctx context.Context, env *probeEnv) ([]findi
 			return nil, err
 		}
 		findings = append(findings, backup...)
+	}
+	// Later source callbacks may end the owner after drive reduction. Only a
+	// completed live observation can replace its remembered risk.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	for target, sample := range pendingRiskSamples {
+		self.risks.remember(target, sample.value, sample.at)
 	}
 	return findings, nil
 }
@@ -400,7 +409,7 @@ func (self *minioRunwayProbe) driveEstimates(observation *minioRunwayHost, end t
 
 // The shortest runway among the drives, since one full drive fails every
 // write. A violation needs only a fresh drive; healthy needs the full census.
-func (self *minioRunwayProbe) driveRunway(hostName string, drives []minioRunwayDriveEstimate, census bool, censusReason string, now time.Time, gateway string) []finding {
+func (self *minioRunwayProbe) driveRunway(hostName string, drives []minioRunwayDriveEstimate, census bool, censusReason string, now time.Time, gateway string, pendingRiskSamples map[string]storageRunwaySample) []finding {
 	settings := self.settings
 	target := hostName + "/drives"
 	var worst, leastFree *minioRunwayDriveEstimate
@@ -422,7 +431,7 @@ func (self *minioRunwayProbe) driveRunway(hostName string, drives []minioRunwayD
 		}
 	}
 	if recentKnown {
-		self.risks.remember(target, recentRate, now)
+		pendingRiskSamples[target] = storageRunwaySample{at: now, value: recentRate}
 	}
 	findings := []finding{}
 	band, tier := "", tierWarn

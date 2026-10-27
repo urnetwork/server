@@ -31,24 +31,32 @@ func (self *pgOpenSetProbe) cadence() time.Duration { return 5 * time.Minute }
 
 // An exact adjacent pair establishes a trend. A censored observation breaks
 // that pair without substituting its lower bound for the last exact count.
-func (self *pgOpenSetProbe) observe(openCount int, exact bool) (previous int, ready bool) {
+// An ended parent preserves both fields, including when it ends before the
+// serialized commit after a successful source read.
+func (self *pgOpenSetProbe) observe(ctx context.Context, openCount int, exact bool) (previous int, ready bool, err error) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
+	if err := ctx.Err(); err != nil {
+		return 0, false, err
+	}
 	if !exact {
 		self.initialized = false
-		return 0, false
+		return 0, false, nil
 	}
 	if !self.initialized {
 		self.initialized = true
 		self.lastCount = openCount
-		return 0, false
+		return 0, false, nil
 	}
 	previous = self.lastCount
 	self.lastCount = openCount
-	return previous, true
+	return previous, true, nil
 }
 
 func (self *pgOpenSetProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	target := "pg"
 	if h := env.cfg.hostByRole("pg-primary"); h != nil {
 		target = h.name
@@ -69,6 +77,9 @@ func (self *pgOpenSetProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	if err != nil {
 		return nil, err
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	counts, err := pgAggregateIntegers(rows, 3)
 	if err != nil {
 		return nil, err
@@ -81,7 +92,10 @@ func (self *pgOpenSetProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	olderThirtyMinutes := int(counts[2])
 	exact := openCount < pgOpenSetScanCap
 
-	previous, trendReady := self.observe(openCount, exact)
+	previous, trendReady, err := self.observe(ctx, openCount, exact)
+	if err != nil {
+		return nil, err
+	}
 	rising := trendReady && previous < openCount
 	if openCount > 150_000 && (!exact || !trendReady || rising) {
 		symptom := fmt.Sprintf("open-contract set = %d above threshold; trend is warming up", openCount)

@@ -140,7 +140,7 @@ func parseReindexDebrisState(row pgRow) (reindexDebrisState, error) {
 	parseNonnegative := func(column int, name string) (int64, error) {
 		value, err := strconv.ParseInt(row.str(column), 10, 64)
 		if err != nil || value < 0 {
-			return 0, fmt.Errorf("invalid reindex debris %s %q", name, row.str(column))
+			return 0, fmt.Errorf("invalid response for reindex debris %s: expected a nonnegative integer", name)
 		}
 		return value, nil
 	}
