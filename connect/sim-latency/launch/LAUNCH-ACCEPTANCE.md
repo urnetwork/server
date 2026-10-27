@@ -5,17 +5,23 @@ checklist is the acceptance index for the new release, not an authorization to
 activate production. Historical v1 checkmarks do not qualify a different source,
 image, host manifest, policy or review provider.
 
-## Current checkpoint — October 27, 05:10 UTC
+## Current checkpoint — October 27, 05:36 UTC
 
 The following supersedes the provider and baseline-preparation progress in the
 dated bullets below; those bullets retain the earlier qualification history.
 
-- Clean control source `1a1bf5ae6` completed three race passes: simulator 151,
-  controller 42, model 13, native helpers 60 and shell guards 2 per pass, zero
-  skips, exact original container/network cleanup. Of 804 pass entries, three
-  are inactive genuine-command entry returns; 801 are other test cases. This
-  is not real provider qualification. Canonical unit receipt `a219218d…` binds
-  the exact tested driver; extended summary `bcab5db2…` preserves the scope.
+- Clean control source `fb5054121` with Warp `1ea3a31` completed three race
+  passes: simulator 200, controller 42, model 13, native helpers 60, Grafana 24
+  and Warp ownership 2 per pass, zero skips, exact original container/network
+  cleanup. Of 1,023 pass entries, three are inactive genuine-command entry
+  returns; 1,020 are other test cases. This is not real provider qualification.
+  Canonical unit receipt `550d6d38…` binds exact tested driver `1e7e8d65…`;
+  extended summary `554538ea…` preserves the scope and setup/logging incident.
+  The initial archive lacked Git metadata; a complete shallow exact-commit
+  fixture corrected setup, without code/test changes, before the three passes.
+  Retry redirection overwrote the complete initial failed stdout/stderr;
+  original terminal/launch records and a tool-observed failure excerpt remain,
+  not reconstructed raw logs. No measurement or model output was overwritten.
 - The v4 genuine review attempt is **terminal, failed**, exit 1 after 1,866.25
   seconds; cleanup is verified. Cancellation, benign review and fabrication
   rejection passed. The fourth case retained Qwen's terminal
@@ -29,15 +35,23 @@ dated bullets below; those bullets retain the earlier qualification history.
   Actual old-cap payload assertions failed, restored-source smoke passed,
   and the distinct source-test attestation cap remains 4,096. Completed-status,
   exact-model, strict schema, unanimous approval, request deadlines and stream
-  bounds are unchanged. Three-pass qualification, a new image and a new public
-  precommit must precede one fresh genuine attempt; none has started.
+  bounds are unchanged. Three-pass qualification is complete. New broker
+  `ddd8cda0…` and image `sha256:5ea22763…` are built from authenticated source
+  archives with honest `buildvcs=false` provenance. Independent image byte
+  readback and nonroot/read-only/offline startup passed; evidence `f0b17b2d…`,
+  exact executable match and original container/network inventory restored.
+  A new public precommit must precede one fresh genuine attempt; none has
+  started.
 - Alert-routing, preflight and finite 4/5 GiB host-profile regressions passed
   **69 smoke tests, zero skips**, including compiled old-source failures.
   Server fixes are pushed through `fb5054121`; Warp owner/transport changes
   through `1ea3a31`. Exact smoke receipt SHA-256
   `42aa17b86db5927877f49f74f06ee8826d342e11326b1cbd57e44202890768e9`.
-  Independent three-pass validation is underway. No live route change or
-  successful Slack notification is claimed.
+  Independent three-pass validation is complete as above. The new exact
+  seven-file C2 host-checker bundle is installed **inactive**; manifest
+  `a3ea6dfa…`, installation receipt `16503195…`. No full checker or host
+  qualification ran, live configuration is unchanged, and no live route change
+  or successful Slack notification is claimed.
 - All five main control binaries are built from clean `1a1bf5ae6`; worker OCI
   `sha256:1996ccd1…` has byte-identical native/readback worker `395bce92…`.
   This is release provenance, not production-host readiness or a claim that the
@@ -50,7 +64,7 @@ dated bullets below; those bullets retain the earlier qualification history.
   `support@ur.xyz` retained as incident owner. Actual notification delivery
   remains unproved. The old staging supervisor is disabled for
   autostart, with its unit and historical state preserved. Main DB migrations
-  891–893 still awaited deployment at the last read-only check, **02:27 UTC**.
+  891–893 still awaited deployment at the last read-only check, **05:14 UTC**.
 
 - Genuine seven-key test-result attestation passed: two actual isolated Go
   executions (one passing, one deliberately failing), then six provider calls.
