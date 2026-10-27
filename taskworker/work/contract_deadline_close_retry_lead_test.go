@@ -39,15 +39,32 @@ func (self *scheduledCloseOwnerFixture) addShortEscrowDeadlineContract(ctx conte
 	return contractId
 }
 
+// A run at now that may start budget pages and owners in all, and nothing
+// once they are spent. runContractDeadlinePassWithin answers every request
+// after its allowance as unlimited, which would hand the retry pass a budget
+// the cut new-deadline pass left none of.
+func runContractDeadlinePassStrictlyWithin(t testing.TB, ctx context.Context, args *CloseContractDeadlinesArgs, now time.Time, budget int) *CloseContractDeadlinesResult {
+	t.Helper()
+	result, err := closeContractDeadlines(ctx, args, now, func() bool {
+		budget--
+		return 0 <= budget
+	})
+	if err != nil {
+		t.Fatal("deadline pass failed", err)
+	}
+	return result
+}
+
 // Production shape (Main, 2026-10-26): new deadlines arrived faster than one
 // run closed them, so each run's new-deadline pass used the whole budget. The
 // retry span kept its position all day, and the contracts in it, which
 // earlier runs had left open, stayed open for days. Here every run gets
-// budget for one page and two owners while three owners' contracts become due
-// since the run before, and the retry span holds two payers' contracts that
-// were due three hours ago: one closes with its reports, the other with
-// reports larger than its legacy escrow, which pays the escrow and no more.
-// The unchanged pass never moved the retry span, and all of them stayed open.
+// budget for one page and two owners and no more, while three owners'
+// contracts become due since the run before, and the retry span holds two
+// payers' contracts that were due three hours ago: one closes with its
+// reports, the other with reports larger than its legacy escrow, which pays
+// the escrow and no more. The unchanged pass never moved the retry span, and
+// all of them stayed open.
 // Now the run after a cut new-deadline pass closes them at their stored
 // deadlines, and the new deadlines the cut passes left close once a run has
 // budget for them.
@@ -91,7 +108,7 @@ func TestContractDeadlinePassRetriesWhileNewDeadlinesUseEveryBudget(t *testing.T
 				deadline := mintedAt.Add(model.DefaultContractExpiration)
 				arrived[payer] = append(arrived[payer], f.addDeadlineContracts(t.Context(), payer, mintedAt, 1, &deadline)...)
 			}
-			result := runContractDeadlinePassWithin(t, ctx, args, now, 3)
+			result := runContractDeadlinePassStrictlyWithin(t, ctx, args, now, 3)
 			if !result.Exhausted {
 				t.Fatalf("run %d did not use its whole budget: %+v", run, result)
 			}

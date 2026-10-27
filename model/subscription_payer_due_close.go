@@ -11,12 +11,13 @@
 // The payer drain retires one payer's due contracts directly, oldest first,
 // through the deadline reconciliation the deadline pass uses: each owner's
 // members together in one owned turn. The payer's own activity requests it:
-// a contract admission its balance refused, and a balance read whose Pending
-// exceeds what its current grants reserve. A gate in Redis passes one request
-// per payer per interval across processes, and the task coalesces by payer,
-// so repeated refusals and polls cost one Redis write each. A drain that
-// leaves due contracts schedules its successor, so one request retires all of
-// them in bounded runs.
+// a contract admission its balance refused, once the admission's recovery and
+// rerun did not admit it, and a balance read whose Pending exceeds what its
+// current grants reserve. A gate in Redis passes one request per payer per
+// interval across processes, and the task coalesces by payer, so repeated
+// refusals and polls cost one Redis write each. A drain that leaves due
+// contracts schedules its successor, so one request retires all of them in
+// bounded runs.
 //
 // Retirement is idempotent and settles once. Each member is reconciled under
 // its owner's admission and row locks, a terminal contract is only read, the
@@ -326,6 +327,18 @@ func payerDueContractCloseRunOnce(payerNetworkId server.Id) *task.RunOnceOption 
 // Redis connection: the request takes one of each in turn.
 func RequestPayerDueContractClose(ctx context.Context, payerNetworkId server.Id) bool {
 	return requestPayerDueContractClose(ctx, payerNetworkId, DefaultPayerDueContractCloseSettings())
+}
+
+// Requests the payer's drain after an admission refused it for its balance.
+// Only the admission's final verdict counts: a refusal its recovery and rerun
+// turned into a contract asks for nothing. Contracts of the payer that
+// outlived their deadline can hold the credit the request lacked until a
+// closer reaches them. The admission has released its connections by now, and
+// the request does not end with a caller that gave up.
+func requestPayerDueContractCloseAfterRefusal(ctx context.Context, payerNetworkId server.Id, err error) {
+	if errors.Is(err, ErrContractBalanceExhausted) {
+		RequestPayerDueContractClose(context.WithoutCancel(ctx), payerNetworkId)
+	}
 }
 
 func requestPayerDueContractClose(ctx context.Context, payerNetworkId server.Id, settings *PayerDueContractCloseSettings) (requested bool) {

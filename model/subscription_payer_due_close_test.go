@@ -1,11 +1,12 @@
 // The payer drain retires one payer's due contracts once each, through owner
 // turns, and leaves everything else; its request passes one per payer per
-// interval; the balance summary reports the Pending no current grant
-// reserves.
+// interval, and only a final balance refusal makes one; the balance summary
+// reports the Pending no current grant reserves.
 package model
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"sync"
 	"testing"
@@ -373,6 +374,44 @@ func TestRequestPayerDueContractClosePassesOneRequestPerInterval(t *testing.T) {
 		}
 		if requestPayerDueContractClose(ctx, server.Id{}, settings) {
 			t.Fatal("a request without a payer passed")
+		}
+	})
+}
+
+// A refusal the admission recovers from asks for nothing: recovery releases an
+// abandoned request's credit and the rerun admits the contract. A refusal that
+// stands after the rerun asks for the payer's drain. A request at the refused
+// grant selection asked for both, and cost the recovered admission one more
+// database connection.
+func TestOnlyAFinalBalanceRefusalRequestsThePayersDrain(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		f := newNetEscrowOrderingTestFixture(t, ctx)
+		createRedisAdmissionTest(ctx, f, 17)
+		redisRecoveryAbandonedTestRequest(t, ctx, f, 983)
+		drains := func() (count int) {
+			server.Db(ctx, func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM pending_task WHERE run_once_key=$1`,
+					payerDueContractCloseRunOnce(f.sourceNetworkId).String()).Scan(&count))
+			})
+			return
+		}
+
+		// the grant's 1000 bytes stay held until recovery releases the abandoned 983
+		if escrow, err := CreateTransferEscrow(ctx, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, 23); err != nil || escrow == nil {
+			t.Fatal("the recovered request was not admitted", err)
+		}
+		if count := drains(); count != 0 {
+			t.Fatal("a refusal the admission recovered from requested the payer's drain", count)
+		}
+		// 960 bytes remain, below the request and its shrink floor
+		if escrow, err := CreateTransferEscrow(ctx, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, Mib); escrow != nil || !errors.Is(err, ErrContractBalanceExhausted) {
+			t.Fatal("the over-balance request was not refused for its balance", escrow, err)
+		}
+		if count := drains(); count != 1 {
+			t.Fatal("a final refusal did not request the payer's drain", count)
 		}
 	})
 }

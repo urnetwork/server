@@ -75,6 +75,16 @@ func (self *payerDueCloseNetworks) subscriptionBalance(t testing.TB, ctx context
 	return result
 }
 
+// A request publishes its drain to run at once, and a task becomes claimable
+// in the second after its run time, when a polling worker takes it. Moves the
+// pending drains a minute back so this worker claims them now.
+func agePayerDueCloseTasks(ctx context.Context) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(ctx, `UPDATE pending_task SET run_at=run_at-interval '1 minute' WHERE function_name=$1`,
+			model.NewClosePayerDueContractsTaskTarget().TargetFunctionName()))
+	})
+}
+
 // Runs the production worker until no task is due, within a bound.
 func evalPayerDueCloseTasks(t testing.TB, ctx context.Context) {
 	t.Helper()
@@ -84,6 +94,7 @@ func evalPayerDueCloseTasks(t testing.TB, ctx context.Context) {
 	}
 	defer worker.Close()
 	for range 64 {
+		agePayerDueCloseTasks(ctx)
 		finished, retried, posts, err := worker.EvalTasks(8)
 		if err != nil {
 			t.Fatal("production worker failed", err)
