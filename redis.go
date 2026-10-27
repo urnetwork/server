@@ -33,6 +33,9 @@ type safeRedisClient struct {
 	disableCommandRetry   bool
 	contextTimeoutEnabled bool
 	authentication        bool
+	// reads a reply that comes after its caller's deadline rather than closing
+	// its connection (socketDeadlineFromContext)
+	keepLateReplies bool
 }
 
 type redisDialFunc func(ctx context.Context, network string, addr string) (net.Conn, error)
@@ -102,6 +105,21 @@ func redisLoopbackHost(host string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+// Whether go-redis takes a command's socket deadlines from its ctx, as the
+// deadline and authentication pools do. go-redis closes a connection whose
+// command failed with any timeout, so there a reply or handshake that comes
+// after its caller's deadline costs the connection, and the next caller dials
+// and handshakes again on the node that was late. On 2026-10-26 the proxies'
+// reservation calls opened up to 25k connections per second to single slow
+// nodes that way: connection handling held each node's main thread at 100%
+// and halved its command throughput. A pool that keeps late replies leaves the
+// deadline off its sockets. go-redis still bounds the wait for a pool turn and
+// a dial with the caller's ctx, and a command that has a connection ends within
+// the pool's own one-second socket timeouts.
+func (self *safeRedisClient) socketDeadlineFromContext() bool {
+	return self.contextTimeoutEnabled && !self.keepLateReplies
 }
 
 func (self *safeRedisClient) open() redis.UniversalClient {
@@ -181,7 +199,9 @@ func (self *safeRedisClient) open() redis.UniversalClient {
 
 		if self.contextTimeoutEnabled {
 			// This pool is only for optional, one-second cleanup. Native caps
-			// also bound driver maintenance that does not carry a caller ctx.
+			// also bound driver maintenance that does not carry a caller ctx,
+			// and in a pool that keeps late replies each command that has a
+			// connection.
 			readTimeout = time.Second
 			writeTimeout = time.Second
 			poolTimeout = time.Second
@@ -231,7 +251,7 @@ func (self *safeRedisClient) open() redis.UniversalClient {
 				ConnMaxIdleTime: connectionMaxIdleTimeDuration,
 				// see https://redis.uptrace.dev/guide/go-redis-debugging.html#timeouts
 				// see https://uptrace.dev/blog/golang-context-timeout.html
-				ContextTimeoutEnabled: self.contextTimeoutEnabled,
+				ContextTimeoutEnabled: self.socketDeadlineFromContext(),
 				// PING, GET and same-slot EVAL use direct slot routing. Policy
 				// discovery otherwise detaches COMMAND from the caller deadline.
 				DisableRoutingPolicies: self.contextTimeoutEnabled,
@@ -265,7 +285,7 @@ func (self *safeRedisClient) open() redis.UniversalClient {
 				ConnMaxIdleTime: connectionMaxIdleTimeDuration,
 				// see https://redis.uptrace.dev/guide/go-redis-debugging.html#timeouts
 				// see https://uptrace.dev/blog/golang-context-timeout.html
-				ContextTimeoutEnabled: self.contextTimeoutEnabled,
+				ContextTimeoutEnabled: self.socketDeadlineFromContext(),
 				ReadTimeout:           readTimeout,
 				WriteTimeout:          writeTimeout,
 				PoolTimeout:           poolTimeout,
@@ -311,6 +331,12 @@ var safeNoCommandRetryClient = &safeRedisClient{disableCommandRetry: true}
 // credential and accounting pools retain their original timeout policies.
 var safeDeadlineClient = &safeRedisClient{disableCommandRetry: true, contextTimeoutEnabled: true}
 
+// Deadline-bound calls that wait out a late reply rather than close its
+// connection (OptRedisKeepLateReplies) have a pool of their own with the same
+// policy otherwise, so that a storm of them never takes the turns of callers
+// whose deadline must bound their socket.
+var safeLateReplyClient = &safeRedisClient{disableCommandRetry: true, contextTimeoutEnabled: true, keepLateReplies: true}
+
 // Authentication owns its pool and total budget; no preflight command borrows
 // authority or consumes a second round trip. Routing redirects share the context.
 var safeAuthClient = &safeRedisClient{disableCommandRetry: true, contextTimeoutEnabled: true, authentication: true}
@@ -349,7 +375,7 @@ func init() {
 	poolStat := func(f func(*redis.PoolStats) float64) func() float64 {
 		return func() float64 {
 			value := float64(0)
-			for _, pool := range []*safeRedisClient{safeClient, safeNoCommandRetryClient, safeDeadlineClient, safeAuthClient} {
+			for _, pool := range []*safeRedisClient{safeClient, safeNoCommandRetryClient, safeDeadlineClient, safeLateReplyClient, safeAuthClient} {
 				if client := pool.current(); client != nil {
 					value += f(client.PoolStats())
 				}
@@ -388,6 +414,7 @@ func RedisReset() {
 	safeClient.reset()
 	safeNoCommandRetryClient.reset()
 	safeDeadlineClient.reset()
+	safeLateReplyClient.reset()
 	safeAuthClient.reset()
 }
 
@@ -479,8 +506,9 @@ func RedisDoOnce(ctx context.Context, callback func(RedisClient)) {
 // RedisWithDeadline is the non-retrying boundary for work with an explicit
 // caller deadline: optional cleanup, admission, and the provider liveness
 // lease. Its dedicated pool applies that deadline to socket reads and writes for
-// both standalone and cluster clients. The callback must pass the same ctx to
-// every command. RedisReset and pool telemetry own this pool just like the
+// both standalone and cluster clients, unless the caller passes
+// OptRedisKeepLateReplies. The callback must pass the same ctx to every
+// command. RedisReset and pool telemetry own this pool just like the
 // ordinary pools; no per-operation client is leaked.
 // The pool bypasses cluster command-policy discovery, so each command routes by
 // its own first key: PING, GET, same-slot EVAL and other single-key commands,
@@ -512,10 +540,34 @@ func RedisWithDeadline(ctx context.Context, callback func(RedisClient) error, op
 			returnErr = context.DeadlineExceeded
 		}
 	}()
-	redisWithClient(ctx, safeDeadlineClient, func(client RedisClient) {
+	pool := safeDeadlineClient
+	for _, option := range options {
+		if v, ok := option.(RedisLateReplyOptions); ok && v.keep {
+			pool = safeLateReplyClient
+		}
+	}
+	redisWithClient(ctx, pool, func(client RedisClient) {
 		returnErr = callback(client)
 	}, append([]any{OptNoRetry()}, options...)...)
 	return
+}
+
+// Whether a deadline-bound call waits out a late reply on its connection.
+type RedisLateReplyOptions struct {
+	keep bool
+}
+
+// Runs a RedisWithDeadline call on the deadline pool that keeps a connection
+// whose reply or handshake comes after its caller's deadline: the deadline
+// bounds the wait for a pool turn and a dial, and a command that has a
+// connection ends within the pool's one-second socket timeouts. The call can
+// then end up to that long after its deadline, and still returns the
+// deadline's error. A slow node then costs its callers their deadlines, not
+// a new connection and handshake per call. A call inside a PostgreSQL
+// transaction keeps the default pool, so that a slow node never holds the
+// transaction past its caller's deadline.
+func OptRedisKeepLateReplies() RedisLateReplyOptions {
+	return RedisLateReplyOptions{keep: true}
 }
 
 // Whether a call on the non-retrying or deadline-bound pools pings first.

@@ -95,6 +95,7 @@ func TestRedisPoolsCloseSocketsWhoseHandshakeFailed(t *testing.T) {
 		{"main", &safeRedisClient{}},
 		{"no_command_retry", &safeRedisClient{disableCommandRetry: true}},
 		{"deadline", &safeRedisClient{disableCommandRetry: true, contextTimeoutEnabled: true}},
+		{"late_reply", &safeRedisClient{disableCommandRetry: true, contextTimeoutEnabled: true, keepLateReplies: true}},
 		{"authentication", &safeRedisClient{disableCommandRetry: true, contextTimeoutEnabled: true, authentication: true}},
 	}
 	for _, p := range pools {
