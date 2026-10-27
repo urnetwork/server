@@ -30,10 +30,11 @@ func TestSnReconcileReplanEvidenceAfterCancelOnly(t *testing.T) {
 		created := payoutTestCutoff.Add(-60 * day)
 		canceled := created.Add(30 * day)
 		// A later row of the network, created at `at`, holding an early sweep
-		// that closed before the stuck row was created.
+		// that closed before the stuck row was created. Its contract id is
+		// minted at the contract's creation, as connect.NewId mints it.
 		holder := func(cohort *payoutTransitionCohort, at time.Time) {
 			closed := created.Add(-day)
-			paymentId := snReconcileTestPayment(t, ctx, cohort.network, nil, at, cohort.insert(t, ctx, closed.Add(-time.Hour), &closed, closed, 10, UsdToNanoCents(1)))
+			paymentId := snReconcileTestPayment(t, ctx, cohort.network, nil, at, cohort.insertMinted(t, ctx, closed.Add(-time.Hour), &closed, closed, 10, UsdToNanoCents(1)))
 			snReconcileTestEpoch(t, ctx, paymentId, at)
 		}
 		a, b, c, d := newPayoutTransitionCohort(t, ctx), newPayoutTransitionCohort(t, ctx), newPayoutTransitionCohort(t, ctx), newPayoutTransitionCohort(t, ctx)
