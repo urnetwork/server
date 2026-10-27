@@ -86,6 +86,9 @@ type redisContractAdmission struct {
 	attemptedBalanceKVs  map[server.Id]bool
 	compensationAttempts map[server.Id]uint64
 	publicationStarted   bool
+	// the insufficient-balance rerun after this request's recovery page made
+	// progress
+	rerunAfterRecovery bool
 
 	// Serializes an attempt starting a pending reservation with this
 	// request's own releases and enrollments of its pending tokens, which
@@ -136,6 +139,20 @@ func (self *redisContractAdmission) notePublication() {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	self.publicationStarted = true
+}
+
+func (self *redisContractAdmission) noteRecoveryRerun() {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.rerunAfterRecovery = true
+}
+
+// Whether this attempt is the rerun after the request's recovery page released
+// bytes, which its census can find without first proving exhaustion.
+func (self *redisContractAdmission) recoveryRerun() bool {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.rerunAfterRecovery
 }
 
 func redisAdmissionFromContext(ctx context.Context) *redisContractAdmission {
