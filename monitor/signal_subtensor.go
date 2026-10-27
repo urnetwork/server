@@ -936,20 +936,25 @@ func evaluateSubtensorNodeWithArchiveControl(target *host, configured SubtensorN
 	if gatewayCurrentRuntimeConvergenceObserved {
 		gatewayErrorKeys = append(gatewayErrorKeys, "evm_chain_id", "eth_get_logs")
 	}
-	gatewayErrors := map[string]string{}
+	// RPC messages can contain private remote input; publish only fixed methods.
+	gatewayFailedMethods := []string{}
 	for _, key := range gatewayErrorKeys {
-		if value := node.Gateway.Errors[key]; value != "" {
-			gatewayErrors[key] = value
+		if node.Gateway.Errors[key] != "" {
+			gatewayFailedMethods = append(gatewayFailedMethods, key)
 		}
 	}
-	if node.GatewayHTTP != 200 || len(gatewayErrors) > 0 {
+	if node.GatewayHTTP != 200 || len(gatewayFailedMethods) > 0 {
+		failedMethods := "none"
+		if len(gatewayFailedMethods) > 0 {
+			failedMethods = strings.Join(gatewayFailedMethods, ",")
+		}
 		findings = append(findings, finding{
 			probeId: "subtensor/node-health", tier: tierPage, class: "subtensor-gateway",
 			target: target.name, frame: configured.Name, sustain: 2,
 			symptom:   fmt.Sprintf("%s's Subtensor overlay gateway does not reproduce its direct node RPC", identity),
 			mechanism: "The backing loopback RPC is observable, but nginx health or JSON-RPC is not; overlay address ordering, nginx lifecycle, or the node-specific upstream is broken.",
 			baseline:  fmt.Sprintf("gateway port %d returns HTTP 200 and reproduces the direct identity and current-runtime interface gates from loopback port %d", configured.GatewayPort, configured.RPCPort),
-			observed:  fmt.Sprintf("gateway_http=%d errors=%s", node.GatewayHTTP, subtensorErrors(gatewayErrors, nil)),
+			observed:  fmt.Sprintf("gateway_http=%d failed_methods=%s", node.GatewayHTTP, failedMethods),
 			action:    "Check the exact overlay bind, nginx unit/journal, and this node's loopback upstream before changing chain data.",
 			verify:    "Require /healthz HTTP 200 and matching direct/gateway chain, genesis, runtime name, recent head, and—at current convergence—runtime, transaction, EVM, and eth_getLogs behavior.",
 			playbook:  "SIGNALS.md §17.1",

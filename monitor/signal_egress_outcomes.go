@@ -284,6 +284,16 @@ func (egressOutcomesProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 	if snapshot.unknownFailure > 0 {
 		findings[3] = egressUnknownFinding(target, snapshot)
 	}
+	// No current success/failure outcome supplies no recovery evidence. Keep
+	// first-observation silence and any independent positive integrity finding.
+	if snapshot.observed == 0 {
+		for index := range findings {
+			if findings[index].healthy {
+				findings[index].healthy = false
+				findings[index].clearHold = true
+			}
+		}
+	}
 	return findings, nil
 }
 
