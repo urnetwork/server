@@ -233,9 +233,9 @@ func TestLaunchPreflightChecksGrafanaRoutingAndLiveMetrics(t *testing.T) {
                     {"uid":"competition-minio-capacity-critical"}
                 ]`))
 		case "/api/v1/provisioning/contact-points":
-			_, _ = response.Write([]byte(`[{"name":"sim-latency-support","address":"support@ur.xyz"}]`))
+			_, _ = response.Write([]byte(`[{"uid":"urnetwork-default-slack","name":"urnetwork-default","type":"slack","settings":{"url":"[REDACTED]"}}]`))
 		case "/api/v1/provisioning/policies":
-			_, _ = response.Write([]byte(`{"receiver":"sim-latency-support","matchers":["severity"]}`))
+			_, _ = response.Write([]byte(`{"receiver":"urnetwork-default","routes":[{"receiver":"urnetwork-default","object_matchers":[["service","=","sim-latency"],["severity","=~","warn|page"]]}]}`))
 		case "/api/v1/query":
 			metricQueries = append(metricQueries, request.URL.Query().Get("query"))
 			value := "12"

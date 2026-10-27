@@ -383,9 +383,12 @@ func assignAppleOfferCodeInTx(tx server.PgTx, ctx context.Context, networkId ser
 	return code, true
 }
 
-// CountAvailableAppleOfferCodes is the number of unassigned, unexpired codes in
-// the pool (for monitoring).
-func CountAvailableAppleOfferCodes(ctx context.Context, now time.Time) (count int) {
+// CountAvailableAppleOfferCodes is the number of unassigned codes in the pool
+// that expire after `after`. A code is handed only to an offer it outlives
+// (assignAppleOfferCodeInTx), so the top-up passes the expiry of an offer
+// issued at its next run: an unexpired code that expires before that serves
+// no one.
+func CountAvailableAppleOfferCodes(ctx context.Context, after time.Time) (count int) {
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
@@ -394,7 +397,7 @@ func CountAvailableAppleOfferCodes(ctx context.Context, now time.Time) (count in
 				FROM network_onboarding_apple_offer_code
 				WHERE network_id IS NULL AND $1 < expires_at
 			`,
-			now,
+			after,
 		)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {

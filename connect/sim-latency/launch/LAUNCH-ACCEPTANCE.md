@@ -5,33 +5,157 @@ checklist is the acceptance index for the new release, not an authorization to
 activate production. Historical v1 checkmarks do not qualify a different source,
 image, host manifest, policy or review provider.
 
-## Current checkpoint — October 27, 03:07 UTC
+## Current checkpoint — October 27, 09:18 UTC
 
 The following supersedes the provider and baseline-preparation progress in the
 dated bullets below; those bullets retain the earlier qualification history.
 
-- Clean control source `1a1bf5ae6` completed three race passes: simulator 151,
-  controller 42, model 13, native helpers 60 and shell guards 2 per pass, zero
-  skips, exact original container/network cleanup. Of 804 pass entries, three
-  are inactive genuine-command entry returns; 801 are other test cases. This
-  is not real provider qualification. Canonical unit receipt `a219218d…` binds
-  the exact tested driver; extended summary `bcab5db2…` preserves the scope.
-- The v4 genuine review attempt began at **03:05:34 UTC**, native PID
-  **2488711**, session **99560**. Cancellation passed and benign review is
-  running. The [published precommit](SNOW-REVIEW-QUALIFICATION-PRECOMMIT-2026-10-27-V4.json)
-  is pushed as `9bb1384a7`. Actual new review image `sha256:97e5453d…` passed
-  byte readback and nonroot/offline help. All six cases, three models, prompts,
-  token bounds and expected outcomes are unchanged; no automatic retry or
-  overlapping scoring is authorized.
+- The [V6 review precommit](SNOW-REVIEW-QUALIFICATION-PRECOMMIT-2026-10-27-V6.json)
+  is pushed through `bab6a7a30`. Its sole genuine attempt started at **08:26:51
+  UTC**, native PID **3017379**, session **9955**. It terminated with exit 1
+  after **544.95 seconds**: cancellation passed; on the benign fixture Qwen and
+  Gemma approved, while Muse withheld reproducibility because the synthetic
+  context explicitly states no tests or official measurements ran. All three
+  members completed without transport/schema errors. The union correctly held;
+  report `121365eb…` and original judgments remain retained. Real recorded Go
+  fixture evidence is being prepared without changing the six expected answers
+  or ignoring uncertainty. There is no automatic retry. Its independently
+  written full native plan matches fresh
+  export `43b2d804…` byte-for-byte. All selected control scopes at exact source
+  `09cc510d` passed three times: 216 simulator, 42 controller, 13 model, 60
+  native, 24 Grafana and 2 Warp tests per pass; zero skips, exact cleanup.
+  Receipt `86171c8e…` / summary `e4f45214…` disclose three inactive command
+  entries among 1,071 passes. New trusted review image `d9006e2f…` passed
+  independent binary readback and hardened offline startup. These tests/image
+  checks are **not yet genuine provider qualification**. The evaluator image
+  `98c9061c…` and frozen application checkpoint are unchanged. No timed scoring
+  or second model attempt may overlap; no automatic provider retry is allowed.
+- The exact corrected bridge plan is now [published before measurement](FRESH-BRIDGE-PLAN-2026-10-27.json),
+  SHA `ebfd06c2…`, with [operator authority provenance](FRESH-BRIDGE-AUTHORITY-2026-10-27.json).
+  Its qualified `244d5421…` operator retains source-base-plus-overlay provenance,
+  the original A/bridge protocol and the accepted 26.9% margin. Actual Git
+  publication authentication remains required. Trusted operator-authored
+  calibration may precede pending reviewer qualification under the documented
+  [phase-order separation](PRELAUNCH-PHASE-ORDER-2026-10-27.md); every final
+  review/launch gate remains mandatory. No corrected bridge or B seed has run.
+- Precommit authentication exposed a reference-sidecar packaging mismatch:
+  genuine flat source/builder sidecars were not pinned under the verifier's
+  required `evidence/` layout. [Byte-verified views](REFERENCE-EVIDENCE-LAYOUT-2026-10-27.json)
+  preserve all original files and patch/image/binary identities; the
+  [V2 bridge plan](FRESH-BRIDGE-PLAN-2026-10-27-V2.json) selects those views.
+  No native validator was weakened, no reference was rebuilt, and no failed
+  control measurements are reused. The original plans/authentication failures
+  remain retained. V2 publication and native authentication precede any run.
+- Matching review-input consumer `ad846565…` is installed inactive at the
+  protected `competition-production-operator-09cc510d-20261028-v2` release.
+  Old 1a/fb505 consumers cannot replay the new `source_files_semantics` input
+  hash and must not be started with the new broker. Existing worker `395b…` /
+  provenance image `1996…`, evaluator `98c…` and frozen scorer `efd…` are separate
+  and unchanged.
+- A fresh current-boot containment proof passed at **07:28:32 UTC**: simultaneous
+  CPU saturation of all ten evaluation cores and a 72 GiB memory bomb ended in
+  the expected cgroup OOM exit 137. Reserved-core cleanup took **775 ms** against
+  the 10-second limit; original container/network inventories and the boot ID
+  were unchanged. Receipt `f59fb790…` and supplement `95dee217…` bind actual
+  immutable fixture-image/binary readback. This is the separate hostile fixture,
+  **not** evaluator image `98c9061c…`, and does not grant full host rebaseline,
+  scoring qualification or production activation.
+- Native collection of the actual evaluator-image host facts also completed
+  with the **required negative exit 1**. Fingerprint `08ee3a5a…` binds actual
+  hardware/runtime, 5 GiB evidence profile and the permanent synthetic local
+  leaves. Receipt `128ef88f…` / supplement `5f0260e8…` prove unchanged boot,
+  inventories and active host configuration. No round marker or rebaseline was
+  fabricated: host eligibility and readiness remain false until the real
+  target-round R1/R1 proof passes.
+- The owner approved the [deadline-compatible calibration amendment](CALIBRATION-AMENDMENT-2026-10-27.md):
+  one corrected fresh R9/R9 bridge, then two independent seeds with correct
+  reference ordering on both. R9, the 26.9% margin, significance, all gates and
+  the three-hour submission cap remain unchanged. Three accepted original A/A
+  pairs remain preserved. The native two-seed tool is not yet qualified: its
+  first full test run exposed a synthetic publication fixture with null
+  required evidence; strict validation correctly refused it. After correcting
+  that fixture, three full 134-test passes completed with zero skips (402 pass
+  entries). Offline qualification receipt `1f4b19a9…` binds exact tested binary
+  `244d5421…`, source base `29b44380…` plus the nine-fragment patch `043b8366…`.
+  Those exact source changes are published in `e31347823`; no different whole-main
+  compiler provenance is claimed. Context-bound native qualification and the
+  final public execution plan remain required. No real draw or
+  corrected bridge has started. Production repeat rewards are explicitly
+  `allow`; same-round duplicate reuse and fresh per-epoch assessment remain.
+- The [V5 review precommit](SNOW-REVIEW-QUALIFICATION-PRECOMMIT-2026-10-27-V5.json)
+  is pushed in `3e36b2432`. The sole genuine attempt started at **06:03:33 UTC**,
+  native PID **2763522**, session **81168**. Its independently generated full
+  plan matches the public precommit byte-for-byte. The attempt terminated with
+  exit 1 after 2,723.93 seconds: cancellation, benign, fabrication and benchmark
+  cases passed; the injected-comment case failed closed and case six did not
+  run. The fixture mutation left contradictory patch hashes, and the schema
+  offered operator-only reason codes that native validation rejected. The
+  original responses/report (`bb22b154…`) remain retained. Identity/schema
+  corrections and deterministic regressions must pass before a new published
+  qualification attempt. This is **not provider qualification**.
+  A preceding OS launcher syntax error exited before
+  native execution or provider calls; its logs remain separate and preserved.
+  No automatic provider retry or timed-scoring overlap is authorized.
+- Clean control source `fb5054121` with Warp `1ea3a31` completed three race
+  passes: simulator 200, controller 42, model 13, native helpers 60, Grafana 24
+  and Warp ownership 2 per pass, zero skips, exact original container/network
+  cleanup. Of 1,023 pass entries, three are inactive genuine-command entry
+  returns; 1,020 are other test cases. This is not real provider qualification.
+  Canonical unit receipt `550d6d38…` binds exact tested driver `1e7e8d65…`;
+  extended summary `554538ea…` preserves the scope and setup/logging incident.
+  The initial archive lacked Git metadata; a complete shallow exact-commit
+  fixture corrected setup, without code/test changes, before the three passes.
+  Retry redirection overwrote the complete initial failed stdout/stderr;
+  original terminal/launch records and a tool-observed failure excerpt remain,
+  not reconstructed raw logs. No measurement or model output was overwritten.
+- The v4 genuine review attempt is **terminal, failed**, exit 1 after 1,866.25
+  seconds; cleanup is verified. Cancellation, benign review and fabrication
+  rejection passed. The fourth case retained Qwen's terminal
+  `status: incomplete`, `incomplete_reason: max_output_tokens` at the requested
+  8,192-token cap; the union correctly refused authority. Cases five and six
+  did not run. Report SHA-256 `98eb3aa7a85152f24f7dfae82fa2e06f62d8e0cc1eb03abde091b281c77430d8`.
+  Its [published precommit](SNOW-REVIEW-QUALIFICATION-PRECOMMIT-2026-10-27-V4.json)
+  remains immutable. This retained response does not resolve the different,
+  historical HTTP-200 response whose terminal object was lost.
+- The review-only cap correction to **32,768** is pushed in `100dfdd66`.
+  Actual old-cap payload assertions failed, restored-source smoke passed,
+  and the distinct source-test attestation cap remains 4,096. Completed-status,
+  exact-model, strict schema, unanimous approval, request deadlines and stream
+  bounds are unchanged. Three-pass qualification is complete. New broker
+  `ddd8cda0…` and image `sha256:5ea22763…` are built from authenticated source
+  archives with honest `buildvcs=false` provenance. Independent image byte
+  readback and nonroot/read-only/offline startup passed; evidence `f0b17b2d…`,
+  exact executable match and original container/network inventory restored.
+  Publication and the separate genuine attempt are recorded above; the V4
+  failed outcome is not relabeled as the new attempt.
+- Alert-routing, preflight and finite 4/5 GiB host-profile regressions passed
+  **69 smoke tests, zero skips**, including compiled old-source failures.
+  Server fixes are pushed through `fb5054121`; Warp owner/transport changes
+  through `1ea3a31`. Exact smoke receipt SHA-256
+  `42aa17b86db5927877f49f74f06ee8826d342e11326b1cbd57e44202890768e9`.
+  Independent three-pass validation is complete as above. The new exact
+  seven-file C2 host-checker bundle is installed **inactive**; manifest
+  `a3ea6dfa…`, installation receipt `16503195…`. No full checker or host
+  qualification ran and active host configuration is unchanged.
 - All five main control binaries are built from clean `1a1bf5ae6`; worker OCI
   `sha256:1996ccd1…` has byte-identical native/readback worker `395bce92…`.
   This is release provenance, not production-host readiness or a claim that the
   real worker runs inside Docker. No actual production worker has started.
-- The Sille-only native loopback metrics forwarder is installed. Its repeated
-  anonymous GET checks pass; authenticated signal ingestion and notification
-  delivery are still unproved. The old staging supervisor is disabled for
+- The Sille-only native loopback metrics forwarder is installed. One isolated
+  synthetic metric was accepted by the native publisher and read back exactly
+  from Mimir; receipt `0d14ffc4…`. This is not a real runner heartbeat.
+  The one email test failed; main Grafana deliberately has no SMTP. The
+  corrected managed route now uses its existing native main Slack receiver,
+  with `support@ur.xyz` retained as incident owner. One native stored-contact
+  test returned Grafana `success` in **282 ms**; receipt `bebc4729…` and separate
+  readback `0e155877…` prove policy/contacts stayed unchanged. This is integration
+  acknowledgment, not human channel confirmation, a real runner heartbeat or
+  a rule-triggered alert. All seven live rule expressions/thresholds/timing and
+  the 15-second/30-second dashboard refresh/warning match. Their new `owner`
+  labels still require normal Warp/Grafana deployment containing `1ea3a31`;
+  file-provisioned rules were not overwritten through the API. The old staging supervisor is disabled for
   autostart, with its unit and historical state preserved. Main DB migrations
-  891–893 still awaited deployment at the last read-only check, **02:27 UTC**.
+  891–893 still awaited deployment at the last read-only check, **05:14 UTC**.
 
 - Genuine seven-key test-result attestation passed: two actual isolated Go
   executions (one passing, one deliberately failing), then six provider calls.
@@ -76,8 +200,9 @@ dated bullets below; those bullets retain the earlier qualification history.
   installed inactive: 17 root-owned read-only artifacts, unchanged v3 dependency
   hashes, no helper or worker execution and no service activation. Installation
   receipt SHA-256 `e51f219353e2f1c912c4beda8a9d12f0394e1524b3efba0b9036ff3d76d47db7`.
-- Replacement bridge authorization and the independent-seed amendment remain
-  unresolved. No corrected bridge or independent-seed scoring has started.
+- Replacement bridge and two-seed scope are approved as above. Native-tool
+  qualification and authenticated executable/plan publication remain gates;
+  no corrected bridge or independent-seed scoring has started.
 - Actual main PostgreSQL was audited at 01:33:35 UTC in a verified read-only,
   repeatable-read transaction. All 890 deployed migration identities match;
   migrations **891–893** (mini provider, multi-repository promotion, Snow union)

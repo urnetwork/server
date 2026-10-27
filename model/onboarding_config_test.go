@@ -183,6 +183,64 @@ func TestOfferConfigMath(t *testing.T) {
 	connect.AssertEqual(t, false, (&OnboardingConfig{Offer: OnboardingOfferConfig{PercentOff: 25}}).OfferEnabled())
 }
 
+// Failure mode (2026-10, Main): onboarding.yml set offer.apple.expiry_days 5,
+// equal to offer.validity_days 5. A generated batch expired 5 days after the
+// top-up, and a code is handed only to an offer it outlives, so every offer
+// issued after the top-up expired after every code: 2,000 codes were
+// generated and none was ever handed out. The loader raises an expiry that
+// does not outlive the offer, so a batch outlives an offer issued up to the
+// next top-up.
+func TestAppleOfferCodeExpiryOutlivesTheOffer(t *testing.T) {
+	data := []byte(`
+onboarding:
+  offer:
+    percent_off: 25
+    months_free: 3
+    validity_days: 5
+    apple:
+      offer_code_id: "synthetic-offer"
+      batch_size: 500
+      min_available: 200
+      expiry_days: 5
+`)
+	var y onboardingYaml
+	connect.AssertEqual(t, nil, yaml.Unmarshal(data, &y))
+	c := newOnboardingConfig(&y)
+	connect.AssertEqual(t, 7, c.MinAppleOfferCodeExpiryDays())
+	connect.AssertEqual(t, 7, c.Offer.Apple.ExpiryDays)
+	connect.AssertEqual(t, 7, c.AppleOfferCodeExpiryDays())
+
+	// a batch generated at a top-up outlives the last offer issued before the
+	// next top-up
+	generatedAt := time.Date(2026, 10, 24, 21, 54, 57, 0, time.UTC)
+	batchExpiresAt := generatedAt.Add(time.Duration(c.Offer.Apple.ExpiryDays) * 24 * time.Hour)
+	lastOfferExpiresAt := generatedAt.Add(OnboardingAppleOfferCodeTopUpInterval).Add(c.OfferValidity())
+	connect.AssertEqual(t, true, lastOfferExpiresAt.Before(batchExpiresAt))
+
+	// a long enough expiry is kept, a short or unset one is raised, and with no
+	// offer the default stands
+	for _, test := range []struct {
+		validityDays int
+		expiryDays   int
+		want         int
+	}{
+		{validityDays: 5, expiryDays: 10, want: 10},
+		{validityDays: 5, expiryDays: 7, want: 7},
+		{validityDays: 5, expiryDays: 6, want: 7},
+		{validityDays: 5, expiryDays: 0, want: 7},
+		{validityDays: 2, expiryDays: 0, want: OnboardingAppleOfferCodeExpiryDaysDefault},
+		{validityDays: 0, expiryDays: 0, want: OnboardingAppleOfferCodeExpiryDaysDefault},
+	} {
+		c := &OnboardingConfig{Offer: OnboardingOfferConfig{
+			ValidityDays: test.validityDays,
+			Apple:        OnboardingAppleOfferCodesConfig{ExpiryDays: test.expiryDays},
+		}}
+		connect.AssertEqual(t, test.want, c.AppleOfferCodeExpiryDays())
+		clampAppleOfferCodeExpiry(c)
+		connect.AssertEqual(t, test.want, c.Offer.Apple.ExpiryDays)
+	}
+}
+
 // TestTemplateId pins the Brevo template selection: step -> variant (default)
 // -> locale (language, en).
 func TestTemplateId(t *testing.T) {
@@ -233,8 +291,7 @@ func TestOnboardingRegistryFile(t *testing.T) {
 	}
 	var y onboardingYaml
 	connect.AssertEqual(t, nil, yaml.Unmarshal(data, &y))
-	c := &y.Onboarding
-	c.Experiments = validExperiments(c.Experiments)
+	c := newOnboardingConfig(&y)
 
 	connect.AssertEqual(t, true, c.OfferEnabled())
 	connect.AssertEqual(t, 25, c.Offer.PercentOff)

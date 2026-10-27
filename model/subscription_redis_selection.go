@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 	"github.com/urnetwork/server"
@@ -187,6 +188,25 @@ func selectRedisTransferBalances(ctx context.Context, admission *redisContractAd
 		redisGrantSelectionFraction.WithLabelValues("rows").Observe(float64(rowsRead) / float64(limits.MaxRows))
 		redisGrantSelectionFraction.WithLabelValues("selected").Observe(float64(len(selected)) / float64(limits.MaxSelected))
 	}()
+	// A payer this process recently refused as exhausted first tries to prove
+	// the census's refusal with one read of each grant, reserving nothing
+	// (subscription_redis_exhaustion.go). A rerun after this request's own
+	// recovery released bytes skips the proof.
+	if !admission.recoveryRerun() && exhaustedRedisPayers.recent(payerNetworkId, time.Now()) {
+		rows, room, proven := proveRedisGrantExhaustion(ctx, admission, payerNetworkId, now, requested, limits)
+		if proven {
+			rowsRead = rows
+			if rowsRead*5 >= limits.MaxRows*4 {
+				redisContractReservationResults.WithLabelValues("selection", "capacity-warning").Inc()
+			}
+			exhaustedRedisPayers.note(payerNetworkId, time.Now())
+			redisContractReservationResults.WithLabelValues("exhaustion-proof", "proven").Inc()
+			return nil, 0, fmt.Errorf("%w (%d).", errRedisReservationInsufficient, room)
+		}
+		// the census decides this payer's requests for the hold
+		exhaustedRedisPayers.noteUnproven(payerNetworkId, time.Now())
+		redisContractReservationResults.WithLabelValues("exhaustion-proof", "unproven").Inc()
+	}
 	var priority Priority
 	remaining := requested
 	var held error
@@ -228,7 +248,8 @@ func selectRedisTransferBalances(ctx context.Context, admission *redisContractAd
 		}
 		admission.noteBalance(balance.balanceId)
 		reservation.noteReservationRequest()
-		amount, err := redisContractReservation(ctx, operation, balance.balanceId, admission.contractId, balance.balanceByteCount, remaining, redisContractReservationLease)
+		amount, err := redisContractReservation(ctx, operation, balance.balanceId, admission.contractId, balance.balanceByteCount, remaining, redisContractReservationLease,
+			server.OptRedisKeepLateReplies())
 		if err != nil {
 			if redisGrantCounterHeld(err) {
 				heldBalanceIds[balance.balanceId] = true
@@ -339,6 +360,7 @@ func selectRedisTransferBalances(ctx context.Context, admission *redisContractAd
 							proberOutcome = "selected_extended"
 						}
 					}
+					exhaustedRedisPayers.forget(payerNetworkId, time.Now())
 					return selected, priority, nil
 				}
 			}
@@ -397,6 +419,7 @@ func selectRedisTransferBalances(ctx context.Context, admission *redisContractAd
 				return nil, 0, err
 			}
 			if done {
+				exhaustedRedisPayers.forget(payerNetworkId, time.Now())
 				return selected, priority / Priority(len(selected)), nil
 			}
 		}
@@ -407,7 +430,12 @@ func selectRedisTransferBalances(ctx context.Context, admission *redisContractAd
 			// Only a complete bounded census can authorize shrink-to-fit. A
 			// capacity refusal or unknown counter is not proof of less funding.
 			if _, ok := grantTransferEscrowByteCount(requested, requested-remaining); ok && len(selected) != 0 {
+				exhaustedRedisPayers.forget(payerNetworkId, time.Now())
 				return selected, priority / Priority(len(selected)), nil
+			}
+			// The internal prober keeps its census and selection outcomes.
+			if !internal {
+				exhaustedRedisPayers.note(payerNetworkId, time.Now())
 			}
 			return nil, 0, fmt.Errorf("%w (%d).", errRedisReservationInsufficient, requested-remaining)
 		}

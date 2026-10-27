@@ -268,3 +268,63 @@ func TestProxyStormRowHighlightsFailedReservations(t *testing.T) {
 		}
 	}
 }
+
+// The cap's slots in use sit directly beside its refusals, each process
+// against the capacity it runs with, so the headroom reads at a glance and a
+// configured cap shows as its own line.
+func TestProxyStormRowShowsCapSlotsAgainstCapacityBesideRefusals(t *testing.T) {
+	dashboard := readTestDashboard(t, "proxy.json")
+	slots := dashboardPanelById(dashboard, 62)
+	refusals := dashboardPanelById(dashboard, 53)
+	if slots == nil || refusals == nil {
+		t.Fatal("the proxy storm row lacks the cap slots or the cap refusals panel")
+	}
+	if slots.Type != "timeseries" || slots.FieldConfig.Defaults.Unit != "short" {
+		t.Errorf("cap slots panel is a %s in %q, want a timeseries in short", slots.Type, slots.FieldConfig.Defaults.Unit)
+	}
+	if slots.GridPos.Y != refusals.GridPos.Y || slots.GridPos.H != refusals.GridPos.H || slots.GridPos.X+slots.GridPos.W != refusals.GridPos.X {
+		t.Errorf("cap slots panel %+v does not sit directly beside the cap refusals %+v", slots.GridPos, refusals.GridPos)
+	}
+	if len(slots.Targets) != 2 {
+		t.Fatalf("cap slots panel has %d queries, want slots in use and capacity", len(slots.Targets))
+	}
+	inUse, capacity := slots.Targets[0], slots.Targets[1]
+	if !strings.Contains(inUse.Expr, "max by (host, block) (max_over_time(urnetwork_hosted_contract_admission_in_use{") || !strings.Contains(inUse.Expr, "}[2m]))") {
+		t.Errorf("cap slots in use are not each block's busiest process over two minutes: %s", inUse.Expr)
+	}
+	if !strings.Contains(capacity.Expr, "max by (host, block) (urnetwork_hosted_contract_admission_capacity{") {
+		t.Errorf("cap capacity is not read per block on each host: %s", capacity.Expr)
+	}
+	if !strings.HasSuffix(inUse.LegendFormat, " in use") || !strings.HasSuffix(capacity.LegendFormat, " capacity") {
+		t.Errorf("cap slots legends %q and %q do not tell use from capacity", inUse.LegendFormat, capacity.LegendFormat)
+	}
+	// the capacity lines are dashed references, kept out of the legend so the
+	// legend ranks the processes by their slots in use
+	dashed, unlisted := false, false
+	for _, override := range slots.FieldConfig.Overrides {
+		for _, property := range override.Properties {
+			if override.Matcher.Options != ".* capacity" {
+				continue
+			}
+			if property.Id == "custom.lineStyle" && strings.Contains(string(property.Value), `"dash"`) {
+				dashed = true
+			}
+			if property.Id == "custom.hideFrom" && strings.Contains(string(property.Value), `"legend": true`) {
+				unlisted = true
+			}
+		}
+	}
+	if !dashed || !unlisted {
+		t.Errorf("the capacity lines are dashed %t and kept out of the legend %t, want both", dashed, unlisted)
+	}
+	for _, part := range []string{"hosted_contract_concurrency", "256 by default", "headroom"} {
+		if !strings.Contains(slots.Description, part) {
+			t.Errorf("cap slots panel does not say %q", part)
+		}
+	}
+	for _, id := range []int{47, 49, 53} {
+		if panel := dashboardPanelById(dashboard, id); panel == nil || !strings.Contains(panel.Description, "proxy.yml hosted_contract_concurrency") {
+			t.Errorf("proxy storm panel %d does not name the configured cap", id)
+		}
+	}
+}

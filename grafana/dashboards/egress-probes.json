@@ -7079,6 +7079,156 @@
           "legendFormat": "shard cleanup errors"
         }
       ]
+    },
+    {
+      "type": "row",
+      "title": "probe tunnel retirement: late provider returns acknowledged before the derived client is revoked",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 450
+      },
+      "id": 138
+    },
+    {
+      "id": 139,
+      "type": "timeseries",
+      "title": "probe tunnel retirements / min by path and outcome",
+      "description": "Probe tunnels (URL probes, and the blackhole and full egress batches) whose derived client was revoked, by how the tunnel closed (path: closed; canceled, its pass's context ended first, as on a deploy, a shutdown or a deadline; lost, its provider left the multi-client first) and how acknowledging the provider's late returns ended (outcome: quiet, a whole acknowledge interval passed with no return while the provider was present; time_bound, the timeout ended it with the provider present and still returning; no_path, the timeout ended it with no provider to return through; unused, the tunnel sent its provider nothing; cut, the wait was canceled). A provider on an sdk before September 2026 retransmits a return to a revoked client for as long as it stays connected, each one a contract refused for an inactive destination, so a derived client is revoked only after a quiet interval; a growing time_bound or no_path share means clients are revoked while returns can still arrive.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 451
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (path, outcome) (rate(urnetwork_provider_tunnel_retirements_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "{{path}} {{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 140,
+      "type": "timeseries",
+      "title": "late and trailing provider returns acknowledged / min",
+      "description": "Late: provider returns a derived client acknowledged after the teardown drain went quiet, by path. The drain alone would have revoked the client before each of them; on 2026-10-19 about 2% of URL probes left one, and they accumulated to about 70k routes and 15k refused contracts a second between fleet-wide restarts. Trailing: returns in the last interval of an acknowledgment that ended without a quiet one, by path and outcome, still arriving as the derived client was revoked.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 451
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (path) (rate(urnetwork_provider_tunnel_retirement_late_returns_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "late {{path}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (path, outcome) (rate(urnetwork_provider_tunnel_retirement_trailing_returns_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "trailing {{path}} {{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 141,
+      "type": "timeseries",
+      "title": "retirements held, acknowledged in the caller, and teardown errors",
+      "description": "Held: closed probe tunnels each taskworker's passes hold while their derived clients acknowledge late returns, so the probe slot is free during the wait; a pass joins every tunnel it holds before it ends. Acknowledged in the caller: closes that waited out the acknowledgment in the closing caller because the pass had no room to hold another. Teardown errors: held retirements whose teardown reported an error; a tunnel retired in its own Close returns the error to its caller instead.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 459
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (host, block, instance) (urnetwork_provider_tunnel_retirements_held{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "held {{host}} {{block}} {{instance}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(urnetwork_provider_tunnel_retirement_backpressure_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "acknowledged in the caller / min"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(rate(urnetwork_provider_tunnel_retirement_errors_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "teardown errors / min"
+        }
+      ]
     }
   ]
 }

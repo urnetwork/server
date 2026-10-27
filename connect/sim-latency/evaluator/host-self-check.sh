@@ -305,7 +305,8 @@ management_memory_reserved=false
     [ "$management_memory_reserve_bytes" = "$expected_management_memory_reserve_bytes" ] &&
     [ "${capacity_reserve_bytes:-0}" -ge "${expected_management_memory_reserve_bytes:-1}" ] 2>/dev/null &&
     jq -e '.memory_capacity_passed == true and
-        .active_memory_limit_bytes == 103079215104 and .evidence_memory_limit_bytes == 4294967296 and
+        .active_memory_limit_bytes == 103079215104 and
+        (.evidence_memory_limit_bytes == 4294967296 or .evidence_memory_limit_bytes == 5368709120) and
         .total_evaluation_memory_limit_bytes == (.active_memory_limit_bytes + .evidence_memory_limit_bytes) and
         .minimum_management_memory_reserve_bytes >= 25769803776 and
         .capacity_reserve_bytes == (.host_memory_bytes - .total_evaluation_memory_limit_bytes) and

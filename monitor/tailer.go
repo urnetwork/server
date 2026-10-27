@@ -447,6 +447,20 @@ func peerConnectionTeardownStalledStage(line string) string {
 
 // the §4 taxonomy. Order matters: first match wins.
 var logClasses = []logClass{
+	// The fixed webhook refusal header owns classification before arbitrary
+	// loader-error details can match a generic resource or transport class.
+	{name: "payment-webhook-refused", re: paymentWebhookRefusedRe,
+		sample: func(line string) string {
+			return "[" + paymentWebhookRefusedLogGroup(line) + "]webhook refused, verification input unavailable (details omitted)"
+		},
+		groupBy:       paymentWebhookRefusedLogGroup,
+		rateThreshold: 1, tier: tierPage, playbook: "SIGNALS.md §8.7",
+		meaning:   "the producer reports that a payment webhook reached its unavailable-verification refusal path; the intended response is 503, but this line does not prove response delivery or payment impact",
+		mechanism: "The named webhook could not load a usable verification prerequisite and takes its fail-closed refusal path. The cause may be an absent resource, missing/blank/wrong-type value, malformed resource or another loader failure. The line does not establish a particular field, mounted generation, provider configuration, backend cause or successful HTTP response write.",
+		context:   "One line counts a matching refusal diagnostic, not a unique event, payment or loss amount. Retries can repeat one event. Provider retry/retention and reconciliation coverage require independent evidence. A clear credentials check can coexist with a different mounted generation, incomplete inventory or another route-specific loader failure; compare the actual consumer before selecting a repair.",
+		action:    "Privately inspect one original loader reason, the configured webhook and its actual mounted generation before choosing a repair. Restore a proved missing or incompatible verification input only through the existing provider/Vault owner; verify provider agreement and the intended route outcome. Reconcile expired or unhandled events through the existing financial owner. Never disable verification or fabricate a secret to clear this page.",
+		verify:    "Require fresh complete log coverage with no matching refusals for two log-errors cadences after ingestion delay, independently successful verification and intended webhook handling, and the actual provider backlog/reconciliation outcome. Quiet logs, credential shape alone or an unrelated 2xx do not certify payment recovery.",
+	},
 	{name: "peerconn-teardown-stalled", re: peerConnectionTeardownStalledRe,
 		sample: func(line string) string {
 			return "[peerconn]teardown stalled stage=" + peerConnectionTeardownStalledStage(line) + " (peer identity omitted)"
@@ -1416,6 +1430,19 @@ func logTimestampSecond(line string) string {
 
 var requiredVaultResourceRe = regexp.MustCompile(`Resource not found in vault \(([^\)]+\.yml)\)`)
 var requiredVaultRouteRe = regexp.MustCompile(`route ([A-Z]+) \^?([^$:\s]+)\$?:`)
+
+// subscription_handlers.go webhookVerifiable and the webhook body verifiers:
+// `[<webhook>]webhook refused, verification <secret|publisher|audience> unavailable: ...`
+var paymentWebhookRefusedRe = regexp.MustCompile(`\[(play|stripe|coinbase|helius)\]webhook refused, verification [a-z]+ unavailable`)
+
+// The refused webhook's bounded name; the resource and field stay in the service log.
+func paymentWebhookRefusedLogGroup(line string) string {
+	if match := paymentWebhookRefusedRe.FindStringSubmatch(line); len(match) > 1 {
+		return match[1]
+	}
+	return "unknown"
+}
+
 var netEscrowNegativeSiteRe = regexp.MustCompile(`\[netescrow\]negative counter after ([a-z][a-z -]{0,40}):`)
 var netEscrowClampMarkerRe = regexp.MustCompile(`\bclamped_to=[^\s]+`)
 var lokiTailBackendAddrRe = regexp.MustCompile(`[[:space:]]addr=("[^"]+"|[^[:space:]]+)`)
