@@ -1,0 +1,406 @@
+// Pure synthetic phase-order regressions execute no file generator, database, provider, evaluator, entropy source or activation command.
+package controller
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
+)
+
+// Synthetic known facts deliberately lack every positive containment/R1 claim.
+func prospectiveProductionPhaseFixture() (Settings, EvaluationPolicy, HostSelfCheck) {
+	policy := EvaluationPolicy{HardwareId: "synthetic-hardware", HostQualificationSha256: strings.Repeat("a", 64), ProviderCount: 3, ClientPoolSize: 2, Replicates: 9, TakeoverMargin: .25}
+	settings := Settings{CompetitionId: "synthetic-competition", BaseSha: strings.Repeat("b", 40), EvaluatorImageDigest: "sha256:" + strings.Repeat("c", 64), EvaluationPolicy: policy,
+		AutomationPolicy: model.CompetitionAutomationPolicy{Environment: "synthetic", SeasonId: "synthetic-season", SourceGeneration: 0, SourceActivationGeneration: 1},
+		SimulatorCommand: "/synthetic/operator", EvaluatorCommand: "/synthetic/evaluator", EvaluatorCommandSha256: strings.Repeat("d", 64),
+		SelfCheckCommand: "/synthetic/checker", SelfCheckCommandSha256: strings.Repeat("e", 64), ConfigLocalDirectory: "/synthetic/config/local", VaultLocalDirectory: "/synthetic/vault/local", ArtifactRoot: "/synthetic/artifacts", ArtifactBucket: "synthetic"}
+	host := HostSelfCheck{Schema: 1, HostId: "synthetic-host", HardwareId: policy.HardwareId, QualificationSha256: policy.HostQualificationSha256, ImageDigest: settings.EvaluatorImageDigest,
+		KernelRelease: "synthetic-kernel", MicrocodeRevision: "synthetic-microcode", IrqAffinitySha256: strings.Repeat("f", 64), IrqPolicySha256: strings.Repeat("1", 64), LogicalCpuCount: 12,
+		SMTDisabled: true, GovernorPinned: true, TurboPinned: true, NumaPinned: true, IrqPinned: true, CgroupV2: true, ManagementCpuReserved: true, ManagementMemoryReserved: true,
+		OfflineBuildCache: true, ArtifactStorage: true, Checks: map[string]bool{"config_secure": true, "qualification_match": false, "cpu_count_exact": true, "worker_affinity_pinned": true, "kernel_microcode_pinned": true, "docker_runtime": true, "docker_user_namespace": true}}
+	measured := policy
+	measured.HardwareId, measured.HostQualificationSha256 = "synthetic-measured-fixture-label", strings.Repeat("2", 64)
+	return settings, measured, host
+}
+
+// Positive unit fixtures are visibly synthetic, with one deterministic target.
+func prospectiveProductionPhaseTwoFixture(t *testing.T) (prospectiveProductionPhaseTwoIdentity, prospectiveProductionApproval, prospectiveProductionPhaseTwoFacts) {
+	t.Helper()
+	disabled, measured, host := prospectiveProductionPhaseFixture()
+	settings, err := prospectiveProductionNormativeTarget(&disabled, host, measured)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commits := map[string]string{}
+	for _, name := range []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "warp", "gvisor"} {
+		commits[name] = strings.Repeat("b", 40)
+	}
+	lock, err := model.CompetitionSourceLockDigest(commits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.AutomationPolicy.SourceLockSha256 = lock
+	publicBytes, selectionPins := prospectiveProductionCommittedPlanFixture(t)
+	selection, err := prospectiveProductionSelectFirstCommittedSeed(publicBytes, selectionPins)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preimage := prospectiveProductionApproval{Schema: 1, Kind: "production-20261028-policy-approval-preimage", IntendedPolicy: settings.PublicInfo(), CurrentBootId: "synthetic-boot", Commits: commits,
+		FirstCommittedSeedRequirement: selection, Evidence: map[string]prospectiveProductionFile{
+			"first_committed_seed_amendment": {Sha256: selectionPins.OwnerAmendmentSha256},
+			"original_two_b_declaration":     {Sha256: selectionPins.OriginalDeclarationSha256},
+			"original_two_b_public_plan":     {Sha256: selectionPins.OriginalPublicPlanSha256},
+		},
+		EvaluatorCommand: settings.EvaluatorCommand, EvaluatorCommandSha256: settings.EvaluatorCommandSha256, SelfCheckCommand: settings.SelfCheckCommand, SelfCheckCommandSha256: settings.SelfCheckCommandSha256,
+		OperatorCommand: settings.SimulatorCommand, ConfigLocalDirectory: settings.ConfigLocalDirectory, VaultLocalDirectory: settings.VaultLocalDirectory, ArtifactRoot: settings.ArtifactRoot, ArtifactBucket: settings.ArtifactBucket,
+		ActivationPrerequisites: defaultProspectiveProductionActivationPrerequisites()}
+	approval, err := model.CompetitionAutomationDigest(preimage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.AutomationPolicy.PolicyApprovalSha256 = approval
+	manifest := []byte("synthetic-ledger-bytes\n")
+	manifestDigest := sha256.Sum256(manifest)
+	expected := prospectiveProductionPhaseTwoIdentity{PolicyApprovalSha256: approval, PreparationSha256: strings.Repeat("3", 64), SourceLedgerSha256: hex.EncodeToString(manifestDigest[:]), SourceDecisionDigest: strings.Repeat("5", 64), BootId: preimage.CurrentBootId}
+	intent := model.CompetitionSourceActivation{Environment: settings.AutomationPolicy.Environment, CompetitionId: settings.CompetitionId, SeasonId: settings.AutomationPolicy.SeasonId,
+		Generation: 1, TargetEpoch: 1, SourceGeneration: 0, Kind: "baseline", State: "prepared", TargetRoundId: server.Id{1},
+		Manifest: manifest, ManifestCommit: strings.Repeat("6", 40), ManifestSha256: expected.SourceLedgerSha256, SourceDecisionDigest: expected.SourceDecisionDigest, PreparedAt: time.Unix(1600000000, 0).UTC(),
+		Commits: commits, SourceLockSha256: lock, EvaluatorImageDigest: settings.EvaluatorImageDigest, HostQualificationSha256: settings.EvaluationPolicy.HostQualificationSha256,
+		Threshold: settings.EvaluationPolicy.TakeoverMargin, OpensAt: time.Date(2026, 10, 28, 0, 0, 0, 0, time.UTC)}
+	intent.IntentSha256, err = competitionPreparationIntentDigest(intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host.Checks["qualification_match"] = true
+	host.ServicesInJobCgroup, host.DefaultDenyNetwork, host.TemplateDatabase, host.RedisReset, host.ImmutableReports, host.NoProductionSecrets = true, true, true, true, true, true
+	host.CleanupVerified, host.ResourceLimitsVerified, host.ResourceBombCleanupVerified, host.RebaselinePassed = true, true, true, true
+	host.RebaselineRoundId = &intent.TargetRoundId
+	facts := prospectiveProductionPhaseTwoFacts{Settings: settings, PreparationSha256: expected.PreparationSha256, SourceLedgerSha256: expected.SourceLedgerSha256, SourceDecisionDigest: expected.SourceDecisionDigest,
+		CurrentBootId: expected.BootId, Intent: intent, Host: host, EmpiricalGatesReviewed: true,
+		Qualification: CompetitionHostQualificationResult{Profile: competitionHostQualificationProfile, ProfileSha256: strings.Repeat("7", 64), IntentSha256: intent.IntentSha256, TargetRoundId: intent.TargetRoundId.String(), ArtifactManifestKey: "synthetic/profile", ArtifactVersionId: "synthetic-version", ArtifactSha256: strings.Repeat("8", 64)}}
+	for _, role := range []string{"api", "worker"} {
+		facts.Receipts = append(facts.Receipts, model.CompetitionSourceReadiness{Environment: intent.Environment, CompetitionId: intent.CompetitionId, SeasonId: intent.SeasonId, Generation: intent.Generation, TargetRoundId: intent.TargetRoundId,
+			Role: role, ActorId: "synthetic-" + role, Ready: true, ManifestCommit: intent.ManifestCommit, ManifestSha256: intent.ManifestSha256, SourceLockSha256: intent.SourceLockSha256,
+			RuntimeImageDigest: "sha256:" + strings.Repeat("9", 64), QualificationSha256: intent.HostQualificationSha256})
+	}
+	return expected, preimage, facts
+}
+
+// This is the original-cycle regression: no positive host or target exists yet.
+func TestProductionPolicyPhaseOneDoesNotRequirePositiveTargetEvidence(t *testing.T) {
+	disabled, measured, host := prospectiveProductionPhaseFixture()
+	before := disabled
+	target, err := prospectiveProductionNormativeTarget(&disabled, host, measured)
+	if err != nil || target == nil || !target.Enabled || !target.AutomationPolicy.Enabled {
+		t.Fatalf("negative physical facts could not define normative preparation policy: %v", err)
+	}
+	if !reflect.DeepEqual(disabled, before) || host.Eligible(target) || sourceWorkerHostReady(host, target, &model.CompetitionSourceActivation{TargetRoundId: server.Id{1}}) || sourcePreparationReceiptsMatch(&model.CompetitionSourceActivation{TargetRoundId: server.Id{1}}, nil) == nil {
+		t.Fatal("phase-one generation changed input or granted positive host/target/quorum authority")
+	}
+}
+
+// All measured dimensions remain exact despite accepting metadata-only labels.
+func TestProductionPolicyPhaseOneRejectsMeasurementChanges(t *testing.T) {
+	for _, entry := range []struct {
+		name string
+		edit func(*EvaluationPolicy)
+	}{{"scale", func(p *EvaluationPolicy) { p.ProviderCount++ }}, {"clients", func(p *EvaluationPolicy) { p.ClientPoolSize++ }}, {"margin", func(p *EvaluationPolicy) { p.TakeoverMargin += .01 }}, {"replicates", func(p *EvaluationPolicy) { p.Replicates = 1 }}, {"timeout", func(p *EvaluationPolicy) { p.ScoreTimeoutSeconds++ }}} {
+		disabled, measured, host := prospectiveProductionPhaseFixture()
+		entry.edit(&disabled.EvaluationPolicy)
+		if _, err := prospectiveProductionNormativeTarget(&disabled, host, measured); err == nil {
+			t.Errorf("%s: changed measured policy accepted", entry.name)
+		}
+	}
+}
+
+// Missing static controls and invented round readiness cannot enter phase one.
+func TestProductionPolicyPhaseOneRejectsRelabeledStaticFacts(t *testing.T) {
+	for _, entry := range []struct {
+		name string
+		edit func(*HostSelfCheck)
+	}{{"round-ready", func(h *HostSelfCheck) { h.RebaselinePassed = true }}, {"round-id", func(h *HostSelfCheck) { id := server.Id{2}; h.RebaselineRoundId = &id }}, {"matched-claim", func(h *HostSelfCheck) { h.Checks["qualification_match"] = true }}, {"image", func(h *HostSelfCheck) { h.ImageDigest = "sha256:" + strings.Repeat("e", 64) }}, {"facts-hash", func(h *HostSelfCheck) { h.QualificationSha256 = strings.Repeat("f", 64) }}, {"physical-control", func(h *HostSelfCheck) { h.ManagementMemoryReserved = false }}} {
+		disabled, measured, host := prospectiveProductionPhaseFixture()
+		entry.edit(&host)
+		if _, err := prospectiveProductionNormativeTarget(&disabled, host, measured); err == nil {
+			t.Errorf("%s: unproved static facts accepted", entry.name)
+		}
+	}
+}
+
+// The early-deployable Mode B is honestly true/true, not a mislabeled disabled
+// file, and changes no policy bytes besides its two explicit interface flags.
+func TestProductionPolicyPhaseOneSeparatesPreparationEnabledVariant(t *testing.T) {
+	original := []byte("# PRIVATE FILE PREPARATION ONLY. Both flags deliberately remain false.\nenabled: false\nautomation_policy:\n  enabled: false\n  source_generation: 0\n")
+	prepared, err := prospectiveProductionPreparationVariant(original)
+	if err != nil || !bytes.Contains(prepared, []byte("\nenabled: true\n")) || !bytes.Contains(prepared, []byte("\n  enabled: true\n")) {
+		t.Fatal("preparation-enabled variant absent", err)
+	}
+	if bytes.Contains(prepared, []byte("Both flags deliberately remain false")) || !bytes.Contains(prepared, []byte("# MODE B: CONTROL-PREPARATION ENABLED")) {
+		t.Fatal("Mode B retained a false disabled-state label")
+	}
+	restored := bytes.Replace(prepared, []byte("\nenabled: true\n"), []byte("\nenabled: false\n"), 1)
+	restored = bytes.Replace(restored, []byte("\n  enabled: true\n"), []byte("\n  enabled: false\n"), 1)
+	restored = bytes.Replace(restored, []byte("# MODE B: CONTROL-PREPARATION ENABLED; this file creates no active pointer, open round, worker ACK or ordinary competition worker."), []byte("# PRIVATE FILE PREPARATION ONLY. Both flags deliberately remain false."), 1)
+	if !bytes.Equal(original, restored) {
+		t.Fatal("Mode B changed more than the two explicit preparation flags")
+	}
+	if _, err := prospectiveProductionPreparationVariant(prepared); err == nil {
+		t.Fatal("already enabled bytes were reinterpreted as a disabled source")
+	}
+}
+
+// A preparation-only controller must be allowed to obtain the genuine R1 and
+// two-role facts; activation and ordinary evaluation remain forbidden until review.
+func TestProductionPolicyPhaseOneDeclaresNarrowPreparationControl(t *testing.T) {
+	prerequisites := defaultProspectiveProductionActivationPrerequisites()
+	if !prerequisites.NoActivationOrOrdinaryCompetitionWorkerBeforePhaseTwo || !prerequisites.PreparationOnlyControlPermitted ||
+		!prerequisites.RootPhaseTwoReviewRequired || !prerequisites.IndependentApiWorkerRequired || !prerequisites.ExactIntentTargetR1Required {
+		t.Fatal("phase-one declaration lost its preparation boundary or positive-proof requirements")
+	}
+	content, err := json.Marshal(prerequisites)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(content, []byte("no_supervisor_or_ordinary_worker_before_phase_two")) ||
+		!bytes.Contains(content, []byte(`"no_activation_or_ordinary_competition_worker_before_phase_two":true`)) ||
+		!bytes.Contains(content, []byte(`"preparation_only_single_reconciliation_control_permitted":true`)) {
+		t.Fatal("normative preimage reintroduced the supervisor/R1 preparation cycle")
+	}
+}
+
+// Full positive exact-intent evidence can be verified without an activation write.
+func TestProductionPolicyPhaseTwoVerifiesWithoutActivating(t *testing.T) {
+	expected, preimage, facts := prospectiveProductionPhaseTwoFixture(t)
+	before := facts.Intent
+	if err := validateProspectiveProductionPhaseTwo(expected, preimage, facts); err != nil {
+		t.Fatal("synthetic exact phase-two context refused", err)
+	}
+	if !reflect.DeepEqual(before, facts.Intent) || facts.Intent.ActivatedAt != nil || facts.Intent.State != "prepared" {
+		t.Fatal("pure verification mutated or activated the intent")
+	}
+}
+
+// The later runtime cannot silently change a frozen definition, file or boot.
+func TestProductionPolicyPhaseTwoRejectsPolicyConfigAndBootDrift(t *testing.T) {
+	for _, entry := range []struct {
+		name string
+		edit func(*prospectiveProductionPhaseTwoFacts)
+	}{{"config", func(f *prospectiveProductionPhaseTwoFacts) { f.PreparationSha256 = strings.Repeat("b", 64) }}, {"ledger", func(f *prospectiveProductionPhaseTwoFacts) { f.SourceLedgerSha256 = strings.Repeat("c", 64) }}, {"source-choice", func(f *prospectiveProductionPhaseTwoFacts) { f.SourceDecisionDigest = strings.Repeat("d", 64) }}, {"boot", func(f *prospectiveProductionPhaseTwoFacts) { f.CurrentBootId = "different-synthetic-boot" }}, {"approval", func(f *prospectiveProductionPhaseTwoFacts) {
+		f.Settings.AutomationPolicy.PolicyApprovalSha256 = strings.Repeat("e", 64)
+	}}, {"policy", func(f *prospectiveProductionPhaseTwoFacts) { f.Settings.EvaluationPolicy.ProviderCount++ }}, {"command", func(f *prospectiveProductionPhaseTwoFacts) {
+		f.Settings.EvaluatorCommand = "/different/synthetic/evaluator"
+	}}, {"pending-gates", func(f *prospectiveProductionPhaseTwoFacts) { f.EmpiricalGatesReviewed = false }}} {
+		expected, preimage, facts := prospectiveProductionPhaseTwoFixture(t)
+		entry.edit(&facts)
+		if err := validateProspectiveProductionPhaseTwo(expected, preimage, facts); err == nil {
+			t.Errorf("%s: changed/pending phase-two context accepted", entry.name)
+		}
+	}
+}
+
+// The negative report or a foreign/malformed target can never become R1 proof.
+func TestProductionPolicyPhaseTwoRequiresFullSameFactsTargetR1(t *testing.T) {
+	for _, entry := range []struct {
+		name string
+		edit func(*prospectiveProductionPhaseTwoFacts)
+	}{{"no-R1", func(f *prospectiveProductionPhaseTwoFacts) { f.Host.RebaselinePassed = false }}, {"foreign-target", func(f *prospectiveProductionPhaseTwoFacts) { id := server.Id{3}; f.Host.RebaselineRoundId = &id }}, {"containment", func(f *prospectiveProductionPhaseTwoFacts) { f.Host.NoProductionSecrets = false }}, {"new-facts", func(f *prospectiveProductionPhaseTwoFacts) { f.Host.QualificationSha256 = strings.Repeat("f", 64) }}, {"foreign-profile-intent", func(f *prospectiveProductionPhaseTwoFacts) { f.Qualification.IntentSha256 = strings.Repeat("a", 64) }}, {"foreign-profile-target", func(f *prospectiveProductionPhaseTwoFacts) { f.Qualification.TargetRoundId = (server.Id{4}).String() }}, {"unretained-profile", func(f *prospectiveProductionPhaseTwoFacts) { f.Qualification.ArtifactVersionId = "" }}, {"already-active", func(f *prospectiveProductionPhaseTwoFacts) {
+		now := time.Unix(123, 0).UTC()
+		f.Intent.ActivatedAt = &now
+	}}} {
+		expected, preimage, facts := prospectiveProductionPhaseTwoFixture(t)
+		entry.edit(&facts)
+		if err := validateProspectiveProductionPhaseTwo(expected, preimage, facts); err == nil {
+			t.Errorf("%s: missing/foreign positive proof accepted", entry.name)
+		}
+	}
+}
+
+// Independent native role identities remain mandatory, not caller-supplied
+// placeholders, duplicate roles, one API alone or a different generation.
+func TestProductionPolicyPhaseTwoRequiresBothMatchingNativeRoles(t *testing.T) {
+	for _, entry := range []struct {
+		name string
+		edit func(*prospectiveProductionPhaseTwoFacts)
+	}{{"one-role", func(f *prospectiveProductionPhaseTwoFacts) { f.Receipts = f.Receipts[:1] }}, {"duplicate-role", func(f *prospectiveProductionPhaseTwoFacts) { f.Receipts[1].Role = "api" }}, {"not-ready", func(f *prospectiveProductionPhaseTwoFacts) { f.Receipts[1].Ready = false }}, {"other-generation", func(f *prospectiveProductionPhaseTwoFacts) { f.Receipts[1].Generation++ }}, {"other-target", func(f *prospectiveProductionPhaseTwoFacts) { f.Receipts[1].TargetRoundId = server.Id{5} }}, {"other-manifest", func(f *prospectiveProductionPhaseTwoFacts) { f.Receipts[1].ManifestSha256 = strings.Repeat("a", 64) }}, {"no-runtime-identity", func(f *prospectiveProductionPhaseTwoFacts) { f.Receipts[1].RuntimeImageDigest = "" }}} {
+		expected, preimage, facts := prospectiveProductionPhaseTwoFixture(t)
+		entry.edit(&facts)
+		if err := validateProspectiveProductionPhaseTwo(expected, preimage, facts); err == nil {
+			t.Errorf("%s: missing/mismatched native role receipt accepted", entry.name)
+		}
+	}
+}
+
+// Public synthetic commitments contain no private seed bytes and use fixed IDs.
+func prospectiveProductionCommittedPlanFixture(t *testing.T) ([]byte, prospectiveProductionSelectionPins) {
+	t.Helper()
+	pins := prospectiveProductionSelectionPins{OwnerAmendmentSha256: strings.Repeat("a", 64), OriginalDeclarationSha256: strings.Repeat("b", 64), OriginalPrivatePlanSha256: strings.Repeat("c", 64)}
+	rounds := []prospectiveProductionCommittedRound{
+		{Position: 1, RoundId: server.Id{11}, SeedCommitment: strings.Repeat("d", 64), ProvidersSha256: strings.Repeat("e", 64), ReferenceOrder: []string{"better", "worse", "no-op"}},
+		{Position: 2, RoundId: server.Id{12}, SeedCommitment: strings.Repeat("f", 64), ProvidersSha256: strings.Repeat("1", 64), ReferenceOrder: []string{"worse", "no-op", "better"}},
+	}
+	for index := range rounds {
+		for jobIndex, role := range rounds[index].ReferenceOrder {
+			rounds[index].Jobs = append(rounds[index].Jobs, prospectiveProductionCommittedJob{Position: jobIndex + 1, Role: role, JobId: server.Id{byte(21 + index*3 + jobIndex)}, RequestSha256: strings.Repeat("2", 64)})
+		}
+	}
+	plan := map[string]any{"schema": 1, "kind": "sim-latency-held-out-public-plan", "two_b_addendum_sha256": pins.OriginalDeclarationSha256,
+		"private_plan_sha256": pins.OriginalPrivatePlanSha256, "required_correctly_ordered_seeds": 2, "rounds": rounds}
+	data, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(data)
+	pins.OriginalPublicPlanSha256 = hex.EncodeToString(digest[:])
+	return data, pins
+}
+
+// The amended normative requirement selects the existing first fixed position,
+// preserves both complete public records, and never claims equal confidence.
+func TestProductionPolicyPhaseOneSelectsOnlyFirstCommittedSeed(t *testing.T) {
+	publicBytes, pins := prospectiveProductionCommittedPlanFixture(t)
+	before := bytes.Clone(publicBytes)
+	selection, err := prospectiveProductionSelectFirstCommittedSeed(publicBytes, pins)
+	if err != nil {
+		t.Fatal("exact first-position derivation refused", err)
+	}
+	if !bytes.Equal(before, publicBytes) || selection.SelectedPosition != 1 || selection.SelectedRound.RoundId != (server.Id{11}) ||
+		selection.PreservedUnstartedRound.RoundId != (server.Id{12}) || len(selection.SelectedRound.Jobs) != 3 || len(selection.PreservedUnstartedRound.Jobs) != 3 ||
+		!selection.SecondMustRemainUnstarted || !selection.NoNewEntropyOrResampling || !selection.ReducedIndependentSeedConfidence ||
+		selection.OriginalPublicPlanSha256 != pins.OriginalPublicPlanSha256 || selection.OriginalPrivatePlanSha256 != pins.OriginalPrivatePlanSha256 ||
+		defaultProspectiveProductionActivationPrerequisites().IndependentOrderedBSeeds != 1 {
+		t.Fatal("first-committed selection changed source bytes, widened execution or retained the old two-seed policy")
+	}
+}
+
+// A new owner label cannot detach the selection from its exact committed lineage.
+func TestProductionPolicyPhaseOneRejectsChangedCommittedPlanPins(t *testing.T) {
+	for _, entry := range []struct {
+		name string
+		edit func(*prospectiveProductionSelectionPins, *[]byte)
+	}{
+		{"public-bytes", func(_ *prospectiveProductionSelectionPins, data *[]byte) { *data = append(*data, ' ') }},
+		{"public-digest", func(p *prospectiveProductionSelectionPins, _ *[]byte) {
+			p.OriginalPublicPlanSha256 = strings.Repeat("3", 64)
+		}},
+		{"private-plan", func(p *prospectiveProductionSelectionPins, _ *[]byte) {
+			p.OriginalPrivatePlanSha256 = strings.Repeat("4", 64)
+		}},
+		{"declaration", func(p *prospectiveProductionSelectionPins, _ *[]byte) {
+			p.OriginalDeclarationSha256 = strings.Repeat("5", 64)
+		}},
+		{"missing-owner-amendment", func(p *prospectiveProductionSelectionPins, _ *[]byte) { p.OwnerAmendmentSha256 = "" }},
+	} {
+		data, pins := prospectiveProductionCommittedPlanFixture(t)
+		entry.edit(&pins, &data)
+		if _, err := prospectiveProductionSelectFirstCommittedSeed(data, pins); err == nil {
+			t.Errorf("%s: detached or changed plan lineage accepted", entry.name)
+		}
+	}
+}
+
+// Even authenticated data must retain the original ordered two-round census.
+func TestProductionPolicyPhaseOneRejectsMalformedCommittedCensus(t *testing.T) {
+	for _, entry := range []struct {
+		name string
+		edit func(map[string]any)
+	}{
+		{"wrong-kind", func(p map[string]any) { p["kind"] = "synthetic-private-plan" }},
+		{"wrong-original-count", func(p map[string]any) { p["required_correctly_ordered_seeds"] = 1 }},
+		{"missing-preserved-round", func(p map[string]any) { p["rounds"] = p["rounds"].([]any)[:1] }},
+		{"reversed-positions", func(p map[string]any) {
+			rounds := p["rounds"].([]any)
+			rounds[0], rounds[1] = rounds[1], rounds[0]
+		}},
+		{"missing-request-commitment", func(p map[string]any) {
+			p["rounds"].([]any)[0].(map[string]any)["jobs"].([]any)[0].(map[string]any)["precommitted_request_sha256"] = ""
+		}},
+	} {
+		data, pins := prospectiveProductionCommittedPlanFixture(t)
+		var plan map[string]any
+		if err := json.Unmarshal(data, &plan); err != nil {
+			t.Fatal(err)
+		}
+		entry.edit(plan)
+		data, err := json.Marshal(plan)
+		if err != nil {
+			t.Fatal(err)
+		}
+		digest := sha256.Sum256(data)
+		pins.OriginalPublicPlanSha256 = hex.EncodeToString(digest[:])
+		if _, err := prospectiveProductionSelectFirstCommittedSeed(data, pins); err == nil {
+			t.Errorf("%s: malformed committed round census accepted", entry.name)
+		}
+	}
+}
+
+// A bare count change cannot authorize another position, a replacement draw,
+// starting the preserved round, missing outcomes, or undisclosed confidence loss.
+func TestProductionPolicyPhaseOneRequiresExactFirstSelectionBoundary(t *testing.T) {
+	for _, entry := range []struct {
+		name string
+		edit func(*prospectiveProductionFirstSeedRequirement)
+	}{
+		{"another-position", func(s *prospectiveProductionFirstSeedRequirement) { s.SelectedPosition = 2 }},
+		{"two-measured-seeds", func(s *prospectiveProductionFirstSeedRequirement) { s.OriginalCommittedSeedCount = 1 }},
+		{"start-second", func(s *prospectiveProductionFirstSeedRequirement) { s.SecondMustRemainUnstarted = false }},
+		{"replacement-draw", func(s *prospectiveProductionFirstSeedRequirement) { s.NoNewEntropyOrResampling = false }},
+		{"omit-outcome", func(s *prospectiveProductionFirstSeedRequirement) { s.AllSelectedOutcomesRequired = false }},
+		{"hide-confidence-reduction", func(s *prospectiveProductionFirstSeedRequirement) { s.ReducedIndependentSeedConfidence = false }},
+		{"repeat-job", func(s *prospectiveProductionFirstSeedRequirement) {
+			s.SelectedRound.Jobs[1].JobId = s.SelectedRound.Jobs[0].JobId
+		}},
+		{"cross-round-job", func(s *prospectiveProductionFirstSeedRequirement) {
+			s.PreservedUnstartedRound.Jobs[0].JobId = s.SelectedRound.Jobs[0].JobId
+		}},
+		{"role-order", func(s *prospectiveProductionFirstSeedRequirement) { s.SelectedRound.ReferenceOrder[0] = "no-op" }},
+	} {
+		data, pins := prospectiveProductionCommittedPlanFixture(t)
+		selection, err := prospectiveProductionSelectFirstCommittedSeed(data, pins)
+		if err != nil {
+			t.Fatal(err)
+		}
+		entry.edit(&selection)
+		if err := validateProspectiveProductionFirstSeedRequirement(selection); err == nil {
+			t.Errorf("%s: broader first-seed authority accepted", entry.name)
+		}
+	}
+}
+
+// Later activation verification rejects stale two-seed approvals, mismatched
+// amendment evidence and unknown selection authority without mutating an intent.
+func TestProductionPolicyPhaseTwoRejectsOldCountOrDetachedSelection(t *testing.T) {
+	for _, entry := range []struct {
+		name string
+		edit func(*prospectiveProductionApproval)
+	}{
+		{"old-two-seed-policy", func(p *prospectiveProductionApproval) { p.ActivationPrerequisites.IndependentOrderedBSeeds = 2 }},
+		{"owner-pin", func(p *prospectiveProductionApproval) {
+			p.Evidence["first_committed_seed_amendment"] = prospectiveProductionFile{Sha256: strings.Repeat("6", 64)}
+		}},
+		{"public-plan-pin", func(p *prospectiveProductionApproval) {
+			p.Evidence["original_two_b_public_plan"] = prospectiveProductionFile{Sha256: strings.Repeat("7", 64)}
+		}},
+		{"another-selected-position", func(p *prospectiveProductionApproval) { p.FirstCommittedSeedRequirement.SelectedPosition = 2 }},
+		{"no-selection", func(p *prospectiveProductionApproval) {
+			p.FirstCommittedSeedRequirement = prospectiveProductionFirstSeedRequirement{}
+		}},
+	} {
+		expected, preimage, facts := prospectiveProductionPhaseTwoFixture(t)
+		before := facts.Intent
+		entry.edit(&preimage)
+		if err := validateProspectiveProductionPhaseTwo(expected, preimage, facts); err == nil {
+			t.Errorf("%s: stale or detached activation preimage accepted", entry.name)
+		}
+		if !reflect.DeepEqual(before, facts.Intent) || facts.Intent.ActivatedAt != nil {
+			t.Fatalf("%s: rejected verification mutated or activated an intent", entry.name)
+		}
+	}
+}

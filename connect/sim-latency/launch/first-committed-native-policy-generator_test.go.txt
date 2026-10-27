@@ -1,0 +1,336 @@
+// This private operator entry point is copied into the qualified controller package only after separate build/run authorization. It uses native typed digests and policySnapshot; it does not grant approval, reserve identities or contact a service.
+package controller
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
+	"gopkg.in/yaml.v3"
+)
+
+// Every input is an exact root-reviewed file, never an asserted approval boolean.
+type prospectiveProductionFile struct {
+	Path   string `json:"path"`
+	Sha256 string `json:"sha256"`
+}
+
+// Only already known identities enter phase one. Pending empirical/target-bound references are retained as explicit phase-two requirements, never read as if they already passed.
+type prospectiveProductionInput struct {
+	DisabledConfig              prospectiveProductionFile `json:"disabled_config"`
+	LedgerTemplate              prospectiveProductionFile `json:"ledger_template"`
+	FrozenCheckpoint            prospectiveProductionFile `json:"frozen_checkpoint"`
+	CalibrationPolicy           prospectiveProductionFile `json:"calibration_policy"`
+	AcceptedA                   prospectiveProductionFile `json:"accepted_a"`
+	MarginFreeze                prospectiveProductionFile `json:"margin_freeze"`
+	CalibrationAmendment        prospectiveProductionFile `json:"calibration_amendment"`
+	FirstCommittedSeedAmendment prospectiveProductionFile `json:"first_committed_seed_amendment"`
+	OriginalTwoBDeclaration     prospectiveProductionFile `json:"original_two_b_declaration"`
+	OriginalTwoBPublicPlan      prospectiveProductionFile `json:"original_two_b_public_plan"`
+	AcceptedFreshBridge         prospectiveProductionFile `json:"accepted_fresh_bridge"`
+	AcceptedSelectedFirstB      prospectiveProductionFile `json:"accepted_selected_first_b"`
+	ProviderQualification       prospectiveProductionFile `json:"provider_qualification"`
+	StaticHostFacts             prospectiveProductionFile `json:"static_host_facts"`
+	StaticHostFactsProof        prospectiveProductionFile `json:"static_host_facts_proof"`
+	ProductionHostReport        prospectiveProductionFile `json:"production_host_report"`
+	MetadataTransferApproval    prospectiveProductionFile `json:"metadata_transfer_approval"`
+	CurrentBootId               string                    `json:"current_boot_id"`
+}
+
+// Each pure generation owns its parsing and retained-input budgets.
+type prospectiveProductionGeneratorSettings struct {
+	MaximumInputBytes    int64
+	MaximumEvidenceBytes int64
+}
+
+// Receipt files are small; whole measurement archives and credentials never enter their preimages.
+func defaultProspectiveProductionGeneratorSettings() prospectiveProductionGeneratorSettings {
+	return prospectiveProductionGeneratorSettings{MaximumInputBytes: 64 * 1024, MaximumEvidenceBytes: 8 * 1024 * 1024}
+}
+
+// Exact native policy values plus separately reviewed evidence form an acyclic external approval preimage.
+type prospectiveProductionApproval struct {
+	Schema                         int                                          `json:"schema"`
+	Kind                           string                                       `json:"kind"`
+	IntendedPolicy                 InfoResult                                   `json:"intended_policy"`
+	EvaluatorCommand               string                                       `json:"evaluator_command"`
+	EvaluatorCommandSha256         string                                       `json:"evaluator_command_sha256"`
+	SelfCheckCommand               string                                       `json:"self_check_command"`
+	SelfCheckCommandSha256         string                                       `json:"self_check_command_sha256"`
+	OperatorCommand                string                                       `json:"operator_command"`
+	OperatorCommandSha256          string                                       `json:"operator_command_sha256"`
+	ConfigLocalDirectory           string                                       `json:"config_local_directory"`
+	VaultLocalDirectory            string                                       `json:"vault_local_directory"`
+	ArtifactRoot                   string                                       `json:"artifact_root"`
+	ArtifactBucket                 string                                       `json:"artifact_bucket"`
+	WorkerLeaseSeconds             int                                          `json:"worker_lease_seconds"`
+	WorkerHeartbeatSeconds         int                                          `json:"worker_heartbeat_seconds"`
+	HostHeartbeatMaxAgeSeconds     int                                          `json:"host_heartbeat_max_age_seconds"`
+	MaxInfrastructureAttempts      int                                          `json:"max_infrastructure_attempts"`
+	RawSourceLockSha256            string                                       `json:"raw_source_lock_sha256"`
+	CandidatePathBase              string                                       `json:"candidate_path_base"`
+	SeasonEndsAt                   time.Time                                    `json:"season_ends_at"`
+	RetainUntil                    time.Time                                    `json:"retain_until"`
+	InitialOpensAt                 string                                       `json:"initial_opens_at"`
+	CurrentBootId                  string                                       `json:"current_boot_id"`
+	Commits                        map[string]string                            `json:"commits"`
+	Evidence                       map[string]prospectiveProductionFile         `json:"evidence"`
+	VersionLabelsOnly              bool                                         `json:"version_labels_only_no_new_economic_terms"`
+	SixFullWindowsAndAcceptedDrain bool                                         `json:"six_full_windows_and_unbounded_accepted_drain"`
+	ActivationPrerequisites        prospectiveProductionActivationPrerequisites `json:"activation_prerequisites_not_yet_satisfied"`
+	FirstCommittedSeedRequirement  prospectiveProductionFirstSeedRequirement    `json:"first_committed_seed_requirement_not_yet_satisfied"`
+}
+
+// A first-baseline decision precedes the manifest commit and future reserved round; it never invents their identities.
+type prospectiveProductionSourceChoice struct {
+	Schema                        int               `json:"schema"`
+	Kind                          string            `json:"kind"`
+	Environment                   string            `json:"environment"`
+	CompetitionId                 string            `json:"competition_id"`
+	SeasonId                      string            `json:"season_id"`
+	PolicyApprovalSha256          string            `json:"policy_approval_sha256"`
+	SourceGeneration              int               `json:"source_generation"`
+	TargetEpoch                   int               `json:"target_epoch"`
+	SourceLockSha256              string            `json:"source_lock_sha256"`
+	Commits                       map[string]string `json:"commits"`
+	EvaluatorImageDigest          string            `json:"evaluator_image_digest"`
+	SignificantImprovementPercent float64           `json:"significant_improvement_percent"`
+	ThresholdEvidenceSha256       string            `json:"threshold_evidence_sha256"`
+	InitialOpensAt                string            `json:"initial_opens_at"`
+}
+
+// Bounded regular-file authentication refuses omitted, changed, symlinked and oversized evidence without emitting file contents.
+func readProspectiveProductionFile(reference prospectiveProductionFile, maximum int64) ([]byte, error) {
+	if !filepath.IsAbs(reference.Path) || filepath.Clean(reference.Path) != reference.Path || !sha256Pattern.MatchString(reference.Sha256) {
+		return nil, errors.New("missing exact evidence reference")
+	}
+	info, err := os.Lstat(reference.Path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > maximum {
+		return nil, errors.New("evidence is absent, unsafe or too large")
+	}
+	file, err := os.Open(reference.Path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(info, opened) {
+		return nil, errors.New("evidence changed while opening")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maximum+1))
+	if err != nil || int64(len(data)) > maximum {
+		return nil, errors.New("evidence exceeded its read budget")
+	}
+	digest := sha256.Sum256(data)
+	if hex.EncodeToString(digest[:]) != reference.Sha256 {
+		return nil, errors.New("evidence digest changed")
+	}
+	return data, nil
+}
+
+// This is an opt-in artifact-generation command, not a unit test or an approval/qualification result.
+func TestOperatorGenerateProspectiveProductionPolicy(t *testing.T) {
+	if os.Getenv("AUTHORIZE_PRODUCTION_POLICY_FILE_GENERATION") != "native-disabled-only" {
+		t.Skip("separately authorized private operator command")
+	}
+	if os.Geteuid() != 0 || server.RequireEnv() != "main" {
+		t.Fatal("root main file-generation context required")
+	}
+	settings := defaultProspectiveProductionGeneratorSettings()
+	inputBytes, err := readRegularFile(os.Getenv("PRODUCTION_POLICY_GENERATION_INPUT"), settings.MaximumInputBytes)
+	if err != nil {
+		t.Fatal("bounded generation input unavailable")
+	}
+	var input prospectiveProductionInput
+	decoder := json.NewDecoder(bytes.NewReader(inputBytes))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&input) != nil || decoder.Decode(new(any)) != io.EOF {
+		t.Fatal("strict generation input required")
+	}
+	if input.DisabledConfig.Sha256 != "d3c639a4838fc3e6b5b607115d605b5d19194e9e3a7387f21d04abf0a4a98e76" || input.LedgerTemplate.Sha256 != "3c35ebe376304b31b855970f3381952953a0deb85cc17152250d64ad534c28ad" ||
+		input.FrozenCheckpoint.Sha256 != "3070f13e3c174e0bacb76ece2ecfb451388538dc8fbd5f2612c2d0d173a47fe6" || input.CalibrationPolicy.Sha256 != "7588cc18b1ea403dd6a6ac34e8af9b225a5c527945947afd4ecdd7e7930a03e5" ||
+		input.AcceptedA.Sha256 != "e78c1a965d485d0a183f95f72797aa75c5c0ba22e52acbcf28749cfe6ecb3adb" || input.MarginFreeze.Sha256 != "d264f48d38a1ab6bea44342cdbcf5e13cebf6e4c2811506e8086995e4600b646" ||
+		input.CalibrationAmendment.Sha256 != "b36e51b6a9253acdcc6ab912d28e00849d683c36c8f951023c770b7f3f928684" ||
+		input.FirstCommittedSeedAmendment.Sha256 != "a2bb5e018dc88cf2dc01dea65422d94fbba68b49accdc5af072479272b8abfe9" ||
+		input.OriginalTwoBDeclaration.Sha256 != "69202c5938c226faac9eeb6f90037869e1a391587e010d2a9787101efdc60c44" ||
+		input.OriginalTwoBPublicPlan.Sha256 != "b3150c5098ea9d4cb155be76c5a423967ecca479813ed75061db5b5bf50bcc43" ||
+		input.StaticHostFacts.Sha256 != "128ef88f9152151552468524ef123403852ea087837a899f2c3e5af14232f6fc" || input.StaticHostFactsProof.Sha256 != "5f0260e834a8c90bc62ef5856c05865337063b5f90060c1bea1c75dbe80bcd83" {
+		t.Fatal("predeclared input scope changed")
+	}
+	evidence := map[string]prospectiveProductionFile{
+		"frozen_checkpoint": input.FrozenCheckpoint, "calibration_policy": input.CalibrationPolicy,
+		"accepted_a": input.AcceptedA, "margin_freeze": input.MarginFreeze, "calibration_amendment": input.CalibrationAmendment,
+		"first_committed_seed_amendment": input.FirstCommittedSeedAmendment, "original_two_b_declaration": input.OriginalTwoBDeclaration, "original_two_b_public_plan": input.OriginalTwoBPublicPlan,
+		"static_host_facts": input.StaticHostFacts, "static_host_facts_proof": input.StaticHostFactsProof,
+	}
+	contents := map[string][]byte{}
+	for key, reference := range evidence {
+		content, err := readProspectiveProductionFile(reference, settings.MaximumEvidenceBytes)
+		if err != nil {
+			t.Fatalf("exact reviewed evidence unavailable: %s", key)
+		}
+		contents[key] = content
+	}
+	firstCommittedSeed, err := prospectiveProductionSelectFirstCommittedSeed(contents["original_two_b_public_plan"], prospectiveProductionSelectionPins{
+		OwnerAmendmentSha256: input.FirstCommittedSeedAmendment.Sha256, OriginalDeclarationSha256: input.OriginalTwoBDeclaration.Sha256,
+		OriginalPublicPlanSha256: input.OriginalTwoBPublicPlan.Sha256, OriginalPrivatePlanSha256: "0b8c65e3186d631782c6247d18e2369b9994851effced026037ed032401c6abb",
+	})
+	if err != nil {
+		t.Fatal("exact original first-position selection refused", err)
+	}
+	bootBytes, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	if err != nil || input.CurrentBootId == "" || strings.TrimSpace(string(bootBytes)) != input.CurrentBootId {
+		t.Fatal("current-boot evidence is stale")
+	}
+	configuration, err := readProspectiveProductionFile(input.DisabledConfig, settings.MaximumEvidenceBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledgerTemplate, err := readProspectiveProductionFile(input.LedgerTemplate, settings.MaximumEvidenceBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var target Settings
+	yamlDecoder := yaml.NewDecoder(bytes.NewReader(configuration))
+	yamlDecoder.KnownFields(true)
+	if yamlDecoder.Decode(&target) != nil || yamlDecoder.Decode(new(any)) != io.EOF || target.Enabled || target.AutomationPolicy.Enabled {
+		t.Fatal("strict disabled production configuration required")
+	}
+	var checkpoint struct {
+		SourceLockSha256 string `json:"source_lock_sha256"`
+		Repositories     map[string]struct {
+			Commit string `json:"commit"`
+		} `json:"repositories"`
+	}
+	if json.Unmarshal(contents["frozen_checkpoint"], &checkpoint) != nil {
+		t.Fatal("frozen checkpoint invalid")
+	}
+	commits := map[string]string{}
+	for name, repository := range checkpoint.Repositories {
+		commits[name] = repository.Commit
+	}
+	lockDigest, err := model.CompetitionSourceLockDigest(commits)
+	if err != nil || lockDigest != checkpoint.SourceLockSha256 || lockDigest != target.AutomationPolicy.SourceLockSha256 || commits["server"] != target.BaseSha {
+		t.Fatal("complete frozen source identity mismatch")
+	}
+	if lockDigest != "ec322ed2db023e15ea5dc3eea60a6ca5989661bba737c340fea3477d8d1300cf" || target.BaseSha != "a9e8e1a710b24c749e6499a0606938252c83e136" || target.EvaluatorImageDigest != "sha256:98c9061c4a43a25e7b581a5193ca6e7f48e49e7b7fc03b7c1b6190a029befee2" {
+		t.Fatal("frozen C2 application identity changed")
+	}
+	var calibrationPolicy EvaluationPolicy
+	if json.Unmarshal(contents["calibration_policy"], &calibrationPolicy) != nil {
+		t.Fatal("calibration policy invalid")
+	}
+	var staticHost HostSelfCheck
+	if json.Unmarshal(contents["static_host_facts"], &staticHost) != nil || staticHost.QualificationSha256 != "08ee3a5a4acf0f4b8fabf6279d4257bd9fdc3314ffb9f59e87f2981556cb300d" || staticHost.RebaselinePassed || staticHost.RebaselineRoundId != nil || staticHost.ImageDigest != target.EvaluatorImageDigest || staticHost.HardwareId != target.EvaluationPolicy.HardwareId || target.EvaluationPolicy.HostQualificationSha256 != staticHost.QualificationSha256 {
+		t.Fatal("actual static host facts changed or were relabeled as target readiness")
+	}
+	normative, err := prospectiveProductionNormativeTarget(&target, staticHost, calibrationPolicy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target = *normative
+	preimage := prospectiveProductionApproval{
+		Schema: 1, Kind: "production-20261028-policy-approval-preimage", IntendedPolicy: target.PublicInfo(),
+		EvaluatorCommand: target.EvaluatorCommand, EvaluatorCommandSha256: target.EvaluatorCommandSha256,
+		SelfCheckCommand: target.SelfCheckCommand, SelfCheckCommandSha256: target.SelfCheckCommandSha256,
+		OperatorCommand: target.SimulatorCommand, OperatorCommandSha256: "ad8465653a4b702a2aaa3da24a25a8fdc34c5271957e972cc1497d5bbcbfd007",
+		ConfigLocalDirectory: target.ConfigLocalDirectory, VaultLocalDirectory: target.VaultLocalDirectory, ArtifactRoot: target.ArtifactRoot, ArtifactBucket: target.ArtifactBucket,
+		WorkerLeaseSeconds: target.WorkerLeaseSeconds, WorkerHeartbeatSeconds: target.WorkerHeartbeatSeconds, HostHeartbeatMaxAgeSeconds: target.HostHeartbeatMaxAgeSeconds, MaxInfrastructureAttempts: target.MaxInfrastructureAttempts,
+		RawSourceLockSha256: "239cea7fe6f77f989b75ba6efa677e8731640ba2fdd3690a35e6fe72103f3d11", CandidatePathBase: "mono_root_v1",
+		SeasonEndsAt: target.SeasonEndsAt, RetainUntil: target.RetainUntil, InitialOpensAt: "2026-10-28T00:00:00Z",
+		CurrentBootId: input.CurrentBootId, Commits: commits, Evidence: evidence, VersionLabelsOnly: true, SixFullWindowsAndAcceptedDrain: true,
+		ActivationPrerequisites: defaultProspectiveProductionActivationPrerequisites(), FirstCommittedSeedRequirement: firstCommittedSeed,
+	}
+	approvalDigest, err := model.CompetitionAutomationDigest(preimage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target.AutomationPolicy.PolicyApprovalSha256 = approvalDigest
+	// Use actual native secret configuration only for pure Settings.Validate;
+	// it is never included in policySnapshot or any emitted artifact.
+	resource, err := server.Vault.SimpleResource(ResourceName)
+	var secret secretsFile
+	if err != nil || resource.UnmarshalYamlE(&secret) != nil {
+		t.Fatal("native competition vault unavailable for pure validation")
+	}
+	target.SeedKey, err = base64.StdEncoding.DecodeString(strings.TrimSpace(secret.SeedKeyBase64))
+	if err != nil {
+		t.Fatal("native seed-key shape invalid")
+	}
+	defer clear(target.SeedKey)
+	target.Tokens = secret.Tokens
+	if err := target.Validate(); err != nil {
+		t.Fatalf("native intended-settings validation refused: %v", err)
+	}
+	policy, err := policySnapshot(&target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	choice := prospectiveProductionSourceChoice{Schema: 1, Kind: "initial_reviewed_source", Environment: target.AutomationPolicy.Environment, CompetitionId: target.CompetitionId, SeasonId: target.AutomationPolicy.SeasonId,
+		PolicyApprovalSha256: approvalDigest, SourceGeneration: 0, TargetEpoch: 1, SourceLockSha256: lockDigest, Commits: commits, EvaluatorImageDigest: target.EvaluatorImageDigest,
+		SignificantImprovementPercent: 26.9, ThresholdEvidenceSha256: input.AcceptedA.Sha256, InitialOpensAt: "2026-10-28T00:00:00Z"}
+	choiceDigest, err := model.CompetitionAutomationDigest(choice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replace := func(content []byte, marker string, value string) []byte {
+		if bytes.Count(content, []byte(marker)) != 1 {
+			t.Fatalf("exact one marker required: %s", marker)
+		}
+		return bytes.Replace(content, []byte(marker), []byte(value), 1)
+	}
+	configuration = replace(configuration, "${GENERATED_PRODUCTION_POLICY_APPROVAL_SHA256}", approvalDigest)
+	preparationConfiguration, err := prospectiveProductionPreparationVariant(configuration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger := replace(ledgerTemplate, "${GENERATED_BASELINE_SOURCE_DECISION_DIGEST}", choiceDigest)
+	output := os.Getenv("PRODUCTION_POLICY_GENERATION_OUTPUT")
+	if !filepath.IsAbs(output) || filepath.Clean(output) != output {
+		t.Fatal("canonical new output directory required")
+	}
+	if err := os.Mkdir(output, 0700); err != nil {
+		t.Fatal("output already exists or cannot be fenced")
+	}
+	write := func(name string, content []byte) {
+		file, err := os.OpenFile(filepath.Join(output, name), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0400)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, writeErr := file.Write(content)
+		if writeErr == nil {
+			writeErr = file.Sync()
+		}
+		closeErr := file.Close()
+		if writeErr != nil || closeErr != nil {
+			t.Fatal("output durability failed")
+		}
+	}
+	preimageBytes, _ := json.Marshal(preimage)
+	choiceBytes, _ := json.Marshal(choice)
+	write("production-policy-approval.canonical.json", preimageBytes)
+	write("production-policy-approval.sha256", []byte(approvalDigest+"\n"))
+	write("source-choice.canonical.json", choiceBytes)
+	write("source-choice.sha256", []byte(choiceDigest+"\n"))
+	write("round-policy.TARGET.canonical.json", policy)
+	write("competition-production.DISABLED.yml", configuration)
+	write("competition-production.PREPARATION-ENABLED.yml", preparationConfiguration)
+	write("sim-latency.yml", ledger)
+	state, _ := json.Marshal(map[string]any{"schema": 1, "kind": "production-policy-file-generation-only", "policy_approved": false, "root_approval_of_exact_preimage_sha256_required": true, "source_ledger_native_validation_pending": true,
+		"policy_approval_sha256": approvalDigest, "source_decision_digest": choiceDigest, "disabled_variant_flags": []bool{false, false}, "control_preparation_variant_flags": []bool{true, true},
+		"native_intended_settings_validate_passed": true, "actual_calibration_bridge_and_b_status": "pending_not_claimed_passed",
+		"required_independent_ordered_b_seeds": 1, "selected_precommitted_position": 1, "second_precommitted_position_must_remain_unstarted": true, "no_new_entropy_or_resampling": true, "genuine_provider_status": "pending_not_claimed_passed", "positive_host_and_exact_target_r1_status": "pending_not_claimed_ready",
+		"mode_b_is_competition_open": false, "main_configuration_installed": false, "supervisor_or_worker_started": false, "round_reserved": false, "hidden_seed_drawn": false, "source_activated": false, "runtime_acknowledgments_created": false, "network_requests": 0, "database_calls": 0, "external_programs_executed": 0})
+	write("generation-state.json", state)
+}

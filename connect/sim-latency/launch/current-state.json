@@ -495,7 +495,7 @@
     "round_baseline_preparation_budget_fix_in_progress": true,
     "submission_deadline_seconds_unchanged": 10800
   },
-  "status": "c2_bridge_terminal_metadata_precision_failure_nine_raw_baselines_retained_unscored_recovery_unresolved",
+  "status": "corrected_bridge_native_accepted_first_committed_operator_qualification_running_production_not_activated",
   "current_bridge_measurement": {
     "started_at": "2026-10-26T20:54:56Z",
     "original_deadline": "2026-10-26T23:54:56Z",
@@ -850,7 +850,7 @@
   },
   "authority_warning": "This is a preparation snapshot, not runtime/score authority. Verify the live process/session and current artifacts before acting; never restart because an observation times out.",
   "historical_sections_warning": "Older dated campaign/tool sections below retain their original observations and next actions. The accepted_three_a_reduction and prospective_c2_build above supersede old analysis-pending and margin-unselected statements; they do not qualify C2 or activate production.",
-  "next_action": "Preserve the terminal failed bridge, nine retained UNSCORED raw baselines and completed read-only byte/sidecar authentication. Independently qualify metadata-precision shell corrections and obtain an explicit new protocol decision before further scoring; no new draw or resampling is authorized here. Finalize the separately pinned thin evaluator overlay and inactive immutable host bundle under the actual correction commit, keeping frozen app binary/source/config and margin0.269 unchanged. Complete genuine Snow honesty-review and distinct seven-key source-test attestation qualification, then all remaining bridge/B, exact-round host, runtime, monitoring and production gates. Historical campaign sections below are not live process or retry authority.",
+  "next_action": "Finish the LIVE first-committed operator qualification (session 84440, exact 30 guards x3, no command entries; prior 134x3 reused explicitly). Then authenticate its exact binary/source/three-pass receipt, install the final named selection config, run separately authorized metadata-only prepare, publish the selected plan, verify native admission, and execute only committed position 1. Keep position 2 unstarted and all originals immutable. In parallel obtain Snow Muse backend enforcement correction/readback and fresh genuine three-member qualification, and verify config62a29a7 plus vault/API reload convergence (production settlement probe still401). Bootstrap may reserve the exact future target under conditional preparation authority, but no ordinary supervisor/worker or source activation before empirical gates, target-bound R1, independent API/worker ACKs and phase-two review. Never act on historical active_attempt or failed-bridge sections as live process/retry authority.",
   "operator_inputs": {
     "observed_at": "2026-10-26T05:23:17Z",
     "source": "Explicit user confirmations and parent-verified private-key/model-access readbacks; no new scoring observation.",
@@ -1607,17 +1607,18 @@
     "api_info_http": 503,
     "api_info_observation": "The original dated check below and parent-reported October26 04:53UTC check return typed infrastructure/source_not_ready: exact runtime source envelope unavailable, retriabletrue. This is an implementation/deployment readiness gate, not an unresolved maintenance input or proof of DB outage/MinIO transport failure. Qualify/install the exact intended envelope and independent readiness acknowledgments; do not bypass guards or restart from this response alone.",
     "minio_health": "Configured172.28.208.176:23900 returned200. Old .177 probe was stale, not proof current MinIO unavailable. Authenticated durability/retention/capacity/replication acceptance remains pending.",
-    "dedicated_review_key": "Provided by user and moved to private vault/main/competition-review-openai.key, mode0600 and excluded from Git. Model metadata access HTTP200, but the actual gpt-5.4-mini/xhigh Responses request returned HTTP429 credit_balance_exhausted. User asked to fund the credited project or replace its dedicated key. Do not retry quota refusals blindly or substitute another model. Actual review-provider qualification remains blocked; never expose key bytes.",
-    "public_edit_scope": "Resolved by user: any file in all ten locked competition repositories, except protected simulator/evaluator/scorer/containment instrument and repository metadata; new mono_root_v1 implementation remains unqualified."
+    "dedicated_review_key": "Historical OpenAI credit/key incident only; superseded by the owner's Snow three-model provider choice. No OpenAI credit/key action is required for the current policy. Never expose or automatically retry the retained credential.",
+    "snow_review_backend": "V7 held on malformed Muse JSON. Configured vLLM0.30 Muse grammar activation has an upstream user-channel boundary defect; actual running bytes still require ops readback and reviewed immutable correction. SNOW-MUSE-STRUCTURED-OUTPUT-2026-10-27.md is the handoff. No output repair, member removal or blind retry.",
+    "production_authentication": "The local production settlement token matches its vault registration digest, but GET /competition/v2/events returned401. Verify vault/config convergence and restart serving API replicas; do not rotate credentials or bypass scope checks.",
+    "public_edit_scope": "Resolved by user and frozen policy: any file in all ten locked competition repositories, except protected server/connect/sim-latency and repository metadata. The corrected mono_root_v1 C2 instrument and bridge are qualified separately from pending production runtime readiness."
   },
   "pending": [
-    "Complete held-out reference qualification: snapshot passed its separate directional pilot but was not significant; warm-reader negative patch passed current-source correctness/build checks. Preserve unfavorable prior outcomes; neither pilot enters Stage A and no automatic retry is allowed",
-    "Final scale, predeclared fresh same-seed/reference calibration and initial margin",
-    "Genuine provider-backed review/test-client qualification",
-    "Exact-image host rebaseline and independent runtime readiness",
-    "Production policy/scoped credentials, future opening and retained runtime manifests",
-    "Live MinIO retention/readback/replication/capacity and Grafana delivery proof",
-    "Current final report, playbook and Macrocosmos handoff"
+    "Complete exact named first-committed operator qualification, publish selected plan, measure all three original reference jobs on position1 and require correct ordering; preserve position2 unstarted and report reduced confidence",
+    "Correct/read back Snow Muse strict-grammar backend and complete newly precommitted genuine three-member review qualification without relabeling V7 or repairing outputs",
+    "Verify config62a29a7 and registered vault credentials on restarted main API replicas; required DB migrations already verified",
+    "Reserve production source/target, obtain exact current-boot R1 with installed initial C2 profile and independent durable API/worker runtime acknowledgments, then phase-two acceptance and fenced activation",
+    "Start the actual production supervisor/runner and verify its 15-second heartbeat, dashboard routing and deployment of owner labels",
+    "Publish verified production round discovery, partner handoff, current report/playbook; exact source archive retention/readback is proved, this large archive's replica delivery remains unverified"
   ],
   "guardrails": [
     "The cold attempt is terminal. Keep subsequent scoring serial under the shared slot; never overlap scoring with tests/builds/bombs.",
