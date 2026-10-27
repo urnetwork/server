@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -27,7 +28,7 @@ func DefaultProxyDeviceManagerSettings() *ProxyDeviceManagerSettings {
 		SequenceBufferSize:           2048,
 		DeviceMemoryTargetByteCount:  proxyDeviceMemoryTargetByteCountFromConfig(),
 		HostedMintConcurrency:        defaultHostedMintConcurrency,
-		HostedContractConcurrency:    defaultHostedContractConcurrency,
+		HostedContractConcurrency:    proxyHostedContractConcurrencyFromConfig(),
 		HostedEvaluationPoolMultiple: defaultHostedEvaluationPoolMultiple,
 	}
 }
@@ -48,8 +49,51 @@ const defaultHostedMintConcurrency = 2
 // around the connect deploys of 2026-10-25 and 2026-10-26 the processes held
 // about 3,800 and 8,600 each, up to 11,500. Past the bound a creation is refused
 // at once (see localclient.ContractAdmission) and its send sequence asks again
-// on its own retry schedule.
+// on its own retry schedule. Once the grant probe shipped (22:06Z on
+// 2026-10-26) a process held at most 32 in flight from its 30th minute on, and
+// came near the bound only in the first 5 minutes after a restart. proxy.yml
+// can replace it (see proxyHostedContractConcurrencyFromConfig).
 const defaultHostedContractConcurrency = 256
+
+// The contract creation bound from the proxy config:
+//
+//	hosted_contract_concurrency: 256
+//
+// Read once, when the process builds its device manager, so a change applies at
+// each block's next start without a build. A missing resource or key keeps the
+// default. So does a value that is not a positive integer, with one error line:
+// the bound protects the process, so a bad value neither fails startup, which
+// would turn a typo into an outage at the next restart, nor removes the bound,
+// which a nonpositive setting means. A very large value is the explicit way to
+// stop the bound from refusing. The process exports the bound it runs with as
+// urnetwork_hosted_contract_admission_capacity.
+func proxyHostedContractConcurrencyFromConfig() int {
+	const key = "hosted_contract_concurrency"
+	resource, err := server.Config.SimpleResource("proxy.yml")
+	if err != nil {
+		// an absent resource is the default; an unreadable one is reported
+		if !errors.Is(err, server.ErrResourceNotFound) || errors.Is(err, server.ErrResourceUnavailable) {
+			glog.Errorf("[proxy]proxy.yml is unreadable; %s keeps %d\n", key, defaultHostedContractConcurrency)
+		}
+		return defaultHostedContractConcurrency
+	}
+	values, err := resource.ParseE()
+	if err != nil {
+		glog.Errorf("[proxy]proxy.yml does not parse; %s keeps %d\n", key, defaultHostedContractConcurrency)
+		return defaultHostedContractConcurrency
+	}
+	value, ok := values[key]
+	if !ok {
+		return defaultHostedContractConcurrency
+	}
+	count, ok := value.(int)
+	if !ok || count <= 0 {
+		glog.Errorf("[proxy]proxy.yml: %s must be a positive integer, not %v (%T); keeping %d\n", key, value, value, defaultHostedContractConcurrency)
+		return defaultHostedContractConcurrency
+	}
+	glog.Infof("[proxy]proxy.yml: %s = %d\n", key, count)
+	return count
+}
 
 const defaultProxyDeviceMemoryTargetByteCount = model.ByteCount(sdk.LowMemoryDeviceTargetByteCount)
 
@@ -97,7 +141,9 @@ type ProxyDeviceManagerSettings struct {
 	HostedMintConcurrency int
 	// HostedContractConcurrency bounds the contract creations in flight across
 	// every device of this manager; past it a creation is refused as a rate
-	// limit (see localclient.ContractAdmission). Nonpositive is unbounded.
+	// limit (see localclient.ContractAdmission). Nonpositive is unbounded. The
+	// default comes from proxy.yml `hosted_contract_concurrency`, which cannot
+	// express unbounded.
 	HostedContractConcurrency int
 	// HostedEvaluationPoolMultiple is each opened device's
 	// ProxyDeviceSettings.HostedEvaluationPoolMultiple. Nonpositive keeps the
