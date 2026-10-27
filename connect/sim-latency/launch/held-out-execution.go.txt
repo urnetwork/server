@@ -895,7 +895,11 @@ func executeHeldOutCampaign(ctx context.Context, config heldOutExecutionConfig, 
 		}
 	}
 	result.Complete = true
-	result.Accepted, result.OrderedSeeds, result.Reasons = acceptHeldOutOutcomesForProtocol(plan.Config.Protocol, plan.Rounds, result.Outcomes)
+	if plan.Config.Protocol == heldOutProtocolFirstCommittedB {
+		result.Accepted, result.OrderedSeeds, result.Reasons = acceptHeldOutFirstCommittedOutcomes(plan.Rounds, result.Outcomes)
+	} else {
+		result.Accepted, result.OrderedSeeds, result.Reasons = acceptHeldOutOutcomesForProtocol(plan.Config.Protocol, plan.Rounds, result.Outcomes)
+	}
 	return result, nil
 }
 

@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-27T15:14:00Z",
+  "observed_at": "2026-10-27T16:14:00Z",
   "objective": "Ready to launch at 2026-10-28T00:00:00Z",
   "storage_verification": {
     "operations_compliance_receipt_sha256": "c6b8b5348633270939395b7a585e1978b3a83c679b2552eccd8ab2a4690edc3f",
@@ -68,7 +68,7 @@
     "private_two_seed_published_source_commit": "e31347823727b3c3ba2e9a14ff4ca3054dda95af",
     "private_two_seed_context_bound_native_qualification_and_public_plan_pending": false,
     "original_two_seed_publication_commit": "40a27c5fb5ba4f368f187b5cd6894ae9e6670d23",
-    "first_committed_operator_independent_qualification_pending": true,
+    "first_committed_operator_independent_qualification_pending": false,
     "statistical_execution_authorized_by_this_snapshot": false,
     "production_repeat_reward_policy": "allow",
     "within_round_duplicate_reuse_unchanged": true,
@@ -495,7 +495,7 @@
     "round_baseline_preparation_budget_fix_in_progress": true,
     "submission_deadline_seconds_unchanged": 10800
   },
-  "status": "corrected_bridge_native_accepted_first_committed_operator_qualification_running_production_not_activated",
+  "status": "corrected_bridge_native_accepted_first_committed_operator_offline_qualified_native_adoption_pending",
   "current_bridge_measurement": {
     "started_at": "2026-10-26T20:54:56Z",
     "original_deadline": "2026-10-26T23:54:56Z",

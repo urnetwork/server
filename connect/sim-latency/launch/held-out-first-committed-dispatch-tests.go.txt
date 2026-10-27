@@ -1,0 +1,21 @@
+// Compatible with the preceding operator source for a compiled red control.
+// This exercises dispatch only; synthetic hooks do not approve a real prefix.
+package main
+
+import "testing"
+
+// The unchanged old executor rejects this named one-round terminal projection;
+// the new closed branch must retain all three outcomes and accept their order.
+func TestHeldOutFirstCommittedExecutionDispatchRegression(t *testing.T) {
+	fixture := newHeldOutExecFixture(t)
+	selected := *fixture.Plan
+	selected.Config.Protocol = "launch-3a-bridge-first-committed-b-2026-10-27-v1"
+	selected.Rounds = selected.Rounds[:1]
+	fixture.Plan = &selected
+	settings := fixture.Preparation.Settings
+	settings.Workload.SeedCount = 1
+	result, err := executeHeldOutCampaign(t.Context(), fixture.Config, selected, fixture.Preparation.Release, settings, fixture.Hooks)
+	if err != nil || result == nil || !result.Complete || !result.Accepted || result.OrderedSeeds != 1 || len(result.Outcomes) != 3 || len(fixture.Invocations) != 3 {
+		t.Fatal("named first-committed terminal dispatch did not accept exactly one complete ordered synthetic seed", err)
+	}
+}
