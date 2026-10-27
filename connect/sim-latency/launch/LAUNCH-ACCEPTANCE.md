@@ -5,10 +5,33 @@ checklist is the acceptance index for the new release, not an authorization to
 activate production. Historical v1 checkmarks do not qualify a different source,
 image, host manifest, policy or review provider.
 
-## Current checkpoint — October 27, 02:08 UTC
+## Current checkpoint — October 27, 03:07 UTC
 
 The following supersedes the provider and baseline-preparation progress in the
 dated bullets below; those bullets retain the earlier qualification history.
+
+- Clean control source `1a1bf5ae6` completed three race passes: simulator 151,
+  controller 42, model 13, native helpers 60 and shell guards 2 per pass, zero
+  skips, exact original container/network cleanup. Of 804 pass entries, three
+  are inactive genuine-command entry returns; 801 are other test cases. This
+  is not real provider qualification. Canonical unit receipt `a219218d…` binds
+  the exact tested driver; extended summary `bcab5db2…` preserves the scope.
+- The v4 genuine review attempt began at **03:05:34 UTC**, native PID
+  **2488711**, session **99560**. Cancellation passed and benign review is
+  running. The [published precommit](SNOW-REVIEW-QUALIFICATION-PRECOMMIT-2026-10-27-V4.json)
+  is pushed as `9bb1384a7`. Actual new review image `sha256:97e5453d…` passed
+  byte readback and nonroot/offline help. All six cases, three models, prompts,
+  token bounds and expected outcomes are unchanged; no automatic retry or
+  overlapping scoring is authorized.
+- All five main control binaries are built from clean `1a1bf5ae6`; worker OCI
+  `sha256:1996ccd1…` has byte-identical native/readback worker `395bce92…`.
+  This is release provenance, not production-host readiness or a claim that the
+  real worker runs inside Docker. No actual production worker has started.
+- The Sille-only native loopback metrics forwarder is installed. Its repeated
+  anonymous GET checks pass; authenticated signal ingestion and notification
+  delivery are still unproved. The old staging supervisor is disabled for
+  autostart, with its unit and historical state preserved. Main DB migrations
+  891–893 still awaited deployment at the last read-only check, **02:27 UTC**.
 
 - Genuine seven-key test-result attestation passed: two actual isolated Go
   executions (one passing, one deliberately failing), then six provider calls.
@@ -37,7 +60,8 @@ dated bullets below; those bullets retain the earlier qualification history.
   and 35 simulator smoke tests passed with zero skips. A compiled old-projection
   control reproduced the exact failure, then restored-source tests passed again.
   Receipt SHA-256 `25d969c22eb793d594173593f726c95bb2df49f4d561b3c37c8a2173a41a4abc`.
-  Three-pass and genuine-provider qualification remain pending.
+  Three-pass validation subsequently completed as above; genuine-provider
+  qualification remains pending.
 - Shared-baseline preparation before the first submission clock is committed
   in `cf22d1a05`, with 19 smoke tests passing, including real isolated PostgreSQL
   cases. Independent review then found a claim/reservation race. Its correction
@@ -46,7 +70,8 @@ dated bullets below; those bullets retain the earlier qualification history.
   claim/scanner smoke subsequently passed 23 controller tests plus two shell
   guards, zero skips, with original container/network inventories restored.
   Compiled old-source controls reproduced all three races and both failed-scan
-  pointer defects. Larger validation remains pending.
+  pointer defects. Three-pass validation subsequently completed; actual full
+  baseline preparation and production runtime qualification remain pending.
   Fixes are pushed in `c37f9cea0`. The separate v4 helper and exact profile are
   installed inactive: 17 root-owned read-only artifacts, unchanged v3 dependency
   hashes, no helper or worker execution and no service activation. Installation
