@@ -73,11 +73,23 @@ type OnboardingAppleOfferCodesConfig struct {
 	OfferReferenceName string `yaml:"offer_reference_name"`
 	// BatchSize per top-up (Apple's minimum is 500)
 	BatchSize int `yaml:"batch_size"`
-	// MinAvailable: a top-up runs when fewer unexpired, unassigned codes remain
+	// MinAvailable: a top-up runs when fewer unassigned codes remain that an
+	// offer issued before the next top-up can still take
 	MinAvailable int `yaml:"min_available"`
-	// ExpiryDays of a batch (the offer's validity, 5)
+	// ExpiryDays of a batch, counted from its generation. A code is handed only
+	// to an offer it outlives, so this must exceed the offer's validity_days
+	// by the top-up interval and a day; see
+	// OnboardingConfig.AppleOfferCodeExpiryDays, which raises a lower value.
 	ExpiryDays int `yaml:"expiry_days"`
 }
+
+// OnboardingAppleOfferCodeTopUpInterval is how often the daily task tops up the
+// App Store one-time offer code pool (controller.AppleOfferCodeTopUp).
+const OnboardingAppleOfferCodeTopUpInterval = 24 * time.Hour
+
+// OnboardingAppleOfferCodeExpiryDaysDefault is a batch's expiry when
+// offer.apple.expiry_days is not set.
+const OnboardingAppleOfferCodeExpiryDaysDefault = 5
 
 // OnboardingAppleOfferReferenceNameDefault is the reference name of the
 // welcome offer code in App Store Connect (the yearly subscription's Offer
@@ -338,10 +350,18 @@ var onboardingConfig = sync.OnceValue(func() *OnboardingConfig {
 		glog.Errorf("[onboarding]onboarding.yml could not be parsed; the onboarding program is inert. err = %s\n", err)
 		return &OnboardingConfig{}
 	}
+	return newOnboardingConfig(&y)
+})
+
+// newOnboardingConfig checks a parsed onboarding.yml: it drops the registry
+// entries that cannot be assigned and raises an App Store offer code expiry
+// that would not outlive the offer, logging each.
+func newOnboardingConfig(y *onboardingYaml) *OnboardingConfig {
 	c := &y.Onboarding
 	c.Experiments = validExperiments(c.Experiments)
+	clampAppleOfferCodeExpiry(c)
 	return c
-})
+}
 
 // Onboarding returns the parsed onboarding config (cached; parsed once).
 func Onboarding() *OnboardingConfig {
@@ -604,6 +624,49 @@ func (c *OnboardingConfig) OfferEnabled() bool {
 // OfferValidity is how long an issued offer stays redeemable.
 func (c *OnboardingConfig) OfferValidity() time.Duration {
 	return time.Duration(c.Offer.ValidityDays) * 24 * time.Hour
+}
+
+// MinAppleOfferCodeExpiryDays is the shortest batch expiry that can serve the
+// welcome offer. A code is handed only to an offer it outlives
+// (assignAppleOfferCodeInTx), and offers keep being issued until the next
+// top-up, so a batch must outlive an offer issued one top-up interval after it
+// was generated, with a day to spare: validity_days + 2.
+func (c *OnboardingConfig) MinAppleOfferCodeExpiryDays() int {
+	return c.Offer.ValidityDays + int(OnboardingAppleOfferCodeTopUpInterval/(24*time.Hour)) + 1
+}
+
+// AppleOfferCodeExpiryDays is the expiry of a generated batch:
+// offer.apple.expiry_days, or the default, raised to
+// MinAppleOfferCodeExpiryDays when it would not outlive the offers it serves.
+func (c *OnboardingConfig) AppleOfferCodeExpiryDays() int {
+	days := c.Offer.Apple.ExpiryDays
+	if days <= 0 {
+		days = OnboardingAppleOfferCodeExpiryDaysDefault
+	}
+	return max(days, c.MinAppleOfferCodeExpiryDays())
+}
+
+// clampAppleOfferCodeExpiry raises an offer.apple.expiry_days that does not
+// outlive the offer, and says so at every load. In 2026-10 expiry_days 5 equal
+// to validity_days 5 kept every generated App Store code from ever being handed
+// out: each batch expired before any offer issued after it.
+func clampAppleOfferCodeExpiry(c *OnboardingConfig) {
+	configured := c.Offer.Apple.ExpiryDays
+	effective := c.AppleOfferCodeExpiryDays()
+	if configured == effective {
+		return
+	}
+	if 0 < configured {
+		glog.Errorf(
+			"[onboarding]onboarding.yml offer.apple.expiry_days %d does not outlive an offer (validity_days %d, a %s top-up interval and a day): no App Store offer code would ever be handed out. Using %d; set offer.apple.expiry_days to at least %d.\n",
+			configured,
+			c.Offer.ValidityDays,
+			OnboardingAppleOfferCodeTopUpInterval,
+			effective,
+			c.MinAppleOfferCodeExpiryDays(),
+		)
+	}
+	c.Offer.Apple.ExpiryDays = effective
 }
 
 // OfferPriceUsd is a price with the welcome discount applied, rounded to the cent.
