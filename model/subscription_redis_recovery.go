@@ -452,6 +452,37 @@ func recoverRedisReservationRequest(ctx context.Context, balanceId, contractId s
 	return
 }
 
+// Moves one request's pending marker on a balance to the recovery marker,
+// keeping its score, as a page enrolls its own request's pending markers. It
+// changes no token amount or lease. A replay finds no pending marker and
+// changes nothing.
+const redisReservationHandoffScript = `
+local score=redis.call('ZSCORE',KEYS[6],ARGV[1])
+if not score then return 0 end
+redis.call('ZADD',KEYS[5],'NX',score,ARGV[1]); redis.call('ZREM',KEYS[6],ARGV[1]); redis.call('PEXPIRE',KEYS[5],90000000)
+return 1
+`
+
+// Reports whether the request's pending marker on the balance moved to the
+// recovery marker. Only the request's own live admission may call this, with
+// its attempts read under its pending lock (handOffReservation): Redis cannot
+// tell an abandoned pending token from one a live attempt may still publish.
+// The call is idempotent, so it skips the deadline pool's preflight round trip.
+func redisReservationHandoff(ctx context.Context, balanceId, contractId server.Id) (bool, error) {
+	bounded, cancel := context.WithTimeout(ctx, redisContractAdmissionTimeout)
+	defer cancel()
+	var moved bool
+	err := server.RedisWithDeadline(bounded, func(client server.RedisClient) error {
+		value, err := client.Eval(bounded, redisReservationHandoffScript, redisContractReservationKeys(balanceId), contractId.String()).Int64()
+		if err != nil {
+			return err
+		}
+		moved = value == 1
+		return nil
+	}, server.OptRedisNoPreflight())
+	return moved, err
+}
+
 // The caller's error/timeout is not cleanup's lifetime. One finite budget owns
 // every balance and every retry after PG has joined; tests supply an owned
 // clock/transport to prove long transient intervals without wall-clock sleeps,
@@ -462,8 +493,11 @@ type redisReservationCleanup struct {
 	// Calls fire once delay has passed, holding no goroutine meanwhile, and
 	// returns what cancels that call. The deferred owner times each retry with
 	// it, so a compensation waiting out its backoff holds no worker.
-	after    func(time.Duration, func()) func() bool
-	recover  func(context.Context, server.Id, server.Id) error
+	after   func(time.Duration, func()) func() bool
+	recover func(context.Context, server.Id, server.Id) error
+	// Moves a token the deferred owner gave up on to the recovery marker; nil
+	// leaves it pending for aged recovery.
+	handoff  func(context.Context, server.Id, server.Id) error
 	deferred *redisDeferredCompensations
 }
 
@@ -492,10 +526,14 @@ func (self *redisContractAdmission) compensate(ctx context.Context) error {
 }
 
 // Compensation releases this request's own tokens, pending ones in Redis alone.
+// A token the deferred owner gives up on passes to the recovery marker.
 func (self *redisContractAdmission) reservationCleanup() redisReservationCleanup {
 	cleanup := defaultRedisReservationCleanup()
 	cleanup.recover = func(ctx context.Context, balanceId, _ server.Id) error {
 		return self.releaseReservation(ctx, balanceId)
+	}
+	cleanup.handoff = func(ctx context.Context, balanceId, _ server.Id) error {
+		return self.handOffReservation(ctx, balanceId)
 	}
 	return cleanup
 }
@@ -518,6 +556,32 @@ func (self *redisContractAdmission) releaseReservation(ctx context.Context, bala
 			}
 		}
 		return recoverRedisReservationRequest(ctx, balanceId, self.contractId)
+	})
+}
+
+// Moves this request's pending token on one balance to the recovery marker
+// once the deferred owner has given up releasing it, so the next page on the
+// balance takes it at once, as the request's own page would have, and releases
+// it through the fenced SQL custody check rather than after
+// redisPendingRecoveryAge. As releaseReservation does, it reads the request's
+// attempts when it runs, under the pending lock: a token an attempt in flight
+// may hold, or one a publication may have taken, keeps its pending marker. One
+// call, which a replay repeats as a no-op.
+func (self *redisContractAdmission) handOffReservation(ctx context.Context, balanceId server.Id) error {
+	return self.retirePending(func(inFlight bool) error {
+		if inFlight || self.publicationHasStarted() {
+			redisContractReservationResults.WithLabelValues("handoff", "skipped").Inc()
+			return nil
+		}
+		moved, err := redisReservationHandoff(ctx, balanceId, self.contractId)
+		result := "absent"
+		if err != nil {
+			result = "error"
+		} else if moved {
+			result = "moved"
+		}
+		redisContractReservationResults.WithLabelValues("handoff", result).Inc()
+		return err
 	})
 }
 
@@ -629,7 +693,8 @@ func (self *redisReservationCompensation) step(owner context.Context) (time.Dura
 			return delay, true
 		}
 	}
-	// The budget leaves no further pass.
+	// The budget leaves no further pass: the owner gives up.
+	self.handOff(owner)
 	if self.deferredPasses == 0 {
 		redisContractReservationResults.WithLabelValues("compensation", "expired").Inc()
 		return 0, false
@@ -637,6 +702,28 @@ func (self *redisReservationCompensation) step(owner context.Context) (time.Dura
 	self.failures = append(self.failures, context.DeadlineExceeded)
 	self.finish()
 	return 0, false
+}
+
+// Passes each balance still pending to the recovery marker once the owner
+// gives up on it, so the next page on the balance takes it at once: one call
+// per balance, all within one admission round trip's bound. A balance the
+// handoff misses, or one a quiesce reaches first, keeps its pending marker for
+// aged recovery.
+func (self *redisReservationCompensation) handOff(owner context.Context) {
+	if self.cleanup.handoff == nil {
+		return
+	}
+	bounded, cancel := context.WithTimeout(owner, redisContractAdmissionTimeout)
+	defer cancel()
+	for _, id := range self.pending {
+		select {
+		case <-bounded.Done():
+			return
+		default:
+		}
+		// the handoff counts its own outcome
+		_ = self.cleanup.handoff(bounded, id, self.contractId)
+	}
 }
 
 // One pass within the request's budget: each pending balance the pass did not
@@ -779,12 +866,18 @@ func (self *redisReservationCompensation) attemptOrDefer(ctx context.Context) (b
 // per selected grant. A compensation the owner takes counts deferred, then
 // completed, pending, or expired when its budget left the owner no pass.
 //
+// When a compensation's budget leaves no further pass, the owner gives up and
+// moves each token still pending to the recovery marker in one call, unless an
+// attempt of its request is in flight or has started publication. The next
+// page on the balance then releases the token through the fenced SQL custody
+// check at once, as the request's own page would have.
+//
 // A full owner drops a compensation, counted dropped, without blocking or
 // starting a goroutine, and a quiesce ends those it holds, as process exit
-// does. That only defers the release, as a compensation that ends pending
-// does: each token stays reserved, which can under-admit its payer but never
-// over-admit, and keeps its pending marker, the state recovery reclaims for a
-// request that died. Any page on the balance takes a pending marker older than
+// does. That only defers the release, as a handoff that fails does: each token
+// stays reserved, which can under-admit its payer but never over-admit, and
+// keeps its pending marker, the state recovery reclaims for a request that
+// died. Any page on the balance takes a pending marker older than
 // redisPendingRecoveryAge, and the fenced SQL custody check then releases each
 // token no contract holds. A returned request starts no attempt that could
 // publish the token, and its lease ends it at last.

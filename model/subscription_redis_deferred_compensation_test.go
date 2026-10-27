@@ -243,7 +243,9 @@ func TestRedisDeferredCompensationCallerWaitsForOnePass(t *testing.T) {
 }
 
 // However many requests fail together, retries run on the deferred owner's
-// workers only, and each request's budget bounds its passes by backoff.
+// workers only, each request's budget bounds its passes by backoff, and the
+// owner hands each exhausted request's token to recovery once, after its last
+// pass.
 func TestRedisDeferredCompensationBoundsRetriesAcrossRequests(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -255,10 +257,20 @@ func TestRedisDeferredCompensationBoundsRetriesAcrossRequests(t *testing.T) {
 		deferred := newRedisDeferredCompensationsForTest(t, redisDeferredCompensationWorkers, requests)
 		var stateLock sync.Mutex
 		attempts := map[server.Id]int{}
+		handoffs := map[server.Id]int{}
 		retrying, maxRetrying := 0, 0
 		observe := func(cleanup redisReservationCleanup) redisReservationCleanup {
 			clock := &redisCompensationTestClock{now: time.Unix(1, 0)}
 			cleanup.now, cleanup.after = clock.Now, clock.After
+			cleanup.handoff = func(_ context.Context, _, request server.Id) error {
+				stateLock.Lock()
+				defer stateLock.Unlock()
+				if handoffs[request] == 0 && attempts[request] < 2 {
+					t.Error("the owner gave up before its deferred pass", request)
+				}
+				handoffs[request]++
+				return nil
+			}
 			cleanup.recover = func(_ context.Context, _, request server.Id) error {
 				first := func() bool {
 					stateLock.Lock()
@@ -315,6 +327,9 @@ func TestRedisDeferredCompensationBoundsRetriesAcrossRequests(t *testing.T) {
 		for request, count := range attempts {
 			if count < 2 || maxPasses < count {
 				t.Fatalf("request %s made %d compensation passes in its budget; backoff allows at most %d", request, count, maxPasses)
+			}
+			if handoffs[request] != 1 {
+				t.Fatalf("request %s handed its exhausted token to recovery %d times", request, handoffs[request])
 			}
 		}
 		if taken := redisCompensationTestCount("deferred") - takenBefore; taken != requests {

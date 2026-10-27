@@ -192,18 +192,25 @@ worker is held only while release calls run, so the owner's throughput is
 bounded by its four concurrent calls rather than by backoff, and the owner does
 not wait for a retry its budget cannot reach. That request's own recovery page
 does not run, so its pending tokens stay with the owner rather than moving to
-the recovery marker. A full owner drops the compensation without blocking, and
-the proxy's before-exit hook quiesces the owner. A dropped token, one the
-quiesce ended or one still pending when its budget ends stays reserved under
-its pending marker: any page on the balance takes it once it is ten minutes
-old, and its 24-hour lease ends it at last.
+the recovery marker. When the budget leaves no further retry, the owner gives
+up and moves each token still pending to the recovery marker in one Redis call,
+as the request's own page would have, unless an attempt of the request is in
+flight or has started publication (read under the request's pending lock when
+the handoff runs). The next page on the balance then releases the token
+through the fenced SQL custody check at once. A full owner drops the
+compensation without blocking, and the proxy's before-exit hook quiesces the
+owner. A dropped token, one the quiesce ended or one the owner could not hand
+off stays reserved under its pending marker: any page on the balance takes it
+once it is ten minutes old, and its 24-hour lease ends it at last.
 `urnetwork_redis_contract_reservation_total` counts
 `operation="compensation"` with the results `completed` and `pending` when a
 compensation ends, `deferred` when the owner takes one, `expired` when its
 budget left the owner no pass (no retry fit in it, or it ended while the
-compensation waited for a worker) and `dropped` when the owner is full. A
-sustained `dropped` rate means Redis refuses releases faster than the owner
-retries them.
+compensation waited for a worker) and `dropped` when the owner is full. It
+counts each given-up token's `operation="handoff"` as `moved`, `absent` (no
+pending marker was left), `skipped` (an attempt was in flight or publication
+had started) or `error` (left to the ten-minute age). A sustained `dropped`
+rate means Redis refuses releases faster than the owner retries them.
 
 `urnetwork_redis_contract_publication_refusals_total{reason}` counts the
 transactions that refused to publish: `window_expired` and `released`. The
