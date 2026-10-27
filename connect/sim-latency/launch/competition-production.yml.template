@@ -12,7 +12,7 @@
 enabled: false
 competition_id: sim-latency-season-1
 base_sha: a9e8e1a710b24c749e6499a0606938252c83e136
-evaluator_image_digest: sha256:b1632a55b415f823871c60b220a194947d280894111c9fa765ad88100e206f24
+evaluator_image_digest: sha256:98c9061c4a43a25e7b581a5193ca6e7f48e49e7b7fc03b7c1b6190a029befee2
 artifact_root: /var/lib/urnetwork/competition
 artifact_bucket: competition
 
@@ -60,8 +60,8 @@ max_infrastructure_attempts: 3
 # Publish/protect the exact commands and retain their actual hashes. Moving
 # operator main is not a substitute for runtime-envelope authentication.
 simulator_command: ${QUALIFIED_SIMULATOR_COMMAND}
-evaluator_command: /usr/local/libexec/urnetwork/competition-c2-a9e8e1a7-control-79e96f0ed-go1273-evidence5g-v2/container/evaluator.sh
-evaluator_command_sha256: d2b03b5b7d45bdb3943f594d410f7b5e955d5529553e1475bb1db7f9d313772a
+evaluator_command: /usr/local/libexec/urnetwork/competition-c2-a9e8e1a7-metadata-fbb2566b-evidence5g-v3/container/evaluator.sh
+evaluator_command_sha256: 0cccda1d1dcc227f30fda800ddb9bbb28e29dd48cc62885da637fcd4eb4eb00b
 self_check_command: ${QUALIFIED_SELF_CHECK_COMMAND}
 self_check_command_sha256: ${QUALIFIED_SELF_CHECK_COMMAND_SHA256}
 
