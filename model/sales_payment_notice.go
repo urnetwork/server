@@ -169,16 +169,58 @@ type salesPaymentNoticeQueue struct {
 	stateLock  sync.Mutex
 	started    bool
 	queuedKeys map[string]time.Time
+	// notices queued and not yet delivered; idle is closed while there are none
+	pending int
+	idle    chan struct{}
 }
 
 func newSalesPaymentNoticeQueue(size int) *salesPaymentNoticeQueue {
+	idle := make(chan struct{})
+	close(idle)
 	return &salesPaymentNoticeQueue{
 		notices:    make(chan *SalesPaymentNotice, size),
 		queuedKeys: map[string]time.Time{},
+		idle:       idle,
 	}
 }
 
 var salesPaymentNotices = newSalesPaymentNoticeQueue(salesPaymentNoticeQueueSize)
+
+// WaitSalesPaymentNotices waits up to timeout for the notices queued so far to
+// be delivered, and reports whether they were. A short-lived process that
+// credits payments (bringyourctl) calls it before it exits; a service never
+// needs to.
+func WaitSalesPaymentNotices(timeout time.Duration) bool {
+	return salesPaymentNotices.wait(timeout)
+}
+
+func (self *salesPaymentNoticeQueue) addPending(delta int) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.addPendingWithLock(delta)
+}
+
+func (self *salesPaymentNoticeQueue) addPendingWithLock(delta int) {
+	if self.pending == 0 && 0 < delta {
+		self.idle = make(chan struct{})
+	}
+	self.pending += delta
+	if self.pending == 0 && delta < 0 {
+		close(self.idle)
+	}
+}
+
+func (self *salesPaymentNoticeQueue) wait(timeout time.Duration) bool {
+	self.stateLock.Lock()
+	idle := self.idle
+	self.stateLock.Unlock()
+	select {
+	case <-idle:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
+}
 
 // enqueue never blocks. It returns whether the notice was queued.
 func (self *salesPaymentNoticeQueue) enqueue(notice *SalesPaymentNotice) bool {
@@ -204,12 +246,15 @@ func (self *salesPaymentNoticeQueue) enqueue(notice *SalesPaymentNotice) bool {
 		self.started = true
 		go self.run()
 	}
+	// counted before the worker can take it
+	self.addPendingWithLock(1)
 	self.stateLock.Unlock()
 
 	select {
 	case self.notices <- notice:
 		return true
 	default:
+		self.addPending(-1)
 		salesPaymentNoticeResults.WithLabelValues(SalesPaymentNoticeResultDropped).Inc()
 		glog.Errorf("[sales]payment notice %s dropped: the queue is full\n", notice.RecordKey)
 		return false
@@ -223,6 +268,7 @@ func (self *salesPaymentNoticeQueue) run() {
 			result = deliverSalesPaymentNotice(notice)
 		})
 		salesPaymentNoticeResults.WithLabelValues(result).Inc()
+		self.addPending(-1)
 	}
 }
 

@@ -425,3 +425,34 @@ func TestSalesPaymentNoticeErrorOmitsTheWebhookUrl(t *testing.T) {
 	var statusErr *errSalesWebhookStatus
 	connect.AssertEqual(t, errors.As(err, &statusErr), false)
 }
+
+// A short-lived process (bringyourctl) waits for its notices before it exits:
+// the wait ends once the worker has delivered them, and gives up at its
+// bound when Slack does not answer.
+func TestWaitSalesPaymentNotices(t *testing.T) {
+	slack := newSalesTestSlack(t)
+	salesTestNetworkName(t, "acme")
+	queue := newSalesPaymentNoticeQueue(8)
+	previousQueue := salesPaymentNotices
+	salesPaymentNotices = queue
+	t.Cleanup(func() {
+		salesPaymentNotices = previousQueue
+		close(queue.notices)
+	})
+
+	// nothing queued: nothing to wait for
+	connect.AssertEqual(t, WaitSalesPaymentNotices(0), true)
+
+	connect.AssertEqual(t, queue.enqueue(salesTestNotice("crypto_intent/1")), true)
+	connect.AssertEqual(t, queue.enqueue(salesTestNotice("crypto_intent/2")), true)
+	connect.AssertEqual(t, WaitSalesPaymentNotices(time.Minute), true)
+	connect.AssertEqual(t, len(slack.posts()), 2)
+
+	// a duplicate or a dropped notice leaves nothing pending
+	connect.AssertEqual(t, queue.enqueue(salesTestNotice("crypto_intent/1")), false)
+	connect.AssertEqual(t, WaitSalesPaymentNotices(0), true)
+
+	slack.block.Store(true)
+	connect.AssertEqual(t, queue.enqueue(salesTestNotice("crypto_intent/3")), true)
+	connect.AssertEqual(t, WaitSalesPaymentNotices(50*time.Millisecond), false)
+}
