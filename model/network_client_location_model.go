@@ -4976,6 +4976,13 @@ type FindProviders2Args struct {
 	// providers included. A provider that never declared it, as none before
 	// the field did, is left out. Unset keeps the capability-blind answer.
 	PostQuantumEncryption bool `json:"post_quantum_encryption"`
+	// RequireModernProvider keeps only modern providers (ClientScore.Modern)
+	// in every draw of the request, named providers included (FP2-MODERN.md):
+	// with a Public key, measured modern by the capability probe within seven
+	// days; with only a Network key, declared post-quantum encryption. A
+	// client that requires end-to-end encryption sets it. Unset keeps the
+	// capability-blind answer.
+	RequireModernProvider bool `json:"require_modern_provider"`
 }
 
 type FindProviders2Result struct {
@@ -5063,6 +5070,16 @@ type ClientScore struct {
 	// including native quality/speed members. PassesMinimums distinguishes
 	// each mode's native membership.
 	Online bool
+	// Whether the provider qualified as modern at the export's instant
+	// (FP2-MODERN.md): with a Public key, measured modern by the capability
+	// probe (egress_modern_provider.go); with only a Network key, which the
+	// probe cannot reach, declared post-quantum encryption in its latest
+	// provide. Set whatever buckets the provider is in. The zero value, as
+	// every entry written before the field decodes, is not modern, so a
+	// request that requires modern providers never takes one no export has
+	// shown to be modern. Set only on the top-level score, like the location
+	// ids.
+	Modern bool
 
 	// set only on the top-level score, never on the `LookbackClientScores`
 	// copies: each score is gob-serialized into thousands of cache key

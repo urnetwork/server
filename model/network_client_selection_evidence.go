@@ -375,6 +375,19 @@ var findProviders2RankMeasuredFirstEnabled = prometheus.NewGaugeFunc(prometheus.
 	return 0
 })
 
+// Each process's effective rank_modern_first, as its FindProviders2 draws read
+// it (through the request settings, at most RequestSettingsMaxAge old).
+// Configuration, not request outcomes, like rank_measured_first's gauge.
+var findProviders2RankModernFirstEnabled = prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+	Name: "urnetwork_findproviders2_rank_modern_first_enabled",
+	Help: "Effective cached rank_modern_first configuration for FindProviders2 band draws; does not attest request outcomes",
+}, func() float64 {
+	if requestEgressIndexSettings().RankModernFirst {
+		return 1
+	}
+	return 0
+})
+
 // Every label pair is exported from the start, so a share is defined before
 // the first answer.
 func init() {
@@ -383,5 +396,5 @@ func init() {
 			findProviders2OnlineFallbackEvidence.WithLabelValues(rankMode, rank.String())
 		}
 	}
-	prometheus.MustRegister(findProviders2OnlineFallbackEvidence, findProviders2RankMeasuredFirstEnabled)
+	prometheus.MustRegister(findProviders2OnlineFallbackEvidence, findProviders2RankMeasuredFirstEnabled, findProviders2RankModernFirstEnabled)
 }

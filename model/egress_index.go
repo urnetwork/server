@@ -106,6 +106,19 @@ type EgressIndexSettings struct {
 	// process's value. False, the default, is the order before it.
 	// `rank_measured_first` in the block.
 	RankMeasuredFirst bool
+	// Whether FindProviders2 draws every modern provider of a band before any
+	// other (FP2-MODERN.md): the readers traverse each target's modern pages,
+	// across every requested family, before its other pages, and each band's
+	// draw takes its modern candidates first, so a provider that is not
+	// modern only fills what the band's modern candidates leave. It replaces
+	// the modern provider gate and changes no membership, tier or band order.
+	// The api, alt and the proxy apply it as they answer; the export
+	// partitions the pages whatever it says. True, the default, is on, and
+	// false is the kill switch: a config release and a restart of those
+	// readers, each applying it within RequestSettingsMaxAge.
+	// urnetwork_findproviders2_rank_modern_first_enabled shows each process's
+	// value. `rank_modern_first` in the block.
+	RankModernFirst bool
 	// how old the settings a request path reads may be. The passes read
 	// provider.yml on every call; a request path runs far too often to read
 	// and parse a file each time.
@@ -186,14 +199,17 @@ func DefaultEgressIndexSettings() *EgressIndexSettings {
 			"cdn":          1,
 			"site":         1,
 		},
-		DefaultClassWeight:    1,
-		MaxFailureIndex:       6,
-		EvidenceMaxAge:        ProviderEgressHealthMaxAge,
-		QualityOkNumerator:    4,
-		QualityOkDenominator:  5,
-		MinScoredLoads:        1,
-		CountryGate:           true,
-		BackfillTierOffset:    ClientScoreCutoffTier + 1 + MaxClientTierDemerit,
+		DefaultClassWeight:   1,
+		MaxFailureIndex:      6,
+		EvidenceMaxAge:       ProviderEgressHealthMaxAge,
+		QualityOkNumerator:   4,
+		QualityOkDenominator: 5,
+		MinScoredLoads:       1,
+		CountryGate:          true,
+		BackfillTierOffset:   ClientScoreCutoffTier + 1 + MaxClientTierDemerit,
+		// modern-first priority replaces the modern provider gate (owner
+		// decision 2026-10-28)
+		RankModernFirst:       true,
 		RequestSettingsMaxAge: time.Minute,
 		// The floor is pending the owner's confirmation. Measured on
 		// 2026-10-13, it exempts the countries whose probe failed
@@ -231,6 +247,7 @@ type egressIndexSettingsBlock struct {
 	CountryGate          *bool          `yaml:"country_gate"`
 	BackfillTierOffset   *int           `yaml:"backfill_tier_offset"`
 	RankMeasuredFirst    *bool          `yaml:"rank_measured_first"`
+	RankModernFirst      *bool          `yaml:"rank_modern_first"`
 }
 
 // The defaults with the overrides of provider.yml, read on every call like the
@@ -524,6 +541,9 @@ func decodeEgressIndexSettings() (*EgressIndexSettings, string) {
 	if overrides.RankMeasuredFirst != nil {
 		settings.RankMeasuredFirst = *overrides.RankMeasuredFirst
 	}
+	if overrides.RankModernFirst != nil {
+		settings.RankModernFirst = *overrides.RankModernFirst
+	}
 	return settings, modernGateFailure
 }
 
@@ -809,6 +829,11 @@ type providerEgressDecision struct {
 	qualityBeforeModernGate bool
 	speedBeforeModernGate   bool
 	modernOutcome           string
+	// the latest probe evidence classifies the provider modern at the
+	// filter's instant, whatever its buckets; false for a hard exclusion.
+	// Modern-first priority and modern-only requests read it
+	// (FP2-MODERN.md), through ClientScore.Modern.
+	modern bool
 }
 
 // Gathers what the rules read about one provider from this pass's bulk loads
@@ -884,6 +909,7 @@ func decideProviderEgress(facts *providerEgressFacts, egressTestEnabled bool) pr
 		}
 	}
 
+	modern := facts.modernOutcome == ProviderModernOutcomeModern
 	switch {
 	case facts.noUrlSuccess:
 		// Measured repeatedly and never carried a URL: out of every bucket
@@ -891,6 +917,7 @@ func decideProviderEgress(facts *providerEgressFacts, egressTestEnabled bool) pr
 		// first success brings the provider back on the next pass.
 		return providerEgressDecision{
 			reason: ProviderExcludedNoSuccess,
+			modern: modern,
 		}
 	case facts.lowUrlSuccess:
 		// Measured repeatedly with successes, but too few for the Online URL
@@ -899,6 +926,7 @@ func decideProviderEgress(facts *providerEgressFacts, egressTestEnabled bool) pr
 		// brings the provider back on the next pass.
 		return providerEgressDecision{
 			reason: ProviderExcludedLowSuccess,
+			modern: modern,
 		}
 	case facts.egressQuality == nil:
 		// no probe verdict at all, no negative mark but the exclusions and
@@ -908,6 +936,7 @@ func decideProviderEgress(facts *providerEgressFacts, egressTestEnabled bool) pr
 			reason:  ProviderExcludedUnprobed,
 			online:  true,
 			counted: true,
+			modern:  modern,
 		}
 	case !*facts.egressQuality:
 		// A measured failing ratio belongs to online, not quality or speed.
@@ -915,6 +944,7 @@ func decideProviderEgress(facts *providerEgressFacts, egressTestEnabled bool) pr
 			reason:  ProviderExcludedHealth,
 			online:  true,
 			counted: true,
+			modern:  modern,
 		}
 	default:
 		modernOutcome := facts.modernOutcome
@@ -936,6 +966,7 @@ func decideProviderEgress(facts *providerEgressFacts, egressTestEnabled bool) pr
 			counted:                 true,
 			qualityBeforeModernGate: quality,
 			speedBeforeModernGate:   speed,
+			modern:                  modern,
 		}
 		if quality || speed {
 			decision.modernOutcome = modernOutcome
