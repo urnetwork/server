@@ -1,0 +1,1559 @@
+// Synthetic owned files and captured process boundaries exercise the new pilot
+// adapter. No real campaign, provider, evaluator, service or entropy is used.
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"reflect"
+	"sort"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/urnetwork/server/model"
+)
+
+// Production reducers, rather than an accepted boolean, construct the expected
+// complete healthy slower result. Every id and scalar is synthetic.
+func newHeldOutPublicPilotCohort() (calibrationAnalysisCohort, calibrationAnalysisSettings) {
+	settings := defaultCalibrationAnalysisSettings()
+	settings.Cohorts, settings.MarginFloor = 1, .269
+	cohort := newCalibrationAnalysisFixture(settings)[0]
+	for index := range cohort.Candidates {
+		cohort.Candidates[index].diagnostics.RawScore = 130 + float64(index)
+	}
+	rebuildCalibrationAnalysisFixture(&cohort)
+	return cohort, settings
+}
+
+// A non-significant adverse direction is sufficient only when every native
+// gate/reducer passes; significance and the selected practical margin stay intact.
+func TestHeldOutPublicPilotAcceptsActualMeanAndMedianSlower(t *testing.T) {
+	cohort, settings := newHeldOutPublicPilotCohort()
+	before, err := json.Marshal(cohort.Result.Significance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateHeldOutPublicPilotDirection(cohort, settings); err != nil {
+		t.Fatal(err)
+	}
+	after, err := json.Marshal(cohort.Result.Significance)
+	if err != nil || !bytes.Equal(before, after) || cohort.Result.Significance.StatisticallySignificant {
+		t.Fatal("direction check changed significance or required significant worsening", err)
+	}
+}
+
+// Mean and median are independent predeclared conditions; neither alone wins.
+func TestHeldOutPublicPilotRejectsMeanOnlyWorsening(t *testing.T) {
+	cohort, settings := newHeldOutPublicPilotCohort()
+	for index := range cohort.Candidates {
+		value := 80.0
+		if index >= 6 {
+			value = 200
+		}
+		cohort.Candidates[index].diagnostics.RawScore = value
+	}
+	rebuildCalibrationAnalysisFixture(&cohort)
+	if cohort.Result.Significance.CandidateMeanRawScore <= cohort.Result.Significance.BaselineMeanRawScore ||
+		validateHeldOutPublicPilotDirection(cohort, settings) == nil {
+		t.Fatal("mean-only worsening accepted or synthetic root cause absent")
+	}
+}
+
+// A worse median with an improved run-level mean remains an unfavorable pilot.
+func TestHeldOutPublicPilotRejectsMedianOnlyWorsening(t *testing.T) {
+	cohort, settings := newHeldOutPublicPilotCohort()
+	for index := range cohort.Candidates {
+		value := 110.0
+		if index < 4 {
+			value = 1
+		}
+		cohort.Candidates[index].diagnostics.RawScore = value
+	}
+	rebuildCalibrationAnalysisFixture(&cohort)
+	if cohort.Result.RawScore <= aggregateBaseline(cohort.Baseline.Replicates).RawScore ||
+		validateHeldOutPublicPilotDirection(cohort, settings) == nil {
+		t.Fatal("median-only worsening accepted or synthetic root cause absent")
+	}
+}
+
+// Strict direction refuses equality rather than choosing a favorable subset.
+func TestHeldOutPublicPilotRejectsEqualDirection(t *testing.T) {
+	cohort, settings := newHeldOutPublicPilotCohort()
+	for index := range cohort.Candidates {
+		cohort.Candidates[index].diagnostics.RawScore = 100
+	}
+	rebuildCalibrationAnalysisFixture(&cohort)
+	if validateHeldOutPublicPilotDirection(cohort, settings) == nil {
+		t.Fatal("equal public pilot direction accepted")
+	}
+}
+
+// A valid slower scalar cannot waive a resource failure in the native reducer.
+func TestHeldOutPublicPilotRejectsGateFailure(t *testing.T) {
+	cohort, settings := newHeldOutPublicPilotCohort()
+	cohort.Candidates[0].resourcesOK = false
+	rebuildCalibrationAnalysisFixture(&cohort)
+	if validateHeldOutPublicPilotDirection(cohort, settings) == nil {
+		t.Fatal("resource gate waived by slower direction")
+	}
+}
+
+// R9 is an exact complete census, not an upper bound or a selectable subset.
+func TestHeldOutPublicPilotRejectsPartialReplicates(t *testing.T) {
+	cohort, settings := newHeldOutPublicPilotCohort()
+	cohort.Candidates = cohort.Candidates[:8]
+	if validateHeldOutPublicPilotDirection(cohort, settings) == nil {
+		t.Fatal("partial public pilot accepted")
+	}
+}
+
+// Controls and candidates must be independent executions even with valid scores.
+func TestHeldOutPublicPilotRejectsReusedControlIdentity(t *testing.T) {
+	cohort, settings := newHeldOutPublicPilotCohort()
+	cohort.Candidates[0].diagnostics.EvaluationId = cohort.ControlEvaluationIds[0]
+	rebuildCalibrationAnalysisFixture(&cohort)
+	if validateHeldOutPublicPilotDirection(cohort, settings) == nil {
+		t.Fatal("control execution reused as candidate")
+	}
+}
+
+// The build subset authenticator consumes genuine typed native source/builder
+// fixture sidecars, without inventing a not-yet-measured direction receipt.
+func TestHeldOutPublicPilotBuildAuthenticatesExistingNativeSidecars(t *testing.T) {
+	reference, request, release, rawLock := newHeldOutBridgePrebuiltFixture(t)
+	projection := heldOutPublicPilotReference{Role: reference.Role, Patch: reference.Patch, CandidateSha: reference.CandidateSha,
+		ImageId: reference.ImageId, BinarySha256: reference.BinarySha256, Build: reference.Build,
+		NativeBuild: reference.NativeBuild, Correctness: reference.Correctness}
+	if err := authenticateHeldOutPublicPilotBuild(projection, request,
+		heldOutPinnedFile{Path: filepath.Join(filepath.Dir(reference.NativeBuild.Path), "synthetic-lock.json"), Sha256: rawLock},
+		release, defaultHeldOutOperatorSettings()); err != nil {
+		t.Fatal(err)
+	}
+	if projection.nativeReference().Direction != (heldOutPinnedFile{}) {
+		t.Fatal("pre-pilot build projection invented measured direction")
+	}
+}
+
+// A source-sidecar omission fails before measurement, not after a timed control.
+func TestHeldOutPublicPilotBuildRejectsMissingNativeSidecar(t *testing.T) {
+	reference, request, release, rawLock := newHeldOutBridgePrebuiltFixture(t)
+	content, err := os.ReadFile(reference.Build.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var receipt heldOutReferenceQualification
+	if err := json.Unmarshal(content, &receipt); err != nil {
+		t.Fatal(err)
+	}
+	receipt.Evidence = receipt.Evidence[:1]
+	projection := heldOutPublicPilotReference{Role: reference.Role, Patch: reference.Patch, CandidateSha: reference.CandidateSha,
+		ImageId: reference.ImageId, BinarySha256: reference.BinarySha256, Build: heldOutOpJson(t, reference.Build.Path, receipt),
+		NativeBuild: reference.NativeBuild, Correctness: reference.Correctness}
+	if authenticateHeldOutPublicPilotBuild(projection, request, heldOutPinnedFile{Sha256: rawLock}, release, defaultHeldOutOperatorSettings()) == nil {
+		t.Fatal("missing native builder sidecar accepted")
+	}
+}
+
+// New native images cannot inherit an old or differently formatted scored policy.
+func TestHeldOutPublicPilotBuildRejectsPolicyDrift(t *testing.T) {
+	reference, request, release, rawLock := newHeldOutBridgePrebuiltFixture(t)
+	projection := heldOutPublicPilotReference{Role: reference.Role, Patch: reference.Patch, CandidateSha: reference.CandidateSha,
+		ImageId: reference.ImageId, BinarySha256: reference.BinarySha256, Build: reference.Build,
+		NativeBuild: reference.NativeBuild, Correctness: reference.Correctness}
+	request.PatchPolicy.MaxPatchBytes++
+	if authenticateHeldOutPublicPilotBuild(projection, request, heldOutPinnedFile{Sha256: rawLock}, release, defaultHeldOutOperatorSettings()) == nil {
+		t.Fatal("native policy drift accepted")
+	}
+}
+
+// The owned run fixture has no evaluator or process. Its exact terminal is the
+// same shape emitted by the installed cohort runner and native status recorder.
+type heldOutPublicPilotRunFixture struct {
+	Claim       heldOutPublicPilotClaim
+	Terminal    []byte
+	Execution   heldOutPublicPilotExecutionTerminal
+	Publication heldOutPublication
+	Plan        heldOutPublicPilotPlan
+	Config      heldOutPublicPilotExecutionConfig
+	Release     heldOutRelease
+	VerifiedAt  time.Time
+}
+
+// Native terminal/control metadata stays synthetic; only pure validators run.
+func newHeldOutPublicPilotRunFixture() heldOutPublicPilotRunFixture {
+	start := time.Unix(1700000000, 0).UTC()
+	planPin := heldOutPinnedFile{Path: "/synthetic.example/plan.json", Sha256: strings.Repeat("a", 64)}
+	publicationPin := heldOutPinnedFile{Path: "/synthetic.example/publication.json", Sha256: strings.Repeat("b", 64)}
+	requestPin := heldOutPinnedFile{Path: "/synthetic.example/worker-request.json", Sha256: strings.Repeat("c", 64)}
+	release := heldOutRelease{Runtime: &heldOutRuntimeRelease{BuilderSha256: strings.Repeat("d", 64), ValidatorSha256: strings.Repeat("e", 64)}}
+	terminal := []byte(fmt.Sprintf("start_utc=%s\ndeadline_utc=%s\nrequest_sha256=%s\ninstrument_revision=C2\nbuilder_sha256=%s\nvalidator_sha256=%s\nterminal_cleanup_verified\nevaluator_exit=0 duration_seconds=2\nend_utc=%s\n",
+		start.Format(time.RFC3339), start.Add(3*time.Hour).Format(time.RFC3339), requestPin.Sha256,
+		release.Runtime.BuilderSha256, release.Runtime.ValidatorSha256, start.Add(2*time.Second).Format(time.RFC3339)))
+	return heldOutPublicPilotRunFixture{Claim: heldOutPublicPilotClaim{Schema: 1, Kind: "sim-latency-public-pilot-one-use-claim",
+		Plan: planPin, Publication: publicationPin, Request: requestPin, ClaimedAt: start, OuterLimit: start.Add(defaultHeldOutPublicPilotSettings().OuterTimeout)},
+		Terminal: terminal, Execution: heldOutPublicPilotExecutionTerminal{Schema: 1, Kind: "sim-latency-public-pilot-runner-terminal",
+			Plan: planPin, Request: requestPin, Completed: start.Add(3 * time.Second), Success: true},
+		Publication: heldOutPublication{PlanSha256: planPin.Sha256, PublishedAt: start.Add(-time.Second), PulledPushed: true},
+		Plan:        heldOutPublicPilotPlan{PreparedAt: start.Add(-2 * time.Second), Request: requestPin},
+		Config:      heldOutPublicPilotExecutionConfig{Plan: planPin, Publication: publicationPin}, Release: release, VerifiedAt: start.Add(time.Minute)}
+}
+
+// A valid exact original window passes without any new measurement mechanism.
+func TestHeldOutPublicPilotRunAcceptsBoundedOriginalTerminal(t *testing.T) {
+	self := newHeldOutPublicPilotRunFixture()
+	if _, _, err := validateHeldOutPublicPilotRun(self.Claim, self.Terminal, self.Execution, self.Publication, self.Plan,
+		self.Config, self.Release, self.VerifiedAt, 10800); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A terminal from a different request cannot be relabeled with this plan.
+func TestHeldOutPublicPilotRunRejectsCrossPilotTerminal(t *testing.T) {
+	self := newHeldOutPublicPilotRunFixture()
+	self.Terminal = bytes.ReplaceAll(self.Terminal, []byte(self.Plan.Request.Sha256), []byte(strings.Repeat("f", 64)))
+	if _, _, err := validateHeldOutPublicPilotRun(self.Claim, self.Terminal, self.Execution, self.Publication, self.Plan,
+		self.Config, self.Release, self.VerifiedAt, 10800); err == nil {
+		t.Fatal("cross-pilot terminal accepted")
+	}
+}
+
+// Runtime cleanup is mandatory even if every score scalar looks favorable.
+func TestHeldOutPublicPilotRunRejectsMissingCleanup(t *testing.T) {
+	self := newHeldOutPublicPilotRunFixture()
+	self.Terminal = bytes.ReplaceAll(self.Terminal, []byte("terminal_cleanup_verified\n"), nil)
+	if _, _, err := validateHeldOutPublicPilotRun(self.Claim, self.Terminal, self.Execution, self.Publication, self.Plan,
+		self.Config, self.Release, self.VerifiedAt, 10800); err == nil {
+		t.Fatal("missing cleanup accepted")
+	}
+}
+
+// A longer supplied budget is not a recovery mode for the original invocation.
+func TestHeldOutPublicPilotRunRejectsExtendedBudget(t *testing.T) {
+	self := newHeldOutPublicPilotRunFixture()
+	if _, _, err := validateHeldOutPublicPilotRun(self.Claim, self.Terminal, self.Execution, self.Publication, self.Plan,
+		self.Config, self.Release, self.VerifiedAt, 10801); err == nil {
+		t.Fatal("extended measurement budget accepted")
+	}
+}
+
+// Later publication cannot backdate a pre-data experiment.
+func TestHeldOutPublicPilotRunRejectsPostDataPublication(t *testing.T) {
+	self := newHeldOutPublicPilotRunFixture()
+	self.Publication.PublishedAt = self.Claim.ClaimedAt.Add(time.Second)
+	if _, _, err := validateHeldOutPublicPilotRun(self.Claim, self.Terminal, self.Execution, self.Publication, self.Plan,
+		self.Config, self.Release, self.VerifiedAt, 10800); err == nil {
+		t.Fatal("post-data publication accepted")
+	}
+}
+
+// A failed runner remains failed even if retained data could otherwise replay.
+func TestHeldOutPublicPilotRunRejectsFailedInvocation(t *testing.T) {
+	self := newHeldOutPublicPilotRunFixture()
+	self.Execution.Success, self.Execution.Failure = false, "synthetic runner failure"
+	if _, _, err := validateHeldOutPublicPilotRun(self.Claim, self.Terminal, self.Execution, self.Publication, self.Plan,
+		self.Config, self.Release, self.VerifiedAt, 10800); err == nil {
+		t.Fatal("failed invocation accepted")
+	}
+}
+
+// A replay observation is actual native evidence only when its own containment,
+// unique owner, image and cleanup contract all pass the existing validator.
+func TestHeldOutPublicPilotRejectsTamperedReplayCleanup(t *testing.T) {
+	image := "sha256:" + strings.Repeat("1", 64)
+	observations := []calibrationReplayObservation{}
+	for index := 0; index < 2; index++ {
+		observations = append(observations, calibrationReplayObservation{ImageId: image, ContainerId: fmt.Sprintf("%064x", index+1),
+			Owner: fmt.Sprintf("%064x", index+11), InspectionSha256: strings.Repeat("2", 64), TerminalSha256: strings.Repeat("3", 64),
+			ContainerCleanupVerified: true})
+	}
+	if err := validateHeldOutBridgeReplays(observations, image); err != nil {
+		t.Fatal(err)
+	}
+	observations[1].ContainerCleanupVerified = false
+	if validateHeldOutBridgeReplays(observations, image) == nil {
+		t.Fatal("tampered replay cleanup accepted")
+	}
+}
+
+// The after reducer reads only generated synthetic files and the existing
+// before-builder fixture. No native public provider generator is invoked here.
+type heldOutPublicPilotMergeFixture struct {
+	Before    heldOutExclusions
+	Request   heldOutRequest
+	Plan      heldOutPublicPilotPlan
+	PlanPin   heldOutPinnedFile
+	Providers heldOutPinnedFile
+	Reviewed  []heldOutPinnedFile
+	At        time.Time
+	Original  *heldOutFreshExclusionBuilderFixture
+}
+
+// The deliberately minimal YAML is census-only synthetic data, not a runnable
+// pilot provider profile or a substitute for the preflight generator validator.
+func newHeldOutPublicPilotMergeFixture(t *testing.T) heldOutPublicPilotMergeFixture {
+	t.Helper()
+	original := newHeldOutFreshExclusionBuilderFixture(t)
+	beforePin, err := prepareHeldOutFreshSingleExclusions(original.Config, original.Release, original.Settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := readHeldOutPinned(beforePin, original.Settings.MaximumBytes, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var before heldOutExclusions
+	if err := decodeHeldOutComplete(content, &before, "synthetic before catalog"); err != nil {
+		t.Fatal(err)
+	}
+	providers := heldOutOpWrite(t, filepath.Join(original.Root, "synthetic-public-providers.yml"),
+		[]byte(fmt.Sprintf("seed: %d\n", original.Facts.PublicPilotSeed)))
+	request := heldOutRequest{RoundSeedHex: fmt.Sprintf("%064x", original.Facts.PublicPilotSeed),
+		ProvidersPath: providers.Path, ProvidersSha256: providers.Sha256}
+	requestPin := heldOutOpJson(t, filepath.Join(original.Root, "synthetic-public-request.json"), request)
+	plan := heldOutPublicPilotPlan{Schema: 1, Kind: "sim-latency-fresh-public-regression-pilot-plan", Protocol: heldOutProtocolFreshSingleB,
+		PublicSeed: original.Facts.PublicPilotSeed, ProvidersSha256: providers.Sha256, Request: requestPin}
+	planPin := heldOutOpJson(t, filepath.Join(original.Root, "synthetic-public-plan.json"), plan)
+	return heldOutPublicPilotMergeFixture{Before: before, Request: request, Plan: plan, PlanPin: planPin, Providers: providers,
+		Reviewed: append(append([]heldOutPinnedFile{}, before.Sources...), requestPin, providers, planPin),
+		At:       original.Config.ReviewedAt.Add(time.Hour), Original: original}
+}
+
+// All historical sets survive, the direct seed/raw label/provider digest are
+// added exactly, and no invented public seed commitment enters the catalog.
+func TestHeldOutPublicPilotAfterMergePreservesCompleteNativeCensus(t *testing.T) {
+	self := newHeldOutPublicPilotMergeFixture(t)
+	merged, err := mergeHeldOutPublicPilotExclusions(self.Before, self.Request, self.Plan, self.PlanPin, self.Providers,
+		self.Reviewed, self.At, self.Original.Settings.MaximumBytes)
+	if err != nil || len(merged.PrivateSeedHexes) != len(self.Before.PrivateSeedHexes)+1 ||
+		len(merged.EffectiveSeeds) != len(self.Before.EffectiveSeeds)+1 || len(merged.ProviderDigests) != len(self.Before.ProviderDigests)+1 ||
+		!reflect.DeepEqual(merged.RetiredCommitments, self.Before.RetiredCommitments) {
+		t.Fatal("after-public merge omitted identities or invented a commitment", err)
+	}
+	if err := validateHeldOutExclusions(*merged, self.Original.Settings.MaximumBytes); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Provider omission cannot be masked by a request's declared provider digest.
+func TestHeldOutPublicPilotAfterMergeRejectsOmittedProviderSource(t *testing.T) {
+	self := newHeldOutPublicPilotMergeFixture(t)
+	reviewed := []heldOutPinnedFile{}
+	for _, pin := range self.Reviewed {
+		if pin != self.Providers {
+			reviewed = append(reviewed, pin)
+		}
+	}
+	if _, err := mergeHeldOutPublicPilotExclusions(self.Before, self.Request, self.Plan, self.PlanPin, self.Providers,
+		reviewed, self.At, self.Original.Settings.MaximumBytes); err == nil {
+		t.Fatal("provider source omission accepted")
+	}
+}
+
+// Another pilot's provider path/digest is not the actual completed workload.
+func TestHeldOutPublicPilotAfterMergeRejectsCrossPilotProvider(t *testing.T) {
+	self := newHeldOutPublicPilotMergeFixture(t)
+	self.Providers.Path += ".other"
+	if _, err := mergeHeldOutPublicPilotExclusions(self.Before, self.Request, self.Plan, self.PlanPin, self.Providers,
+		self.Reviewed, self.At, self.Original.Settings.MaximumBytes); err == nil {
+		t.Fatal("cross-pilot provider accepted")
+	}
+}
+
+// Source pins, not copied seed values, detect drift in the preserved old second
+// position when the completed public workload is later added.
+func TestHeldOutPublicPilotAfterMergeRejectsOriginalSeedPlanDrift(t *testing.T) {
+	self := newHeldOutPublicPilotMergeFixture(t)
+	heldOutOpWrite(t, self.Original.Facts.OriginalPrivatePlan.Path, []byte("synthetic changed original ancestry\n"))
+	if _, err := mergeHeldOutPublicPilotExclusions(self.Before, self.Request, self.Plan, self.PlanPin, self.Providers,
+		self.Reviewed, self.At, self.Original.Settings.MaximumBytes); err == nil {
+		t.Fatal("old original seed plan drift accepted")
+	}
+}
+
+// No output path may replace existing evidence, even inside an owned directory.
+func TestHeldOutPublicPilotImmutableOutputRejectsOverwrite(t *testing.T) {
+	root := newCalibrationFileRoot(t)
+	path := filepath.Join(root, "synthetic-proof.json")
+	before := []byte("synthetic immutable evidence\n")
+	pin, err := writeHeldOutPublicPilotImmutable(path, before)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writeHeldOutPublicPilotImmutable(path, []byte("replacement\n")); err == nil {
+		t.Fatal("immutable public-pilot evidence overwritten")
+	}
+	content, err := readHeldOutPinned(pin, 1024, false)
+	if err != nil || !bytes.Equal(content, before) {
+		t.Fatal("original immutable evidence changed", err)
+	}
+}
+
+// A partial or failed proof is never converted to the existing accepted
+// measured-direction schema merely by supplying an accepted boolean.
+func TestHeldOutPublicPilotDirectionRejectsPartialProof(t *testing.T) {
+	root := newCalibrationFileRoot(t)
+	proofPin := heldOutOpWrite(t, filepath.Join(root, "synthetic-proof.json"), []byte("{}\n"))
+	proof := heldOutPublicPilotProof{Accepted: true, Reasons: []string{}}
+	if _, err := heldOutPublicPilotDirection(proofPin, proof, heldOutPublicPilotPlan{}, heldOutRelease{}); err == nil {
+		t.Fatal("partial native proof created measured direction")
+	}
+}
+
+// Missing full lifecycle evidence fails without touching native I/O callbacks.
+func TestHeldOutPublicPilotVerifierRequiresNativeDependencies(t *testing.T) {
+	calls := 0
+	_, err := verifyHeldOutPublicPilot(context.Background(), heldOutPublicPilotExecutionConfig{}, heldOutRelease{},
+		defaultHeldOutOperatorSettings(), nil, func() []calibrationReplayObservation { calls++; return nil }, time.Now,
+		func(context.Context, string, ...string) ([]byte, error) {
+			calls++
+			return nil, errors.New("unexpected synthetic command")
+		})
+	if err == nil || calls != 0 {
+		t.Fatal("missing native replay dependency reached a claim or command", err)
+	}
+}
+
+// Captured Git/memory process boundaries leave every native plan/provider/
+// policy/build/source validator active over wholly synthetic owned artifacts.
+type heldOutPublicPilotAdmissionFixture struct {
+	Base                     *heldOutFreshSingleFixture
+	Plan                     heldOutPublicPilotPlan
+	Config                   heldOutPublicPilotExecutionConfig
+	PublishedContentBytesKVs map[string][]byte
+	Clock                    time.Time
+	Invocations              int
+}
+
+// Each artifact is independently bound to an existing publication schema; the
+// fake reader supplies only the committed bytes, never a permissive boolean.
+func (self *heldOutPublicPilotAdmissionFixture) publish(t *testing.T, artifact heldOutPinnedFile, at time.Time) heldOutPinnedFile {
+	t.Helper()
+	content, err := readHeldOutPinned(artifact, self.Base.Base.Preparation.Settings.MaximumBytes, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relative := fmt.Sprintf("synthetic-published-%02d.json", len(self.PublishedContentBytesKVs))
+	self.PublishedContentBytesKVs[relative] = content
+	op := self.Base.Base.Preparation
+	return heldOutOpJson(t, filepath.Join(op.Root, relative+".publication.json"), heldOutPublication{
+		Schema: 1, Kind: "sim-latency-held-out-plan-publication", PlanSha256: artifact.Sha256, PublishedAt: at,
+		Commit: strings.Repeat("c", 40), Repository: op.Root, PlanPath: relative, RemoteRef: "refs/remotes/origin/synthetic",
+		PulledPushed: true, Evidence: []heldOutPinnedFile{self.Plan.Tool}})
+}
+
+// No process is executed. Unexpected calls fail rather than silently simulating
+// an evaluator, Docker metadata, scoring or any native source-context operation.
+func (self *heldOutPublicPilotAdmissionFixture) read(_ context.Context, program string, arguments ...string) ([]byte, error) {
+	if program == self.Base.Facts.MemoryExecutable.Path {
+		return []byte(`{"mode":"memory-preflight-only","required_management_bytes":8589934592,"evaluation_limit_bytes":103079215104,"evidence_limit_bytes":5368709120,"management_reserve_bytes":25769803776}`), nil
+	}
+	if program != "/usr/bin/git" {
+		return nil, errors.New("unexpected synthetic prerequisite program")
+	}
+	for index, argument := range arguments {
+		if argument == "merge-base" {
+			return []byte{}, nil
+		}
+		if argument == "show" && index+1 < len(arguments) {
+			_, path, ok := strings.Cut(arguments[index+1], ":")
+			if ok {
+				if content, found := self.PublishedContentBytesKVs[path]; found {
+					return bytes.Clone(content), nil
+				}
+			}
+		}
+	}
+	return nil, errors.New("unexpected synthetic Git prerequisite")
+}
+
+// Reuses the existing small direct-public provider fixture and complete native
+// build sidecars. This is not the real public seed or a real generated campaign.
+func newHeldOutPublicPilotAdmissionFixture(t *testing.T) *heldOutPublicPilotAdmissionFixture {
+	return newHeldOutPublicPilotAdmissionFixtureForSeed(t, 20200103)
+}
+
+// Alternate fixed public integers change only wholly synthetic provider input;
+// the native integer mapping and original two-position ancestry stay separate.
+func newHeldOutPublicPilotAdmissionFixtureForSeed(t *testing.T, publicSeed int64) *heldOutPublicPilotAdmissionFixture {
+	t.Helper()
+	base := newHeldOutFreshSingleFixture(t)
+	op := base.Base.Preparation
+	oldPublicSeed := base.Facts.PublicPilotSeed
+	base.Facts.PublicPilotSeed = publicSeed
+	for index, seed := range base.Exclusions.EffectiveSeeds {
+		if seed == oldPublicSeed {
+			base.Exclusions.EffectiveSeeds[index] = publicSeed
+		}
+	}
+	// The older composed fixture intentionally needed only public ancestry.
+	// This adapter also reconstructs the exact strict native builder output.
+	oldPrivate := base.Facts.OriginalPrivatePlan
+	privateBytes, err := readHeldOutPinned(oldPrivate, op.Settings.MaximumBytes, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var original heldOutPrivatePlan
+	if err := json.Unmarshal(privateBytes, &original); err != nil {
+		t.Fatal(err)
+	}
+	original.Config.Protocol, original.Config.PrivateRoot = heldOutProtocolThreeABridgeTwoB, base.Facts.OriginalRoot
+	original.Config.GeneratorFiles, original.Config.Scripts = []heldOutGeneratorFile{}, []heldOutPinnedFile{}
+	original.References = []heldOutReference{}
+	base.Facts.OriginalPrivatePlan = heldOutOpJson(t, oldPrivate.Path, original)
+	publicBytes, err := readHeldOutPinned(base.Facts.OriginalPublicPlan, op.Settings.MaximumBytes, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var public heldOutPublicPlan
+	if err := decodeHeldOutComplete(publicBytes, &public, "synthetic original public ancestry"); err != nil {
+		t.Fatal(err)
+	}
+	public.PrivatePlanSha256 = base.Facts.OriginalPrivatePlan.Sha256
+	base.Facts.OriginalPublicPlan = heldOutOpJson(t, base.Facts.OriginalPublicPlan.Path, public)
+	for index, pin := range base.Exclusions.Sources {
+		if pin == oldPrivate {
+			base.Exclusions.Sources[index] = base.Facts.OriginalPrivatePlan
+		}
+	}
+	self := &heldOutPublicPilotAdmissionFixture{Base: base, PublishedContentBytesKVs: map[string][]byte{}, Clock: time.Unix(1700000210, 0).UTC()}
+	preflight := newHeldOutFreshSinglePublicPilotConfig(t, base)
+	requestBytes, err := readHeldOutPinned(preflight.Request, op.Settings.MaximumBytes, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var request heldOutRequest
+	if err := decodeHeldOutComplete(requestBytes, &request, "synthetic original public request"); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(op.Root, "synthetic-public-run")
+	containerInventory, networkInventory := heldOutPublicPilotTestInventories()
+	inventoryDigest, err := heldOutPublicPilotInventoryDigest(containerInventory, networkInventory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerBytes, err := readHeldOutPinned(heldOutPinnedFile{Path: request.ProvidersPath, Sha256: request.ProvidersSha256}, op.Settings.MaximumBytes, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := heldOutOpWrite(t, filepath.Join(root, "artifacts", "providers.yml"), providerBytes)
+	request.JobId, request.RoundId = heldOutOpId(9901), heldOutOpId(9902)
+	request.ArtifactDirectory, request.ProvidersPath, request.ProvidersSha256 = filepath.Join(root, "artifacts"), provider.Path, provider.Sha256
+	request.RoundSeedHex = fmt.Sprintf("%064x", base.Facts.PublicPilotSeed)
+	request.PatchPath = filepath.Join(request.ArtifactDirectory, "canonical.patch")
+	priorBytes, _, err := readHeldOutProduced(filepath.Join(op.Root, "inputs"), "exclusions.json", op.Settings.MaximumBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var prior heldOutExclusions
+	if err := decodeHeldOutComplete(priorBytes, &prior, "synthetic frozen historical census"); err != nil {
+		t.Fatal(err)
+	}
+	extraRaw := fmt.Sprintf("%064x", 7302)
+	extraProvider, extraCommitment := heldOutDigest([]byte("synthetic additional historical providers")), heldOutDigest([]byte("synthetic additional historical commitment"))
+	extraSource := heldOutOpJson(t, filepath.Join(op.Root, "inputs", "synthetic-additional-historical-source.json"), map[string]any{
+		"round_seed_hex": extraRaw, "public_workload_seed": int64(20261025), "providers_sha256": extraProvider, "seed_commitment": extraCommitment})
+	prior.Sources = append(prior.Sources, extraSource)
+	prior.PrivateSeedHexes = append(prior.PrivateSeedHexes, extraRaw)
+	prior.EffectiveSeeds = append(prior.EffectiveSeeds, 20261025)
+	prior.ProviderDigests = append(prior.ProviderDigests, extraProvider)
+	prior.RetiredCommitments = append(prior.RetiredCommitments, extraCommitment)
+	priorPin := heldOutOpJson(t, filepath.Join(op.Root, "inputs", "synthetic-frozen-historical-census.json"), prior)
+	beforeConfig := heldOutFreshSingleExclusionBuildConfig{Schema: 1, Kind: "sim-latency-held-out-fresh-single-exclusion-build", Protocol: heldOutProtocolFreshSingleB,
+		Stage: "before_public_pilot", Approval: preflight.Approval, PriorExclusions: priorPin,
+		ReviewedAt: time.Unix(1700000190, 0).UTC(), ReviewedSources: append(append([]heldOutPinnedFile{}, prior.Sources...), base.Facts.OriginalPrivatePlan, base.Facts.OriginalPublicPlan),
+		OutputPath: filepath.Join(op.Root, "inputs", "synthetic-native-before-census.json")}
+	preflight.Exclusions, err = prepareHeldOutFreshSingleExclusions(beforeConfig, op.Release, op.Settings)
+	if err != nil {
+		t.Fatal("synthetic before-census must reach the unchanged native builder", err)
+	}
+	tool := heldOutOpWrite(t, filepath.Join(op.Root, "synthetic-unexecuted-public-tool"), []byte("synthetic nonexecuted helper bytes\n"))
+	self.Plan = heldOutPublicPilotPlan{Schema: 1, Kind: "sim-latency-fresh-public-regression-pilot-plan", Protocol: heldOutProtocolFreshSingleB,
+		ApiImageSynthetic: true, WorkerImageSynthetic: true, HostQualificationSynthetic: true,
+		OriginalHostInventorySha256: inventoryDigest,
+		PreparedAt:                  time.Unix(1700000200, 0).UTC(), Root: root, PublicSeed: base.Facts.PublicPilotSeed, ProvidersSha256: provider.Sha256,
+		Approval: preflight.Approval, BeforeExclusions: preflight.Exclusions, ReferencePolicy: base.Declaration.ReferencePolicy,
+		SourceLock: op.Config.SourceLock, GeneratorFiles: preflight.GeneratorFiles, References: []heldOutPublicPilotReference{},
+		Tool: tool, PrerequisitePublications: []heldOutPublicPilotPublishedEvidence{}}
+	for _, reference := range base.References {
+		self.Plan.References = append(self.Plan.References, heldOutPublicPilotReference{Role: reference.Role, Patch: reference.Patch,
+			CandidateSha: reference.CandidateSha, ImageId: reference.ImageId, BinarySha256: reference.BinarySha256,
+			Build: reference.Build, NativeBuild: reference.NativeBuild, Correctness: reference.Correctness})
+		if reference.Role == "worse" {
+			patch, err := readHeldOutPinned(reference.Patch, op.Settings.MaximumBytes, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			heldOutOpWrite(t, request.PatchPath, patch)
+			request.PatchSha256 = reference.Patch.Sha256
+		}
+	}
+	self.Plan.Request = heldOutOpJson(t, filepath.Join(root, "artifacts", "worker-request.json"), request)
+	self.Plan.BeforeCensusConfig = heldOutOpJson(t, filepath.Join(op.Root, "synthetic-before-census-configuration.json"),
+		beforeConfig)
+	source := heldOutOpWrite(t, filepath.Join(op.Root, "synthetic-tool-source.txt"), []byte("synthetic public adapter source\n"))
+	evidence := []heldOutPinnedFile{}
+	for index := 0; index < 3; index++ {
+		evidence = append(evidence, heldOutOpWrite(t, filepath.Join(op.Root, fmt.Sprintf("synthetic-tool-pass-%d.txt", index)), []byte("synthetic source-unit qualification\n")))
+	}
+	self.Plan.ToolQualification = heldOutOpJson(t, filepath.Join(op.Root, "synthetic-public-tool-qualification.json"),
+		heldOutToolQualification{Schema: 1, Kind: "sim-latency-held-out-operator-qualification", Accepted: true, Protocol: heldOutProtocolFreshSingleB,
+			BinarySha256: tool.Sha256, AnalyzerSource: op.Release.AnalyzerSource, BaseSha: op.Release.BaseSha,
+			SourceLockSha256: op.Release.SourceLockSha256, GoVersion: "go1.27.3", Race: true, ConsecutivePasses: 3,
+			TestsPerPass: heldOutPublicPilotRequiredTests, Sources: []heldOutPinnedFile{source}, Evidence: evidence})
+	targets := []heldOutPinnedFile{self.Plan.ToolQualification}
+	for _, reference := range self.Plan.References {
+		targets = append(targets, reference.Build, reference.Correctness)
+	}
+	for _, pin := range targets {
+		self.Plan.PrerequisitePublications = append(self.Plan.PrerequisitePublications, heldOutPublicPilotPublishedEvidence{
+			Artifact: pin, Publication: self.publish(t, pin, self.Plan.PreparedAt.Add(-time.Second))})
+	}
+	planPin := heldOutOpJson(t, filepath.Join(root, "pilot-plan.json"), self.Plan)
+	self.Config = heldOutPublicPilotExecutionConfig{Schema: 1, Kind: "sim-latency-public-pilot-execution", Plan: planPin,
+		Publication: self.publish(t, planPin, self.Plan.PreparedAt.Add(time.Second)),
+		ProofPath:   filepath.Join(root, "pilot-proof.json"), DirectionPath: filepath.Join(root, "pilot-direction.json")}
+	return self
+}
+
+// Complete source/native/provider/Git preconditions pass without creating an
+// execution claim or consuming the synthetic private entropy/generator hooks.
+func TestHeldOutPublicPilotCompleteSyntheticAdmissionPasses(t *testing.T) {
+	self := newHeldOutPublicPilotAdmissionFixture(t)
+	op := self.Base.Base.Preparation
+	if _, _, err := readHeldOutPublicPilot(t.Context(), self.Config, op.Release, op.Settings, self.read); err != nil {
+		t.Fatal("complete synthetic pilot precommit refused", err)
+	}
+	if self.Base.Base.Entropy.Calls != 0 || op.Generated != 0 {
+		t.Fatal("public pilot admission consumed hidden entropy or private generation")
+	}
+	if _, err := os.Lstat(filepath.Join(self.Plan.Root, "execution.claim.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("admission claimed execution", err)
+	}
+}
+
+// A cached baseline refuses before the one-use claim or any invocation.
+func TestHeldOutPublicPilotExecutionRejectsReusedBaselineBeforeClaim(t *testing.T) {
+	self := newHeldOutPublicPilotAdmissionFixture(t)
+	op := self.Base.Base.Preparation
+	heldOutOpWrite(t, filepath.Join(self.Plan.Root, "artifacts", "baseline.json"), []byte("synthetic cached baseline\n"))
+	err := executeHeldOutPublicPilot(t.Context(), self.Config, op.Release, op.Settings, func() time.Time { return self.Clock }, self.read,
+		func(context.Context, heldOutPublicPilotPlan, heldOutRelease, heldOutOperatorSettings, heldOutPublicPilotSettings) error {
+			self.Invocations++
+			return nil
+		})
+	if err == nil || self.Invocations != 0 {
+		t.Fatal("cached baseline reached runner or passed admission", err)
+	}
+	if _, err := os.Lstat(filepath.Join(self.Plan.Root, "execution.claim.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("cached baseline created an execution claim", err)
+	}
+}
+
+// Failure retains the first immutable claim and terminal result; a second call
+// cannot restart the runner or replace the original attempted experiment.
+func TestHeldOutPublicPilotExecutionFailureIsOneUse(t *testing.T) {
+	self := newHeldOutPublicPilotAdmissionFixture(t)
+	op := self.Base.Base.Preparation
+	invoke := func(context.Context, heldOutPublicPilotPlan, heldOutRelease, heldOutOperatorSettings, heldOutPublicPilotSettings) error {
+		self.Invocations++
+		return errors.New("synthetic retained runner failure")
+	}
+	if err := executeHeldOutPublicPilot(t.Context(), self.Config, op.Release, op.Settings, func() time.Time { return self.Clock }, self.read, invoke); err == nil {
+		t.Fatal("synthetic failed invocation accepted")
+	}
+	claim, err := os.ReadFile(filepath.Join(self.Plan.Root, "execution.claim.json"))
+	if err != nil {
+		t.Fatal("failed invocation lost its claim", err)
+	}
+	if err := executeHeldOutPublicPilot(t.Context(), self.Config, op.Release, op.Settings, func() time.Time { return self.Clock }, self.read, invoke); err == nil || self.Invocations != 1 {
+		t.Fatal("failed public pilot was retried", err)
+	}
+	again, err := os.ReadFile(filepath.Join(self.Plan.Root, "execution.claim.json"))
+	if err != nil || !bytes.Equal(claim, again) {
+		t.Fatal("one-use claim changed", err)
+	}
+}
+
+// GNU timeout accepts single-suffix numeric durations, not combined Go duration
+// strings. The exact original watchdog/grace reaches the installed runner.
+func TestHeldOutPublicPilotRunnerUsesExactSupportedTimeoutArguments(t *testing.T) {
+	plan := heldOutPublicPilotPlan{Root: "/synthetic.example/public-pilot", Request: heldOutPinnedFile{Sha256: strings.Repeat("a", 64)}}
+	release := heldOutRelease{Runtime: &heldOutRuntimeRelease{Runner: heldOutPinnedFile{Path: "/synthetic.example/qualified-cohort-runner.sh"}}}
+	program, arguments, err := heldOutPublicPilotRunnerInvocation(plan, release, defaultHeldOutPublicPilotSettings())
+	if err != nil || program != "/usr/bin/timeout" || !reflect.DeepEqual(arguments, []string{
+		"--signal=TERM", "--kill-after=15s", "10860s", release.Runtime.Runner.Path, plan.Root, plan.Request.Sha256}) {
+		t.Fatal("runner watchdog arguments changed or use unsupported combined units", program, arguments, err)
+	}
+}
+
+// Adapter settings cannot extend the original runner safety deadline.
+func TestHeldOutPublicPilotRunnerRejectsExtendedWatchdog(t *testing.T) {
+	settings := defaultHeldOutPublicPilotSettings()
+	settings.OuterTimeout += time.Second
+	if _, _, err := heldOutPublicPilotRunnerInvocation(heldOutPublicPilotPlan{},
+		heldOutRelease{Runtime: &heldOutRuntimeRelease{}}, settings); err == nil {
+		t.Fatal("extended public pilot watchdog accepted")
+	}
+}
+
+// Generated ids and the existing closed local-fixture name contract form
+// deterministic raw snapshots; no Docker command or actual host read occurs.
+func TestHeldOutPublicPilotInventoryBindsActualObjectIds(t *testing.T) {
+	containerBytes, networkBytes := heldOutPublicPilotTestInventories()
+	containers, networks := string(containerBytes), string(networkBytes)
+	digest, err := heldOutPublicPilotInventoryDigest([]byte(containers), []byte(networks))
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := strings.Replace(containers, fmt.Sprintf("%064x", 1), fmt.Sprintf("%064x", 99), 1)
+	other, err := heldOutPublicPilotInventoryDigest([]byte(changed), []byte(networks))
+	if err != nil || other == digest {
+		t.Fatal("raw inventory object ids are not bound", err)
+	}
+	if _, err := heldOutPublicPilotInventoryDigest([]byte(containers), []byte(networks+fmt.Sprintf("%064x\tsynthetic-extra\n", 100))); err == nil {
+		t.Fatal("extra network accepted")
+	}
+}
+
+// Native name policy is reused with deterministic generated ids; no original
+// host identity or external inventory is read into any synthetic fixture.
+func heldOutPublicPilotTestInventories() ([]byte, []byte) {
+	containerNames, networkNames := heldOutPublicPilotInventoryNames()
+	containers, networks := "", ""
+	for index, name := range containerNames {
+		containers += fmt.Sprintf("%064x\t%s\n", index+1, name)
+	}
+	for index, name := range networkNames {
+		networks += fmt.Sprintf("%064x\t%s\n", index+11, name)
+	}
+	return []byte(containers), []byte(networks)
+}
+
+// The fake runner owns only metadata files. The real native job authenticator
+// must subsequently reject absent R9 raw data instead of accepting this envelope.
+func (self *heldOutPublicPilotAdmissionFixture) invokeEnvelope(t *testing.T) func(context.Context, heldOutPublicPilotPlan, heldOutRelease, heldOutOperatorSettings, heldOutPublicPilotSettings) error {
+	t.Helper()
+	return func(_ context.Context, plan heldOutPublicPilotPlan, release heldOutRelease, _ heldOutOperatorSettings, _ heldOutPublicPilotSettings) error {
+		self.Invocations++
+		start, end := self.Clock, self.Clock.Add(2*time.Second)
+		terminal := []byte(fmt.Sprintf("start_utc=%s\ndeadline_utc=%s\nrequest_sha256=%s\ninstrument_revision=C2\nbuilder_sha256=%s\nvalidator_sha256=%s\nterminal_cleanup_verified\nevaluator_exit=0 duration_seconds=2\nend_utc=%s\n",
+			start.Format(time.RFC3339), start.Add(3*time.Hour).Format(time.RFC3339), plan.Request.Sha256,
+			release.Runtime.BuilderSha256, release.Runtime.ValidatorSha256, end.Format(time.RFC3339)))
+		heldOutOpWrite(t, filepath.Join(plan.Root, "manager-terminal.log"), terminal)
+		containers, networks := heldOutPublicPilotTestInventories()
+		evidence := []heldOutPinnedFile{}
+		for _, phase := range []string{"before", "after"} {
+			evidence = append(evidence,
+				heldOutOpWrite(t, filepath.Join(plan.Root, "host-"+phase+"-containers.tsv"), containers),
+				heldOutOpWrite(t, filepath.Join(plan.Root, "host-"+phase+"-networks.tsv"), networks))
+		}
+		heldOutOpJson(t, filepath.Join(plan.Root, "host-comparison.json"), heldOutPublicPilotHostProof{
+			Schema: 1, Kind: "sim-latency-public-pilot-host-restoration", Before: plan.OriginalHostInventorySha256,
+			After: plan.OriginalHostInventorySha256, Evidence: evidence})
+		self.Clock = end.Add(time.Second)
+		return nil
+	}
+}
+
+// Complete preconditions, pushed plan, claim, terminal and raw inventory do not
+// substitute for actual complete native R9 worker/evidence/scorer inputs.
+func TestHeldOutPublicPilotVerifierRejectsEnvelopeWithoutRawR9(t *testing.T) {
+	self := newHeldOutPublicPilotAdmissionFixture(t)
+	op := self.Base.Base.Preparation
+	if err := executeHeldOutPublicPilot(t.Context(), self.Config, op.Release, op.Settings,
+		func() time.Time { return self.Clock }, self.read, self.invokeEnvelope(t)); err != nil {
+		t.Fatal("synthetic invocation envelope failed before its intended raw-data refusal", err)
+	}
+	replayCalls := 0
+	proof, err := verifyHeldOutPublicPilot(t.Context(), self.Config, op.Release, op.Settings,
+		func(context.Context, string, ScoreInputs, string, string, bool) ([]byte, error) {
+			replayCalls++
+			return nil, errors.New("unexpected replay")
+		},
+		func() []calibrationReplayObservation { return []calibrationReplayObservation{} }, func() time.Time { return self.Clock.Add(time.Second) }, self.read)
+	if err == nil || proof == nil || proof.Accepted || proof.StartedAt.IsZero() || proof.HostInventory.Sha256 == "" || replayCalls != 0 {
+		t.Fatal("metadata envelope replaced raw R9 evidence or refusal missed its intended layer", err)
+	}
+}
+
+// Even a separately hash-pinned/published accepted label and direction cannot
+// retire the workload: the complete native recheck still requires the raw R9 set.
+func TestHeldOutPublicPilotAfterRejectsAcceptedLabelWithoutRawR9(t *testing.T) {
+	self := newHeldOutPublicPilotAdmissionFixture(t)
+	op := self.Base.Base.Preparation
+	if err := executeHeldOutPublicPilot(t.Context(), self.Config, op.Release, op.Settings,
+		func() time.Time { return self.Clock }, self.read, self.invokeEnvelope(t)); err != nil {
+		t.Fatal(err)
+	}
+	cohort, _ := newHeldOutPublicPilotCohort()
+	proof := heldOutPublicPilotProof{Schema: 1, Kind: "sim-latency-public-regression-pilot-proof", Plan: self.Config.Plan,
+		Publication: self.Config.Publication, Request: self.Plan.Request, BeforeExclusions: self.Plan.BeforeExclusions,
+		ProvidersSha256: self.Plan.ProvidersSha256, VerifiedAt: self.Clock.Add(time.Second), StartedAt: self.Clock.Add(-3 * time.Second),
+		CompletedAt: self.Clock.Add(-time.Second), Accepted: true, Reasons: []string{}, Score: cohort.Result,
+		Control: &heldOutFrozenControl{Evidence: []calibrationArtifactBinding{}, ControlEvaluationIds: []string{}},
+		Replays: []calibrationReplayObservation{}}
+	for index := 0; index < 2; index++ {
+		proof.Replays = append(proof.Replays, calibrationReplayObservation{ImageId: op.Release.ImageId,
+			ContainerId: fmt.Sprintf("%064x", index+1), Owner: fmt.Sprintf("%064x", index+11), InspectionSha256: strings.Repeat("2", 64),
+			TerminalSha256: strings.Repeat("3", 64), ContainerCleanupVerified: true})
+	}
+	proofPin := heldOutOpJson(t, self.Config.ProofPath, proof)
+	direction, err := heldOutPublicPilotDirection(proofPin, proof, self.Plan, op.Release)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directionPin := heldOutOpJson(t, self.Config.DirectionPath, direction)
+	requestBytes, err := readHeldOutPinned(self.Plan.Request, op.Settings.MaximumBytes, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var request heldOutRequest
+	if err := decodeHeldOutComplete(requestBytes, &request, "synthetic after request"); err != nil {
+		t.Fatal(err)
+	}
+	beforeBytes, err := readHeldOutPinned(self.Plan.BeforeExclusions, op.Settings.MaximumBytes, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var before heldOutExclusions
+	if err := decodeHeldOutComplete(beforeBytes, &before, "synthetic after before-census"); err != nil {
+		t.Fatal(err)
+	}
+	providers := heldOutPinnedFile{Path: request.ProvidersPath, Sha256: request.ProvidersSha256}
+	config := heldOutPublicPilotAfterConfig{Schema: 1, Kind: "sim-latency-public-pilot-after-exclusions", Stage: "after_public_pilot",
+		Execution: self.Config, Proof: proofPin, ProofPublication: self.publish(t, proofPin, proof.VerifiedAt.Add(time.Second)),
+		Direction: directionPin, DirectionPublication: self.publish(t, directionPin, proof.VerifiedAt.Add(2*time.Second)), Providers: providers,
+		ReviewedAt: proof.VerifiedAt.Add(3 * time.Second), ReviewedSources: append(append([]heldOutPinnedFile{}, before.Sources...), self.Plan.Request, providers, self.Config.Plan),
+		RecheckProofPath: filepath.Join(self.Plan.Root, "after-census-native-recheck.json"), OutputPath: filepath.Join(self.Plan.Root, "synthetic-after-exclusions.json")}
+	replayCalls := 0
+	_, err = prepareHeldOutPublicPilotAfterExclusions(t.Context(), config, op.Release, op.Settings,
+		func(context.Context, string, ScoreInputs, string, string, bool) ([]byte, error) {
+			replayCalls++
+			return nil, errors.New("unexpected native replay")
+		},
+		func() []calibrationReplayObservation { return []calibrationReplayObservation{} }, func() time.Time { return config.ReviewedAt.Add(time.Second) }, self.read)
+	if err == nil || replayCalls != 0 {
+		t.Fatal("accepted receipt label replaced full raw native proof", err)
+	}
+	if _, err := os.Lstat(config.OutputPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("unsupported accepted label created an after catalog", err)
+	}
+	if _, err := os.Lstat(config.RecheckProofPath); err != nil {
+		t.Fatal("raw native recheck refusal was not retained", err)
+	}
+}
+
+// The old 183-only executable/source receipt and another analyzer identity
+// cannot qualify the new closure binary merely by keeping its accepted flag.
+func TestHeldOutPublicPilotRejectsObsoleteToolQualification(t *testing.T) {
+	for _, mutation := range []string{"old-roster", "different-analyzer", "missing-sources"} {
+		self := newHeldOutPublicPilotAdmissionFixture(t)
+		op := self.Base.Base.Preparation
+		content, err := readHeldOutPinned(self.Plan.ToolQualification, op.Settings.MaximumBytes, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var qualification heldOutToolQualification
+		if err := decodeHeldOutComplete(content, &qualification, "synthetic current tool qualification"); err != nil {
+			t.Fatal(err)
+		}
+		switch mutation {
+		case "old-roster":
+			qualification.TestsPerPass = 183
+		case "different-analyzer":
+			qualification.AnalyzerSource = strings.Repeat("f", 40)
+		case "missing-sources":
+			qualification.Sources = []heldOutPinnedFile{}
+		}
+		self.Plan.ToolQualification = heldOutOpJson(t, self.Plan.ToolQualification.Path, qualification)
+		if _, err := authenticateHeldOutPublicPilotPlan(t.Context(), self.Plan, op.Release, op.Settings, self.read); err == nil {
+			t.Fatal("obsolete/unrelated tool qualification admitted", mutation)
+		}
+	}
+}
+
+// Synthetic offline labels cannot turn this direction experiment into an
+// official baseline, live API/worker receipt, or production activation.
+func TestHeldOutPublicPilotRejectsOfficialAuthorityClaim(t *testing.T) {
+	self := newHeldOutPublicPilotAdmissionFixture(t)
+	op := self.Base.Base.Preparation
+	self.Plan.Official = true
+	if _, err := authenticateHeldOutPublicPilotPlan(t.Context(), self.Plan, op.Release, op.Settings, self.read); err == nil {
+		t.Fatal("public pilot accepted an official-authority claim")
+	}
+}
+
+// Re-pins only wholly synthetic administrative bytes. Native ancestry remains
+// independent, so a matching substituted catalog/config cannot erase history.
+func (self *heldOutPublicPilotAdmissionFixture) repinPlan(t *testing.T) {
+	t.Helper()
+	self.Config.Plan = heldOutOpJson(t, self.Config.Plan.Path, self.Plan)
+	self.Config.Publication = self.publish(t, self.Config.Plan, self.Plan.PreparedAt.Add(time.Second))
+}
+
+// Dropping the extra historical source and every identity it alone proves
+// leaves a self-consistent catalog, but not the native constructor's closure.
+func TestHeldOutPublicPilotBeforeCensusRejectsRepinnedHistoricalOmission(t *testing.T) {
+	self := newHeldOutPublicPilotAdmissionFixture(t)
+	op := self.Base.Base.Preparation
+	if _, _, err := readHeldOutPublicPilot(t.Context(), self.Config, op.Release, op.Settings, self.read); err != nil {
+		t.Fatal("complete native lineage must pass before the omission", err)
+	}
+	content, err := readHeldOutPinned(self.Plan.BeforeExclusions, op.Settings.MaximumBytes, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var before heldOutExclusions
+	if err := decodeHeldOutComplete(content, &before, "synthetic complete native before catalog"); err != nil {
+		t.Fatal(err)
+	}
+	content, err = readHeldOutPinned(self.Plan.BeforeCensusConfig, op.Settings.MaximumBytes, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config heldOutFreshSingleExclusionBuildConfig
+	if err := decodeHeldOutComplete(content, &config, "synthetic native before configuration"); err != nil {
+		t.Fatal(err)
+	}
+	kept := []heldOutPinnedFile{}
+	for _, pin := range before.Sources {
+		if filepath.Base(pin.Path) != "synthetic-additional-historical-source.json" {
+			kept = append(kept, pin)
+		}
+	}
+	if len(kept)+1 != len(before.Sources) {
+		t.Fatal("omission fixture did not contain its independent historical source")
+	}
+	before.Sources = kept
+	without := func(values []string, omitted string) []string {
+		result := []string{}
+		for _, value := range values {
+			if value != omitted {
+				result = append(result, value)
+			}
+		}
+		return result
+	}
+	before.PrivateSeedHexes = without(before.PrivateSeedHexes, fmt.Sprintf("%064x", 7302))
+	before.ProviderDigests = without(before.ProviderDigests, heldOutDigest([]byte("synthetic additional historical providers")))
+	before.RetiredCommitments = without(before.RetiredCommitments, heldOutDigest([]byte("synthetic additional historical commitment")))
+	seeds := []int64{}
+	for _, seed := range before.EffectiveSeeds {
+		if seed != 20261025 {
+			seeds = append(seeds, seed)
+		}
+	}
+	before.EffectiveSeeds = seeds
+	if err := validateHeldOutExclusions(before, op.Settings.MaximumBytes); err != nil {
+		t.Fatal("root cause requires the omitted catalog to remain self-consistent", err)
+	}
+	self.Plan.BeforeExclusions = heldOutOpJson(t, filepath.Join(op.Root, "synthetic-omitted-before-catalog.json"), before)
+	config.OutputPath, config.ReviewedSources = self.Plan.BeforeExclusions.Path, before.Sources
+	self.Plan.BeforeCensusConfig = heldOutOpJson(t, self.Plan.BeforeCensusConfig.Path, config)
+	self.repinPlan(t)
+	err = executeHeldOutPublicPilot(t.Context(), self.Config, op.Release, op.Settings,
+		func() time.Time { return self.Clock }, self.read, self.invokeEnvelope(t))
+	if err == nil || !strings.Contains(err.Error(), "frozen historical sources or identity sets") || self.Invocations != 0 {
+		t.Fatal("repinned matching omission bypassed native history before invocation", err)
+	}
+	if _, err := os.Lstat(filepath.Join(self.Plan.Root, "execution.claim.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("historical omission consumed an execution claim", err)
+	}
+}
+
+// Every identity set is reconstructed from pinned native sources, not merely
+// checked for the presence of the original two positions.
+func TestHeldOutPublicPilotBeforeCensusRejectsChangedIdentitySets(t *testing.T) {
+	for _, changed := range []string{"raw", "effective", "providers", "commitments"} {
+		self := newHeldOutPublicPilotAdmissionFixture(t)
+		op := self.Base.Base.Preparation
+		content, err := readHeldOutPinned(self.Plan.BeforeExclusions, op.Settings.MaximumBytes, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var before heldOutExclusions
+		if err := decodeHeldOutComplete(content, &before, "synthetic identity-set catalog"); err != nil {
+			t.Fatal(err)
+		}
+		content, err = readHeldOutPinned(self.Plan.BeforeCensusConfig, op.Settings.MaximumBytes, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var config heldOutFreshSingleExclusionBuildConfig
+		if err := decodeHeldOutComplete(content, &config, "synthetic identity-set configuration"); err != nil {
+			t.Fatal(err)
+		}
+		switch changed {
+		case "raw":
+			before.PrivateSeedHexes = append(before.PrivateSeedHexes, fmt.Sprintf("%064x", 7303))
+		case "effective":
+			before.EffectiveSeeds = append(before.EffectiveSeeds, 20261026)
+		case "providers":
+			before.ProviderDigests = append(before.ProviderDigests, heldOutDigest([]byte("synthetic unbound provider")))
+		case "commitments":
+			before.RetiredCommitments = append(before.RetiredCommitments, heldOutDigest([]byte("synthetic unbound commitment")))
+		}
+		if err := authenticateHeldOutPublicPilotBeforeCensus(config, before, op.Release, op.Settings); err == nil ||
+			!strings.Contains(err.Error(), "frozen historical sources or identity sets") {
+			t.Fatalf("changed %s identity set was not compared to the native result: %v", changed, err)
+		}
+	}
+}
+
+// A matching output/config review time cannot precede the immutable prior
+// catalog, even if owner approval and the failed result are older.
+func TestHeldOutPublicPilotBeforeCensusRejectsReviewBeforePrior(t *testing.T) {
+	self := newHeldOutPublicPilotAdmissionFixture(t)
+	op := self.Base.Base.Preparation
+	content, err := readHeldOutPinned(self.Plan.BeforeCensusConfig, op.Settings.MaximumBytes, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config heldOutFreshSingleExclusionBuildConfig
+	if err := decodeHeldOutComplete(content, &config, "synthetic review configuration"); err != nil {
+		t.Fatal(err)
+	}
+	content, err = readHeldOutPinned(config.PriorExclusions, op.Settings.MaximumBytes, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var prior heldOutExclusions
+	if err := decodeHeldOutComplete(content, &prior, "synthetic historical review"); err != nil {
+		t.Fatal(err)
+	}
+	config.ReviewedAt = prior.ReviewedAt.Add(-time.Second)
+	if err := authenticateHeldOutPublicPilotBeforeCensus(config, heldOutExclusions{}, op.Release, op.Settings); err == nil ||
+		!strings.Contains(err.Error(), "predates its historical catalog") {
+		t.Fatal("review lineage was inferred from matching output/config time", err)
+	}
+}
+
+// This owns an entire synthetic raw native-format job. Only process replay and
+// Git are captured; the job reader, sidecars, six gates and R9 reducers are real.
+type heldOutPublicPilotRawR9Fixture struct {
+	Admission    *heldOutPublicPilotAdmissionFixture
+	Request      heldOutRequest
+	Control      ScoreInputs
+	Candidate    ScoreInputs
+	Bindings     []calibrationArtifactBinding
+	ReplayCalls  int
+	Observations []calibrationReplayObservation
+}
+
+// Returns the exact frozen policy flags used by the synthetic raw runs.
+func heldOutPublicPilotRawFlags(policy model.CompetitionEvaluationPolicy) map[string]string {
+	flags := map[string]string{"impair": strconv.FormatBool(policy.ImpairmentEnabled), "fleet_shards": strconv.Itoa(policy.FleetShards),
+		"hosts": strconv.Itoa(policy.ExchangeHosts), "site_listen": policy.SiteListen, "api_port": strconv.Itoa(policy.ApiPort), "reset": "true"}
+	for name, milliseconds := range map[string]int64{"ramp": policy.RampMs, "prewarm": policy.PrewarmMs, "settle": policy.SettleMs,
+		"duration": policy.DurationMs, "client_warmup_timeout": policy.ClientWarmupTimeoutMs, "request_timeout": policy.RequestTimeoutMs,
+		"pipeline_interval": policy.PipelineIntervalMs, "test_timeout": policy.TestTimeoutMs, "announce_timeout": policy.AnnounceTimeoutMs} {
+		flags[name] = (time.Duration(milliseconds) * time.Millisecond).String()
+	}
+	return flags
+}
+
+// Only this explicitly owned synthetic tree is walked. Mandatory native files
+// are actual typed fixtures; unused evidence slots are labeled synthetic padding.
+func newHeldOutPublicPilotRawR9Fixture(t *testing.T) *heldOutPublicPilotRawR9Fixture {
+	t.Helper()
+	self := &heldOutPublicPilotRawR9Fixture{Admission: newHeldOutPublicPilotAdmissionFixtureForSeed(t, 20261028),
+		Observations: []calibrationReplayObservation{}}
+	a := self.Admission
+	op := a.Base.Base.Preparation
+	content, err := readHeldOutPinned(a.Plan.Request, op.Settings.MaximumBytes, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := decodeHeldOutComplete(content, &self.Request, "synthetic raw native public request"); err != nil {
+		t.Fatal(err)
+	}
+	buildRaw := func() {
+		var reference heldOutPublicPilotReference
+		for _, candidate := range a.Plan.References {
+			if candidate.Role == "worse" {
+				reference = candidate
+			}
+		}
+		corpus := filepath.Join(self.Request.ArtifactDirectory, "evidence", "scorer-input")
+		statsKVs := map[string]*RunStats{}
+		for _, role := range []string{"baseline", "candidate"} {
+			bundle := &self.Control
+			revision := op.Release.BaseSha
+			if role == "candidate" {
+				bundle, revision = &self.Candidate, reference.CandidateSha
+			}
+			for index := 0; index < 9; index++ {
+				options := baselineScoreFixtureOptions()
+				options.evaluationId = fmt.Sprintf("synthetic-public-%s-%02d", role, index)
+				options.totalMs = 100 + float64(index)/10
+				if role == "candidate" {
+					options.totalMs += 40
+				}
+				fixture := newScoreFixture(t, options)
+				target := filepath.Join(corpus, fmt.Sprintf("%s-%02d", role, index))
+				relocateCalibrationScoreFixture(t, fixture, target, self.Request.ProvidersSha256, revision)
+				oldSidecar := scoreSidecarForCSV(fixture.run)
+				newRun, newStderr := filepath.Join(target, "results.csv"), filepath.Join(target, "stderr.log")
+				for _, rename := range []struct{ from, to string }{{from: fixture.run, to: newRun}, {from: fixture.stderr, to: newStderr},
+					{from: oldSidecar, to: filepath.Join(target, "run.json")}} {
+					if err := os.Rename(rename.from, rename.to); err != nil {
+						t.Fatal(err)
+					}
+				}
+				fixture.run, fixture.stderr = newRun, newStderr
+				fixture.runStats.Seed, fixture.runStats.SourceEpoch = a.Plan.PublicSeed, self.Request.SourceEpoch
+				fixture.runStats.ClientsPool, fixture.runStats.ClientsEstablished = self.Request.EvaluationPolicy.ClientPoolSize, self.Request.EvaluationPolicy.ClientPoolSize
+				fixture.runStats.Flags = heldOutPublicPilotRawFlags(self.Request.EvaluationPolicy)
+				fixture.runStats.RequestTimeoutMs = self.Request.EvaluationPolicy.RequestTimeoutMs
+				if self.Request.EvaluationPolicy.DurationMs != fixture.runStats.MeasureEndMs-fixture.runStats.MeasureStartMs {
+					t.Fatal("synthetic raw fixture must retain its exact requested one-second window")
+				}
+				if err := writeRunStats(filepath.Join(target, "run.json"), fixture.runStats); err != nil {
+					t.Fatal(err)
+				}
+				if err := writeFinalMarker(fixture.marker, filepath.Join(target, "run.json"), fixture.runStats); err != nil {
+					t.Fatal(err)
+				}
+				statsKVs[fixture.run] = fixture.runStats
+				bundle.Runs, bundle.Stderr = append(bundle.Runs, fixture.run), append(bundle.Stderr, fixture.stderr)
+				bundle.Accounting, bundle.Samples = append(bundle.Accounting, fixture.accounting), append(bundle.Samples, fixture.samples)
+				bundle.ResourceReports, bundle.Markers = append(bundle.ResourceReports, fixture.resource), append(bundle.Markers, fixture.marker)
+			}
+		}
+		baseline, err := BuildScoreBaseline(ScoreBaselineInputs{Runs: self.Control.Runs, Stderr: self.Control.Stderr,
+			Accounting: self.Control.Accounting, Samples: self.Control.Samples, ResourceReports: self.Control.ResourceReports,
+			Markers: self.Control.Markers, RoundId: self.Request.RoundId, TakeoverMargin: self.Request.EvaluationPolicy.TakeoverMargin})
+		if err != nil {
+			t.Fatal("actual synthetic raw control reduction failed", err)
+		}
+		baselineBytes, err := marshalScoreBaseline(baseline)
+		if err != nil {
+			t.Fatal(err)
+		}
+		self.Control.BaselineManifest, self.Candidate.BaselineManifest = filepath.Join(corpus, "baseline.json"), filepath.Join(corpus, "baseline.json")
+		heldOutOpWrite(t, self.Control.BaselineManifest, baselineBytes)
+		heldOutOpWrite(t, filepath.Join(self.Request.ArtifactDirectory, "baseline.json"), baselineBytes)
+		result := Score(self.Candidate)
+		if result.EvalError != nil || !result.Placeable || result.RawScore <= baseline.Replicates[0].RawScore {
+			t.Fatal("actual synthetic raw candidate reduction did not form a healthy slower cohort", result.EvalError)
+		}
+		scoreBytes, err := marshalScoreResult(result)
+		if err != nil {
+			t.Fatal(err)
+		}
+		heldOutOpWrite(t, filepath.Join(self.Request.ArtifactDirectory, "score.json"), scoreBytes)
+		for run, stats := range statsKVs {
+			marker := stats.FinalMarker
+			for _, path := range []*string{&stats.StatsRoot, &stats.AccountingReport, &stats.ResourceReport, &stats.FinalMarker} {
+				relative, err := filepath.Rel(corpus, *path)
+				if err != nil || strings.HasPrefix(relative, "..") {
+					t.Fatal("synthetic native sidecar escaped its corpus", err)
+				}
+				*path = "/artifacts/" + filepath.ToSlash(relative)
+			}
+			if err := writeRunStats(filepath.Join(filepath.Dir(run), "run.json"), stats); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeFinalMarker(marker, filepath.Join(filepath.Dir(run), "run.json"), stats); err != nil {
+				t.Fatal(err)
+			}
+		}
+		buildBytes, err := readHeldOutPinned(reference.NativeBuild, op.Settings.MaximumBytes, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var build heldOutNativeBuild
+		if err := decodeHeldOutComplete(buildBytes, &build, "synthetic raw committed native build"); err != nil {
+			t.Fatal(err)
+		}
+		heldOutOpWrite(t, filepath.Join(self.Request.ArtifactDirectory, "evidence", "candidate-build.json"), buildBytes)
+		for _, name := range []string{"candidate-original-source.json", "builder-identity.json"} {
+			bytes, _, err := readHeldOutProduced(filepath.Dir(reference.NativeBuild.Path), filepath.Join("evidence", name), op.Settings.MaximumBytes)
+			if err != nil {
+				t.Fatal(err)
+			}
+			heldOutOpWrite(t, filepath.Join(self.Request.ArtifactDirectory, "evidence", name), bytes)
+		}
+		policyBytes, err := readHeldOutPinned(a.Plan.ReferencePolicy, op.Settings.MaximumBytes, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		heldOutOpWrite(t, filepath.Join(self.Request.ArtifactDirectory, "evidence", "policy.json"), policyBytes)
+		originalBytes, _, err := readHeldOutProduced(self.Request.ArtifactDirectory, "evidence/candidate-original-source.json", op.Settings.MaximumBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var original heldOutRuntimeSource
+		if err := decodeStrictJSONBytes(originalBytes, &original, "synthetic raw pristine source identity"); err != nil {
+			t.Fatal(err)
+		}
+		candidate := original
+		candidate.Repositories, candidate.CandidatePatchSha256 = build.CandidateCommits, &build.PatchSha256
+		heldOutOpJson(t, filepath.Join(self.Request.ArtifactDirectory, "evidence", "evaluation-sources.json"), map[string]any{
+			"schema": 1, "kind": "sim-latency-temporary-evaluation-sources", "origin": "authenticated_evaluator_image", "host_repositories_used": false,
+			"runtime_target": "/workspace", "read_only_mount": true, "baseline": original, "candidate": candidate, "cleanup_complete": true})
+		for _, name := range []string{"accounting.json", "resources.json"} {
+			heldOutOpJson(t, filepath.Join(self.Request.ArtifactDirectory, name), map[string]any{"schema": 1, "synthetic_unused_aggregate": true})
+		}
+		heldOutOpJson(t, filepath.Join(self.Request.ArtifactDirectory, "evaluation-progress.json"), map[string]any{
+			"phase": "complete", "baseline_completed": 9, "candidate_completed": 9})
+		paths := []string{}
+		if err := filepath.WalkDir(filepath.Join(self.Request.ArtifactDirectory, "evidence"), func(path string, entry os.DirEntry, err error) error {
+			if err != nil || entry.IsDir() {
+				return err
+			}
+			paths = append(paths, path)
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"baseline.json", "score.json", "accounting.json", "resources.json", "evaluation-progress.json"} {
+			paths = append(paths, filepath.Join(self.Request.ArtifactDirectory, name))
+		}
+		for index := 0; len(paths) < 467; index++ {
+			pin := heldOutOpJson(t, filepath.Join(self.Request.ArtifactDirectory, "evidence", "synthetic-auxiliary", fmt.Sprintf("slot-%03d.json", index)),
+				map[string]any{"schema": 1, "synthetic_unused_evidence_slot": index})
+			paths = append(paths, pin.Path)
+		}
+		if len(paths) != 467 {
+			t.Fatal("synthetic consumed raw corpus exceeds the exact C2 inventory")
+		}
+		sort.Strings(paths)
+		for _, path := range paths {
+			relative, err := filepath.Rel(self.Request.ArtifactDirectory, path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			self.Bindings = append(self.Bindings, calibrationArtifactBinding{Path: relative})
+		}
+		self.refreshRawBindings(t)
+	}
+	invoke := func(ctx context.Context, plan heldOutPublicPilotPlan, release heldOutRelease,
+		settings heldOutOperatorSettings, pilotSettings heldOutPublicPilotSettings) error {
+		buildRaw()
+		return a.invokeEnvelope(t)(ctx, plan, release, settings, pilotSettings)
+	}
+	if err := executeHeldOutPublicPilot(t.Context(), a.Config, op.Release, op.Settings,
+		func() time.Time { return a.Clock }, a.read, invoke); err != nil {
+		t.Fatal("complete synthetic raw runner envelope failed", err)
+	}
+	return self
+}
+
+// Rehashes every synthetic manifest layer after deliberate raw-file mutation;
+// negatives must reach native semantics rather than only an outer digest check.
+func (self *heldOutPublicPilotRawR9Fixture) refreshRawBindings(t *testing.T) {
+	t.Helper()
+	root := self.Request.ArtifactDirectory
+	bind := func(relative string) calibrationArtifactBinding {
+		content, err := os.ReadFile(filepath.Join(root, relative))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return calibrationArtifactBinding{Path: relative, Sha256: heldOutDigest(content), Bytes: int64(len(content))}
+	}
+	for index, binding := range self.Bindings {
+		self.Bindings[index] = bind(binding.Path)
+	}
+	evidence := heldOutOpJson(t, filepath.Join(root, "evidence-manifest.json"), map[string]any{"schema": 1,
+		"kind": "sim-latency-evidence-manifest", "job_id": self.Request.JobId, "round_id": self.Request.RoundId, "artifacts": self.Bindings})
+	var image string
+	for _, reference := range self.Admission.Plan.References {
+		if reference.Role == "worse" {
+			image = reference.ImageId
+		}
+	}
+	complete := heldOutCompletion{Schema: 1, Kind: "sim-latency-worker-evaluation-complete", JobId: self.Request.JobId, RoundId: self.Request.RoundId,
+		Attempt: 1, BaseImageId: self.Admission.Base.Base.Preparation.Release.ImageId, CandidateImageId: &image,
+		PatchSha256: self.Request.PatchSha256, ProvidersSha256: self.Request.ProvidersSha256, CleanupComplete: true,
+		Artifacts: map[string]string{"baseline": bind("baseline.json").Sha256, "score": bind("score.json").Sha256,
+			"accounting": bind("accounting.json").Sha256, "resources": bind("resources.json").Sha256, "evidence_manifest": evidence.Sha256}}
+	heldOutOpJson(t, filepath.Join(root, "evaluation.complete.json"), complete)
+	workerBindings := []calibrationArtifactBinding{}
+	for _, name := range []string{"accounting.json", "baseline.json", "resources.json", "score.json", "evaluation-progress.json", "evaluation.complete.json", "evidence-manifest.json"} {
+		workerBindings = append(workerBindings, bind(name))
+	}
+	content, err := os.ReadFile(filepath.Join(root, "score.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var local ScoreResult
+	if err := decodeStrictJSONBytes(content, &local, "synthetic complete raw score"); err != nil {
+		t.Fatal(err)
+	}
+	var workerScore model.CompetitionScoreResult
+	if err := json.Unmarshal(content, &workerScore); err != nil || local.Diagnostics.BaselineTakeoverEligible == nil {
+		t.Fatal("synthetic raw worker score lacks native takeover diagnostics", err)
+	}
+	workerScore.TakeoverEligible = *local.Diagnostics.BaselineTakeoverEligible
+	security := map[string]any{}
+	for _, name := range []string{"template_database_reset", "redis_reset", "cgroup_contained", "resource_limits", "management_cpu_reserved", "management_memory_reserved",
+		"default_deny_network", "offline_build", "offline_build_resource_limits", "no_production_secrets", "structural_patch_check", "accounting_complete",
+		"resource_report_complete", "cleanup_complete", "immutable_reports"} {
+		security[name] = true
+	}
+	for _, name := range []string{"cgroup_id", "template_database_id", "redis_generation_id"} {
+		security[name] = "synthetic-fixture-only-not-a-kernel-attestation"
+	}
+	heldOutOpJson(t, filepath.Join(root, "worker-result.json"), map[string]any{"schema": 1, "job_id": self.Request.JobId,
+		"score": workerScore, "eval_error": nil, "security": security, "artifacts": workerBindings})
+}
+
+// The captured process boundary recomputes from copies of the authenticated raw
+// files. Only path-bearing fields/marker digests change in that private copy;
+// original reports stay byte-for-byte pinned and are rechecked by the job reader.
+func (self *heldOutPublicPilotRawR9Fixture) replay(t *testing.T) calibrationScoreReplay {
+	t.Helper()
+	return func(ctx context.Context, root string, inputs ScoreInputs, image string, roundId string, baseline bool) ([]byte, error) {
+		a := self.Admission
+		op := a.Base.Base.Preparation
+		want := self.Candidate
+		if baseline {
+			want = self.Control
+		}
+		if root != self.Request.ArtifactDirectory || image != op.Release.ImageId || roundId != self.Request.RoundId || !reflect.DeepEqual(inputs, want) {
+			return nil, errors.New("captured native replay changed its actual root/input/image/round binding")
+		}
+		self.ReplayCalls++
+		originalCorpus := filepath.Join(root, "evidence", "scorer-input")
+		copiedCorpus := filepath.Join(newCalibrationFileRoot(t), "captured-namespace")
+		if err := copyCalibrationReplayCorpus(ctx, originalCorpus, copiedCorpus, defaultCalibrationAnalysisSettings()); err != nil {
+			return nil, err
+		}
+		mapHostPath := func(path string) string {
+			relative, err := filepath.Rel(originalCorpus, path)
+			if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+				t.Fatal("captured replay input escaped its authenticated corpus", err)
+			}
+			return filepath.Join(copiedCorpus, relative)
+		}
+		mapped := ScoreInputs{BaselineManifest: mapHostPath(inputs.BaselineManifest)}
+		for _, field := range []struct {
+			from []string
+			to   *[]string
+		}{{from: inputs.Runs, to: &mapped.Runs}, {from: inputs.Stderr, to: &mapped.Stderr},
+			{from: inputs.Accounting, to: &mapped.Accounting}, {from: inputs.Samples, to: &mapped.Samples},
+			{from: inputs.ResourceReports, to: &mapped.ResourceReports}, {from: inputs.Markers, to: &mapped.Markers}} {
+			for _, path := range field.from {
+				*field.to = append(*field.to, mapHostPath(path))
+			}
+		}
+		for _, run := range mapped.Runs {
+			stats, _, err := readOfficialRunSidecar(run)
+			if err != nil {
+				return nil, err
+			}
+			for _, path := range []*string{&stats.StatsRoot, &stats.AccountingReport, &stats.ResourceReport, &stats.FinalMarker} {
+				if !strings.HasPrefix(*path, "/artifacts/") || filepath.Clean(*path) != *path {
+					return nil, errors.New("captured native sidecar did not retain its original namespace")
+				}
+				*path = filepath.Join(copiedCorpus, strings.TrimPrefix(*path, "/artifacts/"))
+			}
+			if err := writeRunStats(filepath.Join(filepath.Dir(run), "run.json"), stats); err != nil {
+				return nil, err
+			}
+			if err := writeFinalMarker(stats.FinalMarker, filepath.Join(filepath.Dir(run), "run.json"), stats); err != nil {
+				return nil, err
+			}
+		}
+		var output []byte
+		var err error
+		if baseline {
+			value, buildErr := BuildScoreBaseline(ScoreBaselineInputs{Runs: mapped.Runs, Stderr: mapped.Stderr, Accounting: mapped.Accounting,
+				Samples: mapped.Samples, ResourceReports: mapped.ResourceReports, Markers: mapped.Markers,
+				RoundId: roundId, TakeoverMargin: self.Request.EvaluationPolicy.TakeoverMargin})
+			if buildErr != nil {
+				return nil, buildErr
+			}
+			output, err = marshalScoreBaseline(value)
+		} else {
+			output, err = marshalScoreResult(Score(mapped))
+		}
+		if err != nil {
+			return nil, err
+		}
+		self.Observations = append(self.Observations, calibrationReplayObservation{ImageId: image,
+			ContainerId: fmt.Sprintf("%064x", 100+self.ReplayCalls), Owner: fmt.Sprintf("%064x", 200+self.ReplayCalls),
+			InspectionSha256: heldOutDigest([]byte("synthetic inspection")), TerminalSha256: heldOutDigest([]byte("synthetic terminal")),
+			ContainerCleanupVerified: true})
+		return output, nil
+	}
+}
+
+// Persists only a proof that the unchanged complete native reader accepted,
+// then uses the existing measured-direction schema and pushed Git authenticator.
+func (self *heldOutPublicPilotRawR9Fixture) afterConfig(t *testing.T) heldOutPublicPilotAfterConfig {
+	t.Helper()
+	a, op := self.Admission, self.Admission.Base.Base.Preparation
+	proof, err := verifyHeldOutPublicPilot(t.Context(), a.Config, op.Release, op.Settings, self.replay(t),
+		func() []calibrationReplayObservation { return self.Observations }, func() time.Time { return a.Clock.Add(time.Second) }, a.read)
+	if err != nil || proof == nil || !proof.Accepted || self.ReplayCalls != 2 || len(proof.Replays) != 2 ||
+		proof.Control == nil || len(proof.Control.ControlEvaluationIds) != 9 || len(proof.Outcome.CandidateEvaluationIds) != 9 {
+		t.Fatal("full captured synthetic native R9 verification failed", err)
+	}
+	proofPin, err := writeHeldOutPublicPilotProof(a.Config.ProofPath, proof, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	direction, err := heldOutPublicPilotDirection(proofPin, *proof, a.Plan, op.Release)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directionBytes, err := json.MarshalIndent(direction, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	directionPin, err := writeHeldOutPublicPilotImmutable(a.Config.DirectionPath, append(directionBytes, '\n'))
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := readHeldOutPinned(a.Plan.BeforeExclusions, op.Settings.MaximumBytes, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var before heldOutExclusions
+	if err := decodeHeldOutComplete(content, &before, "synthetic successful before-census"); err != nil {
+		t.Fatal(err)
+	}
+	providers := heldOutPinnedFile{Path: self.Request.ProvidersPath, Sha256: self.Request.ProvidersSha256}
+	return heldOutPublicPilotAfterConfig{Schema: 1, Kind: "sim-latency-public-pilot-after-exclusions", Stage: "after_public_pilot",
+		Execution: a.Config, Proof: proofPin, ProofPublication: a.publish(t, proofPin, proof.VerifiedAt.Add(time.Second)),
+		Direction: directionPin, DirectionPublication: a.publish(t, directionPin, proof.VerifiedAt.Add(2*time.Second)), Providers: providers,
+		ReviewedAt: proof.VerifiedAt.Add(3 * time.Second), ReviewedSources: append(append([]heldOutPinnedFile{}, before.Sources...), a.Plan.Request, providers, a.Config.Plan),
+		RecheckProofPath: filepath.Join(a.Plan.Root, "after-census-native-recheck.json"), OutputPath: filepath.Join(a.Plan.Root, "synthetic-native-after-census.json")}
+}
+
+// The complete success path authenticates 18 real synthetic raw bundles twice,
+// preserves all four ancestral sets and adds only the actual public identities.
+func TestHeldOutPublicPilotRawR9VerifiesPersistsAndConstructsAfterCensus(t *testing.T) {
+	self := newHeldOutPublicPilotRawR9Fixture(t)
+	a, op := self.Admission, self.Admission.Base.Base.Preparation
+	config := self.afterConfig(t)
+	self.Observations = []calibrationReplayObservation{}
+	pin, err := prepareHeldOutPublicPilotAfterExclusions(t.Context(), config, op.Release, op.Settings, self.replay(t),
+		func() []calibrationReplayObservation { return self.Observations }, func() time.Time { return config.ReviewedAt.Add(time.Second) }, a.read)
+	if err != nil || self.ReplayCalls != 4 || len(self.Observations) != 2 || pin.Path != config.OutputPath {
+		t.Fatal("full captured native after-census reauthentication failed", err)
+	}
+	content, err := readHeldOutPinned(pin, op.Settings.MaximumBytes, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var after heldOutExclusions
+	if err := decodeHeldOutComplete(content, &after, "synthetic successful after-census"); err != nil {
+		t.Fatal(err)
+	}
+	beforeBytes, err := readHeldOutPinned(a.Plan.BeforeExclusions, op.Settings.MaximumBytes, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var before heldOutExclusions
+	if err := decodeHeldOutComplete(beforeBytes, &before, "synthetic preserved before-census"); err != nil {
+		t.Fatal(err)
+	}
+	expected, err := mergeHeldOutPublicPilotExclusions(before, self.Request, a.Plan, a.Config.Plan, config.Providers,
+		config.ReviewedSources, config.ReviewedAt, op.Settings.MaximumBytes)
+	if err != nil || !reflect.DeepEqual(after, *expected) || len(after.Sources) != len(before.Sources)+3 ||
+		len(after.PrivateSeedHexes) != len(before.PrivateSeedHexes)+1 || len(after.EffectiveSeeds) != len(before.EffectiveSeeds)+1 ||
+		len(after.ProviderDigests) != len(before.ProviderDigests)+1 || !reflect.DeepEqual(after.RetiredCommitments, before.RetiredCommitments) {
+		t.Fatal("actual public closure changed its exact four-set/source union", err)
+	}
+	for _, path := range []string{config.Proof.Path, config.Direction.Path, config.RecheckProofPath, config.OutputPath} {
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0400 {
+			t.Fatal("successful native closure did not persist immutable evidence", err)
+		}
+	}
+	if a.Base.Base.Entropy.Calls != 0 || op.Generated != 0 {
+		t.Fatal("captured public lifecycle drew hidden entropy or generated a hidden workload")
+	}
+}
+
+// Direct public integer 20261028 is not the private hex-domain effective seed.
+// Rehashing every outer receipt cannot hide that error in an actual run sidecar.
+func TestHeldOutPublicPilotRawR9RejectsPrivateMappedSidecarSeed(t *testing.T) {
+	self := newHeldOutPublicPilotRawR9Fixture(t)
+	a, op := self.Admission, self.Admission.Base.Base.Preparation
+	wrong, err := heldOutEffectiveSeed(self.Request.RoundSeedHex)
+	if err != nil || wrong == int64(20261028) || a.Plan.PublicSeed != int64(20261028) {
+		t.Fatal("synthetic private/direct-public mapping root cause absent", err)
+	}
+	run := self.Control.Runs[0]
+	stats, _, err := readOfficialRunSidecar(run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats.Seed = wrong
+	if err := writeRunStats(filepath.Join(filepath.Dir(run), "run.json"), stats); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFinalMarker(self.Control.Markers[0], filepath.Join(filepath.Dir(run), "run.json"), stats); err != nil {
+		t.Fatal(err)
+	}
+	self.refreshRawBindings(t)
+	proof, err := verifyHeldOutPublicPilot(t.Context(), a.Config, op.Release, op.Settings, self.replay(t),
+		func() []calibrationReplayObservation { return self.Observations }, func() time.Time { return a.Clock.Add(time.Second) }, a.read)
+	if err == nil || !strings.Contains(err.Error(), "run seed or client pool differs") || proof == nil || proof.Accepted || self.ReplayCalls != 0 {
+		t.Fatal("private-derived sidecar seed bypassed the direct-public native reader", err)
+	}
+}
+
+// Native source containment is still read after all digest layers have been
+// consistently rehashed; a complete raw R9 corpus does not waive that validator.
+func TestHeldOutPublicPilotRawR9RejectsRepinnedSourceContainment(t *testing.T) {
+	self := newHeldOutPublicPilotRawR9Fixture(t)
+	a, op := self.Admission, self.Admission.Base.Base.Preparation
+	path := filepath.Join(self.Request.ArtifactDirectory, "evidence", "evaluation-sources.json")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var source map[string]json.RawMessage
+	if err := decodeStrictJSONBytes(content, &source, "synthetic native containment source"); err != nil {
+		t.Fatal(err)
+	}
+	source["read_only_mount"] = json.RawMessage("false")
+	heldOutOpJson(t, path, source)
+	self.refreshRawBindings(t)
+	proof, err := verifyHeldOutPublicPilot(t.Context(), a.Config, op.Release, op.Settings, self.replay(t),
+		func() []calibrationReplayObservation { return self.Observations }, func() time.Time { return a.Clock.Add(time.Second) }, a.read)
+	if err == nil || !strings.Contains(err.Error(), "source containment provenance invalid") || proof == nil || proof.Accepted || self.ReplayCalls != 0 {
+		t.Fatal("complete R9 or matching repins waived actual C2 source authentication", err)
+	}
+}
+
+// The original second position is rechecked after an accepted public proof;
+// neither publication nor complete native R9 permits it to have started later.
+func TestHeldOutPublicPilotAfterRejectsOriginalSecondStartAfterRawR9(t *testing.T) {
+	self := newHeldOutPublicPilotRawR9Fixture(t)
+	a, op := self.Admission, self.Admission.Base.Base.Preparation
+	config := self.afterConfig(t)
+	content, err := readHeldOutPinned(a.Base.Facts.OriginalPrivatePlan, op.Settings.MaximumBytes, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var original heldOutPrivatePlan
+	if err := decodeHeldOutComplete(content, &original, "synthetic original second-position hold"); err != nil {
+		t.Fatal(err)
+	}
+	second := original.Rounds[1]
+	jobRoot := heldOutJobRoot(a.Base.Facts.OriginalRoot, second.Public, second.Public.Jobs[0])
+	heldOutOpWrite(t, filepath.Join(jobRoot, "evaluation.started.json"), []byte("synthetic unexpected second-position start\n"))
+	self.Observations = []calibrationReplayObservation{}
+	_, err = prepareHeldOutPublicPilotAfterExclusions(t.Context(), config, op.Release, op.Settings, self.replay(t),
+		func() []calibrationReplayObservation { return self.Observations }, func() time.Time { return config.ReviewedAt.Add(time.Second) }, a.read)
+	if err == nil || self.ReplayCalls != 2 {
+		t.Fatal("old second-position drift was ignored or replay started before ancestry refusal", err)
+	}
+	if _, err := os.Lstat(config.OutputPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("drifted original second-position produced an after catalog", err)
+	}
+}

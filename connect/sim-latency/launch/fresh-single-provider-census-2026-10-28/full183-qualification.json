@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "kind": "retained-provider-census-full183-synthetic-source-qualification",
+  "complete": true,
+  "qualified_source_composition_only": true,
+  "predecessor_publication": "31d9afc89d9dbb04ada44b21bd6dc243ace8a504",
+  "binary_sha256": "dac1380a77e73ee711900718bc57a011a28f926917ebc4eecf2bd98df41d6d32",
+  "binary_reused_in_place": true,
+  "compilation": false,
+  "consecutive_passes": 3,
+  "tests_per_pass": 183,
+  "failures": 0,
+  "skips": 0,
+  "process_exit_codes": [
+    0,
+    0,
+    0
+  ],
+  "printed_case_duration_totals_seconds": [
+    2644.41,
+    2642.13,
+    2644.68
+  ],
+  "qualification_receipt": {
+    "path": "/var/lib/urnetwork/competition-provider-census-full183-20261028.VXNT0ReN/QUALIFICATION-RECEIPT.txt",
+    "sha256": "78f9b4f4d385110329685839e57bde368810d1cd79d210c2b97daa65143459b4"
+  },
+  "artifact_pins_sha256": "c00d5b4eb9743e5e78aff7c7882333458b5ff94ea86803cd3fdb48b825b0f2c9",
+  "exact_overlay_mappings": 25,
+  "resolved_go_source_files": 236,
+  "raw_source_manifest_rows": 5215,
+  "raw_go_files": 5189,
+  "unchanged_current_published_source_pins": 14,
+  "historical_git_object_bindings": 20,
+  "all_pre_post_pins_and_binary_and_main_clean": true,
+  "actual_canonical_slot_or_services_or_gpu_or_models_or_native_inputs_or_measurements": false,
+  "excluded_command_roots": [
+    "TestHeldOutOperatorCommand",
+    "TestHeldOutFirstCommittedCommand",
+    "TestHeldOutThreeAAssemblyCommand"
+  ],
+  "limitation": "This receipt qualifies only the retained25-map composition. The later four public-pilot lifecycle fragments have41targetedpasses separately; the combined33-map full224matrix is NOT yet run. H1 failures and all native/genuine direction/launch gates remain independent."
+}

@@ -41,7 +41,14 @@ measurement started; the original second seed stays unstarted. R9, gates,
 significance and the 26.9% margin remain unchanged. This is not authority to
 relabel the failure, select a favorable result or waive a provider. Prospective
 opening authority comes only from the separate direction linked above.
-Snow V7 remains unqualified. Sampled production
+Snow V7 remains unqualified and its failed report/claims are preserved. The
+owner's Ops evidence records the immutable Muse backend correction, not its
+exact historical truncation cause or provider acceptance. A fresh three-model
+[V8 precommit](SNOW-REVIEW-QUALIFICATION-PRECOMMIT-2026-10-28-V8.json) preserves the
+exact driver, models, schemas, budgets and native decisions, adding only meaningful
+backend-release evidence and fresh authorization/claim identities. V8 inference
+has not started; publication and independent execution-profile admission precede it.
+Sampled production
 credentials are now recognized: settlement requests reach `503 source_not_ready`,
 and other scoped roles receive the expected `403 scope_denied` on that
 settlement-only route. This does not prove every replica's credential mount or
@@ -62,12 +69,16 @@ protocol's first five-minute timeout is retained. Its exact integrated source
 passed [three corrected 21-guard race runs](fresh-single-protocol-2026-10-28/qualification.json),
 with zero skips or failures. Its exact provider/census followup now passed
 [three20-guard race runs](fresh-single-provider-census-2026-10-28/qualification.json),
-also with zero skips or failures. The separate H135 composed service run failed
-after eight passes; cleanup completed, its failed artifacts are retained, and
-the repaired39-guard fixture is not yet qualified. Neither targeted protocol
-record satisfies the broader183 guard matrix, complete native census or native
-CLI qualification required before public-pilot admission. No new held-out seed
-or measurement has started.
+also with zero skips or failures. That retained composition subsequently passed
+the [full183 non-command matrix](fresh-single-provider-census-2026-10-28/full183-qualification.json)
+three times, zero failures/skips. Four additive public-pilot lifecycle fragments
+then passed [41 synthetic guards three times](public-pilot-lifecycle-2026-10-28/qualification.json),
+including captured raw R9 artifacts through the unchanged validators/reducers.
+The combined full224 matrix and actual native CLI/kernel qualification remain
+pending. H1 composed failures remain failed; a later diagnostic-only pass is not
+broader service qualification or a resolved cause. Complete current native census,
+genuine public R9/R9 slower-direction evidence and all remaining admission gates
+are still required. No new held-out seed or measurement has started.
 
 ## Historical checkpoint — October 27, 15:10 UTC
 
