@@ -23,7 +23,8 @@ import (
 
 // A legacy-escrow contract whose receiver checkpoints after the sender's
 // final records that checkpoint as a final and settles inline, as two finals
-// do. A receiver checkpoint before the sender's final settles nothing.
+// do. Since 2026-10-28 (owner) a sender's final after a receiver checkpoint
+// does the same in the sender's report.
 func TestCoveredCheckpointSettlesLegacyEscrowInline(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -48,8 +49,8 @@ func TestCoveredCheckpointSettlesLegacyEscrowInline(t *testing.T) {
 		if _, err := CloseContractWithReport(ctx, ContractCloseReport{ReportId: server.NewId(), ContractId: early.ContractId, ClientId: f.sourceId, AckedByteCount: byteCount}); err != nil {
 			t.Fatal(err)
 		}
-		if checkpoint, _, terminal := readState(early.ContractId); !checkpoint || terminal {
-			t.Fatalf("receiver checkpoint before the sender's final changed the contract: checkpoint=%t terminal=%t", checkpoint, terminal)
+		if checkpoint, used, terminal := readState(early.ContractId); checkpoint || used != byteCount || !terminal {
+			t.Fatalf("sender's final after the receiver's checkpoint: checkpoint=%t bytes=%d terminal=%t, want a settled final of %d bytes", checkpoint, used, terminal, byteCount)
 		}
 
 		escrow, posts := createNetEscrowOrderingTestContract(ctx, f, 60)
@@ -70,7 +71,8 @@ func TestCoveredCheckpointSettlesLegacyEscrowInline(t *testing.T) {
 		if checkpoint, used, terminal := readState(escrow.ContractId); checkpoint || used != byteCount || !terminal {
 			t.Fatalf("covered checkpoint after the sender's final: checkpoint=%t bytes=%d terminal=%t, want a settled final of %d bytes", checkpoint, used, terminal, byteCount)
 		}
-		requireLegacySettlementTestState(t, ctx, f, escrow.ContractId, true, 1000-byteCount, 40)
+		// both contracts settled, so neither escrow is still reserved
+		requireLegacySettlementTestState(t, ctx, f, escrow.ContractId, true, 1000-2*byteCount, 0)
 	})
 }
 
