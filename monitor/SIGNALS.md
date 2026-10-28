@@ -20998,7 +20998,7 @@ Signals:
   stats collectors publish it (`max(urnetwork_stats_provider_modern_gate_on)`),
   which is what is deployed; while no taskworker publishes it, by the desired
   provider.yml, `quality_speed_requires_modern_provider: true` or that switch
-  absent and the gate's start (2026-11-04 00:00 UTC by default,
+  absent and the gate's start (2026-11-11 00:00 UTC by default,
   `quality_speed_modern_provider_start`) passed at the monitor's clock, as the
   model's own provider.yml decoder reads them, so the automatic switch-on
   arms the page. The finding names its `gate_source`. Evidence stays fresh
@@ -22877,7 +22877,7 @@ Probe: `modern-gate-readiness`
 The modern provider gate (server/FP2FIX.md, model/egress_modern_provider.go)
 takes every provider the capability probe has not shown to be modern out of
 Quality and Speed under the `not_modern` reason, keeping it Online. Owner
-decision 2026-10-24: it turns on by itself at 2026-11-04 00:00 UTC, the
+decision 2026-10-28: it turns on by itself at 2026-11-11 00:00 UTC, the
 code's default start, while `quality_speed_requires_modern_provider` is
 absent from provider.yml; every pass and request decides at its own instant.
 Its evidence comes from the capability probe (server/capprobe), which ships

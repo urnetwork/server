@@ -15,7 +15,7 @@ import (
 )
 
 // The export's read of the evidence window, fixed, and before the modern
-// provider gate's default start (2026-10-21), so the gate decides nothing
+// provider gate's default start (2026-11-11), so the gate decides nothing
 // here.
 var egressValidityTestSnapshot = time.Date(2026, time.October, 15, 19, 0, 0, 0, time.UTC)
 

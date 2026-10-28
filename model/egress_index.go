@@ -162,10 +162,10 @@ type EgressIndexSettings struct {
 }
 
 // When the modern provider gate turns on by itself while provider.yml leaves
-// quality_speed_requires_modern_provider out (owner decision 2026-10-24),
+// quality_speed_requires_modern_provider out (owner decision 2026-10-28),
 // unless quality_speed_modern_provider_start moves it.
 func DefaultQualitySpeedModernProviderStart() time.Time {
-	return time.Date(2026, 11, 4, 0, 0, 0, 0, time.UTC)
+	return time.Date(2026, 11, 11, 0, 0, 0, 0, time.UTC)
 }
 
 // The most a connect client adds to a provider's tier from what it sees
