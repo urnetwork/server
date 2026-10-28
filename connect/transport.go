@@ -1690,11 +1690,18 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	connectionId := server.NewId()
+	// the lease closes with the code of a definitive refusal, and so does an
+	// api removal (CLIENTCLOSE.md)
+	closeAuthorization := func(code int) {
+		authorizationCloseCode.Store(int32(code))
+		handleCancel()
+	}
 	self.exchange.registerConnectionWithMovedClose(clientId, connectionId, handleCancel, func() {
 		movedCloseRequested.Store(true)
 		h1Observation.close(connectH1CloseMoved)
 		handleCancel()
 	})
+	self.exchange.registerConnectionAuthorizationClose(connectionId, closeAuthorization)
 	defer self.exchange.unregisterConnection(clientId, connectionId)
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -1706,10 +1713,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	}
 	// the lease's final check before admission is one of the handshake's queries
 	lease, leaseErr := session.StartConnectionAuthorizationLease(
-		session.WithStateQuerySource(handleCtx, session.StateQueryConnectH1), byJwt, connectionId, auth.StreamLeaseVersion, func(code int) {
-			authorizationCloseCode.Store(int32(code))
-			handleCancel()
-		})
+		session.WithStateQuerySource(handleCtx, session.StateQueryConnectH1), byJwt, connectionId, auth.StreamLeaseVersion, closeAuthorization)
 	if leaseErr != nil {
 		h1Observation.result = connectH1ResultStateRefused
 		status := http.StatusUnauthorized
@@ -2666,10 +2670,17 @@ func (self *ConnectHandler) connectQuicWithCarrier(conn *quic.Conn, carrier Resi
 			}
 
 			connectionId = server.NewId()
+			// the lease closes with the code of a definitive refusal, and so
+			// does an api removal (CLIENTCLOSE.md)
+			closeAuthorization := func(code int) {
+				_ = conn.CloseWithError(quic.ApplicationErrorCode(code), "authorization ended")
+				handleCancel()
+			}
 			self.exchange.registerConnectionWithMovedClose(clientId, connectionId, handleCancel, func() {
 				_ = closeConnectQuicMoved(conn)
 				handleCancel()
 			})
+			self.exchange.registerConnectionAuthorizationClose(connectionId, closeAuthorization)
 			connectionRegistered = true
 			var leaseErr error
 			if self.settings.testingBeforeAuthorizationLease != nil {
@@ -2677,10 +2688,7 @@ func (self *ConnectHandler) connectQuicWithCarrier(conn *quic.Conn, carrier Resi
 			}
 			// the lease's final check before admission is one of the handshake's queries
 			lease, leaseErr = session.StartConnectionAuthorizationLease(
-				session.WithStateQuerySource(handleCtx, session.StateQueryConnectH3), byJwt, connectionId, auth.StreamLeaseVersion, func(code int) {
-					_ = conn.CloseWithError(quic.ApplicationErrorCode(code), "authorization ended")
-					handleCancel()
-				})
+				session.WithStateQuerySource(handleCtx, session.StateQueryConnectH3), byJwt, connectionId, auth.StreamLeaseVersion, closeAuthorization)
 			if leaseErr != nil {
 				if !connectAuthDependencyUnavailable(leaseErr) {
 					return refused(leaseErr)

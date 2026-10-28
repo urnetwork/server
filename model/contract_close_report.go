@@ -98,7 +98,7 @@ func closeContractWithReportUsage(ctx context.Context, report ContractCloseRepor
 	// A duplicate resumes only the two-final rule: its original ordering against
 	// the sender's final is not retained, so a contract whose checkpoint did not
 	// complete waits for the receiver's next report or the expiry task.
-	closed, completedCheckpoint, err := settleReportedContract(ctx, report.ContractId, admission.followsSenderFinal)
+	closed, completedCheckpoint, err := settleReportedContract(ctx, report.ContractId, admission.completion)
 	if err != nil {
 		return admission.applied, admission.addedByteCount, err
 	}
@@ -298,7 +298,7 @@ type contractCloseReportAdmission struct {
 	applied        bool
 	addedByteCount ByteCount
 	// the receiver applied this report after the sender's final had committed
-	followsSenderFinal bool
+	completion contractCheckpointCompletion
 }
 
 // Admission takes three round trips: the locked reads, the reservation and the
@@ -403,9 +403,9 @@ func admitContractCloseReportInTx(ctx context.Context, tx server.PgTx, report Co
 	}
 	// The lock above owns both the old rolling receipt and the byte increment.
 	// Any refusal rolls back our reservation too.
-	applied, added, followsSenderFinal := applyLockedContractCloseReportInTx(ctx, tx, report.ContractId, sourceId, destinationId, party, report.AckedByteCount, report.Checkpoint, &report.ReportId)
+	applied, added, completion := applyLockedContractCloseReportInTx(ctx, tx, report.ContractId, sourceId, destinationId, party, report.AckedByteCount, report.Checkpoint, &report.ReportId)
 	if !applied {
 		return contractCloseReportAdmission{}, ErrContractCloseReportClosed
 	}
-	return contractCloseReportAdmission{applied: true, addedByteCount: added, followsSenderFinal: followsSenderFinal}, nil
+	return contractCloseReportAdmission{applied: true, addedByteCount: added, completion: completion}, nil
 }

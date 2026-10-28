@@ -119,7 +119,7 @@ func (self redisMainThreadProbe) check(ctx context.Context, env *probeEnv) ([]fi
 		if lifecycleErr := probeLifecycleError(ctx, err); lifecycleErr != nil {
 			return nil, lifecycleErr
 		}
-		return []finding{unobservable([]string{stormReadReason(err)}, nil)}, nil
+		return []finding{stormReadFailureFinding(unobservable([]string{stormReadReason(err)}, nil), err)}, nil
 	}
 
 	// every configured node is required; any other answering node is judged

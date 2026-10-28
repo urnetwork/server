@@ -2899,16 +2899,29 @@ func closeContractReport(
 	}
 
 	terminalReplay := false
-	receiverFollowsSenderFinal := false
+	completion := contractCheckpointNoCompletion
 	server.Tx(ctx, func(tx server.PgTx) {
-		var followsSenderFinal bool
-		applied, terminalReplay, addedByteCount, followsSenderFinal, returnErr = applyContractCloseReportOrderInTx(ctx, tx, contractId, clientId, usedTransferByteCount, checkpoint, reportId, nil)
-		// An applied id-less report may be a retransmission of an earlier one,
-		// sent before the sender's final. Only a report that raised the party's
-		// retained count was never applied before, so only that one can be
-		// ordered after the sender's final. One that adds nothing leaves the
-		// contract to the receiver's next report or the expiry task.
-		receiverFollowsSenderFinal = followsSenderFinal && returnErr == nil && (reportId != nil || 0 < addedByteCount)
+		var reportCompletion contractCheckpointCompletion
+		applied, terminalReplay, addedByteCount, reportCompletion, returnErr = applyContractCloseReportOrderInTx(ctx, tx, contractId, clientId, usedTransferByteCount, checkpoint, reportId, nil)
+		completion = contractCheckpointNoCompletion
+		if returnErr != nil {
+			return
+		}
+		switch reportCompletion {
+		case contractCheckpointAfterSenderFinal:
+			// An applied id-less report may be a retransmission of an earlier
+			// one, sent before the sender's final. Only a report that raised the
+			// party's retained count was never applied before, so only that one
+			// can be ordered after the sender's final. One that adds nothing
+			// leaves the contract to the receiver's next report or the expiry
+			// task.
+			if reportId != nil || 0 < addedByteCount {
+				completion = reportCompletion
+			}
+		case contractSenderFinalAfterCheckpoint, contractSenderZeroFinalUnreported:
+			// a party's final applies once, so it is never a retransmission
+			completion = reportCompletion
+		}
 	}, server.TxReadCommitted, server.OptNoRetry())
 
 	if terminalReplay {
@@ -2918,7 +2931,7 @@ func closeContractReport(
 		return
 	}
 
-	closed, completedCheckpoint, err := settleReportedContract(ctx, contractId, receiverFollowsSenderFinal)
+	closed, completedCheckpoint, err := settleReportedContract(ctx, contractId, completion)
 	if err != nil {
 		returnErr = err
 		return
@@ -2968,9 +2981,9 @@ func applyContractCloseReportUsageInTx(ctx context.Context, tx server.PgTx,
 func applyContractCloseReportOrderInTx(ctx context.Context, tx server.PgTx,
 	contractId, clientId server.Id, usedTransferByteCount ByteCount,
 	checkpoint bool, reportId *server.Id, expiry *contractExpiryState,
-) (applied, terminalReplay bool, addedByteCount ByteCount, followsSenderFinal bool, returnErr error) {
+) (applied, terminalReplay bool, addedByteCount ByteCount, completion contractCheckpointCompletion, returnErr error) {
 	if expiry != nil && (!expiry.usageUnverifiedRetained || expiry.contractId != contractId) {
-		return false, false, 0, false, fmt.Errorf("expiry report continuation lacks retained ownership")
+		return false, false, 0, contractCheckpointNoCompletion, fmt.Errorf("expiry report continuation lacks retained ownership")
 	}
 	found := false
 	var sourceId server.Id
@@ -3051,7 +3064,7 @@ func applyContractCloseReportOrderInTx(ctx context.Context, tx server.PgTx,
 		return
 	}
 
-	applied, addedByteCount, followsSenderFinal = applyLockedContractCloseReportInTx(ctx, tx, contractId, sourceId, destinationId, party, usedTransferByteCount, checkpoint, reportId)
+	applied, addedByteCount, completion = applyLockedContractCloseReportInTx(ctx, tx, contractId, sourceId, destinationId, party, usedTransferByteCount, checkpoint, reportId)
 	return
 }
 
@@ -3064,10 +3077,13 @@ func applyContractCloseReportOrderInTx(ctx context.Context, tx server.PgTx,
 func applyLockedContractCloseReportInTx(ctx context.Context, tx server.PgTx,
 	contractId, sourceId, destinationId server.Id, party ContractParty,
 	usedTransferByteCount ByteCount, checkpoint bool, reportId *server.Id,
-) (applied bool, addedByteCount ByteCount, followsSenderFinal bool) {
+) (applied bool, addedByteCount ByteCount, completion contractCheckpointCompletion) {
 	// The existing contract row lock serializes the receipt with its party
 	// increment. No shared payer/network row is acquired here.
 	var senderFinal bool
+	var receiverFinal bool
+	var receiverCheckpointed bool
+	var partyUsedTransferByteCount ByteCount
 	result, err := tx.Query(ctx, `WITH prior AS MATERIALIZED (
 		SELECT used_transfer_byte_count,legacy_checkpoint_byte_count,identified_checkpoint_byte_count
 		FROM contract_close WHERE contract_id=$1 AND party=$2
@@ -3105,18 +3121,37 @@ func applyLockedContractCloseReportInTx(ctx context.Context, tx server.PgTx,
 		INSERT INTO contract_close_report (contract_id,party,report_id,used_transfer_byte_count,checkpoint)
 		SELECT $1,$2,$7::uuid,$3::bigint,$5 FROM changed WHERE $7::uuid IS NOT NULL
 	) SELECT changed.used_transfer_byte_count - COALESCE((SELECT used_transfer_byte_count FROM prior),0),
-		EXISTS(SELECT 1 FROM contract_close WHERE contract_id=$1 AND party=$8 AND NOT checkpoint)
+		EXISTS(SELECT 1 FROM contract_close WHERE contract_id=$1 AND party=$8 AND NOT checkpoint),
+		EXISTS(SELECT 1 FROM contract_close WHERE contract_id=$1 AND party=$9 AND NOT checkpoint),
+		EXISTS(SELECT 1 FROM contract_close WHERE contract_id=$1 AND party=$9 AND checkpoint),
+		changed.used_transfer_byte_count
 	FROM changed`,
-		contractId, party, usedTransferByteCount, server.NowUtc(), checkpoint, reportId == nil, reportId, ContractPartySource)
+		contractId, party, usedTransferByteCount, server.NowUtc(), checkpoint, reportId == nil, reportId, ContractPartySource, ContractPartyDestination)
 	server.WithPgResult(result, err, func() {
 		if result.Next() {
-			server.Raise(result.Scan(&addedByteCount, &senderFinal))
+			server.Raise(result.Scan(&addedByteCount, &senderFinal, &receiverFinal, &receiverCheckpointed, &partyUsedTransferByteCount))
 			applied = true
 		}
 	})
 	// The read predates this statement's own write, which reaches the
 	// sender's row only for the sender's own report, and that never follows.
-	followsSenderFinal = applied && party == ContractPartyDestination && senderFinal
+	switch {
+	case applied && party == ContractPartyDestination && senderFinal:
+		completion = contractCheckpointAfterSenderFinal
+	case applied && party == ContractPartySource && !checkpoint && receiverCheckpointed:
+		completion = contractSenderFinalAfterCheckpoint
+	case applied && party == ContractPartySource && !checkpoint && !receiverFinal && partyUsedTransferByteCount == 0 && reportId != nil:
+		// Identified reports only, which every current connect client sends.
+		// The legacy id-less path keeps the two-final rule.
+		completion = contractSenderZeroFinalUnreported
+	}
+	// A receiver that has not reported is asked for its final now that the
+	// sender is done (CLIENTCLOSE.md section 3). One that checkpointed, or a
+	// contract the sender never used, settles with this final instead. A
+	// retried final is not applied and asks nothing.
+	if applied && party == ContractPartySource && !checkpoint && !receiverFinal && !receiverCheckpointed && 0 < partyUsedTransferByteCount {
+		addClientCloseRelayPostCommit(ctx, tx, destinationId, contractId)
+	}
 	// A checkpoint permits resuming the same contract. A final party close
 	// revokes transport permission even when financial settlement is deferred.
 	if !checkpoint {
@@ -3138,12 +3173,12 @@ func settleContract(ctx context.Context, contractId server.Id) (closed bool, ret
 // task. Expiry, repair and prober retirement keep the two-final rule: the
 // expiry sweep finalizes checkpoints itself, one party at a time, before it
 // settles.
-func settleReportedContract(ctx context.Context, contractId server.Id, receiverFollowsSenderFinal bool) (closed bool, completedCheckpoint bool, returnErr error) {
-	return settleContractWithOptions(ctx, contractId, nil, receiverFollowsSenderFinal)
+func settleReportedContract(ctx context.Context, contractId server.Id, completion contractCheckpointCompletion) (closed bool, completedCheckpoint bool, returnErr error) {
+	return settleContractWithOptions(ctx, contractId, nil, completion)
 }
 
 func settleContractWithExpiryScope(ctx context.Context, contractId server.Id, scope *contractExpiryRepairScope) (closed bool, returnErr error) {
-	closed, _, returnErr = settleContractWithOptions(ctx, contractId, scope, false)
+	closed, _, returnErr = settleContractWithOptions(ctx, contractId, scope, contractCheckpointNoCompletion)
 	return
 }
 
@@ -3193,11 +3228,29 @@ func readContractCloseRecords(ctx context.Context, conn server.PgCanQuery, contr
 // Whether a report's settlement can act on these closes: two finals settle,
 // and a receiver checkpoint ordered after the sender's final may complete.
 // Anything else leaves the contract to a later report or the expiry task.
-func contractClosesMaySettle(closes map[ContractParty]contractCloseRecord, receiverFollowsSenderFinal bool) bool {
+func contractClosesMaySettle(closes map[ContractParty]contractCloseRecord, completion contractCheckpointCompletion) bool {
 	source, sourceOk := closes[ContractPartySource]
 	destination, destinationOk := closes[ContractPartyDestination]
-	return sourceOk && destinationOk && !source.checkpoint && (!destination.checkpoint || receiverFollowsSenderFinal)
+	if completion == contractSenderZeroFinalUnreported {
+		return sourceOk && !source.checkpoint && !destinationOk
+	}
+	return sourceOk && destinationOk && !source.checkpoint && (!destination.checkpoint || completion != contractCheckpointNoCompletion)
 }
+
+// Which report, applied under the contract lock, may complete the receiver's
+// checkpoint and settle a sender final with it (settleContractWithOptions).
+type contractCheckpointCompletion int
+
+const (
+	contractCheckpointNoCompletion contractCheckpointCompletion = iota
+	// a receiver report after the sender's final (owner decision B, 2026-10-10)
+	contractCheckpointAfterSenderFinal
+	// the sender's final after a receiver checkpoint (owner, 2026-10-28)
+	contractSenderFinalAfterCheckpoint
+	// the sender's final of zero bytes while the receiver has not reported: an
+	// unused contract (owner, 2026-10-28)
+	contractSenderZeroFinalUnreported
+)
 
 // A private test seam observes each settlement transaction a report opens.
 // Production contexts carry none.
@@ -3242,7 +3295,7 @@ func observeContractSettlementTxForTest(ctx context.Context, contractId server.I
 // task completes one, as a zero-byte final, in the settlement's own
 // transaction, so later reports see an ordinary two-final contract and a
 // failed settlement rolls the completion back.
-func settleContractWithOptions(ctx context.Context, contractId server.Id, scope *contractExpiryRepairScope, receiverFollowsSenderFinal bool) (closed bool, completedCheckpoint bool, returnErr error) {
+func settleContractWithOptions(ctx context.Context, contractId server.Id, scope *contractExpiryRepairScope, completion contractCheckpointCompletion) (closed bool, completedCheckpoint bool, returnErr error) {
 	var posts []func() any
 	var clockTransferByteCount ByteCount
 
@@ -3255,7 +3308,7 @@ func settleContractWithOptions(ctx context.Context, contractId server.Id, scope 
 		server.Db(ctx, func(conn server.PgConn) {
 			hint = readContractCloseRecords(ctx, conn, contractId)
 		})
-		if !contractClosesMaySettle(hint, receiverFollowsSenderFinal) {
+		if !contractClosesMaySettle(hint, completion) {
 			return false, false, nil
 		}
 	}
@@ -3290,7 +3343,7 @@ func settleContractWithOptions(ctx context.Context, contractId server.Id, scope 
 				panic(contractCoveredCheckpointAbort{cause: returnErr})
 			}
 		}()
-		if receiverFollowsSenderFinal && scope == nil && sourceOk && destinationOk && !sourceClose.checkpoint && destinationClose.checkpoint {
+		if completion != contractCheckpointNoCompletion && scope == nil && sourceOk && destinationOk && !sourceClose.checkpoint && destinationClose.checkpoint {
 			// The unlocked read is a hint. Decide under the contract lock that
 			// every report and settlement owner takes, from a fresh read.
 			var destinationId server.Id
@@ -3304,17 +3357,59 @@ func settleContractWithOptions(ctx context.Context, contractId server.Id, scope 
 			closes = readCloses()
 			sourceClose, sourceOk = closes[ContractPartySource]
 			destinationClose, destinationOk = closes[ContractPartyDestination]
+			countsAgree := false
+			if sourceOk && destinationOk {
+				diff := destinationClose.usedTransferByteCount - sourceClose.usedTransferByteCount
+				switch completion {
+				case contractCheckpointAfterSenderFinal:
+					// the receiver's count covers the sender's exact final
+					countsAgree = 0 <= diff && diff <= AcceptableTransfersByteDifference
+				case contractSenderFinalAfterCheckpoint:
+					// the receiver's exit counted what it got and sends nothing
+					// more; the counts agree as two finals must
+					countsAgree = -AcceptableTransfersByteDifference <= diff && diff <= AcceptableTransfersByteDifference
+				}
+			}
 			if outcome == nil && !dispute && !expiryStarted &&
 				sourceOk && !sourceClose.checkpoint && !sourceClose.conservative &&
-				destinationOk && destinationClose.checkpoint &&
-				sourceClose.usedTransferByteCount <= destinationClose.usedTransferByteCount &&
-				destinationClose.usedTransferByteCount-sourceClose.usedTransferByteCount <= AcceptableTransfersByteDifference {
+				destinationOk && destinationClose.checkpoint && countsAgree {
 				applied, _, _, err := applyContractCloseReportUsageInTx(ctx, tx, contractId, destinationId, 0, false, nil, nil)
 				server.Raise(err)
 				if applied {
 					completedCheckpoint = true
 					destinationClose.checkpoint = false
 					server.AddTxCommitCount(tx, &contractCoveredCheckpointCounter, 1)
+				}
+			}
+		}
+
+		if completion == contractSenderZeroFinalUnreported && scope == nil && sourceOk && !destinationOk && !sourceClose.checkpoint {
+			// The sender used nothing, and the receiver never reported: it never
+			// saw the contract. Complete the receiver's side as a zero final
+			// under the contract lock and settle the two zeros now, instead of
+			// leaving the reservation to the expiry sweep, which settles a
+			// sender-only contract with the sender's count anyway.
+			var destinationId server.Id
+			var outcome *ContractOutcome
+			var dispute, expiryStarted bool
+			err := tx.QueryRow(ctx, `SELECT destination_id,outcome,dispute,usage_unverified FROM transfer_contract WHERE contract_id=$1 FOR UPDATE`, contractId).Scan(&destinationId, &outcome, &dispute, &expiryStarted)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return
+			}
+			server.Raise(err)
+			closes = readCloses()
+			sourceClose, sourceOk = closes[ContractPartySource]
+			destinationClose, destinationOk = closes[ContractPartyDestination]
+			if outcome == nil && !dispute && !expiryStarted &&
+				sourceOk && !sourceClose.checkpoint && !sourceClose.conservative && sourceClose.usedTransferByteCount == 0 &&
+				!destinationOk {
+				applied, _, _, err := applyContractCloseReportUsageInTx(ctx, tx, contractId, destinationId, 0, false, nil, nil)
+				server.Raise(err)
+				if applied {
+					completedCheckpoint = true
+					destinationClose = contractCloseRecord{}
+					destinationOk = true
+					server.AddTxCommitCount(tx, &contractZeroFinalSettledCounter, 1)
 				}
 			}
 		}

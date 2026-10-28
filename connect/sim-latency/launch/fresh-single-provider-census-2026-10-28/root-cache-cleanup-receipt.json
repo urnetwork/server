@@ -1,0 +1,64 @@
+{
+  "schema": 1,
+  "kind": "approved-exact-root-go-cache-cleanup-receipt",
+  "status": "COMPLETE",
+  "approval": "Parent /root explicitly authorized ONLY approved150 census4b26bb21.../4296707382 logical bytes; no filesystem-reserve change authorized or performed.",
+  "approved_census": {
+    "path": "/var/lib/urnetwork/competition-h1-native-build-20261028.0dZnAU3A/cache-inspection/bounded-four-gib-proposal-20261028.YndOBp4A/proposed-old-files.census.tsv",
+    "sha256": "4b26bb21f32563f0f74e44b69a7d625204813f66589b037401ca945e30983482",
+    "count": 150,
+    "logical_bytes": 4296707382
+  },
+  "predelete_revalidation": {
+    "snapshot_utc": "2026-10-28T12:41:26Z",
+    "full_hash_poststat_fence_utc": "2026-10-28T12:42:52Z",
+    "canonical_root": "/root/.cache/go-build",
+    "root_device_inode": "64512:18363596",
+    "root_uid_gid_mode": "0:0:0755",
+    "full150_canonical_paths_match": true,
+    "root_regular_nonsymlink_uid0_gid0_nlink1": true,
+    "all_mtime_strictly_before_2026_10_28": true,
+    "all_full_sha256_match": true,
+    "all_original_stat_fields_match": true,
+    "all_stat_fields_unchanged_after_hash": true,
+    "current_Go_actors_and_GOCACHE_GOWORK_scans_empty_before_first_unlink": true,
+    "each_target_individually_stat_SHA_canonical_rechecked_immediately_before_explicit_unlink": true
+  },
+  "removed": {
+    "count": 150,
+    "logical_bytes": 4296707382,
+    "allocated_bytes": 4297216000,
+    "partial": false,
+    "all150_absent_after": true,
+    "method": "150 explicit individually validated sudo unlink -- ABSOLUTE_HASH_ENTRY commands; no recursive deletion,glob,go clean,directory unlink or alternate targets.",
+    "recovery": "Removed compiler derivatives are regenerable by future authorized Go builds; no source/module/evidence/image/binary cache trees were deleted."
+  },
+  "observed_storage": {
+    "before_available_bytes": 4105539584,
+    "after_available_bytes": 8391450624,
+    "after_snapshot_utc": "2026-10-28T12:44:40Z",
+    "net_available_increase_bytes": 4285911040,
+    "before_root_cache_allocated_bytes": 7203946496,
+    "after_root_cache_allocated_bytes": 2906730496,
+    "root_cache_allocated_reduction_bytes": 4297216000,
+    "required_available_bytes": 7152967296,
+    "headroom_gate_passed": true,
+    "note": "df is the actual filesystem snapshot; net free-space change can also reflect unrelated normal writes. Exact root-cache allocation reduction separately matches removed allocated bytes."
+  },
+  "preserved": {
+    "prior16_census_sha256": "5cd8029bb96aae76e2644d5584ab23fd65e9e8d7d23fe6f933a5c2cc4a429b5a",
+    "approved150_census_sha256": "4b26bb21f32563f0f74e44b69a7d625204813f66589b037401ca945e30983482",
+    "both_original_censuses_rechecked_unchanged_after": true,
+    "other_root_cache_entries": true,
+    "home_by_cache": true,
+    "var_cache": true,
+    "module_caches": true,
+    "source": true,
+    "evidence": true,
+    "images": true,
+    "binaries": true
+  },
+  "postcompletion_boundary": "Parent independently confirmed150 absent and disk headroom and authorized LOW35. No current-actor-empty claim is made after that authorization: LOW may now run using its separate cache. No further deletion or cache hashing is authorized by this receipt.",
+  "no_tests_builds_services_provider_calls_measurements_or_seed_entropy_by_cleanup_agent": true,
+  "artifact_root": "/var/lib/urnetwork/competition-h1-native-build-20261028.0dZnAU3A/cache-inspection/approved-four-gib-cleanup-20261028.gnpLqO2W"
+}

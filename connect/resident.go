@@ -762,6 +762,9 @@ type Exchange struct {
 	// connection id -> the moved close of one of those transports, for a
 	// compulsory move's deadline. Nil until the first one.
 	connectionMovedCloses map[server.Id]func()
+	// connection id -> the typed authorization close of one of those
+	// transports, for an api removal (CLIENTCLOSE.md). Nil until the first one.
+	connectionAuthorizationCloses map[server.Id]func(int)
 	// decides at drain time whether drains may send moves; nil allows
 	// (SetDrainMovesAllowed)
 	drainMovesAllowed func(context.Context) bool
@@ -866,6 +869,7 @@ func newExchange(
 		// one shared key-event subscriber per exchange (PEERSSTREAMS2.md §5.1):
 		// residents register their listeners with it in `Resident.Run`
 		exchange.keyEventSubscriber = newKeyEventSubscriber(cancelCtx, &settings.KeyEventDelivery)
+		exchange.keyEventSubscriber.SetClientRemoved(exchange.handleClientRemoved)
 	}
 	exchange.contractOriginNotifications = model.NewContractOriginNotifications(cancelCtx, model.DefaultContractOriginNotificationSettings())
 	if settings.EnableMove {
@@ -1917,6 +1921,7 @@ func (self *Exchange) unregisterConnection(clientId server.Id, connectionId serv
 		}
 	}
 	delete(self.connectionMovedCloses, connectionId)
+	delete(self.connectionAuthorizationCloses, connectionId)
 }
 
 // Counts one accepted inbound exchange connection of the client.
@@ -4502,6 +4507,14 @@ func (self *Resident) Run() {
 		removeHopListener := self.exchange.keyEventSubscriber.AddHopListener(self.clientId, streamHopListener)
 		defer removeHopListener()
 		streamHopListener.Resync()
+
+		// the client's close requests (CLIENTCLOSE.md). Requests added before
+		// this registration had no listener, so it takes once now.
+		closeListener := newClientCloseListener(self.ctx, self.clientId, self.sendListenerFrame)
+		defer closeListener.CloseAndWait()
+		removeCloseListener := self.exchange.keyEventSubscriber.AddCloseListener(self.clientId, closeListener)
+		defer removeCloseListener()
+		closeListener.Kick()
 	}
 
 	// only top-level client-category peers get network peer updates.

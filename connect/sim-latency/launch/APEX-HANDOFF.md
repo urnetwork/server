@@ -3,19 +3,28 @@
 The non-standard external-evaluator design is approved by Macrocosmos. Approval
 does not itself prove a newly built release's live readiness.
 
-## Current v2 production handoff — October 27, 2026
+## Current v2 production handoff — October 28, 2026
 
-Required public opening is **2026-10-28 00:00 UTC**. Current qualification and exact
+The required public opening was **2026-10-28 00:00 UTC**; readiness was missed.
+No late opening or new date has been authorized. Current qualification and exact
 artifact evidence are in [PRODUCTION-2026-10-28.md](PRODUCTION-2026-10-28.md).
 The original-three calibration reduction passed and prospectively froze a
 26.9% practical margin for the 3,600-provider/200-client qualification profile.
 The minimal revised-instrument image is built and its corrected R9/R9 bridge
 has native acceptance as an operational witness, not statistical equivalence.
 The owner approved measuring the first of two prospectively committed seeds;
-the second remains unstarted. All three reference jobs and correct ordering on the selected
-seed, genuine Snow qualification and live readiness remain open. The recovered
-run has completed its nine controls and is measuring the first reference
-candidate. This is not an accepted hidden epoch baseline or activation. See the
+the second remains unstarted. The recovered run completed nine controls and
+all three R9 references, but the screen **failed its frozen ordering criterion**
+at 03:18:27 UTC on October 28: the worse reference outranked the no-op.
+The [complete failed screen](FIRST-COMMITTED-SCREEN-2026-10-28.md) is preserved.
+Independent review found no evaluator defect; this does not establish why the
+ordering failed. The owner approved a
+[new prospective screen](CALIBRATION-NEW-SCREEN-OWNER-APPROVAL-2026-10-28.md)
+with a stronger regression reference, fresh control and newly committed seed.
+Exact protocol/reference review, native qualification and publication remain
+pending; no new seed has been drawn or measurement started. Genuine Snow qualification and
+live readiness remain open; no late opening or waiver is authorized.
+This is not an accepted hidden epoch baseline or activation. See the
 [exact freeze](CALIBRATION-THREE-A-FREEZE-2026-10-26.md),
 [first-seed amendment](CALIBRATION-AMENDMENT-2026-10-27-FIRST-SEED.md), and
 [explicit recovery record](UNMEASURED-MANAGEMENT-OOM-2026-10-27.md).

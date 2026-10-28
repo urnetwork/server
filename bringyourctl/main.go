@@ -104,8 +104,10 @@ Usage:
     bringyourctl payouts populate-tx-hashes
     bringyourctl payouts reconcile-legacy-attempts [--apply] [--group_limit=<group_limit>]
     bringyourctl payouts correct-legacy-attempts [--apply] [--group_limit=<group_limit>] [--move_all_sweeps] [--sweep_batch_size=<sweep_batch_size>] [--sweep_batch_limit=<sweep_batch_limit>] [--count_sweeps]
+    bringyourctl payouts close-parked [(--apply --expect=<digest>)] [--ids]
     bringyourctl payouts sn-reconcile [(--send --expect=<digest>)] [--json]
-    bringyourctl payouts reimburse --file=<file> --reason=<reason> [(--send --expect=<digest>)]
+    bringyourctl payouts reimburse --file=<file> --reason=<reason> [--allow_prior_reimbursement] [(--send --expect=<digest>)]
+    bringyourctl payouts usdc-sent-notice --file=<file> [--send]
     bringyourctl wallet estimate-fee --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
     bringyourctl wallet transfer --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
 		bringyourctl wallets sync-circle
@@ -225,13 +227,15 @@ Options:
     --state=<state>  A crypto invoice status: pending, seen, confirming, paid, expired or review.
     --intent=<intent_id>  A crypto invoice id.
     --address=<payout_address>  The address the account holder gave for a refund, in the invoice's coin.
+    --ids  With payouts close-parked, also list each payment: its id, plan week, reason and payout.
     --group_limit=<group_limit>  Look up at most this many Circle destination groups; omitted or 0 looks up every group.
     --move_all_sweeps  Move every sweep of a corrected legacy attempt to its replacement instead of one anchor sweep.
     --sweep_batch_size=<sweep_batch_size>  With --move_all_sweeps, move at most this many sweeps per transaction; omitted uses 10000.
     --sweep_batch_limit=<sweep_batch_limit>  With --move_all_sweeps, run at most this many sweep transactions in one call; omitted or 0 moves every sweep.
     --count_sweeps  Also count the sweeps a correction would move (dry run).
     --expect=<digest>  The digest the sn-reconcile or reimburse dry run printed; --send refuses any other census.
-    --file=<file>  A payouts reimburse CSV with the header network_id,wallet_id,amount_usdc.
+    --file=<file>  A payouts reimburse CSV with the header network_id,wallet_id,amount_usdc; for payouts usdc-sent-notice, one payment id per line.
+    --allow_prior_reimbursement  With payouts reimburse, pay networks that already have an open manual reimbursement of another plan; each row lists them, and the digest binds the flag and exactly those.
     -c --count=<count>	Number to process [default: 1000].`
 
 func main() {
@@ -389,6 +393,10 @@ func main() {
 			os.Exit(reconcileLegacyPayoutAttempts(opts))
 		} else if correctLegacy, _ := opts.Bool("correct-legacy-attempts"); correctLegacy {
 			os.Exit(correctLegacyPayoutAttempts(opts))
+		} else if closeParked, _ := opts.Bool("close-parked"); closeParked {
+			os.Exit(payoutsCloseParkedCommand(opts))
+		} else if usdcSentNotice, _ := opts.Bool("usdc-sent-notice"); usdcSentNotice {
+			os.Exit(payoutsUsdcSentNoticeCommand(opts))
 		} else if snReconcile, _ := opts.Bool("sn-reconcile"); snReconcile {
 			send, _ := opts.Bool("--send")
 			snReconcileRequireReadOnly(send)
@@ -2128,6 +2136,11 @@ func paymentsReconcile(opts docopt.Opts) {
 		"%s %d, %s %d, %s %d, errors %d, skipped %v\n",
 		creditLabel, result.Credited, endLabel, result.Ended, repairLabel, result.EntitlementsRepaired, result.Errors, result.SkippedStores,
 	)
+	// the sales channel notices of the payments this run credited post from
+	// this process
+	if !result.DryRun && !model.WaitSalesPaymentNotices(salesPaymentNoticeWait) {
+		fmt.Printf("some sales channel notices were not posted before exit\n")
+	}
 	if 0 < result.Errors {
 		os.Exit(1)
 	}

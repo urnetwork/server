@@ -110,7 +110,7 @@ func (self redisPoolTimeoutsProbe) check(ctx context.Context, env *probeEnv) ([]
 		if lifecycleErr := probeLifecycleError(ctx, err); lifecycleErr != nil {
 			return nil, lifecycleErr
 		}
-		return []finding{unobservable([]string{stormReadReason(err)}, nil)}, nil
+		return []finding{stormReadFailureFinding(unobservable([]string{stormReadReason(err)}, nil), err)}, nil
 	}
 
 	required := stormPlacedServices(env, settings.Services)

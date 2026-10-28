@@ -28,11 +28,20 @@ var contractClosedMetric = prometheus.NewCounterFunc(prometheus.CounterOpts{
 	Help: "First terminal contract transitions observed after a successful transaction commit reply, including malformed quarantine and deletion without a prior outcome. This is terminal closure, not completion of asynchronous financial projections.",
 }, func() float64 { return float64(contractClosedCounter.ConfirmedCount()) })
 
+// Unused contracts settled in the sender's zero final because the receiver
+// never reported (owner, 2026-10-28).
+var contractZeroFinalSettledCounter server.TxCommitCounter
+
+var contractZeroFinalSettledMetric = prometheus.NewCounterFunc(prometheus.CounterOpts{
+	Name: "urnetwork_contract_zero_final_settled_total",
+	Help: "Unused contracts settled on the report path: the sender's final reported zero bytes and the receiver had not reported, observed after a successful settlement commit.",
+}, func() float64 { return float64(contractZeroFinalSettledCounter.ConfirmedCount()) })
+
 var contractCoveredCheckpointMetric = prometheus.NewCounterFunc(prometheus.CounterOpts{
 	Name: "urnetwork_contract_covered_checkpoint_total",
 	Help: "Receiver checkpoints completed as finals because they covered the sender's final acked bytes, observed after a successful settlement commit on the report path.",
 }, func() float64 { return float64(contractCoveredCheckpointCounter.ConfirmedCount()) })
 
 func init() {
-	prometheus.MustRegister(contractOpenedMetric, contractClosedMetric, contractCoveredCheckpointMetric)
+	prometheus.MustRegister(contractOpenedMetric, contractClosedMetric, contractCoveredCheckpointMetric, contractZeroFinalSettledMetric)
 }

@@ -1,0 +1,64 @@
+[env]glog not configured from command line. Using default configuration.
+I1028 05:51:22.604465  860170 env.go:1202] [env]try /home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/local/testdata/config, [settings.yml]
+I1028 05:51:22.604753  860170 env.go:1202] [env]try /home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/local/testdata/config/local, [settings.yml]
+I1028 05:51:22.605040  860170 env.go:1202] [env]try /var/lib/urnetwork/competition-fresh-single-unit-20261028.ACenONsX/warp/site, [settings.yml]
+I1028 05:51:22.605171  860170 env.go:81] [env]settings loaded
+panic: test timed out after 5m0s
+	running tests:
+		TestHeldOutFreshSingleDeclarationMutationsRefuseBeforeEntropy (1m2s)
+
+goroutine 370 [running]:
+testing.(*M).startAlarm.func1()
+	/home/by/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.27.3.linux-amd64/src/testing/testing.go:2961 +0x605
+created by time.goFunc
+	/home/by/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.27.3.linux-amd64/src/time/sleep.go:182 +0x45
+
+goroutine 1 [chan receive, 1 minutes]:
+testing.(*T).Run(0xc0007f3688, {0x4ea23bb, 0x3d}, 0x89bb948)
+	/home/by/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.27.3.linux-amd64/src/testing/testing.go:2268 +0xb3e
+testing.runTests.func1(0xc0007f3688)
+	/home/by/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.27.3.linux-amd64/src/testing/testing.go:2744 +0x85
+testing.tRunner(0xc0007f3688, 0xc000ebfa40)
+	/home/by/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.27.3.linux-amd64/src/testing/testing.go:2195 +0x21d
+testing.runTests({0x4ddee8e, 0x1b}, {0x4e5fd7e, 0x2f}, 0xc000017980, {0x8afce58, 0x351, 0x351}, {0xc2b08181a77705f9, 0x45e975acab, ...})
+	/home/by/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.27.3.linux-amd64/src/testing/testing.go:2742 +0x9ea
+testing.(*M).Run(0xc000a4ee60)
+	/home/by/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.27.3.linux-amd64/src/testing/testing.go:2602 +0xf45
+main.main()
+	_testmain.go:1742 +0x165
+
+goroutine 6 [select]:
+github.com/urnetwork/glog.(*fileSink).flushDaemon(0x8d7ab78)
+	/home/by/urnetwork/temp/main-targeted-2f46-corrected-20261026.3Nd6V666/glog/glog_file.go:474 +0x175
+created by github.com/urnetwork/glog.init.1 in goroutine 1
+	/home/by/urnetwork/temp/main-targeted-2f46-corrected-20261026.3Nd6V666/glog/glog_file.go:225 +0x318
+
+goroutine 354 [runnable]:
+internal/poll.(*FD).Read(0xc0004bdd40, {0xc0014d6000, 0x8000, 0x8000})
+	/home/by/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.27.3.linux-amd64/src/internal/poll/fd_unix.go:178 +0x54b
+os.(*File).read(...)
+	/home/by/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.27.3.linux-amd64/src/os/file_posix.go:30
+os.(*File).Read(0xc00114a5c8, {0xc0014d6000, 0x8000, 0x8000})
+	/home/by/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.27.3.linux-amd64/src/os/file.go:144 +0xad
+io.(*LimitedReader).Read(0xc0010d8d20, {0xc0014d6000, 0x8000, 0x8000})
+	/home/by/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.27.3.linux-amd64/src/io/io.go:479 +0xbe
+io.copyBuffer({0x7a428280f200, 0xc000daac80}, {0x8981a80, 0xc0010d8d20}, {0x0, 0x0, 0x0})
+	/home/by/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.27.3.linux-amd64/src/io/io.go:429 +0x26e
+io.Copy(...)
+	/home/by/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.27.3.linux-amd64/src/io/io.go:388
+github.com/urnetwork/server/connect/sim-latency.verifyHeldOutExecutable({0xc00106cc30, 0x4d}, {0xc0012b58c0, 0x40}, 0x40000000)
+	/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_operator_draft_test.go:1286 +0x808
+github.com/urnetwork/server/connect/sim-latency.authenticateHeldOutPreparationWithContract({0x0, 0xc0010c04c0, {0x4e03f4f, 0x21}, 0xc001041680, 0x1, {0x4dfcc49, 0x20}, {0xc000e75080, 0xac}, ...}, ...)
+	/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_operator_draft_test.go:821 +0x2ee5
+github.com/urnetwork/server/connect/sim-latency.(*heldOutTwoBCompositionFixture).authenticate(0xc000a70808)
+	/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_two_b_composed_tests_draft_test.go:411 +0x30a
+github.com/urnetwork/server/connect/sim-latency.newHeldOutTwoBCompositionFixture(0xc0007f2b48)
+	/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_two_b_composed_tests_draft_test.go:401 +0x1635
+github.com/urnetwork/server/connect/sim-latency.newHeldOutFreshSingleFixture(0xc0007f2b48)
+	/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_fresh_single_b_tests_draft_test.go:173 +0x52
+github.com/urnetwork/server/connect/sim-latency.TestHeldOutFreshSingleDeclarationMutationsRefuseBeforeEntropy(0xc0007f2b48)
+	/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_fresh_single_b_tests_draft_test.go:525 +0x255
+testing.tRunner(0xc0007f2b48, 0x89bb948)
+	/home/by/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.27.3.linux-amd64/src/testing/testing.go:2195 +0x21d
+created by testing.(*T).Run in goroutine 1
+	/home/by/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.27.3.linux-amd64/src/testing/testing.go:2260 +0xb13
