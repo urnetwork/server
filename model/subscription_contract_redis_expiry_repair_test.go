@@ -29,10 +29,11 @@ func newRedisExpiryRepairTestContract(t testing.TB, ctx context.Context, f netEs
 		server.Raise(CloseContract(ctx, escrow.ContractId, f.sourceId, 17, false))
 		server.Raise(CloseContract(ctx, escrow.ContractId, f.destinationId, 11, true))
 	case "insufficient":
-		// The receiver's checkpoint predates the sender's final; a covering one
-		// after it would settle in that report (owner decision B).
-		server.Raise(CloseContract(ctx, escrow.ContractId, f.destinationId, 111, true))
-		server.Raise(CloseContract(ctx, escrow.ContractId, f.sourceId, 111, false))
+		// Both reports are applied without settling, as the expiry sweep finds
+		// a contract whose reports never settled it: since 2026-10-28 a sender's
+		// final after a receiver checkpoint settles in its own report.
+		testingApplyContractCloseReport(ctx, escrow.ContractId, f.destinationId, 111, true)
+		testingApplyContractCloseReport(ctx, escrow.ContractId, f.sourceId, 111, false)
 	default:
 		t.Fatal("unknown synthetic report shape")
 	}
