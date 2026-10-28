@@ -600,11 +600,11 @@ of a second's churn per second, against 250–760 a second on 10-21.
        was deployed at 18:28Z, and edge-0, edge-1, edge-3 and edge-4 had
        published it by 18:41Z;
      - no block restarted for it.
-   - Pending, for the owner: recreate every taskworker and api block, and alt
-     on crisp and fireside, by a restart or a deploy. Alt finished a deploy at
-     18:27:56Z, seconds before the config landed, so it needs one too.
-   - Then check that every block reports config `1084072720` or later, and that
-     `urnetwork_stats_provider_modern_gate_on` reads 0 everywhere.
+   - Then, at 22:37–22:48Z, the deploys in the deploy record below recreated
+     every taskworker, api and alt block. They also retired the gate's start
+     in code, so 2026-11-11 no longer turns anything on.
+   - The taskworkers' exports log the switch as false. Reading
+     `urnetwork_stats_provider_modern_gate_on` everywhere is still open.
 1. **connect.** Merge the args field, the spec entry and the generator change.
    Hold the release until step 5.
 2. **server.** Bump connect, then ship the index flag, the partition, the
@@ -650,6 +650,52 @@ of a second's churn per second, against 250–760 a second on 10-21.
 | new (modern) | old | field ignored: capability-blind, the client fails closed per provider |
 | sends `post_quantum_encryption` | new | declaring providers only, as today |
 | neither | new | unchanged, plus priority |
+
+#### Deploy record, 2026-10-28
+
+Server `b916c957d` (this design plus the fenced publication fix in
+FP2-MODERN-REVIEW.md, "Implementation follow-up") and connect `7ec0551e`,
+built with `warpctl build` from the local checkouts. No migration ran:
+production and the build were both at 897.
+
+| Service | Version | Deployed (UTC) |
+| --- | --- | --- |
+| taskworker | 1084248310 | g1 22:37–22:39, g2 22:40–22:42 |
+| api | 1084269800 | 22:40–22:45, in 25/50/75/100% waves |
+| alt | 1084250400 | crisp and fireside, 22:44–22:48 |
+| proxy | 1084253300 | blocks g1–g10 one at a time, 22:49–23:20 |
+
+- **Taskworkers:** the first new export finished at 22:40:17Z. It logged
+  31,602 Online providers, 23,225 of them modern. The other 8,377 were 6,377
+  not post-quantum, 163 without resizable windows, 1,112 without evidence and
+  725 with stale evidence. Exports log the gate off and `rank_modern_first` on.
+  No export logged an update error or a lost publication.
+- **Step 2's gate:** the old taskworkers were silent from 22:43:25Z. New
+  exports completed at 22:44:36Z and 22:47:41Z. Exports run one at a time, so
+  the second started after the last old writer, and its marker covers only new
+  writes. Proxy deployed after it.
+- **Readers:**
+  - api's waves were each ready in 30–55 s, with 5xx flat;
+  - alt's new containers took over by 22:47:52Z;
+  - every proxy block ended with one new container per host and no restarts.
+- **Redis:** dial timeouts ("failed to dial … i/o timeout") rose across api,
+  proxy and taskworker after 22:40Z.
+  - api peaked at about 100 per 10 minutes at 23:10Z, against a baseline under
+    10. By 23:34Z the timeouts were fading.
+  - Redis CPU, rejections and new connections stayed flat, and GETs fell.
+  - The added commands came from the monitor's PTTL scans and the IP rate
+    limiter, most likely from hosted devices reconnecting after the proxy
+    swaps.
+- **Rollback:** hotfix 3 (taskworker 1084050840, api 1084052700, alt
+  1084056600, proxy 1084055340).
+- **Afterwards,** taskworker 1084302400 and api 1084304170 from `72fcd28b2`
+  (the points-leaderboard fallback) began replacing these. `72fcd28b2` changes
+  none of the FP2 code.
+
+**Before the client release (step 5),** these are still open:
+- reading the marker's value itself, which the logs above only bound;
+- `modern_partition_total{state="absent"}` no longer growing;
+- modern-only answers for the three targets in step 5.
 
 ### Tests
 
