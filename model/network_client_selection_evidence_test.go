@@ -63,7 +63,7 @@ func evidenceTestExportedPool(
 ) (map[server.Id]*ClientScore, map[server.Id]string) {
 	t.Helper()
 	settings := DefaultEgressIndexSettings()
-	// the modern provider gate turns on by itself on 2026-11-04; these
+	// the modern provider gate turns on by itself on 2026-11-11; these
 	// fixtures rank providers the gate has no say over
 	modernGateOff := false
 	settings.QualitySpeedRequiresModernProvider = &modernGateOff
