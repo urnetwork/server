@@ -22,6 +22,17 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
+// Topology v2 owns five distinct initial quality tails plus one speed tail.
+// Ordinal4 stays physically absent until the unchanged late-constructor edge.
+const sdkBrowsingProviderCount = 7
+const sdkBrowsingInitialQualityMask uint8 = 0x4f
+const sdkBrowsingTopology = "public_sdk32_quality5_speed1_distinct_initial_v2"
+
+// Initial quality roles0..3 and6 share the same navigation-refusal policy.
+func sdkBrowsingInitialQualityProvider(ordinal int) bool {
+	return 0 <= ordinal && ordinal < 4 || ordinal == 6
+}
+
 // Publication follows complete transport, NAT and public-mode registration.
 // All non-atomic fields remain immutable after ready becomes true.
 type sdkBrowsingSetupProvider struct {
@@ -50,7 +61,7 @@ type sdkBrowsingSetupFixture struct {
 	environment       *routeEnvironment
 	providerNetworkId server.Id
 	providerUserId    server.Id
-	providers         [6]sdkBrowsingSetupProvider
+	providers         [sdkBrowsingProviderCount]sdkBrowsingSetupProvider
 	deviceCarrier     *clientconnect.Tun
 	deviceStrategy    *clientconnect.ClientStrategy
 	space             *sdk.NetworkSpace
@@ -159,8 +170,8 @@ func newSdkBrowsingSetupFixture(t testing.TB, plan *nativeBrowsingPressurePlan, 
 
 // A release/acquire publication permits a short immutable ready-ID snapshot.
 // No fixture lock is retained across transport reads or backend API calls.
-func (self *sdkBrowsingSetupFixture) readyProviderIds() [6]clientconnect.Id {
-	var ids [6]clientconnect.Id
+func (self *sdkBrowsingSetupFixture) readyProviderIds() [sdkBrowsingProviderCount]clientconnect.Id {
+	var ids [sdkBrowsingProviderCount]clientconnect.Id
 	for ordinal := range self.providers {
 		provider := &self.providers[ordinal]
 		if provider.ready.Load() && provider.transport.IsConnected() {
@@ -365,9 +376,9 @@ func (self *sdkBrowsingSetupFixture) close() error {
 	return self.closeErr
 }
 
-// Changed public input: five quality local owners and one speed owner fill the
-// six slots through five physical tails. This is not the private vacant-window
-// reproduction. Unpublished work remains unknown; full100 must recheck owners.
+// Five quality local owners and one speed owner fill the six slots from six
+// initial physical authorities; installed multiplicity remains observational.
+// Unpublished work remains unknown; full100 must recheck actual owners.
 func TestFullTunH1Sdk32InitialPublicFullWindowSetup(t *testing.T) {
 	if testing.Short() {
 		t.Skip("actual SDK/H1/provider setup needs the shared PERFVAR environment")
@@ -403,7 +414,7 @@ func TestFullTunH1Sdk32InitialPublicFullWindowSetup(t *testing.T) {
 			QuiescenceKnown        bool                            `json:"quiescence_known"`
 			ObservedExcludedEmpty  bool                            `json:"observed_excluded_empty"`
 			Full100Run             bool                            `json:"full100_run"`
-		}{GeometryContract: "public_sdk32_quality5_speed1_duplicate_physical_v1", Setup: snapshot, Discovery: discovery, AfterJoin: fixture.afterJoin, ObservedExcludedEmpty: discovery.InitialExcludedEmpty != nil})
+		}{GeometryContract: sdkBrowsingTopology, Setup: snapshot, Discovery: discovery, AfterJoin: fixture.afterJoin, ObservedExcludedEmpty: discovery.InitialExcludedEmpty != nil})
 		if err != nil || len(encoded) > 8*1024 {
 			t.Fatalf("bounded public setup receipt: bytes=%d err=%v", len(encoded), err)
 		}

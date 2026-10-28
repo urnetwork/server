@@ -195,7 +195,7 @@ func writeConnectAuthorizationClose(conn clientconnect.H1MessageConn, code int) 
 	binary.BigEndian.PutUint32(message[1:], reason)
 	_ = conn.SetWriteDeadline(time.Now().Add(time.Second))
 	_ = conn.WriteMessage(websocket.BinaryMessage, message)
-	if ws, ok := conn.(*websocket.Conn); ok {
+	if ws, ok := clientconnect.H1WebSocketConn(conn); ok {
 		_ = ws.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, "authorization ended"), time.Now().Add(time.Second))
 	}
 }

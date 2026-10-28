@@ -85,7 +85,12 @@ func upgradeNilHandler() *ConnectHandler {
 	h.handlerId = server.NewId()
 	h.settings = DefaultConnectHandlerSettings()
 	h.settings.ConnectionRateLimitSettings.BurstConnectionCount = 1000
-	h.exchange = &Exchange{settings: DefaultExchangeSettings()}
+	h.exchange = &Exchange{
+		settings: DefaultExchangeSettings(),
+		// an authorized connection registers here before its upgrade
+		// (registerConnectionWithMovedClose)
+		connections: map[server.Id]map[server.Id]context.CancelFunc{},
+	}
 	h.exchange.settings.EnableDrainCoordination = false
 	return h
 }

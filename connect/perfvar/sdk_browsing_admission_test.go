@@ -59,8 +59,8 @@ type sdkBrowsingScenario struct {
 	acceptOwnedSpeedRecovery                                                     bool
 	tapStarted                                                                   time.Time
 	preTapNs, combinedFirstByteNs, page1FirstByteNs                              int64
-	refusalNs                                                                    [6]int64
-	refusalCounts                                                                [6]uint64
+	refusalNs                                                                    [sdkBrowsingProviderCount]int64
+	refusalCounts                                                                [sdkBrowsingProviderCount]uint64
 	lateConstructedNs, lateApiVisibleNs                                          int64
 	initial, atCss, atTap, afterFirstRefusal                                     sdkBrowsingSetupSnapshot
 }
@@ -241,7 +241,7 @@ func (self *sdkBrowsingScenario) beforePage(ctx context.Context, page int, close
 	if err != nil {
 		return err
 	}
-	if socket == nil || socket.ordinal < 0 || socket.ordinal >= 4 || self.cssClientBytes.Load() != nativeBrowsingHeldPrefixBytes || self.cssGotConn.Load() != 1 || self.cssServerFinished.Load() {
+	if socket == nil || socket.ordinal < 0 || !sdkBrowsingInitialQualityProvider(socket.ordinal) || self.cssClientBytes.Load() != nativeBrowsingHeldPrefixBytes || self.cssGotConn.Load() != 1 || self.cssServerFinished.Load() {
 		return errors.New("SDK_BROWSING_CSS_ORIGINAL_OWNERSHIP")
 	}
 	snapshot, locations := self.snapshotForOwnership()
@@ -484,7 +484,7 @@ func (self *sdkBrowsingScenario) afterFetch(target string, result nativeBrowsing
 	case "/asset/0/0":
 		self.stateLock.Lock()
 		self.cssReceivedBytes = result.bytes
-		self.cssComplete = result.err == nil && result.bytes == nativeBrowsingAssetBytes(0, 0) && self.cssGotConn.Load() == 1 && self.cssClientTuple != "" && self.cssSocket != nil && 0 <= self.cssSocket.ordinal && self.cssSocket.ordinal < 4 && self.readClaimed
+		self.cssComplete = result.err == nil && result.bytes == nativeBrowsingAssetBytes(0, 0) && self.cssGotConn.Load() == 1 && self.cssClientTuple != "" && self.cssSocket != nil && sdkBrowsingInitialQualityProvider(self.cssSocket.ordinal) && self.readClaimed
 		self.stateLock.Unlock()
 	}
 }
@@ -606,35 +606,36 @@ func (self *sdkBrowsingScenario) log(t testing.TB, observation *nativeBrowsingOb
 	t.Helper()
 	self.stateLock.Lock()
 	report := struct {
+		Topology                                 string `json:"topology"`
 		AcceptOwnedSpeedRecovery                 bool   `json:"accept_owned_speed_recovery"`
 		RuntimeProcs                             int    `json:"gomaxprocs"`
 		Scope                                    string `json:"scope"`
 		Initial, AtCss, AtTap, AfterFirstRefusal sdkBrowsingSetupSnapshot
-		Html                                     int64                           `json:"html"`
-		Assets                                   int64                           `json:"assets"`
-		CssExpected                              int                             `json:"css_expected"`
-		CssReceived                              int                             `json:"css_received"`
-		CssOriginal                              bool                            `json:"css_original_tuple"`
-		HeldThroughHtml                          bool                            `json:"css_held_through_html"`
-		OwnerRetained                            bool                            `json:"css_public_owner_retained"`
-		FlowsBefore                              int32                           `json:"css_flows_before"`
-		FlowsAfter                               int32                           `json:"css_flows_after"`
-		PositiveHeldRead                         int                             `json:"positive_held_socket_read_bytes"`
-		Page1Provider                            int                             `json:"page1_provider_ordinal"`
-		PreTapNs                                 int64                           `json:"pre_tap_ns"`
-		CombinedNs                               int64                           `json:"combined_first_byte_ns"`
-		Page1Ns                                  int64                           `json:"page1_first_byte_ns"`
-		RefusalNs                                [6]int64                        `json:"first_refusal_ns"`
-		Refusals                                 [6]uint64                       `json:"refusal_counts"`
-		LateConstructedNs                        int64                           `json:"late_constructed_ns"`
-		LateApiVisibleNs                         int64                           `json:"late_api_visible_ns"`
-		LateReady                                bool                            `json:"late_public_api_visible"`
-		LateJoined                               bool                            `json:"late_constructor_joined"`
-		Discovery                                sdkBrowsingSetupDiscoveryReport `json:"discovery"`
-		AfterJoin                                *sdk.DeviceLocalMemoryUsage     `json:"owner_after_join"`
-		UnpublishedKnown                         bool                            `json:"unpublished_offers_known"`
-		QuiescenceKnown                          bool                            `json:"quiescence_known"`
-	}{AcceptOwnedSpeedRecovery: self.acceptOwnedSpeedRecovery, RuntimeProcs: runtime.GOMAXPROCS(0), Scope: "changed public full-window input; actual SDK32/H1; canonical aggregate pressure boundaries unavailable; one named fixture API probe is observational; source refusal followup views are non-atomic; no forced wake or fixture aging", Initial: self.initial, AtCss: self.atCss, AtTap: self.atTap, AfterFirstRefusal: self.afterFirstRefusal, Html: self.htmlFetches.Load(), Assets: self.assetFetches.Load(), CssExpected: nativeBrowsingAssetBytes(0, 0), CssReceived: self.cssReceivedBytes, CssOriginal: self.cssComplete, HeldThroughHtml: self.heldThroughHtml, OwnerRetained: self.cssOwnerRetained, FlowsBefore: self.cssFlowsBefore, FlowsAfter: self.cssFlowsAfter, PositiveHeldRead: self.positiveHeldBytes, Page1Provider: self.page1Provider, PreTapNs: self.preTapNs, CombinedNs: self.combinedFirstByteNs, Page1Ns: self.page1FirstByteNs, RefusalNs: self.refusalNs, Refusals: self.refusalCounts, LateConstructedNs: self.lateConstructedNs, LateApiVisibleNs: self.lateApiVisibleNs, LateReady: self.lateReady, LateJoined: self.lateJoined, Discovery: self.fixture.discovery.snapshot(), AfterJoin: self.fixture.afterJoin}
+		Html                                     int64                            `json:"html"`
+		Assets                                   int64                            `json:"assets"`
+		CssExpected                              int                              `json:"css_expected"`
+		CssReceived                              int                              `json:"css_received"`
+		CssOriginal                              bool                             `json:"css_original_tuple"`
+		HeldThroughHtml                          bool                             `json:"css_held_through_html"`
+		OwnerRetained                            bool                             `json:"css_public_owner_retained"`
+		FlowsBefore                              int32                            `json:"css_flows_before"`
+		FlowsAfter                               int32                            `json:"css_flows_after"`
+		PositiveHeldRead                         int                              `json:"positive_held_socket_read_bytes"`
+		Page1Provider                            int                              `json:"page1_provider_ordinal"`
+		PreTapNs                                 int64                            `json:"pre_tap_ns"`
+		CombinedNs                               int64                            `json:"combined_first_byte_ns"`
+		Page1Ns                                  int64                            `json:"page1_first_byte_ns"`
+		RefusalNs                                [sdkBrowsingProviderCount]int64  `json:"first_refusal_ns"`
+		Refusals                                 [sdkBrowsingProviderCount]uint64 `json:"refusal_counts"`
+		LateConstructedNs                        int64                            `json:"late_constructed_ns"`
+		LateApiVisibleNs                         int64                            `json:"late_api_visible_ns"`
+		LateReady                                bool                             `json:"late_public_api_visible"`
+		LateJoined                               bool                             `json:"late_constructor_joined"`
+		Discovery                                sdkBrowsingSetupDiscoveryReport  `json:"discovery"`
+		AfterJoin                                *sdk.DeviceLocalMemoryUsage      `json:"owner_after_join"`
+		UnpublishedKnown                         bool                             `json:"unpublished_offers_known"`
+		QuiescenceKnown                          bool                             `json:"quiescence_known"`
+	}{Topology: sdkBrowsingTopology, AcceptOwnedSpeedRecovery: self.acceptOwnedSpeedRecovery, RuntimeProcs: runtime.GOMAXPROCS(0), Scope: "changed public full-window input; actual SDK32/H1; canonical aggregate pressure boundaries unavailable; one named fixture API probe is observational; source refusal followup views are non-atomic; no forced wake or fixture aging", Initial: self.initial, AtCss: self.atCss, AtTap: self.atTap, AfterFirstRefusal: self.afterFirstRefusal, Html: self.htmlFetches.Load(), Assets: self.assetFetches.Load(), CssExpected: nativeBrowsingAssetBytes(0, 0), CssReceived: self.cssReceivedBytes, CssOriginal: self.cssComplete, HeldThroughHtml: self.heldThroughHtml, OwnerRetained: self.cssOwnerRetained, FlowsBefore: self.cssFlowsBefore, FlowsAfter: self.cssFlowsAfter, PositiveHeldRead: self.positiveHeldBytes, Page1Provider: self.page1Provider, PreTapNs: self.preTapNs, CombinedNs: self.combinedFirstByteNs, Page1Ns: self.page1FirstByteNs, RefusalNs: self.refusalNs, Refusals: self.refusalCounts, LateConstructedNs: self.lateConstructedNs, LateApiVisibleNs: self.lateApiVisibleNs, LateReady: self.lateReady, LateJoined: self.lateJoined, Discovery: self.fixture.discovery.snapshot(), AfterJoin: self.fixture.afterJoin}
 	self.stateLock.Unlock()
 	encoded, err := json.Marshal(report)
 	if err != nil || len(encoded) > 16*1024 {
@@ -643,16 +644,16 @@ func (self *sdkBrowsingScenario) log(t testing.TB, observation *nativeBrowsingOb
 		t.Logf("[perfvar] sdk-browsing-full-window %s", encoded)
 	}
 	encoded, err = json.Marshal(struct {
-		Started            uint64    `json:"started"`
-		Completed          uint64    `json:"completed"`
-		Accepted           uint64    `json:"accepted"`
-		Refused            uint64    `json:"refused"`
-		Maximum            int64     `json:"maximum_batch_packets"`
-		Invalid            bool      `json:"invalid"`
-		Dials              [6]uint64 `json:"origin_dials"`
-		Closes             [6]uint64 `json:"origin_closes"`
-		PerPacketMaskKnown bool      `json:"per_packet_mask_known"`
-	}{Started: self.native.bridgeStarted.Load(), Completed: self.native.bridgeCompleted.Load(), Accepted: self.native.bridgeAccepted.Load(), Refused: self.native.bridgeRefused.Load(), Maximum: self.native.bridgeMaximum.Load(), Invalid: self.native.bridgeInvalid.Load(), Dials: [6]uint64{self.native.originDials[0].Load(), self.native.originDials[1].Load(), self.native.originDials[2].Load(), self.native.originDials[3].Load(), self.native.originDials[4].Load(), self.native.originDials[5].Load()}, Closes: [6]uint64{self.native.originCloses[0].Load(), self.native.originCloses[1].Load(), self.native.originCloses[2].Load(), self.native.originCloses[3].Load(), self.native.originCloses[4].Load(), self.native.originCloses[5].Load()}})
+		Started            uint64                           `json:"started"`
+		Completed          uint64                           `json:"completed"`
+		Accepted           uint64                           `json:"accepted"`
+		Refused            uint64                           `json:"refused"`
+		Maximum            int64                            `json:"maximum_batch_packets"`
+		Invalid            bool                             `json:"invalid"`
+		Dials              [sdkBrowsingProviderCount]uint64 `json:"origin_dials"`
+		Closes             [sdkBrowsingProviderCount]uint64 `json:"origin_closes"`
+		PerPacketMaskKnown bool                             `json:"per_packet_mask_known"`
+	}{Started: self.native.bridgeStarted.Load(), Completed: self.native.bridgeCompleted.Load(), Accepted: self.native.bridgeAccepted.Load(), Refused: self.native.bridgeRefused.Load(), Maximum: self.native.bridgeMaximum.Load(), Invalid: self.native.bridgeInvalid.Load(), Dials: [sdkBrowsingProviderCount]uint64{self.native.originDials[0].Load(), self.native.originDials[1].Load(), self.native.originDials[2].Load(), self.native.originDials[3].Load(), self.native.originDials[4].Load(), self.native.originDials[5].Load(), self.native.originDials[6].Load()}, Closes: [sdkBrowsingProviderCount]uint64{self.native.originCloses[0].Load(), self.native.originCloses[1].Load(), self.native.originCloses[2].Load(), self.native.originCloses[3].Load(), self.native.originCloses[4].Load(), self.native.originCloses[5].Load(), self.native.originCloses[6].Load()}})
 	if err != nil || len(encoded) > 2048 {
 		t.Errorf("bounded SDK ABI custody: bytes=%d err=%v", len(encoded), err)
 	} else {

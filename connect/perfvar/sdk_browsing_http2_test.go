@@ -29,13 +29,13 @@ type sdkBrowsingHttp2ProviderBoundary struct {
 }
 
 type sdkBrowsingHttp2Boundary struct {
-	Page            int                                 `json:"page"`
-	Device          *sdk.DeviceLocalMemoryUsage         `json:"device"`
-	BridgeStarted   uint64                              `json:"bridge_started"`
-	BridgeCompleted uint64                              `json:"bridge_completed"`
-	BridgeAccepted  uint64                              `json:"bridge_accepted"`
-	BridgeRefused   uint64                              `json:"bridge_refused"`
-	Providers       [6]sdkBrowsingHttp2ProviderBoundary `json:"providers"`
+	Page            int                                                        `json:"page"`
+	Device          *sdk.DeviceLocalMemoryUsage                                `json:"device"`
+	BridgeStarted   uint64                                                     `json:"bridge_started"`
+	BridgeCompleted uint64                                                     `json:"bridge_completed"`
+	BridgeAccepted  uint64                                                     `json:"bridge_accepted"`
+	BridgeRefused   uint64                                                     `json:"bridge_refused"`
+	Providers       [sdkBrowsingProviderCount]sdkBrowsingHttp2ProviderBoundary `json:"providers"`
 }
 
 func sdkBrowsingHttp2Capture(fixture *sdkBrowsingSetupFixture, page int) sdkBrowsingHttp2Boundary {
@@ -144,12 +144,13 @@ func TestFullTunH1Sdk32PersistentInnerHttp2Browsing100Pages(t *testing.T) {
 		closeErr := fixture.close()
 		observation.Drain = nativeBrowsingMemoryNow()
 		report := struct {
+			Topology    string                         `json:"topology"`
 			Browsing    *nativeBrowsingObservation     `json:"browsing"`
 			Http2       nativeBrowsingHttp2Observation `json:"inner_http2"`
 			LastHealthy *sdkBrowsingHttp2Boundary      `json:"last_healthy,omitempty"`
 			FirstSlow   *sdkBrowsingHttp2Boundary      `json:"first_slow_or_error,omitempty"`
 			AfterJoin   *sdk.DeviceLocalMemoryUsage    `json:"after_join"`
-		}{Browsing: observation, Http2: h2, LastHealthy: lastHealthy, FirstSlow: firstSlow, AfterJoin: fixture.afterJoin}
+		}{Topology: sdkBrowsingTopology, Browsing: observation, Http2: h2, LastHealthy: lastHealthy, FirstSlow: firstSlow, AfterJoin: fixture.afterJoin}
 		encoded, encodeErr := json.Marshal(report)
 		if encodeErr != nil || nativeBrowsingPressureReportByteLimit < len(encoded) {
 			t.Error("bounded inner-H2 report: ", encodeErr, " bytes=", len(encoded))

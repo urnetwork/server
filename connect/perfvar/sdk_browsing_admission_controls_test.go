@@ -23,13 +23,16 @@ func TestSdkBrowsingAdmissionRefusesOnlyOldQualityNavigation(t *testing.T) {
 	self := newSdkBrowsingScenario(newNativeBrowsingPressurePlan())
 	self.tapStarted = time.Now()
 	self.rejectNew.Store(true)
-	for ordinal := range 6 {
-		if got := self.rejectNavigationDial(ordinal, "203.0.113.11:443"); got != (ordinal < 4) {
+	for ordinal := range sdkBrowsingProviderCount {
+		if got := self.rejectNavigationDial(ordinal, "203.0.113.11:443"); got != (ordinal < 4 || ordinal == 6) {
 			t.Fatalf("provider=%d refused=%t", ordinal, got)
 		}
 		if self.rejectNavigationDial(ordinal, "203.0.113.10:443") {
 			t.Fatal("original CSS destination was refused")
 		}
+	}
+	if self.rejectNavigationDial(-1, "203.0.113.11:443") || self.rejectNavigationDial(sdkBrowsingProviderCount, "203.0.113.11:443") {
+		t.Fatal("invalid provider ordinal escaped the refusal boundary")
 	}
 	select {
 	case <-self.firstRefusal:
@@ -38,7 +41,7 @@ func TestSdkBrowsingAdmissionRefusesOnlyOldQualityNavigation(t *testing.T) {
 	}
 	for ordinal, count := range self.refusalCounts {
 		want := uint64(0)
-		if ordinal < 4 {
+		if ordinal < 4 || ordinal == 6 {
 			want = 1
 		}
 		if count != want {
@@ -54,62 +57,73 @@ func TestSdkBrowsingAdmissionRefusesOnlyOldQualityNavigation(t *testing.T) {
 // A positive Read on an unrelated socket stays live. The exact CSS socket
 // blocks until release and then returns the same bytes, count and error.
 func TestSdkBrowsingAdmissionHoldsOnlyOriginalPositiveSocketRead(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	self := newSdkBrowsingScenario(newNativeBrowsingPressurePlan())
-	self.workCtx, self.readArmed = ctx, true
-	native := &sdkBrowsingNative{scenario: self, upstreamConns: map[sdkBrowsingOriginTuple]*sdkBrowsingOriginConn{}}
-	reader, writer := net.Pipe()
-	defer writer.Close()
-	connection := &sdkBrowsingOriginConn{Conn: reader, native: native, ordinal: 0, tuple: sdkBrowsingOriginTuple{sourceAddr: "synthetic-original", destinationAddr: "synthetic-origin"}}
-	defer connection.Close()
-	self.cssSocket = connection
-	native.upstreamConns[connection.tuple] = connection
-	self.holdOriginRead(&sdkBrowsingOriginConn{}, 3)
-	self.holdOriginRead(connection, 0)
-	if self.readClaimed {
-		t.Fatal("unrelated or empty read consumed CSS ownership")
+	for _, ordinal := range []int{0, 6} {
+		func() {
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			self := newSdkBrowsingScenario(newNativeBrowsingPressurePlan())
+			self.workCtx, self.readArmed = ctx, true
+			native := &sdkBrowsingNative{scenario: self, upstreamConns: map[sdkBrowsingOriginTuple]*sdkBrowsingOriginConn{}}
+			reader, writer := net.Pipe()
+			defer writer.Close()
+			connection := &sdkBrowsingOriginConn{Conn: reader, native: native, ordinal: ordinal, tuple: sdkBrowsingOriginTuple{sourceAddr: "synthetic-original", destinationAddr: "synthetic-origin"}}
+			defer connection.Close()
+			self.cssSocket = connection
+			native.upstreamConns[connection.tuple] = connection
+			self.holdOriginRead(&sdkBrowsingOriginConn{}, 3)
+			self.holdOriginRead(connection, 0)
+			if self.readClaimed {
+				t.Fatal("unrelated or empty read consumed CSS ownership")
+			}
+			written := make(chan error, 1)
+			go func() { _, err := writer.Write([]byte("body")); written <- err }()
+			type result struct {
+				count int
+				err   error
+				body  string
+			}
+			returned := make(chan result, 1)
+			go func() {
+				buffer := make([]byte, 4)
+				count, err := connection.Read(buffer)
+				returned <- result{count: count, err: err, body: string(buffer[:count])}
+			}()
+			select {
+			case <-self.readHeld:
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+			if err := <-written; err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-returned:
+				t.Fatal("positive original read returned before its release")
+			default:
+			}
+			self.releaseOnce.Do(func() { close(self.release) })
+			got := <-returned
+			if got.count != 4 || got.err != nil || got.body != "body" || self.positiveHeldBytes != 4 {
+				t.Fatalf("original read changed: %+v held=%d", got, self.positiveHeldBytes)
+			}
+			self.cssClientTuple = "synthetic-original-css"
+			self.cssGotConn.Store(1)
+			self.afterFetch("/asset/0/0", nativeBrowsingAssetResult{bytes: nativeBrowsingAssetBytes(0, 0)})
+			if !self.cssComplete {
+				t.Fatal("initial quality CSS owner failed its complete ownership predicate")
+			}
+			if err := connection.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := connection.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if native.originCloses[ordinal].Load() != 1 || len(native.upstreamConns) != 0 {
+				t.Fatal("origin socket retired more than once or retained attribution")
+			}
+		}()
 	}
-	written := make(chan error, 1)
-	go func() { _, err := writer.Write([]byte("body")); written <- err }()
-	type result struct {
-		count int
-		err   error
-		body  string
-	}
-	returned := make(chan result, 1)
-	go func() {
-		buffer := make([]byte, 4)
-		count, err := connection.Read(buffer)
-		returned <- result{count, err, string(buffer[:count])}
-	}()
-	select {
-	case <-self.readHeld:
-	case <-ctx.Done():
-		t.Fatal(ctx.Err())
-	}
-	if err := <-written; err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-returned:
-		t.Fatal("positive original read returned before its release")
-	default:
-	}
-	self.releaseOnce.Do(func() { close(self.release) })
-	got := <-returned
-	if got.count != 4 || got.err != nil || got.body != "body" || self.positiveHeldBytes != 4 {
-		t.Fatalf("original read changed: %+v held=%d", got, self.positiveHeldBytes)
-	}
-	if err := connection.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := connection.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if native.originCloses[0].Load() != 1 || len(native.upstreamConns) != 0 {
-		t.Fatal("origin socket retired more than once or retained attribution")
-	}
+
 }
 
 // The response recorder exposes the selected real writer prefix, including a

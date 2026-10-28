@@ -25,7 +25,7 @@ func sdkBrowsingPhaseRegistrationError(phase sdkBrowsingPremisePhase, registered
 	return nil
 }
 
-func sdkBrowsingAdmissionPhasePremise(initial, current sdkBrowsingSetupSnapshot, empty *sdkBrowsingSetupEmptyReceipt, providers [6]clientconnect.Id, locations *sdk.ConnectedProviderLocationList, phase sdkBrowsingPremisePhase, registered, physicalLate bool) error {
+func sdkBrowsingAdmissionPhasePremise(initial, current sdkBrowsingSetupSnapshot, empty *sdkBrowsingSetupEmptyReceipt, providers [sdkBrowsingProviderCount]clientconnect.Id, locations *sdk.ConnectedProviderLocationList, phase sdkBrowsingPremisePhase, registered, physicalLate bool) error {
 	if err := sdkBrowsingPhaseRegistrationError(phase, registered); err != nil {
 		return err
 	}
@@ -55,7 +55,7 @@ func (self *sdkBrowsingScenario) validateOwnedPhase(current sdkBrowsingSetupSnap
 	if err != nil {
 		return err
 	}
-	var providers [6]clientconnect.Id
+	var providers [sdkBrowsingProviderCount]clientconnect.Id
 	for ordinal := range self.fixture.providers {
 		provider := &self.fixture.providers[ordinal]
 		if provider.ready.Load() && provider.client != nil {
