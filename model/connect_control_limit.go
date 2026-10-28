@@ -62,9 +62,10 @@ type ConnectControlLimitSettings struct {
 // 2,000 clients sends about 1,600-2,600 requests a minute. 6,000 a minute
 // leaves it 2.3x headroom at the higher ratio. A burst of 3,000 (30 s of the
 // rate) absorbs a provider restart, when every client asks for a return
-// contract at once. A normal client sends a handful a minute (median one
-// contract per 10 minutes, p99.9 103). One client can't sustain more than
-// 100 requests a second, about 1% of the route's peak (10,700/s).
+// contract at once. Half of all clients created one contract in those 10
+// minutes and 99.9% at most 103, under 100 requests a minute even at the
+// higher ratio. One client can't sustain more than 100 requests a second,
+// about 1% of the route's peak (10,700/s).
 func DefaultConnectControlLimitSettings() ConnectControlLimitSettings {
 	return ConnectControlLimitSettings{
 		RequestsPerMinute: 6000,
