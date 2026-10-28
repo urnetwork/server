@@ -523,3 +523,81 @@ func TestContractCompletionRetrySenderDecisionNeedsCheckpointWitness(t *testing.
 		}
 	})
 }
+
+// Client-origin legacy zero finals retain their eligibility before settlement,
+// so a retry can release the real Redis reservation after an interruption.
+func TestContractCompletionRetryLegacyClientZeroFinal(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		f := newNetEscrowOrderingTestFixture(t, ctx)
+		contract := createRedisAdmissionTest(ctx, f, 40)
+		interrupted := errors.New("synthetic stop after legacy client admission")
+		reportCtx := context.WithValue(ctx, contractSettlementTxTestKey{}, func(server.Id) { panic(interrupted) })
+		var stopped any
+		func() {
+			defer func() { stopped = recover() }()
+			if added, err := CloseClientContractUsage(reportCtx, contract.ContractId, f.sourceId, 0, false); added != 0 || err != nil {
+				t.Fatalf("legacy client admission failed: added=%d err=%v", added, err)
+			}
+		}()
+		if stopped != interrupted {
+			t.Fatalf("legacy client report did not reach settlement: %v", stopped)
+		}
+		if outcome, journals := readContractCompletionTestState(t, ctx, contract.ContractId); outcome != nil || journals != 0 {
+			t.Fatalf("interrupted legacy settlement became terminal: outcome=%v journals=%d", outcome, journals)
+		}
+		if reserved := Testing_NetEscrowByteCount(ctx, f.balanceId); reserved != 40 {
+			t.Fatalf("legacy report lost its pending reservation: %d", reserved)
+		}
+		if added, err := CloseClientContractUsage(ctx, contract.ContractId, f.sourceId, 0, false); added != 0 || err != nil {
+			t.Fatalf("legacy client retry changed its count: added=%d err=%v", added, err)
+		}
+		if outcome, journals := readContractCompletionTestState(t, ctx, contract.ContractId); outcome == nil || *outcome != ContractOutcomeSettled || journals != 1 {
+			t.Fatalf("legacy client retry did not settle: outcome=%v journals=%d", outcome, journals)
+		}
+		flushRedisAdmissionTestDebits(t, ctx, f.balanceId, 1, 1)
+		if reserved := Testing_NetEscrowByteCount(ctx, f.balanceId); reserved != 0 {
+			t.Fatalf("legacy client settlement left reservation=%d", reserved)
+		}
+	})
+}
+
+// An internal zero final retains no client-origin proof. Replaying that final
+// through either API cannot create eligibility after its admission.
+func TestContractCompletionRetryInternalZeroFinalNeedsReceiver(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		f := newNetEscrowOrderingTestFixture(t, ctx)
+		contract := createRedisAdmissionTest(ctx, f, 40)
+		settlementAttempts := 0
+		reportCtx := context.WithValue(ctx, contractSettlementTxTestKey{}, func(server.Id) { settlementAttempts++ })
+		for range 2 {
+			if err := CloseContract(reportCtx, contract.ContractId, f.sourceId, 0, false); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if added, err := CloseClientContractUsage(reportCtx, contract.ContractId, f.sourceId, 0, false); added != 0 || err != nil {
+			t.Fatalf("client replay changed an internal final: added=%d err=%v", added, err)
+		}
+		if settlementAttempts != 0 {
+			t.Fatalf("internal final authorized %d settlement attempts", settlementAttempts)
+		}
+		if outcome, journals := readContractCompletionTestState(t, ctx, contract.ContractId); outcome != nil || journals != 0 {
+			t.Fatalf("internal zero final settled without its receiver: outcome=%v journals=%d", outcome, journals)
+		}
+		if reserved := Testing_NetEscrowByteCount(ctx, f.balanceId); reserved != 40 {
+			t.Fatalf("internal final lost its pending reservation: %d", reserved)
+		}
+		if err := CloseContract(ctx, contract.ContractId, f.destinationId, 0, false); err != nil {
+			t.Fatal(err)
+		}
+		if outcome, journals := readContractCompletionTestState(t, ctx, contract.ContractId); outcome == nil || *outcome != ContractOutcomeSettled || journals != 1 {
+			t.Fatalf("two internal finals did not settle: outcome=%v journals=%d", outcome, journals)
+		}
+		flushRedisAdmissionTestDebits(t, ctx, f.balanceId, 1, 1)
+	})
+}

@@ -402,7 +402,7 @@ func admitContractCloseReportInTx(ctx context.Context, tx server.PgTx, report Co
 	}
 	// The lock above owns both the old rolling receipt and the byte increment.
 	// Any refusal rolls back our reservation too.
-	applied, added, completion := applyLockedContractCloseReportInTx(ctx, tx, report.ContractId, sourceId, destinationId, party, report.AckedByteCount, report.Checkpoint, &report.ReportId)
+	applied, added, completion := applyLockedContractCloseReportInTx(ctx, tx, report.ContractId, sourceId, destinationId, party, report.AckedByteCount, report.Checkpoint, &report.ReportId, true)
 	if !applied {
 		return contractCloseReportAdmission{}, ErrContractCloseReportClosed
 	}

@@ -7,8 +7,8 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// A sender's identified zero final while the receiver has not reported settles
-// the unused contract in that report and frees its reservation (owner,
+// A sender's zero final while the receiver has not reported settles the
+// unused contract in that report and frees its reservation (owner,
 // 2026-10-28). A sender that used the contract keeps waiting for the
 // receiver, which is asked for its final.
 func TestSenderZeroFinalSettlesUnusedContract(t *testing.T) {
@@ -56,16 +56,25 @@ func TestSenderZeroFinalSettlesUnusedContract(t *testing.T) {
 			t.Fatalf("a receiver report after the settlement: %v, want already settled", err)
 		}
 
-		// the legacy id-less path keeps the two-final rule
+		// a client's legacy id-less report settles the same (owner, 2026-10-28)
 		legacy := newContract()
-		if err := CloseContract(ctx, legacy, f.sourceId, 0, false); err != nil {
+		if _, err := CloseClientContractUsage(ctx, legacy, f.sourceId, 0, false); err != nil {
 			t.Fatal(err)
 		}
-		if settled, final, _ := state(legacy); settled || final {
-			t.Fatal("a legacy zero final settled the contract")
+		if settled, final, _ := state(legacy); !settled || !final {
+			t.Fatal("a client's legacy zero final did not settle the unused contract")
 		}
 		if requests := TakeClientCloseRequests(ctx, f.destinationId, 1024); !requests.Empty() {
-			t.Fatal("a legacy zero final asked the receiver to close")
+			t.Fatal("a client's legacy zero final asked the receiver to close")
+		}
+
+		// an internal legacy close keeps the two-final rule
+		internal := newContract()
+		if err := CloseContract(ctx, internal, f.sourceId, 0, false); err != nil {
+			t.Fatal(err)
+		}
+		if settled, final, _ := state(internal); settled || final {
+			t.Fatal("an internal legacy zero final settled the contract")
 		}
 
 		// a sender that used the contract waits for the receiver, which is asked

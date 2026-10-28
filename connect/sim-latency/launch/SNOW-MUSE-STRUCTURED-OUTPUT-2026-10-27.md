@@ -111,3 +111,48 @@ Removing the reasoning parser or forcing a nonreasoning template is likewise a
 different launch variant requiring explicit profile approval, channel/framing
 tests and fresh qualification. The current xops effort prefix maps `none` to
 `low`; sending `reasoning.effort=none` is not an established off switch.
+
+## Operations resolution — 2026-10-28
+
+The running Snow backend was read back before changes: the pinned image and all
+three affected parser/manager preimages matched the source above. Installed
+versions were vLLM 0.30.0, XGrammar 0.2.7, llguidance 1.7.6, Transformers 5.17.0,
+and Torch 2.13.0+cu130. The engine configuration used backend `auto` and
+`enable_in_reasoning=False`.
+
+A reviewed derivative separates grammar activation from tool handoff and keeps
+the earliest completed user header across speculative windows. Review found an
+additional non-monotone window case; its failing controls were retained and the
+final correction preserves the previous algorithm for parsers without an
+explicit separate grammar hook. Existing Muse tool/extraction methods, model
+selection, templates, launch arguments and four-token speculation are unchanged.
+
+The actual built image passed 21 CPU boundary/protocol controls and 22 grammar
+controls with Snow's real tokenizer and both unchanged native broker schema
+exports. Deployment-template checks passed 24 tests. The original backend's
+causal failure and initial candidate's two speculative failures are retained.
+The schema exports use exact function-body AST checks with a projected policy
+type; they are not proof of the missing historical V7 request body.
+
+Deployment completed at **2026-10-28 16:40:22 UTC**. Muse runs immutable image
+`sha256:c097ef57f805db9eb39b1cbb4d5d479c6dfbe2e796ea41bacef09e9a37a98663`.
+Live health returned HTTP 200, installed hashes matched the reviewed image, and
+all three selected models remained advertised. Qwen/Gemma configuration hashes
+were unchanged. Two operator-runner failures (router readiness and an unbound
+loopback ingress check) were retained; the final attempt passed. The image and
+configuration backup for rollback remain on Snow.
+
+The sanitized receipt is on **sille**:
+
+`/home/by/urnetwork/temp/snow-muse-structured-output-20261028T164022Z/message.md`
+
+Its sibling `receipt.json`, `SHA256SUMS`, regression logs, reviewed source bundle
+and `rollback.md` contain the exact identities, versions, flags and recovery
+instructions. Source/build/tests are committed in xops fix `4ed245e`, synchronized
+main `7b5ec9d`.
+
+No inference requests, malformed-answer repair, schema relaxation or V7 rerun
+were performed by operations. **V7 remains failed closed and its exact truncation
+cause remains unknown.** A fresh, prospectively recorded three-model
+qualification is the next acceptance step; deployment and CPU controls do not
+confer competition approval.
