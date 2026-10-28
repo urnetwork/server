@@ -19,17 +19,15 @@
 // dashboard counts publish them as urnetwork_stats_provider_modern_gate_shadow
 // and every score export logs them.
 //
-// The gate turns on by itself at its start, 2026-11-11 00:00 UTC by default
-// (owner decision 2026-10-28; EgressIndexSettings.RequiresModernProvider),
-// and from then takes every provider whose outcome is not modern out of
-// Quality and Speed under the not_modern reason. Each pass decides at its
-// own instant, so a pass decides every provider alike.
-// `quality_speed_requires_modern_provider` in provider.yml overrides the
-// start: false keeps the gate off, the kill switch and the way to postpone,
-// and true turns it on at once; `quality_speed_modern_provider_start` moves
-// the start. A provider the gate takes out stays in Online and the location
-// counts, and the rule is bucket membership only, like the URL ratio: probes,
-// explicit client ids and force_minimum keep only the common gates.
+// Modern-first priority within each FindProviders2 band replaced the gate
+// (owner decision 2026-10-28, FP2-MODERN.md), so the gate no longer turns on
+// by itself: only `quality_speed_requires_modern_provider: true` in
+// provider.yml turns it on (EgressIndexSettings.RequiresModernProvider), and
+// absent or false it is off. While on, it takes every provider whose outcome
+// is not modern out of Quality and Speed under the not_modern reason. A
+// provider the gate takes out stays in Online and the location counts, and
+// the rule is bucket membership only, like the URL ratio: probes, explicit
+// client ids and force_minimum keep only the common gates.
 package model
 
 import (
@@ -388,15 +386,16 @@ func countProviderModernGateShadow(bucketOutcomeCounts map[string]map[string]int
 }
 
 // One line for a pass's log: whether the gate is on at the pass's instant,
-// the same decision the pass made, and how provider.yml sets it, and per
-// bucket the providers the other rules admit, those of them the gate keeps,
-// and every outcome that would take one out.
+// the same decision the pass made, how provider.yml sets its switch and
+// modern-first priority (FP2-MODERN.md), and per bucket the providers the
+// other rules admit, those of them the gate keeps, and every outcome that
+// would take one out.
 func providerModernGateShadowSummary(bucketOutcomeCounts map[string]map[string]int64, settings *EgressIndexSettings, now time.Time) string {
 	state := "off, shadow only"
 	if settings.RequiresModernProvider(now) {
 		state = "on"
 	}
-	state = fmt.Sprintf("%s (%s)", state, settings.ModernProviderGateSchedule())
+	state = fmt.Sprintf("%s (%s; egress_index.rank_modern_first: %t)", state, settings.ModernProviderGateSchedule(), settings.RankModernFirst)
 	bucketTexts := make([]string, 0, len(ProviderModernGateBuckets))
 	for _, bucket := range ProviderModernGateBuckets {
 		outcomeCounts := bucketOutcomeCounts[bucket]

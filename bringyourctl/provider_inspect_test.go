@@ -46,3 +46,34 @@ func TestProviderInspectIndexLinesPrintWhetherTheMinimumsAreMet(t *testing.T) {
 		t.Fatalf("Quality short and Speed met: %q", lines)
 	}
 }
+
+// `provider inspect` prints how this host's provider.yml sets modern
+// providers apart (FP2-MODERN.md): the gate's switch, off while absent, and
+// the effective rank_modern_first, and never a start, which is retired.
+func TestProviderInspectModernSettingsPrintTheSwitchAndPriority(t *testing.T) {
+	off, on := false, true
+	for _, c := range []struct {
+		modernSwitch    *bool
+		rankModernFirst bool
+		want            string
+	}{
+		{modernSwitch: nil, rankModernFirst: true, want: "quality_speed_requires_modern_provider absent (off); egress_index.rank_modern_first: true"},
+		{modernSwitch: &off, rankModernFirst: true, want: "quality_speed_requires_modern_provider: false; egress_index.rank_modern_first: true"},
+		{modernSwitch: &on, rankModernFirst: false, want: "quality_speed_requires_modern_provider: true; egress_index.rank_modern_first: false"},
+	} {
+		settings := model.DefaultEgressIndexSettings()
+		settings.QualitySpeedRequiresModernProvider = c.modernSwitch
+		settings.RankModernFirst = c.rankModernFirst
+		text := providerInspectModernSettings(settings)
+		if text != c.want {
+			t.Errorf("modern settings %q, want %q", text, c.want)
+		}
+		if strings.Contains(text, "start") || strings.Contains(text, "2026-11-11") {
+			t.Errorf("modern settings %q name a start", text)
+		}
+	}
+	// the default is priority on with the switch absent
+	if text := providerInspectModernSettings(model.DefaultEgressIndexSettings()); text != "quality_speed_requires_modern_provider absent (off); egress_index.rank_modern_first: true" {
+		t.Errorf("default modern settings %q", text)
+	}
+}

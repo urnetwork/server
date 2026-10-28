@@ -177,25 +177,26 @@ func TestRecordProviderModernEvidenceKeepsTheLatestObservation(t *testing.T) {
 	})
 }
 
-// Shadow first, then on: before the gate's start every provider keeps its
-// buckets and the dashboard counts say what the gate would take out. From the
-// start, with the switch absent (on by time), and with
-// `quality_speed_requires_modern_provider: true`, the providers the probe
-// has not shown to be modern leave the native Quality and Speed samples
-// under not_modern and answer only from the Online tier; they stay in the
-// Online pool and the location counts, and force_minimum and an explicit
-// client id still reach them. `quality_speed_requires_modern_provider:
-// false` after the start turns the gate off again. The shadow reads the same
-// throughout, and the provider status and inspection say why. The start is
-// pinned in provider.yml, so the test reads the same whatever day it runs.
+// Shadow first, then on only by the switch (FP2-MODERN.md): with
+// `quality_speed_requires_modern_provider` absent every provider keeps its
+// buckets at every pass, whatever day the test runs, and the dashboard
+// counts say what the gate would take out; the retired
+// `quality_speed_modern_provider_start`, at an instant the passes come
+// after, turns nothing on. With the switch true, the providers the probe has
+// not shown to be modern leave the native Quality and Speed samples under
+// not_modern and answer only from the Online tier; they stay in the Online
+// pool and the location counts, and force_minimum and an explicit client id
+// still reach them. `quality_speed_requires_modern_provider: false` turns the
+// gate off again. The shadow reads the same throughout, and the provider
+// status and inspection say why. Modern-first priority is off in this
+// provider.yml, so the provider status shows the gate alone.
 func TestModernProviderGateShadowFirstThenOnAcrossThePasses(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		// the switch absent and the start far ahead: the passes decide before
-		// the start
+		// the switch absent: the passes keep the gate off
 		pushModernProviderGateConfig(t, map[string]any{
 			"quality_speed_requires_modern_provider": nil,
-			"quality_speed_modern_provider_start":    "2100-01-01T00:00:00Z",
+			"egress_index":                           map[string]any{"rank_modern_first": false},
 		})
 		city := egressTestCity(ctx, "Palo Alto", "California", "United States", "us")
 
@@ -328,34 +329,40 @@ func TestModernProviderGateShadowFirstThenOnAcrossThePasses(t *testing.T) {
 			}
 		}
 
-		// before the start
+		// the switch absent
 		egressTestPasses(ctx, t)
-		assertGateOff("before the start")
+		assertGateOff("switch absent")
 		offPolicyKey := ProviderEgressCountsPolicyKey(0)
 
-		// on by time: the start moved to an instant the passes below come
-		// after, the switch still absent
+		// the retired start, at an instant the passes below come after, the
+		// switch still absent: it turns nothing on
 		start := server.NowUtc()
 		pushModernProviderGateConfig(t, map[string]any{"quality_speed_modern_provider_start": start.Format(time.RFC3339Nano)})
 		egressTestPasses(ctx, t)
-		assertGateOn("on by time")
-		if inspection := InspectProviderEgress(ctx, legacy.clientId); inspection.Settings.QualitySpeedRequiresModernProvider != nil || !inspection.Settings.QualitySpeedModernProviderStart.Equal(start) || inspection.ModernGateTime.Before(start) {
-			t.Fatalf("on by time: inspection settings %+v at %s, want the switch absent and the start %s", inspection.Settings, inspection.ModernGateTime, start)
+		assertGateOff("the retired start passed")
+		if inspection := InspectProviderEgress(ctx, legacy.clientId); inspection.Settings.QualitySpeedRequiresModernProvider != nil || inspection.ModernGate || inspection.ModernGateTime.Before(start) {
+			t.Fatalf("the retired start passed: inspection settings %+v, gate %t at %s, want the switch absent and the gate off after %s", inspection.Settings, inspection.ModernGate, inspection.ModernGateTime, start)
 		}
-		if ProviderEgressCountsPolicyKey(0) == offPolicyKey {
-			t.Fatal("on by time: the dashboard counts kept the key they had before the start")
-		}
-
-		// the kill switch, after the start
-		pushModernProviderGateConfig(t, map[string]any{"quality_speed_requires_modern_provider": false})
-		egressTestPasses(ctx, t)
-		assertGateOff("switched off after the start")
 		connect.AssertEqual(t, ProviderEgressCountsPolicyKey(0), offPolicyKey)
 
 		// switched on
 		pushModernProviderGateConfig(t, map[string]any{"quality_speed_requires_modern_provider": true})
 		egressTestPasses(ctx, t)
 		assertGateOn("switched on")
+		if ProviderEgressCountsPolicyKey(0) == offPolicyKey {
+			t.Fatal("switched on: the dashboard counts kept the key of the gate off")
+		}
+
+		// the kill switch
+		pushModernProviderGateConfig(t, map[string]any{"quality_speed_requires_modern_provider": false})
+		egressTestPasses(ctx, t)
+		assertGateOff("switched off")
+		connect.AssertEqual(t, ProviderEgressCountsPolicyKey(0), offPolicyKey)
+
+		// switched on again
+		pushModernProviderGateConfig(t, map[string]any{"quality_speed_requires_modern_provider": true})
+		egressTestPasses(ctx, t)
+		assertGateOn("switched on again")
 
 		// evidence of both capabilities brings the provider back at the next
 		// pass

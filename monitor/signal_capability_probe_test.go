@@ -216,26 +216,26 @@ func TestCapabilityProbeSignalAlertsOnAStalledChain(t *testing.T) {
 }
 
 // The stall pages on the modern provider gate as every pass decides it, read
-// from the desired provider.yml by the model's own decoder. With
-// quality_speed_requires_modern_provider absent the gate turns on by itself
-// at its start, so a seven-hour stall warns a second before the start and
-// pages from it, at the default start too; true pages and false warns
-// whatever the time, and a switch or file that cannot be read is off. Only a
-// switch set to true armed the page before, so the automatic switch-on never
-// would have.
+// from the desired provider.yml by the model's own decoder. The gate has no
+// start any more (FP2-MODERN.md): with quality_speed_requires_modern_provider
+// absent it is off at every instant, so a seven-hour stall warns before, at
+// and after the former start, beside the retired start key too; true pages
+// and false warns whatever the time, and a switch or file that cannot be
+// read is off.
 func TestCapabilityProbeStallPagesOnTheEffectiveGate(t *testing.T) {
 	start := time.Date(2026, 11, 2, 12, 30, 0, 0, time.UTC)
-	defaultStart := model.DefaultQualitySpeedModernProviderStart()
+	// the start an absent switch turned the gate on at, until it was retired
+	defaultStart := time.Date(2026, 11, 11, 0, 0, 0, 0, time.UTC)
 	for _, c := range []struct {
 		name     string
 		provider string
 		now      time.Time
 		tier     string
 	}{
-		{name: "switch absent, a second before the start", provider: "quality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", now: start.Add(-time.Second), tier: tierWarn},
-		{name: "switch absent, at the start", provider: "quality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", now: start, tier: tierPage},
-		{name: "switch and start absent, before the default start", provider: "enable_egress_test: false\n", now: defaultStart.Add(-time.Second), tier: tierWarn},
-		{name: "switch and start absent, at the default start", provider: "enable_egress_test: false\n", now: defaultStart, tier: tierPage},
+		{name: "switch absent, a second before the retired start", provider: "quality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", now: start.Add(-time.Second), tier: tierWarn},
+		{name: "switch absent, at the retired start", provider: "quality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", now: start, tier: tierWarn},
+		{name: "switch and start absent, before the former default start", provider: "enable_egress_test: false\n", now: defaultStart.Add(-time.Second), tier: tierWarn},
+		{name: "switch and start absent, at the former default start", provider: "enable_egress_test: false\n", now: defaultStart, tier: tierWarn},
 		{name: "true, a day before the start", provider: "quality_speed_requires_modern_provider: true\nquality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", now: start.Add(-24 * time.Hour), tier: tierPage},
 		{name: "false, a day after the start", provider: "quality_speed_requires_modern_provider: false\nquality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", now: start.Add(24 * time.Hour), tier: tierWarn},
 		{name: "unreadable switch, after the start", provider: "quality_speed_requires_modern_provider: maybe\nquality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", now: start.Add(time.Hour), tier: tierWarn},
