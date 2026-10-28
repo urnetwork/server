@@ -80,6 +80,18 @@ func NewClientSessionFromRequest(req *http.Request) (*ClientSession, error) {
 	return value, nil
 }
 
+// The client address (ip:port) that the session of a request resolved, for
+// work that runs under the session's context and has no session of its own,
+// such as a BeforeStateAnswer. False under any other context, and for a
+// session that holds no raw address.
+func ClientAddressFromContext(ctx context.Context) (string, bool) {
+	clientSession, ok := ctx.Value(clientObservationContextKey{}).(*ClientSession)
+	if !ok || clientSession.ClientAddress == "" {
+		return "", false
+	}
+	return clientSession.ClientAddress, true
+}
+
 // Normalizes an ip:port pair, including ipv4-mapped ipv6.
 func parseRequestAddress(raw string) (netip.AddrPort, error) {
 	host, port, err := net.SplitHostPort(raw)
@@ -197,7 +209,8 @@ func NewLocalClientSessionWithAddressHash(ctx context.Context, clientAddressHash
 // claims, the session horizon, the session revocation marker and this
 // process's remembered state refusals, and returns whether it replied. A
 // reply must grant nothing: it may only report again a refusal this process
-// recorded for that same client. No result of the state query is assumed.
+// recorded for that same client, or refuse the request because that client
+// is over its rate limit. No result of the state query is assumed.
 type BeforeStateAnswer func(ctx context.Context, clientId server.Id) bool
 
 // Sets authentication claims or returns an authentication error. A non-nil

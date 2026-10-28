@@ -122,7 +122,7 @@ func (self dbAcquireWaitProbe) check(ctx context.Context, env *probeEnv) ([]find
 		if lifecycleErr := probeLifecycleError(ctx, err); lifecycleErr != nil {
 			return nil, lifecycleErr
 		}
-		return []finding{unobservable([]string{stormReadReason(err)}, nil)}, nil
+		return []finding{stormReadFailureFinding(unobservable([]string{stormReadReason(err)}, nil), err)}, nil
 	}
 
 	// every placed publisher is required; any other answering service is

@@ -409,10 +409,12 @@ func WrapWithInputBodyFormatterRequireClient[T any, R any](
 // WrapWithInputRequireClient, except that a client credential's request may be
 // answered after the checks that need no client state query and before that
 // query (session.ClientSession.AuthUnlessAnswered). prepare decides from the
-// credential's verified client id and the input whether to answer, and reads
-// nothing; reply then produces the answer. Both must grant nothing: only a
-// refusal already recorded for that client may be reported again. Every other
-// request authenticates and runs impl exactly as WrapWithInputRequireClient.
+// credential's verified client id and the input whether to answer, reading
+// nothing but that client's own rate limit; reply then produces the answer.
+// Both must grant nothing: only a refusal already recorded for that client may
+// be reported again, or the request refused as over the client's rate limit.
+// Every other request authenticates and runs impl exactly as
+// WrapWithInputRequireClient.
 func WrapWithInputRequireClientUnlessAnswered[T any, A any, R any](
 	prepare func(context.Context, server.Id, T) (A, bool),
 	reply func(context.Context, A) (R, error),
