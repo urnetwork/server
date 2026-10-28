@@ -337,7 +337,7 @@ func TestContractCloseReportSenderFinalOrderFromAccumulation(t *testing.T) {
 		apply := func(contractId, clientId server.Id, checkpoint bool, reportId *server.Id) (applied bool, completion contractCheckpointCompletion) {
 			server.Tx(f.ctx, func(tx server.PgTx) {
 				var err error
-				applied, _, _, completion, err = applyContractCloseReportOrderInTx(f.ctx, tx, contractId, clientId, 20, checkpoint, reportId, nil)
+				applied, _, _, completion, err = applyContractCloseReportOrderInTx(f.ctx, tx, contractId, clientId, 20, checkpoint, reportId, nil, false)
 				server.Raise(err)
 			}, server.TxReadCommitted, server.OptNoRetry())
 			return

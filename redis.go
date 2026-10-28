@@ -687,26 +687,77 @@ func RedisDb() int {
 	return redisKeys.RequireInt("db")
 }
 
-// SubscribeKeyEvents psubscribes the patterns on every master node — redis
-// keyspace notifications are emitted only by the node holding the key's slot
-// — and merges the messages into one channel (PEERSSTREAMS2.md). The done
-// channel closes when any node subscription dies or the master set changes
-// (checked every topologyRefresh); events during any gap are gone forever,
-// so on done the caller must unsub, resubscribe, and RESYNC its state. On a
-// non-cluster client this is a single psubscribe.
+// Bounds one keyspace subscription's startup and buffered delivery.
+type RedisKeyEventSubscriptionSettings struct {
+	// Time allowed for subscription writes and every master's acknowledgements.
+	// Native Redis connection setup retains its socket timeouts. Must be positive.
+	AcknowledgementTimeout time.Duration
+	// Interval between cluster master-set checks. Must be positive.
+	TopologyRefreshInterval time.Duration
+	// Messages buffered per node and in the shared merge. Must be positive.
+	MessageBufferSize int
+}
+
+// Allows establishment latency while bounding notification-free startup.
+func DefaultRedisKeyEventSubscriptionSettings() *RedisKeyEventSubscriptionSettings {
+	return &RedisKeyEventSubscriptionSettings{
+		AcknowledgementTimeout:  5 * time.Second,
+		TopologyRefreshInterval: 60 * time.Second,
+		MessageBufferSize:       1024,
+	}
+}
+
+// Subscribes on every master and returns only after all patterns are acknowledged,
+// so the caller's recovery read covers the entire preceding gap. The done channel
+// closes on a lost subscription, merge overflow or master-set change; the caller
+// must unsubscribe, resubscribe and reconcile its state (PEERSSTREAMS2.md).
 func SubscribeKeyEvents(
 	ctx context.Context,
 	topologyRefresh time.Duration,
 	patterns ...string,
 ) (messages <-chan RedisMessage, done <-chan struct{}, unsub func(), returnErr error) {
+	settings := DefaultRedisKeyEventSubscriptionSettings()
+	settings.TopologyRefreshInterval = topologyRefresh
+	return SubscribeKeyEventsWithSettings(ctx, settings, patterns...)
+}
+
+// Applies an owner's startup and buffering limits to a keyspace subscription.
+// Failure closes every opened socket and returns no subscription to the caller.
+func SubscribeKeyEventsWithSettings(
+	ctx context.Context,
+	settings *RedisKeyEventSubscriptionSettings,
+	patterns ...string,
+) (messages <-chan RedisMessage, done <-chan struct{}, unsub func(), returnErr error) {
+	if settings == nil || settings.AcknowledgementTimeout <= 0 || settings.TopologyRefreshInterval <= 0 || settings.MessageBufferSize <= 0 {
+		return nil, nil, nil, fmt.Errorf("invalid redis key-event subscription settings")
+	}
+	// Duplicate patterns produce extra confirmations with an unchanged count;
+	// subscribe once so they cannot look like a reconnect or prevent readiness.
+	uniquePatterns := []string{}
+	seenPatternKVs := map[string]bool{}
+	for _, pattern := range patterns {
+		if !seenPatternKVs[pattern] {
+			seenPatternKVs[pattern] = true
+			uniquePatterns = append(uniquePatterns, pattern)
+		}
+	}
+	if len(uniquePatterns) == 0 {
+		return nil, nil, nil, fmt.Errorf("no redis key-event patterns")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, nil, nil, context.Cause(ctx)
+	}
 	var client RedisClient
 	Redis(ctx, func(c RedisClient) {
 		client = c
 	})
 
-	cancelCtx, cancel := context.WithCancel(ctx)
-	out := make(chan RedisMessage, 1024)
-	doneOnce := sync.OnceFunc(cancel)
+	cancelCtx, cancel := context.WithCancelCause(ctx)
+	startupCtx, startupCancel := context.WithTimeout(cancelCtx, settings.AcknowledgementTimeout)
+	defer startupCancel()
+	stopStartupCancel := context.AfterFunc(startupCtx, func() { cancel(context.Cause(startupCtx)) })
+	defer stopStartupCancel()
+	out := make(chan RedisMessage, settings.MessageBufferSize)
 
 	// ForEachMaster runs its callback CONCURRENTLY, one goroutine per master —
 	// every write to state shared across callbacks must hold stateLock
@@ -714,13 +765,26 @@ func SubscribeKeyEvents(
 	// fatal concurrent map writes at startup with 32 masters)
 	var stateLock sync.Mutex
 	pubsubs := []*redis.PubSub{}
-	masterAddrs := func() (map[string]bool, error) {
+	readyChannels := []<-chan struct{}{}
+	closeSubscriptions := func() {
+		cancel(context.Canceled)
+		for _, pubsub := range pubsubs {
+			_ = pubsub.Close()
+		}
+	}
+	started := false
+	defer func() {
+		if !started {
+			closeSubscriptions()
+		}
+	}()
+	masterAddrs := func(ctx context.Context) (map[string]bool, error) {
 		addrs := map[string]bool{}
 		clusterClient, ok := client.(*redis.ClusterClient)
 		if !ok {
 			return addrs, nil
 		}
-		err := clusterClient.ForEachMaster(cancelCtx, func(ctx context.Context, node *redis.Client) error {
+		err := clusterClient.ForEachMaster(ctx, func(ctx context.Context, node *redis.Client) error {
 			stateLock.Lock()
 			defer stateLock.Unlock()
 			addrs[node.Options().Addr] = true
@@ -729,10 +793,10 @@ func SubscribeKeyEvents(
 		return addrs, err
 	}
 
-	drain := func(pubsub *redis.PubSub) {
-		defer doneOnce()
+	drain := func(pubsub *redis.PubSub, ready chan<- struct{}) {
+		defer cancel(fmt.Errorf("redis key-event subscription ended"))
 		c := pubsub.ChannelWithSubscriptions(
-			redis.WithChannelSize(1024),
+			redis.WithChannelSize(settings.MessageBufferSize),
 		)
 		initialSubscriptionReady := false
 		for {
@@ -753,8 +817,9 @@ func SubscribeKeyEvents(
 							// full resync for the unseen gap.
 							return
 						}
-						if len(patterns) <= value.Count {
+						if len(uniquePatterns) <= value.Count {
 							initialSubscriptionReady = true
+							close(ready)
 						}
 					}
 					continue
@@ -775,71 +840,86 @@ func SubscribeKeyEvents(
 		}
 	}
 
+	subscribe := func(node RedisClient) error {
+		pubsub := node.PSubscribe(cancelCtx)
+		ready := make(chan struct{})
+		func() {
+			stateLock.Lock()
+			defer stateLock.Unlock()
+			pubsubs = append(pubsubs, pubsub)
+			readyChannels = append(readyChannels, ready)
+		}()
+		if err := pubsub.PSubscribe(startupCtx, uniquePatterns...); err != nil {
+			cancel(err)
+			return err
+		}
+		go HandleError(func() { drain(pubsub, ready) })
+		return nil
+	}
+
+	var initialAddrs map[string]bool
 	if clusterClient, ok := client.(*redis.ClusterClient); ok {
-		initialAddrs, err := masterAddrs()
+		var err error
+		initialAddrs, err = masterAddrs(startupCtx)
 		if err != nil {
-			cancel()
 			returnErr = err
 			return
 		}
 		if len(initialAddrs) == 0 {
-			cancel()
 			returnErr = fmt.Errorf("no master nodes")
 			return
 		}
-		err = clusterClient.ForEachMaster(cancelCtx, func(ctx context.Context, node *redis.Client) error {
-			pubsub := node.PSubscribe(cancelCtx, patterns...)
-			func() {
-				stateLock.Lock()
-				defer stateLock.Unlock()
-				pubsubs = append(pubsubs, pubsub)
-			}()
-			go HandleError(func() {
-				drain(pubsub)
-			})
-			return nil
+		err = clusterClient.ForEachMaster(startupCtx, func(ctx context.Context, node *redis.Client) error {
+			return subscribe(node)
 		})
 		if err != nil {
-			for _, pubsub := range pubsubs {
-				pubsub.Close()
-			}
-			cancel()
 			returnErr = err
 			return
 		}
+	} else if err := subscribe(client); err != nil {
+		returnErr = err
+		return
+	}
+
+	// The node drains keep running while readiness waits, so early messages do
+	// not block acknowledgements. An overflow invalidates this startup too.
+	for _, ready := range readyChannels {
+		select {
+		case <-cancelCtx.Done():
+			returnErr = context.Cause(cancelCtx)
+			return
+		case <-ready:
+		}
+	}
+	stopStartupCancel()
+	if err := startupCtx.Err(); err != nil {
+		returnErr = context.Cause(startupCtx)
+		return
+	}
+	if clusterClient, ok := client.(*redis.ClusterClient); ok {
 		// watch the master set: a moved slot emits events on the new owner,
 		// which the current subscriptions do not cover
 		go HandleError(func() {
-			defer doneOnce()
+			defer cancel(fmt.Errorf("redis key-event master set changed"))
 			for {
 				select {
 				case <-cancelCtx.Done():
 					return
-				case <-time.After(topologyRefresh):
+				case <-time.After(settings.TopologyRefreshInterval):
 				}
 				clusterClient.ReloadState(cancelCtx)
-				addrs, err := masterAddrs()
+				addrs, err := masterAddrs(cancelCtx)
 				if err != nil || !maps.Equal(addrs, initialAddrs) {
 					return
 				}
 			}
 		})
-	} else {
-		pubsub := client.PSubscribe(cancelCtx, patterns...)
-		pubsubs = append(pubsubs, pubsub)
-		go HandleError(func() {
-			drain(pubsub)
-		})
 	}
 
+	started = true
 	messages = out
 	done = cancelCtx.Done()
-	unsub = func() {
-		doneOnce()
-		for _, pubsub := range pubsubs {
-			pubsub.Close()
-		}
-	}
+	unsub = closeSubscriptions
 	return
 }
 

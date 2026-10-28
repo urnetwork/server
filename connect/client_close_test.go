@@ -133,10 +133,10 @@ func TestExchangeClientCloseRequestsReachTheClient(t *testing.T) {
 			t.Fatal("client a got a second CloseSequences")
 		case <-time.After(2 * time.Second):
 		}
-		if requests := model.TakeClientCloseRequests(ctx, clientIdA, model.ClientCloseTakeLimit); !requests.Empty() {
+		if requests := model.TakeClientCloseRequests(ctx, clientIdA, 1024); !requests.Empty() {
 			t.Fatal("client a's requests were left behind")
 		}
-		if requests := model.TakeClientCloseRequests(ctx, clientIdB, model.ClientCloseTakeLimit); len(requests.ContractIds) != 1 {
+		if requests := model.TakeClientCloseRequests(ctx, clientIdB, 1024); len(requests.ContractIds) != 1 {
 			t.Fatal("client b's requests were taken without a resident")
 		}
 	})
@@ -164,7 +164,14 @@ func TestExchangeClosesRemovedClient(t *testing.T) {
 			Description: "device b",
 		})
 
-		ws, closeA, err := dialSessionAdmission(ctx, env, "h1plus", byClientJwtA, "")
+		// The active client acknowledges control traffic and keeps its resident
+		// alive. The second socket observes the typed close for that same instance.
+		instanceIdA := server.NewId()
+		clientA := env.newClient(clientIdA)
+		defer clientA.Close()
+		transportA := env.newTransport(byClientJwtA, instanceIdA, clientA.RouteManager())
+		defer transportA.Close()
+		ws, closeA, err := dialSessionAdmissionWithInstance(ctx, env, instanceIdA, "h1plus", byClientJwtA, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -176,9 +183,11 @@ func TestExchangeClosesRemovedClient(t *testing.T) {
 		if !waitFor(ctx, 10*time.Second, func() bool {
 			connectionsA, residentA := env.exchange.testingHoldsClient(clientIdA)
 			connectionsB, residentB := env.exchange.testingHoldsClient(clientIdB)
-			return 0 < connectionsA && residentA && 0 < connectionsB && residentB
+			return 2 <= connectionsA && residentA && 0 < connectionsB && residentB
 		}) {
-			t.Fatal("clients a and b are not both connected")
+			connectionsA, residentA := env.exchange.testingHoldsClient(clientIdA)
+			connectionsB, residentB := env.exchange.testingHoldsClient(clientIdB)
+			t.Fatalf("clients are not both connected: a connections=%d resident=%t; b connections=%d resident=%t", connectionsA, residentA, connectionsB, residentB)
 		}
 
 		removedAt := time.Now()

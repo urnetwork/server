@@ -1,9 +1,13 @@
+// Client close (CLIENTCLOSE.md). Residents deliver their clients' close requests;
+// the exchange closes transports of clients removed through the api.
 package connect
 
 import (
 	"context"
+	"math"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
@@ -12,10 +16,6 @@ import (
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
-
-// Client close (CLIENTCLOSE.md). The resident's listener delivers the close
-// requests of its client, and the exchange closes the transports of a client
-// removed through the api.
 
 var (
 	clientCloseSequencesSent = prometheus.NewCounter(prometheus.CounterOpts{
@@ -44,28 +44,83 @@ func init() {
 // requests and sends them as `CloseSequences`. Kicks coalesce while a
 // delivery runs, so the key-event dispatch never blocks on it.
 type clientCloseListener struct {
-	ctx      context.Context
-	cancel   context.CancelFunc
-	clientId server.Id
-	send     func(*protocol.Frame)
-	kick     chan struct{}
-	done     chan struct{}
+	ctx       context.Context
+	cancel    context.CancelFunc
+	clientId  server.Id
+	batchSize int
+	send      func(*protocol.Frame)
+	kick      chan struct{}
+	done      chan struct{}
 }
 
-func newClientCloseListener(ctx context.Context, clientId server.Id, send func(*protocol.Frame)) *clientCloseListener {
+// The shared control sender can coalesce 3,300 payload bytes and 16 frame
+// wrappers into one carrier. Its ordinary 4 KiB envelope is a compatibility
+// floor: shrinking this listener's batches cannot constrain unrelated frames.
+const clientCloseMinCarrierSize = 4 * 1024
+
+// Starts the resident-owned worker with a batch that fits both exchange and
+// client framing. The send callback takes ownership of the frame bytes.
+func newClientCloseListener(ctx context.Context, clientId server.Id, send func(*protocol.Frame), settings *ExchangeSettings) *clientCloseListener {
 	cancelCtx, cancel := context.WithCancel(ctx)
 	listener := &clientCloseListener{
-		ctx:      cancelCtx,
-		cancel:   cancel,
-		clientId: clientId,
-		send:     send,
-		kick:     make(chan struct{}, 1),
-		done:     make(chan struct{}),
+		ctx:       cancelCtx,
+		cancel:    cancel,
+		clientId:  clientId,
+		batchSize: clientCloseBatchSize(settings),
+		send:      send,
+		kick:      make(chan struct{}, 1),
+		done:      make(chan struct{}),
 	}
 	go server.HandleError(listener.run)
 	return listener
 }
 
+// Measures the larger legacy control envelope, including maximum sequence
+// and RTT tags. Control packs have no contract or peer-encryption envelope.
+// Halving oversized batches also bounds scratch space for custom settings.
+func clientCloseBatchSize(settings *ExchangeSettings) int {
+	batchSize := settings.ClientCloseBatchSize
+	if batchSize <= 0 {
+		batchSize = DefaultExchangeSettings().ClientCloseBatchSize
+	}
+	messageLimit := min(settings.FramerSettings.MaxMessageLen, int(connect.DefaultClientSettings().MinimumMessageLenLimit()))
+	if messageLimit < clientCloseMinCarrierSize {
+		// Keep the Redis requests for another listener or the expiry backstop;
+		// taking them cannot produce a safe carrier on this configuration.
+		return 0
+	}
+	id := server.Id{}
+	request := &protocol.CloseSequences{ContractIds: [][]byte{id.Bytes()}}
+	batchSize = min(batchSize, messageLimit/proto.Size(request))
+	for 0 < batchSize {
+		requests := &protocol.CloseSequences{ContractIds: make([][]byte, batchSize)}
+		for i := range requests.ContractIds {
+			requests.ContractIds[i] = id.Bytes()
+		}
+		frame := connect.RequireToFrameWithDefaultProtocolVersion(requests)
+		packFrame := connect.RequireToFrameWithDefaultProtocolVersion(&protocol.Pack{
+			MessageId:      id.Bytes(),
+			SequenceId:     id.Bytes(),
+			SequenceNumber: math.MaxUint64,
+			Head:           true,
+			Frames:         []*protocol.Frame{frame},
+			Tag:            &protocol.Tag{SendTime: math.MaxUint64},
+		})
+		carrierSize := proto.Size(&protocol.TransferFrame{
+			TransferPath: &protocol.TransferPath{SourceId: connect.ControlId.Bytes(), DestinationId: id.Bytes()},
+			Frame:        packFrame,
+		})
+		connect.MessagePoolReturn(packFrame.MessageBytes)
+		connect.MessagePoolReturn(frame.MessageBytes)
+		if carrierSize <= messageLimit {
+			return batchSize
+		}
+		batchSize /= 2
+	}
+	return 0
+}
+
+// Coalesces hints without blocking the shared key-event dispatcher.
 func (self *clientCloseListener) Kick() {
 	select {
 	case self.kick <- struct{}{}:
@@ -73,6 +128,7 @@ func (self *clientCloseListener) Kick() {
 	}
 }
 
+// Serializes pending-set reads and blocking control sends for this resident.
 func (self *clientCloseListener) run() {
 	defer close(self.done)
 	for {
@@ -88,10 +144,16 @@ func (self *clientCloseListener) run() {
 // Takes and sends until a take comes back short of the limit. A taken request
 // whose send fails is gone; its contract closes at its deadline.
 func (self *clientCloseListener) deliver() {
+	if self.batchSize <= 0 {
+		return
+	}
 	for {
+		if self.ctx.Err() != nil {
+			return
+		}
 		var requests *model.ClientCloseRequests
 		server.HandleError(func() {
-			requests = model.TakeClientCloseRequests(self.ctx, self.clientId, model.ClientCloseTakeLimit)
+			requests = model.TakeClientCloseRequests(self.ctx, self.clientId, self.batchSize)
 		})
 		if requests == nil || requests.Empty() {
 			return
@@ -107,12 +169,13 @@ func (self *clientCloseListener) deliver() {
 		clientCloseSequencesSent.Inc()
 		clientCloseRequestsSent.WithLabelValues("contract").Add(float64(len(requests.ContractIds)))
 		clientCloseRequestsSent.WithLabelValues("peer").Add(float64(len(requests.PeerIds)))
-		if len(requests.ContractIds)+len(requests.PeerIds) < model.ClientCloseTakeLimit {
+		if len(requests.ContractIds)+len(requests.PeerIds) < self.batchSize {
 			return
 		}
 	}
 }
 
+// Joins the worker after withdrawing its Redis and send context.
 func (self *clientCloseListener) CloseAndWait() {
 	self.cancel()
 	<-self.done

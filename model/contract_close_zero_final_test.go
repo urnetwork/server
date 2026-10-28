@@ -48,7 +48,7 @@ func TestSenderZeroFinalSettlesUnusedContract(t *testing.T) {
 		if reserved := Testing_NetEscrowByteCount(ctx, f.balanceId); reserved != 0 {
 			t.Fatalf("the unused contract still reserves %d bytes", reserved)
 		}
-		if requests := TakeClientCloseRequests(ctx, f.destinationId, ClientCloseTakeLimit); !requests.Empty() {
+		if requests := TakeClientCloseRequests(ctx, f.destinationId, 1024); !requests.Empty() {
 			t.Fatal("a settled unused contract asked the receiver to close")
 		}
 		// a receiver report after the settlement is the benign duplicate close
@@ -64,7 +64,7 @@ func TestSenderZeroFinalSettlesUnusedContract(t *testing.T) {
 		if settled, final, _ := state(legacy); !settled || !final {
 			t.Fatal("a client's legacy zero final did not settle the unused contract")
 		}
-		if requests := TakeClientCloseRequests(ctx, f.destinationId, ClientCloseTakeLimit); !requests.Empty() {
+		if requests := TakeClientCloseRequests(ctx, f.destinationId, 1024); !requests.Empty() {
 			t.Fatal("a client's legacy zero final asked the receiver to close")
 		}
 
@@ -85,7 +85,7 @@ func TestSenderZeroFinalSettlesUnusedContract(t *testing.T) {
 		if settled, _, receiverBytes := state(usedContract); settled || receiverBytes != -1 {
 			t.Fatal("a used contract settled without its receiver")
 		}
-		if requests := TakeClientCloseRequests(ctx, f.destinationId, ClientCloseTakeLimit); len(requests.ContractIds) != 1 {
+		if requests := TakeClientCloseRequests(ctx, f.destinationId, 1024); len(requests.ContractIds) != 1 {
 			t.Fatalf("the receiver of a used contract was asked to close %d contracts, want 1", len(requests.ContractIds))
 		}
 
