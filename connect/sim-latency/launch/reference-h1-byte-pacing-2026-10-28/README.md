@@ -32,11 +32,35 @@ public production policy. The test patch is separate and never enters a scored
 candidate; `.go.txt` files here are evidence, not compiled package tests.
 
 `patch-policy.json` preserves the **authored input bytes**, not the policy byte
-pin for a native evaluator run. The evaluator's canonical `jq -S` serialization
-has a different digest and needs its own explicit, preserved input-to-canonical
-lineage and publication before a native reference build or pilot. Do not silently
-replace or reserialize the authored `5d78c808…` artifact. This unit bundle supplies
-no native-scored policy-byte, image-build or pilot-acceptance receipt.
+pin for a native evaluator run. Do not replace or reserialize that `5d78c808…`
+artifact or relabel any LOW source/test pins.
+
+### Separate native-policy canonicalization follow-up
+
+The published [scored policy](patch-policy.scored.json), SHA-256
+`25e9c5b89041f35607b3a9542d13abd2649a9e99b804f59791780af19ab97861`,
+is byte-exact `jq -S .` serialization of the authored input. The frozen evaluator
+uses `jq -S '.patch_policy'` before hashing its native policy. Independent
+readback confirmed byte equality to that projection, identical decoded semantics,
+unchanged array order/limits/forbidden paths, and absent `path_base`.
+
+**Only `25e9c5b8…` may bind the prospective native builds, their image keys,
+public pilot and fresh protocol.** The authored `5d78c808…` remains static input
+lineage, not an interchangeable native-policy hash. This reference-only policy
+is not the public production policy, and the unchanged base image is policy-unbound.
+
+[scored-policy-lineage.json](scored-policy-lineage.json), SHA-256
+`6bf536b6362f1e30e551015ead5ac3ab5b7b88137b6af8fc5b6c33fbec80e860`,
+pins the actual trusted release components and three **calculated expected**
+native image keys. Component hashes and the read-only builder identity were
+independently checked; the three public-input key calculations were recomputed.
+They are not built image IDs, binary digests or measurement receipts. The raw
+lineage's `prepared-not-published` status is its original creation-time observation,
+not a claim of a later build. The original
+[handoff](scored-policy-handoff.txt), SHA-256
+`1be65a2a5affc536844da8e233a9b2b2b5d7f1c24a8bf273914d07ef33581fcc`,
+also remains byte-exact. Native builds still require broader integration and
+separate authorization; this follow-up ran no build, test, service, pilot or seed draw.
 
 The exact default is one microsecond per emitted user-frame byte, in the
 existing dedicated H1 writer, for both WebSocket and H1Plus framed encoding.

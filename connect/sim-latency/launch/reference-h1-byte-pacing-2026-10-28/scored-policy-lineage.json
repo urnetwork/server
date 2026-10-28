@@ -1,0 +1,67 @@
+{
+  "schema": 1,
+  "kind": "h1-reference-authored-to-scored-policy-lineage",
+  "status": "prepared-not-published-or-native-qualified",
+  "authored_policy": {
+    "path": "/home/by/urnetwork/server/connect/sim-latency/launch/reference-h1-byte-pacing-2026-10-28/patch-policy.json",
+    "sha256": "5d78c808eff8d16eaa8f113656c9814dd1453acfd51bd891029a93bf4e4197cb",
+    "purpose": "original-authored-scope-and-focused-unit-lineage-not-scored-native-policy"
+  },
+  "scored_policy": {
+    "path": "patch-policy.scored.json",
+    "sha256": "25e9c5b89041f35607b3a9542d13abd2649a9e99b804f59791780af19ab97861",
+    "purpose": "exact-frozen-evaluator-jq-S-patch-policy-bytes-for-all-three-new-native-builds"
+  },
+  "transformation": {
+    "command": "jq -S . authored-policy.json",
+    "evaluator_projection": "jq -S '.patch_policy' worker-request.json",
+    "semantic_policy_equal": true,
+    "indent_spaces": 2,
+    "final_newline": true,
+    "path_base_absent": true,
+    "allowed_paths_and_order_unchanged": true,
+    "forbidden_paths_and_order_unchanged": true,
+    "max_patch_bytes_unchanged": true
+  },
+  "frozen_source": {
+    "base_sha": "a9e8e1a710b24c749e6499a0606938252c83e136",
+    "canonical_ten_repository_source_lock_sha256": "239cea7fe6f77f989b75ba6efa677e8731640ba2fdd3690a35e6fe72103f3d11",
+    "base_image_id": "sha256:98c9061c4a43a25e7b581a5193ca6e7f48e49e7b7fc03b7c1b6190a029befee2",
+    "pristine_simulator_and_scorer_sha256": "efd1077d56f2435027d8358e01f29d43355a4ec1a45917e72602fcee8cce6727"
+  },
+  "trusted_release": {
+    "directory": "/usr/local/libexec/urnetwork/competition-c2-a9e8e1a7-metadata-fbb2566b-evidence5g-v3/container",
+    "evaluator_sha256": "0cccda1d1dcc227f30fda800ddb9bbb28e29dd48cc62885da637fcd4eb4eb00b",
+    "builder_sha256": "ca3c84c64762450a72013c705438610bf465f78fb57bcba901a573c1005d743d",
+    "patch_validator_sha256": "3d161d76bace48bff6536164a84f330b1618c82f319775b8551c19872b937e54",
+    "build_submission_sha256": "4a998275ffe94d322462ec9d7876af1ff288c3e8ba85f0c3278b4b512baa0172",
+    "source_preparer_sha256": "a2445db1aa6e8655da12ca8ec810eda86c5e93df84801887c76ed490f232d4b6",
+    "dockerfile_submission_sha256": "255d1827494c22482bb851323ee13d8ee03fb407fbf40348531b7d2ec32fc034"
+  },
+  "expected_native_image_keys": {
+    "formula": "sha256(base_image_id + NUL + patch_sha256 + NUL + scored_policy_sha256 + NUL + builder_sha256)",
+    "claim": "public-input-calculations-only-not-built-image-or-binary-identities",
+    "better": {
+      "patch_sha256": "46bc95e3f2719f26f939be7a86c274d0b98bb2b1027f1ef4537d61de4c4ec924",
+      "image_key": "8e113015c045d26f69156335ea95b975abc8df31baf94f96441860ffde3f1e35",
+      "default_image_tag": "urnetwork/sim-latency-submission:8e113015c045d26f69156335ea95b975"
+    },
+    "worse": {
+      "patch_sha256": "6f8c6f24c44a9627f053e58d4a59f845a0ba4b0b51e201f5cabddfb33b30629d",
+      "image_key": "1cbc1ce6b00b6dbdaf2cd3ce405793c0af91133b5808c888b535b8c14c250de0",
+      "default_image_tag": "urnetwork/sim-latency-submission:1cbc1ce6b00b6dbdaf2cd3ce405793c0a"
+    },
+    "no-op": {
+      "patch_sha256": "1076be3ed61df0e14ae90c13bbe4c35442de6371064fd7d78f61ed6834e170f1",
+      "image_key": "5f7fa73e28858cc78501384c89b967dad9b7b732edf6fd78af6639e6b12351a6",
+      "default_image_tag": "urnetwork/sim-latency-submission:5f7fa73e28858cc78501384c89b967dad"
+    }
+  },
+  "claims_excluded": [
+    "native-candidate-build-or-binary-proof",
+    "service-correctness-qualification",
+    "public-pilot-measurement-or-direction",
+    "hidden-seed-draw-or-commitment",
+    "calibration-acceptance-or-production-activation"
+  ]
+}

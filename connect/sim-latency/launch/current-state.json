@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-28T06:04:52Z",
+  "observed_at": "2026-10-28T06:29:12Z",
   "prospective_new_screen": {
     "status": "owner_approved_exact_protocol_reference_review_and_native_qualification_pending",
     "approval_record": "server/connect/sim-latency/launch/CALIBRATION-NEW-SCREEN-OWNER-APPROVAL-2026-10-28.md",
@@ -76,6 +76,11 @@
     "baseline_server_commit": "a9e8e1a710b24c749e6499a0606938252c83e136",
     "product_patch_sha256": "6f8c6f24c44a9627f053e58d4a59f845a0ba4b0b51e201f5cabddfb33b30629d",
     "qualification_test_patch_sha256": "6ef291d4d3ea6ea4fba7600b9a1f8390b79cd13f845f5f0722adb39625623844",
+    "authored_policy_input_sha256_preserved": "5d78c808eff8d16eaa8f113656c9814dd1453acfd51bd891029a93bf4e4197cb",
+    "native_scored_canonical_policy_sha256": "25e9c5b89041f35607b3a9542d13abd2649a9e99b804f59791780af19ab97861",
+    "canonical_policy_lineage_published": true,
+    "native_policy_lineage": "server/connect/sim-latency/launch/reference-h1-byte-pacing-2026-10-28/scored-policy-lineage.json",
+    "only_canonical_policy_may_bind_future_native_builds_and_pilot": true,
     "independent_low_consecutive_passes": 3,
     "baseline_tests_per_pass": 8,
     "candidate_tests_per_pass": 27,
