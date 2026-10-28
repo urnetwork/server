@@ -60,10 +60,14 @@ repair. All three new-policy native images now have exact authenticated
 broader service integration and measured direction remain pending. The new
 protocol's first five-minute timeout is retained. Its exact integrated source
 passed [three corrected 21-guard race runs](fresh-single-protocol-2026-10-28/qualification.json),
-with zero skips or failures. This is not complete native qualification: the
-direct-public provider-digest exclusion followup, its new tests/publication,
-the broader guard matrix and complete native census remain required before
-public-pilot admission. No new held-out seed or measurement has started.
+with zero skips or failures. Its exact provider/census followup now passed
+[three20-guard race runs](fresh-single-provider-census-2026-10-28/qualification.json),
+also with zero skips or failures. The separate H135 composed service run failed
+after eight passes; cleanup completed, its failed artifacts are retained, and
+the repaired39-guard fixture is not yet qualified. Neither targeted protocol
+record satisfies the broader183 guard matrix, complete native census or native
+CLI qualification required before public-pilot admission. No new held-out seed
+or measurement has started.
 
 ## Historical checkpoint — October 27, 15:10 UTC
 

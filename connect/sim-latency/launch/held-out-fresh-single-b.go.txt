@@ -12,7 +12,9 @@ import (
 	"reflect"
 	"time"
 
+	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
+	"gopkg.in/yaml.v3"
 )
 
 // This closed selector never changes the meaning of any earlier seed count.
@@ -556,12 +558,104 @@ func validateHeldOutFreshSinglePublicPilotSeed(exclusions heldOutExclusions, fac
 
 // This is a read-only collision/authority check, not a pilot execution engine.
 type heldOutFreshSinglePilotPreflightConfig struct {
-	Schema     int               `json:"schema"`
-	Kind       string            `json:"kind"`
-	Protocol   string            `json:"protocol"`
-	Approval   heldOutPinnedFile `json:"approval"`
-	Exclusions heldOutPinnedFile `json:"exclusions"`
-	PublicSeed int64             `json:"public_pilot_seed"`
+	Schema         int                    `json:"schema"`
+	Kind           string                 `json:"kind"`
+	Protocol       string                 `json:"protocol"`
+	Approval       heldOutPinnedFile      `json:"approval"`
+	Exclusions     heldOutPinnedFile      `json:"exclusions"`
+	PublicSeed     int64                  `json:"public_pilot_seed"`
+	Request        heldOutPinnedFile      `json:"request"`
+	GeneratorFiles []heldOutGeneratorFile `json:"generator_files"`
+}
+
+// Only the pinned original C2 preparation selects the native pilot instrument.
+// Fresh owner authority is checked before native decoding of old private input.
+func heldOutFreshSinglePublicPilotContext(ctx context.Context, config heldOutFreshSinglePilotPreflightConfig, old heldOutRelease, settings heldOutOperatorSettings) (heldOutRelease, heldOutOperatorSettings, error) {
+	facts := heldOutFreshSingleFactsForRelease(old)
+	if config.Schema != 1 || config.Kind != "sim-latency-held-out-fresh-single-public-pilot-preflight" ||
+		config.Protocol != heldOutProtocolFreshSingleB || config.PublicSeed != facts.PublicPilotSeed {
+		return old, settings, errors.New("explicit fixed public pilot context required")
+	}
+	if _, err := authenticateHeldOutFreshSingleApproval(config.Approval, facts, settings); err != nil {
+		return old, settings, err
+	}
+	content, err := readHeldOutPinned(facts.OriginalPrivatePlan, settings.MaximumBytes, true)
+	if err != nil {
+		return old, settings, err
+	}
+	defer clear(content)
+	var original heldOutPrivatePlan
+	if err := decodeHeldOutComplete(content, &original, "public pilot retained private context"); err != nil {
+		return old, settings, err
+	}
+	if err := validateHeldOutFreshSinglePublicPilotContext(original, facts); err != nil {
+		return old, settings, err
+	}
+	release, _, err := heldOutContextForPreparation(ctx, original.Config, settings)
+	if err != nil {
+		return old, settings, err
+	}
+	selected, err := heldOutSettingsForProtocol(config.Protocol)
+	return release, selected, err
+}
+
+// No caller-selected release, private root or historical selector is projected.
+func validateHeldOutFreshSinglePublicPilotContext(original heldOutPrivatePlan, facts heldOutFreshSingleFacts) error {
+	if original.Schema != 1 || original.Kind != "sim-latency-held-out-private-plan" || len(original.Rounds) != 2 ||
+		original.Config.Protocol != heldOutProtocolThreeABridgeTwoB || original.Config.PrivateRoot != facts.OriginalRoot ||
+		original.Config.Amendment == nil || original.Config.Amendment.Release.Sha256 != facts.ReleaseSha256 {
+		return errors.New("public pilot must reuse the exact retained C2 preparation context")
+	}
+	return nil
+}
+
+// Direct-public integers use the same frozen generator and YAML serialization,
+// never the private raw-seed domain mapping or a CLI's reserialized config.
+func authenticateHeldOutFreshSinglePublicProviders(config heldOutFreshSinglePilotPreflightConfig, release heldOutRelease, settings heldOutOperatorSettings) (string, error) {
+	if settings.Workload.MaxProviderBytes <= 0 {
+		return "", errors.New("positive public-provider byte bound required")
+	}
+	if err := authenticateHeldOutGeneratorFiles(config.GeneratorFiles, release, settings); err != nil {
+		return "", err
+	}
+	content, err := readHeldOutPinned(config.Request, settings.MaximumBytes, true)
+	if err != nil {
+		return "", err
+	}
+	defer clear(content)
+	var request heldOutRequest
+	if err := decodeHeldOutComplete(content, &request, "public pilot exact pre-baseline request"); err != nil {
+		return "", err
+	}
+	policyBytes, err := json.Marshal(request.EvaluationPolicy)
+	if err != nil || heldOutDigest(policyBytes) != release.StageAPolicySha256 || request.Schema != 1 ||
+		request.BaseSha != release.BaseSha || request.EvaluatorImageDigest != release.ImageId || request.SourceEpoch != 0 ||
+		request.ScorerVersion != officialScorerVersion || request.RoundBaselinePath != "" || request.RoundBaselineSha256 != "" {
+		return "", errors.New("public pilot changed its frozen C2 request, policy or baseline freshness")
+	}
+	providers, err := readHeldOutPinned(heldOutPinnedFile{Path: request.ProvidersPath, Sha256: request.ProvidersSha256}, settings.Workload.MaxProviderBytes, true)
+	if err != nil {
+		return "", err
+	}
+	defer clear(providers)
+	var workload Config
+	if yaml.Unmarshal(providers, &workload) != nil || workload.Seed != config.PublicSeed ||
+		workload.Providers.Count != request.EvaluationPolicy.ProviderCount || len(workload.Fleet) != request.EvaluationPolicy.ProviderCount ||
+		workload.Clients.PoolSize != request.EvaluationPolicy.ClientPoolSize ||
+		workload.Clients.MeanPerMinute != float64(request.EvaluationPolicy.ArrivalsPerMinute) ||
+		workload.Clients.QualityWindowSize != request.EvaluationPolicy.QualityWindowSize {
+		return "", errors.New("public pilot provider bytes changed the direct integer or frozen fleet/client profile")
+	}
+	expected, err := controller.GenerateSimLatencyWorkload(config.PublicSeed, request.EvaluationPolicy.ProviderCount,
+		request.EvaluationPolicy.ClientPoolSize, float64(request.EvaluationPolicy.ArrivalsPerMinute), request.EvaluationPolicy.QualityWindowSize)
+	if err != nil {
+		return "", errors.New("native direct-public generator reconstruction failed")
+	}
+	defer clear(expected)
+	if len(expected) == 0 || int64(len(expected)) > settings.Workload.MaxProviderBytes || !bytes.Equal(providers, expected) {
+		return "", errors.New("public pilot bytes differ from the exact native generator serialization")
+	}
+	return request.ProvidersSha256, nil
 }
 
 // No hidden plan or random source is reachable from this pre-pilot operation.
@@ -604,7 +698,19 @@ func verifyHeldOutFreshSinglePublicPilot(config heldOutFreshSinglePilotPreflight
 	if _, err := readHeldOutPinned(facts.FailedResult, settings.MaximumBytes, true); err != nil {
 		return err
 	}
-	return validateHeldOutFreshSinglePublicPilotSeed(exclusions, facts)
+	if err := validateHeldOutFreshSinglePublicPilotSeed(exclusions, facts); err != nil {
+		return err
+	}
+	providerDigest, err := authenticateHeldOutFreshSinglePublicProviders(config, release, settings)
+	if err != nil {
+		return err
+	}
+	for _, excluded := range exclusions.ProviderDigests {
+		if excluded == providerDigest {
+			return errors.New("public pilot provider bytes collide with a retained workload")
+		}
+	}
+	return nil
 }
 
 // A pinned existing helper is used only in memory-only mode. Its consumed

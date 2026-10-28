@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-28T07:37:34Z",
+  "observed_at": "2026-10-28T13:12:29Z",
   "prospective_production_opening": {
     "authorized_after_all_required_gates_pass": true,
     "owner_instruction": "do this as fast as possible. Use parallel agents if it speeds up",
@@ -20,14 +20,28 @@
     "replicates_per_side": 9,
     "stronger_regression_reference_and_fresh_control_required": true,
     "premeasurement_review_qualification_and_publication_required": true,
-    "new_protocol_unit_qualification_status": "first_timeout_preserved_corrected_21_guard_three_passes_complete_provider_digest_followup_and_broader_native_qualification_pending",
+    "new_protocol_unit_qualification_status": "prior_failure_preserved_21_and_provider_census20_targeted_three_passes_complete_broader183_and_native_qualification_pending",
     "new_protocol_unit_completed_passes": 3,
     "new_protocol_unit_tests_per_completed_pass": 21,
     "new_protocol_unit_completed_pass_failures_or_skips": 0,
     "new_protocol_unit_binary_sha256": "a77042d1cfd13da9c045ec12416131be57b04e5fcb97f4b1c953406df2fe291e",
     "new_protocol_unit_proof": "server/connect/sim-latency/launch/fresh-single-protocol-2026-10-28/qualification.json",
     "new_protocol_unit_proof_sha256": "8a64ec220c0be943e0c6261fb0692916ba27d8f30539ed42ac84a9bcdac73783",
-    "public_pilot_provider_digest_exclusion_followup_required": true,
+    "public_pilot_provider_digest_exclusion_followup_required": false,
+    "provider_census_followup": {
+      "status": "targeted_source_unit_qualified_not_native_admission",
+      "proof": "server/connect/sim-latency/launch/fresh-single-provider-census-2026-10-28/qualification.json",
+      "proof_sha256": "a628ee20207098473faeb5b181493a94e074ea678924bbf2b9753803e91c61c9",
+      "consecutive_passes": 3,
+      "tests_per_pass": 20,
+      "failures": 0,
+      "skips": 0,
+      "binary_sha256": "dac1380a77e73ee711900718bc57a011a28f926917ebc4eecf2bd98df41d6d32",
+      "broader_noncommand_tests_pending": 183,
+      "complete_current_native_census_created": false,
+      "after_public_pilot_census_stage_supported": false,
+      "native_cli_context_success_claimed": false
+    },
     "public_pilot_admitted": false,
     "proposed_regression_reference_bundle": "server/connect/sim-latency/launch/reference-h1-byte-pacing-2026-10-28/README.md",
     "new_seed_drawn": false,
@@ -87,7 +101,7 @@
     "private_unstarted_second_seed_retained_without_measurement_or_disclosure": true
   },
   "h1_byte_pacing_reference": {
-    "status": "focused_unit_and_three_native_builds_passed_service_integration_and_measured_direction_pending",
+    "status": "focused_unit_and_native_builds_passed_composed35_failed_repaired39_qualification_and_measured_direction_pending",
     "bundle": "server/connect/sim-latency/launch/reference-h1-byte-pacing-2026-10-28/README.md",
     "baseline_server_commit": "a9e8e1a710b24c749e6499a0606938252c83e136",
     "product_patch_sha256": "6f8c6f24c44a9627f053e58d4a59f845a0ba4b0b51e201f5cabddfb33b30629d",
@@ -104,6 +118,12 @@
     "original_fixture_race_preserved_and_old_overlay_reproduced_expected_race": true,
     "before_and_after_runner_manifest_sha256": "5e4695b3b8338fb2c548b0e529ac9ce1d5f960b4dcdcd62016a0f834e0c2efdd",
     "broader_service_integration_passed": false,
+    "composed35_failure_retained": true,
+    "composed35_passes_before_first_failure": 8,
+    "composed35_failures": 1,
+    "composed35_cleanup_exit_code": 0,
+    "composed35_failure_receipt_sha256": "0377df0b18ead96b51be49735ae4882140f4d70f54e0a6f1da10c06026084a5a",
+    "repaired39_fixture_qualification_pending": true,
     "native_reference_binary_built": true,
     "all_three_native_reference_roles_built": true,
     "authenticated_native_reference_roles": ["better", "worse", "no-op"],
@@ -119,6 +139,15 @@
     "native_build_summary_sha256": "af8f011fac1a07a429bf40e8470bcbc4761c0f14ac76781b105059ebf3a664c9",
     "measured_direction_pilot_started": false,
     "new_held_out_seed_drawn_or_measured": false
+  },
+  "approved_root_compiler_cache_cleanup": {
+    "record": "server/connect/sim-latency/launch/fresh-single-provider-census-2026-10-28/root-cache-cleanup-receipt.json",
+    "receipt_sha256": "e1ac68cae61f218d343284e9061313401ec1416f7a922abfa18e3d9aa452c15e",
+    "removed_exact_approved_derivative_entries": 150,
+    "removed_logical_bytes": 4296707382,
+    "source_module_evidence_image_and_retained_binaries_preserved": true,
+    "derivatives_regenerable_by_future_authorized_builds": true,
+    "further_cleanup_authorized": false
   },
   "retained_repository_baseline_verification": {
     "manifest_rows_and_files": 3677,
@@ -1832,7 +1861,7 @@
   "pending": [
     "Preserve the failed screen and all original files; three exact source versions are retained, but replica delivery/offsite restoration for these archives remains unproved",
     "The H1 focused-unit bundle, scored policy and all three native builds are authenticated; broader service integration and separately frozen measured direction remain required",
-    "Three corrected 21-guard protocol passes are complete; qualify and publish the provider-digest followup, complete reviewed census and broader regression before pilot admission or any fresh hidden seed; original second seed remains unstarted",
+    "Three corrected21 and provider/census20 targeted protocol passes are complete; complete the reviewed native census, broader183 regression and native qualification before pilot admission or any fresh hidden seed; H135 failed and repaired39 qualification is pending; original second seed remains unstarted",
     "Correct/read back Snow Muse strict-grammar backend and complete newly precommitted genuine three-member review qualification without relabeling V7 or repairing outputs",
     "Verify config62a29a7 and registered vault credentials on restarted main API replicas; required DB migrations already verified",
     "Reserve production source/target, obtain exact current-boot R1 with installed initial C2 profile and independent durable API/worker runtime acknowledgments, then phase-two acceptance and fenced activation",

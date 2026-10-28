@@ -17,7 +17,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
+	"gopkg.in/yaml.v3"
 )
 
 // Only the existing captured runtime contract substitutes host I/O. All source,
@@ -897,10 +899,10 @@ func TestHeldOutFreshSingleMemoryGuardCannotApplyRecoveryOrAcceptSmallScope(t *t
 	}
 }
 
-// The actual read-only command core consumes a complete before-pilot catalog;
-// the completed pilot's later catalog deliberately refuses reuse as a new pilot.
-func TestHeldOutFreshSinglePublicPilotPreflightIsReadOnlyAndSinglePurpose(t *testing.T) {
-	self := newHeldOutFreshSingleFixture(t)
+// All public bytes are direct-generator output in this fixture's owned tree.
+// No private-domain seed mapping, native files or process hook is used.
+func newHeldOutFreshSinglePublicPilotConfig(t *testing.T, self *heldOutFreshSingleFixture) heldOutFreshSinglePilotPreflightConfig {
+	t.Helper()
 	op := self.Base.Preparation
 	before := self.Exclusions
 	before.EffectiveSeeds = nil
@@ -915,9 +917,27 @@ func TestHeldOutFreshSinglePublicPilotPreflightIsReadOnlyAndSinglePurpose(t *tes
 			before.Sources = append(before.Sources, pin)
 		}
 	}
-	config := heldOutFreshSinglePilotPreflightConfig{Schema: 1, Kind: "sim-latency-held-out-fresh-single-public-pilot-preflight",
+	request := self.Template
+	providers, err := controller.GenerateSimLatencyWorkload(self.Facts.PublicPilotSeed, request.EvaluationPolicy.ProviderCount,
+		request.EvaluationPolicy.ClientPoolSize, float64(request.EvaluationPolicy.ArrivalsPerMinute), request.EvaluationPolicy.QualityWindowSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerPin := heldOutOpWrite(t, filepath.Join(op.Root, "synthetic-public-pilot", "providers.yml"), providers)
+	request.ProvidersPath, request.ProvidersSha256 = providerPin.Path, providerPin.Sha256
+	return heldOutFreshSinglePilotPreflightConfig{Schema: 1, Kind: "sim-latency-held-out-fresh-single-public-pilot-preflight",
 		Protocol: heldOutProtocolFreshSingleB, Approval: op.Config.FreshSingle.Approval,
-		Exclusions: heldOutOpJson(t, filepath.Join(op.Root, "inputs", "before-public-pilot-exclusions.json"), before), PublicSeed: self.Facts.PublicPilotSeed}
+		Exclusions: heldOutOpJson(t, filepath.Join(op.Root, "inputs", "before-public-pilot-exclusions.json"), before), PublicSeed: self.Facts.PublicPilotSeed,
+		Request:        heldOutOpJson(t, filepath.Join(op.Root, "synthetic-public-pilot", "request.json"), request),
+		GeneratorFiles: append([]heldOutGeneratorFile{}, op.Config.GeneratorFiles...)}
+}
+
+// The actual read-only command core consumes a complete before-pilot catalog;
+// the completed pilot's later catalog deliberately refuses reuse as a new pilot.
+func TestHeldOutFreshSinglePublicPilotPreflightIsReadOnlyAndSinglePurpose(t *testing.T) {
+	self := newHeldOutFreshSingleFixture(t)
+	op := self.Base.Preparation
+	config := newHeldOutFreshSinglePublicPilotConfig(t, self)
 	if err := verifyHeldOutFreshSinglePublicPilot(config, op.Release, op.Settings); err != nil {
 		t.Fatal("synthetic public preflight refused", err)
 	}
@@ -1109,5 +1129,232 @@ func TestHeldOutFreshSingleCampaignIdentityMismatchRefusesBeforeEntropy(t *testi
 			self.Base.Entropy.Calls != 0 || op.Generated != 0 {
 			t.Fatal("another campaign's lineage consumed entropy", variant, err)
 		}
+	}
+}
+
+// The unchanged prior seed-only gate admits this case: only the exact provider
+// digest collides. The complete read-only preflight must now refuse it.
+func TestHeldOutFreshSinglePublicPilotProviderDigestCollisionRefuses(t *testing.T) {
+	self := newHeldOutFreshSingleFixture(t)
+	op := self.Base.Preparation
+	config := newHeldOutFreshSinglePublicPilotConfig(t, self)
+	if err := verifyHeldOutFreshSinglePublicPilot(config, op.Release, op.Settings); err != nil {
+		t.Fatal("complete native-shaped direct-public input refused", err)
+	}
+	content, err := readHeldOutPinned(config.Exclusions, op.Settings.MaximumBytes, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var exclusions heldOutExclusions
+	if decodeHeldOutComplete(content, &exclusions, "synthetic before-public catalog") != nil {
+		t.Fatal("synthetic catalog unavailable")
+	}
+	content, err = readHeldOutPinned(config.Request, op.Settings.MaximumBytes, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var request heldOutRequest
+	if decodeHeldOutComplete(content, &request, "synthetic public request") != nil {
+		t.Fatal("synthetic public request unavailable")
+	}
+	retired := heldOutOpJson(t, filepath.Join(op.Root, "synthetic-retired-provider-record.json"),
+		map[string]any{"providers_sha256": request.ProvidersSha256})
+	exclusions.Sources = append(exclusions.Sources, retired)
+	exclusions.ProviderDigests = append(exclusions.ProviderDigests, request.ProvidersSha256)
+	if err := validateHeldOutExclusions(exclusions, op.Settings.MaximumBytes); err != nil {
+		t.Fatal("digest collision must have an actually pinned retained source", err)
+	}
+	if err := validateHeldOutFreshSinglePublicPilotSeed(exclusions, self.Facts); err != nil {
+		t.Fatal("root cause requires the unchanged seed-only gate to admit this input", err)
+	}
+	config.Exclusions = heldOutOpJson(t, filepath.Join(op.Root, "synthetic-provider-collision-exclusions.json"), exclusions)
+	if err := verifyHeldOutFreshSinglePublicPilot(config, op.Release, op.Settings); err == nil ||
+		!strings.Contains(err.Error(), "provider bytes collide") {
+		t.Fatal("retained provider digest admitted or refused outside the new comparison", err)
+	}
+	if self.Base.Entropy.Calls != 0 || op.Generated != 0 {
+		t.Fatal("public digest preflight consumed hidden entropy or generator work")
+	}
+	if _, err := os.Lstat(op.Config.PrivateRoot); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("provider collision claimed a campaign")
+	}
+}
+
+// A repinned provider file is not authoritative merely because its YAML seed
+// label matches: actual direct-public serialization and source identity matter.
+func TestHeldOutFreshSinglePublicPilotProviderBytesRequireNativeSerialization(t *testing.T) {
+	self := newHeldOutFreshSingleFixture(t)
+	op := self.Base.Preparation
+	base := newHeldOutFreshSinglePublicPilotConfig(t, self)
+	content, err := readHeldOutPinned(base.Request, op.Settings.MaximumBytes, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var original heldOutRequest
+	if decodeHeldOutComplete(content, &original, "synthetic public request") != nil {
+		t.Fatal("synthetic request unavailable")
+	}
+	providers, err := readHeldOutPinned(heldOutPinnedFile{Path: original.ProvidersPath, Sha256: original.ProvidersSha256}, op.Settings.Workload.MaxProviderBytes, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cliConfig, err := generatedConfig(base.PublicSeed, original.EvaluationPolicy.ProviderCount, original.EvaluationPolicy.ClientPoolSize,
+		float64(original.EvaluationPolicy.ArrivalsPerMinute), original.EvaluationPolicy.QualityWindowSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cliBytes, err := yaml.Marshal(cliConfig)
+	if err != nil || !bytes.Equal(cliBytes, providers) {
+		t.Fatal("existing simulator init/save serialization differs from the direct frozen generator", err)
+	}
+	if err := verifyHeldOutFreshSinglePublicPilot(base, op.Release, op.Settings); err != nil {
+		t.Fatal("positive public fixture must first pass the complete guard", err)
+	}
+	for _, variant := range []string{"comment", "different-seed", "different-fleet", "bad-digest", "symlink", "byte-bound"} {
+		config, request := base, original
+		settings := op.Settings
+		directory := filepath.Join(op.Root, "synthetic-public-provider-mutation", variant)
+		switch variant {
+		case "comment":
+			pin := heldOutOpWrite(t, filepath.Join(directory, "providers.yml"), append(bytes.Clone(providers), []byte("# synthetic equivalent presentation\n")...))
+			request.ProvidersPath, request.ProvidersSha256 = pin.Path, pin.Sha256
+		case "different-seed", "different-fleet":
+			seed, count := config.PublicSeed, request.EvaluationPolicy.ProviderCount
+			if variant == "different-seed" {
+				seed++
+			} else {
+				count++
+			}
+			changed, err := controller.GenerateSimLatencyWorkload(seed, count, request.EvaluationPolicy.ClientPoolSize,
+				float64(request.EvaluationPolicy.ArrivalsPerMinute), request.EvaluationPolicy.QualityWindowSize)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pin := heldOutOpWrite(t, filepath.Join(directory, "providers.yml"), changed)
+			request.ProvidersPath, request.ProvidersSha256 = pin.Path, pin.Sha256
+		case "bad-digest":
+			request.ProvidersSha256 = strings.Repeat("e", 64)
+		case "symlink":
+			if err := os.MkdirAll(directory, 0700); err != nil {
+				t.Fatal(err)
+			}
+			request.ProvidersPath = filepath.Join(directory, "providers.yml")
+			if err := os.Symlink(original.ProvidersPath, request.ProvidersPath); err != nil {
+				t.Fatal(err)
+			}
+		case "byte-bound":
+			settings.Workload.MaxProviderBytes = 1
+		}
+		config.Request = heldOutOpJson(t, filepath.Join(directory, "request.json"), request)
+		if err := verifyHeldOutFreshSinglePublicPilot(config, op.Release, settings); err == nil {
+			t.Fatal("repinned non-native public bytes admitted", variant)
+		}
+		if self.Base.Entropy.Calls != 0 || op.Generated != 0 {
+			t.Fatal("provider mutation consumed hidden entropy", variant)
+		}
+	}
+	if _, err := os.Lstat(op.Config.PrivateRoot); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("provider-byte refusal claimed a campaign")
+	}
+}
+
+// Source-pair authentication and the full frozen policy precede any direct
+// generator reconstruction; no reduced fleet, old image or reused baseline fits.
+func TestHeldOutFreshSinglePublicPilotGeneratorAndFrozenPolicyRefuse(t *testing.T) {
+	self := newHeldOutFreshSingleFixture(t)
+	op := self.Base.Preparation
+	base := newHeldOutFreshSinglePublicPilotConfig(t, self)
+	content, err := readHeldOutPinned(base.Request, op.Settings.MaximumBytes, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var original heldOutRequest
+	if decodeHeldOutComplete(content, &original, "synthetic public request") != nil {
+		t.Fatal("synthetic request unavailable")
+	}
+	if err := verifyHeldOutFreshSinglePublicPilot(base, op.Release, op.Settings); err != nil {
+		t.Fatal("positive public fixture must pass before semantic mutations", err)
+	}
+	for _, variant := range []string{"generator-census", "generator-bytes", "replicates", "fleet", "deadline", "base", "image", "epoch", "scorer", "baseline", "public-integer"} {
+		config, request := base, original
+		config.GeneratorFiles = append([]heldOutGeneratorFile{}, base.GeneratorFiles...)
+		directory := filepath.Join(op.Root, "synthetic-public-policy-mutation", variant)
+		switch variant {
+		case "generator-census":
+			config.GeneratorFiles = nil
+		case "generator-bytes":
+			for index := range config.GeneratorFiles {
+				pair := &config.GeneratorFiles[index]
+				if filepath.Base(pair.Frozen.Path) == "competition_sim_latency_controller.go" {
+					pair.Frozen = heldOutOpWrite(t, filepath.Join(directory, "competition_sim_latency_controller.go"), []byte("// synthetic changed frozen generator\n"))
+				}
+			}
+		case "replicates":
+			request.EvaluationPolicy.Replicates = 1
+		case "fleet":
+			request.EvaluationPolicy.ProviderCount++
+		case "deadline":
+			request.EvaluationPolicy.ScoreTimeoutSeconds++
+		case "base":
+			request.BaseSha = strings.Repeat("e", 40)
+		case "image":
+			request.EvaluatorImageDigest = "sha256:" + strings.Repeat("e", 64)
+		case "epoch":
+			request.SourceEpoch++
+		case "scorer":
+			request.ScorerVersion += "-synthetic-change"
+		case "baseline":
+			request.RoundBaselinePath, request.RoundBaselineSha256 = filepath.Join(directory, "old-baseline.json"), strings.Repeat("e", 64)
+		case "public-integer":
+			config.PublicSeed++
+		}
+		config.Request = heldOutOpJson(t, filepath.Join(directory, "request.json"), request)
+		if err := verifyHeldOutFreshSinglePublicPilot(config, op.Release, op.Settings); err == nil {
+			t.Fatal("changed public generator/policy admitted", variant)
+		}
+		if self.Base.Entropy.Calls != 0 || op.Generated != 0 {
+			t.Fatal("public provenance mutation consumed hidden entropy", variant)
+		}
+	}
+}
+
+// The public preflight cannot retain its old seed-only C1 CLI context once
+// native C2 provider reconstruction is required. Historical context stays exact.
+func TestHeldOutFreshSinglePublicPilotContextRequiresRetainedC2(t *testing.T) {
+	self := newHeldOutFreshSingleFixture(t)
+	op := self.Base.Preparation
+	original := heldOutPrivatePlan{Schema: 1, Kind: "sim-latency-held-out-private-plan",
+		Config: heldOutPreparationConfig{Protocol: heldOutProtocolThreeABridgeTwoB, PrivateRoot: self.Facts.OriginalRoot,
+			Amendment: &heldOutAmendmentPins{Release: op.Config.Amendment.Release}},
+		Rounds: make([]heldOutPrivateRound, 2)}
+	if err := validateHeldOutFreshSinglePublicPilotContext(original, self.Facts); err != nil {
+		t.Fatal("pinned original C2 context refused", err)
+	}
+	for _, variant := range []string{"schema", "kind", "rounds", "old-selector", "fresh-selector", "root", "release"} {
+		changed := original
+		amendment := *original.Config.Amendment
+		changed.Config.Amendment = &amendment
+		switch variant {
+		case "schema":
+			changed.Schema++
+		case "kind":
+			changed.Kind = "synthetic-changed-kind"
+		case "rounds":
+			changed.Rounds = changed.Rounds[:1]
+		case "old-selector":
+			changed.Config.Protocol = ""
+		case "fresh-selector":
+			changed.Config.Protocol = heldOutProtocolFreshSingleB
+		case "root":
+			changed.Config.PrivateRoot = op.Config.PrivateRoot
+		case "release":
+			changed.Config.Amendment.Release.Sha256 = strings.Repeat("e", 64)
+		}
+		if validateHeldOutFreshSinglePublicPilotContext(changed, self.Facts) == nil {
+			t.Fatal("public pilot projected a different native context", variant)
+		}
+	}
+	if self.Base.Entropy.Calls != 0 || op.Generated != 0 {
+		t.Fatal("context selection consumed hidden entropy")
 	}
 }

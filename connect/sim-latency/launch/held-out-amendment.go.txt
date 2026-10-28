@@ -393,6 +393,15 @@ func heldOutCommandContext(ctx context.Context, operation string, content []byte
 		if config.Protocol != heldOutProtocolFreshSingleB {
 			return old, settings, errors.New("public-pilot preflight requires its explicit fresh protocol")
 		}
+		return heldOutFreshSinglePublicPilotContext(ctx, config, old, settings)
+	case "prepare-public-exclusions":
+		var config heldOutFreshSingleExclusionBuildConfig
+		if err := decodeHeldOutComplete(content, &config, "fresh before-public-pilot exclusion context"); err != nil {
+			return old, settings, err
+		}
+		if config.Protocol != heldOutProtocolFreshSingleB {
+			return old, settings, errors.New("exclusion construction requires its explicit fresh protocol")
+		}
 		selected, err := heldOutSettingsForProtocol(config.Protocol)
 		return old, selected, err
 	case "verify", "execute", "reveal":
