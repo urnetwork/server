@@ -30,10 +30,18 @@ type salesTestSlack struct {
 	status atomic.Int32
 	block  atomic.Bool
 
-	stateLock sync.Mutex
-	bodies    []string
-	posted    chan struct{}
-	release   chan struct{}
+	stateLock   sync.Mutex
+	bodies      []string
+	posted      chan struct{}
+	release     chan struct{}
+	releaseOnce sync.Once
+}
+
+// releaseHangs answers every post held while block was set.
+func (self *salesTestSlack) releaseHangs() {
+	self.releaseOnce.Do(func() {
+		close(self.release)
+	})
 }
 
 func newSalesTestSlack(t *testing.T) *salesTestSlack {
@@ -60,7 +68,7 @@ func newSalesTestSlack(t *testing.T) *salesTestSlack {
 		w.WriteHeader(int(slack.status.Load()))
 	}))
 	t.Cleanup(func() {
-		close(slack.release)
+		slack.releaseHangs()
 		slack.server.Close()
 	})
 
@@ -404,6 +412,8 @@ func TestSalesPaymentNoticeWorkerPostsAfterTheCommit(t *testing.T) {
 		t.Fatal("the worker did not post")
 	}
 	connect.AssertEqual(t, strings.Contains(slack.posts()[0], `"text":"*Sale:* Pro monthly (renewal)\n*Network:* acme\n`), true)
+	// the worker is done before the test's replacements are put back
+	connect.AssertEqual(t, queue.wait(time.Minute), true)
 }
 
 // The webhook url is a credential: a transport error carries none of it.
@@ -455,4 +465,9 @@ func TestWaitSalesPaymentNotices(t *testing.T) {
 	slack.block.Store(true)
 	connect.AssertEqual(t, queue.enqueue(salesTestNotice("crypto_intent/3")), true)
 	connect.AssertEqual(t, WaitSalesPaymentNotices(50*time.Millisecond), false)
+
+	// once Slack answers, the worker finishes, before the test's replacements
+	// are put back
+	slack.releaseHangs()
+	connect.AssertEqual(t, WaitSalesPaymentNotices(time.Minute), true)
 }
