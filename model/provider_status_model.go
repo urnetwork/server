@@ -207,6 +207,85 @@ type ProviderStatus struct {
 	Appearances *ProviderAppearanceHistogram `json:"appearances,omitempty"`
 }
 
+// A ProviderRankingNumber without its explanation. It gives a value, minimum
+// or maximum only when the number has one, and a count and total only for a
+// counted number that has a value.
+type ProviderRankingNumberCompact struct {
+	Name    string   `json:"name"`
+	Value   *float64 `json:"value,omitempty"`
+	Minimum *float64 `json:"minimum,omitempty"`
+	Maximum *float64 `json:"maximum,omitempty"`
+	Passes  bool     `json:"passes"`
+	Count   *int     `json:"count,omitempty"`
+	Total   *int     `json:"total,omitempty"`
+}
+
+// A ProviderStatusCountry without its explanation.
+type ProviderStatusCountryCompact struct {
+	CountryCode         string `json:"country_code"`
+	Country             string `json:"country"`
+	ObservedCountryCode string `json:"observed_country_code"`
+}
+
+// A ProviderStatus without its English texts, the compact form of the status
+// answer: the reason, the gates, the numbers, the country and the appearances.
+type ProviderStatusCompact struct {
+	ClientId     server.Id                       `json:"client_id"`
+	Reason       string                          `json:"reason"`
+	Admission    *ProviderAdmission              `json:"admission"`
+	Ranking      []*ProviderRankingNumberCompact `json:"ranking"`
+	Country      *ProviderStatusCountryCompact   `json:"country,omitempty"`
+	EvaluateTime time.Time                       `json:"evaluate_time"`
+	Appearances  *ProviderAppearanceHistogram    `json:"appearances,omitempty"`
+}
+
+// The compact form of status: the same facts, without the reason text and
+// the explanations.
+func NewProviderStatusCompact(status *ProviderStatus) *ProviderStatusCompact {
+	compact := &ProviderStatusCompact{
+		ClientId:     status.ClientId,
+		Reason:       status.Reason,
+		Admission:    status.Admission,
+		Ranking:      make([]*ProviderRankingNumberCompact, 0, len(status.Ranking)),
+		EvaluateTime: status.EvaluateTime,
+		Appearances:  status.Appearances,
+	}
+	for _, number := range status.Ranking {
+		compactNumber := &ProviderRankingNumberCompact{
+			Name:   number.Name,
+			Passes: number.Passes,
+		}
+		if number.HasValue {
+			value := number.Value
+			compactNumber.Value = &value
+		}
+		if number.HasMinimum {
+			minimum := number.Minimum
+			compactNumber.Minimum = &minimum
+		}
+		if number.HasMaximum {
+			maximum := number.Maximum
+			compactNumber.Maximum = &maximum
+		}
+		// only a counted number with a value has a total
+		if 0 < number.Total {
+			count := number.Count
+			total := number.Total
+			compactNumber.Count = &count
+			compactNumber.Total = &total
+		}
+		compact.Ranking = append(compact.Ranking, compactNumber)
+	}
+	if status.Country != nil {
+		compact.Country = &ProviderStatusCountryCompact{
+			CountryCode:         status.Country.CountryCode,
+			Country:             status.Country.Country,
+			ObservedCountryCode: status.Country.ObservedCountryCode,
+		}
+	}
+	return compact
+}
+
 // The most provider clients one status answer decides.
 const ProviderStatusMaxClients = 32
 
@@ -907,6 +986,41 @@ func GetNetworkProviderStatuses(ctx context.Context, networkId server.Id) *Provi
 		Providers: GetProviderStatuses(ctx, networkId, clientIds),
 		Truncated: truncated,
 	}
+}
+
+// What a status may say about one client id of a network, in one indexed
+// read: whether it is a client a status decides (an active, top-level client
+// of the network, as loadProviderStatusFacts reads them) and whether it is a
+// provider client, one GetNetworkProviderStatuses lists (any provide key). An
+// unknown id and a client of another network are neither, alike.
+func GetProviderStatusClient(ctx context.Context, networkId server.Id, clientId server.Id) (client bool, provider bool) {
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT
+				EXISTS (
+					SELECT 1 FROM provide_key
+					WHERE provide_key.client_id = network_client.client_id
+				)
+			FROM network_client
+			WHERE
+				network_client.client_id = $1 AND
+				network_client.network_id = $2 AND
+				network_client.active = true AND
+				network_client.source_client_id IS NULL
+			`,
+			clientId,
+			networkId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				client = true
+				server.Raise(result.Scan(&provider))
+			}
+		})
+	})
+	return
 }
 
 // One provider client of the network, nil when it is not one.

@@ -7,6 +7,7 @@ import (
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
+	"github.com/urnetwork/server/session"
 )
 
 func NetworkCheck(w http.ResponseWriter, r *http.Request) {
@@ -34,7 +35,23 @@ func GetNetworkReliability(w http.ResponseWriter, r *http.Request) {
 }
 
 // The caller network's admission and ranking is cached per network inside the
-// controller; the appearance histograms are read fresh on every call.
+// controller; the appearance histograms are read fresh on every call. The
+// query takes an optional client_id, one client of the caller's network, and
+// an optional format, "full" (the default) or "compact". Refusals answer 200
+// with `error.message`.
 func GetProviderStatus(w http.ResponseWriter, r *http.Request) {
-	router.WrapRequireAuth(controller.GetProviderStatus, w, r)
+	query := r.URL.Query()
+	args := &controller.GetProviderStatusArgs{
+		ClientId: query.Get("client_id"),
+		Format:   query.Get("format"),
+	}
+	if args.Format == controller.ProviderStatusFormatCompact {
+		router.WrapRequireAuth(func(clientSession *session.ClientSession) (*controller.GetProviderStatusCompactResult, error) {
+			return controller.GetProviderStatusCompact(args, clientSession)
+		}, w, r)
+		return
+	}
+	router.WrapRequireAuth(func(clientSession *session.ClientSession) (*controller.GetProviderStatusResult, error) {
+		return controller.GetProviderStatusWithArgs(args, clientSession)
+	}, w, r)
 }
