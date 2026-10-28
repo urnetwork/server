@@ -54,7 +54,8 @@ func configureProxyControlFamily() {
 // Couples the identity-restoration hold to the deployment handoff feature.
 // A plain manager used by tests remains immediately restorable; production
 // releases this hold through wg.CompleteDeploymentHandoff. Every hosted window
-// dials the edge `platformPlacement` chooses.
+// dials the edge `platformPlacement` chooses, and the devices of a client
+// removed through the api close on its removal (CLIENTCLOSE1.md section 5).
 func newProxyDeviceManagerSettings(
 	settings *proxy.ProxySettings,
 	platformPlacement connect.PlatformPlacement,
@@ -62,6 +63,7 @@ func newProxyDeviceManagerSettings(
 	managerSettings := proxy.DefaultProxyDeviceManagerSettings()
 	managerSettings.HoldWindowIdentityRestore = settings.EnableWgHandoff
 	managerSettings.PlatformPlacement = platformPlacement
+	managerSettings.ClientRemoved = proxy.DefaultClientRemovedSettings()
 	return managerSettings
 }
 
