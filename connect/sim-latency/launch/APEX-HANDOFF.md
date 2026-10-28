@@ -14,8 +14,9 @@ has native acceptance as an operational witness, not statistical equivalence.
 The owner approved measuring the first of two prospectively committed seeds;
 the second remains unstarted. All three reference jobs and correct ordering on the selected
 seed, genuine Snow qualification and live readiness remain open. The recovered
-run has completed its nine controls and is measuring the first reference
-candidate. This is not an accepted hidden epoch baseline or activation. See the
+run has completed nine controls and the first two reference evaluations; the
+final no-op reference has completed 3/9 candidates at 02:22:33 UTC on October 28.
+This is not an accepted hidden epoch baseline or activation. See the
 [exact freeze](CALIBRATION-THREE-A-FREEZE-2026-10-26.md),
 [first-seed amendment](CALIBRATION-AMENDMENT-2026-10-27-FIRST-SEED.md), and
 [explicit recovery record](UNMEASURED-MANAGEMENT-OOM-2026-10-27.md).

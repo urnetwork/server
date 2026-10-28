@@ -18,16 +18,21 @@ candidates, evaluator exit zero in 10,306 seconds, before its fresh 00:28:07
 deadline; cleanup verified. Its score was placeable but not takeover eligible:
 mean improvement −4.5357%, p=0.727635. See the
 [retained first observation](FIRST-COMMITTED-FIRST-REFERENCE-2026-10-28.md).
-The regression reference is running in the same native session `27905`, using
-the byte-identical nine-run baseline. The no-op and second committed seed have
-not started. The entire first-seed reference screen is **not accepted**.
+The regression reference completed at 01:49:07 UTC (exit zero, cleanup verified).
+The final no-op reference started at 01:50:08 UTC in the same native session
+`27905`, using the byte-identical nine-run baseline; it has completed 3/9
+candidates as of 02:22:33 UTC, with a 04:50:08 UTC deadline. The second committed
+seed remains unstarted. The entire first-seed reference screen is **not accepted**.
 
 The current owner-approved scope is the first committed seed only, with all
 three reference jobs, correct frozen median ordering, and a placeable,
 non-takeover no-op. No new seed, retrospective criterion, or successful-result
 selection is permitted. The numeric scope supersedes older two-seed statements;
-all other gates remain required. Snow V7 remains unqualified, API credential
-convergence remains unverified, and target-round R1, API/worker readiness and
+all other gates remain required. Snow V7 remains unqualified. Sampled production
+credentials are now recognized: settlement requests reach `503 source_not_ready`,
+and other scoped roles receive the expected `403 scope_denied` on that
+settlement-only route. This does not prove every replica's credential mount or
+later readiness checks. Target-round R1, API/worker readiness and
 activation remain unperformed. Consult `current-state.json` and native records
 for later run progress; a live process is not acceptance.
 
