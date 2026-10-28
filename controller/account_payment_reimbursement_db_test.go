@@ -131,7 +131,7 @@ func payoutReimbursementTestRow(networkId server.Id, walletId server.Id, amount 
 }
 
 func payoutReimbursementTestRun(clientSession *session.ClientSession, data []byte, reason string, send bool, expect string) (*PayoutReimbursementReport, error) {
-	return payoutsReimburse(clientSession, data, reason, send, expect, payoutReimbursementTestClock)
+	return payoutsReimburse(clientSession, data, reason, send, expect, false, payoutReimbursementTestClock)
 }
 
 // The dry run's digest for the rows.
