@@ -1,13 +1,15 @@
-# First-committed retained archive command — synthetic unit qualified
+# First-committed retained archive — unit qualified, source versions retained
 
 The exact source passed independent maximum-effort review and three consecutive
 offline Go 1.27.3 race-enabled synthetic unit runs: 27 tests per pass, zero skips
 or failures. See the [qualification record](../RETAINED-ARCHIVE-QUALIFICATION-2026-10-28.md)
-for source and log pins. Live operation remains unqualified: the standalone native
-command binary has not been built or pinned, and canonical-wrapper/native-storage
-integration remains pending. Do not build or invoke this command during timed
-scoring. Unit qualification does not authorize preparation, upload, calibration
-acceptance, or production activation.
+for source and log pins. A pinned native binary has since completed three
+separately authorized retained uploads with exact source-version SHA-256 readback;
+see the [scoped native evidence](../FIRST-COMMITTED-ARCHIVE-RETENTION-2026-10-28.md).
+The complete integration wrapper and delivery of these versions to a replica
+remain unproved. Do not build or invoke this command during timed scoring.
+Past success does not authorize another preparation/upload, reset a one-use
+claim, establish calibration acceptance, or activate production.
 
 This is a separate first-committed archive context, not a replacement name for the
 earlier C2 bridge archive. It adapts the reviewed bridge uploader's streaming

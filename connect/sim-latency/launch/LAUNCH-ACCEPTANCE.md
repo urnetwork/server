@@ -1,7 +1,9 @@
 # October 28 production launch acceptance
 
 The required opening was **2026-10-28T00:00:00Z**; readiness was not achieved
-by that deadline. No new opening or backdated activation is authorized. This
+by that deadline. Backdated activation remains prohibited. The owner's
+[October 28 prospective-opening direction](LATE-OPENING-AUTHORIZATION-2026-10-28.md)
+supersedes the earlier no-late-opening warning only after every required gate passes. This
 checklist is the acceptance index for the new release, not an authorization to
 activate production. Historical v1 checkmarks do not qualify a different source,
 image, host manifest, policy or review provider.
@@ -10,7 +12,9 @@ image, host manifest, policy or review provider.
 
 The [deadline record](LAUNCH-DEADLINE-2026-10-28.md) preserves public discovery
 503 and production control-token 401 at 00:00:10 UTC. The objective is not
-complete. The owner has not authorized rescheduling or a late public opening.
+complete. The earlier absence of late-opening authority is preserved in that
+deadline record; the separately recorded 07:16 UTC direction now authorizes a
+prospective opening after all gates, not backdating or a gate waiver.
 
 The owner-approved, artifact-preserving [unmeasured recovery](UNMEASURED-MANAGEMENT-OOM-2026-10-27.md)
 has been applied once. The first reference completed nine controls and nine
@@ -35,7 +39,8 @@ committed seed. Exact reference/protocol review, native qualification and
 publication must precede measurement. No new seed has been drawn or new
 measurement started; the original second seed stays unstarted. R9, gates,
 significance and the 26.9% margin remain unchanged. This is not authority to
-relabel the failure, select a favorable result, waive a provider or open late.
+relabel the failure, select a favorable result or waive a provider. Prospective
+opening authority comes only from the separate direction linked above.
 Snow V7 remains unqualified. Sampled production
 credentials are now recognized: settlement requests reach `503 source_not_ready`,
 and other scoped roles receive the expected `403 scope_denied` on that
@@ -44,7 +49,21 @@ later readiness checks. Target-round R1, API/worker readiness and
 activation remain unperformed. Consult `current-state.json` and native records
 for current preparation and evidence-retention status. The archive source has
 [three passing synthetic unit runs](RETAINED-ARCHIVE-QUALIFICATION-2026-10-28.md),
-not a qualified native binary, successful integration wrapper or retained upload.
+a pinned Go 1.27.3 native binary and
+[three COMPLIANCE source-version readbacks](FIRST-COMMITTED-ARCHIVE-RETENTION-2026-10-28.md).
+Originals remain; delivery of these versions to a replica and a complete
+integration-wrapper pass remain unproved. The proposed
+[H1 pacing reference](reference-h1-byte-pacing-2026-10-28/README.md) passed its
+focused 8-baseline/27-candidate guards three times after a retained fixture-race
+repair. All three new-policy native images now have exact authenticated
+[offline build proofs](reference-h1-byte-pacing-2026-10-28/native-build-summary.json);
+broader service integration and measured direction remain pending. The new
+protocol's first five-minute timeout is retained. Its exact integrated source
+passed [three corrected 21-guard race runs](fresh-single-protocol-2026-10-28/qualification.json),
+with zero skips or failures. This is not complete native qualification: the
+direct-public provider-digest exclusion followup, its new tests/publication,
+the broader guard matrix and complete native census remain required before
+public-pilot admission. No new held-out seed or measurement has started.
 
 ## Historical checkpoint — October 27, 15:10 UTC
 
@@ -477,12 +496,12 @@ substitute for formal calibration or live readiness.
 | Evaluated source and compiler | Exact ten-repository commits, canonical lock, actual binary build metadata and Go 1.27.3; no operator-proxy dependency | Current C2 server `a9e8e1a7`, image `98c9061c…`, binary `efd1077d…`, actual Go 1.27.3 and canonical lock `ec322ed2…` are bound by the [fresh V2 bridge plan](FRESH-BRIDGE-PLAN-2026-10-27-V2.json) and current-state receipts. Earlier C2 images and C1 identities retain their own historical evidence; none is relabeled as this release. |
 | Full cold evaluation | Nine fresh controls, nine fresh no-op candidates, authenticated score and unchanged G1–G6 inputs, resource/accounting reports, actual total wall time within three hours, exact cleanup | The current C2 corrected R9/R9 bridge has native acceptance `2af963f0…`: 10,290 seconds, all 9+9, score replay, artifact bindings and cleanup. It is an operational compatibility witness, not statistical equivalence. The earlier [corrected-release cold cohort](../baseline/prelaunch-corrected-same-seed-r9-2026-10-25/completed/cohort-01/README.md), 10,498 seconds, retains its own identity and is not relabeled. The recovered first reference also completed 9+9 in 10,306 seconds, but is not a second A/A observation. |
 | Statistical calibration | Approved three-pair reduction, accepted corrected bridge, preserved [failed first screen](FIRST-COMMITTED-SCREEN-2026-10-28.md), and the separately [approved new prospective screen](CALIBRATION-NEW-SCREEN-OWNER-APPROVAL-2026-10-28.md); unchanged R9, algorithm, gates, significance, integrity and per-job bounds | Three-pair native reduction accepted; 99.525% bootstrap placeability; prospective practical margin **26.9%**. Original mean changes −2.80%, +1.16%, +3.44%, p=0.297/0.579/0.783, comparison-specific fringes 9.018%, 10.046%, 7.496%; no significance/takeover. The failed bridge's nine unscored controls remain unused; the corrected bridge is an operational witness. All first-seed references completed, but the worse median outranked the no-op and the screen was not accepted. The original second seed stays committed and unstarted. Exact stronger regression reference, fresh control, new seed commitment, protocol review and native qualification/publication remain pending; no new measurement has started. Confidence is reduced explicitly; this is not production acceptance. The 16.1% floor is not the selected 26.9% margin. |
-| Reference patches | Correctness checks, exact patch/build identities and measured no-op/worse/better behavior; separate pilot and held-out seeds | The [snapshot pilot](SNAPSHOT-PILOT-2026-10-25.md) completed fresh 9+9 with all gates and cleanup in 10,562 seconds. Both predeclared directional conditions passed: mean 19,053.39→18,206.07 ms (4.45% lower), median 18,903.60→18,285.95 ms. Welch p=0.2407: not significant or a takeover; this is a proposed better reference, not held-out qualification. The unfavorable [warm-reader pilot](../baseline/prelaunch-warm-reader-pilot-2026-10-25/completed/README.md) remains preserved. Its unchanged patch has now passed [current-source negative-reference correctness/build qualification](../evaluator/references/2026-10-25/NEGATIVE-QUALIFICATION.md), but fresh independent-seed ordering still must pass. Neither pilot enters Stage A. |
+| Reference patches | Correctness checks, exact patch/build identities and measured no-op/worse/better behavior; separate pilot and held-out seeds | The [snapshot pilot](SNAPSHOT-PILOT-2026-10-25.md) completed fresh 9+9 with all gates and cleanup in 10,562 seconds. Both predeclared directional conditions passed: mean 19,053.39→18,206.07 ms (4.45% lower), median 18,903.60→18,285.95 ms. Welch p=0.2407: not significant or a takeover; this is a proposed better reference, not held-out qualification. The unfavorable [warm-reader pilot](../baseline/prelaunch-warm-reader-pilot-2026-10-25/completed/README.md) and its [correctness/build qualification](../evaluator/references/2026-10-25/NEGATIVE-QUALIFICATION.md) remain preserved; the first held-out screen subsequently failed ordering. The newly proposed [H1 pacing reference](reference-h1-byte-pacing-2026-10-28/README.md) has three passing focused 8/27 unit sets, not broader service qualification, a native reference build or measured direction. Its separately frozen pilot and later held-out ordering remain pending. Neither pilot enters Stage A. |
 | Host containment and rebaseline | Exact-image host fingerprint, reserved management capacity, network/mount containment, adversarial cleanup and independently authenticated readiness | Latest current-boot hostile fixture exercised all ten evaluation cores and 72 GiB memory; OOM exit 137 and joined cleanup passed in 775 ms with original container/network inventory restored. This separate hostile fixture is not exact evaluator-image execution. The current C2 negative self-check records its actual fingerprint without granting readiness. Actual reserved-round C2 R1, production metadata binding and positive readiness remain unverified. Calibration fixture hardware labels are not positive host attestations. |
 | Honesty and source-test providers | Genuine Snow three-member review/test-broker qualification; maintainer tests on Sol 6.1 low; retained acceptance/rejection/uncertainty/unsafe/prompt-injection evidence | Control source `09cc510d`, hardened image `d9006e2f…`, qualified driver `456209be…` and real deterministic Go-fixture observations are retained. V7 cancellation passed, but Muse's benign-case judgment was malformed; Qwen/Gemma approvals did not override the union failure. Report `19a916de…` remains unqualified. Corrected backend evidence and a new genuine qualification precommit/attempt are required; no output repair, ignored member, uncertainty override or automatic retry is permitted. Offline tests and genuine fixture-test execution do not prove provider qualification. |
 | Automated epoch lifecycle | Real evaluation → provisional decision → review/reject-and-advance → approved source build/qualification → next weekly round; exhaustion carries incumbent, uncertainty pauses; restart recovery | Control suites passed at their recorded revisions in [control validation](CONTROL-VALIDATION-2026-10-25.md). Genuine provider and live runtime lifecycle acceptance remains open; do not equate unit tests with deployed proof. |
 | Production policy and timing | New production season and scoped credentials, $20 fee, unbounded FIFO, three-hour job bound, one authenticated R9 control per epoch, six full weekly windows, no early admission | The midnight readiness deadline was missed and recorded. Prepared source ledger is not activation. A new future opening needs explicit owner direction after gates pass; do not backdate or silently reschedule. Verify deployed policy, API advertisement, supervisor journal and readiness acknowledgments. Never reinterpret staging as production. Automated v2 drains accepted work after close and completes after epoch six/review, not by a guaranteed January 1 calendar cutoff. |
-| Artifact durability and distribution | Exact image/archive digest and retained distribution/readback record; live MinIO locking/versioning, replication, capacity and retention proof | Source and replica exact-version payload/COMPLIANCE-retention readback passed; native bucket-protection proof passed. Replica is co-located, not off-site. Ordinary replica access remains denied; verified administrative restore did not broaden it. Version-aware accounting passed: 464 versions / 39,153,130 bytes against the approved decimal 10 TB allocation (not a physical quota/free-space proof). Final retained publication and control-image distribution remain open. `support@ur.xyz` owns post-retention deletion. |
+| Artifact durability and distribution | Exact image/archive digest and retained distribution/readback record; live MinIO locking/versioning, replication, capacity and retention proof | Earlier source/replica exact-version COMPLIANCE readback and bucket-protection proof passed; that replica is co-located, not off-site, and ordinary replica access remains denied. The earlier capacity snapshot counted 464 versions / 39,153,130 bytes against the approved decimal 10 TB allocation, not a physical quota/free-space proof. The [three first-committed archives](FIRST-COMMITTED-ARCHIVE-RETENTION-2026-10-28.md) now separately have COMPLIANCE exact-source-version SHA-256 readbacks through January 1, 2028: 1,094 payload entries, three inventories, 961,268,224 tar bytes. Originals remain; delivery of these three versions to a replica/offsite restore and control-image distribution remain unproved. No deletion is authorized by these records; `support@ur.xyz` owns post-retention deletion. |
 | API, worker and supervisor readiness | Authenticated public contract and submit/poll/result proof, exact runtime manifests, independent API/worker acknowledgments, singleton durable supervisor | Maintenance is cleared. Public source_not_ready remains an exact-envelope preparation gate. Production submitter/control tokens return 401; the requested vault commit contains the registry, but serving-replica mounts and post-vault restarts remain unverified. Check the decrypted/mounted registry digest recorded in the deadline report. Target-round R1, runtime acknowledgments and durable activation remain open; offline fixtures are not live readiness receipts. |
 | Monitoring and operations | Delivered heartbeat every 15 seconds, warning after 30 seconds missing; queue/current job/elapsed/significance/backlog panels; delivered alert routed to support@ur.xyz | Existing implementation and historical deployment evidence do not prove delivery for the new runner. Verify actual ingestion and routing after maintenance. |
 | Partner and public handoff | Current immutable contract, source/image distribution, onboarding/revocation proof, Macrocosmos finalize/decision acceptance, published commercial/appeal terms and updated reports | [Partner handoff](APEX-HANDOFF.md) records release deltas. Partner draft still requires reconciliation; final report must use newly qualified data and show improvement fringes wherever baselines appear. |

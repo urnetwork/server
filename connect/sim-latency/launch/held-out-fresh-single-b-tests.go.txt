@@ -1,0 +1,1113 @@
+// Synthetic, owned native-shape fixtures exercise the new protocol without
+// real campaigns, production input reads, applications, services, or measurements.
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/urnetwork/server/model"
+)
+
+// Only the existing captured runtime contract substitutes host I/O. All source,
+// bridge, policy, receipt and commitment validators remain the production bodies.
+type heldOutFreshSingleFixture struct {
+	Base            *heldOutTwoBCompositionFixture
+	Facts           heldOutFreshSingleFacts
+	Approval        heldOutFreshSingleApproval
+	Declaration     heldOutFreshSingleDeclaration
+	References      []heldOutReference
+	Template        heldOutRequest
+	Exclusions      heldOutExclusions
+	BeforeRecheck   func()
+	Rechecks        int
+	Authentications int
+}
+
+// Creates separate retained old input/output namespaces and public metadata.
+func (self *heldOutFreshSingleFixture) configureLineage(t *testing.T) {
+	t.Helper()
+	op := self.Base.Preparation
+	root := filepath.Join(op.Root, "synthetic-old-campaign")
+	rounds, outcomes := newHeldOutAmendedOutcomes(2)
+	for _, round := range rounds {
+		for _, job := range round.Public.Jobs {
+			artifacts := filepath.Join(heldOutJobRoot(root, round.Public, job), "artifacts")
+			for _, name := range []string{"canonical.patch", "precommitted-request.json", "providers.yml"} {
+				heldOutOpWrite(t, filepath.Join(artifacts, name), []byte("synthetic immutable original input "+name+"\n"))
+			}
+		}
+	}
+	originalPrivate := heldOutPrivatePlan{Schema: 1, Kind: "sim-latency-held-out-private-plan",
+		CampaignId: heldOutOpId(9401), PreparedAt: time.Unix(1500000000, 0).UTC(), Rounds: rounds}
+	for index := range originalPrivate.Rounds {
+		round := &originalPrivate.Rounds[index]
+		round.PrivateSeedHex = fmt.Sprintf("%064x", 9101+index)
+		seed, err := heldOutEffectiveSeed(round.PrivateSeedHex)
+		if err != nil {
+			t.Fatal(err)
+		}
+		round.EffectiveSeed = seed
+		round.Public.ProvidersSha256 = heldOutDigest([]byte(fmt.Sprintf("synthetic old providers %d", index)))
+		round.Public.SeedCommitment = heldOutDigest([]byte(fmt.Sprintf("synthetic old commitment %d", index)))
+	}
+	self.Facts.OriginalRoot = root
+	self.Facts.OriginalPrivatePlan = heldOutOpJson(t, filepath.Join(root, "private-plan.json"), originalPrivate)
+	public := heldOutPublicPlan{Schema: 1, Kind: "sim-latency-held-out-public-plan", Protocol: heldOutProtocolThreeABridgeTwoB,
+		CampaignId: originalPrivate.CampaignId, PrivatePlanSha256: self.Facts.OriginalPrivatePlan.Sha256,
+		DeferredFields: []string{"round_baseline_path", "round_baseline_sha256"}, Rounds: []heldOutPublicRound{}}
+	for _, round := range originalPrivate.Rounds {
+		public.Rounds = append(public.Rounds, round.Public)
+	}
+	self.Facts.OriginalPublicPlan = heldOutOpJson(t, filepath.Join(op.Root, "synthetic-old-public-plan.json"), public)
+	self.Facts.SelectedPublicPlan = heldOutOpWrite(t, filepath.Join(op.Root, "synthetic-old-selected-public.json"),
+		[]byte("{\"synthetic\":\"immutable selected public lineage\"}\n"))
+	for index := range outcomes[:3] {
+		if outcomes[index].Role == "worse" {
+			outcomes[index].RawScore = 15
+		}
+	}
+	failed := heldOutCampaignResult{Schema: 1, Kind: "sim-latency-held-out-screen", CampaignId: public.CampaignId,
+		PlanSha256: self.Facts.SelectedPublicPlan.Sha256, Complete: true, Accepted: false, OrderedSeeds: 0,
+		Reasons: []string{"first_committed_seed_not_correctly_ordered"}, Outcomes: outcomes[:3], ClosedAt: time.Unix(1600000045, 0).UTC()}
+	self.Facts.FailedResult = heldOutOpJson(t, filepath.Join(root, "campaign-result.json"), failed)
+	self.Declaration.OriginalExecutionStarted = heldOutOpJson(t, filepath.Join(root, "execution.started.json"),
+		map[string]any{"schema": 1, "synthetic": "spent original campaign, never reset"})
+	content, err := readHeldOutPinned(op.Config.Exclusions, op.Settings.MaximumBytes, false)
+	if err != nil || json.Unmarshal(content, &self.Exclusions) != nil {
+		t.Fatal("synthetic exclusions unavailable", err)
+	}
+	self.Exclusions.Sources = append(self.Exclusions.Sources, self.Facts.OriginalPrivatePlan)
+	for _, round := range originalPrivate.Rounds {
+		self.Exclusions.PrivateSeedHexes = append(self.Exclusions.PrivateSeedHexes, round.PrivateSeedHex)
+		self.Exclusions.EffectiveSeeds = append(self.Exclusions.EffectiveSeeds, round.EffectiveSeed)
+		self.Exclusions.ProviderDigests = append(self.Exclusions.ProviderDigests, round.Public.ProvidersSha256)
+		self.Exclusions.RetiredCommitments = append(self.Exclusions.RetiredCommitments, round.Public.SeedCommitment)
+	}
+}
+
+// Every new policy-bound native build has actual typed original-source/builder
+// sidecars, while better/no-op preserve their original synthetic patch bytes.
+func (self *heldOutFreshSingleFixture) configureReferences(t *testing.T) {
+	t.Helper()
+	op := self.Base.Preparation
+	var lock heldOutSourceLock
+	content, err := readHeldOutPinned(op.Config.SourceLock, op.Settings.MaximumBytes, false)
+	if err != nil || json.Unmarshal(content, &lock) != nil {
+		t.Fatal("synthetic lock unavailable", err)
+	}
+	var manifest heldOutRuntimeManifest
+	if err := json.Unmarshal(self.Base.RuntimeContentBytesKVs[op.Release.Runtime.Manifest.Path], &manifest); err != nil {
+		t.Fatal(err)
+	}
+	policyBytes, err := heldOutFreshSinglePatchPolicyBytes(self.Template.PatchPolicy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policySha256 := heldOutDigest(policyBytes)
+	self.Declaration.ReferencePolicySha256 = policySha256
+	self.Declaration.ReferencePolicy = heldOutOpWrite(t, filepath.Join(op.Root, "inputs", "fresh-scored-patch-policy.json"), policyBytes)
+	self.References = append([]heldOutReference{}, self.Base.References...)
+	for index := range self.References {
+		reference := &self.References[index]
+		directory := filepath.Join(op.Root, "synthetic-fresh-reference", reference.Role)
+		if reference.Role == "worse" {
+			reference.Patch = heldOutOpWrite(t, filepath.Join(directory, "canonical.patch"), []byte("synthetic changed causal regression patch\n"))
+		}
+		oldBytes, err := readHeldOutPinned(reference.NativeBuild, op.Settings.MaximumBytes, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var build heldOutNativeBuild
+		if err := json.Unmarshal(oldBytes, &build); err != nil {
+			t.Fatal(err)
+		}
+		source := heldOutRuntimeSource{Schema: 1, Kind: "sim-latency-evaluation-source", Temporary: true,
+			BaseImageId: op.Release.ImageId, BaseSha: op.Release.BaseSha, Branch: "sim-latency",
+			SourceLockSha256: op.Config.SourceLock.Sha256, CandidatePathBase: "mono_root_v1", Repositories: lock.Repositories}
+		sourcePin := heldOutOpWrite(t, filepath.Join(directory, "evidence", "candidate-original-source.json"), heldOutRuntimeJson(t, source))
+		builderPin := heldOutOpWrite(t, filepath.Join(directory, "evidence", "builder-identity.json"), heldOutRuntimeJson(t, manifest.Builder))
+		reference.ImageId = "sha256:" + heldOutDigest([]byte("synthetic new-policy image "+reference.Role))
+		build.ImageId, build.PatchSha256, build.PolicySha256 = reference.ImageId, reference.Patch.Sha256, policySha256
+		build.OriginalSourceIdentitySha256 = sourcePin.Sha256
+		build.ImageKey = heldOutDigest([]byte(strings.Join([]string{build.BaseImageId, build.PatchSha256, build.PolicySha256, build.BuilderSha256}, "\x00")))
+		build.Image = "urnetwork/sim-latency-submission:" + build.ImageKey[:32]
+		reference.NativeBuild = heldOutOpJson(t, filepath.Join(directory, "native-build.json"), build)
+		for _, kind := range []string{"build", "correctness", "direction"} {
+			receipt := heldOutReferenceQualification{Schema: 1, Kind: "sim-latency-held-out-reference-" + kind,
+				Role: reference.Role, Accepted: true, BaseSha: op.Release.BaseSha, SourceLockSha256: op.Release.SourceLockSha256,
+				BaseImageId: op.Release.ImageId, PatchSha256: reference.Patch.Sha256, CandidateSha: reference.CandidateSha,
+				ImageId: reference.ImageId, BinarySha256: reference.BinarySha256, GoVersion: "go1.27.3",
+				Evidence: []heldOutPinnedFile{sourcePin, builderPin}}
+			if kind == "direction" {
+				receipt.Direction = map[string]string{"no-op": "no-op", "better": "faster", "worse": "slower"}[reference.Role]
+				if reference.Role == "worse" {
+					receipt.Evidence = append(receipt.Evidence, self.Declaration.RegressionPilotPlan, self.Declaration.RegressionPilotPublication)
+				}
+			}
+			pin := heldOutOpJson(t, filepath.Join(directory, kind+"-qualification.json"), receipt)
+			switch kind {
+			case "build":
+				reference.Build = pin
+			case "correctness":
+				reference.Correctness = pin
+			case "direction":
+				reference.Direction = pin
+			}
+		}
+	}
+	op.Config.References = heldOutOpJson(t, filepath.Join(op.Root, "inputs", "fresh-references.json"), self.References)
+}
+
+// Builds on the already complete synthetic old-A/bridge runtime composition.
+func newHeldOutFreshSingleFixture(t *testing.T) *heldOutFreshSingleFixture {
+	t.Helper()
+	base := newHeldOutTwoBCompositionFixtureWithAuthentication(t, false)
+	op := base.Preparation
+	self := &heldOutFreshSingleFixture{Base: base}
+	self.Facts = heldOutFreshSingleFacts{PrivateRoot: filepath.Join(op.Root, "private-parent", "fresh-campaign"),
+		PublicPlanPath: filepath.Join(op.Root, "public", "fresh-plan.json"), BridgeTemplate: op.Config.Template,
+		OriginalReferences: op.Config.References, ReleaseSha256: op.Config.Amendment.Release.Sha256,
+		NewAllowedPaths: []string{"synthetic/reference.go", "synthetic/transport.go"}, PublicPilotSeed: 20200103, Margin: .2,
+		MemoryExecutable: heldOutOpWrite(t, filepath.Join(op.Root, "synthetic-memory-helper"), []byte("synthetic nonexecuted memory helper\n")),
+		MemoryConfig:     heldOutOpJson(t, filepath.Join(op.Root, "synthetic-memory-config.json"), map[string]any{"synthetic": true})}
+	self.configureLineage(t)
+	self.Declaration.RegressionPilotPlan = heldOutOpJson(t, filepath.Join(op.Root, "synthetic-public-pilot-plan.json"),
+		map[string]any{"schema": 1, "public_workload_seed": self.Facts.PublicPilotSeed, "synthetic_no_measurements": true})
+	self.Declaration.RegressionPilotPublication = heldOutOpJson(t, filepath.Join(op.Root, "synthetic-public-pilot-publication.json"),
+		map[string]any{"schema": 1, "synthetic": true, "plan_sha256": self.Declaration.RegressionPilotPlan.Sha256})
+	self.Exclusions.Sources = append(self.Exclusions.Sources, self.Declaration.RegressionPilotPlan)
+	self.Exclusions.EffectiveSeeds = append(self.Exclusions.EffectiveSeeds, self.Facts.PublicPilotSeed)
+	op.Config.Exclusions = heldOutOpJson(t, filepath.Join(op.Root, "inputs", "fresh-exclusions.json"), self.Exclusions)
+	content, err := readHeldOutPinned(self.Facts.BridgeTemplate, op.Settings.MaximumBytes, false)
+	if err != nil || json.Unmarshal(content, &self.Template) != nil {
+		t.Fatal("synthetic old template unavailable", err)
+	}
+	self.Template.PatchPolicy.AllowedPaths = append([]string{}, self.Facts.NewAllowedPaths...)
+	op.Config.Template = heldOutOpJson(t, filepath.Join(op.Root, "inputs", "fresh-template.json"), self.Template)
+	op.Config.Protocol, op.Config.TwoBAddendum = heldOutProtocolFreshSingleB, nil
+	op.Config.PrivateRoot, op.Config.PublicPlanPath = self.Facts.PrivateRoot, self.Facts.PublicPlanPath
+	op.Config.FreshSingle = &heldOutFreshSinglePins{BridgeTemplate: self.Facts.BridgeTemplate, FailedResult: self.Facts.FailedResult}
+	op.Release.freshSingleFacts = &self.Facts
+	op.Settings, err = heldOutSettingsForProtocol(op.Config.Protocol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	self.Approval = heldOutFreshSingleApproval{Schema: 1, Kind: "sim-latency-held-out-fresh-single-owner-approval",
+		Protocol: op.Config.Protocol, ApprovedAt: time.Unix(1600000060, 0).UTC(), FailedResultSha256: self.Facts.FailedResult.Sha256,
+		PrivateRoot: self.Facts.PrivateRoot, PublicPlanPath: self.Facts.PublicPlanPath, FreshSeedCount: 1,
+		ControlReplicates: 9, CandidateReplicates: 9, ExecutionLimitSeconds: 10800, Alpha: .05, Margin: self.Facts.Margin,
+		FreshControlRequired: true, AllThreeRequired: true, RetainFailedScreen: true, SecondSeedUnstarted: true,
+		NoReplacement: true, PatchPolicyOnly: true, ActivationAuthorized: false}
+	op.Config.FreshSingle.Approval = heldOutOpJson(t, filepath.Join(op.Root, "inputs", "fresh-owner-approval.json"), self.Approval)
+	self.Declaration.Schema, self.Declaration.Kind, self.Declaration.Protocol = 1, "sim-latency-held-out-fresh-single-declaration", op.Config.Protocol
+	self.Declaration.BaseProtocol, self.Declaration.PublishedAt = calibrationProtocolThreeABridgeThreeB, time.Unix(1600000075, 0).UTC()
+	self.Declaration.FailedResult, self.Declaration.SelectedPublicPlan = self.Facts.FailedResult, self.Facts.SelectedPublicPlan
+	self.Declaration.OriginalPublicPlan, self.Declaration.OriginalPrivatePlan = self.Facts.OriginalPublicPlan, self.Facts.OriginalPrivatePlan
+	self.Declaration.OriginalReferences, self.Declaration.BridgeTemplate = self.Facts.OriginalReferences, self.Facts.BridgeTemplate
+	self.Declaration.PublicPilotSeed, self.Declaration.SeedCount, self.Declaration.RequiredOrderedSeeds = self.Facts.PublicPilotSeed, 1, 1
+	self.Declaration.ControlReplicates, self.Declaration.CandidateReplicates, self.Declaration.ExecutionLimitSeconds = 9, 9, 10800
+	self.Declaration.Alpha, self.Declaration.Margin = .05, self.Facts.Margin
+	self.Declaration.FreshControlRequired, self.Declaration.AllOutcomesRetained, self.Declaration.NoReplacement, self.Declaration.SecondSeedUnstarted = true, true, true, true
+	self.configureReferences(t)
+	self.refresh(t)
+	if _, err := self.authenticate(); err != nil {
+		t.Fatal("synthetic fresh composition rejected", err)
+	}
+	return self
+}
+
+// Semantic negatives deliberately repin administrative documents, not their meaning.
+func (self *heldOutFreshSingleFixture) refresh(t *testing.T) {
+	t.Helper()
+	op := self.Base.Preparation
+	d := &self.Declaration
+	d.ApprovalSha256, d.ReferenceTemplateSha256, d.ReferenceBundleSha256 = op.Config.FreshSingle.Approval.Sha256, op.Config.Template.Sha256, op.Config.References.Sha256
+	d.ExclusionsSha256, d.ReleaseSha256, d.SourceLockSha256 = op.Config.Exclusions.Sha256, op.Config.Amendment.Release.Sha256, op.Config.SourceLock.Sha256
+	op.Config.FreshSingle.Declaration = heldOutOpJson(t, filepath.Join(op.Root, "inputs", "fresh-declaration.json"), *d)
+	qualification := self.Base.Qualification
+	qualification.Protocol, qualification.ProtocolApprovalSha256 = op.Config.Protocol, d.ApprovalSha256
+	qualification.TwoBAddendumSha256 = ""
+	qualification.FreshSingleDeclarationSha256, qualification.PriorFailedResultSha256 = op.Config.FreshSingle.Declaration.Sha256, self.Facts.FailedResult.Sha256
+	op.Config.Qualification = heldOutOpJson(t, filepath.Join(op.Root, "inputs", "fresh-tool-qualification.json"), qualification)
+	op.refreshConfig(t)
+}
+
+// The complete ordinary native validator uses the existing explicit fixture contract.
+func (self *heldOutFreshSingleFixture) authenticate() (*heldOutPreparationInputs, error) {
+	self.Authentications++
+	op := self.Base.Preparation
+	return authenticateHeldOutPreparationWithContract(op.Config, op.Release, op.Settings, &self.Base.Contract)
+}
+
+// The producer's new first fence is exercised before any injected entropy read.
+func (self *heldOutFreshSingleFixture) prepare(t *testing.T) (*heldOutPrivatePlan, error) {
+	t.Helper()
+	op := self.Base.Preparation
+	inputs, err := self.authenticate()
+	if err != nil {
+		return nil, err
+	}
+	op.refreshConfig(t)
+	public, err := prepareHeldOutCampaign(t.Context(), op.Config, heldOutDigest(op.ConfigBytes), *inputs, op.Release, op.Settings, op.Hooks, func() error {
+		self.Rechecks++
+		if self.BeforeRecheck != nil {
+			self.BeforeRecheck()
+		}
+		again, err := self.authenticate()
+		if err != nil {
+			return err
+		}
+		if !reflect.DeepEqual(again, inputs) {
+			return errors.New("synthetic fresh inputs changed")
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	op.PrivatePin = heldOutPinnedFile{Path: filepath.Join(op.Config.PrivateRoot, "private-plan.json"), Sha256: public.PrivatePlanSha256}
+	content, err := os.ReadFile(op.Config.PublicPlanPath)
+	if err != nil {
+		return nil, err
+	}
+	op.PublicPin = heldOutPinnedFile{Path: op.Config.PublicPlanPath, Sha256: heldOutDigest(content)}
+	return verifyHeldOutPlanWithContract(op.PrivatePin, op.PublicPin, op.Release, op.Settings, &self.Base.Contract)
+}
+
+// Process hooks are the only substitutions: real journals, deadlines, baseline
+// authentication and the unchanged final acceptance reducer remain composed.
+func (self *heldOutFreshSingleFixture) execute(t *testing.T, plan *heldOutPrivatePlan) (*heldOutCampaignResult, *heldOutExecFixture, error) {
+	t.Helper()
+	op := self.Base.Preparation
+	verified, err := verifyHeldOutPlanWithContract(op.PrivatePin, op.PublicPin, op.Release, op.Settings, &self.Base.Contract)
+	if err != nil || !reflect.DeepEqual(plan, verified) {
+		return nil, nil, errors.Join(err, errors.New("synthetic fresh verification changed"))
+	}
+	fixture := &heldOutExecFixture{Preparation: op, Plan: verified, Clock: time.Now().UTC().Add(24 * time.Hour).Truncate(time.Second),
+		Controls: map[string]*heldOutFrozenControl{}, Config: heldOutExecutionConfig{Schema: 1, Kind: "sim-latency-held-out-execution", PrivatePlan: op.PrivatePin, PublicPlan: op.PublicPin}}
+	fixture.Config.Publication = heldOutOpJson(t, filepath.Join(op.Root, "synthetic-fresh-publication.json"), heldOutPublication{Schema: 1, Kind: "sim-latency-held-out-plan-publication",
+		PlanSha256: op.PublicPin.Sha256, PublishedAt: plan.PreparedAt.Add(time.Second), Commit: strings.Repeat("c", 40), Repository: op.Root,
+		PlanPath: "public/fresh-plan.json", RemoteRef: "refs/remotes/origin/synthetic", PulledPushed: true, Evidence: []heldOutPinnedFile{op.Config.FreshSingle.Declaration}})
+	fixture.Hooks = heldOutExecutionHooks{Now: func() time.Time { return fixture.Clock },
+		CheckHost: func(context.Context, heldOutPrivatePlan) (string, error) {
+			return heldOutDigest([]byte("synthetic unchanged inventory")), nil
+		},
+		Invoke: func(ctx context.Context, root string, start heldOutJobStart) error {
+			deadline, ok := ctx.Deadline()
+			if !ok || !deadline.Equal(start.Deadline) || start.Deadline.Sub(start.StartedAt) != 3*time.Hour {
+				return errors.New("synthetic fresh deadline changed")
+			}
+			fixture.Invocations = append(fixture.Invocations, start)
+			fixture.Clock = fixture.Clock.Add(2 * time.Second)
+			return writeHeldOutExclusive(filepath.Join(root, "manager-terminal.log"), []byte(fmt.Sprintf("start_utc=%s\ndeadline_utc=%s\nevaluator_exit=0 duration_seconds=2\nend_utc=%s\n", start.StartedAt.Format(time.RFC3339), start.Deadline.Format(time.RFC3339), fixture.Clock.Format(time.RFC3339))), 0600)
+		},
+		Authenticate: func(_ context.Context, _ heldOutPrivatePlan, round heldOutPrivateRound, job heldOutPlannedJob, _ heldOutRequest, control *heldOutFrozenControl) (heldOutJobOutcome, *heldOutFrozenControl, error) {
+			if control == nil {
+				control = newHeldOutExecControl(t, fixture, round, job)
+				fixture.Controls[round.Public.RoundId] = control
+			}
+			pValue := .5
+			outcome := heldOutJobOutcome{JobId: job.JobId, RoundId: round.Public.RoundId, Role: job.Role, Complete: true,
+				RawScore: map[string]float64{"better": 8, "no-op": 10, "worse": 12}[job.Role], Placeable: true,
+				Significance: &ScoreSignificance{OneSidedPValue: &pValue}, BaselineSha256: control.Baseline.Sha256}
+			for index := 0; index < plan.Policy.Replicates; index++ {
+				outcome.CandidateEvaluationIds = append(outcome.CandidateEvaluationIds, fmt.Sprintf("synthetic-fresh-%s-%02d", job.JobId, index))
+			}
+			return outcome, control, nil
+		}}
+	result, err := executeHeldOutCampaign(t.Context(), fixture.Config, *verified, op.Release, op.Settings, fixture.Hooks)
+	return result, fixture, err
+}
+
+// Only the explicitly named protocol selects one draw; old defaults are identical.
+func TestHeldOutFreshSingleCountDoesNotRewriteOldProtocols(t *testing.T) {
+	legacy, _ := heldOutSettingsForProtocol("")
+	for protocol, count := range map[string]int{"": 5, calibrationProtocolThreeABridgeThreeB: 3, heldOutProtocolThreeABridgeTwoB: 2, heldOutProtocolFreshSingleB: 1} {
+		settings, err := heldOutSettingsForProtocol(protocol)
+		if err != nil || settings.Workload.SeedCount != count {
+			t.Fatal("explicit protocol count changed", protocol, err)
+		}
+		settings.Workload.SeedCount = legacy.Workload.SeedCount
+		if !reflect.DeepEqual(settings, legacy) {
+			t.Fatal("a non-count setting changed")
+		}
+	}
+}
+
+// A complete composition uses all three newly policy-bound images, exactly one
+// native workload generation, one fresh control, and three append-only jobs.
+func TestHeldOutFreshSingleCompleteCompositionPreservesOldClaims(t *testing.T) {
+	legacy := newHeldOutTwoBCompositionFixture(t)
+	if legacy.ConstructorAuthentications != 1 || legacy.Preparation.ConstructorAuthentications != 1 ||
+		legacy.Entropy.Calls != 0 || legacy.Preparation.Generated != 0 {
+		t.Fatal("ordinary predecessor constructors lost their positive native authentication")
+	}
+	self := newHeldOutFreshSingleFixture(t)
+	op := self.Base.Preparation
+	if self.Authentications != 1 || self.Base.ConstructorAuthentications != 0 || op.ConstructorAuthentications != 0 {
+		t.Fatal("fresh constructor skipped final authentication or repeated predecessor checks")
+	}
+	oldStart, err := readHeldOutPinned(self.Declaration.OriginalExecutionStarted, op.Settings.MaximumBytes, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := self.prepare(t)
+	if err != nil || len(plan.Rounds) != 1 || op.Generated != 1 || self.Rechecks != 3 || self.Authentications != 5 {
+		t.Fatal("single-draw preparation failed", err)
+	}
+	content, err := os.ReadFile(op.PublicPin.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var public heldOutPublicPlan
+	if decodeHeldOutComplete(content, &public, "synthetic fresh public plan") != nil || public.Protocol != heldOutProtocolFreshSingleB ||
+		public.RequiredOrderedSeeds != 1 || public.FreshSingleDeclarationSha256 != op.Config.FreshSingle.Declaration.Sha256 ||
+		public.PriorFailedResultSha256 != self.Facts.FailedResult.Sha256 {
+		t.Fatal("public new-context lineage missing")
+	}
+	var private heldOutPrivatePlan
+	content, err = readHeldOutPinned(op.PrivatePin, op.Settings.MaximumBytes, true)
+	if err != nil || json.Unmarshal(content, &private) != nil {
+		t.Fatal("synthetic private plan unavailable", err)
+	}
+	if bytes.Contains(content, []byte("real production")) {
+		t.Fatal("fixture lost synthetic identity")
+	}
+	result, execution, err := self.execute(t, plan)
+	if err != nil || result == nil || !result.Complete || !result.Accepted || result.OrderedSeeds != 1 ||
+		len(execution.Invocations) != 3 || len(execution.Controls) != 1 {
+		t.Fatal("fresh composed execution failed", err)
+	}
+	baseline := ""
+	for _, outcome := range result.Outcomes {
+		if baseline == "" {
+			baseline = outcome.BaselineSha256
+		}
+		if outcome.BaselineSha256 != baseline || len(outcome.CandidateEvaluationIds) != 9 {
+			t.Fatal("fresh shared control census changed")
+		}
+	}
+	if _, err := executeHeldOutCampaign(t.Context(), execution.Config, *plan, op.Release, op.Settings, execution.Hooks); err == nil || len(execution.Invocations) != 3 {
+		t.Fatal("spent fresh campaign retried")
+	}
+	after, err := readHeldOutPinned(self.Declaration.OriginalExecutionStarted, op.Settings.MaximumBytes, true)
+	if err != nil || !bytes.Equal(oldStart, after) {
+		t.Fatal("old execution claim changed")
+	}
+	if _, err := authenticateHeldOutFreshSingle(op.Config, op.Release, op.Settings, &plan.Margin); err != nil {
+		t.Fatal("original second seed changed", err)
+	}
+}
+
+// A hidden draw is never replaced after an excluded workload or generator failure.
+func TestHeldOutFreshSingleGenerationFailureRetainsSpentNamespace(t *testing.T) {
+	for _, variant := range []string{"generator", "entropy", "excluded", "pre-entropy-mutation"} {
+		self := newHeldOutFreshSingleFixture(t)
+		op := self.Base.Preparation
+		switch variant {
+		case "generator":
+			op.Hooks.Generate = func(context.Context, string, model.CompetitionEvaluationPolicy, heldOutWorkloadSettings) (*heldOutGeneratedWorkload, error) {
+				op.Generated++
+				return nil, errors.New("synthetic generator refusal")
+			}
+		case "entropy":
+			op.Hooks.Entropy = bytes.NewReader(nil)
+		case "excluded":
+			raw, err := hex.DecodeString(self.Exclusions.PrivateSeedHexes[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			content := make([]byte, 16+len(raw))
+			copy(content[16:], raw)
+			self.Base.Entropy = &heldOutTwoBFixtureEntropy{Reader: bytes.NewReader(content)}
+			op.Hooks.Entropy = self.Base.Entropy
+		case "pre-entropy-mutation":
+			self.BeforeRecheck = func() { heldOutOpWrite(t, op.Config.FreshSingle.Approval.Path, []byte("{}")) }
+		}
+		if _, err := self.prepare(t); err == nil {
+			t.Fatal("synthetic failed preparation succeeded", variant)
+		}
+		if op.Generated > 1 {
+			t.Fatal("failed draw was resampled")
+		}
+		if variant == "pre-entropy-mutation" && (self.Base.Entropy.Calls != 0 || op.Generated != 0) {
+			t.Fatal("late authority mutation consumed entropy")
+		}
+		if _, err := os.Lstat(filepath.Join(op.Config.PrivateRoot, "preparation.started")); err != nil {
+			t.Fatal("spent preparation claim missing")
+		}
+		draws := self.Base.Entropy.Calls
+		if _, err := self.prepare(t); err == nil || self.Base.Entropy.Calls != draws {
+			t.Fatal("failed preparation retried entropy")
+		}
+	}
+}
+
+// All request fields except the exact two-path legacy policy remain immutable.
+func TestHeldOutFreshSingleTemplateProjectionRejectsEveryOtherField(t *testing.T) {
+	self := newHeldOutFreshSingleFixture(t)
+	op := self.Base.Preparation
+	content, err := readHeldOutPinned(self.Facts.BridgeTemplate, op.Settings.MaximumBytes, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var original heldOutRequest
+	if json.Unmarshal(content, &original) != nil {
+		t.Fatal("synthetic original template unavailable")
+	}
+	if err := validateHeldOutFreshSingleTemplate(original, self.Template, self.Facts); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < reflect.TypeOf(self.Template).NumField(); index++ {
+		name := reflect.TypeOf(self.Template).Field(index).Name
+		if name == "PatchPolicy" {
+			continue
+		}
+		changed := self.Template
+		field := reflect.ValueOf(&changed).Elem().Field(index)
+		switch field.Kind() {
+		case reflect.String:
+			field.SetString(field.String() + "-synthetic-change")
+		case reflect.Int:
+			field.SetInt(field.Int() + 1)
+		case reflect.Struct:
+			changed.EvaluationPolicy.Replicates++
+		default:
+			t.Fatal("uncovered request field kind", name)
+		}
+		if validateHeldOutFreshSingleTemplate(original, changed, self.Facts) == nil {
+			t.Fatal("non-policy field projected away", name)
+		}
+	}
+	for _, mutate := range []func(*model.CompetitionPatchPolicy){
+		func(policy *model.CompetitionPatchPolicy) { policy.PathBase = "mono_root_v1" },
+		func(policy *model.CompetitionPatchPolicy) { policy.MaxPatchBytes++ },
+		func(policy *model.CompetitionPatchPolicy) {
+			policy.AllowedPaths = []string{"synthetic/transport.go", "synthetic/reference.go"}
+		},
+		func(policy *model.CompetitionPatchPolicy) {
+			policy.AllowedPaths = append(policy.AllowedPaths, "synthetic/third.go")
+		},
+		func(policy *model.CompetitionPatchPolicy) { policy.ForbiddenPaths = []string{} },
+	} {
+		changed := self.Template
+		mutate(&changed.PatchPolicy)
+		if validateHeldOutFreshSingleTemplate(original, changed, self.Facts) == nil {
+			t.Fatal("policy expanded beyond exact approved projection")
+		}
+	}
+}
+
+// The scored policy bytes are an independent jq -S vector, not struct field
+// order. Rehashed authored bytes or native cache tuples cannot authorize a draw.
+func TestHeldOutFreshSingleCanonicalPolicyFileBindsScoredNativeImages(t *testing.T) {
+	policy := model.CompetitionPatchPolicy{MaxPatchBytes: 262144,
+		AllowedPaths:   []string{"connect/resident_contract_manager.go", "connect/transport.go"},
+		ForbiddenPaths: []string{"connect/sim-latency/**", "stats/**", "db_migrations.go", "db_migrations_*.go", "go.mod", "go.sum", "vendor/**", ".github/**"}}
+	want := []byte(`{
+  "allowed_paths": [
+    "connect/resident_contract_manager.go",
+    "connect/transport.go"
+  ],
+  "forbidden_paths": [
+    "connect/sim-latency/**",
+    "stats/**",
+    "db_migrations.go",
+    "db_migrations_*.go",
+    "go.mod",
+    "go.sum",
+    "vendor/**",
+    ".github/**"
+  ],
+  "max_patch_bytes": 262144
+}
+`)
+	content, err := heldOutFreshSinglePatchPolicyBytes(policy)
+	if err != nil || !bytes.Equal(content, want) || heldOutDigest(content) != "25e9c5b89041f35607b3a9542d13abd2649a9e99b804f59791780af19ab97861" {
+		t.Fatal("canonical policy differs from independent scored jq vector", err)
+	}
+	policy = model.CompetitionPatchPolicy{PathBase: "mono_root_v1", MaxPatchBytes: 262144,
+		AllowedPaths:   []string{"synthetic/<&>.go", "synthetic/π.go", "synthetic/\u2028.go", "synthetic/\u2029.go", `synthetic/\u2028.go`, "synthetic/quote\".go", "synthetic/back\\slash.go", "synthetic/tab\t.go"},
+		ForbiddenPaths: []string{}}
+	want = []byte(`{
+  "allowed_paths": [
+    "synthetic/<&>.go",
+    "synthetic/π.go",
+    "synthetic/` + "\u2028" + `.go",
+    "synthetic/` + "\u2029" + `.go",
+    "synthetic/\\u2028.go",
+    "synthetic/quote\".go",
+    "synthetic/back\\slash.go",
+    "synthetic/tab\t.go"
+  ],
+  "forbidden_paths": [],
+  "max_patch_bytes": 262144,
+  "path_base": "mono_root_v1"
+}
+`)
+	content, err = heldOutFreshSinglePatchPolicyBytes(policy)
+	if err != nil || !bytes.Equal(content, want) {
+		t.Fatal("policy arrays, optional path base or JSON escaping changed", err)
+	}
+	for _, variant := range []string{"authored-file", "authored-complete-tuple", "native-policy", "native-image-key"} {
+		self := newHeldOutFreshSingleFixture(t)
+		op := self.Base.Preparation
+		authored, err := json.MarshalIndent(self.Template.PatchPolicy, "", "  ")
+		if err != nil {
+			t.Fatal(err)
+		}
+		authored = append(authored, '\n')
+		canonical, err := readHeldOutPinned(self.Declaration.ReferencePolicy, op.Settings.MaximumBytes, false)
+		if err != nil || bytes.Equal(authored, canonical) || heldOutDigest(canonical) != self.Declaration.ReferencePolicySha256 {
+			t.Fatal("synthetic authored/scored policy distinction lost", err)
+		}
+		authoredSha256 := heldOutDigest(authored)
+		if strings.HasPrefix(variant, "authored-") {
+			self.Declaration.ReferencePolicy = heldOutOpWrite(t, self.Declaration.ReferencePolicy.Path, authored)
+			if variant == "authored-complete-tuple" {
+				self.Declaration.ReferencePolicySha256 = authoredSha256
+			}
+		}
+		for index := range self.References {
+			reference := &self.References[index]
+			content, err := readHeldOutPinned(reference.NativeBuild, op.Settings.MaximumBytes, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var build heldOutNativeBuild
+			if json.Unmarshal(content, &build) != nil || build.PolicySha256 != heldOutDigest(canonical) ||
+				build.ImageKey != heldOutDigest([]byte(strings.Join([]string{build.BaseImageId, build.PatchSha256, build.PolicySha256, build.BuilderSha256}, "\x00"))) {
+				t.Fatal("positive fixture native policy/key was not actually bound")
+			}
+			if variant == "authored-complete-tuple" || variant == "native-policy" && reference.Role == "worse" {
+				build.PolicySha256 = authoredSha256
+				build.ImageKey = heldOutDigest([]byte(strings.Join([]string{build.BaseImageId, build.PatchSha256, build.PolicySha256, build.BuilderSha256}, "\x00")))
+				build.Image = "urnetwork/sim-latency-submission:" + build.ImageKey[:32]
+				reference.NativeBuild = heldOutOpJson(t, reference.NativeBuild.Path, build)
+			}
+			if variant == "native-image-key" && reference.Role == "worse" {
+				build.ImageKey = strings.Repeat("e", 64)
+				build.Image = "urnetwork/sim-latency-submission:" + build.ImageKey[:32]
+				reference.NativeBuild = heldOutOpJson(t, reference.NativeBuild.Path, build)
+			}
+		}
+		op.Config.References = heldOutOpJson(t, op.Config.References.Path, self.References)
+		self.refresh(t)
+		_, err = self.prepare(t)
+		if err == nil || self.Base.Entropy.Calls != 0 || op.Generated != 0 || self.Authentications != 2 {
+			t.Fatal("noncanonical policy/key reached entropy or bypassed authentication", variant, err)
+		}
+		if strings.HasPrefix(variant, "authored-") && !strings.Contains(err.Error(), "canonical") {
+			t.Fatal("authored policy failed outside the explicit scored-byte guard", variant, err)
+		}
+		if _, err := os.Lstat(op.Config.PrivateRoot); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("noncanonical policy/key claimed preparation")
+		}
+	}
+}
+
+// Rehashing changed declaration values does not turn an unapproved scope into authority.
+func TestHeldOutFreshSingleDeclarationMutationsRefuseBeforeEntropy(t *testing.T) {
+	mutations := []func(*heldOutFreshSingleFixture){
+		func(self *heldOutFreshSingleFixture) { self.Declaration.SeedCount = 2 },
+		func(self *heldOutFreshSingleFixture) { self.Declaration.RequiredOrderedSeeds = 0 },
+		func(self *heldOutFreshSingleFixture) { self.Declaration.ControlReplicates = 1 },
+		func(self *heldOutFreshSingleFixture) { self.Declaration.CandidateReplicates = 1 },
+		func(self *heldOutFreshSingleFixture) { self.Declaration.ExecutionLimitSeconds++ },
+		func(self *heldOutFreshSingleFixture) { self.Declaration.Alpha = .5 },
+		func(self *heldOutFreshSingleFixture) { self.Declaration.Margin = 0 },
+		func(self *heldOutFreshSingleFixture) { self.Declaration.FreshControlRequired = false },
+		func(self *heldOutFreshSingleFixture) { self.Declaration.AllOutcomesRetained = false },
+		func(self *heldOutFreshSingleFixture) { self.Declaration.NoReplacement = false },
+		func(self *heldOutFreshSingleFixture) { self.Declaration.SecondSeedUnstarted = false },
+		func(self *heldOutFreshSingleFixture) { self.Declaration.FailedResult.Sha256 = strings.Repeat("e", 64) },
+		func(self *heldOutFreshSingleFixture) {
+			self.Declaration.OriginalPrivatePlan.Sha256 = strings.Repeat("e", 64)
+		},
+		func(self *heldOutFreshSingleFixture) { self.Declaration.PublicPilotSeed++ },
+		func(self *heldOutFreshSingleFixture) {
+			self.Declaration.ReferencePolicySha256 = strings.Repeat("e", 64)
+		},
+	}
+	for index, mutate := range mutations {
+		self := newHeldOutFreshSingleFixture(t)
+		mutate(self)
+		self.refresh(t)
+		if _, err := self.prepare(t); err == nil || self.Base.Entropy.Calls != 0 || self.Base.Preparation.Generated != 0 {
+			t.Fatalf("changed declaration reached entropy at case %d", index)
+		}
+	}
+}
+
+// Typed owner authority cannot be substituted with a hash-matching permissive flag.
+func TestHeldOutFreshSingleOwnerApprovalMutationsRefuse(t *testing.T) {
+	for _, mutate := range []func(*heldOutFreshSingleApproval){
+		func(approval *heldOutFreshSingleApproval) { approval.FreshControlRequired = false },
+		func(approval *heldOutFreshSingleApproval) { approval.RetainFailedScreen = false },
+		func(approval *heldOutFreshSingleApproval) { approval.SecondSeedUnstarted = false },
+		func(approval *heldOutFreshSingleApproval) { approval.ActivationAuthorized = true },
+		func(approval *heldOutFreshSingleApproval) { approval.PrivateRoot += "-other" },
+		func(approval *heldOutFreshSingleApproval) { approval.FailedResultSha256 = strings.Repeat("e", 64) },
+	} {
+		self := newHeldOutFreshSingleFixture(t)
+		op := self.Base.Preparation
+		mutate(&self.Approval)
+		op.Config.FreshSingle.Approval = heldOutOpJson(t, op.Config.FreshSingle.Approval.Path, self.Approval)
+		self.refresh(t)
+		if _, err := self.prepare(t); err == nil || self.Base.Entropy.Calls != 0 {
+			t.Fatal("changed owner authority reached entropy")
+		}
+	}
+}
+
+// The old second seed cannot be measured or silently contain runtime output.
+func TestHeldOutFreshSingleRefusesOldSecondSeedRuntimeState(t *testing.T) {
+	self := newHeldOutFreshSingleFixture(t)
+	content, err := readHeldOutPinned(self.Facts.OriginalPublicPlan, self.Base.Preparation.Settings.MaximumBytes, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var original heldOutPublicPlan
+	if json.Unmarshal(content, &original) != nil {
+		t.Fatal("synthetic original public plan unavailable")
+	}
+	round := original.Rounds[1]
+	jobRoot := heldOutJobRoot(self.Facts.OriginalRoot, round, round.Jobs[0])
+	heldOutOpWrite(t, filepath.Join(jobRoot, "started.json"), []byte("{\"synthetic\":\"forbidden second-seed start\"}\n"))
+	if _, err := self.prepare(t); err == nil || self.Base.Entropy.Calls != 0 {
+		t.Fatal("started old second seed admitted a new draw")
+	}
+}
+
+// An omitted public pilot, old image policy, or inherited worse-direction label
+// cannot pass the same pre-entropy native reference admission body.
+func TestHeldOutFreshSingleReferenceAndPilotPinsRefuse(t *testing.T) {
+	for _, variant := range []string{"pilot-plan", "pilot-publication", "old-policy", "unchanged-worse", "changed-better", "unmeasured-worse"} {
+		self := newHeldOutFreshSingleFixture(t)
+		op := self.Base.Preparation
+		switch variant {
+		case "pilot-plan":
+			heldOutOpWrite(t, self.Declaration.RegressionPilotPlan.Path, []byte("{}"))
+		case "pilot-publication":
+			heldOutOpWrite(t, self.Declaration.RegressionPilotPublication.Path, []byte("{}"))
+		default:
+			for index := range self.References {
+				reference := &self.References[index]
+				if variant == "changed-better" && reference.Role == "better" {
+					reference.Patch = heldOutOpWrite(t, filepath.Join(op.Root, "synthetic-changed-better.patch"), []byte("synthetic forbidden better change"))
+				}
+				if reference.Role != "worse" {
+					continue
+				}
+				if variant == "unchanged-worse" {
+					content, _ := readHeldOutPinned(self.Facts.OriginalReferences, op.Settings.MaximumBytes, false)
+					var prior []heldOutReference
+					_ = json.Unmarshal(content, &prior)
+					for _, old := range prior {
+						if old.Role == "worse" {
+							reference.Patch = old.Patch
+						}
+					}
+				}
+				if variant == "old-policy" {
+					content, _ := readHeldOutPinned(reference.NativeBuild, op.Settings.MaximumBytes, false)
+					var build heldOutNativeBuild
+					_ = json.Unmarshal(content, &build)
+					build.PolicySha256 = strings.Repeat("e", 64)
+					build.ImageKey = heldOutDigest([]byte(strings.Join([]string{build.BaseImageId, build.PatchSha256, build.PolicySha256, build.BuilderSha256}, "\x00")))
+					build.Image = "urnetwork/sim-latency-submission:" + build.ImageKey[:32]
+					reference.NativeBuild = heldOutOpJson(t, reference.NativeBuild.Path, build)
+				}
+				if variant == "unmeasured-worse" {
+					content, _ := readHeldOutPinned(reference.Direction, op.Settings.MaximumBytes, false)
+					var receipt heldOutReferenceQualification
+					_ = json.Unmarshal(content, &receipt)
+					receipt.Direction, receipt.ExpectedDirection, receipt.EvidenceBasis = "", "slower", "synthetic-unmeasured-hypothesis"
+					reference.Direction = heldOutOpJson(t, reference.Direction.Path, receipt)
+				}
+			}
+			op.Config.References = heldOutOpJson(t, op.Config.References.Path, self.References)
+			self.refresh(t)
+		}
+		if _, err := self.prepare(t); err == nil || self.Base.Entropy.Calls != 0 {
+			t.Fatal("invalid reference/pilot reached hidden entropy", variant)
+		}
+	}
+}
+
+// The published-pilot integer is checked against raw and effective original
+// derivations; a collision returns failure rather than changing either seed.
+func TestHeldOutFreshSinglePublicPilotCollisionChecksAllRepresentations(t *testing.T) {
+	self := newHeldOutFreshSingleFixture(t)
+	catalog := self.Exclusions
+	catalog.EffectiveSeeds = nil
+	for _, seed := range self.Exclusions.EffectiveSeeds {
+		if seed != self.Facts.PublicPilotSeed {
+			catalog.EffectiveSeeds = append(catalog.EffectiveSeeds, seed)
+		}
+	}
+	if err := validateHeldOutFreshSinglePublicPilotSeed(catalog, self.Facts); err != nil {
+		t.Fatal(err)
+	}
+	catalog.EffectiveSeeds = append(catalog.EffectiveSeeds, self.Facts.PublicPilotSeed)
+	if validateHeldOutFreshSinglePublicPilotSeed(catalog, self.Facts) == nil {
+		t.Fatal("effective pilot collision accepted")
+	}
+	catalog.EffectiveSeeds = nil
+	facts := self.Facts
+	var err error
+	facts.PublicPilotSeed, err = heldOutEffectiveSeed(catalog.PrivateSeedHexes[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if validateHeldOutFreshSinglePublicPilotSeed(catalog, facts) == nil {
+		t.Fatal("raw private derivation collision accepted")
+	}
+	catalog.PrivateSeedHexes = nil
+	catalog.Sources = nil
+	if validateHeldOutFreshSinglePublicPilotSeed(catalog, self.Facts) == nil {
+		t.Fatal("missing both original seeds accepted")
+	}
+}
+
+// The after-pilot exclusion gate requires the immutable original private plan
+// source as well as the now-retired fixed public pilot integer.
+func TestHeldOutFreshSingleAfterPilotExclusionsCannotOmitEitherSource(t *testing.T) {
+	self := newHeldOutFreshSingleFixture(t)
+	op := self.Base.Preparation
+	for _, variant := range []string{"original", "pilot"} {
+		catalog := self.Exclusions
+		if variant == "original" {
+			catalog.Sources = nil
+		} else {
+			catalog.EffectiveSeeds = nil
+		}
+		if validateHeldOutFreshSingleExclusions(op.Config, catalog, op.Release) == nil {
+			t.Fatal("incomplete post-pilot exclusions accepted", variant)
+		}
+	}
+}
+
+// All old negative acceptance cases remain failures, without adding a better
+// significance/takeover requirement or relaxing the frozen no-op rule.
+func TestHeldOutFreshSingleAcceptanceReusesEveryFrozenNegative(t *testing.T) {
+	rounds, outcomes := newHeldOutAmendedOutcomes(1)
+	if accepted, ordered, _ := acceptHeldOutOutcomesForProtocol(heldOutProtocolFreshSingleB, rounds, outcomes); !accepted || ordered != 1 {
+		t.Fatal("complete frozen single screen rejected")
+	}
+	mutations := []func([]heldOutJobOutcome){
+		func(outcomes []heldOutJobOutcome) { outcomes[0].RawScore = 15 },
+		func(outcomes []heldOutJobOutcome) { outcomes[1].Placeable = false },
+		func(outcomes []heldOutJobOutcome) { outcomes[1].TakeoverEligible = true },
+		func(outcomes []heldOutJobOutcome) { outcomes[2].Complete = false },
+		func(outcomes []heldOutJobOutcome) { outcomes[2].FailureCode = "synthetic_failure" },
+		func(outcomes []heldOutJobOutcome) { outcomes[2].Significance = nil },
+		func(outcomes []heldOutJobOutcome) {
+			p := math.NaN()
+			outcomes[2].Significance = &ScoreSignificance{OneSidedPValue: &p}
+		},
+		func(outcomes []heldOutJobOutcome) {
+			p := 1.1
+			outcomes[2].Significance = &ScoreSignificance{OneSidedPValue: &p}
+		},
+		func(outcomes []heldOutJobOutcome) { outcomes[2].JobId = "synthetic-wrong-job" },
+	}
+	for _, mutate := range mutations {
+		changed := append([]heldOutJobOutcome{}, outcomes...)
+		mutate(changed)
+		if accepted, _, _ := acceptHeldOutOutcomesForProtocol(heldOutProtocolFreshSingleB, rounds, changed); accepted {
+			t.Fatal("frozen negative accepted")
+		}
+	}
+	for _, protocol := range []string{"", calibrationProtocolThreeABridgeThreeB, heldOutProtocolThreeABridgeTwoB} {
+		if accepted, _, _ := acceptHeldOutOutcomesForProtocol(protocol, rounds, outcomes); accepted {
+			t.Fatal("new count leaked into old protocol")
+		}
+	}
+	if accepted, _, _ := acceptHeldOutOutcomesForProtocol(heldOutProtocolFreshSingleB, rounds, outcomes[:2]); accepted {
+		t.Fatal("missing reference accepted")
+	}
+	two, twoOutcomes := newHeldOutAmendedOutcomes(2)
+	if accepted, _, _ := acceptHeldOutOutcomesForProtocol(heldOutProtocolFreshSingleB, two, twoOutcomes); accepted {
+		t.Fatal("second fresh seed silently discarded")
+	}
+}
+
+// New policy projection is unavailable under every old selector and commitment codec.
+func TestHeldOutFreshSingleMetadataCannotAlterHistoricalProtocols(t *testing.T) {
+	self := newHeldOutFreshSingleFixture(t)
+	op := self.Base.Preparation
+	for _, protocol := range []string{"", calibrationProtocolThreeABridgeThreeB, heldOutProtocolThreeABridgeTwoB, heldOutProtocolFirstCommittedB} {
+		config := op.Config
+		config.Protocol = protocol
+		if _, err := heldOutBaseProvenanceConfiguration(config); err == nil {
+			t.Fatal("fresh projection leaked into old protocol")
+		}
+	}
+	base, err := heldOutBaseProvenanceConfiguration(op.Config)
+	if err != nil || base.FreshSingle != nil || base.TwoBAddendum != nil || base.Protocol != calibrationProtocolThreeABridgeThreeB || base.Template != self.Facts.BridgeTemplate {
+		t.Fatal("historical base facts were relabeled", err)
+	}
+	content, err := json.Marshal(heldOutToolQualification{Schema: 1})
+	if err != nil || bytes.Contains(content, []byte("fresh_single")) || bytes.Contains(content, []byte("prior_failed_result")) {
+		t.Fatal("legacy codec gained new fields")
+	}
+	content, err = json.Marshal(heldOutPreparationConfig{Schema: 1})
+	if err != nil || bytes.Contains(content, []byte("fresh_single")) {
+		t.Fatal("legacy configuration gained fresh fields")
+	}
+}
+
+// Only a read-only memory invocation is reachable, and its returned exact
+// management/evaluation/evidence/reserve numbers are authenticated before work.
+func TestHeldOutFreshSingleMemoryGuardCannotApplyRecoveryOrAcceptSmallScope(t *testing.T) {
+	self := newHeldOutFreshSingleFixture(t)
+	op := self.Base.Preparation
+	calls := 0
+	command := func(_ context.Context, program string, args ...string) ([]byte, error) {
+		calls++
+		if program != self.Facts.MemoryExecutable.Path || !reflect.DeepEqual(args, []string{"-memory-preflight-only", "-config", self.Facts.MemoryConfig.Path, "-config-sha256", self.Facts.MemoryConfig.Sha256}) {
+			return nil, errors.New("synthetic memory command changed")
+		}
+		return json.Marshal(map[string]any{"mode": "memory-preflight-only", "required_management_bytes": 8 * 1024 * 1024 * 1024,
+			"evaluation_limit_bytes": 96 * 1024 * 1024 * 1024, "evidence_limit_bytes": 5 * 1024 * 1024 * 1024, "management_reserve_bytes": 24 * 1024 * 1024 * 1024})
+	}
+	if err := preflightHeldOutFreshSingleMemory(t.Context(), op.Config, op.Release, op.Settings, command); err != nil || calls != 1 {
+		t.Fatal("exact synthetic memory guard rejected", err)
+	}
+	if err := preflightHeldOutFreshSingleMemory(t.Context(), op.Config, op.Release, op.Settings, func(context.Context, string, ...string) ([]byte, error) {
+		return nil, errors.New("synthetic three-gibibyte cgroup refusal")
+	}); err == nil {
+		t.Fatal("small memory scope accepted")
+	}
+	if self.Base.Entropy.Calls != 0 || op.Generated != 0 {
+		t.Fatal("memory preflight consumed entropy")
+	}
+}
+
+// The actual read-only command core consumes a complete before-pilot catalog;
+// the completed pilot's later catalog deliberately refuses reuse as a new pilot.
+func TestHeldOutFreshSinglePublicPilotPreflightIsReadOnlyAndSinglePurpose(t *testing.T) {
+	self := newHeldOutFreshSingleFixture(t)
+	op := self.Base.Preparation
+	before := self.Exclusions
+	before.EffectiveSeeds = nil
+	for _, seed := range self.Exclusions.EffectiveSeeds {
+		if seed != self.Facts.PublicPilotSeed {
+			before.EffectiveSeeds = append(before.EffectiveSeeds, seed)
+		}
+	}
+	before.Sources = nil
+	for _, pin := range self.Exclusions.Sources {
+		if pin != self.Declaration.RegressionPilotPlan {
+			before.Sources = append(before.Sources, pin)
+		}
+	}
+	config := heldOutFreshSinglePilotPreflightConfig{Schema: 1, Kind: "sim-latency-held-out-fresh-single-public-pilot-preflight",
+		Protocol: heldOutProtocolFreshSingleB, Approval: op.Config.FreshSingle.Approval,
+		Exclusions: heldOutOpJson(t, filepath.Join(op.Root, "inputs", "before-public-pilot-exclusions.json"), before), PublicSeed: self.Facts.PublicPilotSeed}
+	if err := verifyHeldOutFreshSinglePublicPilot(config, op.Release, op.Settings); err != nil {
+		t.Fatal("synthetic public preflight refused", err)
+	}
+	config.Exclusions = op.Config.Exclusions
+	if verifyHeldOutFreshSinglePublicPilot(config, op.Release, op.Settings) == nil {
+		t.Fatal("already retired public pilot silently admitted again")
+	}
+	if self.Base.Entropy.Calls != 0 || op.Generated != 0 {
+		t.Fatal("read-only public pilot preflight consumed hidden entropy")
+	}
+	if _, err := os.Lstat(op.Config.PrivateRoot); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("read-only public pilot preflight created a campaign")
+	}
+}
+
+// New baseline files cannot be prepopulated from the failed campaign or pilot.
+func TestHeldOutFreshSinglePrepopulatedBaselineRefusesBeforeExecutionClaim(t *testing.T) {
+	self := newHeldOutFreshSingleFixture(t)
+	op := self.Base.Preparation
+	plan, err := self.prepare(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := plan.Rounds[0].Public.Jobs[0]
+	artifacts := filepath.Join(heldOutJobRoot(op.Config.PrivateRoot, plan.Rounds[0].Public, first), "artifacts")
+	heldOutOpWrite(t, filepath.Join(artifacts, "round-baseline.json"), []byte("{\"synthetic\":\"forbidden old or pilot baseline\"}\n"))
+	result, execution, err := self.execute(t, plan)
+	if err == nil || !strings.Contains(err.Error(), "fresh job has runtime or non-precommitted artifacts") ||
+		result != nil || execution == nil || len(execution.Invocations) != 0 {
+		t.Fatal("prepopulated baseline reached a new invocation", err)
+	}
+	if _, err := os.Lstat(filepath.Join(op.Config.PrivateRoot, "execution.started.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("baseline refusal claimed execution")
+	}
+}
+
+// Hash-correct measured labels must retain both precise publication evidence pins.
+func TestHeldOutFreshSingleMeasuredDirectionCannotOmitPilotPublication(t *testing.T) {
+	self := newHeldOutFreshSingleFixture(t)
+	op := self.Base.Preparation
+	for index := range self.References {
+		reference := &self.References[index]
+		if reference.Role != "worse" {
+			continue
+		}
+		content, err := readHeldOutPinned(reference.Direction, op.Settings.MaximumBytes, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var receipt heldOutReferenceQualification
+		if json.Unmarshal(content, &receipt) != nil {
+			t.Fatal("synthetic measured direction unavailable")
+		}
+		kept := []heldOutPinnedFile{}
+		for _, pin := range receipt.Evidence {
+			if pin != self.Declaration.RegressionPilotPublication {
+				kept = append(kept, pin)
+			}
+		}
+		receipt.Evidence = kept
+		reference.Direction = heldOutOpJson(t, reference.Direction.Path, receipt)
+	}
+	op.Config.References = heldOutOpJson(t, op.Config.References.Path, self.References)
+	self.refresh(t)
+	if _, err := self.prepare(t); err == nil || self.Base.Entropy.Calls != 0 {
+		t.Fatal("unpublished regression pilot admitted hidden entropy")
+	}
+}
+
+// A receipt for another declaration cannot qualify this exact executable context.
+func TestHeldOutFreshSingleQualificationContextMutationRefuses(t *testing.T) {
+	for _, variant := range []string{"declaration", "actual-executable-digest"} {
+		self := newHeldOutFreshSingleFixture(t)
+		op := self.Base.Preparation
+		content, err := readHeldOutPinned(op.Config.Qualification, op.Settings.MaximumBytes, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var qualification heldOutToolQualification
+		if json.Unmarshal(content, &qualification) != nil {
+			t.Fatal("synthetic qualifier unavailable")
+		}
+		if variant == "declaration" {
+			qualification.FreshSingleDeclarationSha256 = strings.Repeat("e", 64)
+		} else {
+			qualification.BinarySha256 = strings.Repeat("e", 64)
+		}
+		op.Config.Qualification = heldOutOpJson(t, op.Config.Qualification.Path, qualification)
+		op.refreshConfig(t)
+		_, err = self.prepare(t)
+		if err == nil || self.Base.Entropy.Calls != 0 || op.Generated != 0 || self.Authentications != 2 {
+			t.Fatal("changed qualification reached entropy or bypassed full authentication", variant, err)
+		}
+		if variant == "actual-executable-digest" && !strings.Contains(err.Error(), "operator executable differs from qualification") {
+			t.Fatal("fixture receipt cache bypassed the actual production ELF digest verifier", err)
+		}
+	}
+}
+
+// Future authority cannot consume even a campaign-identity draw before refusal.
+func TestHeldOutFreshSingleFutureAuthorityRefusesBeforeEntropy(t *testing.T) {
+	for _, variant := range []string{"approval", "declaration"} {
+		self := newHeldOutFreshSingleFixture(t)
+		op := self.Base.Preparation
+		future := time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC)
+		if variant == "approval" {
+			self.Approval.ApprovedAt = future
+			op.Config.FreshSingle.Approval = heldOutOpJson(t, op.Config.FreshSingle.Approval.Path, self.Approval)
+		} else {
+			self.Declaration.PublishedAt = future
+		}
+		self.refresh(t)
+		if _, err := self.prepare(t); err == nil || self.Base.Entropy.Calls != 0 {
+			t.Fatal("future authority consumed entropy", variant)
+		}
+	}
+}
+
+// A canceled preparation has no entropy owner; cancellation after durable claim
+// leaves the spent namespace but cannot proceed to ids or a hidden seed.
+func TestHeldOutFreshSingleCanceledPreparationStopsAtBothPreEntropyBoundaries(t *testing.T) {
+	for _, variant := range []string{"initial", "after-recheck"} {
+		self := newHeldOutFreshSingleFixture(t)
+		op := self.Base.Preparation
+		inputs, err := self.authenticate()
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		if variant == "initial" {
+			cancel()
+		}
+		_, err = prepareHeldOutCampaign(ctx, op.Config, heldOutDigest(op.ConfigBytes), *inputs, op.Release, op.Settings, op.Hooks, func() error {
+			if variant == "after-recheck" {
+				cancel()
+			}
+			return nil
+		})
+		cancel()
+		if err == nil || self.Base.Entropy.Calls != 0 || op.Generated != 0 {
+			t.Fatal("canceled preparation consumed entropy", variant)
+		}
+		_, statErr := os.Lstat(op.Config.PrivateRoot)
+		if variant == "initial" && !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatal("initially canceled preparation created a namespace")
+		}
+		if variant == "after-recheck" && statErr != nil {
+			t.Fatal("canceled claimed preparation lost its evidence")
+		}
+	}
+}
+
+// Rehashed synthetic lineage cannot substitute another campaign's failed result
+// or public plan while preserving the rest of the independently pinned context.
+func TestHeldOutFreshSingleCampaignIdentityMismatchRefusesBeforeEntropy(t *testing.T) {
+	for _, variant := range []string{"result", "public-plan"} {
+		self := newHeldOutFreshSingleFixture(t)
+		op := self.Base.Preparation
+		switch variant {
+		case "result":
+			content, err := readHeldOutPinned(self.Facts.FailedResult, op.Settings.MaximumBytes, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var result heldOutCampaignResult
+			if json.Unmarshal(content, &result) != nil {
+				t.Fatal("synthetic failed result unavailable")
+			}
+			result.CampaignId = heldOutOpId(9501)
+			self.Facts.FailedResult = heldOutOpJson(t, self.Facts.FailedResult.Path, result)
+			op.Config.FreshSingle.FailedResult, self.Declaration.FailedResult = self.Facts.FailedResult, self.Facts.FailedResult
+			self.Approval.FailedResultSha256 = self.Facts.FailedResult.Sha256
+			op.Config.FreshSingle.Approval = heldOutOpJson(t, op.Config.FreshSingle.Approval.Path, self.Approval)
+		case "public-plan":
+			content, err := readHeldOutPinned(self.Facts.OriginalPublicPlan, op.Settings.MaximumBytes, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var public heldOutPublicPlan
+			if json.Unmarshal(content, &public) != nil {
+				t.Fatal("synthetic original public plan unavailable")
+			}
+			public.CampaignId = heldOutOpId(9502)
+			self.Facts.OriginalPublicPlan = heldOutOpJson(t, self.Facts.OriginalPublicPlan.Path, public)
+			self.Declaration.OriginalPublicPlan = self.Facts.OriginalPublicPlan
+		}
+		self.refresh(t)
+		if _, err := self.prepare(t); err == nil || !strings.Contains(err.Error(), "failed first-seed lineage") ||
+			self.Base.Entropy.Calls != 0 || op.Generated != 0 {
+			t.Fatal("another campaign's lineage consumed entropy", variant, err)
+		}
+	}
+}

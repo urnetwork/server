@@ -4,14 +4,17 @@ The new [archive package](retained-archive/README.md) passed independent Sol 6.1
 low qualification: **27 tests in each of three consecutive offline race-enabled
 passes**, 81 test passes total, zero skips and zero failures. Independent Sol 6.1
 max source reviews are complete with no remaining blocking finding in this scope.
-This qualifies synthetic unit behavior only; live archive operation remains
-unqualified and no calibration or launch acceptance is claimed.
+This qualifies synthetic unit behavior only. The subsequent pinned native build
+and three authorized source-version retention/readback operations have a
+[separate scoped record](FIRST-COMMITTED-ARCHIVE-RETENTION-2026-10-28.md);
+no calibration or launch acceptance is claimed.
 
 ## Actual execution and retained evidence
 
 The test runner used UID 1000, the exact cached Go 1.27.3 toolchain at
 `/home/by/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.27.3.linux-amd64/bin/go`,
-CPU affinity 20,22, two-way Go build concurrency and a 2 GiB memory bound. Each
+CPU affinity 20,22, two-way Go build concurrency and `GOMEMLIMIT=2GiB`, a Go
+runtime **soft memory target, not a hard RSS cap**. Each
 pass ran only `./connect/sim-latency/launch/retained-archive` with
 `-mod=readonly -p=2 -race -count=1 -timeout=5m -json`.
 
@@ -99,18 +102,28 @@ independent max review covered the 26-test version; the full-package independent
 review separately reviewed the final added 27th test before execution. The
 checkpoint reviewer then read all nine files without changing their bytes.
 
-## Remaining boundaries
+## Subsequent native work and remaining boundaries
 
-The standalone native command binary has not been built, installed or assigned a
-binary digest. The complete `tests.sh` integration wrapper has not passed in this
-qualification. Root-only command dispatch, the exact live scoring inode and
-evidence ancestry, native blob configuration/protection/version history, retained
-upload, exact remote-version readback and replica delivery remain separate,
-unperformed integration checks. Source review and fake transport tests do not
-prove them. No archive was prepared or uploaded and no originals were deleted.
+At the unit checkpoint, the standalone command had not been built or invoked.
+The subsequent Go 1.27.3 build from clean server `d820d5b301850dffc0e0ab1d6c94c9964296a253`
+produced binary SHA-256
+`6132191ee9ae1bf9c410fa16fee508c0f02cdcb2c60e94df069cadd5e969964c`.
+It used a separately observed **hard** 2 GiB cgroup memory limit. The
+[published synthetic/build bundle](retained-archive-qualification-2026-10-28/README.md)
+preserves the raw logs, build metadata and original build-phase provenance.
+Independent installed readback and three actual protected retained uploads with
+exact remote-version SHA-256 equality are documented in the
+[retention record](FIRST-COMMITTED-ARCHIVE-RETENTION-2026-10-28.md), not inferred
+from fake transport tests. No originals were deleted.
+
+The complete `tests.sh` integration wrapper remains unproved here. The build is
+not a full transitive-source census. Delivery of the three new versions to a
+replica and offsite restoration remain unverified; earlier storage witnesses
+must not be relabeled as delivery of these archives.
 
 The [failed first screen](FIRST-COMMITTED-SCREEN-2026-10-28.md) remains failed.
 The [new-screen approval](CALIBRATION-NEW-SCREEN-OWNER-APPROVAL-2026-10-28.md)
 does not supply a prepared seed, reviewed exact protocol, new measurement,
-provider waiver, late opening or production activation. Stop after publishing
-this checkpoint; later build and native archive work require their own admission.
+provider waiver, late opening or production activation. Any further operation
+requires its own in-scope admission; none of the successful one-use uploads may
+be repeated or have its spent claim reset.

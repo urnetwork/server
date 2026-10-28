@@ -51,8 +51,11 @@ this is not authorization for another measurement.
 The second committed seed remains unstarted, with only its three original input
 files per job. It must not be used as a replacement for this failed screen.
 Preserve all first-seed outcomes, OOM/recovery forensics and original plans.
-Private archive qualification and retained upload are separate from calibration
-acceptance; no new full-archive MinIO receipt is claimed here.
+The whole campaign, selection/recovery and management-OOM forensics now have
+[three private retained source-version readbacks](FIRST-COMMITTED-ARCHIVE-RETENTION-2026-10-28.md).
+No original was deleted, and delivery of these versions to a replica remains
+unverified. Retention is separate from calibration acceptance; the private
+unstarted second-seed inputs were not measured or published.
 
 ## Prospective follow-on, not a changed result
 

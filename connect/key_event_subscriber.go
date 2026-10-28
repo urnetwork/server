@@ -33,6 +33,14 @@ var (
 		Name: "urnetwork_key_event_resyncs_total",
 		Help: "listener resyncs forced by the key-event subscriber",
 	})
+	keyEventsDispatchedClientClose = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "urnetwork_key_events_dispatched_client_close_total",
+		Help: "client close-request key events dispatched to registered listeners",
+	})
+	keyEventsDispatchedClientRemoved = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "urnetwork_key_events_dispatched_client_removed_total",
+		Help: "client removed key events dispatched to the exchange",
+	})
 )
 
 func init() {
@@ -41,6 +49,8 @@ func init() {
 		keyEventsDispatchedHops,
 		keyEventResubscribes,
 		keyEventResyncs,
+		keyEventsDispatchedClientClose,
+		keyEventsDispatchedClientRemoved,
 	)
 }
 
@@ -67,7 +77,11 @@ type keyEventSubscriber struct {
 	sessionListeners map[server.Id]*sessionNotificationGroup
 	peerListeners    map[server.Id]map[int64]*model.NetworkPeerListener
 	hopListeners     map[server.Id]map[int64]*model.StreamHopListener
-	newPeerDelta     func(context.Context, server.Id, server.Id, string) *model.NetworkPeerDelta
+	closeListeners   map[server.Id]map[int64]*clientCloseListener
+	// closes what this process holds of a client removed through the api
+	// (CLIENTCLOSE1.md); it must not block
+	clientRemoved func(server.Id)
+	newPeerDelta  func(context.Context, server.Id, server.Id, string) *model.NetworkPeerDelta
 	// the session revision read behind hints; session.NetworkSessionRevision
 	// when unset
 	sessionRevision func(context.Context, server.Id) (string, int64, error)
@@ -79,12 +93,13 @@ type keyEventSubscriber struct {
 func newKeyEventSubscriber(ctx context.Context, settings *KeyEventDeliverySettings) *keyEventSubscriber {
 	cancelCtx, cancel := context.WithCancel(ctx)
 	s := &keyEventSubscriber{
-		ctx:           cancelCtx,
-		cancel:        cancel,
-		settings:      settings,
-		peerListeners: map[server.Id]map[int64]*model.NetworkPeerListener{},
-		hopListeners:  map[server.Id]map[int64]*model.StreamHopListener{},
-		newPeerDelta:  model.NewNetworkPeerDelta,
+		ctx:            cancelCtx,
+		cancel:         cancel,
+		settings:       settings,
+		peerListeners:  map[server.Id]map[int64]*model.NetworkPeerListener{},
+		hopListeners:   map[server.Id]map[int64]*model.StreamHopListener{},
+		closeListeners: map[server.Id]map[int64]*clientCloseListener{},
+		newPeerDelta:   model.NewNetworkPeerDelta,
 	}
 	go server.HandleError(s.run)
 	return s
@@ -133,6 +148,67 @@ func (self *keyEventSubscriber) AddHopListener(clientId server.Id, listener *mod
 			delete(self.hopListeners, clientId)
 		}
 	}
+}
+
+// AddCloseListener registers a resident client's close-request listener for
+// key-event kicks (CLIENTCLOSE1.md).
+func (self *keyEventSubscriber) AddCloseListener(clientId server.Id, listener *clientCloseListener) (remove func()) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	listenerId := self.nextListenerId
+	self.nextListenerId += 1
+	listeners, ok := self.closeListeners[clientId]
+	if !ok {
+		listeners = map[int64]*clientCloseListener{}
+		self.closeListeners[clientId] = listeners
+	}
+	listeners[listenerId] = listener
+	return func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		delete(listeners, listenerId)
+		if len(listeners) == 0 {
+			delete(self.closeListeners, clientId)
+		}
+	}
+}
+
+// SetClientRemoved sets what a client's removed event runs. It must not block.
+func (self *keyEventSubscriber) SetClientRemoved(clientRemoved func(server.Id)) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.clientRemoved = clientRemoved
+}
+
+// Kicks every close listener, trickled over the resync spread. Requests added
+// while unsubscribed have no event of their own, and otherwise wait for the
+// client's next request or expire. Only a (re)subscribe can lose an event, so
+// the corrective poll does not run this.
+func (self *keyEventSubscriber) resyncCloseListeners() {
+	listeners := []*clientCloseListener{}
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		for _, clientListeners := range self.closeListeners {
+			for _, listener := range clientListeners {
+				listeners = append(listeners, listener)
+			}
+		}
+	}()
+	if len(listeners) == 0 {
+		return
+	}
+	spacing := self.settings.ResyncSpreadTimeout / time.Duration(len(listeners))
+	go server.HandleError(func() {
+		for _, listener := range listeners {
+			listener.Kick()
+			select {
+			case <-self.ctx.Done():
+				return
+			case <-time.After(spacing):
+			}
+		}
+	})
 }
 
 // resyncAll trickles a forced resync across every registration, spread over
@@ -232,6 +308,39 @@ func (self *keyEventSubscriber) dispatch(channel string, event string) {
 		self.kickSession(networkId)
 		return
 	}
+	if clientId, ok := model.ParseClientRemovedKeyEvent(channel); ok {
+		if event == "set" {
+			var clientRemoved func(server.Id)
+			func() {
+				self.stateLock.Lock()
+				defer self.stateLock.Unlock()
+				clientRemoved = self.clientRemoved
+			}()
+			if clientRemoved != nil {
+				clientRemoved(clientId)
+				keyEventsDispatchedClientRemoved.Inc()
+			}
+		}
+		return
+	}
+	if clientId, ok := model.ParseClientCloseKeyEvent(channel); ok {
+		// a take (spop) or the set emptying (del) is the listener's own work
+		if event == "sadd" {
+			listeners := []*clientCloseListener{}
+			func() {
+				self.stateLock.Lock()
+				defer self.stateLock.Unlock()
+				for _, listener := range self.closeListeners[clientId] {
+					listeners = append(listeners, listener)
+				}
+			}()
+			for _, listener := range listeners {
+				listener.Kick()
+				keyEventsDispatchedClientClose.Inc()
+			}
+		}
+		return
+	}
 	if networkId, clientId, ok := model.ParseNetworkPeerKeyEvent(channel); ok {
 		switch event {
 		case "set", "del", "expired":
@@ -292,6 +401,8 @@ func (self *keyEventSubscriber) run() {
 		model.NetworkPeerKeyEventPattern(db),
 		sessionEventPattern(db),
 		model.StreamHopsKeyEventPattern(db),
+		model.ClientRemovedKeyEventPattern(db),
+		model.ClientCloseKeyEventPattern(db),
 	}
 
 	for {
@@ -320,6 +431,7 @@ func (self *keyEventSubscriber) run() {
 		// every registration full-reads
 		keyEventResubscribes.Inc()
 		self.resyncAll()
+		self.resyncCloseListeners()
 
 		drain := func() {
 			defer unsub()

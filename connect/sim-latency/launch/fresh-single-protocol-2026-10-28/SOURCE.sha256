@@ -1,0 +1,12 @@
+e37731264b6439a070815f9e03b6a72c6770c66acb3ee4858f090f99a541d843  ../held-out-operator.go.txt
+fb0bbff64c2103b571aa7b5640bf1e5bf0e72fbdac0d2905d5401ec9f4df35d6  ../held-out-amendment.go.txt
+7e1b389cbe3d2f7a0e8d2e8face216fd832b0abfa009672c1ed1d895bec8cddf  ../held-out-two-b-addendum.go.txt
+62373b92fefe3fb81dfe6b4e80bc7780501307a9bbea547f48823188eed978da  ../held-out-execution.go.txt
+5f0891ea8ec307088bf401d34d2263b7308ef66d585a0f1bd36cf901bcc59168  ../held-out-command.go.txt
+31eae507efe46f083d4ec486dfe64e0dfe81a42358645783fce366e461c69254  ../held-out-operator-tests.go.txt
+42e2f6d48d3fbe01a4d9fba466941f7d7050133e4ca3e1098268f4b90901afe5  ../held-out-two-b-composed-tests.go.txt
+eca0a643091c4b54bceb4f4b97043ee81828f1b5ad389749feada8efd7eca556  ../held-out-fresh-single-b.go.txt
+60c252d3f28b94dfe3681e767305432ae266435c6e3957969b9993078063a423  ../held-out-fresh-single-b-tests.go.txt
+cb97bdf17b2e411b1063516757ac6851954edde3b2bb8ef83b826f3fcbc89c00  ../held-out-first-committed.go.txt
+1b493b58a55f2e93d479cfbd486c87c605e0e0a9bda5ddea1b6b6f2c981bee19  ../held-out-first-committed-tests.go.txt
+f0c4663fe93a267375a43a8ae0623e6428b0e6856b93dc14cddd2aaeaac7f840  ../held-out-first-committed-dispatch-tests.go.txt

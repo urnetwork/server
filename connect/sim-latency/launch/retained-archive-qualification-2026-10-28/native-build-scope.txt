@@ -1,0 +1,9 @@
+Result=success
+ControlGroup=/user.slice/user-1000.slice/user@1000.service/app.slice/urnetwork-retained-archive-build-d820d5b3-ySGdzk7G.scope
+MemoryCurrent=1958547456
+MemoryPeak=2019024896
+MemoryMax=2147483648
+MemorySwapMax=0
+TasksMax=128
+Id=urnetwork-retained-archive-build-d820d5b3-ySGdzk7G.scope
+ActiveState=active

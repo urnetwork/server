@@ -477,12 +477,13 @@ func CoinbaseWebhook(
 			}
 			netRevenue := model.UsdToNanoCents((1.0 - sku.FeeFraction) * paymentUsd)
 
-			err = createBalanceCode(
+			chargeId := coinbaseWebhook.Event.Data.Id
+			err = createBalanceCodeForSale(
 				clientSession.Ctx,
 				sku.BalanceByteCount(),
 				model.Pro().DataCodeDuration,
 				netRevenue,
-				coinbaseWebhook.Event.Data.Id,
+				chargeId,
 				string(coinbaseDataJsonBytes),
 				purchaseEmail,
 				// a Coinbase purchase is not tied to a signed-in session: the network is
@@ -490,6 +491,9 @@ func CoinbaseWebhook(
 				// otherwise the emailed code IS the delivery mechanism
 				redeemNetworkId,
 				appliedNetworkName,
+				func() *model.SalesPaymentNotice {
+					return coinbaseSalesNotice(chargeId, sku.BalanceByteCount(), payments[0], redeemNetworkId)
+				},
 			)
 			if err != nil {
 				return nil, err
@@ -557,6 +561,36 @@ func createBalanceCode(
 	redeemNetworkId *server.Id,
 	appliedNetworkName string,
 ) error {
+	return createBalanceCodeForSale(
+		ctx,
+		balanceByteCount,
+		duration,
+		netRevenue,
+		purchaseEventId,
+		purchaseRecord,
+		purchaseEmail,
+		redeemNetworkId,
+		appliedNetworkName,
+		nil,
+	)
+}
+
+// createBalanceCodeForSale is createBalanceCode for a payment: salesNotice,
+// when set, builds the sales notice registered with the code's creation, so
+// it is posted once the new code commits and never for a retry that finds the
+// code already made.
+func createBalanceCodeForSale(
+	ctx context.Context,
+	balanceByteCount model.ByteCount,
+	duration time.Duration,
+	netRevenue model.NanoCents,
+	purchaseEventId string,
+	purchaseRecord string,
+	purchaseEmail string,
+	redeemNetworkId *server.Id,
+	appliedNetworkName string,
+	salesNotice func() *model.SalesPaymentNotice,
+) error {
 	// This is a PAID path -- by the time we are here the customer's money has already
 	// moved. So this one does NOT no-op like the grants do.
 	//
@@ -591,7 +625,13 @@ func createBalanceCode(
 			return err
 		}
 	} else {
-		balanceCode, err = model.CreateBalanceCode(
+		var createdInTx func(tx server.PgTx)
+		if salesNotice != nil {
+			createdInTx = func(tx server.PgTx) {
+				addSalesPaymentNoticeInTx(tx, salesNotice)
+			}
+		}
+		balanceCode, err = model.CreateBalanceCodeForSale(
 			ctx,
 			balanceByteCount,
 			duration,
@@ -599,6 +639,7 @@ func createBalanceCode(
 			purchaseEventId,
 			purchaseRecord,
 			purchaseEmail,
+			createdInTx,
 		)
 		if err != nil {
 			return err
@@ -848,6 +889,9 @@ type PlaySubscribeWithGoogleInfo struct {
 type PlaySubscriptionPurchaseLineItem struct {
 	ProductId  string `json:"productId"`
 	ExpiryTime string `json:"expiryTime"`
+	// the order id of the latest successful charge for the item (a renewal's
+	// order id ends in "..N"); read for the sales notice
+	LatestSuccessfulOrderId string `json:"latestSuccessfulOrderId,omitempty"`
 	// present for auto-renewing plans (absent for prepaid): the customer's
 	// auto-renew switch, read by the subscription details
 	AutoRenewingPlan *PlayAutoRenewingPlan `json:"autoRenewingPlan,omitempty"`
@@ -896,6 +940,9 @@ func (self *PlaySubscription) HasOfferTag(tag string) bool {
 
 type PlayAutoRenewingPlan struct {
 	AutoRenewEnabled bool `json:"autoRenewEnabled"`
+	// the plan's recurring price, a Money (before tax and discounts); kept
+	// raw and read leniently by the sales notice only
+	RecurringPrice json.RawMessage `json:"recurringPrice,omitempty"`
 }
 
 func (self *PlaySubscriptionPurchaseLineItem) ParseExpiryTime() (time.Time, error) {
@@ -1625,6 +1672,12 @@ func playCreditSubscriptionInTx(
 			transferBalance,
 		)
 	}
+
+	// no balance covered this expiry: the window is a new payment, posted once
+	// the caller's transaction commits
+	addSalesPaymentNoticeInTx(tx, func() *model.SalesPaymentNotice {
+		return playSalesNotice(playSubscriptionRenewal, sub, sku, maxExpiryTime)
+	})
 
 	return true, nil
 }
@@ -2671,71 +2724,16 @@ func solanaCreditPaymentIntentInConn(connOwner server.PgConn,
 	startTime := server.NowUtc()
 	endTime := startTime.Add(solanaPlanDuration(paymentSearchResult.SubscriptionPlan) + manualPaymentGracePeriod)
 
-	netRevenue := model.UsdToNanoCents(tokenAmountReceivedUsd)
-
 	server.TxInConn(clientSession.Ctx, connOwner, func(tx server.PgTx) {
-		credited = false
-		returnErr = nil
-		if err := model.LockPaymentNetworkInTx(
+		credited, returnErr = solanaCreditPlanIntentInTx(
 			tx,
-			clientSession.Ctx,
-			*paymentSearchResult.NetworkId,
-		); err != nil {
-			returnErr = err
-			return
-		}
-
-		completed, err := model.MarkPaymentIntentCompletedInTx(
-			tx,
-			paymentSearchResult.PaymentReference,
-			signature,
 			clientSession,
+			paymentSearchResult,
+			signature,
+			tokenAmountReceivedUsd,
+			startTime,
+			endTime,
 		)
-		if err != nil {
-			glog.Infof("[sub]solana credit: error marking payment intent completed: %v", err)
-			returnErr = err
-			return
-		}
-		if !completed {
-			glog.Infof("[sub]solana credit: payment intent %s already completed; not crediting again", paymentSearchResult.PaymentReference)
-			return
-		}
-
-		subscriptionRenewal := model.SubscriptionRenewal{
-			NetworkId:          *paymentSearchResult.NetworkId,
-			SubscriptionType:   model.SubscriptionTypeSupporter,
-			StartTime:          startTime,
-			EndTime:            endTime,
-			NetRevenue:         netRevenue,
-			SubscriptionMarket: model.SubscriptionMarketSolana,
-			TransactionId:      paymentSearchResult.PaymentReference,
-		}
-
-		err = model.AddSubscriptionRenewalInTx(tx, clientSession.Ctx, &subscriptionRenewal)
-
-		if err != nil {
-			glog.Infof("[sub]solana credit: error adding subscription renewal: %v", err)
-			returnErr = err
-			return
-		}
-
-		// a supporter subscription -> carries the Pro entitlement
-		transferBalance := &model.TransferBalance{
-			NetworkId:             *paymentSearchResult.NetworkId,
-			StartTime:             startTime,
-			EndTime:               endTime,
-			StartBalanceByteCount: RefreshSupporterTransferBalance,
-			SubsidyNetRevenue:     netRevenue,
-			BalanceByteCount:      RefreshSupporterTransferBalance,
-			Pro:                   true,
-		}
-		model.AddTransferBalanceInTx(
-			clientSession.Ctx,
-			tx,
-			transferBalance,
-		)
-
-		credited = true
 	}, server.TxReadCommitted)
 
 	if returnErr != nil {
@@ -2749,6 +2747,85 @@ func solanaCreditPaymentIntentInConn(connOwner server.PgConn,
 	}
 
 	return credited, nil
+}
+
+// solanaCreditPlanIntentInTx is one attempt of a plan intent's credit, in the
+// caller's ReadCommitted transaction: the intent one-shot, then the renewal and
+// the pro balance, then the sales notice of the new payment.
+func solanaCreditPlanIntentInTx(
+	tx server.PgTx,
+	clientSession *session.ClientSession,
+	paymentSearchResult *model.PaymentIntentSearchResult,
+	signature string,
+	tokenAmountReceivedUsd float64,
+	startTime time.Time,
+	endTime time.Time,
+) (credited bool, returnErr error) {
+	netRevenue := model.UsdToNanoCents(tokenAmountReceivedUsd)
+
+	if err := model.LockPaymentNetworkInTx(
+		tx,
+		clientSession.Ctx,
+		*paymentSearchResult.NetworkId,
+	); err != nil {
+		return false, err
+	}
+
+	completed, err := model.MarkPaymentIntentCompletedInTx(
+		tx,
+		paymentSearchResult.PaymentReference,
+		signature,
+		clientSession,
+	)
+	if err != nil {
+		glog.Infof("[sub]solana credit: error marking payment intent completed: %v", err)
+		return false, err
+	}
+	if !completed {
+		glog.Infof("[sub]solana credit: payment intent %s already completed; not crediting again", paymentSearchResult.PaymentReference)
+		return false, nil
+	}
+
+	subscriptionRenewal := model.SubscriptionRenewal{
+		NetworkId:          *paymentSearchResult.NetworkId,
+		SubscriptionType:   model.SubscriptionTypeSupporter,
+		StartTime:          startTime,
+		EndTime:            endTime,
+		NetRevenue:         netRevenue,
+		SubscriptionMarket: model.SubscriptionMarketSolana,
+		TransactionId:      paymentSearchResult.PaymentReference,
+	}
+
+	err = model.AddSubscriptionRenewalInTx(tx, clientSession.Ctx, &subscriptionRenewal)
+
+	if err != nil {
+		glog.Infof("[sub]solana credit: error adding subscription renewal: %v", err)
+		return false, err
+	}
+
+	// a supporter subscription -> carries the Pro entitlement
+	transferBalance := &model.TransferBalance{
+		NetworkId:             *paymentSearchResult.NetworkId,
+		StartTime:             startTime,
+		EndTime:               endTime,
+		StartBalanceByteCount: RefreshSupporterTransferBalance,
+		SubsidyNetRevenue:     netRevenue,
+		BalanceByteCount:      RefreshSupporterTransferBalance,
+		Pro:                   true,
+	}
+	model.AddTransferBalanceInTx(
+		clientSession.Ctx,
+		tx,
+		transferBalance,
+	)
+
+	// this call consumed the intent: a new payment, posted once the
+	// transaction commits
+	addSalesPaymentNoticeInTx(tx, func() *model.SalesPaymentNotice {
+		return solanaSalesNotice(paymentSearchResult, tokenAmountReceivedUsd, 0)
+	})
+
+	return true, nil
 }
 
 /**

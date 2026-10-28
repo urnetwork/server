@@ -66,6 +66,17 @@ type heldOutTwoBAddendum struct {
 // The unchanged original-three A and fresh bridge remain under their original
 // protocol. This projection is used only to authenticate those historical facts.
 func heldOutBaseProvenanceConfiguration(config heldOutPreparationConfig) (heldOutPreparationConfig, error) {
+	if config.FreshSingle != nil && config.Protocol != heldOutProtocolFreshSingleB {
+		return config, errors.New("fresh single-seed metadata cannot alter an old protocol")
+	}
+	if config.Protocol == heldOutProtocolFreshSingleB {
+		if config.FreshSingle == nil || config.Amendment == nil || config.TwoBAddendum != nil {
+			return config, errors.New("fresh single-seed authority and unchanged base provenance are required")
+		}
+		base := config
+		base.Protocol, base.Template, base.FreshSingle = calibrationProtocolThreeABridgeThreeB, config.FreshSingle.BridgeTemplate, nil
+		return base, nil
+	}
 	if config.Protocol == heldOutProtocolThreeABridgeTwoB {
 		if config.TwoBAddendum == nil || config.Amendment == nil {
 			return config, errors.New("two-B addendum and unchanged base provenance are both required")
@@ -86,6 +97,9 @@ func heldOutBaseProvenanceConfiguration(config heldOutPreparationConfig) (heldOu
 
 // The B approval is distinct from the unchanged original A approval.
 func heldOutProtocolApproval(config heldOutPreparationConfig) string {
+	if config.Protocol == heldOutProtocolFreshSingleB && config.FreshSingle != nil {
+		return config.FreshSingle.Approval.Sha256
+	}
 	if config.Protocol == heldOutProtocolThreeABridgeTwoB && config.TwoBAddendum != nil {
 		return config.TwoBAddendum.Approval.Sha256
 	}

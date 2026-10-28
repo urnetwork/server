@@ -93,6 +93,9 @@ func heldOutSettingsForProtocol(protocol string) (heldOutOperatorSettings, error
 	case heldOutProtocolThreeABridgeTwoB:
 		settings.Workload.SeedCount = 2
 		return settings, nil
+	case heldOutProtocolFreshSingleB:
+		settings.Workload.SeedCount = 1
+		return settings, nil
 	default:
 		return settings, errors.New("unknown held-out prospective protocol")
 	}
@@ -382,6 +385,16 @@ func heldOutCommandContext(ctx context.Context, operation string, content []byte
 		if err := decodeHeldOutComplete(content, &preparation, "held-out preparation context"); err != nil {
 			return old, settings, err
 		}
+	case "verify-public-pilot":
+		var config heldOutFreshSinglePilotPreflightConfig
+		if err := decodeHeldOutComplete(content, &config, "fresh public-pilot preflight context"); err != nil {
+			return old, settings, err
+		}
+		if config.Protocol != heldOutProtocolFreshSingleB {
+			return old, settings, errors.New("public-pilot preflight requires its explicit fresh protocol")
+		}
+		selected, err := heldOutSettingsForProtocol(config.Protocol)
+		return old, selected, err
 	case "verify", "execute", "reveal":
 		var execution heldOutExecutionConfig
 		if operation == "reveal" {
