@@ -686,7 +686,11 @@ func TestProviderStatusExplainsNotModern(t *testing.T) {
 		t.Errorf("quality weight %+v, want an online-only explanation", weight)
 	}
 
-	connect.AssertEqual(t, statusOf(modernGateTestSettings(false), filter).Reason, ProviderStatusReasonNone)
+	// the gate off and modern-first priority off: nothing to explain
+	// (TestProviderStatusNotModernUnderPriorityAndGate has the rest)
+	gateOff := modernGateTestSettings(false)
+	gateOff.RankModernFirst = false
+	connect.AssertEqual(t, statusOf(gateOff, filter).Reason, ProviderStatusReasonNone)
 	filter.modernEvidence = map[server.Id]*ProviderModernEvidenceRecord{facts.clientId: {
 		PostQuantum:     true,
 		KeyExchange:     "X25519MLKEM768",

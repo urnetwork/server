@@ -425,8 +425,9 @@ var statsProviderOnlineSuccessExemptGauge = newStatsGaugeVec(
 // providers the other rules admit to quality and to speed, how many the probe
 // has shown to be modern and why each other one is not, whether or not the
 // gate is on. Every outcome but modern is what the gate takes out of the
-// bucket once it is on. Two buckets and five outcomes, every series published
-// every refresh, zero included.
+// bucket once it is on. The online bucket, which the gate never holds, counts
+// the Online members by modern outcome (FP2-MODERN.md). Three buckets and
+// five outcomes, every series published every refresh, zero included.
 var statsProviderModernGateShadowGauge = newStatsGaugeVec(
 	"provider_modern_gate_shadow",
 	"Connected valid public providers the other egress rules admit to quality or speed, by what the modern provider gate decides for them",
@@ -1152,6 +1153,14 @@ func statsPublishProviderEgressCounts(counts *model.ProviderEgressCounts) {
 				value:       float64(counts.ModernGateShadowCounts[bucket][outcome]),
 			})
 		}
+	}
+	// Online is no gate bucket: its members by outcome, the supply modern
+	// requests draw from in the Online fallback (FP2-MODERN.md)
+	for _, outcome := range model.ProviderModernOutcomes {
+		shadowValues = append(shadowValues, statsLabeledValue{
+			labelValues: []string{model.ProviderEgressBucketOnline, outcome},
+			value:       float64(counts.ModernOnlineCounts[outcome]),
+		})
 	}
 	statsProviderModernGateShadowGauge.replace(shadowValues)
 }

@@ -570,6 +570,10 @@ func evaluateProviderStatus(
 		evaluation.reason = ProviderStatusReasonEgressFailing
 	case decision.reason == ProviderExcludedNotModern:
 		evaluation.reason = ProviderStatusReasonNotModern
+	case egressSettings.RankModernFirst && !egressFacts.modernGate && (decision.quality || decision.speed) && !decision.modern:
+		// in its buckets, but modern-first priority draws it after the
+		// modern providers of each band (FP2-MODERN.md)
+		evaluation.reason = ProviderStatusReasonNotModern
 	case decision.reason == ProviderExcludedArinNonQuality:
 		evaluation.reason = ProviderStatusReasonNotEligible
 	case !facts.hasSpeedTest || !facts.hasLatencyTest:

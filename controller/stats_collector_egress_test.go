@@ -178,7 +178,14 @@ func TestStatsRefreshProviderEgressPublishesEveryBucketAndReason(t *testing.T) {
 			connect.AssertEqual(t, shadow(bucket, model.ProviderModernOutcomeNoResizableWindows), float64(0))
 			connect.AssertEqual(t, shadow(bucket, model.ProviderModernOutcomeStaleEvidence), float64(0))
 		}
-		connect.AssertEqual(t, testutil.CollectAndCount(statsProviderModernGateShadowGauge.gauge, "urnetwork_stats_provider_modern_gate_shadow"), 2*len(model.ProviderModernOutcomes))
+		// and the online bucket: every online member under its outcome
+		// (FP2-MODERN.md), the four the index counts in online
+		onlineMembers := float64(0)
+		for _, outcome := range model.ProviderModernOutcomes {
+			onlineMembers += shadow(model.ProviderEgressBucketOnline, outcome)
+		}
+		connect.AssertEqual(t, onlineMembers, float64(4))
+		connect.AssertEqual(t, testutil.CollectAndCount(statsProviderModernGateShadowGauge.gauge, "urnetwork_stats_provider_modern_gate_shadow"), 3*len(model.ProviderModernOutcomes))
 		// the gate's schedule beside the counts: off, and on at the pinned start
 		connect.AssertEqual(t, testutil.ToFloat64(statsProviderModernGateOnGauge.gauge), float64(0))
 		connect.AssertEqual(t, testutil.ToFloat64(statsProviderModernGateStartGauge.gauge.WithLabelValues()), float64(pinnedStart.Unix()))

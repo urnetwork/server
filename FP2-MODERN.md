@@ -364,13 +364,17 @@ It wraps:
 Named providers keep their place.
 
 **A finite allowance, the one exception.** Union reads keep their finite row
-allowance (`findProviders2RefillLoadCount`).
+allowance (`findProviders2RefillLoadCount`), and each phase has one of its own.
 
-- The modern phase may spend the whole allowance.
+- The modern phase may spend its whole allowance.
 - If the allowance ends inside the modern phase with too few modern survivors,
-  the cursor skips the rest of the modern phase. The non-modern phase then
-  gets a fresh allowance, so availability doesn't depend on priority.
-- The answer is recorded as `modern_priority_incomplete`.
+  the cursor skips the rest of the modern phase, and the non-modern phase
+  fills the band from its own allowance. Availability doesn't depend on
+  priority.
+- The answer is recorded in
+  `urnetwork_findproviders2_modern_priority_incomplete_total`.
+- With priority off there is no modern phase, so the single allowance is
+  today's.
 
 Strict priority therefore holds whenever the band's modern survivors lie
 within one allowance of modern rows: about 2,420 rows for count 20. Native
@@ -497,12 +501,22 @@ of a second's churn per second, against 250–760 a second on 10-21.
   Destinations from fixed `spec.ClientId` specs, and restored window
   identities, bypass discovery and are not filtered. The window clients'
   `EncryptionModeRequired` still decides them.
+- The sticky Fixed IP redial and the recent-exit lookups also go through
+  `NextDestinationsForClientId`. Under the profile, a recent exit that is not
+  modern comes back as not found, and the window discovers again.
 - The capability probe's pinned tunnels never set the flag. They must reach
   providers that have no evidence yet.
 - An older server ignores the field. Discovery is then capability-blind, and
   the client fails closed per provider.
-- Hosted proxy devices don't enable end-to-end encryption. The sdk, the apps and
-  the JS remote device need only the connect bump.
+- **Hosted proxy devices can enable end-to-end encryption.**
+  - The proxy applies each device's profile through the sdk
+    (`toConnectPerformanceProfile` passes `PostQuantumEncryption` through), and
+    the spec documents `post_quantum_encryption` for hosted profiles.
+  - So a proxy built with the new connect sends `require_modern_provider` from
+    its in-process discovery.
+  - That is why readers deploy only after the index is rewritten
+    ([Rollout](#rollout), step 2).
+- The sdk, the apps and the JS remote device need only the connect bump.
 
 ### Observability
 
@@ -513,18 +527,26 @@ of a second's churn per second, against 250–760 a second on 10-21.
   label.
 - **Selection.** Selection outcomes gain the reason `filtered_capability`, for
   modern and declaration refusals; the latter count as `filtered_hard` today.
+  A modern-only request whose targets hold no modern page reads nothing. It
+  reports `filtered_capability`, or `returned_small_filtered_capability`, from
+  the rows it left unread, not `cache_empty`.
   The selection schema goes from 2 to 3, and `monitor/signal_provider_selection.go`
   learns the reason.
 - **New counters.**
   - `urnetwork_findproviders2_answered_modern_total{rank_mode, band, modern}`:
-    providers answered per band (`named`, `native`, `borrowed`, `online`).
+    providers answered per band (`native`, `borrowed`, `online`). Named
+    providers are not drawn and are not counted.
   - `urnetwork_findproviders2_modern_partition_total{source, state}`: targets
     read per source (`native`, `union`) and state (`partitioned`, `absent`,
     `stale`).
   - `urnetwork_findproviders2_modern_priority_incomplete_total{rank_mode}`:
     answers whose allowance ended inside a modern phase.
-- **Shadow counts** gain an `online` bucket, in the export's log line and in
+- **Shadow counts** gain an `online` bucket, in the export's
+  `[nclm]modern online providers:` log line and in
   `urnetwork_stats_provider_modern_gate_shadow{bucket="online"}`.
+  - The dashboard snapshot carries it as `ModernOnlineCounts`.
+  - The snapshot decoder refuses unknown fields, so the counts policy key goes
+    to schema 6, and each version reads its own snapshots.
 - **Probe paging.** The probe's stall page (SIGNALS.md §2.19g) fires past six
   hours when any of these holds:
   - priority is on in any reader;
@@ -537,22 +559,31 @@ of a second's churn per second, against 250–760 a second on 10-21.
 ### Rollout
 
 0. **Before 2026-11-11 00:00 UTC, whatever this work's schedule.**
-   - Config 808328a is pushed. Release it through the config-updater with
-     `--config_restart=no`.
-   - Restart every taskworker and api block. Alt takes the config at its next
-     deploy.
-   - Check that every block reports the new config version, and that
+   - Done on 2026-10-28:
+     - config 808328a was pushed;
+     - config-updater `2026.10.28-outerwerld-1084072720` (`restart: false`)
+       was deployed at 18:28Z, and edge-0, edge-1, edge-3 and edge-4 had
+       published it by 18:41Z;
+     - no block restarted for it.
+   - Pending, for the owner: recreate every taskworker and api block, and alt
+     on crisp and fireside, by a restart or a deploy. Alt finished a deploy at
+     18:27:56Z, seconds before the config landed, so it needs one too.
+   - Then check that every block reports config `1084072720` or later, and that
      `urnetwork_stats_provider_modern_gate_on` reads 0 everywhere.
 1. **connect.** Merge the args field, the spec entry and the generator change.
    Hold the release until step 5.
 2. **server.** Bump connect, then ship the index flag, the partition, the
    filter, priority (on), status, the probe, the gate default, the metrics and
    the monitor changes. There is no migration.
-   - Taskworkers (export, probe, gate) and readers (api, alt, proxy) deploy in
-     either order.
-   - An old reader ignores the flag and the metadata.
-   - A new reader of old pages reads them as `absent`: today's draw, and
-     modern-only requests answer empty.
+   - **Taskworkers first** (export, probe, gate).
+     - Wait until every old taskworker is gone and `client_score_modern_v1_ready`
+       holds an export start later than the last old one's exit.
+     - Then deploy the **readers** (api, alt, proxy).
+   - The proxy needs this order: it is a reader, and it carries the new connect
+     generator for hosted devices. If it came first, it would read old pages as
+     `absent` and answer its end-to-end devices empty.
+   - An old reader ignores the flag and the metadata, so the taskworkers can go
+     first safely.
    - Roll the readers out in stages, watching
      `urnetwork_findproviders2_answered_modern_total` and load on modern
      providers. The kill switch is `rank_modern_first: false`, with a config

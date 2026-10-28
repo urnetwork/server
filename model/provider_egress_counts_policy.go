@@ -68,8 +68,12 @@ func providerEgressCountsPolicyKey(
 		// Schema 5 selects Quality by the published ARIN serving epoch, which
 		// a schema 4 snapshot did not.
 		ArinServingEpoch int64
+		// Schema 6 carries the Online members' modern outcomes
+		// (ProviderEgressCounts.ModernOnlineCounts, FP2-MODERN.md), which a
+		// schema 5 snapshot does not, and whose wire field a schema 5 reader
+		// refuses.
 	}{
-		Schema: 5, MaxIndex: settings.MaxIndex(),
+		Schema: 6, MaxIndex: settings.MaxIndex(),
 		EvidenceMaxAge:   min(settings.EvidenceMaxAge, ProviderEgressHealthMaxAge),
 		QualityNumerator: settings.QualityOkNumerator, QualityDenominator: settings.QualityOkDenominator,
 		CountryGate: settings.CountryGate, EgressEnabled: enabled,

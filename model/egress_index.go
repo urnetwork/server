@@ -1260,6 +1260,9 @@ type ProviderEgressCounts struct {
 	// the bucket, whether or not the gate is on; every bucket and outcome
 	// present
 	ModernGateShadowCounts map[string]map[string]int64
+	// the Online members by modern outcome, every outcome present
+	// (FP2-MODERN.md, "Observability"); nil in a snapshot written before it
+	ModernOnlineCounts map[string]int64
 }
 
 // Decides every connected, valid, active, top-level provider with a Public
@@ -1274,6 +1277,7 @@ func CountProviderEgress(ctx context.Context) *ProviderEgressCounts {
 		ReasonCounts:           map[string]int64{},
 		MaxIndex:               settings.MaxIndex(),
 		ModernGateShadowCounts: newProviderModernGateShadowCounts(),
+		ModernOnlineCounts:     newProviderModernOnlineCounts(),
 	}
 	for _, bucket := range ProviderEgressBuckets {
 		counts.BucketIndexCounts[bucket] = map[string]int64{}
@@ -1328,10 +1332,9 @@ func CountProviderEgress(ctx context.Context) *ProviderEgressCounts {
 	// margin held against the export's last published guard
 	countFilter.onlineSuccessBaseline = newProviderOnlineSuccessBaseline(countFilter, providerCountRowCountryCodes(rows), settings, readProviderOnlineSuccessPreviousBaseline(ctx, "the dashboard counts"))
 	for _, row := range rows {
-		decision := decideProviderEgress(
-			countFilter.egressFacts(row.clientId, row.claimedCountryCode, row.egressIndex, row.egressQuality, settings),
-			egressTestEnabled,
-		)
+		facts := countFilter.egressFacts(row.clientId, row.claimedCountryCode, row.egressIndex, row.egressQuality, settings)
+		decision := decideProviderEgress(facts, egressTestEnabled)
+		countProviderModernOnline(counts.ModernOnlineCounts, facts, decision)
 		// the index as the dashboard labels it
 		indexLabel := ProviderEgressIndexNone
 		if row.egressIndex != nil {

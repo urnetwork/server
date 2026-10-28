@@ -42,7 +42,7 @@ var findProviders2NativeSourceSchema = prometheus.NewGauge(prometheus.GaugeOpts{
 // Registers the schema even on a process with no requests; quiet and old
 // producers remain distinguishable without a sentinel customer request.
 func init() {
-	findProviders2SelectionSchema.Set(2)
+	findProviders2SelectionSchema.Set(3)
 	findProviders2NativeSourceSchema.Set(1)
 	prometheus.MustRegister(findProviders2SelectionOutcomes, findProviders2StageSeconds, findProviders2StageInflight, findProviders2SelectionSchema, findProviders2NativeSourceOutcomes, findProviders2NativeSourceSchema)
 }
@@ -55,6 +55,10 @@ type findProviders2LoadObservation struct {
 	privateCapture *privateprovidercapture.Recorder
 	privateSource  string
 	missingGroup   *findProviders2MissingGroup
+	// rows a modern-only traversal left unread because their pages hold no
+	// modern provider (network_client_score_modern.go): refused by
+	// capability without a read
+	unreadNonModernRows int
 }
 
 // Owned by one request. No identity map or observation state outlives it.
@@ -72,7 +76,7 @@ type findProviders2SelectionObservation struct {
 	backfillUnavailable  bool
 	loaded               int
 	eligible             int
-	dropped              [4]int
+	dropped              [5]int
 	explicitSources      uint8
 	requestedCount       int
 	discoveryReturned    int
@@ -221,6 +225,8 @@ func (self *findProviders2SelectionObservation) complete(resultCount int) {
 				self.reason = "returned_small_eligible"
 			} else if reason := self.filterReason(); reason != "unclassified_zero" {
 				self.reason = "returned_small_" + reason
+			} else if 0 < self.load.unreadNonModernRows {
+				self.reason = "returned_small_filtered_capability"
 			} else {
 				self.reason = "returned_small_sample"
 			}
@@ -239,6 +245,9 @@ func (self *findProviders2SelectionObservation) complete(resultCount int) {
 		self.reason = "cache_missing"
 	case self.backfillUnavailable:
 		self.reason = "backfill_unavailable"
+	case self.loaded == 0 && 0 < self.load.unreadNonModernRows:
+		// a modern-only request whose targets hold no modern page
+		self.reason = "filtered_capability"
 	case self.loaded == 0:
 		self.reason = "cache_empty"
 	case 0 < self.eligible:
@@ -266,7 +275,7 @@ func (self *findProviders2SelectionObservation) filterReason() string {
 		explicitReason = "filtered_explicit_mixed"
 	}
 	reason := "unclassified_zero"
-	for i, next := range [4]string{"filtered_hard", "filtered_network", "filtered_family", explicitReason} {
+	for i, next := range [5]string{"filtered_hard", "filtered_network", "filtered_family", explicitReason, "filtered_capability"} {
 		if self.dropped[i] == 0 {
 			continue
 		}

@@ -207,6 +207,35 @@ func selectClientScoresByWeight(
 	return clientIds
 }
 
+// Draws up to n of the candidates with draw, the modern ones first: the others
+// only fill what the modern leave (FP2-MODERN.md, "Priority within each
+// band"). Off, it is draw itself. Each class keeps the band's own order,
+// facets, evidence ranks and weights.
+func selectClientScoresModernFirst(
+	candidateClientScores map[server.Id]*ClientScore,
+	n int,
+	modernFirst bool,
+	draw func(map[server.Id]*ClientScore, int) []server.Id,
+) []server.Id {
+	if !modernFirst {
+		return draw(candidateClientScores, n)
+	}
+	modernClientScores := map[server.Id]*ClientScore{}
+	otherClientScores := map[server.Id]*ClientScore{}
+	for clientId, clientScore := range candidateClientScores {
+		if clientScore.Modern {
+			modernClientScores[clientId] = clientScore
+		} else {
+			otherClientScores[clientId] = clientScore
+		}
+	}
+	clientIds := draw(modernClientScores, n)
+	if len(clientIds) < n {
+		clientIds = append(clientIds, draw(otherClientScores, n-len(clientIds))...)
+	}
+	return clientIds
+}
+
 // The URL weight the Online fallback reads: a record written before the
 // weight existed has none, and reads as neutral.
 func onlineFallbackUrlWeight(clientScore *ClientScore) float64 {

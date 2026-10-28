@@ -362,6 +362,44 @@ func classifyProviderModernEvidence(record *ProviderModernEvidenceRecord, now ti
 	}
 }
 
+// Every outcome at zero, for the Online members' modern outcomes.
+func newProviderModernOnlineCounts() map[string]int64 {
+	outcomeCounts := map[string]int64{}
+	for _, outcome := range ProviderModernOutcomes {
+		outcomeCounts[outcome] = 0
+	}
+	return outcomeCounts
+}
+
+// Counts an Online member under the outcome its evidence gives: the supply
+// modern-only requests and modern-first priority draw from in the Online
+// fallback (FP2-MODERN.md). Online is no gate bucket, so the gate's shadow
+// does not hold it.
+func countProviderModernOnline(outcomeCounts map[string]int64, facts *providerEgressFacts, decision providerEgressDecision) {
+	if !decision.online {
+		return
+	}
+	outcome := facts.modernOutcome
+	if outcome == "" {
+		outcome = ProviderModernOutcomeNoEvidence
+	}
+	outcomeCounts[outcome] += 1
+}
+
+// One line for an export's log: the Online members, how many are modern, and
+// every outcome that is not.
+func providerModernOnlineSummary(outcomeCounts map[string]int64) string {
+	online := int64(0)
+	outcomeTexts := make([]string, 0, len(ProviderModernOutcomes)-1)
+	for _, outcome := range ProviderModernOutcomes {
+		online += outcomeCounts[outcome]
+		if outcome != ProviderModernOutcomeModern {
+			outcomeTexts = append(outcomeTexts, fmt.Sprintf("%s %d", outcome, outcomeCounts[outcome]))
+		}
+	}
+	return fmt.Sprintf("%d online, %d modern, %d not (%s)", online, outcomeCounts[ProviderModernOutcomeModern], online-outcomeCounts[ProviderModernOutcomeModern], strings.Join(outcomeTexts, ", "))
+}
+
 // For each bucket of ProviderModernGateBuckets, every outcome at zero.
 func newProviderModernGateShadowCounts() map[string]map[string]int64 {
 	bucketOutcomeCounts := map[string]map[string]int64{}
@@ -418,4 +456,107 @@ func providerModernGateShadowSummary(bucketOutcomeCounts map[string]map[string]i
 		))
 	}
 	return fmt.Sprintf("%s, evidence max age %s: %s", state, ProviderModernEvidenceMaxAge, strings.Join(bucketTexts, "; "))
+}
+
+// The ids among clientIds that are modern at now (FP2-MODERN.md,
+// "Definition"), for providers a request names, which the score index does
+// not hold. One statement per chunk of 256 reads, in one snapshot, each id's
+// current provide keys, its evidence row and its declaration: with a Public
+// key, the evidence decides; with a Network key and no Public one, the
+// declaration (provide_capability_model.go); with neither, the id is not
+// modern, whatever declaration an earlier provide left behind. Each query
+// observes the caller's context. An error is the caller's: a request that
+// requires modern providers cannot be answered without it.
+func readProviderModernClientIds(ctx context.Context, clientIds []server.Id, now time.Time) (map[server.Id]bool, error) {
+	const chunkSize = 256
+	uniqueClientIds := make([]server.Id, 0, len(clientIds))
+	seenClientIds := make(map[server.Id]bool, len(clientIds))
+	for _, clientId := range clientIds {
+		if !seenClientIds[clientId] {
+			seenClientIds[clientId] = true
+			uniqueClientIds = append(uniqueClientIds, clientId)
+		}
+	}
+	modernClientIds := map[server.Id]bool{}
+	if len(uniqueClientIds) == 0 {
+		return modernClientIds, nil
+	}
+	var returnErr error
+	server.Db(ctx, func(conn server.PgConn) {
+		for start := 0; start < len(uniqueClientIds); start += chunkSize {
+			chunkClientIds := uniqueClientIds[start:min(start+chunkSize, len(uniqueClientIds))]
+			if err := ctx.Err(); err != nil {
+				returnErr = err
+				return
+			}
+			rows, err := conn.Query(
+				ctx,
+				`
+				SELECT
+					named.client_id,
+					EXISTS (
+						SELECT 1 FROM provide_key
+						WHERE provide_key.client_id = named.client_id AND provide_key.provide_mode = $2
+					),
+					EXISTS (
+						SELECT 1 FROM provide_key
+						WHERE provide_key.client_id = named.client_id AND provide_key.provide_mode = $3
+					),
+					provider_modern_evidence.post_quantum,
+					provider_modern_evidence.window_resizable,
+					provider_modern_evidence.measured_at,
+					COALESCE(provide_capability.post_quantum_encryption, false)
+				FROM unnest($1::uuid[]) AS named(client_id)
+				LEFT JOIN provider_modern_evidence ON provider_modern_evidence.client_id = named.client_id
+				LEFT JOIN provide_capability ON provide_capability.client_id = named.client_id
+				`,
+				chunkClientIds,
+				ProvideModePublic,
+				ProvideModeNetwork,
+			)
+			if err != nil {
+				returnErr = err
+				return
+			}
+			func() {
+				defer rows.Close()
+				for rows.Next() {
+					var clientId server.Id
+					var providePublic, provideNetwork, declared bool
+					var postQuantum, windowResizable *bool
+					var measuredAt *time.Time
+					if err := rows.Scan(&clientId, &providePublic, &provideNetwork, &postQuantum, &windowResizable, &measuredAt, &declared); err != nil {
+						returnErr = err
+						return
+					}
+					switch {
+					case providePublic:
+						var record *ProviderModernEvidenceRecord
+						if measuredAt != nil {
+							record = &ProviderModernEvidenceRecord{
+								PostQuantum:     postQuantum != nil && *postQuantum,
+								WindowResizable: windowResizable != nil && *windowResizable,
+								MeasuredAt:      *measuredAt,
+							}
+						}
+						if classifyProviderModernEvidence(record, now) == ProviderModernOutcomeModern {
+							modernClientIds[clientId] = true
+						}
+					case provideNetwork:
+						if declared {
+							modernClientIds[clientId] = true
+						}
+					}
+				}
+				returnErr = rows.Err()
+			}()
+			if returnErr != nil {
+				return
+			}
+		}
+	}, server.OptReadOnly(), server.OptNoRetry())
+	if returnErr != nil {
+		return nil, returnErr
+	}
+	return modernClientIds, nil
 }

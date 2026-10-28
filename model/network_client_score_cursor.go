@@ -23,8 +23,16 @@ type clientScorePage struct {
 	nativeKey        string
 	nativeGeneration string
 	nativeChecksum   [sha256.Size]byte
+	// a union modern page of a partitioned target, whose bytes must match the
+	// partition's checksum (network_client_score_modern.go)
+	modernChecksum    [sha256.Size]byte
+	hasModernChecksum bool
 }
 
+// A partitioned traversal (network_client_score_modern.go) reads its pages in
+// two phases: pages[:modernPageCount], the modern pages of every requested
+// facet, then the rest. A take never crosses from the modern phase into the
+// other, so a refill can count the modern phase's survivors apart.
 type clientScoreCursor struct {
 	pages            []clientScorePage
 	nextPage         int
@@ -33,6 +41,12 @@ type clientScoreCursor struct {
 	sourceIncomplete bool
 	nativeOnly       bool
 	observation      *findProviders2LoadObservation
+	modernPageCount  int
+	// the rows taken in the modern phase
+	modernReadCount int
+	// a modern page failed its partition checksum, and every unread page
+	// joined the modern phase so that no modern provider is passed over
+	modernStale bool
 }
 
 // Facet priority is unchanged. Within a facet, shuffle once for the whole
@@ -51,21 +65,79 @@ func newClientScoreCursor(groups []map[string]int, observation *findProviders2Lo
 	return cursor
 }
 
+// A partitioned cursor: the modern groups' pages, then the other groups',
+// each group in draw order and shuffled once for the request.
+func newClientScorePhasedCursor(modernGroups []map[string]clientScorePage, otherGroups []map[string]clientScorePage, observation *findProviders2LoadObservation) *clientScoreCursor {
+	cursor := &clientScoreCursor{observation: observation}
+	appendGroups := func(groups []map[string]clientScorePage) {
+		for _, pages := range groups {
+			keys := slices.Collect(maps.Keys(pages))
+			mathrand.Shuffle(len(keys), func(i, j int) { keys[i], keys[j] = keys[j], keys[i] })
+			for _, key := range keys {
+				if 0 < pages[key].expectedCount {
+					cursor.pages = append(cursor.pages, pages[key])
+				}
+			}
+		}
+	}
+	appendGroups(modernGroups)
+	cursor.modernPageCount = len(cursor.pages)
+	appendGroups(otherGroups)
+	return cursor
+}
+
 func (self *clientScoreCursor) hasMore() bool {
 	return self != nil && self.nextPage < len(self.pages)
 }
 
+// Whether the next page is in the modern phase.
+func (self *clientScoreCursor) inModernPhase() bool {
+	return self != nil && self.nextPage < self.modernPageCount
+}
+
+// Whether pages remain past the modern phase.
+func (self *clientScoreCursor) hasOtherPhase() bool {
+	return self != nil && self.modernPageCount < len(self.pages)
+}
+
+// Leaves the modern phase's unread pages, for a union allowance that ended
+// inside it: the other phase fills the band instead.
+func (self *clientScoreCursor) skipModernPhase() {
+	if self.nextPage < self.modernPageCount {
+		self.nextPage = self.modernPageCount
+	}
+}
+
+// Moves every unread page into the modern phase, once, when a modern page's
+// bytes are not the ones its partition describes.
+func (self *clientScoreCursor) markModernStale() {
+	if self.modernStale {
+		return
+	}
+	self.modernStale = true
+	self.modernPageCount = len(self.pages)
+	findProviders2ModernPartitionTargets.WithLabelValues("union", clientScoreModernStale).Inc()
+}
+
 // Like the existing loader, the last whole page can exceed the requested row
 // budget. Published pages hold at most ClientScoreSampleCount rows, so this
-// rounding adds at most 199 rows; it does not reset on a refill.
+// rounding adds at most 199 rows; it does not reset on a refill. A take in the
+// modern phase ends at its boundary.
 func (self *clientScoreCursor) take(additionalRows int) []clientScorePage {
 	start, rows := self.nextPage, 0
-	for rows < additionalRows && self.hasMore() {
+	end := len(self.pages)
+	if self.nextPage < self.modernPageCount {
+		end = self.modernPageCount
+	}
+	for rows < additionalRows && self.nextPage < end {
 		page := self.pages[self.nextPage]
 		rows += page.expectedCount
 		self.nextPage++
 	}
 	self.readCount += rows
+	if start < self.modernPageCount {
+		self.modernReadCount += rows
+	}
 	return self.pages[start:self.nextPage]
 }
 
@@ -113,6 +185,9 @@ func (self *clientScoreCursor) readWithClient(ctx context.Context, r server.Redi
 		var data []byte
 		if command.native == nil {
 			data, _ = command.legacy.Bytes()
+			if command.page.hasModernChecksum && 0 < len(data) && sha256.Sum256(data) != command.page.modernChecksum {
+				self.markModernStale()
+			}
 		} else {
 			if command.native.Err() != nil {
 				continue
