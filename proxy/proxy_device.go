@@ -1113,6 +1113,11 @@ func newProxyDeviceLocalSettings(
 	deviceLocalSettings.HostedIncompatible = true
 	// the windows dial the edge the platform's load model chooses
 	deviceLocalSettings.PlatformPlacement = proxyDeviceSettings.PlatformPlacement
+	// a hosted device's window transports run from this data center to the
+	// edge and never cross the user's link, so their delay would describe the
+	// wrong network: offer no delay header and measure nothing
+	// (connect/DELAY.md §10.4)
+	deviceLocalSettings.EnableTransportDelay = false
 	return deviceLocalSettings
 }
 
