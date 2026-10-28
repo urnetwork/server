@@ -2918,7 +2918,7 @@ func closeContractReport(
 			if reportId != nil || 0 < addedByteCount {
 				completion = reportCompletion
 			}
-		case contractSenderFinalAfterCheckpoint:
+		case contractSenderFinalAfterCheckpoint, contractSenderZeroFinalUnreported:
 			// a party's final applies once, so it is never a retransmission
 			completion = reportCompletion
 		}
@@ -3083,6 +3083,7 @@ func applyLockedContractCloseReportInTx(ctx context.Context, tx server.PgTx,
 	var senderFinal bool
 	var receiverFinal bool
 	var receiverCheckpointed bool
+	var partyUsedTransferByteCount ByteCount
 	result, err := tx.Query(ctx, `WITH prior AS MATERIALIZED (
 		SELECT used_transfer_byte_count,legacy_checkpoint_byte_count,identified_checkpoint_byte_count
 		FROM contract_close WHERE contract_id=$1 AND party=$2
@@ -3122,12 +3123,13 @@ func applyLockedContractCloseReportInTx(ctx context.Context, tx server.PgTx,
 	) SELECT changed.used_transfer_byte_count - COALESCE((SELECT used_transfer_byte_count FROM prior),0),
 		EXISTS(SELECT 1 FROM contract_close WHERE contract_id=$1 AND party=$8 AND NOT checkpoint),
 		EXISTS(SELECT 1 FROM contract_close WHERE contract_id=$1 AND party=$9 AND NOT checkpoint),
-		EXISTS(SELECT 1 FROM contract_close WHERE contract_id=$1 AND party=$9 AND checkpoint)
+		EXISTS(SELECT 1 FROM contract_close WHERE contract_id=$1 AND party=$9 AND checkpoint),
+		changed.used_transfer_byte_count
 	FROM changed`,
 		contractId, party, usedTransferByteCount, server.NowUtc(), checkpoint, reportId == nil, reportId, ContractPartySource, ContractPartyDestination)
 	server.WithPgResult(result, err, func() {
 		if result.Next() {
-			server.Raise(result.Scan(&addedByteCount, &senderFinal, &receiverFinal, &receiverCheckpointed))
+			server.Raise(result.Scan(&addedByteCount, &senderFinal, &receiverFinal, &receiverCheckpointed, &partyUsedTransferByteCount))
 			applied = true
 		}
 	})
@@ -3138,11 +3140,16 @@ func applyLockedContractCloseReportInTx(ctx context.Context, tx server.PgTx,
 		completion = contractCheckpointAfterSenderFinal
 	case applied && party == ContractPartySource && !checkpoint && receiverCheckpointed:
 		completion = contractSenderFinalAfterCheckpoint
+	case applied && party == ContractPartySource && !checkpoint && !receiverFinal && partyUsedTransferByteCount == 0 && reportId != nil:
+		// Identified reports only, which every current connect client sends.
+		// The legacy id-less path keeps the two-final rule.
+		completion = contractSenderZeroFinalUnreported
 	}
 	// A receiver that has not reported is asked for its final now that the
-	// sender is done (CLIENTCLOSE1.md section 3). One that checkpointed settles
-	// with this final instead. A retried final is not applied and asks nothing.
-	if applied && party == ContractPartySource && !checkpoint && !receiverFinal && !receiverCheckpointed {
+	// sender is done (CLIENTCLOSE.md section 3). One that checkpointed, or a
+	// contract the sender never used, settles with this final instead. A
+	// retried final is not applied and asks nothing.
+	if applied && party == ContractPartySource && !checkpoint && !receiverFinal && !receiverCheckpointed && 0 < partyUsedTransferByteCount {
 		addClientCloseRelayPostCommit(ctx, tx, destinationId, contractId)
 	}
 	// A checkpoint permits resuming the same contract. A final party close
@@ -3224,6 +3231,9 @@ func readContractCloseRecords(ctx context.Context, conn server.PgCanQuery, contr
 func contractClosesMaySettle(closes map[ContractParty]contractCloseRecord, completion contractCheckpointCompletion) bool {
 	source, sourceOk := closes[ContractPartySource]
 	destination, destinationOk := closes[ContractPartyDestination]
+	if completion == contractSenderZeroFinalUnreported {
+		return sourceOk && !source.checkpoint && !destinationOk
+	}
 	return sourceOk && destinationOk && !source.checkpoint && (!destination.checkpoint || completion != contractCheckpointNoCompletion)
 }
 
@@ -3237,6 +3247,9 @@ const (
 	contractCheckpointAfterSenderFinal
 	// the sender's final after a receiver checkpoint (owner, 2026-10-28)
 	contractSenderFinalAfterCheckpoint
+	// the sender's final of zero bytes while the receiver has not reported: an
+	// unused contract (owner, 2026-10-28)
+	contractSenderZeroFinalUnreported
 )
 
 // A private test seam observes each settlement transaction a report opens.
@@ -3366,6 +3379,37 @@ func settleContractWithOptions(ctx context.Context, contractId server.Id, scope 
 					completedCheckpoint = true
 					destinationClose.checkpoint = false
 					server.AddTxCommitCount(tx, &contractCoveredCheckpointCounter, 1)
+				}
+			}
+		}
+
+		if completion == contractSenderZeroFinalUnreported && scope == nil && sourceOk && !destinationOk && !sourceClose.checkpoint {
+			// The sender used nothing, and the receiver never reported: it never
+			// saw the contract. Complete the receiver's side as a zero final
+			// under the contract lock and settle the two zeros now, instead of
+			// leaving the reservation to the expiry sweep, which settles a
+			// sender-only contract with the sender's count anyway.
+			var destinationId server.Id
+			var outcome *ContractOutcome
+			var dispute, expiryStarted bool
+			err := tx.QueryRow(ctx, `SELECT destination_id,outcome,dispute,usage_unverified FROM transfer_contract WHERE contract_id=$1 FOR UPDATE`, contractId).Scan(&destinationId, &outcome, &dispute, &expiryStarted)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return
+			}
+			server.Raise(err)
+			closes = readCloses()
+			sourceClose, sourceOk = closes[ContractPartySource]
+			destinationClose, destinationOk = closes[ContractPartyDestination]
+			if outcome == nil && !dispute && !expiryStarted &&
+				sourceOk && !sourceClose.checkpoint && !sourceClose.conservative && sourceClose.usedTransferByteCount == 0 &&
+				!destinationOk {
+				applied, _, _, err := applyContractCloseReportUsageInTx(ctx, tx, contractId, destinationId, 0, false, nil, nil)
+				server.Raise(err)
+				if applied {
+					completedCheckpoint = true
+					destinationClose = contractCloseRecord{}
+					destinationOk = true
+					server.AddTxCommitCount(tx, &contractZeroFinalSettledCounter, 1)
 				}
 			}
 		}

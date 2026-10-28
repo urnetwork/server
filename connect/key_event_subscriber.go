@@ -79,7 +79,7 @@ type keyEventSubscriber struct {
 	hopListeners     map[server.Id]map[int64]*model.StreamHopListener
 	closeListeners   map[server.Id]map[int64]*clientCloseListener
 	// closes what this process holds of a client removed through the api
-	// (CLIENTCLOSE1.md); it must not block
+	// (CLIENTCLOSE.md); it must not block
 	clientRemoved func(server.Id)
 	newPeerDelta  func(context.Context, server.Id, server.Id, string) *model.NetworkPeerDelta
 	// the session revision read behind hints; session.NetworkSessionRevision
@@ -151,7 +151,7 @@ func (self *keyEventSubscriber) AddHopListener(clientId server.Id, listener *mod
 }
 
 // AddCloseListener registers a resident client's close-request listener for
-// key-event kicks (CLIENTCLOSE1.md).
+// key-event kicks (CLIENTCLOSE.md).
 func (self *keyEventSubscriber) AddCloseListener(clientId server.Id, listener *clientCloseListener) (remove func()) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()

@@ -86,7 +86,7 @@ func TestClientCloseRequestsAreTakenOnce(t *testing.T) {
 
 // The sender's final settles a contract whose receiver checkpointed (owner,
 // 2026-10-28), and asks a receiver that has not reported for its final
-// (CLIENTCLOSE1.md section 3).
+// (CLIENTCLOSE.md section 3).
 func TestSourceFinalAsksDestinationToClose(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -205,7 +205,7 @@ func TestSourceFinalAsksDestinationToClose(t *testing.T) {
 }
 
 // An api removal sets the client's removed flag and asks each counterparty to
-// close its open contracts and sequences with the client (CLIENTCLOSE1.md
+// close its open contracts and sequences with the client (CLIENTCLOSE.md
 // section 4).
 func TestRemoveNetworkClientAsksCounterpartiesToClose(t *testing.T) {
 	env := server.DefaultTestEnv()

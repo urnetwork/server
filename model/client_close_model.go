@@ -1,4 +1,4 @@
-// Client close (CLIENTCLOSE1.md). Two per-client Redis keys whose keyspace
+// Client close (CLIENTCLOSE.md). Two per-client Redis keys whose keyspace
 // events reach the connect and proxy processes, modeled on the stream hop set
 // (`clientStreamHopsKey`):
 //   - `{<clientId>}c_removed` is set after an api removal commits. Each connect
@@ -190,7 +190,7 @@ func TakeClientCloseRequests(ctx context.Context, clientId server.Id, limit int)
 }
 
 // After the sender's final close commits, asks the destination to send its
-// final for the contract (CLIENTCLOSE1.md section 3).
+// final for the contract (CLIENTCLOSE.md section 3).
 func addClientCloseRelayPostCommit(ctx context.Context, tx server.PgTx, destinationId server.Id, contractId server.Id) {
 	server.AddTxPostCommit(tx, "client_close_relay/"+contractId.String(), func() any {
 		relayCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), server.TxPostCommitTimeout)
@@ -204,7 +204,7 @@ func addClientCloseRelayPostCommit(ctx context.Context, tx server.PgTx, destinat
 
 // After an api removal commits, sets the removed flags and queues the read
 // that asks the clients' counterparties to close their open contracts with
-// them (CLIENTCLOSE1.md section 4).
+// them (CLIENTCLOSE.md section 4).
 func addClientsRemovedPostCommit(ctx context.Context, tx server.PgTx, clientIds []server.Id) {
 	removedClientIds := slices.Clone(clientIds)
 	server.AddTxPostCommit(tx, "client_close_removed/"+server.NewId().String(), func() any {

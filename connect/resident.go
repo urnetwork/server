@@ -763,7 +763,7 @@ type Exchange struct {
 	// compulsory move's deadline. Nil until the first one.
 	connectionMovedCloses map[server.Id]func()
 	// connection id -> the typed authorization close of one of those
-	// transports, for an api removal (CLIENTCLOSE1.md). Nil until the first one.
+	// transports, for an api removal (CLIENTCLOSE.md). Nil until the first one.
 	connectionAuthorizationCloses map[server.Id]func(int)
 	// decides at drain time whether drains may send moves; nil allows
 	// (SetDrainMovesAllowed)
@@ -4508,7 +4508,7 @@ func (self *Resident) Run() {
 		defer removeHopListener()
 		streamHopListener.Resync()
 
-		// the client's close requests (CLIENTCLOSE1.md). Requests added before
+		// the client's close requests (CLIENTCLOSE.md). Requests added before
 		// this registration had no listener, so it takes once now.
 		closeListener := newClientCloseListener(self.ctx, self.clientId, self.sendListenerFrame)
 		defer closeListener.CloseAndWait()
