@@ -25,9 +25,12 @@ const (
 	CompetitionWinnerReviewModel     = "gpt-5.4-mini"
 	CompetitionWinnerReviewReasoning = "xhigh"
 	// The aggregate is a versioned union, not a fabricated individual model.
-	CompetitionSnowWinnerReviewPolicy    = "elected_winner_snow_union_v1"
-	CompetitionSnowWinnerReviewModel     = "snow-qwen-gemma-muse-union"
+	CompetitionSnowWinnerReviewPolicy    = "elected_winner_snow_union_v2"
+	CompetitionSnowWinnerReviewModel     = "snow-qwen-gemma-union"
 	CompetitionSnowWinnerReviewReasoning = "provider-default"
+	// Retained three-member rounds keep their exact provider and finding census.
+	CompetitionSnowWinnerReviewPolicyV1 = "elected_winner_snow_union_v1"
+	CompetitionSnowWinnerReviewModelV1  = "snow-qwen-gemma-muse-union"
 	// Historical policy identity remains bound to its original provider.
 	CompetitionLegacyWinnerReviewPolicy    = "elected_winner_sol61max_v1"
 	CompetitionLegacyWinnerReviewModel     = "gpt-6.1-sol"
@@ -115,6 +118,8 @@ func CompetitionWinnerReviewProvider(policy string) (modelName string, reasoning
 	switch policy {
 	case CompetitionSnowWinnerReviewPolicy:
 		return CompetitionSnowWinnerReviewModel, CompetitionSnowWinnerReviewReasoning, true
+	case CompetitionSnowWinnerReviewPolicyV1:
+		return CompetitionSnowWinnerReviewModelV1, CompetitionSnowWinnerReviewReasoning, true
 	case CompetitionWinnerReviewPolicy:
 		return CompetitionWinnerReviewModel, CompetitionWinnerReviewReasoning, true
 	case CompetitionLegacyWinnerReviewPolicy:
@@ -134,7 +139,25 @@ func IsCompetitionWinnerReviewPolicy(policy string) bool {
 // Each member keeps its complete six-criterion findings; callers cannot mutate
 // this census or silently substitute another checkpoint alias.
 func CompetitionSnowWinnerReviewModels() []string {
-	return []string{"qwen3.8-27b", "gemma-4-26b-a4b", "muse-glimmer-30b"}
+	return CompetitionSnowWinnerReviewModelsForPolicy(CompetitionSnowWinnerReviewPolicy)
+}
+
+// Historical rounds retain all three members; the new policy requires both
+// Qwen and Gemma. Unknown selectors never supply an implicit member census.
+func CompetitionSnowWinnerReviewModelsForPolicy(policy string) []string {
+	switch policy {
+	case CompetitionSnowWinnerReviewPolicy:
+		return []string{"qwen3.8-27b", "gemma-4-26b-a4b"}
+	case CompetitionSnowWinnerReviewPolicyV1:
+		return []string{"qwen3.8-27b", "gemma-4-26b-a4b", "muse-glimmer-30b"}
+	default:
+		return nil
+	}
+}
+
+// Version selection comes from the immutable round policy, not provider output.
+func IsCompetitionSnowWinnerReviewPolicy(policy string) bool {
+	return policy == CompetitionSnowWinnerReviewPolicy || policy == CompetitionSnowWinnerReviewPolicyV1
 }
 
 // Both contracts preserve v2 reward semantics; the blob contract additionally
@@ -413,10 +436,10 @@ func ValidateCompetitionIntegrityReview(request CompetitionIntegrityReviewReques
 }
 
 // Validates one Snow member's six unattributed findings, not a publishable
-// three-member review. The public validator still requires eighteen attributed
+// aggregate review. The public validator still requires every attributed
 // findings; all identity, disposition, reason and support rules stay shared.
 func ValidateCompetitionSnowMemberContent(request CompetitionIntegrityReviewRequest, policy CompetitionAutomationPolicy) error {
-	if policy.WinnerReviewPolicy != CompetitionSnowWinnerReviewPolicy {
+	if !IsCompetitionSnowWinnerReviewPolicy(policy.WinnerReviewPolicy) {
 		return errors.New("Snow member content requires the exact Snow winner policy")
 	}
 	return validateCompetitionIntegrityReviewContent(request, policy, true)
@@ -460,7 +483,7 @@ func validateCompetitionIntegrityReviewContent(request CompetitionIntegrityRevie
 		if (request.RewardDisposition == "approved" || request.RewardDisposition == "restored") && request.SourceDisposition != "approved" {
 			return errors.New("affirmative winner review must approve the same source")
 		}
-		if policy.WinnerReviewPolicy == CompetitionSnowWinnerReviewPolicy &&
+		if IsCompetitionSnowWinnerReviewPolicy(policy.WinnerReviewPolicy) &&
 			(request.RewardDisposition == "unchanged" || request.SourceDisposition == "deferred" || request.SourceDisposition == "unchanged") {
 			return errors.New("an uncertain Snow union cannot confer review authority")
 		}
@@ -483,10 +506,10 @@ func validateCompetitionIntegrityReviewContent(request CompetitionIntegrityRevie
 			return errors.New("repeat exclusion was not prospectively adopted")
 		}
 	}
-	snowReview := policy.WinnerReviewPolicy == CompetitionSnowWinnerReviewPolicy
+	snowReview := IsCompetitionSnowWinnerReviewPolicy(policy.WinnerReviewPolicy)
 	models := []string{""}
 	if snowReview && !snowMember {
-		models = CompetitionSnowWinnerReviewModels()
+		models = CompetitionSnowWinnerReviewModelsForPolicy(policy.WinnerReviewPolicy)
 	}
 	criteriaKVs := map[string]bool{}
 	for _, modelName := range models {

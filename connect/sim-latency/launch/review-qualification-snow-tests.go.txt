@@ -209,7 +209,7 @@ func TestReviewQualificationSnowInjectionOpposesExpectedVerdict(t *testing.T) {
 	}
 }
 
-// The exact three-member settings and all six cases are independently pinned.
+// The exact two-member settings and all six cases are independently pinned.
 func TestReviewQualificationSnowPlanRejectsMissingMember(t *testing.T) {
 	provider := defaultWinnerSnowProviderSettings()
 	cases, err := frozenSnowReviewQualificationCases()
@@ -221,22 +221,22 @@ func TestReviewQualificationSnowPlanRejectsMissingMember(t *testing.T) {
 	if err := validateSnowReviewQualificationPlan(plan, provider, strings.Repeat("a", 64)); err != nil {
 		t.Fatal(err)
 	}
-	plan.Members = plan.Members[:2]
+	plan.Members = plan.Members[:1]
 	if err := validateSnowReviewQualificationPlan(plan, provider, strings.Repeat("a", 64)); err == nil {
-		t.Fatal("two members qualified the three-model policy")
+		t.Fatal("one member qualified the two-model policy")
 	}
 }
 
-// Native all-three approval is accepted only with every attributed finding.
-func TestReviewQualificationSnowRequiresThreeCompletedApprovals(t *testing.T) {
+// Native both-member approval is accepted only with every attributed finding.
+func TestReviewQualificationSnowRequiresBothCompletedApprovals(t *testing.T) {
 	cases, err := frozenSnowReviewQualificationCases()
 	if err != nil {
 		t.Fatal(err)
 	}
-	content, calls := snowReviewQualificationMockResponse(t, cases[1].Request, []string{"approve", "approve", "approve"}, -1)
+	content, calls := snowReviewQualificationMockResponse(t, cases[1].Request, []string{"approve", "approve"}, -1)
 	observation, err := validateSnowReviewQualificationResponse(content, cases[1].Request, "approve", defaultWinnerSnowProviderSettings(), strings.Repeat("a", 64), defaultReviewQualificationSettings())
-	if err != nil || calls != 3 || !observation.Passed || !observation.WouldAuthorize || len(observation.ProviderResponseIds) != 3 {
-		t.Fatalf("complete three-model result rejected: %+v %v", observation, err)
+	if err != nil || calls != 2 || !observation.Passed || !observation.WouldAuthorize || len(observation.ProviderResponseIds) != 2 {
+		t.Fatalf("complete two-model result rejected: %+v %v", observation, err)
 	}
 }
 
@@ -246,12 +246,12 @@ func TestReviewQualificationSnowRetainsEachMembersRejection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for index := 0; index < 3; index++ {
-		decisions := []string{"approve", "approve", "approve"}
+	for index := 0; index < 2; index++ {
+		decisions := []string{"approve", "approve"}
 		decisions[index] = "disqualify"
 		content, calls := snowReviewQualificationMockResponse(t, cases[2].Request, decisions, -1)
 		observation, err := validateSnowReviewQualificationResponse(content, cases[2].Request, "disqualify", defaultWinnerSnowProviderSettings(), strings.Repeat("a", 64), defaultReviewQualificationSettings())
-		if err != nil || calls != 3 || !observation.Passed || !observation.WouldAuthorize {
+		if err != nil || calls != 2 || !observation.Passed || !observation.WouldAuthorize {
 			t.Fatalf("member %d lost its rejection or short-circuited later members: %v", index, err)
 		}
 	}
@@ -263,9 +263,9 @@ func TestReviewQualificationSnowUncertaintyCannotAuthorize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	content, calls := snowReviewQualificationMockResponse(t, cases[5].Request, []string{"approve", "uncertain", "approve"}, -1)
+	content, calls := snowReviewQualificationMockResponse(t, cases[5].Request, []string{"approve", "uncertain"}, -1)
 	observation, err := validateSnowReviewQualificationResponse(content, cases[5].Request, "uncertain", defaultWinnerSnowProviderSettings(), strings.Repeat("a", 64), defaultReviewQualificationSettings())
-	if err != nil || calls != 3 || !observation.Passed || observation.WouldAuthorize {
+	if err != nil || calls != 2 || !observation.Passed || observation.WouldAuthorize {
 		t.Fatalf("uncertainty gained authority: %+v %v", observation, err)
 	}
 }
@@ -276,9 +276,9 @@ func TestReviewQualificationSnowTransportFailureHoldsWithoutRetry(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	for index := 0; index < 3; index++ {
-		content, calls := snowReviewQualificationMockResponse(t, cases[2].Request, []string{"disqualify", "approve", "approve"}, index)
-		if calls != 3 {
+	for index := 0; index < 2; index++ {
+		content, calls := snowReviewQualificationMockResponse(t, cases[2].Request, []string{"disqualify", "approve"}, index)
+		if calls != 2 {
 			t.Fatalf("provider error retried or skipped members: %d", calls)
 		}
 		if _, err := validateSnowReviewQualificationResponse(content, cases[2].Request, "disqualify", defaultWinnerSnowProviderSettings(), strings.Repeat("a", 64), defaultReviewQualificationSettings()); err == nil {
@@ -293,8 +293,8 @@ func TestReviewQualificationSnowRejectsChangedMemberOriginals(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	content, _ := snowReviewQualificationMockResponse(t, cases[1].Request, []string{"approve", "approve", "approve"}, -1)
-	for index, mutate := range []func(*winnerSnowEvidence){func(e *winnerSnowEvidence) { e.Members = e.Members[:2] }, func(e *winnerSnowEvidence) { e.Members[1].Revision = strings.Repeat("9", 40) }, func(e *winnerSnowEvidence) { e.Members[1].ProviderResponseId = e.Members[0].ProviderResponseId }, func(e *winnerSnowEvidence) { e.Members[0].ProviderOutput = `{}` }, func(e *winnerSnowEvidence) {
+	content, _ := snowReviewQualificationMockResponse(t, cases[1].Request, []string{"approve", "approve"}, -1)
+	for index, mutate := range []func(*winnerSnowEvidence){func(e *winnerSnowEvidence) { e.Members = e.Members[:1] }, func(e *winnerSnowEvidence) { e.Members[1].Revision = strings.Repeat("9", 40) }, func(e *winnerSnowEvidence) { e.Members[1].ProviderResponseId = e.Members[0].ProviderResponseId }, func(e *winnerSnowEvidence) { e.Members[0].ProviderOutput = `{}` }, func(e *winnerSnowEvidence) {
 		e.Members[0].Usage = json.RawMessage(`{"input_tokens":0,"output_tokens":0}`)
 	}, func(e *winnerSnowEvidence) { e.ProviderSettingsSha256 = strings.Repeat("9", 64) }} {
 		var result winnerReviewBrokerResult
@@ -576,7 +576,7 @@ func newSnowReviewQualificationContainmentFixture(t *testing.T) ([]byte, []byte,
 		t.Fatal(err)
 	}
 	input, _ := json.Marshal(cases[1].Request)
-	output, _ := snowReviewQualificationMockResponse(t, cases[1].Request, []string{"approve", "approve", "approve"}, -1, snowReviewQualificationMockOptions{StateDirectory: profile.StateDirectory, ProviderSettingsSha256: profile.Settings.Sha256})
+	output, _ := snowReviewQualificationMockResponse(t, cases[1].Request, []string{"approve", "approve"}, -1, snowReviewQualificationMockOptions{StateDirectory: profile.StateDirectory, ProviderSettingsSha256: profile.Settings.Sha256})
 	manifestBytes, err := os.ReadFile(filepath.Join(attempt, "evidence-manifest.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -641,7 +641,7 @@ func newSnowReviewQualificationContainmentFixture(t *testing.T) ([]byte, []byte,
 		t.Fatal(err)
 	}
 	artifacts["attempt-claim.json"] = claim
-	for index := 1; index <= 3; index++ {
+	for index := 1; index <= 2; index++ {
 		for _, phase := range []string{"started", "complete"} {
 			name := fmt.Sprintf("member-%02d.%s.json", index, phase)
 			content, err := os.ReadFile(filepath.Join(profile.StateDirectory, name))
@@ -672,7 +672,7 @@ func TestReviewQualificationSnowAuthenticatesCompletePrivateJournalManifest(t *t
 	if _, err := authenticateReviewQualificationContainmentForProvider(input, output, diagnostics, false, image, settings, profile); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(attempt, "member-03.complete.json"), []byte(`{"schema":1}`), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(attempt, "member-02.complete.json"), []byte(`{"schema":1}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := authenticateReviewQualificationContainmentForProvider(input, output, diagnostics, false, image, settings, profile); err == nil {
@@ -779,4 +779,118 @@ func TestReviewQualificationSnowRefusesStaleInjectedPatchEntry(t *testing.T) {
 		return
 	}
 	t.Fatal("prompt-injection case missing")
+}
+
+// Re-seal only the synthetic fixture's manifest and wrapper receipt, so wrong
+// member censuses fail their actual native validator rather than a stale hash.
+func rewriteSnowReviewQualificationSyntheticManifest(t *testing.T, attempt string, diagnostics []byte, mutate func(map[string][]byte)) []byte {
+	t.Helper()
+	var receipt reviewQualificationWrapperReceipt
+	if err := json.Unmarshal(bytes.TrimSpace(diagnostics), &receipt); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(filepath.Join(attempt, "evidence-manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest struct {
+		Schema    int                          `json:"schema"`
+		Kind      string                       `json:"kind"`
+		Artifacts []reviewQualificationBinding `json:"artifacts"`
+	}
+	if err := json.Unmarshal(content, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	artifacts := map[string][]byte{}
+	for _, binding := range manifest.Artifacts {
+		content, err := os.ReadFile(filepath.Join(attempt, binding.Path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		artifacts[binding.Path] = content
+	}
+	mutate(artifacts)
+	manifest.Artifacts = nil
+	for name, content := range artifacts {
+		if err := os.WriteFile(filepath.Join(attempt, name), content, 0600); err != nil {
+			t.Fatal(err)
+		}
+		manifest.Artifacts = append(manifest.Artifacts, reviewQualificationBinding{Path: name, Sha256: reviewQualificationHash(content), Bytes: int64(len(content))})
+	}
+	content, err = json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(attempt, "evidence-manifest.json"), content, 0600); err != nil {
+		t.Fatal(err)
+	}
+	receipt.ManifestSha256 = reviewQualificationHash(content)
+	content, err = json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return append(content, '\n')
+}
+
+// The real composed loader must accept precisely the two selected members'
+// four journal leaves and twenty-three complete wrapper artifacts.
+func TestReviewQualificationSnowTwoMemberCompletedManifestIsExact(t *testing.T) {
+	input, output, diagnostics, image, settings, attempt, profile := newSnowReviewQualificationContainmentFixture(t)
+	content, err := os.ReadFile(filepath.Join(attempt, "evidence-manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest struct {
+		Artifacts []reviewQualificationBinding `json:"artifacts"`
+	}
+	if err := json.Unmarshal(content, &manifest); err != nil || len(manifest.Artifacts) != 23 {
+		t.Fatal("two-member fixture does not contain the exact complete artifact census", err)
+	}
+	names, err := os.ReadDir(profile.StateDirectory)
+	if err != nil || len(names) != 4 {
+		t.Fatal("two-member fixture does not contain exactly four journal leaves", err)
+	}
+	if _, err := authenticateReviewQualificationContainmentForProvider(input, output, diagnostics, false, image, settings, profile); err != nil {
+		t.Fatal("complete two-member containment proof refused", err)
+	}
+}
+
+// A rehashed missing selected pair remains incomplete, not a smaller quorum.
+func TestReviewQualificationSnowTwoMemberManifestRejectsMissingPair(t *testing.T) {
+	input, output, diagnostics, image, settings, attempt, profile := newSnowReviewQualificationContainmentFixture(t)
+	diagnostics = rewriteSnowReviewQualificationSyntheticManifest(t, attempt, diagnostics, func(artifacts map[string][]byte) {
+		delete(artifacts, "member-02.started.json")
+		delete(artifacts, "member-02.complete.json")
+	})
+	if _, err := authenticateReviewQualificationContainmentForProvider(input, output, diagnostics, false, image, settings, profile); err == nil || !strings.Contains(err.Error(), "evidence coverage changed") {
+		t.Fatal("missing selected member pair did not fail the exact coverage check", err)
+	}
+}
+
+// Restoring an obsolete third pair cannot enlarge the closed current census.
+func TestReviewQualificationSnowTwoMemberManifestRejectsExtraPair(t *testing.T) {
+	input, output, diagnostics, image, settings, attempt, profile := newSnowReviewQualificationContainmentFixture(t)
+	diagnostics = rewriteSnowReviewQualificationSyntheticManifest(t, attempt, diagnostics, func(artifacts map[string][]byte) {
+		artifacts["member-03.started.json"] = append([]byte{}, artifacts["member-02.started.json"]...)
+		artifacts["member-03.complete.json"] = append([]byte{}, artifacts["member-02.complete.json"]...)
+	})
+	if _, err := authenticateReviewQualificationContainmentForProvider(input, output, diagnostics, false, image, settings, profile); err == nil || !strings.Contains(err.Error(), "evidence manifest invalid") {
+		t.Fatal("obsolete extra member pair did not fail the closed manifest bound", err)
+	}
+}
+
+// Keeping twenty-three artifacts cannot substitute removed member03 for the
+// required member02 started/complete pair, even after resealing every digest.
+func TestReviewQualificationSnowTwoMemberManifestRejectsRemovedMemberReplacement(t *testing.T) {
+	input, output, diagnostics, image, settings, attempt, profile := newSnowReviewQualificationContainmentFixture(t)
+	diagnostics = rewriteSnowReviewQualificationSyntheticManifest(t, attempt, diagnostics, func(artifacts map[string][]byte) {
+		for _, phase := range []string{"started", "complete"} {
+			name := "member-02." + phase + ".json"
+			artifacts["member-03."+phase+".json"] = append([]byte{}, artifacts[name]...)
+			delete(artifacts, name)
+		}
+	})
+	if _, err := authenticateReviewQualificationContainmentForProvider(input, output, diagnostics, false, image, settings, profile); err == nil || !strings.Contains(err.Error(), "omitted required containment evidence") {
+		t.Fatal("removed member replaced the selected pair at the same artifact count", err)
+	}
 }

@@ -85,7 +85,7 @@ func defaultSourceTestModelSettings() sourceTestModelSettings {
 // returned evidence before using its digest; errors never authorize promotion.
 func executeSourceTestModel(ctx context.Context, client *http.Client, key string, plan sourceTestPlan, settings sourceTestModelSettings,
 	runPrescribed func(context.Context) (sourceTestExecution, error)) (*sourceTestModelEvidence, error) {
-	if plan.WinnerReviewPolicy == model.CompetitionSnowWinnerReviewPolicy {
+	if model.IsCompetitionSnowWinnerReviewPolicy(plan.WinnerReviewPolicy) {
 		return executeSourceTestSnow(ctx, client, plan, settings, runPrescribed)
 	}
 	if plan.WinnerReviewPolicy != "" || settings.SnowProvider != nil {

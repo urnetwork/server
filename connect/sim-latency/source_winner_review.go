@@ -129,7 +129,7 @@ type winnerReviewBrokerResult struct {
 // API mutation. Infrastructure/uncertainty is not a dishonest-submission verdict.
 func validateWinnerReviewBrokerResult(result *winnerReviewBrokerResult, template model.CompetitionIntegrityReviewRequest, policy model.CompetitionAutomationPolicy, original ...winnerReviewBrokerRequest) error {
 	maximumEvidenceBytes := 64 * 1024
-	if policy.WinnerReviewPolicy == model.CompetitionSnowWinnerReviewPolicy {
+	if model.IsCompetitionSnowWinnerReviewPolicy(policy.WinnerReviewPolicy) {
 		maximumEvidenceBytes = 512 * 1024
 	}
 	modelName, reasoning, supported := model.CompetitionWinnerReviewProvider(policy.WinnerReviewPolicy)
@@ -152,7 +152,7 @@ func validateWinnerReviewBrokerResult(result *winnerReviewBrokerResult, template
 	if hex.EncodeToString(digest[:]) != review.PrivateEvidenceSha256 {
 		return errors.New("winner review private evidence digest does not match")
 	}
-	if policy.WinnerReviewPolicy == model.CompetitionSnowWinnerReviewPolicy {
+	if model.IsCompetitionSnowWinnerReviewPolicy(policy.WinnerReviewPolicy) {
 		if len(original) != 1 {
 			return errors.New("Snow review requires its original authenticated input")
 		}
@@ -316,7 +316,7 @@ func winnerReviewResponse(path string, request winnerReviewBrokerRequest, run fu
 	if errors.Is(err, os.ErrNotExist) {
 		return winnerReviewCompletedResponse(path+".broker-response", request, run)
 	}
-	if err != nil || request.Request.Policy.WinnerReviewPolicy != model.CompetitionSnowWinnerReviewPolicy {
+	if err != nil || !model.IsCompetitionSnowWinnerReviewPolicy(request.Request.Policy.WinnerReviewPolicy) {
 		return output, request, err
 	}
 	completed, original, err := winnerReviewCompletedResponse(path+".broker-response", request, nil)

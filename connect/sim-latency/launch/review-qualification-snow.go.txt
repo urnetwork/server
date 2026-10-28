@@ -1,5 +1,5 @@
 // The prospective Snow qualification reuses the actual broker/containment
-// workflow. All three native judgments and their union remain private evidence.
+// workflow. Both native judgments and their union remain private evidence.
 package main
 
 import (
@@ -127,14 +127,14 @@ func bindSnowReviewFixtureEvidence(cases []reviewQualificationCase, content []by
 }
 
 // A valid models-list response, a smaller pool or a changed checkpoint cannot
-// qualify this exact three-member policy or change any frozen expected answer.
+// qualify this exact two-member policy or change any frozen expected answer.
 func validateSnowReviewQualificationPlan(plan reviewQualificationPlan, provider winnerSnowProviderSettings, settingsSha256 string) error {
 	cases, err := frozenSnowReviewQualificationCases()
 	if err != nil {
 		return err
 	}
 	if validateWinnerSnowProviderSettings(provider) != nil || !validSha256(settingsSha256) || plan.Schema != 1 || plan.Kind != "winner-review-snow-provider-qualification-plan" || plan.PolicyModel != model.CompetitionSnowWinnerReviewModel || plan.ProviderModel != model.CompetitionSnowWinnerReviewModel || plan.Reasoning != model.CompetitionSnowWinnerReviewReasoning || plan.ProviderSettingsSha256 != settingsSha256 || !reflect.DeepEqual(plan.Members, provider.Members) || !validSha256(plan.BrokerSha256) || !validSha256(plan.ImageReceiptSha256) || !reflect.DeepEqual(plan.Cases, cases) {
-		return errors.New("Snow qualification requires all three exact members and all six frozen cases")
+		return errors.New("Snow qualification requires both exact members and all six frozen cases")
 	}
 	return nil
 }
@@ -160,7 +160,7 @@ func validateSnowReviewQualificationResponse(content []byte, request winnerRevie
 	if err := decodeStrictJSONBytes([]byte(result.PrivateEvidence), &evidence, "Snow qualification member originals"); err != nil {
 		return observation, err
 	}
-	if evidence.ProviderSettingsSha256 != settingsSha256 || !reflect.DeepEqual(evidence.ProviderSettings, provider) || len(evidence.Members) != len(provider.Members) || len(evidence.Members) != 3 || len(result.Review.Findings) != 18 || evidence.Judgment.Decision != expected {
+	if evidence.ProviderSettingsSha256 != settingsSha256 || !reflect.DeepEqual(evidence.ProviderSettings, provider) || len(evidence.Members) != len(provider.Members) || len(evidence.Members) != len(model.CompetitionSnowWinnerReviewModels()) || len(result.Review.Findings) != 6*len(provider.Members) || evidence.Judgment.Decision != expected {
 		return observation, errors.New("Snow qualification lost a member, checkpoint, settings pin or expected union")
 	}
 	seen := map[string]bool{}
@@ -168,7 +168,7 @@ func validateSnowReviewQualificationResponse(content []byte, request winnerRevie
 	for index, member := range evidence.Members {
 		pin := provider.Members[index]
 		if member.Name != pin.Name || member.RequestedModel != pin.Model || member.Model != pin.Model || member.Revision != pin.Revision || member.Reasoning != pin.Reasoning || member.ProviderResponseId == "" || seen[member.ProviderResponseId] || !validSha256(member.RequestSha256) || !validSha256(member.ResponseSha256) || member.Error != "" {
-			return observation, errors.New("Snow qualification lacks three independent completed model receipts")
+			return observation, errors.New("Snow qualification lacks both independent completed model receipts")
 		}
 		seen[member.ProviderResponseId] = true
 		var usage struct {

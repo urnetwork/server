@@ -36,13 +36,27 @@ type winnerSnowProviderSettings struct {
 	Members  []winnerSnowMember `json:"members"`
 }
 
-// Preserve the selected three checkpoints, rather than an interchangeable pool.
+// Preserve both selected checkpoints, rather than an interchangeable pool.
 func defaultWinnerSnowProviderSettings() winnerSnowProviderSettings {
 	return winnerSnowProviderSettings{Schema: 1, Kind: "snow-review-provider", Endpoint: "http://192.168.1.162:8000/v1/responses", Members: []winnerSnowMember{
 		{Name: "qwen", Model: "qwen3.8-27b", Revision: "f6b4e4c3c4119883d95c554ae69dc934d3d86433", Reasoning: "xhigh"},
 		{Name: "gemma", Model: "gemma-4-26b-a4b", Revision: "a19cfe00be84568a6867111c9a68c9c44fdcffe6", Reasoning: "high"},
-		{Name: "muse", Model: "muse-glimmer-30b", Revision: "e83ead547c81973aaa09c0072c0dbc916e0d8190", Reasoning: "xhigh"},
 	}}
+}
+
+// Only historical evidence replay may select the old three-member release;
+// current provider execution always validates the two-member default above.
+func winnerSnowProviderSettingsForPolicy(policy string) (winnerSnowProviderSettings, bool) {
+	settings := defaultWinnerSnowProviderSettings()
+	switch policy {
+	case model.CompetitionSnowWinnerReviewPolicy:
+		return settings, true
+	case model.CompetitionSnowWinnerReviewPolicyV1:
+		settings.Members = append(settings.Members, winnerSnowMember{Name: "muse", Model: "muse-glimmer-30b", Revision: "e83ead547c81973aaa09c0072c0dbc916e0d8190", Reasoning: "xhigh"})
+		return settings, true
+	default:
+		return winnerSnowProviderSettings{}, false
+	}
 }
 
 // Keep transport/output bounds owned and explicit; all calls share one deadline.
@@ -55,9 +69,9 @@ func defaultWinnerSnowModelSettings() winnerModelSettings {
 }
 
 // Provider constraints and native member validation share the same bounds;
-// three concise public explanations fit the aggregate API contract.
+// both concise public explanations fit the aggregate API contract.
 type winnerSnowJudgmentSettings struct {
-	// Positive UTF-8 byte bound per member; 1200 leaves room for three public summaries.
+	// Positive UTF-8 byte bound per member; 1200 leaves room for both public summaries.
 	MaximumPublicExplanationBytes int
 	// Positive UTF-8 byte bound per finding; 4096 matches native API validation.
 	MaximumFindingExplanationBytes int
@@ -127,11 +141,17 @@ func winnerSnowModelSchema(policy model.CompetitionAutomationPolicy) map[string]
 
 // The fixed endpoint and exact ordered members cannot be replaced by patch text.
 func validateWinnerSnowProviderSettings(settings winnerSnowProviderSettings) error {
-	expected := defaultWinnerSnowProviderSettings()
+	return validateWinnerSnowProviderSettingsForPolicy(settings, model.CompetitionSnowWinnerReviewPolicy)
+}
+
+// The old tuple is accepted only when the authenticated historical policy asks
+// for it; arbitrary subsets, aliases and mixed revisions remain invalid.
+func validateWinnerSnowProviderSettingsForPolicy(settings winnerSnowProviderSettings, policy string) error {
+	expected, supported := winnerSnowProviderSettingsForPolicy(policy)
 	content, err := json.Marshal(settings)
 	want, wantErr := json.Marshal(expected)
-	if err != nil || wantErr != nil || !bytes.Equal(content, want) {
-		return errors.New("Snow provider differs from the selected immutable three-model release")
+	if !supported || err != nil || wantErr != nil || !bytes.Equal(content, want) {
+		return errors.New("Snow provider differs from the selected immutable policy release")
 	}
 	return nil
 }
@@ -354,7 +374,7 @@ func winnerSnowDispositionReasons(decision string, reasons []string) []string {
 // accompany the complete attributed union; original reasons remain in members.
 func aggregateWinnerSnow(members []winnerSnowMemberEvidence, provider winnerSnowProviderSettings, request winnerReviewBrokerRequest) winnerModelJudgment {
 	combined := winnerModelJudgment{Decision: "approve", ReasonCodes: []string{}, Findings: []model.CompetitionReviewFinding{}}
-	if len(members) != len(provider.Members) {
+	if len(members) != len(provider.Members) || validateWinnerSnowProviderSettingsForPolicy(provider, request.Request.Policy.WinnerReviewPolicy) != nil {
 		combined.Decision = "uncertain"
 	}
 	reasons := map[string]bool{}
@@ -386,7 +406,7 @@ func aggregateWinnerSnow(members []winnerSnowMemberEvidence, provider winnerSnow
 		}
 		combined.PublicExplanation += member.Name + ": " + member.Judgment.PublicExplanation + "\n"
 	}
-	if len(combined.Findings) != 18 {
+	if len(combined.Findings) != 6*len(model.CompetitionSnowWinnerReviewModelsForPolicy(request.Request.Policy.WinnerReviewPolicy)) {
 		combined.Decision = "uncertain"
 	}
 	if combined.Decision != "uncertain" {
@@ -416,7 +436,10 @@ func aggregateWinnerSnow(members []winnerSnowMemberEvidence, provider winnerSnow
 		combined.ReasonCodes = []string{"SOURCE_NOT_READY"}
 	}
 	if combined.PublicExplanation == "" || len(combined.PublicExplanation) > 4096 {
-		combined.PublicExplanation = "Three-model review is unresolved; inspect the attributed retained evidence."
+		combined.PublicExplanation = "Snow union review is unresolved; inspect the attributed retained evidence."
+		if request.Request.Policy.WinnerReviewPolicy == model.CompetitionSnowWinnerReviewPolicyV1 {
+			combined.PublicExplanation = "Three-model review is unresolved; inspect the attributed retained evidence."
+		}
 		combined.Decision = "uncertain"
 		combined.ReasonCodes = []string{"SOURCE_NOT_READY"}
 	}
@@ -516,7 +539,7 @@ func executeWinnerSnow(ctx context.Context, client *http.Client, request winnerR
 // preexisting intent is ambiguous, never permission to reroll a review.
 func persistWinnerSnowMember(directory string, index int, phase string, value any) error {
 	info, err := os.Lstat(directory)
-	if err != nil || !info.IsDir() || info.Mode().Perm() != 0700 || index < 1 || index > 3 || (phase != "started" && phase != "complete") {
+	if err != nil || !info.IsDir() || info.Mode().Perm() != 0700 || index < 1 || index > len(defaultWinnerSnowProviderSettings().Members) || (phase != "started" && phase != "complete") {
 		return errors.New("Snow member journal directory or identity is invalid")
 	}
 	content, err := json.Marshal(value)
@@ -548,7 +571,10 @@ func winnerSnowBrokerResult(request winnerReviewBrokerRequest, judgment winnerMo
 	review := request.Template
 	review.PrivateEvidenceSha256 = hex.EncodeToString(digest[:])
 	review.ReasonCodes, review.PublicExplanation, review.Findings = judgment.ReasonCodes, judgment.PublicExplanation, judgment.Findings
-	review.WithheldEvidenceExplanation = "All three attributed model judgments and provider receipts are retained privately."
+	review.WithheldEvidenceExplanation = "All attributed model judgments and provider receipts are retained privately."
+	if request.Request.Policy.WinnerReviewPolicy == model.CompetitionSnowWinnerReviewPolicyV1 {
+		review.WithheldEvidenceExplanation = "All three attributed model judgments and provider receipts are retained privately."
+	}
 	for i := range review.Findings {
 		review.Findings[i].EvidenceSha256 = review.PrivateEvidenceSha256
 	}
@@ -560,7 +586,8 @@ func winnerSnowBrokerResult(request winnerReviewBrokerRequest, judgment winnerMo
 	default:
 		review.RewardDisposition, review.SourceDisposition = "pending", "deferred"
 	}
-	return &winnerReviewBrokerResult{Schema: 1, Model: model.CompetitionSnowWinnerReviewModel, Reasoning: model.CompetitionSnowWinnerReviewReasoning, NoMainCredentials: true, NoCandidateExecution: true, Review: review, PrivateEvidence: string(content)}
+	modelName, reasoning, _ := model.CompetitionWinnerReviewProvider(request.Request.Policy.WinnerReviewPolicy)
+	return &winnerReviewBrokerResult{Schema: 1, Model: modelName, Reasoning: reasoning, NoMainCredentials: true, NoCandidateExecution: true, Review: review, PrivateEvidence: string(content)}
 }
 
 // The supervisor independently replays the deterministic union before any API
@@ -570,7 +597,8 @@ func validateWinnerSnowEvidence(result *winnerReviewBrokerResult, request winner
 	if err := decodeStrictJSONBytes([]byte(result.PrivateEvidence), &evidence, "Snow union evidence"); err != nil {
 		return err
 	}
-	if evidence.Kind != "snow-model-union-review/v1" || evidence.Model != model.CompetitionSnowWinnerReviewModel || evidence.PolicyModel != evidence.Model || evidence.Reasoning != model.CompetitionSnowWinnerReviewReasoning || !validSha256(evidence.ProviderSettingsSha256) || validateWinnerSnowProviderSettings(evidence.ProviderSettings) != nil {
+	modelName, reasoning, supported := model.CompetitionWinnerReviewProvider(request.Request.Policy.WinnerReviewPolicy)
+	if !supported || !model.IsCompetitionSnowWinnerReviewPolicy(request.Request.Policy.WinnerReviewPolicy) || evidence.Kind != "snow-model-union-review/v1" || evidence.Model != modelName || evidence.PolicyModel != evidence.Model || evidence.Reasoning != reasoning || !validSha256(evidence.ProviderSettingsSha256) || validateWinnerSnowProviderSettingsForPolicy(evidence.ProviderSettings, request.Request.Policy.WinnerReviewPolicy) != nil {
 		return errors.New("Snow union provenance is incomplete or changed")
 	}
 	input, err := winnerModelInput(request)

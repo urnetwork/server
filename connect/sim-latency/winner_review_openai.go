@@ -425,7 +425,7 @@ func runWinnerReviewBroker(opts docopt.Opts) {
 	transport.Proxy = nil
 	defer transport.CloseIdleConnections()
 	var result *winnerReviewBrokerResult
-	if request.Request.Policy.WinnerReviewPolicy == model.CompetitionSnowWinnerReviewPolicy {
+	if model.IsCompetitionSnowWinnerReviewPolicy(request.Request.Policy.WinnerReviewPolicy) {
 		providerDigest := optString(opts, "--review-provider-settings-sha256", "")
 		provider, providerErr := loadWinnerSnowProviderSettings(optString(opts, "--review-provider-settings", ""), providerDigest)
 		if providerErr != nil {

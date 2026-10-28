@@ -174,15 +174,15 @@ func TestWinnerSnowReviewBudgetReachesLoopbackFrontend(t *testing.T) {
 		t.Fatal(err)
 	}
 	result, err := executeWinnerSnow(t.Context(), client, request, defaultWinnerSnowModelSettings(), defaultWinnerSnowProviderSettings(), strings.Repeat("a", 64), state)
-	if err != nil || result == nil || len(captures) != 3 {
-		t.Fatal("serial synthetic producer did not complete exactly three calls", err)
+	if err != nil || result == nil || len(captures) != 2 {
+		t.Fatal("serial synthetic producer did not complete exactly two calls", err)
 	}
 	schema, err := json.Marshal(winnerSnowModelSchema(request.Request.Policy))
 	if err != nil {
 		t.Fatal(err)
 	}
 	var evidence winnerSnowEvidence
-	if err := json.Unmarshal([]byte(result.PrivateEvidence), &evidence); err != nil || len(evidence.Members) != 3 {
+	if err := json.Unmarshal([]byte(result.PrivateEvidence), &evidence); err != nil || len(evidence.Members) != 2 {
 		t.Fatal("synthetic producer lost member originals", err)
 	}
 	for index, member := range defaultWinnerSnowProviderSettings().Members {
@@ -213,7 +213,7 @@ func TestWinnerSnowReviewBudgetDoesNotAuthorizeIncompleteTerminal(t *testing.T) 
 			t.Fatal(err)
 		}
 		result, err := executeWinnerSnow(t.Context(), client, request, settings, defaultWinnerSnowProviderSettings(), strings.Repeat("a", 64), state)
-		if err != nil || result == nil || len(captures) != 3 {
+		if err != nil || result == nil || len(captures) != 2 {
 			t.Fatal("failed member was retried or lost its durable union evidence", budget, err)
 		}
 		if validateWinnerReviewBrokerResult(result, request.Template, request.Request.Policy, request) == nil {
@@ -238,7 +238,7 @@ func TestWinnerSnowReviewBudgetDoesNotAuthorizeIncompleteTerminal(t *testing.T) 
 		if strings.Contains(complete.Observation.Error, "SYNTHETIC_PROVIDER_ERROR_MUST_NOT_LEAK") || strings.Contains(complete.Observation.Error, "synthetic-budget-response-0") || strings.Contains(complete.Observation.Error, judgment.PrivateEvidence) {
 			t.Fatal("rejection diagnostics leaked provider output or response identifiers")
 		}
-		for index := 0; index < 3; index++ {
+		for index := 0; index < 2; index++ {
 			capture := <-captures
 			if capture.Index != index || capture.DecodeFailed || capture.Payload.MaximumOutputTokens != budget {
 				t.Fatal("incomplete member caused a retuned or repeated request", budget, index)

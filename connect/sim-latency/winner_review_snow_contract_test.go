@@ -246,8 +246,8 @@ func TestWinnerSnowTransportSendsExplicitJudgmentContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	result, err := executeWinnerSnow(t.Context(), client, request, defaultWinnerSnowModelSettings(), provider, strings.Repeat("a", 64), state)
-	if err != nil || calls != 3 {
-		t.Fatal("native composed Snow producer did not complete exactly three intercepted calls", err, calls)
+	if err != nil || calls != 2 {
+		t.Fatal("native composed Snow producer did not complete exactly two intercepted calls", err, calls)
 	}
 	if err := validateWinnerReviewBrokerResult(result, request.Template, request.Request.Policy, request); err != nil {
 		t.Fatal("explicit-contract result lost native union validation", err)

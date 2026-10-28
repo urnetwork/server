@@ -79,7 +79,7 @@ func TestSourceTestSnowSchemaPinsObservedTruthAndAllCopiedFields(t *testing.T) {
 }
 
 // The actual producer runs the trusted observation callback once and sends its
-// exact schema to all three members for both success and genuine observed failure.
+// exact schema to both members for both success and genuine observed failure.
 func TestSourceTestSnowProducerContractPreservesObservedPassAndFailure(t *testing.T) {
 	for _, exitCode := range []int{0, 7} {
 		plan := sourceTestPlanFixture()
@@ -95,7 +95,7 @@ func TestSourceTestSnowProducerContractPreservesObservedPassAndFailure(t *testin
 		requests, executions := 0, 0
 		evidence, err := executeSourceTestModel(t.Context(), sourceSnowTestClient(t, execution, &requests, ""), "", plan, settings,
 			func(context.Context) (sourceTestExecution, error) { executions++; return execution, nil })
-		if err != nil || evidence == nil || evidence.Execution != execution || evidence.Passed != (exitCode == 0) || len(evidence.Members) != 3 || requests != 3 || executions != 1 {
+		if err != nil || evidence == nil || evidence.Execution != execution || evidence.Passed != (exitCode == 0) || len(evidence.Members) != 2 || requests != 2 || executions != 1 {
 			t.Fatal("actual observed pass/failure was replaced or execution/member census changed", evidence, err, requests, executions)
 		}
 		for _, member := range evidence.Members {

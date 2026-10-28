@@ -11031,4 +11031,8 @@ var migrations = []any{
 	// invoice owes, and the in-app past-due notice. A new table: nothing is
 	// rewritten, and older binaries never read it.
 	newSqlMigration(stripeInvoicePaymentFailureSchemaSql),
+
+	// Add Qwen/Gemma prospectively while preserving the original Snow union's
+	// tuples, eighteen-finding authority and every published migration identity.
+	newSqlMigration(competitionSnowTwoMemberWinnerReviewMigration()),
 }

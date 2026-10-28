@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
-readonly configuration=/etc/urnetwork/competition-review.json
+readonly configuration=/etc/urnetwork/competition-review-v2.json
 readonly state_root=/var/lib/urnetwork/competition-review
 readonly input_limit=4194304 output_limit=1048576 error_limit=65536
 readonly invocation_limit_seconds=1800 cleanup_limit_seconds=20 command_limit_seconds=10
@@ -33,7 +33,7 @@ else
     provider_kind=snow
     provider_settings="$(jq -er '.provider_settings_file' "$configuration")"
     provider_settings_sha256="$(jq -er '.provider_settings_sha256' "$configuration")"
-    [[ "$provider_settings" == /var/lib/urnetwork/competition-review/snow-provider.json && "$provider_settings_sha256" =~ ^[0-9a-f]{64}$ ]]
+    [[ "$provider_settings" == /var/lib/urnetwork/competition-review/snow-provider-v2.json && "$provider_settings_sha256" =~ ^[0-9a-f]{64}$ ]]
     [[ -f "$provider_settings" && ! -L "$provider_settings" && "$(realpath -e "$provider_settings")" == "$provider_settings" ]]
     [[ "$(stat -c %u:%g:%a:%h "$provider_settings")" == 0:0:444:1 ]]
     (( $(stat -c %s "$provider_settings") > 0 && $(stat -c %s "$provider_settings") <= input_limit ))
@@ -48,9 +48,11 @@ else
     done
     [[ "$(sha256sum "$provider_settings" | cut -d ' ' -f1)" == "$provider_settings_sha256" ]]
     jq -e '(keys|sort)==["endpoint","kind","members","schema"] and .schema==1 and .kind=="snow-review-provider" and
-        .endpoint=="http://192.168.1.162:8000/v1/responses" and (.members|length)==3 and
-        [.members[].name]==["qwen","gemma","muse"] and
-        [.members[].model]==["qwen3.8-27b","gemma-4-26b-a4b","muse-glimmer-30b"] and
+        .endpoint=="http://192.168.1.162:8000/v1/responses" and (.members|length)==2 and
+        [.members[].name]==["qwen","gemma"] and
+        [.members[].model]==["qwen3.8-27b","gemma-4-26b-a4b"] and
+        [.members[].revision]==["f6b4e4c3c4119883d95c554ae69dc934d3d86433","a19cfe00be84568a6867111c9a68c9c44fdcffe6"] and
+        [.members[].reasoning]==["xhigh","high"] and
         all(.members[]; (keys|sort)==["model","name","reasoning","revision"] and (.revision|type)=="string" and (.revision|test("^[0-9a-f]{40}$")) and
             (.reasoning|type)=="string" and (.reasoning|length)>0)' "$provider_settings" >/dev/null
     provider_settings_identity="$(stat -c %d:%i:%u:%g:%a:%s:%h "$provider_settings")"
@@ -147,10 +149,10 @@ finish() {
     if [[ "$provider_kind" == snow && -n "${mapped_uid:-}" ]] && $cleanup_verified; then
         shopt -s nullglob dotglob
         state_files=("$member_state"/*)
-        ((${#state_files[@]}<=6)) || evidence_verified=false
+        ((${#state_files[@]}<=4)) || evidence_verified=false
         for source in "${state_files[@]}"; do
             name="${source##*/}"
-            if [[ ! "$name" =~ ^member-0[123]\.(started|complete)\.json$ || -L "$source" || ! -f "$source" ]]; then evidence_verified=false; continue; fi
+            if [[ ! "$name" =~ ^member-0[12]\.(started|complete)\.json$ || -L "$source" || ! -f "$source" ]]; then evidence_verified=false; continue; fi
             [[ "$(stat -c %u:%a:%h "$source")" == "$mapped_uid:600:1" ]] || { evidence_verified=false; continue; }
             (($(stat -c %s "$source")<=1048576)) || { evidence_verified=false; continue; }
             head -c 1048577 "$source" > "$attempt_directory/$name" || evidence_verified=false
@@ -165,7 +167,7 @@ finish() {
     (
         set -Eeuo pipefail
         cd "$attempt_directory" || exit 1
-        for file in input.json image-inspect.json network-inspect.json container-inspect.json container-state.json cgroup.json uid-map.txt key-ownership.json provider-settings.json provider-settings-ownership.json member-state-ownership.json attempt-claim.json member-01.started.json member-01.complete.json member-02.started.json member-02.complete.json member-03.started.json member-03.complete.json provider-address.txt fence.json fence-forward.txt fence-input.txt fence-chain.txt broker.stdout broker.stderr terminal.json; do
+        for file in input.json image-inspect.json network-inspect.json container-inspect.json container-state.json cgroup.json uid-map.txt key-ownership.json provider-settings.json provider-settings-ownership.json member-state-ownership.json attempt-claim.json member-01.started.json member-01.complete.json member-02.started.json member-02.complete.json provider-address.txt fence.json fence-forward.txt fence-input.txt fence-chain.txt broker.stdout broker.stderr terminal.json; do
             [[ ! -f "$file" ]] || jq -cn --arg path "$file" --arg sha256 "$(sha256sum "$file" | cut -d ' ' -f1)" --argjson bytes "$(stat -c %s "$file")" '{path:$path,sha256:$sha256,bytes:$bytes}'
         done | jq -s '{schema:1,kind:"winner-review-container-evidence",artifacts:.}'
     ) > "$attempt_directory/evidence-manifest.json" || evidence_verified=false

@@ -1,11 +1,12 @@
 # Isolated elected-winner review broker
 
-The October26 prospective policy is now `elected_winner_snow_union_v1`: all
-three exact Snow Qwen/Gemma/Muse members, with all18 attributed findings and
-unanimous approval. Missing/error results hold; fully validated rejection is
+The October28 owner-approved prospective policy is `elected_winner_snow_union_v2`:
+exactly Qwen/xhigh and Gemma/high, with all12 attributed findings and both-member
+approval. Historical v1 Qwen/Gemma/Muse records retain their original18 findings;
+failed V7/V8 attempts remain failed. Missing/error results hold; fully validated rejection is
 retained without dropping later model issues. This is not a relabel of the
 historical Mini/Sol procedures below. Use the new [Snow Dockerfile](Dockerfile.snow)
-and the [three-member qualification contract](../../launch/REVIEW-PROVIDER-QUALIFICATION.md#prospective-snow-three-model-policy--october-26-override).
+and a fresh qualification for the exact two-member executable and settings.
 The new wrapper branch mounts only a public pinned root0444 settings leaf RO
 and one mapped-uid0700 journal leaf RW, never a key or main/vault/config parent.
 It fences only the fixed Snow LAN IPv4/TCP8000, not external HTTPS. Its real
@@ -13,6 +14,9 @@ entrypoint is `/review-broker review-broker`, with exactly three inspected
 settings/hash/state-directory arguments. Whole-attempt/member O_EXCL journals
 prevent rerolls; cancellation before provider input consumes no claim. These
 new bytes are unqualified until independent unit and genuine broker proof pass.
+The prospective wrapper reads `/etc/urnetwork/competition-review-v2.json` and
+`/var/lib/urnetwork/competition-review/snow-provider-v2.json`; existing v1
+installation files and claim journals must not be overwritten or reset.
 
 ## Historical key-backed policies
 

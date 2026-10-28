@@ -1,5 +1,5 @@
 // The prospective Snow test policy executes the fixed Go suite once, then
-// collects three serial, tool-free attestations of that same observed result.
+// collects both serial, tool-free attestations of that same observed result.
 package main
 
 import (
@@ -134,7 +134,7 @@ func executeSourceTestSnow(ctx context.Context, client *http.Client, plan source
 	planDigest := sha256.Sum256(planBytes)
 	evidence := &sourceTestModelEvidence{WinnerReviewPolicy: plan.WinnerReviewPolicy, Model: model.CompetitionSnowWinnerReviewModel,
 		Reasoning: model.CompetitionSnowWinnerReviewReasoning, PlanSha256: hex.EncodeToString(planDigest[:]), Execution: execution,
-		Passed: execution.ExitCode == 0, Summary: "All three Snow members matched the authenticated fixed-suite observation."}
+		Passed: execution.ExitCode == 0, Summary: "Both Snow members matched the authenticated fixed-suite observation."}
 	seenResponseIds := map[string]bool{}
 	for _, member := range settings.SnowProvider.Members {
 		payload := map[string]any{
