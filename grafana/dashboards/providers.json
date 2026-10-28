@@ -3587,7 +3587,7 @@
           "legendFormat": "not_modern"
         }
       ],
-      "description": "Providers the modern provider gate takes out of quality and speed: the URL probe has not shown end-to-end post-quantum encryption with resizable transfer windows on their sessions in the last seven days. They stay online and counted, and probes, force_minimum and an explicit client id still reach them. Zero until the gate turns on by itself at 2026-11-11 00:00 UTC while quality_speed_requires_modern_provider is absent from provider.yml (or at quality_speed_modern_provider_start), and while the switch is false; the shadow beside it says what the gate would take out."
+      "description": "Providers the modern provider gate takes out of quality and speed: the URL probe has not shown end-to-end post-quantum encryption with resizable transfer windows on their sessions in the last seven days. They stay online and counted, and probes, force_minimum and an explicit client id still reach them. Zero unless provider.yml sets quality_speed_requires_modern_provider: true, the only way the gate turns on since modern-first priority within each band replaced it (FP2-MODERN.md); the shadow beside it says what the gate would take out."
     },
     {
       "id": 68,
@@ -3641,7 +3641,7 @@
           "legendFormat": "not modern"
         }
       ],
-      "description": "Of the providers the other rules admit to quality, those the modern provider gate would take out: no probe evidence, evidence older than seven days, or a latest observation without post-quantum encryption or without resizable windows. The same whether the gate is on or off; review it before the gate turns on by itself at 2026-11-11 00:00 UTC, and postpone with quality_speed_requires_modern_provider: false, a config release and a taskworker and API restart, if it would gut the bucket (the monitor warns from 72 hours before, SIGNALS.md \u00a72.29)."
+      "description": "Of the providers the other rules admit to quality, those the modern provider gate would take out: no probe evidence, evidence older than seven days, or a latest observation without post-quantum encryption or without resizable windows. The same whether the gate is on or off; review it before setting quality_speed_requires_modern_provider: true, the only way the gate turns on since modern-first priority within each band replaced it (FP2-MODERN.md)."
     },
     {
       "id": 69,
@@ -3820,59 +3820,7 @@
           "legendFormat": "on"
         }
       ],
-      "description": "Whether the modern provider gate holds quality and speed to modern providers under the taskworkers' own provider.yml, as their stats collector last read it: on from the scheduled start while quality_speed_requires_modern_provider is absent, never with it false, at once with it true. The largest of the taskworkers, so a config rollout reads on as soon as one has flipped."
-    },
-    {
-      "id": 74,
-      "type": "stat",
-      "title": "modern gate: scheduled start",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "warp-mimir"
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 8,
-        "x": 8,
-        "y": 117
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "dateTimeAsIso",
-          "color": {
-            "mode": "fixed",
-            "fixedColor": "#2ec4b6"
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "orientation": "auto",
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "center",
-        "textMode": "value",
-        "wideLayout": true
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "warp-mimir"
-          },
-          "expr": "max(urnetwork_stats_provider_modern_gate_start_seconds{env=\"$env\"}) * 1000",
-          "refId": "A",
-          "legendFormat": "start"
-        }
-      ],
-      "description": "The instant the modern provider gate turns on by itself, 2026-11-11 00:00 UTC unless quality_speed_modern_provider_start moves it. No value while provider.yml sets quality_speed_requires_modern_provider, true or false, when no flip is scheduled. The monitor's readiness signal (SIGNALS.md \u00a72.29) watches the shadow from 72 hours before it."
+      "description": "Whether the modern provider gate holds quality and speed to modern providers under the taskworkers' own provider.yml, as their stats collector last read it: on only with quality_speed_requires_modern_provider: true, and off with it false or absent, since modern-first priority within each band replaced the gate (FP2-MODERN.md). The largest of the taskworkers, so a config rollout reads on as soon as one has flipped; the monitor's readiness signal (SIGNALS.md \u00a72.29) checks that they agree."
     },
     {
       "id": 77,
