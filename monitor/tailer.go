@@ -757,9 +757,9 @@ var logClasses = []logClass{
 	{name: "mimir-bucket-index-lag", re: regexp.MustCompile(`caller=bucket\.go:[0-9]+\b.*\bdiff=-(?:1[89][0-9]{2}|[2-9][0-9]{3}|[1-9][0-9]{4,})\b.*\bmsg="bucket index version \(updated_at\) is older than requested"`),
 		sample: mimirBucketIndexLagLogSample, groupBy: mimirBucketIndexLagLogGroup,
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §11.18",
-		meaning:   "a Mimir store-gateway answered with a local bucket index at least 30 minutes older than the version requested by its querier",
-		mechanism: "The querier sends its most recently discovered bucket-index update time to each store-gateway. A gateway compares that request metadata with its local index. Independent jittered 15-minute discovery loops can leave one gateway one generation behind; the production control's exact -873-second gap was that default phase skew. Warp 13fcd05 sets the single-tenant fleet's store-gateway discovery interval to one minute. The 1,800-second alert threshold remains fail-safe across rolling or older generations and indicates many missed current syncs.",
-		context:   "This warning is emitted after the gateway receives the RPC and is not by itself a failed query. Correlate the exact host with the mimir-index gateway freshness and tenant-coverage findings plus err-mimir-store-consistency-check-failed. Mimir 3.2 replaces this noisy 3.1 warning with a histogram, but a feature upgrade solely to hide the line is not a root-cause fix.",
+		meaning:   "a Mimir diagnostic reports its local bucket-index version at least 1,800 seconds below the requested version; a zero local version is not a measured index age",
+		mechanism: "The querier sends its most recently discovered bucket-index update time to each store-gateway. A gateway compares that request metadata with its local index. Independent jittered 15-minute discovery loops can leave one gateway one generation behind; the production control's exact -873-second gap was that default phase skew. Warp 13fcd05 sets the single-tenant fleet's store-gateway discovery interval to one minute. The 1,800-second alert threshold retains the numeric version-gap warning across rolling or older generations. In the reviewed reference source, a zero local version can mean no loaded index metadata; it is not a measured age and does not prove missed syncs. This line does not establish the running producer version or the cause of the version difference.",
+		context:   "This warning can be emitted from deferred RPC diagnostics and is not by itself a failed query or proof of successful RPC completion. Correlate the exact host with the mimir-index gateway freshness and tenant-coverage findings plus err-mimir-store-consistency-check-failed. Mimir 3.2 replaces this noisy 3.1 warning with a histogram, but a feature upgrade solely to hide the line is not a root-cause fix.",
 		action:    "Verify the running Grafana artifact contains Warp 13fcd05. If it is absent, deploy it through the normal Grafana rollout; if present, run the §11.18 mimir-index probe and inspect the framed host/generation for store-gateway sync, object-store, and ring errors. Restore periodic sync or tenant coverage. Do not suppress every bucket warning, increase max_stale_period, or restart all replicas together.",
 		verify:    "On Warp 13fcd05, every gateway's last successful sync remains under two minutes old, discovered tenants equal synced tenants, the shared bucket index remains under 35 minutes old, and no >=1,800-second warning or Mimir consistency error recurs for 10 minutes.",
 	},
@@ -1584,7 +1584,7 @@ func grafanaPluginUnregisteredLogSample(line string) string {
 	return truncateLinePreservingSuffix(strings.Join(parts, " "), marker)
 }
 
-var mimirBucketIndexLagSampleRe = regexp.MustCompile(`caller=bucket\.go:[0-9]+\b.*?\bours=[^[:space:]]+[[:space:]]+requested=[^[:space:]]+[[:space:]]+diff=-[0-9]+[[:space:]]+msg="bucket index version \(updated_at\) is older than requested"`)
+var mimirBucketIndexLagSampleRe = regexp.MustCompile(`(caller=bucket\.go:[0-9]+)\b.*?\bours=([^[:space:]]+)[[:space:]]+requested=([^[:space:]]+)[[:space:]]+diff=(-[0-9]+)[[:space:]]+msg="bucket index version \(updated_at\) is older than requested"`)
 
 // providerTunnelReadDoneLogSample deliberately drops the Warp identity and
 // correlation prefix. The exact terminal phrase is the complete diagnostic;
@@ -1630,14 +1630,26 @@ func mimirBucketIndexLagLogGroup(line string) string {
 	return strings.Join(parts, " ")
 }
 
-// mimirBucketIndexLagLogSample preserves the two versions and their exact
-// difference even when the warp identity and timestamps consume the generic
-// sample budget.
+// Retains only the caller and syntactically valid version tuple. Intermediate
+// tenant/metadata fields and malformed fallback text never enter public evidence.
+// Accepted integers and legacy RFC3339 versions retain their exact spelling.
 func mimirBucketIndexLagLogSample(line string) string {
-	if sample := mimirBucketIndexLagSampleRe.FindString(line); sample != "" {
-		return truncateLine(sample)
+	const unknown = "bucket index version (updated_at) is older than requested; version fields unavailable"
+	matches := mimirBucketIndexLagSampleRe.FindStringSubmatch(line)
+	if len(matches) != 5 {
+		return unknown
 	}
-	return truncateLinePreservingSuffix(line, "bucket index version (updated_at) is older than requested")
+	for _, version := range matches[2:4] {
+		if _, err := strconv.ParseInt(version, 10, 64); err != nil {
+			if _, err := time.Parse(time.RFC3339Nano, version); err != nil {
+				return unknown
+			}
+		}
+	}
+	if _, err := strconv.ParseInt(matches[4], 10, 64); err != nil {
+		return unknown
+	}
+	return truncateLine(fmt.Sprintf("%s ours=%s requested=%s diff=%s msg=%q", matches[1], matches[2], matches[3], matches[4], "bucket index version (updated_at) is older than requested"))
 }
 
 // framerRejectLogSample drops the Warp identity and any customer correlation
