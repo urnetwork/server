@@ -1,11 +1,37 @@
 # October 28 production launch acceptance
 
-Public admission opens **2026-10-28T00:00:00Z**. That date is fixed. This
+The required opening was **2026-10-28T00:00:00Z**; readiness was not achieved
+by that deadline. No new opening or backdated activation is authorized. This
 checklist is the acceptance index for the new release, not an authorization to
 activate production. Historical v1 checkmarks do not qualify a different source,
 image, host manifest, policy or review provider.
 
-## Current checkpoint — October 27, 15:10 UTC
+## Current checkpoint — October 28
+
+The [deadline record](LAUNCH-DEADLINE-2026-10-28.md) preserves public discovery
+503 and production control-token 401 at 00:00:10 UTC. The objective is not
+complete. The owner has not authorized rescheduling or a late public opening.
+
+The owner-approved, artifact-preserving [unmeasured recovery](UNMEASURED-MANAGEMENT-OOM-2026-10-27.md)
+has been applied once. The first reference completed nine controls and nine
+candidates, evaluator exit zero in 10,306 seconds, before its fresh 00:28:07
+deadline; cleanup verified. Its score was placeable but not takeover eligible:
+mean improvement −4.5357%, p=0.727635. See the
+[retained first observation](FIRST-COMMITTED-FIRST-REFERENCE-2026-10-28.md).
+The regression reference is running in the same native session `27905`, using
+the byte-identical nine-run baseline. The no-op and second committed seed have
+not started. The entire first-seed reference screen is **not accepted**.
+
+The current owner-approved scope is the first committed seed only, with all
+three reference jobs, correct frozen median ordering, and a placeable,
+non-takeover no-op. No new seed, retrospective criterion, or successful-result
+selection is permitted. The numeric scope supersedes older two-seed statements;
+all other gates remain required. Snow V7 remains unqualified, API credential
+convergence remains unverified, and target-round R1, API/worker readiness and
+activation remain unperformed. Consult `current-state.json` and native records
+for later run progress; a live process is not acceptance.
+
+## Historical checkpoint — October 27, 15:10 UTC
 
 This checkpoint supersedes conflicting progress statements in the historical
 12:24 record below; it does not erase its evidence or failures.
@@ -434,15 +460,15 @@ substitute for formal calibration or live readiness.
 | Gate | Evidence required for acceptance | Current evidence / remaining action |
 | --- | --- | --- |
 | Evaluated source and compiler | Exact ten-repository commits, canonical lock, actual binary build metadata and Go 1.27.3; no operator-proxy dependency | Current C2 server `a9e8e1a7`, image `98c9061c…`, binary `efd1077d…`, actual Go 1.27.3 and canonical lock `ec322ed2…` are bound by the [fresh V2 bridge plan](FRESH-BRIDGE-PLAN-2026-10-27-V2.json) and current-state receipts. Earlier C2 images and C1 identities retain their own historical evidence; none is relabeled as this release. |
-| Full cold evaluation | Nine fresh controls, nine fresh no-op candidates, authenticated score and unchanged G1–G6 inputs, resource/accounting reports, actual total wall time within three hours, exact cleanup | Passed the prospectively declared corrected-release first cohort: 10,498 seconds, all gates and exact cleanup. Complete [original evidence](../baseline/prelaunch-corrected-same-seed-r9-2026-10-25/completed/cohort-01/README.md) is verified. It is one observation serving two checks, not two independent cohorts; other seeds are not yet qualified. |
-| Statistical calibration | Approved named three-pair/bridge/two-seed protocol; unchanged R9, algorithm, gates, significance, integrity and deadlines; retained outcomes and measured variance | Three-pair native reduction accepted; 99.525% bootstrap placeability; prospective practical margin frozen at **26.9%**. Original means changed −2.80%, +1.16%, +3.44%; p=0.297/0.579/0.783; comparison-specific fringes 9.018%, 10.046%, 7.496%, no significance/takeover. The failed metadata-comparison bridge and its nine unscored controls remain preserved and unused. The fresh corrected bridge is running under its published plan, with 9/9 controls complete at 11:00 UTC; acceptance remains pending. The [approved amendment](CALIBRATION-AMENDMENT-2026-10-27.md) requires correct reference ordering on both independent seeds. A further one-seed request is not approved. The floor was 16.1%, not the selected margin. Reduced confidence is explicit; production qualification is incomplete. |
+| Full cold evaluation | Nine fresh controls, nine fresh no-op candidates, authenticated score and unchanged G1–G6 inputs, resource/accounting reports, actual total wall time within three hours, exact cleanup | The current C2 corrected R9/R9 bridge has native acceptance `2af963f0…`: 10,290 seconds, all 9+9, score replay, artifact bindings and cleanup. It is an operational compatibility witness, not statistical equivalence. The earlier [corrected-release cold cohort](../baseline/prelaunch-corrected-same-seed-r9-2026-10-25/completed/cohort-01/README.md), 10,498 seconds, retains its own identity and is not relabeled. The recovered first reference also completed 9+9 in 10,306 seconds, but is not a second A/A observation. |
+| Statistical calibration | Approved three-pair reduction, accepted corrected bridge, and [first committed seed only](CALIBRATION-AMENDMENT-2026-10-27-FIRST-SEED.md); unchanged R9, algorithm, gates, significance, integrity and per-job bounds; retained outcomes and variance | Three-pair native reduction accepted; 99.525% bootstrap placeability; prospective practical margin **26.9%**. Original mean changes −2.80%, +1.16%, +3.44%, p=0.297/0.579/0.783, comparison-specific fringes 9.018%, 10.046%, 7.496%; no significance/takeover. The failed bridge's nine unscored controls remain unused. The corrected bridge is accepted as an operational witness. The first committed seed's first reference completed validly but was not takeover eligible; regression/no-op completion and the frozen median-ordering/no-op checks remain pending. The second seed stays committed and unstarted. Confidence is reduced explicitly; this is not full production acceptance. The 16.1% floor is not the selected 26.9% margin. |
 | Reference patches | Correctness checks, exact patch/build identities and measured no-op/worse/better behavior; separate pilot and held-out seeds | The [snapshot pilot](SNAPSHOT-PILOT-2026-10-25.md) completed fresh 9+9 with all gates and cleanup in 10,562 seconds. Both predeclared directional conditions passed: mean 19,053.39→18,206.07 ms (4.45% lower), median 18,903.60→18,285.95 ms. Welch p=0.2407: not significant or a takeover; this is a proposed better reference, not held-out qualification. The unfavorable [warm-reader pilot](../baseline/prelaunch-warm-reader-pilot-2026-10-25/completed/README.md) remains preserved. Its unchanged patch has now passed [current-source negative-reference correctness/build qualification](../evaluator/references/2026-10-25/NEGATIVE-QUALIFICATION.md), but fresh independent-seed ordering still must pass. Neither pilot enters Stage A. |
 | Host containment and rebaseline | Exact-image host fingerprint, reserved management capacity, network/mount containment, adversarial cleanup and independently authenticated readiness | Latest current-boot hostile fixture exercised all ten evaluation cores and 72 GiB memory; OOM exit 137 and joined cleanup passed in 775 ms with original container/network inventory restored. This separate hostile fixture is not exact evaluator-image execution. The current C2 negative self-check records its actual fingerprint without granting readiness. Actual reserved-round C2 R1, production metadata binding and positive readiness remain unverified. Calibration fixture hardware labels are not positive host attestations. |
-| Honesty and source-test providers | Genuine Snow three-member review/test-broker qualification; maintainer tests on Sol 6.1 low; retained acceptance/rejection/uncertainty/unsafe/prompt-injection evidence | Qualified control source `09cc510d`, hardened image `d9006e2f…` and three-pass offline receipts are retained. V6 cancellation passed, but the benign fixture held: Qwen/Gemma approved and Muse withheld reproducibility because the supplied context truthfully reported no executed tests. All three responses were complete and pinned; this was not a transport/schema failure. Actual deterministic fixture-test evidence is prepared but unexecuted during timed scoring. A new driver, qualification receipt, precommit and genuine attempt remain required; no uncertainty override, model downgrade or automatic retry is permitted. |
+| Honesty and source-test providers | Genuine Snow three-member review/test-broker qualification; maintainer tests on Sol 6.1 low; retained acceptance/rejection/uncertainty/unsafe/prompt-injection evidence | Control source `09cc510d`, hardened image `d9006e2f…`, qualified driver `456209be…` and real deterministic Go-fixture observations are retained. V7 cancellation passed, but Muse's benign-case judgment was malformed; Qwen/Gemma approvals did not override the union failure. Report `19a916de…` remains unqualified. Corrected backend evidence and a new genuine qualification precommit/attempt are required; no output repair, ignored member, uncertainty override or automatic retry is permitted. Offline tests and genuine fixture-test execution do not prove provider qualification. |
 | Automated epoch lifecycle | Real evaluation → provisional decision → review/reject-and-advance → approved source build/qualification → next weekly round; exhaustion carries incumbent, uncertainty pauses; restart recovery | Control suites passed at their recorded revisions in [control validation](CONTROL-VALIDATION-2026-10-25.md). Genuine provider and live runtime lifecycle acceptance remains open; do not equate unit tests with deployed proof. |
-| Production policy and timing | New production season and scoped credentials, $20 fee, unbounded FIFO, three-hour job bound, one authenticated R9 control per epoch, six full weekly windows, no early admission | Prepared source ledger is not activation. Inspect deployed policy, API advertisement, supervisor journal and readiness acknowledgments after maintenance ends. Never reinterpret an old staging round as production. |
+| Production policy and timing | New production season and scoped credentials, $20 fee, unbounded FIFO, three-hour job bound, one authenticated R9 control per epoch, six full weekly windows, no early admission | The midnight readiness deadline was missed and recorded. Prepared source ledger is not activation. A new future opening needs explicit owner direction after gates pass; do not backdate or silently reschedule. Verify deployed policy, API advertisement, supervisor journal and readiness acknowledgments. Never reinterpret staging as production. Automated v2 drains accepted work after close and completes after epoch six/review, not by a guaranteed January 1 calendar cutoff. |
 | Artifact durability and distribution | Exact image/archive digest and retained distribution/readback record; live MinIO locking/versioning, replication, capacity and retention proof | Source and replica exact-version payload/COMPLIANCE-retention readback passed; native bucket-protection proof passed. Replica is co-located, not off-site. Ordinary replica access remains denied; verified administrative restore did not broaden it. Version-aware accounting passed: 464 versions / 39,153,130 bytes against the approved decimal 10 TB allocation (not a physical quota/free-space proof). Final retained publication and control-image distribution remain open. `support@ur.xyz` owns post-retention deletion. |
-| API, worker and supervisor readiness | Authenticated public contract and submit/poll/result proof, exact runtime manifests, independent API/worker acknowledgments, singleton durable supervisor | Maintenance is explicitly cleared. API source_not_ready remains an exact-envelope deployment/preparation gate, not an external maintenance hold. Install and qualify the new release with separate production inventories; an offline fixture is not a live job/readiness receipt. |
+| API, worker and supervisor readiness | Authenticated public contract and submit/poll/result proof, exact runtime manifests, independent API/worker acknowledgments, singleton durable supervisor | Maintenance is cleared. Public source_not_ready remains an exact-envelope preparation gate. Production submitter/control tokens return 401; the requested vault commit contains the registry, but serving-replica mounts and post-vault restarts remain unverified. Check the decrypted/mounted registry digest recorded in the deadline report. Target-round R1, runtime acknowledgments and durable activation remain open; offline fixtures are not live readiness receipts. |
 | Monitoring and operations | Delivered heartbeat every 15 seconds, warning after 30 seconds missing; queue/current job/elapsed/significance/backlog panels; delivered alert routed to support@ur.xyz | Existing implementation and historical deployment evidence do not prove delivery for the new runner. Verify actual ingestion and routing after maintenance. |
 | Partner and public handoff | Current immutable contract, source/image distribution, onboarding/revocation proof, Macrocosmos finalize/decision acceptance, published commercial/appeal terms and updated reports | [Partner handoff](APEX-HANDOFF.md) records release deltas. Partner draft still requires reconciliation; final report must use newly qualified data and show improvement fringes wherever baselines appear. |
 
@@ -452,17 +478,21 @@ substitute for formal calibration or live readiness.
    larger validation. Keep every subsequent scoring attempt serial under the
    shared slot; do not overlap it with builds, tests or resource-pressure work.
 2. Preserve the failed bridge and its nine unscored controls without reuse.
-   The qualified metadata-only correction and fresh V2 precommit now govern the
-   running corrected bridge; do not restart, extend or resample it. Authenticate
-   its terminal measurements, score replay and cleanup before acceptance, then
-   prepare the two approved independent seeds under their own precommit.
-   Bridge and independent reference acceptance still require genuine evidence.
+   The corrected bridge has native acceptance and retained exact-version archive
+   proof. Both independent seeds were committed before measurements; the owner
+   approved only the first. Continue existing session `27905` through its three
+   unchanged reference jobs and frozen ordering/no-op check. Preserve the valid
+   but non-takeover first outcome. Do not reroll, resample, add retrospective
+   requirements, or start the second seed. Reference acceptance still requires
+   the native complete-screen result.
 3. Main maintenance is cleared. Complete exact-image host and artifact proofs,
    genuine provider qualification, scoped policy and independent readiness.
    Pure preparations can proceed separately; they must not perturb scoring.
-4. Schedule the qualified production season for the fixed opening. Verify the
-   advertised future start, rejection of early submissions, automatic lifecycle,
-   monitoring and partner handoff before declaring launch readiness.
+4. The fixed opening was missed; it is not silently replaced. Obtain owner
+   direction for a new future opening only after readiness gates pass. Verify
+   the advertised start, rejection of early submissions, automatic lifecycle,
+   monitoring and partner handoff before declaring readiness. Never represent
+   a late activation as satisfying the original midnight objective.
 
 At final sign-off, replace each pending item with its exact immutable receipt,
 test/log digest or deployed observation. A plausible configuration, a green
