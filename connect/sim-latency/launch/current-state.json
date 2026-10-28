@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-28T04:43:43.670138142Z",
+  "observed_at": "2026-10-28T06:04:52Z",
   "prospective_new_screen": {
     "status": "owner_approved_exact_protocol_reference_review_and_native_qualification_pending",
     "approval_record": "server/connect/sim-latency/launch/CALIBRATION-NEW-SCREEN-OWNER-APPROVAL-2026-10-28.md",
@@ -12,6 +12,8 @@
     "replicates_per_side": 9,
     "stronger_regression_reference_and_fresh_control_required": true,
     "premeasurement_review_qualification_and_publication_required": true,
+    "new_protocol_unit_qualification_status": "first_attempt_timed_out_unqualified_private_diagnosis_pending",
+    "proposed_regression_reference_bundle": "server/connect/sim-latency/launch/reference-h1-byte-pacing-2026-10-28/README.md",
     "new_seed_drawn": false,
     "new_seed_commitment_published": false,
     "new_measurements_started": false,
@@ -22,8 +24,10 @@
     "late_opening_or_provider_waiver_authorized": false
   },
   "retained_archive_qualification": {
-    "status": "synthetic_unit_qualified_live_operation_unqualified",
+    "status": "source_unit_qualified_pinned_native_binary_and_three_exact_retained_source_versions_verified",
     "record": "server/connect/sim-latency/launch/RETAINED-ARCHIVE-QUALIFICATION-2026-10-28.md",
+    "public_synthetic_and_build_evidence": "server/connect/sim-latency/launch/retained-archive-qualification-2026-10-28/README.md",
+    "native_retention_record": "server/connect/sim-latency/launch/FIRST-COMMITTED-ARCHIVE-RETENTION-2026-10-28.md",
     "independent_low_consecutive_passes": 3,
     "tests_per_pass": 27,
     "skips": 0,
@@ -31,9 +35,67 @@
     "independent_max_source_reviews_complete": true,
     "pre_and_post_each_pass_source_module_head_pins_match": true,
     "source_manifest_sha256": "91554333e5ed713dcec3f0aab894b95bde54843e754ef4ee15f9dd3674a98aeb",
-    "standalone_native_binary_built": false,
-    "canonical_wrapper_and_native_storage_integration_passed": false,
-    "archive_prepared_or_uploaded": false
+    "unit_memory_limit": "GOMEMLIMIT=2GiB_soft_Go_runtime_target_not_hard_RSS_cap",
+    "standalone_native_binary_built": true,
+    "native_binary_source_commit": "d820d5b301850dffc0e0ab1d6c94c9964296a253",
+    "native_binary_sha256": "6132191ee9ae1bf9c410fa16fee508c0f02cdcb2c60e94df069cadd5e969964c",
+    "native_binary_size_bytes": 40180784,
+    "native_binary_independently_verified_installed_root_owned_0500": true,
+    "native_build_hard_cgroup_memory_max_bytes": 2147483648,
+    "canonical_wrapper_passed": false,
+    "native_retained_source_versions_with_equal_sha256_readback": 3,
+    "archive_prepared_or_uploaded": true
+  },
+  "first_committed_archive_retention": {
+    "record": "server/connect/sim-latency/launch/FIRST-COMMITTED-ARCHIVE-RETENTION-2026-10-28.md",
+    "archive_count": 3,
+    "payload_entries": 1094,
+    "embedded_inventories": 3,
+    "tar_members": 1097,
+    "tar_bytes": 961268224,
+    "mode": "COMPLIANCE",
+    "retain_until": "2028-01-01T00:00:00Z",
+    "all_source_and_member_hashes_verified_before_upload": true,
+    "exact_source_version_sha256_readbacks_equal": true,
+    "receipt_sha256": [
+      "595606d14042643af84ea5e5564bcade01f3b08e543e0f3c2103187850d558d8",
+      "cfd45d4b09f9036ebd8096e41496a8892f63c2ab400adffd33586718d36fde16",
+      "258e502387b906ad2bd0343fb7a93d384a3d52736daa6423b12bb5d7ef97d2c5"
+    ],
+    "last_completed_at": "2026-10-28T05:38:13.903813726Z",
+    "source_deletions": 0,
+    "replica_delivery_of_these_versions_verified": false,
+    "offsite_backup_verified": false,
+    "calibration_or_launch_acceptance_claimed": false,
+    "raw_receipts_and_campaign_inputs_published": false,
+    "private_unstarted_second_seed_retained_without_measurement_or_disclosure": true
+  },
+  "h1_byte_pacing_reference": {
+    "status": "focused_unit_passed_broader_service_integration_native_build_and_measured_direction_pending",
+    "bundle": "server/connect/sim-latency/launch/reference-h1-byte-pacing-2026-10-28/README.md",
+    "baseline_server_commit": "a9e8e1a710b24c749e6499a0606938252c83e136",
+    "product_patch_sha256": "6f8c6f24c44a9627f053e58d4a59f845a0ba4b0b51e201f5cabddfb33b30629d",
+    "qualification_test_patch_sha256": "6ef291d4d3ea6ea4fba7600b9a1f8390b79cd13f845f5f0722adb39625623844",
+    "independent_low_consecutive_passes": 3,
+    "baseline_tests_per_pass": 8,
+    "candidate_tests_per_pass": 27,
+    "skips_or_failures_in_fresh_positive_runs": 0,
+    "original_fixture_race_preserved_and_old_overlay_reproduced_expected_race": true,
+    "before_and_after_runner_manifest_sha256": "5e4695b3b8338fb2c548b0e529ac9ce1d5f960b4dcdcd62016a0f834e0c2efdd",
+    "broader_service_integration_passed": false,
+    "native_reference_binary_built": false,
+    "measured_direction_pilot_started": false,
+    "new_held_out_seed_drawn_or_measured": false
+  },
+  "retained_repository_baseline_verification": {
+    "manifest_rows_and_files": 3677,
+    "failures": 0,
+    "reported_exit_code": 0,
+    "reported_elapsed_seconds": 6,
+    "stdout_sha256": "bd311447c251d95f2d367adce991ba255a2dbaab97441132828f1307903b9f38",
+    "stderr_empty": true,
+    "independent_log_row_count_verified": true,
+    "new_measurements": false
   },
   "unmeasured_recovery": {
     "status": "recovered_screen_complete_not_accepted_ordering_failed",
@@ -972,7 +1034,7 @@
   },
   "authority_warning": "This is a preparation snapshot, not runtime/score authority. Verify the live process/session and current artifacts before acting; never restart because an observation times out.",
   "historical_sections_warning": "Older dated campaign/tool sections below retain their original observations and next actions. The accepted_three_a_reduction and prospective_c2_build above supersede old analysis-pending and margin-unselected statements; they do not qualify C2 or activate production.",
-  "next_action": "Preserve the complete failed first-seed screen, all outcomes and the original unstarted second seed. The owner approved a separately precommitted one-seed screen with a stronger regression reference and fresh R9 control; exact protocol/reference review, native qualification and publication remain pending. No new seed has been drawn or measurement started. Archive source has synthetic unit evidence only; native binary build/pin, canonical integration and retained archive operations remain pending. Do not rerun or relabel the old screen, weaken frozen criteria or start its second seed. Midnight readiness was missed; no late opening, backdating or reschedule is authorized. Snow correction/genuine qualification, target R1, API/worker acknowledgments and phase-two readiness remain required before activation and explicit owner opening direction.",
+  "next_action": "Preserve the failed first-seed screen and original unstarted second seed. Three private archives now have COMPLIANCE exact-source-version SHA readbacks; originals remain, and replica delivery for these versions is unproved. Publish the H1 pacing reference's focused 8-baseline/27-candidate three-pass bundle before broader service integration, native reference build or a separately precommitted measured-direction pilot. Diagnose the first new-protocol unit timeout; exact protocol/reference qualification and publication still precede any new seed or measurement. No new held-out seed has been drawn or measured. Do not rerun or relabel the old screen, weaken frozen criteria or start its second seed. Midnight readiness was missed; no late opening, backdating or reschedule is authorized. Snow correction/genuine qualification, target R1, API/worker acknowledgments and phase-two readiness remain required before activation and explicit owner opening direction.",
   "operator_inputs": {
     "observed_at": "2026-10-26T05:23:17Z",
     "source": "Explicit user confirmations and parent-verified private-key/model-access readbacks; no new scoring observation.",
@@ -1735,8 +1797,9 @@
     "public_edit_scope": "Resolved by user and frozen policy: any file in all ten locked competition repositories, except protected server/connect/sim-latency and repository metadata. The corrected mono_root_v1 C2 instrument and bridge are qualified separately from pending production runtime readiness."
   },
   "pending": [
-    "Preserve/archive the complete failed first-seed screen; qualify the archive native binary/integration separately from its synthetic unit evidence",
-    "Prepare and independently review the owner-approved new one-seed screen's exact stronger regression reference, fresh R9 control, protocol, native qualification and premeasurement commitment; no new seed or measurements yet, and the original second seed remains unstarted",
+    "Preserve the failed screen and all original files; three exact source versions are retained, but replica delivery/offsite restoration for these archives remains unproved",
+    "Publish the H1 reference focused-unit bundle, then complete broader H1 service integration, native reference build and separately frozen measured-direction pilot before held-out qualification",
+    "Diagnose the first new-protocol unit qualification timeout, then independently qualify and publish the owner-approved new screen's exact reference/control/protocol/native commitments; no new held-out seed or measurements yet, and the original second seed remains unstarted",
     "Correct/read back Snow Muse strict-grammar backend and complete newly precommitted genuine three-member review qualification without relabeling V7 or repairing outputs",
     "Verify config62a29a7 and registered vault credentials on restarted main API replicas; required DB migrations already verified",
     "Reserve production source/target, obtain exact current-boot R1 with installed initial C2 profile and independent durable API/worker runtime acknowledgments, then phase-two acceptance and fenced activation",
