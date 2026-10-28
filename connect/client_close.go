@@ -13,7 +13,7 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
-// Client close (CLIENTCLOSE1.md). The resident's listener delivers the close
+// Client close (CLIENTCLOSE.md). The resident's listener delivers the close
 // requests of its client, and the exchange closes what it holds of a client
 // removed through the api.
 
@@ -146,7 +146,7 @@ func (self *Exchange) handleClientRemoved(clientId server.Id) {
 }
 
 // Closes what this process holds of a client removed through the api
-// (CLIENTCLOSE1.md section 4): each transport with the authorization close its
+// (CLIENTCLOSE.md section 4): each transport with the authorization close its
 // lease recheck would send, then the resident. The transports close first,
 // since a surviving transport nominates a new resident within about a second.
 // A transport that registers after this is refused by its lease's final

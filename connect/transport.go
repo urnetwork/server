@@ -1691,7 +1691,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	}()
 	connectionId := server.NewId()
 	// the lease closes with the code of a definitive refusal, and so does an
-	// api removal (CLIENTCLOSE1.md)
+	// api removal (CLIENTCLOSE.md)
 	closeAuthorization := func(code int) {
 		authorizationCloseCode.Store(int32(code))
 		handleCancel()
@@ -2671,7 +2671,7 @@ func (self *ConnectHandler) connectQuicWithCarrier(conn *quic.Conn, carrier Resi
 
 			connectionId = server.NewId()
 			// the lease closes with the code of a definitive refusal, and so
-			// does an api removal (CLIENTCLOSE1.md)
+			// does an api removal (CLIENTCLOSE.md)
 			closeAuthorization := func(code int) {
 				_ = conn.CloseWithError(quic.ApplicationErrorCode(code), "authorization ended")
 				handleCancel()

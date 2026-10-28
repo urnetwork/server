@@ -47,7 +47,7 @@ func (self *Exchange) testingHoldsClient(clientId server.Id) (connections int, r
 }
 
 // Close requests added for a client reach it from its resident as one
-// `CloseSequences` from the control id (CLIENTCLOSE1.md section 2).
+// `CloseSequences` from the control id (CLIENTCLOSE.md section 2).
 func TestExchangeClientCloseRequestsReachTheClient(t *testing.T) {
 	if testing.Short() {
 		return
@@ -144,7 +144,7 @@ func TestExchangeClientCloseRequestsReachTheClient(t *testing.T) {
 
 // An api removal closes the removed client's transports with the typed
 // authorization close and cancels its resident at once, well inside the 60 s
-// lease recheck, and leaves other clients alone (CLIENTCLOSE1.md section 4).
+// lease recheck, and leaves other clients alone (CLIENTCLOSE.md section 4).
 func TestExchangeClosesRemovedClient(t *testing.T) {
 	if testing.Short() {
 		return

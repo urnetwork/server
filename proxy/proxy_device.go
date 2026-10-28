@@ -173,7 +173,7 @@ type ProxyDeviceManagerSettings struct {
 	PlatformPlacement connect.PlatformPlacement
 
 	// Closes the devices of a client removed through the api, on the
-	// client's removed flag (CLIENTCLOSE1.md section 5). Nil leaves them to
+	// client's removed flag (CLIENTCLOSE.md section 5). Nil leaves them to
 	// their idle timeout. It subscribes to Redis keyspace events, so the
 	// process sets it and tests that do not exercise removal leave it nil.
 	ClientRemoved *ClientRemovedSettings

@@ -55,7 +55,7 @@ func configureProxyControlFamily() {
 // A plain manager used by tests remains immediately restorable; production
 // releases this hold through wg.CompleteDeploymentHandoff. Every hosted window
 // dials the edge `platformPlacement` chooses, and the devices of a client
-// removed through the api close on its removal (CLIENTCLOSE1.md section 5).
+// removed through the api close on its removal (CLIENTCLOSE.md section 5).
 func newProxyDeviceManagerSettings(
 	settings *proxy.ProxySettings,
 	platformPlacement connect.PlatformPlacement,

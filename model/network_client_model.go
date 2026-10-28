@@ -1362,7 +1362,7 @@ func deactivateLockedNetworkClientsInTx(ctx context.Context, tx server.PgTx, loc
 		return 0, err
 	}
 	// the connect and proxy processes close what they hold of the clients, and
-	// the clients' counterparties close their contracts (CLIENTCLOSE1.md)
+	// the clients' counterparties close their contracts (CLIENTCLOSE.md)
 	addClientsRemovedPostCommit(ctx, tx, lockedClientIds)
 	return tag.RowsAffected(), nil
 }

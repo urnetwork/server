@@ -14,7 +14,7 @@ import (
 )
 
 // Closes the hosted devices of a client removed through the api
-// (CLIENTCLOSE1.md section 5). After a removal commits, the api sets the
+// (CLIENTCLOSE.md section 5). After a removal commits, the api sets the
 // client's `{<clientId>}c_removed` flag (model.SetClientsRemoved), and the
 // flag's keyspace event reaches every proxy process. Before this, a removed
 // client's device served until its 90-minute idle timeout.
