@@ -70,6 +70,7 @@ The sample was 20,000 contracts still open about 95 minutes after creation, crea
 - Removal means any client removal, through the API or an internal cleanup: "any client remove should trigger the removal events". A disconnect is not a removal: "A disconnected client will unfortunately have to be time outs."
 - A sender's final that arrives after the receiver's checkpoint settles the contract immediately, with the same mean the sweep uses ("Settle immediately").
 - A sender's zero-byte final, with no report from the receiver, settles the unused contract immediately ("Settle at once").
+- The rule extends to legacy reports that clients send ("Extend to legacy"), including the egress probe's cleanup of a contract it never used ("Ship it, probe change too").
 
 ## Design
 
@@ -82,13 +83,17 @@ Both rules run in the sender's report, under the contract lock, and settle throu
 | A final | Settles on two finals (unchanged). |
 | A checkpoint, within 16 MiB of the sender's count either way (`contractSenderFinalAfterCheckpoint`) | The checkpoint is completed as a zero final, so the receiver's count stands, and the contract settles. Payment is the mean of the two counts, as in the sweep. |
 | A checkpoint that differs by more than 16 MiB | Left open for the sweep (unchanged). |
-| No report, the sender used 0 bytes, and the report is identified (`contractSenderZeroFinalUnreported`) | A zero final is recorded for the receiver, the contract settles with 0, and the reservation is freed. The sweep would also settle a sender-only contract with the sender's count, here 0. |
+| No report, and the sender used 0 bytes (`contractSenderZeroFinalUnreported`) | A zero final is recorded for the receiver, the contract settles with 0, and the reservation is freed. The sweep would also settle a sender-only contract with the sender's count, here 0. |
 | No report, and the sender used some bytes | Left open. The receiver is asked for its final (section 3), and the sweep remains the backstop. |
 
 - **Shared guards:** no outcome yet, no dispute, expiry not started (`usage_unverified`), a sender count that is not a legacy lower bound, and an unscoped settlement.
 - **Failure:** if settlement fails, the completed receiver final rolls back with it (`contractCoveredCheckpointAbort`).
 - **Late reports:** a receiver report that arrives after either settlement gets the benign "already settled" error that late reports already get once the sweep has settled their contract.
-- **Scope of the zero rule:** it applies only to identified reports (those with a `report_id`). Every current connect client sends one, including the hosted proxy windows. The legacy id-less path keeps the two-final rule, which leaves very old clients and the many legacy test fixtures unchanged.
+- **Scope of the zero rule:** it covers both report paths. Hotfix 2 first applied it to identified reports only (those with a `report_id`).
+  - Measured right after hotfix 2, most unused contracts left open came from older app versions on the legacy id-less path: about 100 per second, from about 2,300 senders on 790 networks.
+  - The owner then extended the rule to legacy reports that clients send (hotfix 3). Connect control passes a client's report without an id to `model.CloseClientContractUsage`, which applies the rule.
+  - The taskworker's egress probe cleans up a contract that committed after its probe was canceled with the requester's zero final through the same control path. That final now settles the contract with a zero provider side, so the provider's own close is the benign duplicate.
+  - Internal callers of `model.CloseContract` keep the two-final rule. This leaves `bringyourctl` and the many test fixtures that use it to stand in for a client unchanged: applying the rule to every legacy call broke 24 of them, because they rely on a sender's zero final leaving the contract open.
 - **Unchanged:** two finals settle, decision B still applies, and the sweep handles the rest.
 
 ### 2. `CloseSequences`, the platform's request that a client close now
@@ -185,7 +190,19 @@ Every step passed its gates: no storm alarm, PgBouncer waiting at 0, no stuck pr
 
 At 60% connect, the removal path closed about 54 transports and 11 residents per second at removal, and sent about 138 `CloseSequences` per second.
 
-**Hotfix 2.** The zero-final rule (section 1), built the same way.
+**Hotfix 2.** The zero-final rule for identified reports (section 1), built the same way.
+
+| Service | Version | Deployed (UTC) |
+|---|---|---|
+| taskworker | 1083920300 | 12:58 |
+| api | 1083922290 | 13:00 |
+| connect | 1083923480 | 13:03, 13:07, 13:11 |
+| proxy | 1083924700 | blocks g1–g10, from 13:13 |
+| alt | 1083925940 | after proxy |
+
+Within minutes the rule settled about 124 unused contracts per second.
+
+**Hotfix 3.** The zero-final rule on clients' legacy reports, through `CloseClientContractUsage`.
 
 **Main.** server `44a61ebf6` (client close, rule 1a, x/net) and connect `71d176c6`. The zero-final rule follows.
 
@@ -214,7 +231,7 @@ All tests run against Redis and PostgreSQL on the local test gate.
   - key and event parsing, and take-once semantics;
   - the receiver request on a used sender final, but not on a retried final, a sender checkpoint, or a receiver that already sent its final;
   - settlement at the sender's final after a checkpoint, and not when the counts disagree beyond the tolerance;
-  - unused contracts settled, with their reservations freed, on the identified path; the legacy id-less path keeps the two-final rule; nothing settles once expiry has started;
+  - unused contracts settled, with their reservations freed, on identified reports and on clients' legacy reports, but not on internal legacy closes, and nothing settled once expiry has started;
   - removal setting flags and asking counterparties.
   - Existing close-report, decision B, checkpoint and expiry-repair suites were updated where they relied on the old order. A test that needs an open contract with both reports now applies the reports without settling.
 - **Connect:** close requests reach a live client as `CloseSequences`. A removed client's transport receives the 4005 typed close well inside the 60 s recheck, and the exchange keeps its resident (the test fails if the removal cancels it). Both tests fail without the new subscription patterns.
@@ -227,7 +244,7 @@ All tests run against Redis and PostgreSQL on the local test gate.
 
 ## Risks
 
-- **A sender that reports zero after sending bytes leaves the provider unpaid for them.** The receiver's later report is refused. Without the rule, the sweep would settle such a contract with only the sender's count unless the receiver reported first. The senders here are mostly the platform's own hosted windows.
+- **A sender that reports zero after sending bytes leaves the provider unpaid for them.** The receiver's later report is refused. Without the rule, the sweep would settle such a contract with only the sender's count unless the receiver reported first. The senders here are mostly the platform's own hosted windows and, with hotfix 3, older apps and the egress probe's cleanup.
 - **The `CloseSequences` handler has three edge cases:**
   - A close for an old contract that arrives before the first pack of its successor ends the live sequence. The existing recovery restarts it.
   - On removal, a close that arrives between a queued contract being taken and being recorded as open sends (0, 0) before the real final. The platform keeps only the first final.

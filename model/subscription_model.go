@@ -2864,7 +2864,19 @@ func CloseContract(
 func CloseContractUsage(ctx context.Context, contractId, clientId server.Id,
 	usedTransferByteCount ByteCount, checkpoint bool,
 ) (ByteCount, error) {
-	_, added, err := closeContractReport(ctx, contractId, clientId, usedTransferByteCount, checkpoint, nil)
+	_, added, err := closeContractReport(ctx, contractId, clientId, usedTransferByteCount, checkpoint, nil, false)
+	return added, err
+}
+
+// CloseClientContractUsage is CloseContractUsage for a legacy report that a
+// client sent, as connect control receives one without a report id. A sender's
+// zero final while the receiver has not reported settles the unused contract,
+// as an identified report's does (owner, 2026-10-28). Internal callers of
+// CloseContract keep the two-final rule.
+func CloseClientContractUsage(ctx context.Context, contractId, clientId server.Id,
+	usedTransferByteCount ByteCount, checkpoint bool,
+) (ByteCount, error) {
+	_, added, err := closeContractReport(ctx, contractId, clientId, usedTransferByteCount, checkpoint, nil, true)
 	return added, err
 }
 
@@ -2882,7 +2894,7 @@ func CloseContractReport(
 	if reportId == (server.Id{}) {
 		return false, fmt.Errorf("invalid close report identity")
 	}
-	applied, _, err := closeContractReport(ctx, contractId, clientId, usedTransferByteCount, checkpoint, &reportId)
+	applied, _, err := closeContractReport(ctx, contractId, clientId, usedTransferByteCount, checkpoint, &reportId, false)
 	return applied, err
 }
 
@@ -2893,6 +2905,7 @@ func closeContractReport(
 	usedTransferByteCount ByteCount,
 	checkpoint bool,
 	reportId *server.Id,
+	clientReport bool,
 ) (applied bool, addedByteCount ByteCount, returnErr error) {
 	if usedTransferByteCount < 0 {
 		return false, 0, fmt.Errorf("Invalid used transfer byte count: %d", usedTransferByteCount)
@@ -2918,9 +2931,15 @@ func closeContractReport(
 			if reportId != nil || 0 < addedByteCount {
 				completion = reportCompletion
 			}
-		case contractSenderFinalAfterCheckpoint, contractSenderZeroFinalUnreported:
+		case contractSenderFinalAfterCheckpoint:
 			// a party's final applies once, so it is never a retransmission
 			completion = reportCompletion
+		case contractSenderZeroFinalUnreported:
+			// An identified report, or a legacy report that a client sent, settles
+			// an unused contract. Internal legacy callers keep the two-final rule.
+			if reportId != nil || clientReport {
+				completion = reportCompletion
+			}
 		}
 	}, server.TxReadCommitted, server.OptNoRetry())
 
@@ -3140,9 +3159,8 @@ func applyLockedContractCloseReportInTx(ctx context.Context, tx server.PgTx,
 		completion = contractCheckpointAfterSenderFinal
 	case applied && party == ContractPartySource && !checkpoint && receiverCheckpointed:
 		completion = contractSenderFinalAfterCheckpoint
-	case applied && party == ContractPartySource && !checkpoint && !receiverFinal && partyUsedTransferByteCount == 0 && reportId != nil:
-		// Identified reports only, which every current connect client sends.
-		// The legacy id-less path keeps the two-final rule.
+	case applied && party == ContractPartySource && !checkpoint && !receiverFinal && partyUsedTransferByteCount == 0:
+		// closeContractReport drops this for internal legacy callers
 		completion = contractSenderZeroFinalUnreported
 	}
 	// A receiver that has not reported is asked for its final now that the

@@ -293,7 +293,7 @@ func TestPrivateProviderLoadedPeerProcess(t *testing.T) {
 							}
 							// The independent provider acknowledgment invokes the same
 							// current model authority as its API/Connect controller.
-							return model.CloseContract(requestCtx, id, f.peer, 0, false)
+							return privateProviderCloseAfterZeroFinal(requestCtx, id, f.peer)
 						}, func(err error) error { return err })
 					}()
 				}

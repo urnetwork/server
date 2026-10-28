@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -140,8 +141,10 @@ func privateLateAssertPool(t testing.TB) {
 
 // The real private controller durably allocates, then a deterministic barrier
 // delivers its known result only after cancellation and closed OOB admission.
-// Cleanup must join through the same authenticated controller, write only the
-// requester's zero-use close, and leave provider accounting authoritative.
+// Cleanup must join through the same authenticated controller and write only
+// the requester's zero-use close. That final settles the unused contract with a
+// zero provider side (owner, 2026-10-28), so the provider's own close is the
+// benign duplicate.
 func TestPrivateProviderLateCommittedContractClosesRequesterOnly(t *testing.T) {
 	privateProviderLateCommittedContractClosesRequesterOnly(t, 1024*1024*1024, false)
 }
@@ -244,7 +247,7 @@ func privateProviderLateCommittedContractClosesRequesterOnly(t *testing.T, credi
 			t.Fatal("cancellation was not retained", reply.err)
 		}
 		var source, destination int
-		var sourceUsed model.ByteCount
+		var sourceUsed, destinationUsed model.ByteCount
 		var checkpoint bool
 		var outcome *string
 		server.Db(ctx, func(conn server.PgConn) {
@@ -252,33 +255,43 @@ func privateProviderLateCommittedContractClosesRequesterOnly(t *testing.T, credi
 				(SELECT count(*) FROM contract_close WHERE contract_id=$1 AND party='source'),
 				(SELECT count(*) FROM contract_close WHERE contract_id=$1 AND party='destination'),
 				COALESCE((SELECT used_transfer_byte_count FROM contract_close WHERE contract_id=$1 AND party='source'),-1),
+				COALESCE((SELECT used_transfer_byte_count FROM contract_close WHERE contract_id=$1 AND party='destination'),-1),
 				COALESCE((SELECT checkpoint FROM contract_close WHERE contract_id=$1 AND party='source'),true),
-				outcome FROM transfer_contract WHERE contract_id=$1`, contract).Scan(&source, &destination, &sourceUsed, &checkpoint, &outcome))
+				outcome FROM transfer_contract WHERE contract_id=$1`, contract).Scan(&source, &destination, &sourceUsed, &destinationUsed, &checkpoint, &outcome))
 		})
-		if calls.Load() != 2 || source != 1 || destination != 0 || sourceUsed != 0 || checkpoint || outcome != nil {
-			t.Fatalf("late cleanup lost requester-only accounting: calls=%d source=%d destination=%d source_used=%d checkpoint=%t terminal=%t", calls.Load(), source, destination, sourceUsed, checkpoint, outcome != nil)
-		}
-		if got := model.Testing_NetEscrowByteCount(ctx, fixture.grant); got != model.ByteCount(stored.TransferByteCount) {
-			t.Fatal("requester cleanup prematurely released provider reservation")
-		}
-		if err := model.CloseContract(ctx, contract, fixture.peer, 0, false); err != nil {
-			t.Fatal(err)
-		}
-		if closed, ok := model.GetContractClose(ctx, contract); !ok || closed.Outcome != model.ContractOutcomeSettled {
-			t.Fatal("independent provider close did not use normal settlement")
+		if calls.Load() != 2 || source != 1 || destination != 1 || sourceUsed != 0 || destinationUsed != 0 || checkpoint ||
+			outcome == nil || *outcome != string(model.ContractOutcomeSettled) {
+			t.Fatalf("late cleanup did not settle the unused contract at zero: calls=%d source=%d destination=%d source_used=%d destination_used=%d checkpoint=%t terminal=%t",
+				calls.Load(), source, destination, sourceUsed, destinationUsed, checkpoint, outcome != nil)
 		}
 		// The reservation stays with its durable debit owner until that owner runs.
 		if got := model.Testing_NetEscrowByteCount(ctx, fixture.grant); got != model.ByteCount(stored.TransferByteCount) {
 			t.Fatal("settlement released the reservation before its debit owner")
 		}
+		if err := model.CloseContract(ctx, contract, fixture.peer, 0, false); err == nil || !strings.Contains(err.Error(), "already closed with outcome settled") {
+			t.Fatal("the provider's close after the settlement is not the benign duplicate", err)
+		}
 		if released := privateFlushGrantDebits(t, ctx, fixture.grant); released != 1 {
-			t.Fatal("normal two-party settlement did not journal exactly its contract", released)
+			t.Fatal("the zero-final settlement did not journal exactly its contract", released)
 		}
 		if got := model.Testing_NetEscrowByteCount(ctx, fixture.grant); got != 0 {
-			t.Fatal("normal two-party settlement retained the reservation")
+			t.Fatal("the zero-final settlement retained the reservation")
 		}
 		privateLateAssertPool(t)
 	})
+}
+
+// The requester's zero final settles an unused contract (owner, 2026-10-28),
+// so the provider's own close of it must be the benign duplicate.
+func privateProviderCloseAfterZeroFinal(ctx context.Context, contractId server.Id, providerId server.Id) error {
+	err := model.CloseContract(ctx, contractId, providerId, 0, false)
+	if err == nil {
+		return errors.New("the provider's close found the unused contract unsettled")
+	}
+	if strings.Contains(err.Error(), "already closed with outcome settled") {
+		return nil
+	}
+	return fmt.Errorf("provider close after the requester's zero final: %w", err)
 }
 
 // Eight simultaneous real private allocations share one payer and one pool
@@ -329,7 +342,7 @@ func TestPrivateProviderContractLoadedSingleConnection(t *testing.T) {
 					done <- reply.err
 					return
 				}
-				done <- model.CloseContract(ctx, contract, fixture.peer, 0, false)
+				done <- privateProviderCloseAfterZeroFinal(ctx, contract, fixture.peer)
 			}()
 		}
 		close(start)
