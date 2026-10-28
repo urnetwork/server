@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Sim-latency final baseline</title>
+  <title>Sim-latency historical v1 baseline</title>
   <style>
     :root {
       --ink:#102035; --muted:#607086; --paper:#eef3f8; --card:#ffffff;
@@ -88,8 +88,18 @@
 </head>
 <body>
 <main>
+  <aside class="notice" aria-label="Historical report status">
+    <strong>Historical v1 report — not current production launch acceptance.</strong>
+    The measurements, 1,800-provider profile, 16.1% margin and readiness claims below
+    describe the earlier release only. The October 28, 2026 release uses a separately
+    frozen 3,600-provider profile and 26.9% practical margin; its calibration and
+    runtime qualification are not yet accepted, and the required midnight opening
+    was missed. See the <a href="../launch/LAUNCH-ACCEPTANCE.md">current acceptance
+    checklist</a> and <a href="../launch/current-state.json">dated current state</a>.
+    No chart below qualifies the new source, image or review provider.
+  </aside>
   <header>
-    <div class="eyebrow">URnetwork · sim-latency · authenticated final baseline</div>
+    <div class="eyebrow">URnetwork · sim-latency · historical v1 baseline</div>
     <h1>What “significantly better” means on the final evaluator.</h1>
     <p class="lead">The competition uses a lower-is-better, failure-charged latency score. Twelve same-seed calibration pairs select a median-of-nine evaluation and the initial 16.1% takeover margin. Each live round generates its own hidden-seed baseline and records run-level variance and a one-sided significance test; a significant winner's measured variance sets the next epoch's margin.</p>
     <div class="chips">

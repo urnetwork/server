@@ -5,7 +5,10 @@ completed fresh R9/R9 in 10,290 seconds with all gates and cleanup. Independent
 native verification accepted it as operational compatibility evidence, not
 statistical equivalence. Its versioned public subset retains all 18 CSVs and
 36 compressed statistics segments; excluded verbose logs remain private and
-the full native replay tree still needs retained MinIO archival. This is not
+the complete native replay tree has an exact-version SHA-equal MinIO readback
+with COMPLIANCE retention through 2028-01-01. See the
+[archive receipt record](../launch/C2-BRIDGE-ARCHIVE-RETENTION-2026-10-27.md);
+replica delivery for that full archive is not independently proved. This is not
 an official production epoch baseline or completed independent-seed calibration.
 The comparison's significance fringe was 12.6246%; the practical takeover
 margin remains 26.9%, and both requirements still apply.
@@ -98,8 +101,9 @@ package during calibration; the boundary prevents repository-wide Go commands
 from treating those immutable inputs as a standalone package. It does not
 change any file under `v1`, and the module file is covered by the manifest.
 
-[`final-baseline.html`](final-baseline.html) is the human-readable visual report
-for this evidence. It is covered by the directory manifest alongside this
+[`final-baseline.html`](final-baseline.html) is the historical v1 visual report,
+not acceptance of the October 28 release. Its original measurements and charts
+remain unchanged under a prominent supersession banner. It is covered by the directory manifest alongside this
 README, the index, verifier, and immutable `v1` data.
 
 ## Identity
