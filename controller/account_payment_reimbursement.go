@@ -11,6 +11,18 @@
 // and advances each payment with AdvancePayment. The plan and payment ids derive
 // from the digest, so a rerun with the same digest creates nothing and only
 // advances what is not yet sent.
+//
+// A network that already has an open manual reimbursement of another plan is
+// refused, unless --allow_prior_reimbursement is given (owner-approved,
+// 2026-10-27: per-window reliability subsidies owed to networks that were
+// already reimbursed). With it, each row lists its network's prior
+// reimbursements with their plan, amount and reason; the digest also covers the
+// flag and each prior reimbursement's payment id, and each marker lists them,
+// so a send refuses when its dry run ran without the flag or saw other prior
+// reimbursements. The plan and payment ids still derive from the digest of the
+// rows, reason and fee alone: a run names its own plan before it reads which
+// reimbursements are prior to it, so its own payments are never prior, and the
+// same rows and reason name the same plan with or without the flag.
 package controller
 
 import (
@@ -184,8 +196,22 @@ func payoutReimbursementPaymentId(digest string, networkId server.Id) server.Id 
 }
 
 // sha256 over the reason, the fee, and each row's network, wallet, chain,
-// address, amount and payout, in network order.
+// address, amount and payout, in network order. The plan and payment ids derive
+// from it, with or without --allow_prior_reimbursement.
 func payoutReimbursementDigest(reason string, fee model.NanoCents, rows []*PayoutReimbursementRow) string {
+	return payoutReimbursementSum(payoutReimbursementDigestLines(reason, fee, rows, false))
+}
+
+// The digest with --allow_prior_reimbursement: sha256 over the same lines, then
+// the flag, then the network and payment id of each row's prior
+// reimbursements, in network and payment id order.
+func payoutReimbursementAllowPriorDigest(reason string, fee model.NanoCents, rows []*PayoutReimbursementRow) string {
+	return payoutReimbursementSum(payoutReimbursementDigestLines(reason, fee, rows, true))
+}
+
+// The canonical text of both digests, one line each. A reason or address is
+// quoted, so no field can add a line.
+func payoutReimbursementDigestLines(reason string, fee model.NanoCents, rows []*PayoutReimbursementRow, allowPriorReimbursement bool) []string {
 	lines := []string{
 		"urnetwork payouts reimburse v1",
 		"reason " + strconv.Quote(reason),
@@ -199,6 +225,19 @@ func payoutReimbursementDigest(reason string, fee model.NanoCents, rows []*Payou
 		lines = append(lines, fmt.Sprintf("row %s %s %s %s %s %d", row.NetworkId, row.WalletId, strconv.Quote(row.Blockchain),
 			strconv.Quote(row.WalletAddress), row.Amount, row.PayoutNanoCents))
 	}
+	if allowPriorReimbursement {
+		lines = append(lines, "allow_prior_reimbursement")
+		for _, row := range sorted {
+			for _, priorPaymentId := range row.priorPaymentIds() {
+				lines = append(lines, fmt.Sprintf("prior %s %s", row.NetworkId, priorPaymentId))
+			}
+		}
+	}
+	return lines
+}
+
+// sha256 of the lines joined by newlines, in hex.
+func payoutReimbursementSum(lines []string) string {
 	sum := sha256.Sum256([]byte(strings.Join(lines, "\n")))
 	return hex.EncodeToString(sum[:])
 }
@@ -219,6 +258,9 @@ type PayoutReimbursementRow struct {
 	// what the sender will ask Circle for
 	CircleAmount string    `json:"circle_amount"`
 	PaymentId    server.Id `json:"payment_id"`
+	// --allow_prior_reimbursement: the network's open manual reimbursements of
+	// other plans, which this payment adds to
+	PriorReimbursements []*PayoutReimbursementPrior `json:"prior_reimbursements,omitempty"`
 
 	// The payment, once the plan exists: pending, reserved (an attempt without
 	// a Circle record), submitted, complete or canceled.
@@ -227,6 +269,30 @@ type PayoutReimbursementRow struct {
 	TxHash     string `json:"tx_hash,omitempty"`
 	// --send: the advance of this run
 	Outcome string `json:"outcome,omitempty"`
+}
+
+// The payment ids of the prior reimbursements in increasing order, as the
+// digest and the marker list them; nil without any.
+func (self *PayoutReimbursementRow) priorPaymentIds() []server.Id {
+	var priorPaymentIds []server.Id
+	for _, prior := range self.PriorReimbursements {
+		priorPaymentIds = append(priorPaymentIds, prior.PaymentId)
+	}
+	slices.SortFunc(priorPaymentIds, func(a server.Id, b server.Id) int {
+		return a.Cmp(b)
+	})
+	return priorPaymentIds
+}
+
+// An open (not canceled) manual reimbursement of another plan for a row's
+// network, listed with --allow_prior_reimbursement.
+type PayoutReimbursementPrior struct {
+	PaymentId     server.Id `json:"payment_id"`
+	PaymentPlanId server.Id `json:"payment_plan_id"`
+	// from its marker: the USDC its wallet receives, and its reason
+	AmountNanoCents model.NanoCents `json:"amount_nano_cents"`
+	Reason          string          `json:"reason"`
+	Completed       bool            `json:"completed"`
 }
 
 type PayoutReimbursementChainTotal struct {
@@ -242,6 +308,9 @@ type PayoutReimbursementReport struct {
 	Reason        string    `json:"reason"`
 	Digest        string    `json:"digest"`
 	PaymentPlanId server.Id `json:"payment_plan_id"`
+	// open manual reimbursements of other plans are listed on their rows
+	// instead of refused, and the digest binds them
+	AllowPriorReimbursement bool `json:"allow_prior_reimbursement,omitempty"`
 	// the sender's fixed fee per payout
 	FeeNanoCents model.NanoCents `json:"fee_nano_cents"`
 	// usdc_payout.yml payments: on, off, or why it is unreadable
@@ -260,23 +329,26 @@ type PayoutReimbursementReport struct {
 	Created bool `json:"created"`
 }
 
-// Runs the dry run, or with `send` the send, of the file's rows.
-func PayoutsReimburse(clientSession *session.ClientSession, csvData []byte, reason string, send bool, expect string) (*PayoutReimbursementReport, error) {
-	return payoutsReimburse(clientSession, csvData, reason, send, expect, server.NowUtc)
+// Runs the dry run, or with `send` the send, of the file's rows. With
+// `allowPriorReimbursement`, a network's open manual reimbursements of other
+// plans are listed on its row instead of refused.
+func PayoutsReimburse(clientSession *session.ClientSession, csvData []byte, reason string, send bool, expect string, allowPriorReimbursement bool) (*PayoutReimbursementReport, error) {
+	return payoutsReimburse(clientSession, csvData, reason, send, expect, allowPriorReimbursement, server.NowUtc)
 }
 
-func payoutsReimburse(clientSession *session.ClientSession, csvData []byte, reason string, send bool, expect string, now func() time.Time) (*PayoutReimbursementReport, error) {
+func payoutsReimburse(clientSession *session.ClientSession, csvData []byte, reason string, send bool, expect string, allowPriorReimbursement bool, now func() time.Time) (*PayoutReimbursementReport, error) {
 	ctx := clientSession.Ctx
 	report := &PayoutReimbursementReport{
-		RunId:        server.NewId(),
-		Time:         now().UTC(),
-		Mode:         "dry_run",
-		Reason:       reason,
-		FeeNanoCents: model.UsdToNanoCents(providerPaymentFeeUsd),
-		Rows:         []*PayoutReimbursementRow{},
-		Chains:       []*PayoutReimbursementChainTotal{},
-		Conflicts:    []*model.ManualReimbursementConflict{},
-		Problems:     []string{},
+		RunId:                   server.NewId(),
+		Time:                    now().UTC(),
+		Mode:                    "dry_run",
+		Reason:                  reason,
+		AllowPriorReimbursement: allowPriorReimbursement,
+		FeeNanoCents:            model.UsdToNanoCents(providerPaymentFeeUsd),
+		Rows:                    []*PayoutReimbursementRow{},
+		Chains:                  []*PayoutReimbursementChainTotal{},
+		Conflicts:               []*model.ManualReimbursementConflict{},
+		Problems:                []string{},
 	}
 	if send {
 		report.Mode = "send"
@@ -360,29 +432,13 @@ func payoutsReimburse(clientSession *session.ClientSession, csvData []byte, reas
 		return report, payoutReimbursementRefusal(report)
 	}
 
-	report.Digest = payoutReimbursementDigest(reason, report.FeeNanoCents, report.Rows)
-	report.PaymentPlanId = payoutReimbursementPlanId(report.Digest)
-	plan := &model.ManualReimbursementPlan{
-		PaymentPlanId: report.PaymentPlanId,
-		Digest:        report.Digest,
-		Reason:        reason,
-	}
+	// The ids derive from the digest without --allow_prior_reimbursement, so the
+	// run names its own plan before it reads the conflicts, which leave that
+	// plan out.
+	planDigest := payoutReimbursementDigest(reason, report.FeeNanoCents, report.Rows)
+	report.PaymentPlanId = payoutReimbursementPlanId(planDigest)
 	for _, row := range report.Rows {
-		row.PaymentId = payoutReimbursementPaymentId(report.Digest, row.NetworkId)
-		plan.Markers = append(plan.Markers, &model.ManualReimbursementMarker{
-			Version:         1,
-			Digest:          report.Digest,
-			Reason:          reason,
-			PaymentPlanId:   report.PaymentPlanId,
-			PaymentId:       row.PaymentId,
-			NetworkId:       row.NetworkId,
-			WalletId:        row.WalletId,
-			WalletAddress:   row.WalletAddress,
-			Blockchain:      row.Blockchain,
-			AmountNanoCents: row.AmountNanoCents,
-			FeeNanoCents:    report.FeeNanoCents,
-			PayoutNanoCents: row.PayoutNanoCents,
-		})
+		row.PaymentId = payoutReimbursementPaymentId(planDigest, row.NetworkId)
 		report.AmountNanoCents += row.AmountNanoCents
 		report.PayoutNanoCents += row.PayoutNanoCents
 		index := slices.IndexFunc(report.Chains, func(total *PayoutReimbursementChainTotal) bool { return total.Chain == row.Chain })
@@ -395,9 +451,16 @@ func payoutsReimburse(clientSession *session.ClientSession, csvData []byte, reas
 	}
 	report.PlanPaymentCount = model.GetManualReimbursementPlanPaymentCount(ctx, report.PaymentPlanId)
 	payoutReimbursementStates(clientSession, report)
-	report.Conflicts = model.GetManualReimbursementConflicts(ctx, networkIds, report.PaymentPlanId)
-	for _, conflict := range report.Conflicts {
-		report.Problems = append(report.Problems, fmt.Sprintf("network %s already has manual reimbursement %s in plan %s", conflict.NetworkId, conflict.PaymentId, conflict.PaymentPlanId))
+	conflicts := model.GetManualReimbursementConflicts(ctx, networkIds, report.PaymentPlanId)
+	if allowPriorReimbursement {
+		payoutReimbursementPriors(clientSession, report, conflicts)
+		report.Digest = payoutReimbursementAllowPriorDigest(reason, report.FeeNanoCents, report.Rows)
+	} else {
+		report.Digest = planDigest
+		report.Conflicts = conflicts
+		for _, conflict := range report.Conflicts {
+			report.Problems = append(report.Problems, fmt.Sprintf("network %s already has manual reimbursement %s in plan %s", conflict.NetworkId, conflict.PaymentId, conflict.PaymentPlanId))
+		}
 	}
 	if 0 < len(report.Problems) {
 		return report, payoutReimbursementRefusal(report)
@@ -416,7 +479,7 @@ func payoutsReimburse(clientSession *session.ClientSession, csvData []byte, reas
 	if expect != report.Digest {
 		return report, ErrPayoutReimbursementDigestMismatch
 	}
-	created, err := model.CreateManualReimbursementPlan(ctx, plan, report.Time)
+	created, err := model.CreateManualReimbursementPlan(ctx, payoutReimbursementPlan(report), report.Time)
 	if err != nil {
 		return report, err
 	}
@@ -438,6 +501,61 @@ func payoutReimbursementRefusal(report *PayoutReimbursementReport) error {
 		errs = append(errs, errors.New(problem))
 	}
 	return errors.Join(errs...)
+}
+
+// Lists each open manual reimbursement of another plan on its network's row,
+// with the amount and reason of its marker. A marker that does not read is a
+// problem.
+func payoutReimbursementPriors(clientSession *session.ClientSession, report *PayoutReimbursementReport, conflicts []*model.ManualReimbursementConflict) {
+	networkIdRows := map[server.Id]*PayoutReimbursementRow{}
+	for _, row := range report.Rows {
+		networkIdRows[row.NetworkId] = row
+	}
+	for _, conflict := range conflicts {
+		row := networkIdRows[conflict.NetworkId]
+		prior := &PayoutReimbursementPrior{
+			PaymentId:     conflict.PaymentId,
+			PaymentPlanId: conflict.PaymentPlanId,
+			Completed:     conflict.Completed,
+		}
+		row.PriorReimbursements = append(row.PriorReimbursements, prior)
+		marker, err := model.GetManualReimbursementMarker(clientSession.Ctx, conflict.PaymentId)
+		if err != nil || marker == nil {
+			report.Problems = append(report.Problems, fmt.Sprintf("line %d: prior manual reimbursement %s of network %s has no readable marker", row.Line, conflict.PaymentId, conflict.NetworkId))
+			continue
+		}
+		prior.AmountNanoCents, prior.Reason = marker.AmountNanoCents, marker.Reason
+	}
+}
+
+// One payment and marker per row of a census without problems. Each marker
+// carries the digest the send matched, and its network's prior reimbursements.
+func payoutReimbursementPlan(report *PayoutReimbursementReport) *model.ManualReimbursementPlan {
+	plan := &model.ManualReimbursementPlan{
+		PaymentPlanId:           report.PaymentPlanId,
+		Digest:                  report.Digest,
+		Reason:                  report.Reason,
+		AllowPriorReimbursement: report.AllowPriorReimbursement,
+	}
+	for _, row := range report.Rows {
+		plan.Markers = append(plan.Markers, &model.ManualReimbursementMarker{
+			Version:                 1,
+			Digest:                  report.Digest,
+			Reason:                  report.Reason,
+			PaymentPlanId:           report.PaymentPlanId,
+			PaymentId:               row.PaymentId,
+			NetworkId:               row.NetworkId,
+			WalletId:                row.WalletId,
+			WalletAddress:           row.WalletAddress,
+			Blockchain:              row.Blockchain,
+			AmountNanoCents:         row.AmountNanoCents,
+			FeeNanoCents:            report.FeeNanoCents,
+			PayoutNanoCents:         row.PayoutNanoCents,
+			AllowPriorReimbursement: report.AllowPriorReimbursement,
+			PriorPaymentIds:         row.priorPaymentIds(),
+		})
+	}
+	return plan
 }
 
 // The state of each row's payment, when it exists.
@@ -542,6 +660,13 @@ func (self *PayoutReimbursementReport) Text() string {
 	fmt.Fprintf(b, "earning policy: %s (a manual reimbursement is admitted by its marker, not the earning census)\n", self.EarningPolicy)
 	fmt.Fprintf(b, "fee: the sender deducts a fixed %s USDC (%d nano cents) from each payout before asking Circle for the rest,\n", formatPayoutReimbursementNanoCents(self.FeeNanoCents), self.FeeNanoCents)
 	fmt.Fprintf(b, "  so each payout_nano_cents is the listed amount plus %d and Circle sends exactly the listed amount\n", self.FeeNanoCents)
+	if self.AllowPriorReimbursement {
+		priorCount := 0
+		for _, row := range self.Rows {
+			priorCount += len(row.PriorReimbursements)
+		}
+		fmt.Fprintf(b, "prior reimbursements: allowed (--allow_prior_reimbursement); the %d open manual reimbursement(s) of other plans listed below are not refused, and the digest binds exactly them\n", priorCount)
+	}
 	fmt.Fprintf(b, "rows: %d\n", len(self.Rows))
 	for _, row := range self.Rows {
 		chain := row.Chain
@@ -563,6 +688,14 @@ func (self *PayoutReimbursementReport) Text() string {
 				fmt.Fprintf(b, ", tx %s", row.TxHash)
 			}
 			fmt.Fprintf(b, "\n")
+		}
+		for _, prior := range row.PriorReimbursements {
+			state := "not complete"
+			if prior.Completed {
+				state = "complete"
+			}
+			fmt.Fprintf(b, "    prior reimbursement %s in plan %s: %s USDC, %s, reason %s\n", prior.PaymentId, prior.PaymentPlanId,
+				formatPayoutReimbursementNanoCents(prior.AmountNanoCents), state, strconv.Quote(prior.Reason))
 		}
 		if row.Outcome != "" {
 			fmt.Fprintf(b, "    this run: %s\n", row.Outcome)
