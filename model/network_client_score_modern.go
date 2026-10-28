@@ -13,9 +13,9 @@
 //
 // A reader classifies every target it reads as partitioned, absent (an older
 // export wrote it, and its scores decode as not modern) or stale (union
-// only: the metadata does not describe the pages read, which only a read
-// straddling two exports' writes sees). A stale target's pages are read with
-// the modern pages, so a stale partition costs reads, never priority.
+// only: publication is incomplete or the metadata does not describe the pages
+// read). A stale target's pages join the modern phase within the same finite
+// read allowance.
 package model
 
 import (
@@ -37,7 +37,9 @@ import (
 // One target payload's modern partition: per family facet, the counts
 // document it describes and its leading modern pages, by checksum.
 type clientScoreModernPartition struct {
-	Facets map[ipFamilyFacet]clientScoreModernPartitionFacet
+	// Distinguishes equal-content publications when a fenced begin is retried.
+	Generation string
+	Facets     map[ipFamilyFacet]clientScoreModernPartitionFacet
 }
 
 type clientScoreModernPartitionFacet struct {
@@ -83,8 +85,7 @@ const (
 
 // Targets read per source and partition state. Rollout reads the absent
 // share falling to zero as proof that a new export rewrote the index
-// (FP2-MODERN.md, "Rollout"), and a stale target is a read that straddled two
-// exports' writes.
+// (FP2-MODERN.md, "Rollout"). Stale includes interrupted publications.
 var findProviders2ModernPartitionTargets = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "urnetwork_findproviders2_modern_partition_total",
 	Help: "Score index targets FindProviders2 read by a modern-first or modern-only traversal, per source (native, union) and partition state (partitioned, absent, stale)",

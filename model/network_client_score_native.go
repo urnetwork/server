@@ -164,15 +164,6 @@ redis.call('SET', KEYS[1], ARGV[5], setExpiryOption, expiryMillis)
 return 1
 `
 
-// A page batch is one script, which holds its node for the whole batch, unlike
-// the legacy stream's pipelined SETs. A batch therefore carries at most 1 MiB
-// of pages, or one larger page alone. At the legacy stream's 8 MiB a batch held
-// a node for 26-33 ms (80 ms at most) on 2026-10-25.
-const (
-	clientScoreNativePageBatchSize  = clientScoreExportBatchSize
-	clientScoreNativePageBatchBytes = 1 << 20
-)
-
 // A snapshot owns one inactive slot. Expected page names are recorded while
 // streaming, not reconstructed from possibly partial Redis contents at commit.
 type clientScoreNativePublication struct {
@@ -351,7 +342,9 @@ func writeClientScoreNativeSnapshot(ctx context.Context, r server.RedisClient, k
 		manifest.SourceCompletedAt = sources[0].SourceCompletedAt
 	}
 	staged := false
-	err = runClientScoreExportStream(ctx, clientScoreNativePageBatchSize, clientScoreNativePageBatchBytes, 1,
+	// A native batch is one script, so it uses the smaller node-blocking budget.
+	settings := defaultClientScoreExportSettings()
+	err = runClientScoreExportStream(ctx, settings.batchSize, settings.nativeBatchBytes, 1,
 		func(emit func(clientScoreRedisSet) error) error {
 			for _, facet := range ipFamilyFacets {
 				payload, ok := facets[facet]

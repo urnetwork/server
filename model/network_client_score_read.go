@@ -252,6 +252,7 @@ func clientScoreTargetPages(
 					page.hasModernChecksum = true
 					facetPageSets[facetIndex].modern[key] = page
 				default:
+					page.modernRecovery = state == clientScoreModernPartitioned
 					facetPageSets[facetIndex].other[key] = page
 				}
 			}

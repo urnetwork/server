@@ -114,7 +114,8 @@ func (h *nativeFirstTransport) ProcessPipelineHook(redis.ProcessPipelineHook) re
 		}
 		h.work.MaxPipelineCommands = max(h.work.MaxPipelineCommands, len(cmds))
 		h.work.MaxPipelineBytes = max(h.work.MaxPipelineBytes, size)
-		if len(cmds) > clientScoreExportBatchSize || size > clientScoreExportBatchBytes {
+		settings := defaultClientScoreExportSettings()
+		if len(cmds) > settings.batchSize || size > settings.batchBytes {
 			return fmt.Errorf("SET stream exceeded its existing command/byte budget: %d/%d", len(cmds), size)
 		}
 		if h.failure == "retry_alias" {
@@ -242,7 +243,7 @@ func (h *nativeFirstTransport) execute(ctx context.Context, cmd redis.Cmder, dir
 			pageCount := (len(values) - 3) / 2
 			h.work.MaxNativePages = max(h.work.MaxNativePages, pageCount)
 			h.work.MaxNativePageBytes = max(h.work.MaxNativePageBytes, pageBytes)
-			if pageCount > clientScoreNativePageBatchSize || (pageBytes > clientScoreNativePageBatchBytes && pageCount != 1) {
+			if pageCount > defaultClientScoreExportSettings().batchSize || (pageBytes > defaultClientScoreExportSettings().nativeBatchBytes && pageCount != 1) {
 				return fmt.Errorf("native PAGE batch exceeded its count/byte guard")
 			}
 			for i := 3; i < len(values); i += 2 {
@@ -460,7 +461,8 @@ func nativeFirstBaselineSnapshot(ctx context.Context, r server.RedisClient, key 
 		manifest.SourceStartedAt = sources[0].SourceStartedAt
 		manifest.SourceCompletedAt = sources[0].SourceCompletedAt
 	}
-	err = runClientScoreExportStream(ctx, clientScoreExportBatchSize, clientScoreExportBatchBytes, 1,
+	settings := defaultClientScoreExportSettings()
+	err = runClientScoreExportStream(ctx, settings.batchSize, settings.batchBytes, 1,
 		func(emit func(clientScoreRedisSet) error) error {
 			for _, facet := range ipFamilyFacets {
 				payload, ok := facets[facet]
@@ -687,11 +689,11 @@ func TestNativeFirstPageSnapshotShapes(t *testing.T) {
 		{name: "one", pages: 1, batches: 1},
 		{name: "exact_count_bound", pages: 512, batches: 1},
 		{name: "multiple_count_batches", pages: 513, batches: 2},
-		{name: "multiple_byte_batches", pages: 3, padding: clientScoreNativePageBatchBytes/2 + 1024, batches: 3},
+		{name: "multiple_byte_batches", pages: 3, padding: defaultClientScoreExportSettings().nativeBatchBytes/2 + 1024, batches: 3},
 		// absolute sizes: one atomic page script carries at most 1 MiB, so
 		// three 400 KiB pages take two batches; at 8 MiB they took one
 		{name: "one_mebibyte_batches", pages: 3, padding: 400 << 10, batches: 2},
-		{name: "oversized_single_value", pages: 1, padding: clientScoreNativePageBatchBytes + 4096, batches: 1},
+		{name: "oversized_single_value", pages: 1, padding: defaultClientScoreExportSettings().nativeBatchBytes + 4096, batches: 1},
 	} {
 		t.Run(shape.name, func(t *testing.T) {
 			r, h := newNativeFirstTransport(t, "")
@@ -710,7 +712,7 @@ func TestNativeFirstPageSnapshotShapes(t *testing.T) {
 			if shape.name == "one_mebibyte_batches" && 1<<20 < h.work.MaxNativePageBytes {
 				t.Fatalf("a native page batch carried %d bytes, bound %d", h.work.MaxNativePageBytes, 1<<20)
 			}
-			if shape.name == "oversized_single_value" && (h.work.MaxNativePages != 1 || h.work.MaxNativePageBytes <= clientScoreNativePageBatchBytes) {
+			if shape.name == "oversized_single_value" && (h.work.MaxNativePages != 1 || h.work.MaxNativePageBytes <= defaultClientScoreExportSettings().nativeBatchBytes) {
 				t.Fatal("oversized value control did not exercise the existing exception")
 			}
 			pointer, err := parseClientScoreNativePointer(h.pointers[key])

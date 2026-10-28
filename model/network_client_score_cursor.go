@@ -27,6 +27,9 @@ type clientScorePage struct {
 	// partition's checksum (network_client_score_modern.go)
 	modernChecksum    [sha256.Size]byte
 	hasModernChecksum bool
+	// A partitioned union page omitted by modern-only traversal until one
+	// of the partition's expected modern pages proves the metadata stale.
+	modernRecovery bool
 }
 
 // A partitioned traversal (network_client_score_modern.go) reads its pages in
@@ -47,6 +50,9 @@ type clientScoreCursor struct {
 	// a modern page failed its partition checksum, and every unread page
 	// joined the modern phase so that no modern provider is passed over
 	modernStale bool
+	// Omitted partitioned pages retained without reading their payloads.
+	// Staleness activates them once within the existing row allowance.
+	modernRecoveryPages []clientScorePage
 }
 
 // Facet priority is unchanged. Within a facet, shuffle once for the whole
@@ -115,6 +121,13 @@ func (self *clientScoreCursor) markModernStale() {
 		return
 	}
 	self.modernStale = true
+	for _, page := range self.modernRecoveryPages {
+		if self.observation != nil {
+			self.observation.unreadNonModernRows -= page.expectedCount
+		}
+	}
+	self.pages = append(self.pages, self.modernRecoveryPages...)
+	self.modernRecoveryPages = nil
 	self.modernPageCount = len(self.pages)
 	findProviders2ModernPartitionTargets.WithLabelValues("union", clientScoreModernStale).Inc()
 }
@@ -185,7 +198,7 @@ func (self *clientScoreCursor) readWithClient(ctx context.Context, r server.Redi
 		var data []byte
 		if command.native == nil {
 			data, _ = command.legacy.Bytes()
-			if command.page.hasModernChecksum && 0 < len(data) && sha256.Sum256(data) != command.page.modernChecksum {
+			if command.page.hasModernChecksum && (len(data) == 0 || sha256.Sum256(data) != command.page.modernChecksum) {
 				self.markModernStale()
 			}
 		} else {

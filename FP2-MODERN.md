@@ -239,9 +239,27 @@ An older manifest without the field decodes with an empty map.
 
 It holds a gob `clientScoreModernPartition`: for each family facet, the
 SHA-256 of that facet's counts document and the SHA-256 of each of its leading
-modern pages. It is written for the same callers as the payload and with the
-same TTL, after the pages it describes. A reader picks the caller or the
-baseline copy by the same alias decision as the counts (`selectClientScorePayload`).
+modern pages. A reader picks the caller or the baseline copy by the same alias
+decision as the counts (`selectClientScorePayload`).
+
+Before replacing a payload, the exporter puts a unique publication token in
+its metadata key by comparing against the previously read metadata. Retries
+retain that comparison value, so a superseded writer cannot reclaim the key.
+Readers classify the token as `stale`. Every subsequent counts or page write
+checks the token atomically in Redis, so a superseding export fences the
+older writer. Only after all payload writes succeed does a guarded commit
+replace the token with the completed metadata, using the payload's expiration.
+Completed metadata includes a unique generation, so an intervening export
+cannot restore an identical comparison value even if its pages are unchanged.
+Until commit, the token lasts at least as long as both the previous metadata
+and the attempted payload; a failed shorter-lived export must not expose
+surviving pages as an `absent` partition.
+
+This write-before-payload barrier is required even when the page counts do
+not change. A counts checksum alone cannot distinguish 400 non-modern
+providers from 400 modern providers when both exports use two pages of 200.
+The incomplete publication remains `stale` after a failure, allowing readers
+to inspect the surviving pages within their ordinary read allowance.
 
 **Each target's partition has one of three states, per source:**
 
@@ -249,10 +267,14 @@ baseline copy by the same alias decision as the counts (`selectClientScorePayloa
 | --- | --- | --- |
 | `partitioned` | native: the manifest has `ModernPages`; union: the metadata's counts checksum equals the counts bytes read | leading modern pages in the modern phase, the rest in the non-modern phase |
 | `absent` | an older export wrote the target | all in the non-modern phase: their scores decode as not modern anyway |
-| `stale` | union only: the counts checksum differs, or a modern-phase page's bytes fail their listed checksum | all its unread pages move into the modern phase, so no modern page is skipped |
+| `stale` | union only: publication is incomplete, the counts checksum differs, or an expected modern-phase page is missing or fails its listed checksum | all its unread pages move into the modern phase, so no modern page is skipped |
 
-A stale state only arises when a read straddles two exports' writes. It costs
-reads, never priority.
+A stale state can arise while publication is in progress, after a failed
+publication, or when a read straddles two exports. Modern-only cursors retain
+the other page references for recovery without reading them while the
+partition is valid. If a modern-page check fails, those pages join the modern
+phase; this neither resets the read allowance nor bypasses the per-provider
+modern filter. Staleness costs reads within that allowance.
 
 **Readiness marker.** Each complete export sets `client_score_modern_v1_ready`
 to the instant its source load started. It is written after the target fan-out
@@ -643,7 +665,16 @@ Each change has a test at the layer where its behavior shows.
   pages written.
 - An old reader decodes the new pages and manifest.
 - A new reader decodes an old page as not modern and an old target as `absent`.
-- Mismatched counts or a page failing its checksum read as `stale`.
+- Incomplete publication, mismatched counts, and a missing or mismatched
+  modern page read as `stale`.
+- An interrupted export with unchanged counts, including a zero-modern
+  predecessor, leaves modern providers discoverable within the read allowance.
+- Overlapping exports and lost-response retries cannot restore an older
+  writer's authority or commit a partial payload. A failed shorter-lived
+  export keeps its dirty metadata until the surviving old payload expires.
+- Modern-only recovery activates retained page references once, preserves the
+  read allowance and per-provider filtering, and leaves valid non-modern
+  pages unread.
 
 **server/model, priority**, through `FindProviders2` with both native and
 legacy readers:
@@ -770,8 +801,9 @@ clarifications. Each is addressed here.
   today, and modern-only requests answer empty. The page covers this.
 - **The declaration is self-reported**, and it only applies to network-only
   providers. The client verifies every session.
-- **Partition reads.** A stale partition costs reads, never priority. The
-  counters show the states.
+- **Partition reads.** A stale partition consumes more of the finite read
+  allowance. The partition-state and incomplete-priority counters show the
+  resulting recovery work and any priority limit.
 - **Step 0 has a deadline.** A taskworker still on the old code reads an absent
   switch as the 2026-11-11 start.
 
@@ -782,8 +814,10 @@ clarifications. Each is addressed here.
 - `model/network_client_location_model.go`: `ClientScore.Modern`, the
   request field, the export's declaration read and marker, the named read, the
   phased quotas, and the band draws in `FindProviders2`.
-- `model/network_client_score_targets.go`: the modern-first split and the
-  union metadata.
+- `model/network_client_score_targets.go`: the modern-first split.
+- `model/network_client_score_modern.go` and
+  `model/network_client_score_modern_publication.go`: union metadata, fenced
+  publication, partition states and readiness.
 - `model/network_client_score_native.go`: the manifest's `ModernPages` and the
   native traversal.
 - `model/network_client_score_read.go` and

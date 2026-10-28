@@ -36,17 +36,6 @@ import (
 )
 
 const (
-	// One UpdateClientScores export contains thousands of cross-slot SETs for
-	// each caller location. Sending all of them through one ClusterClient
-	// pipeline from each of 48 workers can fill a node socket until the 15s
-	// write deadline; generating a complete operation list before batching also
-	// retained tens of GiB across those workers. Produce and flush one bounded
-	// batch at a time; completed chunks are not replayed when a later chunk
-	// needs a transient retry.
-	clientScoreExportBatchSize   = 512
-	clientScoreExportBatchBytes  = 8 << 20
-	clientScoreExportMaxAttempts = 3
-
 	// A caller-target alias is intentionally tiny. "1" selects the shared
 	// zero-caller baseline and "0" selects the caller-specific override. A
 	// missing alias means the cache was written by a legacy process and must
@@ -76,10 +65,35 @@ const (
 	clientScoreIpFamilyReadyValue = "1"
 )
 
+// Each stream bounds its live payloads and retries only the failed batch.
+type clientScoreExportSettings struct {
+	// Positive command count per union or native batch.
+	batchSize int
+	// Positive retained-byte budget; a larger single value is sent alone.
+	batchBytes int
+	// Positive byte budget for native scripts, which hold their Redis node.
+	nativeBatchBytes int
+	// Positive attempt count for a transiently failed union batch.
+	maxAttempts int
+	// Positive duration multiplied by the failed attempt number.
+	retryDelay time.Duration
+}
+
+// Preserve the existing stream limits without shared mutable policy.
+func defaultClientScoreExportSettings() clientScoreExportSettings {
+	return clientScoreExportSettings{
+		batchSize: 512, batchBytes: 8 * 1024 * 1024, nativeBatchBytes: 1024 * 1024,
+		maxAttempts: 3, retryDelay: 250 * time.Millisecond,
+	}
+}
+
 type clientScoreRedisSet struct {
 	key   string
 	value []byte
 	flush bool
+	// A union payload's dirty owner; nil retains the legacy SET operation.
+	modernPublication *clientScoreModernPublication
+	modernBegin       bool
 }
 
 // clientScoreTargetKeys builds the payload and alias key families for one
@@ -265,6 +279,24 @@ func emitClientScoreTargetFanoutWithMetrics(
 		callerIds []server.Id,
 		payload clientScoreExportPayload,
 	) error {
+		publicationKVs := map[server.Id]*clientScoreModernPublication{}
+		if keys.modern != nil {
+			for _, callerId := range callerIds {
+				publication := newClientScoreModernPublication(keys.modern(callerId))
+				publicationKVs[callerId] = publication
+				if err := emit(clientScoreRedisSet{key: publication.key, value: publication.dirty, modernPublication: publication, modernBegin: true}); err != nil {
+					return err
+				}
+			}
+			// No payload can overtake an unacknowledged dirty owner.
+			if err := emit(clientScoreRedisSet{flush: true}); err != nil {
+				return err
+			}
+		}
+		emitOwned := func(callerId server.Id, set clientScoreRedisSet) error {
+			set.modernPublication = publicationKVs[callerId]
+			return emit(set)
+		}
 		for _, callerId := range callerIds {
 			sets := []clientScoreRedisSet{
 				{key: keys.filter(callerId), value: payload.filterBytes},
@@ -279,7 +311,7 @@ func emitClientScoreTargetFanoutWithMetrics(
 				})
 			}
 			for _, set := range sets {
-				if err := emit(set); err != nil {
+				if err := emitOwned(callerId, set); err != nil {
 					return err
 				}
 			}
@@ -290,7 +322,7 @@ func emitClientScoreTargetFanoutWithMetrics(
 				// the same immutable payload under its own key.
 				value := payload.encodeSample(sampleIndex)
 				for _, callerId := range callerIds {
-					if err := emit(clientScoreRedisSet{
+					if err := emitOwned(callerId, clientScoreRedisSet{
 						key:   keys.sample(callerId, sampleIndex),
 						value: value,
 					}); err != nil {
@@ -299,9 +331,7 @@ func emitClientScoreTargetFanoutWithMetrics(
 				}
 			}
 		}
-		// the partition describes the pages as written, so it is written
-		// after them: a read between the two sees a stale partition, which
-		// costs reads, never priority
+		// Dirty metadata remains visible until every payload write is acknowledged.
 		modernPageChecksums := map[ipFamilyFacet][][sha256.Size]byte{}
 		for _, facet := range ipFamilyFacets {
 			facetPayload := payload.facets[facet]
@@ -311,7 +341,7 @@ func emitClientScoreTargetFanoutWithMetrics(
 					modernPageChecksums[facet] = append(modernPageChecksums[facet], sha256.Sum256(value))
 				}
 				for _, callerId := range callerIds {
-					if err := emit(clientScoreRedisSet{
+					if err := emitOwned(callerId, clientScoreRedisSet{
 						key:   keys.facetSample(callerId, facet, sampleIndex),
 						value: value,
 					}); err != nil {
@@ -321,9 +351,14 @@ func emitClientScoreTargetFanoutWithMetrics(
 			}
 		}
 		if keys.modern != nil {
-			partitionBytes := encodeClientScoreGobValue(metrics, newClientScoreModernPartition(payload.facets, modernPageChecksums))
+			if err := emit(clientScoreRedisSet{flush: true}); err != nil {
+				return err
+			}
+			partition := newClientScoreModernPartition(payload.facets, modernPageChecksums)
 			for _, callerId := range callerIds {
-				if err := emit(clientScoreRedisSet{
+				partition.Generation = publicationKVs[callerId].generation
+				partitionBytes := encodeClientScoreGobValue(metrics, partition)
+				if err := emitOwned(callerId, clientScoreRedisSet{
 					key:   keys.modern(callerId),
 					value: partitionBytes,
 				}); err != nil {
@@ -511,7 +546,7 @@ func runClientScoreExportStream(
 			}
 			return flush()
 		}
-		setBytes := len(set.key) + len(set.value)
+		setBytes := set.retainedBytes()
 		// Count and bytes are independent guards. Encoded samples vary with
 		// provider population, so a 512-command batch alone is not a bounded
 		// working set. Flush before adding a value that would cross the byte
@@ -578,12 +613,17 @@ return redis.call('SET', KEYS[1], ARGV[1], 'PXAT', expiresAt)
 
 // Publishes each value and its deadline atomically, rejecting expired exports.
 func writeClientScoreRedisStream(ctx context.Context, r server.RedisClient, ttl time.Duration, produce clientScoreExportProduce) error {
+	settings := defaultClientScoreExportSettings()
 	expiresAt := clientScoreExportExpiresAt(ctx)
+	modernExpiresAt := expiresAt
+	if modernExpiresAt.IsZero() {
+		modernExpiresAt = server.NowUtc().Add(ttl)
+	}
 	return runClientScoreExportStream(
 		ctx,
-		clientScoreExportBatchSize,
-		clientScoreExportBatchBytes,
-		clientScoreExportMaxAttempts,
+		settings.batchSize,
+		settings.batchBytes,
+		settings.maxAttempts,
 		produce,
 		func(batch []clientScoreRedisSet) error {
 			if !expiresAt.IsZero() && !server.NowUtc().Before(expiresAt) {
@@ -591,22 +631,45 @@ func writeClientScoreRedisStream(ctx context.Context, r server.RedisClient, ttl 
 			}
 			span := updateClientScoresPhaseMetrics.start(updateClientScoresPhaseCacheWrite)
 			defer span.finish()
+			for _, set := range batch {
+				if set.modernBegin {
+					if err := set.modernPublication.prepare(ctx, r); err != nil {
+						return err
+					}
+				}
+			}
 			pipe := r.Pipeline()
 			batchBytes := 0
+			modernCommands := []*redis.Cmd{}
 			for _, set := range batch {
-				batchBytes += len(set.key) + len(set.value)
-				if expiresAt.IsZero() {
+				batchBytes += set.retainedBytes()
+				if set.modernPublication != nil {
+					modernCommands = append(modernCommands, set.modernPublication.queue(ctx, pipe, set, modernExpiresAt))
+				} else if expiresAt.IsZero() {
 					pipe.Set(ctx, set.key, set.value, ttl)
 				} else {
 					pipe.Eval(ctx, clientScoreExportSetScript, []string{set.key}, set.value, expiresAt.UnixMilli())
 				}
 			}
 			updateClientScoresPhaseMetrics.addWork(updateClientScoresPhaseCacheWrite, len(batch), batchBytes)
-			_, err := pipe.Exec(ctx)
-			return err
+			commands, err := pipe.Exec(ctx)
+			for _, command := range commands {
+				if command.Err() != nil {
+					return command.Err()
+				}
+			}
+			if err != nil {
+				return err
+			}
+			for _, command := range modernCommands {
+				if err := checkClientScoreModernWrite(command); err != nil {
+					return err
+				}
+			}
+			return nil
 		},
 		func(ctx context.Context, failedAttempt int) error {
-			timer := time.NewTimer(time.Duration(failedAttempt) * 250 * time.Millisecond)
+			timer := time.NewTimer(time.Duration(failedAttempt) * settings.retryDelay)
 			defer timer.Stop()
 			select {
 			case <-ctx.Done():
@@ -6046,6 +6109,7 @@ func loadClientScoresInFacetOrder(
 
 		modernGroups := []map[string]clientScorePage{}
 		otherGroups := []map[string]clientScorePage{}
+		recoveryGroups := []map[string]clientScorePage{}
 		for _, facetPageSet := range facetPageSets {
 			switch partition {
 			case clientScorePartitionModernFirst:
@@ -6053,6 +6117,13 @@ func loadClientScoresInFacetOrder(
 				otherGroups = append(otherGroups, facetPageSet.other)
 			case clientScorePartitionModernOnly:
 				modernGroups = append(modernGroups, facetPageSet.modern)
+				recoveryPageKVs := map[string]clientScorePage{}
+				for key, page := range facetPageSet.other {
+					if page.modernRecovery {
+						recoveryPageKVs[key] = page
+					}
+				}
+				recoveryGroups = append(recoveryGroups, recoveryPageKVs)
 			default:
 				// one class-blind group, without the partition's checksums
 				pages := map[string]clientScorePage{}
@@ -6090,8 +6161,14 @@ func loadClientScoresInFacetOrder(
 			}
 			modernGroups = merge(modernGroups)
 			otherGroups = merge(otherGroups)
+			if len(recoveryGroups) != 0 {
+				recoveryGroups = merge(recoveryGroups)
+			}
 		}
 		cursor = newClientScorePhasedCursor(modernGroups, otherGroups, observation)
+		if len(recoveryGroups) != 0 {
+			cursor.modernRecoveryPages = newClientScorePhasedCursor(nil, recoveryGroups, nil).pages
+		}
 		cursor.sourceIncomplete = sourceIncomplete
 		clientScores, returnErr = cursor.readWithClient(ctx, r, n)
 	})
