@@ -44,7 +44,7 @@ type sdkBrowsingSetupDiscoveryReport struct {
 
 // Ready IDs are copied before I/O; no installed/seen/reserved peer set exists.
 type sdkBrowsingSetupDiscovery struct {
-	readyProviderIds func() [6]clientconnect.Id
+	readyProviderIds func() [sdkBrowsingProviderCount]clientconnect.Id
 	base             clientconnect.NetworkProviderDiscovery
 	stateLock        sync.Mutex
 	report           sdkBrowsingSetupDiscoveryReport
@@ -52,7 +52,7 @@ type sdkBrowsingSetupDiscovery struct {
 }
 
 // Construction publishes the complete fixed-size observation owner.
-func newSdkBrowsingSetupDiscovery(ready func() [6]clientconnect.Id, base clientconnect.NetworkProviderDiscovery) *sdkBrowsingSetupDiscovery {
+func newSdkBrowsingSetupDiscovery(ready func() [sdkBrowsingProviderCount]clientconnect.Id, base clientconnect.NetworkProviderDiscovery) *sdkBrowsingSetupDiscovery {
 	return &sdkBrowsingSetupDiscovery{readyProviderIds: ready, base: base, changed: make(chan struct{}, 1)}
 }
 
@@ -68,7 +68,7 @@ func (self *sdkBrowsingSetupDiscovery) FindProviders2(ctx context.Context, token
 	if args.Count <= 0 || args.IpFamily != clientconnect.IpFamilyFilterDefault && args.IpFamily != clientconnect.IpFamilyFilterV4Capable && args.IpFamily != clientconnect.IpFamilyFilterV4Only {
 		return &clientconnect.FindProviders2Result{Providers: []*clientconnect.FindProvidersProvider{}}, nil
 	}
-	start, end := 0, 5
+	start, end := 0, sdkBrowsingProviderCount
 	if args.RankMode == "speed" {
 		start, end = 5, 6
 	} else if args.RankMode != "" && args.RankMode != "quality" {
@@ -89,6 +89,9 @@ func (self *sdkBrowsingSetupDiscovery) FindProviders2(ctx context.Context, token
 		if spec.ClientId != nil {
 			owned := false
 			for ordinal := start; ordinal < end; ordinal++ {
+				if start == 0 && ordinal == 5 {
+					continue
+				}
 				owned = owned || ready[ordinal] != (clientconnect.Id{}) && ready[ordinal] == *spec.ClientId
 			}
 			if !owned {
@@ -100,6 +103,9 @@ func (self *sdkBrowsingSetupDiscovery) FindProviders2(ctx context.Context, token
 	}
 	if len(query.Specs) == 0 {
 		for ordinal := start; ordinal < end; ordinal++ {
+			if start == 0 && ordinal == 5 {
+				continue
+			}
 			if id := ready[ordinal]; id != (clientconnect.Id{}) {
 				query.Specs = append(query.Specs, &clientconnect.ProviderSpec{ClientId: &id})
 			}
@@ -136,6 +142,9 @@ func (self *sdkBrowsingSetupDiscovery) FindProviders2(ctx context.Context, token
 		}
 		owned := false
 		for ordinal := start; ordinal < end; ordinal++ {
+			if start == 0 && ordinal == 5 {
+				continue
+			}
 			owned = owned || ready[ordinal] != (clientconnect.Id{}) && candidate.ClientId == ready[ordinal]
 		}
 		if !owned {
@@ -162,7 +171,7 @@ func (self *sdkBrowsingSetupDiscovery) FindProviders2(ctx context.Context, token
 				excludedMask |= uint8(1) << ordinal
 			}
 		}
-		if readyMask&0x0f == 0x0f && readyMask&0x10 == 0 && excludedMask&0x0f == 0x0f {
+		if readyMask&sdkBrowsingInitialQualityMask == sdkBrowsingInitialQualityMask && readyMask&0x10 == 0 && excludedMask&sdkBrowsingInitialQualityMask == sdkBrowsingInitialQualityMask {
 			self.stateLock.Lock()
 			if self.report.InitialExcludedEmpty == nil {
 				self.report.InitialExcludedEmpty = &sdkBrowsingSetupEmptyReceipt{QualityCall: qualityCall, ReadyMask: readyMask, CallerExcludedMask: excludedMask}
@@ -186,22 +195,22 @@ func (self *sdkBrowsingSetupDiscovery) snapshot() sdkBrowsingSetupDiscoveryRepor
 
 // Public pull views are independent; these fields describe observed geometry.
 type sdkBrowsingSetupSnapshot struct {
-	Quality           int    `json:"quality"`
-	Speed             int    `json:"speed"`
-	ExitRows          int    `json:"exit_rows"`
-	DistinctLocal     int    `json:"distinct_local"`
-	Done              int    `json:"done"`
-	Warnings          int    `json:"warnings"`
-	MissingLocal      int    `json:"missing_local"`
-	Target            int    `json:"target"`
-	InEvaluation      int    `json:"in_evaluation"`
-	Generation        int64  `json:"generation"`
-	LocationRows      int    `json:"location_rows"`
-	DistinctProviders int    `json:"distinct_providers"`
-	ProviderMask      uint8  `json:"provider_mask"`
-	ProviderCounts    [6]int `json:"provider_counts"`
-	MissingProviders  int    `json:"missing_providers"`
-	ForeignProviders  int    `json:"foreign_providers"`
+	Quality           int                           `json:"quality"`
+	Speed             int                           `json:"speed"`
+	ExitRows          int                           `json:"exit_rows"`
+	DistinctLocal     int                           `json:"distinct_local"`
+	Done              int                           `json:"done"`
+	Warnings          int                           `json:"warnings"`
+	MissingLocal      int                           `json:"missing_local"`
+	Target            int                           `json:"target"`
+	InEvaluation      int                           `json:"in_evaluation"`
+	Generation        int64                         `json:"generation"`
+	LocationRows      int                           `json:"location_rows"`
+	DistinctProviders int                           `json:"distinct_providers"`
+	ProviderMask      uint8                         `json:"provider_mask"`
+	ProviderCounts    [sdkBrowsingProviderCount]int `json:"provider_counts"`
+	MissingProviders  int                           `json:"missing_providers"`
+	ForeignProviders  int                           `json:"foreign_providers"`
 }
 
 // Diagnostics retain counts and fixture ordinals, never credentials or IDs.
@@ -210,7 +219,7 @@ func (self sdkBrowsingSetupSnapshot) String() string {
 }
 
 // Local window-client IDs and physical provider-tail IDs have separate joins.
-func sdkBrowsingSetupSnapshotFrom(exits *sdk.ExitList, status *sdk.WindowStatus, locations *sdk.ConnectedProviderLocationList, ready [6]clientconnect.Id) sdkBrowsingSetupSnapshot {
+func sdkBrowsingSetupSnapshotFrom(exits *sdk.ExitList, status *sdk.WindowStatus, locations *sdk.ConnectedProviderLocationList, ready [sdkBrowsingProviderCount]clientconnect.Id) sdkBrowsingSetupSnapshot {
 	var snapshot sdkBrowsingSetupSnapshot
 	if status != nil {
 		snapshot.Target, snapshot.InEvaluation, snapshot.Generation = status.TargetSize, status.ProviderStateInEvaluation, status.ConnectionGeneration
@@ -272,7 +281,8 @@ func sdkBrowsingSetupSnapshotFrom(exits *sdk.ExitList, status *sdk.WindowStatus,
 	return snapshot
 }
 
-// Ordinary discovery can fill the six local slots using five physical tails.
+// Five genuine initial quality authorities plus speed make the six local slots
+// feasible even when each discovery response is consumed before the next call.
 // Evaluation is an asynchronous monitor projection, never a quiescence proof.
 // An excluded empty result is retained if observed; a full window need not read
 // again, so its absence is unknown rather than a reason to force more discovery.
@@ -280,18 +290,26 @@ func sdkBrowsingSetupReady(snapshot sdkBrowsingSetupSnapshot, empty *sdkBrowsing
 	if snapshot.Quality > 5 || snapshot.Speed > 1 || snapshot.ExitRows > 6 || snapshot.ForeignProviders != 0 {
 		return false, fmt.Errorf("SDK_BROWSING_SETUP_OWNERSHIP: %s", snapshot)
 	}
-	geometry := snapshot.Quality == 5 && snapshot.Speed == 1 && snapshot.ExitRows == 6 && snapshot.DistinctLocal == 6 && snapshot.Done == 0 && snapshot.Warnings == 0 && snapshot.MissingLocal == 0 && snapshot.Target == 6 && snapshot.InEvaluation >= 0 && snapshot.Generation > 0 && snapshot.LocationRows == 6 && snapshot.DistinctProviders == 5 && snapshot.ProviderMask == 0x2f && snapshot.MissingProviders == 0 && snapshot.ProviderCounts[4] == 0 && snapshot.ProviderCounts[5] == 1
-	qualityCount, duplicatedQuality := 0, 0
-	for ordinal := range 4 {
+	geometry := snapshot.Quality == 5 && snapshot.Speed == 1 && snapshot.ExitRows == 6 && snapshot.DistinctLocal == 6 && snapshot.Done == 0 && snapshot.Warnings == 0 && snapshot.MissingLocal == 0 && snapshot.Target == 6 && snapshot.InEvaluation >= 0 && snapshot.Generation > 0 && snapshot.LocationRows == 6 && snapshot.DistinctProviders >= 2 && snapshot.DistinctProviders <= 6 && snapshot.ProviderMask & ^uint8(0x6f) == 0 && snapshot.MissingProviders == 0 && snapshot.ProviderCounts[4] == 0 && snapshot.ProviderCounts[5] == 1
+	qualityCount, qualityProviders := 0, 0
+	expectedMask := uint8(1 << 5)
+	for ordinal := range sdkBrowsingProviderCount {
+		if !sdkBrowsingInitialQualityProvider(ordinal) {
+			continue
+		}
 		count := snapshot.ProviderCounts[ordinal]
-		geometry = geometry && 1 <= count && count <= 2
+		geometry = geometry && 0 <= count && count <= 5
 		qualityCount += count
-		if count == 2 {
-			duplicatedQuality++
+		if count > 0 {
+			qualityProviders++
+			expectedMask |= uint8(1) << ordinal
 		}
 	}
-	geometry = geometry && qualityCount == 5 && duplicatedQuality == 1
-	if empty != nil && (empty.QualityCall <= 0 || empty.ReadyMask&0x0f != 0x0f || empty.ReadyMask&0x10 != 0 || empty.CallerExcludedMask&0x0f != 0x0f) {
+	// Local quorum is exact; the default enumerator may legitimately prefetch
+	// repeated physical tails. Availability is proven separately, not inferred
+	// from one scheduler-dependent installed multiplicity.
+	geometry = geometry && qualityCount == 5 && snapshot.DistinctProviders == qualityProviders+1 && snapshot.ProviderMask == expectedMask
+	if empty != nil && (empty.QualityCall <= 0 || empty.ReadyMask&sdkBrowsingInitialQualityMask != sdkBrowsingInitialQualityMask || empty.ReadyMask&0x10 != 0 || empty.CallerExcludedMask&sdkBrowsingInitialQualityMask != sdkBrowsingInitialQualityMask) {
 		return false, errors.New("SDK_BROWSING_SETUP_EMPTY_RECEIPT: invalid observed response")
 	}
 	return geometry, nil
