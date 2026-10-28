@@ -35,6 +35,8 @@ type salesLedgerTx struct {
 	rows     map[string]bool
 	balances []salesLedgerBalance
 	renewals []salesLedgerRenewal
+	// the lock statements and gate reads, in order
+	log []string
 }
 
 type salesLedgerBalance struct {
@@ -82,6 +84,10 @@ func (self *salesLedgerTx) Exec(ctx context.Context, sql string, args ...any) (p
 	defer self.stateLock.Unlock()
 
 	switch {
+	case strings.Contains(sql, "pg_advisory_xact_lock"):
+		self.log = append(self.log, "advisory_lock "+args[0].(string))
+		return salesLedgerTag(1), nil
+
 	case strings.Contains(sql, "INSERT INTO stripe_invoice"):
 		return self.insertOnce("stripe_invoice/" + args[0].(string)), nil
 
@@ -152,6 +158,7 @@ func (self *salesLedgerTx) Query(ctx context.Context, sql string, args ...any) (
 
 	case strings.Contains(sql, "FROM subscription_renewal") && strings.Contains(sql, "UNION ALL"):
 		// x402AlreadyGrantedForTransaction
+		self.log = append(self.log, "x402_granted "+args[2].(string))
 		networkId := args[0].(server.Id)
 		market := args[1].(string)
 		transaction := args[2].(string)

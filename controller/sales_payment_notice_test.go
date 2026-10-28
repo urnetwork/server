@@ -426,6 +426,16 @@ func TestX402GrantPostsOncePerSettleTransaction(t *testing.T) {
 		connect.AssertEqual(t, err, nil)
 	}
 
+	// each grant checks for an earlier grant only under the settle
+	// transaction's lock, so concurrent grants of one payment serialize
+	connect.AssertEqual(t, tx.log, []string{
+		"advisory_lock x402_settle/0xpro", "x402_granted 0xpro",
+		"advisory_lock x402_settle/0xpro", "x402_granted 0xpro",
+		"advisory_lock x402_settle/0xpro", "x402_granted 0xpro",
+		"advisory_lock x402_settle/5xSolanaSignature", "x402_granted 5xSolanaSignature",
+		"advisory_lock x402_settle/5xSolanaSignature", "x402_granted 5xSolanaSignature",
+	})
+
 	got := notices()
 	connect.AssertEqual(t, len(got), 2)
 	connect.AssertEqual(t, got[0].RecordKey, "x402/0xpro")
