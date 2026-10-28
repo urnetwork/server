@@ -6,6 +6,7 @@ package model
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"slices"
 	"sync"
@@ -256,6 +257,88 @@ func TestClosePayerDueContractsRetiresDueContractsOnceThroughOwnerTurns(t *testi
 		}
 		f.requireSettled(t, ctx, wantIds, append(append([]server.Id{}, live...), disputed...))
 	})
+}
+
+// A page of the drain costs about a page of the payer's open-contract index,
+// however many due contracts the payer holds and wherever they fall in
+// contract order. Ordered by contract_id, the read sorted every due contract
+// of the payer, or walked the primary key from the oldest contract of every
+// payer until it met a page of the payer's. On Main, with payers holding
+// millions of unresolved contracts, the planner chose the walk, and the read
+// outlived its 20 s bound on every run (2026-10-28). Sequential scans are off
+// as they are in effect on Main's billions of contracts; this table is small.
+func TestReadPayerDueContractsExaminesAboutOnePage(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		f := newPayerDueCloseFixture(t, t.Context(), "synthetic-payer-due-page")
+		other := newPayerDueCloseFixture(t, t.Context(), "synthetic-payer-due-page-other")
+		now := server.NowUtc().Truncate(time.Millisecond)
+		const page = 32
+		// The other payer's contracts are older, so they come first in contract order.
+		otherMintedAt := now.Add(-40 * time.Hour)
+		other.addContracts(t.Context(), other.endedBalanceId, otherMintedAt, 40*page, otherMintedAt.Add(DefaultContractExpiration), false)
+		mintedAt := now.Add(-30 * time.Hour)
+		deadline := mintedAt.Add(DefaultContractExpiration)
+		due := f.addContracts(t.Context(), f.endedBalanceId, mintedAt, 4*page, deadline, false)
+
+		if examined := payerDueReadExaminedRows(t, t.Context(), f.payerNetworkId, now, page); 2*page < examined {
+			t.Fatalf("the due read examined %.0f contracts for a page of %d", examined, page)
+		}
+
+		read, err := ReadPayerDueContracts(t.Context(), f.payerNetworkId, now, page)
+		if err != nil {
+			t.Fatal(err)
+		}
+		readIds := []server.Id{}
+		for _, contract := range read {
+			if !slices.Contains(due, contract.ContractId) || !contract.Deadline.Equal(deadline) {
+				t.Fatal("the due read returned a contract that is not one of the payer's due ones, or its deadline")
+			}
+			readIds = append(readIds, contract.ContractId)
+		}
+		if len(readIds) != page || !slices.IsSortedFunc(readIds, server.Id.Cmp) {
+			t.Fatalf("the due read returned %d contracts, want a page of %d in contract order", len(readIds), page)
+		}
+	})
+}
+
+// The transfer_contract rows the due read's scans examined: those they
+// returned and those their filters or rechecks removed, over every loop.
+func payerDueReadExaminedRows(t testing.TB, ctx context.Context, payerNetworkId server.Id, dueBefore time.Time, limit int) float64 {
+	t.Helper()
+	type planNode struct {
+		Relation  string     `json:"Relation Name"`
+		Rows      float64    `json:"Actual Rows"`
+		Loops     float64    `json:"Actual Loops"`
+		Removed   float64    `json:"Rows Removed by Filter"`
+		Rechecked float64    `json:"Rows Removed by Index Recheck"`
+		Plans     []planNode `json:"Plans"`
+	}
+	var examined float64
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(ctx, `SET LOCAL enable_seqscan = off`))
+		var raw []byte
+		server.Raise(tx.QueryRow(ctx, `EXPLAIN (ANALYZE, FORMAT JSON) `+payerDueContractsSql,
+			payerNetworkId, dueBefore.UTC(), dueBefore.UTC().Add(-DefaultContractExpiration), limit).Scan(&raw))
+		var plans []struct {
+			Plan planNode
+		}
+		if json.Unmarshal(raw, &plans) != nil || len(plans) != 1 {
+			t.Fatal("invalid query plan")
+		}
+		var inspect func(planNode)
+		inspect = func(node planNode) {
+			if node.Relation == "transfer_contract" {
+				examined += (node.Rows + node.Removed + node.Rechecked) * node.Loops
+			}
+			for _, child := range node.Plans {
+				inspect(child)
+			}
+		}
+		inspect(plans[0].Plan)
+	})
+	return examined
 }
 
 // A held owner refuses its turn without waiting: its members stay open for
