@@ -436,21 +436,14 @@ var statsProviderModernGateShadowGauge = newStatsGaugeVec(
 )
 
 // The modern provider gate under this process's provider.yml at the last
-// refresh (FP2FIX.md, owner decision 2026-10-15): one while it holds quality
-// and speed to modern providers. The monitor's readiness signal (monitor
-// SIGNALS.md §2.29) reads it with the start below, so a postponed or moved
-// flip moves the signal's windows with it.
+// refresh (FP2FIX.md; FP2-MODERN.md): one while it holds quality and speed to
+// modern providers, which only quality_speed_requires_modern_provider: true
+// does since modern-first priority replaced the gate. The monitor's
+// readiness signal (monitor SIGNALS.md §2.29) reads it per taskworker, to
+// see that the fleet decides the gate alike.
 var statsProviderModernGateOnGauge = newStatsGauge(
 	"provider_modern_gate_on",
 	"One while the modern provider gate holds quality and speed to modern providers under this process's provider.yml",
-)
-
-// While quality_speed_requires_modern_provider is absent from provider.yml,
-// the instant the gate turns on by itself, in unix seconds. No series while
-// the switch is given, true, false or unreadable, when no flip is scheduled.
-var statsProviderModernGateStartGauge = newStatsGaugeVec(
-	"provider_modern_gate_start_seconds",
-	"Unix time the modern provider gate turns on by itself, published only while quality_speed_requires_modern_provider is absent from provider.yml",
 )
 
 var statsProviderEgressAvailableGauge = newStatsGauge(
@@ -1091,8 +1084,8 @@ func statsRefreshDb(ctx context.Context, window statsEpochWindow) {
 }
 
 // Publishes the pool as the egress rules decide it, with the rollout flag as
-// it is now (model.CountProviderEgress), and the modern provider gate's
-// schedule first, so it stays current while a refresh is unavailable.
+// it is now (model.CountProviderEgress), and the modern provider gate first,
+// so it stays current while a refresh is unavailable.
 func statsRefreshProviderEgress(ctx context.Context) {
 	statsPublishProviderModernGate(server.NowUtc())
 	statsProviderEgressAvailableGauge.set(0)
@@ -1104,23 +1097,15 @@ func statsRefreshProviderEgress(ctx context.Context) {
 	statsProviderEgressAvailableGauge.set(1)
 }
 
-// Publishes the modern provider gate under this process's provider.yml at
-// now: whether it is on, and the start while one is scheduled.
+// Publishes whether the modern provider gate is on under this process's
+// provider.yml at now. The gate has no start any more (FP2-MODERN.md), so
+// urnetwork_stats_provider_modern_gate_start_seconds is not published.
 func statsPublishProviderModernGate(now time.Time) {
-	on, scheduledStart := model.GetModernProviderGateSchedule(now)
 	onValue := 0.0
-	if on {
+	if model.GetModernProviderGateOn(now) {
 		onValue = 1
 	}
 	statsProviderModernGateOnGauge.set(onValue)
-	startValues := []statsLabeledValue{}
-	if scheduledStart != nil {
-		startValues = append(startValues, statsLabeledValue{
-			labelValues: []string{},
-			value:       float64(scheduledStart.Unix()),
-		})
-	}
-	statsProviderModernGateStartGauge.replace(startValues)
 }
 
 func statsPublishProviderEgressCounts(counts *model.ProviderEgressCounts) {

@@ -1,5 +1,18 @@
 # FindProviders2 supply and quality-probe repair plan
 
+Latest owner decision, 2026-10-28, superseding the decision of the same day
+below that postponed the automatic cutoff to 2026-11-11 00:00 UTC:
+**modern-first priority within each FindProviders2 band replaces the modern
+provider gate** ([FP2-MODERN.md](FP2-MODERN.md)). Quality and Speed no longer
+require a modern provider. Each band draws its modern providers first, and a
+provider that is not modern only fills what they leave, keeping its buckets.
+`main/provider.yml` sets `quality_speed_requires_modern_provider: false`
+(config 808328a), and the code reads an absent switch as off, so nothing turns
+the gate on by itself: only an explicit `true` does. The start
+`quality_speed_modern_provider_start` is retired, ignored when given and logged
+once, and `urnetwork_stats_provider_modern_gate_start_seconds` is no longer
+published. The gate's sections below keep their history, with notes.
+
 Latest user decision, 2026-10-14: option 4, probe-verified, shadow first.
 **Quality and Speed will require a modern provider: one the capability probe
 has measured, on a real client to provider session, negotiating end-to-end
@@ -192,14 +205,18 @@ reclassifying the fleet.
 | At least one measured URL success in eight hours, or fewer than two measured runs | Required | Required | Required |
 | URL success ratio ≥ 0.8 | Required | Required | Not required; required at `online_url_success_ratio` once set (off by default, 2026-10-15) |
 | Direct or identified-ISP subscriber evidence and no quality exception | Required under policy two | Not required | Not required |
-| Modern provider (end-to-end post-quantum encryption + resizable transfer windows) | Required from 2026-11-11 00:00 UTC | Required from 2026-11-11 00:00 UTC | Not required |
+| Modern provider (end-to-end post-quantum encryption + resizable transfer windows) | Not required; modern providers are drawn first within each band ([FP2-MODERN.md](FP2-MODERN.md)) | Not required; modern providers are drawn first within each band ([FP2-MODERN.md](FP2-MODERN.md)) | Not required; modern providers are drawn first within each band ([FP2-MODERN.md](FP2-MODERN.md)) |
 
 This matrix is the bucket admission contract. Probe admission has a different
 purpose: every provider passing reliability and the ARIN **risk** gate is
 eligible for paced URL probes. ARIN quality exceptions do not stop probes;
 security-quarantined providers also need probes to establish recovery.
 
-The modern provider row (2026-10-14) is native bucket membership too, and
+Note, 2026-10-28 ([FP2-MODERN.md](FP2-MODERN.md)): the row above is now
+priority, not membership. The gate this paragraph describes is retired: it
+is on only with `quality_speed_requires_modern_provider: true`, and an absent
+switch is off at every instant, 2026-11-11 included. The modern provider row
+(2026-10-14) is native bucket membership too, and
 only while the gate is on: from 2026-11-11 00:00 UTC (owner decision
 2026-10-28) while `quality_speed_requires_modern_provider` is absent from
 provider.yml, never with it `false`, and at once with it `true`. Until then
@@ -368,8 +385,13 @@ provider cannot resolve the probe client's key.
   providers in client id order, a bounded page at a time, and keeps the due
   ones (no evidence, modern evidence older than `modern_refresh_hours`, other
   evidence older than `other_refresh_hours`, 72 and 72 by default) that the
-  egress rules admit to Quality or Speed before the gate, so a provider the
-  gate takes out still gets measured. It measures up to `limit` (64) of them,
+  egress rules place in Online, judged with the score export's Online inputs:
+  each provider's published country and the URL-success guard the export last
+  published ([FP2-MODERN.md](FP2-MODERN.md), "The capability probe covers
+  every Online provider"). So every Online provider gets measured, Quality
+  and Speed members and the providers the gate would take out included, and
+  `no_success`, `low_success` and hard-excluded providers do not. It measures
+  up to `limit` (64) of them,
   `concurrency` (16) at once, each in a tunnel whose window pings the
   provider and whose clients attempt opportunistic end-to-end sessions after
   the platform has processed their key registration, recording into connect's
@@ -414,7 +436,14 @@ provider cannot resolve the probe client's key.
   valid public providers) on the providers dashboard. Every score export logs
   one `[nclm]modern provider gate:` line with the totals over its pool. Every
   outcome but `modern` is what the gate takes out once it is on.
-- **Switch.** Three ways (owner decision 2026-10-15), by
+- **Switch.** Note, 2026-10-28 ([FP2-MODERN.md](FP2-MODERN.md), "The gate is
+  retired"): two ways now. `true` turns the gate on, and `false` or an absent
+  switch keeps it off at every instant; `quality_speed_modern_provider_start`
+  is ignored and logged once, and the stats collector publishes only
+  `urnetwork_stats_provider_modern_gate_on`. The failures of the switch
+  itself still read as `false` and still WARN `modern-gate-schedule-unreadable`;
+  those of the start are gone. Main sets `false` (config 808328a). As
+  decided before: three ways (owner decision 2026-10-15), by
   `quality_speed_requires_modern_provider` in provider.yml. Absent, as on
   Main, the gate turns on by itself at its start, 2026-11-11 00:00 UTC by
   default, that instant included. `false` keeps it off: the kill switch and
@@ -463,7 +492,13 @@ provider cannot resolve the probe client's key.
   for the URL ratio. Online is unchanged, so a Quality or Speed answer still
   reaches a non-modern provider in its Online tier, after both native
   buckets.
-- **Rollout.** In order. (1) Merge the connect accessor
+- **Rollout.** Note, 2026-10-28 ([FP2-MODERN.md](FP2-MODERN.md), "Rollout"):
+  step (5) below no longer happens. The gate does not turn on by itself, so
+  there is no start to prepare for; provider.yml sets the switch `false`
+  before 2026-11-11 00:00 UTC (FP2-MODERN.md, step 0), and the readiness
+  signal (monitor SIGNALS.md §2.29) keeps only its fleet-agreement and
+  decode checks, which WARN. Modern-first priority rolls out with the
+  readers instead. As planned before: in order. (1) Merge the connect accessor
   (`ClientSettings.PeerCapabilityRecorder`, connect
   feat/modern-provider-evidence, reviewed and fixed at 4a145681) into connect
   main, and revert the capability probe branch's temporary replace of

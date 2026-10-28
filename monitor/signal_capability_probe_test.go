@@ -219,22 +219,33 @@ func TestCapabilityProbeSignalAlertsOnAStalledChain(t *testing.T) {
 }
 
 // The stall pages on the modern provider gate as every pass decides it, read
-// from the desired provider.yml by the model's own decoder: an explicit true
-// pages and false warns, and a switch or file that cannot be read is off, as
-// is a switch left out at this instant, long before any start the gate had
-// (FP2-MODERN.md retires its start). No reader publishes priority and no
-// modern request was answered, so the gate alone decides.
+// from the desired provider.yml by the model's own decoder. The gate has no
+// start any more (FP2-MODERN.md): with quality_speed_requires_modern_provider
+// absent it is off at every instant, so a seven-hour stall warns before, at
+// and after the former start, beside the retired start key too; true pages
+// and false warns whatever the time, and a switch or file that cannot be
+// read is off. No reader publishes priority and no modern request was
+// answered, so the gate alone decides.
 func TestCapabilityProbeStallPagesOnTheEffectiveGate(t *testing.T) {
+	start := time.Date(2026, 11, 2, 12, 30, 0, 0, time.UTC)
+	// the start an absent switch turned the gate on at, until it was retired
+	defaultStart := time.Date(2026, 11, 11, 0, 0, 0, 0, time.UTC)
 	for _, c := range []struct {
 		name     string
 		provider string
-		tier     string
+		// the finding's instant; zero for capabilityProbeTestNow
+		now  time.Time
+		tier string
 	}{
 		{name: "switch absent", provider: "enable_egress_test: false\n", tier: tierWarn},
-		{name: "true", provider: "quality_speed_requires_modern_provider: true\n", tier: tierPage},
-		{name: "false", provider: "quality_speed_requires_modern_provider: false\n", tier: tierWarn},
-		{name: "unreadable switch", provider: "quality_speed_requires_modern_provider: maybe\n", tier: tierWarn},
-		{name: "a file that is not yaml", provider: "egress_index:\n\tnative_reader_enabled: true\n", tier: tierWarn},
+		{name: "switch absent, a second before the retired start", provider: "quality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", now: start.Add(-time.Second), tier: tierWarn},
+		{name: "switch absent, at the retired start", provider: "quality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", now: start, tier: tierWarn},
+		{name: "switch and start absent, before the former default start", provider: "enable_egress_test: false\n", now: defaultStart.Add(-time.Second), tier: tierWarn},
+		{name: "switch and start absent, at the former default start", provider: "enable_egress_test: false\n", now: defaultStart, tier: tierWarn},
+		{name: "true, a day before the start", provider: "quality_speed_requires_modern_provider: true\nquality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", now: start.Add(-24 * time.Hour), tier: tierPage},
+		{name: "false, a day after the start", provider: "quality_speed_requires_modern_provider: false\nquality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", now: start.Add(24 * time.Hour), tier: tierWarn},
+		{name: "unreadable switch, after the start", provider: "quality_speed_requires_modern_provider: maybe\nquality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", now: start.Add(time.Hour), tier: tierWarn},
+		{name: "a file that is not yaml, after the default start", provider: "egress_index:\n\tnative_reader_enabled: true\n", now: defaultStart.Add(time.Hour), tier: tierWarn},
 	} {
 		desired := func() capabilityProbeDesired {
 			popProbe := server.Config.PushSimpleResource(capabilityProbeSettingsResource, []byte("enabled: true\n"))
@@ -250,7 +261,10 @@ func TestCapabilityProbeStallPagesOnTheEffectiveGate(t *testing.T) {
 		if !desired.enabled {
 			t.Fatalf("%s: the probe read as switched off", c.name)
 		}
-		now := capabilityProbeTestNow
+		now := c.now
+		if now.IsZero() {
+			now = capabilityProbeTestNow
+		}
 		stalled := capabilityProbeObservation{lastPass: now.Add(-7 * time.Hour), exporting: 4, oldestStart: now.Add(-48 * time.Hour)}
 		if f := capabilityProbeStalledFinding(defaultCapabilityProbeSettings(), now, desired, stalled); f.healthy || f.class != "capability-probe-stalled" || f.tier != c.tier {
 			t.Errorf("%s: finding %s at %s (healthy %t), want %s", c.name, f.class, f.tier, f.healthy, c.tier)
