@@ -144,7 +144,9 @@ func (self h1PlusProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return self.unavailable("bounded-source-unavailable"), nil
+		findings := self.unavailable("bounded-source-unavailable")
+		findings[0].observed += " " + observationFailureDetails(err, classifyObservationError(err))
+		return findings, nil
 	}
 	processes, err := parseH1PlusProcesses(out, env.cfg.env, self, now, budget)
 	if err != nil {

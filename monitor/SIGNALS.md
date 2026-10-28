@@ -45457,6 +45457,15 @@ customer data-plane success. Some early admission/capacity rejections occur
 before these counters. Keep client selection/fallback evidence separate and
 do not weaken authentication or TLS to make compatibility appear healthy.
 
+For both §23.1 and §23.2, a failed bounded source read remains
+`h1plus-telemetry-incomplete` with `reason=bounded-source-unavailable`. Retain
+only the existing finite observation error class, typed local admission phases
+and execution-boundary projection from that returned error. Independent joined
+markers do not identify one attempt, actor, remote execution or backend cause;
+absent or malformed markers remain unknown. Do not publish raw source errors or
+response bodies. Successful/malformed response handling and parent cancellation
+keep their separate existing paths; this diagnostic does not establish coverage.
+
 ### 23.3 Connect H1 session closes by carrier, and provider cohorts by app version
 Probe: `connect-close-cohorts`
 

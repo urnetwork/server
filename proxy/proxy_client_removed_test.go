@@ -1,5 +1,5 @@
 // Pins the client index of the device manager and the closing of a removed
-// client's devices (CLIENTCLOSE1.md section 5).
+// client's devices (CLIENTCLOSE.md section 5).
 package proxy
 
 import (
