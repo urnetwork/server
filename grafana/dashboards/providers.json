@@ -3587,7 +3587,7 @@
           "legendFormat": "not_modern"
         }
       ],
-      "description": "Providers the modern provider gate takes out of quality and speed: the URL probe has not shown end-to-end post-quantum encryption with resizable transfer windows on their sessions in the last seven days. They stay online and counted, and probes, force_minimum and an explicit client id still reach them. Zero until the gate turns on by itself at 2026-10-21 00:00 UTC while quality_speed_requires_modern_provider is absent from provider.yml (or at quality_speed_modern_provider_start), and while the switch is false; the shadow beside it says what the gate would take out."
+      "description": "Providers the modern provider gate takes out of quality and speed: the URL probe has not shown end-to-end post-quantum encryption with resizable transfer windows on their sessions in the last seven days. They stay online and counted, and probes, force_minimum and an explicit client id still reach them. Zero until the gate turns on by itself at 2026-11-11 00:00 UTC while quality_speed_requires_modern_provider is absent from provider.yml (or at quality_speed_modern_provider_start), and while the switch is false; the shadow beside it says what the gate would take out."
     },
     {
       "id": 68,
@@ -3641,7 +3641,7 @@
           "legendFormat": "not modern"
         }
       ],
-      "description": "Of the providers the other rules admit to quality, those the modern provider gate would take out: no probe evidence, evidence older than seven days, or a latest observation without post-quantum encryption or without resizable windows. The same whether the gate is on or off; review it before the gate turns on by itself at 2026-10-21 00:00 UTC, and postpone with quality_speed_requires_modern_provider: false, a config release and a taskworker and API restart, if it would gut the bucket (the monitor warns from 72 hours before, SIGNALS.md \u00a72.29)."
+      "description": "Of the providers the other rules admit to quality, those the modern provider gate would take out: no probe evidence, evidence older than seven days, or a latest observation without post-quantum encryption or without resizable windows. The same whether the gate is on or off; review it before the gate turns on by itself at 2026-11-11 00:00 UTC, and postpone with quality_speed_requires_modern_provider: false, a config release and a taskworker and API restart, if it would gut the bucket (the monitor warns from 72 hours before, SIGNALS.md \u00a72.29)."
     },
     {
       "id": 69,
@@ -3872,7 +3872,7 @@
           "legendFormat": "start"
         }
       ],
-      "description": "The instant the modern provider gate turns on by itself, 2026-10-21 00:00 UTC unless quality_speed_modern_provider_start moves it. No value while provider.yml sets quality_speed_requires_modern_provider, true or false, when no flip is scheduled. The monitor's readiness signal (SIGNALS.md \u00a72.29) watches the shadow from 72 hours before it."
+      "description": "The instant the modern provider gate turns on by itself, 2026-11-11 00:00 UTC unless quality_speed_modern_provider_start moves it. No value while provider.yml sets quality_speed_requires_modern_provider, true or false, when no flip is scheduled. The monitor's readiness signal (SIGNALS.md \u00a72.29) watches the shadow from 72 hours before it."
     },
     {
       "id": 77,
