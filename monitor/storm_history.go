@@ -108,6 +108,17 @@ func stormReadReason(err error) string {
 	return "source_unavailable"
 }
 
+// Preserve the original read cause through the fixed shared diagnostic
+// projection. A parse failure keeps its separate reason; neither projection
+// certifies a remote source, individual attempt or common backend cause.
+func stormReadFailureFinding(result finding, err error) finding {
+	readErr, ok := err.(*stormReadError)
+	if ok && readErr.reason == "source_unavailable" {
+		result.observed += " " + observationFailureDetails(readErr.cause, classifyObservationError(readErr.cause))
+	}
+	return result
+}
+
 // One §26 history: every part's series by key, with each value by step.
 type stormHistory struct {
 	// the evaluation steps in Unix seconds, oldest first; the last is the

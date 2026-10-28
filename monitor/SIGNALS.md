@@ -46418,6 +46418,19 @@ hold the series broke, or an evaluation without a value, opens nothing and
 keeps an open incident open. A missing source is unknown, never zero. No
 Grafana rule implements any of these entries yet.
 
+Source-read failures retain `visibility_reason=source_unavailable` and append
+only the existing fixed observation error class and any code-owned local
+admission/execution boundary markers from the returned error. `gaps=none` on
+this branch means no series gaps were enumerated because the read failed; it
+is not complete source coverage. Parse failures remain `invalid_response`;
+missing series retain their separate coverage reasons. Unknown error causes
+stay unclassified, without a fabricated HTTP status or backend phase. Raw
+errors, response bodies, commands, private URLs and source labels are omitted.
+Joined gateway errors can contribute several local markers; these are neither
+an individual-attempt join nor proof of remote execution, a shared backend
+failure, limiter cause, measured zero, customer impact or recovery. Existing
+parent cancellation, class identity, sustain and incident holds are unchanged.
+
 ### 26.1 PgBouncer backlog — clients waiting and the oldest wait
 
 Probe: `pgbouncer-backlog`

@@ -106,7 +106,7 @@ func (self proxyHostCpuProbe) check(ctx context.Context, env *probeEnv) ([]findi
 		if lifecycleErr := probeLifecycleError(ctx, err); lifecycleErr != nil {
 			return nil, lifecycleErr
 		}
-		return []finding{unobservable([]string{stormReadReason(err)}, nil)}, nil
+		return []finding{stormReadFailureFinding(unobservable([]string{stormReadReason(err)}, nil), err)}, nil
 	}
 
 	reasons := history.invalidReasons()
