@@ -420,7 +420,7 @@ func (self pointsReadinessProbe) check(ctx context.Context, env *probeEnv) ([]fi
 	case snapshot.latestEpoch < source.closedBlocks:
 		appendFinding(tierWarn, "points-epoch-rebuild-pending",
 			"The operator calendar is ahead of the published block snapshot.",
-			"An operator block closed after the latest snapshot's block. Rebuilds run when a payout completes, every minute while the rollup advances and hourly otherwise, and none waits for the rollup to finish. Publication time is unknown here; even an old Sunday boundary cannot prove that this rebuild handoff is overdue. A stale snapshot retains its separate two-hour warning.",
+			"An operator block closed after the latest snapshot's block. Rebuilds run when a payout plan commits, every minute while the rollup advances and hourly otherwise, and none waits for the rollup to finish. Publication time is unknown here; even an old Sunday boundary cannot prove that this rebuild handoff is overdue. A stale snapshot retains its separate two-hour warning.",
 			"Let the normal rebuild task publish. Check repeated progress and task failures if this persists; do not infer ST readiness or flip the availability bit.")
 	}
 	if source.missingPoints != 0 {
