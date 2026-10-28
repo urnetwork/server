@@ -45,8 +45,8 @@ type sdkBrowsingNative struct {
 	bridgeRefused         atomic.Uint64
 	bridgeMaximum         atomic.Int64
 	bridgeInvalid         atomic.Bool
-	originDials           [6]atomic.Uint64
-	originCloses          [6]atomic.Uint64
+	originDials           [sdkBrowsingProviderCount]atomic.Uint64
+	originCloses          [sdkBrowsingProviderCount]atomic.Uint64
 	// Explicit body-consumer fixtures leave encrypted socket reads unheld.
 	suppressOriginReadHoldForTest atomic.Bool
 }

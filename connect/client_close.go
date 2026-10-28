@@ -14,7 +14,7 @@ import (
 )
 
 // Client close (CLIENTCLOSE.md). The resident's listener delivers the close
-// requests of its client, and the exchange closes what it holds of a client
+// requests of its client, and the exchange closes the transports of a client
 // removed through the api.
 
 var (
@@ -28,7 +28,7 @@ var (
 	}, []string{"kind"})
 	clientRemovedCloses = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "urnetwork_client_removed_closes_total",
-		Help: "transports and residents closed because their client was removed through the api",
+		Help: "transports closed because their client was removed through the api",
 	}, []string{"kind"})
 )
 
@@ -131,12 +131,12 @@ func (self *Exchange) registerConnectionAuthorizationClose(connectionId server.I
 }
 
 // The key-event dispatch of a client's removed flag. Only a process holding
-// the client's transports or resident does any work, off the dispatch.
+// the client's transports does any work, off the dispatch.
 func (self *Exchange) handleClientRemoved(clientId server.Id) {
 	held := func() bool {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
-		return 0 < len(self.connections[clientId]) || self.residents[clientId] != nil
+		return 0 < len(self.connections[clientId])
 	}()
 	if held {
 		go server.HandleError(func() {
@@ -145,12 +145,15 @@ func (self *Exchange) handleClientRemoved(clientId server.Id) {
 	}
 }
 
-// Closes what this process holds of a client removed through the api
-// (CLIENTCLOSE.md section 4): each transport with the authorization close its
-// lease recheck would send, then the resident. The transports close first,
-// since a surviving transport nominates a new resident within about a second.
-// A transport that registers after this is refused by its lease's final
-// admission check.
+// Closes the transports this process holds of a client removed through the api
+// (CLIENTCLOSE.md section 4), each with the authorization close its lease
+// recheck would send. A transport that registers after this is refused by its
+// lease's final admission check.
+//
+// The resident is left to end at its idle ttl, as it did before the removal
+// closes. Canceling it while peers still sent to the client left each of their
+// forwards retrying the resident lookup every second until the forward idled
+// out; at about 370 removals per second that saturated redis (2026-10-28).
 func (self *Exchange) closeRemovedClient(clientId server.Id) {
 	closeAuthorizations := []func(int){}
 	handleCancels := []context.CancelFunc{}
@@ -172,9 +175,4 @@ func (self *Exchange) closeRemovedClient(clientId server.Id) {
 		handleCancel()
 	}
 	clientRemovedCloses.WithLabelValues("transport").Add(float64(len(closeAuthorizations) + len(handleCancels)))
-
-	if resident := self.localResident(clientId); resident != nil {
-		resident.Cancel()
-		clientRemovedCloses.WithLabelValues("resident").Inc()
-	}
 }

@@ -143,12 +143,13 @@ func runSdkBrowsingColdLink100(t *testing.T, profileName string, http2 bool) {
 		observation.Drain = nativeBrowsingMemoryNow()
 		cold, witnessErr := witness.snapshot()
 		report := struct {
+			Topology    string                            `json:"topology"`
 			Browsing    *nativeBrowsingObservation        `json:"browsing"`
 			ColdLink    nativeBrowsingColdLinkObservation `json:"cold_link"`
 			LastHealthy *sdkBrowsingHttp2Boundary         `json:"last_healthy,omitempty"`
 			FirstSlow   *sdkBrowsingHttp2Boundary         `json:"first_slow_or_error,omitempty"`
 			AfterJoin   *sdk.DeviceLocalMemoryUsage       `json:"after_join"`
-		}{Browsing: observation, ColdLink: cold, LastHealthy: lastHealthy, FirstSlow: firstSlow, AfterJoin: fixture.afterJoin}
+		}{Topology: sdkBrowsingTopology, Browsing: observation, ColdLink: cold, LastHealthy: lastHealthy, FirstSlow: firstSlow, AfterJoin: fixture.afterJoin}
 		encoded, encodeErr := json.Marshal(report)
 		if encodeErr != nil || nativeBrowsingPressureReportByteLimit < len(encoded) {
 			t.Error("bounded matched cold-link report: ", encodeErr, " bytes=", len(encoded))
