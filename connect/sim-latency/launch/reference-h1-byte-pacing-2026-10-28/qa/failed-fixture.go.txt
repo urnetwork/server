@@ -1,0 +1,692 @@
+// Qualification-only synthetic tests pin byte pacing, deadlines, cancellation,
+// pooled ownership and per-writer isolation without making timed observations.
+package connect
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"math"
+	"strings"
+	"sync"
+	"testing"
+	"testing/synctest"
+	"time"
+
+	clientconnect "github.com/urnetwork/connect"
+)
+
+// One test writer owns this clock; barriers synchronize any external observer.
+type connectH1PacingTestClock struct {
+	now   time.Time
+	waits []time.Duration
+}
+
+// Reads synthetic monotonic progress without consulting the host clock.
+func (self *connectH1PacingTestClock) readTime() time.Time { return self.now }
+
+// Advances only the supplied virtual duration, never a real-time sleep.
+func (self *connectH1PacingTestClock) wait(ctx context.Context, duration time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	self.waits = append(self.waits, duration)
+	self.now = self.now.Add(duration)
+	return nil
+}
+
+// Hooks remain instance-local and are never part of a scored patch setting.
+func newConnectH1PacingTestSettings(delay time.Duration) (*ConnectHandlerSettings, *connectH1PacingTestClock) {
+	clock := &connectH1PacingTestClock{now: time.Unix(1000, 0).UTC()}
+	return &ConnectHandlerSettings{
+		H1UserWriteDelayPerByte: delay,
+		h1UserWriteNowForTest:   clock.readTime,
+		h1UserWriteWaitForTest:  clock.wait,
+	}, clock
+}
+
+// Records complete delegated messages and can fail the unchanged socket stages.
+// One worker mutates it; tests inspect it only beyond an explicit barrier/join.
+type connectH1PacingTestWriter struct {
+	deadlines   []time.Time
+	messages    [][]byte
+	frameCalls  int
+	deadlineErr error
+	frameErr    error
+	framedErr   error
+	framedCalls int
+}
+
+// Records the original absolute deadline even when the delegated setter fails.
+func (self *connectH1PacingTestWriter) SetWriteDeadline(deadline time.Time) error {
+	self.deadlines = append(self.deadlines, deadline)
+	return self.deadlineErr
+}
+
+// Records the WebSocket branch independently from the framed batch branch.
+func (self *connectH1PacingTestWriter) WriteMessage(messageType int, message []byte) error {
+	self.frameCalls++
+	if self.frameErr != nil {
+		return self.frameErr
+	}
+	self.messages = append(self.messages, bytes.Clone(message))
+	return nil
+}
+
+// Adds only the optional framed operation to the common recording writer.
+type connectH1PacingFramedTestWriter struct {
+	*connectH1PacingTestWriter
+}
+
+// A framed failure publishes no successful user accounting.
+func (self *connectH1PacingFramedTestWriter) WriteMessages(messages [][]byte) error {
+	self.framedCalls++
+	if self.framedErr != nil {
+		return self.framedErr
+	}
+	for _, message := range messages {
+		self.messages = append(self.messages, bytes.Clone(message))
+	}
+	return nil
+}
+
+// The caller hands the original to the production helper and retains one share.
+func newConnectH1PacingTestMessage(size int, value byte) ([]byte, []byte) {
+	message := clientconnect.MessagePoolGet(size)
+	for i := range message {
+		message[i] = value
+	}
+	return message, clientconnect.MessagePoolShareReadOnly(message)
+}
+
+// Returning the final share proves the production helper returned its owner.
+func checkConnectH1PacingReleased(t *testing.T, witnesses ...[]byte) {
+	t.Helper()
+	for index, witness := range witnesses {
+		if !clientconnect.MessagePoolReturn(witness) {
+			t.Fatalf("synthetic message %d retained production ownership", index)
+		}
+	}
+}
+
+// The scored default is exact; no process-wide pacing object is constructed.
+func TestConnectH1UserWritePacingDefaultIsOneMicrosecondPerByte(t *testing.T) {
+	first := DefaultConnectHandlerSettings()
+	second := DefaultConnectHandlerSettings()
+	if first.H1UserWriteDelayPerByte != time.Microsecond || second.H1UserWriteDelayPerByte != time.Microsecond {
+		t.Fatal("fixed byte-delay default changed")
+	}
+	first.H1UserWriteDelayPerByte = 0
+	if second.H1UserWriteDelayPerByte != time.Microsecond || first.h1UserWriteNowForTest != nil ||
+		first.h1UserWriteWaitForTest != nil || second.h1UserWriteNowForTest != nil || second.h1UserWriteWaitForTest != nil {
+		t.Fatal("default settings shared mutable pacing state or test hooks")
+	}
+}
+
+// Legal small user frames accumulate the four-MiB arithmetic entirely virtually.
+func TestConnectH1UserWritePacingFourMiBHasExactAdditionalService(t *testing.T) {
+	settings, clock := newConnectH1PacingTestSettings(time.Microsecond)
+	start := clock.now
+	writer := &connectH1PacingTestWriter{}
+	for index := 0; index < 1024; index++ {
+		message, witness := newConnectH1PacingTestMessage(4*1024, byte(index))
+		before := clock.now
+		open, err := writeConnectH1UserReadyBatch(t.Context(), writer, nil, nil, message, true, time.Second, nil, settings)
+		if err != nil || !open || !writer.deadlines[index].Equal(before.Add(time.Second)) {
+			t.Fatal("virtual paced frame changed its original deadline", err)
+		}
+		checkConnectH1PacingReleased(t, witness)
+	}
+	if got := clock.now.Sub(start); got != 4194304*time.Microsecond || len(clock.waits) != 1024 {
+		t.Fatalf("virtual four-MiB service=%v waits=%d", got, len(clock.waits))
+	}
+	for _, delay := range clock.waits {
+		if delay != 4096*time.Microsecond {
+			t.Fatal("user-frame delay is not proportional to exact byte count")
+		}
+	}
+}
+
+// The production timer path uses only bubble time, with both test hooks nil.
+func TestConnectH1UserWritePacingProductionTimerCompletesAtExactDelay(t *testing.T) {
+	for _, framed := range []bool{false, true} {
+		synctest.Test(t, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			settings := &ConnectHandlerSettings{H1UserWriteDelayPerByte: time.Microsecond}
+			start := time.Now()
+			first, firstWitness := newConnectH1PacingTestMessage(64, 1)
+			second, secondWitness := newConnectH1PacingTestMessage(96, 2)
+			receive := make(chan []byte, 1)
+			receive <- second
+			writer := &connectH1PacingTestWriter{}
+			var delegated connectH1WebSocketWriter = writer
+			var boundary connectH1WriteBatch = &connectH1BatchTestBoundary{}
+			if framed {
+				delegated = &connectH1PacingFramedTestWriter{connectH1PacingTestWriter: writer}
+				boundary = nil
+			}
+			finished := make(chan struct{})
+			var open bool
+			var err error
+			sent := 0
+			go func() {
+				defer close(finished)
+				open, err = writeConnectH1UserReadyBatch(ctx, delegated, boundary, receive, first, true, time.Second,
+					func(ByteCount) { sent++ }, settings)
+			}()
+			synctest.Wait()
+			if !time.Now().Equal(start) || len(writer.deadlines) != 1 ||
+				!writer.deadlines[0].Equal(start.Add(time.Second)) || len(writer.messages) != 0 || sent != 0 {
+				t.Fatal("production timer did not retain the original no-write boundary")
+			}
+			time.Sleep(159 * time.Microsecond)
+			synctest.Wait()
+			if len(writer.messages) != 0 || sent != 0 {
+				t.Fatal("production timer wrote before the exact byte delay")
+			}
+			time.Sleep(time.Microsecond)
+			synctest.Wait()
+			select {
+			case <-finished:
+			default:
+				t.Fatal("production timer did not complete at the exact byte delay")
+			}
+			if err != nil || !open || time.Since(start) != 160*time.Microsecond || sent != 2 ||
+				len(writer.messages) != 2 || len(writer.deadlines) != 1 ||
+				!bytes.Equal(writer.messages[0], bytes.Repeat([]byte{1}, 64)) ||
+				!bytes.Equal(writer.messages[1], bytes.Repeat([]byte{2}, 96)) {
+				t.Fatal("production timer changed bytes, accounting or deadline", err)
+			}
+			checkConnectH1PacingReleased(t, firstWitness, secondWitness)
+		})
+	}
+}
+
+// Owner cancellation wins while the real production timer is durably blocked.
+func TestConnectH1UserWritePacingProductionTimerCancelsWithoutAdvancingTime(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		settings := &ConnectHandlerSettings{H1UserWriteDelayPerByte: time.Microsecond}
+		start := time.Now()
+		message, witness := newConnectH1PacingTestMessage(64, 1)
+		writer := &connectH1PacingTestWriter{}
+		finished := make(chan struct{})
+		var open bool
+		var err error
+		sent := 0
+		go func() {
+			defer close(finished)
+			open, err = writeConnectH1UserReadyBatch(ctx, writer, nil, nil, message, true, time.Second,
+				func(ByteCount) { sent++ }, settings)
+		}()
+		synctest.Wait()
+		if len(writer.deadlines) != 1 || len(writer.messages) != 0 || sent != 0 {
+			t.Fatal("production timer did not enter its pending wait")
+		}
+		cancel()
+		synctest.Wait()
+		select {
+		case <-finished:
+		default:
+			t.Fatal("production timer retained a canceled writer")
+		}
+		if err != nil || open || !time.Now().Equal(start) || len(writer.messages) != 0 || sent != 0 ||
+			len(writer.deadlines) != 1 || !writer.deadlines[0].Equal(start.Add(time.Second)) {
+			t.Fatal("production timer cancellation changed quiet-close semantics", err)
+		}
+		checkConnectH1PacingReleased(t, witness)
+	})
+}
+
+// An earlier owner deadline cancels the production select before its byte timer.
+func TestConnectH1UserWritePacingProductionTimerHonorsOwnerDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), 32*time.Microsecond)
+		defer cancel()
+		settings := &ConnectHandlerSettings{H1UserWriteDelayPerByte: time.Microsecond}
+		start := time.Now()
+		message, witness := newConnectH1PacingTestMessage(64, 1)
+		writer := &connectH1PacingTestWriter{}
+		finished := make(chan struct{})
+		var open bool
+		var err error
+		go func() {
+			defer close(finished)
+			open, err = writeConnectH1UserReadyBatch(ctx, writer, nil, nil, message, true, time.Second, nil, settings)
+		}()
+		synctest.Wait()
+		time.Sleep(31 * time.Microsecond)
+		synctest.Wait()
+		if ctx.Err() != nil || len(writer.messages) != 0 {
+			t.Fatal("owner deadline fired before its exact virtual instant")
+		}
+		time.Sleep(time.Microsecond)
+		synctest.Wait()
+		select {
+		case <-finished:
+		default:
+			t.Fatal("production timer outlived its owner deadline")
+		}
+		if !errors.Is(ctx.Err(), context.DeadlineExceeded) || err != nil || open ||
+			time.Since(start) != 32*time.Microsecond || len(writer.messages) != 0 ||
+			len(writer.deadlines) != 1 || !writer.deadlines[0].Equal(start.Add(time.Second)) {
+			t.Fatal("owner deadline changed the socket budget or quiet-close result", err)
+		}
+		checkConnectH1PacingReleased(t, witness)
+	})
+}
+
+// With no hooks, a byte delay longer than the socket budget cannot start a timer.
+func TestConnectH1UserWritePacingProductionClockRefusesInsufficientWriteBudget(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		settings := &ConnectHandlerSettings{H1UserWriteDelayPerByte: time.Microsecond}
+		start := time.Now()
+		message, witness := newConnectH1PacingTestMessage(64, 1)
+		writer := &connectH1PacingTestWriter{}
+		open, err := writeConnectH1UserReadyBatch(t.Context(), writer, nil, nil, message, true,
+			32*time.Microsecond, nil, settings)
+		if !errors.Is(err, context.DeadlineExceeded) || open || !time.Now().Equal(start) ||
+			len(writer.messages) != 0 || len(writer.deadlines) != 1 ||
+			!writer.deadlines[0].Equal(start.Add(32*time.Microsecond)) {
+			t.Fatal("production clock extended an insufficient write budget", err)
+		}
+		checkConnectH1PacingReleased(t, witness)
+	})
+}
+
+// Both encodings pass through the same paced ownership and accounting boundary.
+func checkConnectH1PacingEncoding(t *testing.T, framed bool) {
+	t.Helper()
+	settings, clock := newConnectH1PacingTestSettings(time.Microsecond)
+	start := clock.now
+	first, firstWitness := newConnectH1PacingTestMessage(64, 1)
+	second, secondWitness := newConnectH1PacingTestMessage(96, 2)
+	receive := make(chan []byte, 1)
+	receive <- second
+	writer := &connectH1PacingTestWriter{}
+	var delegated connectH1WebSocketWriter = writer
+	var boundary connectH1WriteBatch
+	batch := &connectH1BatchTestBoundary{}
+	if framed {
+		delegated = &connectH1PacingFramedTestWriter{connectH1PacingTestWriter: writer}
+	} else {
+		boundary = batch
+	}
+	var sent []ByteCount
+	open, err := writeConnectH1UserReadyBatch(t.Context(), delegated, boundary, receive, first, true, time.Second,
+		func(value ByteCount) { sent = append(sent, value) }, settings)
+	if err != nil || !open || len(writer.messages) != 2 || len(sent) != 2 || sent[0] != 64 || sent[1] != 96 {
+		t.Fatal("paced encoding changed complete accounting", err)
+	}
+	if !bytes.Equal(writer.messages[0], bytes.Repeat([]byte{1}, 64)) ||
+		!bytes.Equal(writer.messages[1], bytes.Repeat([]byte{2}, 96)) {
+		t.Fatal("paced encoding changed ordered user bytes")
+	}
+	if len(clock.waits) != 1 || clock.waits[0] != 160*time.Microsecond ||
+		len(writer.deadlines) != 1 || !writer.deadlines[0].Equal(start.Add(time.Second)) {
+		t.Fatal("paced encoding refreshed its deadline or charged the wrong bytes")
+	}
+	if framed && (writer.framedCalls != 1 || writer.frameCalls != 0) {
+		t.Fatal("framed pacing fell through to WebSocket writes")
+	}
+	if !framed && (writer.frameCalls != 2 || batch.beginCount != 1 || batch.flushCount != 1 || batch.abortCount != 0) {
+		t.Fatal("WebSocket pacing changed batch flush semantics")
+	}
+	checkConnectH1PacingReleased(t, firstWitness, secondWitness)
+}
+
+// The ordinary WebSocket batch retains FIFO bytes and post-flush accounting.
+func TestConnectH1UserWritePacingWebSocketPreservesBytesAndAccounting(t *testing.T) {
+	checkConnectH1PacingEncoding(t, false)
+}
+
+// The framed writer cannot bypass the byte delay through its fast batch method.
+func TestConnectH1UserWritePacingFramedPreservesBytesAndAccounting(t *testing.T) {
+	checkConnectH1PacingEncoding(t, true)
+}
+
+// The historical invalid-frame filter cannot add delay or success accounting.
+func TestConnectH1UserWritePacingChargesOnlyEmittedFrames(t *testing.T) {
+	settings, clock := newConnectH1PacingTestSettings(time.Microsecond)
+	first, firstWitness := newConnectH1PacingTestMessage(64, 1)
+	skipped, skippedWitness := newConnectH1PacingTestMessage(16, 2)
+	receive := make(chan []byte, 1)
+	receive <- skipped
+	writer := &connectH1PacingTestWriter{}
+	delegated := &connectH1PacingFramedTestWriter{connectH1PacingTestWriter: writer}
+	sent := 0
+	_, err := writeConnectH1UserReadyBatch(t.Context(), delegated, nil, receive, first, true, time.Second,
+		func(value ByteCount) {
+			if value != 64 {
+				t.Fatal("skipped frame entered accounting")
+			}
+			sent++
+		}, settings)
+	if err != nil || len(clock.waits) != 1 || clock.waits[0] != 64*time.Microsecond ||
+		len(writer.messages) != 1 || sent != 1 {
+		t.Fatal("skipped frame entered pacing or output", err)
+	}
+	checkConnectH1PacingReleased(t, firstWitness, skippedWitness)
+}
+
+// An unwrapped writer remains singleton and does not consume the next owner.
+func TestConnectH1UserWritePacingSingletonRetainsQueuedSibling(t *testing.T) {
+	settings, clock := newConnectH1PacingTestSettings(time.Microsecond)
+	first, firstWitness := newConnectH1PacingTestMessage(64, 1)
+	second, secondWitness := newConnectH1PacingTestMessage(96, 2)
+	receive := make(chan []byte, 1)
+	receive <- second
+	writer := &connectH1PacingTestWriter{}
+	open, err := writeConnectH1UserReadyBatch(t.Context(), writer, nil, receive, first, true, time.Second, nil, settings)
+	if err != nil || !open || len(writer.messages) != 1 || len(clock.waits) != 1 || clock.waits[0] != 64*time.Microsecond {
+		t.Fatal("singleton pacing consumed another ready frame", err)
+	}
+	select {
+	case pending := <-receive:
+		if len(pending) != 96 || pending[0] != 2 {
+			t.Fatal("singleton changed its queued sibling")
+		}
+		clientconnect.MessagePoolReturn(pending)
+	default:
+		t.Fatal("singleton dequeued its sibling")
+	}
+	checkConnectH1PacingReleased(t, firstWitness, secondWitness)
+}
+
+// Non-positive policy preserves historical writes without an owned wait.
+func TestConnectH1UserWritePacingNonPositiveDisables(t *testing.T) {
+	for _, delay := range []time.Duration{0, -time.Microsecond} {
+		settings, clock := newConnectH1PacingTestSettings(delay)
+		settings.h1UserWriteWaitForTest = func(context.Context, time.Duration) error {
+			t.Fatal("disabled pacing entered a wait")
+			return nil
+		}
+		message, witness := newConnectH1PacingTestMessage(64, 1)
+		writer := &connectH1PacingTestWriter{}
+		open, err := writeConnectH1UserReadyBatch(t.Context(), writer, nil, nil, message, true, time.Second, nil, settings)
+		if err != nil || !open || len(writer.messages) != 1 || len(clock.waits) != 0 {
+			t.Fatal("non-positive pacing changed historical writes", err)
+		}
+		checkConnectH1PacingReleased(t, witness)
+	}
+}
+
+// Both per-message multiplication and cumulative batch addition must refuse.
+func TestConnectH1UserWritePacingOverflowRefusesAndReturnsOwners(t *testing.T) {
+	for _, delay := range []time.Duration{time.Duration(math.MaxInt64), time.Duration(math.MaxInt64 / 64)} {
+		settings, clock := newConnectH1PacingTestSettings(delay)
+		first, firstWitness := newConnectH1PacingTestMessage(64, 1)
+		second, secondWitness := newConnectH1PacingTestMessage(64, 2)
+		receive := make(chan []byte, 1)
+		receive <- second
+		writer := &connectH1PacingTestWriter{}
+		_, err := writeConnectH1UserReadyBatch(t.Context(), writer, &connectH1BatchTestBoundary{}, receive, first, true,
+			time.Second, nil, settings)
+		if err == nil || !strings.Contains(err.Error(), "duration overflow") || len(writer.messages) != 0 ||
+			len(writer.deadlines) != 0 || len(clock.waits) != 0 {
+			t.Fatal("overflow reached wait or socket I/O", err)
+		}
+		checkConnectH1PacingReleased(t, firstWitness, secondWitness)
+	}
+}
+
+// Cancellation before pacing retains the helper's historical quiet-close result.
+func TestConnectH1UserWritePacingCanceledBeforeWriteIsQuiet(t *testing.T) {
+	settings, clock := newConnectH1PacingTestSettings(time.Microsecond)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	message, witness := newConnectH1PacingTestMessage(64, 1)
+	writer := &connectH1PacingTestWriter{}
+	open, err := writeConnectH1UserReadyBatch(ctx, writer, nil, nil, message, true, time.Second, nil, settings)
+	if err != nil || open || len(writer.messages) != 0 || len(writer.deadlines) != 0 || len(clock.waits) != 0 {
+		t.Fatal("canceled owner entered the socket path", err)
+	}
+	checkConnectH1PacingReleased(t, witness)
+}
+
+// A simultaneous wait completion and owner cancellation cannot emit a frame.
+func TestConnectH1UserWritePacingCanceledAtWaitCompletionIsQuiet(t *testing.T) {
+	settings, _ := newConnectH1PacingTestSettings(time.Microsecond)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	settings.h1UserWriteWaitForTest = func(context.Context, time.Duration) error {
+		cancel()
+		return nil
+	}
+	message, witness := newConnectH1PacingTestMessage(64, 1)
+	writer := &connectH1PacingTestWriter{}
+	sent := 0
+	open, err := writeConnectH1UserReadyBatch(ctx, writer, nil, nil, message, true, time.Second,
+		func(ByteCount) { sent++ }, settings)
+	if err != nil || open || len(writer.messages) != 0 || sent != 0 {
+		t.Fatal("wait completion hid owner cancellation", err)
+	}
+	checkConnectH1PacingReleased(t, witness)
+}
+
+// A delay that cannot fit refuses without extending or spending the write budget.
+func TestConnectH1UserWritePacingCannotOutliveOriginalWriteBudget(t *testing.T) {
+	settings, clock := newConnectH1PacingTestSettings(time.Second)
+	start := clock.now
+	message, witness := newConnectH1PacingTestMessage(64, 1)
+	writer := &connectH1PacingTestWriter{}
+	_, err := writeConnectH1UserReadyBatch(t.Context(), writer, nil, nil, message, true, time.Second, nil, settings)
+	if !errors.Is(err, context.DeadlineExceeded) || len(writer.messages) != 0 || len(clock.waits) != 0 ||
+		len(writer.deadlines) != 1 || !writer.deadlines[0].Equal(start.Add(time.Second)) {
+		t.Fatal("pacing extended the original write budget", err)
+	}
+	checkConnectH1PacingReleased(t, witness)
+}
+
+// Scheduler delay beyond the original deadline cannot grant a fresh socket budget.
+func TestConnectH1UserWritePacingExpiredDeadlineNeverRefreshes(t *testing.T) {
+	settings, clock := newConnectH1PacingTestSettings(time.Microsecond)
+	start := clock.now
+	settings.h1UserWriteWaitForTest = func(context.Context, time.Duration) error {
+		clock.now = start.Add(time.Second)
+		return nil
+	}
+	message, witness := newConnectH1PacingTestMessage(64, 1)
+	writer := &connectH1PacingTestWriter{}
+	_, err := writeConnectH1UserReadyBatch(t.Context(), writer, nil, nil, message, true, time.Second, nil, settings)
+	if !errors.Is(err, context.DeadlineExceeded) || len(writer.messages) != 0 || len(writer.deadlines) != 1 ||
+		!writer.deadlines[0].Equal(start.Add(time.Second)) {
+		t.Fatal("expired paced write received a refreshed deadline", err)
+	}
+	checkConnectH1PacingReleased(t, witness)
+}
+
+// Existing socket failures keep their errors, no success accounting and exact pool release.
+func TestConnectH1UserWritePacingSocketFailuresReturnOwners(t *testing.T) {
+	for _, stage := range []string{"deadline", "frame", "flush", "framed"} {
+		settings, clock := newConnectH1PacingTestSettings(time.Microsecond)
+		first, firstWitness := newConnectH1PacingTestMessage(64, 1)
+		second, secondWitness := newConnectH1PacingTestMessage(64, 2)
+		receive := make(chan []byte, 1)
+		receive <- second
+		failure := errors.New("synthetic delegated socket failure")
+		writer := &connectH1PacingTestWriter{}
+		boundary := &connectH1BatchTestBoundary{}
+		var delegated connectH1WebSocketWriter = writer
+		var batch connectH1WriteBatch = boundary
+		switch stage {
+		case "deadline":
+			writer.deadlineErr = failure
+		case "frame":
+			writer.frameErr = failure
+		case "flush":
+			boundary.flushErr = failure
+		case "framed":
+			writer.framedErr = failure
+			delegated = &connectH1PacingFramedTestWriter{connectH1PacingTestWriter: writer}
+			batch = nil
+		}
+		sent := 0
+		_, err := writeConnectH1UserReadyBatch(t.Context(), delegated, batch, receive, first, true, time.Second,
+			func(ByteCount) { sent++ }, settings)
+		if !errors.Is(err, failure) || sent != 0 || len(writer.deadlines) != 1 {
+			t.Fatalf("socket stage %s changed its failure/accounting: %v", stage, err)
+		}
+		if stage == "deadline" && len(clock.waits) != 0 || stage != "deadline" && len(clock.waits) != 1 {
+			t.Fatalf("socket stage %s reached the wrong wait boundary", stage)
+		}
+		if (stage == "frame" || stage == "flush") && boundary.abortCount != 1 {
+			t.Fatalf("socket stage %s did not abort its retained batch", stage)
+		}
+		checkConnectH1PacingReleased(t, firstWitness, secondWitness)
+	}
+}
+
+// One held writer does not block a zero-wait receiver offer or another writer.
+func TestConnectH1UserWritePacingIsolatesReceiverAndSibling(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	settings, _ := newConnectH1PacingTestSettings(time.Microsecond)
+	entered := make(chan struct{})
+	settings.h1UserWriteWaitForTest = func(ctx context.Context, duration time.Duration) error {
+		close(entered)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	message, witness := newConnectH1PacingTestMessage(64, 1)
+	receive := make(chan []byte, 1)
+	writer := &connectH1PacingTestWriter{}
+	finished := make(chan error, 1)
+	go func() {
+		_, err := writeConnectH1UserReadyBatch(ctx, writer, nil, receive, message, true, time.Second, nil, settings)
+		finished <- err
+	}()
+	select {
+	case <-entered:
+	case <-t.Context().Done():
+		t.Fatal("writer did not reach its controlled pacing wait")
+	}
+	queued, queuedWitness := newConnectH1PacingTestMessage(64, 2)
+	select {
+	case receive <- queued:
+	default:
+		t.Fatal("held writer blocked independent receiver capacity")
+	}
+	refused, refusedWitness := newConnectH1PacingTestMessage(64, 3)
+	select {
+	case receive <- refused:
+		t.Fatal("bounded receive queue admitted beyond its capacity")
+	default:
+		clientconnect.MessagePoolReturn(refused)
+	}
+	siblingSettings, siblingClock := newConnectH1PacingTestSettings(time.Microsecond)
+	sibling, siblingWitness := newConnectH1PacingTestMessage(64, 4)
+	siblingWriter := &connectH1PacingTestWriter{}
+	open, err := writeConnectH1UserReadyBatch(t.Context(), siblingWriter, nil, nil, sibling, true, time.Second, nil, siblingSettings)
+	if err != nil || !open || len(siblingWriter.messages) != 1 || len(siblingClock.waits) != 1 {
+		t.Fatal("held writer stalled an independent sibling", err)
+	}
+	cancel()
+	if err := <-finished; err != nil || len(writer.messages) != 0 {
+		t.Fatal("held writer did not quietly join cancellation", err)
+	}
+	clientconnect.MessagePoolReturn(<-receive)
+	checkConnectH1PacingReleased(t, witness, queuedWitness, refusedWitness, siblingWitness)
+}
+
+// The existing handler join cannot publish idle while its pacing owner is held.
+func TestConnectH1UserWritePacingShutdownJoinsHeldOwner(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		settings, _ := newConnectH1PacingTestSettings(time.Microsecond)
+		entered := make(chan struct{})
+		cancellationSeen := make(chan struct{})
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		releaseWait := func() { releaseOnce.Do(func() { close(release) }) }
+		defer releaseWait()
+		settings.h1UserWriteWaitForTest = func(ctx context.Context, duration time.Duration) error {
+			close(entered)
+			<-ctx.Done()
+			close(cancellationSeen)
+			<-release
+			return ctx.Err()
+		}
+		beforeCount := clientconnect.MessagePoolOutstandingCount()
+		beforeBytes := clientconnect.MessagePoolOutstandingByteCount()
+		beforeViolations := clientconnect.MessagePoolViolationCount()
+		message, witnessWhileHeld := newConnectH1PacingTestMessage(64, 1)
+		writer := &connectH1PacingTestWriter{}
+		var workers connectHandlerWorkers
+		writerFinished := make(chan struct{})
+		var open bool
+		var err error
+		sent := 0
+		workers.start(func() {
+			defer close(writerFinished)
+			open, err = writeConnectH1UserReadyBatch(ctx, writer, nil, nil, message, true, time.Second,
+				func(ByteCount) { sent++ }, settings)
+		})
+		synctest.Wait()
+		select {
+		case <-entered:
+		default:
+			t.Fatal("writer did not enter controlled wait")
+		}
+		stopEntered := make(chan struct{})
+		finished := make(chan struct{})
+		go func() {
+			finishH1ConnectHandlerWorkers(&workers, func() {
+				cancel()
+				close(stopEntered)
+			})
+			close(finished)
+		}()
+		// The writer is blocked on release and the finisher must be blocked on
+		// its join. An erroneous early return is settled before either assertion.
+		synctest.Wait()
+		select {
+		case <-stopEntered:
+		default:
+			t.Fatal("handler finisher did not stop the connection")
+		}
+		select {
+		case <-cancellationSeen:
+		default:
+			t.Fatal("owned wait did not observe handler cancellation")
+		}
+		// There is exactly one witness besides the product owner: a premature
+		// product return would make this the final return, which must fail here.
+		if clientconnect.MessagePoolReturn(witnessWhileHeld) {
+			t.Fatal("held writer released its product owner before explicit release")
+		}
+		select {
+		case <-writerFinished:
+			t.Fatal("held writer returned before its explicit release")
+		default:
+		}
+		select {
+		case <-finished:
+			t.Fatal("handler published idle before its held writer joined")
+		default:
+		}
+		releaseWait()
+		synctest.Wait()
+		select {
+		case <-finished:
+		default:
+			t.Fatal("handler did not join the released pacing owner")
+		}
+		select {
+		case <-writerFinished:
+		default:
+			t.Fatal("handler join preceded writer completion")
+		}
+		if err != nil || open || len(writer.messages) != 0 || sent != 0 {
+			t.Fatal("shutdown emitted a new user frame or changed quiet close", err)
+		}
+		if clientconnect.MessagePoolOutstandingCount() != beforeCount ||
+			clientconnect.MessagePoolOutstandingByteCount() != beforeBytes ||
+			clientconnect.MessagePoolViolationCount() != beforeViolations {
+			t.Fatal("joined shutdown retained a test-owned root or violated pool ownership")
+		}
+	})
+}

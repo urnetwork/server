@@ -1,0 +1,429 @@
+// Synthetic first-prefix qualification. The original six-job verifier runs
+// through a captured child-process boundary; no real entropy or service runs.
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+)
+
+// Owns an already prepared synthetic two-B campaign and distinct new approval.
+// Child verification uses the full legacy validator, not a success placeholder.
+type heldOutFirstCommittedFixture struct {
+	Base          *heldOutTwoBCompositionFixture
+	Original      *heldOutPrivatePlan
+	Config        heldOutFirstCommittedConfig
+	Declaration   heldOutFirstCommittedDeclaration
+	Qualification heldOutFirstCommittedQualification
+	Configuration []byte
+	Execution     heldOutExecutionConfig
+	Settings      heldOutOperatorSettings
+	ChildChecks   int
+}
+
+// Every identity and file is generated inside the synthetic fixture tree.
+func newHeldOutFirstCommittedFixture(t *testing.T) *heldOutFirstCommittedFixture {
+	t.Helper()
+	base := newHeldOutTwoBCompositionFixture(t)
+	original, err := base.prepare(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	op := base.Preparation
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalExecution := heldOutExecutionConfig{Schema: 1, Kind: "sim-latency-held-out-execution", PrivatePlan: op.PrivatePin, PublicPlan: op.PublicPin}
+	publication := heldOutPublication{Schema: 1, Kind: "sim-latency-held-out-plan-publication", PlanSha256: op.PublicPin.Sha256,
+		PublishedAt: original.PreparedAt.Add(time.Second), Commit: strings.Repeat("c", 40), Repository: op.Root,
+		PlanPath: "public/commitments.json", RemoteRef: "refs/remotes/origin/synthetic", PulledPushed: true, Evidence: []heldOutPinnedFile{op.Config.TwoBAddendum.Declaration}}
+	originalExecution.Publication = heldOutOpJson(t, filepath.Join(op.Root, "original-publication.json"), publication)
+	config := heldOutFirstCommittedConfig{Schema: 1, Kind: "sim-latency-held-out-first-committed-selection", Protocol: heldOutProtocolFirstCommittedB,
+		Original: originalExecution, OriginalOperator: heldOutPinnedFile{Path: executable, Sha256: base.Qualification.BinarySha256},
+		OriginalExecution: heldOutOpJson(t, filepath.Join(op.Root, "original-execution.json"), originalExecution),
+		Approval:          heldOutOpWrite(t, filepath.Join(op.Root, "new-first-approval.txt"), []byte("synthetic prospective approval of only the first already committed seed\n")),
+		PrivateRoot:       filepath.Join(filepath.Dir(op.Config.PrivateRoot), "selected-first"), PublicPlanPath: filepath.Join(op.Root, "public", "selected-first.json")}
+	declaration := heldOutFirstCommittedDeclaration{Schema: 1, Kind: "sim-latency-held-out-first-committed-addendum", Protocol: config.Protocol, BaseProtocol: original.Config.Protocol,
+		PublishedAt: original.PreparedAt.Add(2 * time.Second), ApprovalSha256: config.Approval.Sha256,
+		OriginalPrivatePlanSha256: config.Original.PrivatePlan.Sha256, OriginalPublicPlanSha256: config.Original.PublicPlan.Sha256,
+		OriginalPublicationSha256: config.Original.Publication.Sha256, OriginalExecutionSha256: config.OriginalExecution.Sha256, OriginalDeclarationSha256: original.Config.TwoBAddendum.Declaration.Sha256,
+		SelectedRound: original.Rounds[0].Public, UnstartedRound: original.Rounds[1].Public, Margin: original.Margin,
+		SeedCount: 1, RequiredOrderedSeeds: 1, ControlReplicates: 9, CandidateReplicates: 9, ExecutionLimitSeconds: 10800,
+		AllOutcomesRetained: true, NoNewEntropy: true, NoReplacement: true, SecondSeedUnstarted: true}
+	config.Declaration = heldOutOpJson(t, filepath.Join(op.Root, "first-declaration.json"), declaration)
+	tool := base.Qualification
+	tool.Protocol, tool.ProtocolApprovalSha256 = config.Protocol, config.Approval.Sha256
+	qualification := heldOutFirstCommittedQualification{Schema: 1, Kind: "sim-latency-held-out-first-committed-qualification", DeclarationSha256: config.Declaration.Sha256,
+		OriginalPrivatePlanSha256: config.Original.PrivatePlan.Sha256, OriginalPublicPlanSha256: config.Original.PublicPlan.Sha256, Tool: tool}
+	config.Qualification = heldOutOpJson(t, filepath.Join(op.Root, "new-first-qualification.json"), qualification)
+	settings := op.Settings
+	settings.Workload.SeedCount = 1
+	fixture := &heldOutFirstCommittedFixture{Base: base, Original: original, Config: config, Declaration: declaration, Qualification: qualification, Settings: settings}
+	fixture.refresh(t)
+	return fixture
+}
+
+// Re-encoding test metadata never changes an original campaign artifact.
+func (self *heldOutFirstCommittedFixture) refresh(t *testing.T) {
+	t.Helper()
+	content, err := json.MarshalIndent(self.Config, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	self.Configuration = content
+}
+
+// A pinned historical child may only verify the exact original configuration;
+// the complete legacy plan validator still authenticates all six requests.
+func (self *heldOutFirstCommittedFixture) command(ctx context.Context, program string, arguments ...string) ([]byte, error) {
+	op := self.Base.Preparation
+	if program == "/usr/bin/env" {
+		expected := []string{"SIM_LATENCY_HELD_OUT_COMMAND=verify", "SIM_LATENCY_HELD_OUT_REAL_OPT_IN=1",
+			"SIM_LATENCY_HELD_OUT_CONFIG=" + self.Config.OriginalExecution.Path, "SIM_LATENCY_HELD_OUT_CONFIG_SHA256=" + self.Config.OriginalExecution.Sha256,
+			self.Config.OriginalOperator.Path, "-test.run=^TestHeldOutOperatorCommand$", "-test.v"}
+		if !reflect.DeepEqual(arguments, expected) {
+			return nil, errors.New("synthetic historical child gained execution or changed its exact verifier arguments")
+		}
+		self.ChildChecks++
+		_, err := verifyHeldOutPlanWithContract(self.Config.Original.PrivatePlan, self.Config.Original.PublicPlan, op.Release, op.Settings, &self.Base.Contract)
+		return nil, err
+	}
+	if program != "/usr/bin/git" {
+		return nil, errors.New("synthetic reader refused a non-Git non-verifier process")
+	}
+	joined := strings.Join(arguments, " ")
+	if strings.Contains(joined, "merge-base --is-ancestor ") {
+		return nil, nil
+	}
+	if strings.Contains(joined, "show "+strings.Repeat("c", 40)+":public/commitments.json") {
+		return readHeldOutPinned(self.Config.Original.PublicPlan, self.Settings.MaximumBytes, false)
+	}
+	return nil, errors.New("synthetic publication reader refused changed arguments")
+}
+
+// Uses the native no-entropy derivation and its append-only metadata writes.
+func (self *heldOutFirstCommittedFixture) prepare(t *testing.T) *heldOutPrivatePlan {
+	t.Helper()
+	op := self.Base.Preparation
+	public, err := prepareHeldOutFirstCommitted(t.Context(), self.Config, self.Configuration, op.Release, self.Settings,
+		func() time.Time { return self.Declaration.PublishedAt.Add(time.Second) }, self.command)
+	if err != nil {
+		t.Fatal("synthetic first-committed preparation failed", err)
+	}
+	content, err := os.ReadFile(self.Config.PublicPlanPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	self.Execution = heldOutExecutionConfig{Schema: 1, Kind: "sim-latency-held-out-execution",
+		PrivatePlan: heldOutPinnedFile{Path: filepath.Join(self.Config.PrivateRoot, "private-plan.json"), Sha256: public.Selected.PrivatePlanSha256},
+		PublicPlan:  heldOutPinnedFile{Path: self.Config.PublicPlanPath, Sha256: heldOutDigest(content)}, Publication: self.Config.Original.Publication}
+	selected, err := verifyHeldOutFirstCommitted(t.Context(), self.Execution, op.Release, self.Settings, self.command)
+	if err != nil {
+		t.Fatal("synthetic first-committed verification failed", err)
+	}
+	return selected
+}
+
+// The existing executor supplies journaling, deadlines and baseline reuse;
+// only its host/process/observation boundary is synthetic and synchronous.
+func (self *heldOutFirstCommittedFixture) executionFixture(t *testing.T, selected *heldOutPrivatePlan) *heldOutExecFixture {
+	t.Helper()
+	fixture := &heldOutExecFixture{Preparation: self.Base.Preparation, Plan: selected, Config: self.Execution,
+		Clock: time.Now().UTC().Add(24 * time.Hour).Truncate(time.Second), Controls: map[string]*heldOutFrozenControl{}, Invocations: []heldOutJobStart{}}
+	fixture.Hooks = heldOutExecutionHooks{Now: func() time.Time { return fixture.Clock }, CheckHost: func(context.Context, heldOutPrivatePlan) (string, error) {
+		return heldOutDigest([]byte("synthetic unchanged original inventory")), nil
+	}, Invoke: func(ctx context.Context, root string, start heldOutJobStart) error {
+		deadline, ok := ctx.Deadline()
+		if !ok || !deadline.Equal(start.Deadline) || start.Deadline.Sub(start.StartedAt) != 10800*time.Second || start.RoundId != self.Original.Rounds[0].Public.RoundId {
+			return errors.New("first-committed invocation changed round or original deadline")
+		}
+		fixture.Invocations = append(fixture.Invocations, start)
+		fixture.Clock = fixture.Clock.Add(2 * time.Second)
+		return writeHeldOutExclusive(filepath.Join(root, "manager-terminal.log"), []byte(fmt.Sprintf("start_utc=%s\ndeadline_utc=%s\nevaluator_exit=0 duration_seconds=2\nend_utc=%s\n", start.StartedAt.Format(time.RFC3339), start.Deadline.Format(time.RFC3339), fixture.Clock.Format(time.RFC3339))), 0600)
+	}, Authenticate: func(_ context.Context, _ heldOutPrivatePlan, round heldOutPrivateRound, job heldOutPlannedJob, _ heldOutRequest, control *heldOutFrozenControl) (heldOutJobOutcome, *heldOutFrozenControl, error) {
+		if control == nil {
+			control = newHeldOutExecControl(t, fixture, round, job)
+			fixture.Controls[round.Public.RoundId] = control
+		}
+		pValue := .5
+		outcome := heldOutJobOutcome{JobId: job.JobId, RoundId: round.Public.RoundId, Role: job.Role, Complete: true, RawScore: map[string]float64{"better": 8, "no-op": 10, "worse": 12}[job.Role], Placeable: true,
+			Significance: &ScoreSignificance{OneSidedPValue: &pValue}, BaselineSha256: control.Baseline.Sha256, CandidateEvaluationIds: []string{}}
+		for index := 0; index < selected.Policy.Replicates; index++ {
+			outcome.CandidateEvaluationIds = append(outcome.CandidateEvaluationIds, fmt.Sprintf("synthetic-first-%s-%02d", job.JobId, index))
+		}
+		return outcome, control, nil
+	}}
+	return fixture
+}
+
+// Preparing and verifying copies only the original first position. All six
+// original requests, both private seeds and both original plan hashes survive.
+func TestHeldOutFirstCommittedDerivesExactPrefixWithoutEntropy(t *testing.T) {
+	fixture := newHeldOutFirstCommittedFixture(t)
+	draws, generated := fixture.Base.Entropy.Calls, fixture.Base.Preparation.Generated
+	selected := fixture.prepare(t)
+	if fixture.Base.Entropy.Calls != draws || fixture.Base.Preparation.Generated != generated || fixture.ChildChecks != 3 || len(selected.Rounds) != 1 || !reflect.DeepEqual(selected.Rounds[0], fixture.Original.Rounds[0]) || selected.Config.Protocol != heldOutProtocolFirstCommittedB || selected.Config.PrivateRoot != fixture.Original.Config.PrivateRoot || !reflect.DeepEqual(selected.Policy, fixture.Original.Policy) {
+		t.Fatal("first-committed derivation changed entropy, prefix, original paths or complete policy")
+	}
+	for _, pin := range []heldOutPinnedFile{fixture.Config.Original.PrivatePlan, fixture.Config.Original.PublicPlan} {
+		if _, err := readHeldOutPinned(pin, fixture.Settings.MaximumBytes, pin.Path == fixture.Config.Original.PrivatePlan.Path); err != nil {
+			t.Fatal("original immutable plan changed", err)
+		}
+	}
+	content, err := os.ReadFile(fixture.Config.PublicPlanPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, round := range fixture.Original.Rounds {
+		if bytes.Contains(content, []byte(round.PrivateSeedHex)) || bytes.Contains(content, []byte(fixture.Original.Config.PrivateRoot)) {
+			t.Fatal("selected public projection disclosed private seed or input paths")
+		}
+	}
+	var public heldOutFirstCommittedPublicPlan
+	if decodeHeldOutComplete(content, &public, "synthetic selected public projection") != nil || len(public.Selected.Rounds) != 1 || public.Selected.RequiredOrderedSeeds != 1 || !reflect.DeepEqual(public.UnstartedRound, fixture.Original.Rounds[1].Public) {
+		t.Fatal("selected public projection hid the original unstarted second commitment")
+	}
+	historical, err := heldOutFirstCommittedHostPlan(*selected)
+	if err != nil || historical.Config.Protocol != heldOutProtocolThreeABridgeTwoB || selected.Config.Protocol != heldOutProtocolFirstCommittedB {
+		t.Fatal("historical host lookup changed actual execution scope", err)
+	}
+	if margin, err := authenticateHeldOutMargin(historical.Config, fixture.Base.Preparation.Release, fixture.Settings); err != nil || margin != selected.Margin {
+		t.Fatal("first-committed host admission lost unchanged original A/bridge provenance", err)
+	}
+	if _, err := heldOutSettingsForProtocol(heldOutProtocolFirstCommittedB); err == nil {
+		t.Fatal("ordinary entropy-owning prepare gained a first-committed selector")
+	}
+}
+
+// A new private hash is insufficient authority to change source, gates,
+// reference identities, oracle, per-job lifetime or the selected position.
+func TestHeldOutFirstCommittedRejectsRehashedSelectedMutations(t *testing.T) {
+	fixture := newHeldOutFirstCommittedFixture(t)
+	fixture.prepare(t)
+	content, err := os.ReadFile(fixture.Execution.PrivatePlan.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sample := range []struct {
+		name   string
+		mutate func(*heldOutFirstCommittedPrivatePlan)
+	}{
+		{name: "second round", mutate: func(p *heldOutFirstCommittedPrivatePlan) { p.Plan.Rounds = fixture.Original.Rounds[1:] }},
+		{name: "reordered jobs", mutate: func(p *heldOutFirstCommittedPrivatePlan) {
+			p.Plan.Rounds[0].Public.Jobs[0], p.Plan.Rounds[0].Public.Jobs[1] = p.Plan.Rounds[0].Public.Jobs[1], p.Plan.Rounds[0].Public.Jobs[0]
+		}},
+		{name: "source", mutate: func(p *heldOutFirstCommittedPrivatePlan) { p.Plan.Config.SourceLock.Sha256 = strings.Repeat("e", 64) }},
+		{name: "oracle", mutate: func(p *heldOutFirstCommittedPrivatePlan) { p.Plan.Policy.ScorerSha256 = strings.Repeat("e", 64) }},
+		{name: "candidate gate weakened", mutate: func(p *heldOutFirstCommittedPrivatePlan) { p.Plan.Policy.QualityWindowSize = 0 }},
+		{name: "margin weakened", mutate: func(p *heldOutFirstCommittedPrivatePlan) { p.Plan.Policy.TakeoverMargin = 0 }},
+		{name: "deadline extended", mutate: func(p *heldOutFirstCommittedPrivatePlan) { p.Plan.Policy.ScoreTimeoutSeconds++ }},
+		{name: "R9 reduced", mutate: func(p *heldOutFirstCommittedPrivatePlan) { p.Plan.Policy.Replicates-- }},
+		{name: "request rehash", mutate: func(p *heldOutFirstCommittedPrivatePlan) {
+			p.Plan.Rounds[0].Public.Jobs[0].RequestSha256 = strings.Repeat("e", 64)
+		}},
+		{name: "reference substituted", mutate: func(p *heldOutFirstCommittedPrivatePlan) { p.Plan.References[0].Patch.Sha256 = strings.Repeat("e", 64) }},
+	} {
+		var changed heldOutFirstCommittedPrivatePlan
+		if err := json.Unmarshal(content, &changed); err != nil {
+			t.Fatal(err)
+		}
+		sample.mutate(&changed)
+		execution := fixture.Execution
+		execution.PrivatePlan = heldOutOpJson(t, execution.PrivatePlan.Path, changed)
+		if _, err := verifyHeldOutFirstCommitted(t.Context(), execution, fixture.Base.Preparation.Release, fixture.Settings, fixture.command); err == nil {
+			t.Fatalf("rehashing %s authorized a changed first prefix", sample.name)
+		}
+	}
+}
+
+// Declaration-level changes are refused before launching even the read-only
+// original verifier, and cannot choose the second seed or drop a role/outcome.
+func TestHeldOutFirstCommittedDeclarationRejectsSelectionAndRuleChanges(t *testing.T) {
+	fixture := newHeldOutFirstCommittedFixture(t)
+	baseline, err := json.Marshal(fixture.Declaration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mutate := range []func(*heldOutFirstCommittedDeclaration){
+		func(d *heldOutFirstCommittedDeclaration) { d.SelectedRound = d.UnstartedRound },
+		func(d *heldOutFirstCommittedDeclaration) { d.SelectedRound.Jobs = d.SelectedRound.Jobs[:2] },
+		func(d *heldOutFirstCommittedDeclaration) {
+			d.SelectedRound.Order[0], d.SelectedRound.Order[1] = d.SelectedRound.Order[1], d.SelectedRound.Order[0]
+		},
+		func(d *heldOutFirstCommittedDeclaration) { d.UnstartedRound = d.SelectedRound },
+		func(d *heldOutFirstCommittedDeclaration) { d.Margin = 0 },
+		func(d *heldOutFirstCommittedDeclaration) { d.CandidateReplicates = 8 },
+		func(d *heldOutFirstCommittedDeclaration) { d.ExecutionLimitSeconds++ },
+		func(d *heldOutFirstCommittedDeclaration) { d.AllOutcomesRetained = false },
+		func(d *heldOutFirstCommittedDeclaration) { d.NoNewEntropy = false },
+		func(d *heldOutFirstCommittedDeclaration) { d.SecondSeedUnstarted = false },
+	} {
+		var declaration heldOutFirstCommittedDeclaration
+		if err := json.Unmarshal(baseline, &declaration); err != nil {
+			t.Fatal(err)
+		}
+		mutate(&declaration)
+		if validateHeldOutFirstCommittedDeclaration(declaration, fixture.Config, *fixture.Original) == nil {
+			t.Fatal("changed first-only scope or unchanged-policy assertion accepted")
+		}
+	}
+}
+
+// Existing starts and unjournaled artifacts refuse selection before any new
+// metadata is published. This includes the deliberately unused second seed.
+func TestHeldOutFirstCommittedRefusesAnyStartedOriginalJob(t *testing.T) {
+	fixture := newHeldOutFirstCommittedFixture(t)
+	first, second := fixture.Original.Rounds[0].Public, fixture.Original.Rounds[1].Public
+	paths := []string{
+		filepath.Join(fixture.Original.Config.PrivateRoot, "execution.started.json"),
+		filepath.Join(heldOutJobRoot(fixture.Original.Config.PrivateRoot, first, first.Jobs[0]), "started.json"),
+		filepath.Join(heldOutJobRoot(fixture.Original.Config.PrivateRoot, second, second.Jobs[2]), "artifacts", "worker-request.json"),
+	}
+	for _, path := range paths {
+		heldOutOpWrite(t, path, []byte("synthetic existing attempt\n"))
+		if _, err := prepareHeldOutFirstCommitted(t.Context(), fixture.Config, fixture.Configuration, fixture.Base.Preparation.Release, fixture.Settings,
+			func() time.Time { return fixture.Declaration.PublishedAt.Add(time.Second) }, fixture.command); err == nil {
+			t.Fatal("already-started original admitted prefix selection")
+		}
+		if _, err := os.Lstat(fixture.Config.PrivateRoot); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("invalid prefix selection reserved a new private campaign")
+		}
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// The pinned original child must actually succeed, and its untouched second
+// half is verified as well as the selected first three exact requests.
+func TestHeldOutFirstCommittedAuthenticatesAllSixOriginalRequests(t *testing.T) {
+	fixture := newHeldOutFirstCommittedFixture(t)
+	second := fixture.Original.Rounds[1].Public
+	path := filepath.Join(heldOutJobRoot(fixture.Original.Config.PrivateRoot, second, second.Jobs[2]), "artifacts", "precommitted-request.json")
+	heldOutOpWrite(t, path, []byte("synthetic substituted unselected request\n"))
+	if _, err := prepareHeldOutFirstCommitted(t.Context(), fixture.Config, fixture.Configuration, fixture.Base.Preparation.Release, fixture.Settings,
+		func() time.Time { return fixture.Declaration.PublishedAt.Add(time.Second) }, fixture.command); err == nil || fixture.ChildChecks != 1 {
+		t.Fatal("unused second-half request bypassed complete original verification", err)
+	}
+}
+
+// All observed first-seed positions run once, with one fresh R9 control. The
+// original global execution claim blocks both a rerun and the old two-B path.
+func TestHeldOutFirstCommittedExecutesThreeJobsAndLeavesSecondUnstarted(t *testing.T) {
+	fixture := newHeldOutFirstCommittedFixture(t)
+	selected := fixture.prepare(t)
+	execution := fixture.executionFixture(t, selected)
+	result, err := executeHeldOutCampaign(t.Context(), fixture.Execution, *selected, fixture.Base.Preparation.Release, fixture.Settings, execution.Hooks)
+	if err != nil || result == nil || !result.Complete || !result.Accepted || result.OrderedSeeds != 1 || len(result.Outcomes) != 3 || len(execution.Invocations) != 3 || len(execution.Controls) != 1 {
+		t.Fatal("first-only composed execution changed its complete ordered census", err)
+	}
+	if err := validateHeldOutFirstCommittedUnstarted(*fixture.Original, false); err != nil {
+		t.Fatal("second committed seed was started", err)
+	}
+	for index, job := range fixture.Original.Rounds[0].Public.Jobs {
+		if execution.Invocations[index].JobId != job.JobId || len(result.Outcomes[index].CandidateEvaluationIds) != 9 {
+			t.Fatal("first prefix changed order or R9 candidate census")
+		}
+	}
+	if _, err := executeHeldOutCampaign(t.Context(), fixture.Execution, *selected, fixture.Base.Preparation.Release, fixture.Settings, execution.Hooks); err == nil || len(execution.Invocations) != 3 {
+		t.Fatal("selected first seed reran or restarted its deadlines")
+	}
+	if _, err := executeHeldOutCampaign(t.Context(), fixture.Config.Original, *fixture.Original, fixture.Base.Preparation.Release, fixture.Base.Preparation.Settings, execution.Hooks); err == nil || len(execution.Invocations) != 3 {
+		t.Fatal("old two-B executor ran after the first-only execution claim")
+	}
+	fixture.Config.PrivateRoot = filepath.Join(filepath.Dir(fixture.Config.PrivateRoot), "reselected-first")
+	fixture.Config.PublicPlanPath = filepath.Join(fixture.Base.Preparation.Root, "public", "reselected-first.json")
+	fixture.refresh(t)
+	if _, err := prepareHeldOutFirstCommitted(t.Context(), fixture.Config, fixture.Configuration, fixture.Base.Preparation.Release, fixture.Settings,
+		func() time.Time { return fixture.Declaration.PublishedAt.Add(time.Second) }, fixture.command); err == nil {
+		t.Fatal("new output paths permitted a repeated first-seed selection")
+	}
+}
+
+// Ordering is mandatory but insufficient: no-op gates, every p-value and every
+// observed outcome remain required. No result can silently select fewer jobs.
+func TestHeldOutFirstCommittedAcceptanceRetainsAllNoopAndStatisticalGates(t *testing.T) {
+	rounds, outcomes := newHeldOutAmendedOutcomes(1)
+	if accepted, ordered, reasons := acceptHeldOutFirstCommittedOutcomes(rounds, outcomes); !accepted || ordered != 1 || len(reasons) != 0 {
+		t.Fatal("complete ordered synthetic first seed rejected", ordered, reasons)
+	}
+	for _, mutate := range []func([]heldOutJobOutcome){
+		func(v []heldOutJobOutcome) { v[1].Placeable = false },
+		func(v []heldOutJobOutcome) { v[1].TakeoverEligible = true },
+		func(v []heldOutJobOutcome) { v[2].RawScore = 50 },
+		func(v []heldOutJobOutcome) { v[0].Complete = false },
+		func(v []heldOutJobOutcome) { v[0].Significance = nil },
+		func(v []heldOutJobOutcome) { v[0].FailureCode = "synthetic_failure" },
+		func(v []heldOutJobOutcome) { v[0], v[2] = v[2], v[0] },
+	} {
+		changed := append([]heldOutJobOutcome{}, outcomes...)
+		mutate(changed)
+		if accepted, _, _ := acceptHeldOutFirstCommittedOutcomes(rounds, changed); accepted {
+			t.Fatal("failed or reordered first-seed outcome was discarded")
+		}
+	}
+	if accepted, _, _ := acceptHeldOutFirstCommittedOutcomes(rounds, outcomes[:2]); accepted {
+		t.Fatal("missing role was silently discarded")
+	}
+	for _, protocol := range []string{"", calibrationProtocolThreeABridgeThreeB, heldOutProtocolThreeABridgeTwoB} {
+		if accepted, _, _ := acceptHeldOutOutcomesForProtocol(protocol, rounds, outcomes); accepted {
+			t.Fatal("one observed seed weakened an old protocol", protocol)
+		}
+	}
+}
+
+// A genuine observed no-op gate refusal does not drop it, stop the other
+// selected roles, or open the unselected second round as a replacement.
+func TestHeldOutFirstCommittedRetainsGateFailureAcrossAllThreeJobs(t *testing.T) {
+	fixture := newHeldOutFirstCommittedFixture(t)
+	selected := fixture.prepare(t)
+	execution := fixture.executionFixture(t, selected)
+	authenticate := execution.Hooks.Authenticate
+	execution.Hooks.Authenticate = func(ctx context.Context, plan heldOutPrivatePlan, round heldOutPrivateRound, job heldOutPlannedJob, request heldOutRequest, control *heldOutFrozenControl) (heldOutJobOutcome, *heldOutFrozenControl, error) {
+		outcome, frozen, err := authenticate(ctx, plan, round, job, request, control)
+		if job.Role == "no-op" {
+			outcome.Placeable = false
+		}
+		return outcome, frozen, err
+	}
+	result, err := executeHeldOutCampaign(t.Context(), fixture.Execution, *selected, fixture.Base.Preparation.Release, fixture.Settings, execution.Hooks)
+	if err != nil || result == nil || !result.Complete || result.Accepted || len(result.Outcomes) != 3 || len(execution.Invocations) != 3 {
+		t.Fatal("failed selected no-op was discarded, retried or replaced", err)
+	}
+	if err := validateHeldOutFirstCommittedUnstarted(*fixture.Original, false); err != nil {
+		t.Fatal("gate refusal opened the second seed", err)
+	}
+}
+
+// Even a hook-returned control cannot move from the unselected round into a
+// later first-round role: the existing exact-round custody fence still rejects.
+func TestHeldOutFirstCommittedRefusesUnselectedRoundControl(t *testing.T) {
+	fixture := newHeldOutFirstCommittedFixture(t)
+	selected := fixture.prepare(t)
+	execution := fixture.executionFixture(t, selected)
+	authenticate := execution.Hooks.Authenticate
+	execution.Hooks.Authenticate = func(ctx context.Context, plan heldOutPrivatePlan, round heldOutPrivateRound, job heldOutPlannedJob, request heldOutRequest, control *heldOutFrozenControl) (heldOutJobOutcome, *heldOutFrozenControl, error) {
+		outcome, frozen, err := authenticate(ctx, plan, round, job, request, control)
+		if job.Position == 1 && frozen != nil {
+			changed := *frozen
+			changed.RoundId = fixture.Original.Rounds[1].Public.RoundId
+			changed.SourceJobId = fixture.Original.Rounds[1].Public.Jobs[0].JobId
+			frozen = &changed
+		}
+		return outcome, frozen, err
+	}
+	result, err := executeHeldOutCampaign(t.Context(), fixture.Execution, *selected, fixture.Base.Preparation.Release, fixture.Settings, execution.Hooks)
+	if err == nil || result == nil || result.Accepted || result.Complete || len(execution.Invocations) != 1 || len(result.Outcomes) != 1 {
+		t.Fatal("unselected round control crossed into the selected first seed", err)
+	}
+}

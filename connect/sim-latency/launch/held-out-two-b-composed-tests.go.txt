@@ -36,17 +36,18 @@ func (self *heldOutTwoBFixtureEntropy) Read(content []byte) (int, error) {
 // Owns every synthetic file, captured root entry and process record. The real
 // preparation/bridge/reference/commitment validators consume these exact bytes.
 type heldOutTwoBCompositionFixture struct {
-	Preparation            *heldOutOpFixture
-	Contract               heldOutRuntimeContract
-	RuntimeContentBytesKVs map[string][]byte
-	RootMetadataKVs        map[string]heldOutRootPathMetadata
-	Declaration            heldOutTwoBAddendum
-	Qualification          heldOutToolQualification
-	References             []heldOutReference
-	Entropy                *heldOutTwoBFixtureEntropy
-	RuntimeReads           int
-	Invocations            int
-	Reauthentications      int
+	Preparation                *heldOutOpFixture
+	Contract                   heldOutRuntimeContract
+	RuntimeContentBytesKVs     map[string][]byte
+	RootMetadataKVs            map[string]heldOutRootPathMetadata
+	Declaration                heldOutTwoBAddendum
+	Qualification              heldOutToolQualification
+	References                 []heldOutReference
+	Entropy                    *heldOutTwoBFixtureEntropy
+	RuntimeReads               int
+	Invocations                int
+	Reauthentications          int
+	ConstructorAuthentications int
 }
 
 // Captured root entries are checked by the unchanged full-ancestry validator
@@ -366,7 +367,14 @@ func (self *heldOutTwoBCompositionFixture) refreshDeclaration(t *testing.T) {
 // internal validators. The unchanged native wrappers reject this fake runtime.
 func newHeldOutTwoBCompositionFixture(t *testing.T) *heldOutTwoBCompositionFixture {
 	t.Helper()
-	op := newHeldOutOpFixture(t)
+	return newHeldOutTwoBCompositionFixtureWithAuthentication(t, true)
+}
+
+// A fresh-only caller can defer redundant predecessor-positive authentication
+// until its fully configured final native authentication, without stubbing it.
+func newHeldOutTwoBCompositionFixtureWithAuthentication(t *testing.T, authenticate bool) *heldOutTwoBCompositionFixture {
+	t.Helper()
+	op := newHeldOutOpFixtureWithAuthentication(t, authenticate)
 	self := &heldOutTwoBCompositionFixture{Preparation: op, RuntimeContentBytesKVs: map[string][]byte{}, RootMetadataKVs: map[string]heldOutRootPathMetadata{}}
 	op.Config.Protocol = heldOutProtocolThreeABridgeTwoB
 	op.Settings, _ = heldOutSettingsForProtocol(op.Config.Protocol)
@@ -398,8 +406,11 @@ func newHeldOutTwoBCompositionFixture(t *testing.T) *heldOutTwoBCompositionFixtu
 	self.refreshDeclaration(t)
 	self.Entropy = &heldOutTwoBFixtureEntropy{Reader: op.Hooks.Entropy}
 	op.Hooks.Entropy = self.Entropy
-	if _, err := self.authenticate(); err != nil {
-		t.Fatal("complete synthetic base failed its real validation body", err)
+	if authenticate {
+		self.ConstructorAuthentications++
+		if _, err := self.authenticate(); err != nil {
+			t.Fatal("complete synthetic base failed its real validation body", err)
+		}
 	}
 	return self
 }

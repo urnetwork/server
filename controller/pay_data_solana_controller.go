@@ -407,47 +407,17 @@ func solanaCreditDataPackInConn(connOwner server.PgConn,
 	netRevenue := model.UsdToNanoCents(tokenAmountReceivedUsd)
 
 	server.TxInConn(clientSession.Ctx, connOwner, func(tx server.PgTx) {
-		credited = false
-		returnErr = nil
-		if err := model.LockPaymentNetworkInTx(tx, clientSession.Ctx, networkId); err != nil {
-			returnErr = err
-			return
-		}
-		completed, err := model.MarkPaymentIntentCompletedInTx(
+		credited, returnErr = solanaCreditDataPackInTx(
 			tx,
-			paymentSearchResult.PaymentReference,
-			signature,
 			clientSession,
-		)
-		if err != nil {
-			returnErr = err
-			return
-		}
-		if !completed {
-			glog.Infof("[paydata]solana data pack: intent %s already completed; not applying again\n", paymentSearchResult.PaymentReference)
-			return
-		}
-		// pro = false: a data pack is DATA ONLY, exactly like a redeemed code
-		model.AddTransferBalanceInTx(
-			clientSession.Ctx,
-			tx,
-			&model.TransferBalance{
-				NetworkId:             networkId,
-				StartTime:             now,
-				EndTime:               now.Add(duration),
-				StartBalanceByteCount: byteCount,
-				BalanceByteCount:      byteCount,
-				NetRevenue:            netRevenue,
-				Pro:                   false,
-			},
-		)
-		credited = true
-		addSolanaDataAppliedNoteInTx(
-			clientSession.Ctx,
-			tx,
+			paymentSearchResult,
+			signature,
+			tokenAmountReceivedUsd,
 			networkId,
 			byteCount,
-			paymentSearchResult.PaymentReference,
+			now,
+			duration,
+			netRevenue,
 		)
 	}, server.TxReadCommitted)
 	if returnErr != nil {
@@ -461,6 +431,66 @@ func solanaCreditDataPackInConn(connOwner server.PgConn,
 		"[paydata]solana data pack %s applied to network %s (%s, %.2f USDC, %s)\n",
 		itemId, networkId, model.ByteCountHumanReadable(byteCount), tokenAmountReceivedUsd, signature,
 	)
+	return true, nil
+}
+
+// solanaCreditDataPackInTx is one attempt of a data pack intent's credit, in
+// the caller's ReadCommitted transaction: the intent one-shot, then the data
+// balance, the applied note and the sales notice of the new payment.
+func solanaCreditDataPackInTx(
+	tx server.PgTx,
+	clientSession *session.ClientSession,
+	paymentSearchResult *model.PaymentIntentSearchResult,
+	signature string,
+	tokenAmountReceivedUsd float64,
+	networkId server.Id,
+	byteCount model.ByteCount,
+	now time.Time,
+	duration time.Duration,
+	netRevenue model.NanoCents,
+) (credited bool, returnErr error) {
+	if err := model.LockPaymentNetworkInTx(tx, clientSession.Ctx, networkId); err != nil {
+		return false, err
+	}
+	completed, err := model.MarkPaymentIntentCompletedInTx(
+		tx,
+		paymentSearchResult.PaymentReference,
+		signature,
+		clientSession,
+	)
+	if err != nil {
+		return false, err
+	}
+	if !completed {
+		glog.Infof("[paydata]solana data pack: intent %s already completed; not applying again\n", paymentSearchResult.PaymentReference)
+		return false, nil
+	}
+	// pro = false: a data pack is DATA ONLY, exactly like a redeemed code
+	model.AddTransferBalanceInTx(
+		clientSession.Ctx,
+		tx,
+		&model.TransferBalance{
+			NetworkId:             networkId,
+			StartTime:             now,
+			EndTime:               now.Add(duration),
+			StartBalanceByteCount: byteCount,
+			BalanceByteCount:      byteCount,
+			NetRevenue:            netRevenue,
+			Pro:                   false,
+		},
+	)
+	addSolanaDataAppliedNoteInTx(
+		clientSession.Ctx,
+		tx,
+		networkId,
+		byteCount,
+		paymentSearchResult.PaymentReference,
+	)
+	// this call consumed the intent: a new payment, posted once the
+	// transaction commits
+	addSalesPaymentNoticeInTx(tx, func() *model.SalesPaymentNotice {
+		return solanaSalesNotice(paymentSearchResult, tokenAmountReceivedUsd, byteCount)
+	})
 	return true, nil
 }
 

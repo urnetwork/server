@@ -1009,47 +1009,7 @@ func x402GrantProMonthInConn(connOwner server.PgConn,
 
 	granted := false
 	server.TxInConn(ctx, connOwner, func(tx server.PgTx) {
-		granted = false
-		returnErr = nil
-		if err := model.LockPaymentNetworkInTx(tx, ctx, networkId); err != nil {
-			returnErr = err
-			return
-		}
-		if x402AlreadyGrantedForTransaction(ctx, tx, networkId, settleResponse.Transaction) {
-			// this settle tx already granted -- an agent retry, not a new purchase
-			glog.Infof(
-				"[x402]tx %s already granted for network %s; ignoring retry\n",
-				settleResponse.Transaction, networkId,
-			)
-			return
-		}
-
-		err := model.AddSubscriptionRenewalInTx(tx, ctx, &model.SubscriptionRenewal{
-			NetworkId:          networkId,
-			SubscriptionType:   model.SubscriptionTypeSupporter,
-			StartTime:          startTime,
-			EndTime:            endTime,
-			NetRevenue:         netRevenue,
-			SubscriptionMarket: model.SubscriptionMarketX402,
-			TransactionId:      settleResponse.Transaction,
-		})
-		if err != nil {
-			returnErr = err
-			return
-		}
-
-		returnErr = model.AddProTransferBalanceInTx(
-			tx,
-			ctx,
-			networkId,
-			sku.ByteCount,
-			startTime,
-			endTime,
-		)
-		if returnErr == nil {
-			granted = true
-			addX402ReceiptInTx(ctx, tx, networkId, receipt, sku, settleResponse)
-		}
+		granted, returnErr = x402GrantProMonthInTx(tx, ctx, networkId, sku, netRevenue, settleResponse, receipt, startTime, endTime)
 	}, server.TxReadCommitted)
 
 	if returnErr != nil {
@@ -1062,6 +1022,84 @@ func x402GrantProMonthInConn(connOwner server.PgConn,
 	}
 
 	return
+}
+
+// x402GrantProMonthInTx is one attempt of the Pro month grant, in the
+// caller's ReadCommitted transaction: the settle-transaction gate, then the
+// renewal, the pro balance, the receipt and the sales notice of the new
+// payment.
+func x402GrantProMonthInTx(
+	tx server.PgTx,
+	ctx context.Context,
+	networkId server.Id,
+	sku *X402Sku,
+	netRevenue model.NanoCents,
+	settleResponse *X402SettleResponse,
+	receipt *x402Receipt,
+	startTime time.Time,
+	endTime time.Time,
+) (granted bool, returnErr error) {
+	if err := model.LockPaymentNetworkInTx(tx, ctx, networkId); err != nil {
+		return false, err
+	}
+	x402LockSettleTransactionInTx(ctx, tx, settleResponse.Transaction)
+	if x402AlreadyGrantedForTransaction(ctx, tx, networkId, settleResponse.Transaction) {
+		// this settle tx already granted -- an agent retry, not a new purchase
+		glog.Infof(
+			"[x402]tx %s already granted for network %s; ignoring retry\n",
+			settleResponse.Transaction, networkId,
+		)
+		return false, nil
+	}
+
+	err := model.AddSubscriptionRenewalInTx(tx, ctx, &model.SubscriptionRenewal{
+		NetworkId:          networkId,
+		SubscriptionType:   model.SubscriptionTypeSupporter,
+		StartTime:          startTime,
+		EndTime:            endTime,
+		NetRevenue:         netRevenue,
+		SubscriptionMarket: model.SubscriptionMarketX402,
+		TransactionId:      settleResponse.Transaction,
+	})
+	if err != nil {
+		return false, err
+	}
+
+	returnErr = model.AddProTransferBalanceInTx(
+		tx,
+		ctx,
+		networkId,
+		sku.ByteCount,
+		startTime,
+		endTime,
+	)
+	if returnErr != nil {
+		return false, returnErr
+	}
+	addX402ReceiptInTx(ctx, tx, networkId, receipt, sku, settleResponse)
+	// the settle transaction had no grant: a new payment, posted once the
+	// transaction commits
+	addSalesPaymentNoticeInTx(tx, func() *model.SalesPaymentNotice {
+		return x402SalesNotice(networkId, sku, settleResponse)
+	})
+	return true, nil
+}
+
+// x402LockSettleTransactionInTx serializes the grants of one settle
+// transaction until the caller's transaction ends. The network lock is a
+// shared lock, so without this two concurrent grants of the same settle
+// transaction (an agent retry on another api instance, or the reconciler)
+// could both pass the already-granted check. Under ReadCommitted the check
+// after the lock sees the first grant once it commits.
+func x402LockSettleTransactionInTx(ctx context.Context, tx server.PgTx, transaction string) {
+	if transaction == "" {
+		return
+	}
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+		"x402_settle/"+transaction,
+	))
 }
 
 // x402GrantData adds a data balance. pro = false: buying data never grants Pro. The
@@ -1094,32 +1132,54 @@ func x402GrantDataInConn(connOwner server.PgConn,
 
 	var returnErr error
 	server.TxInConn(ctx, connOwner, func(tx server.PgTx) {
-		returnErr = nil
-		if err := model.LockPaymentNetworkInTx(tx, ctx, networkId); err != nil {
-			returnErr = err
-			return
-		}
-		if x402AlreadyGrantedForTransaction(ctx, tx, networkId, settleResponse.Transaction) {
-			glog.Infof(
-				"[x402]tx %s already granted for network %s; ignoring retry\n",
-				settleResponse.Transaction, networkId,
-			)
-			return
-		}
-
-		model.AddTransferBalanceInTx(ctx, tx, &model.TransferBalance{
-			NetworkId:             networkId,
-			StartTime:             startTime,
-			EndTime:               endTime,
-			StartBalanceByteCount: sku.ByteCount,
-			BalanceByteCount:      sku.ByteCount,
-			NetRevenue:            netRevenue,
-			PurchaseToken:         settleResponse.Transaction,
-		})
-		addX402ReceiptInTx(ctx, tx, networkId, receipt, sku, settleResponse)
+		_, returnErr = x402GrantDataInTx(tx, ctx, networkId, sku, netRevenue, settleResponse, receipt, startTime, endTime)
 	}, server.TxReadCommitted)
 
 	return returnErr
+}
+
+// x402GrantDataInTx is one attempt of the data grant, in the caller's
+// ReadCommitted transaction: the settle-transaction gate, then the data
+// balance, the receipt and the sales notice of the new payment.
+func x402GrantDataInTx(
+	tx server.PgTx,
+	ctx context.Context,
+	networkId server.Id,
+	sku *X402Sku,
+	netRevenue model.NanoCents,
+	settleResponse *X402SettleResponse,
+	receipt *x402Receipt,
+	startTime time.Time,
+	endTime time.Time,
+) (granted bool, returnErr error) {
+	if err := model.LockPaymentNetworkInTx(tx, ctx, networkId); err != nil {
+		return false, err
+	}
+	x402LockSettleTransactionInTx(ctx, tx, settleResponse.Transaction)
+	if x402AlreadyGrantedForTransaction(ctx, tx, networkId, settleResponse.Transaction) {
+		glog.Infof(
+			"[x402]tx %s already granted for network %s; ignoring retry\n",
+			settleResponse.Transaction, networkId,
+		)
+		return false, nil
+	}
+
+	model.AddTransferBalanceInTx(ctx, tx, &model.TransferBalance{
+		NetworkId:             networkId,
+		StartTime:             startTime,
+		EndTime:               endTime,
+		StartBalanceByteCount: sku.ByteCount,
+		BalanceByteCount:      sku.ByteCount,
+		NetRevenue:            netRevenue,
+		PurchaseToken:         settleResponse.Transaction,
+	})
+	addX402ReceiptInTx(ctx, tx, networkId, receipt, sku, settleResponse)
+	// the settle transaction had no grant: a new payment, posted once the
+	// transaction commits
+	addSalesPaymentNoticeInTx(tx, func() *model.SalesPaymentNotice {
+		return x402SalesNotice(networkId, sku, settleResponse)
+	})
+	return true, nil
 }
 
 // The longest receipt address the account message outbox stores.

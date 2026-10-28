@@ -1,0 +1,61 @@
+{
+  "schema": 1,
+  "kind": "h1-user-write-pacing-retained-low-fixture-race",
+  "retained_log": {
+    "path": "/tmp/h1-reference-qa.hnbpv4AS/pass1.server.json",
+    "sha256": "17761c5946f69dfa7cc3d5f45de5be5c3580c0e44c15911ead7b68d663049221"
+  },
+  "baseline_pass1": {
+    "top_level_passes": 8,
+    "elapsed_seconds": 1.302,
+    "status": "passed-as-reported-by-owning-LOW; not three-pass qualification"
+  },
+  "candidate_pass1": {
+    "completed_top_level_passes": 10,
+    "status": "halted-on-data-race; incomplete; not a passing candidate qualification"
+  },
+  "failed_test": "TestConnectH1UserWritePacingProductionTimerCompletesAtExactDelay",
+  "failed_source": {
+    "path": "failed-low-fixture-40633afd.go.txt",
+    "sha256": "40633afd8ab6d8f7acca6f44e102ead2dab7cba9a1200af7a6738b9d8f1b1f48"
+  },
+  "failed_test_patch": {
+    "path": "failed-low-qualification-af63474f.patch",
+    "sha256": "af63474ffc1663f9bf4b04c2d754951fc77e247d089409eaa797c98b92e250b0"
+  },
+  "prior_handoff": {
+    "path": "failed-low-handoff-fe65c702.json",
+    "sha256": "fe65c70263bf984724ad76e5249f068257f0104c7ab38ed88fc514ce0871bb6c"
+  },
+  "prior_source_pins": {
+    "path": "failed-low-source-pins-566cb282.json",
+    "sha256": "566cb28205033b9493ab9c20c2e138aa0bb1c43d2e214e07b3b7b998084d3ef1"
+  },
+  "root_cause": "Live parent reads of writer.messages and accounting counters preceded later timer-driven worker writes without a worker-received happens-before edge. synctest.Wait orders settled past worker work into the caller, but virtual time advancement is not a join or publication into the pre-existing worker timer.",
+  "repair": "Immutable deadline/write/accounting channels are the only live observations. A controlled fake-I/O release barrier proves unfinished writer ownership. Mutable slices/counters are inspected only after receiving the worker completion.",
+  "adjacent_audit": {
+    "production_success": "live mutable peeks removed; both encodings use event observations and a release barrier followed by explicit completion receipt",
+    "production_cancellation_and_owner_deadline": "live mutable peeks removed; final state inspected only after completion receipt",
+    "isolation": "held writer read only after finished-error channel receive; healthy sibling runs synchronously",
+    "shutdown": "held owner has one witness and explicit release; synctest.Wait settles writer/finisher, final state read only after completion receipts; pool counters use synchronized public snapshots",
+    "remaining_cases": "synchronous helper calls; writer counters/slices and virtual clocks read after helper returns"
+  },
+  "product_patch_unchanged": {
+    "path": "h1-user-write-pacing.product.patch",
+    "sha256": "6f8c6f24c44a9627f053e58d4a59f845a0ba4b0b51e201f5cabddfb33b30629d"
+  },
+  "current_test_source_sha256": "76ab3398cb5a676a63030ab10f379d7436409062c57878accd157d9ced5db759",
+  "current_test_patch_sha256": "6ef291d4d3ea6ea4fba7600b9a1f8390b79cd13f845f5f0722adb39625623844",
+  "optional_old_fixture_regression_control": {
+    "overlay": {
+      "path": "failed-low-fixture.overlay.json",
+      "sha256": "d8f09e16992958c639f77b8ea653745dbc44baf4cabbbaac9e9ef5da7bece7fd"
+    },
+    "command": "taskset -c 20,22 env GOWORK=off GOTOOLCHAIN=local GOPROXY=off GOSUMDB=sum.golang.org GOMAXPROCS=2 GORACE=halt_on_error=1 go test -race -p=2 -count=1 -timeout=10m -overlay /home/by/urnetwork/temp/h1-byte-pacing-reference-20261028.sv804F/failed-low-fixture.overlay.json ./connect -run '^TestConnectH1UserWritePacingProductionTimerCompletesAtExactDelay$'",
+    "expected": "LOW must retain nonzero race failure and the matching DATA RACE read/write stacks; a compile error is not the intended regression proof",
+    "executed_by_MAX": false
+  },
+  "current_revision_test_execution": false,
+  "no_product_bug_proved": true,
+  "no_measurements_seeds_or_provider_calls": true
+}

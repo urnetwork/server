@@ -30,6 +30,9 @@ type ServiceConfig struct {
 	ExposeAliases []string `yaml:"expose_aliases,omitempty"`
 	ExposeDomains []string `yaml:"expose_domains,omitempty"`
 	Exposed       *bool    `yaml:"exposed,omitempty"`
+	// exact routes limited per address in a bucket of their own instead of
+	// the shared one
+	RouteRateLimits []*RouteRateLimit `yaml:"route_rate_limits,omitempty"`
 }
 
 // DomainNames is every domain of the document, the primary first and the
@@ -71,6 +74,16 @@ type RateLimit struct {
 	Delay             int      `yaml:"delay,omitempty"`
 	NetConnections    int      `yaml:"net_connections,omitempty"`
 	ExcludeSubnets    []string `yaml:"exclude_subnets,omitempty"`
+}
+
+// One `route_rate_limits` entry of a service, in the shape warpctl renders
+// into an nginx location with a zone of its own (warp services
+// RouteRateLimit).
+type RouteRateLimit struct {
+	Path              string `yaml:"path,omitempty"`
+	RequestsPerSecond int    `yaml:"requests_per_second,omitempty"`
+	RequestsPerMinute int    `yaml:"requests_per_minute,omitempty"`
+	Burst             int    `yaml:"burst,omitempty"`
 }
 
 // DefaultRateLimit is what warpctl applies to an lb block that declares no

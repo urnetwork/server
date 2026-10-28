@@ -4351,6 +4351,86 @@
       ]
     },
     {
+      "type": "timeseries",
+      "title": "revocation record checks / s by outcome",
+      "description": "Tagged-credential state checks answered from the Redis revocation record, per second by service and outcome. record_valid and record_refused are answered by the record itself (refused: a tombstone, a revoked session, or a credential issued before its account's credentials changed). record_miss found no projection and fell back to the SQL state query, which then rebuilds the projection (writes panel, kind projection). record_unavailable could not read Redis, so the check refused the credential as unavailable: the record is the authority, and nothing is accepted without it. A rising record_unavailable means authentication is refusing tagged credentials because Redis is unavailable. Readers stay off, and this panel stays empty, until vault auth.yml sets revocation_record_enabled; untagged credentials keep the SQL state query either way (JWT state queries panel).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 233
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (service, outcome) (rate(urnetwork_jwt_state_record_checks_total{env=\"$env\"}[$__rate_interval]))",
+          "legendFormat": "{{service}} {{outcome}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "revocation record writes / s by kind and outcome",
+      "description": "Writes to the Redis revocation record, per second by service, kind and outcome. client, session, credential and network are revocations: each writes its tombstone before its SQL change commits, and a failure fails the revocation itself, so the client or session stays active until the revoke is retried. A rising failure on these kinds means revocations are failing because Redis was unavailable. projection is a positive entry written after a SQL fallback found a credential valid: its failure only costs the next check another fallback, and stale is a projection refused because its SQL read was more than a minute old by Redis time. Writers always write, whether or not vault auth.yml has enabled readers with revocation_record_enabled, so the record is complete from the first enabled read.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 233
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (service, kind, outcome) (rate(urnetwork_session_revocation_record_writes_total{env=\"$env\"}[$__rate_interval]))",
+          "legendFormat": "{{service}} {{kind}} {{outcome}}"
+        }
+      ]
+    },
+    {
       "type": "row",
       "title": "measurement source freshness",
       "collapsed": false,
@@ -4358,7 +4438,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 233
+        "y": 241
       }
     },
     {
@@ -4369,7 +4449,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 234
+        "y": 242
       },
       "datasource": {
         "type": "prometheus",
@@ -4419,7 +4499,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 234
+        "y": 242
       },
       "datasource": {
         "type": "prometheus",

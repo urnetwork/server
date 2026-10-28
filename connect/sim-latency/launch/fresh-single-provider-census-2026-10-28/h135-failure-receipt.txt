@@ -1,0 +1,21 @@
+H1 COMPOSED35 FIRST-FAILURE RECEIPT; NO RETRY
+QA: /home/by/urnetwork/temp/h1-composed-low-20261028.qSRojyEE
+Stable main HEAD before/after:696111a1962472a761a3d4b287c66f63088095e6; clean.
+Exact base98, pinned preparer, separate baseline/candidate ten-repository trees.
+Candidate only product6f8c/focused6ef291/composedec57 patches; source matches staged pinned inputs.
+Guarded race list compiled successfully, exactly35 frozen roots matched.
+First pass terminal1;8 top-level PASS,1 FAIL,0 SKIP; package4.337s.
+Fail: TestConnectH1UserWritePacingComposedWebSocketRetryExactlyOnce,4.03s.
+Assertion: test_util.go:1107: complete-message refusal rebuilt the target's real forward generation.
+FailFast1, no-short, exact Go1.27.3, offline checksums/read-only modules, GOWORKoff, CPU20,22.
+Exact helper-owned disposable PostgreSQL/Redis, successful real preflight attestation.
+Cleanup terminal0; both exact recorded service IDs independently confirmed absent.
+Canonical read-FD inode64512:35309334 exclusively held preparation through cleanup, then released.
+Complete source/module/identity manifest and all ten HEAD/status snapshots unchanged after failure.
+All20 review pins rechecked after failure; no source or dependency changes.
+Raw pass1.json SHA58a9315f7c8a1f198ea98a14ef4f0684112ffba1eeb15164f2782c96d3f85616.
+pass1.stderr empty; exact artifact hashes in ARTIFACT-PINS.sha256.
+No pass2/pass3, source fix, broader suite, scoring, provider or statistical seed action.
+Actual source materialization was~4.039GB rather than initial2.858GB estimate.
+Explicit4GiB working-reserve gate passed after both source trees, before services/compile.
+Preserve this failed QA and previous fresh-single successful/failed QA unchanged.

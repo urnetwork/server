@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "kind": "h1-user-write-pacing-reference-frozen-source-pins",
+  "repositories": {
+    "connect": "e90d59eb404f973dba6e9d0689ecd94e2718c10e",
+    "glog": "1c4954b017d9e8140a4e7020f914eb27410a41c6",
+    "goidenticons": "39ccec1b69db3a6f67e7346d6f44863499e6241d",
+    "gvisor": "57c9e137f7407ad6cd41dcca1ba304a446e09c79",
+    "proxy": "af1d364fe34b807c31936642bff7d3fd849ab2a4",
+    "sdk": "d3824aa98c02e3c16ff7abcfe7a7088c8a470cdb",
+    "server": "a9e8e1a710b24c749e6499a0606938252c83e136",
+    "sn": "6e686aabd53b7c45b154051fd268138988224eba",
+    "userwireguard": "f9a92f0e5f5577a80d358065c4d39ca21f971a1c",
+    "warp": "8dfa405ec380a60307952778921f05bba1c59a33"
+  },
+  "source_lock_sha256": "239cea7fe6f77f989b75ba6efa677e8731640ba2fdd3690a35e6fe72103f3d11",
+  "base_image_id": "sha256:98c9061c4a43a25e7b581a5193ca6e7f48e49e7b7fc03b7c1b6190a029befee2",
+  "patch_path_base": "legacy-server-relative",
+  "source_identity_candidate_path_base": "mono_root_v1",
+  "measured": false,
+  "qualified": false,
+  "product_source": {
+    "path": "server/connect/transport.go",
+    "sha256": "17b0245f96a841f8d41578d804a4be3b3abac4a39ae40ac5b68747d0bd4ba15e"
+  },
+  "qualification_source": {
+    "path": "server/connect/transport_h1_user_write_pacing_test.go",
+    "sha256": "76ab3398cb5a676a63030ab10f379d7436409062c57878accd157d9ced5db759"
+  }
+}

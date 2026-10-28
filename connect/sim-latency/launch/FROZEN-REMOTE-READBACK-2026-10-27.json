@@ -1,0 +1,82 @@
+{
+  "schema": 1,
+  "kind": "frozen-competition-source-remote-readback",
+  "observed_at": "2026-10-27T15:37:56Z",
+  "ref": "refs/heads/sim-latency",
+  "all_ten_match": true,
+  "read_only": true,
+  "operator_proxy_required": false,
+  "source_or_control_changes": false,
+  "repositories": [
+    {
+      "repository": "server",
+      "github_url": "https://github.com/urnetwork/server",
+      "expected_commit": "a9e8e1a710b24c749e6499a0606938252c83e136",
+      "observed_ref_output": "a9e8e1a710b24c749e6499a0606938252c83e136\trefs/heads/sim-latency\n",
+      "exit_code": 0
+    },
+    {
+      "repository": "connect",
+      "github_url": "https://github.com/urnetwork/connect",
+      "expected_commit": "e90d59eb404f973dba6e9d0689ecd94e2718c10e",
+      "observed_ref_output": "e90d59eb404f973dba6e9d0689ecd94e2718c10e\trefs/heads/sim-latency\n",
+      "exit_code": 0
+    },
+    {
+      "repository": "sdk",
+      "github_url": "https://github.com/urnetwork/sdk",
+      "expected_commit": "d3824aa98c02e3c16ff7abcfe7a7088c8a470cdb",
+      "observed_ref_output": "d3824aa98c02e3c16ff7abcfe7a7088c8a470cdb\trefs/heads/sim-latency\n",
+      "exit_code": 0
+    },
+    {
+      "repository": "proxy",
+      "github_url": "https://github.com/urnetwork/proxy",
+      "expected_commit": "af1d364fe34b807c31936642bff7d3fd849ab2a4",
+      "observed_ref_output": "af1d364fe34b807c31936642bff7d3fd849ab2a4\trefs/heads/sim-latency\n",
+      "exit_code": 0
+    },
+    {
+      "repository": "glog",
+      "github_url": "https://github.com/urnetwork/glog",
+      "expected_commit": "1c4954b017d9e8140a4e7020f914eb27410a41c6",
+      "observed_ref_output": "1c4954b017d9e8140a4e7020f914eb27410a41c6\trefs/heads/sim-latency\n",
+      "exit_code": 0
+    },
+    {
+      "repository": "goidenticons",
+      "github_url": "https://github.com/urnetwork/goidenticons",
+      "expected_commit": "39ccec1b69db3a6f67e7346d6f44863499e6241d",
+      "observed_ref_output": "39ccec1b69db3a6f67e7346d6f44863499e6241d\trefs/heads/sim-latency\n",
+      "exit_code": 0
+    },
+    {
+      "repository": "userwireguard",
+      "github_url": "https://github.com/urnetwork/userwireguard",
+      "expected_commit": "f9a92f0e5f5577a80d358065c4d39ca21f971a1c",
+      "observed_ref_output": "f9a92f0e5f5577a80d358065c4d39ca21f971a1c\trefs/heads/sim-latency\n",
+      "exit_code": 0
+    },
+    {
+      "repository": "sn",
+      "github_url": "https://github.com/urfoundation/sn",
+      "expected_commit": "6e686aabd53b7c45b154051fd268138988224eba",
+      "observed_ref_output": "6e686aabd53b7c45b154051fd268138988224eba\trefs/heads/sim-latency\n",
+      "exit_code": 0
+    },
+    {
+      "repository": "warp",
+      "github_url": "https://github.com/urnetwork/warp",
+      "expected_commit": "8dfa405ec380a60307952778921f05bba1c59a33",
+      "observed_ref_output": "8dfa405ec380a60307952778921f05bba1c59a33\trefs/heads/sim-latency\n",
+      "exit_code": 0
+    },
+    {
+      "repository": "gvisor",
+      "github_url": "https://github.com/urnetwork/gvisor",
+      "expected_commit": "57c9e137f7407ad6cd41dcca1ba304a446e09c79",
+      "observed_ref_output": "57c9e137f7407ad6cd41dcca1ba304a446e09c79\trefs/heads/sim-latency\n",
+      "exit_code": 0
+    }
+  ]
+}

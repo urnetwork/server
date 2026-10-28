@@ -1,0 +1,17 @@
+PROVIDER/CENSUS FOLLOWUP SOURCE-UNIT QUALIFICATION ONLY
+QA /var/lib/urnetwork/competition-provider-census-unit-20261028.Z08efBa3
+Race compile terminal0; actual cached Go1.27.3, pinned manager.work, env-i UID0/offline/checksums/read-only modules/CPU20,22.
+Binary SHA256 dac1380a77e73ee711900718bc57a011a28f926917ebc4eecf2bd98df41d6d32.
+Profile SHA256 e6fb5b9ed4e9f5224df4a23fad3b69a560135df3c214e3d26dc779c9185c9ee2.
+MANIFEST SHA256 9d6b649a4e4f5eb111e37f941cbcdc0797d3b58a9bcf7d720e859cc6e44c8642.
+Compiled census exactly20 SMOKE-TARGETS names, anchored PublicPilot/ExclusionBuilder selectors; no Command entry.
+Three separate immutable-binary processes: terminal0 each;20PASS/0FAIL/0SKIP each.
+Summed printed case durations:44.93s,44.75s,44.81s (not statistical measurements).
+All input6/inherited/source-map25/raw/oldfirst/tool/module/worksum/binary/currentpublished12 checks passed before/after.
+Full raw source-only closure5215 records, exact5189Go filename/type census, historical948eightGitobjects and raw229/final236 census passed.
+Main HEAD remained696111a1962472a761a3d4b287c66f63088095e6 and clean after every pass.
+Full raw stdout/stderr, converted JSON, ARTIFACT-PINS.sha256 and frozen provenance snapshots retained in QA.
+H135 failure remains FAILED/unqualified; its cleanup/slot-release activation fact is not a green35 claim.
+All prior successful21 and failed5m/H135 QA unchanged.
+No source clone, service, canonical lock, native CLI, actual provider/private plan/seed/model/pilot/measurement activity.
+No full183 suite authorized or executed. Parent/MAX own publication and any next checkpoint.

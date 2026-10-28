@@ -289,6 +289,14 @@ func connectMoveEngineCases(t *testing.T) []*connectMoveEngineCase {
 	// a drained process that exited five hours ago keeps its counters in the
 	// window; max less min counts its drain exactly
 	drained := func(f *connectMoveEngineFleet, closes float64) {
+		// Refusal cases fill this intentionally omitted current slot themselves.
+		// Historical-drain cases instead need its complete quiet baseline;
+		// the exited process below cannot supply current-process coverage.
+		currentInstance := connectMoveTestInstance("beta-edge-2.example", "green")
+		f.process("beta-edge-2.example", "green", currentInstance, "urnetwork_connect_drain_residents_remaining", nil, connectMoveEngineConstant(0))
+		for _, carrier := range drainRefusalCarriers {
+			f.process("beta-edge-2.example", "green", currentInstance, "urnetwork_connect_drain_refusals_total", map[string]string{"carrier": carrier}, connectMoveEngineConstant(0))
+		}
 		instance := "drained-alpha-blue"
 		ended := at - 5*3600
 		drainStart := ended - 600

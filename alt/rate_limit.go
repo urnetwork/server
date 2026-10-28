@@ -10,6 +10,12 @@
 // too. An address inside `exclude_subnets` is exempt from all three, exactly
 // as nginx maps an excluded prefix to an empty limit key.
 //
+// The api service's `route_rate_limits` give exact routes a per-address
+// bucket of their own instead of the shared one, as their nginx locations do
+// (support inbox 8093, 8077): /connect/control carries one request per
+// contract, and the api limits it per client id. Such a route still counts
+// against the address's concurrent request cap.
+//
 // The state is per process and never shared. The nginx zones it replaces are
 // per lb front, and alt is one block per proxy host, so a shared store would
 // be a different limit rather than the same one.
@@ -41,6 +47,17 @@ type LimitsSettings struct {
 	ExcludePrefixes []netip.Prefix
 	// how often idle address state is discarded
 	SweepTimeout time.Duration
+	// exact api routes with a bucket of their own
+	Routes []*RouteLimitsSettings
+}
+
+// One exact api route whose requests charge a per-address bucket of their own
+// instead of the shared one, in the units the limiter uses. A non-positive
+// rate leaves the route unlimited by rate, as for the shared bucket.
+type RouteLimitsSettings struct {
+	Path              string
+	RequestsPerSecond float64
+	Burst             int
 }
 
 // Loads the `default_rate_limit` block of the environment's services.yml,
@@ -50,13 +67,45 @@ type LimitsSettings struct {
 //
 // Alt never reads `WARP_LIMIT_EXCLUDE_SUBNETS`: the exclusions are the
 // parsed block's, so alt and nginx exempt exactly the same addresses.
+//
+// The api service's `route_rate_limits` come from the same document.
 func DefaultLimitsSettings() *LimitsSettings {
 	rateLimit, err := loadDefaultRateLimit()
 	if err != nil {
 		glog.Infof("[alt]no services.yml default rate limit (%s). Using the warp default.\n", err)
 		rateLimit = DefaultRateLimit()
 	}
-	return LimitsSettingsFromRateLimit(rateLimit)
+	settings := LimitsSettingsFromRateLimit(rateLimit)
+	if servicesConfig, err := LoadServicesConfig(); err == nil {
+		settings.Routes = RouteLimitsSettingsFromServices(servicesConfig, ApiServiceName)
+	}
+	return settings
+}
+
+// Translates a service's `route_rate_limits` as the nginx template does:
+// `requests_per_minute` wins over `requests_per_second`.
+func RouteLimitsSettingsFromServices(servicesConfig *ServicesConfig, service string) []*RouteLimitsSettings {
+	routes := []*RouteLimitsSettings{}
+	serviceConfig, ok := servicesConfig.Versions[0].Services[service]
+	if !ok || serviceConfig == nil {
+		return routes
+	}
+	for _, routeRateLimit := range serviceConfig.RouteRateLimits {
+		if routeRateLimit == nil || routeRateLimit.Path == "" {
+			continue
+		}
+		route := &RouteLimitsSettings{
+			Path:  routeRateLimit.Path,
+			Burst: routeRateLimit.Burst,
+		}
+		if 0 < routeRateLimit.RequestsPerMinute {
+			route.RequestsPerSecond = float64(routeRateLimit.RequestsPerMinute) / 60.0
+		} else if 0 < routeRateLimit.RequestsPerSecond {
+			route.RequestsPerSecond = float64(routeRateLimit.RequestsPerSecond)
+		}
+		routes = append(routes, route)
+	}
+	return routes
 }
 
 func loadDefaultRateLimit() (*RateLimit, error) {
@@ -111,6 +160,9 @@ type Limits struct {
 
 	stateLock  sync.Mutex
 	addrLimits map[netip.Addr]*limitsAddr
+
+	// each exact route's own bucket, by path; read-only once constructed
+	routes map[string]*Limits
 }
 
 func NewLimits(ctx context.Context, settings *LimitsSettings) *Limits {
@@ -118,6 +170,17 @@ func NewLimits(ctx context.Context, settings *LimitsSettings) *Limits {
 		ctx:        ctx,
 		settings:   settings,
 		addrLimits: map[netip.Addr]*limitsAddr{},
+		routes:     map[string]*Limits{},
+	}
+	for _, route := range settings.Routes {
+		// the route's bucket only: the concurrent request cap stays the
+		// address's, counted here
+		limits.routes[route.Path] = NewLimits(ctx, &LimitsSettings{
+			RequestsPerSecond: route.RequestsPerSecond,
+			Burst:             route.Burst,
+			ExcludePrefixes:   settings.ExcludePrefixes,
+			SweepTimeout:      settings.SweepTimeout,
+		})
 	}
 	go server.HandleError(limits.run)
 	return limits
@@ -173,6 +236,35 @@ func (self *Limits) Excluded(addr netip.Addr) bool {
 // limit_req before limit_conn, so a request refused by the cap has already
 // spent its token.
 func (self *Limits) AcquireRequest(addr netip.Addr, now time.Time) (func(), bool) {
+	return self.acquireRequest(addr, now, true)
+}
+
+// Admits one api request to path. A route with a bucket of its own charges
+// that bucket and not the shared one, as its nginx location's own limit_req
+// replaces the shared one, and still counts against the address's
+// concurrent request cap, as limit_conn applies to every location.
+func (self *Limits) AcquireRouteRequest(addr netip.Addr, path string, now time.Time) (func(), bool) {
+	route, ok := self.routes[path]
+	if !ok {
+		return self.AcquireRequest(addr, now)
+	}
+	routeRelease, ok := route.AcquireRequest(addr, now)
+	if !ok {
+		return nil, false
+	}
+	release, ok := self.acquireRequest(addr, now, false)
+	if !ok {
+		routeRelease()
+		return nil, false
+	}
+	return func() {
+		release()
+		routeRelease()
+	}, true
+}
+
+// AcquireRequest, charging the shared bucket only when chargeBucket.
+func (self *Limits) acquireRequest(addr netip.Addr, now time.Time, chargeBucket bool) (func(), bool) {
 	if self.Excluded(addr) {
 		return func() {}, true
 	}
@@ -180,7 +272,7 @@ func (self *Limits) AcquireRequest(addr netip.Addr, now time.Time) (func(), bool
 	defer self.stateLock.Unlock()
 
 	addrLimit := self.addrLimitWithLock(addr, now)
-	if !self.takeTokenWithLock(addrLimit, now) {
+	if chargeBucket && !self.takeTokenWithLock(addrLimit, now) {
 		self.releaseAddrWithLock(addr, addrLimit)
 		return nil, false
 	}
@@ -304,7 +396,7 @@ func NewLimitedHandler(handler http.Handler, limits *Limits) http.Handler {
 			handler.ServeHTTP(w, r)
 			return
 		}
-		release, ok := limits.AcquireRequest(addrPort.Addr(), time.Now())
+		release, ok := limits.AcquireRouteRequest(addrPort.Addr(), r.URL.Path, time.Now())
 		if !ok {
 			http.Error(w, "Too many requests.", http.StatusTooManyRequests)
 			return

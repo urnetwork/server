@@ -1,0 +1,2 @@
+Scope command line contains environment variable, which is not expanded by default for now, but will be expanded by default in the future. Use --expand-environment=yes/no to explicitly control it as needed.
+Running as unit: urnetwork-retained-archive-build-d820d5b3-ySGdzk7G.scope; invocation ID: 1045bf1e412f460caa53819ad649c42e

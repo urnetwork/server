@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-unmeasured-recovery-owner-approval",
+  "approved": true,
+  "fresh_clock_exception": true,
+  "acknowledge_old_deadline_exception": true,
+  "config_sha256": "6b60d757550636fb499f0a3520cb60df7cfc2c467566257566b60310ddffa475",
+  "failure_proof_sha256": "a1d7cf7f79871ad5a9b7c4fe8197e6180dcc7723fd6b1cf82ceba2ea0da98e0e",
+  "public_plan_sha256": "a8a57ccfe3d5f050ec76bf475dc1e35fb25011c9b781ee1c90dfa7cca720bb9f",
+  "old_global_start_sha256": "de4445a57e04ab566a3d02280e4286503bbe71f791389503f39b044963a24ead",
+  "old_first_start_sha256": "df4c9e378f48f0c38c7a2ad731f1fae4613ab8de5b2dddfe5507ef0d52badb8d",
+  "failed_tree_sha256": "43e1b53fb4eee80a0957fd665a17dfe3deb7f4da58975f47f0d2a922023d2799",
+  "old_deadline": "2026-10-27T19:34:06Z",
+  "first_job_ids": [
+    "d11e4ae4-c3f8-4687-b481-3b02bc336130",
+    "23fc7aeb-20ee-40d6-9ad4-2ef495671dda",
+    "8422293a-07f4-43c7-99a2-4bcee8ebd283"
+  ],
+  "fresh_clock_limit_seconds": 10800,
+  "no_new_entropy": true,
+  "no_input_changes": true,
+  "second_seed_unstarted": true,
+  "all_failed_artifacts_retained": true
+}

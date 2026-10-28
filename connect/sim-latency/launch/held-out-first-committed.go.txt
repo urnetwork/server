@@ -1,0 +1,710 @@
+// A separately approved prefix of an already published two-B plan. No entropy,
+// generation, request rewriting, result-based selection or second seed is used.
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+)
+
+// This selector means exactly the first existing position, never a new draw.
+const heldOutProtocolFirstCommittedB = "launch-3a-bridge-first-committed-b-2026-10-27-v1"
+
+// The historical verifier has its own bounded process lifetime, not a new
+// measurement deadline. It may need longer than one ordinary read-only command.
+type heldOutFirstCommittedSettings struct {
+	OriginalVerificationTimeout time.Duration
+}
+
+// Two minutes bounds a pinned read-only verification, never an evaluator job.
+func defaultHeldOutFirstCommittedSettings() heldOutFirstCommittedSettings {
+	return heldOutFirstCommittedSettings{OriginalVerificationTimeout: 2 * time.Minute}
+}
+
+// Original authority remains independently pinned. Selected metadata has new
+// destinations; all six original requests and their artifact paths stay intact.
+type heldOutFirstCommittedConfig struct {
+	Schema            int                    `json:"schema"`
+	Kind              string                 `json:"kind"`
+	Protocol          string                 `json:"protocol"`
+	Approval          heldOutPinnedFile      `json:"approval"`
+	Declaration       heldOutPinnedFile      `json:"declaration"`
+	Original          heldOutExecutionConfig `json:"original"`
+	OriginalExecution heldOutPinnedFile      `json:"original_execution_configuration"`
+	OriginalOperator  heldOutPinnedFile      `json:"original_operator"`
+	Qualification     heldOutPinnedFile      `json:"qualification"`
+	PrivateRoot       string                 `json:"private_root"`
+	PublicPlanPath    string                 `json:"public_plan_path"`
+}
+
+// The public declaration fixes the entire prefix and untouched second round,
+// rather than accepting an index, role filter, altered oracle or new deadline.
+type heldOutFirstCommittedDeclaration struct {
+	Schema                    int                `json:"schema"`
+	Kind                      string             `json:"kind"`
+	Protocol                  string             `json:"protocol"`
+	BaseProtocol              string             `json:"base_protocol"`
+	PublishedAt               time.Time          `json:"published_at"`
+	ApprovalSha256            string             `json:"protocol_approval_sha256"`
+	OriginalPrivatePlanSha256 string             `json:"original_private_plan_sha256"`
+	OriginalPublicPlanSha256  string             `json:"original_public_plan_sha256"`
+	OriginalPublicationSha256 string             `json:"original_publication_sha256"`
+	OriginalExecutionSha256   string             `json:"original_execution_configuration_sha256"`
+	OriginalDeclarationSha256 string             `json:"original_two_b_addendum_sha256"`
+	SelectedRound             heldOutPublicRound `json:"selected_round"`
+	UnstartedRound            heldOutPublicRound `json:"unstarted_second_round"`
+	Margin                    float64            `json:"accepted_margin"`
+	SeedCount                 int                `json:"hidden_b_seed_count"`
+	RequiredOrderedSeeds      int                `json:"required_correctly_ordered_seeds"`
+	ControlReplicates         int                `json:"control_replicates"`
+	CandidateReplicates       int                `json:"candidate_replicates"`
+	ExecutionLimitSeconds     int64              `json:"execution_limit_seconds"`
+	AllOutcomesRetained       bool               `json:"all_outcomes_retained"`
+	NoNewEntropy              bool               `json:"no_new_entropy_or_generation"`
+	NoReplacement             bool               `json:"no_replacement_or_resampling"`
+	SecondSeedUnstarted       bool               `json:"second_seed_must_remain_unstarted"`
+}
+
+// The new tool is qualified separately; the old qualification is not relabeled
+// as covering this executable, selector or independently approved declaration.
+type heldOutFirstCommittedQualification struct {
+	Schema                    int                      `json:"schema"`
+	Kind                      string                   `json:"kind"`
+	DeclarationSha256         string                   `json:"declaration_sha256"`
+	OriginalPrivatePlanSha256 string                   `json:"original_private_plan_sha256"`
+	OriginalPublicPlanSha256  string                   `json:"original_public_plan_sha256"`
+	Tool                      heldOutToolQualification `json:"tool"`
+}
+
+// The selected view is compared with a fresh derivation from the complete
+// original on every verification. Private seed bytes never enter a summary.
+type heldOutFirstCommittedPrivatePlan struct {
+	Schema       int                         `json:"schema"`
+	Kind         string                      `json:"kind"`
+	Config       heldOutFirstCommittedConfig `json:"config"`
+	ConfigSha256 string                      `json:"configuration_sha256"`
+	Plan         heldOutPrivatePlan          `json:"selected_plan"`
+}
+
+// Both original commitments remain visible, with exactly one measured scope.
+// Selected seed commitments retain their original two-B domain and bytes.
+type heldOutFirstCommittedPublicPlan struct {
+	Schema                    int                `json:"schema"`
+	Kind                      string             `json:"kind"`
+	Protocol                  string             `json:"protocol"`
+	DeclarationSha256         string             `json:"declaration_sha256"`
+	OriginalPrivatePlanSha256 string             `json:"original_private_plan_sha256"`
+	OriginalPublicPlanSha256  string             `json:"original_public_plan_sha256"`
+	OriginalPublicationSha256 string             `json:"original_publication_sha256"`
+	CommitmentProtocol        string             `json:"original_commitment_protocol"`
+	Selected                  heldOutPublicPlan  `json:"selected"`
+	UnstartedRound            heldOutPublicRound `json:"unstarted_second_round"`
+}
+
+// Compare complete public round structs, including request hashes and order;
+// changing any gate/source/oracle in the original is rejected by its verifier.
+func validateHeldOutFirstCommittedDeclaration(declaration heldOutFirstCommittedDeclaration, config heldOutFirstCommittedConfig, original heldOutPrivatePlan) error {
+	if config.Schema != 1 || config.Kind != "sim-latency-held-out-first-committed-selection" || config.Protocol != heldOutProtocolFirstCommittedB || config.Original.Schema != 1 || config.Original.Kind != "sim-latency-held-out-execution" ||
+		original.Config.Protocol != heldOutProtocolThreeABridgeTwoB || original.Config.TwoBAddendum == nil || original.Config.Amendment == nil || len(original.Rounds) != 2 {
+		return errors.New("first-committed selection requires the unchanged complete two-B plan")
+	}
+	if declaration.Schema != 1 || declaration.Kind != "sim-latency-held-out-first-committed-addendum" || declaration.Protocol != config.Protocol || declaration.BaseProtocol != original.Config.Protocol || declaration.PublishedAt.IsZero() || declaration.PublishedAt.Before(original.PreparedAt) ||
+		declaration.SeedCount != 1 || declaration.RequiredOrderedSeeds != 1 || declaration.ControlReplicates != 9 || declaration.CandidateReplicates != 9 || declaration.ExecutionLimitSeconds != 3*60*60 || declaration.Margin != original.Margin || !finitePositive(declaration.Margin) ||
+		!declaration.AllOutcomesRetained || !declaration.NoNewEntropy || !declaration.NoReplacement || !declaration.SecondSeedUnstarted {
+		return errors.New("first-committed declaration changed its one-seed scope, gates, R9, margin or deadline")
+	}
+	if !reflect.DeepEqual(declaration.SelectedRound, original.Rounds[0].Public) || !reflect.DeepEqual(declaration.UnstartedRound, original.Rounds[1].Public) || original.Rounds[0].Public.Position != 1 || original.Rounds[1].Public.Position != 2 {
+		return errors.New("only the exact first committed round and all three ordered jobs may be selected")
+	}
+	for _, pair := range []struct{ actual, expected string }{
+		{actual: declaration.ApprovalSha256, expected: config.Approval.Sha256},
+		{actual: declaration.OriginalPrivatePlanSha256, expected: config.Original.PrivatePlan.Sha256},
+		{actual: declaration.OriginalPublicPlanSha256, expected: config.Original.PublicPlan.Sha256},
+		{actual: declaration.OriginalPublicationSha256, expected: config.Original.Publication.Sha256},
+		{actual: declaration.OriginalExecutionSha256, expected: config.OriginalExecution.Sha256},
+		{actual: declaration.OriginalDeclarationSha256, expected: original.Config.TwoBAddendum.Declaration.Sha256},
+	} {
+		if !validSha256(pair.expected) || pair.actual != pair.expected {
+			return errors.New("first-committed declaration changed its original plan or approval binding")
+		}
+	}
+	if config.Approval.Sha256 == original.Config.TwoBAddendum.Approval.Sha256 || config.Approval.Sha256 == original.Config.Amendment.Approval.Sha256 {
+		return errors.New("first-committed selection needs its distinct prospective owner approval")
+	}
+	return nil
+}
+
+// An untouched job has exactly its three precommitted input leaves, not an
+// outcome, baseline, final request, timer or unjournaled evaluator artifact.
+func validateHeldOutFirstCommittedUnstarted(original heldOutPrivatePlan, includeFirst bool) error {
+	if len(original.Rounds) != 2 {
+		return errors.New("complete original two-round census required")
+	}
+	if includeFirst {
+		for _, name := range []string{"execution.started.json", "campaign-result.json"} {
+			if _, err := os.Lstat(filepath.Join(original.Config.PrivateRoot, name)); !errors.Is(err, os.ErrNotExist) {
+				return errors.New("original campaign already started or is unavailable; no prefix selection or retry")
+			}
+		}
+	}
+	for index, round := range original.Rounds {
+		if index == 0 && !includeFirst {
+			continue
+		}
+		if len(round.Public.Jobs) != 3 {
+			return errors.New("original unstarted round has an invalid job census")
+		}
+		roundRoot := filepath.Dir(heldOutJobRoot(original.Config.PrivateRoot, round.Public, round.Public.Jobs[0]))
+		entries, err := os.ReadDir(roundRoot)
+		if err != nil || len(entries) != 3 {
+			return errors.New("original unstarted round contains runtime state")
+		}
+		for _, job := range round.Public.Jobs {
+			root := heldOutJobRoot(original.Config.PrivateRoot, round.Public, job)
+			entries, err := os.ReadDir(root)
+			if err != nil || len(entries) != 1 || entries[0].Name() != "artifacts" || !entries[0].IsDir() {
+				return errors.New("original job already started or contains runtime state")
+			}
+			entries, err = os.ReadDir(filepath.Join(root, "artifacts"))
+			if err != nil || len(entries) != 3 || entries[0].Name() != "canonical.patch" || entries[1].Name() != "precommitted-request.json" || entries[2].Name() != "providers.yml" {
+				return errors.New("original job has measurements or non-precommitted artifacts")
+			}
+		}
+	}
+	return nil
+}
+
+// The original tool authenticates its own historical receipt; this executable
+// independently authenticates the new three-pass selector qualification.
+func authenticateHeldOutFirstCommittedQualification(config heldOutFirstCommittedConfig, original heldOutPrivatePlan, release heldOutRelease, settings heldOutOperatorSettings) error {
+	content, err := readHeldOutPinned(config.Qualification, settings.MaximumBytes, false)
+	if err != nil {
+		return err
+	}
+	var qualification heldOutFirstCommittedQualification
+	if err := decodeHeldOutComplete(content, &qualification, "first-committed operator qualification"); err != nil {
+		return err
+	}
+	tool := qualification.Tool
+	if qualification.Schema != 1 || qualification.Kind != "sim-latency-held-out-first-committed-qualification" || qualification.DeclarationSha256 != config.Declaration.Sha256 || qualification.OriginalPrivatePlanSha256 != config.Original.PrivatePlan.Sha256 || qualification.OriginalPublicPlanSha256 != config.Original.PublicPlan.Sha256 ||
+		tool.Schema != 1 || tool.Kind != "sim-latency-held-out-operator-qualification" || !tool.Accepted || tool.Protocol != config.Protocol || tool.ProtocolApprovalSha256 != config.Approval.Sha256 || tool.OriginalPlanSha256 != original.Config.Amendment.OriginalPlan.Sha256 || tool.TwoBAddendumSha256 != original.Config.TwoBAddendum.Declaration.Sha256 ||
+		tool.AnalyzerSource != release.AnalyzerSource || tool.BaseSha != release.BaseSha || tool.SourceLockSha256 != release.SourceLockSha256 || tool.GoVersion != "go1.27.3" || !tool.Race || tool.ConsecutivePasses != settings.RequiredPasses || tool.TestsPerPass <= 0 || tool.Skips != 0 || len(tool.Sources) == 0 || len(tool.Evidence) != settings.RequiredPasses {
+		return errors.New("new executable is not independently qualified for this exact first-committed scope")
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	if err := verifyHeldOutExecutable(executable, tool.BinarySha256, settings.MaximumExecutableBytes); err != nil {
+		return err
+	}
+	for _, pin := range append(append([]heldOutPinnedFile{}, tool.Sources...), tool.Evidence...) {
+		if _, err := readHeldOutPinned(pin, settings.MaximumBytes, false); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Authentication rereads all six requests, both commitments, old authority,
+// pushed publication, and new approval before any selected artifact is written.
+func authenticateHeldOutFirstCommitted(ctx context.Context, config heldOutFirstCommittedConfig, release heldOutRelease, settings heldOutOperatorSettings, command func(context.Context, string, ...string) ([]byte, error)) (*heldOutPrivatePlan, *heldOutFirstCommittedDeclaration, error) {
+	if settings.Workload.SeedCount != 1 {
+		return nil, nil, errors.New("first-committed operations require their exact one-position scope")
+	}
+	originalSettings := settings
+	originalSettings.Workload.SeedCount = 2
+	private, err := readHeldOutPinned(config.Original.PrivatePlan, settings.MaximumBytes, true)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer clear(private)
+	var original heldOutPrivatePlan
+	if err := decodeHeldOutComplete(private, &original, "original complete committed two-B plan"); err != nil {
+		return nil, nil, err
+	}
+	content, err := readHeldOutPinned(config.Declaration, settings.MaximumBytes, false)
+	if err != nil {
+		return nil, nil, err
+	}
+	var declaration heldOutFirstCommittedDeclaration
+	if err := decodeHeldOutComplete(content, &declaration, "first-committed owner declaration"); err != nil {
+		return nil, nil, err
+	}
+	if err := validateHeldOutFirstCommittedDeclaration(declaration, config, original); err != nil {
+		return nil, nil, err
+	}
+	if content, err := readHeldOutPinned(config.Approval, settings.MaximumBytes, false); err != nil || len(content) == 0 {
+		return nil, nil, errors.New("new prospective first-committed approval is unavailable")
+	}
+	if err := authenticateHeldOutFirstCommittedOriginal(ctx, config, original, settings, command); err != nil {
+		return nil, nil, err
+	}
+	if err := authenticateHeldOutPublication(ctx, config.Original, original, originalSettings, command); err != nil {
+		return nil, nil, err
+	}
+	content, err = readHeldOutPinned(config.Original.Publication, settings.MaximumBytes, false)
+	if err != nil {
+		return nil, nil, err
+	}
+	var publication heldOutPublication
+	if err := decodeHeldOutComplete(content, &publication, "original committed two-B publication"); err != nil || declaration.PublishedAt.Before(publication.PublishedAt) {
+		return nil, nil, errors.New("first-position approval must follow the original full-plan publication")
+	}
+	if err := authenticateHeldOutFirstCommittedQualification(config, original, release, settings); err != nil {
+		return nil, nil, err
+	}
+	if err := validateHeldOutFirstCommittedUnstarted(original, false); err != nil {
+		return nil, nil, err
+	}
+	return &original, &declaration, nil
+}
+
+// The unchanged, separately pinned two-B executable verifies all six original
+// requests itself. It can only enter read-only verify, never prepare or execute.
+func authenticateHeldOutFirstCommittedOriginal(ctx context.Context, config heldOutFirstCommittedConfig, original heldOutPrivatePlan, settings heldOutOperatorSettings, command func(context.Context, string, ...string) ([]byte, error)) error {
+	content, err := readHeldOutPinned(config.OriginalExecution, settings.MaximumBytes, true)
+	if err != nil {
+		return err
+	}
+	var execution heldOutExecutionConfig
+	if decodeHeldOutComplete(content, &execution, "unchanged original two-B execution configuration") != nil || !reflect.DeepEqual(execution, config.Original) || command == nil {
+		return errors.New("historical verifier configuration differs from the pinned original")
+	}
+	content, err = readHeldOutPinned(original.Config.Qualification, settings.MaximumBytes, false)
+	if err != nil {
+		return err
+	}
+	var qualification heldOutToolQualification
+	if decodeHeldOutComplete(content, &qualification, "unchanged original two-B qualification") != nil || qualification.BinarySha256 != config.OriginalOperator.Sha256 || qualification.Protocol != heldOutProtocolThreeABridgeTwoB {
+		return errors.New("historical verifier binary is not the originally qualified two-B executable")
+	}
+	if err := verifyHeldOutExecutable(config.OriginalOperator.Path, config.OriginalOperator.Sha256, settings.MaximumExecutableBytes); err != nil {
+		return err
+	}
+	_, err = command(ctx, "/usr/bin/env", "SIM_LATENCY_HELD_OUT_COMMAND=verify", "SIM_LATENCY_HELD_OUT_REAL_OPT_IN=1",
+		"SIM_LATENCY_HELD_OUT_CONFIG="+config.OriginalExecution.Path, "SIM_LATENCY_HELD_OUT_CONFIG_SHA256="+config.OriginalExecution.Sha256,
+		config.OriginalOperator.Path, "-test.run=^TestHeldOutOperatorCommand$", "-test.v")
+	if err != nil {
+		return errors.New("unchanged original two-B verifier rejected the complete six-job plan")
+	}
+	return nil
+}
+
+// Runtime keeps original request/artifact roots and policy byte identities.
+// Only selection metadata and the closed acceptance cardinality are new.
+func deriveHeldOutFirstCommitted(original heldOutPrivatePlan, config heldOutFirstCommittedConfig, configSha256 string, preparedAt time.Time) heldOutPrivatePlan {
+	selected := original
+	selected.PreparedAt, selected.ConfigSha256 = preparedAt, configSha256
+	selected.Config.Protocol, selected.Config.PublicPlanPath, selected.Config.Qualification = config.Protocol, config.PublicPlanPath, config.Qualification
+	selected.Rounds = append([]heldOutPrivateRound{}, original.Rounds[:1]...)
+	return selected
+}
+
+// A new allowlisted projection labels one measured seed and retains the entire
+// second public commitment without disclosing either private seed.
+func publicHeldOutFirstCommitted(record heldOutFirstCommittedPrivatePlan, original heldOutPrivatePlan, privateSha256 string, release heldOutRelease) heldOutFirstCommittedPublicPlan {
+	config := record.Config
+	selected := publicHeldOutPlan(original, config.Original.PrivatePlan.Sha256, release)
+	selected.Protocol, selected.ProtocolApprovalSha256 = config.Protocol, config.Approval.Sha256
+	selected.BaseProtocol, selected.BaseProtocolApprovalSha256 = original.Config.Protocol, original.Config.TwoBAddendum.Approval.Sha256
+	selected.PrivatePlanSha256, selected.ConfigSha256, selected.QualificationSha256 = privateSha256, record.ConfigSha256, config.Qualification.Sha256
+	selected.PreparedAt, selected.RequiredOrderedSeeds = record.Plan.PreparedAt, 1
+	selected.Rounds = []heldOutPublicRound{original.Rounds[0].Public}
+	return heldOutFirstCommittedPublicPlan{Schema: 1, Kind: "sim-latency-held-out-first-committed-public-plan", Protocol: config.Protocol,
+		DeclarationSha256: config.Declaration.Sha256, OriginalPrivatePlanSha256: config.Original.PrivatePlan.Sha256, OriginalPublicPlanSha256: config.Original.PublicPlan.Sha256,
+		OriginalPublicationSha256: config.Original.Publication.Sha256, CommitmentProtocol: original.Config.Protocol, Selected: selected, UnstartedRound: original.Rounds[1].Public}
+}
+
+// A single exclusive claim binds all future selected metadata to the original
+// campaign. A failed preparation remains retained, never permission to reroll.
+func heldOutFirstCommittedClaim(config heldOutFirstCommittedConfig, configSha256 string) map[string]any {
+	return map[string]any{"schema": 1, "kind": "sim-latency-first-committed-single-selection", "protocol": config.Protocol,
+		"configuration_sha256": configSha256, "declaration_sha256": config.Declaration.Sha256,
+		"original_private_plan_sha256": config.Original.PrivatePlan.Sha256, "original_public_plan_sha256": config.Original.PublicPlan.Sha256,
+		"private_root": config.PrivateRoot, "public_plan_path": config.PublicPlanPath}
+}
+
+// Writes only metadata derived from the authenticated original. No generator,
+// entropy reader, evaluator, Docker client or API is reachable from this path.
+func prepareHeldOutFirstCommitted(ctx context.Context, config heldOutFirstCommittedConfig, configuration []byte, release heldOutRelease, settings heldOutOperatorSettings, now func() time.Time, command func(context.Context, string, ...string) ([]byte, error)) (*heldOutFirstCommittedPublicPlan, error) {
+	original, declaration, err := authenticateHeldOutFirstCommitted(ctx, config, release, settings, command)
+	if err != nil {
+		return nil, err
+	}
+	var decoded heldOutFirstCommittedConfig
+	if decodeHeldOutComplete(configuration, &decoded, "first-committed frozen configuration") != nil || !reflect.DeepEqual(decoded, config) || now == nil {
+		return nil, errors.New("first-committed configuration bytes changed")
+	}
+	if err := validateHeldOutFirstCommittedUnstarted(*original, true); err != nil {
+		return nil, err
+	}
+	if !filepath.IsAbs(config.PrivateRoot) || filepath.Clean(config.PrivateRoot) != config.PrivateRoot || config.PrivateRoot == original.Config.PrivateRoot || strings.HasPrefix(config.PrivateRoot, original.Config.PrivateRoot+string(filepath.Separator)) ||
+		!filepath.IsAbs(config.PublicPlanPath) || filepath.Clean(config.PublicPlanPath) != config.PublicPlanPath || config.PublicPlanPath == config.Original.PublicPlan.Path || config.PublicPlanPath == config.Original.PrivatePlan.Path || strings.HasPrefix(config.PublicPlanPath, original.Config.PrivateRoot+string(filepath.Separator)) || strings.HasPrefix(config.PublicPlanPath, config.PrivateRoot+string(filepath.Separator)) {
+		return nil, errors.New("new distinct canonical selected-plan destinations required")
+	}
+	if err := validateHeldOutPrivateDirectory(filepath.Dir(config.PrivateRoot)); err != nil {
+		return nil, err
+	}
+	for _, path := range []string{config.PrivateRoot, config.PublicPlanPath} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			return nil, errors.New("selected plan destination already exists; no repeated selection")
+		}
+	}
+	preparedAt := now().UTC()
+	if preparedAt.IsZero() || preparedAt.Before(declaration.PublishedAt) {
+		return nil, errors.New("selected plan must follow its prospective declaration")
+	}
+	configSha256 := heldOutDigest(configuration)
+	if err := writeHeldOutRecord(filepath.Join(original.Config.PrivateRoot, "first-committed-selection.json"), heldOutFirstCommittedClaim(config, configSha256)); err != nil {
+		return nil, err
+	}
+	if err := os.Mkdir(config.PrivateRoot, 0700); err != nil {
+		return nil, err
+	}
+	if err := writeHeldOutExclusive(filepath.Join(config.PrivateRoot, "configuration.json"), configuration, 0600); err != nil {
+		return nil, err
+	}
+	record := heldOutFirstCommittedPrivatePlan{Schema: 1, Kind: "sim-latency-held-out-first-committed-private-plan", Config: config, ConfigSha256: configSha256,
+		Plan: deriveHeldOutFirstCommitted(*original, config, configSha256, preparedAt)}
+	private, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	defer clear(private)
+	if err := writeHeldOutExclusive(filepath.Join(config.PrivateRoot, "private-plan.json"), private, 0600); err != nil {
+		return nil, err
+	}
+	public := publicHeldOutFirstCommitted(record, *original, heldOutDigest(private), release)
+	content, err := json.MarshalIndent(public, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	if _, _, err := authenticateHeldOutFirstCommitted(ctx, config, release, settings, command); err != nil {
+		return nil, err
+	}
+	if err := validateHeldOutFirstCommittedUnstarted(*original, true); err != nil {
+		return nil, err
+	}
+	if err := writeHeldOutExclusive(config.PublicPlanPath, content, 0644); err != nil {
+		return nil, err
+	}
+	return &public, nil
+}
+
+// Reauthenticate all six originals and compare the entire derived runtime view;
+// changing the selected source/policy/order is not a new valid plan identity.
+func verifyHeldOutFirstCommitted(ctx context.Context, execution heldOutExecutionConfig, release heldOutRelease, settings heldOutOperatorSettings, command func(context.Context, string, ...string) ([]byte, error)) (*heldOutPrivatePlan, error) {
+	content, err := readHeldOutPinned(execution.PrivatePlan, settings.MaximumBytes, true)
+	if err != nil {
+		return nil, err
+	}
+	defer clear(content)
+	var record heldOutFirstCommittedPrivatePlan
+	if err := decodeHeldOutComplete(content, &record, "selected first-committed private plan"); err != nil {
+		return nil, err
+	}
+	config := record.Config
+	if execution.Schema != 1 || execution.Kind != "sim-latency-held-out-execution" || record.Schema != 1 || record.Kind != "sim-latency-held-out-first-committed-private-plan" || execution.PrivatePlan.Path != filepath.Join(config.PrivateRoot, "private-plan.json") || execution.PublicPlan.Path != config.PublicPlanPath {
+		return nil, errors.New("selected first-committed plan shape or paths changed")
+	}
+	if err := validateHeldOutPrivateDirectory(config.PrivateRoot); err != nil {
+		return nil, err
+	}
+	original, declaration, err := authenticateHeldOutFirstCommitted(ctx, config, release, settings, command)
+	if err != nil {
+		return nil, err
+	}
+	content, err = readHeldOutPinned(heldOutPinnedFile{Path: filepath.Join(config.PrivateRoot, "configuration.json"), Sha256: record.ConfigSha256}, settings.MaximumBytes, true)
+	if err != nil {
+		return nil, err
+	}
+	var frozen heldOutFirstCommittedConfig
+	if decodeHeldOutComplete(content, &frozen, "selected first-committed configuration") != nil || !reflect.DeepEqual(frozen, config) || record.Plan.PreparedAt.IsZero() || record.Plan.PreparedAt.Before(declaration.PublishedAt) || !reflect.DeepEqual(record.Plan, deriveHeldOutFirstCommitted(*original, config, record.ConfigSha256, record.Plan.PreparedAt)) {
+		return nil, errors.New("selected first prefix changed its source, complete policy, requests or provenance")
+	}
+	claim, err := json.MarshalIndent(heldOutFirstCommittedClaim(config, record.ConfigSha256), "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	if _, err := readHeldOutPinned(heldOutPinnedFile{Path: filepath.Join(original.Config.PrivateRoot, "first-committed-selection.json"), Sha256: heldOutDigest(claim)}, settings.MaximumBytes, true); err != nil {
+		return nil, err
+	}
+	content, err = readHeldOutPinned(execution.PublicPlan, settings.MaximumBytes, false)
+	if err != nil {
+		return nil, err
+	}
+	var public heldOutFirstCommittedPublicPlan
+	if decodeHeldOutComplete(content, &public, "selected first-committed public plan") != nil || !reflect.DeepEqual(public, publicHeldOutFirstCommitted(record, *original, execution.PrivatePlan.Sha256, release)) {
+		return nil, errors.New("selected public plan is not the exact original first prefix")
+	}
+	return &record.Plan, nil
+}
+
+// Context always authenticates the old instrument selection, then returns the
+// named one-position scope. Ordinary prepare cannot reach this no-entropy path.
+func heldOutFirstCommittedContext(ctx context.Context, operation string, content []byte, settings heldOutOperatorSettings) (heldOutRelease, heldOutOperatorSettings, error) {
+	old := frozenHeldOutRelease()
+	var config heldOutFirstCommittedConfig
+	if operation == "prepare-first-committed" {
+		if err := decodeHeldOutComplete(content, &config, "first-committed preparation context"); err != nil {
+			return old, settings, err
+		}
+	} else {
+		var execution heldOutExecutionConfig
+		if err := decodeHeldOutComplete(content, &execution, "first-committed execution context"); err != nil {
+			return old, settings, err
+		}
+		private, err := readHeldOutPinned(execution.PrivatePlan, settings.MaximumBytes, true)
+		if err != nil {
+			return old, settings, err
+		}
+		defer clear(private)
+		var record heldOutFirstCommittedPrivatePlan
+		if err := decodeHeldOutComplete(private, &record, "first-committed private context"); err != nil {
+			return old, settings, err
+		}
+		config = record.Config
+	}
+	private, err := readHeldOutPinned(config.Original.PrivatePlan, settings.MaximumBytes, true)
+	if err != nil {
+		return old, settings, err
+	}
+	defer clear(private)
+	var original heldOutPrivatePlan
+	if err := decodeHeldOutComplete(private, &original, "original complete two-B context"); err != nil {
+		return old, settings, err
+	}
+	content, err = readHeldOutPinned(config.Declaration, settings.MaximumBytes, false)
+	if err != nil {
+		return old, settings, err
+	}
+	var declaration heldOutFirstCommittedDeclaration
+	if decodeHeldOutComplete(content, &declaration, "first-committed context declaration") != nil || validateHeldOutFirstCommittedDeclaration(declaration, config, original) != nil {
+		return old, settings, errors.New("first-committed context is not the exact approved prefix")
+	}
+	release, selected, err := heldOutContextForPreparation(ctx, original.Config, settings)
+	if err != nil {
+		return old, settings, err
+	}
+	selected.Workload.SeedCount = 1
+	return release, selected, nil
+}
+
+// The exact selected round must order all three unchanged references. Every
+// outcome and p-value remains required; no-op placeability is not optional.
+func acceptHeldOutFirstCommittedOutcomes(rounds []heldOutPrivateRound, outcomes []heldOutJobOutcome) (bool, int, []string) {
+	if len(rounds) != 1 || rounds[0].Public.Position != 1 || len(rounds[0].Public.Jobs) != 3 || len(outcomes) != 3 {
+		return false, 0, []string{"incomplete_first_committed_seed_screen"}
+	}
+	round := rounds[0].Public
+	byRole := map[string]heldOutJobOutcome{}
+	reasons := []string{}
+	for index, job := range round.Jobs {
+		outcome := outcomes[index]
+		if job.Position != index+1 || job.Role != round.Order[index] || outcome.JobId != job.JobId || outcome.RoundId != round.RoundId || outcome.Role != job.Role {
+			return false, 0, []string{"first_committed_outcome_identity_or_order_changed"}
+		}
+		if _, duplicate := byRole[outcome.Role]; duplicate || (outcome.Role != "no-op" && outcome.Role != "better" && outcome.Role != "worse") {
+			return false, 0, []string{"changed_first_committed_reference_roles"}
+		}
+		byRole[outcome.Role] = outcome
+		if !outcome.Complete || outcome.FailureCode != "" || !finitePositive(outcome.RawScore) || outcome.Significance == nil || outcome.Significance.OneSidedPValue == nil || !finite(*outcome.Significance.OneSidedPValue) || *outcome.Significance.OneSidedPValue < 0 || *outcome.Significance.OneSidedPValue > 1 {
+			reasons = append(reasons, fmt.Sprintf("first_committed_job_%02d_incomplete_or_failed", index+1))
+		}
+	}
+	noop, better, worse := byRole["no-op"], byRole["better"], byRole["worse"]
+	if !noop.Complete || noop.FailureCode != "" || !noop.Placeable || noop.TakeoverEligible {
+		reasons = append(reasons, "first_committed_noop_not_accepted")
+	}
+	ordered := 0
+	if better.Complete && noop.Complete && worse.Complete && better.FailureCode == "" && noop.FailureCode == "" && worse.FailureCode == "" && finitePositive(better.RawScore) && finitePositive(noop.RawScore) && finitePositive(worse.RawScore) && better.RawScore < noop.RawScore && noop.RawScore < worse.RawScore {
+		ordered = 1
+	} else {
+		reasons = append(reasons, "first_committed_seed_not_correctly_ordered")
+	}
+	return len(reasons) == 0, ordered, reasons
+}
+
+// Host admission still authenticates the unchanged original A/bridge pins.
+// Only that historical lookup uses two-B; the actual executor keeps one-B.
+func heldOutFirstCommittedHostPlan(plan heldOutPrivatePlan) (heldOutPrivatePlan, error) {
+	if plan.Config.Protocol != heldOutProtocolFirstCommittedB || plan.Config.TwoBAddendum == nil || plan.Config.Amendment == nil || len(plan.Rounds) != 1 || plan.Rounds[0].Public.Position != 1 {
+		return plan, errors.New("first-committed host projection requires its exact approved scope")
+	}
+	historical := plan
+	historical.Config.Protocol = heldOutProtocolThreeABridgeTwoB
+	return historical, nil
+}
+
+// The old verifier owns its own scoring lock. After taking the execution lock,
+// reread all six exact inputs and refuse any already-started original job.
+func recheckHeldOutFirstCommittedBeforeExecution(execution heldOutExecutionConfig, selected heldOutPrivatePlan, release heldOutRelease, settings heldOutOperatorSettings) error {
+	content, err := readHeldOutPinned(execution.PrivatePlan, settings.MaximumBytes, true)
+	if err != nil {
+		return err
+	}
+	defer clear(content)
+	var record heldOutFirstCommittedPrivatePlan
+	if decodeHeldOutComplete(content, &record, "selected first-committed execution fence") != nil || !reflect.DeepEqual(record.Plan, selected) {
+		return errors.New("selected first-committed execution view changed")
+	}
+	config := record.Config
+	for _, pin := range []heldOutPinnedFile{execution.PublicPlan, execution.Publication, config.Approval, config.Declaration, config.Original.PublicPlan, config.Original.Publication, config.Qualification} {
+		if _, err := readHeldOutPinned(pin, settings.MaximumBytes, false); err != nil {
+			return err
+		}
+	}
+	content, err = readHeldOutPinned(config.Original.PrivatePlan, settings.MaximumBytes, true)
+	if err != nil {
+		return err
+	}
+	defer clear(content)
+	var original heldOutPrivatePlan
+	if decodeHeldOutComplete(content, &original, "unchanged original first-committed execution fence") != nil || !reflect.DeepEqual(selected, deriveHeldOutFirstCommitted(original, config, record.ConfigSha256, selected.PreparedAt)) {
+		return errors.New("original first-position derivation changed before execution")
+	}
+	if err := validateHeldOutFirstCommittedUnstarted(original, true); err != nil {
+		return err
+	}
+	for _, round := range original.Rounds {
+		for _, job := range round.Public.Jobs {
+			path := filepath.Join(heldOutJobRoot(original.Config.PrivateRoot, round.Public, job), "artifacts", "precommitted-request.json")
+			content, err := readHeldOutPinned(heldOutPinnedFile{Path: path, Sha256: job.RequestSha256}, settings.MaximumBytes, true)
+			if err != nil {
+				return err
+			}
+			var request heldOutRequest
+			err = decodeHeldOutComplete(content, &request, "unchanged original six-request execution fence")
+			clear(content)
+			if err != nil {
+				return err
+			}
+			for _, pin := range []heldOutPinnedFile{{Path: request.ProvidersPath, Sha256: request.ProvidersSha256}, {Path: request.PatchPath, Sha256: request.PatchSha256}} {
+				content, err := readHeldOutPinned(pin, settings.MaximumBytes, true)
+				clear(content)
+				if err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return authenticateHeldOutFirstCommittedQualification(config, original, release, settings)
+}
+
+// Separate opt-in command avoids changing the old command's protocol decoder,
+// entropy path or qualified two-B admission. Unset environment is inert.
+func TestHeldOutFirstCommittedCommand(t *testing.T) {
+	operation := os.Getenv("SIM_LATENCY_FIRST_COMMITTED_COMMAND")
+	if operation == "" {
+		return
+	}
+	if os.Getenv("SIM_LATENCY_FIRST_COMMITTED_REAL_OPT_IN") != "1" {
+		t.Fatal("first-committed command requires its separate explicit opt-in")
+	}
+	if operation != "prepare-first-committed" && operation != "verify-first-committed" && operation != "execute-first-committed" {
+		t.Fatal("first-committed command permits only prepare-first-committed, verify-first-committed or execute-first-committed")
+	}
+	if err := validateHeldOutOperatorRuntime(); err != nil {
+		t.Fatal(err)
+	}
+	settings := defaultHeldOutOperatorSettings()
+	pin := heldOutPinnedFile{Path: os.Getenv("SIM_LATENCY_FIRST_COMMITTED_CONFIG"), Sha256: os.Getenv("SIM_LATENCY_FIRST_COMMITTED_CONFIG_SHA256")}
+	content, err := readHeldOutPinned(pin, settings.MaximumBytes, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clear(content)
+	ctx, cancel := signal.NotifyContext(t.Context(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	release, settings, err := heldOutFirstCommittedContext(ctx, operation, content, settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := func(ctx context.Context, program string, arguments ...string) ([]byte, error) {
+		bounded := settings
+		if program == "/usr/bin/env" {
+			bounded.CommandTimeout = defaultHeldOutFirstCommittedSettings().OriginalVerificationTimeout
+		}
+		return runHeldOutReadOnly(ctx, bounded, program, arguments...)
+	}
+	if operation == "prepare-first-committed" {
+		var config heldOutFirstCommittedConfig
+		if err := decodeHeldOutComplete(content, &config, "first-committed metadata preparation"); err != nil {
+			t.Fatal(err)
+		}
+		public, err := prepareHeldOutFirstCommitted(ctx, config, content, release, settings, time.Now, command)
+		if err != nil {
+			t.Fatal(err)
+		}
+		publicBytes, _ := json.MarshalIndent(public, "", "  ")
+		t.Logf("prepared exact first committed round / three unchanged jobs; no entropy or measurements; public_plan_sha256=%s private_plan_sha256=%s", heldOutDigest(publicBytes), public.Selected.PrivatePlanSha256)
+		return
+	}
+	var execution heldOutExecutionConfig
+	if err := decodeHeldOutComplete(content, &execution, "first-committed execution configuration"); err != nil {
+		t.Fatal(err)
+	}
+	// The child verifier takes and releases the canonical slot before this
+	// process acquires it. Never nest the same scoring-lock resource.
+	plan, err := verifyHeldOutFirstCommitted(ctx, execution, release, settings, command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if operation == "verify-first-committed" {
+		t.Log("verified exact first committed round / three unchanged requests; second round unstarted; no measurements")
+		return
+	}
+	_, err = withCalibrationScoringSlot(release.ScoringLock, func() (*calibrationAnalysisReport, error) {
+		if err := recheckHeldOutFirstCommittedBeforeExecution(execution, *plan, release, settings); err != nil {
+			return nil, err
+		}
+		if err := authenticateHeldOutPublication(ctx, execution, *plan, settings, command); err != nil {
+			return nil, err
+		}
+		hooks := heldOutExecutionHooks{Now: time.Now,
+			CheckHost: func(ctx context.Context, plan heldOutPrivatePlan) (string, error) {
+				historical, err := heldOutFirstCommittedHostPlan(plan)
+				if err != nil {
+					return "", err
+				}
+				return checkHeldOutHost(ctx, historical, release, settings)
+			},
+			Invoke: func(ctx context.Context, root string, start heldOutJobStart) error {
+				return invokeHeldOutEvaluator(ctx, root, start, release, settings)
+			},
+			Authenticate: func(ctx context.Context, plan heldOutPrivatePlan, round heldOutPrivateRound, job heldOutPlannedJob, request heldOutRequest, control *heldOutFrozenControl) (heldOutJobOutcome, *heldOutFrozenControl, error) {
+				replaySettings := defaultCalibrationReplaySettings()
+				replaySettings.CpuSet = settings.ManagementCpus
+				observations := []calibrationReplayObservation{}
+				replaySettings.Observe = func(observation calibrationReplayObservation) { observations = append(observations, observation) }
+				analysisSettings := defaultCalibrationAnalysisSettings()
+				analysisSettings.MarginFloor = plan.Margin
+				outcome, frozen, authErr := authenticateHeldOutJob(ctx, plan, round, job, request, control, release, settings,
+					func(ctx context.Context, root string, inputs ScoreInputs, image string, roundId string, baseline bool) ([]byte, error) {
+						return replayCalibrationBundle(ctx, root, inputs, image, roundId, baseline, analysisSettings, replaySettings, runSourceBuildDocker)
+					})
+				writeErr := writeHeldOutRecord(filepath.Join(filepath.Dir(request.ArtifactDirectory), "native-replays.json"), observations)
+				return outcome, frozen, errors.Join(authErr, writeErr)
+			}}
+		result, err := executeHeldOutCampaign(ctx, execution, *plan, release, settings, hooks)
+		if err != nil {
+			return nil, err
+		}
+		t.Logf("completed first committed three-job screen; accepted=%t correctly_ordered_seeds=%d; second seed not executed; no production activation", result.Accepted, result.OrderedSeeds)
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}

@@ -1,0 +1,140 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-fresh-single-protocol-targeted-unit-qualification",
+  "protocol": "launch-3a-bridge-fresh-single-b-2026-10-28-v1",
+  "status": "targeted_21_guard_three_passes_complete_broader_and_native_qualification_pending",
+  "measured": false,
+  "held_out_or_launch_accepted": false,
+  "source_integration_byte_exact_to_tested_fragments": true,
+  "source_base_commit": "29b44380e2e521c2895429737b38c9e350842cd8",
+  "preintegration_main_commit": "94870027f88837a2acc6e58a3754ebd95511a575",
+  "source_form": "retained physical base plus original first-committed and fresh overlays; not a whole-main build",
+  "original_physical_source_manifest_sha256": "e3cd65b82f3b8929c29b3e7fab21530c7ebb94a30765c47225ef8dbe6c3ed9da",
+  "private_source_manifest_sha256": "1bcf0701f4a8966bfc44e728fc69f1e1fa8ed8f56c5d35ffb4a9b3a76a7745af",
+  "private_provenance_manifest_sha256": "0958e3802847abf5934f00426c66da860cf8aecaa29d3c74c7214c1d510aa593",
+  "overlay_sha256": "cf01fe87476ab680c9372b30d94b4c39c0bdce6cf650cadb05a88f016c72d99b",
+  "execution_profile_sha256": "d97ee37012268732c05e2b97811b822061845b325f1c3b75afe5fcfc0cae622a",
+  "binary_sha256": "a77042d1cfd13da9c045ec12416131be57b04e5fcb97f4b1c953406df2fe291e",
+  "race": true,
+  "go_version": "go1.27.3",
+  "go_executable_sha256": "5f5eb6d0b2fb6aa0bb5d5f8c5f1c944e0de955c925f0111af92a9d8f79680b5b",
+  "reported_execution_profile": {
+    "clean_environment": true,
+    "local_unattested_fixtures_only": true,
+    "database_attestation_or_real_vault_opt_in": false,
+    "cpus": [
+      20,
+      22
+    ],
+    "parallelism": 2,
+    "gomaxprocs": 2,
+    "gomemlimit": "2GiB",
+    "memory_limit_is_soft_not_hard_rss": true,
+    "goproxy": "off",
+    "gosumdb": "sum.golang.org",
+    "gotoolchain": "local",
+    "goenv": "off",
+    "module_graph_readonly": true,
+    "compile_timeout_seconds": 600,
+    "test_timeout_seconds": 1200,
+    "outer_test_timeout_seconds": 1260
+  },
+  "consecutive_passes": 3,
+  "tests_per_pass": 21,
+  "total_positive_test_passes": 63,
+  "failures": 0,
+  "skips": 0,
+  "owning_executor_reported_elapsed_seconds": [
+    554.09,
+    552.4,
+    554.02
+  ],
+  "elapsed_provenance": "owning LOW terminal report; raw test2json independently establishes exact21-name PASS census, not compiler/resource or wall-clock proof",
+  "runs": [
+    {
+      "file": "qa/pass1.json",
+      "sha256": "c6c9eb1ff342b86171dbda8c493412567b0f1c499a3712f3142b1f44977a6272",
+      "passes": 21,
+      "failures": 0,
+      "skips": 0
+    },
+    {
+      "file": "qa/pass2.json",
+      "sha256": "1eecb316579140a87415c241e1cc65487164c8d81b8449cdb6210ac46a2cb582",
+      "passes": 21,
+      "failures": 0,
+      "skips": 0
+    },
+    {
+      "file": "qa/pass3.json",
+      "sha256": "c002d3d3044bb93e2ea4f85362c7504b7019dec65993deed255f5a7852b339fd",
+      "passes": 21,
+      "failures": 0,
+      "skips": 0
+    }
+  ],
+  "guard_names": [
+    "TestHeldOutFreshSingleAcceptanceReusesEveryFrozenNegative",
+    "TestHeldOutFreshSingleAfterPilotExclusionsCannotOmitEitherSource",
+    "TestHeldOutFreshSingleCampaignIdentityMismatchRefusesBeforeEntropy",
+    "TestHeldOutFreshSingleCanceledPreparationStopsAtBothPreEntropyBoundaries",
+    "TestHeldOutFreshSingleCanonicalPolicyFileBindsScoredNativeImages",
+    "TestHeldOutFreshSingleCompleteCompositionPreservesOldClaims",
+    "TestHeldOutFreshSingleCountDoesNotRewriteOldProtocols",
+    "TestHeldOutFreshSingleDeclarationMutationsRefuseBeforeEntropy",
+    "TestHeldOutFreshSingleFutureAuthorityRefusesBeforeEntropy",
+    "TestHeldOutFreshSingleGenerationFailureRetainsSpentNamespace",
+    "TestHeldOutFreshSingleMeasuredDirectionCannotOmitPilotPublication",
+    "TestHeldOutFreshSingleMemoryGuardCannotApplyRecoveryOrAcceptSmallScope",
+    "TestHeldOutFreshSingleMetadataCannotAlterHistoricalProtocols",
+    "TestHeldOutFreshSingleOwnerApprovalMutationsRefuse",
+    "TestHeldOutFreshSinglePrepopulatedBaselineRefusesBeforeExecutionClaim",
+    "TestHeldOutFreshSinglePublicPilotCollisionChecksAllRepresentations",
+    "TestHeldOutFreshSinglePublicPilotPreflightIsReadOnlyAndSinglePurpose",
+    "TestHeldOutFreshSingleQualificationContextMutationRefuses",
+    "TestHeldOutFreshSingleReferenceAndPilotPinsRefuse",
+    "TestHeldOutFreshSingleRefusesOldSecondSeedRuntimeState",
+    "TestHeldOutFreshSingleTemplateProjectionRejectsEveryOtherField"
+  ],
+  "source_tool_module_worksum_and_head_checks_before_after_all_runs_passed": true,
+  "retained_prior_timeout": {
+    "binary_sha256": "ab97a12431782acceb6e42c82f202e6d5bf56b4596b177f706a6563e3b70439e",
+    "source_sha256": "a7aa7bc48baa390b1f5c16c249bb143884f7f8b2e54937ca6524909ee6bd34f0",
+    "tests_sha256": "c6c3de35f5160ecf2a74ddb5ae702805fddd3eea61f3ae5f91c623370adb26c6",
+    "exit_code": 2,
+    "test_timeout_seconds": 300,
+    "completed_top_level_passes": 4,
+    "skips": 0,
+    "stdout_file": "qa/prior-timeout.stdout",
+    "stdout_sha256": "dd06bf04ac8128c4148a894b8921cf21287839d0dac4ca9b37eca95236f65b6c",
+    "stderr_file": "qa/prior-timeout.stderr",
+    "stderr_sha256": "40b7c52fd2a4f309f1f38fda65b587e9c6a157849b91d9f23f2889cda3777eb7",
+    "retained_not_counted_as_positive": true
+  },
+  "canonical_policy_guard": {
+    "exact_policy_file_pin_required": true,
+    "independent_scored_vector_sha256": "25e9c5b89041f35607b3a9542d13abd2649a9e99b804f59791780af19ab97861",
+    "authored_file_and_rebound_native_tuple_refuse_before_entropy": true
+  },
+  "open_prerequisites": [
+    "direct-public provider-byte digest exclusion comparison and its new targeted regressions",
+    "broader complete non-command guard matrix after that followup is tested and published; prior scope165plusnewguards, not run",
+    "context-bound native qualification and publication authentication",
+    "complete native-only census including both original committed positions",
+    "separately prospective genuine R9/R9 public direction pilot and measured-direction receipt"
+  ],
+  "public_pilot_admitted": false,
+  "full_protocol_native_qualification_complete": false,
+  "new_held_out_seed_drawn_or_measured": false,
+  "original_failed_screen_retained": true,
+  "original_second_seed_unstarted": true,
+  "claims_excluded": [
+    "full-regression-completion",
+    "native-operator-qualification",
+    "public-pilot-admission",
+    "genuine-reference-direction",
+    "new-hidden-seed-commitment",
+    "calibration-acceptance",
+    "production-activation"
+  ]
+}

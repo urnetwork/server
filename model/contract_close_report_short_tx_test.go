@@ -334,10 +334,10 @@ func TestContractCloseReportSenderFinalOrderFromAccumulation(t *testing.T) {
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		f := newCloseReportFixture(t)
-		apply := func(contractId, clientId server.Id, checkpoint bool, reportId *server.Id) (applied, follows bool) {
+		apply := func(contractId, clientId server.Id, checkpoint bool, reportId *server.Id) (applied bool, completion contractCheckpointCompletion) {
 			server.Tx(f.ctx, func(tx server.PgTx) {
 				var err error
-				applied, _, _, follows, err = applyContractCloseReportOrderInTx(f.ctx, tx, contractId, clientId, 20, checkpoint, reportId, nil)
+				applied, _, _, completion, err = applyContractCloseReportOrderInTx(f.ctx, tx, contractId, clientId, 20, checkpoint, reportId, nil)
 				server.Raise(err)
 			}, server.TxReadCommitted, server.OptNoRetry())
 			return
@@ -351,38 +351,39 @@ func TestContractCloseReportSenderFinalOrderFromAccumulation(t *testing.T) {
 			}, server.TxReadCommitted, server.OptNoRetry())
 			return admission
 		}
-		// The receiver checkpoint before the sender's final does not follow it,
-		// and neither does the sender's own final.
-		if applied, follows := apply(f.contractId, f.destinationId, true, nil); !applied || follows {
-			t.Fatal("receiver checkpoint before the sender's final followed it", applied, follows)
+		// The receiver checkpoint before the sender's final does not follow it.
+		// The sender's final after it follows the receiver's checkpoint instead
+		// (owner, 2026-10-28).
+		if applied, completion := apply(f.contractId, f.destinationId, true, nil); !applied || completion != contractCheckpointNoCompletion {
+			t.Fatal("receiver checkpoint before the sender's final followed it", applied, completion)
 		}
-		if applied, follows := apply(f.contractId, f.sourceId, false, nil); !applied || follows {
-			t.Fatal("sender's own final followed itself", applied, follows)
+		if applied, completion := apply(f.contractId, f.sourceId, false, nil); !applied || completion != contractSenderFinalAfterCheckpoint {
+			t.Fatal("sender's final did not follow the receiver's checkpoint", applied, completion)
 		}
 		reportId := server.NewId()
-		if applied, follows := apply(f.contractId, f.destinationId, true, &reportId); !applied || !follows {
-			t.Fatal("receiver report after the sender's final did not follow it", applied, follows)
+		if applied, completion := apply(f.contractId, f.destinationId, true, &reportId); !applied || completion != contractCheckpointAfterSenderFinal {
+			t.Fatal("receiver report after the sender's final did not follow it", applied, completion)
 		}
 		// A sender checkpoint is not a final; the identified admission sees
 		// the final once it commits.
-		if applied, follows := apply(f.otherContractId, f.sourceId, true, nil); !applied || follows {
-			t.Fatal("sender checkpoint followed itself", applied, follows)
+		if applied, completion := apply(f.otherContractId, f.sourceId, true, nil); !applied || completion != contractCheckpointNoCompletion {
+			t.Fatal("sender checkpoint followed itself", applied, completion)
 		}
 		receiver := ContractCloseReport{ReportId: server.NewId(), ContractId: f.otherContractId, ClientId: f.destinationId, AckedByteCount: 20, Checkpoint: true}
-		if admission := admit(receiver); !admission.applied || admission.followsSenderFinal {
+		if admission := admit(receiver); !admission.applied || admission.completion != contractCheckpointNoCompletion {
 			t.Fatal("receiver report after a sender checkpoint followed a final", admission)
 		}
-		if applied, follows := apply(f.otherContractId, f.sourceId, false, nil); !applied || follows {
-			t.Fatal("sender's final followed itself", applied, follows)
+		if applied, completion := apply(f.otherContractId, f.sourceId, false, nil); !applied || completion != contractSenderFinalAfterCheckpoint {
+			t.Fatal("sender's final did not follow the receiver's checkpoint", applied, completion)
 		}
 		receiver.ReportId = server.NewId()
-		if admission := admit(receiver); !admission.applied || !admission.followsSenderFinal {
+		if admission := admit(receiver); !admission.applied || admission.completion != contractCheckpointAfterSenderFinal {
 			t.Fatal("identified receiver report after the sender's final did not follow it", admission)
 		}
 		// A report that no longer applies publishes no receipt.
 		late := server.NewId()
-		if applied, follows := apply(f.contractId, f.sourceId, true, &late); applied || follows {
-			t.Fatal("report after the party's final applied", applied, follows)
+		if applied, completion := apply(f.contractId, f.sourceId, true, &late); applied || completion != contractCheckpointNoCompletion {
+			t.Fatal("report after the party's final applied", applied, completion)
 		}
 		assertCloseReportLegacyReceipts(t, f.ctx, f.contractId, 1)
 		assertCloseReportLegacyReceipts(t, f.ctx, f.otherContractId, 2)
@@ -606,7 +607,9 @@ func TestContractCloseReportRacingFinalSettlementsClaimOnce(t *testing.T) {
 		}
 		settle := func(contractId server.Id) settlement {
 			var result settlement
-			server.HandleError(func() { result.closed, _, result.err = settleReportedContract(ctx, contractId, false) }, func(err error) { result.err = err })
+			server.HandleError(func() {
+				result.closed, _, result.err = settleReportedContract(ctx, contractId, contractCheckpointNoCompletion)
+			}, func(err error) { result.err = err })
 			return result
 		}
 		// Both read two finals before either begins its transaction.

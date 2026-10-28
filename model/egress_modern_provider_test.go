@@ -243,7 +243,7 @@ func TestModernProviderGateOnKeepsOnlyModernProvidersInQualityAndSpeed(t *testin
 	}
 }
 
-// The flip itself (owner decision 2026-10-24). With the switch absent, a
+// The flip itself (owner decision 2026-10-28). With the switch absent, a
 // provider the probe has not shown to be modern keeps Quality and Speed a
 // microsecond, the smallest step a stored time takes, before the default
 // start, and is not_modern from exactly the start. The switch decides
@@ -251,7 +251,7 @@ func TestModernProviderGateOnKeepsOnlyModernProvidersInQualityAndSpeed(t *testin
 // true holds it on before. A modern provider keeps both buckets throughout.
 func TestModernProviderGateFlipsAtItsStart(t *testing.T) {
 	start := DefaultQualitySpeedModernProviderStart()
-	connect.AssertEqual(t, start, time.Date(2026, 11, 4, 0, 0, 0, 0, time.UTC))
+	connect.AssertEqual(t, start, time.Date(2026, 11, 11, 0, 0, 0, 0, time.UTC))
 	connect.AssertEqual(t, DefaultEgressIndexSettings().QualitySpeedModernProviderStart, start)
 	off, on := false, true
 	for _, c := range []struct {
@@ -262,6 +262,7 @@ func TestModernProviderGateFlipsAtItsStart(t *testing.T) {
 	}{
 		{name: "absent, at the previous cutoff", modernSwitch: nil, now: time.Date(2026, 10, 21, 0, 0, 0, 0, time.UTC), gate: false},
 		{name: "absent, at the previously postponed cutoff", modernSwitch: nil, now: time.Date(2026, 10, 28, 0, 0, 0, 0, time.UTC), gate: false},
+		{name: "absent, at the cutoff postponed on 2026-10-24", modernSwitch: nil, now: time.Date(2026, 11, 4, 0, 0, 0, 0, time.UTC), gate: false},
 		{name: "absent, a microsecond before the start", modernSwitch: nil, now: start.Add(-time.Microsecond), gate: false},
 		{name: "absent, at the start", modernSwitch: nil, now: start, gate: true},
 		{name: "absent, an hour after the start", modernSwitch: nil, now: start.Add(time.Hour), gate: true},
@@ -425,14 +426,14 @@ func TestModernProviderGateShadowSummary(t *testing.T) {
 	connect.AssertEqual(
 		t,
 		providerModernGateShadowSummary(shadow, DefaultEgressIndexSettings(), modernGateTestNow),
-		"off, shadow only (quality_speed_requires_modern_provider absent, on from 2026-11-04T00:00:00Z), evidence max age 168h0m0s: quality 10 admitted, 6 modern, 4 not (not_post_quantum 1, no_resizable_windows 0, no_evidence 3, stale_evidence 0); speed 9 admitted, 7 modern, 2 not (not_post_quantum 0, no_resizable_windows 0, no_evidence 0, stale_evidence 2)",
+		"off, shadow only (quality_speed_requires_modern_provider absent, on from 2026-11-11T00:00:00Z), evidence max age 168h0m0s: quality 10 admitted, 6 modern, 4 not (not_post_quantum 1, no_resizable_windows 0, no_evidence 3, stale_evidence 0); speed 9 admitted, 7 modern, 2 not (not_post_quantum 0, no_resizable_windows 0, no_evidence 0, stale_evidence 2)",
 	)
 	for _, c := range []struct {
 		settings *EgressIndexSettings
 		now      time.Time
 		prefix   string
 	}{
-		{settings: DefaultEgressIndexSettings(), now: start, prefix: "on (quality_speed_requires_modern_provider absent, on from 2026-11-04T00:00:00Z), evidence max age"},
+		{settings: DefaultEgressIndexSettings(), now: start, prefix: "on (quality_speed_requires_modern_provider absent, on from 2026-11-11T00:00:00Z), evidence max age"},
 		{settings: modernGateTestSettings(true), now: modernGateTestNow, prefix: "on (quality_speed_requires_modern_provider: true), evidence max age"},
 		{settings: modernGateTestSettings(false), now: start, prefix: "off, shadow only (quality_speed_requires_modern_provider: false), evidence max age"},
 	} {
@@ -593,7 +594,13 @@ func TestEgressIndexSettingsModernProviderGate(t *testing.T) {
 	settings = load("quality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n")
 	connect.AssertEqual(t, settings.RequiresModernProvider(moved.Add(-time.Microsecond)), false)
 	connect.AssertEqual(t, settings.RequiresModernProvider(moved), true)
+	// a start after the default one holds the gate off at the default start;
+	// a week after it, wherever the default moves
+	postponed := defaultStart.AddDate(0, 0, 7)
+	settings = load("quality_speed_modern_provider_start: " + postponed.Format(time.RFC3339) + "\n")
 	connect.AssertEqual(t, settings.RequiresModernProvider(defaultStart), false)
+	connect.AssertEqual(t, settings.RequiresModernProvider(postponed.Add(-time.Microsecond)), false)
+	connect.AssertEqual(t, settings.RequiresModernProvider(postponed), true)
 	// a date starts the gate at its 00:00 UTC
 	settings = load("quality_speed_modern_provider_start: 2026-11-02\n")
 	connect.AssertEqual(t, settings.RequiresModernProvider(movedDate.Add(-time.Microsecond)), false)

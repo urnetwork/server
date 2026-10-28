@@ -11,6 +11,14 @@ import (
 	"github.com/urnetwork/server"
 )
 
+// Applies a close report without settling the contract.
+func testingApplyContractCloseReport(ctx context.Context, contractId, clientId server.Id, usedTransferByteCount ByteCount, checkpoint bool) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		_, _, _, err := applyContractCloseReportUsageInTx(ctx, tx, contractId, clientId, usedTransferByteCount, checkpoint, nil, nil)
+		server.Raise(err)
+	}, server.TxReadCommitted, server.OptNoRetry())
+}
+
 func newContractExpiryRepairTestContract(t testing.TB, ctx context.Context, f netEscrowOrderingTestFixture, positive bool) server.Id {
 	t.Helper()
 	escrow, posts := createNetEscrowOrderingTestContract(ctx, f, 10)
@@ -19,12 +27,13 @@ func newContractExpiryRepairTestContract(t testing.TB, ctx context.Context, f ne
 	if positive {
 		amount = 3
 	}
-	// The receiver's checkpoint predates the sender's final; a covering one
-	// after it would settle in that report (owner decision B).
+	// Both reports are applied without settling, as the expiry sweep finds a
+	// contract whose reports never settled it: since 2026-10-28 a sender's final
+	// after a receiver checkpoint settles in its own report.
 	if positive {
-		server.Raise(CloseContract(ctx, escrow.ContractId, f.destinationId, amount, true))
+		testingApplyContractCloseReport(ctx, escrow.ContractId, f.destinationId, amount, true)
 	}
-	server.Raise(CloseContract(ctx, escrow.ContractId, f.sourceId, amount, false))
+	testingApplyContractCloseReport(ctx, escrow.ContractId, f.sourceId, amount, false)
 	server.Tx(ctx, func(tx server.PgTx) {
 		old := server.NowUtc().Add(-time.Hour)
 		server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET create_time=$2 WHERE contract_id=$1`, escrow.ContractId, old))

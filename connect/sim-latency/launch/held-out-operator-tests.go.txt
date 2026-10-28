@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -23,16 +24,17 @@ import (
 
 // Owns only generated test paths and identities; no retained production data.
 type heldOutOpFixture struct {
-	Root                  string
-	Config                heldOutPreparationConfig
-	ConfigBytes           []byte
-	Inputs                heldOutPreparationInputs
-	Release               heldOutRelease
-	Settings              heldOutOperatorSettings
-	Hooks                 heldOutPreparationHooks
-	Generated             int
-	Reauthenticated       int
-	PrivatePin, PublicPin heldOutPinnedFile
+	Root                       string
+	Config                     heldOutPreparationConfig
+	ConfigBytes                []byte
+	Inputs                     heldOutPreparationInputs
+	Release                    heldOutRelease
+	Settings                   heldOutOperatorSettings
+	Hooks                      heldOutPreparationHooks
+	Generated                  int
+	Reauthenticated            int
+	ConstructorAuthentications int
+	PrivatePin, PublicPin      heldOutPinnedFile
 }
 
 // Test writing is intentionally replaceable so mutations exercise pinned-byte
@@ -63,9 +65,66 @@ func heldOutOpId(value int) string {
 	return fmt.Sprintf("%08x-0000-4000-8000-%012x", value, value)
 }
 
+// Only fresh fixture receipt construction shares this immutable actual-ELF
+// identity. Production authentication never reads this cache and still streams
+// the actual executable for every qualification check.
+var heldOutFreshFixtureExecutableIdentity struct {
+	Once   sync.Once
+	Sha256 string
+	Err    error
+}
+
+// Reads the current Go test ELF, never a fabricated executable or helper.
+func readHeldOutFixtureExecutableDigest() (string, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	file, err := os.Open(executable)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.New()
+	if _, err := io.Copy(digest, file); err != nil {
+		_ = file.Close()
+		return "", err
+	}
+	if err := file.Close(); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(digest.Sum(nil)), nil
+}
+
+// Reusing a receipt identity saves only fixture generation work, never a native
+// verifier call. Ordinary old fixture constructors retain uncached behavior.
+func heldOutFixtureExecutableDigest(t *testing.T, cacheForFresh bool) string {
+	t.Helper()
+	if cacheForFresh {
+		heldOutFreshFixtureExecutableIdentity.Once.Do(func() {
+			heldOutFreshFixtureExecutableIdentity.Sha256, heldOutFreshFixtureExecutableIdentity.Err = readHeldOutFixtureExecutableDigest()
+		})
+		if heldOutFreshFixtureExecutableIdentity.Err != nil {
+			t.Fatal(heldOutFreshFixtureExecutableIdentity.Err)
+		}
+		return heldOutFreshFixtureExecutableIdentity.Sha256
+	}
+	digest, err := readHeldOutFixtureExecutableDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return digest
+}
+
 // Builds full authenticated-shape preparation inputs. The native encoder uses
 // only a small 25-provider profile; no Docker/service/scorer process is started.
 func newHeldOutOpFixture(t *testing.T) *heldOutOpFixture {
+	t.Helper()
+	return newHeldOutOpFixtureWithAuthentication(t, true)
+}
+
+// Fresh composition may defer only this predecessor-positive authentication;
+// its constructor must still run the final full production validator itself.
+func newHeldOutOpFixtureWithAuthentication(t *testing.T, authenticate bool) *heldOutOpFixture {
 	t.Helper()
 	root := newCalibrationFileRoot(t)
 	fixture := &heldOutOpFixture{Root: root, Settings: defaultHeldOutOperatorSettings()}
@@ -146,24 +205,9 @@ func newHeldOutOpFixture(t *testing.T) *heldOutOpFixture {
 	config.Exclusions = write("exclusions.json", heldOutExclusions{Schema: 1, Kind: "sim-latency-held-out-exclusions", Complete: true,
 		ReviewedAt: time.Unix(1600000000, 0).UTC(), Sources: []heldOutPinnedFile{priorSeeds}, PrivateSeedHexes: []string{fmt.Sprintf("%064x", 9001)},
 		EffectiveSeeds: []int64{20261024}, ProviderDigests: []string{heldOutDigest([]byte("synthetic retired provider bytes"))}, RetiredCommitments: []string{strings.Repeat("e", 64)}})
-	executable, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	file, err := os.Open(executable)
-	if err != nil {
-		t.Fatal(err)
-	}
-	digest := sha256.New()
-	if _, err := io.Copy(digest, file); err != nil {
-		_ = file.Close()
-		t.Fatal(err)
-	}
-	if err := file.Close(); err != nil {
-		t.Fatal(err)
-	}
+	binarySha256 := heldOutFixtureExecutableDigest(t, !authenticate)
 	qualification := heldOutToolQualification{Schema: 1, Kind: "sim-latency-held-out-operator-qualification", Accepted: true,
-		BinarySha256: hex.EncodeToString(digest.Sum(nil)), AnalyzerSource: fixture.Release.AnalyzerSource, BaseSha: fixture.Release.BaseSha,
+		BinarySha256: binarySha256, AnalyzerSource: fixture.Release.AnalyzerSource, BaseSha: fixture.Release.BaseSha,
 		SourceLockSha256: fixture.Release.SourceLockSha256, GoVersion: "go1.27.3", Race: true, ConsecutivePasses: 3, TestsPerPass: 1,
 		Sources: []heldOutPinnedFile{evidence}, Evidence: []heldOutPinnedFile{evidence, evidence, evidence}}
 	config.Qualification = write("qualification.json", qualification)
@@ -196,11 +240,14 @@ func newHeldOutOpFixture(t *testing.T) *heldOutOpFixture {
 	config.StageAReport = write("accepted-report-shape.json", report)
 	fixture.Config = config
 	fixture.refreshConfig(t)
-	inputs, err := authenticateHeldOutPreparation(config, fixture.Release, fixture.Settings)
-	if err != nil {
-		t.Fatalf("synthetic positive preparation boundary rejected: %v", err)
+	if authenticate {
+		fixture.ConstructorAuthentications++
+		inputs, err := authenticateHeldOutPreparation(config, fixture.Release, fixture.Settings)
+		if err != nil {
+			t.Fatalf("synthetic positive preparation boundary rejected: %v", err)
+		}
+		fixture.Inputs = *inputs
 	}
-	fixture.Inputs = *inputs
 	entropy := make([]byte, 2048)
 	for i := range entropy {
 		entropy[i] = byte((i*37 + 13) % 251)

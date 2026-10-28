@@ -29,6 +29,26 @@ if [[ $test_status != 0 ]]; then
     exit $test_status
 fi
 
+# Administrative recovery is a separate standard-library package. Its one
+# ownership integration case requires root; launch qualification requires zero skips.
+GORACE="log_path=profile/recovery-race.out halt_on_error=1" \
+    go test -timeout 5m -v -race ./launch/unmeasured-recovery \
+    | grep --color=always -e "^" -e "$match"
+test_status=${PIPESTATUS[0]}
+if [[ $test_status != 0 ]]; then
+    exit $test_status
+fi
+
+# Archive tests use only synthetic sources and an in-memory transport. They
+# never invoke the live archive command or access retained competition evidence.
+GORACE="log_path=profile/archive-race.out halt_on_error=1" \
+    go test -timeout 5m -v -race ./launch/retained-archive \
+    | grep --color=always -e "^" -e "$match"
+test_status=${PIPESTATUS[0]}
+if [[ $test_status != 0 ]]; then
+    exit $test_status
+fi
+
 GORACE="log_path=profile/race.out halt_on_error=1" \
     go test -timeout 900m -v -race \
     -cpuprofile profile/cpu -memprofile profile/memory "$@" \

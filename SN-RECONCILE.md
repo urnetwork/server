@@ -264,21 +264,96 @@ too.
   - Takes effect when a process loads the new config. An unreadable or invalid
     file counts as off and is reported.
 
-### Closing the parked payments: defined, not run
+### Closing the parked payments: `payouts close-parked`, not yet run
 
-Closing the parked payments is a separate, owner-approved mutation. It would
-cancel every pending payment that Circle cannot hold: not completed, not
-canceled, no `circle_idempotency_key`, no `payment_record`, no `tx_hash`, and no
-staged sweep assignment. For each, it would record an `audit_account_payment`
-event, `usdc_payout_closed`, naming the switch.
+Closing the parked payments is a separate, owner-approved mutation (approved
+2026-10-27). It cancels every pending payment that Circle cannot hold: not
+completed, not canceled, no `circle_idempotency_key`, no `payment_record`, no
+`tx_hash`, and no staged sweep assignment. A payment has a staged sweep
+assignment while its plan's `payment_plan_assignment` row has no
+`complete_time`: the plan committed its payments and is still moving their
+selected sweeps to them from `payment_plan_sweep`, so they are not payable yet.
+`CancelPayment` and the hung-payment cancellation skip such payments the same
+way. For each closed payment it records an `audit_account_payment` event,
+`usdc_payout_closed`, naming the switch.
 
 It forfeits those USDC obligations. Post-cutoff earnings are paid through the
 subnet, and legacy debt never becomes subnet credit. So the planner must not
-re-plan their sweeps, unlike a hung cancellation.
+re-plan their sweeps, unlike a hung cancellation. The closure event is the
+marker. Its event id is the md5 of `usdc_payout_closed/` and the payment id
+(`model.UsdcPayoutClosedEventId`), so the planner finds it with a primary key
+probe:
+- the planner never selects a closed payment's sweeps, so they are never
+  re-planned, and its bonuses never move with them;
+- legacy component recovery never restores a closed payment;
+- the planner's unresolved-liability sample never counts a closed payment's
+  sweeps.
+
+The hung-payment cancellation only cancels payments that are not canceled, so
+it never reaches a closed one.
 
 Keyed or recorded rows are never closed this way; their reconciliation decides
-them. A dry run reports counts by plan week and reason (wallet-less, dust,
-review-held) before anything is written.
+them.
+
+Order:
+1. Submit the final USDC payments, then set `payments: off`.
+2. Deploy the taskworker build that knows the marker before `--apply`, and run
+   `payouts plan` only from this build. An older planner would re-plan a closed
+   payment's sweeps into a new parked payment at its next plan (the weekly plan
+   runs Sundays at 10:00 UTC), and restore a closed payment that holds a legacy
+   component.
+3. Run the dry run, then `--apply` with its digest:
+
+```
+bringyourctl payouts close-parked [--ids]
+bringyourctl payouts close-parked --apply --expect=<digest> [--ids]
+```
+
+The dry run writes nothing. Like the sn-reconcile dry run, its process is read
+only and connects with `pg_maintenance.yml`. It reports:
+- the count and payout of the parked payments, by reason, and by plan week (the
+  UTC Monday of the week the payment was created) and reason;
+- the manual reimbursements among them;
+- pending payments that hold a closure event: closed, then un-canceled by an
+  older planner. They are never closed again; investigate them;
+- the digest.
+
+Payment ids print only with `--ids`. Amounts print exactly: 1 USD is
+1,000,000,000 nano cents, and the sender's $0.01 fee is 10,000,000.
+
+Each payment has one reason, the first hold the sender would apply if payments
+were on:
+- `wallet_less`: neither the payment's own wallet nor, for a payment the sender
+  re-points (every payment but a manual reimbursement), its network's payout
+  wallet is an active wallet of the payment's network.
+- `dust`: the payout does not cover the $0.01 fee, by the sender's arithmetic
+  (10,000,000 nano cents or less).
+- `review_held`: `attribution_review_required`.
+- `other`: parked only because payments are off.
+
+`--apply --expect=<digest>` runs the same census, then refuses before any write
+unless `usdc_payout.yml` declares `payments: off` and the digest matches. An
+absent file means payments are on, and an unreadable one refuses. The digest
+is sha256 over each parked payment's id and payout, so the apply closes exactly
+the payments, with exactly the payouts, the dry run reported. It closes them in
+batches of 500, each in its own READ COMMITTED transaction: the batch's
+payments are locked in id order and read again, then canceled and journaled.
+A payment that changed since the census (keyed, recorded, canceled, completed,
+staged, or with another payout) is skipped, and the apply then exits 1 and
+lists it with `--ids`. Before each batch it checks the switch again, and it
+stops if payments turned on.
+
+A closed payment is canceled and holds its event, so a rerun never closes it
+twice. After an interrupted or partial apply, run the dry run again and apply
+its new digest; an old digest is refused. To confirm, run the dry run again: no
+payment remains parked but those skipped and those created since the census.
+
+What it does not change:
+- A payment the hung-payment cancellation canceled before the census is not
+  parked. The next plan re-plans its sweeps into a new parked payment, which a
+  later run closes.
+- Provider-facing reads. A closed payment is listed like any canceled payment,
+  and its sweeps still count as unpaid bytes.
 
 ## Note (2026-10-27): the listing reads later sweeps below a contract id bound
 
@@ -304,3 +379,31 @@ contract whose id ran ahead of its close by the margin or more would be
 missed (`TestSnReconcileStuckListingIdBoundBoundary`); the partition audit's
 largest skew was 4.8 s. The listing returns the same rows and values as both
 earlier listings (`TestSnReconcileStuckListingIdBoundMatchesReference`).
+
+## Note (2026-10-27): the duplicates read is bounded too
+
+The duplicates read (§6) read every sweep of all 454,429 pending or safely
+canceled rows with its contract. On main it hit the 15-minute statement
+timeout, so the dry run produced no report. It now reads each row's sweeps the
+way the listing reads a later row's:
+- With a bound of 'infinity', every sweep is early, and the sweeps are summed
+  without their contracts.
+- Below the row's close bound (the floor of its bound plus a day), each sweep
+  is read with its contract.
+- Between the close bound and the contract floor (2026-08-01, or
+  `ContractRetention` before the run, whichever is later), only a missing
+  contract makes a sweep early. It is found by an index probe of the key.
+- From the close bound up, a contract with an outcome and no close time makes
+  its sweeps early. Those contracts are read once, from their own index.
+
+The read returns the same rows and values
+(`TestSnReconcileHoldersMatchReference`). Four facts make that exact, and
+`snReconcileHoldersSql` gives the argument:
+- Every contract's id is minted before it closes.
+- Since release v2026.7.15, contract retention has deleted a contract's sweeps
+  together with it.
+- A dispute always writes a close time.
+- A contract that holds a sweep has an outcome, so it is never open.
+`TestSnReconcileHoldersBoundary` documents what the read would miss if one
+failed. Main holds about 174M open contracts, so the read does not enumerate
+them.

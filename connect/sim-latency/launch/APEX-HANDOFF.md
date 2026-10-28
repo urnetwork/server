@@ -3,15 +3,33 @@
 The non-standard external-evaluator design is approved by Macrocosmos. Approval
 does not itself prove a newly built release's live readiness.
 
-## Current v2 production handoff — October 26, 2026
+## Current v2 production handoff — October 28, 2026
 
-Public opening is **2026-10-28 00:00 UTC**. Current qualification and exact
+The required public opening was **2026-10-28 00:00 UTC**; readiness was missed.
+No late opening or new date has been authorized. Current qualification and exact
 artifact evidence are in [PRODUCTION-2026-10-28.md](PRODUCTION-2026-10-28.md).
 The original-three calibration reduction passed and prospectively froze a
 26.9% practical margin for the 3,600-provider/200-client qualification profile.
-The minimal revised-instrument image is built, but its fresh bridge, all-three
-independent reference orderings and live readiness remain open. This is not an
-accepted hidden epoch baseline or activation. See the [exact freeze](CALIBRATION-THREE-A-FREEZE-2026-10-26.md).
+The minimal revised-instrument image is built and its corrected R9/R9 bridge
+has native acceptance as an operational witness, not statistical equivalence.
+The owner approved measuring the first of two prospectively committed seeds;
+the second remains unstarted. The recovered run completed nine controls and
+all three R9 references, but the screen **failed its frozen ordering criterion**
+at 03:18:27 UTC on October 28: the worse reference outranked the no-op.
+The [complete failed screen](FIRST-COMMITTED-SCREEN-2026-10-28.md) is preserved.
+Independent review found no evaluator defect; this does not establish why the
+ordering failed. The owner approved a
+[new prospective screen](CALIBRATION-NEW-SCREEN-OWNER-APPROVAL-2026-10-28.md)
+with a stronger regression reference, fresh control and newly committed seed.
+Exact protocol/reference review, native qualification and publication remain
+pending; no new seed has been drawn or measurement started. Genuine Snow qualification and
+live readiness remain open; no late opening or waiver is authorized.
+This is not an accepted hidden epoch baseline or activation. See the
+[exact freeze](CALIBRATION-THREE-A-FREEZE-2026-10-26.md),
+[first-seed amendment](CALIBRATION-AMENDMENT-2026-10-27-FIRST-SEED.md), and
+[explicit recovery record](UNMEASURED-MANAGEMENT-OOM-2026-10-27.md).
+The current qualified path cannot establish readiness by the requested midnight
+opening; activation must not be backdated or represented as complete.
 Historical release identities and throughput figures below are not new evidence.
 
 Use discovery's exact `decision_mode` and `required_api_capability`. For an
@@ -23,15 +41,20 @@ The exact endpoint/value sets are in the
 [current README contract](../README.md#macrocosmos-integration-v2-contract)
 and [OpenAPI](../../../../sn/api/competition.yml).
 
-The prospective production policy is `elected_winner_gpt54mini_xhigh_v1`: close and drain,
+The prospective production policy is `elected_winner_snow_union_v1`: close and drain,
 seal and reveal, publish the provisional reward winner, automatically review
-with qualified GPT-5.4 mini/xhigh, revoke/re-elect with reasons if rejected, then build,
+with qualified Snow Qwen, Gemma and Muse members, retaining their union of
+findings and requiring all three to approve; revoke/re-elect with reasons if rejected, then build,
 qualify and promote the approved winner before opening the next epoch. Only no
 eligible winner permits incumbent carry-forward. Missing review or failed
 qualification blocks and alerts instead of silently substituting source.
 Reward revision, integrity review, source approval and settlement are distinct;
 do not treat a provisional recipient as source approval or proof of payment.
-Legacy `elected_winner_sol61max_v1` records retain their original model identity.
+Historical Mini and `elected_winner_sol61max_v1` records retain their original
+model identities; they are not authority to substitute for the current policy.
+Automated v2 drains accepted work after close and completes after epoch six and
+required review. Successors get full seven-day intake windows after preparation;
+January 1 is not a hard automatic v2 completion guarantee for an unbounded backlog.
 Production scope is mono-root patches across all ten locked repositories,
 excluding `server/connect/sim-latency/**` and repository metadata. Examples such
 as `server/connect/resident_contract_manager.go` now include the repository root;
@@ -59,7 +82,7 @@ Before production publication, update:
 
 - Compiler/runtime: prospective production requires exact Go **1.27.3**,
   evidenced by the new evaluator artifact, not the historical staging version.
-- Closing: qualified automatic GPT-5.4 mini/xhigh review follows provisional reward
+- Closing: qualified automatic three-member Snow review follows provisional reward
   publication. Pending review does not start a new epoch on the incumbent;
   approved-winner build/readiness gates progression, and only exhausted eligible
   ranking permits carry-forward. Existing historical seasons stay unchanged.

@@ -12,6 +12,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/docopt/docopt-go"
 
@@ -20,6 +21,10 @@ import (
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
+
+// How long a command that credited payments waits for their sales channel
+// notices (model.WaitSalesPaymentNotices) before it exits.
+const salesPaymentNoticeWait = 2 * time.Minute
 
 // cryptoCommand runs one crypto subcommand and returns the exit code.
 func cryptoCommand(opts docopt.Opts, out io.Writer) int {
@@ -136,6 +141,10 @@ func cryptoCommand(opts docopt.Opts, out io.Writer) int {
 			return 1
 		}
 		fmt.Fprintf(out, "credited invoice %s\n", id)
+		// the sales channel notice of the payment posts from this process
+		if !model.WaitSalesPaymentNotices(salesPaymentNoticeWait) {
+			fmt.Fprintf(out, "the sales channel notice was not posted before exit\n")
+		}
 		return 0
 	}
 

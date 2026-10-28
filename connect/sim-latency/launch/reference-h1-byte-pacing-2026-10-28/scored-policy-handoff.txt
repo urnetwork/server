@@ -1,0 +1,11 @@
+Explicit scored-policy handoff; no build or measurement has run.
+
+Preserve the original authored patch-policy.json bytes and SHA-256 5d78c808eff8d16eaa8f113656c9814dd1453acfd51bd891029a93bf4e4197cb. They remain scope/focused-unit lineage, not the native scored-policy bytes. Do not rewrite the low runner's source snapshot or relabel its pins.
+
+The pinned evaluator derives its build policy with jq -S '.patch_policy' worker-request.json. patch-policy.scored.json is the byte-exact jq -S canonical projection of the authored policy: SHA-256 25e9c5b89041f35607b3a9542d13abd2649a9e99b804f59791780af19ab97861. Only object-key order changes; path arrays, max_patch_bytes=262144, forbidden paths and absent path_base remain unchanged.
+
+All three new native builds, their image keys, the public pilot and the fresh protocol must bind 25e9, never raw 5d78. Keep the new scored policy distinct from the production public policy. Base98 remains policy-unbound; only candidate images bind this reference-only policy.
+
+scored-policy-lineage.json pins the source, actual trusted release components and calculated expected default native image keys. The calculated keys are not image IDs or proof of a completed build. Omit build-submission.sh --tag so its default native tag remains authenticatable. Use one fresh prepared source tree per reference.
+
+Publish the explicit authored/scored distinction and canonical-policy pins before any native build. A canonical-policy regression in the prospective protocol must reject semantic-equal but noncanonical bytes before any statistical entropy is acquired. Old protocol behavior remains unchanged. No new hidden draw, provider call, public pilot or measurement is authorized by these files.

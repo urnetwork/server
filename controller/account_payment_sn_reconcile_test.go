@@ -200,15 +200,10 @@ func (self *snReconcileTestFixture) network(blockchain string) (server.Id, serve
 }
 
 // A settled contract opened an hour before it closed at `closed`, whose sweep
-// is not yet planned.
+// is not yet planned. Its id is minted when it opened, as connect.NewId mints
+// every contract's id: the listing and the holders read a sweep by its
+// contract id (A2, A5).
 func (self *snReconcileTestFixture) contract(networkId server.Id, closed time.Time, revenue model.NanoCents) server.Id {
-	return self.contractWithId(server.NewId(), networkId, closed, revenue)
-}
-
-// The same contract with its id minted when it opened, as connect.NewId mints
-// every contract's id. The listing reads a later row's sweeps by contract id
-// (A5), so a later row's early sweep needs one.
-func (self *snReconcileTestFixture) mintedContract(networkId server.Id, closed time.Time, revenue model.NanoCents) server.Id {
 	contractId, opened := server.NewId(), model.ContractIdTimeBound(closed.Add(-time.Hour))
 	copy(contractId[0:6], opened[0:6])
 	return self.contractWithId(contractId, networkId, closed, revenue)
@@ -1789,7 +1784,7 @@ func TestSnReconcileReapedRowIsNotReplanned(t *testing.T) {
 			return f.payment(networkId, &walletId, created, model.UsdToNanoCents(2)), networkId, walletId
 		}
 		laterHolder := func(networkId server.Id, walletId server.Id, closed time.Time) {
-			f.epoch(f.payment(networkId, &walletId, later, 0, f.mintedContract(networkId, closed, model.UsdToNanoCents(2))), later)
+			f.epoch(f.payment(networkId, &walletId, later, 0, f.contract(networkId, closed, model.UsdToNanoCents(2))), later)
 		}
 		replanned, networkA, walletA := reaped()
 		f.cancelWithRecord(replanned, "FAILED", "")

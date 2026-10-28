@@ -145,7 +145,7 @@ func (self pgbouncerBacklogProbe) check(ctx context.Context, env *probeEnv) ([]f
 		if lifecycleErr := probeLifecycleError(ctx, err); lifecycleErr != nil {
 			return nil, lifecycleErr
 		}
-		return []finding{stormUnobservable(pgbouncerBacklogProbeId, "pgbouncer-backlog-unobservable", unobservableTarget, "§26.1", []string{stormReadReason(err)}, nil, settings.MaxListed)}, nil
+		return []finding{stormReadFailureFinding(stormUnobservable(pgbouncerBacklogProbeId, "pgbouncer-backlog-unobservable", unobservableTarget, "§26.1", []string{stormReadReason(err)}, nil, settings.MaxListed), err)}, nil
 	}
 
 	expected := pgbouncerBacklogExpectedInstances(env)

@@ -1,0 +1,291 @@
+// Private two-phase preparation keeps normative policy hashes independent of future target-bound evidence. These pure helpers never reserve, acknowledge or activate a source and never contact a service.
+package controller
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"reflect"
+	"time"
+
+	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
+)
+
+// These are requirements, not assertions that any future empirical gate passed.
+type prospectiveProductionActivationPrerequisites struct {
+	FreshBridgeRequired            bool `json:"accepted_fresh_c2_bridge_required"`
+	IndependentOrderedBSeeds       int  `json:"independent_ordered_b_seeds_required"`
+	AllBOutcomesRequired           bool `json:"all_b_outcomes_required"`
+	GenuineProviderRequired        bool `json:"genuine_three_member_review_qualification_required"`
+	PositiveSameFactsHostRequired  bool `json:"full_positive_host_same_static_fingerprint_required"`
+	ExactIntentTargetR1Required    bool `json:"exact_intent_target_currentboot_r1_required"`
+	IndependentApiWorkerRequired   bool `json:"independent_durable_api_worker_acknowledgments_required"`
+	RootPhaseTwoReviewRequired     bool `json:"root_phase_two_review_required"`
+	NativeFencedActivationRequired bool `json:"native_fenced_activation_required"`
+
+	NoActivationOrOrdinaryCompetitionWorkerBeforePhaseTwo bool `json:"no_activation_or_ordinary_competition_worker_before_phase_two"`
+	PreparationOnlyControlPermitted                       bool `json:"preparation_only_single_reconciliation_control_permitted"`
+}
+
+// The prospectively amended first committed seed remains a later activation gate.
+func defaultProspectiveProductionActivationPrerequisites() prospectiveProductionActivationPrerequisites {
+	return prospectiveProductionActivationPrerequisites{FreshBridgeRequired: true, IndependentOrderedBSeeds: 1, AllBOutcomesRequired: true,
+		GenuineProviderRequired: true, PositiveSameFactsHostRequired: true, ExactIntentTargetR1Required: true,
+		IndependentApiWorkerRequired: true, RootPhaseTwoReviewRequired: true, NativeFencedActivationRequired: true, NoActivationOrOrdinaryCompetitionWorkerBeforePhaseTwo: true, PreparationOnlyControlPermitted: true}
+}
+
+// Phase one accepts actual physical facts while deliberately rejecting any claim
+// that this negative report is already positive containment or round readiness.
+func prospectiveProductionNormativeTarget(disabled *Settings, static HostSelfCheck, measured EvaluationPolicy) (*Settings, error) {
+	if disabled == nil || disabled.Enabled || disabled.AutomationPolicy.Enabled ||
+		!CompetitionHostPhysicalControlsReady(static, disabled.EvaluationPolicy.HardwareId) ||
+		!sha256Pattern.MatchString(static.QualificationSha256) || static.QualificationSha256 != disabled.EvaluationPolicy.HostQualificationSha256 ||
+		static.ImageDigest != disabled.EvaluatorImageDigest || static.RebaselinePassed || static.RebaselineRoundId != nil ||
+		static.Checks["qualification_match"] || static.Eligible(disabled) {
+		return nil, errors.New("phase-one input must be disabled policy plus genuine negative static facts")
+	}
+	unchanged := disabled.EvaluationPolicy
+	unchanged.HardwareId, unchanged.HostQualificationSha256 = measured.HardwareId, measured.HostQualificationSha256
+	if !reflect.DeepEqual(unchanged, measured) {
+		return nil, errors.New("metadata transfer changed measured policy beyond hardware identity and static fingerprint")
+	}
+	target := *disabled
+	target.Enabled, target.AutomationPolicy.Enabled = true, true
+	target.AutomationPolicy.PolicyApprovalSha256 = ""
+	return &target, nil
+}
+
+// Mode B enables the control-preparation interface, not a source pointer or
+// a public round. The caller still emits Mode A as a distinct disabled file.
+func prospectiveProductionPreparationVariant(disabled []byte) ([]byte, error) {
+	publicFlag, automationFlag := []byte("\nenabled: false\n"), []byte("\n  enabled: false\n")
+	if bytes.Count(disabled, publicFlag) != 1 || bytes.Count(disabled, automationFlag) != 1 {
+		return nil, errors.New("exact disabled public and automation flags required")
+	}
+	prepared := bytes.Replace(disabled, publicFlag, []byte("\nenabled: true\n"), 1)
+	prepared = bytes.Replace(prepared, automationFlag, []byte("\n  enabled: true\n"), 1)
+	prepared = bytes.Replace(prepared, []byte("# PRIVATE FILE PREPARATION ONLY. Both flags deliberately remain false."), []byte("# MODE B: CONTROL-PREPARATION ENABLED; this file creates no active pointer, open round, worker ACK or ordinary competition worker."), 1)
+	return prepared, nil
+}
+
+// The first phase pins only known identities; no future intent or R1 hash can
+// participate in this preimage without reintroducing the preparation cycle.
+type prospectiveProductionPhaseTwoIdentity struct {
+	PolicyApprovalSha256 string
+	PreparationSha256    string
+	SourceLedgerSha256   string
+	SourceDecisionDigest string
+	BootId               string
+}
+
+// Actual later files are independently pinned before this pure verifier sees
+// their native contents. Native activation must still recheck durable rows.
+type prospectiveProductionPhaseTwoFacts struct {
+	Settings               *Settings
+	PreparationSha256      string
+	SourceLedgerSha256     string
+	SourceDecisionDigest   string
+	CurrentBootId          string
+	Intent                 model.CompetitionSourceActivation
+	Host                   HostSelfCheck
+	Qualification          CompetitionHostQualificationResult
+	Receipts               []model.CompetitionSourceReadiness
+	EmpiricalGatesReviewed bool
+}
+
+// Phase two cannot change the normative policy to fit a later report, accept
+// a different target/boot, or turn this verification into an activation write.
+func validateProspectiveProductionPhaseTwo(expected prospectiveProductionPhaseTwoIdentity, preimage prospectiveProductionApproval, facts prospectiveProductionPhaseTwoFacts) error {
+	settings := facts.Settings
+	if settings == nil || !settings.Enabled || !settings.AutomationPolicy.Enabled || !facts.EmpiricalGatesReviewed ||
+		preimage.Schema != 1 || preimage.Kind != "production-20261028-policy-approval-preimage" ||
+		!sha256Pattern.MatchString(expected.PolicyApprovalSha256) || !sha256Pattern.MatchString(expected.PreparationSha256) ||
+		!sha256Pattern.MatchString(expected.SourceLedgerSha256) || !sha256Pattern.MatchString(expected.SourceDecisionDigest) ||
+		expected.BootId == "" || facts.CurrentBootId != expected.BootId || preimage.CurrentBootId != expected.BootId ||
+		facts.PreparationSha256 != expected.PreparationSha256 || facts.SourceLedgerSha256 != expected.SourceLedgerSha256 || facts.SourceDecisionDigest != expected.SourceDecisionDigest ||
+		settings.AutomationPolicy.PolicyApprovalSha256 != expected.PolicyApprovalSha256 ||
+		preimage.ActivationPrerequisites != defaultProspectiveProductionActivationPrerequisites() ||
+		validateProspectiveProductionFirstSeedRequirement(preimage.FirstCommittedSeedRequirement) != nil ||
+		preimage.Evidence["first_committed_seed_amendment"].Sha256 != preimage.FirstCommittedSeedRequirement.OwnerAmendmentSha256 ||
+		preimage.Evidence["original_two_b_declaration"].Sha256 != preimage.FirstCommittedSeedRequirement.OriginalDeclarationSha256 ||
+		preimage.Evidence["original_two_b_public_plan"].Sha256 != preimage.FirstCommittedSeedRequirement.OriginalPublicPlanSha256 {
+		return errors.New("phase-two policy/config/boot/gate identity changed or is incomplete")
+	}
+	approvalDigest, err := model.CompetitionAutomationDigest(preimage)
+	if err != nil || approvalDigest != expected.PolicyApprovalSha256 {
+		return errors.New("phase-two normative preimage no longer has the independently approved digest")
+	}
+	actual := settings.PublicInfo()
+	if actual.AutomationPolicy == nil {
+		return errors.New("phase-two automation policy unavailable")
+	}
+	policy := *actual.AutomationPolicy
+	policy.PolicyApprovalSha256 = ""
+	actual.AutomationPolicy = &policy
+	if !reflect.DeepEqual(actual, preimage.IntendedPolicy) || settings.EvaluatorCommand != preimage.EvaluatorCommand || settings.EvaluatorCommandSha256 != preimage.EvaluatorCommandSha256 ||
+		settings.SelfCheckCommand != preimage.SelfCheckCommand || settings.SelfCheckCommandSha256 != preimage.SelfCheckCommandSha256 || settings.SimulatorCommand != preimage.OperatorCommand ||
+		settings.ConfigLocalDirectory != preimage.ConfigLocalDirectory || settings.VaultLocalDirectory != preimage.VaultLocalDirectory || settings.ArtifactRoot != preimage.ArtifactRoot || settings.ArtifactBucket != preimage.ArtifactBucket ||
+		settings.WorkerLeaseSeconds != preimage.WorkerLeaseSeconds || settings.WorkerHeartbeatSeconds != preimage.WorkerHeartbeatSeconds || settings.HostHeartbeatMaxAgeSeconds != preimage.HostHeartbeatMaxAgeSeconds || settings.MaxInfrastructureAttempts != preimage.MaxInfrastructureAttempts ||
+		!settings.SeasonEndsAt.Equal(preimage.SeasonEndsAt) || !settings.RetainUntil.Equal(preimage.RetainUntil) {
+		return errors.New("phase-two observed configuration differs from the approved normative definition")
+	}
+	intent := &facts.Intent
+	if intent.TargetRoundId == (server.Id{}) || intent.Generation != 1 || intent.ExpectedGeneration != 0 || intent.TargetEpoch != 1 || intent.SourceGeneration != 0 ||
+		intent.Kind != "baseline" || intent.ActivatedAt != nil || intent.AbandonedAt != nil || intent.State != "prepared" ||
+		intent.PreparedAt.IsZero() || !intent.PreparedAt.Before(intent.OpensAt) || !gitShaPattern.MatchString(intent.ManifestCommit) || !reflect.DeepEqual(intent.Commits, preimage.Commits) ||
+		intent.ManifestSha256 != expected.SourceLedgerSha256 || intent.SourceDecisionDigest != expected.SourceDecisionDigest ||
+		intent.Commits["server"] != settings.BaseSha || intent.SourceLockSha256 != settings.AutomationPolicy.SourceLockSha256 ||
+		intent.EvaluatorImageDigest != settings.EvaluatorImageDigest || intent.HostQualificationSha256 != settings.EvaluationPolicy.HostQualificationSha256 ||
+		intent.Threshold != settings.EvaluationPolicy.TakeoverMargin || !intent.OpensAt.Equal(time.Date(2026, 10, 28, 0, 0, 0, 0, time.UTC)) {
+		return errors.New("phase-two reserved source/target differs or was already activated")
+	}
+	manifestDigest := sha256.Sum256(intent.Manifest)
+	if hex.EncodeToString(manifestDigest[:]) != expected.SourceLedgerSha256 {
+		return errors.New("phase-two immutable intent changed the exact published source-ledger bytes")
+	}
+	digest, err := competitionPreparationIntentDigest(*intent)
+	if err != nil || digest != intent.IntentSha256 {
+		return errors.New("phase-two immutable intent digest mismatch")
+	}
+	if _, err := sourceSettingsFromIntent(settings, intent); err != nil {
+		return err
+	}
+	if !sourceWorkerHostReady(facts.Host, settings, intent) || facts.Host.QualificationSha256 != preimage.IntendedPolicy.EvaluationPolicy.HostQualificationSha256 {
+		return errors.New("phase-two full positive same-facts exact-target R1 proof is missing")
+	}
+	qualified := facts.Qualification
+	if qualified.Profile != competitionHostQualificationProfile || !sha256Pattern.MatchString(qualified.ProfileSha256) || qualified.IntentSha256 != intent.IntentSha256 || qualified.TargetRoundId != intent.TargetRoundId.String() ||
+		qualified.ArtifactManifestKey == "" || qualified.ArtifactVersionId == "" || !sha256Pattern.MatchString(qualified.ArtifactSha256) {
+		return errors.New("phase-two retained native R1 qualification belongs to another intent or target")
+	}
+	return sourcePreparationReceiptsMatch(intent, facts.Receipts)
+}
+
+// Each job preserves its already published position, role, identity and request
+// commitment. No private seed field is part of this public projection.
+type prospectiveProductionCommittedJob struct {
+	Position      int       `json:"position"`
+	Role          string    `json:"role"`
+	JobId         server.Id `json:"job_id"`
+	RequestSha256 string    `json:"precommitted_request_sha256"`
+}
+
+// Both published rounds remain intact; the second is retained as an explicit
+// unstarted requirement, never deleted or reinterpreted as a measured outcome.
+type prospectiveProductionCommittedRound struct {
+	Position        int                                 `json:"position"`
+	RoundId         server.Id                           `json:"round_id"`
+	SeedCommitment  string                              `json:"seed_commitment"`
+	ProvidersSha256 string                              `json:"providers_sha256"`
+	ReferenceOrder  []string                            `json:"reference_order"`
+	Jobs            []prospectiveProductionCommittedJob `json:"jobs"`
+}
+
+// This requirement describes one fixed premeasurement selection, not an
+// assertion that it passed, that the other round ran, or that confidence is equal.
+type prospectiveProductionFirstSeedRequirement struct {
+	Kind                             string                              `json:"kind"`
+	OwnerAmendmentSha256             string                              `json:"owner_amendment_sha256"`
+	OriginalDeclarationSha256        string                              `json:"original_two_b_declaration_sha256"`
+	OriginalPublicPlanSha256         string                              `json:"original_two_b_public_plan_sha256"`
+	OriginalPrivatePlanSha256        string                              `json:"original_two_b_private_plan_sha256"`
+	OriginalCommittedSeedCount       int                                 `json:"original_committed_seed_count"`
+	SelectedPosition                 int                                 `json:"selected_position"`
+	SelectedRound                    prospectiveProductionCommittedRound `json:"selected_original_round"`
+	PreservedUnstartedRound          prospectiveProductionCommittedRound `json:"preserved_unstarted_original_round"`
+	SecondMustRemainUnstarted        bool                                `json:"second_position_must_remain_unstarted"`
+	NoNewEntropyOrResampling         bool                                `json:"no_new_entropy_or_resampling"`
+	AllSelectedOutcomesRequired      bool                                `json:"all_selected_outcomes_required"`
+	ReducedIndependentSeedConfidence bool                                `json:"reduced_independent_seed_confidence"`
+}
+
+// The root-reviewed input pins close the entire published plan, including fields
+// outside the narrow projection below. The private plan is bound by its published
+// digest only; this helper never opens, decodes or outputs private seed bytes.
+type prospectiveProductionSelectionPins struct {
+	OwnerAmendmentSha256      string
+	OriginalDeclarationSha256 string
+	OriginalPublicPlanSha256  string
+	OriginalPrivatePlanSha256 string
+}
+
+// Validate the complete published three-reference role and identity census.
+func validateProspectiveProductionCommittedRound(round prospectiveProductionCommittedRound) error {
+	if round.RoundId == (server.Id{}) || !sha256Pattern.MatchString(round.SeedCommitment) || !sha256Pattern.MatchString(round.ProvidersSha256) ||
+		len(round.ReferenceOrder) != 3 || len(round.Jobs) != 3 {
+		return errors.New("committed round identity or reference census is incomplete")
+	}
+	roles, jobs := map[string]bool{}, map[server.Id]bool{}
+	for index, job := range round.Jobs {
+		if job.Position != index+1 || job.Role != round.ReferenceOrder[index] || (job.Role != "better" && job.Role != "worse" && job.Role != "no-op") ||
+			roles[job.Role] || job.JobId == (server.Id{}) || jobs[job.JobId] || !sha256Pattern.MatchString(job.RequestSha256) {
+			return errors.New("committed reference order, job identity or request commitment changed")
+		}
+		roles[job.Role], jobs[job.JobId] = true, true
+	}
+	return nil
+}
+
+// Reject missing authority and any conversion into last-position selection,
+// a fresh draw, two measured seeds, or permission to start the preserved round.
+func validateProspectiveProductionFirstSeedRequirement(requirement prospectiveProductionFirstSeedRequirement) error {
+	if requirement.Kind != "first-committed-position-only" || !sha256Pattern.MatchString(requirement.OwnerAmendmentSha256) ||
+		!sha256Pattern.MatchString(requirement.OriginalDeclarationSha256) || !sha256Pattern.MatchString(requirement.OriginalPublicPlanSha256) ||
+		!sha256Pattern.MatchString(requirement.OriginalPrivatePlanSha256) || requirement.OriginalCommittedSeedCount != 2 || requirement.SelectedPosition != 1 ||
+		requirement.SelectedRound.Position != 1 || requirement.PreservedUnstartedRound.Position != 2 ||
+		requirement.SelectedRound.RoundId == requirement.PreservedUnstartedRound.RoundId ||
+		requirement.SelectedRound.SeedCommitment == requirement.PreservedUnstartedRound.SeedCommitment ||
+		!requirement.SecondMustRemainUnstarted || !requirement.NoNewEntropyOrResampling || !requirement.AllSelectedOutcomesRequired || !requirement.ReducedIndependentSeedConfidence {
+		return errors.New("first committed seed requirement is incomplete or broadens owner authority")
+	}
+	if err := validateProspectiveProductionCommittedRound(requirement.SelectedRound); err != nil {
+		return err
+	}
+	if err := validateProspectiveProductionCommittedRound(requirement.PreservedUnstartedRound); err != nil {
+		return err
+	}
+	for _, selected := range requirement.SelectedRound.Jobs {
+		for _, preserved := range requirement.PreservedUnstartedRound.Jobs {
+			if selected.JobId == preserved.JobId {
+				return errors.New("selected and unstarted rounds reuse a job identity")
+			}
+		}
+	}
+	return nil
+}
+
+// Derive only position one from authenticated public bytes without running an
+// operator, drawing entropy, changing a job, or reading the original private plan.
+func prospectiveProductionSelectFirstCommittedSeed(publicBytes []byte, pins prospectiveProductionSelectionPins) (prospectiveProductionFirstSeedRequirement, error) {
+	empty := prospectiveProductionFirstSeedRequirement{}
+	sum := sha256.Sum256(publicBytes)
+	if hex.EncodeToString(sum[:]) != pins.OriginalPublicPlanSha256 {
+		return empty, errors.New("original committed public plan digest changed")
+	}
+	var plan struct {
+		Schema            int                                   `json:"schema"`
+		Kind              string                                `json:"kind"`
+		DeclarationSha256 string                                `json:"two_b_addendum_sha256"`
+		PrivatePlanSha256 string                                `json:"private_plan_sha256"`
+		RequiredSeeds     int                                   `json:"required_correctly_ordered_seeds"`
+		Rounds            []prospectiveProductionCommittedRound `json:"rounds"`
+	}
+	if json.Unmarshal(publicBytes, &plan) != nil || plan.Schema != 1 || plan.Kind != "sim-latency-held-out-public-plan" ||
+		plan.DeclarationSha256 != pins.OriginalDeclarationSha256 || plan.PrivatePlanSha256 != pins.OriginalPrivatePlanSha256 || plan.RequiredSeeds != 2 ||
+		len(plan.Rounds) != 2 || plan.Rounds[0].Position != 1 || plan.Rounds[1].Position != 2 {
+		return empty, errors.New("original two-seed public plan lineage or ordered census changed")
+	}
+	requirement := prospectiveProductionFirstSeedRequirement{
+		Kind: "first-committed-position-only", OwnerAmendmentSha256: pins.OwnerAmendmentSha256,
+		OriginalDeclarationSha256: pins.OriginalDeclarationSha256, OriginalPublicPlanSha256: pins.OriginalPublicPlanSha256, OriginalPrivatePlanSha256: pins.OriginalPrivatePlanSha256,
+		OriginalCommittedSeedCount: 2, SelectedPosition: 1, SelectedRound: plan.Rounds[0], PreservedUnstartedRound: plan.Rounds[1],
+		SecondMustRemainUnstarted: true, NoNewEntropyOrResampling: true, AllSelectedOutcomesRequired: true, ReducedIndependentSeedConfidence: true,
+	}
+	if err := validateProspectiveProductionFirstSeedRequirement(requirement); err != nil {
+		return empty, err
+	}
+	return requirement, nil
+}

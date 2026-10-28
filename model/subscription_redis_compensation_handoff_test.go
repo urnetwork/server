@@ -8,7 +8,9 @@ package model
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -111,8 +113,9 @@ func redisHandoffTestEqual(a, b any) bool {
 	return false
 }
 
-// The owner's every release fails until the request's budget ends, as on an
-// exhausted deadline pool. It then hands the token to the recovery marker, and
+// The owner's every release fails until the request's budget ends, here with a
+// reset connection, as at a failover: transient, but not the slowness that
+// holds the handoff back. It then hands the token to the recovery marker, and
 // the next request on the balance releases it at once, not after the pending
 // age.
 func TestRedisDeferredCompensationGiveUpHandsTokenToRecovery(t *testing.T) {
@@ -130,7 +133,7 @@ func TestRedisDeferredCompensationGiveUpHandsTokenToRecovery(t *testing.T) {
 			cleanup.now, cleanup.after = clock.Now, clock.After
 			cleanup.recover = func(context.Context, server.Id, server.Id) error {
 				releases.Add(1)
-				return context.DeadlineExceeded
+				return syscall.ECONNRESET
 			}
 			cleanup.deferred = deferred
 			return cleanup
@@ -187,8 +190,9 @@ func TestRedisDeferredCompensationHandoffSkipsLiveAttemptsAndPublication(t *test
 		observe := func(cleanup redisReservationCleanup) redisReservationCleanup {
 			clock := &redisCompensationTestClock{now: time.Unix(1, 0)}
 			cleanup.now, cleanup.after = clock.Now, clock.AfterGate(retry, nil)
+			// a reset connection: transient, and no timeout holds the handoff back
 			cleanup.recover = func(context.Context, server.Id, server.Id) error {
-				return context.DeadlineExceeded
+				return syscall.ECONNRESET
 			}
 			cleanup.deferred = deferred
 			return cleanup
@@ -305,5 +309,175 @@ func TestRedisReservationHandoffReplayChangesNothing(t *testing.T) {
 		if tokens := released["tokens"].(map[string]string); len(tokens) != 2 || tokens[neighbor.ContractId.String()] != "17" || tokens[next.ContractId.String()] != "29" {
 			t.Fatal("the released token or a neighbor changed", tokens)
 		}
+	})
+}
+
+// Gives compensations up on a private owner and counts the handoffs it makes.
+type redisHandoffTestOwner struct {
+	deferred *redisDeferredCompensations
+	handoffs atomic.Int32
+}
+
+// One compensation of one balance whose every release fails with failure,
+// deferred after its request's own pass and run until the owner gives it up.
+func (self *redisHandoffTestOwner) GiveUp(t testing.TB, ctx context.Context, failure error) {
+	t.Helper()
+	clock := &redisCompensationTestClock{now: time.Unix(1, 0)}
+	cleanup := redisReservationCleanup{now: clock.Now, after: clock.After, deferred: self.deferred,
+		recover: func(context.Context, server.Id, server.Id) error {
+			return failure
+		},
+		handoff: func(context.Context, server.Id, server.Id) error {
+			self.handoffs.Add(1)
+			return nil
+		}}
+	if !self.deferred.offer(ctx, cleanup.compensation(server.NewId(), []server.Id{server.NewId()}, clock.Now().Add(redisReservationCleanupBudget))) {
+		t.Fatal("the deferred owner refused a compensation it had room for")
+	}
+	if err := self.deferred.drain(ctx); err != nil {
+		t.Fatal("the deferred owner did not give the compensation up", err)
+	}
+}
+
+// A timeout in one of the owner's calls means a slow Redis node or PostgreSQL
+// pool, which the page releasing a handed-off token would wait on while it
+// holds a PostgreSQL connection. For the quiet period after one, the owner
+// hands no given-up token to recovery, whatever ended its compensation; then
+// the handoff resumes.
+func TestRedisDeferredCompensationHandoffWaitsOutTimeouts(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	owner := &redisHandoffTestOwner{deferred: newRedisDeferredCompensationsForTest(t, 1, 1)}
+	var ownerNanos atomic.Int64
+	ownerNanos.Store(time.Unix(1000, 0).UnixNano())
+	// set before the first offer starts the owner's workers
+	owner.deferred.now = func() time.Time { return time.Unix(0, ownerNanos.Load()) }
+	slowBefore := redisHandoffTestCount("slow")
+
+	// releases that time out
+	owner.GiveUp(t, ctx, context.DeadlineExceeded)
+	if owner.handoffs.Load() != 0 || redisHandoffTestCount("slow")-slowBefore != 1 {
+		t.Fatal("a compensation whose releases timed out was handed to recovery", owner.handoffs.Load())
+	}
+	// within the quiet period, a reset connection gives up without a handoff too
+	ownerNanos.Add(int64(redisDeferredCompensationHandoffQuiet - time.Nanosecond))
+	owner.GiveUp(t, ctx, syscall.ECONNRESET)
+	if owner.handoffs.Load() != 0 || redisHandoffTestCount("slow")-slowBefore != 2 {
+		t.Fatal("a give-up within the quiet period after a timeout was handed to recovery", owner.handoffs.Load())
+	}
+	// once the quiet period has passed, the handoff resumes
+	ownerNanos.Add(int64(time.Nanosecond))
+	owner.GiveUp(t, ctx, syscall.ECONNRESET)
+	if owner.handoffs.Load() != 1 || redisHandoffTestCount("slow")-slowBefore != 2 {
+		t.Fatal("the handoff did not resume after the quiet period", owner.handoffs.Load())
+	}
+}
+
+// The operator switch turns the handoff off and on again while the process
+// runs: each give-up reads the current config. Only a false value turns it off,
+// in YAML 1.1 spelling too; a file without the key, or one that does not
+// decode, keeps it on.
+func TestRedisDeferredCompensationHandoffSwitchAppliesLive(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	owner := &redisHandoffTestOwner{deferred: newRedisDeferredCompensationsForTest(t, 1, 1)}
+	disabledBefore := redisHandoffTestCount("disabled")
+
+	off := server.Config.PushSimpleResource(redisContractCompensationResourceName, []byte("handoff: false\n"))
+	t.Cleanup(sync.OnceFunc(off))
+	owner.GiveUp(t, ctx, syscall.ECONNRESET)
+	if owner.handoffs.Load() != 0 || redisHandoffTestCount("disabled")-disabledBefore != 1 {
+		t.Fatal("the handoff ran with the switch off", owner.handoffs.Load())
+	}
+	off()
+	owner.GiveUp(t, ctx, syscall.ECONNRESET)
+	if owner.handoffs.Load() != 1 {
+		t.Fatal("the handoff did not resume once the switch was removed", owner.handoffs.Load())
+	}
+	for _, setting := range []struct {
+		content string
+		on      bool
+	}{
+		{"handoff: true\n", true},
+		{"handoff: off\n", false},
+		{"handoff: [\n", true},
+		{"other: 1\n", true},
+	} {
+		before := owner.handoffs.Load()
+		pop := server.Config.PushSimpleResource(redisContractCompensationResourceName, []byte(setting.content))
+		owner.GiveUp(t, ctx, syscall.ECONNRESET)
+		pop()
+		if on := owner.handoffs.Load() != before; on != setting.on {
+			t.Fatalf("the switch %q left the handoff on=%v, want %v", setting.content, on, setting.on)
+		}
+	}
+	if redisHandoffTestCount("disabled")-disabledBefore != 2 {
+		t.Fatal("a give-up the switch held back was not counted disabled, or one it let through was")
+	}
+}
+
+// With the operator switch off, a compensation the owner gives up on leaves its
+// token pending for the 10-minute age gate, as before the handoff, and no page
+// takes it before then. Turned back on while the process runs, the next
+// give-up hands its token to recovery, and the next page releases it at once.
+func TestRedisDeferredCompensationHandoffSwitchLeavesTokenPending(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+		defer cancel()
+		f := newNetEscrowOrderingTestFixture(t, ctx)
+		neighbor := createRedisAdmissionTest(ctx, f, 17)
+		deferred := newRedisDeferredCompensationsForTest(t, 1, 1)
+		observe := func(cleanup redisReservationCleanup) redisReservationCleanup {
+			clock := &redisCompensationTestClock{now: time.Unix(1, 0)}
+			cleanup.now, cleanup.after = clock.Now, clock.After
+			// a reset connection: transient, and no timeout holds the handoff back
+			cleanup.recover = func(context.Context, server.Id, server.Id) error {
+				return syscall.ECONNRESET
+			}
+			cleanup.deferred = deferred
+			return cleanup
+		}
+		off := server.Config.PushSimpleResource(redisContractCompensationResourceName, []byte("handoff: false\n"))
+		t.Cleanup(sync.OnceFunc(off))
+		disabledBefore, movedBefore := redisHandoffTestCount("disabled"), redisHandoffTestCount("moved")
+		_, first := runRedisHandoffTestRefusal(t, ctx, f, 23, observe)
+		if err := deferred.drain(ctx); err != nil {
+			t.Fatal("the deferred owner did not give up", err)
+		}
+		if disabled := redisHandoffTestCount("disabled") - disabledBefore; disabled != 1 || redisHandoffTestCount("moved") != movedBefore {
+			t.Fatal("the give-up was not held back by the switch", disabled)
+		}
+		redisPendingRequireMarkers(t, ctx, f.balanceId, first.contractId, true, false)
+		_ = createRedisAdmissionTest(ctx, f, 29)
+		if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != 17+23+29 {
+			t.Fatal("a page took the given-up token before its pending age", got)
+		}
+		redisPendingRequireMarkers(t, ctx, f.balanceId, first.contractId, true, false)
+
+		off()
+		_, second := runRedisHandoffTestRefusal(t, ctx, f, 31, observe)
+		if err := deferred.drain(ctx); err != nil {
+			t.Fatal("the deferred owner did not give up", err)
+		}
+		if moved := redisHandoffTestCount("moved") - movedBefore; moved != 1 {
+			t.Fatal("the switch turned back on did not apply to the next give-up", moved)
+		}
+		redisPendingRequireMarkers(t, ctx, f.balanceId, second.contractId, false, true)
+		last := createRedisAdmissionTest(ctx, f, 37)
+		// the second token is released; the first still waits out its age
+		if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != 17+23+29+37 {
+			t.Fatal("the next page did not release the handed-off token", got)
+		}
+		redisRecoveryRequireMarker(t, ctx, f.balanceId, second.contractId, false)
+		redisPendingRequireMarkers(t, ctx, f.balanceId, first.contractId, true, false)
+		server.Redis(ctx, func(client server.RedisClient) {
+			tokens, err := client.HGetAll(ctx, redisContractReservationKeys(f.balanceId)[1]).Result()
+			server.Raise(err)
+			if _, ok := tokens[second.contractId.String()]; ok || tokens[neighbor.ContractId.String()] != "17" || tokens[last.ContractId.String()] != "37" {
+				t.Fatal("the release took the wrong token", tokens)
+			}
+		})
 	})
 }

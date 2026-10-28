@@ -58,6 +58,7 @@ func TestEmailTemplatesRender(t *testing.T) {
 			EpochEnd:    server.NowUtc(),
 		}, true},
 		{&MissingWalletTemplate{PaymentId: server.NewId(), Payout: model.UsdToNanoCents(5.00)}, true},
+		{&UsdcPayoutSentTemplate{Transfer: model.UsdToNanoCents(29.94), WalletSuffix: "AbCd", SentTime: server.NowUtc(), TxHash: "5synthetictransactionhash"}, false},
 		{&SubscriptionTransferBalanceCodeTemplate{Secret: "K7QX3M2PNB4DLZ8R9YWC5AGHT6", BalanceByteCount: 10 * model.Tib}, false},
 		{&SubscriptionDataAppliedTemplate{Secret: "K7QX3M2PNB4DLZ8R9YWC5AGHT6", BalanceByteCount: 1 * model.Tib, NetworkName: "brien"}, false},
 		{&X402ReceiptTemplate{

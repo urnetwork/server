@@ -20998,7 +20998,7 @@ Signals:
   stats collectors publish it (`max(urnetwork_stats_provider_modern_gate_on)`),
   which is what is deployed; while no taskworker publishes it, by the desired
   provider.yml, `quality_speed_requires_modern_provider: true` or that switch
-  absent and the gate's start (2026-11-04 00:00 UTC by default,
+  absent and the gate's start (2026-11-11 00:00 UTC by default,
   `quality_speed_modern_provider_start`) passed at the monitor's clock, as the
   model's own provider.yml decoder reads them, so the automatic switch-on
   arms the page. The finding names its `gate_source`. Evidence stays fresh
@@ -22877,7 +22877,7 @@ Probe: `modern-gate-readiness`
 The modern provider gate (server/FP2FIX.md, model/egress_modern_provider.go)
 takes every provider the capability probe has not shown to be modern out of
 Quality and Speed under the `not_modern` reason, keeping it Online. Owner
-decision 2026-10-24: it turns on by itself at 2026-11-04 00:00 UTC, the
+decision 2026-10-28: it turns on by itself at 2026-11-11 00:00 UTC, the
 code's default start, while `quality_speed_requires_modern_provider` is
 absent from provider.yml; every pass and request decides at its own instant.
 Its evidence comes from the capability probe (server/capprobe), which ships
@@ -24748,7 +24748,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `caller=tail.go:<line> component=tail-querier ... msg="Error receiving response from grpc tail client" [addr=<backend>] err=EOF` | Loki's external WebSocket tail can remain connected while an internal gRPC tail backend is lost, omitting that backend's live entries. Historical controls identified a 60-second ring TCP read deadline and a separate ingester tail-handoff defect; process exit, ring loss, and sustained pressure can also produce EOF. This log event supplies no current artifact ancestry or backend-health measurement. The emitting Grafana host follows the selected querier and is not backend attribution. A quoted `Canceled ... context canceled` during deliberate client retirement is a separate lifecycle. | Bind the current window to exact running artifacts before checking Warp `1e95aef`, `bca37cf`, and `35453fd`; deploy only a proven missing fix through the authorized workflow. If present, inspect same-window native tail counters, send progress, process generation, ring, and network state on the framed backend. Missing evidence remains unknown. Require query-frontend/evaluator and table-lookup info records zero, bucket-index convergence below two minutes, rules/metrics healthy, and EOF/reset/service-drop classes zero for ten minutes with stable tails and bounded reconciliation. Do not raise tail/queue/ring limits or restart the same image. See §1.5. |
 | `caller=tailer.go:<line> msg="tailer dropped streams is reset"` | An ingester-side live-tail path lost records before its internal gRPC send. Upstream Loki 3.7.3's short-burst handoff defect and genuine pressure beyond the bounded processing queue can both produce loss; `35453fd` corrects the former and retains bounded drop metadata under the latter. The reset alone does not prove which source is running or whether any backend is healthy. Grafana is the observation point, not affected-service attribution, and reset rate is not unique lost-record count. | Bind current Grafana/Proxy artifacts before checking Warp `1e95aef`, server `e055c98c`, and Warp `35453fd`; deploy only a proven missing fix through the authorized workflow. If present, diagnose same-process ingester source rate, gRPC send progress, and native tail counters. Missing evidence remains unknown. Reconcile every service window and require evaluator/table-lookup info zero, bucket-index convergence below two minutes, alert rules/metrics/warnings/errors healthy, and all three loss classes zero for ten minutes. A residual EOF needs current backend attribution. Do not suppress the reset or claim Grafana was the affected selector. See §1.5. |
 | `[warpctl][loki-tail-dropped-entries] service=<service> count=<n>` | Loki returned a non-empty API `dropped_entries` list for the named standing tail. On Warp `5927527` or its `35453fd` descendant, this can contain bounded descriptors forwarded from the earlier ingester loss stage; the existing later querier-to-WebSocket overflow uses the same field. This is exact service attribution, but a same-window raw reset only corroborates ingester loss in that window and cannot assign that reset to this exact summary without a privacy-safe join. The alert rate is summary lines; `count` is one response's bounded descriptors, not unique lost records. | Deploy Grafana with Warp `35453fd`, run Warpctl with Warp `26089b2` or later, retain bounded reconciliation for the named service, and remove any residual producer/consumer stall. Never print dropped labels or timestamps or raise either queue. Require a connected tail, two advancing complete overlap reconciliations, and zero `loki-tail-dropped-entries`, raw resets, and backend EOFs for ten minutes through comparable load. See §1.5. |
-| `caller=bucket.go:<line> ... diff=-<seconds> msg="bucket index version (updated_at) is older than requested"` | Mimir 3.1 logs whenever a store-gateway's local bucket index is older than the querier's requested version. The live fleet's exact `diff=-873`/`-882` was one normal generation of independent 15-minute default phase skew, not a query failure, but it repeated on every query and contributed material self-log volume. Warp `13fcd05` changes the single-tenant gateway refresh to one minute. `mimir-bucket-index-lag` retains a conservative >=1,800-second threshold across rolling/older generations. | Verify the running Grafana artifact contains `13fcd05`. If absent, deploy it normally; if present, use `mimir-index` (§11.18) to check the framed gateway's last successful sync and tenant coverage plus the shared compactor index age. Require gateway convergence below two minutes. Restore sync/object-store/ring health if stale. Do not suppress every warning, increase `max_stale_period`, or upgrade solely to hide 3.1 log noise. |
+| `caller=bucket.go:<line> ... diff=-<seconds> msg="bucket index version (updated_at) is older than requested"` | Mimir 3.1 reports when a store-gateway's local bucket-index version is below the querier's requested version; zero can mean unloaded index metadata, not an observed index age. The live fleet's exact `diff=-873`/`-882` was one normal generation of independent 15-minute default phase skew, not a query failure, but it repeated on every query and contributed material self-log volume. Warp `13fcd05` changes the single-tenant gateway refresh to one minute. `mimir-bucket-index-lag` retains a conservative >=1,800-second threshold across rolling/older generations. | Verify the running Grafana artifact contains `13fcd05`. If absent, deploy it normally; if present, use `mimir-index` (§11.18) to check the framed gateway's last successful sync and tenant coverage plus the shared compactor index age. Require gateway convergence below two minutes. Restore sync/object-store/ring health if stale. Do not suppress every warning, increase `max_stale_period`, or upgrade solely to hide 3.1 log noise. |
 | `http: response.WriteHeader on hijacked connection` | A response header was attempted after ownership transferred through Hijack. The immediate frame may be a forwarding wrapper; it cannot prove the caller, panic branch, missing fix or failed transport. The historical 2026-08-31 control isolated expected-Done fallthrough using complete source coverage; it does not diagnose a current warning. | Bind the original event and emitting artifact, then compare ancestry with `02f4d29ae575ae68c2a5f0c8ba3207361b353170`; deploy that fix only when proved missing. Otherwise correlate the same-event caller stack and `[h]unhandled` evidence to identify the current writer or route panic. Missing or partial authority remains unknown. Require ten comparable minutes with zero canonical warnings, complete current observation coverage, and independent H1 success controls after the proven correction. Preserve net/http logging. See §1.5. |
 | `CLUSTERDOWN` | Slot coverage lost (node marked fail + no failover, or majority loss). | CLUSTER INFO/NODES; restart dead nodes; transient ≤ node-timeout during elections is expected and retried in-client. |
 | `OOM command not allowed when used memory > 'maxmemory'` | Node at maxmemory and volatile-ttl has nothing evictable (no-TTL keys dominate). Writes fail, reads work. | Identify node (3.1); drain no-TTL piles (cleanup script) or raise ceiling temporarily; NEVER a client-side problem. |
@@ -33422,9 +33422,17 @@ when the possible compactor owner is unreadable.
 The standing `mimir-bucket-index-lag` log class deliberately ignores that
 historical one-generation control. It alerts only when `diff <= -1800`, retains
 the exact host and generation as its frame, and preserves `ours`, `requested`,
-and `diff` in evidence. A warning at that distance means two nominal writer
-generations under the old default, or many missed one-minute syncs on
-`13fcd05`, have separated the views. Correlate it with
+and `diff` in evidence. This is a reported numeric version difference, not a
+measured index age or count of missed syncs. In the reviewed Mimir reference
+source, a zero local version can mean no loaded index metadata. The line alone
+does not establish the running producer version, source clock, child startup
+state, RPC success or failure, or a shared cause with ingestion/query errors.
+The WARN threshold remains unchanged, including zero-version warnings; missing
+index authority must not become healthy by suppressing the log. Public samples
+retain only the caller and valid integer or legacy RFC3339 version tuple; tenant
+fields, arbitrary intervening metadata and malformed fallback text are omitted.
+Unrecognized version fields remain explicitly unavailable without changing
+classification. Correlate the same child and generation with
 `mimir-store-gateway-stale`, `mimir-store-gateway-tenants`,
 `mimir-bucket-index-stale`, and `err-mimir-store-consistency-check-failed`
 before assigning cause.
@@ -45449,6 +45457,15 @@ customer data-plane success. Some early admission/capacity rejections occur
 before these counters. Keep client selection/fallback evidence separate and
 do not weaken authentication or TLS to make compatibility appear healthy.
 
+For both §23.1 and §23.2, a failed bounded source read remains
+`h1plus-telemetry-incomplete` with `reason=bounded-source-unavailable`. Retain
+only the existing finite observation error class, typed local admission phases
+and execution-boundary projection from that returned error. Independent joined
+markers do not identify one attempt, actor, remote execution or backend cause;
+absent or malformed markers remain unknown. Do not publish raw source errors or
+response bodies. Successful/malformed response handling and parent cancellation
+keep their separate existing paths; this diagnostic does not establish coverage.
+
 ### 23.3 Connect H1 session closes by carrier, and provider cohorts by app version
 Probe: `connect-close-cohorts`
 
@@ -46417,6 +46434,19 @@ beyond its level and clears only when every one has a value within it; a
 hold the series broke, or an evaluation without a value, opens nothing and
 keeps an open incident open. A missing source is unknown, never zero. No
 Grafana rule implements any of these entries yet.
+
+Source-read failures retain `visibility_reason=source_unavailable` and append
+only the existing fixed observation error class and any code-owned local
+admission/execution boundary markers from the returned error. `gaps=none` on
+this branch means no series gaps were enumerated because the read failed; it
+is not complete source coverage. Parse failures remain `invalid_response`;
+missing series retain their separate coverage reasons. Unknown error causes
+stay unclassified, without a fabricated HTTP status or backend phase. Raw
+errors, response bodies, commands, private URLs and source labels are omitted.
+Joined gateway errors can contribute several local markers; these are neither
+an individual-attempt join nor proof of remote execution, a shared backend
+failure, limiter cause, measured zero, customer impact or recovery. Existing
+parent cancellation, class identity, sustain and incident holds are unchanged.
 
 ### 26.1 PgBouncer backlog — clients waiting and the oldest wait
 

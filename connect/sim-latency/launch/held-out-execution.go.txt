@@ -749,6 +749,14 @@ func executeHeldOutCampaign(ctx context.Context, config heldOutExecutionConfig, 
 	if hooks.Now == nil || hooks.CheckHost == nil || hooks.Invoke == nil || hooks.Authenticate == nil || len(plan.Rounds) != settings.Workload.SeedCount {
 		return nil, errors.New("complete held-out execution dependencies required")
 	}
+	if plan.Config.Protocol == heldOutProtocolFreshSingleB {
+		if _, err := authenticateHeldOutFreshSingle(plan.Config, release, settings, &plan.Margin); err != nil {
+			return nil, err
+		}
+		if err := validateHeldOutFreshSingleUnstarted(plan); err != nil {
+			return nil, err
+		}
+	}
 	result = &heldOutCampaignResult{Schema: 1, Kind: "sim-latency-held-out-screen", CampaignId: plan.CampaignId,
 		PlanSha256: config.PublicPlan.Sha256, Reasons: []string{}, Outcomes: []heldOutJobOutcome{}}
 	startedPath := filepath.Join(plan.Config.PrivateRoot, "execution.started.json")
@@ -895,7 +903,11 @@ func executeHeldOutCampaign(ctx context.Context, config heldOutExecutionConfig, 
 		}
 	}
 	result.Complete = true
-	result.Accepted, result.OrderedSeeds, result.Reasons = acceptHeldOutOutcomesForProtocol(plan.Config.Protocol, plan.Rounds, result.Outcomes)
+	if plan.Config.Protocol == heldOutProtocolFirstCommittedB {
+		result.Accepted, result.OrderedSeeds, result.Reasons = acceptHeldOutFirstCommittedOutcomes(plan.Rounds, result.Outcomes)
+	} else {
+		result.Accepted, result.OrderedSeeds, result.Reasons = acceptHeldOutOutcomesForProtocol(plan.Config.Protocol, plan.Rounds, result.Outcomes)
+	}
 	return result, nil
 }
 
@@ -907,6 +919,9 @@ func acceptHeldOutOutcomes(rounds []heldOutPrivateRound, outcomes []heldOutJobOu
 
 // Only the separately approved named amendment changes five/four to three/all.
 func acceptHeldOutOutcomesForProtocol(protocol string, rounds []heldOutPrivateRound, outcomes []heldOutJobOutcome) (bool, int, []string) {
+	if protocol == heldOutProtocolFreshSingleB {
+		return acceptHeldOutFirstCommittedOutcomes(rounds, outcomes)
+	}
 	reasons := []string{}
 	settings, err := heldOutSettingsForProtocol(protocol)
 	if err != nil {
