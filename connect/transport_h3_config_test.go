@@ -32,6 +32,7 @@ func TestConnectH3TransferCarrierEnablesBoundedAckReserve(t *testing.T) {
 		true,
 		settings,
 		maxDatagramByteCount,
+		0,
 	)
 	if !properties.Unreliable || !properties.UnreliableFlowIsolation ||
 		!properties.UnreliableFlowReserve {
@@ -48,7 +49,7 @@ func TestConnectH3TransferCarrierEnablesBoundedAckReserve(t *testing.T) {
 			wantLimit,
 		)
 	}
-	properties = connectH3TransferCarrierProperties(false, settings, 0)
+	properties = connectH3TransferCarrierProperties(false, settings, 0, 0)
 	if properties.Unreliable || properties.UnreliableFlowIsolation ||
 		properties.UnreliableFlowReserve ||
 		properties.UnreliableMaxMessageByteCount != 0 {

@@ -226,7 +226,7 @@ func TestNativeBrowsingColdLinkEndpointScopeAndRefusal(t *testing.T) {
 		if enabled {
 			limit++
 		}
-		for ordinal := 0; ordinal < 6; ordinal++ {
+		for ordinal := 0; ordinal < nativeBrowsingOriginCount+2; ordinal++ {
 			listener := &nativeBrowsingColdRegistryListener{nativeBrowsingOverlapListener: &nativeBrowsingOverlapListener{
 				connections: make(chan net.Conn), closed: make(chan struct{})}, port: 31000 + ordinal}
 			defer listener.Close()
@@ -243,7 +243,7 @@ func TestNativeBrowsingColdLinkEndpointScopeAndRefusal(t *testing.T) {
 		if enabled && native.coldLinkPortForTest != 31004 || !enabled && native.coldLinkPortForTest != 0 {
 			t.Fatal("fifth registration was absent or escaped its opt-in")
 		}
-		for ordinal := 0; ordinal < 6; ordinal++ {
+		for ordinal := 0; ordinal < nativeBrowsingOriginCount+2; ordinal++ {
 			ip := net.IPv4(203, 0, 113, byte(10+ordinal))
 			if native.matches(ip, 443, clientconnect.IpProtocolTcp) != (ordinal < limit) ||
 				native.matches(ip, 444, clientconnect.IpProtocolTcp) || native.matches(ip, 443, clientconnect.IpProtocolUdp) {
@@ -259,13 +259,13 @@ func TestNativeBrowsingColdLinkEndpointScopeAndRefusal(t *testing.T) {
 	}
 	for _, cold := range []bool{false, true} {
 		for _, armed := range []bool{false, true} {
-			for ordinal := -1; ordinal < 6; ordinal++ {
+			for ordinal := -1; ordinal <= sdkBrowsingProviderCount; ordinal++ {
 				for _, address := range []string{"203.0.113.10:443", "203.0.113.11:443", "203.0.113.14:443", "203.0.113.14:444", "unowned.test:443"} {
 					target := "203.0.113.11:443"
 					if cold {
 						target = "203.0.113.14:443"
 					}
-					want := armed && ordinal >= 0 && ordinal < 4 && address == target
+					want := armed && (0 <= ordinal && ordinal < 4 || ordinal == 6) && address == target
 					if sdkBrowsingNavigationDialRefused(cold, armed, ordinal, address) != want {
 						t.Fatalf("refusal escaped its exact target: cold=%t armed=%t provider=%d address=%s", cold, armed, ordinal, address)
 					}
