@@ -112,10 +112,10 @@ func TestAdvancePointsBlockRollupCompletesPaymentWithoutPaidSweeps(t *testing.T)
 				}
 			})
 		})
-		available, err := pointsBlockRollupComplete(ctx)
+		approximation, err := loadPointsLeaderboardApproximation(ctx)
 		connect.AssertEqual(t, err, nil)
-		if !available {
-			t.Fatal("empty completed payment was reported as incomplete")
+		if approximation.BackfillPendingPayments != 0 {
+			t.Fatal("empty completed payment was reported as pending", approximation)
 		}
 	})
 }

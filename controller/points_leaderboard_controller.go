@@ -464,6 +464,13 @@ type RebuildPointsLeaderboardResult struct {
 	LatestEpoch           uint64    `json:"latest_epoch"`
 	EpochMetricsAvailable bool      `json:"epoch_metrics_available"`
 	RollupBatches         int       `json:"rollup_batches"`
+	// The snapshot's approximate inputs (model.PointsLeaderboardApproximation).
+	PayoutWeekPayments      int64 `json:"payout_week_payments"`
+	UnmeasuredPayments      int64 `json:"unmeasured_payments"`
+	PayoutWeekPoints        int64 `json:"payout_week_points"`
+	UnlinkedPoints          int64 `json:"unlinked_points"`
+	ApproximateNetworks     int64 `json:"approximate_networks"`
+	BackfillPendingPayments int64 `json:"backfill_pending_payments"`
 }
 
 const (
@@ -532,20 +539,35 @@ func RebuildPointsLeaderboard(
 	if err != nil {
 		return nil, err
 	}
+	approximation := snapshot.Approximation
+	observePointsLeaderboardApproximation(approximation)
 	glog.Infof(
-		"[points]leaderboard snapshot %s: %d ranked networks, %d completed payout blocks, latest block %d, block metrics available %t\n",
+		"[points]leaderboard snapshot %s: %d ranked networks, %d completed payout blocks, latest block %d, block metrics available %t; payout weeks for %d payments (%d unmeasured after reaping), %d points, %d unlinked points, %d networks; backfill %d batches, %d payments pending\n",
 		snapshot.SnapshotId,
 		snapshot.TotalRanked,
 		len(windows),
 		snapshot.LatestEpoch,
 		snapshot.EpochMetricsAvailable,
+		approximation.PayoutWeekPayments,
+		approximation.UnmeasuredPayments,
+		approximation.PayoutWeekPoints,
+		approximation.UnlinkedPoints,
+		approximation.ApproximateNetworks,
+		rollupBatches,
+		approximation.BackfillPendingPayments,
 	)
 	return &RebuildPointsLeaderboardResult{
-		SnapshotId:            snapshot.SnapshotId,
-		TotalRanked:           snapshot.TotalRanked,
-		LatestEpoch:           snapshot.LatestEpoch,
-		EpochMetricsAvailable: snapshot.EpochMetricsAvailable,
-		RollupBatches:         rollupBatches,
+		SnapshotId:              snapshot.SnapshotId,
+		TotalRanked:             snapshot.TotalRanked,
+		LatestEpoch:             snapshot.LatestEpoch,
+		EpochMetricsAvailable:   snapshot.EpochMetricsAvailable,
+		RollupBatches:           rollupBatches,
+		PayoutWeekPayments:      approximation.PayoutWeekPayments,
+		UnmeasuredPayments:      approximation.UnmeasuredPayments,
+		PayoutWeekPoints:        approximation.PayoutWeekPoints,
+		UnlinkedPoints:          approximation.UnlinkedPoints,
+		ApproximateNetworks:     approximation.ApproximateNetworks,
+		BackfillPendingPayments: approximation.BackfillPendingPayments,
 	}, nil
 }
 
@@ -555,14 +577,21 @@ func RebuildPointsLeaderboardPost(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
-	if result != nil && !result.EpochMetricsAvailable && result.RollupBatches > 0 {
-		// Backfill only bounded batches per run, then retry promptly without
-		// monopolizing payout transactions or a Taskworker for hours.
-		scheduleRebuildPointsLeaderboardAfter(clientSession, tx, time.Minute)
-	} else {
-		ScheduleRebuildPointsLeaderboard(clientSession, tx)
-	}
+	scheduleRebuildPointsLeaderboardAfter(clientSession, tx, pointsLeaderboardRebuildDelay(result))
 	return nil
+}
+
+// pointsLeaderboardRebuildDelay keeps the history backfill moving: while a run
+// advanced rollup batches and payments remain unmeasured, the next run starts
+// a minute later. Each run commits only bounded batches, so it never
+// monopolizes payout transactions or a Taskworker. Block metrics no longer
+// wait on the backfill, so its pace follows its own progress, not their
+// availability. Otherwise the hourly fallback applies.
+func pointsLeaderboardRebuildDelay(result *RebuildPointsLeaderboardResult) time.Duration {
+	if result != nil && 0 < result.RollupBatches && 0 < result.BackfillPendingPayments {
+		return time.Minute
+	}
+	return pointsLeaderboardRebuildInterval
 }
 
 // Tests can pin the clock without changing the shared SubnetBlock clock.

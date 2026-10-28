@@ -9,8 +9,10 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-// SIGNALS.md §17.6 keeps total-point publication separate from the completed
-// operator payout-block rollup. ST configuration and chain epochs are unrelated.
+// SIGNALS.md §17.6 checks the points leaderboard snapshot against the
+// completed operator payout-block calendar, and tracks the history rollup's
+// backfill separately: block metrics no longer wait on it (owner decision
+// 2026-10-28). ST configuration and chain epochs are unrelated.
 func NewPointsReadinessSignal() Signal {
 	return &signalAdapter{
 		number: "17.6",
@@ -80,9 +82,12 @@ func pointsOperatorSchemaFinding(target string) finding {
 	}
 }
 
-// One output row, bounded by the monitor command deadline. The eligibility
-// predicate matches model.pointsBlockRollupComplete, including current-period
-// positive points. Pending counts are point rows, not payments or contracts.
+// One output row, bounded by the monitor command deadline. The counts are the
+// history backfill's progress: positive post-genesis points whose linked
+// payment is absent (missing) or not yet measured by the rollup (pending),
+// including current-period points. The leaderboard publishes those points in
+// payout weeks (model/points_leaderboard_payout_weeks.go), so they no longer
+// gate availability. Pending counts are point rows, not payments or contracts.
 func pointsOperatorSourceQuery() string {
 	return fmt.Sprintf(`
 		WITH lifecycle_clock AS MATERIALIZED (
@@ -244,7 +249,7 @@ func pointsOperatorFinding(target, tier, class, symptom, mechanism, action strin
 	return finding{
 		probeId: "pg/points-readiness", tier: tier, class: class, target: target, sustain: 1,
 		symptom: symptom, mechanism: mechanism,
-		baseline: "Blocks and Streak use completed Sunday-00 UTC seven-day operator payout periods and a complete paid-traffic rollup. ST state is not a prerequisite. The compatibility field latest_epoch is the 1-based operator block, and epoch_metrics_available describes the immutable snapshot's input boundary.",
+		baseline: "Blocks and Streak use completed Sunday-00 UTC seven-day operator payout periods: measured paid-traffic rows where the history rollup measured a payout, and the payout's weeks where it has not. ST state is not a prerequisite. The compatibility field latest_epoch is the 1-based operator block, and epoch_metrics_available is true whenever a completed operator block exists.",
 		observed: fmt.Sprintf(
 			"source=operator-paid-traffic completed_operator_blocks=%d latest_close_age_seconds=%d missing_payment_points=%d pending_rollup_points=%d oldest_pending_point_age_seconds=%d rollup_completion_age=unknown snapshot_epoch_metrics_available=%t snapshot_latest_epoch=%d snapshot_age_seconds=%d total_ranked=%d positive_blocks=%d positive_streak=%d positive_longest_streak=%d",
 			source.closedBlocks, source.latestCloseAge, source.missingPoints, source.pendingPoints,
@@ -252,9 +257,9 @@ func pointsOperatorFinding(target, tier, class, symptom, mechanism, action strin
 			snapshot.totalRanked, snapshot.positiveBlocks, snapshot.positiveStreak, snapshot.positiveLongest,
 		),
 		evidence: "Three bounded read-only PostgreSQL statements returned a snapshot header/row census, physical completion-column preflight and UTC operator-calendar/positive-point rollup census. Only counts, ages, block numbers and booleans are rendered; no network or payment identity is returned.",
-		context:  "Rollup completion has no persisted completion timestamp. A new pending payment can follow a valid immutable snapshot, and a just-completed backfill can precede a still-unavailable snapshot. Current source state alone cannot prove either snapshot corruption or an overdue completion-to-rebuild handoff.",
+		context:  "Rollup completion has no persisted completion timestamp. A new pending payment can follow a valid immutable snapshot, and publication and source counts are separate reads. Current source state alone cannot prove snapshot corruption, an overdue rebuild or a stalled backfill.",
 		action:   action,
-		verify:   "After the bounded normal rollup and rebuild complete, a fresh internally consistent snapshot records the latest completed operator block with availability true. Meaningful zero Blocks/Streak values remain valid. Do not edit snapshot bits, payment completion flags or rollup rows by hand, and do not enable ST to repair this plane.",
+		verify:   "A normal rebuild publishes a fresh internally consistent snapshot of the latest completed operator block with availability true, and the backfill's pending count falls as the bounded rollup measures payments. Meaningful zero Blocks/Streak values remain valid. Do not edit snapshot bits, payment completion flags or rollup rows by hand, and do not enable ST to repair this plane.",
 		playbook: "SIGNALS.md §17.6",
 	}
 }

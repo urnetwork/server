@@ -80,6 +80,20 @@ func legacyProviderPaymentReplacedSql(paymentIdExpression string) string {
 		paymentIdExpression, paymentIdExpression, legacyProviderPaymentReplacedEventType)
 }
 
+// The payment of the expression is a legacy original whose sweeps all moved to
+// its replacement: replaced, with no anchor journaled. An anchored original
+// keeps every sweep but the anchor, and ReleaseLegacyProviderPaymentReplacement
+// journals that on it; a full move releases only once the original owns none.
+// The original then earns in no block of its own, and the points
+// leaderboard's payout weeks follow that (pointsPayoutWeekPaymentSql).
+func legacyProviderPaymentSweepsMovedSql(paymentIdExpression string) string {
+	return fmt.Sprintf(`(%s AND NOT EXISTS (SELECT 1 FROM audit_account_payment anchored
+		WHERE anchored.payment_id = %s AND anchored.event_type = '%s'))`,
+		legacyProviderPaymentReplacedSql(paymentIdExpression),
+		paymentIdExpression,
+		legacyProviderPaymentPendingReattributionEventType)
+}
+
 // The legacy original that the payment of the expression replaces, or null.
 func legacyProviderPaymentReplacesSql(paymentIdExpression string) string {
 	return fmt.Sprintf(`(SELECT (replacement.event_details::jsonb->>'original_payment_id')::uuid FROM audit_account_payment replacement
