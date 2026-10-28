@@ -203,18 +203,18 @@ func TestPointsPartialUnknownCannotClearUntilCompleteRecovery(t *testing.T) {
 		if run >= 4 {
 			age = 60
 		}
-		pending, pendingAge := uint64(0), int64(0)
+		missing := uint64(0)
 		if run < 2 {
-			pending, pendingAge = 1, 60
+			missing = 1
 		}
-		settings, _ := pointsPartialSettings(t, syntheticPointsSnapshot(age, 12, true, 10, 0), []Row{{"true"}}, nil, syntheticPointsOperatorSource(12, 60, 0, pending, pendingAge), sourceErr, nil)
+		settings, _ := pointsPartialSettings(t, syntheticPointsSnapshot(age, 12, true, 10, 0), []Row{{"true"}}, nil, syntheticPointsOperatorSource(12, 60, missing, 0, 0), sourceErr, nil)
 		alerts, err := signal.Run(context.Background(), settings)
 		if err != nil {
 			t.Fatal("partial recovery sequence aborted")
 		}
 		ready, held := gate.split(signal, alerts)
 		for _, transition := range notifier.observeWithLock(settings.Now().Add(time.Duration(run)*5*time.Minute), signal.Key(), SignalExecution{Alerts: ready, HeldAlerts: held}) {
-			if transition.alert.Class != "points-leaderboard-stale" && transition.alert.Class != "points-block-rollup-incomplete" {
+			if transition.alert.Class != "points-leaderboard-stale" && transition.alert.Class != "points-payment-link-missing" {
 				continue
 			}
 			if transition.kind == slackRaised {

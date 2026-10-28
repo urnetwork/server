@@ -82,12 +82,14 @@ func pointsOperatorSchemaFinding(target string) finding {
 	}
 }
 
-// One output row, bounded by the monitor command deadline. The counts are the
-// history backfill's progress: positive post-genesis points whose linked
-// payment is absent (missing) or not yet measured by the rollup (pending),
-// including current-period points. The leaderboard publishes those points in
-// payout weeks (model/points_leaderboard_payout_weeks.go), so they no longer
-// gate availability. Pending counts are point rows, not payments or contracts.
+// One output row, bounded by the monitor command deadline. It counts positive
+// post-genesis points whose linked payment is absent (missing) or not yet
+// measured by the history rollup (pending), including current-period points.
+// Neither gates availability any more: the leaderboard publishes pending
+// points in their payments' payout weeks and missing ones in the block before
+// they posted (model/points_leaderboard_payout_weeks.go). Pending points are
+// the backfill's progress; missing ones can never be measured, and warn.
+// Counts are point rows, not payments or contracts.
 func pointsOperatorSourceQuery() string {
 	return fmt.Sprintf(`
 		WITH lifecycle_clock AS MATERIALIZED (
@@ -249,7 +251,7 @@ func pointsOperatorFinding(target, tier, class, symptom, mechanism, action strin
 	return finding{
 		probeId: "pg/points-readiness", tier: tier, class: class, target: target, sustain: 1,
 		symptom: symptom, mechanism: mechanism,
-		baseline: "Blocks and Streak use completed Sunday-00 UTC seven-day operator payout periods: measured paid-traffic rows where the history rollup measured a payout, and the payout's weeks where it has not. ST state is not a prerequisite. The compatibility field latest_epoch is the 1-based operator block, and epoch_metrics_available is true whenever a completed operator block exists.",
+		baseline: "Blocks and Streak use completed Sunday-00 UTC seven-day operator payout periods: the paid-traffic rows a payout plan or the history rollup stored for a payment, and the payment's payout weeks (an upper bound of those rows) while the rollup has not measured it. ST state is not a prerequisite. The compatibility field latest_epoch is the 1-based operator block, and epoch_metrics_available is true whenever a completed operator block exists.",
 		observed: fmt.Sprintf(
 			"source=operator-paid-traffic completed_operator_blocks=%d latest_close_age_seconds=%d missing_payment_points=%d pending_rollup_points=%d oldest_pending_point_age_seconds=%d rollup_completion_age=unknown snapshot_epoch_metrics_available=%t snapshot_latest_epoch=%d snapshot_age_seconds=%d total_ranked=%d positive_blocks=%d positive_streak=%d positive_longest_streak=%d",
 			source.closedBlocks, source.latestCloseAge, source.missingPoints, source.pendingPoints,
@@ -396,6 +398,10 @@ func (self pointsReadinessProbe) check(ctx context.Context, env *probeEnv) ([]fi
 	appendFinding := func(tier, class, symptom, mechanism, action string) {
 		findings = append(findings, pointsOperatorFinding(target, tier, class, symptom, mechanism, action, snapshot, source))
 	}
+	// Since the payout-week fallback (owner decision 2026-10-28) the rollup's
+	// progress gates nothing: a rebuild publishes block metrics whenever a
+	// completed block exists, so publication is judged against the calendar
+	// alone, and a pending rollup with a current snapshot is healthy.
 	switch {
 	case snapshotContradiction:
 		// The independent snapshot contradiction is already retained.
@@ -406,20 +412,23 @@ func (self pointsReadinessProbe) check(ctx context.Context, env *probeEnv) ([]fi
 			"Verify the deployed operator source and UTC clock, preserve the snapshot, and repair the source/rebuild boundary before a normal rebuild.")
 	case source.closedBlocks == 0:
 		// Before the first Sunday closes, unavailable block metrics are expected.
-	case source.missingPoints != 0 || source.pendingPoints != 0:
-		class := "points-block-rollup-incomplete"
-		if !snapshot.epochAvailable {
-			class = "points-epoch-metrics-unavailable"
-		}
-		appendFinding(tierWarn, class,
-			"The current positive-point source is not fully materialized into operator payout blocks.",
-			"Positive post-genesis point rows with a missing linked payment or incomplete payment rollup keep a new block snapshot unavailable. An earlier available snapshot is not invalidated by a later pending payment. Oldest pending point age is not stalled duration or completion age.",
-			"Inspect bounded rollup batches, the owning payment linkage and rebuild tasks. Pending linked payments can advance normally; missing links require source diagnosis. Preserve total-point ranks and do not fabricate payment or block rows.")
-	case !snapshot.epochAvailable || snapshot.latestEpoch < source.closedBlocks:
+	case !snapshot.epochAvailable:
+		appendFinding(tierWarn, "points-epoch-metrics-unavailable",
+			"Completed operator blocks exist, but the latest points snapshot publishes no Blocks or Streak.",
+			"A current rebuild publishes block metrics whenever a completed block exists: payments the history rollup has not measured earn in their payout weeks, and points without a payment row in the block before they posted, so neither withholds them. An unavailable snapshot after the first block closed therefore comes from a publishing taskworker that predates the payout-week fallback, which still waits for the rollup, or from no rebuild since the block closed. Pending rollup points are the backfill's progress and oldest pending point age is not stalled duration.",
+			"Check the rebuild_points_leaderboard task's recent runs and the running Taskworker's source version. Deploy the reviewed release or repair the failing rebuild, then let a normal rebuild publish. Do not flip the availability bit or fabricate payment or block rows.")
+	case snapshot.latestEpoch < source.closedBlocks:
 		appendFinding(tierWarn, "points-epoch-rebuild-pending",
-			"The operator calendar and currently complete rollup are ahead of the published block snapshot.",
-			"Rollup and snapshot publication are separate reads and transactions. Completion time is unknown; even an old Sunday boundary cannot prove that this rebuild handoff is overdue. A stale snapshot retains its separate two-hour warning.",
-			"Let the normal bounded rollup/rebuild task publish. Check repeated progress and task failures if this persists; do not infer ST readiness or flip the availability bit.")
+			"The operator calendar is ahead of the published block snapshot.",
+			"An operator block closed after the latest snapshot's block. Rebuilds run when a payout completes, every minute while the rollup advances and hourly otherwise, and none waits for the rollup to finish. Publication time is unknown here; even an old Sunday boundary cannot prove that this rebuild handoff is overdue. A stale snapshot retains its separate two-hour warning.",
+			"Let the normal rebuild task publish. Check repeated progress and task failures if this persists; do not infer ST readiness or flip the availability bit.")
+	}
+	if source.missingPoints != 0 {
+		// Independent of publication: these points can never be measured.
+		appendFinding(tierWarn, "points-payment-link-missing",
+			"Positive post-genesis points have no linked payment row.",
+			"A payout point carries its payment id, and Blocks come from that payment's paid sweeps. A point without a payment row has none to measure, so the leaderboard counts it in the last block that closed before it posted; the snapshot stays available. Counts are point rows, not payments.",
+			"Diagnose the point writer or the payment deletion that left these rows unlinked. Preserve the points and total-point ranks; do not insert synthetic payment or block rows.")
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err

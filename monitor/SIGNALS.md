@@ -42146,11 +42146,45 @@ contract with paid sweeps in two periods can earn in both.
 
 The storage/API names `latest_epoch` and `epoch_metrics_available` remain
 for compatibility. They now identify the latest completed operator block and
-whether the immutable snapshot incorporated complete block-rollup input.
+whether the immutable snapshot publishes block metrics, which it does whenever
+a completed operator block exists (owner decision 2026-10-28, below).
 They are not a chain deployment identity or readiness gate. A valid available
 snapshot may have zero positive Blocks/Streak rows: measured zero is not
 unavailable. Before the first operator period closes, unavailable block metrics
 with no affirmative block payload are expected.
+
+**Payout-week fallback (owner decision 2026-10-28).** A payment's points earn
+in its stored `account_payment_block` rows, written by its payout plan or by
+the history rollup. While the rollup has not finished a payment, the rebuild
+adds the payment's **payout weeks**: every operator block overlapping
+[`min_sweep_time`, end of its plan's traffic window), the window being the
+plan's subsidy epoch (`subsidy_payment.end_time`), or the start of the plan's
+own block for a plan without one; the oldest sweep's block always counts
+(`model.pointsPayoutWeeks`). Exact blocks start at the oldest paid sweep and end
+inside the window, so payout weeks are an **upper bound**: stored rows replace
+them on the next rebuild after the rollup measures the payment, and a
+network's Blocks and Streak can then only fall or stay. Measured on Main on
+2026-10-28, the rule contained the exact blocks of all 1,411 rolled-up payments
+with rows and of all 7,191 then-unrolled payments whose sweeps were read
+directly, was exact for 91-92% of payouts without a backlog, and left no gap
+or overlap where a network's exact payments met its payout weeks. Of the 154
+networks with both, the block of the plan time or the block before it left a
+gap there for 106-107, and the oldest sweep's block alone for 71, because
+payouts repay re-planned sweeps of canceled payments whose blocks the rollup
+had stored. Blocks overlapping [`min_sweep_time`, `create_time`) left no gap
+either but credited more blocks the payments never paid (precision 0.35 against
+0.57 on the unrolled payments).
+Pending and canceled payments follow the exact rule: a pending payment owns its
+sweeps; a canceled payment earns only while it still owns a paid sweep; a
+rolled-up payment keeps its stored rows, even none. One exception: a completed
+payment the rollup measured after contract reaping had deleted its sweeps, with
+`min_sweep_time` at or after the genesis and paid bytes, earns in its payout
+weeks for good. A positive point without a payment row earns in the last block
+that closed before it posted. Blocks are a set, so no source double counts a
+block, and each payment's points are summed once per block. The snapshot row
+stores no approximation; the rebuild logs it with the snapshot id and sets the
+Taskworker gauges `urnetwork_points_leaderboard_payout_week_payments{reason}`,
+`_approximate_networks`, `_unlinked_points` and `_rollup_pending_payments`.
 
 Read the latest snapshot header and exact ranked-row census in one bounded
 PostgreSQL statement. Preserve the existing atomic row-count and two-hour
@@ -42190,18 +42224,21 @@ When the preflight passes, a third single-output-row, command-deadline-bounded
 query uses a UTC-normalized database clock and the owning model's calendar constants.
 It counts positive post-genesis `account_point` rows whose linked
 `account_payment` is absent (`missing_payment_points`) or whose existing
-payment has `block_rollup_complete=false` (`pending_rollup_points`).
-This is the exact model completeness predicate, including points in the current
-open period. Counts are point rows, not unique payments or contracts.
+payment has `block_rollup_complete=false` (`pending_rollup_points`),
+including points in the current open period. Neither gates availability any
+more: pending points are published in payout weeks and are the backfill's
+progress, and missing points are published in the block before they posted.
+Counts are point rows, not unique payments or contracts.
 A missing linked payment is not silently equated with a resumable linked-payment
-backfill. Only counts, ages, block numbers and booleans are returned; no
-network, payment, chain deployment or contract identity is rendered.
+backfill: the rollup can never measure it, so it warns on its own. Only counts,
+ages, block numbers and booleans are returned; no network, payment, chain
+deployment or contract identity is rendered.
 
 A payout plan stores its own payments' blocks, from the paid sweeps it
 selected and by the rollup's definition (`model.pointsPaidSweepSql`), and
 inserts those payments complete, all in its own transaction
-(`finalizePayments`, 2026-10-23). A payout therefore leaves this predicate
-true. Before that, every Sunday payout made block metrics unavailable until the
+(`finalizePayments`, 2026-10-23). A payout therefore adds no pending points.
+Before that, every Sunday payout made block metrics unavailable until the
 rollup had visited each new payment. The rollup now finishes only payments
 planned before that change, so a pending payment planned after it was written
 by an older planner binary.
@@ -42221,16 +42258,20 @@ attribution or incident recovery from the local query qualification.
 The 1000-distinct-contract limit bounds output; a selected contract can still
 have many sweeps. The 45-second run budget is checked between batches and does
 not impose an in-flight statement deadline.
-While incomplete, a new snapshot preserves total-point ranks but marks block
-metrics unavailable. Snapshot publication and source progress are separate
-reads/transactions: a new pending payment does not invalidate an earlier snapshot.
+While the rollup is incomplete, a new snapshot publishes the unmeasured
+payments' payout weeks with total-point ranks; the rebuild reruns a minute
+later while the rollup advances. Snapshot publication and source progress are
+separate reads/transactions: a new pending payment does not invalidate an
+earlier snapshot.
 The rollup has no persisted completion timestamp. `oldest_pending_point_age`
 is the source point's age, not the time the rollup has been stalled.
 Similarly, zero pending rows now does not prove how long readiness has held;
 an old Sunday boundary alone cannot prove an overdue rebuild.
 Keep these handoffs WARN, not corruption PAGE. The independent stale-snapshot
 warning still detects a missing publication cadence, but this query does not
-prove sustained rollup progress or a completion-to-publication deadline.
+prove sustained rollup progress or a completion-to-publication deadline; chart
+the rollup's progress with `urnetwork_points_leaderboard_rollup_pending_payments`
+(Taskworker dashboard).
 
 **2026-10-17 local query-work discriminator:** independently qualified native
 controls held the selected batch at 1000 contracts while increasing the preceding
@@ -42269,16 +42310,21 @@ Main attribution nor readiness; missing runtime evidence remains unknown.
   This can be an intentionally staged rollout; it is not proof of a payout
   outage and does not authorize applying migrations to make the monitor pass.
 - `points-epoch-metrics-unavailable` warns when completed operator periods
-  exist but the snapshot is unavailable and the current source has missing
-  payment links or incomplete rollups. Diagnose those owning boundaries,
-  not ST node, keys, funding, coordinator or finalization readiness.
-- `points-block-rollup-incomplete` warns when the current source has missing
-  links or incomplete rollups while an earlier block snapshot is available.
-  Preserve that snapshot; do not relabel this as affirmative corruption.
-- `points-epoch-rebuild-pending` warns when the rollup is currently complete
-  and the snapshot is unavailable or behind the completed operator calendar.
+  exist but the snapshot is unavailable, whatever the rollup's state: the
+  publishing Taskworker predates the payout-week fallback (it still waits for
+  the rollup) or no rebuild has published since the first block closed.
+  Diagnose the rebuild task and the running source version, not ST node,
+  keys, funding, coordinator or finalization readiness.
+- `points-payment-link-missing` warns when positive post-genesis points have
+  no payment row. They publish in the block before they posted, but the
+  rollup can never measure them; diagnose the point writer or the deletion
+  that unlinked them. It is independent of publication.
+- `points-epoch-rebuild-pending` warns when an available snapshot is behind
+  the completed operator calendar. No rebuild waits for the rollup.
   Completion age is unknown even when the latest calendar boundary is old;
   inspect normal task progress and repeated observations.
+- A pending rollup with a current available snapshot is healthy: its
+  approximation is charted, not alerted.
 - `points-epoch-availability-drift` pages on an internal snapshot
   contradiction: a false availability bit with affirmative block payload, or
   a true bit with no 1-based completed block number.
@@ -42289,8 +42335,9 @@ Main attribution nor readiness; missing runtime evidence remains unknown.
 False-positive qualifier: these snapshot-only contradictions are admitted only
 after the existing physical-schema prerequisite passes; schema presence does
 not attest deployed writer ancestry or prove a current Main incident. Ordinary
-pending rollup, measured zero, an open period and an older valid snapshot with
-new pending work retain their existing interpretation. False-negative
+pending rollup is healthy once a current snapshot publishes its payout weeks;
+measured zero, an open period and an older valid snapshot with new pending work
+retain their existing interpretation. False-negative
 qualifier: freshness does not make an internally contradictory snapshot valid;
 a later read/parse failure must not erase its PAGE. Without calendar evidence,
 no block-ahead or missing-rollup conclusion is inferred.
@@ -42328,8 +42375,10 @@ configuration and deployment checks.
 Implementation convention: SIGNALS.md §17.6 (`points-readiness`) maps to
 `signal_points_readiness.go` and `signal_points_readiness_test.go`.
 Deterministic controls cover ST-disabled healthy/meaningful-zero snapshots,
-Sunday boundaries, exact rollup eligibility, incomplete and missing payment
-links, asynchronous snapshot/source handoffs, observation failures, stale and
+Sunday boundaries, exact rollup eligibility, the payout-week fallback's
+classification (`TestPointsOperatorReadinessPayoutWeekFallbackSemantics`:
+pending rollup healthy, unavailable whatever the rollup, missing links on their
+own), asynchronous snapshot/source handoffs, observation failures, stale and
 incomplete snapshots, absent/present/malformed schema preflights, one-shot
 completion with a readiness warning, and genuine internal/calendar
 contradictions once the operator schema is observable. The independent-positive
