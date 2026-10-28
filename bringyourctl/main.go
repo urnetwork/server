@@ -2665,6 +2665,13 @@ func providerInspectIndexLines(inspection *model.ProviderEgressInspection) strin
 	)
 }
 
+// How provider.yml sets modern providers apart (FP2-MODERN.md): the modern
+// provider gate's switch, which is off while absent and has no start, and
+// the modern-first priority FindProviders2 draws each band with.
+func providerInspectModernSettings(settings *model.EgressIndexSettings) string {
+	return fmt.Sprintf("%s; egress_index.rank_modern_first: %t", settings.ModernProviderGateSchedule(), settings.RankModernFirst)
+}
+
 // Prints one provider as the egress rules of connect/GEOMAP.md §10.3 decide
 // it: the index, quality verdict and evidence time the rollup stored, the
 // index its latest health run gives now (what the next rollup will store), the
@@ -2769,13 +2776,8 @@ func providerInspect(opts docopt.Opts) {
 		)
 	}
 	// the gate as the decision below applied it, at the inspection's
-	// instant, and how this host's provider.yml sets it: an absent switch
-	// turns the gate on at the start
-	modernSwitch := "absent"
-	if value := inspection.Settings.QualitySpeedRequiresModernProvider; value != nil {
-		modernSwitch = strconv.FormatBool(*value)
-	}
-	fmt.Printf("  modern provider evidence %s; outcome %s (evidence is stale at %s); gate %t at %s (this host's provider.yml: quality_speed_requires_modern_provider %s, start %s; %s)\n", modernEvidence, optionalString(inspection.ModernOutcome), model.ProviderModernEvidenceMaxAge, inspection.ModernGate, inspection.ModernGateTime.UTC().Format(time.RFC3339), modernSwitch, inspection.Settings.QualitySpeedModernProviderStart.UTC().Format(time.RFC3339), inspection.Settings.ModernProviderGateSchedule())
+	// instant, and how this host's provider.yml sets the gate and priority
+	fmt.Printf("  modern provider evidence %s; outcome %s (evidence is stale at %s); gate %t at %s (this host's provider.yml: %s)\n", modernEvidence, optionalString(inspection.ModernOutcome), model.ProviderModernEvidenceMaxAge, inspection.ModernGate, inspection.ModernGateTime.UTC().Format(time.RFC3339), providerInspectModernSettings(inspection.Settings))
 	fmt.Printf("  fresh probe country %s\n", optionalString(inspection.ObservedCountryCode))
 	fmt.Printf("  blackholed %t, tls authentication failure %t\n", inspection.Blackholed, inspection.TlsAuthenticationFailed)
 	fmt.Printf("  rollout flag (enable_egress_test, rows before the index only) %t, country gate %t\n", inspection.EgressTestEnabled, inspection.Settings.CountryGate)

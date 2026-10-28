@@ -28,8 +28,8 @@ import (
 // still reach the provider. A force_minimum online answer is the Online pool,
 // which does not. Online includes every provider past these gates; quality and
 // speed additionally require a passing ratio of accepted URL outcomes within
-// eight hours and, while the modern provider gate is on (from its start,
-// unless provider.yml switches it), probe evidence of end-to-end
+// eight hours and, while the modern provider gate is on (only with its
+// switch true in provider.yml, FP2-MODERN.md), probe evidence of end-to-end
 // post-quantum encryption with resizable transfer windows
 // (egress_modern_provider.go), which is bucket membership too. Only
 // quality excludes ARIN non-quality entries. Performance and the success ratio
@@ -106,6 +106,19 @@ type EgressIndexSettings struct {
 	// process's value. False, the default, is the order before it.
 	// `rank_measured_first` in the block.
 	RankMeasuredFirst bool
+	// Whether FindProviders2 draws every modern provider of a band before any
+	// other (FP2-MODERN.md): the readers traverse each target's modern pages,
+	// across every requested family, before its other pages, and each band's
+	// draw takes its modern candidates first, so a provider that is not
+	// modern only fills what the band's modern candidates leave. It replaces
+	// the modern provider gate and changes no membership, tier or band order.
+	// The api, alt and the proxy apply it as they answer; the export
+	// partitions the pages whatever it says. True, the default, is on, and
+	// false is the kill switch: a config release and a restart of those
+	// readers, each applying it within RequestSettingsMaxAge.
+	// urnetwork_findproviders2_rank_modern_first_enabled shows each process's
+	// value. `rank_modern_first` in the block.
+	RankModernFirst bool
 	// how old the settings a request path reads may be. The passes read
 	// provider.yml on every call; a request path runs far too often to read
 	// and parse a file each time.
@@ -147,25 +160,12 @@ type EgressIndexSettings struct {
 	// The modern provider gate (egress_modern_provider.go): a provider the
 	// probe has not shown to be modern leaves Quality and Speed, keeping
 	// Online. `quality_speed_requires_modern_provider` in provider.yml, nil
-	// while the key is absent: the gate then turns on by itself at
-	// QualitySpeedModernProviderStart (owner decision 2026-10-15). False is
-	// the kill switch and the way to postpone, true turns the gate on at once,
-	// and a switch that is unreadable or given without a value is false, as
-	// is an absent one beside a start that cannot be read.
-	// RequiresModernProvider applies it.
+	// while the key is absent, which is off: modern-first priority within
+	// each band replaced the gate (owner decision 2026-10-28, FP2-MODERN.md),
+	// so only true turns it on, and nothing turns it on by itself. False is
+	// the kill switch, and a switch that is unreadable, given twice or given
+	// without a value is false. RequiresModernProvider applies it.
 	QualitySpeedRequiresModernProvider *bool
-	// When an absent switch turns the gate on, that instant included:
-	// `quality_speed_modern_provider_start` in provider.yml, an RFC 3339
-	// instant or a date (its 00:00 UTC), or
-	// DefaultQualitySpeedModernProviderStart.
-	QualitySpeedModernProviderStart time.Time
-}
-
-// When the modern provider gate turns on by itself while provider.yml leaves
-// quality_speed_requires_modern_provider out (owner decision 2026-10-28),
-// unless quality_speed_modern_provider_start moves it.
-func DefaultQualitySpeedModernProviderStart() time.Time {
-	return time.Date(2026, 11, 11, 0, 0, 0, 0, time.UTC)
 }
 
 // The most a connect client adds to a provider's tier from what it sees
@@ -186,14 +186,17 @@ func DefaultEgressIndexSettings() *EgressIndexSettings {
 			"cdn":          1,
 			"site":         1,
 		},
-		DefaultClassWeight:    1,
-		MaxFailureIndex:       6,
-		EvidenceMaxAge:        ProviderEgressHealthMaxAge,
-		QualityOkNumerator:    4,
-		QualityOkDenominator:  5,
-		MinScoredLoads:        1,
-		CountryGate:           true,
-		BackfillTierOffset:    ClientScoreCutoffTier + 1 + MaxClientTierDemerit,
+		DefaultClassWeight:   1,
+		MaxFailureIndex:      6,
+		EvidenceMaxAge:       ProviderEgressHealthMaxAge,
+		QualityOkNumerator:   4,
+		QualityOkDenominator: 5,
+		MinScoredLoads:       1,
+		CountryGate:          true,
+		BackfillTierOffset:   ClientScoreCutoffTier + 1 + MaxClientTierDemerit,
+		// modern-first priority replaces the modern provider gate (owner
+		// decision 2026-10-28)
+		RankModernFirst:       true,
 		RequestSettingsMaxAge: time.Minute,
 		// The floor is pending the owner's confirmation. Measured on
 		// 2026-10-13, it exempts the countries whose probe failed
@@ -210,10 +213,9 @@ func DefaultEgressIndexSettings() *EgressIndexSettings {
 		// the 0.36 floor on 2026-10-13; the margin keeps such a country's
 		// exemption until its share passes the noise of one pass to the next.
 		OnlineSuccessCountryFloorMargin: 0.03,
-		// Shadow first (owner decision 2026-10-14), then on by itself at the
-		// start (owner decision 2026-10-15) unless provider.yml sets the switch.
+		// Shadow first (owner decision 2026-10-14); absent is off, since
+		// modern-first priority replaced the gate (owner decision 2026-10-28)
 		QualitySpeedRequiresModernProvider: nil,
-		QualitySpeedModernProviderStart:    DefaultQualitySpeedModernProviderStart(),
 	}
 }
 
@@ -231,7 +233,13 @@ type egressIndexSettingsBlock struct {
 	CountryGate          *bool          `yaml:"country_gate"`
 	BackfillTierOffset   *int           `yaml:"backfill_tier_offset"`
 	RankMeasuredFirst    *bool          `yaml:"rank_measured_first"`
+	RankModernFirst      *bool          `yaml:"rank_modern_first"`
 }
+
+// Whether this process has logged that its provider.yml still carries the
+// retired quality_speed_modern_provider_start. Settings are decoded on every
+// pass and request refresh, so the notice is logged once per process.
+var modernProviderStartIgnoredLogged atomic.Bool
 
 // The defaults with the overrides of provider.yml, read on every call like the
 // rollout flag, so a process applies a changed file at its next pass. A warp
@@ -242,18 +250,17 @@ type egressIndexSettingsBlock struct {
 // so, since a typo in one weight must not take the index away from the whole
 // fleet. The file is parsed once, and each top-level key read here is decoded
 // on its own: the egress_index block, the URL-success rule's keys and the
-// modern provider gate's switch and start beside
-// subscriber_quality_policy_version. A value of the wrong type, or a key the
-// file gives twice, fails only that key; a bad value inside the block fails
-// the block. An unreadable kill switch, or a file that is not yaml at all,
-// disables the rule: it may be an attempt to turn the rule off, and the
-// behaviour before the rule is the one to fall back to. For the same reason
-// an unreadable modern provider switch, one given without a value, or such a
-// file turns that gate off, where an absent switch leaves it to its start;
-// and while the switch is absent, a start that is given but cannot be read,
-// empty included, turns it off too, since each is most likely a postponement
-// that failed. Each is logged, and the first is the second result, "" for
-// none.
+// modern provider gate's switch beside subscriber_quality_policy_version. A
+// value of the wrong type, or a key the file gives twice, fails only that key;
+// a bad value inside the block fails the block. An unreadable kill switch, or
+// a file that is not yaml at all, disables the rule: it may be an attempt to
+// turn the rule off, and the behaviour before the rule is the one to fall
+// back to. For the same reason an unreadable modern provider switch, one
+// given twice or without a value, or such a file holds that gate off, as an
+// absent switch does; each is logged, and the first is the second result, ""
+// for none. quality_speed_modern_provider_start, the instant an absent switch
+// once turned the gate on at, is retired (FP2-MODERN.md): whatever it holds
+// it is ignored, and the first decode of the process that finds it logs so.
 func decodeEgressIndexSettings() (*EgressIndexSettings, string) {
 	settings := DefaultEgressIndexSettings()
 	var modernGateFailure string
@@ -422,9 +429,8 @@ func decodeEgressIndexSettings() (*EgressIndexSettings, string) {
 		settings.OnlineUrlRatioCountryExemption = *urlRatioCountryExemption
 	}
 	// A switch given without a value (empty, ~ or null) decodes as absent,
-	// which would leave the gate to its start; like a start that cannot be
-	// read, it is most likely a postponement that failed, so both hold the
-	// gate off. A start only decides while the switch is absent.
+	// which is off too, but it is most likely a switch that was meant, so it
+	// is a failure the monitor reports, as one that cannot be read is.
 	var modernGate *bool
 	if err := decode("quality_speed_requires_modern_provider", &modernGate); err != nil {
 		glog.Errorf("[egress]provider config quality_speed_requires_modern_provider is unreadable (%s); the modern provider gate is off\n", err)
@@ -435,30 +441,10 @@ func decodeEgressIndexSettings() (*EgressIndexSettings, string) {
 		glog.Errorf("[egress]provider config quality_speed_requires_modern_provider has no value; the modern provider gate is off\n")
 		modernGateFailed("quality_speed_requires_modern_provider has no value")
 	}
-	// detail goes to the log only; failure is a fixed text
-	modernStartUnreadable := func(detail string, failure string) {
-		if settings.QualitySpeedRequiresModernProvider != nil {
-			glog.Errorf("[egress]provider config quality_speed_modern_provider_start %s; quality_speed_requires_modern_provider decides the modern provider gate\n", detail)
-			return
-		}
-		glog.Errorf("[egress]provider config quality_speed_modern_provider_start %s; the modern provider gate is off\n", detail)
-		modernGateFailed(failure)
-	}
-	// any scalar decodes into a string as written, so a timestamp yaml
-	// resolves on its own still reaches the parse; a date is its 00:00 UTC
-	var modernStart *string
-	if err := decode("quality_speed_modern_provider_start", &modernStart); err != nil {
-		modernStartUnreadable(fmt.Sprintf("is unreadable (%s)", err), "quality_speed_modern_provider_start cannot be read")
-	} else if modernStart != nil {
-		if start, err := time.Parse(time.RFC3339, *modernStart); err == nil {
-			settings.QualitySpeedModernProviderStart = start.UTC()
-		} else if date, err := time.Parse(time.DateOnly, *modernStart); err == nil {
-			settings.QualitySpeedModernProviderStart = date.UTC()
-		} else {
-			modernStartUnreadable(fmt.Sprintf("= %q is neither an RFC 3339 instant nor a date", *modernStart), "quality_speed_modern_provider_start is neither an RFC 3339 instant nor a date")
-		}
-	} else if 0 < keyCounts["quality_speed_modern_provider_start"] {
-		modernStartUnreadable("has no value", "quality_speed_modern_provider_start has no value")
+	// the retired start decides nothing, whatever it holds, and is no
+	// failure; a provider.yml from before the retirement still carries it
+	if 0 < keyCounts["quality_speed_modern_provider_start"] && modernProviderStartIgnoredLogged.CompareAndSwap(false, true) {
+		glog.Infof("[egress]provider config quality_speed_modern_provider_start is retired and ignored; an absent quality_speed_requires_modern_provider is off (FP2-MODERN.md)\n")
 	}
 
 	var overrides *egressIndexSettingsBlock
@@ -523,6 +509,9 @@ func decodeEgressIndexSettings() (*EgressIndexSettings, string) {
 	}
 	if overrides.RankMeasuredFirst != nil {
 		settings.RankMeasuredFirst = *overrides.RankMeasuredFirst
+	}
+	if overrides.RankModernFirst != nil {
+		settings.RankModernFirst = *overrides.RankModernFirst
 	}
 	return settings, modernGateFailure
 }
@@ -591,56 +580,45 @@ func (self *EgressIndexSettings) MaxIndex() int {
 }
 
 // Whether the modern provider gate holds Quality and Speed to modern
-// providers at now: the switch when provider.yml gives one, otherwise from
-// QualitySpeedModernProviderStart on, that instant included. Each reader
-// passes the instant it decides at, a pass's or a request's filter time and
-// never a fresh clock read, so one pass decides every provider alike.
+// providers: only while provider.yml sets the switch true. An absent switch is
+// off at every instant, since modern-first priority replaced the gate (owner
+// decision 2026-10-28, FP2-MODERN.md), so the gate never turns on by itself.
+// now is the instant the reader decides at, a pass's or a request's filter
+// time; the decision no longer depends on it.
 func (self *EgressIndexSettings) RequiresModernProvider(now time.Time) bool {
-	if self.QualitySpeedRequiresModernProvider != nil {
-		return *self.QualitySpeedRequiresModernProvider
-	}
-	return !now.Before(self.QualitySpeedModernProviderStart)
+	return self.QualitySpeedRequiresModernProvider != nil && *self.QualitySpeedRequiresModernProvider
 }
 
-// How provider.yml sets the modern provider gate, for the logs and the
-// inspection: the switch when it is given, otherwise the start.
+// How provider.yml sets the modern provider gate, for the logs, the
+// inspection and the monitor: the switch as given, or absent, which is off.
 func (self *EgressIndexSettings) ModernProviderGateSchedule() string {
 	if self.QualitySpeedRequiresModernProvider != nil {
 		return fmt.Sprintf("quality_speed_requires_modern_provider: %t", *self.QualitySpeedRequiresModernProvider)
 	}
-	return fmt.Sprintf("quality_speed_requires_modern_provider absent, on from %s", self.QualitySpeedModernProviderStart.UTC().Format(time.RFC3339))
+	return "quality_speed_requires_modern_provider absent (off)"
 }
 
-// The modern provider gate as this process's provider.yml sets it, at now:
-// whether it holds Quality and Speed, and while the switch is absent the
-// instant it turns on by itself, nil while the switch is given (true, false
-// or unreadable), when no flip is scheduled. The stats collector publishes
-// both for the monitor's readiness signal.
-func GetModernProviderGateSchedule(now time.Time) (on bool, scheduledStart *time.Time) {
-	settings := egressIndexSettings()
-	on = settings.RequiresModernProvider(now)
-	if settings.QualitySpeedRequiresModernProvider == nil {
-		start := settings.QualitySpeedModernProviderStart
-		scheduledStart = &start
-	}
-	return
+// Whether the modern provider gate holds Quality and Speed under this
+// process's provider.yml at now. The stats collector publishes it for the
+// monitor's readiness signal, which checks that the taskworkers decide alike.
+func GetModernProviderGateOn(now time.Time) bool {
+	return egressIndexSettings().RequiresModernProvider(now)
 }
 
 // The egress settings this process's provider.yml sets, decoded as every
 // pass decodes them. The monitor reads the deployment's desired modern
-// provider gate with it, deciding the gate at its own clock
-// (RequiresModernProvider).
+// provider gate with it (RequiresModernProvider).
 func GetEgressIndexSettings() *EgressIndexSettings {
 	return egressIndexSettings()
 }
 
 // Why this process's provider.yml holds the modern provider gate off by a
-// failure, a fixed text, "" when it does not: a file that cannot be read, a
-// switch that cannot be read or has no value, or, while the switch is
-// absent, a start that cannot be used. Each reads as the kill switch and
-// publishes no start, though it is most likely a postponement that failed,
-// so the monitor's readiness signal reports it from the deployment's
-// desired provider.yml (monitor SIGNALS.md §2.29).
+// failure, a fixed text, "" when it does not: a file that cannot be read, or
+// a switch that cannot be read, is given twice or has no value. Each reads
+// as the switch false, as an absent one does, though it is most likely a
+// switch that was meant, so the monitor's readiness signal reports it from
+// the deployment's desired provider.yml (monitor SIGNALS.md §2.29). The
+// retired quality_speed_modern_provider_start is never a failure.
 func GetModernProviderGateFailure() string {
 	_, failure := decodeEgressIndexSettings()
 	return failure
@@ -809,6 +787,11 @@ type providerEgressDecision struct {
 	qualityBeforeModernGate bool
 	speedBeforeModernGate   bool
 	modernOutcome           string
+	// the latest probe evidence classifies the provider modern at the
+	// filter's instant, whatever its buckets; false for a hard exclusion.
+	// Modern-first priority and modern-only requests read it
+	// (FP2-MODERN.md), through ClientScore.Modern.
+	modern bool
 }
 
 // Gathers what the rules read about one provider from this pass's bulk loads
@@ -848,7 +831,7 @@ func (self providerCountFilter) egressFacts(
 			self.onlineSuccessBaseline.noSuccessAppliesIn(publishedCountryCode),
 		lowUrlSuccess: self.onlineSuccessBaseline.belowUrlRatioIn(counts, urlIndex, publishedCountryCode),
 		modernOutcome: classifyProviderModernEvidence(self.modernEvidence[clientId], self.now),
-		// at the filter's instant, so the gate's start flips a pass whole
+		// at the filter's instant, as every reader decides it
 		modernGate: settings.RequiresModernProvider(self.now),
 	}
 }
@@ -884,6 +867,7 @@ func decideProviderEgress(facts *providerEgressFacts, egressTestEnabled bool) pr
 		}
 	}
 
+	modern := facts.modernOutcome == ProviderModernOutcomeModern
 	switch {
 	case facts.noUrlSuccess:
 		// Measured repeatedly and never carried a URL: out of every bucket
@@ -891,6 +875,7 @@ func decideProviderEgress(facts *providerEgressFacts, egressTestEnabled bool) pr
 		// first success brings the provider back on the next pass.
 		return providerEgressDecision{
 			reason: ProviderExcludedNoSuccess,
+			modern: modern,
 		}
 	case facts.lowUrlSuccess:
 		// Measured repeatedly with successes, but too few for the Online URL
@@ -899,6 +884,7 @@ func decideProviderEgress(facts *providerEgressFacts, egressTestEnabled bool) pr
 		// brings the provider back on the next pass.
 		return providerEgressDecision{
 			reason: ProviderExcludedLowSuccess,
+			modern: modern,
 		}
 	case facts.egressQuality == nil:
 		// no probe verdict at all, no negative mark but the exclusions and
@@ -908,6 +894,7 @@ func decideProviderEgress(facts *providerEgressFacts, egressTestEnabled bool) pr
 			reason:  ProviderExcludedUnprobed,
 			online:  true,
 			counted: true,
+			modern:  modern,
 		}
 	case !*facts.egressQuality:
 		// A measured failing ratio belongs to online, not quality or speed.
@@ -915,6 +902,7 @@ func decideProviderEgress(facts *providerEgressFacts, egressTestEnabled bool) pr
 			reason:  ProviderExcludedHealth,
 			online:  true,
 			counted: true,
+			modern:  modern,
 		}
 	default:
 		modernOutcome := facts.modernOutcome
@@ -936,6 +924,7 @@ func decideProviderEgress(facts *providerEgressFacts, egressTestEnabled bool) pr
 			counted:                 true,
 			qualityBeforeModernGate: quality,
 			speedBeforeModernGate:   speed,
+			modern:                  modern,
 		}
 		if quality || speed {
 			decision.modernOutcome = modernOutcome
@@ -1229,6 +1218,9 @@ type ProviderEgressCounts struct {
 	// the bucket, whether or not the gate is on; every bucket and outcome
 	// present
 	ModernGateShadowCounts map[string]map[string]int64
+	// the Online members by modern outcome, every outcome present
+	// (FP2-MODERN.md, "Observability"); nil in a snapshot written before it
+	ModernOnlineCounts map[string]int64
 }
 
 // Decides every connected, valid, active, top-level provider with a Public
@@ -1243,6 +1235,7 @@ func CountProviderEgress(ctx context.Context) *ProviderEgressCounts {
 		ReasonCounts:           map[string]int64{},
 		MaxIndex:               settings.MaxIndex(),
 		ModernGateShadowCounts: newProviderModernGateShadowCounts(),
+		ModernOnlineCounts:     newProviderModernOnlineCounts(),
 	}
 	for _, bucket := range ProviderEgressBuckets {
 		counts.BucketIndexCounts[bucket] = map[string]int64{}
@@ -1297,10 +1290,9 @@ func CountProviderEgress(ctx context.Context) *ProviderEgressCounts {
 	// margin held against the export's last published guard
 	countFilter.onlineSuccessBaseline = newProviderOnlineSuccessBaseline(countFilter, providerCountRowCountryCodes(rows), settings, readProviderOnlineSuccessPreviousBaseline(ctx, "the dashboard counts"))
 	for _, row := range rows {
-		decision := decideProviderEgress(
-			countFilter.egressFacts(row.clientId, row.claimedCountryCode, row.egressIndex, row.egressQuality, settings),
-			egressTestEnabled,
-		)
+		facts := countFilter.egressFacts(row.clientId, row.claimedCountryCode, row.egressIndex, row.egressQuality, settings)
+		decision := decideProviderEgress(facts, egressTestEnabled)
+		countProviderModernOnline(counts.ModernOnlineCounts, facts, decision)
 		// the index as the dashboard labels it
 		indexLabel := ProviderEgressIndexNone
 		if row.egressIndex != nil {

@@ -143,6 +143,10 @@ func statsProviderEgressTestCounts() *model.ProviderEgressCounts {
 			counts.ModernGateShadowCounts[bucket][outcome] = 0
 		}
 	}
+	counts.ModernOnlineCounts = map[string]int64{}
+	for _, outcome := range model.ProviderModernOutcomes {
+		counts.ModernOnlineCounts[outcome] = 0
+	}
 	return counts
 }
 
@@ -609,5 +613,32 @@ func TestStatsProviderEgressCacheCarriesTheModernGateShadow(t *testing.T) {
 	counts.ModernGateShadowCounts = nil
 	if validStatsProviderEgressCounts(counts) {
 		t.Fatal("a snapshot without the modern gate's shadow is valid")
+	}
+}
+
+// The Online members' modern outcomes are part of a complete schema 6
+// snapshot (FP2-MODERN.md): every outcome round-trips, zero included, and a
+// snapshot without them, as a schema 5 one is, is incomplete.
+func TestStatsProviderEgressCacheCarriesTheModernOnlineCounts(t *testing.T) {
+	store := newStatsProviderEgressTestStore()
+	counts := statsProviderEgressTestCounts()
+	counts.ModernOnlineCounts[model.ProviderModernOutcomeModern] = 9
+	counts.ModernOnlineCounts[model.ProviderModernOutcomeNoEvidence] = 40
+	if !validStatsProviderEgressCounts(counts) {
+		t.Fatal("a snapshot with the online modern counts is not valid")
+	}
+	value := statsProviderEgressTestWire(t, counts, store.now(), store.now())
+	decoded, fresh, err := decodeStatsProviderEgressSnapshot(value, store.now())
+	if err != nil || !fresh || !reflect.DeepEqual(decoded.Counts, counts) {
+		t.Fatalf("the online modern counts did not round-trip: %v", err)
+	}
+
+	delete(counts.ModernOnlineCounts, model.ProviderModernOutcomeStaleEvidence)
+	if validStatsProviderEgressCounts(counts) {
+		t.Fatal("a snapshot missing an online outcome is valid")
+	}
+	counts.ModernOnlineCounts = nil
+	if validStatsProviderEgressCounts(counts) {
+		t.Fatal("a snapshot without the online modern counts is valid")
 	}
 }

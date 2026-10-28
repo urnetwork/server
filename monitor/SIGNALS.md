@@ -12005,6 +12005,14 @@ recorded baseline, §2.9 has complete current cache documents, and successful
 provider contracts recover. Do not clear Redis keys, weaken quality/reliability
 gates, or fabricate provider requests to manufacture recovery.
 
+Capability requests (2026-10-28, server/FP2-MODERN.md): the outcome metric
+gains `capability` (`none`, `modern`, `post_quantum` or `modern_post_quantum`).
+A request that keeps only modern or only post-quantum providers can rightly
+answer short where the capable supply is small, so the probe's query selects
+`capability!~"modern.*|post_quantum"`: its zero-share cohorts count only
+capability-blind requests, and the series without the label, which older
+processes export, still count. The label is not summed into the cohorts.
+
 Implementation prerequisite: deploy API export
 `urnetwork_findproviders2_outcomes_total` before the reducer can observe a
 production cohort. SIGNALS.md §2.9a (`provider-count`) maps to
@@ -12741,9 +12749,18 @@ visible alongside actual alerts.
   healthy zero. A valid observed-subset invariant finding is retained alongside
   incomplete fleet visibility.
 
+Schema 3 (2026-10-28, server/FP2-MODERN.md) is schema 2 with the capability
+refusals of `require_modern_provider` and `post_quantum_encryption` apart from
+`filtered_hard`: a zero `filtered_capability` and a short
+`returned_small_filtered_capability`. The probe accepts schema 3 with every
+schema-2 reason, counts it toward response-shape authority as schema 2, and
+keeps a schema-1 or schema-2 process that reports either capability reason
+unknown. A capability refusal is the request's own filter, so it adds no
+finding.
+
 The original zero invariants remain observable during mixed schema-1/schema-2
-rollouts. Complete response-shape attribution requires schema 2 at both ends of
-the window in every configured slot. A complete legacy/mixed fleet retains
+rollouts. Complete response-shape attribution requires schema 2 (or 3) at both
+ends of the window in every configured slot. A complete legacy/mixed fleet retains
 `provider-selection-unavailable` with `frame=response-shape` and
 `reason=incomplete-shape-schema-window`, alongside any proven legacy invariant.
 A changed/future schema or a reason incompatible with its schema stays unknown;
@@ -20936,18 +20953,24 @@ resources separate until every activation gate is reviewed.
 ### 2.19g Modern provider evidence — the capability probe must keep measuring
 Probe: `capability-probe`
 
-WHAT: the FP2 modern provider gate (FP2FIX.md, "Modern provider gate") reads
-`provider_modern_evidence`, and only the capability probe writes it: the
-recurring taskworker task `work.CapabilityProbe` (`server/capprobe`), one pass
-at a time fleet-wide, each provider measured in a short tunnel of its own
-whose clients attempt opportunistic end-to-end sessions. The URL probe writes
-no evidence. While the gate's switch is off a stopped probe only freezes the
-shadow; once it is on, a stopped probe ages every provider's evidence toward
-`stale_evidence` and the gate takes Quality and Speed away from providers
-that are modern. Every series below is per taskworker process
-(`urnetwork_capability_probe_*`, egress probes dashboard, capability probe
-row); sum across the env's taskworkers and remember a process restart resets
-counters.
+WHAT: `provider_modern_evidence`, the evidence a provider is modern by, has
+one writer, the capability probe: the recurring taskworker task
+`work.CapabilityProbe` (`server/capprobe`), one pass at a time fleet-wide,
+each provider measured in a short tunnel of its own whose clients attempt
+opportunistic end-to-end sessions. The URL probe writes no evidence.
+Modern-first priority (`rank_modern_first`, on by default) and modern-only
+requests (`require_modern_provider`) read it through each exported score's
+`Modern` (FP2-MODERN.md), and so does the FP2 modern provider gate (FP2FIX.md,
+"Modern provider gate") while an explicit switch holds it on. The probe
+measures every Online provider, judged with the score export's Online inputs:
+each provider's published country and the URL-success guard the export last
+published. A stopped probe ages every provider's evidence toward
+`stale_evidence` within seven days: priority then draws as it did before it,
+modern-only requests answer empty, and with the gate on Quality and Speed
+lose the providers that are modern. Every series below is per taskworker
+process (`urnetwork_capability_probe_*`, egress probes dashboard, capability
+probe row); sum across the env's taskworkers and remember a process restart
+resets counters.
 
 The probe ships switched off (sn-55) and then schedules nothing: no task
 row, no prober shard, no pass, so every series stays at zero. It is
@@ -20965,18 +20988,28 @@ Healthy shape:
   `result="waiting"` advances every ten minutes, reading nothing. So
   `last_pass_timestamp_seconds` is never older than a pass's
   `max_time_seconds` (900) plus a few seconds.
-- `in_flight` stays at or under `concurrency` (16) on one taskworker at a
-  time.
+- `in_flight` stays at or under `concurrency` (16 by default; FP2-MODERN.md's
+  starting experiment sets 32, with `limit` 128) on one taskworker at a time.
 - `providers_total` is mostly `recorded_*`: `recorded_not_post_quantum`
   dominates while most providers run the custom lineage.
 - `measure_seconds` p95 is about 61-65 s (a provider without the end-to-end
   responder takes the whole establishment window after its first
   acknowledgement) and never above `measure_timeout_seconds` (120); modern
   providers read in seconds.
-- `selection_total` in steady state: `scanned` far above `due`; during the
-  first sweep after deployment, about two days, `due` and `eligible` are
-  close to `scanned` and the shadow's `no_evidence` is large. Neither is a
-  finding then.
+- `selection_total` in steady state: `scanned` far above `due`. `eligible`
+  counts Online providers, about 1.8 times the Quality and Speed providers
+  the probe selected before FP2-MODERN.md (capprobe/README.md, "Capacity").
+  During the first sweep after deployment, about two days, `due` and
+  `eligible` are close to `scanned` and the shadow's `no_evidence` is large,
+  and the first sweep after the probe widens to Online finds most Online-only
+  providers due; neither is a finding then. `stage="unguarded"` counts
+  passes, not providers: a pass that judged eligibility without a trusted
+  URL-success guard (none published, or one older than 60 minutes), when every
+  country is exempt and the providers the score export keeps out of every
+  bucket for want of URL success (`no_success`, `low_success`) are measured
+  too. It stays flat while the export publishes its guard; each such pass logs
+  one `[capprobe]` line, and the model logs the guard's absence when it begins
+  and ends (`[egress]online url-success guard`).
 - `breaker_trips_total` flat, but for the odd small pass at a sweep's tail
   whose few providers all lack the responder; `downgrades_total` low, a
   `held` now and then that the next sweep mostly answers with a modern
@@ -20994,18 +21027,31 @@ Signals:
 - `capability-probe-stalled` — WARN when no taskworker has finished a
   measured or waiting pass for 30 minutes while `capability_probe.yml`
   enables the probe (`time() - max(urnetwork_capability_probe_last_pass_timestamp_seconds) > 1800`),
-  PAGE after six hours with the gate on: on any running taskworker as their
-  stats collectors publish it (`max(urnetwork_stats_provider_modern_gate_on)`),
-  which is what is deployed; while no taskworker publishes it, by the desired
-  provider.yml, `quality_speed_requires_modern_provider: true` or that switch
-  absent and the gate's start (2026-11-11 00:00 UTC by default,
-  `quality_speed_modern_provider_start`) passed at the monitor's clock, as the
-  model's own provider.yml decoder reads them, so the automatic switch-on
-  arms the page. The finding names its `gate_source`. Evidence stays fresh
-  for seven days after its measurement, so a shorter stall, planned
-  database maintenance included, takes no provider out and only warns. The newest pass is read
-  over six hours (`max_over_time`), so a pass of a process that exited
-  since counts; a fleet whose taskworkers all started after it, as the
+  PAGE after six hours while the evidence is in use (FP2-MODERN.md), when any
+  of these holds:
+  - modern-first priority is on in any running reader:
+    `max(urnetwork_findproviders2_rank_modern_first_enabled{job=~"api|alt|proxy"})`
+    is 1, each reader publishing its effective `rank_modern_first` (every
+    process that links the model publishes the gauge, so the readers are
+    named);
+  - modern requests were answered in the last day:
+    `sum(increase(urnetwork_findproviders2_outcomes_total{capability=~"modern.*"}[24h])) > 0`,
+    from whichever process answered them;
+  - the gate is on: on any running taskworker as their stats collectors
+    publish it (`max(urnetwork_stats_provider_modern_gate_on)`), which is what
+    is deployed; while no taskworker publishes it, by the desired provider.yml
+    as the model's own decoder reads it at the monitor's clock, which once
+    FP2-MODERN.md retires the gate's start is an explicit
+    `quality_speed_requires_modern_provider: true`.
+
+  A priority or outcome series that no process publishes arms nothing: no
+  reader then runs priority or has answered a modern request. The finding
+  names `priority`, `modern_requests_24h` (`unknown` for a series nothing
+  publishes, never a measured zero), `gate` and its `gate_source`. Evidence
+  stays fresh for seven days after its measurement, so a shorter stall,
+  planned database maintenance included, takes no provider out and only
+  warns. The newest pass is read over six hours (`max_over_time`), so a pass
+  of a process that exited since counts; a fleet whose taskworkers all started after it, as the
   switch-on restart starts them, is given the 30 minutes from its oldest
   process's start (`process_start_time_seconds`), since the first pass can
   take its whole `max_time_seconds`. Running taskworkers that export no
@@ -21069,8 +21115,9 @@ Signals:
   `negative_withheld` everywhere is `capability-probe-breaker`;
   `record_failed` is the database write, and fails the pass.
 - `capability-probe-breaker` — WARN when `breaker_trips_total` rises on most
-  passes for an hour, PAGE after two hours with the gate on (as for
-  `capability-probe-stalled`): the
+  passes for an hour, PAGE after two hours while the evidence is in use (as
+  for `capability-probe-stalled`: priority on in a reader, modern requests
+  answered in the last day, or the gate on): the
   probe negotiates no end-to-end session with any provider, so its negative
   readings are all withheld (`providers_total{outcome="negative_withheld"}`)
   and its evidence ages toward `stale_evidence`. That is a fault on the
@@ -21102,8 +21149,12 @@ Signals:
   `modern_refresh_hours` and the sweep interval (about 3.75 days at the
   defaults), or when the shadow's
   `urnetwork_stats_provider_modern_gate_shadow{outcome="stale_evidence"}`
-  rises for a day: the probe no longer refreshes evidence before the gate
-  reads it as stale. Raise `concurrency` or find what fails first; never
+  rises for a day: the probe no longer refreshes evidence before priority,
+  modern-only requests and the gate read it as stale. Across the Online
+  population a 72-hour refresh needs at least about 690 measurements an hour,
+  a floor rather than a forecast, since evidence that stays missing or
+  inconclusive is measured again every sweep (capprobe/README.md,
+  "Capacity"). Raise `concurrency` and `limit` or find what fails first; never
   lengthen the staleness window to hide it.
 - `capability-probe-teardown-errors` — WARN while
   `close_errors_total` rises for an hour: capability tunnels fail to retire
@@ -21135,8 +21186,10 @@ negatives" are not a defect to repair.
 Implementation convention: `signal_capability_probe.go` (probe
 `taskworker/capability-probe`) implements `capability-probe-stalled` and
 `capability-probe-disabled-pass` from fleet aggregates in Mimir, read
-against the desired `capability_probe.yml` and `provider.yml`; while the
-config switches the probe off, both are healthy. Query evaluation timestamps
+against the desired `capability_probe.yml` and `provider.yml`; the stall's
+page also reads the readers' `rank_modern_first` gauge and the modern
+requests answered over a day. While the config switches the probe off, both
+are healthy. Query evaluation timestamps
 must remain within five minutes of the monitor clock. Independently, the
 `last_pass` and `oldest_start` timestamp payloads must be finite, nonnegative
 and no later than the monitor clock; exactly now is valid and zero means
@@ -22871,210 +22924,111 @@ that cannot create unintended seedphrase accounts or consume either limiter,
 and corrected exhausted requests retaining 429/Retry-After. Fixed input-shape
 messages omit tokens, identities, provider input, and internal classification.
 
-### 2.29 Modern provider gate readiness — the automatic flip must not empty Quality or Speed
+### 2.29 Modern provider gate readiness — an explicit switch must be decided alike across the fleet
 Probe: `modern-gate-readiness`
 
 The modern provider gate (server/FP2FIX.md, model/egress_modern_provider.go)
 takes every provider the capability probe has not shown to be modern out of
 Quality and Speed under the `not_modern` reason, keeping it Online. Owner
-decision 2026-10-28: it turns on by itself at 2026-11-11 00:00 UTC, the
-code's default start, while `quality_speed_requires_modern_provider` is
-absent from provider.yml; every pass and request decides at its own instant.
-Its evidence comes from the capability probe (server/capprobe), which ships
-switched off and must be switched on and have swept the eligible providers
-before the start. Without
-that evidence a provider reads `no_evidence`, and the flip would empty or
-gut both native buckets. This signal gives the owner warning while turning
-the gate on can still be postponed.
+decision 2026-10-28 (server/FP2-MODERN.md): modern-first priority within each
+FindProviders2 band replaces the gate, which is retired. It no longer turns on
+by itself: only `quality_speed_requires_modern_provider: true` in provider.yml
+turns it on, and `false` or an absent switch keeps it off at every instant,
+2026-11-11 00:00 UTC included. `quality_speed_modern_provider_start` is retired
+and ignored, and `urnetwork_stats_provider_modern_gate_start_seconds` is no
+longer published. So this signal has no start windows any more: the verdict
+on the gate's shadow before a start (`modern-gate-not-ready`) and on a bucket
+that fell after it (`modern-gate-flip-drop`) went with the start. What remains
+watches an explicit switch: that every taskworker decides the gate alike, and
+that the desired provider.yml's switch can be read.
 
 HOW: one Mimir instant query every five minutes, at the monitor's clock,
-through a services gateway, reads thirteen labelled parts from the
-configured environment. Over job `taskworker`: the `count` of
-`urnetwork_stats_provider_modern_gate_on` and of
-`process_start_time_seconds`, and the `max` of
-`urnetwork_stats_provider_modern_gate_start_seconds`, over every process;
-and over the settled processes, those whose `process_start_time_seconds` is
-older than five minutes (`< time() - 300`), the `count` of those processes
-and the `count`, `min` and `max` of the gate and of the start, matched to
-them by `and on(instance)`. Then
-`max(urnetwork_stats_provider_egress_source_started_seconds)`,
-`max by (bucket, outcome) (urnetwork_stats_provider_modern_gate_shadow)` and
-`sum by (bucket) (max by (bucket, index)
-(urnetwork_stats_provider_egress_index))` for quality and speed. Each
-taskworker's stats collector publishes the gate and its start from its own
-provider.yml at every refresh: whether the gate holds Quality and Speed now,
-and, only while the switch is absent, the start. Read per settled process
-against the settled processes, they show a fleet that does not agree: a
-taskworker on code without the automatic start publishes neither, one on an
-older config decides the gate the other way, which the `min` catches where
-the `max` would hide it, and one that missed a moved start schedules
-another. Only settled processes are compared because each push carries a
-random per-process `instance`: a new process registers the gate at its
-stats collector's first refresh, a minute or two after it starts, and a
-drained process's series stay readable for Mimir's five-minute lookback, so
-over every process a restart alone would read as a taskworker without the
-gate. The latest start over every process places the shadow's windows and
-the watch after it. The shadow counts, for the connected valid public
-providers the other rules admit to each bucket, what the gate decides for
-them, whether or not it is on: every outcome but `modern` is what it takes
-out.
+through a services gateway, reads six labelled parts from the configured
+environment, over job `taskworker`: the `count` of
+`urnetwork_stats_provider_modern_gate_on` and of `process_start_time_seconds`
+over every process, and over the settled processes, those whose
+`process_start_time_seconds` is older than five minutes (`< time() - 300`), the
+`count` of those processes and the `count`, `min` and `max` of the gate,
+matched to them by `and on(instance)`. Each taskworker's stats collector
+publishes the gate from its own provider.yml at every refresh: whether it
+holds Quality and Speed now. Read per settled process against the settled
+processes, it shows a fleet that does not agree: one on an older config
+decides the gate the other way, which the `min` catches where the `max` would
+hide it, and one still on code from before the retirement, with the switch
+absent, turns the gate on by itself at its old start. Only settled processes
+are compared because each push carries a random per-process `instance`: a new
+process registers the gate at its stats collector's first refresh, a minute
+or two after it starts, and a drained process's series stay readable for
+Mimir's five-minute lookback, so over every process a restart alone would
+read as a taskworker without the gate. The verdict reads no clock: there is
+no start to judge against.
 
-- `modern-gate-not-ready` (frame the bucket, sustain 2): from 72 hours before
-  the published start, more than half of a bucket's admitted providers are
-  not `modern` in the shadow (exactly half does not fire). WARN from 72 hours
-  before, PAGE from 24 hours before, under the same identity so the warning
-  escalates. The shadow is judged only on dashboard counts whose source read
-  started between 30 minutes ago and 30 seconds in the future, inclusive,
-  and that carry every bucket and outcome; otherwise the run is
-  `cannot-observe`.
-- `modern-gate-flip-drop` (frame the bucket, sustain 1, PAGE): after the
-  start, until 18:00 UTC on the start's day (and at least an hour after the
-  start), while the kill switch can still be released, a bucket holds less
-  than half the providers it had in the last sample a second before the
-  start. It clears when the bucket recovers or the gate is off on every
-  taskworker. Counts whose valid source timestamp precedes the start, or
-  that were published before every taskworker flipped, are no verdict yet;
-  a missing sample before the start is `cannot-observe`. A missing source-start gauge
-  or one without a positive Unix millisecond timestamp is also
-  `cannot-observe`, never a complete healthy run. A current count's source
-  read more than 30 seconds in the future is also `cannot-observe`, even
-  though it compares after the start; it cannot establish a drop or healthy bucket.
-- `modern-gate-fleet-disagrees` (sustain 2), judged on the settled
-  processes: they decide the gate differently (`min` below `max`); fewer
-  publish the gate than run, inside the windows, where one without the gate
-  will not flip with the rest, or anywhere while the gate is on somewhere,
-  since one without it decides it off; or, inside the windows while a start
-  is ahead, fewer schedule a start than publish the gate or their starts
-  differ. Outside the windows a taskworker without the gate beside a gate
-  off everywhere agrees for now, as in a rollout from code before the gate
-  ahead of the start. Inside the windows WARN from 72 hours before
-  the earliest start, since some will not flip with the rest, and PAGE from
-  it until the watch after the latest start ends: Quality and Speed then
-  follow whichever taskworker ran the last score export. Outside them, and
-  while provider.yml sets the switch on every taskworker so that none
-  publishes a start, a gate decided differently WARNs: a taskworker that
-  comes back on an older config after 18:00 UTC on the start's day is seen.
-  With no taskworker process series in Mimir inside the windows the run is
-  `cannot-observe`.
+- `modern-gate-fleet-disagrees` (sustain 2, WARN), judged on the settled
+  processes: they decide the gate differently (`min` below `max`), or fewer
+  publish the gate than run while it is on somewhere, since one without it
+  decides it off. A taskworker without the gate beside a gate off everywhere
+  agrees, as in a rollout from code before the gate. While they disagree,
+  Quality and Speed follow whichever taskworker ran the last score export.
 - `modern-gate-schedule-unreadable` (frame `provider.yml`, sustain 1, WARN,
   an unknown state): the deployment's desired provider.yml, as the
   monitor's own copy of the decoder reads it
   (`model.GetModernProviderGateFailure`), holds the gate off by a failure: a
-  switch that cannot be read or has no value, or, while the switch is
-  absent, a start that is neither an RFC 3339 instant nor a date, is given
-  twice or has no value, or a provider.yml that cannot be read. Each reads
-  as the kill switch and publishes no start, which silences everything
-  above, though it is most likely a postponement that failed; the finding
-  names the failure as a fixed text, never the value given. It is read
-  apart from Mimir, beside `cannot-observe` when Mimir cannot be read.
+  switch that cannot be read, is given twice or has no value, or a
+  provider.yml that cannot be read. Each reads as `false`, as an absent
+  switch does, though a switch was most likely meant: a `true` that failed
+  leaves the gate off, and the fleet agrees on that. The finding names the
+  failure as a fixed text, never the value given. The retired start is never
+  a failure, whatever it holds. It is read apart from Mimir, beside
+  `cannot-observe` when Mimir cannot be read.
 
-Outside 72 hours before the earliest start to the end of the watch after the
-latest the signal is otherwise quiet, whatever the gauges say. A part the
-verdict cannot read is `cannot-observe`, beside the findings the rest of it
-gives. For both readiness and the post-flip drop, a dashboard source-read
-start more than 30 seconds in the monitor's future is `cannot-observe`,
-never evidence that a bucket is ready, recovered, or fallen; this permits
-the same small cross-host clock skew as adjacent Mimir source checks.
-Independent fleet-disagreement findings still stand. No start series means
-the switch is set, true, false or unreadable,
-so no flip is scheduled and only the fleet's agreement is judged: the
-owner's postponement silences the rest, and a moved start moves its windows.
-When no taskworker publishes `urnetwork_stats_provider_modern_gate_on`
-inside the windows of the code's default start, the taskworkers do not run
-the code that flips the gate, or their stats collector is down: the run is
-`cannot-observe`, never quiet. Outside those windows a failed read stays
-quiet.
+A read that fails, an answer with a part the query does not ask for, or a
+sample that is not a count is `cannot-observe`, never quiet, at any time:
+the fleet's agreement is then unknown, and the run is no evidence that a
+disagreement has cleared. With the start windows, a failed read outside them
+stayed quiet.
 
-The monitor's cross-host source-clock allowance is 30 seconds, as specified by
-`modernGateReadinessMaxFutureSkew` in `signal_modern_gate_readiness.go`.
-The exact 30-second edge remains valid; a later source start invalidates both
-buckets because they share that clock. The shared dashboard snapshot owner's
-`statsProviderEgressClockSkew` in `controller/stats_provider_egress_cache.go`
-is a separate, producer-local five-second freshness check: completion cannot
-precede the source start or exceed that reader's clock plus five seconds.
-The stats collector publishes the original source start unchanged. The same
-owner requires `StartedAt.UnixMilli() > 0`; an absent gauge or a zero-valued
-gauge does not establish that the counts were read before the gate start.
-This business timestamp is distinct from the Mimir evaluation timestamp,
-which must still match the requested query second.
-An independently observed fleet disagreement stays beside `cannot-observe`.
-With a valid clock, one bucket's missing outcome or historical sample still
-leaves the other bucket's established finding intact. The post-start watch's
-existing source-at-or-after-start rule remains separate from the pre-start
-shadow's 30-minute age limit; a fully disabled gate does not use those counts.
-Missing-clock runs stay incomplete through the public signal, cadence gate,
-and notifier, so they cannot clear a previously observed bucket incident.
-Only later complete observations count toward the notifier's existing clear
-window. Independently proved fleet failures remain visible during the gap.
-
-ACTION: decide before the start. To postpone, set
-`quality_speed_requires_modern_provider: false` in provider.yml: the kill
-switch, after which the next score export restores the buckets. To move the
-flip, set `quality_speed_modern_provider_start` to an RFC 3339 instant such
-as `2026-10-28T00:00:00Z`, or a date such as `2026-10-28`, its 00:00 UTC.
-Either is a config release through the config-updater and a restart of every
+ACTION: find the taskworkers whose `urnetwork_stats_provider_modern_gate_on`
+is missing or differs (by host and block), confirm each runs the current
+build and its host publishes the current config (WARP_CONFIG_VERSION), and
+restart or redeploy those that differ. The gate is on only while provider.yml
+sets `quality_speed_requires_modern_provider: true`; `false`, or no switch at
+all, keeps it off, and the next score export restores the buckets. A change
+is a config release through the config-updater and a restart of every
 taskworker and API block, since a running container keeps the config version
 it was created with (the same procedure as server/capprobe/README.md,
-"Switching it on"), and it postpones the flip only when the restarts finish
-before the start. A switch given without a value, or a start that cannot be
-read, keeps the gate off and is logged, as a postponement that failed, and
-publishes no start, which would silence this signal: the monitor's own
-decode of the desired provider.yml WARNs `modern-gate-schedule-unreadable`
-for it. Confirm the moved start on
-`urnetwork_stats_provider_modern_gate_start_seconds` or with
-`bringyourctl provider inspect` after the restart. To let it flip, first
-switch the capability probe on and let it sweep the eligible providers until
-`no_evidence` is small. After the start, a `modern-gate-flip-drop` page
-whose drop the shadow explains is answered with the same kill switch; a drop
-the shadow does not explain has another cause (§2.19, §2.23) and the gate is
-not the thing to turn off. Operational rule for the start's day: from the
-start until 18:00 UTC no taskworker restarts except to release the kill
-switch, since every rollout makes the fleet disagree while it runs.
+"Switching it on"). Confirm the switch with `bringyourctl provider inspect`
+after the restart, which prints it and the effective `rank_modern_first`. For
+`modern-gate-schedule-unreadable`, correct the key in provider.yml and
+release it the same way.
 
-False positive: a URL probe outage or other bucket loss in the watch after
-the start pages `modern-gate-flip-drop` though the gate took little; read
-the shadow beside it. A restart alone does not fire, since a process is
-compared only once settled, but a config release that sets the switch or
-moves the start makes the fleet disagree until its last taskworker has
-restarted and the drained processes' series have gone stale, up to five
-minutes after each drain: the kill switch's own rollout after the start can
-page `modern-gate-fleet-disagrees` until it completes. A process that
-disagrees is seen only once settled, five minutes after its start. False
-positive qualifier for source time: a missing or nonpositive source clock,
-or one more than 30 seconds in the future, establishes an observation defect,
-not missing capability evidence or a gate-caused bucket loss. False negative
-qualifier for source time: a fresh Mimir evaluation timestamp cannot make a
-business snapshot beyond that allowance current; neither healthy
-counts nor a severe apparent drop can supply that missing authority. An
-absent or zero-valued source-start gauge is not a measured pre-flip snapshot
-and cannot establish recovery merely because its zero value sorts before the
-gate start. False negative: the dashboard counts cover connected valid public
-providers, the score export's Online population. API processes decide the gate for their
-own readers but publish no gauge, so an API block on an older config is not
-seen.
+False positive: a config release that sets or clears the switch makes the
+fleet disagree until its last taskworker has restarted and the drained
+processes' series have gone stale, up to five minutes after each drain; the
+sustain of 2 carries a short rollout. A restart alone does not fire, since a
+process is compared only once settled. False negative: API, alt and proxy
+processes decide the gate for their own readers but publish no gauge, so a
+reader on an older config is not seen, and a fleet that agrees on the gate
+on, by an explicit `true`, is healthy here. A taskworker still on code from
+before the retirement, with the switch absent, publishes the gate off and its
+old start until 2026-11-11 00:00 UTC; this signal reads no start, so it is
+seen only once it flips. FP2-MODERN.md's Rollout step 0 sets the switch
+`false` everywhere before then.
 
 Implementation convention: SIGNALS.md §2.29 (`modern-gate-readiness`) maps to
 `signal_modern_gate_readiness.go` and `signal_modern_gate_readiness_test.go`,
 registered by `NewModernGateReadinessSignal`. Pure tests with synthetic gauge
-values cover quiet outside the windows, the warning from 72 hours, the page
-from 24 hours, the page after the flip and its exact-half boundaries, the
-watch to 18:00 UTC on the start's day and its clears, a fleet that
-disagrees on the gate or the schedule before and after the start, a moved
-start a taskworker missed, the WARN outside the windows and with the switch
-set everywhere, a rollout from code before the gate that stays quiet until
-the windows, findings kept beside what cannot be read, counts read
-before the flip, a set switch, a moved start, an unpublished schedule, and
-stale or incomplete counts, the exact future-clock allowance and its first
-invalid instant, and future counts beside an independent fleet finding;
-missing and zero-valued source clocks through the public adapter, independent
-fleet findings with failed history, restored-clock healthy and failure
-controls, and notifier retention followed by complete-run clearing;
-synthetic Mimir answers, built from taskworker processes as the query reads
-them, drive the signal's own queries for the
-page before the start, the page after it, a disagreeing fleet, a restart
-that is not judged until its process has settled, and a failed
-postponement in the desired provider.yml, beside a Mimir that answers and
-one that cannot be read.
+values cover a fleet that agrees with the gate off or on everywhere, one that
+decides it differently, one without the gate while it is on and while it is
+off, and one where none publishes it. Synthetic Mimir answers, built from
+taskworker processes as the query reads them, drive the signal's own query
+at instants before, at and after the former start of 2026-11-11 and inside
+its former windows: an agreeing fleet stays quiet and a disagreeing one
+WARNs, never PAGEs; a restart is not judged until its process has settled; a
+rollout from code before the gate stays quiet; failed and invalid reads, the
+retired start part among them, are observation errors; and a switch that
+cannot be read WARNs beside a Mimir that answers and one that cannot be read,
+and through the model's own decoder of the desired provider.yml, where the
+retired start, in any form, is no failure.
 
 2026-10-22 addendum, the miss: the gate turned on by itself at 2026-10-21
 00:00Z. The score export kept 1 of 146 admitted Quality providers and 203 of
@@ -23109,6 +23063,13 @@ Rules added:
   counts moved at 00:05Z, but the damage built up over 14 hours: §14.8
   identity churn, then §2.30 contract latency and PgBouncer queueing from
   14:00Z.
+
+2026-10-28 note: the gate is retired (server/FP2-MODERN.md), so no start is
+left to be unknown before, and the rules above that key on a scheduled start,
+`modern-gate-readiness-unknown`, `modern-gate-decision-missing` and the fail
+safe, have nothing left to act on. The fail safe's aim now holds by
+construction: the gate turns on only with an explicit
+`quality_speed_requires_modern_provider: true`.
 
 ### 2.30 Contract-creation stage latency — the database reaching the data plane
 Probe: `contract-stage-latency`

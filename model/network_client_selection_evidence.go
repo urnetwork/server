@@ -207,6 +207,35 @@ func selectClientScoresByWeight(
 	return clientIds
 }
 
+// Draws up to n of the candidates with draw, the modern ones first: the others
+// only fill what the modern leave (FP2-MODERN.md, "Priority within each
+// band"). Off, it is draw itself. Each class keeps the band's own order,
+// facets, evidence ranks and weights.
+func selectClientScoresModernFirst(
+	candidateClientScores map[server.Id]*ClientScore,
+	n int,
+	modernFirst bool,
+	draw func(map[server.Id]*ClientScore, int) []server.Id,
+) []server.Id {
+	if !modernFirst {
+		return draw(candidateClientScores, n)
+	}
+	modernClientScores := map[server.Id]*ClientScore{}
+	otherClientScores := map[server.Id]*ClientScore{}
+	for clientId, clientScore := range candidateClientScores {
+		if clientScore.Modern {
+			modernClientScores[clientId] = clientScore
+		} else {
+			otherClientScores[clientId] = clientScore
+		}
+	}
+	clientIds := draw(modernClientScores, n)
+	if len(clientIds) < n {
+		clientIds = append(clientIds, draw(otherClientScores, n-len(clientIds))...)
+	}
+	return clientIds
+}
+
 // The URL weight the Online fallback reads: a record written before the
 // weight existed has none, and reads as neutral.
 func onlineFallbackUrlWeight(clientScore *ClientScore) float64 {
@@ -375,6 +404,19 @@ var findProviders2RankMeasuredFirstEnabled = prometheus.NewGaugeFunc(prometheus.
 	return 0
 })
 
+// Each process's effective rank_modern_first, as its FindProviders2 draws read
+// it (through the request settings, at most RequestSettingsMaxAge old).
+// Configuration, not request outcomes, like rank_measured_first's gauge.
+var findProviders2RankModernFirstEnabled = prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+	Name: "urnetwork_findproviders2_rank_modern_first_enabled",
+	Help: "Effective cached rank_modern_first configuration for FindProviders2 band draws; does not attest request outcomes",
+}, func() float64 {
+	if requestEgressIndexSettings().RankModernFirst {
+		return 1
+	}
+	return 0
+})
+
 // Every label pair is exported from the start, so a share is defined before
 // the first answer.
 func init() {
@@ -383,5 +425,5 @@ func init() {
 			findProviders2OnlineFallbackEvidence.WithLabelValues(rankMode, rank.String())
 		}
 	}
-	prometheus.MustRegister(findProviders2OnlineFallbackEvidence, findProviders2RankMeasuredFirstEnabled)
+	prometheus.MustRegister(findProviders2OnlineFallbackEvidence, findProviders2RankMeasuredFirstEnabled, findProviders2RankModernFirstEnabled)
 }

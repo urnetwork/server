@@ -125,11 +125,13 @@ func (redisStatsProviderEgressCacheStore) release(ctx context.Context, key, toke
 // The modern provider gate's shadow arrived with schema 3 of
 // model.ProviderEgressCountsPolicyKey, so a snapshot without it lives under
 // an older policy key and is never read here.
+// The Online members' modern outcomes arrived with schema 6 the same way.
 type statsProviderEgressWireCounts struct {
 	Buckets          map[string]map[string]int64 `json:"b"`
 	Reasons          map[string]int64            `json:"r"`
 	MaxIndex         *int                        `json:"m"`
 	ModernGateShadow map[string]map[string]int64 `json:"g"`
+	ModernOnline     map[string]int64            `json:"o"`
 }
 
 type statsProviderEgressWire struct {
@@ -185,6 +187,15 @@ func validStatsProviderEgressCounts(counts *model.ProviderEgressCounts) bool {
 			}
 		}
 	}
+	// the Online members, with exactly every outcome
+	if len(counts.ModernOnlineCounts) != len(model.ProviderModernOutcomes) {
+		return false
+	}
+	for _, outcome := range model.ProviderModernOutcomes {
+		if count, ok := counts.ModernOnlineCounts[outcome]; !ok || count < 0 {
+			return false
+		}
+	}
 	return true
 }
 
@@ -205,6 +216,7 @@ func encodeStatsProviderEgressSnapshot(snapshot *statsProviderEgressSnapshot, no
 		Reasons:          snapshot.Counts.ReasonCounts,
 		MaxIndex:         &snapshot.Counts.MaxIndex,
 		ModernGateShadow: snapshot.Counts.ModernGateShadowCounts,
+		ModernOnline:     snapshot.Counts.ModernOnlineCounts,
 	}})
 	if err != nil || len(encoded) > statsProviderEgressWireBytes {
 		return "", errStatsProviderEgressInvalid
@@ -225,7 +237,7 @@ func decodeStatsProviderEgressSnapshot(value string, now time.Time) (*statsProvi
 	if decoder.Decode(new(any)) != io.EOF {
 		return nil, false, errStatsProviderEgressInvalid
 	}
-	snapshot := &statsProviderEgressSnapshot{&model.ProviderEgressCounts{BucketIndexCounts: wire.Counts.Buckets, ReasonCounts: wire.Counts.Reasons, MaxIndex: *wire.Counts.MaxIndex, ModernGateShadowCounts: wire.Counts.ModernGateShadow}, time.UnixMilli(wire.Started), time.UnixMilli(wire.Completed)}
+	snapshot := &statsProviderEgressSnapshot{&model.ProviderEgressCounts{BucketIndexCounts: wire.Counts.Buckets, ReasonCounts: wire.Counts.Reasons, MaxIndex: *wire.Counts.MaxIndex, ModernGateShadowCounts: wire.Counts.ModernGateShadow, ModernOnlineCounts: wire.Counts.ModernOnline}, time.UnixMilli(wire.Started), time.UnixMilli(wire.Completed)}
 	fresh, err := statsProviderEgressSnapshotFresh(snapshot, now)
 	return snapshot, fresh, err
 }

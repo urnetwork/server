@@ -72,9 +72,11 @@ type Settings struct {
 
 // The probe ships switched off: capability_probe.yml turns it on, and these
 // values stand for every key the file leaves out. Sixteen tunnels at a time
-// measure about 700 providers an hour, so the fleet's Quality and Speed
-// providers are measured in about two days and refreshed every three, well
-// inside the gate's seven-day staleness window.
+// measured about 580 providers an hour, enough for the Quality and Speed
+// providers the probe measured first. The Online providers it measures (about
+// 49,000 on 2026-10-13) need at least about 690 an hour for a 72-hour
+// refresh, so a deployment raises concurrency and limit in its file, as
+// main's has to 32 and 128 since 2026-10-15 (README.md, "Capacity").
 func DefaultSettings() Settings {
 	return Settings{
 		Enabled:                 false,

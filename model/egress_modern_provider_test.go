@@ -13,13 +13,17 @@ import (
 )
 
 // The modern provider gate (egress_modern_provider.go), pure: the outcome a
-// provider's evidence gives, the decision with the gate off and on, the flip
-// at its start, the shadow counts, the switch and the start in provider.yml,
-// the evidence the ingest refuses and the provider status.
+// provider's evidence gives, the decision with the gate off and on, a switch
+// that alone decides it at every instant, the shadow counts, the switch in
+// provider.yml beside the retired start, the evidence the ingest refuses and
+// the provider status.
 
-// A fixed evaluation time, so no test reads the clock. It is before the
-// gate's default start.
+// A fixed evaluation time, so no test reads the clock.
 var modernGateTestNow = time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+
+// The instant an absent switch turned the gate on by itself until the start
+// was retired (owner decision 2026-10-28, FP2-MODERN.md).
+var modernGateTestFormerStart = time.Date(2026, 11, 11, 0, 0, 0, 0, time.UTC)
 
 // An evidence row last measured age before modernGateTestNow.
 func modernGateTestRecord(postQuantum bool, windowResizable bool, age time.Duration) *ProviderModernEvidenceRecord {
@@ -82,14 +86,6 @@ func modernGateTestSettings(enabled bool) *EgressIndexSettings {
 	return settings
 }
 
-// The default settings with the switch absent and the gate's start at start.
-func modernGateTestScheduledSettings(start time.Time) *EgressIndexSettings {
-	settings := DefaultEgressIndexSettings()
-	settings.QualitySpeedRequiresModernProvider = nil
-	settings.QualitySpeedModernProviderStart = start
-	return settings
-}
-
 // An evidence row measured an hour before at: both capabilities as given.
 func modernGateTestRecordAt(at time.Time, postQuantum bool, windowResizable bool) *ProviderModernEvidenceRecord {
 	record := modernGateTestRecord(postQuantum, windowResizable, 0)
@@ -139,14 +135,14 @@ func TestProviderModernEvidenceStalenessBoundary(t *testing.T) {
 	connect.AssertEqual(t, classifyProviderModernEvidence(modernGateTestRecord(true, true, -time.Second), modernGateTestNow), ProviderModernOutcomeModern)
 }
 
-// With the gate off, as the default is before its start, every provider
+// With the gate off, as the default is at every instant, every provider
 // keeps exactly the buckets the other rules give it, whatever its evidence
 // says: Quality, Speed and Online for a passing ratio, Speed and Online for an
 // ARIN non-quality one.
 func TestModernProviderGateOffLeavesTheBucketsUnchanged(t *testing.T) {
 	settings := DefaultEgressIndexSettings()
 	if settings.QualitySpeedRequiresModernProvider != nil || settings.RequiresModernProvider(modernGateTestNow) {
-		t.Fatalf("the default settings hold the gate on at %s: switch %v, start %s", modernGateTestNow, settings.QualitySpeedRequiresModernProvider, settings.QualitySpeedModernProviderStart)
+		t.Fatalf("the default settings hold the gate on at %s: switch %v", modernGateTestNow, settings.QualitySpeedRequiresModernProvider)
 	}
 	records := map[string]*ProviderModernEvidenceRecord{
 		ProviderModernOutcomeModern:             modernGateTestRecord(true, true, time.Hour),
@@ -243,86 +239,60 @@ func TestModernProviderGateOnKeepsOnlyModernProvidersInQualityAndSpeed(t *testin
 	}
 }
 
-// The flip itself (owner decision 2026-10-28). With the switch absent, a
-// provider the probe has not shown to be modern keeps Quality and Speed a
-// microsecond, the smallest step a stored time takes, before the default
-// start, and is not_modern from exactly the start. The switch decides
-// whatever the time: false keeps the gate off at and long after the start,
-// true holds it on before. A modern provider keeps both buckets throughout.
-func TestModernProviderGateFlipsAtItsStart(t *testing.T) {
-	start := DefaultQualitySpeedModernProviderStart()
-	connect.AssertEqual(t, start, time.Date(2026, 11, 11, 0, 0, 0, 0, time.UTC))
-	connect.AssertEqual(t, DefaultEgressIndexSettings().QualitySpeedModernProviderStart, start)
+// The switch alone decides the gate (owner decision 2026-10-28,
+// FP2-MODERN.md). Absent, the gate is off at every instant: the automatic
+// cutoffs decided before the retirement, a microsecond before, at and after
+// 2026-11-11 00:00 UTC, a year on, and instants far on either side of any
+// clock that runs this test, so a decision read from the clock is caught
+// too. false is off and true is on at every instant. A provider the probe
+// has not shown to be modern keeps Quality and Speed while the gate is off
+// and is not_modern while it is on, a modern provider keeps both
+// throughout, and the export's log line reports the pass's decision.
+func TestModernProviderGateIsOnOnlyWithItsSwitchTrue(t *testing.T) {
+	instants := []time.Time{
+		time.Date(2001, 1, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, 10, 21, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, 10, 28, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, 11, 4, 0, 0, 0, 0, time.UTC),
+		modernGateTestFormerStart.Add(-time.Microsecond),
+		modernGateTestFormerStart,
+		modernGateTestFormerStart.Add(time.Hour),
+		modernGateTestFormerStart.AddDate(1, 0, 0),
+		time.Date(2101, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
 	off, on := false, true
 	for _, c := range []struct {
 		name         string
 		modernSwitch *bool
-		now          time.Time
 		gate         bool
 	}{
-		{name: "absent, at the previous cutoff", modernSwitch: nil, now: time.Date(2026, 10, 21, 0, 0, 0, 0, time.UTC), gate: false},
-		{name: "absent, at the previously postponed cutoff", modernSwitch: nil, now: time.Date(2026, 10, 28, 0, 0, 0, 0, time.UTC), gate: false},
-		{name: "absent, at the cutoff postponed on 2026-10-24", modernSwitch: nil, now: time.Date(2026, 11, 4, 0, 0, 0, 0, time.UTC), gate: false},
-		{name: "absent, a microsecond before the start", modernSwitch: nil, now: start.Add(-time.Microsecond), gate: false},
-		{name: "absent, at the start", modernSwitch: nil, now: start, gate: true},
-		{name: "absent, an hour after the start", modernSwitch: nil, now: start.Add(time.Hour), gate: true},
-		{name: "false, a microsecond before the start", modernSwitch: &off, now: start.Add(-time.Microsecond), gate: false},
-		{name: "false, at the start", modernSwitch: &off, now: start, gate: false},
-		{name: "false, a year after the start", modernSwitch: &off, now: start.AddDate(1, 0, 0), gate: false},
-		{name: "true, a day before the start", modernSwitch: &on, now: start.AddDate(0, 0, -1), gate: true},
-		{name: "true, a microsecond before the start", modernSwitch: &on, now: start.Add(-time.Microsecond), gate: true},
-		{name: "true, at the start", modernSwitch: &on, now: start, gate: true},
+		{name: "absent", modernSwitch: nil, gate: false},
+		{name: "false", modernSwitch: &off, gate: false},
+		{name: "true", modernSwitch: &on, gate: true},
 	} {
 		settings := DefaultEgressIndexSettings()
 		settings.QualitySpeedRequiresModernProvider = c.modernSwitch
-		connect.AssertEqual(t, settings.RequiresModernProvider(c.now), c.gate)
-
-		legacy, modern := server.NewId(), server.NewId()
-		filter := modernGateTestFilterAt(c.now, map[server.Id]*ProviderModernEvidenceRecord{
-			legacy: modernGateTestRecordAt(c.now, false, true),
-			modern: modernGateTestRecordAt(c.now, true, true),
-		})
-		decision := modernGateTestDecide(filter, legacy, settings)
-		connect.AssertEqual(t, decision.modernOutcome, ProviderModernOutcomeNotPostQuantum)
-		if c.gate {
-			if decision.reason != ProviderExcludedNotModern || decision.quality || decision.speed || !decision.online || !decision.counted || decision.hardExcluded {
-				t.Errorf("%s: decision %+v, want online-only for not_modern", c.name, decision)
+		for _, now := range instants {
+			if gate := settings.RequiresModernProvider(now); gate != c.gate {
+				t.Errorf("%s at %s: gate %t, want %t", c.name, now, gate, c.gate)
 			}
-		} else if decision.reason != "" || !decision.quality || !decision.speed || !decision.online || !decision.counted {
-			t.Errorf("%s: decision %+v, want every bucket", c.name, decision)
-		}
-		if decision := modernGateTestDecide(filter, modern, settings); decision.reason != "" || !decision.quality || !decision.speed || !decision.online {
-			t.Errorf("%s: modern provider decision %+v, want every bucket", c.name, decision)
-		}
-	}
-}
 
-// A pass decides at its filter's instant, never at a clock read of its own:
-// with the switch absent, a pass whose instant is the start holds the gate
-// on and one a microsecond before holds it off. The two starts lie far on
-// either side of any clock that runs this test, so a decision read from the
-// clock gets one of them wrong whatever the day. The export's log line
-// reports the same decision from the same instant.
-func TestModernProviderGateDecidesAtThePassInstant(t *testing.T) {
-	for _, start := range []time.Time{
-		time.Date(2001, 1, 1, 0, 0, 0, 0, time.UTC),
-		time.Date(2101, 1, 1, 0, 0, 0, 0, time.UTC),
-	} {
-		settings := modernGateTestScheduledSettings(start)
-		for _, c := range []struct {
-			now  time.Time
-			gate bool
-		}{
-			{now: start.Add(-time.Microsecond), gate: false},
-			{now: start, gate: true},
-		} {
-			legacy := server.NewId()
-			filter := modernGateTestFilterAt(c.now, map[server.Id]*ProviderModernEvidenceRecord{
-				legacy: modernGateTestRecordAt(c.now, false, false),
+			legacy, modern := server.NewId(), server.NewId()
+			filter := modernGateTestFilterAt(now, map[server.Id]*ProviderModernEvidenceRecord{
+				legacy: modernGateTestRecordAt(now, false, true),
+				modern: modernGateTestRecordAt(now, true, true),
 			})
 			decision := modernGateTestDecide(filter, legacy, settings)
-			if (decision.reason == ProviderExcludedNotModern) != c.gate || decision.quality == c.gate || decision.speed == c.gate || !decision.online {
-				t.Errorf("start %s, pass at %s: decision %+v, want the gate on %t", start, c.now, decision, c.gate)
+			connect.AssertEqual(t, decision.modernOutcome, ProviderModernOutcomeNotPostQuantum)
+			if c.gate {
+				if decision.reason != ProviderExcludedNotModern || decision.quality || decision.speed || !decision.online || !decision.counted || decision.hardExcluded {
+					t.Errorf("%s at %s: decision %+v, want online-only for not_modern", c.name, now, decision)
+				}
+			} else if decision.reason != "" || !decision.quality || !decision.speed || !decision.online || !decision.counted {
+				t.Errorf("%s at %s: decision %+v, want every bucket", c.name, now, decision)
+			}
+			if decision := modernGateTestDecide(filter, modern, settings); decision.reason != "" || !decision.quality || !decision.speed || !decision.online {
+				t.Errorf("%s at %s: modern provider decision %+v, want every bucket", c.name, now, decision)
 			}
 
 			shadow := newProviderModernGateShadowCounts()
@@ -332,7 +302,7 @@ func TestModernProviderGateDecidesAtThePassInstant(t *testing.T) {
 				wantState = "on ("
 			}
 			if summary := providerModernGateShadowSummary(shadow, settings, filter.now); !strings.HasPrefix(summary, wantState) {
-				t.Errorf("start %s, pass at %s: log line %q, want it to begin %q", start, c.now, summary, wantState)
+				t.Errorf("%s at %s: log line %q, want it to begin %q", c.name, now, summary, wantState)
 			}
 		}
 	}
@@ -413,8 +383,10 @@ func TestModernProviderGateShadowCountsTheProvidersEachBucketAdmits(t *testing.T
 }
 
 // One log line per export: the gate's state at the pass's instant, how
-// provider.yml sets it and, per bucket, the providers admitted, the modern
-// ones and every outcome that would take one out.
+// provider.yml sets its switch and modern-first priority (FP2-MODERN.md)
+// and, per bucket, the providers admitted, the modern ones and every outcome
+// that would take one out. No start is named: an absent switch is off, at
+// the former start too.
 func TestModernProviderGateShadowSummary(t *testing.T) {
 	shadow := newProviderModernGateShadowCounts()
 	shadow[RankModeQuality][ProviderModernOutcomeModern] = 6
@@ -422,62 +394,70 @@ func TestModernProviderGateShadowSummary(t *testing.T) {
 	shadow[RankModeQuality][ProviderModernOutcomeNotPostQuantum] = 1
 	shadow[RankModeSpeed][ProviderModernOutcomeModern] = 7
 	shadow[RankModeSpeed][ProviderModernOutcomeStaleEvidence] = 2
-	start := DefaultQualitySpeedModernProviderStart()
 	connect.AssertEqual(
 		t,
 		providerModernGateShadowSummary(shadow, DefaultEgressIndexSettings(), modernGateTestNow),
-		"off, shadow only (quality_speed_requires_modern_provider absent, on from 2026-11-11T00:00:00Z), evidence max age 168h0m0s: quality 10 admitted, 6 modern, 4 not (not_post_quantum 1, no_resizable_windows 0, no_evidence 3, stale_evidence 0); speed 9 admitted, 7 modern, 2 not (not_post_quantum 0, no_resizable_windows 0, no_evidence 0, stale_evidence 2)",
+		"off, shadow only (quality_speed_requires_modern_provider absent (off); egress_index.rank_modern_first: true), evidence max age 168h0m0s: quality 10 admitted, 6 modern, 4 not (not_post_quantum 1, no_resizable_windows 0, no_evidence 3, stale_evidence 0); speed 9 admitted, 7 modern, 2 not (not_post_quantum 0, no_resizable_windows 0, no_evidence 0, stale_evidence 2)",
 	)
+	unranked := DefaultEgressIndexSettings()
+	unranked.RankModernFirst = false
 	for _, c := range []struct {
 		settings *EgressIndexSettings
 		now      time.Time
 		prefix   string
 	}{
-		{settings: DefaultEgressIndexSettings(), now: start, prefix: "on (quality_speed_requires_modern_provider absent, on from 2026-11-11T00:00:00Z), evidence max age"},
-		{settings: modernGateTestSettings(true), now: modernGateTestNow, prefix: "on (quality_speed_requires_modern_provider: true), evidence max age"},
-		{settings: modernGateTestSettings(false), now: start, prefix: "off, shadow only (quality_speed_requires_modern_provider: false), evidence max age"},
+		{settings: DefaultEgressIndexSettings(), now: modernGateTestFormerStart, prefix: "off, shadow only (quality_speed_requires_modern_provider absent (off); egress_index.rank_modern_first: true), evidence max age"},
+		{settings: modernGateTestSettings(true), now: modernGateTestNow, prefix: "on (quality_speed_requires_modern_provider: true; egress_index.rank_modern_first: true), evidence max age"},
+		{settings: modernGateTestSettings(false), now: modernGateTestFormerStart, prefix: "off, shadow only (quality_speed_requires_modern_provider: false; egress_index.rank_modern_first: true), evidence max age"},
+		{settings: unranked, now: modernGateTestFormerStart.AddDate(1, 0, 0), prefix: "off, shadow only (quality_speed_requires_modern_provider absent (off); egress_index.rank_modern_first: false), evidence max age"},
 	} {
-		if summary := providerModernGateShadowSummary(shadow, c.settings, c.now); !strings.HasPrefix(summary, c.prefix) {
+		summary := providerModernGateShadowSummary(shadow, c.settings, c.now)
+		if !strings.HasPrefix(summary, c.prefix) {
 			t.Errorf("summary %q, want it to begin %q", summary, c.prefix)
+		}
+		if strings.Contains(summary, "on from") || strings.Contains(summary, "2026-11-11") {
+			t.Errorf("summary %q names a start", summary)
 		}
 	}
 }
 
-// The schedule the stats collector publishes for the monitor: whether the
-// gate is on at the given instant and, only while the switch is absent, the
-// start it turns on at.
-func TestGetModernProviderGateSchedule(t *testing.T) {
+// What the stats collector publishes for the monitor: the gate on only with
+// the switch true. The retired start, wherever it lies and however it is
+// written, turns nothing on, and a switch that cannot be read is off.
+func TestGetModernProviderGateOn(t *testing.T) {
 	start := time.Date(2026, 11, 2, 12, 30, 0, 0, time.UTC)
 	for _, c := range []struct {
-		config         string
-		now            time.Time
-		on             bool
-		scheduledStart *time.Time
+		config string
+		now    time.Time
+		on     bool
 	}{
-		{config: "quality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", now: start.Add(-time.Microsecond), on: false, scheduledStart: &start},
-		{config: "quality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", now: start, on: true, scheduledStart: &start},
-		{config: "quality_speed_requires_modern_provider: false\nquality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", now: start, on: false, scheduledStart: nil},
-		{config: "quality_speed_requires_modern_provider: true\n", now: start.AddDate(-1, 0, 0), on: true, scheduledStart: nil},
-		{config: "quality_speed_requires_modern_provider: maybe\n", now: start, on: false, scheduledStart: nil},
-		{config: "quality_speed_requires_modern_provider: ~\n", now: start, on: false, scheduledStart: nil},
-		{config: "quality_speed_modern_provider_start: next week\n", now: start, on: false, scheduledStart: nil},
+		{config: "", now: modernGateTestFormerStart, on: false},
+		{config: "", now: modernGateTestFormerStart.AddDate(1, 0, 0), on: false},
+		{config: "quality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", now: start, on: false},
+		{config: "quality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", now: start.AddDate(1, 0, 0), on: false},
+		{config: "quality_speed_requires_modern_provider: false\nquality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", now: start, on: false},
+		{config: "quality_speed_requires_modern_provider: true\n", now: start.AddDate(-1, 0, 0), on: true},
+		{config: "quality_speed_requires_modern_provider: true\nquality_speed_modern_provider_start: 2100-01-01T00:00:00Z\n", now: start, on: true},
+		{config: "quality_speed_requires_modern_provider: maybe\n", now: start, on: false},
+		{config: "quality_speed_requires_modern_provider: ~\n", now: start, on: false},
+		{config: "quality_speed_modern_provider_start: next week\n", now: start, on: false},
 	} {
-		on, scheduledStart := func() (bool, *time.Time) {
+		on := func() bool {
 			pop := server.Config.PushSimpleResource(providerConfigResourceName, []byte(c.config))
 			defer pop()
-			return GetModernProviderGateSchedule(c.now)
+			return GetModernProviderGateOn(c.now)
 		}()
-		if on != c.on || (scheduledStart == nil) != (c.scheduledStart == nil) || scheduledStart != nil && !scheduledStart.Equal(*c.scheduledStart) {
-			t.Errorf("%q at %s: on %t start %v, want %t %v", c.config, c.now, on, scheduledStart, c.on, c.scheduledStart)
+		if on != c.on {
+			t.Errorf("%q at %s: on %t, want %t", c.config, c.now, on, c.on)
 		}
 	}
 }
 
 // A provider.yml that holds the gate off by a failure names it, a fixed text
-// without the value given: a file that is not yaml, a switch that cannot be
-// read or has no value, and, while the switch is absent, a start that cannot
-// be used. The switch set on purpose, a usable start, no gate keys, and an
-// unusable start beside a switch, which decides, name none.
+// without the value given: a file that is not yaml, and a switch that cannot
+// be read, is given twice or has no value. The switch set on purpose, no gate
+// keys, and the retired start in any form, beside a switch or without one,
+// name none: the start decides nothing, so it cannot fail.
 func TestGetModernProviderGateFailure(t *testing.T) {
 	for _, c := range []struct {
 		config  string
@@ -487,13 +467,16 @@ func TestGetModernProviderGateFailure(t *testing.T) {
 		{config: "quality_speed_requires_modern_provider: false\n", failure: ""},
 		{config: "quality_speed_requires_modern_provider: true\n", failure: ""},
 		{config: "quality_speed_modern_provider_start: 2026-11-02\n", failure: ""},
+		{config: "quality_speed_modern_provider_start: next week\n", failure: ""},
+		{config: "quality_speed_modern_provider_start:\n", failure: ""},
+		{config: "quality_speed_modern_provider_start: [2026-11-02]\n", failure: ""},
+		{config: "quality_speed_modern_provider_start: 2026-11-02\nquality_speed_modern_provider_start: 2026-11-03\n", failure: ""},
 		{config: "quality_speed_requires_modern_provider: false\nquality_speed_modern_provider_start: next week\n", failure: ""},
 		{config: "egress_index:\n\tmax_failure_index: 3\n", failure: "provider.yml cannot be read"},
 		{config: "quality_speed_requires_modern_provider: maybe\n", failure: "quality_speed_requires_modern_provider cannot be read"},
+		{config: "quality_speed_requires_modern_provider: true\nquality_speed_requires_modern_provider: true\n", failure: "quality_speed_requires_modern_provider cannot be read"},
 		{config: "quality_speed_requires_modern_provider: ~\n", failure: "quality_speed_requires_modern_provider has no value"},
-		{config: "quality_speed_modern_provider_start: next week\n", failure: "quality_speed_modern_provider_start is neither an RFC 3339 instant nor a date"},
-		{config: "quality_speed_modern_provider_start:\n", failure: "quality_speed_modern_provider_start has no value"},
-		{config: "quality_speed_modern_provider_start: [2026-11-02]\n", failure: "quality_speed_modern_provider_start cannot be read"},
+		{config: "quality_speed_requires_modern_provider:\nquality_speed_modern_provider_start: 2026-11-02\n", failure: "quality_speed_requires_modern_provider has no value"},
 	} {
 		failure := func() string {
 			pop := server.Config.PushSimpleResource(providerConfigResourceName, []byte(c.config))
@@ -514,101 +497,107 @@ func modernGateTestSwitchText(modernSwitch *bool) string {
 	return strconv.FormatBool(*modernSwitch)
 }
 
-// provider.yml sets the gate three ways (owner decision 2026-10-15): an
-// absent switch leaves it to its start, false keeps it off and true holds it
-// on. A switch that is not true or false, given twice, or given without a
-// value (empty, ~ or null) reads as false: the last is most likely a
-// postponement that failed, which read as absent turned the gate on at its
-// start. quality_speed_modern_provider_start moves the start with an RFC 3339
-// instant or a date, its 00:00 UTC; with the switch absent, a start given
-// that cannot be read, given twice or given without a value reads as the
-// switch false for the same reason, and beside a switch it changes nothing.
-// A malformed key changes no neighbour, and a malformed neighbour leaves
-// both. A file that is not yaml, here for a tab, reads as false with the
-// default start.
+// provider.yml sets the gate two ways (owner decision 2026-10-28,
+// FP2-MODERN.md): true holds it on, and false or an absent switch keeps it
+// off at every instant. A switch that is not true or false, given twice, or
+// given without a value (empty, ~ or null) reads as false. The retired
+// quality_speed_modern_provider_start changes none of it, whatever it holds,
+// a start already passed included: an absent switch beside it stays absent
+// and off. A malformed key changes no neighbour, and a malformed neighbour
+// leaves the switch. A file that is not yaml, here for a tab, reads as
+// false.
 func TestEgressIndexSettingsModernProviderGate(t *testing.T) {
 	load := func(config string) *EgressIndexSettings {
 		pop := server.Config.PushSimpleResource(providerConfigResourceName, []byte(config))
 		defer pop()
 		return egressIndexSettings()
 	}
-	defaultStart := DefaultQualitySpeedModernProviderStart()
-	moved := time.Date(2026, 11, 2, 12, 30, 0, 0, time.UTC)
-	movedDate := time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC)
 	off, on := false, true
 	neighbours := "online_requires_url_success: false\nonline_success_country_floor: 0.5\negress_index:\n  native_reader_enabled: true\n  max_failure_index: 9\n"
 	for _, c := range []struct {
 		name         string
 		config       string
 		modernSwitch *bool
-		start        time.Time
 	}{
-		{name: "absent", config: "", modernSwitch: nil, start: defaultStart},
-		{name: "true", config: "quality_speed_requires_modern_provider: true\n", modernSwitch: &on, start: defaultStart},
-		{name: "false", config: "quality_speed_requires_modern_provider: false\n", modernSwitch: &off, start: defaultStart},
-		{name: "a quoted true", config: "quality_speed_requires_modern_provider: \"true\"\n", modernSwitch: &off, start: defaultStart},
-		{name: "a number", config: "quality_speed_requires_modern_provider: 1\n", modernSwitch: &off, start: defaultStart},
-		{name: "a list", config: "quality_speed_requires_modern_provider: [true]\n", modernSwitch: &off, start: defaultStart},
-		{name: "the switch twice", config: "quality_speed_requires_modern_provider: true\nquality_speed_requires_modern_provider: true\n", modernSwitch: &off, start: defaultStart},
-		{name: "a start", config: "quality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", modernSwitch: nil, start: moved},
-		{name: "a quoted start", config: "quality_speed_modern_provider_start: \"2026-11-02T12:30:00Z\"\n", modernSwitch: nil, start: moved},
-		{name: "a start with an offset", config: "quality_speed_modern_provider_start: 2026-11-02T14:30:00+02:00\n", modernSwitch: nil, start: moved},
-		{name: "false and a start", config: "quality_speed_requires_modern_provider: false\nquality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", modernSwitch: &off, start: moved},
-		{name: "a switch without a value", config: "quality_speed_requires_modern_provider:\n", modernSwitch: &off, start: defaultStart},
-		{name: "a switch of ~", config: "quality_speed_requires_modern_provider: ~\n", modernSwitch: &off, start: defaultStart},
-		{name: "a switch of null", config: "quality_speed_requires_modern_provider: null\n", modernSwitch: &off, start: defaultStart},
-		{name: "a switch without a value and a start", config: "quality_speed_requires_modern_provider:\nquality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", modernSwitch: &off, start: moved},
-		{name: "a date", config: "quality_speed_modern_provider_start: 2026-11-02\n", modernSwitch: nil, start: movedDate},
-		{name: "a quoted date", config: "quality_speed_modern_provider_start: \"2026-11-02\"\n", modernSwitch: nil, start: movedDate},
-		{name: "a start that is not a time", config: "quality_speed_modern_provider_start: next week\n", modernSwitch: &off, start: defaultStart},
-		{name: "a time without a zone", config: "quality_speed_modern_provider_start: 2026-11-02T12:30:00\n", modernSwitch: &off, start: defaultStart},
-		{name: "a start in a list", config: "quality_speed_modern_provider_start: [2026-11-02T12:30:00Z]\n", modernSwitch: &off, start: defaultStart},
-		{name: "the start twice", config: "quality_speed_modern_provider_start: 2026-11-02T12:30:00Z\nquality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", modernSwitch: &off, start: defaultStart},
-		{name: "a start without a value", config: "quality_speed_modern_provider_start:\n", modernSwitch: &off, start: defaultStart},
-		{name: "a start of null", config: "quality_speed_modern_provider_start: null\n", modernSwitch: &off, start: defaultStart},
-		{name: "true and a malformed start", config: "quality_speed_requires_modern_provider: true\nquality_speed_modern_provider_start: soon\n", modernSwitch: &on, start: defaultStart},
-		{name: "true and a start without a value", config: "quality_speed_requires_modern_provider: true\nquality_speed_modern_provider_start:\n", modernSwitch: &on, start: defaultStart},
-		{name: "a malformed switch and a start", config: "quality_speed_requires_modern_provider: yes please\nquality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", modernSwitch: &off, start: moved},
+		{name: "absent", config: "", modernSwitch: nil},
+		{name: "true", config: "quality_speed_requires_modern_provider: true\n", modernSwitch: &on},
+		{name: "false", config: "quality_speed_requires_modern_provider: false\n", modernSwitch: &off},
+		{name: "a quoted true", config: "quality_speed_requires_modern_provider: \"true\"\n", modernSwitch: &off},
+		{name: "a number", config: "quality_speed_requires_modern_provider: 1\n", modernSwitch: &off},
+		{name: "a list", config: "quality_speed_requires_modern_provider: [true]\n", modernSwitch: &off},
+		{name: "the switch twice", config: "quality_speed_requires_modern_provider: true\nquality_speed_requires_modern_provider: true\n", modernSwitch: &off},
+		{name: "a switch without a value", config: "quality_speed_requires_modern_provider:\n", modernSwitch: &off},
+		{name: "a switch of ~", config: "quality_speed_requires_modern_provider: ~\n", modernSwitch: &off},
+		{name: "a switch of null", config: "quality_speed_requires_modern_provider: null\n", modernSwitch: &off},
+		{name: "a start", config: "quality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", modernSwitch: nil},
+		{name: "a start already passed", config: "quality_speed_modern_provider_start: 2001-01-01T00:00:00Z\n", modernSwitch: nil},
+		{name: "a date", config: "quality_speed_modern_provider_start: 2026-11-02\n", modernSwitch: nil},
+		{name: "a start that is not a time", config: "quality_speed_modern_provider_start: next week\n", modernSwitch: nil},
+		{name: "a start in a list", config: "quality_speed_modern_provider_start: [2026-11-02T12:30:00Z]\n", modernSwitch: nil},
+		{name: "the start twice", config: "quality_speed_modern_provider_start: 2026-11-02T12:30:00Z\nquality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", modernSwitch: nil},
+		{name: "a start without a value", config: "quality_speed_modern_provider_start:\n", modernSwitch: nil},
+		{name: "a start of null", config: "quality_speed_modern_provider_start: null\n", modernSwitch: nil},
+		{name: "false and a start", config: "quality_speed_requires_modern_provider: false\nquality_speed_modern_provider_start: 2001-01-01T00:00:00Z\n", modernSwitch: &off},
+		{name: "true and a malformed start", config: "quality_speed_requires_modern_provider: true\nquality_speed_modern_provider_start: soon\n", modernSwitch: &on},
+		{name: "true and a start far ahead", config: "quality_speed_requires_modern_provider: true\nquality_speed_modern_provider_start: 2100-01-01T00:00:00Z\n", modernSwitch: &on},
+		{name: "a switch without a value and a start", config: "quality_speed_requires_modern_provider:\nquality_speed_modern_provider_start: 2001-01-01T00:00:00Z\n", modernSwitch: &off},
+		{name: "a malformed switch and a start", config: "quality_speed_requires_modern_provider: yes please\nquality_speed_modern_provider_start: 2001-01-01T00:00:00Z\n", modernSwitch: &off},
 	} {
 		settings := load(c.config + neighbours)
-		if modernGateTestSwitchText(settings.QualitySpeedRequiresModernProvider) != modernGateTestSwitchText(c.modernSwitch) || !settings.QualitySpeedModernProviderStart.Equal(c.start) {
-			t.Errorf("%s: switch %s start %s, want %s %s", c.name, modernGateTestSwitchText(settings.QualitySpeedRequiresModernProvider), settings.QualitySpeedModernProviderStart, modernGateTestSwitchText(c.modernSwitch), c.start)
+		if modernGateTestSwitchText(settings.QualitySpeedRequiresModernProvider) != modernGateTestSwitchText(c.modernSwitch) {
+			t.Errorf("%s: switch %s, want %s", c.name, modernGateTestSwitchText(settings.QualitySpeedRequiresModernProvider), modernGateTestSwitchText(c.modernSwitch))
+		}
+		gate := c.modernSwitch != nil && *c.modernSwitch
+		for _, now := range []time.Time{modernGateTestNow, modernGateTestFormerStart, modernGateTestFormerStart.AddDate(1, 0, 0)} {
+			if settings.RequiresModernProvider(now) != gate {
+				t.Errorf("%s at %s: gate %t, want %t", c.name, now, !gate, gate)
+			}
 		}
 		if settings.OnlineRequiresUrlSuccess || settings.OnlineSuccessCountryFloor != 0.5 || !settings.NativeReaderEnabled || settings.MaxFailureIndex != 9 {
 			t.Errorf("%s reset another key: rule %t floor %v native_reader_enabled %t max_failure_index %d", c.name, settings.OnlineRequiresUrlSuccess, settings.OnlineSuccessCountryFloor, settings.NativeReaderEnabled, settings.MaxFailureIndex)
 		}
 	}
 
-	// a tab makes the whole file unreadable: the gate is off for good, the
-	// start is the default, and the URL-success rule is off as well
+	// a tab makes the whole file unreadable: the gate is off for good, and
+	// the URL-success rule is off as well
 	settings := load("egress_index:\n\tnative_reader_enabled: true\nquality_speed_requires_modern_provider: true\nquality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n")
-	if modernGateTestSwitchText(settings.QualitySpeedRequiresModernProvider) != "false" || !settings.QualitySpeedModernProviderStart.Equal(defaultStart) || settings.RequiresModernProvider(defaultStart.AddDate(1, 0, 0)) || settings.OnlineRequiresUrlSuccess {
-		t.Errorf("a file that is not yaml: switch %s start %s rule %t, want false at the default start and the rule off", modernGateTestSwitchText(settings.QualitySpeedRequiresModernProvider), settings.QualitySpeedModernProviderStart, settings.OnlineRequiresUrlSuccess)
+	if modernGateTestSwitchText(settings.QualitySpeedRequiresModernProvider) != "false" || settings.RequiresModernProvider(modernGateTestFormerStart.AddDate(1, 0, 0)) || settings.OnlineRequiresUrlSuccess {
+		t.Errorf("a file that is not yaml: switch %s rule %t, want false and the rule off", modernGateTestSwitchText(settings.QualitySpeedRequiresModernProvider), settings.OnlineRequiresUrlSuccess)
 	}
-	// malformed neighbours leave a valid switch and start
+	// malformed neighbours leave a valid switch
 	settings = load("quality_speed_requires_modern_provider: true\nquality_speed_modern_provider_start: 2026-11-02T12:30:00Z\nonline_requires_url_success: \"false\"\nonline_success_country_floor: 36%\negress_index:\n  max_failure_index: \"nine\"\n")
-	if modernGateTestSwitchText(settings.QualitySpeedRequiresModernProvider) != "true" || !settings.QualitySpeedModernProviderStart.Equal(moved) {
-		t.Errorf("malformed neighbours: switch %s start %s, want true %s", modernGateTestSwitchText(settings.QualitySpeedRequiresModernProvider), settings.QualitySpeedModernProviderStart, moved)
+	if modernGateTestSwitchText(settings.QualitySpeedRequiresModernProvider) != "true" {
+		t.Errorf("malformed neighbours: switch %s, want true", modernGateTestSwitchText(settings.QualitySpeedRequiresModernProvider))
 	}
-	// an absent switch decides by the start read, that instant included
-	settings = load("quality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n")
-	connect.AssertEqual(t, settings.RequiresModernProvider(moved.Add(-time.Microsecond)), false)
-	connect.AssertEqual(t, settings.RequiresModernProvider(moved), true)
-	// a start after the default one holds the gate off at the default start;
-	// a week after it, wherever the default moves
-	postponed := defaultStart.AddDate(0, 0, 7)
-	settings = load("quality_speed_modern_provider_start: " + postponed.Format(time.RFC3339) + "\n")
-	connect.AssertEqual(t, settings.RequiresModernProvider(defaultStart), false)
-	connect.AssertEqual(t, settings.RequiresModernProvider(postponed.Add(-time.Microsecond)), false)
-	connect.AssertEqual(t, settings.RequiresModernProvider(postponed), true)
-	// a date starts the gate at its 00:00 UTC
-	settings = load("quality_speed_modern_provider_start: 2026-11-02\n")
-	connect.AssertEqual(t, settings.RequiresModernProvider(movedDate.Add(-time.Microsecond)), false)
-	connect.AssertEqual(t, settings.RequiresModernProvider(movedDate), true)
-	// a failed postponement holds the gate off past the default start
-	for _, config := range []string{"quality_speed_requires_modern_provider:\n", "quality_speed_modern_provider_start: next week\n", "quality_speed_modern_provider_start: ~\n"} {
-		if load(config).RequiresModernProvider(defaultStart.AddDate(0, 0, 7)) {
-			t.Errorf("%q held the gate on after the default start", config)
+}
+
+// The retired start is logged once per process: the first decode that finds
+// it in provider.yml takes the once-flag and logs that it is ignored, so the
+// later decodes, which run on every pass and request refresh, find the flag
+// taken and log nothing. A provider.yml without it leaves the flag, and the
+// key decodes cleanly at every decode.
+func TestEgressIndexSettingsLogTheRetiredModernProviderStartOnce(t *testing.T) {
+	logged := modernProviderStartIgnoredLogged.Load()
+	t.Cleanup(func() {
+		modernProviderStartIgnoredLogged.Store(logged)
+	})
+	modernProviderStartIgnoredLogged.Store(false)
+	decode := func(config string) (*EgressIndexSettings, string) {
+		pop := server.Config.PushSimpleResource(providerConfigResourceName, []byte(config))
+		defer pop()
+		return decodeEgressIndexSettings()
+	}
+
+	if _, failure := decode("quality_speed_requires_modern_provider: false\n"); failure != "" || modernProviderStartIgnoredLogged.Load() {
+		t.Fatalf("a provider.yml without the start: failure %q, logged %t", failure, modernProviderStartIgnoredLogged.Load())
+	}
+	for range 2 {
+		settings, failure := decode("quality_speed_modern_provider_start: 2001-01-01T00:00:00Z\n")
+		if settings.QualitySpeedRequiresModernProvider != nil || settings.RequiresModernProvider(modernGateTestFormerStart) || failure != "" {
+			t.Fatalf("the retired start decoded as switch %s, gate %t, failure %q", modernGateTestSwitchText(settings.QualitySpeedRequiresModernProvider), settings.RequiresModernProvider(modernGateTestFormerStart), failure)
+		}
+		if !modernProviderStartIgnoredLogged.Load() {
+			t.Fatal("the retired start did not take the once-flag")
 		}
 	}
 }
@@ -686,7 +675,11 @@ func TestProviderStatusExplainsNotModern(t *testing.T) {
 		t.Errorf("quality weight %+v, want an online-only explanation", weight)
 	}
 
-	connect.AssertEqual(t, statusOf(modernGateTestSettings(false), filter).Reason, ProviderStatusReasonNone)
+	// the gate off and modern-first priority off: nothing to explain
+	// (TestProviderStatusNotModernUnderPriorityAndGate has the rest)
+	gateOff := modernGateTestSettings(false)
+	gateOff.RankModernFirst = false
+	connect.AssertEqual(t, statusOf(gateOff, filter).Reason, ProviderStatusReasonNone)
 	filter.modernEvidence = map[server.Id]*ProviderModernEvidenceRecord{facts.clientId: {
 		PostQuantum:     true,
 		KeyExchange:     "X25519MLKEM768",
@@ -698,16 +691,40 @@ func TestProviderStatusExplainsNotModern(t *testing.T) {
 	connect.AssertEqual(t, statusOf(modernGateTestSettings(true), filter).Reason, ProviderStatusReasonNone)
 }
 
-// A provider status request decides the gate at its own instant, the filter's,
-// as a pass does: with the switch absent, not_modern from the start on and
-// nothing of it a microsecond before.
-func TestProviderStatusDecidesTheModernGateAtItsInstant(t *testing.T) {
+// A provider status request reads the switch as a pass does, at its own
+// instant, the filter's: absent, nothing of the gate a microsecond before, at
+// or a year after the former start of 2026-11-11 00:00 UTC; true, not_modern
+// at each of them for a provider without modern evidence. Modern-first
+// priority is off here, so the status shows the gate alone.
+func TestProviderStatusReadsAnAbsentModernGateSwitchAsOff(t *testing.T) {
 	facts := testingProviderStatusFacts()
-	filter := testingProviderStatusFilter(facts)
-	statusOf := func(settings *EgressIndexSettings) *ProviderStatus {
-		evaluation := evaluateProviderStatus(facts, filter, settings, false, testingProviderStatusMinimums)
-		return newProviderStatus(facts, evaluation, filter, settings, testingProviderStatusMinimums, testingProviderStatusNow)
+	// the fixture's evidence, moved to now
+	filterAt := func(now time.Time) providerCountFilter {
+		filter := testingProviderStatusFilter(facts)
+		shift := now.Sub(filter.now)
+		filter.now = now
+		filter.healthWindowEnd = filter.healthWindowEnd.Add(shift)
+		counts := filter.healthCounts[facts.clientId]
+		counts.MeasuredAt = counts.MeasuredAt.Add(shift)
+		counts.FirstMeasuredAt = counts.FirstMeasuredAt.Add(shift)
+		filter.healthCounts[facts.clientId] = counts
+		return filter
 	}
-	connect.AssertEqual(t, statusOf(modernGateTestScheduledSettings(filter.now)).Reason, ProviderStatusReasonNotModern)
-	connect.AssertEqual(t, statusOf(modernGateTestScheduledSettings(filter.now.Add(time.Microsecond))).Reason, ProviderStatusReasonNone)
+	statusOf := func(modernSwitch *bool, now time.Time) *ProviderStatus {
+		settings := DefaultEgressIndexSettings()
+		settings.QualitySpeedRequiresModernProvider = modernSwitch
+		settings.RankModernFirst = false
+		filter := filterAt(now)
+		evaluation := evaluateProviderStatus(facts, filter, settings, false, testingProviderStatusMinimums)
+		return newProviderStatus(facts, evaluation, filter, settings, testingProviderStatusMinimums, now)
+	}
+	on := true
+	for _, now := range []time.Time{modernGateTestFormerStart.Add(-time.Microsecond), modernGateTestFormerStart, modernGateTestFormerStart.AddDate(1, 0, 0)} {
+		if reason := statusOf(nil, now).Reason; reason != ProviderStatusReasonNone {
+			t.Errorf("switch absent at %s: reason %q, want none", now, reason)
+		}
+		if reason := statusOf(&on, now).Reason; reason != ProviderStatusReasonNotModern {
+			t.Errorf("switch true at %s: reason %q, want %s", now, reason, ProviderStatusReasonNotModern)
+		}
+	}
 }

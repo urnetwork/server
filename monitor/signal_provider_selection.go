@@ -134,9 +134,9 @@ func parseProviderSelection(raw, environment string, now time.Time, scope provid
 			validReason := false
 			switch outcome.outcome {
 			case "nonempty":
-				validReason = contains(outcome.reason, "returned|returned_3_9|returned_10_plus|returned_small_direct|returned_small_mixed_direct|returned_small_requested|returned_small_cache_unknown|returned_small_eligible|returned_small_sample|returned_small_filtered_hard|returned_small_filtered_network|returned_small_filtered_family|returned_small_filtered_explicit|returned_small_filtered_client_ids|returned_small_filtered_destinations|returned_small_filtered_explicit_mixed|returned_small_filtered_mixed")
+				validReason = contains(outcome.reason, "returned|returned_3_9|returned_10_plus|returned_small_direct|returned_small_mixed_direct|returned_small_requested|returned_small_cache_unknown|returned_small_eligible|returned_small_sample|returned_small_filtered_hard|returned_small_filtered_network|returned_small_filtered_family|returned_small_filtered_explicit|returned_small_filtered_client_ids|returned_small_filtered_destinations|returned_small_filtered_explicit_mixed|returned_small_filtered_mixed|returned_small_filtered_capability")
 			case "zero":
-				validReason = contains(outcome.reason, "intentional_zero|no_specs|direct_excluded|unresolved_target|backfill_unavailable|cache_page_gap|cache_missing|cache_empty|unsupported_rank|eligible_not_selected|filtered_hard|filtered_network|filtered_family|filtered_explicit|filtered_client_ids|filtered_destinations|filtered_explicit_mixed|filtered_mixed|unclassified_zero")
+				validReason = contains(outcome.reason, "intentional_zero|no_specs|direct_excluded|unresolved_target|backfill_unavailable|cache_page_gap|cache_missing|cache_empty|unsupported_rank|eligible_not_selected|filtered_hard|filtered_network|filtered_family|filtered_explicit|filtered_client_ids|filtered_destinations|filtered_explicit_mixed|filtered_mixed|filtered_capability|unclassified_zero")
 			case "error", "canceled":
 				validReason = contains(outcome.reason, "validate|caller_location|load_primary|load_backfill|hard_exclusions|filter|directory|select|record_matches")
 			}
@@ -167,8 +167,10 @@ func parseProviderSelection(raw, environment string, now time.Time, scope provid
 		slot := key.host + "\x00" + key.block
 		bySlot[slot]++
 		fields := process.fields
+		// Schema 3 is schema 2 with the capability refusals of FP2-MODERN.md
+		// apart from filtered_hard, as filtered_capability.
 		schema := fields["now_schema"]
-		if len(fields) != 8 || (schema != 1 && schema != 2) || fields["prior_schema"] != schema || fields["now_start"] != fields["prior_start"] || fields["now_start"] <= 0 || fields["now_start"] > float64(now.Add(-5*time.Minute).Unix()) {
+		if len(fields) != 8 || (schema != 1 && schema != 2 && schema != 3) || fields["prior_schema"] != schema || fields["now_start"] != fields["prior_start"] || fields["now_start"] <= 0 || fields["now_start"] > float64(now.Add(-5*time.Minute).Unix()) {
 			continue
 		}
 		if !fresh(fields["now_schema_time"], now) || !fresh(fields["now_start_time"], now) || !fresh(fields["prior_schema_time"], now.Add(-5*time.Minute)) || !fresh(fields["prior_start_time"], now.Add(-5*time.Minute)) {
@@ -185,13 +187,16 @@ func parseProviderSelection(raw, environment string, now time.Time, scope provid
 			if schema == 1 && contains(outcome.reason, "filtered_client_ids|filtered_destinations|filtered_explicit_mixed") {
 				valid = false
 			}
+			if schema < 3 && contains(outcome.reason, "filtered_capability|returned_small_filtered_capability") {
+				valid = false
+			}
 		}
 		if !valid {
 			continue
 		}
 		pairedSlots[slot]++
 		evidence.paired++
-		if schema == 2 {
+		if 2 <= schema {
 			evidence.shapePaired++
 		}
 		for outcome, values := range process.outcomes {
@@ -254,8 +259,8 @@ func providerSelectionFindings(evidence providerSelectionEvidence) []finding {
 		findings = append(findings, finding{
 			probeId: "mimir/provider-selection", tier: tierWarn, class: "provider-selection-unavailable", target: "api-fleet", frame: frame, sustain: 1,
 			symptom:   "Provider-selection stage and zero-reason attribution is incomplete",
-			mechanism: "A fresh supported producer and unchanged process generation must cover both ends of the five-minute window for every inventory-enabled API slot. Schema 1 retains zero-reason authority; schema 2 is required for small-list and exclusion-source attribution. Old, missing, excluded, restarted, stale or reset evidence remains unknown.",
-			baseline:  "Exactly one returned process identity per inventory-enabled API host/block, with a fresh same-generation schema-1 or schema-2 window and valid observed counter partitions; complete response-shape attribution requires schema 2 everywhere.",
+			mechanism: "A fresh supported producer and unchanged process generation must cover both ends of the five-minute window for every inventory-enabled API slot. Schema 1 retains zero-reason authority; schema 2 or 3 is required for small-list and exclusion-source attribution, and schema 3 also attributes capability refusals (filtered_capability). Old, missing, excluded, restarted, stale or reset evidence remains unknown.",
+			baseline:  "Exactly one returned process identity per inventory-enabled API host/block, with a fresh same-generation schema-1, schema-2 or schema-3 window and valid observed counter partitions; complete response-shape attribution requires schema 2 or 3 everywhere.",
 			observed:  fmt.Sprintf("paired_processes=%d shape_paired_processes=%d expected_slots=%d reason=%s", evidence.paired, evidence.shapePaired, evidence.expected, reason),
 			evidence:  "Bounded Mimir query; private process join, fixed schema and source timestamps. No target IDs or raw producer strings enter this alert.",
 			context:   "Observed-subset invariant findings remain valid, but a missing partition cannot become healthy zero. Destination-tail exclusions can be healthy-window refill requests; client-ID exclusions can be runtime removals or durable policy. Neither proves client health, and schema-2 reasons never suppress the independent provider-count finding. Lazy counter series can omit a first event, and quiet traffic does not establish location availability.",

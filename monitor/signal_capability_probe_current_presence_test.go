@@ -38,7 +38,7 @@ func TestCapabilityProbeSignalRequiresInitializedCurrentDisabledCounter(t *testi
 		}
 		payload := capabilityProbeMimirFixture(t, values)
 		payload = strings.ReplaceAll(payload, `"metric":{`, `"metric":{"synthetic_private_label":"synthetic-private-sentinel",`)
-		observation, err := parseCapabilityProbeObservation(payload, capabilityProbeTestNow)
+		observation, err := parseCapabilityProbeObservation(payload, capabilityProbeTestNow, defaultCapabilityProbeSettings())
 		if err != nil {
 			t.Fatal("synthetic presence fixture failed to parse")
 		}
@@ -103,7 +103,7 @@ func TestCapabilityProbeSignalCurrentAbsenceKeepsIndependentFindings(t *testing.
 func TestCapabilityProbeSignalMissingCurrentCannotClearDisabledIncident(t *testing.T) {
 	signal := newCapabilityProbeSignal(func() (capabilityProbeDesired, error) {
 		return capabilityProbeDesired{enabled: true}, nil
-	})
+	}, defaultCapabilityProbeSettings())
 	gate := newCadenceAlertGate()
 	notifier := &SlackAlertNotifier{
 		settings:              DefaultSlackAlertNotifierSettings(),

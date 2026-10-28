@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/urnetwork/connect"
@@ -47,14 +48,14 @@ func statsEgressTestUrlEvidence(at time.Time, ok bool) *egresshealth.UrlProbeEvi
 // leaves the provider online for health, no outcomes leave it online as
 // unprobed, and a blackhole verdict is not an admission gate. The index is
 // the failure fraction scaled to the settings' largest index, rounded up.
-// The modern provider gate's start is pinned ahead, so the counts read the
-// gate off whatever day the test runs; moving the start behind the next
-// refresh flips the shared dashboard snapshot at once.
+// The modern provider gate is off with its switch absent whatever day the
+// test runs, beside a retired start already passed (FP2-MODERN.md);
+// switching it on flips the shared dashboard snapshot at once. No start is
+// published either way.
 func TestStatsRefreshProviderEgressPublishesEveryBucketAndReason(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		pinnedStart := time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC)
-		t.Cleanup(server.Config.PushSimpleResource("provider.yml", []byte("quality_speed_modern_provider_start: 2100-01-01T00:00:00Z\n")))
+		t.Cleanup(server.Config.PushSimpleResource("provider.yml", []byte("quality_speed_modern_provider_start: 2001-01-01T00:00:00Z\n")))
 		city := &model.Location{
 			LocationType: model.LocationTypeCity,
 			City:         "Palo Alto",
@@ -178,16 +179,22 @@ func TestStatsRefreshProviderEgressPublishesEveryBucketAndReason(t *testing.T) {
 			connect.AssertEqual(t, shadow(bucket, model.ProviderModernOutcomeNoResizableWindows), float64(0))
 			connect.AssertEqual(t, shadow(bucket, model.ProviderModernOutcomeStaleEvidence), float64(0))
 		}
-		connect.AssertEqual(t, testutil.CollectAndCount(statsProviderModernGateShadowGauge.gauge, "urnetwork_stats_provider_modern_gate_shadow"), 2*len(model.ProviderModernOutcomes))
-		// the gate's schedule beside the counts: off, and on at the pinned start
+		// and the online bucket: every online member under its outcome
+		// (FP2-MODERN.md), the four the index counts in online
+		onlineMembers := float64(0)
+		for _, outcome := range model.ProviderModernOutcomes {
+			onlineMembers += shadow(model.ProviderEgressBucketOnline, outcome)
+		}
+		connect.AssertEqual(t, onlineMembers, float64(4))
+		connect.AssertEqual(t, testutil.CollectAndCount(statsProviderModernGateShadowGauge.gauge, "urnetwork_stats_provider_modern_gate_shadow"), 3*len(model.ProviderModernOutcomes))
+		// the gate beside the counts: off, and no start
 		connect.AssertEqual(t, testutil.ToFloat64(statsProviderModernGateOnGauge.gauge), float64(0))
-		connect.AssertEqual(t, testutil.ToFloat64(statsProviderModernGateStartGauge.gauge.WithLabelValues()), float64(pinnedStart.Unix()))
+		connect.AssertEqual(t, statsEgressTestModernGateStartSeries(t), 0)
 
-		// the start moved behind the next refresh: its policy key is new, so
-		// it counts afresh with the gate on, and the blackholed provider,
-		// which has no evidence, leaves quality and speed under not_modern
-		start := server.NowUtc().Truncate(time.Second)
-		t.Cleanup(server.Config.PushSimpleResource("provider.yml", []byte(fmt.Sprintf("quality_speed_modern_provider_start: %s\n", start.Format(time.RFC3339)))))
+		// switched on: its policy key is new, so it counts afresh with the
+		// gate on, and the blackholed provider, which has no evidence, leaves
+		// quality and speed under not_modern
+		t.Cleanup(server.Config.PushSimpleResource("provider.yml", []byte("quality_speed_requires_modern_provider: true\n")))
 		statsRefreshProviderEgress(ctx)
 		connect.AssertEqual(t, testutil.ToFloat64(statsProviderEgressAvailableGauge.gauge), float64(1))
 		connect.AssertEqual(t, excluded(model.ProviderExcludedNotModern), float64(1))
@@ -200,25 +207,41 @@ func TestStatsRefreshProviderEgressPublishesEveryBucketAndReason(t *testing.T) {
 			connect.AssertEqual(t, shadow(bucket, model.ProviderModernOutcomeNoEvidence), float64(1))
 		}
 		connect.AssertEqual(t, testutil.ToFloat64(statsProviderModernGateOnGauge.gauge), float64(1))
-		connect.AssertEqual(t, testutil.ToFloat64(statsProviderModernGateStartGauge.gauge.WithLabelValues()), float64(start.Unix()))
+		connect.AssertEqual(t, statsEgressTestModernGateStartSeries(t), 0)
 	})
 }
 
-// The modern provider gate's schedule as the monitor reads it: on or off at
-// the refresh's instant, and the start only while the switch is absent, so a
-// switched gate has no flip to watch for.
-func TestStatsPublishProviderModernGateSchedule(t *testing.T) {
+// The series of the retired urnetwork_stats_provider_modern_gate_start_seconds
+// in the registry every stats gauge is pushed from.
+func statsEgressTestModernGateStartSeries(t testing.TB) int {
+	t.Helper()
+	count, err := testutil.GatherAndCount(prometheus.DefaultGatherer, "urnetwork_stats_provider_modern_gate_start_seconds")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return count
+}
+
+// The modern provider gate as the monitor reads it: on only while
+// provider.yml sets the switch true, at any refresh instant. An absent
+// switch is off at and after the former start of 2026-11-11 00:00 UTC, the
+// retired start turns nothing on, and no start is published
+// (FP2-MODERN.md).
+func TestStatsPublishProviderModernGate(t *testing.T) {
+	formerStart := time.Date(2026, 11, 11, 0, 0, 0, 0, time.UTC)
 	start := time.Date(2026, 11, 2, 12, 30, 0, 0, time.UTC)
 	for _, c := range []struct {
 		config string
 		now    time.Time
 		on     float64
-		start  bool
 	}{
-		{config: "quality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", now: start.Add(-time.Second), on: 0, start: true},
-		{config: "quality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", now: start, on: 1, start: true},
-		{config: "quality_speed_requires_modern_provider: false\nquality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", now: start, on: 0, start: false},
-		{config: "quality_speed_requires_modern_provider: true\n", now: start.AddDate(0, 0, -1), on: 1, start: false},
+		{config: "", now: formerStart, on: 0},
+		{config: "", now: formerStart.AddDate(1, 0, 0), on: 0},
+		{config: "quality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", now: start, on: 0},
+		{config: "quality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", now: start.AddDate(0, 0, 7), on: 0},
+		{config: "quality_speed_requires_modern_provider: false\nquality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", now: start, on: 0},
+		{config: "quality_speed_requires_modern_provider: true\n", now: start.AddDate(0, 0, -1), on: 1},
+		{config: "quality_speed_requires_modern_provider: true\nquality_speed_modern_provider_start: 2100-01-01T00:00:00Z\n", now: start, on: 1},
 	} {
 		func() {
 			pop := server.Config.PushSimpleResource("provider.yml", []byte(c.config))
@@ -228,12 +251,8 @@ func TestStatsPublishProviderModernGateSchedule(t *testing.T) {
 		if on := testutil.ToFloat64(statsProviderModernGateOnGauge.gauge); on != c.on {
 			t.Errorf("%q at %s: on %v, want %v", c.config, c.now, on, c.on)
 		}
-		series := testutil.CollectAndCount(statsProviderModernGateStartGauge.gauge, "urnetwork_stats_provider_modern_gate_start_seconds")
-		if (series == 1) != c.start {
-			t.Errorf("%q at %s: %d start series, want one %t", c.config, c.now, series, c.start)
-		}
-		if c.start {
-			connect.AssertEqual(t, testutil.ToFloat64(statsProviderModernGateStartGauge.gauge.WithLabelValues()), float64(start.Unix()))
+		if series := statsEgressTestModernGateStartSeries(t); series != 0 {
+			t.Errorf("%q at %s: %d start series, want none", c.config, c.now, series)
 		}
 	}
 }

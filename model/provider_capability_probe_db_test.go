@@ -99,37 +99,182 @@ func TestCapabilityProbePageMarksDueProviders(t *testing.T) {
 	})
 }
 
-// Through the database, a provider whose accepted URL outcomes pass the ratio
-// is eligible, gate on included, and one without outcomes or failing them is
-// not.
-func TestCapabilityProbeEligibilityReadsTheDecisionsEvidence(t *testing.T) {
+// The providers of the eligibility tests below, connected and measured under
+// an Online URL ratio of 0.5. In us, where the probe works, a healthy
+// provider, one without a URL success, one below the ratio, one whose
+// failing ratio is at it, one with no URL run, one with a single passing run,
+// and two hard exclusions with passing runs, ARIN risk and a failed hour of
+// reliability; in vn, where the probe fails for every measured provider, one
+// without a URL success.
+type capabilityProbeOnlineTestProviders struct {
+	usCity     *Location
+	vnCity     *Location
+	healthy    server.Id
+	dead       server.Id
+	low        server.Id
+	failing    server.Id
+	unprobed   server.Id
+	warming    server.Id
+	risky      server.Id
+	unreliable server.Id
+	vnDead     server.Id
+}
+
+// Connects the providers and runs the passes in the order the taskworker
+// runs them, so the score export has published its samples and its
+// URL-success guard; provider.yml sets the ratio until the test ends.
+func newCapabilityProbeOnlineTestProviders(ctx context.Context, t testing.TB) *capabilityProbeOnlineTestProviders {
+	t.Helper()
+	t.Cleanup(server.Config.PushSimpleResource(providerConfigResourceName, []byte("online_url_success_ratio: 0.5\n")))
+	usCity := egressTestCity(ctx, "Palo Alto", "California", "United States", "us")
+	vnCity := egressTestCity(ctx, "Hanoi", "Hanoi", "Vietnam", "vn")
+	now := server.NowUtc()
+	connected := func(city *Location, scores *ConnectionLocationScores) server.Id {
+		return egressTestConnect(ctx, t, city, egressTestFast, nil, scores).clientId
+	}
+	providers := &capabilityProbeOnlineTestProviders{
+		usCity:     usCity,
+		vnCity:     vnCity,
+		healthy:    connected(usCity, nil),
+		dead:       connected(usCity, nil),
+		low:        connected(usCity, nil),
+		failing:    connected(usCity, nil),
+		unprobed:   connected(usCity, nil),
+		warming:    connected(usCity, nil),
+		risky:      connected(usCity, &ConnectionLocationScores{ArinQualityVerified: true, ArinRisk: true}),
+		unreliable: connected(usCity, nil),
+		vnDead:     connected(vnCity, nil),
+	}
+	egressTestHealth(ctx, providers.healthy, now, 60, 0)
+	egressTestHealth(ctx, providers.dead, now, 5, 5)
+	// one of five is below the ratio, three of five at it
+	egressTestHealth(ctx, providers.low, now, 5, 4)
+	egressTestHealth(ctx, providers.failing, now, 5, 2)
+	egressTestHealth(ctx, providers.warming, now, 1, 0)
+	egressTestHealth(ctx, providers.risky, now, 60, 0)
+	egressTestHealth(ctx, providers.unreliable, now, 60, 0)
+	egressTestReliability(ctx, providers.unreliable, 1, 0.1, 0.1)
+	egressTestHealth(ctx, providers.vnDead, now, 5, 5)
+	egressTestPasses(ctx, t)
+	return providers
+}
+
+// The cohort, in its order.
+func (self *capabilityProbeOnlineTestProviders) clientIds() []server.Id {
+	return []server.Id{
+		self.healthy,
+		self.dead,
+		self.low,
+		self.failing,
+		self.unprobed,
+		self.warming,
+		self.risky,
+		self.unreliable,
+		self.vnDead,
+	}
+}
+
+// Review finding 2 (FP2-MODERN-REVIEW.md): judged with Online alone, the
+// widened probe would have measured providers the score export places in no
+// bucket, since its filter had no published country and no URL-success
+// guard, and a filter without a guard exempts every country. Through the
+// production loader, read as a taskworker other than the export's reads it
+// (from the guard the export published in Redis), probe eligibility is the
+// export's Online membership, as the Online bucket's pages hold it: not the
+// provider without a URL success in us, the one below the Online URL ratio,
+// or either hard exclusion; the healthy provider, the failing ratio that
+// stays Online, the provider with no URL run, the one with a single run and
+// the provider without a success in exempt vn. The provider without a
+// success in us and the one in vn differ only in their published country.
+func TestCapabilityProbeEligibilityIsTheExportsOnlineMembership(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		enableModernProviderGate(t)
-		now := server.NowUtc().Truncate(time.Microsecond)
-		passing, failing, unprobed := server.NewId(), server.NewId(), server.NewId()
-		submit := func(clientId server.Id, okCount int) {
-			for index := range 5 {
-				ok := 0
-				if index < okCount {
-					ok = 1
+		providers := newCapabilityProbeOnlineTestProviders(ctx, t)
+		// the export's guard, as published: a probe pass in this process reads
+		// Redis like any other
+		providerOnlineSuccessBaselineReader.reset()
+
+		eligibility := FilterProviderCapabilityProbeEligible(ctx, providers.clientIds())
+		connect.AssertEqual(t, eligibility.Unguarded, false)
+		connect.AssertEqual(t, eligibility.ClientIds, []server.Id{
+			providers.healthy,
+			providers.failing,
+			providers.unprobed,
+			providers.warming,
+			providers.vnDead,
+		})
+
+		// Online reads the non-forced Quality pages (onlineClientScoreSourceRankMode)
+		exportOnlineClientIds := map[server.Id]bool{}
+		for _, city := range []*Location{providers.usCity, providers.vnCity} {
+			for clientId, clientScore := range egressTestCachedScores(ctx, t, city, onlineClientScoreSourceRankMode, false) {
+				if clientScore.Online {
+					exportOnlineClientIds[clientId] = true
 				}
-				measuredAt := now.Add(-time.Duration(index+1) * time.Minute)
-				SetProviderEgressHealth(ctx, &ProviderEgressHealth{
-					RunId:            server.NewId(),
-					ClientId:         clientId,
-					MeasuredAt:       measuredAt,
-					OKCount:          ok,
-					Total:            1,
-					UrlProbeEvidence: fp2TestUrlProbeEvidence(measuredAt, ok == 1),
-				})
 			}
 		}
-		submit(passing, 5)
-		submit(failing, 1)
-		eligible := FilterProviderCapabilityProbeEligible(ctx, []server.Id{unprobed, failing, passing})
-		connect.AssertEqual(t, eligible, []server.Id{passing})
-		connect.AssertEqual(t, FilterProviderCapabilityProbeEligible(ctx, nil), []server.Id{})
+		exportOnline := []server.Id{}
+		for _, clientId := range providers.clientIds() {
+			if exportOnlineClientIds[clientId] {
+				exportOnline = append(exportOnline, clientId)
+			}
+		}
+		connect.AssertEqual(t, eligibility.ClientIds, exportOnline)
+
+		// the rules took exactly those two out of every bucket, one for each
+		// reason
+		counts := CountProviderEgress(ctx)
+		connect.AssertEqual(t, counts.ReasonCounts[ProviderExcludedNoSuccess], int64(1))
+		connect.AssertEqual(t, counts.ReasonCounts[ProviderExcludedLowSuccess], int64(1))
+	})
+}
+
+// Without a trusted guard, none published or one past its max age, every
+// country is exempt, as provider status reads it: the probe then measures
+// the providers the guard took out too, and says it judged them unguarded.
+// The hard exclusions stay out whatever the guard, and an empty cohort is
+// judged unguarded by nothing.
+func TestCapabilityProbeEligibilityWithoutAPublishedGuard(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		providers := newCapabilityProbeOnlineTestProviders(ctx, t)
+		everyOnline := []server.Id{
+			providers.healthy,
+			providers.dead,
+			providers.low,
+			providers.failing,
+			providers.unprobed,
+			providers.warming,
+			providers.vnDead,
+		}
+		published := getProviderOnlineSuccessBaseline(ctx)
+		if published == nil {
+			t.Fatal("the export published no guard")
+		}
+
+		// past its max age
+		expired, err := encodeProviderOnlineSuccessBaseline(published, server.NowUtc().Add(-providerOnlineSuccessBaselineMaxAge-time.Minute))
+		connect.AssertEqual(t, err, nil)
+		server.Redis(ctx, func(r server.RedisClient) {
+			server.Raise(r.Set(ctx, providerOnlineSuccessBaselineKey, expired, time.Hour).Err())
+		})
+		providerOnlineSuccessBaselineReader.reset()
+		connect.AssertEqual(t, FilterProviderCapabilityProbeEligible(ctx, providers.clientIds()), ProviderCapabilityProbeEligibility{
+			ClientIds: everyOnline,
+			Unguarded: true,
+		})
+
+		// none published
+		server.Redis(ctx, func(r server.RedisClient) {
+			server.Raise(r.Del(ctx, providerOnlineSuccessBaselineKey).Err())
+		})
+		providerOnlineSuccessBaselineReader.reset()
+		connect.AssertEqual(t, FilterProviderCapabilityProbeEligible(ctx, providers.clientIds()), ProviderCapabilityProbeEligibility{
+			ClientIds: everyOnline,
+			Unguarded: true,
+		})
+
+		connect.AssertEqual(t, FilterProviderCapabilityProbeEligible(ctx, nil), ProviderCapabilityProbeEligibility{ClientIds: []server.Id{}})
 	})
 }
 

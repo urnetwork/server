@@ -33,8 +33,16 @@ func (providerCountProbe) id() string             { return "mimir/provider-count
 func (providerCountProbe) tier() string           { return tierPage }
 func (providerCountProbe) cadence() time.Duration { return time.Minute }
 
+// The zero-share cohorts count capability-blind requests only. A request
+// that keeps only modern or only post-quantum providers (capability modern,
+// post_quantum or modern_post_quantum, FP2-MODERN.md) can rightly answer
+// short where the capable supply is small, so its answers never count toward
+// an empty or small list. The negative match keeps capability none and the
+// series without the label, which older processes export.
+const providerCountCapabilitySelector = `capability!~"modern.*|post_quantum"`
+
 func providerCountQuery(environment string) string {
-	return `sum by (ip_family,location_kind,caller_country,rank_mode,force_minimum,result_count) (increase(urnetwork_findproviders2_outcomes_total{env=` + strconv.Quote(environment) + `}[` + providerCountRange + `]))`
+	return `sum by (ip_family,location_kind,caller_country,rank_mode,force_minimum,result_count) (increase(urnetwork_findproviders2_outcomes_total{env=` + strconv.Quote(environment) + `,` + providerCountCapabilitySelector + `}[` + providerCountRange + `]))`
 }
 
 type providerCountKey struct {
