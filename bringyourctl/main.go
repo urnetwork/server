@@ -107,6 +107,7 @@ Usage:
     bringyourctl payouts close-parked [(--apply --expect=<digest>)] [--ids]
     bringyourctl payouts sn-reconcile [(--send --expect=<digest>)] [--json]
     bringyourctl payouts reimburse --file=<file> --reason=<reason> [--allow_prior_reimbursement] [(--send --expect=<digest>)]
+    bringyourctl payouts usdc-sent-notice --file=<file> [--send]
     bringyourctl wallet estimate-fee --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
     bringyourctl wallet transfer --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
 		bringyourctl wallets sync-circle
@@ -233,7 +234,7 @@ Options:
     --sweep_batch_limit=<sweep_batch_limit>  With --move_all_sweeps, run at most this many sweep transactions in one call; omitted or 0 moves every sweep.
     --count_sweeps  Also count the sweeps a correction would move (dry run).
     --expect=<digest>  The digest the sn-reconcile or reimburse dry run printed; --send refuses any other census.
-    --file=<file>  A payouts reimburse CSV with the header network_id,wallet_id,amount_usdc.
+    --file=<file>  A payouts reimburse CSV with the header network_id,wallet_id,amount_usdc; for payouts usdc-sent-notice, one payment id per line.
     --allow_prior_reimbursement  With payouts reimburse, pay networks that already have an open manual reimbursement of another plan; each row lists them, and the digest binds the flag and exactly those.
     -c --count=<count>	Number to process [default: 1000].`
 
@@ -394,6 +395,8 @@ func main() {
 			os.Exit(correctLegacyPayoutAttempts(opts))
 		} else if closeParked, _ := opts.Bool("close-parked"); closeParked {
 			os.Exit(payoutsCloseParkedCommand(opts))
+		} else if usdcSentNotice, _ := opts.Bool("usdc-sent-notice"); usdcSentNotice {
+			os.Exit(payoutsUsdcSentNoticeCommand(opts))
 		} else if snReconcile, _ := opts.Bool("sn-reconcile"); snReconcile {
 			send, _ := opts.Bool("--send")
 			snReconcileRequireReadOnly(send)
