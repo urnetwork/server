@@ -23,14 +23,17 @@ func RetainProviderPaymentAttributionReview(ctx context.Context, paymentId serve
 }
 
 // This bounded diagnostic is a lower-bound sample, never a complete debt
-// inventory. Both drivers preserve the planner's unpaid/canceled indexes.
-const paymentTransitionUnresolvedSampleSql = `
+// inventory. Both drivers preserve the planner's unpaid/canceled indexes. Like
+// the planner, the canceled driver skips a payment the USDC close-out closed:
+// its obligation is forfeited, not retained (account_payment_usdc_close.go).
+var paymentTransitionUnresolvedSampleSql = `
 	WITH candidates AS MATERIALIZED (
 		(SELECT contract_id,payout_net_revenue_nano_cents FROM transfer_escrow_sweep WHERE payment_id IS NULL LIMIT 1024)
 		UNION ALL
 		(SELECT s.contract_id,s.payout_net_revenue_nano_cents FROM account_payment p
 		 JOIN transfer_escrow_sweep s ON s.payment_id=p.payment_id
-		 WHERE p.canceled AND NOT p.completed AND p.circle_idempotency_key IS NULL AND p.payment_record IS NULL AND p.tx_hash IS NULL LIMIT 1024)
+		 WHERE p.canceled AND NOT p.completed AND p.circle_idempotency_key IS NULL AND p.payment_record IS NULL AND p.tx_hash IS NULL
+		 AND NOT ` + usdcPayoutClosed("p") + ` LIMIT 1024)
 	)
 	SELECT COUNT(*), COALESCE(SUM(s.payout_net_revenue_nano_cents),0)::bigint
 	FROM candidates s LEFT JOIN transfer_contract c ON c.contract_id=s.contract_id

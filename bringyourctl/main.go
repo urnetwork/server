@@ -104,6 +104,7 @@ Usage:
     bringyourctl payouts populate-tx-hashes
     bringyourctl payouts reconcile-legacy-attempts [--apply] [--group_limit=<group_limit>]
     bringyourctl payouts correct-legacy-attempts [--apply] [--group_limit=<group_limit>] [--move_all_sweeps] [--sweep_batch_size=<sweep_batch_size>] [--sweep_batch_limit=<sweep_batch_limit>] [--count_sweeps]
+    bringyourctl payouts close-parked [(--apply --expect=<digest>)] [--ids]
     bringyourctl payouts sn-reconcile [(--send --expect=<digest>)] [--json]
     bringyourctl payouts reimburse --file=<file> --reason=<reason> [--allow_prior_reimbursement] [(--send --expect=<digest>)]
     bringyourctl wallet estimate-fee --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
@@ -225,6 +226,7 @@ Options:
     --state=<state>  A crypto invoice status: pending, seen, confirming, paid, expired or review.
     --intent=<intent_id>  A crypto invoice id.
     --address=<payout_address>  The address the account holder gave for a refund, in the invoice's coin.
+    --ids  With payouts close-parked, also list each payment: its id, plan week, reason and payout.
     --group_limit=<group_limit>  Look up at most this many Circle destination groups; omitted or 0 looks up every group.
     --move_all_sweeps  Move every sweep of a corrected legacy attempt to its replacement instead of one anchor sweep.
     --sweep_batch_size=<sweep_batch_size>  With --move_all_sweeps, move at most this many sweeps per transaction; omitted uses 10000.
@@ -390,6 +392,8 @@ func main() {
 			os.Exit(reconcileLegacyPayoutAttempts(opts))
 		} else if correctLegacy, _ := opts.Bool("correct-legacy-attempts"); correctLegacy {
 			os.Exit(correctLegacyPayoutAttempts(opts))
+		} else if closeParked, _ := opts.Bool("close-parked"); closeParked {
+			os.Exit(payoutsCloseParkedCommand(opts))
 		} else if snReconcile, _ := opts.Bool("sn-reconcile"); snReconcile {
 			send, _ := opts.Bool("--send")
 			snReconcileRequireReadOnly(send)
