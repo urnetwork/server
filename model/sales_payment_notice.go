@@ -214,10 +214,18 @@ func (self *salesPaymentNoticeQueue) wait(timeout time.Duration) bool {
 	self.stateLock.Lock()
 	idle := self.idle
 	self.stateLock.Unlock()
+	// idle first: with both ready, a select would pick either
 	select {
 	case <-idle:
 		return true
-	case <-time.After(timeout):
+	default:
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-idle:
+		return true
+	case <-timer.C:
 		return false
 	}
 }
