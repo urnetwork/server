@@ -18,23 +18,33 @@ candidates, evaluator exit zero in 10,306 seconds, before its fresh 00:28:07
 deadline; cleanup verified. Its score was placeable but not takeover eligible:
 mean improvement −4.5357%, p=0.727635. See the
 [retained first observation](FIRST-COMMITTED-FIRST-REFERENCE-2026-10-28.md).
-The regression reference completed at 01:49:07 UTC (exit zero, cleanup verified).
-The final no-op reference started at 01:50:08 UTC in the same native session
-`27905`, using the byte-identical nine-run baseline; it has completed 3/9
-candidates as of 02:22:33 UTC, with a 04:50:08 UTC deadline. The second committed
-seed remains unstarted. The entire first-seed reference screen is **not accepted**.
+All three R9 references completed with verified cleanup. The native screen
+closed at 03:18:27 UTC with **`accepted: false`**, reason
+`first_committed_seed_not_correctly_ordered`: median scores were better
+16,466.4632 ms, worse 17,895.6194 ms, no-op 18,464.6714 ms. The required no-op
+before worse ordering failed. See the [complete failed screen](FIRST-COMMITTED-SCREEN-2026-10-28.md).
+The native session exited zero and resources were released; neither fact turns
+the result into acceptance. The second committed seed remains unstarted.
 
-The current owner-approved scope is the first committed seed only, with all
-three reference jobs, correct frozen median ordering, and a placeable,
-non-takeover no-op. No new seed, retrospective criterion, or successful-result
-selection is permitted. The numeric scope supersedes older two-seed statements;
-all other gates remain required. Snow V7 remains unqualified. Sampled production
+The first-committed-seed scope is complete and failed; it grants no repeat or
+replacement authority. Independent review found no evaluator defect, without
+establishing the cause of the failed ordering. The owner has separately
+[approved a new prospective one-seed screen](CALIBRATION-NEW-SCREEN-OWNER-APPROVAL-2026-10-28.md)
+with a causally stronger regression reference, fresh R9 control and newly
+committed seed. Exact reference/protocol review, native qualification and
+publication must precede measurement. No new seed has been drawn or new
+measurement started; the original second seed stays unstarted. R9, gates,
+significance and the 26.9% margin remain unchanged. This is not authority to
+relabel the failure, select a favorable result, waive a provider or open late.
+Snow V7 remains unqualified. Sampled production
 credentials are now recognized: settlement requests reach `503 source_not_ready`,
 and other scoped roles receive the expected `403 scope_denied` on that
 settlement-only route. This does not prove every replica's credential mount or
 later readiness checks. Target-round R1, API/worker readiness and
 activation remain unperformed. Consult `current-state.json` and native records
-for later run progress; a live process is not acceptance.
+for current preparation and evidence-retention status. The archive source has
+[three passing synthetic unit runs](RETAINED-ARCHIVE-QUALIFICATION-2026-10-28.md),
+not a qualified native binary, successful integration wrapper or retained upload.
 
 ## Historical checkpoint — October 27, 15:10 UTC
 
@@ -466,7 +476,7 @@ substitute for formal calibration or live readiness.
 | --- | --- | --- |
 | Evaluated source and compiler | Exact ten-repository commits, canonical lock, actual binary build metadata and Go 1.27.3; no operator-proxy dependency | Current C2 server `a9e8e1a7`, image `98c9061c…`, binary `efd1077d…`, actual Go 1.27.3 and canonical lock `ec322ed2…` are bound by the [fresh V2 bridge plan](FRESH-BRIDGE-PLAN-2026-10-27-V2.json) and current-state receipts. Earlier C2 images and C1 identities retain their own historical evidence; none is relabeled as this release. |
 | Full cold evaluation | Nine fresh controls, nine fresh no-op candidates, authenticated score and unchanged G1–G6 inputs, resource/accounting reports, actual total wall time within three hours, exact cleanup | The current C2 corrected R9/R9 bridge has native acceptance `2af963f0…`: 10,290 seconds, all 9+9, score replay, artifact bindings and cleanup. It is an operational compatibility witness, not statistical equivalence. The earlier [corrected-release cold cohort](../baseline/prelaunch-corrected-same-seed-r9-2026-10-25/completed/cohort-01/README.md), 10,498 seconds, retains its own identity and is not relabeled. The recovered first reference also completed 9+9 in 10,306 seconds, but is not a second A/A observation. |
-| Statistical calibration | Approved three-pair reduction, accepted corrected bridge, and [first committed seed only](CALIBRATION-AMENDMENT-2026-10-27-FIRST-SEED.md); unchanged R9, algorithm, gates, significance, integrity and per-job bounds; retained outcomes and variance | Three-pair native reduction accepted; 99.525% bootstrap placeability; prospective practical margin **26.9%**. Original mean changes −2.80%, +1.16%, +3.44%, p=0.297/0.579/0.783, comparison-specific fringes 9.018%, 10.046%, 7.496%; no significance/takeover. The failed bridge's nine unscored controls remain unused. The corrected bridge is accepted as an operational witness. The first committed seed's first reference completed validly but was not takeover eligible; regression/no-op completion and the frozen median-ordering/no-op checks remain pending. The second seed stays committed and unstarted. Confidence is reduced explicitly; this is not full production acceptance. The 16.1% floor is not the selected 26.9% margin. |
+| Statistical calibration | Approved three-pair reduction, accepted corrected bridge, preserved [failed first screen](FIRST-COMMITTED-SCREEN-2026-10-28.md), and the separately [approved new prospective screen](CALIBRATION-NEW-SCREEN-OWNER-APPROVAL-2026-10-28.md); unchanged R9, algorithm, gates, significance, integrity and per-job bounds | Three-pair native reduction accepted; 99.525% bootstrap placeability; prospective practical margin **26.9%**. Original mean changes −2.80%, +1.16%, +3.44%, p=0.297/0.579/0.783, comparison-specific fringes 9.018%, 10.046%, 7.496%; no significance/takeover. The failed bridge's nine unscored controls remain unused; the corrected bridge is an operational witness. All first-seed references completed, but the worse median outranked the no-op and the screen was not accepted. The original second seed stays committed and unstarted. Exact stronger regression reference, fresh control, new seed commitment, protocol review and native qualification/publication remain pending; no new measurement has started. Confidence is reduced explicitly; this is not production acceptance. The 16.1% floor is not the selected 26.9% margin. |
 | Reference patches | Correctness checks, exact patch/build identities and measured no-op/worse/better behavior; separate pilot and held-out seeds | The [snapshot pilot](SNAPSHOT-PILOT-2026-10-25.md) completed fresh 9+9 with all gates and cleanup in 10,562 seconds. Both predeclared directional conditions passed: mean 19,053.39→18,206.07 ms (4.45% lower), median 18,903.60→18,285.95 ms. Welch p=0.2407: not significant or a takeover; this is a proposed better reference, not held-out qualification. The unfavorable [warm-reader pilot](../baseline/prelaunch-warm-reader-pilot-2026-10-25/completed/README.md) remains preserved. Its unchanged patch has now passed [current-source negative-reference correctness/build qualification](../evaluator/references/2026-10-25/NEGATIVE-QUALIFICATION.md), but fresh independent-seed ordering still must pass. Neither pilot enters Stage A. |
 | Host containment and rebaseline | Exact-image host fingerprint, reserved management capacity, network/mount containment, adversarial cleanup and independently authenticated readiness | Latest current-boot hostile fixture exercised all ten evaluation cores and 72 GiB memory; OOM exit 137 and joined cleanup passed in 775 ms with original container/network inventory restored. This separate hostile fixture is not exact evaluator-image execution. The current C2 negative self-check records its actual fingerprint without granting readiness. Actual reserved-round C2 R1, production metadata binding and positive readiness remain unverified. Calibration fixture hardware labels are not positive host attestations. |
 | Honesty and source-test providers | Genuine Snow three-member review/test-broker qualification; maintainer tests on Sol 6.1 low; retained acceptance/rejection/uncertainty/unsafe/prompt-injection evidence | Control source `09cc510d`, hardened image `d9006e2f…`, qualified driver `456209be…` and real deterministic Go-fixture observations are retained. V7 cancellation passed, but Muse's benign-case judgment was malformed; Qwen/Gemma approvals did not override the union failure. Report `19a916de…` remains unqualified. Corrected backend evidence and a new genuine qualification precommit/attempt are required; no output repair, ignored member, uncertainty override or automatic retry is permitted. Offline tests and genuine fixture-test execution do not prove provider qualification. |

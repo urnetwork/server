@@ -1,8 +1,9 @@
 # Sim-latency competition live-deployment playbook
 
-## Current production preparation — October 27, 2026
+## Current production preparation — October 28, 2026
 
-Public opening is fixed at **October 28, 2026, 00:00 UTC**. The current launch
+The required public opening was **October 28, 2026, 00:00 UTC**; readiness was
+not achieved. No late opening or new date has been authorized. The current launch
 checklist and exact prepared source/image identities are maintained in
 [`launch/PRODUCTION-2026-10-28.md`](launch/PRODUCTION-2026-10-28.md).
 Use [`launch/LAUNCH-ACCEPTANCE.md`](launch/LAUNCH-ACCEPTANCE.md) for the current
@@ -41,8 +42,17 @@ The second seed remains unstarted. The first attempt failed during source
 extraction before measurements because its management cap was too small.
 The owner explicitly approved the independently qualified, artifact-preserving
 [recovery](launch/UNMEASURED-MANAGEMENT-OOM-2026-10-27.md), an 8 GiB management
-cap, and a fresh three-hour first-job deadline. The recovered run is active;
-its nine controls are complete, but the reference screen is not yet accepted.
+cap, and a fresh three-hour first-job deadline. The recovered run completed all
+nine controls and three R9 references, but failed the frozen median-ordering
+criterion: the worse reference outranked the no-op. See the
+[complete failed screen](launch/FIRST-COMMITTED-SCREEN-2026-10-28.md).
+Preserve that result and the unstarted second seed; do not rerun or relabel the
+failed screen or redefine its acceptance. The owner has approved a
+[separately precommitted new screen](launch/CALIBRATION-NEW-SCREEN-OWNER-APPROVAL-2026-10-28.md)
+with a stronger regression reference, fresh control and newly committed seed.
+Exact reference/protocol review, native qualification and publication remain
+pending; no new seed has been drawn or measurement started. This approval does
+not grant a late opening or provider waiver. Production remains unactivated.
 R9, all evaluation gates, significance and the practical margin are unchanged.
 
 Production admission costs $20 and has no submission-count ceiling. Each round
