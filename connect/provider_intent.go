@@ -151,7 +151,7 @@ func writeConnectH1ClientLimitExceeded(ws connect.H1MessageConn, timeout time.Du
 	if err := ws.WriteMessage(websocket.BinaryMessage, clientLimitExceededControlMessage()); err != nil {
 		return err
 	}
-	if websocketConn, ok := ws.(*websocket.Conn); ok {
+	if websocketConn, ok := connect.H1WebSocketConn(ws); ok {
 		// best effort: the control message above is the signal
 		return websocketConn.WriteControl(
 			websocket.CloseMessage,
