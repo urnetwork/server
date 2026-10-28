@@ -20,7 +20,7 @@ and `measured:false` fields are not a later acceptance receipt.
 | [Product patch](product.patch) | `6f8c6f24c44a9627f053e58d4a59f845a0ba4b0b51e201f5cabddfb33b30629d` |
 | [Qualification-only test patch](qualification-tests.patch) | `6ef291d4d3ea6ea4fba7600b9a1f8390b79cd13f845f5f0722adb39625623844` |
 | [Qualification test source](qualification-tests.go.txt) | `76ab3398cb5a676a63030ab10f379d7436409062c57878accd157d9ced5db759` |
-| [Narrow reference policy](patch-policy.json) | `5d78c808eff8d16eaa8f113656c9814dd1453acfd51bd891029a93bf4e4197cb` |
+| [Authored reference-policy input, not native-scored bytes](patch-policy.json) | `5d78c808eff8d16eaa8f113656c9814dd1453acfd51bd891029a93bf4e4197cb` |
 | [Ten-repository source lock](source-lock.json) | `87424d425b2b3fc867f28144a984a8624a381ee437c17d7f85d9fe5d658fb0bc` |
 
 The scored patch changes only `connect/transport.go`, SHA-256 after application
@@ -30,6 +30,13 @@ only appends that path to `allowed_paths`; `max_patch_bytes=262144`, forbidden
 paths and absent `path_base` remain unchanged. This is not a broadening of the
 public production policy. The test patch is separate and never enters a scored
 candidate; `.go.txt` files here are evidence, not compiled package tests.
+
+`patch-policy.json` preserves the **authored input bytes**, not the policy byte
+pin for a native evaluator run. The evaluator's canonical `jq -S` serialization
+has a different digest and needs its own explicit, preserved input-to-canonical
+lineage and publication before a native reference build or pilot. Do not silently
+replace or reserialize the authored `5d78c808…` artifact. This unit bundle supplies
+no native-scored policy-byte, image-build or pilot-acceptance receipt.
 
 The exact default is one microsecond per emitted user-frame byte, in the
 existing dedicated H1 writer, for both WebSocket and H1Plus framed encoding.

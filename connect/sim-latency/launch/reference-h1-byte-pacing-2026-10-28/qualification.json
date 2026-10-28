@@ -9,6 +9,8 @@
   "qualification_test_patch_sha256": "6ef291d4d3ea6ea4fba7600b9a1f8390b79cd13f845f5f0722adb39625623844",
   "qualification_test_source_sha256": "76ab3398cb5a676a63030ab10f379d7436409062c57878accd157d9ced5db759",
   "source_lock_sha256": "87424d425b2b3fc867f28144a984a8624a381ee437c17d7f85d9fe5d658fb0bc",
+  "authored_policy_input_sha256": "5d78c808eff8d16eaa8f113656c9814dd1453acfd51bd891029a93bf4e4197cb",
+  "native_scored_canonical_policy_byte_pin_supplied_by_this_unit_bundle": false,
   "static_independent_max_review_complete": true,
   "test_executor": "independent Sol 6.1 low",
   "execution_profile_provenance": "Owning LOW execution report and primary-agent tool transcript; raw Go JSON alone is not compiler or resource-containment proof",
