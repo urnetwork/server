@@ -3170,6 +3170,156 @@
                     "legendFormat": "most {{service}}"
                 }
             ]
+        },
+        {
+            "id": 81,
+            "type": "row",
+            "title": "client close and removal (CLIENTCLOSE.md)",
+            "collapsed": false,
+            "gridPos": {
+                "h": 1,
+                "w": 24,
+                "x": 0,
+                "y": 298
+            }
+        },
+        {
+            "id": 82,
+            "type": "timeseries",
+            "title": "close requests and CloseSequences sent by residents / s",
+            "description": "Close requests residents sent to their clients, by kind (contract, peer), and the CloseSequences frames that carried them. A request asks a receiver that has not reported for its final, at the sender's final (CLIENTCLOSE.md). Alt's embedded exchange counts under service alt. No data, not zero, until a resident sends one.",
+            "gridPos": {
+                "h": 8,
+                "w": 8,
+                "x": 0,
+                "y": 299
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (service, kind) (rate(urnetwork_client_close_requests_sent_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "request {{service}} {{kind}}"
+                },
+                {
+                    "refId": "B",
+                    "expr": "sum by (service) (rate(urnetwork_client_close_sequences_sent_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "CloseSequences frame {{service}}"
+                }
+            ]
+        },
+        {
+            "id": 83,
+            "type": "timeseries",
+            "title": "removed-client transport closes and key events dispatched / s",
+            "description": "Transports closed because their client was removed through the api, by kind, and the key events behind them: client-removed events dispatched to the exchange, and close-request events dispatched to registered listeners. A removal keeps the client's resident until its idle ttl (CLIENTCLOSE.md).",
+            "gridPos": {
+                "h": 8,
+                "w": 8,
+                "x": 8,
+                "y": 299
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (service, kind) (rate(urnetwork_client_removed_closes_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "closed {{service}} {{kind}}"
+                },
+                {
+                    "refId": "B",
+                    "expr": "sum by (service) (rate(urnetwork_key_events_dispatched_client_removed_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "removed event {{service}}"
+                },
+                {
+                    "refId": "C",
+                    "expr": "sum by (service) (rate(urnetwork_key_events_dispatched_client_close_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "close-request event {{service}}"
+                }
+            ]
+        },
+        {
+            "id": 84,
+            "type": "timeseries",
+            "title": "unused contracts settled at the sender's zero final / s",
+            "description": "Unused contracts settled on the report path because the sender's final reported zero bytes and the receiver had not reported (owner rule, 2026-10-28), counted after a successful settlement commit. Without the rule they wait for the expiry sweep. Every service that settles reports counts here.",
+            "gridPos": {
+                "h": 8,
+                "w": 8,
+                "x": 16,
+                "y": 299
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (service) (rate(urnetwork_contract_zero_final_settled_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "zero final {{service}}"
+                }
+            ]
         }
     ]
 }

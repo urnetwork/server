@@ -3089,6 +3089,70 @@
           "legendFormat": "contract creation refused"
         }
       ]
+    },
+    {
+      "id": 63,
+      "type": "row",
+      "title": "client removal (CLIENTCLOSE.md)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 200
+      },
+      "panels": []
+    },
+    {
+      "id": 64,
+      "type": "timeseries",
+      "title": "removed-client device closes, subscriptions and read failures / s",
+      "description": "Hosted devices closed because their client was removed through the api, by what found the removal; subscriptions and resubscriptions to the removed-client key events, each of which checks the installed devices' clients; and removed-flag reads that failed, whose devices wait for the next subscription or their idle timeout (CLIENTCLOSE.md section 5).",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 201
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (trigger) (rate(urnetwork_proxy_client_removed_device_closes_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "device closed {{trigger}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum (rate(urnetwork_proxy_client_removed_subscribes_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "subscription"
+        },
+        {
+          "refId": "C",
+          "expr": "sum (rate(urnetwork_proxy_client_removed_read_failures_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "removed-flag read failed"
+        }
+      ]
     }
   ]
 }
