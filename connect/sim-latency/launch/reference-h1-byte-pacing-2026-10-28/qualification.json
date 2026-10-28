@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "kind": "h1-byte-pacing-reference-focused-unit-qualification",
-  "status": "focused_unit_passed_broader_integration_native_build_and_measured_direction_pending",
+  "status": "focused_unit_and_three_offline_native_builds_passed_service_integration_and_measured_direction_pending",
   "measured": false,
   "held_out_or_launch_accepted": false,
   "baseline_server_commit": "a9e8e1a710b24c749e6499a0606938252c83e136",
@@ -15,12 +15,14 @@
     "scored_policy_file": "patch-policy.scored.json",
     "scored_policy_sha256": "25e9c5b89041f35607b3a9542d13abd2649a9e99b804f59791780af19ab97861",
     "lineage_file": "scored-policy-lineage.json",
-    "lineage_sha256": "6bf536b6362f1e30e551015ead5ac3ab5b7b88137b6af8fc5b6c33fbec80e860",
+    "lineage_sha256": "ae0a8bea7d33cf718ab1ab74e43acb14eb6234bf308c9360ec2c6f6ea57b71ec",
     "byte_exact_evaluator_jq_sorted_projection_verified": true,
     "semantic_policy_and_absent_path_base_unchanged": true,
     "only_this_canonical_policy_may_bind_future_native_builds_and_pilot": true,
     "expected_image_keys_are_public_input_calculations_not_build_receipts": true,
-    "native_build_or_measurement_receipt_supplied": false
+    "native_build_or_measurement_receipt_supplied": true,
+    "native_build_receipt_supplied": true,
+    "measurement_receipt_supplied": false
   },
   "static_independent_max_review_complete": true,
   "test_executor": "independent Sol 6.1 low",
@@ -38,7 +40,10 @@
     "count_per_process": 1,
     "go_parallelism": 2,
     "gomaxprocs": 2,
-    "cpus": [20, 22],
+    "cpus": [
+      20,
+      22
+    ],
     "gomemlimit": "2GiB",
     "memory_limit_is_soft_go_runtime_target_not_hard_rss_cap": true,
     "test_timeout_seconds": 300,
@@ -54,12 +59,60 @@
     "complete_repeated_manifests_copied_into_public_bundle": false
   },
   "positive_runs": [
-    {"file":"qa/baseline-pass1.json","sha256":"0ec4a757a97f217e0cce8f8ff9e10e5f7fb79744cd54e8af71f44cd06ecd2974","passes":8,"skips":0,"failures":0,"elapsed_seconds":1.296,"completed_at":"2026-10-28T05:39:42.327179197Z"},
-    {"file":"qa/candidate-pass1.json","sha256":"c0fe013abc64d4df3c6c504a0fc33ab3baef97d47d4bb2cb2babb8221b94205d","passes":27,"skips":0,"failures":0,"elapsed_seconds":1.394,"completed_at":"2026-10-28T05:40:11.937928985Z"},
-    {"file":"qa/baseline-pass2.json","sha256":"69a56db8b673dbc162d95135c1afe6500da5c48db6cab5a556b7febdbc9a578e","passes":8,"skips":0,"failures":0,"elapsed_seconds":1.303,"completed_at":"2026-10-28T05:40:22.730028385Z"},
-    {"file":"qa/candidate-pass2.json","sha256":"9ab0385e002d6be4a7db57d081f024d2b52e476bbeb496332ba4339a19c9de39","passes":27,"skips":0,"failures":0,"elapsed_seconds":1.388,"completed_at":"2026-10-28T05:40:33.578195927Z"},
-    {"file":"qa/baseline-pass3.json","sha256":"b45ce1fea94cd2e981b2debc7f26686d614210bec8a6a19b74c2d37678dbe179","passes":8,"skips":0,"failures":0,"elapsed_seconds":1.302,"completed_at":"2026-10-28T05:40:44.345470809Z"},
-    {"file":"qa/candidate-pass3.json","sha256":"483569683179244f28a02f3eae4691310737639947524eb898ba73e9ce140fe7","passes":27,"skips":0,"failures":0,"elapsed_seconds":1.384,"completed_at":"2026-10-28T05:40:55.207826604Z"}
+    {
+      "file": "qa/baseline-pass1.json",
+      "sha256": "0ec4a757a97f217e0cce8f8ff9e10e5f7fb79744cd54e8af71f44cd06ecd2974",
+      "passes": 8,
+      "skips": 0,
+      "failures": 0,
+      "elapsed_seconds": 1.296,
+      "completed_at": "2026-10-28T05:39:42.327179197Z"
+    },
+    {
+      "file": "qa/candidate-pass1.json",
+      "sha256": "c0fe013abc64d4df3c6c504a0fc33ab3baef97d47d4bb2cb2babb8221b94205d",
+      "passes": 27,
+      "skips": 0,
+      "failures": 0,
+      "elapsed_seconds": 1.394,
+      "completed_at": "2026-10-28T05:40:11.937928985Z"
+    },
+    {
+      "file": "qa/baseline-pass2.json",
+      "sha256": "69a56db8b673dbc162d95135c1afe6500da5c48db6cab5a556b7febdbc9a578e",
+      "passes": 8,
+      "skips": 0,
+      "failures": 0,
+      "elapsed_seconds": 1.303,
+      "completed_at": "2026-10-28T05:40:22.730028385Z"
+    },
+    {
+      "file": "qa/candidate-pass2.json",
+      "sha256": "9ab0385e002d6be4a7db57d081f024d2b52e476bbeb496332ba4339a19c9de39",
+      "passes": 27,
+      "skips": 0,
+      "failures": 0,
+      "elapsed_seconds": 1.388,
+      "completed_at": "2026-10-28T05:40:33.578195927Z"
+    },
+    {
+      "file": "qa/baseline-pass3.json",
+      "sha256": "b45ce1fea94cd2e981b2debc7f26686d614210bec8a6a19b74c2d37678dbe179",
+      "passes": 8,
+      "skips": 0,
+      "failures": 0,
+      "elapsed_seconds": 1.302,
+      "completed_at": "2026-10-28T05:40:44.345470809Z"
+    },
+    {
+      "file": "qa/candidate-pass3.json",
+      "sha256": "483569683179244f28a02f3eae4691310737639947524eb898ba73e9ce140fe7",
+      "passes": 27,
+      "skips": 0,
+      "failures": 0,
+      "elapsed_seconds": 1.384,
+      "completed_at": "2026-10-28T05:40:55.207826604Z"
+    }
   ],
   "total_positive_test_passes": 105,
   "fixed_run_stderr_files_all_empty_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -83,8 +136,33 @@
     "product_bug_proved": false
   },
   "broader_h1_service_integration_passed": false,
-  "native_reference_binary_built": false,
+  "native_reference_binary_built": true,
   "measured_direction_pilot_started": false,
   "new_held_out_seed_drawn_or_measured": false,
-  "original_second_committed_seed_unstarted": true
+  "original_second_committed_seed_unstarted": true,
+  "native_build_followup": {
+    "summary_file": "native-build-summary.json",
+    "summary_sha256": "af8f011fac1a07a429bf40e8470bcbc4761c0f14ac76781b105059ebf3a664c9",
+    "authenticated_roles": [
+      "better",
+      "worse",
+      "no-op"
+    ],
+    "measured": false,
+    "service_correctness_qualified": false,
+    "proofs": [
+      {
+        "file": "native/better-proof.json",
+        "sha256": "898cfcdcbccd11434828a286fa1931661c3faf4f59e0aebfb432306723a341bf"
+      },
+      {
+        "file": "native/worse-proof.json",
+        "sha256": "f00decbf2d9a37338a85c16fea3ee8eba191ff8fc34041dd2d64dced2c317910"
+      },
+      {
+        "file": "native/noop-proof.json",
+        "sha256": "bdcfdd78a2a26aa716f773bf5f44791d5f8b2e5f297b66236d579a50239f4e2d"
+      }
+    ]
+  }
 }

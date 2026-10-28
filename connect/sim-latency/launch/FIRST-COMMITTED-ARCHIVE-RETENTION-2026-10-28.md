@@ -62,6 +62,14 @@ only safe object/version/count/hash metadata. Do not copy private payloads or
 seed values into Git. All three receipts record zero source deletions and zero
 configuration changes; originals and partial/failed evidence remain preserved.
 
+At approximately 06:37 UTC on October 28, the three redundant local
+`full-evidence.tar` files were removed after rechecking each root-owned,
+single-link regular file's exact size and SHA-256 against its retained receipt.
+This reclaimed 961,268,224 bytes for qualification. No original source,
+measurement, private input, receipt, inventory or MinIO object was removed.
+Restore a tar by its exact bucket/key/version above before attempting local
+tar verification; an absent staging copy is not a missing retained version.
+
 Replication configuration validation is **not replica delivery proof**. Delivery
 of these three versions, offsite backup, and restoration from a replica remain
 unverified. No deletion authority, successful calibration, new seed draw,

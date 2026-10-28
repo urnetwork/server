@@ -49,12 +49,12 @@
     "worse": {
       "patch_sha256": "6f8c6f24c44a9627f053e58d4a59f845a0ba4b0b51e201f5cabddfb33b30629d",
       "image_key": "1cbc1ce6b00b6dbdaf2cd3ce405793c0af91133b5808c888b535b8c14c250de0",
-      "default_image_tag": "urnetwork/sim-latency-submission:1cbc1ce6b00b6dbdaf2cd3ce405793c0a"
+      "default_image_tag": "urnetwork/sim-latency-submission:1cbc1ce6b00b6dbdaf2cd3ce405793c0"
     },
     "no-op": {
       "patch_sha256": "1076be3ed61df0e14ae90c13bbe4c35442de6371064fd7d78f61ed6834e170f1",
       "image_key": "5f7fa73e28858cc78501384c89b967dad9b7b732edf6fd78af6639e6b12351a6",
-      "default_image_tag": "urnetwork/sim-latency-submission:5f7fa73e28858cc78501384c89b967dad"
+      "default_image_tag": "urnetwork/sim-latency-submission:5f7fa73e28858cc78501384c89b967da"
     }
   },
   "claims_excluded": [

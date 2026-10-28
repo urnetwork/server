@@ -3,8 +3,10 @@
 Focused synthetic unit qualification passed: three independent LOW passes of
 **8 baseline / 27 candidate tests**, zero skips or failures. This is a proposed
 stronger regression reference, **not a measured slowdown, service-qualified
-reference, native candidate binary or accepted calibration screen**. Publish
-this bundle before subsequent service/native-pilot validation. It does not
+reference or accepted calibration screen**. All three canonical-policy native
+images now have authenticated [offline build proofs](native-build-summary.json),
+separate from the original unit evidence. Broader service correctness and a
+prospective measured-direction pilot remain pending. This bundle does not
 authorize a seed draw, measurement or reuse of the old second committed seed.
 The [bundle manifest](MANIFEST.sha256) pins the published source and QA evidence.
 
@@ -50,7 +52,7 @@ lineage, not an interchangeable native-policy hash. This reference-only policy
 is not the public production policy, and the unchanged base image is policy-unbound.
 
 [scored-policy-lineage.json](scored-policy-lineage.json), SHA-256
-`6bf536b6362f1e30e551015ead5ac3ab5b7b88137b6af8fc5b6c33fbec80e860`,
+`ae0a8bea7d33cf718ab1ab74e43acb14eb6234bf308c9360ec2c6f6ea57b71ec`,
 pins the actual trusted release components and three **calculated expected**
 native image keys. Component hashes and the read-only builder identity were
 independently checked; the three public-input key calculations were recomputed.
@@ -61,6 +63,12 @@ not a claim of a later build. The original
 `1be65a2a5affc536844da8e233a9b2b2b5d7f1c24a8bf273914d07ef33581fcc`,
 also remains byte-exact. Native builds still require broader integration and
 separate authorization; this follow-up ran no build, test, service, pilot or seed draw.
+
+The lineage's two descriptive worse/no-op tag suffixes were corrected from
+33 to 32 hexadecimal characters. All full image keys and build inputs are
+unchanged; the trusted builder derives its own tag, with no custom tag passed.
+The original `6bf536b6…` lineage remains in Git commit `94870027f` and the
+private pre-build snapshot. This metadata correction is not a build retry.
 
 The exact default is one microsecond per emitted user-frame byte, in the
 existing dedicated H1 writer, for both WebSocket and H1Plus framed encoding.

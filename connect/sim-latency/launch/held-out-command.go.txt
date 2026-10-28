@@ -215,6 +215,11 @@ func TestHeldOutOperatorCommand(t *testing.T) {
 			if err := decodeHeldOutComplete(content, &config, "held-out preparation configuration"); err != nil {
 				return nil, err
 			}
+			if err := preflightHeldOutFreshSingleMemory(ctx, config, release, settings, func(ctx context.Context, program string, args ...string) ([]byte, error) {
+				return runHeldOutReadOnly(ctx, settings, program, args...)
+			}); err != nil {
+				return nil, err
+			}
 			inputs, err := authenticateHeldOutPreparation(config, release, settings)
 			if err != nil {
 				return nil, err
@@ -259,6 +264,11 @@ func TestHeldOutOperatorCommand(t *testing.T) {
 				summary = fmt.Sprintf("verified all %d rounds / %d exact precommitted requests; no execution", len(plan.Rounds), len(plan.Rounds)*3)
 				return nil, nil
 			}
+			if err := preflightHeldOutFreshSingleMemory(ctx, plan.Config, release, settings, func(ctx context.Context, program string, args ...string) ([]byte, error) {
+				return runHeldOutReadOnly(ctx, settings, program, args...)
+			}); err != nil {
+				return nil, err
+			}
 			if err := authenticateHeldOutPublication(ctx, config, *plan, settings, func(ctx context.Context, program string, args ...string) ([]byte, error) {
 				return runHeldOutReadOnly(ctx, settings, program, args...)
 			}); err != nil {
@@ -291,6 +301,16 @@ func TestHeldOutOperatorCommand(t *testing.T) {
 			}
 			summary = fmt.Sprintf("completed fixed %d-job screen; accepted=%t correctly_ordered_seeds=%d; no production activation", len(plan.Rounds)*3, result.Accepted, result.OrderedSeeds)
 			return nil, nil
+		case "verify-public-pilot":
+			var config heldOutFreshSinglePilotPreflightConfig
+			if err := decodeHeldOutComplete(content, &config, "fresh public-pilot collision preflight"); err != nil {
+				return nil, err
+			}
+			if err := verifyHeldOutFreshSinglePublicPilot(config, release, settings); err != nil {
+				return nil, err
+			}
+			summary = "verified fixed public-pilot seed against complete original/prior exclusions; no entropy, pilot execution, or measurements"
+			return nil, nil
 		case "reveal":
 			var config heldOutRevealConfig
 			if err := decodeHeldOutComplete(content, &config, "held-out reveal configuration"); err != nil {
@@ -307,7 +327,7 @@ func TestHeldOutOperatorCommand(t *testing.T) {
 			summary = "revealed original committed seeds after authenticated closure; reveal_sha256=" + digest
 			return nil, nil
 		default:
-			return nil, errors.New("held-out command must be freeze-margin, verify-bridge, prepare, verify, execute or reveal")
+			return nil, errors.New("held-out command must be freeze-margin, verify-bridge, prepare, verify, execute, verify-public-pilot or reveal")
 		}
 	})
 	if err != nil {

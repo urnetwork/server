@@ -1,0 +1,9 @@
+=== RUN   TestHeldOutFreshSingleCountDoesNotRewriteOldProtocols
+--- PASS: TestHeldOutFreshSingleCountDoesNotRewriteOldProtocols (0.00s)
+=== RUN   TestHeldOutFreshSingleCompleteCompositionPreservesOldClaims
+--- PASS: TestHeldOutFreshSingleCompleteCompositionPreservesOldClaims (60.68s)
+=== RUN   TestHeldOutFreshSingleGenerationFailureRetainsSpentNamespace
+--- PASS: TestHeldOutFreshSingleGenerationFailureRetainsSpentNamespace (154.17s)
+=== RUN   TestHeldOutFreshSingleTemplateProjectionRejectsEveryOtherField
+--- PASS: TestHeldOutFreshSingleTemplateProjectionRejectsEveryOtherField (23.58s)
+=== RUN   TestHeldOutFreshSingleDeclarationMutationsRefuseBeforeEntropy

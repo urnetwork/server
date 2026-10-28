@@ -1,7 +1,9 @@
 # October 28 production launch acceptance
 
 The required opening was **2026-10-28T00:00:00Z**; readiness was not achieved
-by that deadline. No new opening or backdated activation is authorized. This
+by that deadline. Backdated activation remains prohibited. The owner's
+[October 28 prospective-opening direction](LATE-OPENING-AUTHORIZATION-2026-10-28.md)
+supersedes the earlier no-late-opening warning only after every required gate passes. This
 checklist is the acceptance index for the new release, not an authorization to
 activate production. Historical v1 checkmarks do not qualify a different source,
 image, host manifest, policy or review provider.
@@ -10,7 +12,9 @@ image, host manifest, policy or review provider.
 
 The [deadline record](LAUNCH-DEADLINE-2026-10-28.md) preserves public discovery
 503 and production control-token 401 at 00:00:10 UTC. The objective is not
-complete. The owner has not authorized rescheduling or a late public opening.
+complete. The earlier absence of late-opening authority is preserved in that
+deadline record; the separately recorded 07:16 UTC direction now authorizes a
+prospective opening after all gates, not backdating or a gate waiver.
 
 The owner-approved, artifact-preserving [unmeasured recovery](UNMEASURED-MANAGEMENT-OOM-2026-10-27.md)
 has been applied once. The first reference completed nine controls and nine
@@ -35,7 +39,8 @@ committed seed. Exact reference/protocol review, native qualification and
 publication must precede measurement. No new seed has been drawn or new
 measurement started; the original second seed stays unstarted. R9, gates,
 significance and the 26.9% margin remain unchanged. This is not authority to
-relabel the failure, select a favorable result, waive a provider or open late.
+relabel the failure, select a favorable result or waive a provider. Prospective
+opening authority comes only from the separate direction linked above.
 Snow V7 remains unqualified. Sampled production
 credentials are now recognized: settlement requests reach `503 source_not_ready`,
 and other scoped roles receive the expected `403 scope_denied` on that
@@ -50,9 +55,15 @@ Originals remain; delivery of these versions to a replica and a complete
 integration-wrapper pass remain unproved. The proposed
 [H1 pacing reference](reference-h1-byte-pacing-2026-10-28/README.md) passed its
 focused 8-baseline/27-candidate guards three times after a retained fixture-race
-repair, but broader service integration, native reference build and measured
-direction remain pending. The new protocol's first unit qualification timed out
-and remains unqualified. No new held-out seed or measurement has started.
+repair. All three new-policy native images now have exact authenticated
+[offline build proofs](reference-h1-byte-pacing-2026-10-28/native-build-summary.json);
+broader service integration and measured direction remain pending. The new
+protocol's first five-minute timeout is retained. Its exact integrated source
+passed [three corrected 21-guard race runs](fresh-single-protocol-2026-10-28/qualification.json),
+with zero skips or failures. This is not complete native qualification: the
+direct-public provider-digest exclusion followup, its new tests/publication,
+the broader guard matrix and complete native census remain required before
+public-pilot admission. No new held-out seed or measurement has started.
 
 ## Historical checkpoint — October 27, 15:10 UTC
 
