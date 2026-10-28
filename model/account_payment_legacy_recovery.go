@@ -13,6 +13,8 @@ const legacyPaymentRecoveryLimit = 1024
 // Recover the same original row only with an exact, complete pre-cutoff census.
 // Invalid originals stay visible for review and do not repeatedly occupy the
 // bounded candidate batch. Locked owners and unrelated payments keep running.
+// A payment the USDC close-out closed is never restored: its obligation is
+// forfeited (account_payment_usdc_close.go).
 func (self *PaymentPlanner) recoverLegacyComponents() {
 	if self.transition == nil {
 		return
@@ -20,6 +22,7 @@ func (self *PaymentPlanner) recoverLegacyComponents() {
 	result, err := self.tx.Query(self.ctx, `SELECT payment_id FROM account_payment
 		WHERE canceled AND NOT completed AND circle_idempotency_key IS NULL AND payment_record IS NULL AND tx_hash IS NULL
 		AND NOT attribution_review_required AND (subsidy_payout_nano_cents>0 OR reliability_subsidy_nano_cents>0)
+		AND NOT `+usdcPayoutClosed("account_payment")+`
 		ORDER BY payment_id LIMIT 1024 FOR UPDATE SKIP LOCKED`)
 	ids := []server.Id{}
 	server.WithPgResult(result, err, func() {

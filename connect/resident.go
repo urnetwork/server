@@ -498,6 +498,11 @@ type ExchangeSettings struct {
 	// redis key-event delta delivery for the peers + stream-hops listeners
 	// (PEERSSTREAMS2.md). Off -> pure PEERS2 poll behavior above.
 	KeyEventDelivery KeyEventDeliverySettings
+	// Requests per CloseSequences frame. Defaults to 512 (about 9 KiB);
+	// non-positive uses the default. The listener reduces larger values to
+	// fit the exchange and minimum supported client carrier limits.
+	// Framers below the control sender's 4 KiB envelope leave requests pending.
+	ClientCloseBatchSize int
 
 	ExchangeResidentWaitTimeout time.Duration
 	ExchangeResidentPollTimeout time.Duration
@@ -630,6 +635,7 @@ func DefaultExchangeSettingsWithBufferSize(bufferSize int) *ExchangeSettings {
 			TopologyRefreshInterval: 60 * time.Second,
 			ResyncSpreadTimeout:     30 * time.Second,
 		},
+		ClientCloseBatchSize: 512,
 
 		ExchangeResidentWaitTimeout: exchangeResidentWaitTimeout,
 		ExchangeResidentPollTimeout: 15 * time.Second,
@@ -762,6 +768,9 @@ type Exchange struct {
 	// connection id -> the moved close of one of those transports, for a
 	// compulsory move's deadline. Nil until the first one.
 	connectionMovedCloses map[server.Id]func()
+	// connection id -> the typed authorization close of one of those
+	// transports, for an api removal (CLIENTCLOSE.md). Nil until the first one.
+	connectionAuthorizationCloses map[server.Id]func(int)
 	// decides at drain time whether drains may send moves; nil allows
 	// (SetDrainMovesAllowed)
 	drainMovesAllowed func(context.Context) bool
@@ -866,6 +875,7 @@ func newExchange(
 		// one shared key-event subscriber per exchange (PEERSSTREAMS2.md §5.1):
 		// residents register their listeners with it in `Resident.Run`
 		exchange.keyEventSubscriber = newKeyEventSubscriber(cancelCtx, &settings.KeyEventDelivery)
+		exchange.keyEventSubscriber.SetClientRemoved(exchange.handleClientRemoved)
 	}
 	exchange.contractOriginNotifications = model.NewContractOriginNotifications(cancelCtx, model.DefaultContractOriginNotificationSettings())
 	if settings.EnableMove {
@@ -1917,6 +1927,7 @@ func (self *Exchange) unregisterConnection(clientId server.Id, connectionId serv
 		}
 	}
 	delete(self.connectionMovedCloses, connectionId)
+	delete(self.connectionAuthorizationCloses, connectionId)
 }
 
 // Counts one accepted inbound exchange connection of the client.
@@ -4502,6 +4513,14 @@ func (self *Resident) Run() {
 		removeHopListener := self.exchange.keyEventSubscriber.AddHopListener(self.clientId, streamHopListener)
 		defer removeHopListener()
 		streamHopListener.Resync()
+
+		// the client's close requests (CLIENTCLOSE.md). Requests added before
+		// this registration had no listener, so it takes once now.
+		closeListener := newClientCloseListener(self.ctx, self.clientId, self.sendListenerFrame, self.exchange.settings)
+		defer closeListener.CloseAndWait()
+		removeCloseListener := self.exchange.keyEventSubscriber.AddCloseListener(self.clientId, closeListener)
+		defer removeCloseListener()
+		closeListener.Kick()
 	}
 
 	// only top-level client-category peers get network peer updates.

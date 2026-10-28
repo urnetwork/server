@@ -225,24 +225,18 @@ func TestSubscribeKeyEventsConnDeathResubscribes(t *testing.T) {
 		Raise(err)
 		defer unsub()
 
-		// the subscription delivers: a SET on a matching key arrives. Retry
-		// the SET until delivery — psubscribe confirmation timing means the
-		// first write can race the subscription becoming active.
+		// Readiness includes the subscription confirmation: the first write
+		// must arrive, without republishing it to cover an establishment gap.
 		deliverCtx, deliverCancel := context.WithTimeout(ctx, 15*time.Second)
 		defer deliverCancel()
-		delivered := false
-		for !delivered {
-			Redis(ctx, func(r RedisClient) {
-				Raise(r.Set(ctx, fmt.Sprintf("%s:a", prefix), "1", 30*time.Second).Err())
-			})
-			select {
-			case <-deliverCtx.Done():
-				t.Fatal("no key event delivered before conn kill")
-			case message := <-messages:
-				connect.AssertEqual(t, message.Payload, "set")
-				delivered = true
-			case <-time.After(200 * time.Millisecond):
-			}
+		Redis(ctx, func(r RedisClient) {
+			Raise(r.Set(ctx, fmt.Sprintf("%s:a", prefix), "1", 30*time.Second).Err())
+		})
+		select {
+		case <-deliverCtx.Done():
+			t.Fatal("no key event delivered before conn kill")
+		case message := <-messages:
+			connect.AssertEqual(t, message.Payload, "set")
 		}
 
 		// kill every pubsub connection server-side; go-redis auto-reconnects

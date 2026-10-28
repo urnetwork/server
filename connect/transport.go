@@ -464,6 +464,8 @@ func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 	return &ConnectHandlerSettings{
 		EnableH1Plus: true,
 		H1PlusStats:  defaultConnectH1PlusStats,
+		// a connection that offers the delay header gets it
+		EnableTransportDelay: true,
 		// use the min value from older version of the client
 		// `platformTransportSettings.PingTimeout`
 		MinPingTimeout:   1 * time.Second,
@@ -534,6 +536,10 @@ type ConnectHandlerSettings struct {
 	MaxPingTimeout   time.Duration
 	PingTrackerCount int
 	WriteTimeout     time.Duration
+	// Accepts the per-message delay header (connect DELAY.md §6) on a
+	// connection that offers it and declares no provide intent. On by
+	// default; false keeps every connection on the legacy wire.
+	EnableTransportDelay bool
 	// Bounds the complete authentication phase, then each serving read.
 	ReadTimeout time.Duration
 	// MaximumExchangeMessageByteCount ByteCount
@@ -605,10 +611,14 @@ type ConnectHandlerSettings struct {
 }
 
 // Keeps server-resident Transfer recovery symmetric with the client H3 path.
+// A connection that negotiated the delay header carries it inside every
+// DATAGRAM envelope, so its DATAGRAM frame limit is smaller by the header, as
+// on the client (connect DELAY.md §5.1); 0 is the legacy wire.
 func connectH3TransferCarrierProperties(
 	useH3Datagrams bool,
 	settings *connect.H3DatagramSettings,
 	maxDatagramByteCount int,
+	transportDelayHeaderByteCount int,
 ) connect.TransferCarrierProperties {
 	properties := connect.TransferCarrierProperties{
 		Unreliable:              useH3Datagrams,
@@ -617,7 +627,11 @@ func connectH3TransferCarrierProperties(
 	}
 	if useH3Datagrams {
 		properties.UnreliableMaxMessageByteCount =
-			connect.H3DatagramTransferFrameByteLimit(settings, maxDatagramByteCount)
+			connect.H3DatagramTransferFrameByteLimitWithHeader(
+				settings,
+				maxDatagramByteCount,
+				transportDelayHeaderByteCount,
+			)
 	}
 	return properties
 }
@@ -1339,6 +1353,19 @@ func readConnectH1AuthWithDeadline(ws connect.H1MessageConn, timeout time.Durati
 	return ws.ReadMessage()
 }
 
+// The 101's acceptance of the delay header (connect DELAY.md §6), or nil to
+// keep the legacy wire. It is accepted only when the request offers it, so a
+// client from before the header, which never offers, never gets one. It is
+// accepted for header auth only, where the first message after the 101 is the
+// switch point, and never on a connection that declares provide intent, which
+// header auth declares in the request.
+func connectH1TransportDelayResponseHeader(enableTransportDelay bool, headerAuth bool, r *http.Request) http.Header {
+	if enableTransportDelay && headerAuth && connect.TransportDelayH1Offered(r) && !provideIntentFromHeader(r.Header) {
+		return connect.TransportDelayH1AcceptHeader()
+	}
+	return nil
+}
+
 func echoConnectH1AuthWithDeadline(ws connect.H1MessageConn, timeout time.Duration, authFrameBytes []byte) error {
 	if err := ws.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
 		return err
@@ -1519,6 +1546,18 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			ws.Close()
 		}
 	}()
+	upgradeResponseHeader := connectH1TransportDelayResponseHeader(self.settings.EnableTransportDelay, auth != nil, r)
+	// After a 101 that accepted the header, ws stamps and strips it on every
+	// message, the out-of-band closes and keepalives included. The peer conn
+	// only stamps and echoes and publishes nothing, so it needs no client id,
+	// which the WebSocket upgrade precedes anyway.
+	transportDelayed := false
+	enableTransportDelay := func() {
+		if delayed, ok := connect.NewTransportDelayH1PeerConn(ws, connect.Id{}); ok {
+			ws = delayed
+			transportDelayed = true
+		}
+	}
 	if custom {
 		if !self.settings.EnableH1Plus || !connect.H1PlusAvailable() {
 			h1Observation.result = connectH1ResultUpgradeUnavailable
@@ -1544,16 +1583,18 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		}
 
 		batchResponseWriter := &connectH1BatchResponseWriter{ResponseWriter: w}
-		websocketConn, upgradeErr := upgrader.Upgrade(batchResponseWriter, r, nil)
+		websocketConn, upgradeErr := upgrader.Upgrade(batchResponseWriter, r, upgradeResponseHeader)
 		if upgradeErr != nil {
 			h1Observation.result = connectH1ResultUpgradeError
 			return
 		}
 		ws = websocketConn
 		h1Observation.upgraded = true
+		enableTransportDelay()
 
 		// enforce the message size limit on messages in
 		// +4 for the framer's length header (the websocket carries the framed message).
+		// a delayed conn adds its header to the WebSocket limit itself.
 		ws.SetReadLimit(int64(self.settings.FramerSettings.MaxMessageLen + 4))
 
 		if auth == nil {
@@ -1690,11 +1731,18 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	connectionId := server.NewId()
+	// the lease closes with the code of a definitive refusal, and so does an
+	// api removal (CLIENTCLOSE.md)
+	closeAuthorization := func(code int) {
+		authorizationCloseCode.Store(int32(code))
+		handleCancel()
+	}
 	self.exchange.registerConnectionWithMovedClose(clientId, connectionId, handleCancel, func() {
 		movedCloseRequested.Store(true)
 		h1Observation.close(connectH1CloseMoved)
 		handleCancel()
 	})
+	self.exchange.registerConnectionAuthorizationClose(connectionId, closeAuthorization)
 	defer self.exchange.unregisterConnection(clientId, connectionId)
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -1706,10 +1754,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	}
 	// the lease's final check before admission is one of the handshake's queries
 	lease, leaseErr := session.StartConnectionAuthorizationLease(
-		session.WithStateQuerySource(handleCtx, session.StateQueryConnectH1), byJwt, connectionId, auth.StreamLeaseVersion, func(code int) {
-			authorizationCloseCode.Store(int32(code))
-			handleCancel()
-		})
+		session.WithStateQuerySource(handleCtx, session.StateQueryConnectH1), byJwt, connectionId, auth.StreamLeaseVersion, closeAuthorization)
 	if leaseErr != nil {
 		h1Observation.result = connectH1ResultStateRefused
 		status := http.StatusUnauthorized
@@ -1740,7 +1785,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			h1Observation.result = connectH1ResultClientCanceled
 			return
 		}
-		conn, upgradeErr := connect.AcceptFramedUpgrade(w, r, connect.H1FramerProtocol, max(time.Nanosecond, min(self.settings.WriteTimeout, time.Until(authDeadline))))
+		conn, upgradeErr := connect.AcceptFramedUpgradeWithHeader(w, r, connect.H1FramerProtocol, max(time.Nanosecond, min(self.settings.WriteTimeout, time.Until(authDeadline))), upgradeResponseHeader)
 		connect.RecordH1PlusSelection(self.settings.H1PlusStats, time.Since(upgradeStart), upgradeErr)
 		if upgradeErr != nil {
 			h1Observation.result = connectH1ResultUpgradeError
@@ -1754,6 +1799,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		}
 		ws = framedConn
 		h1Observation.upgraded = true
+		enableTransportDelay()
 	}
 
 	if len(authEcho) > 0 {
@@ -1964,11 +2010,21 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 					pingTracker.Receive()
 
 					messageByteCount := len(message)
+					// a handoff that waits censors the echo of the client's next
+					// write, which waited in the socket for a reason on this
+					// side (connect DELAY.md §4.2)
+					var handoffStartTime time.Time
+					if transportDelayed {
+						handoffStartTime = time.Now()
+					}
 					sendResult := residentTransport.sendReceivedMessage(
 						handleCtx.Done(),
 						message,
 						connect.CarrierReliabilityReliable,
 					)
+					if transportDelayed {
+						connect.NoteTransportDelayHandoff(ws, time.Since(handoffStartTime))
+					}
 					if h1RelayLineageTraceEnabled {
 						trace.end("edge_h1_admit", sendResult == pooledMessageSendDelivered, len(residentTransport.send), cap(residentTransport.send))
 					}
@@ -2410,6 +2466,15 @@ type connectQuicDeadlineWriter interface {
 	SetWriteDeadline(time.Time) error
 }
 
+// Frames the H3 stream after authentication: the connect Framer on the legacy
+// wire, or the connection's connect.TransportDelayH3 when its auth response
+// accepted the delay header (connect DELAY.md §11). Auth frames always use the
+// Framer.
+type connectQuicStreamFraming interface {
+	Read(r io.Reader) ([]byte, error)
+	WriteBatchWithStorage(w io.Writer, messages [][]byte, storage []byte) error
+}
+
 func withConnectQuicAuthFrameWithDeadline(
 	framer *connect.Framer,
 	stream connectQuicDeadlineReader,
@@ -2422,11 +2487,11 @@ func withConnectQuicAuthFrameWithDeadline(
 	return withConnectQuicAuthFrame(framer, stream, use)
 }
 
-func readConnectQuicFrameWithDeadline(framer *connect.Framer, stream connectQuicDeadlineReader, timeout time.Duration) ([]byte, error) {
+func readConnectQuicFrameWithDeadline(framing connectQuicStreamFraming, stream connectQuicDeadlineReader, timeout time.Duration) ([]byte, error) {
 	if err := stream.SetReadDeadline(time.Now().Add(timeout)); err != nil {
 		return nil, err
 	}
-	return framer.Read(stream)
+	return framing.Read(stream)
 }
 
 func writeConnectQuicAuthWithDeadline(framer *connect.Framer, stream connectQuicDeadlineWriter, timeout time.Duration, frame []byte) error {
@@ -2436,10 +2501,46 @@ func writeConnectQuicAuthWithDeadline(framer *connect.Framer, stream connectQuic
 	return framer.Write(stream, frame)
 }
 
+// Answers one H3 auth request and reports the lanes it negotiated. A response
+// that accepts neither DATAGRAM nor the delay header echoes the request's raw
+// frame byte for byte, which preserves old-client behavior: a new client
+// talking to an old server sees both accepted versions 0 and falls back.
+// Accepting either encodes the response, since the raw echo would leave its
+// accepted fields 0. acceptTransportDelay is the server's policy; a request
+// declaring provide intent is never accepted. write borrows the frame for the
+// call.
+func writeConnectQuicAuthResponse(
+	auth *protocol.Auth,
+	authFrameBytes []byte,
+	enableH3Datagrams bool,
+	localQuicSupport bool,
+	remoteQuicSupport bool,
+	acceptTransportDelay bool,
+	write func(responseFrameBytes []byte) error,
+) (useH3Datagrams bool, useTransportDelay bool, err error) {
+	var authResponse *protocol.Auth
+	authResponse, useH3Datagrams = connect.AcceptH3DatagramAuthOffer(
+		auth,
+		enableH3Datagrams,
+		localQuicSupport,
+		remoteQuicSupport,
+	)
+	useTransportDelay = connect.AcceptTransportDelayH3Offer(auth, authResponse, acceptTransportDelay)
+	if !useH3Datagrams && !useTransportDelay {
+		return false, false, write(authFrameBytes)
+	}
+	responseBytes, err := connect.EncodeFrame(authResponse, connect.DefaultProtocolVersion)
+	if err != nil {
+		return false, false, err
+	}
+	defer connect.MessagePoolReturn(responseBytes)
+	return useH3Datagrams, useTransportDelay, write(responseBytes)
+}
+
 // The batch owner releases all gathered messages on every result, including a
 // rejected deadline. Accounting only observes a completed write.
 func writeConnectQuicBatchWithDeadline(
-	framer *connect.Framer,
+	framing connectQuicStreamFraming,
 	stream connectQuicDeadlineWriter,
 	timeout time.Duration,
 	messages [][]byte,
@@ -2455,7 +2556,7 @@ func writeConnectQuicBatchWithDeadline(
 	if err := stream.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
 		return err
 	}
-	if err := framer.WriteBatchWithStorage(stream, messages, storage); err != nil {
+	if err := framing.WriteBatchWithStorage(stream, messages, storage); err != nil {
 		return err
 	}
 	for _, message := range messages {
@@ -2464,11 +2565,11 @@ func writeConnectQuicBatchWithDeadline(
 	return nil
 }
 
-func writeConnectQuicHeartbeatWithDeadline(framer *connect.Framer, stream connectQuicDeadlineWriter, timeout time.Duration, storage []byte) error {
+func writeConnectQuicHeartbeatWithDeadline(framing connectQuicStreamFraming, stream connectQuicDeadlineWriter, timeout time.Duration, storage []byte) error {
 	if err := stream.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
 		return err
 	}
-	return framer.WriteBatchWithStorage(stream, [][]byte{nil}, storage)
+	return framing.WriteBatchWithStorage(stream, [][]byte{nil}, storage)
 }
 
 func withConnectQuicAuthFrame(
@@ -2610,6 +2711,8 @@ func (self *ConnectHandler) connectQuicWithCarrier(conn *quic.Conn, carrier Resi
 	var lease *session.AuthorizationLease
 	provideIntent := false
 	useH3Datagrams := false
+	// both lanes carry the delay header after the auth exchange
+	useTransportDelay := false
 	connectionRegistered := false
 	// set only when the credential itself was refused, not a check failed
 	var refusalErr error
@@ -2666,10 +2769,17 @@ func (self *ConnectHandler) connectQuicWithCarrier(conn *quic.Conn, carrier Resi
 			}
 
 			connectionId = server.NewId()
+			// the lease closes with the code of a definitive refusal, and so
+			// does an api removal (CLIENTCLOSE.md)
+			closeAuthorization := func(code int) {
+				_ = conn.CloseWithError(quic.ApplicationErrorCode(code), "authorization ended")
+				handleCancel()
+			}
 			self.exchange.registerConnectionWithMovedClose(clientId, connectionId, handleCancel, func() {
 				_ = closeConnectQuicMoved(conn)
 				handleCancel()
 			})
+			self.exchange.registerConnectionAuthorizationClose(connectionId, closeAuthorization)
 			connectionRegistered = true
 			var leaseErr error
 			if self.settings.testingBeforeAuthorizationLease != nil {
@@ -2677,10 +2787,7 @@ func (self *ConnectHandler) connectQuicWithCarrier(conn *quic.Conn, carrier Resi
 			}
 			// the lease's final check before admission is one of the handshake's queries
 			lease, leaseErr = session.StartConnectionAuthorizationLease(
-				session.WithStateQuerySource(handleCtx, session.StateQueryConnectH3), byJwt, connectionId, auth.StreamLeaseVersion, func(code int) {
-					_ = conn.CloseWithError(quic.ApplicationErrorCode(code), "authorization ended")
-					handleCancel()
-				})
+				session.WithStateQuerySource(handleCtx, session.StateQueryConnectH3), byJwt, connectionId, auth.StreamLeaseVersion, closeAuthorization)
 			if leaseErr != nil {
 				if !connectAuthDependencyUnavailable(leaseErr) {
 					return refused(leaseErr)
@@ -2688,28 +2795,21 @@ func (self *ConnectHandler) connectQuicWithCarrier(conn *quic.Conn, carrier Resi
 				return leaseErr
 			}
 			connectionState := conn.ConnectionState()
-			authResponse, accepted := connect.AcceptH3DatagramAuthOffer(
+			var responseErr error
+			useH3Datagrams, useTransportDelay, responseErr = writeConnectQuicAuthResponse(
 				auth,
+				authFrameBytes,
 				self.settings.EnableH3Datagrams,
 				connectionState.SupportsDatagrams.Local,
 				connectionState.SupportsDatagrams.Remote,
+				// never on a connection that declares provide intent (connect
+				// DELAY.md D3)
+				self.settings.EnableTransportDelay && !provideIntent,
+				func(responseFrameBytes []byte) error {
+					return writeConnectQuicAuthWithDeadline(framer, stream, min(self.settings.WriteTimeout, time.Until(authDeadline)), responseFrameBytes)
+				},
 			)
-			useH3Datagrams = accepted
-
-			if !useH3Datagrams {
-				// Byte-for-byte echo preserves old-client behavior. A new client
-				// talking to an old server sees accepted_version=0 and falls back.
-				return writeConnectQuicAuthWithDeadline(framer, stream, min(self.settings.WriteTimeout, time.Until(authDeadline)), authFrameBytes)
-			}
-			responseBytes, responseErr := connect.EncodeFrame(
-				authResponse,
-				connect.DefaultProtocolVersion,
-			)
-			if responseErr != nil {
-				return responseErr
-			}
-			defer connect.MessagePoolReturn(responseBytes)
-			return writeConnectQuicAuthWithDeadline(framer, stream, min(self.settings.WriteTimeout, time.Until(authDeadline)), responseBytes)
+			return responseErr
 		},
 	)
 	if err != nil {
@@ -2799,6 +2899,16 @@ func (self *ConnectHandler) connectQuicWithCarrier(conn *quic.Conn, carrier Resi
 				conn.SendDatagram,
 			)
 		}
+		// The accepted delay header rides every stream frame and DATAGRAM
+		// message after the auth exchange (connect DELAY.md §11). The edge
+		// stamps, strips and echoes; it measures nothing.
+		var delayH3 *connect.TransportDelayH3
+		var streamFraming connectQuicStreamFraming = framer
+		if useTransportDelay {
+			delayH3 = connect.NewTransportDelayH3Peer(connect.Id(clientId), self.settings.FramerSettings)
+			streamFraming = delayH3
+		}
+		delayHeaderByteCount := delayH3.HeaderByteCount()
 		admission := ResidentTransportAdmission{
 			ProvideIntent: provideIntent,
 		}
@@ -2817,6 +2927,7 @@ func (self *ConnectHandler) connectQuicWithCarrier(conn *quic.Conn, carrier Resi
 				useH3Datagrams,
 				self.settings.H3DatagramSettings,
 				maxDatagramByteCount,
+				delayHeaderByteCount,
 			),
 			admission,
 			ResidentTransportEdge{
@@ -2885,11 +2996,20 @@ func (self *ConnectHandler) connectQuicWithCarrier(conn *quic.Conn, carrier Resi
 			announce.ReceiveMessage(ByteCount(len(message)))
 			pingTracker.Receive()
 			messageByteCount := len(message)
+			// a reader held here leaves its next frame waiting for a local
+			// reason, so that frame's echo is censored
+			var handoffStartTime time.Time
+			if delayH3 != nil {
+				handoffStartTime = time.Now()
+			}
 			sendResult := residentTransport.sendReceivedMessage(
 				handleCtx.Done(),
 				message,
 				reliability,
 			)
+			if delayH3 != nil {
+				delayH3.NoteHandoff(reliability, time.Since(handoffStartTime))
+			}
 			if sendResult == pooledMessageSendDone {
 				return false
 			}
@@ -2917,7 +3037,7 @@ func (self *ConnectHandler) connectQuicWithCarrier(conn *quic.Conn, carrier Resi
 					return
 				}
 				for {
-					message, err := framer.Read(stream)
+					message, err := streamFraming.Read(stream)
 					if err != nil {
 						return
 					}
@@ -2949,13 +3069,17 @@ func (self *ConnectHandler) connectQuicWithCarrier(conn *quic.Conn, carrier Resi
 					if err != nil {
 						return
 					}
-					message = datagramReassembler.Accept(datagram, time.Now())
+					if delayH3 != nil {
+						message = delayH3.Accept(datagramReassembler, datagram, time.Now())
+					} else {
+						message = datagramReassembler.Accept(datagram, time.Now())
+					}
 					if message == nil {
 						continue
 					}
 				} else {
 					var err error
-					message, err = readConnectQuicFrameWithDeadline(framer, stream, self.settings.ReadTimeout)
+					message, err = readConnectQuicFrameWithDeadline(streamFraming, stream, self.settings.ReadTimeout)
 					if err != nil {
 						if glog.V(2) {
 							glog.Infof("[tr]h3 err = %s\n", err)
@@ -3005,11 +3129,20 @@ func (self *ConnectHandler) connectQuicWithCarrier(conn *quic.Conn, carrier Resi
 		}
 		sendDatagramMessage := func(message []byte) (useStream bool, sendErr error) {
 			var nextMaxDatagramByteCount int
-			useStream, nextMaxDatagramByteCount, sendErr = datagramFragmenter.SendHybrid(
-				message,
-				maxDatagramByteCount,
-				conn.SendDatagram,
-			)
+			if delayH3 != nil {
+				useStream, nextMaxDatagramByteCount, sendErr = delayH3.SendHybrid(
+					datagramFragmenter,
+					message,
+					maxDatagramByteCount,
+					conn.SendDatagram,
+				)
+			} else {
+				useStream, nextMaxDatagramByteCount, sendErr = datagramFragmenter.SendHybrid(
+					message,
+					maxDatagramByteCount,
+					conn.SendDatagram,
+				)
+			}
 			maxDatagramByteCount = nextMaxDatagramByteCount
 			return useStream, sendErr
 		}
@@ -3033,7 +3166,8 @@ func (self *ConnectHandler) connectQuicWithCarrier(conn *quic.Conn, carrier Resi
 				var messageStorage [connectH3WriteBatchMaxMessageCount][]byte
 				messages := messageStorage[:1]
 				messages[0] = firstMessage
-				batchByteCount := len(firstMessage) + 4
+				// each frame takes its length prefix and any delay header
+				batchByteCount := len(firstMessage) + 4 + delayHeaderByteCount
 				receiveOpen = true
 			drainReady:
 				for len(messages) < cap(messages) {
@@ -3046,7 +3180,7 @@ func (self *ConnectHandler) connectQuicWithCarrier(conn *quic.Conn, carrier Resi
 							receiveOpen = false
 							break drainReady
 						}
-						framedByteCount := len(message) + 4
+						framedByteCount := len(message) + 4 + delayHeaderByteCount
 						if connectH3WriteBatchMaxByteCount < batchByteCount+framedByteCount {
 							pendingMessage = message
 							break drainReady
@@ -3062,7 +3196,7 @@ func (self *ConnectHandler) connectQuicWithCarrier(conn *quic.Conn, carrier Resi
 					writeBatchStorage = make([]byte, connectH3WriteBatchMaxByteCount)
 				}
 				err := writeConnectQuicBatchWithDeadline(
-					framer,
+					streamFraming,
 					stream,
 					self.settings.WriteTimeout,
 					messages,
@@ -3114,7 +3248,8 @@ func (self *ConnectHandler) connectQuicWithCarrier(conn *quic.Conn, carrier Resi
 					case <-pingTimer.C:
 						// Heartbeats reuse existing stream scratch but never allocate
 						// the large reliable batch on an otherwise DATAGRAM-only lane.
-						err := writeConnectQuicHeartbeatWithDeadline(framer, stream, self.settings.WriteTimeout, writeBatchStorage)
+						// A negotiated heartbeat is stamped like any stream write.
+						err := writeConnectQuicHeartbeatWithDeadline(streamFraming, stream, self.settings.WriteTimeout, writeBatchStorage)
 						if err != nil {
 							glog.Infof("[ts]err = %s\n", err)
 							return
@@ -3174,9 +3309,11 @@ func (self *ConnectHandler) connectQuicWithCarrier(conn *quic.Conn, carrier Resi
 						if !ok {
 							return
 						}
-						useDatagram := self.settings.H3DatagramSettings.UseDatagramForPath(
+						// the delay header rides inside the envelope
+						useDatagram := self.settings.H3DatagramSettings.UseDatagramForPathWithHeader(
 							len(message),
 							maxDatagramByteCount,
+							delayHeaderByteCount,
 						)
 						if useDatagram {
 							useStream, sendErr := sendDatagramMessage(message)

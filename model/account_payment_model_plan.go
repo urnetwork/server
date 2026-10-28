@@ -513,7 +513,9 @@ func (self *PaymentPlanner) planPayments() (returnErr error) {
 	//       submit, or after Circle explicitly reported terminal CANCELLED and
 	//       its retry markers were cleared. A canceled row that still carries an
 	//       idempotency key, payment record, or transaction hash may already have
-	//       moved funds and must never be selected for another payout.
+	//       moved funds and must never be selected for another payout. A parked
+	//       payment the USDC close-out closed is never selected either: its
+	//       obligation is forfeited (account_payment_usdc_close.go).
 	//
 	// The two arms are disjoint (payment_id NULL vs. a set pointing at a
 	// safely canceled payment), so UNION ALL reproduces the exact
@@ -573,11 +575,12 @@ func (self *PaymentPlanner) planPayments() (returnErr error) {
                 NOT ap.completed AND
                 ap.circle_idempotency_key IS NULL AND
                 ap.payment_record IS NULL AND
-                ap.tx_hash IS NULL
+                ap.tx_hash IS NULL AND
+                NOT %[3]s
         ) u
-        %s
-        %s
-        `, closeTimeJoin, closeTimeBound),
+        %[1]s
+        %[2]s
+        `, closeTimeJoin, closeTimeBound, usdcPayoutClosed("ap")),
 		closeTimeArgs...,
 	))
 	// Autovacuum cannot analyze session-local relations. Publish the selected

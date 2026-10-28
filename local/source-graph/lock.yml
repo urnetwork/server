@@ -10,13 +10,13 @@ siblings:
   # revision.
   - repository: urnetwork/connect
     path: connect
-    ref: 7753f9935ddd0502faf2c8a1b9a82322acbd8926
+    ref: 28bed463716b3d0838c9c8f66afd9c8540ad6154
   - repository: urnetwork/glog
     path: glog
     ref: c9292862af39bbc73aeeddb38981059841ea84fe
   - repository: urnetwork/sdk
     path: sdk
-    ref: f1e24fc3cd2b2ad87ed9ce67395f8e3f12492f9c
+    ref: ec65f9a49a567c55625c1ab13bed1121b751c01c
   - repository: urnetwork/proxy
     path: proxy
     ref: 69824fd10f202c88e6fccfff5cadff37b3a274eb

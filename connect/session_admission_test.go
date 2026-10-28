@@ -36,7 +36,11 @@ func admissionSessionToken(t testing.TB) (*session.ByJwt, string) {
 // These clients use the real transport boundary but do not start client-side
 // reconnect loops. A rejected admission cannot be hidden by a later retry.
 func dialSessionAdmission(ctx context.Context, env *peerDiscoveryEnv, carrier, token, info string) (connectlib.H1MessageConn, func(), error) {
-	instance := server.NewId()
+	return dialSessionAdmissionWithInstance(ctx, env, server.NewId(), carrier, token, info)
+}
+
+// Shares one logical client instance with another fixture transport.
+func dialSessionAdmissionWithInstance(ctx context.Context, env *peerDiscoveryEnv, instance server.Id, carrier, token, info string) (connectlib.H1MessageConn, func(), error) {
 	authBytes, err := connectlib.EncodeFrame(&protocol.Auth{ByJwt: token, InstanceId: instance.Bytes(), AppVersion: "legacy-version", ClientInfo: info, StreamLeaseVersion: 1}, connectlib.DefaultProtocolVersion)
 	if err != nil {
 		return nil, nil, err

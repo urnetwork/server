@@ -11031,4 +11031,14 @@ var migrations = []any{
 	// invoice owes, and the in-app past-due notice. A new table: nothing is
 	// rewritten, and older binaries never read it.
 	newSqlMigration(stripeInvoicePaymentFailureSchemaSql),
+
+	// Retain report ordering through the admission/settlement commit boundary.
+	// The constant default leaves older rows and rolling writers without proof;
+	// their existing insert/update shapes remain valid, without a table rewrite.
+	newSqlMigration(`
+		SET LOCAL lock_timeout = '5s';
+		ALTER TABLE contract_close
+			ADD COLUMN settlement_completion smallint NOT NULL DEFAULT 0,
+			ADD COLUMN settlement_completion_checkpoint_byte_count bigint
+	`),
 }

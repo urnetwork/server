@@ -28,7 +28,7 @@ func sdkBrowsingNavigationDialRefused(coldLink, armed bool, ordinal int, address
 	if coldLink {
 		target = "203.0.113.14:443"
 	}
-	return armed && 0 <= ordinal && ordinal < 4 && address == target
+	return armed && sdkBrowsingInitialQualityProvider(ordinal) && address == target
 }
 
 // Every asset keeps the original four-origin map. Only page1 HTML changes.
@@ -93,36 +93,36 @@ type nativeBrowsingColdRequest struct {
 
 // Fixed receipts bound all500 original requests; socket identities stay private.
 type nativeBrowsingColdLinkObservation struct {
-	InitialWindow            sdkBrowsingSetupSnapshot       `json:"initial_window"`
-	ColdEdgeWindow           sdkBrowsingSetupSnapshot       `json:"cold_edge_window"`
-	ColdEdgeWindowObserved   bool                           `json:"cold_edge_window_observed"`
-	Protocol                 string                         `json:"inner_protocol"`
-	ColdEdges                int                            `json:"cold_edges"`
-	VisitedDestinationEdges  int                            `json:"visited_destination_edges"`
-	SameSessionEdges         int                            `json:"same_session_edges"`
-	Html                     int                            `json:"validated_html"`
-	Assets                   int                            `json:"validated_or_canceled_assets"`
-	ClientAcquisitions       int                            `json:"client_acquisitions"`
-	ServerAttempts           int                            `json:"server_attempts"`
-	ClientSessions           int                            `json:"client_sessions"`
-	ServerSessions           int                            `json:"server_sessions"`
-	CssBodyReadBytes         int64                          `json:"css_body_read_bytes_at_cold_html"`
-	JsBodyReadBytes          int64                          `json:"js_body_read_bytes_at_cold_html"`
-	CssOwnerRetained         bool                           `json:"css_public_owner_retained"`
-	ColdClientReused         bool                           `json:"cold_client_reused"`
-	ColdServerProvider       int                            `json:"cold_server_provider"`
-	ColdTupleOwned           bool                           `json:"cold_server_tuple_owned"`
-	AdmissionChain           string                         `json:"admission_chain"`
-	Refusals                 [6]uint64                      `json:"actual_old_provider_refusals"`
-	FirstRefusalNs           [6]int64                       `json:"first_refusal_ns"`
-	LateConstructedNs        int64                          `json:"late_constructed_ns"`
-	LatePublicApiVisibleNs   int64                          `json:"late_public_api_visible_ns"`
-	LateReady                bool                           `json:"late_ready"`
-	ControllerWaitNs         [nativeBrowsingPageCount]int64 `json:"controller_wait_ns"`
-	CombinedFirstByteNs      [nativeBrowsingPageCount]int64 `json:"tap_to_first_byte_ns"`
-	PublicationIsAdmission   bool                           `json:"publication_is_admission"`
-	BodyReadIsPacketCustody  bool                           `json:"body_read_is_packet_custody"`
-	PhysicalPauseAttribution string                         `json:"physical_pause_attribution"`
+	InitialWindow            sdkBrowsingSetupSnapshot         `json:"initial_window"`
+	ColdEdgeWindow           sdkBrowsingSetupSnapshot         `json:"cold_edge_window"`
+	ColdEdgeWindowObserved   bool                             `json:"cold_edge_window_observed"`
+	Protocol                 string                           `json:"inner_protocol"`
+	ColdEdges                int                              `json:"cold_edges"`
+	VisitedDestinationEdges  int                              `json:"visited_destination_edges"`
+	SameSessionEdges         int                              `json:"same_session_edges"`
+	Html                     int                              `json:"validated_html"`
+	Assets                   int                              `json:"validated_or_canceled_assets"`
+	ClientAcquisitions       int                              `json:"client_acquisitions"`
+	ServerAttempts           int                              `json:"server_attempts"`
+	ClientSessions           int                              `json:"client_sessions"`
+	ServerSessions           int                              `json:"server_sessions"`
+	CssBodyReadBytes         int64                            `json:"css_body_read_bytes_at_cold_html"`
+	JsBodyReadBytes          int64                            `json:"js_body_read_bytes_at_cold_html"`
+	CssOwnerRetained         bool                             `json:"css_public_owner_retained"`
+	ColdClientReused         bool                             `json:"cold_client_reused"`
+	ColdServerProvider       int                              `json:"cold_server_provider"`
+	ColdTupleOwned           bool                             `json:"cold_server_tuple_owned"`
+	AdmissionChain           string                           `json:"admission_chain"`
+	Refusals                 [sdkBrowsingProviderCount]uint64 `json:"actual_old_provider_refusals"`
+	FirstRefusalNs           [sdkBrowsingProviderCount]int64  `json:"first_refusal_ns"`
+	LateConstructedNs        int64                            `json:"late_constructed_ns"`
+	LatePublicApiVisibleNs   int64                            `json:"late_public_api_visible_ns"`
+	LateReady                bool                             `json:"late_ready"`
+	ControllerWaitNs         [nativeBrowsingPageCount]int64   `json:"controller_wait_ns"`
+	CombinedFirstByteNs      [nativeBrowsingPageCount]int64   `json:"tap_to_first_byte_ns"`
+	PublicationIsAdmission   bool                             `json:"publication_is_admission"`
+	BodyReadIsPacketCustody  bool                             `json:"body_read_is_packet_custody"`
+	PhysicalPauseAttribution string                           `json:"physical_pause_attribution"`
 }
 
 type nativeBrowsingColdLinkWitness struct {
@@ -198,7 +198,7 @@ func (self *nativeBrowsingColdLinkWitness) checkHold(hold *nativeBrowsingColdBod
 		request.serverAttempts < 0 || 1 < request.serverAttempts || request.serverAttempts > request.clientAcquisitions ||
 		request.clientAcquisitions == 1 && (request.clientSession == nil || !request.verifiedClientTls) ||
 		request.clientAcquisitions == 0 && (request.clientSession != nil || request.verifiedClientTls) ||
-		request.serverAttempts == 1 && (!request.serverOwned || request.serverTuple == "" || request.serverProvider < 0 || 6 <= request.serverProvider) ||
+		request.serverAttempts == 1 && (!request.serverOwned || request.serverTuple == "" || request.serverProvider < 0 || len(self.row.Refusals) <= request.serverProvider) ||
 		request.serverAttempts == 0 && (request.serverOwned || request.serverTuple != "") {
 		return errors.New("cold-link original request has invalid observed TLS/server ownership")
 	}
@@ -522,8 +522,10 @@ func (self *nativeBrowsingColdLinkWitness) snapshot() (nativeBrowsingColdLinkObs
 	}
 	row.ClientSessions, row.ServerSessions = len(clientSessions), len(serverSessions)
 	var count uint64
-	for _, value := range refusals[:4] {
-		count += value
+	for ordinal, value := range refusals {
+		if sdkBrowsingInitialQualityProvider(ordinal) {
+			count += value
+		}
 	}
 	coldRequest := self.requests[1][nativeBrowsingAssetCount]
 	if count > 0 && ready && constructed > 0 && visible >= constructed && row.ColdEdges == 1 && row.ColdServerProvider == 4 && row.ColdTupleOwned && !row.ColdClientReused && coldRequest.clientSession != nil && coldRequest.verifiedClientTls && coldRequest.clientAcquisitions == 1 && coldRequest.serverAttempts == 1 {
@@ -547,8 +549,8 @@ func (self *nativeBrowsingColdLinkWitness) verdict() error {
 	var requestErr error
 	for page := range self.requests {
 		for slot, request := range self.requests[page] {
-			if request.clientAcquisitions != 1 || request.clientSession == nil || !request.verifiedClientTls || request.serverAttempts != 1 || !request.serverOwned || request.serverTuple == "" || request.serverProvider < 0 || 6 <= request.serverProvider {
-				requestErr = fmt.Errorf("cold-link request lacked one verified client TLS and owned full server tuple: page=%d slot=%d", page, slot)
+			if request.clientAcquisitions != 1 || request.clientSession == nil || !request.verifiedClientTls || request.serverAttempts != 1 || !request.serverOwned || request.serverTuple == "" || request.serverProvider < 0 || len(self.row.Refusals) <= request.serverProvider {
+				requestErr = fmt.Errorf("cold-link request lacked one verified client TLS and owned full server tuple: page=%d slot=%d provider=%d provider_limit=%d client_acquisitions=%d client_tls=%t verified_tls=%t server_attempts=%d server_owned=%t server_tuple_present=%t", page, slot, request.serverProvider, len(self.row.Refusals), request.clientAcquisitions, request.clientSession != nil, request.verifiedClientTls, request.serverAttempts, request.serverOwned, request.serverTuple != "")
 				break
 			}
 		}

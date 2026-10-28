@@ -23,6 +23,7 @@ func payoutsReimburseCommand(opts docopt.Opts) int {
 	reason, _ := opts.String("--reason")
 	send, _ := opts.Bool("--send")
 	expect, _ := opts.String("--expect")
+	allowPriorReimbursement, _ := opts.Bool("--allow_prior_reimbursement")
 	// The dry run writes nothing: its process is read only, so PostgreSQL
 	// refuses any write on its path, as for sn-reconcile.
 	if !send {
@@ -31,13 +32,14 @@ func payoutsReimburseCommand(opts docopt.Opts) int {
 	clientSession := session.NewLocalClientSession(context.Background(), "0.0.0.0:0", nil)
 	defer clientSession.Cancel()
 	return runPayoutsReimburse(os.Stdout, os.Stderr, file, reason, send, os.ReadFile, func(data []byte) (*controller.PayoutReimbursementReport, error) {
-		return controller.PayoutsReimburse(clientSession, data, reason, send, expect)
+		return controller.PayoutsReimburse(clientSession, data, reason, send, expect, allowPriorReimbursement)
 	})
 }
 
 // Prints the report and returns the exit code. A refusal prints its report too,
 // then its error, and exits non-zero. A clean dry run ends with the command
-// that sends exactly what it printed.
+// that sends exactly what it printed, with --allow_prior_reimbursement when the
+// dry run ran with it.
 func runPayoutsReimburse(
 	stdout io.Writer,
 	stderr io.Writer,
@@ -65,8 +67,12 @@ func runPayoutsReimburse(
 		return 1
 	}
 	if !send && report != nil && report.Digest != "" {
-		fmt.Fprintf(stdout, "to send exactly this: bringyourctl payouts reimburse --file=%s --reason=%s --send --expect=%s\n",
-			payoutsReimburseShellQuote(file), payoutsReimburseShellQuote(reason), report.Digest)
+		allowPriorReimbursement := ""
+		if report.AllowPriorReimbursement {
+			allowPriorReimbursement = " --allow_prior_reimbursement"
+		}
+		fmt.Fprintf(stdout, "to send exactly this: bringyourctl payouts reimburse --file=%s --reason=%s%s --send --expect=%s\n",
+			payoutsReimburseShellQuote(file), payoutsReimburseShellQuote(reason), allowPriorReimbursement, report.Digest)
 	}
 	return 0
 }

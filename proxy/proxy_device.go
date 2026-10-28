@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/netip"
 	"slices"
@@ -170,6 +171,12 @@ type ProxyDeviceManagerSettings struct {
 	// windows do not pile onto whichever edge DNS caches answer. The process
 	// owns it; nil resolves the platform host.
 	PlatformPlacement connect.PlatformPlacement
+
+	// Closes the devices of a client removed through the api, on the
+	// client's removed flag (CLIENTCLOSE.md section 5). Nil leaves them to
+	// their idle timeout. It subscribes to Redis keyspace events, so the
+	// process sets it and tests that do not exercise removal leave it nil.
+	ClientRemoved *ClientRemovedSettings
 }
 
 type ProxyDeviceManager struct {
@@ -211,6 +218,15 @@ type ProxyDeviceManager struct {
 	stateLock    sync.RWMutex
 	proxyDevices map[server.Id]*proxyDeviceState
 
+	// clientLock guards clientDevices, each client's installed devices by
+	// proxy id, which a removal of the client closes. It changes with each
+	// pdState.ProxyDevice, under that state's StateLock, and is the innermost
+	// lock.
+	clientLock    sync.Mutex
+	clientDevices map[server.Id]map[server.Id]*ProxyDevice
+	// closes the devices of removed clients; nil without settings.ClientRemoved
+	clientRemoved *clientRemovedSubscriber
+
 	// The ip lock, memoized. ValidCaller runs on EVERY accepted connection, so reading
 	// the device config from redis each time would put a round-trip on the accept path.
 	// The bounded TTL+LRU cache keeps that fast path without retaining every proxy id
@@ -250,6 +266,7 @@ func NewProxyDeviceManager(ctx context.Context, settings *ProxyDeviceManagerSett
 		networkSpace:     settings.NetworkSpace,
 		ownsNetworkSpace: settings.NetworkSpace == nil,
 		proxyDevices:     map[server.Id]*proxyDeviceState{},
+		clientDevices:    map[server.Id]map[server.Id]*ProxyDevice{},
 		lockCache:        newProxyLockCache(proxyLockCacheMaxEntries),
 		windowIdentityGate: newWindowIdentityRestoreGate(
 			settings.HoldWindowIdentityRestore,
@@ -262,6 +279,9 @@ func NewProxyDeviceManager(ctx context.Context, settings *ProxyDeviceManagerSett
 		networkSpace.Close()
 	}
 	manager.proxyDeviceBuilder = manager.newProxyDevice
+	if settings.ClientRemoved != nil {
+		manager.clientRemoved = newClientRemovedSubscriber(cancelCtx, manager, settings.ClientRemoved)
+	}
 	return manager
 }
 
@@ -365,6 +385,7 @@ func (self *ProxyDeviceManager) OpenProxyDevice(proxyId server.Id) (*ProxyDevice
 			// window stays installed and keeps refilling under the same device.
 			pd.Cancel()
 			pdState.ProxyDevice = nil
+			self.removeClientDevice(proxyId, pd)
 		}
 
 		// if another opener is already creating a device for this proxy id, wait
@@ -417,6 +438,9 @@ func (self *ProxyDeviceManager) OpenProxyDevice(proxyId server.Id) (*ProxyDevice
 				accepted = true
 			}
 			self.lifecycleLock.Unlock()
+		}
+		if accepted {
+			self.addClientDevice(proxyId, pd)
 		}
 		pdState.StateLock.Unlock()
 
@@ -513,6 +537,7 @@ func (self *ProxyDeviceManager) startProxyDevice(proxyId server.Id, pd *ProxyDev
 
 					if pd == pdState.ProxyDevice {
 						pdState.ProxyDevice = nil
+						self.removeClientDevice(proxyId, pd)
 					}
 					// drop the empty entry to keep the map bounded under churn, but
 					// only when nothing is installed and no creation is in flight (a
@@ -529,6 +554,9 @@ func (self *ProxyDeviceManager) startProxyDevice(proxyId server.Id, pd *ProxyDev
 
 	go server.HandleError(func() {
 		defer self.deviceWorkers.Done()
+		if self.clientRemoved != nil {
+			self.clientRemoved.checkInstalledDevice(pd)
+		}
 		for {
 			if pd.CancelIfIdle() {
 				return
@@ -697,6 +725,63 @@ func (self *ProxyDeviceManager) DeviceCount() int {
 	return len(self.proxyDevices)
 }
 
+// Indexes a device just installed for the proxy id under its client. The
+// caller holds the proxy id's pdState.StateLock.
+func (self *ProxyDeviceManager) addClientDevice(proxyId server.Id, pd *ProxyDevice) {
+	self.clientLock.Lock()
+	defer self.clientLock.Unlock()
+	proxyDevices, ok := self.clientDevices[pd.clientId]
+	if !ok {
+		proxyDevices = map[server.Id]*ProxyDevice{}
+		self.clientDevices[pd.clientId] = proxyDevices
+	}
+	proxyDevices[proxyId] = pd
+}
+
+// Unindexes a device just uninstalled from the proxy id. The caller holds the
+// proxy id's pdState.StateLock. A device installed without the index (tests
+// install devices directly) is not there.
+func (self *ProxyDeviceManager) removeClientDevice(proxyId server.Id, pd *ProxyDevice) {
+	self.clientLock.Lock()
+	defer self.clientLock.Unlock()
+	proxyDevices := self.clientDevices[pd.clientId]
+	if proxyDevices[proxyId] != pd {
+		return
+	}
+	delete(proxyDevices, proxyId)
+	if len(proxyDevices) == 0 {
+		delete(self.clientDevices, pd.clientId)
+	}
+}
+
+// Cancels each installed device of the client, as an idle device is canceled:
+// the device's worker then uninstalls and closes it. Canceling never blocks.
+// Returns the number of devices this call canceled.
+func (self *ProxyDeviceManager) cancelClientDevices(clientId server.Id) int {
+	pds := func() []*ProxyDevice {
+		self.clientLock.Lock()
+		defer self.clientLock.Unlock()
+		return slices.Collect(maps.Values(self.clientDevices[clientId]))
+	}()
+	canceledCount := 0
+	for _, pd := range pds {
+		select {
+		case <-pd.Done():
+		default:
+			pd.Cancel()
+			canceledCount += 1
+		}
+	}
+	return canceledCount
+}
+
+// The clients with installed devices.
+func (self *ProxyDeviceManager) deviceClientIds() []server.Id {
+	self.clientLock.Lock()
+	defer self.clientLock.Unlock()
+	return slices.Collect(maps.Keys(self.clientDevices))
+}
+
 // Requests manager shutdown and starts asynchronous ownership cleanup. This
 // remains safe from a device callback; external owners use CloseAndWait.
 func (self *ProxyDeviceManager) Close() {
@@ -711,6 +796,10 @@ func (self *ProxyDeviceManager) Close() {
 		go func() {
 			self.openWorkers.Wait()
 			self.deviceWorkers.Wait()
+			// the removed client subscriber stops with the manager's context
+			if self.clientRemoved != nil {
+				<-self.clientRemoved.Done()
+			}
 			// every device's authority has stopped creating contracts
 			self.contractAdmission.Close()
 			// Prevent a test-only direct lazy lookup from constructing an owned
@@ -894,6 +983,9 @@ type ProxyDevice struct {
 	receiveBackpressureForTest func()
 	// Replaces the device-worker join with a deterministic lifecycle barrier.
 	closeDeviceLocalForTest func()
+	// Replaces the packet loop of Run for a device with no DeviceLocal or
+	// Tun; Run returns when it does.
+	runForTest func()
 }
 
 func NewProxyDeviceWithDefaults(
@@ -1113,6 +1205,11 @@ func newProxyDeviceLocalSettings(
 	deviceLocalSettings.HostedIncompatible = true
 	// the windows dial the edge the platform's load model chooses
 	deviceLocalSettings.PlatformPlacement = proxyDeviceSettings.PlatformPlacement
+	// a hosted device's window transports run from this data center to the
+	// edge and never cross the user's link, so their delay would describe the
+	// wrong network: offer no delay header and measure nothing
+	// (connect/DELAY.md §10.4)
+	deviceLocalSettings.EnableTransportDelay = false
 	return deviceLocalSettings
 }
 
@@ -1189,6 +1286,11 @@ func (self *ProxyDevice) PushDeviceRpc(ws sdk.DeviceRpcWs) error {
 // directly copy between tun and device
 func (self *ProxyDevice) Run() {
 	defer self.cancel()
+
+	if self.runForTest != nil {
+		self.runForTest()
+		return
+	}
 
 	receivePacketsCallback := func(
 		source connect.TransferPath,

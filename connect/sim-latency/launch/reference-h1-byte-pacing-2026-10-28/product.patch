@@ -1,0 +1,148 @@
+diff --git a/connect/transport.go b/connect/transport.go
+index 5f6eded66..9821ad60a 100644
+--- a/connect/transport.go
++++ b/connect/transport.go
+@@ -9,6 +9,7 @@ import (
+ 	"errors"
+ 	"fmt"
+ 	"io"
++	"math"
+ 	"net"
+ 	"net/http"
+ 	// "os"
+@@ -322,10 +323,10 @@ func (self *connectH1BatchResponseWriter) Hijack() (
+ 	return connect.NewWebSocketWriteBatchConn(conn), readWriter, nil
+ }
+ 
+-// Writes one user frame immediately, plus a bounded set of frames already
+-// queued at the same instant. Every dequeued pooled buffer is returned after
+-// the terminal flush; successful accounting is published only after that
+-// flush reaches the delegated connection.
++// Writes one user frame plus a bounded set already queued at the same instant.
++// Optional owner pacing holds only this writer's batch and shares its original
++// write deadline. Every dequeued pooled buffer is returned after the terminal
++// flush; successful accounting follows only that delegated flush.
+ func writeConnectH1UserReadyBatch(
+ 	ctx context.Context,
+ 	writer connectH1WebSocketWriter,
+@@ -335,6 +336,7 @@ func writeConnectH1UserReadyBatch(
+ 	firstOpen bool,
+ 	writeTimeout time.Duration,
+ 	onSent func(ByteCount),
++	pacingSettings ...*ConnectHandlerSettings,
+ ) (open bool, err error) {
+ 	if !firstOpen {
+ 		return false, nil
+@@ -377,6 +379,61 @@ func writeConnectH1UserReadyBatch(
+ 		return false, nil
+ 	default:
+ 	}
++	if len(pacingSettings) > 1 {
++		return false, errors.New("one H1 user-write pacing owner required")
++	}
++	var settings *ConnectHandlerSettings
++	if len(pacingSettings) == 1 {
++		settings = pacingSettings[0]
++	}
++	now := time.Now
++	if settings != nil && settings.h1UserWriteNowForTest != nil {
++		now = settings.h1UserWriteNowForTest
++	}
++	writeDeadline := now().Add(writeTimeout)
++	writeDelay := time.Duration(0)
++	if settings != nil && settings.H1UserWriteDelayPerByte > 0 {
++		for _, message := range messageStorage[:messageCount] {
++			if len(message) <= 16 {
++				continue
++			}
++			if int64(len(message)) > math.MaxInt64/int64(settings.H1UserWriteDelayPerByte) ||
++				math.MaxInt64-int64(writeDelay) < int64(len(message))*int64(settings.H1UserWriteDelayPerByte) {
++				return false, errors.New("H1 user-write pacing duration overflow")
++			}
++			writeDelay += time.Duration(len(message)) * settings.H1UserWriteDelayPerByte
++		}
++	}
++	if err = writer.SetWriteDeadline(writeDeadline); err != nil {
++		return open, err
++	}
++	if writeDelay > 0 {
++		if writeDelay >= writeDeadline.Sub(now()) {
++			return false, context.DeadlineExceeded
++		}
++		if settings.h1UserWriteWaitForTest != nil {
++			err = settings.h1UserWriteWaitForTest(ctx, writeDelay)
++		} else {
++			timer := time.NewTimer(writeDelay)
++			select {
++			case <-ctx.Done():
++				err = ctx.Err()
++			case <-timer.C:
++			}
++			timer.Stop()
++		}
++		// Owner cancellation keeps the existing quiet-close result rather than
++		// manufacturing a socket-write failure or new close cause.
++		if ctx.Err() != nil {
++			return false, nil
++		}
++		if err != nil {
++			return false, err
++		}
++		if !now().Before(writeDeadline) {
++			return false, context.DeadlineExceeded
++		}
++	}
+ 
+ 	if h1RelayLineageTraceEnabled {
+ 		var spans [connectH1WriteBatchMaxMessageCount]h1RelayLineageSpan
+@@ -392,9 +449,6 @@ func writeConnectH1UserReadyBatch(
+ 		}()
+ 	}
+ 
+-	if err = writer.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
+-		return open, err
+-	}
+ 	if framed {
+ 		var payloads [connectH1WriteBatchMaxMessageCount][]byte
+ 		n := 0
+@@ -466,11 +520,12 @@ func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
+ 		H1PlusStats:  defaultConnectH1PlusStats,
+ 		// use the min value from older version of the client
+ 		// `platformTransportSettings.PingTimeout`
+-		MinPingTimeout:   1 * time.Second,
+-		MaxPingTimeout:   15 * time.Second,
+-		PingTrackerCount: 4,
+-		WriteTimeout:     15 * time.Second,
+-		ReadTimeout:      30 * time.Second,
++		MinPingTimeout:          1 * time.Second,
++		MaxPingTimeout:          15 * time.Second,
++		PingTrackerCount:        4,
++		WriteTimeout:            15 * time.Second,
++		ReadTimeout:             30 * time.Second,
++		H1UserWriteDelayPerByte: time.Microsecond,
+ 
+ 		// a single exchange message size is encoded as an `int32`
+ 		// because message must be serialized/deserialized from memory,
+@@ -534,6 +589,14 @@ type ConnectHandlerSettings struct {
+ 	MaxPingTimeout   time.Duration
+ 	PingTrackerCount int
+ 	WriteTimeout     time.Duration
++	// Serialization delay per user-frame byte, applied only by its dedicated
++	// H1 writer. Non-positive disables; one microsecond adds about one second
++	// per MiB while retaining the original write deadline and bounded batch.
++	H1UserWriteDelayPerByte time.Duration
++	// Nil in production. One writer may substitute its clock and owned wait
++	// to force cancellation/deadline boundaries without real-time sleeps.
++	h1UserWriteNowForTest  func() time.Time
++	h1UserWriteWaitForTest func(context.Context, time.Duration) error
+ 	// Bounds the complete authentication phase, then each serving read.
+ 	ReadTimeout time.Duration
+ 	// MaximumExchangeMessageByteCount ByteCount
+@@ -2045,6 +2108,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
+ 							glog.Infof("[ts] ->%s\n", clientId)
+ 						}
+ 					},
++					self.settings,
+ 				)
+ 				if err != nil {
+ 					recordWriteError(err)

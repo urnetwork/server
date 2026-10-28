@@ -22,11 +22,11 @@ func (self sdkBrowsingSetupDiscoveryFunc) FindProviders2(ctx context.Context, to
 }
 
 // Both local IDs and provider IDs are generated independently as in the SDK.
-func sdkBrowsingSetupControlViews(t *testing.T) ([6]clientconnect.Id, *sdk.ExitList, *sdk.WindowStatus, *sdk.ConnectedProviderLocationList) {
+func sdkBrowsingSetupControlViews(t *testing.T) ([sdkBrowsingProviderCount]clientconnect.Id, *sdk.ExitList, *sdk.WindowStatus, *sdk.ConnectedProviderLocationList) {
 	t.Helper()
-	var ready [6]clientconnect.Id
+	var ready [sdkBrowsingProviderCount]clientconnect.Id
 	exits, locations := sdk.NewExitList(), sdk.NewConnectedProviderLocationList()
-	for _, ordinal := range []int{0, 1, 2, 3, 5} {
+	for _, ordinal := range []int{0, 1, 2, 3, 5, 6} {
 		ready[ordinal] = clientconnect.NewId()
 		window := "quality"
 		if ordinal == 5 {
@@ -39,12 +39,6 @@ func sdkBrowsingSetupControlViews(t *testing.T) ([6]clientconnect.Id, *sdk.ExitL
 		}
 		locations.Add(&sdk.ConnectedProviderLocation{ClientId: id})
 	}
-	exits.Add(&sdk.Exit{ClientId: sdk.NewId(), WindowType: "quality"})
-	id, err := sdk.ParseId(ready[0].String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	locations.Add(&sdk.ConnectedProviderLocation{ClientId: id})
 	return ready, exits, &sdk.WindowStatus{TargetSize: 6, ProviderStateAdded: 6, ProviderStateInEvaluation: 1, ConnectionGeneration: 1}, locations
 }
 
@@ -52,7 +46,7 @@ func sdkBrowsingSetupControlViews(t *testing.T) ([6]clientconnect.Id, *sdk.ExitL
 func TestSdkBrowsingDiscoveryAllowsUninstalledReoffer(t *testing.T) {
 	ready, _, _, _ := sdkBrowsingSetupControlViews(t)
 	calls := 0
-	discovery := newSdkBrowsingSetupDiscovery(func() [6]clientconnect.Id { return ready }, sdkBrowsingSetupDiscoveryFunc(func(context.Context, string, *clientconnect.FindProviders2Args) (*clientconnect.FindProviders2Result, error) {
+	discovery := newSdkBrowsingSetupDiscovery(func() [sdkBrowsingProviderCount]clientconnect.Id { return ready }, sdkBrowsingSetupDiscoveryFunc(func(context.Context, string, *clientconnect.FindProviders2Args) (*clientconnect.FindProviders2Result, error) {
 		calls++
 		return &clientconnect.FindProviders2Result{Providers: []*clientconnect.FindProvidersProvider{{ClientId: ready[0]}}}, nil
 	}))
@@ -75,17 +69,22 @@ func TestSdkBrowsingDiscoveryPreservesRequestScope(t *testing.T) {
 	defer cancel()
 	excluded := clientconnect.NewId()
 	args := &clientconnect.FindProviders2Args{Specs: []*clientconnect.ProviderSpec{{BestAvailable: true}}, Count: 3, RankMode: "quality", ForceMinimum: true, IpFamily: clientconnect.IpFamilyFilterV4Only, ExcludeClientIds: []clientconnect.Id{excluded}, ExcludeDestinations: [][]clientconnect.Id{{clientconnect.NewId(), excluded}}}
-	discovery := newSdkBrowsingSetupDiscovery(func() [6]clientconnect.Id { return ready }, sdkBrowsingSetupDiscoveryFunc(func(callCtx context.Context, token string, query *clientconnect.FindProviders2Args) (*clientconnect.FindProviders2Result, error) {
+	discovery := newSdkBrowsingSetupDiscovery(func() [sdkBrowsingProviderCount]clientconnect.Id { return ready }, sdkBrowsingSetupDiscoveryFunc(func(callCtx context.Context, token string, query *clientconnect.FindProviders2Args) (*clientconnect.FindProviders2Result, error) {
 		if callCtx != ctx || token != "synthetic-fixture-authority" || query.Count != args.Count || query.RankMode != args.RankMode || query.ForceMinimum != args.ForceMinimum || query.IpFamily != args.IpFamily || !reflect.DeepEqual(query.ExcludeClientIds, args.ExcludeClientIds) || !reflect.DeepEqual(query.ExcludeDestinations, args.ExcludeDestinations) {
 			t.Fatal("caller context/authority/filter changed")
 		}
-		if len(query.Specs) != 4 {
+		if len(query.Specs) != 5 {
 			t.Fatal("ready quality scope included an absent or speed provider")
 		}
+		foundFifth := false
 		for _, spec := range query.Specs {
 			if spec.ClientId == nil || *spec.ClientId == ready[5] || spec.BestAvailable {
 				t.Fatal("named quality pool escaped its declared scope")
 			}
+			foundFifth = foundFifth || *spec.ClientId == ready[6]
+		}
+		if !foundFifth {
+			t.Fatal("independent fifth quality authority was omitted")
 		}
 		query.ExcludeClientIds[0] = ready[0]
 		query.ExcludeDestinations[0][1] = ready[0]
@@ -103,12 +102,12 @@ func TestSdkBrowsingDiscoveryPreservesRequestScope(t *testing.T) {
 // original snapshot while the next call can observe a newly ready provider.
 func TestSdkBrowsingDiscoverySnapshotDoesNotHoldBackendLock(t *testing.T) {
 	ready, _, _, _ := sdkBrowsingSetupControlViews(t)
-	var published atomic.Pointer[[6]clientconnect.Id]
+	var published atomic.Pointer[[sdkBrowsingProviderCount]clientconnect.Id]
 	published.Store(&ready)
 	lateId := clientconnect.NewId()
 	entered, release := make(chan struct{}), make(chan struct{})
 	calls := 0
-	discovery := newSdkBrowsingSetupDiscovery(func() [6]clientconnect.Id { return *published.Load() }, sdkBrowsingSetupDiscoveryFunc(func(ctx context.Context, _ string, query *clientconnect.FindProviders2Args) (*clientconnect.FindProviders2Result, error) {
+	discovery := newSdkBrowsingSetupDiscovery(func() [sdkBrowsingProviderCount]clientconnect.Id { return *published.Load() }, sdkBrowsingSetupDiscoveryFunc(func(ctx context.Context, _ string, query *clientconnect.FindProviders2Args) (*clientconnect.FindProviders2Result, error) {
 		calls++
 		if calls == 1 {
 			close(entered)
@@ -159,7 +158,7 @@ func TestSdkBrowsingDiscoveryCancellationKeepsCallerAuthority(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	entered := make(chan struct{})
-	discovery := newSdkBrowsingSetupDiscovery(func() [6]clientconnect.Id { return ready }, sdkBrowsingSetupDiscoveryFunc(func(callCtx context.Context, _ string, _ *clientconnect.FindProviders2Args) (*clientconnect.FindProviders2Result, error) {
+	discovery := newSdkBrowsingSetupDiscovery(func() [sdkBrowsingProviderCount]clientconnect.Id { return ready }, sdkBrowsingSetupDiscoveryFunc(func(callCtx context.Context, _ string, _ *clientconnect.FindProviders2Args) (*clientconnect.FindProviders2Result, error) {
 		close(entered)
 		<-callCtx.Done()
 		return nil, callCtx.Err()
@@ -191,7 +190,7 @@ func TestSdkBrowsingSetupKeepsExcludedEmptyReadOptionalAndActual(t *testing.T) {
 	if qualified, err := sdkBrowsingSetupReady(snapshot, nil); !qualified || err != nil {
 		t.Fatal("full observed ownership incorrectly required another API call")
 	}
-	discovery := newSdkBrowsingSetupDiscovery(func() [6]clientconnect.Id { return ready }, sdkBrowsingSetupDiscoveryFunc(func(context.Context, string, *clientconnect.FindProviders2Args) (*clientconnect.FindProviders2Result, error) {
+	discovery := newSdkBrowsingSetupDiscovery(func() [sdkBrowsingProviderCount]clientconnect.Id { return ready }, sdkBrowsingSetupDiscoveryFunc(func(context.Context, string, *clientconnect.FindProviders2Args) (*clientconnect.FindProviders2Result, error) {
 		return &clientconnect.FindProviders2Result{Providers: []*clientconnect.FindProvidersProvider{}}, nil
 	}))
 	args := &clientconnect.FindProviders2Args{Count: 5, RankMode: "quality"}
@@ -201,13 +200,16 @@ func TestSdkBrowsingSetupKeepsExcludedEmptyReadOptionalAndActual(t *testing.T) {
 	if discovery.snapshot().InitialExcludedEmpty != nil {
 		t.Fatal("empty response without original exclusions was qualified")
 	}
-	for ordinal := range 4 {
+	for ordinal := range sdkBrowsingProviderCount {
+		if !sdkBrowsingInitialQualityProvider(ordinal) {
+			continue
+		}
 		args.ExcludeDestinations = append(args.ExcludeDestinations, []clientconnect.Id{clientconnect.NewId(), ready[ordinal]})
 	}
 	if _, err := discovery.FindProviders2(t.Context(), "synthetic-fixture-authority", args); err != nil {
 		t.Fatal(err)
 	}
-	if report := discovery.snapshot(); report.InitialExcludedEmpty == nil || report.InitialExcludedEmpty.QualityCall != 2 || report.InitialExcludedEmpty.CallerExcludedMask&0x0f != 0x0f {
+	if report := discovery.snapshot(); report.InitialExcludedEmpty == nil || report.InitialExcludedEmpty.QualityCall != 2 || report.InitialExcludedEmpty.CallerExcludedMask&sdkBrowsingInitialQualityMask != sdkBrowsingInitialQualityMask {
 		t.Fatal("actual excluded empty response did not retain its scalar evidence")
 	}
 }
@@ -225,8 +227,8 @@ func TestSdkBrowsingSetupRejectsIncompleteOrDuplicateViews(t *testing.T) {
 		{name: "missing-local", change: func(exits *sdk.ExitList, _ *sdk.WindowStatus, _ *sdk.ConnectedProviderLocationList) {
 			exits.Get(0).ClientId = nil
 		}},
-		{name: "missing-named-provider", change: func(_ *sdk.ExitList, _ *sdk.WindowStatus, locations *sdk.ConnectedProviderLocationList) {
-			locations.Get(1).ClientId = locations.Get(0).ClientId
+		{name: "speed-in-quality-slot", change: func(_ *sdk.ExitList, _ *sdk.WindowStatus, locations *sdk.ConnectedProviderLocationList) {
+			locations.Get(1).ClientId = locations.Get(4).ClientId
 		}},
 		{name: "missing-provider-id", change: func(_ *sdk.ExitList, _ *sdk.WindowStatus, locations *sdk.ConnectedProviderLocationList) {
 			locations.Get(1).ClientId = nil
@@ -254,27 +256,34 @@ func TestSdkBrowsingSetupRejectsIncompleteOrDuplicateViews(t *testing.T) {
 		ready, exits, status, locations := sdkBrowsingSetupControlViews(t)
 		test.change(exits, status, locations)
 		snapshot := sdkBrowsingSetupSnapshotFrom(exits, status, locations, ready)
-		qualified, err := sdkBrowsingSetupReady(snapshot, &sdkBrowsingSetupEmptyReceipt{QualityCall: 1, ReadyMask: 0x2f, CallerExcludedMask: 0x0f})
+		qualified, err := sdkBrowsingSetupReady(snapshot, &sdkBrowsingSetupEmptyReceipt{QualityCall: 1, ReadyMask: 0x6f, CallerExcludedMask: sdkBrowsingInitialQualityMask})
 		if qualified || (err != nil) != test.wantErr {
 			t.Fatalf("%s: qualified=%t err=%v snapshot=%s", test.name, qualified, err, snapshot)
 		}
 	}
 }
 
-// Any one named quality tail may own the extra local slot; the six local
-// identities remain distinct and the physical speed tail is not duplicated.
+// Physical multiplicity is observed, not made a scheduling prerequisite.
+// Every ready initial quality tail can back the exact five distinct local IDs.
 func TestSdkBrowsingSetupAcceptsFullWindowMultiplicity(t *testing.T) {
-	for ordinal := range 4 {
+	for ordinal := range sdkBrowsingProviderCount {
+		if !sdkBrowsingInitialQualityProvider(ordinal) {
+			continue
+		}
 		ready, exits, status, locations := sdkBrowsingSetupControlViews(t)
 		id, err := sdk.ParseId(ready[ordinal].String())
 		if err != nil {
 			t.Fatal(err)
 		}
-		locations.Get(5).ClientId = id
+		for index := 0; index < locations.Len(); index++ {
+			if locations.Get(index).ClientId.String() != ready[5].String() {
+				locations.Get(index).ClientId = id
+			}
+		}
 		snapshot := sdkBrowsingSetupSnapshotFrom(exits, status, locations, ready)
 		qualified, err := sdkBrowsingSetupReady(snapshot, nil)
-		if !qualified || err != nil || snapshot.ProviderCounts[ordinal] != 2 || snapshot.DistinctLocal != 6 || snapshot.DistinctProviders != 5 {
-			t.Fatalf("duplicate quality ordinal=%d: actual full geometry was rejected: %s err=%v", ordinal, snapshot, err)
+		if !qualified || err != nil || snapshot.ProviderCounts[ordinal] != 5 || snapshot.DistinctLocal != 6 || snapshot.DistinctProviders != 2 {
+			t.Fatalf("quality ordinal=%d: valid installed multiplicity was rejected: %s err=%v", ordinal, snapshot, err)
 		}
 	}
 }

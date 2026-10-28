@@ -315,7 +315,7 @@ func TestPrivateProviderLoadedSelectedGrant(t *testing.T) {
 						}
 						id, err := server.IdFromBytes(stored.ContractId)
 						if err == nil {
-							err = model.CloseContract(closeCtx, id, f.peer, 0, false)
+							err = privateProviderCloseAfterZeroFinal(closeCtx, id, f.peer)
 						}
 						results <- err
 					}()

@@ -84,6 +84,14 @@ func TestProxyMainHoldsIdentityRestoreForDeploymentHandoff(t *testing.T) {
 	}
 }
 
+// The process closes the devices of a client removed through the api instead
+// of leaving them to their idle timeout (CLIENTCLOSE.md section 5).
+func TestProxyMainClosesRemovedClientDevices(t *testing.T) {
+	if newProxyDeviceManagerSettings(proxy.DefaultProxySettings(), nil).ClientRemoved == nil {
+		t.Fatal("the proxy leaves a removed client's devices to their idle timeout")
+	}
+}
+
 // A placement that offers nothing; the test compares its identity only.
 type testProxyMainPlacement struct{}
 

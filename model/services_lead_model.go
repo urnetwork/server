@@ -1,23 +1,17 @@
 package model
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/mail"
-	"net/url"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"gopkg.in/yaml.v3"
 
 	"github.com/urnetwork/glog"
 
@@ -35,10 +29,14 @@ import (
 // sales Slack channel through the incoming webhook in vault `sales.yml`
 // (`slack_webhook_url`) without holding up the response. Without that key the
 // lead is only stored.
+//
+// The webhook config, the post and its retries are the sales webhook helper
+// (sales_webhook.go), shared with the payment notices; the names below are
+// the lead's view of it.
 
-const servicesSalesVaultResource = "sales.yml"
+const servicesSalesVaultResource = salesWebhookVaultResource
 
-const servicesSalesConfigRefresh = 60 * time.Second
+const servicesSalesConfigRefresh = salesWebhookConfigRefresh
 
 const (
 	servicesLeadMaxNameLength    = 256
@@ -69,12 +67,7 @@ var servicesLeadRateLimitSettings = server.IpRateLimitAttemptSettings{
 // one cluster slot
 const servicesLeadRateLimitHashTag = "services_contact_sales"
 
-const (
-	servicesLeadSlackAttemptCount   = 3
-	servicesLeadSlackAttemptTimeout = 10 * time.Second
-)
-
-var servicesLeadSlackRetryDelays = []time.Duration{2 * time.Second, 6 * time.Second}
+const servicesLeadSlackAttemptCount = salesWebhookAttemptCount
 
 var servicesLeadResults = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "urnetwork_services_lead_total",
@@ -265,60 +258,21 @@ func checkServicesLeadRateLimit(ctx context.Context, clientSession *session.Clie
 	return nil
 }
 
-type servicesSalesConfig struct {
-	SlackWebhookUrl string `yaml:"slack_webhook_url"`
-}
-
 // parseServicesSalesConfig returns the webhook url, or "" when the key is
 // absent or is not an https url. The url is a credential: it is never logged.
 func parseServicesSalesConfig(data []byte) string {
-	var config servicesSalesConfig
-	if err := yaml.Unmarshal(data, &config); err != nil {
-		return ""
-	}
-	webhookUrl := strings.TrimSpace(config.SlackWebhookUrl)
-	parsed, err := url.Parse(webhookUrl)
-	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
-		return ""
-	}
-	return webhookUrl
+	return parseSalesWebhookConfig(data)
 }
 
-type servicesSalesConfigSnapshot struct {
-	loadTime        time.Time
-	slackWebhookUrl string
-}
-
-var servicesSalesConfigCache atomic.Pointer[servicesSalesConfigSnapshot]
+// servicesSalesConfigCache is the sales webhook's config snapshot, which the
+// leads and the payment notices share.
+var servicesSalesConfigCache = &salesWebhookConfigCache
 
 // servicesSalesSlackWebhookUrl re-reads vault every
 // `servicesSalesConfigRefresh`, so ops can add or rotate the webhook without
 // a restart.
 func servicesSalesSlackWebhookUrl(now time.Time) string {
-	if snapshot := servicesSalesConfigCache.Load(); snapshot != nil && now.Sub(snapshot.loadTime) < servicesSalesConfigRefresh && !now.Before(snapshot.loadTime) {
-		return snapshot.slackWebhookUrl
-	}
-	slackWebhookUrl := ""
-	if resource, err := server.Vault.SimpleResource(servicesSalesVaultResource); err == nil {
-		if data, err := resource.BytesE(); err == nil {
-			slackWebhookUrl = parseServicesSalesConfig(data)
-		}
-	}
-	servicesSalesConfigCache.Store(&servicesSalesConfigSnapshot{
-		loadTime:        now,
-		slackWebhookUrl: slackWebhookUrl,
-	})
-	return slackWebhookUrl
-}
-
-// slackEscape escapes the three characters Slack treats as control
-// characters, so a field cannot mention a channel (<!channel>), a user or
-// render a disguised link.
-func slackEscape(value string) string {
-	value = strings.ReplaceAll(value, "&", "&amp;")
-	value = strings.ReplaceAll(value, "<", "&lt;")
-	value = strings.ReplaceAll(value, ">", "&gt;")
-	return value
+	return salesWebhookUrl(now)
 }
 
 func formatServicesLeadByteCount(byteCount ByteCount) string {
@@ -362,97 +316,27 @@ func servicesLeadSlackText(lead *servicesLead) string {
 }
 
 // errServicesLeadSlackStatus is a non-2xx webhook answer.
-type errServicesLeadSlackStatus struct {
-	statusCode int
-}
-
-func (self *errServicesLeadSlackStatus) Error() string {
-	return fmt.Sprintf("slack webhook answered %d", self.statusCode)
-}
+type errServicesLeadSlackStatus = errSalesWebhookStatus
 
 // postServicesLeadToSlack posts one message. The returned error never contains
-// the webhook url: a *url.Error, whose text includes the url, is unwrapped to
-// its cause.
+// the webhook url.
 func postServicesLeadToSlack(ctx context.Context, httpClient *http.Client, webhookUrl string, text string) error {
-	body, err := json.Marshal(map[string]any{
-		"text":         text,
-		"unfurl_links": false,
-		"unfurl_media": false,
-	})
-	if err != nil {
-		return err
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, webhookUrl, bytes.NewReader(body))
-	if err != nil {
-		return errors.New("slack webhook request could not be built")
-	}
-	request.Header.Set("Content-Type", "application/json")
-	response, err := httpClient.Do(request)
-	if err != nil {
-		var urlErr *url.Error
-		if errors.As(err, &urlErr) {
-			return urlErr.Err
-		}
-		return errors.New("slack webhook request failed")
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || 300 <= response.StatusCode {
-		return &errServicesLeadSlackStatus{statusCode: response.StatusCode}
-	}
-	return nil
+	return postSalesWebhook(ctx, httpClient, webhookUrl, text)
 }
 
 // servicesLeadNotifier posts a lead with bounded retries. Replaceable in tests.
-type servicesLeadNotifier struct {
-	httpClient  *http.Client
-	retryDelays []time.Duration
-	sleep       func(context.Context, time.Duration) bool
-}
+type servicesLeadNotifier = salesWebhookNotifier
 
 // servicesLeadNotifierFactory builds the notifier notifyServicesLead posts
 // with. Tests replace it to reach a local webhook.
 var servicesLeadNotifierFactory = newServicesLeadNotifier
 
 func newServicesLeadNotifier() *servicesLeadNotifier {
-	return &servicesLeadNotifier{
-		httpClient:  server.NewHttpClient(servicesLeadSlackAttemptTimeout),
-		retryDelays: servicesLeadSlackRetryDelays,
-		sleep:       sleepServicesLeadRetry,
-	}
+	return newSalesWebhookNotifier()
 }
 
 func sleepServicesLeadRetry(ctx context.Context, delay time.Duration) bool {
-	select {
-	case <-ctx.Done():
-		return false
-	case <-time.After(delay):
-		return true
-	}
-}
-
-// Notify returns the last error after the final attempt.
-func (self *servicesLeadNotifier) Notify(ctx context.Context, webhookUrl string, text string) error {
-	var err error
-	for attempt := 0; attempt < servicesLeadSlackAttemptCount; attempt += 1 {
-		if 0 < attempt {
-			delay := self.retryDelays[min(attempt-1, len(self.retryDelays)-1)]
-			if !self.sleep(ctx, delay) {
-				return ctx.Err()
-			}
-		}
-		attemptCtx, cancel := context.WithTimeout(ctx, servicesLeadSlackAttemptTimeout)
-		err = postServicesLeadToSlack(attemptCtx, self.httpClient, webhookUrl, text)
-		cancel()
-		if err == nil {
-			return nil
-		}
-		// a 4xx other than a rate limit will not change on retry
-		var statusErr *errServicesLeadSlackStatus
-		if errors.As(err, &statusErr) && statusErr.statusCode/100 == 4 && statusErr.statusCode != http.StatusTooManyRequests {
-			return err
-		}
-	}
-	return err
+	return sleepSalesWebhookRetry(ctx, delay)
 }
 
 func notifyServicesLead(lead *servicesLead) {
