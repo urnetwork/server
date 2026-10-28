@@ -105,7 +105,7 @@ Usage:
     bringyourctl payouts reconcile-legacy-attempts [--apply] [--group_limit=<group_limit>]
     bringyourctl payouts correct-legacy-attempts [--apply] [--group_limit=<group_limit>] [--move_all_sweeps] [--sweep_batch_size=<sweep_batch_size>] [--sweep_batch_limit=<sweep_batch_limit>] [--count_sweeps]
     bringyourctl payouts sn-reconcile [(--send --expect=<digest>)] [--json]
-    bringyourctl payouts reimburse --file=<file> --reason=<reason> [(--send --expect=<digest>)]
+    bringyourctl payouts reimburse --file=<file> --reason=<reason> [--allow_prior_reimbursement] [(--send --expect=<digest>)]
     bringyourctl wallet estimate-fee --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
     bringyourctl wallet transfer --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
 		bringyourctl wallets sync-circle
@@ -232,6 +232,7 @@ Options:
     --count_sweeps  Also count the sweeps a correction would move (dry run).
     --expect=<digest>  The digest the sn-reconcile or reimburse dry run printed; --send refuses any other census.
     --file=<file>  A payouts reimburse CSV with the header network_id,wallet_id,amount_usdc.
+    --allow_prior_reimbursement  With payouts reimburse, pay networks that already have an open manual reimbursement of another plan; each row lists them, and the digest binds the flag and exactly those.
     -c --count=<count>	Number to process [default: 1000].`
 
 func main() {

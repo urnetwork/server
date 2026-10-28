@@ -11,6 +11,12 @@
 //     matches the marker exactly.
 //
 // A payment without a marker is unaffected.
+//
+// A network has at most one open manual reimbursement unless a plan is created
+// with --allow_prior_reimbursement: then each marker lists the payment ids of its
+// network's open reimbursements of other plans, and the creation refuses any it
+// does not list. No database constraint backs either rule: the creation checks
+// them under its ownership key.
 package model
 
 import (
@@ -18,6 +24,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -72,6 +79,12 @@ type ManualReimbursementMarker struct {
 	FeeNanoCents NanoCents `json:"fee_nano_cents"`
 	// AmountNanoCents + FeeNanoCents
 	PayoutNanoCents NanoCents `json:"payout_nano_cents"`
+	// --allow_prior_reimbursement: the plan pays networks that already have open
+	// manual reimbursements of other plans, and this network's are these, in
+	// increasing order. Both are omitted otherwise, so a marker without them is
+	// byte for byte the marker of before the flag.
+	AllowPriorReimbursement bool        `json:"allow_prior_reimbursement,omitempty"`
+	PriorPaymentIds         []server.Id `json:"prior_payment_ids,omitempty"`
 }
 
 func (self *ManualReimbursementMarker) details() string {
@@ -85,7 +98,9 @@ type ManualReimbursementPlan struct {
 	PaymentPlanId server.Id
 	Digest        string
 	Reason        string
-	Markers       []*ManualReimbursementMarker
+	// every marker carries the same flag
+	AllowPriorReimbursement bool
+	Markers                 []*ManualReimbursementMarker
 }
 
 func (self *ManualReimbursementPlan) check() error {
@@ -110,6 +125,23 @@ func (self *ManualReimbursementPlan) check() error {
 		}
 		networkIds[marker.NetworkId] = true
 		paymentIds[marker.PaymentId] = true
+		// prior reimbursements only with the plan's flag, each once, in increasing order
+		if marker.AllowPriorReimbursement != self.AllowPriorReimbursement || (!marker.AllowPriorReimbursement && 0 < len(marker.PriorPaymentIds)) {
+			return fmt.Errorf("manual reimbursement payment %s does not match the plan's --allow_prior_reimbursement", marker.PaymentId)
+		}
+		for i, priorPaymentId := range marker.PriorPaymentIds {
+			if priorPaymentId == (server.Id{}) || (0 < i && 0 <= marker.PriorPaymentIds[i-1].Cmp(priorPaymentId)) {
+				return fmt.Errorf("manual reimbursement payment %s lists its prior reimbursements out of order or twice", marker.PaymentId)
+			}
+		}
+	}
+	// a payment of this plan is never prior to it
+	for _, marker := range self.Markers {
+		for _, priorPaymentId := range marker.PriorPaymentIds {
+			if paymentIds[priorPaymentId] {
+				return fmt.Errorf("manual reimbursement payment %s lists payment %s of its own plan as prior", marker.PaymentId, priorPaymentId)
+			}
+		}
 	}
 	return nil
 }
@@ -241,8 +273,8 @@ func GetManualReimbursementPlanPaymentCount(ctx context.Context, paymentPlanId s
 // Creates the plan's payments and their markers in one transaction, each payment
 // with its wallet pinned. A rerun of the same plan creates nothing and returns
 // created false; a plan id that holds other payments, an open reimbursement of a
-// network under another plan, or a wallet that changed since the census refuses
-// before anything is written.
+// network under another plan that the network's marker does not list as prior,
+// or a wallet that changed since the census refuses before anything is written.
 func CreateManualReimbursementPlan(ctx context.Context, plan *ManualReimbursementPlan, createTime time.Time) (created bool, returnErr error) {
 	if err := plan.check(); err != nil {
 		return false, err
@@ -250,9 +282,11 @@ func CreateManualReimbursementPlan(ctx context.Context, plan *ManualReimbursemen
 	createTime = createTime.UTC()
 	networkIds := []server.Id{}
 	walletIds := []server.Id{}
+	networkIdPriorPaymentIds := map[server.Id][]server.Id{}
 	for _, marker := range plan.Markers {
 		networkIds = append(networkIds, marker.NetworkId)
 		walletIds = append(walletIds, marker.WalletId)
+		networkIdPriorPaymentIds[marker.NetworkId] = marker.PriorPaymentIds
 	}
 	// every creator holds this key, so the checks below and the inserts are one step
 	keys := []server.PgOwnershipKey{server.NewPgOwnershipKeyFromString("manual_reimbursement", "create")}
@@ -275,9 +309,14 @@ func CreateManualReimbursementPlan(ctx context.Context, plan *ManualReimbursemen
 			return
 		}
 
-		if conflicts := manualReimbursementConflictsInQuery(ctx, tx, networkIds, plan.PaymentPlanId); 0 < len(conflicts) {
-			returnErr = fmt.Errorf("network %s already has manual reimbursement %s in plan %s; nothing was created", conflicts[0].NetworkId, conflicts[0].PaymentId, conflicts[0].PaymentPlanId)
-			return
+		// an open reimbursement of another plan refuses the plan unless its
+		// network's marker lists it (--allow_prior_reimbursement); one that
+		// appeared after the census is never listed
+		for _, conflict := range manualReimbursementConflictsInQuery(ctx, tx, networkIds, plan.PaymentPlanId) {
+			if !slices.Contains(networkIdPriorPaymentIds[conflict.NetworkId], conflict.PaymentId) {
+				returnErr = fmt.Errorf("network %s already has manual reimbursement %s in plan %s; nothing was created", conflict.NetworkId, conflict.PaymentId, conflict.PaymentPlanId)
+				return
+			}
 		}
 
 		type wallet struct {
