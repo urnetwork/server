@@ -287,52 +287,105 @@ func CreateBalanceCode(
 	purchaseRecord string,
 	purchaseEmail string,
 ) (balanceCode *BalanceCode, returnErr error) {
-	server.Tx(ctx, func(tx server.PgTx) {
-		purchaseEventIdExists := false
+	return CreateBalanceCodeForSale(
+		ctx,
+		balanceByteCount,
+		duration,
+		netRevenue,
+		purchaseEventId,
+		purchaseRecord,
+		purchaseEmail,
+		nil,
+	)
+}
 
-		result, err := tx.Query(
+// CreateBalanceCodeForSale is CreateBalanceCode for a payment. createdInTx,
+// when set, runs in the creating transaction right after the code's row is
+// inserted, so what follows from a new purchase record (its sales notice)
+// commits with it, and never for a purchase event that already has a code.
+func CreateBalanceCodeForSale(
+	ctx context.Context,
+	balanceByteCount ByteCount,
+	duration time.Duration,
+	netRevenue NanoCents,
+	purchaseEventId string,
+	purchaseRecord string,
+	purchaseEmail string,
+	createdInTx func(tx server.PgTx),
+) (balanceCode *BalanceCode, returnErr error) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		balanceCode, returnErr = createBalanceCodeInTx(
+			tx,
 			ctx,
-			`
+			balanceByteCount,
+			duration,
+			netRevenue,
+			purchaseEventId,
+			purchaseRecord,
+			purchaseEmail,
+			createdInTx,
+		)
+	})
+	return
+}
+
+// createBalanceCodeInTx is one attempt of CreateBalanceCodeForSale.
+func createBalanceCodeInTx(
+	tx server.PgTx,
+	ctx context.Context,
+	balanceByteCount ByteCount,
+	duration time.Duration,
+	netRevenue NanoCents,
+	purchaseEventId string,
+	purchaseRecord string,
+	purchaseEmail string,
+	createdInTx func(tx server.PgTx),
+) (balanceCode *BalanceCode, returnErr error) {
+	purchaseEventIdExists := false
+
+	result, err := tx.Query(
+		ctx,
+		`
                 SELECT balance_code_id FROM transfer_balance_code
                 WHERE purchase_event_id = $1
             `,
-			purchaseEventId,
-		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				purchaseEventIdExists = true
-			}
-		})
-
-		if purchaseEventIdExists {
-			// the `purchaseEventId` was already converted into a balance code
-			returnErr = fmt.Errorf("Purchase event already exists.")
-			return
+		purchaseEventId,
+	)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			purchaseEventIdExists = true
 		}
+	})
 
-		balanceCodeId := server.NewId()
+	if purchaseEventIdExists {
+		// the `purchaseEventId` was already converted into a balance code
+		returnErr = fmt.Errorf("Purchase event already exists.")
+		return
+	}
 
-		secret, err := newCodeBase32()
-		if err != nil {
-			returnErr = err
-			return
-		}
+	balanceCodeId := server.NewId()
 
-		createTime := server.NowUtc()
-		// round down to 00:00 the day of create time
-		startTime := time.Date(
-			createTime.Year(),
-			createTime.Month(),
-			createTime.Day(),
-			0, 0, 0, 0,
-			createTime.Location(),
-		)
-		// round up to 00:00 the next day of create time + duration
-		endTime := startTime.Add(24 * time.Hour).Add(duration)
+	secret, err := newCodeBase32()
+	if err != nil {
+		returnErr = err
+		return
+	}
 
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
+	createTime := server.NowUtc()
+	// round down to 00:00 the day of create time
+	startTime := time.Date(
+		createTime.Year(),
+		createTime.Month(),
+		createTime.Day(),
+		0, 0, 0, 0,
+		createTime.Location(),
+	)
+	// round up to 00:00 the next day of create time + duration
+	endTime := startTime.Add(24 * time.Hour).Add(duration)
+
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
                 INSERT INTO transfer_balance_code (
                     balance_code_id,
                     create_time,
@@ -347,31 +400,33 @@ func CreateBalanceCode(
                 )
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             `,
-			balanceCodeId,
-			createTime,
-			startTime,
-			endTime,
-			balanceByteCount,
-			netRevenue,
-			secret,
-			purchaseEventId,
-			purchaseRecord,
-			purchaseEmail,
-		))
+		balanceCodeId,
+		createTime,
+		startTime,
+		endTime,
+		balanceByteCount,
+		netRevenue,
+		secret,
+		purchaseEventId,
+		purchaseRecord,
+		purchaseEmail,
+	))
 
-		balanceCode = &BalanceCode{
-			BalanceCodeId:    balanceCodeId,
-			CreateTime:       createTime,
-			StartTime:        startTime,
-			EndTime:          endTime,
-			BalanceByteCount: balanceByteCount,
-			NetRevenue:       netRevenue,
-			Secret:           secret,
-			PurchaseEventId:  purchaseEventId,
-			PurchaseRecord:   purchaseRecord,
-			PurchaseEmail:    purchaseEmail,
-		}
-	})
+	balanceCode = &BalanceCode{
+		BalanceCodeId:    balanceCodeId,
+		CreateTime:       createTime,
+		StartTime:        startTime,
+		EndTime:          endTime,
+		BalanceByteCount: balanceByteCount,
+		NetRevenue:       netRevenue,
+		Secret:           secret,
+		PurchaseEventId:  purchaseEventId,
+		PurchaseRecord:   purchaseRecord,
+		PurchaseEmail:    purchaseEmail,
+	}
+	if createdInTx != nil {
+		createdInTx(tx)
+	}
 	return
 }
 

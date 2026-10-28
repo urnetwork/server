@@ -28,6 +28,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"time"
 
 	"github.com/urnetwork/glog"
 
@@ -101,124 +102,7 @@ func cryptoCreditIntentInConn(
 	now := server.NowUtc()
 	server.HandleError(func() {
 		server.TxInConn(ctx, connOwner, func(tx server.PgTx) {
-			credited = false
-			returnErr = nil
-			if intent.NetworkId != nil {
-				if err := model.LockPaymentNetworkInTx(tx, ctx, *intent.NetworkId); err != nil {
-					returnErr = err
-					return
-				}
-			}
-			// the invoice one-shot first: when it loses, nothing was written
-			if !model.MarkCryptoPaymentIntentCreditedInTx(tx, ctx, intent.IntentId, now, credit.usdNanoCents) {
-				return
-			}
-			if intent.Asset == model.CryptoAssetUsdcSolana {
-				completed, err := model.MarkPaymentIntentCompletedInTx(tx, *intent.SolanaReference, credit.solanaSignature, clientSession)
-				server.Raise(err)
-				if !completed {
-					server.Raise(errCryptoSolanaOneShotDiverged)
-				}
-			}
-
-			var balanceId *server.Id
-			var balanceCodeId *server.Id
-			switch {
-			case plan:
-				networkId := *intent.NetworkId
-				_, transactionId := model.CryptoPaymentRenewalHandle(intent)
-				endTime := now.Add(solanaPlanDuration(intent.Item) + manualPaymentGracePeriod)
-				// a failure past the one-shot raises: committing a credited
-				// invoice without its grant would lose the payment
-				server.Raise(model.AddSubscriptionRenewalInTx(tx, ctx, &model.SubscriptionRenewal{
-					NetworkId:          networkId,
-					SubscriptionType:   model.SubscriptionTypeSupporter,
-					StartTime:          now,
-					EndTime:            endTime,
-					NetRevenue:         credit.usdNanoCents,
-					SubscriptionMarket: market,
-					TransactionId:      transactionId,
-				}))
-				// a supporter subscription carries the Pro entitlement
-				transferBalance := &model.TransferBalance{
-					NetworkId:             networkId,
-					StartTime:             now,
-					EndTime:               endTime,
-					StartBalanceByteCount: RefreshSupporterTransferBalance,
-					SubsidyNetRevenue:     credit.usdNanoCents,
-					BalanceByteCount:      RefreshSupporterTransferBalance,
-					Pro:                   true,
-				}
-				model.AddTransferBalanceInTx(ctx, tx, transferBalance)
-				balanceId = &transferBalance.BalanceId
-				// the regional tier and the welcome offer, in the credit's
-				// transaction on every path
-				model.SetSubscriptionRenewalPriceTierByTransactionInTx(tx, ctx, networkId, market, transactionId, intent.Tier)
-				if intent.Item == model.SolanaPlanYearlyOnboarding {
-					if model.RedeemOnboardingOfferInTx(tx, ctx, networkId, cryptoAssetOnboardingStore(intent.Asset), now) {
-						glog.Infof("[onboarding]offer redeemed on %s by invoice %s\n", cryptoAssetOnboardingStore(intent.Asset), intent.IntentId)
-					}
-				}
-
-			case intent.Delivery == model.CryptoDeliveryCode:
-				balanceCode, created, err := model.CreateBalanceCodeInTx(
-					tx,
-					ctx,
-					byteCount,
-					duration,
-					credit.usdNanoCents,
-					model.CryptoPaymentPurchaseEventId(intent.IntentId),
-					model.MarshalCryptoRateSources(map[string]any{"asset": intent.Asset, "item": intent.Item}),
-					intent.Email,
-				)
-				server.Raise(err)
-				balanceCodeId = &balanceCode.BalanceCodeId
-				if created && intent.Email != "" {
-					// owed exactly when the credit commits; the delivery task
-					// sends it after
-					normalEmail, userAuthType := model.NormalUserAuth(intent.Email)
-					if userAuthType == model.UserAuthTypeEmail {
-						// keyed by the code too: a code granted again after its
-						// payment left the chain and came back is a new email
-						addAccountMessageInTx(ctx, tx, &accountMessage{
-							key:      fmt.Sprintf("crypto_code/%s/%s", intent.IntentId, balanceCode.BalanceCodeId),
-							userAuth: normalEmail,
-							template: &SubscriptionTransferBalanceCodeTemplate{
-								Secret:           balanceCode.Secret,
-								BalanceByteCount: balanceCode.BalanceByteCount,
-							},
-						})
-					}
-				}
-
-			default:
-				networkId := *intent.NetworkId
-				// pro = false: a data pack is DATA ONLY, exactly like a redeemed code
-				transferBalance := &model.TransferBalance{
-					NetworkId:             networkId,
-					StartTime:             now,
-					EndTime:               now.Add(duration),
-					StartBalanceByteCount: byteCount,
-					BalanceByteCount:      byteCount,
-					NetRevenue:            credit.usdNanoCents,
-					Pro:                   false,
-				}
-				model.AddTransferBalanceInTx(ctx, tx, transferBalance)
-				balanceId = &transferBalance.BalanceId
-				addDataAppliedNoteInTx(ctx, tx, networkId, byteCount, fmt.Sprintf("crypto_data_pack/%s", intent.IntentId))
-			}
-
-			model.SetCryptoPaymentIntentGrantInTx(tx, ctx, intent.IntentId, balanceId, balanceCodeId)
-			if 0 < len(credit.receipts) {
-				intentId := intent.IntentId
-				model.SetCryptoPaymentReceiptsStateInTx(tx, ctx, &intentId, credit.receipts, model.CryptoReceiptStateCredited, "")
-				for _, key := range credit.receipts {
-					if value, ok := credit.receiptUsd[key]; ok {
-						model.SetCryptoPaymentReceiptUsdValueInTx(tx, ctx, key, value)
-					}
-				}
-			}
-			credited = true
+			credited, returnErr = cryptoCreditIntentInTx(tx, clientSession, intent, credit, plan, byteCount, duration, now)
 		}, server.TxReadCommitted)
 	}, func(err error) {
 		credited = false
@@ -238,6 +122,143 @@ func cryptoCreditIntentInConn(
 	}
 	cryptoPayCredits.WithLabelValues(intent.Asset, intent.Delivery, cryptoCreditTiming(credit.late)).Inc()
 	glog.Infof("[cryptopay]credited invoice %s (%s %s, delivery %s)\n", intent.IntentId, intent.Asset, intent.Item, intent.Delivery)
+	return true, nil
+}
+
+// cryptoCreditIntentInTx is one attempt of an invoice's credit, in the
+// caller's ReadCommitted transaction: the invoice one-shot, then what the
+// invoice bought, the receipts and the sales notice of the new payment.
+func cryptoCreditIntentInTx(
+	tx server.PgTx,
+	clientSession *session.ClientSession,
+	intent *model.CryptoPaymentIntent,
+	credit *cryptoCredit,
+	plan bool,
+	byteCount model.ByteCount,
+	duration time.Duration,
+	now time.Time,
+) (credited bool, returnErr error) {
+	ctx := clientSession.Ctx
+	market := cryptoAssetMarket(intent.Asset)
+	if intent.NetworkId != nil {
+		if err := model.LockPaymentNetworkInTx(tx, ctx, *intent.NetworkId); err != nil {
+			return false, err
+		}
+	}
+	// the invoice one-shot first: when it loses, nothing was written
+	if !model.MarkCryptoPaymentIntentCreditedInTx(tx, ctx, intent.IntentId, now, credit.usdNanoCents) {
+		return false, nil
+	}
+	if intent.Asset == model.CryptoAssetUsdcSolana {
+		completed, err := model.MarkPaymentIntentCompletedInTx(tx, *intent.SolanaReference, credit.solanaSignature, clientSession)
+		server.Raise(err)
+		if !completed {
+			server.Raise(errCryptoSolanaOneShotDiverged)
+		}
+	}
+
+	var balanceId *server.Id
+	var balanceCodeId *server.Id
+	switch {
+	case plan:
+		networkId := *intent.NetworkId
+		_, transactionId := model.CryptoPaymentRenewalHandle(intent)
+		endTime := now.Add(solanaPlanDuration(intent.Item) + manualPaymentGracePeriod)
+		// a failure past the one-shot raises: committing a credited
+		// invoice without its grant would lose the payment
+		server.Raise(model.AddSubscriptionRenewalInTx(tx, ctx, &model.SubscriptionRenewal{
+			NetworkId:          networkId,
+			SubscriptionType:   model.SubscriptionTypeSupporter,
+			StartTime:          now,
+			EndTime:            endTime,
+			NetRevenue:         credit.usdNanoCents,
+			SubscriptionMarket: market,
+			TransactionId:      transactionId,
+		}))
+		// a supporter subscription carries the Pro entitlement
+		transferBalance := &model.TransferBalance{
+			NetworkId:             networkId,
+			StartTime:             now,
+			EndTime:               endTime,
+			StartBalanceByteCount: RefreshSupporterTransferBalance,
+			SubsidyNetRevenue:     credit.usdNanoCents,
+			BalanceByteCount:      RefreshSupporterTransferBalance,
+			Pro:                   true,
+		}
+		model.AddTransferBalanceInTx(ctx, tx, transferBalance)
+		balanceId = &transferBalance.BalanceId
+		// the regional tier and the welcome offer, in the credit's
+		// transaction on every path
+		model.SetSubscriptionRenewalPriceTierByTransactionInTx(tx, ctx, networkId, market, transactionId, intent.Tier)
+		if intent.Item == model.SolanaPlanYearlyOnboarding {
+			if model.RedeemOnboardingOfferInTx(tx, ctx, networkId, cryptoAssetOnboardingStore(intent.Asset), now) {
+				glog.Infof("[onboarding]offer redeemed on %s by invoice %s\n", cryptoAssetOnboardingStore(intent.Asset), intent.IntentId)
+			}
+		}
+
+	case intent.Delivery == model.CryptoDeliveryCode:
+		balanceCode, created, err := model.CreateBalanceCodeInTx(
+			tx,
+			ctx,
+			byteCount,
+			duration,
+			credit.usdNanoCents,
+			model.CryptoPaymentPurchaseEventId(intent.IntentId),
+			model.MarshalCryptoRateSources(map[string]any{"asset": intent.Asset, "item": intent.Item}),
+			intent.Email,
+		)
+		server.Raise(err)
+		balanceCodeId = &balanceCode.BalanceCodeId
+		if created && intent.Email != "" {
+			// owed exactly when the credit commits; the delivery task
+			// sends it after
+			normalEmail, userAuthType := model.NormalUserAuth(intent.Email)
+			if userAuthType == model.UserAuthTypeEmail {
+				// keyed by the code too: a code granted again after its
+				// payment left the chain and came back is a new email
+				addAccountMessageInTx(ctx, tx, &accountMessage{
+					key:      fmt.Sprintf("crypto_code/%s/%s", intent.IntentId, balanceCode.BalanceCodeId),
+					userAuth: normalEmail,
+					template: &SubscriptionTransferBalanceCodeTemplate{
+						Secret:           balanceCode.Secret,
+						BalanceByteCount: balanceCode.BalanceByteCount,
+					},
+				})
+			}
+		}
+
+	default:
+		networkId := *intent.NetworkId
+		// pro = false: a data pack is DATA ONLY, exactly like a redeemed code
+		transferBalance := &model.TransferBalance{
+			NetworkId:             networkId,
+			StartTime:             now,
+			EndTime:               now.Add(duration),
+			StartBalanceByteCount: byteCount,
+			BalanceByteCount:      byteCount,
+			NetRevenue:            credit.usdNanoCents,
+			Pro:                   false,
+		}
+		model.AddTransferBalanceInTx(ctx, tx, transferBalance)
+		balanceId = &transferBalance.BalanceId
+		addDataAppliedNoteInTx(ctx, tx, networkId, byteCount, fmt.Sprintf("crypto_data_pack/%s", intent.IntentId))
+	}
+
+	model.SetCryptoPaymentIntentGrantInTx(tx, ctx, intent.IntentId, balanceId, balanceCodeId)
+	if 0 < len(credit.receipts) {
+		intentId := intent.IntentId
+		model.SetCryptoPaymentReceiptsStateInTx(tx, ctx, &intentId, credit.receipts, model.CryptoReceiptStateCredited, "")
+		for _, key := range credit.receipts {
+			if value, ok := credit.receiptUsd[key]; ok {
+				model.SetCryptoPaymentReceiptUsdValueInTx(tx, ctx, key, value)
+			}
+		}
+	}
+	// this call won the invoice one-shot: a new payment, posted once the
+	// transaction commits
+	addSalesPaymentNoticeInTx(tx, func() *model.SalesPaymentNotice {
+		return cryptoSalesNotice(intent, credit, plan, byteCount)
+	})
 	return true, nil
 }
 
