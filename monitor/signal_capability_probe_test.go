@@ -68,7 +68,7 @@ func runCapabilityProbeSignal(t *testing.T, desired capabilityProbeDesired, desi
 	}
 	settings := syntheticSettings(source)
 	settings.Hosts = append(settings.Hosts, HostSettings{Name: "metrics-1", Roles: []string{"services"}})
-	alerts, err := newCapabilityProbeSignal(func() (capabilityProbeDesired, error) { return desired, desiredErr }).Run(context.Background(), settings)
+	alerts, err := newCapabilityProbeSignal(func() (capabilityProbeDesired, error) { return desired, desiredErr }, defaultCapabilityProbeSettings()).Run(context.Background(), settings)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,8 +81,9 @@ func capabilityProbeTestUnix(ago time.Duration) float64 {
 }
 
 // While the config switches the probe on, a chain that passes recently with
-// no disabled pass is healthy, and the query reads only fleet aggregates of
-// the probe's series and the taskworkers' starts.
+// no disabled pass is healthy, and the query reads only fleet aggregates: the
+// probe's series, the taskworkers' starts and gate, the readers' priority and
+// the modern requests answered over a day.
 func TestCapabilityProbeSignalHealthyWhilePassing(t *testing.T) {
 	alerts, promql := runCapabilityProbeSignal(t, capabilityProbeDesired{enabled: true, gate: capabilityProbeTestGate(true)}, nil, capabilityProbeMimirFixture(t, map[string]float64{
 		"disabled_increase": 0,
@@ -101,6 +102,8 @@ func TestCapabilityProbeSignalHealthyWhilePassing(t *testing.T) {
 		`count(urnetwork_capability_probe_last_pass_timestamp_seconds{env="synthetic",job="taskworker"})`,
 		`min(process_start_time_seconds{env="synthetic",job="taskworker"})`,
 		`max(urnetwork_stats_provider_modern_gate_on{env="synthetic",job="taskworker"})`,
+		`max(urnetwork_findproviders2_rank_modern_first_enabled{env="synthetic",job=~"api|alt|proxy"})`,
+		`sum(increase(urnetwork_findproviders2_outcomes_total{env="synthetic",capability=~"modern.*"}[24h]))`,
 	} {
 		if !strings.Contains(promql, required) {
 			t.Errorf("the query lacks %s: %s", required, promql)
@@ -216,30 +219,22 @@ func TestCapabilityProbeSignalAlertsOnAStalledChain(t *testing.T) {
 }
 
 // The stall pages on the modern provider gate as every pass decides it, read
-// from the desired provider.yml by the model's own decoder. With
-// quality_speed_requires_modern_provider absent the gate turns on by itself
-// at its start, so a seven-hour stall warns a second before the start and
-// pages from it, at the default start too; true pages and false warns
-// whatever the time, and a switch or file that cannot be read is off. Only a
-// switch set to true armed the page before, so the automatic switch-on never
-// would have.
+// from the desired provider.yml by the model's own decoder: an explicit true
+// pages and false warns, and a switch or file that cannot be read is off, as
+// is a switch left out at this instant, long before any start the gate had
+// (FP2-MODERN.md retires its start). No reader publishes priority and no
+// modern request was answered, so the gate alone decides.
 func TestCapabilityProbeStallPagesOnTheEffectiveGate(t *testing.T) {
-	start := time.Date(2026, 11, 2, 12, 30, 0, 0, time.UTC)
-	defaultStart := model.DefaultQualitySpeedModernProviderStart()
 	for _, c := range []struct {
 		name     string
 		provider string
-		now      time.Time
 		tier     string
 	}{
-		{name: "switch absent, a second before the start", provider: "quality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", now: start.Add(-time.Second), tier: tierWarn},
-		{name: "switch absent, at the start", provider: "quality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", now: start, tier: tierPage},
-		{name: "switch and start absent, before the default start", provider: "enable_egress_test: false\n", now: defaultStart.Add(-time.Second), tier: tierWarn},
-		{name: "switch and start absent, at the default start", provider: "enable_egress_test: false\n", now: defaultStart, tier: tierPage},
-		{name: "true, a day before the start", provider: "quality_speed_requires_modern_provider: true\nquality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", now: start.Add(-24 * time.Hour), tier: tierPage},
-		{name: "false, a day after the start", provider: "quality_speed_requires_modern_provider: false\nquality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", now: start.Add(24 * time.Hour), tier: tierWarn},
-		{name: "unreadable switch, after the start", provider: "quality_speed_requires_modern_provider: maybe\nquality_speed_modern_provider_start: 2026-11-02T12:30:00Z\n", now: start.Add(time.Hour), tier: tierWarn},
-		{name: "a file that is not yaml, after the default start", provider: "egress_index:\n\tnative_reader_enabled: true\n", now: defaultStart.Add(time.Hour), tier: tierWarn},
+		{name: "switch absent", provider: "enable_egress_test: false\n", tier: tierWarn},
+		{name: "true", provider: "quality_speed_requires_modern_provider: true\n", tier: tierPage},
+		{name: "false", provider: "quality_speed_requires_modern_provider: false\n", tier: tierWarn},
+		{name: "unreadable switch", provider: "quality_speed_requires_modern_provider: maybe\n", tier: tierWarn},
+		{name: "a file that is not yaml", provider: "egress_index:\n\tnative_reader_enabled: true\n", tier: tierWarn},
 	} {
 		desired := func() capabilityProbeDesired {
 			popProbe := server.Config.PushSimpleResource(capabilityProbeSettingsResource, []byte("enabled: true\n"))
@@ -255,9 +250,71 @@ func TestCapabilityProbeStallPagesOnTheEffectiveGate(t *testing.T) {
 		if !desired.enabled {
 			t.Fatalf("%s: the probe read as switched off", c.name)
 		}
-		stalled := capabilityProbeObservation{lastPass: c.now.Add(-7 * time.Hour), exporting: 4, oldestStart: c.now.Add(-48 * time.Hour)}
-		if f := capabilityProbeStalledFinding(c.now, desired, stalled); f.healthy || f.class != "capability-probe-stalled" || f.tier != c.tier {
+		now := capabilityProbeTestNow
+		stalled := capabilityProbeObservation{lastPass: now.Add(-7 * time.Hour), exporting: 4, oldestStart: now.Add(-48 * time.Hour)}
+		if f := capabilityProbeStalledFinding(defaultCapabilityProbeSettings(), now, desired, stalled); f.healthy || f.class != "capability-probe-stalled" || f.tier != c.tier {
 			t.Errorf("%s: finding %s at %s (healthy %t), want %s", c.name, f.class, f.tier, f.healthy, c.tier)
+		}
+	}
+}
+
+// FP2-MODERN.md: modern-first priority and modern-only requests read the
+// probe's evidence, and the gate stays only behind an explicit switch, so a
+// stall past six hours pages while any of them holds: priority on in a
+// running reader, a modern request answered in the last day (a fraction
+// included, as increase extrapolates one), or the gate on. With none of them,
+// or with nothing published, so that no reader runs priority or answered a
+// modern request, it only warns, and a stall of six hours or less warns
+// whatever is in use. The finding names each input, an unpublished one as
+// unknown rather than a measured zero or off.
+func TestCapabilityProbeStallPagesWhileTheEvidenceIsInUse(t *testing.T) {
+	zero, one, three, fraction := 0.0, 1.0, 3.0, 0.04
+	for _, c := range []struct {
+		name string
+		// nil for a series no process publishes
+		priorityOn     *float64
+		modernRequests *float64
+		fleetGate      *float64
+		lastPass       time.Duration
+		tier           string
+		observed       []string
+	}{
+		{name: "priority on in a reader", priorityOn: &one, modernRequests: &zero, fleetGate: &zero, lastPass: 7 * time.Hour, tier: tierPage, observed: []string{"priority=on", "modern_requests_24h=0", "gate=off gate_source=fleet"}},
+		{name: "a modern request answered", priorityOn: &zero, modernRequests: &three, fleetGate: &zero, lastPass: 7 * time.Hour, tier: tierPage, observed: []string{"priority=off", "modern_requests_24h=3", "gate=off"}},
+		{name: "a fraction of a modern request", priorityOn: &zero, modernRequests: &fraction, fleetGate: &zero, lastPass: 7 * time.Hour, tier: tierPage, observed: []string{"modern_requests_24h=0.04"}},
+		{name: "the gate on", priorityOn: &zero, modernRequests: &zero, fleetGate: &one, lastPass: 7 * time.Hour, tier: tierPage, observed: []string{"priority=off", "modern_requests_24h=0", "gate=on gate_source=fleet"}},
+		{name: "nothing in use", priorityOn: &zero, modernRequests: &zero, fleetGate: &zero, lastPass: 7 * time.Hour, tier: tierWarn, observed: []string{"priority=off", "modern_requests_24h=0", "gate=off"}},
+		{name: "nothing published", lastPass: 7 * time.Hour, tier: tierWarn, observed: []string{"priority=unknown", "modern_requests_24h=unknown", "gate=off gate_source=desired"}},
+		{name: "priority on, gate unpublished", priorityOn: &one, lastPass: 7 * time.Hour, tier: tierPage, observed: []string{"priority=on", "modern_requests_24h=unknown", "gate_source=desired"}},
+		{name: "priority on, exactly six hours", priorityOn: &one, lastPass: 6 * time.Hour, tier: tierWarn},
+		{name: "priority on, six hours and a second", priorityOn: &one, lastPass: 6*time.Hour + time.Second, tier: tierPage},
+		{name: "a modern request answered, three hours", modernRequests: &three, lastPass: 3 * time.Hour, tier: tierWarn},
+	} {
+		values := map[string]float64{
+			"disabled_increase": 0,
+			"disabled_running":  0,
+			"last_pass":         capabilityProbeTestUnix(c.lastPass),
+			"exporting":         4,
+			"oldest_start":      capabilityProbeTestUnix(48 * time.Hour),
+		}
+		for name, value := range map[string]*float64{"priority_on": c.priorityOn, "modern_requests": c.modernRequests, "gate_on": c.fleetGate} {
+			if value != nil {
+				values[name] = *value
+			}
+		}
+		alerts, _ := runCapabilityProbeSignal(t, capabilityProbeDesired{enabled: true, gate: capabilityProbeTestGate(false)}, nil, capabilityProbeMimirFixture(t, values), nil)
+		if len(alerts) != 1 {
+			t.Errorf("%s: alerts %+v, want only the stall", c.name, alerts)
+			continue
+		}
+		alert := requireAlertClass(t, alerts, "capability-probe-stalled")
+		if alert.Severity != Severity(c.tier) {
+			t.Errorf("%s: severity %s, want %s", c.name, alert.Severity, c.tier)
+		}
+		for _, observed := range c.observed {
+			if !strings.Contains(alert.Observed, observed) {
+				t.Errorf("%s: observed %q, want %q in it", c.name, alert.Observed, observed)
+			}
 		}
 	}
 }
@@ -318,6 +375,18 @@ func TestCapabilityProbeSignalReportsWhatItCannotObserve(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// a chain healthy but for one more series at value
+	withSeries := func(name string, value float64) string {
+		return capabilityProbeMimirFixture(t, map[string]float64{
+			"disabled_increase": 0,
+			"disabled_running":  0,
+			"last_pass":         capabilityProbeTestUnix(time.Minute),
+			"exporting":         4,
+			"oldest_start":      capabilityProbeTestUnix(3 * time.Hour),
+			name:                value,
+		})
+	}
+	nan, _ := strconv.ParseFloat("NaN", 64)
 	for _, c := range []struct {
 		name       string
 		desiredErr error
@@ -329,6 +398,8 @@ func TestCapabilityProbeSignalReportsWhatItCannotObserve(t *testing.T) {
 		{name: "malformed response", response: `{"status":"success","data":{"resultType":"vector","result":[{"metric":{"monitor_capability_series":"unknown"},"value":[0,"1"]}]}}`},
 		{name: "skewed response", response: string(skewed)},
 		{name: "no taskworker series", response: capabilityProbeMimirFixture(t, map[string]float64{})},
+		{name: "negative modern requests", response: withSeries("modern_requests", -1)},
+		{name: "non-finite priority", response: withSeries("priority_on", nan)},
 	} {
 		alerts, _ := runCapabilityProbeSignal(t, capabilityProbeDesired{enabled: true}, c.desiredErr, c.response, c.mimirErr)
 		if len(alerts) != 1 || alerts[0].Class != "cannot-observe" {

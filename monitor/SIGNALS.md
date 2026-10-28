@@ -20936,18 +20936,24 @@ resources separate until every activation gate is reviewed.
 ### 2.19g Modern provider evidence — the capability probe must keep measuring
 Probe: `capability-probe`
 
-WHAT: the FP2 modern provider gate (FP2FIX.md, "Modern provider gate") reads
-`provider_modern_evidence`, and only the capability probe writes it: the
-recurring taskworker task `work.CapabilityProbe` (`server/capprobe`), one pass
-at a time fleet-wide, each provider measured in a short tunnel of its own
-whose clients attempt opportunistic end-to-end sessions. The URL probe writes
-no evidence. While the gate's switch is off a stopped probe only freezes the
-shadow; once it is on, a stopped probe ages every provider's evidence toward
-`stale_evidence` and the gate takes Quality and Speed away from providers
-that are modern. Every series below is per taskworker process
-(`urnetwork_capability_probe_*`, egress probes dashboard, capability probe
-row); sum across the env's taskworkers and remember a process restart resets
-counters.
+WHAT: `provider_modern_evidence`, the evidence a provider is modern by, has
+one writer, the capability probe: the recurring taskworker task
+`work.CapabilityProbe` (`server/capprobe`), one pass at a time fleet-wide,
+each provider measured in a short tunnel of its own whose clients attempt
+opportunistic end-to-end sessions. The URL probe writes no evidence.
+Modern-first priority (`rank_modern_first`, on by default) and modern-only
+requests (`require_modern_provider`) read it through each exported score's
+`Modern` (FP2-MODERN.md), and so does the FP2 modern provider gate (FP2FIX.md,
+"Modern provider gate") while an explicit switch holds it on. The probe
+measures every Online provider, judged with the score export's Online inputs:
+each provider's published country and the URL-success guard the export last
+published. A stopped probe ages every provider's evidence toward
+`stale_evidence` within seven days: priority then draws as it did before it,
+modern-only requests answer empty, and with the gate on Quality and Speed
+lose the providers that are modern. Every series below is per taskworker
+process (`urnetwork_capability_probe_*`, egress probes dashboard, capability
+probe row); sum across the env's taskworkers and remember a process restart
+resets counters.
 
 The probe ships switched off (sn-55) and then schedules nothing: no task
 row, no prober shard, no pass, so every series stays at zero. It is
@@ -20965,18 +20971,28 @@ Healthy shape:
   `result="waiting"` advances every ten minutes, reading nothing. So
   `last_pass_timestamp_seconds` is never older than a pass's
   `max_time_seconds` (900) plus a few seconds.
-- `in_flight` stays at or under `concurrency` (16) on one taskworker at a
-  time.
+- `in_flight` stays at or under `concurrency` (16 by default; FP2-MODERN.md's
+  starting experiment sets 32, with `limit` 128) on one taskworker at a time.
 - `providers_total` is mostly `recorded_*`: `recorded_not_post_quantum`
   dominates while most providers run the custom lineage.
 - `measure_seconds` p95 is about 61-65 s (a provider without the end-to-end
   responder takes the whole establishment window after its first
   acknowledgement) and never above `measure_timeout_seconds` (120); modern
   providers read in seconds.
-- `selection_total` in steady state: `scanned` far above `due`; during the
-  first sweep after deployment, about two days, `due` and `eligible` are
-  close to `scanned` and the shadow's `no_evidence` is large. Neither is a
-  finding then.
+- `selection_total` in steady state: `scanned` far above `due`. `eligible`
+  counts Online providers, about 1.8 times the Quality and Speed providers
+  the probe selected before FP2-MODERN.md (capprobe/README.md, "Capacity").
+  During the first sweep after deployment, about two days, `due` and
+  `eligible` are close to `scanned` and the shadow's `no_evidence` is large,
+  and the first sweep after the probe widens to Online finds most Online-only
+  providers due; neither is a finding then. `stage="unguarded"` counts
+  passes, not providers: a pass that judged eligibility without a trusted
+  URL-success guard (none published, or one older than 60 minutes), when every
+  country is exempt and the providers the score export keeps out of every
+  bucket for want of URL success (`no_success`, `low_success`) are measured
+  too. It stays flat while the export publishes its guard; each such pass logs
+  one `[capprobe]` line, and the model logs the guard's absence when it begins
+  and ends (`[egress]online url-success guard`).
 - `breaker_trips_total` flat, but for the odd small pass at a sweep's tail
   whose few providers all lack the responder; `downgrades_total` low, a
   `held` now and then that the next sweep mostly answers with a modern
@@ -20994,18 +21010,31 @@ Signals:
 - `capability-probe-stalled` — WARN when no taskworker has finished a
   measured or waiting pass for 30 minutes while `capability_probe.yml`
   enables the probe (`time() - max(urnetwork_capability_probe_last_pass_timestamp_seconds) > 1800`),
-  PAGE after six hours with the gate on: on any running taskworker as their
-  stats collectors publish it (`max(urnetwork_stats_provider_modern_gate_on)`),
-  which is what is deployed; while no taskworker publishes it, by the desired
-  provider.yml, `quality_speed_requires_modern_provider: true` or that switch
-  absent and the gate's start (2026-11-11 00:00 UTC by default,
-  `quality_speed_modern_provider_start`) passed at the monitor's clock, as the
-  model's own provider.yml decoder reads them, so the automatic switch-on
-  arms the page. The finding names its `gate_source`. Evidence stays fresh
-  for seven days after its measurement, so a shorter stall, planned
-  database maintenance included, takes no provider out and only warns. The newest pass is read
-  over six hours (`max_over_time`), so a pass of a process that exited
-  since counts; a fleet whose taskworkers all started after it, as the
+  PAGE after six hours while the evidence is in use (FP2-MODERN.md), when any
+  of these holds:
+  - modern-first priority is on in any running reader:
+    `max(urnetwork_findproviders2_rank_modern_first_enabled{job=~"api|alt|proxy"})`
+    is 1, each reader publishing its effective `rank_modern_first` (every
+    process that links the model publishes the gauge, so the readers are
+    named);
+  - modern requests were answered in the last day:
+    `sum(increase(urnetwork_findproviders2_outcomes_total{capability=~"modern.*"}[24h])) > 0`,
+    from whichever process answered them;
+  - the gate is on: on any running taskworker as their stats collectors
+    publish it (`max(urnetwork_stats_provider_modern_gate_on)`), which is what
+    is deployed; while no taskworker publishes it, by the desired provider.yml
+    as the model's own decoder reads it at the monitor's clock, which once
+    FP2-MODERN.md retires the gate's start is an explicit
+    `quality_speed_requires_modern_provider: true`.
+
+  A priority or outcome series that no process publishes arms nothing: no
+  reader then runs priority or has answered a modern request. The finding
+  names `priority`, `modern_requests_24h` (`unknown` for a series nothing
+  publishes, never a measured zero), `gate` and its `gate_source`. Evidence
+  stays fresh for seven days after its measurement, so a shorter stall,
+  planned database maintenance included, takes no provider out and only
+  warns. The newest pass is read over six hours (`max_over_time`), so a pass
+  of a process that exited since counts; a fleet whose taskworkers all started after it, as the
   switch-on restart starts them, is given the 30 minutes from its oldest
   process's start (`process_start_time_seconds`), since the first pass can
   take its whole `max_time_seconds`. Running taskworkers that export no
@@ -21069,8 +21098,9 @@ Signals:
   `negative_withheld` everywhere is `capability-probe-breaker`;
   `record_failed` is the database write, and fails the pass.
 - `capability-probe-breaker` — WARN when `breaker_trips_total` rises on most
-  passes for an hour, PAGE after two hours with the gate on (as for
-  `capability-probe-stalled`): the
+  passes for an hour, PAGE after two hours while the evidence is in use (as
+  for `capability-probe-stalled`: priority on in a reader, modern requests
+  answered in the last day, or the gate on): the
   probe negotiates no end-to-end session with any provider, so its negative
   readings are all withheld (`providers_total{outcome="negative_withheld"}`)
   and its evidence ages toward `stale_evidence`. That is a fault on the
@@ -21102,8 +21132,12 @@ Signals:
   `modern_refresh_hours` and the sweep interval (about 3.75 days at the
   defaults), or when the shadow's
   `urnetwork_stats_provider_modern_gate_shadow{outcome="stale_evidence"}`
-  rises for a day: the probe no longer refreshes evidence before the gate
-  reads it as stale. Raise `concurrency` or find what fails first; never
+  rises for a day: the probe no longer refreshes evidence before priority,
+  modern-only requests and the gate read it as stale. Across the Online
+  population a 72-hour refresh needs at least about 690 measurements an hour,
+  a floor rather than a forecast, since evidence that stays missing or
+  inconclusive is measured again every sweep (capprobe/README.md,
+  "Capacity"). Raise `concurrency` and `limit` or find what fails first; never
   lengthen the staleness window to hide it.
 - `capability-probe-teardown-errors` — WARN while
   `close_errors_total` rises for an hour: capability tunnels fail to retire
@@ -21135,8 +21169,10 @@ negatives" are not a defect to repair.
 Implementation convention: `signal_capability_probe.go` (probe
 `taskworker/capability-probe`) implements `capability-probe-stalled` and
 `capability-probe-disabled-pass` from fleet aggregates in Mimir, read
-against the desired `capability_probe.yml` and `provider.yml`; while the
-config switches the probe off, both are healthy. Query evaluation timestamps
+against the desired `capability_probe.yml` and `provider.yml`; the stall's
+page also reads the readers' `rank_modern_first` gauge and the modern
+requests answered over a day. While the config switches the probe off, both
+are healthy. Query evaluation timestamps
 must remain within five minutes of the monitor clock. Independently, the
 `last_pass` and `oldest_start` timestamp payloads must be finite, nonnegative
 and no later than the monitor clock; exactly now is valid and zero means
