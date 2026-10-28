@@ -201,14 +201,29 @@ At 60% connect, the removal path closed about 54 transports and 11 residents per
 | taskworker | 1083920300 | 12:58 |
 | api | 1083922290 | 13:00 |
 | connect | 1083923480 | 13:03, 13:07, 13:11 |
-| proxy | 1083924700 | blocks g1–g10, from 13:13 |
-| alt | 1083925940 | after proxy |
+| proxy | 1083924700 | blocks g1–g10, 13:13–14:00 |
+| alt | 1083925940 | crisp 14:01–14:04, fireside 14:05–14:09 |
 
 Within minutes the rule settled about 124 unused contracts per second.
 
-**Hotfix 3.** The zero-final rule on clients' legacy reports, through `CloseClientContractUsage`.
+**Hotfix 4.** Connect only: keep a removed client's resident (see the forward lookup flood below). Connect 1084011980, deployed 15:29–15:41.
 
-**Main.** server `44a61ebf6` (client close, rule 1a, x/net) and connect `71d176c6`. The zero-final rule follows.
+**Hotfix 3.** The zero-final rule on clients' legacy reports, through `CloseClientContractUsage`. It was built on hotfix 4, so its connect and alt images keep removed residents too. The hotfix branches are server `hotfix/client-close-2026-10-28` (`0b8fcc72f`) and connect (`ea79e1f1`).
+
+| Service | Version | Deployed (UTC) |
+|---|---|---|
+| taskworker | 1084050840 | 16:36–16:39 |
+| api | 1084052700 | 16:40–16:43 |
+| connect | 1084054010 | 16:45, 16:50, 17:06, 17:17 (20/60/80/100%) |
+| proxy | 1084055340 | blocks g1–g10, 17:24–18:13 |
+| alt | 1084056600 | crisp 18:17–18:22, fireside 18:23–18:27 |
+
+- **Effect:** unused-contract settlements at the zero final rose from about 150 to 300–460 per second. Contract closes outran opens (1,203 against 926 per second at 17:24).
+- **Gates:** clean at every step. Reservation errors stayed at or below 0.2 per second, and the busiest redis shard stayed at or below 0.9.
+- **Peak-hour restarts:** each connect wave briefly raised resident lookups (to 74,000 per second at the 60% step, back to baseline within 4 minutes) and dipped exchange connections while clients reconnected. The 80% step was added to halve the last two waves.
+- **Connected clients:** they dipped as after every connect and proxy rollout this day (about 186,000 to 140,000), mostly hosted proxy devices and idle apps reconnecting over the following hours.
+
+**Main.** server `44a61ebf6` (client close, rule 1a, x/net) and connect `71d176c6`. The zero-final rule followed in `50a0cc506`. Hotfix 4 is in `b98cd928f` and hotfix 3 in `3027b1ec6`.
 
 **SDK.** The connect library's `CloseSequences` handler takes effect as providers update.
 
