@@ -25,9 +25,18 @@ type CompetitionHealthResult struct {
 }
 
 type CompetitionReadinessResult struct {
-	Ready     bool            `json:"ready"`
-	Checks    map[string]bool `json:"checks"`
-	CheckedAt time.Time       `json:"checked_at"`
+	Ready         bool                      `json:"ready"`
+	Checks        map[string]bool           `json:"checks"`
+	CheckedAt     time.Time                 `json:"checked_at"`
+	RuntimeStatus *CompetitionRuntimeStatus `json:"runtime_status,omitempty"`
+}
+
+// Mutable operational availability, never part of a frozen policy snapshot.
+// These fields report real infrastructure and durable holds, not calibration.
+type CompetitionRuntimeStatus struct {
+	IntakeReady     bool `json:"intake_ready"`
+	GradingReady    bool `json:"grading_ready"`
+	PublicationHeld bool `json:"publication_held"`
 }
 
 type CompetitionPatchPolicy struct {
@@ -78,6 +87,7 @@ type CompetitionSeasonPolicy struct {
 }
 
 type CompetitionInfoResult struct {
+	RuntimeStatus         *CompetitionRuntimeStatus    `json:"runtime_status,omitempty"`
 	CompetitionId         string                       `json:"competition_id"`
 	Enabled               bool                         `json:"enabled"`
 	ScoreSchema           int                          `json:"score_schema"`

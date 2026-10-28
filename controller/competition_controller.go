@@ -3441,6 +3441,17 @@ func (self *Service) Ready(ctx context.Context) (ReadinessResult, *CompetitionEr
 		return result, evalError
 	}
 	result.Ready = allChecks(checks)
+	result.RuntimeStatus, err = self.competitionRuntimeStatus(ctx, settings, checks)
+	if err != nil {
+		result.Ready = false
+		result.Checks["automation_hold_status"] = false
+		evalError := infrastructureError("readiness_failed", "competition hold status is unavailable")
+		evalError.Readiness = &result
+		return result, evalError
+	}
+	if result.RuntimeStatus != nil {
+		result.Ready = result.RuntimeStatus.IntakeReady
+	}
 	if !result.Ready {
 		evalError := infrastructureError("not_ready", "competition evaluator is not ready")
 		evalError.Readiness = &result
@@ -3547,6 +3558,28 @@ func (self *Service) Info(ctx context.Context) (*InfoResult, *CompetitionError) 
 		return nil, infrastructureError("source_not_ready", "the exact runtime source envelope is unavailable")
 	}
 	result := settings.PublicInfo()
+	applyRuntimeStatus := func(round *roundRecord) *CompetitionError {
+		if !settings.AutomationPolicy.Enabled {
+			return nil
+		}
+		effective := settings
+		if competitionRoundUsesV2(round) {
+			var sourceErr error
+			effective, sourceErr = settingsForAutomationRound(ctx, settings, self.store, round)
+			if sourceErr != nil {
+				return infrastructureError("source_not_ready", "the exact frozen round source is unavailable")
+			}
+		}
+		checks, checkErr := self.readinessChecks(ctx, effective)
+		if checkErr != nil {
+			return infrastructureError("readiness_failed", "competition intake status is unavailable")
+		}
+		result.RuntimeStatus, err = self.competitionRuntimeStatus(ctx, effective, checks)
+		if err != nil {
+			return infrastructureError("readiness_failed", "competition hold status is unavailable")
+		}
+		return nil
+	}
 	if settings.AutomationPolicy.Enabled && settings.AutomationPolicy.Staging {
 		round, loadErr := competitionConfiguredCurrentRound(ctx, settings, self.store)
 		if loadErr != nil {
@@ -3561,6 +3594,9 @@ func (self *Service) Info(ctx context.Context) (*InfoResult, *CompetitionError) 
 			if err := applyFrozenRoundPublicPolicy(&result, round); err != nil {
 				return nil, infrastructureError("round_policy_mismatch", "staging round policy could not be authenticated")
 			}
+		}
+		if evalError := applyRuntimeStatus(round); evalError != nil {
+			return nil, evalError
 		}
 		return &result, nil
 	}
@@ -3593,6 +3629,13 @@ func (self *Service) Info(ctx context.Context) (*InfoResult, *CompetitionError) 
 				return nil, infrastructureError("round_policy_mismatch", "staging round policy could not be authenticated")
 			}
 		}
+	}
+	statusRound := round
+	if statusRound == nil {
+		statusRound = stagingRound
+	}
+	if evalError := applyRuntimeStatus(statusRound); evalError != nil {
+		return nil, evalError
 	}
 	return &result, nil
 }
@@ -3911,6 +3954,14 @@ func (self *Service) getScoreWithDecisionContract(ctx context.Context, jobId ser
 	}
 	result := scoreJobView(job, principal, server.NowUtc())
 	if v2 {
+		held, holdErr := self.competitionPublicationHeld(ctx, settings, &job.Round)
+		if holdErr != nil {
+			return nil, http.StatusServiceUnavailable, infrastructureError("readiness_failed", "competition hold status is unavailable")
+		}
+		if held {
+			result.State = scoreJobStateView(job.State, false, principal)
+			result.Score, result.EvalError = nil, nil
+		}
 		result.DecisionMode, result.RequiredApiCapability = model.CompetitionDecisionModeV2, competitionRoundApiCapability(&job.Round)
 	}
 	return &result, 200, nil
@@ -3951,14 +4002,20 @@ func (self *Service) roundViewContext(ctx context.Context, round *roundRecord) (
 		return nil, infrastructureError("source_not_ready", "the exact runtime source envelope is unavailable")
 	}
 	view := round.RoundResult
+	published := roundPublished(round, server.NowUtc())
 	if competitionRoundUsesV2(round) {
+		held, holdErr := self.competitionPublicationHeld(ctx, self.settings, round)
+		if holdErr != nil {
+			return nil, infrastructureError("readiness_failed", "competition hold status is unavailable")
+		}
+		published = published && !held
 		view.DecisionMode, view.RequiredApiCapability = model.CompetitionDecisionModeV2, competitionRoundApiCapability(round)
 		view.WinnerJobId, view.FinalizedAt = nil, nil
-		if roundPublished(round, server.NowUtc()) {
+		if published {
 			view.Status = "sealed"
 		}
 	}
-	if roundPublished(round, server.NowUtc()) {
+	if published {
 		seed, err := revealRoundSecret(self.settings, round)
 		if err != nil {
 			return nil, infrastructureError("round_reveal_failed", "round commitment could not be revealed")
@@ -6626,6 +6683,8 @@ type Worker struct {
 	workerId          string
 	workerImageDigest string
 	pollEvery         time.Duration
+	// Nil preserves production tickers; deterministic tests drive exact idle edges.
+	pollTickForTest, hostTickForTest <-chan time.Time
 }
 
 func NewWorker(settings *Settings, store Store, evaluator Evaluator, workerId string) (*Worker, error) {
@@ -6673,20 +6732,32 @@ func (self *Worker) Run(ctx context.Context) error {
 	defer hostTicker.Stop()
 	pollTicker := time.NewTicker(self.pollEvery)
 	defer pollTicker.Stop()
+	pollTick, hostTick := pollTicker.C, hostTicker.C
+	if self.pollTickForTest != nil {
+		pollTick = self.pollTickForTest
+	}
+	if self.hostTickForTest != nil {
+		hostTick = self.hostTickForTest
+	}
 
 	for {
 		if err := requireConfiguredCompetitionRuntime(ctx, self.settings, self.store); err != nil {
 			return err
 		}
 		finished, err := self.finishEpoch(ctx)
-		if err != nil {
+		if err != nil && !errors.Is(err, ErrAutomationHeld) {
 			return fmt.Errorf("finish competition epoch: %w", err)
 		}
 		if finished {
 			return nil
 		}
-		job, err := self.claimWithPreparedRoundBaseline(ctx, hostCheck)
-		if err != nil {
+		var job *queuedJob
+		if err == nil {
+			job, err = self.claimWithPreparedRoundBaseline(ctx, hostCheck)
+		}
+		// An authorized grading pause is idle, not worker death. Keep genuine
+		// self-check/host heartbeats alive without claiming or evaluating work.
+		if err != nil && !errors.Is(err, ErrAutomationHeld) {
 			return fmt.Errorf("claim competition job: %w", err)
 		}
 		if job != nil {
@@ -6709,8 +6780,8 @@ func (self *Worker) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-pollTicker.C:
-		case <-hostTicker.C:
+		case <-pollTick:
+		case <-hostTick:
 			fresh, checkErr := self.selfCheck(ctx)
 			if checkErr != nil {
 				if fresh.HostId != "" {

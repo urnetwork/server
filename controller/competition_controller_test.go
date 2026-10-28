@@ -1554,6 +1554,8 @@ type fakeStore struct {
 	handbacks        int
 	readiness        map[string]bool
 	readyErr         error
+	holdStatus       competitionAutomationHoldStatus
+	holdStatusErr    error
 	round            *roundRecord
 	stagingRound     *roundRecord
 	reviewState      *CandidateReviewState

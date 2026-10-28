@@ -130,6 +130,7 @@ func (self PostgresStore) SealAndElect(ctx context.Context, settings *Settings, 
 			result, stateErr = nil, nil
 			round, policy, loadErr := loadAutomationRoundInTx(ctx, tx, settings, roundId)
 			server.Raise(loadErr)
+			server.Raise(ensureAutomationNotHeldInTx(ctx, tx, settings, "evaluation"))
 			var existing []byte
 			sealErr := tx.QueryRow(ctx, `SELECT seal_json FROM competition_evaluation_seal WHERE round_id=$1`, roundId).Scan(&existing)
 			if sealErr == nil {
@@ -338,7 +339,13 @@ func (self PostgresStore) AutomationResult(ctx context.Context, settings *Settin
 				panic(ErrAutomationNotPublished)
 			}
 			server.Raise(loadErr)
-			result = automationResultInTx(ctx, tx, roundId)
+			observed := automationResultInTx(ctx, tx, roundId)
+			// Existing public integrity invalidations stay inspectable; their
+			// historical seal cannot acquire a newly elected valid winner.
+			if !observed.Invalidated {
+				server.Raise(ensureAutomationNotHeldInTx(ctx, tx, settings, "evaluation"))
+			}
+			result = observed
 		})
 	})
 	return result, err

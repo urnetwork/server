@@ -19,7 +19,7 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-// Exercise the native three-member producer with an intercepted transport;
+// Exercise the configured pinned members with an intercepted transport;
 // every response and journal is synthetic and no socket is opened.
 func winnerReviewSnowCacheFixture(t *testing.T) (winnerReviewBrokerRequest, func() ([]byte, error), *int) {
 	t.Helper()
@@ -118,7 +118,7 @@ func TestWinnerReviewSnowCacheReplaysOriginalInputAfterClockRenewal(t *testing.T
 			}
 		}
 	}
-	if *calls != 3 {
+	if *calls != len(defaultWinnerSnowProviderSettings().Members) {
 		t.Fatal("clock renewal called the provider again", *calls)
 	}
 }
@@ -175,7 +175,7 @@ func TestWinnerReviewSnowCacheRejectsChangedNonClockIdentity(t *testing.T) {
 			}
 		}
 	}
-	if *calls != 3 {
+	if *calls != len(defaultWinnerSnowProviderSettings().Members) {
 		t.Fatal("identity rejection called another provider", *calls)
 	}
 }
@@ -231,7 +231,7 @@ func TestWinnerReviewSnowCacheRejectsMissingOrChangedOriginalMetadata(t *testing
 	if err := cacheWinnerReviewJudgment(missingPath, output); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := winnerReviewResponse(missingPath, request, run); err == nil || *calls != 3 {
+	if _, _, err := winnerReviewResponse(missingPath, request, run); err == nil || *calls != len(defaultWinnerSnowProviderSettings().Members) {
 		t.Fatal("missing completed cache rerolled an accepted Snow judgment", err, *calls)
 	}
 }
@@ -249,7 +249,7 @@ func TestWinnerReviewSnowCacheRejectsChangedAcceptedBytes(t *testing.T) {
 	if err := cacheWinnerReviewJudgment(path, changed); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := winnerReviewResponse(path, request, run); err == nil || *calls != 3 {
+	if _, _, err := winnerReviewResponse(path, request, run); err == nil || *calls != len(defaultWinnerSnowProviderSettings().Members) {
 		t.Fatal("changed accepted output reused original authority or rerolled", err, *calls)
 	}
 }
