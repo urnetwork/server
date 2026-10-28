@@ -143,8 +143,9 @@ func TestExchangeClientCloseRequestsReachTheClient(t *testing.T) {
 }
 
 // An api removal closes the removed client's transports with the typed
-// authorization close and cancels its resident at once, well inside the 60 s
-// lease recheck, and leaves other clients alone (CLIENTCLOSE.md section 4).
+// authorization close at once, well inside the 60 s lease recheck, and leaves
+// other clients alone (CLIENTCLOSE.md section 4). The resident stays until its
+// idle ttl, so peers' forwards to it do not spin on the resident lookup.
 func TestExchangeClosesRemovedClient(t *testing.T) {
 	if testing.Short() {
 		return
@@ -204,10 +205,17 @@ func TestExchangeClosesRemovedClient(t *testing.T) {
 			t.Fatal("the close came no sooner than the lease recheck")
 		}
 		if !waitFor(ctx, 10*time.Second, func() bool {
-			connections, resident := env.exchange.testingHoldsClient(clientIdA)
-			return connections == 0 && !resident
+			connections, _ := env.exchange.testingHoldsClient(clientIdA)
+			return connections == 0
 		}) {
-			t.Fatal("the exchange still holds the removed client")
+			t.Fatal("the exchange still holds the removed client's transports")
+		}
+		// past the asynchronous removal handling: the resident remains
+		select {
+		case <-time.After(2 * time.Second):
+		}
+		if _, resident := env.exchange.testingHoldsClient(clientIdA); !resident {
+			t.Fatal("the removal canceled the removed client's resident")
 		}
 
 		connectionsB, residentB := env.exchange.testingHoldsClient(clientIdB)
