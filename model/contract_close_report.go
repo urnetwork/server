@@ -95,9 +95,8 @@ func closeContractWithReportUsage(ctx context.Context, report ContractCloseRepor
 	}
 	// The original accepted transaction may have lost its reply before settlement.
 	// Resume the idempotent original settlement even on an exact duplicate report.
-	// A duplicate resumes only the two-final rule: its original ordering against
-	// the sender's final is not retained, so a contract whose checkpoint did not
-	// complete waits for the receiver's next report or the expiry task.
+	// The aggregate retains each admitted completion decision under its contract
+	// lock, so retries also resume checkpoint and zero-final settlement.
 	closed, completedCheckpoint, err := settleReportedContract(ctx, report.ContractId, admission.completion)
 	if err != nil {
 		return admission.applied, admission.addedByteCount, err
@@ -297,7 +296,7 @@ func closeContractReportUsageInTx(ctx context.Context, tx server.PgTx, report Co
 type contractCloseReportAdmission struct {
 	applied        bool
 	addedByteCount ByteCount
-	// the receiver applied this report after the sender's final had committed
+	// admitted report ordering that permits receiver finalization
 	completion contractCheckpointCompletion
 }
 

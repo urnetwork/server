@@ -498,6 +498,11 @@ type ExchangeSettings struct {
 	// redis key-event delta delivery for the peers + stream-hops listeners
 	// (PEERSSTREAMS2.md). Off -> pure PEERS2 poll behavior above.
 	KeyEventDelivery KeyEventDeliverySettings
+	// Requests per CloseSequences frame. Defaults to 512 (about 9 KiB);
+	// non-positive uses the default. The listener reduces larger values to
+	// fit the exchange and minimum supported client carrier limits.
+	// Framers below the control sender's 4 KiB envelope leave requests pending.
+	ClientCloseBatchSize int
 
 	ExchangeResidentWaitTimeout time.Duration
 	ExchangeResidentPollTimeout time.Duration
@@ -630,6 +635,7 @@ func DefaultExchangeSettingsWithBufferSize(bufferSize int) *ExchangeSettings {
 			TopologyRefreshInterval: 60 * time.Second,
 			ResyncSpreadTimeout:     30 * time.Second,
 		},
+		ClientCloseBatchSize: 512,
 
 		ExchangeResidentWaitTimeout: exchangeResidentWaitTimeout,
 		ExchangeResidentPollTimeout: 15 * time.Second,
@@ -4510,7 +4516,7 @@ func (self *Resident) Run() {
 
 		// the client's close requests (CLIENTCLOSE.md). Requests added before
 		// this registration had no listener, so it takes once now.
-		closeListener := newClientCloseListener(self.ctx, self.clientId, self.sendListenerFrame)
+		closeListener := newClientCloseListener(self.ctx, self.clientId, self.sendListenerFrame, self.exchange.settings)
 		defer closeListener.CloseAndWait()
 		removeCloseListener := self.exchange.keyEventSubscriber.AddCloseListener(self.clientId, closeListener)
 		defer removeCloseListener()
