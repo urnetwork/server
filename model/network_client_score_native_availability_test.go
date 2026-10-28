@@ -44,10 +44,12 @@ func (self *nativeCancelReadHook) ProcessPipelineHook(next redis.ProcessPipeline
 	}
 }
 
-// The additive native diagnostic must not invalidate the deployed monitor's
-// existing selection-schema-2 witness or require traffic to advertise support.
+// The additive native diagnostic must not change the selection schema the
+// monitor reads, or require traffic to advertise support. The schema is 3
+// since the capability reasons (filtered_capability, FP2-MODERN.md), which
+// the monitor's selection signal accepts from schema 3 on.
 func TestNativeSelectionSchemaRetainsMonitorCompatibility(t *testing.T) {
-	if got := selectionMetricCount(t, "urnetwork_findproviders2_selection_schema_version", nil); got != 2 {
+	if got := selectionMetricCount(t, "urnetwork_findproviders2_selection_schema_version", nil); got != 3 {
 		t.Fatalf("native availability changed the supported selection schema: %g", got)
 	}
 	if got := selectionMetricCount(t, "urnetwork_findproviders2_native_source_schema_version", nil); got != 1 {

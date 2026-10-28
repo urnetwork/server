@@ -213,6 +213,9 @@ func rankClientScore(
 	}
 	passesReliability := providerReliabilityPasses(weights, minIndependentReliabilityWeights)
 	clientScore.Online = decision.online && passesReliability
+	// a network-only score takes its declaration at export instead
+	// (FP2-MODERN.md, "The index flag")
+	clientScore.Modern = decision.modern
 	clientScore.UrlProbeSuccessWeight = providerUrlProbeSuccessWeight(countFilter.healthCounts[clientScore.ClientId])
 	if counts, ok := countFilter.healthCounts[clientScore.ClientId]; ok && counts.Total > 0 {
 		validUntil := clientScoreEgressValidUntil(counts, countFilter.healthWindowEnd, egressSettings)

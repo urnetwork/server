@@ -31,11 +31,17 @@ var passResults = []string{
 }
 
 // Selection stages, the labels of urnetwork_capability_probe_selection_total.
+// Each counts providers except unguarded, which counts passes.
 const (
-	selectionScanned  = "scanned"
-	selectionDue      = "due"
+	selectionScanned = "scanned"
+	selectionDue     = "due"
+	// in online, as the score export decides it
 	selectionEligible = "eligible"
 	selectionStarted  = "started"
+	// a pass that judged eligibility without a published url-success guard,
+	// when every country is exempt and the providers the export keeps out of
+	// online for url success are eligible too
+	selectionUnguarded = "unguarded"
 )
 
 var selectionStages = []string{
@@ -43,6 +49,7 @@ var selectionStages = []string{
 	selectionDue,
 	selectionEligible,
 	selectionStarted,
+	selectionUnguarded,
 }
 
 // The two capabilities of urnetwork_capability_probe_readings_total.
@@ -76,7 +83,7 @@ var selectionTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "urnetwork",
 	Subsystem: "capability_probe",
 	Name:      "selection_total",
-	Help:      "Providers the capability probe's sweep scanned, found due for evidence, found eligible for quality or speed, and started measuring",
+	Help:      "Providers the capability probe's sweep scanned, found due for evidence, found eligible (online, as the score export decides it) and started measuring; stage unguarded counts passes, those that judged eligibility without a published url-success guard, every country exempt",
 }, []string{"stage"})
 
 var providersTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -241,12 +248,15 @@ func ObserveReadinessFailure(step string) {
 	readinessFailuresTotal.WithLabelValues(step).Inc()
 }
 
-// Counts a selection's stages.
+// Counts a selection's stages, once a pass.
 func observeSelection(selected selection, startedCount int) {
 	selectionTotal.WithLabelValues(selectionScanned).Add(float64(selected.scanned))
 	selectionTotal.WithLabelValues(selectionDue).Add(float64(selected.due))
 	selectionTotal.WithLabelValues(selectionEligible).Add(float64(selected.eligible))
 	selectionTotal.WithLabelValues(selectionStarted).Add(float64(startedCount))
+	if selected.unguarded {
+		selectionTotal.WithLabelValues(selectionUnguarded).Inc()
+	}
 }
 
 // Counts one finished measurement under outcome.

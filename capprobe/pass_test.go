@@ -4,6 +4,8 @@ package capprobe
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -14,6 +16,7 @@ import (
 	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
 )
 
 // A pass measures at most concurrency providers at once and starts the rest
@@ -141,6 +144,7 @@ func TestPassMetrics(t *testing.T) {
 				"due":                 testutil.ToFloat64(selectionTotal.WithLabelValues(selectionDue)),
 				"eligible":            testutil.ToFloat64(selectionTotal.WithLabelValues(selectionEligible)),
 				"started":             testutil.ToFloat64(selectionTotal.WithLabelValues(selectionStarted)),
+				"unguarded":           testutil.ToFloat64(selectionTotal.WithLabelValues(selectionUnguarded)),
 				"modern":              testutil.ToFloat64(providersTotal.WithLabelValues(outcomeRecordedModern)),
 				"not post-quantum":    testutil.ToFloat64(providersTotal.WithLabelValues(outcomeRecordedNotPostQuantum)),
 				"sealed post-quantum": testutil.ToFloat64(readingsTotal.WithLabelValues(capabilityE2e, string(e2ePostQuantumSealed))),
@@ -159,7 +163,7 @@ func TestPassMetrics(t *testing.T) {
 		}
 		after := read()
 		for name, delta := range map[string]float64{
-			"measured": 1, "scanned": 4, "due": 3, "eligible": 2, "started": 2,
+			"measured": 1, "scanned": 4, "due": 3, "eligible": 2, "started": 2, "unguarded": 0,
 			"modern": 1, "not post-quantum": 1, "sealed post-quantum": 1, "no responder": 1,
 			"resizable": 1, "fixed": 1, "sweeps": 1, "in flight": 0, "measurements": 2,
 		} {
@@ -170,6 +174,74 @@ func TestPassMetrics(t *testing.T) {
 		connect.AssertEqual(t, testutil.ToFloat64(lastPassTimestampSeconds), float64(time.Now().Unix()))
 		connect.AssertEqual(t, testutil.ToFloat64(lastSweepSeconds), float64(61))
 	})
+}
+
+// Without a published url-success guard every country is exempt, so a pass
+// measures providers the score export keeps out of online for url success
+// (FP2-MODERN.md). A pass that judged any eligibility read without the guard
+// counts once in the selection's unguarded stage and logs one line, however
+// many of its reads lacked it, a selection that fails after such a read
+// included; a pass whose reads all had the guard counts and logs nothing.
+// Each pass here reads twice: its first chunk holds no eligible provider.
+func TestPassCountsAndLogsAnUnguardedSelectionOnce(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		// whether each eligibility read lacks the guard
+		unguardedReads []bool
+		// the second read fails, and the selection with it
+		secondReadFails bool
+		unguarded       int
+	}{
+		{name: "both reads without the guard", unguardedReads: []bool{true, true}, unguarded: 1},
+		{name: "the first read without the guard", unguardedReads: []bool{true, false}, unguarded: 1},
+		{name: "the second read without the guard", unguardedReads: []bool{false, true}, unguarded: 1},
+		{name: "both reads with the guard", unguardedReads: []bool{false, false}, unguarded: 0},
+		{name: "a failed selection after a read without the guard", unguardedReads: []bool{true}, secondReadFails: true, unguarded: 1},
+	} {
+		synctest.Test(t, func(t *testing.T) {
+			store := newFakeStore(200)
+			ids := store.clientIds
+			for _, clientId := range ids[:minEligibilityChunk] {
+				store.ineligible[clientId] = true
+			}
+			fleet := newFakeFleet()
+			for _, clientId := range ids {
+				fleet.providers[clientId] = fakeModernProvider()
+			}
+			runner := newFakeRunner(t, fakeSettings(2, 2, 200, 1), store, fleet)
+			logs := []string{}
+			runner.infof = func(format string, args ...any) {
+				logs = append(logs, fmt.Sprintf(format, args...))
+			}
+			reads := 0
+			runner.filterEligible = func(ctx context.Context, clientIds []server.Id) (model.ProviderCapabilityProbeEligibility, error) {
+				reads += 1
+				if c.secondReadFails && reads == 2 {
+					return model.ProviderCapabilityProbeEligibility{}, errors.New("synthetic eligibility read failure")
+				}
+				eligibility, err := store.filterEligible(ctx, clientIds)
+				eligibility.Unguarded = c.unguardedReads[reads-1]
+				return eligibility, err
+			}
+			unguarded := testutil.ToFloat64(selectionTotal.WithLabelValues(selectionUnguarded))
+			_, result, err := runner.run(t.Context(), Sweep{})
+			if (err != nil) != c.secondReadFails {
+				t.Fatalf("%s: the pass returned %+v, %v", c.name, result, err)
+			}
+			connect.AssertEqual(t, reads, 2)
+			if delta := testutil.ToFloat64(selectionTotal.WithLabelValues(selectionUnguarded)) - unguarded; delta != float64(c.unguarded) {
+				t.Errorf("%s: the unguarded stage moved by %v, want %d", c.name, delta, c.unguarded)
+			}
+			if len(logs) != c.unguarded {
+				t.Fatalf("%s: logs %q, want %d", c.name, logs, c.unguarded)
+			}
+			for _, line := range logs {
+				if !strings.Contains(line, "without a published url-success guard") {
+					t.Errorf("%s: log %q does not say what the pass lacked", c.name, line)
+				}
+			}
+		})
+	}
 }
 
 // The measurement histogram's observation count.

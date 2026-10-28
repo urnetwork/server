@@ -1,10 +1,13 @@
 // The reads the capability probe (server/capprobe) selects its providers
 // with: a bounded page of its sweep over the connected providers, and which
-// of a page's due providers the egress rules admit to Quality or Speed. The
-// probe measures end-to-end post-quantum encryption and resizable transfer
-// windows for the modern provider gate (egress_modern_provider.go) and
-// records what it saw with RecordProviderModernEvidence; it never reads or
-// writes URL evidence, the URL due queue or its quota.
+// of a page's due providers the egress rules keep in Online, as the score
+// export decides it. The probe measures end-to-end post-quantum encryption
+// and resizable transfer windows, the evidence a provider is modern by
+// (egress_modern_provider.go): modern-first priority and modern-only requests
+// read it (FP2-MODERN.md), and so does the modern provider gate while
+// provider.yml switches it on. It records what it saw with
+// RecordProviderModernEvidence; it never reads or writes URL evidence, the
+// URL due queue or its quota.
 package model
 
 import (
@@ -98,40 +101,108 @@ func GetProviderCapabilityProbePage(
 	return candidates
 }
 
-// Of clientIds, in their order, those the egress rules admit to Quality or to
-// Speed before the modern provider gate: the providers whose evidence the gate
-// reads. It is the gate's own population, so a provider the gate takes out
-// for want of evidence stays measured and can return. The native URL-run
-// minimums (egress_native_min_runs.go) come first, as they do for the gate:
-// a provider with one passing URL run is in neither bucket and is first
-// measured after its second run admits it to Speed, so a one-sample fleet
-// batch costs no tunnels. The bulk evidence is read for clientIds alone, as
-// provider status reads it.
-func FilterProviderCapabilityProbeEligible(ctx context.Context, clientIds []server.Id) []server.Id {
-	if len(clientIds) == 0 {
-		return []server.Id{}
-	}
-	return providerCapabilityProbeEligible(
-		newProviderCountFilterForClients(ctx, clientIds),
-		clientIds,
-		egressIndexSettings(),
-		providerEgressTestEnabled(),
-	)
+// Which providers of a cohort the probe measures, and how they were judged.
+type ProviderCapabilityProbeEligibility struct {
+	// in the cohort's order
+	ClientIds []server.Id
+	// no trusted URL-success guard was published (none, or one past its max
+	// age), so every country was exempt from the rule, as provider status
+	// reads it: providers the export keeps out of every bucket for no_success
+	// or low_success were judged eligible too
+	Unguarded bool
 }
 
-// The decision every pass makes, over the filter's evidence. No URL-success
-// guard is consulted: a provider the ratio admits has a success, so that rule
-// never holds for one.
+// Of clientIds, in their order, those the egress rules keep in Online, judged
+// with the score export's Online inputs as provider status judges them: each
+// provider's published country, the country of its location rollup, and the
+// URL-success guard the export last published. Online is the population
+// modern-first priority and modern-only requests draw from (FP2-MODERN.md),
+// Quality and Speed included, so a provider without a URL run, one short of
+// the native URL-run minimums (egress_native_min_runs.go) and one whose
+// failing ratio keeps it Online are measured. A provider the export places in
+// no bucket is not: a hard exclusion, and one the URL-success rule or the
+// Online URL ratio takes out of every bucket (no_success, low_success).
+// Without a trusted guard every country is exempt, so those providers are
+// measured too, and the result says so.
+//
+// The bulk evidence is read for clientIds alone, as provider status reads it.
+// Quality's ARIN facts follow each row's latest slot rather than the
+// published serving epoch, which Online does not read. The guard is read from
+// Redis before any database connection is taken, and each database read takes
+// a connection of its own, none while another is held.
+func FilterProviderCapabilityProbeEligible(ctx context.Context, clientIds []server.Id) ProviderCapabilityProbeEligibility {
+	if len(clientIds) == 0 {
+		return ProviderCapabilityProbeEligibility{ClientIds: []server.Id{}}
+	}
+	onlineSuccessBaseline := getProviderOnlineSuccessBaseline(ctx)
+	clientIdPublishedCountryCodes := getProviderCapabilityProbePublishedCountryCodes(ctx, clientIds)
+	filter := newProviderCountFilterForClients(ctx, clientIds)
+	filter.onlineSuccessBaseline = onlineSuccessBaseline
+	return ProviderCapabilityProbeEligibility{
+		ClientIds: providerCapabilityProbeEligible(
+			filter,
+			clientIdPublishedCountryCodes,
+			clientIds,
+			egressIndexSettings(),
+			providerEgressTestEnabled(),
+		),
+		Unguarded: onlineSuccessBaseline == nil,
+	}
+}
+
+// The published country of each of clientIds with a location rollup row, as
+// the score export reads it: the country code of the rollup's country
+// location, nil when that location is unknown. A provider without a row is
+// absent. Read at most a sweep page of providers a query, the bound of the
+// page read, whatever the cohort.
+func getProviderCapabilityProbePublishedCountryCodes(ctx context.Context, clientIds []server.Id) map[server.Id]*string {
+	clientIdPublishedCountryCodes := make(map[server.Id]*string, len(clientIds))
+	server.Db(ctx, func(conn server.PgConn) {
+		for start := 0; start < len(clientIds); start += ProviderCapabilityProbeMaxPageSize {
+			result, err := conn.Query(
+				ctx,
+				`
+				SELECT
+					network_client_location_reliability.client_id,
+					country_location.country_code
+				FROM network_client_location_reliability
+				LEFT JOIN location AS country_location ON
+					country_location.location_id = network_client_location_reliability.country_location_id
+				WHERE network_client_location_reliability.client_id = ANY($1)
+				`,
+				clientIds[start:min(start+ProviderCapabilityProbeMaxPageSize, len(clientIds))],
+			)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					var clientId server.Id
+					var publishedCountryCode *string
+					server.Raise(result.Scan(&clientId, &publishedCountryCode))
+					clientIdPublishedCountryCodes[clientId] = publishedCountryCode
+				}
+			})
+		}
+	})
+	return clientIdPublishedCountryCodes
+}
+
+// The decision every pass makes, over the filter's evidence and its guard,
+// with each provider's published country (absent or nil for none): whether
+// the provider is in the Online bucket, whatever its native buckets and the
+// modern provider gate.
 func providerCapabilityProbeEligible(
 	filter providerCountFilter,
+	clientIdPublishedCountryCodes map[server.Id]*string,
 	clientIds []server.Id,
 	settings *EgressIndexSettings,
 	egressTestEnabled bool,
 ) []server.Id {
 	eligibleClientIds := []server.Id{}
 	for _, clientId := range clientIds {
-		decision := decideProviderEgress(filter.egressFacts(clientId, nil, nil, nil, settings), egressTestEnabled)
-		if decision.qualityBeforeModernGate || decision.speedBeforeModernGate {
+		decision := decideProviderEgress(
+			filter.egressFacts(clientId, clientIdPublishedCountryCodes[clientId], nil, nil, settings),
+			egressTestEnabled,
+		)
+		if decision.online {
 			eligibleClientIds = append(eligibleClientIds, clientId)
 		}
 	}

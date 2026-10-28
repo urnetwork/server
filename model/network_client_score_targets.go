@@ -192,6 +192,9 @@ func newClientScoreTargetKeys(forceMinimum bool, rankMode RankMode, target clien
 			facetSample: func(callerId server.Id, facet ipFamilyFacet, sampleIndex int) string {
 				return clientScoreLocationGroupFacetSampleKey(forceMinimum, rankMode, target.id, callerId, facet, sampleIndex)
 			},
+			modern: func(callerId server.Id) string {
+				return clientScoreLocationGroupModernKey(forceMinimum, rankMode, target.id, callerId)
+			},
 		}
 	}
 	return clientScoreTargetKeys{
@@ -213,6 +216,9 @@ func newClientScoreTargetKeys(forceMinimum bool, rankMode RankMode, target clien
 		facetSample: func(callerId server.Id, facet ipFamilyFacet, sampleIndex int) string {
 			return clientScoreLocationFacetSampleKey(forceMinimum, rankMode, target.id, callerId, facet, sampleIndex)
 		},
+		modern: func(callerId server.Id) string {
+			return clientScoreLocationModernKey(forceMinimum, rankMode, target.id, callerId)
+		},
 	}
 }
 
@@ -222,6 +228,46 @@ func newClientScoreTargetKeys(forceMinimum bool, rankMode RankMode, target clien
 // provider location. The returned bytes move directly into the 512-item/8MiB
 // streaming writer and are cleared after the synchronous Exec.
 func splitClientScoreSamples(clientScores []*ClientScore) (countsBytes []byte, counts []int, encodeSample func(int) []byte) {
+	counts, encodeSample = pageClientScoreSamples(clientScores)
+	countsBytes = encodeClientScoreGobValue(updateClientScoresPhaseMetrics, counts)
+	return
+}
+
+// Splits one facet's scores modern first (network_client_score_modern.go):
+// the modern providers shuffled and paged, then the others, so every page
+// holds one class and the leading modernPageCount pages are the modern ones.
+// The counts document lists the page sizes in that order, in the format
+// readers before the partition read.
+func splitClientScoreSamplesModernFirst(clientScores []*ClientScore) clientScoreFacetPayload {
+	modernClientScores := make([]*ClientScore, 0, len(clientScores))
+	otherClientScores := make([]*ClientScore, 0, len(clientScores))
+	for _, clientScore := range clientScores {
+		if clientScore.Modern {
+			modernClientScores = append(modernClientScores, clientScore)
+		} else {
+			otherClientScores = append(otherClientScores, clientScore)
+		}
+	}
+	modernCounts, encodeModernSample := pageClientScoreSamples(modernClientScores)
+	otherCounts, encodeOtherSample := pageClientScoreSamples(otherClientScores)
+	counts := append(modernCounts, otherCounts...)
+	modernPageCount := len(modernCounts)
+	return clientScoreFacetPayload{
+		countsBytes: encodeClientScoreGobValue(updateClientScoresPhaseMetrics, counts),
+		counts:      counts,
+		encodeSample: func(i int) []byte {
+			if i < modernPageCount {
+				return encodeModernSample(i)
+			}
+			return encodeOtherSample(i - modernPageCount)
+		},
+		modernPageCount: modernPageCount,
+	}
+}
+
+// Shuffles one list of scores and buckets it into balanced samples of at most
+// ClientScoreSampleCount, encoding each on demand.
+func pageClientScoreSamples(clientScores []*ClientScore) (counts []int, encodeSample func(int) []byte) {
 	mathrand.Shuffle(len(clientScores), func(i int, j int) {
 		clientScores[i], clientScores[j] = clientScores[j], clientScores[i]
 	})
@@ -243,8 +289,6 @@ func splitClientScoreSamples(clientScores []*ClientScore) (countsBytes []byte, c
 		i1 := min((i+1)*clientsPerSample, len(clientScores))
 		return encodeClientScoreGobValue(updateClientScoresPhaseMetrics, clientScores[i0:i1])
 	}
-
-	countsBytes = encodeClientScoreGobValue(updateClientScoresPhaseMetrics, counts)
 	return
 }
 
@@ -296,19 +340,17 @@ func exportClientScores(forceMinimum bool, rankMode RankMode, s map[server.Id]*C
 	updateClientScoresPhaseMetrics.addWork(updateClientScoresPhaseTargetMap, len(s), 0)
 	mapSpan.finish()
 	payload.countsBytes, payload.counts, payload.encodeSample = splitClientScoreSamples(clientScores)
+	// the facets, native and union, are partitioned modern first; the
+	// un-faceted union is read only from exporters that predate the facets
 	if !forceMinimum {
 		payload.nativeFacets = map[ipFamilyFacet]clientScoreFacetPayload{}
 		for _, facet := range ipFamilyFacets {
-			nativePayload := clientScoreFacetPayload{}
-			nativePayload.countsBytes, nativePayload.counts, nativePayload.encodeSample = splitClientScoreSamples(nativeFacetClientScores[facet])
-			payload.nativeFacets[facet] = nativePayload
+			payload.nativeFacets[facet] = splitClientScoreSamplesModernFirst(nativeFacetClientScores[facet])
 		}
 	}
 	// every facet, an empty one included: see the key layout comment
 	for _, facet := range ipFamilyFacets {
-		facetPayload := clientScoreFacetPayload{}
-		facetPayload.countsBytes, facetPayload.counts, facetPayload.encodeSample = splitClientScoreSamples(facetClientScores[facet])
-		payload.facets[facet] = facetPayload
+		payload.facets[facet] = splitClientScoreSamplesModernFirst(facetClientScores[facet])
 	}
 
 	payload.filterBytes = encodeClientScoreGobValue(updateClientScoresPhaseMetrics, filter)

@@ -74,3 +74,24 @@ The November 11 config deadline remains independent of these corrections. This r
 ## Review method
 
 Three parallel code reviews examined selection/index publication, probe policy, capability storage, named-provider handling, generator behavior and rollout. Findings above are based on source inspection and explicit counterexamples. No FP2 implementation changes or regression tests were run for this design review. The proposed regressions are implementation acceptance criteria, not claimed passing results.
+
+## Implementation follow-up — 2026-10-28
+
+The implementation merged at server `d8e12cc38c9ffa0ad896237258cc9f06d7aa79a7` and connect `7ec0551e702fb33655845347a2c4af6b27cceebd` addresses the four design findings above: modern phases reach the page readers and live-validation quota, probe eligibility loads the Online policy inputs, named classification checks actual provider keys, and rollout waits for a completed export after old writers drain. The original review remains pinned to its proposal revision.
+
+The integration review found an additional **[P2] incomplete union publication can hide modern providers**. The writer replaced mutable counts and pages before replacing modern metadata. Replacing 400 non-modern providers with 400 modern providers leaves the same `[200, 200]` counts. If publication stops before metadata, the old zero-modern partition still passes its counts checksum and a modern-only request reads no pages. A second failure occurs when a page checksum does detect a mixed publication: modern-only cursors discarded the other page references, so they could not recover newly modern rows beyond the old boundary. A missing expected modern page also failed to trigger recovery.
+
+The corrective change fences each union publication with a unique dirty token before any payload mutation. Every mutation and the final commit check ownership; payload writes must succeed before commit. The dirty token retains the previous payload's longer expiration, and completed metadata has a unique generation so retries cannot reclaim ownership through identical content. Modern-only cursors retain partitioned page references for recovery, activate them on a missing or changed expected modern page, and preserve both the finite read allowance and per-provider filtering. Old/absent partitions retain their existing behavior. The updated [publication design](FP2-MODERN.md#the-modern-first-page-partition) describes the protocol.
+
+**Regression evidence.** Go overlays ran the new regression tests against the pre-fix implementation without changing either main checkout. Both writer tests failed as expected: interrupted equal-count publication returned 0 of 400 modern rows, and a superseded writer completed successfully. Both public `FindProviders2` reader tests also failed as expected: changed and missing expected-modern pages hid the only modern provider in the former non-modern page.
+
+**Validation.** All runs below used `go test -race -count=1`; Redis/database runs used the shared network-suite gate and `test-env.sh`.
+
+| Scope | Result |
+| --- | --- |
+| Writer/fence regressions, existing modern partition/priority/filter tests, and export-expiry controls | 31 passed, 394.158 s |
+| Reader recovery regressions and adjacent partition/cursor controls | 6 passed, 33.658 s |
+| Stream retries, byte budgets, fan-out compatibility, and native publication boundaries | 13 passed, 3.107 s |
+| Final writer/fence tests after removing unused schema migrations and strengthening the independent byte-budget assertion | 8 passed, 16.541 s |
+
+Formatting and `git diff --check` passed. These are focused regression suites; the full repository suite was not rerun for this correction.

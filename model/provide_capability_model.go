@@ -50,53 +50,59 @@ func readProvidePostQuantumEncryption(ctx context.Context, clientIds []server.Id
 		return capableClientIds, nil
 	}
 	var returnErr error
-	server.Db(ctx, func(conn server.PgConn) {
-		for start := 0; start < len(uniqueClientIds); start += chunkSize {
-			chunkClientIds := uniqueClientIds[start:min(start+chunkSize, len(uniqueClientIds))]
-			chunkClientIdSet := make(map[server.Id]bool, len(chunkClientIds))
-			for _, clientId := range chunkClientIds {
-				chunkClientIdSet[clientId] = true
-			}
-			if err := ctx.Err(); err != nil {
-				returnErr = err
-				return
-			}
-			rows, err := conn.Query(
-				ctx,
-				`
+	// a connection that cannot be acquired raises; it is the caller's error
+	// all the same
+	server.HandleError(func() {
+		server.Db(ctx, func(conn server.PgConn) {
+			for start := 0; start < len(uniqueClientIds); start += chunkSize {
+				chunkClientIds := uniqueClientIds[start:min(start+chunkSize, len(uniqueClientIds))]
+				chunkClientIdSet := make(map[server.Id]bool, len(chunkClientIds))
+				for _, clientId := range chunkClientIds {
+					chunkClientIdSet[clientId] = true
+				}
+				if err := ctx.Err(); err != nil {
+					returnErr = err
+					return
+				}
+				rows, err := conn.Query(
+					ctx,
+					`
 				SELECT client_id
 				FROM provide_capability
 				WHERE
 					client_id = ANY($1) AND
 					post_quantum_encryption
 				`,
-				chunkClientIds,
-			)
-			if err != nil {
-				returnErr = err
-				return
-			}
-			func() {
-				defer rows.Close()
-				for rows.Next() {
-					var clientId server.Id
-					if err := rows.Scan(&clientId); err != nil {
-						returnErr = err
-						return
-					}
-					if !chunkClientIdSet[clientId] || capableClientIds[clientId] {
-						returnErr = fmt.Errorf("invalid provide capability result population")
-						return
-					}
-					capableClientIds[clientId] = true
+					chunkClientIds,
+				)
+				if err != nil {
+					returnErr = err
+					return
 				}
-				returnErr = rows.Err()
-			}()
-			if returnErr != nil {
-				return
+				func() {
+					defer rows.Close()
+					for rows.Next() {
+						var clientId server.Id
+						if err := rows.Scan(&clientId); err != nil {
+							returnErr = err
+							return
+						}
+						if !chunkClientIdSet[clientId] || capableClientIds[clientId] {
+							returnErr = fmt.Errorf("invalid provide capability result population")
+							return
+						}
+						capableClientIds[clientId] = true
+					}
+					returnErr = rows.Err()
+				}()
+				if returnErr != nil {
+					return
+				}
 			}
-		}
-	}, server.OptReadOnly(), server.OptNoRetry())
+		}, server.OptReadOnly(), server.OptNoRetry())
+	}, func(err error) {
+		returnErr = err
+	})
 	if returnErr != nil {
 		return nil, returnErr
 	}

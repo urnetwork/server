@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/connect"
+	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
@@ -211,8 +212,8 @@ func (self *fakeFleet) openTunnels() int {
 
 // A synthetic population and evidence store standing in for the model: the
 // connected providers in client id order, which are public top-level ones,
-// which the egress rules admit, and the evidence recorded so far. Safe for
-// concurrent use.
+// which the egress rules keep in online, and the evidence recorded so far.
+// Safe for concurrent use.
 type fakeStore struct {
 	stateLock   sync.Mutex
 	clientIds   []server.Id
@@ -274,7 +275,7 @@ func (self *fakeStore) readPage(ctx context.Context, afterClientId server.Id, pa
 }
 
 // Implements passRunner.filterEligible.
-func (self *fakeStore) filterEligible(ctx context.Context, clientIds []server.Id) ([]server.Id, error) {
+func (self *fakeStore) filterEligible(ctx context.Context, clientIds []server.Id) (model.ProviderCapabilityProbeEligibility, error) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	self.filterCalls = append(self.filterCalls, slices.Clone(clientIds))
@@ -284,7 +285,7 @@ func (self *fakeStore) filterEligible(ctx context.Context, clientIds []server.Id
 			eligible = append(eligible, clientId)
 		}
 	}
-	return eligible, nil
+	return model.ProviderCapabilityProbeEligibility{ClientIds: eligible}, nil
 }
 
 // Implements passRunner.record, refusing what the model refuses and holding
@@ -345,5 +346,6 @@ func newFakeRunner(t *testing.T, settings Settings, store *fakeStore, fleet *fak
 		record:         store.record,
 		now:            time.Now,
 		after:          time.After,
+		infof:          glog.Infof,
 	}
 }

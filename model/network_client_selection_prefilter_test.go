@@ -181,7 +181,7 @@ func TestFindProviders2PrefilterPreservesRequestFilterBoundaries(t *testing.T) {
 	observation := &findProviders2SelectionObservation{}
 	filtered := maps.Clone(scores)
 	filter.apply(filtered, observation)
-	if len(filtered) != 2 || filtered[public.ClientId] == nil || filtered[private.ClientId] == nil || observation.dropped != [4]int{0, 2, 1, 1} || observation.explicitSources != 3 {
+	if len(filtered) != 2 || filtered[public.ClientId] == nil || filtered[private.ClientId] == nil || observation.dropped != [5]int{0, 2, 1, 1, 0} || observation.explicitSources != 3 {
 		t.Fatal("request prefilter changed eligibility or existing request-rejection precedence")
 	}
 }

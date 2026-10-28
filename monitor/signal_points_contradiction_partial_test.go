@@ -144,8 +144,11 @@ func TestPointsPartialSnapshotContradictionCompleteSourceControls(t *testing.T) 
 		{snapshot: syntheticPointsSnapshot(60, 12, true, 10, 0), source: syntheticPointsOperatorSource(12, 60, 0, 0, 0)},
 		{snapshot: syntheticPointsSnapshot(60, 0, false, 10, 0), source: syntheticPointsOperatorSource(0, 0, 0, 0, 0)},
 		{snapshot: syntheticPointsSnapshot(60, 0, false, 10, 0), source: syntheticPointsOperatorSource(12, 60, 0, 1, 30), class: "points-epoch-metrics-unavailable", severity: SeverityWarn},
-		{snapshot: syntheticPointsSnapshot(60, 12, true, 10, 1), source: syntheticPointsOperatorSource(12, 60, 0, 1, 30), class: "points-block-rollup-incomplete", severity: SeverityWarn},
-		{snapshot: syntheticPointsSnapshot(60, 0, false, 10, 0), source: syntheticPointsOperatorSource(12, 60, 0, 0, 0), class: "points-epoch-rebuild-pending", severity: SeverityWarn},
+		// a pending rollup publishes payout weeks: the current snapshot is valid
+		{snapshot: syntheticPointsSnapshot(60, 12, true, 10, 1), source: syntheticPointsOperatorSource(12, 60, 0, 1, 30)},
+		{snapshot: syntheticPointsSnapshot(60, 12, true, 10, 1), source: syntheticPointsOperatorSource(12, 60, 1, 0, 0), class: "points-payment-link-missing", severity: SeverityWarn},
+		{snapshot: syntheticPointsSnapshot(60, 0, false, 10, 0), source: syntheticPointsOperatorSource(12, 60, 0, 0, 0), class: "points-epoch-metrics-unavailable", severity: SeverityWarn},
+		{snapshot: syntheticPointsSnapshot(60, 11, true, 10, 0), source: syntheticPointsOperatorSource(12, 60, 0, 1, 30), class: "points-epoch-rebuild-pending", severity: SeverityWarn},
 		{snapshot: syntheticPointsSnapshot(60, 13, true, 10, 0), source: syntheticPointsOperatorSource(12, 60, 0, 0, 0), class: "points-epoch-snapshot-drift", severity: SeverityPage},
 	} {
 		settings, stages := pointsPartialSettings(t, control.snapshot, []Row{{"true"}}, nil, control.source, nil, nil)
