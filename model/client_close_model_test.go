@@ -65,11 +65,11 @@ func TestClientCloseRequestsAreTakenOnce(t *testing.T) {
 			t.Fatalf("close requests ttl %s, want (0, %s]", ttl, ClientCloseTtl)
 		}
 
-		requests := TakeClientCloseRequests(ctx, clientId, ClientCloseTakeLimit)
+		requests := TakeClientCloseRequests(ctx, clientId, 1024)
 		if !sameIds(requests.ContractIds, contractIds) || !sameIds(requests.PeerIds, []server.Id{peerId}) {
 			t.Fatalf("took %d contracts and %d peers, want 2 and 1", len(requests.ContractIds), len(requests.PeerIds))
 		}
-		if again := TakeClientCloseRequests(ctx, clientId, ClientCloseTakeLimit); !again.Empty() {
+		if again := TakeClientCloseRequests(ctx, clientId, 1024); !again.Empty() {
 			t.Fatalf("a second take found %d contracts and %d peers", len(again.ContractIds), len(again.PeerIds))
 		}
 
@@ -78,7 +78,7 @@ func TestClientCloseRequestsAreTakenOnce(t *testing.T) {
 		if first := TakeClientCloseRequests(ctx, clientId, 1); len(first.ContractIds) != 1 {
 			t.Fatalf("a take of 1 took %d", len(first.ContractIds))
 		}
-		if rest := TakeClientCloseRequests(ctx, clientId, ClientCloseTakeLimit); len(rest.ContractIds) != 1 {
+		if rest := TakeClientCloseRequests(ctx, clientId, 1024); len(rest.ContractIds) != 1 {
 			t.Fatalf("the rest was %d", len(rest.ContractIds))
 		}
 	})
@@ -106,7 +106,7 @@ func TestSourceFinalAsksDestinationToClose(t *testing.T) {
 			}
 		}
 		takeDestination := func() *ClientCloseRequests {
-			return TakeClientCloseRequests(ctx, f.destinationId, ClientCloseTakeLimit)
+			return TakeClientCloseRequests(ctx, f.destinationId, 1024)
 		}
 		settledDestination := func(contractId server.Id) (final bool, used ByteCount, settled bool) {
 			server.Db(ctx, func(conn server.PgConn) {
@@ -128,7 +128,7 @@ func TestSourceFinalAsksDestinationToClose(t *testing.T) {
 		if requests := takeDestination(); !requests.Empty() {
 			t.Fatal("a settled contract asked the receiver to close")
 		}
-		if requests := TakeClientCloseRequests(ctx, f.sourceId, ClientCloseTakeLimit); !requests.Empty() {
+		if requests := TakeClientCloseRequests(ctx, f.sourceId, 1024); !requests.Empty() {
 			t.Fatal("the sender was asked to close its own final")
 		}
 
@@ -223,7 +223,7 @@ func TestRemoveNetworkClientAsksCounterpartiesToClose(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		TakeClientCloseRequests(ctx, f.destinationId, ClientCloseTakeLimit)
+		TakeClientCloseRequests(ctx, f.destinationId, 1024)
 
 		if IsClientRemoved(ctx, f.sourceId) {
 			t.Fatal("an active client is flagged removed")
@@ -247,7 +247,7 @@ func TestRemoveNetworkClientAsksCounterpartiesToClose(t *testing.T) {
 		var requests *ClientCloseRequests
 		deadline := time.Now().Add(10 * time.Second)
 		for {
-			requests = TakeClientCloseRequests(ctx, f.destinationId, ClientCloseTakeLimit)
+			requests = TakeClientCloseRequests(ctx, f.destinationId, 1024)
 			if !requests.Empty() || time.Now().After(deadline) {
 				break
 			}

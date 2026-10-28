@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -13,9 +14,10 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-// Withhold the first native ACK until the same serialized report reaches the
-// real controller twice. Legacy lower bounds and exact identities must both
-// settle; only legacy independent equal work accepts conservative undercounting.
+// Keep ACKs unavailable through three completed controller deliveries, so a
+// legal extra retry cannot masquerade as an accounting failure. Legacy lower
+// bounds and exact identities must both settle; only legacy independent equal
+// work accepts conservative undercounting.
 func TestNativeCheckpointReportIdentityThroughController(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -57,7 +59,7 @@ func TestNativeCheckpointReportIdentityThroughController(t *testing.T) {
 				receiver := connect.NewClient(nativeCtx, connect.ControlId, connect.NewNoContractClientOob(), settings)
 				sender.ContractManager().AddNoContractPeer(connect.ControlId)
 				receiver.ContractManager().AddNoContractPeer(sender.ClientId())
-				defer func() {
+				stopNative := sync.OnceFunc(func() {
 					nativeCancel()
 					join, stop := context.WithTimeout(context.Background(), 3*time.Second)
 					defer stop()
@@ -67,7 +69,8 @@ func TestNativeCheckpointReportIdentityThroughController(t *testing.T) {
 					if err := receiver.CloseAndWait(join); err != nil {
 						t.Error("native receiver did not join")
 					}
-				}()
+				})
+				defer stopNative()
 				sendRoute, ackRoute := make(chan []byte), make(chan []byte)
 				sender.RouteManager().UpdateTransport(connect.NewSendGatewayTransport(), []connect.Route{sendRoute})
 				receiver.RouteManager().UpdateTransport(connect.NewReceiveGatewayTransport(), []connect.Route{sendRoute})
@@ -78,6 +81,17 @@ func TestNativeCheckpointReportIdentityThroughController(t *testing.T) {
 				}
 				var committed atomic.Int32
 				callbackErrors := make(chan string, 1)
+				minimumDeliveries := int32(2)
+				if loseAck {
+					minimumDeliveries = 3
+				}
+				committedEnough := make(chan struct{})
+				finishRequiredDeliveries := sync.OnceFunc(func() {
+					if loseAck {
+						receiver.RouteManager().UpdateTransport(ackTransport, []connect.Route{ackRoute})
+					}
+					close(committedEnough)
+				})
 				receiver.AddReceiveCallback(func(path connect.TransferPath, frames []*protocol.Frame, _ connect.Peer) {
 					// The synthetic transport has no authenticated key-registration
 					// setup. Retain only the close frames under investigation;
@@ -100,11 +114,10 @@ func TestNativeCheckpointReportIdentityThroughController(t *testing.T) {
 						}
 						return
 					}
-					n := committed.Add(1)
-					if loseAck && n == 2 {
-						// Restore only after the second real SQL commit; the
-						// original operation cannot receive its missing ACK.
-						receiver.RouteManager().UpdateTransport(ackTransport, []connect.Route{ackRoute})
+					// A control callback can batch multiple report deliveries.
+					// Restore ACKs only after the required controller commits.
+					if n := committed.Add(int32(len(closes))); minimumDeliveries <= n {
+						finishRequiredDeliveries()
 					}
 				})
 				sendCheckpoint := func() {
@@ -134,8 +147,23 @@ func TestNativeCheckpointReportIdentityThroughController(t *testing.T) {
 					// operations. Legacy compatibility deliberately undercounts.
 					sendCheckpoint()
 				}
-				if committed.Load() != 2 {
-					t.Fatal("control did not isolate exactly two committed deliveries")
+				select {
+				case <-committedEnough:
+				case cause := <-callbackErrors:
+					t.Fatal("native callback failed its actual controller transaction", cause)
+				case <-ctx.Done():
+					t.Fatalf("controller commit barrier timed out: committed=%d minimum=%d lose_ack=%t identity=%t", committed.Load(), minimumDeliveries, loseAck, identity)
+				}
+				// ACK restoration can race already-admitted retries. Join those
+				// callbacks before final reports and exact financial assertions.
+				stopNative()
+				if count := committed.Load(); count < minimumDeliveries {
+					t.Fatalf("control omitted required committed deliveries: committed=%d minimum=%d lose_ack=%t identity=%t", count, minimumDeliveries, loseAck, identity)
+				}
+				select {
+				case cause := <-callbackErrors:
+					t.Fatal("native callback failed before joining", cause)
+				default:
 				}
 				var final uint64
 				if loseAck {
