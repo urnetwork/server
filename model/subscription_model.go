@@ -3068,6 +3068,7 @@ func applyLockedContractCloseReportInTx(ctx context.Context, tx server.PgTx,
 	// The existing contract row lock serializes the receipt with its party
 	// increment. No shared payer/network row is acquired here.
 	var senderFinal bool
+	var receiverFinal bool
 	result, err := tx.Query(ctx, `WITH prior AS MATERIALIZED (
 		SELECT used_transfer_byte_count,legacy_checkpoint_byte_count,identified_checkpoint_byte_count
 		FROM contract_close WHERE contract_id=$1 AND party=$2
@@ -3105,18 +3106,25 @@ func applyLockedContractCloseReportInTx(ctx context.Context, tx server.PgTx,
 		INSERT INTO contract_close_report (contract_id,party,report_id,used_transfer_byte_count,checkpoint)
 		SELECT $1,$2,$7::uuid,$3::bigint,$5 FROM changed WHERE $7::uuid IS NOT NULL
 	) SELECT changed.used_transfer_byte_count - COALESCE((SELECT used_transfer_byte_count FROM prior),0),
-		EXISTS(SELECT 1 FROM contract_close WHERE contract_id=$1 AND party=$8 AND NOT checkpoint)
+		EXISTS(SELECT 1 FROM contract_close WHERE contract_id=$1 AND party=$8 AND NOT checkpoint),
+		EXISTS(SELECT 1 FROM contract_close WHERE contract_id=$1 AND party=$9 AND NOT checkpoint)
 	FROM changed`,
-		contractId, party, usedTransferByteCount, server.NowUtc(), checkpoint, reportId == nil, reportId, ContractPartySource)
+		contractId, party, usedTransferByteCount, server.NowUtc(), checkpoint, reportId == nil, reportId, ContractPartySource, ContractPartyDestination)
 	server.WithPgResult(result, err, func() {
 		if result.Next() {
-			server.Raise(result.Scan(&addedByteCount, &senderFinal))
+			server.Raise(result.Scan(&addedByteCount, &senderFinal, &receiverFinal))
 			applied = true
 		}
 	})
 	// The read predates this statement's own write, which reaches the
 	// sender's row only for the sender's own report, and that never follows.
 	followsSenderFinal = applied && party == ContractPartyDestination && senderFinal
+	// The receiver's exit only checkpoints its current contract, so ask it for
+	// its final now that the sender is done (CLIENTCLOSE1.md section 3). A
+	// retried final is not applied and asks nothing.
+	if applied && party == ContractPartySource && !checkpoint && !receiverFinal {
+		addClientCloseRelayPostCommit(ctx, tx, destinationId, contractId)
+	}
 	// A checkpoint permits resuming the same contract. A final party close
 	// revokes transport permission even when financial settlement is deferred.
 	if !checkpoint {
