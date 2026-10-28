@@ -96,6 +96,12 @@ func TestRequireModernProviderClassifiesNamedProvidersByTheirKeys(t *testing.T) 
 		if err == nil {
 			t.Fatal("a canceled named read did not fail")
 		}
+		// the declaration read beside it returns the same failure rather than
+		// raising it
+		_, err = readProvidePostQuantumEncryption(canceledCtx, []server.Id{measured})
+		if err == nil {
+			t.Fatal("a canceled declaration read did not fail")
+		}
 	})
 }
 

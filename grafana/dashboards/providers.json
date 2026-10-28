@@ -2063,7 +2063,7 @@
         "y": 63
       },
       "panels": [],
-      "description": "The three buckets FindProviders2 answers from and the providers each egress rule leaves out (connect/GEOMAP.md \u00a710). Membership here is the rules' alone -- the hard exclusions, the country gate and the 90 % rule -- before the reliability and performance minimums of the score cache, over the connected valid public providers the online gauge counts."
+      "description": "The three buckets FindProviders2 answers from and the providers each egress rule leaves out (connect/GEOMAP.md §10). Membership here is the rules' alone -- the hard exclusions, the country gate and the 90 % rule -- before the reliability and performance minimums of the score cache, over the connected valid public providers the online gauge counts."
     },
     {
       "id": 34,
@@ -2387,7 +2387,7 @@
           "legendFormat": "blackhole"
         }
       ],
-      "description": "Providers with a current blackhole verdict: absent from every bucket, every count, force_minimum and an explicit client id. The verdict lifts by itself when the next check passes. A wave here is the checker before it is the fleet (GEOMAP \u00a711.2)."
+      "description": "Providers with a current blackhole verdict: absent from every bucket, every count, force_minimum and an explicit client id. The verdict lifts by itself when the next check passes. A wave here is the checker before it is the fleet (GEOMAP §11.2)."
     },
     {
       "id": 40,
@@ -3362,7 +3362,7 @@
           "legendFormat": "{{rank_mode}}"
         }
       ],
-      "description": "Of every provider non-forced location answers handed out, the share borrowed from outside the requested bucket. Backfill makes every answer look full, so this is the operator's view of how empty the bucket behind it is; above half for an hour is the backfill-sustained finding of SIGNALS.md \u00a72.19b."
+      "description": "Of every provider non-forced location answers handed out, the share borrowed from outside the requested bucket. Backfill makes every answer look full, so this is the operator's view of how empty the bucket behind it is; above half for an hour is the backfill-sustained finding of SIGNALS.md §2.19b."
     },
     {
       "id": 76,
@@ -3820,7 +3820,7 @@
           "legendFormat": "on"
         }
       ],
-      "description": "Whether the modern provider gate holds quality and speed to modern providers under the taskworkers' own provider.yml, as their stats collector last read it: on only with quality_speed_requires_modern_provider: true, and off with it false or absent, since modern-first priority within each band replaced the gate (FP2-MODERN.md). The largest of the taskworkers, so a config rollout reads on as soon as one has flipped; the monitor's readiness signal (SIGNALS.md \u00a72.29) checks that they agree."
+      "description": "Whether the modern provider gate holds quality and speed to modern providers under the taskworkers' own provider.yml, as their stats collector last read it: on only with quality_speed_requires_modern_provider: true, and off with it false or absent, since modern-first priority within each band replaced the gate (FP2-MODERN.md). The largest of the taskworkers, so a config rollout reads on as soon as one has flipped; the monitor's readiness signal (SIGNALS.md §2.29) checks that they agree."
     },
     {
       "id": 77,
@@ -4031,7 +4031,7 @@
         "y": 129
       },
       "panels": [],
-      "description": "The prober's dark verdicts and the destination pool its health runs load (the geomap design, \u00a711.3 and \u00a711.4). The fleet shares are snapshots each taskworker takes for itself, so they are read from the one with the freshest snapshot; the pool gauges are read from the taskworker that ran the latest refresh; the prober's and the refresh's event counters are summed across the taskworkers on the egress probes dashboard."
+      "description": "The prober's dark verdicts and the destination pool its health runs load (the geomap design, §11.3 and §11.4). The fleet shares are snapshots each taskworker takes for itself, so they are read from the one with the freshest snapshot; the pool gauges are read from the taskworker that ran the latest refresh; the prober's and the refresh's event counters are summed across the taskworkers on the egress probes dashboard."
     },
     {
       "id": 56,
@@ -4085,7 +4085,7 @@
           "legendFormat": "dark"
         }
       ],
-      "description": "The share of the providers with a current measured blackhole check that are dark. Dark is a verdict over consecutive failed checks -- three in a row spanning at least 30 minutes by default (geomap \u00a711.3) -- never a single failed check, and one passing check clears it; only a tls authentication failure is dark at once. Read from the one taskworker with the freshest fleet snapshot."
+      "description": "The share of the providers with a current measured blackhole check that are dark. Dark is a verdict over consecutive failed checks -- three in a row spanning at least 30 minutes by default (geomap §11.3) -- never a single failed check, and one passing check clears it; only a tls authentication failure is dark at once. Read from the one taskworker with the freshest fleet snapshot."
     },
     {
       "id": 57,
@@ -4158,7 +4158,7 @@
           "legendFormat": "{{class}}"
         }
       ],
-      "description": "The failed share of the scored loads, after retries, of the health runs measured within the prober-fault window (an hour by default), per class and over all of them. Above the 20 % prober-fault line across every class for an hour is a fault on the prober -- its request shape or its capacity -- not on the sites (monitor signal \u00a72.19b), and the pool refresh skips its run while the share of the loads that reached their provider is over the line, or while fewer than a fifth of the recent loads reached their provider at all (this panel counts every failure, a provider that was never reached included). Read from the one taskworker with the freshest fleet snapshot."
+      "description": "The failed share of the scored loads, after retries, of the health runs measured within the prober-fault window (an hour by default), per class and over all of them. Above the 20 % prober-fault line across every class for an hour is a fault on the prober -- its request shape or its capacity -- not on the sites (monitor signal §2.19b), and the pool refresh skips its run while the share of the loads that reached their provider is over the line, or while fewer than a fifth of the recent loads reached their provider at all (this panel counts every failure, a provider that was never reached included). Read from the one taskworker with the freshest fleet snapshot."
     },
     {
       "id": 63,
@@ -4288,7 +4288,7 @@
           "legendFormat": "since the last refresh"
         }
       ],
-      "description": "Time since a taskworker last completed the daily pool refresh, refreshed or skipped, so this saw-tooths between zero and a day. Amber past 25 h, a run is late; red past two days, the refresh is not running (monitor signal \u00a72.19b refresh not running): its task is missing, parked or failing. The time is kept by the process that ran the refresh, so right after every taskworker restarts this reads as decades until the next daily run."
+      "description": "Time since a taskworker last completed the daily pool refresh, refreshed or skipped, so this saw-tooths between zero and a day. Amber past 25 h, a run is late; red past two days, the refresh is not running (monitor signal §2.19b refresh not running): its task is missing, parked or failing. The time is kept by the process that ran the refresh, so right after every taskworker restarts this reads as decades until the next daily run."
     },
     {
       "id": 59,
@@ -4354,7 +4354,7 @@
           "range": false
         }
       ],
-      "description": "The latest refresh's failure share of each active site: the share of the runs on healthy exits, those that passed nine in ten of the other sites, in which the site failed every attempt (over every exit the probe reached when too few qualified; a run that never reached its provider is in no site's share). Read from the taskworker that ran the latest refresh; a skipped refresh judges nothing, so after one this shows that taskworker's last judged shares, or none. A site over the 50 % retire line across at least 200 judged runs is retired by the next refresh, at most one per class per run; one that stays over it for a day is the pool-needs-refresh finding of monitor signal \u00a72.19b."
+      "description": "The latest refresh's failure share of each active site: the share of the runs on healthy exits, those that passed nine in ten of the other sites, in which the site failed every attempt (over every exit the probe reached when too few qualified; a run that never reached its provider is in no site's share). Read from the taskworker that ran the latest refresh; a skipped refresh judges nothing, so after one this shows that taskworker's last judged shares, or none. A site over the 50 % retire line across at least 200 judged runs is retired by the next refresh, at most one per class per run; one that stays over it for a day is the pool-needs-refresh finding of monitor signal §2.19b."
     },
     {
       "id": 60,
@@ -4413,7 +4413,7 @@
           "legendFormat": "{{class}} {{state}}"
         }
       ],
-      "description": "Destination pool rows per class after the latest refresh, by state: scored sites count toward the index and the 90 % rule, probation sites are loaded and recorded but not yet counted, and candidates are promotable now. Read from the taskworker that ran the latest refresh. An active pool under the class's pool size, or no candidates left to promote, is the pool-thin finding of monitor signal \u00a72.19b."
+      "description": "Destination pool rows per class after the latest refresh, by state: scored sites count toward the index and the 90 % rule, probation sites are loaded and recorded but not yet counted, and candidates are promotable now. Read from the taskworker that ran the latest refresh. An active pool under the class's pool size, or no candidates left to promote, is the pool-thin finding of monitor signal §2.19b."
     },
     {
       "id": 900,
@@ -4974,7 +4974,7 @@
           "format": "table"
         }
       ],
-      "description": "Each country the latest database would empty, per bucket, with the old database's supply there. Monitor signal \u00a72.9d names these countries in its page."
+      "description": "Each country the latest database would empty, per bucket, with the old database's supply there. Monitor signal §2.9d names these countries in its page."
     },
     {
       "id": 910,
@@ -5604,6 +5604,144 @@
           "legendFormat": "pair age"
         }
       ]
+    },
+    {
+      "id": 928,
+      "type": "stat",
+      "title": "rank modern first: on",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 8,
+        "y": 117
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "min": 0,
+          "max": 1,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#ff9f1c"
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "off",
+                  "index": 0
+                },
+                "1": {
+                  "text": "on",
+                  "index": 1
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value_and_name",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "min by (service) ((max by (service, host, instance) (urnetwork_findproviders2_rank_modern_first_enabled{env=\"$env\",service=~\"api|alt|proxy\"}) and on (service, host, instance) max by (service, host, instance) (process_start_time_seconds{env=\"$env\",service=~\"api|alt|proxy\"})) or on (service, host, instance) (0 * max by (service, host, instance) (process_start_time_seconds{env=\"$env\",service=~\"api|alt|proxy\"})))",
+          "refId": "A",
+          "legendFormat": "{{service}}: every process"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (service) (urnetwork_findproviders2_rank_modern_first_enabled{env=\"$env\",service=~\"api|alt|proxy\"})",
+          "refId": "B",
+          "legendFormat": "{{service}}: any process"
+        }
+      ],
+      "description": "Whether the api, alt and the proxy draw every modern provider of a FindProviders2 band before any other (egress_index.rank_modern_first in provider.yml, on by default, FP2-MODERN.md), as each process read it. \"every process\" compares the gauge with the independent process_start_time_seconds inventory by service, host and instance: a process without the gauge counts as off, including an old binary. \"any process\" is on as soon as one publishes on. The kill switch is rank_modern_first: false, a config release and a restart of those readers; the taskworker's export partitions the pages whatever it says."
+    },
+    {
+      "id": 932,
+      "type": "timeseries",
+      "title": "online members by modern outcome",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 233
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (outcome) (urnetwork_stats_provider_modern_gate_shadow{env=\"$env\",bucket=\"online\"})",
+          "refId": "A",
+          "legendFormat": "{{outcome}}"
+        }
+      ],
+      "description": "The Online members by the outcome their capability evidence gives: the supply modern-only requests and modern-first priority draw from in the Online fallback. Online is no gate bucket, so this is no gate's shadow (FP2-MODERN.md)."
     }
   ]
 }

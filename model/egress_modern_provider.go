@@ -481,79 +481,85 @@ func readProviderModernClientIds(ctx context.Context, clientIds []server.Id, now
 		return modernClientIds, nil
 	}
 	var returnErr error
-	server.Db(ctx, func(conn server.PgConn) {
-		for start := 0; start < len(uniqueClientIds); start += chunkSize {
-			chunkClientIds := uniqueClientIds[start:min(start+chunkSize, len(uniqueClientIds))]
-			if err := ctx.Err(); err != nil {
-				returnErr = err
-				return
-			}
-			rows, err := conn.Query(
-				ctx,
-				`
-				SELECT
-					named.client_id,
-					EXISTS (
-						SELECT 1 FROM provide_key
-						WHERE provide_key.client_id = named.client_id AND provide_key.provide_mode = $2
-					),
-					EXISTS (
-						SELECT 1 FROM provide_key
-						WHERE provide_key.client_id = named.client_id AND provide_key.provide_mode = $3
-					),
-					provider_modern_evidence.post_quantum,
-					provider_modern_evidence.window_resizable,
-					provider_modern_evidence.measured_at,
-					COALESCE(provide_capability.post_quantum_encryption, false)
-				FROM unnest($1::uuid[]) AS named(client_id)
-				LEFT JOIN provider_modern_evidence ON provider_modern_evidence.client_id = named.client_id
-				LEFT JOIN provide_capability ON provide_capability.client_id = named.client_id
-				`,
-				chunkClientIds,
-				ProvideModePublic,
-				ProvideModeNetwork,
-			)
-			if err != nil {
-				returnErr = err
-				return
-			}
-			func() {
-				defer rows.Close()
-				for rows.Next() {
-					var clientId server.Id
-					var providePublic, provideNetwork, declared bool
-					var postQuantum, windowResizable *bool
-					var measuredAt *time.Time
-					if err := rows.Scan(&clientId, &providePublic, &provideNetwork, &postQuantum, &windowResizable, &measuredAt, &declared); err != nil {
-						returnErr = err
-						return
-					}
-					switch {
-					case providePublic:
-						var record *ProviderModernEvidenceRecord
-						if measuredAt != nil {
-							record = &ProviderModernEvidenceRecord{
-								PostQuantum:     postQuantum != nil && *postQuantum,
-								WindowResizable: windowResizable != nil && *windowResizable,
-								MeasuredAt:      *measuredAt,
+	// a connection that cannot be acquired raises; it is the caller's error
+	// all the same
+	server.HandleError(func() {
+		server.Db(ctx, func(conn server.PgConn) {
+			for start := 0; start < len(uniqueClientIds); start += chunkSize {
+				chunkClientIds := uniqueClientIds[start:min(start+chunkSize, len(uniqueClientIds))]
+				if err := ctx.Err(); err != nil {
+					returnErr = err
+					return
+				}
+				rows, err := conn.Query(
+					ctx,
+					`
+					SELECT
+						named.client_id,
+						EXISTS (
+							SELECT 1 FROM provide_key
+							WHERE provide_key.client_id = named.client_id AND provide_key.provide_mode = $2
+						),
+						EXISTS (
+							SELECT 1 FROM provide_key
+							WHERE provide_key.client_id = named.client_id AND provide_key.provide_mode = $3
+						),
+						provider_modern_evidence.post_quantum,
+						provider_modern_evidence.window_resizable,
+						provider_modern_evidence.measured_at,
+						COALESCE(provide_capability.post_quantum_encryption, false)
+					FROM unnest($1::uuid[]) AS named(client_id)
+					LEFT JOIN provider_modern_evidence ON provider_modern_evidence.client_id = named.client_id
+					LEFT JOIN provide_capability ON provide_capability.client_id = named.client_id
+					`,
+					chunkClientIds,
+					ProvideModePublic,
+					ProvideModeNetwork,
+				)
+				if err != nil {
+					returnErr = err
+					return
+				}
+				func() {
+					defer rows.Close()
+					for rows.Next() {
+						var clientId server.Id
+						var providePublic, provideNetwork, declared bool
+						var postQuantum, windowResizable *bool
+						var measuredAt *time.Time
+						if err := rows.Scan(&clientId, &providePublic, &provideNetwork, &postQuantum, &windowResizable, &measuredAt, &declared); err != nil {
+							returnErr = err
+							return
+						}
+						switch {
+						case providePublic:
+							var record *ProviderModernEvidenceRecord
+							if measuredAt != nil {
+								record = &ProviderModernEvidenceRecord{
+									PostQuantum:     postQuantum != nil && *postQuantum,
+									WindowResizable: windowResizable != nil && *windowResizable,
+									MeasuredAt:      *measuredAt,
+								}
+							}
+							if classifyProviderModernEvidence(record, now) == ProviderModernOutcomeModern {
+								modernClientIds[clientId] = true
+							}
+						case provideNetwork:
+							if declared {
+								modernClientIds[clientId] = true
 							}
 						}
-						if classifyProviderModernEvidence(record, now) == ProviderModernOutcomeModern {
-							modernClientIds[clientId] = true
-						}
-					case provideNetwork:
-						if declared {
-							modernClientIds[clientId] = true
-						}
 					}
+					returnErr = rows.Err()
+				}()
+				if returnErr != nil {
+					return
 				}
-				returnErr = rows.Err()
-			}()
-			if returnErr != nil {
-				return
 			}
-		}
-	}, server.OptReadOnly(), server.OptNoRetry())
+		}, server.OptReadOnly(), server.OptNoRetry())
+	}, func(err error) {
+		returnErr = err
+	})
 	if returnErr != nil {
 		return nil, returnErr
 	}
