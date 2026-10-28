@@ -1,14 +1,14 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-27T22:58:20Z",
+  "observed_at": "2026-10-28T00:01:02Z",
   "unmeasured_recovery": {
     "status": "owner_approved_recovery_applied_native_executor_running",
     "failed_attempt_measurements_observed": 0,
     "recovered_baseline_completed": 9,
-    "recovered_candidate_completed": 0,
+    "recovered_candidate_completed": 7,
     "recovered_candidate_build_passed": true,
-    "recovered_candidate_replicate_running": 1,
+    "recovered_candidate_replicate_running": 8,
     "recovered_first_job_started_at": "2026-10-27T21:28:07Z",
     "recovered_first_job_deadline": "2026-10-28T00:28:07Z",
     "production_control_authentication_http_status": 401,
@@ -36,6 +36,18 @@
     "second_committed_seed_unstarted": true
   },
   "objective": "Ready to launch at 2026-10-28T00:00:00Z",
+  "requested_launch_deadline_met": false,
+  "deadline_observation": {
+    "observed_at": "2026-10-28T00:00:10Z",
+    "public_discovery_http_status": 503,
+    "public_discovery_error": "source_not_ready",
+    "production_settlement_authentication_http_status": 401,
+    "reference_screen_accepted": false,
+    "snow_qualification_complete": false,
+    "opening_rescheduled": false,
+    "activation_backdated": false,
+    "record": "server/connect/sim-latency/launch/LAUNCH-DEADLINE-2026-10-28.md"
+  },
   "storage_verification": {
     "operations_compliance_receipt_sha256": "c6b8b5348633270939395b7a585e1978b3a83c679b2552eccd8ab2a4690edc3f",
     "operations_compliance_receipt": "/home/by/urnetwork/temp/minio-compliance-season-proof-20261026T182514Z-9aa1d275/receipt.private.json",
@@ -528,7 +540,7 @@
     "round_baseline_preparation_budget_fix_in_progress": true,
     "submission_deadline_seconds_unchanged": 10800
   },
-  "status": "first_committed_owner_authorized_recovery_applied_native_execution_active",
+  "status": "requested_midnight_readiness_deadline_missed_calibration_active_external_gates_pending",
   "current_bridge_measurement": {
     "started_at": "2026-10-26T20:54:56Z",
     "original_deadline": "2026-10-26T23:54:56Z",
