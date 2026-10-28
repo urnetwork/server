@@ -1724,7 +1724,7 @@ func CloseContract(
 	}
 	// Legacy checkpoints conservatively retain a lower bound. A successful
 	// duplicate (including a final replay) contributes no additional bytes.
-	added, err := model.CloseContractUsage(ctx, contractId, clientId, usedTransferByteCount, checkpoint)
+	added, err := model.CloseClientContractUsage(ctx, contractId, clientId, usedTransferByteCount, checkpoint)
 	transferByteCounter.Add(float64(added))
 	return err
 }

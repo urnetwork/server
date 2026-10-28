@@ -104,19 +104,28 @@ func TestNormalCloseCheckpointReplayDisputeRootCause(t *testing.T) {
 			})
 			contractId := createRedisAdmissionTest(ctx, f, 64*mib).ContractId
 			checkpointId := server.NewId()
+			closeContract := func(report ContractCloseReport) error {
+				report.ContractId = contractId
+				if identified {
+					_, err := CloseContractWithReport(ctx, report)
+					return err
+				}
+				return CloseContract(ctx, contractId, report.ClientId, report.AckedByteCount, report.Checkpoint)
+			}
+			// The sender's final settles against the receiver's checkpoint (owner,
+			// 2026-10-28) at the mean of 40 and 32 MiB. A replay that doubled the
+			// checkpoint to 64 MiB would disagree by 24 MiB and leave the contract
+			// open for the receiver's final.
 			for _, report := range []ContractCloseReport{
 				{ReportId: checkpointId, ClientId: f.destinationId, AckedByteCount: 32 * mib, Checkpoint: true},
 				{ReportId: checkpointId, ClientId: f.destinationId, AckedByteCount: 32 * mib, Checkpoint: true},
 				{ReportId: server.NewId(), ClientId: f.sourceId, AckedByteCount: 40 * mib},
-				{ReportId: server.NewId(), ClientId: f.destinationId, AckedByteCount: 8 * mib},
 			} {
-				report.ContractId = contractId
-				if identified {
-					_, err := CloseContractWithReport(ctx, report)
-					server.Raise(err)
-				} else {
-					server.Raise(CloseContract(ctx, contractId, report.ClientId, report.AckedByteCount, report.Checkpoint))
-				}
+				server.Raise(closeContract(report))
+			}
+			// the receiver's later final is the benign close of a settled contract
+			if err := closeContract(ContractCloseReport{ReportId: server.NewId(), ClientId: f.destinationId, AckedByteCount: 8 * mib}); !errors.Is(err, errContractAlreadySettled) {
+				t.Fatalf("the receiver's final after the settlement: identified=%t err=%v, want already settled", identified, err)
 			}
 			var terminal, disputed, beforeExpiration bool
 			var sourceBytes, destinationBytes, earned ByteCount
@@ -129,7 +138,7 @@ func TestNormalCloseCheckpointReplayDisputeRootCause(t *testing.T) {
 					FROM transfer_contract WHERE contract_id=$1`, contractId).
 					Scan(&terminal, &disputed, &beforeExpiration, &sourceBytes, &destinationBytes, &earned))
 			})
-			wantDestination, wantEarned := 40*mib, 40*mib
+			wantDestination, wantEarned := 32*mib, 36*mib
 			if !terminal || disputed || !beforeExpiration || sourceBytes != 40*mib || destinationBytes != wantDestination || earned != wantEarned {
 				t.Fatalf("duplicated report did not determine ordinary dispute: identified=%t terminal=%t disputed=%t source=%d destination=%d earned=%d",
 					identified, terminal, disputed, sourceBytes, destinationBytes, earned)
