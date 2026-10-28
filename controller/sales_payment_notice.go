@@ -364,7 +364,35 @@ func stripeEnrichInvoiceSalesNotice(ctx context.Context, invoiceId string, notic
 		notice.Method = method
 	} else if amount != nil && *amount == 0 {
 		notice.Method = "Stripe (no charge)"
+	} else if method, ok := stripeSalesInvoicePaymentMethod(ctx, invoiceId); ok {
+		notice.Method = method
 	}
+}
+
+// stripeSalesInvoicePayments is the invoice's payments, which name the
+// payment intent or charge on API versions whose invoice no longer does
+// (2025-03-31 and later).
+type stripeSalesInvoicePayments struct {
+	Data []*struct {
+		Payment *struct {
+			PaymentIntent json.RawMessage `json:"payment_intent"`
+			Charge        json.RawMessage `json:"charge"`
+		} `json:"payment"`
+	} `json:"data"`
+}
+
+// stripeSalesInvoicePaymentMethod reads the payment method through the
+// invoice's payments.
+func stripeSalesInvoicePaymentMethod(ctx context.Context, invoiceId string) (string, bool) {
+	payments, err := stripeSalesGet[*stripeSalesInvoicePayments](ctx, "/v1/invoice_payments?invoice="+url.QueryEscape(invoiceId)+"&limit=1")
+	if err != nil || payments == nil || len(payments.Data) == 0 || payments.Data[0] == nil || payments.Data[0].Payment == nil {
+		return "", false
+	}
+	payment := payments.Data[0].Payment
+	if method, ok := stripeSalesPaymentIntentMethod(ctx, stripeIdFromRaw(payment.PaymentIntent)); ok {
+		return method, true
+	}
+	return stripeSalesChargeMethod(ctx, stripeIdFromRaw(payment.Charge))
 }
 
 // stripeCheckoutSalesNotice is the notice of one data line of a completed

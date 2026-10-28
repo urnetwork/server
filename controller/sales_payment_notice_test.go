@@ -127,6 +127,10 @@ func TestStripeInvoiceSalesNoticeReadsThePaymentFromStripe(t *testing.T) {
 		"/v1/payment_intents/pi_wallet": `{"id":"pi_wallet","latest_charge":"ch_wallet"}`,
 		"/v1/charges/ch_wallet":         `{"id":"ch_wallet","payment_method_details":{"type":"card","card":{"wallet":{"type":"link"}}}}`,
 		"/v1/invoices/in_trial":         `{"id":"in_trial","billing_reason":"subscription_create","amount_paid":0,"total":0,"currency":"usd","charge":null,"payment_intent":null}`,
+		"/v1/invoices/in_basil":         `{"id":"in_basil","billing_reason":"subscription_create","amount_paid":499,"currency":"usd","lines":{"data":[{"pricing":{"price_details":{"price":"price_1"}}}]}}`,
+		"/v1/invoice_payments":          `{"data":[{"payment":{"type":"payment_intent","payment_intent":"pi_basil"}}]}`,
+		"/v1/payment_intents/pi_basil":  `{"id":"pi_basil","latest_charge":"ch_basil"}`,
+		"/v1/charges/ch_basil":          `{"id":"ch_basil","payment_method_details":{"type":"card"}}`,
 		"/v1/invoices/in_yen":           `{"id":"in_yen","billing_reason":"subscription_cycle","amount_paid":980,"currency":"jpy","charge":"ch_yen"}`,
 		"/v1/charges/ch_yen":            `{"id":"ch_yen","payment_method_details":{"type":"card","card":{"wallet":{"type":"apple_pay"}}}}`,
 	})
@@ -159,6 +163,12 @@ func TestStripeInvoiceSalesNoticeReadsThePaymentFromStripe(t *testing.T) {
 			invoice: &StripeEventInvoiceObject{Id: "in_trial", BillingReason: "subscription_create"},
 			end:     start.Add(14 * 24 * time.Hour),
 			want:    salesNoticeText("Pro (new, no charge)", "acme", "0.00 USD", "Stripe (no charge)"),
+		},
+		{
+			// an API version whose invoice names no charge: through its payments
+			invoice: &StripeEventInvoiceObject{Id: "in_basil"},
+			end:     start.Add(31*24*time.Hour + manualPaymentGracePeriod),
+			want:    salesNoticeText("Pro monthly (new)", "acme", "4.99 USD", "Stripe (card)"),
 		},
 		{
 			invoice: &StripeEventInvoiceObject{Id: "in_yen"},
