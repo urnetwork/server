@@ -435,10 +435,17 @@ While `rank_modern_first` is on and the gate is off, a provider gets
 - it is a Quality or Speed member;
 - it is not modern.
 
-It keeps its buckets and numbers. The reason sits where the gate's does: after
-`egress_failing`, before `not_eligible` for ARIN non-quality. With the gate on
-(an explicit `true`), `not_modern` keeps its gate meaning, whatever priority is
-set to. With the gate off and priority off, no provider reports it.
+It keeps its buckets and numbers.
+
+- **Position.** The reason sits just after `not_eligible` for ARIN non-quality,
+  and before `speed_test_missing` and `slow`.
+- **Why after ARIN non-quality.** A provider ARIN classifies non-quality reads
+  `not_eligible` whatever its modern status, like an ARIN-risk or TLS one. If
+  `not_modern` came first, a non-modern provider could tell those anti-abuse
+  signals apart (`TestProviderStatusAntiAbuseSignalsAreIndistinguishable`).
+- **With the gate on** (an explicit `true`), the gate's own `not_modern` keeps
+  its place before ARIN non-quality, whatever priority is set to.
+- **With the gate off and priority off**, no provider reports `not_modern`.
 
 Network-only providers keep `network_only`. Online-only providers keep the
 reasons that already explain their place.

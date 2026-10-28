@@ -76,6 +76,23 @@ func testingProviderStatusFilter(facts *providerStatusFacts) providerCountFilter
 
 var testingProviderStatusMinimums = map[int]float64{1: 0.95, 2: 0.7, 3: 0.6}
 
+// Records fresh modern evidence for the provider, as the capability probe
+// writes for an upgraded app, so modern-first priority has nothing to explain
+// (FP2-MODERN.md).
+func testingProviderStatusModern(facts *providerStatusFacts, countFilter *providerCountFilter) {
+	if countFilter.modernEvidence == nil {
+		countFilter.modernEvidence = map[server.Id]*ProviderModernEvidenceRecord{}
+	}
+	countFilter.modernEvidence[facts.clientId] = &ProviderModernEvidenceRecord{
+		PostQuantum:     true,
+		KeyExchange:     "X25519MLKEM768",
+		WindowResizable: true,
+		MeasuredAt:      testingProviderStatusNow.Add(-time.Hour),
+		FirstMeasuredAt: testingProviderStatusNow.Add(-time.Hour),
+		RunCount:        1,
+	}
+}
+
 // Decides facts against countFilter with the default egress settings and the
 // testing minimums, returning the evaluation and the wire status.
 func testingProviderStatus(facts *providerStatusFacts, countFilter providerCountFilter) (*providerStatusEvaluation, *ProviderStatus) {
@@ -95,7 +112,9 @@ func testingProviderStatusNumber(status *ProviderStatus, name string) *ProviderR
 }
 
 // The first failing rule names the reason, in the order the selection
-// applies them.
+// applies them. The provider is modern unless a case says otherwise, as an
+// upgraded app is, so modern-first priority explains only the cases that take
+// its evidence away.
 func TestProviderStatusReasonOrder(t *testing.T) {
 	for _, testCase := range []struct {
 		name   string
@@ -173,6 +192,18 @@ func TestProviderStatusReasonOrder(t *testing.T) {
 		{name: "arin non-quality", modify: func(f *providerStatusFacts, c *providerCountFilter) {
 			c.arinNonQuality[f.clientId] = true
 		}, reason: ProviderStatusReasonNotEligible},
+		// the anti-abuse reason holds whatever the provider's modern status
+		{name: "arin non-quality, not modern", modify: func(f *providerStatusFacts, c *providerCountFilter) {
+			c.arinNonQuality[f.clientId] = true
+			delete(c.modernEvidence, f.clientId)
+		}, reason: ProviderStatusReasonNotEligible},
+		{name: "not modern, drawn after the modern providers", modify: func(f *providerStatusFacts, c *providerCountFilter) {
+			delete(c.modernEvidence, f.clientId)
+		}, reason: ProviderStatusReasonNotModern},
+		{name: "not modern before a missing speed test", modify: func(f *providerStatusFacts, c *providerCountFilter) {
+			delete(c.modernEvidence, f.clientId)
+			f.hasSpeedTest = false
+		}, reason: ProviderStatusReasonNotModern},
 		{name: "no speed test", modify: func(f *providerStatusFacts, c *providerCountFilter) {
 			f.hasSpeedTest = false
 		}, reason: ProviderStatusReasonSpeedTestMissing},
@@ -194,6 +225,7 @@ func TestProviderStatusReasonOrder(t *testing.T) {
 	} {
 		facts := testingProviderStatusFacts()
 		countFilter := testingProviderStatusFilter(facts)
+		testingProviderStatusModern(facts, &countFilter)
 		testCase.modify(facts, &countFilter)
 		_, status := testingProviderStatus(facts, countFilter)
 		if status.Reason != testCase.reason {
@@ -478,6 +510,8 @@ func TestProviderStatusExplainsEgressWarmingUp(t *testing.T) {
 		facts := testingProviderStatusFacts()
 		facts.clientId = server.Id{2}
 		countFilter := testingProviderStatusFilter(facts)
+		// an upgraded app, so warming up is all there is to explain
+		testingProviderStatusModern(facts, &countFilter)
 		countFilter.healthCounts[facts.clientId] = counts
 		countFilter.arinNonQuality[facts.clientId] = arinNonQuality
 		evaluation, status := testingProviderStatus(facts, countFilter)

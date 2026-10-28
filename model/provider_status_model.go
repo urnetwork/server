@@ -570,12 +570,14 @@ func evaluateProviderStatus(
 		evaluation.reason = ProviderStatusReasonEgressFailing
 	case decision.reason == ProviderExcludedNotModern:
 		evaluation.reason = ProviderStatusReasonNotModern
-	case egressSettings.RankModernFirst && !egressFacts.modernGate && (decision.quality || decision.speed) && !decision.modern:
-		// in its buckets, but modern-first priority draws it after the
-		// modern providers of each band (FP2-MODERN.md)
-		evaluation.reason = ProviderStatusReasonNotModern
 	case decision.reason == ProviderExcludedArinNonQuality:
 		evaluation.reason = ProviderStatusReasonNotEligible
+	case egressSettings.RankModernFirst && !egressFacts.modernGate && (decision.quality || decision.speed) && !decision.modern:
+		// in its buckets, but modern-first priority draws it after the
+		// modern providers of each band (FP2-MODERN.md). After the ARIN
+		// non-quality reason, so the anti-abuse signals stay one generic
+		// reason whatever the provider's modern status.
+		evaluation.reason = ProviderStatusReasonNotModern
 	case !facts.hasSpeedTest || !facts.hasLatencyTest:
 		evaluation.reason = ProviderStatusReasonSpeedTestMissing
 	case clientScore.Tiers[RankModeQuality] == ClientScoreCutoffTier:
