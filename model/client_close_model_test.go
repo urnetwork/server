@@ -84,8 +84,9 @@ func TestClientCloseRequestsAreTakenOnce(t *testing.T) {
 	})
 }
 
-// The sender's final asks the destination to send its final, unless the
-// destination has already sent one (CLIENTCLOSE1.md section 3).
+// The sender's final settles a contract whose receiver checkpointed (owner,
+// 2026-10-28), and asks a receiver that has not reported for its final
+// (CLIENTCLOSE1.md section 3).
 func TestSourceFinalAsksDestinationToClose(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -99,64 +100,71 @@ func TestSourceFinalAsksDestinationToClose(t *testing.T) {
 			server.RunPosts(ctx, posts...)
 			return escrow.ContractId
 		}
-		report := func(contractId server.Id, clientId server.Id, checkpoint bool) {
-			if _, err := CloseContractWithReport(ctx, ContractCloseReport{ReportId: server.NewId(), ContractId: contractId, ClientId: clientId, AckedByteCount: byteCount, Checkpoint: checkpoint}); err != nil {
+		report := func(contractId server.Id, clientId server.Id, used ByteCount, checkpoint bool) {
+			if _, err := CloseContractWithReport(ctx, ContractCloseReport{ReportId: server.NewId(), ContractId: contractId, ClientId: clientId, AckedByteCount: used, Checkpoint: checkpoint}); err != nil {
 				t.Fatal(err)
 			}
 		}
 		takeDestination := func() *ClientCloseRequests {
 			return TakeClientCloseRequests(ctx, f.destinationId, ClientCloseTakeLimit)
 		}
-
-		// the receiver checkpointed at its sequence exit; the sender's final asks
-		// it to finish
-		checkpointed := newContract()
-		report(checkpointed, f.destinationId, true)
-		if requests := takeDestination(); !requests.Empty() {
-			t.Fatal("a receiver checkpoint asked the receiver to close")
+		settledDestination := func(contractId server.Id) (final bool, used ByteCount, settled bool) {
+			server.Db(ctx, func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(ctx, `SELECT NOT checkpoint, used_transfer_byte_count,
+					(SELECT outcome IS NOT NULL FROM transfer_contract WHERE contract_id=$1)
+					FROM contract_close WHERE contract_id=$1 AND party=$2`, contractId, ContractPartyDestination).Scan(&final, &used, &settled))
+			})
+			return
 		}
-		report(checkpointed, f.sourceId, false)
-		if requests := takeDestination(); !slices.Equal(requests.ContractIds, []server.Id{checkpointed}) || len(requests.PeerIds) != 0 {
-			t.Fatalf("after the sender's final the receiver was asked to close %d contracts and %d peers, want the contract", len(requests.ContractIds), len(requests.PeerIds))
+
+		// the receiver checkpointed at its sequence exit; the sender's final
+		// settles the contract with the checkpoint's count and asks nothing
+		checkpointed := newContract()
+		report(checkpointed, f.destinationId, byteCount, true)
+		report(checkpointed, f.sourceId, byteCount, false)
+		if final, used, settled := settledDestination(checkpointed); !final || used != byteCount || !settled {
+			t.Fatalf("sender's final after the receiver's checkpoint: final=%t bytes=%d settled=%t, want a settled final of %d bytes", final, used, settled, byteCount)
+		}
+		if requests := takeDestination(); !requests.Empty() {
+			t.Fatal("a settled contract asked the receiver to close")
 		}
 		if requests := TakeClientCloseRequests(ctx, f.sourceId, ClientCloseTakeLimit); !requests.Empty() {
 			t.Fatal("the sender was asked to close its own final")
 		}
 
-		// the receiver's zero final after the request settles the contract on
-		// reports, with the checkpoint's count
-		if _, err := CloseContractWithReport(ctx, ContractCloseReport{ReportId: server.NewId(), ContractId: checkpointed, ClientId: f.destinationId}); err != nil {
-			t.Fatal(err)
+		// counts that disagree beyond the tolerance leave the contract to the
+		// expiry sweep, as before
+		disagreeing := newContract()
+		report(disagreeing, f.destinationId, 1, true)
+		report(disagreeing, f.sourceId, AcceptableTransfersByteDifference+2, false)
+		if final, _, settled := settledDestination(disagreeing); final || settled {
+			t.Fatal("counts beyond the tolerance settled")
 		}
-		var used ByteCount
-		var settled bool
-		server.Db(ctx, func(conn server.PgConn) {
-			server.Raise(conn.QueryRow(ctx, `SELECT used_transfer_byte_count,
-				(SELECT outcome IS NOT NULL FROM transfer_contract WHERE contract_id=$1)
-				FROM contract_close WHERE contract_id=$1 AND party=$2 AND NOT checkpoint`, checkpointed, ContractPartyDestination).Scan(&used, &settled))
-		})
-		if used != byteCount || !settled {
-			t.Fatalf("receiver zero final: bytes=%d settled=%t, want %d and settled", used, settled, byteCount)
-		}
+		takeDestination()
 
-		// a receiver that has no report yet is asked too
+		// a receiver that has no report yet is asked for its final
 		unreported := newContract()
-		report(unreported, f.sourceId, false)
-		if requests := takeDestination(); !slices.Equal(requests.ContractIds, []server.Id{unreported}) {
-			t.Fatalf("an unreported receiver was asked to close %d contracts, want 1", len(requests.ContractIds))
+		report(unreported, f.sourceId, byteCount, false)
+		if requests := takeDestination(); !slices.Equal(requests.ContractIds, []server.Id{unreported}) || len(requests.PeerIds) != 0 {
+			t.Fatalf("an unreported receiver was asked to close %d contracts and %d peers, want the contract", len(requests.ContractIds), len(requests.PeerIds))
+		}
+		// its zero final settles the contract on reports
+		report(unreported, f.destinationId, 0, false)
+		if final, _, settled := settledDestination(unreported); !final || !settled {
+			t.Fatal("the receiver's zero final did not settle the contract")
 		}
 
 		// a receiver that already sent its final is not asked
 		final := newContract()
-		report(final, f.destinationId, false)
-		report(final, f.sourceId, false)
+		report(final, f.destinationId, byteCount, false)
+		report(final, f.sourceId, byteCount, false)
 		if requests := takeDestination(); !requests.Empty() {
 			t.Fatal("a receiver that already sent its final was asked to close")
 		}
 
 		// a sender checkpoint asks nothing
 		senderCheckpoint := newContract()
-		report(senderCheckpoint, f.sourceId, true)
+		report(senderCheckpoint, f.sourceId, byteCount, true)
 		if requests := takeDestination(); !requests.Empty() {
 			t.Fatal("a sender checkpoint asked the receiver to close")
 		}
@@ -175,13 +183,23 @@ func TestSourceFinalAsksDestinationToClose(t *testing.T) {
 			t.Fatal("a retried sender final asked the receiver again")
 		}
 
-		// the legacy id-less report path asks the same
+		// the legacy id-less report path asks the same, and settles the same
 		legacy := newContract()
 		if err := CloseContract(ctx, legacy, f.sourceId, byteCount, false); err != nil {
 			t.Fatal(err)
 		}
 		if requests := takeDestination(); !slices.Equal(requests.ContractIds, []server.Id{legacy}) {
 			t.Fatalf("a legacy sender final asked the receiver to close %d contracts, want 1", len(requests.ContractIds))
+		}
+		legacyCheckpointed := newContract()
+		if err := CloseContract(ctx, legacyCheckpointed, f.destinationId, byteCount, true); err != nil {
+			t.Fatal(err)
+		}
+		if err := CloseContract(ctx, legacyCheckpointed, f.sourceId, byteCount, false); err != nil {
+			t.Fatal(err)
+		}
+		if final, used, settled := settledDestination(legacyCheckpointed); !final || used != byteCount || !settled {
+			t.Fatal("a legacy sender final after the receiver's checkpoint did not settle")
 		}
 	})
 }

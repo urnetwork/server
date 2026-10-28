@@ -53,11 +53,20 @@ Both keys have one hash tag, so each write is a one-slot script. If an event is 
 - items in `c_close` wait for the next event for that client or for the listener to register again, and otherwise expire, leaving those contracts to the sweep, as today;
 - a missed `c_removed` event is covered by the 60 s authorization recheck for transports and by the idle watchers for residents and devices.
 
-### 3. Passing on the sender's final
+### 3. Settling at the sender's final
 
-When a source final commits (`closeContractReport`, applied, `party == source`, not a checkpoint) and the destination has no final yet, a post-commit step adds `c:<contractId>` to the destination's `c_close`. The destination's next report is its final, made after the sender's final. If the destination has only checkpointed, that final is (0, 0), which turns the checkpoint into a final; either way the contract settles on reports in the request. Retries and replays (`terminalReplay`, not applied) add nothing, and a failed Redis write leaves the contract to the sweep.
+**Owner decision, 2026-10-28:** a sender's final that arrives after the receiver's checkpoint settles the contract in the sender's report.
+- The rule mirrors decision B (2026-10-10), which covers the opposite order: a receiver checkpoint after the sender's final.
+- In the common order the receiver checkpoints at its exit and sends nothing more, so the counts on hand are the ones the sweep would settle with (the mean of the two). The contract now settles about an hour sooner, without waiting for a provider update.
+- The guards are the same as decision B's: no outcome, no dispute, expiry not started, and the sender's count not a legacy lower bound.
+- The two counts must agree within `AcceptableTransfersByteDifference` (16 MiB) in either direction. Counts that disagree by more are left to the sweep, as before.
+- Mechanics: `applyLockedContractCloseReportInTx` reports `contractSenderFinalAfterCheckpoint`, and `settleContractWithOptions` completes the checkpoint as a zero final and settles in the same transaction, as it does for decision B.
 
-This handles normal clients and retired hosted windows alike. It moves settlement off the sweep's per-payer path onto the ordinary settlement path, which leaves the grant debit to the debit worker.
+**A receiver with no report yet is asked for its final.** When a source final commits (applied, `party == source`, not a checkpoint) and the destination has neither a final nor a checkpoint, a post-commit step adds `c:<contractId>` to the destination's `c_close`. The destination's final then settles the contract on reports.
+- Retries and replays (`terminalReplay`, not applied) add nothing.
+- A failed Redis write leaves the contract to the sweep.
+
+Both paths settle through the ordinary settlement path, which leaves the grant debit to the debit worker, instead of the sweep's per-payer path. They cover normal clients and retired hosted windows alike.
 
 ### 4. API removal
 
@@ -85,11 +94,13 @@ The proxy device manager keeps an index from a client id to the proxy ids of its
 
 ## Rollout
 
-1. Server: the model, connect, api and taskworker (the close report path runs in each), and proxy. Older clients ignore `CloseSequences`; the cost is one SADD per sender final and one per removed contract.
-2. The connect library and SDK release. Settlement speeds up as providers update, because the receiver's final is what was missing.
+1. **Server:** the model, connect, api and taskworker (each runs the close report path), and proxy.
+   - Settling at the sender's final (section 3) takes effect with this step.
+   - Older clients ignore `CloseSequences`.
+   - The cost is one SADD per sender final whose receiver has not reported, and one per removed contract.
+2. **The connect library and SDK release.** Providers that update send their finals on request, both for contracts whose receiver had not reported and for removed peers.
 3. Watch `urnetwork_redis_contract_reservation_total{operation="reserve-pending",result="skipped"}`, the hot network's open-contract count, and settle versus expiry closes.
 
-## Follow-ups (owner decisions)
+## Follow-ups
 
-- **Settle a contract shortly after the sender's final, without client updates.** If the destination's latest report is a checkpoint and nothing newer has arrived five minutes after the sender's final, settle on reports as the sweep would (the mean of the two counts). The amounts are the ones the sweep produces today, only earlier, and it needs no provider update. It changes the timing rule of decision B, so it needs the owner.
-- **The sweep's per-payer serialization**, the reason one large payer's backlog grows.
+- **The sweep's per-payer serialization.** This is why one large payer's backlog grows, and it still bounds the contracts left to the sweep.
