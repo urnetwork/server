@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
@@ -131,9 +132,17 @@ func TestConnectH1TransportDelay(t *testing.T) {
 						}
 						if !accepted {
 							// a legacy heartbeat is a zero-length message both
-							// ways. Several, so a stamped one (the bare 12-byte
-							// header) anywhere in the window shows.
-							for index := range 4 {
+							// ways, and a stamped one is the bare 12-byte header.
+							// A connection stamps every message or none, so
+							// several empty heartbeats show it stamps none. The
+							// server's own frames may arrive between them (a new
+							// connection's control messages), and each must
+							// parse as a legacy transfer frame.
+							heartbeatCount := 0
+							for index := 0; heartbeatCount < 4; index += 1 {
+								if 32 <= index {
+									t.Fatalf("%s: %d server messages, %d legacy heartbeats", name, index, heartbeatCount)
+								}
 								if err := conn.WriteMessage(websocket.BinaryMessage, []byte{}); err != nil {
 									t.Fatalf("%s: write: %s", name, err)
 								}
@@ -141,8 +150,12 @@ func TestConnectH1TransportDelay(t *testing.T) {
 								if err != nil {
 									t.Fatalf("%s: read: %s", name, err)
 								}
-								if len(message) != 0 {
-									t.Fatalf("%s: legacy heartbeat %d of %d bytes, expected 0", name, index, len(message))
+								if len(message) == 0 {
+									heartbeatCount += 1
+									continue
+								}
+								if err := proto.Unmarshal(message, &protocol.TransferFrame{}); err != nil {
+									t.Fatalf("%s: server message %d of %d bytes is not a legacy frame: %s", name, index, len(message), err)
 								}
 							}
 							return
