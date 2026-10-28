@@ -151,6 +151,10 @@ type selection struct {
 	scanned    int
 	due        int
 	eligible   int
+	// some eligibility read judged its providers without a published
+	// url-success guard, so every country was exempt
+	// (model.ProviderCapabilityProbeEligibility)
+	unguarded bool
 }
 
 // The fewest due providers one eligibility read judges.
@@ -200,10 +204,12 @@ func (self *passRunner) selectDue(ctx context.Context, cursor server.Id, now tim
 		for judged := 0; judged < len(dueClientIds); {
 			room := self.settings.Limit - len(selected.dueClientIds)
 			chunkEnd := min(len(dueClientIds), judged+max(2*room, minEligibilityChunk))
-			eligibleClientIds, err := self.filterEligible(ctx, dueClientIds[judged:chunkEnd])
+			eligibility, err := self.filterEligible(ctx, dueClientIds[judged:chunkEnd])
 			if err != nil {
 				return selected, err
 			}
+			selected.unguarded = selected.unguarded || eligibility.Unguarded
+			eligibleClientIds := eligibility.ClientIds
 			if room < len(eligibleClientIds) || (room == len(eligibleClientIds) && chunkEnd < len(dueClientIds)) {
 				// the pass fills inside this page
 				taken := eligibleClientIds[:room]
@@ -271,11 +277,11 @@ func readProviderCapabilityProbePage(
 
 // The production eligibility read, model.FilterProviderCapabilityProbeEligible,
 // with a datastore failure returned rather than raised.
-func filterProviderCapabilityProbeEligible(ctx context.Context, clientIds []server.Id) (eligibleClientIds []server.Id, returnErr error) {
+func filterProviderCapabilityProbeEligible(ctx context.Context, clientIds []server.Id) (eligibility model.ProviderCapabilityProbeEligibility, returnErr error) {
 	server.HandleError(func() {
-		eligibleClientIds = model.FilterProviderCapabilityProbeEligible(ctx, clientIds)
+		eligibility = model.FilterProviderCapabilityProbeEligible(ctx, clientIds)
 	}, func(err error) {
-		eligibleClientIds, returnErr = nil, err
+		eligibility, returnErr = model.ProviderCapabilityProbeEligibility{}, err
 	})
 	return
 }
