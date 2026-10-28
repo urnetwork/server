@@ -123,6 +123,9 @@ type StripeEventCheckoutCompleteObject struct {
 	Subscription      string                                `json:"subscription"`
 	// set by /pay/data/checkout (apply_to_network, network_id, network_name, item_id)
 	Metadata map[string]string `json:"metadata"`
+	// the payment intent of a payment-mode session: an id, or an object when
+	// expanded. Read only for the sales notice's payment method.
+	PaymentIntent json.RawMessage `json:"payment_intent,omitempty"`
 }
 
 // stripeAppliedNetworkName is the network a buy-data checkout was made FOR, from
@@ -148,6 +151,9 @@ type StripeEventInvoiceObject struct {
 	PeriodEnd   int    `json:"period_end"`
 	Customer    string `json:"customer"`
 	Currency    string `json:"currency"`
+	// subscription_create, subscription_cycle, ...; read only for the sales
+	// notice (new or renewal)
+	BillingReason string `json:"billing_reason,omitempty"`
 }
 
 type StripeEventDataObjectCustomerDetails struct {
@@ -497,9 +503,10 @@ func stripeHandleCheckoutSessionCompleted(
 		appliedNetworkName = stripeAppliedNetworkName(checkoutComplete)
 	}
 
-	if err := stripeFulfillCheckoutLineItems(
+	if err := stripeFulfillCheckoutLineItemsForSale(
 		clientSession.Ctx,
 		stripeSessionId,
+		stripeIdFromRaw(checkoutComplete.PaymentIntent),
 		lineItems.Data,
 		purchaseEmail,
 		redeemNetworkId,
@@ -548,6 +555,29 @@ func stripeFulfillCheckoutLineItems(
 	redeemNetworkId *server.Id,
 	appliedNetworkName string,
 ) error {
+	return stripeFulfillCheckoutLineItemsForSale(
+		ctx,
+		stripeSessionId,
+		"",
+		lineItems,
+		purchaseEmail,
+		redeemNetworkId,
+		appliedNetworkName,
+	)
+}
+
+// stripeFulfillCheckoutLineItemsForSale is stripeFulfillCheckoutLineItems
+// with the session's payment intent, which the sales notice of each new code
+// reads its payment method from ("" when unknown).
+func stripeFulfillCheckoutLineItemsForSale(
+	ctx context.Context,
+	stripeSessionId string,
+	paymentIntentId string,
+	lineItems []*StripeLineItem,
+	purchaseEmail string,
+	redeemNetworkId *server.Id,
+	appliedNetworkName string,
+) error {
 	skus := stripeSkusFunc()
 	for lineIndex, lineItem := range lineItems {
 		stripeSku := lineItem.Price.Product
@@ -583,16 +613,21 @@ func stripeFulfillCheckoutLineItems(
 
 				glog.Infof("[sub]create balance code: %s %s\n", purchaseEmail, string(stripeItemJsonBytes))
 
-				err = createBalanceCode(
+				purchaseEventId := stripeCheckoutPurchaseEventId(stripeSessionId, lineIndex)
+				balanceByteCount := quantity * sku.BalanceByteCount()
+				err = createBalanceCodeForSale(
 					ctx,
-					quantity*sku.BalanceByteCount(),
+					balanceByteCount,
 					model.Pro().DataCodeDuration,
 					netRevenue,
-					stripeCheckoutPurchaseEventId(stripeSessionId, lineIndex),
+					purchaseEventId,
 					string(stripeItemJsonBytes),
 					purchaseEmail,
 					redeemNetworkId,
 					appliedNetworkName,
+					func() *model.SalesPaymentNotice {
+						return stripeCheckoutSalesNotice(purchaseEventId, balanceByteCount, lineItem, paymentIntentId, redeemNetworkId)
+					},
 				)
 				if err != nil {
 					return err
@@ -874,14 +909,13 @@ func stripeHandleInvoicePaidInConn(connOwner server.PgConn,
 	if credit == nil {
 		return &StripeWebhookResult{}, nil
 	}
-	invoiceId := invoice.Id
 	feeFraction := 0.3
 	netRevenue := model.UsdToNanoCents((1.0 - feeFraction) * float64(invoice.Total) / 100.0)
 
 	_, err = stripeCreditInvoicePaidInConn(connOwner,
 		clientSession.Ctx,
 		credit.networkId,
-		invoiceId,
+		invoice,
 		netRevenue,
 		credit.startTime,
 		credit.endTime,
@@ -963,78 +997,22 @@ func stripeCreditInvoicePaid(
 	startTime time.Time,
 	endTime time.Time,
 ) (credited bool, returnErr error) {
-	return stripeCreditInvoicePaidInConn(nil, ctx, networkId, invoiceId, netRevenue, startTime, endTime)
+	return stripeCreditInvoicePaidInConn(nil, ctx, networkId, &StripeEventInvoiceObject{Id: invoiceId}, netRevenue, startTime, endTime)
 }
 
 // Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+// invoice is the invoice as delivered; only its id is required.
 func stripeCreditInvoicePaidInConn(connOwner server.PgConn,
 	ctx context.Context,
 	networkId server.Id,
-	invoiceId string,
+	invoice *StripeEventInvoiceObject,
 	netRevenue model.NanoCents,
 	startTime time.Time,
 	endTime time.Time,
 ) (credited bool, returnErr error) {
 
 	server.TxInConn(ctx, connOwner, func(tx server.PgTx) {
-		credited = false
-		returnErr = nil
-		if err := model.LockPaymentNetworkInTx(tx, ctx, networkId); err != nil {
-			returnErr = err
-			return
-		}
-
-		ledgerTag := server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-			INSERT INTO stripe_invoice (invoice_id, network_id)
-			VALUES ($1, $2)
-			ON CONFLICT DO NOTHING
-			`,
-			invoiceId,
-			networkId,
-		))
-		if ledgerTag.RowsAffected() == 0 {
-			// a retry of an invoice that already credited -- absorb it
-			glog.Infof("[sub]invoice %s already credited; ignoring redelivery\n", invoiceId)
-			return
-		}
-
-		subscriptionRenewal := model.SubscriptionRenewal{
-			NetworkId:          networkId,
-			SubscriptionType:   model.SubscriptionTypeSupporter,
-			StartTime:          startTime,
-			EndTime:            endTime,
-			NetRevenue:         netRevenue,
-			SubscriptionMarket: model.SubscriptionMarketStripe,
-			TransactionId:      invoiceId,
-		}
-
-		err := model.AddSubscriptionRenewalInTx(tx, ctx, &subscriptionRenewal)
-		if err != nil {
-			glog.Infof("Error adding subscription renewal: %v", err)
-			returnErr = err
-			return
-		}
-
-		// a supporter subscription -> carries the Pro entitlement
-		transferBalance := &model.TransferBalance{
-			NetworkId:             networkId,
-			StartTime:             startTime,
-			EndTime:               endTime,
-			StartBalanceByteCount: RefreshSupporterTransferBalance,
-			SubsidyNetRevenue:     netRevenue,
-			BalanceByteCount:      RefreshSupporterTransferBalance,
-			Pro:                   true,
-		}
-
-		model.AddTransferBalanceInTx(
-			ctx,
-			tx,
-			transferBalance,
-		)
-
-		credited = true
+		credited, returnErr = stripeCreditInvoicePaidInTx(tx, ctx, networkId, invoice, netRevenue, startTime, endTime)
 	}, server.TxReadCommitted)
 
 	if returnErr != nil {
@@ -1048,6 +1026,81 @@ func stripeCreditInvoicePaidInConn(connOwner server.PgConn,
 	}
 
 	return credited, nil
+}
+
+// stripeCreditInvoicePaidInTx is one attempt of the credit, in the caller's
+// ReadCommitted transaction: the stripe_invoice ledger gate, then the renewal
+// and the pro balance, then the sales notice of the new payment.
+func stripeCreditInvoicePaidInTx(
+	tx server.PgTx,
+	ctx context.Context,
+	networkId server.Id,
+	invoice *StripeEventInvoiceObject,
+	netRevenue model.NanoCents,
+	startTime time.Time,
+	endTime time.Time,
+) (credited bool, returnErr error) {
+	if err := model.LockPaymentNetworkInTx(tx, ctx, networkId); err != nil {
+		return false, err
+	}
+
+	invoiceId := invoice.Id
+	ledgerTag := server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+		INSERT INTO stripe_invoice (invoice_id, network_id)
+		VALUES ($1, $2)
+		ON CONFLICT DO NOTHING
+		`,
+		invoiceId,
+		networkId,
+	))
+	if ledgerTag.RowsAffected() == 0 {
+		// a retry of an invoice that already credited -- absorb it
+		glog.Infof("[sub]invoice %s already credited; ignoring redelivery\n", invoiceId)
+		return false, nil
+	}
+
+	subscriptionRenewal := model.SubscriptionRenewal{
+		NetworkId:          networkId,
+		SubscriptionType:   model.SubscriptionTypeSupporter,
+		StartTime:          startTime,
+		EndTime:            endTime,
+		NetRevenue:         netRevenue,
+		SubscriptionMarket: model.SubscriptionMarketStripe,
+		TransactionId:      invoiceId,
+	}
+
+	err := model.AddSubscriptionRenewalInTx(tx, ctx, &subscriptionRenewal)
+	if err != nil {
+		glog.Infof("Error adding subscription renewal: %v", err)
+		return false, err
+	}
+
+	// a supporter subscription -> carries the Pro entitlement
+	transferBalance := &model.TransferBalance{
+		NetworkId:             networkId,
+		StartTime:             startTime,
+		EndTime:               endTime,
+		StartBalanceByteCount: RefreshSupporterTransferBalance,
+		SubsidyNetRevenue:     netRevenue,
+		BalanceByteCount:      RefreshSupporterTransferBalance,
+		Pro:                   true,
+	}
+
+	model.AddTransferBalanceInTx(
+		ctx,
+		tx,
+		transferBalance,
+	)
+
+	// the ledger row is new: this invoice is a new payment, posted once the
+	// transaction commits
+	addSalesPaymentNoticeInTx(tx, func() *model.SalesPaymentNotice {
+		return stripeInvoiceSalesNotice(networkId, invoice, startTime, endTime)
+	})
+
+	return true, nil
 }
 
 // ----- refunds / disputes (UPGRADE.md §2 S7) -----

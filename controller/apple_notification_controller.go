@@ -75,6 +75,9 @@ type validatedAppleTransaction struct {
 	// originalTransactionId names the subscription across renewals; an
 	// offer-code binding (apple_offer_code_binding) is keyed on it
 	originalTransactionId string
+	// transactionReason is PURCHASE (the customer bought) or RENEWAL (the
+	// store renewed), "" when the claims do not say; read for the sales notice
+	transactionReason string
 	// unboundAccountToken is set when the claims carry no appAccountToken at
 	// all (an offer-code redemption through the App Store redeem sheet or
 	// link). networkId is then zero until the binding resolves it.
@@ -405,6 +408,11 @@ func appleCreditSubscriptionTransactionInTx(
 		BalanceByteCount:      RefreshSupporterTransferBalance,
 		Pro:                   true,
 	})
+	// the ledger row is new: this transaction is a new payment, posted once
+	// the caller's transaction commits
+	addSalesPaymentNoticeInTx(tx, func() *model.SalesPaymentNotice {
+		return appleSalesNotice(transaction)
+	})
 	return true
 }
 
@@ -505,6 +513,7 @@ func validateAppleTransactionAccount(
 	validated.offerType, _ = appleControllerInt64Claim(transactionClaims, "offerType")
 	validated.offerIdentifier, _ = appleControllerStringClaim(transactionClaims, "offerIdentifier")
 	validated.offerDiscountType, _ = appleControllerStringClaim(transactionClaims, "offerDiscountType")
+	validated.transactionReason, _ = appleControllerStringClaim(transactionClaims, "transactionReason")
 	if !requireEntitlementFields {
 		return validated, nil
 	}

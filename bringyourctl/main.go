@@ -2133,6 +2133,11 @@ func paymentsReconcile(opts docopt.Opts) {
 		"%s %d, %s %d, %s %d, errors %d, skipped %v\n",
 		creditLabel, result.Credited, endLabel, result.Ended, repairLabel, result.EntitlementsRepaired, result.Errors, result.SkippedStores,
 	)
+	// the sales channel notices of the payments this run credited post from
+	// this process
+	if !result.DryRun && !model.WaitSalesPaymentNotices(salesPaymentNoticeWait) {
+		fmt.Printf("some sales channel notices were not posted before exit\n")
+	}
 	if 0 < result.Errors {
 		os.Exit(1)
 	}
