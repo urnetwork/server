@@ -175,7 +175,7 @@ func TestRecordFindProviders2OutcomeRecordsReturnedCountBand(t *testing.T) {
 		ForceMinimum: false,
 	}
 	counter, err := findProviders2OutcomesTotal.GetMetricWithLabelValues(
-		"v6", "group", "us", RankModeSpeed, "false", "1-2",
+		"v6", "group", "us", RankModeSpeed, "false", "1-2", "none",
 	)
 	if err != nil {
 		t.Fatal(err)

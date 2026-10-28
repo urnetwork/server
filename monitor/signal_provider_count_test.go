@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -86,6 +88,37 @@ func TestProviderCountSignalJudgesOnlineRankMode(t *testing.T) {
 	}
 }
 
+// The zero-share cohorts exclude capability requests (FP2-MODERN.md): a
+// request that keeps only modern or only post-quantum providers can rightly
+// answer short. The outcomes query drops capability modern, post_quantum and
+// modern_post_quantum, and keeps capability none and the series without the
+// label, which older processes export. Prometheus matches a regular
+// expression against the whole label value, an absent label being the empty
+// string, in Go's RE2 syntax, so the matcher read from the query is
+// evaluated that way here.
+func TestProviderCountQueryExcludesCapabilityRequests(t *testing.T) {
+	query := providerCountQuery("synthetic")
+	if !strings.Contains(query, `increase(urnetwork_findproviders2_outcomes_total{env="synthetic",capability!~"modern.*|post_quantum"}[5m])`) {
+		t.Fatalf("query %q does not exclude capability requests", query)
+	}
+	matcher := regexp.MustCompile(`capability!~"([^"]*)"`).FindStringSubmatch(query)
+	if matcher == nil {
+		t.Fatalf("query %q has no capability matcher", query)
+	}
+	excluded := regexp.MustCompile("^(?:" + matcher[1] + ")$")
+	for value, counted := range map[string]bool{
+		"":                    true,
+		"none":                true,
+		"modern":              false,
+		"post_quantum":        false,
+		"modern_post_quantum": false,
+	} {
+		if excluded.MatchString(value) == counted {
+			t.Errorf("capability %q: counted %t, want %t", value, !counted, counted)
+		}
+	}
+}
+
 func TestProviderCountSignalSyntheticMissingTelemetryIsVisible(t *testing.T) {
 	now := time.Date(2026, 9, 22, 19, 30, 0, 0, time.UTC)
 	_, err := NewProviderCountSignal().Run(context.Background(), providerCountSyntheticSettings(t, now, providerCountFixture(t, now, nil, "false")))
@@ -97,7 +130,8 @@ func TestProviderCountSignalSyntheticMissingTelemetryIsVisible(t *testing.T) {
 func providerCountSyntheticSettings(t testing.TB, now time.Time, payload string) SignalSettings {
 	t.Helper()
 	source := &syntheticSource{hostFn: func(host HostSettings, command string) (string, error) {
-		if host.Name != "metrics-1" || !strings.Contains(command, "urnetwork_findproviders2_outcomes_total") || !strings.Contains(command, "%5B5m%5D") || !strings.Contains(command, "%22synthetic%22") {
+		// every cohort the signal judges is capability-blind
+		if host.Name != "metrics-1" || !strings.Contains(command, "urnetwork_findproviders2_outcomes_total") || !strings.Contains(command, "%5B5m%5D") || !strings.Contains(command, "%22synthetic%22") || !strings.Contains(command, url.QueryEscape(`capability!~"modern.*|post_quantum"`)) {
 			return "", fmt.Errorf("unexpected provider-count Mimir command on %s", host.Name)
 		}
 		return payload, nil

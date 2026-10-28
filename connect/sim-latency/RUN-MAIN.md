@@ -34,15 +34,26 @@ a deterministic regression test. A separate Sol 6.1 low agent then reruns the
 affected test and required suite; do not accept a debugging agent's test run as
 the independent completion result.
 
-The prospective production policy uses Snow's three reviewers:
-`qwen3.8-27b` (`xhigh`), `gemma-4-26b-a4b` (`high`), and
-`muse-glimmer-30b` (`xhigh`). Run them serially because Snow has one resident
+Winner-review SQL guard qualification also requires
+`COMPETITION_WINNER_REVIEW_SQL_TEST=true` in the selected test binaries'
+environment. These guards own fresh, networkless PostgreSQL 18 fixture
+containers; they never use a live database. Before execution, verify that the
+local `postgres:18` tag resolves to the same image ID as the qualification's
+digest-pinned `postgres:18@sha256:…` image: the helper uses `--pull=never`.
+Qualification must fail on any skipped test as well as any failure. Compilation
+and non-SQL passes do not qualify a skipped SQL body. Retain each attempt's
+pre/post container inventory and owned cleanup evidence; preserve failed or
+skipped attempts without relabeling them as accepted qualification.
+
+The prospective production policy uses Snow's two reviewers:
+`qwen3.8-27b` (`xhigh`) and `gemma-4-26b-a4b` (`high`).
+Run them serially because Snow has one resident
 model at a time; allow model-swap latency inside the original shared deadline.
-All three must approve. Retain the union of all attributed findings; a concrete
+Both must approve. Retain the union of all attributed findings; a concrete
 substantiated rejection rejects, while missing, malformed, unavailable or
 uncertain evidence holds progression without inventing approval or dishonesty.
 Snow replaces external model calls for automated test attestations too: the
-prescribed deterministic Go suite runs once, and all three models attest to
+prescribed deterministic Go suite runs once, and both models attest to
 the same authenticated result. Models do not choose commands or rerun tests.
 The selected endpoint requires no API key. Qualification, fixed egress,
 immutable settings, member journals and protected evidence are still mandatory.
@@ -62,9 +73,11 @@ This legacy staging path is not the v2 staging supervisor described below.
 
 ## V2 durable supervision — disabled until qualified
 
-### Adopted automatic closing policy (review-provider update 2026-10-26)
+### Adopted automatic closing policy (review-provider update 2026-10-28)
 
-New seasons should freeze `winner_review_policy: elected_winner_snow_union_v1`.
+New seasons should freeze `winner_review_policy: elected_winner_snow_union_v2`.
+Qwen and Gemma must both approve; retain both members' complete findings.
+Historical Snow v1 records retain their three-member policy and evidence.
 This is a prospective opt-in, not a reinterpretation of an already-open round.
 The empty policy retains the historical independent source-choice flow described
 below. Do not change an existing season's policy approval or running worker pins
@@ -81,7 +94,7 @@ For the adopted policy the durable supervisor performs:
 1. Close admission and finish every accepted evaluation.
 2. Seal and publish the provisional reward election after the reveal boundary.
 3. Automatically dispatch the current elected candidate to the qualified
-   three-model Snow honesty/safety broker, with exact source/patch/score evidence.
+   two-model Snow honesty/safety broker, with exact source/patch/score evidence.
 4. Record a substantiated rejection through the scoped review API, publish its
    reasons and replacement decision, and review the next elected candidate.
    An unavailable model, timeout or uncertainty is not a rejection.
@@ -106,7 +119,7 @@ Prospectively approve these values together with the rest of the season policy:
 
 ```yaml
 automation_policy:
-  winner_review_policy: elected_winner_snow_union_v1
+  winner_review_policy: elected_winner_snow_union_v2
   winner_review_timeout_seconds: 1800
   source_choice_delay_seconds: 0
   staging_preparation_seconds: 0
@@ -137,7 +150,7 @@ export SIM_LATENCY_BUILD_SHA256=REPLACE_WITH_QUALIFIED_BUILD_BROKER_SHA256
 
 The review broker is a deployment-qualified agent integration, not a fake
 template responder or an arbitrary candidate command. It must actually run
-all three pinned Snow models for the new policy in isolated contexts. The
+both pinned Snow models for the new policy in isolated contexts. The
 manager invokes its pinned executable without a shell and with an allowlisted
 environment containing no main/database/vault/reviewer/Git-push credentials.
 The broker must have no ambient access to those credentials either: do not
@@ -152,7 +165,7 @@ instructions. A valid stdout response has schema 1, model/reasoning pins,
 `no_main_credentials: true`, `no_candidate_execution: true`, a complete
 structured `review`, and real bounded `private_evidence`. These identity
 claims are trusted broker provenance, not independent model attestation.
-All six criteria for each of the three models (18 attributed findings) and
+All six criteria for each of the two models (12 attributed findings) and
 exact revision/digests must validate. Uncertainty blocks;
 it must not be fabricated as either approval or misconduct. The manager caches
 accepted response bytes for identical idempotent retries, retains the report in
@@ -504,7 +517,7 @@ Under elected-winner policy a missing build broker blocks the approved winner;
 it must not silently substitute carry-forward. Missing preparation blocks opening.
 
 Source-promoter, reviewer, scheduler, submitter and settlement authority stay
-separate. The three-model Snow union owns code review and honesty/safety judgment; Sol 6.1
+separate. The two-model Snow union owns code review and honesty/safety judgment; Sol 6.1
 max implements and performs authorized source/config merges, while independent
 Sol 6.1 low owns tests. Unattended operation grants no review authority.
 Before approving anything, the trusted main-environment reviewer can materialize

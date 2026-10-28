@@ -105,7 +105,7 @@ func checkWinnerSnowTerminalText(t *testing.T, name string, stream bool, malform
 	}
 	result, err := executeWinnerSnow(t.Context(), client, request, defaultWinnerSnowModelSettings(), provider, strings.Repeat("a", 64), state)
 	if err != nil || result == nil || len(captures) != len(provider.Members) {
-		t.Fatalf("%s: serial producer did not finish exactly three intercepted calls: %v", name, err)
+		t.Fatalf("%s: serial producer did not finish exactly two intercepted calls: %v", name, err)
 	}
 	var evidence winnerSnowEvidence
 	if err := json.Unmarshal([]byte(result.PrivateEvidence), &evidence); err != nil || len(evidence.Members) != len(provider.Members) {
@@ -176,9 +176,9 @@ func TestWinnerSnowMissingOuterBraceIsRetainedAndNonAuthorizing(t *testing.T) {
 		malformedMember int
 	}{
 		{name: "json first member", malformedMember: 0},
-		{name: "json last member", malformedMember: 2},
+		{name: "json last member", malformedMember: 1},
 		{name: "sse first member", stream: true, malformedMember: 0},
-		{name: "sse last member", stream: true, malformedMember: 2},
+		{name: "sse last member", stream: true, malformedMember: 1},
 	} {
 		checkWinnerSnowTerminalText(t, sample.name, sample.stream, sample.malformedMember, false)
 	}

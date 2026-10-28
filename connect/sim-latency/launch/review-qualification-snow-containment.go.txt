@@ -210,7 +210,7 @@ func validateSnowReviewQualificationJournals(artifacts map[string][]byte, pin re
 	if err := decodeStrictJSONBytes([]byte(result.PrivateEvidence), &evidence, "Snow journal member observations"); err != nil {
 		return err
 	}
-	if len(evidence.Members) != len(provider.Members) || len(evidence.Members) != 3 {
+	if len(evidence.Members) != len(provider.Members) || len(evidence.Members) != len(defaultWinnerSnowProviderSettings().Members) {
 		return errors.New("Snow journal output lost an original member")
 	}
 	state := filepath.Join(attempt, "member-state")

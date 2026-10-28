@@ -107,7 +107,7 @@ func selectReviewedSourceProposal(proposals []reviewedSourceProposal, current *m
 			continue
 		}
 		lockDigest, err := model.CompetitionSourceLockDigestForMode(proposal.Commits, current.Staging)
-		if err != nil || lockDigest != proposal.SourceLockSha256 || (current.WinnerReviewPolicy == model.CompetitionSnowWinnerReviewPolicy && proposal.WinnerReviewPolicy != current.WinnerReviewPolicy) || validateReviewedSourceBuildForPolicy(proposal.BuildReceipt, proposal.ReviewId, proposal.PatchSha256, lockDigest, current.Staging, proposal.WinnerReviewPolicy) != nil {
+		if err != nil || lockDigest != proposal.SourceLockSha256 || (model.IsCompetitionSnowWinnerReviewPolicy(current.WinnerReviewPolicy) && proposal.WinnerReviewPolicy != current.WinnerReviewPolicy) || validateReviewedSourceBuildForPolicy(proposal.BuildReceipt, proposal.ReviewId, proposal.PatchSha256, lockDigest, current.Staging, proposal.WinnerReviewPolicy) != nil {
 			continue
 		}
 		applicable := false

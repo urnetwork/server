@@ -37,23 +37,23 @@ func winnerSnowMemberFixture(t *testing.T) (winnerReviewBrokerRequest, []winnerS
 	return request, members
 }
 
-// Approval retains all eighteen attributed findings, not a selected model.
-func TestWinnerSnowUnionRequiresAllThreeMembers(t *testing.T) {
+// Approval retains all twelve attributed findings, not a selected model.
+func TestWinnerSnowUnionRequiresBothMembers(t *testing.T) {
 	request, members := winnerSnowMemberFixture(t)
 	combined := aggregateWinnerSnow(members, defaultWinnerSnowProviderSettings(), request)
-	if combined.Decision != "approve" || len(combined.Findings) != 18 {
+	if combined.Decision != "approve" || len(combined.Findings) != 12 {
 		t.Fatalf("complete union did not approve: %s (%d findings)", combined.Decision, len(combined.Findings))
 	}
-	combined = aggregateWinnerSnow(members[:2], defaultWinnerSnowProviderSettings(), request)
+	combined = aggregateWinnerSnow(members[:1], defaultWinnerSnowProviderSettings(), request)
 	if combined.Decision != "uncertain" {
-		t.Fatal("missing third reviewer authorized a decision")
+		t.Fatal("missing second reviewer authorized a decision")
 	}
 }
 
 // Parent replay must compare retained raw output, not trust a replaced struct.
 func TestWinnerSnowUnionRejectsReplacedDecodedJudgment(t *testing.T) {
 	request, members := winnerSnowMemberFixture(t)
-	members[2].ProviderOutput = `{}`
+	members[1].ProviderOutput = `{}`
 	if aggregateWinnerSnow(members, defaultWinnerSnowProviderSettings(), request).Decision != "uncertain" {
 		t.Fatal("replaced raw judgment authorized approval")
 	}
@@ -62,7 +62,7 @@ func TestWinnerSnowUnionRejectsReplacedDecodedJudgment(t *testing.T) {
 // One provider receipt cannot stand in for two independent reviewers.
 func TestWinnerSnowUnionRejectsDuplicateProviderReceipt(t *testing.T) {
 	request, members := winnerSnowMemberFixture(t)
-	members[2].ProviderResponseId = members[0].ProviderResponseId
+	members[1].ProviderResponseId = members[0].ProviderResponseId
 	if aggregateWinnerSnow(members, defaultWinnerSnowProviderSettings(), request).Decision != "uncertain" {
 		t.Fatal("reused provider receipt authorized approval")
 	}
@@ -72,7 +72,7 @@ func TestWinnerSnowUnionRejectsDuplicateProviderReceipt(t *testing.T) {
 func TestWinnerSnowUnionRejectsMissingMemberUsage(t *testing.T) {
 	request, members := winnerSnowMemberFixture(t)
 	for _, usage := range []json.RawMessage{nil, json.RawMessage(`{}`), json.RawMessage(`{"input_tokens":10,"output_tokens":0}`)} {
-		members[2].Usage = usage
+		members[1].Usage = usage
 		if aggregateWinnerSnow(members, defaultWinnerSnowProviderSettings(), request).Decision != "uncertain" {
 			t.Fatal("member without genuine token accounting authorized approval")
 		}
@@ -113,13 +113,13 @@ func TestWinnerSnowMemberJournalRequiresPrivateDirectory(t *testing.T) {
 	}
 }
 
-// A member cannot escape the fixed six-leaf journal census.
+// A member cannot escape the fixed four-leaf journal census.
 func TestWinnerSnowMemberJournalRejectsUnknownIdentity(t *testing.T) {
 	directory := t.TempDir()
 	if err := os.Chmod(directory, 0700); err != nil {
 		t.Fatal(err)
 	}
-	for _, index := range []int{0, 4} {
+	for _, index := range []int{0, 3, 4} {
 		if err := persistWinnerSnowMember(directory, index, "started", struct{}{}); err == nil {
 			t.Fatal("unknown member accepted")
 		}

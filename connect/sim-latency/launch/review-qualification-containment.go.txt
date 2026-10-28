@@ -312,7 +312,8 @@ func authenticateReviewQualificationContainment(input, output, diagnostics []byt
 }
 
 // Snow has a public settings/map proof, never a model-key ownership exception.
-// Historical coverage remains 16/15; Snow requires its distinct 17/16 census.
+// Historical coverage remains 16/15 and canceled Snow remains 17. Completed
+// Snow adds its claim, process-state observation and each selected member pair.
 func authenticateReviewQualificationContainmentForProvider(input, output, diagnostics []byte, canceled bool, image string, settings reviewQualificationSettings, profile reviewQualificationProviderProfile) (string, error) {
 	lines := bytes.Split(bytes.TrimSpace(diagnostics), []byte("\n"))
 	if len(lines) == 0 {
@@ -342,7 +343,7 @@ func authenticateReviewQualificationContainmentForProvider(input, output, diagno
 	}
 	maximumArtifacts := 16
 	if profile.Snow {
-		maximumArtifacts = 25
+		maximumArtifacts = 19 + 2*len(defaultWinnerSnowProviderSettings().Members)
 	}
 	if manifest.Schema != 1 || manifest.Kind != "winner-review-container-evidence" || len(manifest.Artifacts) > maximumArtifacts {
 		return "", errors.New("actual wrapper evidence manifest invalid")
@@ -374,7 +375,7 @@ func authenticateReviewQualificationContainmentForProvider(input, output, diagno
 		requiredArtifacts = append(requiredArtifacts, "provider-settings.json", "provider-settings-ownership.json", "member-state-ownership.json")
 		if !canceled {
 			requiredArtifacts = append(requiredArtifacts, "attempt-claim.json")
-			for index := 1; index <= 3; index++ {
+			for index := 1; index <= len(defaultWinnerSnowProviderSettings().Members); index++ {
 				requiredArtifacts = append(requiredArtifacts, fmt.Sprintf("member-%02d.started.json", index), fmt.Sprintf("member-%02d.complete.json", index))
 			}
 		}

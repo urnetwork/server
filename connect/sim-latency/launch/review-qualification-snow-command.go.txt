@@ -47,7 +47,7 @@ type snowReviewQualificationAuthorization struct {
 // started; settings are public root-owned0444, never a key or parent directory.
 func authenticateSnowReviewQualificationInputs(config snowReviewQualificationConfig, settings reviewQualificationSettings) (*reviewQualificationImage, winnerSnowProviderSettings, error) {
 	var provider winnerSnowProviderSettings
-	if config.Schema != 1 || config.Kind != "winner-review-snow-provider-qualification-config" || !filepath.IsAbs(config.OutputDirectory) || filepath.Clean(config.OutputDirectory) != config.OutputDirectory || config.BrokerConfiguration.Path != "/etc/urnetwork/competition-review.json" || config.ProviderSettings.Path != "/var/lib/urnetwork/competition-review/snow-provider.json" {
+	if config.Schema != 1 || config.Kind != "winner-review-snow-provider-qualification-config" || !filepath.IsAbs(config.OutputDirectory) || filepath.Clean(config.OutputDirectory) != config.OutputDirectory || config.BrokerConfiguration.Path != "/etc/urnetwork/competition-review-v2.json" || config.ProviderSettings.Path != "/var/lib/urnetwork/competition-review/snow-provider-v2.json" {
 		return nil, provider, errors.New("explicit Snow qualification/configuration paths required")
 	}
 	if err := reviewQualificationPrivateRoot(filepath.Dir(config.OutputDirectory)); err != nil {
@@ -114,7 +114,7 @@ func authenticateSnowReviewQualificationInputs(config snowReviewQualificationCon
 		return nil, provider, err
 	}
 	if authorization.Schema != 1 || authorization.Kind != "winner-review-snow-provider-qualification-authorization" || authorization.Policy != model.CompetitionSnowWinnerReviewPolicy || authorization.ProviderSettingsSha256 != config.ProviderSettings.Sha256 || authorization.OutputDirectory != config.OutputDirectory || !authorization.SingleAttempt || !authorization.NoExternalProviders || authorization.AuthorizedAt.IsZero() || authorization.AuthorizedAt.After(time.Now().UTC()) {
-		return nil, provider, errors.New("one explicit local three-model qualification authorization required")
+		return nil, provider, errors.New("one explicit local two-model qualification authorization required")
 	}
 	return &image, provider, nil
 }
@@ -207,5 +207,5 @@ func runSnowReviewQualificationCommand(t *testing.T, configBytes []byte, setting
 	if err != nil {
 		t.Fatal("Snow provider qualification failed closed; preserve all member artifacts, no automatic retry: ", err)
 	}
-	t.Log(fmt.Sprintf("local three-model qualification complete=%t qualified=%t cases=%d; no external provider/main/API/database writes", report.Complete, report.Qualified, len(report.Observations)))
+	t.Log(fmt.Sprintf("local two-model qualification complete=%t qualified=%t cases=%d; no external provider/main/API/database writes", report.Complete, report.Qualified, len(report.Observations)))
 }

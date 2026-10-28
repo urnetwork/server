@@ -10,7 +10,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	mathrand "math/rand"
+	"maps"
 	"strings"
 	"time"
 
@@ -69,6 +69,12 @@ type clientScoreNativeManifest struct {
 	SourceStartedAt   time.Time
 	SourceCompletedAt time.Time
 	Facets            map[ipFamilyFacet][]clientScoreNativePageInfo
+	// Whether the export partitioned each facet's pages modern first
+	// (network_client_score_modern.go): the leading ModernPages[facet] pages
+	// hold modern providers only, the rest none. False, as a manifest written
+	// before the partition decodes, leaves the target absent.
+	ModernPartitioned bool
+	ModernPages       map[ipFamilyFacet]int
 }
 
 type clientScoreNativePointer struct {
@@ -157,15 +163,6 @@ redis.call(expireCommand, KEYS[2], expiryMillis)
 redis.call('SET', KEYS[1], ARGV[5], setExpiryOption, expiryMillis)
 return 1
 `
-
-// A page batch is one script, which holds its node for the whole batch, unlike
-// the legacy stream's pipelined SETs. A batch therefore carries at most 1 MiB
-// of pages, or one larger page alone. At the legacy stream's 8 MiB a batch held
-// a node for 26-33 ms (80 ms at most) on 2026-10-25.
-const (
-	clientScoreNativePageBatchSize  = clientScoreExportBatchSize
-	clientScoreNativePageBatchBytes = 1 << 20
-)
 
 // A snapshot owns one inactive slot. Expected page names are recorded while
 // streaming, not reconstructed from possibly partial Redis contents at commit.
@@ -333,14 +330,21 @@ func writeClientScoreNativeSnapshot(ctx context.Context, r server.RedisClient, k
 	if err != nil {
 		return err
 	}
-	manifest := clientScoreNativeManifest{Generation: publication.generation, Facets: map[ipFamilyFacet][]clientScoreNativePageInfo{}}
+	manifest := clientScoreNativeManifest{
+		Generation:        publication.generation,
+		Facets:            map[ipFamilyFacet][]clientScoreNativePageInfo{},
+		ModernPartitioned: true,
+		ModernPages:       map[ipFamilyFacet]int{},
+	}
 	if 0 < len(sources) && sources[0] != nil {
 		manifest.PublicationId = sources[0].PublicationId
 		manifest.SourceStartedAt = sources[0].SourceStartedAt
 		manifest.SourceCompletedAt = sources[0].SourceCompletedAt
 	}
 	staged := false
-	err = runClientScoreExportStream(ctx, clientScoreNativePageBatchSize, clientScoreNativePageBatchBytes, 1,
+	// A native batch is one script, so it uses the smaller node-blocking budget.
+	settings := defaultClientScoreExportSettings()
+	err = runClientScoreExportStream(ctx, settings.batchSize, settings.nativeBatchBytes, 1,
 		func(emit func(clientScoreRedisSet) error) error {
 			for _, facet := range ipFamilyFacets {
 				payload, ok := facets[facet]
@@ -348,6 +352,10 @@ func writeClientScoreNativeSnapshot(ctx context.Context, r server.RedisClient, k
 					return fmt.Errorf("native client score publication omitted a facet")
 				}
 				manifest.Facets[facet] = []clientScoreNativePageInfo{}
+				if payload.modernPageCount < 0 || len(payload.counts) < payload.modernPageCount {
+					return fmt.Errorf("native client score publication has an invalid modern partition")
+				}
+				manifest.ModernPages[facet] = payload.modernPageCount
 				for index, count := range payload.counts {
 					if count <= 0 || ClientScoreSampleCount < count {
 						return fmt.Errorf("native client score publication has invalid page size")
@@ -433,6 +441,16 @@ func readClientScoreNativeManifest(ctx context.Context, r server.RedisClient, ke
 // partial result into proof of exhaustion. No native metadata at all is the
 // pre-schema compatibility case.
 func loadNativeClientScoresWithCursor(ctx context.Context, mode RankMode, locations, groups map[server.Id]bool, caller server.Id, n int, facets []ipFamilyFacet, observation *findProviders2LoadObservation) (scores map[server.Id]*ClientScore, cursor *clientScoreCursor, available bool, returnErr error) {
+	return loadNativeClientScoresWithPartition(ctx, mode, locations, groups, caller, n, facets, clientScorePartitionOff, observation)
+}
+
+// loadNativeClientScoresWithCursor in a partition mode
+// (network_client_score_modern.go): a manifest's ModernPages place its leading
+// pages per facet in the modern phase. A manifest written before the
+// partition is absent, all its pages in the other phase, and one whose
+// partition does not fit its pages is stale, all its pages in the modern
+// phase.
+func loadNativeClientScoresWithPartition(ctx context.Context, mode RankMode, locations, groups map[server.Id]bool, caller server.Id, n int, facets []ipFamilyFacet, partition clientScorePartitionMode, observation *findProviders2LoadObservation) (scores map[server.Id]*ClientScore, cursor *clientScoreCursor, available bool, returnErr error) {
 	server.Redis(ctx, func(r server.RedisClient) {
 		type target struct {
 			callerKey   string
@@ -469,10 +487,13 @@ func loadNativeClientScoresWithCursor(ctx context.Context, mode RankMode, locati
 				return
 			}
 		}
-		pagesByFacet := make([]map[string]clientScorePage, len(facets))
-		for i := range pagesByFacet {
-			pagesByFacet[i] = map[string]clientScorePage{}
+		modernPagesByFacet := make([]map[string]clientScorePage, len(facets))
+		otherPagesByFacet := make([]map[string]clientScorePage, len(facets))
+		for i := range facets {
+			modernPagesByFacet[i] = map[string]clientScorePage{}
+			otherPagesByFacet[i] = map[string]clientScorePage{}
 		}
+		targetStates := map[string]int{}
 		for _, target := range targets {
 			if err := target.callerRead.Err(); err != nil && !errors.Is(err, redis.Nil) {
 				continue
@@ -504,12 +525,28 @@ func loadNativeClientScoresWithCursor(ctx context.Context, mode RankMode, locati
 				returnErr = errors.Join(returnErr, err)
 				continue
 			}
+			state := clientScoreModernAbsent
+			if manifest.ModernPartitioned {
+				state = clientScoreModernPartitioned
+				for _, facet := range facets {
+					if modernPages := manifest.ModernPages[facet]; modernPages < 0 || len(manifest.Facets[facet]) < modernPages {
+						state = clientScoreModernStale
+					}
+				}
+			}
+			targetStates[state] += 1
 			for i, facet := range facets {
+				modernPages := manifest.ModernPages[facet]
 				for index, info := range manifest.Facets[facet] {
 					field := clientScoreNativePageField(facet, index)
-					pagesByFacet[i][slotKey+":"+field] = clientScorePage{
+					page := clientScorePage{
 						key: field, expectedCount: info.Count, nativeKey: slotKey,
 						nativeGeneration: manifest.Generation, nativeChecksum: info.Checksum,
+					}
+					if state == clientScoreModernStale || (state == clientScoreModernPartitioned && index < modernPages) {
+						modernPagesByFacet[i][slotKey+":"+field] = page
+					} else {
+						otherPagesByFacet[i][slotKey+":"+field] = page
 					}
 				}
 			}
@@ -520,15 +557,34 @@ func loadNativeClientScoresWithCursor(ctx context.Context, mode RankMode, locati
 			returnErr = nil
 			return
 		}
-		cursor = &clientScoreCursor{observation: observation, nativeOnly: true, sourceIncomplete: returnErr != nil}
-		for _, pages := range pagesByFacet {
-			group := []clientScorePage{}
-			for _, page := range pages {
-				group = append(group, page)
+		if partition != clientScorePartitionOff {
+			for state, targetCount := range targetStates {
+				findProviders2ModernPartitionTargets.WithLabelValues("native", state).Add(float64(targetCount))
 			}
-			mathrand.Shuffle(len(group), func(i, j int) { group[i], group[j] = group[j], group[i] })
-			cursor.pages = append(cursor.pages, group...)
 		}
+		var modernGroups, otherGroups []map[string]clientScorePage
+		switch partition {
+		case clientScorePartitionModernFirst:
+			modernGroups, otherGroups = modernPagesByFacet, otherPagesByFacet
+		case clientScorePartitionModernOnly:
+			modernGroups = modernPagesByFacet
+			if observation != nil {
+				for _, pages := range otherPagesByFacet {
+					for _, page := range pages {
+						observation.unreadNonModernRows += page.expectedCount
+					}
+				}
+			}
+		default:
+			for i := range facets {
+				pages := maps.Clone(modernPagesByFacet[i])
+				maps.Copy(pages, otherPagesByFacet[i])
+				otherGroups = append(otherGroups, pages)
+			}
+		}
+		cursor = newClientScorePhasedCursor(modernGroups, otherGroups, observation)
+		cursor.nativeOnly = true
+		cursor.sourceIncomplete = returnErr != nil
 		var readErr error
 		scores, readErr = cursor.readWithClient(ctx, r, n)
 		returnErr = errors.Join(returnErr, readErr)
@@ -541,13 +597,19 @@ func loadNativeClientScoresWithCursor(ctx context.Context, mode RankMode, locati
 // bounded legacy read, retaining independently validated native rows. Such a
 // source remains explicitly incomplete even when fallback restores availability.
 func loadPreferredClientScoresWithCursor(nativeReaderEnabled, forceMinimum bool, mode RankMode, ctx context.Context, locations, groups map[server.Id]bool, caller server.Id, n int, facets []ipFamilyFacet, observations ...*findProviders2LoadObservation) (scores map[server.Id]*ClientScore, cursor *clientScoreCursor, returnErr error) {
+	return loadPreferredClientScoresWithPartition(nativeReaderEnabled, forceMinimum, mode, ctx, locations, groups, caller, n, facets, clientScorePartitionOff, observations...)
+}
+
+// loadPreferredClientScoresWithCursor in a partition mode
+// (network_client_score_modern.go), native and legacy sources alike.
+func loadPreferredClientScoresWithPartition(nativeReaderEnabled, forceMinimum bool, mode RankMode, ctx context.Context, locations, groups map[server.Id]bool, caller server.Id, n int, facets []ipFamilyFacet, partition clientScorePartitionMode, observations ...*findProviders2LoadObservation) (scores map[server.Id]*ClientScore, cursor *clientScoreCursor, returnErr error) {
 	var observation *findProviders2LoadObservation
 	if 0 < len(observations) {
 		observation = observations[0]
 	}
 	if nativeReaderEnabled && !forceMinimum {
 		var available bool
-		scores, cursor, available, returnErr = loadNativeClientScoresWithCursor(ctx, mode, locations, groups, caller, n, facets, observation)
+		scores, cursor, available, returnErr = loadNativeClientScoresWithPartition(ctx, mode, locations, groups, caller, n, facets, partition, observation)
 		if ctx.Err() != nil {
 			returnErr = ctx.Err()
 			return
@@ -557,7 +619,7 @@ func loadPreferredClientScoresWithCursor(nativeReaderEnabled, forceMinimum bool,
 		}
 		if returnErr != nil {
 			nativeScores, nativeErr := scores, returnErr
-			scores, cursor, returnErr = loadClientScoresWithCursor(false, mode, ctx, locations, groups, caller, n, facets, observations...)
+			scores, cursor, returnErr = loadClientScoresWithPartition(false, mode, ctx, locations, groups, caller, n, facets, partition, observations...)
 			if scores == nil {
 				scores = map[server.Id]*ClientScore{}
 			}
@@ -576,5 +638,5 @@ func loadPreferredClientScoresWithCursor(nativeReaderEnabled, forceMinimum bool,
 			return
 		}
 	}
-	return loadClientScoresWithCursor(forceMinimum, mode, ctx, locations, groups, caller, n, facets, observations...)
+	return loadClientScoresWithPartition(forceMinimum, mode, ctx, locations, groups, caller, n, facets, partition, observations...)
 }

@@ -74,7 +74,7 @@ func TestWinnerSnowMemberProjectionCannotInventRewardDisqualification(t *testing
 // mixed member reasons while publishing only the compatible reward summary.
 func TestWinnerSnowUnionRetainsMixedMemberReasonsAndAllFindings(t *testing.T) {
 	request, members := winnerSnowMemberFixture(t)
-	judgment := members[2].Judgment
+	judgment := members[1].Judgment
 	judgment.Findings = append([]model.CompetitionReviewFinding{}, judgment.Findings...)
 	judgment.Decision, judgment.ReasonCodes = "disqualify", []string{"MEASUREMENT_FABRICATION", "APPROVED"}
 	judgment.Findings[0].Disposition, judgment.Findings[0].ReasonCode = "fail", "MEASUREMENT_FABRICATION"
@@ -82,13 +82,13 @@ func TestWinnerSnowUnionRetainsMixedMemberReasonsAndAllFindings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	members[2].Judgment, members[2].ProviderOutput = judgment, string(content)
+	members[1].Judgment, members[1].ProviderOutput = judgment, string(content)
 	original, err := json.Marshal(members)
 	if err != nil {
 		t.Fatal(err)
 	}
 	combined := aggregateWinnerSnow(members, defaultWinnerSnowProviderSettings(), request)
-	if combined.Decision != "disqualify" || len(combined.Findings) != 18 || len(combined.ReasonCodes) != 1 || combined.ReasonCodes[0] != "MEASUREMENT_FABRICATION" {
+	if combined.Decision != "disqualify" || len(combined.Findings) != 12 || len(combined.ReasonCodes) != 1 || combined.ReasonCodes[0] != "MEASUREMENT_FABRICATION" {
 		t.Fatal("mixed summary lost rejection or the complete findings union", combined.Decision, combined.ReasonCodes, len(combined.Findings))
 	}
 	after, err := json.Marshal(members)

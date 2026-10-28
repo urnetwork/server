@@ -11,10 +11,10 @@ import (
 
 // Reuses synthetic evidence while attributing each complete criterion set.
 func snowWinnerReviewFixture() (CompetitionAutomationPolicy, CompetitionIntegrityReviewRequest) {
-	policy, review := winnerProviderReviewFixture(CompetitionSnowWinnerReviewPolicy)
+	policy, review := winnerProviderReviewFixture(CompetitionSnowWinnerReviewPolicyV1)
 	single := review.Findings
 	review.Findings = nil
-	for _, modelName := range CompetitionSnowWinnerReviewModels() {
+	for _, modelName := range CompetitionSnowWinnerReviewModelsForPolicy(CompetitionSnowWinnerReviewPolicyV1) {
 		for _, finding := range single {
 			finding.Model = modelName
 			review.Findings = append(review.Findings, finding)
@@ -24,24 +24,24 @@ func snowWinnerReviewFixture() (CompetitionAutomationPolicy, CompetitionIntegrit
 }
 
 // Literal tuples prohibit cross-policy reinterpretation and obsolete dual mode.
-func TestSnowWinnerPolicyIsAdditiveAndPinsAllThreeMembers(t *testing.T) {
-	if CompetitionSnowWinnerReviewPolicy != "elected_winner_snow_union_v1" || CompetitionSnowWinnerReviewModel != "snow-qwen-gemma-muse-union" || CompetitionSnowWinnerReviewReasoning != "provider-default" {
+func TestSnowWinnerHistoricalPolicyPinsAllThreeMembers(t *testing.T) {
+	if CompetitionSnowWinnerReviewPolicyV1 != "elected_winner_snow_union_v1" || CompetitionSnowWinnerReviewModelV1 != "snow-qwen-gemma-muse-union" || CompetitionSnowWinnerReviewReasoning != "provider-default" {
 		t.Fatal("Snow aggregate identity changed")
 	}
-	modelName, reasoning, supported := CompetitionWinnerReviewProvider(CompetitionSnowWinnerReviewPolicy)
-	if !supported || modelName != CompetitionSnowWinnerReviewModel || reasoning != CompetitionSnowWinnerReviewReasoning || !IsCompetitionWinnerReviewPolicy(CompetitionSnowWinnerReviewPolicy) {
+	modelName, reasoning, supported := CompetitionWinnerReviewProvider(CompetitionSnowWinnerReviewPolicyV1)
+	if !supported || modelName != CompetitionSnowWinnerReviewModelV1 || reasoning != CompetitionSnowWinnerReviewReasoning || !IsCompetitionWinnerReviewPolicy(CompetitionSnowWinnerReviewPolicyV1) {
 		t.Fatal("Snow policy did not enter the elected-winner lifecycle")
 	}
 	wantModels := []string{"qwen3.8-27b", "gemma-4-26b-a4b", "muse-glimmer-30b"}
-	models := CompetitionSnowWinnerReviewModels()
+	models := CompetitionSnowWinnerReviewModelsForPolicy(CompetitionSnowWinnerReviewPolicyV1)
 	if !slices.Equal(models, wantModels) {
 		t.Fatal("Snow member census changed", models)
 	}
 	models[0] = "synthetic-unapproved-member"
-	if !slices.Equal(CompetitionSnowWinnerReviewModels(), wantModels) {
+	if !slices.Equal(CompetitionSnowWinnerReviewModelsForPolicy(CompetitionSnowWinnerReviewPolicyV1), wantModels) {
 		t.Fatal("caller mutated the process-wide Snow member census")
 	}
-	for _, unknown := range []string{"elected_winner_snow_dual_v1", "elected_winner_snow_union_v2"} {
+	for _, unknown := range []string{"elected_winner_snow_dual_v1", "elected_winner_snow_union_v3"} {
 		if IsCompetitionWinnerReviewPolicy(unknown) {
 			t.Errorf("unknown Snow policy was adopted: %s", unknown)
 		}

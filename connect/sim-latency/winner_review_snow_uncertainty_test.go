@@ -78,7 +78,7 @@ func TestWinnerSnowMixedUncertaintyCannotInventApprovalOrRejection(t *testing.T)
 }
 
 // The real union keeps the uncertain original alongside every other member
-// finding; the unchanged public native validator still receives all eighteen.
+// finding; the unchanged public native validator still receives all twelve.
 func TestWinnerSnowUnionPreservesUncertainFindingAndNativeQuorum(t *testing.T) {
 	request, members := winnerSnowMemberFixture(t)
 	_, mixed := winnerSnowMixedUncertaintyFixture()
@@ -86,16 +86,16 @@ func TestWinnerSnowUnionPreservesUncertainFindingAndNativeQuorum(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	members[2].Judgment, members[2].ProviderOutput = mixed, string(content)
+	members[1].Judgment, members[1].ProviderOutput = mixed, string(content)
 	before, err := json.Marshal(members)
 	if err != nil {
 		t.Fatal(err)
 	}
 	combined := aggregateWinnerSnow(members, defaultWinnerSnowProviderSettings(), request)
-	if combined.Decision != "disqualify" || len(combined.Findings) != 18 || combined.Findings[13].Model != "muse-glimmer-30b" || combined.Findings[13].Disposition != "uncertain" || combined.Findings[13].ReasonCode != "SOURCE_NOT_READY" {
+	if combined.Decision != "disqualify" || len(combined.Findings) != 12 || combined.Findings[7].Model != "gemma-4-26b-a4b" || combined.Findings[7].Disposition != "uncertain" || combined.Findings[7].ReasonCode != "SOURCE_NOT_READY" {
 		t.Fatal("mixed rejection lost its genuine member census", combined.Decision, len(combined.Findings))
 	}
-	result := winnerSnowBrokerResult(request, combined, []byte("Synthetic complete three-member retained evidence."))
+	result := winnerSnowBrokerResult(request, combined, []byte("Synthetic complete two-member retained evidence."))
 	if err := model.ValidateCompetitionIntegrityReview(result.Review, request.Request.Policy); err != nil {
 		t.Fatal("complete Snow rejection failed unchanged native API validation", err)
 	}

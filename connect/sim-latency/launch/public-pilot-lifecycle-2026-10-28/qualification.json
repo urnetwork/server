@@ -1,0 +1,59 @@
+{
+  "schema": 1,
+  "kind": "public-pilot-lifecycle-synthetic-source-qualification",
+  "source_qualification_only": true,
+  "genuine_public_pilot_qualified": false,
+  "native_cli_or_kernel_qualification": false,
+  "source_revision_manifest_sha256": "dc5ebbbd37fbb38b99fc1561223c81c331eee2ae9a19eea070da8eb44a233903",
+  "source_pins": [
+    {
+      "path": "server/connect/sim-latency/launch/held-out-public-pilot.go.txt",
+      "sha256": "9e59d5c9278103ab94b29bff5e113dba98186130c798ab5db877bb5a9b79c765"
+    },
+    {
+      "path": "server/connect/sim-latency/launch/held-out-public-pilot-after.go.txt",
+      "sha256": "4e68b22b261db4b4cce9bc66d9192bb60d0208e341252bda318e97f8399a4d9d"
+    },
+    {
+      "path": "server/connect/sim-latency/launch/held-out-public-pilot-command.go.txt",
+      "sha256": "26a219e0a5c3b93621e8d41dd0cd5546110884d9e774b388b676e152b7edf0fb"
+    },
+    {
+      "path": "server/connect/sim-latency/launch/held-out-public-pilot-tests.go.txt",
+      "sha256": "0f54d21eca9c796715bea3e698c056e0cfd3815b7dbab7c4e3af1b5927d05604"
+    }
+  ],
+  "exact_overlay_mappings": 33,
+  "resolved_go_source_files": 240,
+  "physical_package_go_files": 229,
+  "compile": {
+    "race": true,
+    "go_version": "go1.27.3",
+    "exit_code": 0,
+    "seconds": 360.2254285812378
+  },
+  "binary_sha256": "04695b33e508fa0a16dd0b5a7a52570940e488615b52fe04ab6c60247c81ef2c",
+  "consecutive_passes": 3,
+  "tests_per_pass": 41,
+  "failures": 0,
+  "skips": 0,
+  "pass_wall_seconds": [
+    167.99728059768677,
+    168.23265624046326,
+    168.1129777431488
+  ],
+  "qualification_receipt": {
+    "path": "/mnt/data/urnetwork-competition-temp/pilot-closure-unit-20261028.Yb5pggEq/QUALIFICATION-RECEIPT.json",
+    "sha256": "f3cda0f4c49cd3b94a051f4b3578e8f82b981fffa3903da8e5558615d671031b"
+  },
+  "artifact_pins_sha256": "b1de999d9c3098649104301f521ef461bced75d5f98a60a79722d6b8d3e95b80",
+  "smoke_roster_sha256": "e8c5266e8106b6af1ca93580b874ea0a5006364868290d6382e895e61c33060c",
+  "prospective_full224_roster_sha256": "1b2d0b38b483ae7b8ed9b57a6a2a0950590948c5327b84d4617e6a4a7a16a5dd",
+  "full224_run": false,
+  "native_measurements": 0,
+  "private_hidden_seed_draws": 0,
+  "provider_or_model_calls": 0,
+  "captured_raw_r9_fixture": "Synthetic captured process/kernel boundary with real original raw scorer/artifact validators,467/7/5 bindings and reducers; not actual native CLI/kernel qualification or measured slower direction.",
+  "preflight_incident": "First orchestration count mismatch was retained and corrected prospectively to9146all/5215source-only before any Go execution; no failed test pass is hidden.",
+  "status": "Exact four integrated additive fragments passed41syntheticguards three times. Full224,actualnativeCLI/kernelcontext,genuineR9/R9publicpilot,after-censusconstructionandhidden-screenqualificationremainseparatependinggates."
+}

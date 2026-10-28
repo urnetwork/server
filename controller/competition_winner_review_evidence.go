@@ -27,7 +27,7 @@ type CompetitionWinnerReviewEvidence struct {
 // The report is bounded and content-addressed under its exact round and job.
 func RetainCompetitionWinnerReviewEvidence(ctx context.Context, settings *Settings, roundId, jobId server.Id, content []byte, expected string) (*CompetitionWinnerReviewEvidence, error) {
 	maximumEvidenceBytes := 64 * 1024
-	if settings != nil && settings.AutomationPolicy.WinnerReviewPolicy == model.CompetitionSnowWinnerReviewPolicy {
+	if settings != nil && model.IsCompetitionSnowWinnerReviewPolicy(settings.AutomationPolicy.WinnerReviewPolicy) {
 		maximumEvidenceBytes = 512 * 1024
 	}
 	if settings == nil || roundId == (server.Id{}) || jobId == (server.Id{}) || len(content) == 0 || len(content) > maximumEvidenceBytes {

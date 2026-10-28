@@ -136,15 +136,20 @@ func sourceTestModelJournalContext(ctx context.Context, plan sourceTestPlan, set
 // or missing observation is uncertainty, not permission to sample again. The
 // qualifier must reconcile it explicitly; completed streams replay byte-for-byte.
 func journalSourceTestProviderStream(ctx context.Context, phase string, payload []byte, settings sourceTestModelSettings, send func() ([]byte, error)) ([]byte, error) {
-	if settings.ResponseJournalDirectory == "" {
-		return send()
-	}
 	allowedPhase := phase == "invocation" || phase == "completion"
 	if settings.SnowProvider != nil {
-		allowedPhase = phase == "snow-qwen" || phase == "snow-gemma" || phase == "snow-muse"
+		allowedPhase = false
+		if validateWinnerSnowProviderSettings(*settings.SnowProvider) == nil {
+			for _, member := range settings.SnowProvider.Members {
+				allowedPhase = allowedPhase || phase == "snow-"+member.Name
+			}
+		}
 	}
 	if !allowedPhase || send == nil {
 		return nil, errors.New("independent provider journal phase is invalid")
+	}
+	if settings.ResponseJournalDirectory == "" {
+		return send()
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err

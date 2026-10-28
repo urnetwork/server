@@ -28,8 +28,8 @@ type PassResult struct {
 	// the sweep's next start had not come, and nothing was read
 	Waiting bool `json:"waiting,omitempty"`
 	// providers the pass's pages held, how many were due for evidence, how
-	// many of those the egress rules admit to quality or speed, how many it
-	// started measuring and how many it recorded evidence for
+	// many of those the egress rules keep in online, how many it started
+	// measuring and how many it recorded evidence for
 	Scanned  int `json:"scanned"`
 	Due      int `json:"due"`
 	Eligible int `json:"eligible"`
@@ -46,16 +46,16 @@ type PassResult struct {
 }
 
 // One pass's owners and seams. Production builds one in SelectPass and one
-// in FinishPass; tests replace the reads, the tunnels, the write and the
-// clock. It is safe for concurrent use after construction: measurements
-// share only the record write, and the pass's own counts are kept under its
-// own lock.
+// in FinishPass; tests replace the reads, the tunnels, the write, the clock
+// and the selection's log. It is safe for concurrent use after construction:
+// measurements share only the record write, and the pass's own counts are
+// kept under its own lock.
 type passRunner struct {
 	settings Settings
 	// the establishment window a ClientHello has to be answered in
 	tlsTimeout     time.Duration
 	readPage       func(ctx context.Context, afterClientId server.Id, pageSize int, modernRefreshBefore time.Time, otherRefreshBefore time.Time) ([]model.ProviderCapabilityProbeCandidate, error)
-	filterEligible func(ctx context.Context, clientIds []server.Id) ([]server.Id, error)
+	filterEligible func(ctx context.Context, clientIds []server.Id) (model.ProviderCapabilityProbeEligibility, error)
 	open           openCapabilityTunnel
 	// writes evidence unless it would downgrade fresh modern evidence
 	// without downgradeConfirmed, in which case it writes nothing and held
@@ -63,6 +63,8 @@ type passRunner struct {
 	record func(ctx context.Context, clientId server.Id, evidence model.ProviderModernEvidence, downgradeConfirmed bool) (held bool, err error)
 	now    func() time.Time
 	after  func(time.Duration) <-chan time.Time
+	// logs what the selection judged without a published url-success guard
+	infof func(format string, args ...any)
 }
 
 // The production runner, with tunnels from tunnelConfig, nil for a runner
@@ -76,6 +78,7 @@ func newPassRunner(settings Settings, tunnelConfig *providertunnel.Config) *pass
 		record:         recordProviderModernEvidence,
 		now:            server.NowUtc,
 		after:          time.After,
+		infof:          glog.Infof,
 	}
 	if tunnelConfig != nil {
 		runner.open = newProviderCapabilityTunnelOpener(*tunnelConfig, settings)
@@ -151,6 +154,11 @@ func (self *passRunner) begin(ctx context.Context, sweep Sweep) (*PassSelection,
 		sweep = Sweep{StartedAt: startedAt, HeldDowngrades: sweep.HeldDowngrades}
 	}
 	selected, err := self.selectDue(ctx, sweep.Cursor, startedAt)
+	if selected.unguarded {
+		// once a pass, however many of its eligibility reads lacked the guard;
+		// the model logs when the guard goes missing and when it returns
+		self.infof("[capprobe]pass judged eligibility without a published url-success guard: every country is exempt, so providers the score export keeps out of online for url success are measured too\n")
+	}
 	if err != nil {
 		observeSelection(selected, 0)
 		passesTotal.WithLabelValues(PassResultFailed).Inc()

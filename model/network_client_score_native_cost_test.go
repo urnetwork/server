@@ -50,7 +50,7 @@ func (self *nativeCostRedis) observeEval(script string, args []any) {
 		for index := 3; index < len(args); index += 2 {
 			size += len(args[index].(string)) + len(args[index+1].([]byte))
 		}
-		if pages > clientScoreNativePageBatchSize || (size > clientScoreNativePageBatchBytes && pages != 1) {
+		if pages > defaultClientScoreExportSettings().batchSize || (size > defaultClientScoreExportSettings().nativeBatchBytes && pages != 1) {
 			self.t.Fatalf("native writer exceeded bounded batch: pages=%d bytes=%d", pages, size)
 		}
 		self.maxBatchPages = max(self.maxBatchPages, pages)
@@ -178,7 +178,7 @@ func TestNativeCost100kPublisherAndCursor(t *testing.T) {
 			if audit.encodedPages != pageCount || audit.writtenPages != pageCount || audit.beginCalls != 1 || audit.commitCalls != 1 || audit.commitPages != pageCount {
 				t.Fatalf("native publication work mismatch: encoded=%d written=%d begin=%d commit=%d commit-pages=%d", audit.encodedPages, audit.writtenPages, audit.beginCalls, audit.commitCalls, audit.commitPages)
 			}
-			if audit.maxEncodedAhead > clientScoreNativePageBatchSize+1 {
+			if audit.maxEncodedAhead > defaultClientScoreExportSettings().batchSize+1 {
 				t.Fatalf("native encoder retained an unbounded pending page set: %d", audit.maxEncodedAhead)
 			}
 			rawPointer, err := r.Get(ctx, key).Result()

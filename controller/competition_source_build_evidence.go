@@ -43,11 +43,11 @@ func ValidateCompetitionReviewedSourceBuildReceipt(receipt CompetitionReviewedSo
 // their original Sol/low contract and cannot be silently used for Snow source.
 func ValidateCompetitionReviewedSourceBuildReceiptForPolicy(receipt CompetitionReviewedSourceBuildReceipt, reviewId server.Id, patchDigest, lockDigest string, staging bool, policy string) error {
 	testModel, testReasoning := "gpt-6.1-sol", "low"
-	if policy == model.CompetitionSnowWinnerReviewPolicy {
+	if model.IsCompetitionSnowWinnerReviewPolicy(policy) {
 		if receipt.WinnerReviewPolicy != policy {
 			return errors.New("Snow source qualification lacks its frozen review policy")
 		}
-		testModel, testReasoning = model.CompetitionSnowWinnerReviewModel, model.CompetitionSnowWinnerReviewReasoning
+		testModel, testReasoning, _ = model.CompetitionWinnerReviewProvider(policy)
 	} else if receipt.WinnerReviewPolicy != "" || (policy != "" && !model.IsCompetitionWinnerReviewPolicy(policy)) {
 		return errors.New("source qualification policy is unsupported or cross-provider")
 	}

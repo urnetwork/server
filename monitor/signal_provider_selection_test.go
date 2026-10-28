@@ -85,7 +85,7 @@ func TestProviderSelectionSignalSchemaVersionBoundaries(t *testing.T) {
 			case defect == "changed" && field == "prior_schema":
 				row["value"].([]any)[1] = "1"
 			case defect == "future" && (field == "now_schema" || field == "prior_schema"):
-				row["value"].([]any)[1] = "3"
+				row["value"].([]any)[1] = "4"
 			case defect == "legacy-new-reason" && (field == "now_schema" || field == "prior_schema"):
 				row["value"].([]any)[1] = "1"
 			case defect == "new-legacy-reason" && labels["reason"] != "":
@@ -97,6 +97,103 @@ func TestProviderSelectionSignalSchemaVersionBoundaries(t *testing.T) {
 			t.Fatalf("%s did not retain schema uncertainty: alerts=%d error=%v", defect, len(alerts), err)
 		}
 		requireAlertClass(t, alerts, "provider-selection-unavailable")
+	}
+}
+
+// selectionTestRows from a producer of schema, for both ends of the window.
+func selectionTestRowsAtSchema(schema int, reason string, count float64) []map[string]any {
+	rows := selectionTestRows(reason, count)
+	for _, row := range rows {
+		if field := row["metric"].(map[string]string)["monitor_selection"]; field == "now_schema" || field == "prior_schema" {
+			row["value"].([]any)[1] = fmt.Sprint(schema)
+		}
+	}
+	return rows
+}
+
+// Schema 3 (FP2-MODERN.md) is schema 2 with the capability refusals apart:
+// a zero filtered_capability and a short returned_small_filtered_capability
+// are complete fixed-vocabulary attribution with response-shape authority,
+// as every schema-2 reason stays under schema 3. A capability refusal is
+// the request's own filter, never a selection invariant failure, so even a
+// large count of capability zeroes raises nothing.
+func TestProviderSelectionSignalAcceptsSchemaThreeCapabilityReasons(t *testing.T) {
+	for _, reason := range []string{"filtered_capability", "returned_small_filtered_capability", "filtered_hard", "returned_small_filtered_hard", "returned_small_sample", "returned_10_plus", "cache_empty"} {
+		rows := selectionTestRowsAtSchema(3, reason, 80)
+		settings := selectionTestSettings(t, pickerTestPayload(t, rows))
+		env, err := newProbeEnv(settings)
+		if err != nil {
+			t.Fatal(err)
+		}
+		evidence := parseProviderSelection(pickerTestPayload(t, rows), "synthetic", pickerTestNow(), pickerScope(env))
+		if !evidence.complete || !evidence.shapeComplete || evidence.shapePaired != 1 || len(evidence.counts) != 1 {
+			t.Fatalf("schema 3 %s lost its complete fixed-vocabulary attribution: %+v", reason, evidence)
+		}
+		for key, count := range evidence.counts {
+			if key.reason != reason || count != 80 {
+				t.Fatalf("schema 3 %s counted as %s %v", reason, key.reason, count)
+			}
+		}
+		alerts, err := NewProviderSelectionSignal().Run(context.Background(), settings)
+		if err != nil || len(alerts) != 0 {
+			t.Fatalf("schema 3 %s raised alerts=%+v error=%v", reason, alerts, err)
+		}
+	}
+	// the invariant findings keep their schema-3 authority
+	alerts, err := NewProviderSelectionSignal().Run(context.Background(), selectionTestSettings(t, pickerTestPayload(t, selectionTestRowsAtSchema(3, "eligible_not_selected", 3))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if alert := requireAlertClass(t, alerts, "provider-selection-empty-despite-eligible"); len(alerts) != 1 || !strings.Contains(alert.Markdown(), "scope_complete=true") {
+		t.Fatalf("a schema 3 producer lost its invariant authority: alerts=%+v", alerts)
+	}
+}
+
+// A producer before schema 3 cannot report a capability refusal: a schema 1
+// or 2 process carrying filtered_capability or
+// returned_small_filtered_capability fails closed, as a schema 1 process
+// with a schema-2 reason does, and leaves its slot unknown.
+func TestProviderSelectionSignalRejectsCapabilityReasonsBeforeSchemaThree(t *testing.T) {
+	for _, schema := range []int{1, 2} {
+		for _, reason := range []string{"filtered_capability", "returned_small_filtered_capability"} {
+			rows := selectionTestRowsAtSchema(schema, reason, 80)
+			settings := selectionTestSettings(t, pickerTestPayload(t, rows))
+			env, err := newProbeEnv(settings)
+			if err != nil {
+				t.Fatal(err)
+			}
+			evidence := parseProviderSelection(pickerTestPayload(t, rows), "synthetic", pickerTestNow(), pickerScope(env))
+			if evidence.complete || evidence.paired != 0 || len(evidence.counts) != 0 {
+				t.Fatalf("schema %d %s was accepted: %+v", schema, reason, evidence)
+			}
+			alerts, err := NewProviderSelectionSignal().Run(context.Background(), settings)
+			if err != nil || len(alerts) != 1 {
+				t.Fatalf("schema %d %s did not retain schema uncertainty: alerts=%d error=%v", schema, reason, len(alerts), err)
+			}
+			requireAlertClass(t, alerts, "provider-selection-unavailable")
+		}
+	}
+}
+
+// A fleet mid-rollout, one slot on schema 2 and one on schema 3, keeps
+// complete response-shape authority: both carry the small-list reasons.
+func TestProviderSelectionSignalMixedSchemaTwoAndThreeKeepShape(t *testing.T) {
+	rows := selectionTestRowsAtSchema(3, "returned_small_filtered_capability", 80)
+	oldRows := selectionTestRowsAtSchema(2, "returned_small_filtered_destinations", 80)
+	for _, row := range oldRows {
+		row["metric"].(map[string]string)["block"] = "green"
+	}
+	rows = append(rows, oldRows...)
+	settings := selectionTestSettings(t, pickerTestPayload(t, rows))
+	settings.LogServiceBlocks["api"] = []string{"blue", "green"}
+	var record ProviderSelectionObservation
+	settings.ProviderSelectionObserver = func(value ProviderSelectionObservation) error { record = value; return nil }
+	alerts, err := NewProviderSelectionSignal().Run(context.Background(), settings)
+	if err != nil || len(alerts) != 0 {
+		t.Fatalf("a mixed schema 2 and 3 fleet raised alerts=%+v error=%v", alerts, err)
+	}
+	if !record.SourceCoverageComplete || !record.ShapeCoverageComplete || record.PairedProcesses != 2 || record.ShapePairedProcesses != 2 || len(record.Outcomes) != 2 {
+		t.Fatalf("a mixed schema 2 and 3 fleet lost shape authority: %+v", record)
 	}
 }
 
@@ -398,7 +495,7 @@ func TestProviderSelectionSignalUnpairedGenerationAuthorityControls(t *testing.T
 			case defect == "zero-schema" && (field == "now_schema" || field == "prior_schema"):
 				row["value"].([]any)[1] = "0"
 			case defect == "unsupported-schema" && (field == "now_schema" || field == "prior_schema"):
-				row["value"].([]any)[1] = "3"
+				row["value"].([]any)[1] = "4"
 			}
 			filtered = append(filtered, row)
 		}
@@ -585,7 +682,7 @@ func TestProviderSelectionSignalGenerationOrderAndPublicJson(t *testing.T) {
 				case variant == "restart" && field == "now_start":
 					row["value"].([]any)[1] = fmt.Sprint(pickerTestNow().Add(-6 * time.Minute).Unix())
 				case variant == "unsupported-schema" && (field == "now_schema" || field == "prior_schema"):
-					row["value"].([]any)[1] = "3"
+					row["value"].([]any)[1] = "4"
 				case variant == "stale-prior" && field == "prior_schema_time":
 					row["value"].([]any)[1] = fmt.Sprint(pickerTestNow().Add(-5*time.Minute - 91*time.Second).Unix())
 				case variant == "future-now" && field == "now_start_time":

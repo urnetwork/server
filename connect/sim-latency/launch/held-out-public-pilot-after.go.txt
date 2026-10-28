@@ -1,0 +1,272 @@
+// Retires only a genuinely verified public pilot. Opaque proof/publication pins
+// are authenticated separately from recognized native workload census sources.
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"path/filepath"
+	"reflect"
+	"sort"
+	"strings"
+	"time"
+)
+
+// Original-only local object names are the same closed contract enforced by
+// checkHeldOutHost and the immutable runner, not caller-selected host fixtures.
+func heldOutPublicPilotInventoryNames() ([]string, []string) {
+	return []string{"buildx_buildkit_warp-multiarch0", "urnetwork-local-pg", "urnetwork-local-redis"},
+		[]string{"bridge", "host", "none", "urnetwork-local"}
+}
+
+// Reconstructs the existing host validator's key from both raw no-trunc Docker
+// inventories. Receipt hashes cannot substitute different object ids or names.
+func heldOutPublicPilotInventoryDigest(containers []byte, networks []byte) (string, error) {
+	canonical := func(content []byte, expected []string) (string, error) {
+		lines := strings.Split(strings.TrimSpace(string(content)), "\n")
+		if len(lines) != len(expected) {
+			return "", errors.New("public pilot raw inventory has a changed object census")
+		}
+		names, ids := []string{}, map[string]bool{}
+		for _, line := range lines {
+			fields := strings.Split(line, "\t")
+			if len(fields) != 2 || !validSha256(fields[0]) || fields[1] == "" || ids[fields[0]] {
+				return "", errors.New("public pilot raw inventory identity is invalid or repeated")
+			}
+			names = append(names, fields[1])
+			ids[fields[0]] = true
+		}
+		sort.Strings(names)
+		sort.Strings(expected)
+		if !reflect.DeepEqual(names, expected) {
+			return "", errors.New("public pilot raw inventory contains non-original object names")
+		}
+		sort.Strings(lines)
+		return strings.Join(lines, "\n"), nil
+	}
+	containerNames, networkNames := heldOutPublicPilotInventoryNames()
+	c, err := canonical(containers, containerNames)
+	if err != nil {
+		return "", err
+	}
+	n, err := canonical(networks, networkNames)
+	if err != nil {
+		return "", err
+	}
+	return heldOutDigest([]byte(c + "\nnetworks\n" + n)), nil
+}
+
+// Exact provider and proof pins are required separately, so neither an omitted
+// provider source nor an unrelated accepted receipt can retire this workload.
+type heldOutPublicPilotAfterConfig struct {
+	Stage                string                            `json:"stage"`
+	Schema               int                               `json:"schema"`
+	Kind                 string                            `json:"kind"`
+	Execution            heldOutPublicPilotExecutionConfig `json:"execution"`
+	Proof                heldOutPinnedFile                 `json:"proof"`
+	ProofPublication     heldOutPinnedFile                 `json:"proof_publication"`
+	Direction            heldOutPinnedFile                 `json:"direction"`
+	DirectionPublication heldOutPinnedFile                 `json:"direction_publication"`
+	Providers            heldOutPinnedFile                 `json:"providers"`
+	ReviewedAt           time.Time                         `json:"reviewed_at"`
+	ReviewedSources      []heldOutPinnedFile               `json:"reviewed_sources"`
+	RecheckProofPath     string                            `json:"native_recheck_proof_path"`
+	OutputPath           string                            `json:"output_path"`
+}
+
+// Sorting by canonical path gives a deterministic closure, rejecting one path
+// presented with conflicting digests instead of silently selecting a version.
+func heldOutPublicPilotNormalizeSources(pins []heldOutPinnedFile) ([]heldOutPinnedFile, error) {
+	byPath := map[string]string{}
+	for _, pin := range pins {
+		if !filepath.IsAbs(pin.Path) || filepath.Clean(pin.Path) != pin.Path || !validSha256(pin.Sha256) {
+			return nil, errors.New("public pilot source pin is invalid")
+		}
+		if digest, present := byPath[pin.Path]; present && digest != pin.Sha256 {
+			return nil, errors.New("public pilot source path has conflicting digests")
+		}
+		byPath[pin.Path] = pin.Sha256
+	}
+	result := make([]heldOutPinnedFile, 0, len(byPath))
+	for path, digest := range byPath {
+		result = append(result, heldOutPinnedFile{Path: path, Sha256: digest})
+	}
+	sort.Slice(result, func(i int, j int) bool { return result[i].Path < result[j].Path })
+	return result, nil
+}
+
+// This comparison never compares or exposes private seed representations.
+func heldOutPublicPilotSameSources(left []heldOutPinnedFile, right []heldOutPinnedFile) bool {
+	l, leftErr := heldOutPublicPilotNormalizeSources(left)
+	r, rightErr := heldOutPublicPilotNormalizeSources(right)
+	return leftErr == nil && rightErr == nil && reflect.DeepEqual(l, r)
+}
+
+// Produces the already established measured-direction schema only after full
+// native acceptance. Its evidence includes the actual proof and both precommits.
+func heldOutPublicPilotDirection(proofPin heldOutPinnedFile, proof heldOutPublicPilotProof, plan heldOutPublicPilotPlan,
+	release heldOutRelease) (heldOutReferenceQualification, error) {
+	if !proof.Accepted || len(proof.Reasons) != 0 || proof.Score == nil || proof.Control == nil ||
+		proof.Plan.Sha256 == "" || proof.Request != plan.Request || proof.BeforeExclusions != plan.BeforeExclusions ||
+		proof.ProvidersSha256 != plan.ProvidersSha256 || !validSha256(proofPin.Sha256) {
+		return heldOutReferenceQualification{}, errors.New("genuine accepted native pilot proof required for measured direction")
+	}
+	for _, reference := range plan.References {
+		if reference.Role != "worse" {
+			continue
+		}
+		evidence := []heldOutPinnedFile{proofPin, proof.Plan, proof.Publication, proof.Request, reference.NativeBuild,
+			proof.Control.Baseline, proof.Control.EvidenceManifest, proof.Control.Completion,
+			{Path: filepath.Join(plan.Root, "artifacts", "score.json"), Sha256: proof.Outcome.ScoreSha256},
+			{Path: filepath.Join(plan.Root, "artifacts", "worker-result.json"), Sha256: proof.Outcome.WorkerSha256}}
+		return heldOutReferenceQualification{Schema: 1, Kind: "sim-latency-held-out-reference-direction", Role: "worse", Accepted: true,
+			BaseSha: release.BaseSha, SourceLockSha256: release.SourceLockSha256, BaseImageId: release.ImageId,
+			PatchSha256: reference.Patch.Sha256, CandidateSha: reference.CandidateSha, ImageId: reference.ImageId,
+			BinarySha256: reference.BinarySha256, GoVersion: "go1.27.3", VcsModified: false, Direction: "slower", Evidence: evidence}, nil
+	}
+	return heldOutReferenceQualification{}, errors.New("measured worse native reference missing")
+}
+
+// The reducer preserves all four existing sets. The public request contributes
+// a raw public label, providers contribute the direct integer and exact digest,
+// and the typed public plan independently binds that same integer/digest.
+func mergeHeldOutPublicPilotExclusions(before heldOutExclusions, request heldOutRequest, plan heldOutPublicPilotPlan,
+	planPin heldOutPinnedFile, providers heldOutPinnedFile, reviewed []heldOutPinnedFile, reviewedAt time.Time,
+	maximumBytes int64) (*heldOutExclusions, error) {
+	if providers.Path != request.ProvidersPath || providers.Sha256 != request.ProvidersSha256 ||
+		plan.ProvidersSha256 != providers.Sha256 || request.RoundSeedHex != fmt.Sprintf("%064x", plan.PublicSeed) || reviewedAt.IsZero() {
+		return nil, errors.New("after-pilot closure omitted or substituted the actual public provider source")
+	}
+	merged := before
+	merged.Sources = append(append([]heldOutPinnedFile{}, before.Sources...), plan.Request, providers, planPin)
+	var err error
+	merged.Sources, err = heldOutPublicPilotNormalizeSources(merged.Sources)
+	if err != nil || !heldOutPublicPilotSameSources(merged.Sources, reviewed) {
+		return nil, errors.New("after-pilot reviewed source closure differs from the exact before/public union")
+	}
+	strings := func(values []string, extra string) []string {
+		set := map[string]bool{}
+		for _, value := range values {
+			set[value] = true
+		}
+		if extra != "" {
+			set[extra] = true
+		}
+		result := make([]string, 0, len(set))
+		for value := range set {
+			result = append(result, value)
+		}
+		sort.Strings(result)
+		return result
+	}
+	merged.PrivateSeedHexes = strings(before.PrivateSeedHexes, request.RoundSeedHex)
+	merged.ProviderDigests = strings(before.ProviderDigests, providers.Sha256)
+	merged.RetiredCommitments = strings(before.RetiredCommitments, "")
+	seeds := map[int64]bool{plan.PublicSeed: true}
+	for _, seed := range before.EffectiveSeeds {
+		seeds[seed] = true
+	}
+	merged.EffectiveSeeds = make([]int64, 0, len(seeds))
+	for seed := range seeds {
+		merged.EffectiveSeeds = append(merged.EffectiveSeeds, seed)
+	}
+	sort.Slice(merged.EffectiveSeeds, func(i int, j int) bool { return merged.EffectiveSeeds[i] < merged.EffectiveSeeds[j] })
+	merged.ReviewedAt, merged.Complete = reviewedAt, true
+	if err := validateHeldOutExclusions(merged, maximumBytes); err != nil {
+		return nil, err
+	}
+	return &merged, nil
+}
+
+// After-pilot construction replays the full raw native proof again, rather than
+// accepting a receipt boolean. Old ancestry and second-position holds are also
+// rechecked by the same preflight on every read of the exact before catalog.
+func prepareHeldOutPublicPilotAfterExclusions(ctx context.Context, config heldOutPublicPilotAfterConfig, release heldOutRelease,
+	settings heldOutOperatorSettings, replay calibrationScoreReplay, observations func() []calibrationReplayObservation,
+	now func() time.Time, run func(context.Context, string, ...string) ([]byte, error)) (heldOutPinnedFile, error) {
+	if config.Schema != 1 || config.Kind != "sim-latency-public-pilot-after-exclusions" || config.Stage != "after_public_pilot" || now == nil ||
+		config.ReviewedAt.IsZero() || config.ReviewedAt.After(now().UTC()) || config.OutputPath == config.RecheckProofPath {
+		return heldOutPinnedFile{}, errors.New("exact separately reviewed after-public-pilot closure required")
+	}
+	for _, path := range []string{config.OutputPath, config.RecheckProofPath} {
+		if err := validateHeldOutPublicPilotNewOutput(path); err != nil {
+			return heldOutPinnedFile{}, err
+		}
+	}
+	plan, request, err := readHeldOutPublicPilot(ctx, config.Execution, release, settings, run)
+	if err != nil {
+		return heldOutPinnedFile{}, err
+	}
+	if config.Providers != (heldOutPinnedFile{Path: request.ProvidersPath, Sha256: request.ProvidersSha256}) ||
+		config.Proof.Path != config.Execution.ProofPath || config.Direction.Path != config.Execution.DirectionPath ||
+		config.RecheckProofPath != filepath.Join(plan.Root, "after-census-native-recheck.json") {
+		return heldOutPinnedFile{}, errors.New("after-pilot provider, original proof or recheck namespace substituted")
+	}
+	content, err := readHeldOutPinned(config.Proof, settings.MaximumBytes, false)
+	if err != nil {
+		return heldOutPinnedFile{}, err
+	}
+	var retained heldOutPublicPilotProof
+	if err := decodeHeldOutComplete(content, &retained, "published genuine public pilot proof"); err != nil {
+		return heldOutPinnedFile{}, err
+	}
+	if retained.Schema != 1 || retained.Kind != "sim-latency-public-regression-pilot-proof" || !retained.Accepted || len(retained.Reasons) != 0 ||
+		retained.Plan != config.Execution.Plan || retained.Publication != config.Execution.Publication || retained.Request != plan.Request ||
+		retained.BeforeExclusions != plan.BeforeExclusions || retained.ProvidersSha256 != plan.ProvidersSha256 ||
+		retained.VerifiedAt.Before(retained.CompletedAt) || retained.VerifiedAt.After(config.ReviewedAt) {
+		return heldOutPinnedFile{}, errors.New("after-pilot proof is rejected, partial, stale or belongs to another precommit")
+	}
+	if err := validateHeldOutBridgeReplays(retained.Replays, release.ImageId); err != nil {
+		return heldOutPinnedFile{}, err
+	}
+	if err := authenticateHeldOutPublication(ctx, heldOutExecutionConfig{PublicPlan: config.Proof, Publication: config.ProofPublication},
+		heldOutPrivatePlan{PreparedAt: retained.VerifiedAt}, settings, run); err != nil {
+		return heldOutPinnedFile{}, err
+	}
+	expectedDirection, err := heldOutPublicPilotDirection(config.Proof, retained, *plan, release)
+	if err != nil {
+		return heldOutPinnedFile{}, err
+	}
+	directionBytes, err := readHeldOutPinned(config.Direction, settings.MaximumBytes, false)
+	if err != nil {
+		return heldOutPinnedFile{}, err
+	}
+	var direction heldOutReferenceQualification
+	if err := decodeHeldOutComplete(directionBytes, &direction, "actual public pilot measured direction"); err != nil || !reflect.DeepEqual(direction, expectedDirection) {
+		return heldOutPinnedFile{}, errors.New("after-pilot measured direction differs from its actual complete native proof")
+	}
+	if err := authenticateHeldOutPublication(ctx, heldOutExecutionConfig{PublicPlan: config.Direction, Publication: config.DirectionPublication},
+		heldOutPrivatePlan{PreparedAt: retained.VerifiedAt}, settings, run); err != nil {
+		return heldOutPinnedFile{}, err
+	}
+	rechecked, verifyErr := verifyHeldOutPublicPilot(ctx, config.Execution, release, settings, replay, observations, now, run)
+	if _, err := writeHeldOutPublicPilotProof(config.RecheckProofPath, rechecked, verifyErr); err != nil {
+		return heldOutPinnedFile{}, err
+	}
+	comparison := *rechecked
+	comparison.VerifiedAt, comparison.Replays = retained.VerifiedAt, retained.Replays
+	if !reflect.DeepEqual(comparison, retained) {
+		return heldOutPinnedFile{}, errors.New("after-pilot native recheck changed raw outcome, score, baseline or evidence bindings")
+	}
+	beforeBytes, err := readHeldOutPinned(plan.BeforeExclusions, settings.MaximumBytes, false)
+	if err != nil {
+		return heldOutPinnedFile{}, err
+	}
+	var before heldOutExclusions
+	if err := decodeHeldOutComplete(beforeBytes, &before, "preserved before-public-pilot exclusion catalog"); err != nil {
+		return heldOutPinnedFile{}, err
+	}
+	merged, err := mergeHeldOutPublicPilotExclusions(before, *request, *plan, config.Execution.Plan, config.Providers,
+		config.ReviewedSources, config.ReviewedAt, settings.MaximumBytes)
+	if err != nil {
+		return heldOutPinnedFile{}, err
+	}
+	encoded, err := json.MarshalIndent(merged, "", "  ")
+	if err != nil || int64(len(encoded))+1 > settings.MaximumBytes {
+		return heldOutPinnedFile{}, errors.New("after-pilot catalog exceeds its strict encoded byte bound")
+	}
+	defer clear(encoded)
+	return writeHeldOutPublicPilotImmutable(config.OutputPath, append(encoded, '\n'))
+}

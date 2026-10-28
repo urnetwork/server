@@ -1,0 +1,159 @@
+// Opt-in command surfaces for the prospective public pilot lifecycle. Ordinary
+// source suites are inert; no shared historical command or runtime is modified.
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"os"
+	"os/signal"
+	"syscall"
+	"testing"
+	"time"
+)
+
+// All public workload inputs must already exist as pinned artifacts. Preparation
+// authenticates them with the frozen native generator and publishes only a plan.
+type heldOutPublicPilotPreparationConfig struct {
+	Schema     int                    `json:"schema"`
+	Kind       string                 `json:"kind"`
+	Plan       heldOutPublicPilotPlan `json:"plan"`
+	OutputPath string                 `json:"output_path"`
+}
+
+// Selects only the original native C2 context; a config cannot inject a release,
+// command runner, fixture capability, weaker settings or private-seed generator.
+func heldOutPublicPilotCommandContext(ctx context.Context, plan heldOutPublicPilotPlan, settings heldOutOperatorSettings) (heldOutRelease, heldOutOperatorSettings, error) {
+	preflight := heldOutFreshSinglePilotPreflightConfig{Schema: 1, Kind: "sim-latency-held-out-fresh-single-public-pilot-preflight",
+		Protocol: plan.Protocol, Approval: plan.Approval, Exclusions: plan.BeforeExclusions, PublicSeed: plan.PublicSeed,
+		Request: plan.Request, GeneratorFiles: plan.GeneratorFiles}
+	return heldOutFreshSinglePublicPilotContext(ctx, preflight, frozenHeldOutRelease(), settings)
+}
+
+// Native operations are unreachable without both opt-in variables, root/Go/CPU
+// validation and an independently supplied configuration digest. No entropy is
+// reachable from any operation. Execute deliberately has no outer scoring flock.
+func TestHeldOutPublicPilotCommand(t *testing.T) {
+	operation := os.Getenv("SIM_LATENCY_PUBLIC_PILOT_COMMAND")
+	if operation == "" {
+		return
+	}
+	if os.Getenv("SIM_LATENCY_HELD_OUT_REAL_OPT_IN") != "1" {
+		t.Fatal("public pilot operation requires independent real-operation opt-in")
+	}
+	if err := validateHeldOutOperatorRuntime(); err != nil {
+		t.Fatal(err)
+	}
+	settings := defaultHeldOutOperatorSettings()
+	configPin := heldOutPinnedFile{Path: os.Getenv("SIM_LATENCY_PUBLIC_PILOT_CONFIG"), Sha256: os.Getenv("SIM_LATENCY_PUBLIC_PILOT_CONFIG_SHA256")}
+	content, err := readHeldOutPinned(configPin, settings.MaximumBytes, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clear(content)
+	ctx, cancel := signal.NotifyContext(t.Context(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	var preparation heldOutPublicPilotPreparationConfig
+	var execution heldOutPublicPilotExecutionConfig
+	var after heldOutPublicPilotAfterConfig
+	var plan heldOutPublicPilotPlan
+	switch operation {
+	case "prepare":
+		if err := decodeHeldOutComplete(content, &preparation, "public pilot preparation command"); err != nil ||
+			preparation.Schema != 1 || preparation.Kind != "sim-latency-public-pilot-preparation" {
+			t.Fatal("explicit complete public-pilot preparation required", err)
+		}
+		plan = preparation.Plan
+	case "execute", "verify", "after-census":
+		if operation == "after-census" {
+			if err := decodeHeldOutComplete(content, &after, "public pilot after-census command"); err != nil {
+				t.Fatal(err)
+			}
+			execution = after.Execution
+		} else if err := decodeHeldOutComplete(content, &execution, "public pilot execution command"); err != nil {
+			t.Fatal(err)
+		}
+		planBytes, err := readHeldOutPinned(execution.Plan, settings.MaximumBytes, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := decodeHeldOutComplete(planBytes, &plan, "public pilot command frozen plan"); err != nil {
+			t.Fatal(err)
+		}
+	default:
+		t.Fatal("public pilot command must be prepare, execute, verify or after-census")
+	}
+	release, settings, err := heldOutPublicPilotCommandContext(ctx, plan, settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := authenticateHeldOutRuntimeFiles(release, settings); err != nil {
+		t.Fatal(err)
+	}
+	executable, err := os.Executable()
+	if err != nil || executable != plan.Tool.Path {
+		t.Fatal("public pilot plan does not name the running qualified executable", err)
+	}
+	if err := verifyHeldOutExecutable(executable, plan.Tool.Sha256, settings.MaximumExecutableBytes); err != nil {
+		t.Fatal(err)
+	}
+	run := func(ctx context.Context, program string, arguments ...string) ([]byte, error) {
+		return runHeldOutReadOnly(ctx, settings, program, arguments...)
+	}
+	if operation == "execute" {
+		// The unchanged cohort runner exclusively owns the canonical flock.
+		// Do not wrap this branch in withCalibrationScoringSlot.
+		if err := executeHeldOutPublicPilot(ctx, execution, release, settings, time.Now, run, invokeHeldOutPublicPilotWithHost); err != nil {
+			t.Fatal(err)
+		}
+		t.Log("completed one public pilot invocation; direction remains unverified until native verify")
+		return
+	}
+	_, err = withCalibrationScoringSlot(release.ScoringLock, func() (*calibrationAnalysisReport, error) {
+		if operation == "prepare" {
+			_, err := prepareHeldOutPublicPilot(ctx, plan, preparation.OutputPath, release, settings, run)
+			return nil, err
+		}
+		observations := []calibrationReplayObservation{}
+		replaySettings := defaultCalibrationReplaySettings()
+		replaySettings.CpuSet = settings.ManagementCpus
+		replaySettings.Observe = func(observation calibrationReplayObservation) { observations = append(observations, observation) }
+		analysis := defaultCalibrationAnalysisSettings()
+		analysis.MarginFloor = heldOutFreshSingleFactsForRelease(release).Margin
+		replay := func(ctx context.Context, root string, inputs ScoreInputs, image string, round string, baseline bool) ([]byte, error) {
+			return replayCalibrationBundle(ctx, root, inputs, image, round, baseline, analysis, replaySettings, runSourceBuildDocker)
+		}
+		observe := func() []calibrationReplayObservation {
+			return append([]calibrationReplayObservation{}, observations...)
+		}
+		if operation == "after-census" {
+			_, err := prepareHeldOutPublicPilotAfterExclusions(ctx, after, release, settings, replay, observe, time.Now, run)
+			return nil, err
+		}
+		for _, path := range []string{execution.ProofPath, execution.DirectionPath} {
+			if err := validateHeldOutPublicPilotNewOutput(path); err != nil {
+				return nil, err
+			}
+		}
+		proof, verifyErr := verifyHeldOutPublicPilot(ctx, execution, release, settings, replay, observe, time.Now, run)
+		proofPin, writeErr := writeHeldOutPublicPilotProof(execution.ProofPath, proof, verifyErr)
+		if err := errors.Join(verifyErr, writeErr); err != nil {
+			return nil, err
+		}
+		direction, err := heldOutPublicPilotDirection(proofPin, *proof, plan, release)
+		if err != nil {
+			return nil, err
+		}
+		directionBytes, err := json.MarshalIndent(direction, "", "  ")
+		if err != nil {
+			return nil, err
+		}
+		_, err = writeHeldOutPublicPilotImmutable(execution.DirectionPath, append(directionBytes, '\n'))
+		return nil, err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Log("completed exact public-pilot preparation/verification/retirement operation; no hidden entropy or production activation")
+}

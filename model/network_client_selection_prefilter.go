@@ -15,10 +15,14 @@ type clientScoreRequestFilter struct {
 	callerNetworkId   server.Id
 	facets            []ipFamilyFacet
 	excludedClientIds map[server.Id]uint8
+	// a request that requires modern providers refuses every other
+	// (FP2-MODERN.md)
+	requireModern bool
 }
 
 // The nonzero values match the existing request-filter observation cells;
-// hard exclusions keep cell zero and are evaluated separately.
+// hard exclusions keep cell zero and are evaluated separately. Cell 4 is a
+// capability refusal, which the declared post-quantum refusals also count in.
 func (self clientScoreRequestFilter) rejection(clientId server.Id, score *ClientScore) int {
 	if score.NetworkOnly && score.NetworkId != self.callerNetworkId {
 		return 1
@@ -28,6 +32,9 @@ func (self clientScoreRequestFilter) rejection(clientId server.Id, score *Client
 	}
 	if self.excludedClientIds[clientId] != 0 {
 		return 3
+	}
+	if self.requireModern && !score.Modern {
+		return 4
 	}
 	return 0
 }

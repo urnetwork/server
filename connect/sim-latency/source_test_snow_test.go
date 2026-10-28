@@ -80,7 +80,7 @@ func sourceSnowTestClient(t *testing.T, execution sourceTestExecution, calls *in
 				t.Fatal("Snow attestation omitted the actual execution/output semantics", required)
 			}
 		}
-		if mutation == "missing-member" && index == 2 {
+		if mutation == "missing-member" && index == 1 {
 			return &http.Response{StatusCode: http.StatusServiceUnavailable, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("synthetic unavailable member"))}, nil
 		}
 		judgment := map[string]any{"passed": execution.ExitCode == 0, "summary": "Synthetic observed fixed-suite result.", "image_id": execution.ImageId,
@@ -121,8 +121,8 @@ func sourceSnowTestClient(t *testing.T, execution sourceTestExecution, calls *in
 	})}
 }
 
-// The three members observe the same single execution; none can run a tool.
-func TestSourceTestSnowExecutesOnceAndRequiresThreeMatchingAttestations(t *testing.T) {
+// Both members observe the same single execution; none can run a tool.
+func TestSourceTestSnowExecutesOnceAndRequiresBothMatchingAttestations(t *testing.T) {
 	plan := sourceTestPlanFixture()
 	plan.WinnerReviewPolicy = model.CompetitionSnowWinnerReviewPolicy
 	settings := defaultSourceTestModelSettings()
@@ -133,7 +133,7 @@ func TestSourceTestSnowExecutesOnceAndRequiresThreeMatchingAttestations(t *testi
 	evidence, err := executeSourceTestModel(context.Background(), sourceSnowTestClient(t, execution, &requests, ""), "", plan, settings,
 		func(context.Context) (sourceTestExecution, error) { executions++; return execution, nil })
 	if err != nil || evidence == nil || !evidence.Passed || evidence.Model != model.CompetitionSnowWinnerReviewModel || evidence.WinnerReviewPolicy != plan.WinnerReviewPolicy ||
-		evidence.Reasoning != model.CompetitionSnowWinnerReviewReasoning || len(evidence.Members) != 3 || requests != 3 || executions != 1 || evidence.CallId != "" {
+		evidence.Reasoning != model.CompetitionSnowWinnerReviewReasoning || len(evidence.Members) != 2 || requests != 2 || executions != 1 || evidence.CallId != "" {
 		t.Fatal("Snow test authority omitted a member or invented an execution", evidence, requests, executions, err)
 	}
 }
@@ -186,7 +186,7 @@ func TestSourceTestSnowJournalReplaysThreeAttestationsAndOneExecution(t *testing
 		t.Fatal(err)
 	}
 	second, err := executeSourceTestModel(context.Background(), client, "", fixture.Plan, settings, run)
-	if err != nil || !reflect.DeepEqual(first, second) || requests != 3 || executions != 1 {
+	if err != nil || !reflect.DeepEqual(first, second) || requests != 2 || executions != 1 {
 		t.Fatal("Snow restart drew new provider/execution evidence", requests, executions, err)
 	}
 	for _, member := range provider.Members {
@@ -223,7 +223,7 @@ func TestSourceTestSnowJournalHoldsMissingMemberWithoutReruns(t *testing.T) {
 			t.Fatal("missing member granted Snow test authority", evidence, err)
 		}
 	}
-	if requests != 3 || executions != 1 {
+	if requests != 2 || executions != 1 {
 		t.Fatal("missing Snow member retried provider or actual tests", requests, executions)
 	}
 }

@@ -5,8 +5,7 @@ import (
 	"time"
 )
 
-// A fixed instant before the modern provider gate's default start, so no key
-// below reads the clock.
+// A fixed instant, so no key below reads the clock.
 var countsPolicyTestNow = time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
 
 // Every field of the policy changes the key: each count rule below, the
@@ -30,8 +29,7 @@ func TestProviderEgressCountsPolicyKeySeparatesCountRules(t *testing.T) {
 			on := true
 			s.QualitySpeedRequiresModernProvider = &on
 		},
-		"modern start": func(s *EgressIndexSettings) { s.QualitySpeedModernProviderStart = countsPolicyTestNow },
-		"url ratio":    func(s *EgressIndexSettings) { s.OnlineUrlSuccessRatio += 0.1 },
+		"url ratio": func(s *EgressIndexSettings) { s.OnlineUrlSuccessRatio += 0.1 },
 		"url ratio exemption": func(s *EgressIndexSettings) {
 			s.OnlineUrlRatioCountryExemption = !s.OnlineUrlRatioCountryExemption
 		},
@@ -67,13 +65,11 @@ func TestProviderEgressCountsPolicyKeyIgnoresUnrelatedRequestSettings(t *testing
 	settings.ClassWeights = map[string]int{"synthetic": 100}
 	settings.DefaultClassWeight++
 	settings.EvidenceMaxAge += time.Hour // Already capped by the accepted-health maximum.
-	// a start moved without passing the key's instant decides alike
-	settings.QualitySpeedModernProviderStart = settings.QualitySpeedModernProviderStart.Add(time.Hour)
 	if providerEgressCountsPolicyKey(settings, false, minimums, 2, countsPolicyTestNow, 0) != base {
 		t.Fatal("request-only settings or ineffective evidence age split the aggregate cache")
 	}
-	// the gate is keyed by its decision: an explicit false before the start
-	// decides as the absent switch does, so the workers share the snapshot
+	// the gate is keyed by its decision: an explicit false decides as the
+	// absent switch does, so the workers share the snapshot
 	off := false
 	settings.QualitySpeedRequiresModernProvider = &off
 	if providerEgressCountsPolicyKey(settings, false, minimums, 2, countsPolicyTestNow, 0) != base {
@@ -81,28 +77,34 @@ func TestProviderEgressCountsPolicyKeyIgnoresUnrelatedRequestSettings(t *testing
 	}
 }
 
-// The dashboard snapshots flip at the modern provider gate's start: with the
-// switch absent the key a second before the start differs from the key at
-// it, and stays put on either side, so a snapshot counted before the start
-// is never read after it. An explicit switch keeps one key across the start.
-func TestProviderEgressCountsPolicyKeyFlipsAtTheModernProviderGateStart(t *testing.T) {
+// The dashboard snapshots no longer flip at a start (FP2-MODERN.md): with
+// the switch absent the key is the gate-off key at every instant, a second
+// before, at and a year after the former start of 2026-11-11 00:00 UTC, the
+// same key an explicit false gives. An explicit true keeps one key of its
+// own at every instant.
+func TestProviderEgressCountsPolicyKeyKeepsAnAbsentModernGateSwitchOff(t *testing.T) {
 	minimums := map[int]float64{1: .95, 2: .7, 3: .6}
-	settings := DefaultEgressIndexSettings()
-	start := settings.QualitySpeedModernProviderStart
+	formerStart := time.Date(2026, 11, 11, 0, 0, 0, 0, time.UTC)
 	key := func(settings *EgressIndexSettings, now time.Time) string {
 		return providerEgressCountsPolicyKey(settings, false, minimums, 2, now, 0)
 	}
-	if key(settings, start.Add(-time.Second)) == key(settings, start) {
-		t.Fatal("the key a second before the gate's start is the key at it")
+	off, on := false, true
+	switched := func(value *bool) *EgressIndexSettings {
+		settings := DefaultEgressIndexSettings()
+		settings.QualitySpeedRequiresModernProvider = value
+		return settings
 	}
-	if key(settings, start.Add(-2*time.Second)) != key(settings, start.Add(-time.Second)) || key(settings, start) != key(settings, start.Add(time.Hour)) {
-		t.Fatal("the key changed away from the gate's start")
+	offKey := key(switched(&off), countsPolicyTestNow)
+	onKey := key(switched(&on), countsPolicyTestNow)
+	if offKey == onKey {
+		t.Fatal("the gate on and off share a key")
 	}
-	for _, value := range []bool{false, true} {
-		explicit := DefaultEgressIndexSettings()
-		explicit.QualitySpeedRequiresModernProvider = &value
-		if key(explicit, start.Add(-time.Second)) != key(explicit, start) {
-			t.Fatalf("an explicit %t switch changed the key at the start", value)
+	for _, now := range []time.Time{countsPolicyTestNow, formerStart.Add(-time.Second), formerStart, formerStart.AddDate(1, 0, 0)} {
+		if key(switched(nil), now) != offKey {
+			t.Errorf("an absent switch at %s did not give the gate-off key", now)
+		}
+		if key(switched(&off), now) != offKey || key(switched(&on), now) != onKey {
+			t.Errorf("an explicit switch changed its key at %s", now)
 		}
 	}
 }

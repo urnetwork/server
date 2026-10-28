@@ -1,5 +1,5 @@
 // Offline guards for the opt-in synthetic Go observer never contact Docker or
-// Snow. Provider fixtures intercept the actual native three-member adapter.
+// Snow. Provider fixtures intercept the actual native two-member adapter.
 package main
 
 import (
@@ -293,12 +293,12 @@ func TestSourceTestSnowRuntimeCachedNativeJournalsDoNotRerunOrResample(t *testin
 		t.Fatal(err)
 	}
 	second, err := executeSourceTestModel(ctx, client, "", fixture.Plan, settings, run)
-	if err != nil || !reflect.DeepEqual(first, second) || requests != 3 || executions != 1 {
+	if err != nil || !reflect.DeepEqual(first, second) || requests != 2 || executions != 1 {
 		t.Fatal("cached native execution/provider journals reran or sampled", requests, executions, err)
 	}
 	interrupted := errors.New("synthetic callback must never run")
 	_, err = executeSourceTestModel(ctx, client, "", fixture.Plan, settings, func(context.Context) (sourceTestExecution, error) { return sourceTestExecution{}, interrupted })
-	if !errors.Is(err, interrupted) || requests != 3 {
+	if !errors.Is(err, interrupted) || requests != 2 {
 		t.Fatal("provider replay ignored the trusted observation callback", requests, err)
 	}
 }

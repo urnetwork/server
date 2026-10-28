@@ -22,23 +22,23 @@ Published source pins alone do not mean the competition is ready or active.
 
 The new season uses six weekly admission windows and automatic FIFO scoring.
 After close and authoritative drain, publish the provisional reward decision,
-perform the isolated three-model Snow honesty/safety review under
-`elected_winner_snow_union_v1`, replace substantiated
+perform the isolated two-model Snow honesty/safety review under
+`elected_winner_snow_union_v2`, replace substantiated
 dishonest winners in rank order, and build/qualify/promote the approved elected
 winner before opening the next round. Exhaustion carries the incumbent forward;
 uncertainty or infrastructure failure pauses and alerts instead of fabricating
 a decision. Review and promotion do not require an agent to poll a running job.
-Qwen, Gemma and Muse must all approve; retain the union of their findings.
-Historical Mini and Sol/max policy records remain unchanged. Independent tests use Sol
+Qwen and Gemma must both approve; retain the union of their findings.
+Historical three-member Snow v1, Mini and Sol/max records remain unchanged. Independent tests use Sol
 6.1 low; implementation/debugging/merges use Sol 6.1 max. The accepted
 three-pair reduction freezes 26.9% prospectively. The corrected R9/R9 bridge
 has native acceptance as an operational witness, not proof of statistical
-equivalence. The owner approved measuring only the first of two prospectively
-committed independent seeds; all three reference jobs and correct ordering on that seed and
-live readiness remain required. See the
+equivalence. The originally approved first of two prospectively committed
+independent seeds has completed with `accepted: false`; the original second
+seed remains unstarted. See the
 [margin freeze](launch/CALIBRATION-THREE-A-FREEZE-2026-10-26.md) and the approved
 [first-seed amendment](launch/CALIBRATION-AMENDMENT-2026-10-27-FIRST-SEED.md).
-The second seed remains unstarted. The first attempt failed during source
+The first attempt failed during source
 extraction before measurements because its management cap was too small.
 The owner explicitly approved the independently qualified, artifact-preserving
 [recovery](launch/UNMEASURED-MANAGEMENT-OOM-2026-10-27.md), an 8 GiB management
@@ -50,9 +50,13 @@ Preserve that result and the unstarted second seed; do not rerun or relabel the
 failed screen or redefine its acceptance. The owner has approved a
 [separately precommitted new screen](launch/CALIBRATION-NEW-SCREEN-OWNER-APPROVAL-2026-10-28.md)
 with a stronger regression reference, fresh control and newly committed seed.
-Exact reference/protocol review, native qualification and publication remain
-pending; no new seed has been drawn or measurement started. This approval does
-not grant a late opening or provider waiver. Production remains unactivated.
+The new path requires the H1 public direction pilot before one fresh hidden
+seed is committed and measured. Composed H1 qualification, that pilot and the
+fresh calibration remain pending; no new seed has been drawn or new calibration
+measurement started. The separate
+[late-opening authorization](launch/LATE-OPENING-AUTHORIZATION-2026-10-28.md)
+requires an actual future opening after the gates pass, never backdating or a
+provider waiver. Production remains unactivated.
 R9, all evaluation gates, significance and the practical margin are unchanged.
 
 Production admission costs $20 and has no submission-count ceiling. Each round

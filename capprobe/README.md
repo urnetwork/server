@@ -11,6 +11,11 @@ credential parent and balance), tunnels, each with a platform transport
 budget of its own as each URL probe's tunnel has, concurrency and metrics,
 and none of the URL probe's due queue, quota or run history.
 
+[FP2-MODERN.md](../FP2-MODERN.md) makes the same evidence decide which
+providers are modern for modern-first priority and modern-only requests,
+which replace the gate (kept only behind an explicit switch), so the probe
+measures every Online provider ("A pass").
+
 It ships switched off: until `capability_probe.yml` says `enabled: true` and
 a taskworker starts with it, nothing is scheduled (see "Switching it on").
 
@@ -21,13 +26,26 @@ connected, valid providers in client id order (`Sweep`, carried in the task's
 arguments), a page at a time (`model.GetProviderCapabilityProbePage`). A
 provider is **due** without evidence, with modern evidence older than
 `modern_refresh_hours`, or with other evidence older than
-`other_refresh_hours`. Of the due ones, the pass keeps those the egress rules
-admit to Quality or Speed **before** the gate
-(`model.FilterProviderCapabilityProbeEligible`, judged in chunks of twice the
-pass's remaining room), so a provider the gate takes out for want of
-evidence is still measured and can return. It measures up to `limit` of
-them, `concurrency` at once, starting none it could not finish before its
-deadline, and the next pass resumes after the last one it started. The
+`other_refresh_hours`; only a provider with a Public provide key is due, so a
+network-only provider is never measured. Of the due ones, the pass keeps the
+**Online** providers (`model.FilterProviderCapabilityProbeEligible`, judged
+in chunks of twice the pass's remaining room): those the egress rules keep in
+the Online bucket, judged with the score export's Online inputs as provider
+status judges them, each provider's published country (its location
+rollup's) and the URL-success guard the export last published. Online is the
+population modern-first priority and modern-only requests draw from, Quality
+and Speed included, so a provider without a URL run, one short of the native
+URL-run minimums, one whose failing ratio keeps it Online and one the gate
+takes out for want of evidence are all measured. A provider the export places
+in no bucket is not: a hard exclusion (reliability, ARIN risk, the URL
+security quarantine), and one the URL-success rule or the Online URL ratio
+takes out of every bucket (`no_success`, `low_success`). Without a trusted
+guard, none published or one older than 60 minutes, every country is exempt,
+as provider status reads it, so those providers are measured too; each such
+pass logs one line and counts once in `selection_total{stage="unguarded"}`.
+It measures up to `limit` of them, `concurrency` at once, starting none it
+could not finish before its deadline, and the next pass resumes after the
+last one it started. The
 selection reads the database only (`SelectPass`); a pass that waits or finds
 nothing to measure finishes there (`FinishPass`) and takes no prober shard.
 A sweep that reaches the population's end completes; the next starts
@@ -153,6 +171,38 @@ Speed sooner once the gate is on, at the cost of measuring every non-modern
 provider that often; most measurements of a provider without the responder
 take the whole establishment window.
 
+## Capacity
+
+The Online population is about 1.8 times what the probe measured as Quality
+and Speed: Online held 49,417 providers on 10-13, against 27,725 Speed
+providers on 10-19. One measurement per provider per 72-hour refresh needs
+about 690 measurements an hour, against about 580 an hour at the default
+concurrency of 16. That figure is a floor, not a forecast:
+
+- inconclusive and missing evidence stays due, so a provider that gives no
+  evidence is measured again every sweep;
+- the settings check each refresh plus `min_sweep_interval_minutes` against
+  the seven-day staleness window, not the sweep's actual duration.
+
+Main's `capability_probe.yml` has set `concurrency: 32` and `limit: 128`
+since 2026-10-15, which swept about 21,000 Quality and Speed providers in
+about 15 hours, about 1,400 an hour; the code defaults stay 16 and 64
+(FP2-MODERN.md, decision 12). At that rate the Online population sweeps in
+about 35 hours. Accept the widened population on measured throughput, not on
+the estimate:
+
+- attempted against recorded measurements: `selection_total{stage="started"}`
+  against `providers_total`'s `recorded_*` outcomes;
+- the measured sweep duration, `last_sweep_seconds`, which must stay under
+  the staleness window less the refresh and the sweep interval (about 3.75
+  days at the defaults);
+- the tail of evidence age: the oldest `measured_at` among the Online
+  providers' `provider_modern_evidence` rows, and the shadow's
+  `stale_evidence`;
+- the balance burn of prober shard 255, unsuccessful attempts included: each
+  pass's shard balance (`prober_shard_run` rows with `shard_index` 255, and
+  their `transfer_balance`), start against remaining.
+
 ## Switching it on
 
 The probe ships off, and a switched-off probe schedules nothing: no task
@@ -235,12 +285,13 @@ while `capability_probe.yml` switches the probe on:
 
 ## Metrics
 
-`urnetwork_capability_probe_*`: passes by result, selection by stage,
-providers by outcome, readings per capability, held and confirmed
-downgrades, breaker trips, measurement duration, in flight, teardown errors,
-funding readiness failures, prober shard cleanup errors, sweeps and the last
-sweep's duration, the last pass, and the chains a taskworker found without
-their row and scheduled again. The egress probes dashboard charts them
-all; SIGNALS.md §2.19g says what each means. The probe's derived clients are minted and retired by the
+`urnetwork_capability_probe_*`: passes by result, selection by stage (the
+`unguarded` stage counts passes, not providers), providers by outcome,
+readings per capability, held and confirmed downgrades, breaker trips,
+measurement duration, in flight, teardown errors, funding readiness failures,
+prober shard cleanup errors, sweeps and the last sweep's duration, the last
+pass, and the chains a taskworker found without their row and scheduled
+again. The egress probes dashboard charts them all; SIGNALS.md §2.19g says
+what each means. The probe's derived clients are minted and retired by the
 same in-process credential owner as the URL probe's, so
 `urnetwork_egress_probe_internal_credentials_total` counts both.

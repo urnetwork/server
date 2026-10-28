@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"bytes"
+	"crypto/sha256"
 	"encoding/gob"
 	"encoding/json"
 	"errors"
@@ -35,17 +36,6 @@ import (
 )
 
 const (
-	// One UpdateClientScores export contains thousands of cross-slot SETs for
-	// each caller location. Sending all of them through one ClusterClient
-	// pipeline from each of 48 workers can fill a node socket until the 15s
-	// write deadline; generating a complete operation list before batching also
-	// retained tens of GiB across those workers. Produce and flush one bounded
-	// batch at a time; completed chunks are not replayed when a later chunk
-	// needs a transient retry.
-	clientScoreExportBatchSize   = 512
-	clientScoreExportBatchBytes  = 8 << 20
-	clientScoreExportMaxAttempts = 3
-
 	// A caller-target alias is intentionally tiny. "1" selects the shared
 	// zero-caller baseline and "0" selects the caller-specific override. A
 	// missing alias means the cache was written by a legacy process and must
@@ -75,10 +65,35 @@ const (
 	clientScoreIpFamilyReadyValue = "1"
 )
 
+// Each stream bounds its live payloads and retries only the failed batch.
+type clientScoreExportSettings struct {
+	// Positive command count per union or native batch.
+	batchSize int
+	// Positive retained-byte budget; a larger single value is sent alone.
+	batchBytes int
+	// Positive byte budget for native scripts, which hold their Redis node.
+	nativeBatchBytes int
+	// Positive attempt count for a transiently failed union batch.
+	maxAttempts int
+	// Positive duration multiplied by the failed attempt number.
+	retryDelay time.Duration
+}
+
+// Preserve the existing stream limits without shared mutable policy.
+func defaultClientScoreExportSettings() clientScoreExportSettings {
+	return clientScoreExportSettings{
+		batchSize: 512, batchBytes: 8 * 1024 * 1024, nativeBatchBytes: 1024 * 1024,
+		maxAttempts: 3, retryDelay: 250 * time.Millisecond,
+	}
+}
+
 type clientScoreRedisSet struct {
 	key   string
 	value []byte
 	flush bool
+	// A union payload's dirty owner; nil retains the legacy SET operation.
+	modernPublication *clientScoreModernPublication
+	modernBegin       bool
 }
 
 // clientScoreTargetKeys builds the payload and alias key families for one
@@ -93,6 +108,9 @@ type clientScoreTargetKeys struct {
 	// the per-family facets of counts and sample (connect/IPV6.md A8)
 	facetCounts func(server.Id, ipFamilyFacet) string
 	facetSample func(server.Id, ipFamilyFacet, int) string
+	// the facets' modern partition (network_client_score_modern.go); nil
+	// writes none
+	modern func(server.Id) string
 }
 
 // clientScoreFacetPayload is one family facet's encoded counts and on-demand
@@ -101,6 +119,9 @@ type clientScoreFacetPayload struct {
 	countsBytes  []byte
 	counts       []int
 	encodeSample func(int) []byte
+	// the leading pages that hold modern providers only; the rest hold none
+	// (network_client_score_modern.go)
+	modernPageCount int
 }
 
 // clientScoreExportPayload is one target's encoded cache payload: today's
@@ -258,6 +279,24 @@ func emitClientScoreTargetFanoutWithMetrics(
 		callerIds []server.Id,
 		payload clientScoreExportPayload,
 	) error {
+		publicationKVs := map[server.Id]*clientScoreModernPublication{}
+		if keys.modern != nil {
+			for _, callerId := range callerIds {
+				publication := newClientScoreModernPublication(keys.modern(callerId))
+				publicationKVs[callerId] = publication
+				if err := emit(clientScoreRedisSet{key: publication.key, value: publication.dirty, modernPublication: publication, modernBegin: true}); err != nil {
+					return err
+				}
+			}
+			// No payload can overtake an unacknowledged dirty owner.
+			if err := emit(clientScoreRedisSet{flush: true}); err != nil {
+				return err
+			}
+		}
+		emitOwned := func(callerId server.Id, set clientScoreRedisSet) error {
+			set.modernPublication = publicationKVs[callerId]
+			return emit(set)
+		}
 		for _, callerId := range callerIds {
 			sets := []clientScoreRedisSet{
 				{key: keys.filter(callerId), value: payload.filterBytes},
@@ -272,7 +311,7 @@ func emitClientScoreTargetFanoutWithMetrics(
 				})
 			}
 			for _, set := range sets {
-				if err := emit(set); err != nil {
+				if err := emitOwned(callerId, set); err != nil {
 					return err
 				}
 			}
@@ -283,7 +322,7 @@ func emitClientScoreTargetFanoutWithMetrics(
 				// the same immutable payload under its own key.
 				value := payload.encodeSample(sampleIndex)
 				for _, callerId := range callerIds {
-					if err := emit(clientScoreRedisSet{
+					if err := emitOwned(callerId, clientScoreRedisSet{
 						key:   keys.sample(callerId, sampleIndex),
 						value: value,
 					}); err != nil {
@@ -292,17 +331,38 @@ func emitClientScoreTargetFanoutWithMetrics(
 				}
 			}
 		}
+		// Dirty metadata remains visible until every payload write is acknowledged.
+		modernPageChecksums := map[ipFamilyFacet][][sha256.Size]byte{}
 		for _, facet := range ipFamilyFacets {
 			facetPayload := payload.facets[facet]
 			for sampleIndex := range facetPayload.counts {
 				value := facetPayload.encodeSample(sampleIndex)
+				if sampleIndex < facetPayload.modernPageCount {
+					modernPageChecksums[facet] = append(modernPageChecksums[facet], sha256.Sum256(value))
+				}
 				for _, callerId := range callerIds {
-					if err := emit(clientScoreRedisSet{
+					if err := emitOwned(callerId, clientScoreRedisSet{
 						key:   keys.facetSample(callerId, facet, sampleIndex),
 						value: value,
 					}); err != nil {
 						return err
 					}
+				}
+			}
+		}
+		if keys.modern != nil {
+			if err := emit(clientScoreRedisSet{flush: true}); err != nil {
+				return err
+			}
+			partition := newClientScoreModernPartition(payload.facets, modernPageChecksums)
+			for _, callerId := range callerIds {
+				partition.Generation = publicationKVs[callerId].generation
+				partitionBytes := encodeClientScoreGobValue(metrics, partition)
+				if err := emitOwned(callerId, clientScoreRedisSet{
+					key:   keys.modern(callerId),
+					value: partitionBytes,
+				}); err != nil {
+					return err
 				}
 			}
 		}
@@ -486,7 +546,7 @@ func runClientScoreExportStream(
 			}
 			return flush()
 		}
-		setBytes := len(set.key) + len(set.value)
+		setBytes := set.retainedBytes()
 		// Count and bytes are independent guards. Encoded samples vary with
 		// provider population, so a 512-command batch alone is not a bounded
 		// working set. Flush before adding a value that would cross the byte
@@ -553,12 +613,17 @@ return redis.call('SET', KEYS[1], ARGV[1], 'PXAT', expiresAt)
 
 // Publishes each value and its deadline atomically, rejecting expired exports.
 func writeClientScoreRedisStream(ctx context.Context, r server.RedisClient, ttl time.Duration, produce clientScoreExportProduce) error {
+	settings := defaultClientScoreExportSettings()
 	expiresAt := clientScoreExportExpiresAt(ctx)
+	modernExpiresAt := expiresAt
+	if modernExpiresAt.IsZero() {
+		modernExpiresAt = server.NowUtc().Add(ttl)
+	}
 	return runClientScoreExportStream(
 		ctx,
-		clientScoreExportBatchSize,
-		clientScoreExportBatchBytes,
-		clientScoreExportMaxAttempts,
+		settings.batchSize,
+		settings.batchBytes,
+		settings.maxAttempts,
 		produce,
 		func(batch []clientScoreRedisSet) error {
 			if !expiresAt.IsZero() && !server.NowUtc().Before(expiresAt) {
@@ -566,22 +631,45 @@ func writeClientScoreRedisStream(ctx context.Context, r server.RedisClient, ttl 
 			}
 			span := updateClientScoresPhaseMetrics.start(updateClientScoresPhaseCacheWrite)
 			defer span.finish()
+			for _, set := range batch {
+				if set.modernBegin {
+					if err := set.modernPublication.prepare(ctx, r); err != nil {
+						return err
+					}
+				}
+			}
 			pipe := r.Pipeline()
 			batchBytes := 0
+			modernCommands := []*redis.Cmd{}
 			for _, set := range batch {
-				batchBytes += len(set.key) + len(set.value)
-				if expiresAt.IsZero() {
+				batchBytes += set.retainedBytes()
+				if set.modernPublication != nil {
+					modernCommands = append(modernCommands, set.modernPublication.queue(ctx, pipe, set, modernExpiresAt))
+				} else if expiresAt.IsZero() {
 					pipe.Set(ctx, set.key, set.value, ttl)
 				} else {
 					pipe.Eval(ctx, clientScoreExportSetScript, []string{set.key}, set.value, expiresAt.UnixMilli())
 				}
 			}
 			updateClientScoresPhaseMetrics.addWork(updateClientScoresPhaseCacheWrite, len(batch), batchBytes)
-			_, err := pipe.Exec(ctx)
-			return err
+			commands, err := pipe.Exec(ctx)
+			for _, command := range commands {
+				if command.Err() != nil {
+					return command.Err()
+				}
+			}
+			if err != nil {
+				return err
+			}
+			for _, command := range modernCommands {
+				if err := checkClientScoreModernWrite(command); err != nil {
+					return err
+				}
+			}
+			return nil
 		},
 		func(ctx context.Context, failedAttempt int) error {
-			timer := time.NewTimer(time.Duration(failedAttempt) * 250 * time.Millisecond)
+			timer := time.NewTimer(time.Duration(failedAttempt) * settings.retryDelay)
 			defer timer.Stop()
 			select {
 			case <-ctx.Done():
@@ -4976,6 +5064,13 @@ type FindProviders2Args struct {
 	// providers included. A provider that never declared it, as none before
 	// the field did, is left out. Unset keeps the capability-blind answer.
 	PostQuantumEncryption bool `json:"post_quantum_encryption"`
+	// RequireModernProvider keeps only modern providers (ClientScore.Modern)
+	// in every draw of the request, named providers included (FP2-MODERN.md):
+	// with a Public key, measured modern by the capability probe within seven
+	// days; with only a Network key, declared post-quantum encryption. A
+	// client that requires end-to-end encryption sets it. Unset keeps the
+	// capability-blind answer.
+	RequireModernProvider bool `json:"require_modern_provider"`
 }
 
 type FindProviders2Result struct {
@@ -5063,6 +5158,16 @@ type ClientScore struct {
 	// including native quality/speed members. PassesMinimums distinguishes
 	// each mode's native membership.
 	Online bool
+	// Whether the provider qualified as modern at the export's instant
+	// (FP2-MODERN.md): with a Public key, measured modern by the capability
+	// probe (egress_modern_provider.go); with only a Network key, which the
+	// probe cannot reach, declared post-quantum encryption in its latest
+	// provide. Set whatever buckets the provider is in. The zero value, as
+	// every entry written before the field decodes, is not modern, so a
+	// request that requires modern providers never takes one no export has
+	// shown to be modern. Set only on the top-level score, like the location
+	// ids.
+	Modern bool
 
 	// set only on the top-level score, never on the `LookbackClientScores`
 	// copies: each score is gob-serialized into thousands of cache key
@@ -5229,6 +5334,27 @@ func clientScoreLocationGroupFacetSampleKey(forceMinimum bool, rankMode RankMode
 	}
 	rm, _ := utf8.DecodeRuneInString(rankMode)
 	return fmt.Sprintf("{cs_%d_%c_%s_%s}s_g_%s_%d", fm, rm, callerLocationId, locationGroupId, facet, index)
+}
+
+// The modern partition of one target payload's family facets
+// (network_client_score_modern.go), under the payload's hash tag and written
+// for the same callers.
+func clientScoreLocationModernKey(forceMinimum bool, rankMode RankMode, locationId server.Id, callerLocationId server.Id) string {
+	fm := 0
+	if forceMinimum {
+		fm = 1
+	}
+	rm, _ := utf8.DecodeRuneInString(rankMode)
+	return fmt.Sprintf("{cs_%d_%c_%s_%s}m_l", fm, rm, callerLocationId, locationId)
+}
+
+func clientScoreLocationGroupModernKey(forceMinimum bool, rankMode RankMode, locationGroupId server.Id, callerLocationId server.Id) string {
+	fm := 0
+	if forceMinimum {
+		fm = 1
+	}
+	rm, _ := utf8.DecodeRuneInString(rankMode)
+	return fmt.Sprintf("{cs_%d_%c_%s_%s}m_g", fm, rm, callerLocationId, locationGroupId)
 }
 
 func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (returnErr error) {
@@ -5496,6 +5622,21 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	}()
 	countFilter.onlineSuccessBaseline = onlineSuccessBaseline
 
+	// A network-only provider, which the capability probe cannot reach, is
+	// modern by its declaration (FP2-MODERN.md, "Definition"); the source
+	// query yields only providers with a Public or Network key, so a
+	// network-only score holds a Network key. Read once for the cohort.
+	networkOnlyClientIds := []server.Id{}
+	for _, row := range pendingScores {
+		if row.score.NetworkOnly {
+			networkOnlyClientIds = append(networkOnlyClientIds, row.score.ClientId)
+		}
+	}
+	networkOnlyDeclaredClientIds, declarationErr := readProvidePostQuantumEncryption(ctx, networkOnlyClientIds)
+	if declarationErr != nil {
+		return fmt.Errorf("read network-only provider declarations: %w", declarationErr)
+	}
+
 	// keyed by lookback index (see ClientLookbacks): 1 = the hour, 2 = 12h.
 	// The hour threshold is the gate that decides whether a provider is in the
 	// market at all. It sat at 0.99 -- less than one bad block in 60 -- which
@@ -5544,17 +5685,18 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	onlineCount := 0
 	// the modern provider gate's shadow over the pool this export decides
 	modernGateShadowCounts := newProviderModernGateShadowCounts()
+	// the Online members by modern outcome (FP2-MODERN.md, "Observability")
+	modernOnlineCounts := newProviderModernOnlineCounts()
 	for clientId, egress := range clientIdEgresses {
-		decision := decideProviderEgress(
-			countFilter.egressFacts(
-				clientId,
-				egress.publishedCountryCode,
-				egress.egressIndex,
-				egress.egressQuality,
-				egressSettings,
-			),
-			egressTestEnabled,
+		facts := countFilter.egressFacts(
+			clientId,
+			egress.publishedCountryCode,
+			egress.egressIndex,
+			egress.egressQuality,
+			egressSettings,
 		)
+		decision := decideProviderEgress(facts, egressTestEnabled)
+		countProviderModernOnline(modernOnlineCounts, facts, decision)
 		clientIdEgressDecisions[clientId] = decision
 		if decision.reason != "" {
 			reasonCounts[decision.reason] += 1
@@ -5574,6 +5716,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	glog.Infof("[nclm]online url-success rule: %s\n", onlineSuccessBaseline.logSummary())
 	// at the filter's instant, the one the decisions above were made at
 	glog.Infof("[nclm]modern provider gate: %s\n", providerModernGateShadowSummary(modernGateShadowCounts, egressSettings, countFilter.now))
+	glog.Infof("[nclm]modern online providers: %s\n", providerModernOnlineSummary(modernOnlineCounts))
 
 	// set each client score to its lowest lookback, decided the same way in
 	// every location and group map it sits in
@@ -5585,6 +5728,9 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 			egressSettings,
 			minIndependentReliabilityWeights,
 		)
+		if clientScore.NetworkOnly {
+			clientScore.Modern = networkOnlyDeclaredClientIds[clientScore.ClientId]
+		}
 	}
 	for _, clientScores := range locationClientScores {
 		for _, clientScore := range clientScores {
@@ -5784,6 +5930,11 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		if err := markClientScoreProviderEligibilityReady(ctx); err != nil {
 			return fmt.Errorf("publish client score provider eligibility state: %w", err)
 		}
+		// after every target joined: this export's pages carry the modern
+		// flag and partition (FP2-MODERN.md, "Rollout", step 5)
+		if err := markClientScoreModernReady(ctx, nativeSourceStartedAt); err != nil {
+			return fmt.Errorf("publish client score modern partition state: %w", err)
+		}
 		if writeUnfacetedPayload {
 			if err := markClientScoreIpFamilyReady(ctx); err != nil {
 				return fmt.Errorf("publish client score ip family migration state: %w", err)
@@ -5850,7 +6001,24 @@ func loadClientScoresWithCursor(
 	facets []ipFamilyFacet,
 	observations ...*findProviders2LoadObservation,
 ) (clientScores map[server.Id]*ClientScore, cursor *clientScoreCursor, returnErr error) {
-	return loadClientScoresInFacetOrder(forceMinimum, rankMode, ctx, locationIds, locationGroupIds, clientLocationId, n, facets, true, observations...)
+	return loadClientScoresWithPartition(forceMinimum, rankMode, ctx, locationIds, locationGroupIds, clientLocationId, n, facets, clientScorePartitionOff, observations...)
+}
+
+// loadClientScoresWithCursor in a partition mode
+// (network_client_score_modern.go).
+func loadClientScoresWithPartition(
+	forceMinimum bool,
+	rankMode RankMode,
+	ctx context.Context,
+	locationIds map[server.Id]bool,
+	locationGroupIds map[server.Id]bool,
+	clientLocationId server.Id,
+	n int,
+	facets []ipFamilyFacet,
+	partition clientScorePartitionMode,
+	observations ...*findProviders2LoadObservation,
+) (clientScores map[server.Id]*ClientScore, cursor *clientScoreCursor, returnErr error) {
+	return loadClientScoresInFacetOrder(forceMinimum, rankMode, ctx, locationIds, locationGroupIds, clientLocationId, n, facets, true, partition, observations...)
 }
 
 // The non-forced union pool of either mode is the whole online bucket: it
@@ -5871,14 +6039,18 @@ func loadOnlineClientScoresWithCursor(
 	clientLocationId server.Id,
 	n int,
 	facets []ipFamilyFacet,
+	partition clientScorePartitionMode,
 	observations ...*findProviders2LoadObservation,
 ) (map[server.Id]*ClientScore, *clientScoreCursor, error) {
-	return loadClientScoresInFacetOrder(false, onlineClientScoreSourceRankMode, ctx, locationIds, locationGroupIds, clientLocationId, n, facets, false, observations...)
+	return loadClientScoresInFacetOrder(false, onlineClientScoreSourceRankMode, ctx, locationIds, locationGroupIds, clientLocationId, n, facets, false, partition, observations...)
 }
 
 // With facetPriority every page of a preferred facet is drawn before any page
 // of the next (see loadClientScores); without it, the pages of every requested
-// facet are drawn in one shuffled order.
+// facet are drawn in one shuffled order. A partitioned mode
+// (network_client_score_modern.go) applies that order within each phase: the
+// modern pages of every facet first, then, unless modern-only, the others,
+// the un-faceted fallback of older exporters last.
 func loadClientScoresInFacetOrder(
 	forceMinimum bool,
 	rankMode RankMode,
@@ -5889,6 +6061,7 @@ func loadClientScoresInFacetOrder(
 	n int,
 	facets []ipFamilyFacet,
 	facetPriority bool,
+	partition clientScorePartitionMode,
 	observations ...*findProviders2LoadObservation,
 ) (clientScores map[server.Id]*ClientScore, cursor *clientScoreCursor, returnErr error) {
 	var observation *findProviders2LoadObservation
@@ -5915,7 +6088,7 @@ func loadClientScoresInFacetOrder(
 			return
 		}
 
-		groupSampleKeyCounts, sourceIncomplete, err := clientScoreTargetPageCounts(
+		facetPageSets, unfacetedPages, targetStates, sourceIncomplete, err := clientScoreTargetPages(
 			forceMinimum,
 			rankMode,
 			clientLocationId,
@@ -5928,15 +6101,74 @@ func loadClientScoresInFacetOrder(
 			returnErr = err
 			return
 		}
-
-		if !facetPriority {
-			pageCounts := map[string]int{}
-			for _, group := range groupSampleKeyCounts {
-				maps.Copy(pageCounts, group)
+		if partition != clientScorePartitionOff {
+			for state, targetCount := range targetStates {
+				findProviders2ModernPartitionTargets.WithLabelValues("union", state).Add(float64(targetCount))
 			}
-			groupSampleKeyCounts = []map[string]int{pageCounts}
 		}
-		cursor = newClientScoreCursor(groupSampleKeyCounts, observation)
+
+		modernGroups := []map[string]clientScorePage{}
+		otherGroups := []map[string]clientScorePage{}
+		recoveryGroups := []map[string]clientScorePage{}
+		for _, facetPageSet := range facetPageSets {
+			switch partition {
+			case clientScorePartitionModernFirst:
+				modernGroups = append(modernGroups, facetPageSet.modern)
+				otherGroups = append(otherGroups, facetPageSet.other)
+			case clientScorePartitionModernOnly:
+				modernGroups = append(modernGroups, facetPageSet.modern)
+				recoveryPageKVs := map[string]clientScorePage{}
+				for key, page := range facetPageSet.other {
+					if page.modernRecovery {
+						recoveryPageKVs[key] = page
+					}
+				}
+				recoveryGroups = append(recoveryGroups, recoveryPageKVs)
+			default:
+				// one class-blind group, without the partition's checksums
+				pages := map[string]clientScorePage{}
+				for _, classPages := range []map[string]clientScorePage{facetPageSet.modern, facetPageSet.other} {
+					for key, page := range classPages {
+						page.hasModernChecksum = false
+						pages[key] = page
+					}
+				}
+				otherGroups = append(otherGroups, pages)
+			}
+		}
+		// an older exporter's pages, whose scores decode as not modern
+		if partition != clientScorePartitionModernOnly {
+			otherGroups = append(otherGroups, unfacetedPages)
+		} else if observation != nil {
+			// left unread: refused by capability without a read
+			unreadPages := []map[string]clientScorePage{unfacetedPages}
+			for _, facetPageSet := range facetPageSets {
+				unreadPages = append(unreadPages, facetPageSet.other)
+			}
+			for _, pages := range unreadPages {
+				for _, page := range pages {
+					observation.unreadNonModernRows += page.expectedCount
+				}
+			}
+		}
+		if !facetPriority {
+			merge := func(groups []map[string]clientScorePage) []map[string]clientScorePage {
+				pages := map[string]clientScorePage{}
+				for _, group := range groups {
+					maps.Copy(pages, group)
+				}
+				return []map[string]clientScorePage{pages}
+			}
+			modernGroups = merge(modernGroups)
+			otherGroups = merge(otherGroups)
+			if len(recoveryGroups) != 0 {
+				recoveryGroups = merge(recoveryGroups)
+			}
+		}
+		cursor = newClientScorePhasedCursor(modernGroups, otherGroups, observation)
+		if len(recoveryGroups) != 0 {
+			cursor.modernRecoveryPages = newClientScorePhasedCursor(nil, recoveryGroups, nil).pages
+		}
 		cursor.sourceIncomplete = sourceIncomplete
 		clientScores, returnErr = cursor.readWithClient(ctx, r, n)
 	})
@@ -6108,6 +6340,12 @@ func FindProviders2(
 		observation.discovery = true
 		observation.privateGroupCount = len(locationGroupIds)
 		requestSettings := requestEgressIndexSettings()
+		// how every source of the request traverses its pages, and whether
+		// every band draws its modern candidates first (FP2-MODERN.md)
+		partition := findProviders2PartitionMode(requestSettings, findProviders2.RequireModernProvider)
+		modernFirst := partition != clientScorePartitionOff
+		// a union allowance ended inside a modern phase
+		modernPriorityIncomplete := false
 		// use a min block size to reduce db activity
 		var count int
 		if findProviders2.ForceCount {
@@ -6157,10 +6395,11 @@ func FindProviders2(
 				clientLocationId,
 				loadCount,
 				facets,
+				partition,
 				&observation.load,
 			)
 		} else {
-			clientScores, primaryCursor, err = loadPreferredClientScoresWithCursor(
+			clientScores, primaryCursor, err = loadPreferredClientScoresWithPartition(
 				requestSettings.NativeReaderEnabled,
 				findProviders2.ForceMinimum,
 				rankMode,
@@ -6170,6 +6409,7 @@ func FindProviders2(
 				clientLocationId,
 				loadCount,
 				facets,
+				partition,
 				&observation.load,
 			)
 		}
@@ -6220,6 +6460,7 @@ func FindProviders2(
 			callerNetworkId:   callerNetworkId,
 			facets:            facets,
 			excludedClientIds: excludeFinalDestinations(),
+			requireModern:     findProviders2.RequireModernProvider,
 		}
 		hardExcludedClientIds := map[server.Id]bool{}
 		qualityExcludedClientIds := map[server.Id]bool{}
@@ -6232,14 +6473,21 @@ func FindProviders2(
 		// verdict.
 		offlineClientIds := map[server.Id]bool{}
 		// For a request that requires post-quantum encryption, the candidates
-		// whose latest provide did not declare it (provide_capability_model.go).
-		// Each leaves every draw of this request, named providers included.
-		// Like offline, nothing outside the request keeps the verdict.
+		// whose latest provide did not declare it (provide_capability_model.go),
+		// and for one that requires modern providers, the named providers
+		// that are not modern (readProviderModernClientIds; the index's
+		// candidates are refused by the request filter instead). Each leaves
+		// every draw of this request, named providers included. Like offline,
+		// nothing outside the request keeps the verdict.
 		incapableClientIds := map[server.Id]bool{}
 		exclusionReadClientIds := map[server.Id]bool{}
 		qualityReadClientIds := map[server.Id]bool{}
 		var nativeClientScores map[server.Id]*ClientScore
 		var clientIds, borrowedClientIds []server.Id
+		// each borrowed provider's modern flag, and those the Online fallback
+		// lent, for the answered-modern counts
+		borrowedModernClientIds := map[server.Id]bool{}
+		onlineBorrowedClientIds := map[server.Id]bool{}
 		// The one instant filterPool judges every pool's URL evidence at, and
 		// with it what the draws below know of each candidate: nil while
 		// rank_measured_first is off or for force_minimum
@@ -6251,7 +6499,9 @@ func FindProviders2(
 		// the draw by their tier in `mode`, each facet in the request's
 		// preference order (selectClientScoresByWeight).
 		selectProviders := func(candidateClientScores map[server.Id]*ClientScore, mode RankMode, n int) []server.Id {
-			return selectClientScoresByWeight(candidateClientScores, mode, facets, n, evidence)
+			return selectClientScoresModernFirst(candidateClientScores, n, modernFirst, func(candidateClientScores map[server.Id]*ClientScore, n int) []server.Id {
+				return selectClientScoresByWeight(candidateClientScores, mode, facets, n, evidence)
+			})
 		}
 
 		validation := &providerQualityValidation{parent: session.Ctx}
@@ -6395,6 +6645,21 @@ func FindProviders2(
 			pruneSelected()
 			return nil
 		}
+		// a named provider that is not modern is refused before any other
+		// named read, as in the named-only path
+		if findProviders2.RequireModernProvider && 0 < len(specClientIds) {
+			observation.enter("hard_exclusions")
+			modernClientIds, err := readProviderModernClientIds(session.Ctx, specClientIds, filterTime)
+			if err != nil {
+				return nil, err
+			}
+			for _, clientId := range specClientIds {
+				if !modernClientIds[clientId] {
+					incapableClientIds[clientId] = true
+					exclusionReadClientIds[clientId] = true
+				}
+			}
+		}
 		if err := readExclusions(clientScores, rankMode, true, specClientIds); err != nil {
 			return nil, err
 		}
@@ -6472,9 +6737,15 @@ func FindProviders2(
 			for clientId := range offlineClientIds {
 				delete(clientScores, clientId)
 			}
-			// undeclared under a post-quantum request: out of every pool too
+			// undeclared under a post-quantum request, or a named provider
+			// that is not modern under a modern one: out of every pool too,
+			// counted as a capability refusal
+			capabilityDropped := 0
 			for clientId := range incapableClientIds {
-				delete(clientScores, clientId)
+				if _, ok := clientScores[clientId]; ok {
+					delete(clientScores, clientId)
+					capabilityDropped += 1
+				}
 			}
 			for clientId := range qualityExcludedClientIds {
 				if clientScore := clientScores[clientId]; clientScore != nil {
@@ -6492,7 +6763,8 @@ func FindProviders2(
 			for _, provider := range providers {
 				delete(clientScores, provider.ClientId)
 			}
-			observation.dropped[0] += before - len(clientScores)
+			observation.dropped[0] += before - len(clientScores) - capabilityDropped
+			observation.dropped[4] += capabilityDropped
 			// a cache written without facets fell back to its un-faceted
 			// buckets, whose scores carry no proven family and read as v4-only
 			requestFilter.apply(clientScores, observation)
@@ -6526,38 +6798,52 @@ func FindProviders2(
 				return nil
 			}
 
-			for {
-				pending := map[server.Id]*ClientScore{}
-				validated := 0
-				for id, score := range scores {
-					if hardExcludedClientIds[id] || qualityExcludedClientIds[id] {
-						if hardExcludedClientIds[id] || offlineClientIds[id] || findProviders2.ForceMinimum {
-							delete(scores, id)
-						} else {
-							score.Online = true
-							score.PassesMinimums = maps.Clone(score.PassesMinimums)
-							delete(score.PassesMinimums, mode)
+			// With modern-first priority the modern candidates are validated
+			// first, against the band's need: validations of the others could
+			// otherwise meet it and leave modern candidates unvalidated, and an
+			// unvalidated Quality native is never drawn.
+			modernPasses := []bool{false}
+			if modernFirst {
+				modernPasses = []bool{true, false}
+			}
+			for _, modernPass := range modernPasses {
+				for {
+					pending := map[server.Id]*ClientScore{}
+					validated := 0
+					for id, score := range scores {
+						if hardExcludedClientIds[id] || qualityExcludedClientIds[id] {
+							if hardExcludedClientIds[id] || offlineClientIds[id] || findProviders2.ForceMinimum {
+								delete(scores, id)
+							} else {
+								score.Online = true
+								score.PassesMinimums = maps.Clone(score.PassesMinimums)
+								delete(score.PassesMinimums, mode)
+							}
+							continue
 						}
-						continue
+						if priorScores[id] != nil || (!findProviders2.ForceMinimum && !score.PassesMinimums[mode]) {
+							continue
+						}
+						if modernPass && !score.Modern {
+							continue
+						}
+						if qualityReadClientIds[id] {
+							validated++
+						} else {
+							pending[id] = score
+						}
 					}
-					if priorScores[id] != nil || (!findProviders2.ForceMinimum && !score.PassesMinimums[mode]) {
-						continue
+					needed := count - len(priorScores) - validated
+					if needed <= 0 || len(pending) == 0 || validation.unavailable != nil {
+						break
 					}
-					if qualityReadClientIds[id] {
-						validated++
-					} else {
-						pending[id] = score
+					ids := selectProviders(pending, mode, providerQualityValidationDraw(needed, findProviders2.ForceMinimum))
+					if err := readQuality(ids, findProviders2.ForceMinimum); err != nil {
+						return err
 					}
-				}
-				needed := count - len(priorScores) - validated
-				if needed <= 0 || len(pending) == 0 || validation.unavailable != nil {
-					return nil
-				}
-				ids := selectProviders(pending, mode, providerQualityValidationDraw(needed, findProviders2.ForceMinimum))
-				if err := readQuality(ids, findProviders2.ForceMinimum); err != nil {
-					return err
 				}
 			}
+			return nil
 		}
 
 		// Native quota counts only native members after every request filter.
@@ -6572,13 +6858,18 @@ func FindProviders2(
 			if err := validateQualityPool(scores, priorScores, mode, native); err != nil {
 				return err
 			}
-			uniqueCount := func() int {
+			// the band's survivors not answered before, only the modern ones
+			// for modernOnly
+			uniqueCount := func(modernOnly bool) int {
 				uniqueCount := 0
 				for clientId, score := range scores {
 					if mode == RankModeQuality && (native || findProviders2.ForceMinimum) && !qualityReadClientIds[clientId] {
 						continue
 					}
 					if !findProviders2.ForceMinimum && ((native && !score.PassesMinimums[mode]) || (!native && !score.Online)) {
+						continue
+					}
+					if modernOnly && !score.Modern {
 						continue
 					}
 					if priorScores[clientId] == nil {
@@ -6593,16 +6884,39 @@ func FindProviders2(
 					unknown = true
 					break
 				}
-				if count <= len(priorScores)+uniqueCount() {
+				// In a partitioned traversal's modern phase only modern
+				// survivors meet the band's need, so a non-modern row read
+				// there never ends the phase (FP2-MODERN.md, "Quota").
+				modernPhase := modernFirst && cursor.inModernPhase()
+				if count <= len(priorScores)+uniqueCount(modernPhase) {
 					break
 				}
-				discardedRows := max(0, cursor.readCount-uniqueCount())
-				limit := findProviders2RefillLoadCount(count, len(excludeFinalDestinations()), discardedRows)
-				additionalRows := limit - cursor.readCount
+				var additionalRows int
 				if native && cursor.nativeOnly {
 					additionalRows = loadCount
+				} else {
+					// each phase of a union read has an allowance of its own
+					phaseReadCount := cursor.readCount
+					if modernFirst {
+						if modernPhase {
+							phaseReadCount = cursor.modernReadCount
+						} else {
+							phaseReadCount = cursor.readCount - cursor.modernReadCount
+						}
+					}
+					discardedRows := max(0, phaseReadCount-uniqueCount(modernPhase))
+					limit := findProviders2RefillLoadCount(count, len(excludeFinalDestinations()), discardedRows)
+					additionalRows = limit - phaseReadCount
 				}
 				if additionalRows <= 0 {
+					if modernPhase && cursor.hasOtherPhase() {
+						// The allowance ended inside the modern phase: the band
+						// keeps its modern survivors and fills from the other
+						// phase, so availability does not wait on priority.
+						cursor.skipModernPhase()
+						modernPriorityIncomplete = true
+						continue
+					}
 					if native {
 						unknown = true
 					}
@@ -6650,7 +6964,7 @@ func FindProviders2(
 				outcome := "exhausted"
 				if unknown {
 					outcome = "unavailable"
-				} else if count <= len(priorScores)+uniqueCount() {
+				} else if count <= len(priorScores)+uniqueCount(false) {
 					outcome = "quota"
 				}
 				observation.nativeSource(mode, backfill, outcome)
@@ -6672,22 +6986,27 @@ func FindProviders2(
 		// a draw weighted by that key within each evidence rank
 		// (selectOnlineClientScores).
 		selectOnline := func(candidateClientScores map[server.Id]*ClientScore, n int) []server.Id {
-			return selectOnlineClientScores(candidateClientScores, facets, n, evidence, mathrand.Float64)
+			return selectClientScoresModernFirst(candidateClientScores, n, modernFirst, func(candidateClientScores map[server.Id]*ClientScore, n int) []server.Id {
+				return selectOnlineClientScores(candidateClientScores, facets, n, evidence, mathrand.Float64)
+			})
 		}
 
 		// Draws up to n members of the online bucket, every one equally likely
 		// apart from the intermediaries filterPool down-weights, in one draw
-		// across the requested facets and with no tier banding.
+		// across the requested facets and with no tier banding; with
+		// modern-first priority, one such draw per class, modern first.
 		selectOnlineUniformly := func(candidateClientScores map[server.Id]*ClientScore, n int) []server.Id {
-			clientIds := slices.Collect(maps.Keys(candidateClientScores))
-			mathrand.Shuffle(len(clientIds), func(i int, j int) {
-				clientIds[i], clientIds[j] = clientIds[j], clientIds[i]
+			return selectClientScoresModernFirst(candidateClientScores, n, modernFirst, func(candidateClientScores map[server.Id]*ClientScore, n int) []server.Id {
+				clientIds := slices.Collect(maps.Keys(candidateClientScores))
+				mathrand.Shuffle(len(clientIds), func(i int, j int) {
+					clientIds[i], clientIds[j] = clientIds[j], clientIds[i]
+				})
+				n = max(0, min(n, len(clientIds)))
+				connect.WeightedSelectFunc(clientIds, n, func(clientId server.Id) float32 {
+					return candidateClientScores[clientId].ScaledWeights[RankModeOnline]
+				})
+				return clientIds[:n]
 			})
-			n = max(0, min(n, len(clientIds)))
-			connect.WeightedSelectFunc(clientIds, n, func(clientId server.Id) float32 {
-				return candidateClientScores[clientId].ScaledWeights[RankModeOnline]
-			})
-			return clientIds[:n]
 		}
 
 		// Native membership comes only from the shared gate decision. The
@@ -6723,18 +7042,22 @@ func FindProviders2(
 			remainingCount := func() int {
 				return count - len(clientIds) - len(borrowedClientIds)
 			}
-			borrow := func(clientScore *ClientScore, mode RankMode, tier int) {
+			borrow := func(clientScore *ClientScore, mode RankMode, tier int, online bool) {
 				provider := findProvidersProviderFromClientScore(clientScore, mode, directory)
 				provider.Tier = tier
 				providers = append(providers, provider)
 				borrowedClientIds = append(borrowedClientIds, clientScore.ClientId)
+				borrowedModernClientIds[clientScore.ClientId] = clientScore.Modern
+				if online {
+					onlineBorrowedClientIds[clientScore.ClientId] = true
+				}
 			}
 			if 0 < remainingCount() {
 				backfillTierOffset := requestSettings.BackfillTierOffset
 
 				observation.enter("load_backfill")
 				observation.load.privateSource = "alternate_legacy"
-				otherClientScores, otherCursor, err := loadPreferredClientScoresWithCursor(
+				otherClientScores, otherCursor, err := loadPreferredClientScoresWithPartition(
 					requestSettings.NativeReaderEnabled,
 					false,
 					otherRankMode,
@@ -6744,6 +7067,7 @@ func FindProviders2(
 					clientLocationId,
 					loadCount,
 					facets,
+					partition,
 					&observation.load,
 				)
 				if err != nil {
@@ -6795,7 +7119,7 @@ func FindProviders2(
 				}
 				for _, clientId := range selectProviders(borrowableClientScores, otherRankMode, remainingCount()) {
 					clientScore := otherClientScores[clientId]
-					borrow(clientScore, otherRankMode, clientScore.Tiers[otherRankMode]+backfillTierOffset)
+					borrow(clientScore, otherRankMode, clientScore.Tiers[otherRankMode]+backfillTierOffset, false)
 				}
 
 				// Healthy native sources are exhausted before online fallback.
@@ -6823,7 +7147,7 @@ func FindProviders2(
 							observation.enter("load_backfill")
 							observation.load.privateSource = "online_legacy"
 							var err error
-							pool, cursor, err = loadClientScoresWithCursor(false, source.mode, session.Ctx, locationIds, locationGroupIds, clientLocationId, loadCount, facets, &observation.load)
+							pool, cursor, err = loadClientScoresWithPartition(false, source.mode, session.Ctx, locationIds, locationGroupIds, clientLocationId, loadCount, facets, partition, &observation.load)
 							if err != nil {
 								if session.Ctx.Err() != nil {
 									return nil, err
@@ -6863,7 +7187,7 @@ func FindProviders2(
 					for _, clientId := range selectOnline(onlineClientScores, remainingCount()) {
 						clientScore := onlineClientScores[clientId]
 						findProviders2OnlineFallbackEvidence.WithLabelValues(rankMode, clientScoreEvidence(clientScore, filterTime).String()).Inc()
-						borrow(clientScore, RankModeSpeed, 2*backfillTierOffset)
+						borrow(clientScore, RankModeSpeed, 2*backfillTierOffset, true)
 					}
 				}
 			}
@@ -6876,6 +7200,19 @@ func FindProviders2(
 		}
 		chosenClientIds := append(slices.Clone(clientIds), borrowedClientIds...)
 		observation.discoveryReturned = len(chosenClientIds)
+		for _, clientId := range clientIds {
+			recordFindProviders2AnsweredModern(rankMode, "native", clientScores[clientId] != nil && clientScores[clientId].Modern)
+		}
+		for _, clientId := range borrowedClientIds {
+			band := "borrowed"
+			if onlineBorrowedClientIds[clientId] {
+				band = "online"
+			}
+			recordFindProviders2AnsweredModern(rankMode, band, borrowedModernClientIds[clientId])
+		}
+		if modernPriorityIncomplete {
+			findProviders2ModernPriorityIncomplete.WithLabelValues(findProviders2MetricRankMode(rankMode)).Inc()
+		}
 
 		// export one anonymized stats sample tracing this call's pool and
 		// selection. Best-effort and gated on stats being enabled, so it is
@@ -6897,6 +7234,19 @@ func FindProviders2(
 		hardExcludedClientIds, err := getProviderRequestExclusions(session.Ctx, specClientIds, rankMode)
 		if err != nil {
 			return nil, err
+		}
+		// a named provider that is not modern is not answered to a request
+		// that requires modern providers, as in discovery (FP2-MODERN.md)
+		if findProviders2.RequireModernProvider {
+			modernClientIds, err := readProviderModernClientIds(session.Ctx, specClientIds, server.NowUtc())
+			if err != nil {
+				return nil, err
+			}
+			for _, clientId := range specClientIds {
+				if !modernClientIds[clientId] {
+					hardExcludedClientIds[clientId] = true
+				}
+			}
 		}
 		// a named provider that did not declare post-quantum encryption is
 		// not answered to a request that requires it, as in discovery

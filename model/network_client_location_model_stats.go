@@ -208,10 +208,42 @@ var findProviders2LoadSeconds = prometheus.NewHistogram(prometheus.HistogramOpts
 // all request-time eligibility filters.  Its labels are intentionally bounded:
 // no client, network, location ID, provider, address, or request identifier
 // may turn a degraded-list observation into a high-cardinality data leak.
+//
+// capability is the request's capability filter (FP2-MODERN.md): none,
+// modern (require_modern_provider), post_quantum (post_quantum_encryption) or
+// modern_post_quantum, so that an empty answer meaning "no capable supply" can
+// be told from an empty pool.
 var findProviders2OutcomesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "urnetwork_findproviders2_outcomes_total",
-	Help: "FindProviders2 completed response outcomes by bounded request class and result-count band",
-}, []string{"ip_family", "location_kind", "caller_country", "rank_mode", "force_minimum", "result_count"})
+	Help: "FindProviders2 completed response outcomes by bounded request class, capability filter and result-count band",
+}, []string{"ip_family", "location_kind", "caller_country", "rank_mode", "force_minimum", "result_count", "capability"})
+
+// The capability filter a request names, as the outcome label reads it.
+func findProviders2OutcomeCapability(findProviders2 *FindProviders2Args) string {
+	switch {
+	case findProviders2.RequireModernProvider && findProviders2.PostQuantumEncryption:
+		return "modern_post_quantum"
+	case findProviders2.RequireModernProvider:
+		return "modern"
+	case findProviders2.PostQuantumEncryption:
+		return "post_quantum"
+	default:
+		return "none"
+	}
+}
+
+// The rank mode of a request in the fixed metric vocabulary: quality (the
+// default), speed, online or unknown.
+func findProviders2MetricRankMode(rankMode RankMode) string {
+	switch rankMode {
+	case "", RankModeQuality:
+		return RankModeQuality
+	case RankModeSpeed, RankModeOnline:
+		return rankMode
+	default:
+		return "unknown"
+	}
+}
 
 func init() {
 	prometheus.MustRegister(findProviders2SampleDrops, findProviders2LoadSeconds, findProviders2OutcomesTotal)
@@ -288,22 +320,14 @@ func recordFindProviders2Outcome(
 	if len(callerCountry) != 2 {
 		callerCountry = "unknown"
 	}
-	rankMode := findProviders2.RankMode
-	switch rankMode {
-	case "", RankModeQuality:
-		rankMode = RankModeQuality
-	case RankModeSpeed, RankModeOnline:
-		// The request value is already one of the fixed metric vocabulary.
-	default:
-		rankMode = "unknown"
-	}
 	findProviders2OutcomesTotal.WithLabelValues(
 		findProviders2OutcomeIpFamily(findProviders2.IpFamily),
 		findProviders2OutcomeLocationKind(findProviders2),
 		callerCountry,
-		rankMode,
+		findProviders2MetricRankMode(findProviders2.RankMode),
 		strconv.FormatBool(findProviders2.ForceMinimum),
 		findProviders2OutcomeCountBand(resultCount),
+		findProviders2OutcomeCapability(findProviders2),
 	).Inc()
 }
 
