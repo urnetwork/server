@@ -3225,8 +3225,11 @@ func readContractCloseRecords(ctx context.Context, conn server.PgCanQuery, contr
 	return closes
 }
 
-// Whether a report's settlement can act on these closes: two finals settle,
-// and a receiver checkpoint ordered after the sender's final may complete.
+// Whether a report's settlement can act on these closes: two finals settle; a
+// receiver checkpoint may complete when the report that completes it is the
+// receiver's after the sender's final (decision B) or the sender's final after
+// the checkpoint (owner, 2026-10-28); and an unused contract settles at the
+// sender's zero final when the receiver has not reported (owner, 2026-10-28).
 // Anything else leaves the contract to a later report or the expiry task.
 func contractClosesMaySettle(closes map[ContractParty]contractCloseRecord, completion contractCheckpointCompletion) bool {
 	source, sourceOk := closes[ContractPartySource]
@@ -3268,27 +3271,35 @@ func observeContractSettlementTxForTest(ctx context.Context, contractId server.I
 // leaves the contract open. Checkpoints that never complete are finalized off
 // the request path by the expiry task, which converts them to finals first.
 //
-// With receiverFollowsSenderFinal, a report owner also settles a sender final
-// plus a receiver checkpoint (owner decision B, 2026-10-10). The caller passes
-// it only for a receiver report that it applied under the contract lock after
-// the sender's final close had committed, and that was never applied before:
-// a new report identity, or an id-less report that raised the receiver's
-// retained count. Any other id-less report may retransmit one sent before the
-// sender's final, so its order is unknown. Nothing is sent on a contract after
-// its sender's final, so that receiver has had its chance to count everything
-// the sender sent. A receiver checkpoint that predates the sender's final
-// never settles here, even when it covers the final: a sender could otherwise
-// report less, even zero, after the receiver's last count and settle before
-// the receiver could answer. The receiver's next report or the expiry task
-// settles that contract. As a second guard the receiver's retained count must
-// cover the sender's exact final count. It is exact for identified checkpoints
-// and a conservative lower bound for id-less ones; a lower bound below the
-// sender's count cannot be verified, so it waits too. A source with id-less
-// checkpoints is itself only a lower bound, so it never settles here. Neither
-// does a checkpoint beyond the dispute tolerance, whose adjudication stays
-// with two finals or the expiry task. Nor does a contract whose expiry the
-// expiry task has started (usage_unverified): its retained proof predates
-// this report, so the expiry task re-reads the report and settles it. The
+// The completion lets a report owner also settle a sender final plus a
+// receiver checkpoint, in two orders:
+//
+//   - contractCheckpointAfterSenderFinal (owner decision B, 2026-10-10): a
+//     receiver report applied under the contract lock after the sender's final
+//     close had committed, and never applied before: a new report identity, or
+//     an id-less report that raised the receiver's retained count. Any other
+//     id-less report may retransmit one sent before the sender's final, so its
+//     order is unknown. Nothing is sent on a contract after its sender's
+//     final, so that receiver has had its chance to count everything the
+//     sender sent. The receiver's retained count must cover the sender's exact
+//     final count, within the dispute tolerance. It is exact for identified
+//     checkpoints and a conservative lower bound for id-less ones; a lower
+//     bound below the sender's count cannot be verified, so it waits.
+//   - contractSenderFinalAfterCheckpoint (owner, 2026-10-28): the sender's
+//     final after the receiver's checkpoint, when the two counts agree within
+//     the dispute tolerance either way. The receiver's exit counted what it
+//     got and sends nothing more. A sender may report less after the
+//     receiver's last count and settle before the receiver answers, but only
+//     within the tolerance, so the receiver loses at most half of it.
+//
+// contractSenderZeroFinalUnreported (owner, 2026-10-28) settles a sender's
+// zero final when the receiver never reported, completing the receiver's side
+// as a zero final. A source with id-less checkpoints is only a lower bound, so
+// it never settles here. Neither does a checkpoint beyond the dispute
+// tolerance, whose adjudication stays with two finals or the expiry task. Nor
+// does a contract whose expiry the expiry task has started (usage_unverified):
+// its retained proof predates this report, so the expiry task re-reads the
+// report and settles it. The
 // settlement uses the retained per-party counts exactly as the expiry task
 // would: the mean of the two for payment, the receiver's for the clock, and
 // the smaller for usage. The checkpoint is completed exactly as the expiry
