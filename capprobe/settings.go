@@ -75,8 +75,8 @@ type Settings struct {
 // measured about 580 providers an hour, enough for the Quality and Speed
 // providers the probe measured first. The Online providers it measures (about
 // 49,000 on 2026-10-13) need at least about 690 an hour for a 72-hour
-// refresh, so a deployment raises concurrency and limit in its file
-// (README.md, "Capacity").
+// refresh, so a deployment raises concurrency and limit in its file, as
+// main's has to 32 and 128 since 2026-10-15 (README.md, "Capacity").
 func DefaultSettings() Settings {
 	return Settings{
 		Enabled:                 false,

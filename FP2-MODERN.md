@@ -46,8 +46,9 @@ a config release and a restart of every taskworker, api and alt block. See
 10. **The field is named `require_modern_provider`.**
 11. **`post_quantum_encryption` keeps its meaning on the server**, for any
     client that sends it.
-12. **Probe capacity starts at `concurrency: 32` and `limit: 128`.** These are
-    a starting experiment, judged against measured throughput.
+12. **Probe capacity stays at `concurrency: 32` and `limit: 128`**, which
+    main's `capability_probe.yml` has set since 2026-10-15. The widened
+    population is accepted on measured throughput.
 
 ## Summary
 
@@ -477,16 +478,21 @@ bucket, stay out. So do hard exclusions.
 Speed providers of 10-19.
 
 **Capacity is an estimate.** At one measurement per provider per 72-hour
-refresh, the probe needs about 690 measurements an hour, against about 580 an
-hour today at concurrency 16. That figure is a floor, not a forecast:
+refresh, the probe needs about 690 measurements an hour.
+
+- Main has run `concurrency: 32` and `limit: 128` since 2026-10-15. That swept
+  about 21,000 Quality and Speed providers in about 15 hours, about 1,400 an
+  hour, so the Online population sweeps in about 35 hours.
+- The code defaults, 16 and 64, manage about 580 an hour.
+
+The 690 figure is a floor, not a forecast:
 
 - inconclusive and missing evidence stays due, so unsuccessful measurements
   recur every sweep;
 - the settings validate refresh plus minimum sweep interval against the
   seven-day window, not the actual sweep duration.
 
-`concurrency: 32` and `limit: 128` are the starting experiment. Acceptance
-reads:
+Acceptance of the widened population reads:
 
 - attempted against recorded measurements;
 - the measured sweep duration;
@@ -595,8 +601,9 @@ of a second's churn per second, against 250–760 a second on 10-21.
      `urnetwork_findproviders2_answered_modern_total` and load on modern
      providers. The kill switch is `rank_modern_first: false`, with a config
      release and a reader restart.
-3. **capability_probe.yml.** Set `concurrency: 32` and `limit: 128`, with a
-   taskworker restart. Accept on the probe metrics above.
+3. **capability_probe.yml.** Already in place: main's file has set
+   `concurrency: 32` and `limit: 128` since 2026-10-15. After the widened
+   population's first sweep, accept it on the probe metrics above.
 4. **Docs.** FP2FIX.md, capprobe/README.md and SIGNALS.md §2.19g and §2.29
    change with the merge.
 5. **Clients.** Release connect, the sdk and the apps only once all of these

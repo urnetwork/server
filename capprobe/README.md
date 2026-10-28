@@ -184,9 +184,12 @@ concurrency of 16. That figure is a floor, not a forecast:
 - the settings check each refresh plus `min_sweep_interval_minutes` against
   the seven-day staleness window, not the sweep's actual duration.
 
-The starting experiment is `concurrency: 32` and `limit: 128` in
-`capability_probe.yml` (FP2-MODERN.md, decision 12); the code defaults stay
-16 and 64. Accept it on measured throughput, not on the estimate:
+Main's `capability_probe.yml` has set `concurrency: 32` and `limit: 128`
+since 2026-10-15, which swept about 21,000 Quality and Speed providers in
+about 15 hours, about 1,400 an hour; the code defaults stay 16 and 64
+(FP2-MODERN.md, decision 12). At that rate the Online population sweeps in
+about 35 hours. Accept the widened population on measured throughput, not on
+the estimate:
 
 - attempted against recorded measurements: `selection_total{stage="started"}`
   against `providers_total`'s `recorded_*` outcomes;
