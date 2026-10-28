@@ -332,7 +332,11 @@ func TestPointsLeaderboardCreditsEachPaidTrafficWeekDespiteLatePosting(t *testin
 	})
 }
 
-func TestPointsLeaderboardWithholdsWeeklyMetricsUntilRollupComplete(t *testing.T) {
+// A payment the history rollup has not finished no longer withholds Blocks
+// and Streak (owner decision 2026-10-28): the snapshot is available and the
+// payment earns in its stored rows and payout weeks
+// (points_leaderboard_payout_weeks.go), never a false zero.
+func TestPointsLeaderboardKeepsWeeklyMetricsAvailableWhileRollupPending(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		networkId := server.NewId()
@@ -347,8 +351,8 @@ func TestPointsLeaderboardWithholdsWeeklyMetricsUntilRollupComplete(t *testing.T
 		})
 		pending, err := RebuildPointsLeaderboard(ctx, windows)
 		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, pending.EpochMetricsAvailable, false)
-		connect.AssertEqual(t, GetPointsLeaderboardNetworkRow(ctx, pending.SnapshotId, networkId).BlocksWithPoints, 0)
+		connect.AssertEqual(t, pending.EpochMetricsAvailable, true)
+		connect.AssertEqual(t, GetPointsLeaderboardNetworkRow(ctx, pending.SnapshotId, networkId).BlocksWithPoints, 1)
 
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `

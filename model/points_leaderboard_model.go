@@ -2,7 +2,6 @@ package model
 
 import (
 	"context"
-	"fmt"
 	"github.com/urnetwork/sdk"
 	"sort"
 	"time"
@@ -50,6 +49,9 @@ type PointsLeaderboardSnapshot struct {
 	LatestEpoch           uint64    `json:"latest_epoch"`
 	TotalRanked           int64     `json:"total_ranked"`
 	EpochMetricsAvailable bool      `json:"epoch_metrics_available"`
+	// Approximation is set on a snapshot the rebuild returns, never stored or
+	// read back: how many of its inputs earn in payout weeks.
+	Approximation PointsLeaderboardApproximation `json:"-"`
 }
 
 // PointsLeaderboardEntry is one stored row. rank_* is the competition rank
@@ -205,20 +207,26 @@ func pointsStreaks(epochsWithPoints map[uint64]bool, epochsAsc []uint64) (blocks
 // completed operator payout blocks (any order). Concurrent rebuilds serialize on an advisory
 // lock at write time; each still produces a complete snapshot, so the worst
 // case of a race is one extra snapshot that the next prune removes.
+//
+// Block metrics are available whenever a completed block exists (owner
+// decision 2026-10-28). A payment the history rollup has not measured earns
+// in its payout weeks (points_leaderboard_payout_weeks.go) instead of holding
+// every network's Blocks and Streak back as unavailable, so no network with
+// points in a completed block publishes a false zero. The returned snapshot's
+// Approximation counts those inputs; stored rows replace them on later
+// rebuilds as the rollup advances.
 func RebuildPointsLeaderboard(ctx context.Context, windows []PointsEpochWindow) (*PointsLeaderboardSnapshot, error) {
-	if 0 < len(windows) {
-		complete, err := pointsBlockRollupComplete(ctx)
-		if err != nil {
-			return nil, err
-		}
-		if !complete {
-			// Never publish a partial historical backfill as measured zeroes.
-			windows = nil
-		}
-	}
 	inputs, err := loadPointsNetworkInputs(ctx, windows)
 	if err != nil {
 		return nil, err
+	}
+	// without a completed block nothing is approximate
+	var approximation PointsLeaderboardApproximation
+	if 0 < len(windows) {
+		approximation, err = loadPointsLeaderboardApproximation(ctx, windows)
+		if err != nil {
+			return nil, err
+		}
 	}
 	entries, latestEpoch := ComputePointsLeaderboard(inputs, windows)
 
@@ -228,6 +236,7 @@ func RebuildPointsLeaderboard(ctx context.Context, windows []PointsEpochWindow) 
 		LatestEpoch:           latestEpoch,
 		TotalRanked:           int64(len(entries)),
 		EpochMetricsAvailable: 0 < len(windows),
+		Approximation:         approximation,
 	}
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
@@ -378,46 +387,10 @@ func RebuildPointsLeaderboard(ctx context.Context, windows []PointsEpochWindow) 
 	return snapshot, nil
 }
 
-// The migration leaves older payments unprocessed. A payout plan stores its
-// payments' block rows and marks them complete in its own transaction
-// (finalizePayments), so a payout leaves the metric available. A positive
-// post-genesis point whose linked payment is absent or unprocessed makes the
-// entire weekly metric unavailable until the bounded backfill catches up.
-func pointsBlockRollupComplete(ctx context.Context) (complete bool, returnErr error) {
-	complete = true
-	server.ReplicaDb(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(ctx, `
-			SELECT EXISTS (
-				SELECT 1 FROM account_point AS point
-				LEFT JOIN account_payment AS payment
-					ON payment.payment_id = point.account_payment_id
-				WHERE point.create_time >= $1
-					AND point.point_value > 0
-					AND (point.account_payment_id IS NULL OR
-						payment.payment_id IS NULL OR
-						NOT payment.block_rollup_complete)
-			)
-		`, SubnetBlockGenesis)
-		server.WithPgResult(result, err, func() {
-			if err != nil {
-				returnErr = err
-				return
-			}
-			if !result.Next() {
-				returnErr = fmt.Errorf("points block-rollup completeness query returned no row")
-				return
-			}
-			var missing bool
-			if returnErr = result.Scan(&missing); returnErr == nil {
-				complete = !missing
-			}
-		})
-	})
-	return complete, returnErr
-}
-
 // loadPointsNetworkInputs reads every network's all-time total and, per
-// completed operator payout block, whether a payout plan earned points there.
+// completed operator payout block, whether it earned points there: from the
+// payments' stored block rows, and the payout weeks of the payments the
+// history rollup has not measured (pointsNetworkBlocksSql).
 func loadPointsNetworkInputs(ctx context.Context, windows []PointsEpochWindow) (inputs []PointsNetworkInput, returnErr error) {
 	byNetwork := map[server.Id]*PointsNetworkInput{}
 	// stats read: tolerates replica delay
@@ -464,16 +437,10 @@ func loadPointsNetworkInputs(ctx context.Context, windows []PointsEpochWindow) (
 		server.ReplicaDb(ctx, func(conn server.PgConn) {
 			result, err := conn.Query(
 				ctx,
-				`
-					SELECT payment_block.block_number, account_point.network_id
-					FROM account_payment_block AS payment_block
-					INNER JOIN account_point ON
-						account_point.account_payment_id = payment_block.payment_id
-					WHERE payment_block.block_number = ANY($1::bigint[])
-					GROUP BY payment_block.block_number, account_point.network_id
-					HAVING 0 < SUM(account_point.point_value)
-				`,
+				pointsNetworkBlocksSql,
 				epochs,
+				SubnetBlockGenesis,
+				int64(SubnetBlockDuration/time.Second),
 			)
 			server.WithPgResult(result, err, func() {
 				if err != nil {

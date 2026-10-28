@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -80,7 +81,62 @@ func TestPointsOperatorReadinessAvailableWithoutSt(t *testing.T) {
 	}
 }
 
-func TestPointsOperatorReadinessPendingRollupIsNotStReadiness(t *testing.T) {
+func pointsAlertClasses(alerts Alerts) []string {
+	classes := []string{}
+	for _, alert := range alerts {
+		classes = append(classes, alert.Class)
+	}
+	sort.Strings(classes)
+	return classes
+}
+
+// Owner decision 2026-10-28: a rebuild publishes Blocks and Streak whenever a
+// completed operator block exists, with payout weeks for payments the history
+// rollup has not measured. The readiness signal judges publication against the
+// calendar alone: a pending rollup with a current available snapshot is
+// healthy, an unavailable snapshot after the first block closed warns whatever
+// the rollup's state, and points without a payment row warn on their own.
+func TestPointsOperatorReadinessPayoutWeekFallbackSemantics(t *testing.T) {
+	for _, state := range []struct {
+		name     string
+		snapshot []Row
+		source   []Row
+		classes  []string
+	}{
+		{name: "pending rollup, current available snapshot",
+			snapshot: syntheticPointsSnapshot(60, 12, true, 10, 4), source: syntheticPointsOperatorSource(12, 10000, 0, 7574, 2764800),
+			classes: []string{}},
+		{name: "pending rollup, available snapshot a block behind",
+			snapshot: syntheticPointsSnapshot(60, 11, true, 10, 4), source: syntheticPointsOperatorSource(12, 10000, 0, 1, 30),
+			classes: []string{"points-epoch-rebuild-pending"}},
+		{name: "pending rollup, unavailable snapshot",
+			snapshot: syntheticPointsSnapshot(60, 0, false, 10, 0), source: syntheticPointsOperatorSource(12, 10000, 0, 3, 950400),
+			classes: []string{"points-epoch-metrics-unavailable"}},
+		{name: "complete rollup, unavailable snapshot",
+			snapshot: syntheticPointsSnapshot(60, 0, false, 10, 0), source: syntheticPointsOperatorSource(12, 10000, 0, 0, 0),
+			classes: []string{"points-epoch-metrics-unavailable"}},
+		{name: "missing payment links, current available snapshot",
+			snapshot: syntheticPointsSnapshot(60, 12, true, 10, 4), source: syntheticPointsOperatorSource(12, 10000, 2, 0, 0),
+			classes: []string{"points-payment-link-missing"}},
+		{name: "missing payment links, unavailable snapshot",
+			snapshot: syntheticPointsSnapshot(60, 0, false, 10, 0), source: syntheticPointsOperatorSource(12, 10000, 2, 0, 0),
+			classes: []string{"points-epoch-metrics-unavailable", "points-payment-link-missing"}},
+		{name: "before the first block closes",
+			snapshot: syntheticPointsSnapshot(60, 0, false, 10, 0), source: syntheticPointsOperatorSource(0, 0, 0, 3, 60),
+			classes: []string{}},
+	} {
+		alerts, _, err := runPointsOperatorFixture(t, syntheticSettings(nil), state.snapshot, state.source)
+		if err != nil {
+			t.Fatalf("%s: %v", state.name, err)
+		}
+		if got := pointsAlertClasses(alerts); strings.Join(got, ",") != strings.Join(state.classes, ",") {
+			t.Fatalf("%s: classes %v, want %v", state.name, got, state.classes)
+		}
+		requirePointsOperatorNoPage(t, alerts)
+	}
+}
+
+func TestPointsOperatorReadinessUnavailableNamesTheReleaseBoundary(t *testing.T) {
 	settings := syntheticSettings(nil)
 	settings.STConfigStatus = STConfigurationExplicitDisabled
 	alerts, _, err := runPointsOperatorFixture(t, settings,
@@ -90,42 +146,56 @@ func TestPointsOperatorReadinessPendingRollupIsNotStReadiness(t *testing.T) {
 	}
 	alert := requireAlertClass(t, alerts, "points-epoch-metrics-unavailable")
 	requirePointsOperatorNoPage(t, alerts)
-	for _, want := range []string{"source=operator-paid-traffic", "pending_rollup_points=3", "oldest_pending_point_age_seconds=950400", "not stalled duration", "bounded rollup batches"} {
+	for _, want := range []string{"source=operator-paid-traffic", "pending_rollup_points=3", "oldest_pending_point_age_seconds=950400", "not stalled duration", "payout weeks", "predates the payout-week fallback", "source version"} {
 		if !strings.Contains(alert.Markdown(), want) {
-			t.Fatalf("rollup diagnosis missing %q: %s", want, alert.Markdown())
+			t.Fatalf("unavailable diagnosis missing %q: %s", want, alert.Markdown())
 		}
 	}
-	for _, wrong := range []string{"because the Main ST", "finalized ST epoch", "obtain the first legitimate finalized epoch"} {
+	for _, wrong := range []string{"because the Main ST", "finalized ST epoch", "obtain the first legitimate finalized epoch", "keep a new block snapshot unavailable"} {
 		if strings.Contains(alert.Markdown(), wrong) {
-			t.Fatalf("operator diagnosis retained unrelated closure %q", wrong)
+			t.Fatalf("operator diagnosis retained superseded closure %q", wrong)
 		}
 	}
 }
 
 func TestPointsOperatorReadinessMissingPaymentIsVisible(t *testing.T) {
-	alerts, _, err := runPointsOperatorFixture(t, syntheticSettings(nil),
-		syntheticPointsSnapshot(60, 0, false, 10, 0), syntheticPointsOperatorSource(12, 10000, 2, 0, 0))
-	if err != nil {
-		t.Fatal(err)
+	for _, available := range []bool{false, true} {
+		block := uint64(0)
+		if available {
+			block = 12
+		}
+		alerts, _, err := runPointsOperatorFixture(t, syntheticSettings(nil),
+			syntheticPointsSnapshot(60, block, available, 10, 0), syntheticPointsOperatorSource(12, 10000, 2, 0, 0))
+		if err != nil {
+			t.Fatal(err)
+		}
+		alert := requireAlertClass(t, alerts, "points-payment-link-missing")
+		if !strings.Contains(alert.Observed, "missing_payment_points=2 pending_rollup_points=0") ||
+			!strings.Contains(alert.Mechanism, "last block that closed before it posted") ||
+			!strings.Contains(alert.Action, "point writer") {
+			t.Fatalf("missing payment evidence was lost: %s", alert.Markdown())
+		}
+		requirePointsOperatorNoPage(t, alerts)
 	}
-	alert := requireAlertClass(t, alerts, "points-epoch-metrics-unavailable")
-	if !strings.Contains(alert.Observed, "missing_payment_points=2 pending_rollup_points=0") || !strings.Contains(alert.Action, "missing links require source diagnosis") {
-		t.Fatalf("missing payment evidence was lost: %s", alert.Markdown())
-	}
-	requirePointsOperatorNoPage(t, alerts)
 }
 
-func TestPointsOperatorReadinessNewPaymentDoesNotInvalidateSnapshot(t *testing.T) {
+func TestPointsOperatorReadinessPendingRollupKeepsSnapshotsValid(t *testing.T) {
 	for _, block := range []uint64{11, 12} {
 		alerts, _, err := runPointsOperatorFixture(t, syntheticSettings(nil),
 			syntheticPointsSnapshot(60, block, true, 10, 4), syntheticPointsOperatorSource(12, 10000, 0, 1, 30))
 		if err != nil {
 			t.Fatal(err)
 		}
-		alert := requireAlertClass(t, alerts, "points-block-rollup-incomplete")
 		requirePointsOperatorNoPage(t, alerts)
-		if !strings.Contains(alert.Mechanism, "not invalidated by a later pending payment") {
-			t.Fatalf("immutable snapshot boundary is missing: %s", alert.Markdown())
+		if block == 12 {
+			if len(alerts) != 0 {
+				t.Fatalf("a pending payment invalidated a current snapshot: %+v", alerts)
+			}
+			continue
+		}
+		alert := requireAlertClass(t, alerts, "points-epoch-rebuild-pending")
+		if len(alerts) != 1 || !strings.Contains(alert.Mechanism, "none waits for the rollup") {
+			t.Fatalf("a lagging snapshot waits on the rollup: %s", alert.Markdown())
 		}
 	}
 }
@@ -133,19 +203,22 @@ func TestPointsOperatorReadinessNewPaymentDoesNotInvalidateSnapshot(t *testing.T
 func TestPointsOperatorReadinessUnknownCompletionRemainsPending(t *testing.T) {
 	for _, available := range []bool{false, true} {
 		for _, snapshotAge := range []int64{60, 7300} {
-			block := uint64(0)
+			block, class := uint64(0), "points-epoch-metrics-unavailable"
 			if available {
-				block = 11
+				block, class = 11, "points-epoch-rebuild-pending"
 			}
 			alerts, _, err := runPointsOperatorFixture(t, syntheticSettings(nil),
 				syntheticPointsSnapshot(snapshotAge, block, available, 10, 0), syntheticPointsOperatorSource(12, 604700, 0, 0, 0))
 			if err != nil {
 				t.Fatal(err)
 			}
-			alert := requireAlertClass(t, alerts, "points-epoch-rebuild-pending")
+			alert := requireAlertClass(t, alerts, class)
 			requirePointsOperatorNoPage(t, alerts)
-			if !strings.Contains(alert.Observed, "rollup_completion_age=unknown") || !strings.Contains(alert.Mechanism, "old Sunday boundary cannot prove") {
+			if !strings.Contains(alert.Observed, "rollup_completion_age=unknown") {
 				t.Fatalf("completion provenance was promoted to certainty: %s", alert.Markdown())
+			}
+			if available && !strings.Contains(alert.Mechanism, "old Sunday boundary cannot prove") {
+				t.Fatalf("an old boundary was promoted to an overdue rebuild: %s", alert.Markdown())
 			}
 			if snapshotAge > 7200 {
 				requireAlertClass(t, alerts, "points-leaderboard-stale")
@@ -162,8 +235,9 @@ func TestPointsOperatorReadinessFirstSundayTransition(t *testing.T) {
 		wantClass string
 	}{
 		{closed: 0, published: 0, available: false},
-		{closed: 1, published: 0, available: false, wantClass: "points-epoch-rebuild-pending"},
+		{closed: 1, published: 0, available: false, wantClass: "points-epoch-metrics-unavailable"},
 		{closed: 1, published: 1, available: true},
+		{closed: 2, published: 1, available: true, wantClass: "points-epoch-rebuild-pending"},
 	} {
 		alerts, _, err := runPointsOperatorFixture(t, syntheticSettings(nil),
 			syntheticPointsSnapshot(0, state.published, state.available, 10, 0), syntheticPointsOperatorSource(state.closed, 0, 0, 0, 0))
@@ -425,7 +499,8 @@ func TestPointsOperatorReadinessDocumentation(t *testing.T) {
 	for _, want := range []string{
 		"Sunday-00 UTC", "seven-day", "operator paid-traffic", "ST is not a prerequisite",
 		"missing_payment_points", "pending_rollup_points", "no persisted completion timestamp",
-		"new pending payment does not invalidate an earlier snapshot", "points-block-rollup-incomplete",
+		"new pending payment does not invalidate an earlier snapshot", "points-payment-link-missing",
+		"payout weeks", "owner decision 2026-10-28", "upper bound",
 		"old Sunday boundary alone cannot prove an overdue rebuild", "source-version boundary",
 		"Do not enable ST", "signal_points_readiness_test.go",
 	} {
@@ -433,7 +508,8 @@ func TestPointsOperatorReadinessDocumentation(t *testing.T) {
 			t.Fatalf("operator readiness catalog missing %q", want)
 		}
 	}
-	for _, stale := range []string{"come only from **finalized epochs", "Closure requires the reviewed Main ST deployment", "only the reviewed ST/finalized-epoch operational closure"} {
+	for _, stale := range []string{"come only from **finalized epochs", "Closure requires the reviewed Main ST deployment", "only the reviewed ST/finalized-epoch operational closure",
+		"points-block-rollup-incomplete", "While incomplete, a new snapshot preserves total-point ranks but marks block metrics unavailable"} {
 		if strings.Contains(section, stale) {
 			t.Fatalf("active catalog retains superseded ST closure %q", stale)
 		}

@@ -112,10 +112,11 @@ func TestAdvancePointsBlockRollupCompletesPaymentWithoutPaidSweeps(t *testing.T)
 				}
 			})
 		})
-		available, err := pointsBlockRollupComplete(ctx)
+		// measured with no paid sweep while pending: exact, no payout weeks
+		approximation, err := loadPointsLeaderboardApproximation(ctx, pointsGenesisWindows(3))
 		connect.AssertEqual(t, err, nil)
-		if !available {
-			t.Fatal("empty completed payment was reported as incomplete")
+		if approximation != (PointsLeaderboardApproximation{}) {
+			t.Fatal("empty measured payment was reported as pending or approximate", approximation)
 		}
 	})
 }
