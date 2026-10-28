@@ -1288,7 +1288,8 @@ func (self *PaymentPlanner) finalizePayments() {
 	// The leaderboard reads a payment's points with its operator blocks, so the
 	// blocks commit with the points: a payout never leaves its points waiting
 	// on a rollup, which made Blocks and Streak unavailable until a backfill of
-	// every payment caught up (pointsBlockRollupComplete). This aggregates the
+	// every payment caught up, and since 2026-10-28 would publish its payout
+	// weeks (points_leaderboard_payout_weeks.go) instead. This aggregates the
 	// selection, like the plan's other reads of it, and joins no contract.
 	server.RaisePgResult(self.tx.Exec(
 		self.ctx,

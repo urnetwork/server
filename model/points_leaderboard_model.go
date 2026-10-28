@@ -208,21 +208,25 @@ func pointsStreaks(epochsWithPoints map[uint64]bool, epochsAsc []uint64) (blocks
 // lock at write time; each still produces a complete snapshot, so the worst
 // case of a race is one extra snapshot that the next prune removes.
 //
-// Block metrics are available whenever a completed block exists. A payment
-// the history rollup has not measured earns in its payout weeks
-// (points_leaderboard_payout_weeks.go) instead of holding every network's
-// Blocks and Streak back as unavailable, so no network with points in a
-// completed block publishes a false zero. The returned snapshot's
-// Approximation counts those inputs; measured rows replace them on later
+// Block metrics are available whenever a completed block exists (owner
+// decision 2026-10-28). A payment the history rollup has not measured earns
+// in its payout weeks (points_leaderboard_payout_weeks.go) instead of holding
+// every network's Blocks and Streak back as unavailable, so no network with
+// points in a completed block publishes a false zero. The returned snapshot's
+// Approximation counts those inputs; stored rows replace them on later
 // rebuilds as the rollup advances.
 func RebuildPointsLeaderboard(ctx context.Context, windows []PointsEpochWindow) (*PointsLeaderboardSnapshot, error) {
 	inputs, err := loadPointsNetworkInputs(ctx, windows)
 	if err != nil {
 		return nil, err
 	}
-	approximation, err := loadPointsLeaderboardApproximation(ctx)
-	if err != nil {
-		return nil, err
+	// without a completed block nothing is approximate
+	var approximation PointsLeaderboardApproximation
+	if 0 < len(windows) {
+		approximation, err = loadPointsLeaderboardApproximation(ctx, windows)
+		if err != nil {
+			return nil, err
+		}
 	}
 	entries, latestEpoch := ComputePointsLeaderboard(inputs, windows)
 
@@ -385,8 +389,8 @@ func RebuildPointsLeaderboard(ctx context.Context, windows []PointsEpochWindow) 
 
 // loadPointsNetworkInputs reads every network's all-time total and, per
 // completed operator payout block, whether it earned points there: from the
-// payments' measured block rows, or their payout weeks where nothing was
-// measured (pointsNetworkBlocksSql).
+// payments' stored block rows, and the payout weeks of the payments the
+// history rollup has not measured (pointsNetworkBlocksSql).
 func loadPointsNetworkInputs(ctx context.Context, windows []PointsEpochWindow) (inputs []PointsNetworkInput, returnErr error) {
 	byNetwork := map[server.Id]*PointsNetworkInput{}
 	// stats read: tolerates replica delay
