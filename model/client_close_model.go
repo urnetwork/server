@@ -35,9 +35,6 @@ const ClientRemovedTtl = 2 * time.Hour
 // takes its requests, and its contracts close at their deadline.
 const ClientCloseTtl = 15 * time.Minute
 
-// the most requests one `CloseSequences` carries
-const ClientCloseTakeLimit = 1024
-
 // the most open contracts, per direction, whose counterparties a removal asks
 // to close
 const clientRemovedOpenContractLimit = 4096

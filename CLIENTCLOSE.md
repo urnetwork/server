@@ -87,6 +87,7 @@ Both rules run in the sender's report, under the contract lock, and settle throu
 
 - **Shared guards:** no outcome yet, no dispute, expiry not started (`usage_unverified`), a sender count that is not a legacy lower bound, and an unscoped settlement.
 - **Failure:** if settlement fails, the completed receiver final rolls back with it (`contractCoveredCheckpointAbort`).
+- **Retry:** admission retains its completion decision in `contract_close.settlement_completion` in the same transaction as the count. An exact retry can resume settlement after admission committed but settlement did not. The retained decision preserves the different count requirements for sender-after-checkpoint and receiver-after-sender; report ids and timestamps do not establish cross-party order. The additive migration must precede deployment. Older rows and older writers default to no retained decision.
 - **Late reports:** a receiver report that arrives after either settlement gets the benign "already settled" error that late reports already get once the sweep has settled their contract.
 - **Scope of the zero rule:** it applies only to identified reports (those with a `report_id`). Every current connect client sends one, including the hosted proxy windows. The legacy id-less path keeps the two-final rule, which leaves very old clients and the many legacy test fixtures unchanged.
 - **Unchanged:** two finals settle, decision B still applies, and the sweep handles the rest.
@@ -101,9 +102,11 @@ Both rules run in the sender's report, under the contract lock, and settle throu
 | A live receive sequence's earlier contract | Sends a final with that sequence's counts. The sequence continues. |
 | A live receive sequence's current contract | Ends the sequence. Its exit sends a final, not a checkpoint. |
 | Held by a live send sequence, or queued for one | Cancels that send sequence. Its exit sends the finals, and a queued contract closes with (0, 0). |
-| Not held by any sequence | Sends a final of (0, 0). Its counts were reported earlier, and the server turns an earlier checkpoint into a final with the same count. |
+| Not held by any sequence | Sends a final of (0, 0) after any in-flight counted reports finish. Repeated requests coalesce while those reports are pending; an existing final satisfies the request. The server turns an earlier checkpoint into a final with the same count. |
 
 For each listed peer, the client ends every receive sequence from that peer (finalizing their current contracts too), cancels every send sequence to it, and closes the contracts queued for it.
+
+Receive sequences retain close-request ownership until all exit reports have been handed to the contract manager. The manager registers counted report ownership before removing a send contract's open entry, and keeps it through native delivery acknowledgment or out-of-band cleanup. A generated zero final cannot overtake that ownership. Shutdown or failed cleanup drops the synthetic zero obligation, retaining the existing counted cleanup and expiry backstop. Native acknowledgments confirm delivery, not database commit. Pending-delivery capacity waits also observe close requests: a current-contract close ends the receiver, while closing an earlier held contract leaves the current sequence running.
 
 This is the owner's close message, with one change: the platform sends it, not the sender. When the sender's sequence ends at 300 s, the receiver's sequence has usually exited at 120 s, so a message on the sender's own sequence would find nothing to close. The sender's final close report already tells the platform the sender is done.
 
@@ -117,7 +120,8 @@ The model follows the stream hop set (`{clientId}s2_c_hops`). Main enables the k
 - **`{clientId}c_close`**
   - A set of pending close items, `c:<contractId>` and `p:<peerId>`. Each add renews its 15-minute TTL.
   - Only the process hosting the client's resident consumes it, through a per-resident listener.
-  - The listener reads on each `sadd` event, once when it registers, and once more after each resubscribe. Each read pops up to 1024 items (SPOP, so each item has exactly one taker) and sends them as one `CloseSequences`.
+  - The listener reads on each `sadd` event, once when it registers, and once more after each resubscribe. Each read pops up to `ExchangeSettings.ClientCloseBatchSize` items (512 by default; SPOP gives each item exactly one taker) and sends them as one `CloseSequences`. It continues until the set is drained. The listener reduces the configured batch if its encoded control carrier would exceed either the exchange's limit or the minimum supported client limit. The size check includes the larger legacy envelope and maximum sequence and RTT tags. A configured exchange limit below 4 KiB leaves requests pending: the shared control sender can coalesce other frames into that envelope, even when this listener sends smaller batches. Default transports retain their 16 KiB limit.
+- **Subscription readiness:** every subscribed Redis master must acknowledge all patterns before the subscription returns and recovery reads begin. Messages arriving during this wait remain buffered. A timeout, cancellation, overflow, reconnect, or subscription failure ends that generation so the caller retries and reconciles.
 - **Producers:**
   - The report path adds `c:<contract>` to the receiver's set when a used sender's final commits and the receiver has not reported.
   - A removal adds its contracts (section 4).
@@ -208,7 +212,7 @@ At 60% connect, the removal path closed about 54 transports and 11 residents per
 
 ## Testing
 
-All tests run against Redis and PostgreSQL on the local test gate.
+Integration tests run against Redis and PostgreSQL on the local test gate. Subscription startup and library concurrency regressions use deterministic barriers and virtual time without external services.
 
 - **Model:**
   - key and event parsing, and take-once semantics;
@@ -216,22 +220,27 @@ All tests run against Redis and PostgreSQL on the local test gate.
   - settlement at the sender's final after a checkpoint, and not when the counts disagree beyond the tolerance;
   - unused contracts settled, with their reservations freed, on the identified path; the legacy id-less path keeps the two-final rule; nothing settles once expiry has started;
   - removal setting flags and asking counterparties.
+  - exact settlement retries after interrupted admission or rollback, with durable ordering, legacy writers, signed reports, and racing receiver counts checked under the contract lock.
   - Existing close-report, decision B, checkpoint and expiry-repair suites were updated where they relied on the old order. A test that needs an open contract with both reports now applies the reports without settling.
 - **Connect:** close requests reach a live client as `CloseSequences`. A removed client's transport receives the 4005 typed close well inside the 60 s recheck, and the exchange keeps its resident (the test fails if the removal cancels it). Both tests fail without the new subscription patterns.
 - **Proxy:** the device index, closes on the removal event, resubscribe re-checks, and races, all under `-race`.
+- **Subscription readiness:** every pattern and master must acknowledge before return; startup events remain buffered, and timeout, cancellation, overflow and reconnect invalidate the generation.
+- **Close batches:** mixed contract and peer backlogs drain through both wire encodings within the configured carrier size; unsupported smaller carriers leave Redis requests untouched.
 - **Connect library:**
   - each row of the section 2 table, the peer case, and the non-control source case;
   - an idle exit that still checkpoints;
+  - teardown and queue-handoff races, coalesced closes behind counted delivery, cleanup callback ownership, and current or earlier contract closes during delivery backpressure;
   - nine mutations of the handler, each caught by at least one test;
   - all under `-race`.
 
 ## Risks
 
-- **A sender that reports zero after sending bytes leaves the provider unpaid for them.** The receiver's later report is refused. Without the rule, the sweep would settle such a contract with only the sender's count unless the receiver reported first. The senders here are mostly the platform's own hosted windows.
-- **The `CloseSequences` handler has three edge cases:**
+- **A sender that reports zero after sending bytes leaves the provider unpaid for them.** Zero acknowledged bytes do not prove nothing was sent: lost acknowledgments can produce the same report, and the rule does not use `UnackedByteCount`. The receiver's later report is refused. Without the rule, the sweep would settle such a contract with only the sender's count unless the receiver reported first. The senders here are mostly the platform's own hosted windows.
+- **The `CloseSequences` handler has two remaining edge cases:**
   - A close for an old contract that arrives before the first pack of its successor ends the live sequence. The existing recovery restarts it.
-  - On removal, a close that arrives between a queued contract being taken and being recorded as open sends (0, 0) before the real final. The platform keeps only the first final.
   - Removing a peer waits for its sequence exits without a deadline.
+
+  Queue removal and recording a send contract as open now share the contract manager lock, closing the previously documented handoff gap.
 - **Load:**
   - one SADD per used sender final whose receiver has not reported;
   - one SET per removed client, plus the read of its open contracts;
