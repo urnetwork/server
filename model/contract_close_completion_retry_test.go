@@ -365,3 +365,161 @@ func TestContractCompletionRetryTwoFinalsOverrideZeroDecision(t *testing.T) {
 		flushRedisAdmissionTestDebits(t, ctx, f.balanceId, 1, 1)
 	})
 }
+
+// A receiver report after the final supersedes the earlier sender decision;
+// retries must keep decision B's refusal of a receiver below the sender.
+func TestContractCompletionRetryUsesLatestReceiverDecision(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		f := newNetEscrowOrderingTestFixture(t, ctx)
+		contract := createRedisAdmissionTest(ctx, f, 40)
+		destination := ContractCloseReport{ReportId: server.NewId(), ContractId: contract.ContractId, ClientId: f.destinationId, AckedByteCount: 9, Checkpoint: true}
+		if _, err := CloseContractWithReport(ctx, destination); err != nil {
+			t.Fatal(err)
+		}
+		source := ContractCloseReport{ReportId: server.NewId(), ContractId: contract.ContractId, ClientId: f.sourceId, AckedByteCount: 11}
+		interruptContractCompletionTestReport(t, ctx, source)
+		destination.ReportId, destination.AckedByteCount = server.NewId(), 1
+		for _, report := range []ContractCloseReport{destination, destination, source} {
+			if _, err := CloseContractWithReport(ctx, report); err != nil {
+				t.Fatal(err)
+			}
+			if outcome, journals := readContractCompletionTestState(t, ctx, contract.ContractId); outcome != nil || journals != 0 {
+				t.Fatalf("stale sender decision broadened receiver decision B: outcome=%v journals=%d", outcome, journals)
+			}
+		}
+		destination.ReportId = server.NewId()
+		if _, err := CloseContractWithReport(ctx, destination); err != nil {
+			t.Fatal(err)
+		}
+		if outcome, _ := readContractCompletionTestState(t, ctx, contract.ContractId); outcome == nil || *outcome != ContractOutcomeSettled {
+			t.Fatal("covering receiver report did not settle")
+		}
+		flushRedisAdmissionTestDebits(t, ctx, f.balanceId, 1, 1)
+	})
+}
+
+// The source call's in-memory decision is a hint too: a receiver report that
+// commits before its settlement lock must govern the current aggregate.
+func TestContractCompletionRetryFreshSenderDecisionRechecksReceiver(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		f := newNetEscrowOrderingTestFixture(t, ctx)
+		contract := createRedisAdmissionTest(ctx, f, 40)
+		destination := ContractCloseReport{ReportId: server.NewId(), ContractId: contract.ContractId, ClientId: f.destinationId, AckedByteCount: 9, Checkpoint: true}
+		if _, err := CloseContractWithReport(ctx, destination); err != nil {
+			t.Fatal(err)
+		}
+		raced := false
+		reportCtx := context.WithValue(ctx, contractSettlementTxTestKey{}, func(server.Id) {
+			raced = true
+			destination.ReportId, destination.AckedByteCount = server.NewId(), 1
+			if _, err := CloseContractWithReport(ctx, destination); err != nil {
+				t.Fatal(err)
+			}
+		})
+		source := ContractCloseReport{ReportId: server.NewId(), ContractId: contract.ContractId, ClientId: f.sourceId, AckedByteCount: 11}
+		if applied, err := CloseContractWithReport(reportCtx, source); !applied || err != nil {
+			t.Fatalf("source admission failed: applied=%t err=%v", applied, err)
+		}
+		if !raced {
+			t.Fatal("source call never reached its settlement lock boundary")
+		}
+		if outcome, journals := readContractCompletionTestState(t, ctx, contract.ContractId); outcome != nil || journals != 0 {
+			t.Fatalf("in-memory sender decision overrode newer receiver: outcome=%v journals=%d", outcome, journals)
+		}
+	})
+}
+
+// An older writer can change the receiver aggregate without the new mode.
+// Retained sender eligibility applies only to the checkpoint it admitted.
+func TestContractCompletionRetryOldWriterChangesReceiverState(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		f := newNetEscrowOrderingTestFixture(t, ctx)
+		contract := createRedisAdmissionTest(ctx, f, 40)
+		destination := ContractCloseReport{ReportId: server.NewId(), ContractId: contract.ContractId, ClientId: f.destinationId, AckedByteCount: 9, Checkpoint: true}
+		if _, err := CloseContractWithReport(ctx, destination); err != nil {
+			t.Fatal(err)
+		}
+		source := ContractCloseReport{ReportId: server.NewId(), ContractId: contract.ContractId, ClientId: f.sourceId, AckedByteCount: 11}
+		interruptContractCompletionTestReport(t, ctx, source)
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `SELECT contract_id FROM transfer_contract WHERE contract_id=$1 FOR UPDATE`, contract.ContractId))
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE contract_close
+				SET used_transfer_byte_count=10,identified_checkpoint_byte_count=10
+				WHERE contract_id=$1 AND party=$2 AND checkpoint`, contract.ContractId, ContractPartyDestination))
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO contract_close_report
+				(contract_id,party,report_id,used_transfer_byte_count,checkpoint)
+				VALUES($1,$2,$3,1,true)`, contract.ContractId, ContractPartyDestination, server.NewId()))
+		})
+		if applied, err := CloseContractWithReport(ctx, source); applied || err != nil {
+			t.Fatalf("sender retry changed custody: applied=%t err=%v", applied, err)
+		}
+		if outcome, journals := readContractCompletionTestState(t, ctx, contract.ContractId); outcome != nil || journals != 0 {
+			t.Fatalf("old-writer update reused a different checkpoint's decision: outcome=%v journals=%d", outcome, journals)
+		}
+	})
+}
+
+// An identified zero increment is still a newer receiver decision. Its count
+// matches the sender witness, so decision B itself must supersede decision A.
+func TestContractCompletionRetryZeroReceiverDecisionSupersedesSender(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		f := newNetEscrowOrderingTestFixture(t, ctx)
+		contract := createRedisAdmissionTest(ctx, f, 40)
+		destination := ContractCloseReport{ReportId: server.NewId(), ContractId: contract.ContractId, ClientId: f.destinationId, AckedByteCount: 9, Checkpoint: true}
+		if _, err := CloseContractWithReport(ctx, destination); err != nil {
+			t.Fatal(err)
+		}
+		source := ContractCloseReport{ReportId: server.NewId(), ContractId: contract.ContractId, ClientId: f.sourceId, AckedByteCount: 11}
+		interruptContractCompletionTestReport(t, ctx, source)
+		destination.ReportId, destination.AckedByteCount = server.NewId(), 0
+		for _, report := range []ContractCloseReport{destination, destination, source} {
+			if _, err := CloseContractWithReport(ctx, report); err != nil {
+				t.Fatal(err)
+			}
+			if outcome, journals := readContractCompletionTestState(t, ctx, contract.ContractId); outcome != nil || journals != 0 {
+				t.Fatalf("sender witness overrode newer zero receiver decision: outcome=%v journals=%d", outcome, journals)
+			}
+		}
+	})
+}
+
+// Missing witness data cannot establish which receiver checkpoint was present
+// when an older source decision was admitted.
+func TestContractCompletionRetrySenderDecisionNeedsCheckpointWitness(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		f := newNetEscrowOrderingTestFixture(t, ctx)
+		contract := createRedisAdmissionTest(ctx, f, 40)
+		destination := ContractCloseReport{ReportId: server.NewId(), ContractId: contract.ContractId, ClientId: f.destinationId, AckedByteCount: 9, Checkpoint: true}
+		if _, err := CloseContractWithReport(ctx, destination); err != nil {
+			t.Fatal(err)
+		}
+		source := ContractCloseReport{ReportId: server.NewId(), ContractId: contract.ContractId, ClientId: f.sourceId, AckedByteCount: 11}
+		interruptContractCompletionTestReport(t, ctx, source)
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE contract_close
+				SET settlement_completion_checkpoint_byte_count=NULL
+				WHERE contract_id=$1 AND party=$2`, contract.ContractId, ContractPartySource))
+		})
+		if applied, err := CloseContractWithReport(ctx, source); applied || err != nil {
+			t.Fatalf("sender retry changed custody: applied=%t err=%v", applied, err)
+		}
+		if outcome, journals := readContractCompletionTestState(t, ctx, contract.ContractId); outcome != nil || journals != 0 {
+			t.Fatalf("sender decision inferred missing checkpoint witness: outcome=%v journals=%d", outcome, journals)
+		}
+	})
+}

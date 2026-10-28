@@ -36,7 +36,10 @@ const stClientKeyDomainFixtureMaximumBytes = uint64(64 * 1024)
 
 // Account the fixture's exact retained census independently of blob paths.
 // The model allowance covers decoded/canonical copies and control structures,
-// not only the two serialized evidence envelopes.
+// not only the two serialized evidence envelopes. Since 2026-10-22 a row
+// keeps no registration copy beside its evidence, whose payload is the signed
+// registration, so the census reads the registration's length from that
+// payload. The json type, unlike jsonb, returns the payload's original bytes.
 func stClientKeyDomainCheckFixtureHistoryBudget(t testing.TB, ctx context.Context, domain snprotocol.ClientKeyHistoryDomain, clientID server.Id, wantCount int64) {
 	t.Helper()
 	digest, err := domain.Digest()
@@ -48,7 +51,7 @@ func stClientKeyDomainCheckFixtureHistoryBudget(t testing.TB, ctx context.Contex
 	server.Db(ctx, func(conn server.PgConn) {
 		server.Raise(conn.QueryRow(ctx, `
 			SELECT COUNT(*), COALESCE(MIN(generation), 0), COALESCE(MAX(generation), 0),
-				COALESCE(SUM(6 * octet_length(registration) + 6 * octet_length(evidence) + 2 * octet_length(evidence_hash) + octet_length(registration_hash) + $3), 0)::bigint
+				COALESCE(SUM(6 * octet_length((convert_from(evidence, 'UTF8')::json -> 'payload')::text) + 6 * octet_length(evidence) + 2 * octet_length(evidence_hash) + octet_length(registration_hash) + $3), 0)::bigint
 			FROM st_client_key_history WHERE client_id = $1 AND domain_hash = $2
 		`, clientID, digest[:], controlBytes).Scan(&count, &first, &last, &accountedBytes))
 	})

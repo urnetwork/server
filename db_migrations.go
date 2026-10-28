@@ -11038,6 +11038,7 @@ var migrations = []any{
 	newSqlMigration(`
 		SET LOCAL lock_timeout = '5s';
 		ALTER TABLE contract_close
-			ADD COLUMN settlement_completion smallint NOT NULL DEFAULT 0
+			ADD COLUMN settlement_completion smallint NOT NULL DEFAULT 0,
+			ADD COLUMN settlement_completion_checkpoint_byte_count bigint
 	`),
 }

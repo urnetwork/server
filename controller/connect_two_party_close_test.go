@@ -2,14 +2,17 @@
 // control dispatcher, whichever escrow kind it holds. The receiver's final is
 // recorded as a final, never a checkpoint, and is not refused or dropped after
 // the sender's final. A receiver checkpoint alone keeps the contract open for
-// the deadline closer unless it follows the sender's final (owner decision B,
-// connect_covered_checkpoint_test.go). Legacy-escrow contracts record the same
-// final and defer settlement to a durable intent; the
+// the deadline closer unless it follows the sender's final and covers it
+// (owner decision B), or the sender's final follows it and the two counts
+// agree within model.AcceptableTransfersByteDifference (owner, 2026-10-28);
+// connect_covered_checkpoint_test.go covers both. Legacy-escrow contracts
+// record the same final and defer settlement to a durable intent; the
 // subscription_legacy_settlement tests cover that path.
 package controller
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -289,26 +292,49 @@ func TestTwoPartyFinalCloseSettlesNetworkContract(t *testing.T) {
 	})
 }
 
-// A receiver that only checkpointed before the sender's final leaves the
-// contract open after that final; the receiver's next report or the deadline
-// closer owns it. Only a receiver report after the sender's final settles a
-// checkpoint (owner decision B, connect_covered_checkpoint_test.go). Changing
-// that rule is a settlement decision that must update this test.
-func TestTwoPartyReceiverCheckpointLeavesContractForCloser(t *testing.T) {
+// The sender's final after a receiver's checkpoint settles the contract when
+// the two counts agree within model.AcceptableTransfersByteDifference, in
+// either direction: the checkpoint is completed as a final of its retained
+// count, and the escrow debits the floor mean of both (owner, 2026-10-28).
+// Counts further apart leave the contract open after that final, with the
+// checkpoint retained; the receiver's next report or the deadline closer owns
+// it. Changing that rule is a settlement decision that must update this test.
+func TestTwoPartySenderFinalSettlesReceiverCheckpointOnlyWithinTolerance(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
-		f := newTwoPartyCloseFixture(t, false)
-		contractId := f.createContract(t, f.windowId, &protocol.CreateContract{
-			DestinationId:     f.providerId.Bytes(),
-			TransferByteCount: uint64(MinContractTransferByteCount),
-		})
 		const byteCount = model.ByteCount(8 * 1024)
-		f.closeContract(t, f.providerId, contractId, byteCount, true, true)
-		f.closeContract(t, f.windowId, contractId, byteCount, false, true)
-		f.assertOpen(t, contractId, "sender final after receiver checkpoint")
-		if state := f.state(t, contractId); !state.destinationFound || !state.destinationCheckpoint {
-			t.Fatalf("receiver checkpoint not retained: found=%t checkpoint=%t", state.destinationFound, state.destinationCheckpoint)
+		for _, test := range []struct {
+			receiverByteCount model.ByteCount
+			senderByteCount   model.ByteCount
+			settles           bool
+		}{
+			{receiverByteCount: byteCount, senderByteCount: byteCount, settles: true},
+			{receiverByteCount: byteCount, senderByteCount: byteCount + model.AcceptableTransfersByteDifference, settles: true},
+			{receiverByteCount: byteCount, senderByteCount: byteCount + model.AcceptableTransfersByteDifference + 1, settles: false},
+			{receiverByteCount: byteCount + model.AcceptableTransfersByteDifference, senderByteCount: byteCount, settles: true},
+			{receiverByteCount: byteCount + model.AcceptableTransfersByteDifference + 1, senderByteCount: byteCount, settles: false},
+		} {
+			f := newTwoPartyCloseFixture(t, false)
+			contractId := f.createOrigin(t, coveredCheckpointToleranceTransferByteCount)
+			f.closeContract(t, f.providerId, contractId, test.receiverByteCount, true, true)
+			f.closeContract(t, f.windowId, contractId, test.senderByteCount, false, true)
+			stage := fmt.Sprintf("sender final of %d bytes after a receiver checkpoint of %d bytes", test.senderByteCount, test.receiverByteCount)
+			if test.settles {
+				state := f.coveredState(t, contractId)
+				if state.outcome != model.ContractOutcomeSettled || !state.destinationFound || state.destinationCheckpoint || state.destinationUsedTransferByteCount != test.receiverByteCount {
+					t.Fatalf("%s: contract did not settle with the receiver checkpoint completed as a final of %d bytes: outcome=%q found=%t checkpoint=%t bytes=%d",
+						stage, test.receiverByteCount, state.outcome, state.destinationFound, state.destinationCheckpoint, state.destinationUsedTransferByteCount)
+				}
+				if want := (test.receiverByteCount + test.senderByteCount) / 2; state.debitByteCount != want {
+					t.Fatalf("%s: settlement debited %d bytes, want the floor mean %d", stage, state.debitByteCount, want)
+				}
+				continue
+			}
+			f.assertOpen(t, contractId, stage)
+			if state := f.state(t, contractId); !state.destinationFound || !state.destinationCheckpoint || state.destinationUsedTransferByteCount != test.receiverByteCount {
+				t.Fatalf("%s: receiver checkpoint not retained: found=%t checkpoint=%t bytes=%d", stage, state.destinationFound, state.destinationCheckpoint, state.destinationUsedTransferByteCount)
+			}
 		}
 	})
 }

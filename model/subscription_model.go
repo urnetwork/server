@@ -3105,12 +3105,17 @@ func applyLockedContractCloseReportInTx(ctx context.Context, tx server.PgTx,
 				AND COALESCE((SELECT byte_count FROM identified),0)=0
 				AND NOT EXISTS(SELECT 1 FROM contract_close WHERE contract_id=$1 AND party=$9)
 				THEN $12::smallint
-			ELSE 0::smallint END AS mode
+			ELSE 0::smallint END AS mode,
+			CASE WHEN $2=$8 AND NOT $5 THEN
+				(SELECT used_transfer_byte_count FROM contract_close WHERE contract_id=$1 AND party=$9 AND checkpoint)
+			END AS checkpoint_byte_count
 	), changed AS (
 		INSERT INTO contract_close
-			(contract_id,party,used_transfer_byte_count,close_time,checkpoint,legacy_checkpoint_byte_count,identified_checkpoint_byte_count,settlement_completion)
+			(contract_id,party,used_transfer_byte_count,close_time,checkpoint,legacy_checkpoint_byte_count,identified_checkpoint_byte_count,
+			 settlement_completion,settlement_completion_checkpoint_byte_count)
 		VALUES($1,$2,$3::bigint,$4,$5,CASE WHEN $5 AND $6 THEN $3::bigint ELSE NULL END,
-			CASE WHEN $5 AND NOT $6 THEN $3::bigint ELSE 0 END, (SELECT mode FROM completion))
+			CASE WHEN $5 AND NOT $6 THEN $3::bigint ELSE 0 END, (SELECT mode FROM completion),
+			(SELECT CASE WHEN mode=$11 THEN checkpoint_byte_count END FROM completion))
 		ON CONFLICT (contract_id,party) DO UPDATE SET
 			used_transfer_byte_count = CASE
 				WHEN NOT $5 THEN greatest(contract_close.used_transfer_byte_count, (SELECT byte_count FROM identified)) + $3::bigint
@@ -3128,6 +3133,8 @@ func applyLockedContractCloseReportInTx(ctx context.Context, tx server.PgTx,
 			identified_checkpoint_byte_count = (SELECT byte_count FROM identified) + CASE WHEN $5 AND NOT $6 THEN $3::bigint ELSE 0 END,
 			settlement_completion = CASE WHEN EXCLUDED.settlement_completion=0 THEN contract_close.settlement_completion
 				ELSE EXCLUDED.settlement_completion END,
+			settlement_completion_checkpoint_byte_count = CASE WHEN EXCLUDED.settlement_completion=0 THEN contract_close.settlement_completion_checkpoint_byte_count
+				ELSE EXCLUDED.settlement_completion_checkpoint_byte_count END,
 			close_time=$4, checkpoint=$5
 		WHERE contract_close.checkpoint
 		RETURNING used_transfer_byte_count
@@ -3201,10 +3208,11 @@ type contractCoveredCheckpointAbort struct{ cause error }
 
 // One party's retained close, checkpoint or final.
 type contractCloseRecord struct {
-	usedTransferByteCount ByteCount
-	checkpoint            bool
-	conservative          bool
-	completion            contractCheckpointCompletion
+	usedTransferByteCount         ByteCount
+	checkpoint                    bool
+	conservative                  bool
+	completion                    contractCheckpointCompletion
+	completionCheckpointByteCount *ByteCount
 }
 
 // Party -> retained close. Without the contract lock the read is a hint.
@@ -3218,7 +3226,8 @@ func readContractCloseRecords(ctx context.Context, conn server.PgCanQuery, contr
                 used_transfer_byte_count,
                 checkpoint,
                 legacy_checkpoint_byte_count IS NOT NULL,
-                settlement_completion
+                settlement_completion,
+                settlement_completion_checkpoint_byte_count
             FROM contract_close
             WHERE
                 contract_id = $1
@@ -3235,6 +3244,7 @@ func readContractCloseRecords(ctx context.Context, conn server.PgCanQuery, contr
 				&close.checkpoint,
 				&close.conservative,
 				&close.completion,
+				&close.completionCheckpointByteCount,
 			))
 			closes[closeParty] = close
 		}
@@ -3242,8 +3252,11 @@ func readContractCloseRecords(ctx context.Context, conn server.PgCanQuery, contr
 	return closes
 }
 
-// Whether a report's settlement can act on these closes: two finals settle,
-// and a receiver checkpoint ordered after the sender's final may complete.
+// Whether a report's settlement can act on these closes: two finals settle; a
+// receiver checkpoint may complete when the report that completes it is the
+// receiver's after the sender's final (decision B) or the sender's final after
+// the checkpoint (owner, 2026-10-28); and an identified zero-ACK sender final
+// settles when the receiver has not reported (owner, 2026-10-28).
 // Anything else leaves the contract to a later report or the expiry task.
 func contractClosesMaySettle(closes map[ContractParty]contractCloseRecord, completion contractCheckpointCompletion) bool {
 	source, sourceOk := closes[ContractPartySource]
@@ -3257,8 +3270,9 @@ func contractClosesMaySettle(closes map[ContractParty]contractCloseRecord, compl
 	return sourceOk && destinationOk && !source.checkpoint && (!destination.checkpoint || completion != contractCheckpointNoCompletion)
 }
 
-// Admission records ordering under the contract lock. A retry may use that
-// proof, but never infer cross-party order from report ids or wall clocks.
+// Admission records ordering under the contract lock. A later receiver report
+// takes precedence; older writers that changed its count invalidate the sender
+// witness. No report id or wall clock is used to infer cross-party order.
 func retainedContractCheckpointCompletion(closes map[ContractParty]contractCloseRecord) contractCheckpointCompletion {
 	source, sourceOk := closes[ContractPartySource]
 	if !sourceOk || source.checkpoint {
@@ -3272,11 +3286,13 @@ func retainedContractCheckpointCompletion(closes map[ContractParty]contractClose
 		return contractCheckpointNoCompletion
 	}
 	if destination.checkpoint {
-		if source.completion == contractSenderFinalAfterCheckpoint {
-			return source.completion
-		}
 		if destination.completion == contractCheckpointAfterSenderFinal {
 			return destination.completion
+		}
+		if source.completion == contractSenderFinalAfterCheckpoint &&
+			source.completionCheckpointByteCount != nil &&
+			*source.completionCheckpointByteCount == destination.usedTransferByteCount {
+			return source.completion
 		}
 	}
 	return contractCheckpointNoCompletion
@@ -3314,28 +3330,43 @@ func observeContractSettlementTxForTest(ctx context.Context, contractId server.I
 // leaves the contract open. Checkpoints that never complete are finalized off
 // the request path by the expiry task, which converts them to finals first.
 //
-// With a retained completion decision, a report owner also settles a sender final
-// plus a receiver checkpoint (owner decision B, 2026-10-10). Admission proves
-// that the receiver report applied under the contract lock after the sender's
-// final close had committed, and that it was never applied before:
-// a new report identity, or an id-less report that raised the receiver's
-// retained count. Any other id-less report may retransmit one sent before the
-// sender's final, so its order is unknown. Nothing is sent on a contract after
-// its sender's final, so that receiver has had its chance to count everything
-// the sender sent. Owner decision A (2026-10-28) also permits the sender's final
-// after a receiver checkpoint, with the ordinary two-final tolerance in either
-// direction. The admission upsert retains which order actually occurred so a
-// retry cannot broaden decision B into decision A. For decision B, the count must
-// cover the sender's exact final count. It is exact for identified checkpoints
-// and a conservative lower bound for id-less ones; a lower bound below the
-// sender's count cannot be verified, so it waits too. A source with id-less
-// checkpoints is itself only a lower bound, so it never settles here. Neither
-// does a checkpoint beyond the dispute tolerance, whose adjudication stays
-// with two finals or the expiry task. Nor does a contract whose expiry the
-// expiry task has started (usage_unverified): its retained proof predates
-// this report, so the expiry task re-reads the report and settles it. The
-// settlement uses the retained per-party counts exactly as the expiry task
-// would: the mean of the two for payment, the receiver's for the clock, and
+// The completion lets a report owner also settle a sender final plus a
+// receiver checkpoint, in two orders:
+//
+//   - contractCheckpointAfterSenderFinal (owner decision B, 2026-10-10): a
+//     receiver report applied under the contract lock after the sender's final
+//     close had committed, and never applied before: a new report identity, or
+//     an id-less report that raised the receiver's retained count. Any other
+//     id-less report may retransmit one sent before the sender's final, so its
+//     order is unknown. Nothing is sent on a contract after its sender's
+//     final, so that receiver has had its chance to count everything the
+//     sender sent. The receiver's retained count must cover the sender's exact
+//     final count, within the dispute tolerance. It is exact for identified
+//     checkpoints and a conservative lower bound for id-less ones; a lower
+//     bound below the sender's count cannot be verified, so it waits.
+//   - contractSenderFinalAfterCheckpoint (owner, 2026-10-28): the sender's
+//     final after the receiver's checkpoint, when the two counts agree within
+//     the dispute tolerance either way. The receiver's exit counted what it
+//     got and sends nothing more. A sender may report less after the
+//     receiver's last count and settle before the receiver answers, but only
+//     within the tolerance, so the receiver loses at most half of it.
+//
+// Admission retains the ordering decision with the aggregate in one commit.
+// Exact retries resume it under the contract lock, with the current counts and
+// all settlement guards rechecked; report ids and wall clocks prove no
+// cross-party order.
+//
+// contractSenderZeroFinalUnreported (owner, 2026-10-28) settles an identified
+// sender final reporting zero acknowledged bytes when no receiver report
+// exists, completing the receiver's side as a zero final. Zero acknowledged
+// bytes do not prove no data was sent; this is the accepted settlement policy.
+// A source with id-less checkpoints is only a lower bound, so
+// it never settles here. Neither does a checkpoint beyond the dispute
+// tolerance, whose adjudication stays with two finals or the expiry task. Nor
+// does a contract whose expiry the expiry task has started (usage_unverified):
+// its retained proof predates this report, so the expiry task re-reads the
+// report and settles it. The settlement uses the retained per-party counts as
+// the expiry task would: the mean for payment, the receiver's for the clock, and
 // the smaller for usage. The checkpoint is completed exactly as the expiry
 // task completes one, as a zero-byte final, in the settlement's own
 // transaction, so later reports see an ordinary two-final contract and a
@@ -3343,7 +3374,6 @@ func observeContractSettlementTxForTest(ctx context.Context, contractId server.I
 func settleContractWithOptions(ctx context.Context, contractId server.Id, scope *contractExpiryRepairScope, completion contractCheckpointCompletion, resumeReportedCompletion bool) (closed bool, completedCheckpoint bool, returnErr error) {
 	var posts []func() any
 	var clockTransferByteCount ByteCount
-	resumingCompletion := resumeReportedCompletion && completion == contractCheckpointNoCompletion
 
 	// The transaction's first read is a read-committed hint, so taking it
 	// before BEGIN changes nothing. A report that can neither settle nor
@@ -3354,7 +3384,7 @@ func settleContractWithOptions(ctx context.Context, contractId server.Id, scope 
 		server.Db(ctx, func(conn server.PgConn) {
 			hint = readContractCloseRecords(ctx, conn, contractId)
 		})
-		if resumingCompletion {
+		if resumeReportedCompletion {
 			completion = retainedContractCheckpointCompletion(hint)
 		}
 		if !contractClosesMaySettle(hint, completion) {
@@ -3406,7 +3436,7 @@ func settleContractWithOptions(ctx context.Context, contractId server.Id, scope 
 			closes = readCloses()
 			sourceClose, sourceOk = closes[ContractPartySource]
 			destinationClose, destinationOk = closes[ContractPartyDestination]
-			if resumingCompletion {
+			if resumeReportedCompletion {
 				completion = retainedContractCheckpointCompletion(closes)
 			}
 			// The accepted zero-final policy uses acknowledged bytes, not proof
