@@ -184,6 +184,10 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleRemoveOldSearchProviderStats(clientSession, tx)
 		work.ScheduleRefreshVerifyProxyEgress(clientSession, tx)
 		work.ScheduleStSyncChain(clientSession, tx)
+		// the SN top board's live binding census and on-chain incentive
+		// (LEADERTOP.md §5.7, §6.2)
+		work.ScheduleSnSyncFleetBindings(clientSession, tx)
+		work.ScheduleSnReadIncentive(clientSession, tx)
 		work.SchedulePaymentReconcile(clientSession, tx)
 		// crypto payments (controller/crypto_pay_scan.go): the scan and
 		// address refill chains of the coins that are on, and the retention
@@ -674,6 +678,15 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.StLedgerV2Step,
 			work.StLedgerV2StepPost,
+		),
+		// LEADERTOP.md §5.7, §6.2
+		task.NewTaskTargetWithPost(
+			work.SnSyncFleetBindings,
+			work.SnSyncFleetBindingsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.SnReadIncentive,
+			work.SnReadIncentivePost,
 		),
 		task.NewTaskTargetWithPost(
 			work.PaymentReconcile,
