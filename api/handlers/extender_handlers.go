@@ -11,9 +11,10 @@ import (
 // (connect/EXTENDER.md C2).
 //
 // The client jwt is required because the activation is attributed to a network
-// and a client and is rate limited per user. The route is served on the
-// family-pinned api hosts, so the caller address the handler probes back has
-// exactly one family.
+// and a client, and is budgeted per client and per account, each family on
+// its own. The route is served on the family-pinned api hosts, so the caller
+// address the handler probes back has exactly one family, and an activation
+// posted to one family's host that arrives on the other is refused.
 func ExtenderActivate(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireClient(controller.ExtenderActivate, w, r)
 }

@@ -121,8 +121,10 @@ func TestAccountActionConstantsAreDistinctAndHaveDisplayNames(t *testing.T) {
 		AccountActionGenerateSeedphrase,
 		AccountActionRegenerateSeedphrase,
 		AccountActionVerifyStorePurchase,
-		AccountActionExtenderActivate,
-		AccountActionExtenderActivateAccount,
+		AccountActionExtenderActivateV4,
+		AccountActionExtenderActivateV6,
+		AccountActionExtenderActivateAccountV4,
+		AccountActionExtenderActivateAccountV6,
 		AccountActionExtenderPingReport,
 		AccountActionExtenderLatencyReport,
 		AccountActionExtenderBlockReport,
@@ -160,7 +162,7 @@ func TestAccountActionWindowText(t *testing.T) {
 		{window: 90 * time.Second, want: "in the last 1m30s"},
 	}
 	for _, c := range cases {
-		message := maxAccountActionAttemptsError(AccountActionExtenderActivate, c.window).Error()
+		message := maxAccountActionAttemptsError(AccountActionExtenderActivateV4, c.window).Error()
 		if !strings.Contains(message, c.want) || strings.Contains(message, "today") {
 			t.Errorf("window %s: %q does not say %q", c.window, message, c.want)
 		}
@@ -182,9 +184,9 @@ func TestAccountActionRefusalNamesTheActionAndItsWindow(t *testing.T) {
 			wantWindow string
 		}{
 			{
-				action:     "extender_activate",
+				action:     "extender_activate_v4",
 				window:     time.Hour,
-				wantName:   "activating an extender",
+				wantName:   "activating an extender over IPv4",
 				wantWindow: "in the last hour",
 			},
 			{
