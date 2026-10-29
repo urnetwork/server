@@ -176,6 +176,7 @@ var routeAccessByRoute = map[string]routeAccess{
 	"GET /network/client-acl-group":                 routeAccessOwnClient, // read an ACL group
 	"GET /network/embed":                            routeAccessNetwork,   // the network's Embed state; the model refuses a client token too
 	"POST /services/contact-sales":                  routeAccessPublic,
+	"POST /friends/apply":                           routeAccessPublic,
 	"POST /preferences/set-preferences":             routeAccessAppAdmin, // account email preferences
 	"GET /preferences":                              routeAccessClient,
 	"POST /feedback/send-feedback":                  routeAccessClient,

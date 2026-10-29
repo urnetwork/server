@@ -247,6 +247,10 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		// the public Services contact form (EMBED1.md)
 		router.NewRoute("POST", "/services/contact-sales", handlers.ServicesContactSales),
 
+		// the public Friends of the Network application form, posted to the
+		// sales channel
+		router.NewRoute("POST", "/friends/apply", handlers.FriendsApply),
+
 		router.NewRoute("POST", "/preferences/set-preferences", handlers.AccountPreferencesSet),
 		router.NewRoute("GET", "/preferences", handlers.AccountPreferencesGet),
 		router.NewRoute("POST", "/feedback/send-feedback", handlers.FeedbackSend),
