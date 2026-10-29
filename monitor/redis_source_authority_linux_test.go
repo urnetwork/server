@@ -90,6 +90,7 @@ func TestRedisFamilyAuthorityNativeBoundedScan(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", test.name, err)
 		}
+		findings = keyFamilyHistoryTargetFindings(t, findings, "redis-1:6380")
 		if len(findings) != 1 {
 			t.Fatalf("%s: expected exactly one observation", test.name)
 		}
@@ -98,8 +99,12 @@ func TestRedisFamilyAuthorityNativeBoundedScan(t *testing.T) {
 				t.Errorf("%s: failed bounded scan acquired health or baseline authority", test.name)
 			}
 		} else {
-			if !findings[0].healthy {
-				t.Errorf("%s: complete bounded scan lost health authority", test.name)
+			if test.cap {
+				if !findings[0].clearHold || findings[0].healthy {
+					t.Error("material complete sample without a learned band certified recovery")
+				}
+			} else if !findings[0].healthy {
+				t.Errorf("%s: complete subthreshold sample lost its static health authority", test.name)
 			}
 			if test.nulMode == "complete" || test.nulMode == "namespace" {
 				samples := env.baseline.metricSamples["redis/family/redacted-binary-family"]
@@ -218,8 +223,9 @@ read() {
 	if calls > 8192 {
 		t.Fatal("native collector exceeded the deterministic 8192-read budget")
 	}
-	if len(findings) != 1 || !findings[0].healthy {
-		t.Fatal("complete bounded source became unknown within the native read budget")
+	findings = keyFamilyHistoryTargetFindings(t, findings, "redis-1:6380")
+	if len(findings) != 1 || !findings[0].clearHold || findings[0].healthy {
+		t.Fatal("complete material read-budget sample without history certified recovery")
 	}
 	samples := env.baseline.metricSamples["redis/family/ckey_<id>"]
 	if len(samples) != 1 || samples[0].v != familyScanKeyLimit {

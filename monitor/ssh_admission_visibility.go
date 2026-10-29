@@ -2,7 +2,11 @@
 // classification. These markers describe returned errors, never native spawns.
 package monitor
 
-import "strings"
+import (
+	"errors"
+	"strconv"
+	"strings"
+)
 
 // Only the acquisition and release call sites assign a known phase. Legacy or
 // malformed values remain unknown rather than inheriting a sibling's authority.
@@ -61,6 +65,10 @@ func observationFailureDetails(err error, errorClass string) string {
 	details := "error_class=" + errorClass
 	if phases := sshAdmissionFailurePhases(err); phases != "" {
 		details += " ssh_admission_failures=" + phases
+	}
+	var admission *runSlotAdmissionError
+	if errors.As(err, &admission) && admission.admissionAttempt >= 1 && admission.admissionAttempt <= 3 {
+		details += " local_admission_attempt=" + strconv.Itoa(admission.admissionAttempt)
 	}
 	return details + observationBoundaryDetails(err)
 }

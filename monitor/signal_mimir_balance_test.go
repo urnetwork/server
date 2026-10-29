@@ -583,8 +583,8 @@ func TestMimirBalanceDiagnosticBranchesAndPrivacy(t *testing.T) {
 		preserveHost            bool
 		elapsed                 time.Duration
 	}{
-		{"host-error", "host-observation-failed", observationErrorClassUnclassified, true, time.Minute},
-		{"parser-error", "host-observation-failed", observationErrorClassUnclassified, true, time.Minute},
+		{"host-error", "host-observation-failed", observationErrorClassInvalidResponse, true, time.Minute},
+		{"parser-error", "host-observation-failed", observationErrorClassInvalidResponse, true, time.Minute},
 		{"no-children", "no-local-child", observationErrorClassUnclassified, true, time.Minute},
 		{"unobservable-child", "child-observation-unavailable", observationErrorClassUnclassified, true, time.Minute},
 		{"counter-decrease", "counter-decreased", observationErrorClassCounterReset, false, time.Minute},

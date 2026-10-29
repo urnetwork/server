@@ -72,8 +72,17 @@ func (contractDegradationProbe) check(ctx context.Context, env *probeEnv) (findi
 		ok, sourceErr = env.cfg.routerGenerationCheck(ctx)
 		return ok && sourceErr == nil && ctx.Err() == nil
 	}
+	generationUnknown := func(phase string) []finding {
+		result := "not-current"
+		if sourceErr != nil {
+			result = "error"
+		}
+		unknown := contractDegradationUnknown("settings-generation")
+		unknown.observed += " guard_phase=" + phase + " checker_result=" + result
+		return []finding{unknown}
+	}
 	if !current() {
-		return []finding{contractDegradationUnknown("settings-generation")}, nil
+		return generationUnknown("initial"), nil
 	}
 	status := env.cfg.contractDegradationConfig.normalized()
 	if status == ContractDegradationConfigUnknown {
@@ -81,7 +90,7 @@ func (contractDegradationProbe) check(ctx context.Context, env *probeEnv) (findi
 	}
 	if status == ContractDegradationConfigDisabled {
 		if !current() {
-			return []finding{contractDegradationUnknown("settings-generation")}, nil
+			return generationUnknown("disabled-intent"), nil
 		}
 		return []finding{healthyFinding("redis/contract-degradation", tierPage, "contract-degradation-active", "contract-degradation")}, nil
 	}
@@ -110,7 +119,7 @@ func (contractDegradationProbe) check(ctx context.Context, env *probeEnv) (findi
 		return []finding{contractDegradationUnknown("redis-read")}, nil
 	}
 	if !current() {
-		return []finding{contractDegradationUnknown("settings-generation")}, nil
+		return generationUnknown("post-read"), nil
 	}
 	completed := env.now().UTC()
 	state, ttlMillis, reason := parseContractDegradationFrame(raw, started, completed)

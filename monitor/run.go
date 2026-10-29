@@ -129,7 +129,8 @@ type SignalExecutionHandler func(ctx context.Context, signal Signal, execution S
 type RunLoopOptions struct {
 	MinimumProbeCadence time.Duration
 	// Optional process-owned observer; failure never changes scheduling or results.
-	InvocationWitness *RunInvocationWitness
+	InvocationWitness   *RunInvocationWitness
+	AdmissionDiagnostic *RunAdmissionDiagnostic
 }
 
 // RunSignal executes a registered signal by its short key or SIGNALS.md
@@ -276,6 +277,7 @@ func (self *Monitor) runExecutionLoop(ctx context.Context, options RunLoopOption
 	var wg sync.WaitGroup
 	errCh := make(chan error, 1)
 	runSlots := newRunSlotPool(runLoopMaxConcurrentSignals)
+	runSlots.diagnostic = options.AdmissionDiagnostic
 	// All active signals wake at the same startup floor. The enabled recurring
 	// sampler gets the first finite turn so that this bulk wave cannot consume
 	// its entire queue-inclusive budget before it has ever observed a query.
@@ -413,14 +415,19 @@ func runSignalInSlot(ctx context.Context, slots *runSlotPool, signal Signal, set
 		ctx = observePgSampleRunSlot(ctx)
 	}
 	ctx = context.WithValue(ctx, runSlotSignalContextKey{}, signal.Key())
+	ctx, admission := slots.admissionContext(ctx)
 	release, err := slots.acquire(ctx, priority)
 	if err != nil {
-		return nil, &runSlotAdmissionError{cause: err}
+		ref := slots.finishAdmission(admission, runAdmissionFailure(admission.attemptOrNil(), err))
+		return nil, &runSlotAdmissionError{cause: err, admissionAttempt: ref}
 	}
 	defer release()
 	if err := ctx.Err(); err != nil {
-		return nil, &runSlotAdmissionError{cause: err}
+		ref := slots.finishAdmission(admission, runAdmissionContextEndedBeforeRun)
+		return nil, &runSlotAdmissionError{cause: err, admissionAttempt: ref}
 	}
+	// Dispatch handoff only: Signal.Run/native entry is independently witnessed.
+	slots.finishAdmission(admission, runAdmissionForDispatch)
 	return signal.Run(ctx, settings)
 }
 
@@ -437,13 +444,18 @@ func runSignalInSlotWithWitness(ctx context.Context, slots *runSlotPool, signal 
 		ctx = observePgSampleRunSlot(ctx)
 	}
 	ctx = context.WithValue(ctx, runSlotSignalContextKey{}, signal.Key())
+	ctx, admission := slots.admissionContext(ctx)
 	release, err := slots.acquire(ctx, priority)
 	if err != nil {
-		return nil, &runSlotAdmissionError{cause: err}
+		ref := slots.finishAdmission(admission, runAdmissionFailure(admission.attemptOrNil(), err))
+		return nil, &runSlotAdmissionError{cause: err, admissionAttempt: ref}
 	}
 	defer release()
 	if err := ctx.Err(); err != nil {
-		return nil, &runSlotAdmissionError{cause: err}
+		ref := slots.finishAdmission(admission, runAdmissionContextEndedBeforeRun)
+		return nil, &runSlotAdmissionError{cause: err, admissionAttempt: ref}
 	}
+	// Dispatch handoff only: Signal.Run/native entry is independently witnessed.
+	slots.finishAdmission(admission, runAdmissionForDispatch)
 	return runSignalWithWitness(ctx, signal, settings, witness, "active", floor)
 }

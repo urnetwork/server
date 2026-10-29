@@ -204,7 +204,7 @@ func TestRedisFamilyAuthorityCancellationPreservesBaseline(t *testing.T) {
 }
 
 // A stale learned band cannot turn a complete current sample into growth;
-// current complete evidence starts the new series using the existing policy.
+// current complete evidence starts the new series but cannot prove recovery.
 func TestRedisFamilyAuthorityStaleHistoryDoesNotInventGrowth(t *testing.T) {
 	source := &syntheticSource{
 		hostFn: func(HostSettings, string) (string, error) {
@@ -229,8 +229,10 @@ func TestRedisFamilyAuthorityStaleHistoryDoesNotInventGrowth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(findings) != 1 || !findings[0].healthy {
-		t.Fatal("expired baseline invented a current family-growth breach")
+	findings = keyFamilyHistoryTargetFindings(t, findings, "redis-1:6380")
+	if len(findings) != 1 || !findings[0].clearHold || findings[0].healthy ||
+		findings[0].class != "family-growth" {
+		t.Fatal("expired baseline invented growth or certified an unmeasured recovery")
 	}
 	samples := env.baseline.metricSamples["redis/family/ckey_<id>"]
 	if len(samples) != 4 || samples[3].v != 30000 {

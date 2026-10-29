@@ -295,6 +295,11 @@ func (self pgContractRateProbe) check(ctx context.Context, env *probeEnv) ([]fin
 			context:  "correlate with deploys/restarts in the last 10 min",
 			playbook: "SIGNALS.md 5.1",
 		}}, nil
+	case !haveBaseline:
+		// A complete count above the static floor cannot qualify the learned
+		// comparison. Preserve only this class/target's existing incident.
+		return []finding{{probeId: "pg/contracts-collapse", tier: tierPage,
+			class: "contracts-collapse", target: target, clearHold: true}}, nil
 	case haveBaseline && median >= 2000 && float64(rate) < 0.5*median:
 		// brownout: < 50% of trailing-hour median for 3 consecutive minutes.
 		// The median >= 2000 guard keeps the learned band meaningful during

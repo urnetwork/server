@@ -70,8 +70,14 @@ func TestProviderCountDirectBelowThresholdHasNoHealthySentinel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(findings) != 0 {
-		t.Fatal("below-threshold direct-only traffic acquired a warning or discovery-healthy sentinel")
+	if len(findings) != 2 {
+		t.Fatal("below-threshold direct-only traffic lost its silent recovery holds")
+	}
+	for index, class := range []string{"provider-count-effective-empty", "provider-count-small-list"} {
+		hold := findings[index]
+		if !hold.clearHold || hold.healthy || hold.probeId != "mimir/provider-count" || hold.class != class || hold.target != "api-fleet" {
+			t.Fatal("direct-only traffic acquired a warning or discovery-healthy sentinel")
+		}
 	}
 }
 

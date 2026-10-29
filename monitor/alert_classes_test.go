@@ -61,32 +61,45 @@ type classValue struct {
 // resolves through string literals, constants, variables assigned only such
 // values, range keys and values over literal lists, and the parameters of
 // helpers, whose call sites resolve in turn. Any other value is computed.
-func harvestAlertClasses(t *testing.T) sourceAlertClasses {
+// Optional synthetic source texts exercise these same rules without changing cwd.
+func harvestAlertClasses(t *testing.T, sourceTexts ...string) sourceAlertClasses {
 	// composite types whose class field is not an alert class or only copies one
 	deniedTypes := map[string]bool{
 		"consoleJsonEvent": true, "dnsmessage.Question": true, "egressSitePoolDestination": true,
 		"egressSitePoolRegionalFailure": true, "egressSitePoolThinPlace": true,
 		"sshAdmissionRequest": true, "ticketIdentity": true, "warpctlLogQueryError": true,
+		// Bounded observation-error metadata; its integer class is never an alert class.
+		"mimirBalancePreparedDiagnostic": true,
 	}
 	// observation error classes, not alert classes
 	deniedFunctions := map[string]bool{"warpctlLogDiagnosticClass": true}
 
-	entries, err := os.ReadDir(".")
-	if err != nil {
-		t.Fatal(err)
-	}
 	fileSet := token.NewFileSet()
 	files := []*ast.File{}
-	for _, entry := range entries {
-		name := entry.Name()
-		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			continue
+	if len(sourceTexts) != 0 {
+		for index, source := range sourceTexts {
+			file, err := parser.ParseFile(fileSet, "synthetic-"+strconv.Itoa(index)+".go", source, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			files = append(files, file)
 		}
-		file, err := parser.ParseFile(fileSet, name, nil, 0)
+	} else {
+		entries, err := os.ReadDir(".")
 		if err != nil {
 			t.Fatal(err)
 		}
-		files = append(files, file)
+		for _, entry := range entries {
+			name := entry.Name()
+			if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+				continue
+			}
+			file, err := parser.ParseFile(fileSet, name, nil, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			files = append(files, file)
+		}
 	}
 
 	text := func(expr ast.Expr) string {
@@ -423,6 +436,29 @@ func harvestAlertClasses(t *testing.T) sourceAlertClasses {
 	return harvest
 }
 
+// One uncovered computed producer or an acknowledgment whose producer no longer exists.
+type alertClassAcknowledgmentIssue struct {
+	site  string
+	stale bool
+}
+
+// Require both directions: every computed site is acknowledged, and every acknowledgment is live.
+func alertClassAcknowledgmentIssues(computedValues map[string][]string, acknowledgedClasses map[string][]string) []alertClassAcknowledgmentIssue {
+	issues := []alertClassAcknowledgmentIssue{}
+	for site := range computedValues {
+		if _, ok := acknowledgedClasses[site]; !ok {
+			issues = append(issues, alertClassAcknowledgmentIssue{site: site})
+		}
+	}
+	for site := range acknowledgedClasses {
+		if _, ok := computedValues[site]; !ok {
+			issues = append(issues, alertClassAcknowledgmentIssue{site: site, stale: true})
+		}
+	}
+	sort.Slice(issues, func(i, j int) bool { return issues[i].site < issues[j].site })
+	return issues
+}
+
 // Every class the source names is in alertClassKinds, and every entry is a
 // class the source names. A class value the source computes is acknowledged
 // below with each class it can take. Unknown-state names are visibility, a
@@ -433,7 +469,7 @@ func TestEveryAlertClassIsClassified(t *testing.T) {
 	// "file function" -> every class its computed class values can take
 	siteComputedClasses := map[string][]string{
 		"pg_query_sample_continuous.go pgSampleFindings":            {"pg-query-repeated-work", "pg-query-slow"},
-		"registry.go visibilityAlert":                               {"provider-api", "provider-authentication", "provider-data-invalid"},
+		"registry.go legacyVisibilityAlert":                         {"provider-api", "provider-authentication", "provider-data-invalid"},
 		"signal_credentials.go Run":                                 {"credential-fields-missing", "credential-resource-malformed", "credential-resource-missing"},
 		"signal_edge_ipv6.go edgeIPv6Findings":                      {"edge-ipv6-http", "edge-ipv6-policy-route", "edge-ipv6-reset", "edge-ipv6-timeout", "edge-ipv6-upstream-drop", "edge-lb-config-rejected"},
 		"signal_egress_coverage.go egressCoverageStallFinding":      {"egress-blackhole-stalled", "egress-full-stalled"},
@@ -457,20 +493,14 @@ func TestEveryAlertClassIsClassified(t *testing.T) {
 
 	harvest := harvestAlertClasses(t)
 	classPositions := harvest.classPositions
-	sites := make([]string, 0, len(harvest.siteComputedValues))
-	for site := range harvest.siteComputedValues {
-		sites = append(sites, site)
-	}
-	sort.Strings(sites)
-	for _, site := range sites {
-		if _, ok := siteComputedClasses[site]; !ok {
-			t.Errorf("%s computes a class from %s: name it with a literal, or acknowledge every class it can take", site, strings.Join(harvest.siteComputedValues[site], ", "))
+	for _, issue := range alertClassAcknowledgmentIssues(harvest.siteComputedValues, siteComputedClasses) {
+		if issue.stale {
+			t.Errorf("%s no longer computes a class: remove its acknowledgment", issue.site)
+		} else {
+			t.Errorf("%s computes a class from %s: name it with a literal, or acknowledge every class it can take", issue.site, strings.Join(harvest.siteComputedValues[issue.site], ", "))
 		}
 	}
 	for site, classes := range siteComputedClasses {
-		if _, ok := harvest.siteComputedValues[site]; !ok {
-			t.Errorf("%s no longer computes a class: remove its acknowledgment", site)
-		}
 		for _, class := range classes {
 			classPositions[class] = append(classPositions[class], site)
 		}
