@@ -206,7 +206,16 @@ func PublishVerifyOriginal(ctx context.Context, original *VerifyOriginalTransiti
 		state, err := json.Marshal(trail)
 		server.Raise(err)
 		completeTime := time.UnixMilli(int64(trail.ActivityMs)).UTC()
-		InsertVerifyTrail(ctx, &VerifyTrailRow{TrailId: trail.TrailId, Vpk: trail.Vpk, ServerKeyId: trail.ServerKeyId, ServerNonce: trail.ServerNonce, Depth: trail.M, Status: VerifyTrailRowStatusComplete, HopsJson: string(hopsJson), FinalSig: proof.FinalSig, VerifierSig: proof.VerifierSig, CreateTime: time.UnixMilli(int64(trail.CreateMs)).UTC(), CompleteTime: &completeTime, OriginalState: state})
+		// the SN Top board's indexed hops commit with the terminal row, so a
+		// replay that finds the row finds its hops (LEADERTOP.md §8)
+		anchor := GetSnTopTempoAnchor(ctx)
+		hops := snTrailHopsOfCompleteTrail(trail, original.HeadWindow, func(t time.Time) int64 {
+			return SnTopTempoAt(anchor, t).Index
+		})
+		server.Tx(ctx, func(tx server.PgTx) {
+			insertVerifyTrailInTx(ctx, tx, &VerifyTrailRow{TrailId: trail.TrailId, Vpk: trail.Vpk, ServerKeyId: trail.ServerKeyId, ServerNonce: trail.ServerNonce, Depth: trail.M, Status: VerifyTrailRowStatusComplete, HopsJson: string(hopsJson), FinalSig: proof.FinalSig, VerifierSig: proof.VerifierSig, CreateTime: time.UnixMilli(int64(trail.CreateMs)).UTC(), CompleteTime: &completeTime, OriginalState: state})
+			insertSnTrailHopsInTx(ctx, tx, hops)
+		})
 		row := GetVerifyTrailRow(ctx, trail.TrailId)
 		if row == nil || row.Status != VerifyTrailRowStatusComplete || row.Depth != trail.M || row.ServerKeyId != trail.ServerKeyId || !bytes.Equal(row.Vpk, trail.Vpk) || !bytes.Equal(row.ServerNonce, trail.ServerNonce) || !bytes.Equal(row.FinalSig, proof.FinalSig) || !bytes.Equal(row.VerifierSig, proof.VerifierSig) || row.HopsJson != string(hopsJson) {
 			panic(errors.New("verification terminal original conflict"))

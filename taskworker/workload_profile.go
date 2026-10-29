@@ -166,6 +166,7 @@ func subnetOperatorTasks() []subnetOperatorTask {
 		{target: task.NewTaskTarget(work.IndexSearchLocations), schedule: work.ScheduleIndexSearchLocations},
 		{target: task.NewTaskTarget(controller.RefreshFreeTransferBalances), schedule: controller.ScheduleRefreshFreeTransferBalances},
 		{target: task.NewTaskTarget(controller.RebuildPointsLeaderboard), schedule: controller.ScheduleRebuildPointsLeaderboard},
+		{target: task.NewTaskTarget(controller.ComputeSnTopSnapshot), schedule: controller.ScheduleComputeSnTopSnapshot},
 		{target: task.NewTaskTarget(work.RemoveCompletedContracts), schedule: work.ScheduleRemoveCompletedContracts},
 		{target: task.NewTaskTarget(work.ReconcileNetEscrow), schedule: work.ScheduleReconcileNetEscrow},
 		{target: work.NewTransferDebitTaskTarget(), schedule: work.ScheduleFlushTransferDebits},

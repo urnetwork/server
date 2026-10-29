@@ -80,7 +80,7 @@ func TestPointsLeaderboardRowFromModel(t *testing.T) {
 		LeaderboardPublic:       true,
 		PointsLeaderboardPublic: false,
 		ContainsProfanity:       true,
-	}, model.PointsLeaderboardSortPoints)
+	}, model.PointsLeaderboardSortPoints, nil)
 	connect.AssertEqual(t, hidden.Anonymous, true)
 	connect.AssertEqual(t, hidden.NetworkName, "")
 	connect.AssertEqual(t, hidden.ContainsProfanity, false)
@@ -94,7 +94,7 @@ func TestPointsLeaderboardRowFromModel(t *testing.T) {
 		NetworkName:             "shown",
 		LeaderboardPublic:       false,
 		PointsLeaderboardPublic: true,
-	}, model.PointsLeaderboardSortPoints)
+	}, model.PointsLeaderboardSortPoints, nil)
 	connect.AssertEqual(t, public.Anonymous, false)
 	connect.AssertEqual(t, public.NetworkName, "shown")
 }
@@ -138,7 +138,8 @@ func TestPointsLeaderboardApiDb(t *testing.T) {
 		connect.AssertEqual(t, empty.Error, (*PointsLeaderboardError)(nil))
 		connect.AssertEqual(t, len(empty.Rows), 0)
 		connect.AssertEqual(t, empty.Me.Ranked, false)
-		connect.AssertEqual(t, empty.Me.NetworkId, ids[0])
+		connect.AssertEqual(t, *empty.Me.NetworkId, ids[0])
+		connect.AssertEqual(t, empty.Me.IsMe, true)
 		// the caller sees its own name even before it is ranked
 		connect.AssertEqual(t, empty.Me.NetworkName, "points_api_a")
 		connect.AssertEqual(t, empty.Me.Anonymous, true)
@@ -197,12 +198,13 @@ func TestPointsLeaderboardApiDb(t *testing.T) {
 		// tie-break puts n3 (4 blocks, rank 2) before n1 (2 blocks, rank 3) --
 		// a rank is shared only when all three values tie. n3's DATA
 		// leaderboard name switch does not reveal its name here.
-		connect.AssertEqual(t, page.Rows[0].NetworkId, ids[2])
+		// an anonymous row carries no network id (LEADERTOP Q12)
+		connect.AssertEqual(t, page.Rows[0].NetworkId, (*server.Id)(nil))
 		connect.AssertEqual(t, page.Rows[0].RankPoints, int64(1))
 		connect.AssertEqual(t, page.Rows[0].TotalPoints, 90.0)
 		connect.AssertEqual(t, page.Rows[0].Anonymous, true)
 		connect.AssertEqual(t, page.Rows[0].NetworkName, "")
-		connect.AssertEqual(t, page.Rows[1].NetworkId, ids[3])
+		connect.AssertEqual(t, page.Rows[1].NetworkId, (*server.Id)(nil))
 		connect.AssertEqual(t, page.Rows[1].RankPoints, int64(2))
 		connect.AssertEqual(t, page.Rows[1].TotalPoints, 80.0)
 		connect.AssertEqual(t, page.Rows[1].Anonymous, true)
@@ -214,12 +216,12 @@ func TestPointsLeaderboardApiDb(t *testing.T) {
 		connect.AssertEqual(t, len(next.Rows), 2)
 		// n1 (rank 3) shows its name and emoji; n0 and n4 tie at 50 and n4's
 		// streak (5) puts it at rank 4, anonymous
-		connect.AssertEqual(t, next.Rows[0].NetworkId, ids[1])
+		connect.AssertEqual(t, *next.Rows[0].NetworkId, ids[1])
 		connect.AssertEqual(t, next.Rows[0].RankPoints, int64(3))
 		connect.AssertEqual(t, next.Rows[0].Anonymous, false)
 		connect.AssertEqual(t, next.Rows[0].NetworkName, "points_api_b")
 		connect.AssertEqual(t, next.Rows[0].EmojiTag, "🐬🔥")
-		connect.AssertEqual(t, next.Rows[1].NetworkId, ids[4])
+		connect.AssertEqual(t, next.Rows[1].NetworkId, (*server.Id)(nil))
 		connect.AssertEqual(t, next.Rows[1].RankPoints, int64(4))
 		connect.AssertEqual(t, next.Rows[1].Anonymous, true)
 		connect.AssertNotEqual(t, next.NextCursor, "")
@@ -228,7 +230,7 @@ func TestPointsLeaderboardApiDb(t *testing.T) {
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, len(last.Rows), 1)
 		// n0 (rank 5) shows its name
-		connect.AssertEqual(t, last.Rows[0].NetworkId, ids[0])
+		connect.AssertEqual(t, *last.Rows[0].NetworkId, ids[0])
 		connect.AssertEqual(t, last.Rows[0].RankPoints, int64(5))
 		connect.AssertEqual(t, last.Rows[0].Anonymous, false)
 		connect.AssertEqual(t, last.Rows[0].NetworkName, "points_api_a")
@@ -252,23 +254,26 @@ func TestPointsLeaderboardApiDb(t *testing.T) {
 		streak, err := GetPointsLeaderboard(&PointsLeaderboardArgs{Sort: "streak"}, sessions[2])
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, len(streak.Rows), 5)
-		connect.AssertEqual(t, streak.Rows[0].NetworkId, ids[4])
+		connect.AssertEqual(t, streak.Rows[0].NetworkId, (*server.Id)(nil))
 		connect.AssertEqual(t, streak.Rows[0].RankStreak, int64(1))
 		connect.AssertEqual(t, streak.Rows[0].Streak, 5)
-		connect.AssertEqual(t, streak.Rows[1].NetworkId, ids[3])
+		connect.AssertEqual(t, streak.Rows[1].NetworkId, (*server.Id)(nil))
 		connect.AssertEqual(t, streak.Rows[1].RankStreak, int64(2))
-		connect.AssertEqual(t, streak.Rows[2].NetworkId, ids[2])
+		// the caller's own anonymous row keeps its id and says is_me
+		connect.AssertEqual(t, *streak.Rows[2].NetworkId, ids[2])
+		connect.AssertEqual(t, streak.Rows[2].IsMe, true)
 		connect.AssertEqual(t, streak.Rows[2].RankStreak, int64(3))
 		connect.AssertEqual(t, streak.Rows[2].Anonymous, true)
 		connect.AssertEqual(t, streak.Rows[2].NetworkName, "")
-		connect.AssertEqual(t, streak.Rows[3].NetworkId, ids[1])
+		connect.AssertEqual(t, *streak.Rows[3].NetworkId, ids[1])
+		connect.AssertEqual(t, streak.Rows[3].IsMe, false)
 		connect.AssertEqual(t, streak.Rows[3].RankStreak, int64(4))
-		connect.AssertEqual(t, streak.Rows[4].NetworkId, ids[0])
+		connect.AssertEqual(t, *streak.Rows[4].NetworkId, ids[0])
 		connect.AssertEqual(t, streak.Rows[4].RankStreak, int64(5))
 		// the anonymous caller still sees its own name: rank 3 by streak,
 		// rank 1 by points
 		connect.AssertEqual(t, streak.Me.Ranked, true)
-		connect.AssertEqual(t, streak.Me.NetworkId, ids[2])
+		connect.AssertEqual(t, *streak.Me.NetworkId, ids[2])
 		connect.AssertEqual(t, streak.Me.PointsLeaderboardPublic, false)
 		connect.AssertEqual(t, streak.Me.Anonymous, true)
 		connect.AssertEqual(t, streak.Me.RankStreak, int64(3))
@@ -287,13 +292,16 @@ func TestPointsLeaderboardApiDb(t *testing.T) {
 		connect.AssertEqual(t, named.Me.NetworkName, "points_api_b")
 		connect.AssertEqual(t, named.Me.EmojiTag, "🐬🔥")
 		for _, row := range named.Rows {
-			if row.NetworkId == ids[1] {
+			if row.NetworkId != nil && *row.NetworkId == ids[1] {
 				connect.AssertEqual(t, row.Anonymous, false)
 				connect.AssertEqual(t, row.NetworkName, "points_api_b")
+				connect.AssertEqual(t, row.IsMe, true)
 			}
-			if row.NetworkId == ids[3] {
+			// n3 (points rank 2) is anonymous: no name and no id
+			if row.RankPoints == 2 {
 				connect.AssertEqual(t, row.Anonymous, true)
 				connect.AssertEqual(t, row.NetworkName, "")
+				connect.AssertEqual(t, row.NetworkId, (*server.Id)(nil))
 			}
 		}
 		// turning the switch off hides the name in the list at once; `me`
@@ -306,7 +314,9 @@ func TestPointsLeaderboardApiDb(t *testing.T) {
 		connect.AssertEqual(t, unnamed.Me.Anonymous, true)
 		connect.AssertEqual(t, unnamed.Me.NetworkName, "points_api_b")
 		for _, row := range unnamed.Rows {
-			if row.NetworkId == ids[1] {
+			// the caller's own row keeps its id after it turns the name off
+			if row.NetworkId != nil && *row.NetworkId == ids[1] {
+				connect.AssertEqual(t, row.IsMe, true)
 				connect.AssertEqual(t, row.Anonymous, true)
 				connect.AssertEqual(t, row.NetworkName, "")
 				connect.AssertEqual(t, row.EmojiTag, "🐬🔥")

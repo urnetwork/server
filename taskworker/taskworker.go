@@ -120,6 +120,8 @@ func initTaskSchedule(ctx context.Context) {
 		controller.ScheduleRefreshProTransferBalances(clientSession, tx)
 		controller.ScheduleRefreshReferralTransferBalances(clientSession, tx)
 		controller.ScheduleRebuildPointsLeaderboard(clientSession, tx)
+		// the SN Top board: one snapshot per tempo (LEADERTOP.md §8)
+		controller.ScheduleComputeSnTopSnapshot(clientSession, tx)
 		controller.ScheduleAwardOperatorBlockPoints(clientSession, tx)
 		work.ScheduleSetMissingConnectionLocations(clientSession, tx)
 		work.ScheduleRemoveLocationLookupResults(clientSession, tx)
@@ -390,6 +392,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			controller.RebuildPointsLeaderboard,
 			controller.RebuildPointsLeaderboardPost,
 			"bringyour.com/bringyour/controller.RebuildPointsLeaderboard",
+		),
+		task.NewTaskTargetWithPost(
+			controller.ComputeSnTopSnapshot,
+			controller.ComputeSnTopSnapshotPost,
 		),
 		task.NewTaskTargetWithPost(
 			controller.AwardOperatorBlockPoints,
