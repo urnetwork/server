@@ -93,8 +93,36 @@ type SnTopValidatorSummary struct {
 	NativeSnapshotBlock uint64
 	SettlementEpoch     uint64
 	MaximumHeadFleets   int
-	ReceivedAt          time.Time
-	Entries             []SnTopValidatorSummaryEntry
+	// the eligible head UIDs: a rank's "of"
+	EntryCount int
+	ReceivedAt time.Time
+	// by rank
+	Entries []SnTopValidatorSummaryEntry
+}
+
+// entryFor is the summary's entry for one fleet identity: its UID's entry,
+// while the identity's hotkey holds the UID and the identity is one of
+// those that make up the UID's score.
+func (self *SnTopValidatorSummary) entryFor(key model.SnTopFleetKey) *SnTopValidatorSummaryEntry {
+	for i := range self.Entries {
+		entry := &self.Entries[i]
+		if entry.Uid != key.Uid || entry.Hotkey != key.Hotkey {
+			continue
+		}
+		for _, fleet := range entry.Fleets {
+			if fleet.FleetId == key.FleetId && fleet.Generation == key.Generation {
+				return entry
+			}
+		}
+	}
+	return nil
+}
+
+func (self *SnTopValidatorSummary) rankOf() int {
+	if 0 < self.EntryCount {
+		return self.EntryCount
+	}
+	return len(self.Entries)
 }
 
 // SnTopIncentive is the on-chain incentive of each UID, read once a tempo.
@@ -102,8 +130,9 @@ type SnTopIncentive struct {
 	At time.Time
 	// each UID's Incentive as the chain stores it: a u16 share of 65535
 	ByUid map[uint16]uint16
-	// the hotkey holding each UID at the read, where it was read; a UID that
-	// changed hands earns for its new holder, not for the fleet
+	// the hotkey holding each UID at the read, where it was read. A fleet's
+	// incentive is its UID's only while the fleet's hotkey holds it: a UID
+	// that changed hands earns for its new holder
 	Holders map[uint16][32]byte
 	// the validator's fallback row, its weights outside the activity cutoff,
 	// or its trust well below 1 (LEADERTOP.md §6.2)
@@ -111,7 +140,8 @@ type SnTopIncentive struct {
 }
 
 // SnTopSources are the board's inputs from the chain sync. Each returns
-// nothing until its source has data.
+// nothing until its source has data, and then the board's claimed fleet,
+// validator and incentive fields stay null.
 type SnTopSources struct {
 	// the live claimed fleets of the settlement epoch, with member clients
 	ClaimedFleets func(ctx context.Context, settlementEpoch uint64) []model.SnTopFleetInput
@@ -121,10 +151,11 @@ type SnTopSources struct {
 	Incentive func(ctx context.Context) *SnTopIncentive
 }
 
+// The chain sync's readers (sn_top_chain_sources.go).
 var snTopSources = SnTopSources{
-	ClaimedFleets:    func(context.Context, uint64) []model.SnTopFleetInput { return nil },
-	ValidatorSummary: func(context.Context) *SnTopValidatorSummary { return nil },
-	Incentive:        func(context.Context) *SnTopIncentive { return nil },
+	ClaimedFleets:    snTopChainClaimedFleets,
+	ValidatorSummary: snTopChainValidatorSummary,
+	Incentive:        snTopChainIncentive,
 }
 
 // SetSnTopSources installs the chain sync's sources; nil members keep the
@@ -836,7 +867,6 @@ func snTopGatherInputs(
 ) *snTopInputs {
 	inputs := &snTopInputs{}
 	eligible := model.GetVerifyEligibleClientIds(ctx)
-	cohort, cohortEnabled := model.GetVerifyCohortMembers(ctx, settings)
 	_, pins := model.GetVerifyHeadPrefixPins(ctx, eligible, settings)
 	presence := model.GetSnTopPresence(ctx, tempo.StartTime, tempo.EndTime)
 	evidence := model.GetSnTopTrailEvidence(ctx, tempo.StartTime, tempo.EndTime)
@@ -845,13 +875,6 @@ func snTopGatherInputs(
 	if presence.CoveredBlocks == 0 {
 		inputs.presenceSource = snTopPresenceEligibleNow
 	}
-	if cohortEnabled {
-		inputs.measuredProviders = len(cohort)
-		inputs.cohortCapacity = settings.CohortSize
-	} else {
-		inputs.measuredProviders = len(eligible)
-	}
-
 	clientIds := map[server.Id]bool{}
 	for _, clientId := range eligible {
 		clientIds[clientId] = true
@@ -876,6 +899,26 @@ func snTopGatherInputs(
 	eligibleSet := map[server.Id]bool{}
 	for _, clientId := range eligible {
 		eligibleSet[clientId] = true
+	}
+
+	// The cohort the validator measures from (verify_cohort_model.go): a
+	// provider is measurable while this settlement epoch's cohort holds it.
+	// Without a cohort every eligible provider can be drawn.
+	cohortEnabled := 0 < settings.CohortSize
+	inputs.cohortCapacity = max(0, settings.CohortSize)
+	cohort := map[server.Id]bool{}
+	if cohortEnabled {
+		cohortClientIds := make([]server.Id, 0, len(clientIds))
+		for clientId := range clientIds {
+			cohortClientIds = append(cohortClientIds, clientId)
+		}
+		cohort, _ = model.GetVerifyCohortMembership(ctx, settings, cohortClientIds)
+		if status, ok := model.GetVerifyCohortStatus(ctx, settings); ok {
+			inputs.measuredProviders = status.Members
+			inputs.cohortCapacity = status.Capacity
+		}
+	} else {
+		inputs.measuredProviders = len(eligible)
 	}
 
 	providers := []model.SnTopProvider{}
@@ -906,7 +949,7 @@ func snTopGatherInputs(
 	}
 	sort.Slice(providers, func(i, j int) bool { return providers[i].ClientId.Less(providers[j].ClientId) })
 
-	fleets := snTopSources.ClaimedFleets(ctx, tempo.SettlementEpoch)
+	fleets := snTopSources.ClaimedFleets(ctx, snTopFleetEpoch(tempo))
 	inputs.incentive = snTopSources.Incentive(ctx)
 	fleets = snTopAttachChainData(fleets, summary, inputs.incentive)
 
@@ -935,26 +978,17 @@ func snTopGatherInputs(
 }
 
 // snTopAttachChainData copies the validator's summary and the on-chain
-// incentive onto each fleet by its UID, while its hotkey still holds the UID.
+// incentive onto each fleet: the summary's entry for the fleet's identity,
+// and its UID's incentive while its hotkey holds the UID.
 func snTopAttachChainData(fleets []model.SnTopFleetInput, summary *SnTopValidatorSummary, incentive *SnTopIncentive) []model.SnTopFleetInput {
-	entries := map[uint16]*SnTopValidatorSummaryEntry{}
-	if summary != nil {
-		for i := range summary.Entries {
-			entries[summary.Entries[i].Uid] = &summary.Entries[i]
-		}
-	}
 	for i := range fleets {
 		fleet := &fleets[i]
 		if summary != nil {
-			rankOf := len(summary.Entries)
+			rankOf := summary.rankOf()
 			selected := false
 			score := 0.0
 			fleet.ValidatorRankOf = &rankOf
-			entry := entries[fleet.Key.Uid]
-			if entry != nil && entry.Hotkey != ([32]byte{}) && entry.Hotkey != fleet.Key.Hotkey {
-				entry = nil
-			}
-			if entry != nil {
+			if entry := summary.entryFor(fleet.Key); entry != nil {
 				rank := entry.Rank
 				fleet.ValidatorRank = &rank
 				selected = entry.Selected
@@ -967,7 +1001,7 @@ func snTopAttachChainData(fleets []model.SnTopFleetInput, summary *SnTopValidato
 		}
 		if incentive != nil {
 			holder, holderRead := incentive.Holders[fleet.Key.Uid]
-			if raw, ok := incentive.ByUid[fleet.Key.Uid]; ok && (!holderRead || holder == fleet.Key.Hotkey) {
+			if raw, ok := incentive.ByUid[fleet.Key.Uid]; ok && holderRead && holder == fleet.Key.Hotkey {
 				value := SnTopIncentiveFraction(raw)
 				fleet.Incentive = &value
 			}

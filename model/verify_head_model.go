@@ -397,34 +397,6 @@ func verifyHeadHashLiveCandidate(live verifyLiveEgress, clientId server.Id, forw
 	return [32]byte{}, false
 }
 
-// GetVerifyCohortMembers lists the providers the verify cohort admitted for
-// the settlement epoch in effect now: the providers the validator can
-// measure (verify_cohort_model.go). enabled is false when no cohort bounds
-// sampling, so every eligible provider can be drawn.
-func GetVerifyCohortMembers(ctx context.Context, settings *VerifySettings) (members map[server.Id]bool, enabled bool) {
-	members = map[server.Id]bool{}
-	if settings.CohortSize <= 0 {
-		return members, false
-	}
-	epoch, ok := verifyCohortEpoch(ctx, settings.CohortDeploymentKey)
-	if !ok {
-		return members, true
-	}
-	keys := newVerifyCohortKeys(settings.CohortDeploymentKey, epoch)
-	server.Redis(ctx, func(r server.RedisClient) {
-		values, err := r.SMembers(ctx, keys.epoch).Result()
-		if err != nil && !errors.Is(err, redis.Nil) {
-			server.Raise(err)
-		}
-		for _, value := range values {
-			if clientId, parseErr := server.ParseId(value); parseErr == nil {
-				members[clientId] = true
-			}
-		}
-	})
-	return members, true
-}
-
 // GetVerifyEgressOwners resolves forward entries in bulk: egress hash hex ->
 // owning client id string, or VerifyEgressAmbiguousOwner. Hashes without a
 // live forward entry are absent.

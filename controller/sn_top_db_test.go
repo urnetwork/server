@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"math/big"
 	"net/netip"
 	"strings"
 	"testing"
@@ -429,5 +430,121 @@ func TestVerifyCompleteTrailWritesSnTrailHopsDb(t *testing.T) {
 			clientId := server.Id(hop.ClientId)
 			connect.AssertEqual(t, evidence.Prefixes[clientId], [][32]byte{hop.EgressIpHash})
 		}
+	})
+}
+
+// A claimed fleet end to end through the chain sync's interfaces: its
+// network ranks with its fleet row (the exact replica, the validator's
+// result and the incentive as a fraction), is not prompted to claim again,
+// sets the claimed floor and takes a seat; the validator's summary names the
+// tempo, and /sn/head reports the binding.
+func TestComputeSnTopSnapshotClaimedFleetDb(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		fixture := newSnTopDbFixture(t, ctx)
+		anonymous := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
+		defer anonymous.Cancel()
+
+		full := fixture.end.Add(-time.Minute)
+		networkA, sessionA := fixture.network(t, "a")
+		networkD, sessionD := fixture.network(t, "d")
+		a1 := fixture.provider(t, networkA, "198.51.100.9", full)
+		d1 := fixture.provider(t, networkD, "198.51.100.41", full)
+		model.Testing_AddVerifyCohortMembers(ctx, fixture.cfg.DeploymentKey(), snTopDbEpoch, []server.Id{a1, d1})
+		fixture.hops(d1, networkD, 0xd1, 0xd2)
+
+		key := model.SnTopFleetKey{FleetId: [32]byte{0xf1}, Hotkey: [32]byte{0xb1}, Generation: 1, Uid: 42}
+		restore := SetSnTopSources(SnTopSources{
+			ClaimedFleets: func(context.Context, uint64) []model.SnTopFleetInput {
+				return []model.SnTopFleetInput{{Key: key, ValidToEpoch: 12, ClientIds: []server.Id{d1}, NetworkIds: []server.Id{networkD}}}
+			},
+			ValidatorSummary: func(context.Context) *SnTopValidatorSummary {
+				return &SnTopValidatorSummary{
+					NativeEpoch: 4321, NativeSnapshotBlock: snTopDbHead - 100, SettlementEpoch: snTopDbEpoch,
+					MaximumHeadFleets: 200, EntryCount: 1, ReceivedAt: fixture.end,
+					Entries: []SnTopValidatorSummaryEntry{{
+						Rank: 1, Uid: 42, Hotkey: key.Hotkey, Score: big.NewRat(2, 1), Selected: true,
+						Fleets: []SnTopValidatorSummaryFleet{{FleetId: key.FleetId, Generation: 1}},
+					}},
+				}
+			},
+			Incentive: func(context.Context) *SnTopIncentive {
+				return &SnTopIncentive{
+					At:      fixture.anchor.Add(-5 * time.Minute),
+					ByUid:   map[uint16]uint16{42: 1180},
+					Holders: map[uint16][32]byte{42: key.Hotkey},
+				}
+			},
+		})
+		defer restore()
+
+		result, err := ComputeSnTopSnapshot(&ComputeSnTopSnapshotArgs{}, anonymous)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result.Skipped, "")
+		// the validator's own tempo, from its summary
+		connect.AssertEqual(t, result.TempoSource, model.SnTopTempoSourceSummary)
+		connect.AssertEqual(t, result.TempoIndex, int64(4321))
+
+		board, err := GetSnTop(&SnTopArgs{}, sessionA)
+		connect.AssertEqual(t, err, nil)
+		snapshot := board.Snapshot
+		connect.AssertEqual(t, snapshot.TempoIndex, int64(4321))
+		connect.AssertEqual(t, snapshot.ClaimedFleets, 1)
+		connect.AssertEqual(t, snapshot.OpenSeats, 199)
+		connect.AssertEqual(t, *snapshot.ClaimedCutoff, 2.0)
+		connect.AssertEqual(t, snapshot.ValidatorSummaryAt.Equal(fixture.end), true)
+		connect.AssertEqual(t, snapshot.IncentiveAt.Equal(fixture.anchor.Add(-5*time.Minute)), true)
+		connect.AssertEqual(t, len(board.Rows), 2)
+
+		rowD, rowA := board.Rows[0], board.Rows[1]
+		snTopDbNear(t, rowD.ProjectedScore, 2)
+		connect.AssertEqual(t, rowD.Measurable, true)
+		// claimed already: not prompted to claim (contract amendment)
+		connect.AssertEqual(t, rowD.ClaimPrompt, false)
+		// anonymous claimed row: no name, shown by its UID
+		connect.AssertEqual(t, rowD.Name, "")
+		connect.AssertEqual(t, len(rowD.Fleets), 1)
+		fleet := rowD.Fleets[0]
+		connect.AssertEqual(t, fleet.Uid, 42)
+		connect.AssertEqual(t, fleet.Generation, uint64(1))
+		connect.AssertEqual(t, fleet.ValidToEpoch, uint64(12))
+		snTopDbNear(t, fleet.ReplicaScore, 2)
+		connect.AssertEqual(t, *fleet.ValidatorScore, 2.0)
+		connect.AssertEqual(t, *fleet.ValidatorRank, 1)
+		connect.AssertEqual(t, *fleet.ValidatorRankOf, 1)
+		connect.AssertEqual(t, *fleet.Selected, true)
+		// a fraction from 0 to 1: 1180 of 65535 is 1.8%
+		if *fleet.Incentive < 0.0179 || 0.0181 < *fleet.Incentive {
+			t.Fatalf("incentive = %v, want the fraction 0.018", *fleet.Incentive)
+		}
+		connect.AssertEqual(t, fleet.IncentiveStale, false)
+		snTopDbNear(t, rowA.ProjectedScore, 1)
+		connect.AssertEqual(t, rowA.ClaimPrompt, true)
+		connect.AssertEqual(t, rowA.IsMe, true)
+		connect.AssertEqual(t, len(rowA.Fleets), 0)
+
+		claimedOnly, err := GetSnTop(&SnTopArgs{Filter: "claimed"}, anonymous)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(claimedOnly.Rows), 1)
+		connect.AssertEqual(t, claimedOnly.Rows[0].Position, 1)
+		unclaimed, err := GetSnTop(&SnTopArgs{Filter: "unclaimed"}, anonymous)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(unclaimed.Rows), 1)
+		connect.AssertEqual(t, unclaimed.Rows[0].Position, 2)
+
+		meD, err := GetSnTopMe(sessionD)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, meD.Me.Row.ClaimPrompt, false)
+		connect.AssertEqual(t, len(meD.Me.Row.Fleets), 1)
+		headD, err := SnHead(sessionD)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, headD.Bound, true)
+		connect.AssertEqual(t, headD.Uid, uint64(42))
+		connect.AssertEqual(t, headD.Rank, 1)
+		connect.AssertEqual(t, headD.RankEstimate, 1)
+
+		// the replica's exact state is kept for the next tempo
+		_, priorFleets := model.GetSnTopEmaState(ctx)
+		connect.AssertEqual(t, priorFleets[key].EmaExact.Cmp(big.NewRat(2, 1)), 0)
 	})
 }

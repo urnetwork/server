@@ -209,17 +209,27 @@ func TestSnTopFoldTempoFromTheValidatorSummary(t *testing.T) {
 // The validator's summary and the incentive read attach to each fleet by
 // UID; without them every field stays null.
 func TestSnTopAttachChainData(t *testing.T) {
-	fleets := []model.SnTopFleetInput{{Key: model.SnTopFleetKey{Uid: 7}}, {Key: model.SnTopFleetKey{Uid: 8}}}
+	hotkey7, hotkey8 := [32]byte{7}, [32]byte{8}
+	key7 := model.SnTopFleetKey{FleetId: [32]byte{0x70}, Hotkey: hotkey7, Generation: 1, Uid: 7}
+	key8 := model.SnTopFleetKey{FleetId: [32]byte{0x80}, Hotkey: hotkey8, Generation: 1, Uid: 8}
+	fleets := []model.SnTopFleetInput{{Key: key7}, {Key: key8}}
 	untouched := snTopAttachChainData(append([]model.SnTopFleetInput{}, fleets...), nil, nil)
 	connect.AssertEqual(t, untouched[0].ValidatorScore, (*float64)(nil))
+	connect.AssertEqual(t, untouched[0].ValidatorRankOf, (*int)(nil))
 	connect.AssertEqual(t, untouched[0].Selected, (*bool)(nil))
 	connect.AssertEqual(t, untouched[0].Incentive, (*float64)(nil))
 
-	summary := &SnTopValidatorSummary{Entries: []SnTopValidatorSummaryEntry{
-		{Rank: 1, Uid: 7, Score: big.NewRat(3, 2), Selected: true},
-		{Rank: 2, Uid: 9, Score: big.NewRat(1, 2), Selected: false},
+	summary := &SnTopValidatorSummary{EntryCount: 2, Entries: []SnTopValidatorSummaryEntry{
+		{Rank: 1, Uid: 7, Hotkey: hotkey7, Score: big.NewRat(3, 2), Selected: true,
+			Fleets: []SnTopValidatorSummaryFleet{{FleetId: key7.FleetId, Generation: 1}}},
+		{Rank: 2, Uid: 9, Hotkey: [32]byte{9}, Score: big.NewRat(1, 2), Selected: false,
+			Fleets: []SnTopValidatorSummaryFleet{{FleetId: [32]byte{0x90}, Generation: 1}}},
 	}}
-	incentive := &SnTopIncentive{ByUid: map[uint16]uint16{7: 16384}, Stale: true}
+	incentive := &SnTopIncentive{
+		ByUid:   map[uint16]uint16{7: 16384, 8: 100},
+		Holders: map[uint16][32]byte{7: hotkey7},
+		Stale:   true,
+	}
 	attached := snTopAttachChainData(append([]model.SnTopFleetInput{}, fleets...), summary, incentive)
 	connect.AssertEqual(t, *attached[0].ValidatorScore, 1.5)
 	connect.AssertEqual(t, *attached[0].ValidatorRank, 1)
@@ -227,27 +237,37 @@ func TestSnTopAttachChainData(t *testing.T) {
 	connect.AssertEqual(t, *attached[0].Selected, true)
 	connect.AssertEqual(t, *attached[0].Incentive, 16384.0/65535)
 	connect.AssertEqual(t, attached[0].IncentiveStale, true)
-	// uid 8 is not eligible at the validator: score 0, not selected, no rank
+	// uid 8 is not eligible at the validator: score 0, not selected, no
+	// rank; and its holder was not read, so no incentive is claimed for it
 	connect.AssertEqual(t, *attached[1].ValidatorScore, 0.0)
 	connect.AssertEqual(t, attached[1].ValidatorRank, (*int)(nil))
 	connect.AssertEqual(t, *attached[1].Selected, false)
 	connect.AssertEqual(t, attached[1].Incentive, (*float64)(nil))
+	connect.AssertEqual(t, attached[1].IncentiveStale, true)
 
 	// a UID that changed hands shows nothing of its new holder's
-	fleetHotkey, newHolder := [32]byte{1}, [32]byte{2}
-	moved := []model.SnTopFleetInput{{Key: model.SnTopFleetKey{Uid: 7, Hotkey: fleetHotkey}}}
-	movedSummary := &SnTopValidatorSummary{Entries: []SnTopValidatorSummaryEntry{
-		{Rank: 1, Uid: 7, Hotkey: newHolder, Score: big.NewRat(3, 2), Selected: true},
+	newHolder := [32]byte{2}
+	movedSummary := &SnTopValidatorSummary{EntryCount: 1, Entries: []SnTopValidatorSummaryEntry{
+		{Rank: 1, Uid: 7, Hotkey: newHolder, Score: big.NewRat(3, 2), Selected: true,
+			Fleets: []SnTopValidatorSummaryFleet{{FleetId: key7.FleetId, Generation: 1}}},
 	}}
 	movedIncentive := &SnTopIncentive{ByUid: map[uint16]uint16{7: 65535}, Holders: map[uint16][32]byte{7: newHolder}}
-	moved = snTopAttachChainData(moved, movedSummary, movedIncentive)
+	moved := snTopAttachChainData([]model.SnTopFleetInput{{Key: key7}}, movedSummary, movedIncentive)
 	connect.AssertEqual(t, *moved[0].ValidatorScore, 0.0)
 	connect.AssertEqual(t, moved[0].ValidatorRank, (*int)(nil))
 	connect.AssertEqual(t, *moved[0].Selected, false)
 	connect.AssertEqual(t, moved[0].Incentive, (*float64)(nil))
-	kept := snTopAttachChainData([]model.SnTopFleetInput{{Key: model.SnTopFleetKey{Uid: 7, Hotkey: newHolder}}}, movedSummary, movedIncentive)
+	newKey := key7
+	newKey.Hotkey = newHolder
+	kept := snTopAttachChainData([]model.SnTopFleetInput{{Key: newKey}}, movedSummary, movedIncentive)
 	connect.AssertEqual(t, *kept[0].ValidatorRank, 1)
 	connect.AssertEqual(t, *kept[0].Incentive, 1.0)
+	// an older generation of the fleet is not one of the identities that
+	// make up the UID's score
+	oldGeneration := key7
+	oldGeneration.Generation = 0
+	old := snTopAttachChainData([]model.SnTopFleetInput{{Key: oldGeneration}}, summary, nil)
+	connect.AssertEqual(t, old[0].ValidatorRank, (*int)(nil))
 
 	// the replica check compares exact values, UID by UID
 	agreement := snTopAgreement{}
@@ -263,6 +283,73 @@ func TestSnTopAttachChainData(t *testing.T) {
 	snTopMeasureIncentive(&agreement, summary, incentive)
 	connect.AssertEqual(t, agreement.selectedEarning, 1)
 	connect.AssertEqual(t, agreement.selectedNotEarning, 0)
+}
+
+// The chain sync's records map onto the board's inputs: live fleets with
+// their members' networks once each, the summary by UID in rank order with
+// its exact scores, and the incentive census's stored u16 with its holders.
+func TestSnTopChainSourcesFromTheChainSync(t *testing.T) {
+	networkA, networkB := server.NewId(), server.NewId()
+	clientA1, clientA2, clientB1, clientNone := server.NewId(), server.NewId(), server.NewId(), server.NewId()
+	key := model.SnFleetKey{FleetId: [32]byte{1}, Hotkey: [32]byte{2}, Generation: 3, Uid: 42}
+	inputs := snTopFleetInputs([]*model.SnClaimedFleet{{
+		Key:          key,
+		ValidToEpoch: 19,
+		UidHeld:      model.SnUidHeldYes,
+		Members: []*model.SnClaimedFleetMember{
+			{ClientId: clientA1, NetworkId: &networkA},
+			{ClientId: clientA2, NetworkId: &networkA},
+			{ClientId: clientB1, NetworkId: &networkB},
+			{ClientId: clientNone},
+		},
+	}})
+	connect.AssertEqual(t, len(inputs), 1)
+	connect.AssertEqual(t, inputs[0].Key, model.SnTopFleetKey(key))
+	connect.AssertEqual(t, inputs[0].ValidToEpoch, uint64(19))
+	connect.AssertEqual(t, inputs[0].ClientIds, []server.Id{clientA1, clientA2, clientB1, clientNone})
+	connect.AssertEqual(t, inputs[0].NetworkIds, []server.Id{networkA, networkB})
+
+	second := model.SnFleetKey{FleetId: [32]byte{5}, Hotkey: [32]byte{6}, Generation: 1, Uid: 7}
+	summary := snTopValidatorSummaryFromModel(&model.SnHeadSummary{
+		NativeEpoch:         4321,
+		NativeSnapshotBlock: 999_990,
+		SettlementEpoch:     7,
+		MaximumHeadFleets:   200,
+		EntryCount:          2,
+		Fleets: []*model.SnHeadSummaryFleetScore{
+			{Key: second, Rank: 2, ScoreNumerator: "1", ScoreDenominator: "3", Score: 1.0 / 3},
+			{Key: key, Rank: 1, ScoreNumerator: "9", ScoreDenominator: "8", Score: 1.125, Selected: true},
+		},
+	})
+	connect.AssertEqual(t, summary.NativeEpoch, uint64(4321))
+	connect.AssertEqual(t, summary.EntryCount, 2)
+	connect.AssertEqual(t, len(summary.Entries), 2)
+	connect.AssertEqual(t, summary.Entries[0].Uid, uint16(42))
+	connect.AssertEqual(t, summary.Entries[0].Score.Cmp(big.NewRat(9, 8)), 0)
+	connect.AssertEqual(t, summary.Entries[1].Uid, uint16(7))
+	attached := snTopAttachChainData([]model.SnTopFleetInput{{Key: model.SnTopFleetKey(key)}}, summary, nil)
+	connect.AssertEqual(t, *attached[0].ValidatorRank, 1)
+	connect.AssertEqual(t, *attached[0].ValidatorRankOf, 2)
+	connect.AssertEqual(t, *attached[0].ValidatorScore, 1.125)
+	connect.AssertEqual(t, *attached[0].Selected, true)
+
+	rows := make([]*model.SnIncentiveUid, 43)
+	for uid := range rows {
+		rows[uid] = &model.SnIncentiveUid{Uid: uint16(uid)}
+	}
+	rows[42] = &model.SnIncentiveUid{Uid: 42, Incentive: 1180, HolderRead: true, Hotkey: key.Hotkey}
+	rows[7] = &model.SnIncentiveUid{Uid: 7, Incentive: 300}
+	incentive := snTopIncentiveFromModel(&model.SnIncentiveSnapshot{Uids: rows, Stale: true})
+	connect.AssertEqual(t, incentive.ByUid[42], uint16(1180))
+	connect.AssertEqual(t, incentive.Stale, true)
+	_, holderOf7 := incentive.Holders[7]
+	connect.AssertEqual(t, holderOf7, false)
+	withIncentive := snTopAttachChainData([]model.SnTopFleetInput{{Key: model.SnTopFleetKey(key)}}, nil, incentive)
+	// the board serves the chain sync's own fraction
+	connect.AssertEqual(t, *withIncentive[0].Incentive, rows[42].IncentiveFraction())
+	for _, raw := range []uint16{0, 1, 1180, 32768, 65535} {
+		connect.AssertEqual(t, SnTopIncentiveFraction(raw), (&model.SnIncentiveUid{Incentive: raw}).IncentiveFraction())
+	}
 }
 
 // Q12 for the points board: an anonymous row never carries its network id;
