@@ -30,18 +30,18 @@ func TestTTLLeaksSignalSyntheticDurationAsSecondsResidue(t *testing.T) {
 		!strings.Contains(alert.Observed, "sample_legacy_contracts=47") ||
 		!strings.Contains(alert.Observed, "sample_legacy_ids=52") ||
 		!strings.Contains(alert.Observed, "sample_suspect_bytes=12694") ||
-		!strings.Contains(alert.Mechanism, "legacy s_sk suffixes") ||
-		!strings.Contains(alert.Mechanism, "time.Duration") ||
-		!strings.Contains(alert.Mechanism, "overflow") ||
-		!strings.Contains(alert.Mechanism, "does not make it the capacity root cause") ||
-		!strings.Contains(alert.Action, "d8e34003") ||
-		!strings.Contains(alert.Action, "raw integer milliseconds") ||
-		!strings.Contains(alert.Action, "do not run an older typed-duration cleanup artifact") ||
+		!strings.Contains(alert.Mechanism, "Legacy s_sk suffixes are present") ||
+		!strings.Contains(alert.Mechanism, "writer and cleanup history are unverified") ||
+		!strings.Contains(alert.Context, "investigative hypotheses") ||
+		!strings.Contains(alert.Mechanism, "not the population behind INFO's average or the capacity root cause") ||
+		!strings.Contains(alert.Action, "current stream TTL contract") ||
+		!strings.Contains(alert.Action, "original writer/artifact") ||
+		!strings.Contains(alert.Action, "binary-safe raw-integer PTTL") ||
 		!strings.Contains(alert.Verify, "raw-integer PTTL") {
 		t.Fatalf("fleet TTL residue alert lost aggregation, attribution, or remediation: %+v", alert)
 	}
-	if strings.Contains(alert.Action+alert.Verify, "d9b2e291") {
-		t.Fatalf("fleet TTL residue alert retained former non-ancestor deployment guidance: %+v", alert)
+	if strings.Contains(alert.Action+alert.Verify, "d9b2e291") || strings.Contains(alert.Action+alert.Verify, "d8e34003") {
+		t.Fatalf("fleet TTL residue alert selected a historical cleanup artifact without provenance: %+v", alert)
 	}
 }
 

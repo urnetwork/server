@@ -59,10 +59,61 @@ type mimirPublisherSample struct {
 	connectionsDistinctFront int
 }
 
+// Keep each source result and local branch separate; fleet coverage is derived.
 type mimirPublisherResult struct {
 	target mimirPublisherTarget
 	sample mimirPublisherSample
 	err    error
+	origin mimirPublisherObservationOrigin
+}
+
+// This enum describes only the local producing branch, never remote execution.
+type mimirPublisherObservationOrigin uint8
+
+const (
+	mimirPublisherOriginUnknown mimirPublisherObservationOrigin = iota
+	mimirPublisherOriginDesiredLoadState
+	mimirPublisherOriginDesiredPreferenceMissing
+	mimirPublisherOriginDesiredFrontUnmatched
+	mimirPublisherOriginSourceReturn
+	mimirPublisherOriginSampleParse
+	mimirPublisherOriginSampleFrontCount
+	mimirPublisherOriginRuntimeRouteInputs
+	mimirPublisherOriginFleetPreferenceCoverage
+	mimirPublisherOriginFleetRuntimePlacement
+)
+
+// Serialize only finite branches; unset and unsupported values stay unknown.
+func (self mimirPublisherObservationOrigin) value() string {
+	switch self {
+	case mimirPublisherOriginDesiredLoadState:
+		return "desired-load-state"
+	case mimirPublisherOriginDesiredPreferenceMissing:
+		return "desired-preference-missing"
+	case mimirPublisherOriginDesiredFrontUnmatched:
+		return "desired-front-unmatched"
+	case mimirPublisherOriginSourceReturn:
+		return "source-return"
+	case mimirPublisherOriginSampleParse:
+		return "sample-parse"
+	case mimirPublisherOriginSampleFrontCount:
+		return "sample-front-count"
+	case mimirPublisherOriginRuntimeRouteInputs:
+		return "runtime-route-inputs"
+	case mimirPublisherOriginFleetPreferenceCoverage:
+		return "fleet-preference-coverage"
+	case mimirPublisherOriginFleetRuntimePlacement:
+		return "fleet-runtime-placement"
+	default:
+		return "unknown"
+	}
+}
+
+// Preserve baseline visibility and error classification; append only finite origin.
+func mimirPublisherCannotObserve(target string, err error, origin mimirPublisherObservationOrigin) finding {
+	visibility := cannotObserveFinding(target, err)
+	visibility.observed += " publisher_observation_origin=" + origin.value()
+	return visibility
 }
 
 func mimirPublisherTargets(cfg *monitorConfig) []mimirPublisherTarget {
@@ -107,22 +158,23 @@ func mimirPublisherTargets(cfg *monitorConfig) []mimirPublisherTarget {
 	return targets
 }
 
-func mimirPublisherDesiredOrdinal(cfg *monitorConfig, publisher *host) (int, error) {
+// Resolve desired policy before contact, returning its branch with the unchanged error.
+func mimirPublisherDesiredOrdinal(cfg *monitorConfig, publisher *host) (int, mimirPublisherObservationOrigin, error) {
 	if cfg.mimirPublishers.LoadState != "ready" {
-		return 0, fmt.Errorf("publisher preference inventory is unobservable")
+		return 0, mimirPublisherOriginDesiredLoadState, fmt.Errorf("publisher preference inventory is unobservable")
 	}
 	preferred := cfg.mimirPublishers.PreferredFronts[publisher.name]
 	if preferred == "" {
-		return 0, fmt.Errorf("publisher lacks an explicit desired front preference")
+		return 0, mimirPublisherOriginDesiredPreferenceMissing, fmt.Errorf("publisher lacks an explicit desired front preference")
 	}
 	fronts := append([]*host(nil), cfg.hostsWithRole("grafana")...)
 	sort.Slice(fronts, func(i, j int) bool { return fronts[i].name < fronts[j].name })
 	for i, front := range fronts {
 		if front.name == preferred {
-			return i + 1, nil
+			return i + 1, mimirPublisherOriginUnknown, nil
 		}
 	}
-	return 0, fmt.Errorf("publisher desired preference does not identify an active front")
+	return 0, mimirPublisherOriginDesiredFrontUnmatched, fmt.Errorf("publisher desired preference does not identify an active front")
 }
 
 func mimirPublisherFrontAddresses(cfg *monitorConfig) ([]string, error) {
@@ -531,9 +583,10 @@ func (mimirPublishersProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	var wait sync.WaitGroup
 	for _, configuredTarget := range targets {
 		target := configuredTarget
-		target.desiredOrdinal, err = mimirPublisherDesiredOrdinal(env.cfg, target.host)
+		var origin mimirPublisherObservationOrigin
+		target.desiredOrdinal, origin, err = mimirPublisherDesiredOrdinal(env.cfg, target.host)
 		if err != nil {
-			results <- mimirPublisherResult{target: target, err: err}
+			results <- mimirPublisherResult{target: target, err: err, origin: origin}
 			continue
 		}
 		wait.Add(1)
@@ -548,11 +601,11 @@ func (mimirPublishersProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			}
 			output, commandErr := mimirShellParsed(ctx, env.runner, target.host, command, 4096)
 			if commandErr != nil {
-				results <- mimirPublisherResult{target: target, err: commandErr}
+				results <- mimirPublisherResult{target: target, err: commandErr, origin: mimirPublisherOriginSourceReturn}
 				return
 			}
 			sample, parseErr := parseMimirPublisherSample(output)
-			results <- mimirPublisherResult{target: target, sample: sample, err: parseErr}
+			results <- mimirPublisherResult{target: target, sample: sample, err: parseErr, origin: mimirPublisherOriginSampleParse}
 		}()
 	}
 	wait.Wait()
@@ -578,14 +631,15 @@ func (mimirPublishersProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			desiredPreferences[result.target.desiredOrdinal] = true
 		}
 		if result.err != nil {
-			findings = append(findings, cannotObserveFinding(result.target.target, result.err))
+			findings = append(findings, mimirPublisherCannotObserve(result.target.target, result.err, result.origin))
 			completePreferences = false
 			continue
 		}
 		if result.sample.expectedFronts != len(fronts) {
-			findings = append(findings, cannotObserveFinding(
+			findings = append(findings, mimirPublisherCannotObserve(
 				result.target.target,
 				fmt.Errorf("publisher expected-front count differs from current inventory"),
+				mimirPublisherOriginSampleFrontCount,
 			))
 			completePreferences = false
 			continue
@@ -605,12 +659,14 @@ func (mimirPublishersProbe) check(ctx context.Context, env *probeEnv) ([]finding
 
 	expectedDistinct := len(desiredPreferences)
 	if !completePreferences {
-		findings = append(findings, cannotObserveFinding(
+		findings = append(findings, mimirPublisherCannotObserve(
 			"publisher-fleet", fmt.Errorf("publisher preference coverage is incomplete"),
+			mimirPublisherOriginFleetPreferenceCoverage,
 		))
 	} else if allDesiredPreferences && len(preferred) == expectedDistinct && !allPlacementObservable {
-		findings = append(findings, cannotObserveFinding(
+		findings = append(findings, mimirPublisherCannotObserve(
 			"publisher-fleet", fmt.Errorf("publisher placement runtime evidence is incomplete"),
+			mimirPublisherOriginFleetRuntimePlacement,
 		))
 	} else if allDesiredPreferences && len(preferred) == expectedDistinct {
 		findings = append(findings, healthyFinding(
@@ -654,7 +710,7 @@ func evaluateMimirPublisher(target string, desiredOrdinal int, sample mimirPubli
 	exactPlacement := mimirPublisherAliasMatches(desiredOrdinal, sample)
 	findings := make([]finding, 0, 2)
 	if exactPlacement && sample.routeState == "unobservable" {
-		findings = append(findings, cannotObserveFinding(target, fmt.Errorf("publisher's running route inputs are unobservable")))
+		findings = append(findings, mimirPublisherCannotObserve(target, fmt.Errorf("publisher's running route inputs are unobservable"), mimirPublisherOriginRuntimeRouteInputs))
 	} else if exactPlacement && sample.routeState == "expected" {
 		findings = append(findings, healthyFinding(
 			"observability/mimir-publishers", tierWarn, "mimir-publisher-placement-drift", target,

@@ -111,3 +111,14 @@ func CompetitionSnowWinnerReviewBodiesSql() (provider, roundInsertGuard, winnerS
 		strings.Split(migration, "$winner_review$")[1], guards[3],
 		strings.Split(migration, "$snow_findings$")[1]
 }
+
+// Extracts the actual successor DDL, including both preserved findings versions.
+// This reads published source only; it does not apply a migration.
+func CompetitionSnowTwoMemberWinnerReviewBodiesSql() (provider, roundInsertGuard, winnerSourceAuthorized, winnerReviewGuard, identityGuard, findingsV1, findingsV2, findingsPolicy string) {
+	migration := competitionSnowTwoMemberWinnerReviewMigration()
+	guards := strings.Split(migration, "$guard$")
+	findings := strings.Split(migration, "$snow_findings$")
+	return strings.Split(migration, "$provider$")[1], guards[1],
+		strings.Split(migration, "$winner_source$")[1], strings.Split(migration, "$winner_review$")[1], guards[3],
+		findings[3], findings[1], strings.Split(migration, "$snow_policy_findings$")[1]
+}

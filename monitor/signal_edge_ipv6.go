@@ -556,6 +556,7 @@ func edgeIPv6Findings(
 		}
 	}
 
+	egress := edgeIPv6PublicEgressFields(result.egress, result.configured)
 	observed := fmt.Sprintf(
 		"address=%s interface=%s http_code=%s curl_exit=%s remote_ip=%s total_seconds=%s operstate=%s configured_present=%s unit_active=%s self_http_code=%s self_exit=%s self_total_seconds=%s route_device=%s route_source=%s route_status=%s source_egress=%s source_egress_status=%s",
 		result.configured.Address,
@@ -567,14 +568,14 @@ func edgeIPv6Findings(
 		result.identity["operstate"],
 		result.identity["configured_present"],
 		result.identity["unit_active"],
-		result.egress["self_http_code"],
-		result.egress["self_exitcode"],
-		result.egress["self_time_total"],
-		result.egress["route_device"],
-		result.egress["route_source"],
-		result.egress["route_status"],
-		result.egress["source_egress"],
-		result.egress["source_egress_status"],
+		egress["self_http_code"],
+		egress["self_exitcode"],
+		egress["self_time_total"],
+		egress["route_device"],
+		egress["route_source"],
+		egress["route_status"],
+		egress["source_egress"],
+		egress["source_egress_status"],
 	)
 	if result.admission != nil {
 		observed += fmt.Sprintf(
@@ -583,16 +584,9 @@ func edgeIPv6Findings(
 			result.admission["lb_map_hash_error_count"],
 		)
 	}
-	identityEvidence := "unavailable"
-	if edgeIPv6IdentityObserved(result) {
-		identityEvidence = strings.TrimSpace(result.identityRaw)
-	}
-	evidence := strings.TrimSpace(strings.Join([]string{
-		"public probe: " + strings.TrimSpace(result.httpOutput),
-		"public probe error: " + errorString(result.httpErr),
-		"host identity: " + identityEvidence,
-		"bound source egress: " + strings.TrimSpace(result.egressRaw),
-	}, "\n"))
+	observed += fmt.Sprintf(" downloaded_bytes=%s content_type_present=%t public_error_class=%s",
+		result.http["monitor_size_download"], strings.TrimSpace(result.http["monitor_content_type"]) != "", classifyObservationError(result.httpErr))
+	evidence := "Only validated HTTPS measurement fields, typed host diagnostics and fixed error classes are public. Native stdout, stderr, MIME text and error messages are omitted."
 	verify := "Repeat three exact-address HTTP/1.1 IPv6 requests, require three 200 responses, and confirm the repaired layer's counters advance without changing the configured identity."
 	if class == "edge-lb-config-rejected" {
 		verify = "Confirm the exact corrected Warp artifact is deployed, at least one configured-pool listener is live, no new exact map-hash admission signature appears for 15 minutes, and three pinned HTTP/1.1 IPv6 requests from each of three independent external observers return 200."
@@ -610,6 +604,52 @@ func edgeIPv6Findings(
 		playbook:  "SIGNALS.md §18.1",
 	})
 	return findings
+}
+
+// Typed diagnostics retain counts and fixed identity relationships, never returned
+// addresses or interface names. Private classifier input and verdicts are unchanged.
+func edgeIPv6PublicEgressFields(values map[string]string, configured EdgeIPv6InterfaceSettings) map[string]string {
+	public := map[string]string{}
+	for _, key := range []string{"self_http_code", "self_exitcode", "self_probe_status", "route_status", "source_egress_status"} {
+		public[key] = "unobserved"
+		value, err := strconv.ParseInt(values[key], 10, 64)
+		if key == "self_http_code" {
+			if err == nil && (value == 0 || value >= 100 && value <= 599) {
+				public[key] = fmt.Sprintf("%03d", value)
+			}
+		} else if err == nil && value >= 0 && value <= 255 {
+			public[key] = strconv.FormatInt(value, 10)
+		}
+	}
+	public["self_time_total"] = "unobserved"
+	if value, err := strconv.ParseFloat(values["self_time_total"], 64); err == nil && !math.IsNaN(value) && !math.IsInf(value, 0) && value >= 0 {
+		public["self_time_total"] = strconv.FormatFloat(value, 'g', -1, 64)
+	}
+	expectedAddress, expectedErr := netip.ParseAddr(configured.Address)
+	for _, key := range []string{"route_source", "source_egress"} {
+		public[key] = "unobserved"
+		if address, err := netip.ParseAddr(values[key]); err == nil && address.Is6() && !address.Is4In6() && address.Zone() == "" {
+			public[key] = "differs-configured"
+			if expectedErr == nil && address == expectedAddress {
+				public[key] = "matches-configured"
+			}
+		}
+	}
+	public["route_device"] = "unobserved"
+	device := values["route_device"]
+	validDevice := device != "" && len(device) <= 16
+	for _, character := range device {
+		if !(character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' || strings.ContainsRune("_.:-", character)) {
+			validDevice = false
+		}
+	}
+	if validDevice {
+		public["route_device"] = "differs-configured"
+		if device == configured.Interface {
+			public["route_device"] = "matches-configured"
+		}
+	}
+	return public
 }
 
 func edgeIPv6RouteUnobservableFinding(result edgeIPv6Result) finding {

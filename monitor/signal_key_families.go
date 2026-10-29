@@ -130,7 +130,8 @@ REDIS_FAMILY`, fullest.port, familyScanKeyLimit, familyScanKeyLimit)
 	findings := []finding{}
 	histogramLines := []string{}
 	alerted := false
-	familyCounts, scanErr := redisFamilyCounts(out)
+	historyPending := false
+	familyCounts, sampledCount, omittedCount, scanErr := redisFamilyCounts(out)
 	if scanErr != nil {
 		findings = append(findings, cannotObserveFinding(target+"/key-families", scanErr))
 		for _, failure := range failures {
@@ -166,6 +167,11 @@ REDIS_FAMILY`, fullest.port, familyScanKeyLimit, familyScanKeyLimit)
 				env.baseline.record(metric, time.Now(), float64(count))
 			}
 		}
+		// The size floor independently rules out a growth alert. Above it,
+		// an unqualified learned band supplies no recovery comparison.
+		if count > familyAlertMinCount && !haveHistory {
+			historyPending = true
+		}
 		if haveHistory && count > familyAlertMinCount && float64(count) > 3*median {
 			alerted = true
 			observed := fmt.Sprintf("count=%d median=%.0f node=%d", count, median, fullest.port)
@@ -196,8 +202,32 @@ REDIS_FAMILY`, fullest.port, familyScanKeyLimit, familyScanKeyLimit)
 	glog.Infof("[monitor]key families on %s (sample %d keys; %s):\n%s\n",
 		target, familyScanKeyLimit, selectionScope, strings.Join(histogramLines, "\n"))
 
-	if !alerted && !partial {
-		findings = append(findings, healthyFinding("redis/key-families", tierWarn, "family-growth", target))
+	if !partial {
+		// INFO ranked these configured nodes but their key families were not
+		// sampled. Selecting a different node cannot retire their incidents.
+		for _, configuredHost := range env.cfg.redisSweepHosts() {
+			for _, port := range configuredHost.redisNodePorts() {
+				unobservedTarget := fmt.Sprintf("%s:%d", configuredHost.name, port)
+				if unobservedTarget != target {
+					findings = append(findings, finding{
+						probeId: "redis/key-families", class: "family-growth", target: unobservedTarget, clearHold: true,
+					})
+				}
+			}
+		}
+		// Redaction can merge individually small raw shapes after top-20
+		// selection. Omitted rows cannot prove their aggregate below the floor;
+		// a complete sampled population at/below that floor still can.
+		histogramPending := omittedCount > 0 && sampledCount > familyAlertMinCount
+		if historyPending || histogramPending {
+			// Keep this target's existing incident open without creating a
+			// visibility alert or suppressing a qualified sibling-family breach.
+			findings = append(findings, finding{
+				probeId: "redis/key-families", class: "family-growth", target: target, clearHold: true,
+			})
+		} else if !alerted {
+			findings = append(findings, healthyFinding("redis/key-families", tierWarn, "family-growth", target))
+		}
 	}
 	return findings, nil
 }
@@ -232,8 +262,9 @@ func safeRedisFamilyLabel(family string) string {
 }
 
 // Validate the entire bounded histogram before labels or counts can reach a
-// baseline, log or alert. Missing completion cannot authorize an empty scan.
-func redisFamilyCounts(output string) (map[string]int, error) {
+// baseline, log or alert. Return the measured sample and omitted raw-row counts
+// only after a valid terminal frame. Missing completion cannot authorize empty.
+func redisFamilyCounts(output string) (map[string]int, int, int, error) {
 	lines := strings.Split(strings.TrimSpace(output), "\n")
 	familyCounts := map[string]int{}
 	seenFamilies := map[string]bool{}
@@ -246,32 +277,32 @@ func redisFamilyCounts(output string) (map[string]int, error) {
 		}
 		if fields[0] == "family_source" {
 			if index != len(lines)-1 {
-				return nil, fmt.Errorf("invalid response from Redis family source")
+				return nil, 0, 0, fmt.Errorf("invalid response from Redis family source")
 			}
 			if len(fields) == 2 && fields[1] == "unavailable" && rows == 0 {
-				return nil, fmt.Errorf("Redis family source exit status failure")
+				return nil, 0, 0, fmt.Errorf("Redis family source exit status failure")
 			}
 			if len(fields) != 3 || fields[1] != "complete" {
-				return nil, fmt.Errorf("invalid response from Redis family source")
+				return nil, 0, 0, fmt.Errorf("invalid response from Redis family source")
 			}
 			count, err := strconv.Atoi(fields[2])
 			if err != nil || count < 0 || count > familyScanKeyLimit || total > count || (count > 0 && rows == 0) || (rows < 20 && total != count) {
-				return nil, fmt.Errorf("invalid response from Redis family source")
+				return nil, 0, 0, fmt.Errorf("invalid response from Redis family source")
 			}
-			return familyCounts, nil
+			return familyCounts, count, count - total, nil
 		}
 		if len(fields) < 2 || rows >= 20 {
-			return nil, fmt.Errorf("invalid response from Redis family source")
+			return nil, 0, 0, fmt.Errorf("invalid response from Redis family source")
 		}
 		count, err := strconv.Atoi(fields[0])
 		family := strings.Join(fields[1:], " ")
 		if err != nil || count <= 0 || count > familyScanKeyLimit || seenFamilies[family] || total > familyScanKeyLimit-count {
-			return nil, fmt.Errorf("invalid response from Redis family source")
+			return nil, 0, 0, fmt.Errorf("invalid response from Redis family source")
 		}
 		seenFamilies[family] = true
 		total += count
 		rows++
 		familyCounts[safeRedisFamilyLabel(family)] += count
 	}
-	return nil, fmt.Errorf("invalid response from Redis family source")
+	return nil, 0, 0, fmt.Errorf("invalid response from Redis family source")
 }

@@ -816,7 +816,7 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	[]snMainnetMigrationContract{
 		migrationCurrentSuffix(891, "provider-aware winner review and scheduled round guards", competitionMigration891ArtifactQuery).removedAt(892),
 		migrationCurrentSuffix(892, "reviewed repository patch source and winner guard custody", competitionMigration892ArtifactQuery).removedAt(893),
-		migrationCurrentSuffix(893, "provider union review, identity and retained source custody", competitionMigration893ArtifactQuery),
+		migrationCurrentSuffix(893, "provider union review, identity and retained source custody", competitionMigration893ArtifactQuery).removedAt(897),
 	},
 	[]snMainnetMigrationContract{
 		// the post-quantum declaration that find-providers2 reads for a
@@ -856,6 +856,14 @@ var migrationCurrentSuffixContracts = slices.Concat(
 				"network_id, last_fail_time", "(resolve_time IS NULL)"),
 			snMainnetMigrationPartialIndex("stripe_invoice_payment_failure", "stripe_invoice_payment_failure_subscription_open",
 				"subscription_id", "(resolve_time IS NULL)")),
+	},
+	[]snMainnetMigrationContract{
+		// These follow the capability and failed-renewal ledger migrations.
+		migrationCurrentSuffix(896, "settlement completion checkpoint columns",
+			snMainnetMigrationColumns("contract_close",
+				snMainnetMigrationColumn{name: "settlement_completion", kind: "smallint", notNull: true, defaultExpression: "0"},
+				snMainnetMigrationColumn{name: "settlement_completion_checkpoint_byte_count", kind: "bigint"})),
+		migrationCurrentSuffix(897, "two-member provider union review, identity and retained source custody", competitionMigration897ArtifactQuery),
 	},
 )
 

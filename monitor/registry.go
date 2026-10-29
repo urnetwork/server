@@ -358,7 +358,21 @@ func (m *Monitor) Run(ctx context.Context) (Alerts, error) {
 	return alerts, errors.Join(errs...)
 }
 
+// Strip direct prepared pool metadata before routing; append only to the expected identity.
 func visibilityAlert(settings SignalSettings, signal Signal, err error) Alert {
+	legacy, prepared := splitPoolRetentionPreparedError(signal, err)
+	alert := legacyVisibilityAlert(settings, signal, legacy)
+	if prepared != nil && alert.SignalNumber == "1.3b" && alert.SignalKey == "pool-retention" &&
+		alert.SignalID == "monitor/visibility" && alert.Class == "cannot-observe" &&
+		alert.Target == "pg/pool-retention" && alert.Severity == SeverityWarn &&
+		alert.Sustain == 2 && alert.unobservable {
+		alert.Observed += " " + prepared.details()
+	}
+	return alert
+}
+
+// Preserve the previous generic renderer with only the legacy normalized error.
+func legacyVisibilityAlert(settings SignalSettings, signal Signal, err error) Alert {
 	if signal.ID() == "pg/query-sample" {
 		return pgSampleFailureAlert(settings, signal, err)
 	}

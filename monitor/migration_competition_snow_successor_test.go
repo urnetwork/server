@@ -15,7 +15,7 @@ import (
 // bodies remain required through the last head before the real replacement.
 func TestMigrationsSnowSuccessorContractCustody(t *testing.T) {
 	contract := migrationCurrentSuffixTestContract(t, 893)
-	if contract.artifact.rowColumn != 304 || contract.artifact.removedVersion != 0 {
+	if contract.artifact.rowColumn != 304 || contract.artifact.removedVersion != 897 {
 		t.Fatal("Snow artifact column or lifetime is wrong")
 	}
 	if migrationCurrentSuffixTestContract(t, 892).artifact.removedVersion != 893 || migrationCurrentSuffixTestContract(t, 844).artifact.removedVersion != 0 {

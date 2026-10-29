@@ -256,14 +256,14 @@ done`, strings.Join(portNames, " ")))
 			)
 			streamSuspect := attribution.legacyContracts + attribution.legacyIDs + attribution.currentContracts + attribution.currentIDs
 			if 0 < streamSuspect && attribution.other == 0 {
-				mechanism = "A pre-fix raw time.Duration reached Redis Lua as nanoseconds and EXPIRE interpreted it as seconds, leaving effectively immortal stream keys."
+				mechanism = "Over-limit keys in the bounded sample belong to stream-key families. The originating writer and cleanup history are unverified; this sample does not establish a duration conversion, a cleanup overflow, or a particular artifact."
 				if 0 < attribution.legacyContracts+attribution.legacyIDs {
-					mechanism += " The first cleanup matched only current s2 stream names, while production residue uses legacy s_sk suffixes."
+					mechanism += " Legacy s_sk suffixes are present; that schema label does not identify which binary wrote or restored the keys."
 				}
-				mechanism += " An intermediate cleanup then read PTTL through go-redis's time.Duration result; converting Redis milliseconds beyond roughly 290 years can overflow and misclassify a leaked key below the 8-hour repair threshold."
-				mechanism += fmt.Sprintf(" The bounded sample measured %d bytes across those suspect keys; this proves the expiry defect but does not make it the capacity root cause.", attribution.suspectBytes)
-				verify = "The cleanup artifact is attributable to an intentional local checkout containing current-main server commit d8e34003; a binary-safe raw-integer PTTL sample shows no targeted key beyond 8 hours, every node's avg_ttl returns below two years, and no new TTL warning appears. Verify capacity recovery independently with redis-bytes and redis-memory."
-				action = "Confirm current stream writers emit no stream-key redis-ttl-suspect lines; diagnose warnings for other key families independently. Build bringyourctl from an intentional local server checkout containing current-main commit d8e34003 and prove expire-leaked-ttls reads PTTL as raw integer milliseconds; record any participating diff and do not run an older typed-duration cleanup artifact. With explicit maintenance authority, run that binary-safe cleanup across legacy s_sk and current s2_sk names. Use redis-bytes for capacity ownership; do not assume this residue creates material headroom, or raise maxmemory to conceal either defect."
+				mechanism += fmt.Sprintf(" The measured %d bytes quantify only sampled suspect stream keys, not the population behind INFO's average or the capacity root cause.", attribution.suspectBytes)
+				context += " Historical duration-as-seconds writes and typed-duration PTTL cleanup overflow are investigative hypotheses, not causes established by this sample. Even a very large matching PTTL is not immutable writer or cleanup provenance."
+				verify = "Every configured node's average TTL returns to at most two years. Independently verify the current stream TTL contract and original writer or cleanup authority, then validate any separately authorized repair with binary-safe raw-integer PTTL and exact schema scope. Verify capacity recovery independently."
+				action = "Confirm the current stream TTL contract, original writer/artifact and any prior cleanup outcome before choosing a repair or cleanup. Do not infer a duration-conversion writer, cleanup overflow or deployed fix from family names or PTTL alone. Any separately authorized maintenance requires schema-specific dry-run review and binary-safe raw-integer PTTL handling; do not run a historical cleanup or delete keys solely from this sample."
 			}
 		}
 		findings = append(findings, finding{

@@ -685,52 +685,105 @@ func TestGrafanaQueryEchoCannotCreateLogAlerts(t *testing.T) {
 	}
 }
 
-// The production H1 admission rejection is an info-level diagnostic and does
-// not contain a generic error-shaped word. Without an explicit class, the
-// standing monitor silently misses a carrier that can never fit on retry.
+// Info-level rejection remains visible with synthetic payload and header sizes;
+// neither private correlations nor a caller-contract diagnosis come from the tag.
 func TestFramerMessageTooLargeIsClassifiedAndRedacted(t *testing.T) {
-	for _, line := range []string{
-		`[edge-4][connect][g2][cid:customer-one][I][2026-09-01T07:14:00Z][framer][reject]write messageLen=4232 > MaxMessageLen=4096 (maxFrameLen=4100)`,
-		`[fireside][proxy][g3][cid:customer-two][I][2026-09-01T07:14:01Z][framer][reject]read messageLen=4950 > MaxMessageLen=4096 (maxFrameLen=4100)`,
-		`[fireside][proxy][g3][cid:customer-three][I][2026-09-01T07:14:02Z][framer][reject]write batch messageLen=4187 > MaxMessageLen=4096 (maxFrameLen=4100)`,
-	} {
-		tailer := newLogTailer("connect", nil)
+	const syntheticCap = 1 << 10
+	const headerByteCount = 4
+	for _, direction := range []string{"write", "read", "write batch"} {
+		line := fmt.Sprintf("[synthetic-origin][synthetic-role][cid:synthetic-correlation][I][framer][reject]%s messageLen=%d > MaxMessageLen=%d (maxFrameLen=%d) private-synthetic-payload", direction, syntheticCap+1, syntheticCap, syntheticCap+headerByteCount)
+		tailer := newLogTailer("synthetic-framer", nil)
 		tailer.classify(line)
 		finding := findingByClass(t, tailer.drainWindow(), "framer-message-too-large")
-		if finding.healthy {
-			t.Fatalf("info-level framer rejection was not classified: %q", line)
+		if finding.healthy || finding.tier != tierWarn || finding.sustain != 1 {
+			t.Fatal("info-level rejection lost its warning identity or sustain")
 		}
-		for _, want := range []string{
-			"messageLen=",
-			"MaxMessageLen=4096",
-			"same immutable Pack",
-			"Connect and Proxy artifacts",
-			"c1403f16",
-			"096414ac",
-			"§8.13",
-			"§8.12",
-			"three sustained HTTP/SOCKS/WireGuard overlap campaigns",
-		} {
-			if !strings.Contains(finding.evidence+finding.mechanism+finding.action+finding.verify, want) {
-				t.Fatalf("framer rejection finding lacks %q: %+v", want, finding)
+		for _, want := range []string{direction, fmt.Sprintf("messageLen=%d", syntheticCap+1), fmt.Sprintf("MaxMessageLen=%d", syntheticCap), "valid message envelope"} {
+			if !strings.Contains(finding.evidence+finding.context, want) {
+				t.Fatalf("rejection lost bounded evidence or authority prerequisite %q", want)
 			}
 		}
-		for _, stale := range []string{"53780b3e", "7e0fcba"} {
-			if strings.Contains(finding.action+finding.verify, stale) {
-				t.Fatalf("framer rejection finding retained former non-ancestor hash %q: %+v", stale, finding)
-			}
-		}
-		for _, secret := range []string{"customer-one", "customer-two", "customer-three", "fireside", "edge-4"} {
+		for _, secret := range []string{"synthetic-origin", "synthetic-correlation", "private-synthetic-payload"} {
 			if strings.Contains(finding.evidence, secret) {
-				t.Fatalf("framer rejection evidence retained identity %q: %q", secret, finding.evidence)
+				t.Fatalf("rejection evidence retained a private canary %q", secret)
 			}
 		}
 	}
 
-	adjacent := newLogTailer("connect", nil)
-	adjacent.classify(`[edge-4][connect][g2][I][framer]write messageLen=4232 MaxMessageLen=8192`)
+	adjacent := newLogTailer("synthetic-framer", nil)
+	adjacent.classify(fmt.Sprintf("[framer]write messageLen=%d MaxMessageLen=%d", syntheticCap, syntheticCap))
 	if finding := findingByClass(t, adjacent.drainWindow(), "framer-message-too-large"); !finding.healthy {
-		t.Fatalf("ordinary framer log was classified as a rejection: %+v", finding)
+		t.Fatal("ordinary in-cap diagnostic was classified as a rejection")
+	}
+}
+
+// The public bounded-log path preserves actual rejections without promoting a
+// protected oversize or an unjoined envelope to a deployment/transport diagnosis.
+func TestLogErrorsFramerRejectionRequiresEnvelopeAuthority(t *testing.T) {
+	const syntheticCap = 1 << 10
+	const headerByteCount = 4
+	for _, test := range []struct {
+		name             string
+		direction        string
+		payloadBytes     int
+		requiredEnvelope int
+	}{
+		{name: "expected oversize protection", direction: "write", payloadBytes: syntheticCap + 1},
+		{name: "known legacy envelope mismatch", direction: "write", payloadBytes: 2 * syntheticCap, requiredEnvelope: 4 * syntheticCap},
+		{name: "read rejection with unknown caller", direction: "read", payloadBytes: syntheticCap + 2},
+		{name: "batch rejection with unknown caller", direction: "write batch", payloadBytes: syntheticCap + 3},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			// This independent fixture contract establishes a valid legacy input;
+			// it is not part of the log or authority the classifier can infer.
+			if test.requiredEnvelope != 0 && (test.payloadBytes > test.requiredEnvelope || test.requiredEnvelope <= syntheticCap) {
+				t.Fatal("synthetic legacy input does not fit its independently required envelope")
+			}
+			line := fmt.Sprintf("[synthetic-origin][cid:synthetic-correlation][I][framer][reject]%s messageLen=%d > MaxMessageLen=%d (maxFrameLen=%d) private-synthetic-payload", test.direction, test.payloadBytes, syntheticCap, syntheticCap+headerByteCount)
+			calls := 0
+			source := &syntheticSource{localFn: func(_ string, args ...string) (string, error) {
+				calls++
+				if len(args) == 0 || args[0] != "logs" {
+					t.Fatal("public log control left its bounded log request")
+				}
+				return line + "\n", nil
+			}}
+			settings := syntheticSettings(source)
+			settings.LogServices = []string{"synthetic-framer"}
+			alerts, err := NewLogErrorsSignal().Run(context.Background(), settings)
+			if err != nil || calls != 1 {
+				t.Fatal("public synthetic log request failed or changed its call count")
+			}
+			alert := requireAlertClass(t, alerts, "framer-message-too-large")
+			if alert.Severity != SeverityWarn || alert.SignalKey != "log-errors" || alert.SignalID != "logs/framer-message-too-large" || alert.Sustain != 1 ||
+				!strings.Contains(alert.Observed, "rate=1/min class=framer-message-too-large") || !strings.Contains(alert.Symptom, "threshold 1/min") {
+				t.Fatal("public rejection warning identity, threshold, rate or count changed")
+			}
+			for _, want := range []string{fmt.Sprintf("messageLen=%d", test.payloadBytes), fmt.Sprintf("MaxMessageLen=%d", syntheticCap), "valid message envelope", "deliberately oversized input is still rejected"} {
+				if !strings.Contains(alert.Evidence+alert.Context+alert.Verify, want) {
+					t.Fatalf("public rejection lost evidence or protection qualifier %q", want)
+				}
+			}
+			requireAlertOmits(t, alert, "synthetic-origin", "synthetic-correlation", "private-synthetic-payload", "This is a transport admission defect", "deploy Connect and Proxy artifacts", "c1403f16", "096414ac", "volume is retry amplification")
+		})
+	}
+
+	for _, line := range []string{
+		fmt.Sprintf("[framer]write messageLen=%d MaxMessageLen=%d", syntheticCap, syntheticCap),
+		fmt.Sprintf("[framer][reject]write messageLen=%d > MaxMessageLen=", syntheticCap+1),
+	} {
+		source := &syntheticSource{localFn: func(_ string, _ ...string) (string, error) { return line, nil }}
+		settings := syntheticSettings(source)
+		settings.LogServices = []string{"synthetic-framer"}
+		alerts, err := NewLogErrorsSignal().Run(context.Background(), settings)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, alert := range alerts {
+			if alert.Class == "framer-message-too-large" {
+				t.Fatal("in-cap or incomplete diagnostic manufactured a complete rejection")
+			}
+		}
 	}
 }
 

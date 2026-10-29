@@ -18,15 +18,18 @@ type runSlotPool struct {
 	// Observation only: the scheduler still uses active, waiting and priority.
 	holders          [4]*runSlotWaiter
 	publicSignalKeys map[string]string
+	diagnostic       *RunAdmissionDiagnostic
 }
 
 type runSlotWaiter struct {
-	ctx       context.Context
-	ready     chan struct{}
-	priority  bool
-	granted   bool
-	signalKey string
-	grantedAt time.Time
+	ctx              context.Context
+	ready            chan struct{}
+	priority         bool
+	granted          bool
+	signalKey        string
+	grantedAt        time.Time
+	grantOrdinal     uint64
+	admissionAttempt *runAdmissionAttempt
 }
 
 // The allowlist comes only from the code-owned catalog, never the caller's
@@ -54,12 +57,18 @@ func (p *runSlotPool) acquire(ctx context.Context, priority bool) (func(), error
 		}
 	}
 	p.mu.Lock()
+	var attempt *runAdmissionAttempt
+	if ref, ok := ctx.Value(runAdmissionContextKey{}).(*runAdmissionReference); ok {
+		attempt = p.diagnostic.beginWithLock(ctx, signalKey, priority, p.holders, p.active)
+		ref.attempt = attempt
+	}
 	if err := ctx.Err(); err != nil {
+		attempt.closeWithLock(false)
 		p.mu.Unlock()
 		return nil, err
 	}
 	p.observePgHoldersWithLock(ctx, false)
-	w := &runSlotWaiter{ctx: ctx, ready: make(chan struct{}), priority: priority, signalKey: signalKey}
+	w := &runSlotWaiter{ctx: ctx, ready: make(chan struct{}), priority: priority, signalKey: signalKey, admissionAttempt: attempt}
 	p.waiting = append(p.waiting, w)
 	p.dispatch()
 	p.mu.Unlock()
@@ -72,6 +81,7 @@ func (p *runSlotPool) acquire(ctx context.Context, priority bool) (func(), error
 			// Admission and cancellation raced. Return only our own grant.
 			p.active--
 			p.forgetHolderWithLock(w)
+			p.diagnostic.eventWithLock(runAdmissionRelease, w, p.active)
 		} else {
 			for i, candidate := range p.waiting {
 				if candidate == w {
@@ -80,6 +90,7 @@ func (p *runSlotPool) acquire(ctx context.Context, priority bool) (func(), error
 				}
 			}
 		}
+		attempt.closeWithLock(false)
 		p.dispatch()
 		p.mu.Unlock()
 		return nil, ctx.Err()
@@ -91,6 +102,7 @@ func (p *runSlotPool) release(w *runSlotWaiter) {
 	defer p.mu.Unlock()
 	p.active--
 	p.forgetHolderWithLock(w)
+	p.diagnostic.eventWithLock(runAdmissionRelease, w, p.active)
 	p.dispatch()
 }
 
@@ -113,6 +125,8 @@ func (p *runSlotPool) dispatch() {
 		for _, w := range p.waiting {
 			if w.ctx.Err() == nil {
 				live = append(live, w)
+			} else {
+				w.admissionAttempt.closeWithLock(false)
 			}
 		}
 		p.waiting = live
@@ -133,6 +147,12 @@ func (p *runSlotPool) dispatch() {
 		w.granted = true
 		p.active++
 		w.grantedAt = time.Now()
+		if p.diagnostic != nil {
+			p.diagnostic.ordinal++
+			w.grantOrdinal = p.diagnostic.ordinal
+			p.diagnostic.eventWithLock(runAdmissionGrant, w, p.active)
+		}
+		w.admissionAttempt.closeWithLock(true)
 		for i, holder := range p.holders {
 			if holder == nil {
 				p.holders[i] = w
@@ -151,7 +171,10 @@ func (p *runSlotPool) dispatch() {
 
 // Distinguish a scheduler deadline from a source command timeout without
 // printing transport errors or claiming that a database request was sent.
-type runSlotAdmissionError struct{ cause error }
+type runSlotAdmissionError struct {
+	cause            error
+	admissionAttempt int
+}
 
 func (e *runSlotAdmissionError) Error() string { return "monitor shared-slot admission unavailable" }
 func (e *runSlotAdmissionError) Unwrap() error { return e.cause }

@@ -167,12 +167,12 @@ func (poolRetentionProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 		case errors.Is(err, context.DeadlineExceeded):
 			return nil, fmt.Errorf("PostgreSQL pool-retention observation unavailable: %w", context.DeadlineExceeded)
 		default:
-			return nil, errors.New("PostgreSQL pool-retention observation unavailable")
+			return nil, preparePoolRetentionReadError(err)
 		}
 	}
 	state, err := parsePoolRetentionRows(rows)
 	if err != nil {
-		return nil, err
+		return nil, preparePoolRetentionRejectedError(err)
 	}
 	idleFraction := float64(state.localIdle) / float64(state.normalCeiling)
 	observed := fmt.Sprintf(
