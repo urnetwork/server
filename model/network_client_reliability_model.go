@@ -2951,12 +2951,7 @@ func sampleMeanByteCount(m map[ByteCount]int) ByteCount {
 }
 
 func UpdateClientLocationReliabilities(ctx context.Context, minTime time.Time, maxTime time.Time) {
-	// judged before the transaction: the judgement reads Redis
-	liveStaleHandlerIds := readLiveStaleNetworkClientHandlerIds(ctx)
-	server.MaintenanceTx(ctx, func(tx server.PgTx) {
-		boundReliabilityTransactionInTx(ctx, tx)
-		UpdateClientLocationReliabilitiesInTx(tx, ctx, minTime, maxTime, liveStaleHandlerIds)
-	}, server.TxReadCommitted)
+	updateClientLocationReliabilityPages(ctx, newClientLocationReliabilityRefresh(ctx, minTime, maxTime))
 }
 
 // Every open connection whose handler is live, with its location, speed and
@@ -3068,10 +3063,42 @@ const clientLocationReliabilityRecentlyClosedSql = `
 // timeouts or is one of liveStaleHandlerIds, the stale handlers judged live
 // before the transaction (network_client_handler_liveness.go).
 func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, minTime time.Time, maxTime time.Time, liveStaleHandlerIds []server.Id) {
-	requireSubscriber, policyErr := subscriberQualityPolicyEnabled()
-	server.Raise(policyErr)
+	updateClientLocationReliabilityCohortInTx(ctx, tx, nil, minTime, maxTime, liveStaleHandlerIds, nil)
+}
+
+// Nil scope retains the caller-owned atomic publication. A cohort always folds
+// every connection of its selected clients and preserves the current hint fence.
+func updateClientLocationReliabilityCohortInTx(ctx context.Context, tx server.PgTx, clientIds []server.Id, minTime, maxTime time.Time, liveStaleHandlerIds []server.Id, refresh *clientLocationReliabilityRefresh) {
+	var requireSubscriber bool
+	if refresh == nil {
+		var policyErr error
+		requireSubscriber, policyErr = subscriberQualityPolicyEnabled()
+		server.Raise(policyErr)
+	}
 	updateBlockNumber := maxTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
 	minHandlerHeartbeatTime := server.NowUtc().Add(-2 * NetworkClientHandlerHeartbeatTimeout)
+	if refresh != nil {
+		requireSubscriber = refresh.requireSubscriber
+		updateBlockNumber = refresh.updateBlockNumber
+		minHandlerHeartbeatTime = refresh.minHandlerHeartbeatTime
+	}
+	connectedSql := clientLocationReliabilityConnectedSql
+	closedSql := clientLocationReliabilityRecentlyClosedSql
+	connectedArgs := []any{minHandlerHeartbeatTime, requireSubscriber, nonNilHandlerIds(liveStaleHandlerIds)}
+	closedArgs := []any{minTime, maxTime, requireSubscriber}
+	healthScope, observedScope, missingScope := "", "", ""
+	var observedArgs, missingArgs []any
+	if clientIds != nil {
+		connectedSql += " AND network_client_connection.client_id = ANY($4::uuid[])"
+		closedSql = strings.Replace(closedSql, "ORDER BY network_client_connection.disconnect_time DESC", "AND network_client_connection.client_id = ANY($4::uuid[]) ORDER BY network_client_connection.disconnect_time DESC", 1)
+		connectedArgs = append(connectedArgs, clientIds)
+		closedArgs = append(closedArgs, clientIds)
+		healthScope = " AND client_id = ANY($3::uuid[])"
+		observedScope = " WHERE client_id = ANY($1::uuid[])"
+		observedArgs = []any{clientIds}
+		missingScope = " AND network_client_location_reliability.client_id = ANY($1::uuid[])"
+		missingArgs = []any{clientIds}
+	}
 
 	// old entries are not deleted on each update, but the connected status is updated
 	// - connected clients are updated, and the valid state is reset to match the latest
@@ -3083,10 +3110,8 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	// for each client, summarize all the active locations
 	result, err := tx.Query(
 		ctx,
-		clientLocationReliabilityConnectedSql,
-		minHandlerHeartbeatTime,
-		requireSubscriber,
-		nonNilHandlerIds(liveStaleHandlerIds),
+		connectedSql,
+		connectedArgs...,
 	)
 	server.WithPgResult(result, err, func() {
 		for result.Next() {
@@ -3104,10 +3129,8 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	// fill in disconnected clients that are missing from `network_client_location_reliability`
 	result, err = tx.Query(
 		ctx,
-		clientLocationReliabilityRecentlyClosedSql,
-		minTime,
-		maxTime,
-		requireSubscriber,
+		closedSql,
+		closedArgs...,
 	)
 	server.WithPgResult(result, err, func() {
 		for result.Next() {
@@ -3124,16 +3147,29 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 
 	// Aggregate accepted URL outcomes in the evidence window. Missing evidence
 	// leaves the provider online-only. Security remains a separate common gate.
-	egressSettings := egressIndexSettings()
-	egressNow := server.NowUtc()
+	var egressSettings *EgressIndexSettings
+	var egressNow time.Time
+	var healthSql string
+	if refresh == nil {
+		egressSettings = egressIndexSettings()
+		egressNow = server.NowUtc()
+		healthSql = providerEgressHealthWindowSql()
+	} else {
+		egressSettings = refresh.egressSettings
+		egressNow = refresh.egressNow
+		healthSql = refresh.egressHealthSql
+	}
+	healthArgs := []any{egressNow.Add(-min(egressSettings.EvidenceMaxAge, ProviderEgressHealthMaxAge)).UTC(), egressNow.UTC()}
+	if clientIds != nil {
+		healthArgs = append(healthArgs, clientIds)
+	}
 	clientIdHealthRuns := func() map[server.Id]*EgressHealthRun {
 		clientIdHealthRuns := map[server.Id]*EgressHealthRun{}
 		result, err := tx.Query(
 			ctx,
 			`SELECT client_id, MAX(measured_at), SUM(ok_count), SUM(total_count), '{}'::jsonb
-			FROM (`+providerEgressHealthWindowSql()+`) AS evidence GROUP BY client_id`,
-			egressNow.Add(-min(egressSettings.EvidenceMaxAge, ProviderEgressHealthMaxAge)).UTC(),
-			egressNow.UTC(),
+			FROM (`+healthSql+healthScope+`) AS evidence GROUP BY client_id`,
+			healthArgs...,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
@@ -3183,12 +3219,13 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 			`
 			SELECT client_id, MAX(observed_at)
 			FROM (
-				SELECT client_id, observed_at FROM provider_egress_location
+				SELECT client_id, observed_at FROM provider_egress_location`+observedScope+`
 				UNION ALL
-				SELECT client_id, measured_at AS observed_at FROM provider_egress_health
+				SELECT client_id, measured_at AS observed_at FROM provider_egress_health`+observedScope+`
 			) AS latest_evidence
 			GROUP BY client_id
 			`,
+			observedArgs...,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
@@ -3251,7 +3288,7 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 		clientLocationReliabilities,
 	)
 
-	probeEligibilityTime := prepareLocationProbeEligibility(ctx, tx)
+	probeEligibilityTime := prepareLocationProbeEligibilityForClients(ctx, tx, clientIds, refresh)
 
 	// A client's row is rewritten only when one of its values changed, or to
 	// refresh update_block_number once it is
@@ -3408,7 +3445,18 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 		updateBlockNumber,
 		clientLocationReliabilityRefreshBlocks,
 	))
-	recordClientLocationReliabilityPass(clientLocationReliabilities, upsertTag.RowsAffected())
+	if refresh == nil {
+		recordClientLocationReliabilityPass(clientLocationReliabilities, upsertTag.RowsAffected())
+	} else {
+		for _, reliability := range clientLocationReliabilities {
+			if reliability.hostedChild {
+				refresh.pageCounts.hostedChildCount++
+			} else {
+				refresh.pageCounts.topLevelCount++
+			}
+		}
+		refresh.pageCounts.writtenRowCount = upsertTag.RowsAffected()
+	}
 
 	// TODO on pg17 this could be part of a MERGE with source missing
 	server.RaisePgResult(tx.Exec(
@@ -3423,12 +3471,13 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	    	FROM network_client_location_reliability
 	    	LEFT JOIN temp_network_client_location_reliability ON
 	    		temp_network_client_location_reliability.client_id = network_client_location_reliability.client_id
-	    	WHERE temp_network_client_location_reliability.client_id IS NULL
+		WHERE temp_network_client_location_reliability.client_id IS NULL`+missingScope+`
 	    ) t
 	    WHERE
 	    	network_client_location_reliability.client_id = t.client_id AND
 	    	network_client_location_reliability.connected = true
 	    `,
+		missingArgs...,
 	))
 
 	publishLocationProbeEligibility(ctx, tx, probeEligibilityTime)
