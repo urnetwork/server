@@ -44,8 +44,12 @@ type ClientSession struct {
 	clientAddressHash     *[32]byte
 	clientAddressHashPort int
 	Header                map[string][]string
-	ClientInfo            ClientInfo
-	ByJwt                 *ByJwt
+	// the host the request was addressed to: the Host header, or the
+	// :authority of an h2 or h3 request, as the ingress passed it on. Empty on
+	// a session that was not made from a request.
+	Host       string
+	ClientInfo ClientInfo
+	ByJwt      *ByJwt
 	// ApiKeyAuthenticated is true when the request authenticated with an API
 	// key (urn_…) rather than a signed token. ByJwt is then the network
 	// identity the key stands for, built for this request only: the caller
@@ -74,6 +78,7 @@ func NewClientSessionFromRequest(req *http.Request) (*ClientSession, error) {
 		Cancel:        cancel,
 		ClientAddress: clientAddress,
 		Header:        map[string][]string(req.Header),
+		Host:          req.Host,
 		ClientInfo:    ClientInfoFromHeader(req.Header),
 	}
 	value.Ctx = context.WithValue(cancelCtx, clientObservationContextKey{}, value)
@@ -329,6 +334,7 @@ func (self *ClientSession) WithByJwt(byJwt *ByJwt) *ClientSession {
 		clientAddressHash:     self.clientAddressHash,
 		clientAddressHashPort: self.clientAddressHashPort,
 		Header:                self.Header,
+		Host:                  self.Host,
 		ClientInfo:            self.ClientInfo,
 		ByJwt:                 byJwt,
 	}

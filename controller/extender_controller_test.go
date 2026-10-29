@@ -604,8 +604,8 @@ func TestExtenderActivateRateLimitIsCappedPerAccount(t *testing.T) {
 			connect.AssertEqual(t, result.Activated, false)
 			return result.Error
 		}
-		const clientRefusal = "maximum number of attempts for activating an extender in the last hour"
-		const accountRefusal = "maximum number of attempts for activating your account's extenders in the last hour"
+		const clientRefusal = "maximum number of attempts for activating an extender over IPv4 in the last hour"
+		const accountRefusal = "maximum number of attempts for activating your account's extenders over IPv4 in the last hour"
 
 		firstSession := newTestExtenderSession(t, ctx, fixture.clientAddress("127.0.0.1"))
 		for i := range 2 {

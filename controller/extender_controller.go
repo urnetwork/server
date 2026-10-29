@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"slices"
 	"strings"
@@ -65,10 +66,9 @@ const (
 	// still leave four seconds of the activation budget for the rest.
 	ExtenderActivateDnsPortProbeTimeout = 3 * time.Second
 
-	// The actions the activation budgets are recorded under
-	// (ExtenderActivateSettings): the calling client's, and its account's.
-	ExtenderActivateRateLimitAction        = model.AccountActionExtenderActivate
-	ExtenderActivateAccountRateLimitAction = model.AccountActionExtenderActivateAccount
+	// The service label of the family api hosts an activation is posted to
+	// (C2): `[<env>-]api-v4` and `[<env>-]api-v6`.
+	extenderActivateApiServiceLabel = "api"
 
 	// Records of other extenders returned with an activation (C2).
 	ExtenderBootstrapCount = 8
@@ -90,16 +90,65 @@ const (
 // refused for the first one's retries, "for this action today" (support inbox
 // 8051). The account keeps a budget of its own, ten clients' worth, so
 // creating more clients does not multiply what one account can probe.
+//
+// Both budgets are kept per address family, each family with the limits
+// below. One budget for both families let a dual-stack client's failing
+// family spend the other's: three restarts of a provider whose ipv4 posts
+// failed spent the hour, and its ipv6 could not activate either (support inbox
+// 8083). A family's budget is spent by the probes of that family's address.
 type ExtenderActivateSettings struct {
-	// activations per client per window. A client posts one activation per
-	// family a pass, and a refused pass backs off ten minutes doubling
-	// (connect/net_extender_activate.go), so a dual-stack client that keeps
-	// failing posts six in its first hour and fewer after
+	// activations per client per family per window. A client posts one
+	// activation per family a pass, and a refused pass backs off ten minutes
+	// doubling (connect/net_extender_activate.go), so a client that keeps
+	// failing posts three a family in its first hour and fewer after
 	ClientRateLimit int
-	// activations per account per window, over all of its clients. A client
-	// refused by its own budget does not spend this one.
+	// activations per account per family per window, over all of its
+	// clients. A client refused by its own budget does not spend this one,
+	// and a client refused by this one does not spend its own.
 	AccountRateLimit int
 	RateLimitWindow  time.Duration
+}
+
+// The actions the activation budgets of one family are recorded under
+// (ExtenderActivateSettings): the calling client's, and its account's.
+func extenderActivateRateLimitActions(ipVersion int) (clientAction string, accountAction string) {
+	if ipVersion == 6 {
+		return model.AccountActionExtenderActivateV6, model.AccountActionExtenderActivateAccountV6
+	}
+	return model.AccountActionExtenderActivateV4, model.AccountActionExtenderActivateAccountV4
+}
+
+// The family an activation claims by the host it was posted to (C2): 4 for a
+// `[<env>-]api-v4` name and 6 for a `[<env>-]api-v6` name, the family api
+// hosts an extender activates each of its families on. 0 for any other host
+// -- the plain api name, an ip literal, a single label, none at all -- which
+// claims no family, so the family is the caller address's, as it is for an
+// operator without family hosts.
+func extenderActivateHostIpVersion(host string) int {
+	hostName := strings.TrimSpace(host)
+	if splitHostName, _, err := net.SplitHostPort(hostName); err == nil {
+		hostName = splitHostName
+	}
+	hostName = strings.TrimSuffix(strings.ToLower(hostName), ".")
+	if _, err := netip.ParseAddr(hostName); err == nil {
+		return 0
+	}
+	label, _, ok := strings.Cut(hostName, ".")
+	if !ok {
+		return 0
+	}
+	labelParts := strings.Split(label, "-")
+	if len(labelParts) < 2 || labelParts[len(labelParts)-2] != extenderActivateApiServiceLabel {
+		return 0
+	}
+	switch labelParts[len(labelParts)-1] {
+	case "v4":
+		return 4
+	case "v6":
+		return 6
+	default:
+		return 0
+	}
 }
 
 func DefaultExtenderActivateSettings() *ExtenderActivateSettings {
@@ -464,9 +513,26 @@ func extenderActivate(
 	if err != nil {
 		return refuse("the caller address is not readable")
 	}
-	ipVersion := server.ClientAddressIpVersion(clientSession.ClientAddress)
+	// the address the probe dials and the record publishes, in the form of its
+	// own family, and that family: an ipv4-mapped caller is its ipv4 address
+	clientIp = clientIp.Unmap()
+	ipVersion := server.IpVersionForAddr(clientIp)
 	if ipVersion != 4 && ipVersion != 6 {
 		return refuse("the caller address has no known family")
+	}
+	// an activation posted to a family api host is for that family (C2), and
+	// the probe dials the family the request arrived on. One that arrived on
+	// the other family -- an alt or proxy path that crossed families -- would
+	// probe, store and answer for the caller's other address as if it were the
+	// family the extender asked for, so it is refused before anything is
+	// probed, spent or stored
+	if hostIpVersion := extenderActivateHostIpVersion(clientSession.Host); hostIpVersion != 0 && hostIpVersion != ipVersion {
+		return refuse(fmt.Sprintf(
+			"the activation for ipv%d arrived over ipv%d, so the ipv%d address could not be probed",
+			hostIpVersion,
+			ipVersion,
+			hostIpVersion,
+		))
 	}
 
 	config, err := EnvExtenderConfig()
@@ -485,23 +551,33 @@ func extenderActivate(
 	if err != nil {
 		return refuse(extenderConfigRefusal(err))
 	}
+	connectSettings := ExtenderProbeConnectSettings()
 
-	// the calling client's budget, then its account's (ExtenderActivateSettings)
-	if err := model.CheckAndRecordAccountActionRateLimit(
+	// The budgets are spent here, at the probe (ExtenderActivateSettings):
+	// after every check that refuses without dialing the caller -- the
+	// arguments, the client, the caller address and its family, the family
+	// the activation was posted for, the operator's configuration -- and
+	// before the first dial. A malformed request, a post that crossed families
+	// and an operator that cannot probe spend nothing, while every activation
+	// that dials the caller is counted before it dials, whatever the probe
+	// then finds. The calling client's budget and its account's are spent
+	// together or not at all, so a client refused by its account's budget
+	// keeps its own, and both are the budgets of the family the probe dials.
+	clientRateLimitAction, accountRateLimitAction := extenderActivateRateLimitActions(ipVersion)
+	if err := model.CheckAndRecordAccountActionBudgets(
 		clientSession.Ctx,
-		*clientSession.ByJwt.ClientId,
-		ExtenderActivateRateLimitAction,
-		settings.ClientRateLimit,
-		settings.RateLimitWindow,
-	); err != nil {
-		return refuse(err.Error())
-	}
-	if err := model.CheckAndRecordAccountActionRateLimit(
-		clientSession.Ctx,
-		clientSession.ByJwt.UserId,
-		ExtenderActivateAccountRateLimitAction,
-		settings.AccountRateLimit,
-		settings.RateLimitWindow,
+		model.AccountActionBudget{
+			Id:     *clientSession.ByJwt.ClientId,
+			Action: clientRateLimitAction,
+			Limit:  settings.ClientRateLimit,
+			Window: settings.RateLimitWindow,
+		},
+		model.AccountActionBudget{
+			Id:     clientSession.ByJwt.UserId,
+			Action: accountRateLimitAction,
+			Limit:  settings.AccountRateLimit,
+			Window: settings.RateLimitWindow,
+		},
 	); err != nil {
 		return refuse(err.Error())
 	}
@@ -509,7 +585,6 @@ func extenderActivate(
 	probeCtx, probeCancel := context.WithTimeout(clientSession.Ctx, ExtenderActivateProbeTimeout)
 	defer probeCancel()
 
-	connectSettings := ExtenderProbeConnectSettings()
 	probeCarrier := func(
 		ctx context.Context,
 		connectMode connect.ExtenderConnectMode,
