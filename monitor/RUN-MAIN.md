@@ -1462,7 +1462,38 @@ triage manifest before Sol Medium begins the repair. Cover, as applicable:
 
 Run the narrow test first, then the package and race suite. Apply the pinned
 engine-source preflight above before either full monitor suite here as well;
-retain the exported variable in the actual child environment:
+retain the exported variable in the actual child environment.
+
+The native test prerequisites are separate from the PostgreSQL/Redis resource
+attestation. Before launching either full monitor suite, bind
+`MONITOR_PG_TAIL_REAL_PSQL` to an explicitly qualified absolute, executable native
+psql client and retain that export in the test child's actual environment. The
+native PgTail controls route it only to their allocated local TestEnv; an ambient
+psql wrapper or a filename alone is not the qualified client. Qualify the client,
+its required loader/library/tool closure and interpreter roles with the selected
+test-source snapshot. Preserve `MONITOR_PROMQL_ENGINE_SOURCE` as above.
+
+Use a closed test `PATH` that contains the source-required real local utilities,
+including `rg`, `shasum`, `dirname`, `bash`, and the native fixtures' Python/shell
+utilities. A tool pinned elsewhere but absent from the actual child `PATH` is not
+available to `exec.LookPath`. Do not import an unrelated ambient search path to
+hide a missing role. Inventory the selected tests' explicit environment and tool
+prerequisites, distinguishing required native tools from fixture-created fake
+commands and helper-child flags. Verify exact physical roles and actual child
+inheritance before admitting the test wave. Missing bindings are local
+qualification setup failures, not probe/product failures or justification to
+skip or weaken the native controls. Retain the first failed attempt; a corrected
+launch requires its own fresh output and prerequisite evidence.
+
+For example, after selecting the qualified absolute client, export it before the
+attested subshells below and verify the non-executing shape checks:
+
+```sh
+export MONITOR_PG_TAIL_REAL_PSQL="$monitor_real_psql"
+[[ "$MONITOR_PG_TAIL_REAL_PSQL" = /* && -f "$MONITOR_PG_TAIL_REAL_PSQL" && -x "$MONITOR_PG_TAIL_REAL_PSQL" ]]
+```
+
+The shape checks do not replace the tool-identity or runtime dependency proof:
 
 ```sh
 bash -c \
