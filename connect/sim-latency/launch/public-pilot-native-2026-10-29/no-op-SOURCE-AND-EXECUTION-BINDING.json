@@ -1,0 +1,121 @@
+{
+  "schema": 1,
+  "kind": "role-correctness-source-and-execution-native-binding",
+  "role": "no-op",
+  "accepted_native_binding": true,
+  "native_product": {
+    "base_sha": "a9e8e1a710b24c749e6499a0606938252c83e136",
+    "base_image_id": "sha256:98c9061c4a43a25e7b581a5193ca6e7f48e49e7b7fc03b7c1b6190a029befee2",
+    "canonical_source_lock_sha256": "ec322ed2db023e15ea5dc3eea60a6ca5989661bba737c340fea3477d8d1300cf",
+    "candidate_sha": "28e5f2f823008394cc51d1405750daf5decd0915",
+    "patch_sha256": "1076be3ed61df0e14ae90c13bbe4c35442de6371064fd7d78f61ed6834e170f1",
+    "image_id": "sha256:6b5afb71b60534987fbd226c8b168d2140dceb2fcad177c61828926f4615c601",
+    "expected_binary_sha256": "b232bd355f90b44aa1838419f3375454009a337931c458641b1351b571bb0872",
+    "product_byte_roots": {
+      "server/connect/transport.go": "5a24cbb81d96fe4c17ff05535a3466d3ab2571a9533a8e92697c4a3f812e34c4",
+      "server/connect/resident_contract_manager.go": "46be72a19f0df89587bd1ec04ab05dde9661d57aaf7edc2838ce4dd00c2ab2dc"
+    },
+    "actual_host_image_runtime_product_byte_equality_verified": true,
+    "required_native_evidence": [
+      {
+        "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/no-op/native-proof.json",
+        "sha256": "8649b80c04274829e02646793b7048d7e765ab0122dc599c99783729c6f41225"
+      },
+      {
+        "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/no-op/native-build.json",
+        "sha256": "0ce843a7dd7d5125b08530e8ddca04b69e9344c6f0e00e0192a44f1f1ed9522c"
+      },
+      {
+        "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/no-op/native-evidence.sha256",
+        "sha256": "ce74a89c073eee07d9c4c687f24ba4af7bea9f2cb5754d491e868d6a49ec3935"
+      },
+      {
+        "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/readbacks-identity-file-v3/no-op/source-byte-roots.sha256",
+        "sha256": "9d8e23fc9bc03d8f9d8419f41b7cdd5bd7b8f96069fa1a6b8cb83c2b93761a5d"
+      },
+      {
+        "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/readbacks-identity-file-v3/no-op/image-source-byte-roots.sha256",
+        "sha256": "9d8e23fc9bc03d8f9d8419f41b7cdd5bd7b8f96069fa1a6b8cb83c2b93761a5d"
+      },
+      {
+        "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/readback-supplement-summary.json",
+        "sha256": "b216cb068be0d239097efeb39d065332f99d0eeeb095f345b4cb545d712aa6ce"
+      }
+    ],
+    "expected_product_byte_roots_manifest_sha256": "9d8e23fc9bc03d8f9d8419f41b7cdd5bd7b8f96069fa1a6b8cb83c2b93761a5d"
+  },
+  "actual_runtime": {
+    "complete": true,
+    "status": "actual93x3_279_PASS_noop_runtime_and_native_product_binding_complete",
+    "terminal_receipt": {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/correctness-source-pins/no-op-role-terminal.txt",
+      "sha256": "45c1b06297d5a0c45f85608a7772ce1d3a36e97e103067f73f7b4fee1d908a9e"
+    },
+    "source_base_git_head": "a9e8e1a710b24c749e6499a0606938252c83e136",
+    "source_module": "/home/by/urnetwork/temp/h1-composed-serving-low-20261028.BGU5MOIW/baseline/server",
+    "source_product_is_read_only_overlay_not_candidate_git_commit": true,
+    "test_race_elf_sha256": "f6d2bca84d38bd6b7d0125628a413fb2b6f2bd8042f2b3d5fce254afe8035cb7",
+    "test_elf_is_not_native_product_binary": true,
+    "tests_per_process": 93,
+    "required_independent_processes": 3,
+    "actual_completed_processes": 3,
+    "actual_total_passes": 279,
+    "parent_canonical_slot_release_claimed": true,
+    "source_manifest_sha256": "42d82421f5ef5430a8f81bd19f65155eb6c4d26a84b5766e459e96a90334cff8",
+    "source_packet_manifest_sha256": "4055159e59b7e9a2439ae37772cf0ae022599e8046644d2e7c773666ccf9ec2b",
+    "no_worse_pacing_or_NlU_source_included": true,
+    "pass_logs": [
+      {
+        "path": "/mnt/data/reference-role-runtime-qa-20261029.Z1jiStbo/no-op/pass1.json",
+        "sha256": "439ed21a96129a9947102c296430c4a15a5bc15bbfe677c85920b3d7fcd6fb18"
+      },
+      {
+        "path": "/mnt/data/reference-role-runtime-qa-20261029.Z1jiStbo/no-op/pass2.json",
+        "sha256": "c1a4cb7b4b9b8b4a922986eca7468261e8a2f72a662ec12176e3c9de670b9946"
+      },
+      {
+        "path": "/mnt/data/reference-role-runtime-qa-20261029.Z1jiStbo/no-op/pass3.json",
+        "sha256": "4c159f70d1e41e55048fa11d74c1a9aa1ebec4d62c6953fc3fb6cf18010570ef"
+      }
+    ],
+    "actual_failures": 0,
+    "actual_skips": 0,
+    "actual_nested_test_passes": 0,
+    "parent_canonical_slot_release_evidence": {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/correctness-source-pins/better-role-terminal.txt",
+      "sha256": "bda80bb61edfc51243119db8bca2d92fb0f419d156fc962ee4236b4775812149"
+    },
+    "parent_canonical_slot_release_note": "Combined two-role runtime unit exited0 at2026-10-29T17:56:23Z and released original64512:35309334; the earlier no-op leaf receipt correctly did not claim overall release before better completed.",
+    "compile_only_receipt": {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/correctness-source-pins/role-compile-terminal.txt",
+      "sha256": "0a06ff9dd7e1440972f5f014004bb858a735c8a65feef36ddfb639898ed19b2a"
+    },
+    "role_transaction_cleanup_postchecks_exit": [
+      0,
+      0,
+      0
+    ],
+    "actual_go_version": "go1.27.3",
+    "management_memory_bytes": 8589934592,
+    "memory_swap_bytes": 0,
+    "cpus": "20,22",
+    "runtime_resource_inputs_sha256": "0e1a74ccd484306dde26a6ed8faa0e7ca66674b8a62422588baa0ff648ad63c8"
+  },
+  "nonclaims": [
+    "Build and role-specific correctness native binding only; no new measurement, direction, pilot, calibration, publication, grading or hold release.",
+    "Both role runtime witnesses are complete independently; neither borrows worse112 or the other role's assertion counts.",
+    "The retained race test ELF is not the native product binary; read-only overlay provenance is not a clean candidate Git checkout claim.",
+    "Historical compile/source-preparation/runtime receipts remain unchanged; their then-pending statements do not describe this finalized binding."
+  ],
+  "finalization_complete": true,
+  "finalization_checks": {
+    "actual_native_build_and_append_only_readback_complete": true,
+    "native_evidence_manifest_and_all_members_sha256_verified": true,
+    "actual_new_native_image_tuple_matches_expected_frozen_role": true,
+    "host_and_image_product_roots_equal_runtime_tested_overlay_roots": true,
+    "all_ten_repository_heads_and_trees_clean_and_protected_tree_match": true,
+    "expected_binary_go_version_and_clean_candidate_vcs_verified": true,
+    "role_specific_three_process_runtime_rosters_and_elf_independently_verified": true,
+    "inventory_restore_and_preserved_v2_failure_verified": true
+  }
+}

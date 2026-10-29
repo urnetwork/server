@@ -1,0 +1,210 @@
+{
+  "official": false,
+  "production_activation_authorized": false,
+  "live_api_or_worker": false,
+  "api_image_digest_is_synthetic": true,
+  "worker_image_digest_is_synthetic": true,
+  "host_qualification_identity_is_synthetic": true,
+  "original_host_inventory_sha256": "1b319b1b2a4dede0ec678ea17f82f4d8e2486b479e8d91b22188a3f4914c9d1b",
+  "schema": 1,
+  "kind": "sim-latency-fresh-public-regression-pilot-plan",
+  "protocol": "launch-3a-bridge-fresh-single-b-2026-10-28-v1",
+  "prepared_at": "2026-10-29T21:19:55Z",
+  "pilot_root": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1",
+  "public_workload_seed": 20261028,
+  "providers_sha256": "e6101167b7940c263d7083eaede834019b306ad1c5269bf7afeb5a8cf6c2db4f",
+  "approval": {
+    "path": "/var/lib/urnetwork/competition-held-out-fresh-single-c2-a9e8e1a7-20261028-v1/approval.json",
+    "sha256": "2188428e3246b893e578c94fb3687ac15508146299a93c87a79236ac90fae646"
+  },
+  "before_exclusions": {
+    "path": "/var/lib/urnetwork/competition-held-out-fresh-single-c2-a9e8e1a7-20261028-v1/before-public-pilot-exclusions.json",
+    "sha256": "325bde561814b529262e67fb8737e5f50aa56b6ad921f278c217df7780edadb5"
+  },
+  "before_census_configuration": {
+    "path": "/var/lib/urnetwork/competition-held-out-fresh-single-c2-a9e8e1a7-20261028-v1/before-census-configuration.json",
+    "sha256": "f353beb8c352a072f7fe9888ee8a1d3df931420785746dfa202632bbffb0a6fc"
+  },
+  "request": {
+    "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/artifacts/worker-request.json",
+    "sha256": "bf0d9b6916f3d37d58b3888ee32339bbf282acfced9fb207178a8f0f95fdbdef"
+  },
+  "reference_patch_policy": {
+    "path": "/var/lib/urnetwork/competition-h1-native-build-20261028.0dZnAU3A/inputs/patch-policy.scored.json",
+    "sha256": "25e9c5b89041f35607b3a9542d13abd2649a9e99b804f59791780af19ab97861"
+  },
+  "source_lock": {
+    "path": "/home/by/urnetwork/temp/mono-root-c2-release-20261026.PUHdHLML/source-lock.json",
+    "sha256": "239cea7fe6f77f989b75ba6efa677e8731640ba2fdd3690a35e6fe72103f3d11"
+  },
+  "generator_files": [
+    {
+      "analyzer": {
+        "path": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/controller/competition_sim_latency_controller.go",
+        "sha256": "9bb9d34ffee85a9375f44ce09610d241737bad591a84a5712dd1aa0f22f76db0"
+      },
+      "frozen": {
+        "path": "/home/by/urnetwork/temp/c2-bridge-20261026.UJH2e2mk/source-auth-server/controller/competition_sim_latency_controller.go",
+        "sha256": "9bb9d34ffee85a9375f44ce09610d241737bad591a84a5712dd1aa0f22f76db0"
+      }
+    },
+    {
+      "analyzer": {
+        "path": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/controller/competition_controller.go",
+        "sha256": "51dd6733723bf05a55f9511b0663e5742f64a2328f20a412c96ca0c5848554a2"
+      },
+      "frozen": {
+        "path": "/home/by/urnetwork/temp/c2-bridge-20261026.UJH2e2mk/source-auth-server/controller/competition_controller.go",
+        "sha256": "62417b9440925646ac5bc0f3095fe391afbcdb1dfcb0e10fb116bff4df88dcd9"
+      }
+    }
+  ],
+  "references": [
+    {
+      "role": "better",
+      "patch": {
+        "path": "/var/lib/urnetwork/competition-h1-native-build-20261028.0dZnAU3A/better/canonical.patch",
+        "sha256": "46bc95e3f2719f26f939be7a86c274d0b98bb2b1027f1ef4537d61de4c4ec924"
+      },
+      "candidate_sha": "b93af9ec70923cf56a6f4ac6f5358eaf89044c6a",
+      "image_id": "sha256:b86130ebe1a3cd58f4ad386335fa8126c9bc9f42e153d9040c2db09ed2502f6d",
+      "binary_sha256": "3c9967f81fbd3c617e92655ba2e4be7ec4289ebc29db3b9aa3a8234723231588",
+      "build": {
+        "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/better-build-qualification.json",
+        "sha256": "90b463187eacd97e79c39b7bbc245cb93230cc61706c3e25ff4d05e2bd613b87"
+      },
+      "native_build": {
+        "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/better/native-build.json",
+        "sha256": "5ad6b312f1be062b151d0e8fb9a1453b344ab224058751bf616ce2b87c4447aa"
+      },
+      "correctness": {
+        "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/better-correctness-qualification.json",
+        "sha256": "c9c41467cf798ee7679b92a36598d4d8b2c594486c471eaa4b63a1c3e7a31428"
+      }
+    },
+    {
+      "role": "no-op",
+      "patch": {
+        "path": "/var/lib/urnetwork/competition-h1-native-build-20261028.0dZnAU3A/no-op/canonical.patch",
+        "sha256": "1076be3ed61df0e14ae90c13bbe4c35442de6371064fd7d78f61ed6834e170f1"
+      },
+      "candidate_sha": "28e5f2f823008394cc51d1405750daf5decd0915",
+      "image_id": "sha256:6b5afb71b60534987fbd226c8b168d2140dceb2fcad177c61828926f4615c601",
+      "binary_sha256": "b232bd355f90b44aa1838419f3375454009a337931c458641b1351b571bb0872",
+      "build": {
+        "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/no-op-build-qualification.json",
+        "sha256": "c7462fdd8bad98ac16f093ab6a833e456a9001b8b8e0f29d637901a76496bb32"
+      },
+      "native_build": {
+        "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/no-op/native-build.json",
+        "sha256": "0ce843a7dd7d5125b08530e8ddca04b69e9344c6f0e00e0192a44f1f1ed9522c"
+      },
+      "correctness": {
+        "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/no-op-correctness-qualification.json",
+        "sha256": "9e52d061ca478cfeb5783845f0538ccb0726350d09ebeca3dd944b14f0f9e753"
+      }
+    },
+    {
+      "role": "worse",
+      "patch": {
+        "path": "/var/lib/urnetwork/competition-h1-native-build-20261028.0dZnAU3A/worse/canonical.patch",
+        "sha256": "6f8c6f24c44a9627f053e58d4a59f845a0ba4b0b51e201f5cabddfb33b30629d"
+      },
+      "candidate_sha": "e2a391a461ab0b588f994a9e7d29ebfeeae171f4",
+      "image_id": "sha256:647922002527eec6bcbff7fe1c64792813ce353bf6685a37dc6be1495083f6af",
+      "binary_sha256": "41629fddb006aaeddd0e849c7aae9e6a85c89496939fdf60735c598cd0cab33c",
+      "build": {
+        "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/worse-build-qualification.json",
+        "sha256": "ea795d37cf23d99607c12b1b9a4598681979e8b691d3402ffed5fae0ec95c1b8"
+      },
+      "native_build": {
+        "path": "/var/lib/urnetwork/competition-h1-native-rebuild-20261029.9el69oHI/worse/native-build.json",
+        "sha256": "d1f6cddaa3695e97814453f766d2d1ee7982f7069e43b484021d5205fd43d93f"
+      },
+      "correctness": {
+        "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/worse-correctness-qualification.json",
+        "sha256": "9d01555fbc04ac887365fd5e786e8a2d6d879d9fbfa15fb7ef566ce2ff62152d"
+      }
+    }
+  ],
+  "tool_executable": {
+    "path": "/mnt/data/urnetwork-competition-temp/pilot225-runtime-v4-20261029.33sL78Lg/pilot225.test",
+    "sha256": "988481d6b55420a1b4be48fc95ae288490b5a31f9cc1496d79f656b41f79bf70"
+  },
+  "tool_qualification": {
+    "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool-qualification.json",
+    "sha256": "3cad65f52a5012aed6f29fb341f4cb709de498214042bcda14a3c9c92fe4cc3b"
+  },
+  "prerequisite_publications": [
+    {
+      "artifact": {
+        "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool-qualification.json",
+        "sha256": "3cad65f52a5012aed6f29fb341f4cb709de498214042bcda14a3c9c92fe4cc3b"
+      },
+      "publication": {
+        "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/publications/tool.publication.json",
+        "sha256": "c55108f26d74350c60cfbdbfa19ef1ef290ff92cdc90f68a235a486386b8cbb8"
+      }
+    },
+    {
+      "artifact": {
+        "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/better-build-qualification.json",
+        "sha256": "90b463187eacd97e79c39b7bbc245cb93230cc61706c3e25ff4d05e2bd613b87"
+      },
+      "publication": {
+        "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/publications/better-build.publication.json",
+        "sha256": "1227a343ac37c04f2e8d72781b536434e4d5733073f859103929acc4b75f3781"
+      }
+    },
+    {
+      "artifact": {
+        "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/better-correctness-qualification.json",
+        "sha256": "c9c41467cf798ee7679b92a36598d4d8b2c594486c471eaa4b63a1c3e7a31428"
+      },
+      "publication": {
+        "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/publications/better-correctness.publication.json",
+        "sha256": "0bec491f53e5633e70bf03443f5a242fb480d8cae50ec1a1ff7819dbb6216370"
+      }
+    },
+    {
+      "artifact": {
+        "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/no-op-build-qualification.json",
+        "sha256": "c7462fdd8bad98ac16f093ab6a833e456a9001b8b8e0f29d637901a76496bb32"
+      },
+      "publication": {
+        "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/publications/no-op-build.publication.json",
+        "sha256": "ea95626662afa21f4dc1cf5af3da842409c195c3a9daccd3a1b5ac46b01d43ee"
+      }
+    },
+    {
+      "artifact": {
+        "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/no-op-correctness-qualification.json",
+        "sha256": "9e52d061ca478cfeb5783845f0538ccb0726350d09ebeca3dd944b14f0f9e753"
+      },
+      "publication": {
+        "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/publications/no-op-correctness.publication.json",
+        "sha256": "61f769bf0487d44ac805dc981f5e7dadd4337e6b9651a323f634f890d889b45b"
+      }
+    },
+    {
+      "artifact": {
+        "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/worse-build-qualification.json",
+        "sha256": "ea795d37cf23d99607c12b1b9a4598681979e8b691d3402ffed5fae0ec95c1b8"
+      },
+      "publication": {
+        "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/publications/worse-build.publication.json",
+        "sha256": "7ddb40268754e6f86af2a0daf5da09f9ab880da65c3604aaf5fa6589cb11a1e5"
+      }
+    },
+    {
+      "artifact": {
+        "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/worse-correctness-qualification.json",
+        "sha256": "9d01555fbc04ac887365fd5e786e8a2d6d879d9fbfa15fb7ef566ce2ff62152d"
+      },
+      "publication": {
+        "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/publications/worse-correctness.publication.json",
+        "sha256": "59d5329f63e6c3c67610696b0ade773e4fff67cb9fa7c5878acb67d41d6d3cd3"
+      }
+    }
+  ]
+}

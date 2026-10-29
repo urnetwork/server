@@ -271,6 +271,8 @@ var routeAccessByRoute = map[string]routeAccess{
 	"GET /sn/ledger/account":                        routeAccessPublic,
 	"GET /sn/attempt-artifact":                      routeAccessPublic,
 	"POST /sn/attempt-artifact":                     routeAccessClient,
+	// the validator's client token; its hotkey signature is the authority
+	"POST /sn/head-summary":                         routeAccessClient,
 	"GET /sn/artifacts":                             routeAccessPublic,
 	"GET /sn/evidence":                              routeAccessPublic,
 	"POST /sn/evidence":                             routeAccessPublic,

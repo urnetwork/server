@@ -234,6 +234,7 @@ func registry() []specEndpoint {
 		{"GET", "/sn/top", nil, rt(controller.SnTopResult{})},
 		{"GET", "/sn/top/me", nil, rt(controller.SnTopMeResult{})},
 		{"POST", "/sn/head/binding", rt(controller.SnHeadBindingArgs{}), rt(controller.SnHeadBindingResult{})},
+		{"POST", "/sn/head-summary", rt(controller.SnHeadSummary{}), nil},
 		{"GET", "/account/epochs", nil, rt(controller.AccountEpochsResult{})},
 	}
 }

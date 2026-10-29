@@ -213,5 +213,7 @@ func subnetOperatorTasks() []subnetOperatorTask {
 		{target: task.NewTaskTarget(work.StDeposit)},
 		{target: task.NewTaskTarget(work.StFinalizePoke)},
 		{target: task.NewTaskTarget(work.StLedgerV2Step)},
+		{target: task.NewTaskTarget(work.SnSyncFleetBindings), schedule: work.ScheduleSnSyncFleetBindings},
+		{target: task.NewTaskTarget(work.SnReadIncentive), schedule: work.ScheduleSnReadIncentive},
 	}
 }

@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-held-out-reference-build",
+  "role": "better",
+  "accepted": true,
+  "base_sha": "a9e8e1a710b24c749e6499a0606938252c83e136",
+  "source_lock_sha256": "ec322ed2db023e15ea5dc3eea60a6ca5989661bba737c340fea3477d8d1300cf",
+  "base_image_id": "sha256:98c9061c4a43a25e7b581a5193ca6e7f48e49e7b7fc03b7c1b6190a029befee2",
+  "patch_sha256": "46bc95e3f2719f26f939be7a86c274d0b98bb2b1027f1ef4537d61de4c4ec924",
+  "candidate_sha": "b93af9ec70923cf56a6f4ac6f5358eaf89044c6a",
+  "image_id": "sha256:b86130ebe1a3cd58f4ad386335fa8126c9bc9f42e153d9040c2db09ed2502f6d",
+  "binary_sha256": "3c9967f81fbd3c617e92655ba2e4be7ec4289ebc29db3b9aa3a8234723231588",
+  "go_version": "go1.27.3",
+  "vcs_modified": false,
+  "direction": "",
+  "evidence": [
+    {
+      "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/better/native-proof.json",
+      "sha256": "4c28a61c4c0c7aff68c83fdfe54f89ab8a464714a577c575291f341b869716cc"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/better/native-build.json",
+      "sha256": "5ad6b312f1be062b151d0e8fb9a1453b344ab224058751bf616ce2b87c4447aa"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/better/native-evidence.sha256",
+      "sha256": "171e21be919dad30cf7a59fd70507b7574c2e29a1998e390ab1fc6a54148a168"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/better/evidence/candidate-original-source.json",
+      "sha256": "b5eb9057910459f3bc08d4a6a136e7fdfe0c095e1ea73e97f2dfdbd6d64deb48"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/better/evidence/builder-identity.json",
+      "sha256": "6667ae6f6513f574a9aa6b3712cf36150d2b99a2ec52ec35556c9a16a562337b"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/readback-supplement-summary.json",
+      "sha256": "b216cb068be0d239097efeb39d065332f99d0eeeb095f345b4cb545d712aa6ce"
+    }
+  ]
+}

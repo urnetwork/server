@@ -227,6 +227,9 @@ func runWithDependencies(
 			WriteTimeout:    30 * time.Second,
 			IdleTimeout:     5 * time.Minute,
 			ShutdownTimeout: 30 * time.Second,
+			// platform transports run their own heartbeat: client pings
+			// against the transport read deadline
+			DisableTcpKeepAlive: true,
 		},
 	)
 	if err != nil && runCtx.Err() == nil {
