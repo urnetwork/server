@@ -23,9 +23,9 @@ const (
 	securityNoticePayoutWalletsUrl = "https://ur.io/app/account/earnings"
 	securityNoticeSignInMethodsUrl = "https://ur.io/app/account/profile"
 	securityNoticeOtherSessionsUrl = "https://ur.io/app/account/sessions"
-	// the API reference's "Long-lived API keys", which says how to list and
-	// delete them; the ur.io app has no API key screen
-	securityNoticeApiKeysUrl = "https://ur.io/docs/api"
+	// the ur.io app's API keys screen, where the owner sees and deletes them
+	// (owner decision 2026-10-29); the notice ships once the screen is live
+	securityNoticeApiKeysUrl = "https://ur.io/app/account/api-keys"
 )
 
 const (
