@@ -83,6 +83,10 @@ func TestEmailTemplatesRender(t *testing.T) {
 			Currency:         "usd",
 		}, true},
 		{&SubscriptionPaymentFailedTemplate{AmountDue: 1999, Currency: "eur"}, true},
+		// the security notices are email only: no sms body
+		{securityWalletNoticeSample(), false},
+		{securitySignInNoticeSample(model.SecuritySignInAdded, model.SecuritySignInRemoved), false},
+		{&AuthPasswordSetTemplate{PasswordSetNotice: model.PasswordSetNotice{ChangeTime: &paymentFailedNextAttempt, Via: model.SecurityNoticeViaWeb}}, true},
 	}
 
 	imageSrc := regexp.MustCompile(`src="([^"]+)"`)

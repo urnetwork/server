@@ -106,6 +106,10 @@ func CreateAccountWalletExternal(
 
 			glog.Infof("[wm][%s]found existing wallet %s for address %s", createAccountWallet.NetworkId, existingWalletId, createAccountWallet.WalletAddress)
 
+			// reactivating a removed wallet that a stale payout_wallet row still
+			// names makes it the payout wallet again (GetPayoutWalletId)
+			watch := watchPayoutWalletInTx(session.Ctx, tx, createAccountWallet.NetworkId)
+
 			// Found an existing wallet - update active = true
 			_ = server.RaisePgResult(tx.Exec(
 				session.Ctx,
@@ -116,6 +120,8 @@ func CreateAccountWalletExternal(
 							`,
 				existingWalletId,
 			))
+
+			watch.noticeInTx(session.Ctx, tx)
 
 			walletId = &existingWalletId
 			return
@@ -480,6 +486,9 @@ func RemoveWallet(id server.Id, session *session.ClientSession) *RemoveWalletRes
 	server.Tx(session.Ctx, func(tx server.PgTx) {
 		result.Success = false
 		result.PayoutWalletId = nil
+		// removing the payout wallet removes it, or replaces it with the
+		// promoted wallet: one change, owed once, after both
+		watch := watchPayoutWalletInTx(session.Ctx, tx, session.ByJwt.NetworkId)
 		tag := server.RaisePgResult(tx.Exec(
 			session.Ctx,
 			`
@@ -502,6 +511,7 @@ func RemoveWallet(id server.Id, session *session.ClientSession) *RemoveWalletRes
 			result.Success = true
 		}
 
+		watch.noticeInTx(session.Ctx, tx)
 	})
 
 	return result

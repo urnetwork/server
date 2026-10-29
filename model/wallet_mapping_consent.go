@@ -230,10 +230,14 @@ func AcceptWalletMappingConsent(ctx context.Context, owner WalletMappingOwner, o
 		if statement.Generation != generation+1 || !bytes.Equal(previous, statement.PreviousHash[:]) {
 			panic(walletMappingAbort{cause: protocol.ErrWalletMappingIntegrity})
 		}
+		watch := watchSubnetWalletInTx(ctx, tx, owner.NetworkId, &owner.ClientId)
 		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO wallet_mapping_consent(domain_hash,client_id,generation,original_hash,nonce,original,accepted_at) VALUES($1,$2,$3,$4,$5,$6,$7)`, domain[:], owner.ClientId, statement.Generation, hash[:], statement.Nonce[:], raw, now))
 		signature := "0x" + hex.EncodeToString(original.Signature[:])
 		setStProviderWalletOriginalInTx(ctx, tx, owner.ClientId, owner.NetworkId, coldkeySs58, statement.Coldkey, &original.Message, &signature)
 		setStWalletInTx(ctx, tx, owner.NetworkId, coldkeySs58, statement.Coldkey)
+		// a consent that moves the provider's or the network's wallet owes the
+		// payout wallet notice
+		watch.noticeInTx(ctx, tx, statement.FromEpoch, statement.ThroughEpoch)
 		accepted = &WalletMappingAccepted{OriginalHash: hash, Generation: statement.Generation, Applied: true}
 	})
 	return accepted, nil

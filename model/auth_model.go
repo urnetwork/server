@@ -638,6 +638,9 @@ func handleLoginParsedAuthJwtWithStore(
 				AuthJwt:       args.AuthJwtStr,
 				AuthJwtType:   args.AuthJwt.AuthType,
 				UserId:        *userId,
+				// linking a new provider to the account is a sign-in method
+				// added; a legacy Apple account's backfill adds no new way in
+				Notify: !legacySsoExists,
 			},
 			ctx,
 		)

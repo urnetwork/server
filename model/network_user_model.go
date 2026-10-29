@@ -276,6 +276,7 @@ func AddAuth(
 				AuthJwtType:   SsoAuthType(*authArgs.AuthJwtType),
 				AuthJwt:       *authArgs.AuthJwt,
 				UserId:        session.ByJwt.UserId,
+				Notify:        true,
 			},
 			session.Ctx,
 		)
@@ -340,12 +341,23 @@ type AddUserAuthArgs struct {
 	Verified     bool
 }
 
+// Adds an email or phone password sign-in to an account (AddAuth), owing the
+// sign-in notice with it.
 func addUserAuth(
 	args *AddUserAuthArgs,
 	ctx context.Context,
 ) (returnErr error) {
 	server.Tx(ctx, func(tx server.PgTx) {
+		watch := watchSignInMethodsInTx(ctx, tx, args.UserId)
 		returnErr = addUserAuthInTx(tx, args, ctx)
+		if returnErr == nil {
+			userAuth, userAuthType := NormalUserAuthV1(args.UserAuth)
+			method := SecuritySignInMethodEmail
+			if userAuthType == UserAuthTypePhone {
+				method = SecuritySignInMethodPhone
+			}
+			watch.noticeInTx(ctx, tx, newSecuritySignInChange(ctx, SecuritySignInAdded, method, maskUserAuth(*userAuth)))
+		}
 	})
 	return
 }
@@ -490,6 +502,11 @@ type AddSsoAuthArgs struct {
 	AuthJwt       string      `json:"auth_jwt_str"`
 	AuthJwtType   SsoAuthType `json:"auth_jwt_type"`
 	UserId        server.Id   `json:"user_id"`
+	// owe the sign-in notice when the sign-in is added: true when an account
+	// gains a sign-in method (AddAuth, a sign-in that links the provider), false
+	// for an account's creation, a migration, or a legacy Apple account's
+	// backfill, which add no way in that the account did not already have
+	Notify bool `json:"-"`
 }
 
 func validateUserAuthAvailability(
@@ -551,9 +568,20 @@ func addSsoAuth(
 ) (returnErr error) {
 
 	server.Tx(ctx, func(tx server.PgTx) {
+		var watch *signInMethodWatch
+		if args.Notify {
+			watch = watchSignInMethodsInTx(ctx, tx, args.UserId)
+		}
 
 		returnErr = addSsoAuthInTx(tx, ctx, args)
 
+		if returnErr == nil && watch != nil {
+			method := SecuritySignInMethodGoogle
+			if args.ParsedAuthJwt.AuthType == AuthTypeApple {
+				method = SecuritySignInMethodApple
+			}
+			watch.noticeInTx(ctx, tx, newSecuritySignInChange(ctx, SecuritySignInAdded, method, maskUserAuth(args.ParsedAuthJwt.UserAuth)))
+		}
 	})
 
 	return returnErr
@@ -752,7 +780,18 @@ func addWalletAuth(
 		return errors.New("401 invalid wallet challenge")
 	}
 	server.Tx(ctx, func(tx server.PgTx) {
-		err = addWalletAuthInTx(tx, addWalletAuth, ctx)
+		watch := watchSignInMethodsInTx(ctx, tx, addWalletAuth.UserId)
+		var added bool
+		added, err = addWalletAuthInTxAdded(tx, addWalletAuth, ctx)
+		// re-adding a bound wallet changes nothing and owes nothing
+		if err == nil && added {
+			watch.noticeInTx(ctx, tx, newSecuritySignInChange(
+				ctx,
+				SecuritySignInAdded,
+				securityWalletSignInMethod(walletAuth.Blockchain),
+				MaskWalletAddress(walletAuth.PublicKey),
+			))
+		}
 	})
 	return err
 }
@@ -832,6 +871,17 @@ func addWalletAuthInTx(
 	addWalletAuth *AddWalletAuthArgs,
 	ctx context.Context,
 ) (err error) {
+	_, err = addWalletAuthInTxAdded(tx, addWalletAuth, ctx)
+	return
+}
+
+// addWalletAuthInTx, which also returns whether it added the wallet: false for
+// a refusal, and for a wallet the user has bound already.
+func addWalletAuthInTxAdded(
+	tx server.PgTx,
+	addWalletAuth *AddWalletAuthArgs,
+	ctx context.Context,
+) (added bool, err error) {
 	walletAuth := addWalletAuth.WalletAuth
 
 	// Check for an existing binding of this wallet to a different user
@@ -954,6 +1004,7 @@ func addWalletAuthInTx(
 			walletAuth.PublicKey,
 			walletAuth.Blockchain,
 		))
+		added = true
 	}
 
 	// Mirror onto network_user's top-level wallet columns. They hold one
@@ -985,7 +1036,7 @@ func addWalletAuthInTx(
 		walletAuth.PublicKey,
 		walletAuth.Blockchain,
 	))
-	return nil
+	return added, nil
 }
 
 // walletChainName names a wallet auth type's chain for a person to read.
@@ -1621,6 +1672,29 @@ func RemoveAuth(ctx context.Context, userId server.Id, authType string) error {
 			return
 		}
 
+		// the sign-in notice goes to the addresses before the removal too, so a
+		// removed email address hears of its own removal
+		watch := watchSignInMethodsInTx(ctx, tx, userId)
+		// the removed method's identity, read before its row is deleted
+		removedIdentity := func(sql string, args ...any) string {
+			identity := ""
+			if guardSecurityNoticeInTx(ctx, tx, SecurityNoticeSignIn, func() string {
+				result, err := tx.Query(ctx, sql, args...)
+				server.WithPgResult(result, err, func() {
+					if result.Next() {
+						var userAuth string
+						server.Raise(result.Scan(&userAuth))
+						identity = maskUserAuth(userAuth)
+					}
+				})
+				return ""
+			}) {
+				return identity
+			}
+			return ""
+		}
+		var removedChange *SecuritySignInChange
+
 		// The wallets this account has bound -- at most one per chain, oldest
 		// first -- each named the way auth_types[] names it. Read before the
 		// switch because two things need them: the wallet branch below, and
@@ -1688,12 +1762,17 @@ func RemoveAuth(ctx context.Context, userId server.Id, authType string) error {
 				notBound()
 				return
 			}
+			identity := removedIdentity(
+				`SELECT user_auth FROM network_user_auth_password WHERE user_id = $1 AND auth_type = $2`,
+				userId, authType,
+			)
 			server.RaisePgResult(tx.Exec(
 				ctx,
 				`DELETE FROM network_user_auth_password
 				 WHERE user_id = $1 AND auth_type = $2`,
 				userId, authType,
 			))
+			removedChange = newSecuritySignInChange(ctx, SecuritySignInRemoved, authType, identity)
 		case "apple", "google":
 			if !removeAuthMethodIsBound(
 				ctx, tx,
@@ -1703,12 +1782,17 @@ func RemoveAuth(ctx context.Context, userId server.Id, authType string) error {
 				notBound()
 				return
 			}
+			identity := removedIdentity(
+				`SELECT user_auth FROM network_user_auth_sso WHERE user_id = $1 AND auth_type = $2`,
+				userId, authType,
+			)
 			server.RaisePgResult(tx.Exec(
 				ctx,
 				`DELETE FROM network_user_auth_sso
 				 WHERE user_id = $1 AND auth_type = $2`,
 				userId, authType,
 			))
+			removedChange = newSecuritySignInChange(ctx, SecuritySignInRemoved, authType, identity)
 		case "solana", "bittensor":
 			var removed *boundWallet
 			var remaining []boundWallet
@@ -1767,6 +1851,7 @@ func RemoveAuth(ctx context.Context, userId server.Id, authType string) error {
 				 )`,
 				userId, slotAddress, slotBlockchain,
 			))
+			removedChange = newSecuritySignInChange(ctx, SecuritySignInRemoved, authType, MaskWalletAddress(removed.address))
 			wallets = remaining
 		case "seedphrase":
 			if !removeAuthMethodIsBound(
@@ -1783,6 +1868,7 @@ func RemoveAuth(ctx context.Context, userId server.Id, authType string) error {
 				 WHERE user_id = $1`,
 				userId,
 			))
+			removedChange = newSecuritySignInChange(ctx, SecuritySignInRemoved, SecuritySignInMethodSeedphrase, "")
 		default:
 			// network_user.auth_type is a second, wider vocabulary (it can hold
 			// 'password', 'bringyour', 'guest'); a client that echoes that
@@ -1821,6 +1907,10 @@ func RemoveAuth(ctx context.Context, userId server.Id, authType string) error {
 			userId,
 			remainingWalletLabel,
 		))
+
+		if removedChange != nil {
+			watch.noticeInTx(ctx, tx, removedChange)
+		}
 	})
 
 	if validationErr == nil {

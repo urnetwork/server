@@ -1,0 +1,25 @@
+{{define "headline"}}PAYOUT WALLET CHANGED{{end}}
+{{define "why"}}Sent to the sign-in email addresses of your URnetwork account
+whenever the wallet its payouts go to changes.{{end}}
+{{define "content"}}
+{{if .Several}}The wallets your URnetwork payouts go to were changed.{{else}}The wallet your URnetwork payouts go to was changed.{{end}}
+{{range .Rows}}
+When: {{.When}}
+Wallet: {{.Wallet}}
+Before: {{.Before}}
+After: {{.After}}
+{{- if .Epochs}}
+Epochs: {{.Epochs}}
+{{- end}}
+{{- if .Via}}
+Made with: {{.Via}}
+{{- end}}
+{{end}}
+{{- if .MoreChangesText}}
+{{.MoreChangesText}}
+{{end}}
+If you didn't make this change, contact security@ur.io right away.
+
+Review your payout wallets: https://ur.io/app/account/earnings
+To sign out every other device: https://ur.io/app/account/sessions
+{{end}}

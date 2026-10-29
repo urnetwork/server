@@ -121,6 +121,9 @@ func (self *AuthPasswordResetTemplate) Name() string {
 // }
 
 type AuthPasswordSetTemplate struct {
+	// when and how the password changed; empty in a notice owed before they
+	// were recorded
+	model.PasswordSetNotice
 	BaseTemplate
 }
 

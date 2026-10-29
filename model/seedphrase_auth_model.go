@@ -137,13 +137,18 @@ func RegenerateSeedphrase(ctx context.Context, userId server.Id) (string, error)
 	hash := computeSeedphraseHash([]byte(normalized), salt)
 
 	server.Tx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
+		watch := watchSignInMethodsInTx(ctx, tx, userId)
+		tag := server.RaisePgResult(tx.Exec(
 			ctx,
 			`UPDATE network_user_auth_seedphrase
 			 SET seedphrase_lookup = $2, seedphrase_hash = $3, seedphrase_salt = $4
 			 WHERE user_id = $1`,
 			userId, lookup, hash, salt,
 		))
+		// the old seedphrase no longer signs in: a sign-in method replaced
+		if tag.RowsAffected() == 1 {
+			watch.noticeInTx(ctx, tx, newSecuritySignInChange(ctx, SecuritySignInReplaced, SecuritySignInMethodSeedphrase, ""))
+		}
 	})
 
 	return newSeedphrase, nil
@@ -183,7 +188,9 @@ func GenerateSeedphrase(ctx context.Context, userId server.Id) (string, error) {
 		if alreadyExists {
 			return
 		}
+		watch := watchSignInMethodsInTx(ctx, tx, userId)
 		server.Raise(CreateSeedphraseAuthInTx(tx, ctx, userId, seedphrase))
+		watch.noticeInTx(ctx, tx, newSecuritySignInChange(ctx, SecuritySignInAdded, SecuritySignInMethodSeedphrase, ""))
 	})
 	if alreadyExists {
 		return "", ErrSeedphraseAuthExists
