@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-held-out-reference-build",
+  "role": "no-op",
+  "accepted": true,
+  "base_sha": "a9e8e1a710b24c749e6499a0606938252c83e136",
+  "source_lock_sha256": "ec322ed2db023e15ea5dc3eea60a6ca5989661bba737c340fea3477d8d1300cf",
+  "base_image_id": "sha256:98c9061c4a43a25e7b581a5193ca6e7f48e49e7b7fc03b7c1b6190a029befee2",
+  "patch_sha256": "1076be3ed61df0e14ae90c13bbe4c35442de6371064fd7d78f61ed6834e170f1",
+  "candidate_sha": "28e5f2f823008394cc51d1405750daf5decd0915",
+  "image_id": "sha256:6b5afb71b60534987fbd226c8b168d2140dceb2fcad177c61828926f4615c601",
+  "binary_sha256": "b232bd355f90b44aa1838419f3375454009a337931c458641b1351b571bb0872",
+  "go_version": "go1.27.3",
+  "vcs_modified": false,
+  "direction": "",
+  "evidence": [
+    {
+      "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/no-op/native-proof.json",
+      "sha256": "8649b80c04274829e02646793b7048d7e765ab0122dc599c99783729c6f41225"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/no-op/native-build.json",
+      "sha256": "0ce843a7dd7d5125b08530e8ddca04b69e9344c6f0e00e0192a44f1f1ed9522c"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/no-op/native-evidence.sha256",
+      "sha256": "ce74a89c073eee07d9c4c687f24ba4af7bea9f2cb5754d491e868d6a49ec3935"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/no-op/evidence/candidate-original-source.json",
+      "sha256": "b5eb9057910459f3bc08d4a6a136e7fdfe0c095e1ea73e97f2dfdbd6d64deb48"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/no-op/evidence/builder-identity.json",
+      "sha256": "6667ae6f6513f574a9aa6b3712cf36150d2b99a2ec52ec35556c9a16a562337b"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/readback-supplement-summary.json",
+      "sha256": "b216cb068be0d239097efeb39d065332f99d0eeeb095f345b4cb545d712aa6ce"
+    }
+  ]
+}
