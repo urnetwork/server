@@ -736,6 +736,22 @@
             ]
         },
         {
+            "id": 85,
+            "type": "timeseries",
+            "title": "transport delay header accepted",
+            "description": "Whether each connect process accepts the per-message delay header on new connections that offer it: EnableTransportDelay as the Redis move control last narrowed it (connect/transport_delay_control.go), 1 on, 0 off. The minimum per host shows a host with any process turned off.",
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 69},
+            "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+            "fieldConfig": {"defaults": {"unit": "short", "min": 0, "max": 1}, "overrides": []},
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "min by (block, host) (urnetwork_connect_transport_delay_enabled{env=\"$env\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+                    "legendFormat": "{{block}} {{host}}"
+                }
+            ]
+        },
+        {
             "id": 19,
             "type": "row",
             "title": "resident runtime ownership",
