@@ -2403,6 +2403,40 @@ func (self *Exchange) WaitForIdle(ctx context.Context) bool {
 // full 16 KiB batch for every sparse exchange sender.
 const exchangeSingletonWriteStorageByteCount = 2 * 1024
 
+// A socket deadline installed for one connection. It is re-armed only when
+// less than two thirds of its timeout remain: setting it on every frame made
+// each exchange read and write a runtime timer modification. An operation that
+// starts under it is bounded by between two thirds of the timeout and the
+// timeout.
+type exchangeDeadline struct {
+	conn     net.Conn
+	deadline time.Time
+}
+
+// Installs now plus timeout with set, unless the deadline installed for conn
+// still has two thirds of timeout left and is no further than timeout away.
+func (self *exchangeDeadline) refresh(conn net.Conn, timeout time.Duration, set func(time.Time) error) error {
+	now := time.Now()
+	if self.conn == conn {
+		if remaining := self.deadline.Sub(now); 2*timeout/3 <= remaining && remaining <= timeout {
+			return nil
+		}
+	}
+	deadline := now.Add(timeout)
+	if err := set(deadline); err != nil {
+		return err
+	}
+	self.conn = conn
+	self.deadline = deadline
+	return nil
+}
+
+// Forgets the installed deadline after a handshake replaced it on the socket.
+func (self *exchangeDeadline) reset() {
+	self.conn = nil
+	self.deadline = time.Time{}
+}
+
 // each call overwrites the internal buffer
 type ExchangeBuffer struct {
 	settings *ExchangeSettings
@@ -2425,6 +2459,11 @@ type ExchangeBuffer struct {
 	// The single writer allocates this only for a non-empty message that fits.
 	// Receive-only, idle, and oversized-only senders retain no payload scratch.
 	writeStorage []byte
+
+	// the message deadlines this buffer installed, re-armed only once a third
+	// of their timeout has passed
+	readDeadline  exchangeDeadline
+	writeDeadline exchangeDeadline
 
 	// Test-only scalar observation after the real native writev returns.
 	afterWritevForTest func(messageCount int, writtenByteCount int64, writeErr error)
@@ -2464,6 +2503,7 @@ func (self *ExchangeBuffer) WriteHeader(ctx context.Context, conn net.Conn, head
 	if err := conn.SetWriteDeadline(time.Now().Add(self.settings.ExchangeWriteHeaderTimeout)); err != nil {
 		return err
 	}
+	self.writeDeadline.reset()
 	if err := self.framer.Write(conn, headerBytes); err != nil {
 		return err
 	}
@@ -2475,6 +2515,7 @@ func (self *ExchangeBuffer) ReadHeader(ctx context.Context, conn net.Conn) (*Exc
 	if err := conn.SetReadDeadline(time.Now().Add(self.settings.ExchangeReadHeaderTimeout)); err != nil {
 		return nil, err
 	}
+	self.readDeadline.reset()
 	headerBytes, err := self.framer.Read(self.connReader(conn))
 	if err != nil {
 		return nil, err
@@ -2506,7 +2547,7 @@ func (self *ExchangeBuffer) WriteMessage(conn net.Conn, transferFrameBytes []byt
 		}
 		self.writeStorage = make([]byte, storageByteCount)
 	}
-	if err := conn.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout)); err != nil {
+	if err := self.writeDeadline.refresh(conn, self.settings.WriteTimeout, conn.SetWriteDeadline); err != nil {
 		connect.MessagePoolReturn(transferFrameBytes)
 		return err
 	}
@@ -2551,7 +2592,7 @@ func (self *ExchangeBuffer) WriteMessages(conn net.Conn, transferFrameBytesBatch
 		}
 	}
 
-	if err := conn.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout)); err != nil {
+	if err := self.writeDeadline.refresh(conn, self.settings.WriteTimeout, conn.SetWriteDeadline); err != nil {
 		for _, message := range transferFrameBytesBatch {
 			connect.MessagePoolReturn(message)
 		}
@@ -2599,7 +2640,7 @@ func (self *ExchangeBuffer) WriteMessages(conn net.Conn, transferFrameBytesBatch
 }
 
 func (self *ExchangeBuffer) ReadMessage(conn net.Conn) ([]byte, error) {
-	if err := conn.SetReadDeadline(time.Now().Add(self.settings.ExchangeReadTimeout)); err != nil {
+	if err := self.readDeadline.refresh(conn, self.settings.ExchangeReadTimeout, conn.SetReadDeadline); err != nil {
 		return nil, err
 	}
 	transferFrameBytes, err := self.framer.Read(self.connReader(conn))
