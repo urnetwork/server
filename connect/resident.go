@@ -597,7 +597,10 @@ func DefaultExchangeSettingsWithBufferSize(bufferSize int) *ExchangeSettings {
 		MaxConcurrentForwardsPerResident: 8 * 1024,
 
 		// ResidentIdleTimeout: 300 * time.Minute,
-		ForwardIdleTimeout: 15 * time.Minute,
+		// Most forwards end as an idle tail, holding a socket, goroutines and
+		// buffers after their last payload. A forward that resumes later
+		// redials, which costs one resident lookup and a handshake.
+		ForwardIdleTimeout: 3 * time.Minute,
 		ControlMinTimeout:  5 * time.Millisecond,
 
 		ExchangeConnectTimeout: 15 * time.Second,
@@ -1354,9 +1357,7 @@ func (self *Exchange) serveExchangeConnection(port int) {
 	if serverSocket == nil {
 		listenIpv4, _, listenPort := server.RequireListenIpPort(port)
 
-		listenConfig := net.ListenConfig{
-			Control: server.SoReusePort,
-		}
+		listenConfig := exchangeListenConfig()
 
 		var err error
 		// leave host part empty to listen on all available interfaces
@@ -2710,6 +2711,25 @@ type ExchangeConnection struct {
 	afterSendWriteForTest func(messageCount int, writeErr error)
 }
 
+// Exchange liveness is the exchange's own ping, every ExchangePingTimeout,
+// against an ExchangeReadTimeout read deadline at each end. TCP keepalive on
+// top of it only added a probe and an ACK per idle socket: at the former 1 s
+// idle, about a fifth of all TCP segments on a services edge.
+func configureExchangeTcpConn(tcpConn *net.TCPConn) {
+	tcpConn.SetNoDelay(true)
+	tcpConn.SetLinger(0)
+	tcpConn.SetKeepAlive(false)
+}
+
+// Accepted exchange sockets rely on the same ping and read deadline, so the
+// listener leaves TCP keepalive off instead of taking Go's default.
+func exchangeListenConfig() net.ListenConfig {
+	return net.ListenConfig{
+		Control:   server.SoReusePort,
+		KeepAlive: -1,
+	}
+}
+
 func NewExchangeConnection(
 	ctx context.Context,
 	header ExchangeHeader,
@@ -2744,14 +2764,7 @@ func NewExchangeConnection(
 	})
 	defer stopContextClose()
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
-		tcpConn.SetNoDelay(true)
-		tcpConn.SetLinger(0)
-		tcpConn.SetKeepAliveConfig(net.KeepAliveConfig{
-			Enable:   true,
-			Idle:     1 * time.Second,
-			Interval: 1 * time.Second,
-			Count:    15,
-		})
+		configureExchangeTcpConn(tcpConn)
 	}
 
 	success := false
