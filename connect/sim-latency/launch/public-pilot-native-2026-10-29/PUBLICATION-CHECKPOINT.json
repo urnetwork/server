@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "kind": "completed-public-pilot-prerequisite-publication-checkpoint",
-  "observed_at": "2026-10-29T20:27:23Z",
+  "observed_at": "2026-10-29T20:28:34Z",
   "scope": "Three published prerequisites and completed private hold-checker controls; not calibration acceptance.",
   "publication": {
     "artifact_commit": "349f9c7447b2277c12026f12bf7fd379e892958d",
@@ -59,7 +59,25 @@
     "build_exit_alone_qualifies_correctness_or_calibration": false,
     "production_worker_kept_running_for_genuine_intake_heartbeat": true
   },
+  "native_readback_attempt": {
+    "unit": "urnetwork-native-reference-readback-P6ZWBPVi-v2.service",
+    "unit_exit_code": 1,
+    "runtime_seconds": 0.866,
+    "failure": "The readback script invokes sim-latency identity, but the frozen binary prints usage and exits 1 because that CLI command is unsupported.",
+    "evidence_directory": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/readbacks",
+    "identity_stderr_sha256": "e94d997a1335040b3b57e46bcc459a1591d1750eef762c3e51970245485b82d9",
+    "container_state_sha256": "743b9d6a21cbd2c32c6f9d5f2d577199d17cf2c5a788a27a85043c684dc9fed1",
+    "identity_container_exit_code": 1,
+    "identity_container_oom_killed": false,
+    "owned_temporary_container_removed": true,
+    "original_container_and_network_inventories_equal": true,
+    "failed_attempt_preserved": true,
+    "retry_or_rebuild_performed": false,
+    "native_proof_or_qualification_created": false,
+    "frozen_binary_or_source_changed": false
+  },
   "live_public_observation": {
+    "observed_at": "2026-10-29T20:26:31Z",
     "api_version": "2026.10.29-outerwerld+1084840860",
     "round_id": "01a1855d-49bd-0250-90db-d0c0885f0e46",
     "round_status": "open",

@@ -1,10 +1,10 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-29T20:27:23Z",
+  "observed_at": "2026-10-29T20:28:34Z",
   "scoring_enablement_current": {
-    "status": "R2_intake_open_three_prerequisites_published_native_reference_builds_exit0_readback_pending_API_hotfix_not_yet_deployed_calibration_pending",
-    "observed_at": "2026-10-29T20:27:23Z",
+    "status": "R2_intake_open_native_builds_exit0_readback_script_identity_command_failure_preserved_API_hotfix_not_yet_deployed_calibration_pending",
+    "observed_at": "2026-10-29T20:28:34Z",
     "metadata_checkpoint_only": true,
     "actual_intake_open": true,
     "grading_enabled": false,
@@ -48,6 +48,9 @@
     "unmeasured_better_noop_native_builds_terminal": true,
     "unmeasured_better_noop_native_builds_exit_code": 0,
     "unmeasured_better_noop_native_readbacks_complete": false,
+    "unmeasured_native_readback_attempt_exit_code": 1,
+    "unmeasured_native_readback_failure": "unsupported_identity_CLI_in_operational_readback_script_not_submission_tampering_or_measured_simulation_failure",
+    "unmeasured_native_readback_failure_cleanup_and_original_inventory_verified": true,
     "retained_completed_evidence": "server/connect/sim-latency/launch/completed-custody-2026-10-29/receipt-summary.json",
     "intake_hotfix_commit": "1355bc7d8e51d6faa1e52f65d405bbdf16b2116b",
     "intake_hotfix_deployment_verified": false,
