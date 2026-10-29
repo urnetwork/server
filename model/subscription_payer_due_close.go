@@ -8,7 +8,7 @@
 // walked the whole backlog oldest first. Their escrow stayed reserved, and a
 // payer whose grant they filled was refused new contracts.
 //
-// The payer drain retires one payer's due contracts directly, oldest first,
+// The payer drain retires one payer's due contracts directly, a page at a time,
 // through the deadline reconciliation the deadline pass uses: each owner's
 // members together in one owned turn. The payer's own activity requests it:
 // a contract admission its balance refused, once the admission's recovery and
@@ -33,6 +33,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -45,16 +46,15 @@ import (
 
 // Tunes the payer drain, its requests and its task.
 type PayerDueContractCloseSettings struct {
-	// Due contracts one read returns, oldest first. Each read scans the
-	// payer's open contracts, so a larger page amortizes that scan.
+	// Due contracts one read returns. A read examines about a page of the
+	// payer's open contracts, however many the payer holds.
 	PageSize int
 	// A contract is due this long after its deadline, so a drain does not
 	// race a party's final close or the deadline pass at the deadline itself.
 	DueMargin time.Duration
 	// How long one run keeps starting owner turns; started turns finish.
 	RunBudget time.Duration
-	// Bounds one read of the payer's open contracts. A payer with too many for
-	// the bound is left to the deadline pass and the expiry sweep.
+	// Bounds one read of a page of the payer's open contracts.
 	ReadTimeout time.Duration
 	// The gate passes one request per payer per interval across processes.
 	RequestInterval time.Duration
@@ -70,10 +70,11 @@ type PayerDueContractCloseSettings struct {
 }
 
 // The page reads a few thousand rows of one payer's open-contract index; on
-// Main the read takes under half a second for a payer with 29,000 open
-// contracts. A minute of turns retires about 4,000 contracts at the owner
-// batch's rate, and a request every two minutes per payer is at most one
-// Redis write per refusal or poll and one queue write per interval.
+// Main the read took 42 ms for a payer the planner put at 13 million
+// unresolved contracts (2026-10-28). A minute of turns retires about 4,000
+// contracts at the owner batch's rate, and a request every two minutes per
+// payer is at most one Redis write per refusal or poll and one queue write
+// per interval.
 func DefaultPayerDueContractCloseSettings() *PayerDueContractCloseSettings {
 	return &PayerDueContractCloseSettings{
 		PageSize:        4096,
@@ -100,21 +101,34 @@ type PayerDueContractClose struct {
 	More          bool `json:"more,omitempty"`
 }
 
-// The payer's undisputed open contracts whose deadline passed at dueBefore,
-// oldest first, at most limit, each with its deadline: the stored one, or for
-// a legacy row without one its creation plus DefaultContractExpiration, the
-// deadline the closers give it. The read uses the payer's open-contract index,
-// as the Pending sum does, and checks each deadline in the heap.
+// The read of ReadPayerDueContracts, apart so its plan can be tested:
+// $1 the payer, $2 the due bound, $3 the due bound less
+// DefaultContractExpiration for legacy rows, $4 the page. It asks for no
+// order, so it stops after a page of the payer's open-contract index. Ordered
+// by contract_id, PostgreSQL had to sort every due contract of the payer, or
+// walk the primary key from the oldest contract of every payer until it met a
+// page of the payer's. On Main, with payers holding millions of unresolved
+// contracts, it walked, and the read outlived ReadTimeout on every run
+// (2026-10-28).
+const payerDueContractsSql = `SELECT contract_id,create_time,expiration_time FROM transfer_contract
+	WHERE payer_network_id=$1 AND (CASE WHEN outcome IS NULL THEN dispute = false ELSE false END)
+		AND (expiration_time<=$2 OR (expiration_time IS NULL AND create_time<=$3))
+	LIMIT $4`
+
+// A page of the payer's undisputed open contracts whose deadline passed at
+// dueBefore, at most limit, in contract order, each with its deadline: the
+// stored one, or for a legacy row without one its creation plus
+// DefaultContractExpiration, the deadline the closers give it. The page is
+// any limit of the due contracts, not the oldest; the drain reads again until
+// none is due. The read uses the payer's open-contract index, as the Pending
+// sum does, and checks each deadline in the heap.
 func ReadPayerDueContracts(ctx context.Context, payerNetworkId server.Id, dueBefore time.Time, limit int) (deadlines []ContractDeadline, returnErr error) {
 	if limit < 1 {
 		return nil, errors.New("invalid payer due contract page")
 	}
 	server.HandleError(func() {
 		server.Db(ctx, func(conn server.PgConn) {
-			rows, err := conn.Query(ctx, `SELECT contract_id,create_time,expiration_time FROM transfer_contract
-				WHERE payer_network_id=$1 AND (CASE WHEN outcome IS NULL THEN dispute = false ELSE false END)
-					AND (expiration_time<=$2 OR (expiration_time IS NULL AND create_time<=$3))
-				ORDER BY contract_id LIMIT $4`,
+			rows, err := conn.Query(ctx, payerDueContractsSql,
 				payerNetworkId, dueBefore.UTC(), dueBefore.UTC().Add(-DefaultContractExpiration), limit)
 			server.WithPgResult(rows, err, func() {
 				for rows.Next() {
@@ -130,6 +144,9 @@ func ReadPayerDueContracts(ctx context.Context, payerNetworkId server.Id, dueBef
 				}
 			})
 		}, server.OptNoRetry())
+		slices.SortFunc(deadlines, func(a ContractDeadline, b ContractDeadline) int {
+			return a.ContractId.Cmp(b.ContractId)
+		})
 	}, func(err error) { deadlines, returnErr = nil, err })
 	return
 }
@@ -160,10 +177,10 @@ func SummarizePayerDueContracts(ctx context.Context, payerNetworkId server.Id, d
 	return
 }
 
-// Retires the payer's contracts that were due DueMargin before now, oldest
-// first, from one page. Members of one owner, the escrow balances they
-// reserve from, close together in owned turns of at most
-// ContractDeadlineOwnerBatchLimit; a contract without escrow closes alone.
+// Retires the payer's contracts that were due DueMargin before now, from one
+// page. Members of one owner, the escrow balances they reserve from, close
+// together in owned turns of at most ContractDeadlineOwnerBatchLimit; a
+// contract without escrow closes alone.
 // Owners take their turns in the order of their oldest member. more reports
 // whether another turn may start. A held owner keeps its members, and a turn
 // that failed inside its members retries each one alone, as the deadline
@@ -192,7 +209,7 @@ func ClosePayerDueContracts(ctx context.Context, payerNetworkId server.Id, now t
 		return nil, err
 	}
 
-	// Owners in the order of their oldest member, since due is oldest first.
+	// Owners in the order of their oldest member, since the page is in contract order.
 	type payerDueOwner struct {
 		balanceIds []server.Id
 		members    []ContractDeadline
