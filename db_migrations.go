@@ -11045,4 +11045,11 @@ var migrations = []any{
 	// Add Qwen/Gemma prospectively while preserving the original Snow union's
 	// tuples, eighteen-finding authority and every published migration identity.
 	newSqlMigration(competitionSnowTwoMemberWinnerReviewMigration()),
+
+	// The SN top board's chain-side census (LEADERTOP.md §5.7, §6.1, §6.2,
+	// sn_chain_schema.go): the live fleet binding versions and their sync
+	// checkpoint, the per-tempo on-chain incentive snapshots, and the
+	// validator's signed head summaries. New tables only; apply before
+	// deploying the taskworker and api that fill them.
+	newSqlMigration(snChainSchemaSql),
 }

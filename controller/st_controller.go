@@ -37,6 +37,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -178,6 +179,11 @@ type StConfig struct {
 	// raise the v2 prune-risk alert when the pool's subnet is among them;
 	// 0 reads as stLedgerV2DefaultPruneAlertPositions.
 	PruneAlertPositions uint64
+	// ValidatorHotkeys are the sr25519 hotkeys of the validators whose signed
+	// head summaries the operator accepts (POST /sn/head-summary) and whose
+	// row is the incentive reader's reference. Empty means the validator that
+	// holds UID 1 with a validator permit (LEADERTOP.md §3.6).
+	ValidatorHotkeys [][32]byte
 }
 
 // DeploymentKey is the exact chain/coordinator identity used to namespace
@@ -260,6 +266,7 @@ type stVaultFile struct {
 	BlockSeconds           int64                          `yaml:"block_seconds"`
 	DeployBlock            uint64                         `yaml:"deploy_block"`
 	PruneAlertPositions    uint64                         `yaml:"v2_prune_alert_positions"`
+	ValidatorHotkeys       []string                       `yaml:"validator_hotkeys"`
 
 	TestnetEnabled                bool                           `yaml:"testnet-enabled"`
 	TestnetAttemptUploadBudget    model.StAttemptUploadBudget    `yaml:"testnet-attempt-upload"`
@@ -294,6 +301,7 @@ type stVaultFile struct {
 	TestnetBlockSeconds           int64                          `yaml:"testnet-block-seconds"`
 	TestnetDeployBlock            uint64                         `yaml:"testnet-deploy-block"`
 	TestnetPruneAlertPositions    uint64                         `yaml:"testnet-v2-prune-alert-positions"`
+	TestnetValidatorHotkeys       []string                       `yaml:"testnet-validator-hotkeys"`
 }
 
 // stConfigFromVault lazily loads `st.yml`. Unlike verify.yml the resource is
@@ -367,6 +375,7 @@ type stSelectedConfig struct {
 	DepositKey, RootKey, ArtifactKey                                                                               string
 	DepositTiers                                                                                                   []StDepositTier
 	DepositZeroRateAction                                                                                          string
+	ValidatorHotkeys                                                                                               []string
 }
 
 func selectStConfig(profile string, f stVaultFile) (stSelectedConfig, error) {
@@ -392,6 +401,7 @@ func selectStConfig(profile string, f stVaultFile) (stSelectedConfig, error) {
 			DepositZeroRateAction: f.TestnetDepositZeroRateAction,
 			BlockSeconds:          f.TestnetBlockSeconds, DeployBlock: f.TestnetDeployBlock,
 			PruneAlertPositions: f.TestnetPruneAlertPositions,
+			ValidatorHotkeys:    append([]string(nil), f.TestnetValidatorHotkeys...),
 		}, nil
 	case stconn.ProfileMainnet:
 		return stSelectedConfig{
@@ -412,6 +422,7 @@ func selectStConfig(profile string, f stVaultFile) (stSelectedConfig, error) {
 			DepositZeroRateAction: f.DepositZeroRateAction,
 			BlockSeconds:          f.BlockSeconds, DeployBlock: f.DeployBlock,
 			PruneAlertPositions: f.PruneAlertPositions,
+			ValidatorHotkeys:    append([]string(nil), f.ValidatorHotkeys...),
 		}, nil
 	default:
 		return stSelectedConfig{}, fmt.Errorf("st.yml unknown profile %q", profile)
@@ -441,6 +452,9 @@ func stConfigForProfile(profile string, file stVaultFile, rpcUrls []string) (*St
 	}
 	if cfg.BlockSeconds <= 0 {
 		cfg.BlockSeconds = stDefaultBlockSeconds
+	}
+	if cfg.ValidatorHotkeys, err = stParseValidatorHotkeys(s.ValidatorHotkeys); err != nil {
+		return nil, fmt.Errorf("st.yml %s validator_hotkeys: %w", profile, err)
 	}
 	if !cfg.Enabled {
 		return cfg, nil
@@ -612,6 +626,23 @@ func stParseHex32(value string) ([32]byte, error) {
 	}
 	copy(out[:], raw)
 	return out, nil
+}
+
+// Each validator hotkey is a distinct nonzero 32-byte sr25519 public key in
+// 0x-hex.
+func stParseValidatorHotkeys(values []string) ([][32]byte, error) {
+	hotkeys := [][32]byte{}
+	for _, value := range values {
+		hotkey, err := stParseHex32(value)
+		if err != nil {
+			return nil, err
+		}
+		if hotkey == ([32]byte{}) || slices.Contains(hotkeys, hotkey) {
+			return nil, fmt.Errorf("hotkey %s is zero or repeated", value)
+		}
+		hotkeys = append(hotkeys, hotkey)
+	}
+	return hotkeys, nil
 }
 
 func stParsePrivateKey(value string) (*ecdsa.PrivateKey, error) {

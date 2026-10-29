@@ -1,0 +1,551 @@
+{
+  "uid": "urnetwork-sn-board-chain",
+  "title": "urnetwork / sn board chain",
+  "description": "The SN top board's chain-side readers (server LEADERTOP.md \u00a75.7, \u00a76.1, \u00a76.2): the live fleet binding sync, the on-chain incentive reader and the validator head-summary ingest. Counts and ages only; no client, network or hotkey is a label.",
+  "tags": [
+    "urnetwork",
+    "subtensor",
+    "leaderboard"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "1m",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "env",
+        "label": "env",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "warp-mimir"
+        },
+        "query": "label_values(urnetwork_sn_fleet_binding_sync_events_total, env)",
+        "definition": "label_values(urnetwork_sn_fleet_binding_sync_events_total, env)",
+        "refresh": 2,
+        "sort": 1,
+        "includeAll": false,
+        "multi": false
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "binding sync lag",
+      "description": "Finalized blocks the live fleet binding census has not applied yet after the last sync run (urnetwork_sn_fleet_binding_sync_lag_blocks). The sync reads at most twenty thousand blocks a run, so a first sync from the deploy block catches up over a few runs; afterwards it stays within about one minute of blocks.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(urnetwork_sn_fleet_binding_sync_lag_blocks{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "lag",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "binding sync last success age",
+      "description": "Seconds since a live binding sync run last finished without an error. The taskworker runs it about every minute.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "time() - max(urnetwork_sn_fleet_binding_sync_last_success_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "age",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "live claimed fleets",
+      "description": "Fleets with a binding active at the current settlement epoch whose hotkey holds the bound UID at the newest metagraph census: the fleets the validator counts. Zero while fleet binding is closed on mainnet.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(urnetwork_sn_fleet_binding_claimed_fleets{env=\"$env\",service=\"taskworker\",instance!=\"\",uid_held=\"held\"})",
+          "legendFormat": "live",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "live fleet members",
+      "description": "Clients bound to a live claimed fleet at the current settlement epoch.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(urnetwork_sn_fleet_binding_live_members{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "members",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "binding logs applied",
+      "description": "Coordinator binding logs the live sync applied per interval, by kind: FleetBound, FleetBindingRevoked, FleetBindingCleaned.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (kind) (increase(urnetwork_sn_fleet_binding_sync_events_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{kind}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "binding sync errors",
+      "description": "Failed sync runs per interval, by reason: config (no deployment or deploy block), chain (an RPC read failed; the next run retries), canonical (a log or the checkpoint is not on the canonical chain; the sync halts for reconciliation), census (the logs contradict the applied census; the range is not applied).",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (reason) (increase(urnetwork_sn_fleet_binding_sync_errors_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{reason}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "claimed fleets by UID test",
+      "description": "Fleets with a binding active at the current settlement epoch, by whether the hotkey still holds the bound UID at the newest metagraph census: held (live), lost (another hotkey holds it or nobody does), unknown (the census has not read that UID yet).",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (uid_held) (urnetwork_sn_fleet_binding_claimed_fleets{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "{{uid_held}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "incentive census age",
+      "description": "Seconds since the newest on-chain incentive census was read. One census is read per native tempo (about 72 minutes), so ages up to about 80 minutes are normal.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 13
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(urnetwork_sn_incentive_age_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "age",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 9,
+      "type": "stat",
+      "title": "incentive tempos behind",
+      "description": "Tempos the chain's SubnetEpochIndex is ahead of the newest stored census at the last index check.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 13
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(urnetwork_sn_incentive_lag_tempos{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "tempos",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 10,
+      "type": "stat",
+      "title": "incentive last stored age",
+      "description": "Seconds since a census was last stored.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 12,
+        "y": 13
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "time() - max(urnetwork_sn_incentive_last_success_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "age",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 11,
+      "type": "stat",
+      "title": "incentive stale",
+      "description": "1 for each reason the newest census is stale: fallback_row (the reference validator's applied row is the stopgap fallback, pool 169 and reserves 170 and 250), reference_inactive (its LastUpdate is outside the activity cutoff), low_validator_trust (below 0.9), no_reference_validator.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 13
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (reason) (urnetwork_sn_incentive_stale{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "{{reason}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "incentive reader runs",
+      "description": "Reader runs per interval, by result: stored (a new tempo's census), unchanged (SubnetEpochIndex has not advanced), skipped (no RPC: the tempo has not nearly passed or a failed read is waiting ten minutes).",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 18
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (result) (increase(urnetwork_sn_incentive_reads_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{result}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "incentive read errors",
+      "description": "Failed reads per interval, by reason: rpc, chain_identity (the endpoint's genesis differs from st.yml), finalized_head, metadata, storage_shape (a runtime changed an item; the reader refuses to decode), storage_malformed, vectors_inconsistent, budget (a census exceeded 100 kB of responses), checkpoint_not_canonical.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 18
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (reason) (increase(urnetwork_sn_incentive_read_errors_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{reason}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "archive bytes read",
+      "description": "Archive response bytes the incentive reader read per interval, by phase: index (finalized head and SubnetEpochIndex checks near each tempo boundary) and census (once per tempo, bounded at 100 kB). Runtime metadata, fetched once per runtime per process, is not counted.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 18
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (phase) (increase(urnetwork_sn_incentive_response_bytes_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{phase}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 15,
+      "type": "stat",
+      "title": "head summary last stored age",
+      "description": "Seconds since the operator last stored a validator head summary (POST /sn/head-summary). The validator sends one per tempo, about every 72 minutes; the board shows the validator's own ranking from it.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 26
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "time() - max(urnetwork_sn_head_summary_last_stored_timestamp_seconds{env=\"$env\",service=\"api\",instance!=\"\"})",
+          "legendFormat": "age",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 16,
+      "type": "stat",
+      "title": "head summary entries",
+      "description": "Eligible head UIDs in the last stored head summary. Zero while the head is empty.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 26
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(urnetwork_sn_head_summary_entries{env=\"$env\",service=\"api\",instance!=\"\"})",
+          "legendFormat": "entries",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "head summary uploads",
+      "description": "Head summary uploads per interval, by result: stored, kept (the tempo's summary at an equal or later snapshot was already stored), invalid (400), not_accepted (403: the hotkey is not an accepted validator), rate_limited (429), too_large (413), unavailable (5xx). Anything but stored and kept means the validator's ranking is missing from the board.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 26
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (result) (increase(urnetwork_sn_head_summary_uploads_total{env=\"$env\",service=\"api\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{result}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    }
+  ]
+}
