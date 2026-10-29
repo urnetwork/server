@@ -1,10 +1,10 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-29T17:07:21Z",
+  "observed_at": "2026-10-29T17:58:42Z",
   "scoring_enablement_current": {
-    "status": "R2_intake_open_Qwen_Gemma_group_and_H1_worse_gates_passed_scoring_and_publications_held",
-    "observed_at": "2026-10-29T17:07:21Z",
+    "status": "R2_intake_open_Qwen_Gemma_and_all_three_reference_runtime_suites_passed_scoring_and_publications_held",
+    "observed_at": "2026-10-29T17:58:42Z",
     "metadata_checkpoint_only": true,
     "actual_intake_open": true,
     "grading_enabled": false,
@@ -23,16 +23,17 @@
       "exact_Qwen_Gemma_genuine_six_case_union_qualification_6_PASS_10_member_responses_independently_reviewed_disagreements_retained",
       "H1_worse_exact_revised_112_scope_three_passes_336_PASS_plus12_synthetic_MMDB_controls_and_one_socket_smoke",
       "new_native_worse_647922_image_readback_and_exact_build_correctness_receipts",
-      "better_noop_two_ELF_compiles_and12_CPU_adapter_controls_only",
+      "better_101x3_303_PASS_and_noop_93x3_279_PASS_with_exact_source_dependencies_strict_LOCAL_services_and_joined_cleanup",
       "public_provider_request_before_census_and_Root_reported_native_collision_preparation_not_measurement"
     ],
     "pending": [
-      "same_988481_race_ELF_three_complete225_PASS_processes_current_first_process_incomplete",
-      "better_noop_exact_role_runtime_and_new_native_image_readback_gates",
+      "same_988481_race_ELF_three_complete225_PASS_processes_first_complete_second_in_progress_third_unstarted",
+      "better_noop_new_native_image_readback_and_exact_tested_source_byte_bridges",
       "prospective_public_pilot_execution_admission_publication_and18_native_timed_runs",
       "only_after_accepted_public_pilot_one_new_hidden_seed_and36_native_fresh_single_screen_runs",
       "independent_final_review_and_durable_scoring_publication_hold_release"
     ],
+    "reference_runtime_checkpoint": "server/connect/sim-latency/launch/REFERENCE-RUNTIME-CORRECTNESS-2026-10-29.json",
     "new_timed_native_runs_pending": 54,
     "new_hidden_seed_drawn": false,
     "original_first_screen_failed_not_accepted": true,
