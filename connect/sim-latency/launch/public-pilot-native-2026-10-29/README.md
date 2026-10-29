@@ -18,6 +18,9 @@ correctness, not measured regression direction.
 
 These are three of seven required native prerequisite artifacts. Better and
 no-op still need their new native images and exact source/readback bindings.
+The [publication checkpoint](PUBLICATION-CHECKPOINT.json) records the three
+actual Git publications and their Root-installed receipts. Their publication
+time is the successful readback observation, not a backdated push timestamp.
 All seven publications must precede the native pilot plan and measurements.
 No public pilot, new hidden seed, calibration acceptance, or scoring-hold release
 is claimed by this checkpoint.

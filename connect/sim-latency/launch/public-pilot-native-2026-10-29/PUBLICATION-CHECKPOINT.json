@@ -1,0 +1,79 @@
+{
+  "schema": 1,
+  "kind": "completed-public-pilot-prerequisite-publication-checkpoint",
+  "observed_at": "2026-10-29T20:27:23Z",
+  "scope": "Three published prerequisites and completed private hold-checker controls; not calibration acceptance.",
+  "publication": {
+    "artifact_commit": "349f9c7447b2277c12026f12bf7fd379e892958d",
+    "main_and_origin_main_observed": "01fa336b6027c7a6c7221ec71317588c421c7070",
+    "publication_observed_at": "2026-10-29T20:00:09Z",
+    "published_prerequisites": 3,
+    "required_prerequisites": 7,
+    "root_directory": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/publications",
+    "root_files": [
+      {
+        "name": "prerequisites-git-publication-proof.json",
+        "sha256": "5d38ef2e07ac85340055f323bf476432df9ef37b5d85d4fc9e34ed2d825ac163"
+      },
+      {
+        "name": "tool.publication.json",
+        "sha256": "c55108f26d74350c60cfbdbfa19ef1ef290ff92cdc90f68a235a486386b8cbb8"
+      },
+      {
+        "name": "worse-build.publication.json",
+        "sha256": "7ddb40268754e6f86af2a0daf5da09f9ab880da65c3604aaf5fa6589cb11a1e5"
+      },
+      {
+        "name": "worse-correctness.publication.json",
+        "sha256": "59d5329f63e6c3c67610696b0ade773e4fff67cb9fa7c5878acb67d41d6d3cd3"
+      }
+    ],
+    "root_files_independently_rehashed": true,
+    "qualification_bytes_match_published_git_blobs_and_root_inputs": true,
+    "publication_time_not_backdated_to_push": true,
+    "independent_trusted_timestamp_claimed": false,
+    "remaining_four_prerequisites_published": false
+  },
+  "private_hold_checker": {
+    "scope": "Synthetic proof-checker regressions only; not a new production API test or grading authority.",
+    "tests_per_process": 4,
+    "consecutive_processes": 3,
+    "total_top_level_passes": 12,
+    "failures": 0,
+    "skips": 0,
+    "binary_sha256": "f30f3f44824c6351d79a48cbe52f03284bda7ca67da60b89cebfc070c90db4cf",
+    "terminal_receipt": "/mnt/data/hold-checker-runtime-qa-20261029.AI9sLumM/TERMINAL-RECEIPT.txt",
+    "terminal_receipt_sha256": "4d6e7cd991d17a7b50da80829088a6e6bd556799e76887232ca329411892d25a",
+    "preserved_pretest_roster_order_guard_failure": true,
+    "production_code_changed": false,
+    "main_db_writes": 0
+  },
+  "unmeasured_native_reference_builds": {
+    "unit": "urnetwork-native-reference-build-P6ZWBPVi-v2.service",
+    "unit_exit_code": 0,
+    "operator_exit_code": 0,
+    "runtime_seconds": 521.698,
+    "better_image_id": "sha256:b86130ebe1a3cd58f4ad386335fa8126c9bc9f42e153d9040c2db09ed2502f6d",
+    "no_op_image_id": "sha256:6b5afb71b60534987fbd226c8b168d2140dceb2fcad177c61828926f4615c601",
+    "native_readbacks_completed": false,
+    "build_exit_alone_qualifies_correctness_or_calibration": false,
+    "production_worker_kept_running_for_genuine_intake_heartbeat": true
+  },
+  "live_public_observation": {
+    "api_version": "2026.10.29-outerwerld+1084840860",
+    "round_id": "01a1855d-49bd-0250-90db-d0c0885f0e46",
+    "round_status": "open",
+    "intake_ready": true,
+    "grading_ready": false,
+    "publication_held": true,
+    "intake_hotfix_commit": "1355bc7d8e51d6faa1e52f65d405bbdf16b2116b",
+    "intake_hotfix_deployment_verified": false,
+    "operator_confirmed_hotfix_not_deployed_yet": true
+  },
+  "excluded_claims": [
+    "No claim that the four remaining build/correctness prerequisites are published or that native readback has passed.",
+    "No timed public pilot, new hidden seed, fresh-screen measurement or calibration acceptance.",
+    "No evaluator-worker pause, source activation, production hold release or scoring enablement.",
+    "No alteration to the frozen ten-repository source checkpoint, evaluator image, R9, margin, significance or deadlines."
+  ]
+}
