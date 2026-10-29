@@ -107,3 +107,37 @@ hold verification and native fenced activation. Then verify an actual submission
 is accepted and remains queued with grading and publication held. Full launch
 readiness still requires the actual deferred calibration and two-model reviewer
 qualification; none is inferred from image recovery or successful API deployment.
+
+## Replacement progress observed October 29
+
+The owner approved replacement scope `sim-latency-production-20261028-r2`.
+The original reservation and its evidence remain historical and unchanged.
+The exact frozen evaluator image was restored through Docker's normal image
+loader and verified by image ID, binary digest and protected-source readback.
+The separately pinned Redis Bookworm dependency was restored by its original
+immutable registry digest; PostgreSQL's pinned image was already available.
+
+Replacement config is published on config main at
+`c3be1e1c91b61bfc3ee0e7b364488a49831e26d5`; its separately scoped credentials
+are published on vault main at `bda73660937fc112486a7a7f1f7926d40e0e4247`.
+The public submitter credential and old control credentials are preserved.
+Only the season scope and approval digest change in the runtime policy. The
+source ledger retains the frozen checkpoint and uses the new source decision.
+The file generator passed 40 deterministic controls three consecutive times,
+including a regression for native negative host reports with a null R1 target.
+
+Native bootstrap completed successfully at 02:01 UTC against that exact config
+commit, using fresh private checkouts and no `--opens-at` reservation. Its
+durable transition is `source_publication_pending`, targeting epoch 1 and round
+`01a1855d-49bd-0250-90db-d0c0885f0e46`. This is not an active source or open round.
+The local recovery file is pre-persistence material; its empty intent digest
+must not be mistaken for the authenticated database intent or manually filled.
+
+At 02:13 UTC, the serving API still rejected the replacement control credential
+with HTTP 401. Deployment convergence was therefore unverified. Deploy the
+config and vault commits above to the serving API processes; this compatibility
+path needs no new API build or migration. Then establish and read back the
+new scope's actual evaluation/reward-delivery holds, complete native runtime
+publication and readiness, activate, and verify intake. Calibration and genuine
+Qwen/Gemma reviewer qualification remain required before grading or rewards.
+No production opening or completed qualification is claimed by this snapshot.
