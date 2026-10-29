@@ -143,18 +143,23 @@ func canaryBaseline(decisionPath string, configRoot string, env string, maxAge t
 }
 
 // A release directory's arin.mmdb beneath configRoot built at epoch, newest
-// version first, or "" without one. Every environment's directories are
-// candidates: the database a fallback serves was an earlier release's latest.
+// version first, else the newest arin-old.mmdb built at it, or "" without
+// either. Every environment's directories are candidates: the database a
+// fallback serves was an earlier release's latest. A release removes the older
+// release directories (ARINDB.md, "Release directories"), so that database is
+// usually left only as the newest directory's arin-old.mmdb, the canary's copy.
 func findArinDatabaseBuiltAt(configRoot string, epoch int64) string {
-	paths, err := filepath.Glob(filepath.Join(configRoot, "*", "arindb", "*", "arin.mmdb"))
-	if err != nil {
-		return ""
-	}
-	slices.Sort(paths)
-	slices.Reverse(paths)
-	for _, path := range paths {
-		if buildEpoch, err := server.ReadArinDatabaseBuildEpoch(path); err == nil && buildEpoch == epoch {
-			return path
+	for _, name := range []string{"arin.mmdb", "arin-old.mmdb"} {
+		paths, err := filepath.Glob(filepath.Join(configRoot, "*", "arindb", "*", name))
+		if err != nil {
+			return ""
+		}
+		slices.Sort(paths)
+		slices.Reverse(paths)
+		for _, path := range paths {
+			if buildEpoch, err := server.ReadArinDatabaseBuildEpoch(path); err == nil && buildEpoch == epoch {
+				return path
+			}
 		}
 	}
 	return ""

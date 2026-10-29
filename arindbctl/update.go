@@ -169,12 +169,12 @@ const (
 // environment would open before this release is added: the runtime resolver
 // over --previous-config, or the --previous-database pin. The file is opened
 // with the runtime decoder and refused unless its type is urnetwork arindb,
-// the manifest beside it names it in sha256["arin.mmdb"], the streamed copy
-// has that SHA-256, the manifest's built_at second is its build epoch, and
-// that epoch is strictly older than the new build's. A refusal, an identical
-// previous database or none leaves both files out. None of these fails the
-// release: blocking it would keep the suspect database in service. The record
-// says what happened and why.
+// its manifest (arinDatabaseManifestPath) names it in sha256["arin.mmdb"], the
+// streamed copy has that SHA-256, the manifest's built_at second is its build
+// epoch, and that epoch is strictly older than the new build's. A refusal, an
+// identical previous database or none leaves both files out. None of these
+// fails the release: blocking it would keep the suspect database in service.
+// The record says what happened and why.
 func copyPreviousArinDatabase(ctx context.Context, options commandOptions, arinDir string) map[string]any {
 	record := map[string]any{}
 	finish := func(status string, reason string) map[string]any {
@@ -218,7 +218,7 @@ func copyPreviousArinDatabase(ctx context.Context, options commandOptions, arinD
 		return finish(previousArinDatabaseRefused, "open the previous database: "+err.Error())
 	}
 	record["build_epoch"] = previousEpoch
-	manifestPath := filepath.Join(filepath.Dir(source), "manifest.json")
+	manifestPath := arinDatabaseManifestPath(source)
 	manifestContent, err := os.ReadFile(manifestPath)
 	if err != nil {
 		return finish(previousArinDatabaseRefused, "read the previous manifest: "+err.Error())
@@ -259,6 +259,17 @@ func copyPreviousArinDatabase(ctx context.Context, options commandOptions, arinD
 	}
 	record["size"] = size
 	return finish(previousArinDatabaseCopied, "")
+}
+
+// The manifest of a release directory's database. A release keeps the canary's
+// copy of the previous database as arin-old.mmdb with that release's manifest
+// as manifest-old.json, and once older release directories are removed that
+// copy is the only one left to pin (ARINDB.md, "Release directories").
+func arinDatabaseManifestPath(databasePath string) string {
+	if filepath.Base(databasePath) == "arin-old.mmdb" {
+		return filepath.Join(filepath.Dir(databasePath), "manifest-old.json")
+	}
+	return filepath.Join(filepath.Dir(databasePath), "manifest.json")
 }
 
 // Streams source to a new destination file, hashing the bytes written.

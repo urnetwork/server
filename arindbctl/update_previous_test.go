@@ -132,6 +132,38 @@ func TestCopyPreviousArinDatabaseCopiesTheResolvedRelease(t *testing.T) {
 	}
 }
 
+// The pin canary-baseline prints once the older release directories are gone,
+// a release's arin-old.mmdb, copies with that copy's own manifest-old.json, not
+// with the manifest.json of the newer database beside it.
+func TestCopyPreviousArinDatabaseCopiesAPinnedOldDatabaseWithItsManifest(t *testing.T) {
+	releaseDir := filepath.Join(t.TempDir(), "all", "arindb", "1.1.0")
+	selected := testPreviousArinDatabase(t, "urnetwork arindb", testPreviousOldEpoch+3600, "unknown")
+	writeTestPreviousRelease(t, releaseDir, selected, testPreviousArinManifest(t, selected, time.Unix(testPreviousOldEpoch+3600, 0)))
+	protected := testPreviousArinDatabase(t, "urnetwork arindb", testPreviousOldEpoch, "subscriber")
+	protectedPath := filepath.Join(releaseDir, "arin-old.mmdb")
+	if err := os.WriteFile(protectedPath, protected, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	protectedManifest := testPreviousArinManifest(t, protected, time.Unix(testPreviousOldEpoch, 0))
+	if err := os.WriteFile(filepath.Join(releaseDir, "manifest-old.json"), protectedManifest, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	arinDir, _ := testNewArinRelease(t)
+
+	record := copyPreviousArinDatabase(t.Context(), commandOptions{previousDatabase: protectedPath}, arinDir)
+	if record["status"] != previousArinDatabaseCopied || record["source"] != protectedPath || record["build_epoch"] != testPreviousOldEpoch {
+		t.Fatalf("copy record %+v", record)
+	}
+	copied, err := os.ReadFile(filepath.Join(arinDir, "arin-old.mmdb"))
+	if err != nil || !bytes.Equal(copied, protected) {
+		t.Fatalf("arin-old.mmdb is not a byte copy of the pinned database: %v", err)
+	}
+	copiedManifest, err := os.ReadFile(filepath.Join(arinDir, "manifest-old.json"))
+	if err != nil || !bytes.Equal(copiedManifest, protectedManifest) {
+		t.Fatalf("manifest-old.json is not a byte copy of the pinned database's manifest: %v", err)
+	}
+}
+
 // The new build copied forward again would not be a second database.
 func TestCopyPreviousArinDatabaseSkipsAnIdenticalDatabase(t *testing.T) {
 	arinDir, database := testNewArinRelease(t)

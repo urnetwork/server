@@ -1861,12 +1861,32 @@ copy, or why there is none, and the release message says so. A refused copy
 never fails the release, because blocking the release would keep the suspect
 database in service.
 
-The copy is a second full file in every release directory, about 0.6 GB
+The copy is a second full file in the release directory, about 0.6 GB
 today. Git LFS stores identical content once, but the checkout, the
-config-updater image and each host's config tree carry it twice. The image
-already includes every retained `arindb` version (7.5 GB for 17 versions on
-2026-10-14), so pruning old versions is the natural mitigation. Pruning is
-outside this change.
+config-updater image and each host's config tree carry it twice.
+
+### Release directories
+
+Processes read only the newest release directory: the runtime resolver takes
+`arindb/<version>/arin.mmdb` in descending version order, and the loader opens
+the first. The canary needs nothing older, because the newest directory's
+`arin-old.mmdb` is a byte copy of the previous release's database, with that
+release's manifest as `manifest-old.json`.
+
+- **Removal.** When the release runner publishes an ARIN release, it removes
+  every other directory under `config/all/arindb` in the same commit
+  (`refresh_ip_databases` in the build repository's `all/run.sh`). A paused
+  ARIN refresh publishes no directory, so it removes none.
+- **Why.** Before this, every release added a directory and none was removed.
+  On 2026-10-29 the tree held ten, 1.11 GB each, which was 11.1 of the 12 GB
+  the config-updater image and every host's config versions carried.
+- **The canary baseline.** A fallback's protected database is then usually
+  left only as the newest directory's `arin-old.mmdb`. `canary-baseline`
+  searches each directory's `arin.mmdb` first, then the `arin-old.mmdb`
+  copies, and pins the match. `update --previous-database` reads a pinned
+  `arin-old.mmdb` with its `manifest-old.json`, so the pin verifies.
+- **GeoLite2.** `config/all/mmdb` still keeps a directory per release, about
+  65 MB each.
 
 ### Loader
 
@@ -2103,7 +2123,9 @@ therefore follows the published decision when it has one:
 latch's old database, held or dropped, whatever the decision serves, else the
 database it serves. It answers `copy` when that is the environment's selected
 latest (or each row's latest slot with no latch), `pin <path>` with the
-release directory's `arin.mmdb` built at that epoch otherwise, and
+release directory's `arin.mmdb` built at that epoch otherwise, or the
+`arin-old.mmdb` copy of it once the older directories are gone (see Release
+directories), and
 `pause <reason>` when the decision is unreadable, of another version, older
 than six hours, drops a fallback without naming its database, or protects a
 database no release directory holds. A pause publishes the GeoLite2 refresh
@@ -2113,7 +2135,9 @@ the decision to it is an operator step (open decision 8). Without the file the
 copy is not gated and the release message says so; the operator then sets
 `ARIN_PREVIOUS_DATABASE_FILE` for the runner to the last good `arin.mmdb` when
 a trip is judged to be a bad release, and clears the pin once a good release
-ships. The pin always wins over the decision.
+ships. Only the newest release directory is kept, so the last good database is
+usually its `arin-old.mmdb`; pinning that file reads its `manifest-old.json`.
+The pin always wins over the decision.
 
 #### Accepting a release the breaker trips on
 

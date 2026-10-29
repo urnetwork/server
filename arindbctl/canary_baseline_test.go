@@ -162,3 +162,44 @@ func TestCanaryBaselineCommandPrintsOneLine(t *testing.T) {
 		}
 	}
 }
+
+// The config tree a release leaves once it removes the older release
+// directories: the selected latest at testPreviousNewEpoch, with the canary's
+// copy of the previous database and its manifest beside it.
+func testCanaryBaselineLatestOnlyConfig(t *testing.T) (root string, oldPath string) {
+	t.Helper()
+	root = t.TempDir()
+	latest := testPreviousArinDatabase(t, "urnetwork arindb", testPreviousNewEpoch, "unknown")
+	latestDir := filepath.Join(root, "all", "arindb", "1.1.0")
+	writeTestPreviousRelease(t, latestDir, latest, testPreviousArinManifest(t, latest, time.Unix(testPreviousNewEpoch, 0)))
+	older := testPreviousArinDatabase(t, "urnetwork arindb", testPreviousOldEpoch, "subscriber")
+	oldPath = filepath.Join(latestDir, "arin-old.mmdb")
+	if err := os.WriteFile(oldPath, older, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(latestDir, "manifest-old.json"), testPreviousArinManifest(t, older, time.Unix(testPreviousOldEpoch, 0)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return root, oldPath
+}
+
+// With only the newest release directory left, a fallback pins the canary's
+// copy of the database it protects instead of pausing the ARIN refresh.
+func TestCanaryBaselinePinsTheOldDatabaseOfTheOnlyRelease(t *testing.T) {
+	root, oldPath := testCanaryBaselineLatestOnlyConfig(t)
+	for _, c := range []struct {
+		name     string
+		document map[string]any
+	}{
+		{name: "a fallback", document: testCanaryDecisionDocument("fallback", testPreviousOldEpoch, "tripped", testCanaryBaselineNow)},
+		{name: "a latched fallback", document: testCanaryDecisionDocument("fallback", testPreviousOldEpoch, "latched", testCanaryBaselineNow.Add(-time.Hour))},
+		{name: "warming holding the latest out", document: testCanaryDecisionDocument("warming", testPreviousOldEpoch, "latest_blocked", testCanaryBaselineNow)},
+	} {
+		if got := canaryBaseline(writeTestCanaryDecision(t, c.document), root, "main", canaryBaselineMaxAge, testCanaryBaselineNow); got != "pin "+oldPath {
+			t.Errorf("%s: %q, want %q", c.name, got, "pin "+oldPath)
+		}
+	}
+	if got := canaryBaseline(writeTestCanaryDecision(t, testCanaryDecisionDocument("latest", testPreviousNewEpoch, "passed", testCanaryBaselineNow)), root, "main", canaryBaselineMaxAge, testCanaryBaselineNow); got != "copy" {
+		t.Errorf("the latest passes: %q, want copy", got)
+	}
+}
