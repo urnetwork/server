@@ -592,7 +592,10 @@ func DefaultExchangeSettingsWithBufferSize(bufferSize int) *ExchangeSettings {
 		MaxConcurrentForwardsPerResident: 8 * 1024,
 
 		// ResidentIdleTimeout: 300 * time.Minute,
-		ForwardIdleTimeout: 15 * time.Minute,
+		// Most forwards end as an idle tail, holding a socket, goroutines and
+		// buffers after their last payload. A forward that resumes later
+		// redials, which costs one resident lookup and a handshake.
+		ForwardIdleTimeout: 3 * time.Minute,
 		ControlMinTimeout:  5 * time.Millisecond,
 
 		ExchangeConnectTimeout: 15 * time.Second,
