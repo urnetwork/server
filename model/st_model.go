@@ -1483,38 +1483,47 @@ func UpsertStEvents(ctx context.Context, deploymentKey StDeploymentKey, events [
 	}
 	key := requireStDeploymentKey(deploymentKey)
 	server.Tx(ctx, func(tx server.PgTx) {
-		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
-			for _, event := range events {
-				batch.Queue(
-					`
-                        INSERT INTO st_event (
-							deployment_key,
-                            block_number,
-							block_hash,
-                            log_index,
-                            tx_hash,
-                            kind,
-                            data_json,
-							original_log
-                        )
-						VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-						ON CONFLICT (deployment_key, block_number, log_index) DO NOTHING
-                    `,
-					key,
-					int64(event.BlockNumber),
-					event.BlockHash,
-					event.LogIndex,
-					event.TxHash,
-					event.Kind,
-					event.DataJson,
-					event.OriginalLog,
-				)
-			}
-		})
+		upsertStEventsInTx(ctx, tx, key, events)
+	})
+}
+
+// The insert of UpsertStEvents inside the caller's transaction, so a sync can
+// commit its mirrored rows together with what it derives from them.
+func upsertStEventsInTx(ctx context.Context, tx server.PgTx, key string, events []*StChainEvent) {
+	if len(events) == 0 {
+		return
+	}
+	server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 		for _, event := range events {
-			verifyStEventOriginalInTx(ctx, tx, key, event)
+			batch.Queue(
+				`
+                    INSERT INTO st_event (
+						deployment_key,
+                        block_number,
+						block_hash,
+                        log_index,
+                        tx_hash,
+                        kind,
+                        data_json,
+						original_log
+                    )
+					VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+					ON CONFLICT (deployment_key, block_number, log_index) DO NOTHING
+                `,
+				key,
+				int64(event.BlockNumber),
+				event.BlockHash,
+				event.LogIndex,
+				event.TxHash,
+				event.Kind,
+				event.DataJson,
+				event.OriginalLog,
+			)
 		}
 	})
+	for _, event := range events {
+		verifyStEventOriginalInTx(ctx, tx, key, event)
+	}
 }
 
 // GetStEvents returns mirrored events in [minBlock, maxBlock], ordered.
