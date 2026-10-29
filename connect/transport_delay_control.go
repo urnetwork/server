@@ -14,8 +14,11 @@
 // the code switch decides. With the code switch off there is nothing to narrow
 // and nothing is read.
 //
-// P2P is negotiated between the two clients (DELAY.md §6.1); the edge only
-// forwards their signals, so this switch does not reach it.
+// P2P is negotiated between the two clients (DELAY.md §6.1), and the edge
+// only forwards their signals. The switch still reaches it: a client offers
+// the header to a peer only while the latest edge answer to its own platform
+// connections accepted it, so P2P follows once the client next connects to an
+// edge.
 //
 // Safe for concurrent use.
 package connect
