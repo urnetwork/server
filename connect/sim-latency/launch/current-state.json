@@ -1,10 +1,10 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-29T17:58:42Z",
+  "observed_at": "2026-10-29T19:30:44Z",
   "scoring_enablement_current": {
-    "status": "R2_intake_open_Qwen_Gemma_and_all_three_reference_runtime_suites_passed_scoring_and_publications_held",
-    "observed_at": "2026-10-29T17:58:42Z",
+    "status": "R2_intake_open_review_reference_runtime_and_675_operator_tests_passed_API_intake_hotfix_pushed_calibration_pending",
+    "observed_at": "2026-10-29T19:30:44Z",
     "metadata_checkpoint_only": true,
     "actual_intake_open": true,
     "grading_enabled": false,
@@ -24,23 +24,34 @@
       "H1_worse_exact_revised_112_scope_three_passes_336_PASS_plus12_synthetic_MMDB_controls_and_one_socket_smoke",
       "new_native_worse_647922_image_readback_and_exact_build_correctness_receipts",
       "better_101x3_303_PASS_and_noop_93x3_279_PASS_with_exact_source_dependencies_strict_LOCAL_services_and_joined_cleanup",
+      "same_988481_race_ELF_three_exact225_processes_675_PASS_zero_failures_skips_integrity_postchecks_passed",
+      "completed_Qwen_Gemma_and_H1_worse_evidence_COMPLIANCE_MinIO_exact_version_SHA256_readback_verified",
+      "closed_initial_intake_only_API_fix_1355bc7d8_pushed_eight_tests_three_passes_before_and_after_merge",
       "public_provider_request_before_census_and_Root_reported_native_collision_preparation_not_measurement"
     ],
     "pending": [
-      "same_988481_race_ELF_three_complete225_PASS_processes_first_complete_second_in_progress_third_unstarted",
+      "deploy_and_verify_API_intake_hotfix_before_pausing_periodic_evaluator_Docker_probes_for_calibration",
       "better_noop_new_native_image_readback_and_exact_tested_source_byte_bridges",
       "prospective_public_pilot_execution_admission_publication_and18_native_timed_runs",
       "only_after_accepted_public_pilot_one_new_hidden_seed_and36_native_fresh_single_screen_runs",
       "independent_final_review_and_durable_scoring_publication_hold_release"
     ],
     "reference_runtime_checkpoint": "server/connect/sim-latency/launch/REFERENCE-RUNTIME-CORRECTNESS-2026-10-29.json",
+    "operator_qualification_checkpoint": "server/connect/sim-latency/launch/public-pilot-native-2026-10-29/COMPLETED-675-CHECKPOINT.json",
+    "retained_completed_evidence": "server/connect/sim-latency/launch/completed-custody-2026-10-29/receipt-summary.json",
+    "intake_hotfix_commit": "1355bc7d8e51d6faa1e52f65d405bbdf16b2116b",
+    "intake_hotfix_deployment_verified": false,
+    "intake_hotfix_merged_test_receipt_sha256": "d90d711c9407b3ece6d5918ccc2e26d95728582757db417bb6766ae7eb1d0010",
+    "native_operator_qualification_sha256": "3cad65f52a5012aed6f29fb341f4cb709de498214042bcda14a3c9c92fe4cc3b",
+    "native_operator_terminal_receipt_sha256": "5690dcebac09fa038fa77f2c5e43529b51abc25b6c363ecd59b1a18e2755d10d",
     "new_timed_native_runs_pending": 54,
     "new_hidden_seed_drawn": false,
     "original_first_screen_failed_not_accepted": true,
     "original_second_seed_unstarted": true,
     "accepted_old_bridge_reused_without_remeasurement": true,
     "frozen_a9_image98_R9_alpha005_margin0269_timeout10800_unchanged": true,
-    "this_checkpoint_does_not_qualify_moving_main_or_attest_new_MinIO_custody": true
+    "this_checkpoint_does_not_qualify_moving_main": true,
+    "new_MinIO_custody_scope": "Only the completed Qwen/Gemma and H1 worse archive identified by fd1da45a699f18c6379dcb26c74f5295cf9e7850d5afff44bc77f071f5370df1; later role/operator/calibration evidence and replica delivery are not included."
   },
   "prospective_production_opening": {
     "authorized_after_all_required_gates_pass": true,
@@ -826,7 +837,7 @@
     "round_baseline_preparation_budget_fix_in_progress": true,
     "submission_deadline_seconds_unchanged": 10800
   },
-  "status": "R2_intake_open_genuine_Qwen_Gemma_and_H1_worse_gates_complete_scoring_held_pending_225_and_native_calibration",
+  "status": "R2_intake_open_review_all_reference_runtime_and_675_operator_tests_complete_API_fix_pushed_calibration_pending",
   "current_bridge_measurement": {
     "started_at": "2026-10-26T20:54:56Z",
     "original_deadline": "2026-10-26T23:54:56Z",
@@ -1180,8 +1191,8 @@
     "next_action": "Poll exact session/process and original logs. Stop on first unexpected failure; max owner diagnoses. No provider calls or scoring, and no overlap with timed measurement."
   },
   "authority_warning": "This is a preparation snapshot, not runtime/score authority. Verify the live process/session and current artifacts before acting; never restart because an observation times out.",
-  "historical_sections_warning": "scoring_enablement_current is the current 2026-10-29 checkpoint. All other dated campaign/tool sections retain their original observations, failures and then-current next actions; stale pending224/provider/opening statements are not current readiness. R2 intake really opened prospectively, but production_activated remains false for full scoring/publication readiness. No metadata/source freeze qualifies moving main, no failed FIRST seed is accepted, and no new custody or calibration success is inferred.",
-  "next_action": "Keep R2 evaluation/reward/publication holds while intake remains open. Complete the unchanged-ELF 225 source-unit gate and exact better/no-op runtime/native-image gates; then admit and prospectively publish the prepared public pilot before its18 timed R9 runs. Only an accepted public direction permits the one fresh hidden seed and36 further native runs. Reuse the accepted old bridge without remeasurement, retain the failed original FIRST screen and unstarted second seed, and preserve all Qwen/Gemma disagreements and historical failures. Independently review actual calibration results and current durable holds before grading/publication release. Frozen a9/image98/R9/alpha.05/margin.269/10800s remain unchanged; do not backdate or relabel metadata as production readiness.",
+  "historical_sections_warning": "scoring_enablement_current is the current 2026-10-29 checkpoint. Other dated campaign/tool sections retain their original observations, failures and then-current next actions; stale pending224/provider/opening statements are not current readiness. R2 intake really opened prospectively, but production_activated remains false for full scoring/publication readiness. No metadata/source freeze qualifies moving main or accepts the failed FIRST seed. Only the exact published completed-evidence receipt qualifies its new source-version custody; no replica delivery or calibration success is inferred.",
+  "next_action": "Keep R2 evaluation/reward/publication holds while intake remains open. Deploy and verify the tested API intake-only correction from 1355bc7d8 or later before pausing periodic evaluator probes. The unchanged operator has completed 675 tests and both better/no-op runtime suites are complete; finish their new native image/readback bindings, publish all seven prerequisites, then prospectively publish and run the18-run public R9 pilot. Only its accepted native direction and after-census permit the one new hidden seed and36-run fresh screen. Reuse the accepted old bridge without remeasurement; retain failed FIRST, the unstarted original second seed, all Qwen/Gemma disagreements and historical failures. Review actual calibration results and fresh durable hold revisions before releasing grading/publication. Frozen a9/image98/R9/alpha.05/margin.269/10800s remain unchanged; never backdate or label qualification metadata as completed calibration.",
   "operator_inputs": {
     "observed_at": "2026-10-26T05:23:17Z",
     "source": "Explicit user confirmations and parent-verified private-key/model-access readbacks; no new scoring observation.",

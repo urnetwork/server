@@ -1,0 +1,163 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-held-out-operator-qualification",
+  "accepted": true,
+  "binary_sha256": "988481d6b55420a1b4be48fc95ae288490b5a31f9cc1496d79f656b41f79bf70",
+  "analyzer_source": "ebf0b61cef37b5d2ac117697b858fab2e4cd70c1",
+  "base_sha": "a9e8e1a710b24c749e6499a0606938252c83e136",
+  "source_lock_sha256": "ec322ed2db023e15ea5dc3eea60a6ca5989661bba737c340fea3477d8d1300cf",
+  "go_version": "go1.27.3",
+  "race": true,
+  "consecutive_passes": 3,
+  "tests_per_pass": 225,
+  "skips": 0,
+  "sources": [
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/fragment-01-held-out-first-committed-dispatch-tests.go.txt",
+      "sha256": "f0c4663fe93a267375a43a8ae0623e6428b0e6856b93dc14cddd2aaeaac7f840"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/fragment-02-held-out-first-committed-tests.go.txt",
+      "sha256": "1b493b58a55f2e93d479cfbd486c87c605e0e0a9bda5ddea1b6b6f2c981bee19"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/fragment-03-held-out-first-committed.go.txt",
+      "sha256": "cb97bdf17b2e411b1063516757ac6851954edde3b2bb8ef83b826f3fcbc89c00"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/fragment-04-held-out-execution.go.txt",
+      "sha256": "62373b92fefe3fb81dfe6b4e80bc7780501307a9bbea547f48823188eed978da"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/fragment-05-held-out-operator-tests.go.txt",
+      "sha256": "31eae507efe46f083d4ec486dfe64e0dfe81a42358645783fce366e461c69254"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/fragment-06-held-out-operator.go.txt",
+      "sha256": "e37731264b6439a070815f9e03b6a72c6770c66acb3ee4858f090f99a541d843"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/fragment-07-held-out-two-b-addendum.go.txt",
+      "sha256": "7e1b389cbe3d2f7a0e8d2e8face216fd832b0abfa009672c1ed1d895bec8cddf"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/fragment-08-held-out-two-b-composed-tests.go.txt",
+      "sha256": "42e2f6d48d3fbe01a4d9fba466941f7d7050133e4ca3e1098268f4b90901afe5"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/fragment-09-held-out-amendment.go.txt",
+      "sha256": "37bbfd1026274b1343f97368b1ea3cbc5e890d6195606466f2ddafd02cf82651"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/fragment-10-held-out-command.go.txt",
+      "sha256": "9bcebc5141f218a29e809195b7a095269dbe58fd5a8f8e5dbbe1ee282d447081"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/fragment-11-held-out-fresh-single-b-tests.go.txt",
+      "sha256": "1f0f1d0f6c136f6f616a40e3b842ab2edaf46eb6d442b248905773a8272ae378"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/fragment-12-held-out-fresh-single-b.go.txt",
+      "sha256": "7f06c242ff81fe97a5fabc0351e31786e599ac4a568e6d99e329246ff1d62a88"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/fragment-13-held-out-public-pilot-after.go.txt",
+      "sha256": "4e68b22b261db4b4cce9bc66d9192bb60d0208e341252bda318e97f8399a4d9d"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/fragment-14-held-out-public-pilot-command.go.txt",
+      "sha256": "26a219e0a5c3b93621e8d41dd0cd5546110884d9e774b388b676e152b7edf0fb"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/fragment-15-held-out-public-pilot-tests.go.txt",
+      "sha256": "0f54d21eca9c796715bea3e698c056e0cfd3815b7dbab7c4e3af1b5927d05604"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/fragment-16-held-out-fresh-exclusion-builder-tests.go.txt",
+      "sha256": "474148bb16db59ae0b49af7f320cd531f6774aa405d2dd2127ffb713c16f8963"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/fragment-17-held-out-fresh-exclusion-builder.go.txt",
+      "sha256": "535d3b4fb77a6770c0d7750ac8083d1002cebd3c208de60b29359b31bf0980c1"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/fragment-18-held-out-public-pilot-oci-repin-tests.go.txt",
+      "sha256": "78002fb498bd1804c713ec458562677dac52af22dc27455ded2b131ef7e8415c"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/fragment-19-held-out-public-pilot.go.txt",
+      "sha256": "8de729a9a530bf9f47f804911227ce825c9346cfce30f1ae007f7c667cefc7e3"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/source-packet.manifest.sha256",
+      "sha256": "b8507cbfb38d1170d5fdf067a3621963cc9407a97ce340a4189d059585917c32"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/pilot225.overlay.json",
+      "sha256": "09ecdc34f2540ed1b0fff2c8711e526917137a418663c6f44a477197b939ba07"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/virtual-source-map.json",
+      "sha256": "0083b2c4b6b9adb68e4a25372c0e3fed349f7cd81660b7385d88487d0bb8d5b9"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/resolved-sources.sha256",
+      "sha256": "e39a3e1bd8f6e1396d88ac43a6d4e0c02db767233103de9a558a23e163557ded"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/test-index.json",
+      "sha256": "9621c64bd0ec37ccefcc27017e7fd3a957d30888fbf1d9e9a309b9ed9e3de0e6"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/unit-targets.txt",
+      "sha256": "f30bb5271051b0baecfa3f0dba9908764231a268504a772510cc32a2c592a612"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/plain-export-full9146.sha256",
+      "sha256": "e3cd65b82f3b8929c29b3e7fab21530c7ebb94a30765c47225ef8dbe6c3ed9da"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/v4-unit-profile.json",
+      "sha256": "57285bee20507faa486512ab83ccde7209ac5003093c17389a6c9e031a3ab41d"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/v4-run.sh",
+      "sha256": "f1b4550b6ae1a09ab726f7434a76f271d39b9dc1df7fc7260c06daf7b756e9ae"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/v4-root-admission.json",
+      "sha256": "ee0b419709c29d0bb670c04d7e2abdeaff70fe361452b843765bde2c00b52dbc"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/actual-used-inputs.sha256",
+      "sha256": "51f5f5d71f4dbdb744f97edc390db154ea830ae17e675d1d0fc249cb113ad480"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/tool-module-pins.sha256",
+      "sha256": "ac1cca12a5f278145872b6e1920329e3f3122910fa3c92741a8fb8126399ee47"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/new-ELF.buildinfo",
+      "sha256": "3326e58e821f1650b81c574a374028d8b41e961a0399df8bafd70c404651bfcb"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-terminal-receipt.txt",
+      "sha256": "5690dcebac09fa038fa77f2c5e43529b51abc25b6c363ecd59b1a18e2755d10d"
+    }
+  ],
+  "evidence": [
+    {
+      "path": "/mnt/data/urnetwork-competition-temp/pilot225-runtime-v4-20261029.33sL78Lg/pass1.json",
+      "sha256": "c53d59698ed3eb6949c024b4e86ee44aa30ce2ff423bed5b9e7a3b69e78a247f"
+    },
+    {
+      "path": "/mnt/data/urnetwork-competition-temp/pilot225-runtime-v4-20261029.33sL78Lg/pass2.json",
+      "sha256": "4cbdde8a1c7e08a5af73cdfbd42443a413fe95cfa69641b1568476e6f54b3a60"
+    },
+    {
+      "path": "/mnt/data/urnetwork-competition-temp/pilot225-runtime-v4-20261029.33sL78Lg/pass3.json",
+      "sha256": "d8516a46ed78efd4f21b9614ea9ed286bb31d107a4bd56684e3e50f4240301bd"
+    }
+  ],
+  "protocol": "launch-3a-bridge-fresh-single-b-2026-10-28-v1"
+}

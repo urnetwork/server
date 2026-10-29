@@ -1,0 +1,111 @@
+{
+  "schema": 1,
+  "kind": "completed-held-out-operator-225-unit-qualification-checkpoint",
+  "observed_at": "2026-10-29 19:18:45 UTC",
+  "scope": "operator source and synthetic unit qualification ONLY",
+  "result": {
+    "accepted": true,
+    "consecutive_independent_processes": 3,
+    "tests_per_process": 225,
+    "total_top_level_passes": 675,
+    "nested_passes": 0,
+    "failures": 0,
+    "skips": 0,
+    "same_race_elf_all_processes": true
+  },
+  "tool": {
+    "binary_sha256": "988481d6b55420a1b4be48fc95ae288490b5a31f9cc1496d79f656b41f79bf70",
+    "go_version": "go1.27.3",
+    "race": true,
+    "analyzer_compatibility_label": "ebf0b61cef37b5d2ac117697b858fab2e4cd70c1",
+    "analyzer_label_is_actual_git_head": false,
+    "base_sha": "a9e8e1a710b24c749e6499a0606938252c83e136",
+    "source_lock_sha256": "ec322ed2db023e15ea5dc3eea60a6ca5989661bba737c340fea3477d8d1300cf",
+    "protocol": "launch-3a-bridge-fresh-single-b-2026-10-28-v1"
+  },
+  "qualification_artifact": {
+    "path": "tool-qualification.json",
+    "sha256": "3cad65f52a5012aed6f29fb341f4cb709de498214042bcda14a3c9c92fe4cc3b",
+    "root_install_target": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool-qualification.json",
+    "installed_by_this_author": false
+  },
+  "actual_evidence": {
+    "terminal": {
+      "path": "/mnt/data/urnetwork-competition-temp/pilot225-runtime-v4-20261029.33sL78Lg/TERMINAL-RECEIPT.txt",
+      "sha256": "5690dcebac09fa038fa77f2c5e43529b51abc25b6c363ecd59b1a18e2755d10d",
+      "root_safe_copy": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-terminal-receipt.txt"
+    },
+    "passes": [
+      {
+        "process": 1,
+        "path": "/mnt/data/urnetwork-competition-temp/pilot225-runtime-v4-20261029.33sL78Lg/pass1.json",
+        "sha256": "c53d59698ed3eb6949c024b4e86ee44aa30ce2ff423bed5b9e7a3b69e78a247f",
+        "top_level_passes": 225,
+        "roster_equal": true,
+        "completed_at": "2026-10-29T17:19:51Z"
+      },
+      {
+        "process": 2,
+        "path": "/mnt/data/urnetwork-competition-temp/pilot225-runtime-v4-20261029.33sL78Lg/pass2.json",
+        "sha256": "4cbdde8a1c7e08a5af73cdfbd42443a413fe95cfa69641b1568476e6f54b3a60",
+        "top_level_passes": 225,
+        "roster_equal": true,
+        "completed_at": "2026-10-29T18:07:32Z"
+      },
+      {
+        "process": 3,
+        "path": "/mnt/data/urnetwork-competition-temp/pilot225-runtime-v4-20261029.33sL78Lg/pass3.json",
+        "sha256": "d8516a46ed78efd4f21b9614ea9ed286bb31d107a4bd56684e3e50f4240301bd",
+        "top_level_passes": 225,
+        "roster_equal": true,
+        "completed_at": "2026-10-29T18:55:10Z"
+      }
+    ],
+    "unit_terminal_at": "2026-10-29T18:55:28Z",
+    "unit_exit_code": 0
+  },
+  "source_scope": {
+    "native_sources": 33,
+    "native_evidence_logs": 3,
+    "adapter_go_text_fragments": 19,
+    "effective_go_files": 241,
+    "overlay_aliases": 34,
+    "compiled_held_out_roots": 229,
+    "executed_roots": 225,
+    "excluded_original_real_command_opt_ins": 4,
+    "provenance": "Ten actual Git repositories and one plain private analyzer server export, not an invented analyzer Git checkout.",
+    "complete_plain_export_files": 9146,
+    "raw_go_files": 5189,
+    "historical_source_subset_5215": "Retained historical reported count only; no new predicate or recomputed subset claim.",
+    "source_packet_manifest_sha256": "b8507cbfb38d1170d5fdf067a3621963cc9407a97ce340a4189d059585917c32",
+    "overlay_sha256": "09ecdc34f2540ed1b0fff2c8711e526917137a418663c6f44a477197b939ba07",
+    "selected_roster_sha256": "f30bb5271051b0baecfa3f0dba9908764231a268504a772510cc32a2c592a612",
+    "actual_compiler_input_manifest_sha256": "51f5f5d71f4dbdb744f97edc390db154ea830ae17e675d1d0fc249cb113ad480"
+  },
+  "independent_author_checks": {
+    "complete_three_raw_logs_rehashed_and_counted": true,
+    "three_exact_rosters_equal": true,
+    "elf_full_sha256_rehashed": true,
+    "all_33_source_pins_rehashed_canonical_root_0400_single_link": true,
+    "full_compiler_export_closure": "Preserved and qualified by the retained terminal receipt; no new compilation or whole-workspace qualification claimed by this author.",
+    "draft_to_final_delta": "Only accepted=true, consecutive_passes=3, terminal SHA, pass2 SHA and pass3 SHA changed.",
+    "native_validator_executed_by_this_author": false
+  },
+  "source_text_snapshot": {
+    "manifest": "ADAPTER-SOURCE-MANIFEST.json",
+    "sha256": "ccc85b27231b96507cedabc8fbdb64a34f3298d4845316a957003ea6db9303ef",
+    "files": 19,
+    "bytes": 635450,
+    "byte_identical_to_root_pins": true,
+    "complete_build_workspace": false
+  },
+  "nonclaims": [
+    "No actual timed public pilot, direction measurement, fresh hidden screen, evaluator/scoring run or calibration acceptance is qualified by these 675 unit passes.",
+    "No hidden seed or new commitment was generated or read, and no prior failed or unstarted campaign was relabelled accepted.",
+    "No future fresh-single declaration-bound qualification projection is inferred; it requires its actual future declaration binding.",
+    "No moving shared/main source, API deployment, provider run, native reference build or other role source is qualified by this operator unit scope.",
+    "No publication, archive upload, MinIO custody, replica delivery, off-site backup, source activation or production hold release was performed by this author.",
+    "Historical failed pre-Go setup receipts, original04695 helper, QG570 driver/source and all prior logs remain preserved.",
+    "This publishable checkpoint contains metadata, hashes and source-text locators only; no credentials or actual private seed/plan payloads."
+  ]
+}

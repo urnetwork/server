@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-held-out-reference-build",
+  "role": "worse",
+  "accepted": true,
+  "base_sha": "a9e8e1a710b24c749e6499a0606938252c83e136",
+  "source_lock_sha256": "ec322ed2db023e15ea5dc3eea60a6ca5989661bba737c340fea3477d8d1300cf",
+  "base_image_id": "sha256:98c9061c4a43a25e7b581a5193ca6e7f48e49e7b7fc03b7c1b6190a029befee2",
+  "patch_sha256": "6f8c6f24c44a9627f053e58d4a59f845a0ba4b0b51e201f5cabddfb33b30629d",
+  "candidate_sha": "e2a391a461ab0b588f994a9e7d29ebfeeae171f4",
+  "image_id": "sha256:647922002527eec6bcbff7fe1c64792813ce353bf6685a37dc6be1495083f6af",
+  "binary_sha256": "41629fddb006aaeddd0e849c7aae9e6a85c89496939fdf60735c598cd0cab33c",
+  "go_version": "go1.27.3",
+  "vcs_modified": false,
+  "direction": "",
+  "evidence": [
+    {
+      "path": "/var/lib/urnetwork/competition-h1-native-rebuild-20261029.9el69oHI/worse/native-proof.json",
+      "sha256": "dc35718bc5a79699fc22a93c0f2d3f74f306951c21d9398e7552765d2438d596"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-native-rebuild-20261029.9el69oHI/worse/native-build.json",
+      "sha256": "d1f6cddaa3695e97814453f766d2d1ee7982f7069e43b484021d5205fd43d93f"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-native-rebuild-20261029.9el69oHI/worse/evidence/candidate-original-source.json",
+      "sha256": "b5eb9057910459f3bc08d4a6a136e7fdfe0c095e1ea73e97f2dfdbd6d64deb48"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-native-rebuild-20261029.9el69oHI/worse/evidence/builder-identity.json",
+      "sha256": "6667ae6f6513f574a9aa6b3712cf36150d2b99a2ec52ec35556c9a16a562337b"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-native-rebuild-20261029.9el69oHI/worse/native-evidence.sha256",
+      "sha256": "096d05caeced5412354e6fc42b4df2578c9e5c34e7d62363defa0f04e0a47b2c"
+    }
+  ]
+}

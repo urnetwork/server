@@ -1,0 +1,135 @@
+{
+  "schema": 1,
+  "kind": "completed-225-operator-adapter-go-text-snapshot",
+  "scope": "Only the 19 exact overlaid Go-text adapter fragments; this is not the full 241-effective-file compiler closure.",
+  "native_tool_qualification_sha256": "3cad65f52a5012aed6f29fb341f4cb709de498214042bcda14a3c9c92fe4cc3b",
+  "binary_sha256": "988481d6b55420a1b4be48fc95ae288490b5a31f9cc1496d79f656b41f79bf70",
+  "files": [
+    {
+      "path": "adapter-source/fragment-01-held-out-first-committed-dispatch-tests.go.txt",
+      "sha256": "f0c4663fe93a267375a43a8ae0623e6428b0e6856b93dc14cddd2aaeaac7f840",
+      "original_root_pin": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/fragment-01-held-out-first-committed-dispatch-tests.go.txt",
+      "bytes": 1123
+    },
+    {
+      "path": "adapter-source/fragment-02-held-out-first-committed-tests.go.txt",
+      "sha256": "1b493b58a55f2e93d479cfbd486c87c605e0e0a9bda5ddea1b6b6f2c981bee19",
+      "original_root_pin": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/fragment-02-held-out-first-committed-tests.go.txt",
+      "bytes": 25748
+    },
+    {
+      "path": "adapter-source/fragment-03-held-out-first-committed.go.txt",
+      "sha256": "cb97bdf17b2e411b1063516757ac6851954edde3b2bb8ef83b826f3fcbc89c00",
+      "original_root_pin": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/fragment-03-held-out-first-committed.go.txt",
+      "bytes": 40170
+    },
+    {
+      "path": "adapter-source/fragment-04-held-out-execution.go.txt",
+      "sha256": "62373b92fefe3fb81dfe6b4e80bc7780501307a9bbea547f48823188eed978da",
+      "original_root_pin": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/fragment-04-held-out-execution.go.txt",
+      "bytes": 60002
+    },
+    {
+      "path": "adapter-source/fragment-05-held-out-operator-tests.go.txt",
+      "sha256": "31eae507efe46f083d4ec486dfe64e0dfe81a42358645783fce366e461c69254",
+      "original_root_pin": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/fragment-05-held-out-operator-tests.go.txt",
+      "bytes": 31525
+    },
+    {
+      "path": "adapter-source/fragment-06-held-out-operator.go.txt",
+      "sha256": "e37731264b6439a070815f9e03b6a72c6770c66acb3ee4858f090f99a541d843",
+      "original_root_pin": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/fragment-06-held-out-operator.go.txt",
+      "bytes": 70580
+    },
+    {
+      "path": "adapter-source/fragment-07-held-out-two-b-addendum.go.txt",
+      "sha256": "7e1b389cbe3d2f7a0e8d2e8face216fd832b0abfa009672c1ed1d895bec8cddf",
+      "original_root_pin": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/fragment-07-held-out-two-b-addendum.go.txt",
+      "bytes": 14284
+    },
+    {
+      "path": "adapter-source/fragment-08-held-out-two-b-composed-tests.go.txt",
+      "sha256": "42e2f6d48d3fbe01a4d9fba466941f7d7050133e4ca3e1098268f4b90901afe5",
+      "original_root_pin": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/fragment-08-held-out-two-b-composed-tests.go.txt",
+      "bytes": 52065
+    },
+    {
+      "path": "adapter-source/fragment-09-held-out-amendment.go.txt",
+      "sha256": "37bbfd1026274b1343f97368b1ea3cbc5e890d6195606466f2ddafd02cf82651",
+      "original_root_pin": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/fragment-09-held-out-amendment.go.txt",
+      "bytes": 24758
+    },
+    {
+      "path": "adapter-source/fragment-10-held-out-command.go.txt",
+      "sha256": "9bcebc5141f218a29e809195b7a095269dbe58fd5a8f8e5dbbe1ee282d447081",
+      "original_root_pin": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/fragment-10-held-out-command.go.txt",
+      "bytes": 17315
+    },
+    {
+      "path": "adapter-source/fragment-11-held-out-fresh-single-b-tests.go.txt",
+      "sha256": "1f0f1d0f6c136f6f616a40e3b842ab2edaf46eb6d442b248905773a8272ae378",
+      "original_root_pin": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/fragment-11-held-out-fresh-single-b-tests.go.txt",
+      "bytes": 66611
+    },
+    {
+      "path": "adapter-source/fragment-12-held-out-fresh-single-b.go.txt",
+      "sha256": "7f06c242ff81fe97a5fabc0351e31786e599ac4a568e6d99e329246ff1d62a88",
+      "original_root_pin": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/fragment-12-held-out-fresh-single-b.go.txt",
+      "bytes": 39110
+    },
+    {
+      "path": "adapter-source/fragment-13-held-out-public-pilot-after.go.txt",
+      "sha256": "4e68b22b261db4b4cce9bc66d9192bb60d0208e341252bda318e97f8399a4d9d",
+      "original_root_pin": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/fragment-13-held-out-public-pilot-after.go.txt",
+      "bytes": 14216
+    },
+    {
+      "path": "adapter-source/fragment-14-held-out-public-pilot-command.go.txt",
+      "sha256": "26a219e0a5c3b93621e8d41dd0cd5546110884d9e774b388b676e152b7edf0fb",
+      "original_root_pin": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/fragment-14-held-out-public-pilot-command.go.txt",
+      "bytes": 6981
+    },
+    {
+      "path": "adapter-source/fragment-15-held-out-public-pilot-tests.go.txt",
+      "sha256": "0f54d21eca9c796715bea3e698c056e0cfd3815b7dbab7c4e3af1b5927d05604",
+      "original_root_pin": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/fragment-15-held-out-public-pilot-tests.go.txt",
+      "bytes": 81123
+    },
+    {
+      "path": "adapter-source/fragment-16-held-out-fresh-exclusion-builder-tests.go.txt",
+      "sha256": "474148bb16db59ae0b49af7f320cd531f6774aa405d2dd2127ffb713c16f8963",
+      "original_root_pin": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/fragment-16-held-out-fresh-exclusion-builder-tests.go.txt",
+      "bytes": 18629
+    },
+    {
+      "path": "adapter-source/fragment-17-held-out-fresh-exclusion-builder.go.txt",
+      "sha256": "535d3b4fb77a6770c0d7750ac8083d1002cebd3c208de60b29359b31bf0980c1",
+      "original_root_pin": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/fragment-17-held-out-fresh-exclusion-builder.go.txt",
+      "bytes": 11406
+    },
+    {
+      "path": "adapter-source/fragment-18-held-out-public-pilot-oci-repin-tests.go.txt",
+      "sha256": "78002fb498bd1804c713ec458562677dac52af22dc27455ded2b131ef7e8415c",
+      "original_root_pin": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/fragment-18-held-out-public-pilot-oci-repin-tests.go.txt",
+      "bytes": 2426
+    },
+    {
+      "path": "adapter-source/fragment-19-held-out-public-pilot.go.txt",
+      "sha256": "8de729a9a530bf9f47f804911227ce825c9346cfce30f1ae007f7c667cefc7e3",
+      "original_root_pin": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/tool225-source-pins/fragment-19-held-out-public-pilot.go.txt",
+      "bytes": 57378
+    }
+  ],
+  "total_files": 19,
+  "total_bytes": 635450,
+  "source_packet_manifest_sha256": "b8507cbfb38d1170d5fdf067a3621963cc9407a97ce340a4189d059585917c32",
+  "actual_compiler_input_manifest_sha256": "51f5f5d71f4dbdb744f97edc390db154ea830ae17e675d1d0fc249cb113ad480",
+  "excludes": [
+    "whole source export/workspace",
+    "credentials and live environment files",
+    "private seed/plan payloads",
+    "unstarted second committed seed",
+    "provider response/log payloads",
+    "binary or Docker image payloads"
+  ]
+}

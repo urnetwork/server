@@ -1,0 +1,362 @@
+// Synthetic native-shape ancestry covers census construction without opening
+// retained campaigns, drawing entropy, generating providers, or running jobs.
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"reflect"
+	"sort"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+)
+
+// All pins refer to canonical private temporary files; the release capability
+// substitutes only synthetic ancestry, never serialized production identities.
+type heldOutFreshExclusionBuilderFixture struct {
+	Root     string
+	Config   heldOutFreshSingleExclusionBuildConfig
+	Facts    heldOutFreshSingleFacts
+	Prior    heldOutExclusions
+	Original heldOutPrivatePlan
+	Public   heldOutPublicPlan
+	Release  heldOutRelease
+	Settings heldOutOperatorSettings
+}
+
+// Keeps review pins explicit after synthetic byte mutations, not by scanning.
+func (self *heldOutFreshExclusionBuilderFixture) refreshSources() {
+	self.Config.ReviewedSources = append(append([]heldOutPinnedFile{}, self.Prior.Sources...),
+		self.Facts.OriginalPrivatePlan, self.Facts.OriginalPublicPlan)
+}
+
+// Re-pins only the synthetic original pair so tests can reach structural guards.
+func (self *heldOutFreshExclusionBuilderFixture) writeOriginal(t *testing.T, content []byte) {
+	t.Helper()
+	self.Facts.OriginalPrivatePlan = heldOutOpWrite(t, self.Facts.OriginalPrivatePlan.Path, content)
+	self.Public.PrivatePlanSha256 = self.Facts.OriginalPrivatePlan.Sha256
+	self.Facts.OriginalPublicPlan = heldOutOpJson(t, self.Facts.OriginalPublicPlan.Path, self.Public)
+	self.refreshSources()
+}
+
+// A complete prior catalog deliberately predates two separately committed
+// synthetic positions, one failed and one provably unstarted.
+func newHeldOutFreshExclusionBuilderFixture(t *testing.T) *heldOutFreshExclusionBuilderFixture {
+	t.Helper()
+	root := newCalibrationFileRoot(t)
+	if err := validateHeldOutPrivateDirectory(root); err != nil {
+		t.Fatal("synthetic fixture lacks its required private boundary", err)
+	}
+	self := &heldOutFreshExclusionBuilderFixture{Root: root, Settings: defaultHeldOutOperatorSettings()}
+	self.Facts = heldOutFreshSingleFacts{PrivateRoot: filepath.Join(root, "synthetic-fresh-campaign"),
+		PublicPlanPath: filepath.Join(root, "synthetic-fresh-public-plan.json"),
+		OriginalRoot:   filepath.Join(root, "synthetic-original-campaign"), PublicPilotSeed: 20200103, Margin: .2}
+	self.Release.freshSingleFacts = &self.Facts
+	priorSeed := fmt.Sprintf("%064x", 7201)
+	priorProviders := heldOutDigest([]byte("synthetic retained provider bytes\n"))
+	priorCommitment := heldOutDigest([]byte("synthetic retained seed commitment\n"))
+	source := heldOutOpJson(t, filepath.Join(root, "synthetic-prior-identities.json"), map[string]any{
+		"round_seed_hex": priorSeed, "public_workload_seed": int64(20261024),
+		"providers_sha256": priorProviders, "seed_commitment": priorCommitment})
+	self.Prior = heldOutExclusions{Schema: 1, Kind: "sim-latency-held-out-exclusions", Complete: true,
+		ReviewedAt: time.Unix(1500000010, 0).UTC(), Sources: []heldOutPinnedFile{source},
+		PrivateSeedHexes: []string{priorSeed}, EffectiveSeeds: []int64{20261024},
+		ProviderDigests: []string{priorProviders}, RetiredCommitments: []string{priorCommitment}}
+	priorPin := heldOutOpJson(t, filepath.Join(root, "synthetic-historical-exclusions.json"), self.Prior)
+	rounds, outcomes := newHeldOutAmendedOutcomes(2)
+	for index := range rounds {
+		round := &rounds[index]
+		round.PrivateSeedHex = fmt.Sprintf("%064x", 9101+index)
+		seed, err := heldOutEffectiveSeed(round.PrivateSeedHex)
+		if err != nil {
+			t.Fatal(err)
+		}
+		round.EffectiveSeed = seed
+		round.Public.ProvidersSha256 = heldOutDigest([]byte(fmt.Sprintf("synthetic original providers %d", index)))
+		round.Public.SeedCommitment = heldOutDigest([]byte(fmt.Sprintf("synthetic original commitment %d", index)))
+		for _, job := range round.Public.Jobs {
+			artifacts := filepath.Join(heldOutJobRoot(self.Facts.OriginalRoot, round.Public, job), "artifacts")
+			for _, name := range []string{"canonical.patch", "precommitted-request.json", "providers.yml"} {
+				heldOutOpWrite(t, filepath.Join(artifacts, name), []byte("synthetic immutable input "+name+"\n"))
+			}
+		}
+	}
+	self.Original = heldOutPrivatePlan{Schema: 1, Kind: "sim-latency-held-out-private-plan", CampaignId: heldOutOpId(9701),
+		PreparedAt: time.Unix(1500000000, 0).UTC(),
+		Config: heldOutPreparationConfig{Protocol: heldOutProtocolThreeABridgeTwoB, PrivateRoot: self.Facts.OriginalRoot,
+			GeneratorFiles: []heldOutGeneratorFile{}, Scripts: []heldOutPinnedFile{}},
+		References: []heldOutReference{}, Rounds: rounds}
+	self.Facts.OriginalPrivatePlan = heldOutOpJson(t, filepath.Join(self.Facts.OriginalRoot, "private-plan.json"), self.Original)
+	self.Public = heldOutPublicPlan{Schema: 1, Kind: "sim-latency-held-out-public-plan", Protocol: heldOutProtocolThreeABridgeTwoB,
+		CampaignId: self.Original.CampaignId, PreparedAt: self.Original.PreparedAt,
+		PrivatePlanSha256: self.Facts.OriginalPrivatePlan.Sha256, DeferredFields: []string{"round_baseline_path", "round_baseline_sha256"},
+		Rounds: []heldOutPublicRound{rounds[0].Public, rounds[1].Public}}
+	self.Facts.OriginalPublicPlan = heldOutOpJson(t, filepath.Join(root, "synthetic-original-public-plan.json"), self.Public)
+	self.Facts.SelectedPublicPlan = heldOutOpJson(t, filepath.Join(root, "synthetic-selected-public-plan.json"),
+		map[string]any{"schema": 1, "synthetic": "immutable selected ancestry"})
+	for index := range outcomes[:3] {
+		if outcomes[index].Role == "worse" {
+			outcomes[index].RawScore = 15
+		}
+	}
+	failed := heldOutCampaignResult{Schema: 1, Kind: "sim-latency-held-out-screen", CampaignId: self.Original.CampaignId,
+		PlanSha256: self.Facts.SelectedPublicPlan.Sha256, Complete: true, Accepted: false, OrderedSeeds: 0,
+		Reasons: []string{"first_committed_seed_not_correctly_ordered"}, Outcomes: outcomes[:3], ClosedAt: time.Unix(1600000045, 0).UTC()}
+	self.Facts.FailedResult = heldOutOpJson(t, filepath.Join(self.Facts.OriginalRoot, "campaign-result.json"), failed)
+	approval := heldOutFreshSingleApproval{Schema: 1, Kind: "sim-latency-held-out-fresh-single-owner-approval",
+		Protocol: heldOutProtocolFreshSingleB, ApprovedAt: time.Unix(1600000060, 0).UTC(), FailedResultSha256: self.Facts.FailedResult.Sha256,
+		PrivateRoot: self.Facts.PrivateRoot, PublicPlanPath: self.Facts.PublicPlanPath, FreshSeedCount: 1,
+		ControlReplicates: 9, CandidateReplicates: 9, ExecutionLimitSeconds: 10800, Alpha: .05, Margin: self.Facts.Margin,
+		FreshControlRequired: true, AllThreeRequired: true, RetainFailedScreen: true, SecondSeedUnstarted: true,
+		NoReplacement: true, PatchPolicyOnly: true, ActivationAuthorized: false}
+	self.Config = heldOutFreshSingleExclusionBuildConfig{Schema: 1, Kind: "sim-latency-held-out-fresh-single-exclusion-build",
+		Protocol: heldOutProtocolFreshSingleB, Stage: "before_public_pilot",
+		Approval: heldOutOpJson(t, filepath.Join(root, "synthetic-owner-approval.json"), approval), PriorExclusions: priorPin,
+		ReviewedAt: time.Unix(1600000075, 0).UTC(), OutputPath: filepath.Join(root, "synthetic-new-exclusions.json")}
+	self.refreshSources()
+	return self
+}
+
+// Every negative test starts from canonical private storage and complete native
+// slices, so a setup refusal cannot masquerade as the intended guarded failure.
+func TestHeldOutFreshExclusionBuilderFixtureHasCompletePrivateShape(t *testing.T) {
+	self := newHeldOutFreshExclusionBuilderFixture(t)
+	if err := validateHeldOutPrivateDirectory(self.Root); err != nil {
+		t.Fatal(err)
+	}
+	if self.Original.References == nil || self.Original.Config.GeneratorFiles == nil || self.Original.Config.Scripts == nil ||
+		self.Public.DeferredFields == nil || self.Public.Rounds == nil || self.Original.Rounds == nil {
+		t.Fatal("synthetic native fixture has a required null slice")
+	}
+	for _, round := range self.Original.Rounds {
+		if round.Public.Jobs == nil {
+			t.Fatal("synthetic native round has a required null job slice")
+		}
+	}
+	privateBytes, err := readHeldOutPinned(self.Facts.OriginalPrivatePlan, self.Settings.MaximumBytes, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var original heldOutPrivatePlan
+	if err := decodeHeldOutComplete(privateBytes, &original, "synthetic fixture private shape"); err != nil {
+		t.Fatal("synthetic native fixture cannot reach the actual builder", err)
+	}
+	publicBytes, err := readHeldOutPinned(self.Facts.OriginalPublicPlan, self.Settings.MaximumBytes, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var public heldOutPublicPlan
+	if err := decodeHeldOutComplete(publicBytes, &public, "synthetic fixture public shape"); err != nil {
+		t.Fatal("synthetic public fixture cannot reach the actual builder", err)
+	}
+	if !reflect.DeepEqual(original, self.Original) || !reflect.DeepEqual(public, self.Public) {
+		t.Fatal("synthetic native fixture changed during complete typed decoding")
+	}
+}
+
+// Every rejected preparation leaves no result or fresh campaign claim.
+func (self *heldOutFreshExclusionBuilderFixture) requireRefusal(t *testing.T) {
+	t.Helper()
+	if pin, err := prepareHeldOutFreshSingleExclusions(self.Config, self.Release, self.Settings); err == nil || pin != (heldOutPinnedFile{}) {
+		t.Fatal("invalid synthetic census accepted or returned an output pin", err)
+	}
+	for _, path := range []string{self.Config.OutputPath, self.Facts.PrivateRoot, self.Facts.PublicPlanPath} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("refusal wrote a census or fresh campaign claim", path, err)
+		}
+	}
+}
+
+// The historical catalog alone is valid but insufficient. Both original native
+// positions and all four exact identity sets appear in the newly authenticated file.
+func TestHeldOutFreshExclusionBuilderClosesHistoricalTwoPositionGap(t *testing.T) {
+	self := newHeldOutFreshExclusionBuilderFixture(t)
+	if err := validateHeldOutExclusions(self.Prior, self.Settings.MaximumBytes); err != nil {
+		t.Fatal("synthetic historical catalog must be independently valid", err)
+	}
+	before := self.Facts.OriginalPrivatePlan.Sha256
+	pin, err := prepareHeldOutFreshSingleExclusions(self.Config, self.Release, self.Settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := readHeldOutPinned(pin, self.Settings.MaximumBytes, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var catalog heldOutExclusions
+	if err := decodeHeldOutComplete(content, &catalog, "synthetic completed catalog"); err != nil {
+		t.Fatal(err)
+	}
+	if len(catalog.Sources) != 3 || len(catalog.PrivateSeedHexes) != 3 || len(catalog.EffectiveSeeds) != 3 ||
+		len(catalog.ProviderDigests) != 3 || len(catalog.RetiredCommitments) != 3 || !catalog.Complete || !catalog.ReviewedAt.Equal(self.Config.ReviewedAt) {
+		t.Fatal("new catalog omitted native identity sets or reviewed source closure")
+	}
+	if err := validateHeldOutExclusions(catalog, self.Settings.MaximumBytes); err != nil {
+		t.Fatal("new catalog failed the actual retained-source authenticator", err)
+	}
+	info, err := os.Lstat(pin.Path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0400 || !bytes.HasSuffix(content, []byte("\n")) {
+		t.Fatal("new catalog is not immutable owned durable-shape output", err)
+	}
+	if _, err := readHeldOutPinned(heldOutPinnedFile{Path: self.Facts.OriginalPrivatePlan.Path, Sha256: before}, self.Settings.MaximumBytes, true); err != nil {
+		t.Fatal("builder changed original seed material", err)
+	}
+	if _, err := os.Lstat(self.Facts.PrivateRoot); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("census builder created a fresh campaign", err)
+	}
+}
+
+// Retained duplicates and arbitrary review ordering normalize deterministically.
+func TestHeldOutFreshExclusionBuilderSortsAndDeduplicatesEverySet(t *testing.T) {
+	self := newHeldOutFreshExclusionBuilderFixture(t)
+	self.Prior.Sources = append(self.Prior.Sources, self.Prior.Sources[0])
+	self.Prior.PrivateSeedHexes = append(self.Prior.PrivateSeedHexes, self.Prior.PrivateSeedHexes[0])
+	self.Prior.EffectiveSeeds = append(self.Prior.EffectiveSeeds, self.Prior.EffectiveSeeds[0])
+	self.Prior.ProviderDigests = append(self.Prior.ProviderDigests, self.Prior.ProviderDigests[0])
+	self.Prior.RetiredCommitments = append(self.Prior.RetiredCommitments, self.Prior.RetiredCommitments[0])
+	self.Config.PriorExclusions = heldOutOpJson(t, self.Config.PriorExclusions.Path, self.Prior)
+	self.refreshSources()
+	for left, right := 0, len(self.Config.ReviewedSources)-1; left < right; left, right = left+1, right-1 {
+		self.Config.ReviewedSources[left], self.Config.ReviewedSources[right] = self.Config.ReviewedSources[right], self.Config.ReviewedSources[left]
+	}
+	pin, err := prepareHeldOutFreshSingleExclusions(self.Config, self.Release, self.Settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := readHeldOutPinned(pin, self.Settings.MaximumBytes, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var catalog heldOutExclusions
+	if err := decodeHeldOutComplete(content, &catalog, "synthetic sorted catalog"); err != nil {
+		t.Fatal(err)
+	}
+	if len(catalog.Sources) != 3 || len(catalog.PrivateSeedHexes) != 3 || len(catalog.EffectiveSeeds) != 3 ||
+		len(catalog.ProviderDigests) != 3 || len(catalog.RetiredCommitments) != 3 ||
+		!sort.StringsAreSorted(catalog.PrivateSeedHexes) || !sort.StringsAreSorted(catalog.ProviderDigests) ||
+		!sort.StringsAreSorted(catalog.RetiredCommitments) ||
+		!sort.SliceIsSorted(catalog.EffectiveSeeds, func(i int, j int) bool { return catalog.EffectiveSeeds[i] < catalog.EffectiveSeeds[j] }) ||
+		!sort.SliceIsSorted(catalog.Sources, func(i int, j int) bool { return catalog.Sources[i].Path < catalog.Sources[j].Path }) {
+		t.Fatal("catalog normalization was incomplete")
+	}
+}
+
+// A review omitting either original source cannot assert complete-now output.
+func TestHeldOutFreshExclusionBuilderRequiresCompleteReviewedSourceList(t *testing.T) {
+	self := newHeldOutFreshExclusionBuilderFixture(t)
+	self.Config.ReviewedSources = append([]heldOutPinnedFile{}, self.Prior.Sources...)
+	self.requireRefusal(t)
+}
+
+// Hash-correct structure does not waive independent retained source bytes.
+func TestHeldOutFreshExclusionBuilderRejectsInvalidHistoricalPin(t *testing.T) {
+	self := newHeldOutFreshExclusionBuilderFixture(t)
+	self.Config.PriorExclusions.Sha256 = strings.Repeat("f", 64)
+	self.requireRefusal(t)
+}
+
+// The native constructor cannot redirect the frozen historical catalog with a
+// serialized config; only synthetic code capabilities admit temporary sources.
+func TestHeldOutFreshExclusionBuilderNativePriorCannotBeOverridden(t *testing.T) {
+	self := newHeldOutFreshExclusionBuilderFixture(t)
+	self.Release.freshSingleFacts = nil
+	self.requireRefusal(t)
+}
+
+// Adjacent int64 values above 2^53 must never collapse through float64 parsing.
+func TestHeldOutFreshExclusionBuilderPreservesExactLargeIntegerSeed(t *testing.T) {
+	self := newHeldOutFreshExclusionBuilderFixture(t)
+	seed := self.Original.Rounds[0].EffectiveSeed
+	if seed <= 9007199254740992 {
+		t.Fatal("synthetic native seed must exercise exact-integer precision")
+	}
+	content, err := json.Marshal(self.Original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := bytes.Replace(content, []byte(strconv.FormatInt(seed, 10)), []byte(strconv.FormatInt(seed+1, 10)), 1)
+	if bytes.Equal(content, changed) {
+		t.Fatal("synthetic exact-integer mutation not applied")
+	}
+	self.writeOriginal(t, changed)
+	self.requireRefusal(t)
+}
+
+// The strict complete parser rejects omitted nested native fields despite Go
+// zero values; no output is written merely because the surrounding pin matches.
+func TestHeldOutFreshExclusionBuilderRejectsIncompletePrivateShape(t *testing.T) {
+	self := newHeldOutFreshExclusionBuilderFixture(t)
+	content, err := json.Marshal(self.Original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	needle := []byte(`"private_seed_hex":"` + self.Original.Rounds[0].PrivateSeedHex + `",`)
+	changed := bytes.Replace(content, needle, nil, 1)
+	if bytes.Equal(content, changed) {
+		t.Fatal("synthetic missing-field mutation not applied")
+	}
+	self.writeOriginal(t, changed)
+	self.requireRefusal(t)
+}
+
+// Public metadata and private full-round identities must stay byte-equivalent
+// as typed values, not merely share a seed count or campaign label.
+func TestHeldOutFreshExclusionBuilderRejectsChangedPublicRound(t *testing.T) {
+	self := newHeldOutFreshExclusionBuilderFixture(t)
+	self.Public.Rounds[1].ProvidersSha256 = heldOutDigest([]byte("synthetic different public provider bytes"))
+	self.Facts.OriginalPublicPlan = heldOutOpJson(t, self.Facts.OriginalPublicPlan.Path, self.Public)
+	self.refreshSources()
+	self.requireRefusal(t)
+}
+
+// Runtime state in the original second position remains a hard refusal.
+func TestHeldOutFreshExclusionBuilderPreservesUnstartedSecondPosition(t *testing.T) {
+	self := newHeldOutFreshExclusionBuilderFixture(t)
+	round := self.Original.Rounds[1].Public
+	artifacts := filepath.Join(heldOutJobRoot(self.Facts.OriginalRoot, round, round.Jobs[0]), "artifacts")
+	heldOutOpWrite(t, filepath.Join(artifacts, "synthetic-result.json"), []byte("{}\n"))
+	self.requireRefusal(t)
+}
+
+// Public direct integer collisions are checked after both old commitments are
+// merged, not against the historically valid but incomplete old catalog alone.
+func TestHeldOutFreshExclusionBuilderRejectsOriginalEffectiveSeedCollision(t *testing.T) {
+	self := newHeldOutFreshExclusionBuilderFixture(t)
+	self.Facts.PublicPilotSeed = self.Original.Rounds[1].EffectiveSeed
+	self.requireRefusal(t)
+}
+
+// A post-pilot catalog needs actual separately frozen public evidence schemas.
+// Until those exist, an after-stage name cannot retire or authorize a workload.
+func TestHeldOutFreshExclusionBuilderRefusesUnsupportedAfterPilotStage(t *testing.T) {
+	self := newHeldOutFreshExclusionBuilderFixture(t)
+	self.Config.Stage = "after_public_pilot"
+	self.requireRefusal(t)
+}
+
+// Immutable prior evidence is never silently replaced by a second invocation.
+func TestHeldOutFreshExclusionBuilderExistingOutputIsNeverOverwritten(t *testing.T) {
+	self := newHeldOutFreshExclusionBuilderFixture(t)
+	before := []byte("synthetic retained output\n")
+	heldOutOpWrite(t, self.Config.OutputPath, before)
+	if _, err := prepareHeldOutFreshSingleExclusions(self.Config, self.Release, self.Settings); err == nil {
+		t.Fatal("existing catalog accepted for replacement")
+	}
+	after, err := os.ReadFile(self.Config.OutputPath)
+	if err != nil || !reflect.DeepEqual(before, after) {
+		t.Fatal("existing catalog was changed", err)
+	}
+}
+
+// Both the read bound and output-parent ownership apply before any new file.
+func TestHeldOutFreshExclusionBuilderRejectsBoundedReadFailure(t *testing.T) {
+	self := newHeldOutFreshExclusionBuilderFixture(t)
+	self.Settings.MaximumBytes = 16
+	self.requireRefusal(t)
+}
