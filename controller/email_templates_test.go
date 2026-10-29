@@ -86,6 +86,7 @@ func TestEmailTemplatesRender(t *testing.T) {
 		// the security notices are email only: no sms body
 		{securityWalletNoticeSample(), false},
 		{securitySignInNoticeSample(model.SecuritySignInAdded, model.SecuritySignInRemoved), false},
+		{securityApiKeyNoticeSample(model.SecurityApiKeyCreated, model.SecurityApiKeyDeleted), false},
 		{&AuthPasswordSetTemplate{PasswordSetNotice: model.PasswordSetNotice{ChangeTime: &paymentFailedNextAttempt, Via: model.SecurityNoticeViaWeb}}, true},
 	}
 

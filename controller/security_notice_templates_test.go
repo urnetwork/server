@@ -248,9 +248,8 @@ func TestPasswordChangedNoticeSaysWhenAndHow(t *testing.T) {
 	}
 }
 
-// The security notices go to email only: neither is allowed by SMS, a phone
-// number never reaches the SMS provider with one, and an email address gets the
-// email.
+// The security notices go to email only: none is allowed by SMS, a phone number
+// never reaches the SMS provider with one, and an email address gets the email.
 func TestSecurityNoticesAreNeverSentBySms(t *testing.T) {
 	smsEndpoint := newAwsEndpoint(t, "application/x-amz-json-1.0", `{"MessageId":"synthetic-message-id"}`)
 	smsSender := smsEndpoint.sender(5 * time.Second)
@@ -267,6 +266,7 @@ func TestSecurityNoticesAreNeverSentBySms(t *testing.T) {
 	for _, template := range []Template{
 		securityWalletNoticeSample(),
 		securitySignInNoticeSample(model.SecuritySignInAdded),
+		securityApiKeyNoticeSample(model.SecurityApiKeyCreated),
 	} {
 		if SmsAllowed(template) {
 			t.Fatalf("%s is allowed by SMS; AWS approved SMS for verification, password reset and password changed only", template.Name())

@@ -112,6 +112,9 @@ var accountMessageTemplates = map[string]func() Template{
 	(&SecuritySignInChangedTemplate{}).Name(): func() Template {
 		return &SecuritySignInChangedTemplate{}
 	},
+	(&SecurityApiKeyChangedTemplate{}).Name(): func() Template {
+		return &SecurityApiKeyChangedTemplate{}
+	},
 }
 
 // Counts delivery outcomes by template and result (sent, retried, abandoned,

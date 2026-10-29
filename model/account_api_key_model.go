@@ -39,6 +39,9 @@ type CreateApiKeyResult struct {
 // to commit: postgres turned that commit into a rollback, and server.Tx retried
 // it for its whole retry window (a minute) before the call failed. A failed
 // statement now raises, which ends the transaction at once.
+//
+// A key created owes the API key security notice in the same transaction
+// (security_notice_api_key.go), with the key's name and never the key.
 func CreateApiKey(createApiKey *CreateApiKeyArgs, session *session.ClientSession) (result *CreateApiKeyResult, err error) {
 	// the name is client input, so a name the column cannot store is a
 	// refusal, not a failed statement
@@ -91,6 +94,12 @@ func CreateApiKey(createApiKey *CreateApiKeyArgs, session *session.ClientSession
 			createApiKey.Name,
 		))
 
+		oweSecurityApiKeyNoticeInTx(
+			session.Ctx,
+			tx,
+			session.ByJwt.NetworkId,
+			newSecurityApiKeyChange(session.Ctx, SecurityApiKeyCreated, createApiKey.Name, nil),
+		)
 	})
 
 	if err != nil {
@@ -107,9 +116,15 @@ func CreateApiKey(createApiKey *CreateApiKeyArgs, session *session.ClientSession
 // A failed delete raises, which ends the transaction at once; the error result
 // is always nil. Its error used to be assigned to the result while the
 // transaction went on to a commit that server.Tx retried for a minute.
+//
+// A key deleted owes the API key security notice in the same transaction
+// (security_notice_api_key.go), with the key's name and creation time, read
+// before the delete. An id the network has no key for deletes nothing and owes
+// nothing.
 func DeleteApiKey(apiKeyId *server.Id, session *session.ClientSession) error {
 	server.Tx(session.Ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
+		watch := watchApiKeyDeleteInTx(session.Ctx, tx, session.ByJwt.NetworkId, apiKeyId)
+		tag := server.RaisePgResult(tx.Exec(
 			session.Ctx,
 			`
 				DELETE FROM account_api_key
@@ -118,6 +133,9 @@ func DeleteApiKey(apiKeyId *server.Id, session *session.ClientSession) error {
 			apiKeyId,
 			session.ByJwt.NetworkId,
 		))
+		if tag.RowsAffected() == 1 {
+			watch.noticeInTx(session.Ctx, tx)
+		}
 	})
 	return nil
 }
