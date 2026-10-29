@@ -7,7 +7,8 @@ package work
 //   - SnSyncFleetBindings (about every minute): applies the coordinator's
 //     finalized FleetBound, FleetBindingRevoked and FleetBindingCleaned logs
 //     to the live binding census (controller/sn_fleet_binding.go), then
-//     refreshes the claimed fleet counts.
+//     refreshes the verify cohort's priority set of live claimed-fleet
+//     members and the claimed fleet counts.
 //   - SnReadIncentive (about every two minutes): reads the on-chain incentive
 //     census once per native tempo (controller/sn_incentive.go). Most runs
 //     make no RPC at all; the reader decides.

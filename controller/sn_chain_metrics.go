@@ -70,6 +70,11 @@ var (
 		Help: "Unix time the newest incentive census was stored.",
 	})
 
+	snVerifyCohortPriorityMembers = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "urnetwork", Subsystem: "verify_cohort", Name: "priority_members",
+		Help: "Claimed-fleet members in the verify cohort's priority set after the last binding sync run: at most an even share of the cohort (cohort size / 200) per live claimed fleet.",
+	})
+
 	snHeadSummaryUploads = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "urnetwork", Subsystem: "sn_head_summary", Name: "uploads_total",
 		Help: "Validator head summary uploads (POST /sn/head-summary), by result: stored, kept (the tempo's summary at an equal or later snapshot is already stored), invalid (400: malformed, not canonical, inconsistent or wrongly signed), not_accepted (403: the hotkey is not an accepted validator), rate_limited (429), too_large (413), unavailable (5xx).",
@@ -127,6 +132,7 @@ func init() {
 		snFleetBindingSyncLastSuccess,
 		snClaimedFleetsGauge,
 		snClaimedFleetMembersGauge,
+		snVerifyCohortPriorityMembers,
 		snIncentiveReads,
 		snIncentiveReadErrors,
 		snIncentiveResponseBytes,

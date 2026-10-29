@@ -317,7 +317,9 @@ func snClaimedFleets(ctx context.Context, deploymentKey model.StDeploymentKey, e
 }
 
 // Refreshes what the claimed fleets at the current settlement epoch drive,
-// after each sync run: the dashboard counts.
+// after each sync run: the dashboard counts, and the verify cohort's priority
+// set of live claimed-fleet members, at most a per-fleet share of each
+// (LEADERTOP.md design question 6).
 func refreshSnClaimedFleetsNow(ctx context.Context) {
 	server.HandleError(func() {
 		claimed, ok, err := SnClaimedFleetsNow(ctx)
@@ -336,6 +338,21 @@ func refreshSnClaimedFleetsNow(ctx context.Context) {
 			snClaimedFleetsGauge.WithLabelValues(status).Set(float64(count))
 		}
 		snClaimedFleetMembersGauge.Set(float64(members))
+
+		settings := VerifySettings()
+		if settings.CohortSize <= 0 || settings.CohortDeploymentKey == "" {
+			return
+		}
+		fleets := [][]server.Id{}
+		for _, fleet := range claimed.LiveFleets() {
+			clientIds := make([]server.Id, 0, len(fleet.Members))
+			for _, member := range fleet.Members {
+				clientIds = append(clientIds, member.ClientId)
+			}
+			fleets = append(fleets, clientIds)
+		}
+		priority := model.SetVerifyCohortPriority(ctx, settings.CohortDeploymentKey, fleets, model.VerifyCohortPriorityPerFleet(settings))
+		snVerifyCohortPriorityMembers.Set(float64(priority))
 	}, func(err error) {
 		glog.Infof("[sn]claimed fleet refresh failed: %s\n", err)
 	})

@@ -1,7 +1,7 @@
 {
   "uid": "urnetwork-sn-board-chain",
   "title": "urnetwork / sn board chain",
-  "description": "The SN top board's chain-side readers (server LEADERTOP.md \u00a75.7, \u00a76.1, \u00a76.2): the live fleet binding sync, the on-chain incentive reader and the validator head-summary ingest. Counts and ages only; no client, network or hotkey is a label.",
+  "description": "The SN top board's chain-side readers (server LEADERTOP.md \u00a75.7, \u00a76.1, \u00a76.2): the live fleet binding sync, the on-chain incentive reader, the validator head-summary ingest and the verify cohort's claimed-fleet priority. Counts and ages only; no client, network or hotkey is a label.",
   "tags": [
     "urnetwork",
     "subtensor",
@@ -538,6 +538,66 @@
           "refId": "A",
           "expr": "sum by (result) (increase(urnetwork_sn_head_summary_uploads_total{env=\"$env\",service=\"api\",instance!=\"\"}[$__rate_interval]))",
           "legendFormat": "{{result}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 18,
+      "type": "stat",
+      "title": "cohort priority members",
+      "description": "Live claimed-fleet members in the verify cohort's priority set after the last binding sync run, at most cohort size / 200 per fleet. They are drawn into the cohort ahead of every other provider, within both cohort caps.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 31
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(urnetwork_verify_cohort_priority_members{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "members",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 19,
+      "type": "timeseries",
+      "title": "cohort priority admissions",
+      "description": "Verify next hops drawn from the claimed-fleet priority set and admitted, per interval, summed over the api processes.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 31
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(urnetwork_verify_cohort_priority_admissions_total{env=\"$env\",service=\"api\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "admissions"
         }
       ],
       "fieldConfig": {
