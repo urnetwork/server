@@ -270,17 +270,20 @@ func (self *providerLivenessLeaseWriter) oldest() (oldestTime time.Time, ok bool
 // of one full pass to the next, and the new ones whenever woken, until ctx
 // ends. One pass at a time.
 func (self *providerLivenessLeaseWriter) run(ctx context.Context) {
-	next := time.Now().Add(self.refreshInterval + self.jitter())
+	// one timer for the full passes, re-armed after each: a time.After per
+	// loop created a timer on every wake and left it in the timer heap
+	passTimer := time.NewTimer(self.refreshInterval + self.jitter())
+	defer passTimer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-self.wake:
 			self.pass(ctx, false)
-		case <-time.After(time.Until(next)):
+		case <-passTimer.C:
 			passStart := time.Now()
 			self.pass(ctx, true)
-			next = passStart.Add(self.refreshInterval + self.jitter())
+			passTimer.Reset(time.Until(passStart.Add(self.refreshInterval + self.jitter())))
 		}
 	}
 }

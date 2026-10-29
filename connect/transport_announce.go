@@ -687,13 +687,27 @@ func (self *ConnectionAnnounce) run() {
 	nextStartTime := server.NowUtc()
 	// consecutive sync rounds whose read failed
 	syncFailureCount := 0
+	// One timer for the next test and one for the next sync round, each re-armed
+	// only after it fires. A time.After for both on every round left the one
+	// that did not fire in the timer heap, the test's for 12 to 24 hours.
+	testTimer := time.NewTimer(nextTest())
+	defer testTimer.Stop()
+	syncTimer := time.NewTimer(self.retryTimeout(syncFailureCount))
+	defer syncTimer.Stop()
+	// a fired sync timer is re-armed after the round, for its outcome
+	syncTimerFired := false
 	for {
-		nextTestTimeout := nextTest()
+		if syncTimerFired {
+			syncTimer.Reset(self.retryTimeout(syncFailureCount))
+			syncTimerFired = false
+		}
 		select {
 		case <-self.ctx.Done():
 			return
-		case <-time.After(nextTestTimeout):
-		case <-time.After(self.retryTimeout(syncFailureCount)):
+		case <-testTimer.C:
+			testTimer.Reset(nextTest())
+		case <-syncTimer.C:
+			syncTimerFired = true
 			roundEndTime := server.NowUtc()
 
 			// FIXME need events to support kicking off connections from the model
