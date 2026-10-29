@@ -44385,7 +44385,14 @@ privacy-reduced shared ancestor. `hostpower-topology-unobservable` warns after
 two probes when the device/uplink or helper cannot produce a concrete class.
 
 For a nearest common PCI endpoint, `separate` requires successful complete
-secondary discovery within the existing six-level and 64-record bounds. The
+secondary discovery within the existing six-level and 64-record bounds. Any
+present kernel removable marker must also be read successfully and supply a
+recognized negative class `fixed`.
+A read failure, `unknown`, empty, or unrecognized value (including `0` or `1`)
+leaves topology unobservable unless an independent valid positive witness proves sharing; a
+complete descendant census cannot replace that independent marker authority.
+The positive kernel class `removable` proves sharing. An absent marker permits
+complete secondary discovery to establish `separate`. The
 helper retains directory-frontier evidence and a joined fixed discovery status;
 the extra overflow record is not hardware evidence. Failed discovery, an
 unresolved subsystem link, a reached depth frontier, or truncated output leaves
