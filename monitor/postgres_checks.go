@@ -387,9 +387,10 @@ func (self *pgConnectRateProbe) check(ctx context.Context, env *probeEnv) ([]fin
 		return nil, err
 	}
 	if !rateReady {
+		// No measured interval exists; silence cannot clear either rate incident.
 		return []finding{
-			healthyFinding("pg/connects-rate", tierWarn, "connects-rate", target),
-			healthyFinding("pg/connects-rate", tierWarn, "connects-storm", target),
+			{probeId: "pg/connects-rate", class: "connects-rate", target: target, clearHold: true},
+			{probeId: "pg/connects-rate", class: "connects-storm", target: target, clearHold: true},
 		}, nil
 	}
 
@@ -419,6 +420,14 @@ func (self *pgConnectRateProbe) check(ctx context.Context, env *probeEnv) ([]fin
 		); haveDaily && median >= 1.5*dailyMedian {
 			median = dailyMedian
 		}
+	}
+
+	if !haveBaseline {
+		// A measured rate without eligible learned history cannot prove recovery.
+		return []finding{
+			{probeId: "pg/connects-rate", class: "connects-rate", target: target, clearHold: true},
+			{probeId: "pg/connects-rate", class: "connects-storm", target: target, clearHold: true},
+		}, nil
 	}
 
 	switch {

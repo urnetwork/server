@@ -155,7 +155,8 @@ func TestRedisTtlAttributionAuthorityValidZeroAndFamilies(t *testing.T) {
 		breach := requireAlertClass(t, alerts, "ttl-leaks")
 		if len(alerts) != 1 || strings.Contains(breach.Observed, "sample_status=unavailable") ||
 			!strings.Contains(breach.Observed, fmt.Sprintf("sample_max_pttl_ms=%d", attribution.maxPTTLMillis)) ||
-			strings.Contains(breach.Action, "expire-leaked-ttls") != test.stream || strings.Contains(breach.Verify, "d8e34003") != test.stream {
+			strings.Contains(breach.Action, "current stream TTL contract") != test.stream ||
+			strings.Contains(breach.Action+breach.Verify, "expire-leaked-ttls") || strings.Contains(breach.Action+breach.Verify, "d8e34003") {
 			t.Fatalf("TTL attribution healthy control assertion: %s lost its independent breach or selected a wrong cleanup", test.name)
 		}
 	}
@@ -175,19 +176,19 @@ func TestRedisTtlAttributionAuthorityCurrentDetailReplacesPrior(t *testing.T) {
 	settings.Hosts[1].Name = "redis-keyspace.example"
 	signal := NewTTLLeaksSignal()
 	alerts, err := signal.Run(context.Background(), settings)
-	if err != nil || len(alerts) != 1 || !strings.Contains(alerts[0].Action, "expire-leaked-ttls") {
+	if err != nil || len(alerts) != 1 || !strings.Contains(alerts[0].Action, "current stream TTL contract") {
 		t.Fatal("detail freshness control did not begin with valid stream attribution")
 	}
 	reply = "5000 10 10 0 0 0 synthetic-private-sentinel 2000 300 28799985312000000 legacy-contracts"
 	alerts, err = signal.Run(context.Background(), settings)
-	if err != nil || len(alerts) != 1 || !strings.Contains(alerts[0].Observed, "sample_status=unavailable") || strings.Contains(alerts[0].Action, "expire-leaked-ttls") {
+	if err != nil || len(alerts) != 1 || !strings.Contains(alerts[0].Observed, "sample_status=unavailable") || strings.Contains(alerts[0].Action, "current stream TTL contract") {
 		t.Fatal("TTL detail freshness assertion: a prior stream sample supplied current attribution")
 	}
 	redisKeyspaceAuthorityPrivate(t, alerts)
 	reply = "5000 10 0 0 0 0 10 2000 300 28799985312000000 other"
 	alerts, err = signal.Run(context.Background(), settings)
 	if err != nil || len(alerts) != 1 || strings.Contains(alerts[0].Observed, "sample_status=unavailable") ||
-		!strings.Contains(alerts[0].Observed, "sample_other=10") || strings.Contains(alerts[0].Action, "expire-leaked-ttls") {
+		!strings.Contains(alerts[0].Observed, "sample_other=10") || strings.Contains(alerts[0].Action, "current stream TTL contract") {
 		t.Fatal("corrected current other-family attribution did not replace the prior stream sample")
 	}
 }

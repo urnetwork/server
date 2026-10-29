@@ -151,7 +151,8 @@ func TestEdgeIPv6SignalSyntheticRootCauseClasses(t *testing.T) {
 		t.Fatalf("timeout lacks upstream ACL diagnosis: %s", drop.Markdown())
 	}
 	if !strings.Contains(policy.Markdown(), "lower-metric management default") ||
-		!strings.Contains(policy.Observed, "route_device=management0") ||
+		!strings.Contains(policy.Observed, "route_device=differs-configured") ||
+		!strings.Contains(policy.Observed, "route_source=differs-configured") ||
 		!strings.Contains(policy.Action, "Warp 8924493") {
 		t.Fatalf("policy-route failure lacks the return-path diagnosis: %s", policy.Markdown())
 	}

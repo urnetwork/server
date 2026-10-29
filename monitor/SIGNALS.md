@@ -265,7 +265,7 @@ active missing capability and must not be read as green.
 | 2.2b | Conditional reader | `pg-freeze` reduces qualified native PG18 JSON duration records; existing JSON/verbose source prerequisites and full-window coverage are required. Missing prerequisites or partial coverage remain unknown. |
 | 2.5b | Runbook | `migrations` pins the retired queue: its guards and contract key dropped, its empty table kept until a later release drops it. The legacy settlement probe retired with the queue on 2026-10-24 (PARTITION-MAINTENANCE-PLAN.md, Part B). |
 | 2.5c | Runbook | `contract-rate`, `transfer-debits`, `open-contracts`, `task-health`, `migrations`, `pg-cpu`, `active-queries`, `wait-events`; exact target visitation and complete post-commit projection remain separately qualified evidence, not automatic probe coverage. |
-| 2.11b | Coverage gap | `pgbouncer-pool-starvation` reads the same exporter but alerts only on pools with no server; the busy-pool queue predicate and an exported wait time are missing |
+| 2.11b | Coverage gap | `pgbouncer-backlog` (§26.1) implements replacement backlog and oldest-wait bands without a server-count gate; the original server-gated saturation proposal is superseded, and an exported average-wait read remains missing |
 | 2.11c | Coverage gap | `pgbouncer-stalls` checks that 6432 accepts a connection; the listener-count, per-worker balance, overflow and hop-latency reads are missing |
 | 5.1 | Runbook | `contract-rate`, `provider-connections`, `task-canaries`, `redis-cluster`, `connection-rate`, `log-errors` |
 | 5.2 | Runbook | `redis-cluster`, `redis-process`, `log-errors` |
@@ -336,7 +336,7 @@ active missing capability and must not be read as green.
 | 17.4 | Runbook | `subtensor`, `subtensor-convergence`, `provenance` |
 | 22.10 | Coverage gap | `subnet-coverage` and the registered family readers share the executable evidence, retention and recovery acceptance tests; testnet campaign qualification and on-chain peer review before production paging are missing |
 | 14.7e | Runbook | `control-route-pressure`, `proxy-runtime`, `provenance`; actual local-authority/no-HTTP tests are release controls, not a production fallback detector |
-| 25.1 | Coverage gap | `contract-rate` counts committed contracts and `contract-stage-latency` measures mean latency; the per-service failure share and the seasonal reply floor are missing |
+| 25.1 | Coverage gap | `contract-failure-share` implements the per-service returned-call failure share; the seasonal reply floor and external Grafana rule/contact-point delivery proof remain missing |
 | 25.2 | Coverage gap | `connection-rate` counts connections PostgreSQL recorded; the Connect handshake-outcome reader is missing |
 | 25.3 | Coverage gap | `log-errors` classifies service error logs; the per-route API error share and request-rate floor are missing |
 | 25.4 | Coverage gap | `provider-connections` watches provider supply; the delivered-traffic floor is missing |
@@ -624,6 +624,17 @@ valid current count still uses the static 1,000/min outage floor. Missing or
 malformed current counts remain `cannot-observe`. Qualify this boundary with
 synthetic clock controls; no Main clock rollback is inferred. A pending learned
 band does not prove recovery of a preceding relative-rate incident.
+A valid count at or above the static floor with insufficient eligible learned
+history is a silent class/target-specific clear hold, not a complete healthy
+relative-rate verdict. It creates no incident and cannot clear an existing
+`contracts-collapse` incident. The measured static outage remains independently
+positive even without learned history. Once the existing learned comparison is
+qualified and in band, two complete healthy runs may clear under notifier
+policy; malformed, failed or canceled observations retain their error authority.
+This hold applies only to this probe/class/target and does not hide independent
+signals or authorize recovery of another target. These are source semantics,
+not evidence of a current throughput incident or an observed false recovery.
+
 
 False-negative qualifier: every valid observation, including a depressed one,
 enters the rolling one-hour baseline. The six-hour override only replaces an
@@ -2127,6 +2138,22 @@ are withheld. Cancellation and deadline causes remain recognizable without
 retaining private source causes; intentional host exclusions remain partial
 coverage. This boundary does not establish current runtime leakage or full
 settings equality, and valid aggregate warning thresholds remain unchanged.
+
+Prepared pool-only diagnostics retain `pool_retention_origin` as the closed
+`unknown`, `read_error`, or `response_rejected` owning-return-branch enum. A
+non-lifecycle read error can additionally carry
+`pool_retention_source_error_class` from the existing closed observation classes,
+and the existing finite `ssh_admission_failures` / `execution_boundaries` sets.
+The original source error/text/chain and all row cells are discarded. The private
+carrier is removed before unchanged legacy visibility routing/classification;
+only an expected generic pool-retention visibility identity receives the prepared
+suffix. It cannot activate provider or SSH-reset routing, change healthy/retained
+thresholds or clear history. Late context wrappers get no prepared suffix.
+A rejected response carries no read-error phase or class; legacy controlled
+parser shape-count error text remains unchanged. Joined metadata describes
+independent returned facts, never a common attempt, remote execution or backend
+cause. Initial-summary consumers require separately qualified projection-version
+support before interpreting these fields; no historical source phase is recovered.
 
 The application pool has a separate ownership failure: `GetNetworkUser` used
 to retain its profile-read client while four authentication helpers opened
@@ -5009,6 +5036,49 @@ Implementation convention: SIGNALS.md §1.6 (`settings-freshness`) maps to
 `signal_settings_freshness.go` and `signal_settings_freshness_test.go`.
 
 ### 1.7 Shared observation failures and observer-overlay route coverage
+
+Optional `-admission-diagnostic-dir` is off by default and requires an existing
+validated invocation witness plus a NEW private directory. It records only the
+first local global-slot attempt for each of `contract-degradation`,
+`pg-freeze-age`, and `transaction-horizon` in that process generation (three
+attempts total). It preserves the global four-signal/host-two policy, budgets,
+queries, cadence, visibility severity/Sustain, exclusions and incident identity.
+Startup fences the owned mode-0700 parent and newly created child with held
+no-follow directory descriptors and matching device/inode/mode/owner metadata.
+Emitter operations retain that child descriptor. Trusted ancestor selection
+remains the caller's private-path authority; hostile same-uid mutation after
+validation and privileged mount replacement are outside this fencing contract.
+A fixed numeric `local_admission_attempt` on the returned admission error joins
+only that same generation/key/slot to the private packet; key/time proximity
+alone does not join an Alert, native invocation or sibling failure.
+
+The bounded admission window includes enqueue/deadline, at most four initial
+holders with distinct grant ordinals, and at most 512 grant/release events.
+Grant ends that window, but the caller seals the terminal only AFTER its pre-Run
+context check. `granted_for_dispatch` means scheduler handoff, not Signal.Run or
+native entry. Cancellation after grant remains distinct from expiry without a
+grant. Initial holder ages are not queue age; a holder without an observed
+release inside this window is not proved leaked or stuck. Unknown keys, bad
+clock/occupancy or event overflow make event completeness unknown.
+
+While a permit is held, diagnostics do only bounded scalar sealing and a
+nonblocking transfer of preallocated storage. A separate finite emitter performs
+all validation, offset conversion, serialization, hashing and file operations;
+it shares no witness, handler or admission lock and is not joined on shutdown.
+Observation storage is bounded to 256 KiB; each of three packets is capped at
+128 KiB. There is no regular-file write wall-clock guarantee. Event completeness
+is separate from artifact acceptance: a reader requires the fixed committed
+receipt, exact byte count/SHA-256 and strict schema/framing. Data and a pending
+receipt are fully written, synced and closed before the receipt is atomically
+published by an exclusive hard link under its committed name. Missing, partial, failed or uncommitted output is
+unknown, even if data JSON says its events are complete. Canonical rehashed data
+also must satisfy the fixed terminal/event vocabulary and coherent complete
+window: nonnegative ordered offsets within the window, known distinct grants,
+valid grant/release occupancy and matching grant-versus-terminal state. A
+qualified incomplete artifact retains only a grounded fixed unknown reason;
+its existence never certifies timeline completeness. This makes no directory
+fsync/crash-durability promise. No live source/CPU/SQL/backend cause or health is
+inferred, and this prospective diagnostic cannot reconstruct earlier attempts.
 
 Mimir SSH query and Mimir-specific reduced-source intake is byte-bounded before
 native stdout/stderr buffering. Each query retains its existing explicit response
@@ -10992,6 +11062,18 @@ configured-publication incident after a complete stable observation; it does
 not establish that every deployed consumer is disabled. No configuration is
 changed by the probe.
 
+A `reason=settings-generation` visibility finding retains fixed
+`guard_phase=initial|disabled-intent|post-read` and
+`checker_result=not-current|error`. These identify only the refusing local
+comparison, not changed settings, a backend cause or publication state. An
+initial or disabled-intent refusal precedes this probe's Redis read; a
+post-read refusal follows its successful read but withholds acceptance of that
+result. These phase fields are not present on older findings: do not infer an
+old attempt's phase from a later observation. Parent cancellation remains a
+lifecycle error with no finding; embedded explicit immutable settings may omit
+the checker. No raw settings, field names or error text are published, and the
+class, reason, thresholds, source budgets and recovery rules remain unchanged.
+
 When enabled, one fixed-key `EVAL_RO` through the configured Redis entry reads
 `TYPE`, bounded `STRLEN`/`GET`, `PTTL` and `TIME` atomically. The installed Redis
 must support `EVAL_RO`; an unsupported command is unknown, with no writable
@@ -11067,6 +11149,22 @@ WARN `connects-storm` requires three consecutive samples above 2.5 times the
 median, with a median of at least 500/min. The first counter sample, a reset,
 and an unavailable baseline cannot establish either rate incident. A failed
 observation is an execution/visibility failure, not proof of zero connections.
+Counter warmup, cumulative-counter reset and a non-forward local sample clock
+also establish no measured rate. These successful but inconclusive counter
+observations stay silent and publish exact-class clear holds for `connects-rate`
+and `connects-storm`; they cannot count as complete absence toward clearing an
+already-open incident. They create no new alert or reporting owner. Two later
+qualified measured healthy observations can satisfy the unchanged notifier
+clear policy. A measured counter interval without the required eligible
+learned history also stays silent with the same exact-class holds: this leaf
+has no static relative-rate fallback. An unavailable baseline store, fewer than
+30 eligible trailing-hour samples, or history wholly outside the eligible
+clock window cannot establish either relative finding's absence. Recording a
+current measured rate for future learning remains unchanged. This is distinct
+from a qualified measured median below the authored guards (1,000/min for the
+low band, 500/min for the storm band): those known guard-off states keep their
+existing healthy meaning. No production reset, clock incident, lost history
+or backend cause is inferred from the synthetic recovery controls.
 The storm's frame distinguishes `reconnect-storm`, `window-child-churn`, and
 the affirmative §2.15 `reliability-window-churn` signature; rate alone does not
 prove a restart or provider-score corruption. A failed diagnostic retains the
@@ -11920,6 +12018,27 @@ as a nonpaging, request-intent-unknown WARN when 20–<50 responses have at leas
 never a scarcity diagnosis or a healthy sentinel for this band. The existing
 PAGE and >=50 provisional WARN thresholds remain unchanged. Direct cohorts and
 ForceMinimum diagnostics keep their existing separate treatment.
+
+Recovery authority: a successful but intent-unknown 20–<50 all-small ordinary
+cohort cannot clear an existing measured incident. The reducer supplies silent
+clear holds for `provider-count-effective-empty` and `provider-count-small-list`
+at `api-fleet` when any returned ordinary cohort is below the existing 20-call
+sample floor or has that intent-unknown small-list shape, or when no qualified
+ordinary cohort is observed. Direct and ForceMinimum-only traffic cannot supply
+ordinary recovery evidence. These holds add no alert or incident and do not
+suppress independently measured PAGE/WARN findings. The notifier's existing
+recovery identity excludes the cohort frame, so a currently sparse/unknown
+ordinary cohort conservatively holds those measured classes across the shared
+target; a healthy sibling cannot certify it. Returned historical/eager zero
+cohorts can therefore delay a clear. There is no source authority here to call
+them irrelevant, and no expected-cohort census is invented for omitted series.
+Qualified ordinary recovery can coexist with excluded direct/diagnostic traffic.
+An ordinary >=50 provisional WARN remains a measured, independent threshold
+state and may recover the distinct PAGE; its missing learned-baseline authority
+is unchanged. After uncertainty ends, two complete qualified observations are
+still required by the notifier; an unknown run breaks that absence streak.
+This corrects local monitor recovery bookkeeping, not a proved production
+occurrence, provider repair, or new emitted metric.
 
 High-volume zero-tail false-negative qualifier: a non-direct location cohort
 can have hundreds of completed requests and a material zero-result fraction
@@ -14020,8 +14139,16 @@ capacity clearance or current recovery follows from this historical result.
 
 ### 2.11b PgBouncer saturation with every server busy — the queue customers wait in
 
-Status: proposed 2026-10-26; no probe implements it. `pgbouncer-pool-starvation`
-(§2.11a) reads the same exporter but alerts only on a pool with no server.
+Status: original server-gated proposal of 2026-10-26, not implemented as written.
+`pgbouncer-backlog` (§26.1) implements its replacement. With default settings,
+WARN requires waiting above 100 clients or an oldest wait above 0.5 s at all
+10 consecutive one-minute evaluation points; PAGE requires waiting above
+1,000 clients at all five points. These sampled-history holds do not prove
+continuous wall-clock duration. The replacement has no server-count gate.
+The original levels below remain historical proposal context, not the
+replacement policy. An exported average-wait read remains missing.
+`pgbouncer-pool-starvation` (§2.11a) separately alerts on a queued pool with
+no server.
 
 §2.11a pages a pool that has queued clients and no server. The commoner
 failure keeps every server busy behind a standing queue: each pool holds its
@@ -23306,7 +23433,25 @@ qualifier: a small future median can invent growth or mature a comparison that
 has too little eligible history. False-negative qualifier: a large future
 median can hide genuine growth against valid past counts. Compare a complete
 current histogram with eligible history; a pending learned band establishes no
-week-over-week verdict. Current valid size/ratio thresholds, partial-fleet and
+week-over-week verdict. A complete material family sample (strictly more than
+20,000 keys) without three eligible prior samples silently holds recovery of
+`family-growth` for the selected host/port; two such successful unchecked runs
+must not clear an earlier incident. Current measurements still appear in the
+bounded histogram and extend the baseline. This hold creates no warning or
+incident, preserves independently qualified family-growth positives, and does
+not grant retirement authority when the fullest node changes: every current
+configured, enabled but unscanned host/port silently holds its existing growth
+incident. No extra scan, expected target or reporting owner is added.
+The source completion count also bounds rows omitted by the raw top-20
+histogram. Since privacy aggregation merges raw shapes after selection, omitted
+small shapes can form a material redacted family. A sampled population above
+20,000 with omitted rows therefore holds selected-target recovery too; the
+visible histogram, valid positive and baseline append remain unchanged.
+A fully covered sampled population at or below 20,000, including a complete
+empty sample, rules out the unchanged static size predicate even if top-20
+rows were omitted. A fully represented histogram with qualified in-band
+comparisons permits ordinary selected-target recovery. Partial fleet/source failures retain their existing visibility and
+baseline rules. Current valid size/ratio thresholds, partial-fleet and
 unavailable-scan visibility findings, and redaction before metric persistence
 remain in force. Require synthetic clock and redaction controls for this
 boundary; no Main clock rollback is inferred.
@@ -23396,7 +23541,7 @@ that the underlying Redis key is corrupt. Synthetic coverage pins binary
 aggregation and verifies that neither the raw fragment nor replacement runes
 reach Markdown.
 
-### 3.3a Impossible TTL residue (writer fixed, stale keys remain)
+### 3.3a Impossible TTL residue
 Probe: `ttl-leaks`
 
 Observation authority: every configured node port must return one successful
@@ -23428,6 +23573,24 @@ or failed sample preserves the independently proven INFO breach with
 `sample_status=unavailable`, fixed public text, and no stream-specific cause,
 cleanup action, or artifact requirement. Raw replies, unknown labels, and
 transport errors never enter JSON, Markdown, or alert identity.
+
+Stream-family membership and an over-limit raw PTTL establish sampled retention
+attribution, not the originating writer, deployment or cleanup mechanism. A
+legacy schema label or even a very large historical-looking PTTL cannot prove
+nanoseconds were consumed as seconds, that an earlier cleanup overflowed, or
+which repair artifact is active. Preserve the independent INFO breach and
+numeric family facts while withholding those causal and artifact claims.
+Historical duration-conversion and typed-duration cleanup incidents below are
+investigative context; selecting that cause or a historical cleanup now requires
+independent original write/cleanup and immutable artifact authority. No such
+provenance is present in this probe's aggregate schema. The legacy
+`duration-as-seconds` Alert frame is retained for incident continuity, not as
+a new original-error or causal witness. Require deterministic
+valid stream-only samples with unknown or alternative provenance, including a
+historical-looking PTTL, alongside true INFO breaches, annual/zero/boundary
+healthy controls and unavailable/mixed/invalid detail. No query, threshold,
+severity, identity, integer validation, sample bounds or maintenance authority
+changes with this attribution correction.
 
 False-positive qualifier: unavailable evidence is unknown, not leaked TTLs or
 proof of any writer generation. A valid bounded sample can miss the population
@@ -29591,6 +29754,22 @@ required. Prefix 892 still detects an altered historical identity body, and
 893 still detects altered retained source or scope-lock custody. These are
 catalog checks, not proof that a reviewer ran or any model output is valid.
 
+Version 896 requires the settlement completion columns: a non-null smallint
+with constant zero default and a nullable bigint checkpoint byte count without
+a default. Exact types, nullability and defaults are schema authority; these
+catalog checks do not prove completion, report ordering or checkpoint contents.
+
+Version 897 transfers the provider-aware bodies and review identity from 893
+only when the published two-member successor applies. The 893 predicate stays
+required through 896. The successor requires exact provider/round/winner and
+identity bodies, both historical eighteen-finding and new twelve-finding
+validators, and the policy dispatcher, including metadata and trigger custody.
+It retains mono-root source, repository authorization and checkpoint guards.
+A numeric head or matching function name does not establish a healthy successor;
+altered, absent or misconfigured bodies remain drift. This is schema authority,
+not runtime review adoption or a claim about a production migration outcome.
+
+
 
 Version 894 adds `provide_capability`, the provider capability declarations
 that find-providers2 reads for a request requiring post-quantum encryption:
@@ -34128,9 +34307,22 @@ The owner-local `observation_stage` is one of `host-observation-failed`,
 `no-local-child`, `child-observation-unavailable`, `counter-decreased`,
 `comparison-nonadvancing`, `comparison-stale`, `identity-bound-exceeded`, or
 `fleet-view-inconsistent`. These fixed values distinguish the retained source
-branch while preserving the existing `error_class`; they are not new Alert
-classes or production root causes. `host-observation-failed` remains coarse:
-command, transport, context, and parser failures share that branch. Only the
+branch and reuse the existing finite `error_class` taxonomy; they are not new
+Alert classes or production root causes. `host-observation-failed` remains coarse:
+command, transport, context, and parser failures share that stage. The additional
+owner-local `observation_source` is `host-command`, `host-parser`,
+`child-discovery`, or `unknown`, selected at the source call site. Command
+diagnostics retain only an exact fourteen-class allowlist and the existing
+nine code-owned execution-boundary bits; unknown typed classes fall back to
+`observation-unclassified`. Parser failures use the fixed invalid-response
+class without native proof, and incomplete discovery retains unclassified
+without native proof. Only prepared enums/bits reach the public formatter;
+the finding helper receives the existing fixed synthetic error, never a raw
+command error, typed-class string, parser output, argv or identity. Invalid
+enum/bit values fail closed. These diagnostics are prospective local branch
+authority, not an original error reconstruction, remote completion, a shared
+attempt, physical cause or recovery. Existing state and history decisions,
+thresholds, identities and generic actions remain unchanged. Only the
 first failure per target is emitted, so its stage does not rule out additional
 child failures. A counter decrease takes precedence over an unavailable
 interval for that same child. No raw errors, labels, process-start tokens,
@@ -34321,6 +34513,31 @@ source convergence prerequisite, not the exact identity of the live extras or
 their traffic effect. Running route inputs, process-owned connections, and
 exact live artifact membership remain separate verification gates; the bounded
 direct follow-up obtained no valid remote observation.
+
+The base-publisher and derived-fleet `cannot-observe` findings retain one finite
+`publisher_observation_origin` field without changing their existing error class:
+`desired-load-state`, `desired-preference-missing`, `desired-front-unmatched`,
+`source-return`, `sample-parse`, `sample-front-count`, `runtime-route-inputs`,
+`fleet-preference-coverage`, `fleet-runtime-placement`, or `unknown`. Desired-policy
+origins are pre-contact predicates; `source-return` means only that the bounded
+source function returned an error, not that SSH or the remote command executed.
+A completed sample with unknown running route can produce the unsuffixed base
+warning. Fleet origins describe derived same-check coverage, not another remote
+request or a common cause. No preference values, names, addresses or raw errors
+are rendered. Global inventory findings and the existing `/connections`
+prerequisite tuple retain their earlier format and semantics. Missing/invalid
+origin remains unknown; no policy, observation, history or verdict changes.
+
+These origins describe prospective producer branches, not the original phase of
+an older unclassified record. An equality-only settings witness does not prove
+ready or complete preferences. Require generation-bound producer and consumer
+qualification before using the new metadata in an extraction or summary; its
+presence here establishes no current reader field coverage. Retain independent
+placement/connection positives and incomplete coverage. False-positive limit:
+a branch label is not remote actor/attempt/response or ingestion-cause proof.
+False-negative limit: unknown source/runtime metadata cannot clear drift or
+supply missing convergence evidence; low traffic and healthy siblings do not
+close the unavailable member or historical window.
 
 ### 11.20d Avoidable metric cardinality
 
@@ -38536,7 +38753,25 @@ connected while its provider window drains below target with
 loss, query Connect and the selected Proxy block for
 `[framer][reject] ... messageLen=... > MaxMessageLen=...`. The standing
 `logs/framer-message-too-large` class covers this signal explicitly because
-the transport emits the rejection at info severity. The 2026-09-01 main
+the transport emits the rejection at info severity.
+
+The standing classifier records only the rejection's direction and numeric
+payload/cap dimensions. This can be expected admission protection for invalid
+input; the same signature can also reveal a mismatch when separate evidence
+proves a required valid message exceeds its context's cap. The tag alone does
+not identify H1, a handshake, an immutable Pack, a legacy endpoint or a failed
+customer operation. First bind the original emitter, call site, valid message
+envelope and same-attempt outcome; prescribe a producer/framer or deployment
+repair only after that authority selects the mismatch. Preserve bounded caps
+and intentional oversize rejection. Counts are matching diagnostic lines, not
+unique failures or proved retry amplification. False-positive qualifiers:
+protective rejection is not automatically a transport defect or missing
+rollout. False-negative qualifiers: absent envelope/emitter/outcome authority
+can hide a valid carrier that no longer fits, and quiet incomplete logs cannot
+prove recovery. The separately corroborated historical cases below remain
+historical evidence, not the diagnosis of every new match.
+
+The 2026-09-01 main
 reproduction rejected 4,232- and 4,187-byte reliable H1 messages during the
 same sustained campaign that retired two exits carrying 16 flows apiece; the
 next SOCKS request completed its public proxy connection and origin TLS
@@ -38563,10 +38798,12 @@ A later production observation rejected a 9,124-byte carrier at the former
 8 KiB ceiling. That disproves the earlier 8 KiB safety margin even though it
 covered the previously measured 4,950-byte profile. The compatible Connect and
 Proxy artifacts must therefore carry the shared 16 KiB floor. A smaller
-rejection can be historical evidence; only a fresh rejection at or below the
-active declared cap proves a currently incompatible endpoint. Conversely, a
-quiet rejection log alone is not recovery proof: require provider-window
-recovery and the paired endpoint identity as well.
+rejection can be historical evidence. A current incompatibility needs a fresh
+rejection joined to the exact endpoint and a separately established valid
+message envelope that endpoint must accept. A rejection above its declared cap
+alone does not establish that the cap is wrong. Conversely, a quiet rejection
+log alone is not recovery proof: require the corroborated affected-path outcome
+and paired endpoint identity as well.
 
 The v190 standing cadence at 2026-09-01T15:27Z observed a fresh Connect write
 rejection at `messageLen=4408`, `MaxMessageLen=4096`, and
@@ -42434,6 +42671,22 @@ Preserve the native identity-command error through the shared finite
 denial, and invalid response must remain distinguishable. Never replace them
 with a generic error or render raw stderr or malformed identity output. The
 identity target remains unknown even when its public HTTPS request succeeds.
+
+Valid failed-curl measurements retain their existing failure classes while
+public diagnostics remain a fixed-field projection. Preserve the validated
+HTTP/exit/peer/time/size fields, MIME-presence Boolean, fixed error class and
+typed host egress counters/durations. Returned route/source IPv6 addresses and
+interface names publish only `matches-configured`, `differs-configured`, or
+`unobserved`; valid wire syntax alone never authorizes a private, link-local,
+management, or unexpected public identity to enter an alert. The configured
+edge target remains the existing authoritative identity; no returned route or
+egress identity is echoed, even when it matches. Unparseable diagnostic fields
+remain `unobserved`, never zero. Native stdout, stderr, MIME text and wrapped
+error messages do not enter Evidence, Markdown, JSON or JSONL; a valid native
+write-out suffix does not authorize publishing other diagnostic lines. The
+in-memory classifier and source/identity observations, query budgets,
+thresholds and parent-cancellation policy remain unchanged. This source rule
+proves neither a past exposure nor an unknown historical failure cause.
 
 An authoritative parent cancellation returns `ctx.Err()` without manufacturing
 findings or starting later host work. Pre-cancelled execution makes no source

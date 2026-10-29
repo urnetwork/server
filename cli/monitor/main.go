@@ -40,19 +40,20 @@ type monitorOptions struct {
 	excludedSignals stringFlags
 	// diagnostic: a focused run without the tier-0 vitals, which cannot
 	// verify production (RUN-MAIN.md, "Tier-0 vitals in every verification")
-	skipTierZeroVitals      bool
-	excludedHosts           stringFlags
-	excludedEdgeIPv6Hosts   stringFlags
-	minimumProbeCadence     time.Duration
-	apiReleaseProofFile     string
-	pgQuerySampleUntil      string
-	pgQuerySampleContinuous bool
-	urlProbeCoverageOutput  string
-	providerSelectionOutput string
-	settingsWitnessOutput   string
-	invocationWitnessOutput string
-	sshAdmissionDirectory   string
-	slackAlerts             bool
+	skipTierZeroVitals           bool
+	excludedHosts                stringFlags
+	excludedEdgeIPv6Hosts        stringFlags
+	minimumProbeCadence          time.Duration
+	apiReleaseProofFile          string
+	pgQuerySampleUntil           string
+	pgQuerySampleContinuous      bool
+	urlProbeCoverageOutput       string
+	providerSelectionOutput      string
+	settingsWitnessOutput        string
+	invocationWitnessOutput      string
+	admissionDiagnosticDirectory string
+	sshAdmissionDirectory        string
+	slackAlerts                  bool
 }
 
 // Exit only after the command-owned process lifecycle has returned.
@@ -256,6 +257,14 @@ func runWithInvocationWitness(args []string, stdout io.Writer, loadSettings func
 		}
 		defer invocationWitness.Close()
 	}
+	var admissionDiagnostic *servermonitor.RunAdmissionDiagnostic
+	if opts.admissionDiagnosticDirectory != "" {
+		admissionDiagnostic, err = servermonitor.NewRunAdmissionDiagnostic(opts.admissionDiagnosticDirectory, invocationWitness)
+		if err != nil {
+			return err
+		}
+		defer admissionDiagnostic.Close()
+	}
 	monitor := servermonitor.NewWithSignals(settings, signals...)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
@@ -282,7 +291,7 @@ func runWithInvocationWitness(args []string, stdout io.Writer, loadSettings func
 	} else {
 		fmt.Fprintln(os.Stderr, "monitor: Slack alert notifications disabled by -slack-alerts=false")
 	}
-	return monitor.RunExecutionLoop(ctx, servermonitor.RunLoopOptions{MinimumProbeCadence: opts.minimumProbeCadence, InvocationWitness: invocationWitness}, continuousAlertHandler(stdout, opts.format, notifier))
+	return monitor.RunExecutionLoop(ctx, servermonitor.RunLoopOptions{MinimumProbeCadence: opts.minimumProbeCadence, InvocationWitness: invocationWitness, AdmissionDiagnostic: admissionDiagnostic}, continuousAlertHandler(stdout, opts.format, notifier))
 }
 
 // Restores default signal handling first, so a second interrupt or SIGTERM
@@ -355,6 +364,7 @@ func parseMonitorOptions(args []string) (monitorOptions, error) {
 	flags.StringVar(&opts.urlProbeCoverageOutput, "url-probe-coverage-output", "", "append one URL quota observation per existing signal execution, including healthy and unavailable results, as JSONL")
 	flags.StringVar(&opts.providerSelectionOutput, "provider-selection-output", "", "append every bounded selection reason observation per existing signal execution, including nonempty and unavailable results, as JSONL")
 	flags.StringVar(&opts.settingsWitnessOutput, "settings-witness-output", "", "create a private same-process settings witness stream for existing freshness invocations; requires an owned Linux user unit")
+	flags.StringVar(&opts.admissionDiagnosticDirectory, "admission-diagnostic-dir", "", "create a NEW private finite local admission diagnostic directory; requires invocation witness, no health claim")
 	flags.StringVar(&opts.invocationWitnessOutput, "invocation-witness-output", "", "create a new private bounded dispatch/Signal.Run-return stream in continuous mode; no health or target-completeness claim")
 	flags.StringVar(&opts.pgQuerySampleUntil, "pg-query-sample-until", "", "UTC expiry for one optional bounded PostgreSQL query/load sample")
 	flags.StringVar(&opts.apiReleaseProofFile, "api-release-proof", "", "private local JSON expectation for the optional bounded API release proof")
@@ -386,6 +396,9 @@ func parseMonitorOptions(args []string) (monitorOptions, error) {
 	}
 	if opts.invocationWitnessOutput != "" && (opts.once || opts.listSignals || opts.invocationWitnessOutput == opts.output || opts.invocationWitnessOutput == opts.urlProbeCoverageOutput || opts.invocationWitnessOutput == opts.providerSelectionOutput || opts.invocationWitnessOutput == opts.settingsWitnessOutput) {
 		return monitorOptions{}, errors.New("monitor: invocation witness requires continuous mode and a distinct new private file")
+	}
+	if opts.admissionDiagnosticDirectory != "" && (opts.invocationWitnessOutput == "" || opts.once || opts.listSignals) {
+		return monitorOptions{}, errors.New("monitor: admission diagnostic requires continuous mode and an invocation witness")
 	}
 	if opts.pgQuerySampleContinuous && opts.pgQuerySampleUntil != "" {
 		return monitorOptions{}, errors.New("monitor: continuous and expiring PG sample modes are mutually exclusive")

@@ -1177,11 +1177,11 @@ var logClasses = []logClass{
 	{name: "framer-message-too-large", re: framerRejectRe,
 		sample:        framerRejectLogSample,
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §14.6",
-		meaning:   "a reliable Connect carrier exceeded the H1 framer admission envelope; retries of the same immutable Pack cannot refill that route",
-		mechanism: "The integrated post-quantum TLS handshake carrier can exceed a legacy component-estimated cap even when every ordinary data group stays below its target. A write rejection strands the sender; a read rejection closes the receiving route. Multi-window retry remains live but cannot make an unchanged oversized carrier fit, so a hosted H1-only provider window can drain to platform-unreachable and retire exits carrying active proxy flows.",
-		context:   "This is a transport admission defect, not evidence that the origin, public proxy listener, rate limiter, policy route, TUN handoff, or WireGuard socket dropped the flow. Preserve direction plus message and cap lengths; correlate the same interval with window target/readiness and exit retirement.",
-		action:    "After §8.13 can read the exact Warpctl identity, deploy Connect and Proxy artifacts from intentional local checkouts containing current-main server commit c1403f16 and Connect module commit 096414ac on both ends of the hosted H1 path. Keep ordinary data coalescing and per-device memory admission bounded; do not suppress the rejection or make the buffer unbounded.",
-		verify:    "§8.12 proves every active Connect and Proxy block runs the compatible commit pair with valid source/digest identities; no framer-message-too-large line recurs; provider windows stay at target without platform-unreachable; and three sustained HTTP/SOCKS/WireGuard overlap campaigns pass.",
+		meaning:   "a framer rejected a message above its configured payload cap; the sample retains direction and lengths",
+		mechanism: "A write rejects oversized input before sending it, a batch rejects before any prefix is sent, and a read rejects before allocating the payload. This can be expected protection for invalid input or a caller/framer envelope mismatch. The historical H1 handshake mismatch was established with separate valid-message and affected-path evidence; the rejection signature alone does not establish that mechanism here.",
+		context:   "The emitting artifact, call site, carrier, valid message envelope and same-attempt outcome remain unproved by the numeric signature. A configured cap may be correct for its context. Neither H1, an immutable Pack, an undersized endpoint nor customer impact follows from this class alone.",
+		action:    "Bind the original event to its exact emitter, call site, configured cap, valid message envelope and admission/route outcome. If a required valid message exceeds that context's cap, repair the corroborated producer/framer contract and verify every affected endpoint. If the input is invalid, preserve the protective rejection and investigate its producer. Keep memory admission bounded; do not raise caps or prescribe a deployment from the signature alone.",
+		verify:    "Under comparable source-qualified traffic, required valid messages fit the verified endpoint envelopes and their affected operations succeed, while deliberately oversized input is still rejected without a partial write or payload allocation. Verify any corroborated route/window failure separately; quiet rejection logs alone are not recovery proof.",
 	},
 	// e2e encryption (post-quantum) sessions — SIGNALS.md §15. The client-side
 	// [tls]/[key] lines surface in server logs through the connect stacks the
@@ -2588,6 +2588,9 @@ func (self *logTailer) drainWindow() []finding {
 			}
 			if c.name == "port-exhaustion" {
 				baseline = "baseline ~0 matching diagnostic lines/minute; counts do not prove retries, native allocation pressure or recovery"
+			}
+			if c.name == "framer-message-too-large" {
+				baseline = "baseline ~0 matching rejection lines/minute; counts do not prove retries, unique failed operations or recovery"
 			}
 			observed := fmt.Sprintf("rate=%d/min class=%s", count, c.name)
 			if c.pageRateThreshold > 0 {

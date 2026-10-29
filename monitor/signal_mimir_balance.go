@@ -100,10 +100,138 @@ type mimirBalanceHostSample struct {
 	remoteConnections int64
 }
 
+// Diagnostics retain only owner-prepared enums. Original command errors never
+// reach the finding helper, public formatter, or persisted histories.
+type mimirBalanceObservationSource uint8
+
+const (
+	mimirBalanceSourceUnknown mimirBalanceObservationSource = iota
+	mimirBalanceSourceCommand
+	mimirBalanceSourceParser
+	mimirBalanceSourceDiscovery
+)
+
+// A zero or unrecognized class is unclassified; raw strings are never stored.
+type mimirBalanceDiagnosticClass uint8
+
+var mimirBalanceDiagnosticClasses = [...]string{
+	observationErrorClassUnclassified,
+	observationErrorClassTimeout,
+	observationErrorClassCanceled,
+	observationErrorClassUnreachable,
+	observationErrorClassCounterReset,
+	observationErrorClassContractMismatch,
+	observationErrorClassStateUnavailable,
+	observationErrorClassAdmissionUnavailable,
+	observationErrorClassBoundExceeded,
+	observationErrorClassInvalidResponse,
+	observationErrorClassMetricUnavailable,
+	observationErrorClassAccessDenied,
+	observationErrorClassCommandFailed,
+	observationErrorClassSSHExit255,
+}
+
+var mimirBalanceDiagnosticBoundaries = [...]string{
+	"unknown/unknown",
+	"global-admission/not-attempted",
+	"transport-preflight/not-attempted",
+	"host-admission/not-attempted",
+	"native-guard/not-attempted",
+	"native-start/failed-no-child",
+	"native-wait/started-joined",
+	"native-wait/started-join-unknown",
+	"mimir-host-admission/not-attempted",
+}
+
+// This transient projection contains no raw source or identity fields.
+type mimirBalancePreparedDiagnostic struct {
+	source     mimirBalanceObservationSource
+	class      mimirBalanceDiagnosticClass
+	boundaries uint16
+}
+
+// The shared classifier can return a typed class verbatim. Accept only exact
+// owned literals; neither prefixes nor private future classes enter a finding.
+func mimirBalancePrepareClass(candidate string) mimirBalanceDiagnosticClass {
+	for index, allowed := range mimirBalanceDiagnosticClasses {
+		if candidate == allowed {
+			return mimirBalanceDiagnosticClass(index)
+		}
+	}
+	return 0
+}
+
+// Only the existing code-owned proof walker supplies boundary tokens. Text in
+// an ordinary error cannot manufacture a native Start/Wait observation.
+func mimirBalancePrepareCommandDiagnostic(err error) mimirBalancePreparedDiagnostic {
+	diagnostic := mimirBalancePreparedDiagnostic{
+		source: mimirBalanceSourceCommand,
+		class:  mimirBalancePrepareClass(classifyObservationError(err)),
+	}
+	details := observationBoundaryDetails(err)
+	if details == "" {
+		return diagnostic
+	}
+	const prefix = " execution_boundaries="
+	if !strings.HasPrefix(details, prefix) {
+		diagnostic.boundaries = 1
+		return diagnostic
+	}
+	for _, token := range strings.Split(strings.TrimPrefix(details, prefix), ",") {
+		matched := false
+		for index, allowed := range mimirBalanceDiagnosticBoundaries {
+			if token == allowed {
+				diagnostic.boundaries |= uint16(1) << index
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			diagnostic.boundaries |= 1
+		}
+	}
+	return diagnostic
+}
+
+// Render only bounded prepared values. Parser/discovery branches cannot borrow
+// command proof, and malformed enum or bit values fail closed.
+func (self mimirBalancePreparedDiagnostic) details() (string, string) {
+	class := observationErrorClassUnclassified
+	source := "unknown"
+	bits := uint16(0)
+	switch self.source {
+	case mimirBalanceSourceCommand:
+		source = "host-command"
+		if int(self.class) < len(mimirBalanceDiagnosticClasses) {
+			class = mimirBalanceDiagnosticClasses[self.class]
+		}
+		bits = self.boundaries
+		if bits & ^uint16((1<<len(mimirBalanceDiagnosticBoundaries))-1) != 0 {
+			bits = 1
+		}
+	case mimirBalanceSourceParser:
+		source, class = "host-parser", observationErrorClassInvalidResponse
+	case mimirBalanceSourceDiscovery:
+		source = "child-discovery"
+	}
+	details := "error_class=" + class + " observation_source=" + source
+	var selected []string
+	for index, name := range mimirBalanceDiagnosticBoundaries {
+		if bits&(uint16(1)<<index) != 0 {
+			selected = append(selected, name)
+		}
+	}
+	if len(selected) != 0 {
+		details += " execution_boundaries=" + strings.Join(selected, ",")
+	}
+	return class, details
+}
+
 type mimirBalanceHostResult struct {
-	host   *host
-	sample mimirBalanceHostSample
-	err    error
+	diagnostic mimirBalancePreparedDiagnostic
+	host       *host
+	sample     mimirBalanceHostSample
+	err        error
 }
 
 type mimirBalanceRate struct {
@@ -118,9 +246,10 @@ type mimirBalanceRate struct {
 // stage is assigned only from fixed owner-local branch constants, never from
 // command/parser output. It is not an Alert class or a production cause.
 type mimirBalanceVisibilityFailure struct {
-	target string
-	stage  string
-	err    error
+	diagnostic mimirBalancePreparedDiagnostic
+	target     string
+	stage      string
+	err        error
 }
 
 type mimirBalanceAssessment struct {
@@ -190,11 +319,15 @@ func (self *mimirBalanceProbe) check(ctx context.Context, env *probeEnv) ([]find
 			}
 			output, err := mimirShell(ctx, env.runner, target, command, mimirShellResponseMaxBytes)
 			if err != nil {
-				resultValues <- mimirBalanceHostResult{host: target, err: err}
+				resultValues <- mimirBalanceHostResult{host: target, err: err, diagnostic: mimirBalancePrepareCommandDiagnostic(err)}
 				return
 			}
 			sample, err := parseMimirBalanceHostSample(output)
-			resultValues <- mimirBalanceHostResult{host: target, sample: sample, err: err}
+			diagnostic := mimirBalancePreparedDiagnostic{}
+			if err != nil {
+				diagnostic.source = mimirBalanceSourceParser
+			}
+			resultValues <- mimirBalanceHostResult{host: target, sample: sample, err: err, diagnostic: diagnostic}
 		}()
 	}
 	wait.Wait()
@@ -231,7 +364,16 @@ func (self *mimirBalanceProbe) check(ctx context.Context, env *probeEnv) ([]find
 }
 
 func mimirBalanceCannotObserveFinding(failure mimirBalanceVisibilityFailure) finding {
-	result := cannotObserveFinding(failure.target, failure.err)
+	findingErr := failure.err
+	if failure.stage == mimirBalanceStageHostObservationFailed {
+		findingErr = fmt.Errorf("host observation failed")
+	}
+	result := cannotObserveFinding(failure.target, findingErr)
+	if failure.stage == mimirBalanceStageHostObservationFailed {
+		errorClass, details := failure.diagnostic.details()
+		result.symptom = "The monitor could not complete an observation for " + failure.target + " (error_class=" + errorClass + ")"
+		result.observed = details
+	}
 	result.observed += " observation_stage=" + failure.stage
 	result.context = "The fixed observation stage names the first retained failure for this target; additional child failures may exist. It identifies a source branch, not a production root cause or recovery."
 	result.playbook = "SIGNALS.md §11.20b and §1.7 and MONITOR.md §3.6"
@@ -327,6 +469,7 @@ func assessMimirBalance(
 			preserveHost()
 			assessment.visibilityFailures = append(assessment.visibilityFailures, mimirBalanceVisibilityFailure{
 				target: hostName + "/mimir-balance", stage: mimirBalanceStageHostObservationFailed, err: fmt.Errorf("host observation failed"),
+				diagnostic: result.diagnostic,
 			})
 			continue
 		}
@@ -336,6 +479,7 @@ func assessMimirBalance(
 			preserveHost()
 			assessment.visibilityFailures = append(assessment.visibilityFailures, mimirBalanceVisibilityFailure{
 				target: hostName + "/mimir-balance", stage: mimirBalanceStageHostObservationFailed, err: fmt.Errorf("child discovery incomplete"),
+				diagnostic: mimirBalancePreparedDiagnostic{source: mimirBalanceSourceDiscovery},
 			})
 			continue
 		}

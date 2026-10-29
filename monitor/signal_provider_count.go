@@ -93,6 +93,8 @@ func (p providerCountProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	}
 	findings := make([]finding, 0, len(cohorts))
 	observedDiscovery := false
+	recoverySample := false
+	recoveryUnknown := false
 	for _, cohort := range cohorts {
 		if cohort.key.forceMinimum != "false" {
 			continue
@@ -103,8 +105,18 @@ func (p providerCountProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		}
 		// Direct specs append caller-chosen IDs without running discovery.
 		// Neither their natural small size nor their absence proves capacity.
-		if cohort.key.locationKind != "direct" && total > 0 {
-			observedDiscovery = true
+		if cohort.key.locationKind != "direct" {
+			if total > 0 {
+				observedDiscovery = true
+			}
+			// Recovery shares the measured class/target across frames. A
+			// returned ordinary cohort below the existing PAGE sample floor
+			// cannot borrow another cohort's healthy response distribution.
+			if total < providerCountPageMin {
+				recoveryUnknown = true
+			} else {
+				recoverySample = true
+			}
 		}
 		zero := cohort.bands["0"]
 		small := zero + cohort.bands["1-2"]
@@ -120,6 +132,15 @@ func (p providerCountProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			// The sample is below the ordinary WARN floor; retain only an
 			// intent-unknown observation, never a lower-threshold scarcity rule.
 			findings = append(findings, providerCountFinding(cohort, total, zero, small, tierWarn, metricHost.name, "small-list-unclassified"))
+			recoveryUnknown = true
+		}
+	}
+	if !recoverySample || recoveryUnknown {
+		// Unknown or excluded-only responses retain measured history without
+		// raising a replacement incident. These exact class/target holds do
+		// not suppress current PAGE/WARN findings or change their thresholds.
+		for _, class := range []string{"provider-count-effective-empty", "provider-count-small-list"} {
+			findings = append(findings, finding{probeId: "mimir/provider-count", class: class, target: "api-fleet", clearHold: true})
 		}
 	}
 	if len(findings) == 0 && observedDiscovery {

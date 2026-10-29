@@ -22,8 +22,14 @@ func TestProviderCountSparseSmallListIsUnknownNotHealthy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(findings) != 1 || findings[0].healthy || findings[0].class != "provider-count-small-list-unclassified" {
+	if len(findings) != 3 || findings[0].healthy || findings[0].class != "provider-count-small-list-unclassified" {
 		t.Fatalf("traffic-bearing all-small cohort became silent/healthy instead of intent unknown: %+v", findings)
+	}
+	for index, class := range []string{"provider-count-effective-empty", "provider-count-small-list"} {
+		hold := findings[index+1]
+		if !hold.clearHold || hold.healthy || hold.probeId != "mimir/provider-count" || hold.class != class || hold.target != "api-fleet" {
+			t.Fatal("unknown small-list intent lost its exact silent measured-class hold")
+		}
 	}
 	alert := alertFromFinding(settings, "2.9a", "provider-count", "provider count", findings[0])
 	if alert.Severity != SeverityWarn || alert.PageSustain != 0 || alert.Sustain != 1 || alert.Frame != "any/location/us/quality" {
