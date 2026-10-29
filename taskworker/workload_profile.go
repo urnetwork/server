@@ -156,6 +156,8 @@ func subnetOperatorTasks() []subnetOperatorTask {
 		{target: model.NewQuarantineReservationReleaseTaskTarget()},
 		// Requested by a payer's refused admission or stranded Pending.
 		{target: model.NewClosePayerDueContractsTaskTarget()},
+		// Drains the payers of grants that ended with escrow still unsettled.
+		{target: model.NewCloseStrandedGrantContractsTaskTarget(), schedule: model.ScheduleCloseStrandedGrantContracts},
 		{target: task.NewTaskTarget(work.SweepOrphanContractData), schedule: work.ScheduleSweepOrphanContractData},
 		// Drain a previously queued retired refresher; startup never seeds it.
 		{target: task.NewTaskTarget(work.RefreshContractHoles)},

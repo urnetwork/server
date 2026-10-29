@@ -98,6 +98,8 @@ func initTaskSchedule(ctx context.Context) {
 		// work.SchedulePopulateAccountWallets(clientSession, tx)
 		work.ScheduleOpenContractClosuresOnStartup(clientSession, tx)
 		work.ScheduleCloseContractDeadlines(clientSession, tx)
+		// drains the payers of grants that ended with escrow still unsettled
+		model.ScheduleCloseStrandedGrantContracts(clientSession, tx)
 		// idle until contract_close.yml enables it
 		work.ScheduleReapScheduledContractCloses(clientSession, tx)
 		for i := range work.DefaultCloseExpiredContractsBlockSize {
@@ -364,6 +366,7 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		model.NewLegacyNetEscrowMirrorTaskTarget(),
 		model.NewQuarantineReservationReleaseTaskTarget(),
 		model.NewClosePayerDueContractsTaskTarget(),
+		model.NewCloseStrandedGrantContractsTaskTarget(),
 		task.NewTaskTargetWithPost(
 			model.RemoveNetworkClientsTask,
 			model.RemoveNetworkClientsTaskPost,

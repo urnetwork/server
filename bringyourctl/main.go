@@ -121,7 +121,7 @@ Usage:
     bringyourctl contracts close-expired [-c <count>]
     bringyourctl contracts close --contract_id=<contract_id> --target_id=<target_id> --used_transfer_byte_count=<used_transfer_byte_count>
     bringyourctl contracts reconcile-net-escrow [--network_id=<network_id>] [--dry-run]
-    bringyourctl contracts close-due --network_id=<network_id> [--dry-run]
+    bringyourctl contracts close-due --network_id=<network_id> [--dry-run] [--before=<before>] [(--commit --expect=<digest>)]
     bringyourctl streams expire-leaked-ttls
     bringyourctl task ls
     bringyourctl task rm <task_id>
@@ -236,10 +236,11 @@ Options:
     --sweep_batch_size=<sweep_batch_size>  With --move_all_sweeps, move at most this many sweeps per transaction; omitted uses 10000.
     --sweep_batch_limit=<sweep_batch_limit>  With --move_all_sweeps, run at most this many sweep transactions in one call; omitted or 0 moves every sweep.
     --count_sweeps  Also count the sweeps a correction would move (dry run).
-    --expect=<digest>  The digest the sn-reconcile, reimburse, account-points backfill-blocks, network sign-out-all or balance move-redeemed dry run printed; --send and --commit refuse any other census.
+    --expect=<digest>  The digest the sn-reconcile, reimburse, account-points backfill-blocks, network sign-out-all, balance move-redeemed or contracts close-due dry run printed; --send and --commit refuse any other census.
+    --before=<before>  With contracts close-due, the deadline bound (RFC 3339) of the contracts to retire; the dry run defaults to a minute ago and prints it, and --commit needs the one the dry run printed.
     --file=<file>  A payouts reimburse CSV with the header network_id,wallet_id,amount_usdc; for payouts usdc-sent-notice, one payment id per line; for account-points backfill-blocks, the awards the dry run saves and --commit commits (omitted, operator-block-points-<digest>.json).
     --blocks=<blocks>  With account-points backfill-blocks, the operator blocks to award, comma separated; omitted, every completed block past the earning boundary. A block that has its points is skipped.
-    --commit  With account-points backfill-blocks, commit the awards of the dry run whose digest is --expect; with network sign-out-all, sign the network out as its dry run with that digest printed; with balance move-redeemed, move the balance its dry run with that digest printed. Without it the run is a read-only dry run.
+    --commit  With account-points backfill-blocks, commit the awards of the dry run whose digest is --expect; with network sign-out-all, sign the network out as its dry run with that digest printed; with balance move-redeemed, move the balance its dry run with that digest printed; with contracts close-due, retire the contracts of the dry run whose digest is --expect. Without it the run is a read-only dry run.
     --remove-clients  With network sign-out-all, also deactivate every active client of the network as /network/remove-clients does.
     --balance_id=<balance_id>  With balance move-redeemed, the unused balance a redeemed balance code granted, left on a deleted network.
     --to_network_id=<network_id>  With balance move-redeemed, the network the balance and its code move to.
@@ -464,8 +465,7 @@ func main() {
 			server.Raise(err)
 			networkId, err := server.ParseId(networkIdStr)
 			server.Raise(err)
-			dryRun, _ := opts.Bool("--dry-run")
-			os.Exit(runPayerDueContractClose(context.Background(), os.Stdout, networkId, dryRun, defaultPayerDueContractCloseOps()))
+			os.Exit(contractsCloseDueCommand(opts, networkId))
 		}
 	} else if streams, _ := opts.Bool("streams"); streams {
 		if expireLeakedTtls, _ := opts.Bool("expire-leaked-ttls"); expireLeakedTtls {
