@@ -44384,6 +44384,17 @@ rewrite the boot journal. `hostpower-shared-removable-domain` warns on the
 privacy-reduced shared ancestor. `hostpower-topology-unobservable` warns after
 two probes when the device/uplink or helper cannot produce a concrete class.
 
+For a nearest common PCI endpoint, `separate` requires successful complete
+secondary discovery within the existing six-level and 64-record bounds. The
+helper retains directory-frontier evidence and a joined fixed discovery status;
+the extra overflow record is not hardware evidence. Failed discovery, an
+unresolved subsystem link, a reached depth frontier, or truncated output leaves
+topology unobservable unless an independent valid ancestor, removable marker,
+or observed Thunderbolt-subsystem witness already proves sharing. A partial
+scan must not erase that positive witness. These source-completeness checks do
+not prove a live host's physical separation, a shared-hardware incident, or
+adoption of the corrected Xops helper. Media health remains independent.
+
 `hostpower-media-health-failed` pages on an explicit failing SMART state.
 `hostpower-media-health-unobservable` warns after two probes when the archive
 bridge/device does not expose both detailed error and self-test logs. A SCSI
