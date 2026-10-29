@@ -24,6 +24,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"fmt"
 	"time"
 	"unicode/utf8"
 
@@ -71,6 +73,18 @@ type AccountMessageArgs struct {
 	TemplateJson string
 	// a held message waits for `ReleaseAccountMessageInTx`
 	Held bool
+	// a message that is not held is due this long after it is added (a
+	// security notice waits for more changes to join it); zero is due at once
+	DeliverAfter time.Duration
+}
+
+// When a message added at `createTime` is due: nil while it is held.
+func (self *AccountMessageArgs) deliverTime(createTime time.Time) *time.Time {
+	if self.Held {
+		return nil
+	}
+	deliverTime := createTime.Add(max(self.DeliverAfter, 0))
+	return &deliverTime
 }
 
 // The stored key: the SHA-256 of the template name and the writer's key, so
@@ -98,14 +112,11 @@ const addAccountMessageSql = `
 	ON CONFLICT (message_key) DO NOTHING
 `
 
-// Adds the message in the caller's transaction, due now unless held. Returns
-// false when a message with the key exists.
+// Adds the message in the caller's transaction, due now (or after its delay)
+// unless held. Returns false when a message with the key exists.
 func AddAccountMessageInTx(ctx context.Context, tx server.PgTx, args *AccountMessageArgs) (added bool) {
 	createTime := server.NowUtc()
-	var deliverTime *time.Time
-	if !args.Held {
-		deliverTime = &createTime
-	}
+	deliverTime := args.deliverTime(createTime)
 	tag := server.RaisePgResult(tx.Exec(
 		ctx,
 		addAccountMessageSql,
@@ -130,10 +141,7 @@ func AddAccountMessagesInTx(ctx context.Context, tx server.PgTx, argsList []*Acc
 	createTime := server.NowUtc()
 	server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 		for _, args := range argsList {
-			var deliverTime *time.Time
-			if !args.Held {
-				deliverTime = &createTime
-			}
+			deliverTime := args.deliverTime(createTime)
 			batch.Queue(
 				addAccountMessageSql,
 				server.NewId(),
@@ -519,25 +527,50 @@ func GetAccountMessageByKey(ctx context.Context, templateName string, key string
 	return
 }
 
-// Owes the notice that the account's password changed, to the admin's email or
-// phone, in the transaction that changes it: one per reset code. An admin
-// without email or phone (an account created with a wallet or SSO), or a
-// network that is gone, gets none.
+// Owes the notice that the account's password changed, in the transaction that
+// changes it, one per reset code: by email to each of the admin's sign-in email
+// addresses (securityNoticeRecipientsInTx), and by SMS to the admin's own
+// sign-in (network_user.user_auth) when that is a phone number, the one
+// security notice AWS approved for SMS. An admin with neither (an account that
+// signs in with a wallet or a seedphrase only), or a network that is gone, gets
+// none. Owing it never fails the reset (guardSecurityNoticeInTx).
+//
+// The admin's own sign-in keeps the key it always had, the reset's id; each
+// other address adds its own to it.
 func addPasswordSetNoticeInTx(ctx context.Context, tx server.PgTx, networkId server.Id, userAuthResetId server.Id) {
-	userAuth, err := getUserAuth(ctx, tx, networkId)
-	if err != nil || userAuth == "" {
-		return
+	changeTime := server.NowUtc()
+	notice := &PasswordSetNotice{
+		ChangeTime: &changeTime,
+		Via:        securityNoticeVia(ctx),
 	}
-	normalUserAuth, _ := NormalUserAuthV1(&userAuth)
-	if normalUserAuth == nil {
-		return
-	}
-	AddAccountMessageInTx(ctx, tx, &AccountMessageArgs{
-		Key:          userAuthResetId.String(),
-		NetworkId:    &networkId,
-		UserAuth:     *normalUserAuth,
-		TemplateName: AuthPasswordSetTemplateName,
-		TemplateJson: "{}",
+	guardSecurityNoticeInTx(ctx, tx, SecurityNoticePassword, func() string {
+		ownUserAuth := ""
+		if userAuth, err := getUserAuth(ctx, tx, networkId); err == nil {
+			ownUserAuth, _ = NormalUserAuth(userAuth)
+		}
+		recipients := securityNoticeRecipientsInTx(ctx, tx, networkId)
+		if phone := securityNoticeLegacyPhoneInTx(ctx, tx, networkId); phone != "" {
+			recipients = append(recipients, phone)
+		}
+		if len(recipients) == 0 {
+			return securityNoticeNoEmail
+		}
+		templateJson, err := json.Marshal(notice)
+		server.Raise(err)
+		for _, recipient := range recipients {
+			key := userAuthResetId.String()
+			if recipient != ownUserAuth {
+				key = fmt.Sprintf("%s:%s", userAuthResetId, recipient)
+			}
+			AddAccountMessageInTx(ctx, tx, &AccountMessageArgs{
+				Key:          key,
+				NetworkId:    &networkId,
+				UserAuth:     recipient,
+				TemplateName: AuthPasswordSetTemplateName,
+				TemplateJson: string(templateJson),
+			})
+		}
+		return securityNoticeQueued
 	})
 }
 

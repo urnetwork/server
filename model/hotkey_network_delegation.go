@@ -193,6 +193,11 @@ func AcceptHotkeyNetworkDelegation(ctx context.Context, owner NetworkWalletMappi
 			panic(walletMappingAbort{cause: protocol.ErrWalletMappingIntegrity})
 		}
 		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO hotkey_network_delegation(domain_hash,network_id,generation,original_hash,nonce,original,accepted_at) VALUES($1,$2,$3,$4,$5,$6,$7)`, domain[:], owner.NetworkId, statement.Generation, hash[:], statement.Nonce[:], raw, now))
+		// a delegation that gives the network's subnet earnings to another
+		// hotkey owes the payout wallet notice
+		oweSubnetConsentNoticeInTx(ctx, tx, owner.NetworkId, SecurityWalletDestinationSubnetHotkey, func() *securityWallet {
+			return previousHotkeyDelegationInTx(ctx, tx, domain, owner.NetworkId, statement.Generation)
+		}, statement.Hotkey, statement.FromEpoch, statement.ThroughEpoch)
 		accepted = &WalletMappingAccepted{OriginalHash: hash, Generation: statement.Generation, Applied: true}
 	})
 	return accepted, nil

@@ -205,6 +205,11 @@ func AcceptNetworkWalletMappingConsent(ctx context.Context, owner NetworkWalletM
 			panic(walletMappingAbort{cause: protocol.ErrWalletMappingIntegrity})
 		}
 		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO network_wallet_mapping_consent(domain_hash,network_id,generation,original_hash,nonce,original,accepted_at) VALUES($1,$2,$3,$4,$5,$6,$7)`, domain[:], owner.NetworkId, statement.Generation, hash[:], statement.Nonce[:], raw, now))
+		// a consent that gives the network's subnet earnings to another wallet
+		// owes the payout wallet notice
+		oweSubnetConsentNoticeInTx(ctx, tx, owner.NetworkId, SecurityWalletDestinationSubnetNetworkConsent, func() *securityWallet {
+			return previousNetworkConsentColdkeyInTx(ctx, tx, domain, owner.NetworkId, statement.Generation)
+		}, statement.Coldkey, statement.FromEpoch, statement.ThroughEpoch)
 		accepted = &WalletMappingAccepted{OriginalHash: hash, Generation: statement.Generation, Applied: true}
 	})
 	return accepted, nil

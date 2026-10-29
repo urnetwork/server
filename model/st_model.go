@@ -167,12 +167,15 @@ func SetStWallet(ctx context.Context, networkId server.Id, coldkeySs58 string, c
 }
 
 // Publish both wallet projections only after the provider original is retained.
+// A set that changes where subnet payouts go owes the payout wallet notice.
 func SetStWalletOriginal(ctx context.Context, networkId server.Id, clientId *server.Id, coldkeySs58 string, coldkeyPubkey [32]byte, originalMessage, originalSignature *string) {
 	server.Tx(ctx, func(tx server.PgTx) {
+		watch := watchSubnetWalletInTx(ctx, tx, networkId, clientId)
 		if clientId != nil {
 			setStProviderWalletOriginalInTx(ctx, tx, *clientId, networkId, coldkeySs58, coldkeyPubkey, originalMessage, originalSignature)
 		}
 		setStWalletInTx(ctx, tx, networkId, coldkeySs58, coldkeyPubkey)
+		watch.noticeInTx(ctx, tx, 0, 0)
 	})
 }
 

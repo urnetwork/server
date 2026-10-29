@@ -23,10 +23,13 @@ var (
 )
 
 // the wallet must be an active wallet owned by the network,
-// so that a payout can never be directed to another network's wallet
+// so that a payout can never be directed to another network's wallet. A
+// selection that changes the payout wallet owes the payout wallet notice.
 func SetPayoutWallet(ctx context.Context, networkId server.Id, walletId server.Id) (returnErr error) {
 	server.Tx(ctx, func(tx server.PgTx) {
+		watch := watchPayoutWalletInTx(ctx, tx, networkId)
 		returnErr = setPayoutWalletInTx(ctx, tx, networkId, walletId)
+		watch.noticeInTx(ctx, tx)
 	})
 	return
 }

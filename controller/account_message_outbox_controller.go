@@ -104,6 +104,14 @@ var accountMessageTemplates = map[string]func() Template{
 	(&NetworkWelcomeTemplate{}).Name(): func() Template {
 		return &NetworkWelcomeTemplate{}
 	},
+	// the security notices, written by the model with the change they report
+	// (model/security_notice_model.go); email only
+	(&SecurityPayoutWalletChangedTemplate{}).Name(): func() Template {
+		return &SecurityPayoutWalletChangedTemplate{}
+	},
+	(&SecuritySignInChangedTemplate{}).Name(): func() Template {
+		return &SecuritySignInChangedTemplate{}
+	},
 }
 
 // Counts delivery outcomes by template and result (sent, retried, abandoned,
