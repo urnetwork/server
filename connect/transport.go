@@ -466,6 +466,10 @@ func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 		H1PlusStats:  defaultConnectH1PlusStats,
 		// a connection that offers the delay header gets it
 		EnableTransportDelay: true,
+		// the mover's tick: an operator's switch reaches new connections
+		// within about ten seconds
+		TransportDelayControlRefreshInterval: 10 * time.Second,
+		TransportDelayControlReadTimeout:     5 * time.Second,
 		// use the min value from older version of the client
 		// `platformTransportSettings.PingTimeout`
 		MinPingTimeout:   1 * time.Second,
@@ -538,8 +542,15 @@ type ConnectHandlerSettings struct {
 	WriteTimeout     time.Duration
 	// Accepts the per-message delay header (connect DELAY.md §6) on a
 	// connection that offers it and declares no provide intent. On by
-	// default; false keeps every connection on the legacy wire.
+	// default; false keeps every connection on the legacy wire. The Redis
+	// control's `transportDelay` can turn it off at runtime, never on past
+	// this (transport_delay_control.go).
 	EnableTransportDelay bool
+	// How often the handler reads the Redis control's `transportDelay`.
+	// Non-positive reads it once, at start.
+	TransportDelayControlRefreshInterval time.Duration
+	// Bounds one read of the control.
+	TransportDelayControlReadTimeout time.Duration
 	// Bounds the complete authentication phase, then each serving read.
 	ReadTimeout time.Duration
 	// MaximumExchangeMessageByteCount ByteCount
@@ -905,6 +916,10 @@ type ConnectHandler struct {
 
 	// holds the WebSocket refusals of clients that cannot read the close
 	refusalHold *connectRefusalHold
+
+	// the Redis control's switch for the delay header
+	// (transport_delay_control.go)
+	transportDelayControl *connectTransportDelayControl
 }
 
 // ConnectHandlerPacketConns contains already-bound packet sockets for the QUIC
@@ -1106,6 +1121,7 @@ func newConnectHandlerWithPacketConns(
 			handlerId,
 			&settings.ConnectionReconcileSettings,
 		),
+		transportDelayControl: newConnectTransportDelayControl(cancelCtx, settings),
 	}
 	h.refusalHold = newConnectRefusalHold(cancelCtx, exchange.IsDraining, settings)
 
@@ -1546,7 +1562,9 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			ws.Close()
 		}
 	}()
-	upgradeResponseHeader := connectH1TransportDelayResponseHeader(self.settings.EnableTransportDelay, auth != nil, r)
+	// decided once for either carrier, so a later switch of the Redis control
+	// leaves this connection's wire as it is
+	upgradeResponseHeader := connectH1TransportDelayResponseHeader(self.acceptTransportDelay(), auth != nil, r)
 	// After a 101 that accepted the header, ws stamps and strips it on every
 	// message, the out-of-band closes and keepalives included. The peer conn
 	// only stamps and echoes and publishes nothing, so it needs no client id,
@@ -2804,7 +2822,7 @@ func (self *ConnectHandler) connectQuicWithCarrier(conn *quic.Conn, carrier Resi
 				connectionState.SupportsDatagrams.Remote,
 				// never on a connection that declares provide intent (connect
 				// DELAY.md D3)
-				self.settings.EnableTransportDelay && !provideIntent,
+				self.acceptTransportDelay() && !provideIntent,
 				func(responseFrameBytes []byte) error {
 					return writeConnectQuicAuthWithDeadline(framer, stream, min(self.settings.WriteTimeout, time.Until(authDeadline)), responseFrameBytes)
 				},

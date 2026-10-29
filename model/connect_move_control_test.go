@@ -136,6 +136,48 @@ func TestConnectMoveControlNarrowsPlacement(t *testing.T) {
 	}
 }
 
+// The control's transport delay switch (connect DELAY.md §11): absent keeps
+// the connect handler's switch, the operator can turn the delay header off,
+// never on past that switch, a value that does not parse is off, and neither
+// the mover's switches nor the placement's touch it.
+func TestConnectMoveControlNarrowsTransportDelay(t *testing.T) {
+	handling := ConnectMoveControlCeiling{EnableTransportDelay: true}
+	handlingWithMoves := connectMoveTestCeiling()
+	handlingWithMoves.EnableTransportDelay = true
+	placing := connectMoveTestCeiling()
+	placing.EnablePlacement = true
+	cases := []struct {
+		name           string
+		fields         map[string]string
+		ceiling        ConnectMoveControlCeiling
+		transportDelay bool
+	}{
+		{name: "absent: the handler's switch", fields: nil, ceiling: handling, transportDelay: true},
+		{name: "absent for the mover's ceiling", fields: nil, ceiling: connectMoveTestCeiling(), transportDelay: false},
+		{name: "absent for the placement's ceiling", fields: nil, ceiling: placing, transportDelay: false},
+		{name: "other fields keep it", fields: map[string]string{"mode": "off", "placement": "off", "drainMoves": "false"}, ceiling: handlingWithMoves, transportDelay: true},
+		{name: "the operator turns it off", fields: map[string]string{"transportDelay": "off"}, ceiling: handling, transportDelay: false},
+		{name: "false", fields: map[string]string{"transportDelay": "false"}, ceiling: handling, transportDelay: false},
+		{name: "0", fields: map[string]string{"transportDelay": "0"}, ceiling: handling, transportDelay: false},
+		{name: "on keeps it on", fields: map[string]string{"transportDelay": "on"}, ceiling: handling, transportDelay: true},
+		{name: "true, padded", fields: map[string]string{"transportDelay": " true "}, ceiling: handling, transportDelay: true},
+		{name: "on cannot widen past the handler's switch", fields: map[string]string{"transportDelay": "on"}, ceiling: ConnectMoveControlCeiling{}, transportDelay: false},
+		{name: "a value that does not parse is off", fields: map[string]string{"transportDelay": "enabled"}, ceiling: handling, transportDelay: false},
+		{name: "an empty value is off", fields: map[string]string{"transportDelay": ""}, ceiling: handling, transportDelay: false},
+		{name: "a field name is exact", fields: map[string]string{"transportdelay": "off"}, ceiling: handling, transportDelay: true},
+	}
+	for _, c := range cases {
+		if control := NarrowConnectMoveControl(c.fields, c.ceiling); control.TransportDelay != c.transportDelay {
+			t.Errorf("%s: transport delay = %t, want %t", c.name, control.TransportDelay, c.transportDelay)
+		}
+	}
+	// the switch changes nothing the mover reads
+	moves := NarrowConnectMoveControl(map[string]string{"mode": "on", "transportDelay": "off"}, handlingWithMoves)
+	if moves.Mode != ConnectMoveModeOn || moves.MaxPerMinute != 120 || moves.Tolerance != 0.10 || !moves.DrainMoves {
+		t.Errorf("transport delay off changed the mover's control: %+v", moves)
+	}
+}
+
 // Whatever the control holds, the effective control is never wider than the
 // code: no mode past EnableMove, no rate above the code cap, no band narrower
 // than the code band, no drain moves past EnableDrainMoves.

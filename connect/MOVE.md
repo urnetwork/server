@@ -505,6 +505,11 @@ phase 0).
 - It overrides the code defaults and is read every tick, so ops can stop or
   slow moves at once without a connect deploy.
 - Code defaults apply when the key is absent.
+- Later fields: `drainMoves`, `placement` (§13) and `transportDelay`. The
+  connect handlers read `transportDelay` every 10 s and stop accepting the
+  delay header on new connections while it is off (connect DELAY.md §11). The
+  mover ignores it. Deleting the whole control turns it back on, since an
+  absent field is the code default.
 
 **Cooldown:** `move_cooldown_<clientId>` with a TTL of `MoveClientCooldown`.
 
