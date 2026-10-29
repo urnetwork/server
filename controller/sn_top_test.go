@@ -219,13 +219,13 @@ func TestSnTopAttachChainData(t *testing.T) {
 		{Rank: 1, Uid: 7, Score: big.NewRat(3, 2), Selected: true},
 		{Rank: 2, Uid: 9, Score: big.NewRat(1, 2), Selected: false},
 	}}
-	incentive := &SnTopIncentive{ByUid: map[uint16]float64{7: 0.25}, Stale: true}
+	incentive := &SnTopIncentive{ByUid: map[uint16]uint16{7: 16384}, Stale: true}
 	attached := snTopAttachChainData(append([]model.SnTopFleetInput{}, fleets...), summary, incentive)
 	connect.AssertEqual(t, *attached[0].ValidatorScore, 1.5)
 	connect.AssertEqual(t, *attached[0].ValidatorRank, 1)
 	connect.AssertEqual(t, *attached[0].ValidatorRankOf, 2)
 	connect.AssertEqual(t, *attached[0].Selected, true)
-	connect.AssertEqual(t, *attached[0].Incentive, 0.25)
+	connect.AssertEqual(t, *attached[0].Incentive, 16384.0/65535)
 	connect.AssertEqual(t, attached[0].IncentiveStale, true)
 	// uid 8 is not eligible at the validator: score 0, not selected, no rank
 	connect.AssertEqual(t, *attached[1].ValidatorScore, 0.0)
@@ -239,7 +239,7 @@ func TestSnTopAttachChainData(t *testing.T) {
 	movedSummary := &SnTopValidatorSummary{Entries: []SnTopValidatorSummaryEntry{
 		{Rank: 1, Uid: 7, Hotkey: newHolder, Score: big.NewRat(3, 2), Selected: true},
 	}}
-	movedIncentive := &SnTopIncentive{ByUid: map[uint16]float64{7: 0.5}, Holders: map[uint16][32]byte{7: newHolder}}
+	movedIncentive := &SnTopIncentive{ByUid: map[uint16]uint16{7: 65535}, Holders: map[uint16][32]byte{7: newHolder}}
 	moved = snTopAttachChainData(moved, movedSummary, movedIncentive)
 	connect.AssertEqual(t, *moved[0].ValidatorScore, 0.0)
 	connect.AssertEqual(t, moved[0].ValidatorRank, (*int)(nil))
@@ -247,7 +247,7 @@ func TestSnTopAttachChainData(t *testing.T) {
 	connect.AssertEqual(t, moved[0].Incentive, (*float64)(nil))
 	kept := snTopAttachChainData([]model.SnTopFleetInput{{Key: model.SnTopFleetKey{Uid: 7, Hotkey: newHolder}}}, movedSummary, movedIncentive)
 	connect.AssertEqual(t, *kept[0].ValidatorRank, 1)
-	connect.AssertEqual(t, *kept[0].Incentive, 0.5)
+	connect.AssertEqual(t, *kept[0].Incentive, 1.0)
 
 	// the replica check compares exact values, UID by UID
 	agreement := snTopAgreement{}
@@ -297,4 +297,47 @@ func TestPointsLeaderboardRowPrivacy(t *testing.T) {
 	connect.AssertEqual(t, own.IsMe, true)
 	connect.AssertEqual(t, own.NetworkName, "")
 	connect.AssertEqual(t, own.Anonymous, true)
+}
+
+// Contract amendment 2026-10-29: fleets[].incentive is the UID's share of
+// SN25 incentive as a fraction from 0 to 1, whatever unit the chain read
+// keeps: subtensor's u16 share of 65535 becomes 0..1, and the wire carries
+// the fraction the apps show as a percent.
+func TestSnTopIncentiveIsAFraction(t *testing.T) {
+	connect.AssertEqual(t, SnTopIncentiveFraction(0), 0.0)
+	connect.AssertEqual(t, SnTopIncentiveFraction(65535), 1.0)
+	snTopFractionNear := func(got float64, want float64) {
+		t.Helper()
+		if got < want-0.0001 || want+0.0001 < got {
+			t.Fatalf("incentive fraction %v, want %v", got, want)
+		}
+	}
+	// 1180 of 65535 is the "1.8%" of the contract's example
+	snTopFractionNear(SnTopIncentiveFraction(1180), 0.018)
+	snTopFractionNear(SnTopIncentiveFraction(32768), 0.5)
+
+	key := model.SnTopFleetKey{Uid: 42, Hotkey: [32]byte{9}}
+	fleets := snTopAttachChainData(
+		[]model.SnTopFleetInput{{Key: key}},
+		nil,
+		&SnTopIncentive{ByUid: map[uint16]uint16{42: 1180}, Holders: map[uint16][32]byte{42: key.Hotkey}},
+	)
+	snTopFractionNear(*fleets[0].Incentive, 0.018)
+	if *fleets[0].Incentive < 0 || 1 < *fleets[0].Incentive {
+		t.Fatalf("incentive %v is not a fraction", *fleets[0].Incentive)
+	}
+	// on the wire, as the apps read it
+	row := snTopRowFromModel(&model.SnTopNetworkRow{SnTopNetworkProjection: model.SnTopNetworkProjection{Position: 1, Claimed: true}}, []*model.SnTopFleetRow{{
+		Key:       key,
+		Incentive: fleets[0].Incentive,
+	}}, nil)
+	rowJson, err := json.Marshal(row)
+	connect.AssertEqual(t, err, nil)
+	var decoded struct {
+		Fleets []struct {
+			Incentive *float64 `json:"incentive"`
+		} `json:"fleets"`
+	}
+	connect.AssertEqual(t, json.Unmarshal(rowJson, &decoded), nil)
+	snTopFractionNear(*decoded.Fleets[0].Incentive, 0.018)
 }

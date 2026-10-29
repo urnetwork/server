@@ -270,9 +270,11 @@ func SnTopLabel(measurable bool, margin float64, measurableBits uint8, precision
 	}
 }
 
-// SnTopClaimPrompt directs a measurable network inside the head to claim (Q13).
-func SnTopClaimPrompt(measurable bool, position int) bool {
-	return measurable && 0 < position && position <= SnTopHeadSeats
+// SnTopClaimPrompt directs a measurable network inside the head to claim
+// (Q13). A network with an active claimed fleet already claimed and is not
+// prompted (contract amendment 2026-10-29).
+func SnTopClaimPrompt(measurable bool, position int, claimed bool) bool {
+	return measurable && 0 < position && position <= SnTopHeadSeats && !claimed
 }
 
 // snTopNetworkLess is the total order: score descending, the older network
@@ -528,7 +530,7 @@ func ProjectSnTop(input *SnTopProjectionInput) *SnTopProjection {
 			Label:           SnTopLabel(isMeasurable, margin, state.MeasurableBits, input.PrecisionAt200),
 			Measurable:      isMeasurable,
 			VerifyEligible:  verifyEligible[entry.networkId],
-			ClaimPrompt:     SnTopClaimPrompt(isMeasurable, position),
+			ClaimPrompt:     SnTopClaimPrompt(isMeasurable, position, claimedNetworks[entry.networkId]),
 			Claimed:         claimedNetworks[entry.networkId],
 		}
 		if hasPrior && 0 < prior.LastPosition {

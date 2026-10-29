@@ -99,8 +99,9 @@ type SnTopValidatorSummary struct {
 
 // SnTopIncentive is the on-chain incentive of each UID, read once a tempo.
 type SnTopIncentive struct {
-	At    time.Time
-	ByUid map[uint16]float64
+	At time.Time
+	// each UID's Incentive as the chain stores it: a u16 share of 65535
+	ByUid map[uint16]uint16
 	// the hotkey holding each UID at the read, where it was read; a UID that
 	// changed hands earns for its new holder, not for the fleet
 	Holders map[uint16][32]byte
@@ -966,13 +967,22 @@ func snTopAttachChainData(fleets []model.SnTopFleetInput, summary *SnTopValidato
 		}
 		if incentive != nil {
 			holder, holderRead := incentive.Holders[fleet.Key.Uid]
-			if value, ok := incentive.ByUid[fleet.Key.Uid]; ok && (!holderRead || holder == fleet.Key.Hotkey) {
+			if raw, ok := incentive.ByUid[fleet.Key.Uid]; ok && (!holderRead || holder == fleet.Key.Hotkey) {
+				value := SnTopIncentiveFraction(raw)
 				fleet.Incentive = &value
 			}
 			fleet.IncentiveStale = incentive.Stale
 		}
 	}
 	return fleets
+}
+
+// SnTopIncentiveFraction is a UID's on-chain incentive as the board serves
+// it: its share of SN25 incentive, a fraction from 0 to 1 (contract
+// amendment 2026-10-29; the apps show 0.018 as "1.8%"). Subtensor stores
+// Incentive as a u16 share of 65535.
+func SnTopIncentiveFraction(raw uint16) float64 {
+	return float64(raw) / float64(^uint16(0))
 }
 
 // snTopAgreement is the board's agreement with the validator and the chain

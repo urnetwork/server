@@ -301,10 +301,12 @@ func TestSnTopLabels(t *testing.T) {
 			t.Errorf("label(%t, %v, %04b, %v) = %s, want %s", c.measurable, c.margin, c.bits, c.precision, got, c.want)
 		}
 	}
-	connect.AssertEqual(t, SnTopClaimPrompt(true, 200), true)
-	connect.AssertEqual(t, SnTopClaimPrompt(true, 201), false)
-	connect.AssertEqual(t, SnTopClaimPrompt(false, 1), false)
-	connect.AssertEqual(t, SnTopClaimPrompt(true, 0), false)
+	connect.AssertEqual(t, SnTopClaimPrompt(true, 200, false), true)
+	connect.AssertEqual(t, SnTopClaimPrompt(true, 201, false), false)
+	connect.AssertEqual(t, SnTopClaimPrompt(false, 1, false), false)
+	connect.AssertEqual(t, SnTopClaimPrompt(true, 0, false), false)
+	// a network that already claimed is not prompted to claim
+	connect.AssertEqual(t, SnTopClaimPrompt(true, 1, true), false)
 	snTopNear(t, SnTopMargin(12, 10), 0.2)
 	snTopNear(t, SnTopMargin(8, 10), -0.2)
 	snTopNear(t, SnTopMargin(3, 0), 1)
@@ -372,6 +374,13 @@ func TestSnTopProjectionSoloScoreAndClaimedFleets(t *testing.T) {
 	connect.AssertEqual(t, row.Claimed, false)
 	claimedRow := snTopRowOf(t, projection, claimedNet)
 	connect.AssertEqual(t, claimedRow.Claimed, true)
+	// measurable and inside the head, but it already claimed: no prompt;
+	// the unclaimed networks beside it are prompted
+	connect.AssertEqual(t, claimedRow.Measurable, true)
+	connect.AssertEqual(t, claimedRow.Position <= SnTopHeadSeats, true)
+	connect.AssertEqual(t, claimedRow.ClaimPrompt, false)
+	connect.AssertEqual(t, row.ClaimPrompt, true)
+	connect.AssertEqual(t, snTopRowOf(t, projection, other).ClaimPrompt, true)
 	// the claimed network's own fleet is not "shared with others"
 	connect.AssertEqual(t, claimedRow.SharedWithUnits, 1)
 	snTopNear(t, claimedRow.RawLastTempo, 0.5)
