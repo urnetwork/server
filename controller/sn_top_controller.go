@@ -72,8 +72,10 @@ const (
 // SnTopValidatorSummaryEntry is one eligible UID of the validator's head
 // summary (sn docs/spec/head-summary-v1.md).
 type SnTopValidatorSummaryEntry struct {
-	Rank     int
-	Uid      uint16
+	Rank int
+	Uid  uint16
+	// the hotkey holding the UID at the summary's snapshot
+	Hotkey   [32]byte
 	Score    *big.Rat
 	Selected bool
 	// the live fleet identities that make up the score
@@ -99,6 +101,9 @@ type SnTopValidatorSummary struct {
 type SnTopIncentive struct {
 	At    time.Time
 	ByUid map[uint16]float64
+	// the hotkey holding each UID at the read, where it was read; a UID that
+	// changed hands earns for its new holder, not for the fleet
+	Holders map[uint16][32]byte
 	// the validator's fallback row, its weights outside the activity cutoff,
 	// or its trust well below 1 (LEADERTOP.md §6.2)
 	Stale bool
@@ -929,7 +934,7 @@ func snTopGatherInputs(
 }
 
 // snTopAttachChainData copies the validator's summary and the on-chain
-// incentive onto each fleet by its UID.
+// incentive onto each fleet by its UID, while its hotkey still holds the UID.
 func snTopAttachChainData(fleets []model.SnTopFleetInput, summary *SnTopValidatorSummary, incentive *SnTopIncentive) []model.SnTopFleetInput {
 	entries := map[uint16]*SnTopValidatorSummaryEntry{}
 	if summary != nil {
@@ -944,7 +949,11 @@ func snTopAttachChainData(fleets []model.SnTopFleetInput, summary *SnTopValidato
 			selected := false
 			score := 0.0
 			fleet.ValidatorRankOf = &rankOf
-			if entry := entries[fleet.Key.Uid]; entry != nil {
+			entry := entries[fleet.Key.Uid]
+			if entry != nil && entry.Hotkey != ([32]byte{}) && entry.Hotkey != fleet.Key.Hotkey {
+				entry = nil
+			}
+			if entry != nil {
 				rank := entry.Rank
 				fleet.ValidatorRank = &rank
 				selected = entry.Selected
@@ -956,7 +965,8 @@ func snTopAttachChainData(fleets []model.SnTopFleetInput, summary *SnTopValidato
 			fleet.Selected = &selected
 		}
 		if incentive != nil {
-			if value, ok := incentive.ByUid[fleet.Key.Uid]; ok {
+			holder, holderRead := incentive.Holders[fleet.Key.Uid]
+			if value, ok := incentive.ByUid[fleet.Key.Uid]; ok && (!holderRead || holder == fleet.Key.Hotkey) {
 				fleet.Incentive = &value
 			}
 			fleet.IncentiveStale = incentive.Stale

@@ -233,6 +233,22 @@ func TestSnTopAttachChainData(t *testing.T) {
 	connect.AssertEqual(t, *attached[1].Selected, false)
 	connect.AssertEqual(t, attached[1].Incentive, (*float64)(nil))
 
+	// a UID that changed hands shows nothing of its new holder's
+	fleetHotkey, newHolder := [32]byte{1}, [32]byte{2}
+	moved := []model.SnTopFleetInput{{Key: model.SnTopFleetKey{Uid: 7, Hotkey: fleetHotkey}}}
+	movedSummary := &SnTopValidatorSummary{Entries: []SnTopValidatorSummaryEntry{
+		{Rank: 1, Uid: 7, Hotkey: newHolder, Score: big.NewRat(3, 2), Selected: true},
+	}}
+	movedIncentive := &SnTopIncentive{ByUid: map[uint16]float64{7: 0.5}, Holders: map[uint16][32]byte{7: newHolder}}
+	moved = snTopAttachChainData(moved, movedSummary, movedIncentive)
+	connect.AssertEqual(t, *moved[0].ValidatorScore, 0.0)
+	connect.AssertEqual(t, moved[0].ValidatorRank, (*int)(nil))
+	connect.AssertEqual(t, *moved[0].Selected, false)
+	connect.AssertEqual(t, moved[0].Incentive, (*float64)(nil))
+	kept := snTopAttachChainData([]model.SnTopFleetInput{{Key: model.SnTopFleetKey{Uid: 7, Hotkey: newHolder}}}, movedSummary, movedIncentive)
+	connect.AssertEqual(t, *kept[0].ValidatorRank, 1)
+	connect.AssertEqual(t, *kept[0].Incentive, 0.5)
+
 	// the replica check compares exact values, UID by UID
 	agreement := snTopAgreement{}
 	snTopMeasureReplica(&agreement, &model.SnTopProjection{Fleets: []*model.SnTopFleetProjection{
