@@ -33,3 +33,8 @@ readback observation, not a backdated push timestamp. All seven publications
 must precede the native pilot plan and measurements.
 No public pilot, new hidden seed, calibration acceptance, or scoring-hold release
 is claimed by this checkpoint.
+
+The [native prepared plan](plan.json) binds the actual seven publication
+receipts, fixed public workload and qualified executable. Native preparation
+passed without measurements or new entropy. The plan still needs its own
+successful Git-publication receipt before the one-use timed execution.
