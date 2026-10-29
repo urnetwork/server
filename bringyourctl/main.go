@@ -78,6 +78,7 @@ Usage:
     bringyourctl health recover
     bringyourctl balance-code create --duration=<duration> --balance=<balance> --cost=<usd> --email=<email> [--count=<count>]
     bringyourctl balance-code check --secret=<secret>
+    bringyourctl balance move-redeemed --balance_id=<balance_id> --to_network_id=<network_id> [(--commit --expect=<digest>)]
     bringyourctl send network-welcome --user_auth=<user_auth>
     bringyourctl send auth-verify --user_auth=<user_auth>
     bringyourctl send auth-password-reset --user_auth=<user_auth>
@@ -235,11 +236,13 @@ Options:
     --sweep_batch_size=<sweep_batch_size>  With --move_all_sweeps, move at most this many sweeps per transaction; omitted uses 10000.
     --sweep_batch_limit=<sweep_batch_limit>  With --move_all_sweeps, run at most this many sweep transactions in one call; omitted or 0 moves every sweep.
     --count_sweeps  Also count the sweeps a correction would move (dry run).
-    --expect=<digest>  The digest the sn-reconcile, reimburse, account-points backfill-blocks or network sign-out-all dry run printed; --send and --commit refuse any other census.
+    --expect=<digest>  The digest the sn-reconcile, reimburse, account-points backfill-blocks, network sign-out-all or balance move-redeemed dry run printed; --send and --commit refuse any other census.
     --file=<file>  A payouts reimburse CSV with the header network_id,wallet_id,amount_usdc; for payouts usdc-sent-notice, one payment id per line; for account-points backfill-blocks, the awards the dry run saves and --commit commits (omitted, operator-block-points-<digest>.json).
     --blocks=<blocks>  With account-points backfill-blocks, the operator blocks to award, comma separated; omitted, every completed block past the earning boundary. A block that has its points is skipped.
-    --commit  With account-points backfill-blocks, commit the awards of the dry run whose digest is --expect; with network sign-out-all, sign the network out as its dry run with that digest printed. Without it the run is a read-only dry run.
+    --commit  With account-points backfill-blocks, commit the awards of the dry run whose digest is --expect; with network sign-out-all, sign the network out as its dry run with that digest printed; with balance move-redeemed, move the balance its dry run with that digest printed. Without it the run is a read-only dry run.
     --remove-clients  With network sign-out-all, also deactivate every active client of the network as /network/remove-clients does.
+    --balance_id=<balance_id>  With balance move-redeemed, the unused balance a redeemed balance code granted, left on a deleted network.
+    --to_network_id=<network_id>  With balance move-redeemed, the network the balance and its code move to.
     --allow_prior_reimbursement  With payouts reimburse, pay networks that already have an open manual reimbursement of another plan; each row lists them, and the digest binds the flag and exactly those.
     -c --count=<count>	Number to process [default: 1000].`
 
@@ -344,6 +347,10 @@ func main() {
 			balanceCodeCreate(opts)
 		} else if check, _ := opts.Bool("check"); check {
 			balanceCodeCheck(opts)
+		}
+	} else if balance, _ := opts.Bool("balance"); balance {
+		if moveRedeemed, _ := opts.Bool("move-redeemed"); moveRedeemed {
+			os.Exit(balanceMoveRedeemedCommand(opts, os.Stdout, os.Stderr))
 		}
 	} else if send, _ := opts.Bool("send"); send {
 		if networkWelcome, _ := opts.Bool("network-welcome"); networkWelcome {
