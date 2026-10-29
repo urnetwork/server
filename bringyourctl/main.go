@@ -127,6 +127,7 @@ Usage:
     bringyourctl task kick <run_once_key>
     bringyourctl auth login <auth_code>
     bringyourctl account-points populate --plan_id=<plan_id>
+    bringyourctl account-points backfill-blocks [--blocks=<blocks>] [--file=<file>] [(--commit --expect=<digest>)]
     bringyourctl client connection fix
     bringyourctl migrate-user-auth
     bringyourctl reliability set-multipliers
@@ -233,8 +234,10 @@ Options:
     --sweep_batch_size=<sweep_batch_size>  With --move_all_sweeps, move at most this many sweeps per transaction; omitted uses 10000.
     --sweep_batch_limit=<sweep_batch_limit>  With --move_all_sweeps, run at most this many sweep transactions in one call; omitted or 0 moves every sweep.
     --count_sweeps  Also count the sweeps a correction would move (dry run).
-    --expect=<digest>  The digest the sn-reconcile or reimburse dry run printed; --send refuses any other census.
-    --file=<file>  A payouts reimburse CSV with the header network_id,wallet_id,amount_usdc; for payouts usdc-sent-notice, one payment id per line.
+    --expect=<digest>  The digest the sn-reconcile, reimburse or account-points backfill-blocks dry run printed; --send and --commit refuse any other census.
+    --file=<file>  A payouts reimburse CSV with the header network_id,wallet_id,amount_usdc; for payouts usdc-sent-notice, one payment id per line; for account-points backfill-blocks, the awards the dry run saves and --commit commits (omitted, operator-block-points-<digest>.json).
+    --blocks=<blocks>  With account-points backfill-blocks, the operator blocks to award, comma separated; omitted, every completed block past the earning boundary. A block that has its points is skipped.
+    --commit  With account-points backfill-blocks, commit the awards of the dry run whose digest is --expect; without it the run is a read-only dry run.
     --allow_prior_reimbursement  With payouts reimburse, pay networks that already have an open manual reimbursement of another plan; each row lists them, and the digest binds the flag and exactly those.
     -c --count=<count>	Number to process [default: 1000].`
 
@@ -478,6 +481,8 @@ func main() {
 	} else if accountPoints, _ := opts.Bool("account-points"); accountPoints {
 		if populate, _ := opts.Bool("populate"); populate {
 			accountPointsPopulate(opts)
+		} else if backfillBlocks, _ := opts.Bool("backfill-blocks"); backfillBlocks {
+			os.Exit(accountPointsBackfillBlocksCommand(opts))
 		}
 		// } else if accountPoints, _ := opts.Bool("client"); accountPoints {
 		// 	if populate, _ := opts.Bool("connection"); populate {

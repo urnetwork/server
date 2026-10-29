@@ -344,6 +344,14 @@ func sendPaymentsWithPlanner(clientSession *session.ClientSession, planner payme
 		})
 	}
 
+	// Past the earning boundary no plan applies points: the operator block
+	// points task awards them, in parallel with the SN pool. A payout run asks
+	// for a run now; the task has its own schedule and retries, so a failing
+	// plan never holds the points back.
+	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
+		TriggerAwardOperatorBlockPointsInTx(clientSession, tx)
+	})
+
 	// The loop can return already-committed plans together with an error from a
 	// later slice. Those durable payments were scheduled above; return the error
 	// so the payout task still retries the remaining frontier.
