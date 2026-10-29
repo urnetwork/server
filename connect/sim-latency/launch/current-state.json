@@ -1,10 +1,10 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-29T21:37:05Z",
+  "observed_at": "2026-10-29T23:54:09Z",
   "scoring_enablement_current": {
-    "status": "R2_intake_open_all7_prerequisites_published_public_pilot_running_baseline01_production_grading_held",
-    "observed_at": "2026-10-29T21:37:05Z",
+    "status": "R2_intake_open_all7_prerequisites_published_public_pilot_running_candidate06_production_grading_held",
+    "observed_at": "2026-10-29T23:54:09Z",
     "metadata_checkpoint_only": true,
     "actual_intake_open": true,
     "grading_enabled": false,
@@ -57,7 +57,19 @@
     "native_public_pilot_started_at": "2026-10-29T21:27:46Z",
     "native_public_pilot_manager_deadline": "2026-10-30T00:27:46Z",
     "native_public_pilot_watchdog_deadline": "2026-10-30T00:28:41Z",
-    "native_public_pilot_phase_observed": "baseline-01_runner_and_disposable_postgres_redis_live",
+    "native_public_pilot_phase_observed": "candidate-06_runner_and_disposable_postgres_redis_live",
+    "native_public_pilot_baseline_replicates_completed_at_observation": 9,
+    "native_public_pilot_candidate_replicates_completed_at_observation": 5,
+    "finalization_input_preparation": {
+      "status": "file_only_independently_checked_drafts_not_native_admission_or_calibration_acceptance",
+      "packet": "/home/by/urnetwork/temp/after-census-fresh-sequence-audit-20261029.iLKFRMCi",
+      "manifest_sha256": "7a541469b90c0981dde2b18cc552f0e02a319d8e6263824f5f65f979011cc0cc",
+      "reviewed_source_union_count": 10,
+      "tool_projection_reuses_exact_completed_675_evidence": true,
+      "future_pilot_proof_direction_publications_catalog_and_declaration_unbound": true,
+      "exclusion_catalog_contains_private_seeds_must_not_be_published": true,
+      "no_new_runtime_tests_measurements_or_entropy": true
+    },
     "native_public_pilot_plan_publication_commit": "84319a1aa4161359a29e8962961d3f62e5c2cd5f",
     "native_public_pilot_plan_publication_sha256": "8247e219f19decaeea44e19b43268cf7e4e5943dcf3e1aee5ecc53168595ea34",
     "native_public_pilot_initial_admission_failure": {
