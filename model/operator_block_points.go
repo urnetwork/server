@@ -435,7 +435,10 @@ var operatorBlockPointsSweepSql = `
 		balance.subsidy_net_revenue_nano_cents
 `
 
-// Reads the window's traffic in bounded read-only statements.
+// Reads the window's traffic in bounded read-only statements. Like every read
+// of an award, each is a statement of its own, outside any transaction, so a
+// slow client is never idle in a transaction while it drains a result (see
+// readPaymentPlanReliabilityPartials).
 func readOperatorBlockTraffic(ctx context.Context, start time.Time, end time.Time, cutoff time.Time) (*operatorBlockTraffic, error) {
 	traffic := newOperatorBlockTraffic()
 	for chunkStart := start; chunkStart.Before(end); {
@@ -444,9 +447,9 @@ func readOperatorBlockTraffic(ctx context.Context, start time.Time, end time.Tim
 		}
 		chunkEnd := server.MinTime(chunkStart.Add(operatorBlockPointsSweepReadDuration), end)
 		var rows []*operatorBlockSweepRow
-		server.MaintenanceTx(ctx, func(tx server.PgTx) {
+		server.MaintenanceDb(ctx, func(conn server.PgConn) {
 			rows = nil
-			result, err := tx.Query(ctx, operatorBlockPointsSweepSql, chunkStart, chunkEnd, cutoff)
+			result, err := conn.Query(ctx, operatorBlockPointsSweepSql, chunkStart, chunkEnd, cutoff)
 			server.WithPgResult(result, err, func() {
 				for result.Next() {
 					row := &operatorBlockSweepRow{}
@@ -467,9 +470,14 @@ func readOperatorBlockTraffic(ctx context.Context, start time.Time, end time.Tim
 					rows = append(rows, row)
 				}
 			})
-		}, server.TxReadCommitted)
+			boundedReadDone("traffic")
+		})
 		for _, row := range rows {
 			traffic.add(row)
+		}
+		if chunkEnd.Sub(start)%(24*time.Hour) == 0 || !chunkEnd.Before(end) {
+			// progress: a block's reads take hours on Main
+			glog.Infof("[obp]traffic [%s, %s) read to %s: %d sweeps\n", start.Format(time.RFC3339), end.Format(time.RFC3339), chunkEnd.Format(time.RFC3339), traffic.sweepCount)
 		}
 		chunkStart = chunkEnd
 	}
@@ -502,9 +510,10 @@ type operatorBlockReliabilityKey struct {
 }
 
 // Reads the window's reliability with the plan's fold, in bounded read-only
-// statements: the plan's chunk reads (readPaymentPlanReliabilityPartials),
-// the valid client locations, the exact numeric sums per network and country,
-// the division in SQL as the fold does it, and the country multipliers.
+// statements, none in a transaction: the plan's chunk reads
+// (readPaymentPlanReliabilityPartials), the valid client locations, the exact
+// numeric sums per network and country, the division in SQL as the fold does
+// it, and the country multipliers.
 func readOperatorBlockReliability(ctx context.Context, start time.Time, end time.Time, now time.Time) (*operatorBlockReliability, error) {
 	minBlockNumber, maxBlockNumber := operatorBlockReliabilityBlockWindow(start, end)
 	reliability := &operatorBlockReliability{
@@ -525,11 +534,14 @@ func readOperatorBlockReliability(ctx context.Context, start time.Time, end time
 	var shift int64
 	var coveredBlockCount int64
 	var degradedBlockNumbers []int64
-	server.Tx(ctx, func(tx server.PgTx) {
-		shift = reliabilityRollupBlockShift(ctx, tx, maxBlockNumber)
-		coveredBlockCount = reliabilityCoveredBlockCount(ctx, tx, minBlockNumber, maxBlockNumber)
-		degradedBlockNumbers = reliabilityDegradedBlocks(ctx, tx, minBlockNumber, maxBlockNumber)
-	}, server.TxReadCommitted)
+	// three statements, each its own snapshot as in a read committed
+	// transaction, with no transaction open between them
+	server.Db(ctx, func(conn server.PgConn) {
+		shift = reliabilityRollupBlockShift(ctx, conn, maxBlockNumber)
+		coveredBlockCount = reliabilityCoveredBlockCount(ctx, conn, minBlockNumber, maxBlockNumber)
+		degradedBlockNumbers = reliabilityDegradedBlocks(ctx, conn, minBlockNumber, maxBlockNumber)
+		boundedReadDone("reliability_blocks")
+	})
 	if 0 < shift {
 		return nil, fmt.Errorf("%w: %d blocks behind the window end", ErrOperatorBlockPointsReliabilityPending, shift)
 	}
@@ -579,6 +591,7 @@ func readOperatorBlockReliability(ctx context.Context, start time.Time, end time
 						clientCountries[clientId] = countryLocationId
 					}
 				})
+				boundedReadDone("client_locations")
 			})
 		}
 
@@ -599,6 +612,8 @@ func readOperatorBlockReliability(ctx context.Context, start time.Time, end time
 			}
 			sum.add(partial.reliabilitySum.numeric())
 		}
+		// progress: a block's reads take hours on Main
+		glog.Infof("[obp]reliability blocks [%d, %d) read to %d: %d clients\n", minBlockNumber, maxBlockNumber, chunkMax, len(clientRead))
 	}
 	if err := checkRetention(); err != nil {
 		return nil, err
@@ -645,6 +660,7 @@ func readOperatorBlockReliability(ctx context.Context, start time.Time, end time
 				weights[i-1] = weight
 			}
 		})
+		boundedReadDone("reliability_weights")
 		result, err = conn.Query(
 			ctx,
 			`SELECT country_location_id, reliability_multiplier FROM network_client_location_reliability_multiplier`,
@@ -657,6 +673,7 @@ func readOperatorBlockReliability(ctx context.Context, start time.Time, end time
 				multipliers[countryLocationId] = multiplier
 			}
 		})
+		boundedReadDone("reliability_multipliers")
 	})
 	for i, key := range keys {
 		multiplier := 1.0

@@ -107,8 +107,9 @@ func installPaymentPlanReliabilityPartialWriteCount(t testing.TB, ctx context.Co
 }
 
 // Attributes each reliability aggregate to the transaction that runs it, per
-// backend, from the driver's begin, commit and rollback statements. onRead
-// runs at the start of each aggregate with its ordinal.
+// backend, from the driver's begin, commit and rollback statements; an
+// aggregate outside them is a transaction of its own. onRead runs at the
+// start of each aggregate with its ordinal.
 type paymentPlanReliabilityReadTracer struct {
 	stateLock                sync.Mutex
 	openBlockCounts          map[uint32]int64
@@ -142,8 +143,11 @@ func (self *paymentPlanReliabilityReadTracer) TraceQueryStart(ctx context.Contex
 			minBlockNumber, _ := data.Args[rangeIndex].(int64)
 			maxBlockNumber, _ := data.Args[rangeIndex+1].(int64)
 			self.readCount += 1
-			blockCount := self.openBlockCounts[pid] + (maxBlockNumber - minBlockNumber)
-			self.openBlockCounts[pid] = blockCount
+			blockCount := maxBlockNumber - minBlockNumber
+			if openBlockCount, open := self.openBlockCounts[pid]; open {
+				blockCount += openBlockCount
+				self.openBlockCounts[pid] = blockCount
+			}
 			self.maxTransactionBlockCount = max(self.maxTransactionBlockCount, blockCount)
 			onRead = self.onRead
 			readCount = self.readCount

@@ -831,8 +831,8 @@ type ReliabilityScore struct {
 // Shifting (rather than truncating) preserves the window width, so the
 // weight normalization ($2-$1) keeps its scale. Returns 0 when the rollup has
 // never run (pre-rollup deploys) or is already caught up.
-func reliabilityRollupBlockShift(ctx context.Context, tx server.PgTx, maxBlockNumber int64) (shift int64) {
-	result, err := tx.Query(
+func reliabilityRollupBlockShift(ctx context.Context, query server.PgCanQuery, maxBlockNumber int64) (shift int64) {
+	result, err := query.Query(
 		ctx,
 		`
 		SELECT max_drained_block FROM client_reliability_rollup
@@ -983,14 +983,14 @@ const reliabilityDegradedMedianBlockCount = 60
 // maxBlockNumber) that a platform event took out. These are excused for every
 // client: they count toward neither the numerator nor the denominator of the
 // reliability weights, exactly like a block that never drained.
-func reliabilityDegradedBlocks(ctx context.Context, tx server.PgTx, minBlockNumber int64, maxBlockNumber int64) (degradedBlockNumbers []int64) {
+func reliabilityDegradedBlocks(ctx context.Context, query server.PgCanQuery, minBlockNumber int64, maxBlockNumber int64) (degradedBlockNumbers []int64) {
 	// never nil: a nil slice binds as SQL NULL, and `block_number = ANY(NULL)`
 	// is NULL, so the score queries' `NOT (... = ANY($n))` would filter out
 	// every row and wipe every provider score -- the outage this excusal
 	// exists to prevent
 	degradedBlockNumbers = []int64{}
 
-	result, err := tx.Query(
+	result, err := query.Query(
 		ctx,
 		`
 		SELECT candidate.block_number
@@ -1038,9 +1038,9 @@ func reliabilityDegradedBlocks(ctx context.Context, tx server.PgTx, minBlockNumb
 // first range (pre-rollup history, or fixture/backfill environments with no
 // coverage rows at all) count as covered, which preserves the plain window
 // width in those cases.
-func reliabilityCoveredBlockCount(ctx context.Context, tx server.PgTx, minBlockNumber int64, maxBlockNumber int64) int64 {
+func reliabilityCoveredBlockCount(ctx context.Context, query server.PgCanQuery, minBlockNumber int64, maxBlockNumber int64) int64 {
 	var uncoveredBlockCount int64
-	result, err := tx.Query(
+	result, err := query.Query(
 		ctx,
 		`
 		SELECT COUNT(*) FROM generate_series($1::bigint, $2::bigint - 1) AS gs(block_number)
