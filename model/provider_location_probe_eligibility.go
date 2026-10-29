@@ -15,7 +15,26 @@ import (
 // Keep the calculation and publication in the caller's transaction so failures
 // still roll back locations and scheduling hints together.
 func prepareLocationProbeEligibility(ctx context.Context, tx server.PgTx) time.Time {
+	return prepareLocationProbeEligibilityForClients(ctx, tx, nil, nil)
+}
+
+// Prepare only selected cycles; outside-cohort hints are never inferred offline.
+// Nil preserves the caller-owned fleet transaction and its hint-change fence.
+func prepareLocationProbeEligibilityForClients(ctx context.Context, tx server.PgTx, clientIds []server.Id, refresh *clientLocationReliabilityRefresh) time.Time {
 	now := server.NowUtc()
+	var admissionSql string
+	if refresh == nil {
+		admissionSql = providerUrlProbeAdmissionSql("provider_location")
+	} else {
+		now = refresh.egressNow
+		admissionSql = refresh.probeAdmissionSql
+	}
+	cycleSql := "provider_egress_probe_cycle"
+	args := []any{now, ProvideModePublic}
+	if clientIds != nil {
+		cycleSql = "(SELECT * FROM provider_egress_probe_cycle WHERE client_id = ANY($3::uuid[]))"
+		args = append(args, clientIds)
+	}
 	server.RaisePgResult(tx.Exec(ctx, `
 		CREATE TEMPORARY TABLE temp_location_probe_eligibility ON COMMIT DROP AS
 		WITH admitted AS (
@@ -34,13 +53,13 @@ func prepareLocationProbeEligibility(ctx context.Context, tx server.PgTx) time.T
 		AND provider.active AND provider.source_client_id IS NULL
 		AND EXISTS (SELECT 1 FROM provide_key
 			WHERE provide_key.client_id=provider_location.client_id AND provide_mode=$2)
-		AND `+providerUrlProbeAdmissionSql("provider_location")+`
+		AND `+admissionSql+`
 		)
 		SELECT COALESCE(cycle.client_id,admitted.client_id) AS client_id,
 			admitted.client_id IS NOT NULL AS eligible,
 			cycle.eligible AS previous_eligible,admitted.next_attempt_at
-		FROM provider_egress_probe_cycle AS cycle
-		FULL JOIN admitted USING(client_id)`, now, ProvideModePublic))
+		FROM `+cycleSql+` AS cycle
+		FULL JOIN admitted USING(client_id)`, args...))
 	// The validity expression above is the rollup table's generated-column
 	// rule; parity controls compare this publication to that actual column.
 	server.RaisePgResult(tx.Exec(ctx, `ALTER TABLE temp_location_probe_eligibility ADD PRIMARY KEY(client_id)`))
