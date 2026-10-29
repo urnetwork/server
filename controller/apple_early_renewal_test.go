@@ -116,7 +116,9 @@ func TestAppleEarlyRenewalIsAccepted(t *testing.T) {
 // is credited as its own window, the current one stays, and a redelivery is
 // acknowledged without a second credit.
 func TestAppleEarlyDidRenewCreditsTheNextPeriod(t *testing.T) {
-	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		configured := []string{"supporter_monthly_26", "supporter_yearly_26"}
 		year := 365 * 24 * time.Hour
@@ -158,17 +160,23 @@ func TestAppleEarlyDidRenewCreditsTheNextPeriod(t *testing.T) {
 		connect.AssertEqual(t, model.IsAppleTransactionCredited(ctx, renewTransactionId), true)
 		connect.AssertEqual(t, model.IsProNetwork(ctx, networkId), true)
 
-		periodStart := now.Add(8 * time.Hour)
+		// The next period starts where the current one expires and lasts the
+		// year it paid for. The windows are compared with each other, as the
+		// timestamp columns store them.
 		var renewals int
-		var renewalStart, renewalEnd time.Time
+		var currentEnd, renewalStart, renewalEnd time.Time
 		server.Db(ctx, func(conn server.PgConn) {
 			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM subscription_renewal WHERE network_id = $1`, networkId).Scan(&renewals))
+			server.Raise(conn.QueryRow(ctx, `SELECT end_time FROM subscription_renewal WHERE network_id = $1 AND transaction_id = $2`,
+				networkId, currentTransactionId).Scan(&currentEnd))
 			server.Raise(conn.QueryRow(ctx, `SELECT start_time, end_time FROM subscription_renewal WHERE network_id = $1 AND transaction_id = $2`,
 				networkId, renewTransactionId).Scan(&renewalStart, &renewalEnd))
 		})
 		connect.AssertEqual(t, renewals, 2)
-		connect.AssertEqual(t, renewalStart.Equal(periodStart), true)
-		connect.AssertEqual(t, renewalEnd.Equal(periodStart.Add(year).Add(SubscriptionGracePeriod)), true)
+		if !renewalStart.Equal(currentEnd.Add(-SubscriptionGracePeriod)) || renewalEnd.Sub(renewalStart) != year+SubscriptionGracePeriod {
+			t.Fatalf("the renewal was credited for [%s, %s), want the year from the current period's expiry %s",
+				renewalStart, renewalEnd, currentEnd.Add(-SubscriptionGracePeriod))
+		}
 
 		// Apple redelivers the same notification: acknowledged, not credited again
 		processed, err = ProcessAppleNotification(ctx, renewal, configured)
