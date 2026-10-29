@@ -34,7 +34,8 @@ func newClientLocationRefreshFixture(t testing.TB, count int) *clientLocationRef
 		ctx: ctx, networkId: server.NewId(), handlerId: CreateNetworkClientHandler(ctx),
 		locationId: server.NewId(), now: server.NowUtc().Truncate(time.Millisecond),
 	}
-	f.oldBlock = f.now.Add(-time.Hour).UnixMilli() / ReliabilityBlockDuration.Milliseconds()
+	// The block stamp advances only after the refresh interval, even when values change.
+	f.oldBlock = f.now.Add(-ClientLocationReliabilityRefreshInterval - ReliabilityBlockDuration).UnixMilli() / ReliabilityBlockDuration.Milliseconds()
 	for range count {
 		f.clientIds = append(f.clientIds, server.NewId())
 	}
