@@ -22,6 +22,6 @@ Anyone with an API key can use your URnetwork account until the key is deleted.
 {{end}}
 If you didn't make this change, contact security@ur.io right away.
 
-To list or delete your API keys: https://ur.io/docs/api
+To see or delete your API keys: https://ur.io/app/account/api-keys
 To sign out every other device: https://ur.io/app/account/sessions
 {{end}}
