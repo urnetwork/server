@@ -3789,6 +3789,30 @@ write-error control. Preserve alert files, private SQL receipts and the cadence
 checkpoint across a single-owner stop/join/promotion; require advancing output
 and subsequent eligible completed samples before marking coverage recovered.
 
+
+A long native stdout record exposed a separate privacy boundary on 2026-10-29.
+The descriptor scrubber flushed unterminated data at 64 KiB and recognized
+addresses independently in each flushed chunk. A deterministic documentation
+address crossing that boundary remained in the concatenated output; the
+ordinary-record control redacted it. This proves a local source defect, not a
+historical disclosure or a reason to reinterpret retained Markdown as native
+Alert JSONL. The streaming repair carries a possible trailing address token
+and its opening bracket into the next read. Carry is bounded; an address-shaped
+token exceeding 256 bytes at a partial-line flush is conservatively replaced
+once and its continuation is discarded through the next delimiter. That can
+redact unusually long non-address hex/decimal text (a false positive) rather
+than let a split address bypass recognition (a false negative). Ordinary
+complete records, ports, non-address text, EOF tails, destination refusal,
+and the explicit crash-passthrough notice retain their existing contracts.
+Deterministic IPv4/IPv6 split-position, bracket/port, oversized-token,
+unterminated-tail and short-write controls qualify the repair. The CLI must
+still use its supported explicit `-format=jsonl` and qualified held-file
+capture before a future single-owner promotion; serializer/parser controls
+alone do not prove that the current watcher retains complete native JSONL.
+Historical Markdown remains `UNKNOWN_UNESCAPED_MARKDOWN` where exact native
+field boundaries or escaping are unavailable. A future JSONL generation does
+not repair those missing historical bytes or establish global monitor health.
+
 Implementation regression learned 2026-08-30: the standing tailer, restart
 health, and scanner-overflow tests existed, but `Monitor.RunLoop` still ran the
 bounded one-minute `logWindowProbe`; no production path instantiated the

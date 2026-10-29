@@ -31,10 +31,15 @@ import (
 	"time"
 )
 
-// scrubMaxLineSize bounds how much is held waiting for a newline. A writer that
-// never emits one must not grow this without limit, so the buffer is flushed
-// whole once it reaches this size. Well above any real log line.
+// scrubMaxLineSize bounds the data waiting for a newline. A writer that never
+// emits one must not grow this without limit, so reaching this size flushes a
+// safe prefix while retaining only a bounded possible address-token suffix.
 const scrubMaxLineSize = 64 * 1024
+
+// Carry a possible address across a bounded partial-line flush. An oversized
+// address-shaped token is conservatively redacted rather than retained without
+// limit or split into pieces that could bypass address recognition.
+const scrubMaxAddressCarrySize = 256
 
 // scrubPassthroughMarkers start a runtime crash dump. A dump is rare, it is the
 // most valuable thing in the log when it happens, and scrubbing it would redact
@@ -205,6 +210,8 @@ func scrubLoop(reader io.Reader, out io.Writer) {
 	buffered := []byte{}
 	chunk := make([]byte, 16*1024)
 	passthrough := false
+	discardAddressContinuation := false
+	discardClosingBracket := false
 	write := func(line []byte) bool {
 		n, err := out.Write(line)
 		return err == nil && n == len(line)
@@ -229,7 +236,22 @@ func scrubLoop(reader io.Reader, out io.Writer) {
 	for {
 		n, err := reader.Read(chunk)
 		if 0 < n {
-			buffered = append(buffered, chunk[:n]...)
+			incoming := chunk[:n]
+			if discardAddressContinuation {
+				end := 0
+				for end < len(incoming) && isAddrByte(incoming[end]) {
+					end++
+				}
+				incoming = incoming[end:]
+				if 0 < len(incoming) {
+					if discardClosingBracket && incoming[0] == ']' {
+						incoming = incoming[1:]
+					}
+					discardAddressContinuation = false
+					discardClosingBracket = false
+				}
+			}
+			buffered = append(buffered, incoming...)
 			for {
 				end := bytes.IndexByte(buffered, '\n')
 				if end < 0 {
@@ -240,12 +262,39 @@ func scrubLoop(reader io.Reader, out io.Writer) {
 				}
 				buffered = buffered[end+1:]
 			}
-			// a writer that never emits a newline must not grow this forever
+			// Flush only a safe prefix: a trailing address token may continue in
+			// the next read. Keep its opening bracket too, so bracketed IPv6
+			// retains the same redaction and port behavior as a complete line.
 			if scrubMaxLineSize <= len(buffered) {
-				if !flush(buffered) {
-					return
+				if passthrough || startsWithPassthroughMarker(buffered) {
+					if !flush(buffered) {
+						return
+					}
+					buffered = buffered[:0]
+				} else {
+					tokenStart := len(buffered)
+					for 0 < tokenStart && isAddrByte(buffered[tokenStart-1]) {
+						tokenStart--
+					}
+					carryStart := tokenStart
+					if 0 < carryStart && buffered[carryStart-1] == '[' {
+						carryStart--
+					}
+					if !flush(buffered[:carryStart]) {
+						return
+					}
+					if scrubMaxAddressCarrySize < len(buffered)-tokenStart {
+						if !write([]byte(scrubbedAddr)) {
+							return
+						}
+						discardAddressContinuation = true
+						discardClosingBracket = carryStart < tokenStart
+						buffered = buffered[:0]
+					} else {
+						copy(buffered, buffered[carryStart:])
+						buffered = buffered[:len(buffered)-carryStart]
+					}
 				}
-				buffered = buffered[:0]
 			}
 		}
 		if err != nil {
