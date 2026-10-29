@@ -13,6 +13,9 @@
 //   - `placement`: whether platform-hosted clients dial the edge the load
 //     model chooses (server edgeplacement, MOVE.md §13); true or false. Read
 //     by the processes that place, not by the mover.
+//   - `transportDelay`: whether the connect handlers accept the per-message
+//     delay header on new connections (connect DELAY.md §11); true or false.
+//     Read by the connect handlers, not by the mover.
 //
 // The control can only narrow the code settings, never widen them:
 //   - the mode never goes above what `EnableMove` allows. `MoveDefaultMode` is
@@ -23,12 +26,15 @@
 //     more clients.
 //   - `drainMoves` can turn drain moves off, never on past `EnableDrainMoves`.
 //   - `placement` can turn placement off, never on past `EnablePlacement`.
+//   - `transportDelay` can turn the delay header off, never on past
+//     `EnableTransportDelay`.
 //
 // A field that does not parse narrows as far as it can: mode off,
 // maxPerMinute 0, an infinite tolerance (no balance sources), drain moves off,
-// placement off.
+// placement off, transport delay off.
 // An absent key or field leaves the code default. A reader that cannot read
-// the control acts as if the mode were off (the mover does).
+// the control acts as if the mode were off (the mover does); the connect
+// handlers keep the transport delay of their last read.
 package model
 
 import (
@@ -45,12 +51,13 @@ const connectMoveControlKey = "{connect_move}control"
 
 // The control's fields.
 const (
-	ConnectMoveControlFieldMode          = "mode"
-	ConnectMoveControlFieldMaxPerMinute  = "maxPerMinute"
-	ConnectMoveControlFieldTolerance     = "tolerance"
-	ConnectMoveControlFieldEvacuateHosts = "evacuateHosts"
-	ConnectMoveControlFieldDrainMoves    = "drainMoves"
-	ConnectMoveControlFieldPlacement     = "placement"
+	ConnectMoveControlFieldMode           = "mode"
+	ConnectMoveControlFieldMaxPerMinute   = "maxPerMinute"
+	ConnectMoveControlFieldTolerance      = "tolerance"
+	ConnectMoveControlFieldEvacuateHosts  = "evacuateHosts"
+	ConnectMoveControlFieldDrainMoves     = "drainMoves"
+	ConnectMoveControlFieldPlacement      = "placement"
+	ConnectMoveControlFieldTransportDelay = "transportDelay"
 )
 
 // The mover's mode, ordered from narrowest to widest.
@@ -109,6 +116,10 @@ type ConnectMoveControlCeiling struct {
 	// The placing process's switch for edge placement. The mover leaves it
 	// false and ignores the control's placement.
 	EnablePlacement bool
+	// The connect handler's switch for the delay header,
+	// `EnableTransportDelay`. The mover and the placement leave it false and
+	// ignore the control's transportDelay.
+	EnableTransportDelay bool
 }
 
 // The effective control: the code settings as the Redis control narrowed them.
@@ -127,18 +138,22 @@ type ConnectMoveControl struct {
 	DrainMoves bool
 	// Platform-hosted clients dial the edge the load model chooses.
 	Placement bool
+	// Connect handlers accept the delay header on new connections that offer
+	// it.
+	TransportDelay bool
 }
 
 // The control the fields narrow the ceiling to. Pure: fields is the control
 // hash as read, empty when the key is absent.
 func NarrowConnectMoveControl(fields map[string]string, ceiling ConnectMoveControlCeiling) *ConnectMoveControl {
 	control := &ConnectMoveControl{
-		Present:       0 < len(fields),
-		MaxPerMinute:  ceiling.MaxPerMinute,
-		Tolerance:     ceiling.Tolerance,
-		EvacuateHosts: map[string]bool{},
-		DrainMoves:    ceiling.EnableDrainMoves,
-		Placement:     ceiling.EnablePlacement,
+		Present:        0 < len(fields),
+		MaxPerMinute:   ceiling.MaxPerMinute,
+		Tolerance:      ceiling.Tolerance,
+		EvacuateHosts:  map[string]bool{},
+		DrainMoves:     ceiling.EnableDrainMoves,
+		Placement:      ceiling.EnablePlacement,
+		TransportDelay: ceiling.EnableTransportDelay,
 	}
 
 	modeValue, modeSet := fields[ConnectMoveControlFieldMode]
@@ -181,6 +196,11 @@ func NarrowConnectMoveControl(fields map[string]string, ceiling ConnectMoveContr
 	if value, ok := fields[ConnectMoveControlFieldPlacement]; ok {
 		placement, parsed := parseConnectMoveControlBool(value)
 		control.Placement = ceiling.EnablePlacement && parsed && placement
+	}
+
+	if value, ok := fields[ConnectMoveControlFieldTransportDelay]; ok {
+		transportDelay, parsed := parseConnectMoveControlBool(value)
+		control.TransportDelay = ceiling.EnableTransportDelay && parsed && transportDelay
 	}
 
 	if !ceiling.EnableMove {
