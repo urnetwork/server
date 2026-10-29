@@ -1212,7 +1212,10 @@ func connectionMeasurementAverage(previous, sample, sampleCount uint64, sampleWi
 // latest one is written after the bounded backoff. Snapshots are cumulative
 // and their count fence makes a replay idempotent, so nothing is lost.
 func (self *ConnectionAnnounce) runMeasurementPublisher() {
-	passiveSampleTime := time.After(self.settings.PassiveSpeedWindowDuration)
+	// one timer for the passive samples, re-armed after each fires: a
+	// time.After per sample created a timer every window for each connection
+	passiveSampleTimer := time.NewTimer(self.settings.PassiveSpeedWindowDuration)
+	defer passiveSampleTimer.Stop()
 	// consecutive failed writes; while a retry waits, no write is attempted
 	writeFailureCount := 0
 	var writeRetryTime <-chan time.Time
@@ -1222,7 +1225,7 @@ func (self *ConnectionAnnounce) runMeasurementPublisher() {
 		case <-self.ctx.Done():
 			return
 		case <-self.measurementWake:
-		case <-passiveSampleTime:
+		case <-passiveSampleTimer.C:
 			passiveSampleDue = true
 		case <-writeRetryTime:
 			writeRetryTime = nil
@@ -1233,7 +1236,7 @@ func (self *ConnectionAnnounce) runMeasurementPublisher() {
 		// A continuously ready wake must not postpone an expired sample timer.
 		if !passiveSampleDue {
 			select {
-			case <-passiveSampleTime:
+			case <-passiveSampleTimer.C:
 				passiveSampleDue = true
 			default:
 			}
@@ -1274,7 +1277,7 @@ func (self *ConnectionAnnounce) runMeasurementPublisher() {
 			}
 		}
 		if passiveSampleDue {
-			passiveSampleTime = time.After(self.settings.PassiveSpeedWindowDuration)
+			passiveSampleTimer.Reset(self.settings.PassiveSpeedWindowDuration)
 		}
 	}
 }
