@@ -313,10 +313,29 @@ type paymentPlanReliabilityPartial struct {
 	reliabilitySum  reliabilityExactSum
 }
 
+// Tests only: runs on a bounded read's connection after the read has consumed
+// its rows, before the read returns the connection to its pool, where a slow
+// client idles. Production leaves it nil.
+var testingBoundedReadDone func(read string)
+
+func boundedReadDone(read string) {
+	if testingBoundedReadDone != nil {
+		testingBoundedReadDone(read)
+	}
+}
+
 // Reads the partials of shifted blocks [minBlockNumber, maxBlockNumber) in
 // read-only statements of at most paymentPlanReliabilityReadBlockCount blocks,
-// each its own transaction, and adds them exactly. A read joins the totals
-// only after its transaction ends, so a retried read is counted once.
+// and adds them exactly. A read joins the totals only after its statement
+// returns, so a retried read is counted once.
+//
+// Each read is a statement of its own, outside any transaction. A read
+// returns about 90k rows on Main, which wait in socket buffers after the
+// server has sent them, and a slow client (a loaded host, a tunnel) takes a
+// while to drain them. In a transaction the server sits idle in it all that
+// time, and Main ends such a session after idle_in_transaction_session_timeout
+// (60 s): the operator block points dry run failed that way on 2026-10-29,
+// 2.5 h into a block. Outside a transaction no timeout applies.
 func readPaymentPlanReliabilityPartials(
 	ctx context.Context,
 	minBlockNumber int64,
@@ -332,9 +351,9 @@ func readPaymentPlanReliabilityPartials(
 			reliabilitySum  pgtype.Numeric
 		}
 		var reads []read
-		server.MaintenanceTx(ctx, func(tx server.PgTx) {
+		server.MaintenanceDb(ctx, func(conn server.PgConn) {
 			reads = nil
-			result, err := tx.Query(
+			result, err := conn.Query(
 				ctx,
 				paymentPlanReliabilityReadSql,
 				readMinBlockNumber,
@@ -348,7 +367,8 @@ func readPaymentPlanReliabilityPartials(
 					reads = append(reads, r)
 				}
 			})
-		}, server.TxReadCommitted)
+			boundedReadDone("reliability_partials")
+		})
 		for _, r := range reads {
 			partial, ok := partials[r.key]
 			if !ok {
