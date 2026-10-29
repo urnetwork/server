@@ -1,11 +1,11 @@
 package controller
 
 // The security notices (model/security_notice_model.go, owner decision
-// 2026-10-29): the payout wallet notice and the sign-in method notice, owed by
-// the model in the transaction of the change and delivered by the account
-// message outbox. They are email only: neither is in smsTemplateNames, and the
-// model owes them to email addresses only. The password-changed notice is
-// AuthPasswordSetTemplate.
+// 2026-10-29): the payout wallet notice, the sign-in method notice and the API
+// key notice, owed by the model in the transaction of the change and delivered
+// by the account message outbox. They are email only: none is in
+// smsTemplateNames, and the model owes them to email addresses only. The
+// password-changed notice is AuthPasswordSetTemplate.
 
 import (
 	"strconv"
@@ -23,6 +23,9 @@ const (
 	securityNoticePayoutWalletsUrl = "https://ur.io/app/account/earnings"
 	securityNoticeSignInMethodsUrl = "https://ur.io/app/account/profile"
 	securityNoticeOtherSessionsUrl = "https://ur.io/app/account/sessions"
+	// the API reference's "Long-lived API keys", which says how to list and
+	// delete them; the ur.io app has no API key screen
+	securityNoticeApiKeysUrl = "https://ur.io/docs/api"
 )
 
 const (
@@ -314,6 +317,147 @@ func (self *SecuritySignInChangedTemplate) TextHeadline() string {
 }
 
 func (self *SecuritySignInChangedTemplate) MoreChangesText() string {
+	return securityNoticeMoreChanges(self.MoreCount)
+}
+
+// One API key change as the API key notice shows it.
+type SecurityApiKeyChangeRow struct {
+	When string
+	// the key's name in quotes, or "(no name)"
+	Key string
+	// when a deleted key was created, or ""
+	KeyCreated string
+	Action     string
+	// how it was made, or ""
+	Via string
+}
+
+// The API key notice: an API key was created for the account or deleted from
+// it. It names each key by its name and creation time, never by the key.
+type SecurityApiKeyChangedTemplate struct {
+	model.SecurityApiKeyNotice
+	BaseTemplate
+}
+
+func (self *SecurityApiKeyChangedTemplate) Name() string {
+	return model.SecurityApiKeyTemplateName
+}
+
+// An API key's name as the notice shows it: in quotes, kept to one line
+// (model.SecurityNoticeApiKeyName), or "(no name)".
+func securityNoticeApiKeyName(name string) string {
+	name = model.SecurityNoticeApiKeyName(name)
+	if name == "" {
+		return "(no name)"
+	}
+	return "“" + name + "”"
+}
+
+// What happened to an API key, as the notice says it.
+func securityNoticeApiKeyAction(action string) string {
+	switch action {
+	case model.SecurityApiKeyCreated:
+		return "Created"
+	case model.SecurityApiKeyDeleted:
+		return "Deleted"
+	default:
+		return "Changed"
+	}
+}
+
+// The changes, oldest first.
+func (self *SecurityApiKeyChangedTemplate) Rows() []*SecurityApiKeyChangeRow {
+	rows := []*SecurityApiKeyChangeRow{}
+	for _, change := range self.Changes {
+		if change == nil {
+			continue
+		}
+		row := &SecurityApiKeyChangeRow{
+			When:   securityNoticeTime(change.ChangeTime),
+			Key:    securityNoticeApiKeyName(change.Name),
+			Action: securityNoticeApiKeyAction(change.Action),
+			Via:    securityNoticeVia(change.Via),
+		}
+		if change.KeyCreateTime != nil {
+			row.KeyCreated = securityNoticeTime(*change.KeyCreateTime)
+		}
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+// The one action every listed change took, or "" when they differ.
+func (self *SecurityApiKeyChangedTemplate) onlyAction() string {
+	action := ""
+	for _, change := range self.Changes {
+		if change == nil {
+			continue
+		}
+		if action != "" && action != change.Action {
+			return ""
+		}
+		action = change.Action
+	}
+	return action
+}
+
+// Whether the notice lists more than one change.
+func (self *SecurityApiKeyChangedTemplate) several() bool {
+	return 1 < len(self.Changes) || 0 < self.MoreCount
+}
+
+// The subject: what happened, without the details.
+func (self *SecurityApiKeyChangedTemplate) Subject() string {
+	switch self.onlyAction() {
+	case model.SecurityApiKeyCreated:
+		if self.several() {
+			return "API keys were created for your URnetwork account"
+		}
+		return "An API key was created for your URnetwork account"
+	case model.SecurityApiKeyDeleted:
+		if self.several() {
+			return "API keys were deleted from your URnetwork account"
+		}
+		return "An API key was deleted from your URnetwork account"
+	default:
+		return "Your URnetwork API keys were changed"
+	}
+}
+
+// The headline: what happened, in a few words.
+func (self *SecurityApiKeyChangedTemplate) Headline() string {
+	switch self.onlyAction() {
+	case model.SecurityApiKeyCreated:
+		if self.several() {
+			return "API keys created"
+		}
+		return "API key created"
+	case model.SecurityApiKeyDeleted:
+		if self.several() {
+			return "API keys deleted"
+		}
+		return "API key deleted"
+	default:
+		return "API keys changed"
+	}
+}
+
+// The headline as the plain-text part sets it, in capitals.
+func (self *SecurityApiKeyChangedTemplate) TextHeadline() string {
+	return strings.ToUpper(self.Headline())
+}
+
+// Whether a listed change created a key, which can then act for the account.
+func (self *SecurityApiKeyChangedTemplate) AnyCreated() bool {
+	for _, change := range self.Changes {
+		if change != nil && change.Action == model.SecurityApiKeyCreated {
+			return true
+		}
+	}
+	return false
+}
+
+func (self *SecurityApiKeyChangedTemplate) MoreChangesText() string {
 	return securityNoticeMoreChanges(self.MoreCount)
 }
 

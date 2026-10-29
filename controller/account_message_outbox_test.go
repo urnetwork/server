@@ -531,9 +531,16 @@ func TestAccountMessageTemplatesDecodeAndRender(t *testing.T) {
 }
 
 // The templates the model writes itself are registered under the names it
-// writes.
+// writes, the security notices among them: a name the delivery task does not
+// know is never sent.
 func TestModelAccountMessageTemplatesAreRegistered(t *testing.T) {
-	for _, templateName := range []string{model.AuthPasswordSetTemplateName, model.NetworkWelcomeTemplateName} {
+	for _, templateName := range []string{
+		model.AuthPasswordSetTemplateName,
+		model.NetworkWelcomeTemplateName,
+		model.SecurityPayoutWalletTemplateName,
+		model.SecuritySignInTemplateName,
+		model.SecurityApiKeyTemplateName,
+	} {
 		template, err := decodeAccountMessageTemplate(templateName, "{}")
 		if err != nil {
 			t.Fatalf("%s: %v", templateName, err)

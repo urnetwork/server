@@ -1,7 +1,8 @@
 // Security notices (owner decision 2026-10-29): an email to the account's
 // sign-in addresses whenever its payout wallet or its sign-in methods change,
-// so an owner notices a change they did not make. In May 2026 an attacker's
-// wallet replaced the payout wallet of 1,459 networks and no owner noticed.
+// or an API key is created or deleted (security_notice_api_key.go), so an
+// owner notices a change they did not make. In May 2026 an attacker's wallet
+// replaced the payout wallet of 1,459 networks and no owner noticed.
 //
 // Each notice is owed in the transaction of the change it reports, through the
 // account message outbox (account_message_outbox_model.go), so it exists exactly
@@ -56,6 +57,7 @@ import (
 const (
 	SecurityPayoutWalletTemplateName = "security_payout_wallet_changed"
 	SecuritySignInTemplateName       = "security_sign_in_changed"
+	SecurityApiKeyTemplateName       = "security_api_key_changed"
 )
 
 // How long a notice waits for more changes of its kind to join it before it is
@@ -75,6 +77,7 @@ const (
 	SecurityNoticeSubnetWallet = "subnet_wallet"
 	SecurityNoticeSignIn       = "sign_in"
 	SecurityNoticePassword     = "password"
+	SecurityNoticeApiKey       = "api_key"
 )
 
 // The result label of the metric.
@@ -95,7 +98,7 @@ var securityNoticeCounter = prometheus.NewCounterVec(
 		Namespace: "urnetwork",
 		Subsystem: "account_message",
 		Name:      "security_notices_total",
-		Help:      "Security notices owed for payout wallet, sign-in method and password changes, by notice and result (queued, coalesced, no_email, failed)",
+		Help:      "Security notices owed for payout wallet, sign-in method, password and API key changes, by notice and result (queued, coalesced, no_email, failed)",
 	},
 	[]string{"notice", "result"},
 )
