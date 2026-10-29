@@ -471,6 +471,8 @@ type ExchangeSettings struct {
 	// Nil in production. Tests publish instance-owned barriers after the real
 	// header succeeds and before any connection worker starts, outside locks.
 	beforeExchangeConnectionRunForTest func(*ExchangeConnection)
+	// Nil in production. Tests count the ping timer arms of exchange writers.
+	afterPingTimerArmForTest func()
 	// Nil and empty in production. Tests give the edge inventory a synthetic
 	// services.yml and the process host it matches, instead of the vault's
 	// and WARP_HOST.
@@ -553,6 +555,13 @@ type ExchangeSettings struct {
 
 	ExchangeMoveSettings
 	ExchangeMoverSettings
+}
+
+// Reports one exchange writer ping timer arm to a test.
+func (self *ExchangeSettings) pingTimerArmedForTest() {
+	if armed := self.afterPingTimerArmForTest; armed != nil {
+		armed()
+	}
 }
 
 type ExchangeChaosSettings struct {
@@ -1596,6 +1605,8 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 			defer handleCancel()
 
 			sendBuffer := NewDefaultExchangeBuffer(self.settings)
+			pinger := newExchangePinger(self.settings)
+			defer pinger.stop()
 			batch := make([][]byte, 0, self.settings.ExchangeWriteBatchCount)
 			// gather pending messages into `batch` without blocking, bounded by
 			// the write batch limits, and write them with a single writev.
@@ -1638,17 +1649,14 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 				if err != nil {
 					return false
 				}
+				pinger.wrote()
 				if glog.V(1) {
 					glog.Infof("[ecrs] %s/%s\n", resident.clientId, resident.residentId)
 				}
 				return open
 			}
-			// reusable ping timer (hot-path timer reuse): the slow select arms a
-			// timer each iteration the send channel briefly drains between bursts.
-			pingTimer := time.NewTimer(0)
-			defer pingTimer.Stop()
 			for {
-				// fast path without arming the ping timer
+				// fast path without waiting on the ping timer
 				select {
 				case <-handleCtx.Done():
 					return
@@ -1660,7 +1668,6 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 				default:
 				}
 
-				pingTimer.Reset(self.settings.ExchangePingTimeout)
 				select {
 				case <-handleCtx.Done():
 					return
@@ -1668,11 +1675,15 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 					if !writeBatch(message, ok) {
 						return
 					}
-				case <-pingTimer.C:
+				case <-pinger.timer.C:
+					if !pinger.fired() {
+						continue
+					}
 					// send a ping
 					if err := sendBuffer.WriteMessage(conn, make([]byte, 0)); err != nil {
 						return
 					}
+					pinger.pinged()
 				}
 			}
 		})
@@ -2437,6 +2448,58 @@ func (self *exchangeDeadline) reset() {
 	self.deadline = time.Time{}
 }
 
+// Paces the keepalive pings of one exchange socket writer from its last write.
+// The timer is armed only when it fires, for the time the writer will have been
+// idle a full ExchangePingTimeout: resetting it whenever the send queue drained
+// made almost every frame a runtime timer modification. The peer still waits
+// at most ExchangePingTimeout between frames.
+type exchangePinger struct {
+	settings      *ExchangeSettings
+	timer         *time.Timer
+	lastWriteTime time.Time
+}
+
+func newExchangePinger(settings *ExchangeSettings) *exchangePinger {
+	pinger := &exchangePinger{
+		settings:      settings,
+		timer:         time.NewTimer(settings.ExchangePingTimeout),
+		lastWriteTime: time.Now(),
+	}
+	settings.pingTimerArmedForTest()
+	return pinger
+}
+
+// Records a completed write. The timer is left as it is.
+func (self *exchangePinger) wrote() {
+	self.lastWriteTime = time.Now()
+}
+
+// Takes a fire of the timer and reports whether the writer has been idle a
+// full ExchangePingTimeout and must ping. Otherwise the timer is re-armed for
+// the rest of the interval.
+func (self *exchangePinger) fired() bool {
+	if idle := time.Since(self.lastWriteTime); idle < self.settings.ExchangePingTimeout {
+		self.arm(self.settings.ExchangePingTimeout - idle)
+		return false
+	}
+	return true
+}
+
+// Records a written ping and arms the timer a full interval out.
+func (self *exchangePinger) pinged() {
+	self.wrote()
+	self.arm(self.settings.ExchangePingTimeout)
+}
+
+func (self *exchangePinger) arm(timeout time.Duration) {
+	self.timer.Reset(timeout)
+	self.settings.pingTimerArmedForTest()
+}
+
+func (self *exchangePinger) stop() {
+	self.timer.Stop()
+}
+
 // each call overwrites the internal buffer
 type ExchangeBuffer struct {
 	settings *ExchangeSettings
@@ -2968,6 +3031,8 @@ func (self *ExchangeConnection) Run() {
 	startWorker(func() {
 		defer self.cancel()
 
+		pinger := newExchangePinger(self.settings)
+		defer pinger.stop()
 		batch := make([][]byte, 0, self.settings.ExchangeWriteBatchCount)
 		// gather pending messages into `batch` without blocking, bounded by the
 		// write batch limits, and write them with a single writev.
@@ -3012,18 +3077,15 @@ func (self *ExchangeConnection) Run() {
 			if err != nil {
 				return false
 			}
+			pinger.wrote()
 			if glog.V(2) {
 				glog.Infof("[ecs] %s/%s@%s:%d\n", self.header.ClientId, self.header.ResidentId, self.host, self.port)
 			}
 			return open
 		}
-		// reusable ping timer (hot-path timer reuse): the slow select below arms
-		// a timer each iteration the send channel briefly drains between bursts.
-		pingTimer := time.NewTimer(0)
-		defer pingTimer.Stop()
 
 		for {
-			// fast path without arming the ping timer
+			// fast path without waiting on the ping timer
 			select {
 			case <-self.ctx.Done():
 				return
@@ -3035,7 +3097,6 @@ func (self *ExchangeConnection) Run() {
 			default:
 			}
 
-			pingTimer.Reset(self.settings.ExchangePingTimeout)
 			select {
 			case <-self.ctx.Done():
 				return
@@ -3043,11 +3104,15 @@ func (self *ExchangeConnection) Run() {
 				if !writeBatch(message, ok) {
 					return
 				}
-			case <-pingTimer.C:
+			case <-pinger.timer.C:
+				if !pinger.fired() {
+					continue
+				}
 				// send a ping
 				if err := self.sendBuffer.WriteMessage(self.conn, make([]byte, 0)); err != nil {
 					return
 				}
+				pinger.pinged()
 			}
 		}
 	})
