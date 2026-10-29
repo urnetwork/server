@@ -526,65 +526,8 @@ func (self *PaymentPlanner) planPayments() (returnErr error) {
 	// prevents later joins from multiplying distinct network payouts that share
 	// one contract/balance. The canceled arm relies on a partial index
 	// `account_payment (payment_id) WHERE canceled` being added separately.
-	server.RaisePgResult(self.tx.Exec(
-		self.ctx,
-		fmt.Sprintf(`
-        CREATE TEMPORARY TABLE temp_account_payment ON COMMIT DROP
-
-        AS
-
-        SELECT
-            u.contract_id,
-            u.balance_id,
-			u.network_id,
-			u.payout_byte_count,
-			u.payout_net_revenue_nano_cents,
-			u.sweep_time,
-			u.payment_id AS previous_payment_id,
-			transfer_contract.create_time AS contract_create_time,
-			transfer_contract.close_time AS contract_close_time,
-			transfer_contract.reap_time AS contract_reap_time
-
-        FROM (
-            SELECT
-                transfer_escrow_sweep.contract_id,
-                transfer_escrow_sweep.balance_id,
-				transfer_escrow_sweep.network_id,
-				transfer_escrow_sweep.payout_byte_count,
-				transfer_escrow_sweep.payout_net_revenue_nano_cents,
-				transfer_escrow_sweep.sweep_time,
-				transfer_escrow_sweep.payment_id,
-				false AS preserve_legacy_components
-            FROM transfer_escrow_sweep
-            WHERE transfer_escrow_sweep.payment_id IS NULL
-
-            UNION ALL
-
-            SELECT
-                s.contract_id,
-                s.balance_id,
-				s.network_id,
-				s.payout_byte_count,
-				s.payout_net_revenue_nano_cents,
-				s.sweep_time,
-				s.payment_id,
-				(ap.subsidy_payout_nano_cents>0 OR ap.reliability_subsidy_nano_cents>0) AS preserve_legacy_components
-            FROM account_payment ap
-            INNER JOIN transfer_escrow_sweep s ON
-                s.payment_id = ap.payment_id
-            WHERE
-                ap.canceled = true AND
-                NOT ap.completed AND
-                ap.circle_idempotency_key IS NULL AND
-                ap.payment_record IS NULL AND
-                ap.tx_hash IS NULL AND
-                NOT %[3]s
-        ) u
-        %[1]s
-        %[2]s
-        `, closeTimeJoin, closeTimeBound, usdcPayoutClosed("ap")),
-		closeTimeArgs...,
-	))
+	selectionSql, selectionArgs := paymentPlanSelectionSql(closeTimeJoin, closeTimeBound, closeTimeArgs, self.transition)
+	server.RaisePgResult(self.tx.Exec(self.ctx, selectionSql, selectionArgs...))
 	// Autovacuum cannot analyze session-local relations. Publish the selected
 	// cardinality and key distribution before its aggregation and assignment joins.
 	server.RaisePgResult(self.tx.Exec(self.ctx, `ANALYZE temp_account_payment`))
@@ -670,6 +613,111 @@ func (self *PaymentPlanner) planPayments() (returnErr error) {
 	}
 
 	return
+}
+
+// Past the earning boundary every unpaid sweep of a contract created after it
+// belongs to the SN pool and is never paid in USDC (owner decision
+// 2026-10-29). Those are every sweep since the cutoff, 50-120M more each week
+// on Main, and the unpaid arm read each of them and its contract only for the
+// close-time bound to drop it: the weekly plan wrote its payments 20 minutes
+// after its 10:00 UTC run on 2026-10-18 and 85 minutes after it on 10-25. The
+// arm now stops at the contract id of this long past the cutoff, an index
+// range on transfer_escrow_sweep (payment_id, contract_id), so its reads stop
+// growing.
+//
+// The selection is unchanged. A contract's id leads with the millisecond it
+// was minted, before its row was inserted (connect.NewId; contract_id_bound.go),
+// and a contract closes after its creation, so a contract minted this long
+// past the cutoff closed after it, and the close-time bound would drop its
+// sweeps. contract_id_bound.go allows 15 minutes for an id preceding the
+// creation clock; an hour leaves room. A contract minted before then, such as
+// one that closed before the cutoff and settled later, is read as before.
+const paymentPlanUnpaidContractIdMargin = time.Hour
+
+// The contract id from which the unpaid arm leaves sweeps to the SN pool, or
+// nil without an earning boundary.
+func paymentPlanUnpaidContractIdBound(transition *server.ProviderPayoutTransition) *server.Id {
+	if transition == nil {
+		return nil
+	}
+	bound := server.ContractIdFloor(transition.Cutoff.Add(paymentPlanUnpaidContractIdMargin))
+	return &bound
+}
+
+// The statement that selects a plan's sweeps into temp_account_payment, with
+// its arguments: the close-time join and bound of the plan, and past the
+// earning boundary the unpaid arm's contract id bound.
+func paymentPlanSelectionSql(
+	closeTimeJoin string,
+	closeTimeBound string,
+	closeTimeArgs []any,
+	transition *server.ProviderPayoutTransition,
+) (string, []any) {
+	args := slices.Clone(closeTimeArgs)
+	unpaidContractIdBound := ""
+	if bound := paymentPlanUnpaidContractIdBound(transition); bound != nil {
+		args = append(args, *bound)
+		unpaidContractIdBound = fmt.Sprintf(" AND transfer_escrow_sweep.contract_id < $%d", len(args))
+		// PostgreSQL does not carry an inequality across a join equality, so
+		// the contract table repeats the bound (contract_id_bound.go). Every
+		// legacy contract, a canceled payment's included, was minted before it.
+		closeTimeBound += fmt.Sprintf(" AND transfer_contract.contract_id < $%d", len(args))
+	}
+	return fmt.Sprintf(`
+        CREATE TEMPORARY TABLE temp_account_payment ON COMMIT DROP
+
+        AS
+
+        SELECT
+            u.contract_id,
+            u.balance_id,
+			u.network_id,
+			u.payout_byte_count,
+			u.payout_net_revenue_nano_cents,
+			u.sweep_time,
+			u.payment_id AS previous_payment_id,
+			transfer_contract.create_time AS contract_create_time,
+			transfer_contract.close_time AS contract_close_time,
+			transfer_contract.reap_time AS contract_reap_time
+
+        FROM (
+            SELECT
+                transfer_escrow_sweep.contract_id,
+                transfer_escrow_sweep.balance_id,
+				transfer_escrow_sweep.network_id,
+				transfer_escrow_sweep.payout_byte_count,
+				transfer_escrow_sweep.payout_net_revenue_nano_cents,
+				transfer_escrow_sweep.sweep_time,
+				transfer_escrow_sweep.payment_id,
+				false AS preserve_legacy_components
+            FROM transfer_escrow_sweep
+            WHERE transfer_escrow_sweep.payment_id IS NULL%[4]s
+
+            UNION ALL
+
+            SELECT
+                s.contract_id,
+                s.balance_id,
+				s.network_id,
+				s.payout_byte_count,
+				s.payout_net_revenue_nano_cents,
+				s.sweep_time,
+				s.payment_id,
+				(ap.subsidy_payout_nano_cents>0 OR ap.reliability_subsidy_nano_cents>0) AS preserve_legacy_components
+            FROM account_payment ap
+            INNER JOIN transfer_escrow_sweep s ON
+                s.payment_id = ap.payment_id
+            WHERE
+                ap.canceled = true AND
+                NOT ap.completed AND
+                ap.circle_idempotency_key IS NULL AND
+                ap.payment_record IS NULL AND
+                ap.tx_hash IS NULL AND
+                NOT %[3]s
+        ) u
+        %[1]s
+        %[2]s
+        `, closeTimeJoin, closeTimeBound, usdcPayoutClosed("ap"), unpaidContractIdBound), args
 }
 
 // paymentPlanSubsidyRangeSQL derives the subsidy epoch from the exact sweep set
