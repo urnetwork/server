@@ -152,10 +152,13 @@ func TestResidentForwardAcceptedTrafficRenewsDeadlineWithNativeACKs(t *testing.T
 				}
 			}
 		}
+		// The second burst lands one step before the idle deadline, and the
+		// check runs at that deadline.
+		step := settings.ForwardIdleTimeout / 15
 		burst()
-		time.Sleep(14 * time.Minute)
+		time.Sleep(settings.ForwardIdleTimeout - step)
 		burst()
-		time.Sleep(time.Minute)
+		time.Sleep(step)
 		for _, forward := range forwards {
 			if forward.IsDone() {
 				t.Fatal("accepted native work did not renew the existing forward generation")
@@ -167,8 +170,8 @@ func TestResidentForwardAcceptedTrafficRenewsDeadlineWithNativeACKs(t *testing.T
 }
 
 // A full destination queue cannot accept another payload. Refused offers must
-// not renew that queue's existing fifteen-minute inactivity allowance. Use
-// the real callback shard, production-size output queue, owned lookup wait,
+// not renew that queue's existing inactivity allowance. Use the real callback
+// shard, production-size output queue and idle allowance, owned lookup wait,
 // idle watcher, accounting and pool returns; only resident discovery is held.
 func TestResidentForwardRefusedOffersDoNotRenewIdleDeadline(t *testing.T) {
 	clientconnect.MessagePoolReturn(clientconnect.MessagePoolGet(1))
@@ -176,7 +179,7 @@ func TestResidentForwardRefusedOffersDoNotRenewIdleDeadline(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		settings := DefaultExchangeSettings()
 		settings.ForwardEnforceActiveContracts = false
-		if settings.ForwardBufferSize != 4096 || settings.ForwardIdleTimeout != 15*time.Minute {
+		if settings.ForwardBufferSize != 4096 || settings.ForwardIdleTimeout != 3*time.Minute {
 			t.Fatal("production forward bounds changed")
 		}
 		resident := newResidentCallbackLifecycleFixture(t, ctx, settings)
@@ -221,8 +224,11 @@ func TestResidentForwardRefusedOffersDoNotRenewIdleDeadline(t *testing.T) {
 			len(forward.send) != settings.ForwardBufferSize || lookups.Load() != 1 {
 			t.Fatalf("native held lookup and full output queue not established: %+v queue=%d lookup=%d", snapshot, len(forward.send), lookups.Load())
 		}
+		// Fourteen refused offers spread over the allowance, the last one step
+		// before it ends.
+		step := settings.ForwardIdleTimeout / 15
 		for range 14 {
-			time.Sleep(time.Minute)
+			time.Sleep(step)
 			offer() // Every offer is refused; none becomes new queued work.
 		}
 		snapshot = ledger.snapshot()
@@ -230,7 +236,7 @@ func TestResidentForwardRefusedOffersDoNotRenewIdleDeadline(t *testing.T) {
 			snapshot.Groups[residentPayloadForwardOutput].Released != 14 {
 			t.Fatalf("refused output ownership did not conserve: %+v", snapshot)
 		}
-		time.Sleep(time.Minute - time.Nanosecond)
+		time.Sleep(step - time.Nanosecond)
 		if forward.IsDone() {
 			t.Fatal("forward expired before its unchanged inactivity allowance")
 		}
