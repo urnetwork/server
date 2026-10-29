@@ -61,6 +61,9 @@ func TestExtenderActivateArgsFieldNames(t *testing.T) {
 		"dns_port",
 		"dns_ports",
 		"dns_tld",
+		// the lag.dev measurement request and opt-out (lag.dev/PLAN.md C4)
+		"measurement_csr",
+		"measurement_disabled",
 		"public_key_hex",
 		"tcp_port",
 		"udp_port",
@@ -82,6 +85,9 @@ func TestExtenderActivateResultFieldNames(t *testing.T) {
 		"dns_ports",
 		"error",
 		"expire_time",
+		// the operator's id of the extender, which names its lag.dev
+		// measurement certificate request (lag.dev/PLAN.md N4)
+		"extender_id",
 		"ip",
 		"ip_version",
 		"record",
