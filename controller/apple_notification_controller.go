@@ -27,6 +27,37 @@ import (
 
 const appleMaximumSubscriptionDuration = 2 * 366 * 24 * time.Hour
 
+// How far a transaction's purchaseDate may lie after the moment its claims are
+// judged (the notification's signedDate, or now for the verify endpoint and
+// the reconciler). A purchase the customer made is dated when it was made, so
+// only clock skew separates the two. A renewal is not: the App Store charges
+// it ahead of the expiry (up to a day), and its purchaseDate is the start of
+// the period it pays for, the previous transaction's expiresDate. On Main the
+// renewals of 2026-10-17 and 2026-10-26 were charged about 8 hours before
+// their period started, and every check in that span refused them as
+// implausible: the DID_RENEW webhook, and the reconciler until the period
+// began. Since the transaction ledger started (2026-08-11) the webhook never
+// credited an ordinary production renewal; only a billing recovery, whose
+// purchaseDate is its charge.
+const appleMaximumPurchaseLead = 5 * time.Minute
+const appleMaximumRenewalLead = 48 * time.Hour
+
+// appleTransactionPurchaseLead is the lead the transaction's purchaseDate may
+// have: a renewal's, when the claims name the transaction a RENEWAL or, when
+// they name no reason, when it is not the subscription's first transaction
+// (as appleSalesKind reads it).
+func appleTransactionPurchaseLead(transaction *validatedAppleTransaction) time.Duration {
+	switch transaction.transactionReason {
+	case "RENEWAL":
+		return appleMaximumRenewalLead
+	case "":
+		if transaction.originalTransactionId != "" && transaction.originalTransactionId != transaction.transactionId {
+			return appleMaximumRenewalLead
+		}
+	}
+	return appleMaximumPurchaseLead
+}
+
 // Apple's highest USD price, $10,000. It bounds only a USD price: a price in
 // another currency is not dollars (a year of Pro in KRW is about 66,000 units)
 // and records no USD revenue to bound.
@@ -536,7 +567,7 @@ func validateAppleTransactionAccount(
 	validated.expiresTime = time.UnixMilli(expiresMillis)
 	if !validated.expiresTime.After(validated.purchaseTime) ||
 		validated.expiresTime.Sub(validated.purchaseTime) > appleMaximumSubscriptionDuration ||
-		validated.purchaseTime.After(time.UnixMilli(notification.SignedDate).Add(5*time.Minute)) {
+		validated.purchaseTime.After(time.UnixMilli(notification.SignedDate).Add(appleTransactionPurchaseLead(validated))) {
 		return nil, errors.New("implausible App Store subscription period")
 	}
 	validated.priceMilliunits = priceMilliunits
