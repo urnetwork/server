@@ -1,10 +1,10 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-29T21:21:51Z",
+  "observed_at": "2026-10-29T21:37:05Z",
   "scoring_enablement_current": {
-    "status": "R2_intake_open_all7_prerequisites_published_native_public_pilot_plan_prepared_for_publication_calibration_pending",
-    "observed_at": "2026-10-29T21:21:51Z",
+    "status": "R2_intake_open_all7_prerequisites_published_public_pilot_running_baseline01_production_grading_held",
+    "observed_at": "2026-10-29T21:37:05Z",
     "metadata_checkpoint_only": true,
     "actual_intake_open": true,
     "grading_enabled": false,
@@ -34,7 +34,7 @@
       "public_provider_request_before_census_and_Root_reported_native_collision_preparation_not_measurement"
     ],
     "pending": [
-      "publish_actual_native_public_pilot_plan_and_execute18_native_timed_runs",
+      "finish_same_live_public_pilot_handle11937_unit_v2_then_native_verify18_runs_and_direction",
       "only_after_accepted_public_pilot_one_new_hidden_seed_and36_native_fresh_single_screen_runs",
       "independent_final_review_and_durable_scoring_publication_hold_release"
     ],
@@ -49,7 +49,27 @@
     "native_public_pilot_plan": "server/connect/sim-latency/launch/public-pilot-native-2026-10-29/plan.json",
     "native_public_pilot_plan_sha256": "790ae696c7d5c663c6531a7d3a86700ed9f0c5b632308dd8e0a96b912d71733f",
     "native_public_pilot_plan_prepared_at": "2026-10-29T21:19:55Z",
-    "native_public_pilot_measured_runs_started": false,
+    "native_public_pilot_measured_runs_started": true,
+    "native_public_pilot_unit": "urnetwork-public-pilot-execute-native225-20261029-v2.service",
+    "native_public_pilot_session": 11937,
+    "native_public_pilot_pid": 1683428,
+    "native_public_pilot_claimed_at": "2026-10-29T21:27:41Z",
+    "native_public_pilot_started_at": "2026-10-29T21:27:46Z",
+    "native_public_pilot_manager_deadline": "2026-10-30T00:27:46Z",
+    "native_public_pilot_watchdog_deadline": "2026-10-30T00:28:41Z",
+    "native_public_pilot_phase_observed": "baseline-01_runner_and_disposable_postgres_redis_live",
+    "native_public_pilot_plan_publication_commit": "84319a1aa4161359a29e8962961d3f62e5c2cd5f",
+    "native_public_pilot_plan_publication_sha256": "8247e219f19decaeea44e19b43268cf7e4e5943dcf3e1aee5ecc53168595ea34",
+    "native_public_pilot_initial_admission_failure": {
+      "unit": "urnetwork-public-pilot-execute-native225-20261029-v1.service",
+      "exit_code": 1,
+      "claim_created": false,
+      "measurements_started": false,
+      "reason": "existing_memory_only_configuration_mode0400_refused_by_exact_private_mode0600_reader",
+      "correction": "Root_changed_only_that_configuration_mode0400_to0600_no_bytes_policy_clock_source_or_entropy_change",
+      "configuration_sha256_unchanged": "6b60d757550636fb499f0a3520cb60df7cfc2c467566257566b60310ddffa475",
+      "failed_journal_preserved": true
+    },
     "unmeasured_better_noop_native_build_unit": "urnetwork-native-reference-build-P6ZWBPVi-v2.service",
     "unmeasured_better_noop_native_builds_terminal": true,
     "unmeasured_better_noop_native_builds_exit_code": 0,
@@ -126,7 +146,7 @@
       "after_public_pilot_census_stage_supported": false,
       "native_cli_context_success_claimed": false
     },
-    "public_pilot_admitted": false,
+    "public_pilot_admitted": true,
     "public_pilot_lifecycle_source_qualification": {
       "status": "41_synthetic_guards_three_passes_complete_not_native_qualification",
       "proof": "server/connect/sim-latency/launch/public-pilot-lifecycle-2026-10-28/qualification.json",
@@ -139,7 +159,7 @@
       "source_after_census_adapter_supported": true,
       "actual_after_census_created": false,
       "native_cli_or_kernel_qualification": false,
-      "genuine_public_r9_pilot_started": false
+      "genuine_public_r9_pilot_started": true
     },
     "proposed_regression_reference_bundle": "server/connect/sim-latency/launch/reference-h1-byte-pacing-2026-10-28/README.md",
     "new_seed_drawn": false,
