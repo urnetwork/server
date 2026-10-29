@@ -44,6 +44,7 @@ func TestTransactionsKeepTheirLockBounds(t *testing.T) {
 		{path: "audit_provider_sweep_model.go", function: "BackfillDeviceAuditEvents", call: "server.TxLockTimeout(auditBackfillLockTimeout)"},
 		{path: "audit_provider_sweep_model.go", function: "BackfillProviderAuditEvents", call: "server.TxLockTimeout(auditBackfillLockTimeout)"},
 		{path: "network_client_model.go", function: "RemoveNetworkClientsBatch", call: "server.TxLockTimeout(removeNetworkClientsBatchLockTimeout)"},
+		{path: "network_sign_out_model.go", function: "CommitNetworkSignOut", call: "server.TxLockTimeout(removeNetworkClientsBatchLockTimeout)"},
 		{path: "network_stats_model.go", function: "StampTopLevelClientContractTime", call: "server.TxLockTimeout(contractTimeStampLockTimeout)"},
 		{path: "device_client_version_model.go", function: "SetDeviceClientVersion", call: "server.TxLockTimeout(deviceClientVersionLockTimeout)"},
 	} {

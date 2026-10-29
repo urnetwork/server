@@ -42,6 +42,8 @@ var revokingStatementOwners = map[string]struct {
 	"model/account_model.go:RemoveNetworkWithStoreSnapshot":                       {hooks: []string{"RetireNetworkRecords"}},
 	"model/lag_guest_model.go:removeExpiredLagGuest":                              {hooks: []string{"RetireNetworkRecords"}},
 	"model/auth_model.go:AuthPasswordSet":                                         {hooks: []string{"RotateCredentialRecordsInTx"}},
+	// bringyourctl network sign-out-all runs the password reset's rotation
+	"model/network_sign_out_model.go:CommitNetworkSignOut": {hooks: []string{"RotateCredentialRecordsInTx"}},
 }
 
 func TestEveryRevokingStatementWritesTheRevocationRecord(t *testing.T) {
