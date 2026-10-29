@@ -1,0 +1,749 @@
+// A separately approved new campaign draws one fresh seed after a genuine
+// public regression pilot. Historical selectors, failed results and claims stay intact.
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"reflect"
+	"time"
+
+	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/model"
+	"gopkg.in/yaml.v3"
+)
+
+// This closed selector never changes the meaning of any earlier seed count.
+const heldOutProtocolFreshSingleB = "launch-3a-bridge-fresh-single-b-2026-10-28-v1"
+
+// Only internal synthetic fixtures substitute facts; no serialized input can.
+type heldOutFreshSingleFacts struct {
+	PrivateRoot         string
+	PublicPlanPath      string
+	OriginalRoot        string
+	FailedResult        heldOutPinnedFile
+	SelectedPublicPlan  heldOutPinnedFile
+	OriginalPublicPlan  heldOutPinnedFile
+	OriginalPrivatePlan heldOutPinnedFile
+	OriginalReferences  heldOutPinnedFile
+	BridgeTemplate      heldOutPinnedFile
+	ReleaseSha256       string
+	NewAllowedPaths     []string
+	PublicPilotSeed     int64
+	Margin              float64
+	MemoryExecutable    heldOutPinnedFile
+	MemoryConfig        heldOutPinnedFile
+}
+
+// These are immutable incident/release identities, not runtime overrides.
+func frozenHeldOutFreshSingleFacts() heldOutFreshSingleFacts {
+	old := "/var/lib/urnetwork/competition-held-out-two-b-c2-a9e8e1a7-20261027-v2"
+	selected := "/var/lib/urnetwork/competition-held-out-first-committed-c2-a9e8e1a7-20261027-v1"
+	fresh := "/var/lib/urnetwork/competition-held-out-fresh-single-c2-a9e8e1a7-20261028-v1"
+	return heldOutFreshSingleFacts{
+		PrivateRoot: filepath.Join(fresh, "campaign"), PublicPlanPath: filepath.Join(fresh, "public-plan.json"),
+		OriginalRoot:        filepath.Join(old, "campaign"),
+		FailedResult:        heldOutPinnedFile{Path: filepath.Join(old, "campaign", "campaign-result.json"), Sha256: "c85bf64bb18418219b5bd6f2c1ae30d88d02612fab5ff7684e7d9dea5882fdda"},
+		SelectedPublicPlan:  heldOutPinnedFile{Path: filepath.Join(selected, "public-plan.json"), Sha256: "a8a57ccfe3d5f050ec76bf475dc1e35fb25011c9b781ee1c90dfa7cca720bb9f"},
+		OriginalPublicPlan:  heldOutPinnedFile{Path: filepath.Join(old, "public-plan.json"), Sha256: "b3150c5098ea9d4cb155be76c5a423967ecca479813ed75061db5b5bf50bcc43"},
+		OriginalPrivatePlan: heldOutPinnedFile{Path: filepath.Join(old, "campaign", "private-plan.json"), Sha256: "0b8c65e3186d631782c6247d18e2369b9994851effced026037ed032401c6abb"},
+		OriginalReferences:  heldOutPinnedFile{Path: "/var/lib/urnetwork/competition-reference-evidence-views-20261027-v1/references.json", Sha256: "001feb8c46fcfc4571bd68841de28855c3ba2506c56fa07ade7734865fbdae51"},
+		BridgeTemplate:      heldOutPinnedFile{Path: "/home/by/urnetwork/temp/c2-metadata-bridge-preparation-20261026.KNG6TfgM/artifacts/worker-request.json", Sha256: "2114953f2f86218b9e92674a1f318d822a62e6663a8ae5e0e5375a806a655ec6"},
+		ReleaseSha256:       "5a1504cbad9787f84c91ac87bc719abd6337a64723733d6cf7d052660753b850",
+		NewAllowedPaths:     []string{"connect/resident_contract_manager.go", "connect/transport.go"},
+		PublicPilotSeed:     20261028,
+		Margin:              .269,
+		MemoryExecutable:    heldOutPinnedFile{Path: "/usr/local/libexec/urnetwork/competition-unmeasured-recovery-2b4bf937-20261027-v1/unmeasured-recovery", Sha256: "2b4bf93776635db3d5397a6b68e7290945d2c08fc5851c5a61b579293cc0757c"},
+		MemoryConfig:        heldOutPinnedFile{Path: "/var/lib/urnetwork/competition-first-committed-management-oom-20261027-v1/recovery-config.json", Sha256: "6b60d757550636fb499f0a3520cb60df7cfc2c467566257566b60310ddffa475"},
+	}
+}
+
+// The native release constructor always leaves this fixture capability nil.
+func heldOutFreshSingleFactsForRelease(release heldOutRelease) heldOutFreshSingleFacts {
+	if release.freshSingleFacts != nil {
+		return *release.freshSingleFacts
+	}
+	return frozenHeldOutFreshSingleFacts()
+}
+
+// The old bridge template remains separately pinned, never relabeled or overwritten.
+type heldOutFreshSinglePins struct {
+	Approval       heldOutPinnedFile `json:"approval"`
+	Declaration    heldOutPinnedFile `json:"declaration"`
+	BridgeTemplate heldOutPinnedFile `json:"original_bridge_template"`
+	FailedResult   heldOutPinnedFile `json:"prior_failed_result"`
+}
+
+// Owner authority precedes public pilot/hidden preparation and cannot waive gates.
+type heldOutFreshSingleApproval struct {
+	Schema                int       `json:"schema"`
+	Kind                  string    `json:"kind"`
+	Protocol              string    `json:"protocol"`
+	ApprovedAt            time.Time `json:"approved_at"`
+	FailedResultSha256    string    `json:"failed_result_sha256"`
+	PrivateRoot           string    `json:"private_root"`
+	PublicPlanPath        string    `json:"public_plan_path"`
+	FreshSeedCount        int       `json:"fresh_seed_count"`
+	ControlReplicates     int       `json:"control_replicates"`
+	CandidateReplicates   int       `json:"candidate_replicates"`
+	ExecutionLimitSeconds int       `json:"execution_limit_seconds"`
+	Alpha                 float64   `json:"alpha"`
+	Margin                float64   `json:"accepted_margin"`
+	FreshControlRequired  bool      `json:"fresh_control_required"`
+	AllThreeRequired      bool      `json:"all_three_references_required"`
+	RetainFailedScreen    bool      `json:"retain_failed_screen"`
+	SecondSeedUnstarted   bool      `json:"original_second_seed_must_remain_unstarted"`
+	NoReplacement         bool      `json:"no_replacement_or_resampling"`
+	PatchPolicyOnly       bool      `json:"reference_template_patch_policy_only"`
+	ActivationAuthorized  bool      `json:"production_activation_authorized"`
+}
+
+// All new reference/pilot/exclusion facts must exist before any hidden entropy.
+// Direction acceptance remains the existing measured-receipt contract.
+type heldOutFreshSingleDeclaration struct {
+	Schema                     int               `json:"schema"`
+	Kind                       string            `json:"kind"`
+	Protocol                   string            `json:"protocol"`
+	BaseProtocol               string            `json:"base_protocol"`
+	PublishedAt                time.Time         `json:"published_at"`
+	ApprovalSha256             string            `json:"protocol_approval_sha256"`
+	FailedResult               heldOutPinnedFile `json:"failed_result"`
+	SelectedPublicPlan         heldOutPinnedFile `json:"failed_selected_public_plan"`
+	OriginalPublicPlan         heldOutPinnedFile `json:"original_two_seed_public_plan"`
+	OriginalPrivatePlan        heldOutPinnedFile `json:"original_two_seed_private_plan"`
+	OriginalReferences         heldOutPinnedFile `json:"original_references"`
+	OriginalExecutionStarted   heldOutPinnedFile `json:"original_execution_started"`
+	BridgeTemplate             heldOutPinnedFile `json:"original_bridge_template"`
+	ReferenceTemplateSha256    string            `json:"reference_template_sha256"`
+	ReferencePolicySha256      string            `json:"reference_patch_policy_sha256"`
+	ReferencePolicy            heldOutPinnedFile `json:"reference_patch_policy"`
+	ReferenceBundleSha256      string            `json:"reference_bundle_sha256"`
+	ExclusionsSha256           string            `json:"exclusions_sha256"`
+	ReleaseSha256              string            `json:"new_release_sha256"`
+	SourceLockSha256           string            `json:"source_lock_file_sha256"`
+	RegressionPilotPlan        heldOutPinnedFile `json:"required_regression_pilot_plan"`
+	RegressionPilotPublication heldOutPinnedFile `json:"required_regression_pilot_publication"`
+	PublicPilotSeed            int64             `json:"public_pilot_seed"`
+	SeedCount                  int               `json:"hidden_b_seed_count"`
+	RequiredOrderedSeeds       int               `json:"required_correctly_ordered_seeds"`
+	ControlReplicates          int               `json:"control_replicates"`
+	CandidateReplicates        int               `json:"candidate_replicates"`
+	ExecutionLimitSeconds      int               `json:"execution_limit_seconds"`
+	Alpha                      float64           `json:"alpha"`
+	Margin                     float64           `json:"accepted_margin"`
+	FreshControlRequired       bool              `json:"fresh_control_required"`
+	AllOutcomesRetained        bool              `json:"all_outcomes_retained"`
+	NoReplacement              bool              `json:"no_replacement_or_resampling"`
+	SecondSeedUnstarted        bool              `json:"original_second_seed_must_remain_unstarted"`
+}
+
+// Validates independently pinned authority without a permissive boolean shortcut.
+func authenticateHeldOutFreshSingleApproval(pin heldOutPinnedFile, facts heldOutFreshSingleFacts, settings heldOutOperatorSettings) (*heldOutFreshSingleApproval, error) {
+	content, err := readHeldOutPinned(pin, settings.MaximumBytes, false)
+	if err != nil {
+		return nil, err
+	}
+	var approval heldOutFreshSingleApproval
+	if err := decodeHeldOutComplete(content, &approval, "fresh single-seed owner approval"); err != nil {
+		return nil, err
+	}
+	if approval.Schema != 1 || approval.Kind != "sim-latency-held-out-fresh-single-owner-approval" ||
+		approval.Protocol != heldOutProtocolFreshSingleB || approval.ApprovedAt.IsZero() || approval.ApprovedAt.After(time.Now().UTC()) ||
+		approval.FailedResultSha256 != facts.FailedResult.Sha256 || approval.PrivateRoot != facts.PrivateRoot ||
+		approval.PublicPlanPath != facts.PublicPlanPath || approval.FreshSeedCount != 1 ||
+		approval.ControlReplicates != 9 || approval.CandidateReplicates != 9 || approval.ExecutionLimitSeconds != 10800 ||
+		approval.Alpha != .05 || approval.Margin != facts.Margin || !approval.FreshControlRequired ||
+		!approval.AllThreeRequired || !approval.RetainFailedScreen || !approval.SecondSeedUnstarted ||
+		!approval.NoReplacement || !approval.PatchPolicyOnly || approval.ActivationAuthorized {
+		return nil, errors.New("fresh campaign authority changed scope, lineage, gates, or activation")
+	}
+	return &approval, nil
+}
+
+// Pure facts are checked before reading old plans, pilot evidence, or entropy.
+func validateHeldOutFreshSingleDeclaration(declaration heldOutFreshSingleDeclaration, config heldOutPreparationConfig, approval heldOutFreshSingleApproval, facts heldOutFreshSingleFacts, margin *float64) error {
+	if config.Protocol != heldOutProtocolFreshSingleB || config.FreshSingle == nil || config.TwoBAddendum != nil || config.Amendment == nil ||
+		config.PrivateRoot != facts.PrivateRoot || config.PublicPlanPath != facts.PublicPlanPath ||
+		declaration.Schema != 1 || declaration.Kind != "sim-latency-held-out-fresh-single-declaration" ||
+		declaration.Protocol != config.Protocol || declaration.BaseProtocol != calibrationProtocolThreeABridgeThreeB ||
+		declaration.PublishedAt.IsZero() || declaration.PublishedAt.Before(approval.ApprovedAt) ||
+		declaration.ApprovalSha256 != config.FreshSingle.Approval.Sha256 ||
+		declaration.FailedResult != facts.FailedResult || declaration.SelectedPublicPlan != facts.SelectedPublicPlan ||
+		declaration.OriginalPublicPlan != facts.OriginalPublicPlan || declaration.OriginalPrivatePlan != facts.OriginalPrivatePlan ||
+		declaration.OriginalReferences != facts.OriginalReferences || declaration.BridgeTemplate != facts.BridgeTemplate ||
+		config.FreshSingle.BridgeTemplate != facts.BridgeTemplate ||
+		config.FreshSingle.FailedResult != facts.FailedResult ||
+		declaration.OriginalExecutionStarted.Path != filepath.Join(facts.OriginalRoot, "execution.started.json") ||
+		declaration.ReferenceTemplateSha256 != config.Template.Sha256 || declaration.ReferenceBundleSha256 != config.References.Sha256 ||
+		declaration.ExclusionsSha256 != config.Exclusions.Sha256 || declaration.ReleaseSha256 != facts.ReleaseSha256 ||
+		declaration.ReleaseSha256 != config.Amendment.Release.Sha256 || declaration.SourceLockSha256 != config.SourceLock.Sha256 ||
+		declaration.PublicPilotSeed != facts.PublicPilotSeed || declaration.SeedCount != 1 || declaration.RequiredOrderedSeeds != 1 ||
+		declaration.ControlReplicates != 9 || declaration.CandidateReplicates != 9 || declaration.ExecutionLimitSeconds != 10800 ||
+		declaration.Alpha != .05 || declaration.Margin != facts.Margin || margin != nil && declaration.Margin != *margin ||
+		!declaration.FreshControlRequired || !declaration.AllOutcomesRetained || !declaration.NoReplacement || !declaration.SecondSeedUnstarted {
+		return errors.New("fresh declaration changed fixed namespace, ancestry, counts, or policy")
+	}
+	for _, pin := range []heldOutPinnedFile{config.FreshSingle.Approval, config.FreshSingle.Declaration,
+		declaration.OriginalExecutionStarted, declaration.RegressionPilotPlan, declaration.RegressionPilotPublication, declaration.ReferencePolicy} {
+		if !filepath.IsAbs(pin.Path) || filepath.Clean(pin.Path) != pin.Path || !validSha256(pin.Sha256) {
+			return errors.New("fresh declaration has missing or noncanonical required evidence pins")
+		}
+	}
+	if !validSha256(declaration.ReferencePolicySha256) || config.Template == facts.BridgeTemplate ||
+		declaration.RegressionPilotPlan == declaration.RegressionPilotPublication {
+		return errors.New("fresh reference template/policy or separate public pilot evidence missing")
+	}
+	if declaration.ReferencePolicy.Sha256 != declaration.ReferencePolicySha256 {
+		return errors.New("fresh canonical patch-policy file pin differs from its independent digest")
+	}
+	return nil
+}
+
+// Native historical checks consume public metadata only. Raw original seeds are
+// read solely inside the existing exclusion-census validator, never logged here.
+func authenticateHeldOutFreshSingleLineage(declaration heldOutFreshSingleDeclaration, facts heldOutFreshSingleFacts, settings heldOutOperatorSettings) error {
+	content, err := readHeldOutPinned(facts.FailedResult, settings.MaximumBytes, true)
+	if err != nil {
+		return err
+	}
+	var result heldOutCampaignResult
+	if err := decodeHeldOutComplete(content, &result, "retained failed first-seed result"); err != nil {
+		return err
+	}
+	content, err = readHeldOutPinned(facts.OriginalPublicPlan, settings.MaximumBytes, false)
+	if err != nil {
+		return err
+	}
+	var original heldOutPublicPlan
+	if err := decodeHeldOutComplete(content, &original, "original two-seed public lineage"); err != nil {
+		return err
+	}
+	if result.Schema != 1 || result.Kind != "sim-latency-held-out-screen" || !result.Complete || result.Accepted ||
+		result.PlanSha256 != facts.SelectedPublicPlan.Sha256 || result.OrderedSeeds != 0 ||
+		!reflect.DeepEqual(result.Reasons, []string{"first_committed_seed_not_correctly_ordered"}) ||
+		result.ClosedAt.IsZero() || !declaration.PublishedAt.After(result.ClosedAt) ||
+		original.Schema != 1 || original.Kind != "sim-latency-held-out-public-plan" ||
+		original.Protocol != heldOutProtocolThreeABridgeTwoB || original.CampaignId != result.CampaignId ||
+		original.PrivatePlanSha256 != facts.OriginalPrivatePlan.Sha256 || len(original.Rounds) != 2 ||
+		original.Rounds[0].Position != 1 || original.Rounds[1].Position != 2 {
+		return errors.New("failed first-seed lineage is missing, changed, or retrospectively accepted")
+	}
+	if _, err := readHeldOutPinned(facts.SelectedPublicPlan, settings.MaximumBytes, false); err != nil {
+		return err
+	}
+	if _, err := readHeldOutPinned(declaration.OriginalExecutionStarted, settings.MaximumBytes, true); err != nil {
+		return err
+	}
+	view := heldOutPrivatePlan{Config: heldOutPreparationConfig{PrivateRoot: facts.OriginalRoot},
+		Rounds: []heldOutPrivateRound{{Public: original.Rounds[0]}, {Public: original.Rounds[1]}}}
+	accepted, ordered, reasons := acceptHeldOutFirstCommittedOutcomes(view.Rounds[:1], result.Outcomes)
+	if accepted || ordered != result.OrderedSeeds || !reflect.DeepEqual(reasons, result.Reasons) {
+		return errors.New("retained failed screen no longer reproduces the unchanged acceptance criterion")
+	}
+	return validateHeldOutFirstCommittedUnstarted(view, false)
+}
+
+// The exact legacy policy projection preserves every request field except its
+// reviewed patch policy, and every old forbidden path/size bound inside that policy.
+func validateHeldOutFreshSingleTemplate(original, revised heldOutRequest, facts heldOutFreshSingleFacts) error {
+	if len(facts.NewAllowedPaths) != 2 || original.PatchPolicy.PathBase != "" || revised.PatchPolicy.PathBase != "" ||
+		!reflect.DeepEqual(original.PatchPolicy.AllowedPaths, facts.NewAllowedPaths[:1]) ||
+		!reflect.DeepEqual(revised.PatchPolicy.AllowedPaths, facts.NewAllowedPaths) {
+		return errors.New("fresh reference template requires the exact two-path legacy policy")
+	}
+	expectedPolicy := original.PatchPolicy
+	expectedPolicy.AllowedPaths = append([]string{}, facts.NewAllowedPaths...)
+	if !reflect.DeepEqual(revised.PatchPolicy, expectedPolicy) {
+		return errors.New("fresh reference policy changed forbidden paths, size, or another legacy field")
+	}
+	revised.PatchPolicy = original.PatchPolicy
+	if !reflect.DeepEqual(original, revised) {
+		return errors.New("fresh reference template changed a non-patch-policy field")
+	}
+	return nil
+}
+
+// Native jq -S policy identities sort map keys, preserve array order and absent
+// path_base, indent by two spaces, and terminate with exactly one newline.
+func heldOutFreshSinglePatchPolicyBytes(policy model.CompetitionPatchPolicy) ([]byte, error) {
+	content, err := json.Marshal(policy)
+	if err != nil {
+		return nil, err
+	}
+	var fields map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(content))
+	decoder.UseNumber()
+	if err := decoder.Decode(&fields); err != nil {
+		return nil, err
+	}
+	var buffer bytes.Buffer
+	encoder := json.NewEncoder(&buffer)
+	encoder.SetEscapeHTML(false)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(fields); err != nil {
+		return nil, err
+	}
+	content = buffer.Bytes()
+	// encoding/json always escapes these two valid Unicode separators, whereas
+	// jq -S emits UTF-8. Other JSON escapes and literal backslashes stay intact.
+	canonical := make([]byte, 0, len(content))
+	for index := 0; index < len(content); {
+		if content[index] == '\\' && index+1 < len(content) {
+			if bytes.HasPrefix(content[index:], []byte("\\u2028")) {
+				canonical = append(canonical, []byte("\u2028")...)
+				index += 6
+				continue
+			}
+			if bytes.HasPrefix(content[index:], []byte("\\u2029")) {
+				canonical = append(canonical, []byte("\u2029")...)
+				index += 6
+				continue
+			}
+			// Copy other escapes as a pair so a literal backslash-u sequence
+			// cannot be mistaken for a Unicode separator escape.
+			canonical = append(canonical, content[index], content[index+1])
+			index += 2
+			continue
+		}
+		canonical = append(canonical, content[index])
+		index++
+	}
+	return canonical, nil
+}
+
+// The file and every candidate cache key bind the same actual scored bytes.
+func heldOutFreshSinglePatchPolicySha256(policy model.CompetitionPatchPolicy) (string, error) {
+	content, err := heldOutFreshSinglePatchPolicyBytes(policy)
+	if err != nil {
+		return "", err
+	}
+	return heldOutDigest(content), nil
+}
+
+// This reads required pilot bytes without guessing an unprovided pilot-result
+// schema or treating a receipt boolean as actual native directional evidence.
+func authenticateHeldOutFreshSingle(config heldOutPreparationConfig, release heldOutRelease, settings heldOutOperatorSettings, margin *float64) (*heldOutFreshSingleDeclaration, error) {
+	if config.Protocol != heldOutProtocolFreshSingleB {
+		if config.FreshSingle != nil {
+			return nil, errors.New("fresh-only metadata attached to an old protocol")
+		}
+		return nil, nil
+	}
+	if config.FreshSingle == nil {
+		return nil, errors.New("fresh single-seed pins missing")
+	}
+	facts := heldOutFreshSingleFactsForRelease(release)
+	approval, err := authenticateHeldOutFreshSingleApproval(config.FreshSingle.Approval, facts, settings)
+	if err != nil {
+		return nil, err
+	}
+	content, err := readHeldOutPinned(config.FreshSingle.Declaration, settings.MaximumBytes, false)
+	if err != nil {
+		return nil, err
+	}
+	var declaration heldOutFreshSingleDeclaration
+	if err := decodeHeldOutComplete(content, &declaration, "prospective fresh single-seed declaration"); err != nil {
+		return nil, err
+	}
+	if err := validateHeldOutFreshSingleDeclaration(declaration, config, *approval, facts, margin); err != nil {
+		return nil, err
+	}
+	if declaration.PublishedAt.After(time.Now().UTC()) {
+		return nil, errors.New("fresh declaration is future-dated; no entropy authorized")
+	}
+	if err := authenticateHeldOutFreshSingleLineage(declaration, facts, settings); err != nil {
+		return nil, err
+	}
+	for _, pin := range []heldOutPinnedFile{declaration.RegressionPilotPlan, declaration.RegressionPilotPublication} {
+		if _, err := readHeldOutPinned(pin, settings.MaximumBytes, false); err != nil {
+			return nil, err
+		}
+	}
+	originalBytes, err := readHeldOutPinned(facts.BridgeTemplate, settings.MaximumBytes, false)
+	if err != nil {
+		return nil, err
+	}
+	defer clear(originalBytes)
+	revisedBytes, err := readHeldOutPinned(config.Template, settings.MaximumBytes, false)
+	if err != nil {
+		return nil, err
+	}
+	defer clear(revisedBytes)
+	var original, revised heldOutRequest
+	if decodeHeldOutComplete(originalBytes, &original, "old bridge template") != nil ||
+		decodeHeldOutComplete(revisedBytes, &revised, "fresh reference template") != nil {
+		return nil, errors.New("fresh reference template cannot be completely decoded")
+	}
+	if err := validateHeldOutFreshSingleTemplate(original, revised, facts); err != nil {
+		return nil, err
+	}
+	policyBytes, err := heldOutFreshSinglePatchPolicyBytes(revised.PatchPolicy)
+	if err != nil || heldOutDigest(policyBytes) != declaration.ReferencePolicySha256 {
+		return nil, errors.New("fresh reference patch policy differs from its canonical scored digest")
+	}
+	pinnedPolicy, err := readHeldOutPinned(declaration.ReferencePolicy, settings.MaximumBytes, false)
+	if err != nil || !bytes.Equal(pinnedPolicy, policyBytes) {
+		return nil, errors.New("fresh reference patch-policy file is not exact canonical scored bytes")
+	}
+	return &declaration, nil
+}
+
+// All three images must belong to the new exact policy; unchanged better/no-op
+// patch bytes alone do not qualify their old policy-bound image cache keys.
+func authenticateHeldOutFreshSingleReferences(config heldOutPreparationConfig, declaration heldOutFreshSingleDeclaration, references []heldOutReference, template heldOutRequest, release heldOutRelease, settings heldOutOperatorSettings) error {
+	if release.Runtime == nil {
+		return errors.New("fresh references require the authenticated C2 native runtime")
+	}
+	facts := heldOutFreshSingleFactsForRelease(release)
+	content, err := readHeldOutPinned(facts.OriginalReferences, settings.MaximumBytes, false)
+	if err != nil {
+		return err
+	}
+	var prior []heldOutReference
+	if err := decodeStrictJSONBytes(content, &prior, "old reference patch identities"); err != nil {
+		return err
+	}
+	oldPatches := map[string]string{}
+	for _, reference := range prior {
+		if oldPatches[reference.Role] != "" {
+			return errors.New("old reference roles duplicated")
+		}
+		oldPatches[reference.Role] = reference.Patch.Sha256
+	}
+	if len(prior) != 3 || len(references) != 3 || len(oldPatches) != 3 {
+		return errors.New("fresh reference roles incomplete")
+	}
+	seen := map[string]bool{}
+	for _, reference := range references {
+		if seen[reference.Role] || oldPatches[reference.Role] == "" ||
+			(reference.Role == "worse") == (reference.Patch.Sha256 == oldPatches[reference.Role]) {
+			return errors.New("only the worse reference patch may change, and it must change")
+		}
+		seen[reference.Role] = true
+		request := template
+		request.PatchSha256 = reference.Patch.Sha256
+		if err := authenticateHeldOutPrebuiltReference(reference, request, config.SourceLock.Sha256, release, settings); err != nil {
+			return err
+		}
+		if reference.Role == "worse" {
+			content, err := readHeldOutPinned(reference.Direction, settings.MaximumBytes, false)
+			if err != nil {
+				return err
+			}
+			var direction heldOutReferenceQualification
+			if err := decodeHeldOutComplete(content, &direction, "new measured regression direction"); err != nil {
+				return err
+			}
+			if direction.Direction != "slower" || direction.EvidenceBasis != "" || direction.ExpectedDirection != "" || direction.PriorReference != nil {
+				return errors.New("fresh worse reference requires genuine current-instrument measured direction")
+			}
+			for _, required := range []heldOutPinnedFile{declaration.RegressionPilotPlan, declaration.RegressionPilotPublication} {
+				found := false
+				for _, pin := range direction.Evidence {
+					found = found || pin == required
+				}
+				if !found {
+					return errors.New("measured regression direction omits its exact predeclared public pilot evidence")
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// Original seed identities are decoded only by the existing private census.
+func validateHeldOutFreshSingleExclusions(config heldOutPreparationConfig, exclusions heldOutExclusions, release heldOutRelease) error {
+	facts := heldOutFreshSingleFactsForRelease(release)
+	foundOriginal, foundPilot := false, false
+	for _, pin := range exclusions.Sources {
+		foundOriginal = foundOriginal || pin == facts.OriginalPrivatePlan
+	}
+	for _, seed := range exclusions.EffectiveSeeds {
+		foundPilot = foundPilot || seed == facts.PublicPilotSeed
+	}
+	if !foundOriginal || !foundPilot {
+		return errors.New("fresh exclusions must include both original committed seeds and the completed public pilot")
+	}
+	return nil
+}
+
+// The new campaign has exactly one round. The old selector's two-round
+// unstarted validator remains unchanged and is used only for old ancestry.
+func validateHeldOutFreshSingleUnstarted(plan heldOutPrivatePlan) error {
+	if len(plan.Rounds) != 1 || plan.Rounds[0].Public.Position != 1 || len(plan.Rounds[0].Public.Jobs) != 3 {
+		return errors.New("fresh unstarted census requires exactly one three-job round")
+	}
+	for _, name := range []string{"execution.started.json", "campaign-result.json"} {
+		if _, err := os.Lstat(filepath.Join(plan.Config.PrivateRoot, name)); !errors.Is(err, os.ErrNotExist) {
+			return errors.New("fresh campaign already started or is unavailable; no retry")
+		}
+	}
+	round := plan.Rounds[0].Public
+	roundRoot := filepath.Dir(heldOutJobRoot(plan.Config.PrivateRoot, round, round.Jobs[0]))
+	entries, err := os.ReadDir(roundRoot)
+	if err != nil || len(entries) != 3 {
+		return errors.New("fresh unstarted round contains runtime state")
+	}
+	seen := map[string]bool{}
+	for index, job := range round.Jobs {
+		if job.Position != index+1 || job.Role != round.Order[index] || seen[job.Role] ||
+			(job.Role != "no-op" && job.Role != "better" && job.Role != "worse") {
+			return errors.New("fresh unstarted job identity/order changed")
+		}
+		seen[job.Role] = true
+		root := heldOutJobRoot(plan.Config.PrivateRoot, round, job)
+		entries, err := os.ReadDir(root)
+		if err != nil || len(entries) != 1 || entries[0].Name() != "artifacts" || !entries[0].IsDir() {
+			return errors.New("fresh job already started or contains runtime state")
+		}
+		entries, err = os.ReadDir(filepath.Join(root, "artifacts"))
+		if err != nil || len(entries) != 3 || entries[0].Name() != "canonical.patch" ||
+			entries[1].Name() != "precommitted-request.json" || entries[2].Name() != "providers.yml" {
+			return errors.New("fresh job has runtime or non-precommitted artifacts")
+		}
+	}
+	return nil
+}
+
+// Optional bindings disappear from every historical JSON/commitment encoding.
+func heldOutFreshSingleBindings(config heldOutPreparationConfig) (string, string) {
+	if config.Protocol != heldOutProtocolFreshSingleB || config.FreshSingle == nil {
+		return "", ""
+	}
+	return config.FreshSingle.Declaration.Sha256, config.FreshSingle.FailedResult.Sha256
+}
+
+// The new tool receipt must bind its exact declaration, not merely a one-seed count.
+func validateHeldOutFreshSingleToolBinding(config heldOutPreparationConfig, qualification heldOutToolQualification, release heldOutRelease) error {
+	if config.Protocol != heldOutProtocolFreshSingleB {
+		if qualification.FreshSingleDeclarationSha256 != "" || qualification.PriorFailedResultSha256 != "" {
+			return errors.New("fresh qualification metadata attached to an old protocol")
+		}
+		return nil
+	}
+	if config.FreshSingle == nil || qualification.FreshSingleDeclarationSha256 != config.FreshSingle.Declaration.Sha256 ||
+		qualification.PriorFailedResultSha256 != heldOutFreshSingleFactsForRelease(release).FailedResult.Sha256 {
+		return errors.New("tool qualification is not bound to this exact fresh declaration and failed-screen ancestry")
+	}
+	return nil
+}
+
+// A prospective public integer pilot cannot collide with either original
+// committed seed; refusal never chooses a different public or hidden seed.
+func validateHeldOutFreshSinglePublicPilotSeed(exclusions heldOutExclusions, facts heldOutFreshSingleFacts) error {
+	for _, seed := range exclusions.EffectiveSeeds {
+		if seed == facts.PublicPilotSeed {
+			return errors.New("public pilot seed collides with an excluded workload")
+		}
+	}
+	for _, raw := range exclusions.PrivateSeedHexes {
+		seed, err := heldOutEffectiveSeed(raw)
+		if err != nil || seed == facts.PublicPilotSeed {
+			return errors.New("public pilot seed collides with a committed private derivation")
+		}
+	}
+	found := false
+	for _, pin := range exclusions.Sources {
+		found = found || pin == facts.OriginalPrivatePlan
+	}
+	if !found {
+		return errors.New("public pilot preflight lacks both original committed seed identities")
+	}
+	return nil
+}
+
+// This is a read-only collision/authority check, not a pilot execution engine.
+type heldOutFreshSinglePilotPreflightConfig struct {
+	Schema         int                    `json:"schema"`
+	Kind           string                 `json:"kind"`
+	Protocol       string                 `json:"protocol"`
+	Approval       heldOutPinnedFile      `json:"approval"`
+	Exclusions     heldOutPinnedFile      `json:"exclusions"`
+	PublicSeed     int64                  `json:"public_pilot_seed"`
+	Request        heldOutPinnedFile      `json:"request"`
+	GeneratorFiles []heldOutGeneratorFile `json:"generator_files"`
+}
+
+// Only the pinned original C2 preparation selects the native pilot instrument.
+// Fresh owner authority is checked before native decoding of old private input.
+func heldOutFreshSinglePublicPilotContext(ctx context.Context, config heldOutFreshSinglePilotPreflightConfig, old heldOutRelease, settings heldOutOperatorSettings) (heldOutRelease, heldOutOperatorSettings, error) {
+	facts := heldOutFreshSingleFactsForRelease(old)
+	if config.Schema != 1 || config.Kind != "sim-latency-held-out-fresh-single-public-pilot-preflight" ||
+		config.Protocol != heldOutProtocolFreshSingleB || config.PublicSeed != facts.PublicPilotSeed {
+		return old, settings, errors.New("explicit fixed public pilot context required")
+	}
+	if _, err := authenticateHeldOutFreshSingleApproval(config.Approval, facts, settings); err != nil {
+		return old, settings, err
+	}
+	content, err := readHeldOutPinned(facts.OriginalPrivatePlan, settings.MaximumBytes, true)
+	if err != nil {
+		return old, settings, err
+	}
+	defer clear(content)
+	var original heldOutPrivatePlan
+	if err := decodeHeldOutComplete(content, &original, "public pilot retained private context"); err != nil {
+		return old, settings, err
+	}
+	if err := validateHeldOutFreshSinglePublicPilotContext(original, facts); err != nil {
+		return old, settings, err
+	}
+	release, _, err := heldOutContextForPreparation(ctx, original.Config, settings)
+	if err != nil {
+		return old, settings, err
+	}
+	selected, err := heldOutSettingsForProtocol(config.Protocol)
+	return release, selected, err
+}
+
+// No caller-selected release, private root or historical selector is projected.
+func validateHeldOutFreshSinglePublicPilotContext(original heldOutPrivatePlan, facts heldOutFreshSingleFacts) error {
+	if original.Schema != 1 || original.Kind != "sim-latency-held-out-private-plan" || len(original.Rounds) != 2 ||
+		original.Config.Protocol != heldOutProtocolThreeABridgeTwoB || original.Config.PrivateRoot != facts.OriginalRoot ||
+		original.Config.Amendment == nil || original.Config.Amendment.Release.Sha256 != facts.ReleaseSha256 {
+		return errors.New("public pilot must reuse the exact retained C2 preparation context")
+	}
+	return nil
+}
+
+// Direct-public integers use the same frozen generator and YAML serialization,
+// never the private raw-seed domain mapping or a CLI's reserialized config.
+func authenticateHeldOutFreshSinglePublicProviders(config heldOutFreshSinglePilotPreflightConfig, release heldOutRelease, settings heldOutOperatorSettings) (string, error) {
+	if settings.Workload.MaxProviderBytes <= 0 {
+		return "", errors.New("positive public-provider byte bound required")
+	}
+	if err := authenticateHeldOutGeneratorFiles(config.GeneratorFiles, release, settings); err != nil {
+		return "", err
+	}
+	content, err := readHeldOutPinned(config.Request, settings.MaximumBytes, true)
+	if err != nil {
+		return "", err
+	}
+	defer clear(content)
+	var request heldOutRequest
+	if err := decodeHeldOutComplete(content, &request, "public pilot exact pre-baseline request"); err != nil {
+		return "", err
+	}
+	policyBytes, err := json.Marshal(request.EvaluationPolicy)
+	if err != nil || heldOutDigest(policyBytes) != release.StageAPolicySha256 || request.Schema != 1 ||
+		request.BaseSha != release.BaseSha || request.EvaluatorImageDigest != release.ImageId || request.SourceEpoch != 0 ||
+		request.ScorerVersion != officialScorerVersion || request.RoundBaselinePath != "" || request.RoundBaselineSha256 != "" {
+		return "", errors.New("public pilot changed its frozen C2 request, policy or baseline freshness")
+	}
+	providers, err := readHeldOutPinned(heldOutPinnedFile{Path: request.ProvidersPath, Sha256: request.ProvidersSha256}, settings.Workload.MaxProviderBytes, true)
+	if err != nil {
+		return "", err
+	}
+	defer clear(providers)
+	var workload Config
+	if yaml.Unmarshal(providers, &workload) != nil || workload.Seed != config.PublicSeed ||
+		workload.Providers.Count != request.EvaluationPolicy.ProviderCount || len(workload.Fleet) != request.EvaluationPolicy.ProviderCount ||
+		workload.Clients.PoolSize != request.EvaluationPolicy.ClientPoolSize ||
+		workload.Clients.MeanPerMinute != float64(request.EvaluationPolicy.ArrivalsPerMinute) ||
+		workload.Clients.QualityWindowSize != request.EvaluationPolicy.QualityWindowSize {
+		return "", errors.New("public pilot provider bytes changed the direct integer or frozen fleet/client profile")
+	}
+	expected, err := controller.GenerateSimLatencyWorkload(config.PublicSeed, request.EvaluationPolicy.ProviderCount,
+		request.EvaluationPolicy.ClientPoolSize, float64(request.EvaluationPolicy.ArrivalsPerMinute), request.EvaluationPolicy.QualityWindowSize)
+	if err != nil {
+		return "", errors.New("native direct-public generator reconstruction failed")
+	}
+	defer clear(expected)
+	if len(expected) == 0 || int64(len(expected)) > settings.Workload.MaxProviderBytes || !bytes.Equal(providers, expected) {
+		return "", errors.New("public pilot bytes differ from the exact native generator serialization")
+	}
+	return request.ProvidersSha256, nil
+}
+
+// No hidden plan or random source is reachable from this pre-pilot operation.
+func verifyHeldOutFreshSinglePublicPilot(config heldOutFreshSinglePilotPreflightConfig, release heldOutRelease, settings heldOutOperatorSettings) error {
+	facts := heldOutFreshSingleFactsForRelease(release)
+	if config.Schema != 1 || config.Kind != "sim-latency-held-out-fresh-single-public-pilot-preflight" ||
+		config.Protocol != heldOutProtocolFreshSingleB || config.PublicSeed != facts.PublicPilotSeed {
+		return errors.New("explicit fixed public pilot preflight required")
+	}
+	if _, err := authenticateHeldOutFreshSingleApproval(config.Approval, facts, settings); err != nil {
+		return err
+	}
+	content, err := readHeldOutPinned(config.Exclusions, settings.MaximumBytes, false)
+	if err != nil {
+		return err
+	}
+	defer clear(content)
+	var exclusions heldOutExclusions
+	if err := decodeHeldOutComplete(content, &exclusions, "pre-public-pilot exclusion census"); err != nil {
+		return err
+	}
+	if err := validateHeldOutExclusions(exclusions, settings.MaximumBytes); err != nil {
+		return err
+	}
+	publicBytes, err := readHeldOutPinned(facts.OriginalPublicPlan, settings.MaximumBytes, false)
+	if err != nil {
+		return err
+	}
+	var original heldOutPublicPlan
+	if decodeHeldOutComplete(publicBytes, &original, "public-pilot original public lineage") != nil ||
+		original.Protocol != heldOutProtocolThreeABridgeTwoB || len(original.Rounds) != 2 ||
+		original.PrivatePlanSha256 != facts.OriginalPrivatePlan.Sha256 {
+		return errors.New("public-pilot preflight changed its original two-seed ancestry")
+	}
+	view := heldOutPrivatePlan{Config: heldOutPreparationConfig{PrivateRoot: facts.OriginalRoot},
+		Rounds: []heldOutPrivateRound{{Public: original.Rounds[0]}, {Public: original.Rounds[1]}}}
+	if err := validateHeldOutFirstCommittedUnstarted(view, false); err != nil {
+		return err
+	}
+	if _, err := readHeldOutPinned(facts.FailedResult, settings.MaximumBytes, true); err != nil {
+		return err
+	}
+	if err := validateHeldOutFreshSinglePublicPilotSeed(exclusions, facts); err != nil {
+		return err
+	}
+	providerDigest, err := authenticateHeldOutFreshSinglePublicProviders(config, release, settings)
+	if err != nil {
+		return err
+	}
+	for _, excluded := range exclusions.ProviderDigests {
+		if excluded == providerDigest {
+			return errors.New("public pilot provider bytes collide with a retained workload")
+		}
+	}
+	return nil
+}
+
+// A pinned existing helper is used only in memory-only mode. Its consumed
+// recovery claim, approval and clock-reset/apply operations are never invoked.
+func preflightHeldOutFreshSingleMemory(ctx context.Context, config heldOutPreparationConfig, release heldOutRelease, settings heldOutOperatorSettings, command func(context.Context, string, ...string) ([]byte, error)) error {
+	if config.Protocol != heldOutProtocolFreshSingleB {
+		return nil
+	}
+	facts := heldOutFreshSingleFactsForRelease(release)
+	if command == nil {
+		return errors.New("fresh memory preflight requires its native read-only command")
+	}
+	if err := verifyHeldOutExecutable(facts.MemoryExecutable.Path, facts.MemoryExecutable.Sha256, settings.MaximumExecutableBytes); err != nil {
+		return err
+	}
+	if _, err := readHeldOutPinned(facts.MemoryConfig, settings.MaximumBytes, true); err != nil {
+		return err
+	}
+	content, err := command(ctx, facts.MemoryExecutable.Path, "-memory-preflight-only", "-config", facts.MemoryConfig.Path, "-config-sha256", facts.MemoryConfig.Sha256)
+	if err != nil {
+		return errors.New("fresh management cgroup memory preflight refused")
+	}
+	var proof struct {
+		Mode       string `json:"mode"`
+		Required   int64  `json:"required_management_bytes"`
+		Evaluation int64  `json:"evaluation_limit_bytes"`
+		Evidence   int64  `json:"evidence_limit_bytes"`
+		Reserve    int64  `json:"management_reserve_bytes"`
+	}
+	if decodeHeldOutComplete(content, &proof, "fresh memory-only proof") != nil ||
+		proof.Mode != "memory-preflight-only" || proof.Required != 8*1024*1024*1024 ||
+		proof.Evaluation != 96*1024*1024*1024 || proof.Evidence != 5*1024*1024*1024 || proof.Reserve != 24*1024*1024*1024 {
+		return errors.New("fresh memory proof changed management or frozen evaluation limits")
+	}
+	return nil
+}

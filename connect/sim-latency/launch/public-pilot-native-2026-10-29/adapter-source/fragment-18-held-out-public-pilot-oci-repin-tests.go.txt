@@ -1,0 +1,50 @@
+// The real production predicate rejects stale OCI identity without relaxing any
+// patch, source or binary pin. This source stays unqualified until Root binds OCI.
+package main
+
+import (
+	"strings"
+	"testing"
+)
+
+// The admitted rebuilt tuple passes once; every stale/mismatched field fails.
+func TestHeldOutPublicPilotExactRebuiltWorseImageGuard(t *testing.T) {
+	const historicalImageId = "sha256:30b2e95b44c07573f3148b70ee2c397e9ed73159cc89a9372a1e561fb5d32591"
+	if heldOutPublicPilotWorseImageId == historicalImageId ||
+		!strings.HasPrefix(heldOutPublicPilotWorseImageId, "sha256:") ||
+		!validSha256(strings.TrimPrefix(heldOutPublicPilotWorseImageId, "sha256:")) {
+		t.Fatal("actual independently admitted new OCI required; retain original qualifier if its exact OCI recurs")
+	}
+	reference := heldOutPublicPilotReference{
+		Role:         "worse",
+		Patch:        heldOutPinnedFile{Sha256: "6f8c6f24c44a9627f053e58d4a59f845a0ba4b0b51e201f5cabddfb33b30629d"},
+		CandidateSha: "e2a391a461ab0b588f994a9e7d29ebfeeae171f4",
+		ImageId:      heldOutPublicPilotWorseImageId,
+		BinarySha256: "41629fddb006aaeddd0e849c7aae9e6a85c89496939fdf60735c598cd0cab33c",
+	}
+	if !heldOutPublicPilotCausalH1Reference(reference) {
+		t.Fatal("exact independently admitted rebuilt tuple rejected")
+	}
+	wrongImageId := "sha256:" + strings.Repeat("0", 64)
+	if wrongImageId == heldOutPublicPilotWorseImageId {
+		wrongImageId = "sha256:" + strings.Repeat("1", 64)
+	}
+	for _, control := range []struct {
+		name   string
+		change func(*heldOutPublicPilotReference)
+	}{
+		{"historical OCI", func(value *heldOutPublicPilotReference) { value.ImageId = historicalImageId }},
+		{"other valid OCI", func(value *heldOutPublicPilotReference) { value.ImageId = wrongImageId }},
+		{"missing OCI", func(value *heldOutPublicPilotReference) { value.ImageId = "" }},
+		{"wrong binary", func(value *heldOutPublicPilotReference) { value.BinarySha256 = strings.Repeat("0", 64) }},
+		{"wrong patch", func(value *heldOutPublicPilotReference) { value.Patch.Sha256 = strings.Repeat("0", 64) }},
+		{"wrong source", func(value *heldOutPublicPilotReference) { value.CandidateSha = strings.Repeat("0", 40) }},
+		{"wrong role", func(value *heldOutPublicPilotReference) { value.Role = "better" }},
+	} {
+		changed := reference
+		control.change(&changed)
+		if heldOutPublicPilotCausalH1Reference(changed) {
+			t.Fatal("mismatched causal reference accepted:", control.name)
+		}
+	}
+}

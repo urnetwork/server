@@ -1,5 +1,5 @@
-// Intake readiness preserves every real source/host/archive check while
-// independently reporting grading and publication holds. No gate is fabricated.
+// Intake preserves source/archive protection while separately reporting real
+// host availability and the one approved initial intake-only hold boundary.
 package controller
 
 import (
@@ -13,6 +13,7 @@ import (
 // Scope-specific latest revisions contain no private explanation or actor data.
 type competitionAutomationHoldStatus struct {
 	Admission, Evaluation, RewardDelivery bool
+	EvaluationHold, RewardDeliveryHold    *model.CompetitionAutomationHold
 }
 
 // Missing support or a failed hold read cannot produce a green v2 projection.
@@ -24,34 +25,16 @@ type competitionAutomationHoldStatusStore interface {
 func (self PostgresStore) AutomationHoldStatus(ctx context.Context, settings *Settings) (status competitionAutomationHoldStatus, err error) {
 	err = captureDatabaseError(func() {
 		server.Db(ctx, func(conn server.PgConn) {
-			rows, queryErr := conn.Query(ctx, `SELECT capability.kind,COALESCE((SELECT active FROM competition_automation_hold
- WHERE environment=$1 AND competition_id=$2 AND season_id=$3 AND kind=capability.kind
- ORDER BY revision DESC LIMIT 1),false)
- FROM (VALUES ('admission'),('evaluation'),('reward_delivery')) AS capability(kind)`,
-				settings.AutomationPolicy.Environment, settings.CompetitionId, settings.AutomationPolicy.SeasonId)
-			server.WithPgResult(rows, queryErr, func() {
-				for rows.Next() {
-					var kind string
-					var active bool
-					server.Raise(rows.Scan(&kind, &active))
-					switch kind {
-					case "admission":
-						status.Admission = active
-					case "evaluation":
-						status.Evaluation = active
-					case "reward_delivery":
-						status.RewardDelivery = active
-					}
-				}
-			})
+			status, err = readCompetitionIntakeHolds(ctx, conn, settings)
+			server.Raise(err)
 		})
 	})
 	return status, err
 }
 
-// An evaluation hold does not weaken or add to admission's containment checks.
-// PublicInfo leaves this pointer nil, preserving canonical policy digests.
-func (self *Service) competitionRuntimeStatus(ctx context.Context, settings *Settings, checks map[string]bool) (*model.CompetitionRuntimeStatus, error) {
+// Ordinary holds never waive readiness; only the exact initial approval can
+// distinguish intake from an offline host. Canonical PublicInfo stays unchanged.
+func (self *Service) competitionRuntimeStatus(ctx context.Context, settings *Settings, round *roundRecord, checks map[string]bool) (*model.CompetitionRuntimeStatus, error) {
 	if !settings.AutomationPolicy.Enabled {
 		return nil, nil
 	}
@@ -63,8 +46,15 @@ func (self *Service) competitionRuntimeStatus(ctx context.Context, settings *Set
 	if err != nil {
 		return nil, err
 	}
-	intakeReady := allChecks(checks) && !holds.Admission
-	return &model.CompetitionRuntimeStatus{IntakeReady: intakeReady, GradingReady: intakeReady && !holds.Evaluation,
+	strictReady := allChecks(checks) && !holds.Admission
+	intakeReady := strictReady
+	if !intakeReady {
+		intakeReady, err = self.approvedIntakeReadiness(ctx, settings, round, checks, holds)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &model.CompetitionRuntimeStatus{IntakeReady: intakeReady, GradingReady: strictReady && !holds.Evaluation,
 		PublicationHeld: holds.Evaluation}, nil
 }
 

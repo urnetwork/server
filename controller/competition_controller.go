@@ -582,6 +582,7 @@ type Settings struct {
 	automationRoundId          server.Id
 	automationTargetRoundId    server.Id
 	roundBaselinePreparation   *roundBaselinePreparationProfile
+	intakeAdmission            *competitionIntakeAdmission
 }
 
 type settingsFile struct {
@@ -3350,6 +3351,7 @@ type Service struct {
 	store               Store
 	apiImageDigest      string
 	apiImageIdentityErr error
+	intakeAuthority     competitionIntakeAuthority
 }
 
 func NewService(settings *Settings, store Store) *Service {
@@ -3361,6 +3363,7 @@ func newServiceWithImageDigest(settings *Settings, store Store, apiImageDigest s
 	service := &Service{
 		settings: settings, store: store, apiImageDigest: apiImageDigest,
 		apiImageIdentityErr: identityErr,
+		intakeAuthority:     approvedCompetitionIntakeAuthority(),
 	}
 	if settings == nil {
 		service.settingsErr = errors.New("competition settings unavailable")
@@ -3441,7 +3444,7 @@ func (self *Service) Ready(ctx context.Context) (ReadinessResult, *CompetitionEr
 		return result, evalError
 	}
 	result.Ready = allChecks(checks)
-	result.RuntimeStatus, err = self.competitionRuntimeStatus(ctx, settings, checks)
+	result.RuntimeStatus, err = self.competitionRuntimeStatus(ctx, settings, round, checks)
 	if err != nil {
 		result.Ready = false
 		result.Checks["automation_hold_status"] = false
@@ -3450,7 +3453,9 @@ func (self *Service) Ready(ctx context.Context) (ReadinessResult, *CompetitionEr
 		return result, evalError
 	}
 	if result.RuntimeStatus != nil {
-		result.Ready = result.RuntimeStatus.IntakeReady
+		// Intake-only discovery can remain available while the evaluator is
+		// offline; this readiness result must still expose that real failure.
+		result.Ready = result.RuntimeStatus.IntakeReady && allChecks(checks)
 	}
 	if !result.Ready {
 		evalError := infrastructureError("not_ready", "competition evaluator is not ready")
@@ -3574,7 +3579,7 @@ func (self *Service) Info(ctx context.Context) (*InfoResult, *CompetitionError) 
 		if checkErr != nil {
 			return infrastructureError("readiness_failed", "competition intake status is unavailable")
 		}
-		result.RuntimeStatus, err = self.competitionRuntimeStatus(ctx, effective, checks)
+		result.RuntimeStatus, err = self.competitionRuntimeStatus(ctx, effective, round, checks)
 		if err != nil {
 			return infrastructureError("readiness_failed", "competition hold status is unavailable")
 		}
@@ -3887,7 +3892,13 @@ func (self *Service) submitWithDecisionContract(ctx context.Context, args ScoreA
 		return nil, http.StatusForbidden, competitionScopeDenied()
 	}
 	if v2 || !round.Staging {
-		if readyErr := self.requireSecureEvaluator(ctx, settings); readyErr != nil {
+		var readyErr *CompetitionError
+		if v2 {
+			settings, readyErr = self.requireSecureIntake(ctx, settings, round)
+		} else {
+			readyErr = self.requireSecureEvaluator(ctx, settings)
+		}
+		if readyErr != nil {
 			return nil, 503, readyErr
 		}
 	}
@@ -5712,6 +5723,9 @@ func (self PostgresStore) Enqueue(
 						stateErr = ErrConflict
 						return
 					}
+					// The same scope lock serializes hold release against BOTH
+					// admission passes, including the pass after retained upload.
+					server.Raise(checkCompetitionIntakeAdmission(ctx, tx, settings, round, now))
 					if policy.AutomationPolicy.RepeatRewardPolicy == "exclude_exact_identity" {
 						duplicate, checkErr := automationRewardDuplicateInTx(ctx, tx, settings, *policy.AutomationPolicy, patch.Sha256)
 						server.Raise(checkErr)

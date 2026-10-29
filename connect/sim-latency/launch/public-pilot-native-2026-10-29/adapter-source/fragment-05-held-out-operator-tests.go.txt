@@ -1,0 +1,632 @@
+// Deterministic synthetic operator qualification. These receipts describe test
+// shapes only, not genuine Stage A acceptance, reference pilots or live services.
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/urnetwork/server/model"
+)
+
+// Owns only generated test paths and identities; no retained production data.
+type heldOutOpFixture struct {
+	Root                       string
+	Config                     heldOutPreparationConfig
+	ConfigBytes                []byte
+	Inputs                     heldOutPreparationInputs
+	Release                    heldOutRelease
+	Settings                   heldOutOperatorSettings
+	Hooks                      heldOutPreparationHooks
+	Generated                  int
+	Reauthenticated            int
+	ConstructorAuthentications int
+	PrivatePin, PublicPin      heldOutPinnedFile
+}
+
+// Test writing is intentionally replaceable so mutations exercise pinned-byte
+// refusal; actual operator publication uses exclusive, fsynced writes instead.
+func heldOutOpWrite(t *testing.T, path string, content []byte) heldOutPinnedFile {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, content, 0600); err != nil {
+		t.Fatal(err)
+	}
+	return heldOutPinnedFile{Path: path, Sha256: heldOutDigest(content)}
+}
+
+// Encodes explicit zero/false fields too, matching the strict field census.
+func heldOutOpJson(t *testing.T, path string, value any) heldOutPinnedFile {
+	t.Helper()
+	content, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return heldOutOpWrite(t, path, content)
+}
+
+// Synthetic ids are deterministic and visibly generated, never campaign ids.
+func heldOutOpId(value int) string {
+	return fmt.Sprintf("%08x-0000-4000-8000-%012x", value, value)
+}
+
+// Only fresh fixture receipt construction shares this immutable actual-ELF
+// identity. Production authentication never reads this cache and still streams
+// the actual executable for every qualification check.
+var heldOutFreshFixtureExecutableIdentity struct {
+	Once   sync.Once
+	Sha256 string
+	Err    error
+}
+
+// Reads the current Go test ELF, never a fabricated executable or helper.
+func readHeldOutFixtureExecutableDigest() (string, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	file, err := os.Open(executable)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.New()
+	if _, err := io.Copy(digest, file); err != nil {
+		_ = file.Close()
+		return "", err
+	}
+	if err := file.Close(); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(digest.Sum(nil)), nil
+}
+
+// Reusing a receipt identity saves only fixture generation work, never a native
+// verifier call. Ordinary old fixture constructors retain uncached behavior.
+func heldOutFixtureExecutableDigest(t *testing.T, cacheForFresh bool) string {
+	t.Helper()
+	if cacheForFresh {
+		heldOutFreshFixtureExecutableIdentity.Once.Do(func() {
+			heldOutFreshFixtureExecutableIdentity.Sha256, heldOutFreshFixtureExecutableIdentity.Err = readHeldOutFixtureExecutableDigest()
+		})
+		if heldOutFreshFixtureExecutableIdentity.Err != nil {
+			t.Fatal(heldOutFreshFixtureExecutableIdentity.Err)
+		}
+		return heldOutFreshFixtureExecutableIdentity.Sha256
+	}
+	digest, err := readHeldOutFixtureExecutableDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return digest
+}
+
+// Builds full authenticated-shape preparation inputs. The native encoder uses
+// only a small 25-provider profile; no Docker/service/scorer process is started.
+func newHeldOutOpFixture(t *testing.T) *heldOutOpFixture {
+	t.Helper()
+	return newHeldOutOpFixtureWithAuthentication(t, true)
+}
+
+// Fresh composition may defer only this predecessor-positive authentication;
+// its constructor must still run the final full production validator itself.
+func newHeldOutOpFixtureWithAuthentication(t *testing.T, authenticate bool) *heldOutOpFixture {
+	t.Helper()
+	root := newCalibrationFileRoot(t)
+	fixture := &heldOutOpFixture{Root: root, Settings: defaultHeldOutOperatorSettings()}
+	write := func(name string, value any) heldOutPinnedFile {
+		return heldOutOpJson(t, filepath.Join(root, "inputs", name), value)
+	}
+	commits := map[string]string{}
+	for i, name := range []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "warp", "gvisor"} {
+		commits[name] = fmt.Sprintf("%040x", i+1)
+	}
+	lockDigest, err := model.CompetitionSourceLockDigest(commits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := heldOutBindingFixturePolicy()
+	policy.Replicates, policy.ScoreTimeoutSeconds, policy.TakeoverMargin = 9, 10800, 0.161
+	policy.RequestTimeoutMs, policy.DurationMs = 1000, 1000
+	policy.HardwareId, policy.HostQualificationSha256 = "synthetic-offline-hardware-not-attested", strings.Repeat("1", 64)
+	policy.SimulatorSha256, policy.ScorerSha256 = strings.Repeat("2", 64), strings.Repeat("2", 64)
+	policy.ConfigLocalSha256, policy.VaultLocalSha256 = strings.Repeat("3", 64), strings.Repeat("4", 64)
+	policy.ExchangeHosts, policy.FleetShards, policy.ApiPort = 4, 1, 12345
+	policy.SiteListen, policy.ImpairmentEnabled = "192.0.2.1:0", true
+	policyBytes, err := json.Marshal(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.Release = heldOutRelease{BaseSha: commits["server"], SourceLockSha256: lockDigest, ImageId: "sha256:" + strings.Repeat("1", 64),
+		BinarySha256: policy.SimulatorSha256, StageAPolicySha256: heldOutDigest(policyBytes), AnalyzerSource: strings.Repeat("b", 40),
+		ScoringLock: filepath.Join(root, "synthetic-existing-slot.lock"), ScriptDirectory: filepath.Join(root, "inputs", "scripts"), ScriptDigests: map[string]string{}}
+	config := heldOutPreparationConfig{Schema: 1, Kind: "sim-latency-held-out-preparation",
+		PrivateRoot: filepath.Join(root, "private-parent", "campaign"), PublicPlanPath: filepath.Join(root, "public", "commitments.json"),
+		SourceLock: write("source-lock.json", evaluatorSourceLock{Schema: 1, Repositories: commits}), GeneratorFiles: []heldOutGeneratorFile{}, Scripts: []heldOutPinnedFile{}}
+	for _, directory := range []string{filepath.Dir(config.PrivateRoot), filepath.Dir(config.PublicPlanPath)} {
+		if err := os.MkdirAll(directory, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"competition_controller.go", "competition_sim_latency_controller.go"} {
+		content := []byte("// Synthetic byte-match provenance fixture, not executable generator source.\n" + name + "\n")
+		config.GeneratorFiles = append(config.GeneratorFiles, heldOutGeneratorFile{
+			Analyzer: heldOutOpWrite(t, filepath.Join(root, "inputs", "analyzer", name), content),
+			Frozen:   heldOutOpWrite(t, filepath.Join(root, "inputs", "frozen", name), content)})
+	}
+	for _, name := range []string{"evaluator.sh", "network-boundary.sh", "compose.yml", "hash-local-mount.sh"} {
+		pin := heldOutOpWrite(t, filepath.Join(fixture.Release.ScriptDirectory, name), []byte("synthetic non-executable script identity "+name+"\n"))
+		config.Scripts = append(config.Scripts, pin)
+		if name != "hash-local-mount.sh" {
+			fixture.Release.ScriptDigests[name] = pin.Sha256
+		}
+	}
+	evidence := write("synthetic-evidence.json", map[string]any{"schema": 1, "synthetic": true, "no_live_qualification": true})
+	references := []heldOutReference{}
+	for i, role := range []string{"no-op", "better", "worse"} {
+		patch := heldOutOpWrite(t, filepath.Join(root, "inputs", role+".patch"), []byte("synthetic patch identity "+role+"\n"))
+		reference := heldOutReference{Role: role, Patch: patch, CandidateSha: fmt.Sprintf("%040x", i+101), ImageId: fmt.Sprintf("sha256:%064x", i+201), BinarySha256: fmt.Sprintf("%064x", i+301)}
+		reference.NativeBuild = write(role+"-native-build.json", heldOutNativeBuild{Schema: 1, Image: "synthetic-reference-image-" + role,
+			ImageId: reference.ImageId, BaseImageId: fixture.Release.ImageId, BaseSha: fixture.Release.BaseSha,
+			CandidateSha: reference.CandidateSha, PatchSha256: patch.Sha256, PolicySha256: strings.Repeat("5", 64), BuilderSha256: strings.Repeat("6", 64), ImageKey: fmt.Sprintf("%064x", i+401)})
+		for _, kind := range []string{"build", "correctness", "direction"} {
+			receipt := heldOutReferenceQualification{Schema: 1, Kind: "sim-latency-held-out-reference-" + kind, Role: role, Accepted: true,
+				BaseSha: fixture.Release.BaseSha, SourceLockSha256: fixture.Release.SourceLockSha256, BaseImageId: fixture.Release.ImageId,
+				PatchSha256: patch.Sha256, CandidateSha: reference.CandidateSha, ImageId: reference.ImageId, BinarySha256: reference.BinarySha256,
+				GoVersion: "go1.27.3", Direction: map[string]string{"no-op": "no-op", "better": "faster", "worse": "slower"}[role], Evidence: []heldOutPinnedFile{evidence}}
+			pin := write(role+"-"+kind+".json", receipt)
+			switch kind {
+			case "build":
+				reference.Build = pin
+			case "correctness":
+				reference.Correctness = pin
+			case "direction":
+				reference.Direction = pin
+			}
+		}
+		references = append(references, reference)
+	}
+	config.References = write("references.json", references)
+	priorSeeds := write("synthetic-prior-seeds.json", map[string]any{"round_seed_hex": fmt.Sprintf("%064x", 9001), "public_workload_seed": int64(20261024), "providers_sha256": heldOutDigest([]byte("synthetic retired provider bytes")), "commitments": []string{strings.Repeat("e", 64)}})
+	config.Exclusions = write("exclusions.json", heldOutExclusions{Schema: 1, Kind: "sim-latency-held-out-exclusions", Complete: true,
+		ReviewedAt: time.Unix(1600000000, 0).UTC(), Sources: []heldOutPinnedFile{priorSeeds}, PrivateSeedHexes: []string{fmt.Sprintf("%064x", 9001)},
+		EffectiveSeeds: []int64{20261024}, ProviderDigests: []string{heldOutDigest([]byte("synthetic retired provider bytes"))}, RetiredCommitments: []string{strings.Repeat("e", 64)}})
+	binarySha256 := heldOutFixtureExecutableDigest(t, !authenticate)
+	qualification := heldOutToolQualification{Schema: 1, Kind: "sim-latency-held-out-operator-qualification", Accepted: true,
+		BinarySha256: binarySha256, AnalyzerSource: fixture.Release.AnalyzerSource, BaseSha: fixture.Release.BaseSha,
+		SourceLockSha256: fixture.Release.SourceLockSha256, GoVersion: "go1.27.3", Race: true, ConsecutivePasses: 3, TestsPerPass: 1,
+		Sources: []heldOutPinnedFile{evidence}, Evidence: []heldOutPinnedFile{evidence, evidence, evidence}}
+	config.Qualification = write("qualification.json", qualification)
+	request := heldOutRequest{Schema: 1, JobId: heldOutOpId(1), RoundId: heldOutOpId(2), Attempt: 1,
+		CompetitionId: "synthetic-stage-a-fixture", BaseSha: fixture.Release.BaseSha, EvaluatorImageDigest: fixture.Release.ImageId,
+		ApiImageDigest: "sha256:" + strings.Repeat("a", 64), WorkerImageDigest: "sha256:" + strings.Repeat("b", 64), ScorerVersion: officialScorerVersion,
+		RoundSeedHex: fmt.Sprintf("%064x", 8001), ProvidersPath: filepath.Join(root, "synthetic-prior", "providers.yml"), ProvidersSha256: strings.Repeat("a", 64),
+		PatchPath: filepath.Join(root, "synthetic-prior", "canonical.patch"), PatchSha256: references[0].Patch.Sha256,
+		ArtifactDirectory: filepath.Join(root, "synthetic-prior"), ConfigLocalDirectory: filepath.Join(root, "synthetic-config", "local"), VaultLocalDirectory: filepath.Join(root, "synthetic-vault", "local"),
+		PatchPolicy: model.CompetitionPatchPolicy{MaxPatchBytes: 262144, AllowedPaths: []string{"synthetic/reference.go"}, ForbiddenPaths: []string{"synthetic/protected/**"}}, EvaluationPolicy: policy}
+	config.Template = write("template.json", request)
+	manifest := calibrationFileManifest{Schema: 1, Kind: "sim-latency-same-seed-calibration-inputs", BaseSha: fixture.Release.BaseSha,
+		EvaluatorImageDigest: fixture.Release.ImageId, ProvidersSha256: request.ProvidersSha256, NoopPatchSha256: request.PatchSha256,
+		EvaluationPolicySha256: fixture.Release.StageAPolicySha256, RoundSeedHex: request.RoundSeedHex, Cohorts: []calibrationFileCohort{}}
+	for i := 0; i < 5; i++ {
+		manifest.Cohorts = append(manifest.Cohorts, calibrationFileCohort{JobId: heldOutOpId(i + 11), RoundId: heldOutOpId(i + 21),
+			ArtifactDirectory: filepath.Join(root, fmt.Sprintf("synthetic-stage-a-%02d", i+1)), RequestSha256: config.Template.Sha256,
+			BaselineSha256: strings.Repeat("1", 64), ScoreSha256: strings.Repeat("2", 64), WorkerResultSha256: strings.Repeat("3", 64), EvidenceManifestSha256: strings.Repeat("4", 64), TerminalSha256: strings.Repeat("5", 64)})
+	}
+	config.StageAInputs = write("stage-a-inputs.json", manifest)
+	settingsA := defaultCalibrationAnalysisSettings()
+	report := calibrationAnalysisReport{Kind: "sim-latency-calibration-analysis", Cohorts: settingsA.Cohorts,
+		ObservedReplicates: 90, BootstrapDraws: settingsA.BootstrapDraws, Placeability: 0.99, GatePassRates: map[string]float64{}, MarginTerms: map[string]float64{},
+		RecommendedMargin: 0.2, Accepted: true, Reasons: []string{}, InputManifestSha256: config.StageAInputs.Sha256, EvaluationPolicySha256: fixture.Release.StageAPolicySha256,
+		ReplayObservations: []calibrationReplayObservation{}}
+	for i := 0; i < 10; i++ {
+		report.ReplayObservations = append(report.ReplayObservations, calibrationReplayObservation{ImageId: fixture.Release.ImageId,
+			ContainerId: fmt.Sprintf("%064x", i+501), Owner: fmt.Sprintf("%064x", i+601), InspectionSha256: strings.Repeat("7", 64), TerminalSha256: strings.Repeat("8", 64), ContainerCleanupVerified: true})
+	}
+	config.StageAReport = write("accepted-report-shape.json", report)
+	fixture.Config = config
+	fixture.refreshConfig(t)
+	if authenticate {
+		fixture.ConstructorAuthentications++
+		inputs, err := authenticateHeldOutPreparation(config, fixture.Release, fixture.Settings)
+		if err != nil {
+			t.Fatalf("synthetic positive preparation boundary rejected: %v", err)
+		}
+		fixture.Inputs = *inputs
+	}
+	entropy := make([]byte, 2048)
+	for i := range entropy {
+		entropy[i] = byte((i*37 + 13) % 251)
+	}
+	fixture.Hooks = heldOutPreparationHooks{Entropy: bytes.NewReader(entropy), Configuration: fixture.ConfigBytes,
+		Now: func() time.Time { return time.Unix(1600000100, 0).UTC() }, Generate: func(ctx context.Context, seed string, policy model.CompetitionEvaluationPolicy, settings heldOutWorkloadSettings) (*heldOutGeneratedWorkload, error) {
+			fixture.Generated++
+			return generateHeldOutWorkload(ctx, seed, policy, settings)
+		}}
+	return fixture
+}
+
+// Keeps the independently supplied configuration pin in sync for semantic
+// mutations. Old pins are retained separately by tests of byte substitution.
+func (self *heldOutOpFixture) refreshConfig(t *testing.T) {
+	t.Helper()
+	content, err := json.MarshalIndent(self.Config, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	self.ConfigBytes = content
+	self.Hooks.Configuration = content
+}
+
+// The synthetic callback still reauthenticates every report/source/reference
+// file on both sides of preparation, independently of the native workload hook.
+func (self *heldOutOpFixture) prepare(t *testing.T) *heldOutPrivatePlan {
+	t.Helper()
+	public, err := prepareHeldOutCampaign(t.Context(), self.Config, heldOutDigest(self.ConfigBytes), self.Inputs,
+		self.Release, self.Settings, self.Hooks, func() error {
+			self.Reauthenticated++
+			_, err := authenticateHeldOutPreparation(self.Config, self.Release, self.Settings)
+			return err
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	self.PrivatePin = heldOutPinnedFile{Path: filepath.Join(self.Config.PrivateRoot, "private-plan.json"), Sha256: public.PrivatePlanSha256}
+	publicBytes, err := os.ReadFile(self.Config.PublicPlanPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	self.PublicPin = heldOutPinnedFile{Path: self.Config.PublicPlanPath, Sha256: heldOutDigest(publicBytes)}
+	privateBytes, err := readHeldOutPinned(self.PrivatePin, self.Settings.MaximumBytes, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plan heldOutPrivatePlan
+	if err := json.Unmarshal(privateBytes, &plan); err != nil {
+		t.Fatal(err)
+	}
+	return &plan
+}
+
+// The full composed path generates five actual native workloads and fifteen
+// requests before publishing any public commitment. Nothing is evaluated.
+func TestHeldOutOperatorPreparesCompleteNativeFiveRoundPlan(t *testing.T) {
+	fixture := newHeldOutOpFixture(t)
+	plan := fixture.prepare(t)
+	if fixture.Generated != 5 || fixture.Reauthenticated != 2 || len(plan.Rounds) != 5 {
+		t.Fatal("incomplete generation or before/after authentication")
+	}
+	if _, err := verifyHeldOutPlan(fixture.PrivatePin, fixture.PublicPin, fixture.Release, fixture.Settings); err != nil {
+		t.Fatal(err)
+	}
+	for _, round := range plan.Rounds {
+		if len(round.Public.Jobs) != 3 {
+			t.Fatal("partial reference order")
+		}
+		for _, job := range round.Public.Jobs {
+			root := heldOutJobRoot(fixture.Config.PrivateRoot, round.Public, job)
+			for _, name := range []string{"precommitted-request.json", "providers.yml", "canonical.patch"} {
+				info, err := os.Stat(filepath.Join(root, "artifacts", name))
+				if err != nil || info.Mode().Perm() != 0600 {
+					t.Fatal("private publication mode changed")
+				}
+			}
+			if _, err := os.Lstat(filepath.Join(root, "started.json")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("preparation started evaluation")
+			}
+		}
+	}
+}
+
+// Public output has an explicit allowlist and cannot serialize the secret
+// seed, effective integer, full request, provider YAML or private path tree.
+func TestHeldOutOperatorPublicPlanOmitsAllPrivateMaterial(t *testing.T) {
+	fixture := newHeldOutOpFixture(t)
+	plan := fixture.prepare(t)
+	content, err := os.ReadFile(fixture.Config.PublicPlanPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"private_seed_hex", "effective_seed", "round_seed_hex", "ProviderBytes", "private_root", "providers_path", "evaluation_policy\"", fixture.Config.PrivateRoot} {
+		if bytes.Contains(content, []byte(forbidden)) {
+			t.Fatalf("public plan leaked forbidden field %q", forbidden)
+		}
+	}
+	for _, round := range plan.Rounds {
+		if bytes.Contains(content, []byte(round.PrivateSeedHex)) {
+			t.Fatal("public plan leaked a raw private seed")
+		}
+	}
+}
+
+// Whitespace drift still violates the independently published accepted-report
+// byte pin, including drift after all private artifacts were already written.
+func TestHeldOutOperatorRefusesChangedReportAtFinalPublication(t *testing.T) {
+	fixture := newHeldOutOpFixture(t)
+	calls := 0
+	_, err := prepareHeldOutCampaign(t.Context(), fixture.Config, heldOutDigest(fixture.ConfigBytes), fixture.Inputs, fixture.Release, fixture.Settings, fixture.Hooks, func() error {
+		calls++
+		if calls == 2 {
+			content, readErr := os.ReadFile(fixture.Config.StageAReport.Path)
+			if readErr != nil {
+				return readErr
+			}
+			if err := os.WriteFile(fixture.Config.StageAReport.Path, append(content, '\n'), 0600); err != nil {
+				return err
+			}
+		}
+		_, err := authenticateHeldOutMargin(fixture.Config, fixture.Release, fixture.Settings)
+		return err
+	})
+	if err == nil || !strings.Contains(err.Error(), "final publication") || calls != 2 {
+		t.Fatalf("changed accepted report not refused at final publication: %v", err)
+	}
+	if _, err := os.Lstat(fixture.Config.PublicPlanPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("partial public plan escaped")
+	}
+	if _, err := os.Stat(filepath.Join(fixture.Config.PrivateRoot, "private-plan.json")); err != nil {
+		t.Fatal("failed preparation evidence was discarded")
+	}
+}
+
+// Entropy failure leaves an exclusive started record. Retrying the same root
+// cannot quietly draw a new campaign after a partial preparation.
+func TestHeldOutOperatorEntropyFailureCannotRerollRoot(t *testing.T) {
+	fixture := newHeldOutOpFixture(t)
+	fixture.Hooks.Entropy = bytes.NewReader(nil)
+	for i := 0; i < 2; i++ {
+		if _, err := prepareHeldOutCampaign(t.Context(), fixture.Config, heldOutDigest(fixture.ConfigBytes), fixture.Inputs, fixture.Release, fixture.Settings, fixture.Hooks, func() error { return nil }); err == nil {
+			t.Fatal("failed entropy or reused private root accepted")
+		}
+	}
+	if fixture.Generated != 0 {
+		t.Fatal("native generator ran without campaign entropy")
+	}
+	if _, err := os.Stat(filepath.Join(fixture.Config.PrivateRoot, "preparation.started")); err != nil {
+		t.Fatal("failed draw evidence removed")
+	}
+}
+
+// Injects a repeated effective seed directly, without searching for a real hash
+// collision; the composed census must refuse before any public plan exists.
+func TestHeldOutOperatorRejectsRepeatedEffectiveWorkload(t *testing.T) {
+	fixture := newHeldOutOpFixture(t)
+	generate := fixture.Hooks.Generate
+	var firstSeed int64
+	fixture.Hooks.Generate = func(ctx context.Context, seed string, policy model.CompetitionEvaluationPolicy, settings heldOutWorkloadSettings) (*heldOutGeneratedWorkload, error) {
+		workload, err := generate(ctx, seed, policy, settings)
+		if err != nil {
+			return nil, err
+		}
+		if firstSeed == 0 {
+			firstSeed = workload.EffectiveSeed
+		} else {
+			workload.EffectiveSeed = firstSeed
+		}
+		return workload, nil
+	}
+	_, err := prepareHeldOutCampaign(t.Context(), fixture.Config, heldOutDigest(fixture.ConfigBytes), fixture.Inputs, fixture.Release, fixture.Settings, fixture.Hooks, func() error { return nil })
+	if err == nil || !strings.Contains(err.Error(), "repeated or excluded effective seed") {
+		t.Fatalf("repeated effective workload accepted: %v", err)
+	}
+}
+
+// Existing public output is refused before consuming any entropy or creating a
+// private root, rather than being overwritten with a convenient replacement.
+func TestHeldOutOperatorNeverOverwritesPublicCommitments(t *testing.T) {
+	fixture := newHeldOutOpFixture(t)
+	prior := []byte("synthetic prior publication\n")
+	heldOutOpWrite(t, fixture.Config.PublicPlanPath, prior)
+	if _, err := prepareHeldOutCampaign(t.Context(), fixture.Config, heldOutDigest(fixture.ConfigBytes), fixture.Inputs, fixture.Release, fixture.Settings, fixture.Hooks, func() error { return nil }); err == nil {
+		t.Fatal("existing public publication overwritten")
+	}
+	content, _ := os.ReadFile(fixture.Config.PublicPlanPath)
+	if !bytes.Equal(content, prior) || fixture.Generated != 0 {
+		t.Fatal("publication refusal consumed workload entropy or changed prior bytes")
+	}
+}
+
+// Repinned malformed acceptance shapes cannot stand in for all ten native
+// baseline/candidate replay identities and successful replay cleanup receipts.
+func TestHeldOutOperatorRejectsIncompleteStageAReplayReceipts(t *testing.T) {
+	fixture := newHeldOutOpFixture(t)
+	content, _ := os.ReadFile(fixture.Config.StageAReport.Path)
+	for _, mutate := range []func(*calibrationAnalysisReport){
+		func(r *calibrationAnalysisReport) { r.ReplayObservations = r.ReplayObservations[:9] },
+		func(r *calibrationAnalysisReport) { r.ReplayObservations[0].ContainerCleanupVerified = false },
+		func(r *calibrationAnalysisReport) { r.ReplayObservations[0].CorpusRetained = true },
+		func(r *calibrationAnalysisReport) {
+			r.ReplayObservations[1].ContainerId = r.ReplayObservations[0].ContainerId
+		},
+	} {
+		var report calibrationAnalysisReport
+		if err := json.Unmarshal(content, &report); err != nil {
+			t.Fatal(err)
+		}
+		mutate(&report)
+		config := fixture.Config
+		config.StageAReport = heldOutOpJson(t, config.StageAReport.Path, report)
+		if _, err := authenticateHeldOutMargin(config, fixture.Release, fixture.Settings); err == nil || !strings.Contains(err.Error(), "replay") {
+			t.Fatalf("incomplete native replay receipts accepted: %v", err)
+		}
+	}
+}
+
+// A changed native encoder cannot be qualified by merely updating a digest in
+// one half of the analyzer/evaluated-source byte-match pair.
+func TestHeldOutOperatorRejectsChangedFrozenGeneratorSource(t *testing.T) {
+	fixture := newHeldOutOpFixture(t)
+	fixture.Config.GeneratorFiles[0].Frozen = heldOutOpWrite(t, fixture.Config.GeneratorFiles[0].Frozen.Path, []byte("synthetic different generator\n"))
+	if _, err := authenticateHeldOutPreparation(fixture.Config, fixture.Release, fixture.Settings); err == nil || !strings.Contains(err.Error(), "generator differs") {
+		t.Fatalf("changed generator accepted: %v", err)
+	}
+}
+
+// No compile-only receipt, skipped guard or two-pass result can authorize real
+// entropy generation. Negative cases re-pin the synthetic summary deliberately.
+func TestHeldOutOperatorRejectsUnqualifiedExecutableReceipt(t *testing.T) {
+	fixture := newHeldOutOpFixture(t)
+	original, _ := os.ReadFile(fixture.Config.Qualification.Path)
+	for _, mutate := range []func(*heldOutToolQualification){func(q *heldOutToolQualification) { q.Accepted = false }, func(q *heldOutToolQualification) { q.Race = false }, func(q *heldOutToolQualification) { q.ConsecutivePasses = 2 }, func(q *heldOutToolQualification) { q.Skips = 1 }, func(q *heldOutToolQualification) { q.BinarySha256 = strings.Repeat("f", 64) }} {
+		var receipt heldOutToolQualification
+		if err := json.Unmarshal(original, &receipt); err != nil {
+			t.Fatal(err)
+		}
+		mutate(&receipt)
+		config := fixture.Config
+		config.Qualification = heldOutOpJson(t, config.Qualification.Path, receipt)
+		if _, err := authenticateHeldOutPreparation(config, fixture.Release, fixture.Settings); err == nil {
+			t.Fatal("unqualified operator receipt accepted")
+		}
+	}
+}
+
+// Test fixtures reach the pin boundary with valid private roots. Symlink/FIFO
+// refusal is synchronous metadata validation, not a timeout-based assertion.
+func TestHeldOutOperatorRefusesLinkedSpecialAndPublicPrivateInputs(t *testing.T) {
+	root := newCalibrationFileRoot(t)
+	pin := heldOutOpWrite(t, filepath.Join(root, "input.json"), []byte("synthetic private bytes\n"))
+	alias := filepath.Join(root, "alias.json")
+	if err := os.Symlink(pin.Path, alias); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readHeldOutPinned(heldOutPinnedFile{Path: alias, Sha256: pin.Sha256}, 1024, true); err == nil {
+		t.Fatal("symlink alias accepted")
+	}
+	fifo := filepath.Join(root, "fifo")
+	if err := syscall.Mkfifo(fifo, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readHeldOutPinned(heldOutPinnedFile{Path: fifo, Sha256: pin.Sha256}, 1024, true); err == nil {
+		t.Fatal("fifo accepted")
+	}
+	if err := os.Chmod(pin.Path, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readHeldOutPinned(pin, 1024, true); err == nil {
+		t.Fatal("public mode on private seed/request file accepted")
+	}
+}
+
+// Re-pinning a reordered public projection still cannot revise the exact
+// committed private round/order/jobs or their domain-separated commitments.
+func TestHeldOutOperatorRejectsRepinnedReferenceReordering(t *testing.T) {
+	fixture := newHeldOutOpFixture(t)
+	fixture.prepare(t)
+	content, _ := os.ReadFile(fixture.PublicPin.Path)
+	var public heldOutPublicPlan
+	if err := json.Unmarshal(content, &public); err != nil {
+		t.Fatal(err)
+	}
+	public.Rounds[0].Order[0], public.Rounds[0].Order[1] = public.Rounds[0].Order[1], public.Rounds[0].Order[0]
+	changed := heldOutOpJson(t, fixture.PublicPin.Path, public)
+	if _, err := verifyHeldOutPlan(fixture.PrivatePin, changed, fixture.Release, fixture.Settings); err == nil || !strings.Contains(err.Error(), "reordered") {
+		t.Fatalf("repinned reference reorder accepted: %v", err)
+	}
+}
+
+// Changed private request bytes cannot become a permitted late-bound field;
+// all original seeds, patches, policy, paths and job ids remain pinned.
+func TestHeldOutOperatorRejectsChangedPrecommittedRequest(t *testing.T) {
+	fixture := newHeldOutOpFixture(t)
+	plan := fixture.prepare(t)
+	job := plan.Rounds[0].Public.Jobs[0]
+	path := filepath.Join(heldOutJobRoot(fixture.Config.PrivateRoot, plan.Rounds[0].Public, job), "artifacts", "precommitted-request.json")
+	content, _ := os.ReadFile(path)
+	heldOutOpWrite(t, path, append(content, '\n'))
+	if _, err := verifyHeldOutPlan(fixture.PrivatePin, fixture.PublicPin, fixture.Release, fixture.Settings); err == nil || !strings.Contains(err.Error(), "bytes changed") {
+		t.Fatalf("changed request accepted: %v", err)
+	}
+}
+
+// A private raw seed's native effective value is excluded even if the catalog
+// author omitted it from the legacy integer list. No cryptographic collision is
+// required to force this regression.
+func TestHeldOutOperatorExcludesKnownPrivateSeedDerivations(t *testing.T) {
+	workloads, policy, settings := newHeldOutBindingFixtures(t)
+	exclusions := heldOutExclusions{PrivateSeedHexes: []string{workloads[0].PrivateSeedHex}, EffectiveSeeds: []int64{20261024}}
+	if err := validateHeldOutExcludedWorkloads(workloads, exclusions, policy, settings); err == nil || !strings.Contains(err.Error(), "excluded effective seed") {
+		t.Fatalf("known private seed derivation accepted: %v", err)
+	}
+}
+
+// A completeness flag cannot hide an omitted prior raw/effective/provider or
+// commitment identity when the exact retained source still contains it.
+func TestHeldOutOperatorAuthenticatesEveryExclusionSourceIdentity(t *testing.T) {
+	fixture := newHeldOutOpFixture(t)
+	content, err := os.ReadFile(fixture.Config.Exclusions.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var original heldOutExclusions
+	if err := json.Unmarshal(content, &original); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateHeldOutExclusions(original, fixture.Settings.MaximumBytes); err != nil {
+		t.Fatal(err)
+	}
+	for _, mutate := range []func(*heldOutExclusions){
+		func(e *heldOutExclusions) { e.PrivateSeedHexes = []string{fmt.Sprintf("%064x", 9002)} },
+		func(e *heldOutExclusions) { e.ProviderDigests = []string{strings.Repeat("f", 64)} },
+		func(e *heldOutExclusions) { e.RetiredCommitments = []string{strings.Repeat("f", 64)} },
+		func(e *heldOutExclusions) { e.EffectiveSeeds = append(append([]int64{}, e.EffectiveSeeds...), 9002) },
+	} {
+		changed := original
+		mutate(&changed)
+		if err := validateHeldOutExclusions(changed, fixture.Settings.MaximumBytes); err == nil || !strings.Contains(err.Error(), "census") {
+			t.Fatalf("unsupported or omitted exclusion identity accepted: %v", err)
+		}
+	}
+}
+
+// Legacy effective seeds exceed the exact integer range of float64. Parsing a
+// source through interface{} must not round one seed into a neighboring value.
+func TestHeldOutOperatorExclusionCensusPreservesInt64Precision(t *testing.T) {
+	fixture := newHeldOutOpFixture(t)
+	content, err := os.ReadFile(fixture.Config.Exclusions.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var exclusions heldOutExclusions
+	if err := json.Unmarshal(content, &exclusions); err != nil {
+		t.Fatal(err)
+	}
+	const legacySeed int64 = 9007199254740993
+	legacy := heldOutOpJson(t, filepath.Join(fixture.Root, "inputs", "large-legacy-seed.json"), map[string]any{"generator_seed": legacySeed})
+	exclusions.Sources = append(exclusions.Sources, legacy)
+	exclusions.EffectiveSeeds = append(exclusions.EffectiveSeeds, legacySeed)
+	if err := validateHeldOutExclusions(exclusions, fixture.Settings.MaximumBytes); err != nil {
+		t.Fatal(err)
+	}
+	exclusions.EffectiveSeeds[len(exclusions.EffectiveSeeds)-1] = legacySeed + 1
+	if err := validateHeldOutExclusions(exclusions, fixture.Settings.MaximumBytes); err == nil {
+		t.Fatal("neighboring rounded legacy seed accepted")
+	}
+}
+
+// encoding/json silently truncates overlong fixed arrays and pads short ones.
+// Committed three-reference orders must reject both rather than normalize them.
+func TestHeldOutOperatorRejectsNonExactCommittedOrderArrayLengths(t *testing.T) {
+	for _, content := range []string{`{"order":["no-op","better","worse","synthetic-extra"]}`, `{"order":["no-op","better"]}`} {
+		var value struct {
+			Order [3]string `json:"order"`
+		}
+		if err := decodeHeldOutComplete([]byte(content), &value, "synthetic committed order"); err == nil || !strings.Contains(err.Error(), "array cardinality") {
+			t.Fatalf("nonexact committed array accepted: %v", err)
+		}
+	}
+}
