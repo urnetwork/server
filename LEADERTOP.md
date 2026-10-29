@@ -13,7 +13,7 @@ The board has to be conservative, because a wrong "yes" costs the miner:
 - **Claiming costs a UID registration.**
 - **A claimed fleet ranked 201 or lower earns nothing from either tier.** Its members leave the pool whether or not the head selects them (`controller/st_controller.go:3611-3617`).
 
-The board is the default leaderboard in every app (ur.io, Android, Apple, Windows, Linux), as a tab named "Protocol" (Q14). The ranking is exposed by an operator API.
+The board is the default leaderboard in every app (ur.io, Android, Apple, Windows, Linux), as a tab named "Protocol" (Q14). This doc covers the ranking, the data and the operator API. The app design is in [apple/LEADERTOP.md](https://github.com/urnetwork/apple/blob/main/LEADERTOP.md).
 
 ## 2. Summary
 
@@ -160,10 +160,12 @@ Each row also carries:
 
 The first value of M is design question 13. While fleet binding is blocked on mainnet, every response says so (§3.6).
 
-**Progress and the claim prompt (owner, 2026-10-29):**
-- The board shows the **top 400** with the 200 line marked, so networks just outside can track their progress into the top 200 (rank history in `/sn/top/me`).
-- A network projected inside the top 200 is directed to **claim on the Earnings page** (ur.io `/app/account/earnings` and the apps' Earnings screens).
-- While binding is closed, the prompt says claiming opens soon, and it says nothing that encourages registering early.
+**What the API serves for the apps (owner, 2026-10-29):**
+- The top 400, so networks just outside the 200 line can track their progress.
+- Each network's daily rank history.
+- A claim-prompt flag for measurable networks projected inside the top 200.
+
+The app presentation (the Protocol tab, the 200 line, the claim prompt on Earnings, progress charts, banners and states) is in [apple/LEADERTOP.md](https://github.com/urnetwork/apple/blob/main/LEADERTOP.md).
 
 ### 5.7 Claimed networks: metadata
 
@@ -325,12 +327,12 @@ The route stays. It is computed from the same snapshot, so the ur.io Top 200 pag
    - the hop table, the snapshot task and the API, behind a flag;
    - a backtest over past tempos;
    - `/sn/head` rebased on the snapshot.
-4. **Apps:** in ur.io, Android, Apple, Windows and Linux the board is a tab named "Protocol", first and the default, followed by "Points" and then "Data" (Q14).
+4. **Apps:** build the Protocol tab in ur.io, Android, Apple, Windows and Linux as [apple/LEADERTOP.md](https://github.com/urnetwork/apple/blob/main/LEADERTOP.md) describes.
 5. **When fleet binding opens on mainnet:** turn on the claimed-fleet metadata and the agreement alerts.
 
 ## 11. Design questions
 
-Each question lists the options with a recommendation, then the decision. The owner answers before any implementation.
+Each question lists the options with a recommendation, then the decision. The owner answers before any implementation. How the apps present the decisions (Q5, Q11, Q12, Q13, Q14, Q16, Q17) is in [apple/LEADERTOP.md](https://github.com/urnetwork/apple/blob/main/LEADERTOP.md).
 
 **Q1. Audience and purpose.**
 **Decision (owner, 2026-10-29):** guide miners who haven't claimed a UID on whether to try for a top-miner UID spot. Show networks that have claimed a UID, with the validator ranking when available, as extra metadata.
