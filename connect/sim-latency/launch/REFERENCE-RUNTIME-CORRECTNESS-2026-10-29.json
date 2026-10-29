@@ -1,0 +1,89 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-three-reference-runtime-correctness-checkpoint",
+  "observed_at": "2026-10-29T17:58:42Z",
+  "scope": "Source-bound race-enabled correctness tests, not measured calibration or final better/no-op native-image qualification",
+  "base_sha": "a9e8e1a710b24c749e6499a0606938252c83e136",
+  "base_image_id": "sha256:98c9061c4a43a25e7b581a5193ca6e7f48e49e7b7fc03b7c1b6190a029befee2",
+  "go_version": "go1.27.3",
+  "roles": [
+    {
+      "role": "worse",
+      "tests_per_process": 112,
+      "independent_processes": 3,
+      "total_top_level_passes": 336,
+      "failures": 0,
+      "skips": 0,
+      "race_test_elf_sha256": "8219a0715fb17245ea9ff5a964d30a92b789d860e8b2e5fe66f0a152adc5b53f",
+      "receipt": {
+        "path": "/mnt/data/h1-mmdb112-qa-20261029.NE2wipxN/TERMINAL-RECEIPT.txt",
+        "sha256": "7f51417121ff4e3bca5651b8b35839f3661d5a9929e0eb1d0c3b4c73c24b75f7"
+      },
+      "current_native_image_id": "sha256:647922002527eec6bcbff7fe1c64792813ce353bf6685a37dc6be1495083f6af",
+      "native_correctness_qualification_sha256": "9d01555fbc04ac887365fd5e786e8a2d6d879d9fbfa15fb7ef566ce2ff62152d"
+    },
+    {
+      "role": "no-op",
+      "tests_per_process": 93,
+      "independent_processes": 3,
+      "total_top_level_passes": 279,
+      "failures": 0,
+      "skips": 0,
+      "race_test_elf_sha256": "f6d2bca84d38bd6b7d0125628a413fb2b6f2bd8042f2b3d5fce254afe8035cb7",
+      "tested_transport_sha256": "5a24cbb81d96fe4c17ff05535a3466d3ab2571a9533a8e92697c4a3f812e34c4",
+      "tested_manager_sha256": "46be72a19f0df89587bd1ec04ab05dde9661d57aaf7edc2838ce4dd00c2ab2dc",
+      "receipt": {
+        "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/correctness-source-pins/no-op-role-terminal.txt",
+        "sha256": "45c1b06297d5a0c45f85608a7772ce1d3a36e97e103067f73f7b4fee1d908a9e"
+      },
+      "raw_pass_sha256": [
+        "439ed21a96129a9947102c296430c4a15a5bc15bbfe677c85920b3d7fcd6fb18",
+        "c1a4cb7b4b9b8b4a922986eca7468261e8a2f72a662ec12176e3c9de670b9946",
+        "4c159f70d1e41e55048fa11d74c1a9aa1ebec4d62c6953fc3fb6cf18010570ef"
+      ],
+      "new_native_image_id": null,
+      "native_image_source_bridge_complete": false
+    },
+    {
+      "role": "better",
+      "tests_per_process": 101,
+      "independent_processes": 3,
+      "total_top_level_passes": 303,
+      "failures": 0,
+      "skips": 0,
+      "race_test_elf_sha256": "62210064423e79c92030e81325785c7bb972bc8fb69a5fa13fed24e6a5541746",
+      "tested_transport_sha256": "5a24cbb81d96fe4c17ff05535a3466d3ab2571a9533a8e92697c4a3f812e34c4",
+      "tested_manager_sha256": "3f4914ff712f9fb99a34fd38fd3eb30d4f3a28c0629e91813adc7d3691a80358",
+      "receipt": {
+        "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/correctness-source-pins/better-role-terminal.txt",
+        "sha256": "bda80bb61edfc51243119db8bca2d92fb0f419d156fc962ee4236b4775812149"
+      },
+      "raw_pass_sha256": [
+        "e03dbb8e637892d16ba40fcc38c6269207979de4812d972f6e7b0fc973cb9186",
+        "555055f532de17060f94f8553ab33c7d60e996fe74df360db6dbf5d86bdd1363",
+        "d8fc78776ab558f4ced343c8d29ab2fcb1bc803547f35397c32e01131c353ca6"
+      ],
+      "new_native_image_id": null,
+      "native_image_source_bridge_complete": false
+    }
+  ],
+  "better_noop_transaction": {
+    "completed_at": "2026-10-29T17:56:23Z",
+    "combined_receipt_sha256": "c9ee9b85f4b1073a7dc6f19f802cf99ec7cba4c5be0d8a5eb3fc023d97c1ce0a",
+    "independent_root_raw_log_and_exact_roster_checks_passed": true,
+    "all_owned_postgresql_and_redis_containers_removed": true,
+    "original_container_and_network_inventories_restored": true,
+    "canonical_lock_released_and_readonly_reacquisition_passed": true,
+    "source_and_dependency_boundaries_unchanged": true,
+    "synthetic_documentation_address_mmdb_fixture_only": true
+  },
+  "all_three_runtime_top_level_passes": 918,
+  "measured_reference_direction_proved": false,
+  "new_calibration_completed": false,
+  "new_hidden_seed_drawn": false,
+  "original_failed_screen_remains_failed": true,
+  "original_second_seed_remains_unstarted": true,
+  "scoring_enabled": false,
+  "production_intake_remains_open": true,
+  "next_action": "Complete the unchanged 225-test operator repeats, rebuild/read back the exact better and no-op native images, publish all prerequisites, and run the prospectively committed calibration."
+}
