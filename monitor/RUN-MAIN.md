@@ -1464,6 +1464,32 @@ Run the narrow test first, then the package and race suite. Apply the pinned
 engine-source preflight above before either full monitor suite here as well;
 retain the exported variable in the actual child environment.
 
+Before launch, inventory the selected tests' complete runtime filesystem
+dependencies as well as Go source and module inputs. Include files opened by
+helpers, documentation assertions, embedded or generated fixture inputs and
+cross-repository relative paths. Resolve each read from the actual package or
+helper working directory in the copied graph. An extension filter, successful
+compile or matching module replacement does not prove that these files were
+copied. Unresolved dynamic reads remain explicit prelaunch prerequisites.
+
+For example, the monitor tests read `monitor/MONITOR.md`; Subnet helpers read
+`sn/crv4/testdata/runtime482-metadata.scale.gz.base64` and
+`sn/deploy/mainnet/policy-v1.yml` from the sibling checkout. These are required
+runtime resources, not a complete dependency census. Preserve the selected
+source revisions, relative topology and full file bodies; do not substitute a
+placeholder or remove assertions to make an incomplete graph pass.
+
+Bind every required resource's source path, resolved target, file type,
+readability and body hash in the gate's expected-input manifest. Verify the
+physical copied files against that manifest before launching the test child,
+including symlink targets and effective working directories. Retain source and
+copied-body custody across materialization, and guard the selected graph before
+and after each admitted gate. Missing or mismatched resources are setup STOPs;
+retain the original failure and prepare a corrected graph with its own evidence.
+A source census or static path check is not physical runtime qualification, and
+a focused repair does not qualify the full normal/race gates. Sol Low owns the
+physical prerequisite checks and test execution.
+
 The native test prerequisites are separate from the PostgreSQL/Redis resource
 attestation. Before launching either full monitor suite, bind
 `MONITOR_PG_TAIL_REAL_PSQL` to an explicitly qualified absolute, executable native
