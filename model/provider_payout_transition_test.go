@@ -112,9 +112,9 @@ func TestProviderTransitionPlannerPartitionAndDelayedSweep(t *testing.T) {
 		before := payoutTestCutoff.Add(-time.Microsecond)
 		at := payoutTestCutoff
 		after := at.Add(time.Microsecond)
-		legacy := f.insert(t, ctx, at.Add(-time.Hour), &before, at.Add(3*time.Hour), 11, UsdToNanoCents(1))
-		f.insert(t, ctx, at.Add(-time.Hour), &at, at.Add(time.Hour), 22, UsdToNanoCents(2))
-		f.insert(t, ctx, at.Add(-time.Hour), &after, at.Add(time.Hour), 33, UsdToNanoCents(3))
+		legacy := f.insertMinted(t, ctx, at.Add(-time.Hour), &before, at.Add(3*time.Hour), 11, UsdToNanoCents(1))
+		f.insertMinted(t, ctx, at.Add(-time.Hour), &at, at.Add(time.Hour), 22, UsdToNanoCents(2))
+		f.insertMinted(t, ctx, at.Add(-time.Hour), &after, at.Add(time.Hour), 33, UsdToNanoCents(3))
 		plan, err := CreatePaymentPlan(ctx, payoutTransitionRevenueConfig(), false, 0)
 		if err != nil {
 			t.Fatal(err)
@@ -159,7 +159,7 @@ func TestProviderTransitionSubsidyOnlyFinalShortTail(t *testing.T) {
 		usePayoutTransition(t)
 		f := newPayoutTransitionCohort(t, ctx)
 		closed := payoutTestCutoff.Add(-time.Microsecond)
-		f.insert(t, ctx, closed.Add(-90*time.Second), &closed, payoutTestCutoff.Add(time.Hour), 1024, 0)
+		f.insertMinted(t, ctx, closed.Add(-90*time.Second), &closed, payoutTestCutoff.Add(time.Hour), 1024, 0)
 		config := payoutTransitionRevenueConfig()
 		config.MinPayoutUsd = 100
 		config.MinWalletPayoutUsd = 1000
@@ -193,8 +193,8 @@ func TestProviderTransitionQuarantinesAmbiguousWithoutBlockingPeer(t *testing.T)
 		usePayoutTransition(t)
 		f := newPayoutTransitionCohort(t, ctx)
 		closed := payoutTestCutoff.Add(-time.Microsecond)
-		f.insert(t, ctx, closed.Add(-time.Hour), &closed, payoutTestCutoff.Add(time.Hour), 11, UsdToNanoCents(1))
-		ambiguous := f.insert(t, ctx, payoutTestCutoff.Add(-time.Hour), nil, payoutTestCutoff.Add(time.Hour), 22, UsdToNanoCents(2))
+		f.insertMinted(t, ctx, closed.Add(-time.Hour), &closed, payoutTestCutoff.Add(time.Hour), 11, UsdToNanoCents(1))
+		ambiguous := f.insertMinted(t, ctx, payoutTestCutoff.Add(-time.Hour), nil, payoutTestCutoff.Add(time.Hour), 22, UsdToNanoCents(2))
 		plan, err := CreatePaymentPlan(ctx, payoutTransitionRevenueConfig(), false, 0)
 		if err != nil {
 			t.Fatal(err)
@@ -221,8 +221,8 @@ func TestProviderTransitionLegacyAdmissionRejectsUnboundAndMixed(t *testing.T) {
 		f := newPayoutTransitionCohort(t, ctx)
 		before := payoutTestCutoff.Add(-time.Microsecond)
 		at := payoutTestCutoff
-		f.insert(t, ctx, at.Add(-time.Hour), &before, at.Add(time.Hour), 11, UsdToNanoCents(1))
-		f.insert(t, ctx, at.Add(-time.Hour), &at, at.Add(time.Hour), 22, UsdToNanoCents(2))
+		f.insertMinted(t, ctx, at.Add(-time.Hour), &before, at.Add(time.Hour), 11, UsdToNanoCents(1))
+		f.insertMinted(t, ctx, at.Add(-time.Hour), &at, at.Add(time.Hour), 22, UsdToNanoCents(2))
 		plan, err := CreatePaymentPlan(ctx, payoutTransitionRevenueConfig(), false, 0)
 		if err != nil {
 			t.Fatal(err)
@@ -282,8 +282,8 @@ func TestProviderTransitionPublicPayoutStatsRetainLegacyAsset(t *testing.T) {
 		before := payoutTestCutoff.Add(-time.Microsecond)
 		at := payoutTestCutoff
 		swept := at.Add(time.Hour)
-		f.insert(t, ctx, at.Add(-time.Hour), &before, swept, 11, UsdToNanoCents(1))
-		f.insert(t, ctx, at.Add(-time.Hour), &at, swept, 22, UsdToNanoCents(2))
+		f.insertMinted(t, ctx, at.Add(-time.Hour), &before, swept, 11, UsdToNanoCents(1))
+		f.insertMinted(t, ctx, at.Add(-time.Hour), &at, swept, 22, UsdToNanoCents(2))
 		server.Db(ctx, func(conn server.PgConn) {
 			rows, err := queryProviderPayoutStats(ctx, conn, f.network, at, at.Add(2*time.Hour))
 			if err != nil {
@@ -306,12 +306,12 @@ func TestProviderTransitionFreeAndPaidUsageHaveEqualSubnetWeight(t *testing.T) {
 		usePayoutTransition(t)
 		free, paid := newPayoutTransitionCohort(t, ctx), newPayoutTransitionCohort(t, ctx)
 		closed := payoutTestCutoff.Add(time.Microsecond)
-		free.insert(t, ctx, payoutTestCutoff.Add(-time.Hour), &closed, closed.Add(time.Hour), 1024, 0)
-		paid.insert(t, ctx, payoutTestCutoff.Add(-time.Hour), &closed, closed.Add(time.Hour), 1024, UsdToNanoCents(9))
+		free.insertMinted(t, ctx, payoutTestCutoff.Add(-time.Hour), &closed, closed.Add(time.Hour), 1024, 0)
+		paid.insertMinted(t, ctx, payoutTestCutoff.Add(-time.Hour), &closed, closed.Add(time.Hour), 1024, UsdToNanoCents(9))
 		// Real nonterminal and canceled snapshots cannot mint usage even if an
 		// escrow row exists. Both share the same actual model read below.
-		free.insert(t, ctx, payoutTestCutoff.Add(-time.Hour), nil, closed.Add(time.Hour), 4096, 0)
-		canceled := paid.insert(t, ctx, payoutTestCutoff.Add(-time.Hour), nil, closed.Add(time.Hour), 8192, 0)
+		free.insertMinted(t, ctx, payoutTestCutoff.Add(-time.Hour), nil, closed.Add(time.Hour), 4096, 0)
+		canceled := paid.insertMinted(t, ctx, payoutTestCutoff.Add(-time.Hour), nil, closed.Add(time.Hour), 8192, 0)
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET outcome='canceled',close_time=$2 WHERE contract_id=$1`, canceled, closed))
 		})

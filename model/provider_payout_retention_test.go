@@ -12,7 +12,7 @@ func payoutTransitionSubsidyPlan(t testing.TB, ctx context.Context) (*payoutTran
 	t.Helper()
 	f := newPayoutTransitionCohort(t, ctx)
 	closed := payoutTestCutoff.Add(-time.Microsecond)
-	f.insert(t, ctx, closed.Add(-90*time.Second), &closed, closed.Add(time.Hour), 1024, 0)
+	f.insertMinted(t, ctx, closed.Add(-90*time.Second), &closed, closed.Add(time.Hour), 1024, 0)
 	config := payoutTransitionRevenueConfig()
 	config.MinPayoutUsd = 100
 	config.MinWalletPayoutUsd = 1000

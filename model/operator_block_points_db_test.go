@@ -51,7 +51,9 @@ func newOperatorBlockPointsPayer(t testing.TB, ctx context.Context) *operatorBlo
 	return payer
 }
 
-// A settled contract of the payer with the provider, and its sweep.
+// A settled contract of the payer with the provider, opened an hour before it
+// closed, and its sweep. Its id is minted when it opened, as connect.NewId
+// mints every contract's id: a payout plan reads unpaid sweeps by contract id.
 func (self *operatorBlockPointsPayer) contract(
 	t testing.TB,
 	ctx context.Context,
@@ -63,7 +65,7 @@ func (self *operatorBlockPointsPayer) contract(
 	revenue NanoCents,
 ) server.Id {
 	t.Helper()
-	contractId := server.NewId()
+	contractId := contractIdMintedAt(closed.Add(-time.Hour))
 	settled := "settled"
 	usage := &contractUsageSnapshot{Version: 1, ByteCount: bytes, Providers: []contractProviderUsage{{ClientId: providerClient, NetworkId: providerNetwork, ByteCount: bytes}}}
 	server.Tx(ctx, func(tx server.PgTx) {

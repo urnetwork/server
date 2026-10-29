@@ -640,8 +640,12 @@ func TestLegacyProviderPaymentCorrectionAnchorRemainderIsNeverPickedUp(t *testin
 			t.Fatal("anchored fixture", len(remainingKeys), len(anchorKeys))
 		}
 
-		// a positive control: an unpaid sweep of the same network a plan must select
-		control := server.NewId()
+		// a positive control: an unpaid sweep of the same network a plan must
+		// select. Its contract opened an hour before it closed, and its id is
+		// minted then, as connect.NewId mints every contract's id: a plan reads
+		// unpaid sweeps by contract id.
+		control, opened := server.NewId(), model.ContractIdTimeBound(identity.closed.Add(-time.Hour))
+		copy(control[0:6], opened[0:6])
 		usage := fmt.Sprintf(`{"version":1,"byte_count":7,"providers":[{"client_id":%q,"network_id":%q,"byte_count":7}]}`, identity.client.String(), identity.network.String())
 		server.Tx(owner.Ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(owner.Ctx, `INSERT INTO transfer_contract(contract_id,source_network_id,source_id,destination_network_id,destination_id,transfer_byte_count,create_time,close_time,outcome,provider_usage,usage_origin_is_source)

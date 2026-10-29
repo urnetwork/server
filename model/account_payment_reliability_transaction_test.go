@@ -103,7 +103,7 @@ func paymentReliabilityTransactionFixture(t testing.TB, ctx context.Context) (*p
 	f := newPayoutTransitionCohort(t, ctx)
 	start := payoutTestCutoff.Add(-4 * time.Hour)
 	end := start.Add(127 * ReliabilityBlockDuration)
-	f.insert(t, ctx, start, &end, payoutTestCutoff.Add(time.Hour), 1024, UsdToNanoCents(1))
+	f.insertMinted(t, ctx, start, &end, payoutTestCutoff.Add(time.Hour), 1024, UsdToNanoCents(1))
 	countryId := server.NewId()
 	clientIds := make([]server.Id, 64)
 	for index := range clientIds {
