@@ -390,16 +390,27 @@ type HttpServerOptions struct {
 	// instead of racing the snap-close of an idle pool (APIDRAIN1.md §2.3).
 	// 0 disables the grace (previous behavior).
 	KeepaliveDrainTimeout time.Duration
+	// Leaves TCP keepalive off on accepted connections, for servers whose
+	// protocol runs its own heartbeat and read deadline.
+	DisableTcpKeepAlive bool
+}
+
+func httpListenConfig(reusePort bool, httpServerOptions HttpServerOptions) net.ListenConfig {
+	listenConfig := net.ListenConfig{}
+	if reusePort {
+		listenConfig.Control = SoReusePort
+	}
+	if httpServerOptions.DisableTcpKeepAlive {
+		listenConfig.KeepAlive = -1
+	}
+	return listenConfig
 }
 
 func HttpListenAndServeWithReusePort(ctx context.Context, addr string, handler http.Handler, reusePort bool, httpServerOptions HttpServerOptions) error {
 	cancelCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	listenConfig := net.ListenConfig{}
-	if reusePort {
-		listenConfig.Control = SoReusePort
-	}
+	listenConfig := httpListenConfig(reusePort, httpServerOptions)
 
 	listener, err := listenConfig.Listen(ctx, "tcp", addr)
 	if err != nil {
@@ -439,10 +450,7 @@ func HttpListenAndServeTlsWithReusePort(ctx context.Context, network string, add
 	cancelCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	listenConfig := net.ListenConfig{}
-	if reusePort {
-		listenConfig.Control = SoReusePort
-	}
+	listenConfig := httpListenConfig(reusePort, httpServerOptions)
 
 	listener, err := listenConfig.Listen(ctx, network, addr)
 	if err != nil {
