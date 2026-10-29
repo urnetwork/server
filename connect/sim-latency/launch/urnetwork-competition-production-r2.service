@@ -1,0 +1,27 @@
+[Unit]
+Description=URnetwork production competition R2 supervisor
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/home/by/urnetwork
+EnvironmentFile=/etc/urnetwork/competition-production-r2-20261029-v1/runtime.env
+Environment=PATH=/home/by/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.27.3.linux-amd64/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/usr/local/libexec/urnetwork/competition-intake-6f43c7085fdb-20261028-v1/sim-latency supervise --enable-automation --owner-id=sille-production-intake-20261028-r2 --state-dir=/var/lib/urnetwork/competition-production-r2-20261029-v1/supervisor --worker-command=/usr/local/libexec/urnetwork/competition-production-r2-20261029-v1/competitionworker-fixed-profile --worker-sha256=93555fee6e29b463e724e4d2ce03caff6607929a73120838faacf5f4be0ec353 --prepare-command=/usr/local/libexec/urnetwork/competition-intake-6f43c7085fdb-20261028-v1/competitionprepare --prepare-sha256=b41f1809d306afbb0312f2302b89e35b81dd6ef8bf3d22db5124a2fefecb4f37 --review-command=/usr/local/libexec/urnetwork/competition-review-snow-qg-fde923bc2199580f-v1 --review-sha256=fde923bc2199580facbf55a205c020bc5dc5d34d046df2be85c8f4ba1f08a72b --reviewer-token-file=/etc/urnetwork/competition-production-r2-20261029-v1/reviewer.token --review-api-url=https://api.bringyour.com --build-command=/usr/local/libexec/urnetwork/competition-control-c5f3e70d7-go1273-v1/source-build --build-sha256=64646e05c297024bb67f59380cc7ba21c873544271e8ba8b1287b2727a1083eb --repos-root=/home/by/urnetwork --source-config=/mnt/data/urnetwork-competition-temp/intake-config-publication-20261028.Y8NTbKuP/config-publish/main/sim-latency.yml
+Restart=on-failure
+RestartSec=15s
+TimeoutStopSec=45s
+KillMode=control-group
+MemoryMax=8G
+MemorySwapMax=0
+AllowedCPUs=20,22
+TasksMax=512
+
+[Install]
+WantedBy=multi-user.target
+
