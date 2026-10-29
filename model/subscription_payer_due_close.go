@@ -31,6 +31,8 @@ package model
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"slices"
@@ -175,6 +177,34 @@ func SummarizePayerDueContracts(ctx context.Context, payerNetworkId server.Id, d
 		}, server.OptNoRetry())
 	}, func(err error) { summary, returnErr = nil, err })
 	return
+}
+
+// Names the set of contracts ReadPayerDueContracts would return without a
+// limit: the payer, the bound and every contract id. bringyourctl contracts
+// close-due commits only the set its dry run reported. Contracts due by
+// dueBefore can only leave the set, so a digest that no longer matches means
+// another closer retired some meanwhile.
+func DigestPayerDueContracts(ctx context.Context, payerNetworkId server.Id, dueBefore time.Time) (count int, digest string, returnErr error) {
+	var idsDigest *string
+	server.HandleError(func() {
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT count(*), md5(string_agg(contract_id::text, ',' ORDER BY contract_id))
+				FROM transfer_contract
+				WHERE payer_network_id=$1 AND (CASE WHEN outcome IS NULL THEN dispute = false ELSE false END)
+					AND (expiration_time<=$2 OR (expiration_time IS NULL AND create_time<=$3))`,
+				payerNetworkId, dueBefore.UTC(), dueBefore.UTC().Add(-DefaultContractExpiration)).Scan(&count, &idsDigest))
+		}, server.OptNoRetry())
+	}, func(err error) { count, returnErr = 0, err })
+	if returnErr != nil {
+		return 0, "", returnErr
+	}
+	ids := ""
+	if idsDigest != nil {
+		ids = *idsDigest
+	}
+	sum := sha256.Sum256([]byte(fmt.Sprintf("payer-due-contracts-v1|%s|%s|%d|%s",
+		payerNetworkId, dueBefore.UTC().Format(time.RFC3339Nano), count, ids)))
+	return count, hex.EncodeToString(sum[:8]), nil
 }
 
 // Retires the payer's contracts that were due DueMargin before now, from one
