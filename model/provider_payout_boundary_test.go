@@ -19,8 +19,8 @@ func TestProviderBoundaryDriftCannotReassignPlannedOrUnplannedUsage(t *testing.T
 		original := server.Config.RequireSimpleResource("sn.yml").Bytes()
 		f := newPayoutTransitionCohort(t, ctx)
 		before, after := payoutTestCutoff.Add(-time.Microsecond), payoutTestCutoff.Add(time.Microsecond)
-		f.insert(t, ctx, before.Add(-time.Hour), &before, after.Add(time.Hour), 11, UsdToNanoCents(1))
-		future := f.insert(t, ctx, before.Add(-time.Hour), &after, after.Add(time.Hour), 22, UsdToNanoCents(2))
+		f.insertMinted(t, ctx, before.Add(-time.Hour), &before, after.Add(time.Hour), 11, UsdToNanoCents(1))
+		future := f.insertMinted(t, ctx, before.Add(-time.Hour), &after, after.Add(time.Hour), 22, UsdToNanoCents(2))
 		plan, err := CreatePaymentPlan(ctx, payoutTransitionRevenueConfig(), false, 0)
 		if err != nil || plan == nil {
 			t.Fatal(err)
@@ -74,7 +74,7 @@ func TestProviderBoundaryUnpreparedPlannerRetainsSource(t *testing.T) {
 		t.Cleanup(server.Config.PushSimpleResource("sn.yml", []byte(data)))
 		f := newPayoutTransitionCohort(t, ctx)
 		closed := payoutTestCutoff.Add(-time.Microsecond)
-		contract := f.insert(t, ctx, closed.Add(-time.Hour), &closed, closed.Add(time.Hour), 11, UsdToNanoCents(1))
+		contract := f.insertMinted(t, ctx, closed.Add(-time.Hour), &closed, closed.Add(time.Hour), 11, UsdToNanoCents(1))
 		if _, err := CreatePaymentPlan(ctx, payoutTransitionRevenueConfig(), false, 0); !errors.Is(err, server.ErrProviderEarningBoundaryUnprepared) {
 			t.Fatal("public planner enrolled missing authority", err)
 		}

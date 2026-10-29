@@ -12,7 +12,7 @@ func payoutTransitionBonusPlan(t testing.TB, ctx context.Context) (*payoutTransi
 	t.Helper()
 	f := newPayoutTransitionCohort(t, ctx)
 	closed := payoutTestCutoff.Add(-time.Microsecond)
-	f.insert(t, ctx, closed.Add(-time.Hour), &closed, closed.Add(time.Hour), 100, UsdToNanoCents(1))
+	f.insertMinted(t, ctx, closed.Add(-time.Hour), &closed, closed.Add(time.Hour), 100, UsdToNanoCents(1))
 	plan, err := CreatePaymentPlan(ctx, payoutTransitionRevenueConfig(), false, 0)
 	if err != nil || plan == nil || plan.NetworkPayments[f.network] == nil {
 		t.Fatalf("bonus base plan missing: %v", err)
@@ -118,7 +118,7 @@ func TestProviderTransitionBonusPlanIsAtomicAndWindowBound(t *testing.T) {
 		first, second := newPayoutTransitionCohort(t, ctx), newPayoutTransitionCohort(t, ctx)
 		closed := payoutTestCutoff.Add(-time.Microsecond)
 		for _, f := range []*payoutTransitionCohort{first, second} {
-			f.insert(t, ctx, closed.Add(-time.Hour), &closed, closed.Add(time.Hour), 100, UsdToNanoCents(1))
+			f.insertMinted(t, ctx, closed.Add(-time.Hour), &closed, closed.Add(time.Hour), 100, UsdToNanoCents(1))
 		}
 		plan, err := CreatePaymentPlan(ctx, payoutTransitionRevenueConfig(), false, 0)
 		if err != nil {
@@ -137,7 +137,7 @@ func TestProviderTransitionBonusPlanIsAtomicAndWindowBound(t *testing.T) {
 		// A new payout row cannot turn an at-cutoff contract into bonus authority.
 		f := newPayoutTransitionCohort(t, ctx)
 		at := payoutTestCutoff
-		contract := f.insert(t, ctx, at.Add(-time.Hour), &at, at.Add(time.Hour), 100, UsdToNanoCents(1))
+		contract := f.insertMinted(t, ctx, at.Add(-time.Hour), &at, at.Add(time.Hour), 100, UsdToNanoCents(1))
 		paymentId, planId := server.NewId(), server.NewId()
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO account_payment(payment_id,payment_plan_id,network_id,payout_byte_count,payout_nano_cents,min_sweep_time) VALUES($1,$2,$3,100,$4,$5)`, paymentId, planId, f.network, UsdToNanoCents(1), at))

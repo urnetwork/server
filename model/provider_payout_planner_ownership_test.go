@@ -125,8 +125,8 @@ func TestProviderPaymentConcurrentPlannersRetainOneOriginalAllocation(t *testing
 		usePayoutTransition(t)
 		f := newPayoutTransitionCohort(t, ctx)
 		closed := payoutTestCutoff.Add(-time.Microsecond)
-		legacy := f.insert(t, ctx, closed.Add(-90*time.Second), &closed, payoutTestCutoff.Add(time.Hour), 17, UsdToNanoCents(1))
-		current := f.insert(t, ctx, closed, &payoutTestCutoff, payoutTestCutoff.Add(time.Hour), 23, UsdToNanoCents(2))
+		legacy := f.insertMinted(t, ctx, closed.Add(-90*time.Second), &closed, payoutTestCutoff.Add(time.Hour), 17, UsdToNanoCents(1))
+		current := f.insertMinted(t, ctx, closed, &payoutTestCutoff, payoutTestCutoff.Add(time.Hour), 23, UsdToNanoCents(2))
 		config := payoutTransitionRevenueConfig()
 		config.MinPayoutUsd = 100
 		barrier := installPaymentPlanOwnershipInsertBarrier(t, ctx, f.network)
@@ -200,7 +200,7 @@ func TestProviderPaymentPlannerCanceledWaitersReleaseEveryMode(t *testing.T) {
 		usePayoutTransition(t)
 		f := newPayoutTransitionCohort(t, ctx)
 		closed := payoutTestCutoff.Add(-time.Microsecond)
-		legacy := f.insert(t, ctx, closed, &closed, payoutTestCutoff.Add(time.Hour), 17, UsdToNanoCents(1))
+		legacy := f.insertMinted(t, ctx, closed, &closed, payoutTestCutoff.Add(time.Hour), 17, UsdToNanoCents(1))
 		config := payoutTransitionRevenueConfig()
 		for _, mode := range []struct {
 			dryRun   bool
@@ -258,7 +258,7 @@ func TestProviderPaymentPlannerOwnerCancellationRestartsOriginalWork(t *testing.
 		usePayoutTransition(t)
 		f := newPayoutTransitionCohort(t, ctx)
 		closed := payoutTestCutoff.Add(-time.Microsecond)
-		legacy := f.insert(t, ctx, closed.Add(-90*time.Second), &closed, payoutTestCutoff.Add(time.Hour), 17, UsdToNanoCents(1))
+		legacy := f.insertMinted(t, ctx, closed.Add(-90*time.Second), &closed, payoutTestCutoff.Add(time.Hour), 17, UsdToNanoCents(1))
 		config := payoutTransitionRevenueConfig()
 		config.MinPayoutUsd = 100
 		barrier := installPaymentPlanOwnershipInsertBarrier(t, ctx, f.network)
@@ -311,7 +311,7 @@ func TestProviderPaymentPlannerFinalizationRefusesChangedOriginalOwner(t *testin
 		usePayoutTransition(t)
 		f := newPayoutTransitionCohort(t, ctx)
 		closed := payoutTestCutoff.Add(-time.Microsecond)
-		legacy := f.insert(t, ctx, closed, &closed, payoutTestCutoff.Add(time.Hour), 17, UsdToNanoCents(1))
+		legacy := f.insertMinted(t, ctx, closed, &closed, payoutTestCutoff.Add(time.Hour), 17, UsdToNanoCents(1))
 		config := payoutTransitionRevenueConfig()
 		config.ForcePoints = true
 		original, err := CreatePaymentPlan(ctx, config, false, 0)
