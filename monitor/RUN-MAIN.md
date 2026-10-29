@@ -287,11 +287,32 @@ watcher binary. Read the latest record's source clocks, nullable age partitions
 and gaps before reporting a mature percentage; an old numeric row is not a
 current observation. Source promotion is still subject to the gates below.
 
+Before either full `./monitor` normal or race invocation, Sol Low must preflight
+and export `MONITOR_PROMQL_ENGINE_SOURCE` as the absolute path to the gate's
+pinned Mimir source, including its vendored Prometheus engine. Verify that
+source and vendor membership against the retained gate input hashes, and retain
+the exact source binding in the launch environment. Also verify the selected
+Server snapshot includes `monitor/testdata/connect_move_promql_engine_test.go.txt`.
+A directory check alone does not qualify an arbitrary checkout. Missing,
+mismatched, or unavailable source is a prerequisite STOP before launching the
+full Go invocation; do not download or substitute an engine during the gate.
+
+`TestConnectMovePromqlEngine` skips when this environment variable is absent.
+That skip invalidates a full monitor gate even when Go exits zero. Require its
+actual RUN/PASS and the selected engine inputs to remain unchanged; preserve an
+invalid attempt separately before preparing a corrected gate. This is a local
+synthetic engine prerequisite, not proof of the deployed Mimir version.
+
 ```sh
 test -n "$BRINGYOUR_HOME"
 test -n "$WARP_HOME"
 test -d "$WARP_HOME/config"
 test -d "$WARP_HOME/vault"
+test -n "${MONITOR_PROMQL_ENGINE_SOURCE:-}" || exit 1
+test -f "$MONITOR_PROMQL_ENGINE_SOURCE/go.mod" || exit 1
+test -f "$MONITOR_PROMQL_ENGINE_SOURCE/vendor/modules.txt" || exit 1
+test -f monitor/testdata/connect_move_promql_engine_test.go.txt || exit 1
+export MONITOR_PROMQL_ENGINE_SOURCE
 install -d -m 700 "$BRINGYOUR_HOME/monitor"
 umask 077
 bash -c \
@@ -1439,7 +1460,9 @@ triage manifest before Sol Medium begins the repair. Cover, as applicable:
 - Markdown detail, stable identity, and redaction; and
 - a negative assertion that rejects the prior false diagnosis or stale action.
 
-Run the narrow test first, then the package and race suite:
+Run the narrow test first, then the package and race suite. Apply the pinned
+engine-source preflight above before either full monitor suite here as well;
+retain the exported variable in the actual child environment:
 
 ```sh
 bash -c \
