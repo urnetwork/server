@@ -1,0 +1,82 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-held-out-reference-correctness",
+  "role": "better",
+  "accepted": true,
+  "base_sha": "a9e8e1a710b24c749e6499a0606938252c83e136",
+  "source_lock_sha256": "ec322ed2db023e15ea5dc3eea60a6ca5989661bba737c340fea3477d8d1300cf",
+  "base_image_id": "sha256:98c9061c4a43a25e7b581a5193ca6e7f48e49e7b7fc03b7c1b6190a029befee2",
+  "patch_sha256": "46bc95e3f2719f26f939be7a86c274d0b98bb2b1027f1ef4537d61de4c4ec924",
+  "candidate_sha": "b93af9ec70923cf56a6f4ac6f5358eaf89044c6a",
+  "image_id": "sha256:b86130ebe1a3cd58f4ad386335fa8126c9bc9f42e153d9040c2db09ed2502f6d",
+  "binary_sha256": "3c9967f81fbd3c617e92655ba2e4be7ec4289ebc29db3b9aa3a8234723231588",
+  "go_version": "go1.27.3",
+  "vcs_modified": false,
+  "direction": "",
+  "evidence": [
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/correctness-source-pins/better-role-terminal.txt",
+      "sha256": "bda80bb61edfc51243119db8bca2d92fb0f419d156fc962ee4236b4775812149"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/better-SOURCE-AND-EXECUTION-BINDING.json",
+      "sha256": "5a78692c748745de1b8aa97b288e44af4ca7aad2ec648ba1ee0e0a88611f5fc6"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/better/native-proof.json",
+      "sha256": "4c28a61c4c0c7aff68c83fdfe54f89ab8a464714a577c575291f341b869716cc"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/better/native-build.json",
+      "sha256": "5ad6b312f1be062b151d0e8fb9a1453b344ab224058751bf616ce2b87c4447aa"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/better/native-evidence.sha256",
+      "sha256": "171e21be919dad30cf7a59fd70507b7574c2e29a1998e390ab1fc6a54148a168"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/readbacks-identity-file-v3/better/source-byte-roots.sha256",
+      "sha256": "88a33906238a0c7266ea04da1daaa0b52f05918a7cec8f70a4b52228c01aa483"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/readbacks-identity-file-v3/better/image-source-byte-roots.sha256",
+      "sha256": "88a33906238a0c7266ea04da1daaa0b52f05918a7cec8f70a4b52228c01aa483"
+    },
+    {
+      "path": "/mnt/data/reference-role-runtime-qa-20261029.Z1jiStbo/better/pass1.json",
+      "sha256": "e03dbb8e637892d16ba40fcc38c6269207979de4812d972f6e7b0fc973cb9186"
+    },
+    {
+      "path": "/mnt/data/reference-role-runtime-qa-20261029.Z1jiStbo/better/pass2.json",
+      "sha256": "555055f532de17060f94f8553ab33c7d60e996fe74df360db6dbf5d86bdd1363"
+    },
+    {
+      "path": "/mnt/data/reference-role-runtime-qa-20261029.Z1jiStbo/better/pass3.json",
+      "sha256": "d8fc78776ab558f4ced343c8d29ab2fcb1bc803547f35397c32e01131c353ca6"
+    },
+    {
+      "path": "/home/by/urnetwork/temp/reference-role-correctness-prep-20261029.8XmThwi0/ARTIFACT-PINS.sha256",
+      "sha256": "4055159e59b7e9a2439ae37772cf0ae022599e8046644d2e7c773666ccf9ec2b"
+    },
+    {
+      "path": "/home/by/urnetwork/temp/reference-role-correctness-prep-20261029.8XmThwi0/ROLE-SOURCE-BINDINGS.json",
+      "sha256": "1885a8c770390d4140e808ada5cd7e1942b11aba6aa07e9f15ec8ee51beaa2f4"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/correctness-source-pins/role-compile-terminal.txt",
+      "sha256": "0a06ff9dd7e1440972f5f014004bb858a735c8a65feef36ddfb639898ed19b2a"
+    },
+    {
+      "path": "/mnt/data/reference-role-compile-qa-20261029.vJVQoFwW/better.overlay.json",
+      "sha256": "5788e7bf246cd76422f3325054ffc1117779bfb8349f6a0fc535dcb2f1deeb27"
+    },
+    {
+      "path": "/mnt/data/reference-role-compile-qa-20261029.vJVQoFwW/better-used-inputs.sha256",
+      "sha256": "99d49c0ea286ec7f09d86d58e8b35355cfa08943a2f74752d135e6b612d94b3e"
+    },
+    {
+      "path": "/home/by/urnetwork/temp/reference-role-correctness-prep-20261029.8XmThwi0/BETTER-101.names",
+      "sha256": "a360d6f5282246acf4e8bdb226bb1316c72d1be37a5795a58703974ca68466a4"
+    }
+  ]
+}
