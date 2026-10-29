@@ -59,7 +59,8 @@ func TestSecurityApiKeyNoticeSaysWhatChanged(t *testing.T) {
 			"When: October 29, 2026, 14:03:07 UTC",
 			"API key: “deploy-bot”",
 			securityNoticeContactLine,
-			"To list or delete your API keys: " + securityNoticeApiKeysUrl,
+			// the ur.io app's API keys screen (owner decision 2026-10-29)
+			"To see or delete your API keys: https://ur.io/app/account/api-keys\n",
 			"To sign out every other device: " + securityNoticeOtherSessionsUrl,
 		} {
 			if !strings.Contains(bodyText, want) {
@@ -71,12 +72,16 @@ func TestSecurityApiKeyNoticeSaysWhatChanged(t *testing.T) {
 			"right away.</p>",
 			"October 29, 2026, 14:03:07 UTC",
 			"“deploy-bot”",
-			`href="` + securityNoticeApiKeysUrl + `"`,
+			`To see or delete your API keys, open <a class="ur-link" href="https://ur.io/app/account/api-keys"`,
 			`href="` + securityNoticeOtherSessionsUrl + `"`,
 		} {
 			if !strings.Contains(bodyHtml, want) {
 				t.Errorf("%v: html part missing %q", c.actions, want)
 			}
+		}
+		// the API reference is no longer linked
+		if strings.Contains(bodyText, "ur.io/docs") || strings.Contains(bodyHtml, "ur.io/docs") {
+			t.Errorf("%v: the notice still links the API reference", c.actions)
 		}
 
 		created, deleted := 0, 0
