@@ -11,8 +11,10 @@ package model
 // country verdicts included, so the status says what the export did whatever
 // this host's provider.yml says. Ranking numbers are shown with what they
 // mean; the anti-abuse signals (ARIN risk and non-quality, the URL security
-// quarantine, the legacy dark verdict) are one generic reason, and their
-// values never leave this file.
+// quarantine, the legacy dark verdict) are one generic reason and one generic
+// code, and their values never leave this file. One table
+// (providerStatusOutcomes) turns every internal cause into the reason and code
+// a provider sees.
 
 import (
 	"context"
@@ -98,6 +100,149 @@ var providerStatusReasonTexts = map[string]string{
 		ProviderQualityMinMeasuredUrlRuns,
 		int(ProviderQualityMinMeasuredUrlSpan/time.Minute),
 	),
+}
+
+// The stable, machine-readable form of a reason (ProviderStatus.ReasonCode):
+// what the provider's operator can act on. A code is coarser than the reason
+// it codes and outlives it: a reason added later codes as one of these. Every
+// anti-abuse signal is withheld, one code whichever signal it is.
+const (
+	// nothing holds the provider back
+	ProviderStatusCodeNone = "none"
+	// providing is off on the device: turn it on
+	ProviderStatusCodeNotProviding = "not_providing"
+	// the device isn't connected: connect it
+	ProviderStatusCodeNotConnected = "not_connected"
+	// more than one address, or no known location: provide from one
+	// address
+	ProviderStatusCodeLocationInvalid = "location_invalid"
+	// the device provides only to its own network: choose Always
+	ProviderStatusCodeNetworkOnly = "network_only"
+	// a measurement is still accruing (reliability history, network checks,
+	// a speed test): wait
+	ProviderStatusCodeWarmingUp = "warming_up"
+	// reliability is below the floor: keep the device connected
+	ProviderStatusCodeReliabilityLow = "reliability_low"
+	// test sites fail to load through the connection: check its internet
+	// connection and any firewall, VPN or DNS filter
+	ProviderStatusCodeEgressFailing = "egress_failing"
+	// the network check hasn't confirmed the modern provider build: update
+	// the app
+	ProviderStatusCodeNotModern = "not_modern"
+	// slower than clients need
+	ProviderStatusCodeSlow = "slow"
+	// an anti-abuse check holds the provider back; never which
+	ProviderStatusCodeWithheld = "withheld"
+)
+
+// The codes, in the order of the first reason in ProviderStatusReasons each
+// codes.
+var ProviderStatusCodes = []string{
+	ProviderStatusCodeNotProviding,
+	ProviderStatusCodeNotConnected,
+	ProviderStatusCodeLocationInvalid,
+	ProviderStatusCodeNetworkOnly,
+	ProviderStatusCodeWarmingUp,
+	ProviderStatusCodeReliabilityLow,
+	ProviderStatusCodeWithheld,
+	ProviderStatusCodeEgressFailing,
+	ProviderStatusCodeNotModern,
+	ProviderStatusCodeSlow,
+	ProviderStatusCodeNone,
+}
+
+// Why the status holds a provider back, as evaluateProviderStatus finds it:
+// these, the status's own rules, or a reason of the selection's exclusion
+// (ProviderExcludedReasons), which names the anti-abuse signals. A cause
+// never leaves this file; providerStatusOutcomes tells it as a reason and a
+// code.
+const (
+	providerStatusCauseNotProviding         = "not_providing"
+	providerStatusCauseNotConnected         = "not_connected"
+	providerStatusCauseLocationInvalid      = "location_invalid"
+	providerStatusCauseNetworkOnly          = "network_only"
+	providerStatusCauseReliabilityWarmingUp = "reliability_warming_up"
+	// the selection's unprobed for a provider whose checks pass on too few
+	// runs for a native bucket yet
+	providerStatusCauseEgressWarmingUp = "egress_warming_up"
+	// in its buckets, but drawn after the modern providers of each band
+	// (modern-first priority)
+	providerStatusCauseModernPriority   = "modern_priority"
+	providerStatusCauseSpeedTestMissing = "speed_test_missing"
+	providerStatusCauseSlow             = "slow"
+	providerStatusCauseNone             = "none"
+)
+
+// The status's own causes. The others are ProviderExcludedReasons.
+var providerStatusRuleCauses = []string{
+	providerStatusCauseNotProviding,
+	providerStatusCauseNotConnected,
+	providerStatusCauseLocationInvalid,
+	providerStatusCauseNetworkOnly,
+	providerStatusCauseReliabilityWarmingUp,
+	providerStatusCauseEgressWarmingUp,
+	providerStatusCauseModernPriority,
+	providerStatusCauseSpeedTestMissing,
+	providerStatusCauseSlow,
+	providerStatusCauseNone,
+}
+
+// What a provider is told of a cause.
+type providerStatusOutcome struct {
+	reason string
+	code   string
+}
+
+// What a provider is told of every anti-abuse signal, whichever it is.
+var providerStatusWithheld = providerStatusOutcome{
+	reason: ProviderStatusReasonNotEligible,
+	code:   ProviderStatusCodeWithheld,
+}
+
+// The one table from every internal cause to what a provider is told: the
+// status's own rules, and every reason of the selection's exclusion
+// (ProviderExcludedReasons). A cause reaches a provider only as its entry
+// says, and a cause without an entry, as a new exclusion reason would be
+// until it is entered here, is told as withheld (providerStatusOutcomeOf).
+// TestProviderStatusOutcomesCoverEveryCause holds the table to both lists.
+var providerStatusOutcomes = map[string]providerStatusOutcome{
+	providerStatusCauseNotProviding:         {ProviderStatusReasonNotProviding, ProviderStatusCodeNotProviding},
+	providerStatusCauseNotConnected:         {ProviderStatusReasonNotConnected, ProviderStatusCodeNotConnected},
+	providerStatusCauseLocationInvalid:      {ProviderStatusReasonLocationInvalid, ProviderStatusCodeLocationInvalid},
+	providerStatusCauseNetworkOnly:          {ProviderStatusReasonNetworkOnly, ProviderStatusCodeNetworkOnly},
+	providerStatusCauseReliabilityWarmingUp: {ProviderStatusReasonReliabilityWarmingUp, ProviderStatusCodeWarmingUp},
+	providerStatusCauseEgressWarmingUp:      {ProviderStatusReasonEgressWarmingUp, ProviderStatusCodeWarmingUp},
+	providerStatusCauseModernPriority:       {ProviderStatusReasonNotModern, ProviderStatusCodeNotModern},
+	providerStatusCauseSpeedTestMissing:     {ProviderStatusReasonSpeedTestMissing, ProviderStatusCodeWarmingUp},
+	providerStatusCauseSlow:                 {ProviderStatusReasonSlow, ProviderStatusCodeSlow},
+	providerStatusCauseNone:                 {ProviderStatusReasonNone, ProviderStatusCodeNone},
+
+	// the selection's exclusion reasons. Its reliability exclusion is the
+	// reliability below the floor; warming up is the status's own rule.
+	ProviderExcludedReliability: {ProviderStatusReasonReliabilityLow, ProviderStatusCodeReliabilityLow},
+	ProviderExcludedNoSuccess:   {ProviderStatusReasonEgressNoSuccess, ProviderStatusCodeEgressFailing},
+	ProviderExcludedLowSuccess:  {ProviderStatusReasonEgressLowSuccess, ProviderStatusCodeEgressFailing},
+	ProviderExcludedUnprobed:    {ProviderStatusReasonEgressUnprobed, ProviderStatusCodeWarmingUp},
+	ProviderExcludedHealth:      {ProviderStatusReasonEgressFailing, ProviderStatusCodeEgressFailing},
+	ProviderExcludedNotModern:   {ProviderStatusReasonNotModern, ProviderStatusCodeNotModern},
+	// the anti-abuse signals: ARIN risk, the URL security quarantine and
+	// ARIN non-quality
+	ProviderExcludedArinRisk:       providerStatusWithheld,
+	ProviderExcludedTls:            providerStatusWithheld,
+	ProviderExcludedArinNonQuality: providerStatusWithheld,
+	// the legacy dark verdict and country labels, which the selection no
+	// longer reports
+	ProviderExcludedBlackhole: providerStatusWithheld,
+	ProviderExcludedCountry:   providerStatusWithheld,
+}
+
+// What a provider is told of cause. A cause the table does not enter is told
+// as withheld, never by its own name.
+func providerStatusOutcomeOf(cause string) providerStatusOutcome {
+	if outcome, ok := providerStatusOutcomes[cause]; ok {
+		return outcome
+	}
+	return providerStatusWithheld
 }
 
 // The names of the ranking numbers, in the order a status lists them. A
@@ -195,8 +340,9 @@ type ProviderStatusCountry struct {
 type ProviderStatus struct {
 	ClientId server.Id `json:"client_id"`
 	// the first reason in ProviderStatusReasons that holds the provider back,
-	// "none" for none, and its English text
+	// "none" for none, its code (ProviderStatusCodes) and its English text
 	Reason     string                   `json:"reason"`
+	ReasonCode string                   `json:"reason_code"`
 	ReasonText string                   `json:"reason_text"`
 	Admission  *ProviderAdmission       `json:"admission"`
 	Ranking    []*ProviderRankingNumber `json:"ranking"`
@@ -228,10 +374,12 @@ type ProviderStatusCountryCompact struct {
 }
 
 // A ProviderStatus without its English texts, the compact form of the status
-// answer: the reason, the gates, the numbers, the country and the appearances.
+// answer: the reason and its code, the gates, the numbers, the country and the
+// appearances.
 type ProviderStatusCompact struct {
 	ClientId     server.Id                       `json:"client_id"`
 	Reason       string                          `json:"reason"`
+	ReasonCode   string                          `json:"reason_code"`
 	Admission    *ProviderAdmission              `json:"admission"`
 	Ranking      []*ProviderRankingNumberCompact `json:"ranking"`
 	Country      *ProviderStatusCountryCompact   `json:"country,omitempty"`
@@ -245,6 +393,7 @@ func NewProviderStatusCompact(status *ProviderStatus) *ProviderStatusCompact {
 	compact := &ProviderStatusCompact{
 		ClientId:     status.ClientId,
 		Reason:       status.Reason,
+		ReasonCode:   status.ReasonCode,
 		Admission:    status.Admission,
 		Ranking:      make([]*ProviderRankingNumberCompact, 0, len(status.Ranking)),
 		EvaluateTime: status.EvaluateTime,
@@ -289,11 +438,18 @@ func NewProviderStatusCompact(status *ProviderStatus) *ProviderStatusCompact {
 // The most provider clients one status answer decides.
 const ProviderStatusMaxClients = 32
 
+// The most provider clients a status answer counts (TotalClients): a network
+// with more counts this many. It bounds the count's index reads.
+const ProviderStatusMaxCountedClients = 10000
+
 // The statuses of a network's provider clients.
 type ProviderStatusesResult struct {
 	Providers []*ProviderStatus `json:"providers"`
 	// the network has more provider clients than one answer decides
 	Truncated bool `json:"truncated"`
+	// how many provider clients the network has, the ones Providers draws
+	// from, counted up to ProviderStatusMaxCountedClients
+	TotalClients int `json:"total_clients"`
 }
 
 // The common SQL of providerCountFilterCommonSql scoped to the client ids in
@@ -544,7 +700,11 @@ func loadProviderStatusFacts(ctx context.Context, networkId server.Id, clientIds
 
 // One provider as FindProviders2's rules see it.
 type providerStatusEvaluation struct {
+	// why the provider is held back, never sent: the reason and code are
+	// what providerStatusOutcomes tells of it
+	cause       string
 	reason      string
+	code        string
 	egressFacts *providerEgressFacts
 	decision    providerEgressDecision
 	// the common gates UpdateClientScores drops a provider for
@@ -618,53 +778,53 @@ func evaluateProviderStatus(
 
 	switch {
 	case !facts.providePublic && !facts.provideNetwork:
-		evaluation.reason = ProviderStatusReasonNotProviding
+		evaluation.cause = providerStatusCauseNotProviding
 	case !facts.hasRollup || !facts.connected:
-		evaluation.reason = ProviderStatusReasonNotConnected
+		evaluation.cause = providerStatusCauseNotConnected
 	case !facts.valid:
-		evaluation.reason = ProviderStatusReasonLocationInvalid
+		evaluation.cause = providerStatusCauseLocationInvalid
 	case !facts.providePublic:
-		evaluation.reason = ProviderStatusReasonNetworkOnly
+		evaluation.cause = providerStatusCauseNetworkOnly
 	case decision.reason == ProviderExcludedReliability || !evaluation.passesReliability:
 		shortWeight, observed := weights[providerStatusShortLookbackIndex]
 		if !facts.hasReliabilityHistory || !observed || minIndependentReliabilityWeights[providerStatusShortLookbackIndex] <= shortWeight {
-			evaluation.reason = ProviderStatusReasonReliabilityWarmingUp
+			evaluation.cause = providerStatusCauseReliabilityWarmingUp
 		} else {
-			evaluation.reason = ProviderStatusReasonReliabilityLow
+			evaluation.cause = ProviderExcludedReliability
 		}
 	case decision.hardExcluded || evaluation.hardExcluded:
-		// ARIN risk or the URL security quarantine
-		evaluation.reason = ProviderStatusReasonNotEligible
-	case decision.reason == ProviderExcludedNoSuccess:
-		evaluation.reason = ProviderStatusReasonEgressNoSuccess
-	case decision.reason == ProviderExcludedLowSuccess:
-		evaluation.reason = ProviderStatusReasonEgressLowSuccess
+		// ARIN risk or the URL security quarantine, which the decision's
+		// reason names. The filter's hard failure without the decision's has
+		// no name, and is told as withheld too.
+		evaluation.cause = ""
+		if decision.hardExcluded {
+			evaluation.cause = decision.reason
+		}
 	case decision.reason == ProviderExcludedUnprobed && providerStatusEgressWarmingUp(egressFacts):
 		// the census's unprobed, told apart for the provider: its checks
 		// pass, on too few runs for a native bucket yet
-		evaluation.reason = ProviderStatusReasonEgressWarmingUp
-	case decision.reason == ProviderExcludedUnprobed:
-		evaluation.reason = ProviderStatusReasonEgressUnprobed
-	case decision.reason == ProviderExcludedHealth:
-		evaluation.reason = ProviderStatusReasonEgressFailing
-	case decision.reason == ProviderExcludedNotModern:
-		evaluation.reason = ProviderStatusReasonNotModern
-	case decision.reason == ProviderExcludedArinNonQuality:
-		evaluation.reason = ProviderStatusReasonNotEligible
+		evaluation.cause = providerStatusCauseEgressWarmingUp
+	case decision.reason != "":
+		// no success, low success, unprobed, health, not modern, and ARIN
+		// non-quality, which the table tells as withheld
+		evaluation.cause = decision.reason
 	case egressSettings.RankModernFirst && !egressFacts.modernGate && (decision.quality || decision.speed) && !decision.modern:
 		// in its buckets, but modern-first priority draws it after the
 		// modern providers of each band (FP2-MODERN.md). After the ARIN
 		// non-quality reason, so the anti-abuse signals stay one generic
 		// reason whatever the provider's modern status.
-		evaluation.reason = ProviderStatusReasonNotModern
+		evaluation.cause = providerStatusCauseModernPriority
 	case !facts.hasSpeedTest || !facts.hasLatencyTest:
-		evaluation.reason = ProviderStatusReasonSpeedTestMissing
+		evaluation.cause = providerStatusCauseSpeedTestMissing
 	case clientScore.Tiers[RankModeQuality] == ClientScoreCutoffTier:
 		// past the quality latency or throughput cutoff
-		evaluation.reason = ProviderStatusReasonSlow
+		evaluation.cause = providerStatusCauseSlow
 	default:
-		evaluation.reason = ProviderStatusReasonNone
+		evaluation.cause = providerStatusCauseNone
 	}
+	outcome := providerStatusOutcomeOf(evaluation.cause)
+	evaluation.reason = outcome.reason
+	evaluation.code = outcome.code
 	return evaluation
 }
 
@@ -722,6 +882,7 @@ func newProviderStatus(
 	status := &ProviderStatus{
 		ClientId:   facts.clientId,
 		Reason:     evaluation.reason,
+		ReasonCode: evaluation.code,
 		ReasonText: providerStatusReasonTexts[evaluation.reason],
 		Admission: &ProviderAdmission{
 			Connected:     facts.hasRollup && facts.connected,
@@ -939,17 +1100,48 @@ func GetProviderStatuses(ctx context.Context, networkId server.Id, clientIds []s
 }
 
 // The admission and ranking of the network's provider clients, at most
-// ProviderStatusMaxClients of them in client id order. The histograms are
-// not part of it.
+// ProviderStatusMaxClients of them in client id order, and how many there
+// are. The histograms are not part of it.
 func GetNetworkProviderStatuses(ctx context.Context, networkId server.Id) *ProviderStatusesResult {
-	// lists the network's provider clients (active, top level, any provide key)
-	// in client id order: at most limit, and whether there were more
-	getNetworkProviderClientIds := func(limit int) (clientIds []server.Id, truncated bool) {
-		clientIds = []server.Id{}
-		server.Db(ctx, func(conn server.PgConn) {
-			result, err := conn.Query(
-				ctx,
-				`
+	clientIds, truncated, total := listNetworkProviderClientIds(ctx, networkId, ProviderStatusMaxClients, ProviderStatusMaxCountedClients)
+	return &ProviderStatusesResult{
+		Providers:    GetProviderStatuses(ctx, networkId, clientIds),
+		Truncated:    truncated,
+		TotalClients: total,
+	}
+}
+
+// Lists the network's provider clients (active, top level, any provide key) in
+// client id order: at most limit, whether there were more, and how many there
+// are, counted up to countLimit. One statement reads both, so the count holds
+// every listed client. The count is the list's filter without its order,
+// bounded by countLimit: one scan of the network's top-level clients by the
+// network_id indexes, and one provide_key primary key probe per client.
+func listNetworkProviderClientIds(ctx context.Context, networkId server.Id, limit int, countLimit int) (clientIds []server.Id, truncated bool, total int) {
+	clientIds = []server.Id{}
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT
+				listed_client.client_id,
+				(
+					SELECT COUNT(*)
+					FROM (
+						SELECT 1
+						FROM network_client
+						WHERE
+							network_client.network_id = $1 AND
+							network_client.active = true AND
+							network_client.source_client_id IS NULL AND
+							EXISTS (
+								SELECT 1 FROM provide_key
+								WHERE provide_key.client_id = network_client.client_id
+							)
+						LIMIT $3
+					) AS counted_client
+				)
+			FROM (
 				SELECT network_client.client_id
 				FROM network_client
 				WHERE
@@ -962,30 +1154,27 @@ func GetNetworkProviderStatuses(ctx context.Context, networkId server.Id) *Provi
 					)
 				ORDER BY network_client.client_id
 				LIMIT $2
-				`,
-				networkId,
-				limit+1,
-			)
-			server.WithPgResult(result, err, func() {
-				for result.Next() {
-					var clientId server.Id
-					server.Raise(result.Scan(&clientId))
-					clientIds = append(clientIds, clientId)
-				}
-			})
+			) AS listed_client
+			ORDER BY listed_client.client_id
+			`,
+			networkId,
+			limit+1,
+			countLimit,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var clientId server.Id
+				server.Raise(result.Scan(&clientId, &total))
+				clientIds = append(clientIds, clientId)
+			}
 		})
-		if limit < len(clientIds) {
-			clientIds = clientIds[:limit]
-			truncated = true
-		}
-		return
+	})
+	// with no row the network has no provider client, and the count is 0
+	if limit < len(clientIds) {
+		clientIds = clientIds[:limit]
+		truncated = true
 	}
-
-	clientIds, truncated := getNetworkProviderClientIds(ProviderStatusMaxClients)
-	return &ProviderStatusesResult{
-		Providers: GetProviderStatuses(ctx, networkId, clientIds),
-		Truncated: truncated,
-	}
+	return
 }
 
 // What a status may say about one client id of a network, in one indexed

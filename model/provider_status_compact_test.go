@@ -23,8 +23,9 @@ func testingProviderStatusJson(t *testing.T, value any) string {
 }
 
 // Every fact of a decided status, its texts aside, reads the same in the
-// compact form: a number gives a value, minimum or maximum exactly when it
-// has one, and a count and total exactly when it is counted with a value.
+// compact form, its reason's code included: a number gives a value, minimum
+// or maximum exactly when it has one, and a count and total exactly when it
+// is counted with a value.
 func TestProviderStatusCompactKeepsEveryFactButTheTexts(t *testing.T) {
 	passing := testingProviderStatusFacts()
 	passingFilter := testingProviderStatusFilter(passing)
@@ -63,6 +64,14 @@ func TestProviderStatusCompactKeepsEveryFactButTheTexts(t *testing.T) {
 		}
 		if fullJson != testingProviderStatusJson(t, status) {
 			t.Fatalf("%s: compacting changed the status", name)
+		}
+		// the reason's code reads the same in both forms
+		var fullFields, compactFields map[string]any
+		if json.Unmarshal([]byte(fullJson), &fullFields) != nil || json.Unmarshal([]byte(compactJson), &compactFields) != nil {
+			t.Fatalf("%s: undecodable %s or %s", name, fullJson, compactJson)
+		}
+		if code, _ := fullFields["reason_code"].(string); code == "" || compactFields["reason_code"] != code {
+			t.Fatalf("%s: reason_code %v, full %v", name, compactFields["reason_code"], fullFields["reason_code"])
 		}
 		if compact.ClientId != status.ClientId || compact.Reason != status.Reason ||
 			testingProviderStatusJson(t, compact.Admission) != testingProviderStatusJson(t, status.Admission) ||
@@ -110,7 +119,8 @@ func TestProviderStatusCompactKeepsEveryFactButTheTexts(t *testing.T) {
 }
 
 // The anti-abuse signals read the same in the compact form as in the full:
-// one generic not_eligible, byte for byte alike whichever signal applies.
+// one generic not_eligible and one generic code, withheld, byte for byte alike
+// whichever signal applies.
 func TestProviderStatusCompactAntiAbuseSignalsAreIndistinguishable(t *testing.T) {
 	compactJson := func(modify func(*providerStatusFacts, *providerCountFilter)) string {
 		facts := testingProviderStatusFacts()
@@ -136,9 +146,13 @@ func TestProviderStatusCompactAntiAbuseSignalsAreIndistinguishable(t *testing.T)
 			c.arinRisk[f.clientId] = true
 			c.blackholed = map[server.Id]bool{f.clientId: true}
 		},
+		"arin_non_quality_and_tls": func(f *providerStatusFacts, c *providerCountFilter) {
+			c.arinNonQuality[f.clientId] = true
+			c.tlsAuthenticationFailed[f.clientId] = true
+		},
 	} {
 		signalJson := compactJson(signal)
-		if !strings.Contains(signalJson, `"reason":"not_eligible"`) {
+		if !strings.Contains(signalJson, `"reason":"not_eligible","reason_code":"withheld"`) {
 			t.Fatalf("%s: %s", name, signalJson)
 		}
 		if firstJson == "" {

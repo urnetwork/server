@@ -4,10 +4,12 @@ package controller
 // clients, why it is or is not offered to clients and how often FindProviders2
 // offered it per minute over the last hour. With client_id, the status of one
 // client of the caller's network; with format=compact, the statuses without
-// their English texts.
+// their English texts. Every answer carries an entity tag of its body, scoped
+// to the caller's network and the query (ProviderStatusEntityScope).
 
 import (
 	"context"
+	"net/url"
 	"time"
 
 	"github.com/urnetwork/glog"
@@ -23,6 +25,16 @@ import (
 // rollup tasks, the score export), so a fresher answer would only cost more
 // queries. The appearance histograms are read fresh on every call.
 const providerStatusCacheTtl = 5 * time.Minute
+
+// The cache keys of the admission and ranking: the network's answer, the
+// caller's own client and one client. A key is renamed when what it holds
+// gains a field (v2: total_clients and reason_code), so an entry an older
+// build wrote is never read without them.
+const (
+	providerStatusNetworkCacheKey = "api_provider_status_v2"
+	providerStatusCallerCacheKey  = "api_provider_status_caller_v2"
+	providerStatusClientCacheKey  = "api_provider_status_client_v2"
+)
 
 // The forms of the answer (the format query parameter).
 const (
@@ -65,6 +77,12 @@ type GetProviderStatusResult struct {
 	Providers []*model.ProviderStatus `json:"providers"`
 	// the network has more provider clients than one answer decides
 	Truncated bool `json:"truncated,omitempty"`
+	// how many provider clients the network has, the ones Providers draws
+	// from, counted up to model.ProviderStatusMaxCountedClients. Only the
+	// network's answer has it: one client's answer is never truncated, and
+	// a count there would change that client's answer whenever another
+	// client of the network starts or stops providing.
+	TotalClients *int `json:"total_clients,omitempty"`
 	// a refused query, with no providers
 	Error *GetProviderStatusError `json:"error,omitempty"`
 }
@@ -72,9 +90,10 @@ type GetProviderStatusResult struct {
 // GetProviderStatusResult in the compact form (format=compact): the same
 // statuses in the same order, without their English texts.
 type GetProviderStatusCompactResult struct {
-	Providers []*model.ProviderStatusCompact `json:"providers"`
-	Truncated bool                           `json:"truncated,omitempty"`
-	Error     *GetProviderStatusError        `json:"error,omitempty"`
+	Providers    []*model.ProviderStatusCompact `json:"providers"`
+	Truncated    bool                           `json:"truncated,omitempty"`
+	TotalClients *int                           `json:"total_clients,omitempty"`
+	Error        *GetProviderStatusError        `json:"error,omitempty"`
 }
 
 // The reads of an answer, replaced in the pure tests.
@@ -87,7 +106,38 @@ var (
 	getCachedClientProviderStatus = cachedClientProviderStatus
 	// the appearance histograms, read fresh
 	getProviderAppearanceHistograms = model.GetProviderAppearanceHistograms
+	// the clock the appearance histograms are read at
+	providerStatusNow = server.NowUtc
 )
+
+// Pins the clock the appearance histograms are read at, so the answers of one
+// test read one window whenever it runs. restore puts the clock back.
+func Testing_SetProviderStatusNow(now func() time.Time) (restore func()) {
+	previous := providerStatusNow
+	providerStatusNow = now
+	return func() {
+		providerStatusNow = previous
+	}
+}
+
+// What an answer's entity tag is scoped to besides the caller's network: the
+// query, in a canonical form. Spellings of one client id share it, as do no
+// format and format=full, which answer the same; every other query has its
+// own. A value that is not valid is kept as sent, escaped.
+func ProviderStatusEntityScope(args *GetProviderStatusArgs) string {
+	clientId := args.ClientId
+	if parsedClientId, err := server.ParseId(clientId); err == nil {
+		clientId = parsedClientId.String()
+	}
+	format := args.Format
+	if format == "" {
+		format = ProviderStatusFormatFull
+	}
+	query := url.Values{}
+	query.Set("client_id", clientId)
+	query.Set("format", format)
+	return query.Encode()
+}
 
 // Tells the caller, for each of its network's own provider clients, how often
 // FindProviders2 offered it per minute over the last hour, the numbers it was
@@ -97,7 +147,7 @@ func GetProviderStatus(clientSession *session.ClientSession) (*GetProviderStatus
 		func(session *session.ClientSession) (*model.ProviderStatusesResult, error) {
 			return model.GetNetworkProviderStatuses(session.Ctx, session.ByJwt.NetworkId), nil
 		},
-		"api_provider_status",
+		providerStatusNetworkCacheKey,
 		providerStatusCacheTtl,
 	)(clientSession)
 	if err != nil {
@@ -121,7 +171,7 @@ func GetProviderStatus(clientSession *session.ClientSession) (*GetProviderStatus
 				}
 				return result, nil
 			},
-			"api_provider_status_caller",
+			providerStatusCallerCacheKey,
 			providerStatusCacheTtl,
 		)(clientSession)
 		if err != nil {
@@ -133,9 +183,11 @@ func GetProviderStatus(clientSession *session.ClientSession) (*GetProviderStatus
 
 	attachProviderAppearances(clientSession.Ctx, statuses)
 
+	totalClients := networkStatuses.TotalClients
 	return &GetProviderStatusResult{
-		Providers: statuses,
-		Truncated: networkStatuses.Truncated,
+		Providers:    statuses,
+		Truncated:    networkStatuses.Truncated,
+		TotalClients: &totalClients,
 	}, nil
 }
 
@@ -225,7 +277,7 @@ func cachedClientProviderStatus(clientSession *session.ClientSession, clientId s
 			}
 			return result, nil
 		},
-		"api_provider_status_client",
+		providerStatusClientCacheKey,
 		providerStatusCacheTtl,
 	)(clientId, clientSession)
 }
@@ -247,9 +299,10 @@ func newGetProviderStatusCompactResult(result *GetProviderStatusResult) *GetProv
 		providers = append(providers, model.NewProviderStatusCompact(status))
 	}
 	return &GetProviderStatusCompactResult{
-		Providers: providers,
-		Truncated: result.Truncated,
-		Error:     result.Error,
+		Providers:    providers,
+		Truncated:    result.Truncated,
+		TotalClients: result.TotalClients,
+		Error:        result.Error,
 	}
 }
 
@@ -260,7 +313,7 @@ func attachProviderAppearances(ctx context.Context, statuses []*model.ProviderSt
 	for _, status := range statuses {
 		clientIds = append(clientIds, status.ClientId)
 	}
-	histograms, err := getProviderAppearanceHistograms(ctx, clientIds, server.NowUtc())
+	histograms, err := getProviderAppearanceHistograms(ctx, clientIds, providerStatusNow())
 	if err != nil {
 		// the admission and ranking still answer; the app shows the histogram
 		// as unavailable
