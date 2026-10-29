@@ -1,6 +1,6 @@
 # LEADERTOP: an SN-aligned top leaderboard
 
-**Status:** proposal, 2026-10-29. Nothing is implemented. The design questions in [§11](#11-design-questions) are answered by the owner before any implementation, and each answer is recorded there.
+**Status:** design settled, 2026-10-29: the owner answered every design question in [§11](#11-design-questions). Nothing is implemented; implementation is the next step.
 
 **Sources read:** server origin/main 01fa336b6 (line citations checked at cb8e668c and e5e6d4c71, unchanged since), sn 3a8509e8, connect 47499613, mmm 1a0f07bc9, config 908942e5, subtensor v455, factury 1401d163. Paths without a repo prefix are in this repo.
 
@@ -13,7 +13,7 @@ The board has to be conservative, because a wrong "yes" costs the miner:
 - **Claiming costs a UID registration.**
 - **A claimed fleet ranked 201 or lower earns nothing from either tier.** Its members leave the pool whether or not the head selects them (`controller/st_controller.go:3611-3617`).
 
-The board is the default leaderboard in every app (ur.io, Android, Apple, Windows, Linux). The ranking is exposed by an operator API.
+The board is the default leaderboard in every app (ur.io, Android, Apple, Windows, Linux), as a tab named "Protocol" (Q14). This doc covers the ranking, the data and the operator API. The app design is in [apple/LEADERTOP.md](https://github.com/urnetwork/apple/blob/main/LEADERTOP.md).
 
 ## 2. Summary
 
@@ -160,6 +160,13 @@ Each row also carries:
 
 The first value of M is design question 13. While fleet binding is blocked on mainnet, every response says so (§3.6).
 
+**What the API serves for the apps (owner, 2026-10-29):**
+- The top 400, so networks just outside the 200 line can track their progress.
+- Each network's daily rank history.
+- A claim-prompt flag for measurable networks projected inside the top 200.
+
+The app presentation (the Protocol tab, the 200 line, the claim prompt on Earnings, progress charts, banners and states) is in [apple/LEADERTOP.md](https://github.com/urnetwork/apple/blob/main/LEADERTOP.md).
+
 ### 5.7 Claimed networks: metadata
 
 - **Bindings:** a live sync of the coordinator's FleetBound, FleetBindingRevoked and FleetBindingCleaned events.
@@ -216,7 +223,7 @@ These go to Prometheus with alerts, and the measured precision is shown on the b
 Public, with optional auth. Rate-limited like the points leaderboard.
 
 **Query:**
-- `limit`: 50 by default, at most 200.
+- `limit`: 50 by default, at most 200 per page. Paging covers the top 400 (Q5), plus the caller's own `me` row wherever it ranks.
 - `cursor`: keyset paging pinned to one snapshot.
 - `filter`: `all`, `unclaimed` or `claimed`.
 - `snapshot`: optional, to pin a snapshot.
@@ -294,7 +301,7 @@ The route stays. It is computed from the same snapshot, so the ur.io Top 200 pag
 6. Attach binding data, the validator summary and incentive.
 7. Write the snapshot and agreement metrics.
 
-**Retention:** 7 days of snapshots, about 140.
+**Retention:** 7 days of per-tempo snapshots (about 140), plus 90 days of each network's daily rank and score in `sn_top_network_daily` for progress charts (Q11).
 
 **Binding sync:** a live sync of FleetBound, revocation and cleanup events, replacing the epoch-build-only path.
 
@@ -320,12 +327,12 @@ The route stays. It is computed from the same snapshot, so the ur.io Top 200 pag
    - the hop table, the snapshot task and the API, behind a flag;
    - a backtest over past tempos;
    - `/sn/head` rebased on the snapshot.
-4. **Apps:** the SN Top tab becomes the default in ur.io, Android, Apple, Windows and Linux. Points stays, and the frozen Data tab is retired (design question 14).
+4. **Apps:** build the Protocol tab in ur.io, Android, Apple, Windows and Linux as [apple/LEADERTOP.md](https://github.com/urnetwork/apple/blob/main/LEADERTOP.md) describes.
 5. **When fleet binding opens on mainnet:** turn on the claimed-fleet metadata and the agreement alerts.
 
 ## 11. Design questions
 
-Each question lists the options with a recommendation, then the decision. The owner answers before any implementation.
+Each question lists the options with a recommendation, then the decision. The owner answers before any implementation. How the apps present the decisions (Q5, Q11, Q12, Q13, Q14, Q16, Q17) is in [apple/LEADERTOP.md](https://github.com/urnetwork/apple/blob/main/LEADERTOP.md).
 
 **Q1. Audience and purpose.**
 **Decision (owner, 2026-10-29):** guide miners who haven't claimed a UID on whether to try for a top-miner UID spot. Show networks that have claimed a UID, with the validator ranking when available, as extra metadata.
@@ -334,14 +341,14 @@ Each question lists the options with a recommendation, then the decision. The ow
 - **Recommended:** the network, each scored as one hypothetical fleet, with claimed fleets as metadata.
 - Alternative: rank fleets and clients separately.
 
-**Decision:** pending.
+**Decision (owner, 2026-10-29):** networks. Each network is scored as one hypothetical fleet of its eligible providers, and a claimed network also shows its fleet rows (UID, generation, validator score) as metadata.
 
 **Q3. Evidence for unclaimed networks.**
 - **(a) Recommended:** project from every eligible provider's pinned /29 or /48 prefix, weighted by presence and calibrated with complete trails.
 - (b) Trails only: exact, but only cohort members have any, so most networks would be blank.
 - (c) Live leases, as `/sn/head` does now: the wrong granularity and no smoothing.
 
-**Decision:** pending.
+**Decision (owner, 2026-10-29):** (a). Project from every eligible provider's pinned /29 or /48 prefix, weighted by presence. Where complete trails exist for a tempo they replace the projection, and they're used to calibrate it.
 
 **Q4. Split rule for shared prefixes.**
 - **(a) Recommended:** share each prefix's credit among every network and claimed fleet present in it. This is conservative: it assumes they all claim.
@@ -350,78 +357,97 @@ Each question lists the options with a recommendation, then the decision. The ow
 
 The recommendation is (a) for the ranking plus (c) in `/me`.
 
-**Decision:** pending.
+**Decision (owner, 2026-10-29):** (a) for the ranking, splitting among every network and claimed fleet present in the prefix, plus (c): `/sn/top/me` also shows the "if you claimed alone today" score.
 
 **Q5. Cutoff shown.**
 - **Recommended:** the projected 200th score across all units, the current floor among claimed fleets, and the number of open seats while fewer than 200 have claimed.
 
-**Decision:** pending.
+**Decision (owner, 2026-10-29):** margins and labels use the projected 200th score across all units. The board also shows the current floor among claimed fleets, and the number of open seats while fewer than 200 have claimed.
+
+**Added (owner, 2026-10-29):**
+- **Show the top 400,** with the 200 line marked, so people can see and track their progress into the top 200.
+- **Claim prompt:** a network projected inside the top 200 is directed to claim on the Earnings page.
 
 **Q6. Cohort admission.** This is the biggest blocker.
 - **(a) Recommended:** members of claimed fleets get priority admission to the cohort, capped per fleet, with stale members rotated out. This keeps the validator under its 4,096-provider census limit, and claiming then leads to measurement. Needs server and sn work, coordinated with sn-55.
 - (b) Leave the cohort as it is. Most networks then stay unmeasurable forever.
 - (c) Enlarge the cohort. The validator's census limit blocks this.
 
-**Decision:** pending.
+**Decision (owner, 2026-10-29):** (a). Members of claimed fleets get priority admission to the cohort, capped per fleet, with stale members rotated out, so the validator stays under its 4,096-provider census limit and claiming leads to measurement. Server and sn work, coordinated with sn-55.
 
 **Q7. Networks the validator can't measure.**
 - **Recommended:** rank them by projection, mark them "not measurable", and never label them "likely".
 - Alternative: hide them.
 
-**Decision:** pending.
+**Decision (owner, 2026-10-29):** rank them by projection with a "not measurable" flag, and never label them "likely" until they can be measured.
 
 **Q8. Exactness.**
 - **Recommended:** import sn's head arithmetic as a Go package, so the replica is bit-identical for claimed fleets.
 - Alternative: reimplement it in the server.
 
-**Decision:** pending.
+**Decision (owner, 2026-10-29):** import sn's head arithmetic (prefix split, ¼ EMA, selection) as a Go package, so the server's numbers for claimed fleets match the validator's exactly.
 
 **Q9. Validator head summary.**
 - **Recommended:** yes. UID 1 uploads its signed per-tempo head result to the operator (an sn change), so the board shows the validator's actual ranking.
 
-**Decision:** pending.
+**Decision (owner, 2026-10-29):** yes. UID 1 uploads a signed per-tempo head summary (fleet, exact score, rank, selected; no private inputs) to the operator, and the board shows the validator's actual ranking for claimed networks. Needs an sn change, coordinated with sn-55.
 
 **Q10. On-chain incentive.**
 - **Recommended:** yes, as metadata for claimed UIDs, with stale and fallback detection.
 
-**Decision:** pending.
+**Decision (owner, 2026-10-29):** yes. Claimed networks show their UID's on-chain `Incentive`, read each tempo, flagged stale on the validator's fallback row or when its weights are outside the activity cutoff.
 
 **Q11. Cadence and history.**
 - **Recommended:** a snapshot every tempo (about 72 min) with the validator's ¼ EMA, keeping 7 days, with a trend shown.
 
-**Decision:** pending.
+**Decision (owner, 2026-10-29):**
+- A snapshot every tempo, with the validator's ¼ EMA.
+- Per-tempo snapshots are kept for 7 days.
+- Each network's daily rank and score are kept for 90 days, so `/sn/top/me` and the apps can chart progress toward the 200 line.
 
 **Q12. Privacy.**
 - **Recommended:** a public endpoint, anonymous by default (tag only, no `network_id`), names opt-in, and claimed rows showing "UID n" unless opted in.
 - Open: reuse `points_leaderboard_public`, or add a new flag?
 
-**Decision:** pending.
+**Decision (owner, 2026-10-29):**
+- The endpoint is public and anonymous by default: tag only, no `network_id`. The Points board's anonymous rows drop `network_id` too.
+- Names appear only for networks with the existing `points_leaderboard_public` setting, so one "show my name on leaderboards" switch covers both boards.
+- An anonymous claimed row shows only "UID n".
 
 **Q13. Recommendation labels.**
 - **Recommended:** likely, borderline, unlikely and not measurable, with M = 20% and "likely" also requiring measurability in at least 3 of the last 4 tempos. Every view carries the warning that a claimed fleet ranked 201 or lower earns nothing.
 
-**Decision:** pending.
+**Decision (owner, 2026-10-29):**
+- **Labels:** likely, borderline, unlikely and not measurable, with M = 20%. "Likely" also requires measurability in at least 3 of the last 4 tempos.
+- **Claim prompt:** every measurable network projected inside the top 200 is directed to claim on the Earnings page. Borderline networks get it with an extra "close to the line" warning.
+- **Warning:** every claim prompt says that a claimed fleet ranked 201 or lower earns nothing.
 
 **Q14. App tabs.**
 - **Recommended:** SN Top is the default tab, Points second, and the frozen Data tab is retired.
 
-**Decision:** pending.
+**Decision (owner, 2026-10-29):** the SN top board is a tab named **"Protocol"**, first and the default, in every app. **"Points"** is the second tab and **"Data"** the third.
 
 **Q15. Endpoint names.**
 - **Recommended:** `GET /sn/top` and `GET /sn/top/me`, with `/sn/head` rebased on the same snapshot.
 
-**Decision:** pending.
+**Decision (owner, 2026-10-29):** `GET /sn/top` (public) and `GET /sn/top/me` (client auth). `GET /sn/head` is computed from the same snapshot, so the Top 200 page, the Earnings page and the Protocol tab agree.
 
 **Q16. Launch timing.**
 - **Recommended:** ship the board while binding is closed, with a "binding isn't open yet" banner and the not-measurable flags. Don't encourage registering before the announcement, per the support policy.
 - Alternative: wait until binding opens.
 
-**Decision:** pending.
+**Decision (owner, 2026-10-29):**
+- Ship the Protocol tab as soon as it's built, with a "claiming isn't open yet" banner while fleet binding is blocked on mainnet.
+- While binding is closed, projected top-200 networks see a "claiming opens soon" note on Earnings instead of a live claim button, and nothing encourages registering early.
+- The claim prompt goes live when binding opens.
 
 **Q17. Precision target.**
 - **Recommended:** publish the measured precision at 200 once fleets bind. Turn on the "likely" label only once it reaches at least 90%. Before then, show "estimate" and no label.
 
-**Decision:** pending.
+**Decision (owner, 2026-10-29):**
+- Publish the measured precision at 200 on the board once fleets bind.
+- The "likely" label switches on only once precision reaches at least 90%.
+- Until then, rows inside 200 show "estimate" and still get the claim prompt and warning (Q13).
 
 ## 12. Risks and open issues
 
