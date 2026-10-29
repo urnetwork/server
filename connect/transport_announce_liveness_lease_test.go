@@ -13,6 +13,7 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/urnetwork/server"
@@ -639,5 +640,64 @@ func TestProviderLivenessWriterStampsUntilItsContextEnds(t *testing.T) {
 	defer stampLock.Unlock()
 	if outcomes[livenessLeaseOutcomeStampFailed] != 1 || outcomes[livenessLeaseOutcomeStamped] < 2 {
 		t.Fatalf("observed %v, want one failed stamp and the others stamped", outcomes)
+	}
+}
+
+// The liveness lease writer waits for its next full pass on one timer, re-armed
+// only after it fires. A time.After per loop created a timer on every woken
+// pass and abandoned it in the heap. Full passes keep their cadence through
+// the wakes.
+func TestLivenessLeaseWriterKeepsOneTimerThroughWakes(t *testing.T) {
+	const wakeCount = 100
+	interval := 25 * time.Second
+	created := countTimersCreated(t, "github.com/urnetwork/server/connect.(*providerLivenessLeaseWriter).run", func() {
+		synctest.Test(t, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			writer := newProviderLivenessLeaseWriter(interval)
+			// never started by begin
+			writer.startOnce.Do(func() {})
+			writer.jitter = func() time.Duration {
+				return 0
+			}
+			writer.observe = func(string, int) {}
+			// a pending connection is written by its first wake, then only by
+			// full passes: no later wake finds it dirty
+			writeTimes := []time.Time{}
+			writer.writeShard = func(ctx context.Context, shard int, scored []server.Id, extended []server.Id, removed []server.Id) ([]bool, error) {
+				writeTimes = append(writeTimes, time.Now())
+				return make([]bool, len(extended)), nil
+			}
+			start := time.Now()
+			runDone := make(chan struct{})
+			go func() {
+				defer close(runDone)
+				writer.run(ctx)
+			}()
+			writer.begin(server.NewId(), nil)
+			for range wakeCount {
+				synctest.Wait()
+				writer.wakeUp()
+				time.Sleep(time.Second)
+			}
+			synctest.Wait()
+			cancel()
+			<-runDone
+			want := []time.Duration{0, interval, 2 * interval, 3 * interval, 4 * interval}
+			got := []time.Duration{}
+			for _, writeTime := range writeTimes {
+				got = append(got, writeTime.Sub(start))
+			}
+			if len(got) != len(want) {
+				t.Fatalf("the connection was written at %v, want %v", got, want)
+			}
+			for i := range want {
+				if got[i] != want[i] {
+					t.Fatalf("the connection was written at %v, want %v", got, want)
+				}
+			}
+		})
+	})
+	if created != 1 {
+		t.Fatalf("%d wakes created %d pass timers, want 1", wakeCount, created)
 	}
 }

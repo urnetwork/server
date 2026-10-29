@@ -782,9 +782,10 @@ func BenchmarkExchangeTcpDispatchSparseReadyBatchLatency(benchmark *testing.B) {
 }
 
 // Records production ExchangeBuffer flush boundaries while its read side
-// remains blocked until connection teardown. SetWriteDeadline starts one
-// WriteMessages flush; the generic net.Conn path then writes alternating frame
-// headers and bodies within that boundary.
+// remains blocked until connection teardown. The writer's dequeue hook starts
+// one WriteMessages flush, since a write deadline is no longer installed per
+// flush; the generic net.Conn path then writes alternating frame headers and
+// bodies within that boundary.
 type exchangeOutboundBatchRecorderConn struct {
 	stateLock sync.Mutex
 	closeOnce sync.Once
@@ -794,6 +795,7 @@ type exchangeOutboundBatchRecorderConn struct {
 	header    [4]byte
 	headerLen int
 	body      []byte
+	flushErr  error
 }
 
 // Creates a recorder with enough completion notifications for one burst.
@@ -816,6 +818,9 @@ func (self *exchangeOutboundBatchRecorderConn) Read([]byte) (int, error) {
 func (self *exchangeOutboundBatchRecorderConn) Write(buffer []byte) (int, error) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
+	if self.flushErr != nil {
+		return 0, self.flushErr
+	}
 	if len(self.batches) == 0 {
 		return 0, errors.New("exchange write began outside a flush")
 	}
@@ -878,15 +883,20 @@ func (self *exchangeOutboundBatchRecorderConn) SetReadDeadline(time.Time) error 
 	return nil
 }
 
-// Starts one exact production WriteMessage or WriteMessages flush boundary.
+// Deadlines are inert; the writer's dequeue hook marks flush boundaries.
 func (self *exchangeOutboundBatchRecorderConn) SetWriteDeadline(time.Time) error {
+	return nil
+}
+
+// Starts one exact production WriteMessage or WriteMessages flush boundary.
+func (self *exchangeOutboundBatchRecorderConn) beginFlush() {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	if self.headerLen != 0 || self.body != nil {
-		return errors.New("exchange flush ended after a frame header")
+		self.flushErr = errors.New("exchange flush ended after a frame header")
+		return
 	}
 	self.batches = append(self.batches, nil)
-	return nil
 }
 
 // Copies the recorded message ids grouped by production flush.
@@ -952,6 +962,7 @@ func runExchangeOutboundBatchFormation(
 	releaseFirstFlush := make(chan struct{})
 	var firstBatchOnce sync.Once
 	connection.afterSendDequeueForTest = func() {
+		recorder.beginFlush()
 		firstBatchOnce.Do(func() {
 			close(firstBatchOwned)
 			<-releaseFirstFlush
