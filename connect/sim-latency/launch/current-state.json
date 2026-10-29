@@ -1,7 +1,46 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-28T17:07:00Z",
+  "observed_at": "2026-10-29T17:07:21Z",
+  "scoring_enablement_current": {
+    "status": "R2_intake_open_Qwen_Gemma_group_and_H1_worse_gates_passed_scoring_and_publications_held",
+    "observed_at": "2026-10-29T17:07:21Z",
+    "metadata_checkpoint_only": true,
+    "actual_intake_open": true,
+    "grading_enabled": false,
+    "publications_held": true,
+    "full_production_scoring_ready": false,
+    "season_id": "sim-latency-production-20261028-r2",
+    "round_id": "01a1855d-49bd-0250-90db-d0c0885f0e46",
+    "opens_at": "2026-10-29T13:06:42.413416Z",
+    "closes_at": "2026-11-05T13:06:42.413416Z",
+    "deadline_missed_and_not_backdated": true,
+    "evidence": {
+      "path": "server/connect/sim-latency/launch/SCORING-ENABLEMENT-CHECKPOINT-2026-10-29.json",
+      "sha256": "ec64dca02fe888de07104aa334ccc01db3f104f9d715f540683157f22a16bca8"
+    },
+    "completed": [
+      "exact_Qwen_Gemma_genuine_six_case_union_qualification_6_PASS_10_member_responses_independently_reviewed_disagreements_retained",
+      "H1_worse_exact_revised_112_scope_three_passes_336_PASS_plus12_synthetic_MMDB_controls_and_one_socket_smoke",
+      "new_native_worse_647922_image_readback_and_exact_build_correctness_receipts",
+      "better_noop_two_ELF_compiles_and12_CPU_adapter_controls_only",
+      "public_provider_request_before_census_and_Root_reported_native_collision_preparation_not_measurement"
+    ],
+    "pending": [
+      "same_988481_race_ELF_three_complete225_PASS_processes_current_first_process_incomplete",
+      "better_noop_exact_role_runtime_and_new_native_image_readback_gates",
+      "prospective_public_pilot_execution_admission_publication_and18_native_timed_runs",
+      "only_after_accepted_public_pilot_one_new_hidden_seed_and36_native_fresh_single_screen_runs",
+      "independent_final_review_and_durable_scoring_publication_hold_release"
+    ],
+    "new_timed_native_runs_pending": 54,
+    "new_hidden_seed_drawn": false,
+    "original_first_screen_failed_not_accepted": true,
+    "original_second_seed_unstarted": true,
+    "accepted_old_bridge_reused_without_remeasurement": true,
+    "frozen_a9_image98_R9_alpha005_margin0269_timeout10800_unchanged": true,
+    "this_checkpoint_does_not_qualify_moving_main_or_attest_new_MinIO_custody": true
+  },
   "prospective_production_opening": {
     "authorized_after_all_required_gates_pass": true,
     "owner_instruction": "do this as fast as possible. Use parallel agents if it speeds up",
@@ -301,6 +340,8 @@
     "native_readonly_deletions": 0
   },
   "production_activated": false,
+  "production_intake_open": true,
+  "production_activated_definition": "Full scoring and winner/publication readiness, not intake-only source/round activation. R2 intake is actually open while grading/publications remain held.",
   "approved_launch_calibration": {
     "status": "first_committed_screen_complete_not_accepted_preserved_no_repeat_authority",
     "owner_approved": true,
@@ -784,7 +825,7 @@
     "round_baseline_preparation_budget_fix_in_progress": true,
     "submission_deadline_seconds_unchanged": 10800
   },
-  "status": "requested_midnight_readiness_deadline_missed_calibration_active_external_gates_pending",
+  "status": "R2_intake_open_genuine_Qwen_Gemma_and_H1_worse_gates_complete_scoring_held_pending_225_and_native_calibration",
   "current_bridge_measurement": {
     "started_at": "2026-10-26T20:54:56Z",
     "original_deadline": "2026-10-26T23:54:56Z",
@@ -1138,8 +1179,8 @@
     "next_action": "Poll exact session/process and original logs. Stop on first unexpected failure; max owner diagnoses. No provider calls or scoring, and no overlap with timed measurement."
   },
   "authority_warning": "This is a preparation snapshot, not runtime/score authority. Verify the live process/session and current artifacts before acting; never restart because an observation times out.",
-  "historical_sections_warning": "Older dated campaign/tool sections below retain their original observations and next actions. The accepted_three_a_reduction and prospective_c2_build above supersede old analysis-pending and margin-unselected statements; they do not qualify C2 or activate production.",
-  "next_action": "Preserve the failed screen, retained evidence and original unstarted second seed. All three H1 native builds are authenticated; broader service qualification and genuine measured direction remain pending. Protocol21/20 targeted passes and full183 passes are complete; additive public-pilot lifecycle41 guards also passed three times. The combined full224 and actual native CLI/kernel/context/census admission remain pending before a public pilot or hidden seed. V8 is prospectively precommitted after actual Ops backend correction, not yet independently admitted or executed; preserve V7 failure and every claim. Frozen gates/deadlines remain unchanged; target R1, API/worker acknowledgments and phase-two readiness still precede prospective activation, never backdating.",
+  "historical_sections_warning": "scoring_enablement_current is the current 2026-10-29 checkpoint. All other dated campaign/tool sections retain their original observations, failures and then-current next actions; stale pending224/provider/opening statements are not current readiness. R2 intake really opened prospectively, but production_activated remains false for full scoring/publication readiness. No metadata/source freeze qualifies moving main, no failed FIRST seed is accepted, and no new custody or calibration success is inferred.",
+  "next_action": "Keep R2 evaluation/reward/publication holds while intake remains open. Complete the unchanged-ELF 225 source-unit gate and exact better/no-op runtime/native-image gates; then admit and prospectively publish the prepared public pilot before its18 timed R9 runs. Only an accepted public direction permits the one fresh hidden seed and36 further native runs. Reuse the accepted old bridge without remeasurement, retain the failed original FIRST screen and unstarted second seed, and preserve all Qwen/Gemma disagreements and historical failures. Independently review actual calibration results and current durable holds before grading/publication release. Frozen a9/image98/R9/alpha.05/margin.269/10800s remain unchanged; do not backdate or relabel metadata as production readiness.",
   "operator_inputs": {
     "observed_at": "2026-10-26T05:23:17Z",
     "source": "Explicit user confirmations and parent-verified private-key/model-access readbacks; no new scoring observation.",
