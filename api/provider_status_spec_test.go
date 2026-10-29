@@ -1,13 +1,15 @@
 package api
 
 // GET /network/provider-status in the published spec (connect/api/bringyour.yml):
-// its query parameters, both forms of its answer field for field in both
-// directions, and the reasons a status gives. Pure: no database or redis.
+// its query parameters, its conditional requests (If-None-Match, ETag and
+// 304), both forms of its answer field for field in both directions, and the
+// reasons and reason codes a status gives. Pure: no database or redis.
 
 import (
 	"reflect"
 	"slices"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/urnetwork/server/controller"
@@ -130,5 +132,59 @@ func TestProviderStatusSpecReasons(t *testing.T) {
 		if !slices.Equal(reasons, model.ProviderStatusReasons) {
 			t.Fatalf("%s.reason = %v, want %v", schemaName, reasons, model.ProviderStatusReasons)
 		}
+	}
+}
+
+// The spec lists the reason codes a status gives, in the order of the
+// reasons they first code, in both forms, and documents each of them.
+func TestProviderStatusSpecReasonCodes(t *testing.T) {
+	spec := loadSpec(t)
+	for _, schemaName := range []string{"ProviderStatus", "ProviderStatusCompact"} {
+		schema := asMap(spec.schemas[schemaName])
+		reasonCode := spec.resolve(asMap(spec.properties(schema)["reason_code"]))
+		codes := []string{}
+		for _, value := range asSlice(reasonCode["enum"]) {
+			codes = append(codes, value.(string))
+		}
+		if !slices.Equal(codes, model.ProviderStatusCodes) {
+			t.Fatalf("%s.reason_code = %v, want %v", schemaName, codes, model.ProviderStatusCodes)
+		}
+		if !slices.Contains(asSlice(schema["required"]), any("reason_code")) {
+			t.Fatalf("%s does not require reason_code", schemaName)
+		}
+		description, _ := reasonCode["description"].(string)
+		for _, code := range model.ProviderStatusCodes {
+			if !strings.Contains(description, "`"+code+"`") {
+				t.Fatalf("%s.reason_code does not document %s", schemaName, code)
+			}
+		}
+	}
+}
+
+// The operation documents its conditional requests: an optional If-None-Match
+// header, the ETag and Cache-Control of the 200, and a 304 with the ETag.
+func TestProviderStatusSpecDocumentsConditionalRequests(t *testing.T) {
+	spec := loadSpec(t)
+	operation := asMap(asMap(spec.paths["/network/provider-status"])["get"])
+
+	var ifNoneMatch map[string]any
+	for _, parameterAny := range asSlice(operation["parameters"]) {
+		parameter := asMap(parameterAny)
+		if parameter["in"] == "header" && parameter["name"] == "If-None-Match" {
+			ifNoneMatch = parameter
+		}
+	}
+	if ifNoneMatch == nil || ifNoneMatch["required"] == true || asMap(ifNoneMatch["schema"])["type"] != "string" {
+		t.Fatalf("If-None-Match = %v, want an optional string header", ifNoneMatch)
+	}
+
+	responses := asMap(operation["responses"])
+	okHeaders := asMap(asMap(responses["200"])["headers"])
+	if asMap(okHeaders["ETag"]) == nil || asMap(okHeaders["Cache-Control"]) == nil {
+		t.Fatalf("200 headers = %v, want ETag and Cache-Control", okHeaders)
+	}
+	notModified := asMap(responses["304"])
+	if notModified == nil || asMap(asMap(notModified["headers"])["ETag"]) == nil || notModified["content"] != nil {
+		t.Fatalf("304 = %v, want the ETag and no content", notModified)
 	}
 }

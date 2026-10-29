@@ -14,9 +14,10 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
-// The admission and ranking are cached per network while the appearances are
-// read fresh on every call, and the caller's own provider comes first. Run
-// with `cd server/controller && ../test.sh -run GetProviderStatus`.
+// The admission and ranking are cached per network, with the reasons' codes
+// and the network's provider client count, while the appearances are read
+// fresh on every call, and the caller's own provider comes first. Run with
+// `cd server/controller && ../test.sh -run GetProviderStatus`.
 func TestGetProviderStatusCachesRankingAndReadsAppearancesFresh(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -46,11 +47,11 @@ func TestGetProviderStatusCachesRankingAndReadsAppearancesFresh(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(first.Providers) != 3 || first.Providers[0].ClientId != callerClientId || first.Truncated {
+		if len(first.Providers) != 3 || first.Providers[0].ClientId != callerClientId || first.Truncated || first.TotalClients == nil || *first.TotalClients != 3 {
 			t.Fatalf("first = %+v", first)
 		}
 		for _, status := range first.Providers {
-			if status.Reason != model.ProviderStatusReasonNotConnected || status.Appearances == nil {
+			if status.Reason != model.ProviderStatusReasonNotConnected || status.ReasonCode != model.ProviderStatusCodeNotConnected || status.Appearances == nil {
 				t.Fatalf("status = %+v", status)
 			}
 			for _, count := range status.Appearances.AppearancesPerMinute {
@@ -70,12 +71,12 @@ func TestGetProviderStatusCachesRankingAndReadsAppearancesFresh(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(second.Providers) != 3 || second.Providers[0].ClientId != callerClientId {
+		if len(second.Providers) != 3 || second.Providers[0].ClientId != callerClientId || second.TotalClients == nil || *second.TotalClients != 3 {
 			t.Fatalf("second = %+v", second)
 		}
 		own := second.Providers[0]
-		if !own.EvaluateTime.Equal(first.Providers[0].EvaluateTime) || own.Reason != model.ProviderStatusReasonNotConnected {
-			t.Fatalf("the ranking was not reused: %s %s", own.EvaluateTime, own.Reason)
+		if !own.EvaluateTime.Equal(first.Providers[0].EvaluateTime) || own.Reason != model.ProviderStatusReasonNotConnected || own.ReasonCode != model.ProviderStatusCodeNotConnected {
+			t.Fatalf("the ranking was not reused: %s %s %s", own.EvaluateTime, own.Reason, own.ReasonCode)
 		}
 		total := int64(0)
 		for _, count := range own.Appearances.AppearancesPerMinute {

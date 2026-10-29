@@ -2,12 +2,16 @@ package controller
 
 // GET /network/provider-status with its query (client_id, format) without a
 // database: which client a query answers for, that every client id the caller
-// may not read gets one answer, the compact form, and that the answer without
-// a query is the network's answer unchanged. The reads are faked.
+// may not read gets one answer, the compact form, total_clients in the
+// network's answer only, the scope of the answer's entity tag, and that the
+// answer without a query is the network's answer, compatible with the one
+// before. The reads are faked.
 
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -20,6 +24,13 @@ import (
 
 var providerStatusQueryTestNow = time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
 
+// The codes of the reasons the fake statuses give, as the model codes them.
+var testingQueryReasonCodes = map[string]string{
+	model.ProviderStatusReasonEgressWarmingUp: model.ProviderStatusCodeWarmingUp,
+	model.ProviderStatusReasonNone:            model.ProviderStatusCodeNone,
+	model.ProviderStatusReasonNotProviding:    model.ProviderStatusCodeNotProviding,
+}
+
 // A decided status with every text, shaped as the model gives one: numbers
 // with and without values, a counted number and a country.
 func testingQueryProviderStatus(clientId server.Id, reason string) *model.ProviderStatus {
@@ -27,6 +38,7 @@ func testingQueryProviderStatus(clientId server.Id, reason string) *model.Provid
 	return &model.ProviderStatus{
 		ClientId:   clientId,
 		Reason:     reason,
+		ReasonCode: testingQueryReasonCodes[reason],
 		ReasonText: "Building network check history. The checks on this connection are passing so far, but it's too early to be sure.",
 		Admission: &model.ProviderAdmission{
 			Connected:        true,
@@ -347,21 +359,24 @@ func TestProviderStatusQueryUnknownClientIsNotFound(t *testing.T) {
 	}
 }
 
-// format=compact answers the statuses of the full form, in the same order and
-// with the same truncation, without the reason text and explanations: a number
-// keeps its name and whether it passes, gives a value, minimum or maximum only
-// when it has one, and a count and total only when counted. It applies to the
-// network's answer and to one client's.
+// format=compact answers the statuses of the full form, in the same order,
+// with the same truncation and total_clients and each reason's code, without
+// the reason text and explanations: a number keeps its name and whether it
+// passes, gives a value, minimum or maximum only when it has one, and a count
+// and total only when counted. It applies to the network's answer and to one
+// client's.
 func TestProviderStatusCompactForm(t *testing.T) {
 	reads := newProviderStatusQueryTestReads(t)
 	network := newProviderStatusQueryTestNetwork(reads)
 	callerSession := testingProviderStatusQuerySession(network.networkId, &network.callerClientId)
+	totalClients := 40
 	reads.networkResult = &GetProviderStatusResult{
 		Providers: []*model.ProviderStatus{
 			testingQueryProviderStatus(network.callerClientId, model.ProviderStatusReasonEgressWarmingUp),
 			testingQueryProviderStatus(network.providerClientId, model.ProviderStatusReasonNone),
 		},
-		Truncated: true,
+		Truncated:    true,
+		TotalClients: &totalClients,
 	}
 	fullJson := testingProviderStatusQueryJson(t, reads.networkResult)
 
@@ -373,6 +388,10 @@ func TestProviderStatusCompactForm(t *testing.T) {
 	if !compact.Truncated || compact.Error != nil || len(compact.Providers) != 2 ||
 		compact.Providers[0].ClientId != network.callerClientId || compact.Providers[1].ClientId != network.providerClientId {
 		t.Fatalf("compact = %s", compactJson)
+	}
+	if compact.TotalClients == nil || *compact.TotalClients != totalClients ||
+		compact.Providers[0].ReasonCode != model.ProviderStatusCodeWarmingUp || compact.Providers[1].ReasonCode != model.ProviderStatusCodeNone {
+		t.Fatalf("compact total_clients and codes = %s", compactJson)
 	}
 	for _, key := range []string{`"reason_text"`, `"explanation"`, `"has_value"`, `"has_minimum"`, `"has_maximum"`} {
 		if strings.Contains(compactJson, key) {
@@ -409,7 +428,7 @@ func TestProviderStatusCompactForm(t *testing.T) {
 		t.Fatal(err)
 	}
 	oneJson := testingProviderStatusQueryJson(t, one)
-	if one.Error != nil || one.Truncated || len(one.Providers) != 1 || one.Providers[0].ClientId != network.providerClientId || one.Providers[0].Appearances == nil {
+	if one.Error != nil || one.Truncated || one.TotalClients != nil || len(one.Providers) != 1 || one.Providers[0].ClientId != network.providerClientId || one.Providers[0].Appearances == nil {
 		t.Fatalf("one client = %s", oneJson)
 	}
 	if strings.Contains(oneJson, `"explanation"`) || strings.Contains(oneJson, `"reason_text"`) {
@@ -417,18 +436,30 @@ func TestProviderStatusCompactForm(t *testing.T) {
 	}
 }
 
-// The answer without a query is the network's answer, unchanged: the same
-// result, and byte for byte the JSON the answer had before the query existed,
-// with no error and every text. format=full answers it too, and another
-// format is refused rather than read as full.
-func TestProviderStatusDefaultAnswerUnchanged(t *testing.T) {
+// The answer without a query is the network's answer, compatible with the
+// answer before the query and the codes existed: every field it had reads as
+// it did, and the only fields added are total_clients beside truncated and
+// reason_code in each status; no error, and every text. format=full answers it
+// too, and another format is refused rather than read as full.
+func TestProviderStatusDefaultAnswerCompatible(t *testing.T) {
 	reads := newProviderStatusQueryTestReads(t)
 	network := newProviderStatusQueryTestNetwork(reads)
 	callerSession := testingProviderStatusQuerySession(network.networkId, &network.callerClientId)
 
+	// a status as it was before reason_code, field for field
+	type legacyProviderStatus struct {
+		ClientId     server.Id                          `json:"client_id"`
+		Reason       string                             `json:"reason"`
+		ReasonText   string                             `json:"reason_text"`
+		Admission    *model.ProviderAdmission           `json:"admission"`
+		Ranking      []*model.ProviderRankingNumber     `json:"ranking"`
+		Country      *model.ProviderStatusCountry       `json:"country,omitempty"`
+		EvaluateTime time.Time                          `json:"evaluate_time"`
+		Appearances  *model.ProviderAppearanceHistogram `json:"appearances,omitempty"`
+	}
 	// the answer as it was before the query, field for field
 	type legacyGetProviderStatusResult struct {
-		Providers []*model.ProviderStatus `json:"providers"`
+		Providers []*legacyProviderStatus `json:"providers"`
 		Truncated bool                    `json:"truncated,omitempty"`
 	}
 	for _, truncated := range []bool{false, true} {
@@ -436,14 +467,34 @@ func TestProviderStatusDefaultAnswerUnchanged(t *testing.T) {
 			testingQueryProviderStatus(network.callerClientId, model.ProviderStatusReasonEgressWarmingUp),
 			testingQueryProviderStatus(network.providerClientId, model.ProviderStatusReasonNone),
 		}
+		totalClients := len(providers)
+		if truncated {
+			totalClients = 40
+		}
 		reads.networkResult = &GetProviderStatusResult{
-			Providers: providers,
+			Providers:    providers,
+			Truncated:    truncated,
+			TotalClients: &totalClients,
+		}
+		legacy := &legacyGetProviderStatusResult{
 			Truncated: truncated,
 		}
-		legacyJson := testingProviderStatusQueryJson(t, &legacyGetProviderStatusResult{
-			Providers: providers,
-			Truncated: truncated,
-		})
+		for _, status := range providers {
+			legacy.Providers = append(legacy.Providers, &legacyProviderStatus{
+				ClientId:     status.ClientId,
+				Reason:       status.Reason,
+				ReasonText:   status.ReasonText,
+				Admission:    status.Admission,
+				Ranking:      status.Ranking,
+				Country:      status.Country,
+				EvaluateTime: status.EvaluateTime,
+				Appearances:  status.Appearances,
+			})
+		}
+		var legacyAnswer any
+		if err := json.Unmarshal([]byte(testingProviderStatusQueryJson(t, legacy)), &legacyAnswer); err != nil {
+			t.Fatal(err)
+		}
 
 		for _, args := range []*GetProviderStatusArgs{{}, {Format: ProviderStatusFormatFull}} {
 			networkReads := reads.networkReads
@@ -455,11 +506,29 @@ func TestProviderStatusDefaultAnswerUnchanged(t *testing.T) {
 				t.Fatalf("%+v: not the network's answer", args)
 			}
 			resultJson := testingProviderStatusQueryJson(t, result)
-			if resultJson != legacyJson {
-				t.Fatalf("%+v: %s, before the query %s", args, resultJson, legacyJson)
-			}
 			if strings.Contains(resultJson, `"error"`) || strings.Count(resultJson, `"reason_text"`) != 2 || strings.Count(resultJson, `"explanation"`) != 10 {
 				t.Fatalf("%+v: %s", args, resultJson)
+			}
+
+			// the additive fields, with their values, and then exactly the
+			// answer from before them
+			var answer map[string]any
+			if err := json.Unmarshal([]byte(resultJson), &answer); err != nil {
+				t.Fatal(err)
+			}
+			if answer["total_clients"] != float64(totalClients) {
+				t.Fatalf("%+v: total_clients %v, want %d", args, answer["total_clients"], totalClients)
+			}
+			delete(answer, "total_clients")
+			for i, provider := range answer["providers"].([]any) {
+				status := provider.(map[string]any)
+				if status["reason_code"] != testingQueryReasonCodes[providers[i].Reason] {
+					t.Fatalf("%+v: status %d reason_code %v", args, i, status["reason_code"])
+				}
+				delete(status, "reason_code")
+			}
+			if !reflect.DeepEqual(any(answer), legacyAnswer) {
+				t.Fatalf("%+v: without the additive fields %v, before them %v", args, answer, legacyAnswer)
 			}
 		}
 	}
@@ -479,6 +548,94 @@ func TestProviderStatusDefaultAnswerUnchanged(t *testing.T) {
 	}
 	if reads.networkReads != networkReads {
 		t.Fatal("an invalid format answered the network's statuses")
+	}
+}
+
+// total_clients is in the network's answer only, in both forms: one client's
+// answer and a refused query have none, and a network without providers
+// counts 0.
+func TestProviderStatusTotalClientsOnlyInTheNetworksAnswer(t *testing.T) {
+	reads := newProviderStatusQueryTestReads(t)
+	network := newProviderStatusQueryTestNetwork(reads)
+	callerSession := testingProviderStatusQuerySession(network.networkId, &network.callerClientId)
+
+	for _, totalClients := range []int{0, 2, 40} {
+		total := totalClients
+		reads.networkResult = &GetProviderStatusResult{
+			Providers:    []*model.ProviderStatus{},
+			Truncated:    model.ProviderStatusMaxClients < totalClients,
+			TotalClients: &total,
+		}
+		full, err := GetProviderStatusWithArgs(&GetProviderStatusArgs{}, callerSession)
+		if err != nil {
+			t.Fatal(err)
+		}
+		compact, err := GetProviderStatusCompact(&GetProviderStatusArgs{Format: ProviderStatusFormatCompact}, callerSession)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := fmt.Sprintf(`"total_clients":%d`, totalClients)
+		if fullJson, compactJson := testingProviderStatusQueryJson(t, full), testingProviderStatusQueryJson(t, compact); !strings.Contains(fullJson, want) || !strings.Contains(compactJson, want) {
+			t.Fatalf("total %d: full %s, compact %s", totalClients, fullJson, compactJson)
+		}
+	}
+
+	for name, args := range map[string]*GetProviderStatusArgs{
+		"one client":         {ClientId: network.providerClientId.String()},
+		"one client compact": {ClientId: network.providerClientId.String(), Format: ProviderStatusFormatCompact},
+		"not found":          {ClientId: server.NewId().String()},
+		"invalid client_id":  {ClientId: "not-a-client-id"},
+		"invalid format":     {Format: "xml"},
+	} {
+		var answer any
+		var err error
+		if args.Format == ProviderStatusFormatCompact {
+			answer, err = GetProviderStatusCompact(args, callerSession)
+		} else {
+			answer, err = GetProviderStatusWithArgs(args, callerSession)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if answerJson := testingProviderStatusQueryJson(t, answer); strings.Contains(answerJson, "total_clients") {
+			t.Fatalf("%s: %s", name, answerJson)
+		}
+	}
+}
+
+// The scope of an answer's entity tag is the query, canonical: spellings of
+// one client id and no format or format=full share one, and every other
+// query has its own; a value that is not valid is kept, escaped.
+func TestProviderStatusEntityScope(t *testing.T) {
+	clientId := server.NewId()
+	scope := func(clientId string, format string) string {
+		return ProviderStatusEntityScope(&GetProviderStatusArgs{ClientId: clientId, Format: format})
+	}
+
+	if network, full := scope("", ""), scope("", ProviderStatusFormatFull); network != full || network != "client_id=&format=full" {
+		t.Fatalf("no format %q, format=full %q", network, full)
+	}
+	if lower, upper := scope(clientId.String(), ""), scope(strings.ToUpper(clientId.String()), ProviderStatusFormatFull); lower != upper || lower != "client_id="+clientId.String()+"&format=full" {
+		t.Fatalf("one client id spelled two ways: %q, %q", lower, upper)
+	}
+
+	scopes := map[string]string{}
+	for name, value := range map[string]string{
+		"network":            scope("", ""),
+		"network compact":    scope("", ProviderStatusFormatCompact),
+		"one client":         scope(clientId.String(), ""),
+		"one client compact": scope(clientId.String(), ProviderStatusFormatCompact),
+		"another client":     scope(server.NewId().String(), ""),
+		"invalid client_id":  scope("not a client&format=compact", ""),
+		"invalid format":     scope("", "FULL"),
+	} {
+		if other, ok := scopes[value]; ok {
+			t.Fatalf("%s and %s share the scope %q", name, other, value)
+		}
+		scopes[value] = name
+	}
+	if invalid := scope("not a client&format=compact", ""); invalid != "client_id=not+a+client%26format%3Dcompact&format=full" {
+		t.Fatalf("an invalid client_id: %q", invalid)
 	}
 }
 

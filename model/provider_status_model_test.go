@@ -112,116 +112,118 @@ func testingProviderStatusNumber(status *ProviderStatus, name string) *ProviderR
 }
 
 // The first failing rule names the reason, in the order the selection
-// applies them. The provider is modern unless a case says otherwise, as an
-// upgraded app is, so modern-first priority explains only the cases that take
-// its evidence away.
+// applies them, and its stable code. The provider is modern unless a case
+// says otherwise, as an upgraded app is, so modern-first priority explains
+// only the cases that take its evidence away.
 func TestProviderStatusReasonOrder(t *testing.T) {
 	for _, testCase := range []struct {
 		name   string
 		modify func(*providerStatusFacts, *providerCountFilter)
 		reason string
+		// the reason_code the status JSON carries
+		code string
 	}{
-		{name: "passes", modify: func(*providerStatusFacts, *providerCountFilter) {}, reason: ProviderStatusReasonNone},
+		{name: "passes", modify: func(*providerStatusFacts, *providerCountFilter) {}, reason: ProviderStatusReasonNone, code: "none"},
 		{name: "no provide key", modify: func(f *providerStatusFacts, c *providerCountFilter) {
 			f.providePublic = false
 			f.provideNetwork = false
 			f.connected = false
-		}, reason: ProviderStatusReasonNotProviding},
+		}, reason: ProviderStatusReasonNotProviding, code: "not_providing"},
 		{name: "no rollup row", modify: func(f *providerStatusFacts, c *providerCountFilter) {
 			f.hasRollup = false
 			f.connected = false
 			f.valid = false
-		}, reason: ProviderStatusReasonNotConnected},
+		}, reason: ProviderStatusReasonNotConnected, code: "not_connected"},
 		{name: "disconnected", modify: func(f *providerStatusFacts, c *providerCountFilter) {
 			f.connected = false
 			c.arinRisk[f.clientId] = true
-		}, reason: ProviderStatusReasonNotConnected},
+		}, reason: ProviderStatusReasonNotConnected, code: "not_connected"},
 		{name: "two addresses", modify: func(f *providerStatusFacts, c *providerCountFilter) {
 			f.valid = false
-		}, reason: ProviderStatusReasonLocationInvalid},
+		}, reason: ProviderStatusReasonLocationInvalid, code: "location_invalid"},
 		{name: "network only", modify: func(f *providerStatusFacts, c *providerCountFilter) {
 			f.providePublic = false
 			c.arinRisk[f.clientId] = true
-		}, reason: ProviderStatusReasonNetworkOnly},
+		}, reason: ProviderStatusReasonNetworkOnly, code: "network_only"},
 		{name: "warming up", modify: func(f *providerStatusFacts, c *providerCountFilter) {
 			f.lookbacks[2] = providerStatusLookback{reliabilityWeight: 0.3, independentReliabilityWeight: 0.3}
 			c.reliabilityFailed[f.clientId] = true
-		}, reason: ProviderStatusReasonReliabilityWarmingUp},
+		}, reason: ProviderStatusReasonReliabilityWarmingUp, code: "warming_up"},
 		{name: "unstable", modify: func(f *providerStatusFacts, c *providerCountFilter) {
 			f.lookbacks[1] = providerStatusLookback{reliabilityWeight: 0.5, independentReliabilityWeight: 0.5}
 			f.lookbacks[2] = providerStatusLookback{reliabilityWeight: 0.3, independentReliabilityWeight: 0.3}
 			c.reliabilityFailed[f.clientId] = true
-		}, reason: ProviderStatusReasonReliabilityLow},
+		}, reason: ProviderStatusReasonReliabilityLow, code: "reliability_low"},
 		{name: "reliability before arin risk, as decided", modify: func(f *providerStatusFacts, c *providerCountFilter) {
 			f.lookbacks[1] = providerStatusLookback{reliabilityWeight: 0.5, independentReliabilityWeight: 0.5}
 			c.reliabilityFailed[f.clientId] = true
 			c.arinRisk[f.clientId] = true
-		}, reason: ProviderStatusReasonReliabilityLow},
+		}, reason: ProviderStatusReasonReliabilityLow, code: "reliability_low"},
 		{name: "arin risk", modify: func(f *providerStatusFacts, c *providerCountFilter) {
 			c.arinRisk[f.clientId] = true
-		}, reason: ProviderStatusReasonNotEligible},
+		}, reason: ProviderStatusReasonNotEligible, code: "withheld"},
 		{name: "tls quarantine", modify: func(f *providerStatusFacts, c *providerCountFilter) {
 			c.tlsAuthenticationFailed[f.clientId] = true
-		}, reason: ProviderStatusReasonNotEligible},
+		}, reason: ProviderStatusReasonNotEligible, code: "withheld"},
 		{name: "unprobed", modify: func(f *providerStatusFacts, c *providerCountFilter) {
 			delete(c.healthCounts, f.clientId)
 			c.arinNonQuality[f.clientId] = true
-		}, reason: ProviderStatusReasonEgressUnprobed},
+		}, reason: ProviderStatusReasonEgressUnprobed, code: "warming_up"},
 		{name: "stale evidence is unprobed", modify: func(f *providerStatusFacts, c *providerCountFilter) {
 			counts := c.healthCounts[f.clientId]
 			counts.MeasuredAt = testingProviderStatusNow.Add(-ProviderEgressHealthMaxAge)
 			c.healthCounts[f.clientId] = counts
-		}, reason: ProviderStatusReasonEgressUnprobed},
+		}, reason: ProviderStatusReasonEgressUnprobed, code: "warming_up"},
 		// passing checks on too few runs for a native bucket: the census's
 		// unprobed, warming up to the provider
 		{name: "one passing run is warming up", modify: func(f *providerStatusFacts, c *providerCountFilter) {
 			c.healthCounts[f.clientId] = ProviderEgressHealthCounts{MeasuredAt: testingProviderStatusNow.Add(-time.Minute), FirstMeasuredAt: testingProviderStatusNow.Add(-time.Minute), OKCount: 1, Total: 1}
-		}, reason: ProviderStatusReasonEgressWarmingUp},
+		}, reason: ProviderStatusReasonEgressWarmingUp, code: "warming_up"},
 		{name: "two passing runs, short for quality alone, are warming up", modify: func(f *providerStatusFacts, c *providerCountFilter) {
 			c.healthCounts[f.clientId] = ProviderEgressHealthCounts{MeasuredAt: testingProviderStatusNow.Add(-time.Minute), FirstMeasuredAt: testingProviderStatusNow.Add(-21 * time.Minute), OKCount: 2, Total: 2}
-		}, reason: ProviderStatusReasonEgressWarmingUp},
+		}, reason: ProviderStatusReasonEgressWarmingUp, code: "warming_up"},
 		{name: "ten passing runs in ten minutes are warming up", modify: func(f *providerStatusFacts, c *providerCountFilter) {
 			c.healthCounts[f.clientId] = ProviderEgressHealthCounts{MeasuredAt: testingProviderStatusNow.Add(-time.Minute), FirstMeasuredAt: testingProviderStatusNow.Add(-11 * time.Minute), OKCount: 10, Total: 10}
-		}, reason: ProviderStatusReasonEgressWarmingUp},
+		}, reason: ProviderStatusReasonEgressWarmingUp, code: "warming_up"},
 		{name: "one failed run is failing, not warming up", modify: func(f *providerStatusFacts, c *providerCountFilter) {
 			c.healthCounts[f.clientId] = ProviderEgressHealthCounts{MeasuredAt: testingProviderStatusNow.Add(-time.Minute), FirstMeasuredAt: testingProviderStatusNow.Add(-time.Minute), OKCount: 0, Total: 1}
-		}, reason: ProviderStatusReasonEgressFailing},
+		}, reason: ProviderStatusReasonEgressFailing, code: "egress_failing"},
 		{name: "failing checks", modify: func(f *providerStatusFacts, c *providerCountFilter) {
 			c.healthCounts[f.clientId] = ProviderEgressHealthCounts{MeasuredAt: testingProviderStatusNow, FirstMeasuredAt: testingProviderStatusNow, OKCount: 15, Total: 20}
-		}, reason: ProviderStatusReasonEgressFailing},
+		}, reason: ProviderStatusReasonEgressFailing, code: "egress_failing"},
 		{name: "arin non-quality", modify: func(f *providerStatusFacts, c *providerCountFilter) {
 			c.arinNonQuality[f.clientId] = true
-		}, reason: ProviderStatusReasonNotEligible},
+		}, reason: ProviderStatusReasonNotEligible, code: "withheld"},
 		// the anti-abuse reason holds whatever the provider's modern status
 		{name: "arin non-quality, not modern", modify: func(f *providerStatusFacts, c *providerCountFilter) {
 			c.arinNonQuality[f.clientId] = true
 			delete(c.modernEvidence, f.clientId)
-		}, reason: ProviderStatusReasonNotEligible},
+		}, reason: ProviderStatusReasonNotEligible, code: "withheld"},
 		{name: "not modern, drawn after the modern providers", modify: func(f *providerStatusFacts, c *providerCountFilter) {
 			delete(c.modernEvidence, f.clientId)
-		}, reason: ProviderStatusReasonNotModern},
+		}, reason: ProviderStatusReasonNotModern, code: "not_modern"},
 		{name: "not modern before a missing speed test", modify: func(f *providerStatusFacts, c *providerCountFilter) {
 			delete(c.modernEvidence, f.clientId)
 			f.hasSpeedTest = false
-		}, reason: ProviderStatusReasonNotModern},
+		}, reason: ProviderStatusReasonNotModern, code: "not_modern"},
 		{name: "no speed test", modify: func(f *providerStatusFacts, c *providerCountFilter) {
 			f.hasSpeedTest = false
-		}, reason: ProviderStatusReasonSpeedTestMissing},
+		}, reason: ProviderStatusReasonSpeedTestMissing, code: "warming_up"},
 		{name: "no latency test", modify: func(f *providerStatusFacts, c *providerCountFilter) {
 			f.hasLatencyTest = false
-		}, reason: ProviderStatusReasonSpeedTestMissing},
+		}, reason: ProviderStatusReasonSpeedTestMissing, code: "warming_up"},
 		{name: "past the throughput cutoff", modify: func(f *providerStatusFacts, c *providerCountFilter) {
 			f.maxBytesPerSecond = 500 * Kib
-		}, reason: ProviderStatusReasonSlow},
+		}, reason: ProviderStatusReasonSlow, code: "slow"},
 		{name: "past the latency cutoff", modify: func(f *providerStatusFacts, c *providerCountFilter) {
 			f.minRelativeLatencyMillis = 250
-		}, reason: ProviderStatusReasonSlow},
+		}, reason: ProviderStatusReasonSlow, code: "slow"},
 		{name: "past only the speed cutoff", modify: func(f *providerStatusFacts, c *providerCountFilter) {
 			f.maxBytesPerSecond = 2 * Mib
-		}, reason: ProviderStatusReasonNone},
+		}, reason: ProviderStatusReasonNone, code: "none"},
 		{name: "a legacy dark verdict decides nothing", modify: func(f *providerStatusFacts, c *providerCountFilter) {
 			c.blackholed = map[server.Id]bool{f.clientId: true}
-		}, reason: ProviderStatusReasonNone},
+		}, reason: ProviderStatusReasonNone, code: "none"},
 	} {
 		facts := testingProviderStatusFacts()
 		countFilter := testingProviderStatusFilter(facts)
@@ -237,12 +239,20 @@ func TestProviderStatusReasonOrder(t *testing.T) {
 		if !slices.Contains(ProviderStatusReasons, status.Reason) {
 			t.Errorf("%s: reason %s is not listed", testCase.name, status.Reason)
 		}
+		statusJson, err := json.Marshal(status)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := `"reason":"` + testCase.reason + `","reason_code":"` + testCase.code + `"`; !strings.Contains(string(statusJson), want) {
+			t.Errorf("%s: status %s, want %s", testCase.name, statusJson, want)
+		}
 	}
 }
 
-// Every anti-abuse signal reads as the one generic reason with identical
-// status JSON, so none can be told apart; no field names a signal, and the
-// legacy dark verdict, which the selection ignores, changes nothing.
+// Every anti-abuse signal reads as the one generic reason and the one generic
+// code, withheld, with identical status JSON, so none can be told apart; no
+// field names a signal, and the legacy dark verdict, which the selection
+// ignores, changes nothing.
 func TestProviderStatusAntiAbuseSignalsAreIndistinguishable(t *testing.T) {
 	statusJson := func(modify func(*providerStatusFacts, *providerCountFilter)) (string, *ProviderStatus) {
 		facts := testingProviderStatusFacts()
@@ -271,12 +281,23 @@ func TestProviderStatusAntiAbuseSignalsAreIndistinguishable(t *testing.T) {
 			c.arinRisk[f.clientId] = true
 			c.tlsAuthenticationFailed[f.clientId] = true
 		},
+		"arin_non_quality_and_risk": func(f *providerStatusFacts, c *providerCountFilter) {
+			c.arinNonQuality[f.clientId] = true
+			c.arinRisk[f.clientId] = true
+		},
+		"dark_and_tls": func(f *providerStatusFacts, c *providerCountFilter) {
+			c.tlsAuthenticationFailed[f.clientId] = true
+			c.blackholed = map[server.Id]bool{f.clientId: true}
+		},
 	}
 	var firstJson string
 	for name, signal := range signals {
 		signalJson, status := statusJson(signal)
 		if status.Reason != ProviderStatusReasonNotEligible || status.ReasonText != "This connection isn't eligible to provide right now." {
 			t.Fatalf("%s: reason %s %q", name, status.Reason, status.ReasonText)
+		}
+		if !strings.Contains(signalJson, `"reason":"not_eligible","reason_code":"withheld"`) {
+			t.Fatalf("%s: the status does not code the signal as withheld: %s", name, signalJson)
 		}
 		for _, number := range status.Ranking {
 			if strings.HasPrefix(number.Name, "weight_") || strings.HasPrefix(number.Name, "tier_") {
