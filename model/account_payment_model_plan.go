@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	// "sync"
 	"time"
 
@@ -1350,6 +1352,56 @@ func (self *PaymentPlanner) applyPayoutPoints(
 	// end, instead of one round-trip per row. A large plan applies points to
 	// every payee plus their referral parents/children, so these per-row
 	// inserts dominated the time to commit the plan.
+	queuedPoints := planPayoutPoints(&payoutPointsPlan{
+		ctx:                  self.ctx,
+		subsidyConfig:        self.subsidyConfig,
+		paymentPlanId:        self.paymentPlanId,
+		totalPoints:          totalPoints,
+		totalPayout:          totalPayout,
+		payments:             self.networkPayments,
+		reliabilitySubsidies: self.networkReliabilitySubsidies,
+		seekerHolders:        self.seekerHolderNetworkIds,
+		referralParents:      self.referralNetworks,
+		networkReferrals:     self.networkReferrals,
+	})
+
+	// flush every queued account_point row in a single batched insert
+	ApplyAccountPointsBatchInTx(self.ctx, self.tx, queuedPoints)
+}
+
+// The inputs of the points rule of one plan: its points, its payments by
+// network, and the bonuses' inputs. Operator block points
+// (operator_block_points.go) apply the same rule to a block's computed
+// payments.
+type payoutPointsPlan struct {
+	ctx           context.Context
+	subsidyConfig *SubsidyConfig
+	paymentPlanId server.Id
+	// account_points_per_payout scaled to the plan's subsidy window
+	totalPoints float64
+	// the sum of the payments' payouts, net of carried bonuses
+	totalPayout          NanoCents
+	payments             map[server.Id]*AccountPayment
+	reliabilitySubsidies map[server.Id]NetworkReliabilitySubsidy
+	seekerHolders        map[server.Id]bool
+	// network -> the network that referred it
+	referralParents map[server.Id]server.Id
+	// network -> the networks it referred
+	networkReferrals map[server.Id][]server.Id
+}
+
+// planPayoutPoints is the points rule of a plan, without writing anything:
+//   - reliability points of each network with a payment
+//   - payout points in proportion to each payment's payout, net of carried
+//     bonuses
+//   - the seeker multiplier, which also doubles the reliability points
+//   - the referral parent's fraction and the referral children's halving
+//     fractions of the payout points
+//
+// Networks are visited in id order, so the rows are the same for the same
+// inputs. The order changes nothing else: every row depends only on its own
+// payment and the plan's totals.
+func planPayoutPoints(plan *payoutPointsPlan) []ApplyAccountPointsArgs {
 	queuedPoints := []ApplyAccountPointsArgs{}
 	queuePoints := func(args ApplyAccountPointsArgs) {
 		queuedPoints = append(queuedPoints, args)
@@ -1358,9 +1410,10 @@ func (self *PaymentPlanner) applyPayoutPoints(
 	/**
 	 * Apply reliability points
 	 */
-	for networkId, reliabilitySubsidy := range self.networkReliabilitySubsidies {
+	for _, networkId := range slices.SortedFunc(maps.Keys(plan.reliabilitySubsidies), server.Id.Cmp) {
+		reliabilitySubsidy := plan.reliabilitySubsidies[networkId]
 
-		payment, ok := self.networkPayments[networkId]
+		payment, ok := plan.payments[networkId]
 		if !ok {
 			glog.Errorf("[plan]no payment found for network %s, but reliability subsidy is %d nano cents\n", networkId, reliabilitySubsidy)
 			continue
@@ -1372,22 +1425,19 @@ func (self *PaymentPlanner) applyPayoutPoints(
 				Event:            AccountPointEventReliability,
 				PointValue:       reliabilitySubsidy.Points,
 				AccountPaymentId: &payment.PaymentId,
-				PaymentPlanId:    &self.paymentPlanId,
+				PaymentPlanId:    &plan.paymentPlanId,
 			}
 			queuePoints(reliabilityPointsArgs)
 		}
 	}
 
-	for _, payment := range self.networkPayments {
+	for _, networkId := range slices.SortedFunc(maps.Keys(plan.payments), server.Id.Cmp) {
+		payment := plan.payments[networkId]
 
 		/**
 		 * Payout account points
 		 */
-		// accountNanoPoints := PointsToNanoPoints(float64(payment.Payout) / float64(totalPayout))
-
-		// scaledAccountPoints := NanoPoints(pointsScaleFactor * float64(accountNanoPoints))
-
-		scaledAccountPoints := PointsToNanoPoints(totalPoints * (float64(payment.Payout-payment.BonusPayout) / float64(totalPayout)))
+		scaledAccountPoints := PointsToNanoPoints(plan.totalPoints * (float64(payment.Payout-payment.BonusPayout) / float64(plan.totalPayout)))
 		glog.Infof("[plan]payout %s with %d nano points (%d nano cents)\n",
 			payment.NetworkId,
 			scaledAccountPoints,
@@ -1411,12 +1461,12 @@ func (self *PaymentPlanner) applyPayoutPoints(
 		/**
 		 * Seeker bonus
 		 */
-		if self.seekerHolderNetworkIds[payment.NetworkId] {
-			seekerBonus := NanoPoints(float64(scaledAccountPoints)*self.subsidyConfig.SeekerHolderMultiplier) - scaledAccountPoints
-			scaledAccountPoints = NanoPoints(float64(scaledAccountPoints) * self.subsidyConfig.SeekerHolderMultiplier) // apply the multiplier to the account points
+		if plan.seekerHolders[payment.NetworkId] {
+			seekerBonus := NanoPoints(float64(scaledAccountPoints)*plan.subsidyConfig.SeekerHolderMultiplier) - scaledAccountPoints
+			scaledAccountPoints = NanoPoints(float64(scaledAccountPoints) * plan.subsidyConfig.SeekerHolderMultiplier) // apply the multiplier to the account points
 
 			// double reliability points for seeker holders
-			seekerBonus += self.networkReliabilitySubsidies[payment.NetworkId].Points
+			seekerBonus += plan.reliabilitySubsidies[payment.NetworkId].Points
 			glog.Infof("[plan]payout seeker holder %s with %d bonus points\n", payment.NetworkId, seekerBonus)
 
 			accountPointsArgs := ApplyAccountPointsArgs{
@@ -1433,11 +1483,11 @@ func (self *PaymentPlanner) applyPayoutPoints(
 		/**
 		 * Apply bonus points to parent referral network
 		 */
-		parentReferralNetworkId, ok := self.referralNetworks[payment.NetworkId]
+		parentReferralNetworkId, ok := plan.referralParents[payment.NetworkId]
 
 		if ok {
 			if parentReferralNetworkId != payment.NetworkId {
-				parentReferralPoints := NanoPoints(float64(scaledAccountPoints) * self.subsidyConfig.ReferralParentPayoutFraction)
+				parentReferralPoints := NanoPoints(float64(scaledAccountPoints) * plan.subsidyConfig.ReferralParentPayoutFraction)
 
 				glog.Infof("[plan]payout applying referral parent network %s with %d points\n", parentReferralNetworkId, scaledAccountPoints)
 
@@ -1459,12 +1509,12 @@ func (self *PaymentPlanner) applyPayoutPoints(
 		 */
 		visited := make(map[server.Id]struct{})
 		payoutChildrenReferralNetworksInTx(
-			self.ctx,
+			plan.ctx,
 			queuePoints,
 			scaledAccountPoints,
-			self.subsidyConfig.ReferralChildPayoutFraction,
+			plan.subsidyConfig.ReferralChildPayoutFraction,
 			payment.NetworkId,
-			self.networkReferrals,
+			plan.networkReferrals,
 			payment.PaymentPlanId,
 			&payment.PaymentId,
 			nil,
@@ -1473,6 +1523,5 @@ func (self *PaymentPlanner) applyPayoutPoints(
 		)
 	}
 
-	// flush every queued account_point row in a single batched insert
-	ApplyAccountPointsBatchInTx(self.ctx, self.tx, queuedPoints)
+	return queuedPoints
 }
