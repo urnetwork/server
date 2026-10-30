@@ -227,6 +227,14 @@ type ProxyDeviceManager struct {
 	// closes the devices of removed clients; nil without settings.ClientRemoved
 	clientRemoved *clientRemovedSubscriber
 
+	// Each proxy id's last failed device creation, held for
+	// deviceCreationRetryTimeout so a failing id cannot re-run its setup on
+	// every open. creationFailureLock is taken under a pdState.StateLock and
+	// takes no other lock.
+	creationFailureLock     sync.Mutex
+	creationFailures        map[server.Id]deviceCreationFailure
+	creationFailureSweepLen int
+
 	// The ip lock, memoized. ValidCaller runs on EVERY accepted connection, so reading
 	// the device config from redis each time would put a round-trip on the accept path.
 	// The bounded TTL+LRU cache keeps that fast path without retaining every proxy id
@@ -266,6 +274,7 @@ func NewProxyDeviceManager(ctx context.Context, settings *ProxyDeviceManagerSett
 		networkSpace:     settings.NetworkSpace,
 		ownsNetworkSpace: settings.NetworkSpace == nil,
 		proxyDevices:     map[server.Id]*proxyDeviceState{},
+		creationFailures: map[server.Id]deviceCreationFailure{},
 		clientDevices:    map[server.Id]map[server.Id]*ProxyDevice{},
 		lockCache:        newProxyLockCache(proxyLockCacheMaxEntries),
 		windowIdentityGate: newWindowIdentityRestoreGate(
@@ -406,6 +415,12 @@ func (self *ProxyDeviceManager) OpenProxyDevice(proxyId server.Id) (*ProxyDevice
 			continue
 		}
 
+		// a failed creation holds the next one back for its cooldown
+		if err := self.creationCooldown(proxyId); err != nil {
+			pdState.StateLock.Unlock()
+			return nil, err
+		}
+
 		// become the creator: publish an in-flight marker, release the lock, then
 		// create the device (db load + DeviceLocal + tun) with NO lock held so the
 		// cold start never blocks other proxy ids/clients (fix E).
@@ -441,6 +456,11 @@ func (self *ProxyDeviceManager) OpenProxyDevice(proxyId server.Id) (*ProxyDevice
 		}
 		if accepted {
 			self.addClientDevice(proxyId, pd)
+		}
+		if err != nil {
+			// before the state unlocks, so no opener starts another creation
+			// between this failure and its cooldown
+			self.holdCreation(proxyId, err)
 		}
 		pdState.StateLock.Unlock()
 
@@ -481,13 +501,68 @@ func (self *ProxyDeviceManager) releaseProxyDeviceState(proxyId server.Id, pdSta
 	}
 }
 
+// errProxyDeviceNotFound: the proxy id has no device configuration. It was
+// removed or expired, or never existed.
+var errProxyDeviceNotFound = errors.New("Proxy device does not exist.")
+
+// A failed device creation holds its proxy id's next one back this long, as
+// wgTunFactory holds back one WireGuard peer's. Each creation reads Redis and
+// PostgreSQL and mints a hosted session; a failing id opened by every retry
+// of every CONNECT would otherwise run them in a tight loop. Opens inside the
+// cooldown return the failure and do not extend it.
+const deviceCreationRetryTimeout = time.Second
+
+// The failures map is swept of expired entries when it reaches this size, and
+// then when it doubles, so it stays near the failure rate times the cooldown.
+const creationFailureSweepLen = 1024
+
+type deviceCreationFailure struct {
+	err        error
+	retryAfter time.Time
+}
+
+// The failure of the proxy id's last device creation while its cooldown
+// lasts, else nil.
+func (self *ProxyDeviceManager) creationCooldown(proxyId server.Id) error {
+	self.creationFailureLock.Lock()
+	defer self.creationFailureLock.Unlock()
+	failure, ok := self.creationFailures[proxyId]
+	if !ok {
+		return nil
+	}
+	if time.Now().Before(failure.retryAfter) {
+		return failure.err
+	}
+	delete(self.creationFailures, proxyId)
+	return nil
+}
+
+// Holds the proxy id's next device creation back for the cooldown.
+func (self *ProxyDeviceManager) holdCreation(proxyId server.Id, err error) {
+	self.creationFailureLock.Lock()
+	defer self.creationFailureLock.Unlock()
+	now := time.Now()
+	if self.creationFailureSweepLen <= len(self.creationFailures) {
+		for id, failure := range self.creationFailures {
+			if !now.Before(failure.retryAfter) {
+				delete(self.creationFailures, id)
+			}
+		}
+		self.creationFailureSweepLen = max(creationFailureSweepLen, 2*len(self.creationFailures))
+	}
+	self.creationFailures[proxyId] = deviceCreationFailure{
+		err:        err,
+		retryAfter: now.Add(deviceCreationRetryTimeout),
+	}
+}
+
 // Constructs one authenticated device owner without publishing or starting it.
 // Its configuration and identity reads may use PostgreSQL; setup runs without
 // manager or device-state locks and is never repeated by an established tun.
 func (self *ProxyDeviceManager) newProxyDevice(proxyId server.Id) (*ProxyDevice, error) {
 	proxyDeviceConfig := model.GetProxyDeviceConfig(self.ctx, proxyId)
 	if proxyDeviceConfig == nil {
-		return nil, fmt.Errorf("Proxy device does not exist.")
+		return nil, errProxyDeviceNotFound
 	}
 
 	networkSpace := self.networkSpaceForDevice()
@@ -587,6 +662,17 @@ func (self *ProxyDeviceManager) startProxyDevice(proxyId server.Id, pd *ProxyDev
 // returning nil, so nil genuinely means "not found" — an outage cannot quietly turn this
 // into a deny-all.)
 func (self *ProxyDeviceManager) ValidCaller(proxyId server.Id, addr netip.Addr) bool {
+	return self.checkCaller(proxyId, addr) == nil
+}
+
+// errCallerNotAuthorized: the caller may not use the proxy. It is outside the
+// ip lock, or the plan does not include the feature.
+var errCallerNotAuthorized = errors.New("Not authorized")
+
+// checkCaller is ValidCaller with the refusal's reason: errProxyDeviceNotFound
+// for a proxy id with no config, errCallerNotAuthorized for a caller outside
+// the ip lock.
+func (self *ProxyDeviceManager) checkCaller(proxyId server.Id, addr netip.Addr) error {
 	entry := self.proxyLock(proxyId)
 
 	// log the peppered hash of the caller, not the raw address (and not the
@@ -597,17 +683,17 @@ func (self *ProxyDeviceManager) ValidCaller(proxyId server.Id, addr netip.Addr) 
 	if !entry.found {
 		callerHash := server.ClientIpHashForAddr(addr)
 		glog.Infof("[proxy]caller %x refused: proxy %s has no config\n", callerHash[:8], proxyId)
-		return false
+		return errProxyDeviceNotFound
 	}
 
 	if len(entry.lockSubnets) == 0 {
 		// the customer did not ask for an ip lock
-		return true
+		return nil
 	}
 
 	for _, lockSubnet := range entry.lockSubnets {
 		if subnetContains(lockSubnet, addr) {
-			return true
+			return nil
 		}
 	}
 
@@ -616,7 +702,7 @@ func (self *ProxyDeviceManager) ValidCaller(proxyId server.Id, addr netip.Addr) 
 		"[proxy]caller %x refused: outside the ip lock for proxy %s (%d subnets)\n",
 		callerHash[:8], proxyId, len(entry.lockSubnets),
 	)
-	return false
+	return errCallerNotAuthorized
 }
 
 // proxyLock returns the ip lock for a proxy id, memoized.
@@ -1699,6 +1785,39 @@ func (self *ProxyDevice) WaitForReady(ctx context.Context, timeout time.Duration
 	)
 }
 
+// WaitForRoute waits until the device's window can carry a new flow: it is
+// ready, or holds at least one provider below its minimum. A window still
+// forming holds none, and a dial into it only parks a stack connection behind
+// retransmitted SYNs. Unlike WaitForReady, it does not hold a dial back from
+// a degraded window that still routes. The timeout is WaitForReady's.
+func (self *ProxyDevice) WaitForRoute(ctx context.Context, timeout time.Duration) bool {
+	deviceState := self.proxyDeviceState()
+	if deviceState == nil {
+		return false
+	}
+	// the common case takes no listener
+	if windowRoutable(deviceState.GetWindowStatus()) {
+		return true
+	}
+	if timeout == 0 {
+		return false
+	}
+
+	var timeoutChannel <-chan time.Time
+	if 0 < timeout {
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		timeoutChannel = timer.C
+	}
+	return waitForProxyDeviceWindow(
+		ctx,
+		self.ctx,
+		deviceState,
+		timeoutChannel,
+		windowRoutable,
+	)
+}
+
 // proxyDeviceWindowStatusSource is the narrow DeviceLocal readiness surface.
 // Keeping the wait independent of the concrete device makes every ordering
 // edge deterministic to test without a live provider window.
@@ -1734,10 +1853,39 @@ func waitForProxyDeviceReady(
 	windowStatusSource proxyDeviceWindowStatusSource,
 	timeoutChannel <-chan time.Time,
 ) bool {
+	return waitForProxyDeviceWindow(
+		callerCtx,
+		deviceCtx,
+		windowStatusSource,
+		timeoutChannel,
+		windowReady,
+	)
+}
+
+// The window holds its minimum.
+func windowReady(windowStatus *sdk.WindowStatus) bool {
+	return windowStatus != nil && windowStatus.MinSatisfied
+}
+
+// The window can carry a new flow: below its minimum it still routes through
+// the providers it holds.
+func windowRoutable(windowStatus *sdk.WindowStatus) bool {
+	return windowStatus != nil && (windowStatus.MinSatisfied || 0 < windowStatus.ProviderStateAdded)
+}
+
+// waitForProxyDeviceWindow is waitForProxyDeviceReady for any window state:
+// only a status that satisfies want returns true.
+func waitForProxyDeviceWindow(
+	callerCtx context.Context,
+	deviceCtx context.Context,
+	windowStatusSource proxyDeviceWindowStatusSource,
+	timeoutChannel <-chan time.Time,
+	want func(*sdk.WindowStatus) bool,
+) bool {
 	ready := make(chan struct{}, 1)
 	sub := windowStatusSource.AddWindowStatusChangeListener(&windowStatusChangeListener{
 		callback: func(windowStatus *sdk.WindowStatus) {
-			if windowStatus != nil && windowStatus.MinSatisfied {
+			if want(windowStatus) {
 				select {
 				case ready <- struct{}{}:
 				default:
@@ -1747,8 +1895,7 @@ func waitForProxyDeviceReady(
 	})
 	defer sub.Close()
 
-	windowStatus := windowStatusSource.GetWindowStatus()
-	if windowStatus != nil && windowStatus.MinSatisfied {
+	if want(windowStatusSource.GetWindowStatus()) {
 		return true
 	}
 
