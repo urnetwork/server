@@ -273,6 +273,9 @@ func parseVerifySettings(res *server.SimpleResource) *model.VerifySettings {
 	if s.CohortSize, s.CohortLifetimeLimit, err = verifyCohortSettings(conf.Profile, v.CohortSize, v.CohortLifetimeLimit); err != nil {
 		panic(fmt.Errorf("verify.yml %w", err))
 	}
+	if 0 < s.CohortSize {
+		s.CohortCensusLimit = max(s.CohortLifetimeLimit, verifyDefaultCohortCensusLimit)
+	}
 	if cfg := stConfig(); cfg != nil {
 		// The cohort's settlement epoch is this deployment's st epoch mirror.
 		// Without one the cohort admits nobody; it never samples unbounded.
@@ -302,6 +305,15 @@ const (
 	verifyDefaultCohortSize          = 1500
 	verifyDefaultCohortLifetimeLimit = 2000
 )
+
+// With stale rotation (model/verify_cohort_rotation.go) the lifetime set is
+// the active set, and the census, every provider ever admitted, is bounded
+// separately: unclaimed providers still never grow it past the lifetime
+// limit, and claimed fleets' members may grow it to three quarters of the
+// validator's signed 4,096. The census is durable in Postgres, so a Redis data
+// loss refuses new providers until it is restored instead of re-admitting up
+// to another lifetime limit, which is what kept the limit under half of 4,096.
+const verifyDefaultCohortCensusLimit = 3072
 
 // verifyCohortSettings resolves the verify.yml cohort keys. Mainnet always
 // bounds next-hop sampling: absent keys take the defaults and zero is refused.

@@ -317,9 +317,9 @@ func snClaimedFleets(ctx context.Context, deploymentKey model.StDeploymentKey, e
 }
 
 // Refreshes what the claimed fleets at the current settlement epoch drive,
-// after each sync run: the dashboard counts, and the verify cohort's priority
-// set of live claimed-fleet members, at most a per-fleet share of each
-// (LEADERTOP.md design question 6).
+// after each sync run: the dashboard counts, the verify cohort's priority
+// set of live claimed-fleet members, at most a per-fleet share of each, and
+// the cohort's stale rotation (LEADERTOP.md design question 6).
 func refreshSnClaimedFleetsNow(ctx context.Context) {
 	server.HandleError(func() {
 		claimed, ok, err := SnClaimedFleetsNow(ctx)
@@ -353,6 +353,11 @@ func refreshSnClaimedFleetsNow(ctx context.Context) {
 		}
 		priority := model.SetVerifyCohortPriority(ctx, settings.CohortDeploymentKey, fleets, model.VerifyCohortPriorityPerFleet(settings))
 		snVerifyCohortPriorityMembers.Set(float64(priority))
+		// with the priority set fresh, rotate stale members out for the
+		// claimed members still waiting for room
+		if rotation := model.RotateVerifyCohort(ctx, settings); rotation != nil && (0 < rotation.Rotated || rotation.Restored) {
+			glog.Infof("[sn]verify cohort rotation: %d stale members out for %d waiting (census %d, active %d, restored %t)\n", rotation.Rotated, rotation.Demand, rotation.Census, rotation.Active, rotation.Restored)
+		}
 	}, func(err error) {
 		glog.Infof("[sn]claimed fleet refresh failed: %s\n", err)
 	})

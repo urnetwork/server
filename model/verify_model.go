@@ -206,6 +206,11 @@ type VerifySettings struct {
 	CohortSize          int
 	CohortLifetimeLimit int
 	CohortDeploymentKey StDeploymentKey
+	// CohortCensusLimit bounds every provider the deployment ever admits once
+	// stale members rotate out of the lifetime set (RotateVerifyCohort). Only
+	// claimed fleets' members are admitted past CohortLifetimeLimit, up to it.
+	// Zero or anything below CohortLifetimeLimit leaves no room past it.
+	CohortCensusLimit int
 	// HopLatencyFromAttributedAttempt counts a hop confirmed after a
 	// retryable answer from the step's last such answer: its AssignedMs is
 	// that time (§7.5). Off by default, a confirmed hop keeps its ASSIGN time
