@@ -209,6 +209,10 @@ type ProxyDeviceManager struct {
 	mintAdmission *localclient.MintAdmission
 	// One contract creation bound shared by every device this manager opens.
 	contractAdmission *localclient.ContractAdmission
+	// One scheduler-pause detector for every multi client of every device
+	// this manager opens, instead of a detector goroutine and timer per
+	// client. Stops with the manager.
+	schedulerPauseDetector *connect.SchedulerPauseDetector
 
 	// stateLock guards the proxyDevices map. It is read-mostly: every
 	// OpenProxyDevice looks up an existing pdState (RLock, concurrent), and only
@@ -280,8 +284,9 @@ func NewProxyDeviceManager(ctx context.Context, settings *ProxyDeviceManagerSett
 		windowIdentityGate: newWindowIdentityRestoreGate(
 			settings.HoldWindowIdentityRestore,
 		),
-		mintAdmission:     localclient.NewMintAdmission(settings.HostedMintConcurrency),
-		contractAdmission: localclient.NewContractAdmission(settings.HostedContractConcurrency),
+		mintAdmission:          localclient.NewMintAdmission(settings.HostedMintConcurrency),
+		contractAdmission:      localclient.NewContractAdmission(settings.HostedContractConcurrency),
+		schedulerPauseDetector: connect.NewSchedulerPauseDetector(cancelCtx),
 	}
 	manager.networkSpaceBuilder = newProxyDeviceManagerNetworkSpace
 	manager.networkSpaceCloser = func(networkSpace *sdk.NetworkSpace) {
@@ -589,6 +594,7 @@ func (self *ProxyDeviceManager) proxyDeviceSettings() *ProxyDeviceSettings {
 	settings.windowIdentityGate = self.windowIdentityGate
 	settings.mintAdmission = self.mintAdmission
 	settings.contractAdmission = self.contractAdmission
+	settings.schedulerPauseDetector = self.schedulerPauseDetector
 	return settings
 }
 
@@ -942,6 +948,13 @@ type deviceCreation struct {
 	err  error
 }
 
+// defaultProxyDeviceIdleTimeout is how long a device is held with no user
+// traffic. Activity is user traffic only: packets from a WireGuard peer and
+// back to it, bytes on an HTTP or SOCKS relay connection, an open, or an
+// attached device-rpc session. The device's own upkeep on its tun (DoH
+// keepalive pings, resolver refreshes) does not hold it.
+const defaultProxyDeviceIdleTimeout = 45 * time.Minute
+
 func DefaultProxyDeviceSettings() *ProxyDeviceSettings {
 	return DefaultProxyDeviceSettingsWithBufferSize(32)
 }
@@ -951,7 +964,7 @@ func DefaultProxyDeviceSettingsWithBufferSize(bufferSize int) *ProxyDeviceSettin
 		ProxyDeviceDescription:       "resident proxy",
 		ProxyDeviceSpec:              "resident proxy",
 		Mtu:                          connect.DefaultMtu,
-		ProxyDeviceIdleTimeout:       90 * time.Minute,
+		ProxyDeviceIdleTimeout:       defaultProxyDeviceIdleTimeout,
 		SequenceBufferSize:           bufferSize,
 		MemoryTargetByteCount:        defaultProxyDeviceMemoryTargetByteCount,
 		HostedEvaluationPoolMultiple: defaultHostedEvaluationPoolMultiple,
@@ -986,6 +999,9 @@ type ProxyDeviceSettings struct {
 	mintAdmission *localclient.MintAdmission
 	// the owning manager's contract creation bound; nil is unbounded
 	contractAdmission *localclient.ContractAdmission
+	// the owning manager's shared scheduler-pause detector; nil runs one per
+	// multi client
+	schedulerPauseDetector *connect.SchedulerPauseDetector
 }
 
 // The owner's bounds the device's local authority shares.
@@ -1296,6 +1312,9 @@ func newProxyDeviceLocalSettings(
 	// wrong network: offer no delay header and measure nothing
 	// (connect/DELAY.md §10.4)
 	deviceLocalSettings.EnableTransportDelay = false
+	// a suspend or a starved scheduler is a fact about this host, judged once
+	// for all of its devices
+	deviceLocalSettings.SchedulerPauseDetector = proxyDeviceSettings.schedulerPauseDetector
 	return deviceLocalSettings
 }
 
@@ -1392,17 +1411,21 @@ func (self *ProxyDevice) Run() {
 	sub := self.deviceLocal.AddReceivePacketsCallback(receivePacketsCallback)
 	defer sub()
 
-	// read in batches to reduce wakeups under load
+	// read in batches to reduce wakeups under load. Egress read here is not
+	// activity: the HTTP and SOCKS relay connections count their own bytes
+	// (instrumentProxyConnection), and what else the tun sends is the device's
+	// own upkeep, such as the DoH keepalive pings, which must not hold an
+	// idle device
 	packets := make([][]byte, 64)
 	for {
-		if !self.UpdateActivity() {
+		if self.isDone() {
 			return
 		}
 		n, err := self.tun.ReadBatch(packets)
 		if err != nil {
 			return
 		}
-		if !self.UpdateActivity() {
+		if self.isDone() {
 			// ReadBatch handed us every pooled copy; no sender owns them yet.
 			for index, packet := range packets[:n] {
 				connect.MessagePoolReturn(packet)
@@ -1422,14 +1445,17 @@ func (self *ProxyDevice) Run() {
 // could only serve one of those paths at a time: any overlapping Tun dial
 // silently stole every WireGuard return packet, while late Tun packets were
 // handed to WireGuard. Destination demultiplexing keeps all paths live.
+//
+// Only a delivery to the WireGuard peer is activity (deliverWireGuardReturn).
+// A return to the tun counts when a relay connection reads it, or not at all
+// when it answers the device's own upkeep.
 func (self *ProxyDevice) deliverReturnPackets(packets [][]byte) {
-	if !self.UpdateActivity() {
+	if self.isDone() {
 		return
 	}
 	receive, receiveAddr, natClientAddr, receiveNotify := self.receiveWithNotifyNat()
 	if receive == nil {
 		_, _ = self.tun.WriteBatch(packets)
-		self.UpdateActivity()
 		return
 	}
 
@@ -1471,7 +1497,6 @@ func (self *ProxyDevice) deliverReturnPackets(packets [][]byte) {
 			return
 		}
 	}
-	self.UpdateActivity()
 }
 
 // deliverWireGuardReturn preserves the device-side Tun loss model: provider
@@ -1938,6 +1963,8 @@ func (self *ProxyDevice) Active() bool {
 	return deviceState != nil && !deviceState.GetDone()
 }
 
+// UpdateActivity records user traffic, holding the device against the idle
+// reaper. False once the device is done.
 func (self *ProxyDevice) UpdateActivity() bool {
 	select {
 	case <-self.ctx.Done():
@@ -1945,6 +1972,15 @@ func (self *ProxyDevice) UpdateActivity() bool {
 	default:
 		self.lastActivityNanos.Store(time.Now().UnixNano())
 		return true
+	}
+}
+
+func (self *ProxyDevice) isDone() bool {
+	select {
+	case <-self.ctx.Done():
+		return true
+	default:
+		return false
 	}
 }
 
