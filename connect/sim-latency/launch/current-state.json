@@ -3,7 +3,7 @@
   "kind": "sim-latency-launch-preparation-checkpoint",
   "observed_at": "2026-10-30T07:01:15.054160826Z",
   "scoring_enablement_current": {
-    "status": "R2_provisional_grading_enabled_recovery_105_tests_passed_control_image_prepared_activation_waits_preparation_clock_decision",
+    "status": "R2_provisional_grading_enabled_original_recovery_105_tests_passed_zero_sample_setup_clock_repair_under_qualification",
     "observed_at": "2026-10-30T06:31:27.228534355Z",
     "metadata_checkpoint_only": true,
     "actual_intake_open": true,
@@ -115,14 +115,18 @@
           "activated": false,
           "source_or_evaluator_freeze_changed": false
         },
-        "clock_decision_pending": {
-          "approval_requested": true,
-          "fresh_clock_approved": false,
-          "current_code_enforces_original_deadline": true,
+        "setup_clock_repair": {
+          "earlier_approval_question_reclassified_as_implementation_scope": true,
+          "explicit_new_owner_reply_received": false,
+          "operator_authorized_zero_sample_setup_recovery": true,
+          "authority_basis": "Existing owner launch/fix instructions; the user10800-second cap applies to individual submissions, whose started_at remainsNULL until the epoch baseline is published. The expired reservation is a separate setup owner, not a started submission or measured sample.",
+          "new_execution_mode": "operator_recovered_zero_sample_three_hour_v1",
+          "new_mode_activated": false,
+          "previously_prepared_8a_worker_enforces_original_deadline": true,
           "original_deadline_approximately": "2026-10-30T07:51:24Z",
           "public_pilot_control_evidence": "Eight inter-completion intervals from all nine preserved controls imply86.22 minutes for nine runs, before cold-start/archive allowance; this is an estimate, not a production measurement.",
-          "requested_amendment": "Fresh preparation-only three-hour clock with same hidden workload/R9 and preserved failed reservation/evidence; per-submission10800-second deadline and all gates remain unchanged.",
-          "new_enforcing_worker_code_and_qualification_required_if_approved": true,
+          "repair_scope": "One explicit private operator capability gives zero-sample preparation a bounded execution interval while retaining original reservation owner/start/deadline in the append-only audit. Same hidden workload/R9; per-submission10800-second deadline and all gates remain unchanged.",
+          "new_enforcing_worker_code_and_qualification_required": true,
           "metadata_cannot_override_current_binary_clock": true,
           "no_recovery_authorization_or_transition_activated": true
         },
@@ -182,7 +186,7 @@
       "public_provider_request_before_census_and_Root_reported_native_collision_preparation_not_measurement"
     ],
     "pending": [
-      "resolve_preparation_clock_authority_then_activate_qualified_recovery_without_resampling_or_spending_submission_attempts",
+      "qualify_and_activate_explicit_zero_sample_setup_execution_clock_without_resampling_or_spending_submission_attempts",
       "seal_native_replacement_public_pilot_plan_and_publish_before_any_measurements",
       "precommit_and_complete_owner_approved_new_public_R9_R9_pilot_without_weakening_any_submission_gate",
       "only_after_accepted_new_pilot_and_native_after_census_one_new_hidden_seed_and36_native_fresh_single_screen_runs",
