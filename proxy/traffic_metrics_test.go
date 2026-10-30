@@ -72,7 +72,7 @@ func TestProxyConnectionMetricsPreserveDirectionalBytesAndCloseOnce(t *testing.T
 	registry := prometheus.NewPedanticRegistry()
 	metrics := newProxyTrafficMetrics(registry)
 	relayConn, destinationConn := net.Pipe()
-	wrapped := metrics.instrumentConnection("http", relayConn)
+	wrapped := metrics.instrumentConnection("http", relayConn, nil)
 
 	writeDone := make(chan error, 1)
 	go func() {
