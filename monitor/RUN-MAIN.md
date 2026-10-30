@@ -1503,6 +1503,12 @@ A source census or static path check is not physical runtime qualification, and
 a focused repair does not qualify the full normal/race gates. Sol Low owns the
 physical prerequisite checks and test execution.
 
+For directory bind mounts, verify read/search and required file access as the
+pinned image's effective container user before fixture startup. A copied `0700`
+directory can preserve every byte and still deny initdb access. Declare the
+required mounted-directory mode (local Postgres initdb uses `0755`); preserve
+parent and file modes, and retain role metadata plus the consumer-access proof.
+
 The native test prerequisites are separate from the PostgreSQL/Redis resource
 attestation. Before launching either full monitor suite, bind
 `MONITOR_PG_TAIL_REAL_PSQL` to an explicitly qualified absolute, executable native
