@@ -1,0 +1,92 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-approved-calibration-next-serial-action",
+  "observed_at": "2026-10-30T11:22:39Z",
+  "purpose": "Exact qualified native preparation handoff. Guidance only: no unit started, plan created, measurements taken, hidden entropy drawn, or production controls changed.",
+  "production_service": "urnetwork-competition-production-r2.service",
+  "calibration_root": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2",
+  "admission_before_any_execution": [
+    "Read current production queue, running job, durable holds and live supervisor from authoritative state.",
+    "Agree the maintenance/intake boundary; current controls cannot keep intake ready beyond 60 seconds after the real worker stops.",
+    "Do not interrupt or consume another attempt of the admitted evaluation. A freshly authorized evaluation hold can fence subsequent claims while the current job finishes.",
+    "Stop and join the production worker only in the agreed serial gap; preserve its unit and do not change frozen source, scoring policy or deadlines.",
+    "Require an idle canonical scoring slot and original three-container/four-network inventory. Do not opportunistically race queued production claims.",
+    "Rehash the exact native operator and configuration before execution. The native program owns its lock: do not add an outer flock.",
+    "Require the new plan and execution/results claims to be absent; an uncertain or failed one-use execution is not automatically retryable."
+  ],
+  "executable": "/mnt/data/operator233-compile-qa-20261030.6p9XdoUI/operator233.test",
+  "executable_sha256": "b1c3e311f76cafdc96327214065f431bda145005d8900563f9c32089e3c58a6c",
+  "preparation_configuration": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2/inputs/prepare-config.native233.json",
+  "preparation_configuration_sha256": "6c7639a355947517eaa9f381479bc7bb3e87e651b6cda2a30c8e531293db5fab",
+  "native_tool_qualification_sha256": "83ceb22269bbb6e0837191a740bf1a5d8820fb48831e79e5bedb8c273a3c4be3",
+  "original_inventory_sha256": "1b319b1b2a4dede0ec678ea17f82f4d8e2486b479e8d91b22188a3f4914c9d1b",
+  "canonical_lock": "/home/by/urnetwork/temp/production-frontier-20261024.63AtMXS5/scoring.lock",
+  "systemd_envelope": {
+    "unique_new_transient_unit_required": true,
+    "wait": true,
+    "pipe": true,
+    "collect": true,
+    "Type": "exec",
+    "MemoryMax": "8G",
+    "MemorySwapMax": 0,
+    "AllowedCPUs": "20,22",
+    "TasksMax": 1024,
+    "KillMode": "control-group",
+    "TimeoutStopSec": 60,
+    "RuntimeMaxSec": 600,
+    "working_directory": "/var/lib/urnetwork"
+  },
+  "environment": {
+    "clear_inherited_environment": true,
+    "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+    "LC_ALL": "C",
+    "GOMAXPROCS": "2",
+    "WARP_ENV": "local",
+    "WARP_HOST": "calibration-control.test.example",
+    "WARP_HOME": "/var/lib/urnetwork/competition-review-qg-qualification-20261029-v1/empty-site",
+    "WARP_CONFIG_HOME": "/var/lib/urnetwork/competition-review-qg-qualification-20261029-v1/empty-config",
+    "WARP_VAULT_HOME": "/var/lib/urnetwork/competition-review-qg-qualification-20261029-v1/empty-vault",
+    "WARP_SITE_HOME": "/var/lib/urnetwork/competition-review-qg-qualification-20261029-v1/empty-site",
+    "SIM_LATENCY_HELD_OUT_REAL_OPT_IN": "1",
+    "SIM_LATENCY_PUBLIC_PILOT_COMMAND": "prepare",
+    "SIM_LATENCY_PUBLIC_PILOT_CONFIG": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2/inputs/prepare-config.native233.json",
+    "SIM_LATENCY_PUBLIC_PILOT_CONFIG_SHA256": "6c7639a355947517eaa9f381479bc7bb3e87e651b6cda2a30c8e531293db5fab"
+  },
+  "arguments": [
+    "-test.run=^TestHeldOutPublicPilotCommand$",
+    "-test.count=1",
+    "-test.parallel=1",
+    "-test.timeout=0"
+  ],
+  "preparation_output": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2/plan.json",
+  "environment_provenance": {
+    "successful_preparation_unit": "urnetwork-public-pilot-prepare-native225-20261029-v1.service",
+    "actual_successful_interval": "2026-10-29T21:20:24Z/2026-10-29T21:20:54Z",
+    "caveat": "Reuse only the reviewed local environment/envelope. New native233 operator and configuration pins are distinct; historical native225 source, plan, publication values and failed pilot remain unchanged."
+  },
+  "after_preparation": [
+    "Reinspect authoritative state and safely resume production if only a short preparation gap was agreed; never overlap actual calibration measurements.",
+    "Hash and version the entire exact new public plan bytes under connect/sim-latency/launch/reduced-public-pilot-2026-10-30/plan.json, not the historical failed pilot path.",
+    "Commit, pull/merge and push. Independently read back the actual pushed Git blob and remote-main ancestry; retain actual publication time and proof.",
+    "Install the truthful protected plan-publication.json receipt and pinned evidence. Do not copy historical publication times, commit values or hashes.",
+    "Only after genuine serial host reservation, inventory/memory checks, and native publication admission may the one-use timed public R9/R9 pilot start.",
+    "Require accepted native public direction and AFTER13 census before drawing the approved new hidden seed. Keep original failed results and unused original second seed unchanged.",
+    "Complete independent calibration acceptance and scoped COMPLIANCE exact-version readback before finalization, accepted-marker creation or reward delivery release."
+  ],
+  "publication_schema_source": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2/inputs/tool233-source-pins/fragment-04-held-out-execution.go.txt",
+  "publication_receipt_path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2/plan-publication.json",
+  "publication_receipt_required_keys": [
+    "schema",
+    "kind",
+    "plan_sha256",
+    "published_at",
+    "commit",
+    "repository",
+    "plan_path",
+    "remote_ref",
+    "pulled_and_pushed",
+    "evidence"
+  ],
+  "historical_failed_pilot_values_must_not_be_reused": true,
+  "original_intake_revision_1_exception_must_not_be_replayed": true
+}

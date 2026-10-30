@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-live-submitter-polling-and-embargo-check",
+  "observed_at": "2026-10-30T11:14:17Z",
+  "environment": "main",
+  "competition_id": "sim-latency-season-1",
+  "season_id": "sim-latency-production-20261028-r2",
+  "round_id": "01a1855d-49bd-0250-90db-d0c0885f0e46",
+  "authentication": "Existing Macrocosmos production submitter credential read locally; credential omitted.",
+  "first_job": {
+    "job_id": "01a18824-ad80-6c43-0b25-a76707293d0f",
+    "http": 200,
+    "state": "completed",
+    "evaluation_status": "completed",
+    "score_exposed": false,
+    "private_error_exposed": false,
+    "worker_image_digest": "sha256:80520bb4b046055b84adc9d083fdc0aa263b93345d9e0f79eaeab718ac36df93",
+    "response_sha256": "3c511eff34d1f58b153662303765934146f04e96827e3450b4b7c665deefffc2"
+  },
+  "current_job": {
+    "job_id": "01a1882e-1c50-8353-220d-18ea401906d3",
+    "http": 200,
+    "state": "running",
+    "evaluation_status": "running",
+    "score_exposed": false,
+    "private_error_exposed": false,
+    "worker_image_digest": "sha256:80520bb4b046055b84adc9d083fdc0aa263b93345d9e0f79eaeab718ac36df93",
+    "response_sha256": "fb3e75f22dea894ef58ea80beca7ccdfbb669316dc984b92ee6c3f50d8f405ff"
+  },
+  "unpublished_round": {
+    "http": 409,
+    "code": "round_not_published",
+    "response_sha256": "3c133146b30f742239f9f8645978138dd3d4916989f1c9a1608fa96849629f48"
+  },
+  "private_evidence_directory": "/var/lib/urnetwork/competition-production-r2-20261029-v1/api-live-poll-20261030.Hz7j7v1e",
+  "no_new_submission_or_remote_write": true,
+  "no_evaluation_interruption": true
+}
