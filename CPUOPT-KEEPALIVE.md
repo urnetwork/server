@@ -40,7 +40,9 @@ heartbeat.
 
 - **Original change:** server 282565213 (10-29), deployed in connect
   `2026.10.29-outerwerld-1085173010` (10-30 02:26–03:05Z). It turned keepalive
-  off on dialed and accepted exchange sockets.
+  off on dialed and accepted exchange sockets. The owner had asked for
+  keepalive at half the read timeout. It was turned off instead, on the
+  heartbeat reasoning below.
 - **Why it seemed safe:** each end pings every ExchangePingTimeout
   (ReadTimeout / 3 = 10 s) against an ExchangeReadTimeout (30 s) read deadline.
 - **What it cost to keep:** at the dialer's 1 s idle, probes and their ACKs
@@ -54,7 +56,8 @@ heartbeat.
   - **Quiet while live:** a live connection receives a ping or data at least
     every ping interval, so it is never quiet for idle and sends no probe.
   - **Bounded when dead:** a dead peer is cut at most 15 s after its last
-    packet at the default 10 s ping, within the former 16 s.
+    packet at the default 10 s ping, within the former 16 s. That is half the
+    30 s ExchangeReadTimeout, the bound the owner first asked for.
 - **Tests:** server/connect/exchange_tcp_keepalive_test.go. They read
   SO_KEEPALIVE, TCP_KEEPINTVL and TCP_KEEPCNT back from real dialed and
   accepted sockets, and pin idle > ping, the 16 s bound and detection before
