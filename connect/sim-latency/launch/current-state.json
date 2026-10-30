@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-30T06:31:27.228534355Z",
+  "observed_at": "2026-10-30T07:01:15.054160826Z",
   "scoring_enablement_current": {
     "status": "R2_provisional_grading_enabled_recovery_105_tests_passed_control_image_prepared_activation_waits_preparation_clock_decision",
     "observed_at": "2026-10-30T06:31:27.228534355Z",
@@ -52,6 +52,20 @@
       },
       "normal_epoch_embargo_still_active": true,
       "actual_submission_execution_started": false,
+      "worker_host_storage_read_check": {
+        "completed_at": "2026-10-30T07:01:15.054160826Z",
+        "versioned_observation": "server/connect/sim-latency/launch/capacity-check/LIVE-PROOF-2026-10-30.json",
+        "retention_configuration_checked": true,
+        "versions_and_delete_markers": 585,
+        "used_body_bytes": 1893410419,
+        "allocation_bytes": 10000000000000,
+        "remote_writes": 0,
+        "raw_receipt_sha256": "49235c978ae15d324173b6aa529745c1d769a900f0671644bca88adf71e96e24",
+        "native_helper_sha256": "37adfebce748e63863a6507932847aeaeebe3276e2b7544b3943bcfe318cd88b",
+        "synthetic_passes": 12,
+        "physical_free_retained_upload_replica_delivery_api_ready_or_scoring_activation_claimed": false,
+        "original_failed_hold_archive_cause": "UNKNOWN; successful current reads do not reconstruct the later retention failure"
+      },
       "latest_queue_observation": {
         "at": "2026-10-30T06:31:27.228534355Z",
         "queued": 9,
