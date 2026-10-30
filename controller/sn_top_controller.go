@@ -13,8 +13,8 @@ package controller
 // privacy rules, the tempo anchor, the task's inputs and its schedule.
 //
 // Claimed fleets, the validator's head summary and on-chain incentive come
-// from the chain sync through snTopSources. Until those sources land they
-// return nothing, and their fields stay null.
+// from the chain sync through snTopSources (sn_top_chain_sources.go). Before
+// each has data its fields stay null.
 
 import (
 	"context"
@@ -140,7 +140,7 @@ type SnTopIncentive struct {
 }
 
 // SnTopSources are the board's inputs from the chain sync. Each returns
-// nothing until its source has data, and then the board's claimed fleet,
+// nothing until its source has data; until then the board's claimed fleet,
 // validator and incentive fields stay null.
 type SnTopSources struct {
 	// the live claimed fleets of the settlement epoch, with member clients
