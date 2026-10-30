@@ -449,6 +449,33 @@ func WrapWithInputRequireClientUnlessAnswered[T any, A any, R any](
 	)
 }
 
+// WrapOptionalAuth is WrapWithInputOptionalAuth for a request without a JSON
+// body: signed-out callers are served, and a request that carries an
+// Authorization header is authenticated exactly as RequireAuth would (a bad
+// token is a 401, not a silently signed-out request).
+func WrapOptionalAuth[R any](
+	impl ImplFunction[R],
+	w http.ResponseWriter,
+	req *http.Request,
+	formatters ...FormatFunction[R],
+) {
+	wrap(
+		func(clientSession *session.ClientSession) (R, error) {
+			if req.Header.Get("Authorization") != "" {
+				if err := clientSession.Auth(req); err != nil {
+					var empty R
+					return empty, authenticationHttpError(err)
+				}
+			}
+			r, err := impl(clientSession)
+			return r, tagImplError(impl, err)
+		},
+		w,
+		req,
+		formatters...,
+	)
+}
+
 // WrapWithInputOptionalAuth serves signed-out callers and, when the request
 // carries an Authorization header, authenticates it exactly as RequireAuth
 // would (a bad token is a 401, not a silently signed-out request). The impl
