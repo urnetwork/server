@@ -1,10 +1,10 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-30T03:29:02Z",
+  "observed_at": "2026-10-30T03:54:17Z",
   "scoring_enablement_current": {
     "status": "R2_intake_open_reduced_reference_native_and336_correctness_verified_new699_operator_qualification_running_production_grading_held",
-    "observed_at": "2026-10-30T03:29:02Z",
+    "observed_at": "2026-10-30T03:54:17Z",
     "metadata_checkpoint_only": true,
     "actual_intake_open": true,
     "grading_enabled": false,
@@ -161,6 +161,13 @@
       "caller_flag_omission_preserved_and_fixed_with_expected_red_then_three_two_test_green_processes": true,
       "new_measurements_started": false,
       "scoring_restoration_procedure": "server/connect/sim-latency/launch/SCORING-RESTORE-2026-10-30.md",
+      "baseline_preservation_repair": {
+        "record": "server/connect/sim-latency/launch/BASELINE-MANIFEST-REPAIR-2026-10-30.json",
+        "deterministic_passes_separate_from_operator_scope": 18,
+        "actual_manifest_checksums_verified": 3689,
+        "measurement_files_changed": false,
+        "scoring_or_calibration_acceptance_claimed": false
+      },
       "submission_gates_and_frozen_competition_identity_unchanged": true,
       "prior_failed_pilot_remains_rejected": true
     },
