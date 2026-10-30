@@ -49,13 +49,17 @@ The largest memory owner was WireGuard peers:
    4. the handler, called on its own goroutine.
 4. **The worker wait:** a worker waits at most `HandlerTimeout`; the proxy
    sets 250 ms.
-   - On timeout the initiation is dropped. The late answer still creates the
-     peer, so the client's retry about 5 s later succeeds.
+   - On timeout the initiation is dropped. A late answer still creates the
+     peer if its resolution remains current, so the client's retry about 5 s
+     later succeeds. Configuration removal or replacement invalidates it.
    - A panicking handler counts as a failure and is not cached.
 5. **Creating the peer:** an accepted miss runs `AddPeerOnDemand`.
-   - It holds `ipcMutex.RLock`, so it can't overlap IpcSet, Up, Down or Close.
-   - It re-checks and inserts the peer under the peer-map lock, sets the
-     allowed IPs and starts it.
+   - Completion verifies ownership of the key's pending resolution under the
+     exclusive configuration lock, then installs it while retaining that lock.
+     Removal, IpcSet, Up, Down and Close use the same serialization boundary.
+   - It allocates, configures and starts the peer before publishing it under
+     the peer-map lock. Concurrent creators wait for initialization to finish;
+     packet lookup cannot observe a partially configured on-demand peer.
    - The worker then consumes the same initiation again, so the first
      handshake completes without a retry.
 6. **Smaller lock windows:** `NewPeer` now computes the static-static key and
@@ -79,13 +83,19 @@ keys are dropped).
 - **Indexing:** `AddClients` only indexes clients, mapping address and public
   key to address and preshared key. The miss handler reads the index under an
   RLock: no Redis or PG on the receive path.
-- **Client changes:** removing a client, changing an address's key, or moving a
-  key to another address removes the live peer and detaches its tun.
+- **Client changes:** removal, key/address replacement and preshared-key
+  changes invalidate pending resolutions and remove the old peer before
+  publishing or endpoint-seeding its replacement. Unchanged configurations
+  preserve live sessions. Server-first creation shares the control lock with
+  reconciliation, so it cannot recreate a client from a stale snapshot.
 - **Eviction:** every minute, peers whose newest handshake (or creation, if
   they never completed one) is over 10 minutes old are removed. Any traffic
   needs a handshake at least every 180 s, so an active session is never
   evicted. An evicted client's tun is detached, not cancelled, and its next
-  packet re-attaches it.
+  packet re-attaches it. Eviction snapshots attachment activity before removing
+  peers and detaches only unchanged entries. External attachment calls run
+  outside the state lock and reconcile the current address/channel afterward,
+  so delayed calls cannot overwrite a newer activation or address move.
 - **Server-first traffic:** the deploy handoff is the only path where the
   proxy sends first. A client added with an `Endpoint`, a `SeedEndpoints`
   call, and an `InitiateHandshake` call each create the peer.
@@ -115,9 +125,11 @@ keys are dropped).
   - It is bounded by the cookie check, the per-source limiter, the 1,024/s
     budget and eviction.
   - In the worst case the memory equals what eager registration costs today.
-- **Orphan peer.** If a client is removed while its handshake is in flight, its
-  peer can survive up to about 11 minutes. It carries no traffic, because the
-  client is no longer in the index.
+- **Revocation during a handshake.** Removing a client invalidates pending
+  answers even when no peer exists yet, and joins any peer installation that
+  already began. Late accepted answers cannot restore its key or allowed-IP
+  route. The previous claim that an orphan could safely survive for 11 minutes
+  was incorrect: it could rehandshake indefinitely and reach a reused address.
 - **Cold connects on a saturated host.** If the handler wait exceeds 250 ms,
   the initiation is dropped and the connect takes about 5 s longer.
 - **Not tested:** an old eager-mode instance handing off to a new on-demand
