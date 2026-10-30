@@ -7,10 +7,11 @@
   "calibration_root": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2",
   "admission_before_any_execution": [
     "Read current production queue, running job, durable holds and live supervisor from authoritative state.",
-    "Agree the maintenance/intake boundary; current controls cannot keep intake ready beyond 60 seconds after the real worker stops.",
+    "For timed calibration, agree the maintenance/intake boundary before stopping the worker. This is not required for a brief plan-only reservation that keeps the actual held worker online and genuinely fresh.",
     "Do not interrupt or consume another attempt of the admitted evaluation. A freshly authorized evaluation hold can fence subsequent claims while the current job finishes.",
-    "Stop and join the production worker only in the agreed serial gap; preserve its unit and do not change frozen source, scoring policy or deadlines.",
-    "Require an idle canonical scoring slot and original three-container/four-network inventory. Do not opportunistically race queued production claims.",
+    "The pending FIFO is unbounded and need NOT be empty. Preserve every queued admission and its unstarted attempt/deadline; drain only the active evaluation after fencing subsequent claims.",
+    "Plan-only preparation: keep the actual held worker online with normal host self-checks and runner heartbeats. After the active evaluation completes, require the canonical scoring lock to be available; native prepare does not require worker absence or an inventory census.",
+    "Timed execution only: stop and join the production worker in the agreed maintenance window and require the original three-container/four-network inventory. Preserve its unit and all frozen source, scoring policy and deadlines. Never race unfenced pending claims.",
     "Rehash the exact native operator and configuration before execution. The native program owns its lock: do not add an outer flock.",
     "Require the new plan and execution/results claims to be absent; an uncertain or failed one-use execution is not automatically retryable."
   ],
@@ -65,7 +66,8 @@
     "caveat": "Reuse only the reviewed local environment/envelope. New native233 operator and configuration pins are distinct; historical native225 source, plan, publication values and failed pilot remain unchanged."
   },
   "after_preparation": [
-    "Reinspect authoritative state and safely resume production if only a short preparation gap was agreed; never overlap actual calibration measurements.",
+    "Before releasing a brief preparation hold while calibration remains pending, qualify the deadline guard for the prospective release revision. Fresh-read and confirm the actual release, then immediately install/reverify the matching guard; preserve its original global one-use claim, acceptance marker, scope and November 5 deadline. Do not leave the guard expecting the earlier revision.",
+    "Reinspect authoritative state and safely resume provisional production after the brief plan-only reservation; keep rewards held and the normal result embargo. Never overlap actual calibration measurements.",
     "Hash and version the entire exact new public plan bytes under connect/sim-latency/launch/reduced-public-pilot-2026-10-30/plan.json, not the historical failed pilot path.",
     "Commit, pull/merge and push. Independently read back the actual pushed Git blob and remote-main ancestry; retain actual publication time and proof.",
     "Install the truthful protected plan-publication.json receipt and pinned evidence. Do not copy historical publication times, commit values or hashes.",
