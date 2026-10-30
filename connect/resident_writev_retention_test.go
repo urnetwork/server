@@ -33,12 +33,15 @@ func (self *exchangeWritevObservedTcpConn) Write(p []byte) (int, error) {
 	return self.TCPConn.Write(p)
 }
 
-// Counts installed write deadlines. The exchange re-arms its write deadline
-// only once a third of WriteTimeout has passed, so a batch written right after
-// the singleton installs none.
+// Closes the batch socket only after its deadline succeeds for the immediate-error case.
 func (self *exchangeWritevObservedTcpConn) SetWriteDeadline(deadline time.Time) error {
-	self.deadlines.Add(1)
-	return self.TCPConn.SetWriteDeadline(deadline)
+	err := self.TCPConn.SetWriteDeadline(deadline)
+	if self.deadlines.Add(1) == 3 && self.closeAtBatch && err == nil {
+		// The header and singleton have completed. Close the real socket only
+		// after the batch deadline succeeds, so WriteTo itself sees the error.
+		_ = self.TCPConn.Close()
+	}
+	return err
 }
 
 // Successful transport writes preserve payloads and release vector references.
@@ -276,12 +279,6 @@ func testExchangeConnectionWritevTerminalBatchWithFailure(
 		} else if dequeuedBatches == 2 {
 			writesBeforeBatch = socket.writes.Load()
 			batchWriteStarted.Store(true)
-			if socket.closeAtBatch {
-				// The header and singleton have completed. The batch installs no
-				// deadline this soon after the singleton, so closing the real
-				// socket here makes WriteTo itself see the error.
-				_ = socket.TCPConn.Close()
-			}
 		} else if outcome == "partial_timeout" {
 			if !previousNativeBatchFull.Load() {
 				peerDrainErr = fmt.Errorf("pressure drain requested without a fully written predecessor")
@@ -515,14 +512,7 @@ func testExchangeConnectionWritevTerminalBatchWithFailure(
 			t.Errorf("pressure drained %d wire bytes, want %d", peerDrainedWireBytes.Load(), wantDrainedWireBytes)
 		}
 	}
-	// The header and the singleton install write deadlines. A later batch
-	// re-arms only once a third of WriteTimeout has passed, which only the
-	// pressure batches that stall reach.
-	maxDeadlines := int64(2)
-	if outcome == "partial_timeout" {
-		maxDeadlines = int64(wantDequeuedBatches + 1)
-	}
-	if dequeuedBatches != wantDequeuedBatches || socket.deadlines.Load() < 2 || maxDeadlines < socket.deadlines.Load() || socket.writes.Load() != writesBeforeBatch {
+	if dequeuedBatches != wantDequeuedBatches || socket.deadlines.Load() != int64(wantDequeuedBatches+1) || socket.writes.Load() != writesBeforeBatch {
 		t.Fatalf("expected header, singleton, then bounded native batches: batches=%d deadlines=%d fallback writes=%d",
 			dequeuedBatches, socket.deadlines.Load(), socket.writes.Load()-writesBeforeBatch)
 	}
