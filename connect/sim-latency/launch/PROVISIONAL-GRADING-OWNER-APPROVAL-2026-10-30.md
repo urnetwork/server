@@ -55,7 +55,16 @@ An initial persistent cutoff timer is armed for November 5, 12:00 UTC, stopping
 the sole normal R2 supervisor before the 13:06 UTC close if not canceled after
 accepted calibration. This stop fence blocks the normal supervisor, not an
 independently authorized API caller; a stronger bounded API-hold guard is being
-prepared and is not yet claimed installed or tested here.
+prepared and was not yet installed at the time of that initial decision.
+
+Subsequently, the bounded guard passed 30 deterministic checks (10 roots in
+three fresh processes) and was installed and armed as
+`urnetwork-competition-calibration-api-cutoff-r2.timer`, at the same November 5,
+12:00 UTC cutoff. The guard persists its one-use claim before one bounded API
+request and stops the R2 worker on uncertainty or failure; it cannot manufacture
+calibration acceptance. The exact installed binary/unit pins and test receipt
+are recorded in [current-state.json](current-state.json). The guard has not
+been executed against main, and no accepted-calibration marker has been created.
 
 After a later evaluation re-hold, the original revision-1 intake-only exception
 does not apply. Reserve/announce any necessary maintenance pause or qualify a

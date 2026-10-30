@@ -1,0 +1,97 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-production-provisional-grading-live",
+  "observed_at": "2026-10-30T11:00:35.669710197Z",
+  "environment": "main",
+  "competition_id": "sim-latency-season-1",
+  "season_id": "sim-latency-production-20261028-r2",
+  "round_id": "01a1855d-49bd-0250-90db-d0c0885f0e46",
+  "grading_started": true,
+  "production_calibration_accepted": false,
+  "normal_epoch_embargo_still_active": true,
+  "reward_delivery_hold": {"revision": 1, "active": true},
+  "evaluation_hold": {"revision": 2, "active": false},
+  "baseline": {
+    "replicates": 9,
+    "prepared_at": "2026-10-30T09:19:46.820976200Z",
+    "published_at": "2026-10-30T09:23:40.651673Z",
+    "sha256": "b6b0b13f6137b32fd5569f9ff16d78d8dac3d578ad40549c8ae33513cf447557",
+    "completion_receipt_sha256": "2655752fecf552233b40e0e66a6775e69e658fa43b5a434a9a24aa42da9925f5",
+    "evidence_manifest_sha256": "3f1fc8ccaa057264a7260845d88456dc3368d1ca4bbce3f0436f079e203e065a",
+    "cleanup_complete": true,
+    "independent_local_metadata_linkage_verified": true,
+    "raw_sample_rehash_or_new_remote_worm_verification_claimed": false
+  },
+  "first_submission": {
+    "job_id": "01a18824-ad80-6c43-0b25-a76707293d0f",
+    "state": "succeeded",
+    "attempt_count": 1,
+    "started_at": "2026-10-30T09:23:40.651673Z",
+    "completed_at": "2026-10-30T10:50:44.803639Z",
+    "elapsed_seconds_rounded_to_milliseconds": 5224.152,
+    "candidate_replicates_completed": 9,
+    "shared_baseline_replicates": 9,
+    "evaluation_error": null,
+    "cleanup_complete": true,
+    "private_progress_sha256": "509818daad468c3de003a59ee6c05110df55b33825b70676573813b925db8f39",
+    "private_result_sha256": "62ac198f9b90d63ac66a917a675dcc465859648465290cbbcd7a6d26a03ab8a8",
+    "private_completion_sha256": "2c6257af7306107bfb92c9f089b6aa8ac2a12d840f4fe65f07ee4ddc6ec46327",
+    "raw_results_remain_private_under_epoch_embargo": true,
+    "success_does_not_claim_gate_pass_significance_reward_or_winner": true
+  },
+  "current_submission": {
+    "job_id": "01a1882e-1c50-8353-220d-18ea401906d3",
+    "state": "running",
+    "attempt_count": 1,
+    "started_at": "2026-10-30T10:50:51.961674Z",
+    "slot_heartbeat_at": "2026-10-30T11:00:15.556509Z",
+    "lease_live_at_database_observation": true,
+    "candidate_first_container_started_at": "2026-10-30T10:55:57.144987334Z",
+    "first_measurement_file_growth_observed": true,
+    "per_submission_time_limit_seconds": 10800
+  },
+  "queue": {"total": 11, "succeeded": 1, "running": 1, "queued": 9, "failed": 0},
+  "read_only_database_evidence": {
+    "path": "/var/lib/urnetwork/competition-production-r2-20261029-v1/grading-observation-20261030.qW4mM2yh/READONLY-SNAPSHOT.private.json",
+    "sha256": "7f87aa3e5a5fe4a813b88459289928050d810611681639cbdee31e46472724fe",
+    "transaction_read_only": true,
+    "no_database_writes_or_leases_claimed": true
+  },
+  "api_readiness": {
+    "checked_at": "2026-10-30T11:03:24.171671Z",
+    "http": 200,
+    "ready": true,
+    "all_11_checks_true": true,
+    "intake_ready": true,
+    "grading_ready": true,
+    "publication_held": false,
+    "normal_epoch_embargo_still_active": true,
+    "response_sha256": "5f976b54349c1caf1e1b20ede081a4adabf40601cebc05e4a4d40fa9270328c7"
+  },
+  "runtime": {
+    "service": "urnetwork-competition-production-r2.service",
+    "supervisor_started_at": "2026-10-30T07:53:05Z",
+    "supervisor_pid_at_observation": 410387,
+    "supervisor_restarts_at_observation": 0,
+    "worker_source_commit": "cf95828bf5a1a2312bd7412d4c924d57d69866c4",
+    "worker_sha256": "70c867bccc07e451b9598027096a36d6dbaf1179b324910e3c8b03512a90a2ad",
+    "worker_image_digest": "sha256:80520bb4b046055b84adc9d083fdc0aa263b93345d9e0f79eaeab718ac36df93",
+    "recovery_native_event_id": 219,
+    "frozen_evaluator_image_digest": "sha256:98c9061c4a43a25e7b581a5193ca6e7f48e49e7b7fc03b7c1b6190a029befee2",
+    "frozen_server_base_sha": "a9e8e1a710b24c749e6499a0606938252c83e136",
+    "source_rules_gates_margin_and_submission_clock_unchanged": true,
+    "recovery_top_level_test_passes": 117,
+    "recovery_fresh_test_processes": 3,
+    "recovery_test_failures_or_skips": 0
+  },
+  "remaining_before_finalization": [
+    "Complete the owner-approved reduced-strength public R9/R9 pilot in a genuine serial host reservation.",
+    "After its acceptance, complete the approved single fresh hidden-seed reference screen without production timing overlap.",
+    "Independently accept the calibration and its exact retained artifacts before finalization or reward delivery release."
+  ],
+  "pre_finalization_fences": {
+    "deadline": "2026-11-05T12:00:00Z",
+    "worker_stop_timer_and_one_use_api_hold_guard_armed": true,
+    "accepted_calibration_marker_created": false
+  }
+}
