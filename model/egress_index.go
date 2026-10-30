@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"math"
 	"strconv"
@@ -1001,6 +1002,28 @@ func providerHardExclusionsCheckedMember(clientId server.Id) string {
 	return "checked:" + clientId.String()
 }
 
+// A provider's exclusion and checked members, as clientId.String() and
+// providerHardExclusionsCheckedMember format them, from one allocation. Every
+// request reads both for each of its candidates, and Id.String formats
+// through fmt.
+func providerHardExclusionsMembers(clientId server.Id) (member string, checkedMember string) {
+	const checkedPrefix = "checked:"
+	var b [len(checkedPrefix) + 36]byte
+	copy(b[:], checkedPrefix)
+	id := b[len(checkedPrefix):]
+	hex.Encode(id[0:8], clientId[0:4])
+	id[8] = '-'
+	hex.Encode(id[9:13], clientId[4:6])
+	id[13] = '-'
+	hex.Encode(id[14:18], clientId[6:8])
+	id[18] = '-'
+	hex.Encode(id[19:23], clientId[8:10])
+	id[23] = '-'
+	hex.Encode(id[24:36], clientId[10:16])
+	checkedMember = string(b[:])
+	return checkedMember[len(checkedPrefix):], checkedMember
+}
+
 // Replace exclusions, checked identities and their expiry in one transaction.
 func publishProviderHardExclusions(ctx context.Context, clientIds []server.Id, filter providerCountFilter, ttl time.Duration) error {
 	members := []any{providerHardExclusionsCohortReadyMember}
@@ -1066,7 +1089,8 @@ func getProviderHardExclusions(ctx context.Context, clientIds []server.Id) (excl
 	members := make([]any, 0, 2*len(clientIds)+2)
 	members = append(members, providerHardExclusionsReadyMember, providerHardExclusionsCohortReadyMember)
 	for _, clientId := range clientIds {
-		members = append(members, clientId.String(), providerHardExclusionsCheckedMember(clientId))
+		member, checkedMember := providerHardExclusionsMembers(clientId)
+		members = append(members, member, checkedMember)
 	}
 	unknownClientIds := make([]server.Id, 0, len(clientIds))
 	server.Redis(ctx, func(r server.RedisClient) {
