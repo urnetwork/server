@@ -1,10 +1,10 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-30T03:21:20Z",
+  "observed_at": "2026-10-30T03:29:02Z",
   "scoring_enablement_current": {
     "status": "R2_intake_open_reduced_reference_native_and336_correctness_verified_new699_operator_qualification_running_production_grading_held",
-    "observed_at": "2026-10-30T03:21:20Z",
+    "observed_at": "2026-10-30T03:29:02Z",
     "metadata_checkpoint_only": true,
     "actual_intake_open": true,
     "grading_enabled": false,
@@ -133,6 +133,17 @@
       "full_operator_qualification_started_at": "2026-10-30T01:39:29Z",
       "full_operator_runtime_prepared": "/mnt/data/operator233-runtime-qa-20261030.Yq1JtHDv/run.sh",
       "full_operator_runtime_admitted_only_after_all_H1_cleanup_checks_pass": true,
+      "operator_source_custody_staged_not_qualification": {
+        "directory": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2/inputs/tool233-source-pins",
+        "source_map_sha256": "9c43142623416b07bebe9a6f7f0ee9256a455cf06af957e88bc4e52291e85c58",
+        "known_sources_copied": 40,
+        "all_original_and_copied_hashes_matched": true,
+        "copies_root_owned_mode0400_single_link": true,
+        "exclusive_creation_preserved_originals": true,
+        "future_terminal_copy_absent": true,
+        "final_tool_qualification_absent": true,
+        "final_pass_and_integrity_checks_still_required": true
+      },
       "checkpoint": "server/connect/sim-latency/launch/reduced-pilot-operator-2026-10-30/CHECKPOINT.json",
       "checkpoint_sha256": "30722e6d215793cd503510f77626372c01731a9d186c0b35197dee9ccee4ef3d",
       "before_census_configuration_staged_not_executed_sha256": "0e1c5a320084249a66efbb18e0bfa9a38d1a9ce1d52436a3a48fe46e223d1249",
