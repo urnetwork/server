@@ -30,11 +30,100 @@ var wgPeersGauge = prometheus.NewGauge(
 		Namespace: "urnetwork",
 		Subsystem: "proxy",
 		Name:      "wg_peers",
-		Help:      "Registered wg peers on this instance's device",
+		Help:      "Configured wg clients on this instance; with on-demand peers, wg_device_peers counts the device's peers",
 	},
 )
 
 var defaultDeviceRpcH1PlusStats = &connect.H1PlusStats{}
+
+// With on-demand peers (proxyWgPeersOnDemandFromConfig) the device holds a
+// peer only for clients that handshook recently; wg_peers counts the
+// configured clients.
+var wgDevicePeersGauge = prometheus.NewGauge(
+	prometheus.GaugeOpts{
+		Namespace: "urnetwork",
+		Subsystem: "proxy",
+		Name:      "wg_device_peers",
+		Help:      "WireGuard peers on this instance's device, each with its goroutines and queues",
+	},
+)
+
+var wgPeerEvictionsGauge = prometheus.NewGauge(
+	prometheus.GaugeOpts{
+		Namespace: "urnetwork",
+		Subsystem: "proxy",
+		Name:      "wg_peer_evictions",
+		Help:      "WireGuard on-demand peers removed for idleness by this instance's device",
+	},
+)
+
+var wgPeerMissGauge = prometheus.NewGaugeVec(
+	prometheus.GaugeOpts{
+		Namespace: "urnetwork",
+		Subsystem: "proxy",
+		Name:      "wg_peer_misses",
+		Help:      "WireGuard handshake initiations from keys without a device peer, by bounded outcome",
+	},
+	[]string{"outcome"},
+)
+
+const defaultWgPeersOnDemand = true
+
+// The wg peer registration mode from the proxy config:
+//
+//	wg_peers_on_demand: true
+//
+// On by default: a configured client gets a device peer only when it
+// handshakes, and loses it after the idle bound (proxy repo
+// WgProxySettings.PeersOnDemand). false restores eager registration, where
+// every configured client of the block holds a peer with two goroutines and
+// its queues whether or not it ever connects. Read once, when the process
+// builds its wg server, so a change applies at each block's next start. A
+// missing resource or key keeps the default; so does a value that is not a
+// boolean, with one error line, because a typo must not change the memory
+// profile of every block at the next restart.
+func proxyWgPeersOnDemandFromConfig() bool {
+	const key = "wg_peers_on_demand"
+	resource, err := server.Config.SimpleResource("proxy.yml")
+	if err != nil {
+		// an absent resource is the default; an unreadable one is reported
+		if !errors.Is(err, server.ErrResourceNotFound) || errors.Is(err, server.ErrResourceUnavailable) {
+			glog.Errorf("[wg]proxy.yml is unreadable; %s keeps %t\n", key, defaultWgPeersOnDemand)
+		}
+		return defaultWgPeersOnDemand
+	}
+	values, err := resource.ParseE()
+	if err != nil {
+		glog.Errorf("[wg]proxy.yml does not parse; %s keeps %t\n", key, defaultWgPeersOnDemand)
+		return defaultWgPeersOnDemand
+	}
+	value, ok := values[key]
+	if !ok {
+		return defaultWgPeersOnDemand
+	}
+	onDemand, ok := value.(bool)
+	if !ok {
+		glog.Errorf("[wg]proxy.yml: %s must be true or false, not %v (%T); keeping %t\n", key, value, value, defaultWgPeersOnDemand)
+		return defaultWgPeersOnDemand
+	}
+	glog.Infof("[wg]proxy.yml: %s = %t\n", key, onDemand)
+	return onDemand
+}
+
+// updateWgPeerMetrics publishes the device's peer population and its
+// cumulative on-demand outcomes for one device generation.
+func updateWgPeerMetrics(stats proxy.WgPeerStats) {
+	wgDevicePeersGauge.Set(float64(stats.PeerCount))
+	wgPeerEvictionsGauge.Set(float64(stats.EvictedPeerCount))
+	wgPeerMissGauge.WithLabelValues("accepted").Set(float64(stats.PeerMiss.Accepted))
+	wgPeerMissGauge.WithLabelValues("refused").Set(float64(stats.PeerMiss.Refused))
+	wgPeerMissGauge.WithLabelValues("negative_cache_hit").Set(float64(stats.PeerMiss.NegativeCacheHits))
+	wgPeerMissGauge.WithLabelValues("coalesced").Set(float64(stats.PeerMiss.Coalesced))
+	wgPeerMissGauge.WithLabelValues("rate_limited").Set(float64(stats.PeerMiss.RateLimited))
+	wgPeerMissGauge.WithLabelValues("handler_failure").Set(float64(stats.PeerMiss.HandlerFailures))
+	wgPeerMissGauge.WithLabelValues("handler_timeout").Set(float64(stats.PeerMiss.HandlerTimeouts))
+	wgPeerMissGauge.WithLabelValues("create_failure").Set(float64(stats.PeerMiss.CreateFailures))
+}
 
 var wgInboundPeerQueueDropPacketsGauge = prometheus.NewGauge(
 	prometheus.GaugeOpts{
@@ -80,6 +169,9 @@ var lifecycleJoinEnabledGauge = prometheus.NewGaugeFunc(
 func init() {
 	prometheus.MustRegister(server.NewH1PlusCollector("proxy", connect.H1FramerXlProtocol, defaultDeviceRpcH1PlusStats))
 	prometheus.MustRegister(wgPeersGauge)
+	prometheus.MustRegister(wgDevicePeersGauge)
+	prometheus.MustRegister(wgPeerEvictionsGauge)
+	prometheus.MustRegister(wgPeerMissGauge)
 	prometheus.MustRegister(wgInboundPeerQueueDropPacketsGauge)
 	prometheus.MustRegister(wgInboundDecryptionQueueDropPacketsGauge)
 	prometheus.MustRegister(wgReceiveRoutineFailuresGauge)
@@ -754,6 +846,8 @@ func NewWgServer(
 	// silence wg device/proxy logging the same as the network space and
 	// deviceLocal in proxy_device.go, otherwise it falls through to glog.
 	wgProxySettings.Log = connect.NewNoopLogger()
+	// configured clients get device peers when they handshake, not up front
+	wgProxySettings.PeersOnDemand = proxyWgPeersOnDemandFromConfig()
 	wgProxy := proxy.NewWgProxy(ctx, wgProxySettings)
 
 	s := &wgServer{
@@ -805,6 +899,7 @@ func updateWgRuntimeMetrics(stats proxy.WgRuntimeStats) {
 func (self *wgServer) runRuntimeMetrics() {
 	for {
 		updateWgRuntimeMetrics(self.wgProxy.RuntimeStats())
+		updateWgPeerMetrics(self.wgProxy.PeerStats())
 		select {
 		case <-self.ctx.Done():
 			return
@@ -945,8 +1040,10 @@ func (self *wgServer) logClientCounts(op string, applied int, removed int, count
 	// every peer-set mutation path (add / sync / reconcile) ends here, so
 	// the gauge is exact between changes
 	wgPeersGauge.Set(float64(peerCount))
+	devicePeerCount := self.wgProxy.PeerCount()
+	wgDevicePeersGauge.Set(float64(devicePeerCount))
 	glog.Infof(
-		"[wg]%s clients: %d/%d applied, %d removed (%d no wg config, %d key mismatch, %d bad auth token, %d not entitled), peers %d/%d\n",
+		"[wg]%s clients: %d/%d applied, %d removed (%d no wg config, %d key mismatch, %d bad auth token, %d not entitled), clients %d, device peers %d/%d\n",
 		op,
 		applied,
 		counts.total,
@@ -959,6 +1056,7 @@ func (self *wgServer) logClientCounts(op string, applied int, removed int, count
 		// is exactly the kind of thing that turns into an unexplainable support ticket.
 		counts.notEntitled,
 		peerCount,
+		devicePeerCount,
 		proxy.MaxClients,
 	)
 }
