@@ -1,10 +1,10 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-30T07:53:33Z",
+  "observed_at": "2026-10-30T11:03:24.171671Z",
   "scoring_enablement_current": {
-    "status": "R2_provisional_grading_enabled_117_tests_passed_zero_sample_recovery_activated_shared_baseline_preparation_running",
-    "observed_at": "2026-10-30T07:53:33Z",
+    "status": "R2_provisional_grading_running_shared_R9_baseline_published_one_succeeded_one_running_nine_queued",
+    "observed_at": "2026-10-30T11:03:24.171671Z",
     "metadata_checkpoint_only": true,
     "actual_intake_open": true,
     "grading_enabled": true,
@@ -25,21 +25,21 @@
         "root_response": "/var/lib/urnetwork/competition-production-r2-20261029-v1/provisional-grading-20261030-v1/evaluation-release-response.json"
       },
       "reward_delivery_hold": {
-        "latest_confirmed_at": "2026-10-30T06:31:27.228534355Z",
+        "latest_confirmed_at": "2026-10-30T11:00:35.669710197Z",
         "revision": 1,
         "active": true,
         "no_reward_release": true
       },
       "strict_readiness": {
-        "at": "2026-10-30T04:52:24.409923Z",
+        "at": "2026-10-30T11:03:24.171671Z",
         "http": 200,
         "ready": true,
         "all11true": true,
         "grading_ready": true,
         "publication_held": false,
         "normal_epoch_embargo_still_active": true,
-        "qa": "/mnt/data/grading-readiness-once-qa-20261030.k22LP8zO",
-        "terminal_sha256": "74a0310822a3a145aa5ab370db3021042209b79fe1ce758a4e0aebd036dbd7d1"
+        "response": "/var/lib/urnetwork/competition-production-r2-20261029-v1/grading-observation-20261030.qW4mM2yh/API-READYZ.private.json",
+        "response_sha256": "5f976b54349c1caf1e1b20ede081a4adabf40601cebc05e4a4d40fa9270328c7"
       },
       "monitoring": {
         "receipt": "/var/lib/urnetwork/competition-r2-monitoring-readonly-20261030.TXjRlSRg/MONITORING-RECEIPT.json",
@@ -51,7 +51,9 @@
         "no_synthetic_alert_or_delivery_claim": true
       },
       "normal_epoch_embargo_still_active": true,
-      "actual_submission_execution_started": false,
+      "actual_submission_execution_started": true,
+      "live_scoring_checkpoint": "server/connect/sim-latency/launch/PROVISIONAL-SCORING-LIVE-2026-10-30.json",
+      "live_scoring_checkpoint_sha256": "1ffbc1aa1c65a936b91473927caf137d4e8b4d4b19570a29890b7fe092c71a62",
       "worker_host_storage_read_check": {
         "completed_at": "2026-10-30T07:01:15.054160826Z",
         "versioned_observation": "server/connect/sim-latency/launch/capacity-check/LIVE-PROOF-2026-10-30.json",
@@ -67,16 +69,23 @@
         "original_failed_hold_archive_cause": "UNKNOWN; successful current reads do not reconstruct the later retention failure"
       },
       "latest_queue_observation": {
-        "at": "2026-10-30T06:31:27.228534355Z",
+        "at": "2026-10-30T11:00:35.669710197Z",
+        "total": 11,
         "queued": 9,
-        "attempt_counts": [0],
-        "started_at_all_null": true,
-        "baselines_published": 0,
-        "worker_slot_unleased": true,
-        "read_only_snapshot": "/var/lib/urnetwork/competition-production-r2-20261029-v1/recovery-audit-20261030-v2/READONLY-SNAPSHOT.private.json",
-        "sha256": "6eeec7b4fd2ba58227fa4886a264298c662783413501f9c5f93ae5b339575b39"
+        "succeeded": 1,
+        "running": 1,
+        "failed": 0,
+        "attempt_counts": [0, 1],
+        "started_at_all_null": false,
+        "baselines_published": 1,
+        "worker_slot_unleased": false,
+        "current_job_id": "01a1882e-1c50-8353-220d-18ea401906d3",
+        "read_only_snapshot": "/var/lib/urnetwork/competition-production-r2-20261029-v1/grading-observation-20261030.qW4mM2yh/READONLY-SNAPSHOT.private.json",
+        "sha256": "7f87aa3e5a5fe4a813b88459289928050d810611681639cbdee31e46472724fe"
       },
       "baseline_pipeline_blocker": {
+        "resolved_at": "2026-10-30T09:23:40.651673Z",
+        "resolution": "The qualified zero-sample recovery completed all nine controls, published the immutable round baseline, and claimed the first real submission. The first submission subsequently succeeded on attempt1.",
         "discovered_by": "h1_resident_publication_debug",
         "artifact_root": "/var/lib/urnetwork/competition/baseline-preparations/01a1855d-49bd-0250-90db-d0c0885f0e46/baseline.01a18b25-d0e4-23f3-f750-60ca6cf25eb5",
         "hold_sha256": "000dc02e7d5d05036e8a8ef6fadea7c7f2b2a058ad6f364982e4e06dad45253c",
@@ -87,7 +96,7 @@
         "no_measured_baseline_artifacts": true,
         "diagnosis": "prepare-round-baseline.sh(100891...) evalsfrozen evaluator0ccc prefix. runContainedCommand clearsenvironment exceptPATH/LANG/LC_ALL/TZ, so COMPETITION_MANAGEMENT_CPUSET_APPLIED absent. Frozenprefix reexecsrealpath$0 usingEVALUATOR --request/--result ABI; $0isBASELINEwrapper supports--request/--receipt/--owner/--context-sha256 ONLY →exit2 no stderr. Fastheldbaseline producer, NOTsubmission/seed/timedfailure.",
         "frozen_instrument_must_remain_unchanged": true,
-        "qualified_caller_fix": "trusted CALLER applies realtaskset thenexecs SAME BASELINE $@ before evalprefix; sentinelonlyafteractualaffinity, unchangedfrozenprefixresourcecheck. Actual21 passes, installed immutable v5 caller c3a7474685eb6e5aba141fa460c5ada2f5cfc8d8cbc543f2fe309720cb9e5428 plus16 unchanged dependencies; no runtime restart.",
+        "qualified_caller_fix": "trusted CALLER applies realtaskset thenexecs SAME BASELINE $@ before evalprefix; sentinelonlyafteractualaffinity, unchangedfrozenprefixresourcecheck. Actual21 passes, immutable v5 caller c3a7474685eb6e5aba141fa460c5ada2f5cfc8d8cbc543f2fe309720cb9e5428 plus16 unchanged dependencies. Activated with the independently qualified v2 control worker at07:53:05UTC; frozen evaluator unchanged.",
         "recovery": "appendonlyheldreservation mustuseSUPPORTED zero-sample/sameowner freshcontrol recovery; doNOTdelete/resetDB/oldhold/artifacts orblindrerun; no submissionattemptstarted/timebudgetconsumed.",
         "diagnosis_file": "/home/by/urnetwork/temp/r2-provisional-grading-recovery-20261030.0ryLNpaS/BASELINE-PREPARATION-REEXEC-DIAGNOSIS.md",
         "diagnosis_sha256": "598a8bc877cc7351064b2886d3eae28489b9e0831517affbb5391aa0e7a6d9d5",
@@ -134,7 +143,9 @@
             "observed_at": "2026-10-30T07:53:33Z",
             "native_event_id": 219,
             "fresh_artifact_directory": "/var/lib/urnetwork/competition/baseline-preparations/01a1855d-49bd-0250-90db-d0c0885f0e46/baseline.01a18b25-d0e4-23f3-f750-60ca6cf25eb5.recovery.219",
-            "phase": "fresh isolated source preparation observed; no measured baseline or submission claimed",
+            "phase": "nine controls completed and immutable epoch baseline published; first submission succeeded and second running",
+            "baseline_published_at": "2026-10-30T09:23:40.651673Z",
+            "baseline_sha256": "b6b0b13f6137b32fd5569f9ff16d78d8dac3d578ad40549c8ae33513cf447557",
             "source_commit": "cf95828bf5a1a2312bd7412d4c924d57d69866c4",
             "worker_sha256": "70c867bccc07e451b9598027096a36d6dbaf1179b324910e3c8b03512a90a2ad",
             "worker_image": "sha256:80520bb4b046055b84adc9d083fdc0aa263b93345d9e0f79eaeab718ac36df93",
@@ -194,6 +205,9 @@
       "sha256": "ec64dca02fe888de07104aa334ccc01db3f104f9d715f540683157f22a16bca8"
     },
     "completed": [
+      "qualified_zero_sample_recovery_117_actual_passes_and_two_independent_reviews_activated_without_changing_frozen_evaluator_or_submission_budget",
+      "shared_R9_epoch_baseline_completed_published_and_independent_local_receipt_metadata_linkage_verified",
+      "first_real_submission_succeeded_attempt1_in_87m04s_second_FIFO_submission_running_and_actual_API_all11_ready",
       "exact_Qwen_Gemma_genuine_six_case_union_qualification_6_PASS_10_member_responses_independently_reviewed_disagreements_retained",
       "H1_worse_exact_revised_112_scope_three_passes_336_PASS_plus12_synthetic_MMDB_controls_and_one_socket_smoke",
       "new_native_worse_647922_image_readback_and_exact_build_correctness_receipts",
@@ -208,7 +222,6 @@
       "public_provider_request_before_census_and_Root_reported_native_collision_preparation_not_measurement"
     ],
     "pending": [
-      "complete_and_publish_shared_R9_epoch_baseline_then_verify_first_real_FIFO_submission_claim",
       "seal_native_replacement_public_pilot_plan_and_publish_before_any_measurements",
       "precommit_and_complete_owner_approved_new_public_R9_R9_pilot_without_weakening_any_submission_gate",
       "only_after_accepted_new_pilot_and_native_after_census_one_new_hidden_seed_and36_native_fresh_single_screen_runs",

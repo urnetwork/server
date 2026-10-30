@@ -1,5 +1,24 @@
 # R2 scoring restoration: readiness before hold release
 
+## Current operational status — supersedes the historical sequence below
+
+The owner subsequently approved [provisional grading](PROVISIONAL-GRADING-OWNER-APPROVAL-2026-10-30.md),
+moving calibration to a pre-finalization gate. Production grading is now running:
+the shared R9 baseline was published at 09:23 UTC, the first submission succeeded
+at 10:50 UTC, and the next FIFO submission is running. The exact observations
+are in [the live checkpoint](PROVISIONAL-SCORING-LIVE-2026-10-30.json).
+
+Do not replay the hold-release sequence or replace the current unit with the
+historical unit below. The active unit now hashes to
+`9ede9888a35bfcc14f65b219a12ce3d1219f7cb8195c109be761c81b5d82303e`;
+its independently qualified worker fixes the zero-sample preparation failure
+without changing the frozen evaluator, R9, gates, margin, or submission clock.
+Reward delivery remains held and the normal epoch embargo still applies.
+Reserve a genuine serial calibration window; never race production timing for
+the canonical lock or fabricate host freshness to keep intake green.
+
+## Historical pre-amendment sequence
+
 This is an audited operational sequence, **not a release approval or evidence
 that scoring is enabled**. At 03:14 UTC on October 30, intake was open for R2
 round `01a1855d-49bd-0250-90db-d0c0885f0e46`, while grading and publication were
