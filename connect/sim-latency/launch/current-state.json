@@ -1,10 +1,10 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-30T05:13:12Z",
+  "observed_at": "2026-10-30T06:31:27.228534355Z",
   "scoring_enablement_current": {
-    "status": "R2_provisional_grading_enabled_runtime_ready_zero_sample_baseline_held_caller_ABI_fix_and_supported_recovery_in_progress",
-    "observed_at": "2026-10-30T05:13:12Z",
+    "status": "R2_provisional_grading_enabled_recovery_105_tests_passed_control_image_prepared_activation_waits_preparation_clock_decision",
+    "observed_at": "2026-10-30T06:31:27.228534355Z",
     "metadata_checkpoint_only": true,
     "actual_intake_open": true,
     "grading_enabled": true,
@@ -25,7 +25,7 @@
         "root_response": "/var/lib/urnetwork/competition-production-r2-20261029-v1/provisional-grading-20261030-v1/evaluation-release-response.json"
       },
       "reward_delivery_hold": {
-        "latest_confirmed_at": "2026-10-30T04:52:03.246793906Z",
+        "latest_confirmed_at": "2026-10-30T06:31:27.228534355Z",
         "revision": 1,
         "active": true,
         "no_reward_release": true
@@ -52,6 +52,16 @@
       },
       "normal_epoch_embargo_still_active": true,
       "actual_submission_execution_started": false,
+      "latest_queue_observation": {
+        "at": "2026-10-30T06:31:27.228534355Z",
+        "queued": 9,
+        "attempt_counts": [0],
+        "started_at_all_null": true,
+        "baselines_published": 0,
+        "worker_slot_unleased": true,
+        "read_only_snapshot": "/var/lib/urnetwork/competition-production-r2-20261029-v1/recovery-audit-20261030-v2/READONLY-SNAPSHOT.private.json",
+        "sha256": "6eeec7b4fd2ba58227fa4886a264298c662783413501f9c5f93ae5b339575b39"
+      },
       "baseline_pipeline_blocker": {
         "discovered_by": "h1_resident_publication_debug",
         "artifact_root": "/var/lib/urnetwork/competition/baseline-preparations/01a1855d-49bd-0250-90db-d0c0885f0e46/baseline.01a18b25-d0e4-23f3-f750-60ca6cf25eb5",
@@ -63,13 +73,44 @@
         "no_measured_baseline_artifacts": true,
         "diagnosis": "prepare-round-baseline.sh(100891...) evalsfrozen evaluator0ccc prefix. runContainedCommand clearsenvironment exceptPATH/LANG/LC_ALL/TZ, so COMPETITION_MANAGEMENT_CPUSET_APPLIED absent. Frozenprefix reexecsrealpath$0 usingEVALUATOR --request/--result ABI; $0isBASELINEwrapper supports--request/--receipt/--owner/--context-sha256 ONLY →exit2 no stderr. Fastheldbaseline producer, NOTsubmission/seed/timedfailure.",
         "frozen_instrument_must_remain_unchanged": true,
-        "prospective_fix": "trusted CALLER applies realtaskset thenexecs SAME BASELINE $@ before evalprefix; sentinelonlyafteractualaffinity, unchangedfrozenprefixresourcecheck. Not genericenvforward/skipguard.",
+        "qualified_caller_fix": "trusted CALLER applies realtaskset thenexecs SAME BASELINE $@ before evalprefix; sentinelonlyafteractualaffinity, unchangedfrozenprefixresourcecheck. Actual21 passes, installed immutable v5 caller c3a7474685eb6e5aba141fa460c5ada2f5cfc8d8cbc543f2fe309720cb9e5428 plus16 unchanged dependencies; no runtime restart.",
         "recovery": "appendonlyheldreservation mustuseSUPPORTED zero-sample/sameowner freshcontrol recovery; doNOTdelete/resetDB/oldhold/artifacts orblindrerun; no submissionattemptstarted/timebudgetconsumed.",
         "diagnosis_file": "/home/by/urnetwork/temp/r2-provisional-grading-recovery-20261030.0ryLNpaS/BASELINE-PREPARATION-REEXEC-DIAGNOSIS.md",
         "diagnosis_sha256": "598a8bc877cc7351064b2886d3eae28489b9e0831517affbb5391aa0e7a6d9d5",
-        "delegated": {
-          "h1": "implementnarrowcalleradaptergeneratorfix+deterministicGoABIcleanenv/argvpreservation/adjacenttests; sourceonly; no native/writes/restart",
-          "qg": "audit/implementSUPPORTEDzero-samplebaselineheldrecovery+dettests; no DB/APIwrites/native/deploy"
+        "recovery_qualification": {
+          "completed_at": "2026-10-30T06:24:04Z",
+          "actual_top_level_passes": 105,
+          "roots_per_process": 35,
+          "fresh_processes": 3,
+          "failures": 0,
+          "skips": 0,
+          "receipt": "/mnt/data/recovery-controller-overlay-qa-20261030.yIZIl7Wi/TERMINAL-RECEIPT.txt",
+          "receipt_sha256": "ba475041b18973f378920119ebffeb80d0e034d90cfa473c1321c1518a0b379d",
+          "scope": "Full real controller package; seven recovery roots,23 existing preparation roots,five caller ABI roots. Fresh capped PostgreSQL/Redis, actual BIGSERIAL/FK and forced blocked-cleanup race; fixture cleanup, exact inventory, source/module/ELF checks and canonical lock release passed.",
+          "prior_failures_retained": true,
+          "typed_nil_fixture_fix": "Use separate patchErr for a pointer-returning canonicalizer; the successful typed nil must not be boxed into an existing error interface. Last correction was test-only.",
+          "production_classification_fix": "A held committed candidate remains held, not a transient lost lease; strict existing assertion and absent/unrelated/started capability regression pass."
+        },
+        "compiled_control_release": {
+          "source_commit": "e46e3c0b36657de58ccc67358dc4773890a1eee2",
+          "published_main_commit": "33dadb1fd0b262dab3fd28e08bd9502772b5ff43",
+          "worker_sha256": "8a111c2041d0dd43d95e1910017eb013bff772a96b9bc54553252788d6576e62",
+          "worker_image": "sha256:7e0698e6ad2ef6f54a296d311dd45b963f1680a4a36febb7131ab786cd6f5108",
+          "native_used_source_manifest_sha256": "360a6882b030a04564a2d2d2dbeb36927a66e74061f35fe05215dd03515853eb",
+          "control_only_dependencies": "SN8607627310f1905f4df5854c1b4e47ee1b6c4251 and Connecta6d16288f6a7a26f094d5ea565813ded4ce4cb6b are isolated pinned control-build exports, not changes to the frozen evaluator checkpoint.",
+          "activated": false,
+          "source_or_evaluator_freeze_changed": false
+        },
+        "clock_decision_pending": {
+          "approval_requested": true,
+          "fresh_clock_approved": false,
+          "current_code_enforces_original_deadline": true,
+          "original_deadline_approximately": "2026-10-30T07:51:24Z",
+          "public_pilot_control_evidence": "Eight inter-completion intervals from all nine preserved controls imply86.22 minutes for nine runs, before cold-start/archive allowance; this is an estimate, not a production measurement.",
+          "requested_amendment": "Fresh preparation-only three-hour clock with same hidden workload/R9 and preserved failed reservation/evidence; per-submission10800-second deadline and all gates remain unchanged.",
+          "new_enforcing_worker_code_and_qualification_required_if_approved": true,
+          "metadata_cannot_override_current_binary_clock": true,
+          "no_recovery_authorization_or_transition_activated": true
         },
         "source_supervisor_observability": "parent captureschildstdout/stderrboundedthenDISCARDSonEXIT2; journalonlyevaluation_blocked. Needpreserveexisting logs / improvecontrol-onlyerrorcapture ifneeded, don'tclaimchildPIDmeansjobrun."
       },
@@ -82,13 +123,23 @@
         "timer_sha256": "73ccc7e4ed3d9c54a25525bf53f1f40ef339d41b7c7c9e3a05220c723030e97f",
         "action": "systemctl stop soleR2supervisor (75s bound), NOTserverAPIgate; cancelonlyaftercalibrationaccepted"
       },
-      "stronger_deadline_guard_source_only": {
+      "stronger_deadline_guard": {
         "packet": "/home/by/urnetwork/temp/r2-calibration-deadline-guard-20261030.FJRaKzeD",
         "manifest": "f467b24096436d0ce6897425b0144a335ea33db172d2ae9144551fe88ca74362",
         "main_sha256": "6fb33d13cce089067f3bc92cd42c8ee66a93de83afeb2d295b0ece49eebf5383",
         "test_sha256": "eb55e57a0d1085cbcf52759d75514da44959e460ae3f07555a5caa877113213e",
         "tests": 10,
-        "status": "SOURCEONLY NOTcompiled/tested/installed; RootmustreviewthenLOWwhenidle; currentlyno actualtimedproductionbaseline duepreflightfailure",
+        "status": "INSTALLED_AND_ARMED; actual30 passes (10 roots x3), native compiled but never executed; no API request or calibration acceptance created",
+        "binary_sha256": "fda27fb6e6defb98d816f8a225fa6c0c6a397ca6caa5cc4c9081150001e62ce0",
+        "test_receipt": "/mnt/data/deadline-guard-qa.5guwNhs8/receipt.log",
+        "test_receipt_sha256": "23044ee48ea2f110c448eaa19e0204eb777da0c1361cca1f5748cb7afe1263be",
+        "timer": "urnetwork-competition-calibration-api-cutoff-r2.timer",
+        "next": "2026-11-05T12:00:00Z",
+        "timer_sha256": "0a94423b45645fc5bd2806ef427536a73b2f09bcfb002c97f53fd18a3f25ae23",
+        "service_sha256": "956d3f23e92e01543aef346853a0a8a1dd8101b100435ff0a796eb9490f3f3b0",
+        "body_sha256": "60401160c57b777d6f3db7b3acfeb7e2deef4a605adcb387c321283c88990650",
+        "enabled_and_persistent_active_waiting": true,
+        "claim_or_accepted_marker_created": false,
         "behavior": "atdeadline iftrustedacceptedmarkerabsent/invalid, durableRootO_EXCLclaim+file/dirfsync BEFOREsingleboundedPOSTevalactiveexpected2→rev3 OPERATOR_HOLD d0c8 evidence, no retry; anyexistingclaim/uncertain/malformed/failure stopsR2unit. AcceptedmarkeronlyRootafteractualcalib; nevercreatefrominvalidDRAFT."
       }
     },
@@ -117,11 +168,11 @@
       "public_provider_request_before_census_and_Root_reported_native_collision_preparation_not_measurement"
     ],
     "pending": [
-      "publish_actual_completed699_tool_qualification_and_seventh_prerequisite_receipt",
+      "resolve_preparation_clock_authority_then_activate_qualified_recovery_without_resampling_or_spending_submission_attempts",
       "seal_native_replacement_public_pilot_plan_and_publish_before_any_measurements",
       "precommit_and_complete_owner_approved_new_public_R9_R9_pilot_without_weakening_any_submission_gate",
       "only_after_accepted_new_pilot_and_native_after_census_one_new_hidden_seed_and36_native_fresh_single_screen_runs",
-      "independent_final_review_and_new_scoped_COMPLIANCE_custody_then_restore_worker_readiness_with_both_holds_active_before_fresh_CAS_release"
+      "independent_final_calibration_review_and_new_scoped_COMPLIANCE_custody_before_finalization_and_any_reward_delivery_release"
     ],
     "reference_runtime_checkpoint": "server/connect/sim-latency/launch/REFERENCE-RUNTIME-CORRECTNESS-2026-10-29.json",
     "operator_qualification_checkpoint": "server/connect/sim-latency/launch/public-pilot-native-2026-10-29/COMPLETED-675-CHECKPOINT.json",
