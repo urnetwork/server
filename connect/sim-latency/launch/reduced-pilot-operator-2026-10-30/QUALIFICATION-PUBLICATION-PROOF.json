@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "kind": "actual-completed-operator-git-publication-readback",
+  "observed_at": "2026-10-30T04:17:42Z",
+  "repository": "/home/by/urnetwork/temp/competition-intake-publication-20261028.nVreyI4E/server",
+  "remote_url": "git@github.com:urnetwork/server.git",
+  "commit": "e15e88b5a82467f6675c001aca575a5364145d0c",
+  "observed_remote_main": "e15e88b5a82467f6675c001aca575a5364145d0c",
+  "pull_push_exit_code": 0,
+  "remote_ancestry_exit_code": 0,
+  "committed_artifact_sha256": "83ceb22269bbb6e0837191a740bf1a5d8820fb48831e79e5bedb8c273a3c4be3",
+  "root_artifact_sha256": "83ceb22269bbb6e0837191a740bf1a5d8820fb48831e79e5bedb8c273a3c4be3",
+  "actual_tests": 699,
+  "qualification_scope": "operator only; no new measured-pilot acceptance, hidden seed or production-scoring authority"
+}

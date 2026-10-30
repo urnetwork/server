@@ -1,14 +1,97 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-30T04:16:47Z",
+  "observed_at": "2026-10-30T05:13:12Z",
   "scoring_enablement_current": {
-    "status": "R2_intake_open_reduced_reference_and699_operator_qualified_native_before10_complete_public_pilot_plan_pending_production_grading_held",
-    "observed_at": "2026-10-30T04:16:47Z",
+    "status": "R2_provisional_grading_enabled_runtime_ready_zero_sample_baseline_held_caller_ABI_fix_and_supported_recovery_in_progress",
+    "observed_at": "2026-10-30T05:13:12Z",
     "metadata_checkpoint_only": true,
     "actual_intake_open": true,
-    "grading_enabled": false,
-    "publications_held": true,
+    "grading_enabled": true,
+    "publications_held": false,
+    "provisional_grading_current": {
+      "owner_approved_provisional_grading": true,
+      "owner_approval": "server/connect/sim-latency/launch/PROVISIONAL-GRADING-OWNER-APPROVAL-2026-10-30.md",
+      "calibration_gate": "pre_finalization_not_pre_grading",
+      "calibration_passed": false,
+      "evaluation_release": {
+        "at": "2026-10-30T04:51:11.041569Z",
+        "http": 200,
+        "revision": 2,
+        "active": false,
+        "hold_id": "01a18b25-c643-16fa-01a9-93f4e6ea845a",
+        "request_sha256": "8dfa3bd49ef29c8dc567e43d023da83525a158da3ab18cd78d55ba279300a926",
+        "evidence_sha256": "d0c8bcbd5a99eba6b412b9996797d023f02a0615339c46b1e0b448cd5ddc3834",
+        "root_response": "/var/lib/urnetwork/competition-production-r2-20261029-v1/provisional-grading-20261030-v1/evaluation-release-response.json"
+      },
+      "reward_delivery_hold": {
+        "latest_confirmed_at": "2026-10-30T04:52:03.246793906Z",
+        "revision": 1,
+        "active": true,
+        "no_reward_release": true
+      },
+      "strict_readiness": {
+        "at": "2026-10-30T04:52:24.409923Z",
+        "http": 200,
+        "ready": true,
+        "all11true": true,
+        "grading_ready": true,
+        "publication_held": false,
+        "normal_epoch_embargo_still_active": true,
+        "qa": "/mnt/data/grading-readiness-once-qa-20261030.k22LP8zO",
+        "terminal_sha256": "74a0310822a3a145aa5ab370db3021042209b79fe1ce758a4e0aebd036dbd7d1"
+      },
+      "monitoring": {
+        "receipt": "/var/lib/urnetwork/competition-r2-monitoring-readonly-20261030.TXjRlSRg/MONITORING-RECEIPT.json",
+        "sha256": "af933aabecae61786a3df387ad30089811c750a2fff3f289fc5a9cf51b5d51dc",
+        "real_advancing_heartbeat": true,
+        "warning30s": true,
+        "dashboard15s": true,
+        "canonical_slack_support_route": true,
+        "no_synthetic_alert_or_delivery_claim": true
+      },
+      "normal_epoch_embargo_still_active": true,
+      "actual_submission_execution_started": false,
+      "baseline_pipeline_blocker": {
+        "discovered_by": "h1_resident_publication_debug",
+        "artifact_root": "/var/lib/urnetwork/competition/baseline-preparations/01a1855d-49bd-0250-90db-d0c0885f0e46/baseline.01a18b25-d0e4-23f3-f750-60ca6cf25eb5",
+        "hold_sha256": "000dc02e7d5d05036e8a8ef6fadea7c7f2b2a058ad6f364982e4e06dad45253c",
+        "failure_at": "2026-10-30T04:51:25Z",
+        "submission_started": false,
+        "candidate_executed": false,
+        "stderr_bytes": 0,
+        "no_measured_baseline_artifacts": true,
+        "diagnosis": "prepare-round-baseline.sh(100891...) evalsfrozen evaluator0ccc prefix. runContainedCommand clearsenvironment exceptPATH/LANG/LC_ALL/TZ, so COMPETITION_MANAGEMENT_CPUSET_APPLIED absent. Frozenprefix reexecsrealpath$0 usingEVALUATOR --request/--result ABI; $0isBASELINEwrapper supports--request/--receipt/--owner/--context-sha256 ONLY →exit2 no stderr. Fastheldbaseline producer, NOTsubmission/seed/timedfailure.",
+        "frozen_instrument_must_remain_unchanged": true,
+        "prospective_fix": "trusted CALLER applies realtaskset thenexecs SAME BASELINE $@ before evalprefix; sentinelonlyafteractualaffinity, unchangedfrozenprefixresourcecheck. Not genericenvforward/skipguard.",
+        "recovery": "appendonlyheldreservation mustuseSUPPORTED zero-sample/sameowner freshcontrol recovery; doNOTdelete/resetDB/oldhold/artifacts orblindrerun; no submissionattemptstarted/timebudgetconsumed.",
+        "diagnosis_file": "/home/by/urnetwork/temp/r2-provisional-grading-recovery-20261030.0ryLNpaS/BASELINE-PREPARATION-REEXEC-DIAGNOSIS.md",
+        "diagnosis_sha256": "598a8bc877cc7351064b2886d3eae28489b9e0831517affbb5391aa0e7a6d9d5",
+        "delegated": {
+          "h1": "implementnarrowcalleradaptergeneratorfix+deterministicGoABIcleanenv/argvpreservation/adjacenttests; sourceonly; no native/writes/restart",
+          "qg": "audit/implementSUPPORTEDzero-samplebaselineheldrecovery+dettests; no DB/APIwrites/native/deploy"
+        },
+        "source_supervisor_observability": "parent captureschildstdout/stderrboundedthenDISCARDSonEXIT2; journalonlyevaluation_blocked. Needpreserveexisting logs / improvecontrol-onlyerrorcapture ifneeded, don'tclaimchildPIDmeansjobrun."
+      },
+      "cutoff_fence": {
+        "timer": "urnetwork-competition-calibration-cutoff-r2.timer",
+        "next": "2026-11-05T12:00:00Z",
+        "enabled": true,
+        "persistent": true,
+        "service_sha256": "5fceb80ff5e11dfd8a1be4e44e00b933a601c952656ee00ac304e8bb8d81d6e1",
+        "timer_sha256": "73ccc7e4ed3d9c54a25525bf53f1f40ef339d41b7c7c9e3a05220c723030e97f",
+        "action": "systemctl stop soleR2supervisor (75s bound), NOTserverAPIgate; cancelonlyaftercalibrationaccepted"
+      },
+      "stronger_deadline_guard_source_only": {
+        "packet": "/home/by/urnetwork/temp/r2-calibration-deadline-guard-20261030.FJRaKzeD",
+        "manifest": "f467b24096436d0ce6897425b0144a335ea33db172d2ae9144551fe88ca74362",
+        "main_sha256": "6fb33d13cce089067f3bc92cd42c8ee66a93de83afeb2d295b0ece49eebf5383",
+        "test_sha256": "eb55e57a0d1085cbcf52759d75514da44959e460ae3f07555a5caa877113213e",
+        "tests": 10,
+        "status": "SOURCEONLY NOTcompiled/tested/installed; RootmustreviewthenLOWwhenidle; currentlyno actualtimedproductionbaseline duepreflightfailure",
+        "behavior": "atdeadline iftrustedacceptedmarkerabsent/invalid, durableRootO_EXCLclaim+file/dirfsync BEFOREsingleboundedPOSTevalactiveexpected2→rev3 OPERATOR_HOLD d0c8 evidence, no retry; anyexistingclaim/uncertain/malformed/failure stopsR2unit. AcceptedmarkeronlyRootafteractualcalib; nevercreatefrominvalidDRAFT."
+      }
+    },
     "full_production_scoring_ready": false,
     "season_id": "sim-latency-production-20261028-r2",
     "round_id": "01a1855d-49bd-0250-90db-d0c0885f0e46",
