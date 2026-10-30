@@ -730,7 +730,12 @@ func snHeadWithChainSettings(result *SnHeadResult, cfg *StConfig) {
 	}
 }
 
-// SnHead reports the caller network's Top 200 standing.
+// SnHead reports the caller network's Top 200 standing. It reads the SN Top
+// board's newest snapshot (LEADERTOP.md §7, Q15), so this route, the Top 200
+// page and the Protocol tab agree: the score is the network's projected
+// score, the floor the projected 200th score, and the rank its position in
+// the board's total order. Before the board's first snapshot it falls back
+// to the live estimate.
 func SnHead(clientSession *session.ClientSession) (*SnHeadResult, error) {
 	ctx := clientSession.Ctx
 	networkId := clientSession.ByJwt.NetworkId
@@ -740,18 +745,25 @@ func SnHead(clientSession *session.ClientSession) (*SnHeadResult, error) {
 		Source: "server",
 	}
 	snHeadWithChainSettings(result, stConfig())
-	ranking := snHeadRankingSafe(ctx)
 	var prefer map[server.Id]bool
-	if ranking == nil {
-		result.Error = &SnHeadError{Message: "Head estimate unavailable right now."}
-	} else {
-		result.Score = ranking.scores[networkId]
-		result.Floor = ranking.floor()
-		result.RankEstimate = ranking.rankOf(result.Score)
-		result.Eligible = 0 < result.Score && result.RankEstimate <= SnHeadCutoff
-		prefer = ranking.liveClients[networkId]
+	bound, fromSnapshot := snTopSafe(func() (snHeadBound, bool) {
+		return snTopHeadFromSnapshot(ctx, networkId, result)
+	})
+	if !fromSnapshot {
+		ranking := snHeadRankingSafe(ctx)
+		if ranking == nil {
+			result.Error = &SnHeadError{Message: "Head estimate unavailable right now."}
+		} else {
+			result.Score = ranking.scores[networkId]
+			result.Floor = ranking.floor()
+			result.RankEstimate = ranking.rankOf(result.Score)
+			result.Eligible = 0 < result.Score && result.RankEstimate <= SnHeadCutoff
+			prefer = ranking.liveClients[networkId]
+		}
 	}
-	bound := snHeadBoundState(ctx, networkId, true, prefer)
+	if !bound.bound {
+		bound = snHeadBoundState(ctx, networkId, true, prefer)
+	}
 	if bound.bound {
 		result.Bound = true
 		result.Hotkey = snHotkeySs58(bound.hotkey)

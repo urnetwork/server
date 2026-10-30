@@ -354,6 +354,10 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		router.NewRoute("GET", "/sn/wallet", handlers.SnGetWallet),
 		router.NewRoute("POST", "/sn/wallet/validate", handlers.SnValidateWallet),
 		router.NewRoute("GET", "/sn/head", handlers.SnHead),
+		// the SN Top board (LEADERTOP.md §7): public with optional auth, and
+		// the caller's detail
+		router.NewRoute("GET", "/sn/top", handlers.SnTop),
+		router.NewRoute("GET", "/sn/top/me", handlers.SnTopMe),
 		router.NewRoute("POST", "/sn/head/binding", handlers.SnHeadBinding),
 		router.NewRoute("GET", "/sn/pool/claim", handlers.SnPoolClaim),
 		router.NewRoute("GET", "/sn/epoch", handlers.SnEpoch),
@@ -362,6 +366,7 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		router.NewRoute("GET", "/sn/ledger/account", handlers.SnLedgerAccount),
 		router.NewRoute("GET", "/sn/attempt-artifact", handlers.SnAttemptArtifact),
 		router.NewRoute("POST", "/sn/attempt-artifact", handlers.SnUploadAttemptArtifactWithReserved(reserved)),
+		router.NewRoute("POST", "/sn/head-summary", handlers.SnUploadHeadSummary),
 		router.NewRoute("GET", "/sn/artifacts", handlers.SnArtifactHistory),
 		router.NewRoute("GET", "/sn/evidence", handlers.SnEvidence),
 		router.NewRoute("POST", "/sn/evidence", handlers.SnEvidence),

@@ -261,6 +261,8 @@ var routeAccessByRoute = map[string]routeAccess{
 	"GET /sn/wallet":                                routeAccessOwnClientPayout, // wallet read
 	"POST /sn/wallet/validate":                      routeAccessPublic,
 	"GET /sn/head":                                  routeAccessClient,
+	"GET /sn/top":                                   routeAccessPublic, // the public board; a token only adds the caller's own row
+	"GET /sn/top/me":                                routeAccessClient,
 	"POST /sn/head/binding":                         routeAccessOwnClientPayout, // binds the caller's head
 	"GET /sn/pool/claim":                            routeAccessClient,
 	"GET /sn/epoch":                                 routeAccessPublic,
@@ -269,6 +271,8 @@ var routeAccessByRoute = map[string]routeAccess{
 	"GET /sn/ledger/account":                        routeAccessPublic,
 	"GET /sn/attempt-artifact":                      routeAccessPublic,
 	"POST /sn/attempt-artifact":                     routeAccessClient,
+	// the validator's client token; its hotkey signature is the authority
+	"POST /sn/head-summary":                         routeAccessClient,
 	"GET /sn/artifacts":                             routeAccessPublic,
 	"GET /sn/evidence":                              routeAccessPublic,
 	"POST /sn/evidence":                             routeAccessPublic,

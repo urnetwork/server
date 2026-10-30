@@ -92,6 +92,40 @@ func TestRunRejectedConnectPreservesStatusWithoutPublishingMetrics(t *testing.T)
 	}
 }
 
+// Platform transports run their own heartbeat, client pings against the read
+// deadline, so connect's listener leaves TCP keepalive off.
+func TestRunServesPlatformTransportsWithoutTcpKeepAlive(t *testing.T) {
+	for key, value := range map[string]string{
+		"WARP_ENV": "test", "WARP_VERSION": "2026.9.4+1037600680",
+		"WARP_HOST": "synthetic-host", "WARP_SERVICE": "connect", "WARP_BLOCK": "g1",
+		"WARP_HOST_IPV4": "127.0.0.1", "WARP_HOST_IPV6": "", "WARP_PORTS": "8080:8080",
+	} {
+		t.Setenv(key, value)
+	}
+	t.Cleanup(router.SetWarpStatusReady)
+	readinessErr := errors.New("database migration head 627 is below binary-required head 630")
+	var served []server.HttpServerOptions
+	err := runWithDependencies(context.Background(), RunOptions{Port: 8080},
+		func(context.Context) error {
+			router.SetWarpStatusNotReady(readinessErr)
+			return readinessErr
+		},
+		func(context.Context) func() {
+			return func() {}
+		},
+		func(_ context.Context, _ string, _ http.Handler, _ bool, httpServerOptions server.HttpServerOptions) error {
+			served = append(served, httpServerOptions)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(served) != 1 || !served[0].DisableTcpKeepAlive {
+		t.Fatalf("connect served with %+v, want TCP keepalive disabled", served)
+	}
+}
+
 func TestRunSettingsUseExplicitTLSDefaultHostWithoutEnablingSelfSign(t *testing.T) {
 	settings := exchangeSettingsForRun(RunOptions{Port: 443, TLSDefaultHostName: "127.0.1.1"})
 	transportTLS := settings.ConnectHandlerSettings.TransportTlsSettings

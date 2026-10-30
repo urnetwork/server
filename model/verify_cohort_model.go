@@ -31,9 +31,13 @@ package model
 // boundary seen slightly earlier or later than a validator sees it moves a few
 // assignments between adjacent cohorts, which are inside the lifetime set.
 //
-// Within the caps, providers already in the lifetime set (carried scores, last
-// epoch's cohort among them) are re-admitted first; they cost no lifetime
-// budget. A new provider is admitted only after the cohort has averaged
+// Within the caps, members of claimed head fleets are drawn first
+// (LEADERTOP.md design question 6): the binding sync keeps a priority set of
+// each live claimed fleet's members, at most a per-fleet cap of them
+// (SetVerifyCohortPriority), and a priority member skips the growth gate,
+// never a cap, so claiming a UID leads to measurement. Next, providers
+// already in the lifetime set (carried scores, last epoch's cohort among
+// them) are re-admitted; they cost no lifetime budget. A new provider is admitted only after the cohort has averaged
 // ReliabilityAMin draws this epoch, so early members reach a_min quickly
 // rather than every member waiting for the whole cohort to fill, and after a
 // rollover carried members that reconnect late still find room before new
@@ -50,8 +54,11 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"slices"
+	"strings"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/urnetwork/glog"
@@ -68,6 +75,20 @@ const verifyCohortEpochTtl = 30 * 24 * time.Hour
 // eligible-set sample keeps "carried first" effective as that set fills.
 const verifyCohortCarryDrawCount = 64
 
+// The priority set holds at most a per-fleet share of each claimed fleet; one
+// draw covers a few fleets' members.
+const verifyCohortPriorityDrawCount = 64
+
+// Next hops admitted from the claimed-fleet priority set.
+var verifyCohortPriorityAdmissions = prometheus.NewCounter(prometheus.CounterOpts{
+	Namespace: "urnetwork", Subsystem: "verify_cohort", Name: "priority_admissions_total",
+	Help: "Verify next hops drawn from the claimed-fleet priority set and admitted to the cohort (LEADERTOP.md design question 6). Within both cohort caps.",
+})
+
+func init() {
+	prometheus.MustRegister(verifyCohortPriorityAdmissions)
+}
+
 // All keys share one hash tag, so the admission script stays in one cluster
 // slot. The deployment key keeps a redeployed coordinator, whose epochs
 // restart at zero, from inheriting another deployment's cohorts.
@@ -75,6 +96,7 @@ type verifyCohortKeys struct {
 	epoch    string
 	draws    string
 	lifetime string
+	priority string
 }
 
 func newVerifyCohortKeys(deploymentKey StDeploymentKey, epoch uint64) verifyCohortKeys {
@@ -83,7 +105,97 @@ func newVerifyCohortKeys(deploymentKey StDeploymentKey, epoch uint64) verifyCoho
 		epoch:    fmt.Sprintf("%se%d", prefix, epoch),
 		draws:    fmt.Sprintf("%se%ddraws", prefix, epoch),
 		lifetime: prefix + "lifetime",
+		priority: prefix + "priority",
 	}
+}
+
+// The priority set is replaced about every minute by the binding sync. A sync
+// that stops lets it lapse, so a binding that ended long ago never keeps its
+// priority.
+const verifyCohortPriorityTtl = 1 * time.Hour
+
+// VerifyCohortPriorityPerFleet is the most members of one claimed fleet that
+// draw ahead of the rest: an even share of the cohort among the 200 head
+// seats, so a full head fits the cohort and no fleet takes another's share.
+func VerifyCohortPriorityPerFleet(settings *VerifySettings) int {
+	return max(1, settings.CohortSize/verifyCohortHeadSeats)
+}
+
+// The protocol's maximum_head_fleets on mainnet.
+const verifyCohortHeadSeats = 200
+
+// SetVerifyCohortPriority replaces the deployment's priority set with the
+// members of the live claimed fleets, at most perFleet of each: members in the
+// eligible set first, then members already in the lifetime set (they cost no
+// lifetime budget), then by client id. Returns how many members it set. An
+// empty set removes the key.
+func SetVerifyCohortPriority(ctx context.Context, deploymentKey StDeploymentKey, fleets [][]server.Id, perFleet int) int {
+	if deploymentKey == "" {
+		return 0
+	}
+	keys := newVerifyCohortKeys(deploymentKey, 0)
+	candidates := []string{}
+	for _, members := range fleets {
+		for _, member := range members {
+			candidates = append(candidates, member.String())
+		}
+	}
+	selected := []any{}
+	server.Redis(ctx, func(r server.RedisClient) {
+		eligible := map[string]bool{}
+		carried := map[string]bool{}
+		if 0 < len(candidates) {
+			args := make([]any, len(candidates))
+			for i, candidate := range candidates {
+				args[i] = candidate
+			}
+			inEligible, err := r.SMIsMember(ctx, verifyEligibleKey, args...).Result()
+			server.Raise(err)
+			inLifetime, err := r.SMIsMember(ctx, keys.lifetime, args...).Result()
+			server.Raise(err)
+			for i, candidate := range candidates {
+				eligible[candidate], carried[candidate] = inEligible[i], inLifetime[i]
+			}
+		}
+		seen := map[string]bool{}
+		for _, members := range fleets {
+			ordered := []string{}
+			for _, member := range members {
+				ordered = append(ordered, member.String())
+			}
+			slices.SortFunc(ordered, func(a string, b string) int {
+				if eligible[a] != eligible[b] {
+					if eligible[a] {
+						return -1
+					}
+					return 1
+				}
+				if carried[a] != carried[b] {
+					if carried[a] {
+						return -1
+					}
+					return 1
+				}
+				return strings.Compare(a, b)
+			})
+			for _, member := range ordered[:min(len(ordered), max(0, perFleet))] {
+				if !seen[member] {
+					seen[member] = true
+					selected = append(selected, member)
+				}
+			}
+		}
+		_, err := r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+			pipe.Del(ctx, keys.priority)
+			if 0 < len(selected) {
+				pipe.SAdd(ctx, keys.priority, selected...)
+				pipe.Expire(ctx, keys.priority, verifyCohortPriorityTtl)
+			}
+			return nil
+		})
+		server.Raise(err)
+	})
+	return len(selected)
 }
 
 // verifyCohortAdmitScript admits ARGV[1] into the epoch cohort (or confirms it
@@ -286,7 +398,13 @@ func sampleVerifyCohortNextHop(
 
 			candidate := ""
 			skipGrowthGate := false
+			priority := false
 			if size < settings.CohortSize {
+				// a claimed fleet's member skips the growth gate, never a cap
+				candidate = drawVerifyCohortCandidate(ctx, r, keys.priority, verifyCohortPriorityDrawCount, keys.epoch, excluded)
+				skipGrowthGate, priority = candidate != "", candidate != ""
+			}
+			if candidate == "" && size < settings.CohortSize {
 				candidate = drawVerifyCohortCandidate(ctx, r, keys.lifetime, verifyCohortCarryDrawCount, keys.epoch, excluded)
 				if candidate == "" && lifetime < settings.CohortLifetimeLimit &&
 					(starved || settings.ReliabilityAMin*int64(size) <= draws) {
@@ -319,9 +437,88 @@ func sampleVerifyCohortNextHop(
 				excluded[candidate] = true
 				continue
 			}
+			if priority {
+				verifyCohortPriorityAdmissions.Inc()
+			}
 			nextHop = &candidateId
 			n = cohortN
 			return
+		}
+	})
+	return
+}
+
+// The cohort at the current settlement epoch, for the board
+// (LEADERTOP.md §3.5): how many providers the validator can measure.
+type VerifyCohortStatus struct {
+	Epoch         uint64
+	Members       int
+	Capacity      int
+	Lifetime      int
+	LifetimeLimit int
+	// claimed-fleet members drawing ahead of the rest
+	Priority int
+}
+
+// GetVerifyCohortStatus reads the cohort's sizes; ok is false when there is no
+// cohort or its settlement epoch is unknown.
+func GetVerifyCohortStatus(ctx context.Context, settings *VerifySettings) (*VerifyCohortStatus, bool) {
+	if settings.CohortSize <= 0 {
+		return nil, false
+	}
+	epoch, ok := verifyCohortEpoch(ctx, settings.CohortDeploymentKey)
+	if !ok {
+		return nil, false
+	}
+	keys := newVerifyCohortKeys(settings.CohortDeploymentKey, epoch)
+	status := &VerifyCohortStatus{Epoch: epoch, Capacity: settings.CohortSize, LifetimeLimit: settings.CohortLifetimeLimit}
+	server.Redis(ctx, func(r server.RedisClient) {
+		var members, lifetime, priority *redis.IntCmd
+		_, err := r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+			members = pipe.SCard(ctx, keys.epoch)
+			lifetime = pipe.SCard(ctx, keys.lifetime)
+			priority = pipe.SCard(ctx, keys.priority)
+			return nil
+		})
+		server.Raise(err)
+		status.Members, status.Lifetime, status.Priority = int(members.Val()), int(lifetime.Val()), int(priority.Val())
+	})
+	return status, true
+}
+
+// GetVerifyCohortMembership reports, for each client, whether it is in the
+// current epoch's cohort and whether it is in the lifetime set (re-admitted
+// ahead of new providers whenever it is eligible). Both are false without a
+// cohort.
+func GetVerifyCohortMembership(ctx context.Context, settings *VerifySettings, clientIds []server.Id) (epochMembers map[server.Id]bool, lifetimeMembers map[server.Id]bool) {
+	epochMembers, lifetimeMembers = map[server.Id]bool{}, map[server.Id]bool{}
+	if settings.CohortSize <= 0 || len(clientIds) == 0 {
+		return
+	}
+	epoch, ok := verifyCohortEpoch(ctx, settings.CohortDeploymentKey)
+	if !ok {
+		return
+	}
+	keys := newVerifyCohortKeys(settings.CohortDeploymentKey, epoch)
+	server.Redis(ctx, func(r server.RedisClient) {
+		for start := 0; start < len(clientIds); start += 1024 {
+			batch := clientIds[start:min(start+1024, len(clientIds))]
+			args := make([]any, len(batch))
+			for i, clientId := range batch {
+				args[i] = clientId.String()
+			}
+			inEpoch, err := r.SMIsMember(ctx, keys.epoch, args...).Result()
+			server.Raise(err)
+			inLifetime, err := r.SMIsMember(ctx, keys.lifetime, args...).Result()
+			server.Raise(err)
+			for i, clientId := range batch {
+				if inEpoch[i] {
+					epochMembers[clientId] = true
+				}
+				if inLifetime[i] {
+					lifetimeMembers[clientId] = true
+				}
+			}
 		}
 	})
 	return

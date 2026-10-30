@@ -20,6 +20,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 
+	"github.com/urfoundation/sn/stabi"
 	"github.com/urnetwork/server/model"
 )
 
@@ -62,19 +63,26 @@ func (self *CoreStClient) FleetBoundEvents(ctx context.Context, fromBlock uint64
 		if err != nil {
 			return nil, fmt.Errorf("FleetBound log %d:%d: %w", log.BlockNumber, log.Index, err)
 		}
-		// a struct of strings and a log always encode
-		data, _ := json.Marshal(model.StFleetBoundEventData{
-			ClientId: fmt.Sprintf("0x%x", bound.ClientId), FleetId: fmt.Sprintf("0x%x", bound.FleetId), Hotkey: fmt.Sprintf("0x%x", bound.Hotkey),
-			Uid: fmt.Sprintf("%d", bound.Uid), Generation: fmt.Sprintf("%d", bound.Generation),
-			ValidFromEpoch: fmt.Sprintf("%d", bound.ValidFromEpoch), ValidToEpoch: fmt.Sprintf("%d", bound.ValidToEpoch),
-		})
-		originalLog, _ := json.Marshal(log)
-		events = append(events, &model.StChainEvent{
-			BlockNumber: log.BlockNumber, BlockHash: log.BlockHash.Hex(), LogIndex: int(log.Index), TxHash: log.TxHash.Hex(),
-			Kind: model.StFleetBoundEventKind, DataJson: string(data), OriginalLog: originalLog,
-		})
+		events = append(events, stFleetBoundChainEvent(log, bound))
 	}
 	return events, nil
+}
+
+// The st_event row of one FleetBound log. The live binding sync
+// (sn_fleet_binding.go) mirrors the same rows, so both writers must produce
+// identical bytes for st_event's idempotent admission.
+func stFleetBoundChainEvent(log *types.Log, bound *stabi.STCoordinatorFleetBound) *model.StChainEvent {
+	// a struct of strings and a log always encode
+	data, _ := json.Marshal(model.StFleetBoundEventData{
+		ClientId: fmt.Sprintf("0x%x", bound.ClientId), FleetId: fmt.Sprintf("0x%x", bound.FleetId), Hotkey: fmt.Sprintf("0x%x", bound.Hotkey),
+		Uid: fmt.Sprintf("%d", bound.Uid), Generation: fmt.Sprintf("%d", bound.Generation),
+		ValidFromEpoch: fmt.Sprintf("%d", bound.ValidFromEpoch), ValidToEpoch: fmt.Sprintf("%d", bound.ValidToEpoch),
+	})
+	originalLog, _ := json.Marshal(log)
+	return &model.StChainEvent{
+		BlockNumber: log.BlockNumber, BlockHash: log.BlockHash.Hex(), LogIndex: int(log.Index), TxHash: log.TxHash.Hex(),
+		Kind: model.StFleetBoundEventKind, DataJson: string(data), OriginalLog: originalLog,
+	}
 }
 
 // Mirrors every FleetBound log from the deploy block through closeBlock into
