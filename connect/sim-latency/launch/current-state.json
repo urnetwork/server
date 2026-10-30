@@ -9,7 +9,7 @@
   "production_activated": true,
   "production_fully_qualified": false,
   "authority_warning": "This is a preparation snapshot, not runtime/score authority. Verify the live process/session and current artifacts before acting; never restart because an observation times out.",
-  "next_action": "Deploy the pending additive migration from the pushed server checkpoint, then deploy the main API with the pushed SN contract. Verify private owner feedback and public embargo. Install the truthful native plan-publication receipt; only after live maintenance verification apply revision-four ACTIVE calibration maintenance, stop/join the real worker and run serial calibration. Keep rewards held, leave epoch one unchanged, and qualify the future G2 evaluator image/configuration before epoch two.",
+  "next_action": "Deploy the pending additive migration from the pushed server checkpoint, then deploy the main API with the pushed SN contract. Verify private owner feedback and public embargo. The native plan-publication receipt and timed-execution configuration are installed and rehashed; revalidate them before use. Only after live maintenance verification apply revision-four ACTIVE calibration maintenance, stop/join the real worker and run serial calibration. Keep rewards held, leave epoch one unchanged, and qualify the future G2 evaluator image/configuration before epoch two.",
   "production": {
     "api": "https://api.bringyour.com",
     "season_id": "sim-latency-production-20261028-r2",
@@ -140,18 +140,22 @@
       "plan_sha256": "a22861dfd3d4e6bfd3e9a994b447fc535847cf7f3e4b92871dbce4ae97e79dd0",
       "native_log_sha256": "e592335923ede2051332d30e8ebe20a373227557c08ef8be5e49464d788f9e96",
       "exact_versioned_copy_matches_native": true,
-      "publication_receipt_installed": false,
+      "publication_receipt_installed": true,
+      "publication_receipt_installed_at": "2026-10-30T18:23:45Z",
+      "publication_receipt_sha256": "6f917eb98444576e875e9b979461c91777107af46f0341e70345888f6e408f56",
+      "publication_git_evidence_sha256": "1f49c744893d4059b976a401c85d8104e3355d1cffa8b13406d61a3110a85e78",
+      "execution_configuration_sha256": "996417eece4a3e817346d99c605728bb97f4187d7428a6c7f47dea19209866ef",
       "do_not_run_prepare_again": true
     },
     "next_serial_actions": [
-      "Checkpoint and remote-readback the exact public plan; install a truthful protected plan-publication.json receipt with actual publication time/commit.",
+      "The exact public plan, remote ancestry, protected publication receipt and separately pinned execution configuration are verified. Revalidate actual files and prerequisites before use; do not repeat prepare or treat this metadata checkpoint as measurement authority.",
       "After the deployed maintenance mode and actual revision-four hold are verified, stop/join the real worker; verify inventory, free canonical lock and evaluation/management memory before native timed execution.",
       "Run one new public R9/R9 pilot with the approved reduced-strength reference. No production evaluation or build/test load may overlap.",
       "Only after accepted native public direction and AFTER13 census draw/run the approved fresh hidden seed (36runs). Preserve failed references and the unused original second seed.",
       "Independently accept calibration and retain COMPLIANCE exact-version evidence before accepted-marker creation, fence cancellation or reward delivery release. Resume grading using the actual authorized release revision."
     ],
     "serial_action_handoff": "server/connect/sim-latency/launch/reduced-pilot-operator-2026-10-30/NEXT-SERIAL-ACTION.json",
-    "serial_action_handoff_sha256": "bd7aa43153fc8fe047f4590bd44fbc598a3c990f7cc16f91f7075e3e87d4cf56"
+    "serial_action_handoff_sha256": "26d2e3ca16189e0514cb9b11c3942c80cca6b399683322a2042fcd621347d7db"
   },
   "deadline_fences": {
     "deadline": "2026-11-05T12:00:00Z",
@@ -183,7 +187,7 @@
     "retained_in_git": true,
     "warning": "The 164128-byte historical checkpoint retains all earlier failures, qualifications and source pins. Its old top-level status and next_action are superseded; do not execute them. Read history only for a specific supporting artifact."
   },
-  "observed_at": "2026-10-30T17:54:24Z",
+  "observed_at": "2026-10-30T18:30:07Z",
   "phase_checkpoint_qualification": {
     "status": "focused tests, native API build, standalone guard and static checks passed; not a live release",
     "toolchain": "go1.27.3",
@@ -243,6 +247,21 @@
     "private_receipt_sha256": "750653d4116a69cd5c748488d9a90def9e1ed9f9adf7c9db98b0c8878e0188c8",
     "static_checks_passed": true
   },
+  "followup_image_script_qualification": {
+    "status": "accepted_with_manifest_collation_exception",
+    "report": "server/connect/sim-latency/launch/IMAGE-SCRIPT-PROVENANCE-QUALIFICATION-2026-10-30.json",
+    "report_sha256": "4d8beb5ea593cf9cda31210ae4afcd93cc4d628fdf9266cf3620db6c1fc96801",
+    "whole_package_race_compilation": true,
+    "selected_unit_roots": 23,
+    "fresh_processes": 3,
+    "top_level_passes": 69,
+    "test_failures": 0,
+    "test_skips": 0,
+    "full_suite_or_image_build_claimed": false,
+    "original_wrapper_exit_one_preserved": true,
+    "complete_unique_source_path_digest_set_unchanged": true,
+    "current_epoch_and_frozen_patch_unchanged": true
+  },
   "checkpoint_publication": {
     "observed_at": "2026-10-30T17:54:24Z",
     "pulled_merged_and_pushed": true,
@@ -254,6 +273,6 @@
     "clean_canonical_workspaces_fast_forwarded": true,
     "frozen_competition_branches_unchanged": true,
     "plan_sha256": "a22861dfd3d4e6bfd3e9a994b447fc535847cf7f3e4b92871dbce4ae97e79dd0",
-    "native_publication_receipt_installed": false
+    "native_publication_receipt_installed": true
   }
 }
