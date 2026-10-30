@@ -1360,7 +1360,7 @@ func (self *Exchange) serveExchangeConnection(port int) {
 	if serverSocket == nil {
 		listenIpv4, _, listenPort := server.RequireListenIpPort(port)
 
-		listenConfig := exchangeListenConfig()
+		listenConfig := exchangeListenConfig(exchangeKeepAliveConfig(self.settings.ExchangePingTimeout))
 
 		var err error
 		// leave host part empty to listen on all available interfaces
@@ -2809,22 +2809,34 @@ type ExchangeConnection struct {
 	afterSendWriteForTest func(messageCount int, writeErr error)
 }
 
-// Exchange liveness is the exchange's own ping, every ExchangePingTimeout,
-// against an ExchangeReadTimeout read deadline at each end. TCP keepalive on
-// top of it only added a probe and an ACK per idle socket: at the former 1 s
-// idle, about a fifth of all TCP segments on a services edge.
-func configureExchangeTcpConn(tcpConn *net.TCPConn) {
-	tcpConn.SetNoDelay(true)
-	tcpConn.SetLinger(0)
-	tcpConn.SetKeepAlive(false)
+// exchangeKeepAliveConfig is the TCP keepalive of an exchange socket. Each end
+// pings at least every pingTimeout, so a live connection is never quiet for
+// Idle and sends no probe. A dead peer is noticed Idle plus Count unanswered
+// probes after its last packet: pingTimeout + 5 s, 15 s at the default 10 s
+// ping. That is within the 16 s that the former keepalive (1 s idle, 15
+// probes 1 s apart) took, at a fraction of its cost: probing after 1 s of
+// quiet was about a fifth of all TCP segments on a services edge. The read
+// deadline alone notices a dead peer only 20-30 s after its last frame.
+func exchangeKeepAliveConfig(pingTimeout time.Duration) net.KeepAliveConfig {
+	return net.KeepAliveConfig{
+		Enable:   true,
+		Idle:     pingTimeout + time.Second,
+		Interval: time.Second,
+		Count:    4,
+	}
 }
 
-// Accepted exchange sockets rely on the same ping and read deadline, so the
-// listener leaves TCP keepalive off instead of taking Go's default.
-func exchangeListenConfig() net.ListenConfig {
+func configureExchangeTcpConn(tcpConn *net.TCPConn, keepAlive net.KeepAliveConfig) {
+	tcpConn.SetNoDelay(true)
+	tcpConn.SetLinger(0)
+	tcpConn.SetKeepAliveConfig(keepAlive)
+}
+
+// Accepted exchange sockets carry the same keepalive as dialed ones.
+func exchangeListenConfig(keepAlive net.KeepAliveConfig) net.ListenConfig {
 	return net.ListenConfig{
-		Control:   server.SoReusePort,
-		KeepAlive: -1,
+		Control:         server.SoReusePort,
+		KeepAliveConfig: keepAlive,
 	}
 }
 
@@ -2862,7 +2874,7 @@ func NewExchangeConnection(
 	})
 	defer stopContextClose()
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
-		configureExchangeTcpConn(tcpConn)
+		configureExchangeTcpConn(tcpConn, exchangeKeepAliveConfig(settings.ExchangePingTimeout))
 	}
 
 	success := false
