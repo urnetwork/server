@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/docopt/docopt-go"
+	"github.com/urnetwork/server/model"
 	"gopkg.in/yaml.v3"
 )
 
@@ -96,14 +97,15 @@ func (self sourceRepositories) commitsForMode(_ bool) map[string]string {
 }
 
 type sourceEpoch struct {
-	Epoch                         int                 `yaml:"epoch"`
-	Kind                          string              `yaml:"kind"`
-	SignificantImprovementPercent float64             `yaml:"significant_improvement_percent"`
-	WinnerJobId                   string              `yaml:"winner_job_id,omitempty"`
-	WinnerSignificance            *sourceSignificance `yaml:"winner_significance,omitempty"`
-	PromotedFromEpoch             *int                `yaml:"promoted_from_epoch,omitempty"`
-	PromotedAt                    string              `yaml:"promoted_at,omitempty"`
-	Repositories                  sourceRepositories  `yaml:"repositories"`
+	G2VolumePolicy                model.CompetitionG2VolumePolicy `yaml:"g2_volume_policy,omitempty"`
+	Epoch                         int                             `yaml:"epoch"`
+	Kind                          string                          `yaml:"kind"`
+	SignificantImprovementPercent float64                         `yaml:"significant_improvement_percent"`
+	WinnerJobId                   string                          `yaml:"winner_job_id,omitempty"`
+	WinnerSignificance            *sourceSignificance             `yaml:"winner_significance,omitempty"`
+	PromotedFromEpoch             *int                            `yaml:"promoted_from_epoch,omitempty"`
+	PromotedAt                    string                          `yaml:"promoted_at,omitempty"`
+	Repositories                  sourceRepositories              `yaml:"repositories"`
 }
 
 // sourceSignificance preserves the winning evaluation statistics that define
@@ -159,12 +161,13 @@ type evaluatorSourceLock struct {
 }
 
 type sourceRecord struct {
-	Schema                        int               `json:"schema"`
-	Staging                       bool              `json:"staging,omitempty"`
-	Epoch                         int               `json:"epoch"`
-	Branch                        string            `json:"branch"`
-	SignificantImprovementPercent float64           `json:"significant_improvement_percent"`
-	Repositories                  map[string]string `json:"repositories"`
+	G2VolumePolicy                model.CompetitionG2VolumePolicy `json:"g2_volume_policy,omitempty"`
+	Schema                        int                             `json:"schema"`
+	Staging                       bool                            `json:"staging,omitempty"`
+	Epoch                         int                             `json:"epoch"`
+	Branch                        string                          `json:"branch"`
+	SignificantImprovementPercent float64                         `json:"significant_improvement_percent"`
+	Repositories                  map[string]string               `json:"repositories"`
 }
 
 // readSourceFile bounds operator configuration before parsing it.
@@ -261,6 +264,9 @@ func validateSourceManifest(manifest *sourceManifest) error {
 		return errors.New("source config must contain baseline epoch 0 and at most six promoted epochs")
 	}
 	for epochIndex, epoch := range manifest.EvaluationSource.Epochs {
+		if epoch.G2VolumePolicy != model.CompetitionG2VolumePolicyLegacy {
+			return errors.New("historical schema-one source cannot carry a prospective scoring policy")
+		}
 		if epoch.Repositories.OperatorProxy.Commit != "" {
 			return errors.New("source cannot include retired operator-proxy")
 		}
@@ -392,7 +398,8 @@ func (self *sourceManifest) epoch(epochNumber int) (*sourceEpoch, error) {
 			return nil, err
 		}
 		return &sourceEpoch{
-			Epoch: epochNumber, Kind: generation.Kind,
+			G2VolumePolicy: generation.G2VolumePolicy,
+			Epoch:          epochNumber, Kind: generation.Kind,
 			SignificantImprovementPercent: generation.SignificantImprovementPercent,
 			Repositories:                  generation.Repositories,
 		}, nil
@@ -683,12 +690,14 @@ func runSourceCheck(opts docopt.Opts) {
 			fatalf("source epoch config: %s", err)
 		}
 		result := struct {
-			Schema                        int     `json:"schema"`
-			Staging                       bool    `json:"staging,omitempty"`
-			Branch                        string  `json:"branch"`
-			Epoch                         int     `json:"epoch"`
-			SignificantImprovementPercent float64 `json:"significant_improvement_percent"`
+			G2VolumePolicy                model.CompetitionG2VolumePolicy `json:"g2_volume_policy,omitempty"`
+			Schema                        int                             `json:"schema"`
+			Staging                       bool                            `json:"staging,omitempty"`
+			Branch                        string                          `json:"branch"`
+			Epoch                         int                             `json:"epoch"`
+			SignificantImprovementPercent float64                         `json:"significant_improvement_percent"`
 		}{
+			G2VolumePolicy:                epoch.G2VolumePolicy,
 			Schema:                        1,
 			Staging:                       manifest.Staging,
 			Branch:                        manifest.EvaluationSource.Branch,
@@ -741,6 +750,7 @@ func runSourceRecord(opts docopt.Opts) {
 		fatalf("source record measured dependency graph: %s", err)
 	}
 	result := sourceRecord{
+		G2VolumePolicy:                epoch.G2VolumePolicy,
 		Schema:                        1,
 		Staging:                       manifest.Staging,
 		Epoch:                         epochNumber,
@@ -787,6 +797,7 @@ func runStagingSourceCheck(opts docopt.Opts) {
 		fatalf("staging source config: %s", err)
 	}
 	result := sourceRecord{
+		G2VolumePolicy:                epoch.G2VolumePolicy,
 		Schema:                        1,
 		Epoch:                         epochNumber,
 		Branch:                        stagingEvaluationSourceBranch,

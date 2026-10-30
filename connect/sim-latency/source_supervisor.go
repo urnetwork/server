@@ -261,6 +261,7 @@ func (self *sourceSupervisorRuntime) chooseSource(ctx context.Context, lease mod
 	}
 	preparedAt := time.Now().UTC()
 	intent := &model.CompetitionSourceActivation{
+		G2VolumePolicy: current.G2VolumePolicy, SimulatorSha256: current.SimulatorSha256, ScorerSha256: current.ScorerSha256,
 		Environment: current.Environment, CompetitionId: current.CompetitionId, SeasonId: current.SeasonId,
 		Staging: current.Staging, StagingRoundWindowSeconds: current.StagingRoundWindowSeconds, StagingPreparationSeconds: current.StagingPreparationSeconds,
 		Generation: generation, ExpectedGeneration: current.Generation, SourceGeneration: current.SourceGeneration, TargetEpoch: transition.TargetEpoch,
@@ -292,8 +293,12 @@ func (self *sourceSupervisorRuntime) chooseSource(ctx context.Context, lease mod
 		intent.SourceLockSha256, intent.Commits = proposal.SourceLockSha256, proposal.Commits
 		intent.ReviewId, intent.ReviewDecisionDigest = &proposal.ReviewId, proposal.ReviewDecisionDigest
 		intent.ApprovedPatchSha256 = proposal.PatchSha256
+		intent.CandidatePathBase = proposal.CandidatePathBase
 		intent.EvaluatedImageDigest = proposal.EvaluatedImageDigest
 		intent.EvaluatorImageDigest, intent.HostQualificationSha256 = proposal.BuildReceipt.EvaluatorImageDigest, proposal.BuildReceipt.HostQualificationSha256
+		if proposal.BuildReceipt.SimulatorSha256 != "" {
+			intent.SimulatorSha256, intent.ScorerSha256 = proposal.BuildReceipt.SimulatorSha256, proposal.BuildReceipt.SimulatorSha256
+		}
 		intent.BuildReadyAt = proposal.ReadyAt
 		if !intent.Staging {
 			selectedMargin = proposal.Significance.RecommendedNextEpochTakeoverMarginPercent
@@ -304,36 +309,7 @@ func (self *sourceSupervisorRuntime) chooseSource(ctx context.Context, lease mod
 			return nil, err
 		}
 	}
-	intent.SourceDecisionDigest, err = model.CompetitionAutomationDigest(struct {
-		Staging              bool      `json:"staging,omitempty"`
-		Generation           int64     `json:"generation"`
-		TargetEpoch          int       `json:"target_epoch"`
-		SourceLockSha256     string    `json:"source_lock_sha256"`
-		RewardDecisionDigest string    `json:"reward_decision_digest"`
-		Kind                 string    `json:"kind"`
-		TargetRoundId        server.Id `json:"target_round_id"`
-	}{Staging: intent.Staging, Generation: generation, TargetEpoch: intent.TargetEpoch, SourceLockSha256: intent.SourceLockSha256, RewardDecisionDigest: rewardDigest, Kind: intent.Kind, TargetRoundId: intent.TargetRoundId})
-	if err != nil {
-		return nil, err
-	}
-	manifest.EvaluationSource.Rounds = append(manifest.EvaluationSource.Rounds, reviewedSourceRound{
-		Epoch: intent.TargetEpoch, SourceGeneration: intent.SourceGeneration, ActivationGeneration: intent.Generation,
-		SourceDecisionDigest: intent.SourceDecisionDigest, Kind: intent.Kind, Reason: intent.Reason, RewardDecisionDigest: rewardDigest,
-		SourceLockSha256: intent.SourceLockSha256, SignificantImprovementPercent: selectedMargin,
-	})
-	if err := validateSourceManifest(manifest); err != nil {
-		return nil, err
-	}
-	manifestBytes, err := yaml.Marshal(manifest)
-	if err != nil {
-		return nil, err
-	}
-	manifestDigest := sha256.Sum256(manifestBytes)
-	intent.Manifest, intent.ManifestSha256 = manifestBytes, hex.EncodeToString(manifestDigest[:])
-	publication := &sourcePublicationIntent{Schema: 2, Staging: intent.Staging, ActivationGeneration: generation, SourceDecisionDigest: intent.SourceDecisionDigest, ManifestSha256: intent.ManifestSha256}
-	if proposal != nil {
-		publication.ApprovedPatchSha256, publication.ApprovedPatchPath = proposal.PatchSha256, filepath.Join(finalRoot, "canonical.patch")
-	}
+	stagedRoots := map[string]string{}
 	for _, repository := range sourceRepositoryNamesForMode(intent.Staging) {
 		stagedRoot := filepath.Join(root, repository)
 		origin := origins[repository]
@@ -356,6 +332,44 @@ func (self *sourceSupervisorRuntime) chooseSource(ctx context.Context, lease mod
 		if _, err := sourceGitText(ctx, stagedRoot, "checkout", "--quiet", "--detach", intent.Commits[repository]); err != nil {
 			return nil, err
 		}
+		stagedRoots[repository] = stagedRoot
+	}
+	if err := self.instrumentSelectedSource(ctx, current, intent, manifest, stagedRoots); err != nil {
+		return nil, err
+	}
+	intent.SourceDecisionDigest, err = model.CompetitionAutomationDigest(struct {
+		Staging              bool      `json:"staging,omitempty"`
+		Generation           int64     `json:"generation"`
+		TargetEpoch          int       `json:"target_epoch"`
+		SourceLockSha256     string    `json:"source_lock_sha256"`
+		RewardDecisionDigest string    `json:"reward_decision_digest"`
+		Kind                 string    `json:"kind"`
+		TargetRoundId        server.Id `json:"target_round_id"`
+	}{Staging: intent.Staging, Generation: generation, TargetEpoch: intent.TargetEpoch, SourceLockSha256: intent.SourceLockSha256, RewardDecisionDigest: rewardDigest, Kind: intent.Kind, TargetRoundId: intent.TargetRoundId})
+	if err != nil {
+		return nil, err
+	}
+	manifest.EvaluationSource.Rounds = append(manifest.EvaluationSource.Rounds, reviewedSourceRound{
+		G2VolumePolicy: intent.G2VolumePolicy,
+		Epoch:          intent.TargetEpoch, SourceGeneration: intent.SourceGeneration, ActivationGeneration: intent.Generation,
+		SourceDecisionDigest: intent.SourceDecisionDigest, Kind: intent.Kind, Reason: intent.Reason, RewardDecisionDigest: rewardDigest,
+		SourceLockSha256: intent.SourceLockSha256, SignificantImprovementPercent: selectedMargin,
+	})
+	if err := validateSourceManifest(manifest); err != nil {
+		return nil, err
+	}
+	manifestBytes, err := yaml.Marshal(manifest)
+	if err != nil {
+		return nil, err
+	}
+	manifestDigest := sha256.Sum256(manifestBytes)
+	intent.Manifest, intent.ManifestSha256 = manifestBytes, hex.EncodeToString(manifestDigest[:])
+	publication := &sourcePublicationIntent{Schema: 2, Staging: intent.Staging, ActivationGeneration: generation, SourceDecisionDigest: intent.SourceDecisionDigest, ManifestSha256: intent.ManifestSha256, TrustedInstrument: intent.TrustedInstrument}
+	if proposal != nil {
+		publication.ApprovedPatchSha256, publication.ApprovedPatchPath = proposal.PatchSha256, filepath.Join(finalRoot, "canonical.patch")
+		publication.CandidatePathBase = proposal.CandidatePathBase
+	}
+	for _, repository := range sourceRepositoryNamesForMode(intent.Staging) {
 		ref := model.CompetitionSourceGitRef{Branch: sourceBranch(intent.Staging), ExpectedCommit: current.Commits[repository], Commit: intent.Commits[repository]}
 		intent.GitRefs[repository] = ref
 		publication.Refs = append(publication.Refs, sourcePublicationRef{Repository: repository, Branch: ref.Branch, ExpectedCommit: ref.ExpectedCommit, Commit: ref.Commit, StagedRoot: filepath.Join(finalRoot, repository)})
@@ -429,6 +443,14 @@ func (self *sourceSupervisorRuntime) publishSource(ctx context.Context, lease mo
 	}
 	if publication.Staging != intent.Staging || publication.ActivationGeneration != intent.Generation || publication.SourceDecisionDigest != intent.SourceDecisionDigest || publication.ManifestSha256 != intent.ManifestSha256 || publication.ApprovedPatchSha256 != intent.ApprovedPatchSha256 {
 		return errors.New("publication journal is not the authenticated source intent")
+	}
+	if publication.CandidatePathBase != intent.CandidatePathBase {
+		return errors.New("publication journal candidate path base differs from its durable evaluated-source authorization")
+	}
+	publicationProof, proofErr := model.CompetitionAutomationDigest(publication.TrustedInstrument)
+	intentProof, intentProofErr := model.CompetitionAutomationDigest(intent.TrustedInstrument)
+	if proofErr != nil || intentProofErr != nil || publicationProof != intentProof {
+		return errors.New("publication journal substituted trusted instrument proof")
 	}
 	if publication.Bootstrap != (intent.Kind == "baseline") {
 		return errors.New("publication bootstrap flag differs from authorized source kind")

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
 )
 
 // Preparation is not a submission attempt and never resets a submission timer.
@@ -51,11 +52,12 @@ type roundBaselinePreparationPin struct {
 }
 
 type roundBaselinePreparationConfig struct {
-	Schema             int                           `json:"schema"`
-	Kind               string                        `json:"kind"`
-	Program            roundBaselinePreparationPin   `json:"program"`
-	Dependencies       []roundBaselinePreparationPin `json:"dependencies"`
-	ZeroSampleRecovery *roundBaselinePreparationPin  `json:"zero_sample_recovery,omitempty"`
+	G2VolumePolicy     model.CompetitionG2VolumePolicy `json:"g2_volume_policy,omitempty"`
+	Schema             int                             `json:"schema"`
+	Kind               string                          `json:"kind"`
+	Program            roundBaselinePreparationPin     `json:"program"`
+	Dependencies       []roundBaselinePreparationPin   `json:"dependencies"`
+	ZeroSampleRecovery *roundBaselinePreparationPin    `json:"zero_sample_recovery,omitempty"`
 }
 
 // Runtime-only policy survives source/frozen-settings copies without changing
@@ -86,6 +88,22 @@ func roundBaselinePreparationDependencyDigests() map[string]string {
 		"Dockerfile.submission":          "255d1827494c22482bb851323ee13d8ee03fb407fbf40348531b7d2ec32fc034",
 		"competitionpatch":               "3d161d76bace48bff6536164a84f330b1618c82f319775b8551c19872b937e54",
 		"competitionpatch.sha256":        "560358c0192972f71e715144289b8871fc4c3566d382cd30a9b7d3deb74c6df7",
+	}
+}
+
+// A new producer has its own immutable release. The historical program and
+// dependency fingerprints above continue to authenticate version-one controls.
+func roundBaselinePreparationPolicyDependencies(policy model.CompetitionG2VolumePolicy) (map[string]string, string, error) {
+	dependencies := roundBaselinePreparationDependencyDigests()
+	switch policy {
+	case model.CompetitionG2VolumePolicyLegacy:
+		return dependencies, "prepare-round-baseline.sh", nil
+	case model.CompetitionG2VolumePolicyMinimumWork:
+		delete(dependencies, "evaluator.sh")
+		dependencies["evaluator-minimum-work.sh"] = "7780930d44ebc1df5d8f775a75c37aadb2048fc1b9386027615f3ce6b5fe56d4"
+		return dependencies, "prepare-round-baseline-minimum-work.sh", nil
+	default:
+		return nil, "", errors.New("unsupported baseline preparation g2 volume policy")
 	}
 }
 
@@ -139,6 +157,24 @@ type roundBaselinePreparer interface {
 
 var errRoundBaselinePreparationHeld = errors.New("round baseline preparation is held; reconcile original evidence, do not resample")
 
+// A future CLI option may never replace the current startup profile, even if
+// the operator accidentally supplies a valid legacy configuration at that path.
+func ConfigureCompetitionFutureRoundBaselinePreparation(settings *Settings, path, expected string) error {
+	if settings == nil || settings.FutureEpochPolicy == nil {
+		return errors.New("future preparation requires an approved future epoch policy")
+	}
+	copy := *settings
+	copy.futureBaselinePreparation = nil
+	if err := ConfigureCompetitionRoundBaselinePreparation(&copy, path, expected); err != nil {
+		return err
+	}
+	if copy.futureBaselinePreparation == nil || copy.futureBaselinePreparation.Config.G2VolumePolicy != settings.FutureEpochPolicy.G2VolumePolicy {
+		return errors.New("future preparation config does not name the separately staged policy")
+	}
+	settings.futureBaselinePreparation = copy.futureBaselinePreparation
+	return nil
+}
+
 // Hashes bind the exact frozen round/source/workload and real queued job while
 // leaving the hidden seed out of durable reservation/event payloads.
 func roundBaselinePreparationContext(settings *Settings, job *queuedJob) (string, error) {
@@ -181,9 +217,16 @@ func ConfigureCompetitionRoundBaselinePreparation(settings *Settings, path, expe
 	if err := decodeCompetitionPreparationJson(bytes.NewReader(content), 64*1024, &config); err != nil {
 		return err
 	}
-	expectedDependencies := roundBaselinePreparationDependencyDigests()
+	if config.G2VolumePolicy != settings.EvaluationPolicy.G2VolumePolicy &&
+		(settings.FutureEpochPolicy == nil || config.G2VolumePolicy != settings.FutureEpochPolicy.G2VolumePolicy) {
+		return errors.New("baseline preparation policy is neither current nor explicitly staged for a future epoch")
+	}
+	expectedDependencies, expectedProgram, err := roundBaselinePreparationPolicyDependencies(config.G2VolumePolicy)
+	if err != nil {
+		return err
+	}
 	if config.Schema != 1 || config.Kind != "sim-latency-round-baseline-preparation-config" ||
-		filepath.Base(config.Program.Path) != "prepare-round-baseline.sh" || len(config.Dependencies) != len(expectedDependencies) {
+		filepath.Base(config.Program.Path) != expectedProgram || len(config.Dependencies) != len(expectedDependencies) {
 		return errors.New("baseline preparation configuration identity is invalid")
 	}
 	for _, pin := range config.Dependencies {
@@ -225,7 +268,11 @@ func ConfigureCompetitionRoundBaselinePreparation(settings *Settings, path, expe
 	if err := configureRoundBaselineRecovery(settings, profile); err != nil {
 		return err
 	}
-	settings.roundBaselinePreparation = profile
+	if config.G2VolumePolicy == settings.EvaluationPolicy.G2VolumePolicy {
+		settings.roundBaselinePreparation = profile
+	} else {
+		settings.futureBaselinePreparation = profile
+	}
 	return nil
 }
 

@@ -115,22 +115,23 @@ func (self PostgresStore) ReviewedSource(ctx context.Context, settings *Settings
 // The trusted deployment adapter installs this exact envelope on every
 // participating runtime. It contains no token, workload, patch, or seed.
 type CompetitionRuntimeManifest struct {
-	RequiredApiCapability     string    `json:"required_api_capability,omitempty"`
-	IntentSha256              string    `json:"intent_sha256,omitempty"`
-	Staging                   bool      `json:"staging,omitempty"`
-	StagingRoundWindowSeconds int       `json:"staging_round_window_seconds,omitempty"`
-	StagingPreparationSeconds int       `json:"staging_preparation_seconds,omitempty"`
-	Environment               string    `json:"environment"`
-	CompetitionId             string    `json:"competition_id"`
-	SeasonId                  string    `json:"season_id"`
-	Generation                int64     `json:"generation"`
-	TargetRoundId             server.Id `json:"target_round_id"`
-	ManifestCommit            string    `json:"manifest_commit"`
-	ManifestSha256            string    `json:"manifest_sha256"`
-	Manifest                  []byte    `json:"manifest"`
-	SourceLockSha256          string    `json:"source_lock_sha256"`
-	EvaluatorImageDigest      string    `json:"evaluator_image_digest"`
-	HostQualificationSha256   string    `json:"host_qualification_sha256"`
+	G2VolumePolicy            model.CompetitionG2VolumePolicy `json:"g2_volume_policy,omitempty"`
+	RequiredApiCapability     string                          `json:"required_api_capability,omitempty"`
+	IntentSha256              string                          `json:"intent_sha256,omitempty"`
+	Staging                   bool                            `json:"staging,omitempty"`
+	StagingRoundWindowSeconds int                             `json:"staging_round_window_seconds,omitempty"`
+	StagingPreparationSeconds int                             `json:"staging_preparation_seconds,omitempty"`
+	Environment               string                          `json:"environment"`
+	CompetitionId             string                          `json:"competition_id"`
+	SeasonId                  string                          `json:"season_id"`
+	Generation                int64                           `json:"generation"`
+	TargetRoundId             server.Id                       `json:"target_round_id"`
+	ManifestCommit            string                          `json:"manifest_commit"`
+	ManifestSha256            string                          `json:"manifest_sha256"`
+	Manifest                  []byte                          `json:"manifest"`
+	SourceLockSha256          string                          `json:"source_lock_sha256"`
+	EvaluatorImageDigest      string                          `json:"evaluator_image_digest"`
+	HostQualificationSha256   string                          `json:"host_qualification_sha256"`
 }
 
 // Authenticates installed runtime content instead of accepting a caller's

@@ -335,8 +335,13 @@ func testRoundBaseline(t testing.TB, settings *Settings, round *roundRecord, raw
 			},
 		})
 	}
+	scorerVersion, err := model.CompetitionScorerVersionForG2Policy(evaluationPolicy.G2VolumePolicy)
+	if err != nil {
+		t.Fatal(err)
+	}
 	content, err := json.MarshalIndent(roundBaselineManifest{
-		ScoreSchema: ScoreSchema, Kind: "sim-latency-score-baseline", ScorerVersion: ScorerVersion,
+		G2VolumePolicy: evaluationPolicy.G2VolumePolicy,
+		ScoreSchema:    ScoreSchema, Kind: "sim-latency-score-baseline", ScorerVersion: scorerVersion,
 		RoundId: round.RoundId.String(), ConfigSha256: round.ProvidersSha256,
 		RequestTimeoutMs: evaluationPolicy.RequestTimeoutMs,
 		RunFlags:         map[string]string{"official": "true"},
@@ -1878,7 +1883,7 @@ func TestCompetitionNullableOutcomeJsonTreatsSqlAndJsonNullAsAbsent(t *testing.T
 	}
 }
 
-func TestScoreResultsRemainEmbargoedUntilWinnerFinalization(t *testing.T) {
+func TestScoreOwnerFeedbackDoesNotPublishErrorsBeforeWinnerFinalization(t *testing.T) {
 	settings := validSettings()
 	raw, normalized := 10.0, 112.0
 	completedAt := server.NowUtc()
@@ -1900,8 +1905,8 @@ func TestScoreResultsRemainEmbargoedUntilWinnerFinalization(t *testing.T) {
 	result, status, evalError := service.GetScore(context.Background(), job.JobId, submitter)
 	if evalError != nil || status != 200 || result.State != "completed" ||
 		result.EvaluationStatus != "completed" || result.EvaluationFailure != nil ||
-		result.Score != nil || result.EvalError != nil {
-		t.Fatalf("embargoed result = %#v, %d, %#v", result, status, evalError)
+		result.Score == nil || result.EvalError != nil {
+		t.Fatalf("private owner result = %#v, %d, %#v", result, status, evalError)
 	}
 	operator := &Principal{Id: "ops", Role: "operator"}
 	result, status, evalError = service.GetScore(context.Background(), job.JobId, operator)
@@ -4438,6 +4443,7 @@ func TestApexAdapterConformance(t *testing.T) {
 				RoundId:     roundId,
 				PatchSha256: patchDigests[patchIndex],
 				State:       "completed", EvaluationStatus: "completed",
+				Score: privateCompletedScore(competitionRankingScore(90+5*float64(patchIndex), 110-5*float64(patchIndex))),
 			}
 			if patchIndex == 0 && leakEmbargoedScore {
 				leakEmbargoedScore = false
@@ -4586,7 +4592,7 @@ func TestApexAdapterConformance(t *testing.T) {
 		if err != nil {
 			t.Fatalf("FIFO poll %d: %v", i+1, err)
 		}
-		if record.JobId != jobIds[i] || record.State != "completed" || record.Score != nil {
+		if record.JobId != jobIds[i] || record.State != "completed" || record.Score != nil || record.PrivateScore == nil || record.Published {
 			t.Fatalf("FIFO poll %d = %+v", i+1, record)
 		}
 	}

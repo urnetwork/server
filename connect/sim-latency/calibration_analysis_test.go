@@ -47,7 +47,7 @@ func newCalibrationAnalysisFixture(settings calibrationAnalysisSettings) []calib
 func rebuildCalibrationAnalysisFixture(cohort *calibrationAnalysisCohort) {
 	baseline := aggregateBaseline(cohort.Baseline.Replicates)
 	candidate := aggregateCandidate(cohort.Candidates)
-	gates := buildScoreGates(baseline, candidate, cohort.Candidates)
+	gates := buildScoreGates(baseline, candidate, cohort.Candidates, cohort.Baseline.G2VolumePolicy)
 	cohort.Result = &ScoreResult{
 		ScoreSchema: apexScoreSchema, RawScore: candidate.RawScore, Placeable: allScoreGatesPass(gates),
 		Gates: gates, Significance: scoreSignificance(cohort.Baseline.Replicates, cohort.Candidates, cohort.Baseline.TakeoverMargin),

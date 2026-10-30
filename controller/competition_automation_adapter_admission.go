@@ -20,7 +20,8 @@ func validateApexAdmissionContract(competitionId string, round RoundResult, enab
 	return nil
 }
 
-// Polling may publish immutable scores, never an approved winner or payment status.
+// Private score feedback is distinct from published scores, and neither grants
+// winner approval or payment status.
 func recordApexV2Poll(record *ApexAdapterRecord, job ScoreJobResult, now time.Time) error {
 	if record.DecisionMode != model.CompetitionDecisionModeV2 || job.DecisionMode != record.DecisionMode ||
 		job.RequiredApiCapability != record.RequiredApiCapability || record.JobId != job.JobId ||
@@ -28,6 +29,9 @@ func recordApexV2Poll(record *ApexAdapterRecord, job ScoreJobResult, now time.Ti
 		return errors.New("v2 poll changed an immutable admission identity")
 	}
 	if err := validateScoreJobPoll(job); err != nil {
+		return err
+	}
+	if err := recordApexPrivateScore(record, job); err != nil {
 		return err
 	}
 	if record.EvaluationStatus == "failed" || record.EvaluationStatus == "canceled" {
@@ -44,11 +48,13 @@ func recordApexV2Poll(record *ApexAdapterRecord, job ScoreJobResult, now time.Ti
 			return errors.New("v2 poll changed a published score")
 		}
 	}
-	if job.Score != nil {
+	if job.Score != nil && job.State == "succeeded" {
 		if err := validateScore(job.Score); err != nil {
 			return err
 		}
 		record.Score, record.Published = job.Score, true
+		record.PrivateScore = nil
+		record.PrivateScoreRefreshAt = nil
 	}
 	if job.EvalError != nil {
 		if job.EvalError.Retriable || validateEvaluationError(job.EvalError) != nil {

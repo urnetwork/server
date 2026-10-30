@@ -1,5 +1,5 @@
-// One previously approved intake-only contract may queue authenticated work
-// while its initial grading holds remain intact. This never fabricates host
+// Exact initial or separately approved calibration-maintenance authority may
+// queue authenticated work while grading stays held. Neither fabricates host
 // heartbeats or changes frozen policy, activation, evaluation or publication.
 package controller
 
@@ -44,7 +44,9 @@ func approvedCompetitionIntakeAuthority() competitionIntakeAuthority {
 
 // This unexported per-request permit is never serialized into policy or config.
 type competitionIntakeAdmission struct {
-	Authority competitionIntakeAuthority
+	Authority            competitionIntakeAuthority
+	MaintenanceAuthority *competitionCalibrationMaintenanceAuthority
+	SourceIntentSha256   string
 }
 
 // Existing pooled connections and caller-owned transactions share only this
@@ -56,8 +58,9 @@ type competitionIntakeReader interface {
 // Reads current revisions, not idempotent historical responses or cached booleans.
 func readCompetitionIntakeHolds(ctx context.Context, reader competitionIntakeReader, settings *Settings) (competitionAutomationHoldStatus, error) {
 	var content []byte
-	err := reader.QueryRow(ctx, `SELECT COALESCE(jsonb_object_agg(kind,jsonb_build_object('active',active,'revision',revision,'hold',hold_json)),'{}'::jsonb)
- FROM (SELECT DISTINCT ON (kind) kind,active,revision,hold_json FROM competition_automation_hold
+	err := reader.QueryRow(ctx, `SELECT COALESCE(jsonb_object_agg(kind,jsonb_build_object('active',active,'revision',revision,'hold_id',hold_id,
+ 'created_at',created_at AT TIME ZONE 'UTC','idempotency_key',idempotency_key,'request_sha256',request_sha256,'hold',hold_json)),'{}'::jsonb)
+ FROM (SELECT DISTINCT ON (kind) kind,active,revision,hold_id,created_at,idempotency_key,request_sha256,hold_json FROM competition_automation_hold
  WHERE environment=$1 AND competition_id=$2 AND season_id=$3
  AND kind IN ('admission','evaluation','reward_delivery')
  ORDER BY kind,revision DESC) AS latest`, settings.AutomationPolicy.Environment, settings.CompetitionId, settings.AutomationPolicy.SeasonId).Scan(&content)
@@ -65,9 +68,13 @@ func readCompetitionIntakeHolds(ctx context.Context, reader competitionIntakeRea
 		return competitionAutomationHoldStatus{}, err
 	}
 	var records map[string]struct {
-		Active   *bool           `json:"active"`
-		Revision *int            `json:"revision"`
-		Hold     json.RawMessage `json:"hold"`
+		Active         *bool           `json:"active"`
+		Revision       *int            `json:"revision"`
+		HoldId         string          `json:"hold_id"`
+		CreatedAt      *time.Time      `json:"created_at"`
+		IdempotencyKey string          `json:"idempotency_key"`
+		RequestSha256  string          `json:"request_sha256"`
+		Hold           json.RawMessage `json:"hold"`
 	}
 	if err := json.Unmarshal(content, &records); err != nil {
 		return competitionAutomationHoldStatus{}, err
@@ -80,12 +87,21 @@ func readCompetitionIntakeHolds(ctx context.Context, reader competitionIntakeRea
 				Active *bool `json:"active"`
 			} `json:"request"`
 		}
-		if record.Active == nil || record.Revision == nil || *record.Revision < 1 ||
+		if record.Active == nil || record.Revision == nil || *record.Revision < 1 || record.CreatedAt == nil ||
 			json.Unmarshal(record.Hold, &hold) != nil || json.Unmarshal(record.Hold, &required) != nil || required.Request.Active == nil ||
 			hold.Revision != *record.Revision || hold.Request.Active != *record.Active ||
+			hold.HoldId.String() != record.HoldId || !hold.CreatedAt.Truncate(time.Microsecond).Equal(*record.CreatedAt) ||
+			hold.Request.IdempotencyKey != record.IdempotencyKey || hold.RequestSha256 != record.RequestSha256 ||
 			hold.Environment != settings.AutomationPolicy.Environment || hold.CompetitionId != settings.CompetitionId || hold.SeasonId != settings.AutomationPolicy.SeasonId || hold.Request.Kind != kind {
 			return status, errors.New("competition hold scope does not match its durable row")
 		}
+		requestSha256, err := model.CompetitionAutomationDigest(hold.Request)
+		if err != nil || requestSha256 != record.RequestSha256 {
+			return status, errors.New("competition hold request does not match its durable digest")
+		}
+		// PostgreSQL owns the maintenance deadline; JSON cannot move it. Its
+		// microsecond precision may truncate the original JSON nanoseconds.
+		hold.CreatedAt = *record.CreatedAt
 		switch kind {
 		case "admission":
 			status.Admission = *record.Active
@@ -148,10 +164,23 @@ func competitionIntakeChecksPass(checks map[string]bool) bool {
 // That immutable activated source required actual initial R1 and two-role ACKs;
 // consulting a mutable online host row would recreate the intake coupling.
 func (self *Service) approvedIntakeReadiness(ctx context.Context, settings *Settings, round *roundRecord, checks map[string]bool, holds competitionAutomationHoldStatus) (bool, error) {
-	if !self.intakeAuthority.matches(settings, round, server.NowUtc()) || !self.intakeAuthority.holdsMatch(holds) || !competitionIntakeChecksPass(checks) {
-		return false, nil
+	return self.approvedIntakeAdmission(settings, round, checks, holds, server.NowUtc()) != nil, nil
+}
+
+// Select the actual proved capability, never a boolean later converted into
+// an initial-hold permit. Maintenance requires a prior authentic blob envelope.
+func (self *Service) approvedIntakeAdmission(settings *Settings, round *roundRecord, checks map[string]bool, holds competitionAutomationHoldStatus, now time.Time) *competitionIntakeAdmission {
+	if !competitionIntakeChecksPass(checks) {
+		return nil
 	}
-	return true, nil
+	if self.intakeAuthority.matches(settings, round, now) && self.intakeAuthority.holdsMatch(holds) {
+		return &competitionIntakeAdmission{Authority: self.intakeAuthority}
+	}
+	maintenance := self.calibrationMaintenanceAuthority
+	if maintenance.Scope.matches(settings, round, now) && maintenance.holdsMatch(holds, now) && sha256Pattern.MatchString(settings.runtimeIntentSha256) {
+		return &competitionIntakeAdmission{Authority: maintenance.Scope, MaintenanceAuthority: &maintenance, SourceIntentSha256: settings.runtimeIntentSha256}
+	}
+	return nil
 }
 
 // Ordinary admission remains exactly strict; only a proved exception gets a
@@ -172,12 +201,12 @@ func (self *Service) requireSecureIntake(ctx context.Context, settings *Settings
 	if err != nil {
 		return nil, infrastructureError("not_ready", "competition intake hold authority is unavailable")
 	}
-	allowed, err := self.approvedIntakeReadiness(ctx, settings, round, checks, holds)
-	if err != nil || !allowed {
+	admission := self.approvedIntakeAdmission(settings, round, checks, holds, server.NowUtc())
+	if admission == nil {
 		return nil, infrastructureError("not_ready", "competition evaluator containment is not ready")
 	}
 	copySettings := *settings
-	copySettings.intakeAdmission = &competitionIntakeAdmission{Authority: self.intakeAuthority}
+	copySettings.intakeAdmission = admission
 	return &copySettings, nil
 }
 
@@ -185,6 +214,12 @@ func (self *Service) requireSecureIntake(ctx context.Context, settings *Settings
 // Read the latest hold records using only this transaction. The receipt time
 // is shared by both passes, preserving on-time submissions across slow uploads.
 func checkCompetitionIntakeAdmission(ctx context.Context, reader competitionIntakeReader, settings *Settings, round *roundRecord, receivedAt time.Time) error {
+	return checkCompetitionIntakeAdmissionWithClock(ctx, reader, settings, round, receivedAt, server.NowUtc)
+}
+
+// Production always supplies the real server clock. A private clock seam lets
+// deterministic tests cross maintenance expiry without altering receipt time.
+func checkCompetitionIntakeAdmissionWithClock(ctx context.Context, reader competitionIntakeReader, settings *Settings, round *roundRecord, receivedAt time.Time, nowUtc func() time.Time) error {
 	if settings.intakeAdmission == nil {
 		return nil
 	}
@@ -193,7 +228,17 @@ func checkCompetitionIntakeAdmission(ctx context.Context, reader competitionInta
 		return errors.New("approved intake-only source or window changed")
 	}
 	holds, err := readCompetitionIntakeHolds(ctx, reader, settings)
-	if err != nil || !authority.holdsMatch(holds) {
+	if err != nil {
+		return errors.New("approved intake hold authority is unavailable")
+	}
+	if maintenance := settings.intakeAdmission.MaintenanceAuthority; maintenance != nil {
+		if maintenance.Scope != authority || checkCompetitionCalibrationMaintenanceSource(ctx, reader, settings, round, settings.intakeAdmission.SourceIntentSha256) != nil ||
+			!maintenance.holdsMatch(holds, nowUtc()) {
+			return errors.New("approved calibration maintenance holds, source or lifetime changed")
+		}
+		return nil
+	}
+	if !authority.holdsMatch(holds) {
 		return errors.New("approved initial intake holds changed")
 	}
 	return nil

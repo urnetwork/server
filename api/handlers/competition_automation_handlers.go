@@ -17,7 +17,7 @@ func CompetitionV2SubmitScore(w http.ResponseWriter, r *http.Request) {
 	controller.CompetitionV2SubmitScoreHandler(w, r)
 }
 
-// Polls an owned immutable job without bypassing the publication embargo.
+// Polls private owner feedback without bypassing public publication or review.
 func CompetitionV2GetScore(w http.ResponseWriter, r *http.Request) {
 	controller.CompetitionV2GetScoreHandler(w, r)
 }

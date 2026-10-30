@@ -320,12 +320,12 @@ func (self PostgresStore) ClaimPreparedRoundBaseline(ctx context.Context, settin
  (round_id,baseline_json,baseline_sha256,source_job_id,source_attempt,source_artifact_manifest_sha256,
  base_sha,providers_sha256,evaluator_image_digest,scorer_version,hardware_id,host_qualification_sha256,created_at)
  VALUES($1,$2,$3,$4,1,$5,$6,$7,$8,$9,$10,$11,$12)`, source.RoundId, prepared.BaselineJson, prepared.BaselineSha256,
-				source.JobId, prepared.ArtifactManifestSha256, frozen.BaseSha, source.Round.ProvidersSha256, frozen.EvaluatorImageDigest, ScorerVersion,
+				source.JobId, prepared.ArtifactManifestSha256, frozen.BaseSha, source.Round.ProvidersSha256, frozen.EvaluatorImageDigest, frozen.scorerVersion(),
 				frozen.EvaluationPolicy.HardwareId, frozen.EvaluationPolicy.HostQualificationSha256, now))
 			baseline := &roundBaselineRecord{RoundId: source.RoundId, Json: prepared.BaselineJson, Sha256: prepared.BaselineSha256,
 				SourceJobId: source.JobId, SourceAttempt: 1, SourceArtifactManifestSha256: prepared.ArtifactManifestSha256,
 				BaseSha: frozen.BaseSha, ProvidersSha256: source.Round.ProvidersSha256, EvaluatorImageDigest: frozen.EvaluatorImageDigest,
-				ScorerVersion: ScorerVersion, HardwareId: frozen.EvaluationPolicy.HardwareId, HostQualificationSha256: frozen.EvaluationPolicy.HostQualificationSha256, CreatedAt: now}
+				ScorerVersion: frozen.scorerVersion(), HardwareId: frozen.EvaluationPolicy.HardwareId, HostQualificationSha256: frozen.EvaluationPolicy.HostQualificationSha256, CreatedAt: now}
 			server.Raise(validateRoundBaselineRecord(frozen, &source.Round, baseline))
 			appendEvent(ctx, tx, source.JobId, now, "round_baseline_preparation_published", preparation.Owner,
 				map[string]any{"schema": 1, "owner": preparation.Owner, "baseline_sha256": prepared.BaselineSha256, "artifact_manifest_sha256": prepared.ArtifactManifestSha256})

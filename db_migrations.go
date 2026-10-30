@@ -11058,4 +11058,8 @@ var migrations = []any{
 	// and 90 days of daily history (sn_top_schema.go). New tables only; apply
 	// before deploying the api and taskworker that write them.
 	newSqlMigration(snTopSchemaSql),
+
+	// A prospective operator-approved instrument overlay retains independent
+	// product winner review and all historical source/round authority.
+	newSqlMigration(competitionTrustedInstrumentMigration()),
 }

@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/model"
 )
 
 // Proves every original ref is still unpublished. One advanced or drifting ref
@@ -61,15 +62,17 @@ type sourcePublicationRef struct {
 // Retains the immutable publication plan before the first push. The database
 // intent digest must match; this file is recovery material, not authorization.
 type sourcePublicationIntent struct {
-	Schema               int                    `json:"schema"`
-	Staging              bool                   `json:"staging,omitempty"`
-	ActivationGeneration int64                  `json:"activation_generation"`
-	SourceDecisionDigest string                 `json:"source_decision_digest"`
-	ManifestSha256       string                 `json:"manifest_sha256"`
-	ApprovedPatchSha256  string                 `json:"approved_patch_sha256,omitempty"`
-	ApprovedPatchPath    string                 `json:"approved_patch_path,omitempty"`
-	Bootstrap            bool                   `json:"bootstrap,omitempty"`
-	Refs                 []sourcePublicationRef `json:"refs"`
+	TrustedInstrument    *model.CompetitionTrustedInstrumentProof `json:"trusted_instrument,omitempty"`
+	Schema               int                                      `json:"schema"`
+	Staging              bool                                     `json:"staging,omitempty"`
+	ActivationGeneration int64                                    `json:"activation_generation"`
+	SourceDecisionDigest string                                   `json:"source_decision_digest"`
+	ManifestSha256       string                                   `json:"manifest_sha256"`
+	ApprovedPatchSha256  string                                   `json:"approved_patch_sha256,omitempty"`
+	CandidatePathBase    string                                   `json:"candidate_path_base,omitempty"`
+	ApprovedPatchPath    string                                   `json:"approved_patch_path,omitempty"`
+	Bootstrap            bool                                     `json:"bootstrap,omitempty"`
+	Refs                 []sourcePublicationRef                   `json:"refs"`
 }
 
 // Abstracts publication for deterministic lost-reply and partial-push tests.
@@ -90,6 +93,20 @@ func validateSourcePublicationIntent(intent *sourcePublicationIntent) error {
 		len(intent.Refs) != len(sourceRepositoryNamesForMode(intent.Staging))+1 {
 		return errors.New("source publication intent identity or complete repository set is invalid")
 	}
+	if intent.CandidatePathBase != "" && intent.CandidatePathBase != "mono_root_v1" {
+		return errors.New("source publication candidate path base is unsupported")
+	}
+	if intent.TrustedInstrument != nil {
+		proof := intent.TrustedInstrument
+		if intent.Staging || intent.Bootstrap || proof.Schema != 1 || controller.ValidateCompetitionTrustedInstrumentApproval(&proof.Approval) != nil ||
+			(proof.SelectedProductKind != "reviewed_source_carry_forward" && proof.SelectedProductKind != "reviewed_source_promotion") {
+			return errors.New("source publication trusted instrument proof is invalid")
+		}
+		lock, err := model.CompetitionSourceLockDigestForMode(proof.SelectedProductCommits, false)
+		if err != nil || lock != proof.SelectedProductSourceLockSha256 {
+			return errors.New("source publication lost its selected product graph")
+		}
+	}
 	for index, repository := range append(sourceRepositoryNamesForMode(intent.Staging), "config") {
 		ref := intent.Refs[index]
 		branch := sourceBranch(intent.Staging)
@@ -101,14 +118,27 @@ func validateSourcePublicationIntent(intent *sourcePublicationIntent) error {
 			!filepath.IsAbs(ref.StagedRoot) {
 			return fmt.Errorf("source publication ref %d is invalid", index)
 		}
+		if intent.TrustedInstrument != nil && repository != "server" && repository != "config" && intent.TrustedInstrument.SelectedProductCommits[repository] != ref.Commit {
+			return fmt.Errorf("source publication %s commit differs from the exact selected product graph", repository)
+		}
 		if repository != "server" && repository != "config" && ref.Commit != ref.ExpectedCommit {
-			return fmt.Errorf("source publication cannot change protected repository %s", repository)
+			if intent.CandidatePathBase != "mono_root_v1" || !validSha256(intent.ApprovedPatchSha256) || !filepath.IsAbs(intent.ApprovedPatchPath) {
+				return fmt.Errorf("source publication cannot change protected repository %s without its actual selected-product proof", repository)
+			}
 		}
 		if intent.Bootstrap && ref.Commit != ref.ExpectedCommit {
 			return errors.New("baseline bootstrap cannot change a published ref")
 		}
-		if repository == "server" && ref.Commit != ref.ExpectedCommit && (!validSha256(intent.ApprovedPatchSha256) || !filepath.IsAbs(intent.ApprovedPatchPath)) {
+		if repository == "server" && ref.Commit != ref.ExpectedCommit && intent.TrustedInstrument == nil && (!validSha256(intent.ApprovedPatchSha256) || !filepath.IsAbs(intent.ApprovedPatchPath)) {
 			return errors.New("changed server source requires its separately approved canonical patch digest")
+		}
+		if repository == "server" && intent.TrustedInstrument != nil {
+			proof := intent.TrustedInstrument
+			if ref.Commit != proof.InstrumentedServerCommit || ref.Commit == proof.SelectedProductCommits["server"] ||
+				(proof.SelectedProductKind == "reviewed_source_carry_forward" && (proof.SelectedProductCommits["server"] != ref.ExpectedCommit || intent.ApprovedPatchSha256 != "" || intent.ApprovedPatchPath != "" || proof.SelectedProductReviewId != nil)) ||
+				(proof.SelectedProductKind == "reviewed_source_promotion" && (proof.SelectedProductReviewId == nil || !validSha256(intent.ApprovedPatchSha256) || intent.ApprovedPatchSha256 != proof.SelectedProductPatchSha256 || !filepath.IsAbs(intent.ApprovedPatchPath))) {
+				return errors.New("source publication substituted actual product selection or instrument child")
+			}
 		}
 	}
 	return nil
@@ -213,7 +243,27 @@ func (self *gitSourcePublicationBackend) Verify(ctx context.Context, ref sourceP
 			return errors.New("private staging clone lost an immutable commit")
 		}
 	}
+	if ref.Repository == "server" && intent.TrustedInstrument != nil {
+		proof := intent.TrustedInstrument
+		if ref.Commit != proof.InstrumentedServerCommit {
+			return errors.New("server publication differs from its protected instrument child")
+		}
+		productRef := ref
+		productRef.Commit = proof.SelectedProductCommits["server"]
+		productIntent := *intent
+		productIntent.TrustedInstrument = nil
+		// Existing winner-patch and protected evaluator guards run unchanged on
+		// the actual selected product before the independently approved child.
+		if err := self.Verify(ctx, productRef, &productIntent); err != nil {
+			return fmt.Errorf("selected product publication: %w", err)
+		}
+		return verifyTrustedInstrumentChild(ctx, ref.StagedRoot, proof)
+	}
 	if ref.Commit != ref.ExpectedCommit {
+		if ref.Repository != "config" && ((intent.CandidatePathBase != "" && intent.CandidatePathBase != self.patchPolicy.PathBase) ||
+			(ref.Repository != "server" && intent.CandidatePathBase != "mono_root_v1")) {
+			return errors.New("source publication candidate path base differs from the authenticated evaluated patch policy")
+		}
 		parents, err := sourceGitText(ctx, ref.StagedRoot, "rev-list", "--parents", "-n", "1", ref.Commit)
 		if err != nil || parents != ref.Commit+" "+ref.ExpectedCommit {
 			return errors.New("publication must be one exact fast-forward commit above its expected ref")

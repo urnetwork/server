@@ -29,6 +29,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/urnetwork/server/model"
 )
 
 // Schema 2 adds the official-evaluation lifecycle fields. CSV columns remain
@@ -77,8 +79,9 @@ type MetricSummary struct {
 // summaries. Loaded either from the side-car directly or recomputed from a
 // results CSV.
 type RunStats struct {
-	Schema int    `json:"schema"`
-	Kind   string `json:"kind"`
+	G2VolumePolicy model.CompetitionG2VolumePolicy `json:"g2_volume_policy,omitempty"`
+	Schema         int                             `json:"schema"`
+	Kind           string                          `json:"kind"`
 	// the artifact path this was loaded from (set at load, kept on save)
 	Label string `json:"label,omitempty"`
 

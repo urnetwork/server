@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
 )
 
@@ -92,11 +93,15 @@ func cloneSourceBuildRepository(ctx context.Context, repository, source, destina
 // this boundary never substitutes a reward decision or a model assertion for it.
 func validateSourceBuildRequest(request reviewedSourceBuildRequest) error {
 	proposal := request.Proposal
-	if request.Operation != "isolated_reviewed_source_build" || request.SandboxContract != "offline_evaluator_containment_v1" || proposal == nil || proposal.Schema != 2 ||
-		proposal.ReviewId == ([16]byte{}) || proposal.JobId == ([16]byte{}) || request.SourceGeneration < 1 || maximumCompetitionEpoch < request.SourceGeneration ||
-		!validSha256(proposal.ReviewDecisionDigest) || !validSha256(proposal.PatchSha256) || !validSha256(proposal.BaseSourceLockSha256) ||
+	instrument := request.Operation == "isolated_trusted_instrument_build"
+	if (!instrument && request.Operation != "isolated_reviewed_source_build") || request.SandboxContract != "offline_evaluator_containment_v1" || proposal == nil || proposal.Schema != 2 ||
+		(!instrument && (proposal.ReviewId == ([16]byte{}) || proposal.JobId == ([16]byte{}) || !validSha256(proposal.ReviewDecisionDigest))) || request.SourceGeneration < 1 || maximumCompetitionEpoch < request.SourceGeneration ||
+		!validSha256(proposal.PatchSha256) || !validSha256(proposal.BaseSourceLockSha256) ||
 		!strings.HasPrefix(proposal.EvaluatedImageDigest, "sha256:") || !validSha256(strings.TrimPrefix(proposal.EvaluatedImageDigest, "sha256:")) {
 		return errors.New("source build requires the authenticated reviewed-source protocol")
+	}
+	if !instrument && request.TrustedInstrument != nil {
+		return errors.New("reviewed product build cannot reuse trusted instrument authority")
 	}
 	if proposal.CandidatePathBase != "" && proposal.CandidatePathBase != "mono_root_v1" {
 		return errors.New("source build candidate path base is unsupported")
@@ -119,17 +124,37 @@ func validateSourceBuildRequest(request reviewedSourceBuildRequest) error {
 		return err
 	}
 	lock, err := model.CompetitionSourceLockDigestForMode(proposal.Commits, proposal.Staging)
-	if err != nil || lock != proposal.SourceLockSha256 || generation.SourceLockSha256 != lock || generation.SourceApprovalId != proposal.ReviewId.String() ||
-		generation.SourceApprovalDigest != proposal.ReviewDecisionDigest || generation.PatchSha256 != proposal.PatchSha256 || generation.EvaluatedBaseSourceLockSha256 != proposal.BaseSourceLockSha256 {
+	if err != nil || lock != proposal.SourceLockSha256 || generation.SourceLockSha256 != lock {
 		return errors.New("source build manifest does not bind the exact approved patch and commits")
 	}
-	if proposal.Significance == nil || generation.ScoreSha256 != proposal.Significance.ScoreSha256 || len(proposal.StagedRoots) != len(sourceRepositoryNames()) {
-		return errors.New("source build evidence or private repository census is incomplete")
+	if instrument {
+		proof := request.TrustedInstrument
+		if proof == nil || proof.Schema != 1 || proposal.Staging || proposal.ReviewId != ([16]byte{}) || proposal.JobId != ([16]byte{}) || proposal.ReviewDecisionDigest != "" || proposal.Significance != nil ||
+			proof.BuildReceipt != nil || generation.G2VolumePolicy != model.CompetitionG2VolumePolicyMinimumWork || generation.TrustedInstrument == nil ||
+			proof.InstrumentedServerCommit != proposal.Commits["server"] || proof.SelectedProductSourceLockSha256 != proposal.BaseSourceLockSha256 || proof.Approval.PatchSha256 != proposal.PatchSha256 {
+			return errors.New("instrument build requires explicit separate approval without fabricated product review metadata")
+		}
+		if err := controller.ValidateCompetitionTrustedInstrumentApproval(&proof.Approval); err != nil {
+			return err
+		}
+		manifestProof, err := model.CompetitionAutomationDigest(generation.TrustedInstrument)
+		requestProof, proofErr := model.CompetitionAutomationDigest(proof)
+		if err != nil || proofErr != nil || manifestProof != requestProof {
+			return errors.New("instrument build proof differs from the prospective generation")
+		}
+	} else {
+		if generation.SourceApprovalId != proposal.ReviewId.String() || generation.SourceApprovalDigest != proposal.ReviewDecisionDigest || generation.PatchSha256 != proposal.PatchSha256 || generation.EvaluatedBaseSourceLockSha256 != proposal.BaseSourceLockSha256 ||
+			proposal.Significance == nil || generation.ScoreSha256 != proposal.Significance.ScoreSha256 {
+			return errors.New("source build approval or statistics do not match the authenticated manifest")
+		}
+		expectedStatistics, err := model.CompetitionAutomationDigest(generation.Significance)
+		actualStatistics, actualErr := model.CompetitionAutomationDigest(proposal.Significance)
+		if err != nil || actualErr != nil || actualStatistics != expectedStatistics {
+			return errors.New("source build statistics differ from the authenticated manifest")
+		}
 	}
-	expectedStatistics, err := model.CompetitionAutomationDigest(generation.Significance)
-	actualStatistics, actualErr := model.CompetitionAutomationDigest(proposal.Significance)
-	if err != nil || actualErr != nil || actualStatistics != expectedStatistics {
-		return errors.New("source build statistics differ from the authenticated manifest")
+	if len(proposal.StagedRoots) != len(sourceRepositoryNames()) {
+		return errors.New("source build evidence or private repository census is incomplete")
 	}
 	for _, repository := range sourceRepositoryNames() {
 		path, ok := proposal.StagedRoots[repository]
@@ -267,6 +292,11 @@ func prepareSourceBuildContext(ctx context.Context, request reviewedSourceBuildR
 		}
 		if err := cloneSourceBuildRepository(ctx, repository, source, filepath.Join(result.SourceDirectory, repository), request.Proposal.Commits[repository]); err != nil {
 			return nil, fmt.Errorf("source build repository %s: %w", repository, err)
+		}
+	}
+	if request.TrustedInstrument != nil {
+		if err := verifyTrustedInstrumentChild(ctx, request.Proposal.StagedRoots["server"], request.TrustedInstrument); err != nil {
+			return nil, err
 		}
 	}
 	if err := verifyFrozenSourceGraphForMode(ctx, filepath.Join(result.SourceDirectory, "server"), request.Proposal.Commits["server"], request.Proposal.Staging); err != nil {

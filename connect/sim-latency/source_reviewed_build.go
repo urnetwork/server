@@ -17,7 +17,8 @@ func reviewedGenerationForProposal(current *model.CompetitionSourceActivation, p
 		margin = 0
 	}
 	return reviewedSourceGeneration{
-		Generation: current.SourceGeneration + 1, Kind: "reviewed_source_promotion", SourceLockSha256: proposal.SourceLockSha256,
+		G2VolumePolicy: current.G2VolumePolicy,
+		Generation:     current.SourceGeneration + 1, Kind: "reviewed_source_promotion", SourceLockSha256: proposal.SourceLockSha256,
 		SignificantImprovementPercent: margin, ThresholdEvidenceSha256: proposal.Significance.ScoreSha256,
 		SourceApprovalId: proposal.ReviewId.String(), SourceApprovalDigest: proposal.ReviewDecisionDigest,
 		EvaluatedBaseSourceLockSha256: current.SourceLockSha256, PatchSha256: proposal.PatchSha256,
@@ -59,11 +60,12 @@ func reviewedSourceImageManifest(current *model.CompetitionSourceActivation, pro
 // No main configuration/credentials enter this request. Manifest bytes are
 // prospective source identity, not evidence that the build or qualification ran.
 type reviewedSourceBuildRequest struct {
-	Operation            string                  `json:"operation"`
-	Proposal             *reviewedSourceProposal `json:"proposal"`
-	SourceManifest       []byte                  `json:"source_manifest"`
-	SourceGeneration     int                     `json:"source_generation"`
-	ConfigLocalDirectory string                  `json:"config_local_directory"`
-	VaultLocalDirectory  string                  `json:"vault_local_directory"`
-	SandboxContract      string                  `json:"sandbox_contract"`
+	TrustedInstrument    *model.CompetitionTrustedInstrumentProof `json:"trusted_instrument,omitempty"`
+	Operation            string                                   `json:"operation"`
+	Proposal             *reviewedSourceProposal                  `json:"proposal"`
+	SourceManifest       []byte                                   `json:"source_manifest"`
+	SourceGeneration     int                                      `json:"source_generation"`
+	ConfigLocalDirectory string                                   `json:"config_local_directory"`
+	VaultLocalDirectory  string                                   `json:"vault_local_directory"`
+	SandboxContract      string                                   `json:"sandbox_contract"`
 }

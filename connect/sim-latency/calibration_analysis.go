@@ -136,7 +136,7 @@ func validateCalibrationAnalysisCohort(cohort calibrationAnalysisCohort, setting
 	}
 	base := aggregateBaseline(baseline.Replicates)
 	candidate := aggregateCandidate(cohort.Candidates)
-	gates := buildScoreGates(base, candidate, cohort.Candidates)
+	gates := buildScoreGates(base, candidate, cohort.Candidates, baseline.G2VolumePolicy)
 	if result.RawScore != candidate.RawScore || result.Placeable != allScoreGatesPass(gates) ||
 		!reflect.DeepEqual(result.Diagnostics.Baseline, &base.ScoreAggregateDiagnostics) ||
 		!reflect.DeepEqual(result.Diagnostics.Candidate, &candidate) ||
@@ -243,7 +243,7 @@ func analyzeCalibrationCohorts(cohorts []calibrationAnalysisCohort, settings cal
 		}
 		baseline := aggregateBaseline(controls)
 		candidate := aggregateCandidate(candidates)
-		gates := buildScoreGates(baseline, candidate, candidates)
+		gates := buildScoreGates(baseline, candidate, candidates, cohort.Baseline.G2VolumePolicy)
 		for name, gate := range gates {
 			if gate.Passed {
 				report.GatePassRates[name]++

@@ -117,11 +117,44 @@ Closing admission does not stop accepted work. Publication requires admission
 close, complete authoritative drain, an immutable evaluation seal, and reveal:
 `seal.publication_at` is the later of sealing time and the frozen `reveal_at`.
 Before publication, terminal success/failure polling remains `state: completed`
-with no score or private error text; `evaluation_status` and the allowlisted,
-message-free `evaluation_failure` expose only safe evaluator lifecycle signals.
+but the owning production submitter credential can immediately read a completed
+private `score`: raw/normalized values, reviewed numeric/bool G1–G6 reasons,
+significance and safe numeric summaries. Full evaluator errors, arbitrary
+diagnostic strings, logs, seeds, artifact paths and review decisions remain
+sealed; `evaluation_status` and message-free `evaluation_failure` expose only
+reviewed lifecycle/failure signals. Staging outcomes keep their existing
+publication gate. This additive owner feedback does not rewrite any current
+round's frozen evaluator, scoring policy, source/OpenAPI evidence or public
+decision contract, and does not publish, elect, approve or pay a winner.
 The public round-result/history endpoints return `409 round_not_published` until
 that boundary, then return a `no-store` projection. A provisional reward can be
 published without a completed honesty review.
+
+UR privacy is credential-owner-wide, not individual-miner-wide. One
+Macrocosmos/Apex submitter credential serves multiple miners and can read every
+job durably associated with that credential. Apex must authenticate the miner,
+authorize its own miner-to-submission mapping and return private feedback only
+through that mapping. Never expose the shared credential or treat a guessed
+`job_id` as authorization. Polling responses and errors are `Cache-Control:
+no-store`; do not copy private feedback into a public result cache or leaderboard.
+
+Identical canonical patches may bind several distinct Apex `submission_id`s to
+one cached `job_id`. Preserve each miner's admission identity and fee receipt;
+associate them only when the returned round, canonical patch, status URL,
+staging flag and decision contract all match. The reference adapter fans out
+the same validated job observation to those existing admissions, with owner
+feedback stored as `private_score`, not public `score` or `published`. It never
+creates an association for an unadmitted miner. Multiple admissions to one job
+do not create more evaluator draws or duplicate reward entitlements; public
+winner/reward reconciliation keeps the existing job/round/revision identity.
+
+The reference adapter automatically refreshes pre-upgrade completed admissions
+and probes ambiguous completed cache hits without asserting scoring success.
+Its per-job durable backoff (one minute by default) alternates with normal FIFO
+polling and stops once feedback or terminal failure is known. Update Apex
+consumers before the API rollout: old consumers may reject private production
+`score` responses, and old adapter binaries cannot read new private feedback or
+refresh fields. Do not roll an old binary back onto the new adapter state file.
 
 The prospective October 28 season selects `elected_winner_gpt54mini_xhigh_v1`:
 publish the provisional winner, automatically review it with qualified GPT-5.4
@@ -203,6 +236,41 @@ therefore staging `settlement_status` is limited to `pending`, `received`, or
 `rejected`. The manual legacy review and staging flows below do not apply to
 explicit v2 rounds; v2 review/source authority uses the separately scoped
 automation contract described in [`RUN-MAIN.md`](RUN-MAIN.md).
+
+### Explicit intake-preserving calibration maintenance
+
+The [October 30 owner approval](launch/CALIBRATION-MAINTENANCE-INTAKE-OWNER-APPROVAL-2026-10-30.json)
+adds a distinct, bounded intake permission for the current R2 epoch-one round.
+Its [prospective hold request](launch/CALIBRATION-MAINTENANCE-INTAKE-HOLD-REQUEST-2026-10-30.json)
+expects evaluation revision 3 and appends an **active** revision 4 with reason
+`CALIBRATION_MAINTENANCE`. These staged files are not evidence that the code is
+deployed, that revision 4 exists, or that calibration has run or passed.
+
+Only that exact scope, frozen source/policy, evidence digest, request digest and
+idempotency key can use this permission. Admission must remain unheld, and the
+original reward-delivery hold must remain active and unchanged. The default
+per-service limit is ten hours from the original database-created hold timestamp,
+allowing roughly nine hours of serial calibration plus verification. Future
+timestamps, expiry, release/rehold, another revision, incidents or source drift
+refuse the permission; replay does not renew it. A maintenance reason on any
+other hold or round cannot waive readiness.
+
+After the running job terminates and the FIFO slot and measurement lock are
+free, the real worker can be stopped for approved serial calibration. No fake
+heartbeat or host-check fact is created: `GET /competition/readyz` may honestly
+return 503 with the real host checks false, while `/competition/info` reports
+`runtime_status.intake_ready: true`, `grading_ready: false` and
+`publication_held: true`, and authenticated v2 submissions queue normally.
+Existing separately approved private completed-score feedback is unchanged;
+public results, rankings and winner remain held.
+
+All non-host readiness checks, live protected archive checks and authentic
+runtime-envelope/frozen-policy validation remain mandatory. Both durable enqueue
+passes reread latest holds, activated source and the real clock on the existing
+transaction. Epoch admission still uses the original receipt time, and queued,
+unstarted jobs do not start evaluation clocks. Restoring grading requires genuine
+host readiness and a separately authorized `RECOVERY_APPROVED` release; this mode
+does not accept calibration or release rewards.
 
 ## Score and statistical significance
 
@@ -373,8 +441,10 @@ Submissions are admitted throughout each seven-day window and evaluated as
 soon as possible in exact FIFO order. Closing an epoch stops admission but does
 not stop accepted work: the worker continues until the entire backlog is
 terminal, then seals the deterministic significant-candidate ranking and exits.
-Scores, failures, hidden seed, workload, and leaderboard remain embargoed while
-the agent harness reviews the candidates one by one. Approval of the first
+Public scores, full failures, hidden seed, workload, and leaderboard remain
+embargoed while the agent harness reviews the candidates one by one; authorized
+production owners may already inspect the private feedback described above.
+Approval of the first
 honest candidate—or rejection of the last candidate—atomically finalizes and
 publishes the epoch. The external control loop can then promote or carry forward
 the source and explicitly create the next epoch.

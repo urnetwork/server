@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-owner-approved-feedback-and-future-g2-policy",
+  "recorded_on": "2026-10-30",
+  "environment": "main",
+  "competition_id": "sim-latency-season-1",
+  "season_id": "sim-latency-production-20261028-r2",
+  "owner_instruction_summary": "Let submitters see their own completed scores immediately, while keeping everyone else's scores, public rankings, and winner embargoed. Apply this feedback in the current round; remove both G2 upper bounds and retain 95% floors starting with the next round.",
+  "current_round": {
+    "round_id": "01a1855d-49bd-0250-90db-d0c0885f0e46",
+    "epoch": 1,
+    "private_completed_score_feedback_approved": true,
+    "private_feedback_scope": "Authenticated owners of a completed job; authorization remains credential-owner scoped, including legitimate same-round duplicate associations.",
+    "apex_individual_miner_routing_required": true,
+    "public_scores_rankings_winner_seed_and_workload_remain_embargoed": true,
+    "internal_artifact_paths_logs_and_unreviewed_diagnostics_remain_private": true,
+    "g2_request_and_byte_median_minimum_ratio_inclusive": 0.95,
+    "g2_request_and_byte_median_maximum_ratio_inclusive": 1.05,
+    "measurement_policy_baseline_and_existing_judgments_unchanged": true,
+    "reevaluation_or_rejudging_authorized_by_this_instruction": false
+  },
+  "future_rounds": {
+    "first_epoch": 2,
+    "g2_request_median_minimum_ratio_inclusive": 0.95,
+    "g2_received_bytes_median_minimum_ratio_inclusive": 0.95,
+    "g2_request_upper_bound": null,
+    "g2_received_bytes_upper_bound": null,
+    "all_other_gates_significance_margin_replicates_resource_and_time_limits_unchanged": true,
+    "explicit_immutable_policy_and_compatible_trusted_instrument_required": true,
+    "new_epoch_baseline_required": true,
+    "current_frozen_image_must_not_be_relabelled_as_supporting_the_new_rule": true
+  },
+  "implementation": {
+    "status": "in_progress_not_deployed",
+    "independent_tests_and_live_private_feedback_verification_pending": true,
+    "future_instrument_image_qualification_and_activation_pending": true,
+    "approval_does_not_accept_pending_calibration_or_release_rewards": true
+  }
+}

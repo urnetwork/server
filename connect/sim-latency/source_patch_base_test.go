@@ -71,7 +71,7 @@ func TestReviewedSourceChecksRealPinnedModesForStagingAndPublication(t *testing.
 			t.Fatal(err)
 		}
 		digest := sha256.Sum256(canonical.Bytes)
-		intent := &sourcePublicationIntent{ApprovedPatchPath: patchPath, ApprovedPatchSha256: hex.EncodeToString(digest[:])}
+		intent := &sourcePublicationIntent{CandidatePathBase: policy.PathBase, ApprovedPatchPath: patchPath, ApprovedPatchSha256: hex.EncodeToString(digest[:])}
 		ref := sourcePublicationRef{Repository: "connect", Branch: "sim-latency", ExpectedCommit: base, Commit: candidate, StagedRoot: repository}
 		backend := &gitSourcePublicationBackend{patchPolicy: policy}
 		err = backend.Verify(context.Background(), ref, intent)

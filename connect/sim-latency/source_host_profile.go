@@ -97,7 +97,7 @@ func prospectiveSourceHostProfile(request reviewedSourceBuildRequest, artifacts 
 	configDigest := sha256.Sum256(config.Content)
 	return &sourceProspectiveHostProfile{Schema: 1, Kind: "prospective-source-hardware-fingerprint/v1", RuntimeQualified: false,
 		ImageId: artifacts.ImageId, BaseImageId: incumbent.ImageDigest, SourceLockSha256: request.Proposal.SourceLockSha256,
-		ReviewId: request.Proposal.ReviewId.String(), QualificationSha256: prospective.QualificationSha256, BootId: beforeBoot,
+		ReviewId: sourceBuildAuthorizationIdentity(request), QualificationSha256: prospective.QualificationSha256, BootId: beforeBoot,
 		ProspectiveConfigSha256: hex.EncodeToString(configDigest[:]), ConfigLocalSha256: config.ConfigLocalSha256, VaultLocalSha256: config.VaultLocalSha256,
 		Incumbent: incumbent, Prospective: prospective}, nil
 }

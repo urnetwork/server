@@ -78,7 +78,10 @@ func (self *CompetitionSupervisor) reconcileWinnerReview(ctx context.Context, le
 		return stored, "winner_review_blocked", failure, true
 	}
 	if decision.SelectedJobId == nil {
-		if snapshot.Intent != nil && snapshot.Intent.Kind != "reviewed_source_carry_forward" {
+		instrumentCarry := snapshot.Intent != nil && snapshot.Intent.Kind == "trusted_instrument_transition" && snapshot.Intent.TrustedInstrument != nil &&
+			snapshot.Intent.TrustedInstrument.SelectedProductKind == "reviewed_source_carry_forward" && snapshot.Intent.TargetEpoch == 2 &&
+			snapshot.Intent.G2VolumePolicy == model.CompetitionG2VolumePolicyMinimumWork && snapshot.Intent.ReviewId == nil && snapshot.Intent.WinnerReview == nil
+		if snapshot.Intent != nil && snapshot.Intent.Kind != "reviewed_source_carry_forward" && !instrumentCarry {
 			return block("winner_revoked_during_source_preparation", ErrConflict)
 		}
 		if snapshot.Round.Epoch >= 6 {

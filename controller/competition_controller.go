@@ -558,6 +558,7 @@ type Settings struct {
 	EvaluatorImageDigest       string                            `yaml:"evaluator_image_digest"`
 	PatchPolicy                PatchPolicy                       `yaml:"patch_policy"`
 	EvaluationPolicy           EvaluationPolicy                  `yaml:"evaluation_policy"`
+	FutureEpochPolicy          *CompetitionFutureEpochPolicy     `yaml:"future_epoch_policy,omitempty"`
 	SeasonPolicy               SeasonPolicy                      `yaml:"season_policy"`
 	ArtifactRoot               string                            `yaml:"artifact_root"`
 	ArtifactBucket             string                            `yaml:"artifact_bucket"`
@@ -582,7 +583,10 @@ type Settings struct {
 	automationRoundId          server.Id
 	automationTargetRoundId    server.Id
 	roundBaselinePreparation   *roundBaselinePreparationProfile
+	futureBaselinePreparation  *roundBaselinePreparationProfile
 	intakeAdmission            *competitionIntakeAdmission
+	// Non-serialized proof set only after exact retained runtime authentication.
+	runtimeIntentSha256 string
 }
 
 type settingsFile struct {
@@ -593,6 +597,7 @@ type settingsFile struct {
 	EvaluatorImageDigest       string                            `yaml:"evaluator_image_digest"`
 	PatchPolicy                PatchPolicy                       `yaml:"patch_policy"`
 	EvaluationPolicy           EvaluationPolicy                  `yaml:"evaluation_policy"`
+	FutureEpochPolicy          *CompetitionFutureEpochPolicy     `yaml:"future_epoch_policy,omitempty"`
 	SeasonPolicy               SeasonPolicy                      `yaml:"season_policy"`
 	ArtifactRoot               string                            `yaml:"artifact_root"`
 	ArtifactBucket             string                            `yaml:"artifact_bucket"`
@@ -655,6 +660,7 @@ func LoadSettings() (*Settings, error) {
 		EvaluatorImageDigest:       strings.TrimSpace(public.EvaluatorImageDigest),
 		PatchPolicy:                public.PatchPolicy,
 		EvaluationPolicy:           public.EvaluationPolicy,
+		FutureEpochPolicy:          public.FutureEpochPolicy,
 		SeasonPolicy:               public.SeasonPolicy,
 		ArtifactRoot:               filepath.Clean(public.ArtifactRoot),
 		ArtifactBucket:             strings.TrimSpace(public.ArtifactBucket),
@@ -736,6 +742,12 @@ func (self *Settings) Validate() error {
 		return fmt.Errorf("patch_policy.forbidden_paths must explicitly contain %q", protectedTree)
 	}
 	p := self.EvaluationPolicy
+	if _, err := model.CompetitionScorerVersionForG2Policy(p.G2VolumePolicy); err != nil {
+		return err
+	}
+	if err := self.validateFutureEpochPolicy(); err != nil {
+		return err
+	}
 	season := self.SeasonPolicy
 	if model.IsCompetitionWinnerReviewPolicy(self.AutomationPolicy.WinnerReviewPolicy) && season.PreparationWindowSeconds != 0 {
 		return errors.New("elected-winner closing waits for actual qualification rather than a fixed preparation delay")
@@ -913,7 +925,7 @@ func (self *Settings) PublicInfo() InfoResult {
 		CompetitionId:        self.CompetitionId,
 		Enabled:              self.Enabled,
 		ScoreSchema:          ScoreSchema,
-		ScorerVersion:        ScorerVersion,
+		ScorerVersion:        self.scorerVersion(),
 		BaseSha:              self.BaseSha,
 		EvaluatorImageDigest: self.EvaluatorImageDigest,
 		PatchPolicy:          self.PatchPolicy,
@@ -1080,15 +1092,16 @@ type evaluatorRequest struct {
 // This is the strict subset of baseline.json independently authenticated by
 // the worker before it freezes or redistributes the scorer-owned document.
 type roundBaselineManifest struct {
-	ScoreSchema      int                      `json:"score_schema"`
-	Kind             string                   `json:"kind"`
-	ScorerVersion    string                   `json:"scorer_version"`
-	RoundId          string                   `json:"round_id"`
-	ConfigSha256     string                   `json:"config_sha256"`
-	RequestTimeoutMs int64                    `json:"request_timeout_ms"`
-	RunFlags         map[string]string        `json:"run_flags"`
-	TakeoverMargin   float64                  `json:"takeover_margin"`
-	Replicates       []roundBaselineReplicate `json:"replicates"`
+	G2VolumePolicy   model.CompetitionG2VolumePolicy `json:"g2_volume_policy,omitempty"`
+	ScoreSchema      int                             `json:"score_schema"`
+	Kind             string                          `json:"kind"`
+	ScorerVersion    string                          `json:"scorer_version"`
+	RoundId          string                          `json:"round_id"`
+	ConfigSha256     string                          `json:"config_sha256"`
+	RequestTimeoutMs int64                           `json:"request_timeout_ms"`
+	RunFlags         map[string]string               `json:"run_flags"`
+	TakeoverMargin   float64                         `json:"takeover_margin"`
+	Replicates       []roundBaselineReplicate        `json:"replicates"`
 }
 
 // Carries the recomputed score inputs and public live telemetry for one
@@ -1341,9 +1354,10 @@ func (self CommandEvaluator) Evaluate(ctx context.Context, settings *Settings, j
 				),
 			}
 		}
-		if !scoreMatchesFrozenMargin(result.Score, settings.EvaluationPolicy.TakeoverMargin) {
+		if !scoreMatchesFrozenMargin(result.Score, settings.EvaluationPolicy.TakeoverMargin) ||
+			!scoreMatchesFrozenG2Policy(result.Score, settings.EvaluationPolicy.G2VolumePolicy) {
 			return EvaluationOutcome{Error: terminalInfrastructureError(
-				"score_result_invalid", "pinned scorer used a margin different from the frozen round",
+				"score_result_invalid", "pinned scorer used a policy different from the frozen round",
 			)}
 		}
 	}
@@ -1441,7 +1455,7 @@ func evaluatorRequestForJob(settings *Settings, job *queuedJob, seed, attemptDir
 		Attempt:     job.AttemptCount, CompetitionId: settings.CompetitionId,
 		BaseSha: settings.BaseSha, EvaluatorImageDigest: job.EvaluatorImageDigest,
 		ApiImageDigest: job.ApiImageDigest, WorkerImageDigest: job.WorkerImageDigest,
-		ScorerVersion: ScorerVersion, RoundSeedHex: seed, PatchPath: patchPath,
+		ScorerVersion: settings.scorerVersion(), RoundSeedHex: seed, PatchPath: patchPath,
 		PatchSha256:   job.PatchSha256,
 		ProvidersPath: providersPath, ProvidersSha256: job.Round.ProvidersSha256,
 		RoundBaselinePath: roundBaselinePath, RoundBaselineSha256: roundBaselineSha256,
@@ -1482,7 +1496,9 @@ func validateRoundBaselineJson(settings *Settings, round *roundRecord, content [
 		return "", err
 	}
 	if manifest.ScoreSchema != ScoreSchema || manifest.Kind != "sim-latency-score-baseline" ||
-		manifest.ScorerVersion != ScorerVersion || manifest.RoundId != round.RoundId.String() ||
+		manifest.ScorerVersion != settings.scorerVersion() || manifest.ScorerVersion != policy.ScorerVersion ||
+		manifest.G2VolumePolicy != settings.EvaluationPolicy.G2VolumePolicy || manifest.G2VolumePolicy != policy.EvaluationPolicy.G2VolumePolicy ||
+		manifest.RoundId != round.RoundId.String() ||
 		manifest.ConfigSha256 != round.ProvidersSha256 ||
 		manifest.RequestTimeoutMs != settings.EvaluationPolicy.RequestTimeoutMs ||
 		manifest.TakeoverMargin != settings.EvaluationPolicy.TakeoverMargin ||
@@ -1524,7 +1540,7 @@ func validateRoundBaselineRecord(settings *Settings, round *roundRecord, baselin
 		!sha256Pattern.MatchString(baseline.Sha256) ||
 		baseline.BaseSha != settings.BaseSha || baseline.ProvidersSha256 != round.ProvidersSha256 ||
 		baseline.EvaluatorImageDigest != settings.EvaluatorImageDigest ||
-		baseline.ScorerVersion != ScorerVersion ||
+		baseline.ScorerVersion != settings.scorerVersion() ||
 		baseline.HardwareId != settings.EvaluationPolicy.HardwareId ||
 		baseline.HostQualificationSha256 != settings.EvaluationPolicy.HostQualificationSha256 ||
 		baseline.SourceJobId == (server.Id{}) || baseline.SourceAttempt <= 0 ||
@@ -1645,11 +1661,14 @@ func settingsForFrozenRound(settings *Settings, round *roundRecord) (*Settings, 
 		return nil, errors.New("round policy is missing")
 	}
 	copy := *settings
+	policy, err := decodeRoundPolicySnapshot(round.PolicyJson)
+	if err != nil {
+		return nil, err
+	}
+	// A staged future policy is never inherited by an already frozen round.
+	// Its image and command pins must still match the immutable snapshot below.
+	copy.EvaluationPolicy.G2VolumePolicy = policy.EvaluationPolicy.G2VolumePolicy
 	if round.Staging {
-		policy, err := decodeRoundPolicySnapshot(round.PolicyJson)
-		if err != nil {
-			return nil, err
-		}
 		if policy.AutomationPolicy == nil || !policy.AutomationPolicy.Enabled {
 			copy.AutomationPolicy = model.CompetitionAutomationPolicy{}
 		} else if !policy.AutomationPolicy.Staging || !settings.AutomationPolicy.Staging {
@@ -3346,12 +3365,13 @@ func captureRedisError(run func()) error {
 }
 
 type Service struct {
-	settings            *Settings
-	settingsErr         error
-	store               Store
-	apiImageDigest      string
-	apiImageIdentityErr error
-	intakeAuthority     competitionIntakeAuthority
+	settings                        *Settings
+	settingsErr                     error
+	store                           Store
+	apiImageDigest                  string
+	apiImageIdentityErr             error
+	intakeAuthority                 competitionIntakeAuthority
+	calibrationMaintenanceAuthority competitionCalibrationMaintenanceAuthority
 }
 
 func NewService(settings *Settings, store Store) *Service {
@@ -3362,8 +3382,9 @@ func NewService(settings *Settings, store Store) *Service {
 func newServiceWithImageDigest(settings *Settings, store Store, apiImageDigest string, identityErr error) *Service {
 	service := &Service{
 		settings: settings, store: store, apiImageDigest: apiImageDigest,
-		apiImageIdentityErr: identityErr,
-		intakeAuthority:     approvedCompetitionIntakeAuthority(),
+		apiImageIdentityErr:             identityErr,
+		intakeAuthority:                 approvedCompetitionIntakeAuthority(),
+		calibrationMaintenanceAuthority: approvedCompetitionCalibrationMaintenanceAuthority(),
 	}
 	if settings == nil {
 		service.settingsErr = errors.New("competition settings unavailable")
@@ -3651,6 +3672,7 @@ func applyFrozenRoundPublicPolicy(result *InfoResult, round *roundRecord) error 
 		return errors.New("round policy identity is invalid")
 	}
 	result.BaseSha = policy.BaseSha
+	result.ScoreSchema, result.ScorerVersion = policy.ScoreSchema, policy.ScorerVersion
 	result.EvaluatorImageDigest = policy.EvaluatorImageDigest
 	result.PatchPolicy = policy.PatchPolicy
 	result.EvaluationPolicy = policy.EvaluationPolicy
@@ -3943,6 +3965,9 @@ func (self *Service) GetScore(ctx context.Context, jobId server.Id, principal *P
 
 // Both URLs are immutable contracts; neither silently reinterprets another mode.
 func (self *Service) getScoreWithDecisionContract(ctx context.Context, jobId server.Id, principal *Principal, v2 bool) (*ScoreJobResult, int, *CompetitionError) {
+	if !competitionScorePrincipalAllowed(principal, v2) {
+		return nil, http.StatusForbidden, competitionScopeDenied()
+	}
 	settings, err := self.Settings()
 	if err != nil {
 		return nil, 503, infrastructureError("configuration_unavailable", "competition configuration is not ready")
@@ -3951,14 +3976,11 @@ func (self *Service) getScoreWithDecisionContract(ctx context.Context, jobId ser
 	if errors.Is(err, ErrNotFound) {
 		return nil, 404, submissionError("job_not_found", "score job does not exist")
 	}
-	if err != nil {
+	if err != nil || job == nil {
 		return nil, 503, infrastructureError("storage_unavailable", "score job storage is unavailable")
 	}
 	if status, modeErr := requireRoundDecisionContract(&job.Round, v2); modeErr != nil {
 		return nil, status, modeErr
-	}
-	if v2 && (principal == nil || principal.Role != "submitter") {
-		return nil, http.StatusForbidden, competitionScopeDenied()
 	}
 	if err := requireCompetitionRoundRuntime(ctx, settings, self.store, &job.Round); err != nil {
 		return nil, http.StatusServiceUnavailable, infrastructureError("source_not_ready", "the exact runtime source envelope is unavailable")
@@ -3970,8 +3992,7 @@ func (self *Service) getScoreWithDecisionContract(ctx context.Context, jobId ser
 			return nil, http.StatusServiceUnavailable, infrastructureError("readiness_failed", "competition hold status is unavailable")
 		}
 		if held {
-			result.State = scoreJobStateView(job.State, false, principal)
-			result.Score, result.EvalError = nil, nil
+			result = unpublishedScoreJobView(job, principal, result)
 		}
 		result.DecisionMode, result.RequiredApiCapability = model.CompetitionDecisionModeV2, competitionRoundApiCapability(&job.Round)
 	}
@@ -4051,7 +4072,7 @@ func roundPublished(round *roundRecord, now time.Time) bool {
 }
 
 func scoreJobStateView(state string, published bool, principal *Principal) string {
-	if principal.Role != "operator" && !published && (state == "succeeded" || state == "failed") {
+	if (principal == nil || principal.Role != "operator") && !published && (state == "succeeded" || state == "failed") {
 		return "completed"
 	}
 	return state
@@ -4109,10 +4130,12 @@ func scoreJobEvaluationFailure(status string, evalError *CompetitionError) *Eval
 		"infrastructure\x00evaluator_process_failed",
 		"infrastructure\x00evaluator_result_invalid",
 		"infrastructure\x00evaluator_result_missing",
+		"infrastructure\x00g2_volume_policy_mismatch",
 		"infrastructure\x00incomplete_run_manifest",
 		"infrastructure\x00invalid_accounting",
 		"infrastructure\x00invalid_baseline",
 		"infrastructure\x00invalid_final_marker",
+		"infrastructure\x00invalid_g2_volume_policy",
 		"infrastructure\x00invalid_measure_window",
 		"infrastructure\x00invalid_resource_report",
 		"infrastructure\x00invalid_results_csv",
@@ -4154,7 +4177,8 @@ func scoreJobView(job *queuedJob, principal *Principal, now time.Time) ScoreJobR
 		evalError.Retriable = false
 		result.EvalError = &evalError
 	}
-	if principal.Role != "operator" && job.Round.Staging && job.Round.Canceled {
+	operator := principal != nil && principal.Role == "operator"
+	if !operator && job.Round.Staging && job.Round.Canceled {
 		if !isStagingDiscardedJob(result) {
 			result.State = "canceled"
 			result.EvalError = submissionError(
@@ -4167,13 +4191,8 @@ func scoreJobView(job *queuedJob, principal *Principal, now time.Time) ScoreJobR
 		result.EvaluationFailure = nil
 		return result
 	}
-	if principal.Role != "operator" && !roundPublished(&job.Round, now) {
-		stagingDiscarded := isStagingDiscardedJob(result)
-		result.State = scoreJobStateView(result.State, false, principal)
-		result.Score = nil
-		if !stagingDiscarded {
-			result.EvalError = nil
-		}
+	if !operator && !roundPublished(&job.Round, now) {
+		result = unpublishedScoreJobView(job, principal, result)
 	}
 	return result
 }
@@ -4299,8 +4318,12 @@ func decodeRoundPolicySnapshot(stored json.RawMessage) (*roundPolicySnapshot, er
 	if (policy.Schema != 1 && policy.Schema != 2) || policy.CompetitionId == "" || 128 < len(policy.CompetitionId) ||
 		!gitShaPattern.MatchString(policy.BaseSha) ||
 		!imageDigestPattern.MatchString(policy.EvaluatorImageDigest) ||
-		policy.ScoreSchema != ScoreSchema || policy.ScorerVersion != ScorerVersion {
+		policy.ScoreSchema != ScoreSchema {
 		return nil, errors.New("round policy identity is invalid")
+	}
+	scorerVersion, err := model.CompetitionScorerVersionForG2Policy(policy.EvaluationPolicy.G2VolumePolicy)
+	if err != nil || policy.ScorerVersion != scorerVersion || (policy.Schema == 1 && policy.EvaluationPolicy.G2VolumePolicy != "") {
+		return nil, errors.New("round scorer version does not match its frozen g2 volume policy")
 	}
 	if policy.Schema == 1 {
 		if policy.EvaluatorCommand != "" || policy.EvaluatorCommandSha256 != "" {
@@ -4337,7 +4360,7 @@ func policySnapshot(settings *Settings) ([]byte, error) {
 		EvaluatorCommand:       settings.EvaluatorCommand,
 		EvaluatorCommandSha256: settings.EvaluatorCommandSha256,
 		ScoreSchema:            ScoreSchema,
-		ScorerVersion:          ScorerVersion,
+		ScorerVersion:          settings.scorerVersion(),
 		PatchPolicy:            settings.PatchPolicy,
 		EvaluationPolicy:       settings.EvaluationPolicy,
 		SeasonPolicy:           settings.SeasonPolicy,
@@ -4496,7 +4519,7 @@ func (self PostgresStore) CreateRound(ctx context.Context, settings *Settings, a
 			if settings.AutomationPolicy.Enabled {
 				intent, loadErr := currentSourceActivationInTx(ctx, tx, settings)
 				server.Raise(loadErr)
-				if intent.Generation != settings.AutomationPolicy.SourceActivationGeneration || intent.TargetEpoch != round.Epoch || intent.TargetRoundId != round.RoundId || intent.SourceLockSha256 != settings.AutomationPolicy.SourceLockSha256 || intent.SourceGeneration != settings.AutomationPolicy.SourceGeneration || intent.Commits["server"] != settings.BaseSha || intent.Threshold != settings.EvaluationPolicy.TakeoverMargin || intent.EvaluatorImageDigest != settings.EvaluatorImageDigest || intent.HostQualificationSha256 != settings.EvaluationPolicy.HostQualificationSha256 || (!intent.OpensAt.IsZero() && !intent.OpensAt.Equal(round.OpensAt)) || round.OpensAt.Before(intent.PreparedAt.Add(sourcePreparationInterval(intent))) || round.ClosesAt.Sub(round.OpensAt) != 7*24*time.Hour || round.RevealAt.Before(round.ClosesAt) || intent.ActivatedAt == nil {
+				if intent.Generation != settings.AutomationPolicy.SourceActivationGeneration || intent.TargetEpoch != round.Epoch || intent.TargetRoundId != round.RoundId || intent.SourceLockSha256 != settings.AutomationPolicy.SourceLockSha256 || intent.SourceGeneration != settings.AutomationPolicy.SourceGeneration || intent.Commits["server"] != settings.BaseSha || intent.Threshold != settings.EvaluationPolicy.TakeoverMargin || intent.G2VolumePolicy != settings.EvaluationPolicy.G2VolumePolicy || intent.EvaluatorImageDigest != settings.EvaluatorImageDigest || intent.HostQualificationSha256 != settings.EvaluationPolicy.HostQualificationSha256 || (!intent.OpensAt.IsZero() && !intent.OpensAt.Equal(round.OpensAt)) || round.OpensAt.Before(intent.PreparedAt.Add(sourcePreparationInterval(intent))) || round.ClosesAt.Sub(round.OpensAt) != 7*24*time.Hour || round.RevealAt.Before(round.ClosesAt) || intent.ActivatedAt == nil {
 					stateErr = ErrConflict
 					return
 				}
@@ -5881,6 +5904,9 @@ func scanRoundBaseline(row pgx.Row) (*roundBaselineRecord, error) {
 }
 
 func (self PostgresStore) GetJob(ctx context.Context, settings *Settings, jobId server.Id, principal *Principal) (job *queuedJob, err error) {
+	if !competitionScorePrincipalAllowed(principal, false) {
+		return nil, ErrNotFound
+	}
 	var stateErr error
 	err = captureDatabaseError(func() {
 		server.Db(ctx, func(conn server.PgConn) {
@@ -6271,6 +6297,13 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 			if settings.automationLease != nil && roundId != settings.automationRoundId {
 				panic(ErrLeaseLost)
 			}
+			if outcome.Score != nil && outcome.Error == nil {
+				policy, policyErr := decodeRoundPolicySnapshot(policyJson)
+				server.Raise(policyErr)
+				if !scoreMatchesFrozenG2Policy(outcome.Score, policy.EvaluationPolicy.G2VolumePolicy) {
+					panic(errors.New("score g2 volume policy does not match the immutable round"))
+				}
+			}
 			if !imageDigestPattern.MatchString(apiImageDigest) || !imageDigestPattern.MatchString(workerImageDigest) {
 				panic(errors.New("competition job runtime image identity is invalid"))
 			}
@@ -6329,7 +6362,7 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 					ON CONFLICT (round_id) DO NOTHING
 				`, roundId, outcome.RoundBaselineJson, baselineSha256, jobId, attempts,
 					manifestSha256, settings.BaseSha, providersSha256, settings.EvaluatorImageDigest,
-					ScorerVersion, settings.EvaluationPolicy.HardwareId,
+					roundSettings.scorerVersion(), roundSettings.EvaluationPolicy.HardwareId,
 					settings.EvaluationPolicy.HostQualificationSha256, now)
 				server.Raise(insertErr)
 				if insertResult.RowsAffected() == 1 {
@@ -7201,8 +7234,8 @@ var apexSubmissionIdPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,
 
 // ApexAdapterRecord is the durable boundary between one Apex admission and the
 // immutable job accepted by the competition API. Production records are paid;
-// staging records are explicitly fee-free. Public outcome fields are populated
-// only after the API publishes a finalized round.
+// staging records are explicitly fee-free. PrivateScore is owner-only feedback,
+// never publication or approval. Public outcomes require finalized publication.
 type ApexAdapterRecord struct {
 	Sequence              uint64             `json:"sequence"`
 	SubmissionId          string             `json:"submission_id"`
@@ -7220,6 +7253,8 @@ type ApexAdapterRecord struct {
 	Published             bool               `json:"published"`
 	Winner                bool               `json:"winner,omitempty"`
 	HonestyReview         string             `json:"honesty_review,omitempty"`
+	PrivateScore          *ScoreResult       `json:"private_score,omitempty"`
+	PrivateScoreRefreshAt *time.Time         `json:"private_score_refresh_at,omitempty"`
 	Score                 *ScoreResult       `json:"score,omitempty"`
 	EvalError             *CompetitionError  `json:"eval_error,omitempty"`
 	SubmittedAt           time.Time          `json:"submitted_at"`
@@ -7230,9 +7265,10 @@ type ApexAdapterRecord struct {
 }
 
 type apexAdapterState struct {
-	Schema       int                 `json:"schema"`
-	NextSequence uint64              `json:"next_sequence"`
-	Records      []ApexAdapterRecord `json:"records"`
+	Schema                  int                 `json:"schema"`
+	NextSequence            uint64              `json:"next_sequence"`
+	PrivateScoreRefreshNext bool                `json:"private_score_refresh_next,omitempty"`
+	Records                 []ApexAdapterRecord `json:"records"`
 }
 
 // ApexAdapterFileStore persists the emulator's admission identity in one
@@ -7380,7 +7416,7 @@ func (self *ApexAdapterFileStore) RecordAdmission(submissionId string, accepted 
 	if accepted.State != "queued" && accepted.State != "running" && accepted.State != "completed" {
 		return nil, errors.New("competition API returned an invalid admission state")
 	}
-	return self.changeRecord(submissionId, func(record *ApexAdapterRecord) error {
+	return self.changeRecordInState(submissionId, func(state *apexAdapterState, record *ApexAdapterRecord) error {
 		if !record.Staging && record.FeeReceipt == "" {
 			return errors.New("competition admission cannot precede fee collection")
 		}
@@ -7418,7 +7454,7 @@ func (self *ApexAdapterFileStore) RecordAdmission(submissionId string, accepted 
 			record.EvaluationFailure = nil
 		}
 		record.UpdatedAt = now.UTC()
-		return nil
+		return reconcileApexJobAssociations(state, record.JobId, now)
 	})
 }
 
@@ -7464,7 +7500,8 @@ func validateScoreJobPoll(job ScoreJobResult) error {
 
 	stagingDiscard := isStagingDiscardedJob(job)
 	if job.Score != nil {
-		if job.State != "succeeded" || job.EvaluationStatus != "completed" ||
+		privateScore := job.State == "completed" && !job.Staging && privateScoreProjectionMatches(job.Score)
+		if (job.State != "succeeded" && !privateScore) || job.EvaluationStatus != "completed" ||
 			job.EvaluationFailure != nil || job.EvalError != nil || validateScore(job.Score) != nil {
 			return errors.New("competition poll returned an invalid published score")
 		}
@@ -7518,87 +7555,33 @@ func normalizeLegacyScoreJobPoll(job *ScoreJobResult) error {
 	return nil
 }
 
-// RecordPoll records outcome-neutral state until publication. A finalized
-// staging round publishes through its authenticated job endpoint; production
-// outcomes remain restricted to finalized leaderboard reconciliation.
+// Private completed production feedback never sets Published, Score or winner
+// approval. Finalized staging publishes through its job endpoint; production
+// public outcomes still require finalized leaderboard reconciliation.
 func (self *ApexAdapterFileStore) RecordPoll(submissionId string, job ScoreJobResult, now time.Time) (*ApexAdapterRecord, error) {
-	return self.changeRecord(submissionId, func(record *ApexAdapterRecord) error {
-		if record.DecisionMode != "" {
-			return recordApexV2Poll(record, job, now)
-		}
-		if job.DecisionMode != "" || job.RequiredApiCapability != "" {
-			return errors.New("legacy polling cannot acquire v2 semantics")
-		}
-		if record.JobId != job.JobId || record.RoundId != job.RoundId || record.Staging != job.Staging || record.CanonicalPatchSha256 != job.PatchSha256 {
+	return self.changeRecordInState(submissionId, func(state *apexAdapterState, selected *ApexAdapterRecord) error {
+		if selected.JobId == (server.Id{}) || selected.JobId != job.JobId {
 			return errors.New("competition poll changed an immutable job identity")
 		}
-		stagingDiscard := isStagingDiscardedJob(job)
-		if !record.Staging && (job.Score != nil || job.EvalError != nil && !stagingDiscard) {
-			return errors.New("competition poll disclosed an embargoed outcome")
-		}
-		legacyProjection := job.EvaluationStatus == ""
-		if err := normalizeLegacyScoreJobPoll(&job); err != nil {
-			return err
-		}
-		if err := validateScoreJobPoll(job); err != nil {
-			return err
-		}
-		legacyCompleted := legacyProjection && job.State == "completed" &&
-			job.EvaluationFailure == nil && job.Score == nil && job.EvalError == nil
-		if record.EvaluationStatus == "failed" {
-			if legacyCompleted {
-				record.UpdatedAt = now.UTC()
-				return nil
+		updateRecord := func(record *ApexAdapterRecord) error {
+			if record.DecisionMode != "" {
+				return recordApexV2Poll(record, job, now)
 			}
-			if stagingDiscard && job.EvaluationStatus == "canceled" {
-				record.State = job.State
-				record.EvaluationStatus = job.EvaluationStatus
-				record.EvaluationFailure = nil
-				record.UpdatedAt = now.UTC()
-				return nil
+			return recordApexLegacyPoll(record, job, now)
+		}
+		for i := range state.Records {
+			record := &state.Records[i]
+			if record.JobId != selected.JobId {
+				continue
 			}
-			if job.EvaluationStatus != "failed" ||
-				(record.EvaluationFailure == nil) != (job.EvaluationFailure == nil) ||
-				record.EvaluationFailure != nil &&
-					(record.EvaluationFailure.Kind != job.EvaluationFailure.Kind ||
-						record.EvaluationFailure.Code != job.EvaluationFailure.Code) {
-				return errors.New("competition poll changed a terminal evaluation failure")
+			if !apexAdapterJobIdentityMatches(*selected, *record) {
+				return errors.New("competition cached job changed an immutable admission association")
+			}
+			if err := updateRecord(record); err != nil {
+				return err
 			}
 		}
-		if record.EvaluationStatus == "canceled" && job.EvaluationStatus != "canceled" {
-			return errors.New("competition poll changed a canceled evaluation")
-		}
-		if legacyCompleted {
-			// A legacy completed response proves only that processing stopped. Do
-			// not erase a stronger status learned from a new server during a
-			// rolling deployment, or invent completed scoring when none is known.
-			if record.EvaluationStatus != "completed" && record.EvaluationStatus != "canceled" {
-				record.State = "completed"
-				record.EvaluationStatus = ""
-				record.EvaluationFailure = nil
-			}
-			record.UpdatedAt = now.UTC()
-			return nil
-		}
-		if record.Staging && !stagingDiscard && (job.Score != nil || job.EvalError != nil) {
-			if job.Score != nil {
-				if job.State != "succeeded" || job.EvalError != nil || validateScore(job.Score) != nil {
-					return errors.New("competition poll returned an invalid published staging score")
-				}
-			} else if job.State != "failed" || job.EvalError.Retriable || validateEvaluationError(job.EvalError) != nil {
-				return errors.New("competition poll returned an invalid published staging error")
-			}
-			record.Score = job.Score
-			record.EvalError = job.EvalError
-			record.Published = true
-		} else if record.Staging && !stagingDiscard && job.State != "queued" && job.State != "running" && job.State != "completed" {
-			return errors.New("competition poll returned an invalid unpublished staging state")
-		}
-		record.State = job.State
-		record.EvaluationStatus = job.EvaluationStatus
-		record.EvaluationFailure = job.EvaluationFailure
-		record.UpdatedAt = now.UTC()
-		return nil
+		return reconcileApexJobAssociations(state, selected.JobId, now)
 	})
 }
 
@@ -7673,11 +7656,11 @@ func validateApexLeaderboard(leaderboard LeaderboardResult) error {
 // every returned job, patch, and staging admission identity before persisting.
 func (self *ApexAdapterFileStore) ReconcileLeaderboard(leaderboards SeasonLeaderboardResult, now time.Time) error {
 	return self.update(func(state *apexAdapterState) error {
-		byJobId := map[server.Id]*ApexAdapterRecord{}
+		jobIdRecords := map[server.Id][]*ApexAdapterRecord{}
 		for i := range state.Records {
 			record := &state.Records[i]
 			if record.JobId != (server.Id{}) {
-				byJobId[record.JobId] = record
+				jobIdRecords[record.JobId] = append(jobIdRecords[record.JobId], record)
 			}
 		}
 		seenJobIds := map[server.Id]bool{}
@@ -7690,31 +7673,43 @@ func (self *ApexAdapterFileStore) ReconcileLeaderboard(leaderboards SeasonLeader
 					return errors.New("Apex reconciliation received a duplicate leaderboard job")
 				}
 				seenJobIds[entry.JobId] = true
-				record, ok := byJobId[entry.JobId]
+				records, ok := jobIdRecords[entry.JobId]
 				if !ok {
 					return fmt.Errorf("leaderboard job %s is not an admitted Apex submission", entry.JobId)
 				}
-				if record.RoundId != leaderboard.RoundId || record.CanonicalPatchSha256 != entry.PatchSha256 {
-					return errors.New("leaderboard changed an immutable Apex submission identity")
+				for _, record := range records {
+					if record.RoundId != leaderboard.RoundId || record.CanonicalPatchSha256 != entry.PatchSha256 {
+						return errors.New("leaderboard changed an immutable Apex submission identity")
+					}
+					if record.Staging != leaderboard.Staging {
+						return errors.New("leaderboard changed the staging admission identity")
+					}
+					if record.DecisionMode != "" {
+						return errors.New("legacy leaderboard cannot reinterpret a v2 provisional reward")
+					}
+					if record.EvaluationStatus == "failed" || record.EvaluationStatus == "canceled" {
+						return errors.New("leaderboard score contradicts the terminal evaluation status")
+					}
+					score := entry.Score
+					if err := validateApexJobObservation(*record, ApexAdapterRecord{Score: &score, EvaluationStatus: "completed"}); err != nil {
+						return err
+					}
+					if record.PrivateScore != nil {
+						if err := recordApexPrivateScore(record, ScoreJobResult{State: "succeeded", EvaluationStatus: "completed", Score: &score}); err != nil {
+							return err
+						}
+					}
+					record.Score = &score
+					record.PrivateScore = nil
+					record.PrivateScoreRefreshAt = nil
+					record.EvaluationStatus = "completed"
+					record.EvaluationFailure = nil
+					record.Published = true
+					record.Winner = entry.Winner
+					record.HonestyReview = entry.HonestyReview
+					record.State = "published"
+					record.UpdatedAt = now.UTC()
 				}
-				if record.Staging != leaderboard.Staging {
-					return errors.New("leaderboard changed the staging admission identity")
-				}
-				if record.DecisionMode != "" {
-					return errors.New("legacy leaderboard cannot reinterpret a v2 provisional reward")
-				}
-				if record.EvaluationStatus == "failed" || record.EvaluationStatus == "canceled" {
-					return errors.New("leaderboard score contradicts the terminal evaluation status")
-				}
-				score := entry.Score
-				record.Score = &score
-				record.EvaluationStatus = "completed"
-				record.EvaluationFailure = nil
-				record.Published = true
-				record.Winner = entry.Winner
-				record.HonestyReview = entry.HonestyReview
-				record.State = "published"
-				record.UpdatedAt = now.UTC()
 			}
 		}
 		return nil
@@ -7743,12 +7738,11 @@ func (self *ApexAdapterFileStore) Pending() ([]ApexAdapterRecord, error) {
 	var records []ApexAdapterRecord
 	err := self.read(func(state *apexAdapterState) error {
 		for _, record := range state.Records {
-			if record.JobId == (server.Id{}) || record.Published ||
-				(!record.Staging && record.State == "completed") || record.State == "failed" ||
-				record.State == "canceled" || record.State == "invalid" {
+			if !apexAdapterRecordPending(record) {
 				continue
 			}
 			record = apexAdapterRecordView(record)
+			record.PrivateScore = nil
 			record.Score = nil
 			record.EvalError = nil
 			records = append(records, record)
@@ -7763,6 +7757,17 @@ func (self *ApexAdapterFileStore) changeRecord(
 	submissionId string,
 	change func(*ApexAdapterRecord) error,
 ) (*ApexAdapterRecord, error) {
+	return self.changeRecordInState(submissionId, func(_ *apexAdapterState, record *ApexAdapterRecord) error {
+		return change(record)
+	})
+}
+
+// Association-aware changes share one atomic state transaction; a job poll may
+// update only the admissions already durably bound to its exact identity.
+func (self *ApexAdapterFileStore) changeRecordInState(
+	submissionId string,
+	change func(*apexAdapterState, *ApexAdapterRecord) error,
+) (*ApexAdapterRecord, error) {
 	var result ApexAdapterRecord
 	err := self.update(func(state *apexAdapterState) error {
 		for i := range state.Records {
@@ -7770,7 +7775,7 @@ func (self *ApexAdapterFileStore) changeRecord(
 			if record.SubmissionId != submissionId {
 				continue
 			}
-			if err := change(record); err != nil {
+			if err := change(state, record); err != nil {
 				return err
 			}
 			result = *record
@@ -7911,7 +7916,7 @@ func (self *ApexAdapterFileStore) withState(write bool, operation func(*apexAdap
 
 func validateApexAdapterState(state *apexAdapterState) error {
 	seenSubmissionIds := map[string]bool{}
-	seenJobIds := map[server.Id]bool{}
+	jobIdRecords := map[server.Id]ApexAdapterRecord{}
 	lastSequence := uint64(0)
 	for _, record := range state.Records {
 		if record.DecisionMode != "" || record.RequiredApiCapability != "" || record.CompetitionId != "" {
@@ -7928,11 +7933,21 @@ func validateApexAdapterState(state *apexAdapterState) error {
 			return errors.New("Apex adapter state contains an invalid submission record")
 		}
 		if record.JobId != (server.Id{}) {
-			if record.RoundId == (server.Id{}) || !sha256Pattern.MatchString(record.CanonicalPatchSha256) || record.StatusUrl == "" || seenJobIds[record.JobId] {
+			if record.RoundId == (server.Id{}) || !sha256Pattern.MatchString(record.CanonicalPatchSha256) || record.StatusUrl == "" {
 				return errors.New("Apex adapter state contains an invalid job identity")
 			}
-			seenJobIds[record.JobId] = true
-		} else if record.EvaluationStatus != "" || record.EvaluationFailure != nil {
+			if previous, exists := jobIdRecords[record.JobId]; exists {
+				if !apexAdapterJobIdentityMatches(previous, record) {
+					return errors.New("Apex adapter cached job has inconsistent immutable admission associations")
+				}
+				if err := validateApexJobObservation(previous, record); err != nil {
+					return err
+				}
+			}
+			if previous, exists := jobIdRecords[record.JobId]; !exists || apexJobObservationRank(record) > apexJobObservationRank(previous) {
+				jobIdRecords[record.JobId] = record
+			}
+		} else if record.EvaluationStatus != "" || record.EvaluationFailure != nil || record.PrivateScore != nil || record.PrivateScoreRefreshAt != nil {
 			return errors.New("Apex adapter state contains evaluation state before admission")
 		}
 		if record.EvaluationStatus != "" {
@@ -7954,6 +7969,14 @@ func validateApexAdapterState(state *apexAdapterState) error {
 		}
 		if !record.Published && (record.Score != nil || record.EvalError != nil) {
 			return errors.New("Apex adapter state contains an unpublished outcome")
+		}
+		if record.PrivateScore != nil && (record.Staging || record.Published ||
+			record.EvaluationStatus != "completed" || record.EvaluationFailure != nil ||
+			!privateScoreProjectionMatches(record.PrivateScore)) {
+			return errors.New("Apex adapter state contains invalid private completed-score feedback")
+		}
+		if record.PrivateScoreRefreshAt != nil && (record.PrivateScoreRefreshAt.IsZero() || !apexPrivateScoreRefreshEligible(record)) {
+			return errors.New("Apex adapter state contains an invalid private score refresh schedule")
 		}
 		if record.Published && (record.Score == nil) == (record.EvalError == nil) {
 			return errors.New("Apex adapter published a submission without exactly one outcome")
@@ -7994,21 +8017,26 @@ type ApexAdapterOptions struct {
 	Wait            func(context.Context, time.Duration) error
 	Now             func() time.Time
 	V2CompetitionId string
+	// Minimum interval between refreshes when a completed production job's
+	// replica still omits private feedback. Zero selects the default; negative
+	// is invalid. The durable schedule also backs off failed refresh requests.
+	PrivateScoreRefreshEvery time.Duration
 }
 
 // ApexAdapter maps production and fee-free evaluated staging admissions onto
 // the authenticated async API. It has no evaluator, hidden-seed, MinIO,
 // Docker, or operator privileges.
 type ApexAdapter struct {
-	baseUrl         *url.URL
-	submitterJwt    string
-	store           *ApexAdapterFileStore
-	feeCollector    ApexFeeCollector
-	httpClient      *http.Client
-	maxAttempts     int
-	wait            func(context.Context, time.Duration) error
-	now             func() time.Time
-	v2CompetitionId string
+	baseUrl                  *url.URL
+	submitterJwt             string
+	store                    *ApexAdapterFileStore
+	feeCollector             ApexFeeCollector
+	httpClient               *http.Client
+	maxAttempts              int
+	wait                     func(context.Context, time.Duration) error
+	now                      func() time.Time
+	v2CompetitionId          string
+	privateScoreRefreshEvery time.Duration
 }
 
 // NewApexAdapter constructs a fail-closed adapter. The bearer token is kept in
@@ -8031,18 +8059,25 @@ func NewApexAdapter(
 	if strings.TrimSpace(submitterJwt) == "" || store == nil || feeCollector == nil {
 		return nil, errors.New("Apex adapter token, durable store, and fee collector are required")
 	}
+	defaults := DefaultApexAdapterOptions()
 	if options.HttpClient == nil {
-		options.HttpClient = server.NewHttpClient(30 * time.Second)
+		options.HttpClient = defaults.HttpClient
 	}
 	httpClient := *options.HttpClient
 	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	}
 	if options.MaxAttempts == 0 {
-		options.MaxAttempts = 5
+		options.MaxAttempts = defaults.MaxAttempts
 	}
 	if options.MaxAttempts < 1 || options.MaxAttempts > 20 {
 		return nil, errors.New("Apex adapter max attempts must be between 1 and 20")
+	}
+	if options.PrivateScoreRefreshEvery == 0 {
+		options.PrivateScoreRefreshEvery = defaults.PrivateScoreRefreshEvery
+	}
+	if options.PrivateScoreRefreshEvery < 0 {
+		return nil, errors.New("Apex adapter private score refresh interval must be positive")
 	}
 	if options.Wait == nil {
 		options.Wait = func(ctx context.Context, delay time.Duration) error {
@@ -8058,15 +8093,16 @@ func NewApexAdapter(
 		options.Now = server.NowUtc
 	}
 	return &ApexAdapter{
-		baseUrl:         parsed,
-		submitterJwt:    submitterJwt,
-		store:           store,
-		feeCollector:    feeCollector,
-		httpClient:      &httpClient,
-		maxAttempts:     options.MaxAttempts,
-		wait:            options.Wait,
-		now:             options.Now,
-		v2CompetitionId: options.V2CompetitionId,
+		baseUrl:                  parsed,
+		submitterJwt:             submitterJwt,
+		store:                    store,
+		feeCollector:             feeCollector,
+		httpClient:               &httpClient,
+		maxAttempts:              options.MaxAttempts,
+		wait:                     options.Wait,
+		now:                      options.Now,
+		v2CompetitionId:          options.V2CompetitionId,
+		privateScoreRefreshEvery: options.PrivateScoreRefreshEvery,
 	}, nil
 }
 
@@ -8147,14 +8183,14 @@ func (self *ApexAdapter) Submit(ctx context.Context, submissionId string, patch 
 	return self.store.RecordAdmission(submissionId, accepted, self.now())
 }
 
-// PollNext polls exactly one earliest unpublished admission, preserving FIFO
-// pressure at the adapter boundary even if callers invoke it concurrently.
+// Alternates ordinary FIFO polls with due private-score refreshes of previously
+// completed production jobs. Durable reservations bound rolling-replica retries
+// and preserve fairness even across cooperating adapter instances.
 func (self *ApexAdapter) PollNext(ctx context.Context) (*ApexAdapterRecord, error) {
-	records, err := self.store.Pending()
-	if err != nil || len(records) == 0 {
+	record, err := self.store.nextPrivateScoreAwarePoll(self.now(), self.privateScoreRefreshEvery)
+	if err != nil || record == nil {
 		return nil, err
 	}
-	record := records[0]
 	if err := validateApexAdmissionContract(record.CompetitionId, RoundResult{DecisionMode: record.DecisionMode, RequiredApiCapability: record.RequiredApiCapability}, self.v2CompetitionId); err != nil {
 		return nil, err
 	}

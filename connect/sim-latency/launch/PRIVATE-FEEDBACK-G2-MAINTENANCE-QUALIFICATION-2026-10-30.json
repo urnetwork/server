@@ -1,0 +1,153 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-focused-control-plane-qualification",
+  "status": "pass",
+  "observed_at": "2026-10-30T17:47:39Z",
+  "scope": "Owner-only completed-score feedback, intake-preserving calibration maintenance and prospective epoch-two minimum-work G2/source transition. This is not production calibration acceptance or future evaluator-image qualification.",
+  "toolchain": {
+    "version": "go1.27.3",
+    "sha256": "5f5eb6d0b2fb6aa0bb5d5f8c5f1c944e0de955c925f0111af92a9d8f79680b5b"
+  },
+  "tests": {
+    "roots": 168,
+    "fresh_processes_per_root": 3,
+    "top_level_passes": 504,
+    "failures": 0,
+    "skips": 0,
+    "packages": [
+      {
+        "package": ".",
+        "roots": 3,
+        "passes": 9,
+        "accepted_phase": 11
+      },
+      {
+        "package": "./controller",
+        "roots": 90,
+        "passes": 270,
+        "accepted_phase": 11
+      },
+      {
+        "package": "./model",
+        "roots": 14,
+        "passes": 42,
+        "accepted_phase": 12
+      },
+      {
+        "package": "./api",
+        "roots": 2,
+        "passes": 6,
+        "accepted_phase": 13
+      },
+      {
+        "package": "./connect/sim-latency",
+        "roots": 59,
+        "passes": 177,
+        "accepted_phase": 15
+      }
+    ],
+    "additional_scorer_subtest_passes_not_in_top_level_total": 87,
+    "includes_complete_six_epoch_lifecycle": true,
+    "includes_actual_isolated_postgresql": true,
+    "one_fresh_all_package_run": false,
+    "earlier_failed_attempts_preserved_and_excluded": true,
+    "full_sim_latency_tests_sh_three_passes_claimed": false
+  },
+  "cross_phase_provenance": {
+    "production_and_previously_tested_package_closures_unchanged": true,
+    "source_exception": {
+      "path": "connect/sim-latency/source_trusted_instrument_test.go",
+      "before": "88cf61e8c429dc33da0ee7edbbb1d4e08dc5984456a8c78ceda93aec7d23aa07",
+      "after": "d15f80bbd119bfe32cd43f1008d0a24c07366107fcdeffe6900127a78d38ee98",
+      "reason": "Corrected a scorer-only, previously unexecuted test's concrete-error variable typing. Exact one-line hash/path normalization; no generic test-file exclusion."
+    },
+    "source_manifest_sha256": "555c595f4a2e0a805ede4e5015b4ae6986c2cf038729594f1b7a2402731226ff",
+    "dependency_manifest_sha256": "608bff210ac7d5233f830d5daea4ab6ae079396926786f342a7a7b5075390fb5",
+    "sn_api_sha256": "c0d837fc9dfa2034f9547475cf08ada002732a56063484c072adf92d35537597",
+    "aggregate_receipt_sha256": "40a75282c77110c9d294ff968b5a3ca7198ec1479a8c6a7da55f7685d090cc62"
+  },
+  "test_profile": {
+    "race": true,
+    "offline_go_modules": true,
+    "cpus": "20,22",
+    "swap_max": 0,
+    "private_local_services": true,
+    "private_global_git_identity_preserved_without_author_overrides": true,
+    "umask": "0022",
+    "api_test_compile_trimpath": false,
+    "production_native_build_trimpath": true,
+    "nested_go_build_vcs_metadata": false,
+    "nested_go_build_parallelism": 1,
+    "model_test_compiler_limit_gib": 6,
+    "other_test_units_limit_gib": 3,
+    "scorer_inflight_memory_override_applied": false,
+    "official_evaluator_limits_unchanged": true
+  },
+  "native_api": {
+    "cgo_enabled": false,
+    "sha256": "a0bbee7e1a39d8c54e1446cbdb62fcaf1cd551af3e981ce17424631a40431914",
+    "executed": false
+  },
+  "standalone_deadline_guard": {
+    "roots": 12,
+    "fresh_processes": 3,
+    "top_level_passes": 36,
+    "failures": 0,
+    "skips": 0,
+    "race_binary_sha256": "9b84a8182dbcee9ad38cbe0d04970bdcedb68735b568c53fd265c6023f527399",
+    "native_binary_sha256": "44389b03953b3d94de6c9ad9e718e9a49fec7f0250d9801b6287b618ce5e6ac6",
+    "native_executed": false,
+    "deployed": false,
+    "source_hashes_before_after_equal": true
+  },
+  "static_checks": {
+    "status": "pass",
+    "shell_syntax": [
+      "connect/sim-latency/official-run.sh",
+      "connect/sim-latency/evaluator/container/evaluator-minimum-work.sh",
+      "connect/sim-latency/evaluator/container/prepare-round-baseline-minimum-work.sh"
+    ],
+    "git_diff_check": true,
+    "private_log_sha256": "e8bab91a4b5aec9704c47b0d85aac62938c5dba371fad89eeb1070da49542e83"
+  },
+  "cleanup": {
+    "all_registered_children_joined": true,
+    "owned_local_services_removed": true,
+    "original_services_not_modified": true,
+    "source_dependency_fixture_integrity_exit": 0
+  },
+  "post_test_changes": {
+    "metadata_only": [
+      "connect/sim-latency/launch/current-state.json",
+      "connect/sim-latency/launch/reduced-pilot-operator-2026-10-30/NEXT-SERIAL-ACTION.json",
+      "connect/sim-latency/launch/PRIVATE-FEEDBACK-G2-MAINTENANCE-QUALIFICATION-2026-10-30.json"
+    ],
+    "executable_modes_only": [
+      "connect/sim-latency/evaluator/container/evaluator-minimum-work.sh",
+      "connect/sim-latency/evaluator/container/prepare-round-baseline-minimum-work.sh"
+    ],
+    "go_or_shell_content_changed_after_validation": false
+  },
+  "private_evidence": {
+    "receipt": "/home/by/urnetwork/temp/private-score-g2-qa.G3nGCBxl/attempt15/QA-SUMMARY.private.json",
+    "sha256": "750653d4116a69cd5c748488d9a90def9e1ed9f9adf7c9db98b0c8878e0188c8",
+    "full_commands_durations_binary_and_log_digests_retained": true,
+    "raw_environment_and_logs_not_published": true
+  },
+  "production_actions": {
+    "main_database_migrated": false,
+    "api_deployed": false,
+    "evaluator_changed": false,
+    "evaluation_hold_changed": false,
+    "timed_calibration_started": false,
+    "new_hidden_workload_seed_drawn": false,
+    "reward_hold_released": false
+  },
+  "pending": [
+    "Commit/pull/merge/push and verify remote main publication.",
+    "Apply the additive migration before deploying the new main API.",
+    "Verify owner-only feedback and bounded maintenance live; apply its new active hold and stop/join the worker before timed calibration.",
+    "Complete the serial public pilot and hidden calibration, independent acceptance and retained evidence.",
+    "Qualify/publish the new evaluator instrument/image and future policy configuration before epoch two; do not rejudge epoch one."
+  ]
+}

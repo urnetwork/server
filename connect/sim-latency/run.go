@@ -31,10 +31,12 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/stats"
 )
 
 type RunOptions struct {
+	G2VolumePolicy   model.CompetitionG2VolumePolicy
 	Epoch            int
 	SourceConfig     string
 	RepositoriesRoot string
@@ -84,7 +86,7 @@ func (self *RunOptions) fleetSettings() FleetSettings {
 	return *self.FleetSettings
 }
 
-const officialScorerVersion = "sim-latency-score/1"
+const officialScorerVersion = model.CompetitionScorerVersion
 const teardownTimeout = 20 * time.Second
 
 var runEvaluationIdPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
@@ -138,6 +140,9 @@ func waitPhase(ctx context.Context, duration time.Duration) error {
 func Run(options *RunOptions) (retErr error) {
 	if options == nil {
 		return incompleteError("invalid_options", "setup", errors.New("nil run options"))
+	}
+	if _, err := model.CompetitionScorerVersionForG2Policy(options.G2VolumePolicy); err != nil {
+		return incompleteError("invalid_options", "setup", err)
 	}
 	if options.RequestTimeout <= 0 {
 		if options.Official {
@@ -663,6 +668,10 @@ func Run(options *RunOptions) (retErr error) {
 // artifacts can be checked for comparability. The window, client counts,
 // and metrics are filled in as the run progresses.
 func newRunStats(options *RunOptions, config *Config) (*RunStats, error) {
+	scorerVersion, err := model.CompetitionScorerVersionForG2Policy(options.G2VolumePolicy)
+	if err != nil {
+		return nil, err
+	}
 	configBytes, err := os.ReadFile(options.ConfigPath)
 	if err != nil {
 		return nil, err
@@ -679,11 +688,12 @@ func newRunStats(options *RunOptions, config *Config) (*RunStats, error) {
 		probeInterval = (probeOffsets[1] - probeOffsets[0]).String()
 	}
 	return &RunStats{
+		G2VolumePolicy:   options.G2VolumePolicy,
 		Schema:           runStatsSchema,
 		Kind:             runStatsKind,
 		SourceEpoch:      options.Epoch,
 		ScoreSchema:      apexScoreSchema,
-		ScorerVersion:    officialScorerVersion,
+		ScorerVersion:    scorerVersion,
 		EvaluationId:     options.EvaluationId,
 		Official:         options.Official,
 		RequestTimeoutMs: options.RequestTimeout.Milliseconds(),
@@ -879,14 +889,15 @@ func writeExclusiveAtomicFile(path string, content []byte, mode os.FileMode) (re
 }
 
 type runFinalMarker struct {
-	Schema            int    `json:"schema"`
-	Kind              string `json:"kind"`
-	ScoreSchema       int    `json:"score_schema"`
-	ScorerVersion     string `json:"scorer_version"`
-	EvaluationId      string `json:"evaluation_id"`
-	RunManifestSha256 string `json:"run_manifest_sha256"`
-	RunManifestBytes  int64  `json:"run_manifest_bytes"`
-	CompletedUnixMs   int64  `json:"completed_unix_ms"`
+	G2VolumePolicy    model.CompetitionG2VolumePolicy `json:"g2_volume_policy,omitempty"`
+	Schema            int                             `json:"schema"`
+	Kind              string                          `json:"kind"`
+	ScoreSchema       int                             `json:"score_schema"`
+	ScorerVersion     string                          `json:"scorer_version"`
+	EvaluationId      string                          `json:"evaluation_id"`
+	RunManifestSha256 string                          `json:"run_manifest_sha256"`
+	RunManifestBytes  int64                           `json:"run_manifest_bytes"`
+	CompletedUnixMs   int64                           `json:"completed_unix_ms"`
 }
 
 func writeFinalMarker(markerPath string, metaPath string, runStats *RunStats) error {
@@ -895,10 +906,11 @@ func writeFinalMarker(markerPath string, metaPath string, runStats *RunStats) er
 		return fmt.Errorf("read finalized run manifest: %w", err)
 	}
 	marker := runFinalMarker{
+		G2VolumePolicy:    runStats.G2VolumePolicy,
 		Schema:            1,
 		Kind:              "sim-latency-complete",
 		ScoreSchema:       apexScoreSchema,
-		ScorerVersion:     officialScorerVersion,
+		ScorerVersion:     runStats.ScorerVersion,
 		EvaluationId:      runStats.EvaluationId,
 		RunManifestSha256: fmt.Sprintf("%x", sha256.Sum256(manifestBytes)),
 		RunManifestBytes:  int64(len(manifestBytes)),
