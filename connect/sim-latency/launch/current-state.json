@@ -1,10 +1,10 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-30T07:01:15.054160826Z",
+  "observed_at": "2026-10-30T07:53:33Z",
   "scoring_enablement_current": {
-    "status": "R2_provisional_grading_enabled_original_recovery_105_tests_passed_zero_sample_setup_clock_repair_under_qualification",
-    "observed_at": "2026-10-30T06:31:27.228534355Z",
+    "status": "R2_provisional_grading_enabled_117_tests_passed_zero_sample_recovery_activated_shared_baseline_preparation_running",
+    "observed_at": "2026-10-30T07:53:33Z",
     "metadata_checkpoint_only": true,
     "actual_intake_open": true,
     "grading_enabled": true,
@@ -121,14 +121,36 @@
           "operator_authorized_zero_sample_setup_recovery": true,
           "authority_basis": "Existing owner launch/fix instructions; the user10800-second cap applies to individual submissions, whose started_at remainsNULL until the epoch baseline is published. The expired reservation is a separate setup owner, not a started submission or measured sample.",
           "new_execution_mode": "operator_recovered_zero_sample_three_hour_v1",
-          "new_mode_activated": false,
+          "new_mode_activated": true,
           "previously_prepared_8a_worker_enforces_original_deadline": true,
           "original_deadline_approximately": "2026-10-30T07:51:24Z",
           "public_pilot_control_evidence": "Eight inter-completion intervals from all nine preserved controls imply86.22 minutes for nine runs, before cold-start/archive allowance; this is an estimate, not a production measurement.",
           "repair_scope": "One explicit private operator capability gives zero-sample preparation a bounded execution interval while retaining original reservation owner/start/deadline in the append-only audit. Same hidden workload/R9; per-submission10800-second deadline and all gates remain unchanged.",
-          "new_enforcing_worker_code_and_qualification_required": true,
+          "new_enforcing_worker_code_and_qualification_required": false,
           "metadata_cannot_override_current_binary_clock": true,
-          "no_recovery_authorization_or_transition_activated": true
+          "no_recovery_authorization_or_transition_activated": false,
+          "active_recovery": {
+            "worker_started_at": "2026-10-30T07:53:05Z",
+            "observed_at": "2026-10-30T07:53:33Z",
+            "native_event_id": 219,
+            "fresh_artifact_directory": "/var/lib/urnetwork/competition/baseline-preparations/01a1855d-49bd-0250-90db-d0c0885f0e46/baseline.01a18b25-d0e4-23f3-f750-60ca6cf25eb5.recovery.219",
+            "phase": "fresh isolated source preparation observed; no measured baseline or submission claimed",
+            "source_commit": "cf95828bf5a1a2312bd7412d4c924d57d69866c4",
+            "worker_sha256": "70c867bccc07e451b9598027096a36d6dbaf1179b324910e3c8b03512a90a2ad",
+            "worker_image": "sha256:80520bb4b046055b84adc9d083fdc0aa263b93345d9e0f79eaeab718ac36df93",
+            "unit_sha256": "9ede9888a35bfcc14f65b219a12ce3d1219f7cb8195c109be761c81b5d82303e",
+            "old_worker_stopped_and_joined_before_replacement": true,
+            "previous_unit": "/var/lib/urnetwork/competition-round-baseline-recovery-20261030-v2/activation.fi1pru7G/previous-unit.service",
+            "recovery_authorization_sha256": "55cf115ec496f2ecc448b585100910498b60e51cd7b70bcafe63d4449a26ed52",
+            "actual_top_level_passes": 117,
+            "roots_per_process": 39,
+            "fresh_processes": 3,
+            "failures": 0,
+            "skips": 0,
+            "test_receipt_sha256": "8fc92cfcd62f087800576932e09eab073da67638470a09e487393da5a1a37785",
+            "native_build_receipt_sha256": "d25b6463c888c75097e849d4e254aa29d27be3d1a00bd3278d37b007164e4cea",
+            "frozen_evaluator_source_rules_and_submission_clock_unchanged": true
+          }
         },
         "source_supervisor_observability": "parent captureschildstdout/stderrboundedthenDISCARDSonEXIT2; journalonlyevaluation_blocked. Needpreserveexisting logs / improvecontrol-onlyerrorcapture ifneeded, don'tclaimchildPIDmeansjobrun."
       },
@@ -186,7 +208,7 @@
       "public_provider_request_before_census_and_Root_reported_native_collision_preparation_not_measurement"
     ],
     "pending": [
-      "qualify_and_activate_explicit_zero_sample_setup_execution_clock_without_resampling_or_spending_submission_attempts",
+      "complete_and_publish_shared_R9_epoch_baseline_then_verify_first_real_FIFO_submission_claim",
       "seal_native_replacement_public_pilot_plan_and_publish_before_any_measurements",
       "precommit_and_complete_owner_approved_new_public_R9_R9_pilot_without_weakening_any_submission_gate",
       "only_after_accepted_new_pilot_and_native_after_census_one_new_hidden_seed_and36_native_fresh_single_screen_runs",
