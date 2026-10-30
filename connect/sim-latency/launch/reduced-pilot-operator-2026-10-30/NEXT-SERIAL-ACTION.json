@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "kind": "sim-latency-approved-calibration-next-serial-action",
-  "observed_at": "2026-10-30T17:45:57Z",
+  "observed_at": "2026-10-30T17:54:24Z",
   "purpose": "Qualified native calibration handoff, not runtime authority. Metadata-only preparation succeeded at its recorded actual time; no timed measurements or hidden entropy. Next: qualify/push the control-plane changes and exact public plan, deploy bounded maintenance, then reserve the host before timed execution. The envelope, environment and arguments below document the successful prepare only; they are not a command to repeat or the timed-execution configuration.",
   "production_service": "urnetwork-competition-production-r2.service",
   "calibration_root": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2",
@@ -67,7 +67,7 @@
   },
   "after_preparation": [
     "Do not repeat successful native prepare; preserve its exact public plan, original failed results and the unused original second seed.",
-    "Commit, pull/merge and push all qualified control-plane changes and the entire exact public plan before any main migration or timed measurement.",
+    "The tested code and exact public plan are already committed, merged, pulled and pushed: server25eb7e7cf479a14506605746e376468f0db3fdfe and SNc59b0ddc1357f8ab010264d7f0cdc24ee49a28ad. Canonical clean checkouts were fetched/fast-forwarded from origin and the plan blob was rehashed. Verify these exact identities before migrating or measuring.",
     "Deploy the additive migration/API. Verify owner-only completed feedback and public embargo. Fresh-read revision three and apply only the newly approved revision-four ACTIVE CALIBRATION_MAINTENANCE request, not an inactive grading release.",
     "After confirming that actual revision, qualify/install its matching deadline guard while preserving the original global one-use claim, accepted-marker path, scope and November5deadline. Never create the marker or cancel the fence before genuine calibration acceptance.",
     "Independently read back the pushed plan Git blob and remote-main ancestry. Retain the actual publication time/evidence and install truthful protected plan-publication.json. Historical publication times/commits/hashes are not reusable.",
@@ -104,5 +104,18 @@
   },
   "preparation_command_reference_only": true,
   "next_action_is_not_prepare": true,
-  "timed_execution_configuration_must_be_separately_verified": true
+  "timed_execution_configuration_must_be_separately_verified": true,
+  "checkpoint_publication": {
+    "observed_at": "2026-10-30T17:54:24Z",
+    "pulled_merged_and_pushed": true,
+    "server_repository": "https://github.com/urnetwork/server",
+    "server_tested_code_commit": "25eb7e7cf479a14506605746e376468f0db3fdfe",
+    "sn_repository": "https://github.com/urfoundation/sn",
+    "sn_main_commit": "c59b0ddc1357f8ab010264d7f0cdc24ee49a28ad",
+    "remote_heads_verified": true,
+    "clean_canonical_workspaces_fast_forwarded": true,
+    "frozen_competition_branches_unchanged": true,
+    "plan_sha256": "a22861dfd3d4e6bfd3e9a994b447fc535847cf7f3e4b92871dbce4ae97e79dd0",
+    "native_publication_receipt_installed": false
+  }
 }
