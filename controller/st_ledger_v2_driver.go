@@ -296,6 +296,33 @@ func stV1EpochAllowed(ctx context.Context, cfg *StConfig, epoch uint64) (bool, e
 	return sweep && sweepEpoch == epoch, nil
 }
 
+// Rechecks the durable cutoff while a task's continuation transaction is held.
+// This reads no chain state and records no activation; execution admission still
+// owns those checks. A latch recorded between Run and Post takes effect here.
+func StV1TaskContinuationAllowedInTx(ctx context.Context, tx server.PgTx, epoch uint64) (bool, error) {
+	cfg := stConfig()
+	if cfg == nil {
+		return false, errStNotConfigured
+	}
+	var activation *model.StLedgerV2Activation
+	if cfg.LedgerV2Enabled() {
+		activation = model.GetStLedgerV2ActivationInTx(ctx, tx, cfg.DeploymentKey())
+	} else {
+		activation = model.GetStLedgerV2ActivationIfInstalledInTx(ctx, tx, cfg.DeploymentKey())
+	}
+	if activation == nil {
+		return true, nil
+	}
+	if err := stLedgerV2ActivationRefusal(cfg, activation); err != nil {
+		return false, err
+	}
+	if epoch < activation.FirstEpoch {
+		return true, nil
+	}
+	sweepEpoch, sweep := stLedgerV1SweepEpoch(ctx, cfg)
+	return sweep && sweepEpoch == epoch, nil
+}
+
 func stV1EpochAdmission(ctx context.Context, cfg *StConfig, epoch uint64) error {
 	allowed, err := stV1EpochAllowed(ctx, cfg, epoch)
 	if err != nil {
