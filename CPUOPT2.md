@@ -8,7 +8,24 @@ This is research, not a change. Every number comes from read-only measurement
 on Main on 2026-10-29: Mimir, short low-rate `perf` samples, kernel and socket
 counters. Nothing in production was changed for it. Code references were read
 at server main e5e6d4c71 plus the connect and warp repos. *(inferred)* marks a
-claim reasoned from code rather than measured.
+claim reasoned from code rather than measured. §8 adds the proxy hosts in
+depth (2026-10-30).
+
+**Status (2026-10-30 ~00:40Z):**
+- **Merged and pushed:**
+  - TCP keepalive off on exchange sockets and connect's platform-transport
+    listener (282565213), and for platform-transport dials in the connect
+    library (01030ccd);
+  - the forward idle timeout cut from 15 to 3 min (3d3dd2073);
+  - the low-risk timer changes from §3.2: lazy deadlines, pings paced from
+    the last write, reused timers (9976fe0f4, fc9c57bd0, dd4150ee9,
+    04373ea30).
+- **Built, not deployed:** connect release `2026.10.29-outerwerld-1085173010`,
+  on the running hotfix's exact source (branch `hotfix/connect-cpu-2026-10-29`).
+  The rollout is held until the proxy hosts recover (§8).
+- **Kernel options:** `retbleed=stuff iommu=pt` are in GRUB on the four
+  services edges (xops 8459280). They take effect on the rolling reboots,
+  which are held with the rollout.
 
 ## Summary
 
@@ -63,7 +80,7 @@ so do not add them up.
 | 10 | Multiplexed exchange links per process pair (§3.3) | 1–2 months | high | 8–15% on top of 9 |
 | 11 | H1 without nginx: connect terminates TLS (§3.6) | 1–2 months | high | 4–8% |
 | 12 | Add edge-6, and edge-7/8 when they arrive, to the services tier (§3.11) | weeks | medium | +20–25% capacity per host |
-| P | Proxy hosts: memory limit up, GOMAXPROCS down, shorter idle hold (§3.9) | days | low–medium | proxy CPU −30–50% per device |
+| P | Proxy hosts (§8): lazy WireGuard peers, bounded CONNECT retries, a process-wide FindProviders2 page cache; memory limit up meanwhile | days–weeks | low–medium | proxy CPU −50–70% at the 10-29 load |
 
 **Path to 2×** (§5). The post-fix peak is about 225 of 312 logical CPUs
 (10-27 21:30Z). Carrying twice that at no more than 80% busy needs:
@@ -518,6 +535,8 @@ Effort is high.
 
 ### 3.9 Proxy hosts (crisp and fireside)
 
+§8 supersedes this subsection with a fuller measurement and code study.
+
 **Evidence:**
 - GC is about 68% of proxy CPU, because the heap is pinned against GOMEMLIMIT.
   GOMEMLIMIT is 90% of the warp block memoryLimit (warp/warpctl/run.go:2189).
@@ -644,3 +663,153 @@ CPU per unit of work:
    elsewhere.
 6. Proxy settings (memoryLimit, GOMAXPROCS, idle hold) and the spec for the
    new proxy hosts.
+7. Proxy code fixes from §8.6, in order: lazy WireGuard peers, bounded
+   CONNECT retries, the FindProviders2 page cache. Whether to raise the
+   proxy memoryLimit before they land. The restart reconnects each host's
+   hosted devices; on 10-29 the owner chose to wait the saturation out.
+
+## 8. Proxy hosts in depth (added 2026-10-30)
+
+Measured during the second saturation of 10-29: from 21:10Z both hosts sat at
+99.9% CPU, with load 80 on 24 cores. Sources:
+- perf on a crisp proxy process;
+- Mimir and Loki;
+- a code study of server/proxy, ../proxy, connect, sdk, userwireguard and
+  gvisor.
+
+File references are relative to the urnetwork root.
+
+### 8.1 What the CPU is doing
+
+- **The hosts are CPU-bound in Go, not the kernel:** user 92%, system 3%,
+  softirq 5%.
+- **One process at 2.35 cores:**
+  - GC is about 57%: background mark 27% and assists 30%. `mallocgc` is 34%
+    inclusive.
+  - The connect library is 58% inclusive. Inside it, in-process
+    FindProviders2 is 18%: Redis 15%, and gob decoding of client-score pages
+    12%.
+  - HTTPS CONNECT handling 6%, H1 transport 5%, blackhole detection 4%,
+    gVisor 4%.
+- **Useful work is small:** 881 active proxy sessions moved 0.66 MB/s
+  fleet-wide while 46 cores ran.
+- **Day over day:**
+  - devices +40% (20.3k → 28.4k);
+  - proxy CPU 3.4× (13 → 46 cores);
+  - allocation per process 3× (0.05 → 0.14 GB/s);
+  - GC 9× more often (every 27 s → every 3 s).
+
+### 8.2 Why: the processes live above their memory limit
+
+Per process: heap in use 5.56 GB + stacks 1.26 GB + runtime 0.17 GB ≈ 6.99 GB.
+GOMEMLIMIT is 6.82 GB, 90% of the warp memoryLimit (warp/warpctl/run.go:2189).
+The next-GC target (4.46 GB) sits below the live heap, so GC never stops, and
+only Go's 50% GC CPU limiter caps it. Cutting allocation barely helps until
+memory drops below the limit.
+
+| Owner, per process | Count | Heap | Stacks | Goroutines |
+|---|---|---|---|---|
+| WireGuard peers: every configured one, started on registration | ~41.3k | ~1.1 GB | ~0.45 GB | ~82.6k |
+| Hosted devices | ~1.43k | ~2.4 MB each | ~0.4 MB each | ~73–98 each |
+| Stuck HTTP CONNECTs | ~1.9k | ~60 MB | — | ~4k |
+
+**WireGuard peers follow signups, not use:**
+- The proxy registers every WG-configured client of its block
+  (server/proxy/server.go:886-941, 1021-1057).
+- userwireguard starts each peer at registration (device/uapi.go:412-413).
+- Each started peer holds 2 goroutines, queues of 1024/1024/128 slots, two
+  128-slot batch slices and 5 timers: about 26 KiB of heap and 11 KiB of
+  stack.
+- That is 824k peers across 20 processes. MaxPeers is 65,536 per device
+  (device/constants.go:39).
+
+**Idle devices keep everything:**
+- 12.7k of the 28.4k live devices were idle.
+- Each keeps its full state for 90 min (`ProxyDeviceIdleTimeout`,
+  server/proxy/proxy_device.go:868; 90 min since 6df7a6fab).
+- DoH keepalive pings count as activity, so the real hold is about 105 min.
+
+### 8.3 A CONNECT retry storm that has run for days
+
+- **The numbers:** 38.3k HTTP CONNECTs are in flight against 881 active
+  sessions, and `connect_dial_error` runs at 29k/s fleet-wide.
+- **The shape:** both grow linearly, by about 2k stuck CONNECTs and about 1k
+  errors/s per hour. They reset only when the proxies restart, as at 10-29
+  05:30Z, and have climbed again since.
+- **The cause:** ../proxy/http.go:380-398 retries a failed CONNECT dial about
+  every second until the client hangs up.
+  - It retries every error class: unauthorized, unknown device, NXDOMAIN,
+    policy reset.
+  - It never answers the client.
+  - Device creation has no per-id cooldown (server/proxy/proxy_device.go:375-464);
+    only WireGuard has one.
+- **The saturation's "panic" pages:** these are Redis deadline errors that
+  `HandleError` logs with a stack. In 400 sampled lines, 272 came from
+  `getProviderHardExclusions`, 90 from `RecordProviderSearchMatches` and 36
+  from loading client scores. All are inside the in-process FindProviders2.
+
+### 8.4 Allocation sources
+
+By first application caller of `mallocgc`, sampled for 15 s at 99 Hz:
+- **encoding/gob score decoding** (`decodeMap`, `decString`, `decAlloc`): the
+  largest source.
+- **Multi-client stats snapshots:** `windowStatsWithCoalesce`,
+  `packetStatsCounters.snapshot`, `unorderedClients`.
+- **Per-tick timers.** Every hosted device runs 1 s loops that each create a
+  new timer per tick: contract stats, the sdk contract-stats flush,
+  `IpAssoc`, event epoch, the scheduler-pause detector and the send-stall
+  watch. Blackhole detection adds one every 1.25 s. That is about 14k new
+  timers/s per process with zero traffic.
+- **Per-frame and per-packet work:**
+  - a 4-byte heap header per H1 frame;
+  - `flushDeliver` clones;
+  - IP path parses per packet;
+  - a WireGuard endpoint per datagram.
+- **Per CONNECT attempt:** `strings.SplitN` of the SNI, amplified by the retry
+  loop.
+
+### 8.5 FindProviders2 inside the proxy
+
+**Cadence:**
+- Each hosted window refreshes its exits on a 45–60 min rotation, idle
+  devices included.
+- Errors retry at 1→15 s even when the window is full.
+- Under timeouts that reaches about 190 calls/s per process *(inferred)*.
+
+**Cost per call:**
+- Each call loads max(10 × count, 1000) score rows, with count ≥ 20, though
+  windows ask for 1–4 candidates
+  (server/model/network_client_location_model.go:6252-6260, 6350-6355).
+- Each 200-row page is copied, SHA-256 checked and decoded by a new
+  `gob.Decoder` (server/model/network_client_score_cursor.go).
+
+**The cache opportunity:** pages are content-addressed, and every hosted
+session asks for location 0.0.0.0:0. A process-wide cache of decoded pages
+would almost always hit and could never be stale. None exists; the "5 s score
+cache" is test-only.
+
+### 8.6 Ranked proxy changes
+
+| # | Change | Expected | Risk | Effort |
+|---|---|---|---|---|
+| 1 | Lazy WireGuard peers: start queues and goroutines on the first handshake or server-initiated send, stop on key expiry; 256-slot queues | −1.0 GB heap, −0.45 GB stacks, −80k goroutines per process. On its own this takes the process out of the memory-limit regime (GC ≈1.3 → ≈0.3 cores per process) | start/stop races; a handoff initiation must start the peer | M: userwireguard/device |
+| 2 | Raise the proxy memoryLimit now, and revert after #1: crisp +4 GB per process, fireside +1.5 GB (its ceiling) | about −1 core per process, −10 to −12 cores per host | fireside RAM; the restart reconnects hosted devices | XS: warp config |
+| 3 | Bound CONNECT: answer at once on definitive failures (407/403/502); wait with `WaitForReady` instead of polling; back off 1→8 s within about 30 s, then 504; add a per-id creation cooldown | ends the 29k/s storm: about 5–15% CPU, 4k goroutines and 60 MB per process, plus the error-log flood | clients waiting on cold windows get a 504 | S–M: ../proxy/http.go, server/proxy/server.go, connect/tun.go |
+| 4 | FindProviders2: a process-wide LRU of decoded score pages keyed by slot, field, generation and checksum; hex `encodeUuid`; a hosted error-retry floor plus singleflight | −10–14 points of proxy CPU; most gob allocation gone | about 64 MB per process | M: server/model/network_client_score_* |
+| 5 | Cap hosted windows, for example quality 3 and speed 0 | prevents a 2.7× rise in per-device heartbeats, cpings and FP2 as windows refill from 2.25 to 6 clients | throughput per device | S: sdk policy |
+| 6 | Idle hold 90 → 30–45 min (identity TTL ≥ hold), don't count DoH keepalives as activity, or hibernate idle DeviceLocals | −0.5–1 GB per process, about −25% background work | re-mint churn on reopen | S/M |
+| 7 | Per-device loops: reuse timers, skip ticks with no pending work, `context.AfterFunc` for parked waiters; turn off the pause detector, heartbeat and outcome watch for hosted devices | −14k timers/s, about −34 goroutines per device, 3–6% CPU | low | M: connect |
+| 8 | Small fixes: `strings.Cut` for the SNI; borrowed IP parse in WG; reuse WG endpoints and frame-header scratch; skip gonet write deadlines; cache the uTLS spec; sample WG sessions without an `IpcGet` of 41k peers every 15 s; cache TLS keys by cert path | a few % | low | XS–S each |
+| 9 | GOMAXPROCS 8 → 3–4 per process (80 Ps on 24 cores today) | fewer continuous GC workers (about 20 → 8 cores per host), 5 fewer gVisor goroutines per device | burst latency | XS |
+| 10 | Host: SO_RCVBUF/SO_RCVBUFFORCE 4–8 MiB on the WireGuard socket (none is set today), and RPS on the single-queue Realtek NIC | fewer of the millions of UDP drops | low | XS: userwireguard/conn, xops |
+| — | The message pool cap (8 GiB, server/cli/proxy/main.go:26, 39-45) sits above GOMEMLIMIT and its free list is never trimmed | only 10 MB is retained today; cap it at about 512 MiB as a guard | low | XS |
+
+**Order:**
+- #2 is the immediate relief.
+- #1, #3 and #4 are the structural fixes. They make per-device cost scale with
+  use rather than signups and stop the storm.
+- With them, the four planned proxy hosts add real headroom instead of
+  absorbing GC.
+
+Estimates are inferred from the measurements above. Measure each one per
+block: GC share, CPU per live device, and the `connect_dial_error` rate.
