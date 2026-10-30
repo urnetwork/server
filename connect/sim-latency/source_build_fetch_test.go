@@ -47,6 +47,10 @@ func TestSourceBuildFetchDoesNotRequireMissingParentHistory(t *testing.T) {
 // A successful process exit cannot bless truncated stdout/stderr or retain
 // the temporary trust file when the bounded copy fails.
 func TestSourceBuildFetchRejectsSuccessfulTransportOutputOverflow(t *testing.T) {
+	settings := defaultSourceGitExecutionSettings()
+	if settings.MaximumDiagnosticBytes != 4*1024 {
+		t.Fatal("source fetch diagnostic default changed", settings.MaximumDiagnosticBytes)
+	}
 	gitPath, err := exec.LookPath("git")
 	if err != nil {
 		t.Fatal(err)
@@ -61,7 +65,7 @@ func TestSourceBuildFetchRejectsSuccessfulTransportOutputOverflow(t *testing.T) 
 		payload := filepath.Join(root, "transport-output")
 		size := maximumSourceConfigBytes + 1
 		if channel == "stderr" {
-			size = 4096 + 1
+			size = settings.MaximumDiagnosticBytes + 1
 		}
 		if err := os.WriteFile(payload, bytes.Repeat([]byte("x"), size), 0o600); err != nil {
 			t.Fatal(err)

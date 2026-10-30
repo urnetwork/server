@@ -112,7 +112,7 @@ func cloneSourceBuildRepository(ctx context.Context, repository, source, destina
 		}
 	}
 	fetch.Env = append(fetch.Env, "GIT_NO_LAZY_FETCH=1", "GIT_OPTIONAL_LOCKS=0")
-	fetch.Stdout, fetch.Stderr = &sourceBoundedWriter{limit: maximumSourceConfigBytes}, &sourceBoundedWriter{limit: 4096}
+	fetch.Stdout, fetch.Stderr = &sourceBoundedWriter{limit: maximumSourceConfigBytes}, &sourceBoundedWriter{limit: defaultSourceGitExecutionSettings().MaximumDiagnosticBytes}
 	if err := fetch.Run(); err != nil {
 		return fmt.Errorf("exact approved source fetch: %w", err)
 	}
