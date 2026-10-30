@@ -10,8 +10,8 @@ package model
 // settlement epoch's start block, so a tempo never spans two settlement
 // epochs and its index is epoch·⌈epoch blocks/360⌉ + tempos since the start.
 // Without any chain mirror the cadence falls back to the wall clock at 12
-// seconds a block. A validator head summary, once ingested, names the
-// validator's own tempo exactly (SnTopTempoSourceSummary).
+// seconds a block. Validator summaries authorize independent sequence cuts;
+// their delivery times never rebase this network-estimate cadence.
 
 import (
 	"context"
@@ -35,7 +35,7 @@ const (
 )
 
 const (
-	// the validator's own tempo, from its head summary
+	// legacy receipt-time estimate source; never used for new estimates
 	SnTopTempoSourceSummary = "summary"
 	// the chain head the st sync reads
 	SnTopTempoSourceChain = "chain"

@@ -179,10 +179,13 @@ The app presentation (the Protocol tab, the 200 line, the claim prompt on Earnin
 
 ### 5.8 Exact replica for claimed fleets
 
-- **Inputs:** the trail hops of each tempo, from the indexed hop table (§8).
-- **Tempo boundaries:** the validator's own cut manifests, which it uploads to `/sn/attempt-artifact`.
-- **Arithmetic:** the validator's exact integer arithmetic, imported from sn as a package (design question 8). EMA state is persisted.
-- **Check:** the result is compared with the validator's published head result each tempo (§6.3).
+- **Inputs:** the complete record/proof streams referenced by the signed v2 head summary, plus its historical eligible client-to-fleet census. The indexed hop table remains an input to network estimates; it cannot establish an exact fleet replica.
+- **Boundaries:** the authenticated cut's egress sequence cursor through its terminal sequence. Neither summary receipt time nor signing time defines the cut. The referenced objects use `/sn/attempt-artifact`.
+- **Arithmetic:** the validator's exact arithmetic and signed policy, imported from sn (design question 8). Persist the exact EMA with its validator, native epoch and measurement hash. Replay each committed measurement in predecessor order; an intentionally skipped native epoch is not an empty measurement.
+- **Availability:** return `replica_score: null` until complete global evidence and a valid predecessor or an explicitly signed empty-prior first measurement are available. An empty predecessor alone does not rule out migrated EMA state. V1 summaries and legacy approximate EMA state cannot bootstrap exact replay. V2 scopes private census data to its owning operator, so a server receiving only part of a multi-operator result cannot reproduce its global prefix split. Published validator scores remain available.
+- **Check:** compare only a fully replayed result with the corresponding signed head result (§6.3). Missing evidence must not produce a zero score or an agreement measurement.
+
+The wire contract and server-before-validator rollout are specified in [head-summary-v2.md](../sn/docs/spec/head-summary-v2.md).
 
 ## 6. Ground truth: optional data
 
@@ -286,20 +289,23 @@ The route stays. It is computed from the same snapshot, so the ur.io Top 200 pag
 
 | Table | Holds |
 |---|---|
-| `sn_top_snapshot` | id, tempo index, block, computed_at, settlement epoch, cutoffs, counts, flags |
+| `sn_top_snapshot` | id, tempo index, block, computed_at, settlement epoch, cutoffs, counts, flags, independent exact-replica checkpoint |
 | `sn_top_network` | per network per snapshot: position, EMA, raw, prefixes, shared, presence, margin, label, gates |
-| `sn_top_fleet` | per fleet per snapshot: fleet key, UID, hotkey, networks, replica EMA, validator score, rank and selection, incentive |
+| `sn_top_fleet` | per fleet per snapshot: fleet key, UID, hotkey, networks, replica EMA and availability, validator score, rank and selection, incentive |
 | `sn_top_ema_state` | each unit's current EMA and the tempo it was last folded |
 | `sn_trail_hop` | one row per trail hop: tempo index, attempt id, hop index, client_id, network_id, prefix hash, complete. Written when a trail completes. `verify_trail` keeps hops as JSON with no time index. |
 
-**Task:** one taskworker run per tempo, after the epoch boundary is finalized:
+**Task:** periodic checks publish one network snapshot per completed tempo. Catch-up processes the oldest pending tempo before advancing again:
+
 1. Pin the settlement epoch's prefix hashes.
-2. Compute presence for the tempo.
+2. Compute presence from distinct connected minutes for the tempo.
 3. Fold in complete-trail hops.
 4. Compute the claim counts, raw scores and EMA.
 5. Rank and label.
 6. Attach binding data, the validator summary and incentive.
 7. Write the snapshot and agreement metrics.
+
+The network estimate retains its established chain or clock cadence when summaries arrive late. Recovery folds each retained interval with that interval's evidence; it does not skip directly to the newest interval or apply repeated decay while discarding intermediate contributions. Expired evidence stops recovery instead of manufacturing empty intervals. Exact fleet replay advances independently in bounded passes, and late summaries may refresh fleet state without folding the network estimate twice.
 
 **Retention:** 7 days of per-tempo snapshots (about 140), plus 90 days of each network's daily rank and score in `sn_top_network_daily` for progress charts (Q11).
 

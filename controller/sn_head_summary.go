@@ -129,6 +129,9 @@ func snUploadHeadSummary(ctx context.Context, cfg *StConfig, clientSession *sess
 	if err != nil {
 		return "", err
 	}
+	if summary.Schema == headsummary.SchemaV2 && summary.EvidenceRecipient != cfg.NoId {
+		return "", fmt.Errorf("%w: evidence is addressed to another operator", ErrSnHeadSummaryNotAccepted)
+	}
 	// the decoder accepted the hotkey's form
 	hotkey, err := headsummary.ParseHex32(summary.ValidatorHotkey)
 	if err != nil {
@@ -168,7 +171,8 @@ func snStoredHeadSummary(summary *SnHeadSummary, body []byte, receivedAt time.Ti
 		NativeSnapshotBlock: summary.NativeSnapshotBlock, EvmSnapshotBlock: summary.EVMSnapshotBlock,
 		SettlementEpoch: summary.SettlementEpoch, PolicyId: summary.PolicyID,
 		MeasurementArtifactHash: summary.MeasurementArtifactHash, MaximumHeadFleets: summary.MaximumHeadFleets,
-		EntryCount: len(summary.Entries), SelectedCount: len(summary.SelectedUIDs),
+		ReplicaGenesis: summary.Schema == headsummary.SchemaV2 && summary.PreviousMeasurementArtifactHash == "" && summary.EvidenceEmptyPrior,
+		EntryCount:     len(summary.Entries), SelectedCount: len(summary.SelectedUIDs),
 		SigningHash: summary.SigningHash, ReceivedAt: receivedAt, Body: append([]byte(nil), body...),
 	}
 	var err error

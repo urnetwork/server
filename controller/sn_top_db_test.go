@@ -183,7 +183,7 @@ func TestComputeSnTopSnapshotDb(t *testing.T) {
 		a2 := fixture.provider(t, networkA, "198.51.100.17", half)
 		b1 := fixture.provider(t, networkB, "198.51.100.12", full)
 		// C provides but its egress never attributes to it alone
-		fixture.provider(t, networkC, "", full)
+		c1 := fixture.provider(t, networkC, "", full)
 		d1 := fixture.provider(t, networkD, "198.51.100.41", full)
 		// the cohort measures A's and D's providers, not B's
 		model.Testing_AddVerifyCohortMembers(ctx, fixture.cfg.DeploymentKey(), snTopDbEpoch, []server.Id{a1, a2, d1})
@@ -262,20 +262,22 @@ func TestComputeSnTopSnapshotDb(t *testing.T) {
 		// the next tempo: B's provider loses eligibility and complete trails
 		// showed A's provider in six prefixes
 		model.RemoveVerifyEgressForClient(ctx, b1)
+		fixture.start = fixture.start.Add(model.SnTopTempoDuration)
+		fixture.end = fixture.end.Add(model.SnTopTempoDuration)
 		fixture.hops(a1, networkA, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6)
+		fixture.hops(d1, networkD, 0xd1, 0xd2)
+		model.AddClientReliabilityStatsRange(ctx, networkA, a2, [32]byte{0xa2}, fixture.start, fixture.start.Add(35*time.Minute), &model.ClientReliabilityStats{ConnectionEstablishedCount: 1, ProvideEnabledCount: 1, ReceiveMessageCount: 1, ReceiveByteCount: 1024, SendMessageCount: 1, SendByteCount: 1024})
+		model.AddClientReliabilityStatsRange(ctx, networkC, c1, [32]byte{0xc1}, fixture.start, fixture.end.Add(-time.Minute), &model.ClientReliabilityStats{ConnectionEstablishedCount: 1, ProvideEnabledCount: 1, ReceiveMessageCount: 1})
 		fixture.client.state = &StEpochState{
 			Epoch: snTopDbEpoch, EpochStartBlock: snTopDbEpochStart, TEpochBlocks: 50400,
-			HeadBlock: snTopDbHead + 360, HeadBlockTime: fixture.anchor,
+			HeadBlock: snTopDbHead + 360, HeadBlockTime: fixture.anchor.Add(model.SnTopTempoDuration),
 		}
 		snTopDbResetChainState()
-		// a fold within half a tempo of the last waits
+		// An anchor refresh cannot advance time or refold a completed interval.
 		recent, err := ComputeSnTopSnapshot(&ComputeSnTopSnapshotArgs{}, anonymous)
 		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, recent.Skipped, "recent")
-		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `UPDATE sn_top_snapshot SET computed_at = computed_at - interval '72 minutes'`))
-		})
-		second, err := ComputeSnTopSnapshot(&ComputeSnTopSnapshotArgs{}, anonymous)
+		connect.AssertEqual(t, recent.Skipped, "folded")
+		second, err := computeSnTopSnapshotAt(&ComputeSnTopSnapshotArgs{}, anonymous, fixture.anchor.Add(model.SnTopTempoDuration))
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, second.Skipped, "")
 		connect.AssertEqual(t, second.TempoIndex, int64(snTopDbEpoch*140+5))
@@ -347,10 +349,11 @@ func TestComputeSnTopSnapshotDb(t *testing.T) {
 		boardC, err := GetSnTop(&SnTopArgs{}, sessionC)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, boardC.Me, (*SnTopRow)(nil))
-		// B: ranked by its decaying score, measurable no more
+		// B has no reliability observations in the new interval and is
+		// ranked only by its decaying prior score.
 		meB, err := GetSnTopMe(sessionB)
 		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, meB.Me.NotMeasurableReason, model.SnTopReasonSharedEgress)
+		connect.AssertEqual(t, meB.Me.NotMeasurableReason, model.SnTopReasonNotProviding)
 
 		// /sn/head reads the same snapshot
 		headA, err := SnHead(sessionA)
@@ -481,17 +484,17 @@ func TestComputeSnTopSnapshotClaimedFleetDb(t *testing.T) {
 		result, err := ComputeSnTopSnapshot(&ComputeSnTopSnapshotArgs{}, anonymous)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, result.Skipped, "")
-		// the validator's own tempo, from its summary
-		connect.AssertEqual(t, result.TempoSource, model.SnTopTempoSourceSummary)
-		connect.AssertEqual(t, result.TempoIndex, int64(4321))
+		// The estimate cadence is independent of the summary's native epoch.
+		connect.AssertEqual(t, result.TempoSource, model.SnTopTempoSourceChain)
+		connect.AssertEqual(t, result.TempoIndex, int64(snTopDbEpoch*140+4))
 
 		board, err := GetSnTop(&SnTopArgs{}, sessionA)
 		connect.AssertEqual(t, err, nil)
 		snapshot := board.Snapshot
-		connect.AssertEqual(t, snapshot.TempoIndex, int64(4321))
+		connect.AssertEqual(t, snapshot.TempoIndex, int64(snTopDbEpoch*140+4))
 		connect.AssertEqual(t, snapshot.ClaimedFleets, 1)
 		connect.AssertEqual(t, snapshot.OpenSeats, 199)
-		connect.AssertEqual(t, *snapshot.ClaimedCutoff, 2.0)
+		connect.AssertEqual(t, snapshot.ClaimedCutoff, (*float64)(nil))
 		connect.AssertEqual(t, snapshot.ValidatorSummaryAt.Equal(fixture.end), true)
 		connect.AssertEqual(t, snapshot.IncentiveAt.Equal(fixture.anchor.Add(-5*time.Minute)), true)
 		connect.AssertEqual(t, len(board.Rows), 2)
@@ -508,7 +511,7 @@ func TestComputeSnTopSnapshotClaimedFleetDb(t *testing.T) {
 		connect.AssertEqual(t, fleet.Uid, 42)
 		connect.AssertEqual(t, fleet.Generation, uint64(1))
 		connect.AssertEqual(t, fleet.ValidToEpoch, uint64(12))
-		snTopDbNear(t, fleet.ReplicaScore, 2)
+		connect.AssertEqual(t, fleet.ReplicaScore, (*float64)(nil))
 		connect.AssertEqual(t, *fleet.ValidatorScore, 2.0)
 		connect.AssertEqual(t, *fleet.ValidatorRank, 1)
 		connect.AssertEqual(t, *fleet.ValidatorRankOf, 1)
@@ -543,9 +546,9 @@ func TestComputeSnTopSnapshotClaimedFleetDb(t *testing.T) {
 		connect.AssertEqual(t, headD.Rank, 1)
 		connect.AssertEqual(t, headD.RankEstimate, 1)
 
-		// the replica's exact state is kept for the next tempo
+		// An unsigned summary adapter cannot seed exact state.
 		_, priorFleets := model.GetSnTopEmaState(ctx)
-		connect.AssertEqual(t, priorFleets[key].EmaExact.Cmp(big.NewRat(2, 1)), 0)
+		connect.AssertEqual(t, len(priorFleets), 0)
 	})
 }
 

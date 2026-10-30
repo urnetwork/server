@@ -253,6 +253,25 @@ func snTopHeadPinKey(clientId server.Id, window string) string {
 // candidate and is absent. The reads are pipelined 512 providers at a time.
 func GetVerifyHeadPrefixPins(ctx context.Context, clientIds []server.Id, settings *VerifySettings) (window string, pins map[server.Id][32]byte) {
 	window = verifyHeadHashWindow(ctx, settings)
+	return window, getVerifyHeadPrefixPins(ctx, clientIds, settings, window, true)
+}
+
+// GetSnTopPrefixPins reads the estimate interval's settlement pin, preserving
+// retained pins for providers that are no longer eligible. Historical windows
+// cannot acquire a new pin from today's egress address.
+func GetSnTopPrefixPins(ctx context.Context, clientIds []server.Id, settings *VerifySettings, tempo SnTopTempo) map[server.Id][32]byte {
+	current := verifyHeadHashWindow(ctx, settings)
+	window := fmt.Sprintf("e%d", tempo.SettlementEpoch)
+	if tempo.Source == SnTopTempoSourceClock {
+		// Without a historical epoch mapping, only the original clock window
+		// can supply a retained pin. Today's epoch or IP cannot fill that gap.
+		window = fmt.Sprintf("h%d", tempo.EndTime.Add(-time.Nanosecond).Unix()/int64(verifyHeadHashFallbackWindow/time.Second))
+	}
+	return getVerifyHeadPrefixPins(ctx, clientIds, settings, window, window == current)
+}
+
+// getVerifyHeadPrefixPins owns the Redis pipelines for one explicit window.
+func getVerifyHeadPrefixPins(ctx context.Context, clientIds []server.Id, settings *VerifySettings, window string, allowLive bool) (pins map[server.Id][32]byte) {
 	pins = map[server.Id][32]byte{}
 	if len(clientIds) == 0 {
 		return
@@ -292,7 +311,7 @@ func GetVerifyHeadPrefixPins(ctx context.Context, clientIds []server.Id, setting
 					unpinned = append(unpinned, clientId)
 				}
 			}
-			if len(unpinned) == 0 {
+			if len(unpinned) == 0 || !allowLive {
 				continue
 			}
 

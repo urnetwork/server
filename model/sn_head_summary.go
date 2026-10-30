@@ -39,7 +39,10 @@ type SnHeadSummary struct {
 	PolicyId                uint64
 	PolicyHash              [32]byte
 	MeasurementArtifactHash string
-	MaximumHeadFleets       uint16
+	// An authenticated v2 empty-prior marker indexes bootstrap candidates.
+	// Replay still verifies the canonical body before accepting this hint.
+	ReplicaGenesis    bool
+	MaximumHeadFleets uint16
 	// the eligible head UIDs: a rank's "of"
 	EntryCount    int
 	SelectedCount int
@@ -76,9 +79,9 @@ func PutSnHeadSummary(ctx context.Context, summary *SnHeadSummary) bool {
 					netuid, validator_hotkey, native_epoch, native_snapshot_block, native_snapshot_hash,
 					evm_snapshot_block, evm_snapshot_hash, settlement_epoch, policy_id, policy_hash,
 					measurement_artifact_hash, validator_uid, maximum_head_fleets, entry_count, selected_count,
-					signed_at, signing_hash, received_at, body
+					signed_at, signing_hash, received_at, body, replica_genesis
 				)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
 				ON CONFLICT (netuid, validator_hotkey, native_epoch) DO UPDATE
 				SET
 					native_snapshot_block = EXCLUDED.native_snapshot_block,
@@ -96,13 +99,14 @@ func PutSnHeadSummary(ctx context.Context, summary *SnHeadSummary) bool {
 					signed_at = EXCLUDED.signed_at,
 					signing_hash = EXCLUDED.signing_hash,
 					received_at = EXCLUDED.received_at,
-					body = EXCLUDED.body
+					body = EXCLUDED.body,
+					replica_genesis = EXCLUDED.replica_genesis
 				WHERE sn_head_summary.native_snapshot_block < EXCLUDED.native_snapshot_block
 			`,
 			int(summary.Netuid), summary.ValidatorHotkey[:], int64(summary.NativeEpoch), int64(summary.NativeSnapshotBlock), summary.NativeSnapshotHash[:],
 			int64(summary.EvmSnapshotBlock), summary.EvmSnapshotHash[:], int64(summary.SettlementEpoch), int64(summary.PolicyId), summary.PolicyHash[:],
 			summary.MeasurementArtifactHash, int(summary.ValidatorUid), int(summary.MaximumHeadFleets), summary.EntryCount, summary.SelectedCount,
-			summary.SignedAt.UTC(), summary.SigningHash, summary.ReceivedAt.UTC(), summary.Body,
+			summary.SignedAt.UTC(), summary.SigningHash, summary.ReceivedAt.UTC(), summary.Body, summary.ReplicaGenesis,
 		))
 		if tag.RowsAffected() != 1 {
 			return
@@ -135,12 +139,44 @@ func PutSnHeadSummary(ctx context.Context, summary *SnHeadSummary) bool {
 // GetLatestSnHeadSummary returns the stored summary with the newest native
 // epoch for netuid, of validatorHotkey when it is given, or nil.
 func GetLatestSnHeadSummary(ctx context.Context, netuid uint16, validatorHotkey *[32]byte) *SnHeadSummary {
+	return getSnHeadSummary(ctx, netuid, validatorHotkey, nil, nil, false, false)
+}
+
+// GetNextSnHeadSummary reads the earliest retained signed transition after the
+// checkpoint, bounded by the target summary observed by this snapshot task.
+// A nil checkpoint selects a signed v2 genesis, bypassing legacy history only
+// when the validator explicitly starts a new measurement namespace.
+func GetNextSnHeadSummary(ctx context.Context, netuid uint16, validatorHotkey [32]byte, after *uint64, through uint64) *SnHeadSummary {
+	return getSnHeadSummary(ctx, netuid, &validatorHotkey, after, &through, true, after == nil)
+}
+
+// getSnHeadSummary owns one connection for both the header and its fleet rows.
+func getSnHeadSummary(ctx context.Context, netuid uint16, validatorHotkey *[32]byte, after, through *uint64, oldest bool, genesis bool) *SnHeadSummary {
 	var summary *SnHeadSummary
 	server.Db(ctx, func(conn server.PgConn) {
 		summary = nil
 		var hotkeyArg []byte
 		if validatorHotkey != nil {
 			hotkeyArg = validatorHotkey[:]
+		}
+		var afterArg, throughArg *int64
+		if after != nil {
+			value := int64(*after)
+			afterArg = &value
+		}
+		if through != nil {
+			value := int64(*through)
+			throughArg = &value
+		}
+		order := ` ORDER BY native_epoch DESC, validator_hotkey LIMIT 1`
+		if oldest {
+			order = ` ORDER BY native_epoch ASC, validator_hotkey LIMIT 1`
+		}
+		filter := ""
+		if genesis {
+			// The partial index bounds bootstrap discovery independently of the
+			// retained bodies' sizes. Full authentication follows in the caller.
+			filter = ` AND replica_genesis = true`
 		}
 		rows, err := conn.Query(
 			ctx,
@@ -149,13 +185,13 @@ func GetLatestSnHeadSummary(ctx context.Context, netuid uint16, validatorHotkey 
 					validator_hotkey, native_epoch, native_snapshot_block, native_snapshot_hash,
 					evm_snapshot_block, evm_snapshot_hash, settlement_epoch, policy_id, policy_hash,
 					measurement_artifact_hash, validator_uid, maximum_head_fleets, entry_count, selected_count,
-					signed_at, signing_hash, received_at, body
+					signed_at, signing_hash, received_at, body, replica_genesis
 				FROM sn_head_summary
 				WHERE netuid = $1 AND ($2::bytea IS NULL OR validator_hotkey = $2)
-				ORDER BY native_epoch DESC, validator_hotkey
-				LIMIT 1
-			`,
-			int(netuid), hotkeyArg,
+					AND ($3::bigint IS NULL OR $3 < native_epoch)
+					AND ($4::bigint IS NULL OR native_epoch <= $4)
+			`+filter+order,
+			int(netuid), hotkeyArg, afterArg, throughArg,
 		)
 		server.WithPgResult(rows, err, func() {
 			if !rows.Next() {
@@ -169,7 +205,7 @@ func GetLatestSnHeadSummary(ctx context.Context, netuid uint16, validatorHotkey 
 				&hotkey, &nativeEpoch, &nativeBlock, &nativeHash,
 				&evmBlock, &evmHash, &settlementEpoch, &policyId, &policyHash,
 				&summary.MeasurementArtifactHash, &validatorUid, &maximumHeadFleets, &summary.EntryCount, &summary.SelectedCount,
-				&summary.SignedAt, &summary.SigningHash, &summary.ReceivedAt, &summary.Body,
+				&summary.SignedAt, &summary.SigningHash, &summary.ReceivedAt, &summary.Body, &summary.ReplicaGenesis,
 			))
 			summary.ValidatorHotkey, summary.NativeSnapshotHash, summary.EvmSnapshotHash, summary.PolicyHash = [32]byte(hotkey), [32]byte(nativeHash), [32]byte(evmHash), [32]byte(policyHash)
 			summary.NativeEpoch, summary.NativeSnapshotBlock, summary.EvmSnapshotBlock = uint64(nativeEpoch), uint64(nativeBlock), uint64(evmBlock)

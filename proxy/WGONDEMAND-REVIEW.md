@@ -22,7 +22,7 @@ Each relevant fix was selectively reverted with a temporary Go overlay while ret
 | Selective regression overlays, including update-only IPC removal and moved-address attachment | Failed on the intended assertions |
 | Formatting and `git diff --check` | Passed |
 
-Database-backed integration, the long soak, mixed eager/on-demand deployment handoff and production memory/CPU measurements were not rerun. The parallel 24-hour commit review also found four separate server issues in SN Top presence/cut/EMA calculations and CONNECT setup budgeting; those are outside this WireGuard fix and remain unfixed.
+The original WireGuard validation did not rerun the long soak, mixed eager/on-demand deployment handoff or production memory/CPU measurements. The four separate server findings from the parallel commit review are addressed in the server follow-up below, including database-backed regression coverage.
 
 The updated [design](/Users/brien/urnetwork/server/proxy/WGONDEMAND.md) describes the synchronization and removes the incorrect orphan-lifetime claim. The original review below is preserved as the pre-fix record; its line references and validation results refer to the revisions listed there.
 
@@ -107,3 +107,48 @@ Reviewed [server/proxy/WGONDEMAND.md](/Users/brien/urnetwork/server/proxy/WGONDE
 The review tests are retained in [the proxy reproduction file](/private/tmp/wgondemand-review-c_n__uic/proxy/wg_review_regression_test.go) and [the device reproduction file](/private/tmp/wgondemand-review-c_n__uic/userwireguard/device/peer_review_regression_test.go). Run them from their respective directories with `go test -race -count=1 -timeout=60s -run '^TestReview' -v .` (use `./device` from the userwireguard module root). The temporary device source has one scheduling hook before `handlePeerPostConfig`; the removal test uses that hook to force the interleaving. The readiness test uses the existing allowed-IP mutex. The stale-authorization test wraps the real proxy handler with channels after its lookup. None depends on sleeps or probabilistic scheduling to trigger the failure.
 
 No implementation changes or commits were made. Database-backed server integration tests, the long soak, and mixed eager-to-on-demand deployment handoff were not rerun. The design's production memory/CPU estimates were not independently remeasured. Each fix should include a permanent deterministic regression that fails without the fix and passes with it.
+
+
+**Server fix follow-up, 2026-10-30.** The four separate findings below have been addressed following `connect/CODESTYLE.md`, with deterministic regressions.
+
+- **Presence:** count distinct reliability minutes, so multiple addresses in one minute cannot inflate connection coverage.
+- **Evidence:** network estimates retain their established cadence. Exact fleet scores use signed v2 cut references, complete record/proof replay and the historical eligible binding census. The producer sends each operator only its own private census. Bootstrap requires an explicitly signed empty prior; migrated or approximate prior state cannot seed an exact replica.
+- **Recovery:** fold the oldest pending network interval with its own evidence and retained prefix pins. Fleet EMA advances separately through authenticated measurement predecessors in bounded batches. Missing or expired evidence never becomes an empty fold. Late summaries and recovered object reads can finish the replica without changing network EMA; retained v1 history cannot obstruct a valid fresh bootstrap.
+- **CONNECT:** apply the request deadline to caller-lock and plan admission, real Redis socket reads, shared device-construction waits, route readiness and dialing. Construction remains owned and joined by the manager, so one canceled caller does not stop healthy siblings. Preserve the synchronous legacy open path and failure cooldown. Ordinary HTTP and SOCKS also receive bounded setup contexts.
+
+`replica_score` is now nullable in the API and TypeScript bindings; the Go SDK exposes `HasReplicaScore`. A verified zero remains distinguishable from unavailable evidence. Published validator scores remain available when exact replay is unavailable.
+
+**Regression evidence.** The permanent presence test failed before the fix with 1 instead of 0.5. Delayed delivery moved the original interval by 20 minutes. The missed-tempo database test skipped directly to index 984 instead of processing 982, 983 and 984 with contributions 2, 0 and 4. Both composed CONNECT creator/waiter tests fail against server `a5f7685fa`; disabling only deadline-aware Redis also fails the real held-socket test. Those overlays are in `/private/tmp/connect-budget-regression.JWwfl6`. Removing only the producer's prior-state check fails `TestHeadSummaryEvidenceDoesNotInventEmptyMigratedPrior` using `/tmp/sn-head-empty-prior.QYD608/overlay.json`.
+
+The real-cut regression replays two complete signed trails. Its sequence cursor excludes the first trail, a historical generation change excludes one hop from the second, and the result is six credited prefixes plus a live zero identity. Moving receipt by five days preserves that result. Missing/corrupt proofs, unknown signing keys, incomplete global evidence and missing predecessors produce no exact score.
+
+**Validation:**
+
+| Check | Result |
+| --- | --- |
+| CONNECT/admission, shared construction, cancellation, cooldown and legacy ownership regressions | Passed under `-race` |
+| Existing HTTP refusal, SNI, route-readiness and plan-cache integration tests | Passed under `-race` with local fixtures |
+| SN Top presence, chronology, historical pins, signed replay, late recovery and nullable storage regressions | Passed under `-race` with isolated PostgreSQL/Redis fixtures |
+| SN protocol and producer tests, including unchanged v1 golden signatures and migrated-prior rejection | Passed under `-race` |
+| API leaderboard and signed-summary HTTP routes | Passed under `-race` with local fixtures |
+| SDK SN Top decoding/round trips, TypeScript contract tests, OpenAPI spec tests and generated-client check | Passed |
+| Selective pre-fix regressions | Failed on the intended assertions |
+| Formatting and whitespace checks | Passed |
+
+**Rollout and limits.** Apply the additive server migration before deploying the server, then deploy the v2-capable server before the validator producer. V1 remains readable. Exact replay requires complete global evidence and authenticated prior history; missing history, migrated prior state or a partial multi-operator census leaves the replica unavailable. The full repository suites, production rollout, long soak and production resource measurements were not run.
+
+**Parallel 24-hour review — separate server findings**
+
+The parallel review covered October 29, 2026 at 05:11:17 UTC through October 30 at 05:11:17 UTC: 134 server, 24 connect, 4 proxy and 19 SDK commit entries, including merge changes. The four remaining findings were in server; no additional connect or SDK defect was identified in that review.
+
+1. **[P2] Count distinct reliability minutes when computing presence.** Server `ce5def2bf`, `GetSnTopPresence` in [model/sn_top_model.go](/Users/brien/urnetwork/server/model/sn_top_model.go). The table key includes an address hash, so `COUNT(*)` counts multiple rows for one client's minute. Two addresses during 36 of a tempo's 72 minutes produced presence 1 instead of 0.5, inflating projected credit and shared-prefix eligibility. The permanent database reproduction is [sn_top_presence_db_test.go](/Users/brien/urnetwork/server/controller/sn_top_presence_db_test.go).
+
+2. **[P2] Keep evidence selection independent of summary delivery.** Server `ce5def2bf`, `snTopFoldTempo` in [sn_top_controller.go](/Users/brien/urnetwork/server/controller/sn_top_controller.go). It derived the scoring interval from `ReceivedAt`. The same signed native epoch delivered 20 minutes later changed the interval from [10:48,12:00) to [11:08,12:20), selecting different trail and reliability records. Receipt time does not authenticate the validator's evidence cut. Exact fleet replay also requires the cut's historical eligible binding census; today's membership cannot supply it.
+
+3. **[P2] Replay missed scoring periods before advancing EMA state.** Server `ce5def2bf`, `ComputeSnTopSnapshot` and [sn_top_projection.go](/Users/brien/urnetwork/server/model/sn_top_projection.go). A task outage skipped to the newest tempo and applied one fold, then marked the state current. Starting at 1 in tempo 10, three actual zero-contribution folds through tempo 13 require 0.421875; one fold produced 0.75. Recovery must also retain nonzero contributions in missed periods. Validator epochs in which no measurement was committed are distinct from measurements the server missed.
+
+4. **[P2] Apply the CONNECT deadline to admission and device setup.** Server `df27527859` with proxy `592f644e`, `httpServer.newHttpProxy` in [server/proxy/server.go](/Users/brien/urnetwork/server/proxy/server.go) and `ProxyDeviceManager.OpenProxyDevice` in [proxy_device.go](/Users/brien/urnetwork/server/proxy/proxy_device.go).
+
+   Bounded CONNECT shipped: the library creates a deadline, with a 30-second default, before calling the dial callback synchronously. The server callback used manager/listener contexts for the caller-lock read and feature lookup, then opened a device without the request context. The constructor and callers waiting for an existing construction could therefore outlive the CONNECT budget. Only the later route wait and network dial honored that deadline; the handler could not send 504 while stuck in setup.
+
+   The library's `TestConnectBudgetBoundsBlockedDial` passes because its callback explicitly waits on `ctx.Done()`. The composed server reproduction holds the real callback's device builder on a channel, uses a one-second budget and advances two seconds under `testing/synctest`: before the fix, no response arrives until the builder is released. This was reconfirmed against server `a5f7685fa` and proxy `584eac3`. Permanent creator and coalesced-waiter cases are in [http_connect_budget_test.go](/Users/brien/urnetwork/server/proxy/http_connect_budget_test.go); admission and shared-owner isolation have adjacent regression files.

@@ -387,7 +387,8 @@ func TestSnTopProjectionSoloScoreAndClaimedFleets(t *testing.T) {
 	connect.AssertEqual(t, projection.ClaimedFleets, 1)
 	connect.AssertEqual(t, projection.OpenSeats, 199)
 	connect.AssertEqual(t, len(projection.Fleets), 1)
-	// no trail hops: the fleet's exact replica is 0 and it is not selected
+	// No authenticated cut: no exact value or claimed floor is available.
+	connect.AssertEqual(t, projection.Fleets[0].ReplicaAvailable, false)
 	connect.AssertEqual(t, projection.Fleets[0].ReplicaExact.Sign(), 0)
 	connect.AssertEqual(t, projection.Fleets[0].ReplicaSelected, false)
 	if projection.ClaimedCutoff != nil {
@@ -412,7 +413,9 @@ func TestSnTopProjectionFleetReplicaIsExact(t *testing.T) {
 		{Key: keyA, ClientIds: []server.Id{clientA}, NetworkIds: []server.Id{networkA}},
 		{Key: keyB, ClientIds: []server.Id{clientB}, NetworkIds: []server.Id{networkB}},
 	}
-	first := ProjectSnTop(&SnTopProjectionInput{TempoIndex: 1, Providers: []SnTopProvider{providerA, providerB}, Fleets: fleets})
+	firstReplica, err := FoldSnTopReplica(map[SnTopFleetKey]map[[32]byte]bool{keyA: {shared: true, onlyA: true}, keyB: {shared: true}}, nil, 1, SnTopHeadSeats, GetSnTopHeadMath())
+	connect.AssertEqual(t, err, nil)
+	first := ProjectSnTop(&SnTopProjectionInput{TempoIndex: 1, Providers: []SnTopProvider{providerA, providerB}, Fleets: fleets, Replica: firstReplica})
 	connect.AssertEqual(t, first.FleetStates[keyA].EmaExact.Cmp(big.NewRat(3, 2)), 0)
 	connect.AssertEqual(t, first.FleetStates[keyB].EmaExact.Cmp(big.NewRat(1, 2)), 0)
 	connect.AssertEqual(t, len(first.Fleets), 2)
@@ -424,11 +427,14 @@ func TestSnTopProjectionFleetReplicaIsExact(t *testing.T) {
 	connect.AssertEqual(t, *first.ClaimedCutoff, 0.5)
 
 	// next tempo, no hops: both decay by exactly ¾
+	secondReplica, err := FoldSnTopReplica(map[SnTopFleetKey]map[[32]byte]bool{keyA: {}, keyB: {}}, first.FleetStates, 2, SnTopHeadSeats, GetSnTopHeadMath())
+	connect.AssertEqual(t, err, nil)
 	second := ProjectSnTop(&SnTopProjectionInput{
 		TempoIndex:  2,
 		Providers:   []SnTopProvider{snTopProvider(clientA, networkA, onlyA, 1, true), snTopProvider(clientB, networkB, shared, 1, true)},
 		Fleets:      fleets,
 		PriorFleets: first.FleetStates,
+		Replica:     secondReplica,
 	})
 	connect.AssertEqual(t, second.FleetStates[keyA].EmaExact.Cmp(big.NewRat(9, 8)), 0)
 	connect.AssertEqual(t, second.FleetStates[keyB].EmaExact.Cmp(big.NewRat(3, 8)), 0)
