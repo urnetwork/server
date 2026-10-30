@@ -35,9 +35,9 @@
       "active": true
     },
     "latest_durable_queue_snapshot": {
-      "at": "2026-10-30T15:21:50.124677571Z",
-      "total": 14,
-      "queued": 10,
+      "at": "2026-10-30T19:22:48.694323482Z",
+      "total": 15,
+      "queued": 11,
       "succeeded": 4,
       "running": 0,
       "failed": 0,
@@ -45,8 +45,12 @@
       "worker_slot_unleased": true,
       "last_job_started_at": "2026-10-30T13:50:40.962535Z",
       "last_job_completed_at": "2026-10-30T15:20:43.662409Z",
-      "path": "/var/lib/urnetwork/competition-production-r2-20261029-v1/goal-continuation-20261030.q0RjZdLE/AFTER-FOURTH-SNAPSHOT.private.json",
-      "sha256": "c275d01574c39aeaa6dbe0731dee6fb9579ccd9bec3f44019643d4959984f483",
+      "path": "/var/lib/urnetwork/competition-production-r2-20261029-v1/readonly-before-g2-v3-20261030.ddquolSn/audit.private.json",
+      "sha256": "af934e6aaad3a6e6a35335e4aa4253fafa98802a40ecce6d00bb168c5c89591a",
+      "database_transaction_read_only": true,
+      "database_transaction_isolation": "repeatable read",
+      "database_version_observed": 899,
+      "audit_scope_warning": "Queue, hold, host and deployed-version facts only. This historical auditor knows migration identities through 892; its six unknown later entries 893–898 are not evidence of corruption or a current-schema qualification.",
       "later_intake_may_increase_queue": true
     },
     "shared_epoch_baseline_sha256": "b6b0b13f6137b32fd5569f9ff16d78d8dac3d578ad40549c8ae33513cf447557",
@@ -98,7 +102,64 @@
         "tree": "5b6d2d15a4da15d78864ca115d50a1f7e9a6a459",
         "static_review_passed": true,
         "compiled_or_runtime_qualified": false,
-        "approved_or_activated": false
+        "approved_or_activated": false,
+        "preliminary_unit_attempts": [
+          {
+            "output": "/mnt/data/competition-g2-frozen-unit-6423-20261030-v1",
+            "result": "failed_before_go_or_guests",
+            "body_exit": 128,
+            "cleanup_exit": 0,
+            "integrity_exit": 0,
+            "failure": "Local fetch upload-pack rejected the exact source .git ownership.",
+            "stderr_sha256": "fb671f0bd1aadca239d02475fce41eda124211279e754aaf6a3e3f6800f45c7c"
+          },
+          {
+            "output": "/mnt/data/competition-g2-frozen-unit-6423-20261030-v2",
+            "result": "failed_before_go_or_guests",
+            "body_exit": 128,
+            "cleanup_exit": 0,
+            "integrity_exit": 0,
+            "failure": "Parent command-scoped trust did not reach local upload-pack; Git clears command configuration from the transport child environment.",
+            "stderr_sha256": "fb671f0bd1aadca239d02475fce41eda124211279e754aaf6a3e3f6800f45c7c"
+          },
+          {
+            "output": "/mnt/data/competition-g2-frozen-unit-6423-20261030-v3",
+            "result": "failed_before_go_or_tests",
+            "body_exit": 1,
+            "cleanup_exit": 0,
+            "integrity_exit": 0,
+            "all_ten_exact_source_fetches_passed": true,
+            "canonical_patch_and_tree_checks_passed": true,
+            "immutable_image_metadata_export_passed": true,
+            "failure": "A host-side Git diff after initial chmod refreshed .git/index to root-owned 0600; the unprivileged guest could not read it. No matching production sealer defect was found by static audit.",
+            "stderr_sha256": "f90ec44347e385a6497f60356c828790f6bf3c46ecf7ec36155b98635a51e8f0"
+          }
+        ],
+        "unit_passes_claimed": 0,
+        "native_transport_mechanism_proof": {
+          "fresh_processes": 3,
+          "top_level_passes": 3,
+          "failures": 0,
+          "skips": 0,
+          "private_receipt_sha256": "1a6e999f34c84fcab096cf5a0a32d7429036c8d8fed559dcac59ddd7de1dc6bd",
+          "synthetic_native_guard_not_real_uid_claim": true
+        },
+        "native_index_seal_proof": {
+          "fresh_processes": 3,
+          "top_level_passes": 3,
+          "failures": 0,
+          "skips": 0,
+          "private_receipt_sha256": "c9fbb4fe0dcd06310d248145c3a0cd31c3de375c87faf8fce97c174dc89a69fb",
+          "old_0444_to_0600_index_refresh_reproduced": true,
+          "corrected_final_seal_and_production_readonly_status_verified": true
+        },
+        "next_attempt": {
+          "packet": "/home/by/urnetwork/temp/g2-frozen-patch-qualification-v4-20261030.G5z1l1Wx",
+          "script_sha256": "bbf367a575e5043e6d6b6628b17dabe11f248538efbf2befa6ec6a6982a12203",
+          "manifest_sha256": "71f186266a4652f1d66f9aef90519e25487528b2419ad551724b4babd961e7a8",
+          "status": "prepared_inert_not_executed",
+          "requires_root_review_and_fresh_idle_slot_before_low_execution": true
+        }
       }
     }
   },
@@ -187,7 +248,7 @@
     "retained_in_git": true,
     "warning": "The 164128-byte historical checkpoint retains all earlier failures, qualifications and source pins. Its old top-level status and next_action are superseded; do not execute them. Read history only for a specific supporting artifact."
   },
-  "observed_at": "2026-10-30T18:30:07Z",
+  "observed_at": "2026-10-30T19:46:44Z",
   "phase_checkpoint_qualification": {
     "status": "focused tests, native API build, standalone guard and static checks passed; not a live release",
     "toolchain": "go1.27.3",
@@ -262,15 +323,36 @@
     "complete_unique_source_path_digest_set_unchanged": true,
     "current_epoch_and_frozen_patch_unchanged": true
   },
+  "followup_git_boundary_qualification": {
+    "status": "focused_pass",
+    "report": "server/connect/sim-latency/launch/GIT-SOURCE-BOUNDARY-QUALIFICATION-2026-10-30.json",
+    "report_sha256": "db8054dd043eb8df31ffc880662ec7811596e7d9459412b600ce2e1fe5a67738",
+    "tested_fix_commit": "e75d63817c98c2b388e3007ca075dfe657239075",
+    "fresh_post_merge_budget_refactor_commit": "490269cb772e2592a5ec85dba2fc07ebdead702a",
+    "whole_actual_package_race_compiled": true,
+    "selected_unit_roots": 30,
+    "fresh_processes": 3,
+    "top_level_passes": 90,
+    "failures": 0,
+    "skips": 0,
+    "raw_before_after_manifests_identical": true,
+    "full_post_merge_suite_claimed": false,
+    "post_merge_upstream_change_is_explicit_in_report": true,
+    "fresh_post_merge_affected_qualification_top_level_passes": 90,
+    "fresh_post_merge_affected_qualification_failures": 0,
+    "fresh_post_merge_affected_qualification_skips": 0,
+    "fresh_post_merge_private_receipt_sha256": "324537d5be5f94e061a7544223e57fba163a9d6cd3195a96ea432c9924b9ca7d"
+  },
   "checkpoint_publication": {
-    "observed_at": "2026-10-30T17:54:24Z",
+    "observed_at": "2026-10-30T19:28:49Z",
     "pulled_merged_and_pushed": true,
     "server_repository": "https://github.com/urnetwork/server",
-    "server_tested_code_commit": "25eb7e7cf479a14506605746e376468f0db3fdfe",
+    "server_tested_code_commit": "e75d63817c98c2b388e3007ca075dfe657239075",
+    "server_main_at_publication": "56ed212edb2ee9623f3ca98ae6b68729a327b671",
     "sn_repository": "https://github.com/urfoundation/sn",
-    "sn_main_commit": "c59b0ddc1357f8ab010264d7f0cdc24ee49a28ad",
+    "sn_main_commit": "2cb50ac4733e62cb30a127295cdcfabcf9c93222",
     "remote_heads_verified": true,
-    "clean_canonical_workspaces_fast_forwarded": true,
+    "clean_canonical_workspaces_fast_forwarded": false,
     "frozen_competition_branches_unchanged": true,
     "plan_sha256": "a22861dfd3d4e6bfd3e9a994b447fc535847cf7f3e4b92871dbce4ae97e79dd0",
     "native_publication_receipt_installed": true

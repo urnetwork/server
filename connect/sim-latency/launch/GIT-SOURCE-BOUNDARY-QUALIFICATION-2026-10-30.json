@@ -1,0 +1,100 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-source-build-git-boundary-qualification",
+  "status": "focused_pass_not_full_runtime_qualification",
+  "tested_parent_commit": "bc72632a524a06b6d4d37b4939b4edb19c4d68b4",
+  "tested_fix_commit": "e75d63817c98c2b388e3007ca075dfe657239075",
+  "sn_commit": "2cb50ac4733e62cb30a127295cdcfabcf9c93222",
+  "published_merge_commit": "56ed212edb2ee9623f3ca98ae6b68729a327b671",
+  "source_sha256": {
+    "connect/sim-latency/source_build_context.go": "867e1b67f3f275e5a8462a0655627e1407181c87ebb39013bb6b3d17e74b6361",
+    "connect/sim-latency/source_build_fetch_test.go": "a9ba7ded933597eb59b87381d38ffbd25a16b9a284e2c3df76b24adf216aa1fe",
+    "connect/sim-latency/source_build_sandbox.go": "8c37000ac32a15b3b4de65a2f95ec2a117fd6598d82ba3d393420d1d745171ae",
+    "connect/sim-latency/source_build_sandbox_git_test.go": "dbbae971126bb94246d45aa0961df835db54a6056b5b1185ae28aa9f5e73cf83"
+  },
+  "root_causes": [
+    "Guest UID 65532 must not depend on inherited broad image Git trust when inspecting a sealed source owned by another UID.",
+    "A failed status command with empty stdout can look clean when used directly inside test -z; assign and check its exit first.",
+    "Git 2.43 local transport removes command-scoped configuration before upload-pack. Parent -c trust does not authorize the source-side child."
+  ],
+  "remedy": "Reset guest trust to the exact server mount using inherited process configuration. For local fetch only, create a private 0700 directory and 0400 protected config naming exactly destination, source and source/.git; use fixed child-local uploader guards and remove the temporary config before returning. No host-wide trust, wildcard, chown or VCS-stamping bypass.",
+  "primary_references": [
+    "https://raw.githubusercontent.com/git/git/v2.43.0/connect.c#L1372-L1375",
+    "https://raw.githubusercontent.com/git/git/v2.43.0/environment.c#L122-L138"
+  ],
+  "qualification": {
+    "toolchain": "go1.27.3",
+    "whole_actual_package_race_compiled": true,
+    "package": "github.com/urnetwork/server/connect/sim-latency",
+    "selected_unit_roots": 30,
+    "fresh_processes": 3,
+    "top_level_passes": 90,
+    "failures": 0,
+    "skips": 0,
+    "compile_seconds": 106.773,
+    "pass_seconds": [5.719, 5.834, 5.712],
+    "binary_sha256": "fffda0c9b4d22d87d9f9f51db18c99020426fdd0989820295035bacf264d6a86",
+    "source_manifest_sha256": "5f0b0f4dc1f5b0960d7b748d862d9dde48f4765094463791225583375ac2a1ee",
+    "dependency_manifest_sha256": "bd26d851caa5692644a4a707af9bc57b93c5339ca89b6c15292b4b547fd5ac26",
+    "infrastructure_manifest_sha256": "76bbbf5e25d0236c6421b1cdf92734c3457cebf9f478fabd2e2e429435b2cea1",
+    "raw_before_after_manifests_identical": true,
+    "locale_pinned_before_every_snapshot": true,
+    "execution_exit": 0,
+    "independent_static_review": "GO; no concrete blocker found in the four exact source hashes",
+    "private_receipt": "/home/by/urnetwork/temp/git-affected-unit-qa.b6yRlsbD/QA-SUMMARY.private.json",
+    "private_receipt_sha256": "d974489beaafcf9b0d1ca17fece901349a00947626c858e3021e093e3f8a2559",
+    "real_docker_integration_tests": "Explicitly not selected; not skipped."
+  },
+  "independent_mechanism_reproduction": {
+    "kind": "stdlib-only native Git synthetic transport proof",
+    "fresh_processes": 3,
+    "top_level_passes": 3,
+    "failures": 0,
+    "skips": 0,
+    "cases_each_process": ["client-c-negative", "private-config-positive", "unrelated-sibling-negative"],
+    "native_forced_ownership_guard_not_real_uid_claim": true,
+    "source_index_config_bytes_and_modes_unchanged": true,
+    "private_receipt_sha256": "1a6e999f34c84fcab096cf5a0a32d7429036c8d8fed559dcac59ddd7de1dc6bd"
+  },
+  "post_test_pull": {
+    "upstream_commit": "24b202b09b61bc090997bd9422812aac1dad9d4f",
+    "paths": ["connect/resident.go", "connect/exchange_tcp_keepalive_test.go"],
+    "description": "Independently published main TCP-keepalive changes were merged without changing any of the four qualified Git-fix files. They are not claimed to be part of this pre-merge 90-pass proof.",
+    "four_qualified_source_hashes_unchanged_after_merge": true,
+    "new_full_post_merge_suite_claimed": false
+  },
+  "fresh_post_merge_affected_qualification": {
+    "tested_parent_commit": "56ed212edb2ee9623f3ca98ae6b68729a327b671",
+    "tested_budget_refactor_commit": "490269cb772e2592a5ec85dba2fc07ebdead702a",
+    "change": "Move the unchanged 4 KiB diagnostic cap into the owning source Git settings constructor; the overflow regression reads that default and verifies limit-plus-one refusal.",
+    "source_sha256": {
+      "connect/sim-latency/source_git.go": "468ecd7bad717008837ccb2472872da419b1260764acea35ec11996b8cbd089a",
+      "connect/sim-latency/source_build_context.go": "411252bffbd0e90592f3c245093d3a7530ee2f1ff22a58ab740583ab6084c3db",
+      "connect/sim-latency/source_build_fetch_test.go": "0e414620b8056755eae36886cda9866d5a8928a45ad3c3bfc799c6fdf1a5f917"
+    },
+    "whole_actual_package_race_compiled": true,
+    "selected_unit_roots": 30,
+    "fresh_processes": 3,
+    "top_level_passes": 90,
+    "failures": 0,
+    "skips": 0,
+    "compile_seconds": 44.852,
+    "pass_seconds": [6.950, 5.638, 5.795],
+    "binary_sha256": "f5ce8cd1077cb7d32bc5777ac132956532960606c698d9e5ae7f2f8fc51df908",
+    "source_manifest_sha256": "dcbe14d03b2864a0ca96489ec4f0bf5fbd3a7d93494a32c63afc28ad96be2a76",
+    "raw_before_after_manifests_identical": true,
+    "execution_exit": 0,
+    "upstream_keepalive_merge_included_in_this_fresh_proof": true,
+    "private_receipt": "/home/by/urnetwork/temp/git-budget-unit-qa.o1PvRu7y/QA-SUMMARY.private.json",
+    "private_receipt_sha256": "324537d5be5f94e061a7544223e57fba163a9d6cd3195a96ea432c9924b9ca7d",
+    "full_simulator_suite_claimed": false
+  },
+  "boundaries": {
+    "full_simulator_suite_claimed": false,
+    "new_evaluator_image_built": false,
+    "frozen_instrument_patch_changed": false,
+    "current_epoch_source_policy_changed": false,
+    "main_database_or_api_deployed": false,
+    "calibration_accepted": false
+  }
+}
