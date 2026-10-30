@@ -196,9 +196,15 @@ func (self *clientScoreCursor) readWithClient(ctx context.Context, r server.Redi
 	scores := map[server.Id]*ClientScore{}
 	for _, command := range commands {
 		var data []byte
+		// the sha256 of the page bytes read, by which the decoded page is
+		// cached (decodeClientScorePage)
+		var checksum [sha256.Size]byte
 		if command.native == nil {
 			data, _ = command.legacy.Bytes()
-			if command.page.hasModernChecksum && (len(data) == 0 || sha256.Sum256(data) != command.page.modernChecksum) {
+			if 0 < len(data) {
+				checksum = sha256.Sum256(data)
+			}
+			if command.page.hasModernChecksum && (len(data) == 0 || checksum != command.page.modernChecksum) {
 				self.markModernStale()
 			}
 		} else {
@@ -221,6 +227,7 @@ func (self *clientScoreCursor) readWithClient(ctx context.Context, r server.Redi
 				sourceErr = errors.Join(sourceErr, fmt.Errorf("%w: page checksum mismatch", errClientScoreNativeUnavailable))
 				continue
 			}
+			checksum = command.page.nativeChecksum
 			data = data[sha256.Size:]
 		}
 		if len(data) == 0 {
@@ -230,7 +237,7 @@ func (self *clientScoreCursor) readWithClient(ctx context.Context, r server.Redi
 			}
 			continue
 		}
-		sample, err := decodeClientScoreSample(data)
+		sample, err := decodeClientScorePage(data, checksum)
 		if err != nil {
 			sourceErr = errors.Join(sourceErr, err)
 			continue

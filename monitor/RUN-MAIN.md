@@ -1517,6 +1517,22 @@ directory can preserve every byte and still deny initdb access. Declare the
 required mounted-directory mode (local Postgres initdb uses `0755`); preserve
 parent and file modes, and retain role metadata plus the consumer-access proof.
 
+The hash of `bin/go`, its version, and a Go-source census do not bind the full
+compiler toolchain. Pin and verify the actual `pkg/tool` executables, assembler
+headers, selected non-Go race objects, and the native CC/linker executable,
+loader, library, CRT, specs and include/search closure before launch and after
+each gate. Refuse missing compiler roles before allocating a fixture; do not
+ignore them because they were absent from an expected-file map. An after-only
+census cannot repair missing pre-launch authority. Preserve affected native
+results as diagnostics and use fresh outputs, caches and prerequisites for the
+corrected qualification launch.
+
+Generated control and admission inputs must each retain their own named path
+and hash from the selected launch's manifests. Verify tool and source bindings
+against their respective selected records; do not share an ambiguous hash field
+or copy pins from an older example. Derive interpreter runtime paths from the
+selected interpreter, rather than copying a Python-version directory.
+
 The native test prerequisites are separate from the PostgreSQL/Redis resource
 attestation. Before launching either full monitor suite, bind
 `MONITOR_PG_TAIL_REAL_PSQL` to an explicitly qualified absolute, executable native
