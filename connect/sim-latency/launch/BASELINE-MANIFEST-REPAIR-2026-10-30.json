@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "kind": "baseline-preservation-manifest-repair-not-calibration-acceptance",
+  "observed_at": "2026-10-30T03:54:17Z",
+  "defect": {
+    "omitted_files": 12,
+    "omitted_directory": "baseline/prelaunch-public-regression-r9-2026-10-30",
+    "stale_metadata": "baseline/README.md",
+    "measurements_changed": false,
+    "verifier_changed": false
+  },
+  "repaired_manifest_sha256": "5d0f70a0da96c1171d1177bfbd753ebdc6fb37b06c47a8e3d1c53a3265b8eadd",
+  "preserved_other_original_entries": 3676,
+  "preserved_original_entries_projection_sha256": "881014048c5c78c04859d2ff68225d0424c14faff08ff004015c3a142506a1ae",
+  "newly_indexed_native_records_equal_root_originals": 10,
+  "test_source_sha256": "e936fd481b999177aa8d3caf8f2c53d35e169442904194939404db1795ec1f97",
+  "unchanged_verifier_sha256": "bfb7f0a8d35e3cb8cfac265fa238930a9c54b5feddaeddc7a43d02763c087b8e",
+  "qualification": {
+    "go_version": "go1.27.3",
+    "race": true,
+    "stdlib_named_file": true,
+    "separate_processes": 3,
+    "roots_per_process": 6,
+    "total_top_level_passes": 18,
+    "failures_or_skips": 0,
+    "binary_sha256": "ee7bd22394363ed352457b8b0f7c23cbc8a676cb851879754d63cd9ae224ae28",
+    "source_elf_and_manifest_integrity_postchecks_exit_code": 0
+  },
+  "real_readonly_verification": {
+    "invocations": 1,
+    "exit_code": 0,
+    "exact_coverage": true,
+    "checksums_passed": 3689,
+    "stderr_bytes": 0,
+    "stdout_sha256": "56819976e42fbf32ab113cb8980f39297bb94eef5264efcc6a68f44c40159aad"
+  },
+  "terminal_receipt": {
+    "path": "/mnt/data/baseline-manifest-tests-qa-20261030.5ytQCM1o/TERMINAL-RECEIPT.txt",
+    "sha256": "902dde22085134aceeed0c147a6b715bfe1eeaa70b634139e5c1734ab14bafd0"
+  },
+  "operator_qualification_68844_unchanged_and_still_running": true,
+  "new_pilot_or_hidden_measurements_started": false,
+  "production_scoring_enabled": false,
+  "calibration_acceptance_claimed": false
+}

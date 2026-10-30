@@ -20,6 +20,7 @@ import (
 	"github.com/urnetwork/proxy"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
+	"gvisor.dev/gvisor/pkg/tcpip"
 )
 
 // wgPeersGauge is the wg device's registered peer table size. Updated on
@@ -30,11 +31,100 @@ var wgPeersGauge = prometheus.NewGauge(
 		Namespace: "urnetwork",
 		Subsystem: "proxy",
 		Name:      "wg_peers",
-		Help:      "Registered wg peers on this instance's device",
+		Help:      "Configured wg clients on this instance; with on-demand peers, wg_device_peers counts the device's peers",
 	},
 )
 
 var defaultDeviceRpcH1PlusStats = &connect.H1PlusStats{}
+
+// With on-demand peers (proxyWgPeersOnDemandFromConfig) the device holds a
+// peer only for clients that handshook recently; wg_peers counts the
+// configured clients.
+var wgDevicePeersGauge = prometheus.NewGauge(
+	prometheus.GaugeOpts{
+		Namespace: "urnetwork",
+		Subsystem: "proxy",
+		Name:      "wg_device_peers",
+		Help:      "WireGuard peers on this instance's device, each with its goroutines and queues",
+	},
+)
+
+var wgPeerEvictionsGauge = prometheus.NewGauge(
+	prometheus.GaugeOpts{
+		Namespace: "urnetwork",
+		Subsystem: "proxy",
+		Name:      "wg_peer_evictions",
+		Help:      "WireGuard on-demand peers removed for idleness by this instance's device",
+	},
+)
+
+var wgPeerMissGauge = prometheus.NewGaugeVec(
+	prometheus.GaugeOpts{
+		Namespace: "urnetwork",
+		Subsystem: "proxy",
+		Name:      "wg_peer_misses",
+		Help:      "WireGuard handshake initiations from keys without a device peer, by bounded outcome",
+	},
+	[]string{"outcome"},
+)
+
+const defaultWgPeersOnDemand = true
+
+// The wg peer registration mode from the proxy config:
+//
+//	wg_peers_on_demand: true
+//
+// On by default: a configured client gets a device peer only when it
+// handshakes, and loses it after the idle bound (proxy repo
+// WgProxySettings.PeersOnDemand). false restores eager registration, where
+// every configured client of the block holds a peer with two goroutines and
+// its queues whether or not it ever connects. Read once, when the process
+// builds its wg server, so a change applies at each block's next start. A
+// missing resource or key keeps the default; so does a value that is not a
+// boolean, with one error line, because a typo must not change the memory
+// profile of every block at the next restart.
+func proxyWgPeersOnDemandFromConfig() bool {
+	const key = "wg_peers_on_demand"
+	resource, err := server.Config.SimpleResource("proxy.yml")
+	if err != nil {
+		// an absent resource is the default; an unreadable one is reported
+		if !errors.Is(err, server.ErrResourceNotFound) || errors.Is(err, server.ErrResourceUnavailable) {
+			glog.Errorf("[wg]proxy.yml is unreadable; %s keeps %t\n", key, defaultWgPeersOnDemand)
+		}
+		return defaultWgPeersOnDemand
+	}
+	values, err := resource.ParseE()
+	if err != nil {
+		glog.Errorf("[wg]proxy.yml does not parse; %s keeps %t\n", key, defaultWgPeersOnDemand)
+		return defaultWgPeersOnDemand
+	}
+	value, ok := values[key]
+	if !ok {
+		return defaultWgPeersOnDemand
+	}
+	onDemand, ok := value.(bool)
+	if !ok {
+		glog.Errorf("[wg]proxy.yml: %s must be true or false, not %v (%T); keeping %t\n", key, value, value, defaultWgPeersOnDemand)
+		return defaultWgPeersOnDemand
+	}
+	glog.Infof("[wg]proxy.yml: %s = %t\n", key, onDemand)
+	return onDemand
+}
+
+// updateWgPeerMetrics publishes the device's peer population and its
+// cumulative on-demand outcomes for one device generation.
+func updateWgPeerMetrics(stats proxy.WgPeerStats) {
+	wgDevicePeersGauge.Set(float64(stats.PeerCount))
+	wgPeerEvictionsGauge.Set(float64(stats.EvictedPeerCount))
+	wgPeerMissGauge.WithLabelValues("accepted").Set(float64(stats.PeerMiss.Accepted))
+	wgPeerMissGauge.WithLabelValues("refused").Set(float64(stats.PeerMiss.Refused))
+	wgPeerMissGauge.WithLabelValues("negative_cache_hit").Set(float64(stats.PeerMiss.NegativeCacheHits))
+	wgPeerMissGauge.WithLabelValues("coalesced").Set(float64(stats.PeerMiss.Coalesced))
+	wgPeerMissGauge.WithLabelValues("rate_limited").Set(float64(stats.PeerMiss.RateLimited))
+	wgPeerMissGauge.WithLabelValues("handler_failure").Set(float64(stats.PeerMiss.HandlerFailures))
+	wgPeerMissGauge.WithLabelValues("handler_timeout").Set(float64(stats.PeerMiss.HandlerTimeouts))
+	wgPeerMissGauge.WithLabelValues("create_failure").Set(float64(stats.PeerMiss.CreateFailures))
+}
 
 var wgInboundPeerQueueDropPacketsGauge = prometheus.NewGauge(
 	prometheus.GaugeOpts{
@@ -80,6 +170,9 @@ var lifecycleJoinEnabledGauge = prometheus.NewGaugeFunc(
 func init() {
 	prometheus.MustRegister(server.NewH1PlusCollector("proxy", connect.H1FramerXlProtocol, defaultDeviceRpcH1PlusStats))
 	prometheus.MustRegister(wgPeersGauge)
+	prometheus.MustRegister(wgDevicePeersGauge)
+	prometheus.MustRegister(wgPeerEvictionsGauge)
+	prometheus.MustRegister(wgPeerMissGauge)
 	prometheus.MustRegister(wgInboundPeerQueueDropPacketsGauge)
 	prometheus.MustRegister(wgInboundDecryptionQueueDropPacketsGauge)
 	prometheus.MustRegister(wgReceiveRoutineFailuresGauge)
@@ -93,9 +186,10 @@ const InternalApiPort = 8083
 const InternalWgPort = 8084
 
 func DefaultProxySettings() *ProxySettings {
-	// HttpProxy interprets ProxyConnectTimeout as retry pacing, not as a total
-	// timeout. Follow its prompt production default so a transient hosted-device
-	// dial failure can recover inside an ordinary client request deadline.
+	// HttpProxy interprets ProxyConnectTimeout as the first retry backoff and
+	// ProxyConnectBudget as the bound on all of a CONNECT's retries. Follow its
+	// production defaults so a transient hosted-device dial failure can recover
+	// inside an ordinary client request deadline.
 	httpProxySettings := proxy.DefaultHttpProxySettings()
 	return &ProxySettings{
 		EnableDeviceRpcH1Plus:    true,
@@ -109,6 +203,7 @@ func DefaultProxySettings() *ProxySettings {
 		ProxyIdleTimeout:         5 * time.Minute,
 		ProxyTlsHandshakeTimeout: 30 * time.Second,
 		ProxyConnectTimeout:      httpProxySettings.ProxyConnectTimeout,
+		ProxyConnectBudget:       httpProxySettings.ProxyConnectBudget,
 		NotificationTimeout:      5 * time.Second,
 		WarmupTimeout:            30 * time.Minute,
 		MaxRequestBytes:          32 * model.Kib,
@@ -163,6 +258,7 @@ type ProxySettings struct {
 	ProxyIdleTimeout         time.Duration
 	ProxyTlsHandshakeTimeout time.Duration
 	ProxyConnectTimeout      time.Duration
+	ProxyConnectBudget       time.Duration
 	NotificationTimeout      time.Duration
 	WarmupTimeout            time.Duration
 	MaxRequestBytes          model.ByteCount
@@ -563,8 +659,7 @@ func (self *httpServer) CloseAndWait(ctx context.Context) error {
 func (self *httpServer) newHttpProxy() *proxy.HttpProxy {
 	authProxyId := func(r *http.Request) (server.Id, error) {
 		if r.TLS != nil {
-			host := r.TLS.ServerName
-			hostProxyId := strings.SplitN(host, ".", 2)[0]
+			hostProxyId, _, _ := strings.Cut(r.TLS.ServerName, ".")
 			proxyId, err := model.ParseSignedProxyId(hostProxyId)
 			if err == nil {
 				return proxyId, nil
@@ -575,22 +670,28 @@ func (self *httpServer) newHttpProxy() *proxy.HttpProxy {
 		return authHeaderProxyId(authHeader)
 	}
 
+	// A failure no retry can change is returned as a refusal, which the proxy
+	// answers at once (see proxy.ConnectRefusal); any other error is retried
+	// within the proxy's connect budget, which ctx carries.
 	connectDial := func(ctx context.Context, r *http.Request, network string, addr string) (net.Conn, error) {
 		proxyId, err := authProxyId(r)
 		if err != nil {
 			recordProxyAdmissionFailure("http", true)
-			return nil, err
+			return nil, proxy.NewConnectRefusal(proxy.ConnectRefusalUnauthenticated, err)
 		}
 
 		addrPort, err := netip.ParseAddrPort(r.RemoteAddr)
 		if err != nil {
 			recordProxyAdmissionFailure("http", true)
-			return nil, err
+			return nil, proxy.NewConnectRefusal(proxy.ConnectRefusalForbidden, err)
 		}
 
-		if !self.proxyDeviceManager.ValidCaller(proxyId, addrPort.Addr()) {
+		if err := self.proxyDeviceManager.checkCaller(proxyId, addrPort.Addr()); err != nil {
 			recordProxyAdmissionFailure("http", true)
-			return nil, fmt.Errorf("Not authorized")
+			if errors.Is(err, errProxyDeviceNotFound) {
+				return nil, proxy.NewConnectRefusal(proxy.ConnectRefusalUnknownProxy, err)
+			}
+			return nil, proxy.NewConnectRefusal(proxy.ConnectRefusalForbidden, err)
 		}
 
 		// the same per-connection plan check as SOCKS. Both tiers include the https
@@ -599,19 +700,33 @@ func (self *httpServer) newHttpProxy() *proxy.HttpProxy {
 		if !model.ProxyFeatureAllowed(self.ctx, proxyId, model.FeatureHttpsProxy) {
 			glog.Infof("[http]refused %s: the https proxy is not included in the plan\n", proxyId)
 			recordProxyAdmissionFailure("http", true)
-			return nil, fmt.Errorf("Not authorized")
+			return nil, proxy.NewConnectRefusal(proxy.ConnectRefusalForbidden, errCallerNotAuthorized)
 		}
 
 		pd, err := self.proxyDeviceManager.OpenProxyDevice(proxyId)
 		if err != nil {
 			recordProxyAdmissionFailure("http", false)
+			if errors.Is(err, errProxyDeviceNotFound) {
+				return nil, proxy.NewConnectRefusal(proxy.ConnectRefusalUnknownProxy, err)
+			}
 			return nil, err
+		}
+
+		// A window still forming has no provider to carry the dial. Wait for its
+		// first one, within ctx, rather than dial into it and be retried on a
+		// timer.
+		if !pd.WaitForRoute(ctx, self.settings.ProxyConnectBudget) {
+			recordProxyAdmissionFailure("http", false)
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			return nil, errProxyDeviceNoRoute
 		}
 
 		conn, err := pd.DialContext(ctx, network, addr)
 		if err != nil {
 			recordProxyAdmissionFailure("http", false)
-			return nil, err
+			return nil, connectDialRefusal(err)
 		}
 		pd.recordFlowTraceDial("http", conn)
 		return instrumentProxyConnection("http", conn), nil
@@ -622,6 +737,7 @@ func (self *httpServer) newHttpProxy() *proxy.HttpProxy {
 	httpSettings.ProxyWriteTimeout = self.settings.ProxyWriteTimeout
 	httpSettings.ProxyIdleTimeout = self.settings.ProxyIdleTimeout
 	httpSettings.ProxyConnectTimeout = self.settings.ProxyConnectTimeout
+	httpSettings.ProxyConnectBudget = self.settings.ProxyConnectBudget
 	httpSettings.ProxyTlsHandshakeTimeout = self.settings.ProxyTlsHandshakeTimeout
 
 	httpProxy := proxy.NewHttpProxy(httpSettings)
@@ -754,6 +870,8 @@ func NewWgServer(
 	// silence wg device/proxy logging the same as the network space and
 	// deviceLocal in proxy_device.go, otherwise it falls through to glog.
 	wgProxySettings.Log = connect.NewNoopLogger()
+	// configured clients get device peers when they handshake, not up front
+	wgProxySettings.PeersOnDemand = proxyWgPeersOnDemandFromConfig()
 	wgProxy := proxy.NewWgProxy(ctx, wgProxySettings)
 
 	s := &wgServer{
@@ -805,6 +923,7 @@ func updateWgRuntimeMetrics(stats proxy.WgRuntimeStats) {
 func (self *wgServer) runRuntimeMetrics() {
 	for {
 		updateWgRuntimeMetrics(self.wgProxy.RuntimeStats())
+		updateWgPeerMetrics(self.wgProxy.PeerStats())
 		select {
 		case <-self.ctx.Done():
 			return
@@ -945,8 +1064,10 @@ func (self *wgServer) logClientCounts(op string, applied int, removed int, count
 	// every peer-set mutation path (add / sync / reconcile) ends here, so
 	// the gauge is exact between changes
 	wgPeersGauge.Set(float64(peerCount))
+	devicePeerCount := self.wgProxy.PeerCount()
+	wgDevicePeersGauge.Set(float64(devicePeerCount))
 	glog.Infof(
-		"[wg]%s clients: %d/%d applied, %d removed (%d no wg config, %d key mismatch, %d bad auth token, %d not entitled), peers %d/%d\n",
+		"[wg]%s clients: %d/%d applied, %d removed (%d no wg config, %d key mismatch, %d bad auth token, %d not entitled), clients %d, device peers %d/%d\n",
 		op,
 		applied,
 		counts.total,
@@ -959,6 +1080,7 @@ func (self *wgServer) logClientCounts(op string, applied int, removed int, count
 		// is exactly the kind of thing that turns into an unexplainable support ticket.
 		counts.notEntitled,
 		peerCount,
+		devicePeerCount,
 		proxy.MaxClients,
 	)
 }
@@ -1054,6 +1176,44 @@ func (self *wgServer) SyncProxyClients(proxyClients []*model.ProxyClient, syncSt
 	self.logClientCounts("sync", len(applied), removed, counts)
 
 	return errors.Join(addErr, removeErr)
+}
+
+// errProxyDeviceNoRoute: the device's window formed no provider in time.
+var errProxyDeviceNoRoute = errors.New("Proxy device has no route.")
+
+// The text of the tun's error for a SYN answered with a reset.
+var tunConnectionRefused = (&tcpip.ErrConnectionRefused{}).String()
+
+// connectDialRefusal makes a device dial failure that no retry can change a
+// refusal: a name that does not exist, or a dial whose every attempt was
+// reset, by the destination or by the client security policy, which resets a
+// flow it rejects. Any other error is returned as is, to be retried. A reset
+// from a provider leaving the window is retried by the dial race itself, which
+// relaunches a failed attempt at once.
+func connectDialRefusal(err error) error {
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
+		return proxy.NewConnectRefusal(proxy.ConnectRefusalNoSuchHost, err)
+	}
+	if dialReset(err) {
+		return proxy.NewConnectRefusal(proxy.ConnectRefusalReset, err)
+	}
+	return err
+}
+
+// dialReset reports whether every attempt of a tun dial was reset.
+func dialReset(err error) bool {
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		attempts := joined.Unwrap()
+		for _, attempt := range attempts {
+			if !dialReset(attempt) {
+				return false
+			}
+		}
+		return 0 < len(attempts)
+	}
+	var opErr *net.OpError
+	return errors.As(err, &opErr) && opErr.Err != nil && opErr.Err.Error() == tunConnectionRefused
 }
 
 func authHeaderProxyId(authHeader string) (server.Id, error) {

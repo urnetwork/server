@@ -1,6 +1,6 @@
 eaae4eda9e5bcdc7b447133b277eb163e97d170735ed30b4dff1853fe9882927  .gitattributes
 4e0d8d22a5bada549c6e11aa48c5a096b6bd679e5bfe639b4e23c4e3a92621d4  INDEX.json
-83fa0d58e5400e07866c659e3f52274b2ca02140f0224843c57e2e6095da8c93  README.md
+9f41be7363eda0380e7b946a1948d9a84e018eb1e001a98e565f3bd3886ddd87  README.md
 3eaf92637ceddea9b19fa08e7411a7f80ec87ec90d25c9499fea84c5e8a2c38d  final-baseline.html
 a7ee75cf99b8ce0ce5259ccd9ade2696179eda3fa297678bb94e45a20c8d084a  final-preview.html
 768c57b3d341eeb31861ba848a595b94f9e6f0b71d0364e29205968bc3aedf1e  go.mod
@@ -750,6 +750,18 @@ bbefdcd22156ef49998fc5deb56eb5efb51cd87a5694ee647e78c3d5c6b73f26  prelaunch-prov
 c93b332f211a874a07c23eed418eb219949579f2b571864d8c3defaa4bc167a6  prelaunch-provide-frontier-2026-10-24/failed-p15000-on/runner.log.gz
 1858af95c59ba0048c9843b2d18338d515150e7f2d8acfd45bb279358c11ef35  prelaunch-provide-frontier-2026-10-24/failed-p15000-on/services.log.gz
 e675916516c355fcf770fc73f0e15e1b170b99e69ab42c2142eb9ef48f352fdf  prelaunch-provide-frontier-2026-10-24/image-record.json
+fffaef174c5edf01f95dc427335ed2071c87895da3f0556bdad37cf812acab75  prelaunch-public-regression-r9-2026-10-30/MANIFEST.sha256
+99ee513125390bc43bc99d7ddf6374ea74a85321e49e54603964b6adaf3bf06b  prelaunch-public-regression-r9-2026-10-30/README.md
+b1fe863c10022cf35693c35c9a26ec017ab0835cf2f48baadca1abc8a41f540e  prelaunch-public-regression-r9-2026-10-30/baseline.json
+4dbf01afec5eb397ed81a33a0d3b42136aa7acb36c14ac0eeb53de23985bdfe4  prelaunch-public-regression-r9-2026-10-30/execution-result.json
+2497b493dffa3bc105827ffc444647ee73e62116604b2a3cfd90fbfea86fbee5  prelaunch-public-regression-r9-2026-10-30/host-after-containers.tsv
+c839e159c4f3870fbb433e03dc185f669fe1e41454a2877f802d676a42118b97  prelaunch-public-regression-r9-2026-10-30/host-after-networks.tsv
+2497b493dffa3bc105827ffc444647ee73e62116604b2a3cfd90fbfea86fbee5  prelaunch-public-regression-r9-2026-10-30/host-before-containers.tsv
+c839e159c4f3870fbb433e03dc185f669fe1e41454a2877f802d676a42118b97  prelaunch-public-regression-r9-2026-10-30/host-before-networks.tsv
+bd7daf93c42a340b19ec7703a06a42ee5fdcd137c7ec76147e9537eb11f2ca88  prelaunch-public-regression-r9-2026-10-30/host-comparison.json
+aaa980fadf17d2404a54777c7d7f1cee81d6dda75b3f8b7ce2f0a3e7a457a265  prelaunch-public-regression-r9-2026-10-30/manager-terminal.log
+7220f48fcdbb33d2df2728eafd014eef10f392ce6ee70f36f5bd7752b693aab7  prelaunch-public-regression-r9-2026-10-30/pilot-proof.REJECTED.json
+0a4b0d615db9fe91d26f38af88576d6213b65b89fbaf3aa50c12868f60e6f415  prelaunch-public-regression-r9-2026-10-30/score.json
 b66190f5ce5681fd50f77e99fb4f111a28c20f8683e534f98775392c53bc8d77  prelaunch-ready-snapshot-frontier-2026-10-25/INDEX.json
 8ea22f09d53996e2c924d61ebf7c56cd18ca33147d22ce8929bc8fdbe8baef8b  prelaunch-ready-snapshot-frontier-2026-10-25/README.md
 f0b428bb8373b667ff81c1952a447434e6f4cdc1562b247f2900f164a65494ab  prelaunch-ready-snapshot-frontier-2026-10-25/complete-p15000-off/docker-id-map.json

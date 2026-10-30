@@ -1,10 +1,24 @@
 # Sim-latency competition live-deployment playbook
 
-## Current production preparation — October 28, 2026
+## Current production intake and scoring preparation — October 30, 2026
 
 The required public opening was **October 28, 2026, 00:00 UTC**; readiness was
-not achieved. No late opening or new date has been authorized. The current launch
-checklist and exact prepared source/image identities are maintained in
+not achieved and that opening was not backdated. The owner subsequently approved
+intake-first launch and a replacement season. Production R2 epoch 1 is now open
+for submissions, but **production grading and publication remain held**.
+At 03:14 UTC on October 30, public `/competition/info` reported
+`intake_ready: true`, `grading_ready: false`, `publication_held: true` and:
+
+- season: `sim-latency-production-20261028-r2`;
+- round: `01a1855d-49bd-0250-90db-d0c0885f0e46`, epoch 1, status `open`;
+- actual opening: October 29, 13:06:42.413416 UTC;
+- submission close: November 5, 13:06:42.413416 UTC.
+
+The production worker is deliberately stopped for uncontended calibration;
+intake readiness does not mean the evaluator is running. Use the
+[current checkpoint](launch/current-state.json) and the
+[scoring restoration procedure](launch/SCORING-RESTORE-2026-10-30.md) before
+changing either hold. The prepared source/image identities are maintained in
 [`launch/PRODUCTION-2026-10-28.md`](launch/PRODUCTION-2026-10-28.md).
 Use [`launch/LAUNCH-ACCEPTANCE.md`](launch/LAUNCH-ACCEPTANCE.md) for the current
 release's evidence-by-evidence acceptance gates. The checked v1 checklist below
@@ -20,7 +34,8 @@ top of the launch journal and in
 [`launch/GO-AND-PROVIDE-2026-10-24.md`](launch/GO-AND-PROVIDE-2026-10-24.md).
 Published source pins alone do not mean the competition is ready or active.
 
-The new season uses six weekly admission windows and automatic FIFO scoring.
+The season uses six weekly admission windows and automatic FIFO scoring once
+the current evaluation hold is safely released.
 After close and authoritative drain, publish the provisional reward decision,
 perform the isolated two-model Snow honesty/safety review under
 `elected_winner_snow_union_v2`, replace substantiated
@@ -50,14 +65,28 @@ Preserve that result and the unstarted second seed; do not rerun or relabel the
 failed screen or redefine its acceptance. The owner has approved a
 [separately precommitted new screen](launch/CALIBRATION-NEW-SCREEN-OWNER-APPROVAL-2026-10-28.md)
 with a stronger regression reference, fresh control and newly committed seed.
-The new path requires the H1 public direction pilot before one fresh hidden
-seed is committed and measured. Composed H1 qualification, that pilot and the
-fresh calibration remain pending; no new seed has been drawn or new calibration
-measurement started. The separate
+The new path requires an H1 public direction pilot before one fresh hidden
+seed is committed and measured. The first public pilot completed all 18 R9/R9
+runs, but its 1 microsecond/byte intentional regression reference failed G1 and
+the lower G2 work-volume bounds. Preserve its
+[complete rejected evidence](baseline/prelaunch-public-regression-r9-2026-10-30/README.md);
+completion is not acceptance.
+
+The owner prospectively approved a
+[100 ns/byte reference and replacement public pilot](launch/CALIBRATION-REDUCED-PACING-OWNER-APPROVAL-2026-10-30.md)
+using public seed `20261030`. That reference's native build/readback and
+[three-process correctness scope](launch/reduced-reference-correctness-2026-10-30/README.md)
+have completed with 336 passes and zero failures or skips. The separately
+qualified Go input helper passed 12 controls and
+[constructed the new public inputs once](launch/fixed-public-inputs-2026-10-30/README.md).
+The new operator's three-process 233-test qualification is still running;
+the old operator's 675 passes do not qualify its changed bytes. The replacement
+public pilot and subsequent single hidden-seed screen have not started.
+No submission gate, R9, significance, practical margin or per-job deadline has
+been changed. No new hidden seed has been drawn. The separate
 [late-opening authorization](launch/LATE-OPENING-AUTHORIZATION-2026-10-28.md)
-requires an actual future opening after the gates pass, never backdating or a
-provider waiver. Production remains unactivated.
-R9, all evaluation gates, significance and the practical margin are unchanged.
+and subsequent intake-first/replacement-season approvals do not establish
+scoring readiness or permit relabeling failed calibration as accepted.
 
 Production admission costs $20 and has no submission-count ceiling. Each round
 gets one authenticated nine-run control baseline shared by all its submissions;
@@ -68,17 +97,16 @@ programs. Evaluations and promotions use private temporary checkouts, not the
 operator's branches. Only direct read-only `config/local` and `vault/local`
 leaves may enter evaluation containers.
 
-The first source bootstrap must pin `--opens-at=2026-10-28T00:00:00Z`.
-The supervisor can advertise a qualified round as `scheduled`; it must not admit
-before that instant. Later rounds receive full weekly windows after actual
-review/build/readiness, not speculative fixed start dates. Production activation,
+The original October 28 reservation was missed and must not be replayed or
+backdated. R2 uses its actual opening recorded above. Later rounds receive full
+weekly windows after actual review/build/readiness, not speculative fixed start
+dates. Complete scoring activation,
 fresh calibration, genuine review/build-broker qualification, artifact and
-monitoring verification, and adapter acceptance remain explicit launch gates.
-The prepared bootstrap requires reserving that initial opening before midnight
-and cannot overlap the active timed calibration. The current qualified path
-cannot establish readiness by the requested opening; do not backdate activation
-or silently change the schedule. See the
-[verified bootstrap constraints](launch/BOOTSTRAP-PREPARATION-NOTES-2026-10-27.md).
+monitoring verification, and adapter acceptance remain explicit launch gates;
+an open intake round alone does not satisfy them. The
+[earlier bootstrap constraints](launch/BOOTSTRAP-PREPARATION-NOTES-2026-10-27.md)
+are preserved as the original reservation record, not an instruction to recreate
+R2. Do not restart the recurrent-probe worker during timed calibration.
 For automated v2, six completed epochs and their queue drains/reviews determine
 completion; the configured January 1 season date is not a guarantee that an
 unbounded grading backlog has finished by then. Each successor receives a full

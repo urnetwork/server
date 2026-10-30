@@ -1,4 +1,4 @@
-# Reduced public-pilot operator: source and early-smoke checkpoint
+# Reduced public-pilot operator: source and completed qualification
 
 This is a prospective control-program revision for the owner-approved
 [100 ns reference](../reference-h1-byte-pacing-100ns-2026-10-30/README.md).
@@ -18,7 +18,12 @@ The new binary compiled successfully as Go 1.27.3 race-enabled ELF
 Its compiled 237 held-out tests minus the original four real-command entrypoints
 match the exact 233-test roster. Nine early smoke tests passed with zero failures
 or skips, including all eight new controls and the exact native-reference guard.
-**Full three-process 233-test qualification is still pending.** The source
+The same binary completed three independent 233-test processes: **699 top-level
+passes, zero failures or skips**, with all final source/dependency/Git/ELF
+integrity checks passed. The [completed checkpoint](COMPLETED-699-CHECKPOINT.json)
+and exact [native qualification](tool-qualification.json) bind those actual
+results and 41 protected provenance files, including the completed terminal
+receipt. The source
 packet's runtime configuration remains a proposal until Root admits execution;
 its earlier false/zero fields are preserved rather than relabeled as completed.
 
@@ -50,6 +55,8 @@ synthetic environment values. The old caller produces the expected red result;
 the corrected caller passed three separate processes (six top-level passes).
 Those results are not part of either the 112-test or 233-test totals.
 
-`CHECKPOINT.json` records exact receipts, scope and still-pending work. Successful
-native build/readback, compile-only results and early smoke do not authorize
+`CHECKPOINT.json` is the unchanged timestamped early snapshot, not the final
+qualification. The completed checkpoint supersedes its still-pending unit gate,
+without rewriting its original observations. Successful native build/readback,
+compile-only results, early smoke and the completed unit gate do not authorize
 calibration acceptance, a seed draw, hold release, or production grading.
