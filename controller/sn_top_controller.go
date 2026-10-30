@@ -42,18 +42,24 @@ const (
 	snTopStaleTempos = 3
 	// how often the task checks for a completed tempo
 	snTopCheckInterval = 5 * time.Minute
-	// a tempo is folded this long after it ends, once the reliability rollup
-	// has drained its last blocks and its last trails have completed
-	snTopSettleDelay = 3 * time.Minute
-	// never fold twice within this, whatever the tempo source says
-	snTopMinFoldInterval = SnTopMinFoldInterval
 	// the history days /sn/top/me returns
 	snTopHistoryDays = model.SnTopHistoryDays
 )
 
-// SnTopMinFoldInterval keeps a tempo source change (the clock to the chain,
-// or the chain to the validator's summary) from folding one tempo twice.
-const SnTopMinFoldInterval = model.SnTopTempoDuration / 2
+// SnTopFoldSettings owns the estimate task's admission delays.
+type SnTopFoldSettings struct {
+	// SettleDelay lets reliability and trailing hops drain after the interval.
+	// Non-positive disables the delay.
+	SettleDelay time.Duration
+	// SourceChangeHoldoff separates a legacy cadence reset from its prior fold.
+	// Non-positive disables the holdoff; same-source recovery never waits on it.
+	SourceChangeHoldoff time.Duration
+}
+
+// DefaultSnTopFoldSettings allows rollups to drain and separates legacy resets.
+func DefaultSnTopFoldSettings() SnTopFoldSettings {
+	return SnTopFoldSettings{SettleDelay: 3 * time.Minute, SourceChangeHoldoff: model.SnTopTempoDuration / 2}
+}
 
 // Fleet binding is blocked on mainnet (LEADERTOP.md §3.6): the commitment
 // oracle is not deployed and the fleet runtime authority has not shipped.
@@ -89,6 +95,8 @@ type SnTopValidatorSummaryFleet struct {
 
 // SnTopValidatorSummary is the validator's latest head summary.
 type SnTopValidatorSummary struct {
+	// Stored retains the signed body and identities needed for exact replay.
+	Stored              *model.SnHeadSummary
 	NativeEpoch         uint64
 	NativeSnapshotBlock uint64
 	SettlementEpoch     uint64
@@ -204,7 +212,7 @@ type SnTopFleet struct {
 	Uid             int      `json:"uid"`
 	Generation      uint64   `json:"generation"`
 	ValidToEpoch    uint64   `json:"valid_to_epoch"`
-	ReplicaScore    float64  `json:"replica_score"`
+	ReplicaScore    *float64 `json:"replica_score"`
 	ValidatorScore  *float64 `json:"validator_score"`
 	ValidatorRank   *int     `json:"validator_rank"`
 	ValidatorRankOf *int     `json:"validator_rank_of"`
@@ -404,11 +412,16 @@ func snTopEmptySnapshot() *SnTopSnapshot {
 }
 
 func snTopFleetFromModel(fleet *model.SnTopFleetRow) SnTopFleet {
+	var replicaScore *float64
+	if fleet.ReplicaAvailable {
+		value := model.SnTopFinite(fleet.ReplicaScore)
+		replicaScore = &value
+	}
 	return SnTopFleet{
 		Uid:             int(fleet.Key.Uid),
 		Generation:      fleet.Key.Generation,
 		ValidToEpoch:    fleet.ValidToEpoch,
-		ReplicaScore:    model.SnTopFinite(fleet.ReplicaScore),
+		ReplicaScore:    replicaScore,
 		ValidatorScore:  fleet.ValidatorScore,
 		ValidatorRank:   fleet.ValidatorRank,
 		ValidatorRankOf: fleet.ValidatorRankOf,
@@ -706,42 +719,52 @@ func snTopTempoAnchor(ctx context.Context) *model.SnTopTempoAnchor {
 	}
 }
 
-// snTopFoldTempo is the tempo to fold now: the validator's own when its
-// head summary names a newer one (exact), else the anchored cadence's last
-// completed tempo.
+// Network estimates keep their original cadence and replay the oldest missed
+// interval. Validator summaries authorize sequence cuts, never wall times.
 func snTopFoldTempo(anchor *model.SnTopTempoAnchor, summary *SnTopValidatorSummary, previous *model.SnTopSnapshot, now time.Time) model.SnTopTempo {
-	if snTopSummaryCurrent(summary, now) {
-		start := summary.ReceivedAt.Add(-model.SnTopTempoDuration)
-		if previous != nil && previous.TempoSource == model.SnTopTempoSourceSummary && previous.TempoEndTime.Before(summary.ReceivedAt) {
-			start = previous.TempoEndTime
-		}
-		startBlock := uint64(0)
-		if model.SnTopTempoBlocks <= summary.NativeSnapshotBlock {
-			startBlock = summary.NativeSnapshotBlock - model.SnTopTempoBlocks
-		}
-		return model.SnTopTempo{
-			Source:          model.SnTopTempoSourceSummary,
-			Index:           int64(summary.NativeEpoch),
-			StartBlock:      startBlock,
-			EndBlock:        summary.NativeSnapshotBlock,
-			StartTime:       start,
-			EndTime:         summary.ReceivedAt,
-			SettlementEpoch: summary.SettlementEpoch,
+	if previous != nil && previous.TempoSource != model.SnTopTempoSourceSummary {
+		if previous.TempoSource == model.SnTopTempoSourceClock {
+			anchor = nil
+		} else if anchor != nil {
+			// Retain the last boundary when a refreshed chain observation or
+			// RPC fallback changes the nominal clock's anchor.
+			pinned := *anchor
+			pinned.Source = previous.TempoSource
+			pinned.Block = previous.Block
+			pinned.TimeMs = previous.TempoEndTime.UnixMilli()
+			anchor = &pinned
+		} else {
+			// An absent chain anchor cannot rebase chain indexes onto Unix time.
+			return model.SnTopTempo{Source: previous.TempoSource, Index: previous.TempoIndex, EndTime: previous.TempoEndTime}
 		}
 	}
-	return model.SnTopCompletedTempo(anchor, now)
-}
-
-// A summary drives the tempo while it keeps arriving; once the validator
-// stops sending them the anchored cadence takes over again.
-func snTopSummaryCurrent(summary *SnTopValidatorSummary, now time.Time) bool {
-	return summary != nil && 0 < summary.NativeSnapshotBlock && !summary.ReceivedAt.IsZero() &&
-		now.Sub(summary.ReceivedAt) < 2*model.SnTopTempoDuration
+	completed := model.SnTopCompletedTempo(anchor, now)
+	if previous != nil && previous.TempoSource == completed.Source && previous.TempoIndex < completed.Index {
+		var next model.SnTopTempo
+		if anchor == nil {
+			next = model.SnTopTempoAt(nil, previous.TempoEndTime)
+		} else {
+			next = anchor.TempoOfBlock(previous.Block)
+		}
+		if next.Index == previous.TempoIndex+1 {
+			return next
+		}
+		// A changed settlement-epoch mapping cannot silently skip the gap.
+		return model.SnTopTempo{Source: previous.TempoSource, Index: previous.TempoIndex, EndTime: previous.TempoEndTime}
+	}
+	return completed
 }
 
 // snTopShouldFold decides whether the tempo still needs a snapshot.
 func snTopShouldFold(tempo model.SnTopTempo, latest *model.SnTopSnapshot, now time.Time) (bool, string) {
-	if tempo.Source != model.SnTopTempoSourceSummary && now.Before(tempo.EndTime.Add(snTopSettleDelay)) {
+	return snTopShouldFoldWithSettings(tempo, latest, now, DefaultSnTopFoldSettings())
+}
+
+func snTopShouldFoldWithSettings(tempo model.SnTopTempo, latest *model.SnTopSnapshot, now time.Time, settings SnTopFoldSettings) (bool, string) {
+	if !tempo.StartTime.IsZero() && tempo.StartTime.Before(now.Add(-model.SnTrailHopRetention)) {
+		return false, "evidence_expired"
+	}
+	if 0 < settings.SettleDelay && tempo.Source != model.SnTopTempoSourceSummary && now.Before(tempo.EndTime.Add(settings.SettleDelay)) {
 		return false, "settling"
 	}
 	if latest == nil {
@@ -750,7 +773,7 @@ func snTopShouldFold(tempo model.SnTopTempo, latest *model.SnTopSnapshot, now ti
 	if latest.TempoSource == tempo.Source && tempo.Index <= latest.TempoIndex {
 		return false, "folded"
 	}
-	if now.Sub(latest.ComputedAt) < snTopMinFoldInterval {
+	if 0 < settings.SourceChangeHoldoff && latest.TempoSource != tempo.Source && now.Sub(latest.ComputedAt) < settings.SourceChangeHoldoff {
 		return false, "recent"
 	}
 	return true, ""
@@ -764,8 +787,12 @@ func ComputeSnTopSnapshot(
 	args *ComputeSnTopSnapshotArgs,
 	clientSession *session.ClientSession,
 ) (*ComputeSnTopSnapshotResult, error) {
+	return computeSnTopSnapshotAt(args, clientSession, server.NowUtc())
+}
+
+// computeSnTopSnapshotAt fixes one task pass's observation time across reads.
+func computeSnTopSnapshotAt(args *ComputeSnTopSnapshotArgs, clientSession *session.ClientSession, now time.Time) (*ComputeSnTopSnapshotResult, error) {
 	ctx := clientSession.Ctx
-	now := server.NowUtc()
 	result := &ComputeSnTopSnapshotResult{}
 	if !StEnabled() {
 		result.Skipped = "st_disabled"
@@ -787,11 +814,18 @@ func ComputeSnTopSnapshot(
 	result.TempoSource = tempo.Source
 	if fold, reason := snTopShouldFold(tempo, latest, now); !fold {
 		result.Skipped = reason
+		if latest != nil {
+			snTopRefreshReplica(ctx, latest, summary)
+		}
 		return result, nil
 	}
 
 	settings := VerifySettings()
 	inputs := snTopGatherInputs(ctx, settings, tempo, latest, summary)
+	if inputs.unavailable != "" {
+		result.Skipped = inputs.unavailable
+		return result, nil
+	}
 	projection := model.ProjectSnTop(inputs.projection)
 	snTopMeasureReplica(&inputs.agreement, projection, summary)
 	snTopMeasureIncentive(&inputs.agreement, summary, inputs.incentive)
@@ -818,6 +852,8 @@ func ComputeSnTopSnapshot(
 		CohortCapacity:    inputs.cohortCapacity,
 		PresenceSource:    inputs.presenceSource,
 		PrecisionAt200:    inputs.projection.PrecisionAt200,
+		ReplicaCheckpoint: inputs.replicaCheckpoint,
+		ReplicaComplete:   inputs.projection.Replica != nil,
 	}
 	if summary != nil {
 		at := summary.ReceivedAt.UTC()
@@ -853,6 +889,8 @@ type snTopInputs struct {
 	trailHops         int
 	incentive         *SnTopIncentive
 	agreement         snTopAgreement
+	replicaCheckpoint *model.SnTopReplicaCheckpoint
+	unavailable       string
 }
 
 const (
@@ -872,7 +910,6 @@ func snTopGatherInputs(
 ) *snTopInputs {
 	inputs := &snTopInputs{}
 	eligible := model.GetVerifyEligibleClientIds(ctx)
-	_, pins := model.GetVerifyHeadPrefixPins(ctx, eligible, settings)
 	presence := model.GetSnTopPresence(ctx, tempo.StartTime, tempo.EndTime)
 	evidence := model.GetSnTopTrailEvidence(ctx, tempo.StartTime, tempo.EndTime)
 	inputs.trailHops = evidence.Hops
@@ -884,9 +921,17 @@ func snTopGatherInputs(
 	for _, clientId := range eligible {
 		clientIds[clientId] = true
 	}
+	for clientId := range presence.Clients {
+		clientIds[clientId] = true
+	}
 	for clientId := range evidence.Prefixes {
 		clientIds[clientId] = true
 	}
+	pinClientIds := make([]server.Id, 0, len(clientIds))
+	for clientId := range clientIds {
+		pinClientIds = append(pinClientIds, clientId)
+	}
+	pins := model.GetSnTopPrefixPins(ctx, pinClientIds, settings, tempo)
 	lookup := []server.Id{}
 	networkOf := map[server.Id]server.Id{}
 	for clientId := range clientIds {
@@ -959,6 +1004,35 @@ func snTopGatherInputs(
 	fleets = snTopAttachChainData(fleets, summary, inputs.incentive)
 
 	priorNetworks, priorFleets := model.GetSnTopEmaState(ctx)
+	if latest == nil && len(priorNetworks) != 0 {
+		// Retention may have removed the boundary while leaving EMA state.
+		// Reusing it at today's index would silently skip unrecoverable folds.
+		inputs.unavailable = "checkpoint_missing"
+		return inputs
+	}
+	if latest != nil && latest.TempoSource != model.SnTopTempoSourceSummary {
+		for _, state := range priorNetworks {
+			if state.LastTempoIndex != tempo.Index-1 {
+				inputs.unavailable = "checkpoint_mismatch"
+				return inputs
+			}
+		}
+	}
+	var checkpoint *model.SnTopReplicaCheckpoint
+	if latest != nil {
+		checkpoint = latest.ReplicaCheckpoint
+	}
+	if checkpoint == nil {
+		priorFleets = nil
+	}
+	replica, replicaCheckpoint, replicaStates := snTopAdvanceReplica(ctx, summary, checkpoint, priorFleets)
+	inputs.replicaCheckpoint = replicaCheckpoint
+	priorFleets = replicaStates
+	if latest != nil && latest.TempoSource == model.SnTopTempoSourceSummary {
+		// Legacy receipt-time windows overlap the real cadence and cannot be
+		// an EMA predecessor of its first corrected estimate.
+		priorNetworks = nil
+	}
 	for networkId := range priorNetworks {
 		networks[networkId] = true
 	}
@@ -976,6 +1050,7 @@ func snTopGatherInputs(
 		NetworkCreateTimes: model.GetNetworkCreateTimes(ctx, networkIds),
 		PriorNetworks:      priorNetworks,
 		PriorFleets:        priorFleets,
+		Replica:            replica,
 		PrecisionAt200:     inputs.agreement.precisionAt200,
 		Math:               model.GetSnTopHeadMath(),
 	}
@@ -1097,18 +1172,8 @@ func snTopMeasureReplica(agreement *snTopAgreement, projection *model.SnTopProje
 	if summary == nil {
 		return
 	}
-	replicaByUid := map[uint16]*big.Rat{}
-	for _, fleet := range projection.Fleets {
-		uid := fleet.Fleet.Key.Uid
-		if replicaByUid[uid] == nil {
-			replicaByUid[uid] = new(big.Rat)
-		}
-		if fleet.ReplicaExact != nil {
-			replicaByUid[uid].Add(replicaByUid[uid], fleet.ReplicaExact)
-		}
-	}
 	for _, entry := range summary.Entries {
-		replica, ok := replicaByUid[entry.Uid]
+		replica, ok := projection.ReplicaUidScores[entry.Uid]
 		if !ok || entry.Score == nil {
 			continue
 		}

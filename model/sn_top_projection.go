@@ -119,6 +119,8 @@ type SnTopProjectionInput struct {
 	NetworkCreateTimes map[server.Id]time.Time
 	PriorNetworks      map[server.Id]SnTopUnitState
 	PriorFleets        map[SnTopFleetKey]SnTopUnitState
+	// Nil while complete authenticated evidence or its predecessor is missing.
+	Replica *SnTopReplica
 	// the measured precision at 200, nil until fleets bind (Q17)
 	PrecisionAt200 *float64
 	Math           SnTopHeadMath
@@ -148,11 +150,12 @@ type SnTopNetworkProjection struct {
 
 // SnTopFleetProjection is one claimed fleet's row: its exact replica.
 type SnTopFleetProjection struct {
-	Fleet           SnTopFleetInput
-	ReplicaScore    float64
-	ReplicaExact    *big.Rat
-	ReplicaRaw      float64
-	ReplicaSelected bool
+	Fleet            SnTopFleetInput
+	ReplicaScore     float64
+	ReplicaExact     *big.Rat
+	ReplicaRaw       float64
+	ReplicaSelected  bool
+	ReplicaAvailable bool
 }
 
 type SnTopProjection struct {
@@ -167,6 +170,7 @@ type SnTopProjection struct {
 	EligibleProviders int
 	NetworkStates     map[server.Id]SnTopUnitState
 	FleetStates       map[SnTopFleetKey]SnTopUnitState
+	ReplicaUidScores  map[uint16]*big.Rat
 }
 
 // prefix presence of one unit
@@ -325,10 +329,8 @@ func ProjectSnTop(input *SnTopProjectionInput) *SnTopProjection {
 	networkPresence := map[server.Id]snTopPresence{}
 	unclaimedPresence := map[server.Id]snTopPresence{}
 	fleetPresence := make([]snTopPresence, len(input.Fleets))
-	fleetShowed := make([]map[[32]byte]bool, len(input.Fleets))
 	for i := range input.Fleets {
 		fleetPresence[i] = snTopPresence{}
-		fleetShowed[i] = map[[32]byte]bool{}
 	}
 	verifyEligible := map[server.Id]bool{}
 	measurable := map[server.Id]bool{}
@@ -356,10 +358,6 @@ func ProjectSnTop(input *SnTopProjectionInput) *SnTopProjection {
 		for _, fleetIndex := range fleets {
 			for h, presence := range contribution {
 				fleetPresence[fleetIndex].add(h, presence)
-			}
-			// the replica counts trail evidence only (§5.8)
-			for _, h := range provider.TrailPrefixes {
-				fleetShowed[fleetIndex][h] = true
 			}
 		}
 		if len(fleets) == 0 {
@@ -568,40 +566,30 @@ func ProjectSnTop(input *SnTopProjectionInput) *SnTopProjection {
 		})
 	}
 
-	// the claimed fleets' exact replica (§5.8)
-	showed := map[SnTopFleetKey]map[[32]byte]bool{}
-	for i := range input.Fleets {
-		showed[input.Fleets[i].Key] = fleetShowed[i]
+	// The replica is prepared separately from authenticated sequence cuts.
+	// Preserve its prior checkpoint while evidence is unavailable.
+	projection.FleetStates = input.PriorFleets
+	if input.Replica != nil {
+		projection.FleetStates = input.Replica.States
 	}
-	raw := headMath.RawScores(showed)
-	priorExact := map[SnTopFleetKey]*big.Rat{}
-	for key, state := range input.PriorFleets {
-		if state.EmaExact != nil && 0 < state.EmaExact.Sign() {
-			priorExact[key] = state.EmaExact
-		}
-	}
-	next, err := headMath.Fold(raw, priorExact)
-	if err != nil {
-		// the inputs above are never negative; a failure is a defect
-		panic(err)
-	}
-	projection.FleetStates = map[SnTopFleetKey]SnTopUnitState{}
-	for key, value := range next {
-		score, _ := value.Float64()
-		projection.FleetStates[key] = SnTopUnitState{Ema: score, EmaExact: value, LastTempoIndex: input.TempoIndex}
-	}
-	// a UID's score sums its live identities' positive EMA values
+	// A UID's score sums the signed census, independent of current membership.
 	uidScores := map[uint16]*big.Rat{}
-	for i := range input.Fleets {
-		key := input.Fleets[i].Key
-		if value, ok := next[key]; ok {
+	if input.Replica != nil {
+		for key := range input.Replica.Live {
 			if uidScores[key.Uid] == nil {
 				uidScores[key.Uid] = new(big.Rat)
 			}
-			uidScores[key.Uid].Add(uidScores[key.Uid], value)
+			if value := input.Replica.States[key].EmaExact; value != nil {
+				uidScores[key.Uid].Add(uidScores[key.Uid], value)
+			}
 		}
+		projection.ReplicaUidScores = uidScores
 	}
-	selected, _, err := headMath.Select(uidScores, SnTopHeadSeats)
+	maximum := SnTopHeadSeats
+	if input.Replica != nil {
+		maximum = input.Replica.MaximumHeadFleets
+	}
+	selected, _, err := headMath.Select(uidScores, maximum)
 	if err != nil {
 		panic(err)
 	}
@@ -618,12 +606,15 @@ func ProjectSnTop(input *SnTopProjectionInput) *SnTopProjection {
 			ReplicaSelected: selectedUids[fleet.Key.Uid],
 			ReplicaExact:    new(big.Rat),
 		}
-		if value, ok := next[fleet.Key]; ok {
-			row.ReplicaExact = value
-			row.ReplicaScore, _ = value.Float64()
-		}
-		if value, ok := raw[fleet.Key]; ok {
-			row.ReplicaRaw, _ = value.Float64()
+		if input.Replica != nil && input.Replica.Live[fleet.Key] {
+			row.ReplicaAvailable = true
+			if value := input.Replica.States[fleet.Key].EmaExact; value != nil {
+				row.ReplicaExact = value
+				row.ReplicaScore, _ = value.Float64()
+			}
+			if value, ok := input.Replica.Raw[fleet.Key]; ok {
+				row.ReplicaRaw, _ = value.Float64()
+			}
 		}
 		projection.Fleets = append(projection.Fleets, row)
 	}

@@ -11,23 +11,25 @@ import (
 
 func TestProxyLockCacheBoundsUniqueIdentifiers(t *testing.T) {
 	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
-	cache := newProxyLockCache(proxyLockCacheMaxEntries)
+	ttl := 30 * time.Second
+	maxEntries := 16 * 1024
+	cache := newProxyLockCache(maxEntries, ttl)
 	extra := 257
 	evictions := 0
 
-	for i := 0; i < proxyLockCacheMaxEntries+extra; i++ {
+	for i := 0; i < maxEntries+extra; i++ {
 		result := cache.put(proxyLockCacheTestID(i), proxyLockEntry{
 			found:  true,
-			expiry: now.Add(proxyLockCacheTtl),
+			expiry: now.Add(ttl),
 		}, now)
 		evictions += result.evicted
-		if result.size > proxyLockCacheMaxEntries {
-			t.Fatalf("cache exceeded hard capacity after insert %d: size=%d capacity=%d", i, result.size, proxyLockCacheMaxEntries)
+		if result.size > maxEntries {
+			t.Fatalf("cache exceeded hard capacity after insert %d: size=%d capacity=%d", i, result.size, maxEntries)
 		}
 	}
 
-	if got := cache.size(); got != proxyLockCacheMaxEntries {
-		t.Fatalf("cache size=%d, want hard capacity %d", got, proxyLockCacheMaxEntries)
+	if got := cache.size(); got != maxEntries {
+		t.Fatalf("cache size=%d, want hard capacity %d", got, maxEntries)
 	}
 	if evictions != extra {
 		t.Fatalf("evictions=%d, want %d", evictions, extra)
@@ -35,14 +37,14 @@ func TestProxyLockCacheBoundsUniqueIdentifiers(t *testing.T) {
 	if result := cache.get(proxyLockCacheTestID(0), now); result.found {
 		t.Fatal("oldest unique identifier survived bounded churn")
 	}
-	if result := cache.get(proxyLockCacheTestID(proxyLockCacheMaxEntries+extra-1), now); !result.found {
+	if result := cache.get(proxyLockCacheTestID(maxEntries+extra-1), now); !result.found {
 		t.Fatal("newest unique identifier was not retained")
 	}
 }
 
 func TestProxyLockCacheEvictsLeastRecentlyUsed(t *testing.T) {
 	now := time.Date(2026, 9, 1, 12, 1, 0, 0, time.UTC)
-	cache := newProxyLockCache(2)
+	cache := newProxyLockCache(2, 30*time.Second)
 	entry := proxyLockEntry{found: true, expiry: now.Add(time.Minute)}
 
 	cache.put(proxyLockCacheTestID(1), entry, now)
@@ -65,7 +67,7 @@ func TestProxyLockCacheEvictsLeastRecentlyUsed(t *testing.T) {
 
 func TestProxyLockCacheExpiresAndRemovesEntry(t *testing.T) {
 	now := time.Date(2026, 9, 1, 12, 2, 0, 0, time.UTC)
-	cache := newProxyLockCache(4)
+	cache := newProxyLockCache(4, 30*time.Second)
 	id := proxyLockCacheTestID(1)
 	cache.put(id, proxyLockEntry{found: true, expiry: now.Add(30 * time.Second)}, now)
 
@@ -82,12 +84,13 @@ func TestProxyLockCacheExpiresAndRemovesEntry(t *testing.T) {
 
 func TestProxyLockCacheSweepsColdExpiredEntries(t *testing.T) {
 	now := time.Date(2026, 9, 1, 12, 2, 30, 0, time.UTC)
-	cache := newProxyLockCache(4)
-	entry := proxyLockEntry{found: true, expiry: now.Add(proxyLockCacheTtl)}
+	ttl := 30 * time.Second
+	cache := newProxyLockCache(4, ttl)
+	entry := proxyLockEntry{found: true, expiry: now.Add(ttl)}
 	cache.put(proxyLockCacheTestID(1), entry, now)
 	cache.put(proxyLockCacheTestID(2), entry, now)
 
-	result := cache.get(proxyLockCacheTestID(3), now.Add(proxyLockCacheTtl))
+	result := cache.get(proxyLockCacheTestID(3), now.Add(ttl))
 	if result.found || result.expired != 2 || result.size != 0 {
 		t.Fatalf("unrelated lookup result=%+v, want both cold expired keys swept", result)
 	}
@@ -98,7 +101,7 @@ func TestProxyLockCacheSweepsColdExpiredEntries(t *testing.T) {
 
 func TestProxyLockCacheCopiesPrefixesAndPreservesFreshWinner(t *testing.T) {
 	now := time.Date(2026, 9, 1, 12, 3, 0, 0, time.UTC)
-	cache := newProxyLockCache(4)
+	cache := newProxyLockCache(4, 30*time.Second)
 	id := proxyLockCacheTestID(1)
 	originalPrefix := netip.MustParsePrefix("192.0.2.0/24")
 	prefixes := []netip.Prefix{originalPrefix}

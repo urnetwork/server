@@ -170,6 +170,19 @@ Each restore has a test that passes on caad1de6, fails on d16f4a40 and passes
 on the fix. The round-1 operation-count tests still pass, so the CPU savings
 on the hot paths stay.
 
+**Checked, no change needed:** the 10-30 client-loop timer change, #5 (connect
+89d943bb), runs in the proxy now. It lies outside the caad1de6 to d16f4a40
+range above, so it was checked separately:
+- Its loops park only when they have nothing timed to do:
+  - contract stats park after an epoch with no change and emit one epoch
+    after the next change;
+  - IP association clusters only dirty state, as before;
+  - the outcome watchdog stops only once `everAdded` disarms it for good.
+- The shared pause detector arms the same `schedulerPauseProbeInterval` timer
+  and judges each client with that client's own tolerance and hold.
+
+No detection bound moved.
+
 ## Status
 
 - **server:** 24b202b09 pushed to main. It takes effect with the next connect
@@ -178,6 +191,9 @@ on the hot paths stay.
 - **connect:** the restores above are in connect main at 005fd3ca (pushed
   10-30). They ship with each service's next build; the proxy and apps carry
   #4.
+- **proxy:** the running proxy (1085611320) carries b096a4a1, so its hosted
+  devices notice a dead connect server only at the 30 s read deadline. That
+  lasts until a proxy build includes 239c8eef.
 - **Tests on 005fd3ca:** the full connect suite passes on Linux (go 1.27.3:
   vet clean, 506 pass, 4 skip) and on macOS. On macOS one load-sensitive
   throughput floor, `TestWindowPathSdkBidirectionalMedium`, missed by 0.3%

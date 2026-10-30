@@ -79,6 +79,7 @@ func snTopChainValidatorSummary(ctx context.Context) *SnTopValidatorSummary {
 
 func snTopValidatorSummaryFromModel(summary *model.SnHeadSummary) *SnTopValidatorSummary {
 	out := &SnTopValidatorSummary{
+		Stored:              summary,
 		NativeEpoch:         summary.NativeEpoch,
 		NativeSnapshotBlock: summary.NativeSnapshotBlock,
 		SettlementEpoch:     summary.SettlementEpoch,

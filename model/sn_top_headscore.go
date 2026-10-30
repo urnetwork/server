@@ -10,7 +10,7 @@ import (
 // validator's own exact head arithmetic (design question 8): the board's
 // claimed-fleet replica computes a fleet's head score bit for bit as the
 // validator does.
-type snTopHeadscoreMath struct{}
+type snTopHeadscoreMath struct{ alpha headscore.Ratio }
 
 // the policy's head_score_ema on mainnet (sn deploy/mainnet/policy-v1.yml)
 var snTopHeadscoreAlpha = headscore.Ratio{Numerator: 1, Denominator: 4}
@@ -19,10 +19,24 @@ func snTopHeadscoreKey(key SnTopFleetKey) headscore.FleetKey {
 	return headscore.FleetKey{FleetID: key.FleetId, Hotkey: key.Hotkey, Generation: key.Generation, UID: key.Uid}
 }
 
-func (snTopHeadscoreMath) Alpha() *big.Rat {
+// NewSnTopHeadMath uses the authenticated measurement's policy, which can
+// differ from the estimate's default smoothing weight.
+func NewSnTopHeadMath(numerator, denominator uint64) SnTopHeadMath {
+	return snTopHeadscoreMath{alpha: headscore.Ratio{Numerator: numerator, Denominator: denominator}}
+}
+
+func (self snTopHeadscoreMath) ratio() headscore.Ratio {
+	if self.alpha.Denominator == 0 {
+		return snTopHeadscoreAlpha
+	}
+	return self.alpha
+}
+
+func (self snTopHeadscoreMath) Alpha() *big.Rat {
+	alpha := self.ratio()
 	return new(big.Rat).SetFrac(
-		new(big.Int).SetUint64(snTopHeadscoreAlpha.Numerator),
-		new(big.Int).SetUint64(snTopHeadscoreAlpha.Denominator),
+		new(big.Int).SetUint64(alpha.Numerator),
+		new(big.Int).SetUint64(alpha.Denominator),
 	)
 }
 
@@ -30,7 +44,7 @@ func (snTopHeadscoreMath) RawScores(showed map[SnTopFleetKey]map[[32]byte]bool) 
 	return headscore.RawScores(showed)
 }
 
-func (snTopHeadscoreMath) Fold(raw map[SnTopFleetKey]*big.Rat, prior map[SnTopFleetKey]*big.Rat) (map[SnTopFleetKey]*big.Rat, error) {
+func (self snTopHeadscoreMath) Fold(raw map[SnTopFleetKey]*big.Rat, prior map[SnTopFleetKey]*big.Rat) (map[SnTopFleetKey]*big.Rat, error) {
 	keys := map[headscore.FleetKey]SnTopFleetKey{}
 	scoreRaw := map[headscore.FleetKey]*big.Rat{}
 	for key, value := range raw {
@@ -44,7 +58,7 @@ func (snTopHeadscoreMath) Fold(raw map[SnTopFleetKey]*big.Rat, prior map[SnTopFl
 		keys[converted] = key
 		scorePrior[converted] = value
 	}
-	records, err := headscore.Fold(scorePrior, scoreRaw, snTopHeadscoreAlpha)
+	records, err := headscore.Fold(scorePrior, scoreRaw, self.ratio())
 	if err != nil {
 		return nil, err
 	}

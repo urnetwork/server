@@ -258,6 +258,10 @@ func StEpochClosePost(
 	if _, current := stTaskDeploymentCurrent(stEpochClose.DeploymentKey); !current {
 		return nil
 	}
+	allowed, err := controller.StV1TaskContinuationAllowedInTx(clientSession.Ctx, tx, stEpochClose.Epoch)
+	if err != nil || !allowed {
+		return err
+	}
 	if stEpochCloseResult.Retry {
 		if stEpochClose.Attempt+1 < stEpochCloseMaxAttempts {
 			task.ScheduleTaskInTx(
@@ -335,6 +339,10 @@ func StCommitRootPost(
 ) error {
 	if _, current := stTaskDeploymentCurrent(stCommitRoot.DeploymentKey); !current {
 		return nil
+	}
+	allowed, err := controller.StV1TaskContinuationAllowedInTx(clientSession.Ctx, tx, stCommitRoot.Epoch)
+	if err != nil || !allowed {
+		return err
 	}
 	if stCommitRootResult.Retry && stCommitRoot.Attempt+1 < stCommitRootMaxAttempts {
 		task.ScheduleTaskInTx(

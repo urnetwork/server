@@ -180,19 +180,14 @@ func TestSnTopShouldFold(t *testing.T) {
 	connect.AssertEqual(t, reason, "recent")
 }
 
-// A current head summary names the validator's own tempo; a stale one
-// hands the cadence back to the chain anchor.
+// Legacy receipt-time estimates restart on the stable chain cadence.
 func TestSnTopFoldTempoFromTheValidatorSummary(t *testing.T) {
 	now := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
 	anchor := &model.SnTopTempoAnchor{Source: model.SnTopTempoSourceChain, Block: 1_000_000, TimeMs: now.UnixMilli(), Epoch: 7, EpochStartBlock: 999_000, EpochBlocks: 50400}
 	summary := &SnTopValidatorSummary{NativeEpoch: 4321, NativeSnapshotBlock: 999_990, SettlementEpoch: 7, ReceivedAt: now.Add(-time.Minute)}
 	previous := &model.SnTopSnapshot{TempoSource: model.SnTopTempoSourceSummary, TempoIndex: 4320, TempoEndTime: now.Add(-73 * time.Minute), ComputedAt: now.Add(-10 * time.Minute)}
 	tempo := snTopFoldTempo(anchor, summary, previous, now)
-	connect.AssertEqual(t, tempo.Source, model.SnTopTempoSourceSummary)
-	connect.AssertEqual(t, tempo.Index, int64(4321))
-	connect.AssertEqual(t, tempo.EndBlock, uint64(999_990))
-	connect.AssertEqual(t, tempo.StartTime, previous.TempoEndTime)
-	connect.AssertEqual(t, tempo.EndTime, summary.ReceivedAt)
+	connect.AssertEqual(t, tempo, model.SnTopCompletedTempo(anchor, now))
 	// the previous fold was ten minutes ago: wait
 	fold, _ := snTopShouldFold(tempo, previous, now)
 	connect.AssertEqual(t, fold, false)
@@ -271,14 +266,10 @@ func TestSnTopAttachChainData(t *testing.T) {
 
 	// the replica check compares exact values, UID by UID
 	agreement := snTopAgreement{}
-	snTopMeasureReplica(&agreement, &model.SnTopProjection{Fleets: []*model.SnTopFleetProjection{
-		{Fleet: fleets[0], ReplicaExact: big.NewRat(3, 2)},
-	}}, summary)
+	snTopMeasureReplica(&agreement, &model.SnTopProjection{ReplicaUidScores: map[uint16]*big.Rat{fleets[0].Key.Uid: big.NewRat(3, 2)}}, summary)
 	connect.AssertEqual(t, agreement.replicaMatches, 1)
 	connect.AssertEqual(t, agreement.replicaMismatches, 0)
-	snTopMeasureReplica(&agreement, &model.SnTopProjection{Fleets: []*model.SnTopFleetProjection{
-		{Fleet: fleets[0], ReplicaExact: big.NewRat(3, 4)},
-	}}, summary)
+	snTopMeasureReplica(&agreement, &model.SnTopProjection{ReplicaUidScores: map[uint16]*big.Rat{fleets[0].Key.Uid: big.NewRat(3, 4)}}, summary)
 	connect.AssertEqual(t, agreement.replicaMismatches, 1)
 	snTopMeasureIncentive(&agreement, summary, incentive)
 	connect.AssertEqual(t, agreement.selectedEarning, 1)

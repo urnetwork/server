@@ -26,8 +26,10 @@ func wgAdmissionTestManager(t *testing.T) *ProxyDeviceManager {
 	t.Helper()
 	ctx := server.WithoutPostgres(t.Context())
 	manager := NewProxyDeviceManager(ctx, &ProxyDeviceManagerSettings{
-		CheckProxyDeviceIdleTimeout: time.Minute,
-		NetworkSpace:                &sdk.NetworkSpace{},
+		CheckProxyDeviceIdleTimeout:    time.Minute,
+		NetworkSpace:                   &sdk.NetworkSpace{},
+		DeviceCreationRetryTimeout:     time.Second,
+		CreationFailureSweepMinEntries: 1024,
 	})
 	t.Cleanup(func() {
 		if err := manager.CloseAndWait(context.Background()); err != nil {
@@ -228,7 +230,7 @@ func TestWgTunFactoryPanicCompletesCoalescedManagerOpeners(t *testing.T) {
 			t.Fatal("constructor panic retained an unfinished per-id marker")
 		}
 		// a later attempt comes after the failure's creation cooldown
-		time.Sleep(deviceCreationRetryTimeout)
+		time.Sleep(manager.settings.DeviceCreationRetryTimeout)
 		if _, err := manager.OpenProxyDevice(proxyId); !errors.Is(err, setupErr) || calls.Load() != 2 {
 			t.Fatal("completed panic prevented a later construction attempt")
 		}

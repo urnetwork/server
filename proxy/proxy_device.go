@@ -25,12 +25,16 @@ import (
 
 func DefaultProxyDeviceManagerSettings() *ProxyDeviceManagerSettings {
 	return &ProxyDeviceManagerSettings{
-		CheckProxyDeviceIdleTimeout:  1 * time.Minute,
-		SequenceBufferSize:           2048,
-		DeviceMemoryTargetByteCount:  proxyDeviceMemoryTargetByteCountFromConfig(),
-		HostedMintConcurrency:        defaultHostedMintConcurrency,
-		HostedContractConcurrency:    proxyHostedContractConcurrencyFromConfig(),
-		HostedEvaluationPoolMultiple: defaultHostedEvaluationPoolMultiple,
+		CheckProxyDeviceIdleTimeout:    1 * time.Minute,
+		SequenceBufferSize:             2048,
+		DeviceMemoryTargetByteCount:    proxyDeviceMemoryTargetByteCountFromConfig(),
+		HostedMintConcurrency:          defaultHostedMintConcurrency,
+		HostedContractConcurrency:      proxyHostedContractConcurrencyFromConfig(),
+		HostedEvaluationPoolMultiple:   defaultHostedEvaluationPoolMultiple,
+		ProxyLockCacheTtl:              30 * time.Second,
+		ProxyLockCacheMaxEntries:       16 * 1024,
+		DeviceCreationRetryTimeout:     time.Second,
+		CreationFailureSweepMinEntries: 1024,
 	}
 }
 
@@ -136,6 +140,18 @@ type ProxyDeviceManagerSettings struct {
 	CheckProxyDeviceIdleTimeout time.Duration
 	SequenceBufferSize          int
 	DeviceMemoryTargetByteCount model.ByteCount
+	// Bounds stale caller restrictions and spaces cache expiry sweeps. The
+	// default avoids repeated admission I/O; nonpositive disables new caching.
+	ProxyLockCacheTtl time.Duration
+	// Bounds memoized caller restrictions even for a stream of unique valid or
+	// expired credentials. Nonpositive disables new cache entries.
+	ProxyLockCacheMaxEntries int
+	// Holds failed construction back so repeated opens do not repeat durable
+	// setup. Nonpositive disables the cooldown; waiters still share each result.
+	DeviceCreationRetryTimeout time.Duration
+	// Initial failure-count threshold for expiry sweeps; later sweeps follow
+	// map growth. Nonpositive starts at one entry.
+	CreationFailureSweepMinEntries int
 	// HostedMintConcurrency bounds the derived-client registrations in flight
 	// across every device of this manager; past it a registration is refused
 	// as a rate limit (see localclient.MintAdmission). Nonpositive is unbounded.
@@ -204,7 +220,11 @@ type ProxyDeviceManager struct {
 	networkSpaceCloser  func(*sdk.NetworkSpace)
 	ownsNetworkSpace    bool
 	proxyDeviceBuilder  func(server.Id) (*ProxyDevice, error)
-	windowIdentityGate  *windowIdentityRestoreGate
+	// Admission reads use each caller's context; construction retains the
+	// manager context because its result is shared by independent callers.
+	proxyDeviceConfigReader func(context.Context, server.Id) *model.ProxyDeviceConfig
+	proxyFeatureReader      func(context.Context, server.Id, string) bool
+	windowIdentityGate      *windowIdentityRestoreGate
 	// One registration bound shared by every device this manager opens.
 	mintAdmission *localclient.MintAdmission
 	// One contract creation bound shared by every device this manager opens.
@@ -231,8 +251,8 @@ type ProxyDeviceManager struct {
 	// closes the devices of removed clients; nil without settings.ClientRemoved
 	clientRemoved *clientRemovedSubscriber
 
-	// Each proxy id's last failed device creation, held for
-	// deviceCreationRetryTimeout so a failing id cannot re-run its setup on
+	// Each proxy id's last failed device creation, held for the configured
+	// cooldown so a failing id cannot re-run its setup on
 	// every open. creationFailureLock is taken under a pdState.StateLock and
 	// takes no other lock.
 	creationFailureLock     sync.Mutex
@@ -250,10 +270,6 @@ type ProxyDeviceManager struct {
 	// deltas; sampled slot-full state does not establish event-time saturation.
 	platformPreemptions proxyPlatformPreemptionTracker
 }
-
-// proxyLockCacheTtl bounds how long a stale ip lock can be enforced after the proxy
-// device config changes.
-const proxyLockCacheTtl = 30 * time.Second
 
 type proxyLockEntry struct {
 	// found is false when the proxy id has no config at all -- it was deleted, expired,
@@ -280,7 +296,7 @@ func NewProxyDeviceManager(ctx context.Context, settings *ProxyDeviceManagerSett
 		proxyDevices:     map[server.Id]*proxyDeviceState{},
 		creationFailures: map[server.Id]deviceCreationFailure{},
 		clientDevices:    map[server.Id]map[server.Id]*ProxyDevice{},
-		lockCache:        newProxyLockCache(proxyLockCacheMaxEntries),
+		lockCache:        newProxyLockCache(settings.ProxyLockCacheMaxEntries, settings.ProxyLockCacheTtl),
 		windowIdentityGate: newWindowIdentityRestoreGate(
 			settings.HoldWindowIdentityRestore,
 		),
@@ -293,6 +309,9 @@ func NewProxyDeviceManager(ctx context.Context, settings *ProxyDeviceManagerSett
 		networkSpace.Close()
 	}
 	manager.proxyDeviceBuilder = manager.newProxyDevice
+	manager.proxyDeviceConfigReader = model.GetProxyDeviceConfigForAdmission
+	manager.proxyFeatureReader = model.ProxyFeatureAllowedForAdmission
+	proxyLockCacheCapacityGauge.Set(float64(manager.lockCache.maxEntries))
 	if settings.ClientRemoved != nil {
 		manager.clientRemoved = newClientRemovedSubscriber(cancelCtx, manager, settings.ClientRemoved)
 	}
@@ -348,7 +367,24 @@ func (self *ProxyDeviceManager) networkSpaceForDevice() *sdk.NetworkSpace {
 	return self.networkSpace
 }
 
+// Opens a device with the manager's lifetime. A caller that starts construction
+// retains its synchronous setup and unpublished-device cleanup ownership.
 func (self *ProxyDeviceManager) OpenProxyDevice(proxyId server.Id) (*ProxyDevice, error) {
+	return self.openProxyDevice(self.ctx, proxyId, false)
+}
+
+// Bounds this caller's wait while keeping shared construction and the device
+// owned by the manager. Cancellation never stops another caller's setup.
+func (self *ProxyDeviceManager) OpenProxyDeviceWithContext(ctx context.Context, proxyId server.Id) (*ProxyDevice, error) {
+	return self.openProxyDevice(ctx, proxyId, true)
+}
+
+// Admits an opener and coalesces one construction per id. A cancellable creator
+// transfers its construction to a separately retained manager worker.
+func (self *ProxyDeviceManager) openProxyDevice(ctx context.Context, proxyId server.Id, cancellableCreator bool) (*ProxyDevice, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	self.lifecycleLock.Lock()
 	if self.closed {
 		self.lifecycleLock.Unlock()
@@ -388,6 +424,14 @@ func (self *ProxyDeviceManager) OpenProxyDevice(proxyId server.Id) (*ProxyDevice
 
 	for {
 		pdState.StateLock.Lock()
+		if err := ctx.Err(); err != nil {
+			pdState.StateLock.Unlock()
+			return nil, err
+		}
+		if err := self.ctx.Err(); err != nil {
+			pdState.StateLock.Unlock()
+			return nil, err
+		}
 
 		// reuse a live device
 		if pd := pdState.ProxyDevice; pd != nil {
@@ -410,8 +454,13 @@ func (self *ProxyDeviceManager) OpenProxyDevice(proxyId server.Id) (*ProxyDevice
 			pdState.StateLock.Unlock()
 			select {
 			case <-c.done:
+			case <-ctx.Done():
+				return nil, ctx.Err()
 			case <-self.ctx.Done():
-				return nil, fmt.Errorf("Proxy device manager closed.")
+				return nil, self.ctx.Err()
+			}
+			if err := ctx.Err(); err != nil {
+				return nil, err
 			}
 			if c.err != nil {
 				return nil, c.err
@@ -431,62 +480,81 @@ func (self *ProxyDeviceManager) OpenProxyDevice(proxyId server.Id) (*ProxyDevice
 		// cold start never blocks other proxy ids/clients (fix E).
 		c := &deviceCreation{done: make(chan struct{})}
 		pdState.creating = c
-		pdState.StateLock.Unlock()
-
-		// Each new device owns the configured 24 MiB target. Other devices
-		// cannot consume or reject this device's admission budget.
-		// Construction owns the signed proxy's durable configuration and identity
-		// reads. Recover here so every coalesced opener receives a completed result.
-		pd, err := server.HandleError2(func() (*ProxyDevice, error) {
-			return self.proxyDeviceBuilder(proxyId)
-		}, func(err error) (*ProxyDevice, error) {
-			return nil, err
-		})
-
-		accepted := false
-		pdState.StateLock.Lock()
-		pdState.creating = nil
-		if err == nil {
-			self.lifecycleLock.Lock()
-			if self.closed {
-				err = fmt.Errorf("Proxy device manager closed.")
-			} else if cancelErr := self.ctx.Err(); cancelErr != nil {
-				err = cancelErr
-			} else {
-				self.deviceWorkers.Add(2)
-				pdState.ProxyDevice = pd
-				accepted = true
-			}
-			self.lifecycleLock.Unlock()
-		}
-		if accepted {
-			self.addClientDevice(proxyId, pd)
-		}
-		if err != nil {
-			// before the state unlocks, so no opener starts another creation
-			// between this failure and its cooldown
-			self.holdCreation(proxyId, err)
+		if cancellableCreator {
+			// This admitted opener keeps both counts nonzero until ownership is
+			// transferred, so shutdown and map cleanup also join the new worker.
+			self.openWorkers.Add(1)
+			pdState.users.Add(1)
 		}
 		pdState.StateLock.Unlock()
-
-		if accepted {
-			self.startProxyDevice(proxyId, pd)
-		} else {
-			if pd != nil {
-				_ = pd.Close()
-			}
+		if cancellableCreator {
+			go func() {
+				defer self.openWorkers.Done()
+				defer self.releaseProxyDeviceState(proxyId, pdState)
+				self.createProxyDevice(proxyId, pdState, c)
+			}()
+			continue
 		}
-
-		// waiters re-read pdState.ProxyDevice (re-validating liveness) on wake, so
-		// only the error needs to be shared directly
-		c.err = err
-		close(c.done)
-
-		if err != nil {
-			return nil, err
-		}
-		return pd, nil
+		return self.createProxyDevice(proxyId, pdState, c)
 	}
+}
+
+// Publishes one construction result, completes every waiter, and joins any
+// rejected device's cleanup. The caller owns its worker and state references.
+func (self *ProxyDeviceManager) createProxyDevice(proxyId server.Id, pdState *proxyDeviceState, c *deviceCreation) (*ProxyDevice, error) {
+	// Each new device owns the configured 24 MiB target. Other devices
+	// cannot consume or reject this device's admission budget.
+	// Construction owns the signed proxy's durable configuration and identity
+	// reads. Recover here so every coalesced opener receives a completed result.
+	pd, err := server.HandleError2(func() (*ProxyDevice, error) {
+		return self.proxyDeviceBuilder(proxyId)
+	}, func(err error) (*ProxyDevice, error) {
+		return nil, err
+	})
+
+	accepted := false
+	pdState.StateLock.Lock()
+	pdState.creating = nil
+	if err == nil {
+		self.lifecycleLock.Lock()
+		if self.closed {
+			err = fmt.Errorf("Proxy device manager closed.")
+		} else if cancelErr := self.ctx.Err(); cancelErr != nil {
+			err = cancelErr
+		} else {
+			self.deviceWorkers.Add(2)
+			pdState.ProxyDevice = pd
+			accepted = true
+		}
+		self.lifecycleLock.Unlock()
+	}
+	if accepted {
+		self.addClientDevice(proxyId, pd)
+	}
+	if err != nil {
+		// before the state unlocks, so no opener starts another creation
+		// between this failure and its cooldown
+		self.holdCreation(proxyId, err)
+	}
+	pdState.StateLock.Unlock()
+
+	if accepted {
+		self.startProxyDevice(proxyId, pd)
+	} else {
+		if pd != nil {
+			_ = pd.Close()
+		}
+	}
+
+	// waiters re-read pdState.ProxyDevice (re-validating liveness) on wake, so
+	// only the error needs to be shared directly
+	c.err = err
+	close(c.done)
+
+	if err != nil {
+		return nil, err
+	}
+	return pd, nil
 }
 
 // An opener may retain a state pointer while construction or teardown runs
@@ -510,17 +578,7 @@ func (self *ProxyDeviceManager) releaseProxyDeviceState(proxyId server.Id, pdSta
 // removed or expired, or never existed.
 var errProxyDeviceNotFound = errors.New("Proxy device does not exist.")
 
-// A failed device creation holds its proxy id's next one back this long, as
-// wgTunFactory holds back one WireGuard peer's. Each creation reads Redis and
-// PostgreSQL and mints a hosted session; a failing id opened by every retry
-// of every CONNECT would otherwise run them in a tight loop. Opens inside the
-// cooldown return the failure and do not extend it.
-const deviceCreationRetryTimeout = time.Second
-
-// The failures map is swept of expired entries when it reaches this size, and
-// then when it doubles, so it stays near the failure rate times the cooldown.
-const creationFailureSweepLen = 1024
-
+// One failed setup's result and the next time this id may construct again.
 type deviceCreationFailure struct {
 	err        error
 	retryAfter time.Time
@@ -544,6 +602,9 @@ func (self *ProxyDeviceManager) creationCooldown(proxyId server.Id) error {
 
 // Holds the proxy id's next device creation back for the cooldown.
 func (self *ProxyDeviceManager) holdCreation(proxyId server.Id, err error) {
+	if self.settings.DeviceCreationRetryTimeout <= 0 {
+		return
+	}
 	self.creationFailureLock.Lock()
 	defer self.creationFailureLock.Unlock()
 	now := time.Now()
@@ -553,11 +614,11 @@ func (self *ProxyDeviceManager) holdCreation(proxyId server.Id, err error) {
 				delete(self.creationFailures, id)
 			}
 		}
-		self.creationFailureSweepLen = max(creationFailureSweepLen, 2*len(self.creationFailures))
+		self.creationFailureSweepLen = max(1, self.settings.CreationFailureSweepMinEntries, 2*len(self.creationFailures))
 	}
 	self.creationFailures[proxyId] = deviceCreationFailure{
 		err:        err,
-		retryAfter: now.Add(deviceCreationRetryTimeout),
+		retryAfter: now.Add(self.settings.DeviceCreationRetryTimeout),
 	}
 }
 
@@ -565,7 +626,7 @@ func (self *ProxyDeviceManager) holdCreation(proxyId server.Id, err error) {
 // Its configuration and identity reads may use PostgreSQL; setup runs without
 // manager or device-state locks and is never repeated by an established tun.
 func (self *ProxyDeviceManager) newProxyDevice(proxyId server.Id) (*ProxyDevice, error) {
-	proxyDeviceConfig := model.GetProxyDeviceConfig(self.ctx, proxyId)
+	proxyDeviceConfig := self.proxyDeviceConfigReader(self.ctx, proxyId)
 	if proxyDeviceConfig == nil {
 		return nil, errProxyDeviceNotFound
 	}
@@ -679,40 +740,82 @@ var errCallerNotAuthorized = errors.New("Not authorized")
 // for a proxy id with no config, errCallerNotAuthorized for a caller outside
 // the ip lock.
 func (self *ProxyDeviceManager) checkCaller(proxyId server.Id, addr netip.Addr) error {
-	entry := self.proxyLock(proxyId)
+	return self.checkCallerWithContext(self.ctx, proxyId, addr)
+}
 
-	// log the peppered hash of the caller, not the raw address (and not the
-	// lock subnets, which for a LockCallerIp config are the customer's /32) —
-	// the rest of the request path (transport_announce, rate limits) already
-	// logs hex(ClientIpHash), so a refused caller stays correlatable with its
-	// other log lines without putting the address itself in the logs
-	if !entry.found {
-		callerHash := server.ClientIpHashForAddr(addr)
-		glog.Infof("[proxy]caller %x refused: proxy %s has no config\n", callerHash[:8], proxyId)
-		return errProxyDeviceNotFound
-	}
+// Retains the request's deadline through cold configuration reads and preserves
+// raised database cancellation as an error, never an authorization refusal.
+func (self *ProxyDeviceManager) checkCallerWithContext(ctx context.Context, proxyId server.Id, addr netip.Addr) error {
+	return server.HandleError1(func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		entry := self.proxyLock(ctx, proxyId)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 
-	if len(entry.lockSubnets) == 0 {
-		// the customer did not ask for an ip lock
-		return nil
-	}
+		// log the peppered hash of the caller, not the raw address (and not the
+		// lock subnets, which for a LockCallerIp config are the customer's /32) —
+		// the rest of the request path (transport_announce, rate limits) already
+		// logs hex(ClientIpHash), so a refused caller stays correlatable with its
+		// other log lines without putting the address itself in the logs
+		if !entry.found {
+			callerHash := server.ClientIpHashForAddr(addr)
+			glog.Infof("[proxy]caller %x refused: proxy %s has no config\n", callerHash[:8], proxyId)
+			return errProxyDeviceNotFound
+		}
 
-	for _, lockSubnet := range entry.lockSubnets {
-		if subnetContains(lockSubnet, addr) {
+		if len(entry.lockSubnets) == 0 {
+			// the customer did not ask for an ip lock
 			return nil
 		}
-	}
 
-	callerHash := server.ClientIpHashForAddr(addr)
-	glog.Infof(
-		"[proxy]caller %x refused: outside the ip lock for proxy %s (%d subnets)\n",
-		callerHash[:8], proxyId, len(entry.lockSubnets),
-	)
-	return errCallerNotAuthorized
+		for _, lockSubnet := range entry.lockSubnets {
+			if subnetContains(lockSubnet, addr) {
+				return nil
+			}
+		}
+
+		callerHash := server.ClientIpHashForAddr(addr)
+		glog.Infof(
+			"[proxy]caller %x refused: outside the ip lock for proxy %s (%d subnets)\n",
+			callerHash[:8], proxyId, len(entry.lockSubnets),
+		)
+		return errCallerNotAuthorized
+	}, func(err error) error {
+		if cancelErr := ctx.Err(); cancelErr != nil {
+			return cancelErr
+		}
+		return err
+	})
+}
+
+// Checks one connection's plan under its own deadline. Model reads may raise;
+// cancellation and lookup failures must remain distinct from a denied feature.
+func (self *ProxyDeviceManager) checkFeature(ctx context.Context, proxyId server.Id, feature string) error {
+	return server.HandleError1(func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		allowed := self.proxyFeatureReader(ctx, proxyId, feature)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if !allowed {
+			return errCallerNotAuthorized
+		}
+		return nil
+	}, func(err error) error {
+		if cancelErr := ctx.Err(); cancelErr != nil {
+			return cancelErr
+		}
+		return err
+	})
 }
 
 // proxyLock returns the ip lock for a proxy id, memoized.
-func (self *ProxyDeviceManager) proxyLock(proxyId server.Id) proxyLockEntry {
+func (self *ProxyDeviceManager) proxyLock(ctx context.Context, proxyId server.Id) proxyLockEntry {
 	now := time.Now()
 
 	result := self.lockCache.get(proxyId, now)
@@ -726,14 +829,19 @@ func (self *ProxyDeviceManager) proxyLock(proxyId server.Id) proxyLockEntry {
 	}
 	proxyLockCacheMissesCounter.Inc()
 
-	proxyDeviceConfig := model.GetProxyDeviceConfig(self.ctx, proxyId)
+	proxyDeviceConfig := self.proxyDeviceConfigReader(ctx, proxyId)
+	// A canceled read must not publish a negative cache entry for other callers.
+	server.Raise(ctx.Err())
 
 	entry := proxyLockEntry{
 		found:  proxyDeviceConfig != nil,
-		expiry: now.Add(proxyLockCacheTtl),
+		expiry: now.Add(self.settings.ProxyLockCacheTtl),
 	}
 	if proxyDeviceConfig != nil {
 		entry.lockSubnets = proxyDeviceConfig.LockSubnets
+	}
+	if self.settings.ProxyLockCacheTtl <= 0 || self.settings.ProxyLockCacheMaxEntries <= 0 {
+		return entry
 	}
 
 	result = self.lockCache.put(proxyId, entry, now)
@@ -930,7 +1038,7 @@ func (self *ProxyDeviceManager) CloseAndWait(ctx context.Context) error {
 type proxyDeviceState struct {
 	StateLock   sync.Mutex
 	ProxyDevice *ProxyDevice
-	// users counts OpenProxyDevice callers retaining this state pointer. A
+	// users counts openers and construction workers retaining this state pointer. A
 	// lookup increments it under manager.stateLock before teardown may remove
 	// the map entry; its zero check is performed with that lock held.
 	users atomic.Int64

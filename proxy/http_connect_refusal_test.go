@@ -33,8 +33,12 @@ func newHttpConnectTestManager(t testing.TB) *ProxyDeviceManager {
 	t.Helper()
 	ctx := server.WithoutPostgres(context.Background())
 	manager := NewProxyDeviceManager(ctx, &ProxyDeviceManagerSettings{
-		CheckProxyDeviceIdleTimeout: time.Minute,
-		NetworkSpace:                &sdk.NetworkSpace{},
+		CheckProxyDeviceIdleTimeout:    time.Minute,
+		NetworkSpace:                   &sdk.NetworkSpace{},
+		ProxyLockCacheTtl:              30 * time.Second,
+		ProxyLockCacheMaxEntries:       32,
+		DeviceCreationRetryTimeout:     time.Second,
+		CreationFailureSweepMinEntries: 1024,
 	})
 	t.Cleanup(func() {
 		if err := manager.CloseAndWait(context.Background()); err != nil {

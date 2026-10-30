@@ -481,7 +481,15 @@ func (self *socks5Server) CloseAndWait(ctx context.Context) error {
 }
 
 func (self *socks5Server) newSocksProxy() *proxy.SocksProxy {
+	connectBudget := self.settings.ProxyConnectBudget
+	if connectBudget <= 0 {
+		connectBudget = proxy.DefaultHttpProxySettings().ProxyConnectBudget
+	}
 	validUser := func(username string, password string, userAddr string) (valid bool) {
+		// The credential callback has no request context. Bound its cold reads
+		// with the configured setup budget and the listener's lifetime.
+		ctx, cancel := context.WithTimeout(self.ctx, connectBudget)
+		defer cancel()
 		defer func() {
 			if !valid {
 				recordProxyAdmissionFailure("socks", true)
@@ -507,8 +515,10 @@ func (self *socks5Server) newSocksProxy() *proxy.SocksProxy {
 		// Free while enforce_features is dark, and served from in-process caches once
 		// it is on, so this costs nothing on the accept path. See
 		// model.ProxyFeatureAllowed.
-		if !model.ProxyFeatureAllowed(self.ctx, proxyId, model.FeatureSocksProxy) {
-			glog.Infof("[socks]refused %s: socks is not included in the plan\n", proxyId)
+		if err := self.proxyDeviceManager.checkFeature(ctx, proxyId, model.FeatureSocksProxy); err != nil {
+			if errors.Is(err, errCallerNotAuthorized) {
+				glog.Infof("[socks]refused %s: socks is not included in the plan\n", proxyId)
+			}
 			return false
 		}
 
@@ -516,11 +526,13 @@ func (self *socks5Server) newSocksProxy() *proxy.SocksProxy {
 			glog.Infof("[socks]user valid %s (%s)\n", proxyId, addrPort)
 		}
 
-		valid = self.proxyDeviceManager.ValidCaller(proxyId, addrPort.Addr())
+		valid = self.proxyDeviceManager.checkCallerWithContext(ctx, proxyId, addrPort.Addr()) == nil
 		return valid
 	}
 
 	connectDial := func(ctx context.Context, r proxy.SocksRequest, network string, addr string) (net.Conn, error) {
+		ctx, cancel := context.WithTimeout(ctx, connectBudget)
+		defer cancel()
 		username := r.AuthContext.Payload["username"]
 		// the proxy id was already verified by the credential store
 		proxyId := model.RequireEncodedProxyId(username)
@@ -535,7 +547,7 @@ func (self *socks5Server) newSocksProxy() *proxy.SocksProxy {
 			}
 		}
 
-		pd, err := self.proxyDeviceManager.OpenProxyDevice(proxyId)
+		pd, err := self.proxyDeviceManager.OpenProxyDeviceWithContext(ctx, proxyId)
 		if err != nil {
 			recordProxyAdmissionFailure("socks", false)
 			return nil, err
@@ -657,6 +669,10 @@ func (self *httpServer) CloseAndWait(ctx context.Context) error {
 }
 
 func (self *httpServer) newHttpProxy() *proxy.HttpProxy {
+	connectBudget := self.settings.ProxyConnectBudget
+	if connectBudget <= 0 {
+		connectBudget = proxy.DefaultHttpProxySettings().ProxyConnectBudget
+	}
 	authProxyId := func(r *http.Request) (server.Id, error) {
 		if r.TLS != nil {
 			hostProxyId, _, _ := strings.Cut(r.TLS.ServerName, ".")
@@ -674,6 +690,13 @@ func (self *httpServer) newHttpProxy() *proxy.HttpProxy {
 	// answers at once (see proxy.ConnectRefusal); any other error is retried
 	// within the proxy's connect budget, which ctx carries.
 	connectDial := func(ctx context.Context, r *http.Request, network string, addr string) (net.Conn, error) {
+		// CONNECT already supplies its total budget. Ordinary forwarding also
+		// needs a finite setup deadline for admission's Redis socket reads.
+		ctx, cancel := context.WithTimeout(ctx, connectBudget)
+		defer cancel()
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		proxyId, err := authProxyId(r)
 		if err != nil {
 			recordProxyAdmissionFailure("http", true)
@@ -686,24 +709,30 @@ func (self *httpServer) newHttpProxy() *proxy.HttpProxy {
 			return nil, proxy.NewConnectRefusal(proxy.ConnectRefusalForbidden, err)
 		}
 
-		if err := self.proxyDeviceManager.checkCaller(proxyId, addrPort.Addr()); err != nil {
-			recordProxyAdmissionFailure("http", true)
+		if err := self.proxyDeviceManager.checkCallerWithContext(ctx, proxyId, addrPort.Addr()); err != nil {
+			recordProxyAdmissionFailure("http", errors.Is(err, errProxyDeviceNotFound) || errors.Is(err, errCallerNotAuthorized))
 			if errors.Is(err, errProxyDeviceNotFound) {
 				return nil, proxy.NewConnectRefusal(proxy.ConnectRefusalUnknownProxy, err)
 			}
-			return nil, proxy.NewConnectRefusal(proxy.ConnectRefusalForbidden, err)
+			if errors.Is(err, errCallerNotAuthorized) {
+				return nil, proxy.NewConnectRefusal(proxy.ConnectRefusalForbidden, err)
+			}
+			return nil, err
 		}
 
 		// the same per-connection plan check as SOCKS. Both tiers include the https
 		// proxy today, so this does not bite -- but the gate belongs on the path, not
 		// on an assumption about what the plan happens to contain.
-		if !model.ProxyFeatureAllowed(self.ctx, proxyId, model.FeatureHttpsProxy) {
-			glog.Infof("[http]refused %s: the https proxy is not included in the plan\n", proxyId)
-			recordProxyAdmissionFailure("http", true)
-			return nil, proxy.NewConnectRefusal(proxy.ConnectRefusalForbidden, errCallerNotAuthorized)
+		if err := self.proxyDeviceManager.checkFeature(ctx, proxyId, model.FeatureHttpsProxy); err != nil {
+			recordProxyAdmissionFailure("http", errors.Is(err, errCallerNotAuthorized))
+			if errors.Is(err, errCallerNotAuthorized) {
+				glog.Infof("[http]refused %s: the https proxy is not included in the plan\n", proxyId)
+				return nil, proxy.NewConnectRefusal(proxy.ConnectRefusalForbidden, err)
+			}
+			return nil, err
 		}
 
-		pd, err := self.proxyDeviceManager.OpenProxyDevice(proxyId)
+		pd, err := self.proxyDeviceManager.OpenProxyDeviceWithContext(ctx, proxyId)
 		if err != nil {
 			recordProxyAdmissionFailure("http", false)
 			if errors.Is(err, errProxyDeviceNotFound) {

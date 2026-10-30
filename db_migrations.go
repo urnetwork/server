@@ -11062,4 +11062,6 @@ var migrations = []any{
 	// A prospective operator-approved instrument overlay retains independent
 	// product winner review and all historical source/round authority.
 	newSqlMigration(competitionTrustedInstrumentMigration()),
+	// Authenticate the exact replica independently of the estimate's cadence.
+	newSqlMigration(snTopReplicaSchemaSql),
 }

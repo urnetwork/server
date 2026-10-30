@@ -210,7 +210,7 @@ func GetSnTopPresence(ctx context.Context, startTime time.Time, endTime time.Tim
 		result, err := conn.Query(
 			ctx,
 			`
-				SELECT network_id, client_id, COUNT(*)
+					SELECT network_id, client_id, COUNT(DISTINCT block_number)
 				FROM client_reliability
 				WHERE valid = true AND $1 <= block_number AND block_number < $2
 				GROUP BY network_id, client_id
@@ -310,6 +310,14 @@ func GetSnTopEmaState(ctx context.Context) (networks map[server.Id]SnTopUnitStat
  * Snapshots
  */
 
+// SnTopReplicaCheckpoint identifies the signed measurement whose exact state
+// was committed. It is independent of the network estimate's tempo index.
+type SnTopReplicaCheckpoint struct {
+	ValidatorHotkey [32]byte
+	NativeEpoch     uint64
+	MeasurementHash string
+}
+
 // SnTopSnapshot is one tempo's snapshot header (sn_top_snapshot).
 type SnTopSnapshot struct {
 	SnapshotId         server.Id
@@ -335,6 +343,8 @@ type SnTopSnapshot struct {
 	ValidatorSummaryAt *time.Time
 	IncentiveAt        *time.Time
 	PrecisionAt200     *float64
+	ReplicaCheckpoint  *SnTopReplicaCheckpoint
+	ReplicaComplete    bool
 }
 
 const snTopSnapshotSelect = `
@@ -343,13 +353,16 @@ const snTopSnapshotSelect = `
 		computed_at, settlement_epoch, total_ranked, head_seats, claimed_fleets, open_seats,
 		projected_cutoff, claimed_cutoff, binding_open, binding_note, eligible_providers,
 		measured_providers, cohort_capacity, presence_source, validator_summary_at,
-		incentive_at, precision_at_200
+		incentive_at, precision_at_200, replica_validator_hotkey, replica_native_epoch, replica_measurement_hash, replica_complete
 	FROM sn_top_snapshot
 `
 
 func scanSnTopSnapshot(result server.PgResult) *SnTopSnapshot {
 	snapshot := &SnTopSnapshot{}
 	var block, settlementEpoch int64
+	var replicaHotkey []byte
+	var replicaEpoch *int64
+	var replicaHash *string
 	server.Raise(result.Scan(
 		&snapshot.SnapshotId, &snapshot.TempoIndex, &snapshot.TempoSource, &block,
 		&snapshot.TempoStartTime, &snapshot.TempoEndTime, &snapshot.ComputedAt, &settlementEpoch,
@@ -357,7 +370,11 @@ func scanSnTopSnapshot(result server.PgResult) *SnTopSnapshot {
 		&snapshot.ProjectedCutoff, &snapshot.ClaimedCutoff, &snapshot.BindingOpen, &snapshot.BindingNote,
 		&snapshot.EligibleProviders, &snapshot.MeasuredProviders, &snapshot.CohortCapacity,
 		&snapshot.PresenceSource, &snapshot.ValidatorSummaryAt, &snapshot.IncentiveAt, &snapshot.PrecisionAt200,
+		&replicaHotkey, &replicaEpoch, &replicaHash, &snapshot.ReplicaComplete,
 	))
+	if len(replicaHotkey) == 32 && replicaEpoch != nil && replicaHash != nil {
+		snapshot.ReplicaCheckpoint = &SnTopReplicaCheckpoint{ValidatorHotkey: [32]byte(replicaHotkey), NativeEpoch: uint64(*replicaEpoch), MeasurementHash: *replicaHash}
+	}
 	snapshot.Block = uint64(block)
 	snapshot.SettlementEpoch = uint64(settlementEpoch)
 	snapshot.TempoStartTime = snapshot.TempoStartTime.UTC()
@@ -398,6 +415,15 @@ func GetSnTopSnapshot(ctx context.Context, snapshotId server.Id) (snapshot *SnTo
 func WriteSnTopSnapshot(ctx context.Context, snapshot *SnTopSnapshot, projection *SnTopProjection) {
 	server.Tx(ctx, func(tx server.PgTx) {
 		var block, settlementEpoch int64 = int64(snapshot.Block), int64(snapshot.SettlementEpoch)
+		var replicaHotkey []byte
+		var replicaEpoch *int64
+		var replicaHash *string
+		if checkpoint := snapshot.ReplicaCheckpoint; checkpoint != nil {
+			replicaHotkey = checkpoint.ValidatorHotkey[:]
+			epoch := int64(checkpoint.NativeEpoch)
+			replicaEpoch = &epoch
+			replicaHash = &checkpoint.MeasurementHash
+		}
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -406,9 +432,9 @@ func WriteSnTopSnapshot(ctx context.Context, snapshot *SnTopSnapshot, projection
 					computed_at, settlement_epoch, total_ranked, head_seats, claimed_fleets, open_seats,
 					projected_cutoff, claimed_cutoff, binding_open, binding_note, eligible_providers,
 					measured_providers, cohort_capacity, presence_source, validator_summary_at,
-					incentive_at, precision_at_200
+					incentive_at, precision_at_200, replica_validator_hotkey, replica_native_epoch, replica_measurement_hash, replica_complete
 				)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
 			`,
 			snapshot.SnapshotId, snapshot.TempoIndex, snapshot.TempoSource, block,
 			snapshot.TempoStartTime.UTC(), snapshot.TempoEndTime.UTC(), snapshot.ComputedAt.UTC(), settlementEpoch,
@@ -416,11 +442,36 @@ func WriteSnTopSnapshot(ctx context.Context, snapshot *SnTopSnapshot, projection
 			snapshot.ProjectedCutoff, snapshot.ClaimedCutoff, snapshot.BindingOpen, snapshot.BindingNote,
 			snapshot.EligibleProviders, snapshot.MeasuredProviders, snapshot.CohortCapacity,
 			snapshot.PresenceSource, snapshot.ValidatorSummaryAt, snapshot.IncentiveAt, snapshot.PrecisionAt200,
+			replicaHotkey, replicaEpoch, replicaHash, snapshot.ReplicaComplete,
 		))
 		insertSnTopNetworksInTx(ctx, tx, snapshot.SnapshotId, projection.Networks)
 		insertSnTopFleetsInTx(ctx, tx, snapshot.SnapshotId, projection.Fleets)
-		replaceSnTopEmaStateInTx(ctx, tx, snapshot.ComputedAt, projection)
+		replaceSnTopEmaStateInTx(ctx, tx, snapshot.ComputedAt, projection, false)
 		recordSnTopDailyInTx(ctx, tx, snapshot)
+	})
+}
+
+// WriteSnTopReplica finalizes delayed signed evidence on an existing estimate.
+// Network rows, estimate timestamps and network EMA values remain untouched.
+func WriteSnTopReplica(ctx context.Context, snapshotId server.Id, checkpoint *SnTopReplicaCheckpoint, summaryAt time.Time, projection *SnTopProjection) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		var hotkey []byte
+		var epoch *int64
+		var hash *string
+		if checkpoint != nil {
+			hotkey = checkpoint.ValidatorHotkey[:]
+			value := int64(checkpoint.NativeEpoch)
+			epoch, hash = &value, &checkpoint.MeasurementHash
+		}
+		server.RaisePgResult(tx.Exec(ctx, `
+			UPDATE sn_top_snapshot SET replica_validator_hotkey = $2,
+				replica_native_epoch = $3, replica_measurement_hash = $4,
+				validator_summary_at = $5, claimed_cutoff = $6, replica_complete = $7
+			WHERE snapshot_id = $1
+		`, snapshotId, hotkey, epoch, hash, summaryAt.UTC(), projection.ClaimedCutoff, projection.ReplicaUidScores != nil))
+		server.RaisePgResult(tx.Exec(ctx, `DELETE FROM sn_top_fleet WHERE snapshot_id = $1`, snapshotId))
+		insertSnTopFleetsInTx(ctx, tx, snapshotId, projection.Fleets)
+		replaceSnTopEmaStateInTx(ctx, tx, server.NowUtc(), projection, true)
 	})
 }
 
@@ -508,22 +559,22 @@ func insertSnTopFleetsInTx(ctx context.Context, tx server.PgTx, snapshotId serve
 				INSERT INTO sn_top_fleet (
 					snapshot_id, fleet_key, fleet_id, hotkey, generation, uid, valid_to_epoch,
 					network_ids, replica_score, replica_raw, replica_selected, validator_score,
-					validator_rank, validator_rank_of, selected, incentive, incentive_stale
+					validator_rank, validator_rank_of, selected, incentive, incentive_stale, replica_available
 				)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
 			`,
 			snapshotId, fleet.Key.String(), fleet.Key.FleetId[:], fleet.Key.Hotkey[:],
 			int64(fleet.Key.Generation), int32(fleet.Key.Uid), int64(fleet.ValidToEpoch),
 			networkIds, SnTopFinite(row.ReplicaScore), SnTopFinite(row.ReplicaRaw), row.ReplicaSelected,
 			fleet.ValidatorScore, validatorRank, validatorRankOf, fleet.Selected,
-			fleet.Incentive, fleet.IncentiveStale,
+			fleet.Incentive, fleet.IncentiveStale, row.ReplicaAvailable,
 		))
 	}
 }
 
 // replaceSnTopEmaStateInTx upserts every unit folded this tempo and deletes
 // the units that were not (dropped below the EMA floor, or unbound).
-func replaceSnTopEmaStateInTx(ctx context.Context, tx server.PgTx, updateTime time.Time, projection *SnTopProjection) {
+func replaceSnTopEmaStateInTx(ctx context.Context, tx server.PgTx, updateTime time.Time, projection *SnTopProjection, fleetsOnly bool) {
 	kinds := []string{}
 	keys := []string{}
 	emas := []float64{}
@@ -582,8 +633,8 @@ func replaceSnTopEmaStateInTx(ctx context.Context, tx server.PgTx, updateTime ti
 	}
 	server.RaisePgResult(tx.Exec(
 		ctx,
-		`DELETE FROM sn_top_ema_state WHERE update_time < $1`,
-		updateTime.UTC(),
+		`DELETE FROM sn_top_ema_state WHERE update_time < $1 AND (NOT $2 OR unit_kind = $3)`,
+		updateTime.UTC(), fleetsOnly, snTopUnitFleet,
 	))
 }
 
@@ -809,18 +860,45 @@ func GetSnTopNetworkRow(ctx context.Context, snapshotId server.Id, networkId ser
 
 // SnTopFleetRow is a claimed fleet's row in a snapshot.
 type SnTopFleetRow struct {
-	Key             SnTopFleetKey
-	ValidToEpoch    uint64
-	NetworkIds      []server.Id
-	ReplicaScore    float64
-	ReplicaRaw      float64
-	ReplicaSelected bool
-	ValidatorScore  *float64
-	ValidatorRank   *int
-	ValidatorRankOf *int
-	Selected        *bool
-	Incentive       *float64
-	IncentiveStale  bool
+	Key              SnTopFleetKey
+	ValidToEpoch     uint64
+	NetworkIds       []server.Id
+	ReplicaScore     float64
+	ReplicaRaw       float64
+	ReplicaSelected  bool
+	ReplicaAvailable bool
+	ValidatorScore   *float64
+	ValidatorRank    *int
+	ValidatorRankOf  *int
+	Selected         *bool
+	Incentive        *float64
+	IncentiveStale   bool
+}
+
+// GetSnTopSnapshotFleetInputs preserves a snapshot's membership when delayed
+// replica data is finalized. It does not substitute today's binding census.
+func GetSnTopSnapshotFleetInputs(ctx context.Context, snapshotId server.Id) (fleets []SnTopFleetInput) {
+	server.Db(ctx, func(conn server.PgConn) {
+		rows, err := conn.Query(ctx, `SELECT fleet_key, valid_to_epoch, network_ids::text[] FROM sn_top_fleet WHERE snapshot_id = $1 ORDER BY fleet_key`, snapshotId)
+		server.WithPgResult(rows, err, func() {
+			for rows.Next() {
+				var key string
+				var epoch int64
+				var networks []string
+				server.Raise(rows.Scan(&key, &epoch, &networks))
+				parsed, err := ParseSnTopFleetKey(key)
+				server.Raise(err)
+				fleet := SnTopFleetInput{Key: parsed, ValidToEpoch: uint64(epoch)}
+				for _, network := range networks {
+					networkId, err := server.ParseId(network)
+					server.Raise(err)
+					fleet.NetworkIds = append(fleet.NetworkIds, networkId)
+				}
+				fleets = append(fleets, fleet)
+			}
+		})
+	})
+	return
 }
 
 // GetSnTopFleets lists a snapshot's fleets of the given networks, by
@@ -840,7 +918,7 @@ func GetSnTopFleets(ctx context.Context, snapshotId server.Id, networkIds []serv
 			`
 				SELECT fleet_key, valid_to_epoch, network_ids::text[], replica_score, replica_raw,
 					replica_selected, validator_score, validator_rank, validator_rank_of, selected,
-					incentive, incentive_stale
+					incentive, incentive_stale, replica_available
 				FROM sn_top_fleet
 				WHERE snapshot_id = $1 AND network_ids && $2::uuid[]
 				ORDER BY uid, fleet_key
@@ -858,7 +936,7 @@ func GetSnTopFleets(ctx context.Context, snapshotId server.Id, networkIds []serv
 				server.Raise(result.Scan(
 					&fleetKey, &validToEpoch, &networkIds, &row.ReplicaScore, &row.ReplicaRaw,
 					&row.ReplicaSelected, &row.ValidatorScore, &validatorRank, &validatorRankOf, &row.Selected,
-					&row.Incentive, &row.IncentiveStale,
+					&row.Incentive, &row.IncentiveStale, &row.ReplicaAvailable,
 				))
 				key, err := ParseSnTopFleetKey(fleetKey)
 				if err != nil {

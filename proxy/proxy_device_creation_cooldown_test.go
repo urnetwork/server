@@ -39,7 +39,7 @@ func TestProxyDeviceCreationFailureIsRetriedOncePerCooldown(t *testing.T) {
 		}
 
 		// opens inside the cooldown do not extend it
-		time.Sleep(deviceCreationRetryTimeout - time.Nanosecond)
+		time.Sleep(manager.settings.DeviceCreationRetryTimeout - time.Nanosecond)
 		if _, err := manager.OpenProxyDevice(failingId); !errors.Is(err, setupErr) || calls.Load() != 2 {
 			t.Fatal("construction retried before the cooldown ended")
 		}
