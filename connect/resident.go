@@ -463,6 +463,11 @@ type ExchangeSettings struct {
 	ExchangeReadHeaderTimeout          time.Duration
 	ExchangeWriteHeaderTimeout         time.Duration
 	ExchangeReconnectAfterErrorTimeout time.Duration
+	// Idle is the ping interval plus this margin. Outstanding data can
+	// suppress TCP probes; application reads retain their own timeout.
+	ExchangeKeepAliveIdleMargin time.Duration
+	ExchangeKeepAliveInterval   time.Duration
+	ExchangeKeepAliveCount      int
 	// DialContext, when set, creates outbound internal exchange connections.
 	// Tests use it to place edge-to-edge TCP below a userspace network model.
 	// Nil retains the host TCP dialer. The exchange owns and closes successful
@@ -624,6 +629,9 @@ func DefaultExchangeSettingsWithBufferSize(bufferSize int) *ExchangeSettings {
 		ExchangeReadHeaderTimeout:          exchangeResidentWaitTimeout,
 		ExchangeWriteHeaderTimeout:         exchangeResidentWaitTimeout,
 		ExchangeReconnectAfterErrorTimeout: 1 * time.Second,
+		ExchangeKeepAliveIdleMargin:        time.Second,
+		ExchangeKeepAliveInterval:          time.Second,
+		ExchangeKeepAliveCount:             4,
 		ExchangeResidentTtl:                300 * time.Second,
 		// network peers re-enabled on the PEERS2 poll architecture (PEERS2.md) —
 		// the pubsub delivery that caused the 2026-07-15 outage is gone (no
@@ -1366,7 +1374,7 @@ func (self *Exchange) serveExchangeConnection(port int) {
 	if serverSocket == nil {
 		listenIpv4, _, listenPort := server.RequireListenIpPort(port)
 
-		listenConfig := exchangeListenConfig(exchangeKeepAliveConfig(self.settings.ExchangePingTimeout))
+		listenConfig := exchangeListenConfig(exchangeKeepAliveConfig(self.settings))
 
 		var err error
 		// leave host part empty to listen on all available interfaces
@@ -2420,26 +2428,20 @@ func (self *Exchange) WaitForIdle(ctx context.Context) bool {
 // full 16 KiB batch for every sparse exchange sender.
 const exchangeSingletonWriteStorageByteCount = 2 * 1024
 
-// A socket deadline installed for one connection. It is re-armed only when
-// less than two thirds of its timeout remain: setting it on every frame made
-// each exchange read and write a runtime timer modification. An operation that
-// starts under it is bounded by between two thirds of the timeout and the
-// timeout.
+// A socket deadline installed for one connection. Only an identical absolute
+// deadline may be reused: an earlier one shortens a healthy operation's budget.
 type exchangeDeadline struct {
 	conn     net.Conn
 	deadline time.Time
 }
 
-// Installs now plus timeout with set, unless the deadline installed for conn
-// still has two thirds of timeout left and is no further than timeout away.
+// Gives this operation its entire budget, retaining native I/O completion
+// semantics even if its goroutine resumes after the deadline.
 func (self *exchangeDeadline) refresh(conn net.Conn, timeout time.Duration, set func(time.Time) error) error {
-	now := time.Now()
-	if self.conn == conn {
-		if remaining := self.deadline.Sub(now); 2*timeout/3 <= remaining && remaining <= timeout {
-			return nil
-		}
+	deadline := time.Now().Add(timeout)
+	if self.conn == conn && self.deadline.Equal(deadline) {
+		return nil
 	}
-	deadline := now.Add(timeout)
 	if err := set(deadline); err != nil {
 		return err
 	}
@@ -2815,23 +2817,19 @@ type ExchangeConnection struct {
 	afterSendWriteForTest func(messageCount int, writeErr error)
 }
 
-// exchangeKeepAliveConfig is the TCP keepalive of an exchange socket. Each end
-// pings at least every pingTimeout, so a live connection is never quiet for
-// Idle and sends no probe. A dead peer is noticed Idle plus Count unanswered
-// probes after its last packet: pingTimeout + 5 s, 15 s at the default 10 s
-// ping. That is within the 16 s that the former keepalive (1 s idle, 15
-// probes 1 s apart) took, at a fraction of its cost: probing after 1 s of
-// quiet was about a fifth of all TCP segments on a services edge. The read
-// deadline alone notices a dead peer only 20-30 s after its last frame.
-func exchangeKeepAliveConfig(pingTimeout time.Duration) net.KeepAliveConfig {
+// Puts idle probing after the normal ping cadence. TCP suppresses keepalive
+// probes while data is outstanding, so idle + interval * count is not a
+// dead-peer guarantee; the independent exchange read timeout remains required.
+func exchangeKeepAliveConfig(settings *ExchangeSettings) net.KeepAliveConfig {
 	return net.KeepAliveConfig{
 		Enable:   true,
-		Idle:     pingTimeout + time.Second,
-		Interval: time.Second,
-		Count:    4,
+		Idle:     settings.ExchangePingTimeout + settings.ExchangeKeepAliveIdleMargin,
+		Interval: settings.ExchangeKeepAliveInterval,
+		Count:    settings.ExchangeKeepAliveCount,
 	}
 }
 
+// Applies exchange latency and idle-probe settings to the owned TCP socket.
 func configureExchangeTcpConn(tcpConn *net.TCPConn, keepAlive net.KeepAliveConfig) {
 	tcpConn.SetNoDelay(true)
 	tcpConn.SetLinger(0)
@@ -2880,7 +2878,7 @@ func NewExchangeConnection(
 	})
 	defer stopContextClose()
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
-		configureExchangeTcpConn(tcpConn, exchangeKeepAliveConfig(settings.ExchangePingTimeout))
+		configureExchangeTcpConn(tcpConn, exchangeKeepAliveConfig(settings))
 	}
 
 	success := false
