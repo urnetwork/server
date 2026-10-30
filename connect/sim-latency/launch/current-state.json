@@ -1,10 +1,10 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-30T01:53:25Z",
+  "observed_at": "2026-10-30T02:18:47Z",
   "scoring_enablement_current": {
     "status": "R2_intake_open_reduced_reference_native_and336_correctness_verified_new699_operator_qualification_running_production_grading_held",
-    "observed_at": "2026-10-30T01:53:25Z",
+    "observed_at": "2026-10-30T02:18:47Z",
     "metadata_checkpoint_only": true,
     "actual_intake_open": true,
     "grading_enabled": false,
@@ -34,7 +34,7 @@
       "public_provider_request_before_census_and_Root_reported_native_collision_preparation_not_measurement"
     ],
     "pending": [
-      "finish_same_new233_operator_qualification_session68844_three_processes_and_terminal_integrity_no_new_tests_or_measurements_in_parallel",
+      "finish_same_new233_operator_qualification_session68844_three_processes_and_terminal_integrity_untimed_input_helper_checks_only_on_disjoint_cores_no_measurements_in_parallel",
       "run_staged_ten_source_before_census_with_new_qualified_operator_then_publish_all_seven_actual_prerequisites",
       "precommit_and_complete_owner_approved_new_public_R9_R9_pilot_without_weakening_any_submission_gate",
       "only_after_accepted_new_pilot_and_native_after_census_one_new_hidden_seed_and36_native_fresh_single_screen_runs",
@@ -98,6 +98,15 @@
       "correctness_failures_or_skips": 0,
       "correctness_terminal_receipt_sha256": "ec5b7611603b12a399bcb5113fd52b4a64a6ab63e8449d1eccc7f20a1d08dac9",
       "correctness_terminal_cleanup_source_checks_and_canonical_release_verified": true,
+      "build_correctness_projection": {
+        "versioned_directory": "server/connect/sim-latency/launch/reduced-reference-correctness-2026-10-30",
+        "build_qualification_sha256": "5f04940b4c9de0abc728db0091f93907d36bf17861187de426ba473ed31065f0",
+        "correctness_qualification_sha256": "4e32d1606ad27e57ed63ed9cff546b9acbeea42f281993296e4fae5b1383626c",
+        "source_execution_binding_sha256": "aca355e3a035941a6141ccbf4a1e7853288264f7cc35efb9d8c514c5f2f4769e",
+        "root_inputs_installed_and_independently_checked": true,
+        "typed_evidence_occurrences_verified": 46,
+        "regression_direction_not_yet_measured": true
+      },
       "new_operator_elf": "/mnt/data/operator233-compile-qa-20261030.6p9XdoUI/operator233.test",
       "new_operator_elf_sha256": "b1c3e311f76cafdc96327214065f431bda145005d8900563f9c32089e3c58a6c",
       "operator_early_smoke_passes": 9,

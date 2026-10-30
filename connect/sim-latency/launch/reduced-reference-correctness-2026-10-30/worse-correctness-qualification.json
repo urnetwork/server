@@ -1,0 +1,182 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-held-out-reference-correctness",
+  "role": "worse",
+  "accepted": true,
+  "base_sha": "a9e8e1a710b24c749e6499a0606938252c83e136",
+  "source_lock_sha256": "ec322ed2db023e15ea5dc3eea60a6ca5989661bba737c340fea3477d8d1300cf",
+  "base_image_id": "sha256:98c9061c4a43a25e7b581a5193ca6e7f48e49e7b7fc03b7c1b6190a029befee2",
+  "patch_sha256": "6e5e94f03715df42d9d9169aef5ab3272cbac0311ae5292dbbdc819c23ea2924",
+  "candidate_sha": "1222b197eab2f8465bf64f62176743d5294df82f",
+  "image_id": "sha256:2eadb97375e9afbe9c9a559c454777f55a0aaed269579b86aa8593b7a84eb1ee",
+  "binary_sha256": "a20a41162c6c683b74f5bd9c9ad7a71f021a856828120cdf66c0376cfca7271b",
+  "go_version": "go1.27.3",
+  "vcs_modified": false,
+  "direction": "",
+  "evidence": [
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2/inputs/correctness-source-pins/h1-reduced100ns-runtime-terminal.txt",
+      "sha256": "ec5b7611603b12a399bcb5113fd52b4a64a6ab63e8449d1eccc7f20a1d08dac9"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2/inputs/worse-SOURCE-AND-EXECUTION-BINDING.json",
+      "sha256": "aca355e3a035941a6141ccbf4a1e7853288264f7cc35efb9d8c514c5f2f4769e"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-reduced-100ns-native-20261030-v1/worse/native-proof.json",
+      "sha256": "af064a13180ba1b629622b1b047df955c5d825df0b25e7b00f8173c215d2f834"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-reduced-100ns-native-20261030-v1/worse/native-build.json",
+      "sha256": "05fdc4131e98954fd2cec6954591106aee10230e662040df6df550a6d7e2ac88"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-reduced-100ns-native-20261030-v1/worse/native-evidence.sha256",
+      "sha256": "bad9b84964190d9dd27cbe3122efeee9b657dedd9f771b5d557bad1abc0ca7e1"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-reduced-100ns-native-20261030-v1/readbacks-v1/worse/source-byte-roots.sha256",
+      "sha256": "44160686c983acd9b743cdf12c6341424cca8277340e65341da1e64d81515904"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-reduced-100ns-native-20261030-v1/readbacks-v1/worse/image-source-byte-roots.sha256",
+      "sha256": "44160686c983acd9b743cdf12c6341424cca8277340e65341da1e64d81515904"
+    },
+    {
+      "path": "/mnt/data/h1-reduced100ns-runtime-v2-qa-20261030.LRnajCXY/pass1.json",
+      "sha256": "d463cce078c51fe621ce5c81ec16d1b9fc60c32bdf96847fcc5fa74a69972cfe"
+    },
+    {
+      "path": "/mnt/data/h1-reduced100ns-runtime-v2-qa-20261030.LRnajCXY/pass2.json",
+      "sha256": "2bb917215e7fdaa14763a45d54dbd116b19135d2c8e95ee869c22b2624df960c"
+    },
+    {
+      "path": "/mnt/data/h1-reduced100ns-runtime-v2-qa-20261030.LRnajCXY/pass3.json",
+      "sha256": "4b3aba5c2f1dbd45868570262e87ccbc09ee45b485452ede5472b73c774809c0"
+    },
+    {
+      "path": "/mnt/data/h1-reduced100ns-runtime-v2-qa-20261030.LRnajCXY/expected112.names",
+      "sha256": "bde9d6bc9588b1a4d6060425377ea0b14ae0a4f1d4d51c85519f36688f04ecf6"
+    },
+    {
+      "path": "/home/by/urnetwork/temp/h1-reduced-100ns-reference-20261030.2iX5D6ur/qualification.overlay.json",
+      "sha256": "ea74ec37f1ec48896ef65a74d4256ea84ab9970828844237c09f44f4c9428645"
+    },
+    {
+      "path": "/mnt/data/h1-reduced100ns-compile-qa-20261030.og8Sk34P/base-source.sha256",
+      "sha256": "42d82421f5ef5430a8f81bd19f65155eb6c4d26a84b5766e459e96a90334cff8"
+    },
+    {
+      "path": "/mnt/data/h1-reduced100ns-compile-qa-20261030.og8Sk34P/used-inputs.sha256",
+      "sha256": "4aa206bcd6ea8a9259e5de7bfb506bce01c5cc8f530b747c862c6b6463b6c72f"
+    },
+    {
+      "path": "/mnt/data/h1-reduced100ns-compile-qa-20261030.og8Sk34P/authority.sha256",
+      "sha256": "889023adaf1f45f5f9839c6604dad45f0c91948dfd5437bc9f10782ffb9abf5a"
+    },
+    {
+      "path": "/mnt/data/h1-reduced100ns-compile-qa-20261030.og8Sk34P/tool-module-pins.sha256",
+      "sha256": "9ad4b1b57e725f88e57892faeb7ba4c2bd6a6e51c54f7ead495e930659c2294c"
+    },
+    {
+      "path": "/mnt/data/h1-reduced100ns-compile-qa-20261030.og8Sk34P/actual-dependencies.json",
+      "sha256": "71e289606090a5ce6243abe4856c388980d61e31bb66a38585d93598daa7433c"
+    },
+    {
+      "path": "/mnt/data/h1-reduced100ns-compile-qa-20261030.og8Sk34P/go.env",
+      "sha256": "11bcbe5ae864ab7c74a90fa3661476da50cb90db376921535f09286252d4b632"
+    },
+    {
+      "path": "/mnt/data/h1-reduced100ns-compile-qa-20261030.og8Sk34P/ELF.buildinfo",
+      "sha256": "c44f41f6573ab76bbadd887fbf1a11d0757ffaa08f428780f08dd523de69e3ff"
+    },
+    {
+      "path": "/mnt/data/h1-reduced100ns-compile-qa-20261030.og8Sk34P/initial.git",
+      "sha256": "004c14e149516862e9a1fa30176637a38d4f2240c8baeafd622bd9c6aab7e3bb"
+    },
+    {
+      "path": "/mnt/data/h1-reduced100ns-runtime-v2-qa-20261030.LRnajCXY/terminal.git",
+      "sha256": "004c14e149516862e9a1fa30176637a38d4f2240c8baeafd622bd9c6aab7e3bb"
+    },
+    {
+      "path": "/mnt/data/h1-reduced100ns-runtime-v2-qa-20261030.LRnajCXY/runtime-inputs.sha256",
+      "sha256": "f81c0d03d6ae13b283ecfe1705f1f71d963d1b244cfccf71c0b96b2a20ba59a5"
+    },
+    {
+      "path": "/mnt/data/h1-reduced100ns-runtime-v2-qa-20261030.LRnajCXY/terminal.pins",
+      "sha256": "c724fee7cd647d8f9809218caee2ea5093df0b490ba63044e247d17b3556bea5"
+    },
+    {
+      "path": "/mnt/data/h1-reduced100ns-runtime-v2-qa-20261030.LRnajCXY/terminal.source.check",
+      "sha256": "7320652c11d3dee10dd046633116093ee3fceadb90791550c47663dd07cb3dbb"
+    },
+    {
+      "path": "/mnt/data/h1-reduced100ns-runtime-v2-qa-20261030.LRnajCXY/terminal.used-inputs.check",
+      "sha256": "418f234c8dff52940012b97c60264f1e6b7882a24497934c70036aee2868765d"
+    },
+    {
+      "path": "/mnt/data/h1-reduced100ns-runtime-v2-qa-20261030.LRnajCXY/terminal.runtime-inputs.check",
+      "sha256": "29b22ecc3d3e714774f5c69c1a7c569cee16d8d968fa438ef2c2342d199f79c0"
+    },
+    {
+      "path": "/mnt/data/h1-reduced100ns-runtime-v2-qa-20261030.LRnajCXY/transaction.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "/mnt/data/h1-reduced100ns-runtime-v2-qa-20261030.LRnajCXY/postchecks.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "/mnt/data/h1-reduced100ns-runtime-v2-qa-20261030.LRnajCXY/inventory-before",
+      "sha256": "07d04f55a8446954901e037c1f4b8e613187490f112a461d53b3d3a7ff32b927"
+    },
+    {
+      "path": "/mnt/data/h1-reduced100ns-runtime-v2-qa-20261030.LRnajCXY/inventory-after",
+      "sha256": "07d04f55a8446954901e037c1f4b8e613187490f112a461d53b3d3a7ff32b927"
+    },
+    {
+      "path": "/mnt/data/h1-reduced100ns-runtime-v2-qa-20261030.LRnajCXY/networks-before",
+      "sha256": "0d8612baac8710f8a467f9fec5b5af7364b4fe7b6dd2dcad89ecaad39bde2b05"
+    },
+    {
+      "path": "/mnt/data/h1-reduced100ns-runtime-v2-qa-20261030.LRnajCXY/networks-after",
+      "sha256": "0d8612baac8710f8a467f9fec5b5af7364b4fe7b6dd2dcad89ecaad39bde2b05"
+    },
+    {
+      "path": "/mnt/data/h1-reduced100ns-runtime-v2-qa-20261030.LRnajCXY/released-lock",
+      "sha256": "aa701323dc495a759179be669ee4acde408a909d182db2c495bed61e8ab4c066"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2/inputs/correctness-source-pins/h1-reduced100ns-compile-terminal.txt",
+      "sha256": "04560adda4a2e38ef597c9bf17ca7469037826fc36388e4c9e3cc2c76fbf5eef"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2/inputs/correctness-source-pins/h1-reduced100ns-failed-caller-terminal.txt",
+      "sha256": "bf0059577f89f0ef98d472c7c4597866e898d46a6ef68d590ed8098531261f21"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2/inputs/correctness-source-pins/h1-reduced100ns-caller-guard-terminal.txt",
+      "sha256": "23203d85cdbfb1d28333291c00e8da4f276bbfca7209afe8994a030abc74870d"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2/inputs/correctness-source-pins/actual-launch-profile.txt",
+      "sha256": "5ee2e8af581b0af83cf207a4fa30d2d2894e97544ea262237d9802b232178012"
+    },
+    {
+      "path": "/mnt/data/h1-caller-guard-qa-20261030.0G9UNqgU/red.json",
+      "sha256": "7eb62b91f7fb8b444a42da8c00a50ef85bef89af6e93f41706ff33bfe46f8a51"
+    },
+    {
+      "path": "/mnt/data/h1-caller-guard-qa-20261030.0G9UNqgU/pass1.json",
+      "sha256": "49e179021d532a43c3a9a0e3b3d3e431dd2932d2bf5300fb74729d9a73af9b39"
+    },
+    {
+      "path": "/mnt/data/h1-caller-guard-qa-20261030.0G9UNqgU/pass2.json",
+      "sha256": "8ffc74956483afd65c3649d6ed0c8cc5163137e5826503353cac96725405786f"
+    },
+    {
+      "path": "/mnt/data/h1-caller-guard-qa-20261030.0G9UNqgU/pass3.json",
+      "sha256": "383e6211d9f28a49de09760506a783418ff86f673688f86eaafaac7513e95622"
+    }
+  ]
+}
