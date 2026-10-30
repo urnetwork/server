@@ -6692,7 +6692,10 @@ func FindProviders2(
 		// Applies the request's eligibility to one mode's loaded pool, then the
 		// request's weights in that mode. It runs on the requested mode's pool
 		// and, when that comes up short, on the other mode's, so a borrowed
-		// provider passes exactly what a native one does.
+		// provider passes exactly what a native one does. A score's maps are
+		// its decoded page's, shared with every other reader
+		// (decodeClientScorePage), so a change replaces the map with a
+		// changed clone.
 		filterPool := func(clientScores map[server.Id]*ClientScore, mode RankMode, hardExcludedClientIds map[server.Id]bool) {
 			observation.enter("filter")
 			now := filterTime
@@ -6723,10 +6726,12 @@ func FindProviders2(
 						continue
 					}
 					// Every online member is equally likely.
-					if clientScore.ScaledWeights == nil {
-						clientScore.ScaledWeights = map[string]float32{}
+					scaledWeights := maps.Clone(clientScore.ScaledWeights)
+					if scaledWeights == nil {
+						scaledWeights = map[string]float32{}
 					}
-					clientScore.ScaledWeights[mode] = 1.0
+					scaledWeights[mode] = 1.0
+					clientScore.ScaledWeights = scaledWeights
 				}
 			}
 			before := len(clientScores)
@@ -6771,6 +6776,7 @@ func FindProviders2(
 			observation.eligible += len(clientScores)
 			if findProviders2.ForceMinimum {
 				for _, clientScore := range clientScores {
+					clientScore.ScaledWeights = maps.Clone(clientScore.ScaledWeights)
 					clientScore.ScaledWeights[mode] = 1.0
 				}
 			}
@@ -6780,6 +6786,7 @@ func FindProviders2(
 			for _, destination := range findProviders2.ExcludeDestinations {
 				for _, clientId := range destination[:len(destination)-1] {
 					if clientScore, ok := clientScores[clientId]; ok {
+						clientScore.ScaledWeights = maps.Clone(clientScore.ScaledWeights)
 						clientScore.ScaledWeights[mode] *= intermediaryScale
 					}
 				}
