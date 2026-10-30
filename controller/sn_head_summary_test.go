@@ -10,7 +10,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -19,48 +18,68 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ChainSafe/go-schnorrkel"
 	"github.com/ethereum/go-ethereum/common"
+	subkey "github.com/vedhavyas/go-subkey/v2"
+	"github.com/vedhavyas/go-subkey/v2/sr25519"
+
+	"github.com/urfoundation/sn/protocol/headscore"
+	"github.com/urfoundation/sn/protocol/headsummary"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 )
 
-// A synthetic sr25519 validator key.
+// A synthetic sr25519 validator key, derived as sn's tests derive theirs.
 type snHeadSummaryTestKey struct {
-	secret *schnorrkel.SecretKey
-	hotkey [32]byte
+	keypair subkey.KeyPair
+	hotkey  [32]byte
 }
 
 func newSnHeadSummaryTestKey(t testing.TB, seed [32]byte) *snHeadSummaryTestKey {
 	t.Helper()
-	mini, err := schnorrkel.NewMiniSecretKeyFromRaw(seed)
+	keypair, err := subkey.DeriveKeyPair(sr25519.Scheme{}, "0x"+hex.EncodeToString(seed[:]))
 	if err != nil {
 		t.Fatal(err)
 	}
-	secret := mini.ExpandEd25519()
-	public, err := secret.Public()
-	if err != nil {
-		t.Fatal(err)
-	}
-	return &snHeadSummaryTestKey{secret: secret, hotkey: public.Encode()}
+	return &snHeadSummaryTestKey{keypair: keypair, hotkey: [32]byte(keypair.Public())}
 }
 
 func (self *snHeadSummaryTestKey) hex() string {
-	return "0x" + hex.EncodeToString(self.hotkey[:])
+	return headsummary.Hex32(self.hotkey)
 }
 
-// Signs the summary as the validator does and returns its canonical body.
+var snHeadSummaryTestSignedAt = time.Date(2026, 10, 29, 18, 4, 5, 123456789, time.UTC)
+
+// Signs a consistent summary as the validator does and returns its body.
 func (self *snHeadSummaryTestKey) sign(t testing.TB, summary *SnHeadSummary) []byte {
 	t.Helper()
-	digest := SnHeadSummaryDigest(summary)
-	signature, err := self.secret.Sign(schnorrkel.NewSigningContext([]byte("substrate"), digest[:]))
+	body, err := headsummary.Sign(summary, self.hotkey, snHeadSummaryTestSignedAt, self.keypair.Sign)
 	if err != nil {
 		t.Fatal(err)
 	}
-	encoded := signature.Encode()
-	summary.SigningHash = "sha256:" + hex.EncodeToString(digest[:])
-	summary.Signature = "0x" + hex.EncodeToString(encoded[:])
+	return body
+}
+
+// Signs any summary, consistent or not, over sn's digest; the validator's
+// signer refuses inconsistent content, so tests of refusals sign here.
+func (self *snHeadSummaryTestKey) signAny(t testing.TB, summary *SnHeadSummary) []byte {
+	t.Helper()
+	if summary.SignedAt == "" {
+		summary.SignedAt = snHeadSummaryTestSignedAt.Format(time.RFC3339Nano)
+	}
+	if summary.SignatureScheme == "" {
+		summary.SignatureScheme = headsummary.SignatureScheme
+	}
+	summary.SigningHash, summary.Signature = "", ""
+	digest, err := headsummary.SigningDigest(summary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature, err := self.keypair.Sign(digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary.SigningHash, summary.Signature = "sha256:"+hex.EncodeToString(digest[:]), "0x"+hex.EncodeToString(signature)
 	body, err := json.Marshal(summary)
 	if err != nil {
 		t.Fatal(err)
@@ -76,19 +95,18 @@ func snHeadSummaryTestHash(b byte) string {
 // so the lower UID ranks first; UID 7 has two generations of one fleet.
 func snHeadSummaryTestEnvelope(validator string) *SnHeadSummary {
 	return &SnHeadSummary{
-		Schema: SnHeadSummarySchemaV1, Netuid: 25, NativeEpoch: 51234, NativeSnapshotBlock: 6_123_456, NativeSnapshotHash: snHeadSummaryTestHash(0x6d),
-		EvmSnapshotBlock: 6_123_450, EvmSnapshotHash: snHeadSummaryTestHash(0x2a), SettlementEpoch: 7, PolicyId: 1, PolicyHash: snHeadSummaryTestHash(0x9c),
-		MeasurementArtifactHash: "sha256:" + strings.Repeat("41", 32), ValidatorHotkey: validator, ValidatorUid: 1, MaximumHeadFleets: 2,
-		Entries: []SnHeadSummaryEntry{
-			{Rank: 1, Uid: 42, Hotkey: snHeadSummaryTestHash(0x8f), Score: SnHeadSummaryRational{Numerator: "7", Denominator: "4"}, Selected: true,
-				Fleets: []SnHeadSummaryFleet{{FleetId: snHeadSummaryTestHash(0x11), Generation: 3}}},
-			{Rank: 2, Uid: 7, Hotkey: snHeadSummaryTestHash(0x87), Score: SnHeadSummaryRational{Numerator: "1", Denominator: "1"}, Selected: true,
-				Fleets: []SnHeadSummaryFleet{{FleetId: snHeadSummaryTestHash(0x12), Generation: 1}, {FleetId: snHeadSummaryTestHash(0x12), Generation: 2}}},
-			{Rank: 3, Uid: 9, Hotkey: snHeadSummaryTestHash(0x89), Score: SnHeadSummaryRational{Numerator: "1", Denominator: "1"}, Selected: false,
-				Fleets: []SnHeadSummaryFleet{{FleetId: snHeadSummaryTestHash(0x13), Generation: 1}}},
+		Schema: headsummary.Schema, Netuid: 25, NativeEpoch: 51234, NativeSnapshotBlock: 6_123_456, NativeSnapshotHash: snHeadSummaryTestHash(0x6d),
+		EVMSnapshotBlock: 6_123_450, EVMSnapshotHash: snHeadSummaryTestHash(0x2a), SettlementEpoch: 7, PolicyID: 1, PolicyHash: snHeadSummaryTestHash(0x9c),
+		MeasurementArtifactHash: "sha256:" + strings.Repeat("41", 32), ValidatorHotkey: validator, ValidatorUID: 1, MaximumHeadFleets: 2,
+		Entries: []headsummary.Entry{
+			{Rank: 1, UID: 42, Hotkey: snHeadSummaryTestHash(0x8f), Score: headscore.Rational{Numerator: "7", Denominator: "4"}, Selected: true,
+				Fleets: []headsummary.Fleet{{FleetID: snHeadSummaryTestHash(0x11), Generation: 3}}},
+			{Rank: 2, UID: 7, Hotkey: snHeadSummaryTestHash(0x87), Score: headscore.Rational{Numerator: "1", Denominator: "1"}, Selected: true,
+				Fleets: []headsummary.Fleet{{FleetID: snHeadSummaryTestHash(0x12), Generation: 1}, {FleetID: snHeadSummaryTestHash(0x12), Generation: 2}}},
+			{Rank: 3, UID: 9, Hotkey: snHeadSummaryTestHash(0x89), Score: headscore.Rational{Numerator: "1", Denominator: "1"}, Selected: false,
+				Fleets: []headsummary.Fleet{{FleetID: snHeadSummaryTestHash(0x13), Generation: 1}}},
 		},
-		SelectedUids: []uint16{42, 7}, RejectedUids: []uint16{9},
-		SignedAt: "2026-10-29T18:04:05.123456789Z", SignatureScheme: "sr25519",
+		SelectedUIDs: []uint16{42, 7}, RejectedUIDs: []uint16{9},
 	}
 }
 
@@ -99,37 +117,22 @@ func requireSnHeadSummaryInvalid(t testing.TB, err error, label string) {
 	}
 }
 
-// A signed canonical summary decodes and verifies, and its digest is SHA-256
-// over the domain, a zero byte and the encoding with an empty signing hash
-// and signature.
-func TestSnHeadSummaryDecodesAndVerifiesASignedSummary(t *testing.T) {
+// A signed canonical summary decodes through sn's decoder, and an empty head
+// is a valid summary with three empty arrays.
+func TestSnHeadSummaryDecodesASignedSummary(t *testing.T) {
 	key := newSnHeadSummaryTestKey(t, [32]byte{0x01})
 	body := key.sign(t, snHeadSummaryTestEnvelope(key.hex()))
 	summary, err := DecodeSnHeadSummary(body)
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || summary.NativeEpoch != 51234 || len(summary.Entries) != 3 || summary.ValidatorHotkey != key.hex() {
+		t.Fatal(summary, err)
 	}
-	if err := VerifySnHeadSummarySignature(summary); err != nil {
-		t.Fatal(err)
-	}
-	unsigned := *summary
-	unsigned.SigningHash, unsigned.Signature = "", ""
-	encoded, _ := json.Marshal(&unsigned)
-	if !bytes.Contains(encoded, []byte(`"signing_hash":"","signature":""}`)) {
-		t.Fatalf("the unsigned encoding keeps the members in place: %s", encoded)
-	}
-	want := sha256.Sum256(append(append([]byte("urnetwork/validator/head-summary/v1"), 0), encoded...))
-	if SnHeadSummaryDigest(summary) != want || summary.SigningHash != "sha256:"+hex.EncodeToString(want[:]) {
-		t.Fatal("the digest differs from the spec's")
-	}
-	// an empty head is a valid summary with three empty arrays
 	empty := snHeadSummaryTestEnvelope(key.hex())
-	empty.Entries, empty.SelectedUids, empty.RejectedUids = []SnHeadSummaryEntry{}, []uint16{}, []uint16{}
+	empty.Entries, empty.SelectedUIDs, empty.RejectedUIDs = []headsummary.Entry{}, []uint16{}, []uint16{}
 	emptyBody := key.sign(t, empty)
 	if !bytes.Contains(emptyBody, []byte(`"entries":[],"selected_uids":[],"rejected_uids":[]`)) {
 		t.Fatalf("empty arrays: %s", emptyBody)
 	}
-	if summary, err := DecodeSnHeadSummary(emptyBody); err != nil || VerifySnHeadSummarySignature(summary) != nil {
+	if _, err := DecodeSnHeadSummary(emptyBody); err != nil {
 		t.Fatal("the empty head", err)
 	}
 }
@@ -151,7 +154,7 @@ func TestSnHeadSummaryRefusesNonCanonicalBodies(t *testing.T) {
 		"trailing data":    text + `{}`,
 		"uppercase hex":    strings.Replace(text, snHeadSummaryTestHash(0x6d), "0x"+strings.ToUpper(snHeadSummaryTestHash(0x6d)[2:]), 1),
 		"key case":         strings.Replace(text, `"netuid":25`, `"Netuid":25`, 1),
-		"unknown schema":   strings.Replace(text, SnHeadSummarySchemaV1, "urnetwork-validator-head-summary-v2", 1),
+		"unknown schema":   strings.Replace(text, headsummary.Schema, "urnetwork-validator-head-summary-v2", 1),
 		"exponent":         strings.Replace(text, `"settlement_epoch":7`, `"settlement_epoch":7e0`, 1),
 	} {
 		if mutated == text {
@@ -171,82 +174,89 @@ func TestSnHeadSummaryRefusesInconsistentValues(t *testing.T) {
 	key := newSnHeadSummaryTestKey(t, [32]byte{0x03})
 	for name, change := range map[string]func(*SnHeadSummary){
 		"rank gap":    func(s *SnHeadSummary) { s.Entries[2].Rank = 4 },
-		"score order": func(s *SnHeadSummary) { s.Entries[1].Score = SnHeadSummaryRational{Numerator: "2", Denominator: "1"} },
+		"score order": func(s *SnHeadSummary) { s.Entries[1].Score = headscore.Rational{Numerator: "2", Denominator: "1"} },
 		"tie order": func(s *SnHeadSummary) {
-			s.Entries[1].Uid, s.Entries[2].Uid, s.SelectedUids, s.RejectedUids = 9, 7, []uint16{42, 9}, []uint16{7}
+			s.Entries[1].UID, s.Entries[2].UID, s.SelectedUIDs, s.RejectedUIDs = 9, 7, []uint16{42, 9}, []uint16{7}
 		},
-		"repeated uid": func(s *SnHeadSummary) { s.Entries[2].Uid, s.RejectedUids = 42, []uint16{42} },
+		"repeated uid": func(s *SnHeadSummary) { s.Entries[2].UID, s.RejectedUIDs = 42, []uint16{42} },
 		"selection": func(s *SnHeadSummary) {
-			s.Entries[2].Selected, s.SelectedUids, s.RejectedUids = true, []uint16{42, 7, 9}, []uint16{}
+			s.Entries[2].Selected, s.SelectedUIDs, s.RejectedUIDs = true, []uint16{42, 7, 9}, []uint16{}
 		},
-		"selected uids":          func(s *SnHeadSummary) { s.SelectedUids = []uint16{7, 42} },
-		"rejected uids":          func(s *SnHeadSummary) { s.RejectedUids = []uint16{} },
-		"unreduced score":        func(s *SnHeadSummary) { s.Entries[0].Score = SnHeadSummaryRational{Numerator: "14", Denominator: "8"} },
-		"zero score":             func(s *SnHeadSummary) { s.Entries[2].Score = SnHeadSummaryRational{Numerator: "0", Denominator: "1"} },
-		"leading zero":           func(s *SnHeadSummary) { s.Entries[0].Score = SnHeadSummaryRational{Numerator: "07", Denominator: "4"} },
+		"selected uids":          func(s *SnHeadSummary) { s.SelectedUIDs = []uint16{7, 42} },
+		"rejected uids":          func(s *SnHeadSummary) { s.RejectedUIDs = []uint16{} },
+		"unreduced score":        func(s *SnHeadSummary) { s.Entries[0].Score = headscore.Rational{Numerator: "14", Denominator: "8"} },
+		"zero score":             func(s *SnHeadSummary) { s.Entries[2].Score = headscore.Rational{Numerator: "0", Denominator: "1"} },
+		"leading zero":           func(s *SnHeadSummary) { s.Entries[0].Score = headscore.Rational{Numerator: "07", Denominator: "4"} },
 		"zero hotkey":            func(s *SnHeadSummary) { s.Entries[0].Hotkey = snHeadSummaryTestHash(0) },
 		"zero validator":         func(s *SnHeadSummary) { s.ValidatorHotkey = snHeadSummaryTestHash(0) },
 		"fleet order":            func(s *SnHeadSummary) { s.Entries[1].Fleets[0].Generation, s.Entries[1].Fleets[1].Generation = 2, 1 },
 		"duplicate fleet":        func(s *SnHeadSummary) { s.Entries[1].Fleets[1].Generation = 1 },
 		"zero generation":        func(s *SnHeadSummary) { s.Entries[0].Fleets[0].Generation = 0 },
-		"zero fleet":             func(s *SnHeadSummary) { s.Entries[0].Fleets[0].FleetId = snHeadSummaryTestHash(0) },
-		"no fleet":               func(s *SnHeadSummary) { s.Entries[0].Fleets = []SnHeadSummaryFleet{} },
+		"zero fleet":             func(s *SnHeadSummary) { s.Entries[0].Fleets[0].FleetID = snHeadSummaryTestHash(0) },
+		"no fleet":               func(s *SnHeadSummary) { s.Entries[0].Fleets = []headsummary.Fleet{} },
 		"trailing fraction zero": func(s *SnHeadSummary) { s.SignedAt = "2026-10-29T18:04:05.120Z" },
 		"local offset":           func(s *SnHeadSummary) { s.SignedAt = "2026-10-29T18:04:05+01:00" },
 		"zero netuid":            func(s *SnHeadSummary) { s.Netuid = 0 },
-		"zero policy":            func(s *SnHeadSummary) { s.PolicyId = 0 },
+		"zero policy":            func(s *SnHeadSummary) { s.PolicyID = 0 },
 		"zero head seats":        func(s *SnHeadSummary) { s.MaximumHeadFleets = 0 },
 		"zero snapshot":          func(s *SnHeadSummary) { s.NativeSnapshotBlock = 0 },
 		"artifact address":       func(s *SnHeadSummary) { s.MeasurementArtifactHash = "sha256:41" },
 		"scheme":                 func(s *SnHeadSummary) { s.SignatureScheme = "ed25519" },
 		"too many entries": func(s *SnHeadSummary) {
-			s.Entries, s.SelectedUids, s.RejectedUids = []SnHeadSummaryEntry{}, []uint16{}, []uint16{}
+			s.Entries, s.SelectedUIDs, s.RejectedUIDs = []headsummary.Entry{}, []uint16{}, []uint16{}
 			for i := range 4097 {
-				s.Entries = append(s.Entries, SnHeadSummaryEntry{Rank: uint32(i + 1), Uid: uint16(i), Hotkey: snHeadSummaryTestHash(0x77),
-					Score: SnHeadSummaryRational{Numerator: "1", Denominator: "1"}, Selected: i < 2, Fleets: []SnHeadSummaryFleet{{FleetId: snHeadSummaryTestHash(0x11), Generation: 1}}})
+				s.Entries = append(s.Entries, headsummary.Entry{Rank: uint32(i + 1), UID: uint16(i), Hotkey: snHeadSummaryTestHash(0x77),
+					Score: headscore.Rational{Numerator: "1", Denominator: "1"}, Selected: i < 2, Fleets: []headsummary.Fleet{{FleetID: snHeadSummaryTestHash(0x11), Generation: 1}}})
 				if i < 2 {
-					s.SelectedUids = append(s.SelectedUids, uint16(i))
+					s.SelectedUIDs = append(s.SelectedUIDs, uint16(i))
 				} else {
-					s.RejectedUids = append(s.RejectedUids, uint16(i))
+					s.RejectedUIDs = append(s.RejectedUIDs, uint16(i))
 				}
 			}
 		},
 	} {
 		summary := snHeadSummaryTestEnvelope(key.hex())
 		change(summary)
-		_, err := DecodeSnHeadSummary(key.sign(t, summary))
+		_, err := DecodeSnHeadSummary(key.signAny(t, summary))
 		requireSnHeadSummaryInvalid(t, err, name)
 	}
 }
 
 // The signature binds every member: a member changed after signing breaks
 // the signing hash; a recomputed hash with another key's signature, or the
-// right key's signature over another digest, does not verify.
+// right key's signature over another digest, does not verify; a well-formed
+// random signature does not either.
 func TestSnHeadSummaryRefusesWrongSignatures(t *testing.T) {
 	key, other := newSnHeadSummaryTestKey(t, [32]byte{0x04}), newSnHeadSummaryTestKey(t, [32]byte{0x05})
 	signed := snHeadSummaryTestEnvelope(key.hex())
-	key.sign(t, signed)
+	body := key.sign(t, signed)
+	if _, err := DecodeSnHeadSummary(body); err != nil {
+		t.Fatal("the signed summary", err)
+	}
 
 	tampered := *signed
 	tampered.SettlementEpoch = 8
-	body, _ := json.Marshal(&tampered)
-	summary, err := DecodeSnHeadSummary(body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	requireSnHeadSummaryInvalid(t, VerifySnHeadSummarySignature(summary), "tampered member")
+	tamperedBody, _ := json.Marshal(&tampered)
+	_, err := DecodeSnHeadSummary(tamperedBody)
+	requireSnHeadSummaryInvalid(t, err, "tampered member")
 
 	// signed by another key under this hotkey
 	impostor := snHeadSummaryTestEnvelope(key.hex())
-	other.sign(t, impostor)
-	requireSnHeadSummaryInvalid(t, VerifySnHeadSummarySignature(impostor), "another key")
+	_, err = DecodeSnHeadSummary(other.signAny(t, impostor))
+	requireSnHeadSummaryInvalid(t, err, "another key")
 
 	// this key's signature over another summary's digest
 	replayed := snHeadSummaryTestEnvelope(key.hex())
 	replayed.NativeEpoch = 51235
-	digest := SnHeadSummaryDigest(replayed)
+	replayed.SignedAt, replayed.SignatureScheme = signed.SignedAt, signed.SignatureScheme
+	digest, err := headsummary.SigningDigest(replayed)
+	if err != nil {
+		t.Fatal(err)
+	}
 	replayed.SigningHash, replayed.Signature = "sha256:"+hex.EncodeToString(digest[:]), signed.Signature
-	requireSnHeadSummaryInvalid(t, VerifySnHeadSummarySignature(replayed), "a signature of another digest")
+	replayedBody, _ := json.Marshal(replayed)
+	_, err = DecodeSnHeadSummary(replayedBody)
+	requireSnHeadSummaryInvalid(t, err, "a signature of another digest")
 
 	// a well-formed signature of random bytes
 	random := *signed
@@ -254,11 +264,9 @@ func TestSnHeadSummaryRefusesWrongSignatures(t *testing.T) {
 	rand.Read(noise[:])
 	noise[63] |= 0x80
 	random.Signature = "0x" + hex.EncodeToString(noise[:])
-	requireSnHeadSummaryInvalid(t, VerifySnHeadSummarySignature(&random), "a random signature")
-
-	if err := VerifySnHeadSummarySignature(signed); err != nil {
-		t.Fatal("the signed summary", err)
-	}
+	randomBody, _ := json.Marshal(&random)
+	_, err = DecodeSnHeadSummary(randomBody)
+	requireSnHeadSummaryInvalid(t, err, "a random signature")
 }
 
 // The operator accepts the hotkeys st.yml lists, and only those; without a
@@ -286,7 +294,7 @@ func TestSnHeadSummaryAcceptsTheConfiguredValidator(t *testing.T) {
 	}{
 		"no census":       {cfg: unconfigured, hotkey: key.hotkey},
 		"another hotkey":  {cfg: unconfigured, snapshot: holder, hotkey: other.hotkey},
-		"another uid":     {cfg: unconfigured, snapshot: holder, change: func(s *SnHeadSummary) { s.ValidatorUid = 2 }, hotkey: key.hotkey},
+		"another uid":     {cfg: unconfigured, snapshot: holder, change: func(s *SnHeadSummary) { s.ValidatorUID = 2 }, hotkey: key.hotkey},
 		"another subnet":  {cfg: unconfigured, snapshot: holder, change: func(s *SnHeadSummary) { s.Netuid = 26 }, hotkey: key.hotkey},
 		"an older census": {cfg: unconfigured, snapshot: &model.SnIncentiveSnapshot{SubnetEpochIndex: 51232, Uids: holder.Uids}, hotkey: key.hotkey},
 		"no permit": {cfg: unconfigured, snapshot: &model.SnIncentiveSnapshot{SubnetEpochIndex: 51234, Uids: []*model.SnIncentiveUid{
@@ -345,7 +353,7 @@ func TestSnUploadHeadSummaryKeepsOnePerTempo(t *testing.T) {
 		later := snHeadSummaryTestEnvelope(key.hex())
 		later.NativeSnapshotBlock = 6_123_470
 		later.Entries = later.Entries[:1]
-		later.SelectedUids, later.RejectedUids = []uint16{42}, []uint16{}
+		later.SelectedUIDs, later.RejectedUIDs = []uint16{42}, []uint16{}
 		laterBody := key.sign(t, later)
 		if result, err := snUploadHeadSummary(ctx, cfg, nil, laterBody, now.Add(2*time.Minute)); err != nil || result != SnHeadSummaryStored {
 			t.Fatal("later snapshot", result, err)
