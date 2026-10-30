@@ -1,6 +1,24 @@
 # R2 scoring restoration: readiness before hold release
 
-## Current operational status — supersedes the historical sequence below
+## Current maintenance status — October 30, 23:11 UTC
+
+Production R2 epoch 1 remains open for intake, but evaluation hold **4**
+(`CALIBRATION_MAINTENANCE`) and reward-delivery hold **1** are active. The real
+worker is stopped and joined. The original one-use public pilot is running;
+all nine controls and one of nine candidate runs have completed. It is not
+accepted, and no fresh hidden seed has been drawn. Completed owners can now
+read their private scores while public results stay sealed.
+
+Use the [current checkpoint](current-state.json) and
+[live maintenance evidence](CALIBRATION-MAINTENANCE-LIVE-2026-10-30.json), not
+the earlier grading snapshot below. Maintenance authority expires at its
+original **October 31, 07:19:42.289655 UTC** bound and must not be renewed.
+Do not restart the worker during timed calibration. Before release, require
+actual accepted calibration, independent review, scoped COMPLIANCE custody,
+joined cleanup and genuine worker readiness; neither this guide nor an archive
+receipt supplies that approval.
+
+## Historical provisional-grading snapshot — October 30
 
 The owner subsequently approved [provisional grading](PROVISIONAL-GRADING-OWNER-APPROVAL-2026-10-30.md),
 moving calibration to a pre-finalization gate. Production grading is now running:
@@ -57,8 +75,12 @@ sudo systemctl start urnetwork-competition-production-r2.service
 ```
 
 The audited unit is Root-owned, management CPUs 20,22, 8 GiB hard memory limit,
-no swap and control-group cleanup. Its unit-file SHA-256 is
-`5a254d861ec63a99cc94fcf7dcff9a75a1c4a077874cefb59b1bf4c00e80f9a6`.
+no swap and control-group cleanup. The historical unit-file SHA-256 was
+`5a254d861ec63a99cc94fcf7dcff9a75a1c4a077874cefb59b1bf4c00e80f9a6`;
+the actual October 30 maintenance unit was independently rehashed as
+`9ede9888a35bfcc14f65b219a12ce3d1219f7cb8195c109be761c81b5d82303e`.
+Freshly verify the actual existing unit and its qualified hooks before recovery;
+do not install or replay a historical unit from these recorded pins.
 Use the unit's existing pinned worker/review/build hooks and protected runtime
 environment; do not capture credential contents or construct another supervisor.
 
