@@ -38621,11 +38621,15 @@ not merely a healthy control request.
 time out while the same temporary device subsequently passes all SOCKS and
 WireGuard requests. On its exact block, the distinguishing counter edge is one
 new `ConnectDialErrors` followed by `ConnectClientsGone`, with no DoH panic,
-identity restore, or pending-H1 increase. `ProxyConnectTimeout` is the interval
-between retries, not a total timeout. A legacy 30-minute value turns one
-recoverable TUN dial error into a client-visible terminal timeout; current
-proxy/server defaults pace retries at one second and continue until the client
-leaves. A clean immediate rerun does not make the legacy interval safe.
+identity restore, or pending-H1 increase. `ProxyConnectTimeout` is the first
+interval between retries, not a total timeout. A legacy 30-minute value turns
+one recoverable TUN dial error into a client-visible terminal timeout; current
+proxy/server defaults back off from one second, doubling to eight, inside the
+30-second `ProxyConnectBudget`, then answer 504 (`connect_timeout`). A refusal
+no retry can change (no credential, ip lock or plan, unknown or removed device,
+reset, no such host) is answered 407, 403 or 502 at once and counted by class
+(`dial_refused_*`). A clean immediate rerun does not make the legacy interval
+safe.
 
 **Rejected TLS-chain attribution:** an acceptance error ending only in
 `x509: certificate signed by unknown authority` does not distinguish a broken
