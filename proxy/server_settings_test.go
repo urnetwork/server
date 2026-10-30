@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"testing"
+	"time"
 
 	"github.com/urnetwork/connect"
 	proxylib "github.com/urnetwork/proxy"
@@ -26,6 +27,22 @@ func TestDefaultProxySettingsUsesHttpDialRetryPacing(t *testing.T) {
 		settings.ProxyConnectTimeout,
 		proxylib.DefaultHttpProxySettings().ProxyConnectTimeout,
 	)
+	connect.AssertEqual(
+		t,
+		settings.ProxyConnectBudget,
+		proxylib.DefaultHttpProxySettings().ProxyConnectBudget,
+	)
+}
+
+// The http proxy runs with the server's connect pacing and budget.
+func TestHttpProxyUsesServerConnectBudget(t *testing.T) {
+	settings := DefaultProxySettings()
+	settings.ProxyConnectTimeout = 2 * time.Second
+	settings.ProxyConnectBudget = 45 * time.Second
+	httpSettings := (&httpServer{settings: settings}).newHttpProxy().Settings()
+
+	connect.AssertEqual(t, httpSettings.ProxyConnectTimeout, settings.ProxyConnectTimeout)
+	connect.AssertEqual(t, httpSettings.ProxyConnectBudget, settings.ProxyConnectBudget)
 }
 
 // TestDefaultProxyDeviceManagerSettingsLoadsDeviceMemoryBudget proves the main
