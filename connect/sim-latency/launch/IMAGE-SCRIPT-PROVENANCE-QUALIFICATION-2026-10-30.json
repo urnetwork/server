@@ -1,0 +1,56 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-image-script-provenance-qualification",
+  "status": "accepted_with_manifest_collation_exception",
+  "purpose": "Qualify the main control-plane image-context writer, not the frozen evaluator or future G2 instrument patch.",
+  "parent_server_commit": "d9cfb9fc82523ca35bff0235a8b83567a82ebb38",
+  "sn_commit": "c59b0ddc1357f8ab010264d7f0cdc24ee49a28ad",
+  "change": "For minimum-work images only, hash the two actual canonical, bounded, read-only protected scripts before context emission; override both script hashes and inherited overlay labels. Preserve historical Dockerfile, identity and lock bytes.",
+  "source_sha256": {
+    "connect/sim-latency/source_build_image_run.go": "ba4c0937296041ee60972a47bfc11563b03a877ddb86a9c590be03827b2957cb",
+    "connect/sim-latency/source_build_image_scripts_test.go": "48c4358ff98f121dec0a40e21e564a962377d5052a51e4b86ad6b8f87629934e"
+  },
+  "toolchain": "go1.27.3",
+  "package": "github.com/urnetwork/server/connect/sim-latency",
+  "whole_package_race_compilation": true,
+  "compile_seconds": 36.365,
+  "test_binary_sha256": "d83011122b1d8c174372a870fd378e47c7d8e611f909386a8af2a34fc71bfa53",
+  "selected_top_level_roots": 23,
+  "fresh_test_processes": 3,
+  "top_level_passes": 69,
+  "test_failures": 0,
+  "test_skips": 0,
+  "pass_seconds": [5.940, 4.939, 4.874],
+  "selected_roster_sha256": "d7fbc0e95a821e30a92edde3a3f48e0b5465e90685b1d0f03278bbe7f5389952",
+  "new_regression_roots": [
+    "TestSourceBuildImageInstrumentAdoptionBindsInstalledScriptLabels",
+    "TestSourceBuildImageInheritedMinimumWorkBindsInstalledScriptLabels",
+    "TestSourceBuildImageScriptLabelsRejectUnsealedMissingOrRedirectedInputs",
+    "TestSourceBuildImageLegacyScriptLabelBindingPreservesExactBytes"
+  ],
+  "explicit_integration_exclusion": {
+    "test": "TestSourceBuildImageRealCopyOnlyAssembly",
+    "reason": "Actual Docker image builds are outside this bounded unit checkpoint; the test was not selected, not skipped."
+  },
+  "integrity": {
+    "original_wrapper_exit": 1,
+    "reason": "The initial manifest used POSIX collation; retained synthetic fixture initialization changed the locale to en_US.UTF-8 before the final manifest. Only line ordering differed.",
+    "original_failure_and_raw_manifests_preserved": true,
+    "root_independently_verified_complete_unique_path_digest_equality": true,
+    "source_manifest_entries_before_and_after": 10052,
+    "lc_all_c_sorted_source_manifest_sha256_before_and_after": "2d85048e39bc862f288785c39166fc36a534c0619a3dc95c910523be5cee8508",
+    "dependency_manifest_unchanged_byte_for_byte": true,
+    "infrastructure_manifest_unchanged_byte_for_byte": true,
+    "go_code_changed_after_tests": false,
+    "post_test_json_handoff_updates_outside_code_proof": true
+  },
+  "private_receipt": "/home/by/urnetwork/temp/image-script-provenance-qa.wbXCdOII/QA-SUMMARY.private.json",
+  "private_receipt_sha256": "f4b06f1582de576d508f88f4d062aa9bf9a646f097c34937a8666f97b4fbc26c",
+  "full_suite_run": false,
+  "runtime_image_built": false,
+  "frozen_competition_branches_changed": false,
+  "current_epoch_policy_changed": false,
+  "api_or_database_deployed": false,
+  "maintenance_activated": false,
+  "calibration_started": false
+}
