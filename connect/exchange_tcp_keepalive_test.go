@@ -1,5 +1,7 @@
 //go:build unix
 
+// Socket option readback verifies configuration, not a universal detection
+// bound: TCP suppresses idle probes when application data is outstanding.
 package connect
 
 import (
@@ -12,29 +14,37 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// Both ends of an exchange connection carry TCP keepalive tuned past the
-// exchange ping (exchangeKeepAliveConfig): quiet while the connection is live,
-// and noticing a dead peer within the former keepalive's 16 s, well before the
-// read deadline would.
-func TestExchangeKeepAliveIsQuietWhileLiveAndBoundsADeadPeer(t *testing.T) {
+// Idle probing starts after the expected heartbeat. These values describe an
+// idle probe schedule, not a guarantee about an actively writing connection.
+func TestExchangeKeepAliveStartsAfterTheNormalPingCadence(t *testing.T) {
 	settings := DefaultExchangeSettings()
-	keepAlive := exchangeKeepAliveConfig(settings.ExchangePingTimeout)
+	keepAlive := exchangeKeepAliveConfig(settings)
 	if !keepAlive.Enable {
 		t.Fatal("exchange keepalive is off")
 	}
 	if keepAlive.Idle <= settings.ExchangePingTimeout {
 		t.Fatalf("keepalive idle %s does not outlast the ping every %s, so live connections probe", keepAlive.Idle, settings.ExchangePingTimeout)
 	}
-	deadPeer := keepAlive.Idle + time.Duration(keepAlive.Count)*keepAlive.Interval
-	// the former exchange keepalive: 1 s idle, then 15 probes 1 s apart
-	if formerDeadPeer := 16 * time.Second; formerDeadPeer < deadPeer {
-		t.Fatalf("a dead peer is noticed %s after its last packet, later than the former %s", deadPeer, formerDeadPeer)
-	}
-	if settings.ExchangeReadTimeout <= deadPeer {
-		t.Fatalf("keepalive notices a dead peer at %s, no sooner than the %s read deadline", deadPeer, settings.ExchangeReadTimeout)
+	if keepAlive.Idle != 11*time.Second || keepAlive.Interval != time.Second || keepAlive.Count != 4 {
+		t.Fatalf("default exchange probe settings changed: %+v", keepAlive)
 	}
 }
 
+// A custom ping cadence and probe settings reach the same configuration used
+// by both accepted and dialed sockets.
+func TestExchangeKeepAliveUsesOwnerSettings(t *testing.T) {
+	settings := DefaultExchangeSettings()
+	settings.ExchangePingTimeout = 7 * time.Second
+	settings.ExchangeKeepAliveIdleMargin = 2 * time.Second
+	settings.ExchangeKeepAliveInterval = 3 * time.Second
+	settings.ExchangeKeepAliveCount = 5
+	want := net.KeepAliveConfig{Enable: true, Idle: 9 * time.Second, Interval: 3 * time.Second, Count: 5}
+	if got := exchangeKeepAliveConfig(settings); got != want {
+		t.Fatalf("exchange probe settings = %+v, want %+v", got, want)
+	}
+}
+
+// Dialed sockets retain the configured probe interval and count.
 func TestExchangeDialedSocketKeepsTcpKeepAlive(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -51,7 +61,7 @@ func TestExchangeDialedSocketKeepsTcpKeepAlive(t *testing.T) {
 	defer conn.Close()
 	tcpConn := conn.(*net.TCPConn)
 
-	keepAlive := exchangeKeepAliveConfig(DefaultExchangeSettings().ExchangePingTimeout)
+	keepAlive := exchangeKeepAliveConfig(DefaultExchangeSettings())
 	configureExchangeTcpConn(tcpConn, keepAlive)
 	if !tcpKeepAliveEnabled(t, tcpConn) {
 		t.Fatal("dialed exchange socket has no TCP keepalive")
@@ -59,10 +69,11 @@ func TestExchangeDialedSocketKeepsTcpKeepAlive(t *testing.T) {
 	assertTcpKeepAliveProbes(t, tcpConn, keepAlive)
 }
 
+// Accepted sockets inherit the same configuration from their listener.
 func TestExchangeListenerAcceptsWithTcpKeepAlive(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	keepAlive := exchangeKeepAliveConfig(DefaultExchangeSettings().ExchangePingTimeout)
+	keepAlive := exchangeKeepAliveConfig(DefaultExchangeSettings())
 	listenConfig := exchangeListenConfig(keepAlive)
 	listener, err := listenConfig.Listen(ctx, "tcp", "127.0.0.1:0")
 	if err != nil {
@@ -96,6 +107,7 @@ func TestExchangeListenerAcceptsWithTcpKeepAlive(t *testing.T) {
 	assertTcpKeepAliveProbes(t, serverConn.(*net.TCPConn), keepAlive)
 }
 
+// Reads the kernel option from the actual connection under test.
 func tcpKeepAliveEnabled(t *testing.T, tcpConn *net.TCPConn) bool {
 	t.Helper()
 	rawConn, err := tcpConn.SyscallConn()
@@ -115,8 +127,7 @@ func tcpKeepAliveEnabled(t *testing.T, tcpConn *net.TCPConn) bool {
 	return enabled != 0
 }
 
-// The socket's probe interval and count, which with the idle bound how late a
-// dead peer is noticed.
+// Reads probe options without inferring how active data will affect probing.
 func assertTcpKeepAliveProbes(t *testing.T, tcpConn *net.TCPConn, keepAlive net.KeepAliveConfig) {
 	t.Helper()
 	rawConn, err := tcpConn.SyscallConn()

@@ -1,5 +1,12 @@
 # CPUOPT2 — edge CPU efficiency (2026-10-29)
 
+**Correctness follow-up (2026-10-30):** [CPUOPT-KEEPALIVE.md](CPUOPT-KEEPALIVE.md)
+supersedes the keepalive redundancy and deadline-safety assumptions below.
+The review restores native per-operation deadlines and accepted-service
+keepalive, fixes feed heartbeat starvation and shared pause logging, and
+corrects the unconditional TCP detection claims. Historical watchdog/lazy
+deadline operation counts below do not describe the corrected implementation.
+
 **Question (owner, 2026-10-29):** the edges run close to their CPU limit while
 using less than half their memory. How do we cut and rebalance CPU so the same
 hardware can carry about twice today's usage?

@@ -138,8 +138,7 @@ func TestExchangeDeadlineReadMessageRejectedBeforeIo(t *testing.T) {
 	requireExchangeIODelta(t, "received", "data", before, 0, 0)
 }
 
-// A cached second frame is also subject to the owner's next due re-arm. The
-// read deadline is re-armed once a third of its timeout has passed.
+// A buffered second frame is subject to the next operation's deadline setter.
 func TestExchangeDeadlineBufferedFrameCannotHideRejection(t *testing.T) {
 	clientconnect.MessagePoolReturn(clientconnect.MessagePoolGet(1))
 	synctest.Test(t, func(t *testing.T) {
@@ -157,7 +156,7 @@ func TestExchangeDeadlineBufferedFrameCannotHideRejection(t *testing.T) {
 		if receiver.reader.Buffered() == 0 {
 			t.Fatal("fixture did not retain the second framed message")
 		}
-		time.Sleep(settings.ExchangeReadTimeout/3 + time.Millisecond)
+		time.Sleep(time.Millisecond)
 		conn.readErr = errors.New("synthetic cached-frame deadline rejected")
 		before := snapshotExchangeIO("received", "data")
 		message, err = receiver.ReadMessage(conn)
