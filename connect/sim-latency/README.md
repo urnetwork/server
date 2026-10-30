@@ -21,9 +21,13 @@ The actual compiler must be **Go 1.27.3**. Select that installed toolchain on
 
 ## Current competition contract
 
-Public opening is fixed at **2026-10-28 00:00 UTC**. Preparation now uses a
-fresh Go 1.27.3 checkpoint; its final scale, calibrated margin and official
-epoch baseline are **not yet qualified**. Follow
+The original **2026-10-28 00:00 UTC** opening was missed, not backdated.
+The approved replacement production season, R2 epoch 1, opened submission intake
+at **2026-10-29 13:06:42.413416 UTC**. Intake remains open while grading and
+publication are held for calibration. The Go 1.27.3 checkpoint's fresh bridge
+and independent-seed acceptance are **not yet complete**. Follow the
+[current checkpoint](launch/current-state.json),
+the [live maintenance record](launch/CALIBRATION-MAINTENANCE-LIVE-2026-10-30.json), and
 [`launch/PRODUCTION-2026-10-28.md`](launch/PRODUCTION-2026-10-28.md) and its
 exact-artifact records for current evidence. An installed image or a passing
 local smoke is not production activation.

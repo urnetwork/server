@@ -242,6 +242,11 @@
     "live_transition_report": "server/connect/sim-latency/launch/CALIBRATION-MAINTENANCE-LIVE-2026-10-30.json",
     "live_transition_report_sha256": "14a7e83a285b254cb03d654e1748b51a8a35c70c853586045202bced85c5dfe3",
     "running_public_pilot": {
+      "observed_at": "2026-10-30T23:06:38Z",
+      "phase": "candidate",
+      "replicate_count": 9,
+      "baseline_completed": 9,
+      "candidate_completed": 1,
       "unit": "urnetwork-public-pilot-execute-native233-20261030-v1.service",
       "observer_session": 58342,
       "observer_session_terminal": false,
@@ -348,7 +353,7 @@
     "retained_in_git": true,
     "warning": "The 164128-byte historical checkpoint retains all earlier failures, qualifications and source pins. Its old top-level status and next_action are superseded; do not execute them. Read history only for a specific supporting artifact."
   },
-  "observed_at": "2026-10-30T21:34:50Z",
+  "observed_at": "2026-10-30T23:06:38Z",
   "phase_checkpoint_qualification": {
     "status": "focused tests, native API build, standalone guard and static checks passed; not a live release",
     "toolchain": "go1.27.3",

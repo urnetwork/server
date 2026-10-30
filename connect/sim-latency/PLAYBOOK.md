@@ -16,13 +16,21 @@ At 03:14 UTC on October 30, public `/competition/info` reported
 
 The later read-only snapshot at **18:39 UTC on October 30** shows four completed
 evaluations, eleven queued jobs and no running job. Every queued job still has
-zero attempts and an unset start time. The worker is **online**, publishing real
+zero attempts and an unset start time. The worker was **online**, publishing real
 host heartbeats, with evaluation hold revision 3 active and reward-delivery hold
-revision 1 active. New claims are paused; no timed calibration has started.
-Do not stop the worker until the separately approved intake-preserving
-calibration-maintenance release is deployed and its actual active revision 4
-has been verified. The earlier stopped-worker observation is historical, not
-an instruction to manufacture readiness or replay an initial-hold exception.
+revision 1 active. At that snapshot, new claims were paused and timed calibration
+had not started. That phase required the separately approved intake-preserving
+maintenance release and its actual active revision 4 before stopping the worker.
+
+The later **23:06 UTC October 30** observation supersedes that operational state:
+maintenance hold **4** is active, the real worker is stopped and joined, and
+the replacement public pilot is running under its original one-use invocation.
+All nine public controls and one of nine candidate runs have completed; this is
+not acceptance. No fresh hidden seed has been drawn. Intake remains available
+with truthful offline host checks, and completed owners can read private scores
+without public reveal. Maintenance authority expires from its original creation
+at **October 31, 07:19:42.289655 UTC**; it cannot be renewed to extend calibration.
+Do not restart the worker during timed measurements or manufacture readiness.
 Use the
 [current checkpoint](launch/current-state.json) and the
 [scoring restoration procedure](launch/SCORING-RESTORE-2026-10-30.md) before
@@ -93,8 +101,10 @@ qualify its changed bytes. Metadata-only native prepare completed at
 15:23–15:24 UTC. Its exact public plan is pushed, and the protected publication
 receipt and separately pinned execution configuration were installed and
 rehashed at 18:23 UTC. These are not timed measurements or permission to repeat
-prepare. The replacement public pilot and subsequent single hidden-seed screen
-have not started. Epoch-one gates, R9, significance, practical margin and per-job
+prepare. The replacement public pilot started at **21:28:33 UTC October 30**;
+the subsequent single hidden-seed screen has not started. Observe the existing
+process and never repeat the one-use execution after an observation timeout.
+Epoch-one gates, R9, significance, practical margin and per-job
 deadline remain unchanged. No new hidden seed has been drawn. The separate
 [late-opening authorization](launch/LATE-OPENING-AUTHORIZATION-2026-10-28.md)
 and subsequent intake-first/replacement-season approvals do not establish
