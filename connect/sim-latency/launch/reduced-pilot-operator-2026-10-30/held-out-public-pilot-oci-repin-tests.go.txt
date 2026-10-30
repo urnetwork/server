@@ -1,0 +1,57 @@
+// Synthetic tuples exercise the exact matcher called by the real closed
+// production predicate, without copying live source/image identities into tests.
+package main
+
+import "testing"
+
+// One exact tuple passes; stale, omitted, invalid and mismatched fields refuse.
+func TestHeldOutPublicPilotExactRebuiltWorseImageGuard(t *testing.T) {
+	tuple := heldOutPublicPilotCausalTuple{PatchSha256: heldOutDigest([]byte("synthetic patch")),
+		CandidateSha: heldOutDigest([]byte("synthetic commit"))[:40],
+		ImageId:      "sha256:" + heldOutDigest([]byte("synthetic image")), BinarySha256: heldOutDigest([]byte("synthetic binary"))}
+	reference := heldOutPublicPilotReference{Role: "worse", Patch: heldOutPinnedFile{Sha256: tuple.PatchSha256},
+		CandidateSha: tuple.CandidateSha, ImageId: tuple.ImageId, BinarySha256: tuple.BinarySha256}
+	if !heldOutPublicPilotMatchesCausalTuple(reference, tuple) {
+		t.Fatal("exact synthetic independently admitted tuple rejected")
+	}
+	for _, control := range []struct {
+		name   string
+		change func(*heldOutPublicPilotReference)
+	}{
+		{"historical OCI", func(value *heldOutPublicPilotReference) {
+			value.ImageId = "sha256:" + heldOutDigest([]byte("synthetic historical image"))
+		}},
+		{"missing OCI", func(value *heldOutPublicPilotReference) { value.ImageId = "" }},
+		{"wrong binary", func(value *heldOutPublicPilotReference) {
+			value.BinarySha256 = heldOutDigest([]byte("synthetic wrong binary"))
+		}},
+		{"wrong patch", func(value *heldOutPublicPilotReference) {
+			value.Patch.Sha256 = heldOutDigest([]byte("synthetic wrong patch"))
+		}},
+		{"wrong source", func(value *heldOutPublicPilotReference) {
+			value.CandidateSha = heldOutDigest([]byte("synthetic wrong source"))[:40]
+		}},
+		{"wrong role", func(value *heldOutPublicPilotReference) { value.Role = "better" }},
+	} {
+		changed := reference
+		control.change(&changed)
+		if heldOutPublicPilotMatchesCausalTuple(changed, tuple) {
+			t.Fatal("mismatched causal reference accepted:", control.name)
+		}
+	}
+	for _, control := range []func(*heldOutPublicPilotCausalTuple){
+		func(value *heldOutPublicPilotCausalTuple) { value.ImageId = "sha256:UNBOUND" },
+		func(value *heldOutPublicPilotCausalTuple) { value.PatchSha256 = "UNBOUND" },
+		func(value *heldOutPublicPilotCausalTuple) { value.CandidateSha = "UNBOUND" },
+		func(value *heldOutPublicPilotCausalTuple) { value.BinarySha256 = "UNBOUND" },
+	} {
+		changed := tuple
+		control(&changed)
+		if heldOutPublicPilotMatchesCausalTuple(reference, changed) {
+			t.Fatal("unbound causal identity admitted")
+		}
+	}
+	if heldOutPublicPilotCausalH1Reference(reference) {
+		t.Fatal("synthetic test tuple was accepted as the compiled production tuple")
+	}
+}

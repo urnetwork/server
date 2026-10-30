@@ -1,0 +1,293 @@
+// Synthetic native-shape failed-public-pilot provenance exercises the new
+// BEFORE extension without services, retained campaigns, hidden seeds or replay.
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"reflect"
+	"testing"
+	"time"
+)
+
+// Every artifact is synthetic and private. The unexported release capability
+// supplies facts only to tests; no serialized command can substitute them.
+type heldOutReducedPilotFixture struct {
+	Admission *heldOutPublicPilotAdmissionFixture
+	Config    heldOutFreshSingleExclusionBuildConfig
+	Facts     heldOutFreshSingleFacts
+	Release   heldOutRelease
+	Settings  heldOutOperatorSettings
+	Retired   heldOutPublicPilotRetirement
+	Before    heldOutExclusions
+	Expected  heldOutExclusions
+	Proof     heldOutPublicPilotProof
+}
+
+// Re-pinning bad synthetic proof bytes reaches semantic guards, not merely an
+// unrelated hash mismatch. Production facts remain immutable compiled pins.
+func (self *heldOutReducedPilotFixture) writeProof(t *testing.T) {
+	t.Helper()
+	self.Retired.FailedProof = heldOutOpJson(t, self.Retired.FailedProof.Path, self.Proof)
+}
+
+// The real-shaped completed9+9 rejection has two native replay observations;
+// it is nonplaceable and cannot be used for accepted measured direction.
+func newHeldOutReducedPilotFixture(t *testing.T) *heldOutReducedPilotFixture {
+	t.Helper()
+	admission := newHeldOutPublicPilotAdmissionFixture(t)
+	op := admission.Base.Base.Preparation
+	self := &heldOutReducedPilotFixture{Admission: admission, Facts: admission.Base.Facts, Release: op.Release, Settings: op.Settings}
+	configBytes, err := readHeldOutPinned(admission.Plan.BeforeCensusConfig, op.Settings.MaximumBytes, false)
+	if err != nil || decodeHeldOutComplete(configBytes, &self.Config, "synthetic original before config") != nil {
+		t.Fatal("synthetic admission lacks complete before config", err)
+	}
+	beforeBytes, err := readHeldOutPinned(admission.Plan.BeforeExclusions, op.Settings.MaximumBytes, false)
+	if err != nil || decodeHeldOutComplete(beforeBytes, &self.Before, "synthetic original before census") != nil {
+		t.Fatal("synthetic admission lacks complete before census", err)
+	}
+	requestBytes, err := readHeldOutPinned(admission.Plan.Request, op.Settings.MaximumBytes, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var request heldOutRequest
+	if err := decodeHeldOutComplete(requestBytes, &request, "synthetic public request"); err != nil {
+		t.Fatal(err)
+	}
+	planPin := heldOutOpJson(t, filepath.Join(admission.Plan.Root, "plan.json"), admission.Plan)
+	self.Retired = heldOutPublicPilotRetirement{
+		OwnerAddendum:    heldOutOpWrite(t, filepath.Join(op.Root, "inputs", "synthetic-replacement-owner.md"), []byte("synthetic owner permits one new public pilot; all gates unchanged\n")),
+		OriginalApproval: admission.Plan.Approval, Plan: planPin, Request: admission.Plan.Request,
+		Providers:        heldOutPinnedFile{Path: request.ProvidersPath, Sha256: request.ProvidersSha256},
+		EvaluatorImageId: self.Release.ImageId,
+		FailedProof:      heldOutPinnedFile{Path: filepath.Join(admission.Plan.Root, "pilot-proof.json")},
+		Root:             admission.Plan.Root, PublicSeed: admission.Plan.PublicSeed}
+	cohort, _ := newHeldOutPublicPilotCohort()
+	score := *cohort.Result
+	score.Placeable = false
+	self.Proof = heldOutPublicPilotProof{Schema: 1, Kind: "sim-latency-public-regression-pilot-proof", Plan: planPin,
+		Publication: admission.Config.Publication, Request: admission.Plan.Request, BeforeExclusions: admission.Plan.BeforeExclusions,
+		ProvidersSha256: request.ProvidersSha256, StartedAt: admission.Clock.Add(-3 * time.Second),
+		CompletedAt: admission.Clock.Add(-time.Second), VerifiedAt: admission.Clock,
+		Accepted: false, Reasons: []string{"synthetic complete public pilot failed placement gates"},
+		Outcome: heldOutJobOutcome{JobId: request.JobId, RoundId: request.RoundId, Role: "worse", Complete: true,
+			CandidateEvaluationIds: []string{}},
+		Control: &heldOutFrozenControl{Replicates: 9, ControlEvaluationIds: []string{}, Evidence: []calibrationArtifactBinding{}},
+		Score:   &score, Replays: []calibrationReplayObservation{}}
+	for index := 0; index < 9; index++ {
+		self.Proof.Control.ControlEvaluationIds = append(self.Proof.Control.ControlEvaluationIds, heldOutOpId(11001+index))
+		self.Proof.Outcome.CandidateEvaluationIds = append(self.Proof.Outcome.CandidateEvaluationIds, heldOutOpId(12001+index))
+	}
+	for index := 0; index < 2; index++ {
+		self.Proof.Replays = append(self.Proof.Replays, calibrationReplayObservation{ImageId: self.Release.ImageId,
+			ContainerId: fmt.Sprintf("%064x", index+1), Owner: fmt.Sprintf("%064x", index+11),
+			InspectionSha256: heldOutDigest([]byte(fmt.Sprintf("synthetic inspect %d", index))),
+			TerminalSha256:   heldOutDigest([]byte(fmt.Sprintf("synthetic terminal %d", index))), ContainerCleanupVerified: true})
+	}
+	self.writeProof(t)
+	self.Facts.PublicPilotSeed = self.Retired.PublicSeed + 1
+	self.Facts.PublicPilotRoot = filepath.Join(op.Root, "synthetic-next-public-pilot")
+	self.Facts.RetiredPublicPilot = &self.Retired
+	self.Release.freshSingleFacts = &self.Facts
+	self.Config.RetiredPublicPilot = &self.Retired
+	self.Config.OutputPath = filepath.Join(op.Root, "synthetic-replacement-before.json")
+	self.Config.ReviewedAt = admission.Clock.Add(time.Minute)
+	self.Config.ReviewedSources = append(append([]heldOutPinnedFile{}, self.Before.Sources...), self.Retired.Request, self.Retired.Providers, self.Retired.Plan)
+	expected, err := mergeHeldOutPublicPilotExclusions(self.Before, request, admission.Plan, self.Retired.Plan, self.Retired.Providers,
+		self.Config.ReviewedSources, self.Config.ReviewedAt, self.Settings.MaximumBytes)
+	if err != nil {
+		t.Fatal("synthetic expected retirement closure is invalid", err)
+	}
+	self.Expected = *expected
+	if err := authenticateHeldOutPublicPilotBeforeCensus(self.Config, self.Expected, self.Release, self.Settings); err != nil {
+		t.Fatal("synthetic retirement must reach the positive independent reconstruction before mutation", err)
+	}
+	return self
+}
+
+// Both the writer and independent reconstruction must reject bad closure;
+// a failed writer must not create an output or a hidden campaign claim.
+func (self *heldOutReducedPilotFixture) requireRefusal(t *testing.T) {
+	t.Helper()
+	if _, err := prepareHeldOutFreshSingleExclusions(self.Config, self.Release, self.Settings); err == nil {
+		t.Fatal("invalid synthetic replacement before-census was written")
+	}
+	if err := authenticateHeldOutPublicPilotBeforeCensus(self.Config, self.Expected, self.Release, self.Settings); err == nil {
+		t.Fatal("independent before-census reconstruction accepted invalid provenance")
+	}
+	if _, err := os.Lstat(self.Config.OutputPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("refused replacement left a new catalog", err)
+	}
+}
+
+// This is exclusion-only success: no proof mutation, accepted direction,
+// accepted AFTER catalog or hidden state follows from retaining the workload.
+func TestHeldOutReducedPublicPilotRetiresCompleteRejectedR9WithoutAcceptance(t *testing.T) {
+	self := newHeldOutReducedPilotFixture(t)
+	// The native before dispatcher still selects the historical pre-C2
+	// release; the later independent reconstruction selects current C2.
+	originalDispatcher := self.Release
+	originalDispatcher.ImageId = "sha256:" + heldOutDigest([]byte("synthetic original pre-current evaluator"))
+	if originalDispatcher.ImageId == self.Retired.EvaluatorImageId {
+		t.Fatal("synthetic original/current image distinction was lost")
+	}
+	pin, err := prepareHeldOutFreshSingleExclusions(self.Config, originalDispatcher, self.Settings)
+	if err != nil {
+		t.Fatal("complete gate-rejected public workload could not be retired", err)
+	}
+	content, err := readHeldOutPinned(pin, self.Settings.MaximumBytes, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var catalog heldOutExclusions
+	if err := decodeHeldOutComplete(content, &catalog, "synthetic new before"); err != nil {
+		t.Fatal(err)
+	}
+	if len(catalog.Sources) != len(self.Before.Sources)+3 || !heldOutPublicPilotSameSources(catalog.Sources, self.Config.ReviewedSources) ||
+		len(catalog.PrivateSeedHexes) != len(self.Before.PrivateSeedHexes)+1 ||
+		len(catalog.EffectiveSeeds) != len(self.Before.EffectiveSeeds)+1 ||
+		len(catalog.ProviderDigests) != len(self.Before.ProviderDigests)+1 ||
+		!reflect.DeepEqual(catalog.RetiredCommitments, self.Before.RetiredCommitments) {
+		t.Fatal("retirement lost ancestry, omitted the failed workload or invented a commitment")
+	}
+	if err := authenticateHeldOutPublicPilotBeforeCensus(self.Config, catalog, self.Release, self.Settings); err != nil {
+		t.Fatal("independent before reconstruction diverged from its writer", err)
+	}
+	if self.Proof.Accepted || self.Proof.Score.Placeable || len(self.Proof.Replays) != 2 {
+		t.Fatal("synthetic rejection was upgraded or lost its original observations")
+	}
+	if _, err := heldOutPublicPilotDirection(self.Retired.FailedProof, self.Proof, self.Admission.Plan, self.Release); err == nil {
+		t.Fatal("retirement manufactured accepted direction from a rejected proof")
+	}
+}
+
+// Each of the three recognized workload sources is mandatory; authority/proof
+// cannot masquerade as a fourth recognized seed source or replace one of them.
+func TestHeldOutReducedPublicPilotRejectsOmittedOrExtraCensusSources(t *testing.T) {
+	for omission := 0; omission < 4; omission++ {
+		self := newHeldOutReducedPilotFixture(t)
+		if omission < 3 {
+			self.Config.ReviewedSources = append(self.Config.ReviewedSources[:len(self.Before.Sources)+omission],
+				self.Config.ReviewedSources[len(self.Before.Sources)+omission+1:]...)
+		} else {
+			self.Config.ReviewedSources = append(self.Config.ReviewedSources, self.Retired.FailedProof)
+		}
+		self.requireRefusal(t)
+	}
+}
+
+// Canonical byte-equivalent aliases and request/provider source substitutions
+// are refused even when the synthetic compiled facts are independently re-pinned.
+func TestHeldOutReducedPublicPilotRejectsAliasesAndSourceSubstitution(t *testing.T) {
+	for _, change := range []func(*heldOutReducedPilotFixture){
+		func(self *heldOutReducedPilotFixture) { self.Retired.Plan.Path += "/../plan.json" },
+		func(self *heldOutReducedPilotFixture) { self.Retired.Providers.Path += ".other" },
+		func(self *heldOutReducedPilotFixture) {
+			self.Proof.Request.Sha256 = heldOutDigest([]byte("synthetic other request"))
+		},
+	} {
+		self := newHeldOutReducedPilotFixture(t)
+		change(self)
+		self.writeProof(t)
+		self.requireRefusal(t)
+	}
+}
+
+// Accepted, partial, missing-score, wrong-request and empty-replay receipts
+// cannot be presented as this complete rejected pilot.
+func TestHeldOutReducedPublicPilotRejectsAcceptedPartialOrIncompleteProof(t *testing.T) {
+	for _, change := range []func(*heldOutPublicPilotProof){
+		func(value *heldOutPublicPilotProof) { value.Accepted = true },
+		func(value *heldOutPublicPilotProof) { value.Outcome.Complete = false },
+		func(value *heldOutPublicPilotProof) { value.Score = nil },
+		func(value *heldOutPublicPilotProof) { value.Control = nil },
+		func(value *heldOutPublicPilotProof) {
+			value.Outcome.CandidateEvaluationIds = value.Outcome.CandidateEvaluationIds[:8]
+		},
+		func(value *heldOutPublicPilotProof) { value.Reasons = []string{} },
+		func(value *heldOutPublicPilotProof) { value.Replays = []calibrationReplayObservation{} },
+		func(value *heldOutPublicPilotProof) {
+			value.Replays[0].ImageId = "sha256:" + heldOutDigest([]byte("synthetic wrong replay evaluator"))
+		},
+	} {
+		self := newHeldOutReducedPilotFixture(t)
+		change(&self.Proof)
+		self.writeProof(t)
+		self.requireRefusal(t)
+	}
+}
+
+// Rehashing an unrelated typed receipt cannot change what the owner approved.
+func TestHeldOutReducedPublicPilotRejectsWrongProofKind(t *testing.T) {
+	self := newHeldOutReducedPilotFixture(t)
+	self.Proof.Kind = "synthetic-unrelated-proof"
+	self.writeProof(t)
+	self.requireRefusal(t)
+}
+
+// The replacement public integer is fixed prospectively; neither collision
+// refusal nor the retirement helper selects a substitute public/hidden seed.
+func TestHeldOutReducedPublicPilotRejectsPublicSeedCollision(t *testing.T) {
+	self := newHeldOutReducedPilotFixture(t)
+	self.Facts.PublicPilotSeed = self.Retired.PublicSeed
+	self.requireRefusal(t)
+}
+
+// The configuration has to name the separately compiled exact authority and
+// failed tuple; missing, wrong or aliased owner/proof pins refuse both sites.
+func TestHeldOutReducedPublicPilotBindsExactOwnerAndFailurePins(t *testing.T) {
+	for _, change := range []func(*heldOutFreshSingleExclusionBuildConfig){
+		func(value *heldOutFreshSingleExclusionBuildConfig) { value.RetiredPublicPilot = nil },
+		func(value *heldOutFreshSingleExclusionBuildConfig) {
+			changed := *value.RetiredPublicPilot
+			changed.OwnerAddendum.Sha256 = heldOutDigest([]byte("synthetic other owner"))
+			value.RetiredPublicPilot = &changed
+		},
+		func(value *heldOutFreshSingleExclusionBuildConfig) {
+			changed := *value.RetiredPublicPilot
+			changed.FailedProof.Path += ".other"
+			value.RetiredPublicPilot = &changed
+		},
+		func(value *heldOutFreshSingleExclusionBuildConfig) {
+			changed := *value.RetiredPublicPilot
+			changed.EvaluatorImageId = "sha256:" + heldOutDigest([]byte("synthetic wrong declared evaluator"))
+			value.RetiredPublicPilot = &changed
+		},
+	} {
+		self := newHeldOutReducedPilotFixture(t)
+		change(&self.Config)
+		self.requireRefusal(t)
+	}
+}
+
+// Hidden preparation cannot omit the retired pilot even from an otherwise
+// independently consistent catalog; historical contexts remain unchanged.
+func TestHeldOutReducedPublicPilotFreshClosurePreservesRetirement(t *testing.T) {
+	self := newHeldOutReducedPilotFixture(t)
+	config := heldOutPreparationConfig{FreshSingle: &heldOutFreshSinglePins{Approval: self.Retired.OriginalApproval}}
+	if err := validateHeldOutRetiredPublicPilotExclusions(config, self.Before, self.Release); err == nil {
+		t.Fatal("fresh closure omitted the failed public workload")
+	}
+	complete := self.Before
+	complete.Sources = append(append([]heldOutPinnedFile{}, self.Before.Sources...), self.Retired.Request, self.Retired.Providers, self.Retired.Plan)
+	if err := validateHeldOutRetiredPublicPilotExclusions(config, complete, self.Release); err != nil {
+		t.Fatal("complete synthetic retirement closure refused", err)
+	}
+	self.Facts.RetiredPublicPilot = nil
+	if err := validateHeldOutRetiredPublicPilotExclusions(heldOutPreparationConfig{}, self.Before, self.Release); err != nil {
+		t.Fatal("historical non-retirement context changed", err)
+	}
+	// Prove source/proof bytes still have the original typed field, not a
+	// private test interpretation accidentally accepting an absent boolean.
+	content, err := readHeldOutPinned(self.Retired.FailedProof, self.Settings.MaximumBytes, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]json.RawMessage
+	if json.Unmarshal(content, &document) != nil || string(document["accepted"]) != "false" {
+		t.Fatal("synthetic rejected proof changed")
+	}
+}
