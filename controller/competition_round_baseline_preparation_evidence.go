@@ -416,8 +416,8 @@ func authenticateRoundBaselineNativeRun(directory, root, id string, bound map[st
 	return nil
 }
 
-// The host operation and archive retries share the reservation's original
-// deadline. A retry reuploads these same authenticated bytes, never reruns Go.
+// The host operation and archive retries share the worker's bounded setup
+// execution deadline. A retry reuploads these same bytes, never reruns Go.
 func (self CommandEvaluator) PrepareRoundBaseline(ctx context.Context, settings *Settings, preparation *roundBaselinePreparation) (result *preparedRoundBaseline, resultErr error) {
 	if preparation == nil || preparation.SourceJob == nil {
 		return nil, errors.New("baseline producer source job is missing")

@@ -428,3 +428,198 @@ func TestCompetitionRoundBaselineRecoveryWaitingCleanupCannotClearSlot(t *testin
 		}
 	})
 }
+
+// Actual PostgreSQL recovery may begin after the immutable reservation expired.
+// The composed worker passes the new setup deadline to its producer, while the
+// source remains queued and only successful publication starts its candidate.
+func TestCompetitionRoundBaselineRecoveryExplicitExecutionClockPublishes(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		settings, store, original, now := newRoundBaselineRecoveryStoreTest(t, "-fresh-setup-clock")
+		settings.roundBaselinePreparation.Settings.FenceNotify = make(chan time.Time)
+		settings.roundBaselinePreparation.Recovery.Authorization.ExecutionClock = roundBaselineRecoveredExecutionClock
+		*now = original.Deadline.Add(time.Minute)
+		executionStartedAt := *now
+		executionDeadline := executionStartedAt.Add(settings.roundBaselinePreparation.Settings.TotalTimeout)
+		var observed *roundBaselinePreparation
+		producer := roundBaselinePreparationTestProducer{run: func(operationCtx context.Context, recovered *roundBaselinePreparation) (*preparedRoundBaseline, error) {
+			observed = recovered
+			deadline, ok := operationCtx.Deadline()
+			if !ok || !deadline.Equal(executionDeadline) || recovered.Recovery == nil ||
+				!recovered.Recovery.ExecutionStartedAt.Equal(executionStartedAt) || !recovered.Recovery.ExecutionDeadline.Equal(executionDeadline) ||
+				recovered.Owner != original.Owner || !recovered.StartedAt.Equal(original.StartedAt) || !recovered.Deadline.Equal(original.Deadline) {
+				return nil, errors.New("recovered setup clock or original lineage changed")
+			}
+			var state string
+			var started *time.Time
+			var attempts int
+			var slotDeadline time.Time
+			server.Db(operationCtx, func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(operationCtx, `SELECT state,started_at,attempt_count FROM competition_job WHERE job_id=$1`, original.JobId).Scan(&state, &started, &attempts))
+				server.Raise(conn.QueryRow(operationCtx, `SELECT lease_expires_at FROM competition_worker_slot WHERE slot_id=1 AND worker_id=$1 AND job_id IS NULL`, original.Owner).Scan(&slotDeadline))
+			})
+			if state != "queued" || started != nil || attempts != 0 || !slotDeadline.Equal(executionDeadline.Add(settings.roundBaselinePreparation.Settings.CleanupTimeout)) {
+				return nil, errors.New("setup changed source attempt or lost its bounded slot")
+			}
+			if err := store.ReleaseRoundBaselinePreparation(operationCtx, original); err != nil {
+				return nil, err
+			}
+			if err := store.HoldRoundBaselinePreparation(operationCtx, settings, original, roundBaselinePreparationHold{Stage: "producer_or_archive"}); err == nil {
+				return nil, errors.New("old hold crossed recovered setup fence")
+			}
+			if err := store.CheckRoundBaselinePreparation(operationCtx, settings, recovered); err != nil {
+				return nil, err
+			}
+			prepared := preparedRoundBaselineTest(t, settings, recovered)
+			prepared.ArtifactManifest = []byte(strings.ReplaceAll(string(prepared.ArtifactManifest),
+				"/baseline-preparation/"+recovered.Owner+"/", "/baseline-preparation/"+roundBaselinePreparationArtifactOwner(recovered)+"/"))
+			digest := sha256.Sum256(prepared.ArtifactManifest)
+			prepared.ArtifactManifestSha256 = hex.EncodeToString(digest[:])
+			*now = executionStartedAt.Add(time.Hour)
+			return prepared, nil
+		}}
+		worker := &Worker{settings: settings, store: store, evaluator: producer, workerId: "synthetic-new-worker",
+			workerImageDigest: settings.roundBaselinePreparation.Recovery.Authorization.ReplacementWorkerImage}
+		job, err := worker.claimWithPreparedRoundBaseline(ctx, HostSelfCheck{RebaselinePassed: true, RebaselineRoundId: &original.RoundId})
+		if err != nil || observed == nil || job == nil || job.State != "running" || job.StartedAt == nil || !job.StartedAt.Equal(*now) || job.AttemptCount != 1 || job.RoundBaseline == nil {
+			t.Fatal("fresh setup did not publish exactly one real candidate", err)
+		}
+		if job.StartedAt.Add(time.Duration(settings.EvaluationPolicy.ScoreTimeoutSeconds)*time.Second).Sub(*job.StartedAt) != settings.roundBaselinePreparation.Settings.TotalTimeout {
+			t.Fatal("candidate lost its separate unchanged three-hour budget")
+		}
+	})
+}
+
+// Unknown capability modes cannot revive an expired reservation. Explicit fresh
+// setup still expires once, and a later failure can never append a second clock.
+func TestCompetitionRoundBaselineRecoveryExecutionClockRefusesRepeatAndExpiry(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		settings, store, original, now := newRoundBaselineRecoveryStoreTest(t, "-fresh-clock-refusal")
+		*now = original.Deadline.Add(time.Minute)
+		settings.roundBaselinePreparation.Recovery.Authorization.ExecutionClock = "synthetic-unknown-clock"
+		if preparation, err := store.ReserveRoundBaseline(ctx, settings, "synthetic-new-worker", settings.roundBaselinePreparation.Recovery.Authorization.ReplacementWorkerImage); !errors.Is(err, errRoundBaselinePreparationHeld) || preparation != nil {
+			t.Fatal("unknown clock capability revived expired reservation", err)
+		}
+		settings.roundBaselinePreparation.Recovery.Authorization.ExecutionClock = ""
+		if preparation, err := store.ReserveRoundBaseline(ctx, settings, "synthetic-new-worker", settings.roundBaselinePreparation.Recovery.Authorization.ReplacementWorkerImage); !errors.Is(err, errRoundBaselinePreparationHeld) || preparation != nil {
+			t.Fatal("absent capability revived expired reservation", err)
+		}
+		settings.roundBaselinePreparation.Recovery.Authorization.ExecutionClock = roundBaselineRecoveredExecutionClock
+		recovered, err := store.ReserveRoundBaseline(ctx, settings, "synthetic-new-worker", settings.roundBaselinePreparation.Recovery.Authorization.ReplacementWorkerImage)
+		if err != nil || recovered == nil {
+			t.Fatal("explicit fresh setup refused", err)
+		}
+		*now = *recovered.Recovery.ExecutionDeadline
+		if err := store.CheckRoundBaselinePreparation(ctx, settings, recovered); !errors.Is(err, ErrLeaseLost) {
+			t.Fatal("expired recovered setup was extended", err)
+		}
+		if err := store.HoldRoundBaselinePreparation(ctx, settings, recovered, roundBaselinePreparationHold{Stage: "producer_or_archive"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.ReleaseRoundBaselinePreparation(ctx, recovered); err != nil {
+			t.Fatal(err)
+		}
+		if preparation, err := store.ReserveRoundBaseline(ctx, settings, "synthetic-third-worker", recovered.WorkerImage); !errors.Is(err, errRoundBaselinePreparationHeld) || preparation != nil {
+			t.Fatal("second recovered execution clock admitted", err)
+		}
+	})
+}
+
+// Reconstruct actual append-only rows with valid canonical hashes. Even a
+// rehashed malformed interval or shifted start cannot bypass event_at lineage.
+func TestCompetitionRoundBaselineRecoveryRejectsMalformedExecutionClockEvents(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		for _, mutation := range []string{"valid", "missing-start", "missing-deadline", "unknown-mode", "omitted-mode", "extended", "shifted-start"} {
+			settings, store, original, now := newRoundBaselineRecoveryStoreTest(t, "-clock-event-"+mutation)
+			*now = original.Deadline.Add(time.Minute)
+			rollback := errors.New("synthetic event rollback")
+			err := captureDatabaseError(func() {
+				server.Tx(ctx, func(tx server.PgTx) {
+					holdId, err := readRoundBaselineHeldEvent(ctx, tx, original, nil, settings.roundBaselinePreparation.Settings.MaximumRecordBytes)
+					server.Raise(err)
+					capability := settings.roundBaselinePreparation.Recovery
+					a := capability.Authorization
+					startedAt, deadline := *now, now.Add(settings.roundBaselinePreparation.Settings.TotalTimeout)
+					transition := roundBaselineRecoveryTransition{Schema: 1, Kind: "sim-latency-round-baseline-zero-sample-recovered",
+						Owner: original.Owner, RoundId: original.RoundId, JobId: original.JobId, PreviousHoldId: holdId,
+						PreviousContextSha256: original.ContextSha256, ContextSha256: strings.Repeat("d", 64),
+						PreviousWorkerId: original.WorkerId, WorkerId: "synthetic-new-worker", PreviousWorkerImage: original.WorkerImage,
+						WorkerImage: a.ReplacementWorkerImage, StartedAt: original.StartedAt, Deadline: original.Deadline,
+						AuthorizationSha256: capability.AuthorizationSha256, ApprovalSha256: a.Approval.Sha256, EvidenceSha256: a.Evidence.Sha256,
+						ExecutionClock: roundBaselineRecoveredExecutionClock, ExecutionStartedAt: &startedAt, ExecutionDeadline: &deadline}
+					switch mutation {
+					case "missing-start":
+						transition.ExecutionStartedAt = nil
+					case "missing-deadline":
+						transition.ExecutionDeadline = nil
+					case "unknown-mode":
+						transition.ExecutionClock = "synthetic-unknown-clock"
+					case "omitted-mode":
+						transition.ExecutionClock = ""
+					case "extended":
+						deadline = deadline.Add(time.Second)
+					case "shifted-start":
+						startedAt, deadline = startedAt.Add(time.Second), deadline.Add(time.Second)
+					}
+					appendEvent(ctx, tx, original.JobId, *now, "round_baseline_preparation_zero_sample_recovered", original.Owner, transition)
+					actual, readErr := readRoundBaselinePreparationEvent(ctx, tx, original.RoundId, settings.roundBaselinePreparation.Settings.MaximumRecordBytes)
+					if mutation == "valid" {
+						if readErr != nil || actual == nil || actual.Recovery == nil || !roundBaselinePreparationExecutionDeadline(actual).Equal(deadline) {
+							t.Fatal("valid event reconstruction refused", readErr)
+						}
+					} else if readErr == nil || actual != nil {
+						t.Fatal("malformed rehashed clock event admitted", mutation)
+					}
+					panic(rollback)
+				}, server.OptReadWrite())
+			})
+			if !errors.Is(err, rollback) {
+				t.Fatal("synthetic event transaction did not roll back", err)
+			}
+			if err := store.ReleaseRoundBaselinePreparation(ctx, original); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+}
+
+// Optional pointer fields must not alter historical canonical event encoding.
+func TestCompetitionRoundBaselineRecoveryClockOmissionKeepsCanonicalBytes(t *testing.T) {
+	transition := roundBaselineRecoveryTransition{Schema: 1, Kind: "synthetic-recovery", Owner: "synthetic-owner"}
+	content, err := json.Marshal(transition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legacy struct {
+		Schema                int       `json:"schema"`
+		Kind                  string    `json:"kind"`
+		Owner                 string    `json:"owner"`
+		RoundId               server.Id `json:"round_id"`
+		JobId                 server.Id `json:"job_id"`
+		PreviousHoldId        int64     `json:"previous_hold_event_id"`
+		PreviousContextSha256 string    `json:"previous_context_sha256"`
+		ContextSha256         string    `json:"context_sha256"`
+		PreviousWorkerId      string    `json:"previous_worker_id"`
+		WorkerId              string    `json:"worker_id"`
+		PreviousWorkerImage   string    `json:"previous_worker_image_digest"`
+		WorkerImage           string    `json:"worker_image_digest"`
+		StartedAt             time.Time `json:"started_at"`
+		Deadline              time.Time `json:"deadline"`
+		AuthorizationSha256   string    `json:"authorization_sha256"`
+		ApprovalSha256        string    `json:"approval_sha256"`
+		EvidenceSha256        string    `json:"evidence_sha256"`
+	}
+	legacy.Schema, legacy.Kind, legacy.Owner = transition.Schema, transition.Kind, transition.Owner
+	previous, err := json.Marshal(legacy)
+	if err != nil || string(content) != string(previous) {
+		t.Fatal("omitted recovery clock changed historical canonical bytes", err)
+	}
+}

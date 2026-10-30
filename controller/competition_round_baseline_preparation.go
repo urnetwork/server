@@ -273,7 +273,11 @@ func (self *Worker) claimWithPreparedRoundBaseline(ctx context.Context, host Hos
 		preparation.SourceJob == nil || preparation.SourceJob.StartedAt != nil || preparation.SourceJob.AttemptCount != 0 {
 		return hold("host_or_source_job_mismatch", errors.New("baseline preparation cannot borrow host readiness or a started job"))
 	}
-	operationCtx, cancel := context.WithDeadline(ctx, preparation.Deadline)
+	executionDeadline := roundBaselinePreparationExecutionDeadline(preparation)
+	if executionDeadline.IsZero() {
+		return hold("invalid_execution_clock", ErrConflict)
+	}
+	operationCtx, cancel := context.WithDeadline(ctx, executionDeadline)
 	defer cancel()
 	operationCtx, fenceCancel := context.WithCancelCause(operationCtx)
 	fenceCtx, stopFence := context.WithCancel(operationCtx)

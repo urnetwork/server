@@ -1,5 +1,5 @@
 // A private Root-pinned authorization can reconcile one proven pre-native,
-// zero-sample failure without changing the original owner or deadline.
+// zero-sample failure without rewriting its original owner or reservation clock.
 package controller
 
 import (
@@ -39,7 +39,12 @@ type roundBaselineRecoveryAuthorization struct {
 	HoldSha256               string                      `json:"hold_sha256"`
 	SummarySha256            string                      `json:"stderr_summary_sha256"`
 	RequestSha256            string                      `json:"request_sha256"`
+	ExecutionClock           string                      `json:"execution_clock,omitempty"`
 }
+
+// This private operator capability changes only zero-sample setup execution.
+// It never changes submission attempts, candidate clocks or frozen round policy.
+const roundBaselineRecoveredExecutionClock = "operator_recovered_zero_sample_three_hour_v1"
 
 // Startup authenticates sealed metadata and opaque input hashes without parsing
 // seed/provider contents or retaining them in a durable event.
@@ -52,24 +57,27 @@ type roundBaselineRecoveryCapability struct {
 // One append-only transition retains both actual control versions and contexts.
 // EventId is the database fence token, excluded from canonical payload bytes.
 type roundBaselineRecoveryTransition struct {
-	Schema                int       `json:"schema"`
-	Kind                  string    `json:"kind"`
-	Owner                 string    `json:"owner"`
-	RoundId               server.Id `json:"round_id"`
-	JobId                 server.Id `json:"job_id"`
-	PreviousHoldId        int64     `json:"previous_hold_event_id"`
-	PreviousContextSha256 string    `json:"previous_context_sha256"`
-	ContextSha256         string    `json:"context_sha256"`
-	PreviousWorkerId      string    `json:"previous_worker_id"`
-	WorkerId              string    `json:"worker_id"`
-	PreviousWorkerImage   string    `json:"previous_worker_image_digest"`
-	WorkerImage           string    `json:"worker_image_digest"`
-	StartedAt             time.Time `json:"started_at"`
-	Deadline              time.Time `json:"deadline"`
-	AuthorizationSha256   string    `json:"authorization_sha256"`
-	ApprovalSha256        string    `json:"approval_sha256"`
-	EvidenceSha256        string    `json:"evidence_sha256"`
-	EventId               int64     `json:"-"`
+	Schema                int        `json:"schema"`
+	Kind                  string     `json:"kind"`
+	Owner                 string     `json:"owner"`
+	RoundId               server.Id  `json:"round_id"`
+	JobId                 server.Id  `json:"job_id"`
+	PreviousHoldId        int64      `json:"previous_hold_event_id"`
+	PreviousContextSha256 string     `json:"previous_context_sha256"`
+	ContextSha256         string     `json:"context_sha256"`
+	PreviousWorkerId      string     `json:"previous_worker_id"`
+	WorkerId              string     `json:"worker_id"`
+	PreviousWorkerImage   string     `json:"previous_worker_image_digest"`
+	WorkerImage           string     `json:"worker_image_digest"`
+	StartedAt             time.Time  `json:"started_at"`
+	Deadline              time.Time  `json:"deadline"`
+	ExecutionClock        string     `json:"execution_clock,omitempty"`
+	ExecutionStartedAt    *time.Time `json:"execution_started_at,omitempty"`
+	ExecutionDeadline     *time.Time `json:"execution_deadline,omitempty"`
+	AuthorizationSha256   string     `json:"authorization_sha256"`
+	ApprovalSha256        string     `json:"approval_sha256"`
+	EvidenceSha256        string     `json:"evidence_sha256"`
+	EventId               int64      `json:"-"`
 }
 
 // The old held event used this map's canonical encoding, not jsonb key order.
@@ -216,6 +224,9 @@ func configureRoundBaselineRecovery(settings *Settings, profile *roundBaselinePr
 		!sha256Pattern.MatchString(authorization.RequestSha256) {
 		return ErrConflict
 	}
+	if authorization.ExecutionClock != "" && authorization.ExecutionClock != roundBaselineRecoveredExecutionClock {
+		return ErrConflict
+	}
 	for _, evidence := range []roundBaselinePreparationPin{authorization.Approval, authorization.Evidence, authorization.FailedProgram} {
 		if _, err := readRoundBaselineRecoveryPin(evidence, profile.Settings.MaximumRecordBytes); err != nil {
 			return err
@@ -278,8 +289,9 @@ func applyRoundBaselineRecoveryInTx(ctx context.Context, tx server.PgTx, prepara
 	var content []byte
 	var digest, actor string
 	var id int64
-	err := tx.QueryRow(ctx, `SELECT event_id,payload_json,payload_sha256,actor_id FROM competition_job_event
- WHERE job_id=$1 AND event_type='round_baseline_preparation_zero_sample_recovered' ORDER BY event_id LIMIT 1`, preparation.JobId).Scan(&id, &content, &digest, &actor)
+	var eventAt time.Time
+	err := tx.QueryRow(ctx, `SELECT event_id,payload_json,payload_sha256,actor_id,event_at FROM competition_job_event
+ WHERE job_id=$1 AND event_type='round_baseline_preparation_zero_sample_recovered' ORDER BY event_id LIMIT 1`, preparation.JobId).Scan(&id, &content, &digest, &actor, &eventAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
@@ -318,22 +330,31 @@ func applyRoundBaselineRecoveryInTx(ctx context.Context, tx server.PgTx, prepara
 		return ErrConflict
 	}
 	transition.EventId = id
+	clock := *preparation
+	clock.Recovery = &transition
+	if roundBaselinePreparationExecutionDeadline(&clock).IsZero() ||
+		transition.ExecutionClock != "" && (!transition.ExecutionStartedAt.Equal(eventAt) || eventAt.Before(preparation.StartedAt)) {
+		return ErrConflict
+	}
 	preparation.WorkerId, preparation.WorkerImage, preparation.ContextSha256 = transition.WorkerId, transition.WorkerImage, transition.ContextSha256
 	preparation.Recovery = &transition
 	return nil
 }
 
-// Only a queued, never-started original source can reacquire its original clock.
+// A queued, never-started original source can reconcile once. Only the explicit
+// private clock capability permits a fresh bounded setup execution interval.
 func recoverRoundBaselinePreparationInTx(ctx context.Context, tx server.PgTx, settings *Settings, original *roundBaselinePreparation, job *queuedJob, workerId, workerImage string, now time.Time) (*roundBaselinePreparation, error) {
 	capability := settings.roundBaselinePreparation.Recovery
 	if capability == nil || original.Recovery != nil || job == nil {
 		return nil, errRoundBaselinePreparationHeld
 	}
 	a := capability.Authorization
+	freshClock := a.ExecutionClock == roundBaselineRecoveredExecutionClock
 	if a.Owner != original.Owner || a.RoundId != original.RoundId || a.JobId != original.JobId ||
 		a.PreviousContextSha256 != original.ContextSha256 || a.PreviousWorkerImage != original.WorkerImage ||
 		a.ReplacementWorkerImage != workerImage || now.Before(a.ApprovedAt) || a.ApprovedAt.Before(original.StartedAt) ||
-		!now.Before(original.Deadline) || original.Deadline.Sub(original.StartedAt) != settings.roundBaselinePreparation.Settings.TotalTimeout ||
+		a.ExecutionClock != "" && !freshClock || !freshClock && !now.Before(original.Deadline) ||
+		original.Deadline.Sub(original.StartedAt) != settings.roundBaselinePreparation.Settings.TotalTimeout ||
 		job.JobId != original.JobId || job.RoundId != original.RoundId || job.State != "queued" || job.StartedAt != nil || job.AttemptCount != 0 ||
 		job.PatchSha256 != original.PatchSha256 || job.PatchSha256 != capability.PatchSha256 || job.Round.ProvidersSha256 != capability.ProvidersSha256 ||
 		job.Round.Canceled || job.Round.FinalizedAt != nil || job.Round.AutomationSealedAt != nil ||
@@ -378,6 +399,11 @@ func recoverRoundBaselinePreparationInTx(ctx context.Context, tx server.PgTx, se
 		PreviousContextSha256: original.ContextSha256, ContextSha256: newContext, PreviousWorkerId: original.WorkerId, WorkerId: workerId,
 		PreviousWorkerImage: original.WorkerImage, WorkerImage: workerImage, StartedAt: original.StartedAt, Deadline: original.Deadline,
 		AuthorizationSha256: capability.AuthorizationSha256, ApprovalSha256: a.Approval.Sha256, EvidenceSha256: a.Evidence.Sha256}
+	if freshClock {
+		executionStartedAt := now
+		executionDeadline := now.Add(settings.roundBaselinePreparation.Settings.TotalTimeout)
+		transition.ExecutionClock, transition.ExecutionStartedAt, transition.ExecutionDeadline = a.ExecutionClock, &executionStartedAt, &executionDeadline
+	}
 	appendEvent(ctx, tx, original.JobId, now, "round_baseline_preparation_zero_sample_recovered", original.Owner, transition)
 	copy := *original
 	if err := applyRoundBaselineRecoveryInTx(ctx, tx, &copy, settings.roundBaselinePreparation.Settings.MaximumRecordBytes); err != nil {
@@ -389,6 +415,26 @@ func recoverRoundBaselinePreparationInTx(ctx context.Context, tx server.PgTx, se
 	}
 	copy.SourceJob = job
 	return &copy, nil
+}
+
+// Invalid or partial transition clocks return zero and therefore fail closed.
+// Original reservation times remain immutable; omission preserves old JSON and
+// the old execution clock exactly. Database reconstruction binds start to event_at.
+func roundBaselinePreparationExecutionDeadline(preparation *roundBaselinePreparation) time.Time {
+	if preparation == nil {
+		return time.Time{}
+	}
+	recovery := preparation.Recovery
+	if recovery == nil || recovery.ExecutionClock == "" && recovery.ExecutionStartedAt == nil && recovery.ExecutionDeadline == nil {
+		return preparation.Deadline
+	}
+	if recovery.ExecutionClock != roundBaselineRecoveredExecutionClock || recovery.ExecutionStartedAt == nil || recovery.ExecutionDeadline == nil ||
+		recovery.ExecutionStartedAt.IsZero() || recovery.ExecutionStartedAt.Before(preparation.StartedAt) ||
+		!preparation.StartedAt.Before(preparation.Deadline) ||
+		!recovery.ExecutionDeadline.Equal(recovery.ExecutionStartedAt.Add(preparation.Deadline.Sub(preparation.StartedAt))) {
+		return time.Time{}
+	}
+	return *recovery.ExecutionDeadline
 }
 
 // Local/retained namespaces are fresh, while native receipt owner stays original.

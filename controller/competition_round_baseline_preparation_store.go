@@ -114,7 +114,6 @@ func (self PostgresStore) ReserveRoundBaseline(ctx context.Context, settings *Se
 	if profile.TotalTimeout <= 0 || profile.CleanupTimeout <= 0 || profile.FenceInterval <= 0 || profile.MaximumRecordBytes <= 0 || profile.MaximumDiagnosticBytes <= 0 || profile.MaximumManifestBytes <= 0 || profile.MaximumEvidenceBytes <= 0 || profile.MaximumRawFileBytes <= 0 || profile.MaximumArtifacts <= 0 || profile.ArchiveAttempts <= 0 || profile.ArchiveBackoff <= 0 || profile.Now == nil {
 		return nil, errors.New("baseline preparation owner bounds are invalid")
 	}
-	now := self.nowUtc()
 	resultErr = captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
 			preparation = nil
@@ -123,6 +122,8 @@ func (self PostgresStore) ReserveRoundBaseline(ctx context.Context, settings *Se
 			var slotJob *server.Id
 			var slotDeadline *time.Time
 			server.Raise(tx.QueryRow(ctx, `SELECT worker_id,job_id,lease_expires_at FROM competition_worker_slot WHERE slot_id=1 FOR UPDATE`).Scan(&slotOwner, &slotJob, &slotDeadline))
+			// Choose the execution clock only after this transaction owns the slot.
+			now := self.nowUtc()
 			recovery := settings.roundBaselinePreparation.Recovery
 			recoveryOwnsSlot := recovery != nil && slotOwner != nil && *slotOwner == recovery.Authorization.Owner && slotJob == nil
 			if slotOwner != nil && slotDeadline != nil && now.Before(*slotDeadline) && !recoveryOwnsSlot {
@@ -155,7 +156,7 @@ func (self PostgresStore) ReserveRoundBaseline(ctx context.Context, settings *Se
 					preparation, err = recoverRoundBaselinePreparationInTx(ctx, tx, settings, reserved, job, workerId, workerImage, now)
 					server.Raise(err)
 					server.RaisePgResult(tx.Exec(ctx, `UPDATE competition_worker_slot SET worker_id=$1,job_id=NULL,lease_expires_at=$2,heartbeat_at=$3 WHERE slot_id=1`,
-						preparation.Owner, preparation.Deadline.Add(profile.CleanupTimeout), now))
+						preparation.Owner, roundBaselinePreparationExecutionDeadline(preparation).Add(profile.CleanupTimeout), now))
 					return
 				}
 			}
@@ -202,7 +203,11 @@ func (self PostgresStore) checkRoundBaselinePreparationInTx(ctx context.Context,
 	if err := tx.QueryRow(ctx, `SELECT worker_id,job_id,lease_expires_at FROM competition_worker_slot WHERE slot_id=1 FOR UPDATE`).Scan(&owner, &slotJob, &deadline); err != nil {
 		return nil, nil, err
 	}
-	if owner == nil || *owner != preparation.Owner || slotJob != nil || deadline == nil || !now.Before(*deadline) || !now.Before(preparation.Deadline) {
+	executionDeadline := roundBaselinePreparationExecutionDeadline(preparation)
+	if executionDeadline.IsZero() {
+		return nil, nil, ErrConflict
+	}
+	if owner == nil || *owner != preparation.Owner || slotJob != nil || deadline == nil || !now.Before(*deadline) || !now.Before(executionDeadline) {
 		return nil, nil, ErrLeaseLost
 	}
 	job, err := scanJob(tx.QueryRow(ctx, jobSelect+` WHERE j.job_id=$1 FOR UPDATE OF j`, preparation.JobId), true, now)
@@ -230,7 +235,7 @@ func (self PostgresStore) checkRoundBaselinePreparationInTx(ctx context.Context,
 		return nil, nil, ErrConflict
 	}
 	reserved, err := readRoundBaselinePreparationEvent(ctx, tx, job.RoundId, settings.roundBaselinePreparation.Settings.MaximumRecordBytes)
-	if err != nil || reserved.Owner != preparation.Owner || reserved.JobId != preparation.JobId || reserved.WorkerId != preparation.WorkerId || reserved.WorkerImage != preparation.WorkerImage || reserved.RoundId != preparation.RoundId || reserved.PatchSha256 != preparation.PatchSha256 || reserved.ContextSha256 != preparation.ContextSha256 || roundBaselineRecoveryEventId(reserved) != roundBaselineRecoveryEventId(preparation) || !reserved.StartedAt.Equal(preparation.StartedAt) || !reserved.Deadline.Equal(preparation.Deadline) || preparation.Deadline.Sub(preparation.StartedAt) != settings.roundBaselinePreparation.Settings.TotalTimeout {
+	if err != nil || reserved.Owner != preparation.Owner || reserved.JobId != preparation.JobId || reserved.WorkerId != preparation.WorkerId || reserved.WorkerImage != preparation.WorkerImage || reserved.RoundId != preparation.RoundId || reserved.PatchSha256 != preparation.PatchSha256 || reserved.ContextSha256 != preparation.ContextSha256 || roundBaselineRecoveryEventId(reserved) != roundBaselineRecoveryEventId(preparation) || !reserved.StartedAt.Equal(preparation.StartedAt) || !reserved.Deadline.Equal(preparation.Deadline) || !roundBaselinePreparationExecutionDeadline(reserved).Equal(executionDeadline) || preparation.Deadline.Sub(preparation.StartedAt) != settings.roundBaselinePreparation.Settings.TotalTimeout {
 		return nil, nil, ErrConflict
 	}
 	held, err := roundBaselinePreparationHeldInTx(ctx, tx, reserved)
