@@ -101,7 +101,7 @@ func validatePreparedRoundBaseline(prepared *preparedRoundBaseline, preparation 
 		archive.Retention == nil || archive.Retention.Backend != "server/blob" || !archive.Retention.AuthenticatedAfterUpload || !archive.Retention.ComplianceObjectLock || archive.Retention.RetainUntil.Before(settings.RetainUntil) {
 		return errors.New("baseline archive lacks its exact owned retained provenance")
 	}
-	expectedKey := filepath.ToSlash(filepath.Join(archive.Retention.Prefix, "competition", "v1", settings.CompetitionId, "rounds", preparation.RoundId.String(), "baseline-preparation", preparation.Owner, "baseline-preparation-manifest.json"))
+	expectedKey := filepath.ToSlash(filepath.Join(archive.Retention.Prefix, "competition", "v1", settings.CompetitionId, "rounds", preparation.RoundId.String(), "baseline-preparation", roundBaselinePreparationArtifactOwner(preparation), "baseline-preparation-manifest.json"))
 	if archive.Retention.Bucket != settings.ArtifactBucket || archive.Retention.ManifestKey != expectedKey ||
 		len(archive.Artifacts) == 0 || len(archive.Artifacts) > settings.roundBaselinePreparation.Settings.MaximumArtifacts+6 || archive.Retention.ObjectCount != len(archive.Artifacts) || len(archive.Retention.Objects) != len(archive.Artifacts) {
 		return errors.New("baseline archive used an ordinary attempt namespace or incomplete retention inventory")
@@ -460,7 +460,7 @@ func (self CommandEvaluator) PrepareRoundBaseline(ctx context.Context, settings 
 	if err != nil {
 		return nil, err
 	}
-	directory, err := createRoundBaselinePreparationDirectory(settings.ArtifactRoot, job.RoundId.String(), preparation.Owner)
+	directory, err := createRoundBaselinePreparationDirectory(settings.ArtifactRoot, job.RoundId.String(), roundBaselinePreparationArtifactOwner(preparation))
 	if err != nil {
 		return nil, errors.Join(errRoundBaselinePreparationHeld, err)
 	}
@@ -601,7 +601,7 @@ func createRoundBaselinePreparationDirectory(root, roundId, owner string) (strin
 // Uses the same private WORM backend and authenticated object retention, with
 // a purpose-specific immutable namespace unrelated to attempt-01 publication.
 func (self *blobArtifactArchive) ArchiveRoundBaselinePreparation(ctx context.Context, settings *Settings, preparation *roundBaselinePreparation, directory string, document roundBaselinePreparationArchiveDocument) (json.RawMessage, error) {
-	prefix := filepath.ToSlash(filepath.Join(self.store.Prefix(), "competition", "v1", settings.CompetitionId, "rounds", preparation.RoundId.String(), "baseline-preparation", preparation.Owner))
+	prefix := filepath.ToSlash(filepath.Join(self.store.Prefix(), "competition", "v1", settings.CompetitionId, "rounds", preparation.RoundId.String(), "baseline-preparation", roundBaselinePreparationArtifactOwner(preparation)))
 	manifestName := "baseline-preparation-manifest.json"
 	if document.Outcome == "infrastructure_hold" {
 		manifestName = "baseline-preparation-hold-manifest.json"

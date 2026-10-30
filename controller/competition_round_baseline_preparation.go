@@ -51,10 +51,11 @@ type roundBaselinePreparationPin struct {
 }
 
 type roundBaselinePreparationConfig struct {
-	Schema       int                           `json:"schema"`
-	Kind         string                        `json:"kind"`
-	Program      roundBaselinePreparationPin   `json:"program"`
-	Dependencies []roundBaselinePreparationPin `json:"dependencies"`
+	Schema             int                           `json:"schema"`
+	Kind               string                        `json:"kind"`
+	Program            roundBaselinePreparationPin   `json:"program"`
+	Dependencies       []roundBaselinePreparationPin `json:"dependencies"`
+	ZeroSampleRecovery *roundBaselinePreparationPin  `json:"zero_sample_recovery,omitempty"`
 }
 
 // Runtime-only policy survives source/frozen-settings copies without changing
@@ -62,6 +63,7 @@ type roundBaselinePreparationConfig struct {
 type roundBaselinePreparationProfile struct {
 	Config   roundBaselinePreparationConfig
 	Settings roundBaselinePreparationSettings
+	Recovery *roundBaselineRecoveryCapability
 }
 
 // Facts from the sealed metadata-preflight v3 producer, not configurable policy.
@@ -90,18 +92,19 @@ func roundBaselinePreparationDependencyDigests() map[string]string {
 // A reservation is append-only database evidence, not a claimed/running job.
 // Its identity contains no seed, providers, credentials or caller-selected command.
 type roundBaselinePreparation struct {
-	Schema        int        `json:"schema"`
-	Kind          string     `json:"kind"`
-	Owner         string     `json:"owner"`
-	WorkerId      string     `json:"worker_id"`
-	JobId         server.Id  `json:"job_id"`
-	RoundId       server.Id  `json:"round_id"`
-	PatchSha256   string     `json:"patch_sha256"`
-	ContextSha256 string     `json:"context_sha256"`
-	WorkerImage   string     `json:"worker_image_digest"`
-	StartedAt     time.Time  `json:"started_at"`
-	Deadline      time.Time  `json:"deadline"`
-	SourceJob     *queuedJob `json:"-"`
+	Schema        int                              `json:"schema"`
+	Kind          string                           `json:"kind"`
+	Owner         string                           `json:"owner"`
+	WorkerId      string                           `json:"worker_id"`
+	JobId         server.Id                        `json:"job_id"`
+	RoundId       server.Id                        `json:"round_id"`
+	PatchSha256   string                           `json:"patch_sha256"`
+	ContextSha256 string                           `json:"context_sha256"`
+	WorkerImage   string                           `json:"worker_image_digest"`
+	StartedAt     time.Time                        `json:"started_at"`
+	Deadline      time.Time                        `json:"deadline"`
+	SourceJob     *queuedJob                       `json:"-"`
+	Recovery      *roundBaselineRecoveryTransition `json:"-"`
 }
 
 // The producer must finish and archive before publication. The archive is a
@@ -218,7 +221,11 @@ func ConfigureCompetitionRoundBaselinePreparation(settings *Settings, path, expe
 	if statErr != nil || closeErr != nil || info.Mode().Perm()&0o022 != 0 || info.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid()) {
 		return errors.New("baseline preparation artifact root is not owned by the worker or is externally writable")
 	}
-	settings.roundBaselinePreparation = &roundBaselinePreparationProfile{Config: config, Settings: defaultRoundBaselinePreparationSettings()}
+	profile := &roundBaselinePreparationProfile{Config: config, Settings: defaultRoundBaselinePreparationSettings()}
+	if err := configureRoundBaselineRecovery(settings, profile); err != nil {
+		return err
+	}
+	settings.roundBaselinePreparation = profile
 	return nil
 }
 
