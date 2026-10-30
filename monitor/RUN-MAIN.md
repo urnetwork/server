@@ -36,6 +36,14 @@ so their evidence context and open causal boundaries remain intact:
   self-improvement fix to the probes, shared monitoring utilities, signal
   catalog, or this harness also belongs to Sol Medium.
 
+Before assigning new work to a reused role, verify the agent's actual status.
+Use `followup_task` to reactivate a completed agent; it also accepts new work
+for a running agent. Reserve `send_message` for status updates: it does not
+start a new turn for a completed agent. Confirm an active acknowledgement and,
+when execution has started, its actual live execution-session handle before
+reporting execution underway. Retain ownership of live handles through terminal
+completion and cleanup; passing a handle does not transfer ownership.
+
 For each such boundary, Sol Low sends an initial deterministic delta and triage
 manifest referencing the prior ledger record and object hashes described below;
 group shared dependency/artifact/rollout failures and keep unrelated causes
