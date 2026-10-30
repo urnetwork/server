@@ -11052,4 +11052,10 @@ var migrations = []any{
 	// validator's signed head summaries. New tables only; apply before
 	// deploying the taskworker and api that fill them.
 	newSqlMigration(snChainSchemaSql),
+
+	// The SN Top board (LEADERTOP.md §8, owner decision 2026-10-29): the
+	// indexed trail hop table, the per-tempo snapshots, each unit's EMA state
+	// and 90 days of daily history (sn_top_schema.go). New tables only; apply
+	// before deploying the api and taskworker that write them.
+	newSqlMigration(snTopSchemaSql),
 }
