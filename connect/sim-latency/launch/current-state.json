@@ -10,15 +10,20 @@
   "production_fully_qualified": false,
   "authority_warning": "This is a preparation snapshot, not runtime/score authority. Verify the live process/session and current artifacts before acting; never restart because an observation times out.",
   "deployment_status": {
+    "owner_feedback_reverified_at": "2026-10-30T22:43:01.551218379Z",
     "server_main_minimum": "0a23176f53e4abf64a8364225dde572464b028f1",
     "sn_main_minimum": "2cb50ac4733e62cb30a127295cdcfabcf9c93222",
     "database_version_confirmed": 901,
-    "api_readiness_http_status": 200,
+    "api_readiness_http_status": 503,
+    "strict_readiness_false_expected_while_real_worker_is_offline": true,
+    "info_http_status": 200,
+    "intake_ready_under_active_maintenance": true,
     "completed_owner_poll_http_status": 200,
     "completed_owner_private_score_present": true,
     "api_release_verified": true,
     "observed_release_not_a_season_pin": "2026.10.30-outerwerld+1085932990",
-    "api_probe_evidence": "/home/by/urnetwork/temp/competition-owner-feedback-convergence-20261030.g4x3ZxMA",
+    "api_probe_evidence": "/home/by/urnetwork/temp/api-v2-deployment-confirm-20261030.SYM7ju5Z",
+    "latest_owner_feedback_verification": "server/connect/sim-latency/launch/PRIVATE-OWNER-FEEDBACK-LIVE-2026-10-30.json",
     "new_config_vault_or_epoch_one_image_deployment_required": false,
     "negative_owner_feedback_probe_alone_is_not_binary_identity_proof": true
   },
@@ -269,6 +274,19 @@
       "no_synthetic_heartbeats": true,
       "queued_evaluation_clocks_remain_unstarted": true
     },
+    "maintenance_recovery_audit": {
+      "read_only_independent_review_completed": true,
+      "original_expiry_must_not_be_extended": true,
+      "whole_hidden_campaign_requires_an_outer_abort_and_recovery_reserve": true,
+      "three_per_job_maximum_budgets_are_nine_hours_not_a_completion_estimate": true,
+      "management_unit_stop_does_not_remove_docker_daemon_resources": true,
+      "creator_side_root_recovery_ledger_exists": false,
+      "unqualified_automatic_cleanup_or_worker_restart_is_not_authorized": true,
+      "unknown_resources_require_fail_closed_not_prefix_or_label_pruning": true,
+      "before_worker_restart_require_joined_clients_original_inventory_no_evidence_binds_and_free_canonical_lock": true,
+      "fresh_hold_and_reward_identity_readback_required": true,
+      "no_new_recovery_code_timer_or_runtime_change_installed_by_this_audit": true
+    },
     "native_public_plan_preparation": {
       "unit": "urnetwork-public-pilot-prepare-native233-20261030-v1.service",
       "actual_started_at": "2026-10-30T15:23:40.417504Z",
@@ -294,7 +312,7 @@
       "The exact public plan, remote ancestry, protected publication receipt and separately pinned execution configuration are verified. Revalidate actual files and prerequisites before use; do not repeat prepare or treat this metadata checkpoint as measurement authority.",
       "Maintenance4 and real offline intake are verified; the real worker is stopped/joined and the public pilot is already running. Observe unit urnetwork-public-pilot-execute-native233-20261030-v1.service/session58342; do not launch another pilot, worker, build or test.",
       "The one-use public R9/R9 pilot uses the approved reduced-strength reference. Await authoritative terminal status on the same handle; success is not yet direction acceptance.",
-      "Only after accepted native public direction and AFTER13 census draw/run the approved fresh hidden seed (36runs). Preserve failed references and the unused original second seed.",
+      "Only after accepted native public direction and AFTER13 census draw/run the approved fresh hidden seed (36runs). Preserve failed references and the unused original second seed. Before launch, bind the exact hidden unit and an outer abort deadline with recovery reserve before the ORIGINAL maintenance expiry; individual10800s limits do not bound the three-job campaign. An aborted or partial campaign cannot pass acceptance.",
       "Independently accept calibration and retain COMPLIANCE exact-version evidence before accepted-marker creation, fence cancellation or reward delivery release. Resume grading using the actual authorized release revision."
     ],
     "serial_action_handoff": "server/connect/sim-latency/launch/reduced-pilot-operator-2026-10-30/NEXT-SERIAL-ACTION.json",

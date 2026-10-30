@@ -1,0 +1,75 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-private-owner-feedback-live-verification",
+  "observed_at": "2026-10-30T22:43:01.551218379Z",
+  "status": "deployed_owner_feedback_and_embargo_verified",
+  "scope": {
+    "competition_id": "sim-latency-season-1",
+    "season_id": "sim-latency-production-20261028-r2",
+    "round_id": "01a1855d-49bd-0250-90db-d0c0885f0e46",
+    "epoch": 1,
+    "job_id": "01a1884d-3b55-f5dd-45e5-eb4145b2ac0f",
+    "no_admission_or_evaluation_was_started": true
+  },
+  "request_authority": {
+    "status_url_source": "The exact status_url retained from the successful offline-intake cache-hit response, not a guessed or legacy polling URL.",
+    "admission_response_sha256": "3ad2e8d027c3a2e5551f06c4b04df93d26fa0108dcaa2686f5ee4ea22928b72d",
+    "status_url": "/competition/v2/score/01a1884d-3b55-f5dd-45e5-eb4145b2ac0f"
+  },
+  "owner_projection": {
+    "http_status": 200,
+    "state": "completed",
+    "evaluation_status": "completed",
+    "score_is_object": true,
+    "score_schema": 1,
+    "full_error_field_absent": true,
+    "numeric_scores_and_private_metrics_not_published_in_this_record": true,
+    "response_sha256": "7420642e472dcb433e42482c0efb228132266ec2a534cf51fba81d54d193f8ac"
+  },
+  "cross_owner_projection": {
+    "different_submitter_credential": true,
+    "http_status": 404,
+    "code": "job_not_found",
+    "response_sha256": "9787715c8a1c31daa3a20b55a003bc33b2a84d813e6c337809c746a13be8bb12"
+  },
+  "independent_source_and_capture_review": {
+    "passed": true,
+    "schema_key": ".score.score_schema",
+    "safe_projection_types_bounds_and_allowlists_match": true,
+    "full_errors_artifact_identities_seeds_and_review_fields_absent": true,
+    "source_references": [
+      "server/controller/competition_private_score.go:42",
+      "server/model/competition_model.go:257",
+      "sn/api/competition.yml:534",
+      "sn/api/competition.yml:2180"
+    ],
+    "review_did_not_run_tests_builds_or_inference": true
+  },
+  "public_projection": {
+    "info_http_status": 200,
+    "round_status": "open",
+    "intake_ready": true,
+    "grading_ready": false,
+    "publication_held": true,
+    "info_response_sha256": "f3b88a6f0872121330cf89c4105d3861c8738d227da11a2f6f56801e8d9169f3",
+    "round_result_http_status": 409,
+    "round_result_code": "round_not_published",
+    "round_result_response_sha256": "3c133146b30f742239f9f8645978138dd3d4916989f1c9a1608fa96849629f48"
+  },
+  "operator_probe_correction": {
+    "legacy_v1_poll_http_status": 409,
+    "code": "unsupported_decision_mode",
+    "expected_for_a_v2_job": true,
+    "not_a_deployed_api_regression": true,
+    "response_sha256": "a1796cd35362bda79da86388b94c490fdd879e139748160960cb573a69614834"
+  },
+  "private_evidence_roots": [
+    "/home/by/urnetwork/temp/api-v2-deployment-confirm-20261030.SYM7ju5Z",
+    "/home/by/urnetwork/temp/api-deployment-confirm-20261030.lTj9Y8t6"
+  ],
+  "remaining": {
+    "serial_calibration_running_not_accepted": true,
+    "evaluation_and_reward_holds_remain_active": true,
+    "no_new_api_config_or_vault_deployment_required_for_this_phase": true
+  }
+}
