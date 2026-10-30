@@ -548,3 +548,58 @@ func TestComputeSnTopSnapshotClaimedFleetDb(t *testing.T) {
 		connect.AssertEqual(t, priorFleets[key].EmaExact.Cmp(big.NewRat(2, 1)), 0)
 	})
 }
+
+// Before the board's first snapshot /sn/top/me gives no not-measurable
+// reason: the board is empty and says nothing about the caller, who may well
+// be providing. Once a snapshot exists, a caller without a row in it had no
+// verify-eligible provider in the tempo: not providing.
+func TestSnTopMeNotMeasurableReasonDb(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		snTopResetLatestSnapshotCache()
+		t.Cleanup(snTopResetLatestSnapshotCache)
+		networkId := server.NewId()
+		userId := server.NewId()
+		name := fmt.Sprintf("sntopreason%s", strings.ReplaceAll(networkId.String(), "-", "")[:10])
+		model.Testing_CreateNetwork(ctx, networkId, name, userId)
+		clientSession := session.Testing_CreateClientSession(ctx, session.NewByJwt(networkId, userId, name, false, false))
+
+		empty, err := GetSnTopMe(clientSession)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, empty.Snapshot.Id, "")
+		connect.AssertEqual(t, empty.Me.NotMeasurableReason, "")
+		connect.AssertEqual(t, empty.Me.Row.IsMe, true)
+		connect.AssertEqual(t, empty.Me.Row.Position, 0)
+		connect.AssertEqual(t, len(empty.Me.History), 0)
+
+		// a snapshot that ranks another network only
+		now := server.NowUtc()
+		other := server.NewId()
+		snapshot := &model.SnTopSnapshot{
+			SnapshotId:     server.NewId(),
+			TempoIndex:     1,
+			TempoSource:    model.SnTopTempoSourceChain,
+			TempoStartTime: now.Add(-model.SnTopTempoDuration),
+			TempoEndTime:   now,
+			ComputedAt:     now,
+			TotalRanked:    1,
+			HeadSeats:      model.SnTopHeadSeats,
+			OpenSeats:      model.SnTopHeadSeats,
+			BindingNote:    snTopBindingNote(false),
+			PresenceSource: snTopPresenceReliability,
+		}
+		model.WriteSnTopSnapshot(ctx, snapshot, &model.SnTopProjection{
+			Networks: []*model.SnTopNetworkProjection{{
+				NetworkId: other, Position: 1, ProjectedScore: 1, Label: model.SnTopLabelEstimate, Measurable: true, VerifyEligible: true,
+			}},
+			NetworkStates: map[server.Id]model.SnTopUnitState{other: {Ema: 1, LastTempoIndex: 1, LastPosition: 1}},
+		})
+		snTopResetLatestSnapshotCache()
+		ranked, err := GetSnTopMe(clientSession)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, ranked.Snapshot.Id, snapshot.SnapshotId.String())
+		connect.AssertEqual(t, ranked.Me.NotMeasurableReason, model.SnTopReasonNotProviding)
+		connect.AssertEqual(t, ranked.Me.Row.Position, 0)
+		connect.AssertEqual(t, ranked.Me.Row.Label, model.SnTopLabelNotMeasurable)
+	})
+}

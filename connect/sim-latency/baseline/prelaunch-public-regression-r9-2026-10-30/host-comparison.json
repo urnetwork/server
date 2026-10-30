@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-public-pilot-host-restoration",
+  "before_inventory_sha256": "1b319b1b2a4dede0ec678ea17f82f4d8e2486b479e8d91b22188a3f4914c9d1b",
+  "after_inventory_sha256": "1b319b1b2a4dede0ec678ea17f82f4d8e2486b479e8d91b22188a3f4914c9d1b",
+  "evidence": [
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/host-before-containers.tsv",
+      "sha256": "2497b493dffa3bc105827ffc444647ee73e62116604b2a3cfd90fbfea86fbee5"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/host-before-networks.tsv",
+      "sha256": "c839e159c4f3870fbb433e03dc185f669fe1e41454a2877f802d676a42118b97"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/host-after-containers.tsv",
+      "sha256": "2497b493dffa3bc105827ffc444647ee73e62116604b2a3cfd90fbfea86fbee5"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/host-after-networks.tsv",
+      "sha256": "c839e159c4f3870fbb433e03dc185f669fe1e41454a2877f802d676a42118b97"
+    }
+  ]
+}

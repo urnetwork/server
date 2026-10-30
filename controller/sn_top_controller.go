@@ -550,7 +550,9 @@ func GetSnTop(args *SnTopArgs, clientSession *session.ClientSession) (*SnTopResu
 }
 
 // GetSnTopMe is the caller's detail (`GET /sn/top/me`) in the newest
-// snapshot, with its daily rank history, at most 90 days.
+// snapshot, with its daily rank history, at most 90 days. Before the first
+// snapshot the board is empty and gives no not-measurable reason: it knows
+// nothing about the caller yet.
 func GetSnTopMe(clientSession *session.ClientSession) (*SnTopMeResult, error) {
 	ctx := clientSession.Ctx
 	now := server.NowUtc()
@@ -563,7 +565,7 @@ func GetSnTopMe(clientSession *session.ClientSession) (*SnTopMeResult, error) {
 			IsMe:   true,
 			Fleets: []SnTopFleet{},
 		},
-		NotMeasurableReason: model.SnTopReasonNotProviding,
+		NotMeasurableReason: model.SnTopReasonNone,
 		History:             []SnTopHistoryPoint{},
 	}
 	result.Me = me
@@ -571,6 +573,9 @@ func GetSnTopMe(clientSession *session.ClientSession) (*SnTopMeResult, error) {
 		result.Snapshot = snTopEmptySnapshot()
 	} else {
 		result.Snapshot = snTopSnapshotFromModel(snapshot, now)
+		// a snapshot without the caller's row: no verify-eligible provider
+		// of the caller's was present in the tempo
+		me.NotMeasurableReason = model.SnTopReasonNotProviding
 	}
 	var row *model.SnTopNetworkRow
 	if snapshot != nil {
