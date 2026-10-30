@@ -1,10 +1,10 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-30T03:54:17Z",
+  "observed_at": "2026-10-30T04:16:47Z",
   "scoring_enablement_current": {
-    "status": "R2_intake_open_reduced_reference_native_and336_correctness_verified_new699_operator_qualification_running_production_grading_held",
-    "observed_at": "2026-10-30T03:54:17Z",
+    "status": "R2_intake_open_reduced_reference_and699_operator_qualified_native_before10_complete_public_pilot_plan_pending_production_grading_held",
+    "observed_at": "2026-10-30T04:16:47Z",
     "metadata_checkpoint_only": true,
     "actual_intake_open": true,
     "grading_enabled": false,
@@ -34,8 +34,8 @@
       "public_provider_request_before_census_and_Root_reported_native_collision_preparation_not_measurement"
     ],
     "pending": [
-      "finish_same_new233_operator_qualification_session68844_three_processes_and_terminal_integrity_untimed_input_helper_checks_only_on_disjoint_cores_no_measurements_in_parallel",
-      "run_staged_ten_source_before_census_with_new_qualified_operator_then_publish_all_seven_actual_prerequisites",
+      "publish_actual_completed699_tool_qualification_and_seventh_prerequisite_receipt",
+      "seal_native_replacement_public_pilot_plan_and_publish_before_any_measurements",
       "precommit_and_complete_owner_approved_new_public_R9_R9_pilot_without_weakening_any_submission_gate",
       "only_after_accepted_new_pilot_and_native_after_census_one_new_hidden_seed_and36_native_fresh_single_screen_runs",
       "independent_final_review_and_new_scoped_COMPLIANCE_custody_then_restore_worker_readiness_with_both_holds_active_before_fresh_CAS_release"
@@ -86,7 +86,7 @@
       "prospective_public_seed": 20261030,
       "prospective_root": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2",
       "new_native_tuple_verified": true,
-      "new_operator_qualification_pending": true,
+      "new_operator_qualification_pending": false,
       "native_image_id": "sha256:2eadb97375e9afbe9c9a559c454777f55a0aaed269579b86aa8593b7a84eb1ee",
       "native_candidate_sha": "1222b197eab2f8465bf64f62176743d5294df82f",
       "native_binary_sha256": "a20a41162c6c683b74f5bd9c9ad7a71f021a856828120cdf66c0376cfca7271b",
@@ -110,7 +110,12 @@
       "new_operator_elf": "/mnt/data/operator233-compile-qa-20261030.6p9XdoUI/operator233.test",
       "new_operator_elf_sha256": "b1c3e311f76cafdc96327214065f431bda145005d8900563f9c32089e3c58a6c",
       "operator_early_smoke_passes": 9,
-      "full_operator_qualification_passes_completed_at_observation": 2,
+      "full_operator_qualification_passes_completed_at_observation": 3,
+      "full_operator_qualification_terminal_at": "2026-10-30T04:10:01Z",
+      "full_operator_qualification_total_top_level_passes": 699,
+      "full_operator_qualification_failures_or_skips": 0,
+      "full_operator_qualification_terminal_integrity_exit_code": 0,
+      "final_tool_qualification_sha256": "83ceb22269bbb6e0837191a740bf1a5d8820fb48831e79e5bedb8c273a3c4be3",
       "full_operator_final_pass_started_at": "2026-10-30T03:19:53Z",
       "full_operator_completed_pass_logs": [
         {
@@ -124,12 +129,18 @@
           "sha256": "70924f6a5873459e5a74dd5d523e6eca946200ff773bd2ee383dd7b87e929f71",
           "exact_top_level_passes": 233,
           "failures_or_skips": 0
+        },
+        {
+          "path": "/mnt/data/operator233-runtime-qa-20261030.Yq1JtHDv/pass3.json",
+          "sha256": "c3496fc7464662eed138170e329ea0687ec35821c396f86a552fe353b3523c64",
+          "exact_top_level_passes": 233,
+          "failures_or_skips": 0
         }
       ],
-      "full_operator_qualification_running": true,
+      "full_operator_qualification_running": false,
       "full_operator_qualification_unit": "urnetwork-operator233-runtime-Yq1JtHDv.service",
       "full_operator_qualification_session": 68844,
-      "full_operator_qualification_pid_at_observation": 3672852,
+      "full_operator_qualification_pid_at_observation": 0,
       "full_operator_qualification_started_at": "2026-10-30T01:39:29Z",
       "full_operator_runtime_prepared": "/mnt/data/operator233-runtime-qa-20261030.Yq1JtHDv/run.sh",
       "full_operator_runtime_admitted_only_after_all_H1_cleanup_checks_pass": true,
@@ -140,13 +151,24 @@
         "all_original_and_copied_hashes_matched": true,
         "copies_root_owned_mode0400_single_link": true,
         "exclusive_creation_preserved_originals": true,
-        "future_terminal_copy_absent": true,
-        "final_tool_qualification_absent": true,
-        "final_pass_and_integrity_checks_still_required": true
+        "future_terminal_copy_absent": false,
+        "final_tool_qualification_absent": false,
+        "final_pass_and_integrity_checks_still_required": false,
+        "final_source_count_with_actual_terminal": 41
       },
-      "checkpoint": "server/connect/sim-latency/launch/reduced-pilot-operator-2026-10-30/CHECKPOINT.json",
-      "checkpoint_sha256": "30722e6d215793cd503510f77626372c01731a9d186c0b35197dee9ccee4ef3d",
-      "before_census_configuration_staged_not_executed_sha256": "0e1c5a320084249a66efbb18e0bfa9a38d1a9ce1d52436a3a48fe46e223d1249",
+      "checkpoint": "server/connect/sim-latency/launch/reduced-pilot-operator-2026-10-30/COMPLETED-699-CHECKPOINT.json",
+      "checkpoint_sha256": "e4c747f3edf3bfd44bdd7e93abb1af3c7564660d42ab3259a8c8224c8436edce",
+      "before_census_configuration_sha256": "0e1c5a320084249a66efbb18e0bfa9a38d1a9ce1d52436a3a48fe46e223d1249",
+      "native_before_census": {
+        "unit": "urnetwork-before-public-census-reduced233-20261030-v1.service",
+        "session": 14330,
+        "exit_code": 0,
+        "runtime_milliseconds": 14682,
+        "reviewed_sources": 10,
+        "private_catalog_sha256": "c3f49e9c1ecaf87253b680fa2be5b40a9e8befcf740d2bacdadb5cdaab5e10f3",
+        "private_catalog_not_published": true,
+        "no_measurements_or_entropy": true
+      },
       "public_inputs": {
         "construction_checkpoint": "server/connect/sim-latency/launch/fixed-public-inputs-2026-10-30/CONSTRUCTION.json",
         "helper_controls_three_processes_twelve_passes": true,
