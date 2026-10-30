@@ -1,0 +1,145 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-native-reference-readback-supplement-summary",
+  "status": "actual-two-role-offline-readback-complete",
+  "observed_at_utc": "2026-10-29T20:53:45Z",
+  "scope": "Unmeasured build/source/binary identity and preserved invocation-failure custody only.",
+  "native_readback": {
+    "operator_reported_unit": "urnetwork-native-reference-readback-supplement-P6-v3.service",
+    "operator_reported_session": 85637,
+    "operator_reported_elapsed_seconds": 12.026,
+    "exit_status": 0,
+    "exit_status_file": {
+      "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/readback-identity-file-v3.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "installed_wrapper": {
+      "path": "/usr/local/libexec/urnetwork/h1-native-reference-readback-supplement-20261029-v3",
+      "sha256": "fa191085728d50fbb7973268a4dc4c50b2274ff1a0d35c633ac9c5b47b15dcae"
+    },
+    "wrapper_source_manifest": {
+      "path": "/home/by/urnetwork/temp/p6-readback-identity-supplement-20261029.lovvKhsA/MANIFEST.sha256",
+      "sha256": "a6a49c28502884ce70de277c02a839e7b6ead2dee660ac97a31289c5065c3bd0"
+    },
+    "identity_contract": "Default IMAGE identity dispatch, not the simulator binary's nonexistent identity subcommand; independent fixed-file stat and sorted-JSON equality also passed.",
+    "checks_independently_reviewed": [
+      "Both native evidence manifests and every member SHA256 verify.",
+      "Both host and image product manifests match the corresponding runtime-tested role overlay product bytes.",
+      "Expected native binary SHA256, Go1.27.3 and exact candidate VCS revision with vcs.modified=false agree.",
+      "All ten repository HEAD/tree records and protected simulator subtree agree with the successful native readback.",
+      "Before/after complete container and network inventory files are byte-identical."
+    ],
+    "container_inventory_before": {
+      "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/readbacks-identity-file-v3/containers.before.txt",
+      "sha256": "445289a0084cae7b7e55a753841d0984907358bb6858eb0fab5a75f1864ef988"
+    },
+    "container_inventory_after": {
+      "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/readbacks-identity-file-v3/containers.after.txt",
+      "sha256": "445289a0084cae7b7e55a753841d0984907358bb6858eb0fab5a75f1864ef988"
+    },
+    "network_inventory_before": {
+      "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/readbacks-identity-file-v3/networks.before.txt",
+      "sha256": "a1fc56f9ed719d30d8c6eaac278ae672aa50fc86fc72bbe2613994cd1357dc54"
+    },
+    "network_inventory_after": {
+      "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/readbacks-identity-file-v3/networks.after.txt",
+      "sha256": "a1fc56f9ed719d30d8c6eaac278ae672aa50fc86fc72bbe2613994cd1357dc54"
+    },
+    "roles": [
+      {
+        "role": "better",
+        "image_id": "sha256:b86130ebe1a3cd58f4ad386335fa8126c9bc9f42e153d9040c2db09ed2502f6d",
+        "native_build": {
+          "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/better/native-build.json",
+          "sha256": "5ad6b312f1be062b151d0e8fb9a1453b344ab224058751bf616ce2b87c4447aa"
+        },
+        "native_proof": {
+          "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/better/native-proof.json",
+          "sha256": "4c28a61c4c0c7aff68c83fdfe54f89ab8a464714a577c575291f341b869716cc"
+        },
+        "native_evidence": {
+          "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/better/native-evidence.sha256",
+          "sha256": "171e21be919dad30cf7a59fd70507b7574c2e29a1998e390ab1fc6a54148a168"
+        },
+        "host_product_roots": {
+          "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/readbacks-identity-file-v3/better/source-byte-roots.sha256",
+          "sha256": "88a33906238a0c7266ea04da1daaa0b52f05918a7cec8f70a4b52228c01aa483"
+        },
+        "image_product_roots": {
+          "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/readbacks-identity-file-v3/better/image-source-byte-roots.sha256",
+          "sha256": "88a33906238a0c7266ea04da1daaa0b52f05918a7cec8f70a4b52228c01aa483"
+        }
+      },
+      {
+        "role": "no-op",
+        "image_id": "sha256:6b5afb71b60534987fbd226c8b168d2140dceb2fcad177c61828926f4615c601",
+        "native_build": {
+          "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/no-op/native-build.json",
+          "sha256": "0ce843a7dd7d5125b08530e8ddca04b69e9344c6f0e00e0192a44f1f1ed9522c"
+        },
+        "native_proof": {
+          "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/no-op/native-proof.json",
+          "sha256": "8649b80c04274829e02646793b7048d7e765ab0122dc599c99783729c6f41225"
+        },
+        "native_evidence": {
+          "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/no-op/native-evidence.sha256",
+          "sha256": "ce74a89c073eee07d9c4c687f24ba4af7bea9f2cb5754d491e868d6a49ec3935"
+        },
+        "host_product_roots": {
+          "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/readbacks-identity-file-v3/no-op/source-byte-roots.sha256",
+          "sha256": "9d8e23fc9bc03d8f9d8419f41b7cdd5bd7b8f96069fa1a6b8cb83c2b93761a5d"
+        },
+        "image_product_roots": {
+          "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/readbacks-identity-file-v3/no-op/image-source-byte-roots.sha256",
+          "sha256": "9d8e23fc9bc03d8f9d8419f41b7cdd5bd7b8f96069fa1a6b8cb83c2b93761a5d"
+        }
+      }
+    ]
+  },
+  "deterministic_regression": {
+    "receipt": {
+      "path": "/mnt/data/p6-readback-tests-qa-20261029.l7rXs3dA/TERMINAL-RECEIPT.txt",
+      "sha256": "bd007853caa3430c741d355b59be4b2b1e7adb866377b34215df8929edf1f50b"
+    },
+    "processes": 3,
+    "top_level_passes_per_process": 6,
+    "total_top_level_passes": 18,
+    "substantive_assertion_roots_per_process": 5,
+    "dormant_fake_child_helper_roots_per_process": 1,
+    "failures": 0,
+    "skips": 0,
+    "nested_passes": 0,
+    "test_source": {
+      "path": "/home/by/urnetwork/temp/p6-readback-identity-supplement-20261029.lovvKhsA/tests/readback_test.go",
+      "sha256": "1725baf1df193dda73843374fc96fdbd2358c321206f4d3d44693ea3e41f167d"
+    },
+    "description": "Actual old function/callsite fails while corrected default callsite executes the actual native identity dispatch over synthetic JSON; all13 tuple fields have changed/missing/null refusal controls. No real Docker call in these tests."
+  },
+  "preserved_failed_v2": {
+    "exit_status": 1,
+    "cause": "Operational wrapper overrode the image dispatcher with the simulator binary and invoked an unsupported identity command.",
+    "exit_status_file": {
+      "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/readback.exit",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    "stderr": {
+      "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/readbacks/better-identity.stderr",
+      "sha256": "e94d997a1335040b3b57e46bcc459a1591d1750eef762c3e51970245485b82d9"
+    },
+    "stdout": {
+      "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/readbacks/better-identity.stdout",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "state": {
+      "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/readbacks/better-identity.state.json",
+      "sha256": "743b9d6a21cbd2c32c6f9d5f2d577199d17cf2c5a788a27a85043c684dc9fed1"
+    },
+    "unchanged": true,
+    "superseded_only_for": "Unsupported operational dispatch; neither historical attempt nor its failure is erased or relabeled."
+  },
+  "nonclaims": [
+    "No new source, patch, binary, image build or qualification runtime was executed by this independent file-only finalization.",
+    "Native proof alone is not service correctness: separately completed role-specific 303/279 runtime witnesses provide that scope.",
+    "No measured direction, public-pilot completion, new hidden commitment, calibration acceptance, production scoring, publication or hold release is claimed."
+  ]
+}

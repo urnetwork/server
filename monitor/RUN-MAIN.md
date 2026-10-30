@@ -939,13 +939,23 @@ authority for production findings.
 
 ### Watcher handoff
 
+Select the handoff from the watcher's exact invocation. The
+[shared SSH admission profile](#shared-ssh-admission-for-bounded-diagnostics)
+registers one watcher owner and refuses a second live owner. Preserve the user's
+authorized singleton policy: use the [no-overlap alternative](#no-overlap-watcher-handoff)
+below, stopping the predecessor and proving its whole unit/cgroup and owned
+claims retired before starting the successor. Do not bypass registration by
+changing the admission directory, weakening the guard, resetting the queue, or
+changing budgets. Record the actual collection gap and process-local Sustain
+reset; this profile cannot use the overlap sequence below.
+
 Any monitor code, catalog, inventory-loading, tailer, alert-rendering, or
 effective Config/Vault settings-generation change requires a newly built
 watcher. A `settings-freshness` finding means this boundary has already been
 crossed; validate the current generation with a fresh one-shot before
 promotion. Such a one-shot must also respect the operator's observation interval;
 do not add an immediate diagnostic merely to satisfy a handoff checklist.
-The normal bounded-overlap handoff is:
+For profiles that permit overlap, the normal bounded-overlap handoff is:
 
 1. run focused tests, the attested-local sequential package and race gates, and
    `go vet ./monitor` exactly as described under Deterministic verification
@@ -980,7 +990,10 @@ alert ledger, not the channel, is the record. Accept those duplicates: a
 candidate started with `-slack-alerts=false` would stay silent after
 promotion.
 
-When the operator explicitly prioritizes a no-overlap active-probe interval,
+<a id="no-overlap-watcher-handoff"></a>
+
+For the selected shared-admission singleton policy, or when the operator
+explicitly prioritizes a no-overlap active-probe interval,
 use this alternative instead of waiting 15 minutes beside an active predecessor:
 finish the same tests/build/hash preflight, resolve the exact owned predecessor
 PID/session/binary, and gracefully stop it through its durable session. Confirm

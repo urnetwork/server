@@ -51,7 +51,11 @@ type SnValidatorWeightRow struct {
 
 // One UID of a snapshot.
 type SnIncentiveUid struct {
-	Uid             uint16
+	Uid uint16
+	// SubtensorModule::Incentive of the subnet's mechanism 0 at this UID, as
+	// the chain stores it: Yuma's per-UID incentive, normalized to sum to 1
+	// across the subnet, then stored as a PerU16 where 65535 is 1. Use
+	// IncentiveFraction for the UID's share.
 	Incentive       uint16
 	LastUpdate      uint64
 	ValidatorPermit bool
@@ -62,7 +66,10 @@ type SnIncentiveUid struct {
 	BlockAtRegistration uint64
 }
 
-// The UID's incentive as a fraction in [0, 1].
+// IncentiveFraction is the UID's share of the subnet's incentive, a fraction
+// in [0, 1]: the stored PerU16 over 65535. This is the unit of the board's
+// fleets[].incentive, which the apps render as a percent. The UIDs' shares sum
+// to about 1, short only by the chain's per-UID rounding.
 func (self *SnIncentiveUid) IncentiveFraction() float64 {
 	return float64(self.Incentive) / 65535
 }
@@ -91,9 +98,9 @@ type SnIncentiveSnapshot struct {
 	Uids []*SnIncentiveUid
 }
 
-// The incentive of uid when its holder at the snapshot is hotkey. A UID that
-// changed hands earns for its new holder, so another hotkey's UID is not
-// found.
+// The incentive of uid when its holder at the snapshot is hotkey; its
+// IncentiveFraction is the UID's share in [0, 1]. A UID that changed hands
+// earns for its new holder, so another hotkey's UID is not found.
 func (self *SnIncentiveSnapshot) IncentiveFor(uid uint16, hotkey [32]byte) (*SnIncentiveUid, bool) {
 	if int(uid) >= len(self.Uids) {
 		return nil, false

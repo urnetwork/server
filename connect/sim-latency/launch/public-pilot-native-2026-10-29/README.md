@@ -16,11 +16,25 @@ The worse reference's [build](worse-build-qualification.json) and
 `647922…` image and its tested source. They establish build/readback and
 correctness, not measured regression direction.
 
-These are three of seven required native prerequisite artifacts. Better and
-no-op still need their new native images and exact source/readback bindings.
-The [publication checkpoint](PUBLICATION-CHECKPOINT.json) records the three
-actual Git publications and their Root-installed receipts. Their publication
-time is the successful readback observation, not a backdated push timestamp.
-All seven publications must precede the native pilot plan and measurements.
+All seven native prerequisite artifacts are now present: the tool and the
+build/correctness pair for each of worse, better and no-op. The
+[better binding](better-SOURCE-AND-EXECUTION-BINDING.json) and
+[no-op binding](no-op-SOURCE-AND-EXECUTION-BINDING.json) connect the actual new
+images to their independently tested product bytes (303 and 279 runtime passes).
+The [supplement record](readback-supplement-summary.json) preserves the initial
+unsupported-identity invocation failure and the separately tested, successful
+default-entrypoint readback. Neither image was rebuilt for that correction.
+
+The historical [publication checkpoint](PUBLICATION-CHECKPOINT.json) records
+the first three actual Git publications and their Root-installed receipts.
+The remaining four require their own subsequent publication proof; that first
+proof is not overwritten or relabeled. Every publication time is a successful
+readback observation, not a backdated push timestamp. All seven publications
+must precede the native pilot plan and measurements.
 No public pilot, new hidden seed, calibration acceptance, or scoring-hold release
 is claimed by this checkpoint.
+
+The [native prepared plan](plan.json) binds the actual seven publication
+receipts, fixed public workload and qualified executable. Native preparation
+passed without measurements or new entropy. The plan still needs its own
+successful Git-publication receipt before the one-use timed execution.

@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"slices"
 	"testing"
 	"time"
@@ -101,6 +102,13 @@ func TestSnIncentiveSnapshotStaleness(t *testing.T) {
 	}
 	if row, ok := snapshot.IncentiveFor(3, stmetagraphtest.Hotkey(3)); !ok || row.Incentive != 0 || row.BlockAtRegistration != 1003 {
 		t.Fatal("UID 3", row, ok)
+	}
+	// the stored PerU16 over 65535 is the UID's share: UIDs 2 and 7 split it
+	if row := snapshot.Uids[2]; row.Incentive != 30000 || row.IncentiveFraction() != 30000.0/65535 {
+		t.Fatal("UID 2's share", row.IncentiveFraction())
+	}
+	if total := snapshot.Uids[2].IncentiveFraction() + snapshot.Uids[7].IncentiveFraction(); math.Abs(total-1) > 1e-12 {
+		t.Fatal("the shares of a normalized vector sum to 1", total)
 	}
 	if _, ok := snapshot.IncentiveFor(3, stmetagraphtest.Hotkey(4)); ok {
 		t.Fatal("another hotkey's UID was attributed")

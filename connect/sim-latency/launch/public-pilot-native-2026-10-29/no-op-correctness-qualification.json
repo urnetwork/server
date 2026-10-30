@@ -1,0 +1,86 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-held-out-reference-correctness",
+  "role": "no-op",
+  "accepted": true,
+  "base_sha": "a9e8e1a710b24c749e6499a0606938252c83e136",
+  "source_lock_sha256": "ec322ed2db023e15ea5dc3eea60a6ca5989661bba737c340fea3477d8d1300cf",
+  "base_image_id": "sha256:98c9061c4a43a25e7b581a5193ca6e7f48e49e7b7fc03b7c1b6190a029befee2",
+  "patch_sha256": "1076be3ed61df0e14ae90c13bbe4c35442de6371064fd7d78f61ed6834e170f1",
+  "candidate_sha": "28e5f2f823008394cc51d1405750daf5decd0915",
+  "image_id": "sha256:6b5afb71b60534987fbd226c8b168d2140dceb2fcad177c61828926f4615c601",
+  "binary_sha256": "b232bd355f90b44aa1838419f3375454009a337931c458641b1351b571bb0872",
+  "go_version": "go1.27.3",
+  "vcs_modified": false,
+  "direction": "",
+  "evidence": [
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/correctness-source-pins/no-op-role-terminal.txt",
+      "sha256": "45c1b06297d5a0c45f85608a7772ce1d3a36e97e103067f73f7b4fee1d908a9e"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/no-op-SOURCE-AND-EXECUTION-BINDING.json",
+      "sha256": "fecffbc027a1a0527978c2e194e35a8375b3af1867ddc02d4da7052d73dfce2c"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/no-op/native-proof.json",
+      "sha256": "8649b80c04274829e02646793b7048d7e765ab0122dc599c99783729c6f41225"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/no-op/native-build.json",
+      "sha256": "0ce843a7dd7d5125b08530e8ddca04b69e9344c6f0e00e0192a44f1f1ed9522c"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/no-op/native-evidence.sha256",
+      "sha256": "ce74a89c073eee07d9c4c687f24ba4af7bea9f2cb5754d491e868d6a49ec3935"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/readbacks-identity-file-v3/no-op/source-byte-roots.sha256",
+      "sha256": "9d8e23fc9bc03d8f9d8419f41b7cdd5bd7b8f96069fa1a6b8cb83c2b93761a5d"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-native-rebuild-better-noop-20261029.P6ZWBPVi/readbacks-identity-file-v3/no-op/image-source-byte-roots.sha256",
+      "sha256": "9d8e23fc9bc03d8f9d8419f41b7cdd5bd7b8f96069fa1a6b8cb83c2b93761a5d"
+    },
+    {
+      "path": "/mnt/data/reference-role-runtime-qa-20261029.Z1jiStbo/no-op/pass1.json",
+      "sha256": "439ed21a96129a9947102c296430c4a15a5bc15bbfe677c85920b3d7fcd6fb18"
+    },
+    {
+      "path": "/mnt/data/reference-role-runtime-qa-20261029.Z1jiStbo/no-op/pass2.json",
+      "sha256": "c1a4cb7b4b9b8b4a922986eca7468261e8a2f72a662ec12176e3c9de670b9946"
+    },
+    {
+      "path": "/mnt/data/reference-role-runtime-qa-20261029.Z1jiStbo/no-op/pass3.json",
+      "sha256": "4c159f70d1e41e55048fa11d74c1a9aa1ebec4d62c6953fc3fb6cf18010570ef"
+    },
+    {
+      "path": "/home/by/urnetwork/temp/reference-role-correctness-prep-20261029.8XmThwi0/ARTIFACT-PINS.sha256",
+      "sha256": "4055159e59b7e9a2439ae37772cf0ae022599e8046644d2e7c773666ccf9ec2b"
+    },
+    {
+      "path": "/home/by/urnetwork/temp/reference-role-correctness-prep-20261029.8XmThwi0/ROLE-SOURCE-BINDINGS.json",
+      "sha256": "1885a8c770390d4140e808ada5cd7e1942b11aba6aa07e9f15ec8ee51beaa2f4"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/correctness-source-pins/role-compile-terminal.txt",
+      "sha256": "0a06ff9dd7e1440972f5f014004bb858a735c8a65feef36ddfb639898ed19b2a"
+    },
+    {
+      "path": "/mnt/data/reference-role-compile-qa-20261029.vJVQoFwW/no-op.overlay.json",
+      "sha256": "dccefcdc4f1e8cd16545e0d5c6dadde5e7edbc5c60ea73084df867d0ea700a56"
+    },
+    {
+      "path": "/mnt/data/reference-role-compile-qa-20261029.vJVQoFwW/no-op-used-inputs.sha256",
+      "sha256": "0dd80805145cdc5505d4fd3300072c20ea29a6528893348aed6ccb13389d86c4"
+    },
+    {
+      "path": "/home/by/urnetwork/temp/reference-role-correctness-prep-20261029.8XmThwi0/BASELINE-AND-NOOP-93.names",
+      "sha256": "6af579b89d3ee690a90c12df2dc1770cb706f8a7cc31c34113ca7e9cd10dfec8"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/inputs/correctness-source-pins/better-role-terminal.txt",
+      "sha256": "bda80bb61edfc51243119db8bca2d92fb0f419d156fc962ee4236b4775812149"
+    }
+  ]
+}
