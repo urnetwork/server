@@ -279,3 +279,31 @@ func TestConnectionAnnounceCountsProviderThroughUnreadableProvideModes(t *testin
 		}
 	})
 }
+
+// Sync rounds wait on the same two timers, each re-armed only after it fires.
+// A time.After for both on every round created two timers a round and left
+// the test's, 12 to 24 hours out, in the timer heap.
+func TestConnectionAnnounceSyncRoundsReuseTheirTimers(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		testCtx, testCancel := context.WithTimeout(ctx, 60*time.Second)
+		defer testCancel()
+		const roundCount = 20
+		created := countTimersCreated(t, "github.com/urnetwork/server/connect.(*ConnectionAnnounce).run", func() {
+			fixture := startSyncAnnounceForTest(ctx, "")
+			defer fixture.close()
+			fixture.awaitRegistered(t, testCtx)
+			for range roundCount {
+				fixture.awaitRound(t, testCtx)
+				select {
+				case fixture.release <- struct{}{}:
+				case <-testCtx.Done():
+					t.Fatal("timed out releasing a sync round")
+				}
+			}
+		})
+		if created != 2 {
+			t.Fatalf("%d sync rounds created %d timers, want 2: the test's and the round's", roundCount, created)
+		}
+	})
+}
