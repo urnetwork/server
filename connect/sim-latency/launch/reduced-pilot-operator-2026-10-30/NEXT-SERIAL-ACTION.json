@@ -1,8 +1,12 @@
 {
   "schema": 1,
   "kind": "sim-latency-approved-calibration-next-serial-action",
-  "observed_at": "2026-10-30T20:38:00Z",
-  "purpose": "Qualified native calibration handoff, not runtime authority. Metadata-only preparation and publication succeeded at their recorded actual times; no timed measurements or hidden entropy. Migration 901 is confirmed. Next: verify the main API rollout and bounded maintenance, join all isolated qualification work, then reserve the host before timed execution. The envelope, environment and arguments below document the successful prepare only; they are not a command to repeat or the timed-execution configuration.",
+  "observed_at": "2026-10-30T21:34:50Z",
+  "status": "PUBLIC_PILOT_ALREADY_RUNNING_DO_NOT_REPEAT_PREPARE_OR_EXECUTE",
+  "purpose": "The actual public pilot is RUNNING under unit urnetwork-public-pilot-execute-native233-20261030-v1.service, PID2768801, observer session58342, started2026-10-30T21:28:33Z. Observe that same handle; never repeat prepare or execute. This file retains the successful preparation/publication provenance only. Its environment, arguments and after_preparation checklist are historical references, not commands to run now. Read the live transition report and current-state.json for the current next action. No hidden entropy has been drawn and no calibration result is accepted.",
+  "live_transition_report": "server/connect/sim-latency/launch/CALIBRATION-MAINTENANCE-LIVE-2026-10-30.json",
+  "live_transition_report_sha256": "14a7e83a285b254cb03d654e1748b51a8a35c70c853586045202bced85c5dfe3",
+  "historical_checklist_must_not_reapply_hold_or_repeat_execution": true,
   "production_service": "urnetwork-competition-production-r2.service",
   "calibration_root": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2",
   "admission_before_any_execution": [
