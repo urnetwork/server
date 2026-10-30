@@ -156,16 +156,17 @@ consumers before the API rollout: old consumers may reject private production
 `score` responses, and old adapter binaries cannot read new private feedback or
 refresh fields. Do not roll an old binary back onto the new adapter state file.
 
-The prospective October 28 season selects `elected_winner_gpt54mini_xhigh_v1`:
-publish the provisional winner, automatically review it with qualified GPT-5.4
-mini/xhigh, revoke/re-elect on substantiated rejection, then independently build,
+Production R2 selects `elected_winner_snow_union_v2`: publish the provisional
+winner, automatically review it with qualified Qwen (`qwen3.8-27b`) and Gemma
+(`gemma-4-26b-a4b`) on Snow, retain the union of their findings, and require both
+to approve. Revoke/re-elect on substantiated rejection, then independently build,
 qualify and promote that approved winner before opening the next epoch.
 Only an exhausted eligible ranking carries the incumbent forward. Missing or
 expired review and failed source qualification block and alert support; they
 never silently approve, promote another candidate, or fall back. The sixth
-epoch is reviewed before the supervisor exits. This prospective policy leaves
-existing round rules unchanged; historical `elected_winner_sol61max_v1` records
-retain their Sol 6.1/max identities. Provider qualification remains required.
+epoch is reviewed before the supervisor exits. Historical Sol, GPT-5.4 mini and
+three-model Snow records retain their original identities; Muse is not a member
+of the R2 two-model policy. Provider qualification remains required.
 See [RUN-MAIN.md](RUN-MAIN.md#adopted-automatic-closing-policy-2026-10-23)
 for activation, the private model-broker protocol, scoped authority, and
 independent build/readiness requirements.
@@ -313,10 +314,11 @@ control does not turn requests within a run into independent observations.
 This is part of the immutable evaluation result, not a post-hoc leaderboard
 calculation.
 
-The prospective production source epoch 0 margin is **26.9%**, frozen by the
+The production source epoch 0 margin is **26.9%**, frozen by the
 [accepted original-three reduction](launch/CALIBRATION-THREE-A-FREEZE-2026-10-26.md).
-Its fresh revised-instrument bridge, independent reference ordering and live
-readiness must still pass before activation. Historical 16.1% values remain
+Intake-first activation is not calibration acceptance: the pending fresh public
+pilot, independent reference screen and live qualification must pass before
+grading/publication holds can be released. Historical 16.1% values remain
 attached to their original rounds, not silently substituted for this margin.
 Under legacy v1, production statistical eligibility places a submission into
 the ranked honesty-review queue; it does not by itself make the submission a
@@ -329,6 +331,30 @@ margin. If no submission is statistically significant, or every significant
 candidate is rejected as dishonest, the epoch has no winner and both the
 source commits and percentage carry forward unchanged.
 
+### Current and next-epoch G2 work-volume policy
+
+Production R2 epoch 1 retains its frozen rule: the median completed-request
+count and median received bytes must each be within **95–105%**, inclusive, of
+the shared epoch baseline. A genuine speedup receives no exception to the
+current upper bounds. Its existing jobs, evaluator and results are not rejudged.
+
+The owner approved a prospective change starting in epoch 2: both medians must
+remain **at least 95%** of baseline, inclusive, with **no upper bounds**.
+This is `g2_volume_policy: minimum-work/1` and scorer `sim-latency-score/2`;
+absence of that policy identifies the historical two-sided rule. More completed
+work alone will no longer fail G2. All other gates, nine-run replication,
+latency ranking, practical margin, Welch significance and three-hour submission
+budget remain unchanged. Faster raw latency is not permission to fake traffic,
+skip accounting or bypass correctness.
+
+The policy change is not active in epoch 1. It needs a separately authenticated
+protected-instrument transition, qualified evaluator image and fresh shared
+baseline for the successor source. Miners should follow the exact policy and
+image advertised for their accepted round, not infer an upgrade from this
+announcement or reuse another round's control sample. See the
+[owner approval](launch/PRIVATE-FEEDBACK-NEXT-G2-APPROVAL-2026-10-30.json)
+and [current checkpoint](launch/current-state.json) for rollout status.
+
 ## Epoch source identity and promotion
 
 The source graph applies to both contracts. The manual `epoch-review` and
@@ -338,7 +364,7 @@ recorded review, source intent, readiness, and activation authority.
 The complete local-module graph that can affect the measured product is frozen
 by source epoch: `server`, `connect`, `sdk`, `proxy`, `glog`, `goidenticons`,
 `userwireguard`, `sn`, `warp`, and `gvisor`, all on branch
-`sim-latency`. The first four are the product roots; the remaining seven are required local
+`sim-latency`. The first four are the product roots; the remaining six are required local
 dependencies and evaluator build inputs. The trusted API and worker
 continue on `main`; they record their runtime image digests per evaluation but
 their source commits are not scoring inputs.

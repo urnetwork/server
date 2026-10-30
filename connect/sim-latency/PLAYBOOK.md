@@ -14,8 +14,16 @@ At 03:14 UTC on October 30, public `/competition/info` reported
 - actual opening: October 29, 13:06:42.413416 UTC;
 - submission close: November 5, 13:06:42.413416 UTC.
 
-The production worker is deliberately stopped for uncontended calibration;
-intake readiness does not mean the evaluator is running. Use the
+The later read-only snapshot at **18:39 UTC on October 30** shows four completed
+evaluations, eleven queued jobs and no running job. Every queued job still has
+zero attempts and an unset start time. The worker is **online**, publishing real
+host heartbeats, with evaluation hold revision 3 active and reward-delivery hold
+revision 1 active. New claims are paused; no timed calibration has started.
+Do not stop the worker until the separately approved intake-preserving
+calibration-maintenance release is deployed and its actual active revision 4
+has been verified. The earlier stopped-worker observation is historical, not
+an instruction to manufacture readiness or replay an initial-hold exception.
+Use the
 [current checkpoint](launch/current-state.json) and the
 [scoring restoration procedure](launch/SCORING-RESTORE-2026-10-30.md) before
 changing either hold. The prepared source/image identities are maintained in
@@ -79,14 +87,25 @@ using public seed `20261030`. That reference's native build/readback and
 have completed with 336 passes and zero failures or skips. The separately
 qualified Go input helper passed 12 controls and
 [constructed the new public inputs once](launch/fixed-public-inputs-2026-10-30/README.md).
-The new operator's three-process 233-test qualification is still running;
-the old operator's 675 passes do not qualify its changed bytes. The replacement
-public pilot and subsequent single hidden-seed screen have not started.
-No submission gate, R9, significance, practical margin or per-job deadline has
-been changed. No new hidden seed has been drawn. The separate
+The new operator's three-process 233-test qualification completed with 699
+passes; those exact executable/source pins, not the old operator's 675 passes,
+qualify its changed bytes. Metadata-only native prepare completed at
+15:23–15:24 UTC. Its exact public plan is pushed, and the protected publication
+receipt and separately pinned execution configuration were installed and
+rehashed at 18:23 UTC. These are not timed measurements or permission to repeat
+prepare. The replacement public pilot and subsequent single hidden-seed screen
+have not started. Epoch-one gates, R9, significance, practical margin and per-job
+deadline remain unchanged. No new hidden seed has been drawn. The separate
 [late-opening authorization](launch/LATE-OPENING-AUTHORIZATION-2026-10-28.md)
 and subsequent intake-first/replacement-season approvals do not establish
 scoring readiness or permit relabeling failed calibration as accepted.
+
+Epoch 1 keeps inclusive 95–105% request-count and received-byte median bands.
+The owner approved **95% floors with no upper bounds from epoch 2**, under
+`minimum-work/1` and scorer `/2`; the future instrument/image still needs
+qualification. Do not change or rejudge epoch 1. See the
+[current/next G2 announcement](README.md#current-and-next-epoch-g2-work-volume-policy)
+and the [current checkpoint](launch/current-state.json) before deployment.
 
 Production admission costs $20 and has no submission-count ceiling. Each round
 gets one authenticated nine-run control baseline shared by all its submissions;

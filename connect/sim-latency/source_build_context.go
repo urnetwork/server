@@ -37,9 +37,19 @@ func sourceBuildPublicOrigin(repository string) string {
 
 // Verify both ends of a local Git transport. No ignored files, alternate-object
 // links, source configuration or hooks are copied into the clean checkout.
-func cloneSourceBuildRepository(ctx context.Context, repository, source, destination, expectedCommit string) error {
+func cloneSourceBuildRepository(ctx context.Context, repository, source, destination, expectedCommit string) (resultErr error) {
 	if !slices.Contains(sourceRepositoryNames(), repository) || !sourceGitShaPattern.MatchString(expectedCommit) {
 		return errors.New("source build repository identity is invalid")
+	}
+	canonicalSource, sourceRoot, err := sourceGitRoots(source)
+	if err != nil || canonicalSource != source || sourceRoot != source {
+		return errors.New("source build transport requires an exact ordinary source checkout")
+	}
+	sourceGitDirectory := filepath.Join(sourceRoot, ".git")
+	canonicalGit, gitErr := filepath.EvalSymlinks(sourceGitDirectory)
+	gitInfo, statErr := os.Lstat(sourceGitDirectory)
+	if gitErr != nil || statErr != nil || canonicalGit != sourceGitDirectory || !gitInfo.IsDir() || gitInfo.Mode()&os.ModeSymlink != 0 {
+		return errors.New("source build transport Git directory is missing or redirected")
 	}
 	head, err := sourceGitText(ctx, source, "rev-parse", "HEAD")
 	if err != nil || head != expectedCommit {
@@ -64,7 +74,46 @@ func cloneSourceBuildRepository(ctx context.Context, repository, source, destina
 	if _, err := sourceGitText(ctx, destination, "remote", "add", "origin", sourceBuildPublicOrigin(repository)); err != nil {
 		return err
 	}
-	if _, err := sourceGitText(ctx, destination, "-c", "protocol.file.allow=always", "fetch", "--quiet", "--no-tags", "--depth=1", "--", source, expectedCommit); err != nil {
+	// Git clears command config before local upload-pack. A private global file
+	// survives that boundary without changing host config or widening other calls.
+	configurationRoot, err := os.MkdirTemp(parent, ".source-build-git-")
+	if err != nil {
+		return err
+	}
+	configurationPath := filepath.Join(configurationRoot, "gitconfig")
+	defer func() {
+		if err := os.Remove(configurationPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			resultErr = errors.Join(resultErr, err)
+		}
+		resultErr = errors.Join(resultErr, os.Remove(configurationRoot))
+	}()
+	quote := func(value string) string {
+		return "\"" + strings.NewReplacer("\\", "\\\\", "\"", "\\\"", "\n", "\\n", "\t", "\\t", "\b", "\\b").Replace(value) + "\""
+	}
+	configuration := "[safe]\n\tdirectory =\n\tdirectory = " + quote(destination) + "\n\tdirectory = " + quote(sourceRoot) + "\n\tdirectory = " + quote(sourceGitDirectory) + "\n"
+	if err := writePrivateReviewFile(configurationPath, []byte(configuration)); err != nil {
+		return err
+	}
+	if err := os.Chmod(configurationPath, 0o400); err != nil {
+		return err
+	}
+	// All command text is fixed. Git quotes the separately supplied source path;
+	// child-local guards cannot be replaced by the source's repository config.
+	fetch, err := sourceGitLocalCommand(ctx, destination, "-c", "safe.directory="+sourceRoot, "-c", "safe.directory="+sourceGitDirectory,
+		"-c", "protocol.file.allow=always", "fetch",
+		"--upload-pack=/usr/bin/git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c core.attributesFile=/dev/null -c log.showSignature=false -c gc.auto=0 -c maintenance.auto=false -c protocol.allow=never -c credential.helper= -c credential.interactive=false upload-pack",
+		"--quiet", "--no-tags", "--depth=1", "--", source, expectedCommit)
+	if err != nil {
+		return err
+	}
+	for index, entry := range fetch.Env {
+		if strings.HasPrefix(entry, "GIT_CONFIG_GLOBAL=") {
+			fetch.Env[index] = "GIT_CONFIG_GLOBAL=" + configurationPath
+		}
+	}
+	fetch.Env = append(fetch.Env, "GIT_NO_LAZY_FETCH=1", "GIT_OPTIONAL_LOCKS=0")
+	fetch.Stdout, fetch.Stderr = &sourceBoundedWriter{limit: maximumSourceConfigBytes}, &sourceBoundedWriter{limit: defaultSourceGitExecutionSettings().MaximumDiagnosticBytes}
+	if err := fetch.Run(); err != nil {
 		return fmt.Errorf("exact approved source fetch: %w", err)
 	}
 	// FETCH_HEAD contains the private transport path, not public provenance.

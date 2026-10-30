@@ -97,10 +97,13 @@ func sourceBuildSandboxArguments(input sourceBuildSandboxInput, settings sourceB
 		"--tmpfs=/tmp:rw,nosuid,nodev,noexec,uid=65532,gid=65532,mode=1770,size=" + strconv.FormatInt(settings.TmpBytes, 10),
 		"--env=SOURCE_BUILD_COMMIT=" + input.Commit,
 		"--env=GOCACHE=/work/cache", "--env=GOTMPDIR=/work/tmp", "--env=TMPDIR=/tmp", "--env=GOFLAGS=-mod=readonly", "--env=GOPROXY=off", "--env=GOSUMDB=off", "--env=GOTOOLCHAIN=local", "--entrypoint=/bin/bash"}
+	for _, entry := range sourceBuildSandboxGitEnvironment() {
+		args = append(args, "--env="+entry)
+	}
 	if input.Phase != "metadata" {
 		args = append(args, "--tmpfs=/opt/urnetwork/go/pkg/mod/cache/download/github.com/urnetwork/server/@v:rw,nosuid,nodev,noexec,uid=65532,gid=65532,mode=0700,size="+strconv.FormatInt(settings.MetadataBytes, 10))
 	}
-	script := "test \"$(go env GOVERSION)\" = go1.27.3; mkdir -p /work/cache /work/tmp; cp -R /opt/urnetwork/go/build-cache/. /work/cache/; cp -R /input/server-metadata/. /opt/urnetwork/go/pkg/mod/cache/download/github.com/urnetwork/server/@v/; test \"$(git -C /workspace/server rev-parse HEAD)\" = \"$SOURCE_BUILD_COMMIT\"; test -z \"$(git -C /workspace/server status --porcelain --untracked-files=all)\"; cd /workspace/server; "
+	script := "test \"$(go env GOVERSION)\" = go1.27.3; mkdir -p /work/cache /work/tmp; cp -R /opt/urnetwork/go/build-cache/. /work/cache/; cp -R /input/server-metadata/. /opt/urnetwork/go/pkg/mod/cache/download/github.com/urnetwork/server/@v/; source_head=$(git -C /workspace/server rev-parse HEAD); test \"$source_head\" = \"$SOURCE_BUILD_COMMIT\"; source_status=$(git -C /workspace/server status --porcelain --untracked-files=all); test -z \"$source_status\"; cd /workspace/server; "
 	if input.Phase == "metadata" {
 		// Export only the immutable incumbent's module metadata. In particular,
 		// do not shadow this path with the later phases' empty writable tmpfs.
@@ -114,6 +117,26 @@ func sourceBuildSandboxArguments(input sourceBuildSandboxInput, settings sourceB
 		script += "go build -trimpath -o /output/sim-latency ./connect/sim-latency; test \"$(go version -m /output/sim-latency | sed -n 's/.*vcs.revision=//p')\" = \"$SOURCE_BUILD_COMMIT\"; test \"$(go version -m /output/sim-latency | sed -n 's/.*vcs.modified=//p')\" = false; cat /output/sim-latency"
 	}
 	return append(args, input.ImageId, "-ceu", script), nil
+}
+
+// Command-scope config reaches Go's own VCS subprocesses as well as preflight.
+// Reset inherited trust, then name only the authenticated mounted server root.
+func sourceBuildSandboxGitEnvironment() []string {
+	configuration := [][2]string{
+		{"safe.directory", ""}, {"safe.directory", "/workspace/server"},
+		{"core.hooksPath", "/dev/null"}, {"core.fsmonitor", "false"},
+		{"core.attributesFile", "/dev/null"}, {"log.showSignature", "false"},
+		{"gc.auto", "0"}, {"maintenance.auto", "false"},
+		{"submodule.recurse", "false"}, {"fetch.recurseSubmodules", "false"},
+		{"protocol.allow", "never"}, {"credential.helper", ""}, {"credential.interactive", "false"},
+	}
+	environment := []string{"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_PARAMETERS=",
+		"GIT_CONFIG_COUNT=" + strconv.Itoa(len(configuration)), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0", "GIT_NO_LAZY_FETCH=1",
+		"GIT_ATTR_NOSYSTEM=1", "GIT_ASKPASS=/bin/false", "SSH_ASKPASS=/bin/false", "GIT_PAGER=/bin/cat"}
+	for index, entry := range configuration {
+		environment = append(environment, "GIT_CONFIG_KEY_"+strconv.Itoa(index)+"="+entry[0], "GIT_CONFIG_VALUE_"+strconv.Itoa(index)+"="+entry[1])
+	}
+	return environment
 }
 
 // Docker command execution is injectable for deterministic fence/cleanup tests.
