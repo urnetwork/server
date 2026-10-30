@@ -1,5 +1,13 @@
 # Sim-latency baseline preservation
 
+The [October 30 public H1 regression pilot](prelaunch-public-regression-r9-2026-10-30/README.md)
+completed all nine controls and nine candidates in 10,763 seconds with clean
+teardown, but native verification rejected it: the intentional regression was
+too aggressive and failed G1 and the lower G2 bounds. The exact generated
+baseline, score, rejected proof and host inventories are versioned with their
+improvement/acceptance boundaries. This failed attempt is not an official epoch
+baseline or permission to start production scoring.
+
 The [October 27 corrected C2 bridge](prelaunch-corrected-c2-bridge-2026-10-27/README.md)
 completed fresh R9/R9 in 10,290 seconds with all gates and cleanup. Independent
 native verification accepted it as operational compatibility evidence, not

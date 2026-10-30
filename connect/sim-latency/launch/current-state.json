@@ -1,10 +1,10 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-29T23:54:09Z",
+  "observed_at": "2026-10-30T00:44:55Z",
   "scoring_enablement_current": {
-    "status": "R2_intake_open_all7_prerequisites_published_public_pilot_running_candidate06_production_grading_held",
-    "observed_at": "2026-10-29T23:54:09Z",
+    "status": "R2_intake_open_public_pilot_rejected_G1_G2_owner_approved_reduced_strength_replacement_production_grading_held",
+    "observed_at": "2026-10-30T00:44:55Z",
     "metadata_checkpoint_only": true,
     "actual_intake_open": true,
     "grading_enabled": false,
@@ -34,9 +34,10 @@
       "public_provider_request_before_census_and_Root_reported_native_collision_preparation_not_measurement"
     ],
     "pending": [
-      "finish_same_live_public_pilot_handle11937_unit_v2_then_native_verify18_runs_and_direction",
-      "only_after_accepted_public_pilot_one_new_hidden_seed_and36_native_fresh_single_screen_runs",
-      "independent_final_review_and_durable_scoring_publication_hold_release"
+      "build_and_qualify_one_predeclared100ns_reference_and_new_operator_with_prior_failure_retired_in_new_census",
+      "precommit_and_complete_owner_approved_new_public_R9_R9_pilot_without_weakening_any_submission_gate",
+      "only_after_accepted_new_pilot_and_native_after_census_one_new_hidden_seed_and36_native_fresh_single_screen_runs",
+      "independent_final_review_and_new_scoped_COMPLIANCE_custody_then_restore_worker_readiness_with_both_holds_active_before_fresh_CAS_release"
     ],
     "reference_runtime_checkpoint": "server/connect/sim-latency/launch/REFERENCE-RUNTIME-CORRECTNESS-2026-10-29.json",
     "operator_qualification_checkpoint": "server/connect/sim-latency/launch/public-pilot-native-2026-10-29/COMPLETED-675-CHECKPOINT.json",
@@ -57,9 +58,36 @@
     "native_public_pilot_started_at": "2026-10-29T21:27:46Z",
     "native_public_pilot_manager_deadline": "2026-10-30T00:27:46Z",
     "native_public_pilot_watchdog_deadline": "2026-10-30T00:28:41Z",
-    "native_public_pilot_phase_observed": "candidate-06_runner_and_disposable_postgres_redis_live",
+    "native_public_pilot_phase_observed": "terminal_cleanup_verified_exit0_native_verifier_rejected_G1_G2",
     "native_public_pilot_baseline_replicates_completed_at_observation": 9,
-    "native_public_pilot_candidate_replicates_completed_at_observation": 5,
+    "native_public_pilot_candidate_replicates_completed_at_observation": 9,
+    "native_public_pilot_terminal": {
+      "completed_at": "2026-10-30T00:27:09Z",
+      "elapsed_seconds": 10763,
+      "original_budget_seconds": 10800,
+      "evaluator_exit_code": 0,
+      "cleanup_and_original_inventory_verified": true,
+      "native_verification_unit": "urnetwork-public-pilot-verify-native225-20261030-v1.service",
+      "native_verification_exit_code": 1,
+      "accepted": false,
+      "failed_gates": ["G1_success", "G2_volume"],
+      "reason": "public pilot is partial, failed or not placeable",
+      "rejected_proof_sha256": "7220f48fcdbb33d2df2728eafd014eef10f392ce6ee70f36f5bd7752b693aab7",
+      "versioned_public_dataset": "server/connect/sim-latency/baseline/prelaunch-public-regression-r9-2026-10-30/README.md",
+      "no_direction_receipt_or_after_census_acceptance": true,
+      "no_new_hidden_seed": true
+    },
+    "approved_reduced_strength_public_pilot": {
+      "owner_approval_record": "server/connect/sim-latency/launch/CALIBRATION-REDUCED-PACING-OWNER-APPROVAL-2026-10-30.md",
+      "owner_reply": "Approve reduced-strength reference and new public pilot",
+      "prospective_pacing_nanoseconds_per_byte": 100,
+      "prospective_public_seed": 20261030,
+      "prospective_root": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2",
+      "new_native_tuple_and_operator_qualification_pending": true,
+      "new_measurements_started": false,
+      "submission_gates_and_frozen_competition_identity_unchanged": true,
+      "prior_failed_pilot_remains_rejected": true
+    },
     "finalization_input_preparation": {
       "status": "file_only_independently_checked_drafts_not_native_admission_or_calibration_acceptance",
       "packet": "/home/by/urnetwork/temp/after-census-fresh-sequence-audit-20261029.iLKFRMCi",

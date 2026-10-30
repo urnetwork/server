@@ -88,8 +88,10 @@ func TestSnTopRouteDb(t *testing.T) {
 		if code != http.StatusOK {
 			t.Fatalf("GET /sn/top/me = %d", code)
 		}
+		// the board has no snapshot yet: it gives no reason, and a provider
+		// is never told to turn providing on
 		me, ok := body["me"].(map[string]any)
-		if !ok || me["not_measurable_reason"] != "not_providing" {
+		if reason, present := me["not_measurable_reason"]; !ok || !present || reason != "" {
 			t.Fatalf("me = %v", body["me"])
 		}
 		row, ok := me["row"].(map[string]any)

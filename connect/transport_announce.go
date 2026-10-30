@@ -687,13 +687,27 @@ func (self *ConnectionAnnounce) run() {
 	nextStartTime := server.NowUtc()
 	// consecutive sync rounds whose read failed
 	syncFailureCount := 0
+	// One timer for the next test and one for the next sync round, each re-armed
+	// only after it fires. A time.After for both on every round left the one
+	// that did not fire in the timer heap, the test's for 12 to 24 hours.
+	testTimer := time.NewTimer(nextTest())
+	defer testTimer.Stop()
+	syncTimer := time.NewTimer(self.retryTimeout(syncFailureCount))
+	defer syncTimer.Stop()
+	// a fired sync timer is re-armed after the round, for its outcome
+	syncTimerFired := false
 	for {
-		nextTestTimeout := nextTest()
+		if syncTimerFired {
+			syncTimer.Reset(self.retryTimeout(syncFailureCount))
+			syncTimerFired = false
+		}
 		select {
 		case <-self.ctx.Done():
 			return
-		case <-time.After(nextTestTimeout):
-		case <-time.After(self.retryTimeout(syncFailureCount)):
+		case <-testTimer.C:
+			testTimer.Reset(nextTest())
+		case <-syncTimer.C:
+			syncTimerFired = true
 			roundEndTime := server.NowUtc()
 
 			// FIXME need events to support kicking off connections from the model
@@ -1212,7 +1226,10 @@ func connectionMeasurementAverage(previous, sample, sampleCount uint64, sampleWi
 // latest one is written after the bounded backoff. Snapshots are cumulative
 // and their count fence makes a replay idempotent, so nothing is lost.
 func (self *ConnectionAnnounce) runMeasurementPublisher() {
-	passiveSampleTime := time.After(self.settings.PassiveSpeedWindowDuration)
+	// one timer for the passive samples, re-armed after each fires: a
+	// time.After per sample created a timer every window for each connection
+	passiveSampleTimer := time.NewTimer(self.settings.PassiveSpeedWindowDuration)
+	defer passiveSampleTimer.Stop()
 	// consecutive failed writes; while a retry waits, no write is attempted
 	writeFailureCount := 0
 	var writeRetryTime <-chan time.Time
@@ -1222,7 +1239,7 @@ func (self *ConnectionAnnounce) runMeasurementPublisher() {
 		case <-self.ctx.Done():
 			return
 		case <-self.measurementWake:
-		case <-passiveSampleTime:
+		case <-passiveSampleTimer.C:
 			passiveSampleDue = true
 		case <-writeRetryTime:
 			writeRetryTime = nil
@@ -1233,7 +1250,7 @@ func (self *ConnectionAnnounce) runMeasurementPublisher() {
 		// A continuously ready wake must not postpone an expired sample timer.
 		if !passiveSampleDue {
 			select {
-			case <-passiveSampleTime:
+			case <-passiveSampleTimer.C:
 				passiveSampleDue = true
 			default:
 			}
@@ -1274,7 +1291,7 @@ func (self *ConnectionAnnounce) runMeasurementPublisher() {
 			}
 		}
 		if passiveSampleDue {
-			passiveSampleTime = time.After(self.settings.PassiveSpeedWindowDuration)
+			passiveSampleTimer.Reset(self.settings.PassiveSpeedWindowDuration)
 		}
 	}
 }
