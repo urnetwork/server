@@ -240,3 +240,33 @@ func TestProviderHardExclusionsMissingHealthyControl(t *testing.T) {
 		}
 	})
 }
+
+var hardExclusionMembersSink [2]string
+
+// A reader's members are the writer's (publishProviderHardExclusions), and
+// formatting a candidate's pair takes one allocation: every request formats a
+// pair for each of its candidates.
+func TestProviderHardExclusionsMembersMatchPublishedMembers(t *testing.T) {
+	clientIds := []server.Id{{}}
+	var high server.Id
+	for i := range high {
+		high[i] = 0xff
+	}
+	clientIds = append(clientIds, high)
+	for range 1000 {
+		clientIds = append(clientIds, server.NewId())
+	}
+	for _, clientId := range clientIds {
+		member, checkedMember := providerHardExclusionsMembers(clientId)
+		if member != clientId.String() || checkedMember != providerHardExclusionsCheckedMember(clientId) {
+			t.Fatalf("members %q %q differ from the published %q %q", member, checkedMember, clientId.String(), providerHardExclusionsCheckedMember(clientId))
+		}
+	}
+	clientId := server.NewId()
+	allocations := testing.AllocsPerRun(100, func() {
+		hardExclusionMembersSink[0], hardExclusionMembersSink[1] = providerHardExclusionsMembers(clientId)
+	})
+	if 1 < allocations {
+		t.Fatalf("a candidate's members took %.0f allocations, want 1", allocations)
+	}
+}
