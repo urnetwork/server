@@ -1,0 +1,269 @@
+// Temporary synthetic fixtures exercise the real file writer and imported
+// native generator without live paths, identities, policy or external services.
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"reflect"
+	"testing"
+
+	"github.com/urnetwork/server/controller"
+)
+
+// One owner-private fixture contains only visibly synthetic public data.
+type publicInputFixture struct {
+	Policy   inputPolicy
+	Settings inputSettings
+	Template []byte
+	Fields   map[string]json.RawMessage
+	JobId    string
+	RoundId  string
+}
+
+// Synthetic public identity strings never invoke a random source.
+func syntheticInputId(value int) string {
+	return fmt.Sprintf("%08x-0000-4000-8000-%012x", value, value)
+}
+
+// Every fixture file starts private and supplies its own content digest.
+func writeInputFixture(t *testing.T, path string, content []byte) inputPin {
+	t.Helper()
+	if err := os.WriteFile(path, content, 0600); err != nil {
+		t.Fatal(err)
+	}
+	hash := sha256.Sum256(content)
+	return inputPin{Path: path, Sha256: hex.EncodeToString(hash[:])}
+}
+
+// Raw frozen fields deliberately include nested objects not interpreted by
+// construction, proving that projection is not a lossy request-schema copy.
+func newPublicInputFixture(t *testing.T) *publicInputFixture {
+	t.Helper()
+	anchor := t.TempDir()
+	parent := filepath.Join(anchor, "synthetic-public-pilot")
+	if err := os.Mkdir(parent, 0700); err != nil {
+		t.Fatal(err)
+	}
+	document := map[string]any{
+		"job_id": syntheticInputId(1), "round_id": syntheticInputId(2),
+		"round_seed_hex": "synthetic old public label",
+		"providers_path": "/synthetic/old/providers.yml", "providers_sha256": "synthetic old provider digest",
+		"patch_path": "/synthetic/old/canonical.patch", "patch_sha256": "synthetic old patch digest",
+		"artifact_directory":     "/synthetic/old",
+		"competition_id":         "synthetic-offline-pilot",
+		"config_local_directory": "/synthetic/config/local", "vault_local_directory": "/synthetic/vault/local",
+		"round_baseline_path": "", "round_baseline_sha256": "",
+		"evaluation_policy": map[string]any{"provider_count": 3, "client_pool_size": 2, "arrivals_per_minute": 4, "quality_window_size": 1,
+			"replicates": 3, "score_timeout_seconds": 7002, "takeover_margin": 0.2, "synthetic_frozen_flag": true},
+		"patch_policy":       map[string]any{"synthetic_paths": []string{"synthetic.go"}, "frozen": true},
+		"synthetic_metadata": map[string]any{"unchanged": []any{true, "synthetic", 17}},
+	}
+	template, err := json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	self := &publicInputFixture{Settings: defaultInputSettings(), Template: template,
+		Policy: inputPolicy{OwnerUid: uint32(os.Geteuid()), Anchor: anchor, OutputDirectory: filepath.Join(parent, "artifacts"), PublicSeed: 10101},
+		JobId:  syntheticInputId(3), RoundId: syntheticInputId(4)}
+	self.Policy.Template = writeInputFixture(t, filepath.Join(anchor, "synthetic-old-request.json"), template)
+	self.Policy.Patch = writeInputFixture(t, filepath.Join(anchor, "synthetic-new.patch"), []byte("synthetic immutable patch bytes\n"))
+	if json.Unmarshal(template, &self.Fields) != nil {
+		t.Fatal("synthetic template invalid")
+	}
+	return self
+}
+
+// The exact imported generator determines bytes; every unlisted old request
+// field survives semantically, and all written leaves are private regular files.
+func TestPublicInputsUseNativeGeneratorAndPreserveFrozenProjection(t *testing.T) {
+	self := newPublicInputFixture(t)
+	report, err := generatePublicInputs(t.Context(), self.Policy, self.Settings, self.JobId, self.RoundId)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.AdmissionOrAcceptanceClaimed || len(report.Files) != 3 {
+		t.Fatal("construction claimed broader acceptance")
+	}
+	expected, err := controller.GenerateSimLatencyWorkload(self.Policy.PublicSeed, 3, 2, 4, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	providers, err := os.ReadFile(filepath.Join(self.Policy.OutputDirectory, "providers.yml"))
+	if err != nil || !bytes.Equal(providers, expected) {
+		t.Fatal("provider bytes differ from exact native serialization", err)
+	}
+	request, err := os.ReadFile(filepath.Join(self.Policy.OutputDirectory, "worker-request.json"))
+	if err != nil || len(request) == 0 || request[len(request)-1] != '\n' {
+		t.Fatal("public request lacks complete canonical file", err)
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(request, &fields) != nil {
+		t.Fatal("new request invalid")
+	}
+	if len(fields) != len(self.Fields) {
+		t.Fatal("projection dropped request fields")
+	}
+	allowed := map[string]bool{"job_id": true, "round_id": true, "round_seed_hex": true, "providers_path": true, "providers_sha256": true,
+		"patch_path": true, "patch_sha256": true, "artifact_directory": true}
+	for key, old := range self.Fields {
+		if allowed[key] {
+			continue
+		}
+		var before, after bytes.Buffer
+		if json.Compact(&before, old) != nil || json.Compact(&after, fields[key]) != nil || !bytes.Equal(before.Bytes(), after.Bytes()) {
+			t.Fatal("frozen request value changed", key)
+		}
+	}
+	var seed, jobId, roundId string
+	json.Unmarshal(fields["round_seed_hex"], &seed)
+	json.Unmarshal(fields["job_id"], &jobId)
+	json.Unmarshal(fields["round_id"], &roundId)
+	if seed != fmt.Sprintf("%064x", self.Policy.PublicSeed) || jobId != self.JobId || roundId != self.RoundId {
+		t.Fatal("public projection changed identity mapping")
+	}
+	patch, err := os.ReadFile(filepath.Join(self.Policy.OutputDirectory, "canonical.patch"))
+	original, oldErr := os.ReadFile(self.Policy.Patch.Path)
+	if err != nil || oldErr != nil || !bytes.Equal(patch, original) {
+		t.Fatal("patch bytes changed", err, oldErr)
+	}
+	for _, file := range report.Files {
+		info, err := os.Lstat(file.Path)
+		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
+			t.Fatal("public file privacy changed", err)
+		}
+		content, err := os.ReadFile(file.Path)
+		hash := sha256.Sum256(content)
+		if err != nil || int64(len(content)) != file.Bytes || hex.EncodeToString(hash[:]) != file.Sha256 {
+			t.Fatal("written-byte report mismatch", err)
+		}
+	}
+}
+
+// Both namespace and actual O_EXCL leaf creation refuse replacement. Partial
+// construction is preserved rather than retried or silently filled in.
+func TestPublicInputsNeverOverwriteOrReusePartialNamespace(t *testing.T) {
+	self := newPublicInputFixture(t)
+	if _, err := generatePublicInputs(t.Context(), self.Policy, self.Settings, self.JobId, self.RoundId); err != nil {
+		t.Fatal(err)
+	}
+	providerPath := filepath.Join(self.Policy.OutputDirectory, "providers.yml")
+	before, err := os.ReadFile(providerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := generatePublicInputs(t.Context(), self.Policy, self.Settings, self.JobId, self.RoundId); err == nil {
+		t.Fatal("existing output namespace reused")
+	}
+	root, err := os.OpenRoot(self.Policy.OutputDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, writeErr := writePublicInput(root, "providers.yml", []byte("synthetic replacement"), self.Policy)
+	closeErr := root.Close()
+	if writeErr == nil || closeErr != nil {
+		t.Fatal("existing leaf was replaced or closure failed", writeErr, closeErr)
+	}
+	after, err := os.ReadFile(providerPath)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("existing output bytes changed", err)
+	}
+	partial := newPublicInputFixture(t)
+	if err := os.Mkdir(partial.Policy.OutputDirectory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	writeInputFixture(t, filepath.Join(partial.Policy.OutputDirectory, "worker-request.json"), []byte("synthetic partial evidence\n"))
+	if _, err := generatePublicInputs(t.Context(), partial.Policy, partial.Settings, partial.JobId, partial.RoundId); err == nil {
+		t.Fatal("partial namespace repaired or retried")
+	}
+	entries, err := os.ReadDir(partial.Policy.OutputDirectory)
+	if err != nil || len(entries) != 1 || entries[0].Name() != "worker-request.json" {
+		t.Fatal("partial evidence changed", err)
+	}
+}
+
+// Pin/identity/boundary failures are deterministic and occur before exclusive
+// output creation. No default CLI invocation can implicitly prepare inputs.
+func TestPublicInputsRejectChangedPinsIdsAndCanceledOwner(t *testing.T) {
+	for _, change := range []func(*publicInputFixture){
+		func(value *publicInputFixture) { value.Policy.Template.Sha256 = hex.EncodeToString(make([]byte, 32)) },
+		func(value *publicInputFixture) { value.Policy.Patch.Sha256 = hex.EncodeToString(make([]byte, 32)) },
+		func(value *publicInputFixture) { value.JobId = syntheticInputId(1) },
+		func(value *publicInputFixture) { value.RoundId = value.JobId },
+		func(value *publicInputFixture) { value.JobId = "synthetic-invalid-id" },
+		func(value *publicInputFixture) { value.Settings.MaximumProviderBytes = 1 },
+	} {
+		self := newPublicInputFixture(t)
+		change(self)
+		if _, err := generatePublicInputs(t.Context(), self.Policy, self.Settings, self.JobId, self.RoundId); err == nil {
+			t.Fatal("changed synthetic pin/identity/bound accepted")
+		}
+		if _, err := os.Lstat(self.Policy.OutputDirectory); !os.IsNotExist(err) {
+			t.Fatal("refused preparation created output", err)
+		}
+	}
+	self := newPublicInputFixture(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := generatePublicInputs(ctx, self.Policy, self.Settings, self.JobId, self.RoundId); err == nil {
+		t.Fatal("canceled owner created inputs")
+	}
+	for _, args := range [][]string{nil, {"-prepare"}, {"-root=/synthetic"}, {"-seed=10101"}, {"-prepare", "-job-id=synthetic", "-round-id=synthetic"}} {
+		var output bytes.Buffer
+		if err := runPublicInputs(args, &output); err == nil || output.Len() != 0 {
+			t.Fatal("invalid CLI acquired preparation authority")
+		}
+	}
+}
+
+// Links and writable ancestry are rejected by the real bounded input/path
+// guards, not by an injected fake filesystem or a nonexistent target.
+func TestPublicInputsRejectLinksAndUnprotectedAncestry(t *testing.T) {
+	for _, change := range []func(*publicInputFixture){
+		func(value *publicInputFixture) {
+			target := value.Policy.Template.Path + ".retained"
+			if err := os.Rename(value.Policy.Template.Path, target); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, value.Policy.Template.Path); err != nil {
+				t.Fatal(err)
+			}
+		},
+		func(value *publicInputFixture) {
+			if err := os.Link(value.Policy.Template.Path, value.Policy.Template.Path+".hardlink"); err != nil {
+				t.Fatal(err)
+			}
+		},
+		func(value *publicInputFixture) {
+			if err := os.Chmod(filepath.Dir(value.Policy.OutputDirectory), 0777); err != nil {
+				t.Fatal(err)
+			}
+		},
+		func(value *publicInputFixture) {
+			if err := os.Symlink(filepath.Dir(value.Policy.OutputDirectory), value.Policy.OutputDirectory); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		self := newPublicInputFixture(t)
+		change(self)
+		if _, err := generatePublicInputs(t.Context(), self.Policy, self.Settings, self.JobId, self.RoundId); err == nil {
+			t.Fatal("unsafe synthetic path admitted")
+		}
+		if _, err := os.Lstat(filepath.Join(self.Policy.OutputDirectory, "providers.yml")); !os.IsNotExist(err) {
+			t.Fatal("unsafe-path refusal wrote public output", err)
+		}
+	}
+	// The source map is not modified by the projection fixture itself.
+	self := newPublicInputFixture(t)
+	var original map[string]json.RawMessage
+	if json.Unmarshal(self.Template, &original) != nil || !reflect.DeepEqual(original, self.Fields) {
+		t.Fatal("synthetic template changed")
+	}
+}
