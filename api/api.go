@@ -354,6 +354,10 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		router.NewRoute("GET", "/sn/wallet", handlers.SnGetWallet),
 		router.NewRoute("POST", "/sn/wallet/validate", handlers.SnValidateWallet),
 		router.NewRoute("GET", "/sn/head", handlers.SnHead),
+		// the SN Top board (LEADERTOP.md §7): public with optional auth, and
+		// the caller's detail
+		router.NewRoute("GET", "/sn/top", handlers.SnTop),
+		router.NewRoute("GET", "/sn/top/me", handlers.SnTopMe),
 		router.NewRoute("POST", "/sn/head/binding", handlers.SnHeadBinding),
 		router.NewRoute("GET", "/sn/pool/claim", handlers.SnPoolClaim),
 		router.NewRoute("GET", "/sn/epoch", handlers.SnEpoch),

@@ -4,7 +4,7 @@ This is the standing operating contract for an agent that runs the production
 monitor, validates every finding, fixes root causes, extends the signal catalog,
 and repeats. The Go monitor described in [MONITOR.md](MONITOR.md) remains a
 deterministic, read-only detector. The agent using this harness is the separate
-diagnostic and repair system that consumes its structured Markdown alerts.
+diagnostic and repair system that consumes its structured alerts.
 
 The harness is intentionally continuous. A quiet snapshot, a code commit, or a
 successful deployment is not an end condition. Keep one authoritative monitor
