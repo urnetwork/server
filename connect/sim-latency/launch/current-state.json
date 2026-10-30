@@ -1,10 +1,10 @@
 {
   "schema": 1,
   "kind": "sim-latency-launch-preparation-checkpoint",
-  "observed_at": "2026-10-30T02:32:27Z",
+  "observed_at": "2026-10-30T03:21:20Z",
   "scoring_enablement_current": {
     "status": "R2_intake_open_reduced_reference_native_and336_correctness_verified_new699_operator_qualification_running_production_grading_held",
-    "observed_at": "2026-10-30T02:32:27Z",
+    "observed_at": "2026-10-30T03:21:20Z",
     "metadata_checkpoint_only": true,
     "actual_intake_open": true,
     "grading_enabled": false,
@@ -110,7 +110,22 @@
       "new_operator_elf": "/mnt/data/operator233-compile-qa-20261030.6p9XdoUI/operator233.test",
       "new_operator_elf_sha256": "b1c3e311f76cafdc96327214065f431bda145005d8900563f9c32089e3c58a6c",
       "operator_early_smoke_passes": 9,
-      "full_operator_qualification_passes_completed_at_observation": 1,
+      "full_operator_qualification_passes_completed_at_observation": 2,
+      "full_operator_final_pass_started_at": "2026-10-30T03:19:53Z",
+      "full_operator_completed_pass_logs": [
+        {
+          "path": "/mnt/data/operator233-runtime-qa-20261030.Yq1JtHDv/pass1.json",
+          "sha256": "c614ae4ff324c0ff21ca3c9f774da05b5fb74dd391881dee82c7b673b7a85ab4",
+          "exact_top_level_passes": 233,
+          "failures_or_skips": 0
+        },
+        {
+          "path": "/mnt/data/operator233-runtime-qa-20261030.Yq1JtHDv/pass2.json",
+          "sha256": "70924f6a5873459e5a74dd5d523e6eca946200ff773bd2ee383dd7b87e929f71",
+          "exact_top_level_passes": 233,
+          "failures_or_skips": 0
+        }
+      ],
       "full_operator_qualification_running": true,
       "full_operator_qualification_unit": "urnetwork-operator233-runtime-Yq1JtHDv.service",
       "full_operator_qualification_session": 68844,
@@ -134,6 +149,7 @@
       },
       "caller_flag_omission_preserved_and_fixed_with_expected_red_then_three_two_test_green_processes": true,
       "new_measurements_started": false,
+      "scoring_restoration_procedure": "server/connect/sim-latency/launch/SCORING-RESTORE-2026-10-30.md",
       "submission_gates_and_frozen_competition_identity_unchanged": true,
       "prior_failed_pilot_remains_rejected": true
     },
