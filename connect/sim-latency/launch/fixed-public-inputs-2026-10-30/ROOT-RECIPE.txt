@@ -1,0 +1,43 @@
+SOURCE-ONLY FIXED PUBLIC INPUT WRITER; NOT COMPILED/RUN/TESTED/INSTALLED
+No existing qualified Go-only writer was found. The prior qualified provider generation used frozen98 Docker init. This separate small helper calls the EXACT exported controller.GenerateSimLatencyWorkload; it neither modifies nor extends b1c3/operator. Native b1c3 must independently validate the generated provider bytes/request/patch before any new plan.
+
+SOURCE / MODULE
+Build the two named absolute Go files from:
+ /home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server
+with EXACT same existing manager.work and pinned module/dependency graph as b1c3:
+ GOWORK=/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/manager.work
+This selects that frozen y1L controller, NOT movingMain or a new module.
+Generator source actual hashes: controller/competition_sim_latency_controller.go9bb9d34... and competition_controller.go51dd673..., matching native plan generatorSources. PINNED-CONTEXT.sha256 records exact tool/work/module/generator/template/patch pins. No current whole dependency/source census is claimed by source authoring; LOW retains actual resolved dependencies/source/binary checks.
+Go1.27.3 only, tool5f5eb6..., offline GOPROXYoff/GOENVoff/GOTOOLCHAINlocal/GOVCSoff, normal sums, readonly modules, CGO1/gcc, existing module/build cache. No source clone, go.mod edits, download or tidy.
+
+ACTUAL GENERATION SEMANTICS
+Closed source pins: oldbf0 public worker-request.json and new6e5 canonical.patch. Only8fields change:
+ job_id,round_id,round_seed_hex,providers_path,providers_sha256,patch_path,patch_sha256,artifact_directory.
+EVERY other original JSON value is retained, including competition_id (its old descriptive offline label deliberately stays unchanged), schema/attempt/source/base/evaluator/API/worker identities, scorer, policies, baseline placeholders, local config/vault paths, hardware and synthetic flags. Provider bytes come directly from the imported controller with publicseed20261030 and the frozen request's provider/client/arrival/quality fields.
+No hidden plan/seed, API, DB, Docker, score, provider/model endpoint or main credential is read/called. The controller uses deterministic public math/rand; this helper does not draw public IDs or storage entropy. Root supplies new public job/round UUID-rendered IDs only at actual dispatch.
+
+OUTPUT / FAILURE
+Fixed new directory:
+ /var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2/artifacts
+It was ABSENT when source was prepared. It MUST remain absent before dispatch: do not precreate it. Existing Root0700 pilot parent is required. After validating all inputs and constructing all bounded bytes, exclusive Mkdir atomically claims artifacts, parent entry is synchronized before children. The three fixed outputs use descriptor-scoped os.Root +O_EXCL0600, exact regular/owner/singlelink checks, write/chmod/sync/close; directory/parent sync follows.
+ providers.yml
+ canonical.patch
+ worker-request.json
+All are Root600 as native private readers require. No overwrite, cleanup, partial resumption or automatic retry exists; failure retains its spent directory/partial files and produces no success report. Report is only written-byte hashes/sizes, NOT independent storage readback, readiness, accepted pilot or calibration.
+Canonical path/ancestor owner/no-writable/no-link checks apply to both input files and output parent. Pinned input read uses nofollow/nonblocking, bounds, fullSHA and before/after inode/size/mtime checks. No arbitrary root/seed/template/patch CLI option exists.
+
+FUTURE LOW/ROOT BUILD FORMS — NO EXECUTION AUTHORITY FROM THIS FILE
+Reuse fresh private QA and safe empty LOCAL config/site/vault/home process context; all real native opt-ins unset. Normal Root admission only, no timed calibration interference. Named-file compile requires no new module:
+ <ADMITTED_GO> test -race -mod=readonly -buildvcs=false -p=2 -c -o <FRESH_QA>/public-inputs.test <PACKET>/public_inputs.go <PACKET>/public_inputs_test.go
+List/compare exact EXPECTED-4.names. Four deterministic synthetic roots exercise actual imported generator byte equality, preservation of all frozen values, realO_EXCL/nooverwrite/partial refusal, changed pins/IDs/bounds/cancellation, links and unsafe ancestry. These are ordinary helper regressions, not a new statistical/launch gate.
+If Root admits tests, run bounded fresh count1/parallel1 processes and retain source/module/ELF/rawJSON/exit evidence; three processes yield12PASS only if genuinely run. No such test has run here.
+Separate normal native helper build:
+ <ADMITTED_GO> build -trimpath -mod=readonly -buildvcs=false -p=2 -o <FRESH_QA>/fixed-public-inputs <PACKET>/public_inputs.go
+Retain actual binarySHA/buildinfo/controller source resolution. Any source/module/cache mismatch stops; do not substitute movingMain. Source/compile author provides no future executable hash.
+Main-case environment for future execution stays LOCAL/empty config/site/vault; no main environment script/credentials. Native generated REQUEST strings retain the original authorized local-only leaves; program does not open them.
+
+FUTURE ROOT DISPATCH — NOT AUTHORIZED OR PERFORMED BY AUTHOR
+ <ACTUAL_REVIEWED_PINNED_HELPER> -prepare -job-id=<ROOT_FRESH_PUBLIC_JOB_ID> -round-id=<ROOT_FRESH_PUBLIC_ROUND_ID>
+Root creates/chooses those public identities at dispatch, never reuse the old public/template IDs. No seed/root override and no automatic ID generation. No outer canonical lock is implemented by this data-only helper; scheduling/resource authority remains Root's. It does not run a measurement or create a native campaign/precommit.
+
+Root must separately run the new qualified b1c3 before-census builder using the actual reviewed0e1c config, then native collision/provider/template preflight and new public preparation. The helper neither requires nor fabricates an existing before catalog. Preserve native before325, failed7220, old988 and original hidden ancestry. Never fill future provider/request/plan SHAs until these genuine files exist and have been independently checked by native b1c3.

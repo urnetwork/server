@@ -1,0 +1,216 @@
+--- old988/held-out-fresh-single-b.go.txt
++++ new233/held-out-fresh-single-b.go.txt
+@@ -34,6 +34,8 @@
+ 	ReleaseSha256       string
+ 	NewAllowedPaths     []string
+ 	PublicPilotSeed     int64
++	PublicPilotRoot     string
++	RetiredPublicPilot  *heldOutPublicPilotRetirement
+ 	Margin              float64
+ 	MemoryExecutable    heldOutPinnedFile
+ 	MemoryConfig        heldOutPinnedFile
+@@ -55,7 +57,9 @@
+ 		BridgeTemplate:      heldOutPinnedFile{Path: "/home/by/urnetwork/temp/c2-metadata-bridge-preparation-20261026.KNG6TfgM/artifacts/worker-request.json", Sha256: "2114953f2f86218b9e92674a1f318d822a62e6663a8ae5e0e5375a806a655ec6"},
+ 		ReleaseSha256:       "5a1504cbad9787f84c91ac87bc719abd6337a64723733d6cf7d052660753b850",
+ 		NewAllowedPaths:     []string{"connect/resident_contract_manager.go", "connect/transport.go"},
+-		PublicPilotSeed:     20261028,
++		PublicPilotSeed:     20261030,
++		PublicPilotRoot:     "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2",
++		RetiredPublicPilot:  frozenHeldOutPublicPilotRetirement(),
+ 		Margin:              .269,
+ 		MemoryExecutable:    heldOutPinnedFile{Path: "/usr/local/libexec/urnetwork/competition-unmeasured-recovery-2b4bf937-20261027-v1/unmeasured-recovery", Sha256: "2b4bf93776635db3d5397a6b68e7290945d2c08fc5851c5a61b579293cc0757c"},
+ 		MemoryConfig:        heldOutPinnedFile{Path: "/var/lib/urnetwork/competition-first-committed-management-oom-20261027-v1/recovery-config.json", Sha256: "6b60d757550636fb499f0a3520cb60df7cfc2c467566257566b60310ddffa475"},
+@@ -468,6 +472,9 @@
+ 	if !foundOriginal || !foundPilot {
+ 		return errors.New("fresh exclusions must include both original committed seeds and the completed public pilot")
+ 	}
++	if err := validateHeldOutRetiredPublicPilotExclusions(config, exclusions, release); err != nil {
++		return err
++	}
+ 	return nil
+ }
+ 
+--- old988/held-out-fresh-exclusion-builder.go.txt
++++ new233/held-out-fresh-exclusion-builder.go.txt
+@@ -16,15 +16,16 @@
+ // The independently pinned command input supplies the reviewed complete source
+ // list. The builder cannot establish host-wide completeness by scanning files.
+ type heldOutFreshSingleExclusionBuildConfig struct {
+-	Schema          int                 `json:"schema"`
+-	Kind            string              `json:"kind"`
+-	Protocol        string              `json:"protocol"`
+-	Stage           string              `json:"stage"`
+-	Approval        heldOutPinnedFile   `json:"approval"`
+-	PriorExclusions heldOutPinnedFile   `json:"prior_exclusions"`
+-	ReviewedAt      time.Time           `json:"reviewed_at"`
+-	ReviewedSources []heldOutPinnedFile `json:"reviewed_sources"`
+-	OutputPath      string              `json:"output_path"`
++	Schema             int                           `json:"schema"`
++	Kind               string                        `json:"kind"`
++	Protocol           string                        `json:"protocol"`
++	Stage              string                        `json:"stage"`
++	Approval           heldOutPinnedFile             `json:"approval"`
++	PriorExclusions    heldOutPinnedFile             `json:"prior_exclusions"`
++	ReviewedAt         time.Time                     `json:"reviewed_at"`
++	ReviewedSources    []heldOutPinnedFile           `json:"reviewed_sources"`
++	OutputPath         string                        `json:"output_path"`
++	RetiredPublicPilot *heldOutPublicPilotRetirement `json:"retired_public_pilot,omitempty"`
+ }
+ 
+ // Returns only the new immutable catalog pin. All sensitive extraction stays
+@@ -145,6 +146,10 @@
+ 		return heldOutPinnedFile{}, err
+ 	}
+ 	catalog.Sources = append(catalog.Sources, facts.OriginalPrivatePlan, facts.OriginalPublicPlan)
++	catalog, err = retireHeldOutPublicPilotBefore(config, catalog, release, settings)
++	if err != nil {
++		return heldOutPinnedFile{}, err
++	}
+ 	normalizeSources := func(pins []heldOutPinnedFile) ([]heldOutPinnedFile, error) {
+ 		byPath := map[string]string{}
+ 		for _, pin := range pins {
+--- old988/held-out-public-pilot.go.txt
++++ new233/held-out-public-pilot.go.txt
+@@ -22,10 +22,10 @@
+ 
+ // The closed source roster is the published 183 non-command guards plus this
+ // adapter's deterministic guards. Old executable receipts cannot qualify it.
+-const heldOutPublicPilotRequiredTests = 225
++const heldOutPublicPilotRequiredTests = 233
+ 
+ // Exact new native OCI is deliberately unusable until Root admits its readback.
+-const heldOutPublicPilotWorseImageId = "sha256:647922002527eec6bcbff7fe1c64792813ce353bf6685a37dc6be1495083f6af"
++const heldOutPublicPilotWorseImageId = "sha256:2eadb97375e9afbe9c9a559c454777f55a0aaed269579b86aa8593b7a84eb1ee"
+ 
+ // These are adapter supervision limits, not replacements for the runner's
+ // immutable 10800-second execution budget or its 45-second cleanup grace.
+@@ -59,15 +59,9 @@
+ 		NativeBuild: self.NativeBuild, Correctness: self.Correctness}
+ }
+ 
+-// Only the independently admitted OCI changes; patch, source and binary stay exact.
++// The closed native tuple must be independently built/read back before use.
+ func heldOutPublicPilotCausalH1Reference(reference heldOutPublicPilotReference) bool {
+-	return strings.HasPrefix(heldOutPublicPilotWorseImageId, "sha256:") &&
+-		validSha256(strings.TrimPrefix(heldOutPublicPilotWorseImageId, "sha256:")) &&
+-		reference.Role == "worse" &&
+-		reference.Patch.Sha256 == "6f8c6f24c44a9627f053e58d4a59f845a0ba4b0b51e201f5cabddfb33b30629d" &&
+-		reference.CandidateSha == "e2a391a461ab0b588f994a9e7d29ebfeeae171f4" &&
+-		reference.ImageId == heldOutPublicPilotWorseImageId &&
+-		reference.BinarySha256 == "41629fddb006aaeddd0e849c7aae9e6a85c89496939fdf60735c598cd0cab33c"
++	return heldOutPublicPilotMatchesCausalTuple(reference, frozenHeldOutReducedPublicPilotTuple())
+ }
+ 
+ // Public prerequisites use the existing independently receipted Git shape.
+@@ -301,7 +295,7 @@
+ 	if !validSha256(plan.OriginalHostInventorySha256) {
+ 		return nil, errors.New("public pilot must precommit its actual original host object inventory")
+ 	}
+-	if release.freshSingleFacts == nil && (plan.Root != "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1" ||
++	if release.freshSingleFacts == nil && (plan.Root != facts.PublicPilotRoot ||
+ 		release.BaseSha != "a9e8e1a710b24c749e6499a0606938252c83e136" ||
+ 		release.ImageId != "sha256:98c9061c4a43a25e7b581a5193ca6e7f48e49e7b7fc03b7c1b6190a029befee2" ||
+ 		release.BinarySha256 != "efd1077d56f2435027d8358e01f29d43355a4ec1a45917e72602fcee8cce6727" ||
+@@ -591,6 +585,10 @@
+ 	if err != nil {
+ 		return err
+ 	}
++	expected, err = retireHeldOutPublicPilotBefore(config, expected, release, settings)
++	if err != nil {
++		return err
++	}
+ 	normalizeStrings := func(values []string) []string {
+ 		set := map[string]bool{}
+ 		for _, value := range values {
+--- old988/held-out-public-pilot-oci-repin-tests.go.txt
++++ new233/held-out-public-pilot-oci-repin-tests.go.txt
+@@ -1,50 +1,57 @@
+-// The real production predicate rejects stale OCI identity without relaxing any
+-// patch, source or binary pin. This source stays unqualified until Root binds OCI.
++// Synthetic tuples exercise the exact matcher called by the real closed
++// production predicate, without copying live source/image identities into tests.
+ package main
+ 
+-import (
+-	"strings"
+-	"testing"
+-)
++import "testing"
+ 
+-// The admitted rebuilt tuple passes once; every stale/mismatched field fails.
++// One exact tuple passes; stale, omitted, invalid and mismatched fields refuse.
+ func TestHeldOutPublicPilotExactRebuiltWorseImageGuard(t *testing.T) {
+-	const historicalImageId = "sha256:30b2e95b44c07573f3148b70ee2c397e9ed73159cc89a9372a1e561fb5d32591"
+-	if heldOutPublicPilotWorseImageId == historicalImageId ||
+-		!strings.HasPrefix(heldOutPublicPilotWorseImageId, "sha256:") ||
+-		!validSha256(strings.TrimPrefix(heldOutPublicPilotWorseImageId, "sha256:")) {
+-		t.Fatal("actual independently admitted new OCI required; retain original qualifier if its exact OCI recurs")
+-	}
+-	reference := heldOutPublicPilotReference{
+-		Role:         "worse",
+-		Patch:        heldOutPinnedFile{Sha256: "6f8c6f24c44a9627f053e58d4a59f845a0ba4b0b51e201f5cabddfb33b30629d"},
+-		CandidateSha: "e2a391a461ab0b588f994a9e7d29ebfeeae171f4",
+-		ImageId:      heldOutPublicPilotWorseImageId,
+-		BinarySha256: "41629fddb006aaeddd0e849c7aae9e6a85c89496939fdf60735c598cd0cab33c",
+-	}
+-	if !heldOutPublicPilotCausalH1Reference(reference) {
+-		t.Fatal("exact independently admitted rebuilt tuple rejected")
+-	}
+-	wrongImageId := "sha256:" + strings.Repeat("0", 64)
+-	if wrongImageId == heldOutPublicPilotWorseImageId {
+-		wrongImageId = "sha256:" + strings.Repeat("1", 64)
++	tuple := heldOutPublicPilotCausalTuple{PatchSha256: heldOutDigest([]byte("synthetic patch")),
++		CandidateSha: heldOutDigest([]byte("synthetic commit"))[:40],
++		ImageId:      "sha256:" + heldOutDigest([]byte("synthetic image")), BinarySha256: heldOutDigest([]byte("synthetic binary"))}
++	reference := heldOutPublicPilotReference{Role: "worse", Patch: heldOutPinnedFile{Sha256: tuple.PatchSha256},
++		CandidateSha: tuple.CandidateSha, ImageId: tuple.ImageId, BinarySha256: tuple.BinarySha256}
++	if !heldOutPublicPilotMatchesCausalTuple(reference, tuple) {
++		t.Fatal("exact synthetic independently admitted tuple rejected")
+ 	}
+ 	for _, control := range []struct {
+ 		name   string
+ 		change func(*heldOutPublicPilotReference)
+ 	}{
+-		{"historical OCI", func(value *heldOutPublicPilotReference) { value.ImageId = historicalImageId }},
+-		{"other valid OCI", func(value *heldOutPublicPilotReference) { value.ImageId = wrongImageId }},
++		{"historical OCI", func(value *heldOutPublicPilotReference) {
++			value.ImageId = "sha256:" + heldOutDigest([]byte("synthetic historical image"))
++		}},
+ 		{"missing OCI", func(value *heldOutPublicPilotReference) { value.ImageId = "" }},
+-		{"wrong binary", func(value *heldOutPublicPilotReference) { value.BinarySha256 = strings.Repeat("0", 64) }},
+-		{"wrong patch", func(value *heldOutPublicPilotReference) { value.Patch.Sha256 = strings.Repeat("0", 64) }},
+-		{"wrong source", func(value *heldOutPublicPilotReference) { value.CandidateSha = strings.Repeat("0", 40) }},
++		{"wrong binary", func(value *heldOutPublicPilotReference) {
++			value.BinarySha256 = heldOutDigest([]byte("synthetic wrong binary"))
++		}},
++		{"wrong patch", func(value *heldOutPublicPilotReference) {
++			value.Patch.Sha256 = heldOutDigest([]byte("synthetic wrong patch"))
++		}},
++		{"wrong source", func(value *heldOutPublicPilotReference) {
++			value.CandidateSha = heldOutDigest([]byte("synthetic wrong source"))[:40]
++		}},
+ 		{"wrong role", func(value *heldOutPublicPilotReference) { value.Role = "better" }},
+ 	} {
+ 		changed := reference
+ 		control.change(&changed)
+-		if heldOutPublicPilotCausalH1Reference(changed) {
++		if heldOutPublicPilotMatchesCausalTuple(changed, tuple) {
+ 			t.Fatal("mismatched causal reference accepted:", control.name)
+ 		}
+ 	}
++	for _, control := range []func(*heldOutPublicPilotCausalTuple){
++		func(value *heldOutPublicPilotCausalTuple) { value.ImageId = "sha256:UNBOUND" },
++		func(value *heldOutPublicPilotCausalTuple) { value.PatchSha256 = "UNBOUND" },
++		func(value *heldOutPublicPilotCausalTuple) { value.CandidateSha = "UNBOUND" },
++		func(value *heldOutPublicPilotCausalTuple) { value.BinarySha256 = "UNBOUND" },
++	} {
++		changed := tuple
++		control(&changed)
++		if heldOutPublicPilotMatchesCausalTuple(reference, changed) {
++			t.Fatal("unbound causal identity admitted")
++		}
++	}
++	if heldOutPublicPilotCausalH1Reference(reference) {
++		t.Fatal("synthetic test tuple was accepted as the compiled production tuple")
++	}
+ }

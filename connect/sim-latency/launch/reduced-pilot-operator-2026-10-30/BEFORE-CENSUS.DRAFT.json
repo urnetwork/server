@@ -1,0 +1,87 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-held-out-fresh-single-exclusion-build",
+  "protocol": "launch-3a-bridge-fresh-single-b-2026-10-28-v1",
+  "stage": "before_public_pilot",
+  "approval": {
+    "path": "/var/lib/urnetwork/competition-held-out-fresh-single-c2-a9e8e1a7-20261028-v1/approval.json",
+    "sha256": "2188428e3246b893e578c94fb3687ac15508146299a93c87a79236ac90fae646"
+  },
+  "prior_exclusions": {
+    "path": "/var/lib/urnetwork/competition-held-out-c2-a9e8e1a7-b-inputs-20261026-v1/exclusions.REVIEWED.json",
+    "sha256": "bc3b97cdf2669324574302daf7929bf98e31099c5c1b32a4eb933cb9320493e5"
+  },
+  "reviewed_at": "0001-01-01T00:00:00Z",
+  "reviewed_sources": [
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/artifacts/providers.yml",
+      "sha256": "e6101167b7940c263d7083eaede834019b306ad1c5269bf7afeb5a8cf6c2db4f"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/artifacts/worker-request.json",
+      "sha256": "bf0d9b6916f3d37d58b3888ee32339bbf282acfced9fb207178a8f0f95fdbdef"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/plan.json",
+      "sha256": "790ae696c7d5c663c6531a7d3a86700ed9f0c5b632308dd8e0a96b912d71733f"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-held-out-c2-a9e8e1a7-b-inputs-20261026-v1/current-a-request.json",
+      "sha256": "515090059fdaa753f56e03d8d925f09de8df26ad8dd979189e153571243f032d"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-held-out-c2-a9e8e1a7-b-inputs-20261026-v1/independent-review-addendum.APPROVED.json",
+      "sha256": "b265ef4843ca0f5eee30088654af28680803608dae4d6489bed12d71c83ade68"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-held-out-c2-a9e8e1a7-b-inputs-20261026-v1/normalized-identities.json",
+      "sha256": "5afea12061ce71f6b822879cbac2598381ee1d8b43e56fee34d5da2a1039447a"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-held-out-c2-a9e8e1a7-b-inputs-20261026-v1/public-better-pilot-request.json",
+      "sha256": "55f1f4428d2e2d1ca8bdd50ffe39de81dbbd405b77cc8f609a065fd7f0bb4b0e"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-held-out-c2-a9e8e1a7-b-inputs-20261026-v1/public-worse-pilot-request.json",
+      "sha256": "e8705f9e365ac5c11e67f17aecfc6a7c78a433765159b9dfc80fd8be4ef71e71"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-held-out-two-b-c2-a9e8e1a7-20261027-v2/campaign/private-plan.json",
+      "sha256": "0b8c65e3186d631782c6247d18e2369b9994851effced026037ed032401c6abb"
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-held-out-two-b-c2-a9e8e1a7-20261027-v2/public-plan.json",
+      "sha256": "b3150c5098ea9d4cb155be76c5a423967ecca479813ed75061db5b5bf50bcc43"
+    }
+  ],
+  "output_path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2/before-public-pilot-exclusions.json",
+  "retired_public_pilot": {
+    "owner_addendum": {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2/inputs/reduced-pacing-owner-approval.md",
+      "sha256": "5ad846a1b261c200cbafb9c74817152c201c391ab2ff8c4c6eccf0c20e314d4f"
+    },
+    "original_approval": {
+      "path": "/var/lib/urnetwork/competition-held-out-fresh-single-c2-a9e8e1a7-20261028-v1/approval.json",
+      "sha256": "2188428e3246b893e578c94fb3687ac15508146299a93c87a79236ac90fae646"
+    },
+    "failed_proof": {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/pilot-proof.json",
+      "sha256": "7220f48fcdbb33d2df2728eafd014eef10f392ce6ee70f36f5bd7752b693aab7"
+    },
+    "plan": {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/plan.json",
+      "sha256": "790ae696c7d5c663c6531a7d3a86700ed9f0c5b632308dd8e0a96b912d71733f"
+    },
+    "request": {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/artifacts/worker-request.json",
+      "sha256": "bf0d9b6916f3d37d58b3888ee32339bbf282acfced9fb207178a8f0f95fdbdef"
+    },
+    "providers": {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/artifacts/providers.yml",
+      "sha256": "e6101167b7940c263d7083eaede834019b306ad1c5269bf7afeb5a8cf6c2db4f"
+    },
+    "evaluator_image_id": "sha256:98c9061c4a43a25e7b581a5193ca6e7f48e49e7b7fc03b7c1b6190a029befee2",
+    "pilot_root": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1",
+    "public_seed": 20261028
+  }
+}

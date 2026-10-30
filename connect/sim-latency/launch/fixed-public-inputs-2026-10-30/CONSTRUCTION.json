@@ -1,0 +1,80 @@
+{
+  "schema": 1,
+  "kind": "actual-fixed-public-pilot-input-construction-checkpoint",
+  "observed_at": "2026-10-30T02:32:27Z",
+  "source_packet_manifest_sha256": "9d83589c9c880366806515a34f010dd8cea091ff2e24dc18ea340be549f3f2ba",
+  "source_sha256": "6fa32274162084970b3fed85976393478392d9fe21d0a84ed25d347cb84d9222",
+  "test_source_sha256": "212ed0ab281d7dfb6f4c5a3a8f47f5771c3c38c3a2fe590eca7847ef07b26b32",
+  "native_helper_path": "/mnt/data/fixed-public-inputs-unit-qa-20261030.t5RRg8KK/fixed-public-inputs",
+  "native_helper_sha256": "daa33481f4dc78ea9c371f15276231dc3d0bbc786ccc124ae151aef068285244",
+  "go_version": "go1.27.3",
+  "cgo_enabled": true,
+  "claimed_static": false,
+  "controller_directory": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/controller",
+  "generator_source_sha256": "9bb9d34ffee85a9375f44ce09610d241737bad591a84a5712dd1aa0f22f76db0",
+  "controller_source_sha256": "51dd6733723bf05a55f9511b0663e5742f64a2328f20a412c96ca0c5848554a2",
+  "actual_used_dependency_closure_sha256": "003372e5d38e179a878b1dd893ec9c65ea1707f5626f1668a11811fd71e7b839",
+  "qualification": {
+    "separate_race_processes": 3,
+    "tests_per_process": 4,
+    "total_top_level_passes": 12,
+    "failures_or_skips": 0,
+    "source_dependency_elf_and_git_postchecks_exit_code": 0,
+    "terminal_receipt_sha256": "c7cf096fa519528809fdef33da1016367a00ffebc7a41b8fc01c139c088f1f4d"
+  },
+  "execution": {
+    "unit": "urnetwork-fixed-public-inputs-create-20261030-v1.service",
+    "started_at": "2026-10-30T02:29:57Z",
+    "exit_code": 0,
+    "piped_stdout_report_observed_by_root": true,
+    "stdout_report_retained_in_journal": false,
+    "runtime_milliseconds": 571,
+    "allowed_cpus": "0,2",
+    "memory_max_gib": 4,
+    "memory_swap_max_bytes": 0,
+    "environment": "empty LOCAL configuration/site/vault/home; no main credentials",
+    "public_seed": 20261030,
+    "public_job_id": "1489b757-d470-4288-b73c-333422e09d7a",
+    "public_round_id": "1c827c2b-7a1f-400a-abb6-16f50ff92615",
+    "journal_sha256": "fb85ca6634d5a724104ae87525ae434ccd8decb91a3440c8d9eda8cee7632916"
+  },
+  "files": [
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2/artifacts/providers.yml",
+      "sha256": "a193020927395be72b3ba1988caa444798541facdfff31488baa5a0a9dc393a1",
+      "bytes": 2758967,
+      "owner": "0:0",
+      "mode": "0600",
+      "nlink": 1
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2/artifacts/worker-request.json",
+      "sha256": "0db8f072ec0ff32c6a4a423481f8857ef9f2b37781d5d51881d22e03af6c77e0",
+      "bytes": 3100,
+      "owner": "0:0",
+      "mode": "0600",
+      "nlink": 1
+    },
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2/artifacts/canonical.patch",
+      "sha256": "6e5e94f03715df42d9d9169aef5ab3272cbac0311ae5292dbbdc819c23ea2924",
+      "bytes": 5347,
+      "owner": "0:0",
+      "mode": "0600",
+      "nlink": 1
+    }
+  ],
+  "root_independent_readback": {
+    "all_three_file_hashes_matched": true,
+    "key_sets_identical": true,
+    "changed_fields": ["artifact_directory", "job_id", "patch_path", "patch_sha256", "providers_path", "providers_sha256", "round_id", "round_seed_hex"],
+    "all_other_request_values_unchanged": true,
+    "baseline_path_and_hash_empty": true,
+    "canonical_patch_matches_native_candidate": true,
+    "native_helper_hash_unchanged": true
+  },
+  "native_operator_admission_pending": true,
+  "new_measurements_started": false,
+  "hidden_seed_generated": false,
+  "calibration_or_production_acceptance_claimed": false
+}

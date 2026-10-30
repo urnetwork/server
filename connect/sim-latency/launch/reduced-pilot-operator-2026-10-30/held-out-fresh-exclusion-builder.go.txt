@@ -1,0 +1,239 @@
+// Builds a separately reviewed pre-pilot exclusion catalog from pinned native
+// ancestry. It never draws entropy, generates providers, or starts a campaign.
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"reflect"
+	"sort"
+	"syscall"
+	"time"
+)
+
+// The independently pinned command input supplies the reviewed complete source
+// list. The builder cannot establish host-wide completeness by scanning files.
+type heldOutFreshSingleExclusionBuildConfig struct {
+	Schema             int                           `json:"schema"`
+	Kind               string                        `json:"kind"`
+	Protocol           string                        `json:"protocol"`
+	Stage              string                        `json:"stage"`
+	Approval           heldOutPinnedFile             `json:"approval"`
+	PriorExclusions    heldOutPinnedFile             `json:"prior_exclusions"`
+	ReviewedAt         time.Time                     `json:"reviewed_at"`
+	ReviewedSources    []heldOutPinnedFile           `json:"reviewed_sources"`
+	OutputPath         string                        `json:"output_path"`
+	RetiredPublicPilot *heldOutPublicPilotRetirement `json:"retired_public_pilot,omitempty"`
+}
+
+// Returns only the new immutable catalog pin. All sensitive extraction stays
+// inside native typed decoding; no raw identities are returned or logged.
+func prepareHeldOutFreshSingleExclusions(config heldOutFreshSingleExclusionBuildConfig, release heldOutRelease, settings heldOutOperatorSettings) (heldOutPinnedFile, error) {
+	refuse := func(message string) (heldOutPinnedFile, error) {
+		return heldOutPinnedFile{}, errors.New(message)
+	}
+	if config.Schema != 1 || config.Kind != "sim-latency-held-out-fresh-single-exclusion-build" ||
+		config.Protocol != heldOutProtocolFreshSingleB || config.Stage != "before_public_pilot" ||
+		config.ReviewedAt.IsZero() || config.ReviewedAt.After(time.Now().UTC()) || len(config.ReviewedSources) == 0 ||
+		settings.MaximumBytes <= 0 || !filepath.IsAbs(config.OutputPath) || filepath.Clean(config.OutputPath) != config.OutputPath {
+		return refuse("explicit reviewed before-public-pilot census required; after-pilot construction is not supported")
+	}
+	priorPin := heldOutPinnedFile{
+		Path:   "/var/lib/urnetwork/competition-held-out-c2-a9e8e1a7-b-inputs-20261026-v1/exclusions.REVIEWED.json",
+		Sha256: "bc3b97cdf2669324574302daf7929bf98e31099c5c1b32a4eb933cb9320493e5",
+	}
+	// Only the existing unexported synthetic release capability substitutes
+	// this identity. No native constructor or serialized flag can enable it.
+	if release.freshSingleFacts != nil {
+		priorPin = config.PriorExclusions
+	}
+	if config.PriorExclusions != priorPin {
+		return refuse("historical exclusion catalog differs from the frozen ancestry")
+	}
+	if err := validateHeldOutPrivateDirectory(filepath.Dir(config.OutputPath)); err != nil {
+		return heldOutPinnedFile{}, err
+	}
+	if _, err := os.Lstat(config.OutputPath); !errors.Is(err, os.ErrNotExist) {
+		return refuse("new exclusion target already exists or is unavailable")
+	}
+	facts := heldOutFreshSingleFactsForRelease(release)
+	approval, err := authenticateHeldOutFreshSingleApproval(config.Approval, facts, settings)
+	if err != nil {
+		return heldOutPinnedFile{}, err
+	}
+	if config.ReviewedAt.Before(approval.ApprovedAt) {
+		return refuse("exclusion review predates its prospective owner approval")
+	}
+	content, err := readHeldOutPinned(priorPin, settings.MaximumBytes, false)
+	if err != nil {
+		return heldOutPinnedFile{}, err
+	}
+	defer clear(content)
+	var catalog heldOutExclusions
+	if err := decodeHeldOutComplete(content, &catalog, "retained historical exclusion catalog"); err != nil {
+		return heldOutPinnedFile{}, err
+	}
+	if err := validateHeldOutExclusions(catalog, settings.MaximumBytes); err != nil {
+		return heldOutPinnedFile{}, err
+	}
+	if config.ReviewedAt.Before(catalog.ReviewedAt) {
+		return refuse("new exclusion review predates the retained catalog")
+	}
+	privateBytes, err := readHeldOutPinned(facts.OriginalPrivatePlan, settings.MaximumBytes, true)
+	if err != nil {
+		return heldOutPinnedFile{}, err
+	}
+	defer clear(privateBytes)
+	var original heldOutPrivatePlan
+	if err := decodeHeldOutComplete(privateBytes, &original, "original complete two-seed private ancestry"); err != nil {
+		return heldOutPinnedFile{}, err
+	}
+	publicBytes, err := readHeldOutPinned(facts.OriginalPublicPlan, settings.MaximumBytes, false)
+	if err != nil {
+		return heldOutPinnedFile{}, err
+	}
+	var public heldOutPublicPlan
+	if err := decodeHeldOutComplete(publicBytes, &public, "original complete two-seed public ancestry"); err != nil {
+		return heldOutPinnedFile{}, err
+	}
+	failedBytes, err := readHeldOutPinned(facts.FailedResult, settings.MaximumBytes, true)
+	if err != nil {
+		return heldOutPinnedFile{}, err
+	}
+	var failed heldOutCampaignResult
+	if err := decodeHeldOutComplete(failedBytes, &failed, "unchanged failed first-seed result"); err != nil {
+		return heldOutPinnedFile{}, err
+	}
+	if _, err := readHeldOutPinned(facts.SelectedPublicPlan, settings.MaximumBytes, false); err != nil {
+		return heldOutPinnedFile{}, err
+	}
+	if original.Schema != 1 || original.Kind != "sim-latency-held-out-private-plan" ||
+		original.Config.Protocol != heldOutProtocolThreeABridgeTwoB || original.Config.PrivateRoot != facts.OriginalRoot ||
+		original.PreparedAt.IsZero() || len(original.Rounds) != 2 ||
+		public.Schema != 1 || public.Kind != "sim-latency-held-out-public-plan" || public.Protocol != heldOutProtocolThreeABridgeTwoB ||
+		public.CampaignId != original.CampaignId || public.PrivatePlanSha256 != facts.OriginalPrivatePlan.Sha256 || len(public.Rounds) != 2 ||
+		failed.Schema != 1 || failed.Kind != "sim-latency-held-out-screen" || failed.CampaignId != original.CampaignId ||
+		failed.PlanSha256 != facts.SelectedPublicPlan.Sha256 || !failed.Complete || failed.Accepted || failed.OrderedSeeds != 0 ||
+		!reflect.DeepEqual(failed.Reasons, []string{"first_committed_seed_not_correctly_ordered"}) ||
+		failed.ClosedAt.Before(original.PreparedAt) || failed.ClosedAt.IsZero() || !config.ReviewedAt.After(failed.ClosedAt) {
+		return refuse("original two-seed ancestry or failed first result changed")
+	}
+	seenOriginalRaw, seenOriginalSeeds := map[string]bool{}, map[int64]bool{}
+	seenOriginalProviders, seenOriginalCommitments := map[string]bool{}, map[string]bool{}
+	for index, round := range original.Rounds {
+		seed, err := heldOutEffectiveSeed(round.PrivateSeedHex)
+		if err != nil || round.EffectiveSeed != seed || round.Public.Position != index+1 ||
+			!reflect.DeepEqual(round.Public, public.Rounds[index]) || !validSha256(round.Public.ProvidersSha256) ||
+			!validSha256(round.Public.SeedCommitment) || len(round.Public.Jobs) != 3 ||
+			seenOriginalRaw[round.PrivateSeedHex] || seenOriginalSeeds[seed] ||
+			seenOriginalProviders[round.Public.ProvidersSha256] || seenOriginalCommitments[round.Public.SeedCommitment] {
+			return refuse("original seed representation, exact integer, or complete public round changed")
+		}
+		seenOriginalRaw[round.PrivateSeedHex], seenOriginalSeeds[seed] = true, true
+		seenOriginalProviders[round.Public.ProvidersSha256], seenOriginalCommitments[round.Public.SeedCommitment] = true, true
+		catalog.PrivateSeedHexes = append(catalog.PrivateSeedHexes, round.PrivateSeedHex)
+		catalog.EffectiveSeeds = append(catalog.EffectiveSeeds, round.EffectiveSeed)
+		catalog.ProviderDigests = append(catalog.ProviderDigests, round.Public.ProvidersSha256)
+		catalog.RetiredCommitments = append(catalog.RetiredCommitments, round.Public.SeedCommitment)
+	}
+	accepted, ordered, reasons := acceptHeldOutFirstCommittedOutcomes(original.Rounds[:1], failed.Outcomes)
+	if accepted || ordered != failed.OrderedSeeds || !reflect.DeepEqual(reasons, failed.Reasons) {
+		return refuse("retained failed first-seed result does not reproduce its original acceptance rule")
+	}
+	if err := validateHeldOutFirstCommittedUnstarted(original, false); err != nil {
+		return heldOutPinnedFile{}, err
+	}
+	catalog.Sources = append(catalog.Sources, facts.OriginalPrivatePlan, facts.OriginalPublicPlan)
+	catalog, err = retireHeldOutPublicPilotBefore(config, catalog, release, settings)
+	if err != nil {
+		return heldOutPinnedFile{}, err
+	}
+	normalizeSources := func(pins []heldOutPinnedFile) ([]heldOutPinnedFile, error) {
+		byPath := map[string]string{}
+		for _, pin := range pins {
+			if !filepath.IsAbs(pin.Path) || filepath.Clean(pin.Path) != pin.Path || !validSha256(pin.Sha256) {
+				return nil, errors.New("reviewed census source pin is invalid")
+			}
+			if digest, present := byPath[pin.Path]; present && digest != pin.Sha256 {
+				return nil, errors.New("reviewed census source path has conflicting digests")
+			}
+			byPath[pin.Path] = pin.Sha256
+		}
+		result := make([]heldOutPinnedFile, 0, len(byPath))
+		for path, digest := range byPath {
+			result = append(result, heldOutPinnedFile{Path: path, Sha256: digest})
+		}
+		sort.Slice(result, func(i int, j int) bool { return result[i].Path < result[j].Path })
+		return result, nil
+	}
+	catalog.Sources, err = normalizeSources(catalog.Sources)
+	if err != nil {
+		return heldOutPinnedFile{}, err
+	}
+	reviewed, err := normalizeSources(config.ReviewedSources)
+	if err != nil || !reflect.DeepEqual(reviewed, catalog.Sources) {
+		return refuse("complete reviewed source list differs from retained ancestry; no implicit extra sources")
+	}
+	normalizeStrings := func(values []string) []string {
+		seen := map[string]bool{}
+		result := make([]string, 0, len(values))
+		for _, value := range values {
+			if !seen[value] {
+				seen[value] = true
+				result = append(result, value)
+			}
+		}
+		sort.Strings(result)
+		return result
+	}
+	catalog.PrivateSeedHexes = normalizeStrings(catalog.PrivateSeedHexes)
+	catalog.ProviderDigests = normalizeStrings(catalog.ProviderDigests)
+	catalog.RetiredCommitments = normalizeStrings(catalog.RetiredCommitments)
+	seenSeeds := map[int64]bool{}
+	seeds := make([]int64, 0, len(catalog.EffectiveSeeds))
+	for _, seed := range catalog.EffectiveSeeds {
+		if !seenSeeds[seed] {
+			seenSeeds[seed] = true
+			seeds = append(seeds, seed)
+		}
+	}
+	sort.Slice(seeds, func(i int, j int) bool { return seeds[i] < seeds[j] })
+	catalog.EffectiveSeeds = seeds
+	catalog.ReviewedAt, catalog.Complete = config.ReviewedAt, true
+	if err := validateHeldOutExclusions(catalog, settings.MaximumBytes); err != nil {
+		return heldOutPinnedFile{}, err
+	}
+	if err := validateHeldOutFreshSinglePublicPilotSeed(catalog, facts); err != nil {
+		return heldOutPinnedFile{}, err
+	}
+	encoded, err := json.MarshalIndent(catalog, "", "  ")
+	if err != nil {
+		return heldOutPinnedFile{}, err
+	}
+	encoded = append(encoded, '\n')
+	defer clear(encoded)
+	if int64(len(encoded)) > settings.MaximumBytes {
+		return refuse("new exclusion catalog exceeds its pinned-input byte bound")
+	}
+	// The existing writer accepts only 0600/0644. This catalog is immutable
+	// 0400 from creation; preserve a partial target if durability ever fails.
+	if err := validateHeldOutPrivateDirectory(filepath.Dir(config.OutputPath)); err != nil {
+		return heldOutPinnedFile{}, err
+	}
+	fd, err := syscall.Open(config.OutputPath, syscall.O_WRONLY|syscall.O_CREAT|syscall.O_EXCL|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0400)
+	if err != nil {
+		return refuse("new exclusion target already exists or cannot be exclusively created")
+	}
+	file := os.NewFile(uintptr(fd), config.OutputPath)
+	_, writeErr := file.Write(encoded)
+	syncErr, closeErr := file.Sync(), file.Close()
+	if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
+		return heldOutPinnedFile{}, err
+	}
+	if err := syncHeldOutDirectory(filepath.Dir(config.OutputPath)); err != nil {
+		return heldOutPinnedFile{}, err
+	}
+	return heldOutPinnedFile{Path: config.OutputPath, Sha256: heldOutDigest(encoded)}, nil
+}

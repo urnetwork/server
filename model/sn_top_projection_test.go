@@ -530,3 +530,11 @@ func TestSnTopProjectionIsDeterministic(t *testing.T) {
 		}
 	}
 }
+
+// Q8: the board's claimed-fleet replica uses sn's protocol/headscore, the
+// validator's own head arithmetic.
+func TestSnTopHeadMathIsTheValidatorsPackage(t *testing.T) {
+	if _, ok := GetSnTopHeadMath().(snTopHeadscoreMath); !ok {
+		t.Fatalf("the board's head arithmetic is %T, not sn's protocol/headscore", GetSnTopHeadMath())
+	}
+}

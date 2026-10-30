@@ -128,6 +128,7 @@ func registry() []specEndpoint {
 		{method: "GET", path: "/network/embed", argType: nil, resultType: rt(model.NetworkEmbedResult{})},
 		// the public Services contact form (EMBED1.md)
 		{method: "POST", path: "/services/contact-sales", argType: rt(model.ServicesContactSalesArgs{}), resultType: rt(model.ServicesContactSalesResult{})},
+		{method: "POST", path: "/friends/apply", argType: rt(model.FriendsApplyArgs{}), resultType: rt(model.FriendsApplyResult{})},
 
 		{"POST", "/preferences/set-preferences", rt(model.AccountPreferencesSetArgs{}), rt(model.AccountPreferencesSetResult{})},
 		{"GET", "/preferences", nil, rt(model.AccountPreferencesGetResult{})},

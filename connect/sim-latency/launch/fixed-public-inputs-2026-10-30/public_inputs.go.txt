@@ -1,0 +1,364 @@
+// Generates only one fixed public pilot's local inputs. The pinned controller
+// owns provider serialization; the native operator still owns all admission.
+package main
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"syscall"
+
+	"github.com/urnetwork/server/controller"
+)
+
+// A local content pin authenticates opaque public template or patch bytes.
+type inputPin struct {
+	Path   string
+	Sha256 string
+}
+
+// Only synthetic tests substitute this closed runtime policy; CLI cannot.
+type inputPolicy struct {
+	OwnerUid        uint32
+	Anchor          string
+	Template        inputPin
+	Patch           inputPin
+	OutputDirectory string
+	PublicSeed      int64
+}
+
+// Every allocation bound belongs to this invocation, not package globals.
+type inputSettings struct {
+	MaximumRequestBytes      int64
+	MaximumPatchBytes        int64
+	MaximumProviderBytes     int64
+	MaximumGeneratorEntities int
+}
+
+// The sealed old request is semantics, not a hidden plan or credential source.
+func defaultInputPolicy() inputPolicy {
+	return inputPolicy{OwnerUid: 0, Anchor: "/",
+		Template: inputPin{Path: "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1/artifacts/worker-request.json",
+			Sha256: "bf0d9b6916f3d37d58b3888ee32339bbf282acfced9fb207178a8f0f95fdbdef"},
+		Patch: inputPin{Path: "/var/lib/urnetwork/competition-h1-reduced-100ns-native-20261030-v1/worse/canonical.patch",
+			Sha256: "6e5e94f03715df42d9d9169aef5ab3272cbac0311ae5292dbbdc819c23ea2924"},
+		OutputDirectory: "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2/artifacts",
+		PublicSeed:      20261030}
+}
+
+// Limits bound memory/files only; no evaluation/scoring policy is changed.
+func defaultInputSettings() inputSettings {
+	return inputSettings{MaximumRequestBytes: 4 * 1024 * 1024, MaximumPatchBytes: 262144,
+		MaximumProviderBytes: 16 * 1024 * 1024, MaximumGeneratorEntities: 10000}
+}
+
+// Reports only hashes of bytes written, never policy, credentials or seed input.
+type generatedInput struct {
+	Path   string `json:"path"`
+	Sha256 string `json:"sha256"`
+	Bytes  int64  `json:"bytes"`
+}
+
+// This is file construction, not independent readback or calibration acceptance.
+type inputReport struct {
+	Schema                       int              `json:"schema"`
+	Kind                         string           `json:"kind"`
+	PublicSeed                   int64            `json:"public_seed"`
+	Files                        []generatedInput `json:"files"`
+	AdmissionOrAcceptanceClaimed bool             `json:"admission_or_acceptance_claimed"`
+}
+
+// Canonical lower-case UUID rendering admits the server's public Id encoding.
+// The caller supplies public identities; this program draws no entropy.
+func canonicalInputId(value string) bool {
+	if len(value) != 36 || value[8] != '-' || value[13] != '-' || value[18] != '-' || value[23] != '-' {
+		return false
+	}
+	compact := strings.ReplaceAll(value, "-", "")
+	decoded, err := hex.DecodeString(compact)
+	return err == nil && len(decoded) == 16 && hex.EncodeToString(decoded) == compact && compact != strings.Repeat("0", 32)
+}
+
+// Protect every ancestor, not merely the final root-owned leaf.
+func checkInputPath(value string, policy inputPolicy) error {
+	if !filepath.IsAbs(value) || filepath.Clean(value) != value || !filepath.IsAbs(policy.Anchor) || filepath.Clean(policy.Anchor) != policy.Anchor {
+		return errors.New("canonical protected path required")
+	}
+	relative, err := filepath.Rel(policy.Anchor, value)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return errors.New("input path escapes its owner")
+	}
+	current := policy.Anchor
+	parts := []string{}
+	if relative != "." {
+		parts = strings.Split(relative, string(filepath.Separator))
+	}
+	for index := 0; index <= len(parts); index++ {
+		if index > 0 {
+			current = filepath.Join(current, parts[index-1])
+		}
+		info, err := os.Lstat(current)
+		if err != nil {
+			return errors.New("protected input path unavailable")
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || stat.Uid != policy.OwnerUid || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0022 != 0 ||
+			(index < len(parts) && !info.IsDir()) || (!info.IsDir() && (!info.Mode().IsRegular() || stat.Nlink != 1)) {
+			return errors.New("linked, writable or unowned input path")
+		}
+	}
+	return nil
+}
+
+// Inputs are bounded ordinary files; nonblocking open closes the FIFO race.
+func readInput(pin inputPin, maximumBytes int64, private bool, policy inputPolicy) ([]byte, error) {
+	digest, err := hex.DecodeString(pin.Sha256)
+	if err != nil || len(digest) != sha256.Size || hex.EncodeToString(digest) != pin.Sha256 || maximumBytes <= 0 {
+		return nil, errors.New("exact input pin required")
+	}
+	if err := checkInputPath(pin.Path, policy); err != nil {
+		return nil, err
+	}
+	before, err := os.Lstat(pin.Path)
+	if err != nil || !before.Mode().IsRegular() || before.Size() <= 0 || before.Size() > maximumBytes ||
+		(private && before.Mode().Perm()&0077 != 0) {
+		return nil, errors.New("bounded private input required")
+	}
+	fd, err := syscall.Open(pin.Path, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, errors.New("input open refused")
+	}
+	file := os.NewFile(uintptr(fd), pin.Path)
+	opened, statErr := file.Stat()
+	if statErr != nil || !os.SameFile(before, opened) {
+		file.Close()
+		return nil, errors.New("input changed before open")
+	}
+	content, readErr := io.ReadAll(io.LimitReader(file, maximumBytes+1))
+	after, afterErr := file.Stat()
+	current, pathErr := os.Lstat(pin.Path)
+	closeErr := file.Close()
+	hash := sha256.Sum256(content)
+	if readErr != nil || afterErr != nil || pathErr != nil || closeErr != nil || int64(len(content)) != before.Size() ||
+		!os.SameFile(before, after) || !os.SameFile(before, current) || after.Size() != before.Size() ||
+		after.ModTime() != before.ModTime() || after.Mode() != before.Mode() ||
+		hex.EncodeToString(hash[:]) != pin.Sha256 {
+		return nil, errors.New("input bytes or identity changed")
+	}
+	return content, nil
+}
+
+// All fields except the explicit public identity/path/hash projection are kept
+// as original JSON values. In particular competition_id and policies stay put.
+func projectPublicRequest(content []byte, policy inputPolicy, settings inputSettings, jobId, roundId string) ([]byte, []byte, error) {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(content, &fields) != nil || fields == nil {
+		return nil, nil, errors.New("pinned request is not an object")
+	}
+	var oldJobId, oldRoundId string
+	if json.Unmarshal(fields["job_id"], &oldJobId) != nil || json.Unmarshal(fields["round_id"], &oldRoundId) != nil ||
+		!canonicalInputId(jobId) || !canonicalInputId(roundId) || jobId == roundId || jobId == oldJobId || roundId == oldRoundId ||
+		jobId == oldRoundId || roundId == oldJobId || policy.PublicSeed <= 0 {
+		return nil, nil, errors.New("distinct fresh public job/round identities required")
+	}
+	var evaluation struct {
+		ProviderCount     int `json:"provider_count"`
+		ClientPoolSize    int `json:"client_pool_size"`
+		ArrivalsPerMinute int `json:"arrivals_per_minute"`
+		QualityWindowSize int `json:"quality_window_size"`
+	}
+	if json.Unmarshal(fields["evaluation_policy"], &evaluation) != nil || evaluation.ProviderCount <= 0 ||
+		evaluation.ClientPoolSize <= 0 || evaluation.ArrivalsPerMinute <= 0 ||
+		evaluation.ProviderCount > settings.MaximumGeneratorEntities || evaluation.ClientPoolSize > settings.MaximumGeneratorEntities {
+		return nil, nil, errors.New("pinned workload profile is invalid or exceeds construction bounds")
+	}
+	providers, err := controller.GenerateSimLatencyWorkload(policy.PublicSeed, evaluation.ProviderCount,
+		evaluation.ClientPoolSize, float64(evaluation.ArrivalsPerMinute), evaluation.QualityWindowSize)
+	if err != nil || len(providers) == 0 || int64(len(providers)) > settings.MaximumProviderBytes {
+		return nil, nil, errors.New("native public workload generation refused")
+	}
+	providerHash := sha256.Sum256(providers)
+	changes := map[string]string{"job_id": jobId, "round_id": roundId, "round_seed_hex": fmt.Sprintf("%064x", policy.PublicSeed),
+		"providers_path": filepath.Join(policy.OutputDirectory, "providers.yml"), "providers_sha256": hex.EncodeToString(providerHash[:]),
+		"patch_path": filepath.Join(policy.OutputDirectory, "canonical.patch"), "patch_sha256": policy.Patch.Sha256,
+		"artifact_directory": policy.OutputDirectory}
+	for key, value := range changes {
+		if _, exists := fields[key]; !exists {
+			return nil, nil, errors.New("pinned request omitted a projected field")
+		}
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return nil, nil, errors.New("public field encoding failed")
+		}
+		fields[key] = encoded
+	}
+	request, err := json.MarshalIndent(fields, "", "  ")
+	if err != nil || int64(len(request))+1 > settings.MaximumRequestBytes {
+		return nil, nil, errors.New("public request exceeds its construction bound")
+	}
+	return append(request, '\n'), providers, nil
+}
+
+// File creation never follows/replaces a leaf. A failure retains partial bytes.
+func writePublicInput(root *os.Root, name string, content []byte, policy inputPolicy) (generatedInput, error) {
+	file, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return generatedInput{}, errors.New("new public output already exists or cannot be created")
+	}
+	info, statErr := file.Stat()
+	if statErr != nil || !info.Mode().IsRegular() || info.Sys().(*syscall.Stat_t).Uid != policy.OwnerUid || info.Sys().(*syscall.Stat_t).Nlink != 1 {
+		file.Close()
+		return generatedInput{}, errors.New("new public output identity refused")
+	}
+	written, writeErr := file.Write(content)
+	if written != len(content) && writeErr == nil {
+		writeErr = io.ErrShortWrite
+	}
+	modeErr := file.Chmod(0600)
+	syncErr, closeErr := file.Sync(), file.Close()
+	if err := errors.Join(writeErr, modeErr, syncErr, closeErr); err != nil {
+		return generatedInput{}, errors.New("public output write/sync/close failed; retain partial namespace")
+	}
+	hash := sha256.Sum256(content)
+	return generatedInput{Path: filepath.Join(policy.OutputDirectory, name), Sha256: hex.EncodeToString(hash[:]), Bytes: int64(len(content))}, nil
+}
+
+// Namespace entry durability precedes writing children and is rechecked before
+// reporting completion. Open/sync/close errors retain all partial evidence.
+func syncPublicInputDirectory(value string) error {
+	directory, err := os.Open(value)
+	if err != nil {
+		return err
+	}
+	return errors.Join(directory.Sync(), directory.Close())
+}
+
+// Source validation/generation precedes the exclusive artifacts-directory claim.
+// No failed or preexisting namespace is reused, overwritten or removed.
+func generatePublicInputs(ctx context.Context, policy inputPolicy, settings inputSettings, jobId, roundId string) (*inputReport, error) {
+	if ctx.Err() != nil || settings.MaximumRequestBytes <= 0 || settings.MaximumPatchBytes <= 0 ||
+		settings.MaximumProviderBytes <= 0 || settings.MaximumGeneratorEntities <= 0 {
+		return nil, errors.New("positive construction bounds and live owner required")
+	}
+	parent := filepath.Dir(policy.OutputDirectory)
+	if !filepath.IsAbs(policy.OutputDirectory) || filepath.Clean(policy.OutputDirectory) != policy.OutputDirectory {
+		return nil, errors.New("canonical new output directory required")
+	}
+	if err := checkInputPath(parent, policy); err != nil {
+		return nil, err
+	}
+	parentInfo, err := os.Lstat(parent)
+	if err != nil || !parentInfo.IsDir() || parentInfo.Mode().Perm() != 0700 {
+		return nil, errors.New("private output parent required")
+	}
+	if _, err := os.Lstat(policy.OutputDirectory); !errors.Is(err, os.ErrNotExist) {
+		return nil, errors.New("public output namespace already exists; no retry")
+	}
+	template, err := readInput(policy.Template, settings.MaximumRequestBytes, true, policy)
+	if err != nil {
+		return nil, err
+	}
+	patch, err := readInput(policy.Patch, settings.MaximumPatchBytes, false, policy)
+	if err != nil {
+		return nil, err
+	}
+	request, providers, err := projectPublicRequest(template, policy, settings, jobId, roundId)
+	if err != nil {
+		return nil, err
+	}
+	if ctx.Err() != nil {
+		return nil, errors.New("public input owner canceled before creation")
+	}
+	if err := os.Mkdir(policy.OutputDirectory, 0700); err != nil {
+		return nil, errors.New("public output namespace was claimed; no overwrite")
+	}
+	if err := os.Chmod(policy.OutputDirectory, 0700); err != nil {
+		return nil, err
+	}
+	if err := syncPublicInputDirectory(parent); err != nil {
+		return nil, errors.New("public namespace claim could not be synchronized")
+	}
+	directory, err := os.Open(policy.OutputDirectory)
+	if err != nil {
+		return nil, err
+	}
+	before, err := directory.Stat()
+	if err != nil || directory.Sync() != nil {
+		directory.Close()
+		return nil, errors.New("public directory durability unavailable")
+	}
+	root, err := os.OpenRoot(policy.OutputDirectory)
+	if err != nil {
+		directory.Close()
+		return nil, err
+	}
+	report := &inputReport{Schema: 1, Kind: "fixed-public-pilot-input-construction", PublicSeed: policy.PublicSeed, Files: []generatedInput{}}
+	for _, item := range []struct {
+		name    string
+		content []byte
+	}{{name: "providers.yml", content: providers}, {name: "canonical.patch", content: patch}, {name: "worker-request.json", content: request}} {
+		if ctx.Err() != nil {
+			root.Close()
+			directory.Close()
+			return nil, errors.New("public input owner canceled; retain partial namespace")
+		}
+		written, err := writePublicInput(root, item.name, item.content, policy)
+		if err != nil {
+			root.Close()
+			directory.Close()
+			return nil, err
+		}
+		report.Files = append(report.Files, written)
+	}
+	current, statErr := os.Lstat(policy.OutputDirectory)
+	if statErr != nil || !os.SameFile(before, current) || current.Mode().Perm() != 0700 {
+		root.Close()
+		directory.Close()
+		return nil, errors.New("public directory identity changed")
+	}
+	rootErr, syncErr, closeErr := root.Close(), directory.Sync(), directory.Close()
+	if err := errors.Join(rootErr, syncErr, closeErr); err != nil {
+		return nil, errors.New("public directory final sync/close failed")
+	}
+	if err := syncPublicInputDirectory(parent); err != nil {
+		return nil, err
+	}
+	return report, nil
+}
+
+// CLI accepts only fresh public IDs and an explicit prepare action; source,
+// output root, template, patch and public seed cannot be supplied by callers.
+func runPublicInputs(arguments []string, output io.Writer) error {
+	flags := flag.NewFlagSet("fixed-public-inputs", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	prepare := flags.Bool("prepare", false, "explicit fixed public input creation")
+	jobId := flags.String("job-id", "", "fresh public job Id")
+	roundId := flags.String("round-id", "", "fresh public round Id")
+	if err := flags.Parse(arguments); err != nil || flags.NArg() != 0 || !*prepare || !canonicalInputId(*jobId) || !canonicalInputId(*roundId) {
+		return errors.New("explicit -prepare and distinct fresh public job/round Ids required")
+	}
+	if os.Geteuid() != 0 {
+		return errors.New("Root input-construction principal required")
+	}
+	report, err := generatePublicInputs(context.Background(), defaultInputPolicy(), defaultInputSettings(), *jobId, *roundId)
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(output).Encode(report)
+}
+
+// Errors are stage labels, not raw request/provider/configuration contents.
+func main() {
+	if err := runPublicInputs(os.Args[1:], os.Stdout); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}

@@ -1,0 +1,207 @@
+// One owner-approved failed public workload is retired into a new BEFORE
+// catalog. No rejected proof becomes direction evidence or an accepted AFTER.
+package main
+
+import (
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"time"
+
+	"gopkg.in/yaml.v3"
+)
+
+// Only the compiled old public workload and published addendum can extend the
+// before-census. Proof/authority are provenance, not recognized seed sources.
+type heldOutPublicPilotRetirement struct {
+	OwnerAddendum    heldOutPinnedFile `json:"owner_addendum"`
+	OriginalApproval heldOutPinnedFile `json:"original_approval"`
+	FailedProof      heldOutPinnedFile `json:"failed_proof"`
+	Plan             heldOutPinnedFile `json:"plan"`
+	Request          heldOutPinnedFile `json:"request"`
+	Providers        heldOutPinnedFile `json:"providers"`
+	EvaluatorImageId string            `json:"evaluator_image_id"`
+	Root             string            `json:"pilot_root"`
+	PublicSeed       int64             `json:"public_seed"`
+}
+
+// Exact published failure/owner bytes preserve both earlier approval meanings.
+func frozenHeldOutPublicPilotRetirement() *heldOutPublicPilotRetirement {
+	old := "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261028-v1"
+	fresh := "/var/lib/urnetwork/competition-held-out-fresh-single-c2-a9e8e1a7-20261028-v1"
+	next := "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2"
+	return &heldOutPublicPilotRetirement{
+		OwnerAddendum:    heldOutPinnedFile{Path: filepath.Join(next, "inputs", "reduced-pacing-owner-approval.md"), Sha256: "5ad846a1b261c200cbafb9c74817152c201c391ab2ff8c4c6eccf0c20e314d4f"},
+		OriginalApproval: heldOutPinnedFile{Path: filepath.Join(fresh, "approval.json"), Sha256: "2188428e3246b893e578c94fb3687ac15508146299a93c87a79236ac90fae646"},
+		FailedProof:      heldOutPinnedFile{Path: filepath.Join(old, "pilot-proof.json"), Sha256: "7220f48fcdbb33d2df2728eafd014eef10f392ce6ee70f36f5bd7752b693aab7"},
+		Plan:             heldOutPinnedFile{Path: filepath.Join(old, "plan.json"), Sha256: "790ae696c7d5c663c6531a7d3a86700ed9f0c5b632308dd8e0a96b912d71733f"},
+		Request:          heldOutPinnedFile{Path: filepath.Join(old, "artifacts", "worker-request.json"), Sha256: "bf0d9b6916f3d37d58b3888ee32339bbf282acfced9fb207178a8f0f95fdbdef"},
+		Providers:        heldOutPinnedFile{Path: filepath.Join(old, "artifacts", "providers.yml"), Sha256: "e6101167b7940c263d7083eaede834019b306ad1c5269bf7afeb5a8cf6c2db4f"},
+		EvaluatorImageId: "sha256:98c9061c4a43a25e7b581a5193ca6e7f48e49e7b7fc03b7c1b6190a029befee2",
+		Root:             old, PublicSeed: 20261028,
+	}
+}
+
+// These are causal source identities, not tunables or serialized overrides.
+type heldOutPublicPilotCausalTuple struct {
+	PatchSha256  string
+	CandidateSha string
+	ImageId      string
+	BinarySha256 string
+}
+
+// Root observed this exact new build/readback. Correctness and direction remain
+// separate requirements; no old qualified tuple is relabeled.
+func frozenHeldOutReducedPublicPilotTuple() heldOutPublicPilotCausalTuple {
+	return heldOutPublicPilotCausalTuple{
+		PatchSha256:  "6e5e94f03715df42d9d9169aef5ab3272cbac0311ae5292dbbdc819c23ea2924",
+		CandidateSha: "1222b197eab2f8465bf64f62176743d5294df82f",
+		ImageId:      heldOutPublicPilotWorseImageId,
+		BinarySha256: "a20a41162c6c683b74f5bd9c9ad7a71f021a856828120cdf66c0376cfca7271b",
+	}
+}
+
+// The real closed predicate and synthetic controls share this exact matcher.
+func heldOutPublicPilotMatchesCausalTuple(reference heldOutPublicPilotReference, tuple heldOutPublicPilotCausalTuple) bool {
+	commit, err := hex.DecodeString(tuple.CandidateSha)
+	return err == nil && len(commit) == 20 && hex.EncodeToString(commit) == tuple.CandidateSha &&
+		validSha256(tuple.PatchSha256) && validSha256(tuple.BinarySha256) &&
+		strings.HasPrefix(tuple.ImageId, "sha256:") && validSha256(strings.TrimPrefix(tuple.ImageId, "sha256:")) &&
+		reference.Role == "worse" && reference.Patch.Sha256 == tuple.PatchSha256 &&
+		reference.CandidateSha == tuple.CandidateSha && reference.ImageId == tuple.ImageId &&
+		reference.BinarySha256 == tuple.BinarySha256
+}
+
+// Hash-pinned rejection authenticates only workload retirement. It grants no
+// placement, measured-direction, hidden-seed or statistical acceptance authority.
+func authenticateHeldOutRetiredPublicPilot(retired heldOutPublicPilotRetirement, facts heldOutFreshSingleFacts,
+	approval heldOutPinnedFile, reviewedAt time.Time, settings heldOutOperatorSettings) (heldOutPublicPilotPlan, heldOutRequest, error) {
+	refuse := func() (heldOutPublicPilotPlan, heldOutRequest, error) {
+		return heldOutPublicPilotPlan{}, heldOutRequest{}, errors.New("closed failed public-pilot retirement differs from its complete owner-approved provenance")
+	}
+	if approval != retired.OriginalApproval || retired.PublicSeed <= 0 || retired.PublicSeed == facts.PublicPilotSeed ||
+		!filepath.IsAbs(retired.Root) || filepath.Clean(retired.Root) != retired.Root ||
+		retired.Plan.Path != filepath.Join(retired.Root, "plan.json") ||
+		retired.Request.Path != filepath.Join(retired.Root, "artifacts", "worker-request.json") ||
+		retired.Providers.Path != filepath.Join(retired.Root, "artifacts", "providers.yml") ||
+		retired.FailedProof.Path != filepath.Join(retired.Root, "pilot-proof.json") ||
+		reviewedAt.IsZero() || reviewedAt.After(time.Now().UTC()) {
+		return refuse()
+	}
+	ownerBytes, err := readHeldOutPinned(retired.OwnerAddendum, settings.MaximumBytes, false)
+	if err != nil || len(ownerBytes) == 0 {
+		return refuse()
+	}
+	clear(ownerBytes)
+	planBytes, err := readHeldOutPinned(retired.Plan, settings.MaximumBytes, false)
+	if err != nil {
+		return refuse()
+	}
+	var plan heldOutPublicPilotPlan
+	if err := decodeHeldOutComplete(planBytes, &plan, "retired failed public pilot plan"); err != nil {
+		return refuse()
+	}
+	requestBytes, err := readHeldOutPinned(retired.Request, settings.MaximumBytes, true)
+	if err != nil {
+		return refuse()
+	}
+	defer clear(requestBytes)
+	var request heldOutRequest
+	if err := decodeHeldOutComplete(requestBytes, &request, "retired public request"); err != nil {
+		return refuse()
+	}
+	providersBytes, err := readHeldOutPinned(retired.Providers, settings.MaximumBytes, false)
+	if err != nil {
+		return refuse()
+	}
+	var providers Config
+	if yaml.Unmarshal(providersBytes, &providers) != nil {
+		return refuse()
+	}
+	proofBytes, err := readHeldOutPinned(retired.FailedProof, settings.MaximumBytes, false)
+	if err != nil {
+		return refuse()
+	}
+	var proof heldOutPublicPilotProof
+	if err := decodeHeldOutComplete(proofBytes, &proof, "retained rejected public pilot proof"); err != nil {
+		return refuse()
+	}
+	if plan.Schema != 1 || plan.Kind != "sim-latency-fresh-public-regression-pilot-plan" || plan.Protocol != heldOutProtocolFreshSingleB ||
+		plan.Root != retired.Root || plan.PublicSeed != retired.PublicSeed || plan.Approval != retired.OriginalApproval ||
+		plan.Request != retired.Request || plan.ProvidersSha256 != retired.Providers.Sha256 || plan.PreparedAt.IsZero() ||
+		request.ProvidersPath != retired.Providers.Path || request.ProvidersSha256 != retired.Providers.Sha256 ||
+		request.RoundSeedHex != fmt.Sprintf("%064x", retired.PublicSeed) || providers.Seed != retired.PublicSeed ||
+		request.ArtifactDirectory != filepath.Join(retired.Root, "artifacts") ||
+		proof.Schema != 1 || proof.Kind != "sim-latency-public-regression-pilot-proof" || proof.Accepted || len(proof.Reasons) == 0 ||
+		proof.Plan != retired.Plan || proof.Request != retired.Request || proof.BeforeExclusions != plan.BeforeExclusions ||
+		proof.ProvidersSha256 != retired.Providers.Sha256 || proof.VerifiedAt.IsZero() ||
+		!proof.CompletedAt.After(proof.StartedAt) || proof.StartedAt.Before(plan.PreparedAt) ||
+		proof.VerifiedAt.Before(proof.CompletedAt) || reviewedAt.Before(proof.VerifiedAt) ||
+		!proof.Outcome.Complete || proof.Outcome.FailureCode != "" || proof.Outcome.Role != "worse" ||
+		proof.Outcome.JobId != request.JobId || proof.Outcome.RoundId != request.RoundId ||
+		proof.Control == nil || proof.Control.Replicates != 9 || len(proof.Control.ControlEvaluationIds) != 9 ||
+		len(proof.Outcome.CandidateEvaluationIds) != 9 || proof.Score == nil {
+		return refuse()
+	}
+	// Native before-census dispatch intentionally retains the original C1
+	// release. The retired proof belongs to its separately frozen C2 image.
+	if err := validateHeldOutBridgeReplays(proof.Replays, retired.EvaluatorImageId); err != nil {
+		return refuse()
+	}
+	return plan, request, nil
+}
+
+// The same pure extension is used by the native builder and its independent
+// reconstruction. It adds only failed request/providers/plan to source closure.
+func retireHeldOutPublicPilotBefore(config heldOutFreshSingleExclusionBuildConfig, before heldOutExclusions,
+	release heldOutRelease, settings heldOutOperatorSettings) (heldOutExclusions, error) {
+	facts := heldOutFreshSingleFactsForRelease(release)
+	if facts.RetiredPublicPilot == nil {
+		if config.RetiredPublicPilot != nil {
+			return heldOutExclusions{}, errors.New("retirement is not authorized for this historical context")
+		}
+		return before, nil
+	}
+	if config.RetiredPublicPilot == nil || !reflect.DeepEqual(*config.RetiredPublicPilot, *facts.RetiredPublicPilot) {
+		return heldOutExclusions{}, errors.New("new before-census must bind the exact compiled failed public pilot and owner addendum")
+	}
+	retired := *facts.RetiredPublicPilot
+	plan, request, err := authenticateHeldOutRetiredPublicPilot(retired, facts, config.Approval, config.ReviewedAt, settings)
+	if err != nil {
+		return heldOutExclusions{}, err
+	}
+	// This existing reducer only merges exact workload identities. The
+	// accepted-AFTER entrypoint and its full replay remain strictly separate.
+	merged, err := mergeHeldOutPublicPilotExclusions(before, request, plan, retired.Plan, retired.Providers,
+		config.ReviewedSources, config.ReviewedAt, settings.MaximumBytes)
+	if err != nil {
+		return heldOutExclusions{}, err
+	}
+	return *merged, nil
+}
+
+// Hidden preparation must preserve retirement even if a caller supplies a new
+// internally consistent catalog instead of the genuine completed AFTER output.
+func validateHeldOutRetiredPublicPilotExclusions(config heldOutPreparationConfig, exclusions heldOutExclusions, release heldOutRelease) error {
+	facts := heldOutFreshSingleFactsForRelease(release)
+	if facts.RetiredPublicPilot == nil {
+		return nil
+	}
+	retired := *facts.RetiredPublicPilot
+	if config.FreshSingle == nil || config.FreshSingle.Approval != retired.OriginalApproval {
+		return errors.New("fresh retirement is missing its original approval binding")
+	}
+	for _, required := range []heldOutPinnedFile{retired.Request, retired.Providers, retired.Plan} {
+		found := false
+		for _, source := range exclusions.Sources {
+			found = found || source == required
+		}
+		if !found {
+			return errors.New("fresh exclusion closure omitted the failed public pilot")
+		}
+	}
+	return nil
+}

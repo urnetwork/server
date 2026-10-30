@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "kind": "actual-git-publication-readback",
+  "observed_at": "2026-10-30T02:20:41Z",
+  "repository": "/home/by/urnetwork/temp/competition-intake-publication-20261028.nVreyI4E/server",
+  "remote_url": "git@github.com:urnetwork/server.git",
+  "commit": "7d3cce1a54afda98b3803e05fb11874345524aec",
+  "observed_remote_main": "7d3cce1a54afda98b3803e05fb11874345524aec",
+  "pull_and_push_exit_code": 0,
+  "remote_readback_exit_code": 0,
+  "remote_ancestry_check_exit_code": 0,
+  "artifacts": [
+    {
+      "plan_path": "connect/sim-latency/launch/reduced-reference-correctness-2026-10-30/worse-build-qualification.json",
+      "root_path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2/inputs/worse-build-qualification.json",
+      "sha256": "5f04940b4c9de0abc728db0091f93907d36bf17861187de426ba473ed31065f0",
+      "committed_and_root_bytes_equal": true
+    },
+    {
+      "plan_path": "connect/sim-latency/launch/reduced-reference-correctness-2026-10-30/worse-correctness-qualification.json",
+      "root_path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2/inputs/worse-correctness-qualification.json",
+      "sha256": "4e32d1606ad27e57ed63ed9cff546b9acbeea42f281993296e4fae5b1383626c",
+      "committed_and_root_bytes_equal": true
+    }
+  ],
+  "qualification_scope": "Completed native build/readback and 336 correctness passes only; no measured direction, replacement pilot, hidden-seed calibration, operator qualification or grading authorization."
+}
