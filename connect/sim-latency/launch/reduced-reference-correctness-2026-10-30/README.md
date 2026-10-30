@@ -22,6 +22,13 @@ The launch-profile copy is necessary because its preserved original is mode
 the original, unchanged pre-installation instructions; their `installed: false`
 describes that earlier proposal, not the subsequent Root action.
 
+The [publication readback](PUBLICATION-PROOF.json) verifies both typed artifacts
+at pushed server commit `7d3cce1a54afda98b3803e05fb11874345524aec` against their
+Root-installed bytes. Their two native publication receipts are installed under
+the new pilot's protected inputs. Together with the four unchanged better/no-op
+publications, six of the seven prerequisites are available; the new operator's
+completed qualification and its publication are still pending.
+
 `MANIFEST.sha256` verifies the five original packet members. This publication
 does **not** establish measured regression direction, a successful replacement
 pilot, hidden-seed calibration, operator qualification or production grading

@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-held-out-plan-publication",
+  "plan_sha256": "4e32d1606ad27e57ed63ed9cff546b9acbeea42f281993296e4fae5b1383626c",
+  "published_at": "2026-10-30T02:20:41Z",
+  "commit": "7d3cce1a54afda98b3803e05fb11874345524aec",
+  "repository": "/home/by/urnetwork/temp/competition-intake-publication-20261028.nVreyI4E/server",
+  "plan_path": "connect/sim-latency/launch/reduced-reference-correctness-2026-10-30/worse-correctness-qualification.json",
+  "remote_ref": "refs/remotes/origin/main",
+  "pulled_and_pushed": true,
+  "evidence": [
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2/inputs/publications/reduced-reference-git-publication-proof.json",
+      "sha256": "692e88cabae4f7e8113e35d5d57f0f0f06e9143b27e8978b6d7d3b32b6f5ec86"
+    }
+  ]
+}
