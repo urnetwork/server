@@ -347,7 +347,6 @@ func init() {
 	prometheus.MustRegister(proxyLockCacheEvictionsCounter)
 	prometheus.MustRegister(proxyWireGuardReturnBackpressureCounter)
 	prometheus.MustRegister(proxyWireGuardReturnBackpressureDuration)
-	proxyLockCacheCapacityGauge.Set(proxyLockCacheMaxEntries)
 }
 
 // Reduces independently sampled devices without retaining customer identity

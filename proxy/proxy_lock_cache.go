@@ -9,12 +9,6 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// proxyLockCacheMaxEntries bounds authenticated and formerly-authenticated
-// proxy ids retained by one process. It is larger than the observed hot device
-// set while keeping even an all-unique stale-token stream at a small fixed heap
-// boundary.
-const proxyLockCacheMaxEntries = 16_384
-
 type proxyLockCacheItem struct {
 	proxyID server.Id
 	entry   proxyLockEntry
@@ -34,26 +28,26 @@ type proxyLockCacheResult struct {
 // the same ids and entries already owned by the map; it never owns device
 // configs or request objects.
 type proxyLockCache struct {
-	lock       sync.Mutex
-	maxEntries int
-	entries    map[server.Id]*list.Element
-	recency    list.List
-	nextSweep  time.Time
+	stateLock     sync.Mutex
+	maxEntries    int
+	entries       map[server.Id]*list.Element
+	recency       list.List
+	nextSweep     time.Time
+	sweepInterval time.Duration
 }
 
-func newProxyLockCache(maxEntries int) *proxyLockCache {
-	if maxEntries <= 0 {
-		maxEntries = 1
-	}
+// Keeps expiry cadence owned by the manager that supplies the cache lifetime.
+func newProxyLockCache(maxEntries int, sweepInterval time.Duration) *proxyLockCache {
 	return &proxyLockCache{
-		maxEntries: maxEntries,
-		entries:    map[server.Id]*list.Element{},
+		maxEntries:    max(0, maxEntries),
+		entries:       map[server.Id]*list.Element{},
+		sweepInterval: sweepInterval,
 	}
 }
 
 func (self *proxyLockCache) get(proxyID server.Id, now time.Time) proxyLockCacheResult {
-	self.lock.Lock()
-	defer self.lock.Unlock()
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
 	expired := self.sweepExpired(now)
 
 	element := self.entries[proxyID]
@@ -82,8 +76,8 @@ func (self *proxyLockCache) put(
 	entry proxyLockEntry,
 	now time.Time,
 ) proxyLockCacheResult {
-	self.lock.Lock()
-	defer self.lock.Unlock()
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
 
 	expired := self.sweepExpired(now)
 	if element := self.entries[proxyID]; element != nil {
@@ -129,7 +123,7 @@ func (self *proxyLockCache) sweepExpired(now time.Time) int {
 	if now.Before(self.nextSweep) {
 		return 0
 	}
-	self.nextSweep = now.Add(proxyLockCacheTtl)
+	self.nextSweep = now.Add(self.sweepInterval)
 	expired := 0
 	for _, element := range self.entries {
 		item := element.Value.(*proxyLockCacheItem)
@@ -151,7 +145,7 @@ func (self *proxyLockCache) remove(element *list.Element) {
 }
 
 func (self *proxyLockCache) size() int {
-	self.lock.Lock()
-	defer self.lock.Unlock()
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
 	return len(self.entries)
 }

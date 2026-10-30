@@ -324,7 +324,7 @@ func loadProNetworkWithConn(ctx context.Context, conn server.PgCanQuery, network
 // The redis entry for the network, ok false on a miss, an error or a value in
 // another format.
 func getProNetworkCached(ctx context.Context, networkId server.Id) (entitlement proEntitlement, ok bool) {
-	server.Redis(ctx, func(r server.RedisClient) {
+	proxyAdmissionRedis(ctx, func(r server.RedisClient) {
 		value, err := r.Get(ctx, proNetworkKey(networkId)).Result()
 		if err != nil {
 			// a miss, or a cache error -- either way fall back to the db, which is
@@ -355,7 +355,7 @@ return ARGV[1]
 // Stores the entitlement in redis unless redis holds a newer one, and returns the
 // entitlement redis holds afterwards. ok is false on a cache error.
 func setProNetworkCached(ctx context.Context, networkId server.Id, entitlement proEntitlement) (stored proEntitlement, ok bool) {
-	server.Redis(ctx, func(r server.RedisClient) {
+	proxyAdmissionRedis(ctx, func(r server.RedisClient) {
 		value, err := r.Eval(
 			ctx,
 			proNetworkCacheSetScript,

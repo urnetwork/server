@@ -449,7 +449,7 @@ func RemoveProxyDeviceConfig(ctx context.Context, proxyId server.Id) {
 func GetProxyDeviceConfig(ctx context.Context, proxyId server.Id) *ProxyDeviceConfig {
 	var proxyDeviceConfigJson string
 
-	server.Redis(ctx, func(r server.RedisClient) {
+	proxyAdmissionRedis(ctx, func(r server.RedisClient) {
 		proxyDeviceConfigJson, _ = r.Get(ctx, proxyDeviceConfigKey(proxyId)).Result()
 	})
 
