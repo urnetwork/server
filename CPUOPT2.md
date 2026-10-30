@@ -26,7 +26,8 @@ depth (2026-10-30). §9 applies the timer lessons to the connect library
     2.4 GB per process.
   - proxy limits (14:21Z): GOMEMLIMIT 6500MiB again, a 10GiB `memory_limit`,
     and 4 cores (§8.6 #2, #9).
-- **Open:** §9's connect-library changes (none started).
+- **Merged, not deployed:** §9's connect-library changes, in connect main
+  d16f4a40 (§9.4). They ship with the next build of each service.
 
 ## Summary
 
@@ -858,6 +859,22 @@ The library runs in three places, so each fix lands differently:
 - **Not measured:** providers and phones. Their rates below are *(inferred)*
   from code and default settings.
 
+- **Microbenchmark** (scratchpad bench-deadlines, Apple M1 Max, go1.27.3,
+  real loopback TCP pairs, 50k frames/s, a busy machine): eager re-arming
+  (read and write deadline plus ping reset per frame, 3.00 re-arms per frame)
+  against lazy (0.01–0.13 per frame), alternated in one process on the same
+  sockets.
+  - 1k connections: no measurable difference (eager/lazy 0.93, range
+    0.78–1.02).
+  - 10k connections: eager costs about 13% more total CPU (1.13, range
+    0.92–1.75), about +0.9 µs per frame. `pollSetDeadline` alone is 10.2%
+    of user samples against 1.2%.
+  - It understates production on two counts. macOS loopback and kqueue are
+    about 80% of its CPU, and Linux epoll is several times cheaper, which
+    makes the same timer work a larger share. Its timer heaps (0.3k–3k per P)
+    are far smaller than §3.2's (about 28k per P), so it measures the cost
+    of each re-arm, not the heap scans those re-arms trigger.
+
 **A Go 1.27 detail that shapes every fix:**
 - A channel timer sits in a P's heap only while a goroutine blocks on it.
   Leaving a `select` turns it into a zombie, so each pass of a loop pays a
@@ -1002,3 +1019,60 @@ The library runs in three places, so each fix lands differently:
 - Re-run the connect suite. The perf floors (`TestWindowPathSdk*`) are
   load-sensitive, so run them alone.
 - Measure provider and phone battery on devices before shipping #4 and #5.
+
+### 9.4 What shipped (2026-10-30)
+
+Six branches merged into connect main, 45 commits up to d16f4a40. Every
+change has a test that failed on the old code first. The integrated tree
+passed the full root package and `./extender/...` on macOS (one cross-branch
+test expectation, fixed in d16f4a40), and 578 provider, UDP and ICMP tests on
+Linux (the epoll poller) in a container.
+
+| §9.3 | Branch | Done | Old → new, from the failing-first tests |
+|---|---|---|---|
+| #1, #5 | `perf/timers-transport` | lazy read and write deadlines on H1, H1+ and H3, with slack settings; the websocket batch conn forwards an unchanged write deadline once; pings paced from the last write (`pingPacer`); QUIC keepalive 2× PingTimeout; a `PingJitter` setting (default 0, wall-clock aligned) | write deadline installs 50 → 1; read 50 → ≤1; ping timer arms 30 → ≤4 at the same ping instants |
+| #2, #7 | `perf/timers-multiclient` | `detectBlackhole`, `watchSendStalls` and `runEventEpoch` park on their evidence edges; the prober sleeps until its next due exit; race completion on `time.AfterFunc`; reused timers in resize, send retry and discovery | 100 idle epochs: 100 wakes → 0; health passes over 125 s idle: 100 → 12; prober scans over 15 min: 180 → 15 |
+| #3, #7 | `perf/timers-transfer` | lazy deadlines in the Send/Receive/Forward `Run` loops (`time.AfterFunc` into a 1-slot wake); no per-frame client read timeout; `expireQueuedContracts` parks while empty; one timer per call in `TakeContract` and Pack | 64 acked messages: 129 arms → 6; 64 Packs: 64 → 1; 20 idle minutes of client reads: 40 wakes → 0 |
+| #4 | `perf/timers-provider` | poll shards wait without a timeout; upstream keepalive off by default; the stats epoch parks; RTO woken only when its deadline moves earlier; lazy I/O deadlines; idle timers armed once; ack compress armed only to coalesce; atomic last activity; the DMCA scan parks | idle shards: repeated wakes → 0; 64 ACKs: 63 RTO wakes → 0; 64 operations: 64 deadline installs → 1; last-activity stamp 87 → 34 ns |
+| #6 | `perf/timers-extender-p2p` | lazy relay and legacy p2p write deadlines; extender listener and feed keepalive off; no QUIC keepalive on an owned carrier; one flight-wait timer; ICE keepalive 2 → 5 s | relay: 64 installs per direction → ≤2; p2p data channel installs 128/192 → 2/2 |
+| #7 | `perf/timers-net-http` | the strategy's merge goroutine replaced by `context.AfterFunc`; the extender startup gate arms its timer only when it waits | 1 goroutine per call → 0; 4 allocations per call → 0 |
+
+**Behavior changes to know:**
+- **Dead-peer detection is later:**
+  - platform transport: read up to +T/3, write up to +T/2;
+  - an idle channel's lost carrier: 70 s (60 s);
+  - extender relay: 45 s (30 s);
+  - a blocked p2p write: 22.5 s (15 s);
+  - provider upstream TCP: 300 s (about 10 s with the old 5 s, count-1
+    keepalive, which also killed live flows on a sleepy radio).
+- **Ping jitter:** `PingJitter` is off until the proxy sets it, through
+  `newProxyDeviceLocalSettings` and an sdk `DeviceLocalSettings` field.
+- **The exchange benefits too:** it gets the websocket write-deadline dedup
+  through `WebSocketWriteBatchConn` on its next connect build.
+
+**Not done:**
+- **The ack worker's quiet-head polling** (§9.2 finding 3). Waiting for the
+  compress deadline instead cost 25–49% of one direction's throughput in two
+  deterministic window tests. It needs a shared ack-flush wheel or
+  sender-marked burst ends. Only "skip an unchanged Reset" shipped.
+- **Provider:**
+  - the datagram sender's 10 ms poll while sends are pending, which needs
+    wakes from transfer_prepared_memory and from flow cancellation;
+  - the hashed idle wheel.
+- **Extender:**
+  - the datagram relay's per-datagram idle reset;
+  - a per-chunk `time.After` in extender_proxy.go;
+  - the sdk provider extender's own listener keepalive.
+- **Multi-client:**
+  - the remaining `time.After` loops (`windowGeneratorCall`,
+    `randomEnumerateClientArgs`, expand waits, `waitWindowRetry`);
+  - a per-admission goroutine parked on `client.Done()`.
+- **CODESTYLE:** its hot-path timer section still prescribes a Reset before
+  each select. Revise it to match.
+
+**Measurement still owed:** none of this is deployed. Build a proxy with
+connect d16f4a40, put one block on it, and compare that block with the
+others:
+- the perf timer share, against today's baseline of about 5%;
+- CPU per live device;
+- goroutine wakes per second.
