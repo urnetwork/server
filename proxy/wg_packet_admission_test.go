@@ -227,6 +227,8 @@ func TestWgTunFactoryPanicCompletesCoalescedManagerOpeners(t *testing.T) {
 		if manager.DeviceCount() != 0 {
 			t.Fatal("constructor panic retained an unfinished per-id marker")
 		}
+		// a later attempt comes after the failure's creation cooldown
+		time.Sleep(deviceCreationRetryTimeout)
 		if _, err := manager.OpenProxyDevice(proxyId); !errors.Is(err, setupErr) || calls.Load() != 2 {
 			t.Fatal("completed panic prevented a later construction attempt")
 		}

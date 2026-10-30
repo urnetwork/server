@@ -196,11 +196,18 @@ func (self *proxyTrafficMetrics) Collect(metrics chan<- prometheus.Metric) {
 			{reason: "connect_dial_error", value: stats.ConnectDialErrors},
 			{reason: "connect_client_gone", value: stats.ConnectClientsGone},
 			{reason: "connect_hijack_error", value: stats.ConnectHijackErrors},
+			{reason: "connect_timeout", value: stats.ConnectTimeouts},
 			{reason: "request_dial_error", value: stats.RequestDialErrors},
 			{reason: "request_not_replayed", value: stats.RequestsNotReplayed},
 			{reason: "response_aborted", value: stats.ResponsesAborted},
 			{reason: "body_too_large", value: stats.BodiesTooLarge},
 			{reason: "upgrade_error", value: stats.UpgradeErrors},
+			// definitive refusals answered at once, by class
+			{reason: "dial_refused_unauthenticated", value: stats.DialRefusedUnauthenticated},
+			{reason: "dial_refused_forbidden", value: stats.DialRefusedForbidden},
+			{reason: "dial_refused_unknown_proxy", value: stats.DialRefusedUnknownProxy},
+			{reason: "dial_refused_reset", value: stats.DialRefusedReset},
+			{reason: "dial_refused_no_such_host", value: stats.DialRefusedNoSuchHost},
 		})
 		metrics <- prometheus.MustNewConstMetric(self.ingressActiveDesc, prometheus.GaugeValue, float64(httpSource.ActiveCount()), "http")
 	}

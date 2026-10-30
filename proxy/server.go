@@ -20,6 +20,7 @@ import (
 	"github.com/urnetwork/proxy"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
+	"gvisor.dev/gvisor/pkg/tcpip"
 )
 
 // wgPeersGauge is the wg device's registered peer table size. Updated on
@@ -185,9 +186,10 @@ const InternalApiPort = 8083
 const InternalWgPort = 8084
 
 func DefaultProxySettings() *ProxySettings {
-	// HttpProxy interprets ProxyConnectTimeout as retry pacing, not as a total
-	// timeout. Follow its prompt production default so a transient hosted-device
-	// dial failure can recover inside an ordinary client request deadline.
+	// HttpProxy interprets ProxyConnectTimeout as the first retry backoff and
+	// ProxyConnectBudget as the bound on all of a CONNECT's retries. Follow its
+	// production defaults so a transient hosted-device dial failure can recover
+	// inside an ordinary client request deadline.
 	httpProxySettings := proxy.DefaultHttpProxySettings()
 	return &ProxySettings{
 		EnableDeviceRpcH1Plus:    true,
@@ -201,6 +203,7 @@ func DefaultProxySettings() *ProxySettings {
 		ProxyIdleTimeout:         5 * time.Minute,
 		ProxyTlsHandshakeTimeout: 30 * time.Second,
 		ProxyConnectTimeout:      httpProxySettings.ProxyConnectTimeout,
+		ProxyConnectBudget:       httpProxySettings.ProxyConnectBudget,
 		NotificationTimeout:      5 * time.Second,
 		WarmupTimeout:            30 * time.Minute,
 		MaxRequestBytes:          32 * model.Kib,
@@ -255,6 +258,7 @@ type ProxySettings struct {
 	ProxyIdleTimeout         time.Duration
 	ProxyTlsHandshakeTimeout time.Duration
 	ProxyConnectTimeout      time.Duration
+	ProxyConnectBudget       time.Duration
 	NotificationTimeout      time.Duration
 	WarmupTimeout            time.Duration
 	MaxRequestBytes          model.ByteCount
@@ -655,8 +659,7 @@ func (self *httpServer) CloseAndWait(ctx context.Context) error {
 func (self *httpServer) newHttpProxy() *proxy.HttpProxy {
 	authProxyId := func(r *http.Request) (server.Id, error) {
 		if r.TLS != nil {
-			host := r.TLS.ServerName
-			hostProxyId := strings.SplitN(host, ".", 2)[0]
+			hostProxyId, _, _ := strings.Cut(r.TLS.ServerName, ".")
 			proxyId, err := model.ParseSignedProxyId(hostProxyId)
 			if err == nil {
 				return proxyId, nil
@@ -667,22 +670,28 @@ func (self *httpServer) newHttpProxy() *proxy.HttpProxy {
 		return authHeaderProxyId(authHeader)
 	}
 
+	// A failure no retry can change is returned as a refusal, which the proxy
+	// answers at once (see proxy.ConnectRefusal); any other error is retried
+	// within the proxy's connect budget, which ctx carries.
 	connectDial := func(ctx context.Context, r *http.Request, network string, addr string) (net.Conn, error) {
 		proxyId, err := authProxyId(r)
 		if err != nil {
 			recordProxyAdmissionFailure("http", true)
-			return nil, err
+			return nil, proxy.NewConnectRefusal(proxy.ConnectRefusalUnauthenticated, err)
 		}
 
 		addrPort, err := netip.ParseAddrPort(r.RemoteAddr)
 		if err != nil {
 			recordProxyAdmissionFailure("http", true)
-			return nil, err
+			return nil, proxy.NewConnectRefusal(proxy.ConnectRefusalForbidden, err)
 		}
 
-		if !self.proxyDeviceManager.ValidCaller(proxyId, addrPort.Addr()) {
+		if err := self.proxyDeviceManager.checkCaller(proxyId, addrPort.Addr()); err != nil {
 			recordProxyAdmissionFailure("http", true)
-			return nil, fmt.Errorf("Not authorized")
+			if errors.Is(err, errProxyDeviceNotFound) {
+				return nil, proxy.NewConnectRefusal(proxy.ConnectRefusalUnknownProxy, err)
+			}
+			return nil, proxy.NewConnectRefusal(proxy.ConnectRefusalForbidden, err)
 		}
 
 		// the same per-connection plan check as SOCKS. Both tiers include the https
@@ -691,19 +700,33 @@ func (self *httpServer) newHttpProxy() *proxy.HttpProxy {
 		if !model.ProxyFeatureAllowed(self.ctx, proxyId, model.FeatureHttpsProxy) {
 			glog.Infof("[http]refused %s: the https proxy is not included in the plan\n", proxyId)
 			recordProxyAdmissionFailure("http", true)
-			return nil, fmt.Errorf("Not authorized")
+			return nil, proxy.NewConnectRefusal(proxy.ConnectRefusalForbidden, errCallerNotAuthorized)
 		}
 
 		pd, err := self.proxyDeviceManager.OpenProxyDevice(proxyId)
 		if err != nil {
 			recordProxyAdmissionFailure("http", false)
+			if errors.Is(err, errProxyDeviceNotFound) {
+				return nil, proxy.NewConnectRefusal(proxy.ConnectRefusalUnknownProxy, err)
+			}
 			return nil, err
+		}
+
+		// A window still forming has no provider to carry the dial. Wait for its
+		// first one, within ctx, rather than dial into it and be retried on a
+		// timer.
+		if !pd.WaitForRoute(ctx, self.settings.ProxyConnectBudget) {
+			recordProxyAdmissionFailure("http", false)
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			return nil, errProxyDeviceNoRoute
 		}
 
 		conn, err := pd.DialContext(ctx, network, addr)
 		if err != nil {
 			recordProxyAdmissionFailure("http", false)
-			return nil, err
+			return nil, connectDialRefusal(err)
 		}
 		pd.recordFlowTraceDial("http", conn)
 		return instrumentProxyConnection("http", conn), nil
@@ -714,6 +737,7 @@ func (self *httpServer) newHttpProxy() *proxy.HttpProxy {
 	httpSettings.ProxyWriteTimeout = self.settings.ProxyWriteTimeout
 	httpSettings.ProxyIdleTimeout = self.settings.ProxyIdleTimeout
 	httpSettings.ProxyConnectTimeout = self.settings.ProxyConnectTimeout
+	httpSettings.ProxyConnectBudget = self.settings.ProxyConnectBudget
 	httpSettings.ProxyTlsHandshakeTimeout = self.settings.ProxyTlsHandshakeTimeout
 
 	httpProxy := proxy.NewHttpProxy(httpSettings)
@@ -1152,6 +1176,44 @@ func (self *wgServer) SyncProxyClients(proxyClients []*model.ProxyClient, syncSt
 	self.logClientCounts("sync", len(applied), removed, counts)
 
 	return errors.Join(addErr, removeErr)
+}
+
+// errProxyDeviceNoRoute: the device's window formed no provider in time.
+var errProxyDeviceNoRoute = errors.New("Proxy device has no route.")
+
+// The text of the tun's error for a SYN answered with a reset.
+var tunConnectionRefused = (&tcpip.ErrConnectionRefused{}).String()
+
+// connectDialRefusal makes a device dial failure that no retry can change a
+// refusal: a name that does not exist, or a dial whose every attempt was
+// reset, by the destination or by the client security policy, which resets a
+// flow it rejects. Any other error is returned as is, to be retried. A reset
+// from a provider leaving the window is retried by the dial race itself, which
+// relaunches a failed attempt at once.
+func connectDialRefusal(err error) error {
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
+		return proxy.NewConnectRefusal(proxy.ConnectRefusalNoSuchHost, err)
+	}
+	if dialReset(err) {
+		return proxy.NewConnectRefusal(proxy.ConnectRefusalReset, err)
+	}
+	return err
+}
+
+// dialReset reports whether every attempt of a tun dial was reset.
+func dialReset(err error) bool {
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		attempts := joined.Unwrap()
+		for _, attempt := range attempts {
+			if !dialReset(attempt) {
+				return false
+			}
+		}
+		return 0 < len(attempts)
+	}
+	var opErr *net.OpError
+	return errors.As(err, &opErr) && opErr.Err != nil && opErr.Err.Error() == tunConnectionRefused
 }
 
 func authHeaderProxyId(authHeader string) (server.Id, error) {
