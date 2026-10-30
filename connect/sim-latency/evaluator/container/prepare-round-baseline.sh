@@ -5,6 +5,7 @@
 # It cannot run build_candidate, candidate code, or publish a submission result.
 set -Eeuo pipefail
 umask 077
+baseline_arguments=("$@")
 
 baseline_request=""
 baseline_receipt=""
@@ -28,6 +29,23 @@ baseline_artifacts="$(dirname -- "$baseline_request")"
 [ "$baseline_receipt" = "$baseline_artifacts/round-baseline-preparation.complete.json" ] || exit 2
 [ ! -e "$baseline_receipt" ] && [ ! -L "$baseline_receipt" ] || exit 2
 jq -e '.evaluation_policy.replicates == 9 and .round_baseline_path == "" and .round_baseline_sha256 == ""' "$baseline_request" >/dev/null
+
+# round_baseline_affinity_program_begin
+# The inherited evaluator re-execs its own request/result ABI. Confine this
+# separate role first, preserving its receipt/owner/context ABI on every exec.
+baseline_resource_boundary_json="$("$baseline_release/resource-boundary.sh")"
+baseline_management_cpuset="$(jq -er '.management_cpuset | select(type == "string" and length > 0)' <<<"$baseline_resource_boundary_json")"
+baseline_expected_management_affinity="$(taskset -c "$baseline_management_cpuset" awk -F: \
+    '$1 == "Cpus_allowed_list" {gsub(/[[:space:]]/, "", $2); print $2}' /proc/self/status)"
+if [ "${COMPETITION_MANAGEMENT_CPUSET_APPLIED:-}" != "$baseline_management_cpuset" ]; then
+    exec taskset -c "$baseline_management_cpuset" \
+        env COMPETITION_MANAGEMENT_CPUSET_APPLIED="$baseline_management_cpuset" \
+        "$(realpath -e "$0")" "${baseline_arguments[@]}"
+fi
+baseline_actual_management_affinity="$(awk -F: \
+    '$1 == "Cpus_allowed_list" {gsub(/[[:space:]]/, "", $2); print $2}' /proc/self/status)"
+[ "$baseline_actual_management_affinity" = "$baseline_expected_management_affinity" ] || exit 2
+# round_baseline_affinity_program_end
 
 # round_baseline_prefix_program_begin
 # No configurable source transformation: the complete source SHA and unique
