@@ -3,13 +3,25 @@
   "kind": "sim-latency-launch-preparation-checkpoint",
   "objective": "Ready to launch at 2026-10-28T00:00:00Z",
   "requested_launch_deadline_met": false,
-  "status": "R2_focused_checkpoint_passed_intake_open_next_claims_held_maintenance_not_deployed",
+  "status": "R2_DB901_confirmed_V5_45_unit_passes_intake_open_next_claims_held_API_rollout_unverified",
   "production_intake_open": true,
   "grading_started": true,
   "production_activated": true,
   "production_fully_qualified": false,
   "authority_warning": "This is a preparation snapshot, not runtime/score authority. Verify the live process/session and current artifacts before acting; never restart because an observation times out.",
-  "next_action": "Deploy the pending additive migration from the pushed server checkpoint, then deploy the main API with the pushed SN contract. Verify private owner feedback and public embargo. The native plan-publication receipt and timed-execution configuration are installed and rehashed; revalidate them before use. Only after live maintenance verification apply revision-four ACTIVE calibration maintenance, stop/join the real worker and run serial calibration. Keep rewards held, leave epoch one unchanged, and qualify the future G2 evaluator image/configuration before epoch two.",
+  "deployment_status": {
+    "server_main_minimum": "0a23176f53e4abf64a8364225dde572464b028f1",
+    "sn_main_minimum": "2cb50ac4733e62cb30a127295cdcfabcf9c93222",
+    "database_version_confirmed": 901,
+    "api_readiness_http_status": 200,
+    "completed_owner_poll_http_status": 200,
+    "completed_owner_private_score_present": false,
+    "api_release_verified": false,
+    "api_probe_evidence": "/home/by/urnetwork/temp/competition-v2-deployment-check-20261030.JfwP8eLW",
+    "new_config_vault_or_epoch_one_image_deployment_required": false,
+    "negative_owner_feedback_probe_alone_is_not_binary_identity_proof": true
+  },
+  "next_action": "Migration 901 and the V5 preliminary 45-pass frozen-instrument qualification are confirmed; V5 is terminal with successful cleanup/integrity and must not be restarted. Deploy or verify the main API from server 0a23176f5 or later with SN 2cb50ac4 or later, including private owner feedback and public embargo. The native plan-publication receipt and timed-execution configuration are installed and rehashed; revalidate them before use. Only after live maintenance verification apply revision-four ACTIVE calibration maintenance, stop/join the real worker and run serial calibration. Keep rewards held, leave epoch one unchanged, and qualify the future G2 evaluator image/configuration before epoch two.",
   "production": {
     "api": "https://api.bringyour.com",
     "season_id": "sim-latency-production-20261028-r2",
@@ -35,7 +47,7 @@
       "active": true
     },
     "latest_durable_queue_snapshot": {
-      "at": "2026-10-30T19:22:48.694323482Z",
+      "at": "2026-10-30T20:27:12.853124302Z",
       "total": 15,
       "queued": 11,
       "succeeded": 4,
@@ -45,12 +57,12 @@
       "worker_slot_unleased": true,
       "last_job_started_at": "2026-10-30T13:50:40.962535Z",
       "last_job_completed_at": "2026-10-30T15:20:43.662409Z",
-      "path": "/var/lib/urnetwork/competition-production-r2-20261029-v1/readonly-before-g2-v3-20261030.ddquolSn/audit.private.json",
-      "sha256": "af934e6aaad3a6e6a35335e4aa4253fafa98802a40ecce6d00bb168c5c89591a",
+      "path": "/var/lib/urnetwork/competition-production-r2-20261029-v1/readonly-before-g2-v5-20261030.XcoBnJQQ/audit.private.json",
+      "sha256": "69e4c8f51c15b8ef1c1caf4b965e1a57ca0c83055e53bc6c53b7321f0a2df4dd",
       "database_transaction_read_only": true,
       "database_transaction_isolation": "repeatable read",
-      "database_version_observed": 899,
-      "audit_scope_warning": "Queue, hold, host and deployed-version facts only. This historical auditor knows migration identities through 892; its six unknown later entries 893–898 are not evidence of corruption or a current-schema qualification.",
+      "database_version_observed": 901,
+      "audit_scope_warning": "Queue, hold, host and deployed-version facts only. This historical auditor knows migration identities through 892; unknown later catalog identities are not evidence of corruption or a current-schema qualification.",
       "later_intake_may_increase_queue": true
     },
     "shared_epoch_baseline_sha256": "b6b0b13f6137b32fd5569f9ff16d78d8dac3d578ad40549c8ae33513cf447557",
@@ -101,7 +113,8 @@
         "bytes": 85204,
         "tree": "5b6d2d15a4da15d78864ca115d50a1f7e9a6a459",
         "static_review_passed": true,
-        "compiled_or_runtime_qualified": false,
+        "preliminary_units_compiled_and_qualified": true,
+        "production_built_or_runtime_qualified": false,
         "approved_or_activated": false,
         "preliminary_unit_attempts": [
           {
@@ -133,9 +146,22 @@
             "immutable_image_metadata_export_passed": true,
             "failure": "A host-side Git diff after initial chmod refreshed .git/index to root-owned 0600; the unprivileged guest could not read it. No matching production sealer defect was found by static audit.",
             "stderr_sha256": "f90ec44347e385a6497f60356c828790f6bf3c46ecf7ec36155b98635a51e8f0"
+          },
+          {
+            "output": "/mnt/data/competition-g2-frozen-unit-6423-20261030-v4",
+            "result": "failed_before_docker_guests_go_or_tests",
+            "body_exit": 1,
+            "cleanup_exit": 0,
+            "integrity_exit": 0,
+            "all_ten_exact_source_fetches_passed": true,
+            "canonical_patch_tree_and_final_seal_checks_passed": true,
+            "failure": "The copied capture helper still required a v3 output prefix and rejected the v4 operation before Docker create.",
+            "final_manifest_sha256": "db6599613cc643a6fca3c8680c9cf6514db4918d5bd31a48acccb757cc17ab59"
           }
         ],
-        "unit_passes_claimed": 0,
+        "unit_passes_claimed": 45,
+        "unit_qualification_report": "server/connect/sim-latency/launch/G2-FROZEN-INSTRUMENT-UNIT-QUALIFICATION-2026-10-30.json",
+        "unit_qualification_report_sha256": "0f2b85247b2abd831ee397a74e762f3bb97b9c31d4ae860a896e3f37c1ae4bf2",
         "native_transport_mechanism_proof": {
           "fresh_processes": 3,
           "top_level_passes": 3,
@@ -153,12 +179,43 @@
           "old_0444_to_0600_index_refresh_reproduced": true,
           "corrected_final_seal_and_production_readonly_status_verified": true
         },
-        "next_attempt": {
-          "packet": "/home/by/urnetwork/temp/g2-frozen-patch-qualification-v4-20261030.G5z1l1Wx",
-          "script_sha256": "bbf367a575e5043e6d6b6628b17dabe11f248538efbf2befa6ec6a6982a12203",
-          "manifest_sha256": "71f186266a4652f1d66f9aef90519e25487528b2419ad551724b4babd961e7a8",
-          "status": "prepared_inert_not_executed",
-          "requires_root_review_and_fresh_idle_slot_before_low_execution": true
+        "native_capture_namespace_proof": {
+          "actual_helper_sha256": "f18c6ae2df6ad1da3dd8ed9792a3766d45339b58fd50dfc6b7b8e8a7f173a52e",
+          "fresh_processes": 3,
+          "top_level_passes": 3,
+          "package_passes": 3,
+          "failures": 0,
+          "skips": 0,
+          "evidence_manifest_sha256": "024129902d70c91ba15d1af225d59be446b516e14157b126c1ff6e3eb895f7db",
+          "write_free_preflight_only_not_product_qualification": true,
+          "retired_control_fixture_failure_preserved": true
+        },
+        "current_attempt": {
+          "packet": "/home/by/urnetwork/temp/g2-frozen-patch-qualification-v5-20261030.dNkGVQ0q",
+          "script_sha256": "080bdee523327bd6c579e1b0baccd5aa249fda03c71e410e96f301c42f066777",
+          "preparation_sha256": "8682058f8f974371dab960d2bcbe10bf944784f46ce9915e69e285b553360eb4",
+          "manifest_sha256": "643c1f304efc4e5ccf0b4bea0d04f5adda2bd224d2c92188e54229212aab2c79",
+          "manifest_inputs_independently_verified": 81,
+          "status": "terminal_pass_preliminary_units_only",
+          "systemd_unit": "urnetwork-g2-frozen6423-unit-v5.service",
+          "historical_main_pid": 2456558,
+          "observer_session": 42449,
+          "observer_session_terminal": true,
+          "started_at": "2026-10-30T20:30:16Z",
+          "finished_at": "2026-10-30T20:37:11Z",
+          "expected_top_level_passes": 45,
+          "actual_top_level_passes": 45,
+          "failures": 0,
+          "skips": 0,
+          "actual_fresh_test_processes_required": 6,
+          "actual_fresh_test_processes": 6,
+          "exit": 0,
+          "cleanup_exit": 0,
+          "integrity_exit": 0,
+          "final_manifest_sha256": "d7ef828fcb43315a77fb53627ae9b8c1f1d90e507994c0b61eeb2f40519e0b6f",
+          "cgo_enabled": false,
+          "race_or_production_build_claimed": false,
+          "do_not_restart_terminal_attempt": true
         }
       }
     }
@@ -216,7 +273,7 @@
       "Independently accept calibration and retain COMPLIANCE exact-version evidence before accepted-marker creation, fence cancellation or reward delivery release. Resume grading using the actual authorized release revision."
     ],
     "serial_action_handoff": "server/connect/sim-latency/launch/reduced-pilot-operator-2026-10-30/NEXT-SERIAL-ACTION.json",
-    "serial_action_handoff_sha256": "26d2e3ca16189e0514cb9b11c3942c80cca6b399683322a2042fcd621347d7db"
+    "serial_action_handoff_sha256": "a30bce061ab918d33b8f4de5ad567678a62b2f6668d6bf061b5eaa98ee7aa381"
   },
   "deadline_fences": {
     "deadline": "2026-11-05T12:00:00Z",
@@ -248,7 +305,7 @@
     "retained_in_git": true,
     "warning": "The 164128-byte historical checkpoint retains all earlier failures, qualifications and source pins. Its old top-level status and next_action are superseded; do not execute them. Read history only for a specific supporting artifact."
   },
-  "observed_at": "2026-10-30T19:46:44Z",
+  "observed_at": "2026-10-30T20:38:00Z",
   "phase_checkpoint_qualification": {
     "status": "focused tests, native API build, standalone guard and static checks passed; not a live release",
     "toolchain": "go1.27.3",

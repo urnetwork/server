@@ -1,8 +1,8 @@
 {
   "schema": 1,
   "kind": "sim-latency-approved-calibration-next-serial-action",
-  "observed_at": "2026-10-30T18:30:07Z",
-  "purpose": "Qualified native calibration handoff, not runtime authority. Metadata-only preparation succeeded at its recorded actual time; no timed measurements or hidden entropy. Next: qualify/push the control-plane changes and exact public plan, deploy bounded maintenance, then reserve the host before timed execution. The envelope, environment and arguments below document the successful prepare only; they are not a command to repeat or the timed-execution configuration.",
+  "observed_at": "2026-10-30T20:38:00Z",
+  "purpose": "Qualified native calibration handoff, not runtime authority. Metadata-only preparation and publication succeeded at their recorded actual times; no timed measurements or hidden entropy. Migration 901 is confirmed. Next: verify the main API rollout and bounded maintenance, join all isolated qualification work, then reserve the host before timed execution. The envelope, environment and arguments below document the successful prepare only; they are not a command to repeat or the timed-execution configuration.",
   "production_service": "urnetwork-competition-production-r2.service",
   "calibration_root": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2",
   "admission_before_any_execution": [
@@ -67,11 +67,11 @@
   },
   "after_preparation": [
     "Do not repeat successful native prepare; preserve its exact public plan, original failed results and the unused original second seed.",
-    "The tested code and exact public plan are already committed, merged, pulled and pushed: server25eb7e7cf479a14506605746e376468f0db3fdfe and SNc59b0ddc1357f8ab010264d7f0cdc24ee49a28ad. Canonical clean checkouts were fetched/fast-forwarded from origin and the plan blob was rehashed. Verify these exact identities before migrating or measuring.",
-    "Deploy the additive migration/API. Verify owner-only completed feedback and public embargo. Fresh-read revision three and apply only the newly approved revision-four ACTIVE CALIBRATION_MAINTENANCE request, not an inactive grading release.",
+    "The exact public plan remains published at server25eb7e7cf479a14506605746e376468f0db3fdfe. The current deployment checkpoint is server0a23176f53e4abf64a8364225dde572464b028f1 with SN2cb50ac4733e62cb30a127295cdcfabcf9c93222, already committed, merged, pulled and pushed. Verify actual deployment and unchanged plan bytes; newer control commits do not replace the published plan identity.",
+    "Migration901 is confirmed by the read-only20:27:12Z audit. Deploy or verify the main API; verify owner-only completed feedback and public embargo. Fresh-read revision three and apply only the newly approved revision-four ACTIVE CALIBRATION_MAINTENANCE request, not an inactive grading release. Do not stop the real worker before the live capability is verified.",
     "After confirming that actual revision, qualify/install its matching deadline guard while preserving the original global one-use claim, accepted-marker path, scope and November5deadline. Never create the marker or cancel the fence before genuine calibration acceptance.",
     "The protected plan-publication.json and separately pinned execution configuration are installed and rehashed below. Preserve them and revalidate their actual files, Git ancestry and prerequisite pins before timed execution. Do not repeat prepare or replace them with historical publication values.",
-    "Only after live maintenance intake proof, actual worker stop/join, serial host reservation, original inventory/memory checks and native publication admission may the one-use timed public R9/R9 pilot start. Preserve queued admissions/unstarted clocks. No production scoring or build/test load may overlap calibration.",
+    "Only after live maintenance intake proof, actual worker stop/join, serial host reservation, original inventory/memory checks and native publication admission may the one-use timed public R9/R9 pilot start. Preserve queued admissions/unstarted clocks. V5 completed45preliminary unit passes and cleanup at20:37:11Z; independently confirm no new client/guest/build/test activity before reserving the host. No production scoring or build/test load may overlap calibration.",
     "Require accepted native public direction and AFTER13 census before drawing the approved fresh hidden seed and its36runs. Do not reuse old failed results as acceptance.",
     "Complete independent calibration acceptance and scoped COMPLIANCE exact-version readback before finalization, accepted-marker creation or reward-delivery release. Resume grading only under the actual authorized release revision."
   ],
