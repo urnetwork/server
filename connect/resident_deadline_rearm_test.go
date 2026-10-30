@@ -1,5 +1,4 @@
-// Exchange socket deadlines are re-armed once a third of their timeout has
-// passed, not per frame, and still bound every read and write.
+// Every exchange operation receives its full native socket deadline budget.
 package connect
 
 import (
@@ -33,11 +32,9 @@ func (self *exchangeDeadlineRecordingConn) SetWriteDeadline(deadline time.Time) 
 	return self.exchangeDeadlineConn.SetWriteDeadline(deadline)
 }
 
-// A busy exchange socket re-arms each deadline once a third of its timeout has
-// passed, not on every frame: each re-arm modifies a runtime timer. Every read
-// and write still runs under a deadline between two thirds of its timeout and
-// its timeout away.
-func TestExchangeDeadlinesRearmOnlyAfterAThirdOfTheTimeout(t *testing.T) {
+// Traffic cannot borrow an earlier operation's deadline or extend its own
+// configured budget. Identical absolute deadlines need no extra setter call.
+func TestExchangeDeadlinesPreserveEachOperationBudget(t *testing.T) {
 	clientconnect.MessagePoolReturn(clientconnect.MessagePoolGet(1))
 	synctest.Test(t, func(t *testing.T) {
 		settings := DefaultExchangeSettings()
@@ -49,8 +46,8 @@ func TestExchangeDeadlinesRearmOnlyAfterAThirdOfTheTimeout(t *testing.T) {
 			if len(deadlines) == 0 {
 				t.Fatalf("no %s deadline was installed", name)
 			}
-			if remaining := time.Until(deadlines[len(deadlines)-1]); remaining < 2*timeout/3 || timeout < remaining {
-				t.Fatalf("%s ran under a deadline %s away, want between %s and %s", name, remaining, 2*timeout/3, timeout)
+			if remaining := time.Until(deadlines[len(deadlines)-1]); remaining != timeout {
+				t.Fatalf("%s ran under a deadline %s away, want %s", name, remaining, timeout)
 			}
 		}
 		start := time.Now()
@@ -66,61 +63,55 @@ func TestExchangeDeadlinesRearmOnlyAfterAThirdOfTheTimeout(t *testing.T) {
 				t.Fatal(err)
 			}
 			requireInForce("read", conn.readDeadlines, settings.ExchangeReadTimeout)
-			frameCount += 1
+			frameCount++
 			time.Sleep(10 * time.Millisecond)
 		}
 		t.Logf("frames=%d write_deadlines=%d read_deadlines=%d", frameCount, len(conn.writeDeadlines), len(conn.readDeadlines))
-		// 30 s of frames re-arm the 15 s write deadline just after 0, 5, 10,
-		// 15, 20 and 25 s, and the 30 s read deadline just after 0, 10 and 20 s.
-		if len(conn.writeDeadlines) != 6 || len(conn.readDeadlines) != 3 {
-			t.Fatalf("%d frames installed %d write and %d read deadlines, want 6 and 3", frameCount, len(conn.writeDeadlines), len(conn.readDeadlines))
+		if len(conn.writeDeadlines) != frameCount || len(conn.readDeadlines) != frameCount {
+			t.Fatalf("%d frames installed %d write and %d read deadlines", frameCount, len(conn.writeDeadlines), len(conn.readDeadlines))
 		}
 	})
 }
 
-// A write to a peer that stopped reading is still cut off by the deadline in
-// force: two thirds of WriteTimeout after it starts when the deadline was kept,
-// the worst case, and WriteTimeout when the write re-armed it.
+// A peer that stops reading is cut off at the write's own timeout regardless
+// of how much time passed after an earlier successful frame.
 func TestExchangeDeadlineStalledWriteIsBoundedByTheWriteTimeout(t *testing.T) {
 	clientconnect.MessagePoolReturn(clientconnect.MessagePoolGet(1))
 	settings := DefaultExchangeSettings()
 	for _, c := range []struct {
-		name    string
-		idle    time.Duration
-		stalled time.Duration
+		name string
+		idle time.Duration
 	}{
-		{name: "deadline kept", idle: settings.WriteTimeout / 3, stalled: 2 * settings.WriteTimeout / 3},
-		{name: "deadline re-armed", idle: settings.WriteTimeout/3 + time.Millisecond, stalled: settings.WriteTimeout},
+		{name: "earlier boundary", idle: settings.WriteTimeout / 3},
+		{name: "past earlier boundary", idle: settings.WriteTimeout/3 + time.Millisecond},
 	} {
-		t.Run(c.name, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
-				local, remote := net.Pipe()
-				defer local.Close()
-				defer remote.Close()
-				sender := NewDefaultExchangeBuffer(settings)
-				// the peer reads the first frame, then stops reading
-				read := make(chan error, 1)
-				go func() {
-					frame := make([]byte, exchangeIOFrameHeaderByteCount+37)
-					_, err := io.ReadFull(remote, frame)
-					read <- err
-				}()
-				if err := sender.WriteMessage(local, clientconnect.MessagePoolGet(37)); err != nil {
-					t.Fatal(err)
-				}
-				if err := <-read; err != nil {
-					t.Fatal(err)
-				}
-				time.Sleep(c.idle)
-				start := time.Now()
-				err := sender.WriteMessage(local, clientconnect.MessagePoolGet(37))
-				if !errors.Is(err, os.ErrDeadlineExceeded) {
-					t.Fatalf("stalled write returned %v, want the deadline", err)
-				}
-				if stalled := time.Since(start); stalled != c.stalled {
-					t.Fatalf("stalled write was cut off after %s, want %s", stalled, c.stalled)
-				}
-			})
+		synctest.Test(t, func(t *testing.T) {
+			local, remote := net.Pipe()
+			defer local.Close()
+			defer remote.Close()
+			sender := NewDefaultExchangeBuffer(settings)
+			// the peer reads the first frame, then stops reading
+			read := make(chan error, 1)
+			go func() {
+				frame := make([]byte, exchangeIOFrameHeaderByteCount+37)
+				_, err := io.ReadFull(remote, frame)
+				read <- err
+			}()
+			if err := sender.WriteMessage(local, clientconnect.MessagePoolGet(37)); err != nil {
+				t.Fatal(err)
+			}
+			if err := <-read; err != nil {
+				t.Fatal(err)
+			}
+			time.Sleep(c.idle)
+			start := time.Now()
+			err := sender.WriteMessage(local, clientconnect.MessagePoolGet(37))
+			if !errors.Is(err, os.ErrDeadlineExceeded) {
+				t.Fatalf("stalled write returned %v, want the deadline", err)
+			}
+			if stalled := time.Since(start); stalled != settings.WriteTimeout {
+				t.Fatalf("%s: stalled write was cut off after %s, want %s", c.name, stalled, settings.WriteTimeout)
+			}
 		})
 	}
 }

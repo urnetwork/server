@@ -223,13 +223,12 @@ func runWithDependencies(
 		router.NewRouter(runCtx, routes),
 		false,
 		server.HttpServerOptions{
+			// This shared listener also serves /status without protocol
+			// heartbeats, so retain its default kernel keepalive backstop.
 			ReadTimeout:     15 * time.Second,
 			WriteTimeout:    30 * time.Second,
 			IdleTimeout:     5 * time.Minute,
 			ShutdownTimeout: 30 * time.Second,
-			// platform transports run their own heartbeat: client pings
-			// against the transport read deadline
-			DisableTcpKeepAlive: true,
 		},
 	)
 	if err != nil && runCtx.Err() == nil {
