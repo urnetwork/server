@@ -6462,6 +6462,12 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 }
 
 func (self PostgresStore) HandBack(ctx context.Context, workerId string, jobId server.Id, reason string) error {
+	return self.handBackWithFailure(ctx, workerId, jobId, reason, competitionHeartbeatFailure{})
+}
+
+// Persists safe heartbeat cause metadata in the existing owner-fenced event;
+// every state/slot update and the transaction boundary are unchanged.
+func (self PostgresStore) handBackWithFailure(ctx context.Context, workerId string, jobId server.Id, reason string, failure competitionHeartbeatFailure) error {
 	now := self.nowUtc()
 	return captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
@@ -6473,7 +6479,7 @@ func (self PostgresStore) HandBack(ctx context.Context, workerId string, jobId s
 			`, jobId, workerId, now)
 			server.Raise(err)
 			if result.RowsAffected() == 1 {
-				appendEvent(ctx, tx, jobId, now, "handed_back", workerId, map[string]any{"reason": reason})
+				appendEvent(ctx, tx, jobId, now, "handed_back", workerId, competitionHandBackEvent{Reason: reason, competitionHeartbeatFailure: failure})
 			}
 			server.RaisePgResult(tx.Exec(ctx, `
 				UPDATE competition_worker_slot SET worker_id = NULL, job_id = NULL,
@@ -6746,6 +6752,9 @@ type Worker struct {
 	pollEvery         time.Duration
 	// Nil preserves production tickers; deterministic tests drive exact idle edges.
 	pollTickForTest, hostTickForTest <-chan time.Time
+	// Nil retains the production ticker; tests force the exact failure edge.
+	evaluationTickForTest <-chan time.Time
+	heartbeatSettings     competitionHeartbeatSettings
 }
 
 func NewWorker(settings *Settings, store Store, evaluator Evaluator, workerId string) (*Worker, error) {
@@ -6778,6 +6787,7 @@ func newWorkerWithImageDigest(
 	return &Worker{
 		settings: settings, store: store, evaluator: evaluator, workerId: workerId,
 		workerImageDigest: workerImageDigest, pollEvery: time.Second,
+		heartbeatSettings: defaultCompetitionHeartbeatSettings(),
 	}, nil
 }
 
@@ -7046,6 +7056,10 @@ func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostChec
 	}()
 	heartbeatTicker := time.NewTicker(time.Duration(self.settings.WorkerHeartbeatSeconds) * time.Second)
 	defer heartbeatTicker.Stop()
+	heartbeatTick := heartbeatTicker.C
+	if self.evaluationTickForTest != nil {
+		heartbeatTick = self.evaluationTickForTest
+	}
 	for {
 		select {
 		case result := <-done:
@@ -7073,19 +7087,19 @@ func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostChec
 				metricOutcome = "submission_failed"
 			}
 			return nil
-		case <-heartbeatTicker.C:
+		case <-heartbeatTick:
 			if err := self.store.Heartbeat(parent, self.settings, self.workerId, job.JobId); err != nil {
 				cancel()
 				<-done
-				_ = self.handBack(job.JobId, "heartbeat_failed")
-				return fmt.Errorf("heartbeat competition job %s: %w", job.JobId, err)
+				_ = self.handBack(job.JobId, "heartbeat_failed", err)
+				return fmt.Errorf("heartbeat competition job %s: %w", job.JobId, safeCompetitionHeartbeatError(err))
 			}
 
 			if err := self.store.RegisterHost(parent, self.settings, hostCheck); err != nil {
 				cancel()
 				<-done
-				_ = self.handBack(job.JobId, "host_heartbeat_failed")
-				return fmt.Errorf("refresh evaluator host during job %s: %w", job.JobId, err)
+				_ = self.handBack(job.JobId, "host_heartbeat_failed", err)
+				return fmt.Errorf("refresh evaluator host during job %s: %w", job.JobId, safeCompetitionHeartbeatError(err))
 			}
 		case <-parent.Done():
 			cancel()
@@ -7098,9 +7112,18 @@ func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostChec
 	}
 }
 
-func (self *Worker) handBack(jobId server.Id, reason string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+func (self *Worker) handBack(jobId server.Id, reason string, failures ...error) error {
+	timeout := self.heartbeatSettings.HandBackTimeout
+	if timeout <= 0 {
+		timeout = defaultCompetitionHeartbeatSettings().HandBackTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+	if len(failures) != 0 && failures[0] != nil {
+		if store, ok := self.store.(competitionHeartbeatFailureStore); ok {
+			return store.handBackWithFailure(ctx, self.workerId, jobId, reason, competitionHeartbeatFailureDetails(failures[0]))
+		}
+	}
 	return self.store.HandBack(ctx, self.workerId, jobId, reason)
 }
 

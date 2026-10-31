@@ -1,0 +1,98 @@
+// Heartbeat failures keep bounded, non-secret diagnostic evidence without
+// changing cancellation, fencing, ownership or retry decisions.
+package controller
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"net"
+	"time"
+
+	"github.com/urnetwork/server"
+)
+
+// The existing cleanup budget belongs to each worker; non-positive selects
+// the historical default rather than shortening an already-owned cleanup.
+type competitionHeartbeatSettings struct {
+	HandBackTimeout time.Duration
+}
+
+// Retains the existing fifteen-second cleanup bound in one defaults location.
+func defaultCompetitionHeartbeatSettings() competitionHeartbeatSettings {
+	return competitionHeartbeatSettings{HandBackTimeout: 15 * time.Second}
+}
+
+// Only fixed categories, a validated PostgreSQL code and an opaque digest are
+// serializable. The original error is deliberately absent from this type.
+type competitionHeartbeatFailure struct {
+	Category     string `json:"error_category,omitempty"`
+	SqlState     string `json:"error_sqlstate,omitempty"`
+	DetailSha256 string `json:"error_sha256,omitempty"`
+}
+
+// A narrow optional capability preserves compatibility with non-PG stores.
+// Both direct and embedded production PostgresStore values implement it.
+type competitionHeartbeatFailureStore interface {
+	handBackWithFailure(context.Context, string, server.Id, string, competitionHeartbeatFailure) error
+}
+
+// Classification is diagnostic only, never permission to retain a lost lease.
+func competitionHeartbeatFailureDetails(err error) competitionHeartbeatFailure {
+	if err == nil {
+		return competitionHeartbeatFailure{}
+	}
+	digest := sha256.Sum256([]byte(err.Error()))
+	detail := competitionHeartbeatFailure{Category: "other", DetailSha256: hex.EncodeToString(digest[:])}
+	var sqlError interface{ SQLState() string }
+	var networkError net.Error
+	switch {
+	case errors.Is(err, ErrLeaseLost):
+		detail.Category = "lease_lost"
+	case errors.Is(err, context.DeadlineExceeded):
+		detail.Category = "deadline_exceeded"
+	case errors.Is(err, context.Canceled):
+		detail.Category = "canceled"
+	case errors.As(err, &sqlError):
+		detail.Category = "postgresql"
+		state := sqlError.SQLState()
+		valid := len(state) == 5
+		for _, value := range state {
+			valid = valid && (value >= '0' && value <= '9' || value >= 'A' && value <= 'Z')
+		}
+		if valid {
+			detail.SqlState = state
+		}
+	case errors.As(err, &networkError):
+		detail.Category = "network"
+	}
+	return detail
+}
+
+// The unchanged reason remains top-level; no error message or error object can
+// reach appendEvent's JSON encoder through this payload.
+type competitionHandBackEvent struct {
+	Reason string `json:"reason"`
+	competitionHeartbeatFailure
+}
+
+// Returned errors remain inspectable with errors.Is/As but safe to format.
+type competitionSafeHeartbeatError struct {
+	detail competitionHeartbeatFailure
+	cause  error
+}
+
+// Diagnostic formatting contains only the same safe fields as the ledger.
+func (self competitionSafeHeartbeatError) Error() string {
+	return fmt.Sprintf("category=%s sqlstate=%s detail_sha256=%s", self.detail.Category, self.detail.SqlState, self.detail.DetailSha256)
+}
+
+// The original cause is retained for programmatic decisions, never serialization.
+func (self competitionSafeHeartbeatError) Unwrap() error { return self.cause }
+
+// This wrapper does not classify a failure as retryable or suppress any error.
+func safeCompetitionHeartbeatError(err error) error {
+	return competitionSafeHeartbeatError{detail: competitionHeartbeatFailureDetails(err), cause: err}
+}

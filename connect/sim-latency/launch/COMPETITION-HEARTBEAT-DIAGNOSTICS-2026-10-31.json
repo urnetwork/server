@@ -1,0 +1,82 @@
+{
+  "schema": 1,
+  "kind": "competition-heartbeat-handback-diagnostic-qualification",
+  "status": "diagnostics_only_source_fixed_targeted_tests_passed_not_deployed",
+  "incident": {
+    "handed_back_at": "2026-10-31T21:34:29.010523Z",
+    "recorded_reason": "heartbeat_failed",
+    "automatic_reclaim_at": "2026-10-31T21:35:06.898738Z",
+    "sanitized_evaluator_exit_code": 143,
+    "outer_worker_exit_code": 2,
+    "single_job_read_only_event_report_sha256": "351724545c3029b9f808976e57bd4f528e5b8ac9ab5473a94b67a4a3d9287c2a",
+    "sanitized_failure_receipt_sha256": "b61301e346cb90b4b1bd135804b7f1e2fd2ddf5111d8a0668b562d3e706d1b94",
+    "private_diagnostic_directory": "/home/by/urnetwork/temp/competition-requeue-diagnosis-20261031.qLMhQ4Km",
+    "original_heartbeat_error_subtype": "unknown: prior evidence does not distinguish a PostgreSQL/transport error from genuine lease/fence loss",
+    "later_transient_readiness_503_not_established_as_cancellation_trigger": true,
+    "candidate_gate_or_scored_failure_not_claimed": true,
+    "original_submission_start_and_cumulative_three_hour_budget_preserved": true,
+    "automatic_second_attempt_observed_healthy_without_manual_retry": true,
+    "private_job_identity_scores_and_payloads_not_published": true
+  },
+  "proven_observability_gap": "The existing handed_back event retained only its reason, while the long-lived supervisor retained a bounded stderr prefix and did not expose the child's final error subtype. Historical cause cannot be reconstructed from heartbeat_failed alone.",
+  "correction": {
+    "fields": ["error_category", "error_sqlstate", "error_sha256"],
+    "categories": ["lease_lost", "deadline_exceeded", "canceled", "postgresql", "network", "other"],
+    "sqlstate_admission": "Exactly five ASCII uppercase letters or digits; malformed values omitted.",
+    "detail": "SHA256 of the error text; the original error/message/DSN is never serialized in the event.",
+    "actual_worker_and_adjacent_host_heartbeat_paths_covered": true,
+    "safe_returned_error_preserves_errors_is_and_as": true,
+    "ordinary_reason_only_event_encoding_unchanged": true,
+    "cancel_join_handback_order_and_owner_fenced_transaction_unchanged": true,
+    "lease_fencing_retry_deadlines_and_scoring_policy_unchanged": true,
+    "historical_cleanup_timeout_seconds": 15,
+    "transient_error_tolerance_or_false_fence_fix_claimed": false,
+    "independent_source_review_passed": true
+  },
+  "source": {
+    "base_commit": "6560417210f55e1699e41063e95cf82e9ef0fe61",
+    "files": {
+      "controller/competition_controller.go": "f61626fd4e279a04502f2c471efa17f1dc9ba8f02e3aa8f5c4172571a9e7cf08",
+      "controller/competition_heartbeat_failure.go": "3699399d357af595ec8d8172fc23f7a3ba4ef4e9b6683d694ec9328fda74ce20",
+      "controller/competition_heartbeat_failure_test.go": "1f7b15c7846cb08ee57bb9592e816cbd4c66ca86c3f817e92dd692695782a938"
+    }
+  },
+  "targeted_negative": {
+    "meaning": "Targeted dropped-cause wiring control, not a byte-identical historical whole-source build. Only the two new heartbeat cause arguments were removed; auxiliary test seams and classifiers remained.",
+    "root": "TestCompetitionHeartbeatFailurePersistsLeaseLossAfterJoin",
+    "expected_actual_failure": "safe heartbeat handback evidence missing or changed: calls=0 legacy=1",
+    "top_level_failures": 1,
+    "package_failures": 1,
+    "test_exit": 1,
+    "expected_failure_wrapper_exit": 0,
+    "raw_log_sha256": "37808e91cd830cce97c66203be7b1228e2f1763be5039f1cc8df95e7a3559744",
+    "evidence_manifest_sha256": "32653ea4c5332946c1de114a81b42272a1ae2f9fcdc1a3cce4f5a977dea56dba"
+  },
+  "positive": {
+    "artifact_directory": "/mnt/data/heartbeat-diagnostics-qa-20261031.vsSbRMn7/positive/qa",
+    "toolchain": "go1.27.3",
+    "actual_controller_package_race_compile": true,
+    "new_roots": 9,
+    "adjacent_pure_roots": 5,
+    "fresh_same_elf_processes": 3,
+    "top_level_passes": 42,
+    "package_passes": 3,
+    "failures": 0,
+    "skips": 0,
+    "subtests": 0,
+    "race_elf_sha256": "7a70c2c9ca637dd286fa634687c1ff856eb1754c2fbfc990c80bbf8fa958e5eb",
+    "evidence_manifest_sha256": "f4c241bc2429160f10f8b66f192965c2c2e14217fbc27a8ceac370265200d05a",
+    "source_dependency_and_elf_after_guards_passed": true,
+    "management_cpus": [20, 22],
+    "test_scope": "Pure synthetic manual-tick worker/store boundaries, explicit cancellation/cleanup barriers, safe payload encoding, error identity and adjacent timeout/retry/rebaseline controls.",
+    "live_database_native_evaluator_or_provider_tested": false,
+    "full_repository_or_normal_release_graph_qualification_claimed": false
+  },
+  "runtime_boundary": {
+    "deployed": false,
+    "running_worker_restarted_or_replaced": false,
+    "frozen_epoch_one_source_image_baseline_or_policy_changed": false,
+    "holds_timers_or_accepted_marker_changed": false,
+    "original_heartbeat_subtype_remains_unknown": true
+  }
+}
