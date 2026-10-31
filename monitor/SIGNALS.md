@@ -12093,11 +12093,22 @@ dualstack and IPv4-only providers, `v4` IPv4-only and `v6` dualstack and
 IPv6-only: the facets each request family draws. Admitted means in the
 non-forced union pool, online or native, before per-caller network exclusions.
 That is about 100 countries times three families, with no client, network,
-provider or location identity. A process publishes its measurement for an hour
-after the export that made it, so a taskworker that stopped exporting drops
-out. `urnetwork_findproviders2_empty_outcomes_total` names the
-`target_country` of a `cache_empty` answer for a country, or for a region its
-country, and leaves it empty for every other answer. The probe reads, in the
+provider or location identity. A measurement is published for an hour after
+the export that made it, and only by the taskworker holding the newest one
+(2026-10-31: six taskworkers published 1,947 series for 339 country and
+family pairs before this). The export lands on whichever taskworker claims it,
+so several hold a measurement within the hour; they share a lease in Redis
+(`{client_score_supply_publisher}`, the measurement's time and the process),
+which every process with a current measurement claims on each scrape. The
+newest measurement keeps it, and a process a newer export displaced stops at
+its next scrape. When the holder stops, its lease lapses within a minute and
+the newest measurement left takes over, inside the five minutes Mimir still
+reads the stopped series. A process that cannot claim the lease publishes its
+measurement as before, so the supply never goes dark; the probe takes the
+newest measurement either way.
+`urnetwork_findproviders2_empty_outcomes_total` names the `target_country` of
+a `cache_empty` answer for a country, or for a region its country, and leaves
+it empty for every other answer. The probe reads, in the
 same query, each process's measurement and time (the newest is the current
 supply), the 24-hour maximum per country and family, the oldest measurement in
 those 24 hours, and the fleet totals with their 7-day maximum. Judged in the

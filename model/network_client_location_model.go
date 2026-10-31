@@ -5993,7 +5993,9 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		if err := publishProviderOnlineSuccessBaseline(ctx, onlineSuccessBaseline, ttl); err != nil {
 			glog.Errorf("[nclm]publish online url-success guard: %s\n", err)
 		}
-		clientScoreSupplyMetrics.publish(supply)
+		// published by this process alone while it holds the newest
+		// measurement (network_client_score_supply.go)
+		clientScoreSupplyMetrics.publish(ctx, supply)
 		glog.Infof(
 			"[nclm]update %d client locations x %d location scores, %d location group scores, %d of them empty, %d departed targets cleared\n",
 			len(clientLocationIds),
