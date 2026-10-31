@@ -73,7 +73,7 @@ func stV2RebuildWithdraw(opts docopt.Opts) {
 // stV2RecoveryUsage preserves a scheduled recovery source epoch's usage
 // census (VERSION2-FINAL.md §16 step 6) as a content-addressed artifact: a
 // manifest and its usage chunks, written into a new --out directory and,
-// with --store, put once each in the blob store's private recovery prefix.
+// with --blob, put once each in the blob store's private recovery prefix.
 // The process is read-only: PostgreSQL refuses every write it attempts, and
 // the census is one REPEATABLE READ, READ ONLY transaction through the
 // whole-window reader. Standard output carries counts and references only.
@@ -90,7 +90,7 @@ func stV2RecoveryUsage(opts docopt.Opts) {
 	if _, err := os.Lstat(out); !errors.Is(err, os.ErrNotExist) {
 		panic(fmt.Errorf("--out %q already exists or cannot be checked: %v", out, err))
 	}
-	store, _ := opts.Bool("--store")
+	store, _ := opts.Bool("--blob")
 	start := time.Now()
 	usage, err := controller.BuildStLedgerV2RecoveryUsage(ctx, epoch)
 	if err != nil {

@@ -159,7 +159,7 @@ Usage:
     bringyourctl st v2-unrecoverable --epoch=<epoch> --by=<operator>
     bringyourctl st v2-rebuild --epoch=<epoch> --by=<operator>
     bringyourctl st v2-rebuild-withdraw --epoch=<epoch> --by=<operator>
-    bringyourctl st v2-recovery-usage --epoch=<epoch> --out=<dir> [--store]
+    bringyourctl st v2-recovery-usage --epoch=<epoch> --out=<path> [--blob]
     bringyourctl st v2-recovery-record --epoch=<epoch> --usage=<manifest> [--dir=<dir>] --by=<operator>
     bringyourctl st v2-activation
     bringyourctl st v2-activation-clear --no_id=<no_id> --first_epoch=<first_epoch> --vault_v2_address=<vault_v2_address> --settlement_v2_address=<settlement_v2_address> --by=<operator>

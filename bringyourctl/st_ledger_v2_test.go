@@ -131,6 +131,75 @@ func TestStV2EpochCommandsRefusedWithdrawalExitsNonZero(t *testing.T) {
 	}
 }
 
+// §16 step 6: st v2-recovery-usage and st v2-recovery-record each select their
+// command alone with their options; a malformed epoch is refused before
+// anything is read, an existing --out before the census, and without
+// settlement v2 each command is refused.
+func TestStV2RecoveryCommands(t *testing.T) {
+	controller.SetStConfig(&controller.StConfig{Enabled: true})
+	defer controller.SetStConfig(nil)
+	refused := func(run func(docopt.Opts), opts docopt.Opts) string {
+		var reason string
+		func() {
+			defer func() { reason = fmt.Sprint(recover()) }()
+			run(opts)
+		}()
+		return reason
+	}
+	commands := map[string][]string{
+		"v2-recovery-usage":  {"st", "v2-recovery-usage", "--epoch=3", "--out=/nonexistent/usage", "--blob"},
+		"v2-recovery-record": {"st", "v2-recovery-record", "--epoch=3", "--usage=sha256:" + strings.Repeat("ab", 32), "--dir=/nonexistent/usage", "--by=operator@example"},
+	}
+	for command, args := range commands {
+		opts, err := docopt.ParseArgs(bringyourctlUsage, args, "synthetic")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, other := range []string{"v2-recovery-usage", "v2-recovery-record", "v2-unrecoverable", "v2-rebuild", "v2-activation", "payout-dry-run"} {
+			if selected, _ := opts.Bool(other); selected != (other == command) {
+				t.Fatalf("%s parsed with %s %t", command, other, selected)
+			}
+		}
+		if epoch, _ := opts.String("--epoch"); epoch != "3" {
+			t.Fatalf("%s parsed as %v", command, opts)
+		}
+	}
+	usage, err := docopt.ParseArgs(bringyourctlUsage, commands["v2-recovery-usage"], "synthetic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, _ := usage.String("--out"); out != "/nonexistent/usage" {
+		t.Fatalf("--out %q", out)
+	}
+	if blob, _ := usage.Bool("--blob"); !blob {
+		t.Fatal("--blob not set")
+	}
+	record, err := docopt.ParseArgs(bringyourctlUsage, commands["v2-recovery-record"], "synthetic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for option, want := range map[string]string{"--usage": "sha256:" + strings.Repeat("ab", 32), "--dir": "/nonexistent/usage", "--by": "operator@example"} {
+		if value, _ := record.String(option); value != want {
+			t.Fatalf("record parsed %s as %q", option, value)
+		}
+	}
+	if reason := refused(stV2RecoveryRecord, record); reason != "st ledger v2: not configured" {
+		t.Fatalf("record without settlement v2: %s", reason)
+	}
+	// An existing --out directory is refused before the census.
+	existing := docopt.Opts{"--epoch": "3", "--out": t.TempDir(), "--blob": false}
+	if reason := refused(stV2RecoveryUsage, existing); !strings.Contains(reason, "already exists") {
+		t.Fatalf("usage into an existing directory: %s", reason)
+	}
+	server.Testing_ReleasePgReadOnly()
+	for _, run := range []func(docopt.Opts){stV2RecoveryUsage, stV2RecoveryRecord} {
+		if reason := refused(run, docopt.Opts{"--epoch": "three", "--out": "/nonexistent/usage", "--by": "operator@example"}); reason != `bad --epoch "three": strconv.ParseUint: parsing "three": invalid syntax` {
+			t.Fatalf("a malformed epoch: %s", reason)
+		}
+		server.Testing_ReleasePgReadOnly()
+	}
+}
+
 // SV-9 (operator path, §8.6): st v2-activation and st v2-activation-clear each
 // select their command alone, the clear with every recorded value and who runs
 // it; a malformed number is refused before anything is read, and without a

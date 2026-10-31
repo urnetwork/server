@@ -55,14 +55,14 @@ Epoch 3's rows are never built inside the driver's epoch step, so the receiving 
 Run this on a host inside the data network that can run `bringyourctl st payout-dry-run`, with the production `st.yml`/`sn.yml` and blob store configuration. Start it only after epoch 4's root commit is confirmed, so it never overlaps epoch 4's read.
 
 ```
-bringyourctl st v2-recovery-usage --epoch=3 --out=<new dir> --store
+bringyourctl st v2-recovery-usage --epoch=3 --out=<new dir> --blob
 ```
 
 - **Read-only.** The process sets `default_transaction_read_only` on every PostgreSQL session (`server.RequirePgReadOnly`), so any write fails.
 - **The read.** The census is one REPEATABLE READ, READ ONLY transaction through the whole-window reader (6a523f17d, 7720f0deb). It covers about 404M contracts and is projected at 25–30 min with no completed production measurement.
   - It holds the xmin horizon while it runs. Watch the horizon age and the `[st]usage window … reading it whole` log line, as for epoch 4.
 - **Output.** Content-addressed objects in `<new dir>`: usage chunks of 40-byte rows (client id, network id, payout bytes, in client order) and a manifest, each file named by its `sha256`.
-  - `--store` also puts them, once each, under the blob store's `st/v2/recovery/sha256/` prefix, which `/sn/ledger/object` does not serve.
+  - `--blob` also puts them, once each, under the blob store's `st/v2/recovery/sha256/` prefix, which `/sn/ledger/object` does not serve.
   - Standard output prints counts and the manifest reference only.
 - **Keep the manifest reference.** Copy `<new dir>` off the host as a second copy. Usage rows are also retained in `st_provider_usage_archive` for about 52 weeks.
 - **On failure.** It changes nothing; run it again. Epoch 3 closed on 10-30, so a second run should produce the same manifest reference.

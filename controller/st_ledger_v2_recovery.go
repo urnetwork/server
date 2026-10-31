@@ -329,12 +329,12 @@ func stLedgerV2RecoveryScheduled(cfg *StConfig, epoch uint64) (*ledger.RecoveryS
 // It writes nothing: the caller runs it in a read-only process and stores
 // the result.
 func BuildStLedgerV2RecoveryUsage(ctx context.Context, epoch uint64) (*StLedgerV2RecoveryUsage, error) {
+	if !stConfig().LedgerV2Enabled() {
+		return nil, errStLedgerV2NotConfigured
+	}
 	cfg, client, err := stRequire()
 	if err != nil {
 		return nil, err
-	}
-	if !cfg.LedgerV2Enabled() {
-		return nil, errStLedgerV2NotConfigured
 	}
 	if _, err := stLedgerV2RecoveryScheduled(cfg, epoch); err != nil {
 		return nil, err
@@ -491,12 +491,12 @@ func StLedgerV2RecordRecoveryRows(ctx context.Context, epoch uint64, ref string,
 	if recordedBy == "" {
 		return nil, fmt.Errorf("%w: the record must name who makes it", ErrStLedgerV2RecoveryRefused)
 	}
+	if !stConfig().LedgerV2Enabled() {
+		return nil, errStLedgerV2NotConfigured
+	}
 	cfg, client, err := stRequire()
 	if err != nil {
 		return nil, err
-	}
-	if !cfg.LedgerV2Enabled() {
-		return nil, errStLedgerV2NotConfigured
 	}
 	if err := stLedgerV2ActivationAdmission(ctx, cfg); err != nil {
 		return nil, err
