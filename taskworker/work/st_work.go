@@ -145,6 +145,7 @@ func StSyncChain(
 	}
 
 	scheduleStLedgerV2Steps(clientSession, deploymentKey, state)
+	scheduleStV1Sweep(clientSession, deploymentKey)
 
 	return &StSyncChainResult{}, nil
 }

@@ -184,6 +184,16 @@ type StConfig struct {
 	// row is the incentive reader's reference. Empty means the validator that
 	// holds UID 1 with a validator permit (LEADERTOP.md §3.6).
 	ValidatorHotkeys [][32]byte
+	// V1SweepEpoch is the one v1 epoch at or after the pool's first v2 epoch
+	// whose windows carry the phase C sweep (VERSION2-FINAL.md §16): its v1
+	// close, a single-leaf root paying vault2 and that root's finalization,
+	// claim and absorption (st_v1_sweep.go). 0 means no sweep. Only the
+	// sweep chain acts on it; ordinary v1 admission keeps refusing it.
+	V1SweepEpoch uint64
+	// V1SweepRecoveryEpochs are the v1 source epochs whose root-missed
+	// funding the sweep record assigns to recovery by the source epoch's own
+	// rows; the rest of the sweep is ordinary funding (owner, 2026-10-31).
+	V1SweepRecoveryEpochs []uint64
 }
 
 // DeploymentKey is the exact chain/coordinator identity used to namespace
@@ -267,6 +277,8 @@ type stVaultFile struct {
 	DeployBlock            uint64                         `yaml:"deploy_block"`
 	PruneAlertPositions    uint64                         `yaml:"v2_prune_alert_positions"`
 	ValidatorHotkeys       []string                       `yaml:"validator_hotkeys"`
+	V1SweepEpoch           uint64                         `yaml:"v1_sweep_epoch"`
+	V1SweepRecoveryEpochs  []uint64                       `yaml:"v1_sweep_recovery_epochs"`
 
 	TestnetEnabled                bool                           `yaml:"testnet-enabled"`
 	TestnetAttemptUploadBudget    model.StAttemptUploadBudget    `yaml:"testnet-attempt-upload"`
@@ -302,6 +314,8 @@ type stVaultFile struct {
 	TestnetDeployBlock            uint64                         `yaml:"testnet-deploy-block"`
 	TestnetPruneAlertPositions    uint64                         `yaml:"testnet-v2-prune-alert-positions"`
 	TestnetValidatorHotkeys       []string                       `yaml:"testnet-validator-hotkeys"`
+	TestnetV1SweepEpoch           uint64                         `yaml:"testnet-v1-sweep-epoch"`
+	TestnetV1SweepRecoveryEpochs  []uint64                       `yaml:"testnet-v1-sweep-recovery-epochs"`
 }
 
 // stConfigFromVault lazily loads `st.yml`. Unlike verify.yml the resource is
@@ -376,6 +390,8 @@ type stSelectedConfig struct {
 	DepositTiers                                                                                                   []StDepositTier
 	DepositZeroRateAction                                                                                          string
 	ValidatorHotkeys                                                                                               []string
+	V1SweepEpoch                                                                                                   uint64
+	V1SweepRecoveryEpochs                                                                                          []uint64
 }
 
 func selectStConfig(profile string, f stVaultFile) (stSelectedConfig, error) {
@@ -400,8 +416,10 @@ func selectStConfig(profile string, f stVaultFile) (stSelectedConfig, error) {
 			DepositEpochCapRao:     f.TestnetDepositEpochCapRao, ReliabilityAMin: f.TestnetReliabilityAMin,
 			DepositZeroRateAction: f.TestnetDepositZeroRateAction,
 			BlockSeconds:          f.TestnetBlockSeconds, DeployBlock: f.TestnetDeployBlock,
-			PruneAlertPositions: f.TestnetPruneAlertPositions,
-			ValidatorHotkeys:    append([]string(nil), f.TestnetValidatorHotkeys...),
+			PruneAlertPositions:   f.TestnetPruneAlertPositions,
+			ValidatorHotkeys:      append([]string(nil), f.TestnetValidatorHotkeys...),
+			V1SweepEpoch:          f.TestnetV1SweepEpoch,
+			V1SweepRecoveryEpochs: append([]uint64(nil), f.TestnetV1SweepRecoveryEpochs...),
 		}, nil
 	case stconn.ProfileMainnet:
 		return stSelectedConfig{
@@ -421,8 +439,10 @@ func selectStConfig(profile string, f stVaultFile) (stSelectedConfig, error) {
 			DepositEpochCapRao: f.DepositEpochCapRao, ReliabilityAMin: f.ReliabilityAMin,
 			DepositZeroRateAction: f.DepositZeroRateAction,
 			BlockSeconds:          f.BlockSeconds, DeployBlock: f.DeployBlock,
-			PruneAlertPositions: f.PruneAlertPositions,
-			ValidatorHotkeys:    append([]string(nil), f.ValidatorHotkeys...),
+			PruneAlertPositions:   f.PruneAlertPositions,
+			ValidatorHotkeys:      append([]string(nil), f.ValidatorHotkeys...),
+			V1SweepEpoch:          f.V1SweepEpoch,
+			V1SweepRecoveryEpochs: append([]uint64(nil), f.V1SweepRecoveryEpochs...),
 		}, nil
 	default:
 		return stSelectedConfig{}, fmt.Errorf("st.yml unknown profile %q", profile)
@@ -513,6 +533,9 @@ func stConfigForProfile(profile string, file stVaultFile, rpcUrls []string) (*St
 		return nil, fmt.Errorf("st.yml coordinator, settlement vault, and reserve sink must be distinct")
 	}
 	if err := stLedgerV2ConfigAddresses(cfg, s.SettlementV2, s.VaultV2); err != nil {
+		return nil, fmt.Errorf("st.yml %s %w", profile, err)
+	}
+	if err := stV1SweepConfig(cfg, s.V1SweepEpoch, s.V1SweepRecoveryEpochs); err != nil {
 		return nil, fmt.Errorf("st.yml %s %w", profile, err)
 	}
 	if cfg.GenesisHash, err = stParseHex32(s.GenesisHash); err != nil {
