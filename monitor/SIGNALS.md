@@ -45818,6 +45818,30 @@ application is not implemented. Missing today: the `subnet_replay` enrollment
 provisioned, and `/sn/evidence/history` is not enumerated because its public
 contract requires a known kind and run id.
 
+With settlement v2 declared, the family reads the §22.7 cutover at the same
+checkpoint and leaves the sanctioned v1 carry sweep root out of the
+committed-artifact checks: listing, reading, byte verification, loss and the
+audit traversal. Its artifact hash names a sweep record, not a payout
+artifact, so the payout verifier would misjudge it as lost or tampered. While
+the cutover is unknown, any committed root could be the sweep, so every
+committed artifact stays undecided under a `settlement-v2-cutover` coverage
+gap naming `subnet-artifact-integrity` and `subnet-history-availability`,
+and the run is `partial:settlement-v2-cutover-unknown`.
+
+- **False-positive qualifier:** a sweep record absent from both origins, or
+  served as bytes that are not a payout artifact, is not a lost or tampered
+  payout artifact. The authoritative discriminator is the §22.7 sanction:
+  the root equals the single sweep leaf and is the operator's sanctioned
+  post-cutover root. Healthy control: the sweep record absent or served is
+  silent, while an ordinary committed artifact lost at every origin still
+  pages.
+- **False-negative qualifier:** the sweep record itself is neither listed,
+  read nor verified here, so its loss is invisible to this family; recovering
+  that needs a reader that checks the served bytes' sha256 against the
+  committed hash. While the cutover is unknown, a real loss or tampering of
+  an ordinary committed artifact is withheld; the coverage gap keeps the run
+  from reading healthy.
+
 ### 22.8a Enrolled payout artifact availability — partial reader
 Probe: `subnet-artifacts`
 
