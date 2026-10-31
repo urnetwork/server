@@ -71,6 +71,7 @@ func newBaselineManifestFixture(t *testing.T) *baselineManifestFixture {
 	files := map[string][]byte{
 		"README.md":                    []byte("Synthetic retained snapshot.\n"),
 		"verify.sh":                    verifier,
+		"final-preview.html":           []byte("<!doctype html><title>Synthetic preview</title><p>Original synthetic observation.</p>\n"),
 		"historical/results.csv":       []byte("value\n11\n"),
 		"addition/README.md":           []byte("Synthetic new evidence.\n"),
 		"addition/nested/results.json": payload,
@@ -174,6 +175,40 @@ func TestBaselineManifestRejectsReadmeChecksumDrift(t *testing.T) {
 	output, err := fixture.verify(t)
 	if err == nil || !strings.Contains(output, "README.md: FAILED") {
 		t.Fatalf("changed README accepted or misclassified: %v\n%s", err, output)
+	}
+}
+
+// Historical report annotations need explicit rebinding, never a verifier bypass.
+func TestBaselineManifestReportAnnotationNeedsExplicitDigestRebind(t *testing.T) {
+	fixture := newBaselineManifestFixture(t)
+	original, err := os.ReadFile(filepath.Join(fixture.root, "final-preview.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := os.ReadFile(filepath.Join(fixture.root, "MANIFEST.sha256"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	annotation := []byte("<!doctype html><title>Synthetic historical preview</title><aside>Superseded synthetic snapshot.</aside><p>Original synthetic observation.</p>\n")
+	fixture.write(t, "final-preview.html", annotation)
+	output, err := fixture.verify(t)
+	if err == nil || !strings.Contains(output, "final-preview.html: FAILED") {
+		t.Fatalf("stale report annotation digest accepted or misclassified: %v\n%s", err, output)
+	}
+	oldRecord := fmt.Sprintf("%x  final-preview.html\n", sha256.Sum256(original))
+	newRecord := fmt.Sprintf("%x  final-preview.html\n", sha256.Sum256(annotation))
+	if strings.Count(string(manifest), oldRecord) != 1 {
+		t.Fatal("synthetic report must have exactly one original digest")
+	}
+	fixture.write(t, "MANIFEST.sha256", []byte(strings.Replace(string(manifest), oldRecord, newRecord, 1)))
+	output, err = fixture.verify(t)
+	if err != nil || !strings.Contains(output, "sim-latency baseline snapshot: verified") {
+		t.Fatalf("explicit report-only digest rebind refused: %v\n%s", err, output)
+	}
+	fixture.write(t, "historical/results.csv", []byte("value\n29\n"))
+	output, err = fixture.verify(t)
+	if err == nil || !strings.Contains(output, "historical/results.csv: FAILED") {
+		t.Fatalf("report rebind hid independent payload drift: %v\n%s", err, output)
 	}
 }
 
