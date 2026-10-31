@@ -80,7 +80,7 @@
     "shared_epoch_baseline_sha256": "b6b0b13f6137b32fd5569f9ff16d78d8dac3d578ad40549c8ae33513cf447557",
     "completed_evaluation_duration_observed_minutes": "87–90",
     "private_scores_and_eligibility_not_published_here": true,
-    "public_open_round_checked_at": "2026-10-31T01:23:43.289260563Z"
+    "public_open_round_checked_at": "2026-10-31T02:03:01Z"
   },
   "frozen_evaluation": {
     "go_version": "go1.27.3",
@@ -298,13 +298,13 @@
       "seed_drawn_once_no_reroll": true,
       "original_second_seed_unstarted": true,
       "latest_measured_progress": {
-        "observed_at": "2026-10-31T01:37:45Z",
-        "phase": "baseline",
-        "baseline_completed": 4,
-        "candidate_completed": 0,
-        "unique_measurements_complete": 4,
+        "observed_at": "2026-10-31T02:45:29Z",
+        "phase": "candidate",
+        "baseline_completed": 9,
+        "candidate_completed": 2,
+        "unique_measurements_complete": 11,
         "unique_measurements_planned": 36,
-        "native_progress_updated_unix_ms": 1793410624408,
+        "native_progress_updated_unix_ms": 1793414664981,
         "counts_only_no_hidden_metric_values": true
       },
       "not_yet_accepted": true
@@ -418,7 +418,7 @@
     "retained_in_git": true,
     "warning": "The 164128-byte historical checkpoint retains all earlier failures, qualifications and source pins. Its old top-level status and next_action are superseded; do not execute them. Read history only for a specific supporting artifact."
   },
-  "observed_at": "2026-10-31T01:37:45Z",
+  "observed_at": "2026-10-31T02:45:29Z",
   "current_public_data_report": {
     "path": "server/connect/sim-latency/baseline/final-baseline.html",
     "sha256": "8d3521b462cd73d60831c0d2245643d0826547bef390fe6ed6c8f2a955f93dd1",
@@ -430,6 +430,24 @@
     "official_private_epoch_baseline_owner_scores_or_hidden_metrics_used": false,
     "old_report_preserved_byte_for_byte": "server/connect/sim-latency/baseline/final-baseline-v1-historical.html",
     "full_baseline_payload_reverification_deferred_until_timed_work_finishes": true
+  },
+  "future_g2_host_install_source_draft": {
+    "status": "independently_source_reviewed_only_not_formatted_compiled_tested_committed_or_deployed",
+    "next_epoch_only_never_an_epoch_one_grading_restoration_gate": true,
+    "source_paths": [
+      "server/controller/competition_source_host_install.go",
+      "server/controller/competition_trusted_instrument.go",
+      "server/controller/competition_source_host_instrument_test.go"
+    ],
+    "new_synthetic_test_roots": 8,
+    "focused_roots_with_existing_adjacent_tests": 21,
+    "actual_tests_executed": 0,
+    "packet": "/home/by/urnetwork/temp/g2-next-epoch-source-handoff-20261031.ZFLXsxBe",
+    "packet_manifest_sha256": "284e3c25dc1c28b2f6a49cc4cbb758565055ab0b05122192067aa3422a606db2",
+    "handoff_sha256": "cbd38af8c3079f3169ed87225cc526a5c37f5f0214ab3fe60a40ec291aa86ac7",
+    "max_formats_and_refreezes_then_low_executes_only_after_root_releases_timed_exclusion": true,
+    "custody_v2_source_packet_unchanged": true,
+    "do_not_deploy_or_claim_qualification_from_source_review": true
   },
   "phase_checkpoint_qualification": {
     "status": "focused tests, native API build, standalone guard and static checks passed; not a live release",
