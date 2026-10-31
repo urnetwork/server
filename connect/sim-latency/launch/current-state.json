@@ -298,18 +298,18 @@
       "seed_drawn_once_no_reroll": true,
       "original_second_seed_unstarted": true,
       "latest_measured_progress": {
-        "observed_at": "2026-10-31T05:26:09Z",
+        "observed_at": "2026-10-31T06:20:29Z",
         "job_position": 3,
         "job_role": "worse",
         "progress_path": "/var/lib/urnetwork/competition-held-out-fresh-single-c2-a9e8e1a7-20261028-v1/campaign/round-01/job-03-worse/artifacts/evaluation-progress.json",
-        "phase": "building",
+        "phase": "candidate",
         "baseline_completed": 9,
         "baseline_is_reused_not_new_measurements": true,
-        "candidate_completed": 0,
-        "completed_candidates_by_role": {"no-op": 9, "better": 9, "worse": 0},
-        "unique_measurements_complete": 27,
+        "candidate_completed": 6,
+        "completed_candidates_by_role": {"no-op": 9, "better": 9, "worse": 6},
+        "unique_measurements_complete": 33,
         "unique_measurements_planned": 36,
-        "native_progress_updated_unix_ms": 1793424161245,
+        "native_progress_updated_unix_ms": 1793427621111,
         "counts_only_no_hidden_metric_values": true
       },
       "current_job_clock": {
@@ -463,7 +463,7 @@
     "retained_in_git": true,
     "warning": "The 164128-byte historical checkpoint retains all earlier failures, qualifications and source pins. Its old top-level status and next_action are superseded; do not execute them. Read history only for a specific supporting artifact."
   },
-  "observed_at": "2026-10-31T05:26:09Z",
+  "observed_at": "2026-10-31T06:20:29Z",
   "current_public_data_report": {
     "path": "server/connect/sim-latency/baseline/final-baseline.html",
     "sha256": "8d3521b462cd73d60831c0d2245643d0826547bef390fe6ed6c8f2a955f93dd1",
@@ -528,6 +528,18 @@
       "Run the 21 new roots plus relevant existing metric-inventory and operational tests, preserving actual three-process logs and digests; perform actual native Grafana rendering separately.",
       "Only after qualification commit/pull/merge/push, then apply the additive completed-score index migration and deploy the main API/metrics producer and Grafana dashboard through the normal pipeline."
     ]
+  },
+  "pending_full_hold_readback_inspector": {
+    "status": "independently_source_reviewed_only_unformatted_uncompiled_unrun_uninstalled_unexecuted",
+    "source_packet": "/home/by/urnetwork/temp/r2-full-hold-inspector-source-20261031.7BR22FIz",
+    "source_manifest_sha256": "7e2a443553aad878cbed53bbe3dd43aac4631338a277db3f11d2d7c2427b22bd",
+    "synthetic_test_roots": 7,
+    "actual_tests_executed": 0,
+    "actual_database_inspections_executed": 0,
+    "existing_fresh_hold_readback_requirement_only_not_new_approval_criteria": true,
+    "not_a_current_grading_or_worker_restoration_gate": true,
+    "no_release_authority_from_source_review": true,
+    "post_timed_max_format_refreeze_then_low_qualification_requires_explicit_root_go": true
   },
   "phase_checkpoint_qualification": {
     "status": "focused tests, native API build, standalone guard and static checks passed; not a live release",
