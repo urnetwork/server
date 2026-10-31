@@ -135,7 +135,7 @@ func TestSourceBuildRealOfflinePipeline(t *testing.T) {
 		providerResponses++
 		stream := sourceTestToolStream(t, "run_prescribed_tests", "{}", false)
 		if providerResponses == 2 {
-			stream = winnerModelFixtureStream(t, `{"passed":true,"summary":"Synthetic provider observed the prescribed offline test result."}`)
+			stream = winnerModelFixtureStreamForModel(t, `{"passed":true,"summary":"Synthetic provider observed the prescribed offline test result."}`, sourceTestModelName)
 		} else if providerResponses != 1 {
 			t.Fatal("completed provider stream was requested again during actual-suite replay")
 		}
