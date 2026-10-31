@@ -894,13 +894,13 @@ func TestExtenderMeasurementWithdrawsAndRevokes(t *testing.T) {
 
 // Amendment 23 end to end. An extender whose probes fail is away: it leaves
 // the zone in the next dns pass, like any extender that may not be measured,
-// and the lag.dev sample stops offering it (A4). But it keeps its
-// certificate: nothing is withdrawn or revoked, its request stays issued, and
-// a renewal that comes due waits for it. Another extender's request, waiting
-// when it was deactivated, is neither refused nor ordered, and keeps its
-// place. Back within the grace, the name is published again with the
-// certificate it had and no new order, the due renewal goes through, and the
-// waiting request is issued.
+// and its name leaves the published set the lag.dev sample draws from (A4).
+// But it keeps its certificate: nothing is withdrawn or revoked, its request
+// stays issued, and a renewal that comes due waits for it. Another extender's
+// request, waiting when it was deactivated, is neither refused nor ordered,
+// and keeps its place. Back within the grace, the name is published again with
+// the certificate it had and no new order, the due renewal goes through, and
+// the waiting request is issued.
 func TestExtenderMeasurementKeepsAnAwayExtendersCertificate(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -909,7 +909,7 @@ func TestExtenderMeasurementKeepsAnAwayExtendersCertificate(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		offered := func() []string {
+		published := func() []string {
 			names := []string{}
 			for _, host := range controller.GetExtenderMeasurementHosts(ctx, config, server.NowUtc()) {
 				names = append(names, host.Name)
@@ -934,8 +934,8 @@ func TestExtenderMeasurementKeepsAnAwayExtendersCertificate(t *testing.T) {
 		}
 		connect.AssertEqual(t, runTestMeasurementIssue(t, ctx).Issued, 2)
 		connect.AssertEqual(t, runTestMeasurementDns(t, ctx).Names, 2)
-		if !slices.Equal(offered(), sortedNames(away, staying)) {
-			t.Fatalf("offered %v", offered())
+		if !slices.Equal(published(), sortedNames(away, staying)) {
+			t.Fatalf("published %v", published())
 		}
 		requestTestMeasurementCert(t, ctx, waiting, server.NowUtc())
 		pendingTime := model.Testing_GetNetworkExtenderMeasurement(ctx, waiting).PendingTime.UTC()
@@ -949,8 +949,8 @@ func TestExtenderMeasurementKeepsAnAwayExtendersCertificate(t *testing.T) {
 		assertTestMeasurementAddressRecords(t, env, map[string][]string{
 			testMeasurementName(staying) + " A": {"203.0.113.2"},
 		})
-		if !slices.Equal(offered(), sortedNames(staying)) {
-			t.Fatalf("offered %v while away", offered())
+		if !slices.Equal(published(), sortedNames(staying)) {
+			t.Fatalf("published %v while away", published())
 		}
 		awayCerts := model.Testing_GetNetworkExtenderMeasurementCerts(ctx, away)
 		connect.AssertEqual(t, len(awayCerts), 1)
@@ -979,8 +979,8 @@ func TestExtenderMeasurementKeepsAnAwayExtendersCertificate(t *testing.T) {
 			testMeasurementName(away) + " A":    {"203.0.113.1"},
 			testMeasurementName(staying) + " A": {"203.0.113.2"},
 		})
-		if !slices.Equal(offered(), sortedNames(away, staying)) {
-			t.Fatalf("offered %v once back", offered())
+		if !slices.Equal(published(), sortedNames(away, staying)) {
+			t.Fatalf("published %v once back", published())
 		}
 		// served again by the certificate it kept
 		connect.AssertEqual(t, env.ca.issuedCount(), 2)

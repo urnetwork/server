@@ -482,8 +482,9 @@ type ExtenderMeasurementCertResult struct {
 // installs an issued chain at once and reads again for each renewal (C6),
 // which answers issued with a new chain and expiry. It keeps serving an
 // installed certificate through none, pending and refused, and drops it at
-// once on withdrawn (C9) -- after a deactivation, an operator's override, or
-// its owner's opt-out.
+// once on withdrawn (C9) -- after a deactivation that lasted the away grace,
+// an operator's override, or its owner's opt-out. While it is away it is
+// answered issued with the chain it holds (amendment 23).
 //
 // The state is the extender's latest request's, with two exceptions:
 //
