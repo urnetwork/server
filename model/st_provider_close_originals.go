@@ -7,6 +7,8 @@ import "github.com/urfoundation/sn/payoutartifact"
 // Each row costs at least 512 bytes against the 512 KiB window allowance, so
 // 1025 rows prove overflow. Disjoint indexed prefixes can stop there; only a
 // complete window is sorted and encoded. Usage itself still reads every owner.
+// A window of more than MaxClosedWorkRecords owners never runs this statement:
+// its census can hold no record, so the usage statement alone reads it.
 //
 // Once the evidence is partitioned by report_id (PARTITION-MAINTENANCE-PLAN.md
 // C5), each contract's reports are read within the range of its report ids, so
