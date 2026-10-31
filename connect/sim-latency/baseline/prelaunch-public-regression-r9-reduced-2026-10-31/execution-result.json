@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-public-pilot-runner-terminal",
+  "plan": {
+    "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2/plan.json",
+    "sha256": "a22861dfd3d4e6bfd3e9a994b447fc535847cf7f3e4b92871dbce4ae97e79dd0"
+  },
+  "request": {
+    "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2/artifacts/worker-request.json",
+    "sha256": "0db8f072ec0ff32c6a4a423481f8857ef9f2b37781d5d51881d22e03af6c77e0"
+  },
+  "completed_at": "2026-10-31T00:21:59.301818116Z",
+  "runner_succeeded": true,
+  "failure": ""
+}

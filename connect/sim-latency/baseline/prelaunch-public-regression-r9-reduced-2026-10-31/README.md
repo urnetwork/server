@@ -27,6 +27,8 @@ Exact accepted artifacts:
 |---|---|
 | [Native proof](pilot-proof.json) | `983a4b554a85d04fcfbcded69b3c15a7ab8cdae8cbadd23544363f7c1d6e0436` |
 | [Measured direction](pilot-direction.json) | `7dda458aa8ed8558529f87dbd3d36b7afa762dadb65e846e2db706999ba13b86` |
+| [Nine-run control manifest](baseline.json) | `ee85182d88d4622b12fd9178065a06205fb8f64c5f1facd697e616ecb5369795` |
+| [Candidate score and variance](score.json) | `c9a63fd3e964f22d86b1c8b777f83eea18331d8f78509508929e6c1feab9dae3` |
 
 The original public plan is hash
 `a22861dfd3d4e6bfd3e9a994b447fc535847cf7f3e4b92871dbce4ae97e79dd0`,
@@ -36,7 +38,14 @@ The proof binds the complete raw artifact member census and both replay
 observations at their original protected paths; these copies match it byte for
 byte. No production job's private score or workload is published here.
 
-Next: publish the exact proof and direction receipts, complete the native
-after-public-pilot 13-source exclusion census, then prepare the approved fresh
-hidden-seed screen. That screen, independent review and new COMPLIANCE custody
+The exact proof and direction were committed, pulled and pushed at server
+`a1f50084a7dabc7204d87c926fd62b2f348b288e`; their protected publication
+receipts were independently rehashed. The native after-public-pilot census
+then completed with 13 sources and a second accepted two-replay check at
+2026-10-31 00:32:58.433657992 UTC. The private exclusion catalog's digest is
+`d5bdf06218e689141d3a0beb45a3fef9f30de018fd52fde7e4cf482ed2e7e899`;
+its private seed/exclusion contents are deliberately not published.
+
+Next: prepare the approved fresh hidden-seed screen. That screen, independent
+review and new COMPLIANCE custody
 remain required; this pilot alone does not release either production hold.

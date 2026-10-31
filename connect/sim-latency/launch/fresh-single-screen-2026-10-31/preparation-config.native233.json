@@ -1,0 +1,129 @@
+{
+  "fresh_single": {
+    "approval": {
+      "path": "/var/lib/urnetwork/competition-held-out-fresh-single-c2-a9e8e1a7-20261028-v1/approval.json",
+      "sha256": "2188428e3246b893e578c94fb3687ac15508146299a93c87a79236ac90fae646"
+    },
+    "declaration": {
+      "path": "/var/lib/urnetwork/competition-held-out-fresh-single-c2-a9e8e1a7-20261028-v1/declaration.json",
+      "sha256": "f483e625d3b11488133e38c5b2b71c62bbb660702f29167caf91191cee398308"
+    },
+    "original_bridge_template": {
+      "path": "/home/by/urnetwork/temp/c2-metadata-bridge-preparation-20261026.KNG6TfgM/artifacts/worker-request.json",
+      "sha256": "2114953f2f86218b9e92674a1f318d822a62e6663a8ae5e0e5375a806a655ec6"
+    },
+    "prior_failed_result": {
+      "path": "/var/lib/urnetwork/competition-held-out-two-b-c2-a9e8e1a7-20261027-v2/campaign/campaign-result.json",
+      "sha256": "c85bf64bb18418219b5bd6f2c1ae30d88d02612fab5ff7684e7d9dea5882fdda"
+    }
+  },
+  "protocol": "launch-3a-bridge-fresh-single-b-2026-10-28-v1",
+  "amendment": {
+    "approval": {
+      "path": "/usr/local/libexec/urnetwork/competition-calibration-3a-2f46d3cc6/approval.md",
+      "sha256": "a794618968d840163952b7b2058100fd87b71ef7ccc44919ba590c5a253f643c"
+    },
+    "original_plan": {
+      "path": "/usr/local/libexec/urnetwork/competition-calibration-3a-2f46d3cc6/original-plan.json",
+      "sha256": "24f9b6ea9fe6fbfb4381ca29535b81a1cd4966b397c701b04f5b09ac74eb11d8"
+    },
+    "original_base_sha": "c1f9dda603d6279666fca5d92b99c5663306c5f7",
+    "original_image_id": "sha256:002c39040ce23dee27b171c7e657f749c6a6d05b1e9b97d90ac87336470dbaf3",
+    "new_release": {
+      "path": "/home/by/urnetwork/temp/c2-metadata-bridge-preparation-20261026.KNG6TfgM/c2-instrument-release.json",
+      "sha256": "5a1504cbad9787f84c91ac87bc719abd6337a64723733d6cf7d052660753b850"
+    },
+    "margin_freeze": {
+      "path": "/home/by/urnetwork/temp/c2-bridge-20261026.UJH2e2mk/margin-freeze.json",
+      "sha256": "d264f48d38a1ab6bea44342cdbcf5e13cebf6e4c2811506e8086995e4600b646"
+    },
+    "bridge_plan": {
+      "path": "/var/lib/urnetwork/competition-bridge-reference-view-plan-20261027-v2/bridge-plan.json",
+      "sha256": "c70f5dfbad281c7d0ca70235043e400ca2a3b7fa49f2cf3be8ed8636b419723c"
+    },
+    "bridge_publication": {
+      "path": "/var/lib/urnetwork/competition-bridge-reference-view-plan-20261027-v2/publication.json",
+      "sha256": "3f9654a6b46699b6348029f6f904aaa34de1b110d2cc97599c485bffaa00dc50"
+    },
+    "bridge_inputs": {
+      "path": "/var/lib/urnetwork/competition-bridge-singleton-manifest-20261027-v1/bridge-inputs.json",
+      "sha256": "85cf983b773102ac5ad706ba1eff612330261baf54589f07a2eae95937c000ec"
+    },
+    "bridge_compatibility_receipt": {
+      "path": "/var/lib/urnetwork/competition-bridge-singleton-manifest-20261027-v1/bridge-compatibility.json",
+      "sha256": "2af963f0ca0cecef740744da974bd2d0c65a41a24b5d68cac277d076fe84c930"
+    }
+  },
+  "schema": 1,
+  "kind": "sim-latency-held-out-preparation",
+  "private_root": "/var/lib/urnetwork/competition-held-out-fresh-single-c2-a9e8e1a7-20261028-v1/campaign",
+  "public_plan_path": "/var/lib/urnetwork/competition-held-out-fresh-single-c2-a9e8e1a7-20261028-v1/public-plan.json",
+  "template": {
+    "path": "/var/lib/urnetwork/competition-held-out-fresh-single-c2-a9e8e1a7-20261028-v1/inputs/reference-template.json",
+    "sha256": "b657ab6bc87c5081a04ba6f542ede7bb97265f4264066e8b3ad89758de006e9c"
+  },
+  "stage_a_report": {
+    "path": "/home/by/urnetwork/temp/c2-bridge-20261026.UJH2e2mk/accepted-a-report.json",
+    "sha256": "e78c1a965d485d0a183f95f72797aa75c5c0ba22e52acbcf28749cfe6ecb3adb"
+  },
+  "stage_a_inputs": {
+    "path": "/home/by/urnetwork/temp/c2-bridge-20261026.UJH2e2mk/accepted-a-inputs.json",
+    "sha256": "abf5fb1656358e6c1f2f41bc965ae5fd5e8a4faf510c95f3d5c251a10b392c94"
+  },
+  "source_lock": {
+    "path": "/home/by/urnetwork/temp/mono-root-c2-release-20261026.PUHdHLML/source-lock.json",
+    "sha256": "239cea7fe6f77f989b75ba6efa677e8731640ba2fdd3690a35e6fe72103f3d11"
+  },
+  "exclusions": {
+    "path": "/var/lib/urnetwork/competition-held-out-fresh-single-c2-a9e8e1a7-20261028-v1/after-public-pilot-exclusions.json",
+    "sha256": "d5bdf06218e689141d3a0beb45a3fef9f30de018fd52fde7e4cf482ed2e7e899"
+  },
+  "references": {
+    "path": "/var/lib/urnetwork/competition-held-out-fresh-single-c2-a9e8e1a7-20261028-v1/inputs/references.json",
+    "sha256": "430087759eb866a9b79e482d6f14ae04e19f01c71e19abe1d6e26f88b2337656"
+  },
+  "qualification": {
+    "path": "/var/lib/urnetwork/competition-held-out-fresh-single-c2-a9e8e1a7-20261028-v1/inputs/tool-qualification.native233.bound.json",
+    "sha256": "96934517166227683fdaf57b6476ee6de18059be551c39c7f15eb1fe08acadaa"
+  },
+  "generator_files": [
+    {
+      "analyzer": {
+        "path": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/controller/competition_controller.go",
+        "sha256": "51dd6733723bf05a55f9511b0663e5742f64a2328f20a412c96ca0c5848554a2"
+      },
+      "frozen": {
+        "path": "/home/by/urnetwork/temp/c2-bridge-20261026.UJH2e2mk/source-auth-server/controller/competition_controller.go",
+        "sha256": "62417b9440925646ac5bc0f3095fe391afbcdb1dfcb0e10fb116bff4df88dcd9"
+      }
+    },
+    {
+      "analyzer": {
+        "path": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/controller/competition_sim_latency_controller.go",
+        "sha256": "9bb9d34ffee85a9375f44ce09610d241737bad591a84a5712dd1aa0f22f76db0"
+      },
+      "frozen": {
+        "path": "/home/by/urnetwork/temp/c2-bridge-20261026.UJH2e2mk/source-auth-server/controller/competition_sim_latency_controller.go",
+        "sha256": "9bb9d34ffee85a9375f44ce09610d241737bad591a84a5712dd1aa0f22f76db0"
+      }
+    }
+  ],
+  "scripts": [
+    {
+      "path": "/usr/local/libexec/urnetwork/competition-c2-a9e8e1a7-metadata-fbb2566b-evidence5g-v3/container/evaluator.sh",
+      "sha256": "0cccda1d1dcc227f30fda800ddb9bbb28e29dd48cc62885da637fcd4eb4eb00b"
+    },
+    {
+      "path": "/usr/local/libexec/urnetwork/competition-c2-a9e8e1a7-metadata-fbb2566b-evidence5g-v3/container/network-boundary.sh",
+      "sha256": "9ab82a9a8bb2272934461472509c15df4242f14859351dadd6dfcb2a1cd27cb7"
+    },
+    {
+      "path": "/usr/local/libexec/urnetwork/competition-c2-a9e8e1a7-metadata-fbb2566b-evidence5g-v3/container/compose.yml",
+      "sha256": "f4ca3a5eedfd5f081fbb507fc0102fa03ce11c095b406bcc0f7dc0119b5e0464"
+    },
+    {
+      "path": "/usr/local/libexec/urnetwork/competition-c2-a9e8e1a7-metadata-fbb2566b-evidence5g-v3/container/hash-local-mount.sh",
+      "sha256": "94ee94b9cc42dfe2f7236d49cc24e26b7bd79e9b63c5d582315b7fd1878dcb86"
+    }
+  ]
+}
