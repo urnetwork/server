@@ -19823,6 +19823,17 @@ Missing inventory, source, range, or diagnostic collectors produces a WARN
 `control-route-pressure-unobservable` finding; independently proven hot slots
 still emit `control-route-pressure`.
 
+The completions, the request denominator and the 100-completion floor exclude
+requests the API answered from their body alone, before authentication:
+packs of only `PeerAudit` frames (CPUOPT3 D3), counted per process by
+`urnetwork_connect_control_discarded_requests_total{abuse}`. Such a request
+spends about 0.1 ms and no handler time, so counting it would dilute the mean
+and the canceled share of the requests that do work (a quarter of all control
+requests in 2026-10). The thresholds are unchanged. A release without the
+counter reads as zero discards; a discard counted just ahead of its route
+completion at a scrape boundary cannot take a denominator below zero. The
+alert reports `requests_5m` without them and `discarded_5m` beside it.
+
 The phase and frame diagnostics read only the listed partitions: the four
 phases and the nine frame message kinds below. A partition outside those
 lists is skipped. Before CPUOPT3 D3 any unlisted partition made its process

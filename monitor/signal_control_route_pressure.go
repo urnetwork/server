@@ -62,6 +62,9 @@ func controlRoutePressureQuery(environment string) string {
 	sum := "urnetwork_http_request_duration_seconds_sum{" + route + "}"
 	requests := "urnetwork_http_requests_total{" + route + "}"
 	canceled := "urnetwork_http_requests_total{" + route + `,outcome="canceled"}`
+	// requests answered from their body alone, before authentication
+	// (controller/connect_control_discard.go); zero on a release without it
+	discarded := "urnetwork_connect_control_discarded_requests_total{" + base + "}"
 	inflight := "urnetwork_http_requests_inflight{" + route + "}"
 	start := "process_start_time_seconds{" + base + "}"
 	parts := []string{}
@@ -74,6 +77,7 @@ func controlRoutePressureQuery(environment string) string {
 	add("seconds", "increase("+sum+"[5m])")
 	add("requests", "sum by("+identity+")(increase("+requests+"[5m]))")
 	add("canceled", "sum by("+identity+")(increase("+canceled+"[5m])) or on("+identity+") (0 * increase("+count+"[5m]))")
+	add("discarded", "sum by("+identity+")(increase("+discarded+"[5m])) or on("+identity+") (0 * increase("+count+"[5m]))")
 	add("inflight", inflight)
 	add("inflight_min", "min_over_time("+inflight+"[5m])")
 	add("samples", "count_over_time("+count+"[5m])")
@@ -161,7 +165,7 @@ func parseControlRoutePressure(payload, environment string, now time.Time) ([]*c
 		}
 		name := labels["monitor_metric"]
 		switch name {
-		case "start", "start_time", "count", "seconds", "requests", "canceled", "inflight", "inflight_min", "samples", "early_samples", "count_time", "seconds_time", "inflight_time", "requests_time", "seconds_samples", "seconds_early_samples", "inflight_samples", "inflight_early_samples":
+		case "start", "start_time", "count", "seconds", "requests", "canceled", "discarded", "inflight", "inflight_min", "samples", "early_samples", "count_time", "seconds_time", "inflight_time", "requests_time", "seconds_samples", "seconds_early_samples", "inflight_samples", "inflight_early_samples":
 		case "phase", "frame":
 			partition := labels["phase"]
 			allowed := controlRoutePhases[:]
@@ -241,11 +245,16 @@ func evaluateControlRoutePressure(processes []*controlRouteProcess, expected map
 		if !complete {
 			gaps = append(gaps, process.host+"/"+process.block+"[phase/frame telemetry unavailable]")
 		}
-		if values["count"] < 100 {
+		// Discarded requests did no handler work. A discard counted just
+		// ahead of its route completion at a scrape boundary can leave the
+		// difference slightly short, never below zero.
+		count := math.Max(0, values["count"]-values["discarded"])
+		requests := math.Max(0, values["requests"]-values["discarded"])
+		if count < 100 {
 			continue
 		}
-		mean := values["seconds"] / values["count"]
-		share := values["canceled"] / values["requests"]
+		mean := values["seconds"] / count
+		share := values["canceled"] / requests
 		if share < 0.20 || mean < 5 {
 			continue
 		}
@@ -258,8 +267,8 @@ func evaluateControlRoutePressure(processes []*controlRouteProcess, expected map
 			target: process.host, frame: process.block, sustain: sustain,
 			symptom:   "Traffic-bearing control requests are canceled while spending substantial time inside the API handler.",
 			mechanism: "Control-plane residence can delay provide-secret registration and contract replies. A provider_unresponsive probe state can include these failures; this is not evidence that the provider exit is dark.",
-			baseline:  "Per newest API process over 5m: WARN requires >=100 completions, >=20% canceled and >=5s mean; PAGE additionally requires >=50% canceled, >=10s mean and >=100 inflight throughout sampled range, sustained twice.",
-			observed:  fmt.Sprintf("requests_5m=%.0f canceled_5m=%.0f canceled_share=%.1f%% mean_seconds=%.3f inflight=%.0f inflight_min_5m=%.0f %s", values["requests"], values["canceled"], 100*share, mean, values["inflight"], values["inflight_min"], diagnostics),
+			baseline:  "Per newest API process over 5m, excluding requests discarded before authentication: WARN requires >=100 completions, >=20% canceled and >=5s mean; PAGE additionally requires >=50% canceled, >=10s mean and >=100 inflight throughout sampled range, sustained twice.",
+			observed:  fmt.Sprintf("requests_5m=%.0f discarded_5m=%.0f canceled_5m=%.0f canceled_share=%.1f%% mean_seconds=%.3f inflight=%.0f inflight_min_5m=%.0f %s", requests, values["discarded"], values["canceled"], 100*share, mean, values["inflight"], values["inflight_min"], diagnostics),
 			evidence:  "Reset-aware counter increases and underlying source timestamps are joined on the exact newest process; the process and range must span five minutes. Cancellation includes every recorded status, including none and 200.",
 			context:   "Mean is not p95; canceled/none is not an observed HTTP 499. Legitimate holds, caller churn or response loss can contribute. HTTP 200 and frame handler_ok may carry application rejection; completions are not ACKs or distinct providers. Phases do not isolate PG pool wait.",
 			action:    "Compare authenticate versus controller phase residence/inflight, then HTTP-ingress frame completion outcomes and frame residence by fixed message. Corroborate with separate PG pool/CPU and same-source probe DNS path, registration, guard and durable measured coverage. Do not weaken provider/credit guards or infer a DNS-server fault from this signal.",
@@ -279,7 +288,7 @@ func controlRouteComplete(process *controlRouteProcess, now time.Time) bool {
 	if process.invalid {
 		return false
 	}
-	for _, name := range []string{"start", "start_time", "count", "seconds", "requests", "canceled", "inflight", "inflight_min", "samples", "early_samples", "count_time", "seconds_time", "inflight_time", "requests_time", "seconds_samples", "seconds_early_samples", "inflight_samples", "inflight_early_samples"} {
+	for _, name := range []string{"start", "start_time", "count", "seconds", "requests", "canceled", "discarded", "inflight", "inflight_min", "samples", "early_samples", "count_time", "seconds_time", "inflight_time", "requests_time", "seconds_samples", "seconds_early_samples", "inflight_samples", "inflight_early_samples"} {
 		if _, ok := process.values[name]; !ok {
 			return false
 		}

@@ -14,7 +14,7 @@ import (
 func controlRouteFixture(now time.Time, instance string) *controlRouteProcess {
 	values := map[string]float64{
 		"start": float64(now.Add(-time.Hour).Unix()),
-		"count": 1000, "requests": 1000, "canceled": 800, "seconds": 12000,
+		"count": 1000, "requests": 1000, "canceled": 800, "seconds": 12000, "discarded": 0,
 		"inflight": 500, "inflight_min": 200, "samples": 10, "early_samples": 2,
 		"seconds_samples": 10, "seconds_early_samples": 2, "inflight_samples": 10, "inflight_early_samples": 2,
 	}
@@ -226,6 +226,7 @@ func TestControlRoutePressureQueryUsesBoundedFixedRouteAndHistory(t *testing.T) 
 		"increase(", "[5m]", "count_over_time(", "[1m] offset 4m", "min_over_time(",
 		"timestamp(", "process_start_time_seconds", `ingress="http"`,
 		"urnetwork_connect_control_http_phase_inflight", "urnetwork_connect_control_frames_inflight",
+		"urnetwork_connect_control_discarded_requests_total",
 	} {
 		if !strings.Contains(query, required) {
 			t.Fatalf("query missing %q", required)
@@ -233,5 +234,57 @@ func TestControlRoutePressureQueryUsesBoundedFixedRouteAndHistory(t *testing.T) 
 	}
 	if strings.Contains(query, `status="none"`) || strings.Contains(query, "quantile") || strings.Contains(query, "provider_id") {
 		t.Fatalf("query narrows cancellation or invents identity/quantile: %s", query)
+	}
+}
+
+// A request the api answers from its body alone (an audit-only pack,
+// controller/connect_control_discard.go) spends no handler time. Discards
+// leave both denominators, so they cannot dilute a hot route's mean or
+// canceled share below the thresholds, and the thresholds stay as they are.
+func TestControlRoutePressureSubtractsDiscards(t *testing.T) {
+	now := time.Date(2026, 10, 31, 20, 0, 0, 0, time.UTC)
+	process := controlRouteFixture(now, "synthetic-current")
+	// 1,000 requests that do work at a 6 s mean with 25% canceled, and 333
+	// discards: a quarter of all completions
+	for name, value := range map[string]float64{
+		"count": 1333, "requests": 1333, "discarded": 333, "seconds": 6000, "canceled": 250,
+	} {
+		process.values[name] = value
+	}
+	alerts := runControlRouteFixture(t, now, controlRouteFixtureJson(t, now, process))
+	alert := requireAlertClass(t, alerts, "control-route-pressure")
+	if len(alerts) != 1 || alert.Severity != Severity(tierWarn) || alert.Sustain != 1 {
+		t.Fatalf("discards diluted the route below its thresholds: %+v", alerts)
+	}
+	for _, want := range []string{"requests_5m=1000", "discarded_5m=333", "canceled_share=25.0%", "mean_seconds=6.000"} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("missing %q: %s", want, alert.Markdown())
+		}
+	}
+
+	// fewer than 100 requests that do work is not traffic-bearing, however
+	// many were discarded, and a discard count ahead of a scrape boundary
+	// neither alerts nor makes the slot unobservable
+	for _, values := range []map[string]float64{
+		{"count": 5099, "requests": 5099, "discarded": 5000, "seconds": 1980, "canceled": 99},
+		{"count": 50, "requests": 50, "discarded": 60, "seconds": 1000, "canceled": 40},
+	} {
+		quiet := controlRouteFixture(now, "synthetic-current")
+		for name, value := range values {
+			quiet.values[name] = value
+		}
+		if alerts := runControlRouteFixture(t, now, controlRouteFixtureJson(t, now, quiet)); len(alerts) != 0 {
+			t.Fatalf("discards made a quiet process alert: %+v", alerts)
+		}
+	}
+
+	// the cell is required like every other: a process without it is
+	// incomplete, not one with no discards
+	missing := controlRouteFixture(now, "synthetic-current")
+	delete(missing.values, "discarded")
+	alerts = runControlRouteFixture(t, now, controlRouteFixtureJson(t, now, missing))
+	requireAlertClass(t, alerts, "control-route-pressure-unobservable")
+	if len(alerts) != 1 {
+		t.Fatalf("a process without its discard cell became evidence: %+v", alerts)
 	}
 }
