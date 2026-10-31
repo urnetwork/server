@@ -520,6 +520,21 @@ func TestUpdateClientScoresPublishesEmptyTargets(t *testing.T) {
 				t.Fatalf("supply %v=%d is outside the bounded vocabulary", key, count)
 			}
 		}
+		// and took the publisher lease for it, so this process alone
+		// publishes it
+		server.Redis(ctx, func(r server.RedisClient) {
+			lease, err := r.Get(ctx, clientScoreSupplyPublisherKey).Result()
+			if err != nil || lease != clientScoreSupplyLease(supply.measuredAt, clientScoreSupplyMetrics.publisher) {
+				t.Fatalf("the export holds no publisher lease for its measurement: %q (%v)", lease, err)
+			}
+			ttl, err := r.PTTL(ctx, clientScoreSupplyPublisherKey).Result()
+			if err != nil || ttl <= 0 || clientScoreSupplyPublisherLeaseTtl < ttl {
+				t.Fatalf("the publisher lease has %s left (%v), want up to %s", ttl, err, clientScoreSupplyPublisherLeaseTtl)
+			}
+		})
+		if clientScoreSupplyMetrics.publication(ctx) != supply {
+			t.Fatal("the process that ran the export does not publish its measurement")
+		}
 
 		server.Redis(ctx, func(r server.RedisClient) {
 			for _, key := range []string{

@@ -91,11 +91,54 @@ func TestExtenderActivateResultFieldNames(t *testing.T) {
 		"ip",
 		"ip_version",
 		"record",
+		// the optional carriers that were left out of an accepted activation,
+		// and why (EXTENDER.md C2a, connect#230)
+		"refused_carriers",
 	}
 	got := jsonFieldNames(reflect.TypeOf(controller.ExtenderActivateResult{}))
 	if !slices.Equal(got, want) {
 		t.Fatalf("ExtenderActivateResult fields = %v, want exactly %v", got, want)
 	}
+	wantRefusal := []string{"carrier", "error", "port"}
+	if got := jsonFieldNames(reflect.TypeOf(controller.ExtenderCarrierRefusal{})); !slices.Equal(got, wantRefusal) {
+		t.Fatalf("ExtenderCarrierRefusal fields = %v, want exactly %v", got, wantRefusal)
+	}
+}
+
+// An accepted activation names each optional carrier it left out (C2a,
+// connect#230): the carrier, the port it was probed on and why, one entry per
+// dns port. The document is literal, because it is what an extender reads.
+// An answer that left nothing out carries no list at all.
+func TestExtenderActivateRefusedCarriersWireForm(t *testing.T) {
+	resultBytes, err := json.Marshal(&controller.ExtenderActivateResult{
+		Activated: true,
+		Carriers:  []string{"tcp", "dns"},
+		DnsPorts:  []int{4053},
+		RefusedCarriers: []*controller.ExtenderCarrierRefusal{
+			{Carrier: "quic", Port: 443, Error: "timeout: no recent network activity"},
+			{Carrier: "dns", Port: 53, Error: "context deadline exceeded"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("the activation result did not encode: %v", err)
+	}
+	connect.AssertEqual(
+		t,
+		string(resultBytes),
+		`{"activated":true,"carriers":["tcp","dns"],"dns_ports":[4053],"refused_carriers":[`+
+			`{"carrier":"quic","port":443,"error":"timeout: no recent network activity"},`+
+			`{"carrier":"dns","port":53,"error":"context deadline exceeded"}]}`,
+	)
+
+	acceptedBytes, err := json.Marshal(&controller.ExtenderActivateResult{
+		Activated:       true,
+		Carriers:        []string{"tcp"},
+		RefusedCarriers: []*controller.ExtenderCarrierRefusal{},
+	})
+	if err != nil {
+		t.Fatalf("the activation result did not encode: %v", err)
+	}
+	connect.AssertEqual(t, string(acceptedBytes), `{"activated":true,"carriers":["tcp"]}`)
 }
 
 // The dns port list travels both ways under the same name (L2): a provider

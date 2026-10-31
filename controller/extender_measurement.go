@@ -60,6 +60,15 @@ const (
 
 	// Why an extender is withdrawn when its owner opts out (C4, C9).
 	ExtenderMeasurementOptOutReason = "the extender's owner opted out of measurement"
+
+	// How long a deactivated extender keeps its certificate (C9, amendment
+	// 23). Its probes fail when its host restarts or its network drops, and it
+	// comes back with the same name. Withdrawing at once revoked the
+	// certificate and ordered a new one at each return, and the CA issues one
+	// name at most five times in seven days (lag.dev/ops/letsencrypt.md §5.1).
+	// A week of grace keeps an extender that comes back within it to no new
+	// order, and one that stays away longer to at most one a week.
+	ExtenderMeasurementAwayGrace = 7 * 24 * time.Hour
 )
 
 // ExtenderMeasurementName is an extender's measurement name (N1): its id
@@ -226,22 +235,40 @@ func ExtenderMeasurementEligibleAddresses(
 }
 
 // ExtenderMeasurementWithdrawReason is why an extender's live certificates
-// must be withdrawn (C9), empty while they may stay: the extender was
-// deactivated, or it is in the gated tier or a canary, which an operator's
-// override made it (A9). An address change withdraws nothing: the name is the
-// extender's id, and the reconcile moves its records (C8).
-func ExtenderMeasurementWithdrawReason(extender *model.NetworkExtender) string {
+// must be withdrawn at `now` (C9), empty while they may stay: the extender is
+// in the gated tier or a canary, which an operator's override made it (A9), or
+// it was deactivated and is no longer away (ExtenderMeasurementAway). An
+// address change withdraws nothing: the name is the extender's id, and the
+// reconcile moves its records (C8).
+func ExtenderMeasurementWithdrawReason(extender *model.NetworkExtender, now time.Time) string {
 	switch {
 	case extender == nil:
 		return "the extender is gone"
-	case !extender.Active:
-		return "the extender is not active"
 	case extender.DirectoryTier != connect.ExtenderDirectoryTierOpen:
 		return "the extender moved to the gated tier"
 	case extender.CanaryChannel != "":
 		return "the extender became a canary"
+	case !extender.Active && !ExtenderMeasurementAway(extender, now):
+		return "the extender is not active"
 	}
 	return ""
+}
+
+// ExtenderMeasurementAway reports whether an open tier extender that is no
+// canary was deactivated less than ExtenderMeasurementAwayGrace before `now`
+// (C9, amendment 23). Like any extender that is not active, it is out of the
+// zone and the lag.dev sample (C8, A4), and nothing is ordered for it. Unlike
+// one that left, it keeps its certificate, which serves again with no new
+// order when it activates within the grace. The deactivation is the
+// extender's revoke_time, which only the probes set and an activation clears;
+// an inactive extender without one is not away.
+func ExtenderMeasurementAway(extender *model.NetworkExtender, now time.Time) bool {
+	return extender != nil &&
+		!extender.Active &&
+		extender.RevokeTime != nil &&
+		now.Before(extender.RevokeTime.Add(ExtenderMeasurementAwayGrace)) &&
+		extender.DirectoryTier == connect.ExtenderDirectoryTierOpen &&
+		extender.CanaryChannel == ""
 }
 
 // One extender that may serve the measurement api now (C8, A4): its name, the
@@ -455,8 +482,9 @@ type ExtenderMeasurementCertResult struct {
 // installs an issued chain at once and reads again for each renewal (C6),
 // which answers issued with a new chain and expiry. It keeps serving an
 // installed certificate through none, pending and refused, and drops it at
-// once on withdrawn (C9) -- after a deactivation, an operator's override, or
-// its owner's opt-out.
+// once on withdrawn (C9) -- after a deactivation that lasted the away grace,
+// an operator's override, or its owner's opt-out. While it is away it is
+// answered issued with the chain it holds (amendment 23).
 //
 // The state is the extender's latest request's, with two exceptions:
 //

@@ -171,10 +171,10 @@ func BuildParams(in ParamsInput) map[string]string {
 		p["cta_url"] = CtaUrl(in.SiteUrl, in.Template, in.Token)
 		p["providers_online"] = FormatCount(in.ProvidersOnline)
 		if in.Variant == VariantActivated {
-			p["connect_days"] = FormatCount(in.ConnectDays)
 			if daysActive < 2 {
 				daysActive = 2
 			}
+			p["connect_days"] = FormatCount(connectDaysOfFirst(in.ConnectDays, daysActive))
 			p["days_active"] = FormatCount(daysActive)
 			p["platform"] = in.Platform
 			p["countries_online"] = FormatCount(in.CountriesOnline)
@@ -194,7 +194,7 @@ func BuildParams(in ParamsInput) map[string]string {
 		p["trial_end_at"] = trialEnd
 	case TemplateE4Feedback:
 		if in.Variant == VariantEngaged {
-			p["connect_days"] = FormatCount(in.ConnectDays)
+			p["connect_days"] = FormatCount(connectDaysOfFirst(in.ConnectDays, daysActive))
 			p["days_active"] = FormatCount(daysActive)
 			for r := 1; r <= 5; r++ {
 				p["rating_url_"+strconv.Itoa(r)] = FeedbackUrl(in.SiteUrl, in.Token, "r="+strconv.Itoa(r))
@@ -210,4 +210,14 @@ func BuildParams(in ParamsInput) map[string]string {
 		}
 	}
 	return p
+}
+
+// connectDaysOfFirst is the connect_days that the activated and engaged texts
+// quote as "You've connected on {connect_days} of your first {days_active}
+// days". Connection days are UTC calendar days, while days_active counts whole
+// days since sign-up, so a network that signed up late in a UTC day and
+// connects every day has more connection days than whole days. It connected
+// on every one of its first days then, and never on more days than it has had.
+func connectDaysOfFirst(connectDays int, daysActive int) int {
+	return min(connectDays, daysActive)
 }

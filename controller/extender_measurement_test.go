@@ -303,27 +303,78 @@ func TestExtenderMeasurementEligibleAddresses(t *testing.T) {
 	}
 }
 
-// A certificate is withdrawn when its extender is deactivated, or is in the
-// gated tier or a canary (C9), and for nothing else: neither an address
-// change nor a tcp port keeps it from being served again, so neither revokes
-// it.
+// A deactivated open tier extender that is no canary, its deactivation time
+// set by its probes, as it is `ago` before now.
+func testMeasurementAwayExtender(ago time.Duration) *model.NetworkExtender {
+	extender := testMeasurementExtender()
+	extender.Active = false
+	revokeTime := server.NowUtc().Add(-ago)
+	extender.RevokeTime = &revokeTime
+	return extender
+}
+
+// A certificate is withdrawn when its extender is in the gated tier or a
+// canary, or was deactivated and stayed away past the grace (C9, amendment
+// 23), and for nothing else: neither an address change nor a tcp port keeps it
+// from being served again, nor does an absence shorter than the grace, so
+// none of them revokes it.
 func TestExtenderMeasurementWithdrawReason(t *testing.T) {
-	connect.AssertEqual(t, ExtenderMeasurementWithdrawReason(testMeasurementExtender()), "")
+	now := server.NowUtc()
+	connect.AssertEqual(t, ExtenderMeasurementWithdrawReason(testMeasurementExtender(), now), "")
 	otherPort := testMeasurementExtender()
 	otherPort.TcpPort = 8443
-	connect.AssertEqual(t, ExtenderMeasurementWithdrawReason(otherPort), "")
+	connect.AssertEqual(t, ExtenderMeasurementWithdrawReason(otherPort, now), "")
+	connect.AssertEqual(t, ExtenderMeasurementWithdrawReason(testMeasurementAwayExtender(time.Hour), now), "")
+	connect.AssertEqual(t, ExtenderMeasurementWithdrawReason(testMeasurementAwayExtender(ExtenderMeasurementAwayGrace-time.Minute), now), "")
 
 	gated := testMeasurementExtender()
 	gated.DirectoryTier = connect.ExtenderDirectoryTierGated
 	canary := testMeasurementExtender()
 	canary.CanaryChannel = connect.ExtenderChannelGated
+	left := testMeasurementAwayExtender(ExtenderMeasurementAwayGrace + time.Minute)
+	// an inactive extender whose probes did not deactivate it
 	inactive := testMeasurementExtender()
 	inactive.Active = false
-	for _, extender := range []*model.NetworkExtender{gated, canary, inactive, nil} {
-		if ExtenderMeasurementWithdrawReason(extender) == "" {
+	// the override acts at once, away or not (A9)
+	awayGated := testMeasurementAwayExtender(time.Hour)
+	awayGated.DirectoryTier = connect.ExtenderDirectoryTierGated
+	awayCanary := testMeasurementAwayExtender(time.Hour)
+	awayCanary.CanaryChannel = connect.ExtenderChannelGated
+	for _, extender := range []*model.NetworkExtender{gated, canary, left, inactive, awayGated, awayCanary, nil} {
+		if ExtenderMeasurementWithdrawReason(extender, now) == "" {
 			t.Fatalf("a certificate stays for %+v", extender)
 		}
 	}
+	connect.AssertEqual(t, ExtenderMeasurementWithdrawReason(left, now), "the extender is not active")
+	connect.AssertEqual(t, ExtenderMeasurementWithdrawReason(awayGated, now), "the extender moved to the gated tier")
+}
+
+// An extender is away from its deactivation until the grace ends, and only an
+// open tier extender that is no canary is (amendment 23). An active one is
+// not away, and while away it still may not be measured: it is out of the zone
+// like any extender that is not active (C8).
+func TestExtenderMeasurementAway(t *testing.T) {
+	now := server.NowUtc()
+	connect.AssertEqual(t, ExtenderMeasurementAway(testMeasurementExtender(), now), false)
+	connect.AssertEqual(t, ExtenderMeasurementAway(nil, now), false)
+
+	away := testMeasurementAwayExtender(time.Hour)
+	connect.AssertEqual(t, ExtenderMeasurementAway(away, now), true)
+	connect.AssertEqual(t, ExtenderMeasurementAway(away, away.RevokeTime.Add(ExtenderMeasurementAwayGrace-time.Second)), true)
+	connect.AssertEqual(t, ExtenderMeasurementAway(away, away.RevokeTime.Add(ExtenderMeasurementAwayGrace)), false)
+	if _, reason := ExtenderMeasurementEligibleAddresses(away, []*model.NetworkExtenderAddress{testMeasurementAddress("203.0.113.7", connect.ExtenderCarrierTcp)}); reason == "" {
+		t.Fatalf("an away extender may be measured")
+	}
+
+	inactive := testMeasurementExtender()
+	inactive.Active = false
+	connect.AssertEqual(t, ExtenderMeasurementAway(inactive, now), false)
+	gated := testMeasurementAwayExtender(time.Hour)
+	gated.DirectoryTier = connect.ExtenderDirectoryTierGated
+	connect.AssertEqual(t, ExtenderMeasurementAway(gated, now), false)
+	canary := testMeasurementAwayExtender(time.Hour)
+	canary.CanaryChannel = connect.ExtenderChannelGated
+	connect.AssertEqual(t, ExtenderMeasurementAway(canary, now), false)
 }
 
 // The record field (C10): a record carries the extender's id as its

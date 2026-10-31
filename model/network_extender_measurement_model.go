@@ -269,7 +269,8 @@ func scanNetworkExtenderMeasurementCert(result server.PgResult) *NetworkExtender
 //
 // Anything else is pending: other names or another key, or the same request
 // again after it was refused or its certificate was withdrawn (C9), which is
-// how an extender that comes back is given a certificate again. An extender
+// how an extender that comes back after the away grace is given a certificate
+// again; within the grace it still holds its own (amendment 23). An extender
 // that was already waiting keeps its place in the queue (C7), and the same
 // names and key keep the backoff of their failed orders, so asking again
 // cannot hurry the CA.
@@ -516,6 +517,11 @@ func RefuseNetworkExtenderMeasurementRequest(
 // pending, so while the cap is spent the same capped requests come back every
 // pass; without this order, `limit` of them waiting longer would keep every
 // request the cap does not hold from ever being read.
+//
+// The request of an extender that is not active is left out: nothing may be
+// ordered for it, and it keeps its pending_time, so it is back in its place
+// when the extender activates again (amendment 23). Left in, deactivated
+// extenders that waited longest could fill `limit` too.
 func GetPendingNetworkExtenderMeasurements(
 	ctx context.Context,
 	now time.Time,
@@ -530,7 +536,14 @@ func GetPendingNetworkExtenderMeasurements(
 			FROM network_extender_measurement
 			WHERE
 				state = $1 AND
-				(retry_time IS NULL OR retry_time <= $2)
+				(retry_time IS NULL OR retry_time <= $2) AND
+				NOT EXISTS (
+					SELECT 1
+					FROM network_extender
+					WHERE
+						network_extender.extender_id = network_extender_measurement.extender_id AND
+						NOT network_extender.active
+				)
 			ORDER BY
 				EXISTS (
 					SELECT 1
@@ -1042,6 +1055,12 @@ func HasUnexpiredNetworkExtenderMeasurementCertForNames(ctx context.Context, nam
 // GetNetworkExtenderMeasurementCertsForRenewal reads the live certificates
 // whose renewal time has come (C6), soonest due first. Each comes with its
 // extender and the extender's latest request, whose key a renewal follows.
+//
+// A certificate of an extender that is not active is left out: it is not
+// renewed while its extender is away, and is read again, already due, when the
+// extender activates (amendment 23). Left in, certificates of deactivated
+// extenders, due the longest, could fill `limit` and keep every serving
+// extender's renewal from being read.
 func GetNetworkExtenderMeasurementCertsForRenewal(
 	ctx context.Context,
 	now time.Time,
@@ -1058,7 +1077,14 @@ func GetNetworkExtenderMeasurementCertsForRenewal(
 				withdraw_time IS NULL AND
 				renewed_time IS NULL AND
 				$1 < not_after AND
-				renew_time <= $1
+				renew_time <= $1 AND
+				NOT EXISTS (
+					SELECT 1
+					FROM network_extender
+					WHERE
+						network_extender.extender_id = network_extender_measurement_cert.extender_id AND
+						NOT network_extender.active
+				)
 			ORDER BY renew_time ASC, cert_id ASC
 			LIMIT $2
 			`,

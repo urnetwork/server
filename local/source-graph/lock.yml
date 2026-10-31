@@ -10,7 +10,7 @@ siblings:
   # revision.
   - repository: urnetwork/connect
     path: connect
-    ref: 89d943bb7ba498d3c967e38efa7621880a9ea465
+    ref: 89b15920a5fa9c733fb4400443b35408abbdc258
   - repository: urnetwork/glog
     path: glog
     ref: 1c4954b017d9e8140a4e7020f914eb27410a41c6

@@ -356,7 +356,7 @@ func refreshSnClaimedFleetsNow(ctx context.Context) {
 		// with the priority set fresh, rotate stale members out for the
 		// claimed members still waiting for room
 		if rotation := model.RotateVerifyCohort(ctx, settings); rotation != nil && (0 < rotation.Rotated || rotation.Restored) {
-			glog.Infof("[sn]verify cohort rotation: %d stale members out for %d waiting (census %d, active %d, restored %t)\n", rotation.Rotated, rotation.Demand, rotation.Census, rotation.Active, rotation.Restored)
+			glog.Infof("[sn]verify cohort rotation: %d stale members out for %d waiting (census %d, active %d of %d before rotation and %d after, restored %t)\n", rotation.Rotated, rotation.Demand, rotation.Census, rotation.Active+rotation.Rotated, settings.CohortLifetimeLimit, rotation.Active, rotation.Restored)
 		}
 	}, func(err error) {
 		glog.Infof("[sn]claimed fleet refresh failed: %s\n", err)
