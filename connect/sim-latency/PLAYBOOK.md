@@ -38,6 +38,18 @@ Storage and operational readiness do not authorize hold release. Await the
 owner's explicit provisional-grading or revised-calibration decision; keep the
 November 5 pre-finalization fences and do not create an accepted marker.
 
+At **12:14:48 UTC**, authenticated readiness again returned 200 with all eleven
+checks true and grading/publication still held. The normal control-build SN pin
+was corrected in `8b84ba73e` after a deterministic old-pin capability failure
+and three fresh passing controls. By **12:25:26 UTC**, its clean exact-graph CLI, twelve release
+roots and 147 feature executions passed: 159 outer top-level passes, thirteen
+subtest passes and ten package passes, zero failures/skips. The counter-only
+stop and original event logs remain preserved; only unstarted feature tests
+continued. See the [qualification record](launch/CONTROL-RELEASE-GRAPH-QUALIFICATION-2026-10-31.json).
+This is not new calibration, future-image qualification or permission to release
+either hold. The [current checkpoint](launch/current-state.json) names the
+remaining operator decision and deployment boundaries.
+
 The operator score dashboard and future-epoch G2 host handoff code are pushed
 in `766b48358`; 49 focused roots passed three times, zero failures/skips, against
 the actual merged server source with private diagnostic dependency exports.
@@ -146,8 +158,13 @@ scoring readiness or permit relabeling failed calibration as accepted.
 
 Epoch 1 keeps inclusive 95–105% request-count and received-byte median bands.
 The owner approved **95% floors with no upper bounds from epoch 2**, under
-`minimum-work/1` and scorer `/2`; the future instrument/image still needs
-qualification. Do not change or rejudge epoch 1. See the
+`minimum-work/1` and scorer `/2`. The exact protected patch now has a separate
+[operator technical approval](launch/G2-INSTRUMENT-APPROVAL-RECORD-2026-10-31.json)
+and its native-validated
+[approval payload](launch/G2-INSTRUMENT-OPERATOR-APPROVAL-2026-10-31.json).
+This does not choose the future product/winner, create an instrument child,
+qualify a new image, configure the live future policy or activate it. Those
+boundaries remain open. Do not change or rejudge epoch 1. See the
 [current/next G2 announcement](README.md#current-and-next-epoch-g2-work-volume-policy)
 and the [current checkpoint](launch/current-state.json) before deployment.
 
