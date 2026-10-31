@@ -502,7 +502,10 @@ func loadOnboardingFacts(ctx context.Context, row *model.NetworkOnboarding, now 
 			offerState = onboarding.OfferStateExpired
 		}
 	}
-	connectDays, connected := model.NetworkConnectDays(ctx, row.NetworkId, row.CreatedAt)
+	// every step that asks whether the network connected (E1, E2 and the
+	// feedback step) reads this one fact: the connection rows, connect.day and
+	// connect.first, as the send plan's connect_days counts them
+	_, connected := model.NetworkConnectDays(ctx, row.NetworkId, row.CreatedAt)
 	facts := onboarding.Facts{
 		Path:              path,
 		HasEmail:          row.Email,
@@ -514,13 +517,12 @@ func loadOnboardingFacts(ctx context.Context, row *model.NetworkOnboarding, now 
 		Bounced:           row.Bounced,
 		Complained:        row.Complained,
 		ComplainedStep:    row.ComplainedStep,
-		HasConnected:      connected || model.HasOnboardingEvent(ctx, row.NetworkId, model.EventConnectFirst),
+		HasConnected:      connected,
 		WidgetAdded:       model.HasOnboardingEvent(ctx, row.NetworkId, model.EventWidgetAdded),
 		OfferState:        offerState,
 		FeedbackSubmitted: model.NetworkHasFeedback(ctx, row.NetworkId, row.CreatedAt) || model.HasOnboardingEvent(ctx, row.NetworkId, model.EventFeedbackSubmitted),
 		EmailOpens:        model.CountOnboardingEvents(ctx, row.NetworkId, model.EventEmailOpened),
 	}
-	_ = connectDays
 	return facts, offer
 }
 

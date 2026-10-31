@@ -339,3 +339,42 @@ func TestParamsMatchManifests(t *testing.T) {
 		t.Error("slugs")
 	}
 }
+
+// The activated and engaged texts read "You've connected on {connect_days} of
+// your first {days_active} days" (support inbox 8146). connect_days counts UTC
+// calendar days from every connection record since sign-up, and days_active
+// whole days since sign-up, so a network that signed up late in a UTC day and
+// connected daily has more connection days than whole days. The text says it
+// connected on all of them, never on more days than it has had.
+func TestConnectDaysNeverExceedDaysActive(t *testing.T) {
+	for _, c := range []struct {
+		template    string
+		variant     string
+		daysActive  int
+		connectDays int
+		wantConnect string
+		wantActive  string
+	}{
+		{TemplateE2Widget, VariantActivated, 3, 4, "3", "3"},
+		{TemplateE2Widget, VariantActivated, 3, 2, "2", "3"},
+		// the activated text's floor of 2 days applies first
+		{TemplateE2Widget, VariantActivated, 1, 3, "2", "2"},
+		{TemplateE4Feedback, VariantEngaged, 6, 7, "6", "6"},
+		{TemplateE4Feedback, VariantEngaged, 5, 3, "3", "5"},
+		// engaged by email opens alone
+		{TemplateE4Feedback, VariantEngaged, 5, 0, "0", "5"},
+	} {
+		p := BuildParams(ParamsInput{
+			Template:    c.template,
+			Variant:     c.variant,
+			DaysActive:  c.daysActive,
+			ConnectDays: c.connectDays,
+			Token:       "T",
+			SiteUrl:     "https://ur.io",
+		})
+		if p["connect_days"] != c.wantConnect || p["days_active"] != c.wantActive {
+			t.Errorf("%s/%s with %d connection days in %d days: connected on %s of %s days, want %s of %s",
+				c.template, c.variant, c.connectDays, c.daysActive, p["connect_days"], p["days_active"], c.wantConnect, c.wantActive)
+		}
+	}
+}
