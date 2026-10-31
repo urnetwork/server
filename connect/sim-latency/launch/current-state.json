@@ -3,7 +3,7 @@
   "kind": "sim-latency-launch-preparation-checkpoint",
   "objective": "Ready to launch at 2026-10-28T00:00:00Z",
   "requested_launch_deadline_met": false,
-  "status": "R2_public_pilot_after13_accepted_fresh_hidden_screen_running_not_accepted",
+  "status": "R2_hidden_screen_complete_failed_reference_ordering_real_worker_restored_held",
   "production_intake_open": true,
   "grading_started": true,
   "production_activated": true,
@@ -13,9 +13,9 @@
     "owner_feedback_reverified_at": "2026-10-31T01:23:57.355780549Z",
     "server_main_minimum": "0a23176f53e4abf64a8364225dde572464b028f1",
     "sn_main_minimum": "2cb50ac4733e62cb30a127295cdcfabcf9c93222",
-    "database_version_confirmed": 901,
-    "api_readiness_http_status": 503,
-    "strict_readiness_false_expected_while_real_worker_is_offline": true,
+    "database_version_confirmed": 902,
+    "api_readiness_http_status": 200,
+    "strict_readiness_false_expected_while_real_worker_is_offline": false,
     "info_http_status": 200,
     "intake_ready_under_active_maintenance": true,
     "completed_owner_poll_http_status": 200,
@@ -26,9 +26,12 @@
     "latest_owner_feedback_verification": "server/connect/sim-latency/launch/API-DEPLOYMENT-VERIFIED-2026-10-31.json",
     "latest_verification_scope": "Read-only live contract behavior, not an exact main binary commit or all-replica identity proof. The earlier release observation is historical, not a season pin.",
     "new_config_vault_or_epoch_one_image_deployment_required": false,
-    "negative_owner_feedback_probe_alone_is_not_binary_identity_proof": true
+    "negative_owner_feedback_probe_alone_is_not_binary_identity_proof": true,
+    "api_readiness_verified_at": "2026-10-31T06:59:36.524939Z",
+    "api_readiness_operator_authenticated": true,
+    "api_readiness_all_eleven_checks_true": true
   },
-  "next_action": "Observe ONLY the ALREADY RUNNING fresh hidden screen: unit urnetwork-held-out-fresh-single-execute-native233-20261031-v1.service, PID389555, InvocationIDcbc7a9ae9a4e49338dc2f85f58759a65, session88021. The nine shared controls, nine no-op and nine better runs are complete; better execution and replay cleanup are verified, not performance acceptance. CURRENT job is job-03-worse, started05:21:42Z with its own original08:21:42Z per-job deadline, but the EARLIER whole-owner administrative stop07:04:37Z still applies. Monitor its artifacts/evaluation-progress.json, not a completed role. Its baseline digest and original control identity match; cached controls are not new measurements. Observer1315 finished only its better-phase watch; observer1389 watches the SAME live native owner and final role. Never restart/prepare/reroll/execute because an observer ends or times out. Finish the fixed36runs; no concurrent tests/builds/scoring. ORIGINAL maintenance expiry07:19:42.289655Z is nonrenewable. After all strict owners join, prove original inventory/no evidence mounts/free lock before restoring the real worker WITH BOTH HOLDS ACTIVE before expiry, even if review/custody remains. Qualify the new48-test custody-view helper only after timed work, then actual scoped COMPLIANCE retention/readback and independent frozen-protocol result review. Only genuine accepted calibration permits marker/fence cancellation/fresh independent hold CAS releases. Epoch-one source/image/policy/baseline remain unchanged; new dashboard and future G2 source work are not current grading gates.",
+  "next_action": "Do NOT restart the completed native hidden screen: all36unique measurements completed, original session88021 exited0, unit is inactive/PID0. Frozen campaign-result21d7de792a84c1b1e2f1736122d82c6765f916555d3ef5e8cfb4402c05975625 is complete=true but ACCEPTED=FALSE: better<no-op failed, no-op<worse passed. Keep this failed result and original second seed unstarted; no reroll/newmeasurement/protocol change is authorized. Original strict owners joined, original3container/4network inventory restored, no F/P open files/mounts, canonical slot free. Real existing worker restored06:51:55Z WITH BOTH HOLDS ACTIVE, before original07:19:42.289655Z offline expiry. Operator-authenticated Ready200/all11 at06:59:36.524939Z; grading remains paused/publication held. Complete independent raw-lineage review and preserve failed F/V/C evidence with qualified custody helper. A first QA preflight stopped before Go because it checked moving historical reference files; unchanged-source corrected immutable-input admission is approved, actual48x3 tests still unproven. Await owner's explicit decision on provisional grading versus revised calibration; no accepted marker, fence cancellation or hold release is authorized by this failed result. Main dashboard/future G2 code remains unqualified WIP, not current grading gates.",
   "production": {
     "api": "https://api.bringyour.com",
     "season_id": "sim-latency-production-20261028-r2",
@@ -40,11 +43,11 @@
     "source_generation": 0,
     "activation_generation": 1,
     "worker_service": "urnetwork-competition-production-r2.service",
-    "worker_last_started_at": "2026-10-30T21:24:05Z",
+    "worker_last_started_at": "2026-10-31T06:51:55Z",
     "worker_final_stopped_at": "2026-10-30T21:25:22Z",
-    "worker_main_pid": 0,
-    "worker_remains_online_for_real_readiness": false,
-    "worker_offline_under_verified_maintenance_not_fake_readiness": true,
+    "worker_main_pid": 3975481,
+    "worker_remains_online_for_real_readiness": true,
+    "worker_offline_under_verified_maintenance_not_fake_readiness": false,
     "evaluation_hold": {
       "revision": 4,
       "active": true,
@@ -59,7 +62,7 @@
       "active": true
     },
     "latest_durable_queue_snapshot": {
-      "at": "2026-10-31T04:16:34.561127055Z",
+      "at": "2026-10-31T06:50:46.014858204Z",
       "total": 18,
       "queued": 14,
       "succeeded": 4,
@@ -69,18 +72,22 @@
       "worker_slot_unleased": true,
       "last_job_started_at": "2026-10-30T13:50:40.962535Z",
       "last_job_completed_at": "2026-10-30T15:20:43.662409Z",
-      "path": "/var/lib/urnetwork/competition-production-r2-20261029-v1/readonly-health-20261031T0416-v1/audit.private.json",
-      "sha256": "bc21adc4a35c1ef9c366a9ef99be39ea009400dcace2dc37da8c87f1e68c9501",
+      "path": "/var/lib/urnetwork/competition-production-r2-20261029-v1/readonly-health-before-held-restore-20261031.zC2N7ysL/audit.private.json",
+      "sha256": "b5597ea97a0454c322fd3e113faffe001ac5b5a19eec8e0b4bf7615cbf6214a1",
       "database_transaction_read_only": true,
       "database_transaction_isolation": "repeatable read",
-      "database_version_observed": 901,
+      "database_version_observed": 902,
       "audit_scope_warning": "Queue, hold, host and deployed-version facts only. This historical auditor knows migration identities through 892; unknown later catalog identities are not evidence of corruption or a current-schema qualification.",
       "later_intake_may_increase_queue": true
     },
     "shared_epoch_baseline_sha256": "b6b0b13f6137b32fd5569f9ff16d78d8dac3d578ad40549c8ae33513cf447557",
     "completed_evaluation_duration_observed_minutes": "87–90",
     "private_scores_and_eligibility_not_published_here": true,
-    "public_open_round_checked_at": "2026-10-31T04:21:03Z"
+    "public_open_round_checked_at": "2026-10-31T06:53:48Z",
+    "worker_invocation_id": "5e17f2e2c96a41a8b156ab9119affc96",
+    "held_restoration_receipt": "/var/lib/urnetwork/competition-production-r2-20261029-v1/held-worker-restoration-20261031-v1.json",
+    "held_restoration_receipt_sha256": "6517ffdab805466063b74d95de1e6e5a45d60d90da56bcc41175d9c84c19436d",
+    "worker_restored_before_original_maintenance_expiry": true
   },
   "frozen_evaluation": {
     "go_version": "go1.27.3",
@@ -105,7 +112,7 @@
   },
   "approved_changes": {
     "owner_record": "server/connect/sim-latency/launch/PRIVATE-FEEDBACK-NEXT-G2-APPROVAL-2026-10-30.json",
-    "implementation_status": "Main API behavior and private completed-owner feedback were reverified on October31. Exact maintenance hold4 remains active. Public pilot18runs and AFTER13 are accepted; the existing single-seed hidden screen is running. Full calibration acceptance, scoped custody and the future evaluator-image qualification remain pending.",
+    "implementation_status": "Private owner feedback is deployed and verified. Public pilot18 and AFTER13 accepted. Full36-run hidden screen completed cleanly but FAILED frozen reference ordering; it is not accepted calibration. Original real worker restored with evaluation4/reward1 ACTIVE, genuine operator Ready200/all11 verified. Await explicit owner decision; no new measurement, accepted marker, timer cancellation or release authorized.",
     "current_round_private_feedback": {
       "owning_submitter_credential_only": true,
       "shared_Apex_credential_requires_individual_miner_mapping": true,
@@ -275,18 +282,22 @@
       "no_private_catalog_contents_published": true
     },
     "fresh_hidden_screen": {
-      "status": "native_execute_running_observe_same_owner_only",
+      "status": "native_execute_terminal_complete_but_rejected_by_frozen_protocol",
       "unit": "urnetwork-held-out-fresh-single-execute-native233-20261031-v1.service",
       "observer_session": 88021,
-      "main_pid": 389555,
-      "invocation_id": "cbc7a9ae9a4e49338dc2f85f58759a65",
+      "main_pid": 0,
+      "invocation_id": null,
       "started_at": "2026-10-31T00:57:09Z",
       "execution_claim_at": "2026-10-31T00:58:01.061111468Z",
       "campaign_id": "c14d842b-ed8c-4615-a941-70f229f469cc",
       "expected_measurements": 36,
       "shared_control_runs": 9,
       "candidate_runs_per_role": 9,
-      "roles_in_order": ["no-op", "better", "worse"],
+      "roles_in_order": [
+        "no-op",
+        "better",
+        "worse"
+      ],
       "first_baseline_container_and_simulator_processes_observed": true,
       "public_plan_sha256": "527aa5213d4d4f306679ddfe990ea94f52d7fe1da6a0ff12f9786ee196a38779",
       "public_commitment_commit": "8966cebcbd16b7d87dbb40604b95cd002a7870ca",
@@ -298,25 +309,30 @@
       "seed_drawn_once_no_reroll": true,
       "original_second_seed_unstarted": true,
       "latest_measured_progress": {
-        "observed_at": "2026-10-31T06:20:29Z",
+        "observed_at": "2026-10-31T06:49:43Z",
         "job_position": 3,
         "job_role": "worse",
         "progress_path": "/var/lib/urnetwork/competition-held-out-fresh-single-c2-a9e8e1a7-20261028-v1/campaign/round-01/job-03-worse/artifacts/evaluation-progress.json",
-        "phase": "candidate",
+        "phase": "complete",
         "baseline_completed": 9,
         "baseline_is_reused_not_new_measurements": true,
-        "candidate_completed": 6,
-        "completed_candidates_by_role": {"no-op": 9, "better": 9, "worse": 6},
-        "unique_measurements_complete": 33,
+        "candidate_completed": 9,
+        "completed_candidates_by_role": {
+          "no-op": 9,
+          "better": 9,
+          "worse": 9
+        },
+        "unique_measurements_complete": 36,
         "unique_measurements_planned": 36,
-        "native_progress_updated_unix_ms": 1793427621111,
+        "native_progress_updated_unix_ms": 1793429326323,
         "counts_only_no_hidden_metric_values": true
       },
       "current_job_clock": {
         "started_at": "2026-10-31T05:21:42Z",
         "original_deadline": "2026-10-31T08:21:42Z",
         "per_job_limit_seconds": 10800,
-        "earlier_administrative_stop_still_applies": "2026-10-31T07:04:37Z"
+        "earlier_administrative_stop_still_applies": "2026-10-31T07:04:37Z",
+        "closed": true
       },
       "no_op_execution_metadata": {
         "complete_r9_candidate": true,
@@ -352,7 +368,32 @@
         "new_control_runs_for_worse": 0,
         "production_epoch_baseline_unchanged": true
       },
-      "not_yet_accepted": true
+      "original_main_pid": 389555,
+      "original_invocation_id": "cbc7a9ae9a4e49338dc2f85f58759a65",
+      "observer_session_terminal": true,
+      "native_exit_code": 0,
+      "terminal_observed_at": "2026-10-31T06:49:43Z",
+      "not_accepted": true,
+      "rejected_by_frozen_protocol": true,
+      "result": {
+        "path": "/var/lib/urnetwork/competition-held-out-fresh-single-c2-a9e8e1a7-20261028-v1/campaign/campaign-result.json",
+        "sha256": "21d7de792a84c1b1e2f1736122d82c6765f916555d3ef5e8cfb4402c05975625",
+        "complete": true,
+        "accepted": false,
+        "correctly_ordered_seeds": 0,
+        "reasons": [
+          "first_committed_seed_not_correctly_ordered"
+        ],
+        "closed_at": "2026-10-31T06:49:31.245313281Z"
+      },
+      "predicate_review": {
+        "better_raw_less_than_no_op": false,
+        "no_op_raw_less_than_worse": true,
+        "no_op_placeable_and_not_takeover": true,
+        "all_three_complete_without_failure": true,
+        "independent_full_raw_lineage_review_pending": true,
+        "private_performance_values_not_published": true
+      }
     },
     "fresh_custody_helper": {
       "old_39_test_packet_known_hardlink_incompatible_not_ready": true,
@@ -364,7 +405,14 @@
       "compiled_or_installed": false,
       "original_evidence_unchanged_no_snapshot_created": true,
       "qualification_after_timed_measurements_only": true,
-      "never_grants_calibration_acceptance_or_release": true
+      "never_grants_calibration_acceptance_or_release": true,
+      "status": "post_format_source_reviewed_first_qa_preflight_failed_before_go_corrected_input_admission_approved_tests_not_yet_proven",
+      "post_format_manifest_sha256": "e0f379699ab40e99f08991f360b95baf36134cd5e855ead8334124368f67383e",
+      "first_qa_preflight_failure": "Historical original-reference shards point at moving main; no Go/build/test ran. Actual closed NVL and module-cache sources remain pinned. Corrected driver verifies actual module/package resolution and immutable content, retaining historical manifest identities.",
+      "first_qa_preflight_failure_sha256": "fc4996fd19c52c297983ee2097ce4538d6b13c129f7b7519ae5162f12fb603cd",
+      "corrected_driver": "/home/by/urnetwork/temp/custody-v2-qualification-20261031.RAYYsnJY/run.sh",
+      "corrected_driver_sha256": "354602f36034f1faaeee25537836047d36c2606d02aeeb9fb4d092d011f27e59",
+      "failed_calibration_will_be_retained_as_failure": true
     },
     "maintenance": {
       "owner_record": "server/connect/sim-latency/launch/CALIBRATION-MAINTENANCE-INTAKE-OWNER-APPROVAL-2026-10-30.json",
@@ -384,7 +432,9 @@
       "revision_four_is_not_an_inactive_grading_release": true,
       "truthful_host_checks_required": true,
       "no_synthetic_heartbeats": true,
-      "queued_evaluation_clocks_remain_unstarted": true
+      "queued_evaluation_clocks_remain_unstarted": true,
+      "real_worker_restored_before_original_expiry": true,
+      "worker_offline": false
     },
     "maintenance_recovery_audit": {
       "read_only_independent_review_completed": true,
@@ -397,7 +447,10 @@
       "unknown_resources_require_fail_closed_not_prefix_or_label_pruning": true,
       "before_worker_restart_require_joined_clients_original_inventory_no_evidence_binds_and_free_canonical_lock": true,
       "fresh_hold_and_reward_identity_readback_required": true,
-      "no_new_recovery_code_timer_or_runtime_change_installed_by_this_audit": true
+      "no_new_recovery_code_timer_or_runtime_change_installed_by_this_audit": true,
+      "actual_joined_cleanup_original_inventory_and_free_lock_verified": true,
+      "real_worker_restored_with_both_holds_before_original_expiry": true,
+      "strict_ready_all_eleven_checks_verified": true
     },
     "native_public_plan_preparation": {
       "unit": "urnetwork-public-pilot-prepare-native233-20261030-v1.service",
@@ -421,17 +474,18 @@
       "do_not_run_prepare_again": true
     },
     "next_serial_actions": [
-      "Public pilot18runs and native AFTER13 are ACCEPTED, exact proof/direction and new hidden declaration/public commitment are pushed. Do not repeat any preparation or seed draw.",
-      "Observe only active native hidden unit urnetwork-held-out-fresh-single-execute-native233-20261031-v1.service/session88021/PID389555/InvocationIDcbc7a9ae9a4e49338dc2f85f58759a65. Finish36fixedmeasurements, no concurrent tests/builds/scoring; no restart on observation timeout.",
-      "Preserve all outcomes/failed lineages and the original unstarted second seed. The whole owner stops by07:04:37Z, preserving recovery time before original07:19:42.289655Z expiry; never renew authority or accept a partial screen.",
-      "After joined strict calibration/replay/census cleanup, original inventory/no evidence mounts/free lock proof and fresh hold identities, restore the real worker WITH BOTH HOLDS ACTIVE before expiry even if independent review/custody remains.",
-      "Only after timed work, format/refreeze and independently qualify the corrected48-test custody-view helper; retain actual new evidence with COMPLIANCE exact-version readback. Frozen-protocol independent result review remains separate.",
-      "Only genuine accepted calibration plus review/custody authorizes accepted-marker creation, obsolete-fence cancellation and separate fresh hold CAS releases. Epoch-one evaluator/policy/baseline unchanged; future G2 image qualification separate."
+      "Original native hidden execution is terminal exit0 with36unique measurements; DO NOT restart/prepare/reroll/reveal. Its frozen native result is accepted=false because better<no-op failed. Preserve it and all earlier failed lineages, plus the unstarted historical second seed.",
+      "Real worker has been restored with both holds active before original offline expiry; operator-authenticated Ready200/all11 is genuine. Verify advancing15s heartbeat/Grafana routing; do not fabricate signals.",
+      "Finish independent raw-lineage/census review and corrected immutable-input custody-helper qualification; retain failed F/V/C evidence with exact COMPLIANCE versions/readback without relabeling failure as acceptance.",
+      "Await explicit owner's provisional-grading/revised-calibration decision. Keep holds and Nov5 fences; no accepted marker, new measurements or independent release authority is implied by successful execution/cleanup/readiness.",
+      "Dashboard and future epoch2 G2 source remain unqualified WIP. They are not grading gates; qualify and checkpoint them separately after the operational recovery."
     ],
     "serial_action_handoff": "server/connect/sim-latency/launch/reduced-pilot-operator-2026-10-30/NEXT-SERIAL-ACTION.json",
     "serial_action_handoff_sha256": "c15cdedc85bdbdcf04695005a2fa094ed4927e0e1613ee18a1952be552406fdd",
     "live_hidden_screen_report": "server/connect/sim-latency/launch/HIDDEN-SCREEN-LIVE-2026-10-31.json",
-    "live_hidden_screen_report_sha256": "50c48cc778ebb0e98374370957be73873d256a405f544050bb29b2bacd530d55"
+    "live_hidden_screen_report_sha256": "50c48cc778ebb0e98374370957be73873d256a405f544050bb29b2bacd530d55",
+    "owner_decision_pending": true,
+    "owner_decision_requested": "Resume provisional grading under unchanged R9/gates/significance/margin/time limit with payouts held and Nov5 pre-finalization fences retained, or keep grading paused pending revised calibration. No response observed at this snapshot."
   },
   "deadline_fences": {
     "deadline": "2026-11-05T12:00:00Z",
@@ -463,7 +517,7 @@
     "retained_in_git": true,
     "warning": "The 164128-byte historical checkpoint retains all earlier failures, qualifications and source pins. Its old top-level status and next_action are superseded; do not execute them. Read history only for a specific supporting artifact."
   },
-  "observed_at": "2026-10-31T06:20:29Z",
+  "observed_at": "2026-10-31T07:02:28Z",
   "current_public_data_report": {
     "path": "server/connect/sim-latency/baseline/final-baseline.html",
     "sha256": "8d3521b462cd73d60831c0d2245643d0826547bef390fe6ed6c8f2a955f93dd1",
@@ -504,14 +558,23 @@
     "authenticated_operator_only_public_embargo_unchanged": true,
     "frozen_evaluator_policy_baseline_and_runtime_unchanged": true,
     "never_a_current_grading_restoration_gate": true,
-    "xy_panel_ids": [31, 32, 33, 34],
+    "xy_panel_ids": [
+      31,
+      32,
+      33,
+      34
+    ],
     "original_submission_time_x_axis_with_unique_per_query_aliases": true,
     "median_takeover_and_variance_dependent_mean_significance_are_distinct": true,
     "per_producer_completeness_and_original_source_time_gated_before_host_deduplication": true,
     "all_or_none_bounded_snapshot_no_silent_latest_subset": true,
     "unscored_failures_never_fabricated_as_zero": true,
     "scope": "Exact configured competition/environment/season/round and staging flag.",
-    "synthetic_go_test_roots": {"controller": 12, "migration": 1, "grafana": 8},
+    "synthetic_go_test_roots": {
+      "controller": 12,
+      "migration": 1,
+      "grafana": 8
+    },
     "actual_tests_executed": 0,
     "source_pins": {
       "grafana/dashboards/competition.json": "63a5b271c5e909830ebf33d178124c9bb251a9b40031c65c4f35511794f46923",
@@ -539,7 +602,10 @@
     "existing_fresh_hold_readback_requirement_only_not_new_approval_criteria": true,
     "not_a_current_grading_or_worker_restoration_gate": true,
     "no_release_authority_from_source_review": true,
-    "post_timed_max_format_refreeze_then_low_qualification_requires_explicit_root_go": true
+    "post_timed_max_format_refreeze_then_low_qualification_requires_explicit_root_go": true,
+    "post_format_source_manifest_sha256": "d0f1c104572acfb2d29c8fd452f66ac13ce0c5651f3e7b79e11129d867783508",
+    "format_only_byte_proof_passed": true,
+    "actual_tests_passed_not_yet_observed": true
   },
   "phase_checkpoint_qualification": {
     "status": "focused tests, native API build, standalone guard and static checks passed; not a live release",
@@ -648,5 +714,6 @@
     "frozen_competition_branches_unchanged": true,
     "plan_sha256": "a22861dfd3d4e6bfd3e9a994b447fc535847cf7f3e4b92871dbce4ae97e79dd0",
     "native_publication_receipt_installed": true
-  }
+  },
+  "grading_currently_paused": true
 }
