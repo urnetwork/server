@@ -13,10 +13,11 @@ import (
 
 // Reads only the fields needed to distinguish candidate points from references.
 type competitionSubmissionPlot struct {
-	Id          int    `json:"id"`
-	Type        string `json:"type"`
-	Description string `json:"description"`
-	GridPos     struct {
+	Id            int    `json:"id"`
+	Type          string `json:"type"`
+	PluginVersion string `json:"pluginVersion"`
+	Description   string `json:"description"`
+	GridPos       struct {
 		W int `json:"w"`
 		X int `json:"x"`
 		Y int `json:"y"`
@@ -35,11 +36,22 @@ type competitionSubmissionPlot struct {
 		} `json:"overrides"`
 	} `json:"fieldConfig"`
 	Options struct {
+		Mapping       string `json:"mapping"`
 		SeriesMapping string `json:"seriesMapping"`
 		Series        []struct {
-			Frame *int   `json:"frame"`
-			X     string `json:"x"`
-			Y     string `json:"y"`
+			Frame json.RawMessage `json:"frame"`
+			X     struct {
+				Matcher struct {
+					Id      string `json:"id"`
+					Options string `json:"options"`
+				} `json:"matcher"`
+			} `json:"x"`
+			Y struct {
+				Matcher struct {
+					Id      string `json:"id"`
+					Options string `json:"options"`
+				} `json:"matcher"`
+			} `json:"y"`
 		} `json:"series"`
 	} `json:"options"`
 	Transformations []struct {
@@ -122,7 +134,8 @@ func TestCompetitionSubmissionChartsShareOriginalSubmissionAxis(t *testing.T) {
 	previousY := -1
 	for _, id := range []int{31, 32, 33, 34} {
 		panel := readCompetitionSubmissionPlot(t, id)
-		if panel.Type != "xychart" || panel.Options.SeriesMapping != "manual" ||
+		if panel.Type != "xychart" || panel.PluginVersion != "13.2.0" ||
+			panel.Options.Mapping != "auto" || panel.Options.SeriesMapping != "" ||
 			panel.GridPos.X != 0 || panel.GridPos.W != 24 || panel.GridPos.Y <= previousY {
 			t.Fatalf("panel %d lost aligned, stacked XY layout", id)
 		}
@@ -131,7 +144,8 @@ func TestCompetitionSubmissionChartsShareOriginalSubmissionAxis(t *testing.T) {
 			t.Fatalf("panel %d lost candidate categories or reference series", id)
 		}
 		for i, series := range panel.Options.Series {
-			if series.X != "submitted_at_ms_"+panel.Targets[i].RefId || series.Y == "" || series.Frame != nil {
+			if series.X.Matcher.Id != "byName" || series.Y.Matcher.Id != "byName" ||
+				series.X.Matcher.Options != "submitted_at_ms_"+panel.Targets[i].RefId || series.Y.Matcher.Options == "" || series.Frame != nil {
 				t.Fatalf("panel %d depends on a positional frame or wrong x axis: %+v", id, series)
 			}
 		}
@@ -152,9 +166,8 @@ func TestCompetitionSubmissionChartsShareOriginalSubmissionAxis(t *testing.T) {
 	}
 }
 
-// Manual XY mapping first matches x, then requires y in that same frame.
-// Unique x and y display aliases avoid both the shared-x missing-y exception
-// and positional shifts when a candidate category has no query frame.
+// Explicit name matchers in auto mode are independent of final frame order.
+// Unique x and y aliases also isolate categories whose query frames are absent.
 func TestCompetitionSubmissionChartsPreserveSparseQuerySeries(t *testing.T) {
 	for _, id := range []int{31, 32, 33, 34} {
 		panel := readCompetitionSubmissionPlot(t, id)
@@ -181,11 +194,11 @@ func TestCompetitionSubmissionChartsPreserveSparseQuerySeries(t *testing.T) {
 		seen := map[string]bool{}
 		seenXs := map[string]bool{}
 		for _, series := range panel.Options.Series {
-			if seen[series.Y] || seenXs[series.X] {
+			if seen[series.Y.Matcher.Options] || seenXs[series.X.Matcher.Options] {
 				t.Fatalf("panel %d reuses an ambiguous x/y selector: %+v", id, series)
 			}
-			seen[series.Y] = true
-			seenXs[series.X] = true
+			seen[series.Y.Matcher.Options] = true
+			seenXs[series.X.Matcher.Options] = true
 		}
 		// No eligible, significant-only or gate-failed point is present.
 		// The ordinary candidate and every reference must remain selectable.
@@ -208,8 +221,8 @@ func TestCompetitionSubmissionChartsPreserveSparseQuerySeries(t *testing.T) {
 		matchedSeries := 0
 		for _, series := range panel.Options.Series {
 			for _, fields := range availableFields {
-				if fields[series.X] {
-					if !fields[series.Y] {
+				if fields[series.X.Matcher.Options] {
+					if !fields[series.Y.Matcher.Options] {
 						t.Fatalf("panel %d matches x in another query frame without its y", id)
 					}
 					matchedSeries++
@@ -253,7 +266,7 @@ func TestCompetitionSubmissionReferenceLinesKeepSingletonMarkers(t *testing.T) {
 		for _, series := range panel.Options.Series[4:] {
 			markerAndLine := false
 			for _, override := range panel.FieldConfig.Overrides {
-				if override.Matcher.Id != "byName" || override.Matcher.Options != series.Y {
+				if override.Matcher.Id != "byName" || override.Matcher.Options != series.Y.Matcher.Options {
 					continue
 				}
 				for _, property := range override.Properties {
@@ -267,7 +280,7 @@ func TestCompetitionSubmissionReferenceLinesKeepSingletonMarkers(t *testing.T) {
 				}
 			}
 			if !markerAndLine {
-				t.Fatalf("panel %d hides reference %q with only one completed submission", id, series.Y)
+				t.Fatalf("panel %d hides reference %q with only one completed submission", id, series.Y.Matcher.Options)
 			}
 		}
 	}

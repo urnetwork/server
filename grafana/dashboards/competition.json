@@ -792,56 +792,92 @@
           }
         ]
       },
+      "pluginVersion": "13.2.0",
       "options": {
-        "seriesMapping": "manual",
-        "dims": {},
+        "mapping": "auto",
         "series": [
           {
-            "x": "submitted_at_ms_A",
-            "y": "numerically eligible (not approval)",
-            "pointColor": {},
-            "pointSize": {
-              "fixed": 7
+            "x": {
+              "matcher": {
+                "id": "byName",
+                "options": "submitted_at_ms_A"
+              }
+            },
+            "y": {
+              "matcher": {
+                "id": "byName",
+                "options": "numerically eligible (not approval)"
+              }
             }
           },
           {
-            "x": "submitted_at_ms_B",
-            "y": "significant, not takeover eligible",
-            "pointColor": {},
-            "pointSize": {
-              "fixed": 7
+            "x": {
+              "matcher": {
+                "id": "byName",
+                "options": "submitted_at_ms_B"
+              }
+            },
+            "y": {
+              "matcher": {
+                "id": "byName",
+                "options": "significant, not takeover eligible"
+              }
             }
           },
           {
-            "x": "submitted_at_ms_C",
-            "y": "not statistically significant",
-            "pointColor": {},
-            "pointSize": {
-              "fixed": 7
+            "x": {
+              "matcher": {
+                "id": "byName",
+                "options": "submitted_at_ms_C"
+              }
+            },
+            "y": {
+              "matcher": {
+                "id": "byName",
+                "options": "not statistically significant"
+              }
             }
           },
           {
-            "x": "submitted_at_ms_D",
-            "y": "one or more gates failed",
-            "pointColor": {},
-            "pointSize": {
-              "fixed": 7
+            "x": {
+              "matcher": {
+                "id": "byName",
+                "options": "submitted_at_ms_D"
+              }
+            },
+            "y": {
+              "matcher": {
+                "id": "byName",
+                "options": "one or more gates failed"
+              }
             }
           },
           {
-            "x": "submitted_at_ms_E",
-            "y": "epoch baseline median",
-            "pointColor": {},
-            "pointSize": {
-              "fixed": 7
+            "x": {
+              "matcher": {
+                "id": "byName",
+                "options": "submitted_at_ms_E"
+              }
+            },
+            "y": {
+              "matcher": {
+                "id": "byName",
+                "options": "epoch baseline median"
+              }
             }
           },
           {
-            "x": "submitted_at_ms_F",
-            "y": "median takeover ceiling (inclusive)",
-            "pointColor": {},
-            "pointSize": {
-              "fixed": 7
+            "x": {
+              "matcher": {
+                "id": "byName",
+                "options": "submitted_at_ms_F"
+              }
+            },
+            "y": {
+              "matcher": {
+                "id": "byName",
+                "options": "median takeover ceiling (inclusive)"
+              }
             }
           }
         ],
@@ -1275,56 +1311,92 @@
           }
         ]
       },
+      "pluginVersion": "13.2.0",
       "options": {
-        "seriesMapping": "manual",
-        "dims": {},
+        "mapping": "auto",
         "series": [
           {
-            "x": "submitted_at_ms_A",
-            "y": "numerically eligible (not approval)",
-            "pointColor": {},
-            "pointSize": {
-              "fixed": 7
+            "x": {
+              "matcher": {
+                "id": "byName",
+                "options": "submitted_at_ms_A"
+              }
+            },
+            "y": {
+              "matcher": {
+                "id": "byName",
+                "options": "numerically eligible (not approval)"
+              }
             }
           },
           {
-            "x": "submitted_at_ms_B",
-            "y": "significant, not takeover eligible",
-            "pointColor": {},
-            "pointSize": {
-              "fixed": 7
+            "x": {
+              "matcher": {
+                "id": "byName",
+                "options": "submitted_at_ms_B"
+              }
+            },
+            "y": {
+              "matcher": {
+                "id": "byName",
+                "options": "significant, not takeover eligible"
+              }
             }
           },
           {
-            "x": "submitted_at_ms_C",
-            "y": "not statistically significant",
-            "pointColor": {},
-            "pointSize": {
-              "fixed": 7
+            "x": {
+              "matcher": {
+                "id": "byName",
+                "options": "submitted_at_ms_C"
+              }
+            },
+            "y": {
+              "matcher": {
+                "id": "byName",
+                "options": "not statistically significant"
+              }
             }
           },
           {
-            "x": "submitted_at_ms_D",
-            "y": "one or more gates failed",
-            "pointColor": {},
-            "pointSize": {
-              "fixed": 7
+            "x": {
+              "matcher": {
+                "id": "byName",
+                "options": "submitted_at_ms_D"
+              }
+            },
+            "y": {
+              "matcher": {
+                "id": "byName",
+                "options": "one or more gates failed"
+              }
             }
           },
           {
-            "x": "submitted_at_ms_E",
-            "y": "epoch baseline mean",
-            "pointColor": {},
-            "pointSize": {
-              "fixed": 7
+            "x": {
+              "matcher": {
+                "id": "byName",
+                "options": "submitted_at_ms_E"
+              }
+            },
+            "y": {
+              "matcher": {
+                "id": "byName",
+                "options": "epoch baseline mean"
+              }
             }
           },
           {
-            "x": "submitted_at_ms_F",
-            "y": "candidate-specific Welch mean boundary",
-            "pointColor": {},
-            "pointSize": {
-              "fixed": 7
+            "x": {
+              "matcher": {
+                "id": "byName",
+                "options": "submitted_at_ms_F"
+              }
+            },
+            "y": {
+              "matcher": {
+                "id": "byName",
+                "options": "candidate-specific Welch mean boundary"
+              }
             }
           }
         ],
@@ -1795,64 +1867,106 @@
           }
         ]
       },
+      "pluginVersion": "13.2.0",
       "options": {
-        "seriesMapping": "manual",
-        "dims": {},
+        "mapping": "auto",
         "series": [
           {
-            "x": "submitted_at_ms_A",
-            "y": "numerically eligible (not approval)",
-            "pointColor": {},
-            "pointSize": {
-              "fixed": 7
+            "x": {
+              "matcher": {
+                "id": "byName",
+                "options": "submitted_at_ms_A"
+              }
+            },
+            "y": {
+              "matcher": {
+                "id": "byName",
+                "options": "numerically eligible (not approval)"
+              }
             }
           },
           {
-            "x": "submitted_at_ms_B",
-            "y": "significant, not takeover eligible",
-            "pointColor": {},
-            "pointSize": {
-              "fixed": 7
+            "x": {
+              "matcher": {
+                "id": "byName",
+                "options": "submitted_at_ms_B"
+              }
+            },
+            "y": {
+              "matcher": {
+                "id": "byName",
+                "options": "significant, not takeover eligible"
+              }
             }
           },
           {
-            "x": "submitted_at_ms_C",
-            "y": "not statistically significant",
-            "pointColor": {},
-            "pointSize": {
-              "fixed": 7
+            "x": {
+              "matcher": {
+                "id": "byName",
+                "options": "submitted_at_ms_C"
+              }
+            },
+            "y": {
+              "matcher": {
+                "id": "byName",
+                "options": "not statistically significant"
+              }
             }
           },
           {
-            "x": "submitted_at_ms_D",
-            "y": "one or more gates failed",
-            "pointColor": {},
-            "pointSize": {
-              "fixed": 7
+            "x": {
+              "matcher": {
+                "id": "byName",
+                "options": "submitted_at_ms_D"
+              }
+            },
+            "y": {
+              "matcher": {
+                "id": "byName",
+                "options": "one or more gates failed"
+              }
             }
           },
           {
-            "x": "submitted_at_ms_E",
-            "y": "baseline: zero improvement",
-            "pointColor": {},
-            "pointSize": {
-              "fixed": 7
+            "x": {
+              "matcher": {
+                "id": "byName",
+                "options": "submitted_at_ms_E"
+              }
+            },
+            "y": {
+              "matcher": {
+                "id": "byName",
+                "options": "baseline: zero improvement"
+              }
             }
           },
           {
-            "x": "submitted_at_ms_F",
-            "y": "candidate-specific significance fringe",
-            "pointColor": {},
-            "pointSize": {
-              "fixed": 7
+            "x": {
+              "matcher": {
+                "id": "byName",
+                "options": "submitted_at_ms_F"
+              }
+            },
+            "y": {
+              "matcher": {
+                "id": "byName",
+                "options": "candidate-specific significance fringe"
+              }
             }
           },
           {
-            "x": "submitted_at_ms_G",
-            "y": "frozen practical margin (median test)",
-            "pointColor": {},
-            "pointSize": {
-              "fixed": 7
+            "x": {
+              "matcher": {
+                "id": "byName",
+                "options": "submitted_at_ms_G"
+              }
+            },
+            "y": {
+              "matcher": {
+                "id": "byName",
+                "options": "frozen practical margin (median test)"
+              }
             }
           }
         ],
@@ -2274,48 +2388,78 @@
           }
         ]
       },
+      "pluginVersion": "13.2.0",
       "options": {
-        "seriesMapping": "manual",
-        "dims": {},
+        "mapping": "auto",
         "series": [
           {
-            "x": "submitted_at_ms_A",
-            "y": "numerically eligible (not approval)",
-            "pointColor": {},
-            "pointSize": {
-              "fixed": 7
+            "x": {
+              "matcher": {
+                "id": "byName",
+                "options": "submitted_at_ms_A"
+              }
+            },
+            "y": {
+              "matcher": {
+                "id": "byName",
+                "options": "numerically eligible (not approval)"
+              }
             }
           },
           {
-            "x": "submitted_at_ms_B",
-            "y": "significant, not takeover eligible",
-            "pointColor": {},
-            "pointSize": {
-              "fixed": 7
+            "x": {
+              "matcher": {
+                "id": "byName",
+                "options": "submitted_at_ms_B"
+              }
+            },
+            "y": {
+              "matcher": {
+                "id": "byName",
+                "options": "significant, not takeover eligible"
+              }
             }
           },
           {
-            "x": "submitted_at_ms_C",
-            "y": "not statistically significant",
-            "pointColor": {},
-            "pointSize": {
-              "fixed": 7
+            "x": {
+              "matcher": {
+                "id": "byName",
+                "options": "submitted_at_ms_C"
+              }
+            },
+            "y": {
+              "matcher": {
+                "id": "byName",
+                "options": "not statistically significant"
+              }
             }
           },
           {
-            "x": "submitted_at_ms_D",
-            "y": "one or more gates failed",
-            "pointColor": {},
-            "pointSize": {
-              "fixed": 7
+            "x": {
+              "matcher": {
+                "id": "byName",
+                "options": "submitted_at_ms_D"
+              }
+            },
+            "y": {
+              "matcher": {
+                "id": "byName",
+                "options": "one or more gates failed"
+              }
             }
           },
           {
-            "x": "submitted_at_ms_E",
-            "y": "recorded significance alpha (inclusive)",
-            "pointColor": {},
-            "pointSize": {
-              "fixed": 7
+            "x": {
+              "matcher": {
+                "id": "byName",
+                "options": "submitted_at_ms_E"
+              }
+            },
+            "y": {
+              "matcher": {
+                "id": "byName",
+                "options": "recorded significance alpha (inclusive)"
+              }
             }
           }
         ],
