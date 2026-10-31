@@ -1,11 +1,12 @@
 # Sim-latency competition live-deployment playbook
 
-## Current production intake and scoring preparation — October 31, 2026
+## Current production intake and provisional grading — October 31, 2026
 
 The required public opening was **October 28, 2026, 00:00 UTC**; readiness was
 not achieved and that opening was not backdated. The owner subsequently approved
 intake-first launch and a replacement season. Production R2 epoch 1 is now open
-for submissions, but **production grading and publication remain held**.
+for submissions, and **owner-approved provisional grading has resumed**.
+Reward delivery remains held and calibration is still **not accepted**.
 At 03:14 UTC on October 30, public `/competition/info` reported
 `intake_ready: true`, `grading_ready: false`, `publication_held: true` and:
 
@@ -14,7 +15,18 @@ At 03:14 UTC on October 30, public `/competition/info` reported
 - actual opening: October 29, 13:06:42.413416 UTC;
 - submission close: November 5, 13:06:42.413416 UTC.
 
-Latest **09:24 UTC October 31** checkpoint: the reduced public pilot and native
+At **18:23:16 UTC**, the reviewed owner-approved evaluation-only CAS succeeded:
+evaluation hold 5 is inactive and reward-delivery hold 1 remains active. The
+same existing worker made its first genuine FIFO claim at **18:23:18 UTC**,
+using the unchanged shared epoch baseline. Strict operator readiness at
+**18:24:36 UTC** returned 200/all eleven checks true, grading ready and
+publication not held. The ordinary open-round embargo still applies; a payout
+hold alone is not a publication hold. Both November 5 fences and the absence of
+an accepted marker are preserved. See the sanitized
+[scoring-resumption record](launch/PROVISIONAL-GRADING-RESUMED-2026-10-31.json).
+No worker restart, new calibration measurement or source/policy change occurred.
+
+The earlier **09:24 UTC October 31** checkpoint: the reduced public pilot and native
 13-source exclusion census are accepted. The fresh hidden-seed screen completed
 all 36 unique measurements, but **failed its frozen reference-ordering rule**;
 native completion and exit zero are not calibration acceptance. Independent
@@ -34,9 +46,10 @@ revision 1, both active. The separately dated **06:50:46 UTC** queue audit shows
 All three failed-screen/public-pilot-view/qualified-source archives now have
 exact-version SHA-equal MinIO readbacks and COMPLIANCE retention through
 **2028-01-01**. New-object replica delivery and off-site backup are not claimed.
-Storage and operational readiness do not authorize hold release. Await the
-owner's explicit provisional-grading or revised-calibration decision; keep the
-November 5 pre-finalization fences and do not create an accepted marker.
+Storage and operational readiness did not authorize hold release. The later
+explicit owner approval and independently reviewed recovery amendment authorize
+only the completed evaluation release; keep reward delivery and the November 5
+pre-finalization safeguards intact and do not create an accepted marker.
 
 At **12:14:48 UTC**, authenticated readiness again returned 200 with all eleven
 checks true and grading/publication still held. The normal control-build SN pin
@@ -73,8 +86,9 @@ transition requires a separate review after authoritative R1 sealing and old
 worker join; it is not a condition for restoring R1 grading. See the
 [inactive staging evidence](launch/CONTROL-BUNDLE-STAGING-2026-10-31.json).
 At **14:47:09 UTC**, operator readiness remained 200/all eleven checks true,
-with intake ready, grading not ready and publication held. Calibration still
-requires the owner's explicit decision.
+with intake ready, grading not ready and publication held. The owner's decision
+was still pending at that dated observation; it is superseded by the reviewed
+provisional-grading resumption above, not successful calibration acceptance.
 
 The operator score dashboard and future-epoch G2 host handoff code are pushed
 in `766b48358`; 49 focused roots passed three times, zero failures/skips, against

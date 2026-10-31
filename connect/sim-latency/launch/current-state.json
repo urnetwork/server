@@ -3,7 +3,7 @@
   "kind": "sim-latency-launch-preparation-checkpoint",
   "objective": "Ready to launch at 2026-10-28T00:00:00Z",
   "requested_launch_deadline_met": false,
-  "status": "R2_hidden_screen_complete_failed_reference_ordering_real_worker_restored_held",
+  "status": "R2_provisional_grading_resumed_failed_calibration_preserved_reward_delivery_held",
   "production_intake_open": true,
   "grading_started": true,
   "production_activated": true,
@@ -27,11 +27,11 @@
     "latest_verification_scope": "Read-only live contract behavior, not an exact main binary commit or all-replica identity proof. The earlier release observation is historical, not a season pin.",
     "new_config_vault_or_epoch_one_image_deployment_required": false,
     "negative_owner_feedback_probe_alone_is_not_binary_identity_proof": true,
-    "api_readiness_verified_at": "2026-10-31T14:47:09Z",
+    "api_readiness_verified_at": "2026-10-31T18:24:36.457042Z",
     "api_readiness_operator_authenticated": true,
     "api_readiness_all_eleven_checks_true": true
   },
-  "next_action": "Calibration remains ACCEPTED=FALSE. Await the owner's explicit provisional-grading or revised-calibration decision; no reseeding, rerun, accepted marker, fence cancellation or hold release is authorized. Failed evidence is independently reviewed and retained with exact-version COMPLIANCE readbacks. Last typed hold readback at13:05 confirmed evaluation4/reward1 ACTIVE; operator Ready200/all11 at14:47:09Z still confirms intake-ready, grading-not-ready and publication-held. Normal control checks remain qualified (159 earlier roots;207 selected G2/source checks plus5 supplemental regressions). Four clean4f control programs, their real7818 native-provenance OCI/archive, and the inactive profiles/17-file producer closure are now installed and pass native file-only admission. They do NOT replace the R1 tuple or qualify a future evaluator. A separately reviewed whole-tuple transition belongs after authoritative R1 seal and old-worker join, before the genuine future source intent; selected product, instrument child/evaluator image, runtime ACK and next baseline remain pending. Never change/rejudge epoch1 or gate its grading recovery on future G2. Migration903 precedes normal API/metrics/dashboard rollout where pending. No static qualification or checkpoint grants calibration/hold-release authority.",
+  "next_action": "Owner explicitly approved provisional grading and requested scoring continue. The reviewed evaluation-only CAS completed at18:23:16Z: evaluation5 INACTIVE, reward1 unchanged ACTIVE. Strict operator Ready200/all11 at18:24:36Z reports grading-ready and publication-not-held; the existing worker made its first genuine FIFO claim at18:23:18Z against the unchanged shared baseline. Continue normal scoring under unchanged R9/gates/alpha.05/margin.269/10800s cap. Calibration remains ACCEPTED=FALSE; preserve failed evidence, accepted-marker absence, payout hold and both Nov5 fences. No reseeding, calibration rerun, retrospective acceptance or reward release is authorized. Normal control checks and inactive future profiles do not replace the R1 tuple or qualify a future evaluator. A separate whole-tuple transition belongs after authoritative R1 seal and old-worker join; selected product, instrument child/evaluator image, runtime ACK and next baseline remain pending. Never rejudge epoch1 or gate current grading on future G2/dashboard work. Migration903 precedes normal API/metrics/dashboard rollout where pending; this metadata checkpoint performs no deployment or new release.",
   "production": {
     "api": "https://api.bringyour.com",
     "season_id": "sim-latency-production-20261028-r2",
@@ -49,31 +49,31 @@
     "worker_remains_online_for_real_readiness": true,
     "worker_offline_under_verified_maintenance_not_fake_readiness": false,
     "evaluation_hold": {
-      "revision": 4,
-      "active": true,
-      "reason_code": "CALIBRATION_MAINTENANCE",
-      "hold_id": "01a18eae-cad3-f805-a3af-5d2ca77a696a",
-      "created_at": "2026-10-30T21:19:42.289655Z",
-      "maximum_authority_expires_at": "2026-10-31T07:19:42.289655Z",
-      "request_sha256": "e792b5aed90c6fcb0f4f5c844919e72e084e9fb4d6403a678fff5a0e47a2b5dd"
+      "revision": 5,
+      "active": false,
+      "reason_code": "RECOVERY_APPROVED",
+      "created_at": "2026-10-31T18:23:16.194087Z",
+      "request_sha256": "bd34b0ef5173d27339cf58b9f24bd0d7db9861dd1e999085b266c1fd7d2f8dcc",
+      "evidence_sha256": "1f10477799b1001943d207e92ff3a8522764eef461c26dd17b840611265837ce",
+      "superseded_maintenance_revision": 4
     },
     "reward_delivery_hold": {
       "revision": 1,
       "active": true
     },
     "latest_durable_queue_snapshot": {
-      "at": "2026-10-31T06:50:46.014858204Z",
-      "total": 18,
-      "queued": 14,
+      "at": "2026-10-31T18:24:08.108004395Z",
+      "total": 20,
+      "queued": 15,
       "succeeded": 4,
-      "running": 0,
+      "running": 1,
       "failed": 0,
       "queued_attempts_zero_and_started_at_null": true,
-      "worker_slot_unleased": true,
-      "last_job_started_at": "2026-10-30T13:50:40.962535Z",
+      "worker_slot_unleased": false,
+      "last_job_started_at": "2026-10-31T18:23:18.492443Z",
       "last_job_completed_at": "2026-10-30T15:20:43.662409Z",
-      "path": "/var/lib/urnetwork/competition-production-r2-20261029-v1/readonly-health-before-held-restore-20261031.zC2N7ysL/audit.private.json",
-      "sha256": "b5597ea97a0454c322fd3e113faffe001ac5b5a19eec8e0b4bf7615cbf6214a1",
+      "path": "/home/by/urnetwork/temp/scoring-resume-health-20261031.YtN18qp4/audit.private.json",
+      "sha256": "12ce2e2bc5fac61d4b11540532491941d2202b4b67203e02515b2646d1751f23",
       "database_transaction_read_only": true,
       "database_transaction_isolation": "repeatable read",
       "database_version_observed": 902,
@@ -87,7 +87,9 @@
     "worker_invocation_id": "5e17f2e2c96a41a8b156ab9119affc96",
     "held_restoration_receipt": "/var/lib/urnetwork/competition-production-r2-20261029-v1/held-worker-restoration-20261031-v1.json",
     "held_restoration_receipt_sha256": "6517ffdab805466063b74d95de1e6e5a45d60d90da56bcc41175d9c84c19436d",
-    "worker_restored_before_original_maintenance_expiry": true
+    "worker_restored_before_original_maintenance_expiry": true,
+    "grading_resumed_with_first_genuine_fifo_claim_at": "2026-10-31T18:23:18.492443Z",
+    "scoring_resumption_record": "server/connect/sim-latency/launch/PROVISIONAL-GRADING-RESUMED-2026-10-31.json"
   },
   "frozen_evaluation": {
     "go_version": "go1.27.3",
@@ -112,7 +114,7 @@
   },
   "approved_changes": {
     "owner_record": "server/connect/sim-latency/launch/PRIVATE-FEEDBACK-NEXT-G2-APPROVAL-2026-10-30.json",
-    "implementation_status": "Private owner feedback is deployed and verified. Public pilot18 and AFTER13 accepted. Full36-run hidden screen completed cleanly but FAILED frozen reference ordering; it is not accepted calibration. Original real worker restored with evaluation4/reward1 ACTIVE, genuine operator Ready200/all11 verified. Await explicit owner decision; no new measurement, accepted marker, timer cancellation or release authorized.",
+    "implementation_status": "Private owner feedback is deployed and verified. Public pilot18 and AFTER13 accepted; full36-run hidden screen FAILED frozen ordering and remains unaccepted. Owner explicitly approved provisional grading: the reviewed evaluation-only CAS produced evaluation5 INACTIVE while reward1 stays ACTIVE. Ready200/all11 and the existing worker's first genuine FIFO claim are verified. No calibration rerun, accepted marker, timer cancellation, payout release or future-epoch activation is authorized.",
     "current_round_private_feedback": {
       "owning_submitter_credential_only": true,
       "shared_Apex_credential_requires_individual_miner_mapping": true,
@@ -501,15 +503,16 @@
       "Original native hidden execution is terminal exit0 with36unique measurements; DO NOT restart/prepare/reroll/reveal. Its frozen native result is accepted=false because better<no-op failed. Preserve it and all earlier failed lineages, plus the unstarted historical second seed.",
       "Real worker was restored with both holds active before the original offline expiry. Genuine readiness and an advancing producer heartbeat in main Grafana were verified; retain support@ur.xyz ownership and do not fabricate signals.",
       "Independent raw-lineage review, custody-helper qualification and exact-version COMPLIANCE F/V/C readback are complete. Preserve their failed-calibration interpretation and private evidence; storage success is not acceptance.",
-      "Await explicit owner's provisional-grading/revised-calibration decision. Keep holds and Nov5 fences; no accepted marker, new measurements or independent release authority is implied by successful execution/cleanup/readiness.",
+      "Owner approved provisional grading; the reviewed evaluation-only CAS and first genuine FIFO claim completed. Continue unchanged epoch-one scoring with reward1 held, failed calibration preserved, accepted marker absent and both Nov5 fences retained; no further release or calibration measurement is authorized.",
       "Dashboard and future epoch2 G2 host handoff code are qualified by49focused roots repeated3times and pushed to main. Deploy additive index903 before the main API/metrics producer and Grafana update. Browser rendering, normal release-graph equivalence and the future instrument/image runtime qualification are not claimed; none is a current grading-restoration gate."
     ],
     "serial_action_handoff": "server/connect/sim-latency/launch/reduced-pilot-operator-2026-10-30/NEXT-SERIAL-ACTION.json",
     "serial_action_handoff_sha256": "c15cdedc85bdbdcf04695005a2fa094ed4927e0e1613ee18a1952be552406fdd",
     "live_hidden_screen_report": "server/connect/sim-latency/launch/HIDDEN-SCREEN-LIVE-2026-10-31.json",
     "live_hidden_screen_report_sha256": "50c48cc778ebb0e98374370957be73873d256a405f544050bb29b2bacd530d55",
-    "owner_decision_pending": true,
-    "owner_decision_requested": "Resume provisional grading under unchanged R9/gates/significance/margin/time limit with payouts held and Nov5 pre-finalization fences retained, or keep grading paused pending revised calibration. No response observed at this snapshot."
+    "owner_decision_pending": false,
+    "owner_decision_requested": "Owner replied approved to provisional-grading approval and added Please continue scoring. The evaluation-only recovery completed under unchanged epoch-one rules; payouts and Nov5 fences remain held/preserved.",
+    "owner_decision_record": "server/connect/sim-latency/launch/PROVISIONAL-GRADING-RESUMED-2026-10-31.json"
   },
   "deadline_fences": {
     "deadline": "2026-11-05T12:00:00Z",
@@ -884,15 +887,16 @@
     "metadata_checkpoint_does_not_release_holds_or_authorize_calibration": true
   },
   "latest_runtime_observation": {
-    "checked_at": "2026-10-31T14:47:09Z",
+    "checked_at": "2026-10-31T18:24:36.457042Z",
     "operator_authenticated": true,
     "http_status": 200,
     "all_eleven_checks_true": true,
     "intake_ready": true,
-    "grading_ready": false,
-    "publication_held": true,
-    "report_browser_containers_removed_original_inventory_restored": true,
-    "scoring_or_reward_hold_release_performed": false
+    "grading_ready": true,
+    "publication_held": false,
+    "existing_supervisor_identity_preserved": true,
+    "evaluation_hold_release_performed": true,
+    "reward_delivery_hold_release_performed": false
   },
   "retained_failed_calibration_evidence": {
     "status": "all_three_exact_source_versions_retained_and_read_back",
