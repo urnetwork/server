@@ -57,7 +57,7 @@ func providerCountExplainedFindings(t *testing.T, now time.Time, payload string)
 	if err != nil {
 		t.Fatal(err)
 	}
-	findings, err := (providerCountProbe{}).check(context.Background(), env)
+	findings, err := (&providerCountProbe{}).check(context.Background(), env)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,8 +76,10 @@ func providerCountFindingClasses(findings []finding) []string {
 
 // The incident's shape: twenty zeros in twenty-one completed requests, every
 // zero explained by the city target or the request's own exclusions. Neither
-// the PAGE nor an intent-unknown small-list WARN may claim it, and the
-// explained cohort supplies no recovery credit to other incidents.
+// the PAGE nor an intent-unknown small-list WARN may claim it. Its twenty-one
+// requests are judgeable evidence of its own state, so on a first execution it
+// holds nothing; it cannot vouch for another cohort's incident either
+// (signal_provider_count_cohort_recovery_test.go).
 func TestProviderCountExplainedNarrowTargetCohortDoesNotPage(t *testing.T) {
 	now := time.Date(2026, 10, 31, 3, 30, 0, 0, time.UTC)
 	for _, explanations := range [][]providerCountExplanation{
@@ -90,14 +92,10 @@ func TestProviderCountExplainedNarrowTargetCohortDoesNotPage(t *testing.T) {
 		if classes := providerCountFindingClasses(findings); len(classes) != 0 {
 			t.Fatalf("explained zeros %+v raised %v", explanations, classes)
 		}
-		holds := 0
 		for _, f := range findings {
-			if f.clearHold && f.target == "api-fleet" && (f.class == "provider-count-effective-empty" || f.class == "provider-count-small-list") {
-				holds++
+			if f.clearHold {
+				t.Fatalf("explained cohort %+v that reported nothing held %s", explanations, f.class)
 			}
-		}
-		if holds != 2 {
-			t.Fatalf("explained cohort %+v supplied recovery credit: %+v", explanations, findings)
 		}
 	}
 }
