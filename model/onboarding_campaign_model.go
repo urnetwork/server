@@ -445,21 +445,51 @@ func NetworkProductUpdates(ctx context.Context, networkId server.Id) (productUpd
 	return
 }
 
-// NetworkConnectDays counts the distinct UTC days on which any of the
-// network's clients held a connection since `since`, and whether there was one
-// at all.
+// NetworkConnectDays counts the distinct UTC days since `since` on which the
+// network connected, and whether it connected at all. Three records show a
+// connection:
+//   - a network_client_connection row. RemoveDisconnectedNetworkClients
+//     deletes a closed connection's row 8 h after the disconnect, so the table
+//     alone forgets every earlier day;
+//   - a connect.day event, which the connection path writes once per network
+//     and UTC day (RecordConnectDay) and the event retention keeps;
+//   - a connect.first event, which apps send once after their first
+//     connection (older app versions never send it). Its time is the app's
+//     clock, so it names no day, but when it is the only record it counts as
+//     one.
+//
+// The campaign takes both its connected fact and the connect_days it quotes
+// from here, so a network it treats as connected is never told it connected
+// on 0 days.
 func NetworkConnectDays(ctx context.Context, networkId server.Id, since time.Time) (days int, connected bool) {
 	server.Db(ctx, func(conn server.PgConn) {
+		// The connect.day bound is a row comparison on (network_id, at), which
+		// only the network's own index can use (see insertConnectDayInTx).
 		result, err := conn.Query(
 			ctx,
 			`
-				SELECT COUNT(DISTINCT date_trunc('day', network_client_connection.connect_time))
-				FROM network_client_connection
-				INNER JOIN network_client ON network_client.client_id = network_client_connection.client_id
-				WHERE network_client.network_id = $1 AND network_client_connection.connect_time >= $2
+				SELECT COUNT(DISTINCT connect_day.day)
+				FROM (
+					SELECT date_trunc('day', network_client_connection.connect_time) AS day
+					FROM network_client_connection
+					INNER JOIN network_client ON network_client.client_id = network_client_connection.client_id
+					WHERE
+						network_client.network_id = $1::uuid AND
+						network_client_connection.connect_time >= $2::timestamp
+
+					UNION ALL
+
+					SELECT date_trunc('day', network_onboarding_event.at) AS day
+					FROM network_onboarding_event
+					WHERE
+						network_onboarding_event.network_id = $1::uuid AND
+						(network_onboarding_event.network_id, network_onboarding_event.at) >= ($1::uuid, $2::timestamp) AND
+						network_onboarding_event.name = $3::varchar(64)
+				) connect_day
 			`,
 			networkId,
 			since,
+			EventConnectDay,
 		)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
@@ -467,6 +497,9 @@ func NetworkConnectDays(ctx context.Context, networkId server.Id, since time.Tim
 			}
 		})
 	})
+	if days == 0 && HasOnboardingEvent(ctx, networkId, EventConnectFirst) {
+		days = 1
+	}
 	connected = 0 < days
 	return
 }
