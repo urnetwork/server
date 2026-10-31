@@ -28,7 +28,7 @@
     "new_config_vault_or_epoch_one_image_deployment_required": false,
     "negative_owner_feedback_probe_alone_is_not_binary_identity_proof": true
   },
-  "next_action": "Observe ONLY the ALREADY RUNNING fresh hidden screen: unit urnetwork-held-out-fresh-single-execute-native233-20261031-v1.service, PID389555, InvocationIDcbc7a9ae9a4e49338dc2f85f58759a65, session88021. Public pilot and AFTER13 are accepted; the new seed was drawn ONCE and its public commitment was pushed. Never prepare/reroll/execute again after observation timeout. Finish the fixed36runs; no concurrent tests/builds/scoring. Administrative stop is by2026-10-31T07:04:37Z with recovery reserve before ORIGINAL maintenance expiry07:19:42.289655Z; no renewal. After all strict owners join, prove original inventory/no evidence mounts/free lock before restoring the real worker WITH BOTH HOLDS ACTIVE before expiry, even if review/custody remains. Qualify the new48-test custody-view helper only after timed work, then actual scoped COMPLIANCE retention/readback and independent frozen-protocol result review. Only genuine accepted calibration permits marker/fence cancellation/fresh independent hold CAS releases. Epoch-one source/image/policy/baseline remain unchanged.",
+  "next_action": "Observe ONLY the ALREADY RUNNING fresh hidden screen: unit urnetwork-held-out-fresh-single-execute-native233-20261031-v1.service, PID389555, InvocationIDcbc7a9ae9a4e49338dc2f85f58759a65, session88021. The nine shared controls and nine no-op runs are complete. CURRENT job is job-02-better, started03:53:44Z with its own original06:53:44Z deadline; monitor its artifacts/evaluation-progress.json, not the completed no-op file. Its baseline digest matches the original control; do not double-count cached controls. Public pilot and AFTER13 are accepted; the new seed was drawn ONCE and its public commitment was pushed. Never prepare/reroll/execute again after observation timeout. Finish the fixed36runs; no concurrent tests/builds/scoring. Administrative stop is by2026-10-31T07:04:37Z with recovery reserve before ORIGINAL maintenance expiry07:19:42.289655Z; no renewal. After all strict owners join, prove original inventory/no evidence mounts/free lock before restoring the real worker WITH BOTH HOLDS ACTIVE before expiry, even if review/custody remains. Qualify the new48-test custody-view helper only after timed work, then actual scoped COMPLIANCE retention/readback and independent frozen-protocol result review. Only genuine accepted calibration permits marker/fence cancellation/fresh independent hold CAS releases. Epoch-one source/image/policy/baseline remain unchanged.",
   "production": {
     "api": "https://api.bringyour.com",
     "season_id": "sim-latency-production-20261028-r2",
@@ -298,14 +298,44 @@
       "seed_drawn_once_no_reroll": true,
       "original_second_seed_unstarted": true,
       "latest_measured_progress": {
-        "observed_at": "2026-10-31T02:45:29Z",
-        "phase": "candidate",
+        "observed_at": "2026-10-31T03:58:35Z",
+        "job_position": 2,
+        "job_role": "better",
+        "job_id": "a891db2c-81aa-4230-b1d4-724f13aa1b48",
+        "progress_path": "/var/lib/urnetwork/competition-held-out-fresh-single-c2-a9e8e1a7-20261028-v1/campaign/round-01/job-02-better/artifacts/evaluation-progress.json",
+        "phase": "building",
         "baseline_completed": 9,
-        "candidate_completed": 2,
-        "unique_measurements_complete": 11,
+        "baseline_is_reused_not_new_measurements": true,
+        "candidate_completed": 0,
+        "completed_candidates_by_role": {"no-op": 9, "better": 0, "worse": 0},
+        "unique_measurements_complete": 18,
         "unique_measurements_planned": 36,
-        "native_progress_updated_unix_ms": 1793414664981,
+        "native_progress_updated_unix_ms": 1793418882836,
         "counts_only_no_hidden_metric_values": true
+      },
+      "current_job_clock": {
+        "started_at": "2026-10-31T03:53:44Z",
+        "original_deadline": "2026-10-31T06:53:44Z",
+        "per_job_limit_seconds": 10800
+      },
+      "no_op_execution_metadata": {
+        "complete_r9_candidate": true,
+        "candidate_measurement_count": 9,
+        "failure_code": "",
+        "cleanup_verified": true,
+        "native_replay_count": 2,
+        "all_replay_container_cleanup_verified": true,
+        "replay_scratch_corpus_retained": false,
+        "scratch_deletion_is_required_by_qualified_validator_not_original_data_loss": true,
+        "raw_performance_gates_eligibility_and_p_values_not_inspected_or_published": true,
+        "not_full_calibration_acceptance": true
+      },
+      "shared_baseline_reuse": {
+        "source_control_job_id": "684a3861-7324-4c45-bc38-eff44c5a6dfb",
+        "better_finalization_digest_matches_noop_control_outcome": true,
+        "only_deferred_request_fields_changed": true,
+        "new_control_runs_for_better": 0,
+        "production_epoch_baseline_unchanged": true
       },
       "not_yet_accepted": true
     },
@@ -418,7 +448,7 @@
     "retained_in_git": true,
     "warning": "The 164128-byte historical checkpoint retains all earlier failures, qualifications and source pins. Its old top-level status and next_action are superseded; do not execute them. Read history only for a specific supporting artifact."
   },
-  "observed_at": "2026-10-31T02:45:29Z",
+  "observed_at": "2026-10-31T03:58:35Z",
   "current_public_data_report": {
     "path": "server/connect/sim-latency/baseline/final-baseline.html",
     "sha256": "8d3521b462cd73d60831c0d2245643d0826547bef390fe6ed6c8f2a955f93dd1",
