@@ -35,6 +35,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/urnetwork/glog"
+	"gopkg.in/yaml.v3"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
@@ -66,8 +67,11 @@ const (
 	// Root-key sends stop this many blocks before a boundary, so the pool's v2
 	// close finds the root key idle.
 	stV1SweepBoundaryQuietBlocks = 25
-	// Surplus below this is not assigned.
-	stV1SweepMinimumAssignRao = 1_000_000
+	// Surplus below this is not assigned, and stake below this on the v1
+	// escrow is not absorbed: 0.1 alpha, so dust a third party transfers
+	// there never keeps the chain from concluding.
+	stV1SweepMinimumAssignRao = 100_000_000
+	stV1SweepMinimumAbsorbRao = 100_000_000
 	// Polls while waiting on another actor.
 	stV1SweepPollDelay = time.Minute
 )
@@ -92,7 +96,37 @@ var (
 	errStV1SweepClientMissing = errors.New("st: the v1 sweep client is unavailable")
 )
 
-// Selects the sweep epoch and recovery epochs of an enabled st.yml profile.
+// stV1SweepSelect selects the sweep epoch and recovery epochs of an enabled
+// st.yml profile from their raw keys. A malformed or inconsistent sweep
+// configuration disables only the sweep: it is recorded in
+// V1SweepConfigError and alerted, and the st subsystem, v2 included, keeps
+// running (a refused sweep config never disables settlement).
+func stV1SweepSelect(cfg *StConfig, profile string, epochNode *yaml.Node, recoveryNode *yaml.Node) {
+	var epoch uint64
+	var recovery []uint64
+	err := stV1SweepDecode(epochNode, &epoch)
+	if err == nil {
+		err = stV1SweepDecode(recoveryNode, &recovery)
+	}
+	if err == nil {
+		err = stV1SweepConfig(cfg, epoch, recovery)
+	}
+	if err != nil {
+		cfg.V1SweepEpoch, cfg.V1SweepRecoveryEpochs = 0, nil
+		cfg.V1SweepConfigError = fmt.Sprintf("st.yml %s sweep keys refused, the sweep is disabled: %s", profile, err)
+		stV1SweepAlertSink("config", cfg.V1SweepConfigError)
+	}
+}
+
+// Decodes one raw sweep key; an absent key leaves value unchanged.
+func stV1SweepDecode(node *yaml.Node, value any) error {
+	if node == nil || node.Kind == 0 {
+		return nil
+	}
+	return node.Decode(value)
+}
+
+// stV1SweepConfig checks the sweep epoch and recovery epochs and sets them.
 func stV1SweepConfig(cfg *StConfig, epoch uint64, recovery []uint64) error {
 	if epoch == 0 {
 		if len(recovery) != 0 {
@@ -204,9 +238,16 @@ type StV1SweepChain struct {
 	// C upgrade, whose owner-only assignSurplus(noId, epoch, amount) the
 	// governance Safe calls.
 	AssignSelector bool
-	// RecordedArtifact is the upgrade's v1SweepArtifactHash(noId, epoch):
-	// zero until the Safe records the committed sweep root for readers.
+	// AssignReadError notes a failed liveness read; the upgrade then reads
+	// as not live. It never fails the snapshot.
+	AssignReadError string
+	// RecordedEpoch, RecordedRoot and RecordedArtifact are the upgrade's
+	// v1Sweep(noId) record: zeros until the Safe records the committed sweep
+	// root for readers. RecordReadError notes a failed read, display-only.
+	RecordedEpoch    uint64
+	RecordedRoot     [32]byte
 	RecordedArtifact [32]byte
+	RecordReadError  string
 }
 
 // StV1SweepClient is the chain surface of the sweep chain. The close is the
@@ -223,7 +264,9 @@ type StV1SweepClient interface {
 	V1SweepFinalize(ctx context.Context, epoch uint64, noId uint64) (string, error)
 	V1SweepClaim(ctx context.Context, epoch uint64, noId uint64, coldkey [32]byte) (string, error)
 	V1SweepWithdraw(ctx context.Context, epoch uint64, noId uint64, attempt uint64, coldkey [32]byte) (string, error)
-	V1SweepAbsorb(ctx context.Context, epoch uint64, noId uint64, hotkey [32]byte) (string, error)
+	// V1SweepAbsorb absorbs under one operation key per attempt, so a later
+	// transfer onto the v1 escrow can be absorbed again.
+	V1SweepAbsorb(ctx context.Context, epoch uint64, noId uint64, attempt uint64, hotkey [32]byte) (string, error)
 }
 
 // A step that failed this many times stops the chain with an alert. The close
@@ -534,7 +577,9 @@ func stV1SweepQuiet(in *stV1SweepInput) (bool, string) {
 			return false, fmt.Sprintf("the v2 commit window of epoch %d is open without its root; the root key stays with v2", recent)
 		}
 	}
-	if chain.NextEnd != 0 && chain.HeadBlock < chain.NextEnd && chain.NextEnd-chain.HeadBlock <= stV1SweepBoundaryQuietBlocks {
+	// The latest block decides imminence; a boundary the latest block passed
+	// but finality has not yet reached is still imminent.
+	if chain.NextEnd != 0 && chain.HeadBlock < chain.NextEnd && chain.NextEnd <= in.latest+stV1SweepBoundaryQuietBlocks {
 		return false, fmt.Sprintf("the boundary at block %d is imminent; the root key stays idle for the v2 close", chain.NextEnd)
 	}
 	return true, ""
@@ -625,7 +670,7 @@ func stV1SweepNext(in *stV1SweepInput) stV1SweepAction {
 		if 0 < stV1SweepAmount(chain.ClaimCredit).Sign() {
 			return act(stV1SweepActWithdraw, epoch, "the claim's payment was deferred; withdraw vault2's claim credit")
 		}
-		if 0 < stV1SweepAmount(chain.Absorbable).Sign() {
+		if big.NewInt(stV1SweepMinimumAbsorbRao).Cmp(stV1SweepAmount(chain.Absorbable)) <= 0 {
 			return act(stV1SweepActAbsorb, epoch, "absorb vault2's stake on the v1 escrow hotkey")
 		}
 		surplus := new(big.Int).Sub(stV1SweepAmount(chain.V2LiveEscrow), stV1SweepAmount(chain.V2Accounted))
@@ -715,10 +760,12 @@ func stV1SweepWaitOutcome(cfg *StConfig, chain *StV1SweepChain, action stV1Sweep
 	return &StPublishOutcome{Status: model.StPublishStatusSkipped, Reason: action.reason, Retry: true, RetryAt: at}
 }
 
-// StV1SweepTurn runs one turn of the sweep chain: it reads one finalized
-// snapshot, decides the next action and performs it. A returned outcome with
-// Retry continues the chain at RetryAt; without it the chain has concluded.
-func StV1SweepTurn(ctx context.Context) (*StPublishOutcome, error) {
+// StV1SweepTurn runs one turn of the sweep chain of taskEpoch: it reads one
+// finalized snapshot, decides the next action and performs it. A returned
+// outcome with Retry continues the chain at RetryAt; without it the chain
+// has concluded. A chain whose epoch is no longer the configured sweep epoch
+// (st.yml re-pointed) concludes at once without acting.
+func StV1SweepTurn(ctx context.Context, taskEpoch uint64) (*StPublishOutcome, error) {
 	cfg := stConfig()
 	if cfg == nil || !cfg.Enabled {
 		return nil, errStNotConfigured
@@ -726,6 +773,9 @@ func StV1SweepTurn(ctx context.Context) (*StPublishOutcome, error) {
 	epoch, sweep := stLedgerV1SweepEpoch(ctx, cfg)
 	if !sweep {
 		return &StPublishOutcome{Status: model.StPublishStatusSkipped, Reason: errStV1SweepNotConfigured.Error()}, nil
+	}
+	if epoch != taskEpoch {
+		return &StPublishOutcome{Status: model.StPublishStatusSkipped, Reason: fmt.Sprintf("the chain of epoch %d is stale: the configured sweep epoch is %d", taskEpoch, epoch)}, nil
 	}
 	if err := stPayoutAdmission(ctx, cfg); err != nil {
 		return nil, err
@@ -759,7 +809,59 @@ func StV1SweepTurn(ctx context.Context) (*StPublishOutcome, error) {
 		action = stV1SweepAction{kind: stV1SweepActRefuse, epoch: epoch, reason: fmt.Sprintf("the %s step failed %d times (last: %s)", action.kind, failures, kind)}
 	}
 	glog.Infof("[st]v1 sweep epoch %d at block %d: %s\n", epoch, chain.HeadBlock, action)
-	return stV1SweepPerform(ctx, cfg, client, epoch, activation.FirstEpoch, chain, stV1SweepAttempts(publishes), action), nil
+	outcome := stV1SweepPerform(ctx, cfg, client, epoch, activation.FirstEpoch, chain, stV1SweepAttempts(publishes), action)
+	if action.kind == stV1SweepActClose && outcome.Status == model.StPublishStatusFailed && stV1SweepMaximumCloseAttempts <= closeFailures+1 {
+		stV1SweepAlertSink(fmt.Sprintf("epoch %d", epoch), fmt.Sprintf("the sweep close failed %d times (last: %s); the chain defers after the epoch's v2 root, and the reveal-lag stake waits for a later sweep", closeFailures+1, outcome.Reason))
+	}
+	return outcome, nil
+}
+
+// Consecutive failed turns: from stV1SweepAlertFailures each failure alerts
+// (then every stV1SweepAlertEvery); at stV1SweepAbandonFailures, about two
+// hours of failed turns a minute apart, a chain whose root is not yet
+// committed is abandoned. After the commit the chain never abandons: its
+// remaining steps are permissionless and keep retrying, alerting.
+const (
+	stV1SweepAlertFailures   = 5
+	stV1SweepAlertEvery      = 20
+	stV1SweepAbandonFailures = 120
+)
+
+// StV1SweepAfterTurn counts a chain's consecutive failed turns (an error, or
+// a failed outcome: admission, chain reads, record build or store, sends),
+// alerts on a run of them and abandons an uncommitted sweep after too many.
+// It returns the new count and whether the chain stops.
+func StV1SweepAfterTurn(ctx context.Context, epoch uint64, failures int, outcome *StPublishOutcome, turnErr error) (int, bool) {
+	failed := turnErr != nil || outcome == nil || outcome.Status == model.StPublishStatusFailed
+	if !failed {
+		return 0, false
+	}
+	failures++
+	reason := ""
+	if turnErr != nil {
+		reason = turnErr.Error()
+	} else if outcome != nil {
+		reason = outcome.Reason
+	}
+	cfg := stConfig()
+	if cfg == nil {
+		return failures, false
+	}
+	if stV1SweepAlertFailures <= failures && (failures == stV1SweepAlertFailures || failures%stV1SweepAlertEvery == 0) {
+		stV1SweepAlertSink(fmt.Sprintf("epoch %d", epoch), fmt.Sprintf("%d consecutive failed sweep turns (last: %s)", failures, reason))
+	}
+	if failures < stV1SweepAbandonFailures {
+		return failures, false
+	}
+	for _, publish := range stV1SweepPublishes(ctx, cfg, epoch) {
+		if publish.Kind == StPublishKindV1SweepCommit && publish.Status == model.StPublishStatusConfirmed {
+			return failures, false
+		}
+	}
+	message := fmt.Sprintf("abandoned after %d consecutive failed turns before the sweep root was committed (last: %s); re-point v1_sweep_epoch to a later epoch", failures, reason)
+	stV1SweepAlertSink(fmt.Sprintf("epoch %d", epoch), message)
+	stV1SweepRecordOutcome(ctx, cfg, epoch, StPublishKindV1SweepAbandon, &StPublishOutcome{Status: model.StPublishStatusSkipped, Reason: message})
+	return failures, true
 }
 
 // The publish kind of each sending action.
@@ -792,13 +894,22 @@ func stV1SweepFailures(publishes []*model.StPublish, action string) (string, int
 	return last, failures
 }
 
-// stV1SweepAttempts counts the withdraw attempts so far, the next attempt's
+// The attempts so far of the steps keyed per attempt: the next attempt's
 // operation key.
-func stV1SweepAttempts(publishes []*model.StPublish) uint64 {
-	attempts := uint64(0)
+type stV1SweepAttemptCounts struct {
+	withdraw uint64
+	absorb   uint64
+}
+
+// stV1SweepAttempts counts the withdraw and absorb attempts so far.
+func stV1SweepAttempts(publishes []*model.StPublish) stV1SweepAttemptCounts {
+	attempts := stV1SweepAttemptCounts{}
 	for _, publish := range publishes {
-		if publish.Kind == StPublishKindV1SweepWithdraw {
-			attempts++
+		switch publish.Kind {
+		case StPublishKindV1SweepWithdraw:
+			attempts.withdraw++
+		case StPublishKindV1SweepAbsorb:
+			attempts.absorb++
 		}
 	}
 	return attempts
@@ -815,7 +926,7 @@ func stV1SweepSend(ctx context.Context, cfg *StConfig, epoch uint64, kind string
 	return outcome
 }
 
-func stV1SweepPerform(ctx context.Context, cfg *StConfig, client StV1SweepClient, epoch uint64, firstEpoch uint64, chain *StV1SweepChain, withdrawAttempt uint64, action stV1SweepAction) *StPublishOutcome {
+func stV1SweepPerform(ctx context.Context, cfg *StConfig, client StV1SweepClient, epoch uint64, firstEpoch uint64, chain *StV1SweepChain, attempts stV1SweepAttemptCounts, action stV1SweepAction) *StPublishOutcome {
 	noId := cfg.NoId
 	switch action.kind {
 	case stV1SweepActWait:
@@ -856,11 +967,11 @@ func stV1SweepPerform(ctx context.Context, cfg *StConfig, client StV1SweepClient
 		})
 	case stV1SweepActWithdraw:
 		return stV1SweepSend(ctx, cfg, epoch, StPublishKindV1SweepWithdraw, func() (string, error) {
-			return client.V1SweepWithdraw(ctx, epoch, noId, withdrawAttempt, chain.Vault2Coldkey)
+			return client.V1SweepWithdraw(ctx, epoch, noId, attempts.withdraw, chain.Vault2Coldkey)
 		})
 	case stV1SweepActAbsorb:
 		return stV1SweepSend(ctx, cfg, epoch, StPublishKindV1SweepAbsorb, func() (string, error) {
-			return client.V1SweepAbsorb(ctx, epoch, noId, chain.V1EscrowHotkey)
+			return client.V1SweepAbsorb(ctx, epoch, noId, attempts.absorb, chain.V1EscrowHotkey)
 		})
 	case stV1SweepActAwaitAssign:
 		return &StPublishOutcome{Status: model.StPublishStatusSkipped, Reason: fmt.Sprintf("%s (amount %s)", action.reason, action.amount), Retry: true, RetryAt: server.NowUtc().Add(10 * stV1SweepPollDelay)}
@@ -910,33 +1021,46 @@ func stV1SweepCommit(ctx context.Context, cfg *StConfig, client StV1SweepClient,
 // the chain facts and the next action, and, before the commit, the record
 // this snapshot would commit. Amounts are rao.
 type StV1SweepStatusView struct {
-	Configured    bool                `json:"configured"`
-	Epoch         uint64              `json:"epoch,omitempty"`
-	FirstV2Epoch  uint64              `json:"first_v2_epoch,omitempty"`
-	Refusal       string              `json:"refusal,omitempty"`
-	HeadBlock     uint64              `json:"head_block,omitempty"`
-	End           uint64              `json:"end_block,omitempty"`
-	CloseDeadline uint64              `json:"close_deadline_block,omitempty"`
-	RootDeadline  uint64              `json:"root_deadline_block,omitempty"`
-	FinalizeAt    uint64              `json:"finalize_block,omitempty"`
-	Status        string              `json:"status,omitempty"`
-	PayoutRoot    string              `json:"payout_root,omitempty"`
-	Committed     bool                `json:"committed"`
-	ArtifactHash  string              `json:"artifact_hash,omitempty"`
-	CarryRao      string              `json:"carry_rao,omitempty"`
-	FundedRao     string              `json:"funded_rao,omitempty"`
-	TotalRao      string              `json:"total_rao,omitempty"`
-	LeafClaimed   bool                `json:"leaf_claimed"`
-	AbsorbableRao string              `json:"absorbable_rao,omitempty"`
-	V2SurplusRao  string              `json:"v2_surplus_rao,omitempty"`
-	AssignLive    bool                `json:"assign_live"`
-	Recorded      bool                `json:"recorded"`
-	SafeCalls     []StV1SweepSafeCall `json:"safe_calls,omitempty"`
-	Next          string              `json:"next,omitempty"`
-	Preview       *StV1SweepRecord    `json:"preview_record,omitempty"`
-	PreviewHash   string              `json:"preview_artifact_hash,omitempty"`
-	PreviewError  string              `json:"preview_error,omitempty"`
-	Publishes     []*model.StPublish  `json:"publishes,omitempty"`
+	Configured    bool   `json:"configured"`
+	Epoch         uint64 `json:"epoch,omitempty"`
+	FirstV2Epoch  uint64 `json:"first_v2_epoch,omitempty"`
+	Refusal       string `json:"refusal,omitempty"`
+	HeadBlock     uint64 `json:"head_block,omitempty"`
+	End           uint64 `json:"end_block,omitempty"`
+	CloseDeadline uint64 `json:"close_deadline_block,omitempty"`
+	RootDeadline  uint64 `json:"root_deadline_block,omitempty"`
+	FinalizeAt    uint64 `json:"finalize_block,omitempty"`
+	Status        string `json:"status,omitempty"`
+	PayoutRoot    string `json:"payout_root,omitempty"`
+	Committed     bool   `json:"committed"`
+	ArtifactHash  string `json:"artifact_hash,omitempty"`
+	CarryRao      string `json:"carry_rao,omitempty"`
+	FundedRao     string `json:"funded_rao,omitempty"`
+	TotalRao      string `json:"total_rao,omitempty"`
+	LeafClaimed   bool   `json:"leaf_claimed"`
+	AbsorbableRao string `json:"absorbable_rao,omitempty"`
+	V2SurplusRao  string `json:"v2_surplus_rao,omitempty"`
+	AssignLive    bool   `json:"assign_live"`
+	Recorded      bool   `json:"recorded"`
+	// RecordedEpoch is the upgrade's v1Sweep record epoch, 0 before it.
+	RecordedEpoch   uint64              `json:"recorded_epoch,omitempty"`
+	RecordReadError string              `json:"record_read_error,omitempty"`
+	AssignReadError string              `json:"assign_read_error,omitempty"`
+	ConfigError     string              `json:"config_error,omitempty"`
+	SafeCalls       []StV1SweepSafeCall `json:"safe_calls,omitempty"`
+	Next            string              `json:"next,omitempty"`
+	Preview         *StV1SweepRecord    `json:"preview_record,omitempty"`
+	PreviewHash     string              `json:"preview_artifact_hash,omitempty"`
+	PreviewError    string              `json:"preview_error,omitempty"`
+	Publishes       []*model.StPublish  `json:"publishes,omitempty"`
+}
+
+// stV1SweepRecorded reports that the upgrade records this sweep for readers:
+// its v1Sweep(noId) names the sweep epoch, the single vault2 leaf and the
+// committed artifact hash.
+func stV1SweepRecorded(epoch uint64, chain *StV1SweepChain) bool {
+	return chain.RecordReadError == "" && chain.RecordedEpoch == epoch && chain.RecordedArtifact != ([32]byte{}) &&
+		chain.RecordedArtifact == chain.Sweep.RootArtifact && chain.RecordedRoot == StV1SweepRoot(chain.Vault2Coldkey) && chain.Sweep.Root == chain.RecordedRoot
 }
 
 // StV1SweepSafeCall is one owner call the governance Safe signs, built from
@@ -955,7 +1079,7 @@ func stV1SweepSafeCalls(cfg *StConfig, epoch uint64, chain *StV1SweepChain, surp
 	calls := []StV1SweepSafeCall{}
 	to := stV1SweepAddress(cfg.SettlementV2)
 	root := StV1SweepRoot(chain.Vault2Coldkey)
-	if chain.AssignSelector && chain.Sweep.Root == root && chain.RecordedArtifact == ([32]byte{}) {
+	if chain.AssignSelector && chain.Sweep.Root == root && chain.RecordReadError == "" && chain.RecordedEpoch == 0 && chain.RecordedArtifact == ([32]byte{}) {
 		if calldata, err := StV1SweepPackRecord(cfg.NoId, epoch, chain.Sweep.RootArtifact); err == nil {
 			calls = append(calls, StV1SweepSafeCall{Name: "recordV1Sweep", To: to, Calldata: stV1SweepHex(calldata), Note: fmt.Sprintf("record the committed sweep root of epoch %d (artifact %s) for readers", epoch, stV1SweepHex(chain.Sweep.RootArtifact[:]))})
 		}
@@ -1016,7 +1140,8 @@ func GetStV1SweepStatus(ctx context.Context) (*StV1SweepStatusView, error) {
 	}
 	view.CarryRao, view.FundedRao, view.TotalRao = stV1SweepAmount(chain.Carry).String(), stV1SweepAmount(chain.Sweep.Funded).String(), stV1SweepAmount(chain.Sweep.Total).String()
 	view.LeafClaimed, view.AbsorbableRao, view.V2SurplusRao, view.AssignLive = chain.LeafClaimed, stV1SweepAmount(chain.Absorbable).String(), surplus.String(), chain.AssignSelector
-	view.Recorded = chain.RecordedArtifact != ([32]byte{}) && chain.RecordedArtifact == chain.Sweep.RootArtifact
+	view.Recorded = stV1SweepRecorded(epoch, chain)
+	view.RecordedEpoch, view.RecordReadError, view.AssignReadError, view.ConfigError = chain.RecordedEpoch, chain.RecordReadError, chain.AssignReadError, cfg.V1SweepConfigError
 	view.SafeCalls = stV1SweepSafeCalls(cfg, epoch, chain, surplus)
 	view.Next = stV1SweepNext(&stV1SweepInput{
 		epoch: epoch, firstEpoch: activation.FirstEpoch, chain: chain, latest: latest,

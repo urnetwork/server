@@ -33,11 +33,15 @@ type StV1SweepArgs struct {
 	DeploymentKey string `json:"deployment_key"`
 	Epoch         uint64 `json:"epoch"`
 	Attempt       int    `json:"attempt"`
+	// Failures counts the chain's consecutive failed turns
+	// (controller.StV1SweepAfterTurn).
+	Failures int `json:"failures,omitempty"`
 }
 
 type StV1SweepResult struct {
-	Retry   bool       `json:"retry"`
-	RetryAt *time.Time `json:"retry_at,omitempty"`
+	Retry    bool       `json:"retry"`
+	RetryAt  *time.Time `json:"retry_at,omitempty"`
+	Failures int        `json:"failures,omitempty"`
 }
 
 func stV1SweepRunOnce(args *StV1SweepArgs) *task.RunOnceOption {
@@ -64,14 +68,15 @@ func StV1Sweep(
 	if _, current := stTaskDeploymentCurrent(stV1Sweep.DeploymentKey); !current {
 		return &StV1SweepResult{}, nil
 	}
-	outcome, err := controller.StV1SweepTurn(clientSession.Ctx)
+	outcome, err := controller.StV1SweepTurn(clientSession.Ctx, stV1Sweep.Epoch)
+	failures, stop := controller.StV1SweepAfterTurn(clientSession.Ctx, stV1Sweep.Epoch, stV1Sweep.Failures, outcome, err)
 	if err != nil {
-		glog.Infof("[st]v1 sweep epoch %d turn failed (attempt %d): %s\n", stV1Sweep.Epoch, stV1Sweep.Attempt, err)
-		return &StV1SweepResult{Retry: true}, nil
+		glog.Errorf("[st]v1 sweep epoch %d turn failed (attempt %d, %d consecutive): %s\n", stV1Sweep.Epoch, stV1Sweep.Attempt, failures, err)
+		return &StV1SweepResult{Retry: !stop, Failures: failures}, nil
 	}
 	glog.Infof("[st]v1 sweep epoch %d: %s\n", stV1Sweep.Epoch, outcome)
-	result := &StV1SweepResult{Retry: outcome.Retry}
-	if outcome.Retry && !outcome.RetryAt.IsZero() {
+	result := &StV1SweepResult{Retry: outcome.Retry && !stop, Failures: failures}
+	if result.Retry && !outcome.RetryAt.IsZero() {
 		retryAt := outcome.RetryAt
 		result.RetryAt = &retryAt
 	}
@@ -94,6 +99,7 @@ func StV1SweepPost(
 		}
 		next := *stV1Sweep
 		next.Attempt += 1
+		next.Failures = stV1SweepResult.Failures
 		task.ScheduleTaskInTx(tx, StV1Sweep, &next, clientSession, stV1SweepRunOnce(&next), task.RunAt(runAt), task.MaxTime(stV1SweepMaxTime))
 	}
 	return nil

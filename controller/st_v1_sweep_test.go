@@ -538,8 +538,8 @@ func (self *sweepFakeClient) V1SweepClaim(_ context.Context, epoch uint64, noId 
 func (self *sweepFakeClient) V1SweepWithdraw(_ context.Context, epoch uint64, noId uint64, attempt uint64, coldkey [32]byte) (string, error) {
 	return self.record(fmt.Sprintf("withdraw %d %d attempt %d %x", epoch, noId, attempt, coldkey[:2]))
 }
-func (self *sweepFakeClient) V1SweepAbsorb(_ context.Context, epoch uint64, noId uint64, hotkey [32]byte) (string, error) {
-	return self.record(fmt.Sprintf("absorb %d %d %x", epoch, noId, hotkey[:2]))
+func (self *sweepFakeClient) V1SweepAbsorb(_ context.Context, epoch uint64, noId uint64, attempt uint64, hotkey [32]byte) (string, error) {
+	return self.record(fmt.Sprintf("absorb %d %d attempt %d %x", epoch, noId, attempt, hotkey[:2]))
 }
 
 // sweepCapture replaces the publish hooks with an in-memory log and store.
@@ -581,7 +581,7 @@ func TestStV1SweepPerformCloseUsesTheDepositSigner(t *testing.T) {
 	capture := captureSweep(t)
 	client := &sweepFakeClient{}
 	chain := sweepTestChain()
-	outcome := stV1SweepPerform(context.Background(), sweepTestConfig(), client, sweepTestEpoch, sweepTestEpoch, chain, 0, sweepNext(chain, chain.HeadBlock+2))
+	outcome := stV1SweepPerform(context.Background(), sweepTestConfig(), client, sweepTestEpoch, sweepTestEpoch, chain, stV1SweepAttemptCounts{}, sweepNext(chain, chain.HeadBlock+2))
 	if strings.Join(client.calls, ";") != "close 4 1 by deposit" || outcome.Status != model.StPublishStatusConfirmed || !outcome.Retry {
 		t.Fatalf("calls %v outcome %+v", client.calls, outcome)
 	}
@@ -597,7 +597,7 @@ func TestStV1SweepPerformCommitPublishesTheRecord(t *testing.T) {
 	client := &sweepFakeClient{}
 	chain := sweepFundedChain()
 	cfg := sweepTestConfig()
-	stV1SweepPerform(context.Background(), cfg, client, sweepTestEpoch, sweepTestEpoch, chain, 0, sweepNext(chain, chain.HeadBlock))
+	stV1SweepPerform(context.Background(), cfg, client, sweepTestEpoch, sweepTestEpoch, chain, stV1SweepAttemptCounts{}, sweepNext(chain, chain.HeadBlock))
 	root := StV1SweepRoot(sweepTestVault2Coldkey)
 	if strings.Join(client.calls, ";") != fmt.Sprintf("commit 4 1 %x", root[:4]) {
 		t.Fatalf("calls %v", client.calls)
@@ -621,12 +621,12 @@ func TestStV1SweepPerformCommitRepeatsTheReservedIntent(t *testing.T) {
 	chain := sweepFundedChain()
 	reserved := [32]byte{0xab}
 	client := &sweepFakeClient{reserved: &reserved}
-	outcome := stV1SweepPerform(context.Background(), sweepTestConfig(), client, sweepTestEpoch, sweepTestEpoch, chain, 0, sweepNext(chain, chain.HeadBlock))
+	outcome := stV1SweepPerform(context.Background(), sweepTestConfig(), client, sweepTestEpoch, sweepTestEpoch, chain, stV1SweepAttemptCounts{}, sweepNext(chain, chain.HeadBlock))
 	if len(client.calls) != 0 || outcome.Status != model.StPublishStatusFailed || !strings.Contains(outcome.Reason, "not in the store") {
 		t.Fatalf("missing record: calls %v outcome %+v", client.calls, outcome)
 	}
 	capture.store["sha256:"+hex.EncodeToString(reserved[:])] = []byte("prior record")
-	stV1SweepPerform(context.Background(), sweepTestConfig(), client, sweepTestEpoch, sweepTestEpoch, chain, 0, sweepNext(chain, chain.HeadBlock))
+	stV1SweepPerform(context.Background(), sweepTestConfig(), client, sweepTestEpoch, sweepTestEpoch, chain, stV1SweepAttemptCounts{}, sweepNext(chain, chain.HeadBlock))
 	if len(client.calls) != 1 || client.committed != reserved {
 		t.Fatalf("calls %v committed %x", client.calls, client.committed)
 	}
@@ -639,12 +639,12 @@ func TestStV1SweepPerformAwaitsTheSafeThenConcludes(t *testing.T) {
 	chain := sweepFundedChain()
 	client := &sweepFakeClient{}
 	await := stV1SweepAction{kind: stV1SweepActAwaitAssign, epoch: sweepTestEpoch, amount: sweepRao(sweepTestTotal), reason: "the owner's Safe assigns"}
-	outcome := stV1SweepPerform(context.Background(), sweepTestConfig(), client, sweepTestEpoch, sweepTestEpoch, chain, 0, await)
+	outcome := stV1SweepPerform(context.Background(), sweepTestConfig(), client, sweepTestEpoch, sweepTestEpoch, chain, stV1SweepAttemptCounts{}, await)
 	if len(client.calls) != 0 || !outcome.Retry || len(capture.outcomes) != 0 || !strings.Contains(outcome.Reason, "7629732373750") {
 		t.Fatalf("await: calls %v outcome %+v outcomes %v", client.calls, outcome, capture.outcomes)
 	}
 	done := stV1SweepAction{kind: stV1SweepActDone, epoch: sweepTestEpoch, reason: "no surplus is left"}
-	outcome = stV1SweepPerform(context.Background(), sweepTestConfig(), client, sweepTestEpoch, sweepTestEpoch, chain, 0, done)
+	outcome = stV1SweepPerform(context.Background(), sweepTestConfig(), client, sweepTestEpoch, sweepTestEpoch, chain, stV1SweepAttemptCounts{}, done)
 	if len(client.calls) != 0 || outcome.Retry || strings.Join(capture.outcomes, ";") != "4 v1sweep_assign confirmed" {
 		t.Fatalf("done: calls %v outcome %+v outcomes %v", client.calls, outcome, capture.outcomes)
 	}
@@ -692,7 +692,7 @@ func TestStV1SweepPerformRefusalConcludes(t *testing.T) {
 	capture := captureSweep(t)
 	chain := sweepTestChain()
 	chain.Sweep.Root = [32]byte{2}
-	outcome := stV1SweepPerform(context.Background(), sweepTestConfig(), &sweepFakeClient{}, sweepTestEpoch, sweepTestEpoch, chain, 0, sweepNext(chain, chain.HeadBlock))
+	outcome := stV1SweepPerform(context.Background(), sweepTestConfig(), &sweepFakeClient{}, sweepTestEpoch, sweepTestEpoch, chain, stV1SweepAttemptCounts{}, sweepNext(chain, chain.HeadBlock))
 	if outcome.Retry || len(capture.alerts) != 1 || strings.Join(capture.outcomes, ";") != "4 v1sweep_refused skipped" {
 		t.Fatalf("outcome %+v alerts %v outcomes %v", outcome, capture.alerts, capture.outcomes)
 	}
@@ -719,9 +719,9 @@ func TestStV1SweepFailureBudgetAndWithdrawAttempts(t *testing.T) {
 	if _, failures := stV1SweepFailures(publishes, stV1SweepActWait); failures != 0 {
 		t.Fatal("a wait counted failures")
 	}
-	publishes = append(publishes, &model.StPublish{Kind: StPublishKindV1SweepWithdraw, Status: model.StPublishStatusFailed}, &model.StPublish{Kind: StPublishKindV1SweepWithdraw, Status: model.StPublishStatusConfirmed})
-	if attempts := stV1SweepAttempts(publishes); attempts != 2 {
-		t.Fatalf("withdraw attempts %d", attempts)
+	publishes = append(publishes, &model.StPublish{Kind: StPublishKindV1SweepWithdraw, Status: model.StPublishStatusFailed}, &model.StPublish{Kind: StPublishKindV1SweepWithdraw, Status: model.StPublishStatusConfirmed}, &model.StPublish{Kind: StPublishKindV1SweepAbsorb, Status: model.StPublishStatusConfirmed})
+	if attempts := stV1SweepAttempts(publishes); attempts != (stV1SweepAttemptCounts{withdraw: 2, absorb: 1}) {
+		t.Fatalf("attempts %+v", attempts)
 	}
 }
 

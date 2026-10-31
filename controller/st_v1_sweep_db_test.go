@@ -90,7 +90,7 @@ func TestStV1SweepTurnClosesThenConcludesOnRefusal(t *testing.T) {
 		if epoch, due := StV1SweepDue(f.ctx); !due || epoch != 5 {
 			t.Fatalf("due %d %t", epoch, due)
 		}
-		outcome, err := StV1SweepTurn(f.ctx)
+		outcome, err := StV1SweepTurn(f.ctx, 5)
 		if err != nil || outcome.Status != model.StPublishStatusConfirmed || strings.Join(client.calls, ";") != "close 5 1 by deposit" {
 			t.Fatalf("close turn: %+v %v calls %v", outcome, err, client.calls)
 		}
@@ -100,7 +100,7 @@ func TestStV1SweepTurnClosesThenConcludesOnRefusal(t *testing.T) {
 		}
 
 		client.chain.Sweep.Root = [32]byte{2}
-		outcome, err = StV1SweepTurn(f.ctx)
+		outcome, err = StV1SweepTurn(f.ctx, 5)
 		if err != nil || outcome.Retry || len(alerts) != 1 || !strings.Contains(alerts[0], "not the single vault2 leaf") {
 			t.Fatalf("refusal turn: %+v %v alerts %v", outcome, err, alerts)
 		}
@@ -108,9 +108,55 @@ func TestStV1SweepTurnClosesThenConcludesOnRefusal(t *testing.T) {
 			t.Fatal("a refused sweep is still due")
 		}
 		calls := len(client.calls)
-		outcome, err = StV1SweepTurn(f.ctx)
+		outcome, err = StV1SweepTurn(f.ctx, 5)
 		if err != nil || outcome.Retry || !strings.Contains(outcome.Reason, "concluded") || len(client.calls) != calls {
 			t.Fatalf("concluded turn: %+v %v calls %v", outcome, err, client.calls)
+		}
+	})
+}
+
+// Failed closes are recorded and counted: the third failure alerts, and the
+// fourth turn stops closing (its operation key is spent) and waits for the
+// epoch's v2 root instead of refusing the sweep.
+func TestStV1SweepTurnAlertsWhenTheCloseIsExhausted(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		f, cfg := newSweepFixture(t)
+		observeLedgerV2Activation(t, f)
+		alerts := []string{}
+		priorAlert := stV1SweepAlertSink
+		stV1SweepAlertSink = func(subject string, message string) { alerts = append(alerts, message) }
+		defer func() { stV1SweepAlertSink = priorAlert }()
+
+		chain := sweepTestChain()
+		chain.Sweep.Epoch = 5
+		client := &sweepTurnClient{sweepFakeClient: sweepFakeClient{sendErr: errors.New("execution reverted: RuntimeAccountingMismatch")}, chain: chain, latest: chain.HeadBlock + 2}
+		SetStV1SweepClient(client)
+		defer SetStV1SweepClient(nil)
+
+		for turn := 1; turn <= stV1SweepMaximumCloseAttempts; turn++ {
+			outcome, err := StV1SweepTurn(f.ctx, 5)
+			if err != nil || outcome.Status != model.StPublishStatusFailed || !outcome.Retry {
+				t.Fatalf("close %d: %+v %v", turn, outcome, err)
+			}
+			if wantAlerts := map[bool]int{true: 1, false: 0}[turn == stV1SweepMaximumCloseAttempts]; len(alerts) != wantAlerts {
+				t.Fatalf("close %d: alerts %v", turn, alerts)
+			}
+		}
+		if !strings.Contains(alerts[0], "failed 3 times") {
+			t.Fatalf("alert %q", alerts[0])
+		}
+		outcome, err := StV1SweepTurn(f.ctx, 5)
+		if err != nil || outcome.Status != model.StPublishStatusSkipped || !strings.Contains(outcome.Reason, "root key stays with v2") || len(client.calls) != stV1SweepMaximumCloseAttempts {
+			t.Fatalf("after the closes: %+v %v calls %v", outcome, err, client.calls)
+		}
+		closes := 0
+		for _, publish := range model.GetStPublishes(f.ctx, cfg.DeploymentKey(), 5) {
+			if publish.Kind == StPublishKindV1SweepClose && publish.Status == model.StPublishStatusFailed {
+				closes++
+			}
+		}
+		if closes != stV1SweepMaximumCloseAttempts {
+			t.Fatalf("recorded %d failed closes", closes)
 		}
 	})
 }

@@ -52,6 +52,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/rpc"
+	"gopkg.in/yaml.v3"
 
 	"github.com/urnetwork/glog"
 
@@ -194,6 +195,9 @@ type StConfig struct {
 	// funding the sweep record assigns to recovery by the source epoch's own
 	// rows; the rest of the sweep is ordinary funding (owner, 2026-10-31).
 	V1SweepRecoveryEpochs []uint64
+	// V1SweepConfigError says why st.yml's sweep keys were refused. A refused
+	// sweep configuration disables only the sweep, never the st subsystem.
+	V1SweepConfigError string
 }
 
 // DeploymentKey is the exact chain/coordinator identity used to namespace
@@ -277,8 +281,10 @@ type stVaultFile struct {
 	DeployBlock            uint64                         `yaml:"deploy_block"`
 	PruneAlertPositions    uint64                         `yaml:"v2_prune_alert_positions"`
 	ValidatorHotkeys       []string                       `yaml:"validator_hotkeys"`
-	V1SweepEpoch           uint64                         `yaml:"v1_sweep_epoch"`
-	V1SweepRecoveryEpochs  []uint64                       `yaml:"v1_sweep_recovery_epochs"`
+	// The sweep keys stay raw, so a malformed value refuses only the sweep
+	// (stV1SweepSelect) instead of failing the whole st.yml decode.
+	V1SweepEpoch          yaml.Node `yaml:"v1_sweep_epoch"`
+	V1SweepRecoveryEpochs yaml.Node `yaml:"v1_sweep_recovery_epochs"`
 
 	TestnetEnabled                bool                           `yaml:"testnet-enabled"`
 	TestnetAttemptUploadBudget    model.StAttemptUploadBudget    `yaml:"testnet-attempt-upload"`
@@ -314,8 +320,8 @@ type stVaultFile struct {
 	TestnetDeployBlock            uint64                         `yaml:"testnet-deploy-block"`
 	TestnetPruneAlertPositions    uint64                         `yaml:"testnet-v2-prune-alert-positions"`
 	TestnetValidatorHotkeys       []string                       `yaml:"testnet-validator-hotkeys"`
-	TestnetV1SweepEpoch           uint64                         `yaml:"testnet-v1-sweep-epoch"`
-	TestnetV1SweepRecoveryEpochs  []uint64                       `yaml:"testnet-v1-sweep-recovery-epochs"`
+	TestnetV1SweepEpoch           yaml.Node                      `yaml:"testnet-v1-sweep-epoch"`
+	TestnetV1SweepRecoveryEpochs  yaml.Node                      `yaml:"testnet-v1-sweep-recovery-epochs"`
 }
 
 // stConfigFromVault lazily loads `st.yml`. Unlike verify.yml the resource is
@@ -390,8 +396,7 @@ type stSelectedConfig struct {
 	DepositTiers                                                                                                   []StDepositTier
 	DepositZeroRateAction                                                                                          string
 	ValidatorHotkeys                                                                                               []string
-	V1SweepEpoch                                                                                                   uint64
-	V1SweepRecoveryEpochs                                                                                          []uint64
+	V1SweepEpoch, V1SweepRecoveryEpochs                                                                            yaml.Node
 }
 
 func selectStConfig(profile string, f stVaultFile) (stSelectedConfig, error) {
@@ -419,7 +424,7 @@ func selectStConfig(profile string, f stVaultFile) (stSelectedConfig, error) {
 			PruneAlertPositions:   f.TestnetPruneAlertPositions,
 			ValidatorHotkeys:      append([]string(nil), f.TestnetValidatorHotkeys...),
 			V1SweepEpoch:          f.TestnetV1SweepEpoch,
-			V1SweepRecoveryEpochs: append([]uint64(nil), f.TestnetV1SweepRecoveryEpochs...),
+			V1SweepRecoveryEpochs: f.TestnetV1SweepRecoveryEpochs,
 		}, nil
 	case stconn.ProfileMainnet:
 		return stSelectedConfig{
@@ -442,7 +447,7 @@ func selectStConfig(profile string, f stVaultFile) (stSelectedConfig, error) {
 			PruneAlertPositions:   f.PruneAlertPositions,
 			ValidatorHotkeys:      append([]string(nil), f.ValidatorHotkeys...),
 			V1SweepEpoch:          f.V1SweepEpoch,
-			V1SweepRecoveryEpochs: append([]uint64(nil), f.V1SweepRecoveryEpochs...),
+			V1SweepRecoveryEpochs: f.V1SweepRecoveryEpochs,
 		}, nil
 	default:
 		return stSelectedConfig{}, fmt.Errorf("st.yml unknown profile %q", profile)
@@ -535,9 +540,9 @@ func stConfigForProfile(profile string, file stVaultFile, rpcUrls []string) (*St
 	if err := stLedgerV2ConfigAddresses(cfg, s.SettlementV2, s.VaultV2); err != nil {
 		return nil, fmt.Errorf("st.yml %s %w", profile, err)
 	}
-	if err := stV1SweepConfig(cfg, s.V1SweepEpoch, s.V1SweepRecoveryEpochs); err != nil {
-		return nil, fmt.Errorf("st.yml %s %w", profile, err)
-	}
+	// A refused sweep configuration disables only the sweep; settlement,
+	// v2 included, keeps running.
+	stV1SweepSelect(cfg, profile, &s.V1SweepEpoch, &s.V1SweepRecoveryEpochs)
 	if cfg.GenesisHash, err = stParseHex32(s.GenesisHash); err != nil {
 		return nil, fmt.Errorf("st.yml genesis_hash: %w", err)
 	}

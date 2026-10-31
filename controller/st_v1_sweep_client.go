@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strings"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 
@@ -20,15 +22,17 @@ import (
 // The EIP-1967 implementation slot of STSettlement2's UUPS proxy.
 var stV1SweepImplementationSlot = common.HexToHash("0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc")
 
-// The phase C STSettlement2 surface (sn evm/src/STSettlement2PhaseC.sol), all
-// owner-only: assignSurplus(noId, epoch, amount) adds escrow surplus to the
-// pool's next funding snapshot, epoch being vault2.lastFundedEpoch(noId) + 1;
-// recordV1Sweep(noId, epoch, artifactHash) records the committed sweep root for
-// readers; v1SweepArtifactHash(noId, epoch) reads that record.
+// The phase C STSettlement2 surface (sn evm/src/STSettlement2PhaseC.sol). The
+// two writes are owner-only: assignSurplus(noId, epoch, amount) adds escrow
+// surplus to the pool's next funding snapshot, epoch being
+// vault2.lastFundedEpoch(noId) + 1, and recordV1Sweep(noId, epoch,
+// artifactHash) records the committed sweep root for readers. The view
+// v1Sweep(noId) returns that record: (uint64 epoch, bytes32 payoutRoot,
+// bytes32 artifactHash), zeros until recorded.
 var (
 	stV1SweepAssignSelector   = crypto.Keccak256([]byte("assignSurplus(uint256,uint256,uint256)"))[:4]
 	stV1SweepRecordSelector   = crypto.Keccak256([]byte("recordV1Sweep(uint256,uint256,bytes32)"))[:4]
-	stV1SweepRecordedSelector = crypto.Keccak256([]byte("v1SweepArtifactHash(uint256,uint256)"))[:4]
+	stV1SweepRecordedSelector = crypto.Keccak256([]byte("v1Sweep(uint256)"))[:4]
 )
 
 // StV1SweepPackAssign is the owner's assignSurplus(noId, epoch, amount) call.
@@ -52,12 +56,41 @@ func StV1SweepPackRecord(noId uint64, epoch uint64, artifactHash [32]byte) ([]by
 	return append(append([]byte(nil), stV1SweepRecordSelector...), packed...), nil
 }
 
-func stV1SweepPackRecorded(noId uint64, epoch uint64) []byte {
-	encoded := make([]byte, 68)
+// stV1SweepPackRecorded is the view call v1Sweep(noId).
+func stV1SweepPackRecorded(noId uint64) []byte {
+	encoded := make([]byte, 36)
 	copy(encoded, stV1SweepRecordedSelector)
 	new(big.Int).SetUint64(noId).FillBytes(encoded[4:36])
-	new(big.Int).SetUint64(epoch).FillBytes(encoded[36:68])
 	return encoded
+}
+
+// stV1SweepDecodeRecorded decodes v1Sweep's (uint64 epoch, bytes32 payoutRoot,
+// bytes32 artifactHash).
+func stV1SweepDecodeRecorded(out []byte) (uint64, [32]byte, [32]byte, error) {
+	if len(out) != 96 {
+		return 0, [32]byte{}, [32]byte{}, fmt.Errorf("v1Sweep returned %d bytes, want 96", len(out))
+	}
+	epoch := new(big.Int).SetBytes(out[:32])
+	if !epoch.IsUint64() {
+		return 0, [32]byte{}, [32]byte{}, errors.New("v1Sweep epoch exceeds uint64")
+	}
+	return epoch.Uint64(), [32]byte(out[32:64]), [32]byte(out[64:96]), nil
+}
+
+// stV1SweepApplyRecorded sets the record read from v1Sweep(noId) on the
+// snapshot. The record is display-only: a failed read is noted, never an
+// error of the snapshot, so it can never hold back a close, defer or commit.
+func stV1SweepApplyRecorded(chain *StV1SweepChain, out []byte, readErr error) {
+	if readErr == nil {
+		var epoch uint64
+		var root, artifact [32]byte
+		if epoch, root, artifact, readErr = stV1SweepDecodeRecorded(out); readErr == nil {
+			chain.RecordedEpoch, chain.RecordedRoot, chain.RecordedArtifact, chain.RecordReadError = epoch, root, artifact, ""
+			return
+		}
+	}
+	chain.RecordedEpoch, chain.RecordedRoot, chain.RecordedArtifact = 0, [32]byte{}, [32]byte{}
+	chain.RecordReadError = readErr.Error()
 }
 
 func (self *CoreStClient) v1SweepRequire() error {
@@ -219,24 +252,20 @@ func (self *CoreStClient) V1SweepChain(ctx context.Context, epoch uint64, noId u
 		return nil, fmt.Errorf("vault2 lastFundedEpoch(): %v", err)
 	}
 	chain.V2NextEpoch = last.Uint64() + 1
-	if chain.AssignSelector, err = self.v1SweepAssignLive(ctx, block); err != nil {
-		return nil, err
+	// The phase C facts are display-only: neither read can fail the snapshot.
+	if live, err := self.v1SweepAssignLive(ctx, block); err != nil {
+		chain.AssignReadError = err.Error()
+	} else {
+		chain.AssignSelector = live
 	}
 	if chain.AssignSelector {
-		err := self.eachRpc(ctx, func(ctx context.Context, client *ethclient.Client) error {
-			out, err := client.CallContract(ctx, ethereum.CallMsg{To: &self.cfg.SettlementV2, Data: stV1SweepPackRecorded(noId, epoch)}, new(big.Int).SetUint64(block))
-			if err != nil {
-				return err
-			}
-			if len(out) != 32 {
-				return fmt.Errorf("v1SweepArtifactHash returned %d bytes", len(out))
-			}
-			chain.RecordedArtifact = [32]byte(out)
-			return nil
+		var out []byte
+		readErr := self.eachRpc(ctx, func(ctx context.Context, client *ethclient.Client) error {
+			var err error
+			out, err = client.CallContract(ctx, ethereum.CallMsg{To: &self.cfg.SettlementV2, Data: stV1SweepPackRecorded(noId)}, new(big.Int).SetUint64(block))
+			return err
 		})
-		if err != nil {
-			return nil, fmt.Errorf("v1SweepArtifactHash(): %w", err)
-		}
+		stV1SweepApplyRecorded(chain, out, readErr)
 	}
 	return chain, nil
 }
@@ -270,9 +299,36 @@ func (self *CoreStClient) V1SweepLatestBlock(ctx context.Context) (uint64, error
 	return self.LedgerV2LatestBlock(ctx)
 }
 
-// V1SweepClose sends the permissionless v1 close from the deposit signer. It
-// keeps the close operation key, so the engine's expired-close handling
-// applies; the deposit signer's nonce sequence is never the root key's.
+// v1SweepCloseOperation is the configured sweep's v1 close as the deposit
+// signer sends it: its operation key close:E:N, the coordinator and the exact
+// calldata closeOperatorEpoch(E, N).
+func (self *CoreStClient) v1SweepCloseOperation() (string, common.Address, []byte, bool) {
+	if self.cfg == nil || self.coordinator == nil || self.cfg.V1SweepEpoch == 0 || self.cfg.NoId == 0 || self.cfg.ContractAddress == (common.Address{}) {
+		return "", common.Address{}, nil, false
+	}
+	epoch, noId := self.cfg.V1SweepEpoch, self.cfg.NoId
+	return fmt.Sprintf("close:%d:%d", epoch, noId), self.cfg.ContractAddress, self.coordinator.PackCloseOperatorEpoch(new(big.Int).SetUint64(epoch), new(big.Int).SetUint64(noId)), true
+}
+
+// v1SweepCloseIntent reports whether intent is exactly the configured sweep's
+// close: its operation key, target, calldata and calldata hash, and this
+// deployment's identity. Nothing broader is the deposit key's to sign.
+func (self *CoreStClient) v1SweepCloseIntent(intent *model.StTransactionIntent) bool {
+	operation, to, calldata, ok := self.v1SweepCloseOperation()
+	if !ok || intent == nil {
+		return false
+	}
+	logicalKey, err := stTransactionLogicalKey(self.cfg, operation)
+	return err == nil && intent.LogicalKey == logicalKey && strings.EqualFold(intent.ToAddress, to.Hex()) &&
+		bytes.Equal(intent.Calldata, calldata) && strings.EqualFold(intent.CalldataHash, crypto.Keccak256Hash(calldata).Hex()) &&
+		intent.DeploymentKey == self.cfg.DeploymentKey() && intent.ChainId == self.cfg.ChainId &&
+		strings.EqualFold(intent.GenesisHash, hexutil.Encode(self.cfg.GenesisHash[:])) &&
+		intent.Profile == self.cfg.Profile && intent.DeploymentId == self.cfg.DeploymentId
+}
+
+// V1SweepClose sends the configured sweep's permissionless v1 close from the
+// deposit signer, whose nonce sequence is never the root key's. It keeps the
+// close operation key, so the engine's expired-close handling applies.
 func (self *CoreStClient) V1SweepClose(ctx context.Context, epoch uint64, noId uint64) (string, error) {
 	if err := self.v1SweepRequire(); err != nil {
 		return "", err
@@ -280,7 +336,11 @@ func (self *CoreStClient) V1SweepClose(ctx context.Context, epoch uint64, noId u
 	if self.cfg.DepositKey == nil {
 		return "", errors.New("st: the sweep close needs the deposit signer key")
 	}
-	return self.send(ctx, fmt.Sprintf("close:%d:%d", epoch, noId), self.cfg.DepositKey, self.cfg.ContractAddress, self.coordinator.PackCloseOperatorEpoch(new(big.Int).SetUint64(epoch), new(big.Int).SetUint64(noId)))
+	operation, to, calldata, ok := self.v1SweepCloseOperation()
+	if !ok || epoch != self.cfg.V1SweepEpoch || noId != self.cfg.NoId {
+		return "", fmt.Errorf("st: the sweep closes only the configured epoch %d of pool %d", self.cfg.V1SweepEpoch, self.cfg.NoId)
+	}
+	return self.send(ctx, operation, self.cfg.DepositKey, to, calldata)
 }
 
 func (self *CoreStClient) V1SweepDefer(ctx context.Context, epoch uint64, noId uint64) (string, error) {
@@ -347,10 +407,11 @@ func (self *CoreStClient) V1SweepWithdraw(ctx context.Context, epoch uint64, noI
 }
 
 // V1SweepAbsorb moves vault2's stake on the v1 escrow hotkey into vault2's
-// escrow as unaccounted surplus.
-func (self *CoreStClient) V1SweepAbsorb(ctx context.Context, epoch uint64, noId uint64, hotkey [32]byte) (string, error) {
+// escrow as unaccounted surplus. Each attempt has its own operation key: a
+// fixed key would return the first absorb's transaction for every later one.
+func (self *CoreStClient) V1SweepAbsorb(ctx context.Context, epoch uint64, noId uint64, attempt uint64, hotkey [32]byte) (string, error) {
 	if err := self.v1SweepRequire(); err != nil {
 		return "", err
 	}
-	return self.send(ctx, fmt.Sprintf("v1sweepabsorb:%d:%d", epoch, noId), self.cfg.RootKey, self.cfg.VaultV2, stLedgerV2VaultAbi.PackAbsorbStake(hotkey))
+	return self.send(ctx, fmt.Sprintf("v1sweepabsorb:%d:%d:%d", epoch, noId, attempt), self.cfg.RootKey, self.cfg.VaultV2, stLedgerV2VaultAbi.PackAbsorbStake(hotkey))
 }
