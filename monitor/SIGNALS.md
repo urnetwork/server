@@ -19884,7 +19884,28 @@ The opt-in API instrumentation adds only fixed cells:
   exactly 16 cells: four phases by `ok|rejected|canceled|panic`. Successful
   transitions count the phase exited, not another logical request. Canceled
   context takes precedence over panic. Early rejection remains in its owning
-  phase; all gauges release during normal return or panic unwind.
+  phase; all gauges release during normal return or panic unwind. A request
+  discarded before authentication (below) goes from `prepare`, which covers
+  its shape check, straight to `response`, and never enters `authenticate`
+  or `controller`.
+- `urnetwork_connect_control_discarded_requests_total{abuse}` counts
+  `/connect/control` requests whose every frame is a `PeerAudit`, answered
+  `{"pack":"","error":null}` from the body alone: after the route's
+  intended network and lag.dev guest gates, before the credential, the
+  per-client limit, the revocation record or any state is read. The proxy's
+  hosted authority counts its own the same way, after its lifecycle checks
+  and before contract admission. The pack is at most 2 KiB of base64 and
+  every frame must decode as a `PeerAudit`; any other pack, including one
+  that adds a single frame of another type, takes the authenticated path. No
+  server has consumed an audit, and connect stops sending them by default
+  (`ClientSettings.SendPeerAudits`), so the rate falls as clients update.
+  `abuse` is `claimed` when any frame sets `abuse` (a provider's
+  `ReportAbuse`), otherwise `none`; it is client-supplied telemetry with no
+  authority. Both children exist at zero. Nothing is logged for these
+  requests at any level. They make no `urnetwork_session_auth_attempts_total`
+  attempt, no `urnetwork_connect_control_client_limit_total` decision and no
+  `urnetwork_jwt_state_record_checks_total` check, and they spend no
+  per-client budget.
 - `urnetwork_connect_control_refusal_replays_total{cause}` counts API
   `/connect/control` requests answered from route refusals that the
   router's origin notification owner recorded for the credential's own
@@ -19908,7 +19929,8 @@ The opt-in API instrumentation adds only fixed cells:
   cells: `http|internal`, nine fixed message kinds (`create_contract`,
   `close_contract`, `provide`, `encrypted_key`, `client_key`, `control_ping`,
   `provide_ping`, `resident_move_result`, `other`), and
-  `handler_ok|error|canceled|panic`. Matching
+  `handler_ok|error|canceled|panic`. A `PeerAudit` in a pack with other
+  frames is a no-op that completes `handler_ok` under `other`. Matching
   `urnetwork_connect_control_frames_inflight` and
   `urnetwork_connect_control_frame_seconds_{sum,count}` locate handler
   residence. Every child exists at zero on a capable executable. `internal`

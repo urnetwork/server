@@ -122,9 +122,11 @@ func checkConnectControlLimit(ctx context.Context, clientId server.Id) (limited 
 	return false, 0
 }
 
-// How a control request is answered before its client state query: refused
-// as over the client's limit, or with the refusals recorded for it.
+// How a control request is answered before its client state query: empty,
+// as a pack discarded whole (connect_control_discard.go), refused as over the
+// client's limit, or with the refusals recorded for it.
 type ConnectControlAnswer struct {
+	discarded  bool
 	limited    bool
 	retryAfter time.Duration
 	refusals   *ConnectControlRefusals
@@ -133,7 +135,11 @@ type ConnectControlAnswer struct {
 // The prepare of router.WrapWithInputRequireClientUnlessAnswered for
 // /connect/control. A request over its client's limit is answered with a
 // 429. Every other request counts against the limit and then may be answered
-// from the refusals recorded for it (PrepareConnectControlRefusals).
+// from the refusals recorded for it (PrepareConnectControlRefusals). A pack
+// discarded whole never gets here: the route's discard answered it before
+// authentication. To answer it after the signature instead (CPUOPT3 D3 owner
+// question 1 (b)), the handler passes no discard and this calls
+// DiscardConnectControl first.
 func PrepareConnectControl(ctx context.Context, clientId server.Id, connectControl *ConnectControlArgs) (*ConnectControlAnswer, bool) {
 	if limited, retryAfter := checkConnectControlLimit(ctx, clientId); limited {
 		return &ConnectControlAnswer{limited: true, retryAfter: retryAfter}, true
@@ -148,6 +154,10 @@ func PrepareConnectControl(ctx context.Context, clientId server.Id, connectContr
 // The reply of router.WrapWithInputRequireClientUnlessAnswered for
 // /connect/control.
 func ReplyConnectControl(ctx context.Context, answer *ConnectControlAnswer) (*ConnectControlResult, error) {
+	if answer.discarded {
+		// connectControlResult(nil, nil): an empty pack and no error
+		return &ConnectControlResult{}, nil
+	}
 	if answer.limited {
 		return nil, model.NewConnectControlLimitError(answer.retryAfter)
 	}

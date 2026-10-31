@@ -247,6 +247,23 @@ func (self *Authority) ConnectControl(ctx context.Context, token string, args *c
 		if args == nil {
 			return nil, errors.New("local control request is absent")
 		}
+		// a closed authority or an ended request reports its lifecycle
+		if self.closed.Load() {
+			return nil, context.Canceled
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+		// A pack of only audits is answered empty before contract admission
+		// and any credential, Redis or database read
+		// (controller/connect_control_discard.go). To answer it after the
+		// signature instead (owner question 1 (b)), this moves after a
+		// parseClaimsPreflight.
+		if controller.DiscardConnectControlPack(args.Pack) {
+			return &connect.ConnectControlResult{}, nil
+		}
 		if self.contractAdmission != nil && createsContractsOnly(args.Pack) {
 			// a closed authority or an ended request reports its lifecycle,
 			// not a rate limit

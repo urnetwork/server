@@ -10,16 +10,23 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
-// A request over its verified client's limit is answered 429 with Retry-After
-// before the client state query (controller/connect_control_limit.go). A
-// request whose every frame repeats a route already refused for the
-// credential's own client is answered from that refusal, also before the
-// query (controller/connect_control_refusal_replay.go); every other request
+// A request whose every frame is a PeerAudit is answered empty from its body,
+// before its credential is read (controller/connect_control_discard.go); the
+// route's intended network and lag.dev guest gates still run first. A request
+// over its verified client's limit is answered 429 with Retry-After before
+// the client state query (controller/connect_control_limit.go). A request
+// whose every frame repeats a route already refused for the credential's own
+// client is answered from that refusal, also before the query
+// (controller/connect_control_refusal_replay.go); every other request
 // authenticates as before.
 func ConnectControl(w http.ResponseWriter, r *http.Request) {
 	r, finish := router.ObserveConnectControl(r)
 	defer finish()
 	router.WrapWithInputRequireClientUnlessAnswered(
+		// before authentication (CPUOPT3 D3 owner question 1 (a)); nil here
+		// and a first call in PrepareConnectControl answers it after the
+		// signature instead (b)
+		controller.DiscardConnectControl,
 		controller.PrepareConnectControl,
 		controller.ReplyConnectControl,
 		controller.ConnectControl,
