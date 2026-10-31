@@ -59,9 +59,9 @@
       "active": true
     },
     "latest_durable_queue_snapshot": {
-      "at": "2026-10-31T00:44:46.515596595Z",
-      "total": 17,
-      "queued": 13,
+      "at": "2026-10-31T04:16:34.561127055Z",
+      "total": 18,
+      "queued": 14,
       "succeeded": 4,
       "running": 0,
       "failed": 0,
@@ -69,8 +69,8 @@
       "worker_slot_unleased": true,
       "last_job_started_at": "2026-10-30T13:50:40.962535Z",
       "last_job_completed_at": "2026-10-30T15:20:43.662409Z",
-      "path": "/var/lib/urnetwork/competition-production-r2-20261029-v1/readonly-before-hidden-20261031-v1/audit.private.json",
-      "sha256": "666400f9ece0b9c621155832dd8e1b6aaef0c553a6b76b065d466c9e6cede408",
+      "path": "/var/lib/urnetwork/competition-production-r2-20261029-v1/readonly-health-20261031T0416-v1/audit.private.json",
+      "sha256": "bc21adc4a35c1ef9c366a9ef99be39ea009400dcace2dc37da8c87f1e68c9501",
       "database_transaction_read_only": true,
       "database_transaction_isolation": "repeatable read",
       "database_version_observed": 901,
@@ -80,7 +80,7 @@
     "shared_epoch_baseline_sha256": "b6b0b13f6137b32fd5569f9ff16d78d8dac3d578ad40549c8ae33513cf447557",
     "completed_evaluation_duration_observed_minutes": "87–90",
     "private_scores_and_eligibility_not_published_here": true,
-    "public_open_round_checked_at": "2026-10-31T02:03:01Z"
+    "public_open_round_checked_at": "2026-10-31T04:21:03Z"
   },
   "frozen_evaluation": {
     "go_version": "go1.27.3",
@@ -298,19 +298,18 @@
       "seed_drawn_once_no_reroll": true,
       "original_second_seed_unstarted": true,
       "latest_measured_progress": {
-        "observed_at": "2026-10-31T03:58:35Z",
+        "observed_at": "2026-10-31T04:52:11Z",
         "job_position": 2,
         "job_role": "better",
-        "job_id": "a891db2c-81aa-4230-b1d4-724f13aa1b48",
         "progress_path": "/var/lib/urnetwork/competition-held-out-fresh-single-c2-a9e8e1a7-20261028-v1/campaign/round-01/job-02-better/artifacts/evaluation-progress.json",
-        "phase": "building",
+        "phase": "candidate",
         "baseline_completed": 9,
         "baseline_is_reused_not_new_measurements": true,
-        "candidate_completed": 0,
-        "completed_candidates_by_role": {"no-op": 9, "better": 0, "worse": 0},
-        "unique_measurements_complete": 18,
+        "candidate_completed": 6,
+        "completed_candidates_by_role": {"no-op": 9, "better": 6, "worse": 0},
+        "unique_measurements_complete": 24,
         "unique_measurements_planned": 36,
-        "native_progress_updated_unix_ms": 1793418882836,
+        "native_progress_updated_unix_ms": 1793422305886,
         "counts_only_no_hidden_metric_values": true
       },
       "current_job_clock": {
@@ -448,7 +447,7 @@
     "retained_in_git": true,
     "warning": "The 164128-byte historical checkpoint retains all earlier failures, qualifications and source pins. Its old top-level status and next_action are superseded; do not execute them. Read history only for a specific supporting artifact."
   },
-  "observed_at": "2026-10-31T03:58:35Z",
+  "observed_at": "2026-10-31T04:52:11Z",
   "current_public_data_report": {
     "path": "server/connect/sim-latency/baseline/final-baseline.html",
     "sha256": "8d3521b462cd73d60831c0d2245643d0826547bef390fe6ed6c8f2a955f93dd1",
@@ -477,7 +476,42 @@
     "handoff_sha256": "cbd38af8c3079f3169ed87225cc526a5c37f5f0214ab3fe60a40ec291aa86ac7",
     "max_formats_and_refreezes_then_low_executes_only_after_root_releases_timed_exclusion": true,
     "custody_v2_source_packet_unchanged": true,
+    "current_reference_context_changed_by_dashboard_source_work": true,
+    "old_packet_alone_is_not_current_main_test_qualification": true,
     "do_not_deploy_or_claim_qualification_from_source_review": true
+  },
+  "pending_operator_submission_dashboard": {
+    "status": "independently_source_reviewed_only_unformatted_uncompiled_unrun_unrendered_undeployed",
+    "uncommitted_source": true,
+    "user_request": "Aligned per-submission score plots against the same epoch baseline and actual improvement fringes.",
+    "dashboard": "server/grafana/dashboards/competition.json",
+    "authenticated_operator_only_public_embargo_unchanged": true,
+    "frozen_evaluator_policy_baseline_and_runtime_unchanged": true,
+    "never_a_current_grading_restoration_gate": true,
+    "xy_panel_ids": [31, 32, 33, 34],
+    "original_submission_time_x_axis_with_unique_per_query_aliases": true,
+    "median_takeover_and_variance_dependent_mean_significance_are_distinct": true,
+    "per_producer_completeness_and_original_source_time_gated_before_host_deduplication": true,
+    "all_or_none_bounded_snapshot_no_silent_latest_subset": true,
+    "unscored_failures_never_fabricated_as_zero": true,
+    "scope": "Exact configured competition/environment/season/round and staging flag.",
+    "synthetic_go_test_roots": {"controller": 12, "migration": 1, "grafana": 8},
+    "actual_tests_executed": 0,
+    "source_pins": {
+      "grafana/dashboards/competition.json": "63a5b271c5e909830ebf33d178124c9bb251a9b40031c65c4f35511794f46923",
+      "grafana/competition_submission_dashboard_test.go": "0c971ef37e955e1ead63322a553c261ba3bf462a0583e865933a5834bc9a0576",
+      "controller/competition_submission_metrics.go": "c629ff4e5228c02ab80ecbff0cd530d50ce52180415ec8a384bf92267908deb2",
+      "controller/competition_submission_metrics_test.go": "e41baf72102d88945c17df9cf28bdd9562a0bf4eda86166a4d1b2a522c9cffb6",
+      "competition_submission_metrics_migration.go": "223660de11cc3430549b7851068caf28c743abe1f1f9774ba94d505c39ba8550",
+      "competition_submission_metrics_migration_test.go": "c230ea5e53960d21eec5348f7e1fc19e2e04c53007bf75f245039d01c9de4107",
+      "controller/competition_controller.go": "c9bbaa62857fd75c584123fba8599bbc58fb303ea7cefe505a536f0707057c73",
+      "db_migrations.go": "292652db5e0202ae8a8a8781772aa02afcc071bbfdc45acd5d327fcaf4933441"
+    },
+    "remaining": [
+      "After all timed owners join, Max formats and refreezes actual current sources; Low executes tests with the closed dependency cache. Include new controller/root source files rather than claiming the old G2 packet covers current main.",
+      "Run the 21 new roots plus relevant existing metric-inventory and operational tests, preserving actual three-process logs and digests; perform actual native Grafana rendering separately.",
+      "Only after qualification commit/pull/merge/push, then apply the additive completed-score index migration and deploy the main API/metrics producer and Grafana dashboard through the normal pipeline."
+    ]
   },
   "phase_checkpoint_qualification": {
     "status": "focused tests, native API build, standalone guard and static checks passed; not a live release",
