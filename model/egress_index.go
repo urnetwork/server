@@ -120,6 +120,15 @@ type EgressIndexSettings struct {
 	// urnetwork_findproviders2_rank_modern_first_enabled shows each process's
 	// value. `rank_modern_first` in the block.
 	RankModernFirst bool
+	// Whether FindProviders2 answers a city or region target the score export
+	// published without an admitted provider from its region, then its
+	// country, for a request that is not strict
+	// (network_client_location_fallback.go). The api, alt and the proxy
+	// apply it as they answer. True, the default, is on (owner decision
+	// 2026-10-31), and false is the kill switch: a config release and a
+	// restart of those readers, each applying it within
+	// RequestSettingsMaxAge. `location_fallback` in the block.
+	LocationFallback bool
 	// how old the settings a request path reads may be. The passes read
 	// provider.yml on every call; a request path runs far too often to read
 	// and parse a file each time.
@@ -199,6 +208,9 @@ func DefaultEgressIndexSettings() *EgressIndexSettings {
 		// decision 2026-10-28)
 		RankModernFirst:       true,
 		RequestSettingsMaxAge: time.Minute,
+		// a city or region without admitted supply answers from its region,
+		// then its country (owner decision 2026-10-31)
+		LocationFallback: true,
 		// The floor is pending the owner's confirmation. Measured on
 		// 2026-10-13, it exempts the countries whose probe failed
 		// structurally (VN 0.03, JP 0.24, RU 0.25, TW 0.27, ZA and IN 0.35)
@@ -235,6 +247,7 @@ type egressIndexSettingsBlock struct {
 	BackfillTierOffset   *int           `yaml:"backfill_tier_offset"`
 	RankMeasuredFirst    *bool          `yaml:"rank_measured_first"`
 	RankModernFirst      *bool          `yaml:"rank_modern_first"`
+	LocationFallback     *bool          `yaml:"location_fallback"`
 }
 
 // Whether this process has logged that its provider.yml still carries the
@@ -513,6 +526,9 @@ func decodeEgressIndexSettings() (*EgressIndexSettings, string) {
 	}
 	if overrides.RankModernFirst != nil {
 		settings.RankModernFirst = *overrides.RankModernFirst
+	}
+	if overrides.LocationFallback != nil {
+		settings.LocationFallback = *overrides.LocationFallback
 	}
 	return settings, modernGateFailure
 }

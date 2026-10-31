@@ -1055,7 +1055,7 @@ func TestFindProvidersProviderCarriesFreshSessionSelectionMetadata(t *testing.T)
 		NetworkOnly:           true,
 		ReputationFailedNames: "bloomberg",
 	}
-	provider := findProvidersProviderFromClientScore(score, RankModeQuality, nil)
+	provider := findProvidersProviderFromClientScore(score, RankModeQuality, nil, "")
 	connect.AssertEqual(t, provider.ClientId, clientId)
 	connect.AssertEqual(t, provider.Tier, 0)
 	connect.AssertEqual(t, provider.EstimatedBytesPerSecond, ByteCount(5_000_000))
