@@ -23,8 +23,8 @@
     ]
   },
   "report": {
-    "path": "final-baseline.html",
-    "sha256": "cc460708ca7049298a3ef62a765345d1eb651ef6b112683fd1268a4e468744b9"
+    "path": "final-baseline-v1-historical.html",
+    "sha256": "9d0b9beed44f840c438b4d30f655551c5d362f18cd63854eaf4730d295634c7c"
   },
   "additional_datasets": [
     {

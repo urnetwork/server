@@ -6,6 +6,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -57,5 +59,37 @@ func TestSourceBuildImagePlanRejectsUnverifiedArtifacts(t *testing.T) {
 	request.SourceGeneration++
 	if _, err := sourceBuildImagePlanForDigest(request, strings.Repeat("a", 64)); err == nil {
 		t.Fatal("different reviewed generation accepted")
+	}
+}
+
+// The legacy image keeps its inherited bytes; only the new policy replaces
+// the two exact installed programs, retaining the base image's entrypoint ABI.
+func TestSourceBuildLegacyImageKeepsInheritedRunnerAndEntrypoint(t *testing.T) {
+	request := sourceBuildContextFixture(t)
+	plan, err := sourceBuildImagePlanForDigest(request, strings.Repeat("a", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"source/server/connect/sim-latency/official-run.sh", "source/server/connect/sim-latency/evaluator/container/entrypoint.sh"} {
+		if strings.Contains(string(plan.Dockerfile), path) {
+			t.Fatal("legacy assembly changed an inherited runner program", path)
+		}
+	}
+	base, err := os.ReadFile(filepath.Join("evaluator", "container", "Dockerfile.base"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range []string{
+		"COPY evaluator/entrypoint.sh /usr/local/libexec/competition-container\n",
+		"COPY evaluator/official-run.sh /usr/local/libexec/competition-official-run\n",
+		`ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/libexec/competition-container"]`,
+	} {
+		if !strings.Contains(string(base), line) {
+			t.Fatal("instrument refresh paths no longer match the real base image ABI", line)
+		}
+	}
+	entrypoint, err := os.ReadFile(filepath.Join("evaluator", "container", "entrypoint.sh"))
+	if err != nil || !strings.Contains(string(entrypoint), "margin-preflight|preflight|baseline|score|finalize)") {
+		t.Fatal("new protected entrypoint cannot dispatch metadata-only preflight", err)
 	}
 }

@@ -678,23 +678,22 @@ func stripeSetCancelAtPeriodEnd(ctx context.Context, subscriptionId string, canc
 
 // ----- apple -----
 
+// appleLookupSubscriptionState asks production first. Where apple.yml accepts
+// Sandbox notifications, a TestFlight or App Review subscription is credited
+// like any other, and production answers 4040010 for it; the sandbox then
+// answers for its state, the way reconcileApple establishes the environment.
 func appleLookupSubscriptionState(ctx context.Context, originalTransactionId string) (*subscriptionStoreState, error) {
-	if appleReconcileCredentialsFunc() == nil {
+	creds := appleReconcileCredentialsFunc()
+	if creds == nil {
 		return nil, errors.New("no App Store Server API credentials")
 	}
-	statusesUrl := fmt.Sprintf(
-		"%s/inApps/v1/subscriptions/%s",
-		appleAppStoreServerApiBaseUrl,
-		url.PathEscape(originalTransactionId),
-	)
-	statuses, err := server.HttpGetRequireStatusOk[*appleSubscriptionStatusesResponse](
-		ctx,
-		statusesUrl,
-		func(header http.Header) {
-			appleServerApiAuthHeaderFunc(ctx, header)
-		},
-		server.ResponseJsonObject[*appleSubscriptionStatusesResponse],
-	)
+	statuses, err := appleGetSubscriptionStatuses(ctx, appleAppStoreServerApiBaseUrl, originalTransactionId)
+	if appleTransactionIdNotFound(err) && creds.allowsEnvironment(appleEnvironmentSandbox) {
+		statuses, err = appleGetSubscriptionStatuses(ctx, appleAppStoreServerApiSandboxBaseUrl, originalTransactionId)
+		if err != nil {
+			err = fmt.Errorf("App Store sandbox: %w", err)
+		}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("subscription statuses: %w", err)
 	}

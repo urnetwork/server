@@ -1,0 +1,248 @@
+{
+  "schema": 1,
+  "kind": "actual-h1-worse-correctness-source-and-execution-binding",
+  "scope": "File-only projection of already-completed owner-approved reduced100ns native build/readback and three-process race correctness execution; no new run, direction, pilot or calibration claim.",
+  "native_product": {
+    "base_sha": "a9e8e1a710b24c749e6499a0606938252c83e136",
+    "source_lock_sha256": "ec322ed2db023e15ea5dc3eea60a6ca5989661bba737c340fea3477d8d1300cf",
+    "base_image_id": "sha256:98c9061c4a43a25e7b581a5193ca6e7f48e49e7b7fc03b7c1b6190a029befee2",
+    "role": "worse",
+    "candidate_sha": "1222b197eab2f8465bf64f62176743d5294df82f",
+    "patch_sha256": "6e5e94f03715df42d9d9169aef5ab3272cbac0311ae5292dbbdc819c23ea2924",
+    "image_id": "sha256:2eadb97375e9afbe9c9a559c454777f55a0aaed269579b86aa8593b7a84eb1ee",
+    "binary_sha256": "a20a41162c6c683b74f5bd9c9ad7a71f021a856828120cdf66c0376cfca7271b",
+    "vcs_modified": false,
+    "native_build": {
+      "path": "/var/lib/urnetwork/competition-h1-reduced-100ns-native-20261030-v1/worse/native-build.json",
+      "sha256": "05fdc4131e98954fd2cec6954591106aee10230e662040df6df550a6d7e2ac88"
+    },
+    "native_build_proof": {
+      "path": "/var/lib/urnetwork/competition-h1-reduced-100ns-native-20261030-v1/worse/native-proof.json",
+      "sha256": "af064a13180ba1b629622b1b047df955c5d825df0b25e7b00f8173c215d2f834"
+    },
+    "native_evidence_manifest": {
+      "path": "/var/lib/urnetwork/competition-h1-reduced-100ns-native-20261030-v1/worse/native-evidence.sha256",
+      "sha256": "bad9b84964190d9dd27cbe3122efeee9b657dedd9f771b5d557bad1abc0ca7e1"
+    },
+    "product_byte_roots": {
+      "server/connect/transport.go": "69a50b2cc7d06369d3ac99f75baa147246a5b821ac8402272155f23e05626566",
+      "server/connect/resident_contract_manager.go": "ba7ea5f5986cac2894dafec97762d32e1503990c1656b407280f12a329909e8d"
+    },
+    "native_host_product_roots": {
+      "path": "/var/lib/urnetwork/competition-h1-reduced-100ns-native-20261030-v1/readbacks-v1/worse/source-byte-roots.sha256",
+      "sha256": "44160686c983acd9b743cdf12c6341424cca8277340e65341da1e64d81515904"
+    },
+    "native_image_product_roots": {
+      "path": "/var/lib/urnetwork/competition-h1-reduced-100ns-native-20261030-v1/readbacks-v1/worse/image-source-byte-roots.sha256",
+      "sha256": "44160686c983acd9b743cdf12c6341424cca8277340e65341da1e64d81515904"
+    },
+    "native_host_and_image_byte_roots_equal_actual_test_product_roots": true,
+    "native_evidence_manifest_independently_rechecked_exit": 0
+  },
+  "actual_correctness_execution": {
+    "qa_directory": "/mnt/data/h1-reduced100ns-runtime-v2-qa-20261030.LRnajCXY",
+    "terminal_receipt": {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2/inputs/correctness-source-pins/h1-reduced100ns-runtime-terminal.txt",
+      "sha256": "ec5b7611603b12a399bcb5113fd52b4a64a6ab63e8449d1eccc7f20a1d08dac9"
+    },
+    "compile_receipt": {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2/inputs/correctness-source-pins/h1-reduced100ns-compile-terminal.txt",
+      "sha256": "04560adda4a2e38ef597c9bf17ca7469037826fc36388e4c9e3cc2c76fbf5eef"
+    },
+    "go_version": "go1.27.3",
+    "race": true,
+    "test_elf": {
+      "path": "/mnt/data/h1-reduced100ns-runtime-v2-qa-20261030.LRnajCXY/reduced112.test",
+      "sha256": "786469a90ffbbed7874665d8f6b989b923dfaeea4c3012b94fed1ae3bc6544c4"
+    },
+    "test_elf_is_not_native_product_binary": true,
+    "source_directory": "/home/by/urnetwork/temp/h1-composed-serving-low-20261028.BGU5MOIW/candidate/server",
+    "base_source_manifest": {
+      "path": "/mnt/data/h1-reduced100ns-compile-qa-20261030.og8Sk34P/base-source.sha256",
+      "sha256": "42d82421f5ef5430a8f81bd19f65155eb6c4d26a84b5766e459e96a90334cff8"
+    },
+    "actual_compiler_used_input_closure": {
+      "path": "/mnt/data/h1-reduced100ns-compile-qa-20261030.og8Sk34P/used-inputs.sha256",
+      "sha256": "4aa206bcd6ea8a9259e5de7bfb506bce01c5cc8f530b747c862c6b6463b6c72f"
+    },
+    "authority_manifest": {
+      "path": "/mnt/data/h1-reduced100ns-compile-qa-20261030.og8Sk34P/authority.sha256",
+      "sha256": "889023adaf1f45f5f9839c6604dad45f0c91948dfd5437bc9f10782ffb9abf5a"
+    },
+    "module_and_compiler_manifest": {
+      "path": "/mnt/data/h1-reduced100ns-compile-qa-20261030.og8Sk34P/tool-module-pins.sha256",
+      "sha256": "9ad4b1b57e725f88e57892faeb7ba4c2bd6a6e51c54f7ead495e930659c2294c"
+    },
+    "actual_dependencies": {
+      "path": "/mnt/data/h1-reduced100ns-compile-qa-20261030.og8Sk34P/actual-dependencies.json",
+      "sha256": "71e289606090a5ce6243abe4856c388980d61e31bb66a38585d93598daa7433c"
+    },
+    "go_environment": {
+      "path": "/mnt/data/h1-reduced100ns-compile-qa-20261030.og8Sk34P/go.env",
+      "sha256": "11bcbe5ae864ab7c74a90fa3661476da50cb90db376921535f09286252d4b632"
+    },
+    "race_elf_build_info": {
+      "path": "/mnt/data/h1-reduced100ns-compile-qa-20261030.og8Sk34P/ELF.buildinfo",
+      "sha256": "c44f41f6573ab76bbadd887fbf1a11d0757ffaa08f428780f08dd523de69e3ff"
+    },
+    "initial_and_terminal_git_snapshot_sha256": "004c14e149516862e9a1fa30176637a38d4f2240c8baeafd622bd9c6aab7e3bb",
+    "test_worktree_is_not_claimed_clean_native_commit": true,
+    "tracked_product_delta": "Warm physical candidate transport17b and its indexes remain untouched; the product overlay supplies exact69a reduced100ns transport. Its unchanged ba7 manager and other source/dependency closure match the native candidate; test-only overlays are not native product edits.",
+    "roster": {
+      "path": "/mnt/data/h1-reduced100ns-runtime-v2-qa-20261030.LRnajCXY/expected112.names",
+      "sha256": "bde9d6bc9588b1a4d6060425377ea0b14ae0a4f1d4d51c85519f36688f04ecf6"
+    },
+    "raw_pass_logs": [
+      {
+        "path": "/mnt/data/h1-reduced100ns-runtime-v2-qa-20261030.LRnajCXY/pass1.json",
+        "sha256": "d463cce078c51fe621ce5c81ec16d1b9fc60c32bdf96847fcc5fa74a69972cfe"
+      },
+      {
+        "path": "/mnt/data/h1-reduced100ns-runtime-v2-qa-20261030.LRnajCXY/pass2.json",
+        "sha256": "2bb917215e7fdaa14763a45d54dbd116b19135d2c8e95ee869c22b2624df960c"
+      },
+      {
+        "path": "/mnt/data/h1-reduced100ns-runtime-v2-qa-20261030.LRnajCXY/pass3.json",
+        "sha256": "4b3aba5c2f1dbd45868570262e87ccbc09ee45b485452ede5472b73c774809c0"
+      }
+    ],
+    "per_pass_observed_counts": [
+      {
+        "pass": 1,
+        "top_level_passes": 112,
+        "nested_passes": 0,
+        "failures": 0,
+        "skips": 0
+      },
+      {
+        "pass": 2,
+        "top_level_passes": 112,
+        "nested_passes": 0,
+        "failures": 0,
+        "skips": 0
+      },
+      {
+        "pass": 3,
+        "top_level_passes": 112,
+        "nested_passes": 0,
+        "failures": 0,
+        "skips": 0
+      }
+    ],
+    "separate_processes": 3,
+    "top_level_passes_per_process": 112,
+    "total_top_level_passes": 336,
+    "failures": 0,
+    "skips": 0,
+    "transaction_exit": 0,
+    "postchecks_exit": 0,
+    "runtime_caller": {
+      "path": "/mnt/data/h1-reduced100ns-runtime-v2-qa-20261030.LRnajCXY/run.sh",
+      "sha256": "6020a16bf39c810bb6d6251b28284ec621988401f9824f133ef388308511ab4f"
+    },
+    "actual_launch_profile": {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2/inputs/correctness-source-pins/actual-launch-profile.txt",
+      "sha256": "5ee2e8af581b0af83cf207a4fa30d2d2894e97544ea262237d9802b232178012"
+    }
+  },
+  "source_and_fixture_boundaries": {
+    "pass_boundary_names": [
+      "pass1-before",
+      "pass1-after",
+      "pass2-before",
+      "pass2-after",
+      "pass3-before",
+      "pass3-after",
+      "terminal"
+    ],
+    "each_source_check_sha256": "7320652c11d3dee10dd046633116093ee3fceadb90791550c47663dd07cb3dbb",
+    "each_used_inputs_check_sha256": "418f234c8dff52940012b97c60264f1e6b7882a24497934c70036aee2868765d",
+    "each_runtime_inputs_check_sha256": "29b22ecc3d3e714774f5c69c1a7c569cee16d8d968fa438ef2c2342d199f79c0",
+    "each_git_snapshot_sha256": "004c14e149516862e9a1fa30176637a38d4f2240c8baeafd622bd9c6aab7e3bb",
+    "each_authority_check_sha256": "c724fee7cd647d8f9809218caee2ea5093df0b490ba63044e247d17b3556bea5",
+    "runtime_inputs": {
+      "path": "/mnt/data/h1-reduced100ns-runtime-v2-qa-20261030.LRnajCXY/runtime-inputs.sha256",
+      "sha256": "f81c0d03d6ae13b283ecfe1705f1f71d963d1b244cfccf71c0b96b2a20ba59a5"
+    },
+    "original_container_inventory_before_and_after_sha256": "07d04f55a8446954901e037c1f4b8e613187490f112a461d53b3d3a7ff32b927",
+    "original_network_inventory_before_and_after_sha256": "0d8612baac8710f8a467f9fec5b5af7364b4fe7b6dd2dcad89ecaad39bde2b05",
+    "original_container_count": 3,
+    "original_network_count": 4,
+    "owned_services_joined_and_removed": true,
+    "canonical_released_witness": {
+      "path": "/mnt/data/h1-reduced100ns-runtime-v2-qa-20261030.LRnajCXY/released-lock",
+      "sha256": "aa701323dc495a759179be669ee4acde408a909d182db2c495bed61e8ab4c066"
+    }
+  },
+  "frozen_test_repository_heads": {
+    "server": "a9e8e1a710b24c749e6499a0606938252c83e136",
+    "connect": "e90d59eb404f973dba6e9d0689ecd94e2718c10e",
+    "sdk": "d3824aa98c02e3c16ff7abcfe7a7088c8a470cdb",
+    "proxy": "af1d364fe34b807c31936642bff7d3fd849ab2a4",
+    "glog": "1c4954b017d9e8140a4e7020f914eb27410a41c6",
+    "goidenticons": "39ccec1b69db3a6f67e7346d6f44863499e6241d",
+    "userwireguard": "f9a92f0e5f5577a80d358065c4d39ca21f971a1c",
+    "sn": "6e686aabd53b7c45b154051fd268138988224eba",
+    "warp": "8dfa405ec380a60307952778921f05bba1c59a33",
+    "gvisor": "57c9e137f7407ad6cd41dcca1ba304a446e09c79"
+  },
+  "fixture_only_test_changes": {
+    "overlay": {
+      "path": "/home/by/urnetwork/temp/h1-reduced-100ns-reference-20261030.2iX5D6ur/qualification.overlay.json",
+      "sha256": "ea74ec37f1ec48896ef65a74d4256ea84ab9970828844237c09f44f4c9428645"
+    },
+    "overlay_mapping_count": 6,
+    "product_default_delay_nanoseconds": 100,
+    "default_assertions_source_sha256": "ab65b7e097204557f52280d3e4ab1b985d0fc93d035eca48237c4dbe632b4c01",
+    "test_roster_change": "Exactly one default-test name changes OneMicrosecondPerByte to OneHundredNanosecondsPerByte, one-to-one; no tests or assertions dropped. All explicit1us caller/cancellation/deadline stress settings stay unchanged.",
+    "composed_test_sha256": "f0900233111683ca2bbfe541a36acbd7640a64ddf6a479209461392fee2805d2",
+    "startup_test_sha256": "70df318c7a29f8ff6c4d497afe8b34f9102677d386a5776a885491e07f8e1790",
+    "preseal_test_sha256": "9c5b3960dbd3eeb9ee32bc0efdece0268b9a305b4265ee6b3a77d3b2d79a7296",
+    "seal_controls_test_sha256": "8a27266f2269c40bf48a2350029758dabe3c656d171c10116c2da5f37a1112d0",
+    "synthetic_mmdb_resource_sha256": "e2a9ac5b77bc65d7613275f0d1aa90b9c229f59457a8639f4bd40a483d610a68",
+    "runtime_input_only": "Fresh owned strictLOCAL suite fixture using the previously qualified MMDB helper77cbe591; no new helper-control pass count is asserted or added to336."
+  },
+  "separate_caller_qualification": {
+    "failed_pretest_receipt": {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2/inputs/correctness-source-pins/h1-reduced100ns-failed-caller-terminal.txt",
+      "sha256": "bf0059577f89f0ef98d472c7c4597866e898d46a6ef68d590ed8098531261f21"
+    },
+    "failed_pretest_h1_processes": 0,
+    "failed_pretest_is_not_correctness": true,
+    "guard_regression_receipt": {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2/inputs/correctness-source-pins/h1-reduced100ns-caller-guard-terminal.txt",
+      "sha256": "23203d85cdbfb1d28333291c00e8da4f276bbfca7209afe8994a030abc74870d"
+    },
+    "expected_old_red_executions": 1,
+    "new_guard_processes": 3,
+    "new_guard_top_level_passes_per_process": 2,
+    "new_guard_total_top_level_passes": 6,
+    "guard_passes_added_to_h1_count": 0,
+    "red_log": {
+      "path": "/mnt/data/h1-caller-guard-qa-20261030.0G9UNqgU/red.json",
+      "sha256": "7eb62b91f7fb8b444a42da8c00a50ef85bef89af6e93f41706ff33bfe46f8a51"
+    },
+    "green_logs": [
+      {
+        "path": "/mnt/data/h1-caller-guard-qa-20261030.0G9UNqgU/pass1.json",
+        "sha256": "49e179021d532a43c3a9a0e3b3d3e431dd2932d2bf5300fb74729d9a73af9b39"
+      },
+      {
+        "path": "/mnt/data/h1-caller-guard-qa-20261030.0G9UNqgU/pass2.json",
+        "sha256": "8ffc74956483afd65c3649d6ed0c8cc5163137e5826503353cac96725405786f"
+      },
+      {
+        "path": "/mnt/data/h1-caller-guard-qa-20261030.0G9UNqgU/pass3.json",
+        "sha256": "383e6211d9f28a49de09760506a783418ff86f673688f86eaafaac7513e95622"
+      }
+    ],
+    "cause_limit": "The first setup's missing explicit fail-fast flag is a demonstrated caller defect; its exact first failing shell command was not logged and is not invented here."
+  },
+  "nonclaims": [
+    "336 correctness passes qualify only these reduced100ns source bytes and actual service fixture; they do not accept any measured direction, pilot, hidden screen, calibration, production activation or hold release.",
+    "The native product binarya20a and race testELF786469 are distinct builds; exact product bytes and complete recorded dependency/source closure form the bridge, not binary equality.",
+    "Native clean VCS describes the native candidate/image, not the intentionally overlaid warm test worktree.",
+    "The original1us pilot/proof7220 remains failed. No old failed/setup/compile-only receipt is reclassified; no seed was read, selected, reset or generated by this projection.",
+    "Root copy paths below must be byte-identically installed and read back before these proposed native receipts are admitted. This source-only author did not install them."
+  ]
+}

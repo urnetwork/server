@@ -11053,7 +11053,19 @@ var migrations = []any{
 	// deploying the taskworker and api that fill them.
 	newSqlMigration(snChainSchemaSql),
 
-	// The verify cohort's durable census (model/verify_cohort_rotation.go):
+	// The SN Top board (LEADERTOP.md §8, owner decision 2026-10-29): the
+	// indexed trail hop table, the per-tempo snapshots, each unit's EMA state
+	// and 90 days of daily history (sn_top_schema.go). New tables only; apply
+	// before deploying the api and taskworker that write them.
+	newSqlMigration(snTopSchemaSql),
+
+	// A prospective operator-approved instrument overlay retains independent
+	// product winner review and all historical source/round authority.
+	newSqlMigration(competitionTrustedInstrumentMigration()),
+	// Authenticate the exact replica independently of the estimate's cadence.
+	newSqlMigration(snTopReplicaSchemaSql),
+
+	// 902: the verify cohort's durable census (model/verify_cohort_rotation.go):
 	// every provider a deployment ever admitted, which the validator keeps
 	// scoring forever, so stale members can rotate out of the lifetime set
 	// without the census ever being re-admitted after a Redis data loss. A

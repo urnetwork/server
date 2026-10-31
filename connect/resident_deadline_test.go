@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	clientconnect "github.com/urnetwork/connect"
@@ -137,30 +138,34 @@ func TestExchangeDeadlineReadMessageRejectedBeforeIo(t *testing.T) {
 	requireExchangeIODelta(t, "received", "data", before, 0, 0)
 }
 
-// A cached second frame is also subject to the owner's next operation bound.
+// A buffered second frame is subject to the next operation's deadline setter.
 func TestExchangeDeadlineBufferedFrameCannotHideRejection(t *testing.T) {
-	settings := DefaultExchangeSettings()
-	conn := &exchangeDeadlineConn{}
-	if err := NewDefaultExchangeBuffer(settings).WriteMessages(conn, [][]byte{clientconnect.MessagePoolGet(37), clientconnect.MessagePoolGet(53)}); err != nil {
-		t.Fatal(err)
-	}
-	receiver := NewReceiveOnlyExchangeBuffer(settings)
-	message, err := receiver.ReadMessage(conn)
-	clientconnect.MessagePoolReturn(message)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if receiver.reader.Buffered() == 0 {
-		t.Fatal("fixture did not retain the second framed message")
-	}
-	conn.readErr = errors.New("synthetic cached-frame deadline rejected")
-	before := snapshotExchangeIO("received", "data")
-	message, err = receiver.ReadMessage(conn)
-	clientconnect.MessagePoolReturn(message)
-	if !errors.Is(err, conn.readErr) || message != nil {
-		t.Errorf("cached frame escaped rejected deadline: %v", err)
-	}
-	requireExchangeIODelta(t, "received", "data", before, 0, 0)
+	clientconnect.MessagePoolReturn(clientconnect.MessagePoolGet(1))
+	synctest.Test(t, func(t *testing.T) {
+		settings := DefaultExchangeSettings()
+		conn := &exchangeDeadlineConn{}
+		if err := NewDefaultExchangeBuffer(settings).WriteMessages(conn, [][]byte{clientconnect.MessagePoolGet(37), clientconnect.MessagePoolGet(53)}); err != nil {
+			t.Fatal(err)
+		}
+		receiver := NewReceiveOnlyExchangeBuffer(settings)
+		message, err := receiver.ReadMessage(conn)
+		clientconnect.MessagePoolReturn(message)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if receiver.reader.Buffered() == 0 {
+			t.Fatal("fixture did not retain the second framed message")
+		}
+		time.Sleep(time.Millisecond)
+		conn.readErr = errors.New("synthetic cached-frame deadline rejected")
+		before := snapshotExchangeIO("received", "data")
+		message, err = receiver.ReadMessage(conn)
+		clientconnect.MessagePoolReturn(message)
+		if !errors.Is(err, conn.readErr) || message != nil {
+			t.Errorf("cached frame escaped rejected deadline: %v", err)
+		}
+		requireExchangeIODelta(t, "received", "data", before, 0, 0)
+	})
 }
 
 // Successful header framing and decoding stays unchanged.

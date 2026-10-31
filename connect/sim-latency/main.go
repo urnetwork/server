@@ -56,6 +56,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/model"
 )
 
 func simulationUsage() string {
@@ -63,15 +64,16 @@ func simulationUsage() string {
 
 Usage:
   sim-latency init [--out=<path>] [--count=<n>] [--clients=<n>] [--rate=<m>] [--seed=<s>] [--quality-window=<n>]
-  sim-latency run --epoch=<n> [--source-config=<path>] [--repos-root=<dir>] [--providers=<path>] [--site-home=<dir>] [--ramp=<d>] [--prewarm=<d>] [--settle=<d>] [--client-warmup-timeout=<d>] [--duration=<d>] [--request-timeout=<d>] [--fleet-shards=<n>] [--site-listen=<addr>] [--hosts=<n>] [--api-port=<p>] [--pipeline-interval=<d>] [--test-timeout=<d>] [--announce-timeout=<d>] [--no-impair] [--reset] [--meta=<path>] [--evaluation-id=<id>] [--official] [--expected-revision=<sha>] [--resource-report=<path>] [--accounting-report=<path>] [--accounting-source=<path>] [--final-marker=<path>]
+  sim-latency run --epoch=<n> [--source-config=<path>] [--repos-root=<dir>] [--providers=<path>] [--site-home=<dir>] [--ramp=<d>] [--prewarm=<d>] [--settle=<d>] [--client-warmup-timeout=<d>] [--duration=<d>] [--request-timeout=<d>] [--fleet-shards=<n>] [--site-listen=<addr>] [--hosts=<n>] [--api-port=<p>] [--pipeline-interval=<d>] [--test-timeout=<d>] [--announce-timeout=<d>] [--no-impair] [--reset] [--meta=<path>] [--evaluation-id=<id>] [--official] [--expected-revision=<sha>] [--resource-report=<path>] [--accounting-report=<path>] [--accounting-source=<path>] [--final-marker=<path>] [--g2-volume-policy=<policy>]
   sim-latency fleet --epoch=<n> [--source-config=<path>] [--repos-root=<dir>] --providers=<path> --shard=<i/n> --api-url=<url> --ws-urls=<urls> [--ramp=<d>] [--no-impair] [--evaluation-id=<id>] [--accounting-command-fd=<n>] [--accounting-response-fd=<n>]
   sim-latency analyze --run=<path> [--window=<w>] [--out=<path>] [--json]
   sim-latency baseline --epoch=<n> [--source-config=<path>] [--repos-root=<dir>] --runs=<paths> [--alpha=<a>] [--out=<path>]
   sim-latency baseline --epoch=<n> [--source-config=<path>] [--repos-root=<dir>] [--replicates=<n>] [--out-dir=<dir>] [--alpha=<a>] [--out=<path>] [--providers=<path>] [--site-home=<dir>] [--ramp=<d>] [--prewarm=<d>] [--settle=<d>] [--client-warmup-timeout=<d>] [--duration=<d>] [--request-timeout=<d>] [--fleet-shards=<n>] [--site-listen=<addr>] [--hosts=<n>] [--api-port=<p>] [--pipeline-interval=<d>] [--test-timeout=<d>] [--announce-timeout=<d>] [--no-impair]
   sim-latency compare --a=<paths> --b=<paths> [--baseline=<path>] [--p=<a>] [--window=<w>] [--json]
-  sim-latency score-baseline --run=<paths> --stderr=<paths> --accounting=<paths> --samples=<paths> --resource-report=<paths> --marker=<paths> --round-id=<id> --takeover-margin=<m> [--out=<path>]
+  sim-latency score-baseline --run=<paths> --stderr=<paths> --accounting=<paths> --samples=<paths> --resource-report=<paths> --marker=<paths> --round-id=<id> --takeover-margin=<m> [--g2-volume-policy=<policy>] [--out=<path>]
   sim-latency score-progress --run=<paths> --baseline=<path>
   sim-latency score --run=<paths> --stderr=<paths> --baseline=<path> --accounting=<paths> --samples=<paths> --resource-report=<paths> --marker=<paths> [--out=<path>]
+  sim-latency score-policy [--g2-volume-policy=<policy>]
   sim-latency calibrate --calibration-inputs=<path> --calibration-inputs-sha256=<digest> --calibration-lock=<path> --calibration-cpuset=<cpus> [--calibration-protocol=<name> --calibration-approval=<path> --calibration-approval-sha256=<digest> --calibration-original-plan=<path> --calibration-original-plan-sha256=<digest>]
   sim-latency source-check --epoch=<n> [--source-config=<path>] [--repos-root=<dir>] [--json]
   sim-latency source-record --epoch=<n> [--staging] [--source-config=<path>] [--repos-root=<dir>]
@@ -220,6 +222,7 @@ Options:
   --baseline=<path>      Compare noise floor, or authenticated score baseline manifest (score).
   --round-id=<id>        Competition round id bound into a score baseline manifest.
   --takeover-margin=<m>  Frozen fractional improvement required for takeover.
+  --g2-volume-policy=<policy>  Frozen G2 policy; omission retains historical 95–105%, minimum-work/1 retains only inclusive 95% floors.
   --stderr=<paths>       Comma-separated candidate stderr artifacts (score).
   --accounting=<paths>   Comma-separated immutable accounting snapshots (score).
   --samples=<paths>      Comma-separated FindProviders2 corpora (score).
@@ -243,6 +246,17 @@ func main() {
 	}
 
 	switch {
+	case optBool(opts, "score-policy"):
+		policy := model.CompetitionG2VolumePolicy(optString(opts, "--g2-volume-policy", ""))
+		version, err := model.CompetitionScorerVersionForG2Policy(policy)
+		if err != nil {
+			fatalf("score policy: %s", err)
+		}
+		printJson(struct {
+			ScoreSchema    int                             `json:"score_schema"`
+			ScorerVersion  string                          `json:"scorer_version"`
+			G2VolumePolicy model.CompetitionG2VolumePolicy `json:"g2_volume_policy,omitempty"`
+		}{ScoreSchema: apexScoreSchema, ScorerVersion: version, G2VolumePolicy: policy})
 	case optBool(opts, "init"):
 		runInit(opts)
 	case optBool(opts, "run"):
@@ -380,6 +394,7 @@ func runRun(opts docopt.Opts) {
 	servicesConfig.AnnounceTimeout = optDuration(opts, "--announce-timeout", servicesConfig.AnnounceTimeout)
 
 	options := &RunOptions{
+		G2VolumePolicy:      model.CompetitionG2VolumePolicy(optString(opts, "--g2-volume-policy", "")),
 		Epoch:               epochNumber,
 		SourceConfig:        sourceConfig,
 		RepositoriesRoot:    repositoriesRoot,

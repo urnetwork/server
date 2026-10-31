@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "kind": "proposed-root-readonly-evidence-copy-plan",
+  "installed": false,
+  "root_parent_mode": "0700",
+  "destination_owner": "0:0",
+  "destination_mode": "0400",
+  "destination_nlink": 1,
+  "rule": "Root must require fresh absent canonical destination, exact original source SHA before and after, O_EXCL/no overwrite, exact destination SHA and metadata. Never chmod/delete originals. Public evidence only; command configs still require0600.",
+  "files": [
+    {
+      "source": "/mnt/data/h1-reduced100ns-runtime-v2-qa-20261030.LRnajCXY/TERMINAL-RECEIPT.txt",
+      "destination": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2/inputs/correctness-source-pins/h1-reduced100ns-runtime-terminal.txt",
+      "sha256": "ec5b7611603b12a399bcb5113fd52b4a64a6ab63e8449d1eccc7f20a1d08dac9",
+      "observed_source_mode": "0400",
+      "purpose": "immutable Root evidence copy"
+    },
+    {
+      "source": "/mnt/data/h1-reduced100ns-compile-qa-20261030.og8Sk34P/TERMINAL-RECEIPT.txt",
+      "destination": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2/inputs/correctness-source-pins/h1-reduced100ns-compile-terminal.txt",
+      "sha256": "04560adda4a2e38ef597c9bf17ca7469037826fc36388e4c9e3cc2c76fbf5eef",
+      "observed_source_mode": "0400",
+      "purpose": "immutable Root evidence copy"
+    },
+    {
+      "source": "/mnt/data/h1-reduced100ns-runtime-qa-20261030.IzlolnHO/TERMINAL-RECEIPT.txt",
+      "destination": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2/inputs/correctness-source-pins/h1-reduced100ns-failed-caller-terminal.txt",
+      "sha256": "bf0059577f89f0ef98d472c7c4597866e898d46a6ef68d590ed8098531261f21",
+      "observed_source_mode": "0400",
+      "purpose": "preserve distinct pre-test failure"
+    },
+    {
+      "source": "/mnt/data/h1-caller-guard-qa-20261030.0G9UNqgU/TERMINAL-RECEIPT.txt",
+      "destination": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2/inputs/correctness-source-pins/h1-reduced100ns-caller-guard-terminal.txt",
+      "sha256": "23203d85cdbfb1d28333291c00e8da4f276bbfca7209afe8994a030abc74870d",
+      "observed_source_mode": "0400",
+      "purpose": "separate oldRED/new6PASS caller supplement"
+    },
+    {
+      "source": "/mnt/data/h1-reduced100ns-runtime-v2-qa-20261030.LRnajCXY/actual-launch-profile.txt",
+      "destination": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2/inputs/correctness-source-pins/actual-launch-profile.txt",
+      "sha256": "5ee2e8af581b0af83cf207a4fa30d2d2894e97544ea262237d9802b232178012",
+      "observed_source_mode": "0664",
+      "purpose": "mandatory copy: original group-write mode is rejected by readHeldOutPinned"
+    }
+  ],
+  "other_selected_evidence_modes": "Raw112/caller JSON, Go env, dependency manifests and boundary logs inspected are0600/single-link; no current public-read mode blocker there. Public0644 by itself is allowed; 0664 is not."
+}

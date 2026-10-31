@@ -218,6 +218,14 @@ frontend in front of PgBouncer, §8.14c TCP retransmission timeouts on the
 services hosts, and the §7 2026-10-26 rows. None is implemented; their
 thresholds were replayed against Mimir history from 10-17 to 10-26.
 
+Updated 2026-10-30 after settlement V2 activation and validator recovery.
+Section 22.9a adds a read-only validator health runbook: process and publisher
+liveness, phase-specific progress, finalized versus applied weights, native
+reveal waits, dependency health, and the V2 activation/epoch boundary. It names
+the existing progress fields and optional SN textfile metrics separately from
+the missing server-monitor ingestion and V2 replay coverage. The provisional
+alert margins are operational guidance, not newly installed alerts.
+
 Historical evidence reviewed 2026-10-16: the
 [October outage postmortem](../../factury/postmortem/2026-10-10.md) and its
 [visual timeline](../../factury/postmortem/2026-10-10-timeline.html), the
@@ -334,6 +342,7 @@ active missing capability and must not be read as green.
 | 17.2 | Shared contract | `subtensor`, `subtensor-convergence` |
 | 17.3 | Runbook | `subtensor`, `subtensor-convergence` |
 | 17.4 | Runbook | `subtensor`, `subtensor-convergence`, `provenance` |
+| 22.9a | Coverage gap | `subnet-process`, `subnet-weights`, `subtensor` provide the existing dependency and chain checks; validator progress-file ingestion, external heartbeat alerts, and V2 settlement replay are missing from these readers. The read-only runbook describes their direct observation sources. |
 | 22.10 | Coverage gap | `subnet-coverage` and the registered family readers share the executable evidence, retention and recovery acceptance tests; testnet campaign qualification and on-chain peer review before production paging are missing |
 | 14.7e | Runbook | `control-route-pressure`, `proxy-runtime`, `provenance`; actual local-authority/no-HTTP tests are release controls, not a production fallback detector |
 | 25.1 | Coverage gap | `contract-failure-share` implements the per-service returned-call failure share; the seasonal reply floor and external Grafana rule/contact-point delivery proof remain missing |
@@ -12018,9 +12027,60 @@ these fields or nonempty response sizes. That observation does not establish
 healthy windows. Schema 2 in §2.9c records finite small-result boundaries and
 the exclusion field that actually removed sampled candidates; neither field
 is trusted evidence of client health. The API cannot distinguish durable policy
-from runtime removals within `ExcludeClientIds`, or join this target-kind metric
-to a caller-country cohort. These explanations never suppress this section's
-independent PAGE or provisional WARN.
+from runtime removals within `ExcludeClientIds`, and the §2.9c target-kind
+metric has no caller country, so its reasons never suppress this section's
+independent PAGE or provisional WARN. The per-cohort empty-answer explanations
+below are joined to the outcome cohorts on their own labels instead.
+
+Empty-answer explanations (2026-10-31):
+`urnetwork_findproviders2_empty_outcomes_total` counts every answer of the
+outcome counter's `0` band again, under the same request-class labels
+(`ip_family`, `location_kind`, `caller_country`, `rank_mode`, `force_minimum`,
+`capability`), with the requested `target_kind` and the request's terminal
+selection `reason` from the §2.9c fixed vocabulary. The probe reads both in one
+query at one instant, the explanations tagged `monitor_part="empty"`, and joins
+them on those labels. Two explanations take zeros out of the judgment. The
+request's own: `filtered_destinations` and `intentional_zero` (every candidate
+was a destination the request excluded, and the standard window excludes there
+only the healthy exits it already holds, so the answer is a refill that found
+nothing new; or it asked for zero). `ExcludeClientIds` also carries the
+client's runtime removals of providers that failed it, so `filtered_client_ids`,
+`filtered_explicit_mixed` and `filtered_explicit` still count: such a zero can
+be a user left with nothing. Target supply:
+`cache_empty` for a `city` or `region` target (the score export published the
+target without an admitted provider, so it has connected source rows that fail
+the shared reliability, URL and hard-exclusion gates, or it lost its last
+provider within the cache ttl; most cities hold one or two providers). Explained
+zeros leave the denominator as well as the zero count, so the effective-empty
+PAGE and both small-list WARNs judge only the answers neither explains, and
+refill traffic cannot dilute a real platform empty below the ratio. A country,
+group, best-available, mixed or unknown target the export wrote empty still
+counts toward the PAGE, as do missing cache metadata, page gaps, hard, network,
+family and mixed filters and every other reason. Explanations can only lower a
+verdict. A response without them (`zero_explanations=absent`, as from API
+processes that predate the counter) is judged on its bands exactly as before; a
+row outside the fixed vocabularies, stale, negative or duplicated means the
+explanations are discarded whole (`zero_explanations=invalid`); a read that
+used them reports `zero_explanations=joined`. An explanation is clamped to the
+zeros it explains, and an explained cohort supplies no recovery credit.
+Findings report `zero_explained_by_request`, `zero_explained_by_target_supply`,
+`zero_unexplained` and `considered_requests`.
+
+`provider-count-target-supply-empty` is a nonpaging WARN: at least 50 completed
+ordinary requests in five minutes, at least half of them answered empty from a
+city or region without admitted supply. It keeps a supply gap at product scale
+visible without calling it a selection failure. Whether an app or the platform
+should fall back from such a target to its region or country is a product
+decision this signal does not make.
+
+The case that motivated this, Main 2026-10-25 04:15 UTC to 10-31: the chronic
+`any/location/au/quality` and `any/location/au/speed` PAGEs were about 21
+completed requests in five minutes per mode, steady across every API host and
+deploy at four requests a minute per rank mode, the cadence of one client's
+15-second window resize. Their zeros matched the §2.9c `city` zeros: `cache_empty`
+while the city's providers failed admission, `filtered_destinations` while the
+request already excluded the admitted ones. That one caller met the 20-request
+PAGE floor by itself. With the explanations joined it raises nothing.
 
 `caller_country=us` identifies the caller, not the requested/provider country;
 `location` combines different targets and can coexist with explicit ClientId
@@ -12442,6 +12502,10 @@ positive-subset findings. Global service-placement configuration remains intact.
   request error; PAGE when at least 20 request errors occur in that window.
   This separate denominator prevents surfaced errors from looking like recovery
   merely because they leave successful-empty counts.
+  Thresholds use unrounded paired raw-counter endpoint differences, not
+  extrapolated PromQL `increase`. Public counter summaries round to zero decimal
+  places, so the same displayed value can fall on either side of a threshold.
+  Read counts overlap outcomes and do not enter the request-error PAGE sum.
 - WARN `provider-picker-unobservable`: missing/unreadable/partial/stale/reset
   producer evidence, or fewer than 20 successful initial outcomes for a health
   claim. Search/direct-only or quiet traffic cannot establish initial health.
@@ -22823,6 +22887,30 @@ parsing (including nonnumeric and overflow controls), the per-network probe
 shape of the query, and identifier-free Markdown. Malformed evidence fails the
 probe; it must never be coerced to a low-volume healthy result.
 
+Observation-failure provenance: a typed local signup-quality failure retains
+`signup_quality_stage=source-read` when the runner's `pg` call fails, or
+`signup_quality_stage=aggregate-parse` when that call succeeded but its rows
+fail this probe's exact day/count contract. Aggregate-parse failures use
+`observation-invalid-response`; source-read preserves the original fixed
+error class, context cause and native execution boundaries. Source-read covers
+the entire existing runner, including transport and PostgreSQL CSV decoding;
+it does not identify remote SQL entry, a server error or which deadline ended.
+The stage is code-owned proof, not a token recovered from raw error text.
+Missing typed stage remains unknown. No raw output, row values, SQL or private
+errors are added to alerts; the visibility identity, severity, sustain and
+cohort query/quality thresholds stay unchanged.
+
+False-positive qualifier: source or aggregate failure measures no cohort,
+share, signup acceptance or automation. A malformed aggregate is an observation
+contract failure, not a measured low share. False-negative qualifier: missing
+source, native provenance or original same-attempt timing can conceal real
+quality problems; an unavailable result cannot clear the quality incident.
+Existing source gaps and matured-cohort verification still apply. Synthetic
+public-constructor controls distinguish source errors, malformed aggregates,
+healthy/low-volume/low-share results, parent cancellation, native boundary
+preservation and error-text privacy; source presence is not a test PASS or
+retrospective attribution of a historical timeout.
+
 ### 2.27 Subscription dashboard snapshot liveness
 Probe: `subscription-metrics`
 
@@ -28707,6 +28795,19 @@ head is never schema health. Use a separately qualified monitor that knows the
 applied head; do not roll back services or edit database objects to satisfy an
 older validator. At a source-known head, every still-required artifact retains
 its exact check and immediate drift page.
+
+Published SN top-board migrations are part of that source-known schema. Their
+content-derived versions currently occupy 898 (chain fleet bindings, incentive
+census and signed head summaries) and 899 (trail hops, ranking snapshots, EMA
+and daily history). The owning migration probe checks their twelve durable
+tables, exact column types/widths/nullability/defaults, primary and check
+constraints, and eight ready valid indexes. A matching numeric head with one
+of these artifacts missing remains immediate schema drift, not healthy. The
+missing-table and rolled-back shape controls preserve healthy published prefixes
+and attribute faults to the owning version. Source/custody failure and a newer
+unknown database head remain unknown; these catalog checks do not prove chain
+census correctness, snapshot freshness, application outcomes or deployed schema
+health without an actual qualified observation.
 
 Mainnet and native-fee artifact checks belong to this one registered probe.
 Their helpers live in `migration_sn_mainnet.go` and `migration_native_fee.go`;
@@ -38882,11 +38983,15 @@ not merely a healthy control request.
 time out while the same temporary device subsequently passes all SOCKS and
 WireGuard requests. On its exact block, the distinguishing counter edge is one
 new `ConnectDialErrors` followed by `ConnectClientsGone`, with no DoH panic,
-identity restore, or pending-H1 increase. `ProxyConnectTimeout` is the interval
-between retries, not a total timeout. A legacy 30-minute value turns one
-recoverable TUN dial error into a client-visible terminal timeout; current
-proxy/server defaults pace retries at one second and continue until the client
-leaves. A clean immediate rerun does not make the legacy interval safe.
+identity restore, or pending-H1 increase. `ProxyConnectTimeout` is the first
+interval between retries, not a total timeout. A legacy 30-minute value turns
+one recoverable TUN dial error into a client-visible terminal timeout; current
+proxy/server defaults back off from one second, doubling to eight, inside the
+30-second `ProxyConnectBudget`, then answer 504 (`connect_timeout`). A refusal
+no retry can change (no credential, ip lock or plan, unknown or removed device,
+reset, no such host) is answered 407, 403 or 502 at once and counted by class
+(`dial_refused_*`). A clean immediate rerun does not make the legacy interval
+safe.
 
 **Rejected TLS-chain attribution:** an acceptance error ending only in
 `x509: certificate signed by unknown authority` does not distinguish a broken
@@ -45583,6 +45688,121 @@ false deposits, root/evidence equivocation, RPC inconsistency, custody and
 dependency/resource failures. Chain-wide runtime exploit tests stay in a pinned
 local environment; the production monitor observes rather than generates them.
 No slashing, proof-of-routing guarantee or instant vtrust response is invented.
+
+### 22.9a Validator health: progress, native cycles, and settlement V2
+
+**Read-only runbook; automatic coverage remains incomplete (2026-10-30).**
+The validator publishes `urnetwork-validator-progress-v1` when launched with
+`--progress-file`. The optional `sn-mainnet monitor --services` consumer can
+validate that file and export per-role textfiles. Neither is a registered
+progress-file reader in this server monitor. `subnet-process` currently reads
+operator database/task/intent state and explicitly reports the missing
+validator/miner process exporters; `subnet-weights` reads the native chain.
+`subnet-settlement` replays v1 and reports
+`settlement-v2-reader-unimplemented` for a declared V2 pair. Registering these
+probes does not establish enrollment, deployment, metric ingestion or delivered
+alerts. Keep those gaps visible alongside a successful direct health check.
+The existing `subnet-head` pool census is also v1-based: it does not resolve
+the epoch-specific V2 `settlementAt` destination. Its allowed-recipient verdict
+cannot independently certify or veto the V2 pool switch.
+
+Use [SERVICE-PROGRESS.md](../../sn/mainnet/SERVICE-PROGRESS.md),
+[SERVICE-MONITOR.md](../../sn/mainnet/SERVICE-MONITOR.md),
+[NATIVE-DEADLINES.md](../../sn/mainnet/NATIVE-DEADLINES.md) and the
+[progress wire](../../sn/protocol/validator_progress.go) as the field and
+consumer contracts. The source snapshot is unsigned operational evidence,
+atomic and at most 8 KiB; read it
+through a bounded reader with an independently expected deployment, validator,
+chain/genesis/netuid and config. The producer's `instance_id` and `started_at`
+separate generations. Preserve the original source times and collector time;
+file mtime and a successful SSH read cannot refresh a protocol observation.
+
+For the deployed unit, a bounded process check is:
+
+```sh
+systemctl show sn-validator.service --no-pager \
+  --property=ActiveState,SubState,MainPID,NRestarts,ExecMainStartTimestamp,ExecMainCode,ExecMainStatus,NeedDaemonReload
+```
+
+Read the progress path configured in that unit, rather than assuming all roles
+share a path. Keep a complete expected host/role roster outside the monitored
+host. A missing role, stale collector sample or failed read is **unknown**, not
+zero failures. Retain one small public projection per sample; journal diagnosis
+should select fixed diagnostic codes, the current PID and a finite time/row/byte
+window. Prepared payloads, signatures, raw participant histories and credentials
+do not belong in metrics, alerts or the public projection.
+
+The following are useful collection and alert inputs. These are proposed
+operational rules for the missing adapter, not new metric names or `Probe`
+registrations. Collect light process/progress/dependency observations every
+60 seconds initially, within the existing shared SSH/RPC budgets. Use two
+failed complete samples for a transient WARN; use the actual protocol deadline
+for escalation. Proved invariant violations retain §22.0/§22.10 severity and
+recovery semantics.
+
+| Signal and source | Healthy interpretation / alert condition | Response and limits |
+|---|---|---|
+| Process generation: unit state, PID/start, restart delta and running executable | Active/running with the expected role/config, stable start and no unexpected restart increase. A green process alone says nothing about scoring, publication or chain application. Warn on an unexpected restart; page on a required writer being down or two active owners. | Correlate the failure with that generation's journal and last durable intent. An observer SSH failure is a visibility failure, not proof the unit stopped. |
+| Publisher: `heartbeat_at`, `publisher.outcome`, `publisher.last_success_at` | Heartbeat advances and acknowledged atomic publication remains fresh. A fresh file can coexist with `retrying` after an ambiguous directory sync; heartbeat alone cannot certify publication. | The producer normally publishes every 30 seconds. The SN rule examples use provisional 90-second warning / 120-second critical heartbeat ages. Adjust for the actual publish/sample intervals and clock skew before enabling; watch stale/missing consumer samples independently. |
+| Steering responsiveness: `steering.current`, `observed_at`, `last_success_at`, `outcome`, `epoch_known` | Fresh returned loop outcomes prove responsiveness. `epoch_wait`, `reveal_wait`, `read_wait` and `receipt_transport_wait` are observations, not successful weight application. A fresh heartbeat with an overdue armed steering outcome is a separate stall warning. | Use the optional consumer `steering_liveness` policy only after a fresh outcome from the current instance. Choose warning/critical margins from the longest admitted operation plus loop/collection overhead; the 120/300-second documentation example is not a production SLO. |
+| Phase cost: preparation-stage begin/end, `elapsed_ms`, `operation_elapsed_ms`, `cancel_cause` | Collection, records, proofs, replay and measurement complete within the effective operation and native-window budgets. Compare the same phase and workload across cycles; growth in replay debt, repeated deadline cancellation or too little remaining block margin warns. | Current production steering has a 30-minute whole-operation default, configurable by `--steering-operation-timeout`; read its effective value from the unit/invocation, not progress JSON. Individual reads have separate bounds. A 600-second alarm would have misclassified a successful 603-second launch cycle. Startup settlement advance has a different owner/budget. Stage records have no operation ID; interleaved spans or dropped messages prevent naive pairing/summing. Profile the slow phase before changing concurrency or timeouts. |
+| Intent lifecycle: `intent.current`, `last_success_at`, `value.status`, original `created_at` and `progress_at` | A successful read and a semantic transition are separate. Pending can precede broadcast; finalized means inclusion succeeded; applied is the later application observation. Repeated reads do not reset original creation or progress age. | Warn on unresolved uncertainty or shrinking submission margin, then reconcile receipt/canonical history. A transaction hash alone is not submission proof; neither a pending age nor a failed read authorizes a retry or replacement. |
+| Native schedule: producer `native.*`, intent native epoch/reveal block, independent finalized RPC | Derive the current native head/epoch and pending epoch from authenticated, fresh reads. Before the actual reveal boundary, a finalized intent in `reveal_wait` is normal. The producer may retain an older native snapshot while the loop waits. | Require current/known flags **and** field-specific source age. A stale native field makes deadline inference unknown even with a fresh heartbeat. Reveal is an earliest prediction, not an expiry; inspect drand availability, pending commits and runtime application after it (§22.6). |
+| Applied weights: full native `Weights` row, `LastUpdate`, finalized block/hash, intent boundaries and dispatch result | Compare the complete UID/u16 row for the validator's weight-row owner at an explicit finalized checkpoint. Include the effective V2 pool hotkey-to-UID mapping. Success requires the correct lifecycle and row, not just the presence of one positive recipient. | Application block is the observer's head; it need not equal `LastUpdate`. Repeated vectors can match an older cycle, and a new commit can advance `LastUpdate` before reveal. Preserve exact intent/extrinsic/reveal/application context; signed-decision replay is still a separate coverage gap. |
+| Settlement progress: `settlement.current`, `cursor_known`, `epoch`, `target_epoch`, `pending_publications`, `first_pending_epoch`, `last_success_at`, `progress_at` | A fresh successful advance with known cursor equal to target and zero pending publications is caught up. The cursor can stay at the same open settlement epoch for days without being stalled. | Warn on growing backlog or failed advances; compare due work with the effective settlement close/commit/finalize windows in blocks (§22.7). A known durable cursor can survive a publication failure; it does not turn that failure into success. |
+| Diagnostic delivery: `diagnostics` per-domain `delivered`, `dropped`, `dropped_bytes`, `unavailable`, `last_success_at` | Counters are scoped to the same producer instance. Increases in dropped/unavailable output mean lost diagnostic visibility even while protocol work continues. Idle domains can retain `starting` and old success times normally. | Warn on current counter deltas or unavailable output; investigate the sink/admission budget. There is no per-reason drop counter, so a rise cannot distinguish a full queue from a writer failure. Missing log events then cannot establish absence of work or errors. These are not counts of dropped trails, missing signed evidence, failed weights or lost funds. Reset the baseline on instance change and treat saturated counters as incomplete loss accounting. |
+| Node/RPC: `system_health`, finalized head/hash, sync state, direct/gateway/reference comparison | Heads advance, required peers exist, and the operational endpoint is caught up on the configured chain/runtime. Compare sources at one finalized height; native and synthetic EVM hashes need not be equal. | Reuse §17 and §22.1 for loss, lag and divergence. One healthy endpoint or two aliases of one node cannot prove independent agreement. Keep source unavailability separate from contradictory finalized history. |
+| Resources and evidence availability: process CPU/RSS, local state disk/inodes, file descriptors, read latency, replica success and replay debt | Capacity and retention runway accommodate measured work before its real deadline. A referenced object is retrievable from each required replica, with correct bytes/signature; a green MinIO health endpoint is insufficient. | Reuse host pressure, storage runway and artifact checks (§8.14, §11.6, §22.8). Missing evidence requires recovery of the original object. A diagnostic drop is not this evidence-loss signal; preserve journals and original failed captures. |
+| V2 driver and watcher: recorded activation, ordinary epoch status, scheduled watcher result and timer | `bringyourctl st v2-activation` is armed for the expected pool, first epoch and exact pair with no refusal. `sn-transition-status` admits writes and reports schema/boundary readiness. V2 epoch state advances when work is due; watcher invocations finish and remain scheduled. | Check these directly until a V2 reader exists. An inactive completed oneshot with exit 0 can be healthy; “no pending root” exercises no root approval. The transition label `sn_earning_legacy_settlement` follows the earning-policy clock, not the selected contract version. |
+
+The validator's signing/weight-row UID and the operator pool UID are different
+identities. Resolve both from their configured hotkeys at the checkpoint. Native
+`Active[poolUID]=false` alone does not negate an active EVM `operatorAt` entry or
+prove a broken V2 registration; read the pool registration, effective
+`settlementAt` destination, UID mapping and applied row together. Native validator
+permit/trust/dividends, operator eligibility and a pool's activity flag have
+different meanings (§22.2/§22.6).
+
+**Clocks and escalation.** Native epochs, UR settlement epochs, publisher
+intervals and watcher schedules are independent. Keep the mainnet 50,400-block
+settlement policy and its close/root/challenge windows separate from native
+tempo. An open first V2 epoch need not have a root, funding capture or claimable
+balance yet. Top200 `binding_open=false` can be the intended launch state;
+counts from a timestamped previous-epoch board do not establish current account
+claimability or canonical epoch. Compare each with its own desired state and
+deadline rather than paging on absence alone.
+
+The implemented `subnet-weights` defaults warn/page from pending-commit and
+drand state, with three stale tempos and one extra overdue reveal epoch;
+`subnet-process` uses mirror lag above 150 blocks or positive lag older than
+10 minutes, unresolved intents older than 30 minutes, and three task reschedule
+errors. Those are the owning readers' defaults in
+[subnet_replay_settings.go](subnet_replay_settings.go), not a replacement for a
+validator operation budget or a generic fixed “no progress” timer. Unknown
+enrollment/source state cannot clear these findings.
+
+**Existing metric vocabulary, not installed coverage.** The optional SN
+consumer's `sn_mainnet_validator_*{role}` families include
+`sample_timestamp_seconds`, `read_current`, `source_current`,
+`heartbeat_timestamp_seconds`, `producer_publish_last_success_timestamp_seconds`,
+`intent_current`, `intent_status`, `intent_progress_timestamp_seconds`,
+`intent_reveal_block`, `intent_finalized_block`, `intent_application_block`,
+`settlement_current`, `settlement_epoch`, `settlement_target_epoch`,
+`settlement_pending_publications`, `steering_current`, `steering_status`, and
+`steering_liveness_*`. Gate each retained value with its current/known flags and
+source timestamp. Its independently supplied
+`sn_mainnet_validator_expected{env,host,role}` roster is needed for a dead-man
+alarm; a series produced only by the monitored host disappears with that host.
+Use the existing
+[service alert examples](../../sn/mainnet/service-alerts.example.yml) and
+[diagnostic alert examples](../../sn/mainnet/diagnostic-alerts.example.yml)
+as starting rules, with their explicit provisional margins and role isolation.
+Verify textfile collection, original sample age, remote ingestion, rule
+evaluation and notification delivery separately before claiming automatic
+monitoring. Scope alerts by stable host/role/deployment; put changing epochs,
+blocks and hashes in bounded evidence, not time-series labels. Recovery needs
+fresh complete observations and reconciliation of missed work (§22.10), not
+just another heartbeat or a restart.
 
 ### 22.10 Alert evidence, recovery, and implementation acceptance
 

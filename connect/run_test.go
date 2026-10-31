@@ -92,9 +92,9 @@ func TestRunRejectedConnectPreservesStatusWithoutPublishingMetrics(t *testing.T)
 	}
 }
 
-// Platform transports run their own heartbeat, client pings against the read
-// deadline, so connect's listener leaves TCP keepalive off.
-func TestRunServesPlatformTransportsWithoutTcpKeepAlive(t *testing.T) {
+// The listener also serves ordinary /status HTTP requests, whose idle lifetime
+// exceeds the kernel keepalive backstop and has no transport heartbeat.
+func TestRunKeepsTcpKeepAliveOnSharedListener(t *testing.T) {
 	for key, value := range map[string]string{
 		"WARP_ENV": "test", "WARP_VERSION": "2026.9.4+1037600680",
 		"WARP_HOST": "synthetic-host", "WARP_SERVICE": "connect", "WARP_BLOCK": "g1",
@@ -121,8 +121,8 @@ func TestRunServesPlatformTransportsWithoutTcpKeepAlive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(served) != 1 || !served[0].DisableTcpKeepAlive {
-		t.Fatalf("connect served with %+v, want TCP keepalive disabled", served)
+	if len(served) != 1 || served[0].DisableTcpKeepAlive {
+		t.Fatalf("connect served with %+v, want TCP keepalive enabled", served)
 	}
 }
 

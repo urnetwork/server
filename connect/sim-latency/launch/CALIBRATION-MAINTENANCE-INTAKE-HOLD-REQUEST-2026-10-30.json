@@ -1,0 +1,9 @@
+{
+  "kind": "evaluation",
+  "active": true,
+  "expected_revision": 3,
+  "idempotency_key": "r2-epoch1-calibration-maintenance-intake-20261030-v1",
+  "reason_code": "CALIBRATION_MAINTENANCE",
+  "public_explanation": "Owner-approved bounded calibration maintenance preserves authenticated submission intake while the real worker is stopped for serial calibration. Evaluation and publication remain held; reward delivery remains held.",
+  "evidence_sha256": "de4bbd4bd9b281a50afc9fb5387b6361f20351388578acddc8f28284981a013c"
+}

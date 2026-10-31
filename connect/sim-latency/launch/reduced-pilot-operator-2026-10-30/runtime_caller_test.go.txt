@@ -1,0 +1,76 @@
+// Synthetic caller controls execute only the actual shell guard, never fixture
+// setup, services or an evaluator. The script under review is supplied externally.
+package runtimecaller
+
+import (
+	"errors"
+	"os"
+	"os/exec"
+	"strings"
+	"testing"
+)
+
+// The real late guard requires independent attestation and the explicit strict
+// flag. Missing, empty or differently spelled flags must not become defaults.
+func TestRuntimeCallerRequiresExplicitFailFastAndAttestation(t *testing.T) {
+	content, err := os.ReadFile(os.Getenv("H1_RUNTIME_CALLER_GUARD_SOURCE"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	guard := "[[ -n ${WARP_TEST_ENV_ATTESTED_ADDRS:-} && ${WARP_TEST_ENV_FAIL_FAST:-} == 1 ]]"
+	if strings.Count(string(content), guard) != 1 {
+		t.Fatal("the actual runtime caller no longer has one exact strict attestation guard")
+	}
+	for _, testCase := range []struct {
+		name        string
+		environment []string
+		wantSuccess bool
+	}{
+		{name: "missing flag", environment: []string{"WARP_TEST_ENV_ATTESTED_ADDRS=fixture.example"}},
+		{name: "empty flag", environment: []string{"WARP_TEST_ENV_ATTESTED_ADDRS=fixture.example", "WARP_TEST_ENV_FAIL_FAST="}},
+		{name: "wrong flag", environment: []string{"WARP_TEST_ENV_ATTESTED_ADDRS=fixture.example", "WARP_TEST_ENV_FAIL_FAST=0"}},
+		{name: "missing attestation", environment: []string{"WARP_TEST_ENV_FAIL_FAST=1"}},
+		{name: "strict caller", environment: []string{"WARP_TEST_ENV_ATTESTED_ADDRS=fixture.example", "WARP_TEST_ENV_FAIL_FAST=1"}, wantSuccess: true},
+	} {
+		command := exec.Command("/bin/bash", "-euc", guard)
+		command.Env = append([]string{"PATH=/usr/bin:/bin", "LC_ALL=C"}, testCase.environment...)
+		err := command.Run()
+		if testCase.wantSuccess {
+			if err != nil {
+				t.Fatalf("%s: explicit strict caller refused: %v", testCase.name, err)
+			}
+		} else {
+			var exitError *exec.ExitError
+			if !errors.As(err, &exitError) || exitError.ExitCode() != 1 {
+				t.Fatalf("%s: omitted or incorrect authority did not fail closed: %v", testCase.name, err)
+			}
+		}
+	}
+}
+
+// Caller validation must precede temporary/service creation, not merely clean
+// up after discovering the same missing environment flag at a later boundary.
+func TestRuntimeCallerRejectsMissingFlagBeforeSetup(t *testing.T) {
+	content, err := os.ReadFile(os.Getenv("H1_RUNTIME_CALLER_GUARD_SOURCE"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(content)
+	guard := "[[ ${WARP_TEST_ENV_FAIL_FAST:-} == 1 ]]"
+	guardPosition := strings.Index(script, guard)
+	if strings.Count(script, guard) != 1 {
+		t.Fatal("caller must reject an absent fail-fast flag before setup")
+	}
+	for _, boundary := range []string{"mkdir -m0700", "release_gate_services_start "} {
+		position := strings.Index(script, boundary)
+		if position < 0 || position <= guardPosition {
+			t.Fatalf("strict caller validation does not precede %q", boundary)
+		}
+	}
+	command := exec.Command("/bin/bash", "-euc", script[:guardPosition+len(guard)])
+	command.Env = []string{"PATH=/usr/bin:/bin", "LC_ALL=C"}
+	var exitError *exec.ExitError
+	if err := command.Run(); !errors.As(err, &exitError) || exitError.ExitCode() != 1 {
+		t.Fatalf("actual pre-setup prefix admitted an omitted flag: %v", err)
+	}
+}

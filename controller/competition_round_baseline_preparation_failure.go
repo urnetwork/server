@@ -252,7 +252,7 @@ func retainFailedRoundBaselinePreparation(ctx context.Context, settings *Setting
 	if err := decodeCompetitionPreparationJson(bytes.NewReader(manifest), settings.roundBaselinePreparation.Settings.MaximumRecordBytes, &retained); err != nil {
 		return nil, err
 	}
-	if retained.Outcome != "infrastructure_hold" || retained.Owner != preparation.Owner || retained.ContextSha256 != preparation.ContextSha256 || retained.Retention == nil || !retained.Retention.AuthenticatedAfterUpload || !retained.Retention.ComplianceObjectLock || !strings.HasSuffix(retained.Retention.ManifestKey, "/"+preparation.Owner+"/baseline-preparation-hold-manifest.json") {
+	if retained.Outcome != "infrastructure_hold" || retained.Owner != preparation.Owner || retained.ContextSha256 != preparation.ContextSha256 || retained.Retention == nil || !retained.Retention.AuthenticatedAfterUpload || !retained.Retention.ComplianceObjectLock || !strings.HasSuffix(retained.Retention.ManifestKey, "/"+roundBaselinePreparationArtifactOwner(preparation)+"/baseline-preparation-hold-manifest.json") {
 		return nil, errors.New("baseline failure archive did not authenticate its owned hold")
 	}
 	return manifest, nil

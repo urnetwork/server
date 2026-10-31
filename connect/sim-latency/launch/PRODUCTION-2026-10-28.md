@@ -1,6 +1,16 @@
 # Production launch — October 28, 2026, 00:00 UTC
 
-## Current preparation pointer — October 26
+## Current operational pointer
+
+This file preserves the dated preparation journal, including superseded model
+choices and failed attempts. For the actual R2 intake, maintenance holds,
+running calibration and accepted keyless Qwen/Gemma qualification, use
+[current-state.json](current-state.json), [LAUNCH-ACCEPTANCE.md](LAUNCH-ACCEPTANCE.md)
+and the [live maintenance record](CALIBRATION-MAINTENANCE-LIVE-2026-10-30.json).
+Do not revive a historical Mini/Muse provider requirement or replay old runtime
+instructions from this journal. Calibration is not yet accepted.
+
+## Historical preparation pointer — October 26
 
 User-confirmed operator inputs are now resolved: maintenance is cleared, broad
 ten-repository editable scope is approved outside the protected instrument and

@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"io/fs"
+	"maps"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/session"
 	"github.com/urnetwork/server/stats"
 	"github.com/urnetwork/server/stats/sample"
 )
@@ -184,6 +186,69 @@ func TestRecordFindProviders2OutcomeRecordsReturnedCountBand(t *testing.T) {
 	recordFindProviders2Outcome(args, "US", 2)
 	if got := testutil.ToFloat64(counter); got != before+1 {
 		t.Fatalf("outcome counter = %v, want %v", got, before+1)
+	}
+}
+
+// Every completed empty answer the outcome counter's zero band counts is also
+// counted, under the same request-class labels, with the requested target's
+// kind and the request's terminal selection reason, so the provider-count
+// probe (SIGNALS.md §2.9a) can tell the zeros a request explains from the
+// platform's. An empty specification runs without a database; its zero is the
+// request's own (no_specs).
+func TestFindProviders2EmptyOutcomeExplainsTheOutcomeZeroBand(t *testing.T) {
+	cohort := map[string]string{"ip_family": "any", "location_kind": "direct", "caller_country": "unknown", "rank_mode": "quality", "force_minimum": "false", "capability": "none"}
+	zeroBand := maps.Clone(cohort)
+	zeroBand["result_count"] = "0"
+	explained := maps.Clone(cohort)
+	explained["target_kind"] = "none"
+	explained["reason"] = "no_specs"
+	outcomesBefore := selectionMetricCount(t, "urnetwork_findproviders2_outcomes_total", zeroBand)
+	explainedBefore := selectionMetricCount(t, "urnetwork_findproviders2_empty_outcomes_total", explained)
+	result, err := FindProviders2(&FindProviders2Args{}, &session.ClientSession{Ctx: context.Background()})
+	if err != nil || result == nil || len(result.Providers) != 0 {
+		t.Fatalf("empty request changed its existing result: error=%v", err)
+	}
+	if after := selectionMetricCount(t, "urnetwork_findproviders2_outcomes_total", zeroBand); after != outcomesBefore+1 {
+		t.Fatalf("outcome zero band = %g, want %g", after, outcomesBefore+1)
+	}
+	if after := selectionMetricCount(t, "urnetwork_findproviders2_empty_outcomes_total", explained); after != explainedBefore+1 {
+		t.Fatalf("empty-outcome explanation = %g, want %g", after, explainedBefore+1)
+	}
+}
+
+// The explanation's request-class labels are the outcome counter's, value for
+// value, including the caller-country normalization, so the two join on them
+// alone.
+func TestRecordFindProviders2EmptyOutcomeSharesTheOutcomeCohortLabels(t *testing.T) {
+	groupID := server.NewId()
+	args := &FindProviders2Args{
+		Specs:                 []*ProviderSpec{{LocationGroupId: &groupID}},
+		RankMode:              RankModeSpeed,
+		IpFamily:              "v6-capable",
+		RequireModernProvider: true,
+	}
+	for _, callerCountry := range []string{" US ", "not-a-country"} {
+		wantCountry := "us"
+		if callerCountry == "not-a-country" {
+			wantCountry = "unknown"
+		}
+		outcome, err := findProviders2OutcomesTotal.GetMetricWithLabelValues("v6", "group", wantCountry, RankModeSpeed, "false", "0", "modern")
+		if err != nil {
+			t.Fatal(err)
+		}
+		explained, err := findProviders2EmptyOutcomesTotal.GetMetricWithLabelValues("v6", "group", wantCountry, RankModeSpeed, "false", "modern", "group", "cache_missing")
+		if err != nil {
+			t.Fatal(err)
+		}
+		outcomeBefore, explainedBefore := testutil.ToFloat64(outcome), testutil.ToFloat64(explained)
+		recordFindProviders2Outcome(args, callerCountry, 0)
+		recordFindProviders2EmptyOutcome(args, callerCountry, "group", "cache_missing")
+		if got := testutil.ToFloat64(outcome); got != outcomeBefore+1 {
+			t.Fatalf("%q: outcome zero band = %v, want %v", callerCountry, got, outcomeBefore+1)
+		}
+		if got := testutil.ToFloat64(explained); got != explainedBefore+1 {
+			t.Fatalf("%q: explanation = %v, want %v", callerCountry, got, explainedBefore+1)
+		}
 	}
 }
 

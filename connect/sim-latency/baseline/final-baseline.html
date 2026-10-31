@@ -1,321 +1,141 @@
 <!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Sim-latency historical v1 baseline</title>
-  <style>
-    :root {
-      --ink:#102035; --muted:#607086; --paper:#eef3f8; --card:#ffffff;
-      --line:#d4deea; --navy:#143f73; --blue:#1688bd; --cyan:#17a8c2;
-      --green:#14815d; --green-soft:#dff5e9; --red:#ca4252;
-      --amber:#d48717; --violet:#7258b7; --shadow:0 14px 38px rgba(26,52,80,.08);
-    }
-    * { box-sizing:border-box; }
-    body { margin:0; background:linear-gradient(180deg,#e8f0f7 0,#f5f7fa 420px); color:var(--ink); font:15px/1.55 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
-    main { max-width:1180px; margin:0 auto; padding:54px 26px 84px; }
-    header { padding:14px 4px 34px; }
-    .eyebrow,.section-index { color:var(--cyan); font-size:12px; font-weight:900; letter-spacing:.14em; text-transform:uppercase; }
-    h1 { max-width:980px; margin:10px 0 18px; font-size:clamp(40px,7vw,76px); line-height:.98; letter-spacing:-.05em; }
-    h2 { margin:3px 0 8px; font-size:30px; line-height:1.12; letter-spacing:-.025em; }
-    p { color:var(--muted); }
-    .lead { max-width:890px; font-size:19px; }
-    .chips { display:flex; flex-wrap:wrap; gap:9px; margin-top:24px; }
-    .chip { padding:7px 12px; border:1px solid var(--line); border-radius:999px; background:#fff; color:var(--navy); font-size:12px; font-weight:800; }
-    .chip.ready { background:var(--green-soft); border-color:#94cfb5; color:#075c40; }
-    section { margin:24px 0; padding:30px; border:1px solid var(--line); border-radius:24px; background:var(--card); box-shadow:var(--shadow); }
-    .section-head { display:flex; align-items:flex-start; justify-content:space-between; gap:28px; margin-bottom:20px; }
-    .section-head p { max-width:790px; margin-bottom:0; }
-    .section-kpi { min-width:150px; color:var(--navy); font-size:23px; font-weight:900; text-align:right; }
-    .section-kpi small { display:block; color:var(--muted); font-size:11px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; }
-    svg { display:block; width:100%; height:auto; border:1px solid var(--line); border-radius:16px; background:#f9fbfd; }
-    svg text { font-family:inherit; }
-    .axis { stroke:#aebccc; stroke-width:1; }
-    .grid { stroke:#e1e7ef; stroke-width:1; }
-    .axis-label { fill:var(--muted); font-size:11px; }
-    .axis-title { fill:var(--muted); font-size:12px; font-weight:750; }
-    .baseline { fill:none; stroke:var(--navy); stroke-width:3; }
-    .candidate { fill:none; stroke:var(--cyan); stroke-width:3; }
-    .better { fill:none; stroke:var(--green); stroke-width:3; }
-    .noop { fill:none; stroke:var(--violet); stroke-width:3; }
-    .worse { fill:none; stroke:var(--amber); stroke-width:3; }
-    .projection-ttfb { fill:none; stroke:var(--cyan); stroke-width:3.5; }
-    .projection-speed { fill:none; stroke:var(--green); stroke-width:3.5; }
-    .projection-dot-ttfb { fill:var(--cyan); stroke:#fff; stroke-width:2; }
-    .projection-dot-speed { fill:var(--green); stroke:#fff; stroke-width:2; }
-    .projection-fringe-ttfb { fill:rgba(23,168,194,.12); }
-    .projection-fringe-speed { fill:rgba(20,129,93,.13); }
-    .dot-baseline { fill:var(--navy); }
-    .dot-candidate { fill:var(--cyan); }
-    .dot-better { fill:var(--green); }
-    .dot-noop { fill:var(--violet); }
-    .dot-worse { fill:var(--amber); }
-    .baseline-line { stroke:var(--navy); stroke-width:2.2; stroke-dasharray:4 4; }
-    .threshold-line { stroke:var(--red); stroke-width:3; stroke-dasharray:9 5; }
-    .threshold-label { fill:var(--red); font-size:12px; font-weight:900; }
-    .baseline-label { fill:var(--navy); font-size:12px; font-weight:900; }
-    .improvement-fringe { fill:rgba(20,129,93,.13); }
-    .fringe-label { fill:#075c40; font-size:10px; font-weight:950; letter-spacing:.08em; }
-    .visual-title { fill:var(--navy); font-size:14px; font-weight:900; letter-spacing:.04em; }
-    .box { fill:#fff; stroke:#c7d4e2; }
-    .box-green { fill:#e1f4e9; stroke:#76bc99; }
-    .box-blue { fill:#e4f2fa; stroke:#7bb9d4; }
-    .box-amber { fill:#fff4df; stroke:#d8ac5d; }
-    .box-red { fill:#fff0ee; stroke:#df938d; }
-    .box-title { fill:var(--navy); font-size:11px; font-weight:900; letter-spacing:.08em; }
-    .box-value { fill:var(--ink); font-size:14px; font-weight:800; }
-    .small { fill:var(--muted); font-size:11px; }
-    .check-circle { fill:var(--green); }
-    .check-mark { fill:none; stroke:#fff; stroke-width:3; stroke-linecap:round; stroke-linejoin:round; }
-    .metrics { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin-top:16px; }
-    .metric { min-height:88px; padding:14px 15px; border:1px solid var(--line); border-radius:14px; background:#fbfcfe; }
-    .metric strong { display:block; color:var(--navy); font-size:18px; overflow-wrap:anywhere; }
-    .metric span { display:block; margin-top:4px; color:var(--muted); font-size:12px; }
-    .legend { display:flex; flex-wrap:wrap; gap:16px; margin:13px 2px 0; color:var(--muted); font-size:12px; font-weight:700; }
-    .legend i { display:inline-block; width:18px; height:4px; margin-right:6px; border-radius:4px; vertical-align:middle; }
-    .notice { margin-top:16px; padding:14px 17px; border-left:4px solid var(--amber); background:#fff8e8; color:#765114; font-size:13px; }
-    footer { margin-top:30px; color:var(--muted); font-size:12px; }
-    code { font-size:12px; overflow-wrap:anywhere; }
-    @media(max-width:780px) {
-      main { padding:30px 14px 56px; }
-      section { padding:20px; }
-      .section-head { display:block; }
-      .section-kpi { margin-top:12px; text-align:left; }
-      .metrics { grid-template-columns:repeat(2,minmax(0,1fr)); }
-    }
-    @media print { body { background:#fff; } section { break-inside:avoid; box-shadow:none; } }
-  </style>
-</head>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"><title>Final baseline — public-calibration draft · 2026-10-31</title><style>
+:root{--ink:#102a42;--muted:#52687c;--line:#dbe3ec;--paper:#f3f6fa;--blue:#2563a6;--green:#00836d;--purple:#8b5bb5;--gold:#b8740f}
+*{box-sizing:border-box}html{scroll-behavior:auto}body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.55 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+a{color:var(--blue)}h1,h2,h3,p{margin:0}h1{font-size:clamp(34px,5vw,61px);line-height:1.08;letter-spacing:-.045em;max-width:850px}h2{font-size:clamp(26px,3.4vw,38px);line-height:1.15;letter-spacing:-.035em}h3{font-size:19px;line-height:1.25}.wrap{max-width:1240px;margin:auto;padding:0 28px}.hero{background:radial-gradient(ellipse at 90% 0,#245473 0,transparent 50%),#0b2133;color:white;padding:42px 0 38px}.hero .kicker{color:#8db6ce}.hero .intro{max-width:800px;color:#c9d9e5;font-size:18px;margin-top:20px}.kicker{text-transform:uppercase;letter-spacing:.15em;font-size:10px;font-weight:800;margin-bottom:9px;color:var(--muted)}.pill{display:inline-block;border:1px solid currentColor;border-radius:99px;padding:5px 11px;font-size:11px;font-weight:700}.draft{color:#ffd88a;background:#b8730c22;margin-bottom:20px}.profile-pills{display:flex;gap:9px;flex-wrap:wrap;margin-top:26px}.profile-pills .pill{border-color:#466479;color:#e1edf4}.scope{margin-top:22px;border-left:3px solid #e9b448;padding-left:13px;color:#cbdbe6;max-width:970px;font-size:13px}.nav{background:white;border-bottom:1px solid var(--line)}.nav .wrap{display:flex;gap:24px;flex-wrap:wrap;padding-top:15px;padding-bottom:15px}.nav a{font-size:12px;text-decoration:none;font-weight:750}
+section{padding:54px 0;border-bottom:1px solid var(--line)}.section-head{display:flex;gap:20px;align-items:flex-start;margin-bottom:25px}.section-number{font-size:40px;line-height:1;color:#adc2d4;font-weight:800;letter-spacing:-.08em}.section-head p{color:var(--muted);max-width:840px;margin-top:12px}.grid{display:grid;gap:18px}.two{grid-template-columns:repeat(2,minmax(0,1fr))}.three{grid-template-columns:repeat(3,minmax(0,1fr))}.card{background:white;border:1px solid var(--line);border-radius:16px;padding:23px;min-width:0;box-shadow:0 3px 0 #dde6ef55}.card p{margin-top:10px;color:var(--muted)}.card .kicker{margin-top:0}.architecture{background:#fff;border:1px solid var(--line);border-radius:18px;padding:24px;overflow:hidden}.architecture svg{width:100%;height:auto}.flow{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-top:20px}.flow-item{background:#edf4f8;padding:14px;border-radius:10px;font-size:12px;position:relative}.flow-item b{display:block;font-size:15px;margin-bottom:4px}.flow-item:after{content:"→";position:absolute;right:-10px;top:35%;font-size:20px;color:#708ea5}.flow-item:last-child:after{content:none}.flow-item.baseline{border-bottom:3px dashed var(--green)}.flow-item.limit{border-bottom:3px dotted var(--purple)}.tiny-rule{margin-top:13px;display:flex;flex-wrap:wrap;gap:13px;font-size:11px}.practical{color:var(--green)}.statistical{color:var(--purple)}.fringes{display:flex;gap:9px;flex-wrap:wrap;font-size:11px;font-weight:750}.fringes span{background:#f5f7fa;padding:5px 7px;border-radius:5px}.callout{margin:20px 0;background:#fff8e8;border:1px solid #efd49f;border-radius:12px;padding:17px 20px;color:#71521a;font-size:13px}.callout b{color:#68430a}.metric-value{font-size:35px;font-weight:800;letter-spacing:-.035em;margin-top:12px}.metric-value small{font-size:15px;font-weight:600;color:var(--muted);letter-spacing:0}.metric>p:not(.micro){min-height:45px;font-size:13px}.metric svg{width:100%;margin-top:14px}.axis{font-size:10px;fill:#617487}.plot-label{font-size:11px;fill:#18384e;font-weight:700}.micro{font-size:11px!important;line-height:1.5}.score-cards{margin-top:20px}.score-cards svg,.aggregate svg,.projection svg{width:100%;height:auto}.number-row{display:flex;gap:22px;flex-wrap:wrap;margin-top:16px}.number-row strong{display:block;font-size:24px;letter-spacing:-.025em}.number-row span{font-size:11px;color:var(--muted)}.band{background:#eef5fa;border:1px solid #cfe0ee;padding:15px;border-radius:10px;margin-top:18px;font-size:12px}.eligibility{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px}.eligibility span{border-radius:6px;background:#eef4f8;font-size:11px;padding:7px 10px;font-weight:700}.gates{display:flex;gap:7px;flex-wrap:wrap;margin-top:15px}.gate{color:#176b57;background:#e8f4ef;padding:6px 9px;border-radius:6px;font-size:11px;font-weight:700}.status{background:#102b40;color:#e8f0f5}.status .section-head p,.status .kicker{color:#adc6d8}.status .section-number{color:#4e7390}.status .card{background:#19384f;border-color:#35556c;box-shadow:none;color:#eef5fa}.status .card p{color:#b8cddb}.status .micro{color:#b8cddb}.status-path{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin:18px 0}.status-step{border:1px solid #47677e;border-radius:12px;padding:17px 12px;font-size:12px}.status-step b{display:block;font-size:14px;margin:8px 0}.status-step .dot{height:12px;width:12px;border-radius:50%;background:#648197;display:block}.status-step.done .dot{background:#6bd0b3}.status-step.running .dot{background:#edbd62;box-shadow:0 0 0 5px #edbd621a}.status-step.running{border-color:#cc9f4d}.status-step.done{border-color:#439e87}.queue-grid{display:grid;grid-template-columns:repeat(17,1fr);gap:5px;margin-top:23px}.queue-cell{min-height:32px;display:flex;align-items:center;justify-content:center;font-size:10px;border-radius:4px}.queue-cell.complete{background:#4e94bd}.queue-cell.queued{border:1px solid #54728a;color:#b8cedd}.large-number{font-size:50px;font-weight:800;line-height:1;letter-spacing:-.045em}.holds{display:flex;gap:8px;flex-wrap:wrap;margin-top:19px}.holds span{padding:7px 11px;font-size:11px;border:1px solid #bb9148;color:#f4d294;border-radius:99px}.projection .card{background:#fffdfa}.projection-label{color:#95600b;font-weight:800;font-size:11px}.table-scroll{overflow:auto;margin-top:22px}table{width:100%;border-collapse:collapse;background:white;font-size:12px;min-width:720px}th,td{padding:13px 11px;text-align:right;border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums}th:first-child{text-align:left}thead th{background:#eaf0f5;color:#314d63;font-size:10px;vertical-align:bottom}tbody th{font-weight:700}.anchor-row{background:#eef5fc}.assumptions{margin-top:20px;color:var(--muted);font-size:12px}.assumptions li{margin-bottom:7px}.source-footer{padding:35px 0;color:var(--muted);font-size:12px}.source-item{background:white;border:1px solid var(--line);padding:12px 15px;margin-top:10px;border-radius:8px}.source-item code{display:block;font-size:10px;overflow-wrap:anywhere;margin-top:5px}.source-footer h3{color:var(--ink)}.foot-grid{display:grid;grid-template-columns:1fr 1fr;gap:22px;margin-top:23px}.mono{font-variant-numeric:tabular-nums}
+@media(max-width:760px){.wrap{padding-left:18px;padding-right:18px}.two,.three,.foot-grid{grid-template-columns:1fr}.flow{grid-template-columns:1fr}.flow-item:after{content:none}.status-path{grid-template-columns:1fr 1fr}.queue-grid{grid-template-columns:repeat(9,1fr)}section{padding:36px 0}.card{padding:18px}.hero{padding-top:28px}.nav .wrap{gap:13px}.section-head{gap:14px}.architecture{padding:10px}.metric>p:not(.micro){min-height:0}}
+@media print{body{background:white;font-size:11px}.wrap{padding-left:0;padding-right:0;max-width:none}.hero,.status{background:white;color:#102a42}.hero .intro,.hero .scope,.hero .kicker,.status .card p,.status .section-head p,.status .kicker{color:#52687c}.status .card{background:white;color:#102a42;border-color:#ccd5df}.profile-pills .pill{color:#102a42;border-color:#a5b4c2}.nav{display:none}section{padding:22px 0}.card,.architecture{box-shadow:none;break-inside:avoid}.section-head{break-after:avoid}.draft{color:#71521a}.status-path{break-inside:avoid}.source-item{break-inside:avoid}a{color:inherit;text-decoration:none}.source-footer{padding:20px 0}.status .micro{color:#52687c}}
+</style></head>
 <body>
+<header class="hero"><div class="wrap"><p class="kicker">URnetwork · sim-latency · 2026-10-31</p><span class="pill draft">DRAFT PREVIEW · HIDDEN ACCEPTANCE &amp; CUSTODY PENDING</span><h1>A frozen benchmark.<br>A public point of reference.</h1><p class="intro">Four views of the evaluation environment, accepted public R9/R9 evidence, operator-reported status, and six explicitly hypothetical threshold-only improvements.</p><div class="profile-pills"><span class="pill">3,600 providers</span><span class="pill">200 clients</span><span class="pill">R9 × R9 public pilot</span><span class="pill">26.9% frozen margin</span><span class="pill">α = 0.05</span></div><p class="scope"><b>Scope:</b> all performance values come only from the accepted PUBLIC calibration dataset. These are not the official production epoch-one baseline, private owner scores, or hidden-screen results. No live API polling, rendering, build, test, or benchmark was performed for this draft.</p></div></header>
+<div style="background:#e8eff5;border-bottom:1px solid #d3deea;padding:12px 18px;font-size:12px;text-align:center">This is the current four-section <b>DRAFT PREVIEW</b>. <a href="final-baseline-v1-historical.html">Preserved historical v1 report</a> · <a href="final-baseline-2026-10-31-derivation.json">Exact public-source derivation</a>. Acceptance/custody are still pending.</div>
+<nav class="nav"><div class="wrap"><a href="#environment">01 · Frozen environment</a><a href="#public-data">02 · Public evidence &amp; fringes</a><a href="#status">03 · Current status snapshot</a><a href="#projection">04 · Six-round toy projection</a></div></nav>
 <main>
-  <aside class="notice" aria-label="Historical report status">
-    <strong>Historical v1 report — not current production launch acceptance.</strong>
-    The measurements, 1,800-provider profile, 16.1% margin and readiness claims below
-    describe the earlier release only. The October 28, 2026 release uses a separately
-    frozen 3,600-provider profile and 26.9% practical margin; its calibration and
-    runtime qualification are not yet accepted, and the required midnight opening
-    was missed. See the <a href="../launch/LAUNCH-ACCEPTANCE.md">current acceptance
-    checklist</a> and <a href="../launch/current-state.json">dated current state</a>.
-    No chart below qualifies the new source, image or review provider.
-  </aside>
-  <header>
-    <div class="eyebrow">URnetwork · sim-latency · historical v1 baseline</div>
-    <h1>What “significantly better” means on the final evaluator.</h1>
-    <p class="lead">The competition uses a lower-is-better, failure-charged latency score. Twelve same-seed calibration pairs select a median-of-nine evaluation and the initial 16.1% takeover margin. Each live round generates its own hidden-seed baseline and records run-level variance and a one-sided significance test; a significant winner's measured variance sets the next epoch's margin.</p>
-    <div class="chips">
-      <span class="chip ready">LOCAL TECHNICAL GATE · 10/10</span>
-      <span class="chip">1,800 providers · 200 clients</span>
-      <span class="chip">3-minute measured window</span>
-      <span class="chip">R=9 · median</span>
-      <span class="chip">epoch 0 margin · 16.1%</span>
-      <span class="chip">score schema 1</span>
-    </div>
-  </header>
-
-  <section id="policy-baseline">
-    <div class="section-head">
-      <div><div class="section-index">01 · POLICY BASELINE</div><h2>The initial calibrated scoring line</h2><p>The 12-pair baseline population averages 43.102 seconds. At the initial 16.1% margin, a submission must land at or below 36.162 seconds under the selected aggregation. The green band is the raw-margin fringe; lower is better.</p></div>
-      <div class="section-kpi">≤36.162 s<small>significantly better</small></div>
-    </div>
-    <svg viewBox="0 0 1000 260" role="img" aria-label="Calibration baseline gauge with significant-better threshold and shaded improvement fringe">
-      <text class="visual-title" x="80" y="38">FAILURE-CHARGED RAW SCORE · LOWER IS BETTER</text>
-      <rect class="improvement-fringe" data-improvement-fringe-for="calibration-policy" x="80" y="74" width="552.3" height="88" rx="10"/>
-      <line class="axis" x1="80" y1="118" x2="920" y2="118"/>
-      <line class="threshold-line" data-threshold-for="calibration-policy" x1="632.3" y1="64" x2="632.3" y2="174"/>
-      <text class="threshold-label" data-threshold-label-for="calibration-policy" x="624" y="194" text-anchor="end">threshold 36.162 s</text>
-      <line class="baseline-line" data-baseline-id="calibration-policy" x1="738.3" y1="72" x2="738.3" y2="164"/>
-      <text class="baseline-label" x="746" y="92">baseline mean 43.102 s</text>
-      <circle class="dot-candidate" cx="724.5" cy="118" r="8"/>
-      <text class="axis-label" x="724.5" y="145" text-anchor="middle">paired no-op mean 42.197 s</text>
-      <text class="fringe-label" x="96" y="103">SIGNIFICANT-IMPROVEMENT FRINGE · 0–36.162 s</text>
-      <text class="axis-label" x="80" y="220" text-anchor="middle">0 s</text><text class="axis-label" x="386" y="220" text-anchor="middle">20 s</text><text class="axis-label" x="691" y="220" text-anchor="middle">40 s</text><text class="axis-label" x="920" y="220" text-anchor="middle">55 s</text>
-    </svg>
-    <div class="metrics">
-      <div class="metric"><strong>43.102 s</strong><span>12-pair calibration baseline mean</span></div>
-      <div class="metric"><strong>36.162 s</strong><span>mean × 0.839 significant-better line</span></div>
-      <div class="metric"><strong>R=9</strong><span>one shared epoch control; nine fresh replicates per candidate</span></div>
-      <div class="metric"><strong>16.1%</strong><span>epoch-0 calibrated takeover margin</span></div>
-    </div>
-    <div class="notice">Crossing the plotted line is necessary, not sufficient: a winner must also pass G1–G6 and the run-level one-sided Welch test at p ≤ 0.05. Every score stores both sample variances and its next-epoch margin recommendation.</div>
-  </section>
-
-  <section id="same-seed-stability">
-    <div class="section-head">
-      <div><div class="section-index">02 · SAME-SEED STABILITY</div><h2>Twelve uncensored A/A pairs</h2><p>Every completed result remains in the population, including non-placeable no-op draws. The plot shows the full baseline and comment-only no-op series, the baseline mean, the exact threshold, and the shaded significant-improvement fringe.</p></div>
-      <div class="section-kpi">10.127% CV<small>baseline run noise</small></div>
-    </div>
-    <svg viewBox="0 0 1000 350" role="img" aria-label="Twelve same-seed baseline and no-op measurements with threshold and significant-improvement fringe">
-      <rect class="improvement-fringe" data-improvement-fringe-for="same-seed-calibration" x="80" y="243.3" width="840" height="56.7"/>
-      <line class="grid" x1="80" y1="70" x2="920" y2="70"/><line class="grid" x1="80" y1="162" x2="920" y2="162"/><line class="grid" x1="80" y1="254" x2="920" y2="254"/>
-      <line class="axis" x1="80" y1="300" x2="920" y2="300"/><line class="axis" x1="80" y1="70" x2="80" y2="300"/>
-      <polyline class="baseline" data-baseline-id="same-seed-calibration" points="80.0,153.3 156.4,201.4 232.7,253.0 309.1,155.2 385.5,205.8 461.8,161.6 538.2,210.3 614.5,180.5 690.9,90.3 767.3,198.2 843.6,161.9 920.0,182.0"/>
-      <polyline class="candidate" points="80.0,211.1 156.4,223.0 232.7,154.7 309.1,218.2 385.5,185.5 461.8,212.7 538.2,189.8 614.5,189.0 690.9,117.1 767.3,210.4 843.6,170.7 920.0,171.3"/>
-      <line class="baseline-line" data-baseline-id="same-seed-calibration" x1="80" y1="179.5" x2="920" y2="179.5"/><text class="baseline-label" x="912" y="171" text-anchor="end">baseline mean 43.102 s</text>
-      <line class="threshold-line" data-threshold-for="same-seed-calibration" x1="80" y1="243.3" x2="920" y2="243.3"/><text class="threshold-label" data-threshold-label-for="same-seed-calibration" x="912" y="235" text-anchor="end">significant-better ≤36.162 s</text>
-      <text class="fringe-label" x="92" y="286">SIGNIFICANT-IMPROVEMENT FRINGE</text>
-      <text class="axis-label" x="58" y="74" text-anchor="end">55 s</text><text class="axis-label" x="58" y="166" text-anchor="end">45 s</text><text class="axis-label" x="58" y="258" text-anchor="end">35 s</text>
-      <text class="axis-title" x="500" y="332" text-anchor="middle">authenticated same-seed pair 1–12</text>
-    </svg>
-    <div class="legend"><span><i style="background:#143f73"></i>baseline</span><span><i style="background:#17a8c2"></i>comment-only no-op</span><span><i style="background:#ca4252"></i>threshold</span><span><i style="background:#b8e2cd"></i>significant-improvement fringe</span></div>
-    <div class="metrics">
-      <div class="metric"><strong>4.365 s</strong><span>baseline sample standard deviation</span></div>
-      <div class="metric"><strong>35.107–52.789 s</strong><span>observed baseline range</span></div>
-      <div class="metric"><strong>42.197 s</strong><span>paired no-op mean</span></div>
-      <div class="metric"><strong>94.614%</strong><span>estimated single-evaluation no-op placeability at R=9</span></div>
-    </div>
-  </section>
-
-  <section id="production-staging">
-    <div class="section-head">
-      <div><div class="section-index">03 · PRODUCTION STAGING DRAW</div><h2>The final API/worker path reproduced the baseline</h2><p>The terminal staging job ran nine pristine baseline and nine exact no-op candidate replicates. Its same-round baseline median was 39.996 seconds, so this round’s takeover line was 33.557 seconds. The no-op median was 40.476 seconds: placeable, but correctly not takeover-eligible. The production design now freezes that nine-run control once per epoch and reuses its exact authenticated bytes for every later candidate.</p></div>
-      <div class="section-kpi">18/18 clean<small>staging measurements</small></div>
-    </div>
-    <svg viewBox="0 0 1000 350" role="img" aria-label="Nine production staging baseline and no-op measurements with threshold and significant-improvement fringe">
-      <rect class="improvement-fringe" data-improvement-fringe-for="production-staging-baseline" x="100" y="259.1" width="800" height="40.9"/>
-      <line class="grid" x1="100" y1="70" x2="900" y2="70"/><line class="grid" x1="100" y1="185" x2="900" y2="185"/><line class="axis" x1="100" y1="300" x2="900" y2="300"/><line class="axis" x1="100" y1="70" x2="100" y2="300"/>
-      <polyline class="baseline" data-baseline-id="production-staging-baseline" points="100.0,131.3 200.0,115.6 300.0,185.0 400.0,169.0 500.0,234.4 600.0,211.4 700.0,181.6 800.0,197.1 900.0,198.8"/>
-      <polyline class="candidate" points="100.0,204.2 200.0,178.8 300.0,156.7 400.0,164.0 500.0,179.5 600.0,235.0 700.0,156.1 800.0,196.5 900.0,209.5"/>
-      <line class="baseline-line" data-baseline-id="production-staging-baseline" x1="100" y1="185.0" x2="900" y2="185.0"/><text class="baseline-label" x="892" y="176" text-anchor="end">same-round baseline median 39.996 s</text>
-      <line class="candidate" x1="100" y1="179.5" x2="900" y2="179.5"/><text class="axis-label" x="108" y="170">no-op median 40.476 s</text>
-      <line class="threshold-line" data-threshold-for="production-staging-baseline" x1="100" y1="259.1" x2="900" y2="259.1"/><text class="threshold-label" data-threshold-label-for="production-staging-baseline" x="892" y="250" text-anchor="end">significant-better ≤33.557 s</text>
-      <text class="fringe-label" x="112" y="287">SIGNIFICANT-IMPROVEMENT FRINGE</text>
-      <text class="axis-label" x="78" y="74" text-anchor="end">50 s</text><text class="axis-label" x="78" y="189" text-anchor="end">40 s</text><text class="axis-label" x="78" y="304" text-anchor="end">30 s</text>
-      <text class="axis-title" x="500" y="332" text-anchor="middle">production staging replicate 1–9 · failure-charged raw score</text>
-    </svg>
-    <div class="metrics">
-      <div class="metric"><strong>39.996 s</strong><span>staging same-round baseline median</span></div>
-      <div class="metric"><strong>33.557 s</strong><span>staging significant-better threshold</span></div>
-      <div class="metric"><strong>40.476 s</strong><span>exact no-op candidate median · 1.201% slower</span></div>
-      <div class="metric"><strong>98.814</strong><span>display-only normalized score · G1–G6 all passed</span></div>
-    </div>
-    <div class="notice">The 39.996-second value is a production staging observation, not a permanent absolute target. Every live round derives a fresh hidden-seed same-round baseline and applies the percentage recorded for its source epoch. Epoch 1 starts at 16.1%; a significant winner's measured variance determines the next percentage, while a no-winner epoch carries it forward unchanged.</div>
-  </section>
-
-  <section id="environment">
-    <div class="section-head">
-      <div><div class="section-index">04 · FINAL ENVIRONMENT</div><h2>One bounded 12-core host at p1800</h2><p>The selected point is the highest authenticated scale below the measured quality frontier. Ten physical cores and the untrusted memory boundary belong to the evaluation; two physical cores and at least 24 GiB remain available to the management and cleanup plane.</p></div>
-      <div class="section-kpi">p1800<small>frozen competition scale</small></div>
-    </div>
-    <svg viewBox="0 0 1000 350" role="img" aria-label="Final evaluator host, resource boundaries, and workload topology">
-      <rect class="box-blue" x="34" y="40" width="560" height="260" rx="20"/><text class="visual-title" x="58" y="70">AUTHORITATIVE HOST · 12 PHYSICAL CORES · 128 GiB</text>
-      <rect class="box" x="58" y="92" width="326" height="84" rx="13"/><text class="box-title" x="80" y="120">EVALUATION BOUNDARY</text><text class="box-value" x="80" y="149">10 cores · 72 GiB runner</text>
-      <rect class="box-green" x="402" y="92" width="168" height="84" rx="13"/><text class="box-title" x="423" y="120">MANAGEMENT</text><text class="box-value" x="423" y="149">2 cores · ≥24 GiB</text>
-      <rect class="box" x="58" y="196" width="150" height="70" rx="12"/><text class="box-title" x="78" y="222">POSTGRESQL</text><text class="box-value" x="78" y="248">16 GiB</text>
-      <rect class="box" x="224" y="196" width="150" height="70" rx="12"/><text class="box-title" x="248" y="222">REDIS</text><text class="box-value" x="248" y="248">8 GiB</text>
-      <rect class="box" x="390" y="196" width="180" height="70" rx="12"/><text class="box-title" x="414" y="222">SUBMISSION IMAGE</text><text class="small" x="414" y="247">offline · no network · RO local leaves</text>
-      <line class="axis" x1="594" y1="166" x2="642" y2="166"/>
-      <rect class="box-green" x="654" y="54" width="308" height="116" rx="16"/><text class="box-title" x="682" y="84">SELECTED · p1800-c200-r80-q2</text><text class="box-value" x="682" y="116">1,800 providers · 200 clients</text><text class="small" x="682" y="142">80 arrivals/min · 4 hosts · 4 shards · 98.680% floor</text>
-      <rect class="box-red" x="654" y="194" width="308" height="106" rx="16"/><text class="box-title" x="682" y="224">REJECTED UPPER BOUND · p2700</text><text class="box-value" x="682" y="254">2,700 providers · 300 clients</text><text class="small" x="682" y="280">96.980% fell below the 97% quality gate</text>
-      <text class="axis-label" x="34" y="330">SMT and turbo off · performance governor · fixed IRQ placement · management-controlled kill and cleanup</text>
-    </svg>
-    <div class="metrics">
-      <div class="metric"><strong>4.606 / 10 cores</strong><span>maximum selected-point mean CPU use</span></div>
-      <div class="metric"><strong>11.851 GiB</strong><span>maximum selected-point peak RSS</span></div>
-      <div class="metric"><strong>1.019 s</strong><span>adversarial 72 GiB OOM cleanup time</span></div>
-      <div class="metric"><strong>0 residuals</strong><span>containers, networks, or evidence mounts after cleanup</span></div>
-    </div>
-  </section>
-
-  <section id="references">
-    <div class="section-head">
-      <div><div class="section-index">05 · INDEPENDENT REFERENCES</div><h2>Better, no-op, and worse across hidden seeds</h2><p>Each seed uses one precommitted designated baseline. Candidate raw scores are divided by that baseline; lower is better. The authorized launch screen passed 4/5 correct orderings. The green fringe below 0.839 is the initial calibrated raw-margin region; live winners also need G1–G6 and p ≤ 0.05.</p></div>
-      <div class="section-kpi">4/5 ordered<small>authorized launch screen</small></div>
-    </div>
-    <svg viewBox="0 0 1000 350" role="img" aria-label="Independent reference ratios with baseline, significant-better threshold, and improvement fringe">
-      <rect class="improvement-fringe" data-improvement-fringe-for="independent-designated-baseline" x="100" y="280.5" width="800" height="19.5"/>
-      <line class="grid" x1="100" y1="70" x2="900" y2="70"/><line class="grid" x1="100" y1="179.5" x2="900" y2="179.5"/><line class="axis" x1="100" y1="300" x2="900" y2="300"/>
-      <line class="baseline-line" data-baseline-id="independent-designated-baseline" x1="100" y1="245.2" x2="900" y2="245.2"/><text class="baseline-label" x="892" y="237" text-anchor="end">designated same-round baseline = 1.000</text>
-      <line class="threshold-line" data-threshold-for="independent-designated-baseline" x1="100" y1="280.5" x2="900" y2="280.5"/><text class="threshold-label" data-threshold-label-for="independent-designated-baseline" x="892" y="272" text-anchor="end">significant-better ratio ≤0.839</text>
-      <text class="fringe-label" x="112" y="295">SIGNIFICANT-IMPROVEMENT FRINGE</text>
-      <polyline class="better" points="100.0,265.1 300.0,245.9 500.0,211.2 700.0,250.9 900.0,280.2"/><polyline class="noop" points="100.0,263.3 300.0,231.5 500.0,235.4 700.0,196.9 900.0,268.1"/><polyline class="worse" points="100.0,125.1 300.0,191.9 500.0,82.9 700.0,89.2 900.0,195.1"/>
-      <circle class="dot-better" cx="100" cy="265.1" r="5"/><circle class="dot-better" cx="300" cy="245.9" r="5"/><circle class="dot-better" cx="500" cy="211.2" r="5"/><circle class="dot-better" cx="700" cy="250.9" r="5"/><circle class="dot-better" cx="900" cy="280.2" r="5"/>
-      <circle class="dot-noop" cx="100" cy="263.3" r="5"/><circle class="dot-noop" cx="300" cy="231.5" r="5"/><circle class="dot-noop" cx="500" cy="235.4" r="5"/><circle class="dot-noop" cx="700" cy="196.9" r="5"/><circle class="dot-noop" cx="900" cy="268.1" r="5"/>
-      <circle class="dot-worse" cx="100" cy="125.1" r="5"/><circle class="dot-worse" cx="300" cy="191.9" r="5"/><circle class="dot-worse" cx="500" cy="82.9" r="5"/><circle class="dot-worse" cx="700" cy="89.2" r="5"/><circle class="dot-worse" cx="900" cy="195.1" r="5"/>
-      <text class="axis-label" x="100" y="326" text-anchor="middle">seed 1</text><text class="axis-label" x="300" y="326" text-anchor="middle">seed 2</text><text class="axis-label" x="500" y="326" text-anchor="middle">seed 3</text><text class="axis-label" x="700" y="326" text-anchor="middle">seed 4</text><text class="axis-label" x="900" y="326" text-anchor="middle">seed 5</text>
-    </svg>
-    <div class="legend"><span><i style="background:#14815d"></i>better reference</span><span><i style="background:#7258b7"></i>no-op reference</span><span><i style="background:#d48717"></i>worse reference</span><span><i style="background:#b8e2cd"></i>significant-improvement fringe</span></div>
-    <div class="metrics">
-      <div class="metric"><strong>4 / 5</strong><span>better &lt; no-op &lt; worse orderings</span></div>
-      <div class="metric"><strong>5 hidden seeds</strong><span>independently generated and precommitted</span></div>
-      <div class="metric"><strong>R=1 references</strong><span>diagnostic screen; competition scoring remains R=9</span></div>
-      <div class="metric"><strong>3 / 3 / 0</strong><span>better / no-op / worse placeable seeds; diagnostic only</span></div>
-    </div>
-    <div class="notice">Launch compromise disclosure: the five-seed 4/5 screen is explicitly not confidence-equivalent to the original 20-seed 19/20 design. It is the authorized speed-to-launch compromise, and all failed orderings remain visible.</div>
-  </section>
-
-  <section id="product-projection">
-    <div class="section-head">
-      <div><div class="section-index">06 · SIX-ROUND PRODUCT PROJECTION</div><h2>Compounding threshold wins change the experience</h2><p>The sealed production baseline run manifests measure a median p95 TTFB of 666.915 ms and median p50 large-transfer throughput of 1.725 Mbps. This conservative illustrative path holds every epoch at the initial 16.1% floor, makes each winner the next baseline, lowers TTFB by exactly 16.1%, and raises throughput by exactly 16.1% in each of six successive rounds.</p></div>
-      <div class="section-kpi">232.617 ms · 4.224 Mbps<small>projected after round 6</small></div>
-    </div>
-    <svg viewBox="0 0 1000 460" role="img" aria-label="Six-round projected p95 TTFB and p50 throughput when each round reaches the 16.1 percent significant-improvement threshold">
-      <text class="visual-title" x="52" y="38">P95 TTFB · LOWER IS BETTER</text>
-      <text class="visual-title" x="552" y="38">P50 LARGE-TRANSFER SPEED · HIGHER IS BETTER</text>
-
-      <path class="projection-fringe-ttfb" data-improvement-fringe-for="product-ttfb" d="M70 107.2 L135 163.0 L200 209.9 L265 249.2 L330 282.1 L395 309.8 L460 333.0 L460 370 L70 370 Z"/>
-      <line class="grid" x1="70" y1="90" x2="460" y2="90"/><line class="grid" x1="70" y1="194" x2="460" y2="194"/><line class="grid" x1="70" y1="298" x2="460" y2="298"/>
-      <line class="axis" x1="70" y1="370" x2="460" y2="370"/><line class="axis" x1="70" y1="70" x2="70" y2="370"/>
-      <line class="baseline-line" data-baseline-id="product-ttfb" x1="70" y1="107.2" x2="460" y2="107.2"/>
-      <text class="baseline-label" x="452" y="99" text-anchor="end">baseline 666.915 ms</text>
-      <polyline class="projection-ttfb" data-threshold-for="product-ttfb" points="70,107.2 135,163.0 200,209.9 265,249.2 330,282.1 395,309.8 460,333.0"/>
-      <text class="threshold-label" data-threshold-label-for="product-ttfb" x="452" y="350" text-anchor="end">round 6 threshold 232.617 ms</text>
-      <circle class="projection-dot-ttfb" cx="70" cy="107.2" r="5"/><circle class="projection-dot-ttfb" cx="135" cy="163.0" r="5"/><circle class="projection-dot-ttfb" cx="200" cy="209.9" r="5"/><circle class="projection-dot-ttfb" cx="265" cy="249.2" r="5"/><circle class="projection-dot-ttfb" cx="330" cy="282.1" r="5"/><circle class="projection-dot-ttfb" cx="395" cy="309.8" r="5"/><circle class="projection-dot-ttfb" cx="460" cy="333.0" r="5"/>
-      <text class="fringe-label" x="82" y="355">SIGNIFICANT-IMPROVEMENT FRINGE</text>
-      <text class="axis-label" x="58" y="94" text-anchor="end">700</text><text class="axis-label" x="58" y="198" text-anchor="end">500</text><text class="axis-label" x="58" y="302" text-anchor="end">300</text>
-
-      <path class="projection-fringe-speed" data-improvement-fringe-for="product-speed" d="M552 330.5 L617 306.4 L682 278.5 L747 246.1 L812 208.4 L877 164.7 L942 113.9 L942 70 L552 70 Z"/>
-      <line class="grid" x1="552" y1="90" x2="942" y2="90"/><line class="grid" x1="552" y1="220" x2="942" y2="220"/><line class="grid" x1="552" y1="350" x2="942" y2="350"/>
-      <line class="axis" x1="552" y1="370" x2="942" y2="370"/><line class="axis" x1="552" y1="70" x2="552" y2="370"/>
-      <line class="baseline-line" data-baseline-id="product-speed" x1="552" y1="330.5" x2="942" y2="330.5"/>
-      <text class="baseline-label" x="560" y="322">baseline 1.725 Mbps</text>
-      <polyline class="projection-speed" data-threshold-for="product-speed" points="552,330.5 617,306.4 682,278.5 747,246.1 812,208.4 877,164.7 942,113.9"/>
-      <text class="threshold-label" data-threshold-label-for="product-speed" x="934" y="104" text-anchor="end">round 6 threshold 4.224 Mbps</text>
-      <circle class="projection-dot-speed" cx="552" cy="330.5" r="5"/><circle class="projection-dot-speed" cx="617" cy="306.4" r="5"/><circle class="projection-dot-speed" cx="682" cy="278.5" r="5"/><circle class="projection-dot-speed" cx="747" cy="246.1" r="5"/><circle class="projection-dot-speed" cx="812" cy="208.4" r="5"/><circle class="projection-dot-speed" cx="877" cy="164.7" r="5"/><circle class="projection-dot-speed" cx="942" cy="113.9" r="5"/>
-      <text class="fringe-label" x="566" y="86">SIGNIFICANT-IMPROVEMENT FRINGE</text>
-      <text class="axis-label" x="540" y="94" text-anchor="end">4.5</text><text class="axis-label" x="540" y="224" text-anchor="end">3.0</text><text class="axis-label" x="540" y="354" text-anchor="end">1.5</text>
-
-      <text class="axis-label" x="70" y="397" text-anchor="middle">base</text><text class="axis-label" x="135" y="397" text-anchor="middle">R1</text><text class="axis-label" x="200" y="397" text-anchor="middle">R2</text><text class="axis-label" x="265" y="397" text-anchor="middle">R3</text><text class="axis-label" x="330" y="397" text-anchor="middle">R4</text><text class="axis-label" x="395" y="397" text-anchor="middle">R5</text><text class="axis-label" x="460" y="397" text-anchor="middle">R6</text>
-      <text class="axis-label" x="552" y="397" text-anchor="middle">base</text><text class="axis-label" x="617" y="397" text-anchor="middle">R1</text><text class="axis-label" x="682" y="397" text-anchor="middle">R2</text><text class="axis-label" x="747" y="397" text-anchor="middle">R3</text><text class="axis-label" x="812" y="397" text-anchor="middle">R4</text><text class="axis-label" x="877" y="397" text-anchor="middle">R5</text><text class="axis-label" x="942" y="397" text-anchor="middle">R6</text>
-      <text class="axis-title" x="500" y="434" text-anchor="middle">successive competition round · exact 16.1% modeled improvement from the prior round</text>
-    </svg>
-    <div class="legend"><span><i style="background:#17a8c2"></i>projected p95 TTFB threshold</span><span><i style="background:#14815d"></i>projected p50 throughput threshold</span><span><i style="background:#143f73"></i>measured starting baseline</span><span><i style="background:#b8e2cd"></i>significant-improvement fringe</span></div>
-    <div class="metrics">
-      <div class="metric"><strong>666.915 → 232.617 ms</strong><span>projected p95 TTFB · 65.120% cumulative reduction</span></div>
-      <div class="metric"><strong>1.725 → 4.224 Mbps</strong><span>projected p50 large-transfer speed · 2.449× baseline</span></div>
-      <div class="metric"><strong>×0.839 / round</strong><span>TTFB target at the exact lower-is-better margin</span></div>
-      <div class="metric"><strong>×1.161 / round</strong><span>throughput modeling assumption at the same relative margin</span></div>
-    </div>
-    <div class="notice">Projection, not a performance promise: the measured starting values are authenticated, but future improvements are hypothetical. The competition takeover decision is based on failure-charged p95 total latency, G1–G6, and p ≤ 0.05—not independent TTFB or throughput thresholds. The scorer never recommends a later margin below the incumbent 16.1%, so the plotted fixed-margin path is the minimum-margin scenario; an epoch may require more.</div>
-  </section>
-
-  <section id="readiness">
-    <div class="section-head">
-      <div><div class="section-index">07 · COMPETITION STATUS</div><h2>The local technical launch chain is sealed</h2><p>Source identity, frontier selection, baseline calibration, measurement protocol, reference ordering, containment, API/miner package, production staging, calibration documentation, and final reporting all pass the fail-closed completion audit.</p></div>
-      <div class="section-kpi">10 / 10<small>required checks passed</small></div>
-    </div>
-    <svg viewBox="0 0 1000 330" role="img" aria-label="Ten-stage authenticated competition readiness chain">
-      <text class="visual-title" x="40" y="42">AUTHENTICATED LOCAL TECHNICAL LAUNCH CHAIN</text>
-      <g>
-        <rect class="box-green" x="38" y="74" width="170" height="86" rx="14"/><circle class="check-circle" cx="65" cy="101" r="13"/><path class="check-mark" d="M58 101l5 5 10-12"/><text class="box-title" x="88" y="105">SOURCE + SCALE</text><text class="small" x="58" y="137">identity · frontier · p1800</text>
-        <rect class="box-green" x="226" y="74" width="170" height="86" rx="14"/><circle class="check-circle" cx="253" cy="101" r="13"/><path class="check-mark" d="M246 101l5 5 10-12"/><text class="box-title" x="276" y="105">BASELINE</text><text class="small" x="246" y="137">12 pairs · R=9 · epoch 0 16.1%</text>
-        <rect class="box-green" x="414" y="74" width="170" height="86" rx="14"/><circle class="check-circle" cx="441" cy="101" r="13"/><path class="check-mark" d="M434 101l5 5 10-12"/><text class="box-title" x="464" y="105">REFERENCES</text><text class="small" x="434" y="137">hidden seeds · 4/5 order</text>
-        <rect class="box-green" x="602" y="74" width="170" height="86" rx="14"/><circle class="check-circle" cx="629" cy="101" r="13"/><path class="check-mark" d="M622 101l5 5 10-12"/><text class="box-title" x="652" y="105">SECURITY</text><text class="small" x="622" y="137">15/15 · bomb cleanup</text>
-        <rect class="box-green" x="790" y="74" width="170" height="86" rx="14"/><circle class="check-circle" cx="817" cy="101" r="13"/><path class="check-mark" d="M810 101l5 5 10-12"/><text class="box-title" x="840" y="105">STAGING</text><text class="small" x="810" y="137">generate → reveal · 7/7</text>
-      </g>
-      <rect class="box-blue" x="38" y="190" width="922" height="86" rx="16"/><text class="box-title" x="66" y="220">READY FOR OPERATOR DEPLOYMENT</text><text class="box-value" x="66" y="250">FIFO · cache · failover · immutable artifacts · default-deny network · config/local + vault/local only</text>
-      <text class="axis-label" x="40" y="309">External Apex registry activation, partner acceptance, production credentials, and organizational on-call ownership remain external/operator follow-through.</text>
-    </svg>
-    <div class="metrics">
-      <div class="metric"><strong>10 / 10</strong><span>local required completion checks passed</span></div>
-      <div class="metric"><strong>7 / 7</strong><span>production readiness records sealed</span></div>
-      <div class="metric"><strong>15 / 15</strong><span>security assertions true in terminal staging</span></div>
-      <div class="metric"><strong>0 failures</strong><span>required pending and failed audit checks</span></div>
-    </div>
-  </section>
-
-  <footer>
-    Generated from the authenticated calibration chain sealed 2026-08-28. Calibration evaluator source <code>46515d82fe98ff666c61b2b5bb1d34a89cf4dad8</code>; calibration image <code>sha256:2abcf145c0f914899debbd2fd52e57a16cf20072165c8d13f04a0ba487198a4c</code>; completion audit <code>f28e630e5e7a8a79bedc97dbdc9dafd4302cb067daa875de20ce2278f7999423</code>. Lower raw scores are better.
-  </footer>
+<section id="environment"><div class="wrap"><div class="section-head"><div class="section-number">01</div><div><p class="kicker">One controlled envelope</p><h2>Reproduce the work. Isolate the timing.</h2><p>Resource limits below are the frozen profile, not observed utilization. Replicates run serially; the management lane stays separate from timed evaluation.</p></div></div>
+<div class="architecture"><svg viewBox="0 0 1080 265" role="img" aria-label="Frozen 3600-provider 200-client workload, isolated evaluation resources and separate management resources"><title>Fixed evaluation and management architecture; not a network topology measurement</title><defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#6f90a8"/></marker></defs>
+<rect x="10" y="20" width="270" height="218" rx="18" fill="#eef5fa"/><text x="32" y="52" class="plot-label">FIXED PUBLIC WORKLOAD PROFILE</text>
+<circle cx="37" cy="81" r="5.5" fill="#6c9bb8"/><circle cx="56" cy="81" r="5.5" fill="#6c9bb8"/><circle cx="75" cy="81" r="5.5" fill="#6c9bb8"/><circle cx="94" cy="81" r="5.5" fill="#6c9bb8"/><circle cx="113" cy="81" r="5.5" fill="#6c9bb8"/><circle cx="132" cy="81" r="5.5" fill="#6c9bb8"/><circle cx="151" cy="81" r="5.5" fill="#6c9bb8"/><circle cx="170" cy="81" r="5.5" fill="#6c9bb8"/><circle cx="189" cy="81" r="5.5" fill="#6c9bb8"/><circle cx="208" cy="81" r="5.5" fill="#6c9bb8"/><circle cx="227" cy="81" r="5.5" fill="#6c9bb8"/><circle cx="246" cy="81" r="5.5" fill="#6c9bb8"/><circle cx="37" cy="101" r="5.5" fill="#6c9bb8"/><circle cx="56" cy="101" r="5.5" fill="#6c9bb8"/><circle cx="75" cy="101" r="5.5" fill="#6c9bb8"/><circle cx="94" cy="101" r="5.5" fill="#6c9bb8"/><circle cx="113" cy="101" r="5.5" fill="#6c9bb8"/><circle cx="132" cy="101" r="5.5" fill="#6c9bb8"/><circle cx="151" cy="101" r="5.5" fill="#6c9bb8"/><circle cx="170" cy="101" r="5.5" fill="#6c9bb8"/><circle cx="189" cy="101" r="5.5" fill="#6c9bb8"/><circle cx="208" cy="101" r="5.5" fill="#6c9bb8"/><circle cx="227" cy="101" r="5.5" fill="#6c9bb8"/><circle cx="246" cy="101" r="5.5" fill="#6c9bb8"/><circle cx="37" cy="121" r="5.5" fill="#6c9bb8"/><circle cx="56" cy="121" r="5.5" fill="#6c9bb8"/><circle cx="75" cy="121" r="5.5" fill="#6c9bb8"/><circle cx="94" cy="121" r="5.5" fill="#6c9bb8"/><circle cx="113" cy="121" r="5.5" fill="#6c9bb8"/><circle cx="132" cy="121" r="5.5" fill="#6c9bb8"/><circle cx="151" cy="121" r="5.5" fill="#6c9bb8"/><circle cx="170" cy="121" r="5.5" fill="#6c9bb8"/><circle cx="189" cy="121" r="5.5" fill="#6c9bb8"/><circle cx="208" cy="121" r="5.5" fill="#6c9bb8"/><circle cx="227" cy="121" r="5.5" fill="#6c9bb8"/><circle cx="246" cy="121" r="5.5" fill="#6c9bb8"/><text x="32" y="159" style="font-size:28px;font-weight:800;fill:#102a42">3,600 providers</text><text x="32" y="185" style="font-size:17px;fill:#36566f">200 configured clients</text><text x="32" y="212" class="axis">4 logical fleet shards · not 4 physical hosts</text>
+<path d="M290 122 L355 122" stroke="#6f90a8" stroke-width="3" marker-end="url(#arrow)"/>
+<rect x="370" y="20" width="342" height="218" rx="18" fill="#102c42"/><text x="394" y="54" style="fill:#b7d2e4;font-size:12px;font-weight:700">TIMED EVALUATION ENVELOPE</text><text x="394" y="104" style="fill:white;font-size:40px;font-weight:800">10 CPUs</text><text x="394" y="145" style="fill:white;font-size:30px;font-weight:750">96 GiB hard cap</text><text x="394" y="178" style="fill:#c7dbe9;font-size:14px">Go 1.27.3 · frozen 10-repository graph</text><text x="394" y="209" style="fill:#c7dbe9;font-size:12px">3-hour job cap · each measured window 180s</text>
+<path d="M728 122 L780 122" stroke="#6f90a8" stroke-width="2" stroke-dasharray="5 5"/>
+<rect x="797" y="20" width="270" height="218" rx="18" fill="#f7eedc"/><text x="821" y="54" class="plot-label">SEPARATE MANAGEMENT LANE</text><text x="821" y="104" style="font-size:36px;font-weight:800;fill:#6e4c16">2 CPUs</text><text x="821" y="145" style="font-size:29px;font-weight:750;fill:#6e4c16">8 GiB hard cap</text><text x="821" y="177" class="axis">No build/test/archive workload</text><text x="821" y="196" class="axis">overlaps timed calibration.</text></svg>
+<div class="flow"><div class="flow-item baseline"><b>1 epoch baseline</b>9 fresh control runs once per epoch; shared only within that epoch.</div><div class="flow-item"><b>9 fresh candidates</b>Every candidate gets a new R9 set. Never reuse candidate timing.</div><div class="flow-item"><b>All 6 gates</b>Success, volume, path integrity, matchmaking, stability, resources.</div><div class="flow-item baseline"><b>Practical fringe</b>Raw-score median at least26.9% below that epoch's baseline.</div><div class="flow-item limit"><b>Statistical fringe</b>Positive mean improvement + one-sided Welch p≤0.05, plus support guard.</div></div>
+<div class="tiny-rule"><span class="practical">▱ Dashed green = practical score-margin line</span><span class="statistical">┊ Dotted purple = statistical mean-fringe line</span><span>Operational-metric mappings below are explicitly illustrative.</span></div></div>
+<div class="band"><b>Frozen identity:</b> server <span class="mono">a9e8e1a7…</span> · ten-repository graph <span class="mono">ec322ed2…</span> · evaluator image <span class="mono">sha256:98c9061c…</span>. Source/image/policy changes and later epoch qualification are separate approval paths.</div>
+</div></section>
+<section id="public-data"><div class="wrap"><div class="section-head"><div class="section-number">02</div><div><p class="kicker">Accepted public calibration · seed20261030</p><h2>A real public pilot, not a production baseline.</h2><p>9 control +9 candidate runs completed2026-10-30 21:29:26→2026-10-31 00:21:55 UTC; native proof accepted2026-10-31 00:24:59 UTC. Acceptance confirms the approved reduced regression's direction and gates—not a statistically significant regression, takeover, or complete launch acceptance.</p></div></div>
+<div class="gates"><span class="gate">✓ G1 · success</span><span class="gate">✓ G2 · volume</span><span class="gate">✓ G3 · path integrity</span><span class="gate">✓ G4 · matchmaking</span><span class="gate">✓ G5 · stability</span><span class="gate">✓ G6 · resources</span></div>
+<div class="callout"><b>Read the fringe lines correctly.</b> The raw-median panel carries the normative practical cutoff; the separate mean panel shows the current-variance Welch diagnostic. Every dashed TTFB/Mbps line marked† is a <b>toy mapping</b> of the26.9% margin or the current13.125% mean-based statistical fringe. Those mappings require extra uniform-latency assumptions; they are <b>not metric-specific significance tests, CIs, candidate measurements, or promises</b>. The26.9% margin was frozen before this pilot, not fitted to these nine-run variances.</div>
+<div class="grid two"><article class="card metric"><p class="kicker">PUBLIC CONTROL · R9</p><h3>TTFB p50</h3><div class="metric-value">158.683 <small>ms</small></div><p>Median of nine per-run p50s; positive successful-request TTFB only.</p><svg viewBox="0 0 540 160" role="img" aria-label="Nine public control replicate quantiles with illustrative toy mapped fringe lines">
+ <title>Nine measured control quantiles; dashed lines are illustrative, not metric-specific significance thresholds</title>
+ <line x1="40" y1="104" x2="500" y2="104" stroke="#ccd5df"/>
+ <line x1="293.76532752500805" y1="72" x2="440.00000000000006" y2="72" stroke="#b3c8dd" stroke-width="6"/>
+ <line x1="273.94093457566953" y1="25" x2="273.94093457566953" y2="106" stroke="#00836d" stroke-width="2" stroke-dasharray="6 4"/>
+ <line x1="318.0243159929735" y1="25" x2="318.0243159929735" y2="106" stroke="#8b5bb5" stroke-width="2" stroke-dasharray="2 4"/>
+ <circle cx="293.76532752500805" cy="64" r="4.5" fill="#2563a6" opacity=".8"><title>Control replicate 1: 125.827 ms</title></circle><circle cx="358.50193610842206" cy="72" r="4.5" fill="#2563a6" opacity=".8"><title>Control replicate 2: 157.926 ms</title></circle><circle cx="414.09648273636657" cy="80" r="4.5" fill="#2563a6" opacity=".8"><title>Control replicate 3: 185.492 ms</title></circle><circle cx="440.00000000000006" cy="64" r="4.5" fill="#2563a6" opacity=".8"><title>Control replicate 4: 198.336 ms</title></circle><circle cx="336.94054533720555" cy="72" r="4.5" fill="#2563a6" opacity=".8"><title>Control replicate 5: 147.235 ms</title></circle><circle cx="438.38455953533395" cy="80" r="4.5" fill="#2563a6" opacity=".8"><title>Control replicate 6: 197.535 ms</title></circle><circle cx="360.0286382704098" cy="64" r="4.5" fill="#2563a6" opacity=".8"><title>Control replicate 7: 158.683 ms</title></circle><circle cx="300.14944336882866" cy="72" r="4.5" fill="#2563a6" opacity=".8"><title>Control replicate 8: 128.993 ms</title></circle><circle cx="403.4216682800904" cy="80" r="4.5" fill="#2563a6" opacity=".8"><title>Control replicate 9: 180.199 ms</title></circle>
+ <line x1="360.0286382704098" y1="47" x2="360.0286382704098" y2="95" stroke="#102a42" stroke-width="3"/>
+ <text x="360.0286382704098" y="20" text-anchor="middle" class="plot-label">R9 run-median 158.683</text>
+ <line x1="40" y1="104" x2="40" y2="109" stroke="#92a0af"/><text x="40" y="126" text-anchor="middle" class="axis">0</text><line x1="155" y1="104" x2="155" y2="109" stroke="#92a0af"/><text x="155" y="126" text-anchor="middle" class="axis">57</text><line x1="270" y1="104" x2="270" y2="109" stroke="#92a0af"/><text x="270" y="126" text-anchor="middle" class="axis">114</text><line x1="385" y1="104" x2="385" y2="109" stroke="#92a0af"/><text x="385" y="126" text-anchor="middle" class="axis">171</text><line x1="500" y1="104" x2="500" y2="109" stroke="#92a0af"/><text x="500" y="126" text-anchor="middle" class="axis">228</text><text x="500" y="151" text-anchor="end" class="axis">ms · lower is better</text>
+ </svg>
+ <div class="fringes"><span class="practical">▱ Toy margin line† 115.997 ms</span><span class="statistical">┊ Toy mean-fringe† 137.856 ms</span></div><p class="micro">Blue dots: 9 observed run quantiles; range is not a confidence interval. † Dashed operating-metric fringes are toy mappings, not TTFB/throughput significance tests.</p></article><article class="card metric"><p class="kicker">PUBLIC CONTROL · R9</p><h3>TTFB p95</h3><div class="metric-value">1,983.493 <small>ms</small></div><p>Median of nine per-run p95s. Not a pooled percentile of all requests.</p><svg viewBox="0 0 540 160" role="img" aria-label="Nine public control replicate quantiles with illustrative toy mapped fringe lines">
+ <title>Nine measured control quantiles; dashed lines are illustrative, not metric-specific significance thresholds</title>
+ <line x1="40" y1="104" x2="500" y2="104" stroke="#ccd5df"/>
+ <line x1="305.1945866193208" y1="72" x2="440.00000000000006" y2="72" stroke="#b3c8dd" stroke-width="6"/>
+ <line x1="244.25051116570978" y1="25" x2="244.25051116570978" y2="106" stroke="#00836d" stroke-width="2" stroke-dasharray="6 4"/>
+ <line x1="282.7390860905265" y1="25" x2="282.7390860905265" y2="106" stroke="#8b5bb5" stroke-width="2" stroke-dasharray="2 4"/>
+ <circle cx="305.1945866193208" cy="64" r="4.5" fill="#2563a6" opacity=".8"><title>Control replicate 1: 1,882.563 ms</title></circle><circle cx="395.4217113141858" cy="72" r="4.5" fill="#2563a6" opacity=".8"><title>Control replicate 2: 2,523.067 ms</title></circle><circle cx="315.3628281122919" cy="80" r="4.5" fill="#2563a6" opacity=".8"><title>Control replicate 3: 1,954.745 ms</title></circle><circle cx="419.98468402840734" cy="64" r="4.5" fill="#2563a6" opacity=".8"><title>Control replicate 4: 2,697.435 ms</title></circle><circle cx="311.0106410609257" cy="72" r="4.5" fill="#2563a6" opacity=".8"><title>Control replicate 5: 1,923.850 ms</title></circle><circle cx="342.98233204596806" cy="80" r="4.5" fill="#2563a6" opacity=".8"><title>Control replicate 6: 2,150.811 ms</title></circle><circle cx="440.00000000000006" cy="64" r="4.5" fill="#2563a6" opacity=".8"><title>Control replicate 7: 2,839.519 ms</title></circle><circle cx="319.4124639749792" cy="72" r="4.5" fill="#2563a6" opacity=".8"><title>Control replicate 8: 1,983.493 ms</title></circle><circle cx="309.46175224364583" cy="80" r="4.5" fill="#2563a6" opacity=".8"><title>Control replicate 9: 1,912.855 ms</title></circle>
+ <line x1="319.4124639749792" y1="47" x2="319.4124639749792" y2="95" stroke="#102a42" stroke-width="3"/>
+ <text x="319.4124639749792" y="20" text-anchor="middle" class="plot-label">R9 run-median 1,983.493</text>
+ <line x1="40" y1="104" x2="40" y2="109" stroke="#92a0af"/><text x="40" y="126" text-anchor="middle" class="axis">0</text><line x1="155" y1="104" x2="155" y2="109" stroke="#92a0af"/><text x="155" y="126" text-anchor="middle" class="axis">816</text><line x1="270" y1="104" x2="270" y2="109" stroke="#92a0af"/><text x="270" y="126" text-anchor="middle" class="axis">1,633</text><line x1="385" y1="104" x2="385" y2="109" stroke="#92a0af"/><text x="385" y="126" text-anchor="middle" class="axis">2,449</text><line x1="500" y1="104" x2="500" y2="109" stroke="#92a0af"/><text x="500" y="126" text-anchor="middle" class="axis">3,265</text><text x="500" y="151" text-anchor="end" class="axis">ms · lower is better</text>
+ </svg>
+ <div class="fringes"><span class="practical">▱ Toy margin line† 1,449.933 ms</span><span class="statistical">┊ Toy mean-fringe† 1,723.156 ms</span></div><p class="micro">Blue dots: 9 observed run quantiles; range is not a confidence interval. † Dashed operating-metric fringes are toy mappings, not TTFB/throughput significance tests.</p></article><article class="card metric"><p class="kicker">PUBLIC CONTROL · R9</p><h3>Large-transfer p50 rate</h3><div class="metric-value">4.661 <small>Mbps</small></div><p>Median of nine per-run p50s: successful HTTP200 downloads ≥1MiB; rate=bytes/(total_ms/1000), then ×8/10⁶ for Mbps.</p><svg viewBox="0 0 540 160" role="img" aria-label="Nine public control replicate quantiles with illustrative toy mapped fringe lines">
+ <title>Nine measured control quantiles; dashed lines are illustrative, not metric-specific significance thresholds</title>
+ <line x1="40" y1="104" x2="500" y2="104" stroke="#ccd5df"/>
+ <line x1="287.1533066163977" y1="72" x2="384.8874169577341" y2="72" stroke="#b3c8dd" stroke-width="6"/>
+ <line x1="440.00000000000006" y1="25" x2="440.00000000000006" y2="106" stroke="#00836d" stroke-width="2" stroke-dasharray="6 4"/>
+ <line x1="376.5762217454129" y1="25" x2="376.5762217454129" y2="106" stroke="#8b5bb5" stroke-width="2" stroke-dasharray="2 4"/>
+ <circle cx="376.4674685415597" cy="64" r="4.5" fill="#2563a6" opacity=".8"><title>Control replicate 1: 5.363 Mbps</title></circle><circle cx="332.4" cy="72" r="4.5" fill="#2563a6" opacity=".8"><title>Control replicate 2: 4.661 Mbps</title></circle><circle cx="311.3562780270465" cy="80" r="4.5" fill="#2563a6" opacity=".8"><title>Control replicate 3: 4.326 Mbps</title></circle><circle cx="314.3960157285174" cy="64" r="4.5" fill="#2563a6" opacity=".8"><title>Control replicate 4: 4.374 Mbps</title></circle><circle cx="382.5487961035239" cy="72" r="4.5" fill="#2563a6" opacity=".8"><title>Control replicate 5: 5.460 Mbps</title></circle><circle cx="304.2767442646375" cy="80" r="4.5" fill="#2563a6" opacity=".8"><title>Control replicate 6: 4.213 Mbps</title></circle><circle cx="342.88062310155016" cy="64" r="4.5" fill="#2563a6" opacity=".8"><title>Control replicate 7: 4.828 Mbps</title></circle><circle cx="384.8874169577341" cy="72" r="4.5" fill="#2563a6" opacity=".8"><title>Control replicate 8: 5.498 Mbps</title></circle><circle cx="287.1533066163977" cy="80" r="4.5" fill="#2563a6" opacity=".8"><title>Control replicate 9: 3.940 Mbps</title></circle>
+ <line x1="332.4" y1="47" x2="332.4" y2="95" stroke="#102a42" stroke-width="3"/>
+ <text x="332.4" y="20" text-anchor="middle" class="plot-label">R9 run-median 4.661</text>
+ <line x1="40" y1="104" x2="40" y2="109" stroke="#92a0af"/><text x="40" y="126" text-anchor="middle" class="axis">0.0</text><line x1="155" y1="104" x2="155" y2="109" stroke="#92a0af"/><text x="155" y="126" text-anchor="middle" class="axis">1.8</text><line x1="270" y1="104" x2="270" y2="109" stroke="#92a0af"/><text x="270" y="126" text-anchor="middle" class="axis">3.7</text><line x1="385" y1="104" x2="385" y2="109" stroke="#92a0af"/><text x="385" y="126" text-anchor="middle" class="axis">5.5</text><line x1="500" y1="104" x2="500" y2="109" stroke="#92a0af"/><text x="500" y="126" text-anchor="middle" class="axis">7.3</text><text x="500" y="151" text-anchor="end" class="axis">Mbps · higher is better</text>
+ </svg>
+ <div class="fringes"><span class="practical">▱ Toy margin line† 6.376 Mbps</span><span class="statistical">┊ Toy mean-fringe† 5.365 Mbps</span></div><p class="micro">Blue dots: 9 observed run quantiles; range is not a confidence interval. † Dashed operating-metric fringes are toy mappings, not TTFB/throughput significance tests.</p></article><article class="card metric"><p class="kicker">PUBLIC CONTROL · R9</p><h3>Large-transfer p95 rate</h3><div class="metric-value">182.998 <small>Mbps</small></div><p>Median of nine per-run p95s: the FAST tail, not the slow tail, aggregate, or client average.</p><svg viewBox="0 0 540 160" role="img" aria-label="Nine public control replicate quantiles with illustrative toy mapped fringe lines">
+ <title>Nine measured control quantiles; dashed lines are illustrative, not metric-specific significance thresholds</title>
+ <line x1="40" y1="104" x2="500" y2="104" stroke="#ccd5df"/>
+ <line x1="294.92638202144633" y1="72" x2="392.0570217743653" y2="72" stroke="#b3c8dd" stroke-width="6"/>
+ <line x1="440.00000000000006" y1="25" x2="440.00000000000006" y2="106" stroke="#00836d" stroke-width="2" stroke-dasharray="6 4"/>
+ <line x1="376.57622174541297" y1="25" x2="376.57622174541297" y2="106" stroke="#8b5bb5" stroke-width="2" stroke-dasharray="2 4"/>
+ <circle cx="332.40000000000003" cy="64" r="4.5" fill="#2563a6" opacity=".8"><title>Control replicate 1: 182.998 Mbps</title></circle><circle cx="345.36916329772407" cy="72" r="4.5" fill="#2563a6" opacity=".8"><title>Control replicate 2: 191.115 Mbps</title></circle><circle cx="294.92638202144633" cy="80" r="4.5" fill="#2563a6" opacity=".8"><title>Control replicate 3: 159.545 Mbps</title></circle><circle cx="352.592909458672" cy="64" r="4.5" fill="#2563a6" opacity=".8"><title>Control replicate 4: 195.636 Mbps</title></circle><circle cx="305.640351266894" cy="72" r="4.5" fill="#2563a6" opacity=".8"><title>Control replicate 5: 166.251 Mbps</title></circle><circle cx="310.9951741549992" cy="80" r="4.5" fill="#2563a6" opacity=".8"><title>Control replicate 6: 169.602 Mbps</title></circle><circle cx="311.5826218493542" cy="64" r="4.5" fill="#2563a6" opacity=".8"><title>Control replicate 7: 169.970 Mbps</title></circle><circle cx="392.0570217743653" cy="72" r="4.5" fill="#2563a6" opacity=".8"><title>Control replicate 8: 220.335 Mbps</title></circle><circle cx="351.14072428965807" cy="80" r="4.5" fill="#2563a6" opacity=".8"><title>Control replicate 9: 194.727 Mbps</title></circle>
+ <line x1="332.40000000000003" y1="47" x2="332.40000000000003" y2="95" stroke="#102a42" stroke-width="3"/>
+ <text x="332.40000000000003" y="20" text-anchor="middle" class="plot-label">R9 run-median 182.998</text>
+ <line x1="40" y1="104" x2="40" y2="109" stroke="#92a0af"/><text x="40" y="126" text-anchor="middle" class="axis">0</text><line x1="155" y1="104" x2="155" y2="109" stroke="#92a0af"/><text x="155" y="126" text-anchor="middle" class="axis">72</text><line x1="270" y1="104" x2="270" y2="109" stroke="#92a0af"/><text x="270" y="126" text-anchor="middle" class="axis">144</text><line x1="385" y1="104" x2="385" y2="109" stroke="#92a0af"/><text x="385" y="126" text-anchor="middle" class="axis">216</text><line x1="500" y1="104" x2="500" y2="109" stroke="#92a0af"/><text x="500" y="126" text-anchor="middle" class="axis">288</text><text x="500" y="151" text-anchor="end" class="axis">Mbps · higher is better</text>
+ </svg>
+ <div class="fringes"><span class="practical">▱ Toy margin line† 250.340 Mbps</span><span class="statistical">┊ Toy mean-fringe† 210.646 Mbps</span></div><p class="micro">Blue dots: 9 observed run quantiles; range is not a confidence interval. † Dashed operating-metric fringes are toy mappings, not TTFB/throughput significance tests.</p></article></div>
+<div class="grid two score-cards"><article class="card"><p class="kicker">ACTUAL PRACTICAL ELIGIBILITY · MEDIAN</p><h3>Raw total-latency score ≠ TTFB.</h3><div class="number-row"><div><strong>20,987.250ms</strong><span>Control median of R9 raw scores</span></div><div><strong>21,056.753ms</strong><span>Candidate median ·0.33117% slower</span></div></div><svg viewBox="0 0 560 181" role="img" aria-label="Public control and candidate raw score replicates with official practical median threshold">
+ <title>Raw-score median cutoff is official; this is total latency, not TTFB</title>
+ <rect x="65" y="28" width="230.12519625000004" height="100" fill="#e6f4ed"/>
+ <line x1="295.12519625000004" y1="22" x2="295.12519625000004" y2="134" stroke="#00836d" stroke-width="2" stroke-dasharray="6 4"/>
+ <text x="4" y="59" class="axis">Control</text><text x="4" y="111" class="axis">Candidate</text>
+ <circle cx="337.02980899999983" cy="48" r="4" fill="#2563a6"/><circle cx="417.6471679999995" cy="55" r="4" fill="#2563a6"/><circle cx="379.80875" cy="62" r="4" fill="#2563a6"/><circle cx="442.4110437499999" cy="48" r="4" fill="#2563a6"/><circle cx="329.91351799999995" cy="55" r="4" fill="#2563a6"/><circle cx="395.59206799999987" cy="62" r="4" fill="#2563a6"/><circle cx="406.8386644999999" cy="48" r="4" fill="#2563a6"/><circle cx="341.66908324999997" cy="55" r="4" fill="#2563a6"/><circle cx="338.22843875" cy="62" r="4" fill="#2563a6"/>
+ <circle cx="453.6193549999997" cy="100" r="4" fill="#c57b10"/><circle cx="394.2637609999999" cy="107" r="4" fill="#c57b10"/><circle cx="470.10778999999974" cy="114" r="4" fill="#c57b10"/><circle cx="380.85130249999986" cy="100" r="4" fill="#c57b10"/><circle cx="442.3380927499997" cy="107" r="4" fill="#c57b10"/><circle cx="365.9585629999998" cy="114" r="4" fill="#c57b10"/><circle cx="310.6876025" cy="100" r="4" fill="#c57b10"/><circle cx="330.3664325" cy="107" r="4" fill="#c57b10"/><circle cx="349.70688500000006" cy="114" r="4" fill="#c57b10"/>
+ <line x1="379.80875" y1="37" x2="379.80875" y2="73" stroke="#102a42" stroke-width="3"/>
+ <line x1="380.85130249999986" y1="89" x2="380.85130249999986" y2="125" stroke="#8c5104" stroke-width="3"/>
+ <line x1="65" y1="138" x2="515" y2="138" stroke="#ccd5df"/><line x1="65" y1="138" x2="65" y2="143" stroke="#92a0af"/><text x="65" y="160" text-anchor="middle" class="axis">0</text><line x1="177.5" y1="138" x2="177.5" y2="143" stroke="#92a0af"/><text x="177.5" y="160" text-anchor="middle" class="axis">7,500</text><line x1="290" y1="138" x2="290" y2="143" stroke="#92a0af"/><text x="290" y="160" text-anchor="middle" class="axis">15,000</text><line x1="402.5" y1="138" x2="402.5" y2="143" stroke="#92a0af"/><text x="402.5" y="160" text-anchor="middle" class="axis">22,500</text><line x1="515" y1="138" x2="515" y2="143" stroke="#92a0af"/><text x="515" y="160" text-anchor="middle" class="axis">30,000</text>
+ <text x="515" y="177" text-anchor="end" class="axis">raw total-latency p95 score · ms</text></svg><div class="fringes"><span class="practical">▱ Official median ceiling 15,341.67975ms</span></div><p class="micro">Each run's raw score is the p95 of measured total_ms, with failures charged the120,000ms timeout. The evaluation score is the median of nine run scores. The candidate is placeable, but not takeover-eligible.</p></article>
+<article class="card"><p class="kicker">ACTUAL STATISTICAL FRINGE · MEANS</p><h3>Welch compares nine run scores per side.</h3><div class="number-row"><div><strong>20,771.397ms</strong><span>Control mean ·SD2,762.778ms</span></div><div><strong>21,577.035ms</strong><span>Candidate mean ·SD3,751.867ms</span></div></div><svg viewBox="0 0 560 181" role="img" aria-label="Mean raw scores and sample standard deviations with current-variance Welch mean fringe">
+ <title>Separate mean-based statistical fringe at current measured variances; bars are sample standard deviations, not confidence intervals</title>
+ <line x1="335.6767135487389" y1="23" x2="335.6767135487389" y2="134" stroke="#8b5bb5" stroke-width="2" stroke-dasharray="2 4"/>
+ <text x="4" y="59" class="axis">Control</text><line x1="335.1292722899888" y1="55" x2="418.01262621001104" y2="55" stroke="#2563a6" stroke-width="3"/><line x1="335.1292722899888" y1="48" x2="335.1292722899888" y2="62" stroke="#2563a6"/><line x1="418.01262621001104" y1="48" x2="418.01262621001104" y2="62" stroke="#2563a6"/><circle cx="376.57094924999996" cy="55" r="6" fill="#2563a6"/><text x="4" y="111" class="axis">Candidate</text><line x1="332.377526502183" y1="107" x2="444.9335366644834" y2="107" stroke="#c57b10" stroke-width="3"/><line x1="332.377526502183" y1="100" x2="332.377526502183" y2="114" stroke="#c57b10"/><line x1="444.9335366644834" y1="100" x2="444.9335366644834" y2="114" stroke="#c57b10"/><circle cx="388.65553158333324" cy="107" r="6" fill="#c57b10"/>
+ <line x1="65" y1="138" x2="515" y2="138" stroke="#ccd5df"/><line x1="65" y1="138" x2="65" y2="143" stroke="#92a0af"/><text x="65" y="160" text-anchor="middle" class="axis">0</text><line x1="177.5" y1="138" x2="177.5" y2="143" stroke="#92a0af"/><text x="177.5" y="160" text-anchor="middle" class="axis">7,500</text><line x1="290" y1="138" x2="290" y2="143" stroke="#92a0af"/><text x="290" y="160" text-anchor="middle" class="axis">15,000</text><line x1="402.5" y1="138" x2="402.5" y2="143" stroke="#92a0af"/><text x="402.5" y="160" text-anchor="middle" class="axis">22,500</text><line x1="515" y1="138" x2="515" y2="143" stroke="#92a0af"/><text x="515" y="160" text-anchor="middle" class="axis">30,000</text>
+ <text x="515" y="177" text-anchor="end" class="axis">mean of run-level raw scores · ms</text></svg><div class="fringes"><span class="statistical">┊ Current-variance mean ceiling 18,045.114ms</span></div><p class="micro">Reported statistical-only minimum:13.125176% mean improvement at these variances. Observed mean improvement is−3.878597%; one-sided improvement p=0.694165. Error bars are±1 between-run sample SD, not CIs. This is NOT the median ceiling and is NOT a universal future threshold.</p></article></div>
+<div class="eligibility"><span>✓ All six gates</span><span>AND median≤15,341.67975ms</span><span>AND positive mean improvement / Welch p≤.05</span><span>AND next-epoch margin support</span></div>
+<div class="grid two" style="margin-top:20px"><article class="card aggregate"><p class="kicker">SEPARATE WORKLOAD-WIDE MEASURE</p><h3>Aggregate delivered rate is not one client.</h3><svg viewBox="0 0 580 280" role="img" aria-label="Measured aggregate delivered rate and explicitly illustrative fringe references">
+ <title>Aggregate payload Mbps across all in-window received bytes, not a single-client rate or wire capacity</title>
+ <rect x="60" y="105.06053726" width="420" height="10.470425022857157" fill="#dceaf5"/>
+ <line x1="60" y1="71.76573156146179" x2="480" y2="71.76573156146179" stroke="#00836d" stroke-width="2" stroke-dasharray="6 4"/>
+ <line x1="60" y1="94.47687776122143" x2="480" y2="94.47687776122143" stroke="#8b5bb5" stroke-width="2" stroke-dasharray="2 4"/>
+ <rect x="145" y="110.29574977142859" width="85" height="104.70425022857141" rx="4" fill="#2563a6"/>
+ <rect x="310" y="110.16381992222222" width="85" height="104.83618007777778" rx="4" fill="#c57b10"/>
+ <text x="187" y="101.29574977142859" text-anchor="middle" class="plot-label">172.454</text>
+ <text x="352" y="101.16381992222222" text-anchor="middle" class="plot-label">172.671</text>
+ <text x="187" y="239" text-anchor="middle" class="axis">Public control R9</text><text x="352" y="239" text-anchor="middle" class="axis">Regression R9</text>
+ <text x="49" y="219" text-anchor="end" class="axis">0</text><text x="49" y="176.5" text-anchor="end" class="axis">70</text><text x="49" y="134" text-anchor="end" class="axis">140</text><text x="49" y="91.5" text-anchor="end" class="axis">210</text><text x="49" y="49" text-anchor="end" class="axis">280</text>
+ <line x1="60" y1="215" x2="480" y2="215" stroke="#aebbc8"/>
+ <text x="480" y="269" text-anchor="end" class="axis">Mbps · median of 9 per-run delivered rates</text></svg><div class="fringes"><span class="practical">▱ Toy inverse-time reference† 235.915Mbps</span><span class="statistical">┊ Toy mean-fringe reference† 198.509Mbps</span></div><p class="micro">All in-window received bytes ÷180s ×8/1,000,000; includes partial bytes from failed rows. The light band is ACTIVE epoch1 G2's inclusive95–105% median byte-volume corridor (163.831–181.077Mbps at a fixed180s window). Dashed references lie beyond that corridor: they are NOT literal aggregate benchmark targets.</p><div class="band"><b>Policy boundary:</b> epoch1 stays inclusive95–105%. Owner-approved prospective epoch2+ minimum-work/1 keeps≥95% request/byte floors without105% upper caps. <b>NOT ACTIVE:</b> typed operational approval and source/image/worker/runtime qualification are separate prerequisites. This preview activates nothing.</div></article>
+<article class="card"><p class="kicker">METRIC BOUNDARIES</p><h3>What these numbers do—and do not—say.</h3><p><b>TTFB:</b> successful positive-request samples; headline p50/p95 values are medians of nine run quantiles, not pooled quantiles.</p><p><b>Large-transfer rate:</b> successful HTTP200 downloads ≥1MiB, received bytes divided by total completion time; decimal Mbps=bytes/s×8/10⁶. p95 is the fast tail, not a struggling-flow guarantee.</p><p><b>Aggregate rate:</b> all delivered payload across the configured workload, not physical link capacity, sustained per-client bandwidth, or the p50 transfer statistic.</p><p><b>Unpublished candidate metrics:</b> candidate TTFB and per-transfer quantiles are not in these allowed public score/proof summaries, so no candidate series is invented.</p><div class="band">R9 is the independent sample count for Welch. Per-request N and within-run block_se are not substitutes for nine independent runs.</div></article></div>
+</div></section>
+<section id="status" class="status"><div class="wrap"><div class="section-head"><div class="section-number">03</div><div><p class="kicker">Operator snapshot · 2026-10-31 01:23–01:24 UTC · not a live feed</p><h2>Public proof accepted. Full readiness still gated.</h2><p>This panel uses aggregate operator-reported state only. Runtime flags were confirmed by the operator; queue counts come from the task snapshot. This report made no API poll and used no private customer score or hidden performance result.</p></div></div>
+<div class="status-path"><div class="status-step done"><span class="dot"></span><b>Public R9/R9</b>Accepted direction +all6 gates;2 native replays.</div><div class="status-step done"><span class="dot"></span><b>AFTER13</b>13-source census and second accepted2-replay check.</div><div class="status-step running"><span class="dot"></span><b>Fresh hidden screen</b>RUNNING. Operator snapshot:2/36 unique measurements complete. No hidden performance or acceptance asserted.</div><div class="status-step"><span class="dot"></span><b>Independent acceptance</b>Pending complete retained evidence and review.</div><div class="status-step"><span class="dot"></span><b>COMPLIANCE custody</b>Pending scoped exact-version readback; release remains gated.</div></div>
+<div class="grid two"><article class="card"><p class="kicker">PRODUCTION SUBMISSIONS · REPORTED COUNTS</p><div class="number-row"><div><div class="large-number">4</div><span>completed</span></div><div><div class="large-number">13</div><span>queued</span></div></div><div class="queue-grid" aria-label="Four completed and thirteen queued submissions"><span class="queue-cell complete" aria-hidden="true">✓</span><span class="queue-cell complete" aria-hidden="true">✓</span><span class="queue-cell complete" aria-hidden="true">✓</span><span class="queue-cell complete" aria-hidden="true">✓</span><span class="queue-cell queued" aria-hidden="true">1</span><span class="queue-cell queued" aria-hidden="true">2</span><span class="queue-cell queued" aria-hidden="true">3</span><span class="queue-cell queued" aria-hidden="true">4</span><span class="queue-cell queued" aria-hidden="true">5</span><span class="queue-cell queued" aria-hidden="true">6</span><span class="queue-cell queued" aria-hidden="true">7</span><span class="queue-cell queued" aria-hidden="true">8</span><span class="queue-cell queued" aria-hidden="true">9</span><span class="queue-cell queued" aria-hidden="true">10</span><span class="queue-cell queued" aria-hidden="true">11</span><span class="queue-cell queued" aria-hidden="true">12</span><span class="queue-cell queued" aria-hidden="true">13</span></div><p class="micro">Completion is not a winner or release claim. No private owner score, official epoch-one baseline, job identity, or future hidden measurement was read for this report.</p></article>
+<article class="card"><p class="kicker">AUTHORITY &amp; READINESS</p><h3>Keep the measurement lane uncontended.</h3><p>The ordinary worker is paused for calibration. Operator-confirmed runtime flags: intake_ready=true; grading_ready=false; publication_held=true. Intake-preserving maintenance is not an all-checks-ready assertion; this report made no readyz poll.</p><div class="holds"><span>Evaluation hold4 ·ACTIVE</span><span>Reward-delivery hold1 ·ACTIVE</span></div><p class="micro">Restore the genuine held worker only after joined clients, cleanup/original inventory and free canonical lock are proven. Maintenance expiry bounds downtime—not a new statistical-acceptance deadline. Custody or a synthetic receipt alone never releases grading, publication, or rewards.</p><p class="micro practical" style="color:#7ed5bb">Score-fringe policy remains unchanged:26.9% median margin AND new mean-based Welch evidence. Public pilot acceptance does not satisfy the hidden screen.</p></article></div>
+</div></section>
+<section id="projection" class="projection"><div class="wrap"><div class="section-head"><div class="section-number">04</div><div><p class="kicker">Six hypothetical successive rounds · not actual epoch numbers</p><h2>What repeated just-threshold improvements would look like.</h2><p>The true algebraic score ceiling is Lₖ=L₀×0.731ᵏ. To also illustrate TTFB and Mbps, this panel adds a separate toy model—not an identity implied by scoring.</p></div></div>
+<div class="callout"><b>Extra assumptions, prominently:</b> fixed payload bytes/mix per work item; successful total completion time AND TTFB scale uniformly byq=0.731 at every step; steady concurrency and no other bottleneck, floor, capacity cap or contention. These assumptions may fail under the frozen impaired network. Constant26.9% future margins are illustrative; future variances/thresholds and actual eligibility are unknown. This does NOT promise six reward wins.</div>
+<div class="grid two"><article class="card"><p class="projection-label">TOY TTFB P50 · MEDIAN OF PER-RUN P50s</p><h3>158.683→24.212ms</h3><svg viewBox="0 0 540 292" role="img" aria-label="Six-step illustrative ms scenario, not a forecast">
+ <title>Extra uniform-latency assumptions; future variance and acceptance are unknown</title>
+ <line x1="52" y1="118.44745762711865" x2="472" y2="118.44745762711865" stroke="#00836d" stroke-width="1.8" stroke-dasharray="6 4"/>
+ <line x1="52" y1="98.36890072587724" x2="472" y2="98.36890072587724" stroke="#8b5bb5" stroke-width="1.8" stroke-dasharray="2 4"/>
+ <polyline points="52,79.23728813559322 122,118.44745762711865 192,147.11009152542374 262,168.06247690508474 332,183.37867061761693 402,194.574808221478 472,202.7591848099004" fill="none" stroke="#2563a6" stroke-width="3.5"/>
+ <circle cx="52" cy="79.23728813559322" r="6" fill="#2563a6"/><text x="52" y="68.23728813559322" text-anchor="middle" class="plot-label">158.7</text><text x="52" y="249" text-anchor="middle" class="axis">Anchor</text><circle cx="122" cy="118.44745762711865" r="4.5" fill="#2563a6"/><text x="122" y="107.44745762711865" text-anchor="middle" class="plot-label">116.0</text><text x="122" y="249" text-anchor="middle" class="axis">R1</text><circle cx="192" cy="147.11009152542374" r="4.5" fill="#2563a6"/><text x="192" y="136.11009152542374" text-anchor="middle" class="plot-label">84.8</text><text x="192" y="249" text-anchor="middle" class="axis">R2</text><circle cx="262" cy="168.06247690508474" r="4.5" fill="#2563a6"/><text x="262" y="157.06247690508474" text-anchor="middle" class="plot-label">62.0</text><text x="262" y="249" text-anchor="middle" class="axis">R3</text><circle cx="332" cy="183.37867061761693" r="4.5" fill="#2563a6"/><text x="332" y="172.37867061761693" text-anchor="middle" class="plot-label">45.3</text><text x="332" y="249" text-anchor="middle" class="axis">R4</text><circle cx="402" cy="194.574808221478" r="4.5" fill="#2563a6"/><text x="402" y="183.574808221478" text-anchor="middle" class="plot-label">33.1</text><text x="402" y="249" text-anchor="middle" class="axis">R5</text><circle cx="472" cy="202.7591848099004" r="4.5" fill="#2563a6"/><text x="472" y="191.7591848099004" text-anchor="middle" class="plot-label">24.2</text><text x="472" y="249" text-anchor="middle" class="axis">R6</text>
+ <line x1="52" y1="227" x2="472" y2="227" stroke="#c9d2dd"/>
+ <text x="472" y="276" text-anchor="end" class="axis">ms · hypothetical steps, not actual epochs</text></svg>
+ <div class="fringes"><span class="practical">▱ Anchor toy margin† 116.00 ms</span><span class="statistical">┊ Anchor toy mean-fringe† 137.86 ms</span></div><p class="micro">The anchor is measured public data; R1–R6 are assumption-driven values. † Fringe lines map the anchor's score policy/noise only. Future Welch boundaries must be remeasured; no TTFB significance claim is made.</p></article>
+<article class="card"><p class="projection-label">TOY PER-LARGE-TRANSFER P50 RATE · NOT AGGREGATE</p><h3>4.661→30.547Mbps</h3><svg viewBox="0 0 540 292" role="img" aria-label="Six-step illustrative Mbps scenario, not a forecast">
+ <title>Extra uniform-latency assumptions; future variance and acceptance are unknown</title>
+ <line x1="52" y1="194.57480822147798" x2="472" y2="194.57480822147798" stroke="#00836d" stroke-width="1.8" stroke-dasharray="6 4"/>
+ <line x1="52" y1="199.39900976326365" x2="472" y2="199.39900976326365" stroke="#8b5bb5" stroke-width="1.8" stroke-dasharray="2 4"/>
+ <polyline points="52,202.7591848099004 122,194.57480822147798 192,183.37867061761693 262,168.06247690508474 332,147.1100915254237 402,118.44745762711861 472,79.23728813559322" fill="none" stroke="#c57b10" stroke-width="3.5"/>
+ <circle cx="52" cy="202.7591848099004" r="6" fill="#2563a6"/><text x="52" y="191.7591848099004" text-anchor="middle" class="plot-label">4.66</text><text x="52" y="249" text-anchor="middle" class="axis">Anchor</text><circle cx="122" cy="194.57480822147798" r="4.5" fill="#c57b10"/><text x="122" y="183.57480822147798" text-anchor="middle" class="plot-label">6.38</text><text x="122" y="249" text-anchor="middle" class="axis">R1</text><circle cx="192" cy="183.37867061761693" r="4.5" fill="#c57b10"/><text x="192" y="172.37867061761693" text-anchor="middle" class="plot-label">8.72</text><text x="192" y="249" text-anchor="middle" class="axis">R2</text><circle cx="262" cy="168.06247690508474" r="4.5" fill="#c57b10"/><text x="262" y="157.06247690508474" text-anchor="middle" class="plot-label">11.93</text><text x="262" y="249" text-anchor="middle" class="axis">R3</text><circle cx="332" cy="147.1100915254237" r="4.5" fill="#c57b10"/><text x="332" y="136.1100915254237" text-anchor="middle" class="plot-label">16.32</text><text x="332" y="249" text-anchor="middle" class="axis">R4</text><circle cx="402" cy="118.44745762711861" r="4.5" fill="#c57b10"/><text x="402" y="107.44745762711861" text-anchor="middle" class="plot-label">22.33</text><text x="402" y="249" text-anchor="middle" class="axis">R5</text><circle cx="472" cy="79.23728813559322" r="4.5" fill="#c57b10"/><text x="472" y="68.23728813559322" text-anchor="middle" class="plot-label">30.55</text><text x="472" y="249" text-anchor="middle" class="axis">R6</text>
+ <line x1="52" y1="227" x2="472" y2="227" stroke="#c9d2dd"/>
+ <text x="472" y="276" text-anchor="end" class="axis">Mbps · hypothetical steps, not actual epochs</text></svg>
+ <div class="fringes"><span class="practical">▱ Anchor toy margin† 6.38 Mbps</span><span class="statistical">┊ Anchor toy mean-fringe† 5.37 Mbps</span></div><p class="micro">Mbpsₖ=4.6609547695÷0.731ᵏ under the extra fixed-work assumptions. Each toy step is+36.7989% rate, NOT+26.9% rate. Actual benchmark aggregate172.454Mbps is not used as this curve's anchor.</p></article></div>
+<div class="table-scroll"><table><thead><tr><th>Scenario step</th><th>Raw-median ceiling<br>ms · actual margin algebra</th><th>Toy TTFB p50<br>ms · run-quantile median</th><th>Toy TTFB p95<br>ms · run-quantile median</th><th>Toy large-transfer p50<br>decimal Mbps</th><th>Toy large-transfer p95<br>decimal Mbps ·fast tail</th></tr></thead><tbody><tr class="anchor-row"><th>Public anchor</th><td>20,987.250</td><td>158.683</td><td>1,983.493</td><td>4.661</td><td>182.998</td></tr><tr><th>Toy R1</th><td>15,341.680</td><td>115.997</td><td>1,449.933</td><td>6.376</td><td>250.340</td></tr><tr><th>Toy R2</th><td>11,214.768</td><td>84.794</td><td>1,059.901</td><td>8.722</td><td>342.462</td></tr><tr><th>Toy R3</th><td>8,197.995</td><td>61.984</td><td>774.788</td><td>11.932</td><td>468.484</td></tr><tr><th>Toy R4</th><td>5,992.735</td><td>45.311</td><td>566.370</td><td>16.323</td><td>640.881</td></tr><tr><th>Toy R5</th><td>4,380.689</td><td>33.122</td><td>414.016</td><td>22.330</td><td>876.718</td></tr><tr><th>Toy R6</th><td>3,202.284</td><td>24.212</td><td>302.646</td><td>30.547</td><td>1,199.341</td></tr></tbody></table></div>
+<div class="band"><b>At R6, only under these assumptions:</b> latency multiplier0.152582337 (84.7418% lower); reciprocal rate multiplier6.553838545×. The score column is NOT TTFB. High-tail Mbps may exceed real path caps: the toy is not a hardware-capacity forecast.</div>
+<ul class="assumptions"><li>Each “round” here is an illustrative new accepted-incumbent comparison, not a real production epoch, measured job, committed source change or guarantee of a reward.</li><li>A real new epoch requires its own fresh R9 baseline; each candidate still requires9 fresh runs. Volume/path/success/matchmaking/stability/resource gates, the3-hour cap, current one-sided Welch evidence and support guard still apply.</li><li>The13.125176% statistical-only fringe comes from the current public control/candidate variances. It is shown only as an anchor reference, not propagated as a future significance threshold.</li><li>Improving raw p95 total latency does not mathematically force TTFB or throughput to improve proportionally. Fixed-window aggregate volume is separately guarded; no private/hidden performance was used or inferred.</li></ul>
+</div></section>
 </main>
-</body>
-</html>
+<footer class="source-footer"><div class="wrap"><p class="kicker">Evidence, definitions &amp; limitations</p><h3>Only one public performance dataset was used.</h3><p style="margin-top:10px">connect/sim-latency/baseline/prelaunch-public-regression-r9-reduced-2026-10-31/ · public seed20261030 · proof accepted2026-10-31T00:24:59.093728079Z. The dataset README's earlier “next prepare hidden” checkpoint is historical; the status panel uses the later operator-provided running-state snapshot.</p>
+<div class="source-item"><b>baseline.json</b><span> · exact public bytes</span><code>SHA256 ee85182d88d4622b12fd9178065a06205fb8f64c5f1facd697e616ecb5369795</code></div><div class="source-item"><b>score.json</b><span> · exact public bytes</span><code>SHA256 c9a63fd3e964f22d86b1c8b777f83eea18331d8f78509508929e6c1feab9dae3</code></div><div class="source-item"><b>pilot-proof.json</b><span> · exact public bytes</span><code>SHA256 983a4b554a85d04fcfbcded69b3c15a7ab8cdae8cbadd23544363f7c1d6e0436</code></div>
+<div class="foot-grid"><div><b>Method</b><p>All telemetry headlines are medians of9 per-run summaries. Throughput uses decimal Mbps, not MiB/s. Aggregate delivered rate uses the frozen180s measured window; successful-transfer and total delivered-rate populations differ. Sample SDs are between-run, not request-level precision. Exact derivations and static source hashes are in the <a href="final-baseline-2026-10-31-derivation.json">dated derivation companion</a>.</p></div><div><b>Draft boundary</b><p>Not browser-rendered or visually tested. No build, benchmark, provider, Docker, live API, database or custody operation was run. Historical tracked reports and the frozen custody-V2 packet were left unchanged. Final publication waits for review; hidden acceptance, independent evidence review and COMPLIANCE custody remain pending.</p></div></div></div></footer>
+</body></html>

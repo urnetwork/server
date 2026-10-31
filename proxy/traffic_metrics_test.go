@@ -38,19 +38,25 @@ func TestProxyIngressCollectorExportsCompleteBoundedLibrarySnapshots(t *testing.
 			active: 2,
 		},
 		proxyMetricsHttpSource{
-			stats:  proxylib.HttpStatsSnapshot{ConnectClientsGone: 7, ResponsesAborted: 11},
+			stats:  proxylib.HttpStatsSnapshot{ConnectClientsGone: 7, ResponsesAborted: 11, ConnectTimeouts: 13, DialRefusedReset: 17},
 			active: 4,
 		},
 	)
 	families := gatherProxyMetricFamilies(t, registry)
-	if got := len(families["urnetwork_proxy_ingress_events_total"].Metric); got != 18 {
-		t.Fatalf("bounded ingress event series = %d, want 18", got)
+	if got := len(families["urnetwork_proxy_ingress_events_total"].Metric); got != 24 {
+		t.Fatalf("bounded ingress event series = %d, want 24", got)
 	}
 	if got := proxyMetricValue(t, families, "urnetwork_proxy_ingress_events_total", map[string]string{"protocol": "socks", "reason": "connect_dial_error"}); got != 3 {
 		t.Fatalf("SOCKS connect dial errors = %v, want 3", got)
 	}
 	if got := proxyMetricValue(t, families, "urnetwork_proxy_ingress_events_total", map[string]string{"protocol": "http", "reason": "response_aborted"}); got != 11 {
 		t.Fatalf("HTTP response aborts = %v, want 11", got)
+	}
+	if got := proxyMetricValue(t, families, "urnetwork_proxy_ingress_events_total", map[string]string{"protocol": "http", "reason": "connect_timeout"}); got != 13 {
+		t.Fatalf("HTTP connect timeouts = %v, want 13", got)
+	}
+	if got := proxyMetricValue(t, families, "urnetwork_proxy_ingress_events_total", map[string]string{"protocol": "http", "reason": "dial_refused_reset"}); got != 17 {
+		t.Fatalf("HTTP reset refusals = %v, want 17", got)
 	}
 	if got := proxyMetricValue(t, families, "urnetwork_proxy_ingress_active", map[string]string{"protocol": "http"}); got != 4 {
 		t.Fatalf("HTTP active = %v, want 4", got)
@@ -66,7 +72,7 @@ func TestProxyConnectionMetricsPreserveDirectionalBytesAndCloseOnce(t *testing.T
 	registry := prometheus.NewPedanticRegistry()
 	metrics := newProxyTrafficMetrics(registry)
 	relayConn, destinationConn := net.Pipe()
-	wrapped := metrics.instrumentConnection("http", relayConn)
+	wrapped := metrics.instrumentConnection("http", relayConn, nil)
 
 	writeDone := make(chan error, 1)
 	go func() {

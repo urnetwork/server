@@ -5,8 +5,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,6 +28,12 @@ func prepareSourceBuildImageFiles(root *sourceBuildContext, request reviewedSour
 	if err != nil {
 		return err
 	}
+	return prepareSourceBuildImageContextFiles(root, request, binary, plan)
+}
+
+// The entry above authenticates the executable first; this internal writer also
+// lets deterministic tests exercise the real context without invoking a compiler.
+func prepareSourceBuildImageContextFiles(root *sourceBuildContext, request reviewedSourceBuildRequest, binary []byte, plan *sourceBuildImagePlan) error {
 	if root == nil || !filepath.IsAbs(root.Directory) || filepath.Clean(root.Directory) != root.Directory ||
 		root.SourceDirectory != filepath.Join(root.Directory, "source") || root.ManifestPath != filepath.Join(root.Directory, "sim-latency.yml") || root.LockPath != filepath.Join(root.Directory, "source-lock.json") {
 		return errors.New("source image context does not belong to the private build attempt")
@@ -44,6 +53,9 @@ func prepareSourceBuildImageFiles(root *sourceBuildContext, request reviewedSour
 			return errors.New("source image metadata differs from approved generation")
 		}
 	}
+	if err := bindSourceBuildImageScriptLabels(root, request, plan); err != nil {
+		return err
+	}
 	for _, file := range []struct {
 		name string
 		data []byte
@@ -55,6 +67,51 @@ func prepareSourceBuildImageFiles(root *sourceBuildContext, request reviewedSour
 			return err
 		}
 	}
+	return nil
+}
+
+// The protected programs replace inherited shell overlays only for minimum-work.
+// Hash their actual sealed bytes, never caller claims or inherited image labels.
+func bindSourceBuildImageScriptLabels(root *sourceBuildContext, request reviewedSourceBuildRequest, plan *sourceBuildImagePlan) error {
+	if !sourceBuildRequestMinimumWork(request) {
+		return nil
+	}
+	if root == nil || plan == nil || !filepath.IsAbs(root.SourceDirectory) || filepath.Clean(root.SourceDirectory) != root.SourceDirectory {
+		return errors.New("source script labels require the authenticated sealed source")
+	}
+	digests := make([]string, 2)
+	for index, relative := range []string{"connect/sim-latency/official-run.sh", "connect/sim-latency/evaluator/container/entrypoint.sh"} {
+		path := filepath.Join(root.SourceDirectory, "server", filepath.FromSlash(relative))
+		canonical, pathErr := filepath.EvalSymlinks(path)
+		info, statErr := os.Lstat(path)
+		if pathErr != nil || statErr != nil || canonical != path || !info.Mode().IsRegular() || info.Mode().Perm()&0o222 != 0 ||
+			info.Size() <= 0 || info.Size() > maximumSourceConfigBytes {
+			return errors.New("source script labels require exact regular read-only protected programs")
+		}
+		file, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		opened, statErr := file.Stat()
+		if statErr != nil || !os.SameFile(info, opened) || !opened.Mode().IsRegular() || opened.Mode().Perm()&0o222 != 0 || opened.Size() != info.Size() {
+			_ = file.Close()
+			return errors.New("source script changed while opening")
+		}
+		// The existing protected-source document bound also limits these exact-byte labels.
+		content, readErr := io.ReadAll(io.LimitReader(file, maximumSourceConfigBytes+1))
+		closeErr := file.Close()
+		if readErr != nil || closeErr != nil || len(content) > maximumSourceConfigBytes || int64(len(content)) != info.Size() {
+			return errors.New("source script changed or exceeded its protected-source budget")
+		}
+		digest := sha256.Sum256(content)
+		digests[index] = fmt.Sprintf("%x", digest)
+	}
+	// Retire both inherited overlay claims; the immediate parent is this overlay's base.
+	plan.Dockerfile = append(plan.Dockerfile, []byte(fmt.Sprintf(`LABEL com.urnetwork.competition.official-run-sha256=%q
+LABEL com.urnetwork.competition.entrypoint-sha256=%q
+LABEL com.urnetwork.competition.shell-overlay=%q
+LABEL com.urnetwork.competition.shell-overlay-base=%q
+`, digests[0], digests[1], "authenticated-source-scripts-v1", request.Proposal.EvaluatedImageDigest))...)
 	return nil
 }
 

@@ -247,6 +247,10 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		// the public Services contact form (EMBED1.md)
 		router.NewRoute("POST", "/services/contact-sales", handlers.ServicesContactSales),
 
+		// the public Friends of the Network application form, posted to the
+		// sales channel
+		router.NewRoute("POST", "/friends/apply", handlers.FriendsApply),
+
 		router.NewRoute("POST", "/preferences/set-preferences", handlers.AccountPreferencesSet),
 		router.NewRoute("GET", "/preferences", handlers.AccountPreferencesGet),
 		router.NewRoute("POST", "/feedback/send-feedback", handlers.FeedbackSend),
@@ -354,6 +358,10 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		router.NewRoute("GET", "/sn/wallet", handlers.SnGetWallet),
 		router.NewRoute("POST", "/sn/wallet/validate", handlers.SnValidateWallet),
 		router.NewRoute("GET", "/sn/head", handlers.SnHead),
+		// the SN Top board (LEADERTOP.md §7): public with optional auth, and
+		// the caller's detail
+		router.NewRoute("GET", "/sn/top", handlers.SnTop),
+		router.NewRoute("GET", "/sn/top/me", handlers.SnTopMe),
 		router.NewRoute("POST", "/sn/head/binding", handlers.SnHeadBinding),
 		router.NewRoute("GET", "/sn/pool/claim", handlers.SnPoolClaim),
 		router.NewRoute("GET", "/sn/epoch", handlers.SnEpoch),

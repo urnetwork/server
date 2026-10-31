@@ -62,15 +62,16 @@ type ScoreBaselineReplicate struct {
 // consumed by score. Replicates and takeover margin are deliberately data,
 // not CLI knobs: they are frozen once for a round after calibration.
 type ScoreBaselineManifest struct {
-	ScoreSchema      int                      `json:"score_schema"`
-	Kind             string                   `json:"kind"`
-	ScorerVersion    string                   `json:"scorer_version"`
-	RoundId          string                   `json:"round_id"`
-	ConfigSha256     string                   `json:"config_sha256"`
-	RequestTimeoutMs int64                    `json:"request_timeout_ms"`
-	RunFlags         map[string]string        `json:"run_flags"`
-	TakeoverMargin   float64                  `json:"takeover_margin"`
-	Replicates       []ScoreBaselineReplicate `json:"replicates"`
+	G2VolumePolicy   model.CompetitionG2VolumePolicy `json:"g2_volume_policy,omitempty"`
+	ScoreSchema      int                             `json:"score_schema"`
+	Kind             string                          `json:"kind"`
+	ScorerVersion    string                          `json:"scorer_version"`
+	RoundId          string                          `json:"round_id"`
+	ConfigSha256     string                          `json:"config_sha256"`
+	RequestTimeoutMs int64                           `json:"request_timeout_ms"`
+	RunFlags         map[string]string               `json:"run_flags"`
+	TakeoverMargin   float64                         `json:"takeover_margin"`
+	Replicates       []ScoreBaselineReplicate        `json:"replicates"`
 }
 
 type AccountingSnapshot struct {
@@ -115,6 +116,7 @@ type ScoreInputs struct {
 // contract is derived from the first run and cross-checked across every
 // replicate before the manifest is emitted.
 type ScoreBaselineInputs struct {
+	G2VolumePolicy  model.CompetitionG2VolumePolicy
 	Runs            []string
 	Stderr          []string
 	Accounting      []string
@@ -165,16 +167,18 @@ type ScoreAggregateDiagnostics struct {
 }
 
 type ScoreDiagnostics struct {
-	RoundId                  string                      `json:"round_id,omitempty"`
-	BaselineSha256           string                      `json:"baseline_sha256,omitempty"`
-	ReplicateCount           int                         `json:"replicate_count,omitempty"`
-	RequestTimeoutMs         int64                       `json:"request_timeout_ms,omitempty"`
-	TakeoverMargin           float64                     `json:"takeover_margin,omitempty"`
-	BaselineTakeoverRawMax   float64                     `json:"baseline_takeover_raw_max,omitempty"`
-	BaselineTakeoverEligible *bool                       `json:"baseline_takeover_eligible,omitempty"`
-	Baseline                 *ScoreAggregateDiagnostics  `json:"baseline,omitempty"`
-	Candidate                *ScoreAggregateDiagnostics  `json:"candidate,omitempty"`
-	Replicates               []ScoreReplicateDiagnostics `json:"replicates,omitempty"`
+	G2VolumePolicy           model.CompetitionG2VolumePolicy `json:"g2_volume_policy,omitempty"`
+	ScorerVersion            string                          `json:"scorer_version,omitempty"`
+	RoundId                  string                          `json:"round_id,omitempty"`
+	BaselineSha256           string                          `json:"baseline_sha256,omitempty"`
+	ReplicateCount           int                             `json:"replicate_count,omitempty"`
+	RequestTimeoutMs         int64                           `json:"request_timeout_ms,omitempty"`
+	TakeoverMargin           float64                         `json:"takeover_margin,omitempty"`
+	BaselineTakeoverRawMax   float64                         `json:"baseline_takeover_raw_max,omitempty"`
+	BaselineTakeoverEligible *bool                           `json:"baseline_takeover_eligible,omitempty"`
+	Baseline                 *ScoreAggregateDiagnostics      `json:"baseline,omitempty"`
+	Candidate                *ScoreAggregateDiagnostics      `json:"candidate,omitempty"`
+	Replicates               []ScoreReplicateDiagnostics     `json:"replicates,omitempty"`
 }
 
 type ScoreResult struct {
@@ -269,12 +273,13 @@ func Score(inputs ScoreInputs) *ScoreResult {
 	baseAggregate := aggregateBaseline(baseline.Replicates)
 	candidateAggregate := aggregateCandidate(replicates)
 	significance := scoreSignificance(baseline.Replicates, replicates, baseline.TakeoverMargin)
-	gates := buildScoreGates(baseAggregate, candidateAggregate, replicates)
+	gates := buildScoreGates(baseAggregate, candidateAggregate, replicates, baseline.G2VolumePolicy)
 	rawScore := candidateAggregate.RawScore
 	normalized := clampScore(100*baseAggregate.RawScore/rawScore, 1, 200)
 	takeoverRawMax := baseAggregate.RawScore * (1 - baseline.TakeoverMargin)
 
 	diagnostics := ScoreDiagnostics{
+		G2VolumePolicy:         baseline.G2VolumePolicy,
 		RoundId:                baseline.RoundId,
 		BaselineSha256:         baselineSha256,
 		ReplicateCount:         len(replicates),
@@ -283,6 +288,9 @@ func Score(inputs ScoreInputs) *ScoreResult {
 		BaselineTakeoverRawMax: takeoverRawMax,
 		Baseline:               &baseAggregate.ScoreAggregateDiagnostics,
 		Candidate:              &candidateAggregate,
+	}
+	if baseline.G2VolumePolicy != model.CompetitionG2VolumePolicyLegacy {
+		diagnostics.ScorerVersion = baseline.ScorerVersion
 	}
 	for _, replicate := range replicates {
 		diagnostics.Replicates = append(diagnostics.Replicates, replicate.diagnostics)
@@ -355,6 +363,10 @@ func BuildScoreBaseline(inputs ScoreBaselineInputs) (*ScoreBaselineManifest, err
 	if !finite(inputs.TakeoverMargin) || inputs.TakeoverMargin < 0 || 0.5 < inputs.TakeoverMargin {
 		return nil, scoreError("invalid_baseline", "baseline takeover margin is outside [0, 0.5]")
 	}
+	scorerVersion, err := model.CompetitionScorerVersionForG2Policy(inputs.G2VolumePolicy)
+	if err != nil {
+		return nil, scoreError("invalid_g2_volume_policy", "baseline g2 volume policy is unsupported")
+	}
 
 	first, _, err := readOfficialRunSidecar(inputs.Runs[0])
 	if err != nil {
@@ -372,6 +384,8 @@ func BuildScoreBaseline(inputs ScoreBaselineInputs) (*ScoreBaselineManifest, err
 		inputs.TakeoverMargin,
 		nil,
 	)
+	contract.G2VolumePolicy = inputs.G2VolumePolicy
+	contract.ScorerVersion = scorerVersion
 
 	replicates := make([]ScoreBaselineReplicate, 0, want)
 	evaluationIds := map[string]bool{}
@@ -487,7 +501,11 @@ func validateScoreBaseline(baseline *ScoreBaselineManifest) error {
 	if baseline.ScoreSchema != apexScoreSchema || baseline.Kind != scoreBaselineKind {
 		return scoreError("invalid_baseline", "baseline manifest has the wrong kind or score schema")
 	}
-	if baseline.ScorerVersion != officialScorerVersion {
+	scorerVersion, err := model.CompetitionScorerVersionForG2Policy(baseline.G2VolumePolicy)
+	if err != nil {
+		return scoreError("invalid_g2_volume_policy", "baseline g2 volume policy is unsupported")
+	}
+	if baseline.ScorerVersion != scorerVersion {
 		return scoreError("scorer_version_mismatch", "baseline manifest requires a different scorer version")
 	}
 	if !scoreRoundIdPattern.MatchString(baseline.RoundId) {
@@ -683,6 +701,7 @@ func buildScoreGates(
 	baseline baselineAggregate,
 	candidate ScoreAggregateDiagnostics,
 	replicates []candidateReplicate,
+	g2Policy model.CompetitionG2VolumePolicy,
 ) map[string]ScoreGate {
 	g1AbsoluteMin := 0.97
 	g1RelativeMin := baseline.SuccessRate - 0.01
@@ -692,8 +711,24 @@ func buildScoreGates(
 	requestMax := 1.05 * baseline.RequestCount
 	bytesMin := 0.95 * baseline.ReceivedBytes
 	bytesMax := 1.05 * baseline.ReceivedBytes
-	g2 := requestMin <= candidate.RequestCount && candidate.RequestCount <= requestMax &&
-		bytesMin <= candidate.ReceivedBytes && candidate.ReceivedBytes <= bytesMax
+	g2 := finitePositive(baseline.RequestCount) && finitePositive(baseline.ReceivedBytes) &&
+		finitePositive(candidate.RequestCount) && finitePositive(candidate.ReceivedBytes) &&
+		requestMin <= candidate.RequestCount && bytesMin <= candidate.ReceivedBytes
+	g2Details := map[string]any{
+		"candidate_requests": candidate.RequestCount,
+		"request_min":        requestMin,
+		"candidate_bytes":    candidate.ReceivedBytes,
+		"bytes_min":          bytesMin,
+	}
+	switch g2Policy {
+	case model.CompetitionG2VolumePolicyLegacy:
+		g2 = g2 && candidate.RequestCount <= requestMax && candidate.ReceivedBytes <= bytesMax
+		g2Details["request_max"], g2Details["bytes_max"] = requestMax, bytesMax
+	case model.CompetitionG2VolumePolicyMinimumWork:
+		g2Details["policy"] = g2Policy
+	default:
+		g2 = false
+	}
 
 	g3 := 0.95 <= candidate.AccountingCoverage
 
@@ -731,15 +766,8 @@ func buildScoreGates(
 			},
 		},
 		"G2_volume": {
-			Passed: g2,
-			Details: map[string]any{
-				"candidate_requests": candidate.RequestCount,
-				"request_min":        requestMin,
-				"request_max":        requestMax,
-				"candidate_bytes":    candidate.ReceivedBytes,
-				"bytes_min":          bytesMin,
-				"bytes_max":          bytesMax,
-			},
+			Passed:  g2,
+			Details: g2Details,
 		},
 		"G3_path_integrity": {
 			Passed: g3,
@@ -984,7 +1012,14 @@ func validateRunContract(runStats *RunStats, baseline *ScoreBaselineManifest) er
 	if runStats.Schema != runStatsSchema || runStats.Kind != runStatsKind {
 		return scoreError("artifact_schema_mismatch", "official scoring requires a schema-2 run manifest")
 	}
-	if runStats.ScoreSchema != apexScoreSchema || runStats.ScorerVersion != officialScorerVersion {
+	scorerVersion, err := model.CompetitionScorerVersionForG2Policy(runStats.G2VolumePolicy)
+	if err != nil {
+		return scoreError("invalid_g2_volume_policy", "run g2 volume policy is unsupported")
+	}
+	if runStats.G2VolumePolicy != baseline.G2VolumePolicy {
+		return scoreError("g2_volume_policy_mismatch", "run g2 volume policy does not match the authenticated baseline")
+	}
+	if runStats.ScoreSchema != apexScoreSchema || runStats.ScorerVersion != scorerVersion || runStats.ScorerVersion != baseline.ScorerVersion {
 		return scoreError("scorer_version_mismatch", "run manifest uses a different score schema or scorer version")
 	}
 	if runStats.EvaluationId == "" {
@@ -1036,7 +1071,8 @@ func validateFinalMarker(path string, manifestBytes []byte, runStats *RunStats) 
 	}
 	manifestSha := fmt.Sprintf("%x", sha256.Sum256(manifestBytes))
 	if marker.Schema != 1 || marker.Kind != "sim-latency-complete" ||
-		marker.ScoreSchema != apexScoreSchema || marker.ScorerVersion != officialScorerVersion ||
+		marker.ScoreSchema != apexScoreSchema || marker.ScorerVersion != runStats.ScorerVersion ||
+		marker.G2VolumePolicy != runStats.G2VolumePolicy ||
 		marker.EvaluationId != runStats.EvaluationId ||
 		marker.RunManifestSha256 != manifestSha ||
 		marker.RunManifestBytes != int64(len(manifestBytes)) ||
@@ -1542,6 +1578,7 @@ func marshalScoreBaseline(baseline *ScoreBaselineManifest) ([]byte, error) {
 
 func runScoreBaseline(opts docopt.Opts) {
 	inputs := ScoreBaselineInputs{
+		G2VolumePolicy:  model.CompetitionG2VolumePolicy(optString(opts, "--g2-volume-policy", "")),
 		Runs:            splitPaths(optString(opts, "--run", "")),
 		Stderr:          splitPaths(optString(opts, "--stderr", "")),
 		Accounting:      splitPaths(optString(opts, "--accounting", "")),

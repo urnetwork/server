@@ -49,34 +49,35 @@ type CompetitionPatchPolicy struct {
 }
 
 type CompetitionEvaluationPolicy struct {
-	HardwareId              string  `json:"hardware_id" yaml:"hardware_id"`
-	HostQualificationSha256 string  `json:"host_qualification_sha256" yaml:"host_qualification_sha256"`
-	ConfigLocalSha256       string  `json:"config_local_sha256" yaml:"config_local_sha256"`
-	VaultLocalSha256        string  `json:"vault_local_sha256" yaml:"vault_local_sha256"`
-	SimulatorSha256         string  `json:"simulator_sha256" yaml:"simulator_sha256"`
-	ScorerSha256            string  `json:"scorer_sha256" yaml:"scorer_sha256"`
-	ProviderCount           int     `json:"provider_count" yaml:"provider_count"`
-	ClientPoolSize          int     `json:"client_pool_size" yaml:"client_pool_size"`
-	ArrivalsPerMinute       int     `json:"arrivals_per_minute" yaml:"arrivals_per_minute"`
-	QualityWindowSize       int     `json:"quality_window_size" yaml:"quality_window_size"`
-	ExchangeHosts           int     `json:"exchange_hosts" yaml:"exchange_hosts"`
-	FleetShards             int     `json:"fleet_shards" yaml:"fleet_shards"`
-	SiteListen              string  `json:"site_listen" yaml:"site_listen"`
-	ApiPort                 int     `json:"api_port" yaml:"api_port"`
-	RampMs                  int64   `json:"ramp_ms" yaml:"ramp_ms"`
-	PrewarmMs               int64   `json:"prewarm_ms" yaml:"prewarm_ms"`
-	SettleMs                int64   `json:"settle_ms" yaml:"settle_ms"`
-	ClientWarmupTimeoutMs   int64   `json:"client_warmup_timeout_ms" yaml:"client_warmup_timeout_ms"`
-	DurationMs              int64   `json:"duration_ms" yaml:"duration_ms"`
-	RequestTimeoutMs        int64   `json:"request_timeout_ms" yaml:"request_timeout_ms"`
-	PipelineIntervalMs      int64   `json:"pipeline_interval_ms" yaml:"pipeline_interval_ms"`
-	TestTimeoutMs           int64   `json:"test_timeout_ms" yaml:"test_timeout_ms"`
-	AnnounceTimeoutMs       int64   `json:"announce_timeout_ms" yaml:"announce_timeout_ms"`
-	ImpairmentEnabled       bool    `json:"impairment_enabled" yaml:"impairment_enabled"`
-	Replicates              int     `json:"replicates" yaml:"replicates"`
-	TakeoverMargin          float64 `json:"takeover_margin" yaml:"takeover_margin"`
-	QueueLimit              int     `json:"queue_limit" yaml:"queue_limit"`
-	ScoreTimeoutSeconds     int     `json:"score_timeout_seconds" yaml:"score_timeout_seconds"`
+	G2VolumePolicy          CompetitionG2VolumePolicy `json:"g2_volume_policy,omitempty" yaml:"g2_volume_policy,omitempty"`
+	HardwareId              string                    `json:"hardware_id" yaml:"hardware_id"`
+	HostQualificationSha256 string                    `json:"host_qualification_sha256" yaml:"host_qualification_sha256"`
+	ConfigLocalSha256       string                    `json:"config_local_sha256" yaml:"config_local_sha256"`
+	VaultLocalSha256        string                    `json:"vault_local_sha256" yaml:"vault_local_sha256"`
+	SimulatorSha256         string                    `json:"simulator_sha256" yaml:"simulator_sha256"`
+	ScorerSha256            string                    `json:"scorer_sha256" yaml:"scorer_sha256"`
+	ProviderCount           int                       `json:"provider_count" yaml:"provider_count"`
+	ClientPoolSize          int                       `json:"client_pool_size" yaml:"client_pool_size"`
+	ArrivalsPerMinute       int                       `json:"arrivals_per_minute" yaml:"arrivals_per_minute"`
+	QualityWindowSize       int                       `json:"quality_window_size" yaml:"quality_window_size"`
+	ExchangeHosts           int                       `json:"exchange_hosts" yaml:"exchange_hosts"`
+	FleetShards             int                       `json:"fleet_shards" yaml:"fleet_shards"`
+	SiteListen              string                    `json:"site_listen" yaml:"site_listen"`
+	ApiPort                 int                       `json:"api_port" yaml:"api_port"`
+	RampMs                  int64                     `json:"ramp_ms" yaml:"ramp_ms"`
+	PrewarmMs               int64                     `json:"prewarm_ms" yaml:"prewarm_ms"`
+	SettleMs                int64                     `json:"settle_ms" yaml:"settle_ms"`
+	ClientWarmupTimeoutMs   int64                     `json:"client_warmup_timeout_ms" yaml:"client_warmup_timeout_ms"`
+	DurationMs              int64                     `json:"duration_ms" yaml:"duration_ms"`
+	RequestTimeoutMs        int64                     `json:"request_timeout_ms" yaml:"request_timeout_ms"`
+	PipelineIntervalMs      int64                     `json:"pipeline_interval_ms" yaml:"pipeline_interval_ms"`
+	TestTimeoutMs           int64                     `json:"test_timeout_ms" yaml:"test_timeout_ms"`
+	AnnounceTimeoutMs       int64                     `json:"announce_timeout_ms" yaml:"announce_timeout_ms"`
+	ImpairmentEnabled       bool                      `json:"impairment_enabled" yaml:"impairment_enabled"`
+	Replicates              int                       `json:"replicates" yaml:"replicates"`
+	TakeoverMargin          float64                   `json:"takeover_margin" yaml:"takeover_margin"`
+	QueueLimit              int                       `json:"queue_limit" yaml:"queue_limit"`
+	ScoreTimeoutSeconds     int                       `json:"score_timeout_seconds" yaml:"score_timeout_seconds"`
 }
 
 type CompetitionSeasonPolicy struct {
@@ -309,6 +310,16 @@ func ValidateCompetitionScore(score *CompetitionScoreResult) error {
 	}
 	if score.Gates == nil {
 		return errors.New("score gates are missing")
+	}
+	policyValue, policyPresent := score.Diagnostics["g2_volume_policy"]
+	versionValue, versionPresent := score.Diagnostics["scorer_version"]
+	if policyPresent || versionPresent {
+		policy, policyOk := policyValue.(string)
+		version, versionOk := versionValue.(string)
+		expectedVersion, err := CompetitionScorerVersionForG2Policy(CompetitionG2VolumePolicy(policy))
+		if !policyOk || !versionOk || policy != string(CompetitionG2VolumePolicyMinimumWork) || err != nil || version != expectedVersion {
+			return errors.New("score g2 volume policy provenance is malformed")
+		}
 	}
 	if err := validateCompetitionScoreSignificance(score.Significance); err != nil {
 		return err

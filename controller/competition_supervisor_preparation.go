@@ -22,7 +22,36 @@ func sourceSettingsFromIntent(settings *Settings, intent *model.CompetitionSourc
 	if err != nil || lock != intent.SourceLockSha256 || !imageDigestPattern.MatchString(intent.EvaluatorImageDigest) || !sha256Pattern.MatchString(intent.HostQualificationSha256) {
 		return nil, ErrConflict
 	}
+	if _, err := model.CompetitionScorerVersionForG2Policy(intent.G2VolumePolicy); err != nil {
+		return nil, err
+	}
+	// Selection follows the configured target epoch, not a request's omitted
+	// policy. Otherwise legacy omission could bypass an approved transition.
+	if settings.FutureEpochPolicy != nil && settings.FutureEpochPolicy.FromEpoch <= intent.TargetEpoch {
+		expected, err := settings.ForCompetitionEpoch(intent.TargetEpoch)
+		if err != nil || expected.EvaluationPolicy.G2VolumePolicy != intent.G2VolumePolicy {
+			return nil, errors.New("source policy does not match the approved future epoch")
+		}
+	}
 	copy := *settings
+	if intent.G2VolumePolicy != model.CompetitionG2VolumePolicyLegacy {
+		if intent.Staging || intent.TargetEpoch < 2 {
+			return nil, ErrConflict
+		}
+		future, err := settings.ForCompetitionEpoch(intent.TargetEpoch)
+		if err != nil || future.EvaluationPolicy.G2VolumePolicy != intent.G2VolumePolicy {
+			return nil, ErrConflict
+		}
+		copy = *future
+		if !sha256Pattern.MatchString(intent.SimulatorSha256) || intent.SimulatorSha256 != intent.ScorerSha256 {
+			return nil, errors.New("future source is missing its qualified simulator/scorer binary pins")
+		}
+		copy.EvaluationPolicy.SimulatorSha256, copy.EvaluationPolicy.ScorerSha256 = intent.SimulatorSha256, intent.ScorerSha256
+		if copy.roundBaselinePreparation != nil && copy.roundBaselinePreparation.Config.G2VolumePolicy != intent.G2VolumePolicy {
+			return nil, errors.New("future source requires its separately pinned baseline preparation role")
+		}
+	}
+	copy.EvaluationPolicy.G2VolumePolicy = intent.G2VolumePolicy
 	copy.BaseSha, copy.EvaluatorImageDigest = intent.Commits["server"], intent.EvaluatorImageDigest
 	copy.EvaluationPolicy.TakeoverMargin, copy.EvaluationPolicy.HostQualificationSha256 = intent.Threshold, intent.HostQualificationSha256
 	copy.AutomationPolicy.SourceGeneration, copy.AutomationPolicy.SourceLockSha256, copy.AutomationPolicy.SourceActivationGeneration = intent.SourceGeneration, intent.SourceLockSha256, intent.Generation

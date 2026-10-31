@@ -528,7 +528,9 @@ func checkCompetitionApi(
 	if err := getLaunchJson(ctx, client, config.ApiUrl, "/competition/info", "", info); err != nil {
 		return nil, nil, err
 	}
-	if !info.Enabled || info.ScoreSchema != controller.ScoreSchema || info.ScorerVersion != controller.ScorerVersion ||
+	expectedScorerVersion, policyErr := model.CompetitionScorerVersionForG2Policy(epoch.G2VolumePolicy)
+	if policyErr != nil || info.EvaluationPolicy.G2VolumePolicy != epoch.G2VolumePolicy ||
+		!info.Enabled || info.ScoreSchema != controller.ScoreSchema || info.ScorerVersion != expectedScorerVersion ||
 		info.BaseSha != epoch.Repositories.Server.Commit || info.EvaluatorImageDigest != config.EvaluatorImageDigest {
 		return nil, nil, errors.New("live competition policy does not match the frozen epoch and evaluator")
 	}

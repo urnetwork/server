@@ -22,30 +22,32 @@ import (
 	"unicode"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
 	"golang.org/x/sys/unix"
 )
 
 // Pointer booleans distinguish explicit absence of submission/candidate work
 // from a malformed producer receipt that merely omitted those assertions.
 type roundBaselinePreparationCompletion struct {
-	Schema                 int      `json:"schema"`
-	Kind                   string   `json:"kind"`
-	Owner                  string   `json:"owner"`
-	ContextSha256          string   `json:"context_sha256"`
-	JobId                  string   `json:"job_id"`
-	RoundId                string   `json:"round_id"`
-	SourceEpoch            int      `json:"source_epoch"`
-	BaseSha                string   `json:"base_sha"`
-	BaseImageId            string   `json:"base_image_id"`
-	ProvidersSha256        string   `json:"providers_sha256"`
-	ScorerVersion          string   `json:"scorer_version"`
-	Replicates             int      `json:"replicates"`
-	ControlEvaluationIds   []string `json:"control_evaluation_ids"`
-	BaselineSha256         string   `json:"baseline_sha256"`
-	EvidenceManifestSha256 string   `json:"evidence_manifest_sha256"`
-	SubmissionStarted      *bool    `json:"submission_started"`
-	CandidateExecuted      *bool    `json:"candidate_executed"`
-	CleanupComplete        *bool    `json:"cleanup_complete"`
+	G2VolumePolicy         model.CompetitionG2VolumePolicy `json:"g2_volume_policy,omitempty"`
+	Schema                 int                             `json:"schema"`
+	Kind                   string                          `json:"kind"`
+	Owner                  string                          `json:"owner"`
+	ContextSha256          string                          `json:"context_sha256"`
+	JobId                  string                          `json:"job_id"`
+	RoundId                string                          `json:"round_id"`
+	SourceEpoch            int                             `json:"source_epoch"`
+	BaseSha                string                          `json:"base_sha"`
+	BaseImageId            string                          `json:"base_image_id"`
+	ProvidersSha256        string                          `json:"providers_sha256"`
+	ScorerVersion          string                          `json:"scorer_version"`
+	Replicates             int                             `json:"replicates"`
+	ControlEvaluationIds   []string                        `json:"control_evaluation_ids"`
+	BaselineSha256         string                          `json:"baseline_sha256"`
+	EvidenceManifestSha256 string                          `json:"evidence_manifest_sha256"`
+	SubmissionStarted      *bool                           `json:"submission_started"`
+	CandidateExecuted      *bool                           `json:"candidate_executed"`
+	CleanupComplete        *bool                           `json:"cleanup_complete"`
 }
 
 // A private archive namespace and purpose separate these controls from the
@@ -101,7 +103,7 @@ func validatePreparedRoundBaseline(prepared *preparedRoundBaseline, preparation 
 		archive.Retention == nil || archive.Retention.Backend != "server/blob" || !archive.Retention.AuthenticatedAfterUpload || !archive.Retention.ComplianceObjectLock || archive.Retention.RetainUntil.Before(settings.RetainUntil) {
 		return errors.New("baseline archive lacks its exact owned retained provenance")
 	}
-	expectedKey := filepath.ToSlash(filepath.Join(archive.Retention.Prefix, "competition", "v1", settings.CompetitionId, "rounds", preparation.RoundId.String(), "baseline-preparation", preparation.Owner, "baseline-preparation-manifest.json"))
+	expectedKey := filepath.ToSlash(filepath.Join(archive.Retention.Prefix, "competition", "v1", settings.CompetitionId, "rounds", preparation.RoundId.String(), "baseline-preparation", roundBaselinePreparationArtifactOwner(preparation), "baseline-preparation-manifest.json"))
 	if archive.Retention.Bucket != settings.ArtifactBucket || archive.Retention.ManifestKey != expectedKey ||
 		len(archive.Artifacts) == 0 || len(archive.Artifacts) > settings.roundBaselinePreparation.Settings.MaximumArtifacts+6 || archive.Retention.ObjectCount != len(archive.Artifacts) || len(archive.Retention.Objects) != len(archive.Artifacts) {
 		return errors.New("baseline archive used an ordinary attempt namespace or incomplete retention inventory")
@@ -212,7 +214,7 @@ func authenticateRoundBaselinePreparation(directory string, settings *Settings, 
 	}
 	if receipt.Schema != 1 || receipt.Kind != "sim-latency-round-baseline-preparation-complete" || receipt.Owner != preparation.Owner || receipt.ContextSha256 != preparation.ContextSha256 ||
 		receipt.JobId != preparation.JobId.String() || receipt.RoundId != preparation.RoundId.String() || receipt.SourceEpoch != evaluationSourceEpoch(&preparation.SourceJob.Round) ||
-		receipt.BaseSha != settings.BaseSha || receipt.BaseImageId != settings.EvaluatorImageDigest || receipt.ProvidersSha256 != preparation.SourceJob.Round.ProvidersSha256 || receipt.ScorerVersion != ScorerVersion ||
+		receipt.BaseSha != settings.BaseSha || receipt.BaseImageId != settings.EvaluatorImageDigest || receipt.ProvidersSha256 != preparation.SourceJob.Round.ProvidersSha256 || receipt.ScorerVersion != settings.scorerVersion() || receipt.G2VolumePolicy != settings.EvaluationPolicy.G2VolumePolicy ||
 		receipt.Replicates != 9 || len(receipt.ControlEvaluationIds) != 9 || receipt.SubmissionStarted == nil || *receipt.SubmissionStarted || receipt.CandidateExecuted == nil || *receipt.CandidateExecuted || receipt.CleanupComplete == nil || !*receipt.CleanupComplete {
 		return nil, document, errors.New("baseline preparation receipt changed purpose or frozen identity")
 	}
@@ -311,35 +313,37 @@ func authenticateRoundBaselineNativeRun(directory, root, id string, bound map[st
 		return json.Unmarshal(content, target)
 	}
 	var run struct {
-		Schema                 int    `json:"schema"`
-		Kind                   string `json:"kind"`
-		EvaluationId           string `json:"evaluation_id"`
-		CompletionState        string `json:"completion_state"`
-		Official               bool   `json:"official"`
-		BuildRevision          string `json:"build_revision"`
-		BuildModified          bool   `json:"build_modified"`
-		ConfigSha256           string `json:"config_sha256"`
-		SourceEpoch            int    `json:"source_epoch"`
-		ScoreSchema            int    `json:"score_schema"`
-		ScorerVersion          string `json:"scorer_version"`
-		RequestTimeoutMs       int64  `json:"request_timeout_ms"`
-		ResultsCsvSha256       string `json:"results_csv_sha256"`
-		ResultsCsvBytes        int64  `json:"results_csv_bytes"`
-		AccountingSourceSha256 string `json:"accounting_source_sha256"`
-		AccountingSourceBytes  int64  `json:"accounting_source_bytes"`
-		StatsRoot              string `json:"stats_root"`
+		Schema                 int                             `json:"schema"`
+		Kind                   string                          `json:"kind"`
+		EvaluationId           string                          `json:"evaluation_id"`
+		CompletionState        string                          `json:"completion_state"`
+		Official               bool                            `json:"official"`
+		BuildRevision          string                          `json:"build_revision"`
+		BuildModified          bool                            `json:"build_modified"`
+		ConfigSha256           string                          `json:"config_sha256"`
+		SourceEpoch            int                             `json:"source_epoch"`
+		ScoreSchema            int                             `json:"score_schema"`
+		ScorerVersion          string                          `json:"scorer_version"`
+		G2VolumePolicy         model.CompetitionG2VolumePolicy `json:"g2_volume_policy,omitempty"`
+		RequestTimeoutMs       int64                           `json:"request_timeout_ms"`
+		ResultsCsvSha256       string                          `json:"results_csv_sha256"`
+		ResultsCsvBytes        int64                           `json:"results_csv_bytes"`
+		AccountingSourceSha256 string                          `json:"accounting_source_sha256"`
+		AccountingSourceBytes  int64                           `json:"accounting_source_bytes"`
+		StatsRoot              string                          `json:"stats_root"`
 	}
 	if err := read("run.json", &run); err != nil {
 		return err
 	}
 	var marker struct {
-		Schema        int    `json:"schema"`
-		Kind          string `json:"kind"`
-		EvaluationId  string `json:"evaluation_id"`
-		RunSha256     string `json:"run_manifest_sha256"`
-		RunBytes      int64  `json:"run_manifest_bytes"`
-		ScoreSchema   int    `json:"score_schema"`
-		ScorerVersion string `json:"scorer_version"`
+		Schema         int                             `json:"schema"`
+		Kind           string                          `json:"kind"`
+		EvaluationId   string                          `json:"evaluation_id"`
+		RunSha256      string                          `json:"run_manifest_sha256"`
+		RunBytes       int64                           `json:"run_manifest_bytes"`
+		ScoreSchema    int                             `json:"score_schema"`
+		ScorerVersion  string                          `json:"scorer_version"`
+		G2VolumePolicy model.CompetitionG2VolumePolicy `json:"g2_volume_policy,omitempty"`
 	}
 	if err := read("run.complete.json", &marker); err != nil {
 		return err
@@ -378,9 +382,9 @@ func authenticateRoundBaselineNativeRun(directory, root, id string, bound map[st
 	if err := read("accounting.source.json", &accountingSource); err != nil {
 		return err
 	}
-	if run.Schema != 2 || run.Kind != "sim-latency-run" || run.EvaluationId != id || run.CompletionState != "complete" || !run.Official || run.BuildModified || run.BuildRevision != settings.BaseSha || run.ConfigSha256 != preparation.SourceJob.Round.ProvidersSha256 || run.SourceEpoch != evaluationSourceEpoch(&preparation.SourceJob.Round) || run.ScoreSchema != ScoreSchema || run.ScorerVersion != ScorerVersion || run.RequestTimeoutMs != settings.EvaluationPolicy.RequestTimeoutMs ||
+	if run.Schema != 2 || run.Kind != "sim-latency-run" || run.EvaluationId != id || run.CompletionState != "complete" || !run.Official || run.BuildModified || run.BuildRevision != settings.BaseSha || run.ConfigSha256 != preparation.SourceJob.Round.ProvidersSha256 || run.SourceEpoch != evaluationSourceEpoch(&preparation.SourceJob.Round) || run.ScoreSchema != ScoreSchema || run.ScorerVersion != settings.scorerVersion() || run.G2VolumePolicy != settings.EvaluationPolicy.G2VolumePolicy || run.RequestTimeoutMs != settings.EvaluationPolicy.RequestTimeoutMs ||
 		run.ResultsCsvSha256 != bound[root+"results.csv"].Sha256 || run.ResultsCsvBytes != bound[root+"results.csv"].Bytes || run.AccountingSourceSha256 != bound[root+"accounting.source.json"].Sha256 || run.AccountingSourceBytes != bound[root+"accounting.source.json"].Bytes ||
-		marker.Schema != 1 || marker.Kind != "sim-latency-complete" || marker.EvaluationId != id || marker.RunSha256 != bound[root+"run.json"].Sha256 || marker.RunBytes != bound[root+"run.json"].Bytes || marker.ScoreSchema != ScoreSchema || marker.ScorerVersion != ScorerVersion ||
+		marker.Schema != 1 || marker.Kind != "sim-latency-complete" || marker.EvaluationId != id || marker.RunSha256 != bound[root+"run.json"].Sha256 || marker.RunBytes != bound[root+"run.json"].Bytes || marker.ScoreSchema != ScoreSchema || marker.ScorerVersion != settings.scorerVersion() || marker.G2VolumePolicy != settings.EvaluationPolicy.G2VolumePolicy ||
 		resources.Schema != 1 || resources.Kind != "sim-latency-resource-report" || !resources.Complete || resources.EvaluationId != id || resources.ExitCode == nil || *resources.ExitCode != 0 || resources.OomKilled == nil || *resources.OomKilled || resources.HardKilled == nil || *resources.HardKilled || resources.LimitEscape == nil || *resources.LimitEscape || resources.MeasurementMissing == nil || *resources.MeasurementMissing || accounting.Schema != 1 || accounting.Kind != "sim-latency-accounting" || !accounting.Complete || accounting.EvaluationId != id || accounting.ProviderBytes <= 0 ||
 		accountingSource.Schema != 1 || accountingSource.Kind != "sim-latency-provider-accounting-source" || !accountingSource.Complete || accountingSource.EvaluationId != id || accountingSource.ProviderBytes != accounting.ProviderBytes {
 		return errors.New("baseline native marker/CSV/accounting/resource chain disagrees")
@@ -416,8 +420,8 @@ func authenticateRoundBaselineNativeRun(directory, root, id string, bound map[st
 	return nil
 }
 
-// The host operation and archive retries share the reservation's original
-// deadline. A retry reuploads these same authenticated bytes, never reruns Go.
+// The host operation and archive retries share the worker's bounded setup
+// execution deadline. A retry reuploads these same bytes, never reruns Go.
 func (self CommandEvaluator) PrepareRoundBaseline(ctx context.Context, settings *Settings, preparation *roundBaselinePreparation) (result *preparedRoundBaseline, resultErr error) {
 	if preparation == nil || preparation.SourceJob == nil {
 		return nil, errors.New("baseline producer source job is missing")
@@ -460,7 +464,7 @@ func (self CommandEvaluator) PrepareRoundBaseline(ctx context.Context, settings 
 	if err != nil {
 		return nil, err
 	}
-	directory, err := createRoundBaselinePreparationDirectory(settings.ArtifactRoot, job.RoundId.String(), preparation.Owner)
+	directory, err := createRoundBaselinePreparationDirectory(settings.ArtifactRoot, job.RoundId.String(), roundBaselinePreparationArtifactOwner(preparation))
 	if err != nil {
 		return nil, errors.Join(errRoundBaselinePreparationHeld, err)
 	}
@@ -601,7 +605,7 @@ func createRoundBaselinePreparationDirectory(root, roundId, owner string) (strin
 // Uses the same private WORM backend and authenticated object retention, with
 // a purpose-specific immutable namespace unrelated to attempt-01 publication.
 func (self *blobArtifactArchive) ArchiveRoundBaselinePreparation(ctx context.Context, settings *Settings, preparation *roundBaselinePreparation, directory string, document roundBaselinePreparationArchiveDocument) (json.RawMessage, error) {
-	prefix := filepath.ToSlash(filepath.Join(self.store.Prefix(), "competition", "v1", settings.CompetitionId, "rounds", preparation.RoundId.String(), "baseline-preparation", preparation.Owner))
+	prefix := filepath.ToSlash(filepath.Join(self.store.Prefix(), "competition", "v1", settings.CompetitionId, "rounds", preparation.RoundId.String(), "baseline-preparation", roundBaselinePreparationArtifactOwner(preparation)))
 	manifestName := "baseline-preparation-manifest.json"
 	if document.Outcome == "infrastructure_hold" {
 		manifestName = "baseline-preparation-hold-manifest.json"

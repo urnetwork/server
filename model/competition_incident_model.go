@@ -72,8 +72,11 @@ func ValidateCompetitionAutomationHold(args CompetitionAutomationHoldArgs) error
 		return errors.New("invalid automation hold identity or explanation")
 	}
 	if args.ReasonCode != "OPERATOR_HOLD" && args.ReasonCode != "EVALUATION_INTEGRITY_INCIDENT" &&
-		args.ReasonCode != "SOURCE_COMPROMISE" && args.ReasonCode != "RECOVERY_APPROVED" {
+		args.ReasonCode != "SOURCE_COMPROMISE" && args.ReasonCode != "RECOVERY_APPROVED" && args.ReasonCode != "CALIBRATION_MAINTENANCE" {
 		return errors.New("unknown automation hold reason")
+	}
+	if args.ReasonCode == "CALIBRATION_MAINTENANCE" && (args.Kind != "evaluation" || !args.Active) {
+		return errors.New("calibration maintenance requires an active evaluation hold")
 	}
 	if !args.Active && args.ReasonCode != "RECOVERY_APPROVED" {
 		return errors.New("hold release requires an explicit recovery approval")

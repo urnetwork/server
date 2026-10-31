@@ -180,6 +180,18 @@ func classifyObservationError(err error) string {
 		return logQueryError.class
 	}
 
+	var signupQualityFailure *signupQualityObservationError
+	if errors.As(err, &signupQualityFailure) && signupQualityFailure != nil {
+		switch signupQualityFailure.stage {
+		case signupQualityObservationAggregateParse:
+			return observationErrorClassInvalidResponse
+		case signupQualityObservationSourceRead:
+			return classifyObservationError(signupQualityFailure.err)
+		default:
+			return observationErrorClassUnclassified
+		}
+	}
+
 	lower := strings.ToLower(err.Error())
 	var sshFailure *sshCommandError
 	var exitFailure *exec.ExitError

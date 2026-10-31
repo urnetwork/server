@@ -33,10 +33,10 @@ passing every gate, or no winner. It never pauses for honesty review or
 promotes source.
 
 Usage:
-  competitionworker [--worker_id=<id>] [--baseline-preparation-config=<path> --baseline-preparation-sha256=<sha>]
-  competitionworker --check [--worker_id=<id>] [--baseline-preparation-config=<path> --baseline-preparation-sha256=<sha>]
-  competitionworker --supervisor-request [--worker_id=<id>] [--baseline-preparation-config=<path> --baseline-preparation-sha256=<sha>]
-  competitionworker --source-readiness=<generation> [--worker_id=<id>] [--baseline-preparation-config=<path> --baseline-preparation-sha256=<sha>]
+  competitionworker [--worker_id=<id>] [--baseline-preparation-config=<path> --baseline-preparation-sha256=<sha>] [--future-baseline-preparation-config=<path> --future-baseline-preparation-sha256=<sha>]
+  competitionworker --check [--worker_id=<id>] [--baseline-preparation-config=<path> --baseline-preparation-sha256=<sha>] [--future-baseline-preparation-config=<path> --future-baseline-preparation-sha256=<sha>]
+  competitionworker --supervisor-request [--worker_id=<id>] [--baseline-preparation-config=<path> --baseline-preparation-sha256=<sha>] [--future-baseline-preparation-config=<path> --future-baseline-preparation-sha256=<sha>]
+  competitionworker --source-readiness=<generation> [--worker_id=<id>] [--baseline-preparation-config=<path> --baseline-preparation-sha256=<sha>] [--future-baseline-preparation-config=<path> --future-baseline-preparation-sha256=<sha>]
   competitionworker -h | --help
   competitionworker --version
 
@@ -48,6 +48,8 @@ Options:
   --source-readiness=<generation>  Probe and acknowledge this exact installed v2 source generation.
   --baseline-preparation-config=<path>  Root-pinned full-R9 preparation role; does not change API or submission budget.
   --baseline-preparation-sha256=<sha>  Exact immutable preparation configuration SHA-256.
+  --future-baseline-preparation-config=<path>  Separately pinned future-policy role; inactive for current rounds.
+  --future-baseline-preparation-sha256=<sha>  Exact immutable future preparation configuration SHA-256.
   --worker_id=<id>   Stable evaluator identity; defaults to hostname.`
 
 	opts, err := docopt.ParseArgs(usage, os.Args[1:], server.RequireVersion())
@@ -72,6 +74,19 @@ Options:
 	}
 	if baselineConfig != "" {
 		if err := controller.ConfigureCompetitionRoundBaselinePreparation(settings, baselineConfig, baselineDigest); err != nil {
+			panic(err)
+		}
+	}
+	futureBaselineConfig, _ := opts.String("--future-baseline-preparation-config")
+	futureBaselineDigest, _ := opts.String("--future-baseline-preparation-sha256")
+	if (futureBaselineConfig == "") != (futureBaselineDigest == "") {
+		panic("future baseline preparation requires both the config path and its exact SHA-256")
+	}
+	if futureBaselineConfig != "" {
+		if settings.FutureEpochPolicy == nil {
+			panic("future baseline preparation requires an explicitly approved future epoch policy")
+		}
+		if err := controller.ConfigureCompetitionFutureRoundBaselinePreparation(settings, futureBaselineConfig, futureBaselineDigest); err != nil {
 			panic(err)
 		}
 	}

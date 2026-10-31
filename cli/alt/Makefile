@@ -27,6 +27,7 @@ warp_build_image:
 		--build-arg SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH}" \
 	--platform linux/arm64/v8,linux/amd64 \
 	-t ${WARP_DOCKER_NAMESPACE}/${WARP_DOCKER_IMAGE}:${WARP_DOCKER_VERSION} \
+	--metadata-file build/image-metadata.json \
 	--no-cache \
 	--output type=image,push=true,rewrite-timestamp=true,unpack=false \
 	.

@@ -3,20 +3,63 @@ package session
 import (
 	"context"
 	"crypto/rsa"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 
-	"github.com/go-jose/go-jose/v3"
+	"github.com/go-jose/go-jose/v4"
 	gojwt "github.com/golang-jwt/jwt/v5"
 
 	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
 )
+
+// Provider JWK sets are untrusted input. Reject oversized RSA parameters before
+// crypto/rsa validates private keys (GHSA-mgcc-cww5-fp2q).
+func TestJwkKeySetRejectsOversizedRSAParameters(t *testing.T) {
+	integer := func(bits int) string {
+		value := make([]byte, (bits+7)/8)
+		value[0] = 1 << ((bits - 1) % 8)
+		value[len(value)-1] |= 1
+		return base64.RawURLEncoding.EncodeToString(value)
+	}
+	for _, test := range []struct {
+		name string
+		key  map[string]string
+		want string
+	}{
+		{
+			name: "oversized public modulus",
+			key:  map[string]string{"kty": "RSA", "n": integer(16385), "e": "AQAB"},
+			want: "modulus too large",
+		},
+		{
+			name: "oversized private prime",
+			key: map[string]string{
+				"kty": "RSA", "n": integer(2049), "e": "AQAB",
+				"d": "Aw", "p": integer(16384), "q": "Aw",
+			},
+			want: "p * q != n",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			data, err := json.Marshal(map[string]any{"keys": []any{test.key}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var keySet jose.JSONWebKeySet
+			if err := json.Unmarshal(data, &keySet); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("parsing malicious RSA key: got %v, want %q", err, test.want)
+			}
+		})
+	}
+}
 
 // The Google and Apple validators differ only by their key set url. A local
 // server stands in for both, so the fetch and parse run without the network.

@@ -1,5 +1,12 @@
 # CPUOPT2 — edge CPU efficiency (2026-10-29)
 
+**Correctness follow-up (2026-10-30):** [CPUOPT-KEEPALIVE.md](CPUOPT-KEEPALIVE.md)
+supersedes the keepalive redundancy and deadline-safety assumptions below.
+The review restores native per-operation deadlines and accepted-service
+keepalive, fixes feed heartbeat starvation and shared pause logging, and
+corrects the unconditional TCP detection claims. Historical watchdog/lazy
+deadline operation counts below do not describe the corrected implementation.
+
 **Question (owner, 2026-10-29):** the edges run close to their CPU limit while
 using less than half their memory. How do we cut and rebalance CPU so the same
 hardware can carry about twice today's usage?
@@ -8,7 +15,26 @@ This is research, not a change. Every number comes from read-only measurement
 on Main on 2026-10-29: Mimir, short low-rate `perf` samples, kernel and socket
 counters. Nothing in production was changed for it. Code references were read
 at server main e5e6d4c71 plus the connect and warp repos. *(inferred)* marks a
-claim reasoned from code rather than measured.
+claim reasoned from code rather than measured. §8 adds the proxy hosts in
+depth (2026-10-30). §9 applies the timer lessons to the connect library
+(2026-10-30).
+
+**Status (2026-10-30 ~15:20Z; ledger T0228–T0235):**
+- **Deployed:**
+  - connect `2026.10.29-outerwerld-1085173010` (02:26–03:05Z): keepalive off,
+    the 3 min forward idle timeout, and the §3.2 timer changes (lazy
+    deadlines, pings paced from the last write, reused timers). Forwards fell
+    from 672k to 191k and exchange connections from 1.61M to 0.71M.
+  - `retbleed=stuff iommu=pt` on the four services edges, after rolling
+    reboots (03:16–03:52Z).
+  - proxy `2026.10.30-outerwerld-1085611320` (12:45–13:08Z), shipping §8.6
+    #1, #3, #4, #6 and #7. Proxy host CPU fell from about 30% to about 16%,
+    dial errors from 6–10k/s to about 15/s per host, and heap from 4.9 to
+    2.4 GB per process.
+  - proxy limits (14:21Z): GOMEMLIMIT 6500MiB again, a 10GiB `memory_limit`,
+    and 4 cores (§8.6 #2, #9).
+- **Merged, not deployed:** §9's connect-library changes, in connect main
+  d16f4a40 (§9.4). They ship with the next build of each service.
 
 ## Summary
 
@@ -63,7 +89,7 @@ so do not add them up.
 | 10 | Multiplexed exchange links per process pair (§3.3) | 1–2 months | high | 8–15% on top of 9 |
 | 11 | H1 without nginx: connect terminates TLS (§3.6) | 1–2 months | high | 4–8% |
 | 12 | Add edge-6, and edge-7/8 when they arrive, to the services tier (§3.11) | weeks | medium | +20–25% capacity per host |
-| P | Proxy hosts: memory limit up, GOMAXPROCS down, shorter idle hold (§3.9) | days | low–medium | proxy CPU −30–50% per device |
+| P | Proxy hosts (§8): lazy WireGuard peers, bounded CONNECT retries, a process-wide FindProviders2 page cache; memory limit up meanwhile | days–weeks | low–medium | proxy CPU −50–70% at the 10-29 load |
 
 **Path to 2×** (§5). The post-fix peak is about 225 of 312 logical CPUs
 (10-27 21:30Z). Carrying twice that at no more than 80% busy needs:
@@ -518,6 +544,8 @@ Effort is high.
 
 ### 3.9 Proxy hosts (crisp and fireside)
 
+§8 supersedes this subsection with a fuller measurement and code study.
+
 **Evidence:**
 - GC is about 68% of proxy CPU, because the heap is pinned against GOMEMLIMIT.
   GOMEMLIMIT is 90% of the warp block memoryLimit (warp/warpctl/run.go:2189).
@@ -644,3 +672,414 @@ CPU per unit of work:
    elsewhere.
 6. Proxy settings (memoryLimit, GOMAXPROCS, idle hold) and the spec for the
    new proxy hosts.
+7. Proxy code fixes from §8.6, in order: lazy WireGuard peers, bounded
+   CONNECT retries, the FindProviders2 page cache. Whether to raise the
+   proxy memoryLimit before they land. The restart reconnects each host's
+   hosted devices; on 10-29 the owner chose to wait the saturation out.
+
+## 8. Proxy hosts in depth (added 2026-10-30)
+
+Measured during the second saturation of 10-29: from 21:10Z both hosts sat at
+99.9% CPU, with load 80 on 24 cores. Sources:
+- perf on a crisp proxy process;
+- Mimir and Loki;
+- a code study of server/proxy, ../proxy, connect, sdk, userwireguard and
+  gvisor.
+
+File references are relative to the urnetwork root.
+
+### 8.1 What the CPU is doing
+
+- **The hosts are CPU-bound in Go, not the kernel:** user 92%, system 3%,
+  softirq 5%.
+- **One process at 2.35 cores:**
+  - GC is about 57%: background mark 27% and assists 30%. `mallocgc` is 34%
+    inclusive.
+  - The connect library is 58% inclusive. Inside it, in-process
+    FindProviders2 is 18%: Redis 15%, and gob decoding of client-score pages
+    12%.
+  - HTTPS CONNECT handling 6%, H1 transport 5%, blackhole detection 4%,
+    gVisor 4%.
+- **Useful work is small:** 881 active proxy sessions moved 0.66 MB/s
+  fleet-wide while 46 cores ran.
+- **Day over day:**
+  - devices +40% (20.3k → 28.4k);
+  - proxy CPU 3.4× (13 → 46 cores);
+  - allocation per process 3× (0.05 → 0.14 GB/s);
+  - GC 9× more often (every 27 s → every 3 s).
+
+### 8.2 Why: the processes live above their memory limit
+
+Per process: heap in use 5.56 GB + stacks 1.26 GB + runtime 0.17 GB ≈ 6.99 GB.
+GOMEMLIMIT is 6.82 GB, 90% of the warp memoryLimit (warp/warpctl/run.go:2189).
+The next-GC target (4.46 GB) sits below the live heap, so GC never stops, and
+only Go's 50% GC CPU limiter caps it. Cutting allocation barely helps until
+memory drops below the limit.
+
+| Owner, per process | Count | Heap | Stacks | Goroutines |
+|---|---|---|---|---|
+| WireGuard peers: every configured one, started on registration | ~41.3k | ~1.1 GB | ~0.45 GB | ~82.6k |
+| Hosted devices | ~1.43k | ~2.4 MB each | ~0.4 MB each | ~73–98 each |
+| Stuck HTTP CONNECTs | ~1.9k | ~60 MB | — | ~4k |
+
+**WireGuard peers follow signups, not use:**
+- The proxy registers every WG-configured client of its block
+  (server/proxy/server.go:886-941, 1021-1057).
+- userwireguard starts each peer at registration (device/uapi.go:412-413).
+- Each started peer holds 2 goroutines, queues of 1024/1024/128 slots, two
+  128-slot batch slices and 5 timers: about 26 KiB of heap and 11 KiB of
+  stack.
+- That is 824k peers across 20 processes. MaxPeers is 65,536 per device
+  (device/constants.go:39).
+
+**Idle devices keep everything:**
+- 12.7k of the 28.4k live devices were idle.
+- Each keeps its full state for 90 min (`ProxyDeviceIdleTimeout`,
+  server/proxy/proxy_device.go:868; 90 min since 6df7a6fab).
+- DoH keepalive pings count as activity, so the real hold is about 105 min.
+
+### 8.3 A CONNECT retry storm that has run for days
+
+- **The numbers:** 38.3k HTTP CONNECTs are in flight against 881 active
+  sessions, and `connect_dial_error` runs at 29k/s fleet-wide.
+- **The shape:** both grow linearly, by about 2k stuck CONNECTs and about 1k
+  errors/s per hour. They reset only when the proxies restart, as at 10-29
+  05:30Z, and have climbed again since.
+- **The cause:** ../proxy/http.go:380-398 retries a failed CONNECT dial about
+  every second until the client hangs up.
+  - It retries every error class: unauthorized, unknown device, NXDOMAIN,
+    policy reset.
+  - It never answers the client.
+  - Device creation has no per-id cooldown (server/proxy/proxy_device.go:375-464);
+    only WireGuard has one.
+- **The saturation's "panic" pages:** these are Redis deadline errors that
+  `HandleError` logs with a stack. In 400 sampled lines, 272 came from
+  `getProviderHardExclusions`, 90 from `RecordProviderSearchMatches` and 36
+  from loading client scores. All are inside the in-process FindProviders2.
+
+### 8.4 Allocation sources
+
+By first application caller of `mallocgc`, sampled for 15 s at 99 Hz:
+- **encoding/gob score decoding** (`decodeMap`, `decString`, `decAlloc`): the
+  largest source.
+- **Multi-client stats snapshots:** `windowStatsWithCoalesce`,
+  `packetStatsCounters.snapshot`, `unorderedClients`.
+- **Per-tick timers.** Every hosted device runs 1 s loops that each create a
+  new timer per tick: contract stats, the sdk contract-stats flush,
+  `IpAssoc`, event epoch, the scheduler-pause detector and the send-stall
+  watch. Blackhole detection adds one every 1.25 s. That is about 14k new
+  timers/s per process with zero traffic.
+- **Per-frame and per-packet work:**
+  - a 4-byte heap header per H1 frame;
+  - `flushDeliver` clones;
+  - IP path parses per packet;
+  - a WireGuard endpoint per datagram.
+- **Per CONNECT attempt:** `strings.SplitN` of the SNI, amplified by the retry
+  loop.
+
+### 8.5 FindProviders2 inside the proxy
+
+**Cadence:**
+- Each hosted window refreshes its exits on a 45–60 min rotation, idle
+  devices included.
+- Errors retry at 1→15 s even when the window is full.
+- Under timeouts that reaches about 190 calls/s per process *(inferred)*.
+
+**Cost per call:**
+- Each call loads max(10 × count, 1000) score rows, with count ≥ 20, though
+  windows ask for 1–4 candidates
+  (server/model/network_client_location_model.go:6252-6260, 6350-6355).
+- Each 200-row page is copied, SHA-256 checked and decoded by a new
+  `gob.Decoder` (server/model/network_client_score_cursor.go).
+
+**The cache opportunity:** pages are content-addressed, and every hosted
+session asks for location 0.0.0.0:0. A process-wide cache of decoded pages
+would almost always hit and could never be stale. None exists; the "5 s score
+cache" is test-only.
+
+### 8.6 Ranked proxy changes
+
+| # | Change | Expected | Risk | Effort |
+|---|---|---|---|---|
+| 1 | Lazy WireGuard peers: start queues and goroutines on the first handshake or server-initiated send, stop on key expiry; 256-slot queues | −1.0 GB heap, −0.45 GB stacks, −80k goroutines per process. On its own this takes the process out of the memory-limit regime (GC ≈1.3 → ≈0.3 cores per process) | start/stop races; a handoff initiation must start the peer | M: userwireguard/device |
+| 2 | Raise the proxy memoryLimit now, and revert after #1: crisp +4 GB per process, fireside +1.5 GB (its ceiling) | about −1 core per process, −10 to −12 cores per host | fireside RAM; the restart reconnects hosted devices | XS: warp config |
+| 3 | Bound CONNECT: answer at once on definitive failures (407/403/502); wait with `WaitForReady` instead of polling; back off 1→8 s within about 30 s, then 504; add a per-id creation cooldown | ends the 29k/s storm: about 5–15% CPU, 4k goroutines and 60 MB per process, plus the error-log flood | clients waiting on cold windows get a 504 | S–M: ../proxy/http.go, server/proxy/server.go, connect/tun.go |
+| 4 | FindProviders2: a process-wide LRU of decoded score pages keyed by slot, field, generation and checksum; hex `encodeUuid`; a hosted error-retry floor plus singleflight | −10–14 points of proxy CPU; most gob allocation gone | about 64 MB per process | M: server/model/network_client_score_* |
+| 5 | Cap hosted windows, for example quality 3 and speed 0 | prevents a 2.7× rise in per-device heartbeats, cpings and FP2 as windows refill from 2.25 to 6 clients | throughput per device | S: sdk policy |
+| 6 | Idle hold 90 → 30–45 min (identity TTL ≥ hold), don't count DoH keepalives as activity, or hibernate idle DeviceLocals | −0.5–1 GB per process, about −25% background work | re-mint churn on reopen | S/M |
+| 7 | Per-device loops: reuse timers, skip ticks with no pending work, `context.AfterFunc` for parked waiters; turn off the pause detector, heartbeat and outcome watch for hosted devices | −14k timers/s, about −34 goroutines per device, 3–6% CPU | low | M: connect |
+| 8 | Small fixes: `strings.Cut` for the SNI; borrowed IP parse in WG; reuse WG endpoints and frame-header scratch; skip gonet write deadlines; cache the uTLS spec; sample WG sessions without an `IpcGet` of 41k peers every 15 s; cache TLS keys by cert path | a few % | low | XS–S each |
+| 9 | GOMAXPROCS 8 → 3–4 per process (80 Ps on 24 cores today) | fewer continuous GC workers (about 20 → 8 cores per host), 5 fewer gVisor goroutines per device | burst latency | XS |
+| 10 | Host: SO_RCVBUF/SO_RCVBUFFORCE 4–8 MiB on the WireGuard socket (none is set today), and RPS on the single-queue Realtek NIC | fewer of the millions of UDP drops | low | XS: userwireguard/conn, xops |
+| — | The message pool cap (8 GiB, server/cli/proxy/main.go:26, 39-45) sits above GOMEMLIMIT and its free list is never trimmed | only 10 MB is retained today; cap it at about 512 MiB as a guard | low | XS |
+
+**Order:**
+- #2 is the immediate relief.
+- #1, #3 and #4 are the structural fixes. They make per-device cost scale with
+  use rather than signups and stop the storm.
+- With them, the four planned proxy hosts add real headroom instead of
+  absorbing GC.
+
+Estimates are inferred from the measurements above. Measure each one per
+block: GC share, CPU per live device, and the `connect_dial_error` rate.
+
+## 9. The connect library (added 2026-10-30)
+
+**Question (owner, 2026-10-30):** do the timer lessons from §3.2 also apply to
+the connect repo?
+
+They do, and mostly in the same shapes:
+- deadlines re-armed on every frame;
+- a ping timer reset on every write;
+- loops that wake on a schedule with nothing to do.
+
+The library runs in three places, so each fix lands differently:
+- **Proxy hosted devices:** about 1k per proxy process, 20 processes. Each
+  device has a platform transport, windows and channels. This is the only
+  population measured here.
+- **Providers:** desktop, CLI and mobile devices that carry other users'
+  flows. Timer work there scales with flows and packets.
+- **Apps:** phones, where wakeups cost battery more than they cost CPU.
+
+### 9.1 Method and measurements
+
+- **perf on crisp** (10-30 14:45Z): one proxy process on release
+  `1085611320`, 30 s at 99 Hz, 4,148 samples.
+  - Runtime timer functions are about 5% of samples: `(*timers).adjust` 2.6%
+    self, `siftDown` 0.8%, `stealWork` 0.7%.
+  - For comparison, `adjust` was 10–13% in the connect profiles of §3.2.
+  - Timer-arming frames, by first application caller:
+    - `RedisAuth` deadline contexts;
+    - `runEventEpoch` and `detectBlackhole` (`maybeAdd`/`modify`);
+    - the ack worker `ReceiveSequence.Run.func3`;
+    - `ResilientTlsConn.SetWriteDeadline`;
+    - `ContractManager.runContractStats` and `expireQueuedContracts`;
+    - `ApiOutOfBandControl.SendControlWithCtx`;
+    - `ClientStrategy.parallelEvalWithRouteHedge`.
+- **Code study:** five read-only audits of connect main `caad1de6` (Go
+  1.27.3), cited by file:line below; paths are in the connect repo:
+  - the platform transport;
+  - transfer sequences and contracts;
+  - multi-client loops after 3ad45203;
+  - the provider side;
+  - the other transports.
+- **Not measured:** providers and phones. Their rates below are *(inferred)*
+  from code and default settings.
+
+- **Microbenchmark** (scratchpad bench-deadlines, Apple M1 Max, go1.27.3,
+  real loopback TCP pairs, 50k frames/s, a busy machine): eager re-arming
+  (read and write deadline plus ping reset per frame, 3.00 re-arms per frame)
+  against lazy (0.01–0.13 per frame), alternated in one process on the same
+  sockets.
+  - 1k connections: no measurable difference (eager/lazy 0.93, range
+    0.78–1.02).
+  - 10k connections: eager costs about 13% more total CPU (1.13, range
+    0.92–1.75), about +0.9 µs per frame. `pollSetDeadline` alone is 10.2%
+    of user samples against 1.2%.
+  - It understates production on two counts. macOS loopback and kqueue are
+    about 80% of its CPU, and Linux epoll is several times cheaper, which
+    makes the same timer work a larger share. Its timer heaps (0.3k–3k per P)
+    are far smaller than §3.2's (about 28k per P), so it measures the cost
+    of each re-arm, not the heap scans those re-arms trigger.
+
+**A Go 1.27 detail that shapes every fix:**
+- A channel timer sits in a P's heap only while a goroutine blocks on it.
+  Leaving a `select` turns it into a zombie, so each pass of a loop pays a
+  `maybeAdd`, and each `Reset` or `Set*Deadline` pays a `modify`. Modifies
+  are what make `adjust` rebuild the heap (§3.2).
+- A lazy deadline removes the per-packet `modify`. A timer channel left in a
+  per-packet `select` still pays block, unblock and zombie accounting.
+- A `time.AfterFunc` that feeds a 1-buffered wake channel, or a shared
+  sweeper, removes that cost too.
+
+### 9.2 Findings
+
+**1. Deadlines re-armed on every frame (lesson: lazy re-arm).**
+- **Platform transport, H1:**
+  - The read deadline is re-armed on every inbound message, server pings
+    included (transport.go:3214 → net_websocket_batch.go:227 →
+    net_resilient.go:635).
+  - The write deadline is sent again by gorilla on every frame, even
+    mid-batch (net_websocket_batch.go:235 → net_resilient.go:639, the
+    profiled `ResilientTlsConn.SetWriteDeadline`).
+  - The writer stores a new value per write at transport.go:2926, 2987,
+    2994, 3111 and 3167.
+  - Nothing is deduplicated.
+- **Platform transport, H1+ and H3:** a write deadline per batch
+  (transport_h1plus.go:69); H3 stream deadlines per batch or message
+  (transport.go:4076, 4186, 4398).
+- **Provider data path:**
+  - TCP deadlines per read and per write batch (ip.go:5923, 4965);
+  - UDP and ICMP deadlines per datagram (ip.go:3519, 3709, 3807;
+    ip_icmp.go:796, 834).
+- **Extender server relay:** a read and a write deadline per 4 KiB chunk, in
+  both directions (extender/extender.go:1893, 1900, 1933, 1939;
+  extender_camouflage.go:492, 518). This is a server-side hot path on
+  operator extender hosts.
+- **p2p legacy SCTP lane:** per message, a write deadline
+  (transport_p2p.go:1472; transport_p2p_webrtc.go:4688), a zero read deadline
+  (4498), and a `NewTimer` plus `Stop` (4467).
+
+**2. A ping timer reset on every write (lesson: pace from the last write).**
+- `resetWakeupTimer(pingTimer, …)` runs on every writer wake that writes:
+  transport.go:2953, 3097, 3118, 3133, 3141, 3159, 3165 and 3174; H3 4193 and
+  4209.
+- **Cost:** a `time.Now` and a `Reset` of a heaped channel timer, once per
+  batch. That is once per message when traffic is sparse.
+
+**3. Loops that wake with nothing to do (lesson: reuse, then park).**
+- 3ad45203 (§8.6 #7) removed the allocations but kept the periodic wakes. At
+  about 1k devices per proxy process:
+  - `detectBlackhole`: per channel, about 7 per device, at 0.8 Hz. About
+    5.6k wakes/s, each reading under the parent lock
+    (ip_remote_multi_client.go:18869, 19207).
+  - `watchSendStalls`: per window, 1 Hz, about 2k/s (12082–12084).
+  - `runEventEpoch`: per device, 1 Hz, about 1k/s (2902, 2926).
+  - `runProber`: per device, 0.2 Hz (ip_remote_multi_client_prober.go:640–642).
+- All four can park on an edge, as `runContractStats` and `IpAssoc` do now:
+  - a blackhole verdict needs a send in the 30 s window;
+  - a stall needs `sendNackCount > 0`;
+  - an epoch needs a counter change.
+- **Transfer sequences, per packet in steady state:**
+  - **Ack worker** (`ReceiveSequence.Run.func3`, transfer.go:16066): arms
+    and fires per 10 ms `AckCompressTimeout` on each active sequence, plus
+    1 ms quiet-head re-arms. That is 100–1000 timer operations/s per hot
+    sequence.
+  - **Client read loop:** a timer per inbound frame
+    (transfer.go:4543 → transfer_route_manager.go:3405, 3465, 3546), and a
+    wake every 30 s when idle.
+  - **Idle and resend timers:** `SendSequence.Run` (transfer.go:9943),
+    `ReceiveSequence.Run` (16320) and `ForwardSequence.Run` (18357) Reset
+    them on every pass.
+  - **`expireQueuedContracts`:** a new `time.After` every 60 s per contract
+    manager, forever, and a scan under the manager mutex
+    (transfer_contract_manager.go:825).
+- **Provider loops:**
+  - **UDP poll shards** wait 100 ms forever, 10 Hz per shard (2–4 shards
+    × 2 families), even with no flows (ip_udp_socket_poller_epoll.go:64,
+    _kqueue.go:65). On a phone that is 20–80 wakes/s while providing
+    nothing *(inferred)*.
+  - **Stats epoch:** `runPacketStats` creates a new `time.After` each second
+    (ip.go:8814).
+  - **TCP retransmit:** the timer is re-armed with a goroutine wake on every
+    advancing ACK (ip_tcp_return_recovery.go:135, 197→277).
+  - **Idle timers:** Reset and Stop on every send-loop wake (ip.go:6689–6696,
+    3841; ip_icmp.go:825).
+  - **Ack compress:** fires 50 ms after every ack (ip.go:6178–6211).
+  - **Last activity:** `UpdateLastActivityTime` takes a mutex and calls
+    `time.Now` per packet (ip.go:11253).
+
+**4. Keepalive (lesson: off where app pings exist).**
+- **Done:** off for platform-transport dials, including when an extender or
+  VLESS carries the platform transport (connect 01030ccd; net.go:288–292).
+- **Still on:**
+  - **Provider upstream TCP flows:** they inherit
+    `DefaultConnectSettings` (5 s idle, 5 s interval, count 1; net.go:94–99),
+    because `ProviderKeepAliveConfig` is nil (ip.go:5530). Every idle flow
+    probes every 5 s, which keeps a phone's radio up.
+  - **Extender feed subscription:** dialed on an unmarked context
+    (net_extender_network.go:1176).
+  - **Extender server accepted connections:** Go's 15 s default
+    (extender/extender.go:377–380).
+
+**5. Ping cadence and alignment (new; not in §3).**
+- **Idle cadence:** an idle client pings every 10 s, not 5.
+  `WakeupTime` rounds now+5 s up to the next 5 s boundary.
+- **Alignment:** the boundaries are wall-clock, so pings from every client
+  arrive together.
+  - **H1:** 140k idle clients are about 14k pings/s at the exchange,
+    arriving in bursts of about 70k at each boundary *(inferred)*.
+  - **H3:** quic-go adds its own PING 5 s after the last received packet
+    (`KeepAlivePeriod` = PingTimeout, transport.go:1238), so the app ping and
+    the QUIC ping alternate. That is about 2 ack-eliciting packets per 10 s
+    where one would do.
+- **Per-channel pings:** wall-clock aligned the same way.
+- **Trade-off:** alignment saves radio wakeups on phones. On hosts (the
+  proxy, the exchange) it only makes bursts.
+- **Other keepalives:** the p2p ICE keepalive is 2 s per peer connection
+  (transport_p2p_webrtc.go:875). The extender QUIC carrier inherits a 5 s
+  keepalive on top of the inner transport's ping.
+
+### 9.3 Ranked connect changes
+
+| # | Change | Who | Expected | Risk | Effort |
+|---|---|---|---|---|---|
+| 1 | Platform transport: lazy deadlines, re-armed only when less than T remains (read to now+40 s, write to now+15 s); the batch conn skips a write deadline `Equal` to the last one forwarded; ping paced from a recorded last-write time | proxy, providers, apps; every carrier at once | per-frame 2–3 timer operations become at most one per 5–10 s per connection; probably most of the proxy's remaining ~5% timer CPU *(inferred)* | a websocket write timeout is terminal, so each write must start with at least T left; the read cutoff moves to 30–40 s after the last frame, safe while server pings stay at most ~10 s apart | S–M: transport.go, net_websocket_batch.go, net_resilient.go |
+| 2 | Park the per-device loops: `detectBlackhole` on the send edge, `watchSendStalls` on the nack edge, `runEventEpoch` on a change flag; the prober sleeps until its next due time | proxy, apps | about −8.6k wakes/s per proxy process; an idle phone goes from ~10 to ~1 wakes/s *(inferred)* | a fallback timer (~10 s) keeps transport-loss retirement at most 70 s (60 s today) | S–M: ip_remote_multi_client*.go |
+| 3 | Transfer: the ack worker waits for its compress deadline and skips unchanged Resets (or a shared ack-flush wheel); lazy idle and resend deadlines in the Send/Receive/Forward `Run` loops; no per-frame timeout in the client read loop; park `expireQueuedContracts` while empty | providers, proxy, apps | per-packet timer work gone from steady state | resend, ack and idle deadlines must never fire late; an early fire costs one recompute | M: transfer.go, transfer_route_manager.go, transfer_contract_manager.go |
+| 4 | Provider: poll shards wait without a timeout (wake via `context.AfterFunc`); park the stats epoch; upstream keepalive off, or idle ≥ the flow idle timeout; signal the retransmit timer only when its deadline moves earlier; lazy I/O deadlines; arm idle timers once; ack at once when ≥50 ms since the last ack; atomic last-activity; one hashed wheel per buffer for idle timeouts (slot ≤ T/8, about 33 checks/s at 10k flows) | providers, especially mobile | battery: removes the 20–80/s idle poller wakes and the 5 s keepalive per flow; CPU: per-packet timer work | a close must never be early (re-check `IdleCondition`) and at most one slot late | M–L: ip.go, ip_udp_socket_poller_*.go, ip_tcp_return_recovery.go |
+| 5 | Ping cadence: QUIC `KeepAlivePeriod` = 2× PingTimeout; a ping-jitter setting for hosts (the proxy), keeping wall-clock alignment on phones; measure the exchange's ping bursts | exchange, proxy, H3 apps | halves idle H3 packets; smooths ~70k-ping bursts at the exchange *(inferred)* | dead-peer detection on H3 goes to at most ~30 s (~25 s today) | S |
+| 6 | Extender and p2p: lazy re-arm per direction in the extender server relay; `ListenConfig{KeepAlive: -1}` for the extender server; mark the feed subscription dial; on the legacy SCTP lane create the timer only when the conn isn't ready and skip unchanged deadlines; `KeepAlivePeriod` 0 on the extender QUIC carrier when a platform transport owns it; reuse the flight-wait timer (net_extender_quic_send.go:268) | operator extenders, censored-region users, p2p | small per user; the relay is per byte on extender hosts | `TestP2pLegacyPhysicalWriteTimeoutStillBoundsBlockedCarrier` asserts exactly T and needs updating | S each |
+| 7 | Small: race completion via `time.AfterFunc` + `sync.Once` (ip_remote_multi_client.go:9791); reuse timers in resize, send retry and discovery; `context.AfterFunc` for net_http's merge goroutines (net_http.go:1508, 1821); one timer per call in `TakeContract` and in Pack's establishment waits | all | minor | low | XS each |
+
+**Order:**
+- #1 first. It is one change in one place, every carrier inherits it, and it
+  targets the largest sampled proxy site.
+- #2 and #3 next, for the proxy and for phones.
+- #4 matters most for providers on phones and needs its own tests.
+
+**Validate:**
+- Re-profile a proxy process before and after each change: the
+  `timers.adjust` share and the callers of `pollSetDeadline`, `modify` and
+  `maybeAdd`.
+- For #2 and #4, count goroutine wakes per second per process.
+- Re-run the connect suite. The perf floors (`TestWindowPathSdk*`) are
+  load-sensitive, so run them alone.
+- Measure provider and phone battery on devices before shipping #4 and #5.
+
+### 9.4 What shipped (2026-10-30)
+
+Six branches merged into connect main, 45 commits up to d16f4a40. Every
+change has a test that failed on the old code first. The integrated tree
+passed the full root package and `./extender/...` on macOS (one cross-branch
+test expectation, fixed in d16f4a40), and 578 provider, UDP and ICMP tests on
+Linux (the epoll poller) in a container.
+
+| §9.3 | Branch | Done | Old → new, from the failing-first tests |
+|---|---|---|---|
+| #1, #5 | `perf/timers-transport` | lazy read and write deadlines on H1, H1+ and H3, with slack settings; the websocket batch conn forwards an unchanged write deadline once; pings paced from the last write (`pingPacer`); QUIC keepalive 2× PingTimeout; a `PingJitter` setting (default 0, wall-clock aligned) | write deadline installs 50 → 1; read 50 → ≤1; ping timer arms 30 → ≤4 at the same ping instants |
+| #2, #7 | `perf/timers-multiclient` | `detectBlackhole`, `watchSendStalls` and `runEventEpoch` park on their evidence edges; the prober sleeps until its next due exit; race completion on `time.AfterFunc`; reused timers in resize, send retry and discovery | 100 idle epochs: 100 wakes → 0; health passes over 125 s idle: 100 → 12; prober scans over 15 min: 180 → 15 |
+| #3, #7 | `perf/timers-transfer` | lazy deadlines in the Send/Receive/Forward `Run` loops (`time.AfterFunc` into a 1-slot wake); no per-frame client read timeout; `expireQueuedContracts` parks while empty; one timer per call in `TakeContract` and Pack | 64 acked messages: 129 arms → 6; 64 Packs: 64 → 1; 20 idle minutes of client reads: 40 wakes → 0 |
+| #4 | `perf/timers-provider` | poll shards wait without a timeout; upstream keepalive off by default; the stats epoch parks; RTO woken only when its deadline moves earlier; lazy I/O deadlines; idle timers armed once; ack compress armed only to coalesce; atomic last activity; the DMCA scan parks | idle shards: repeated wakes → 0; 64 ACKs: 63 RTO wakes → 0; 64 operations: 64 deadline installs → 1; last-activity stamp 87 → 34 ns |
+| #6 | `perf/timers-extender-p2p` | lazy relay and legacy p2p write deadlines; extender listener and feed keepalive off; no QUIC keepalive on an owned carrier; one flight-wait timer; ICE keepalive 2 → 5 s | relay: 64 installs per direction → ≤2; p2p data channel installs 128/192 → 2/2 |
+| #7 | `perf/timers-net-http` | the strategy's merge goroutine replaced by `context.AfterFunc`; the extender startup gate arms its timer only when it waits | 1 goroutine per call → 0; 4 allocations per call → 0 |
+
+**Behavior changes to know:**
+- **Dead-peer detection is later:**
+  - platform transport: read up to +T/3, write up to +T/2;
+  - an idle channel's lost carrier: 70 s (60 s);
+  - extender relay: 45 s (30 s);
+  - a blocked p2p write: 22.5 s (15 s);
+  - provider upstream TCP: 300 s (about 10 s with the old 5 s, count-1
+    keepalive, which also killed live flows on a sleepy radio).
+- **Ping jitter:** `PingJitter` is off until the proxy sets it, through
+  `newProxyDeviceLocalSettings` and an sdk `DeviceLocalSettings` field.
+- **The exchange benefits too:** it gets the websocket write-deadline dedup
+  through `WebSocketWriteBatchConn` on its next connect build.
+
+**Not done:**
+- **The ack worker's quiet-head polling** (§9.2 finding 3). Waiting for the
+  compress deadline instead cost 25–49% of one direction's throughput in two
+  deterministic window tests. It needs a shared ack-flush wheel or
+  sender-marked burst ends. Only "skip an unchanged Reset" shipped.
+- **Provider:**
+  - the datagram sender's 10 ms poll while sends are pending, which needs
+    wakes from transfer_prepared_memory and from flow cancellation;
+  - the hashed idle wheel.
+- **Extender:**
+  - the datagram relay's per-datagram idle reset;
+  - a per-chunk `time.After` in extender_proxy.go;
+  - the sdk provider extender's own listener keepalive.
+- **Multi-client:**
+  - the remaining `time.After` loops (`windowGeneratorCall`,
+    `randomEnumerateClientArgs`, expand waits, `waitWindowRetry`);
+  - a per-admission goroutine parked on `client.Done()`.
+- **CODESTYLE:** its hot-path timer section still prescribes a Reset before
+  each select. Revise it to match.
+
+**Measurement still owed:** none of this is deployed. Build a proxy with
+connect d16f4a40, put one block on it, and compare that block with the
+others:
+- the perf timer share, against today's baseline of about 5%;
+- CPU per live device;
+- goroutine wakes per second.

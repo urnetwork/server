@@ -1,0 +1,66 @@
+{
+  "schema": 1,
+  "kind": "completed-reduced-public-pilot-operator-qualification",
+  "observed_at": "2026-10-30T04:15:23Z",
+  "binary": {
+    "path": "/mnt/data/operator233-compile-qa-20261030.6p9XdoUI/operator233.test",
+    "sha256": "b1c3e311f76cafdc96327214065f431bda145005d8900563f9c32089e3c58a6c"
+  },
+  "qualification": {
+    "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2/inputs/tool-qualification.json",
+    "sha256": "83ceb22269bbb6e0837191a740bf1a5d8820fb48831e79e5bedb8c273a3c4be3"
+  },
+  "actual": {
+    "unit": "urnetwork-operator233-runtime-Yq1JtHDv.service",
+    "original_session": 68844,
+    "terminal_at": "2026-10-30T04:10:01Z",
+    "exit_code": 0,
+    "postchecks_exit_code": 0,
+    "independent_count1_processes": 3,
+    "roots_per_process": 233,
+    "total_top_level_passes": 699,
+    "failures_or_skips": 0,
+    "compiled_held_out_roots": 237,
+    "excluded_original_native_command_roots": 4,
+    "exact_roster_sha256": "91f4cfe50e70ee288761051ed85fc040e1cedf3641cc240a0572ab39e27e2fe5"
+  },
+  "terminal_receipt": {
+    "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2/inputs/tool233-terminal-receipt.txt",
+    "sha256": "1d0866485e8dee0e9a06ecc4b6b02ef398ab4d91d5e57f0382ae52b55c7f6676"
+  },
+  "raw_passes": [
+    {
+      "path": "/mnt/data/operator233-runtime-qa-20261030.Yq1JtHDv/pass1.json",
+      "sha256": "c614ae4ff324c0ff21ca3c9f774da05b5fb74dd391881dee82c7b673b7a85ab4"
+    },
+    {
+      "path": "/mnt/data/operator233-runtime-qa-20261030.Yq1JtHDv/pass2.json",
+      "sha256": "70924f6a5873459e5a74dd5d523e6eca946200ff773bd2ee383dd7b87e929f71"
+    },
+    {
+      "path": "/mnt/data/operator233-runtime-qa-20261030.Yq1JtHDv/pass3.json",
+      "sha256": "c3496fc7464662eed138170e329ea0687ec35821c396f86a552fe353b3523c64"
+    }
+  ],
+  "proven_provenance": {
+    "protected_root_sources": 41,
+    "full_physical_export_files": 9146,
+    "physical_export_sha256": "e3cd65b82f3b8929c29b3e7fab21530c7ebb94a30765c47225ef8dbe6c3ed9da",
+    "resolved_package_go": 243,
+    "overlay_targets": 38,
+    "actual_used_input_closure_sha256": "3b18b76334ba4f12a0d795eb6ecc447862f16b54f45818755a442d6a2322b4ea",
+    "plain_export_not_fictional_git_checkout": true,
+    "all_source_dependency_module_git_elf_boundary_checks_passed": true
+  },
+  "separate_scopes_not_counted_in699": {
+    "old_operator_passes": 675,
+    "early_smoke_passes": 9,
+    "reduced_reference_correctness_passes": 336,
+    "public_input_helper_passes": 12,
+    "baseline_manifest_regression_passes": 18
+  },
+  "frozen_submission_gates_R9_significance_margin_deadlines_unchanged": true,
+  "measurements_or_hidden_seed_claimed": false,
+  "calibration_acceptance_claimed": false,
+  "production_scoring_or_hold_release_claimed": false
+}

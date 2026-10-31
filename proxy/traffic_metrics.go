@@ -196,11 +196,18 @@ func (self *proxyTrafficMetrics) Collect(metrics chan<- prometheus.Metric) {
 			{reason: "connect_dial_error", value: stats.ConnectDialErrors},
 			{reason: "connect_client_gone", value: stats.ConnectClientsGone},
 			{reason: "connect_hijack_error", value: stats.ConnectHijackErrors},
+			{reason: "connect_timeout", value: stats.ConnectTimeouts},
 			{reason: "request_dial_error", value: stats.RequestDialErrors},
 			{reason: "request_not_replayed", value: stats.RequestsNotReplayed},
 			{reason: "response_aborted", value: stats.ResponsesAborted},
 			{reason: "body_too_large", value: stats.BodiesTooLarge},
 			{reason: "upgrade_error", value: stats.UpgradeErrors},
+			// definitive refusals answered at once, by class
+			{reason: "dial_refused_unauthenticated", value: stats.DialRefusedUnauthenticated},
+			{reason: "dial_refused_forbidden", value: stats.DialRefusedForbidden},
+			{reason: "dial_refused_unknown_proxy", value: stats.DialRefusedUnknownProxy},
+			{reason: "dial_refused_reset", value: stats.DialRefusedReset},
+			{reason: "dial_refused_no_such_host", value: stats.DialRefusedNoSuchHost},
 		})
 		metrics <- prometheus.MustNewConstMetric(self.ingressActiveDesc, prometheus.GaugeValue, float64(httpSource.ActiveCount()), "http")
 	}
@@ -249,8 +256,12 @@ func (self *proxyTrafficMetrics) observeSessionClose(protocol string, outcome st
 
 // proxyMetricsConn counts traffic at the upstream-connection side of the
 // ingress relay. Write is client-to-destination; Read is destination-to-client.
+// Bytes either way are the user's traffic, and are reported to activity.
 type proxyMetricsConn struct {
 	net.Conn
+	// records user traffic on the device the connection was dialed through;
+	// nil reports nothing
+	activity     func() bool
 	metrics      *proxyTrafficMetrics
 	protocol     string
 	start        time.Time
@@ -267,6 +278,7 @@ func (self *proxyMetricsConn) Read(buffer []byte) (int, error) {
 	count, err := self.Conn.Read(buffer)
 	if 0 < count {
 		self.readBytes.Add(float64(count))
+		self.reportActivity()
 	}
 	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
 		self.readFailure.Store(true)
@@ -279,11 +291,18 @@ func (self *proxyMetricsConn) Write(buffer []byte) (int, error) {
 	count, err := self.Conn.Write(buffer)
 	if 0 < count {
 		self.writeBytes.Add(float64(count))
+		self.reportActivity()
 	}
 	if err != nil && !errors.Is(err, net.ErrClosed) {
 		self.writeFailure.Store(true)
 	}
 	return count, err
+}
+
+func (self *proxyMetricsConn) reportActivity() {
+	if self.activity != nil {
+		self.activity()
+	}
 }
 
 // Close implements net.Conn and records exactly one terminal sample.
@@ -304,19 +323,22 @@ func (self *proxyMetricsConn) Close() error {
 	return err
 }
 
-// instrumentProxyConnection wraps a successful finite-protocol dial.
-func instrumentProxyConnection(protocol string, conn net.Conn) net.Conn {
-	return defaultProxyTrafficMetrics.instrumentConnection(protocol, conn)
+// instrumentProxyConnection wraps a successful finite-protocol dial. activity
+// records the connection's bytes as user traffic on the device it was dialed
+// through (`ProxyDevice.UpdateActivity`); nil records none.
+func instrumentProxyConnection(protocol string, conn net.Conn, activity func() bool) net.Conn {
+	return defaultProxyTrafficMetrics.instrumentConnection(protocol, conn, activity)
 }
 
 // instrumentConnection wraps one successful dial with this metric family.
-func (self *proxyTrafficMetrics) instrumentConnection(protocol string, conn net.Conn) net.Conn {
+func (self *proxyTrafficMetrics) instrumentConnection(protocol string, conn net.Conn, activity func() bool) net.Conn {
 	protocol = boundedProxyProtocol(protocol)
 	self.recordAdmission(protocol, "admitted")
 	active := self.sessionsActive.WithLabelValues(protocol)
 	active.Inc()
 	return &proxyMetricsConn{
 		Conn:       conn,
+		activity:   activity,
 		metrics:    self,
 		protocol:   protocol,
 		start:      time.Now(),

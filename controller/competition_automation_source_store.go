@@ -103,6 +103,21 @@ func (self PostgresStore) requireAutomationLeaseInTx(ctx context.Context, tx ser
 	if !valid {
 		return ErrLeaseLost
 	}
+	approvalDigest, approvalJson := "", ""
+	if settings.FutureEpochPolicy != nil && settings.FutureEpochPolicy.TrustedInstrument != nil {
+		approval := settings.FutureEpochPolicy.TrustedInstrument
+		if err := ValidateCompetitionTrustedInstrumentApproval(approval); err != nil {
+			return err
+		}
+		content, err := json.Marshal(approval)
+		if err != nil {
+			return err
+		}
+		approvalDigest, approvalJson = approval.ApprovalSha256, string(content)
+	}
+	if _, err := tx.Exec(ctx, `SELECT set_config('urnetwork.competition_v2_instrument_approval',$1,true),set_config('urnetwork.competition_v2_instrument_approval_json',$2,true)`, approvalDigest, approvalJson); err != nil {
+		return err
+	}
 	// Database triggers independently fence stale and legacy source writers.
 	_, err = tx.Exec(ctx, `SELECT set_config('urnetwork.competition_v2_owner',$1,true),set_config('urnetwork.competition_v2_fence',$2,true),
 	 set_config('urnetwork.competition_v2_bootstrap_lock',$3,true),set_config('urnetwork.competition_v2_bootstrap_base',$4,true),
@@ -159,6 +174,9 @@ func validateSourceAuthorizationInTx(ctx context.Context, tx server.PgTx, settin
 		return ErrConflict
 	}
 	if current == nil {
+		if intent.TrustedInstrument != nil || intent.G2VolumePolicy != model.CompetitionG2VolumePolicyLegacy {
+			return errors.New("baseline cannot import a prospective instrument transition")
+		}
 		if intent.Kind != "baseline" || intent.ExpectedGeneration != 0 || intent.TargetEpoch != 1 || intent.SourceGeneration != 0 || intent.SourceLockSha256 != settings.AutomationPolicy.SourceLockSha256 || intent.Commits["server"] != settings.BaseSha || intent.Threshold != settings.EvaluationPolicy.TakeoverMargin || !sha256Pattern.MatchString(settings.AutomationPolicy.PolicyApprovalSha256) {
 			return ErrConflict
 		}
@@ -166,6 +184,19 @@ func validateSourceAuthorizationInTx(ctx context.Context, tx server.PgTx, settin
 	}
 	if intent.AbandonedAt != nil || intent.ExpectedGeneration != current.Generation || intent.Generation <= current.Generation || intent.TargetEpoch != current.TargetEpoch+1 || intent.BaseSourceLockSha256 != current.SourceLockSha256 {
 		return ErrConflict
+	}
+	if err := validateTrustedInstrumentSource(settings, intent, current); err != nil {
+		return err
+	}
+	if proof := intent.TrustedInstrument; proof != nil {
+		// Authorize the actual selected product with every existing winner and
+		// integrity-review guard. The stored activation remains the full child.
+		productIntent := *intent
+		productIntent.Kind, productIntent.Commits, productIntent.SourceLockSha256 = proof.SelectedProductKind, proof.SelectedProductCommits, proof.SelectedProductSourceLockSha256
+		if proof.SelectedProductKind == "reviewed_source_carry_forward" {
+			productIntent.SourceGeneration = current.SourceGeneration
+		}
+		intent = &productIntent
 	}
 	var predecessorId server.Id
 	if err := tx.QueryRow(ctx, `SELECT round_id FROM competition_round WHERE competition_id=$1 AND epoch_number=$2 AND staging=$5
@@ -247,6 +278,9 @@ func validateSourceAuthorizationInTx(ctx context.Context, tx server.PgTx, settin
 		policy, err := decodeRoundPolicySnapshot(policyJson)
 		if err != nil {
 			return err
+		}
+		if intent.CandidatePathBase != "" && intent.CandidatePathBase != policy.PatchPolicy.PathBase {
+			return errors.New("source publication path base differs from the genuinely evaluated patch policy")
 		}
 		if policy.AutomationPolicy == nil || policy.AutomationPolicy.Staging != intent.Staging || policy.AutomationPolicy.Environment != intent.Environment || policy.AutomationPolicy.SeasonId != intent.SeasonId || policy.EvaluatorImageDigest != intent.EvaluatedImageDigest {
 			return ErrConflict

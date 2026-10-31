@@ -518,7 +518,8 @@ func authenticateCompetitionQualification(directory string, request evaluatorReq
 		return err
 	}
 	if result.Schema != 1 || result.JobId != request.JobId || result.EvalError != nil || validateScore(result.Score) != nil || !result.Score.Placeable ||
-		!scoreMatchesFrozenMargin(result.Score, request.EvaluationPolicy.TakeoverMargin) || result.Score.Significance.ReplicateCount != 1 || !result.Security.passedFor(nil) {
+		!scoreMatchesFrozenMargin(result.Score, request.EvaluationPolicy.TakeoverMargin) ||
+		!scoreMatchesFrozenG2Policy(result.Score, request.EvaluationPolicy.G2VolumePolicy) || result.Score.Significance.ReplicateCount != 1 || !result.Security.passedFor(nil) {
 		return errors.New("host-readiness evaluation did not pass its score and security gates")
 	}
 	if len(result.Score.Gates) != 6 {
@@ -944,7 +945,7 @@ func RunCompetitionHostQualification(ctx context.Context, settings *Settings, co
 	}
 	evaluationRequest := evaluatorRequest{Staging: intent.Staging, Schema: 1, JobId: server.NewId().String(), RoundId: intent.TargetRoundId.String(), SourceEpoch: intent.SourceGeneration, Attempt: 1,
 		CompetitionId: intent.CompetitionId, BaseSha: settings.BaseSha, EvaluatorImageDigest: intent.EvaluatorImageDigest, ApiImageDigest: config.ApiImageDigest, WorkerImageDigest: workerImage,
-		ScorerVersion: ScorerVersion, RoundSeedHex: seedHex, ProvidersPath: providersPath, ProvidersSha256: workload.Sha256, PatchPath: patchPath, PatchSha256: patch.Sha256, ArtifactDirectory: directory,
+		ScorerVersion: settings.scorerVersion(), RoundSeedHex: seedHex, ProvidersPath: providersPath, ProvidersSha256: workload.Sha256, PatchPath: patchPath, PatchSha256: patch.Sha256, ArtifactDirectory: directory,
 		ConfigLocalDirectory: settings.ConfigLocalDirectory, VaultLocalDirectory: settings.VaultLocalDirectory, PatchPolicy: settings.PatchPolicy, EvaluationPolicy: profileSettings.EvaluationPolicy}
 	requestBytes, err := json.Marshal(evaluationRequest)
 	if err != nil {

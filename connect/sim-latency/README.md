@@ -21,9 +21,14 @@ The actual compiler must be **Go 1.27.3**. Select that installed toolchain on
 
 ## Current competition contract
 
-Public opening is fixed at **2026-10-28 00:00 UTC**. Preparation now uses a
-fresh Go 1.27.3 checkpoint; its final scale, calibrated margin and official
-epoch baseline are **not yet qualified**. Follow
+The original **2026-10-28 00:00 UTC** opening was missed, not backdated.
+The approved replacement production season, R2 epoch 1, opened submission intake
+at **2026-10-29 13:06:42.413416 UTC**. Intake remains open while grading and
+publication are held for calibration. The reduced public R9/R9 pilot and native
+13-source exclusion census are accepted; the fresh hidden-seed 36-run screen
+is now running and **not yet accepted**. Follow the
+[current checkpoint](launch/current-state.json),
+the [live hidden-screen record](launch/HIDDEN-SCREEN-LIVE-2026-10-31.json), and
 [`launch/PRODUCTION-2026-10-28.md`](launch/PRODUCTION-2026-10-28.md) and its
 exact-artifact records for current evidence. An installed image or a passing
 local smoke is not production activation.
@@ -38,19 +43,20 @@ calibration; it is not a claim that the new checkpoint has passed calibration.
 |---|---|
 | Evaluator host | one 128 GiB-class Ubuntu host with 12 isolated CPUs |
 | CPU boundary | 10 evaluation CPUs; 2 management/cleanup CPUs |
-| Workload | 3,600-provider qualification profile; 200 clients and 80 arrivals/minute; fresh bridge and independent-seed acceptance remain pending |
+| Workload | Frozen epoch-one profile: 3,600 providers, 200 clients and 80 arrivals/minute; accepted public pilot, independent-seed screen running |
 | Selection | quality window 2; 4 exchange hosts; 4 fleet shards |
 | Measurement | 180 seconds with provider impairment enabled |
 | Aggregation | one immutable 9-run control per epoch; median of 9 fresh runs per candidate |
-| Initial significant-improvement percentage | 26.9% prospectively frozen by the accepted October 26 three-pair reduction; fresh instrument bridge and independent-seed qualification remain pending |
+| Initial significant-improvement percentage | 26.9% prospectively frozen by the accepted October 26 three-pair reduction; independent-seed acceptance remains pending |
 | Admission | six seven-day epochs; unbounded paid submissions at $20 each |
 | Dispatch | immediate single-job FIFO; Redis list backed by authoritative PostgreSQL |
 | Submission deadline | 3 hours total, including attempts, backoff, score, and cleanup |
 
 The historical qualified checkpoint used 1,800 providers. Do not transfer that
 qualification, its measurements or its final report to the new source/image.
-Select the new scale from fresh impairment-on/off frontier evidence, correctness
-and resource gates, and the full cold-job three-hour budget. Incomplete points
+The 3,600-provider profile is frozen for R2 epoch one; do not resize it mid-round.
+Future checkpoint scale selection requires fresh impairment-on/off frontier,
+correctness and resource evidence and the full cold-job three-hour budget. Incomplete points
 are retained for diagnosis and never count as control samples.
 
 Every canonical submission patch gets a content-addressed image derived from
@@ -74,8 +80,12 @@ See:
   decision and acceptance checklist;
 - [`playbook.yml`](playbook.yml) for machine-readable launch status;
 - [`baseline/README.md`](baseline/README.md) for preserved calibration evidence;
-- [`baseline/final-baseline.html`](baseline/final-baseline.html) for the visual
-  **historical** baseline report (not the new production checkpoint);
+- [`baseline/final-baseline.html`](baseline/final-baseline.html) for the
+  four-section public-data **draft preview**, with improvement fringes and
+  hypothetical six-round TTFB/throughput projections (not the private epoch
+  baseline or complete launch acceptance);
+- [`baseline/final-baseline-v1-historical.html`](baseline/final-baseline-v1-historical.html)
+  for the unchanged historical v1 report;
 - [`../../controller/competition_controller.go`](../../controller/competition_controller.go)
   and [`../../model/competition_model.go`](../../model/competition_model.go)
   for the API/worker implementation; and
@@ -117,22 +127,56 @@ Closing admission does not stop accepted work. Publication requires admission
 close, complete authoritative drain, an immutable evaluation seal, and reveal:
 `seal.publication_at` is the later of sealing time and the frozen `reveal_at`.
 Before publication, terminal success/failure polling remains `state: completed`
-with no score or private error text; `evaluation_status` and the allowlisted,
-message-free `evaluation_failure` expose only safe evaluator lifecycle signals.
+but the owning production submitter credential can immediately read a completed
+private `score`: raw/normalized values, reviewed numeric/bool G1–G6 reasons,
+significance and safe numeric summaries. Full evaluator errors, arbitrary
+diagnostic strings, logs, seeds, artifact paths and review decisions remain
+sealed; `evaluation_status` and message-free `evaluation_failure` expose only
+reviewed lifecycle/failure signals. Staging outcomes keep their existing
+publication gate. This additive owner feedback does not rewrite any current
+round's frozen evaluator, scoring policy, source/OpenAPI evidence or public
+decision contract, and does not publish, elect, approve or pay a winner.
 The public round-result/history endpoints return `409 round_not_published` until
 that boundary, then return a `no-store` projection. A provisional reward can be
 published without a completed honesty review.
 
-The prospective October 28 season selects `elected_winner_gpt54mini_xhigh_v1`:
-publish the provisional winner, automatically review it with qualified GPT-5.4
-mini/xhigh, revoke/re-elect on substantiated rejection, then independently build,
+UR privacy is credential-owner-wide, not individual-miner-wide. One
+Macrocosmos/Apex submitter credential serves multiple miners and can read every
+job durably associated with that credential. Apex must authenticate the miner,
+authorize its own miner-to-submission mapping and return private feedback only
+through that mapping. Never expose the shared credential or treat a guessed
+`job_id` as authorization. Polling responses and errors are `Cache-Control:
+no-store`; do not copy private feedback into a public result cache or leaderboard.
+
+Identical canonical patches may bind several distinct Apex `submission_id`s to
+one cached `job_id`. Preserve each miner's admission identity and fee receipt;
+associate them only when the returned round, canonical patch, status URL,
+staging flag and decision contract all match. The reference adapter fans out
+the same validated job observation to those existing admissions, with owner
+feedback stored as `private_score`, not public `score` or `published`. It never
+creates an association for an unadmitted miner. Multiple admissions to one job
+do not create more evaluator draws or duplicate reward entitlements; public
+winner/reward reconciliation keeps the existing job/round/revision identity.
+
+The reference adapter automatically refreshes pre-upgrade completed admissions
+and probes ambiguous completed cache hits without asserting scoring success.
+Its per-job durable backoff (one minute by default) alternates with normal FIFO
+polling and stops once feedback or terminal failure is known. Update Apex
+consumers before the API rollout: old consumers may reject private production
+`score` responses, and old adapter binaries cannot read new private feedback or
+refresh fields. Do not roll an old binary back onto the new adapter state file.
+
+Production R2 selects `elected_winner_snow_union_v2`: publish the provisional
+winner, automatically review it with qualified Qwen (`qwen3.8-27b`) and Gemma
+(`gemma-4-26b-a4b`) on Snow, retain the union of their findings, and require both
+to approve. Revoke/re-elect on substantiated rejection, then independently build,
 qualify and promote that approved winner before opening the next epoch.
 Only an exhausted eligible ranking carries the incumbent forward. Missing or
 expired review and failed source qualification block and alert support; they
 never silently approve, promote another candidate, or fall back. The sixth
-epoch is reviewed before the supervisor exits. This prospective policy leaves
-existing round rules unchanged; historical `elected_winner_sol61max_v1` records
-retain their Sol 6.1/max identities. Provider qualification remains required.
+epoch is reviewed before the supervisor exits. Historical Sol, GPT-5.4 mini and
+three-model Snow records retain their original identities; Muse is not a member
+of the R2 two-model policy. Provider qualification remains required.
 See [RUN-MAIN.md](RUN-MAIN.md#adopted-automatic-closing-policy-2026-10-23)
 for activation, the private model-broker protocol, scoped authority, and
 independent build/readiness requirements.
@@ -204,6 +248,41 @@ therefore staging `settlement_status` is limited to `pending`, `received`, or
 explicit v2 rounds; v2 review/source authority uses the separately scoped
 automation contract described in [`RUN-MAIN.md`](RUN-MAIN.md).
 
+### Explicit intake-preserving calibration maintenance
+
+The [October 30 owner approval](launch/CALIBRATION-MAINTENANCE-INTAKE-OWNER-APPROVAL-2026-10-30.json)
+adds a distinct, bounded intake permission for the current R2 epoch-one round.
+Its [prospective hold request](launch/CALIBRATION-MAINTENANCE-INTAKE-HOLD-REQUEST-2026-10-30.json)
+expects evaluation revision 3 and appends an **active** revision 4 with reason
+`CALIBRATION_MAINTENANCE`. These staged files are not evidence that the code is
+deployed, that revision 4 exists, or that calibration has run or passed.
+
+Only that exact scope, frozen source/policy, evidence digest, request digest and
+idempotency key can use this permission. Admission must remain unheld, and the
+original reward-delivery hold must remain active and unchanged. The default
+per-service limit is ten hours from the original database-created hold timestamp,
+allowing roughly nine hours of serial calibration plus verification. Future
+timestamps, expiry, release/rehold, another revision, incidents or source drift
+refuse the permission; replay does not renew it. A maintenance reason on any
+other hold or round cannot waive readiness.
+
+After the running job terminates and the FIFO slot and measurement lock are
+free, the real worker can be stopped for approved serial calibration. No fake
+heartbeat or host-check fact is created: `GET /competition/readyz` may honestly
+return 503 with the real host checks false, while `/competition/info` reports
+`runtime_status.intake_ready: true`, `grading_ready: false` and
+`publication_held: true`, and authenticated v2 submissions queue normally.
+Existing separately approved private completed-score feedback is unchanged;
+public results, rankings and winner remain held.
+
+All non-host readiness checks, live protected archive checks and authentic
+runtime-envelope/frozen-policy validation remain mandatory. Both durable enqueue
+passes reread latest holds, activated source and the real clock on the existing
+transaction. Epoch admission still uses the original receipt time, and queued,
+unstarted jobs do not start evaluation clocks. Restoring grading requires genuine
+host readiness and a separately authorized `RECOVERY_APPROVED` release; this mode
+does not accept calibration or release rewards.
+
 ## Score and statistical significance
 
 For each replicate, the raw score is p95 `total_ms` over requests that start in
@@ -245,10 +324,11 @@ control does not turn requests within a run into independent observations.
 This is part of the immutable evaluation result, not a post-hoc leaderboard
 calculation.
 
-The prospective production source epoch 0 margin is **26.9%**, frozen by the
+The production source epoch 0 margin is **26.9%**, frozen by the
 [accepted original-three reduction](launch/CALIBRATION-THREE-A-FREEZE-2026-10-26.md).
-Its fresh revised-instrument bridge, independent reference ordering and live
-readiness must still pass before activation. Historical 16.1% values remain
+Intake-first activation is not calibration acceptance: the pending fresh public
+pilot, independent reference screen and live qualification must pass before
+grading/publication holds can be released. Historical 16.1% values remain
 attached to their original rounds, not silently substituted for this margin.
 Under legacy v1, production statistical eligibility places a submission into
 the ranked honesty-review queue; it does not by itself make the submission a
@@ -261,6 +341,30 @@ margin. If no submission is statistically significant, or every significant
 candidate is rejected as dishonest, the epoch has no winner and both the
 source commits and percentage carry forward unchanged.
 
+### Current and next-epoch G2 work-volume policy
+
+Production R2 epoch 1 retains its frozen rule: the median completed-request
+count and median received bytes must each be within **95–105%**, inclusive, of
+the shared epoch baseline. A genuine speedup receives no exception to the
+current upper bounds. Its existing jobs, evaluator and results are not rejudged.
+
+The owner approved a prospective change starting in epoch 2: both medians must
+remain **at least 95%** of baseline, inclusive, with **no upper bounds**.
+This is `g2_volume_policy: minimum-work/1` and scorer `sim-latency-score/2`;
+absence of that policy identifies the historical two-sided rule. More completed
+work alone will no longer fail G2. All other gates, nine-run replication,
+latency ranking, practical margin, Welch significance and three-hour submission
+budget remain unchanged. Faster raw latency is not permission to fake traffic,
+skip accounting or bypass correctness.
+
+The policy change is not active in epoch 1. It needs a separately authenticated
+protected-instrument transition, qualified evaluator image and fresh shared
+baseline for the successor source. Miners should follow the exact policy and
+image advertised for their accepted round, not infer an upgrade from this
+announcement or reuse another round's control sample. See the
+[owner approval](launch/PRIVATE-FEEDBACK-NEXT-G2-APPROVAL-2026-10-30.json)
+and [current checkpoint](launch/current-state.json) for rollout status.
+
 ## Epoch source identity and promotion
 
 The source graph applies to both contracts. The manual `epoch-review` and
@@ -270,7 +374,7 @@ recorded review, source intent, readiness, and activation authority.
 The complete local-module graph that can affect the measured product is frozen
 by source epoch: `server`, `connect`, `sdk`, `proxy`, `glog`, `goidenticons`,
 `userwireguard`, `sn`, `warp`, and `gvisor`, all on branch
-`sim-latency`. The first four are the product roots; the remaining seven are required local
+`sim-latency`. The first four are the product roots; the remaining six are required local
 dependencies and evaluator build inputs. The trusted API and worker
 continue on `main`; they record their runtime image digests per evaluation but
 their source commits are not scoring inputs.
@@ -373,8 +477,10 @@ Submissions are admitted throughout each seven-day window and evaluated as
 soon as possible in exact FIFO order. Closing an epoch stops admission but does
 not stop accepted work: the worker continues until the entire backlog is
 terminal, then seals the deterministic significant-candidate ranking and exits.
-Scores, failures, hidden seed, workload, and leaderboard remain embargoed while
-the agent harness reviews the candidates one by one. Approval of the first
+Public scores, full failures, hidden seed, workload, and leaderboard remain
+embargoed while the agent harness reviews the candidates one by one; authorized
+production owners may already inspect the private feedback described above.
+Approval of the first
 honest candidate—or rejection of the last candidate—atomically finalizes and
 publishes the epoch. The external control loop can then promote or carry forward
 the source and explicitly create the next epoch.

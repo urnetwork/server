@@ -83,11 +83,14 @@ func executeSourceBuildBroker(ctx context.Context, request reviewedSourceBuildRe
 	if err != nil {
 		return nil, err
 	}
-	if err := validateReviewedSourceBuildForPolicy(receipt, request.Proposal.ReviewId, request.Proposal.PatchSha256, request.Proposal.SourceLockSha256, request.Proposal.Staging, request.Proposal.WinnerReviewPolicy); err != nil {
+	if err := validateSourceBuildReceipt(request, receipt); err != nil {
 		return nil, err
 	}
 	if receipt.EvaluatorImageDigest != artifacts.ImageId || receipt.SandboxId != owner {
 		return nil, errors.New("qualification receipt belongs to a different built image or invocation")
+	}
+	if sourceBuildRequestMinimumWork(request) && receipt.SimulatorSha256 != artifacts.SimulatorSha256 {
+		return nil, errors.New("instrument qualification receipt substituted the actual compiled binary")
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err

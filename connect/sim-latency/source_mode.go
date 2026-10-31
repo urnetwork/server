@@ -46,8 +46,26 @@ func validateSourceActivationMode(intent *model.CompetitionSourceActivation, set
 		return errors.New("source activation manifest digest does not match")
 	}
 	generation, err := manifest.generation(intent.SourceGeneration)
-	if err != nil || generation.SourceLockSha256 != intent.SourceLockSha256 || !sourceMarginMatches(generation.SignificantImprovementPercent, intent.Threshold) {
+	if err != nil || generation.SourceLockSha256 != intent.SourceLockSha256 || !sourceMarginMatches(generation.SignificantImprovementPercent, intent.Threshold) || generation.G2VolumePolicy != intent.G2VolumePolicy {
 		return errors.New("source activation differs from its manifest generation and margin")
+	}
+	if intent.TrustedInstrument != nil || intent.Kind == "trusted_instrument_transition" || (generation.TrustedInstrument != nil && intent.TargetEpoch == 2) {
+		if intent.TrustedInstrument == nil || generation.TrustedInstrument == nil || intent.TargetEpoch != 2 || generation.Kind != intent.Kind ||
+			intent.G2VolumePolicy != model.CompetitionG2VolumePolicyMinimumWork {
+			return errors.New("source activation has no exact epoch-two instrument generation proof")
+		}
+		intentProof, intentErr := model.CompetitionAutomationDigest(intent.TrustedInstrument)
+		generationProof, generationErr := model.CompetitionAutomationDigest(generation.TrustedInstrument)
+		if intentErr != nil || generationErr != nil || intentProof != generationProof {
+			return errors.New("source activation instrument proof differs from the immutable manifest generation")
+		}
+		round, err := manifest.sourceRound(intent.TargetEpoch)
+		if err != nil || round.SourceGeneration != intent.SourceGeneration || round.ActivationGeneration != intent.Generation ||
+			round.SourceDecisionDigest != intent.SourceDecisionDigest || round.Kind != intent.Kind || round.Reason != intent.Reason ||
+			round.RewardDecisionDigest != intent.RewardDecisionDigest || round.SourceLockSha256 != intent.SourceLockSha256 ||
+			round.G2VolumePolicy != intent.G2VolumePolicy || !sourceMarginMatches(round.SignificantImprovementPercent, intent.Threshold) {
+			return errors.New("source activation differs from its exact epoch-two instrument round mapping")
+		}
 	}
 	return nil
 }

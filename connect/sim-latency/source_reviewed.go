@@ -294,7 +294,7 @@ func runStageReviewedSource(opts docopt.Opts) {
 				fatalf("source commit identity: %s", err)
 			}
 			backend := &gitSourcePublicationBackend{patchPolicy: approved.PatchPolicy}
-			if err := backend.Verify(ctx, sourcePublicationRef{Repository: repository, Branch: sourceBranch(current.Staging), ExpectedCommit: current.Commits[repository], Commit: proposal.Commits[repository], StagedRoot: stagedRoot}, &sourcePublicationIntent{Staging: current.Staging, ApprovedPatchPath: patchPath, ApprovedPatchSha256: patch.Sha256}); err != nil {
+			if err := backend.Verify(ctx, sourcePublicationRef{Repository: repository, Branch: sourceBranch(current.Staging), ExpectedCommit: current.Commits[repository], Commit: proposal.Commits[repository], StagedRoot: stagedRoot}, &sourcePublicationIntent{Staging: current.Staging, CandidatePathBase: approved.PatchPolicy.PathBase, ApprovedPatchPath: patchPath, ApprovedPatchSha256: patch.Sha256}); err != nil {
 				fatalf("exact approved source tree: %s", err)
 			}
 		}

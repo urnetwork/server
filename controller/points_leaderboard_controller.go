@@ -54,7 +54,15 @@ type PointsLeaderboardArgs struct {
 }
 
 type PointsLeaderboardRow struct {
-	NetworkId server.Id `json:"network_id"`
+	// NetworkId is present only on a named row (the network turned on
+	// points_leaderboard_public) and on the signed-in caller's own row, so an
+	// anonymous row never identifies its network (owner decision 2026-10-29,
+	// LEADERTOP Q12). Every app found its own row by comparing this id with
+	// its own; the caller's row keeps the id for them, and IsMe says it
+	// outright.
+	NetworkId *server.Id `json:"network_id,omitempty"`
+	// IsMe marks the signed-in caller's own row.
+	IsMe bool `json:"is_me"`
 	// NetworkName is present only when the network turned on
 	// points_leaderboard_public; otherwise Anonymous is true and the row is
 	// still listed.
@@ -165,10 +173,14 @@ func pointsLeaderboardLimit(limit int) int {
 	return limit
 }
 
-func pointsLeaderboardRowFromModel(row *model.PointsLeaderboardRow, sortBy string) PointsLeaderboardRow {
+// pointsLeaderboardRowFromModel applies the row privacy rules: the name and
+// the network id only for a network that turned on points_leaderboard_public,
+// and the id of the caller's own row (callerNetworkId, nil when signed out).
+func pointsLeaderboardRowFromModel(row *model.PointsLeaderboardRow, sortBy string, callerNetworkId *server.Id) PointsLeaderboardRow {
+	isMe := callerNetworkId != nil && *callerNetworkId == row.NetworkId
 	out := PointsLeaderboardRow{
 		Position:         row.Position(sortBy),
-		NetworkId:        row.NetworkId,
+		IsMe:             isMe,
 		EmojiTag:         row.EmojiTag,
 		Anonymous:        !row.PointsLeaderboardPublic,
 		TotalPoints:      float64(row.TotalNanoPoints) / snNanoPointsPerPoint,
@@ -182,6 +194,10 @@ func pointsLeaderboardRowFromModel(row *model.PointsLeaderboardRow, sortBy strin
 	if row.PointsLeaderboardPublic {
 		out.NetworkName = row.NetworkName
 		out.ContainsProfanity = row.ContainsProfanity
+	}
+	if row.PointsLeaderboardPublic || isMe {
+		networkId := row.NetworkId
+		out.NetworkId = &networkId
 	}
 	return out
 }
@@ -267,8 +283,12 @@ func GetPointsLeaderboard(
 		},
 	}
 	rows, prevCursor, nextCursor := pager.page(cursor, args.SeekRank, limit)
+	var callerNetworkId *server.Id
+	if clientSession != nil && clientSession.ByJwt != nil {
+		callerNetworkId = &clientSession.ByJwt.NetworkId
+	}
 	for _, row := range rows {
-		result.Rows = append(result.Rows, pointsLeaderboardRowFromModel(row, sortBy))
+		result.Rows = append(result.Rows, pointsLeaderboardRowFromModel(row, sortBy, callerNetworkId))
 	}
 	result.PrevCursor = prevCursor
 	result.NextCursor = nextCursor
@@ -370,7 +390,8 @@ func pointsLeaderboardMe(
 	// settings read supplies the current database name.
 	me := &PointsLeaderboardMe{
 		PointsLeaderboardRow: PointsLeaderboardRow{
-			NetworkId:   networkId,
+			NetworkId:   &networkId,
+			IsMe:        true,
 			NetworkName: settings.NetworkName,
 			EmojiTag:    settings.EmojiTag,
 			Anonymous:   !settings.PointsLeaderboardPublic,
@@ -379,7 +400,7 @@ func pointsLeaderboardMe(
 	}
 	if snapshot != nil {
 		if row := model.GetPointsLeaderboardNetworkRow(ctx, snapshot.SnapshotId, networkId); row != nil {
-			me.PointsLeaderboardRow = pointsLeaderboardRowFromModel(row, model.PointsLeaderboardSortPoints)
+			me.PointsLeaderboardRow = pointsLeaderboardRowFromModel(row, model.PointsLeaderboardSortPoints, &networkId)
 			me.NetworkName = row.NetworkName
 			me.Anonymous = !row.PointsLeaderboardPublic
 			me.Ranked = true

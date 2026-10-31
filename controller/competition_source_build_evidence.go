@@ -13,25 +13,7 @@ import (
 // A completed independent build binds its reviewed patch, exact image and
 // retained tests/containment. Its host hash is a prospective fingerprint; actual
 // next-round readiness is established separately by fenced preparation.
-type CompetitionReviewedSourceBuildReceipt struct {
-	Schema                  int       `json:"schema"`
-	Staging                 bool      `json:"staging,omitempty"`
-	ReviewId                server.Id `json:"review_id"`
-	PatchSha256             string    `json:"patch_sha256"`
-	SourceLockSha256        string    `json:"source_lock_sha256"`
-	EvaluatorImageDigest    string    `json:"evaluator_image_digest"`
-	HostQualificationSha256 string    `json:"host_qualification_sha256"`
-	ContainmentSha256       string    `json:"containment_sha256"`
-	TestEvidenceSha256      string    `json:"test_evidence_sha256"`
-	SandboxId               string    `json:"sandbox_id"`
-	Offline                 bool      `json:"offline"`
-	NoMainCredentials       bool      `json:"no_main_credentials"`
-	ReadOnlySource          bool      `json:"read_only_source"`
-	Passed                  bool      `json:"passed"`
-	TestModel               string    `json:"test_model"`
-	TestReasoning           string    `json:"test_reasoning"`
-	WinnerReviewPolicy      string    `json:"winner_review_policy,omitempty"`
-}
+type CompetitionReviewedSourceBuildReceipt = model.CompetitionReviewedSourceBuildReceipt
 
 // A review approval is not permission to bypass genuine independent build,
 // test and isolation evidence. Both producer and consumer use this contract.
@@ -51,7 +33,9 @@ func ValidateCompetitionReviewedSourceBuildReceiptForPolicy(receipt CompetitionR
 	} else if receipt.WinnerReviewPolicy != "" || (policy != "" && !model.IsCompetitionWinnerReviewPolicy(policy)) {
 		return errors.New("source qualification policy is unsupported or cross-provider")
 	}
-	if receipt.Schema != 1 || receipt.Staging != staging || receipt.ReviewId != reviewId || receipt.PatchSha256 != patchDigest || receipt.SourceLockSha256 != lockDigest ||
+	instrumentPolicyValid := receipt.G2VolumePolicy == model.CompetitionG2VolumePolicyLegacy && receipt.SimulatorSha256 == "" ||
+		receipt.G2VolumePolicy == model.CompetitionG2VolumePolicyMinimumWork && !staging && sha256Pattern.MatchString(receipt.SimulatorSha256)
+	if receipt.Schema != 1 || receipt.Operation != "" || receipt.InstrumentApprovalSha256 != "" || !instrumentPolicyValid || receipt.Staging != staging || receipt.ReviewId != reviewId || receipt.PatchSha256 != patchDigest || receipt.SourceLockSha256 != lockDigest ||
 		!receipt.Passed || !receipt.Offline || !receipt.NoMainCredentials || !receipt.ReadOnlySource || receipt.SandboxId == "" ||
 		receipt.TestModel != testModel || receipt.TestReasoning != testReasoning || !imageDigestPattern.MatchString(receipt.EvaluatorImageDigest) ||
 		!sha256Pattern.MatchString(receipt.HostQualificationSha256) || !sha256Pattern.MatchString(receipt.ContainmentSha256) || !sha256Pattern.MatchString(receipt.TestEvidenceSha256) {

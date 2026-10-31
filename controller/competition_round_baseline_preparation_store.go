@@ -66,6 +66,9 @@ func readRoundBaselinePreparationEvent(ctx context.Context, tx server.PgTx, roun
 		preparation.StartedAt.IsZero() || !preparation.StartedAt.Before(preparation.Deadline) {
 		return nil, errors.New("baseline preparation reservation event is corrupt")
 	}
+	if err := applyRoundBaselineRecoveryInTx(ctx, tx, &preparation, maximum); err != nil {
+		return nil, err
+	}
 	return &preparation, nil
 }
 
@@ -78,8 +81,8 @@ func (self PostgresStore) allowPreparedRoundBaselineClaimInTx(ctx context.Contex
 		return false, err
 	}
 	if reserved != nil {
-		var held bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM competition_job_event WHERE job_id=$1 AND event_type='round_baseline_preparation_held' AND payload_json->>'owner'=$2)`, reserved.JobId, reserved.Owner).Scan(&held); err != nil {
+		held, err := roundBaselinePreparationHeldInTx(ctx, tx, reserved)
+		if err != nil {
 			return false, err
 		}
 		if held || baseline == nil {
@@ -111,7 +114,6 @@ func (self PostgresStore) ReserveRoundBaseline(ctx context.Context, settings *Se
 	if profile.TotalTimeout <= 0 || profile.CleanupTimeout <= 0 || profile.FenceInterval <= 0 || profile.MaximumRecordBytes <= 0 || profile.MaximumDiagnosticBytes <= 0 || profile.MaximumManifestBytes <= 0 || profile.MaximumEvidenceBytes <= 0 || profile.MaximumRawFileBytes <= 0 || profile.MaximumArtifacts <= 0 || profile.ArchiveAttempts <= 0 || profile.ArchiveBackoff <= 0 || profile.Now == nil {
 		return nil, errors.New("baseline preparation owner bounds are invalid")
 	}
-	now := self.nowUtc()
 	resultErr = captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
 			preparation = nil
@@ -120,7 +122,11 @@ func (self PostgresStore) ReserveRoundBaseline(ctx context.Context, settings *Se
 			var slotJob *server.Id
 			var slotDeadline *time.Time
 			server.Raise(tx.QueryRow(ctx, `SELECT worker_id,job_id,lease_expires_at FROM competition_worker_slot WHERE slot_id=1 FOR UPDATE`).Scan(&slotOwner, &slotJob, &slotDeadline))
-			if slotOwner != nil && slotDeadline != nil && now.Before(*slotDeadline) {
+			// Choose the execution clock only after this transaction owns the slot.
+			now := self.nowUtc()
+			recovery := settings.roundBaselinePreparation.Recovery
+			recoveryOwnsSlot := recovery != nil && slotOwner != nil && *slotOwner == recovery.Authorization.Owner && slotJob == nil
+			if slotOwner != nil && slotDeadline != nil && now.Before(*slotDeadline) && !recoveryOwnsSlot {
 				return
 			}
 			job, err := scanJob(tx.QueryRow(ctx, jobSelect+roundBaselinePreparationJobSql, settings.CompetitionId, optionalAutomationRoundId(settings), now), true, now)
@@ -135,10 +141,23 @@ func (self PostgresStore) ReserveRoundBaseline(ctx context.Context, settings *Se
 				server.Raise(reservationErr)
 			}
 			if reserved != nil {
-				var held bool
-				server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM competition_job_event WHERE job_id=$1 AND event_type='round_baseline_preparation_held' AND payload_json->>'owner'=$2)`, reserved.JobId, reserved.Owner).Scan(&held))
+				held, holdErr := roundBaselinePreparationHeldInTx(ctx, tx, reserved)
+				server.Raise(holdErr)
 				if held {
-					panic(errRoundBaselinePreparationHeld)
+					if slotJob != nil || slotOwner != nil && *slotOwner != reserved.Owner {
+						panic(errRoundBaselinePreparationHeld)
+					}
+					// The first reservation is the FIFO selection linearization;
+					// a subsequently committed older admission cannot substitute it.
+					if job.JobId != reserved.JobId {
+						job, err = scanJob(tx.QueryRow(ctx, jobSelect+` WHERE j.job_id=$1 FOR UPDATE OF j`, reserved.JobId), true, now)
+						server.Raise(err)
+					}
+					preparation, err = recoverRoundBaselinePreparationInTx(ctx, tx, settings, reserved, job, workerId, workerImage, now)
+					server.Raise(err)
+					server.RaisePgResult(tx.Exec(ctx, `UPDATE competition_worker_slot SET worker_id=$1,job_id=NULL,lease_expires_at=$2,heartbeat_at=$3 WHERE slot_id=1`,
+						preparation.Owner, roundBaselinePreparationExecutionDeadline(preparation).Add(profile.CleanupTimeout), now))
+					return
 				}
 			}
 			baseline, err := scanRoundBaseline(tx.QueryRow(ctx, `SELECT round_id,baseline_json,baseline_sha256,source_job_id,source_attempt,source_artifact_manifest_sha256,
@@ -184,7 +203,11 @@ func (self PostgresStore) checkRoundBaselinePreparationInTx(ctx context.Context,
 	if err := tx.QueryRow(ctx, `SELECT worker_id,job_id,lease_expires_at FROM competition_worker_slot WHERE slot_id=1 FOR UPDATE`).Scan(&owner, &slotJob, &deadline); err != nil {
 		return nil, nil, err
 	}
-	if owner == nil || *owner != preparation.Owner || slotJob != nil || deadline == nil || !now.Before(*deadline) || !now.Before(preparation.Deadline) {
+	executionDeadline := roundBaselinePreparationExecutionDeadline(preparation)
+	if executionDeadline.IsZero() {
+		return nil, nil, ErrConflict
+	}
+	if owner == nil || *owner != preparation.Owner || slotJob != nil || deadline == nil || !now.Before(*deadline) || !now.Before(executionDeadline) {
 		return nil, nil, ErrLeaseLost
 	}
 	job, err := scanJob(tx.QueryRow(ctx, jobSelect+` WHERE j.job_id=$1 FOR UPDATE OF j`, preparation.JobId), true, now)
@@ -212,11 +235,11 @@ func (self PostgresStore) checkRoundBaselinePreparationInTx(ctx context.Context,
 		return nil, nil, ErrConflict
 	}
 	reserved, err := readRoundBaselinePreparationEvent(ctx, tx, job.RoundId, settings.roundBaselinePreparation.Settings.MaximumRecordBytes)
-	if err != nil || reserved.Owner != preparation.Owner || reserved.JobId != preparation.JobId || reserved.WorkerId != preparation.WorkerId || reserved.WorkerImage != preparation.WorkerImage || reserved.RoundId != preparation.RoundId || reserved.PatchSha256 != preparation.PatchSha256 || reserved.ContextSha256 != preparation.ContextSha256 || !reserved.StartedAt.Equal(preparation.StartedAt) || !reserved.Deadline.Equal(preparation.Deadline) || preparation.Deadline.Sub(preparation.StartedAt) != settings.roundBaselinePreparation.Settings.TotalTimeout {
+	if err != nil || reserved.Owner != preparation.Owner || reserved.JobId != preparation.JobId || reserved.WorkerId != preparation.WorkerId || reserved.WorkerImage != preparation.WorkerImage || reserved.RoundId != preparation.RoundId || reserved.PatchSha256 != preparation.PatchSha256 || reserved.ContextSha256 != preparation.ContextSha256 || roundBaselineRecoveryEventId(reserved) != roundBaselineRecoveryEventId(preparation) || !reserved.StartedAt.Equal(preparation.StartedAt) || !reserved.Deadline.Equal(preparation.Deadline) || !roundBaselinePreparationExecutionDeadline(reserved).Equal(executionDeadline) || preparation.Deadline.Sub(preparation.StartedAt) != settings.roundBaselinePreparation.Settings.TotalTimeout {
 		return nil, nil, ErrConflict
 	}
-	var held bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM competition_job_event WHERE job_id=$1 AND event_type='round_baseline_preparation_held' AND payload_json->>'owner'=$2)`, reserved.JobId, reserved.Owner).Scan(&held); err != nil {
+	held, err := roundBaselinePreparationHeldInTx(ctx, tx, reserved)
+	if err != nil {
 		return nil, nil, err
 	}
 	if held {
@@ -253,14 +276,14 @@ func (self PostgresStore) HoldRoundBaselinePreparation(ctx context.Context, sett
 			server.Raise(tx.QueryRow(ctx, `SELECT job_id FROM competition_job WHERE job_id=$1 AND round_id=$2 FOR UPDATE`, preparation.JobId, preparation.RoundId).Scan(&sourceJobId))
 			reserved, err := readRoundBaselinePreparationEvent(ctx, tx, preparation.RoundId, settings.roundBaselinePreparation.Settings.MaximumRecordBytes)
 			server.Raise(err)
-			if reserved.Owner != preparation.Owner || reserved.ContextSha256 != preparation.ContextSha256 {
+			if reserved.Owner != preparation.Owner || reserved.ContextSha256 != preparation.ContextSha256 || roundBaselineRecoveryEventId(reserved) != roundBaselineRecoveryEventId(preparation) {
 				panic(ErrConflict)
 			}
 			if hold.Stage == "" || len(hold.Stage) > 64 || hold.ArtifactArchiveRetained != sha256Pattern.MatchString(hold.ArtifactManifestSha256) {
 				panic(ErrConflict)
 			}
-			var alreadyHeld bool
-			server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM competition_job_event WHERE job_id=$1 AND event_type='round_baseline_preparation_held' AND payload_json->>'owner'=$2)`, preparation.JobId, preparation.Owner).Scan(&alreadyHeld))
+			alreadyHeld, holdErr := roundBaselinePreparationHeldInTx(ctx, tx, reserved)
+			server.Raise(holdErr)
 			if alreadyHeld {
 				return
 			}
@@ -297,12 +320,12 @@ func (self PostgresStore) ClaimPreparedRoundBaseline(ctx context.Context, settin
  (round_id,baseline_json,baseline_sha256,source_job_id,source_attempt,source_artifact_manifest_sha256,
  base_sha,providers_sha256,evaluator_image_digest,scorer_version,hardware_id,host_qualification_sha256,created_at)
  VALUES($1,$2,$3,$4,1,$5,$6,$7,$8,$9,$10,$11,$12)`, source.RoundId, prepared.BaselineJson, prepared.BaselineSha256,
-				source.JobId, prepared.ArtifactManifestSha256, frozen.BaseSha, source.Round.ProvidersSha256, frozen.EvaluatorImageDigest, ScorerVersion,
+				source.JobId, prepared.ArtifactManifestSha256, frozen.BaseSha, source.Round.ProvidersSha256, frozen.EvaluatorImageDigest, frozen.scorerVersion(),
 				frozen.EvaluationPolicy.HardwareId, frozen.EvaluationPolicy.HostQualificationSha256, now))
 			baseline := &roundBaselineRecord{RoundId: source.RoundId, Json: prepared.BaselineJson, Sha256: prepared.BaselineSha256,
 				SourceJobId: source.JobId, SourceAttempt: 1, SourceArtifactManifestSha256: prepared.ArtifactManifestSha256,
 				BaseSha: frozen.BaseSha, ProvidersSha256: source.Round.ProvidersSha256, EvaluatorImageDigest: frozen.EvaluatorImageDigest,
-				ScorerVersion: ScorerVersion, HardwareId: frozen.EvaluationPolicy.HardwareId, HostQualificationSha256: frozen.EvaluationPolicy.HostQualificationSha256, CreatedAt: now}
+				ScorerVersion: frozen.scorerVersion(), HardwareId: frozen.EvaluationPolicy.HardwareId, HostQualificationSha256: frozen.EvaluationPolicy.HostQualificationSha256, CreatedAt: now}
 			server.Raise(validateRoundBaselineRecord(frozen, &source.Round, baseline))
 			appendEvent(ctx, tx, source.JobId, now, "round_baseline_preparation_published", preparation.Owner,
 				map[string]any{"schema": 1, "owner": preparation.Owner, "baseline_sha256": prepared.BaselineSha256, "artifact_manifest_sha256": prepared.ArtifactManifestSha256})
@@ -323,5 +346,9 @@ func (self PostgresStore) ClaimPreparedRoundBaseline(ctx context.Context, settin
 // A successful transfer has non-null job_id, so this cannot release the real
 // candidate's slot. An obsolete owner also cannot erase a later reservation.
 func (self PostgresStore) ReleaseRoundBaselinePreparation(ctx context.Context, preparation *roundBaselinePreparation) error {
-	return releaseCompetitionQualificationSlot(ctx, preparation.Owner)
+	return captureDatabaseError(func() {
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.Raise(releaseRoundBaselinePreparationInTx(ctx, tx, preparation, self.nowUtc()))
+		}, server.OptReadWrite(), server.TxReadCommitted)
+	})
 }

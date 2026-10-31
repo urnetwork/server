@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -105,14 +106,54 @@ func parseSignupQualitySnapshot(rows []pgRow) (signupQualitySnapshot, error) {
 	return signupQualitySnapshot{day: day, networks: networks, deviceNetworks: deviceNetworks}, nil
 }
 
+// Local stages describe the returned runner result or this probe's aggregate
+// parser, never a remote SQL phase or a measured population outcome.
+type signupQualityObservationStage uint8
+
+const (
+	signupQualityObservationUnknown signupQualityObservationStage = iota
+	signupQualityObservationSourceRead
+	signupQualityObservationAggregateParse
+)
+
+// Preserve the native/context cause while keeping direct error text private.
+type signupQualityObservationError struct {
+	stage signupQualityObservationStage
+	err   error
+}
+
+// Only fixed code-owned text leaves this wrapper; Unwrap retains the cause.
+func (self *signupQualityObservationError) Error() string {
+	return "signup quality observation unavailable"
+}
+
+// Keep errors.Is/As, parent lifecycle and native boundary proof intact.
+func (self *signupQualityObservationError) Unwrap() error { return self.err }
+
+// Missing typed proof remains absent; error strings cannot supply a stage.
+func signupQualityObservationDetails(err error) string {
+	var failure *signupQualityObservationError
+	if !errors.As(err, &failure) || failure == nil {
+		return ""
+	}
+	switch failure.stage {
+	case signupQualityObservationSourceRead:
+		return " signup_quality_stage=source-read"
+	case signupQualityObservationAggregateParse:
+		return " signup_quality_stage=aggregate-parse"
+	default:
+		return " signup_quality_stage=unknown"
+	}
+}
+
 func (pgSignupQualityProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
 	rows, err := env.runner.pg(ctx, signupQualityQuery)
 	if err != nil {
-		return nil, err
+		return nil, &signupQualityObservationError{stage: signupQualityObservationSourceRead, err: err}
 	}
 	snapshot, err := parseSignupQualitySnapshot(rows)
 	if err != nil {
-		return nil, err
+		return nil, &signupQualityObservationError{stage: signupQualityObservationAggregateParse, err: err}
 	}
 	day := snapshot.day
 	networks := snapshot.networks

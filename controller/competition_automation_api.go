@@ -186,7 +186,8 @@ func (self *Service) SubmitV2(ctx context.Context, args ScoreArgs, principal *Pr
 	return self.submitWithDecisionContract(ctx, args, principal, true)
 }
 
-// V2 polling still uses the authoritative job-owner check and outcome-neutral projection.
+// V2 polling retains the authoritative owner check and public embargo while
+// returning reviewed completed-score feedback privately to that credential.
 func (self *Service) GetScoreV2(ctx context.Context, jobId server.Id, principal *Principal) (*ScoreJobResult, int, *CompetitionError) {
 	return self.getScoreWithDecisionContract(ctx, jobId, principal, true)
 }

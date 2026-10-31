@@ -21,17 +21,42 @@ import (
 
 // The SQL seam returns current column facts separately from model JSON.
 type competitionIntakeReadinessReader struct {
-	stateLock sync.Mutex
-	records   map[string]map[string]any
-	err       error
-	reads     int
+	stateLock         sync.Mutex
+	records           map[string]map[string]any
+	err               error
+	reads             int
+	source            *model.CompetitionSourceActivation
+	sourceGeneration  int64
+	sourceInvalidated bool
+	sourceErr         error
+	sourceReads       int
 }
 
 // No query can acquire a real connection or use a production fixture.
-func (self *competitionIntakeReadinessReader) QueryRow(_ context.Context, _ string, _ ...any) pgx.Row {
+func (self *competitionIntakeReadinessReader) QueryRow(_ context.Context, query string, _ ...any) pgx.Row {
 	return competitionIntakeReadinessRow(func(destinations ...any) error {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
+		if strings.Contains(query, "FROM competition_source_activation") {
+			self.sourceReads++
+			if self.sourceErr != nil {
+				return self.sourceErr
+			}
+			if self.source == nil {
+				return pgx.ErrNoRows
+			}
+			content, err := json.Marshal(self.source)
+			if err != nil {
+				return err
+			}
+			*destinations[0].(*[]byte) = content
+			*destinations[1].(*string) = self.source.IntentSha256
+			*destinations[2].(**time.Time) = self.source.ActivatedAt
+			*destinations[3].(**time.Time) = self.source.AbandonedAt
+			*destinations[4].(*int64) = self.sourceGeneration
+			*destinations[5].(*bool) = self.sourceInvalidated
+			return nil
+		}
 		self.reads++
 		if self.err != nil {
 			return self.err
@@ -55,10 +80,13 @@ func (self competitionIntakeReadinessRow) Scan(destinations ...any) error {
 // API fakes retain actual source-envelope authentication and raw host failures.
 type competitionIntakeReadinessStore struct {
 	*competitionAutomationStagingPreflightFixture
-	reader        *competitionIntakeReadinessReader
-	archiveStart  chan struct{}
-	archiveReturn chan struct{}
-	marked        bool
+	reader            *competitionIntakeReadinessReader
+	archiveStart      chan struct{}
+	archiveReturn     chan struct{}
+	marked            bool
+	clock             func() time.Time
+	beforeAdmission   func()
+	maintenanceMarked bool
 }
 
 // All non-host dependencies remain present; tests may independently fail each.
@@ -85,15 +113,25 @@ func (self *competitionIntakeReadinessStore) AutomationHoldStatus(ctx context.Co
 // explicit retained-upload barrier, without claiming PostgreSQL race coverage.
 func (self *competitionIntakeReadinessStore) Enqueue(ctx context.Context, settings *Settings, roundId server.Id, patch *CanonicalPatch, principal, image string) (*queuedJob, bool, error) {
 	self.marked = settings.intakeAdmission != nil
+	self.maintenanceMarked = self.marked && settings.intakeAdmission.MaintenanceAuthority != nil
 	receivedAt := server.NowUtc()
-	if err := checkCompetitionIntakeAdmission(ctx, self.reader, settings, self.round, receivedAt); err != nil {
+	if self.beforeAdmission != nil {
+		self.beforeAdmission()
+	}
+	checkAdmission := func() error {
+		if self.clock != nil {
+			return checkCompetitionIntakeAdmissionWithClock(ctx, self.reader, settings, self.round, receivedAt, self.clock)
+		}
+		return checkCompetitionIntakeAdmission(ctx, self.reader, settings, self.round, receivedAt)
+	}
+	if err := checkAdmission(); err != nil {
 		return nil, false, err
 	}
 	if self.archiveStart != nil {
 		close(self.archiveStart)
 		<-self.archiveReturn
 	}
-	if err := checkCompetitionIntakeAdmission(ctx, self.reader, settings, self.round, receivedAt); err != nil {
+	if err := checkAdmission(); err != nil {
 		return nil, false, err
 	}
 	return self.fakeStore.Enqueue(ctx, settings, roundId, patch, principal, image)
@@ -147,7 +185,7 @@ func newCompetitionIntakeReadinessFixture(t testing.TB) (*Settings, *competition
 		holdId := server.Id{byte(index + 1)}
 		hold := &model.CompetitionAutomationHold{HoldId: holdId, Environment: settings.AutomationPolicy.Environment, CompetitionId: settings.CompetitionId,
 			SeasonId: settings.AutomationPolicy.SeasonId, ActorId: "synthetic-owner", Revision: 1, CreatedAt: server.NowUtc(), Request: args, RequestSha256: requestSha256}
-		reader.records[kind] = map[string]any{"active": true, "revision": 1, "hold": hold}
+		reader.records[kind] = competitionIntakeReadinessHoldRecord(hold)
 	}
 	store := &competitionIntakeReadinessStore{competitionAutomationStagingPreflightFixture: base, reader: reader}
 	service := newServiceWithImageDigest(settings, store, testApiImageDigest(), nil)
@@ -159,6 +197,13 @@ func newCompetitionIntakeReadinessFixture(t testing.TB) (*Settings, *competition
 		HardwareId: frozen.EvaluationPolicy.HardwareId, HostQualificationSha256: frozen.EvaluationPolicy.HostQualificationSha256,
 		EvaluationHoldId: evaluation.HoldId.String(), EvaluationRequestSha256: evaluation.RequestSha256, RewardHoldId: reward.HoldId.String(), RewardRequestSha256: reward.RequestSha256}
 	return settings, store, service, blobs
+}
+
+// Synthetic column facts remain independently mutable from the JSON payload.
+func competitionIntakeReadinessHoldRecord(hold *model.CompetitionAutomationHold) map[string]any {
+	return map[string]any{"active": hold.Request.Active, "revision": hold.Revision, "hold_id": hold.HoldId.String(),
+		"created_at": hold.CreatedAt.Truncate(time.Microsecond), "idempotency_key": hold.Request.IdempotencyKey,
+		"request_sha256": hold.RequestSha256, "hold": hold}
 }
 
 // The captured root cause is host-only unavailability during approved held

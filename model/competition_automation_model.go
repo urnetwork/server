@@ -621,6 +621,10 @@ type CompetitionSourceGitRef struct {
 
 // An immutable intent stages source; only a separately recorded activation changes runtime authority.
 type CompetitionSourceActivation struct {
+	G2VolumePolicy            CompetitionG2VolumePolicy          `json:"g2_volume_policy,omitempty"`
+	TrustedInstrument         *CompetitionTrustedInstrumentProof `json:"trusted_instrument,omitempty"`
+	SimulatorSha256           string                             `json:"simulator_sha256,omitempty"`
+	ScorerSha256              string                             `json:"scorer_sha256,omitempty"`
 	Staging                   bool                               `json:"staging,omitempty"`
 	StagingRoundWindowSeconds int                                `json:"staging_round_window_seconds,omitempty"`
 	StagingPreparationSeconds int                                `json:"staging_preparation_seconds,omitempty"`
@@ -634,6 +638,7 @@ type CompetitionSourceActivation struct {
 	TargetRoundId             server.Id                          `json:"target_round_id"`
 	SourceDecisionDigest      string                             `json:"source_decision_digest"`
 	ApprovedPatchSha256       string                             `json:"approved_patch_sha256,omitempty"`
+	CandidatePathBase         string                             `json:"candidate_path_base,omitempty"`
 	Kind                      string                             `json:"kind"`
 	Reason                    string                             `json:"reason"`
 	BaseSourceLockSha256      string                             `json:"base_source_lock_sha256"`

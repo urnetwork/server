@@ -51,6 +51,7 @@ func settingsForAutomationRound(ctx context.Context, settings *Settings, store S
 		if err := LoadCompetitionRuntimeManifestContext(ctx, frozen, intent); err != nil {
 			return nil, err
 		}
+		frozen.runtimeIntentSha256 = intent.IntentSha256
 	}
 	return frozen, nil
 }

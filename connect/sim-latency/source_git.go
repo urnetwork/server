@@ -20,13 +20,15 @@ type sourceGitExecutionSettings struct {
 	ConfigurationTimeout time.Duration
 	// Positive combined configuration-key/output cap; default 64 KiB.
 	MaximumConfigurationBytes int
+	// Bounds diagnostic memory in bytes; default 4 KiB. Non-positive rejects nonempty output.
+	MaximumDiagnosticBytes int
 	// Positive descendant/pipe drain bound; default five seconds.
 	WaitDelay time.Duration
 }
 
 // Shared Git subprocess defaults do not reset a caller's total source budget.
 func defaultSourceGitExecutionSettings() sourceGitExecutionSettings {
-	return sourceGitExecutionSettings{ConfigurationTimeout: 2 * time.Minute, MaximumConfigurationBytes: 64 * 1024, WaitDelay: 5 * time.Second}
+	return sourceGitExecutionSettings{ConfigurationTimeout: 2 * time.Minute, MaximumConfigurationBytes: 64 * 1024, MaximumDiagnosticBytes: 4 * 1024, WaitDelay: 5 * time.Second}
 }
 
 // Discovers ordinary and bare repository roots without asking Git to trust an

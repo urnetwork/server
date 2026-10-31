@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
 )
 
 // Preparation is not a submission attempt and never resets a submission timer.
@@ -51,10 +52,12 @@ type roundBaselinePreparationPin struct {
 }
 
 type roundBaselinePreparationConfig struct {
-	Schema       int                           `json:"schema"`
-	Kind         string                        `json:"kind"`
-	Program      roundBaselinePreparationPin   `json:"program"`
-	Dependencies []roundBaselinePreparationPin `json:"dependencies"`
+	G2VolumePolicy     model.CompetitionG2VolumePolicy `json:"g2_volume_policy,omitempty"`
+	Schema             int                             `json:"schema"`
+	Kind               string                          `json:"kind"`
+	Program            roundBaselinePreparationPin     `json:"program"`
+	Dependencies       []roundBaselinePreparationPin   `json:"dependencies"`
+	ZeroSampleRecovery *roundBaselinePreparationPin    `json:"zero_sample_recovery,omitempty"`
 }
 
 // Runtime-only policy survives source/frozen-settings copies without changing
@@ -62,6 +65,7 @@ type roundBaselinePreparationConfig struct {
 type roundBaselinePreparationProfile struct {
 	Config   roundBaselinePreparationConfig
 	Settings roundBaselinePreparationSettings
+	Recovery *roundBaselineRecoveryCapability
 }
 
 // Facts from the sealed metadata-preflight v3 producer, not configurable policy.
@@ -87,21 +91,38 @@ func roundBaselinePreparationDependencyDigests() map[string]string {
 	}
 }
 
+// A new producer has its own immutable release. The historical program and
+// dependency fingerprints above continue to authenticate version-one controls.
+func roundBaselinePreparationPolicyDependencies(policy model.CompetitionG2VolumePolicy) (map[string]string, string, error) {
+	dependencies := roundBaselinePreparationDependencyDigests()
+	switch policy {
+	case model.CompetitionG2VolumePolicyLegacy:
+		return dependencies, "prepare-round-baseline.sh", nil
+	case model.CompetitionG2VolumePolicyMinimumWork:
+		delete(dependencies, "evaluator.sh")
+		dependencies["evaluator-minimum-work.sh"] = "7780930d44ebc1df5d8f775a75c37aadb2048fc1b9386027615f3ce6b5fe56d4"
+		return dependencies, "prepare-round-baseline-minimum-work.sh", nil
+	default:
+		return nil, "", errors.New("unsupported baseline preparation g2 volume policy")
+	}
+}
+
 // A reservation is append-only database evidence, not a claimed/running job.
 // Its identity contains no seed, providers, credentials or caller-selected command.
 type roundBaselinePreparation struct {
-	Schema        int        `json:"schema"`
-	Kind          string     `json:"kind"`
-	Owner         string     `json:"owner"`
-	WorkerId      string     `json:"worker_id"`
-	JobId         server.Id  `json:"job_id"`
-	RoundId       server.Id  `json:"round_id"`
-	PatchSha256   string     `json:"patch_sha256"`
-	ContextSha256 string     `json:"context_sha256"`
-	WorkerImage   string     `json:"worker_image_digest"`
-	StartedAt     time.Time  `json:"started_at"`
-	Deadline      time.Time  `json:"deadline"`
-	SourceJob     *queuedJob `json:"-"`
+	Schema        int                              `json:"schema"`
+	Kind          string                           `json:"kind"`
+	Owner         string                           `json:"owner"`
+	WorkerId      string                           `json:"worker_id"`
+	JobId         server.Id                        `json:"job_id"`
+	RoundId       server.Id                        `json:"round_id"`
+	PatchSha256   string                           `json:"patch_sha256"`
+	ContextSha256 string                           `json:"context_sha256"`
+	WorkerImage   string                           `json:"worker_image_digest"`
+	StartedAt     time.Time                        `json:"started_at"`
+	Deadline      time.Time                        `json:"deadline"`
+	SourceJob     *queuedJob                       `json:"-"`
+	Recovery      *roundBaselineRecoveryTransition `json:"-"`
 }
 
 // The producer must finish and archive before publication. The archive is a
@@ -135,6 +156,24 @@ type roundBaselinePreparer interface {
 }
 
 var errRoundBaselinePreparationHeld = errors.New("round baseline preparation is held; reconcile original evidence, do not resample")
+
+// A future CLI option may never replace the current startup profile, even if
+// the operator accidentally supplies a valid legacy configuration at that path.
+func ConfigureCompetitionFutureRoundBaselinePreparation(settings *Settings, path, expected string) error {
+	if settings == nil || settings.FutureEpochPolicy == nil {
+		return errors.New("future preparation requires an approved future epoch policy")
+	}
+	copy := *settings
+	copy.futureBaselinePreparation = nil
+	if err := ConfigureCompetitionRoundBaselinePreparation(&copy, path, expected); err != nil {
+		return err
+	}
+	if copy.futureBaselinePreparation == nil || copy.futureBaselinePreparation.Config.G2VolumePolicy != settings.FutureEpochPolicy.G2VolumePolicy {
+		return errors.New("future preparation config does not name the separately staged policy")
+	}
+	settings.futureBaselinePreparation = copy.futureBaselinePreparation
+	return nil
+}
 
 // Hashes bind the exact frozen round/source/workload and real queued job while
 // leaving the hidden seed out of durable reservation/event payloads.
@@ -178,9 +217,16 @@ func ConfigureCompetitionRoundBaselinePreparation(settings *Settings, path, expe
 	if err := decodeCompetitionPreparationJson(bytes.NewReader(content), 64*1024, &config); err != nil {
 		return err
 	}
-	expectedDependencies := roundBaselinePreparationDependencyDigests()
+	if config.G2VolumePolicy != settings.EvaluationPolicy.G2VolumePolicy &&
+		(settings.FutureEpochPolicy == nil || config.G2VolumePolicy != settings.FutureEpochPolicy.G2VolumePolicy) {
+		return errors.New("baseline preparation policy is neither current nor explicitly staged for a future epoch")
+	}
+	expectedDependencies, expectedProgram, err := roundBaselinePreparationPolicyDependencies(config.G2VolumePolicy)
+	if err != nil {
+		return err
+	}
 	if config.Schema != 1 || config.Kind != "sim-latency-round-baseline-preparation-config" ||
-		filepath.Base(config.Program.Path) != "prepare-round-baseline.sh" || len(config.Dependencies) != len(expectedDependencies) {
+		filepath.Base(config.Program.Path) != expectedProgram || len(config.Dependencies) != len(expectedDependencies) {
 		return errors.New("baseline preparation configuration identity is invalid")
 	}
 	for _, pin := range config.Dependencies {
@@ -218,7 +264,15 @@ func ConfigureCompetitionRoundBaselinePreparation(settings *Settings, path, expe
 	if statErr != nil || closeErr != nil || info.Mode().Perm()&0o022 != 0 || info.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid()) {
 		return errors.New("baseline preparation artifact root is not owned by the worker or is externally writable")
 	}
-	settings.roundBaselinePreparation = &roundBaselinePreparationProfile{Config: config, Settings: defaultRoundBaselinePreparationSettings()}
+	profile := &roundBaselinePreparationProfile{Config: config, Settings: defaultRoundBaselinePreparationSettings()}
+	if err := configureRoundBaselineRecovery(settings, profile); err != nil {
+		return err
+	}
+	if config.G2VolumePolicy == settings.EvaluationPolicy.G2VolumePolicy {
+		settings.roundBaselinePreparation = profile
+	} else {
+		settings.futureBaselinePreparation = profile
+	}
 	return nil
 }
 
@@ -266,7 +320,11 @@ func (self *Worker) claimWithPreparedRoundBaseline(ctx context.Context, host Hos
 		preparation.SourceJob == nil || preparation.SourceJob.StartedAt != nil || preparation.SourceJob.AttemptCount != 0 {
 		return hold("host_or_source_job_mismatch", errors.New("baseline preparation cannot borrow host readiness or a started job"))
 	}
-	operationCtx, cancel := context.WithDeadline(ctx, preparation.Deadline)
+	executionDeadline := roundBaselinePreparationExecutionDeadline(preparation)
+	if executionDeadline.IsZero() {
+		return hold("invalid_execution_clock", ErrConflict)
+	}
+	operationCtx, cancel := context.WithDeadline(ctx, executionDeadline)
 	defer cancel()
 	operationCtx, fenceCancel := context.WithCancelCause(operationCtx)
 	fenceCtx, stopFence := context.WithCancel(operationCtx)

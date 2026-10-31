@@ -1,0 +1,73 @@
+{
+  "fresh_single_declaration_sha256": "f483e625d3b11488133e38c5b2b71c62bbb660702f29167caf91191cee398308",
+  "prior_failed_result_sha256": "c85bf64bb18418219b5bd6f2c1ae30d88d02612fab5ff7684e7d9dea5882fdda",
+  "base_protocol": "launch-3a-bridge-3b-2026-10-26-v1",
+  "base_protocol_approval_sha256": "a794618968d840163952b7b2058100fd87b71ef7ccc44919ba590c5a253f643c",
+  "protocol": "launch-3a-bridge-fresh-single-b-2026-10-28-v1",
+  "protocol_approval_sha256": "2188428e3246b893e578c94fb3687ac15508146299a93c87a79236ac90fae646",
+  "original_plan_sha256": "24f9b6ea9fe6fbfb4381ca29535b81a1cd4966b397c701b04f5b09ac74eb11d8",
+  "original_a_base_sha": "c1f9dda603d6279666fca5d92b99c5663306c5f7",
+  "original_a_evaluator_image_id": "sha256:002c39040ce23dee27b171c7e657f749c6a6d05b1e9b97d90ac87336470dbaf3",
+  "new_release_sha256": "5a1504cbad9787f84c91ac87bc719abd6337a64723733d6cf7d052660753b850",
+  "margin_freeze_sha256": "d264f48d38a1ab6bea44342cdbcf5e13cebf6e4c2811506e8086995e4600b646",
+  "bridge_plan_sha256": "c70f5dfbad281c7d0ca70235043e400ca2a3b7fa49f2cf3be8ed8636b419723c",
+  "bridge_inputs_sha256": "85cf983b773102ac5ad706ba1eff612330261baf54589f07a2eae95937c000ec",
+  "bridge_compatibility_receipt_sha256": "2af963f0ca0cecef740744da974bd2d0c65a41a24b5d68cac277d076fe84c930",
+  "required_correctly_ordered_seeds": 1,
+  "schema": 1,
+  "kind": "sim-latency-held-out-public-plan",
+  "campaign_id": "c14d842b-ed8c-4615-a941-70f229f469cc",
+  "prepared_at": "2026-10-31T00:44:51.113923407Z",
+  "private_plan_sha256": "c356f20ab64de8a5e4a09752648ffcf6445e75f0d119a0f3e51db06408c0e6d5",
+  "configuration_sha256": "08f5f9c89429976d7462cccabd4b3845f52742c63c85b1c948ac8d63a6044d44",
+  "base_sha": "a9e8e1a710b24c749e6499a0606938252c83e136",
+  "source_lock_sha256": "ec322ed2db023e15ea5dc3eea60a6ca5989661bba737c340fea3477d8d1300cf",
+  "evaluator_image_id": "sha256:98c9061c4a43a25e7b581a5193ca6e7f48e49e7b7fc03b7c1b6190a029befee2",
+  "accepted_stage_a_report_sha256": "e78c1a965d485d0a183f95f72797aa75c5c0ba22e52acbcf28749cfe6ecb3adb",
+  "stage_a_inputs_sha256": "abf5fb1656358e6c1f2f41bc965ae5fd5e8a4faf510c95f3d5c251a10b392c94",
+  "evaluation_policy_sha256": "9ae215229cf367705866b2b7a01a75d0f817c6c8ab5657596339ed08c30ce188",
+  "accepted_margin": 0.269,
+  "reference_bundle_sha256": "430087759eb866a9b79e482d6f14ae04e19f01c71e19abe1d6e26f88b2337656",
+  "exclusions_sha256": "d5bdf06218e689141d3a0beb45a3fef9f30de018fd52fde7e4cf482ed2e7e899",
+  "qualification_sha256": "96934517166227683fdaf57b6476ee6de18059be551c39c7f15eb1fe08acadaa",
+  "control_replicates_per_round": 9,
+  "candidate_replicates_per_job": 9,
+  "original_job_limit_seconds": 10800,
+  "deferred_request_fields": [
+    "round_baseline_path",
+    "round_baseline_sha256"
+  ],
+  "rounds": [
+    {
+      "position": 1,
+      "round_id": "fec31071-1989-4803-996a-2aef81a15eb9",
+      "seed_commitment": "4039246720baae5d76460d1063469fa4277bff91b68220732cb4de17b6e27b29",
+      "providers_sha256": "2cfc7b56af9e7bea2247687c8fade9d8c0ce815538632a5f7b1e0c8316904241",
+      "reference_order": [
+        "no-op",
+        "better",
+        "worse"
+      ],
+      "jobs": [
+        {
+          "position": 1,
+          "role": "no-op",
+          "job_id": "684a3861-7324-4c45-bc38-eff44c5a6dfb",
+          "precommitted_request_sha256": "6805df289eb1d58901cf5c515d581c7fd991dc4a918608cdb791317f07462594"
+        },
+        {
+          "position": 2,
+          "role": "better",
+          "job_id": "a891db2c-81aa-4230-b1d4-724f13aa1b48",
+          "precommitted_request_sha256": "f5be8f0d0411c1ca0914f5fb8d12899082c1dd0edc9067b3dce94411a17105e0"
+        },
+        {
+          "position": 3,
+          "role": "worse",
+          "job_id": "3a98f516-f9d4-402f-90cb-68207984cb1f",
+          "precommitted_request_sha256": "0010abf587063135643ea7c9c31b6739ef5f2efdb361780a83895aaffa2ac621"
+        }
+      ]
+    }
+  ]
+}

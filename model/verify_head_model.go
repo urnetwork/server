@@ -236,6 +236,186 @@ return ARGV[1]`, []string{key}, hex.EncodeToString(candidate[:]), lifetime.Milli
 	return
 }
 
+// The SN Top board's own pin of a provider's head hash for one scoring window
+// (LEADERTOP.md §5.3). It is separate from the trail's pin so the board never
+// changes what a hop records.
+func snTopHeadPinKey(clientId server.Id, window string) string {
+	return fmt.Sprintf("{sntop_pin_%s}%s", clientId, window)
+}
+
+// GetVerifyHeadPrefixPins returns the /29 or /48 prefix hash each provider
+// scores by in the scoring window in effect now, pinned per settlement epoch
+// exactly as PinVerifyHopEgressIpHash pins a trail's hops (LEADERTOP.md §5.3):
+// the trail's pin when a hop already set one this window, else the board's
+// own pin, else the provider's candidate (verifyHeadHashCandidate), which the
+// board then pins for the window's lifetime. Like a poison hop it never sets
+// the trail's pin. A provider without a stored egress-IP-hash has no
+// candidate and is absent. The reads are pipelined 512 providers at a time.
+func GetVerifyHeadPrefixPins(ctx context.Context, clientIds []server.Id, settings *VerifySettings) (window string, pins map[server.Id][32]byte) {
+	window = verifyHeadHashWindow(ctx, settings)
+	return window, getVerifyHeadPrefixPins(ctx, clientIds, settings, window, true)
+}
+
+// GetSnTopPrefixPins reads the estimate interval's settlement pin, preserving
+// retained pins for providers that are no longer eligible. Historical windows
+// cannot acquire a new pin from today's egress address.
+func GetSnTopPrefixPins(ctx context.Context, clientIds []server.Id, settings *VerifySettings, tempo SnTopTempo) map[server.Id][32]byte {
+	current := verifyHeadHashWindow(ctx, settings)
+	window := fmt.Sprintf("e%d", tempo.SettlementEpoch)
+	if tempo.Source == SnTopTempoSourceClock {
+		// Without a historical epoch mapping, only the original clock window
+		// can supply a retained pin. Today's epoch or IP cannot fill that gap.
+		window = fmt.Sprintf("h%d", tempo.EndTime.Add(-time.Nanosecond).Unix()/int64(verifyHeadHashFallbackWindow/time.Second))
+	}
+	return getVerifyHeadPrefixPins(ctx, clientIds, settings, window, window == current)
+}
+
+// getVerifyHeadPrefixPins owns the Redis pipelines for one explicit window.
+func getVerifyHeadPrefixPins(ctx context.Context, clientIds []server.Id, settings *VerifySettings, window string, allowLive bool) (pins map[server.Id][32]byte) {
+	pins = map[server.Id][32]byte{}
+	if len(clientIds) == 0 {
+		return
+	}
+	lifetime := verifyHeadHashLifetime(ctx, window, settings)
+	nowMs := uint64(server.NowUtc().UnixMilli())
+	decode := func(cmd *redis.StringCmd) ([32]byte, bool) {
+		value, err := cmd.Result()
+		if errors.Is(err, redis.Nil) {
+			return [32]byte{}, false
+		}
+		server.Raise(err)
+		return decodeVerifyHeadHash(value, "head hash pin"), true
+	}
+	server.Redis(ctx, func(r server.RedisClient) {
+		for start := 0; start < len(clientIds); start += 512 {
+			chunk := clientIds[start:min(start+512, len(clientIds))]
+			trailCmds := make([]*redis.StringCmd, len(chunk))
+			boardCmds := make([]*redis.StringCmd, len(chunk))
+			_, err := r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+				for i, clientId := range chunk {
+					trailCmds[i] = pipe.Get(ctx, verifyHeadHashKey(clientId, window))
+					boardCmds[i] = pipe.Get(ctx, snTopHeadPinKey(clientId, window))
+				}
+				return nil
+			})
+			if err != nil && !errors.Is(err, redis.Nil) {
+				server.Raise(err)
+			}
+			unpinned := []server.Id{}
+			for i, clientId := range chunk {
+				if pinned, ok := decode(trailCmds[i]); ok {
+					pins[clientId] = pinned
+				} else if pinned, ok := decode(boardCmds[i]); ok {
+					pins[clientId] = pinned
+				} else {
+					unpinned = append(unpinned, clientId)
+				}
+			}
+			if len(unpinned) == 0 || !allowLive {
+				continue
+			}
+
+			// the candidates: each provider's live egress and the forward
+			// entries that decide which family attributes to it
+			reverseCmds := make([][]*redis.MapStringStringCmd, len(unpinned))
+			_, err = r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+				for i, clientId := range unpinned {
+					for _, reverseKey := range verifyClientEgressKeys(clientId) {
+						reverseCmds[i] = append(reverseCmds[i], pipe.HGetAll(ctx, reverseKey))
+					}
+				}
+				return nil
+			})
+			if err != nil && !errors.Is(err, redis.Nil) {
+				server.Raise(err)
+			}
+			lives := make([]verifyLiveEgress, len(unpinned))
+			forwardHashes := map[string]bool{}
+			for i := range unpinned {
+				versions := []map[string]string{}
+				for _, cmd := range reverseCmds[i] {
+					fields, _ := cmd.Result()
+					live, _ := splitVerifyEgressFields(fields, nowMs)
+					versions = append(versions, live)
+				}
+				lives[i] = newVerifyLiveEgress(versions[0], versions[1])
+				for _, family := range []int{4, 6} {
+					for _, egressHashHex := range lives[i].familyForwardHashes(family) {
+						forwardHashes[egressHashHex] = true
+					}
+				}
+			}
+			forwardList := make([]string, 0, len(forwardHashes))
+			for egressHashHex := range forwardHashes {
+				forwardList = append(forwardList, egressHashHex)
+			}
+			forwardCmds := make([]*redis.StringCmd, len(forwardList))
+			_, err = r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+				for i, egressHashHex := range forwardList {
+					forwardCmds[i] = pipe.Get(ctx, verifyEgressKeyFromHex(egressHashHex))
+				}
+				return nil
+			})
+			if err != nil && !errors.Is(err, redis.Nil) {
+				server.Raise(err)
+			}
+			forwards := map[string]string{}
+			for i, egressHashHex := range forwardList {
+				owner, cmdErr := forwardCmds[i].Result()
+				if cmdErr == nil {
+					forwards[egressHashHex] = owner
+				}
+			}
+
+			candidates := map[server.Id][32]byte{}
+			for i, clientId := range unpinned {
+				if candidate, ok := verifyHeadHashLiveCandidate(lives[i], clientId, forwards); ok {
+					candidates[clientId] = candidate
+				}
+			}
+			if len(candidates) == 0 {
+				continue
+			}
+			_, err = r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+				for clientId, candidate := range candidates {
+					pipe.SetNX(ctx, snTopHeadPinKey(clientId, window), hex.EncodeToString(candidate[:]), lifetime)
+				}
+				return nil
+			})
+			if err != nil && !errors.Is(err, redis.Nil) {
+				server.Raise(err)
+			}
+			// a concurrent writer that pinned first keeps its value from the
+			// next tempo on; this tempo scores the candidate either way
+			for clientId, candidate := range candidates {
+				pins[clientId] = candidate
+			}
+		}
+	})
+	return
+}
+
+// verifyHeadHashLiveCandidate is verifyHeadHashCandidate on prefetched state:
+// the least stored egress-IP-hash of the first family, IPv4 then IPv6, that
+// attributes to the provider. There is no hop source to fall back to.
+func verifyHeadHashLiveCandidate(live verifyLiveEgress, clientId server.Id, forwards map[string]string) ([32]byte, bool) {
+	for _, family := range []int{4, 6} {
+		if !live.familyAttributes(family, clientId, forwards) {
+			continue
+		}
+		scores := []string{}
+		for _, address := range live.byFamily[family] {
+			if address.score != "" {
+				scores = append(scores, address.score)
+			}
+		}
+		if 0 < len(scores) {
+			return decodeVerifyHeadHash(slices.Min(scores), "stored egress-IP-hash"), true
+		}
+	}
+	return [32]byte{}, false
+}
+
 // GetVerifyEgressOwners resolves forward entries in bulk: egress hash hex ->
 // owning client id string, or VerifyEgressAmbiguousOwner. Hashes without a
 // live forward entry are absent.

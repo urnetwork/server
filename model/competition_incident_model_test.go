@@ -6,6 +6,31 @@ import (
 	"testing"
 )
 
+// This reason represents only a paused evaluator, never an admission, source or
+// reward waiver. Intake authority must separately prove its precise approval.
+func TestCompetitionAutomationCalibrationMaintenanceRequiresActiveEvaluation(t *testing.T) {
+	args := CompetitionAutomationHoldArgs{Kind: "evaluation", Active: true, ExpectedRevision: 3,
+		IdempotencyKey: "synthetic-calibration", ReasonCode: "CALIBRATION_MAINTENANCE",
+		PublicExplanation: "Synthetic serial calibration pause.", EvidenceSha256: strings.Repeat("f", 64)}
+	if err := ValidateCompetitionAutomationHold(args); err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []string{"admission", "source_activation", "reward_delivery"} {
+		args.Kind = kind
+		if ValidateCompetitionAutomationHold(args) == nil {
+			t.Fatalf("maintenance reason accepted for %s", kind)
+		}
+	}
+	args.Kind, args.Active = "evaluation", false
+	if ValidateCompetitionAutomationHold(args) == nil {
+		t.Fatal("maintenance reason released the evaluator")
+	}
+	args.ReasonCode = "RECOVERY_APPROVED"
+	if err := ValidateCompetitionAutomationHold(args); err != nil {
+		t.Fatal("normal explicit recovery changed", err)
+	}
+}
+
 // Releasing a pause requires an affirmative recovery decision, not a boolean.
 func TestCompetitionAutomationHoldRequiresRecoveryApproval(t *testing.T) {
 	args := CompetitionAutomationHoldArgs{

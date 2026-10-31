@@ -54,7 +54,7 @@ func TestSourcePublicationAuthenticatesDependencyPatchTree(t *testing.T) {
 		t.Fatal(err)
 	}
 	digest := sha256.Sum256(patch)
-	intent := &sourcePublicationIntent{ApprovedPatchPath: patchPath, ApprovedPatchSha256: hex.EncodeToString(digest[:])}
+	intent := &sourcePublicationIntent{CandidatePathBase: "mono_root_v1", ApprovedPatchPath: patchPath, ApprovedPatchSha256: hex.EncodeToString(digest[:])}
 	ref := sourcePublicationRef{Repository: "connect", Branch: "sim-latency", ExpectedCommit: base, Commit: commit, StagedRoot: repository}
 	backend := &gitSourcePublicationBackend{patchPolicy: controller.PatchPolicy{PathBase: "mono_root_v1", MaxPatchBytes: 4096, AllowedPaths: []string{"connect/**", "sdk/**"}, ForbiddenPaths: []string{"server/connect/sim-latency/**"}}}
 	if err := backend.Verify(context.Background(), ref, intent); err != nil {

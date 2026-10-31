@@ -1,5 +1,5 @@
 // Intake preserves source/archive protection while separately reporting real
-// host availability and the one approved initial intake-only hold boundary.
+// host availability and exact initial or calibration-maintenance hold authority.
 package controller
 
 import (
@@ -32,7 +32,7 @@ func (self PostgresStore) AutomationHoldStatus(ctx context.Context, settings *Se
 	return status, err
 }
 
-// Ordinary holds never waive readiness; only the exact initial approval can
+// Ordinary holds never waive readiness; only an exact intake approval can
 // distinguish intake from an offline host. Canonical PublicInfo stays unchanged.
 func (self *Service) competitionRuntimeStatus(ctx context.Context, settings *Settings, round *roundRecord, checks map[string]bool) (*model.CompetitionRuntimeStatus, error) {
 	if !settings.AutomationPolicy.Enabled {

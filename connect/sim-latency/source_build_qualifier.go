@@ -106,7 +106,7 @@ func executeSourceBuildQualifier(ctx context.Context, qualification sourceBuildQ
 	}
 	proposal := qualification.Build.Proposal
 	if profile == nil || profile.Schema != 1 || profile.Kind != "prospective-source-hardware-fingerprint/v1" || profile.RuntimeQualified ||
-		profile.ImageId != qualification.Artifacts.ImageId || profile.BaseImageId != proposal.EvaluatedImageDigest || profile.ReviewId != proposal.ReviewId.String() ||
+		profile.ImageId != qualification.Artifacts.ImageId || profile.BaseImageId != proposal.EvaluatedImageDigest || profile.ReviewId != sourceBuildAuthorizationIdentity(qualification.Build) ||
 		profile.SourceLockSha256 != proposal.SourceLockSha256 || !validSha256(profile.QualificationSha256) || !validSha256(profileDigest) {
 		return nil, errors.New("source qualification host evidence belongs to another image or claims premature runtime readiness")
 	}
@@ -126,7 +126,15 @@ func executeSourceBuildQualifier(ctx context.Context, qualification sourceBuildQ
 		HostQualificationSha256: profile.QualificationSha256, ContainmentSha256: containmentDigest, TestEvidenceSha256: testDigest,
 		SandboxId: qualification.Owner, Offline: true, NoMainCredentials: true, ReadOnlySource: true, Passed: true,
 		TestModel: tests.Model, TestReasoning: tests.Reasoning, WinnerReviewPolicy: tests.WinnerReviewPolicy}
-	if err := validateReviewedSourceBuildForPolicy(receipt, proposal.ReviewId, proposal.PatchSha256, proposal.SourceLockSha256, proposal.Staging, proposal.WinnerReviewPolicy); err != nil {
+	if sourceBuildRequestMinimumWork(qualification.Build) {
+		receipt.SimulatorSha256, receipt.G2VolumePolicy = qualification.Artifacts.SimulatorSha256, model.CompetitionG2VolumePolicyMinimumWork
+	}
+	if qualification.Build.TrustedInstrument != nil {
+		receipt.Schema, receipt.Operation = 2, "trusted_instrument_build"
+		receipt.InstrumentApprovalSha256 = qualification.Build.TrustedInstrument.Approval.ApprovalSha256
+		receipt.SimulatorSha256 = qualification.Artifacts.SimulatorSha256
+	}
+	if err := validateSourceBuildReceipt(qualification.Build, receipt); err != nil {
 		return nil, err
 	}
 	if err := ctx.Err(); err != nil {

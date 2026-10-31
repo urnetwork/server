@@ -463,6 +463,11 @@ type ExchangeSettings struct {
 	ExchangeReadHeaderTimeout          time.Duration
 	ExchangeWriteHeaderTimeout         time.Duration
 	ExchangeReconnectAfterErrorTimeout time.Duration
+	// Idle is the ping interval plus this margin. Outstanding data can
+	// suppress TCP probes; application reads retain their own timeout.
+	ExchangeKeepAliveIdleMargin time.Duration
+	ExchangeKeepAliveInterval   time.Duration
+	ExchangeKeepAliveCount      int
 	// DialContext, when set, creates outbound internal exchange connections.
 	// Tests use it to place edge-to-edge TCP below a userspace network model.
 	// Nil retains the host TCP dialer. The exchange owns and closes successful
@@ -471,6 +476,8 @@ type ExchangeSettings struct {
 	// Nil in production. Tests publish instance-owned barriers after the real
 	// header succeeds and before any connection worker starts, outside locks.
 	beforeExchangeConnectionRunForTest func(*ExchangeConnection)
+	// Nil in production. Tests count the ping timer arms of exchange writers.
+	afterPingTimerArmForTest func()
 	// Nil and empty in production. Tests give the edge inventory a synthetic
 	// services.yml and the process host it matches, instead of the vault's
 	// and WARP_HOST.
@@ -560,6 +567,13 @@ type ExchangeSettings struct {
 	ExchangeMoverSettings
 }
 
+// Reports one exchange writer ping timer arm to a test.
+func (self *ExchangeSettings) pingTimerArmedForTest() {
+	if armed := self.afterPingTimerArmForTest; armed != nil {
+		armed()
+	}
+}
+
 type ExchangeChaosSettings struct {
 	ResidentShutdownPerSecond float64
 }
@@ -615,6 +629,9 @@ func DefaultExchangeSettingsWithBufferSize(bufferSize int) *ExchangeSettings {
 		ExchangeReadHeaderTimeout:          exchangeResidentWaitTimeout,
 		ExchangeWriteHeaderTimeout:         exchangeResidentWaitTimeout,
 		ExchangeReconnectAfterErrorTimeout: 1 * time.Second,
+		ExchangeKeepAliveIdleMargin:        time.Second,
+		ExchangeKeepAliveInterval:          time.Second,
+		ExchangeKeepAliveCount:             4,
 		ExchangeResidentTtl:                300 * time.Second,
 		// network peers re-enabled on the PEERS2 poll architecture (PEERS2.md) —
 		// the pubsub delivery that caused the 2026-07-15 outage is gone (no
@@ -1357,7 +1374,7 @@ func (self *Exchange) serveExchangeConnection(port int) {
 	if serverSocket == nil {
 		listenIpv4, _, listenPort := server.RequireListenIpPort(port)
 
-		listenConfig := exchangeListenConfig()
+		listenConfig := exchangeListenConfig(exchangeKeepAliveConfig(self.settings))
 
 		var err error
 		// leave host part empty to listen on all available interfaces
@@ -1602,6 +1619,8 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 			defer handleCancel()
 
 			sendBuffer := NewDefaultExchangeBuffer(self.settings)
+			pinger := newExchangePinger(self.settings)
+			defer pinger.stop()
 			batch := make([][]byte, 0, self.settings.ExchangeWriteBatchCount)
 			// gather pending messages into `batch` without blocking, bounded by
 			// the write batch limits, and write them with a single writev.
@@ -1644,17 +1663,14 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 				if err != nil {
 					return false
 				}
+				pinger.wrote()
 				if glog.V(1) {
 					glog.Infof("[ecrs] %s/%s\n", resident.clientId, resident.residentId)
 				}
 				return open
 			}
-			// reusable ping timer (hot-path timer reuse): the slow select arms a
-			// timer each iteration the send channel briefly drains between bursts.
-			pingTimer := time.NewTimer(0)
-			defer pingTimer.Stop()
 			for {
-				// fast path without arming the ping timer
+				// fast path without waiting on the ping timer
 				select {
 				case <-handleCtx.Done():
 					return
@@ -1666,7 +1682,6 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 				default:
 				}
 
-				pingTimer.Reset(self.settings.ExchangePingTimeout)
 				select {
 				case <-handleCtx.Done():
 					return
@@ -1674,11 +1689,15 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 					if !writeBatch(message, ok) {
 						return
 					}
-				case <-pingTimer.C:
+				case <-pinger.timer.C:
+					if !pinger.fired() {
+						continue
+					}
 					// send a ping
 					if err := sendBuffer.WriteMessage(conn, make([]byte, 0)); err != nil {
 						return
 					}
+					pinger.pinged()
 				}
 			}
 		})
@@ -2409,6 +2428,86 @@ func (self *Exchange) WaitForIdle(ctx context.Context) bool {
 // full 16 KiB batch for every sparse exchange sender.
 const exchangeSingletonWriteStorageByteCount = 2 * 1024
 
+// A socket deadline installed for one connection. Only an identical absolute
+// deadline may be reused: an earlier one shortens a healthy operation's budget.
+type exchangeDeadline struct {
+	conn     net.Conn
+	deadline time.Time
+}
+
+// Gives this operation its entire budget, retaining native I/O completion
+// semantics even if its goroutine resumes after the deadline.
+func (self *exchangeDeadline) refresh(conn net.Conn, timeout time.Duration, set func(time.Time) error) error {
+	deadline := time.Now().Add(timeout)
+	if self.conn == conn && self.deadline.Equal(deadline) {
+		return nil
+	}
+	if err := set(deadline); err != nil {
+		return err
+	}
+	self.conn = conn
+	self.deadline = deadline
+	return nil
+}
+
+// Forgets the installed deadline after a handshake replaced it on the socket.
+func (self *exchangeDeadline) reset() {
+	self.conn = nil
+	self.deadline = time.Time{}
+}
+
+// Paces the keepalive pings of one exchange socket writer from its last write.
+// The timer is armed only when it fires, for the time the writer will have been
+// idle a full ExchangePingTimeout: resetting it whenever the send queue drained
+// made almost every frame a runtime timer modification. The peer still waits
+// at most ExchangePingTimeout between frames.
+type exchangePinger struct {
+	settings      *ExchangeSettings
+	timer         *time.Timer
+	lastWriteTime time.Time
+}
+
+func newExchangePinger(settings *ExchangeSettings) *exchangePinger {
+	pinger := &exchangePinger{
+		settings:      settings,
+		timer:         time.NewTimer(settings.ExchangePingTimeout),
+		lastWriteTime: time.Now(),
+	}
+	settings.pingTimerArmedForTest()
+	return pinger
+}
+
+// Records a completed write. The timer is left as it is.
+func (self *exchangePinger) wrote() {
+	self.lastWriteTime = time.Now()
+}
+
+// Takes a fire of the timer and reports whether the writer has been idle a
+// full ExchangePingTimeout and must ping. Otherwise the timer is re-armed for
+// the rest of the interval.
+func (self *exchangePinger) fired() bool {
+	if idle := time.Since(self.lastWriteTime); idle < self.settings.ExchangePingTimeout {
+		self.arm(self.settings.ExchangePingTimeout - idle)
+		return false
+	}
+	return true
+}
+
+// Records a written ping and arms the timer a full interval out.
+func (self *exchangePinger) pinged() {
+	self.wrote()
+	self.arm(self.settings.ExchangePingTimeout)
+}
+
+func (self *exchangePinger) arm(timeout time.Duration) {
+	self.timer.Reset(timeout)
+	self.settings.pingTimerArmedForTest()
+}
+
+func (self *exchangePinger) stop() {
+	self.timer.Stop()
+}
+
 // each call overwrites the internal buffer
 type ExchangeBuffer struct {
 	settings *ExchangeSettings
@@ -2431,6 +2530,11 @@ type ExchangeBuffer struct {
 	// The single writer allocates this only for a non-empty message that fits.
 	// Receive-only, idle, and oversized-only senders retain no payload scratch.
 	writeStorage []byte
+
+	// the message deadlines this buffer installed, re-armed only once a third
+	// of their timeout has passed
+	readDeadline  exchangeDeadline
+	writeDeadline exchangeDeadline
 
 	// Test-only scalar observation after the real native writev returns.
 	afterWritevForTest func(messageCount int, writtenByteCount int64, writeErr error)
@@ -2470,6 +2574,7 @@ func (self *ExchangeBuffer) WriteHeader(ctx context.Context, conn net.Conn, head
 	if err := conn.SetWriteDeadline(time.Now().Add(self.settings.ExchangeWriteHeaderTimeout)); err != nil {
 		return err
 	}
+	self.writeDeadline.reset()
 	if err := self.framer.Write(conn, headerBytes); err != nil {
 		return err
 	}
@@ -2481,6 +2586,7 @@ func (self *ExchangeBuffer) ReadHeader(ctx context.Context, conn net.Conn) (*Exc
 	if err := conn.SetReadDeadline(time.Now().Add(self.settings.ExchangeReadHeaderTimeout)); err != nil {
 		return nil, err
 	}
+	self.readDeadline.reset()
 	headerBytes, err := self.framer.Read(self.connReader(conn))
 	if err != nil {
 		return nil, err
@@ -2512,7 +2618,7 @@ func (self *ExchangeBuffer) WriteMessage(conn net.Conn, transferFrameBytes []byt
 		}
 		self.writeStorage = make([]byte, storageByteCount)
 	}
-	if err := conn.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout)); err != nil {
+	if err := self.writeDeadline.refresh(conn, self.settings.WriteTimeout, conn.SetWriteDeadline); err != nil {
 		connect.MessagePoolReturn(transferFrameBytes)
 		return err
 	}
@@ -2557,7 +2663,7 @@ func (self *ExchangeBuffer) WriteMessages(conn net.Conn, transferFrameBytesBatch
 		}
 	}
 
-	if err := conn.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout)); err != nil {
+	if err := self.writeDeadline.refresh(conn, self.settings.WriteTimeout, conn.SetWriteDeadline); err != nil {
 		for _, message := range transferFrameBytesBatch {
 			connect.MessagePoolReturn(message)
 		}
@@ -2605,7 +2711,7 @@ func (self *ExchangeBuffer) WriteMessages(conn net.Conn, transferFrameBytesBatch
 }
 
 func (self *ExchangeBuffer) ReadMessage(conn net.Conn) ([]byte, error) {
-	if err := conn.SetReadDeadline(time.Now().Add(self.settings.ExchangeReadTimeout)); err != nil {
+	if err := self.readDeadline.refresh(conn, self.settings.ExchangeReadTimeout, conn.SetReadDeadline); err != nil {
 		return nil, err
 	}
 	transferFrameBytes, err := self.framer.Read(self.connReader(conn))
@@ -2711,22 +2817,30 @@ type ExchangeConnection struct {
 	afterSendWriteForTest func(messageCount int, writeErr error)
 }
 
-// Exchange liveness is the exchange's own ping, every ExchangePingTimeout,
-// against an ExchangeReadTimeout read deadline at each end. TCP keepalive on
-// top of it only added a probe and an ACK per idle socket: at the former 1 s
-// idle, about a fifth of all TCP segments on a services edge.
-func configureExchangeTcpConn(tcpConn *net.TCPConn) {
-	tcpConn.SetNoDelay(true)
-	tcpConn.SetLinger(0)
-	tcpConn.SetKeepAlive(false)
+// Puts idle probing after the normal ping cadence. TCP suppresses keepalive
+// probes while data is outstanding, so idle + interval * count is not a
+// dead-peer guarantee; the independent exchange read timeout remains required.
+func exchangeKeepAliveConfig(settings *ExchangeSettings) net.KeepAliveConfig {
+	return net.KeepAliveConfig{
+		Enable:   true,
+		Idle:     settings.ExchangePingTimeout + settings.ExchangeKeepAliveIdleMargin,
+		Interval: settings.ExchangeKeepAliveInterval,
+		Count:    settings.ExchangeKeepAliveCount,
+	}
 }
 
-// Accepted exchange sockets rely on the same ping and read deadline, so the
-// listener leaves TCP keepalive off instead of taking Go's default.
-func exchangeListenConfig() net.ListenConfig {
+// Applies exchange latency and idle-probe settings to the owned TCP socket.
+func configureExchangeTcpConn(tcpConn *net.TCPConn, keepAlive net.KeepAliveConfig) {
+	tcpConn.SetNoDelay(true)
+	tcpConn.SetLinger(0)
+	tcpConn.SetKeepAliveConfig(keepAlive)
+}
+
+// Accepted exchange sockets carry the same keepalive as dialed ones.
+func exchangeListenConfig(keepAlive net.KeepAliveConfig) net.ListenConfig {
 	return net.ListenConfig{
-		Control:   server.SoReusePort,
-		KeepAlive: -1,
+		Control:         server.SoReusePort,
+		KeepAliveConfig: keepAlive,
 	}
 }
 
@@ -2764,7 +2878,7 @@ func NewExchangeConnection(
 	})
 	defer stopContextClose()
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
-		configureExchangeTcpConn(tcpConn)
+		configureExchangeTcpConn(tcpConn, exchangeKeepAliveConfig(settings))
 	}
 
 	success := false
@@ -2933,6 +3047,8 @@ func (self *ExchangeConnection) Run() {
 	startWorker(func() {
 		defer self.cancel()
 
+		pinger := newExchangePinger(self.settings)
+		defer pinger.stop()
 		batch := make([][]byte, 0, self.settings.ExchangeWriteBatchCount)
 		// gather pending messages into `batch` without blocking, bounded by the
 		// write batch limits, and write them with a single writev.
@@ -2977,18 +3093,15 @@ func (self *ExchangeConnection) Run() {
 			if err != nil {
 				return false
 			}
+			pinger.wrote()
 			if glog.V(2) {
 				glog.Infof("[ecs] %s/%s@%s:%d\n", self.header.ClientId, self.header.ResidentId, self.host, self.port)
 			}
 			return open
 		}
-		// reusable ping timer (hot-path timer reuse): the slow select below arms
-		// a timer each iteration the send channel briefly drains between bursts.
-		pingTimer := time.NewTimer(0)
-		defer pingTimer.Stop()
 
 		for {
-			// fast path without arming the ping timer
+			// fast path without waiting on the ping timer
 			select {
 			case <-self.ctx.Done():
 				return
@@ -3000,7 +3113,6 @@ func (self *ExchangeConnection) Run() {
 			default:
 			}
 
-			pingTimer.Reset(self.settings.ExchangePingTimeout)
 			select {
 			case <-self.ctx.Done():
 				return
@@ -3008,11 +3120,15 @@ func (self *ExchangeConnection) Run() {
 				if !writeBatch(message, ok) {
 					return
 				}
-			case <-pingTimer.C:
+			case <-pinger.timer.C:
+				if !pinger.fired() {
+					continue
+				}
 				// send a ping
 				if err := self.sendBuffer.WriteMessage(self.conn, make([]byte, 0)); err != nil {
 					return
 				}
+				pinger.pinged()
 			}
 		}
 	})

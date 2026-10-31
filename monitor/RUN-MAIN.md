@@ -4,7 +4,7 @@ This is the standing operating contract for an agent that runs the production
 monitor, validates every finding, fixes root causes, extends the signal catalog,
 and repeats. The Go monitor described in [MONITOR.md](MONITOR.md) remains a
 deterministic, read-only detector. The agent using this harness is the separate
-diagnostic and repair system that consumes its structured Markdown alerts.
+diagnostic and repair system that consumes its structured alerts.
 
 The harness is intentionally continuous. A quiet snapshot, a code commit, or a
 successful deployment is not an end condition. Keep one authoritative monitor
@@ -35,6 +35,14 @@ so their evidence context and open causal boundaries remain intact:
   Sol Low to run. Every
   self-improvement fix to the probes, shared monitoring utilities, signal
   catalog, or this harness also belongs to Sol Medium.
+
+Before assigning new work to a reused role, verify the agent's actual status.
+Use `followup_task` to reactivate a completed agent; it also accepts new work
+for a running agent. Reserve `send_message` for status updates: it does not
+start a new turn for a completed agent. Confirm an active acknowledgement and,
+when execution has started, its actual live execution-session handle before
+reporting execution underway. Retain ownership of live handles through terminal
+completion and cleanup; passing a handle does not transfer ownership.
 
 For each such boundary, Sol Low sends an initial deterministic delta and triage
 manifest referencing the prior ledger record and object hashes described below;
@@ -1502,6 +1510,28 @@ retain the original failure and prepare a corrected graph with its own evidence.
 A source census or static path check is not physical runtime qualification, and
 a focused repair does not qualify the full normal/race gates. Sol Low owns the
 physical prerequisite checks and test execution.
+
+For directory bind mounts, verify read/search and required file access as the
+pinned image's effective container user before fixture startup. A copied `0700`
+directory can preserve every byte and still deny initdb access. Declare the
+required mounted-directory mode (local Postgres initdb uses `0755`); preserve
+parent and file modes, and retain role metadata plus the consumer-access proof.
+
+The hash of `bin/go`, its version, and a Go-source census do not bind the full
+compiler toolchain. Pin and verify the actual `pkg/tool` executables, assembler
+headers, selected non-Go race objects, and the native CC/linker executable,
+loader, library, CRT, specs and include/search closure before launch and after
+each gate. Refuse missing compiler roles before allocating a fixture; do not
+ignore them because they were absent from an expected-file map. An after-only
+census cannot repair missing pre-launch authority. Preserve affected native
+results as diagnostics and use fresh outputs, caches and prerequisites for the
+corrected qualification launch.
+
+Generated control and admission inputs must each retain their own named path
+and hash from the selected launch's manifests. Verify tool and source bindings
+against their respective selected records; do not share an ambiguous hash field
+or copy pins from an older example. Derive interpreter runtime paths from the
+selected interpreter, rather than copying a Python-version directory.
 
 The native test prerequisites are separate from the PostgreSQL/Redis resource
 attestation. Before launching either full monitor suite, bind

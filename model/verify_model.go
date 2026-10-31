@@ -1772,41 +1772,50 @@ func InsertVerifyTrail(
 	row *VerifyTrailRow,
 ) {
 	server.Tx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-			INSERT INTO verify_trail (
-				trail_id,
-				vpk,
-				server_key_id,
-				server_nonce,
-				depth,
-				status,
-				hops_json,
-				final_sig,
-				verifier_sig,
-				create_time,
-				complete_time,
-				original_state
-			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-			ON CONFLICT (trail_id) DO NOTHING
-			`,
-			row.TrailId,
-			row.Vpk,
-			int16(row.ServerKeyId),
-			row.ServerNonce,
-			row.Depth,
-			row.Status,
-			row.HopsJson,
-			row.FinalSig,
-			row.VerifierSig,
-			row.CreateTime.UTC(),
-			row.CompleteTime,
-			row.OriginalState,
-		))
-		server.RaisePgResult(tx.Exec(ctx, `DELETE FROM verify_original_pending WHERE trail_id=$1`, row.TrailId))
+		insertVerifyTrailInTx(ctx, tx, row)
 	})
+}
+
+// insertVerifyTrailInTx is InsertVerifyTrail in the caller's transaction.
+func insertVerifyTrailInTx(
+	ctx context.Context,
+	tx server.PgTx,
+	row *VerifyTrailRow,
+) {
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+		INSERT INTO verify_trail (
+			trail_id,
+			vpk,
+			server_key_id,
+			server_nonce,
+			depth,
+			status,
+			hops_json,
+			final_sig,
+			verifier_sig,
+			create_time,
+			complete_time,
+			original_state
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		ON CONFLICT (trail_id) DO NOTHING
+		`,
+		row.TrailId,
+		row.Vpk,
+		int16(row.ServerKeyId),
+		row.ServerNonce,
+		row.Depth,
+		row.Status,
+		row.HopsJson,
+		row.FinalSig,
+		row.VerifierSig,
+		row.CreateTime.UTC(),
+		row.CompleteTime,
+		row.OriginalState,
+	))
+	server.RaisePgResult(tx.Exec(ctx, `DELETE FROM verify_original_pending WHERE trail_id=$1`, row.TrailId))
 }
 
 // GetVerifyTrailRow loads one `verify_trail` record, or nil.

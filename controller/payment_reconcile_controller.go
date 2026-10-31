@@ -175,7 +175,7 @@ var zcashReconcileHasCredentials = func() bool {
 // The only genuinely new credential reconciliation needs: App Store Server
 // API client credentials, from vault/<env>/apple.yml --
 // app_store_server_api_key_id, issuer_id, private_key (the .p8 contents).
-// bundle_id and product_ids are read from the existing
+// bundle_id, product_ids and environments are read from the existing
 // app_store_notifications block.
 type appleServerApiCredentials struct {
 	KeyId      string
@@ -183,6 +183,17 @@ type appleServerApiCredentials struct {
 	PrivateKey string
 	BundleId   string
 	ProductIds []string
+	// The App Store environments ("Production", "Sandbox") whose notifications
+	// this deployment accepts and credits: the same list the webhook verifier
+	// enforces.
+	Environments []string
+}
+
+// allowsEnvironment reports whether this deployment accepts the App Store
+// environment's notifications, so its renewals can name that environment's
+// transactions.
+func (self *appleServerApiCredentials) allowsEnvironment(environment string) bool {
+	return slices.Contains(self.Environments, environment)
 }
 
 func appleReconcileCredentialsFromVault() *appleServerApiCredentials {
@@ -201,8 +212,9 @@ func appleReconcileCredentialsFromVault() *appleServerApiCredentials {
 		IssuerId              string `yaml:"issuer_id"`
 		PrivateKey            string `yaml:"private_key"`
 		AppStoreNotifications *struct {
-			BundleId   string   `yaml:"bundle_id"`
-			ProductIds []string `yaml:"product_ids"`
+			BundleId     string   `yaml:"bundle_id"`
+			ProductIds   []string `yaml:"product_ids"`
+			Environments []string `yaml:"environments"`
 		} `yaml:"app_store_notifications"`
 	}
 	if err := resource.UnmarshalYamlE(&config); err != nil ||
@@ -211,11 +223,12 @@ func appleReconcileCredentialsFromVault() *appleServerApiCredentials {
 		return nil
 	}
 	return &appleServerApiCredentials{
-		KeyId:      config.KeyId,
-		IssuerId:   config.IssuerId,
-		PrivateKey: config.PrivateKey,
-		BundleId:   config.AppStoreNotifications.BundleId,
-		ProductIds: config.AppStoreNotifications.ProductIds,
+		KeyId:        config.KeyId,
+		IssuerId:     config.IssuerId,
+		PrivateKey:   config.PrivateKey,
+		BundleId:     config.AppStoreNotifications.BundleId,
+		ProductIds:   config.AppStoreNotifications.ProductIds,
+		Environments: config.AppStoreNotifications.Environments,
 	}
 }
 
@@ -223,6 +236,59 @@ var appleReconcileCredentialsFunc = appleReconcileCredentialsFromVault
 
 // replaceable by tests standing up a fake App Store Server API
 var appleAppStoreServerApiBaseUrl = "https://api.storekit.itunes.apple.com"
+
+// The sandbox App Store Server API, which holds TestFlight and App Review
+// purchases. The same API key signs requests to both environments.
+// Replaceable by tests standing up a fake.
+var appleAppStoreServerApiSandboxBaseUrl = "https://api.storekit-sandbox.itunes.apple.com"
+
+// The App Store environment name in notifications, signed transactions and
+// apple.yml app_store_notifications.environments.
+const appleEnvironmentSandbox = "Sandbox"
+
+// Apple's TransactionIdNotFoundError. Production answers it for a transaction
+// id that belongs to the sandbox environment, which only the sandbox API
+// knows.
+const appleTransactionIdNotFoundErrorCode = 4040010
+
+// appleTransactionIdNotFound reports whether err is Apple's 404
+// TransactionIdNotFoundError. Every other failure, including a 404 with a
+// different error code or a body that is not Apple's error object, is not.
+func appleTransactionIdNotFound(err error) bool {
+	var statusErr *server.HttpStatusError
+	if !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusNotFound {
+		return false
+	}
+	var apiError struct {
+		ErrorCode int64 `json:"errorCode"`
+	}
+	if json.Unmarshal([]byte(statusErr.ResponseBody), &apiError) != nil {
+		return false
+	}
+	return apiError.ErrorCode == appleTransactionIdNotFoundErrorCode
+}
+
+// appleGetSubscriptionStatuses calls Get All Subscription Statuses for the
+// transaction in the environment that baseUrl names.
+func appleGetSubscriptionStatuses(
+	ctx context.Context,
+	baseUrl string,
+	transactionId string,
+) (*appleSubscriptionStatusesResponse, error) {
+	statusesUrl := fmt.Sprintf(
+		"%s/inApps/v1/subscriptions/%s",
+		baseUrl,
+		url.PathEscape(transactionId),
+	)
+	return server.HttpGetRequireStatusOk[*appleSubscriptionStatusesResponse](
+		ctx,
+		statusesUrl,
+		func(header http.Header) {
+			appleServerApiAuthHeaderFunc(ctx, header)
+		},
+		server.ResponseJsonObject[*appleSubscriptionStatusesResponse],
+	)
+}
 
 // appleServerApiAuthHeaderFunc signs the ES256 client JWT the App Store
 // Server API requires. Mirrors playAuthHeaderFunc: on signing failure the
@@ -427,13 +493,16 @@ type PaymentReconcileRunOptions struct {
 // PaymentReconcileStoreResult is one store's tally for the run. In a dry run,
 // the action counts describe the corresponding would_* events.
 type PaymentReconcileStoreResult struct {
-	Examined             int  `json:"examined"`
-	Credited             int  `json:"credited"`
-	Ended                int  `json:"ended"`
-	EntitlementsRepaired int  `json:"entitlements_repaired"`
-	Errors               int  `json:"errors"`
-	Skipped              bool `json:"skipped,omitempty"`
-	BudgetExhausted      bool `json:"budget_exhausted,omitempty"`
+	Examined             int `json:"examined"`
+	Credited             int `json:"credited"`
+	Ended                int `json:"ended"`
+	EntitlementsRepaired int `json:"entitlements_repaired"`
+	Errors               int `json:"errors"`
+	// Sandbox counts examined App Store renewals that only the sandbox
+	// environment knows (TestFlight and App Review purchases).
+	Sandbox         int  `json:"sandbox,omitempty"`
+	Skipped         bool `json:"skipped,omitempty"`
+	BudgetExhausted bool `json:"budget_exhausted,omitempty"`
 }
 
 type PaymentReconcileRunResult struct {
@@ -626,6 +695,15 @@ func (self *paymentReconcileRun) examine(store string) {
 	summary := self.storeResult(store)
 	summary.Examined += 1
 	self.storeDetail(store)["examined"] = summary.Examined
+}
+
+// countSandbox counts one examined store object that only the store's sandbox
+// environment knows. The count is folded into the heartbeat row, so these
+// renewals stay visible without an audit row each run.
+func (self *paymentReconcileRun) countSandbox(store string) {
+	summary := self.storeResult(store)
+	summary.Sandbox += 1
+	self.storeDetail(store)["sandbox"] = summary.Sandbox
 }
 
 // creditAction names the audit action for a credit repair: the real action,
@@ -1255,11 +1333,23 @@ func stripeRenewalMatchesInvoiceInConn(connOwner server.PgConn,
 //	    network's other App Store subscriptions keep theirs
 //	1 active with auto-renew off (cancel at period end)      -> nothing (status
 //	    stays 1 until expiry; the rule falls out of the status itself)
+//	production 4040010, the sandbox knows the transaction    -> nothing (a
+//	    TestFlight or App Review purchase; counted as sandbox, not an error)
+//	production 4040010, the sandbox does not know it either  -> status error
 //
 // Subscriptions whose last credited window ended up to
 // paymentReconcileLapsedWindow ago are checked too; a lapsed row is only ever
 // credited, never ended. A transaction the pre-ledger handler already
 // credited is never credited again (appleCreditSubscriptionTransactionInTx).
+//
+// A deployment whose apple.yml app_store_notifications.environments lists
+// Sandbox credits TestFlight and App Review purchases from their
+// notifications, so its renewals can name sandbox transactions. Production
+// answers 4040010 for those. The sandbox answer only establishes the
+// environment: a sandbox purchase moves no money, so the reconciler credits,
+// ends and repairs nothing from sandbox state. Only an answer the sandbox
+// gives counts; a sandbox miss or failure remains a status error, which keeps
+// the watermark in place.
 func reconcileApple(run *paymentReconcileRun, since time.Time) (bool, error) {
 	ctx := run.clientSession.Ctx
 	store := model.SubscriptionMarketApple
@@ -1291,20 +1381,22 @@ func reconcileApple(run *paymentReconcileRun, since time.Time) (bool, error) {
 			return false, nil
 		}
 
-		statusesUrl := fmt.Sprintf(
-			"%s/inApps/v1/subscriptions/%s",
-			appleAppStoreServerApiBaseUrl,
-			url.PathEscape(renewal.TransactionId),
-		)
-		statuses, err := server.HttpGetRequireStatusOk[*appleSubscriptionStatusesResponse](
-			ctx,
-			statusesUrl,
-			func(header http.Header) {
-				appleServerApiAuthHeaderFunc(ctx, header)
-			},
-			server.ResponseJsonObject[*appleSubscriptionStatusesResponse],
-		)
-		if err == nil {
+		statuses, err := appleGetSubscriptionStatuses(ctx, appleAppStoreServerApiBaseUrl, renewal.TransactionId)
+		if appleTransactionIdNotFound(err) && creds.allowsEnvironment(appleEnvironmentSandbox) {
+			// the sandbox lookup is a second store API call
+			if !run.spend(store) {
+				return false, nil
+			}
+			sandboxStatuses, sandboxErr := appleGetSubscriptionStatuses(ctx, appleAppStoreServerApiSandboxBaseUrl, renewal.TransactionId)
+			if sandboxErr == nil {
+				sandboxErr = validateAppleSubscriptionStatuses(sandboxStatuses)
+			}
+			if sandboxErr == nil {
+				run.countSandbox(store)
+				continue
+			}
+			err = fmt.Errorf("App Store sandbox: %w", sandboxErr)
+		} else if err == nil {
 			err = validateAppleSubscriptionStatuses(statuses)
 		}
 		if err != nil {

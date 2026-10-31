@@ -107,6 +107,19 @@ validate_source_epoch_margin() {
 
 # This read-only action authenticates the built-in source metadata without
 # services, candidate initialization or simulation; hosts call it before R runs.
+validate_source_epoch_g2_policy() {
+    local policy="${APEX_G2_VOLUME_POLICY:-}"
+    case "$policy" in
+        ''|minimum-work/1) ;;
+        *) die "unsupported g2 volume policy" ;;
+    esac
+    jq -e --arg policy "$policy" '
+        if $policy == "" then (has("g2_volume_policy") | not)
+        else .g2_volume_policy == $policy end
+    ' <<<"$1" >/dev/null || die "g2 volume policy does not match the configured source generation"
+}
+
+# This read-only action checks both independently frozen contracts.
 source_margin_preflight() {
     local name source_epoch
     for name in APEX_SIM_BIN APEX_SIM_SHA256 APEX_EPOCH APEX_TAKEOVER_MARGIN; do require_var "$name"; done
@@ -125,6 +138,7 @@ source_margin_preflight() {
             --json
     )" || die "source epoch threshold preflight failed"
     validate_source_epoch_margin "$source_epoch"
+    validate_source_epoch_g2_policy "$source_epoch"
 }
 
 preflight() {
@@ -252,6 +266,11 @@ run_one() {
         --announce-timeout "$APEX_ANNOUNCE_TIMEOUT"
     )
     if [ "$APEX_NO_IMPAIR" = yes ]; then args+=(--no-impair); fi
+    case "${APEX_G2_VOLUME_POLICY:-}" in
+        '') ;;
+        minimum-work/1) args+=(--g2-volume-policy "$APEX_G2_VOLUME_POLICY") ;;
+        *) die "unsupported g2 volume policy" ;;
+    esac
 
     log "starting simulator; artifacts=$dir"
     set +e
@@ -264,8 +283,10 @@ run_one() {
     [ -s "$meta" ] || die "simulator emitted no run manifest"
     [ -s "$marker" ] || die "simulator emitted no completion marker"
     [ -s "$accounting_source" ] || die "simulator emitted no provider accounting source"
-    jq -e --argjson source_epoch "$APEX_EPOCH" \
-        '.schema == 2 and .source_epoch == $source_epoch and .score_schema == 1 and .completion_state == "complete"' "$meta" >/dev/null ||
+    jq -e --argjson source_epoch "$APEX_EPOCH" --arg g2_volume_policy "${APEX_G2_VOLUME_POLICY:-}" \
+        '.schema == 2 and .source_epoch == $source_epoch and .score_schema == 1 and .completion_state == "complete" and
+         (.g2_volume_policy // "") == $g2_volume_policy and
+         .scorer_version == (if $g2_volume_policy == "" then "sim-latency-score/1" else "sim-latency-score/2" end)' "$meta" >/dev/null ||
         die "run manifest is not complete schema 2"
     jq -e --arg evaluation_id "$APEX_EVALUATION_ID" \
         '.schema == 1 and
@@ -308,7 +329,13 @@ build_baseline_bundle() {
 
     source_margin_preflight
 
-    "$APEX_SCORER_BIN" score-baseline \
+    local g2_policy_args=()
+    case "${APEX_G2_VOLUME_POLICY:-}" in
+        '') ;;
+        minimum-work/1) g2_policy_args+=(--g2-volume-policy "$APEX_G2_VOLUME_POLICY") ;;
+        *) die "unsupported g2 volume policy" ;;
+    esac
+    "$APEX_SCORER_BIN" score-baseline "${g2_policy_args[@]}" \
         --run "$APEX_BASELINE_RUNS" \
         --stderr "$APEX_BASELINE_STDERR" \
         --accounting "$APEX_BASELINE_ACCOUNTING" \
@@ -318,7 +345,10 @@ build_baseline_bundle() {
         --round-id "$APEX_ROUND_ID" \
         --takeover-margin "$APEX_TAKEOVER_MARGIN" \
         --out "$APEX_BASELINE_MANIFEST" >/dev/null
-    jq -e '.score_schema == 1 and .kind == "sim-latency-score-baseline" and
+    jq -e --arg g2_volume_policy "${APEX_G2_VOLUME_POLICY:-}" \
+        '.score_schema == 1 and .kind == "sim-latency-score-baseline" and
+        (.g2_volume_policy // "") == $g2_volume_policy and
+        .scorer_version == (if $g2_volume_policy == "" then "sim-latency-score/1" else "sim-latency-score/2" end) and
         (.replicates | length % 2 == 1) and
         ([.replicates[].findproviders_sample_span_fraction |
           type == "number" and isfinite and . >= 0.90 and . <= 1] | all)' \

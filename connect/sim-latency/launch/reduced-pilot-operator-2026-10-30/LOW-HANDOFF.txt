@@ -1,0 +1,64 @@
+NEW REDUCED-PUBLIC-PILOT OPERATOR SOURCE PROJECTION — FILE ONLY, NOT QUALIFIED
+No compile/test/native/census/archive/model/API/DB/entropy operation was executed. Existing988481/225x3 operator and failed7220 proof are preserved. UNBOUND source snapshot NXqzByyf remains unchanged; this separate bound copy incorporates actual new tuple plus reviewed source/dispatcher fixes and new controls.
+
+SOURCE / ASSEMBLY
+Use SAME warm physical exported server:
+ /home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server
+Complete baseline full-source manifest e3cd65b82f3b8929c29b3e7fab21530c7ebb94a30765c47225ef8dbe6c3ed9da:
+ /home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/full-source.sha256
+Source is a complete export, NOT an invented clean Git checkout. Shared3654 and all original indices/HEADs are untouched. Keep old scoped-Git/export validation from v4; require Git command exit0 as well as stdout, never empty-stdout-as-success.
+operator233.overlay.json retains27oldtargets, rewires7Go/textaliases for4changedbackings, adds2Go+2textaliases for retirementhelper/8controls:38targets,21Go+17text,21backings. VIRTUAL-SOURCE-MAP.json contains the COMPLETE243-package-Go projection (old241+2), including actual backing paths/hashes, not just the six changed fragments. Its census is source-only, not a compiled claim.
+All accepted-AFTER/fullverify/scoring/runtime/source/image98/gates/R9/.05/.269/10800 code stays unchanged. Core AFTER fragment remains original AN4jgB3I bytes. Four excluded native command roots remain excluded from qualification.
+
+EXACT MODULE / COMPILER / INPUT PINS
+Reuse old v4 module context; no cloning, downloads, tidy, module/dependency edits, source fetch or cache prune:
+ GOWORK=/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/manager.work
+ GOTOOLCHAIN=local GOENV=off GOPROXY=off GOSUMDB=sum.golang.org GOVCS=off
+ CGO_ENABLED=1 CC=/usr/bin/gcc GOPATH=/home/by/go GOMODCACHE=/home/by/go/pkg/mod
+ GOCACHE=/var/cache/urnetwork/competition-go-build
+Compiler:
+ /home/by/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.27.3.linux-amd64/bin/go
+ SHA5f5eb6d0b2fb6aa0bb5d5f8c5f1c944e0de955c925f0111af92a9d8f79680b5b
+BASELINE-INPUT-PINS.sha256 binds old fullsource/overlay/VSM/manifests, old actualused-inputs/modulepins/terminal, manager.work+sum/go.mod+sum and actual new native proof files. These old receipts remain OLD evidence, never new binary qualification.
+At qualification validate before/after source/overlay/module/fullsource/actualdepenv/ELF pins. Reconstruct NEW actual used-input map from new go-list/overlay; old51f5 manifest is baseline lineage, not a substitute for new changed backing inputs. The physical fullsource manifest is relative to server CWD.
+No private seeds, credential/environment leaves, endpoints, products or Root runtime paths were accessed or mutated by source authoring.
+
+ROOT-ADMITTED COMPILE ONLY (separate authority still required)
+New QUALIFICATION-PROFILE.DRAFT.json records Root-approved compile0,2,4,6/12GiB/noSwap/Tasks1024, GOMAXPROCS4,p4. It may overlap ONLY Root-admitted nonscoring H1 work on disjoint CPUs; never timed calibration.
+Use fresh private QA, retain old QAs/failures. Reuse original v4 hermetic LOCAL test context and safe environment; no main credential or real-command opt-in. Compilation CWD is server above.
+ timeout --signal=TERM --kill-after=15s 600s <ADMITTED_GO> test -race -mod=readonly -buildvcs=false -overlay=<THIS_PACKET>/operator233.overlay.json -p=4 -c -o <FRESH_QA>/operator233.test ./connect/sim-latency
+Retain complete stdout/stderr, go-env/buildinfo, actual dependency mapping, source checks and outputSHA. There is NO separate ordinary go-build CLI: native operations reside in this new race test ELF. -buildvcs=false is explicit export provenance, not native product cleanliness.
+
+ROOT-ADMITTED INDEPENDENT LOW RUNTIME — NOT AUTHORIZED NOW
+Runtime waits for H1/canonical idle and separate Root GO: exact CPUs20,22, hard8GiB/noSwap/Tasks1024, GOMAXPROCS2, testparallel2; retain actual unit limits. Never overlap measurement/model calls.
+List ^TestHeldOut: expect237roots total; exclude ONLY original four real-command roots from prior profile, require remaining EXACT233=old225+8 new synthetic controls (EXPECTED-233.names/pattern). Compare compiled identities, not lexical guesses. No skip or inactive-command entries count as selected guards.
+CWD=server/connect/sim-latency; SAME new ELF THREE separate processes, stop first unexpected failure, preserve all logs:
+ timeout --signal=TERM --kill-after=15s 3660s <ADMITTED_GO> tool test2json -t -p sim-latency <FRESH_QA>/operator233.test -test.v=test2json -test.run='<contents EXPECTED-233.pattern>' -test.count=1 -test.parallel=2 -test.timeout=60m -test.failfast
+Each process requires233top-levelPASS/0FAIL/SKIP and identical matched roster/source/module/dependency/ELF before+after, terminal cleanup/postchecks0;699newPASS only if genuinely executed. Old675does NOT qualify these bytes. No actual test has run from this packet. Qualification failure requires MAX diagnosis/new frozen correction, not a reroll.
+
+CLOSED NEW CONTEXT / NATIVE TUPLE
+Fixed new pilot root /var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2, publicseed20261030.
+Owner addendum5ad846a... is already published; Root's future installed opaque MD path is inputs/reduced-pacing-owner-approval.md under new pilotroot. Original approval218/c85/old failed7220 unchanged; unclaimed fresh v1 root unchanged.
+Actual Root native build/readback observation: patch6e5e94..., candidate1222b197..., image2eadb973..., binarya20a4116..., transport69a50... . SOURCE-PROJECTION.json pins actual build05fd/proofaf064/evidencebad9. These are build/readback, NOT correctness or measured direction; new112 correctness and new233operator qualification remain independent pending gates.
+New causal guard uses the same strict synthetic-tested tuple matcher; old/wrong/unbound tuple values refuse. Better/no-op patches and all frozen source dependencies stay unchanged.
+
+BEFORE CENSUS / EXACT PROVENANCE
+Existing native API had NO generic extra-source field: it reconstructs old7 then equality-checks the declared sources, so simply passing10 would fail. New optionalomitempty retired_public_pilot binds exact compiled ownerMD/approval218/failedproof7220/oldplan790/requestbf0/providerse610/oldpublicseed20261028/base98. No runtime override can change those facts. Authority/proof pins are provenance, NOT extra recognized census source entries.
+The SAME retirement helper is called by native builder AND independent before reconstruction. It authenticates complete9+9 rejected/nonplaceable proof, exact old paths/bytes and two retained native replay observations, then calls the existing pure identity reducer to append ONLY oldrequest/providers/plan. No accepted proof/direction/AFTER is fabricated.
+REAL CALLSITE FIX: prepare-public-exclusions dispatch intentionally returns original C1 release/image002c; later pilot authentication uses C2/base98. Replay checks therefore bind the exact retired.EvaluatorImageId=base98, NOT caller release.ImageId. Positive regression composes distinct synthetic C1dispatcher writer and C2reader; wrong declared/replayed image controls fail. Root's earlier missing-.replays hunch was retracted; actual .native_replays contains TWOvalid observations, and the strict guard remains.
+Fresh hidden-preparation closure also requires all three retired pins; generic existing source census derives/authenticates their complete raw/effective/provider identity sets.
+
+NATIVE CONFIG / COMMAND FORMS — DRAFTS ONLY, NO EXECUTION PERMISSION
+BEFORE-CENSUS.DRAFT.json has exact10source union (old7+failedpilot3), existing approval218/prior catalog unchanged, new Root OutputPath, and exact new typed retirement. ReviewedAt isZERO deliberately; Root must set actual reviewedtime and freeze actualconfigSHA after complete provenance/source review. Source lists include oldprivate-plan PIN metadata but author never opened private plan/seed bytes. Preserve private catalog contents.
+Only after new operator qualification/install, Root may use EXISTING verb with protected0600config:
+ SIM_LATENCY_HELD_OUT_REAL_OPT_IN=1
+ SIM_LATENCY_HELD_OUT_COMMAND=prepare-public-exclusions
+ SIM_LATENCY_HELD_OUT_CONFIG=<NEW_ROOT>/before-census-configuration.json
+ SIM_LATENCY_HELD_OUT_CONFIG_SHA256=<ACTUAL_REVIEWED_CONFIG_SHA256>
+ <NEW_QUALIFIED_ELF> -test.run=^TestHeldOutOperatorCommand$ -test.count=1 -test.parallel=1 -test.timeout=0
+Native command owns canonical lock; NOouterflock. It creates only a new private0400BEFOREcatalog. Retire old publicseed/providers/label even though its result failed. Do NOT call accepted-after on7220 or overwrite before325/failedproof/claims.
+
+NEW PILOT / SUCCESSOR
+After actual newbefore, deterministic publicprovider/request construction, new reference correctness/build receipts, NEW233tool qualification and seven actual prerequisite publications, prepare and publish fullnewplan+realreceipt before one-use native execute. The newRoot/seed are fixed, not selected after results. No scoring-rule/evaluator change.
+ONLY accepted complete NEW native proof/full frozen-score replay and its actual measured direction/publications permit unchanged after-census. AFTER-CENSUS.DRAFT.json / REVIEWED-SOURCES-AFTER-13.DRAFT.json declare before10+newrequest/providers/plan3=13. New provider/request/plan/proof/direction/publication hashes remainUNBOUND, ReviewedAtZERO. Existing native AFTER requiresacceptedproof and full replay again; no relaxed gate or boolean substitute.
+Only then finalize the original approved one fresh hidden screen, new declaration/aftercatalog/reference pins and declaration-bound projection of the SAME NEW qualified233x3 evidence. Do NOT reuse old988/675receipt as new qualification or redraw any hidden seed. All future plan hashes, measured direction, accepted aftercatalog and hidden entropy/results remain absent/UNBOUND.

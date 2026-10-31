@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-held-out-plan-publication",
+  "plan_sha256": "83ceb22269bbb6e0837191a740bf1a5d8820fb48831e79e5bedb8c273a3c4be3",
+  "published_at": "2026-10-30T04:17:42Z",
+  "commit": "e15e88b5a82467f6675c001aca575a5364145d0c",
+  "repository": "/home/by/urnetwork/temp/competition-intake-publication-20261028.nVreyI4E/server",
+  "plan_path": "connect/sim-latency/launch/reduced-pilot-operator-2026-10-30/tool-qualification.json",
+  "remote_ref": "refs/remotes/origin/main",
+  "pulled_and_pushed": true,
+  "evidence": [
+    {
+      "path": "/var/lib/urnetwork/competition-h1-public-regression-pilot-20261030-v2/inputs/publications/tool-git-publication-proof.json",
+      "sha256": "8a6325207da594610e83a305b55b2049cb52615acd739e85610f619c8078854b"
+    }
+  ]
+}

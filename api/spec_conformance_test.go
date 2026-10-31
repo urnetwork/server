@@ -128,6 +128,7 @@ func registry() []specEndpoint {
 		{method: "GET", path: "/network/embed", argType: nil, resultType: rt(model.NetworkEmbedResult{})},
 		// the public Services contact form (EMBED1.md)
 		{method: "POST", path: "/services/contact-sales", argType: rt(model.ServicesContactSalesArgs{}), resultType: rt(model.ServicesContactSalesResult{})},
+		{method: "POST", path: "/friends/apply", argType: rt(model.FriendsApplyArgs{}), resultType: rt(model.FriendsApplyResult{})},
 
 		{"POST", "/preferences/set-preferences", rt(model.AccountPreferencesSetArgs{}), rt(model.AccountPreferencesSetResult{})},
 		{"GET", "/preferences", nil, rt(model.AccountPreferencesGetResult{})},
@@ -231,6 +232,8 @@ func registry() []specEndpoint {
 		{"POST", "/sn/wallet/hotkey-delegation/history", rt(controller.SnHotkeyNetworkDelegationHistoryArgs{}), rt(controller.SnWalletMappingHistoryResult{})},
 		{"POST", "/sn/wallet/validate", rt(controller.SnValidateWalletArgs{}), rt(controller.SnValidateWalletResult{})},
 		{"GET", "/sn/head", nil, rt(controller.SnHeadResult{})},
+		{"GET", "/sn/top", nil, rt(controller.SnTopResult{})},
+		{"GET", "/sn/top/me", nil, rt(controller.SnTopMeResult{})},
 		{"POST", "/sn/head/binding", rt(controller.SnHeadBindingArgs{}), rt(controller.SnHeadBindingResult{})},
 		{"POST", "/sn/head-summary", rt(controller.SnHeadSummary{}), nil},
 		{"GET", "/account/epochs", nil, rt(controller.AccountEpochsResult{})},

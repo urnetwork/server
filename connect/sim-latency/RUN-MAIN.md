@@ -184,8 +184,10 @@ qualified isolated build broker. Tests retain independent Sol 6.1 low ownership.
 The tool-free provider client is `sim-latency review-broker`; its scratch-image
 wrapper and deployment/qualification procedure are in
 [`evaluator/review/README.md`](evaluator/review/README.md). Implementation is not
-live provider access or genuine qualification. Provision the dedicated model
-key, build/install the contained broker and qualify it, and independently
+live provider access or genuine qualification. Configure the adopted Qwen/Gemma
+endpoints and their network boundary; current Snow access is keyless and does
+not require a provider-key file. Build/install the contained broker and qualify
+it, and independently
 provision/qualify the build broker before enabling the new season. A test receipt
 or this runbook alone does not satisfy those requirements.
 
@@ -431,7 +433,10 @@ mode-0700 bare repository and a bounded exact-commit fetch from its origin;
 it never fetches into product checkouts or substitutes the moving branch head.
 
 Git stores immutable manifest content; the database pointer selects runtime
-authority. At least 16 hours are reserved from preparation start. Independent
+authority. The adopted immutable season policy determines the preparation
+interval: the historical policy reserved 16 hours, while current production
+sets `preparation_window_seconds: 0`. Zero removes that fixed delay, not any
+readiness or qualification gate. Independent
 API and worker acknowledgments and production qualification precede pointer
 activation; only then is one full seven-day round committed. An unadvertised
 start is chosen after readiness, so slow preparation does not shorten admission.
@@ -441,7 +446,7 @@ Committed schedules/source cannot change. Failed preparation remains visibly
 UUID and source/image; the eventual round must commit the reserved UUID. This is
 a real host-readiness check, not the scoring baseline: the immutable R=9 scoring
 control is still established after creation using the fresh round workload.
-There is no second 16-hour delay. If a chosen promotion cannot
+There is no additional fixed delay after readiness. If a chosen promotion cannot
 use an authorized pre-commit fallback, it stays blocked rather than rewriting its
 intent. A failed promotion whose complete mode-specific remote refs remain at their expected
 predecessors may be durably abandoned; the next activation attempt carries the
@@ -649,9 +654,11 @@ export WARP_IMAGE_DIGEST=sha256:REPLACE_WITH_THE_RUNNING_WORKER_DIGEST
 For epoch 1, optionally set `SIM_LATENCY_FIRST_OPENS_AT` to an RFC3339 instant.
 Every round is exactly seven days and uses an end-exclusive admission window.
 Later rounds open after the previous epoch drains, is reviewed, and is promoted.
-The frozen default `SIM_LATENCY_PREPARATION_SECONDS=57600` reserves the 16-hour
-same-round host-readiness interval; changing it requires a reviewed
-season-policy change before launch. This readiness rebaseline is not the
+For these legacy manual commands, `SIM_LATENCY_PREPARATION_SECONDS=57600`
+is the historical 16-hour helper default, not the adopted v2 production policy.
+Current v2 production sets `preparation_window_seconds: 0`; a legacy environment
+variable must not override that immutable policy or waive readiness. This
+readiness rebaseline is not the
 scoring control. The worker establishes the epoch's one immutable nine-run
 `baseline.json` before it builds the first accepted submission.
 

@@ -1,0 +1,1886 @@
+{
+  "schema": 1,
+  "kind": "prospective-reduced-public-pilot233-source-projection-not-qualified",
+  "physical_base_server": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server",
+  "original_full_source_manifest": {
+    "path": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/full-source.sha256",
+    "sha256": "e3cd65b82f3b8929c29b3e7fab21530c7ebb94a30765c47225ef8dbe6c3ed9da",
+    "relative_path_cwd": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server"
+  },
+  "old_first_overlay": {
+    "path": "/home/by/urnetwork/temp/first-committed-operator-qa-20261027.a21tBAze/new.overlay.json",
+    "sha256": "aa0391064d578839d4c238e1bfccc8b3672103a70651d23b74665f364f5d133b",
+    "entries": 5
+  },
+  "final_overlay": {
+    "path": "/home/by/urnetwork/temp/public-pilot-reduced-bound-operator-20261030.urI4AYrI/operator233.overlay.json",
+    "sha256": "1c29159fb6443741dcad5bfbba1f804bcd5ad60440f8293dc700602fb5bf906e"
+  },
+  "precedence": "Retain27oldtargets, rewire7oldGo/texttargets for4changedbackings; add2Go+2textaliases forretirementhelper/controls. Old988/context preserved. No physical-source/index/HEAD changes.",
+  "verified_census": {
+    "raw_package_go": 229,
+    "resolved_package_go": 243,
+    "raw_server_go": 5189,
+    "virtual_go_additions": 14,
+    "overlay_entries": 38,
+    "go_mappings": 21,
+    "text_mappings": 17,
+    "fragment_backings": 21,
+    "source_projection_only": true,
+    "new_compilation_or_runtime_qualification_claimed": false
+  },
+  "mappings": [
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_amendment_draft_test.go",
+      "raw_physical_sha256": "fb67da4b30bda7e0bbbf147483bc87e1f37970674469bb66cf776d1ada995c10",
+      "prior_first_source": null,
+      "prior_first_sha256": null,
+      "final_source": "/home/by/urnetwork/temp/fresh-single-provider-guard-static-20261028.bKtb0fOX/held-out-amendment.go.txt",
+      "final_sha256": "37bbfd1026274b1343f97368b1ea3cbc5e890d6195606466f2ddafd02cf82651",
+      "relation": "replace_raw_physical",
+      "stage_one_source": "/home/by/urnetwork/temp/fresh-single-protocol-static-20261028.4O6WWzAm/held-out-amendment.go.txt",
+      "stage_one_sha256": "fb0bbff64c2103b571aa7b5640bf1e5bf0e72fbdac0d2905d5401ec9f4df35d6"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_command_draft_test.go",
+      "raw_physical_sha256": "a7118d2d457b9dba0d3782f9bfa5029aac0c5e24ab762d8e3bbd3a436fecb898",
+      "prior_first_source": null,
+      "prior_first_sha256": null,
+      "final_source": "/home/by/urnetwork/temp/fresh-single-provider-guard-static-20261028.bKtb0fOX/held-out-command.go.txt",
+      "final_sha256": "9bcebc5141f218a29e809195b7a095269dbe58fd5a8f8e5dbbe1ee282d447081",
+      "relation": "replace_raw_physical",
+      "stage_one_source": "/home/by/urnetwork/temp/fresh-single-protocol-static-20261028.4O6WWzAm/held-out-command.go.txt",
+      "stage_one_sha256": "5f0891ea8ec307088bf401d34d2263b7308ef66d585a0f1bd36cf901bcc59168"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_execution_draft_test.go",
+      "raw_physical_sha256": "83b31ec0e5da4d50ab39e84bb6c1269f528a79398834d327bf6730514f8758d4",
+      "prior_first_source": "/home/by/urnetwork/temp/first-committed-operator-qa-20261027.a21tBAze/held-out-execution.go.txt",
+      "prior_first_sha256": "dd432dcca0f83101968b58178068252939500274dfb67707df15af5d77ef8469",
+      "final_source": "/home/by/urnetwork/temp/fresh-single-protocol-static-20261028.4O6WWzAm/held-out-execution.go.txt",
+      "final_sha256": "62373b92fefe3fb81dfe6b4e80bc7780501307a9bbea547f48823188eed978da",
+      "relation": "supersede_prior_replacement",
+      "stage_one_source": "/home/by/urnetwork/temp/fresh-single-protocol-static-20261028.4O6WWzAm/held-out-execution.go.txt",
+      "stage_one_sha256": "62373b92fefe3fb81dfe6b4e80bc7780501307a9bbea547f48823188eed978da"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_first_committed_dispatch_tests_draft_test.go",
+      "raw_physical_sha256": null,
+      "prior_first_source": "/home/by/urnetwork/temp/first-committed-operator-qa-20261027.a21tBAze/held-out-first-committed-dispatch-tests.go.txt",
+      "prior_first_sha256": "f0c4663fe93a267375a43a8ae0623e6428b0e6856b93dc14cddd2aaeaac7f840",
+      "final_source": "/home/by/urnetwork/temp/first-committed-operator-qa-20261027.a21tBAze/held-out-first-committed-dispatch-tests.go.txt",
+      "final_sha256": "f0c4663fe93a267375a43a8ae0623e6428b0e6856b93dc14cddd2aaeaac7f840",
+      "relation": "retain_prior_virtual_addition",
+      "stage_one_source": "/home/by/urnetwork/temp/first-committed-operator-qa-20261027.a21tBAze/held-out-first-committed-dispatch-tests.go.txt",
+      "stage_one_sha256": "f0c4663fe93a267375a43a8ae0623e6428b0e6856b93dc14cddd2aaeaac7f840"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_first_committed_draft_test.go",
+      "raw_physical_sha256": null,
+      "prior_first_source": "/home/by/urnetwork/temp/first-committed-operator-qa-20261027.a21tBAze/held-out-first-committed.go.txt",
+      "prior_first_sha256": "cb97bdf17b2e411b1063516757ac6851954edde3b2bb8ef83b826f3fcbc89c00",
+      "final_source": "/home/by/urnetwork/temp/first-committed-operator-qa-20261027.a21tBAze/held-out-first-committed.go.txt",
+      "final_sha256": "cb97bdf17b2e411b1063516757ac6851954edde3b2bb8ef83b826f3fcbc89c00",
+      "relation": "retain_prior_virtual_addition",
+      "stage_one_source": "/home/by/urnetwork/temp/first-committed-operator-qa-20261027.a21tBAze/held-out-first-committed.go.txt",
+      "stage_one_sha256": "cb97bdf17b2e411b1063516757ac6851954edde3b2bb8ef83b826f3fcbc89c00"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_first_committed_tests_draft_test.go",
+      "raw_physical_sha256": null,
+      "prior_first_source": "/home/by/urnetwork/temp/first-committed-operator-qa-20261027.a21tBAze/held-out-first-committed-tests.go.txt",
+      "prior_first_sha256": "1b493b58a55f2e93d479cfbd486c87c605e0e0a9bda5ddea1b6b6f2c981bee19",
+      "final_source": "/home/by/urnetwork/temp/first-committed-operator-qa-20261027.a21tBAze/held-out-first-committed-tests.go.txt",
+      "final_sha256": "1b493b58a55f2e93d479cfbd486c87c605e0e0a9bda5ddea1b6b6f2c981bee19",
+      "relation": "retain_prior_virtual_addition",
+      "stage_one_source": "/home/by/urnetwork/temp/first-committed-operator-qa-20261027.a21tBAze/held-out-first-committed-tests.go.txt",
+      "stage_one_sha256": "1b493b58a55f2e93d479cfbd486c87c605e0e0a9bda5ddea1b6b6f2c981bee19"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_fresh_exclusion_builder_draft_test.go",
+      "raw_physical_sha256": null,
+      "prior_first_source": null,
+      "prior_first_sha256": null,
+      "final_source": "/home/by/urnetwork/temp/public-pilot-reduced-bound-operator-20261030.urI4AYrI/held-out-fresh-exclusion-builder.go.txt",
+      "final_sha256": "8cafea7296efaddf60131e36d039f0275b9607ccc9ce5c1c183343fba3dccc6d",
+      "relation": "new_owner_approved_reduced_reference_context",
+      "previous_988_source": "/home/by/urnetwork/temp/h1-public-pilot-precommit-20261028.V8ZmMrfz/held-out-fresh-exclusion-builder.go.txt",
+      "previous_988_sha256": "535d3b4fb77a6770c0d7750ac8083d1002cebd3c208de60b29359b31bf0980c1"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_fresh_exclusion_builder_tests_draft_test.go",
+      "raw_physical_sha256": null,
+      "prior_first_source": null,
+      "prior_first_sha256": null,
+      "final_source": "/home/by/urnetwork/temp/h1-public-pilot-fixture-revision-20261028.XQjNhhF7/held-out-fresh-exclusion-builder-tests.go.txt",
+      "final_sha256": "474148bb16db59ae0b49af7f320cd531f6774aa405d2dd2127ffb713c16f8963",
+      "relation": "new_census_virtual_addition"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_fresh_single_b_draft_test.go",
+      "raw_physical_sha256": null,
+      "prior_first_source": null,
+      "prior_first_sha256": null,
+      "final_source": "/home/by/urnetwork/temp/public-pilot-reduced-bound-operator-20261030.urI4AYrI/held-out-fresh-single-b.go.txt",
+      "final_sha256": "efe765785d81afd207ffc44acc170a3bb40956dd30ed5bb454dddadfbc3441eb",
+      "relation": "new_owner_approved_reduced_reference_context",
+      "stage_one_source": "/home/by/urnetwork/temp/fresh-single-protocol-static-20261028.4O6WWzAm/held-out-fresh-single-b.go.txt",
+      "stage_one_sha256": "eca0a643091c4b54bceb4f4b97043ee81828f1b5ad389749feada8efd7eca556",
+      "previous_988_source": "/home/by/urnetwork/temp/fresh-single-provider-guard-static-20261028.bKtb0fOX/held-out-fresh-single-b.go.txt",
+      "previous_988_sha256": "7f06c242ff81fe97a5fabc0351e31786e599ac4a568e6d99e329246ff1d62a88"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_fresh_single_b_tests_draft_test.go",
+      "raw_physical_sha256": null,
+      "prior_first_source": null,
+      "prior_first_sha256": null,
+      "final_source": "/home/by/urnetwork/temp/fresh-single-provider-guard-static-20261028.bKtb0fOX/held-out-fresh-single-b-tests.go.txt",
+      "final_sha256": "1f0f1d0f6c136f6f616a40e3b842ab2edaf46eb6d442b248905773a8272ae378",
+      "relation": "new_virtual_addition",
+      "stage_one_source": "/home/by/urnetwork/temp/fresh-single-protocol-static-20261028.4O6WWzAm/held-out-fresh-single-b-tests.go.txt",
+      "stage_one_sha256": "60c252d3f28b94dfe3681e767305432ae266435c6e3957969b9993078063a423"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_operator_draft_test.go",
+      "raw_physical_sha256": "c4bfc11f3a39e7be3816923d57d96d382e6518931e5da1aabcfa74a4c8227575",
+      "prior_first_source": null,
+      "prior_first_sha256": null,
+      "final_source": "/home/by/urnetwork/temp/fresh-single-protocol-static-20261028.4O6WWzAm/held-out-operator.go.txt",
+      "final_sha256": "e37731264b6439a070815f9e03b6a72c6770c66acb3ee4858f090f99a541d843",
+      "relation": "replace_raw_physical",
+      "stage_one_source": "/home/by/urnetwork/temp/fresh-single-protocol-static-20261028.4O6WWzAm/held-out-operator.go.txt",
+      "stage_one_sha256": "e37731264b6439a070815f9e03b6a72c6770c66acb3ee4858f090f99a541d843"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_operator_tests_draft_test.go",
+      "raw_physical_sha256": "1d076c8c90191a14c8d54fa339217b86dac539e2dc05cd37bd1bd54c8f438d6b",
+      "prior_first_source": null,
+      "prior_first_sha256": null,
+      "final_source": "/home/by/urnetwork/temp/fresh-single-protocol-static-20261028.4O6WWzAm/held-out-operator-tests.go.txt",
+      "final_sha256": "31eae507efe46f083d4ec486dfe64e0dfe81a42358645783fce366e461c69254",
+      "relation": "replace_raw_physical_test_only",
+      "stage_one_source": "/home/by/urnetwork/temp/fresh-single-protocol-static-20261028.4O6WWzAm/held-out-operator-tests.go.txt",
+      "stage_one_sha256": "31eae507efe46f083d4ec486dfe64e0dfe81a42358645783fce366e461c69254"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_public_pilot_adapter_test.go",
+      "raw_physical_sha256": null,
+      "final_source": "/home/by/urnetwork/temp/public-pilot-reduced-bound-operator-20261030.urI4AYrI/held-out-public-pilot.go.txt",
+      "final_sha256": "083611a06d1ad03f6db5f234cc48347bd165e92139fa618929cd6ad585f894d6",
+      "relation": "new_owner_approved_reduced_reference_context",
+      "prior224_source": "/home/by/urnetwork/temp/h1-public-pilot-closure-fix-20261028.AN4jgB3I/held-out-public-pilot.go.txt",
+      "prior224_sha256": "9e59d5c9278103ab94b29bff5e113dba98186130c798ab5db877bb5a9b79c765",
+      "previous_988_source": "/home/by/urnetwork/temp/public-pilot-225-composition-20261029.FRp2hMaJ/held-out-public-pilot.go.txt",
+      "previous_988_sha256": "8de729a9a530bf9f47f804911227ce825c9346cfce30f1ae007f7c667cefc7e3"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_public_pilot_after_test.go",
+      "raw_physical_sha256": null,
+      "final_source": "/home/by/urnetwork/temp/h1-public-pilot-closure-fix-20261028.AN4jgB3I/held-out-public-pilot-after.go.txt",
+      "final_sha256": "4e68b22b261db4b4cce9bc66d9192bb60d0208e341252bda318e97f8399a4d9d",
+      "relation": "additive_public_pilot"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_public_pilot_command_test.go",
+      "raw_physical_sha256": null,
+      "final_source": "/home/by/urnetwork/temp/h1-public-pilot-closure-fix-20261028.AN4jgB3I/held-out-public-pilot-command.go.txt",
+      "final_sha256": "26a219e0a5c3b93621e8d41dd0cd5546110884d9e774b388b676e152b7edf0fb",
+      "relation": "additive_public_pilot"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_public_pilot_lifecycle_test.go",
+      "raw_physical_sha256": null,
+      "final_source": "/home/by/urnetwork/temp/h1-public-pilot-closure-fix-20261028.AN4jgB3I/held-out-public-pilot-tests.go.txt",
+      "final_sha256": "0f54d21eca9c796715bea3e698c056e0cfd3815b7dbab7c4e3af1b5927d05604",
+      "relation": "additive_public_pilot"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_two_b_addendum_draft_test.go",
+      "raw_physical_sha256": "544189280bdcaa429937423c200c6761a1136e0bdba51d7120474a6cf3eed578",
+      "prior_first_source": null,
+      "prior_first_sha256": null,
+      "final_source": "/home/by/urnetwork/temp/fresh-single-protocol-static-20261028.4O6WWzAm/held-out-two-b-addendum.go.txt",
+      "final_sha256": "7e1b389cbe3d2f7a0e8d2e8face216fd832b0abfa009672c1ed1d895bec8cddf",
+      "relation": "replace_raw_physical",
+      "stage_one_source": "/home/by/urnetwork/temp/fresh-single-protocol-static-20261028.4O6WWzAm/held-out-two-b-addendum.go.txt",
+      "stage_one_sha256": "7e1b389cbe3d2f7a0e8d2e8face216fd832b0abfa009672c1ed1d895bec8cddf"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_two_b_composed_tests_draft_test.go",
+      "raw_physical_sha256": "8e9273210b2c63af2861da2bc82edddacad900158ac4931bbbbb7874438cf9e7",
+      "prior_first_source": null,
+      "prior_first_sha256": null,
+      "final_source": "/home/by/urnetwork/temp/fresh-single-protocol-static-20261028.4O6WWzAm/held-out-two-b-composed-tests.go.txt",
+      "final_sha256": "42e2f6d48d3fbe01a4d9fba466941f7d7050133e4ca3e1098268f4b90901afe5",
+      "relation": "replace_raw_physical_test_only",
+      "stage_one_source": "/home/by/urnetwork/temp/fresh-single-protocol-static-20261028.4O6WWzAm/held-out-two-b-composed-tests.go.txt",
+      "stage_one_sha256": "42e2f6d48d3fbe01a4d9fba466941f7d7050133e4ca3e1098268f4b90901afe5"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/launch/held-out-amendment.go.txt",
+      "raw_physical_sha256": "fb67da4b30bda7e0bbbf147483bc87e1f37970674469bb66cf776d1ada995c10",
+      "prior_first_source": null,
+      "prior_first_sha256": null,
+      "final_source": "/home/by/urnetwork/temp/fresh-single-provider-guard-static-20261028.bKtb0fOX/held-out-amendment.go.txt",
+      "final_sha256": "37bbfd1026274b1343f97368b1ea3cbc5e890d6195606466f2ddafd02cf82651",
+      "relation": "replace_raw_physical",
+      "stage_one_source": "/home/by/urnetwork/temp/fresh-single-protocol-static-20261028.4O6WWzAm/held-out-amendment.go.txt",
+      "stage_one_sha256": "fb0bbff64c2103b571aa7b5640bf1e5bf0e72fbdac0d2905d5401ec9f4df35d6"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/launch/held-out-command.go.txt",
+      "raw_physical_sha256": "a7118d2d457b9dba0d3782f9bfa5029aac0c5e24ab762d8e3bbd3a436fecb898",
+      "prior_first_source": null,
+      "prior_first_sha256": null,
+      "final_source": "/home/by/urnetwork/temp/fresh-single-provider-guard-static-20261028.bKtb0fOX/held-out-command.go.txt",
+      "final_sha256": "9bcebc5141f218a29e809195b7a095269dbe58fd5a8f8e5dbbe1ee282d447081",
+      "relation": "replace_raw_physical",
+      "stage_one_source": "/home/by/urnetwork/temp/fresh-single-protocol-static-20261028.4O6WWzAm/held-out-command.go.txt",
+      "stage_one_sha256": "5f0891ea8ec307088bf401d34d2263b7308ef66d585a0f1bd36cf901bcc59168"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/launch/held-out-execution.go.txt",
+      "raw_physical_sha256": "83b31ec0e5da4d50ab39e84bb6c1269f528a79398834d327bf6730514f8758d4",
+      "prior_first_source": "/home/by/urnetwork/temp/first-committed-operator-qa-20261027.a21tBAze/held-out-execution.go.txt",
+      "prior_first_sha256": "dd432dcca0f83101968b58178068252939500274dfb67707df15af5d77ef8469",
+      "final_source": "/home/by/urnetwork/temp/fresh-single-protocol-static-20261028.4O6WWzAm/held-out-execution.go.txt",
+      "final_sha256": "62373b92fefe3fb81dfe6b4e80bc7780501307a9bbea547f48823188eed978da",
+      "relation": "supersede_prior_replacement",
+      "stage_one_source": "/home/by/urnetwork/temp/fresh-single-protocol-static-20261028.4O6WWzAm/held-out-execution.go.txt",
+      "stage_one_sha256": "62373b92fefe3fb81dfe6b4e80bc7780501307a9bbea547f48823188eed978da"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/launch/held-out-fresh-exclusion-builder-tests.go.txt",
+      "raw_physical_sha256": null,
+      "prior_first_source": null,
+      "prior_first_sha256": null,
+      "final_source": "/home/by/urnetwork/temp/h1-public-pilot-fixture-revision-20261028.XQjNhhF7/held-out-fresh-exclusion-builder-tests.go.txt",
+      "final_sha256": "474148bb16db59ae0b49af7f320cd531f6774aa405d2dd2127ffb713c16f8963",
+      "relation": "new_census_virtual_addition"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/launch/held-out-fresh-exclusion-builder.go.txt",
+      "raw_physical_sha256": null,
+      "prior_first_source": null,
+      "prior_first_sha256": null,
+      "final_source": "/home/by/urnetwork/temp/public-pilot-reduced-bound-operator-20261030.urI4AYrI/held-out-fresh-exclusion-builder.go.txt",
+      "final_sha256": "8cafea7296efaddf60131e36d039f0275b9607ccc9ce5c1c183343fba3dccc6d",
+      "relation": "new_owner_approved_reduced_reference_context",
+      "previous_988_source": "/home/by/urnetwork/temp/h1-public-pilot-precommit-20261028.V8ZmMrfz/held-out-fresh-exclusion-builder.go.txt",
+      "previous_988_sha256": "535d3b4fb77a6770c0d7750ac8083d1002cebd3c208de60b29359b31bf0980c1"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/launch/held-out-fresh-single-b-tests.go.txt",
+      "raw_physical_sha256": null,
+      "prior_first_source": null,
+      "prior_first_sha256": null,
+      "final_source": "/home/by/urnetwork/temp/fresh-single-provider-guard-static-20261028.bKtb0fOX/held-out-fresh-single-b-tests.go.txt",
+      "final_sha256": "1f0f1d0f6c136f6f616a40e3b842ab2edaf46eb6d442b248905773a8272ae378",
+      "relation": "new_virtual_addition",
+      "stage_one_source": "/home/by/urnetwork/temp/fresh-single-protocol-static-20261028.4O6WWzAm/held-out-fresh-single-b-tests.go.txt",
+      "stage_one_sha256": "60c252d3f28b94dfe3681e767305432ae266435c6e3957969b9993078063a423"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/launch/held-out-fresh-single-b.go.txt",
+      "raw_physical_sha256": null,
+      "prior_first_source": null,
+      "prior_first_sha256": null,
+      "final_source": "/home/by/urnetwork/temp/public-pilot-reduced-bound-operator-20261030.urI4AYrI/held-out-fresh-single-b.go.txt",
+      "final_sha256": "efe765785d81afd207ffc44acc170a3bb40956dd30ed5bb454dddadfbc3441eb",
+      "relation": "new_owner_approved_reduced_reference_context",
+      "stage_one_source": "/home/by/urnetwork/temp/fresh-single-protocol-static-20261028.4O6WWzAm/held-out-fresh-single-b.go.txt",
+      "stage_one_sha256": "eca0a643091c4b54bceb4f4b97043ee81828f1b5ad389749feada8efd7eca556",
+      "previous_988_source": "/home/by/urnetwork/temp/fresh-single-provider-guard-static-20261028.bKtb0fOX/held-out-fresh-single-b.go.txt",
+      "previous_988_sha256": "7f06c242ff81fe97a5fabc0351e31786e599ac4a568e6d99e329246ff1d62a88"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/launch/held-out-operator-tests.go.txt",
+      "raw_physical_sha256": "1d076c8c90191a14c8d54fa339217b86dac539e2dc05cd37bd1bd54c8f438d6b",
+      "prior_first_source": null,
+      "prior_first_sha256": null,
+      "final_source": "/home/by/urnetwork/temp/fresh-single-protocol-static-20261028.4O6WWzAm/held-out-operator-tests.go.txt",
+      "final_sha256": "31eae507efe46f083d4ec486dfe64e0dfe81a42358645783fce366e461c69254",
+      "relation": "replace_raw_physical_test_only",
+      "stage_one_source": "/home/by/urnetwork/temp/fresh-single-protocol-static-20261028.4O6WWzAm/held-out-operator-tests.go.txt",
+      "stage_one_sha256": "31eae507efe46f083d4ec486dfe64e0dfe81a42358645783fce366e461c69254"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/launch/held-out-operator.go.txt",
+      "raw_physical_sha256": "c4bfc11f3a39e7be3816923d57d96d382e6518931e5da1aabcfa74a4c8227575",
+      "prior_first_source": null,
+      "prior_first_sha256": null,
+      "final_source": "/home/by/urnetwork/temp/fresh-single-protocol-static-20261028.4O6WWzAm/held-out-operator.go.txt",
+      "final_sha256": "e37731264b6439a070815f9e03b6a72c6770c66acb3ee4858f090f99a541d843",
+      "relation": "replace_raw_physical",
+      "stage_one_source": "/home/by/urnetwork/temp/fresh-single-protocol-static-20261028.4O6WWzAm/held-out-operator.go.txt",
+      "stage_one_sha256": "e37731264b6439a070815f9e03b6a72c6770c66acb3ee4858f090f99a541d843"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/launch/held-out-public-pilot-after.go.txt",
+      "raw_physical_sha256": null,
+      "final_source": "/home/by/urnetwork/temp/h1-public-pilot-closure-fix-20261028.AN4jgB3I/held-out-public-pilot-after.go.txt",
+      "final_sha256": "4e68b22b261db4b4cce9bc66d9192bb60d0208e341252bda318e97f8399a4d9d",
+      "relation": "additive_public_pilot"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/launch/held-out-public-pilot-command.go.txt",
+      "raw_physical_sha256": null,
+      "final_source": "/home/by/urnetwork/temp/h1-public-pilot-closure-fix-20261028.AN4jgB3I/held-out-public-pilot-command.go.txt",
+      "final_sha256": "26a219e0a5c3b93621e8d41dd0cd5546110884d9e774b388b676e152b7edf0fb",
+      "relation": "additive_public_pilot"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/launch/held-out-public-pilot-tests.go.txt",
+      "raw_physical_sha256": null,
+      "final_source": "/home/by/urnetwork/temp/h1-public-pilot-closure-fix-20261028.AN4jgB3I/held-out-public-pilot-tests.go.txt",
+      "final_sha256": "0f54d21eca9c796715bea3e698c056e0cfd3815b7dbab7c4e3af1b5927d05604",
+      "relation": "additive_public_pilot"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/launch/held-out-public-pilot.go.txt",
+      "raw_physical_sha256": null,
+      "final_source": "/home/by/urnetwork/temp/public-pilot-reduced-bound-operator-20261030.urI4AYrI/held-out-public-pilot.go.txt",
+      "final_sha256": "083611a06d1ad03f6db5f234cc48347bd165e92139fa618929cd6ad585f894d6",
+      "relation": "new_owner_approved_reduced_reference_context",
+      "prior224_source": "/home/by/urnetwork/temp/h1-public-pilot-closure-fix-20261028.AN4jgB3I/held-out-public-pilot.go.txt",
+      "prior224_sha256": "9e59d5c9278103ab94b29bff5e113dba98186130c798ab5db877bb5a9b79c765",
+      "previous_988_source": "/home/by/urnetwork/temp/public-pilot-225-composition-20261029.FRp2hMaJ/held-out-public-pilot.go.txt",
+      "previous_988_sha256": "8de729a9a530bf9f47f804911227ce825c9346cfce30f1ae007f7c667cefc7e3"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/launch/held-out-two-b-addendum.go.txt",
+      "raw_physical_sha256": "544189280bdcaa429937423c200c6761a1136e0bdba51d7120474a6cf3eed578",
+      "prior_first_source": null,
+      "prior_first_sha256": null,
+      "final_source": "/home/by/urnetwork/temp/fresh-single-protocol-static-20261028.4O6WWzAm/held-out-two-b-addendum.go.txt",
+      "final_sha256": "7e1b389cbe3d2f7a0e8d2e8face216fd832b0abfa009672c1ed1d895bec8cddf",
+      "relation": "replace_raw_physical",
+      "stage_one_source": "/home/by/urnetwork/temp/fresh-single-protocol-static-20261028.4O6WWzAm/held-out-two-b-addendum.go.txt",
+      "stage_one_sha256": "7e1b389cbe3d2f7a0e8d2e8face216fd832b0abfa009672c1ed1d895bec8cddf"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/launch/held-out-two-b-composed-tests.go.txt",
+      "raw_physical_sha256": "8e9273210b2c63af2861da2bc82edddacad900158ac4931bbbbb7874438cf9e7",
+      "prior_first_source": null,
+      "prior_first_sha256": null,
+      "final_source": "/home/by/urnetwork/temp/fresh-single-protocol-static-20261028.4O6WWzAm/held-out-two-b-composed-tests.go.txt",
+      "final_sha256": "42e2f6d48d3fbe01a4d9fba466941f7d7050133e4ca3e1098268f4b90901afe5",
+      "relation": "replace_raw_physical_test_only",
+      "stage_one_source": "/home/by/urnetwork/temp/fresh-single-protocol-static-20261028.4O6WWzAm/held-out-two-b-composed-tests.go.txt",
+      "stage_one_sha256": "42e2f6d48d3fbe01a4d9fba466941f7d7050133e4ca3e1098268f4b90901afe5"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_public_pilot_oci_repin_test.go",
+      "raw_physical_sha256": null,
+      "prior_first_source": null,
+      "prior_first_sha256": null,
+      "final_source": "/home/by/urnetwork/temp/public-pilot-reduced-bound-operator-20261030.urI4AYrI/held-out-public-pilot-oci-repin-tests.go.txt",
+      "final_sha256": "2b70d7deceec41a3f2a022c063283f5b9bbe7af9fc687b07e8b8c6cc588c6192",
+      "relation": "new_owner_approved_reduced_reference_context",
+      "previous_988_source": "/home/by/urnetwork/temp/public-pilot-225-composition-20261029.FRp2hMaJ/held-out-public-pilot-oci-repin-tests.go.txt",
+      "previous_988_sha256": "78002fb498bd1804c713ec458562677dac52af22dc27455ded2b131ef7e8415c"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_public_pilot_retirement_test.go",
+      "raw_physical_sha256": null,
+      "prior_first_source": null,
+      "prior_first_sha256": null,
+      "final_source": "/home/by/urnetwork/temp/public-pilot-reduced-bound-operator-20261030.urI4AYrI/held-out-public-pilot-retirement.go.txt",
+      "final_sha256": "19d86a1a736e31df9758e64304552c62e2ac638ffa5e203cf413bad973be60b9",
+      "relation": "new_retired_public_pilot_guard"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_public_pilot_retirement_controls_test.go",
+      "raw_physical_sha256": null,
+      "prior_first_source": null,
+      "prior_first_sha256": null,
+      "final_source": "/home/by/urnetwork/temp/public-pilot-reduced-bound-operator-20261030.urI4AYrI/held-out-public-pilot-retirement-tests.go.txt",
+      "final_sha256": "fbbd0b7fe5884089895a82f9c5e896cc81347dbea7f4ee9be528d1dfec375f3f",
+      "relation": "new_retired_public_pilot_guard"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/launch/held-out-public-pilot-retirement.go.txt",
+      "raw_physical_sha256": null,
+      "prior_first_source": null,
+      "prior_first_sha256": null,
+      "final_source": "/home/by/urnetwork/temp/public-pilot-reduced-bound-operator-20261030.urI4AYrI/held-out-public-pilot-retirement.go.txt",
+      "final_sha256": "19d86a1a736e31df9758e64304552c62e2ac638ffa5e203cf413bad973be60b9",
+      "relation": "new_retired_public_pilot_guard"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/launch/held-out-public-pilot-retirement-tests.go.txt",
+      "raw_physical_sha256": null,
+      "prior_first_source": null,
+      "prior_first_sha256": null,
+      "final_source": "/home/by/urnetwork/temp/public-pilot-reduced-bound-operator-20261030.urI4AYrI/held-out-public-pilot-retirement-tests.go.txt",
+      "final_sha256": "fbbd0b7fe5884089895a82f9c5e896cc81347dbea7f4ee9be528d1dfec375f3f",
+      "relation": "new_retired_public_pilot_guard"
+    }
+  ],
+  "resolved_package_go": [
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/baseline_boundary_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/baseline_boundary_test.go",
+      "sha256": "ccf9e6b4fce5a3372d94809363cdc102c56c7bbf506323bf83d5d1c15b2b9010",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/baseline_four_exchange_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/baseline_four_exchange_test.go",
+      "sha256": "f44c7b9313f6f48aacda64d0a5cd55014c699c58bb0d573992f5181aad3ef152",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/baseline_metadata_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/baseline_metadata_test.go",
+      "sha256": "22f741a57d8d5084f8a998285d572ed8f1b071d0be2623853d43300901bf801d",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/baseline.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/baseline.go",
+      "sha256": "7e068afc57d2dc31d31ee88c95bb2f3fd6e631e0018006e7cd02ee0f19a98491",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/calibration_analysis_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/calibration_analysis_test.go",
+      "sha256": "e94bab4c492418a6195cb2cf2cca20b34125c3d57f8a024b89c1faf46758676d",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/calibration_analysis.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/calibration_analysis.go",
+      "sha256": "d61fd171dd29e4eb6bc813c3714c9185159c034f24938a8f6ff1cc76789b0aff",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/calibration_command_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/calibration_command_test.go",
+      "sha256": "edcdb034cda22da9d017c83c83ebf9af37dc84e81db0d8f5c4ca49d3c632f9ca",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/calibration_command.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/calibration_command.go",
+      "sha256": "527d57740c93b842e802385061cbe2bcaaca7058a04e2c8eec660f74b89e5962",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/calibration_evidence_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/calibration_evidence_test.go",
+      "sha256": "ddc459789cece69c74c311f787a0d70299fbf78ac1753e3dd45c331a9b189dca",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/calibration_files_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/calibration_files_test.go",
+      "sha256": "c5e3e4f01550a4579c49d9c373615ce6bce52d528fb750c72c5d33e63b328322",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/calibration_files.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/calibration_files.go",
+      "sha256": "ec685cbb985b3221436530faeb30981483ecffd4620d490a9c6531d0ea1f30b6",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/calibration_loader_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/calibration_loader_test.go",
+      "sha256": "b6227b36d1723f0b89afd75f5b21ca307eaef4c425b7c4d1f45ae928698640dc",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/calibration_loader.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/calibration_loader.go",
+      "sha256": "d62e6bf9e594aa49ed5312b3372bee019a2b1c37a3ecbf6771b5c832326d6201",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/calibration_protocol_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/calibration_protocol_test.go",
+      "sha256": "c6600986244d1b5ca1b8fe07ac8516af67ae57c4072f4ca0333f4efbab838e13",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/calibration_protocol.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/calibration_protocol.go",
+      "sha256": "f777c06469031581428e013cca044fb879e40427adc14caad7c2e886bf3d2206",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/calibration_qualification_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/calibration_qualification_test.go",
+      "sha256": "a26322f398ec2e28b59d792ed7670ffad244cbbb79f89a35702c2ffb50a330c7",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/calibration_replay_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/calibration_replay_test.go",
+      "sha256": "161f45ee2d755a213801ea6fa999c62455e806fa0c37502db1b3f9bc011dc0f6",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/calibration_replay.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/calibration_replay.go",
+      "sha256": "7a15d0367cee13deaf103699005cb0a62806bc14e442dcc1484161c73c81de68",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/client_probe_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/client_probe_test.go",
+      "sha256": "1ac78ac45925c65d291b02339207178d2b8df7137ef3055f695159c551033402",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/client_response_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/client_response_test.go",
+      "sha256": "9dee4995b1095d5d35a1bb340e365afd9006cc568f0ccbbf72e26802ac047e32",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/client_results_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/client_results_test.go",
+      "sha256": "dc872655c3830b06245ab9124b7a4195327a12cbf621c2da22da50dffb898214",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/client_session_fixture_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/client_session_fixture_test.go",
+      "sha256": "5ce15107ff476983bfac8cc852f67ad5eb894f864fbc9537492dfcb10cd2d512",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/client_warmup_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/client_warmup_test.go",
+      "sha256": "3c47b72b2b1f92566b947028cfee66bff51b92513a57de72c70315a614f82719",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/client.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/client.go",
+      "sha256": "2bf4bfa5fb590fd8b20ce15e378dac52af87114a114a423cf6a6022ea5be6589",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/compare.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/compare.go",
+      "sha256": "cb1d28e641fc042cdac38ba85bb37d4feecaf6fc0883d767d06efc6af381165d",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/config.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/config.go",
+      "sha256": "f6d144142834393510cdcf70edf90cbe22d651bdb91ac741a15e32dfc0e6b125",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/credentials_scope_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/credentials_scope_test.go",
+      "sha256": "45ffad7908e180e8a4b2b0bd1f221b2f888da39fca38d8717fff3cfae2be349f",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/credentials_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/credentials_test.go",
+      "sha256": "c3954430047f6f023a06c77b9bd79e6e278613c55f47afbc9b030577f08d60b6",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/credentials.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/credentials.go",
+      "sha256": "7a63e273119a7fa68e9c4bc1e7244695a152d256f818cb2d3b0010540e24f09d",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/entrypoints_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/entrypoints_test.go",
+      "sha256": "d80dfc16039d21b546bc20fa9cd77a00836157b9e2302d223cbeb70f4d4b0f77",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/epoch_review_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/epoch_review_test.go",
+      "sha256": "1ea33a42323983b3cf5fdafa06c3cd8f6baf97d7b8d6cba4fd7223fe87086a75",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/epoch_review.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/epoch_review.go",
+      "sha256": "ab08440317f3dc964550ebb1bc3bb769152fc4d9e4029aca18a8df7025eb913e",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/evaluator_admission_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/evaluator_admission_test.go",
+      "sha256": "6ef0a231b1868b9d04763095a204d16d09d9df03fa3b8c7027dc6d8e0b82d2bf",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/evaluator_base_build_gate_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/evaluator_base_build_gate_test.go",
+      "sha256": "f5fc99b455ed5916f2143d1c0db71fb22435b0bb0014611b0aefe87326e7adab",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/evaluator_entrypoint_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/evaluator_entrypoint_test.go",
+      "sha256": "3b737a75481759bbd0697a867fc4a5281f6d7e6214c413f05817dafaaef9ee81",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/evaluator_git_gate_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/evaluator_git_gate_test.go",
+      "sha256": "45f6887fadfdf0b5892cf3b50ee8eb897af2bdb005dabb89108d07d1243eae7c",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/evaluator_live_progress_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/evaluator_live_progress_test.go",
+      "sha256": "2b108ca3c52f5d07253d521245cb0cc005bbfa920fb565e5b25232dc7a257bcb",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/evaluator_memory_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/evaluator_memory_test.go",
+      "sha256": "45eb154dcf780cee40ddef5b0737078eb7fc4f53a5ec269de192d7ffad043b91",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/evaluator_network_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/evaluator_network_test.go",
+      "sha256": "33c6cbf8ed9500a5bf45de9a1c7d66483869e5edd52185cba5c8881de0d5a021",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/evaluator_post_run_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/evaluator_post_run_test.go",
+      "sha256": "8720aaf05e34b8650a47617ca9593acc9bda8617be6760ec809f8dd2ad720bc8",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/evaluator_repository_builder_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/evaluator_repository_builder_test.go",
+      "sha256": "c9ee618541bb065e876644e3f0147023eb82f062f8c9807cb4ea36e6c16d4b40",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/evaluator_request_schema_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/evaluator_request_schema_test.go",
+      "sha256": "3241dd224c07892295c313451bf6ef7d5fb8b43b152863d5f421b3513abd0610",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/evaluator_round_baseline_preparation_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/evaluator_round_baseline_preparation_test.go",
+      "sha256": "d6228e51bcbaee5cd4f5efe68bb2a17868f349ddff13a2a6f1fdec14905b2d3e",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/evaluator_runtime_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/evaluator_runtime_test.go",
+      "sha256": "bcf2bf1a43c6ac978a551ce7925061b08ee1cc0432f2d0d6c8cbe5f43714e15a",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/evaluator_source_git_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/evaluator_source_git_test.go",
+      "sha256": "99cbe06a0ad80c308c29b4860101849cbea62404e4ef380d98af2e52b2c1df18",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/evaluator_stage_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/evaluator_stage_test.go",
+      "sha256": "a99ac431794dbf1766a03923f2de2ae8ad3173a297e6ccb0ae13721f0e197ac1",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/evaluator_staging_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/evaluator_staging_test.go",
+      "sha256": "6482b9246ea39903bdc8e490c6362a69c451968aaa765a260b5f1224656becd6",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/fleet_dynamics_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/fleet_dynamics_test.go",
+      "sha256": "3e5f21193273ceafb12afad0ba15238e898f691c3eccf631a38f438881e68a56",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/fleet_impairment_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/fleet_impairment_test.go",
+      "sha256": "861b2f9e76978d481a37f6f79ef5b128b17aa91813846579ce5566af7d27bbf1",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/fleet_readiness_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/fleet_readiness_test.go",
+      "sha256": "8d348e0fba16762119a2485127d2d38c3e6a995c927fb8039c224d610e21eda7",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/fleet.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/fleet.go",
+      "sha256": "1282e754c2c9be636029753affd78c10171247cf8d988d5e0166ed635ef27f1f",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/hash_local_mount_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/hash_local_mount_test.go",
+      "sha256": "87d3fdd660703508c49b7202fa716bcc3cff0123d5b110bcffe3a0cffdbf8f44",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_amendment_draft_test.go",
+      "source": "/home/by/urnetwork/temp/fresh-single-provider-guard-static-20261028.bKtb0fOX/held-out-amendment.go.txt",
+      "sha256": "37bbfd1026274b1343f97368b1ea3cbc5e890d6195606466f2ddafd02cf82651",
+      "layer": "replace_raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_amendment_tests_draft_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_amendment_tests_draft_test.go",
+      "sha256": "e4776cb43c9d1fa56f21bcb6cf17dc2b6064e182dcbb092635df23d7a7c40a4a",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_bridge_draft_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_bridge_draft_test.go",
+      "sha256": "b2e941f0d8e12ca7a8c6bac2aed3fdfdfc76bfa568c25a91e2c0c0ce62cb2a56",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_command_draft_test.go",
+      "source": "/home/by/urnetwork/temp/fresh-single-provider-guard-static-20261028.bKtb0fOX/held-out-command.go.txt",
+      "sha256": "9bcebc5141f218a29e809195b7a095269dbe58fd5a8f8e5dbbe1ee282d447081",
+      "layer": "replace_raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_exclusion_census_draft_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_exclusion_census_draft_test.go",
+      "sha256": "2af6049e0d3c0b9b3dc8a9c287bb976537d26afed197b5b7a6a47eb5f67c4f0f",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_execution_draft_test.go",
+      "source": "/home/by/urnetwork/temp/fresh-single-protocol-static-20261028.4O6WWzAm/held-out-execution.go.txt",
+      "sha256": "62373b92fefe3fb81dfe6b4e80bc7780501307a9bbea547f48823188eed978da",
+      "layer": "supersede_prior_replacement"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_execution_tests_draft_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_execution_tests_draft_test.go",
+      "sha256": "a4a34a962db349ac5577b51b8a391038e4b67986565cef9034f1f38e231de13a",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_first_committed_dispatch_tests_draft_test.go",
+      "source": "/home/by/urnetwork/temp/first-committed-operator-qa-20261027.a21tBAze/held-out-first-committed-dispatch-tests.go.txt",
+      "sha256": "f0c4663fe93a267375a43a8ae0623e6428b0e6856b93dc14cddd2aaeaac7f840",
+      "layer": "retain_prior_virtual_addition"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_first_committed_draft_test.go",
+      "source": "/home/by/urnetwork/temp/first-committed-operator-qa-20261027.a21tBAze/held-out-first-committed.go.txt",
+      "sha256": "cb97bdf17b2e411b1063516757ac6851954edde3b2bb8ef83b826f3fcbc89c00",
+      "layer": "retain_prior_virtual_addition"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_first_committed_tests_draft_test.go",
+      "source": "/home/by/urnetwork/temp/first-committed-operator-qa-20261027.a21tBAze/held-out-first-committed-tests.go.txt",
+      "sha256": "1b493b58a55f2e93d479cfbd486c87c605e0e0a9bda5ddea1b6b6f2c981bee19",
+      "layer": "retain_prior_virtual_addition"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_fresh_exclusion_builder_draft_test.go",
+      "source": "/home/by/urnetwork/temp/public-pilot-reduced-bound-operator-20261030.urI4AYrI/held-out-fresh-exclusion-builder.go.txt",
+      "sha256": "8cafea7296efaddf60131e36d039f0275b9607ccc9ce5c1c183343fba3dccc6d",
+      "layer": "new_reduced_operator_overlay"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_fresh_exclusion_builder_tests_draft_test.go",
+      "source": "/home/by/urnetwork/temp/h1-public-pilot-fixture-revision-20261028.XQjNhhF7/held-out-fresh-exclusion-builder-tests.go.txt",
+      "sha256": "474148bb16db59ae0b49af7f320cd531f6774aa405d2dd2127ffb713c16f8963",
+      "layer": "new_census_virtual_addition"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_fresh_single_b_draft_test.go",
+      "source": "/home/by/urnetwork/temp/public-pilot-reduced-bound-operator-20261030.urI4AYrI/held-out-fresh-single-b.go.txt",
+      "sha256": "efe765785d81afd207ffc44acc170a3bb40956dd30ed5bb454dddadfbc3441eb",
+      "layer": "new_reduced_operator_overlay"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_fresh_single_b_tests_draft_test.go",
+      "source": "/home/by/urnetwork/temp/fresh-single-provider-guard-static-20261028.bKtb0fOX/held-out-fresh-single-b-tests.go.txt",
+      "sha256": "1f0f1d0f6c136f6f616a40e3b842ab2edaf46eb6d442b248905773a8272ae378",
+      "layer": "new_virtual_addition"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_margin_pin_draft_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_margin_pin_draft_test.go",
+      "sha256": "524441f5c81c0c12eb44a2da3ca558c071226b121e30a366c1de8d4c7b07dc88",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_margin_pin_tests_draft_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_margin_pin_tests_draft_test.go",
+      "sha256": "d9c9c8634ac92f1b1a8dd9f52ddd00934838d1a3d5688fb2f09fa66518f15b40",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_operator_draft_test.go",
+      "source": "/home/by/urnetwork/temp/fresh-single-protocol-static-20261028.4O6WWzAm/held-out-operator.go.txt",
+      "sha256": "e37731264b6439a070815f9e03b6a72c6770c66acb3ee4858f090f99a541d843",
+      "layer": "replace_raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_operator_tests_draft_test.go",
+      "source": "/home/by/urnetwork/temp/fresh-single-protocol-static-20261028.4O6WWzAm/held-out-operator-tests.go.txt",
+      "sha256": "31eae507efe46f083d4ec486dfe64e0dfe81a42358645783fce366e461c69254",
+      "layer": "replace_raw_physical_test_only"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_public_pilot_adapter_test.go",
+      "source": "/home/by/urnetwork/temp/public-pilot-reduced-bound-operator-20261030.urI4AYrI/held-out-public-pilot.go.txt",
+      "sha256": "083611a06d1ad03f6db5f234cc48347bd165e92139fa618929cd6ad585f894d6",
+      "layer": "new_reduced_operator_overlay"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_public_pilot_after_test.go",
+      "source": "/home/by/urnetwork/temp/h1-public-pilot-closure-fix-20261028.AN4jgB3I/held-out-public-pilot-after.go.txt",
+      "sha256": "4e68b22b261db4b4cce9bc66d9192bb60d0208e341252bda318e97f8399a4d9d",
+      "layer": "additive_public_pilot"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_public_pilot_command_test.go",
+      "source": "/home/by/urnetwork/temp/h1-public-pilot-closure-fix-20261028.AN4jgB3I/held-out-public-pilot-command.go.txt",
+      "sha256": "26a219e0a5c3b93621e8d41dd0cd5546110884d9e774b388b676e152b7edf0fb",
+      "layer": "additive_public_pilot"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_public_pilot_lifecycle_test.go",
+      "source": "/home/by/urnetwork/temp/h1-public-pilot-closure-fix-20261028.AN4jgB3I/held-out-public-pilot-tests.go.txt",
+      "sha256": "0f54d21eca9c796715bea3e698c056e0cfd3815b7dbab7c4e3af1b5927d05604",
+      "layer": "additive_public_pilot"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_public_pilot_oci_repin_test.go",
+      "source": "/home/by/urnetwork/temp/public-pilot-reduced-bound-operator-20261030.urI4AYrI/held-out-public-pilot-oci-repin-tests.go.txt",
+      "sha256": "2b70d7deceec41a3f2a022c063283f5b9bbe7af9fc687b07e8b8c6cc588c6192",
+      "layer": "new_reduced_operator_overlay"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_public_pilot_retirement_controls_test.go",
+      "source": "/home/by/urnetwork/temp/public-pilot-reduced-bound-operator-20261030.urI4AYrI/held-out-public-pilot-retirement-tests.go.txt",
+      "sha256": "fbbd0b7fe5884089895a82f9c5e896cc81347dbea7f4ee9be528d1dfec375f3f",
+      "layer": "new_retired_pilot_virtual_addition"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_public_pilot_retirement_test.go",
+      "source": "/home/by/urnetwork/temp/public-pilot-reduced-bound-operator-20261030.urI4AYrI/held-out-public-pilot-retirement.go.txt",
+      "sha256": "19d86a1a736e31df9758e64304552c62e2ac638ffa5e203cf413bad973be60b9",
+      "layer": "new_retired_pilot_virtual_addition"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_reference_order_draft_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_reference_order_draft_test.go",
+      "sha256": "cf4ba34d2c8e368532ac0e2555dfa9474304fa389d1a76f07e140e99bb7bd628",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_reference_order_tests_draft_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_reference_order_tests_draft_test.go",
+      "sha256": "faf4dfd4e87e0f6e42887f249c9b0200cd4004cc12032317191fbd771139e5e1",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_request_finalization_draft_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_request_finalization_draft_test.go",
+      "sha256": "8b44bae10054c2e85806334321a1767134533a6a7c0cb31d293dc84d4aac1427",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_request_finalization_tests_draft_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_request_finalization_tests_draft_test.go",
+      "sha256": "0d19700f1decc64285fc078170ce1e69dc21e35b7b50ad65239bf970832384b8",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_runtime_release_draft_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_runtime_release_draft_test.go",
+      "sha256": "a5507e2b8307b05e8acc9daabda9a58da78323a4addba06b2926b33f3aae6a85",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_runtime_release_tests_draft_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_runtime_release_tests_draft_test.go",
+      "sha256": "79309f056caba6d333b921e56885ac4619ec90f56a04569ca355923bffbbdc29",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_three_a_input_assembly_draft_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_three_a_input_assembly_draft_test.go",
+      "sha256": "0df475abb1c1cf2f71d678cf63438a89b1ff789303723d034baa6c0dd5787b48",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_three_a_input_assembly_tests_draft_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_three_a_input_assembly_tests_draft_test.go",
+      "sha256": "433367dd93706fd7822c767d5cc0d1890e07da3e5ab3dcebe8a291c5314cc957",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_two_b_addendum_draft_test.go",
+      "source": "/home/by/urnetwork/temp/fresh-single-protocol-static-20261028.4O6WWzAm/held-out-two-b-addendum.go.txt",
+      "sha256": "7e1b389cbe3d2f7a0e8d2e8face216fd832b0abfa009672c1ed1d895bec8cddf",
+      "layer": "replace_raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_two_b_addendum_tests_draft_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_two_b_addendum_tests_draft_test.go",
+      "sha256": "05d9a5fcfb24e78c686b298cecd2cce08b785077766b4a4713a5619aebe108cd",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_two_b_composed_tests_draft_test.go",
+      "source": "/home/by/urnetwork/temp/fresh-single-protocol-static-20261028.4O6WWzAm/held-out-two-b-composed-tests.go.txt",
+      "sha256": "42e2f6d48d3fbe01a4d9fba466941f7d7050133e4ca3e1098268f4b90901afe5",
+      "layer": "replace_raw_physical_test_only"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_workload_binding_draft_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_workload_binding_draft_test.go",
+      "sha256": "617a7a51f2c24596e9ed8f7ceffecfec79d133cdf40d502ea2d9034ca1f6eb00",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_workload_binding_tests_draft_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/held_out_workload_binding_tests_draft_test.go",
+      "sha256": "d171234379bef0e29ab5b25411835bfed3e91d87a86a09e700cd9df4c2b48256",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/impair.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/impair.go",
+      "sha256": "41ec4ac031ea76cec9b9c2c12bfad9573d9752e209753bc287d2242e2a6bb3c6",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/init.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/init.go",
+      "sha256": "67fa4868a1edacef57496f2e61c3316898c17aa856980b5f0ed5b12b7672f25d",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/launch_http_credential_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/launch_http_credential_test.go",
+      "sha256": "4a5d34040bc2e060861a83d1e7cd817054715ffe5bd40ee898c69432279b61a4",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/launch_http_credential.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/launch_http_credential.go",
+      "sha256": "41df708da1ce2b7f453d179a63b435faf61a61c8fafacc13f439139861083eff",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/launch_readiness_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/launch_readiness_test.go",
+      "sha256": "3f7b7f802cefe994b03978eca5cb295396fa083cf7bb455808e79231eb341566",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/launch_storage_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/launch_storage_test.go",
+      "sha256": "0d59695f32e9e3a434f980e4263ec51c5541df6aa5ed4275a679bd109cf1104a",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/launch_tools_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/launch_tools_test.go",
+      "sha256": "38d3edda0bc615a0d73475663dac7769079662f6d98ab0f01618ea584fa2972c",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/launch_tools.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/launch_tools.go",
+      "sha256": "e3ed9d443a6142c0aa4e69e925d30d851ea422fb974344216fcbe04b187c0fb9",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/main.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/main.go",
+      "sha256": "9dbb4dcdb8787d5dbf5bba73a3a451393dc6976e0950fd4bef3a5fba21896de8",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/official_run_margin_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/official_run_margin_test.go",
+      "sha256": "03598828d4863e1fa251ec1acaceacf5f8369a324af69d0efe1f64d5a0a398d5",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/provision_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/provision_test.go",
+      "sha256": "832185fb732557144fb1a8d4e6927947cc73e65fc905111c50fcfaeccf5d77ea",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/provision.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/provision.go",
+      "sha256": "d92a602b6ee34924448293e7603704f2e460d5be1ac8ba9461d091c089feee38",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/reset_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/reset_test.go",
+      "sha256": "64925f9075f8cc94362287cb0a4ff62ad03eda3b5d08dcda1bc21f2a7b2bdeb1",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/reset.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/reset.go",
+      "sha256": "812778a6574c6bdeacb7558daf1c0bd6d1b7d52de6bfda69d0e168361a95362e",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/results.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/results.go",
+      "sha256": "d97749b7d6b0e6e63850d5bd9c30072b100cd9f682552f371bdcd5560b599c05",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/review_qualification_command_draft_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/review_qualification_command_draft_test.go",
+      "sha256": "4ce5c7fd66b26fdd7c18af0623814673a9aa2c3f2219118936770e697de4d403",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/review_qualification_containment_draft_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/review_qualification_containment_draft_test.go",
+      "sha256": "6b13e068dafe66e728fdd5cd7ed51417d117c4a50a9fcac84dffa6f3938c7ebc",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/review_qualification_draft_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/review_qualification_draft_test.go",
+      "sha256": "75dc5522f7f846d53338b2c9c610f6369f190510953c313c6e8636c8fab5bd70",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/review_qualification_snow_command_draft_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/review_qualification_snow_command_draft_test.go",
+      "sha256": "469e8763fea70f62f561a9f4545abf25e9683a62781e8bedae26211cb3092d47",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/review_qualification_snow_containment_draft_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/review_qualification_snow_containment_draft_test.go",
+      "sha256": "69bc51a5e98a130a81911650e3daa16d1a6e2de9f78a86a1bc11afce99cd39f3",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/review_qualification_snow_draft_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/review_qualification_snow_draft_test.go",
+      "sha256": "b4e3967315638e929b856941a9626b9ee1196f236f2d87269103d880a6a5072a",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/review_qualification_snow_tests_draft_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/review_qualification_snow_tests_draft_test.go",
+      "sha256": "5218fc37a7e77a29fb64a57a197ad2fc767066cad0b59ec501b92ffe63260871",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/review_qualification_tests_draft_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/review_qualification_tests_draft_test.go",
+      "sha256": "f821e434aacbe0e3ec4cbc61d11084d779f8be672c9d40497247e21a9b2f5a9d",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/rng.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/rng.go",
+      "sha256": "b8c477caa034d37641a6d49c7ef2a6ccaa9d3b117e9e951d01753097236ecdfb",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/run_lifecycle_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/run_lifecycle_test.go",
+      "sha256": "5bc178d54424f72e30b66ebb8aa4b4ab5e4d56455aeb1aa23f25ae4286df63d2",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/run_main_automation_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/run_main_automation_test.go",
+      "sha256": "b193d993cf6c6a988d87a9473f5b08885dff08285ae4f6dc467310c6c1dd0a66",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/run_main_lock_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/run_main_lock_test.go",
+      "sha256": "aef5338992f63486b0d1c2badfded25985d0b8d642733622b4930731e3a6721e",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/run_main_staging_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/run_main_staging_test.go",
+      "sha256": "8e7f988bf0f47f07f81cb6cfcd3f300051e2266cd39a6acfcefac1b485af0bb0",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/run.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/run.go",
+      "sha256": "664cdd5146679f8b9e93663ea8add260a4d419b4cd441493a6abe264c8094621",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/score_significance_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/score_significance_test.go",
+      "sha256": "f772b0547e79c330b6304900b3d031a07e24aa1db7cf50aa10b9f5c58a0f9bf9",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/score_significance.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/score_significance.go",
+      "sha256": "a0ad056983b1a0d26d410bc086c4dbf69bc9c897643c9711570249f75f5121d0",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/score_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/score_test.go",
+      "sha256": "72423743abc03a5832c935c2bf78248e23ac7b5f094eebee9ba805ad618753a7",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/score.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/score.go",
+      "sha256": "e6be6f69358db5e34e15a5016229c2d22f22b9bfe9dbb395efc4fc50502334c5",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/services_lifecycle_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/services_lifecycle_test.go",
+      "sha256": "465b823869f59ba0460676f30a2b8ea3994c8ffcfac74950b758716facdadc46",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/services_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/services_test.go",
+      "sha256": "b654a262cb7553eafd47e05dd65754b77f4b4ba843453cf568519545a3e68da6",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/services.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/services.go",
+      "sha256": "b35a502e6bc895992ad1269f44131765f8869ec6ce31e9a96dc647dfe55859d9",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/sim_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/sim_test.go",
+      "sha256": "0e4db12fe52b810e7a88f1bb4f6172b5b93895ab12cd16c8bdfc6ddb1e782ae0",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/site.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/site.go",
+      "sha256": "a42dc57434f0c21ff1cb130fc8610861224ff91e67685ea3eb52f4ca58f6c5d2",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_bootstrap_opening_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_bootstrap_opening_test.go",
+      "sha256": "03003b134dc0565c8f0c75fb98dec4869a2eb83627c9c5f32c637576ae1a7319",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_bootstrap_opening.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_bootstrap_opening.go",
+      "sha256": "6afc2f9295c2eac36c38ab490659bd249bdd5a2e1435e6771c49e396103a4846",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_bootstrap_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_bootstrap_test.go",
+      "sha256": "a371a54c708c580e9ee3929b04d459e5d2ad038c1cce78b7cc433953aa6cb3e0",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_bootstrap.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_bootstrap.go",
+      "sha256": "1587bd64ba92bbdc275278251f82b6aa7941312da59227edeb7f8b70743d2ae1",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_attempt_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_attempt_test.go",
+      "sha256": "3bb47a05dcadacdf7ee859e479ae478767b7ce09636d561ecdd5c5a14e3ec156",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_attempt.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_attempt.go",
+      "sha256": "16570969c5acc29b17899f841ef9747ba1789ef29591973066e776d0a6c5a291",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_binary_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_binary_test.go",
+      "sha256": "ebc8f212e7f0456f8a32d393da04bdb17f5ff590c03c4365abf25eefd20f5ada",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_binary.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_binary.go",
+      "sha256": "5af7e6d6e8ee5b44c4047b6f26853b51bba21f81ae4255844ff6a615ce452c12",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_broker_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_broker_test.go",
+      "sha256": "64a84664a5cbcb55f38ed1a36bb39f8c7f95ea35faf85b2ae06d084fbe579671",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_broker.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_broker.go",
+      "sha256": "f66d2b6e9d904a1a7f68feff7f88afebae59c3419f83a81d1c8f522b3ff4d00c",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_context_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_context_test.go",
+      "sha256": "625dd1ae279cca182a571f3e48336d3d6db395461537f94622556b22f5aff862",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_context.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_context.go",
+      "sha256": "9ffcbc8a12ca33305644dafd765437c7c69ebb4e782c9a7de44426e72c9b03de",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_fetch_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_fetch_test.go",
+      "sha256": "6d4b2361c6ad0dc961682e8685fb2fd2c0f8f2ba52452f1f20834d6432f432e3",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_image_integration_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_image_integration_test.go",
+      "sha256": "c2e6815b64c5d22fc5e6bf1e39fb0c42c8cd57a1fdeaba7fdc7c0e0a09ea3ec2",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_image_run_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_image_run_test.go",
+      "sha256": "263d4d4e45c2f28438e0b85653318a6339fe0c92b139b2014508751d2bc9b6ea",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_image_run.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_image_run.go",
+      "sha256": "560d847d51ecfefb0e471effd09ede0af43b9a09cd74975cf0dfa82e5880656a",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_image_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_image_test.go",
+      "sha256": "bc2c57963bbb4d8446185d14a7e2220f823d8e6185185b7ba301d096ba859aef",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_image.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_image.go",
+      "sha256": "141259ca8808c0747077d092ffa2c96d1fafcd252ddeadb341f5c64f3f8357eb",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_metadata_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_metadata_test.go",
+      "sha256": "563f13f334c2d0d4d333a50e3392dd63101ec1f6ebf229eba29edd6b04de80e8",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_metadata.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_metadata.go",
+      "sha256": "e22ec88d0c4f3465d6ba36c4d155fd5bdbfbba6729084707347897f9c794002d",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_modes_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_modes_test.go",
+      "sha256": "86e4dd336ab25d73d22d70db98969c031fc290fb12ea22c2dd7b0ccf697d50e3",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_path_base_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_path_base_test.go",
+      "sha256": "6316ded90d4f9986b994e8008342396860531f190da45a016ca55e73e3f33f12",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_pipeline_integration_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_pipeline_integration_test.go",
+      "sha256": "9d333071016a4b14d6b945f3c2ad8806864442b4b5de7e697cbe95f79f72db4d",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_pipeline_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_pipeline_test.go",
+      "sha256": "033f8a064def0258bb0064ea06a6781a531af68d08c95066832f0aa2c504febb",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_pipeline.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_pipeline.go",
+      "sha256": "5134188cf8b92dded8c2420ed5ce62ba8747ab19ae75c3ff148a0d101e28d88b",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_qualifier_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_qualifier_test.go",
+      "sha256": "68d71ccb234ab08af1d0c226ef6b6e16f21c05284bbe461cb485e211a644f5ba",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_qualifier.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_qualifier.go",
+      "sha256": "be8e63e6768bd3e5ad086787411cb0a28ffd97a55a5b59273c4beae20222aa7a",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_sandbox_integration_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_sandbox_integration_test.go",
+      "sha256": "1e20896049fb24258fed354cc1af9aa1b24f11feae7a916e932bf64ffd4bd8ce",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_sandbox_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_sandbox_test.go",
+      "sha256": "d2dfcefde39696ddf5cd2f72c801c5a8c20e654373e263fdd607021d5c0b1044",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_sandbox.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_build_sandbox.go",
+      "sha256": "b666e14eacff2b8332657f2d3118f04cad8c28aea61cbd54a8b484b1facabda3",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_config_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_config_test.go",
+      "sha256": "5af704373b205a43a1dec8af2094470739808dc126342dfe09eb2a40fdd203ca",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_config.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_config.go",
+      "sha256": "0d22bb118d1139c39dce5317f57c3daab53c46150cf9d91c2bddcbf3f4d10fe6",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_epoch_mono_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_epoch_mono_test.go",
+      "sha256": "373ee1a94643e65280cdbd25ac9aabb3539680318cf1a01525699c2d254a9389",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_epoch_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_epoch_test.go",
+      "sha256": "3c7753cf82fee2f86653947b342d7da1084d8d4b3876f38436f11f3d194f29b3",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_epoch_v2_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_epoch_v2_test.go",
+      "sha256": "aece90cc5525fb48f36e8bb0f1e40b1e64d73d00f63f256f7f5aa26baa296d2e",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_epoch_v2.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_epoch_v2.go",
+      "sha256": "6c6546668a6713d3feb978085296fa621c25e4c8ab2c850b523ac204758a9dcf",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_epoch.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_epoch.go",
+      "sha256": "4759b74470bc8672478830833eed3591f6795cf0c150f696bb75c0b44a653398",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_fixture_git_identity_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_fixture_git_identity_test.go",
+      "sha256": "d3bc29c11877d910e6fd84e9cf6c69aa869aa7b28a4fc1228d93b796752e3679",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_fixture_identity_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_fixture_identity_test.go",
+      "sha256": "e1120e77cc0e705ba4668d7f830b49ee3297f081359915ee3db40da8790372d5",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_git_blob_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_git_blob_test.go",
+      "sha256": "ac0ffe2cebcea73b2e26e2ec060273a91a8ffc91a08c72bc0bb17a69c283c477",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_git_blob.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_git_blob.go",
+      "sha256": "7b0c765f85dafd6ff6072a967f5ab611df93fbd8b7f7cdbdc926abdd56b6208e",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_git_filter_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_git_filter_test.go",
+      "sha256": "6253da002532e62399b7f06f11a6bbaafbb9b86323f41820ff178202fac06518",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_git_ownership_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_git_ownership_test.go",
+      "sha256": "59c0069f7a432b702892af594edc24a1b6e2290d5ffcec5a532d720e918e778d",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_git.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_git.go",
+      "sha256": "d37bd123da723ad2a5c1662264d6299c44b09c1ec592bbc3dad2450d2b433f9b",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_graph.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_graph.go",
+      "sha256": "2b0de6fe5895b65a779a8b550d6553304f45a919b2bd5e094d4d25cf2682fdbc",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_host_config_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_host_config_test.go",
+      "sha256": "785e12c91e99ca4297b5ff9d2c2f9bdb0f1d9d798d8ae146cb8600c099b3d4a5",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_host_probe_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_host_probe_test.go",
+      "sha256": "7b0c2378a85bd9ec18524efea6325a9de5a0f0cd4c66e31c2f433c1736334d69",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_host_probe.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_host_probe.go",
+      "sha256": "63f30be3890058d7a7ce44d03c8c8efd911dec15103647b27c7bfc63ffa5c110",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_host_profile_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_host_profile_test.go",
+      "sha256": "91bc9b922130a88d60701e3c63f703aed1167feed02bd4ac064d76dbee9fbaba",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_host_profile.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_host_profile.go",
+      "sha256": "59f2a9746532f40ed050f05c0b301bd5b9c17e2ce6b97883525ffae15567046e",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_margin_precision_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_margin_precision_test.go",
+      "sha256": "dae3a9100386188abd0101bed657245706f7d999216ae7958a38cf15b11b85b0",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_margin.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_margin.go",
+      "sha256": "fd06fe0e6a3d6579cc9006e67ac270c5bf3a6a323750abc53e0a26ec12d63f13",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_mode.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_mode.go",
+      "sha256": "e8a25f711fa2bf9a35ae149ed239e52d272c21c733de8c1a59f4e9e99f0f5e37",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_patch_base_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_patch_base_test.go",
+      "sha256": "29f5af0372709669a3218c62534054cf6ea59b743a5e860dc6e47ceb14d4ac92",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_patch_base.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_patch_base.go",
+      "sha256": "d5b77f630ee7a2a22a264a343095fbb6d600b4a850b9cecb4f80aaf752a9b7fc",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_promote.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_promote.go",
+      "sha256": "b3dec953d8da6964161cd3e15dbab7e92e21e2fe6f556192fb116c184ee7e42b",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_publication_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_publication_test.go",
+      "sha256": "a7cf6fc96033b7781ee4a6959a626a35fbc1030ac564d8ff5e12092c2ee29b66",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_publication.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_publication.go",
+      "sha256": "c7500cbefd3842ce618f3f4254b56db90b8daef808ced2930d1adf1dcc0b3155",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_repository_promotion_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_repository_promotion_test.go",
+      "sha256": "b1322cd6174b4336e973c07df54f65ad21154c3c05c8e14470669df3c393dce0",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_repository_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_repository_test.go",
+      "sha256": "fc063b765d7ec47b6c1064c97fb2b30ff17d6bea2c2afdf3d60e5a662aa3aff1",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_retirement_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_retirement_test.go",
+      "sha256": "4e8328611711fe9565784f3ab08c23011691301f29d749482d0f82a87e3ad765",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_review_packet_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_review_packet_test.go",
+      "sha256": "6af95635fc9dd77f422ae6cfbefac498519d41af006ccd5c965184425700de7c",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_review_packet.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_review_packet.go",
+      "sha256": "1697cf7bb9ffb1cb710ff2e04f29ff2e4026eb07657a14cfeb29293d2f08850a",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_review_template_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_review_template_test.go",
+      "sha256": "4b792d8020d30e199404531c97827339cc0302c15eec57a097e8b15aed34725f",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_review_template.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_review_template.go",
+      "sha256": "84c706bd394421e7af5c757925c7867bcb22683e07bfef5ab1ba5e61638d8b6c",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_reviewed_build_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_reviewed_build_test.go",
+      "sha256": "630c9ee830aac9bf00f02ff0d7d5772fa6ec87242503ad579cd5e222c315dd09",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_reviewed_build.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_reviewed_build.go",
+      "sha256": "2eb5592b576194062400aea3f7872153a2b3d353ad8dd9502d5f2941e2fe8b65",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_reviewed_commit_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_reviewed_commit_test.go",
+      "sha256": "346fd4dfbf20e688c79ce1babcfa69d98c1f31b42c51ae38e6b5b3aa81c41852",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_reviewed_commit.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_reviewed_commit.go",
+      "sha256": "a0c584aad57eab9f3be0849ac72d69fd83bd56f0fafa4f3b4d4ad82b0864078d",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_reviewed_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_reviewed_test.go",
+      "sha256": "1ef1a694920ef7684ac84fc70e9f265e6639101f2dde09f613bb2a25867998a1",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_reviewed.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_reviewed.go",
+      "sha256": "ee5dfa17b9b2e3a3e76e00e8e79179e2c0aeea33e43942c4bca169b19ca4213c",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_staging_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_staging_test.go",
+      "sha256": "8772dbfab83e84c23bf8327275f190e7630833a2aa17cf5264ce98a384793ec8",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_supervisor_output_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_supervisor_output_test.go",
+      "sha256": "a13fdf0098bc688d04b2bf0c3d04487679a39db8958a7349124410fa795e8a12",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_supervisor_script_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_supervisor_script_test.go",
+      "sha256": "84f1943efad6ce2f1e0612c0830bbb96178801f492f7264e8913bec6fe2818fe",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_supervisor.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_supervisor.go",
+      "sha256": "1221ec3082f913a5eb59a4fea63e4e38fcac897f08d499b2ca583eba86ae2b3c",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_test_containment_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_test_containment_test.go",
+      "sha256": "0eb41b15f4f92e7deba921260cdc8ab3a592fd4bde0fb2c630e0f51b3e4659d7",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_test_containment.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_test_containment.go",
+      "sha256": "7da6bb38dcd0a9c5ef77b555e41f283479a6761708da68362da560e1f1414afe",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_test_journal_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_test_journal_test.go",
+      "sha256": "688580a94f1cf39d34d60a2386fac30790639f2d9992fa541efc0ce425661517",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_test_journal.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_test_journal.go",
+      "sha256": "2474ca3b31d8419a21cc61334b230232992b5dd0c4076a1b494d7d0fe6722e17",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_test_model_build.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_test_model_build.go",
+      "sha256": "bcbe438cdbcc8c6a5d67239796e96f120086238458a6141f6f64817ad5b952ac",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_test_model_journal_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_test_model_journal_test.go",
+      "sha256": "92b14d27581be026f20b0588dff945eb8fc10799e52352c5655804c3d565eb79",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_test_model_journal.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_test_model_journal.go",
+      "sha256": "33db21276a2cfe9c9f6a67d74ea935ac72f22658fab051bb0c7237bf4b61a836",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_test_model_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_test_model_test.go",
+      "sha256": "524783c2ad4d5ffead8a797e360f4d01fe4937c83a3570cbab469913c15da4e1",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_test_model.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_test_model.go",
+      "sha256": "40274fb4c6913ef16900f39548345f3d831aa22097222ccd646376ac579472d3",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_test_snow_contract_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_test_snow_contract_test.go",
+      "sha256": "ac74ce51574c3decd3c3cf543e7f1fb6775d30b66f836d55119b248459223c8a",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_test_snow_runtime_qualification_draft_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_test_snow_runtime_qualification_draft_test.go",
+      "sha256": "d9fc0c7704c2818d2d5112eb4bc822d1ed94428587fffca7ce2207a21aa63f17",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_test_snow_runtime_qualification_tests_draft_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_test_snow_runtime_qualification_tests_draft_test.go",
+      "sha256": "d6ad6ec0277264a5472f9b8b5285fb8675040923ebc55ccb8b376234d18b2b1a",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_test_snow_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_test_snow_test.go",
+      "sha256": "3c0ac2bcd43f0da2c363698eab6ad37283a11280c1bae112640e319f3ba84540",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_test_snow.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_test_snow.go",
+      "sha256": "f95cb1ac4c777cfe643989c3a97c492ca79431ed0ef4d18fc19cbea6a5944233",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_test_suite_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_test_suite_test.go",
+      "sha256": "430b728eca3975ac48a6ef1b4fbd94aad61d8fe7545be11017062f8f395876d8",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_test_suite.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_test_suite.go",
+      "sha256": "ce1f7744cfdc392afc44a87b1ea2a0a19e1ef6833cce96f423ce8cc10f3a0864",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_winner_review_cache_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_winner_review_cache_test.go",
+      "sha256": "9a416f85d8ebc81b66752cc95c7cf59d3b5c2548ac93e0984709053b6e961f4e",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_winner_review_context_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_winner_review_context_test.go",
+      "sha256": "12fe59dac2acf37e5c20a762f7fa4ef61bc770770d4205e2e8ac72ba9383aa7c",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_winner_review_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_winner_review_test.go",
+      "sha256": "488e2af6c01b3727b237ca6ff38b63885bf45d543a09add8deeb4fe17f47a4fc",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_winner_review.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/source_winner_review.go",
+      "sha256": "29634427d85bbe835a640477e41d51729cb19b1cdcae6bb14c9d7b54763751a1",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/staging_review.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/staging_review.go",
+      "sha256": "ad0eeb9ab543548c7cd967e58c5fc34b2abb29ed42dd4f0b2ca562dcbd7f4618",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/stats_math.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/stats_math.go",
+      "sha256": "f48f45f666fefd0f8e5c0a7e6174f19fe9a943d11aa466505d9667c134ad2c8f",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/stats_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/stats_test.go",
+      "sha256": "1824ac3dab861722934fc81463d94f4cffcdb7ee894b6b2e8896931bd7b014fb",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/toolchain_policy_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/toolchain_policy_test.go",
+      "sha256": "dd85dda8ab37f058f0a5b43502bc1acf735b7dbed9fc902de8a95536b0ef41e6",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/util.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/util.go",
+      "sha256": "e5c5aaa7502719bad412cc75a8d91b1422c3ed6d5f56b9241352f4655c03b576",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/winner_review_file_operations_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/winner_review_file_operations_test.go",
+      "sha256": "44b5426f8833cbf6be308e77c1be2cd9a07753cadb24c1514033e2cf5b7de369",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/winner_review_image_modes_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/winner_review_image_modes_test.go",
+      "sha256": "60e4762a757dec2324858a1622850db06cb7a5c136611ca987d03e66c6cb6053",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/winner_review_openai_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/winner_review_openai_test.go",
+      "sha256": "73b5ccc5f740fa4164d7d6f278e20a2ea1793fec2fae140c442708d9294f3642",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/winner_review_openai.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/winner_review_openai.go",
+      "sha256": "cb436c438e24b6428746c03ee7cd4df691fb535ba15df92c331beaa8184fdcd0",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/winner_review_refusal_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/winner_review_refusal_test.go",
+      "sha256": "aaf85f30e9f2208b6fc4785c2efe47ecf41a52056dd480fef6521e05ee731ff0",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/winner_review_refusal.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/winner_review_refusal.go",
+      "sha256": "d76737a9323bc032dc9f6d2b37a3d1f62ddb8a17fe15cf7b45a94c9b3687fe92",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/winner_review_response_diagnostics_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/winner_review_response_diagnostics_test.go",
+      "sha256": "c4698cf4deeb1fc73e8d0e94cfd5aec086d01176c25524913df81fca630bfd1d",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/winner_review_response_diagnostics.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/winner_review_response_diagnostics.go",
+      "sha256": "5919861154482a880a8c8e441d498018fb08443aa7134a81a22d049fb20428d9",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/winner_review_snapshot_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/winner_review_snapshot_test.go",
+      "sha256": "6a82c8ce6bb21ba2cf47fd5560f0c27cb44872f72e1b7c9faa205bab335ef513",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/winner_review_snow_budget_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/winner_review_snow_budget_test.go",
+      "sha256": "fb62b80b5ac842c9e379895676bb62271a1c46d0abddad0cdd9acd8de92d4290",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/winner_review_snow_contract_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/winner_review_snow_contract_test.go",
+      "sha256": "5002f8d07145cf1f0d7888b470e2c653bfbdd3529b2d7022e22b6e4e0de7a14c",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/winner_review_snow_reasons_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/winner_review_snow_reasons_test.go",
+      "sha256": "cc34aff5685c18db8a77f1bdb8ff6053d9d8aa7fd8a8fb731ed067850b1e6d1f",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/winner_review_snow_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/winner_review_snow_test.go",
+      "sha256": "b46e261f982bc90f82fd52d010b8834cfe74f11284d46fb058cade6b7cdbc176",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/winner_review_snow_uncertainty_test.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/winner_review_snow_uncertainty_test.go",
+      "sha256": "15a3774f23ec9b09de44005bead64db013c76a6c0697c80f11664013b0376d4e",
+      "layer": "raw_physical"
+    },
+    {
+      "target": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/winner_review_snow.go",
+      "source": "/home/by/urnetwork/temp/optional-two-b-nullfix-qual-20261027.y1L90CLb/server/connect/sim-latency/winner_review_snow.go",
+      "sha256": "696eb3350dcbd01452628cbc04f61c66fb95ba96d92fcd0f2fd897fee2f1d1e5",
+      "layer": "raw_physical"
+    }
+  ],
+  "stage_one_main_commit": "696111a1962472a761a3d4b287c66f63088095e6",
+  "stage_one_source_manifest_sha256": "1bcf0701f4a8966bfc44e728fc69f1e1fa8ed8f56c5d35ffb4a9b3a76a7745af",
+  "previous_988_source_map": {
+    "path": "/home/by/urnetwork/temp/public-pilot-225-composition-20261029.FRp2hMaJ/VIRTUAL-SOURCE-MAP.json",
+    "sha256": "0083b2c4b6b9adb68e4a25372c0e3fed349f7cd81660b7385d88487d0bb8d5b9"
+  }
+}

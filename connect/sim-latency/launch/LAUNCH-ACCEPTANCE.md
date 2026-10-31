@@ -3,12 +3,41 @@
 The required opening was **2026-10-28T00:00:00Z**; readiness was not achieved
 by that deadline. Backdated activation remains prohibited. The owner's
 [October 28 prospective-opening direction](LATE-OPENING-AUTHORIZATION-2026-10-28.md)
-supersedes the earlier no-late-opening warning only after every required gate passes. This
-checklist is the acceptance index for the new release, not an authorization to
-activate production. Historical v1 checkmarks do not qualify a different source,
+required full readiness. Later owner-approved intake-first/replacement-season
+authority allowed the [actual R2 intake opening](INTAKE-LAUNCH-2026-10-29.md),
+not completed calibration or scoring qualification. This checklist is an
+acceptance index, not new activation or hold-release authority.
+Historical v1 checkmarks do not qualify a different source,
 image, host manifest, policy or review provider.
 
-## Current checkpoint — October 28
+## Current maintenance checkpoint — October 30, 23:11 UTC
+
+The approved replacement R2 season is open for intake. Grading and publication
+are held under actual maintenance hold **4**; reward-delivery hold **1** remains
+active. The worker is stopped and joined, and the original one-use replacement
+public pilot is running with nine controls and one of nine candidate runs
+complete. No fresh hidden seed has been drawn and calibration is not accepted.
+
+The exact native233 operator has three passing 233-test processes (699 passes,
+zero failures/skips). The genuine accepted review-provider group is now the
+exact two-member **Qwen/Gemma** tuple, not the historical three-model/Muse
+attempts. Reuse that exact qualification; do not add fresh inference or revive
+a superseded provider requirement merely to finish calibration. The API's
+completed-owner private-score projection and public embargo are verified.
+
+Use [current-state.json](current-state.json), the
+[live maintenance record](CALIBRATION-MAINTENANCE-LIVE-2026-10-30.json), and the
+[restoration procedure](SCORING-RESTORE-2026-10-30.md) for current gates and
+identities. Original maintenance authority expires **October 31,
+07:19:42.289655 UTC**, without renewal. Accepted public direction/AFTER13,
+the approved fresh hidden screen, independent result review, new scoped
+COMPLIANCE custody and genuine runtime readiness remain required before
+scoring restoration. An open intake round is not full launch acceptance.
+
+This checkpoint supersedes historical operational and pending-provider claims
+below, not their failures, immutable pins or applicable acceptance criteria.
+
+## Historical checkpoint — October 28
 
 The [deadline record](LAUNCH-DEADLINE-2026-10-28.md) preserves public discovery
 503 and production control-token 401 at 00:00:10 UTC. The objective is not

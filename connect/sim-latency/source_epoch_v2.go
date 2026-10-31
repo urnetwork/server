@@ -13,32 +13,35 @@ import (
 // Records a reviewed implementation. Approval and measurement identities are
 // mandatory for new code; a reward decision is deliberately not an approval.
 type reviewedSourceGeneration struct {
-	Generation                    int                 `yaml:"generation" json:"generation"`
-	Kind                          string              `yaml:"kind" json:"kind"`
-	SourceLockSha256              string              `yaml:"source_lock_sha256" json:"source_lock_sha256"`
-	SignificantImprovementPercent float64             `yaml:"significant_improvement_percent" json:"significant_improvement_percent"`
-	ThresholdEvidenceSha256       string              `yaml:"threshold_evidence_sha256" json:"threshold_evidence_sha256"`
-	SourceApprovalId              string              `yaml:"source_approval_id,omitempty" json:"source_approval_id,omitempty"`
-	SourceApprovalDigest          string              `yaml:"source_approval_digest,omitempty" json:"source_approval_digest,omitempty"`
-	EvaluatedBaseSourceLockSha256 string              `yaml:"evaluated_base_source_lock_sha256,omitempty" json:"evaluated_base_source_lock_sha256,omitempty"`
-	PatchSha256                   string              `yaml:"patch_sha256,omitempty" json:"patch_sha256,omitempty"`
-	ScoreSha256                   string              `yaml:"score_sha256,omitempty" json:"score_sha256,omitempty"`
-	Significance                  *sourceSignificance `yaml:"significance,omitempty" json:"significance,omitempty"`
-	Repositories                  sourceRepositories  `yaml:"repositories" json:"repositories"`
+	G2VolumePolicy                model.CompetitionG2VolumePolicy          `yaml:"g2_volume_policy,omitempty" json:"g2_volume_policy,omitempty"`
+	TrustedInstrument             *model.CompetitionTrustedInstrumentProof `yaml:"trusted_instrument,omitempty" json:"trusted_instrument,omitempty"`
+	Generation                    int                                      `yaml:"generation" json:"generation"`
+	Kind                          string                                   `yaml:"kind" json:"kind"`
+	SourceLockSha256              string                                   `yaml:"source_lock_sha256" json:"source_lock_sha256"`
+	SignificantImprovementPercent float64                                  `yaml:"significant_improvement_percent" json:"significant_improvement_percent"`
+	ThresholdEvidenceSha256       string                                   `yaml:"threshold_evidence_sha256" json:"threshold_evidence_sha256"`
+	SourceApprovalId              string                                   `yaml:"source_approval_id,omitempty" json:"source_approval_id,omitempty"`
+	SourceApprovalDigest          string                                   `yaml:"source_approval_digest,omitempty" json:"source_approval_digest,omitempty"`
+	EvaluatedBaseSourceLockSha256 string                                   `yaml:"evaluated_base_source_lock_sha256,omitempty" json:"evaluated_base_source_lock_sha256,omitempty"`
+	PatchSha256                   string                                   `yaml:"patch_sha256,omitempty" json:"patch_sha256,omitempty"`
+	ScoreSha256                   string                                   `yaml:"score_sha256,omitempty" json:"score_sha256,omitempty"`
+	Significance                  *sourceSignificance                      `yaml:"significance,omitempty" json:"significance,omitempty"`
+	Repositories                  sourceRepositories                       `yaml:"repositories" json:"repositories"`
 }
 
 // Records the exact source choice for one future round. Its reward digest is
 // provenance only, including when that round carries an unshipped winner.
 type reviewedSourceRound struct {
-	Epoch                         int     `yaml:"epoch" json:"epoch"`
-	SourceGeneration              int     `yaml:"source_generation" json:"source_generation"`
-	ActivationGeneration          int64   `yaml:"activation_generation" json:"activation_generation"`
-	SourceDecisionDigest          string  `yaml:"source_decision_digest" json:"source_decision_digest"`
-	Kind                          string  `yaml:"kind" json:"kind"`
-	Reason                        string  `yaml:"reason" json:"reason"`
-	RewardDecisionDigest          string  `yaml:"reward_decision_digest,omitempty" json:"reward_decision_digest,omitempty"`
-	SourceLockSha256              string  `yaml:"source_lock_sha256" json:"source_lock_sha256"`
-	SignificantImprovementPercent float64 `yaml:"significant_improvement_percent" json:"significant_improvement_percent"`
+	G2VolumePolicy                model.CompetitionG2VolumePolicy `yaml:"g2_volume_policy,omitempty" json:"g2_volume_policy,omitempty"`
+	Epoch                         int                             `yaml:"epoch" json:"epoch"`
+	SourceGeneration              int                             `yaml:"source_generation" json:"source_generation"`
+	ActivationGeneration          int64                           `yaml:"activation_generation" json:"activation_generation"`
+	SourceDecisionDigest          string                          `yaml:"source_decision_digest" json:"source_decision_digest"`
+	Kind                          string                          `yaml:"kind" json:"kind"`
+	Reason                        string                          `yaml:"reason" json:"reason"`
+	RewardDecisionDigest          string                          `yaml:"reward_decision_digest,omitempty" json:"reward_decision_digest,omitempty"`
+	SourceLockSha256              string                          `yaml:"source_lock_sha256" json:"source_lock_sha256"`
+	SignificantImprovementPercent float64                         `yaml:"significant_improvement_percent" json:"significant_improvement_percent"`
 }
 
 // Validates historical entries separately so upgrading a manifest never
@@ -94,7 +97,8 @@ func validateReviewedSourceManifest(manifest *sourceManifest) error {
 		if index == 0 {
 			if generation.Kind != "baseline" || generation.SourceApprovalId != "" ||
 				generation.SourceApprovalDigest != "" || generation.Significance != nil ||
-				generation.EvaluatedBaseSourceLockSha256 != "" || generation.PatchSha256 != "" || generation.ScoreSha256 != "" {
+				generation.EvaluatedBaseSourceLockSha256 != "" || generation.PatchSha256 != "" || generation.ScoreSha256 != "" ||
+				generation.TrustedInstrument != nil || generation.G2VolumePolicy != model.CompetitionG2VolumePolicyLegacy {
 				return errors.New("source generation 0 must be an approved baseline without promotion metadata")
 			}
 			if len(manifest.EvaluationSource.Epochs) > 0 {
@@ -106,6 +110,12 @@ func validateReviewedSourceManifest(manifest *sourceManifest) error {
 			continue
 		}
 		previous := generationRecords[index-1]
+		if err := validateTrustedInstrumentGeneration(&generation, &previous); err != nil {
+			return fmt.Errorf("source generation %d trusted instrument: %w", index, err)
+		}
+		if generation.Kind == "trusted_instrument_transition" {
+			continue
+		}
 		if generation.Kind != "reviewed_source_promotion" || generation.SourceApprovalId == "" ||
 			!validSha256(generation.SourceApprovalDigest) || !validSha256(generation.PatchSha256) ||
 			!validSha256(generation.ScoreSha256) || generation.EvaluatedBaseSourceLockSha256 != previous.SourceLockSha256 ||
@@ -130,7 +140,7 @@ func validateReviewedSourceManifest(manifest *sourceManifest) error {
 		}
 		generation, err := manifest.generation(round.SourceGeneration)
 		if err != nil || round.SourceLockSha256 != generation.SourceLockSha256 ||
-			round.SignificantImprovementPercent != generation.SignificantImprovementPercent {
+			round.SignificantImprovementPercent != generation.SignificantImprovementPercent || round.G2VolumePolicy != generation.G2VolumePolicy {
 			return fmt.Errorf("source round %d does not match its explicit reviewed generation and margin", round.Epoch)
 		}
 		previousGeneration := 0
@@ -147,8 +157,12 @@ func validateReviewedSourceManifest(manifest *sourceManifest) error {
 				return errors.New("reviewed source carry-forward must retain source generation and margin")
 			}
 		case "reviewed_source_promotion":
-			if round.SourceGeneration != previousGeneration+1 || generation.SourceApprovalId == "" {
+			if round.SourceGeneration != previousGeneration+1 || generation.SourceApprovalId == "" || (generation.TrustedInstrument != nil && round.Epoch != 2) {
 				return errors.New("source promotion must select the next separately approved generation")
+			}
+		case "trusted_instrument_transition":
+			if round.Epoch != 2 || round.SourceGeneration != previousGeneration+1 || generation.Kind != "trusted_instrument_transition" || generation.TrustedInstrument == nil {
+				return errors.New("instrument-only carry must select its explicit new protected generation for epoch two")
 			}
 		default:
 			return fmt.Errorf("source round %d has unsupported v2 choice kind %q", round.Epoch, round.Kind)

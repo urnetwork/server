@@ -100,7 +100,7 @@ func executeJournaledSourceBuildBroker(ctx context.Context, request reviewedSour
 	if err != nil || statErr != nil || !filepath.IsAbs(state) || canonical != state || !info.IsDir() || info.Mode().Perm()&0o077 != 0 {
 		return nil, errors.New("durable source build state must be private and canonical")
 	}
-	key := sha256.Sum256([]byte(request.Proposal.ReviewId.String()))
+	key := sha256.Sum256([]byte(sourceBuildAuthorizationIdentity(request)))
 	directory := filepath.Join(state, ".attempts", hex.EncodeToString(key[:]))
 	for _, path := range []string{filepath.Dir(directory), directory} {
 		if err := os.Mkdir(path, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
@@ -217,7 +217,7 @@ func executeJournaledSourceBuildBroker(ctx context.Context, request reviewedSour
 		if err != nil {
 			return receipt, err
 		}
-		if err := validateReviewedSourceBuildForPolicy(receipt, request.Proposal.ReviewId, request.Proposal.PatchSha256, request.Proposal.SourceLockSha256, request.Proposal.Staging, request.Proposal.WinnerReviewPolicy); err != nil {
+		if err := validateSourceBuildReceipt(request, receipt); err != nil {
 			return receipt, err
 		}
 		if receipt.EvaluatorImageDigest != qualification.Artifacts.ImageId || receipt.SandboxId != reservation.Owner {
