@@ -275,6 +275,21 @@ func reactivateTestMeasurementExtender(t testing.TB, ctx context.Context, index 
 	}
 }
 
+// The extender's probes fail at `probeTime` at every address, which
+// deactivates it then, as the uptime task does.
+func deactivateTestMeasurementExtender(t testing.TB, ctx context.Context, extenderId server.Id, probeTime time.Time) {
+	t.Helper()
+	sign := func(*model.NetworkExtender, time.Time) ([]byte, error) {
+		return []byte("revocation"), nil
+	}
+	for _, ipVersion := range []int{4, 6} {
+		model.RecordNetworkExtenderProbeResult(ctx, extenderId, ipVersion, false, probeTime, 1, sign)
+	}
+	if entry := model.Testing_GetNetworkExtender(ctx, extenderId); entry == nil || entry.Extender.Active {
+		t.Fatalf("the extender was not deactivated")
+	}
+}
+
 // A certificate request for `name` under a fresh measurement key.
 func newTestMeasurementCsr(t testing.TB, name string) (*ecdsa.PrivateKey, []byte) {
 	t.Helper()
@@ -781,12 +796,13 @@ func TestExtenderMeasurementReissuesACertificateThatRanOut(t *testing.T) {
 	})
 }
 
-// C9 end to end. A deactivated extender and one an operator moved to the
-// gated tier are withdrawn, leave the zone in the same dns pass, and are
-// revoked by the next issuance pass for the cessation of operation. An
-// address change withdraws nothing and orders nothing: the name's record
-// moves (C8). A deactivated extender that comes back asks again and is issued
-// again, outside the cap; a gated one that asks again is refused.
+// C9 end to end. An extender deactivated longer than the away grace ago and
+// one an operator moved to the gated tier are withdrawn, leave the zone in the
+// same dns pass, and are revoked by the next issuance pass for the cessation
+// of operation. An address change withdraws nothing and orders nothing: the
+// name's record moves (C8). A deactivated extender that comes back asks again
+// and is issued again, outside the cap; a gated one that asks again is
+// refused.
 func TestExtenderMeasurementWithdrawsAndRevokes(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -806,9 +822,8 @@ func TestExtenderMeasurementWithdrawsAndRevokes(t *testing.T) {
 		connect.AssertEqual(t, dnsResult.Names, 4)
 		connect.AssertEqual(t, dnsResult.Withdrawn, 0)
 
-		model.RecordNetworkExtenderProbeResult(ctx, deactivated, 4, false, server.NowUtc(), 1, func(*model.NetworkExtender, time.Time) ([]byte, error) {
-			return []byte("revocation"), nil
-		})
+		// its probes failed past the grace: it left
+		deactivateTestMeasurementExtender(t, ctx, deactivated, server.NowUtc().Add(-controller.ExtenderMeasurementAwayGrace-time.Minute))
 		reactivateTestMeasurementExtender(t, ctx, 2, "198.51.100.2")
 		if err := model.SetNetworkExtenderDirectoryTier(ctx, gated, connect.ExtenderDirectoryTierGated, true); err != nil {
 			t.Fatal(err)
@@ -872,6 +887,111 @@ func TestExtenderMeasurementWithdrawsAndRevokes(t *testing.T) {
 		dnsResult = runTestMeasurementDns(t, ctx)
 		connect.AssertEqual(t, dnsResult.Names, 3)
 		connect.AssertEqual(t, dnsResult.Withdrawn, 0)
+		assertTestMeasurementForeignRecordSets(t, env, testMeasurementForeignApexRecordSets())
+		assertTestMeasurementBatches(t, env)
+	})
+}
+
+// Amendment 23 end to end. An extender whose probes fail is away: it leaves
+// the zone in the next dns pass, like any extender that may not be measured,
+// and the lag.dev sample stops offering it (A4). But it keeps its
+// certificate: nothing is withdrawn or revoked, its request stays issued, and
+// a renewal that comes due waits for it. Another extender's request, waiting
+// when it was deactivated, is neither refused nor ordered, and keeps its
+// place. Back within the grace, the name is published again with the
+// certificate it had and no new order, the due renewal goes through, and the
+// waiting request is issued.
+func TestExtenderMeasurementKeepsAnAwayExtendersCertificate(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		env := newTestMeasurementEnv(t, testMeasurementEnvSettings{})
+		config, err := controller.EnvExtenderConfig()
+		if err != nil {
+			t.Fatal(err)
+		}
+		offered := func() []string {
+			names := []string{}
+			for _, host := range controller.GetExtenderMeasurementHosts(ctx, config, server.NowUtc()) {
+				names = append(names, host.Name)
+			}
+			slices.Sort(names)
+			return names
+		}
+		sortedNames := func(extenderIds ...server.Id) []string {
+			names := []string{}
+			for _, extenderId := range extenderIds {
+				names = append(names, testMeasurementName(extenderId))
+			}
+			slices.Sort(names)
+			return names
+		}
+
+		away := createTestMeasurementExtender(t, ctx, 1, "203.0.113.1")
+		staying := createTestMeasurementExtender(t, ctx, 2, "203.0.113.2")
+		waiting := createTestMeasurementExtender(t, ctx, 3, "203.0.113.3")
+		for _, extenderId := range []server.Id{away, staying} {
+			requestTestMeasurementCert(t, ctx, extenderId, server.NowUtc())
+		}
+		connect.AssertEqual(t, runTestMeasurementIssue(t, ctx).Issued, 2)
+		connect.AssertEqual(t, runTestMeasurementDns(t, ctx).Names, 2)
+		if !slices.Equal(offered(), sortedNames(away, staying)) {
+			t.Fatalf("offered %v", offered())
+		}
+		requestTestMeasurementCert(t, ctx, waiting, server.NowUtc())
+		pendingTime := model.Testing_GetNetworkExtenderMeasurement(ctx, waiting).PendingTime.UTC()
+
+		deactivateTestMeasurementExtender(t, ctx, away, server.NowUtc())
+		deactivateTestMeasurementExtender(t, ctx, waiting, server.NowUtc())
+
+		dnsResult := runTestMeasurementDns(t, ctx)
+		connect.AssertEqual(t, dnsResult.Withdrawn, 0)
+		connect.AssertEqual(t, dnsResult.Names, 1)
+		assertTestMeasurementAddressRecords(t, env, map[string][]string{
+			testMeasurementName(staying) + " A": {"203.0.113.2"},
+		})
+		if !slices.Equal(offered(), sortedNames(staying)) {
+			t.Fatalf("offered %v while away", offered())
+		}
+		awayCerts := model.Testing_GetNetworkExtenderMeasurementCerts(ctx, away)
+		connect.AssertEqual(t, len(awayCerts), 1)
+		connect.AssertEqual(t, awayCerts[0].WithdrawTime == nil, true)
+		connect.AssertEqual(t, awayCerts[0].PublishTime == nil, true)
+		connect.AssertEqual(t, model.Testing_GetNetworkExtenderMeasurement(ctx, away).State, model.NetworkExtenderMeasurementStateIssued)
+
+		// its renewal comes due while it is away, and waits with the rest
+		model.Testing_SetNetworkExtenderMeasurementCertRenewTime(ctx, awayCerts[0].CertId, server.NowUtc().Add(-time.Second))
+		result := runTestMeasurementIssue(t, ctx)
+		connect.AssertEqual(t, result.Revoked+result.Renewed+result.Issued+result.Refused+result.Failed, 0)
+		connect.AssertEqual(t, env.ca.issuedCount(), 2)
+		connect.AssertEqual(t, len(env.ca.revokedReasons()), 0)
+		measurement := model.Testing_GetNetworkExtenderMeasurement(ctx, waiting)
+		connect.AssertEqual(t, measurement.State, model.NetworkExtenderMeasurementStatePending)
+		connect.AssertEqual(t, measurement.PendingTime.UTC(), pendingTime)
+		connect.AssertEqual(t, runTestMeasurementDns(t, ctx).Withdrawn, 0)
+
+		// both come back within the grace
+		reactivateTestMeasurementExtender(t, ctx, 1, "203.0.113.1")
+		reactivateTestMeasurementExtender(t, ctx, 3, "203.0.113.3")
+		dnsResult = runTestMeasurementDns(t, ctx)
+		connect.AssertEqual(t, dnsResult.Withdrawn, 0)
+		connect.AssertEqual(t, dnsResult.Names, 2)
+		assertTestMeasurementAddressRecords(t, env, map[string][]string{
+			testMeasurementName(away) + " A":    {"203.0.113.1"},
+			testMeasurementName(staying) + " A": {"203.0.113.2"},
+		})
+		if !slices.Equal(offered(), sortedNames(away, staying)) {
+			t.Fatalf("offered %v once back", offered())
+		}
+		// served again by the certificate it kept
+		connect.AssertEqual(t, env.ca.issuedCount(), 2)
+		connect.AssertEqual(t, len(model.Testing_GetNetworkExtenderMeasurementCerts(ctx, away)), 1)
+
+		result = runTestMeasurementIssue(t, ctx)
+		connect.AssertEqual(t, result.Renewed, 1)
+		connect.AssertEqual(t, result.Issued, 1)
+		connect.AssertEqual(t, result.Revoked, 0)
+		connect.AssertEqual(t, env.ca.issuedCount(), 4)
+		connect.AssertEqual(t, model.Testing_GetNetworkExtenderMeasurement(ctx, waiting).State, model.NetworkExtenderMeasurementStateIssued)
 		assertTestMeasurementForeignRecordSets(t, env, testMeasurementForeignApexRecordSets())
 		assertTestMeasurementBatches(t, env)
 	})
