@@ -27,7 +27,11 @@ var competitionMigration893ArtifactQuery = func() string {
 
 // The successor replaces only the published provider-aware bodies. Both
 // findings versions and retained authorization remain exact catalog authority.
-var competitionMigration897ArtifactQuery = func() string {
+var competitionMigration897ArtifactQuery = competitionSnowTwoMemberCustodyArtifactQuery(server.CompetitionRepositoryPatchSourceBodySql())
+
+// The v897 custody with the given source authorization body. 900 re-creates
+// only that body, so it republishes the rest of this custody unchanged.
+func competitionSnowTwoMemberCustodyArtifactQuery(sourceAuthorized string) string {
 	sourceGraphValid, _ := server.CompetitionSourceRetirementBodiesSql()
 	_, _, _, _, winnerCheckpointGuard := server.CompetitionWinnerReviewBodiesSql()
 	provider, roundInsertGuard, winnerSourceAuthorized, winnerReviewGuard, identityGuard, findingsV1, findingsV2, findingsPolicy := server.CompetitionSnowTwoMemberWinnerReviewBodiesSql()
@@ -36,7 +40,7 @@ var competitionMigration897ArtifactQuery = func() string {
 		parallelSafe(snMainnetMigrationFunction("competition_v2_snow_review_findings_valid(jsonb)", "boolean", "plpgsql", "i", false, findingsV1, "request")) + " AND " +
 		parallelSafe(snMainnetMigrationFunction("competition_v2_snow_review_findings_valid_v2(jsonb)", "boolean", "plpgsql", "i", false, findingsV2, "request")) + " AND " +
 		parallelSafe(snMainnetMigrationFunction("competition_v2_snow_review_findings_valid_for_policy(jsonb,text)", "boolean", "sql", "i", false, findingsPolicy, "request", "policy_name")) + " AND " +
-		competitionV2SourceGuardsArtifactQuery(sourceGraphValid, server.CompetitionRepositoryPatchSourceBodySql(), roundInsertGuard, winnerSourceAuthorized, winnerReviewGuard, winnerCheckpointGuard) + " AND " +
+		competitionV2SourceGuardsArtifactQuery(sourceGraphValid, sourceAuthorized, roundInsertGuard, winnerSourceAuthorized, winnerReviewGuard, winnerCheckpointGuard) + " AND " +
 		snMainnetMigrationFunction("competition_v2_review_identity_guard()", "trigger", "plpgsql", "v", false, identityGuard) + " AND " +
 		snMainnetMigrationTrigger("competition_integrity_review", "competition_v2_review_identity", "competition_v2_review_identity_guard", 7) + ")"
-}()
+}
