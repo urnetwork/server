@@ -298,6 +298,20 @@ func (self *findProviders2SelectionObservation) complete(resultCount int) {
 	}
 }
 
+// Whether every target the request has read was published without an
+// admitted provider: the cache_empty boundary of complete, known before the
+// answer is. A missing or partial cache, an unavailable source and a
+// modern-only read that left rows unread are not proof of empty supply, and
+// a target whose admitted providers the request's filters removed was not
+// empty.
+func (self *findProviders2SelectionObservation) targetsWithoutSupply() bool {
+	return self.loaded == 0 &&
+		self.load.missingPages == 0 &&
+		self.load.missingTargets == 0 &&
+		!self.backfillUnavailable &&
+		self.load.unreadNonModernRows == 0
+}
+
 // Classifies actual removed candidates, not the presence of an exclusion
 // field. Destination tails may be live-window refills; neither field proves
 // the client's current health or why it excluded a provider.

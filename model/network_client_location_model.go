@@ -809,6 +809,11 @@ type locationDirectoryEntry struct {
 	LocationType LocationType
 	Latitude     *float64
 	Longitude    *float64
+	// the region and country the location's row names, which the location
+	// fallback climbs to (network_client_location_fallback.go). nil past the
+	// row's granularity: a country row has no region.
+	RegionLocationId  *server.Id
+	CountryLocationId *server.Id
 }
 
 type locationDirectorySnapshot struct {
@@ -939,19 +944,26 @@ func locationDirectory() map[server.Id]*locationDirectoryEntry {
 // time (2026-08-11 audit). The ttl is the same staleness bound the per-process
 // snapshot already had, so nothing is served staler than before — the scan is
 // just paid once per window for the fleet instead of once per process.
-const locationDirectoryRedisKey = "location_directory"
+//
+// v2 rows carry each location's region and country, which the location
+// fallback climbs to. The key changed with them, so a process from before
+// them, which shares the old key, cannot publish a window of rows without
+// them that the processes after read. The old key lapses with its ttl.
+const locationDirectoryRedisKey = "location_directory_v2"
 
 // locationDirectoryRow is the wire form of one directory entry. The directory is
 // keyed by location id in memory, but server.Id implements MarshalJSON and not
 // MarshalText, so it cannot be a json map key — the cache carries a list and the
 // map is rebuilt on read.
 type locationDirectoryRow struct {
-	LocationId   server.Id    `json:"location_id"`
-	Name         string       `json:"name"`
-	CountryCode  string       `json:"country_code"`
-	LocationType LocationType `json:"location_type,omitempty"`
-	Latitude     *float64     `json:"latitude,omitempty"`
-	Longitude    *float64     `json:"longitude,omitempty"`
+	LocationId        server.Id    `json:"location_id"`
+	Name              string       `json:"name"`
+	CountryCode       string       `json:"country_code"`
+	LocationType      LocationType `json:"location_type,omitempty"`
+	Latitude          *float64     `json:"latitude,omitempty"`
+	Longitude         *float64     `json:"longitude,omitempty"`
+	RegionLocationId  *server.Id   `json:"region_location_id,omitempty"`
+	CountryLocationId *server.Id   `json:"country_location_id,omitempty"`
 }
 
 // getLocationDirectoryCache reads the fleet-shared directory, or nil on miss.
@@ -973,11 +985,13 @@ func getLocationDirectoryCache(ctx context.Context) map[server.Id]*locationDirec
 		entries = map[server.Id]*locationDirectoryEntry{}
 		for _, row := range rows {
 			entries[row.LocationId] = &locationDirectoryEntry{
-				Name:         row.Name,
-				CountryCode:  row.CountryCode,
-				LocationType: row.LocationType,
-				Latitude:     row.Latitude,
-				Longitude:    row.Longitude,
+				Name:              row.Name,
+				CountryCode:       row.CountryCode,
+				LocationType:      row.LocationType,
+				Latitude:          row.Latitude,
+				Longitude:         row.Longitude,
+				RegionLocationId:  row.RegionLocationId,
+				CountryLocationId: row.CountryLocationId,
 			}
 		}
 	})
@@ -992,12 +1006,14 @@ func setLocationDirectoryCache(
 	rows := make([]*locationDirectoryRow, 0, len(entries))
 	for locationId, entry := range entries {
 		rows = append(rows, &locationDirectoryRow{
-			LocationId:   locationId,
-			Name:         entry.Name,
-			CountryCode:  entry.CountryCode,
-			LocationType: entry.LocationType,
-			Latitude:     entry.Latitude,
-			Longitude:    entry.Longitude,
+			LocationId:        locationId,
+			Name:              entry.Name,
+			CountryCode:       entry.CountryCode,
+			LocationType:      entry.LocationType,
+			Latitude:          entry.Latitude,
+			Longitude:         entry.Longitude,
+			RegionLocationId:  entry.RegionLocationId,
+			CountryLocationId: entry.CountryLocationId,
 		})
 	}
 	rowsJson, err := json.Marshal(rows)
@@ -1088,7 +1104,9 @@ func queryLocationDirectory(ctx context.Context) map[server.Id]*locationDirector
 				location.country_code,
 				location.location_type,
 				location.latitude,
-				location.longitude
+				location.longitude,
+				location.region_location_id,
+				location.country_location_id
 			FROM location
 			WHERE location.location_id IN (
 				SELECT DISTINCT loc.id
@@ -1111,6 +1129,9 @@ func queryLocationDirectory(ctx context.Context) map[server.Id]*locationDirector
 			for result.Next() {
 				var locationId server.Id
 				entry := &locationDirectoryEntry{}
+				// the hierarchy columns are null past a row's granularity, and
+				// server.Id.Scan errors on a nil source, so they scan through
+				// pointers
 				server.Raise(result.Scan(
 					&locationId,
 					&entry.Name,
@@ -1118,6 +1139,8 @@ func queryLocationDirectory(ctx context.Context) map[server.Id]*locationDirector
 					&entry.LocationType,
 					&entry.Latitude,
 					&entry.Longitude,
+					&entry.RegionLocationId,
+					&entry.CountryLocationId,
 				))
 				entry.CountryCode = strings.ToLower(entry.CountryCode)
 				entries[locationId] = entry
@@ -5071,6 +5094,12 @@ type FindProviders2Args struct {
 	// client that requires end-to-end encryption sets it. Unset keeps the
 	// capability-blind answer.
 	RequireModernProvider bool `json:"require_modern_provider"`
+	// Strict answers the requested targets only. Unset, as every client
+	// before the field sends, a city or region target the score export
+	// published without an admitted provider is answered from its region,
+	// then its country, and each provider found there carries its
+	// FindProvidersProvider.Match (network_client_location_fallback.go).
+	Strict bool `json:"strict"`
 }
 
 type FindProviders2Result struct {
@@ -5093,6 +5122,12 @@ type FindProvidersProvider struct {
 	// IpFamily is the provider's proven category: "dualstack", "v4-only" or
 	// "v6-only". Empty for a fixed client-id spec, which bypasses discovery.
 	IpFamily string `json:"ip_family,omitempty"`
+	// Match is the level the provider was found at when the request's city or
+	// region target had no admitted provider: LocationTypeRegion or
+	// LocationTypeCountry (network_client_location_fallback.go). Empty, and
+	// absent from the wire, for a provider of the requested target itself and
+	// for a named provider, so an answer without a fallback is unchanged.
+	Match LocationType `json:"match,omitempty"`
 }
 
 type LocationCoordinates struct {
@@ -6232,12 +6267,14 @@ func resolveProviderLocation(
 }
 
 // findProvidersProviderFromClientScore is the cache-to-wire boundary. Keep
-// discovery metadata assembled in one pure helper so reputation and
-// same-network eligibility cannot be silently dropped by one response path.
+// discovery metadata assembled in one pure helper so reputation, same-network
+// eligibility and the fallback match cannot be silently dropped by one
+// response path. match is "" for the request's own targets.
 func findProvidersProviderFromClientScore(
 	clientScore *ClientScore,
 	rankMode RankMode,
 	directory map[server.Id]*locationDirectoryEntry,
+	match LocationType,
 ) *FindProvidersProvider {
 	return &FindProvidersProvider{
 		ClientId:                   clientScore.ClientId,
@@ -6248,6 +6285,7 @@ func findProvidersProviderFromClientScore(
 		ReputationFailedNames:      clientScore.ReputationFailedNames,
 		Location:                   resolveProviderLocation(directory, clientScore),
 		IpFamily:                   string(clientScore.IpFamily()),
+		Match:                      match,
 	}
 }
 
@@ -6389,693 +6427,22 @@ func FindProviders2(
 		}
 		observation.targetKind = findProviders2TargetKind(findProviders2, countryLocations, targetDirectory)
 
-		observation.enter("load_primary")
-		observation.load.privateSource = "primary_legacy"
-		loadStartTime := time.Now()
-		var clientScores map[server.Id]*ClientScore
-		var primaryCursor *clientScoreCursor
-		if rankMode == RankModeOnline {
-			clientScores, primaryCursor, err = loadOnlineClientScoresWithCursor(
-				session.Ctx,
-				locationIds,
-				locationGroupIds,
-				clientLocationId,
-				loadCount,
-				facets,
-				partition,
-				&observation.load,
-			)
-		} else {
-			clientScores, primaryCursor, err = loadPreferredClientScoresWithPartition(
-				requestSettings.NativeReaderEnabled,
-				findProviders2.ForceMinimum,
-				rankMode,
-				session.Ctx,
-				locationIds,
-				locationGroupIds,
-				clientLocationId,
-				loadCount,
-				facets,
-				partition,
-				&observation.load,
-			)
-		}
-		if err != nil {
-			// Online, like force_minimum, has no other bucket to fall back to.
-			if session.Ctx.Err() != nil || findProviders2.ForceMinimum || rankMode == RankModeOnline {
-				return nil, err
-			}
-			// Native cache availability is not a security decision. Preserve
-			// validated pages and try the next same-target bucket; diagnostics
-			// keep this unknown source distinct from proven exhaustion.
-			observation.backfillUnavailable = true
-			if primaryCursor != nil {
-				primaryCursor.sourceIncomplete = true
-			}
-		}
-		if clientScores == nil {
-			clientScores = map[server.Id]*ClientScore{}
-		}
-		observation.loaded += len(clientScores)
-		loadEndTime := time.Now()
-		loadDuration := loadEndTime.Sub(loadStartTime)
-		loadMillis := float64(loadDuration) / float64(time.Millisecond)
-		findProviders2LoadSeconds.Observe(loadDuration.Seconds())
-		// one provider search per call makes this client-driven volume: the
-		// histogram is the signal, the slow-case line is V(1) detail
-		if 50*time.Millisecond <= loadDuration && glog.V(1) {
-			glog.Infof(
-				"[nclm]findproviders2 load %.2fms (%d)\n",
-				loadMillis,
-				len(clientScores),
-			)
-		}
-
-		// The hard exclusions (connect/GEOMAP.md §10.3), read once for every
-		// provider this call could return, and applied here where the result
-		// is assembled rather than only where the pool's minimums were: the
-		// cached pool already leaves out what its last export saw excluded,
-		// but that export can be an hour old, a verdict issued since must hold
-		// now, and force_minimum reads the same pool with no minimums at all.
-		// Request-only refusals cannot appear in the answer and need no fresh
-		// security or subscriber read. Preserve the same predicates below.
-		var callerNetworkId server.Id
-		if session.ByJwt != nil {
-			callerNetworkId = session.ByJwt.NetworkId
-		}
-		requestFilter := clientScoreRequestFilter{
-			callerNetworkId:   callerNetworkId,
-			facets:            facets,
-			excludedClientIds: excludeFinalDestinations(),
-			requireModern:     findProviders2.RequireModernProvider,
-		}
-		hardExcludedClientIds := map[server.Id]bool{}
-		qualityExcludedClientIds := map[server.Id]bool{}
-		// The candidates this request's live read (readQuality) found
-		// without a live connection, and those with no current liveness
-		// lease (provider_liveness_lease.go). Each leaves every draw of this
-		// request, native, borrowed and Online fallback. A named provider is
-		// never read for a lease, and one the live read finds offline later
-		// stays where its spec put it. Nothing outside the request keeps the
-		// verdict.
-		offlineClientIds := map[server.Id]bool{}
-		// For a request that requires post-quantum encryption, the candidates
-		// whose latest provide did not declare it (provide_capability_model.go),
-		// and for one that requires modern providers, the named providers
-		// that are not modern (readProviderModernClientIds; the index's
-		// candidates are refused by the request filter instead). Each leaves
-		// every draw of this request, named providers included. Like offline,
-		// nothing outside the request keeps the verdict.
-		incapableClientIds := map[server.Id]bool{}
-		exclusionReadClientIds := map[server.Id]bool{}
-		qualityReadClientIds := map[server.Id]bool{}
-		var nativeClientScores map[server.Id]*ClientScore
-		var clientIds, borrowedClientIds []server.Id
-		// each borrowed provider's modern flag, and those the Online fallback
-		// lent, for the answered-modern counts
-		borrowedModernClientIds := map[server.Id]bool{}
-		onlineBorrowedClientIds := map[server.Id]bool{}
-		// The one instant filterPool judges every pool's URL evidence at, and
-		// with it what the draws below know of each candidate: nil while
-		// rank_measured_first is off or for force_minimum
-		// (network_client_selection_evidence.go). The evidence rank and the
-		// neutral URL weight cannot disagree about an expiry.
-		filterTime := server.NowUtc()
-		evidence := findProviders2Evidence(requestSettings, findProviders2.ForceMinimum, filterTime)
-		// Draws up to n of the candidates by their weight in `mode` and bands
-		// the draw by their tier in `mode`, each facet in the request's
-		// preference order (selectClientScoresByWeight).
-		selectProviders := func(candidateClientScores map[server.Id]*ClientScore, mode RankMode, n int) []server.Id {
-			return selectClientScoresModernFirst(candidateClientScores, n, modernFirst, func(candidateClientScores map[server.Id]*ClientScore, n int) []server.Id {
-				return selectClientScoresByWeight(candidateClientScores, mode, facets, n, evidence)
-			})
-		}
-
-		validation := &providerQualityValidation{parent: session.Ctx}
-		defer validation.close()
-		pruneSelected := func() {
-			// A later bucket can expose common risk for an earlier selection.
-			// Revoke it before quota/refill counts or final answers use it.
-			// A drawn provider found offline since is revoked the same way;
-			// a named one is not drawn, and stays.
-			offlineSelections := map[server.Id]bool{}
-			rejectedSelection := func(clientId server.Id) bool {
-				if offlineClientIds[clientId] {
-					offlineSelections[clientId] = true
-				} else if !hardExcludedClientIds[clientId] && !incapableClientIds[clientId] {
-					return false
-				}
-				delete(clientScores, clientId)
-				delete(nativeClientScores, clientId)
-				return true
-			}
-			clientIds = slices.DeleteFunc(clientIds, rejectedSelection)
-			borrowedClientIds = slices.DeleteFunc(borrowedClientIds, rejectedSelection)
-			providers = slices.DeleteFunc(providers, func(provider *FindProvidersProvider) bool {
-				return hardExcludedClientIds[provider.ClientId] || offlineSelections[provider.ClientId] || incapableClientIds[provider.ClientId]
-			})
-			observation.explicitReturned = len(providers) - len(clientIds) - len(borrowedClientIds)
-		}
-		readQuality := func(ids []server.Id, strict bool) error {
-			if len(ids) == 0 {
-				return nil
-			}
-			observation.enter("hard_exclusions")
-			excluded, risky, offline, err := validation.read(ids)
-			if err != nil {
-				if session.Ctx.Err() != nil || strict {
-					return err
-				}
-				observation.backfillUnavailable = true
-				return nil
-			}
-			maps.Copy(qualityExcludedClientIds, excluded)
-			maps.Copy(qualityExcludedClientIds, offline)
-			maps.Copy(offlineClientIds, offline)
-			maps.Copy(hardExcludedClientIds, risky)
-			for _, id := range ids {
-				qualityReadClientIds[id] = true
-			}
-			pruneSelected()
-			return nil
-		}
-
-		// Common refusals apply to every bucket. Subscriber refusals apply only
-		// to native Quality, including Quality borrowed by a Speed request,
-		// except that a candidate read without a live connection leaves every
-		// draw of the request (offlineClientIds).
-		readExclusions := func(scores map[server.Id]*ClientScore, mode RankMode, native bool, namedClientIds []server.Id) error {
-			observation.enter("hard_exclusions")
-			candidateClientIds := requestFilter.unchecked(scores, exclusionReadClientIds)
-			for _, clientId := range namedClientIds {
-				if !exclusionReadClientIds[clientId] {
-					candidateClientIds = append(candidateClientIds, clientId)
-				}
-			}
-			// Read first for a request that requires post-quantum
-			// encryption, so the reads below are only of declaring providers.
-			// An undeclared candidate is read once and leaves every draw.
-			if findProviders2.PostQuantumEncryption {
-				capableClientIds, err := readProvidePostQuantumEncryption(session.Ctx, candidateClientIds)
-				if err != nil {
-					return err
-				}
-				candidateClientIds = slices.DeleteFunc(candidateClientIds, func(clientId server.Id) bool {
-					if capableClientIds[clientId] {
-						return false
-					}
-					incapableClientIds[clientId] = true
-					exclusionReadClientIds[clientId] = true
-					return true
-				})
-			}
-			excluded, err := getProviderHardExclusions(session.Ctx, candidateClientIds)
-			if err != nil {
-				return err
-			}
-			maps.Copy(hardExcludedClientIds, excluded)
-			// A candidate without a current liveness lease leaves every draw
-			// of the request like one the live read finds offline. The lease
-			// read fails open (provider_liveness_lease_read.go), and judges
-			// at its own instant, which needs nothing of the request's. A
-			// named provider keeps its place whatever its lease: a redial
-			// that names its exit gets one try, and a wrong offline verdict
-			// there changes the user's IP.
-			namedClientIdSet := map[server.Id]bool{}
-			for _, clientId := range namedClientIds {
-				namedClientIdSet[clientId] = true
-			}
-			leaseClientIds := make([]server.Id, 0, len(candidateClientIds))
-			for _, clientId := range candidateClientIds {
-				if !hardExcludedClientIds[clientId] && !namedClientIdSet[clientId] {
-					leaseClientIds = append(leaseClientIds, clientId)
-				}
-			}
-			offline, err := readFindProviders2Liveness(session.Ctx, leaseClientIds, server.NowUtc(), rankMode)
-			if err != nil {
-				return err
-			}
-			maps.Copy(offlineClientIds, offline)
-			for _, clientId := range candidateClientIds {
-				exclusionReadClientIds[clientId] = true
-			}
-			qualityClientIds := []server.Id{}
-			if rankMode == RankModeQuality {
-				for _, id := range namedClientIds {
-					if !hardExcludedClientIds[id] && !incapableClientIds[id] && !qualityReadClientIds[id] {
-						qualityClientIds = append(qualityClientIds, id)
-					}
-				}
-			}
-			if err := readQuality(qualityClientIds, true); err != nil {
-				return err
-			}
-			// A later Quality page may expose common risk for an earlier
-			// Speed selection. Check that overlap before filterPool removes it.
-			if mode == RankModeQuality && native {
-				prior := []server.Id{}
-				// the request's one instant, as filterPool reads it
-				now := filterTime
-				for _, provider := range providers {
-					id := provider.ClientId
-					if score := scores[id]; score != nil && !qualityReadClientIds[id] &&
-						!hardExcludedClientIds[id] && score.PassesMinimums[mode] &&
-						score.urlEvidenceCurrent(now) {
-						prior = append(prior, id)
-					}
-				}
-				if err := readQuality(prior, findProviders2.ForceMinimum); err != nil {
-					return err
-				}
-			}
-
-			pruneSelected()
-			return nil
-		}
-		// a named provider that is not modern is refused before any other
-		// named read, as in the named-only path
-		if findProviders2.RequireModernProvider && 0 < len(specClientIds) {
-			observation.enter("hard_exclusions")
-			modernClientIds, err := readProviderModernClientIds(session.Ctx, specClientIds, filterTime)
-			if err != nil {
-				return nil, err
-			}
-			for _, clientId := range specClientIds {
-				if !modernClientIds[clientId] {
-					incapableClientIds[clientId] = true
-					exclusionReadClientIds[clientId] = true
-				}
-			}
-		}
-		if err := readExclusions(clientScores, rankMode, true, specClientIds); err != nil {
-			return nil, err
-		}
-		namedExcludedClientIds := maps.Clone(hardExcludedClientIds)
-		if rankMode == RankModeQuality {
-			maps.Copy(namedExcludedClientIds, qualityExcludedClientIds)
-		}
-		maps.Copy(namedExcludedClientIds, incapableClientIds)
-		appendSpecProviders(namedExcludedClientIds)
-
-		// drop providers this caller cannot contract with.
-		//
-		// UpdateClientScores puts both Public and Network-only providers in the
-		// pool. A Network-only provider can only settle a contract with a
-		// source in its own network (GetProvideRelationship ->
-		// ProvideModeNetwork -> CreateContractNoEscrow); it is real, usable
-		// supply for those users and has always been discoverable to them, so
-		// it stays. For anyone else CreateContract would reject with
-		// NoPermission, so it goes.
-		//
-		// This must happen here, after loadClientScores, and must never be
-		// baked into the cached set: the client score redis entries are keyed
-		// by (forceMinimum, rankMode, locationId, callerLocationId) with no
-		// network component, so a single cached set is shared by callers from
-		// every network.
-		//
-		// A session with no jwt yields the zero network id, which matches no
-		// provider -- fail closed rather than leak.
-
-		// Applies the request's eligibility to one mode's loaded pool, then the
-		// request's weights in that mode. It runs on the requested mode's pool
-		// and, when that comes up short, on the other mode's, so a borrowed
-		// provider passes exactly what a native one does. A score's maps are
-		// its decoded page's, shared with every other reader
-		// (decodeClientScorePage), so a change replaces the map with a
-		// changed clone.
-		filterPool := func(clientScores map[server.Id]*ClientScore, mode RankMode, hardExcludedClientIds map[server.Id]bool) {
-			observation.enter("filter")
-			now := filterTime
-			for _, clientScore := range clientScores {
-				// the evidence rank reads the same expiry at the same instant
-				// (clientScoreEvidence)
-				if !clientScore.urlEvidenceCurrent(now) {
-					// Older native cache records may not also set Online. Their
-					// prior native admission also admitted online fallback. Expiry
-					// removes only native evidence; request filters still run below.
-					if clientScore.PassesMinimums[RankModeQuality] || clientScore.PassesMinimums[RankModeSpeed] {
-						clientScore.Online = true
-					}
-					clientScore.PassesMinimums = nil
-					clientScore.UrlProbeSuccessWeight = 1
-				}
-			}
-			if mode == RankModeOnline {
-				for clientId, clientScore := range clientScores {
-					// A native member is an online member, whatever its
-					// record says. The union pool holds nothing else; keep
-					// that true of the answer even for a record that is not.
-					if clientScore.PassesMinimums[RankModeQuality] || clientScore.PassesMinimums[RankModeSpeed] {
-						clientScore.Online = true
-					}
-					if !clientScore.Online {
-						delete(clientScores, clientId)
-						continue
-					}
-					// Every online member is equally likely.
-					scaledWeights := maps.Clone(clientScore.ScaledWeights)
-					if scaledWeights == nil {
-						scaledWeights = map[string]float32{}
-					}
-					scaledWeights[mode] = 1.0
-					clientScore.ScaledWeights = scaledWeights
-				}
-			}
-			before := len(clientScores)
-			for clientId := range hardExcludedClientIds {
-				delete(clientScores, clientId)
-			}
-			// read without a live connection: out of every pool of this request
-			for clientId := range offlineClientIds {
-				delete(clientScores, clientId)
-			}
-			// undeclared under a post-quantum request, or a named provider
-			// that is not modern under a modern one: out of every pool too,
-			// counted as a capability refusal
-			capabilityDropped := 0
-			for clientId := range incapableClientIds {
-				if _, ok := clientScores[clientId]; ok {
-					delete(clientScores, clientId)
-					capabilityDropped += 1
-				}
-			}
-			for clientId := range qualityExcludedClientIds {
-				if clientScore := clientScores[clientId]; clientScore != nil {
-					if findProviders2.ForceMinimum && rankMode == RankModeQuality {
-						delete(clientScores, clientId)
-					} else if clientScore.PassesMinimums[RankModeQuality] {
-						// A stale Quality label cannot survive live revalidation.
-						// Its prior admission still supplies common-gated Online.
-						clientScore.Online = true
-						clientScore.PassesMinimums = maps.Clone(clientScore.PassesMinimums)
-						delete(clientScore.PassesMinimums, RankModeQuality)
-					}
-				}
-			}
-			for _, provider := range providers {
-				delete(clientScores, provider.ClientId)
-			}
-			observation.dropped[0] += before - len(clientScores) - capabilityDropped
-			observation.dropped[4] += capabilityDropped
-			// a cache written without facets fell back to its un-faceted
-			// buckets, whose scores carry no proven family and read as v4-only
-			requestFilter.apply(clientScores, observation)
-			observation.eligible += len(clientScores)
-			if findProviders2.ForceMinimum {
-				for _, clientScore := range clientScores {
-					clientScore.ScaledWeights = maps.Clone(clientScore.ScaledWeights)
-					clientScore.ScaledWeights[mode] = 1.0
-				}
-			}
-			// the final hop is excluded
-			// intermediaries have score reduced
-			intermediaryScale := float32(0.5)
-			for _, destination := range findProviders2.ExcludeDestinations {
-				for _, clientId := range destination[:len(destination)-1] {
-					if clientScore, ok := clientScores[clientId]; ok {
-						clientScore.ScaledWeights = maps.Clone(clientScore.ScaledWeights)
-						clientScore.ScaledWeights[mode] *= intermediaryScale
-					}
-				}
-			}
-		}
-		filterPool(clientScores, rankMode, hardExcludedClientIds)
-		if primaryCursor != nil && primaryCursor.nativeOnly {
-			retainNativeClientScores(clientScores, rankMode)
-		}
-
-		// Read only the weighted native candidates needed after request filters.
-		// Unchecked Quality members remain available for refill but never count
-		// toward its native quota or enter a native response.
-		validateQualityPool := func(scores, priorScores map[server.Id]*ClientScore, mode RankMode, native bool) error {
-			if mode != RankModeQuality || (!native && !findProviders2.ForceMinimum) {
-				return nil
-			}
-
-			// With modern-first priority the modern candidates are validated
-			// first, against the band's need: validations of the others could
-			// otherwise meet it and leave modern candidates unvalidated, and an
-			// unvalidated Quality native is never drawn.
-			modernPasses := []bool{false}
-			if modernFirst {
-				modernPasses = []bool{true, false}
-			}
-			for _, modernPass := range modernPasses {
-				for {
-					pending := map[server.Id]*ClientScore{}
-					validated := 0
-					for id, score := range scores {
-						if hardExcludedClientIds[id] || qualityExcludedClientIds[id] {
-							if hardExcludedClientIds[id] || offlineClientIds[id] || findProviders2.ForceMinimum {
-								delete(scores, id)
-							} else {
-								score.Online = true
-								score.PassesMinimums = maps.Clone(score.PassesMinimums)
-								delete(score.PassesMinimums, mode)
-							}
-							continue
-						}
-						if priorScores[id] != nil || (!findProviders2.ForceMinimum && !score.PassesMinimums[mode]) {
-							continue
-						}
-						if modernPass && !score.Modern {
-							continue
-						}
-						if qualityReadClientIds[id] {
-							validated++
-						} else {
-							pending[id] = score
-						}
-					}
-					needed := count - len(priorScores) - validated
-					if needed <= 0 || len(pending) == 0 || validation.unavailable != nil {
-						break
-					}
-					ids := selectProviders(pending, mode, providerQualityValidationDraw(needed, findProviders2.ForceMinimum))
-					if err := readQuality(ids, findProviders2.ForceMinimum); err != nil {
-						return err
-					}
-				}
-			}
-			return nil
-		}
-
-		// Native quota counts only native members after every request filter.
-		// Materialized native pages use bounded batches until quota or true
-		// exhaustion; online and pre-schema union reads keep their finite row
-		// allowance. Reaching that legacy limit is unknown, not exhaustion;
-		// degraded fallback still preserves availability and reports the gap.
-		refillPool := func(scores, priorScores map[server.Id]*ClientScore, mode RankMode, cursor *clientScoreCursor, knownHardExclusions map[server.Id]bool, backfill, native bool) error {
-			if count <= 0 {
-				return nil
-			}
-			if err := validateQualityPool(scores, priorScores, mode, native); err != nil {
-				return err
-			}
-			// the band's survivors not answered before, only the modern ones
-			// for modernOnly
-			uniqueCount := func(modernOnly bool) int {
-				uniqueCount := 0
-				for clientId, score := range scores {
-					if mode == RankModeQuality && (native || findProviders2.ForceMinimum) && !qualityReadClientIds[clientId] {
-						continue
-					}
-					if !findProviders2.ForceMinimum && ((native && !score.PassesMinimums[mode]) || (!native && !score.Online)) {
-						continue
-					}
-					if modernOnly && !score.Modern {
-						continue
-					}
-					if priorScores[clientId] == nil {
-						uniqueCount++
-					}
-				}
-				return uniqueCount
-			}
-			unknown := cursor == nil || cursor.sourceIncomplete || 0 < cursor.missingPages
-			for cursor.hasMore() {
-				if mode == RankModeQuality && native && validation.unavailable != nil {
-					unknown = true
-					break
-				}
-				// In a partitioned traversal's modern phase only modern
-				// survivors meet the band's need, so a non-modern row read
-				// there never ends the phase (FP2-MODERN.md, "Quota").
-				modernPhase := modernFirst && cursor.inModernPhase()
-				if count <= len(priorScores)+uniqueCount(modernPhase) {
-					break
-				}
-				var additionalRows int
-				if native && cursor.nativeOnly {
-					additionalRows = loadCount
-				} else {
-					// each phase of a union read has an allowance of its own
-					phaseReadCount := cursor.readCount
-					if modernFirst {
-						if modernPhase {
-							phaseReadCount = cursor.modernReadCount
-						} else {
-							phaseReadCount = cursor.readCount - cursor.modernReadCount
-						}
-					}
-					discardedRows := max(0, phaseReadCount-uniqueCount(modernPhase))
-					limit := findProviders2RefillLoadCount(count, len(excludeFinalDestinations()), discardedRows)
-					additionalRows = limit - phaseReadCount
-				}
-				if additionalRows <= 0 {
-					if modernPhase && cursor.hasOtherPhase() {
-						// The allowance ended inside the modern phase: the band
-						// keeps its modern survivors and fills from the other
-						// phase, so availability does not wait on priority.
-						cursor.skipModernPhase()
-						modernPriorityIncomplete = true
-						continue
-					}
-					if native {
-						unknown = true
-					}
-					break
-				}
-				if backfill {
-					observation.enter("load_backfill")
-				} else {
-					observation.enter("load_primary")
-				}
-				extraScores, err := cursor.read(session.Ctx, additionalRows)
-				if err != nil {
-					if session.Ctx.Err() != nil || (!native && !backfill) {
-						return err
-					}
-					unknown = true
-				}
-				readFailed := err != nil
-				unknown = unknown || cursor.sourceIncomplete || 0 < cursor.missingPages
-				observation.loaded += len(extraScores)
-				if err := readExclusions(extraScores, mode, native, nil); err != nil {
-					return err
-				}
-				filterPool(extraScores, mode, knownHardExclusions)
-				if native && cursor.nativeOnly {
-					retainNativeClientScores(extraScores, mode)
-				}
-				for clientId, clientScore := range extraScores {
-					if scores[clientId] == nil {
-						scores[clientId] = clientScore
-					}
-				}
-				if err := validateQualityPool(scores, priorScores, mode, native); err != nil {
-					return err
-				}
-				if readFailed {
-					break
-				}
-			}
-			unknown = unknown || (mode == RankModeQuality && native && validation.unavailable != nil)
-			if unknown {
-				observation.backfillUnavailable = true
-			}
-			if native {
-				outcome := "exhausted"
-				if unknown {
-					outcome = "unavailable"
-				} else if count <= len(priorScores)+uniqueCount(false) {
-					outcome = "quota"
-				}
-				observation.nativeSource(mode, backfill, outcome)
-			}
-			return nil
-		}
-		// The online bucket is no mode's native membership; it refills on
-		// online members like the online fallback.
-		if err := refillPool(clientScores, nil, rankMode, primaryCursor, hardExcludedClientIds, false, !findProviders2.ForceMinimum && rankMode != RankModeOnline); err != nil {
-			return nil, err
-		}
-		observation.primaryClientScores = clientScores
-		observation.enter("select")
-
-		// Takes up to n of the online bucket in its order
-		// (connect/GEOMAP.md §10.3): reliability weight times URL weight,
-		// highest first, then the speed-mode performance adjustment, each
-		// facet in the request's preference order; with rank_measured_first,
-		// a draw weighted by that key within each evidence rank
-		// (selectOnlineClientScores).
-		selectOnline := func(candidateClientScores map[server.Id]*ClientScore, n int) []server.Id {
-			return selectClientScoresModernFirst(candidateClientScores, n, modernFirst, func(candidateClientScores map[server.Id]*ClientScore, n int) []server.Id {
-				return selectOnlineClientScores(candidateClientScores, facets, n, evidence, mathrand.Float64)
-			})
-		}
-
-		// Draws up to n members of the online bucket, every one equally likely
-		// apart from the intermediaries filterPool down-weights, in one draw
-		// across the requested facets and with no tier banding; with
-		// modern-first priority, one such draw per class, modern first.
-		selectOnlineUniformly := func(candidateClientScores map[server.Id]*ClientScore, n int) []server.Id {
-			return selectClientScoresModernFirst(candidateClientScores, n, modernFirst, func(candidateClientScores map[server.Id]*ClientScore, n int) []server.Id {
-				clientIds := slices.Collect(maps.Keys(candidateClientScores))
-				mathrand.Shuffle(len(clientIds), func(i int, j int) {
-					clientIds[i], clientIds[j] = clientIds[j], clientIds[i]
-				})
-				n = max(0, min(n, len(clientIds)))
-				connect.WeightedSelectFunc(clientIds, n, func(clientId server.Id) float32 {
-					return candidateClientScores[clientId].ScaledWeights[RankModeOnline]
-				})
-				return clientIds[:n]
-			})
-		}
-
-		// Native membership comes only from the shared gate decision. The
-		// performance tier orders members within this bucket.
-		nativeClientScores = map[server.Id]*ClientScore{}
-		for clientId, clientScore := range clientScores {
-			if (findProviders2.ForceMinimum || clientScore.PassesMinimums[rankMode] || (rankMode == RankModeOnline && clientScore.Online)) &&
-				(rankMode != RankModeQuality || qualityReadClientIds[clientId]) {
-				nativeClientScores[clientId] = clientScore
-			}
-		}
-		if rankMode == RankModeOnline {
-			clientIds = selectOnlineUniformly(nativeClientScores, count)
-		} else {
-			clientIds = selectProviders(nativeClientScores, rankMode, count)
-		}
-
-		observation.enter("directory")
-		directory := locationDirectory()
-		observation.targetKind = findProviders2TargetKind(findProviders2, countryLocations, directory)
-		observation.targetCountry = findProviders2TargetCountry(findProviders2, countryLocations, directory)
-		observation.enter("select")
-
-		// output in order of `clientIds`
-		for _, clientId := range clientIds {
-			clientScore := clientScores[clientId]
-			providers = append(providers, findProvidersProviderFromClientScore(clientScore, rankMode, directory))
-		}
-
-		// Fill the requested bucket, then the other native bucket, then the
-		// online union. Every borrowed page passes the same request filters;
-		// tier offsets preserve its lower client-visible priority.
-		if otherRankMode, ok := backfillRankMode(rankMode); ok && !findProviders2.ForceMinimum {
-			remainingCount := func() int {
-				return count - len(clientIds) - len(borrowedClientIds)
-			}
-			borrow := func(clientScore *ClientScore, mode RankMode, tier int, online bool) {
-				provider := findProvidersProviderFromClientScore(clientScore, mode, directory)
-				provider.Tier = tier
-				providers = append(providers, provider)
-				borrowedClientIds = append(borrowedClientIds, clientScore.ClientId)
-				borrowedModernClientIds[clientScore.ClientId] = clientScore.Modern
-				if online {
-					onlineBorrowedClientIds[clientScore.ClientId] = true
-				}
-			}
-			if 0 < remainingCount() {
-				backfillTierOffset := requestSettings.BackfillTierOffset
-
-				observation.enter("load_backfill")
-				observation.load.privateSource = "alternate_legacy"
-				otherClientScores, otherCursor, err := loadPreferredClientScoresWithPartition(
-					requestSettings.NativeReaderEnabled,
-					false,
-					otherRankMode,
+		// The request's own targets first. While every target read was
+		// published without an admitted provider, a city or region target is
+		// answered from its region, then its country
+		// (network_client_location_fallback.go). Each level is one more
+		// attempt under every filter of the request, and match is its level,
+		// "" for the request's own targets.
+		var fallback *findProviders2LocationFallback
+		match := LocationType("")
+		for {
+			observation.enter("load_primary")
+			observation.load.privateSource = "primary_legacy"
+			loadStartTime := time.Now()
+			var clientScores map[server.Id]*ClientScore
+			var primaryCursor *clientScoreCursor
+			if rankMode == RankModeOnline {
+				clientScores, primaryCursor, err = loadOnlineClientScoresWithCursor(
 					session.Ctx,
 					locationIds,
 					locationGroupIds,
@@ -7085,164 +6452,864 @@ func FindProviders2(
 					partition,
 					&observation.load,
 				)
+			} else {
+				clientScores, primaryCursor, err = loadPreferredClientScoresWithPartition(
+					requestSettings.NativeReaderEnabled,
+					findProviders2.ForceMinimum,
+					rankMode,
+					session.Ctx,
+					locationIds,
+					locationGroupIds,
+					clientLocationId,
+					loadCount,
+					facets,
+					partition,
+					&observation.load,
+				)
+			}
+			if err != nil {
+				// Online, like force_minimum, has no other bucket to fall back to.
+				if session.Ctx.Err() != nil || findProviders2.ForceMinimum || rankMode == RankModeOnline {
+					return nil, err
+				}
+				// Native cache availability is not a security decision. Preserve
+				// validated pages and try the next same-target bucket; diagnostics
+				// keep this unknown source distinct from proven exhaustion.
+				observation.backfillUnavailable = true
+				if primaryCursor != nil {
+					primaryCursor.sourceIncomplete = true
+				}
+			}
+			if clientScores == nil {
+				clientScores = map[server.Id]*ClientScore{}
+			}
+			observation.loaded += len(clientScores)
+			loadEndTime := time.Now()
+			loadDuration := loadEndTime.Sub(loadStartTime)
+			loadMillis := float64(loadDuration) / float64(time.Millisecond)
+			findProviders2LoadSeconds.Observe(loadDuration.Seconds())
+			// one provider search per call makes this client-driven volume: the
+			// histogram is the signal, the slow-case line is V(1) detail
+			if 50*time.Millisecond <= loadDuration && glog.V(1) {
+				glog.Infof(
+					"[nclm]findproviders2 load %.2fms (%d)\n",
+					loadMillis,
+					len(clientScores),
+				)
+			}
+
+			// The hard exclusions (connect/GEOMAP.md §10.3), read once for every
+			// provider this call could return, and applied here where the result
+			// is assembled rather than only where the pool's minimums were: the
+			// cached pool already leaves out what its last export saw excluded,
+			// but that export can be an hour old, a verdict issued since must hold
+			// now, and force_minimum reads the same pool with no minimums at all.
+			// Request-only refusals cannot appear in the answer and need no fresh
+			// security or subscriber read. Preserve the same predicates below.
+			var callerNetworkId server.Id
+			if session.ByJwt != nil {
+				callerNetworkId = session.ByJwt.NetworkId
+			}
+			requestFilter := clientScoreRequestFilter{
+				callerNetworkId:   callerNetworkId,
+				facets:            facets,
+				excludedClientIds: excludeFinalDestinations(),
+				requireModern:     findProviders2.RequireModernProvider,
+			}
+			hardExcludedClientIds := map[server.Id]bool{}
+			qualityExcludedClientIds := map[server.Id]bool{}
+			// The candidates this request's live read (readQuality) found
+			// without a live connection, and those with no current liveness
+			// lease (provider_liveness_lease.go). Each leaves every draw of this
+			// request, native, borrowed and Online fallback. A named provider is
+			// never read for a lease, and one the live read finds offline later
+			// stays where its spec put it. Nothing outside the request keeps the
+			// verdict.
+			offlineClientIds := map[server.Id]bool{}
+			// For a request that requires post-quantum encryption, the candidates
+			// whose latest provide did not declare it (provide_capability_model.go),
+			// and for one that requires modern providers, the named providers
+			// that are not modern (readProviderModernClientIds; the index's
+			// candidates are refused by the request filter instead). Each leaves
+			// every draw of this request, named providers included. Like offline,
+			// nothing outside the request keeps the verdict.
+			incapableClientIds := map[server.Id]bool{}
+			exclusionReadClientIds := map[server.Id]bool{}
+			qualityReadClientIds := map[server.Id]bool{}
+			var nativeClientScores map[server.Id]*ClientScore
+			var clientIds, borrowedClientIds []server.Id
+			// each borrowed provider's modern flag, and those the Online fallback
+			// lent, for the answered-modern counts
+			borrowedModernClientIds := map[server.Id]bool{}
+			onlineBorrowedClientIds := map[server.Id]bool{}
+			// The one instant filterPool judges every pool's URL evidence at, and
+			// with it what the draws below know of each candidate: nil while
+			// rank_measured_first is off or for force_minimum
+			// (network_client_selection_evidence.go). The evidence rank and the
+			// neutral URL weight cannot disagree about an expiry.
+			filterTime := server.NowUtc()
+			evidence := findProviders2Evidence(requestSettings, findProviders2.ForceMinimum, filterTime)
+			// Draws up to n of the candidates by their weight in `mode` and bands
+			// the draw by their tier in `mode`, each facet in the request's
+			// preference order (selectClientScoresByWeight).
+			selectProviders := func(candidateClientScores map[server.Id]*ClientScore, mode RankMode, n int) []server.Id {
+				return selectClientScoresModernFirst(candidateClientScores, n, modernFirst, func(candidateClientScores map[server.Id]*ClientScore, n int) []server.Id {
+					return selectClientScoresByWeight(candidateClientScores, mode, facets, n, evidence)
+				})
+			}
+
+			validation := &providerQualityValidation{parent: session.Ctx}
+			defer validation.close()
+			pruneSelected := func() {
+				// A later bucket can expose common risk for an earlier selection.
+				// Revoke it before quota/refill counts or final answers use it.
+				// A drawn provider found offline since is revoked the same way;
+				// a named one is not drawn, and stays.
+				offlineSelections := map[server.Id]bool{}
+				rejectedSelection := func(clientId server.Id) bool {
+					if offlineClientIds[clientId] {
+						offlineSelections[clientId] = true
+					} else if !hardExcludedClientIds[clientId] && !incapableClientIds[clientId] {
+						return false
+					}
+					delete(clientScores, clientId)
+					delete(nativeClientScores, clientId)
+					return true
+				}
+				clientIds = slices.DeleteFunc(clientIds, rejectedSelection)
+				borrowedClientIds = slices.DeleteFunc(borrowedClientIds, rejectedSelection)
+				providers = slices.DeleteFunc(providers, func(provider *FindProvidersProvider) bool {
+					return hardExcludedClientIds[provider.ClientId] || offlineSelections[provider.ClientId] || incapableClientIds[provider.ClientId]
+				})
+				observation.explicitReturned = len(providers) - len(clientIds) - len(borrowedClientIds)
+			}
+			readQuality := func(ids []server.Id, strict bool) error {
+				if len(ids) == 0 {
+					return nil
+				}
+				observation.enter("hard_exclusions")
+				excluded, risky, offline, err := validation.read(ids)
 				if err != nil {
-					if session.Ctx.Err() != nil {
-						return nil, err
+					if session.Ctx.Err() != nil || strict {
+						return err
 					}
 					observation.backfillUnavailable = true
-					if otherCursor != nil {
-						otherCursor.sourceIncomplete = true
-					}
+					return nil
 				}
-				if otherClientScores == nil {
-					otherClientScores = map[server.Id]*ClientScore{}
+				maps.Copy(qualityExcludedClientIds, excluded)
+				maps.Copy(qualityExcludedClientIds, offline)
+				maps.Copy(offlineClientIds, offline)
+				maps.Copy(hardExcludedClientIds, risky)
+				for _, id := range ids {
+					qualityReadClientIds[id] = true
 				}
-				observation.loaded += len(otherClientScores)
-				if err := readExclusions(otherClientScores, otherRankMode, true, nil); err != nil {
-					return nil, err
-				}
-				filterPool(otherClientScores, otherRankMode, hardExcludedClientIds)
-				if otherCursor != nil && otherCursor.nativeOnly {
-					retainNativeClientScores(otherClientScores, otherRankMode)
-				}
-				if err := refillPool(otherClientScores, nativeClientScores, otherRankMode, otherCursor, hardExcludedClientIds, true, true); err != nil {
-					return nil, err
-				}
-				observation.backfillClientScores = otherClientScores
-				observation.enter("select")
+				pruneSelected()
+				return nil
+			}
 
-				// 1. the other bucket's natives. Quality borrows only the Speed
-				// natives within its own latency and throughput cutoffs, their
-				// Quality tier below ClientScoreCutoffTier. Those past the
-				// cutoffs are online members, as every native is, and wait for
-				// the Online fallback.
-				borrowableClientScores := map[server.Id]*ClientScore{}
-				pastCutoffClientScores := map[server.Id]*ClientScore{}
-				for clientId, clientScore := range otherClientScores {
-					if !clientScore.PassesMinimums[otherRankMode] ||
-						(otherRankMode == RankModeQuality && !qualityReadClientIds[clientId]) {
-						continue
+			// Common refusals apply to every bucket. Subscriber refusals apply only
+			// to native Quality, including Quality borrowed by a Speed request,
+			// except that a candidate read without a live connection leaves every
+			// draw of the request (offlineClientIds).
+			readExclusions := func(scores map[server.Id]*ClientScore, mode RankMode, native bool, namedClientIds []server.Id) error {
+				observation.enter("hard_exclusions")
+				candidateClientIds := requestFilter.unchecked(scores, exclusionReadClientIds)
+				for _, clientId := range namedClientIds {
+					if !exclusionReadClientIds[clientId] {
+						candidateClientIds = append(candidateClientIds, clientId)
 					}
-					if _, native := nativeClientScores[clientId]; native {
-						continue
-					}
-					if rankMode == RankModeQuality && ClientScoreCutoffTier <= clientScore.Tiers[RankModeQuality] {
-						pastCutoffClientScores[clientId] = clientScore
-						continue
-					}
-					borrowableClientScores[clientId] = clientScore
 				}
-				for _, clientId := range selectProviders(borrowableClientScores, otherRankMode, remainingCount()) {
-					clientScore := otherClientScores[clientId]
-					borrow(clientScore, otherRankMode, clientScore.Tiers[otherRankMode]+backfillTierOffset, false)
-				}
-
-				// Healthy native sources are exhausted before online fallback.
-				// An unavailable source instead uses degraded fallback, keeping
-				// its explicit unknown diagnosis without blocking connectivity.
-				if 0 < remainingCount() {
-					answeredClientScores := map[server.Id]*ClientScore{}
-					for _, clientId := range clientIds {
-						answeredClientScores[clientId] = clientScores[clientId]
+				// Read first for a request that requires post-quantum
+				// encryption, so the reads below are only of declaring providers.
+				// An undeclared candidate is read once and leaves every draw.
+				if findProviders2.PostQuantumEncryption {
+					capableClientIds, err := readProvidePostQuantumEncryption(session.Ctx, candidateClientIds)
+					if err != nil {
+						return err
 					}
-					for _, clientId := range borrowedClientIds {
-						answeredClientScores[clientId] = otherClientScores[clientId]
-					}
-					onlineClientScores := map[server.Id]*ClientScore{}
-					for _, source := range []struct {
-						mode   RankMode
-						scores map[server.Id]*ClientScore
-						cursor *clientScoreCursor
-					}{
-						{mode: rankMode, scores: clientScores, cursor: primaryCursor},
-						{mode: otherRankMode, scores: otherClientScores, cursor: otherCursor},
-					} {
-						pool, cursor := source.scores, source.cursor
-						if cursor == nil || cursor.nativeOnly {
-							observation.enter("load_backfill")
-							observation.load.privateSource = "online_legacy"
-							var err error
-							pool, cursor, err = loadClientScoresWithPartition(false, source.mode, session.Ctx, locationIds, locationGroupIds, clientLocationId, loadCount, facets, partition, &observation.load)
-							if err != nil {
-								if session.Ctx.Err() != nil {
-									return nil, err
-								}
-								observation.backfillUnavailable = true
-								if cursor != nil {
-									cursor.sourceIncomplete = true
-								}
-							}
-							if pool == nil {
-								pool = map[server.Id]*ClientScore{}
-							}
-							observation.loaded += len(pool)
-							if err := readExclusions(pool, source.mode, false, nil); err != nil {
-								return nil, err
-							}
-							filterPool(pool, source.mode, hardExcludedClientIds)
+					candidateClientIds = slices.DeleteFunc(candidateClientIds, func(clientId server.Id) bool {
+						if capableClientIds[clientId] {
+							return false
 						}
-						priorScores := maps.Clone(answeredClientScores)
-						maps.Copy(priorScores, onlineClientScores)
-						if err := refillPool(pool, priorScores, source.mode, cursor, hardExcludedClientIds, true, false); err != nil {
+						incapableClientIds[clientId] = true
+						exclusionReadClientIds[clientId] = true
+						return true
+					})
+				}
+				excluded, err := getProviderHardExclusions(session.Ctx, candidateClientIds)
+				if err != nil {
+					return err
+				}
+				maps.Copy(hardExcludedClientIds, excluded)
+				// A candidate without a current liveness lease leaves every draw
+				// of the request like one the live read finds offline. The lease
+				// read fails open (provider_liveness_lease_read.go), and judges
+				// at its own instant, which needs nothing of the request's. A
+				// named provider keeps its place whatever its lease: a redial
+				// that names its exit gets one try, and a wrong offline verdict
+				// there changes the user's IP.
+				namedClientIdSet := map[server.Id]bool{}
+				for _, clientId := range namedClientIds {
+					namedClientIdSet[clientId] = true
+				}
+				leaseClientIds := make([]server.Id, 0, len(candidateClientIds))
+				for _, clientId := range candidateClientIds {
+					if !hardExcludedClientIds[clientId] && !namedClientIdSet[clientId] {
+						leaseClientIds = append(leaseClientIds, clientId)
+					}
+				}
+				offline, err := readFindProviders2Liveness(session.Ctx, leaseClientIds, server.NowUtc(), rankMode)
+				if err != nil {
+					return err
+				}
+				maps.Copy(offlineClientIds, offline)
+				for _, clientId := range candidateClientIds {
+					exclusionReadClientIds[clientId] = true
+				}
+				qualityClientIds := []server.Id{}
+				if rankMode == RankModeQuality {
+					for _, id := range namedClientIds {
+						if !hardExcludedClientIds[id] && !incapableClientIds[id] && !qualityReadClientIds[id] {
+							qualityClientIds = append(qualityClientIds, id)
+						}
+					}
+				}
+				if err := readQuality(qualityClientIds, true); err != nil {
+					return err
+				}
+				// A later Quality page may expose common risk for an earlier
+				// Speed selection. Check that overlap before filterPool removes it.
+				if mode == RankModeQuality && native {
+					prior := []server.Id{}
+					// the request's one instant, as filterPool reads it
+					now := filterTime
+					for _, provider := range providers {
+						id := provider.ClientId
+						if score := scores[id]; score != nil && !qualityReadClientIds[id] &&
+							!hardExcludedClientIds[id] && score.PassesMinimums[mode] &&
+							score.urlEvidenceCurrent(now) {
+							prior = append(prior, id)
+						}
+					}
+					if err := readQuality(prior, findProviders2.ForceMinimum); err != nil {
+						return err
+					}
+				}
+
+				pruneSelected()
+				return nil
+			}
+			// a named provider that is not modern is refused before any other
+			// named read, as in the named-only path
+			if findProviders2.RequireModernProvider && 0 < len(specClientIds) {
+				observation.enter("hard_exclusions")
+				modernClientIds, err := readProviderModernClientIds(session.Ctx, specClientIds, filterTime)
+				if err != nil {
+					return nil, err
+				}
+				for _, clientId := range specClientIds {
+					if !modernClientIds[clientId] {
+						incapableClientIds[clientId] = true
+						exclusionReadClientIds[clientId] = true
+					}
+				}
+			}
+			if err := readExclusions(clientScores, rankMode, true, specClientIds); err != nil {
+				return nil, err
+			}
+			namedExcludedClientIds := maps.Clone(hardExcludedClientIds)
+			if rankMode == RankModeQuality {
+				maps.Copy(namedExcludedClientIds, qualityExcludedClientIds)
+			}
+			maps.Copy(namedExcludedClientIds, incapableClientIds)
+			appendSpecProviders(namedExcludedClientIds)
+
+			// drop providers this caller cannot contract with.
+			//
+			// UpdateClientScores puts both Public and Network-only providers in the
+			// pool. A Network-only provider can only settle a contract with a
+			// source in its own network (GetProvideRelationship ->
+			// ProvideModeNetwork -> CreateContractNoEscrow); it is real, usable
+			// supply for those users and has always been discoverable to them, so
+			// it stays. For anyone else CreateContract would reject with
+			// NoPermission, so it goes.
+			//
+			// This must happen here, after loadClientScores, and must never be
+			// baked into the cached set: the client score redis entries are keyed
+			// by (forceMinimum, rankMode, locationId, callerLocationId) with no
+			// network component, so a single cached set is shared by callers from
+			// every network.
+			//
+			// A session with no jwt yields the zero network id, which matches no
+			// provider -- fail closed rather than leak.
+
+			// Applies the request's eligibility to one mode's loaded pool, then the
+			// request's weights in that mode. It runs on the requested mode's pool
+			// and, when that comes up short, on the other mode's, so a borrowed
+			// provider passes exactly what a native one does. A score's maps are
+			// its decoded page's, shared with every other reader
+			// (decodeClientScorePage), so a change replaces the map with a
+			// changed clone.
+			filterPool := func(clientScores map[server.Id]*ClientScore, mode RankMode, hardExcludedClientIds map[server.Id]bool) {
+				observation.enter("filter")
+				now := filterTime
+				for _, clientScore := range clientScores {
+					// the evidence rank reads the same expiry at the same instant
+					// (clientScoreEvidence)
+					if !clientScore.urlEvidenceCurrent(now) {
+						// Older native cache records may not also set Online. Their
+						// prior native admission also admitted online fallback. Expiry
+						// removes only native evidence; request filters still run below.
+						if clientScore.PassesMinimums[RankModeQuality] || clientScore.PassesMinimums[RankModeSpeed] {
+							clientScore.Online = true
+						}
+						clientScore.PassesMinimums = nil
+						clientScore.UrlProbeSuccessWeight = 1
+					}
+				}
+				if mode == RankModeOnline {
+					for clientId, clientScore := range clientScores {
+						// A native member is an online member, whatever its
+						// record says. The union pool holds nothing else; keep
+						// that true of the answer even for a record that is not.
+						if clientScore.PassesMinimums[RankModeQuality] || clientScore.PassesMinimums[RankModeSpeed] {
+							clientScore.Online = true
+						}
+						if !clientScore.Online {
+							delete(clientScores, clientId)
+							continue
+						}
+						// Every online member is equally likely.
+						scaledWeights := maps.Clone(clientScore.ScaledWeights)
+						if scaledWeights == nil {
+							scaledWeights = map[string]float32{}
+						}
+						scaledWeights[mode] = 1.0
+						clientScore.ScaledWeights = scaledWeights
+					}
+				}
+				before := len(clientScores)
+				for clientId := range hardExcludedClientIds {
+					delete(clientScores, clientId)
+				}
+				// read without a live connection: out of every pool of this request
+				for clientId := range offlineClientIds {
+					delete(clientScores, clientId)
+				}
+				// undeclared under a post-quantum request, or a named provider
+				// that is not modern under a modern one: out of every pool too,
+				// counted as a capability refusal
+				capabilityDropped := 0
+				for clientId := range incapableClientIds {
+					if _, ok := clientScores[clientId]; ok {
+						delete(clientScores, clientId)
+						capabilityDropped += 1
+					}
+				}
+				for clientId := range qualityExcludedClientIds {
+					if clientScore := clientScores[clientId]; clientScore != nil {
+						if findProviders2.ForceMinimum && rankMode == RankModeQuality {
+							delete(clientScores, clientId)
+						} else if clientScore.PassesMinimums[RankModeQuality] {
+							// A stale Quality label cannot survive live revalidation.
+							// Its prior admission still supplies common-gated Online.
+							clientScore.Online = true
+							clientScore.PassesMinimums = maps.Clone(clientScore.PassesMinimums)
+							delete(clientScore.PassesMinimums, RankModeQuality)
+						}
+					}
+				}
+				for _, provider := range providers {
+					delete(clientScores, provider.ClientId)
+				}
+				observation.dropped[0] += before - len(clientScores) - capabilityDropped
+				observation.dropped[4] += capabilityDropped
+				// a cache written without facets fell back to its un-faceted
+				// buckets, whose scores carry no proven family and read as v4-only
+				requestFilter.apply(clientScores, observation)
+				observation.eligible += len(clientScores)
+				if findProviders2.ForceMinimum {
+					for _, clientScore := range clientScores {
+						clientScore.ScaledWeights = maps.Clone(clientScore.ScaledWeights)
+						clientScore.ScaledWeights[mode] = 1.0
+					}
+				}
+				// the final hop is excluded
+				// intermediaries have score reduced
+				intermediaryScale := float32(0.5)
+				for _, destination := range findProviders2.ExcludeDestinations {
+					for _, clientId := range destination[:len(destination)-1] {
+						if clientScore, ok := clientScores[clientId]; ok {
+							clientScore.ScaledWeights = maps.Clone(clientScore.ScaledWeights)
+							clientScore.ScaledWeights[mode] *= intermediaryScale
+						}
+					}
+				}
+			}
+			filterPool(clientScores, rankMode, hardExcludedClientIds)
+			if primaryCursor != nil && primaryCursor.nativeOnly {
+				retainNativeClientScores(clientScores, rankMode)
+			}
+
+			// Read only the weighted native candidates needed after request filters.
+			// Unchecked Quality members remain available for refill but never count
+			// toward its native quota or enter a native response.
+			validateQualityPool := func(scores, priorScores map[server.Id]*ClientScore, mode RankMode, native bool) error {
+				if mode != RankModeQuality || (!native && !findProviders2.ForceMinimum) {
+					return nil
+				}
+
+				// With modern-first priority the modern candidates are validated
+				// first, against the band's need: validations of the others could
+				// otherwise meet it and leave modern candidates unvalidated, and an
+				// unvalidated Quality native is never drawn.
+				modernPasses := []bool{false}
+				if modernFirst {
+					modernPasses = []bool{true, false}
+				}
+				for _, modernPass := range modernPasses {
+					for {
+						pending := map[server.Id]*ClientScore{}
+						validated := 0
+						for id, score := range scores {
+							if hardExcludedClientIds[id] || qualityExcludedClientIds[id] {
+								if hardExcludedClientIds[id] || offlineClientIds[id] || findProviders2.ForceMinimum {
+									delete(scores, id)
+								} else {
+									score.Online = true
+									score.PassesMinimums = maps.Clone(score.PassesMinimums)
+									delete(score.PassesMinimums, mode)
+								}
+								continue
+							}
+							if priorScores[id] != nil || (!findProviders2.ForceMinimum && !score.PassesMinimums[mode]) {
+								continue
+							}
+							if modernPass && !score.Modern {
+								continue
+							}
+							if qualityReadClientIds[id] {
+								validated++
+							} else {
+								pending[id] = score
+							}
+						}
+						needed := count - len(priorScores) - validated
+						if needed <= 0 || len(pending) == 0 || validation.unavailable != nil {
+							break
+						}
+						ids := selectProviders(pending, mode, providerQualityValidationDraw(needed, findProviders2.ForceMinimum))
+						if err := readQuality(ids, findProviders2.ForceMinimum); err != nil {
+							return err
+						}
+					}
+				}
+				return nil
+			}
+
+			// Native quota counts only native members after every request filter.
+			// Materialized native pages use bounded batches until quota or true
+			// exhaustion; online and pre-schema union reads keep their finite row
+			// allowance. Reaching that legacy limit is unknown, not exhaustion;
+			// degraded fallback still preserves availability and reports the gap.
+			refillPool := func(scores, priorScores map[server.Id]*ClientScore, mode RankMode, cursor *clientScoreCursor, knownHardExclusions map[server.Id]bool, backfill, native bool) error {
+				if count <= 0 {
+					return nil
+				}
+				if err := validateQualityPool(scores, priorScores, mode, native); err != nil {
+					return err
+				}
+				// the band's survivors not answered before, only the modern ones
+				// for modernOnly
+				uniqueCount := func(modernOnly bool) int {
+					uniqueCount := 0
+					for clientId, score := range scores {
+						if mode == RankModeQuality && (native || findProviders2.ForceMinimum) && !qualityReadClientIds[clientId] {
+							continue
+						}
+						if !findProviders2.ForceMinimum && ((native && !score.PassesMinimums[mode]) || (!native && !score.Online)) {
+							continue
+						}
+						if modernOnly && !score.Modern {
+							continue
+						}
+						if priorScores[clientId] == nil {
+							uniqueCount++
+						}
+					}
+					return uniqueCount
+				}
+				unknown := cursor == nil || cursor.sourceIncomplete || 0 < cursor.missingPages
+				for cursor.hasMore() {
+					if mode == RankModeQuality && native && validation.unavailable != nil {
+						unknown = true
+						break
+					}
+					// In a partitioned traversal's modern phase only modern
+					// survivors meet the band's need, so a non-modern row read
+					// there never ends the phase (FP2-MODERN.md, "Quota").
+					modernPhase := modernFirst && cursor.inModernPhase()
+					if count <= len(priorScores)+uniqueCount(modernPhase) {
+						break
+					}
+					var additionalRows int
+					if native && cursor.nativeOnly {
+						additionalRows = loadCount
+					} else {
+						// each phase of a union read has an allowance of its own
+						phaseReadCount := cursor.readCount
+						if modernFirst {
+							if modernPhase {
+								phaseReadCount = cursor.modernReadCount
+							} else {
+								phaseReadCount = cursor.readCount - cursor.modernReadCount
+							}
+						}
+						discardedRows := max(0, phaseReadCount-uniqueCount(modernPhase))
+						limit := findProviders2RefillLoadCount(count, len(excludeFinalDestinations()), discardedRows)
+						additionalRows = limit - phaseReadCount
+					}
+					if additionalRows <= 0 {
+						if modernPhase && cursor.hasOtherPhase() {
+							// The allowance ended inside the modern phase: the band
+							// keeps its modern survivors and fills from the other
+							// phase, so availability does not wait on priority.
+							cursor.skipModernPhase()
+							modernPriorityIncomplete = true
+							continue
+						}
+						if native {
+							unknown = true
+						}
+						break
+					}
+					if backfill {
+						observation.enter("load_backfill")
+					} else {
+						observation.enter("load_primary")
+					}
+					extraScores, err := cursor.read(session.Ctx, additionalRows)
+					if err != nil {
+						if session.Ctx.Err() != nil || (!native && !backfill) {
+							return err
+						}
+						unknown = true
+					}
+					readFailed := err != nil
+					unknown = unknown || cursor.sourceIncomplete || 0 < cursor.missingPages
+					observation.loaded += len(extraScores)
+					if err := readExclusions(extraScores, mode, native, nil); err != nil {
+						return err
+					}
+					filterPool(extraScores, mode, knownHardExclusions)
+					if native && cursor.nativeOnly {
+						retainNativeClientScores(extraScores, mode)
+					}
+					for clientId, clientScore := range extraScores {
+						if scores[clientId] == nil {
+							scores[clientId] = clientScore
+						}
+					}
+					if err := validateQualityPool(scores, priorScores, mode, native); err != nil {
+						return err
+					}
+					if readFailed {
+						break
+					}
+				}
+				unknown = unknown || (mode == RankModeQuality && native && validation.unavailable != nil)
+				if unknown {
+					observation.backfillUnavailable = true
+				}
+				if native {
+					outcome := "exhausted"
+					if unknown {
+						outcome = "unavailable"
+					} else if count <= len(priorScores)+uniqueCount(false) {
+						outcome = "quota"
+					}
+					observation.nativeSource(mode, backfill, outcome)
+				}
+				return nil
+			}
+			// The online bucket is no mode's native membership; it refills on
+			// online members like the online fallback.
+			if err := refillPool(clientScores, nil, rankMode, primaryCursor, hardExcludedClientIds, false, !findProviders2.ForceMinimum && rankMode != RankModeOnline); err != nil {
+				return nil, err
+			}
+			observation.primaryClientScores = clientScores
+			observation.enter("select")
+
+			// Takes up to n of the online bucket in its order
+			// (connect/GEOMAP.md §10.3): reliability weight times URL weight,
+			// highest first, then the speed-mode performance adjustment, each
+			// facet in the request's preference order; with rank_measured_first,
+			// a draw weighted by that key within each evidence rank
+			// (selectOnlineClientScores).
+			selectOnline := func(candidateClientScores map[server.Id]*ClientScore, n int) []server.Id {
+				return selectClientScoresModernFirst(candidateClientScores, n, modernFirst, func(candidateClientScores map[server.Id]*ClientScore, n int) []server.Id {
+					return selectOnlineClientScores(candidateClientScores, facets, n, evidence, mathrand.Float64)
+				})
+			}
+
+			// Draws up to n members of the online bucket, every one equally likely
+			// apart from the intermediaries filterPool down-weights, in one draw
+			// across the requested facets and with no tier banding; with
+			// modern-first priority, one such draw per class, modern first.
+			selectOnlineUniformly := func(candidateClientScores map[server.Id]*ClientScore, n int) []server.Id {
+				return selectClientScoresModernFirst(candidateClientScores, n, modernFirst, func(candidateClientScores map[server.Id]*ClientScore, n int) []server.Id {
+					clientIds := slices.Collect(maps.Keys(candidateClientScores))
+					mathrand.Shuffle(len(clientIds), func(i int, j int) {
+						clientIds[i], clientIds[j] = clientIds[j], clientIds[i]
+					})
+					n = max(0, min(n, len(clientIds)))
+					connect.WeightedSelectFunc(clientIds, n, func(clientId server.Id) float32 {
+						return candidateClientScores[clientId].ScaledWeights[RankModeOnline]
+					})
+					return clientIds[:n]
+				})
+			}
+
+			// Native membership comes only from the shared gate decision. The
+			// performance tier orders members within this bucket.
+			nativeClientScores = map[server.Id]*ClientScore{}
+			for clientId, clientScore := range clientScores {
+				if (findProviders2.ForceMinimum || clientScore.PassesMinimums[rankMode] || (rankMode == RankModeOnline && clientScore.Online)) &&
+					(rankMode != RankModeQuality || qualityReadClientIds[clientId]) {
+					nativeClientScores[clientId] = clientScore
+				}
+			}
+			if rankMode == RankModeOnline {
+				clientIds = selectOnlineUniformly(nativeClientScores, count)
+			} else {
+				clientIds = selectProviders(nativeClientScores, rankMode, count)
+			}
+
+			observation.enter("directory")
+			directory := locationDirectory()
+			observation.targetKind = findProviders2TargetKind(findProviders2, countryLocations, directory)
+			observation.targetCountry = findProviders2TargetCountry(findProviders2, countryLocations, directory)
+			observation.enter("select")
+
+			// output in order of `clientIds`
+			for _, clientId := range clientIds {
+				clientScore := clientScores[clientId]
+				providers = append(providers, findProvidersProviderFromClientScore(clientScore, rankMode, directory, match))
+			}
+
+			// Fill the requested bucket, then the other native bucket, then the
+			// online union. Every borrowed page passes the same request filters;
+			// tier offsets preserve its lower client-visible priority.
+			if otherRankMode, ok := backfillRankMode(rankMode); ok && !findProviders2.ForceMinimum {
+				remainingCount := func() int {
+					return count - len(clientIds) - len(borrowedClientIds)
+				}
+				borrow := func(clientScore *ClientScore, mode RankMode, tier int, online bool) {
+					provider := findProvidersProviderFromClientScore(clientScore, mode, directory, match)
+					provider.Tier = tier
+					providers = append(providers, provider)
+					borrowedClientIds = append(borrowedClientIds, clientScore.ClientId)
+					borrowedModernClientIds[clientScore.ClientId] = clientScore.Modern
+					if online {
+						onlineBorrowedClientIds[clientScore.ClientId] = true
+					}
+				}
+				if 0 < remainingCount() {
+					backfillTierOffset := requestSettings.BackfillTierOffset
+
+					observation.enter("load_backfill")
+					observation.load.privateSource = "alternate_legacy"
+					otherClientScores, otherCursor, err := loadPreferredClientScoresWithPartition(
+						requestSettings.NativeReaderEnabled,
+						false,
+						otherRankMode,
+						session.Ctx,
+						locationIds,
+						locationGroupIds,
+						clientLocationId,
+						loadCount,
+						facets,
+						partition,
+						&observation.load,
+					)
+					if err != nil {
+						if session.Ctx.Err() != nil {
 							return nil, err
 						}
-						for clientId, clientScore := range pool {
-							if clientScore.Online && answeredClientScores[clientId] == nil && onlineClientScores[clientId] == nil && !offlineClientIds[clientId] {
+						observation.backfillUnavailable = true
+						if otherCursor != nil {
+							otherCursor.sourceIncomplete = true
+						}
+					}
+					if otherClientScores == nil {
+						otherClientScores = map[server.Id]*ClientScore{}
+					}
+					observation.loaded += len(otherClientScores)
+					if err := readExclusions(otherClientScores, otherRankMode, true, nil); err != nil {
+						return nil, err
+					}
+					filterPool(otherClientScores, otherRankMode, hardExcludedClientIds)
+					if otherCursor != nil && otherCursor.nativeOnly {
+						retainNativeClientScores(otherClientScores, otherRankMode)
+					}
+					if err := refillPool(otherClientScores, nativeClientScores, otherRankMode, otherCursor, hardExcludedClientIds, true, true); err != nil {
+						return nil, err
+					}
+					observation.backfillClientScores = otherClientScores
+					observation.enter("select")
+
+					// 1. the other bucket's natives. Quality borrows only the Speed
+					// natives within its own latency and throughput cutoffs, their
+					// Quality tier below ClientScoreCutoffTier. Those past the
+					// cutoffs are online members, as every native is, and wait for
+					// the Online fallback.
+					borrowableClientScores := map[server.Id]*ClientScore{}
+					pastCutoffClientScores := map[server.Id]*ClientScore{}
+					for clientId, clientScore := range otherClientScores {
+						if !clientScore.PassesMinimums[otherRankMode] ||
+							(otherRankMode == RankModeQuality && !qualityReadClientIds[clientId]) {
+							continue
+						}
+						if _, native := nativeClientScores[clientId]; native {
+							continue
+						}
+						if rankMode == RankModeQuality && ClientScoreCutoffTier <= clientScore.Tiers[RankModeQuality] {
+							pastCutoffClientScores[clientId] = clientScore
+							continue
+						}
+						borrowableClientScores[clientId] = clientScore
+					}
+					for _, clientId := range selectProviders(borrowableClientScores, otherRankMode, remainingCount()) {
+						clientScore := otherClientScores[clientId]
+						borrow(clientScore, otherRankMode, clientScore.Tiers[otherRankMode]+backfillTierOffset, false)
+					}
+
+					// Healthy native sources are exhausted before online fallback.
+					// An unavailable source instead uses degraded fallback, keeping
+					// its explicit unknown diagnosis without blocking connectivity.
+					if 0 < remainingCount() {
+						answeredClientScores := map[server.Id]*ClientScore{}
+						for _, clientId := range clientIds {
+							answeredClientScores[clientId] = clientScores[clientId]
+						}
+						for _, clientId := range borrowedClientIds {
+							answeredClientScores[clientId] = otherClientScores[clientId]
+						}
+						onlineClientScores := map[server.Id]*ClientScore{}
+						for _, source := range []struct {
+							mode   RankMode
+							scores map[server.Id]*ClientScore
+							cursor *clientScoreCursor
+						}{
+							{mode: rankMode, scores: clientScores, cursor: primaryCursor},
+							{mode: otherRankMode, scores: otherClientScores, cursor: otherCursor},
+						} {
+							pool, cursor := source.scores, source.cursor
+							if cursor == nil || cursor.nativeOnly {
+								observation.enter("load_backfill")
+								observation.load.privateSource = "online_legacy"
+								var err error
+								pool, cursor, err = loadClientScoresWithPartition(false, source.mode, session.Ctx, locationIds, locationGroupIds, clientLocationId, loadCount, facets, partition, &observation.load)
+								if err != nil {
+									if session.Ctx.Err() != nil {
+										return nil, err
+									}
+									observation.backfillUnavailable = true
+									if cursor != nil {
+										cursor.sourceIncomplete = true
+									}
+								}
+								if pool == nil {
+									pool = map[server.Id]*ClientScore{}
+								}
+								observation.loaded += len(pool)
+								if err := readExclusions(pool, source.mode, false, nil); err != nil {
+									return nil, err
+								}
+								filterPool(pool, source.mode, hardExcludedClientIds)
+							}
+							priorScores := maps.Clone(answeredClientScores)
+							maps.Copy(priorScores, onlineClientScores)
+							if err := refillPool(pool, priorScores, source.mode, cursor, hardExcludedClientIds, true, false); err != nil {
+								return nil, err
+							}
+							for clientId, clientScore := range pool {
+								if clientScore.Online && answeredClientScores[clientId] == nil && onlineClientScores[clientId] == nil && !offlineClientIds[clientId] {
+									onlineClientScores[clientId] = clientScore
+								}
+							}
+						}
+						// The Speed natives held back past Quality's cutoffs stay
+						// candidates even where the pages read above lack them.
+						for clientId, clientScore := range pastCutoffClientScores {
+							if answeredClientScores[clientId] == nil && onlineClientScores[clientId] == nil && !offlineClientIds[clientId] {
 								onlineClientScores[clientId] = clientScore
 							}
 						}
-					}
-					// The Speed natives held back past Quality's cutoffs stay
-					// candidates even where the pages read above lack them.
-					for clientId, clientScore := range pastCutoffClientScores {
-						if answeredClientScores[clientId] == nil && onlineClientScores[clientId] == nil && !offlineClientIds[clientId] {
-							onlineClientScores[clientId] = clientScore
+						for _, clientId := range selectOnline(onlineClientScores, remainingCount()) {
+							clientScore := onlineClientScores[clientId]
+							findProviders2OnlineFallbackEvidence.WithLabelValues(rankMode, clientScoreEvidence(clientScore, filterTime).String()).Inc()
+							borrow(clientScore, RankModeSpeed, 2*backfillTierOffset, true)
 						}
-					}
-					for _, clientId := range selectOnline(onlineClientScores, remainingCount()) {
-						clientScore := onlineClientScores[clientId]
-						findProviders2OnlineFallbackEvidence.WithLabelValues(rankMode, clientScoreEvidence(clientScore, filterTime).String()).Inc()
-						borrow(clientScore, RankModeSpeed, 2*backfillTierOffset, true)
 					}
 				}
 			}
-			findProviders2BackfillProviders.WithLabelValues(rankMode).Observe(float64(len(borrowedClientIds)))
-			findProviders2AnsweredProviders.WithLabelValues(rankMode).Add(float64(len(clientIds) + len(borrowedClientIds)))
-		} else if rankMode == RankModeOnline && !findProviders2.ForceMinimum {
-			// The online bucket holds every online provider: nothing to borrow.
-			findProviders2BackfillProviders.WithLabelValues(rankMode).Observe(0)
-			findProviders2AnsweredProviders.WithLabelValues(rankMode).Add(float64(len(clientIds)))
-		}
-		chosenClientIds := append(slices.Clone(clientIds), borrowedClientIds...)
-		observation.discoveryReturned = len(chosenClientIds)
-		for _, clientId := range clientIds {
-			recordFindProviders2AnsweredModern(rankMode, "native", clientScores[clientId] != nil && clientScores[clientId].Modern)
-		}
-		for _, clientId := range borrowedClientIds {
-			band := "borrowed"
-			if onlineBorrowedClientIds[clientId] {
-				band = "online"
-			}
-			recordFindProviders2AnsweredModern(rankMode, band, borrowedModernClientIds[clientId])
-		}
-		if modernPriorityIncomplete {
-			findProviders2ModernPriorityIncomplete.WithLabelValues(findProviders2MetricRankMode(rankMode)).Inc()
-		}
 
-		// export one anonymized stats sample tracing this call's pool and
-		// selection. Best-effort and gated on stats being enabled, so it is
-		// inert unless a process opts in (see recordFindProviders2Sample).
-		if s := stats.Default(); s.Enabled() {
-			recordFindProviders2Sample(
-				s,
-				findProviders2,
-				rankMode,
-				count,
-				ipInfo.CountryCode,
-				float64(loadDuration.Nanoseconds())/1e6,
-				clientScores,
-				chosenClientIds,
-			)
+			// Climbs a level while every target read was published without an
+			// admitted provider. The named providers were read and answered with
+			// the request's own targets, so a level reads none.
+			if !findProviders2.Strict && requestSettings.LocationFallback && 0 < count && observation.targetsWithoutSupply() {
+				if fallback == nil {
+					fallback = newFindProviders2LocationFallback(locationIds, directory)
+				}
+				if level, ok := fallback.nextLevel(); ok {
+					locationIds, locationGroupIds, match = level.locationIds, map[server.Id]bool{}, level.match
+					specClientIds = nil
+					continue
+				}
+			}
+			if fallback != nil {
+				fallback.record(observation.targetKind, match, 0 < len(clientIds)+len(borrowedClientIds))
+			}
+
+			// the answer's metrics, once for the attempt that answered
+			if _, ok := backfillRankMode(rankMode); (ok || rankMode == RankModeOnline) && !findProviders2.ForceMinimum {
+				// The online bucket holds every online provider: it borrows none.
+				findProviders2BackfillProviders.WithLabelValues(rankMode).Observe(float64(len(borrowedClientIds)))
+				findProviders2AnsweredProviders.WithLabelValues(rankMode).Add(float64(len(clientIds) + len(borrowedClientIds)))
+			}
+			chosenClientIds := append(slices.Clone(clientIds), borrowedClientIds...)
+			observation.discoveryReturned = len(chosenClientIds)
+			for _, clientId := range clientIds {
+				recordFindProviders2AnsweredModern(rankMode, "native", clientScores[clientId] != nil && clientScores[clientId].Modern)
+			}
+			for _, clientId := range borrowedClientIds {
+				band := "borrowed"
+				if onlineBorrowedClientIds[clientId] {
+					band = "online"
+				}
+				recordFindProviders2AnsweredModern(rankMode, band, borrowedModernClientIds[clientId])
+			}
+			if modernPriorityIncomplete {
+				findProviders2ModernPriorityIncomplete.WithLabelValues(findProviders2MetricRankMode(rankMode)).Inc()
+			}
+
+			// export one anonymized stats sample tracing this call's pool and
+			// selection. Best-effort and gated on stats being enabled, so it is
+			// inert unless a process opts in (see recordFindProviders2Sample).
+			if s := stats.Default(); s.Enabled() {
+				recordFindProviders2Sample(
+					s,
+					findProviders2,
+					rankMode,
+					count,
+					ipInfo.CountryCode,
+					float64(loadDuration.Nanoseconds())/1e6,
+					clientScores,
+					chosenClientIds,
+				)
+			}
+			break
 		}
 	} else {
 		observation.enter("hard_exclusions")

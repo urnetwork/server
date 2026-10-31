@@ -591,6 +591,41 @@ and its force_minimum, which keep the full subscriber policy for native
 Quality; a client-id spec sent together with a discovery spec; and Speed and
 Online requests.
 
+### Location fallback (2026-10-31)
+
+Owner decision, 2026-10-31. A cohort of AU callers had empty answers for a
+week, about 8 requests a minute: the score export published their city with
+no admitted provider (cache_empty). Of the 1,451 cities with providers, 951
+have exactly one and 169 have none passing reliability; regions number 518,
+58 of them empty.
+
+This is the one exception to "never widen the requested target" above. A
+city target whose every read was published without an admitted provider is
+answered from its region, then from its country if the region has none
+either; a region target from its country
+(`model/network_client_location_fallback.go`). The rules:
+
+- only a lack of supply climbs: the request climbs while every target it read
+  was published empty, the cache_empty boundary of the selection
+  observation. A target whose admitted providers the request's own
+  exclusions or filters removed is not widened (a window refill already
+  holds them), nor is one with missing or partial cache evidence;
+- a level never leaves the target's country, and its parents come from the
+  location directory;
+- each level is one more pass of the same discovery, so every filter of the
+  request holds there: IP family, rank mode, exclusions, network-only
+  access, capability filters, caps and counts. A named provider is answered
+  once, ahead of discovery;
+- a provider a level answers carries `match`, `region` or `country`. An
+  answer that did not climb is byte-identical on the wire;
+- `strict` keeps the exact answer. Older clients send none, so they get the
+  fallback. `egress_index.location_fallback: false` in provider.yml is the
+  kill switch;
+- `urnetwork_findproviders2_location_fallback_total{target_kind, level}`
+  counts each answer to a city or region target that could climb, by the
+  level that answered, or `none`. The outcome counters count the final
+  answer, so a fallback answer is not an empty one there.
+
 ## Metrics derived for ranking
 
 The indexer computes admission and ranking from the same eight-hour URL
