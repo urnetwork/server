@@ -29812,6 +29812,43 @@ timestamp`, all NOT NULL with no defaults, keyed by `PRIMARY KEY
 schema drift at 894. The probe reads the catalog only; it does not show how
 many providers declare the capability.
 
+Version 897 retires at 900. The trusted instrument overlay re-creates
+`competition_v2_source_authorized` in place, keeping its oid. The new body
+first projects an authenticated instrument back to its selected product, then
+checks the evaluated path base, so v897's exact source body no longer exists
+at 900. Version 900 republishes the complete v897 custody with the 900 source
+body. It also requires `competition_v2_instrument_lock_digest(jsonb)` (SQL,
+immutable) and `competition_v2_instrument_product_intent(jsonb,text,text,text)`
+(PL/pgSQL, volatile), each with its exact body, argument names and metadata.
+The expected bodies come from the server's migration source. Before 900, the
+900 body is drift owned by 897. From 900 on, these are drift owned by 900: the
+897 body, a body without the projection or the path-base check, and a missing
+or reconfigured instrument function. Without this successor contract, a
+coherent database at 900 or 901 paged with the v897 artifact missing
+(2026-10-30).
+
+Versions 898, 899 and 901 pin the SN Top board's tables. Each pins every
+published column's exact type, nullability and default, plus every key, check
+and read index.
+- 898, the chain census: `sn_fleet_binding` (unique bound-log index,
+  hash-width, uid-range and cleanup-triple checks), `sn_fleet_binding_sync`,
+  `sn_incentive_snapshot` and its read-time index, `sn_incentive_uid`,
+  `sn_head_summary` and its received-time index, and `sn_head_summary_fleet`.
+- 899, the board: `sn_trail_hop`, `sn_top_snapshot`, `sn_top_network`,
+  `sn_top_fleet`, `sn_top_ema_state` and `sn_top_network_daily`, with their
+  confirm-time, computed-time, snapshot-position, update-time and day indexes.
+- 901, the replica provenance: on `sn_top_snapshot`, the nullable
+  `replica_validator_hotkey bytea`, `replica_native_epoch bigint` and
+  `replica_measurement_hash text`, and `replica_complete`; also
+  `sn_top_fleet.replica_available` and `sn_head_summary.replica_genesis`. The
+  three flags are `boolean NOT NULL DEFAULT false`. 901 also pins the valid,
+  ready partial index `sn_head_summary_replica_genesis` on (netuid,
+  validator_hotkey, native_epoch) WHERE (replica_genesis = true). A full index
+  over the same keys, a changed key order or a lost default is drift at 901.
+
+These checks read the catalog only. They do not show whether the board, the
+replica or any score is current.
+
 ### 8.10 Client-reliability covering-index drift after partition cutover
 Probe: `reliability-index`
 
