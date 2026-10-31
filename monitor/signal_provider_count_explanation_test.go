@@ -84,7 +84,7 @@ func TestProviderCountExplainedNarrowTargetCohortDoesNotPage(t *testing.T) {
 		{{"city", "cache_empty", 20}},
 		{{"city", "filtered_destinations", 20}},
 		{{"city", "cache_empty", 11}, {"city", "filtered_destinations", 9}},
-		{{"region", "cache_empty", 15}, {"country", "filtered_client_ids", 5}},
+		{{"region", "cache_empty", 15}, {"country", "filtered_destinations", 4}, {"country", "intentional_zero", 1}},
 	} {
 		findings := providerCountExplainedFindings(t, now, providerCountExplainedPayload(t, now, "au", map[string]float64{"0": 20, "10+": 1}, explanations...))
 		if classes := providerCountFindingClasses(findings); len(classes) != 0 {
@@ -104,7 +104,8 @@ func TestProviderCountExplainedNarrowTargetCohortDoesNotPage(t *testing.T) {
 
 // Zeros the explanations do not account for still page: missing cache
 // metadata, a country, group or best-available target the export wrote
-// empty, and filters other than the request's own exclusions.
+// empty, filters other than a window refill's, and client-ID exclusions,
+// which can be the client's own removals of providers that failed it.
 func TestProviderCountUnexplainedZerosStillPage(t *testing.T) {
 	now := time.Date(2026, 10, 31, 3, 30, 0, 0, time.UTC)
 	for _, explanation := range []providerCountExplanation{
@@ -113,6 +114,9 @@ func TestProviderCountUnexplainedZerosStillPage(t *testing.T) {
 		{"city", "eligible_not_selected", 20},
 		{"city", "filtered_hard", 20},
 		{"city", "filtered_mixed", 20},
+		{"city", "filtered_client_ids", 20},
+		{"city", "filtered_explicit_mixed", 20},
+		{"city", "filtered_explicit", 20},
 		{"country", "cache_empty", 20},
 		{"location_unknown", "cache_empty", 20},
 		{"mixed", "cache_empty", 20},
@@ -268,7 +272,8 @@ func TestMonitorDocumentationProviderCountEmptyExplanations(t *testing.T) {
 	for _, required := range []string{
 		"`urnetwork_findproviders2_empty_outcomes_total`",
 		"`provider-count-target-supply-empty`",
-		"`filtered_destinations`, `filtered_client_ids`, `filtered_explicit`, `filtered_explicit_mixed` and `intentional_zero`",
+		"`filtered_destinations` and `intentional_zero`",
+		"`filtered_client_ids`, `filtered_explicit_mixed` and `filtered_explicit` still count",
 		"`cache_empty` for a `city` or `region` target",
 		"leave the denominator",
 		"A country, group, best-available, mixed or unknown target the export wrote empty still counts toward the PAGE",

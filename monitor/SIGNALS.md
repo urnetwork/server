@@ -12040,10 +12040,13 @@ outcome counter's `0` band again, under the same request-class labels
 selection `reason` from the §2.9c fixed vocabulary. The probe reads both in one
 query at one instant, the explanations tagged `monitor_part="empty"`, and joins
 them on those labels. Two explanations take zeros out of the judgment. The
-request's own: `filtered_destinations`, `filtered_client_ids`,
-`filtered_explicit`, `filtered_explicit_mixed` and `intentional_zero` (its
-exclusions removed every candidate the target holds, as a window refill that
-excludes the exits it already has does, or it asked for zero). Target supply:
+request's own: `filtered_destinations` and `intentional_zero` (every candidate
+was a destination the request excluded, and the standard window excludes there
+only the healthy exits it already holds, so the answer is a refill that found
+nothing new; or it asked for zero). `ExcludeClientIds` also carries the
+client's runtime removals of providers that failed it, so `filtered_client_ids`,
+`filtered_explicit_mixed` and `filtered_explicit` still count: such a zero can
+be a user left with nothing. Target supply:
 `cache_empty` for a `city` or `region` target (the score export published the
 target without an admitted provider, so it has connected source rows that fail
 the shared reliability, URL and hard-exclusion gates, or it lost its last

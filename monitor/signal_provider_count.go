@@ -71,8 +71,8 @@ func (k providerCountKey) frame() string {
 type providerCountCohort struct {
 	key   providerCountKey
 	bands map[string]float64
-	// the cohort's zeros its request explains: its own exclusions removed
-	// every candidate, or it asked for none
+	// the cohort's zeros its request explains: the exits its window already
+	// holds were every candidate, or it asked for none
 	requestExplained float64
 	// the cohort's zeros from a city or region the score export holds no
 	// admitted provider for
@@ -82,10 +82,14 @@ type providerCountCohort struct {
 }
 
 // The selection reasons (model network_client_selection_metrics.go) of a zero
-// the request itself explains: the caller's explicit exclusions removed every
-// candidate the target holds, or it asked for zero. A refill that excludes the
-// window it already has is the common case.
-var providerCountRequestExplainedReasons = []string{"filtered_destinations", "filtered_client_ids", "filtered_explicit", "filtered_explicit_mixed", "intentional_zero"}
+// the request itself explains. filtered_destinations: ExcludeDestinations
+// removed every candidate, and the standard window passes there only the
+// healthy exits it already holds, so the answer is a refill finding nothing
+// new. intentional_zero: it asked for zero. ExcludeClientIds also carries the
+// client's runtime removals of providers that failed it, so a zero it explains
+// (filtered_client_ids, or filtered_explicit_mixed and the schema-1
+// filtered_explicit with it) can be a user who has nothing and still counts.
+var providerCountRequestExplainedReasons = []string{"filtered_destinations", "intentional_zero"}
 
 // The target kinds whose cache_empty zero is target supply, not a platform
 // empty: most cities and regions hold one or two providers, so the export
@@ -282,10 +286,10 @@ func providerCountFinding(cohort providerCountCohort, tier, metricHost, class st
 		target: "api-fleet", frame: cohort.key.frame(), sustain: 1,
 		symptom:   symptom,
 		mechanism: "This counts the final FindProviders2 connection-selection response after network-only, IP-family, and explicit-destination exclusion filters. A nonempty Redis score cache can therefore remain healthy while the product-visible list is empty or materially small for this request cohort. The app location picker uses different endpoints and is independently covered by provider-picker (§2.9b); this counter cannot prove picker health.",
-		baseline:  "At least 20 ordinary discovery requests in five minutes with 80% zero providers is an effective-empty page; this absolute page does not require a learned baseline. Zeros the request's own exclusions or an empty city or region target explain leave both counts first.",
+		baseline:  "At least 20 ordinary discovery requests in five minutes with 80% zero providers is an effective-empty page; this absolute page does not require a learned baseline. Zeros explained by a window refill (filtered_destinations), a zero-count request or an empty city or region target leave both counts first.",
 		observed:  observed,
 		evidence:  "Mimir aggregates only the API counter's fixed-vocabulary request class and result-count bands, joined on the same labels to the empty answers' fixed target kind and selection reason. Both are incremented at the completed response boundary; no client, network, provider, location ID, address, request identifier, or provider list leaves the API.",
-		context:   "Direct explicit-destination cohorts are reported separately as request-intent unknown, and ForceMinimum diagnostics are excluded. A zero the request's own exclusions explain, or a city or region the score export holds no admitted provider for, does not count; a country, group, best-available, mixed or unknown target the export wrote empty still does. Network-only access outside its network and restrictive location or group requests can still legitimately make a discovery cohort small. A returned candidate can still fail later, so pair this with missing-origin, stale-destination, egress admission, and end-to-end connection success. Missing outcome telemetry is a cannot-observe condition, never a healthy zero, and absent or untrusted explanations explain nothing.",
+		context:   "Direct explicit-destination cohorts are reported separately as request-intent unknown, and ForceMinimum diagnostics are excluded. A refill zero whose every candidate was an exit the window already holds, a zero-count request, or a city or region the score export holds no admitted provider for does not count; a country, group, best-available, mixed or unknown target the export wrote empty still does, and so does a zero ExcludeClientIds explains, which can be the client's own removals of providers that failed it. Network-only access outside its network and restrictive location or group requests can still legitimately make a discovery cohort small. A returned candidate can still fail later, so pair this with missing-origin, stale-destination, egress admission, and end-to-end connection success. Missing outcome telemetry is a cannot-observe condition, never a healthy zero, and absent or untrusted explanations explain nothing.",
 		action:    "Treat repeated empty connection-selection lists as a product availability failure. Identify whether the reported screen is the location picker (§2.9b) or FindProviders2; caller country is not selected target country, and ForceCount/requested Count and exclusions remain unobserved. Correlate the same cohort with §2.9 cache population, §2.15 reliability integrity, §2.19a egress admission, and §2.17/§2.18 lifecycle failures. Restore the owning selection or lifecycle boundary; do not clear score keys, relax gates, or fabricate requests to make the list count recover.",
 		verify:    "Two consecutive complete five-minute windows show every materially used ordinary cohort below the alert band, §2.9 current cache documents remain complete, and successful provider routes recover without manual state changes.",
 		playbook:  "SIGNALS.md §2.9a and §5.9",
