@@ -34,6 +34,8 @@ type SubnetReplayPin struct {
 	settlementVault      common.Address
 	policyHash           common.Hash
 	settlementV2Declared bool
+	settlementV2         common.Address
+	settlementVaultV2    common.Address
 }
 
 // Parses sn.yml bytes with the server's strict reviewed-schedule parser. A
@@ -67,6 +69,8 @@ func NewSubnetReplayPin(data []byte) *SubnetReplayPin {
 	pin.settlementVault = common.HexToAddress(mainnet.SettlementVault)
 	pin.policyHash = policyHash
 	pin.settlementV2Declared = mainnet.SettlementV2Address != "" || mainnet.VaultV2Address != ""
+	pin.settlementV2 = common.HexToAddress(mainnet.SettlementV2Address)
+	pin.settlementVaultV2 = common.HexToAddress(mainnet.VaultV2Address)
 	return pin
 }
 

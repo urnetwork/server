@@ -225,6 +225,7 @@ var subnetReplayClassKinds = map[string]alertClassKind{
 	"subnet-claim-correctness":       incidentAlertClass,
 	"subnet-claim-credit-payment":    incidentAlertClass,
 	"subnet-epoch-progress":          incidentAlertClass,
+	"subnet-root-deadline":           incidentAlertClass,
 	"subnet-payout-root":             incidentAlertClass,
 	"subnet-vault-conservation":      incidentAlertClass,
 	"subnet-artifact-integrity":      incidentAlertClass,

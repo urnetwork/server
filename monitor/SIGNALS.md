@@ -45488,8 +45488,50 @@ state and are rendered as exact integers; claimant identities, hashes and
 addresses are never rendered. Missing today: the `subnet_replay` enrollment
 (`replay_from_block`, `api_origins`) is not provisioned in vault/main
 monitor.yml, so the journal and root reproduction stay unknown until it is; a
-declared settlement v2 deployment is not read and reports a coverage gap; no
-claimant or keeper SLO is configured.
+declared settlement v2 deployment is not replayed and reports a coverage gap;
+no claimant or keeper SLO is configured. The independent deadline page in
+§22.7.1 covers root presence for both versions without this replay enrollment.
+
+### 22.7.1 Independent payout root deadline
+Probe: `subnet-root-deadline`
+
+`signal_subnet_root_deadline.go` checks the latest closed epoch every five
+minutes using the reviewed `sn.yml` deployment pin and a configured archive
+node. It reads the finalized chain checkpoint, coordinator epoch clock and
+operator census, and each operator's root state. All views use the same
+canonical block hash; a closing checkpoint recheck precedes every verdict.
+The bounded read needs no producer database, payout leaves, task result,
+artifact API, replay frontier or optional `subnet_replay` enrollment. Thus a
+census that runs through the deadline cannot suppress the alert.
+
+| Alert class | Trip condition | Severity and action |
+|---|---|---|
+| `subnet-root-deadline` | A due operator still has no confirmed root with at most `RootDeadlineLeadBlocks` remaining. Default 600 blocks is about T-2h at mainnet's 12 s/block. | Page, Sustain 1 on the first observation. Inspect close/computation/publication/commit immediately; resolve an ambiguous transaction before retrying. |
+
+The root deadline is `epochEndBlock(e) + policyAt(e).rootCommitWindowBlocks`,
+inclusive. Before an operator's `vault2.pools(noId).firstEpoch`, or when its
+v2 pool is unregistered, the check uses the active v1 `operatorAt` and
+`rootCommitments(e,noId)`. From `firstEpoch` it uses v2 `pending(noId)` and
+the latest finalized `roots` entry. A root for an older epoch does not
+satisfy the current deadline, and a v1 root cannot satisfy a v2 epoch.
+Both contract pairs' links and subnet identities must match the reviewed pin.
+
+A v2 epoch needs no new root when `lastFundedEpoch >= e` and
+`fundedThrough(e)` equals the latest finalized root's total (zero before the
+first root). An absent close must still page even if `fundedThrough(e)` reads
+zero. An intentional no-allocation outcome based on provider usage requires
+operator investigation; a producer's assertion alone cannot suppress the
+independent page. Pausing the writer also does not stop the deadline clock.
+
+Targets are `subnet-root-deadline/no-N`, frame `epoch-N/root`. The same page
+continues after the deadline, with `deadline_passed=true`, until a root is
+observed or the next epoch becomes due. Preserve missed-window incidents for
+follow-up; never backdate a root. The check does not certify root contents,
+auditor approvals, challenge completion, claims or v2 conservation.
+RPC failures, missing deployment/source configuration, census bounds or an
+inconsistent checkpoint emit `subnet-monitor-coverage` with unknown state,
+Sustain 1, target `subnet-root-deadline/coverage`. They never prove a missing
+root or healthy settlement.
 
 ### 22.8 Public artifacts, validator evidence anchors, and audit continuity
 Probe: `subnet-evidence`
@@ -45699,8 +45741,10 @@ progress-file reader in this server monitor. `subnet-process` currently reads
 operator database/task/intent state and explicitly reports the missing
 validator/miner process exporters; `subnet-weights` reads the native chain.
 `subnet-settlement` replays v1 and reports
-`settlement-v2-reader-unimplemented` for a declared V2 pair. Registering these
-probes does not establish enrollment, deployment, metric ingestion or delivered
+`settlement-v2-reader-unimplemented` for a declared V2 pair. The independent
+`subnet-root-deadline` (§22.7.1) reads v1/v2 root presence and funding for the
+current deadline; it does not implement full V2 settlement replay. Registering
+these probes does not establish enrollment, deployment, metric ingestion or delivered
 alerts. Keep those gaps visible alongside a successful direct health check.
 The existing `subnet-head` pool census is also v1-based: it does not resolve
 the epoch-specific V2 `settlementAt` destination. Its allowed-recipient verdict

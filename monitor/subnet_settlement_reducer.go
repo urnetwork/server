@@ -273,7 +273,7 @@ func evaluateSubnetSettlementProgress(entry *subnetSettlementEntry, block uint64
 	if !rootPresent && rootDeadline < block && block < end+policy.EpochBlocks && value.Status != subnetSettlementCarried {
 		progress("root", "root-within-window", tierWarn, 2, rootDeadline,
 			"An operator missed its payout root window",
-			"Without a root the epoch finalizes as root-missed: its funding carries to the same operator's next root, and providers of this epoch receive no entitlement from it.",
+			"Without a root the epoch finalizes as root-missed: its funding remains in the same operator's v1 carry, and providers receive no entitlement from this epoch itself. Moving that carry into v2 requires the planned v1 sweep; a v2 root alone cannot consume it.",
 			"Record the missed publication and repair the operator's root path before the next epoch's window; never backdate or invent a root.")
 	}
 	if settled && block < finalizeAt {
