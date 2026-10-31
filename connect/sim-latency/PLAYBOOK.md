@@ -62,6 +62,20 @@ or skips. Earlier failed attempts remain preserved and excluded from those
 counts. See the [selected-scope qualification](launch/CONTROL-G2-MANAGER-QUALIFICATION-2026-10-31.json).
 This does not qualify a future evaluator image or amend the failed calibration.
 
+At **14:44:06 UTC**, the separately installed, inactive future-control bundle
+passed native protected-file admission. It contains four clean Go 1.27.3 control
+programs from `4f46bb0d8`, six passing help/policy smokes, a byte-verified native
+control-provenance image/archive, five guarded wrappers and the exact 17-file
+minimum-work producer closure. The image is **not** an evaluator image or a
+running worker container. No operational wrapper ran, no runtime-config/vault
+was copied, and no existing service was repointed. Its future whole-tuple
+transition requires a separate review after authoritative R1 sealing and old
+worker join; it is not a condition for restoring R1 grading. See the
+[inactive staging evidence](launch/CONTROL-BUNDLE-STAGING-2026-10-31.json).
+At **14:47:09 UTC**, operator readiness remained 200/all eleven checks true,
+with intake ready, grading not ready and publication held. Calibration still
+requires the owner's explicit decision.
+
 The operator score dashboard and future-epoch G2 host handoff code are pushed
 in `766b48358`; 49 focused roots passed three times, zero failures/skips, against
 the actual merged server source with private diagnostic dependency exports.

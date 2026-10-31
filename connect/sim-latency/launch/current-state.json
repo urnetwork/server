@@ -27,11 +27,11 @@
     "latest_verification_scope": "Read-only live contract behavior, not an exact main binary commit or all-replica identity proof. The earlier release observation is historical, not a season pin.",
     "new_config_vault_or_epoch_one_image_deployment_required": false,
     "negative_owner_feedback_probe_alone_is_not_binary_identity_proof": true,
-    "api_readiness_verified_at": "2026-10-31T13:43:36Z",
+    "api_readiness_verified_at": "2026-10-31T14:47:09Z",
     "api_readiness_operator_authenticated": true,
     "api_readiness_all_eleven_checks_true": true
   },
-  "next_action": "Calibration remains ACCEPTED=FALSE. Await the owner's explicit provisional-grading or revised-calibration decision; no reseeding, rerun, accepted marker, fence cancellation or hold release is authorized. Failed evidence is independently reviewed and retained with exact-version COMPLIANCE readbacks. Typed read-only inspection at13:05 confirms evaluation4/reward1 ACTIVE. Operator Ready200/all11 at13:43:36Z confirms intake readiness, not scoring acceptance. Normal control lock fix8b84ba73e has its separate159-pass qualification. Fixture-only fixa1e20b492 now passes five focused regressions and all207 selected G2/source-manager checks across three fresh runs; original failed attempts are preserved and excluded. Exact future-epoch2 G2 technical approval f7c1d4c4 is recorded, but selected product, instrument child/image, future config/runtime and baseline remain pending. Never change/rejudge epoch1 or gate its grading recovery on future G2. Migration903 must precede normal main API/metrics/dashboard rollout. No control qualification or checkpoint grants calibration/hold-release authority.",
+  "next_action": "Calibration remains ACCEPTED=FALSE. Await the owner's explicit provisional-grading or revised-calibration decision; no reseeding, rerun, accepted marker, fence cancellation or hold release is authorized. Failed evidence is independently reviewed and retained with exact-version COMPLIANCE readbacks. Last typed hold readback at13:05 confirmed evaluation4/reward1 ACTIVE; operator Ready200/all11 at14:47:09Z still confirms intake-ready, grading-not-ready and publication-held. Normal control checks remain qualified (159 earlier roots;207 selected G2/source checks plus5 supplemental regressions). Four clean4f control programs, their real7818 native-provenance OCI/archive, and the inactive profiles/17-file producer closure are now installed and pass native file-only admission. They do NOT replace the R1 tuple or qualify a future evaluator. A separately reviewed whole-tuple transition belongs after authoritative R1 seal and old-worker join, before the genuine future source intent; selected product, instrument child/evaluator image, runtime ACK and next baseline remain pending. Never change/rejudge epoch1 or gate its grading recovery on future G2. Migration903 precedes normal API/metrics/dashboard rollout where pending. No static qualification or checkpoint grants calibration/hold-release authority.",
   "production": {
     "api": "https://api.bringyour.com",
     "season_id": "sim-latency-production-20261028-r2",
@@ -541,7 +541,7 @@
     "retained_in_git": true,
     "warning": "The 164128-byte historical checkpoint retains all earlier failures, qualifications and source pins. Its old top-level status and next_action are superseded; do not execute them. Read history only for a specific supporting artifact."
   },
-  "observed_at": "2026-10-31T13:43:36Z",
+  "observed_at": "2026-10-31T14:47:09Z",
   "current_public_data_report": {
     "path": "server/connect/sim-latency/baseline/final-baseline.html",
     "sha256": "3f9e59d19bd97d88da832de39b93bebb34089b9a31472329648ebcab760ee2ab",
@@ -737,6 +737,32 @@
     "full_suite_or_candidate_containment_qualification_claimed": false,
     "scoring_hold_release_or_future_image_activation_authority": false
   },
+  "inactive_future_control_bundle": {
+    "status": "native_builds_and_provenance_verified_profiles_installed_and_file_admitted_not_activated",
+    "report": "server/connect/sim-latency/launch/CONTROL-BUNDLE-STAGING-2026-10-31.json",
+    "report_sha256": "5972fc79a09dda72fd3fda5679ef993a3ad1ea03cd12418edb60a358a38e2052",
+    "control_source_commit": "4f46bb0d87f00dcb53ac3fd67521a42c60ceafa9",
+    "native_program_count": 4,
+    "help_and_policy_smokes": 6,
+    "go_version": "go1.27.3",
+    "native_directory": "/usr/local/libexec/urnetwork/competition-control-4f46bb0d87f0-20261031-v1",
+    "control_provenance_image": "sha256:7818b31ad24faaca90844ed0fb65e53c44f15481a272bd0c1c03206492f6296a",
+    "image_is_not_an_evaluator_or_running_worker_container": true,
+    "archive": "/var/lib/urnetwork/competition-control-artifacts-4f46bb0d87f0-20261031-v1/control-image.tar",
+    "archive_sha256": "7e9d11a3bf1926c1d6d2d8dffbbc464d4b7b41ea0ced11fd80c02f88a4a955f5",
+    "configuration_directory": "/etc/urnetwork/competition-production-r2-future2-4f46bb0d87f0-20261031-v1",
+    "packet_manifest_sha256": "354d8814161bfeb415ee32ac4866a7ae8996a4203b4ab7aff3a5403d9bf94cad",
+    "source_builder_and_host_qualifier_share_existing_build_history": true,
+    "qualified_qwen_gemma_profile_pinned_without_model_calls": true,
+    "legacy_profile_unchanged_future_profile_has_no_recovery_authorization": true,
+    "sealed_file_admission_finished_at": "2026-10-31T14:44:06Z",
+    "sealed_file_admission_evidence_sha256": "27d16376af3a7b8d86f98069850cfbdc3c90dd951f421ad51ddf55af7a062728",
+    "operational_wrappers_executed": false,
+    "future_runtime_config_or_vault_copied": false,
+    "api_configuration_or_current_service_changed": false,
+    "not_an_epoch_one_grading_restoration_gate": true,
+    "future_activation_boundary": "Separate whole-tuple review after authoritative R1 seal and old-worker join, before preparing the actual future source intent. Never hot-repoint or re-ACK R1."
+  },
   "latest_source_checkpoint": {
     "observed_at": "2026-10-31T09:24:12Z",
     "repository": "https://github.com/urnetwork/server",
@@ -803,7 +829,7 @@
     "metadata_checkpoint_does_not_release_holds_or_authorize_calibration": true
   },
   "latest_runtime_observation": {
-    "checked_at": "2026-10-31T13:43:36Z",
+    "checked_at": "2026-10-31T14:47:09Z",
     "operator_authenticated": true,
     "http_status": 200,
     "all_eleven_checks_true": true,
