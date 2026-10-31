@@ -53,11 +53,18 @@ The lifetime set becomes the **active** set: the providers drawn ahead of new on
 ## Coordination
 
 - **sn-55:** confirm that a census of up to 3,072 is safe for the production validator (its census bound, transition size, disk and memory), and agree on the merge window. Nothing in sn changes.
+- **Census check (2026-10-31, against sn main `2cb50ac4`):** safe.
+  - The validator unions this settlement window, every provider it ever scored and this tempo's egress providers into one census. It fails the measurement and the settlement past the signed `max_providers`, 4,096, a fixed capacity dimension (`validator/measurement_stats_v2.go:36-73`, `validator/attempt_settlement_v2_runtime.go:225-262`, `validator/production_capacity.go:85-94`).
+  - Its quality EMAs are never evicted, and only server-assigned hops are scored, so the census is every provider the server ever admits: at most 3,072, which leaves 1,024 for anything the validator scored outside the cohort.
+  - The transition stays near 1.3 MB of its 2 MiB. Per-epoch and per-tempo counts follow the cohort size, which rotation does not change.
+  - `controller/verify_controller.go` names the 4,096 bound (`verifyValidatorMaxProviders`) and refuses a `cohort_lifetime_limit` above it.
 - **Owner:** time the merge. With no claimed fleets it is inert, so it can merge with the first binding that opens on mainnet.
 
 ## Deploy
 
 1. Apply the migration (a new table, `verify_cohort_census`).
+   - An api deployed ahead of it admits exactly as before rotation: without the table no durable census can exist.
+   - Any other failed census read fails closed without failing the draw: a ready Redis census admits as usual, and a lost one refuses new providers until a read succeeds.
 2. Deploy every **api** first.
    - An api still on the old admission script checks only the active cap.
    - Such an api could give a rotated-out slot to an unclaimed provider and grow the census past 2,000.
@@ -72,5 +79,6 @@ The lifetime set becomes the **active** set: the providers drawn ahead of new on
 - A full lifetime set refuses a claimed member until rotation frees room; claimed members then fill the census to its limit; an unclaimed provider is still refused; a rotated member returns at no census cost; every census member is durable.
 - Rotation runs only while claimed members wait, at most that many, and never removes a member drawn this or last epoch, an eligible member or a claimed one.
 - After a Redis loss of every cohort key, no new provider is admitted until rotation restores the census from Postgres, and the restored census still bounds admissions.
+- Without the census table, draws admit as before rotation; any other census read failure refuses new providers without failing the draw, and is not cached.
 
 The existing cohort tests pass unchanged.

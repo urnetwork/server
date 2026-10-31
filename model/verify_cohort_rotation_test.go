@@ -240,3 +240,51 @@ func TestVerifyCohortCensusFailsClosedAfterRedisLoss(t *testing.T) {
 		}
 	})
 }
+
+// An api deployed ahead of the census migration has no verify_cohort_census
+// table. No durable census can exist then, so draws admit as they did before
+// rotation instead of failing every next hop on the missing relation.
+func TestVerifyCohortDrawsWithoutTheCensusTable(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		settings := testVerifyCohortRotationSettings()
+		testVerifyCohortSetEpoch(ctx, 2)
+		keys := newVerifyCohortKeys(settings.CohortDeploymentKey, 2)
+		addresses := &testVerifyCohortAddresses{}
+		addresses.providers(ctx, settings, 3)
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `DROP TABLE verify_cohort_census`))
+		})
+		hops := testVerifyCohortSample(t, ctx, settings, 6)
+		if len(hops) != 3 || len(testVerifyCohortMembers(ctx, keys.lifetime)) != 3 {
+			t.Fatal("draws without the census table", hops, testVerifyCohortMembers(ctx, keys.lifetime))
+		}
+		if verifyCohortCensusRequired(ctx, settings.CohortDeploymentKey) {
+			t.Fatal("a missing census table required a durable census")
+		}
+	})
+}
+
+// Any other census read failure fails closed without failing the draw: with
+// no ready Redis census a new provider waits, and nothing is cached, so the
+// first draw after the failure reads the census again.
+func TestVerifyCohortCensusReadFailureFailsClosed(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		settings := testVerifyCohortRotationSettings()
+		testVerifyCohortSetEpoch(ctx, 2)
+		addresses := &testVerifyCohortAddresses{}
+		addresses.providers(ctx, settings, 2)
+		renameDeploymentKey := func(from string, to string) {
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(ctx, `ALTER TABLE verify_cohort_census RENAME COLUMN `+from+` TO `+to))
+			})
+		}
+		renameDeploymentKey("deployment_key", "unreadable_deployment_key")
+		if nextHop, _ := SampleVerifyNextHop(ctx, nil, settings); nextHop != nil {
+			t.Fatal("a new provider was admitted while the census could not be read", nextHop)
+		}
+		renameDeploymentKey("unreadable_deployment_key", "deployment_key")
+		testVerifyCohortSample(t, ctx, settings, 2)
+	})
+}

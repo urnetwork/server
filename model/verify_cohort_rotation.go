@@ -24,10 +24,13 @@ package model
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"sync"
 	"time"
 
+	"github.com/jackc/pgerrcode"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 
@@ -73,6 +76,12 @@ const verifyCohortCensusCacheTtl = time.Minute
 // Whether a durable census exists for the deployment. Once one does it never
 // goes away, so a true answer is kept and a false one is read again after the
 // cache ttl, which only delays fail-closed by that long.
+//
+// Every next-hop draw asks, so a failed read must not fail the draw. Without
+// the census table (an api deployed ahead of its migration) no durable census
+// can exist, and admission is as it was before rotation. Any other failure
+// fails closed and is not cached: a ready Redis census admits as usual, and
+// a lost one refuses new providers until a read succeeds.
 func verifyCohortCensusRequired(ctx context.Context, deploymentKey StDeploymentKey) bool {
 	cache := verifyCohortCensusExists
 	cache.stateLock.Lock()
@@ -81,18 +90,36 @@ func verifyCohortCensusRequired(ctx context.Context, deploymentKey StDeploymentK
 	if exists || !readAt.IsZero() && time.Since(readAt) < verifyCohortCensusCacheTtl {
 		return exists
 	}
-	server.Db(ctx, func(conn server.PgConn) {
-		rows, err := conn.Query(ctx, `SELECT EXISTS (SELECT 1 FROM verify_cohort_census WHERE deployment_key = $1)`, string(deploymentKey))
-		server.WithPgResult(rows, err, func() {
-			if rows.Next() {
-				server.Raise(rows.Scan(&exists))
-			}
+	var readErr error
+	server.HandleError(func() {
+		server.Db(ctx, func(conn server.PgConn) {
+			rows, err := conn.Query(ctx, `SELECT EXISTS (SELECT 1 FROM verify_cohort_census WHERE deployment_key = $1)`, string(deploymentKey))
+			server.WithPgResult(rows, err, func() {
+				if rows.Next() {
+					server.Raise(rows.Scan(&exists))
+				}
+			})
 		})
+	}, func(err error) {
+		readErr = err
 	})
+	if readErr != nil {
+		if !verifyCohortCensusTableMissing(readErr) {
+			glog.Infof("[verify]cohort census read failed; new providers wait for a ready census: %s\n", readErr)
+			return true
+		}
+		exists = false
+	}
 	cache.stateLock.Lock()
 	cache.exists[deploymentKey], cache.readAt[deploymentKey] = exists, time.Now()
 	cache.stateLock.Unlock()
 	return exists
+}
+
+// The census table does not exist: the api runs ahead of its migration.
+func verifyCohortCensusTableMissing(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UndefinedTable
 }
 
 // Writes a new census member through to Postgres. A failed write is logged:
