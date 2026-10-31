@@ -80,8 +80,12 @@ See:
   decision and acceptance checklist;
 - [`playbook.yml`](playbook.yml) for machine-readable launch status;
 - [`baseline/README.md`](baseline/README.md) for preserved calibration evidence;
-- [`baseline/final-baseline.html`](baseline/final-baseline.html) for the visual
-  **historical** baseline report (not the new production checkpoint);
+- [`baseline/final-baseline.html`](baseline/final-baseline.html) for the
+  four-section public-data **draft preview**, with improvement fringes and
+  hypothetical six-round TTFB/throughput projections (not the private epoch
+  baseline or complete launch acceptance);
+- [`baseline/final-baseline-v1-historical.html`](baseline/final-baseline-v1-historical.html)
+  for the unchanged historical v1 report;
 - [`../../controller/competition_controller.go`](../../controller/competition_controller.go)
   and [`../../model/competition_model.go`](../../model/competition_model.go)
   for the API/worker implementation; and

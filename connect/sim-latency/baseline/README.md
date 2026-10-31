@@ -1,5 +1,25 @@
 # Sim-latency baseline preservation
 
+The four-section [current public-data report](final-baseline.html), dated
+October 31, uses only the accepted
+[reduced-reference public R9/R9 pilot](prelaunch-public-regression-r9-reduced-2026-10-31/README.md).
+It shows practical and statistical improvement fringes, the frozen environment,
+a timestamped production-status snapshot, and an explicitly hypothetical
+six-round TTFB/throughput projection. Its
+[derivation](final-baseline-2026-10-31-derivation.json) keeps the raw median
+score boundary separate from the conditional mean-based Welch diagnostic.
+It is a **draft preview, not the private production epoch baseline or complete
+launch acceptance**. Hidden calibration, independent review and new scoped
+COMPLIANCE custody remain pending at that report's snapshot. No browser
+rendering, benchmark or test was performed to prepare the report.
+
+The previous [historical v1 report](final-baseline-v1-historical.html) is
+preserved byte-for-byte at its new path. The
+[report-lineage record](REPORT-LINEAGE-2026-10-31.json) records the prior
+index/manifest claims and their observed drift; it does not rewrite old
+measurements or assert a new qualification. Follow
+[the current checkpoint](../launch/current-state.json) for operational state.
+
 The [October 30 public H1 regression pilot](prelaunch-public-regression-r9-2026-10-30/README.md)
 completed all nine controls and nine candidates in 10,763 seconds with clean
 teardown, but native verification rejected it: the intentional regression was
@@ -109,12 +129,13 @@ package during calibration; the boundary prevents repository-wide Go commands
 from treating those immutable inputs as a standalone package. It does not
 change any file under `v1`, and the module file is covered by the manifest.
 
-[`final-baseline.html`](final-baseline.html) is the historical v1 visual report,
-not acceptance of the October 28 release. Its original measurements and charts
-remain unchanged under a prominent supersession banner. It is covered by the directory manifest alongside this
-README, the index, verifier, and immutable `v1` data.
+[`final-baseline-v1-historical.html`](final-baseline-v1-historical.html) is the
+historical v1 visual report, not acceptance of the October 28 release. Its
+original measurements, charts and supersession banner remain unchanged. It is
+covered by the directory manifest alongside the new draft report, derivation,
+this README, the index, verifier and immutable `v1` data.
 
-## Identity
+## Historical v1 identity
 
 - Evaluated server source: `46515d82fe98ff666c61b2b5bb1d34a89cf4dad8`
 - Evaluator image: `sha256:2abcf145c0f914899debbd2fd52e57a16cf20072165c8d13f04a0ba487198a4c`

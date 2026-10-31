@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-public-report-lineage-reconciliation",
+  "recorded_on": "2026-10-31",
+  "previous_checkpoint_commit": "074c83cfadf20fa0f6f4d95316f5826a6b2dfe31",
+  "historical_v1_report": {
+    "previous_path": "final-baseline.html",
+    "preserved_path": "final-baseline-v1-historical.html",
+    "observed_bytes_sha256": "9d0b9beed44f840c438b4d30f655551c5d362f18cd63854eaf4730d295634c7c",
+    "preserved_byte_for_byte": true,
+    "previous_index_report_claim_sha256": "cc460708ca7049298a3ef62a765345d1eb651ef6b112683fd1268a4e468744b9",
+    "previous_global_manifest_report_claim_sha256": "3eaf92637ceddea9b19fa08e7411a7f80ec87ec90d25c9499fea84c5e8a2c38d",
+    "previous_index_bytes_sha256": "4e0d8d22a5bada549c6e11aa48c5a096b6bd679e5bfe639b4e23c4e3a92621d4",
+    "previous_global_manifest_bytes_sha256": "5d0f70a0da96c1171d1177bfbd753ebdc6fb37b06c47a8e3d1c53a3265b8eadd",
+    "provenance_warning": "The old claims did not match the observed historical report at the preceding Git checkpoint. Updating the pointer to the preserved observed bytes is not a claim that those bytes were the original qualified cc460 or 3eaf artifact. The preceding commit retains all prior index, manifest and report bytes."
+  },
+  "new_public_data_report": {
+    "path": "final-baseline.html",
+    "sha256": "8d3521b462cd73d60831c0d2245643d0826547bef390fe6ed6c8f2a955f93dd1",
+    "derivation_path": "final-baseline-2026-10-31-derivation.json",
+    "derivation_sha256": "41c1148367232fcc497d235aa8be8c31c79705c93bdff9c5adcb7cd7298c5879",
+    "section_count": 4,
+    "public_performance_dataset": "prelaunch-public-regression-r9-reduced-2026-10-31",
+    "private_epoch_baseline_owner_scores_or_hidden_metrics_used": false,
+    "source_math_units_and_privacy_review_passed": true,
+    "browser_rendered": false,
+    "full_launch_acceptance_claimed": false
+  },
+  "manifest_scope": {
+    "reconciles_report_metadata_and_twelve_recent_public_dataset_paths": true,
+    "unrelated_large_payload_checksum_entries_unchanged": true,
+    "coverage_and_new_small_file_hash_checks_are_not_a_full_payload_reverification": true,
+    "full_verifier_deferred_until_no_timed_measurement_is_running": true
+  },
+  "authority": "Documentation and preservation only. No source-image scoring policy, old measurement, hidden-screen acceptance, evidence-custody approval, production hold or runtime process was changed."
+}

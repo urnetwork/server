@@ -204,7 +204,8 @@ not actually been signed; those remaining actions are listed explicitly below.
 Read these first:
 
 - [Preserved calibration evidence](baseline/README.md)
-- [Final baseline infographic](baseline/final-baseline.html)
+- [Public-data baseline infographic — draft preview](baseline/final-baseline.html)
+- [Historical v1 baseline infographic](baseline/final-baseline-v1-historical.html)
 - [Official evaluator contract](OFFICIAL-RUN.md)
 - [Competition controller](../../controller/competition_controller.go)
 - [Evaluator protocol](evaluator/EVALUATOR-PROTOCOL.md)

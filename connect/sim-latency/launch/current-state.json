@@ -297,6 +297,16 @@
       "original_maintenance_expiry": "2026-10-31T07:19:42.289655Z",
       "seed_drawn_once_no_reroll": true,
       "original_second_seed_unstarted": true,
+      "latest_measured_progress": {
+        "observed_at": "2026-10-31T01:37:45Z",
+        "phase": "baseline",
+        "baseline_completed": 4,
+        "candidate_completed": 0,
+        "unique_measurements_complete": 4,
+        "unique_measurements_planned": 36,
+        "native_progress_updated_unix_ms": 1793410624408,
+        "counts_only_no_hidden_metric_values": true
+      },
       "not_yet_accepted": true
     },
     "fresh_custody_helper": {
@@ -408,7 +418,19 @@
     "retained_in_git": true,
     "warning": "The 164128-byte historical checkpoint retains all earlier failures, qualifications and source pins. Its old top-level status and next_action are superseded; do not execute them. Read history only for a specific supporting artifact."
   },
-  "observed_at": "2026-10-31T01:26:23Z",
+  "observed_at": "2026-10-31T01:37:45Z",
+  "current_public_data_report": {
+    "path": "server/connect/sim-latency/baseline/final-baseline.html",
+    "sha256": "8d3521b462cd73d60831c0d2245643d0826547bef390fe6ed6c8f2a955f93dd1",
+    "status": "four_section_public_calibration_draft_preview_not_full_launch_acceptance",
+    "derivation_path": "server/connect/sim-latency/baseline/final-baseline-2026-10-31-derivation.json",
+    "derivation_sha256": "41c1148367232fcc497d235aa8be8c31c79705c93bdff9c5adcb7cd7298c5879",
+    "source_math_and_privacy_review_passed": true,
+    "browser_rendered": false,
+    "official_private_epoch_baseline_owner_scores_or_hidden_metrics_used": false,
+    "old_report_preserved_byte_for_byte": "server/connect/sim-latency/baseline/final-baseline-v1-historical.html",
+    "full_baseline_payload_reverification_deferred_until_timed_work_finishes": true
+  },
   "phase_checkpoint_qualification": {
     "status": "focused tests, native API build, standalone guard and static checks passed; not a live release",
     "toolchain": "go1.27.3",
