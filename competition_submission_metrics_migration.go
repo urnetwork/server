@@ -7,3 +7,8 @@ SET LOCAL lock_timeout = '5s';
 CREATE INDEX competition_job_completed_score_metrics_idx ON competition_job (round_id,job_id)
 WHERE state IN ('succeeded','failed') AND score_json IS NOT NULL;
 `
+
+// The catalog monitor follows the immutable SQL wherever the list places it.
+func CompetitionSubmissionMetricsMigrationVersion() int {
+	return sqlMigrationVersion(competitionSubmissionMetricsMigrationSql)
+}

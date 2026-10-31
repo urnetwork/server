@@ -872,6 +872,7 @@ var migrationCurrentSuffixContracts = slices.Concat(
 			competitionMigration900ArtifactQuery),
 		snTopReplicaMigrationContract,
 		verifyCohortCensusMigrationContract,
+		competitionSubmissionMetricsMigrationContract,
 	},
 )
 

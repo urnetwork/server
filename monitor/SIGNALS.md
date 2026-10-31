@@ -5073,8 +5073,9 @@ Implementation convention: SIGNALS.md §1.6 (`settings-freshness`) maps to
 Optional `-admission-diagnostic-dir` is off by default and requires an existing
 validated invocation witness plus a NEW private directory. It records only the
 first local global-slot attempt for each of `contract-degradation`,
-`pg-freeze-age`, and `transaction-horizon` in that process generation (three
-attempts total). It preserves the global four-signal/host-two policy, budgets,
+`pg-freeze-age`, `transaction-horizon`, `contract-partition-retention-blocked`,
+and `partition-retention-blocked` in that process generation (five attempts
+total). It preserves the global four-signal/host-two policy, budgets,
 queries, cadence, visibility severity/Sustain, exclusions and incident identity.
 Startup fences the owned mode-0700 parent and newly created child with held
 no-follow directory descriptors and matching device/inode/mode/owner metadata.
@@ -5098,8 +5099,10 @@ While a permit is held, diagnostics do only bounded scalar sealing and a
 nonblocking transfer of preallocated storage. A separate finite emitter performs
 all validation, offset conversion, serialization, hashing and file operations;
 it shares no witness, handler or admission lock and is not joined on shutdown.
-Observation storage is bounded to 256 KiB; each of three packets is capped at
-128 KiB. There is no regular-file write wall-clock guarantee. Event completeness
+Observation storage is bounded to 256 KiB; each of five packets is capped at
+128 KiB (at most 640 KiB of packet JSON across five attempts, plus bounded
+commit receipts). Fixed event storage is five arrays of 512 events; the existing
+256 KiB observation-memory ceiling remains. There is no regular-file write wall-clock guarantee. Event completeness
 is separate from artifact acceptance: a reader requires the fixed committed
 receipt, exact byte count/SHA-256 and strict schema/framing. Data and a pending
 receipt are fully written, synced and closed before the receipt is atomically
@@ -12033,8 +12036,16 @@ Empty-answer explanations (2026-10-31):
 `urnetwork_findproviders2_empty_outcomes_total` counts every answer of the
 outcome counter's `0` band again, under the same request-class labels
 (`ip_family`, `location_kind`, `caller_country`, `rank_mode`, `force_minimum`,
-`capability`), with the requested `target_kind` and the request's terminal
-selection `reason` from the §2.9c fixed vocabulary. The probe reads both in one
+`capability`), with `target_kind` and the terminal selection `reason` from the
+§2.9c fixed vocabulary. `target_kind` is normally the requested kind. After a
+location fallback within one qualified target country, it is the last region
+or country level read; an empty climbed country uses the country-supply rule
+below rather than the original city's narrow-target explanation. Strict,
+disabled or nonclimbable requests, and targets spanning countries, retain the
+requested kind. The §2.9c selection counter keeps the requested kind and final
+reason. Completed outcomes count the final returned list once, not each level
+read; a successful climb supplies no zero-band or empty-explanation event.
+The probe reads both outcome counters in one
 query at one instant, the explanations tagged `monitor_part="empty"`, and joins
 them on those labels. Two explanations take zeros out of the judgment. The
 request's own: `filtered_destinations` and `intentional_zero` (every candidate
@@ -12069,9 +12080,10 @@ Findings report `zero_explained_by_request`, `zero_explained_by_target_supply`,
 `provider-count-target-supply-empty` is a nonpaging WARN: at least 50 completed
 ordinary requests in five minutes, at least half of them answered empty from a
 city or region without admitted supply. It keeps a supply gap at product scale
-visible without calling it a selection failure. Whether an app or the platform
-should fall back from such a target to its region or country is a product
-decision this signal does not make.
+visible without calling it a selection failure. The owner-approved producer
+policy now tries the region, then the country, for a published-empty city or
+region by default; `Strict` or `egress_index.location_fallback=false` preserves
+the exact target. This signal does not widen requests or change that policy.
 
 The case that motivated this, Main 2026-10-25 04:15 UTC to 10-31: the chronic
 `any/location/au/quality` and `any/location/au/speed` PAGEs were about 21
@@ -12694,8 +12706,13 @@ ownership require separate authority; private nonces and endpoint witnesses do
 not prove those facts. Quiet telemetry is not affected-target supply or recovery.
 
 This supplements §2.9a without changing its scarcity thresholds or interpreting
-the location picker (§2.9b). `FindProviders2` backfill reads the **same requested
-location/group** in the other rank mode; it is not a global-location fallback.
+the location picker (§2.9b). Rank-bucket `FindProviders2` backfill reads the
+**same location/group at the current geographic level** in the other rank
+mode. Separate geographic fallback can then climb a published-empty city or
+region within its country, preserving the request's filters and gates; missing
+or partial source evidence and filter-exhausted candidates do not justify a
+climb. Native-source counters count visited tiers; final answer/backfill metrics
+and completed-response cohorts are not a denominator of geographic attempts.
 A large global online pool or a successful best-available control therefore
 does not establish supply for the selected target. The roughly four-percent
 location zero tail observed during the 2026-09-27 incident remains unattributed
@@ -28870,6 +28887,19 @@ unknown database head remain unknown; these catalog checks do not prove chain
 census correctness, snapshot freshness, application outcomes or deployed schema
 health without an actual qualified observation.
 
+Live-schema authority has its own conservative source bound. The compiled
+server migration count continues to determine real numeric lag and immutable
+identity comparison. It does not certify the monitor's artifact knowledge:
+that knowledge stops at the last contiguous explicit suffix contract after
+the legacy prefix. An omitted appended contract or interior catalog gap leaves
+that and later database heads cannot-observe, even when those heads are in the
+compiled server list. Positional true placeholders do not close this gap.
+Passing older predicates cannot clear drift; failed older live definitions
+cannot select corruption over a legitimate unknown successor. Independent
+immutable identity/catalog faults still page. Synthetic public-path controls
+exercise complete older predicates, a replaced artifact, independent immutable
+fault and unchanged real numeric lag without changing global source catalogs.
+
 Mainnet and native-fee artifact checks belong to this one registered probe.
 Their helpers live in `migration_sn_mainnet.go` and `migration_native_fee.go`;
 `signal_*.go` filenames are reserved for independently registered signals.
@@ -30002,6 +30032,15 @@ type, nullability or default; and a missing, narrowed or deferrable key. Before
 a database reaches 902, the absent table is not drift. A source head ahead of
 the database raises only the `migration-behind` WARN, which is never promoted
 to a page.
+
+Version 903 adds the operator's completed-score index on `competition_job`: exact
+non-unique btree keys `(round_id, job_id)` and predicate selecting both
+`succeeded` and `failed` rows with non-null `score_json`. Its content-derived
+version follows the immutable migration SQL. A missing, invalid or unready
+index, changed key order, method, uniqueness or predicate is drift from903;
+before903 its absence is only numeric migration lag. Catalog checks do not
+prove a score snapshot is fresh or a dashboard was served. An unreviewed
+later schema remains unknown until its own explicit contract is qualified.
 
 ### 8.10 Client-reliability covering-index drift after partition cutover
 Probe: `reliability-index`
