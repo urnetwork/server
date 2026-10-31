@@ -12062,7 +12062,8 @@ processes that predate the counter) is judged on its bands exactly as before; a
 row outside the fixed vocabularies, stale, negative or duplicated means the
 explanations are discarded whole (`zero_explanations=invalid`); a read that
 used them reports `zero_explanations=joined`. An explanation is clamped to the
-zeros it explains, and an explained cohort supplies no recovery credit.
+zeros it explains. An explained cohort's requests are evidence of its own
+recovery (recovery authority, below), never of another cohort's.
 Findings report `zero_explained_by_request`, `zero_explained_by_target_supply`,
 `zero_unexplained` and `considered_requests`.
 
@@ -12103,24 +12104,36 @@ never a scarcity diagnosis or a healthy sentinel for this band. The existing
 PAGE and >=50 provisional WARN thresholds remain unchanged. Direct cohorts and
 ForceMinimum diagnostics keep their existing separate treatment.
 
-Recovery authority: a successful but intent-unknown 20–<50 all-small ordinary
-cohort cannot clear an existing measured incident. The reducer supplies silent
-clear holds for `provider-count-effective-empty` and `provider-count-small-list`
-at `api-fleet` when any returned ordinary cohort is below the existing 20-call
-sample floor or has that intent-unknown small-list shape, or when no qualified
-ordinary cohort is observed. Direct and ForceMinimum-only traffic cannot supply
+Recovery authority: a measured incident waits only on the evidence of the
+cohorts it was reported for. The notifier's recovery identity excludes the
+cohort frame, so the probe remembers, between executions, every ordinary cohort
+that reported `provider-count-effective-empty` or `provider-count-small-list`.
+A reporting cohort recovers from its class on its own evidence: two
+consecutive executions in which it returns at least the 20-request floor, does
+not report the class and is not in the intent-unknown 20–<50 all-small shape.
+Explained answers count toward that floor, since they too show the cohort no
+longer meets the class; they never vouch for another cohort. Until then, an
+execution in which the cohort is below the floor, in the intent-unknown shape,
+idle, or missing from the response supplies a silent clear hold for its class
+at `api-fleet` and restarts its streak; a healthy sibling cannot certify it.
+A cohort that never reported a class holds nothing, so a sparse, idle or
+intent-unknown sibling cannot keep another cohort's incident open. Main showed
+why that matters: every five-minute evaluation over a day (2026-10-30 to 10-31)
+returned 106 to 286 ordinary cohorts below the floor, and while any such cohort
+held both classes, no effective-empty or small-list incident could ever clear. The
+missing-data guard is unchanged: a response with no ordinary cohort at the
+floor in a judgeable shape holds both classes, a failed, annotated or
+malformed read supplies no absence credit, and a retired execution commits
+neither findings nor memory. Direct and ForceMinimum-only traffic cannot supply
 ordinary recovery evidence. These holds add no alert or incident and do not
-suppress independently measured PAGE/WARN findings. The notifier's existing
-recovery identity excludes the cohort frame, so a currently sparse/unknown
-ordinary cohort conservatively holds those measured classes across the shared
-target; a healthy sibling cannot certify it. Returned historical/eager zero
-cohorts can therefore delay a clear. There is no source authority here to call
-them irrelevant, and no expected-cohort census is invented for omitted series.
-Qualified ordinary recovery can coexist with excluded direct/diagnostic traffic.
-An ordinary >=50 provisional WARN remains a measured, independent threshold
-state and may recover the distinct PAGE; its missing learned-baseline authority
-is unchanged. After uncertainty ends, two complete qualified observations are
-still required by the notifier; an unknown run breaks that absence streak.
+suppress independently measured PAGE/WARN findings. An ordinary >=50
+provisional WARN remains a measured, independent threshold state and may
+recover the distinct PAGE; its missing learned-baseline authority is
+unchanged. Silence is not recovery: a reporting cohort whose traffic stops
+keeps its class held until it returns with the requests to judge, or the
+watcher restarts and forgets both the cohort and the incident. After
+uncertainty ends, two complete qualified observations are still required by the
+notifier; an unknown run of the reporting cohort breaks that absence streak.
 This corrects local monitor recovery bookkeeping, not a proved production
 occurrence, provider repair, or new emitted metric.
 
