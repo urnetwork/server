@@ -109,10 +109,32 @@ type validatedAppleTransaction struct {
 	// transactionReason is PURCHASE (the customer bought) or RENEWAL (the
 	// store renewed), "" when the claims do not say; read for the sales notice
 	transactionReason string
+	// environment is the App Store environment the signed transaction names
+	// ("Production", "Sandbox"), "" when the claims do not say. Every path that
+	// reads the claims verified them first: the webhook and the verify
+	// endpoint against the pinned Apple roots and apple.yml's accepted
+	// environments, the reconciler as an authenticated pull from Apple.
+	environment string
 	// unboundAccountToken is set when the claims carry no appAccountToken at
 	// all (an offer-code redemption through the App Store redeem sheet or
 	// link). networkId is then zero until the binding resolves it.
 	unboundAccountToken bool
+}
+
+// sandbox reports whether the transaction is a sandbox purchase: TestFlight,
+// App Review or a sandbox tester. No money moves for it.
+func (self *validatedAppleTransaction) sandbox() bool {
+	return self.environment == appleEnvironmentSandbox
+}
+
+// creditNetRevenue is the net revenue a credit records for the transaction:
+// zero for a sandbox purchase, which keeps its Pro entitlement but earned
+// nothing, and the validated net revenue otherwise.
+func (self *validatedAppleTransaction) creditNetRevenue() model.NanoCents {
+	if self.sandbox() {
+		return 0
+	}
+	return self.netRevenue
 }
 
 // Returns true only when this call committed a new entitlement. Valid retries
@@ -379,6 +401,13 @@ func appleNetworkExistsInTx(tx server.PgTx, ctx context.Context, networkId serve
 // of what a credit in another currency was paid. Returns true only when this
 // call committed a new entitlement. The caller must refresh the pro cache
 // (model.UpdateProNetwork) after commit when true.
+//
+// A sandbox purchase (TestFlight, App Review) is credited like any other, so
+// the tester keeps Pro, through the same ledger gate. It records no revenue
+// on the renewal or the balance, and posts no sales notice. The balance's
+// paid column is generated from its revenue, so the sandbox balance is
+// unpaid: its contracts carry unpaid priority and payout planning counts its
+// traffic as unpaid.
 func appleCreditSubscriptionTransactionInTx(
 	tx server.PgTx,
 	ctx context.Context,
@@ -421,7 +450,7 @@ func appleCreditSubscriptionTransactionInTx(
 		SubscriptionType:   model.SubscriptionTypeSupporter,
 		StartTime:          transaction.purchaseTime,
 		EndTime:            endTime,
-		NetRevenue:         transaction.netRevenue,
+		NetRevenue:         transaction.creditNetRevenue(),
 		SubscriptionMarket: model.SubscriptionMarketApple,
 		TransactionId:      transaction.transactionId,
 	}
@@ -435,10 +464,14 @@ func appleCreditSubscriptionTransactionInTx(
 		StartTime:             transaction.purchaseTime,
 		EndTime:               endTime,
 		StartBalanceByteCount: RefreshSupporterTransferBalance,
-		SubsidyNetRevenue:     transaction.netRevenue,
+		SubsidyNetRevenue:     transaction.creditNetRevenue(),
 		BalanceByteCount:      RefreshSupporterTransferBalance,
 		Pro:                   true,
 	})
+	if transaction.sandbox() {
+		// no payment was made, so there is no sale to post
+		return true
+	}
 	// the ledger row is new: this transaction is a new payment, posted once
 	// the caller's transaction commits
 	addSalesPaymentNoticeInTx(tx, func() *model.SalesPaymentNotice {
@@ -545,6 +578,7 @@ func validateAppleTransactionAccount(
 	validated.offerIdentifier, _ = appleControllerStringClaim(transactionClaims, "offerIdentifier")
 	validated.offerDiscountType, _ = appleControllerStringClaim(transactionClaims, "offerDiscountType")
 	validated.transactionReason, _ = appleControllerStringClaim(transactionClaims, "transactionReason")
+	validated.environment, _ = appleControllerStringClaim(transactionClaims, "environment")
 	if !requireEntitlementFields {
 		return validated, nil
 	}
