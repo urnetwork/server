@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/netip"
@@ -346,17 +347,50 @@ func TestExtenderActivateRefusesAWrongPublicKey(t *testing.T) {
 	})
 }
 
-// A carrier that is not bound fails the whole activation with that carrier
-// named, and stores nothing: a record must not promise a carrier the extender
-// does not answer on.
+// The carriers an activation answer says were left out (C2a), as
+// "<carrier>:<port>", read off the json the extender reads. Each must say why.
+func testActivationRefusedCarriers(t testing.TB, result *ExtenderActivateResult) []string {
+	t.Helper()
+	resultJson, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	answer := struct {
+		RefusedCarriers []struct {
+			Carrier string `json:"carrier"`
+			Port    int    `json:"port"`
+			Error   string `json:"error"`
+		} `json:"refused_carriers"`
+	}{}
+	if err := json.Unmarshal(resultJson, &answer); err != nil {
+		t.Fatal(err)
+	}
+	refused := []string{}
+	for _, refusedCarrier := range answer.RefusedCarriers {
+		if refusedCarrier.Error == "" {
+			t.Fatalf("the %s carrier on port %d was left out with no reason", refusedCarrier.Carrier, refusedCarrier.Port)
+		}
+		refused = append(refused, fmt.Sprintf("%s:%d", refusedCarrier.Carrier, refusedCarrier.Port))
+	}
+	return refused
+}
+
+// An optional carrier that is not served is left out rather than refusing the
+// activation (C2a, connect#230): the extender is accepted on the tcp carrier
+// and the forward through it, and the answer, the address row and the record
+// carry only the carriers that answered, so no client is sent to the dead
+// one. The answer names the carrier it left out.
 //
-// The refusal costs the probe budget, because a udp carrier with nothing bound
-// gives no answer to fail fast on -- which is exactly why the budget exists.
-func TestExtenderActivateRefusesACarrierThatIsNotServed(t *testing.T) {
+// The dead carrier costs what is left of the probe budget, because a udp
+// carrier with nothing bound gives no answer to fail fast on. It is offered
+// first here and is still probed last, after the required test and the dns
+// carrier, so that spend costs it alone.
+func TestExtenderActivateLeavesOutAnOptionalCarrierThatIsNotServed(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		fixture := newTestExtenderFixture(t)
-		installTestExtenderConfig(t, fixture.api)
+		rootPrivateKey := installTestExtenderConfig(t, fixture.api)
+		rootPublicKey := rootPrivateKey.Public().(ed25519.PublicKey)
 
 		// a udp port nothing is bound to
 		closedConn, err := net.ListenPacket("udp", ":0")
@@ -368,7 +402,58 @@ func TestExtenderActivateRefusesACarrierThatIsNotServed(t *testing.T) {
 
 		args := fixture.activateArgs()
 		args.UdpPort = closedPort
-		args.Carriers = []string{connect.ExtenderCarrierTcp, connect.ExtenderCarrierQuic}
+		args.Carriers = []string{
+			connect.ExtenderCarrierQuic,
+			connect.ExtenderCarrierTcp,
+			connect.ExtenderCarrierDns,
+		}
+
+		clientSession := newTestExtenderSession(t, ctx, fixture.clientAddress("127.0.0.1"))
+		result, err := ExtenderActivate(args, clientSession)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !result.Activated {
+			t.Fatalf("the activation was refused for an optional carrier: %s", result.Error)
+		}
+		wantCarriers := []string{connect.ExtenderCarrierTcp, connect.ExtenderCarrierDns}
+		if !slices.Equal(result.Carriers, wantCarriers) {
+			t.Fatalf("carriers = %v, want %v", result.Carriers, wantCarriers)
+		}
+		if !slices.Equal(result.DnsPorts, []int{fixture.dnsPort}) {
+			t.Fatalf("dns ports = %v, want %d", result.DnsPorts, fixture.dnsPort)
+		}
+		wantRefused := []string{fmt.Sprintf("%s:%d", connect.ExtenderCarrierQuic, closedPort)}
+		if refused := testActivationRefusedCarriers(t, result); !slices.Equal(refused, wantRefused) {
+			t.Fatalf("refused carriers = %v, want %v", refused, wantRefused)
+		}
+
+		body := verifyTestExtenderRecord(t, rootPublicKey, result.Record)
+		connect.AssertEqual(t, len(body.Addresses), 1)
+		if !slices.Equal(body.Addresses[0].Carriers, wantCarriers) {
+			t.Fatalf("record carriers = %v, want %v", body.Addresses[0].Carriers, wantCarriers)
+		}
+
+		stored := model.Testing_GetNetworkExtender(ctx, testExtenderIdForKey(ctx, t, fixture.publicKey))
+		connect.AssertEqual(t, len(stored.Addresses), 1)
+		if !slices.Equal(stored.Addresses[0].Carriers, wantCarriers) {
+			t.Fatalf("stored carriers = %v, want %v", stored.Addresses[0].Carriers, wantCarriers)
+		}
+	})
+}
+
+// The required test alone accepts an extender (C2a): one whose tcp carrier
+// does not answer is refused although every optional carrier would, the
+// refusal names the tcp carrier, and nothing is stored. A carrier that is left
+// out when it fails must never stand in for the required test when it passes.
+func TestExtenderActivateRefusesWhenOnlyTheOptionalCarriersAnswer(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		fixture := newTestExtenderFixture(t)
+		installTestExtenderConfig(t, fixture.api)
+
+		args := fixture.activateArgs()
+		args.TcpPort = testClosedTcpPort(t)
 
 		clientSession := newTestExtenderSession(t, ctx, fixture.clientAddress("127.0.0.1"))
 		result, err := ExtenderActivate(args, clientSession)
@@ -376,9 +461,10 @@ func TestExtenderActivateRefusesACarrierThatIsNotServed(t *testing.T) {
 			t.Fatal(err)
 		}
 		connect.AssertEqual(t, result.Activated, false)
-		if !strings.Contains(result.Error, "quic carrier") {
-			t.Fatalf("error = %q, want the quic carrier named", result.Error)
+		if !strings.Contains(result.Error, "tcp carrier") {
+			t.Fatalf("error = %q, want the tcp carrier named", result.Error)
 		}
+		connect.AssertEqual(t, len(testActivationRefusedCarriers(t, result)), 0)
 		connect.AssertEqual(t, len(model.GetRandomActiveNetworkExtenders(ctx, 8, server.Id{})), 0)
 		connect.AssertEqual(t, len(model.Testing_GetNetworkExtenderPublishes(ctx)), 0)
 	})
@@ -974,9 +1060,9 @@ func TestExtenderActivateProbesEveryDnsPortAndRecordsThemAscending(t *testing.T)
 }
 
 // A dns port that does not answer costs its own budget and nothing else: the
-// extender still activates on the ports that do, and the record names only
-// those. This is the ordinary case of an extender that binds 53 on a path that
-// blocks it.
+// extender still activates on the ports that do, the record names only those,
+// and the answer names the port it left out. This is the ordinary case of an
+// extender that binds 53 on a path that blocks it.
 func TestExtenderActivateRecordsOnlyTheDnsPortsThatAnswer(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -985,9 +1071,10 @@ func TestExtenderActivateRecordsOnlyTheDnsPortsThatAnswer(t *testing.T) {
 		rootPublicKey := rootPrivateKey.Public().(ed25519.PublicKey)
 
 		args := fixture.activateArgs()
-		// the dead port leads, so the served port and the forward behind it are
-		// reached only if the dead one is bounded on its own
-		args.DnsPorts = []int{testClosedUdpPortBelow(t, fixture.dnsPort), fixture.dnsPort}
+		// the dead port leads, so the served port and the quic carrier behind
+		// it are reached only if the dead one is bounded on its own
+		deadPort := testClosedUdpPortBelow(t, fixture.dnsPort)
+		args.DnsPorts = []int{deadPort, fixture.dnsPort}
 
 		clientSession := newTestExtenderSession(t, ctx, fixture.clientAddress("127.0.0.1"))
 		result, err := ExtenderActivate(args, clientSession)
@@ -999,6 +1086,18 @@ func TestExtenderActivateRecordsOnlyTheDnsPortsThatAnswer(t *testing.T) {
 		}
 		if !slices.Equal(result.DnsPorts, []int{fixture.dnsPort}) {
 			t.Fatalf("dns ports = %v, want only the served port %d", result.DnsPorts, fixture.dnsPort)
+		}
+		allCarriers := []string{
+			connect.ExtenderCarrierTcp,
+			connect.ExtenderCarrierQuic,
+			connect.ExtenderCarrierDns,
+		}
+		if !slices.Equal(result.Carriers, allCarriers) {
+			t.Fatalf("carriers = %v, want every carrier %v", result.Carriers, allCarriers)
+		}
+		wantRefused := []string{fmt.Sprintf("%s:%d", connect.ExtenderCarrierDns, deadPort)}
+		if refused := testActivationRefusedCarriers(t, result); !slices.Equal(refused, wantRefused) {
+			t.Fatalf("refused carriers = %v, want %v", refused, wantRefused)
 		}
 
 		body := verifyTestExtenderRecord(t, rootPublicKey, result.Record)
@@ -1013,31 +1112,58 @@ func TestExtenderActivateRecordsOnlyTheDnsPortsThatAnswer(t *testing.T) {
 	})
 }
 
-// A dns carrier with no port left is the carrier failing, and it is refused
-// exactly as an unserved carrier is, with nothing stored: a record must not
-// promise a dns carrier that answers on no port at all.
-func TestExtenderActivateRefusesWhenNoDnsPortAnswers(t *testing.T) {
+// A dns carrier with no port that answers is left out like any optional
+// carrier (C2a, connect#230): the extender is accepted on tcp, and the answer,
+// the address row and the record promise no dns carrier and no dns port, while
+// the answer names each port that did not answer.
+func TestExtenderActivateLeavesOutADnsCarrierWithNoPortThatAnswers(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		fixture := newTestExtenderFixture(t)
-		installTestExtenderConfig(t, fixture.api)
+		rootPrivateKey := installTestExtenderConfig(t, fixture.api)
+		rootPublicKey := rootPrivateKey.Public().(ed25519.PublicKey)
 
 		firstDeadPort := testClosedUdpPortBelow(t, fixture.dnsPort)
+		secondDeadPort := testClosedUdpPortBelow(t, firstDeadPort)
 		args := fixture.activateArgs()
 		args.Carriers = []string{connect.ExtenderCarrierTcp, connect.ExtenderCarrierDns}
-		args.DnsPorts = []int{firstDeadPort, testClosedUdpPortBelow(t, firstDeadPort)}
+		args.DnsPorts = []int{firstDeadPort, secondDeadPort}
 
 		clientSession := newTestExtenderSession(t, ctx, fixture.clientAddress("127.0.0.1"))
 		result, err := ExtenderActivate(args, clientSession)
 		if err != nil {
 			t.Fatal(err)
 		}
-		connect.AssertEqual(t, result.Activated, false)
-		if !strings.Contains(result.Error, "dns carrier") {
-			t.Fatalf("error = %q, want the dns carrier named", result.Error)
+		if !result.Activated {
+			t.Fatalf("the activation was refused for the optional dns carrier: %s", result.Error)
 		}
-		connect.AssertEqual(t, len(model.GetRandomActiveNetworkExtenders(ctx, 8, server.Id{})), 0)
-		connect.AssertEqual(t, len(model.Testing_GetNetworkExtenderPublishes(ctx)), 0)
+		wantCarriers := []string{connect.ExtenderCarrierTcp}
+		if !slices.Equal(result.Carriers, wantCarriers) {
+			t.Fatalf("carriers = %v, want %v", result.Carriers, wantCarriers)
+		}
+		connect.AssertEqual(t, len(result.DnsPorts), 0)
+		// ascending, which is the order the ports are probed in
+		wantRefused := []string{
+			fmt.Sprintf("%s:%d", connect.ExtenderCarrierDns, secondDeadPort),
+			fmt.Sprintf("%s:%d", connect.ExtenderCarrierDns, firstDeadPort),
+		}
+		if refused := testActivationRefusedCarriers(t, result); !slices.Equal(refused, wantRefused) {
+			t.Fatalf("refused carriers = %v, want %v", refused, wantRefused)
+		}
+
+		body := verifyTestExtenderRecord(t, rootPublicKey, result.Record)
+		connect.AssertEqual(t, len(body.Addresses), 1)
+		if !slices.Equal(body.Addresses[0].Carriers, wantCarriers) {
+			t.Fatalf("record carriers = %v, want %v", body.Addresses[0].Carriers, wantCarriers)
+		}
+		connect.AssertEqual(t, len(testRecordDnsPorts(body)), 0)
+
+		stored := model.Testing_GetNetworkExtender(ctx, testExtenderIdForKey(ctx, t, fixture.publicKey))
+		connect.AssertEqual(t, len(stored.Addresses), 1)
+		if !slices.Equal(stored.Addresses[0].Carriers, wantCarriers) {
+			t.Fatalf("stored carriers = %v, want %v", stored.Addresses[0].Carriers, wantCarriers)
+		}
+		connect.AssertEqual(t, len(stored.Addresses[0].DnsPorts), 0)
 	})
 }
 

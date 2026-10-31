@@ -32,12 +32,17 @@ import (
 //
 // Activation is the only place an extender enters the directory, and it does
 // so by being proved from the outside: the operator dials back to the caller's
-// own address over every carrier the caller claims, requires a signature over
-// a fresh challenge on each, and then forwards a real `GET /hello` through the
-// tcp carrier to its own api. Nothing is stored until all of that passes, so
-// an extender behind NAT, on the wrong family, or without the private key it
+// own address on the tcp carrier, requires a signature over a fresh
+// challenge, and forwards a real `GET /hello` through it to its own api. That
+// is the required test (C2a), and nothing is stored unless it passes, so an
+// extender behind NAT, on the wrong family, or without the private key it
 // claims simply never appears -- no reachability heuristic and no trust in
 // what the caller said about itself.
+//
+// Every other carrier the caller claims is optional (C2a): each is challenged
+// the same way when it is offered, and one that does not answer is left out of
+// what is stored and signed rather than refusing the activation. A client is
+// only ever sent to a carrier that answered.
 //
 // The probe runs synchronously inside the request. That is what lets the
 // answer carry the signed record: the caller gets its identity in the
@@ -56,14 +61,16 @@ const (
 
 	// The whole probe budget of one activation (C2). Every carrier and the
 	// forward share it, so a caller cannot hold a request open by being slow
-	// on one carrier.
+	// on one carrier. The required test runs first (C2a), so an optional
+	// carrier that spends what is left of it only loses itself.
 	ExtenderActivateProbeTimeout = 10 * time.Second
 
 	// The budget of one dns carrier port (L2). The dns carrier is probed once
 	// per listed port, and a udp port with nothing bound gives no answer to
 	// fail fast on, so a dead port under the shared budget alone would spend
-	// it all and fail every port and the forward behind it. Two dead ports
-	// still leave four seconds of the activation budget for the rest.
+	// it all and fail every port and carrier probed after it. Two dead ports
+	// still leave up to four seconds of the activation budget for quic, which
+	// is probed after them.
 	ExtenderActivateDnsPortProbeTimeout = 3 * time.Second
 
 	// The service label of the family api hosts an activation is posted to
@@ -236,11 +243,18 @@ type ExtenderActivateResult struct {
 	Carriers []string `json:"carriers,omitempty"`
 	// the dns ports that passed their probe, ascending, which is what the
 	// stored address and the signed record list (L2). Empty when the dns
-	// carrier was not offered.
+	// carrier was not offered or no port answered.
 	DnsPorts []int `json:"dns_ports,omitempty"`
+	// the optional carriers that were offered and did not answer, each dns
+	// port that did not, in the order offered, with the port and the probe's
+	// error (C2a). They are left out of the stored address and the signed
+	// record, so the extender is published on the carriers that answered and
+	// no others. Empty on a refusal, which probes no optional carrier.
+	RefusedCarriers []*ExtenderCarrierRefusal `json:"refused_carriers,omitempty"`
 	// why the activation was refused, empty on success. A refusal is a normal
-	// answer, not a request error: the caller is told which carrier failed so
-	// it can fix its own binding.
+	// answer, not a request error: the caller is told which part of the
+	// required test failed -- the tcp carrier, the forward through it, or the
+	// family the forward arrived on (C2a) -- so it can fix its own binding.
 	Error      string     `json:"error,omitempty"`
 	ExpireTime *time.Time `json:"expire_time,omitempty"`
 	// the operator patterns this extender may forward to (A5)
@@ -250,6 +264,16 @@ type ExtenderActivateResult struct {
 	// base64 of serialized protocol.ExtenderRecord messages of other active
 	// extenders, the directory an app starts from (D6)
 	Bootstrap []string `json:"bootstrap,omitempty"`
+}
+
+// One optional carrier, or one port of the dns carrier, that did not answer
+// its probe and was left out of an activation (C2a).
+type ExtenderCarrierRefusal struct {
+	Carrier string `json:"carrier"`
+	// the port the carrier was probed on
+	Port int `json:"port"`
+	// why the probe failed
+	Error string `json:"error"`
 }
 
 // The carrier of a connect mode, and which of an extender's ports it is
@@ -585,86 +609,51 @@ func extenderActivate(
 	probeCtx, probeCancel := context.WithTimeout(clientSession.Ctx, ExtenderActivateProbeTimeout)
 	defer probeCancel()
 
-	probeCarrier := func(
-		ctx context.Context,
-		connectMode connect.ExtenderConnectMode,
-		port int,
-	) error {
-		_, err := connect.ProbeExtenderCarrier(
-			ctx,
-			connectSettings,
-			clientIp,
-			connectMode,
-			port,
-			dnsTld,
-			serverName,
-			publicKey,
-			apiHost,
-			ExtenderProbeDestinationPort,
-		)
-		return err
-	}
-
-	// the dns ports that answered, which is what the address row and the
-	// record list (L2). Empty unless the dns carrier was offered.
-	activeDnsPorts := []int{}
-	for _, carrier := range carriers {
-		connectMode, _ := extenderCarrierConnectMode(carrier)
-		if carrier == connect.ExtenderCarrierDns {
-			// one dns port failing is not the carrier failing: an extender
-			// that offers 53 and 4053 on a path that blocks 53 is still
-			// reachable on 4053, and the record must say which. Only a carrier
-			// with no port left is refused.
-			var firstErr error
-			for _, port := range dnsPorts {
-				portCtx, portCancel := context.WithTimeout(
-					probeCtx,
-					ExtenderActivateDnsPortProbeTimeout,
-				)
-				err := probeCarrier(portCtx, connectMode, port)
-				portCancel()
-				if err == nil {
-					activeDnsPorts = append(activeDnsPorts, port)
-				} else if firstErr == nil {
-					firstErr = err
-				}
-			}
-			if len(activeDnsPorts) == 0 {
-				return refuse(fmt.Sprintf("the %s carrier did not answer: %s", carrier, firstErr))
-			}
-			continue
-		}
-		port := tcpPort
-		if carrier == connect.ExtenderCarrierQuic {
-			port = udpPort
-		}
-		if err := probeCarrier(probeCtx, connectMode, port); err != nil {
-			return refuse(fmt.Sprintf("the %s carrier did not answer: %s", carrier, err))
-		}
-	}
-
-	forwardClientAddress, err := connect.ProbeExtenderForward(
+	// the acceptance rule (C2a) over the real probes: the required test, then
+	// each optional carrier offered, which is left out when it does not answer
+	outcome := probeExtenderActivation(
 		probeCtx,
-		connectSettings,
-		clientIp,
+		&extenderActivationProbes{
+			carrier: func(
+				ctx context.Context,
+				connectMode connect.ExtenderConnectMode,
+				port int,
+			) error {
+				_, err := connect.ProbeExtenderCarrier(
+					ctx,
+					connectSettings,
+					clientIp,
+					connectMode,
+					port,
+					dnsTld,
+					serverName,
+					publicKey,
+					apiHost,
+					ExtenderProbeDestinationPort,
+				)
+				return err
+			},
+			forward: func(ctx context.Context) (string, error) {
+				return connect.ProbeExtenderForward(
+					ctx,
+					connectSettings,
+					clientIp,
+					tcpPort,
+					serverName,
+					publicKey,
+					config.ApiUrl,
+					extenderForwardProbeTlsConfig(),
+				)
+			},
+		},
+		carriers,
 		tcpPort,
-		serverName,
-		publicKey,
-		config.ApiUrl,
-		extenderForwardProbeTlsConfig(),
+		udpPort,
+		dnsPorts,
+		ipVersion,
 	)
-	if err != nil {
-		return refuse(fmt.Sprintf("the forward did not answer: %s", err))
-	}
-	// an extender must egress on the family it was reached on (A7); a forward
-	// that arrives on the other family would publish an address that does not
-	// carry the traffic the record promises
-	if forwardIpVersion := server.ClientAddressIpVersion(forwardClientAddress); forwardIpVersion != ipVersion {
-		return refuse(fmt.Sprintf(
-			"the forward arrived on ipv%d, not ipv%d",
-			forwardIpVersion,
-			ipVersion,
-		))
+	if outcome.refusal != "" {
+		return refuse(outcome.refusal)
 	}
 
 	// The location of the activating address (M1). The country code goes on the
@@ -729,8 +718,10 @@ func extenderActivate(
 			CountryCode: countryCode,
 			IpVersion:   ipVersion,
 			Ip:          clientIp,
-			Carriers:    carriers,
-			DnsPorts:    activeDnsPorts,
+			// only the carriers that answered: a client is never sent to one
+			// that was left out (C2a)
+			Carriers: outcome.carriers,
+			DnsPorts: outcome.dnsPorts,
 			// the operator's policy, by the activating network (R1)
 			DirectoryTier: config.DirectoryTierForNetwork(clientSession.ByJwt.NetworkId),
 
@@ -807,15 +798,149 @@ func extenderActivate(
 
 	extenderId := activated.Extender.ExtenderId
 	return &ExtenderActivateResult{
-		Activated:    true,
-		ExtenderId:   &extenderId,
-		Ip:           clientIp.String(),
-		IpVersion:    ipVersion,
-		Carriers:     carriers,
-		DnsPorts:     activeDnsPorts,
-		ExpireTime:   &expireTime,
-		AllowedHosts: config.AllowedHosts(),
-		Record:       recordBase64,
-		Bootstrap:    bootstrap,
+		Activated:       true,
+		ExtenderId:      &extenderId,
+		Ip:              clientIp.String(),
+		IpVersion:       ipVersion,
+		Carriers:        outcome.carriers,
+		DnsPorts:        outcome.dnsPorts,
+		RefusedCarriers: outcome.refusedCarriers,
+		ExpireTime:      &expireTime,
+		AllowedHosts:    config.AllowedHosts(),
+		Record:          recordBase64,
+		Bootstrap:       bootstrap,
 	}, nil
+}
+
+// The probes of one activation (C2): the challenge over one carrier on one
+// port, and the verified `GET /hello` through the tcp carrier, which answers
+// the caller address the api saw. Each is bound to the caller's address, its
+// key and the operator's probe settings. probeExtenderActivation judges the
+// acceptance rule over them, so the rule is tested without sockets.
+type extenderActivationProbes struct {
+	carrier func(ctx context.Context, connectMode connect.ExtenderConnectMode, port int) error
+	forward func(ctx context.Context) (string, error)
+}
+
+// What the probes of one activation found (C2a).
+type extenderActivationOutcome struct {
+	// why the required test failed, empty when it passed. When it is set no
+	// optional carrier was probed and nothing may be stored.
+	refusal string
+	// the carriers that answered, in the order offered: the tcp carrier the
+	// required test passed on, and each optional carrier that answered
+	carriers []string
+	// the dns ports that answered, ascending (L2)
+	dnsPorts []int
+	// the optional carriers, and the dns ports, that did not answer, in the
+	// order offered
+	refusedCarriers []*ExtenderCarrierRefusal
+}
+
+// Judges one activation by the acceptance rule of C2a.
+//
+// The required test runs first: the challenge on the tcp carrier, the
+// verified forward through it, and the family the forward arrived on (A7). If
+// any of those fails, the activation is refused with that failure named, and
+// nothing else is probed. Only then is each optional carrier probed, when it
+// was offered, under what is left of the shared budget. One that does not
+// answer is left out and listed; it never refuses an activation the required
+// test passed (connect#230). The order is part of the rule: a udp carrier
+// gives no answer to fail fast on, so an optional carrier probed before the
+// forward could spend the budget the forward needs and gate the activation
+// after all.
+//
+// The dns carrier goes before quic. Each dns port is bounded on its own (L2),
+// so the dns carrier always leaves quic the rest of the budget, while quic is
+// bounded only by the budget: a quic carrier that never answers, probed
+// first, would leave the dns carrier no time to answer in.
+func probeExtenderActivation(
+	probeCtx context.Context,
+	probes *extenderActivationProbes,
+	carriers []string,
+	tcpPort int,
+	udpPort int,
+	dnsPorts []int,
+	ipVersion int,
+) *extenderActivationOutcome {
+	if err := probes.carrier(probeCtx, connect.ExtenderConnectModeTcpTls, tcpPort); err != nil {
+		return &extenderActivationOutcome{
+			refusal: fmt.Sprintf("the %s carrier did not answer: %s", connect.ExtenderCarrierTcp, err),
+		}
+	}
+	forwardClientAddress, err := probes.forward(probeCtx)
+	if err != nil {
+		return &extenderActivationOutcome{
+			refusal: fmt.Sprintf("the forward did not answer: %s", err),
+		}
+	}
+	// an extender must egress on the family it was reached on (A7); a forward
+	// that arrives on the other family would publish an address that does not
+	// carry the traffic the record promises
+	if forwardIpVersion := server.ClientAddressIpVersion(forwardClientAddress); forwardIpVersion != ipVersion {
+		return &extenderActivationOutcome{
+			refusal: fmt.Sprintf(
+				"the forward arrived on ipv%d, not ipv%d",
+				forwardIpVersion,
+				ipVersion,
+			),
+		}
+	}
+
+	answered := map[string]bool{
+		connect.ExtenderCarrierTcp: true,
+	}
+	refusals := map[string][]*ExtenderCarrierRefusal{}
+	refuseCarrier := func(carrier string, port int, err error) {
+		refusals[carrier] = append(refusals[carrier], &ExtenderCarrierRefusal{
+			Carrier: carrier,
+			Port:    port,
+			Error:   err.Error(),
+		})
+	}
+
+	// the dns ports that answered, which is what the address row and the
+	// record list (L2). Empty unless the dns carrier was offered and answered.
+	activeDnsPorts := []int{}
+	if slices.Contains(carriers, connect.ExtenderCarrierDns) {
+		// one dns port failing is not the carrier failing: an extender that
+		// offers 53 and 4053 on a path that blocks 53 is still reachable on
+		// 4053, and the record must say which
+		for _, port := range dnsPorts {
+			portCtx, portCancel := context.WithTimeout(
+				probeCtx,
+				ExtenderActivateDnsPortProbeTimeout,
+			)
+			err := probes.carrier(portCtx, connect.ExtenderConnectModeDns, port)
+			portCancel()
+			if err == nil {
+				activeDnsPorts = append(activeDnsPorts, port)
+			} else {
+				refuseCarrier(connect.ExtenderCarrierDns, port, err)
+			}
+		}
+		answered[connect.ExtenderCarrierDns] = 0 < len(activeDnsPorts)
+	}
+	if slices.Contains(carriers, connect.ExtenderCarrierQuic) {
+		if err := probes.carrier(probeCtx, connect.ExtenderConnectModeQuic, udpPort); err == nil {
+			answered[connect.ExtenderCarrierQuic] = true
+		} else {
+			refuseCarrier(connect.ExtenderCarrierQuic, udpPort, err)
+		}
+	}
+
+	// in the order offered, which is the order the address row and the
+	// record list them in. A carrier this does not probe is never listed.
+	outcome := &extenderActivationOutcome{
+		carriers:        []string{},
+		dnsPorts:        activeDnsPorts,
+		refusedCarriers: []*ExtenderCarrierRefusal{},
+	}
+	for _, carrier := range carriers {
+		if answered[carrier] {
+			outcome.carriers = append(outcome.carriers, carrier)
+		}
+		outcome.refusedCarriers = append(outcome.refusedCarriers, refusals[carrier]...)
+	}
+	return outcome
 }
