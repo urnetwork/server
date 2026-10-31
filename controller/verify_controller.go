@@ -274,7 +274,7 @@ func parseVerifySettings(res *server.SimpleResource) *model.VerifySettings {
 		panic(fmt.Errorf("verify.yml %w", err))
 	}
 	if 0 < s.CohortSize {
-		s.CohortCensusLimit = max(s.CohortLifetimeLimit, verifyDefaultCohortCensusLimit)
+		s.CohortCensusLimit = verifyCohortCensusLimit(s.CohortLifetimeLimit)
 	}
 	if cfg := stConfig(); cfg != nil {
 		// The cohort's settlement epoch is this deployment's st epoch mirror.
@@ -306,14 +306,41 @@ const (
 	verifyDefaultCohortLifetimeLimit = 2000
 )
 
+// verifyValidatorMaxProviders is the SN25 validator's signed provider census
+// bound, max_providers, 4,096 at launch (sn VERSION2.md:32,219). It is a
+// fixed dimension of the validator's production capacity: no capacity
+// revision may change it (sn validator/config_evidence_v2.go:35,
+// validator/production_capacity.go:85-94). The validator unions this
+// settlement window, every provider it ever scored and this tempo's egress
+// providers into one census and fails the measurement and the settlement past
+// the bound (validator/measurement_stats_v2.go:36-73,
+// validator/attempt_settlement_v2_runtime.go:225-262). Its quality EMAs are
+// never evicted, only the window and the egress sets rotate
+// (validator/stats.go:481-501,315-332), and only server-assigned hops are
+// scored; its own seed hop is never measured (validator/trail_seed_pool.go:5-7).
+// So every provider the server ever admits must fit in it.
+const verifyValidatorMaxProviders = 4096
+
 // With stale rotation (model/verify_cohort_rotation.go) the lifetime set is
 // the active set, and the census, every provider ever admitted, is bounded
 // separately: unclaimed providers still never grow it past the lifetime
 // limit, and claimed fleets' members may grow it to three quarters of the
-// validator's signed 4,096. The census is durable in Postgres, so a Redis data
-// loss refuses new providers until it is restored instead of re-admitting up
-// to another lifetime limit, which is what kept the limit under half of 4,096.
+// validator's 4,096, leaving 1,024 for anything the validator lineage scored
+// outside the cohort. The census is durable in Postgres, so a Redis data loss
+// refuses new providers until it is restored instead of re-admitting up to
+// another lifetime limit, which is what kept the limit under half of 4,096.
+// The settlement transition, about 414 bytes per scored provider, stays near
+// 1.3 MB at 3,072 against max_transition_bytes 2 MiB (sn VERSION2.md:33). The
+// per-epoch window and the per-tempo egress hashes follow the cohort size,
+// which rotation does not change.
 const verifyDefaultCohortCensusLimit = 3072
+
+// The census limit for a lifetime limit: never below it, so rotation can only
+// add room, and never above the validator's census, which verifyCohortSettings
+// guarantees by refusing a larger lifetime limit.
+func verifyCohortCensusLimit(lifetimeLimit int) int {
+	return min(max(lifetimeLimit, verifyDefaultCohortCensusLimit), verifyValidatorMaxProviders)
+}
 
 // verifyCohortSettings resolves the verify.yml cohort keys. Mainnet always
 // bounds next-hop sampling: absent keys take the defaults and zero is refused.
@@ -337,6 +364,10 @@ func verifyCohortSettings(profile string, size, lifetimeLimit *int) (int, int, e
 	}
 	if resolvedSize <= 0 || resolvedLimit < resolvedSize {
 		return 0, 0, fmt.Errorf("cohort_size must be positive and at most cohort_lifetime_limit")
+	}
+	// every admitted provider stays in the validator's census
+	if verifyValidatorMaxProviders < resolvedLimit {
+		return 0, 0, fmt.Errorf("cohort_lifetime_limit must be at most %d, the validator's max_providers", verifyValidatorMaxProviders)
 	}
 	return resolvedSize, resolvedLimit, nil
 }
