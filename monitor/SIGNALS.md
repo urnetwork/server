@@ -29931,6 +29931,17 @@ index over the same keys, a changed key order or a lost default is drift at
 901. These checks read the catalog only. They do not show whether the replica
 or any score is current.
 
+Version 902 adds `verify_cohort_census`, the verify cohort's durable census of
+every provider a deployment ever admitted. It has three columns, all NOT NULL
+with no default: `deployment_key character varying(96)`, `client_id uuid` and
+`admitted_at timestamp`. It is keyed by `PRIMARY KEY (deployment_key,
+client_id)` and has no other check or index. Its content-derived version
+follows its DDL. These are drift at 902: a missing or unlogged table; a changed
+type, nullability or default; and a missing, narrowed or deferrable key. Before
+a database reaches 902, the absent table is not drift. A source head ahead of
+the database raises only the `migration-behind` WARN, which is never promoted
+to a page.
+
 ### 8.10 Client-reliability covering-index drift after partition cutover
 Probe: `reliability-index`
 
