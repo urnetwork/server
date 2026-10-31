@@ -45801,6 +45801,9 @@ v2 pool is unregistered, the check uses the active v1 `operatorAt` and
 `rootCommitments(e,noId)`. From `firstEpoch` it uses v2 `pending(noId)` and
 the latest finalized `roots` entry. A root for an older epoch does not
 satisfy the current deadline, and a v1 root cannot satisfy a v2 epoch.
+That includes the one-time v1 carry sweep root at a v2 epoch (§22.7): v1
+root state is never read for a v2 epoch, so a committed sweep root cannot
+satisfy that epoch's deadline and a missing one cannot page it.
 Both contract pairs' links and subnet identities must match the reviewed pin.
 
 A v2 epoch needs no new root when `lastFundedEpoch >= e` and
