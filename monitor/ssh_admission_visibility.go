@@ -70,5 +70,5 @@ func observationFailureDetails(err error, errorClass string) string {
 	if errors.As(err, &admission) && admission.admissionAttempt >= 1 && admission.admissionAttempt <= 3 {
 		details += " local_admission_attempt=" + strconv.Itoa(admission.admissionAttempt)
 	}
-	return details + observationBoundaryDetails(err)
+	return details + observationBoundaryDetails(err) + signupQualityObservationDetails(err)
 }

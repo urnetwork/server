@@ -141,6 +141,34 @@ func TestProviderPickerSignalRequestErrorPage(t *testing.T) {
 	}
 }
 
+// Public counters round for display; severity must retain the underlying delta.
+func TestProviderPickerSignalErrorSeverityUsesUnroundedDelta(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		errors   float64
+		severity Severity
+	}{
+		{name: "below", errors: 19.75, severity: SeverityWarn},
+		{name: "at", errors: 20, severity: SeverityPage},
+		{name: "above", errors: 20.25, severity: SeverityPage},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			alerts := runPickerFixture(t, pickerTestRows(map[string]float64{
+				"initial/nonempty": 20,
+				"initial/error":    test.errors,
+				"read/filters":     1,
+			}))
+			a := requireAlertClass(t, alerts, "provider-picker-read-or-request-error")
+			if len(alerts) != 1 || a.Severity != test.severity {
+				t.Fatalf("unrounded errors %v with an overlapping read error: severity %s, alerts %d; want %s and one alert", test.errors, a.Severity, len(alerts), test.severity)
+			}
+			if !strings.Contains(a.Observed, "initial_error=20 ") || !strings.Contains(a.Observed, "read_filters=1 ") {
+				t.Fatalf("rounded public counters lost: %s", a.Observed)
+			}
+		})
+	}
+}
+
 func TestProviderPickerSignalPartialCoverageKeepsPositive(t *testing.T) {
 	rows := pickerTestRows(map[string]float64{"initial/empty": 20})
 	settings := pickerTestSettings(t, pickerTestPayload(t, rows))

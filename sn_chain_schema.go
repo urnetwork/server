@@ -128,3 +128,8 @@ const snChainSchemaSql = `
 		PRIMARY KEY (netuid, validator_hotkey, native_epoch, uid, fleet_id, generation)
 	)
 `
+
+// The catalog monitor follows this immutable DDL wherever merges place it.
+func SnChainSchemaMigrationVersion() int {
+	return sqlMigrationVersion(snChainSchemaSql)
+}

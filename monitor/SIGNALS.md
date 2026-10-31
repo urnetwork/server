@@ -12451,6 +12451,10 @@ positive-subset findings. Global service-placement configuration remains intact.
   request error; PAGE when at least 20 request errors occur in that window.
   This separate denominator prevents surfaced errors from looking like recovery
   merely because they leave successful-empty counts.
+  Thresholds use unrounded paired raw-counter endpoint differences, not
+  extrapolated PromQL `increase`. Public counter summaries round to zero decimal
+  places, so the same displayed value can fall on either side of a threshold.
+  Read counts overlap outcomes and do not enter the request-error PAGE sum.
 - WARN `provider-picker-unobservable`: missing/unreadable/partial/stale/reset
   producer evidence, or fewer than 20 successful initial outcomes for a health
   claim. Search/direct-only or quiet traffic cannot establish initial health.
@@ -22832,6 +22836,30 @@ parsing (including nonnumeric and overflow controls), the per-network probe
 shape of the query, and identifier-free Markdown. Malformed evidence fails the
 probe; it must never be coerced to a low-volume healthy result.
 
+Observation-failure provenance: a typed local signup-quality failure retains
+`signup_quality_stage=source-read` when the runner's `pg` call fails, or
+`signup_quality_stage=aggregate-parse` when that call succeeded but its rows
+fail this probe's exact day/count contract. Aggregate-parse failures use
+`observation-invalid-response`; source-read preserves the original fixed
+error class, context cause and native execution boundaries. Source-read covers
+the entire existing runner, including transport and PostgreSQL CSV decoding;
+it does not identify remote SQL entry, a server error or which deadline ended.
+The stage is code-owned proof, not a token recovered from raw error text.
+Missing typed stage remains unknown. No raw output, row values, SQL or private
+errors are added to alerts; the visibility identity, severity, sustain and
+cohort query/quality thresholds stay unchanged.
+
+False-positive qualifier: source or aggregate failure measures no cohort,
+share, signup acceptance or automation. A malformed aggregate is an observation
+contract failure, not a measured low share. False-negative qualifier: missing
+source, native provenance or original same-attempt timing can conceal real
+quality problems; an unavailable result cannot clear the quality incident.
+Existing source gaps and matured-cohort verification still apply. Synthetic
+public-constructor controls distinguish source errors, malformed aggregates,
+healthy/low-volume/low-share results, parent cancellation, native boundary
+preservation and error-text privacy; source presence is not a test PASS or
+retrospective attribution of a historical timeout.
+
 ### 2.27 Subscription dashboard snapshot liveness
 Probe: `subscription-metrics`
 
@@ -28716,6 +28744,19 @@ head is never schema health. Use a separately qualified monitor that knows the
 applied head; do not roll back services or edit database objects to satisfy an
 older validator. At a source-known head, every still-required artifact retains
 its exact check and immediate drift page.
+
+Published SN top-board migrations are part of that source-known schema. Their
+content-derived versions currently occupy 898 (chain fleet bindings, incentive
+census and signed head summaries) and 899 (trail hops, ranking snapshots, EMA
+and daily history). The owning migration probe checks their twelve durable
+tables, exact column types/widths/nullability/defaults, primary and check
+constraints, and eight ready valid indexes. A matching numeric head with one
+of these artifacts missing remains immediate schema drift, not healthy. The
+missing-table and rolled-back shape controls preserve healthy published prefixes
+and attribute faults to the owning version. Source/custody failure and a newer
+unknown database head remain unknown; these catalog checks do not prove chain
+census correctness, snapshot freshness, application outcomes or deployed schema
+health without an actual qualified observation.
 
 Mainnet and native-fee artifact checks belong to this one registered probe.
 Their helpers live in `migration_sn_mainnet.go` and `migration_native_fee.go`;
