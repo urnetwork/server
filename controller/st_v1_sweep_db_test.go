@@ -81,8 +81,10 @@ func TestStV1SweepTurnClosesThenConcludesOnRefusal(t *testing.T) {
 		stV1SweepAlertSink = func(subject string, message string) { alerts = append(alerts, message) }
 		defer func() { stV1SweepAlertSink = priorAlert }()
 
+		// The fixture's pool starts v2 at epoch 5, the sweep epoch: one block
+		// after end(5) the coordinator is in epoch 6.
 		chain := sweepTestChain()
-		chain.Sweep.Epoch = 5
+		chain.Sweep.Epoch, chain.Current = 5, 6
 		client := &sweepTurnClient{chain: chain, latest: chain.HeadBlock + 2}
 		SetStV1SweepClient(client)
 		defer SetStV1SweepClient(nil)
@@ -127,8 +129,10 @@ func TestStV1SweepTurnAlertsWhenTheCloseIsExhausted(t *testing.T) {
 		stV1SweepAlertSink = func(subject string, message string) { alerts = append(alerts, message) }
 		defer func() { stV1SweepAlertSink = priorAlert }()
 
+		// The fixture's pool starts v2 at epoch 5, the sweep epoch: one block
+		// after end(5) the coordinator is in epoch 6.
 		chain := sweepTestChain()
-		chain.Sweep.Epoch = 5
+		chain.Sweep.Epoch, chain.Current = 5, 6
 		client := &sweepTurnClient{sweepFakeClient: sweepFakeClient{sendErr: errors.New("execution reverted: RuntimeAccountingMismatch")}, chain: chain, latest: chain.HeadBlock + 2}
 		SetStV1SweepClient(client)
 		defer SetStV1SweepClient(nil)
