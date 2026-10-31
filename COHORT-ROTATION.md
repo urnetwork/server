@@ -1,6 +1,6 @@
 # Verify cohort stale rotation
 
-**Status:** owner decision 2026-10-29 (LEADERTOP design question 6, part two). Merged on 2026-10-31 as f45365d84 and deployed the same day, on the owner's go: migration 902 at 06:37Z, api 2026.10.31-outerwerld-1086286270 and alt 2026.10.31-outerwerld-1086288290, then taskworker 2026.10.31-outerwerld-1086289460 at 06:49Z. The first rotation seeded the census at 06:49:57Z with 2,001 members and logged "1 stale members out for 1 waiting (census 2000, active 1999)". Part one (claimed-fleet priority) is on main.
+**Status:** owner decision 2026-10-29 (LEADERTOP design question 6, part two). Merged on 2026-10-31 as f45365d84 and deployed the same day, on the owner's go: migration 902 at 06:37Z, api 2026.10.31-outerwerld-1086286270 and alt 2026.10.31-outerwerld-1086288290, then taskworker 2026.10.31-outerwerld-1086289460 at 06:49Z. The first rotation, at 06:49:57Z, seeded the census with the 2,000 active members and logged "1 stale members out for 1 waiting (census 2000, active 1999)". The active set was full, so one waiting claimed member needed one stale member rotated out; 1,999 is the active set after rotation. Admitting that member made the census 2,001, the rows in `verify_cohort_census`. Only a claimed fleet's member can grow the census past 2,000. Part one (claimed-fleet priority) is on main.
 
 ## Problem
 
@@ -27,6 +27,8 @@ The lifetime set becomes the **active** set: the providers drawn ahead of new on
 1. Make the census ready: load the durable census from Postgres into Redis, union in the active set, mirror anything Postgres lacks, then set the ready marker.
 2. Count the claimed members that are eligible and not active (the demand).
 3. Rotate out at most `demand − free active slots` stale members, and at most 64 per run.
+   - The free active slots are the lifetime limit (2,000) less the active set before rotation. With the active set full, every waiting claimed member rotates one stale member out.
+   - The log reports the active set before and after rotation.
    - A member is stale when it was not drawn in this or the previous settlement epoch, is not eligible now, and is not a claimed member.
    - Rotation frees room only for claimed members waiting for it. Freeing room eagerly would let unclaimed providers take it, and they cannot grow the census anyway.
 
@@ -44,7 +46,7 @@ The lifetime set becomes the **active** set: the providers drawn ahead of new on
 
 ## What changes in production
 
-- Claimed fleets' members can be measured after the lifetime set fills. While there are 0–3 claimed fleets this rotates nothing: rotation runs only for claimed members waiting for room.
+- Claimed fleets' members can be measured after the lifetime set fills. Rotation runs only for claimed members waiting for room, but the lifetime set is full, so each claimed member not yet active rotates one stale member out. The first claimed fleet did so on 2026-10-31.
 - The validator's census can grow from 2,000 to at most 3,072.
   - It must stay under the validator's own per-transition limits: the settlement transition was estimated at about 414 bytes a provider against 2 MiB, about 5,000 providers (sn `VERSION2.md` §3.5).
   - sn-55 should confirm the headroom.
@@ -79,6 +81,7 @@ The lifetime set becomes the **active** set: the providers drawn ahead of new on
 `model/verify_cohort_rotation_test.go` (local test env):
 - A full lifetime set refuses a claimed member until rotation frees room; claimed members then fill the census to its limit; an unclaimed provider is still refused; a rotated member returns at no census cost; every census member is durable.
 - Rotation runs only while claimed members wait, at most that many, and never removes a member drawn this or last epoch, an eligible member or a claimed one.
+- Free active slots count against the demand: one free slot covers one waiting member, and with the active set full one waiting member rotates one stale member out, as in the first production rotation.
 - After a Redis loss of every cohort key, no new provider is admitted until rotation restores the census from Postgres, and the restored census still bounds admissions.
 - Without the census table, draws admit as before rotation; any other census read failure refuses new providers without failing the draw, and is not cached.
 

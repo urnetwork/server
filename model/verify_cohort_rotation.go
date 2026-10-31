@@ -140,10 +140,14 @@ func recordVerifyCohortCensus(ctx context.Context, deploymentKey StDeploymentKey
 
 // The outcome of one rotation.
 type VerifyCohortRotation struct {
+	// providers ever admitted, as this run found them
 	Census int
+	// the active (lifetime) set after this run's rotation
 	Active int
 	// claimed members waiting for active room
-	Demand   int
+	Demand int
+	// stale members rotated out: the demand less the free active slots (the
+	// lifetime limit less the active set before rotation), at most 64
 	Rotated  int
 	Restored bool
 }
