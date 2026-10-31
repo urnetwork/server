@@ -10,7 +10,7 @@
   "production_fully_qualified": false,
   "authority_warning": "This is a preparation snapshot, not runtime/score authority. Verify the live process/session and current artifacts before acting; never restart because an observation times out.",
   "deployment_status": {
-    "owner_feedback_reverified_at": "2026-10-30T22:43:01.551218379Z",
+    "owner_feedback_reverified_at": "2026-10-31T01:23:57.355780549Z",
     "server_main_minimum": "0a23176f53e4abf64a8364225dde572464b028f1",
     "sn_main_minimum": "2cb50ac4733e62cb30a127295cdcfabcf9c93222",
     "database_version_confirmed": 901,
@@ -22,8 +22,9 @@
     "completed_owner_private_score_present": true,
     "api_release_verified": true,
     "observed_release_not_a_season_pin": "2026.10.30-outerwerld+1085932990",
-    "api_probe_evidence": "/home/by/urnetwork/temp/api-v2-deployment-confirm-20261030.SYM7ju5Z",
-    "latest_owner_feedback_verification": "server/connect/sim-latency/launch/PRIVATE-OWNER-FEEDBACK-LIVE-2026-10-30.json",
+    "api_probe_evidence": "/home/by/urnetwork/temp/api-owner-rollout-confirm-20261031.lPB0GZNl",
+    "latest_owner_feedback_verification": "server/connect/sim-latency/launch/API-DEPLOYMENT-VERIFIED-2026-10-31.json",
+    "latest_verification_scope": "Read-only live contract behavior, not an exact main binary commit or all-replica identity proof. The earlier release observation is historical, not a season pin.",
     "new_config_vault_or_epoch_one_image_deployment_required": false,
     "negative_owner_feedback_probe_alone_is_not_binary_identity_proof": true
   },
@@ -79,7 +80,7 @@
     "shared_epoch_baseline_sha256": "b6b0b13f6137b32fd5569f9ff16d78d8dac3d578ad40549c8ae33513cf447557",
     "completed_evaluation_duration_observed_minutes": "87–90",
     "private_scores_and_eligibility_not_published_here": true,
-    "public_open_round_checked_at": "2026-10-30T16:50:14Z"
+    "public_open_round_checked_at": "2026-10-31T01:23:43.289260563Z"
   },
   "frozen_evaluation": {
     "go_version": "go1.27.3",
@@ -104,7 +105,7 @@
   },
   "approved_changes": {
     "owner_record": "server/connect/sim-latency/launch/PRIVATE-FEEDBACK-NEXT-G2-APPROVAL-2026-10-30.json",
-    "implementation_status": "Main API deployment and private completed-owner feedback are verified. Exact maintenance hold4 is active and its offline-intake cache-hit proof passed; serial public calibration is running. Calibration acceptance and the future evaluator-image qualification remain pending.",
+    "implementation_status": "Main API behavior and private completed-owner feedback were reverified on October31. Exact maintenance hold4 remains active. Public pilot18runs and AFTER13 are accepted; the existing single-seed hidden screen is running. Full calibration acceptance, scoped custody and the future evaluator-image qualification remain pending.",
     "current_round_private_feedback": {
       "owning_submitter_credential_only": true,
       "shared_Apex_credential_requires_individual_miner_mapping": true,
@@ -407,7 +408,7 @@
     "retained_in_git": true,
     "warning": "The 164128-byte historical checkpoint retains all earlier failures, qualifications and source pins. Its old top-level status and next_action are superseded; do not execute them. Read history only for a specific supporting artifact."
   },
-  "observed_at": "2026-10-31T01:04:02Z",
+  "observed_at": "2026-10-31T01:26:23Z",
   "phase_checkpoint_qualification": {
     "status": "focused tests, native API build, standalone guard and static checks passed; not a live release",
     "toolchain": "go1.27.3",

@@ -1,22 +1,29 @@
 # R2 scoring restoration: readiness before hold release
 
-## Current maintenance status — October 30, 23:11 UTC
+## Current maintenance status — October 31, 01:24 UTC
 
 Production R2 epoch 1 remains open for intake, but evaluation hold **4**
 (`CALIBRATION_MAINTENANCE`) and reward-delivery hold **1** are active. The real
-worker is stopped and joined. The original one-use public pilot is running;
-all nine controls and one of nine candidate runs have completed. It is not
-accepted, and no fresh hidden seed has been drawn. Completed owners can now
-read their private scores while public results stay sealed.
+worker is stopped and joined. The public R9/R9 pilot and native AFTER13 census
+are accepted. The fresh hidden seed was drawn once, its exact public commitment
+was pushed, and the existing native execution is running: two of its 36 unique
+measurements have completed. Never repeat preparation, draw another seed or
+restart execution after an observation timeout. Completed-owner private scores
+and the open intake were reverified against the deployed API; public results
+remain held. See [the read-only API check](API-DEPLOYMENT-VERIFIED-2026-10-31.json).
 
 Use the [current checkpoint](current-state.json) and
 [live maintenance evidence](CALIBRATION-MAINTENANCE-LIVE-2026-10-30.json), not
 the earlier grading snapshot below. Maintenance authority expires at its
 original **October 31, 07:19:42.289655 UTC** bound and must not be renewed.
-Do not restart the worker during timed calibration. Before release, require
-actual accepted calibration, independent review, scoped COMPLIANCE custody,
-joined cleanup and genuine worker readiness; neither this guide nor an archive
-receipt supplies that approval.
+Do not restart the worker during timed calibration. Once all timed and strict
+replay/census owners have joined, prove original inventory, absence of evidence
+mounts, a free canonical lock and current active hold identities. Restore the
+real worker **with both holds active** before that original expiry, even if
+custody or independent review remains pending. Grading release still requires
+actual accepted calibration, independent review, scoped COMPLIANCE custody and
+genuine worker readiness; neither this guide nor an archive receipt supplies
+that approval.
 
 ## Historical provisional-grading snapshot — October 30
 

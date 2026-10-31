@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-api-deployment-behavior-verification",
+  "observed_at": "2026-10-31T01:23:57.355780549Z",
+  "scope": {
+    "api": "https://api.bringyour.com",
+    "competition_id": "sim-latency-season-1",
+    "season_id": "sim-latency-production-20261028-r2",
+    "round_id": "01a1855d-49bd-0250-90db-d0c0885f0e46",
+    "epoch": 1,
+    "no_admission_evaluation_or_hold_mutation_was_started": true,
+    "behavior_check_is_not_a_main_binary_commit_or_all_replica_identity_proof": true
+  },
+  "public_info": {
+    "observed_at": "2026-10-31T01:23:43.289260563Z",
+    "http_status": 200,
+    "round_status": "open",
+    "intake_ready": true,
+    "grading_ready": false,
+    "publication_held": true,
+    "closes_at": "2026-11-05T13:06:42.413416Z",
+    "response_sha256": "f3b88a6f0872121330cf89c4105d3861c8738d227da11a2f6f56801e8d9169f3",
+    "private_evidence_root": "/home/by/urnetwork/temp/api-rollout-confirm-20261031.WYNTYnKM"
+  },
+  "completed_owner_poll": {
+    "status_url": "/competition/v2/score/01a1884d-3b55-f5dd-45e5-eb4145b2ac0f",
+    "http_status": 200,
+    "state": "completed",
+    "evaluation_status": "completed",
+    "score_is_object": true,
+    "score_schema": 1,
+    "full_error_field_absent": true,
+    "response_sha256": "7420642e472dcb433e42482c0efb228132266ec2a534cf51fba81d54d193f8ac",
+    "private_evidence_root": "/home/by/urnetwork/temp/api-owner-rollout-confirm-20261031.lPB0GZNl",
+    "numeric_scores_and_private_metrics_not_published_here": true
+  },
+  "earlier_independent_access_and_embargo_verification": "server/connect/sim-latency/launch/PRIVATE-OWNER-FEEDBACK-LIVE-2026-10-30.json",
+  "remaining": {
+    "hidden_calibration_running_not_accepted": true,
+    "evaluation_and_reward_delivery_holds_remain_active": true,
+    "no_new_api_config_vault_or_epoch_one_image_deployment_required_for_this_phase": true,
+    "next_action": "Observe the existing native hidden-screen execution, not a new preparation or execution. Restore the real worker with holds active only after joined cleanup; grading release requires actual accepted calibration, independent review and scoped custody."
+  }
+}
