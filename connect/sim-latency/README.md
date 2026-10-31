@@ -24,10 +24,11 @@ The actual compiler must be **Go 1.27.3**. Select that installed toolchain on
 The original **2026-10-28 00:00 UTC** opening was missed, not backdated.
 The approved replacement production season, R2 epoch 1, opened submission intake
 at **2026-10-29 13:06:42.413416 UTC**. Intake remains open while grading and
-publication are held for calibration. The Go 1.27.3 checkpoint's fresh bridge
-and independent-seed acceptance are **not yet complete**. Follow the
+publication are held for calibration. The reduced public R9/R9 pilot and native
+13-source exclusion census are accepted; the fresh hidden-seed 36-run screen
+is now running and **not yet accepted**. Follow the
 [current checkpoint](launch/current-state.json),
-the [live maintenance record](launch/CALIBRATION-MAINTENANCE-LIVE-2026-10-30.json), and
+the [live hidden-screen record](launch/HIDDEN-SCREEN-LIVE-2026-10-31.json), and
 [`launch/PRODUCTION-2026-10-28.md`](launch/PRODUCTION-2026-10-28.md) and its
 exact-artifact records for current evidence. An installed image or a passing
 local smoke is not production activation.
@@ -42,19 +43,20 @@ calibration; it is not a claim that the new checkpoint has passed calibration.
 |---|---|
 | Evaluator host | one 128 GiB-class Ubuntu host with 12 isolated CPUs |
 | CPU boundary | 10 evaluation CPUs; 2 management/cleanup CPUs |
-| Workload | 3,600-provider qualification profile; 200 clients and 80 arrivals/minute; fresh bridge and independent-seed acceptance remain pending |
+| Workload | Frozen epoch-one profile: 3,600 providers, 200 clients and 80 arrivals/minute; accepted public pilot, independent-seed screen running |
 | Selection | quality window 2; 4 exchange hosts; 4 fleet shards |
 | Measurement | 180 seconds with provider impairment enabled |
 | Aggregation | one immutable 9-run control per epoch; median of 9 fresh runs per candidate |
-| Initial significant-improvement percentage | 26.9% prospectively frozen by the accepted October 26 three-pair reduction; fresh instrument bridge and independent-seed qualification remain pending |
+| Initial significant-improvement percentage | 26.9% prospectively frozen by the accepted October 26 three-pair reduction; independent-seed acceptance remains pending |
 | Admission | six seven-day epochs; unbounded paid submissions at $20 each |
 | Dispatch | immediate single-job FIFO; Redis list backed by authoritative PostgreSQL |
 | Submission deadline | 3 hours total, including attempts, backoff, score, and cleanup |
 
 The historical qualified checkpoint used 1,800 providers. Do not transfer that
 qualification, its measurements or its final report to the new source/image.
-Select the new scale from fresh impairment-on/off frontier evidence, correctness
-and resource gates, and the full cold-job three-hour budget. Incomplete points
+The 3,600-provider profile is frozen for R2 epoch one; do not resize it mid-round.
+Future checkpoint scale selection requires fresh impairment-on/off frontier,
+correctness and resource evidence and the full cold-job three-hour budget. Incomplete points
 are retained for diagnosis and never count as control samples.
 
 Every canonical submission patch gets a content-addressed image derived from

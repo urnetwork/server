@@ -14,6 +14,15 @@ At 03:14 UTC on October 30, public `/competition/info` reported
 - actual opening: October 29, 13:06:42.413416 UTC;
 - submission close: November 5, 13:06:42.413416 UTC.
 
+Latest **01:04 UTC October 31** checkpoint: the reduced public pilot and native
+13-source exclusion census are accepted. The fresh hidden-seed 36-run screen
+is running under its original committed seed and bounded owner; it is not yet
+accepted. Observe only the live owner in
+[HIDDEN-SCREEN-LIVE-2026-10-31.json](launch/HIDDEN-SCREEN-LIVE-2026-10-31.json).
+The read-only control-plane snapshot shows 13 unstarted queued jobs and four
+completed jobs. Both holds remain active; public intake remains open.
+The dated observations below preserve earlier phases, not current commands.
+
 The later read-only snapshot at **18:39 UTC on October 30** shows four completed
 evaluations, eleven queued jobs and no running job. Every queued job still has
 zero attempts and an unset start time. The worker was **online**, publishing real
