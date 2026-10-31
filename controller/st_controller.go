@@ -2171,9 +2171,27 @@ func (self *CoreStClient) stakeMoveGasFloor(to common.Address, calldata []byte, 
 		return stV1DepositGasFloor
 	case bytes.HasPrefix(calldata, stTransferStakeSelector) && to == stStakingPrecompileAddress:
 		return stV1DepositStagingGasFloor
+	case (bytes.HasPrefix(calldata, stV1ClaimSelector) || bytes.HasPrefix(calldata, stV1WithdrawClaimCreditSelector)) && to == self.cfg.SettlementVault:
+		return stV1ClaimGasFloor
+	case bytes.HasPrefix(calldata, stLedgerV2AbsorbStakeSelector) && self.cfg.LedgerV2Enabled() && to == self.cfg.VaultV2:
+		return stLedgerV2StakeMoveGasFloor
 	}
 	return 0
 }
+
+// stV1ClaimGasFloor is the least gas limit of the sweep's vault1 claim and
+// claim-credit withdrawal, each a transferStake from vault1's own coldkey, for
+// stV1CloseGasFloor's reason: the admission grows with that coldkey's
+// StakingHotkeys list, which third parties can lengthen after the estimate.
+// It is the claim floor of VERSION2-FINAL.md §8.1. vault2's absorbStake, a
+// moveStake from vault2's coldkey, takes the capture's floor.
+const stV1ClaimGasFloor = 2_600_000
+
+var (
+	stV1ClaimSelector               = crypto.Keccak256([]byte("claim(uint256,uint256,bytes32,uint256,bytes32[])"))[:4]
+	stV1WithdrawClaimCreditSelector = crypto.Keccak256([]byte("withdrawClaimCredit(bytes32)"))[:4]
+	stLedgerV2AbsorbStakeSelector   = crypto.Keccak256([]byte("absorbStake(bytes32)"))[:4]
+)
 
 func (self *CoreStClient) CloseOperatorEpoch(ctx context.Context, epoch uint64, noId uint64) (string, error) {
 	if self.coordinator == nil {

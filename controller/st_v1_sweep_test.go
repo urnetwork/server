@@ -19,6 +19,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/urfoundation/sn/merkle"
+	"github.com/urfoundation/sn/stabi"
 
 	"github.com/urnetwork/server/model"
 )
@@ -721,5 +722,35 @@ func TestStV1SweepFailureBudgetAndWithdrawAttempts(t *testing.T) {
 	publishes = append(publishes, &model.StPublish{Kind: StPublishKindV1SweepWithdraw, Status: model.StPublishStatusFailed}, &model.StPublish{Kind: StPublishKindV1SweepWithdraw, Status: model.StPublishStatusConfirmed})
 	if attempts := stV1SweepAttempts(publishes); attempts != 2 {
 		t.Fatalf("withdraw attempts %d", attempts)
+	}
+}
+
+// The sweep's stake moves are signed at their floors: the vault1 claim and
+// claim-credit withdrawal at the claim floor, vault2's absorbStake at the
+// capture floor; the selectors are the bindings' own.
+func TestStV1SweepStakeMoveGasFloors(t *testing.T) {
+	cfg := sweepTestConfig()
+	client := &CoreStClient{cfg: cfg}
+	claim := stabi.NewSTSettlementVault().PackClaim(big.NewInt(4), big.NewInt(1), sweepTestVault2Coldkey, big.NewInt(10_000), [][32]byte{})
+	withdraw := stabi.NewSTSettlementVault().PackWithdrawClaimCredit(sweepTestVault2Coldkey)
+	absorb := stLedgerV2VaultAbi.PackAbsorbStake(sweepTestEscrowHotkey)
+	for _, test := range []struct {
+		name     string
+		to       common.Address
+		calldata []byte
+		floor    uint64
+	}{
+		{"claim", cfg.SettlementVault, claim, stV1ClaimGasFloor},
+		{"withdraw", cfg.SettlementVault, withdraw, stV1ClaimGasFloor},
+		{"absorb", cfg.VaultV2, absorb, stLedgerV2StakeMoveGasFloor},
+		{"claim elsewhere", cfg.VaultV2, claim, 0},
+		{"absorb elsewhere", cfg.SettlementVault, absorb, 0},
+	} {
+		if floor := client.stakeMoveGasFloor(test.to, test.calldata, model.StTxAttemptExecution); floor != test.floor {
+			t.Fatalf("%s: floor %d, want %d", test.name, floor, test.floor)
+		}
+		if floor := client.stakeMoveGasFloor(test.to, test.calldata, model.StTxAttemptCancellation); floor != 0 {
+			t.Fatalf("%s: a cancellation floor %d", test.name, floor)
+		}
 	}
 }
