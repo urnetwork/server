@@ -871,6 +871,7 @@ var migrationCurrentSuffixContracts = slices.Concat(
 		migrationCurrentSuffix(900, "trusted instrument overlay with two-member review, identity and retained source custody",
 			competitionMigration900ArtifactQuery),
 		snTopReplicaMigrationContract,
+		verifyCohortCensusMigrationContract,
 	},
 )
 
