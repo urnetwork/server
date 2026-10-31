@@ -11071,4 +11071,7 @@ var migrations = []any{
 	// without the census ever being re-admitted after a Redis data loss. A
 	// new table; apply before deploying the api and taskworker that write it.
 	newSqlMigration(verifyCohortCensusSchemaSql),
+
+	// Bound operator-only immutable score history reads by one exact round.
+	newSqlMigration(competitionSubmissionMetricsMigrationSql),
 }

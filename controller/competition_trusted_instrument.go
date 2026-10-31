@@ -34,23 +34,54 @@ func validateTrustedInstrumentSource(settings *Settings, intent, current *model.
 		}
 		return nil
 	}
-	if current == nil || settings.FutureEpochPolicy == nil || settings.FutureEpochPolicy.TrustedInstrument == nil || intent.Staging ||
-		intent.TargetEpoch != 2 || current.TargetEpoch != 1 || current.G2VolumePolicy != model.CompetitionG2VolumePolicyLegacy ||
+	if err := validateTrustedInstrumentProof(settings, intent); err != nil {
+		return err
+	}
+	if current == nil || current.TargetEpoch != 1 || current.G2VolumePolicy != model.CompetitionG2VolumePolicyLegacy ||
+		intent.SourceGeneration != current.SourceGeneration+1 {
+		return errors.New("trusted instrument transition is not the exact frozen predecessor's successor")
+	}
+	if proof.Approval.InstrumentBaseSourceLockSha256 != current.SourceLockSha256 || proof.Approval.InstrumentBaseImageDigest != current.EvaluatorImageDigest || !reflect.DeepEqual(proof.Approval.InstrumentBaseCommits, current.Commits) {
+		return errors.New("trusted instrument provenance is not the frozen epoch-one instrument")
+	}
+	switch proof.SelectedProductKind {
+	case "reviewed_source_carry_forward":
+		if !reflect.DeepEqual(proof.SelectedProductCommits, current.Commits) || intent.Threshold != current.Threshold || intent.ThresholdEvidenceSha256 != current.ThresholdEvidenceSha256 {
+			return errors.New("instrument-only carry must preserve actual incumbent product and threshold without review metadata")
+		}
+	case "reviewed_source_promotion":
+		if proof.SelectedProductSourceLockSha256 == current.SourceLockSha256 {
+			return errors.New("instrument overlay cannot substitute the selected winner's genuine approval")
+		}
+	}
+	return nil
+}
+
+// Both source authorization and host installation authenticate the same typed
+// configured proof. Predecessor, winner review and threshold checks remain at
+// the database authorizer; this helper grants no activation or runtime readiness.
+func validateTrustedInstrumentProof(settings *Settings, intent *model.CompetitionSourceActivation) error {
+	if settings == nil || intent == nil || intent.TrustedInstrument == nil || settings.FutureEpochPolicy == nil || settings.FutureEpochPolicy.TrustedInstrument == nil {
+		return errors.New("trusted instrument proof is missing its configured authority")
+	}
+	if err := settings.validateFutureEpochPolicy(); err != nil {
+		return err
+	}
+	proof := intent.TrustedInstrument
+	if intent.Staging || intent.TargetEpoch != 2 ||
 		intent.G2VolumePolicy != model.CompetitionG2VolumePolicyMinimumWork || proof.Schema != 1 ||
 		proof.Approval.ApprovalSha256 != settings.FutureEpochPolicy.TrustedInstrument.ApprovalSha256 ||
 		!reflect.DeepEqual(proof.Approval, *settings.FutureEpochPolicy.TrustedInstrument) {
 		return errors.New("trusted instrument transition is not prospectively authorized for this successor")
 	}
-	if err := ValidateCompetitionTrustedInstrumentApproval(settings.FutureEpochPolicy.TrustedInstrument); err != nil {
-		return err
-	}
-	if proof.Approval.InstrumentBaseSourceLockSha256 != current.SourceLockSha256 || proof.Approval.InstrumentBaseImageDigest != current.EvaluatorImageDigest || !reflect.DeepEqual(proof.Approval.InstrumentBaseCommits, current.Commits) {
-		return errors.New("trusted instrument provenance is not the frozen epoch-one instrument")
+	lock, err := model.CompetitionSourceLockDigestForMode(intent.Commits, false)
+	if err != nil || lock != intent.SourceLockSha256 {
+		return errors.New("trusted instrument child source graph differs from its exact lock")
 	}
 	selectedLock, err := model.CompetitionSourceLockDigestForMode(proof.SelectedProductCommits, false)
 	if err != nil || selectedLock != proof.SelectedProductSourceLockSha256 || !gitShaPattern.MatchString(proof.InstrumentedServerCommit) ||
 		proof.InstrumentedServerCommit != intent.Commits["server"] || proof.InstrumentedServerCommit == proof.SelectedProductCommits["server"] ||
-		intent.SourceGeneration != current.SourceGeneration+1 || !sha256Pattern.MatchString(intent.SimulatorSha256) || intent.ScorerSha256 != intent.SimulatorSha256 {
+		!sha256Pattern.MatchString(intent.SimulatorSha256) || intent.ScorerSha256 != intent.SimulatorSha256 {
 		return errors.New("trusted instrument proof lost its exact selected graph, child or compiled instrument")
 	}
 	for repository, commit := range proof.SelectedProductCommits {
@@ -61,14 +92,13 @@ func validateTrustedInstrumentSource(settings *Settings, intent, current *model.
 	switch proof.SelectedProductKind {
 	case "reviewed_source_carry_forward":
 		if intent.Kind != "trusted_instrument_transition" || intent.ReviewId != nil || proof.SelectedProductReviewId != nil || proof.SelectedProductReviewDigest != "" || proof.SelectedProductPatchSha256 != "" ||
-			intent.ReviewDecisionDigest != "" || intent.ApprovedPatchSha256 != "" || !reflect.DeepEqual(proof.SelectedProductCommits, current.Commits) ||
-			intent.Threshold != current.Threshold || intent.ThresholdEvidenceSha256 != current.ThresholdEvidenceSha256 {
+			intent.ReviewDecisionDigest != "" || intent.ApprovedPatchSha256 != "" || !reflect.DeepEqual(proof.SelectedProductCommits, proof.Approval.InstrumentBaseCommits) {
 			return errors.New("instrument-only carry must preserve actual incumbent product and threshold without review metadata")
 		}
 	case "reviewed_source_promotion":
-		if intent.Kind != "reviewed_source_promotion" || intent.ReviewId == nil || proof.SelectedProductReviewId == nil || *proof.SelectedProductReviewId != *intent.ReviewId ||
+		if intent.Kind != "reviewed_source_promotion" || intent.ReviewId == nil || *intent.ReviewId == (server.Id{}) || proof.SelectedProductReviewId == nil || *proof.SelectedProductReviewId != *intent.ReviewId ||
 			proof.SelectedProductReviewDigest != intent.ReviewDecisionDigest || proof.SelectedProductPatchSha256 != intent.ApprovedPatchSha256 ||
-			proof.SelectedProductSourceLockSha256 == current.SourceLockSha256 {
+			!sha256Pattern.MatchString(intent.ReviewDecisionDigest) || !sha256Pattern.MatchString(intent.ApprovedPatchSha256) || proof.SelectedProductSourceLockSha256 == proof.Approval.InstrumentBaseSourceLockSha256 {
 			return errors.New("instrument overlay cannot substitute the selected winner's genuine approval")
 		}
 	default:

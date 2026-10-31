@@ -1,6 +1,7 @@
 {
   "uid": "urnetwork-competition",
   "title": "urnetwork / sim-latency competition",
+  "description": "Authenticated operator diagnostics, including per-submission comparisons against the selected epoch baseline. Private scores and winner eligibility must not be publicly shared before the frozen reveal boundary.",
   "tags": ["urnetwork", "competition"],
   "timezone": "browser",
   "schemaVersion": 39,
@@ -23,6 +24,20 @@
         "datasource": {"type": "prometheus", "uid": "warp-mimir"},
         "query": "label_values(urnetwork_competition_configured{env=\"$env\"}, host)",
         "refresh": 2, "sort": 1, "multi": true, "includeAll": true
+      },
+      {
+        "name": "score_round",
+        "label": "score round (operator)",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "warp-mimir"
+        },
+        "query": "label_values(urnetwork_competition_submission_score_snapshot_ready{env=\"$env\",host=~\"$host\"}, round_id)",
+        "refresh": 2,
+        "sort": 2,
+        "multi": false,
+        "includeAll": false
       }
     ]
   },
@@ -296,6 +311,2289 @@
       },
       "options": {"colorMode": "background", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
       "targets": [{"refId": "A", "expr": "max(urnetwork_competition_current_round_staging{env=\"$env\",host=~\"$host\"})", "instant": true}]
+    },
+    {
+      "id": 27,
+      "type": "stat",
+      "title": "score snapshot complete and fresh",
+      "description": "Operator-only stored-score inventory, not evaluator readiness. Zero means unavailable, stale, invalid or over the configured point limit; no partial inventory is shown.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 4,
+        "y": 62
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "max": 1,
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "unavailable / incomplete"
+                },
+                "1": {
+                  "text": "complete and fresh"
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "orange",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(((urnetwork_competition_submission_score_snapshot_ready{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and (urnetwork_competition_submission_score_snapshot_complete{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) >= 0) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) <= urnetwork_competition_submission_score_snapshot_max_age_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}))) or vector(0)",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 28,
+      "type": "stat",
+      "title": "completed scores in selected round",
+      "description": "Every valid numeric completed score in a successful snapshot is included, including failed gates. Queued jobs and failures without valid numeric statistics have no fabricated zero. Overflow fails closed rather than displaying a silent latest-N subset.",
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 10,
+        "y": 62
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(urnetwork_competition_submission_score_snapshot_points{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} and ((urnetwork_competition_submission_score_snapshot_ready{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and (urnetwork_competition_submission_score_snapshot_complete{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) >= 0) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) <= urnetwork_competition_submission_score_snapshot_max_age_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"})))",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 29,
+      "type": "stat",
+      "title": "score source snapshot age",
+      "description": "Age uses the producer's original observation timestamp, never a new ingestion timestamp. All plots are hidden after the producer's configured maximum age.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 62
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "time() - max(urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"})",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 36,
+      "type": "stat",
+      "title": "stored terminal score records",
+      "description": "All bounded same-round terminal records with stored score JSON, including early failed reports. On a complete fresh snapshot this equals plotted scores plus the unplottable-failure count. Failures with SQL-NULL scores remain in the existing durable job-state totals.",
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 0,
+        "y": 67
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(urnetwork_competition_submission_score_snapshot_rows{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} and ((urnetwork_competition_submission_score_snapshot_ready{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and (urnetwork_competition_submission_score_snapshot_complete{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) >= 0) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) <= urnetwork_competition_submission_score_snapshot_max_age_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"})))",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 37,
+      "type": "stat",
+      "title": "failed reports without plottable statistics",
+      "description": "Explicitly counted early failures with stored reports but no complete positive numeric score/significance. They are not zero-latency points. Failed evaluations with real complete numeric scores remain plotted in red.",
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 12,
+        "y": 67
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(urnetwork_competition_submission_score_snapshot_unplottable_failed{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} and ((urnetwork_competition_submission_score_snapshot_ready{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and (urnetwork_competition_submission_score_snapshot_complete{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) >= 0) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) <= urnetwork_competition_submission_score_snapshot_max_age_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"})))",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 30,
+      "type": "text",
+      "title": "submission comparisons — authenticated operators only",
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 71
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "Choose one **score round**. The four plots share the same submission-time x axis: each point is one completed submission, not a replicate or a scrape. Green lines are the epoch's stored baseline; amber is its median takeover ceiling; purple is the variance-dependent Welch mean boundary. Blue points meet recorded numerical takeover conditions, cyan are statistically significant but not takeover eligible, gray are not significant, and red failed a gate. **Numerical eligibility is not a winner or honesty approval.** These internal plots do not change the public embargo. Median ranking and mean-based significance are separate tests. The producer exports the entire bounded snapshot or no points, never an undisclosed latest-N subset."
+      }
+    },
+    {
+      "id": 31,
+      "type": "xychart",
+      "title": "submission median score versus epoch baseline",
+      "description": "Lower is better. Raw score is the median of replicate p95 total request latencies, NOT TTFB. Green is the immutable epoch median baseline; amber is baseline × (1 − frozen takeover margin). The separate statistical fringe is shown on the aligned mean panel below, not misrepresented as a median cutoff.",
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 75
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#8f8f8f"
+          },
+          "custom": {
+            "show": "points",
+            "pointSize": {
+              "fixed": 7
+            },
+            "lineWidth": 0,
+            "axisPlacement": "left",
+            "axisLabel": "scored latency (ms)",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "axisCenteredZero": false,
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "numerically eligible (not approval)"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "numerically eligible (not approval)"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#3987e5"
+                }
+              },
+              {
+                "id": "custom.show",
+                "value": "points"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "significant, not takeover eligible"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "significant, not takeover eligible"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#56b5db"
+                }
+              },
+              {
+                "id": "custom.show",
+                "value": "points"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "not statistically significant"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "not statistically significant"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8f8f8f"
+                }
+              },
+              {
+                "id": "custom.show",
+                "value": "points"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "one or more gates failed"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "one or more gates failed"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#e02f44"
+                }
+              },
+              {
+                "id": "custom.show",
+                "value": "points"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "epoch baseline median"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "epoch baseline median"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#199e70"
+                }
+              },
+              {
+                "id": "custom.show",
+                "value": "points+lines"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    6,
+                    4
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "median takeover ceiling (inclusive)"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "median takeover ceiling (inclusive)"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#e0a52f"
+                }
+              },
+              {
+                "id": "custom.show",
+                "value": "points+lines"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    6,
+                    4
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^submitted_at_ms_[A-Z]+$"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsIso"
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "submission time"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "seriesMapping": "manual",
+        "dims": {},
+        "series": [
+          {
+            "x": "submitted_at_ms_A",
+            "y": "numerically eligible (not approval)",
+            "pointColor": {},
+            "pointSize": {
+              "fixed": 7
+            }
+          },
+          {
+            "x": "submitted_at_ms_B",
+            "y": "significant, not takeover eligible",
+            "pointColor": {},
+            "pointSize": {
+              "fixed": 7
+            }
+          },
+          {
+            "x": "submitted_at_ms_C",
+            "y": "not statistically significant",
+            "pointColor": {},
+            "pointSize": {
+              "fixed": 7
+            }
+          },
+          {
+            "x": "submitted_at_ms_D",
+            "y": "one or more gates failed",
+            "pointColor": {},
+            "pointSize": {
+              "fixed": 7
+            }
+          },
+          {
+            "x": "submitted_at_ms_E",
+            "y": "epoch baseline median",
+            "pointColor": {},
+            "pointSize": {
+              "fixed": 7
+            }
+          },
+          {
+            "x": "submitted_at_ms_F",
+            "y": "median takeover ceiling (inclusive)",
+            "pointColor": {},
+            "pointSize": {
+              "fixed": 7
+            }
+          }
+        ],
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        },
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        }
+      },
+      "transformations": [
+        {
+          "id": "convertFieldType",
+          "options": {
+            "conversions": [
+              {
+                "targetField": "submitted_at_ms",
+                "destinationType": "number"
+              }
+            ]
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "field": "submitted_at_ms",
+                "desc": false
+              }
+            ]
+          }
+        },
+        {
+          "id": "organize",
+          "filter": {
+            "id": "byRefId",
+            "options": "A"
+          },
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {},
+            "renameByName": {
+              "Value": "numerically eligible (not approval)",
+              "Value #A": "numerically eligible (not approval)",
+              "submitted_at_ms": "submitted_at_ms_A"
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "filter": {
+            "id": "byRefId",
+            "options": "B"
+          },
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {},
+            "renameByName": {
+              "Value": "significant, not takeover eligible",
+              "Value #B": "significant, not takeover eligible",
+              "submitted_at_ms": "submitted_at_ms_B"
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "filter": {
+            "id": "byRefId",
+            "options": "C"
+          },
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {},
+            "renameByName": {
+              "Value": "not statistically significant",
+              "Value #C": "not statistically significant",
+              "submitted_at_ms": "submitted_at_ms_C"
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "filter": {
+            "id": "byRefId",
+            "options": "D"
+          },
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {},
+            "renameByName": {
+              "Value": "one or more gates failed",
+              "Value #D": "one or more gates failed",
+              "submitted_at_ms": "submitted_at_ms_D"
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "filter": {
+            "id": "byRefId",
+            "options": "E"
+          },
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {},
+            "renameByName": {
+              "Value": "epoch baseline median",
+              "Value #E": "epoch baseline median",
+              "submitted_at_ms": "submitted_at_ms_E"
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "filter": {
+            "id": "byRefId",
+            "options": "F"
+          },
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {},
+            "renameByName": {
+              "Value": "median takeover ceiling (inclusive)",
+              "Value #F": "median takeover ceiling (inclusive)",
+              "submitted_at_ms": "submitted_at_ms_F"
+            }
+          }
+        }
+      ],
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (job_id, round_id, submitted_at_ms, classification) (urnetwork_competition_submission_score_value{env=\"$env\",host=~\"$host\",round_id=\"$score_round\",statistic=\"median_raw_ms\",classification=\"eligible\"} and ignoring(job_id, submitted_at_ms, statistic, classification) ((urnetwork_competition_submission_score_snapshot_ready{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and (urnetwork_competition_submission_score_snapshot_complete{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) >= 0) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) <= urnetwork_competition_submission_score_snapshot_max_age_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"})))",
+          "format": "table",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "B",
+          "expr": "max by (job_id, round_id, submitted_at_ms, classification) (urnetwork_competition_submission_score_value{env=\"$env\",host=~\"$host\",round_id=\"$score_round\",statistic=\"median_raw_ms\",classification=\"significant_only\"} and ignoring(job_id, submitted_at_ms, statistic, classification) ((urnetwork_competition_submission_score_snapshot_ready{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and (urnetwork_competition_submission_score_snapshot_complete{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) >= 0) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) <= urnetwork_competition_submission_score_snapshot_max_age_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"})))",
+          "format": "table",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "C",
+          "expr": "max by (job_id, round_id, submitted_at_ms, classification) (urnetwork_competition_submission_score_value{env=\"$env\",host=~\"$host\",round_id=\"$score_round\",statistic=\"median_raw_ms\",classification=\"not_significant\"} and ignoring(job_id, submitted_at_ms, statistic, classification) ((urnetwork_competition_submission_score_snapshot_ready{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and (urnetwork_competition_submission_score_snapshot_complete{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) >= 0) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) <= urnetwork_competition_submission_score_snapshot_max_age_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"})))",
+          "format": "table",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "D",
+          "expr": "max by (job_id, round_id, submitted_at_ms, classification) (urnetwork_competition_submission_score_value{env=\"$env\",host=~\"$host\",round_id=\"$score_round\",statistic=\"median_raw_ms\",classification=\"gate_failed\"} and ignoring(job_id, submitted_at_ms, statistic, classification) ((urnetwork_competition_submission_score_snapshot_ready{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and (urnetwork_competition_submission_score_snapshot_complete{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) >= 0) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) <= urnetwork_competition_submission_score_snapshot_max_age_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"})))",
+          "format": "table",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "E",
+          "expr": "max by (job_id, round_id, submitted_at_ms, classification) (urnetwork_competition_submission_score_value{env=\"$env\",host=~\"$host\",round_id=\"$score_round\",statistic=\"baseline_median_raw_ms\"} and ignoring(job_id, submitted_at_ms, statistic, classification) ((urnetwork_competition_submission_score_snapshot_ready{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and (urnetwork_competition_submission_score_snapshot_complete{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) >= 0) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) <= urnetwork_competition_submission_score_snapshot_max_age_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"})))",
+          "format": "table",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "F",
+          "expr": "max by (job_id, round_id, submitted_at_ms, classification) (urnetwork_competition_submission_score_value{env=\"$env\",host=~\"$host\",round_id=\"$score_round\",statistic=\"practical_median_max_ms\"} and ignoring(job_id, submitted_at_ms, statistic, classification) ((urnetwork_competition_submission_score_snapshot_ready{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and (urnetwork_competition_submission_score_snapshot_complete{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) >= 0) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) <= urnetwork_competition_submission_score_snapshot_max_age_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"})))",
+          "format": "table",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 32,
+      "type": "xychart",
+      "title": "submission mean score versus measured significance fringe",
+      "description": "Lower is better. Green is the stored baseline mean. Purple is baseline mean × (1 − this candidate's recorded minimum significant improvement percentage / 100); candidate variance changes that fringe. It is not a universal latency threshold and does not replace the recorded p-value or the median takeover test.",
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 84
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#8f8f8f"
+          },
+          "custom": {
+            "show": "points",
+            "pointSize": {
+              "fixed": 7
+            },
+            "lineWidth": 0,
+            "axisPlacement": "left",
+            "axisLabel": "scored latency (ms)",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "axisCenteredZero": false,
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "numerically eligible (not approval)"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "numerically eligible (not approval)"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#3987e5"
+                }
+              },
+              {
+                "id": "custom.show",
+                "value": "points"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "significant, not takeover eligible"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "significant, not takeover eligible"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#56b5db"
+                }
+              },
+              {
+                "id": "custom.show",
+                "value": "points"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "not statistically significant"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "not statistically significant"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8f8f8f"
+                }
+              },
+              {
+                "id": "custom.show",
+                "value": "points"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "one or more gates failed"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "one or more gates failed"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#e02f44"
+                }
+              },
+              {
+                "id": "custom.show",
+                "value": "points"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "epoch baseline mean"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "epoch baseline mean"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#199e70"
+                }
+              },
+              {
+                "id": "custom.show",
+                "value": "points+lines"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    6,
+                    4
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "candidate-specific Welch mean boundary"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "candidate-specific Welch mean boundary"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#b877d9"
+                }
+              },
+              {
+                "id": "custom.show",
+                "value": "points+lines"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    6,
+                    4
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^submitted_at_ms_[A-Z]+$"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsIso"
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "submission time"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "seriesMapping": "manual",
+        "dims": {},
+        "series": [
+          {
+            "x": "submitted_at_ms_A",
+            "y": "numerically eligible (not approval)",
+            "pointColor": {},
+            "pointSize": {
+              "fixed": 7
+            }
+          },
+          {
+            "x": "submitted_at_ms_B",
+            "y": "significant, not takeover eligible",
+            "pointColor": {},
+            "pointSize": {
+              "fixed": 7
+            }
+          },
+          {
+            "x": "submitted_at_ms_C",
+            "y": "not statistically significant",
+            "pointColor": {},
+            "pointSize": {
+              "fixed": 7
+            }
+          },
+          {
+            "x": "submitted_at_ms_D",
+            "y": "one or more gates failed",
+            "pointColor": {},
+            "pointSize": {
+              "fixed": 7
+            }
+          },
+          {
+            "x": "submitted_at_ms_E",
+            "y": "epoch baseline mean",
+            "pointColor": {},
+            "pointSize": {
+              "fixed": 7
+            }
+          },
+          {
+            "x": "submitted_at_ms_F",
+            "y": "candidate-specific Welch mean boundary",
+            "pointColor": {},
+            "pointSize": {
+              "fixed": 7
+            }
+          }
+        ],
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        },
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        }
+      },
+      "transformations": [
+        {
+          "id": "convertFieldType",
+          "options": {
+            "conversions": [
+              {
+                "targetField": "submitted_at_ms",
+                "destinationType": "number"
+              }
+            ]
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "field": "submitted_at_ms",
+                "desc": false
+              }
+            ]
+          }
+        },
+        {
+          "id": "organize",
+          "filter": {
+            "id": "byRefId",
+            "options": "A"
+          },
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {},
+            "renameByName": {
+              "Value": "numerically eligible (not approval)",
+              "Value #A": "numerically eligible (not approval)",
+              "submitted_at_ms": "submitted_at_ms_A"
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "filter": {
+            "id": "byRefId",
+            "options": "B"
+          },
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {},
+            "renameByName": {
+              "Value": "significant, not takeover eligible",
+              "Value #B": "significant, not takeover eligible",
+              "submitted_at_ms": "submitted_at_ms_B"
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "filter": {
+            "id": "byRefId",
+            "options": "C"
+          },
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {},
+            "renameByName": {
+              "Value": "not statistically significant",
+              "Value #C": "not statistically significant",
+              "submitted_at_ms": "submitted_at_ms_C"
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "filter": {
+            "id": "byRefId",
+            "options": "D"
+          },
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {},
+            "renameByName": {
+              "Value": "one or more gates failed",
+              "Value #D": "one or more gates failed",
+              "submitted_at_ms": "submitted_at_ms_D"
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "filter": {
+            "id": "byRefId",
+            "options": "E"
+          },
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {},
+            "renameByName": {
+              "Value": "epoch baseline mean",
+              "Value #E": "epoch baseline mean",
+              "submitted_at_ms": "submitted_at_ms_E"
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "filter": {
+            "id": "byRefId",
+            "options": "F"
+          },
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {},
+            "renameByName": {
+              "Value": "candidate-specific Welch mean boundary",
+              "Value #F": "candidate-specific Welch mean boundary",
+              "submitted_at_ms": "submitted_at_ms_F"
+            }
+          }
+        }
+      ],
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (job_id, round_id, submitted_at_ms, classification) (urnetwork_competition_submission_score_value{env=\"$env\",host=~\"$host\",round_id=\"$score_round\",statistic=\"mean_raw_ms\",classification=\"eligible\"} and ignoring(job_id, submitted_at_ms, statistic, classification) ((urnetwork_competition_submission_score_snapshot_ready{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and (urnetwork_competition_submission_score_snapshot_complete{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) >= 0) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) <= urnetwork_competition_submission_score_snapshot_max_age_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"})))",
+          "format": "table",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "B",
+          "expr": "max by (job_id, round_id, submitted_at_ms, classification) (urnetwork_competition_submission_score_value{env=\"$env\",host=~\"$host\",round_id=\"$score_round\",statistic=\"mean_raw_ms\",classification=\"significant_only\"} and ignoring(job_id, submitted_at_ms, statistic, classification) ((urnetwork_competition_submission_score_snapshot_ready{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and (urnetwork_competition_submission_score_snapshot_complete{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) >= 0) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) <= urnetwork_competition_submission_score_snapshot_max_age_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"})))",
+          "format": "table",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "C",
+          "expr": "max by (job_id, round_id, submitted_at_ms, classification) (urnetwork_competition_submission_score_value{env=\"$env\",host=~\"$host\",round_id=\"$score_round\",statistic=\"mean_raw_ms\",classification=\"not_significant\"} and ignoring(job_id, submitted_at_ms, statistic, classification) ((urnetwork_competition_submission_score_snapshot_ready{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and (urnetwork_competition_submission_score_snapshot_complete{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) >= 0) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) <= urnetwork_competition_submission_score_snapshot_max_age_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"})))",
+          "format": "table",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "D",
+          "expr": "max by (job_id, round_id, submitted_at_ms, classification) (urnetwork_competition_submission_score_value{env=\"$env\",host=~\"$host\",round_id=\"$score_round\",statistic=\"mean_raw_ms\",classification=\"gate_failed\"} and ignoring(job_id, submitted_at_ms, statistic, classification) ((urnetwork_competition_submission_score_snapshot_ready{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and (urnetwork_competition_submission_score_snapshot_complete{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) >= 0) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) <= urnetwork_competition_submission_score_snapshot_max_age_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"})))",
+          "format": "table",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "E",
+          "expr": "max by (job_id, round_id, submitted_at_ms, classification) (urnetwork_competition_submission_score_value{env=\"$env\",host=~\"$host\",round_id=\"$score_round\",statistic=\"baseline_mean_raw_ms\"} and ignoring(job_id, submitted_at_ms, statistic, classification) ((urnetwork_competition_submission_score_snapshot_ready{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and (urnetwork_competition_submission_score_snapshot_complete{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) >= 0) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) <= urnetwork_competition_submission_score_snapshot_max_age_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"})))",
+          "format": "table",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "F",
+          "expr": "max by (job_id, round_id, submitted_at_ms, classification) (urnetwork_competition_submission_score_value{env=\"$env\",host=~\"$host\",round_id=\"$score_round\",statistic=\"significant_mean_max_ms\"} and ignoring(job_id, submitted_at_ms, statistic, classification) ((urnetwork_competition_submission_score_snapshot_ready{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and (urnetwork_competition_submission_score_snapshot_complete{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) >= 0) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) <= urnetwork_competition_submission_score_snapshot_max_age_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"})))",
+          "format": "table",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 33,
+      "type": "xychart",
+      "title": "mean improvement versus statistical and practical margins",
+      "description": "Higher is better. Points use the stored observed mean improvement percentage. Green is zero improvement; purple is the stored candidate-specific significance requirement; amber is the frozen practical margin for reference. Actual takeover also requires the MEDIAN ceiling above plus all gates; crossing a mean percentage alone is not sufficient.",
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 93
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#8f8f8f"
+          },
+          "custom": {
+            "show": "points",
+            "pointSize": {
+              "fixed": 7
+            },
+            "lineWidth": 0,
+            "axisPlacement": "left",
+            "axisLabel": "improvement (%)",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "axisCenteredZero": false,
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "numerically eligible (not approval)"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "numerically eligible (not approval)"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#3987e5"
+                }
+              },
+              {
+                "id": "custom.show",
+                "value": "points"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "significant, not takeover eligible"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "significant, not takeover eligible"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#56b5db"
+                }
+              },
+              {
+                "id": "custom.show",
+                "value": "points"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "not statistically significant"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "not statistically significant"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8f8f8f"
+                }
+              },
+              {
+                "id": "custom.show",
+                "value": "points"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "one or more gates failed"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "one or more gates failed"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#e02f44"
+                }
+              },
+              {
+                "id": "custom.show",
+                "value": "points"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "baseline: zero improvement"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "baseline: zero improvement"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#199e70"
+                }
+              },
+              {
+                "id": "custom.show",
+                "value": "points+lines"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    6,
+                    4
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "candidate-specific significance fringe"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "candidate-specific significance fringe"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#b877d9"
+                }
+              },
+              {
+                "id": "custom.show",
+                "value": "points+lines"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    6,
+                    4
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "frozen practical margin (median test)"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "frozen practical margin (median test)"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#e0a52f"
+                }
+              },
+              {
+                "id": "custom.show",
+                "value": "points+lines"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    6,
+                    4
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^submitted_at_ms_[A-Z]+$"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsIso"
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "submission time"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "seriesMapping": "manual",
+        "dims": {},
+        "series": [
+          {
+            "x": "submitted_at_ms_A",
+            "y": "numerically eligible (not approval)",
+            "pointColor": {},
+            "pointSize": {
+              "fixed": 7
+            }
+          },
+          {
+            "x": "submitted_at_ms_B",
+            "y": "significant, not takeover eligible",
+            "pointColor": {},
+            "pointSize": {
+              "fixed": 7
+            }
+          },
+          {
+            "x": "submitted_at_ms_C",
+            "y": "not statistically significant",
+            "pointColor": {},
+            "pointSize": {
+              "fixed": 7
+            }
+          },
+          {
+            "x": "submitted_at_ms_D",
+            "y": "one or more gates failed",
+            "pointColor": {},
+            "pointSize": {
+              "fixed": 7
+            }
+          },
+          {
+            "x": "submitted_at_ms_E",
+            "y": "baseline: zero improvement",
+            "pointColor": {},
+            "pointSize": {
+              "fixed": 7
+            }
+          },
+          {
+            "x": "submitted_at_ms_F",
+            "y": "candidate-specific significance fringe",
+            "pointColor": {},
+            "pointSize": {
+              "fixed": 7
+            }
+          },
+          {
+            "x": "submitted_at_ms_G",
+            "y": "frozen practical margin (median test)",
+            "pointColor": {},
+            "pointSize": {
+              "fixed": 7
+            }
+          }
+        ],
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        },
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        }
+      },
+      "transformations": [
+        {
+          "id": "convertFieldType",
+          "options": {
+            "conversions": [
+              {
+                "targetField": "submitted_at_ms",
+                "destinationType": "number"
+              }
+            ]
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "field": "submitted_at_ms",
+                "desc": false
+              }
+            ]
+          }
+        },
+        {
+          "id": "organize",
+          "filter": {
+            "id": "byRefId",
+            "options": "A"
+          },
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {},
+            "renameByName": {
+              "Value": "numerically eligible (not approval)",
+              "Value #A": "numerically eligible (not approval)",
+              "submitted_at_ms": "submitted_at_ms_A"
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "filter": {
+            "id": "byRefId",
+            "options": "B"
+          },
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {},
+            "renameByName": {
+              "Value": "significant, not takeover eligible",
+              "Value #B": "significant, not takeover eligible",
+              "submitted_at_ms": "submitted_at_ms_B"
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "filter": {
+            "id": "byRefId",
+            "options": "C"
+          },
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {},
+            "renameByName": {
+              "Value": "not statistically significant",
+              "Value #C": "not statistically significant",
+              "submitted_at_ms": "submitted_at_ms_C"
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "filter": {
+            "id": "byRefId",
+            "options": "D"
+          },
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {},
+            "renameByName": {
+              "Value": "one or more gates failed",
+              "Value #D": "one or more gates failed",
+              "submitted_at_ms": "submitted_at_ms_D"
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "filter": {
+            "id": "byRefId",
+            "options": "E"
+          },
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {},
+            "renameByName": {
+              "Value": "baseline: zero improvement",
+              "Value #E": "baseline: zero improvement",
+              "submitted_at_ms": "submitted_at_ms_E"
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "filter": {
+            "id": "byRefId",
+            "options": "F"
+          },
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {},
+            "renameByName": {
+              "Value": "candidate-specific significance fringe",
+              "Value #F": "candidate-specific significance fringe",
+              "submitted_at_ms": "submitted_at_ms_F"
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "filter": {
+            "id": "byRefId",
+            "options": "G"
+          },
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {},
+            "renameByName": {
+              "Value": "frozen practical margin (median test)",
+              "Value #G": "frozen practical margin (median test)",
+              "submitted_at_ms": "submitted_at_ms_G"
+            }
+          }
+        }
+      ],
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (job_id, round_id, submitted_at_ms, classification) (urnetwork_competition_submission_score_value{env=\"$env\",host=~\"$host\",round_id=\"$score_round\",statistic=\"mean_improvement_percent\",classification=\"eligible\"} and ignoring(job_id, submitted_at_ms, statistic, classification) ((urnetwork_competition_submission_score_snapshot_ready{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and (urnetwork_competition_submission_score_snapshot_complete{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) >= 0) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) <= urnetwork_competition_submission_score_snapshot_max_age_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"})))",
+          "format": "table",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "B",
+          "expr": "max by (job_id, round_id, submitted_at_ms, classification) (urnetwork_competition_submission_score_value{env=\"$env\",host=~\"$host\",round_id=\"$score_round\",statistic=\"mean_improvement_percent\",classification=\"significant_only\"} and ignoring(job_id, submitted_at_ms, statistic, classification) ((urnetwork_competition_submission_score_snapshot_ready{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and (urnetwork_competition_submission_score_snapshot_complete{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) >= 0) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) <= urnetwork_competition_submission_score_snapshot_max_age_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"})))",
+          "format": "table",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "C",
+          "expr": "max by (job_id, round_id, submitted_at_ms, classification) (urnetwork_competition_submission_score_value{env=\"$env\",host=~\"$host\",round_id=\"$score_round\",statistic=\"mean_improvement_percent\",classification=\"not_significant\"} and ignoring(job_id, submitted_at_ms, statistic, classification) ((urnetwork_competition_submission_score_snapshot_ready{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and (urnetwork_competition_submission_score_snapshot_complete{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) >= 0) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) <= urnetwork_competition_submission_score_snapshot_max_age_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"})))",
+          "format": "table",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "D",
+          "expr": "max by (job_id, round_id, submitted_at_ms, classification) (urnetwork_competition_submission_score_value{env=\"$env\",host=~\"$host\",round_id=\"$score_round\",statistic=\"mean_improvement_percent\",classification=\"gate_failed\"} and ignoring(job_id, submitted_at_ms, statistic, classification) ((urnetwork_competition_submission_score_snapshot_ready{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and (urnetwork_competition_submission_score_snapshot_complete{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) >= 0) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) <= urnetwork_competition_submission_score_snapshot_max_age_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"})))",
+          "format": "table",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "E",
+          "expr": "max by (job_id, round_id, submitted_at_ms, classification) (urnetwork_competition_submission_score_value{env=\"$env\",host=~\"$host\",round_id=\"$score_round\",statistic=\"zero\"} and ignoring(job_id, submitted_at_ms, statistic, classification) ((urnetwork_competition_submission_score_snapshot_ready{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and (urnetwork_competition_submission_score_snapshot_complete{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) >= 0) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) <= urnetwork_competition_submission_score_snapshot_max_age_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"})))",
+          "format": "table",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "F",
+          "expr": "max by (job_id, round_id, submitted_at_ms, classification) (urnetwork_competition_submission_score_value{env=\"$env\",host=~\"$host\",round_id=\"$score_round\",statistic=\"minimum_significant_improvement_percent\"} and ignoring(job_id, submitted_at_ms, statistic, classification) ((urnetwork_competition_submission_score_snapshot_ready{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and (urnetwork_competition_submission_score_snapshot_complete{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) >= 0) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) <= urnetwork_competition_submission_score_snapshot_max_age_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"})))",
+          "format": "table",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "G",
+          "expr": "max by (job_id, round_id, submitted_at_ms, classification) (urnetwork_competition_submission_score_value{env=\"$env\",host=~\"$host\",round_id=\"$score_round\",statistic=\"takeover_margin_percent\"} and ignoring(job_id, submitted_at_ms, statistic, classification) ((urnetwork_competition_submission_score_snapshot_ready{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and (urnetwork_competition_submission_score_snapshot_complete{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) >= 0) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) <= urnetwork_competition_submission_score_snapshot_max_age_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"})))",
+          "format": "table",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 34,
+      "type": "xychart",
+      "title": "recorded one-sided p-value versus alpha",
+      "description": "Lower is better. Each point is the stored one-sided Welch p-value; purple is that score's stored alpha. No new significance test is performed by the dashboard. Colors retain gate/takeover classification; a low p-value alone does not approve a winner.",
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 102
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#8f8f8f"
+          },
+          "custom": {
+            "show": "points",
+            "pointSize": {
+              "fixed": 7
+            },
+            "lineWidth": 0,
+            "axisPlacement": "left",
+            "axisLabel": "one-sided p-value",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "axisCenteredZero": false,
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "numerically eligible (not approval)"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "numerically eligible (not approval)"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#3987e5"
+                }
+              },
+              {
+                "id": "custom.show",
+                "value": "points"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "significant, not takeover eligible"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "significant, not takeover eligible"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#56b5db"
+                }
+              },
+              {
+                "id": "custom.show",
+                "value": "points"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "not statistically significant"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "not statistically significant"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8f8f8f"
+                }
+              },
+              {
+                "id": "custom.show",
+                "value": "points"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "one or more gates failed"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "one or more gates failed"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#e02f44"
+                }
+              },
+              {
+                "id": "custom.show",
+                "value": "points"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "recorded significance alpha (inclusive)"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "recorded significance alpha (inclusive)"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#b877d9"
+                }
+              },
+              {
+                "id": "custom.show",
+                "value": "points+lines"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    6,
+                    4
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^submitted_at_ms_[A-Z]+$"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsIso"
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "submission time"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "seriesMapping": "manual",
+        "dims": {},
+        "series": [
+          {
+            "x": "submitted_at_ms_A",
+            "y": "numerically eligible (not approval)",
+            "pointColor": {},
+            "pointSize": {
+              "fixed": 7
+            }
+          },
+          {
+            "x": "submitted_at_ms_B",
+            "y": "significant, not takeover eligible",
+            "pointColor": {},
+            "pointSize": {
+              "fixed": 7
+            }
+          },
+          {
+            "x": "submitted_at_ms_C",
+            "y": "not statistically significant",
+            "pointColor": {},
+            "pointSize": {
+              "fixed": 7
+            }
+          },
+          {
+            "x": "submitted_at_ms_D",
+            "y": "one or more gates failed",
+            "pointColor": {},
+            "pointSize": {
+              "fixed": 7
+            }
+          },
+          {
+            "x": "submitted_at_ms_E",
+            "y": "recorded significance alpha (inclusive)",
+            "pointColor": {},
+            "pointSize": {
+              "fixed": 7
+            }
+          }
+        ],
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        },
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        }
+      },
+      "transformations": [
+        {
+          "id": "convertFieldType",
+          "options": {
+            "conversions": [
+              {
+                "targetField": "submitted_at_ms",
+                "destinationType": "number"
+              }
+            ]
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "field": "submitted_at_ms",
+                "desc": false
+              }
+            ]
+          }
+        },
+        {
+          "id": "organize",
+          "filter": {
+            "id": "byRefId",
+            "options": "A"
+          },
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {},
+            "renameByName": {
+              "Value": "numerically eligible (not approval)",
+              "Value #A": "numerically eligible (not approval)",
+              "submitted_at_ms": "submitted_at_ms_A"
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "filter": {
+            "id": "byRefId",
+            "options": "B"
+          },
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {},
+            "renameByName": {
+              "Value": "significant, not takeover eligible",
+              "Value #B": "significant, not takeover eligible",
+              "submitted_at_ms": "submitted_at_ms_B"
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "filter": {
+            "id": "byRefId",
+            "options": "C"
+          },
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {},
+            "renameByName": {
+              "Value": "not statistically significant",
+              "Value #C": "not statistically significant",
+              "submitted_at_ms": "submitted_at_ms_C"
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "filter": {
+            "id": "byRefId",
+            "options": "D"
+          },
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {},
+            "renameByName": {
+              "Value": "one or more gates failed",
+              "Value #D": "one or more gates failed",
+              "submitted_at_ms": "submitted_at_ms_D"
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "filter": {
+            "id": "byRefId",
+            "options": "E"
+          },
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {},
+            "renameByName": {
+              "Value": "recorded significance alpha (inclusive)",
+              "Value #E": "recorded significance alpha (inclusive)",
+              "submitted_at_ms": "submitted_at_ms_E"
+            }
+          }
+        }
+      ],
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (job_id, round_id, submitted_at_ms, classification) (urnetwork_competition_submission_score_value{env=\"$env\",host=~\"$host\",round_id=\"$score_round\",statistic=\"one_sided_p_value\",classification=\"eligible\"} and ignoring(job_id, submitted_at_ms, statistic, classification) ((urnetwork_competition_submission_score_snapshot_ready{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and (urnetwork_competition_submission_score_snapshot_complete{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) >= 0) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) <= urnetwork_competition_submission_score_snapshot_max_age_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"})))",
+          "format": "table",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "B",
+          "expr": "max by (job_id, round_id, submitted_at_ms, classification) (urnetwork_competition_submission_score_value{env=\"$env\",host=~\"$host\",round_id=\"$score_round\",statistic=\"one_sided_p_value\",classification=\"significant_only\"} and ignoring(job_id, submitted_at_ms, statistic, classification) ((urnetwork_competition_submission_score_snapshot_ready{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and (urnetwork_competition_submission_score_snapshot_complete{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) >= 0) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) <= urnetwork_competition_submission_score_snapshot_max_age_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"})))",
+          "format": "table",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "C",
+          "expr": "max by (job_id, round_id, submitted_at_ms, classification) (urnetwork_competition_submission_score_value{env=\"$env\",host=~\"$host\",round_id=\"$score_round\",statistic=\"one_sided_p_value\",classification=\"not_significant\"} and ignoring(job_id, submitted_at_ms, statistic, classification) ((urnetwork_competition_submission_score_snapshot_ready{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and (urnetwork_competition_submission_score_snapshot_complete{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) >= 0) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) <= urnetwork_competition_submission_score_snapshot_max_age_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"})))",
+          "format": "table",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "D",
+          "expr": "max by (job_id, round_id, submitted_at_ms, classification) (urnetwork_competition_submission_score_value{env=\"$env\",host=~\"$host\",round_id=\"$score_round\",statistic=\"one_sided_p_value\",classification=\"gate_failed\"} and ignoring(job_id, submitted_at_ms, statistic, classification) ((urnetwork_competition_submission_score_snapshot_ready{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and (urnetwork_competition_submission_score_snapshot_complete{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) >= 0) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) <= urnetwork_competition_submission_score_snapshot_max_age_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"})))",
+          "format": "table",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "E",
+          "expr": "max by (job_id, round_id, submitted_at_ms, classification) (urnetwork_competition_submission_score_value{env=\"$env\",host=~\"$host\",round_id=\"$score_round\",statistic=\"alpha\"} and ignoring(job_id, submitted_at_ms, statistic, classification) ((urnetwork_competition_submission_score_snapshot_ready{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and (urnetwork_competition_submission_score_snapshot_complete{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) >= 0) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) <= urnetwork_competition_submission_score_snapshot_max_age_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"})))",
+          "format": "table",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 35,
+      "type": "table",
+      "title": "submission identity and median score",
+      "description": "Maps every plotted submission-time coordinate to its exact job ID. Sorted by original submitted_at, never by evaluation finish or metric scrape time. Scores remain operator-only.",
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 111
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ms"
+              },
+              {
+                "id": "displayName",
+                "value": "median scored latency"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "submitted_at_ms"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsIso"
+              },
+              {
+                "id": "displayName",
+                "value": "submitted at"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "sortBy": [
+          {
+            "displayName": "submitted at",
+            "desc": false
+          }
+        ]
+      },
+      "transformations": [
+        {
+          "id": "convertFieldType",
+          "options": {
+            "conversions": [
+              {
+                "targetField": "submitted_at_ms",
+                "destinationType": "number"
+              }
+            ]
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "field": "submitted_at_ms",
+                "desc": false
+              }
+            ]
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {
+              "submitted_at_ms": 0,
+              "job_id": 1,
+              "classification": 2,
+              "Value": 3,
+              "round_id": 4
+            }
+          }
+        }
+      ],
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (job_id, round_id, submitted_at_ms, classification) (urnetwork_competition_submission_score_value{env=\"$env\",host=~\"$host\",round_id=\"$score_round\",statistic=\"median_raw_ms\"} and ignoring(job_id, submitted_at_ms, statistic, classification) ((urnetwork_competition_submission_score_snapshot_ready{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and (urnetwork_competition_submission_score_snapshot_complete{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"} == 1) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) >= 0) and ((time() - urnetwork_competition_submission_score_snapshot_timestamp_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"}) <= urnetwork_competition_submission_score_snapshot_max_age_seconds{env=\"$env\",host=~\"$host\",round_id=\"$score_round\"})))",
+          "format": "table",
+          "instant": true,
+          "range": false
+        }
+      ]
     }
   ]
 }
