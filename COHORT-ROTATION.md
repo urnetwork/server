@@ -1,6 +1,6 @@
 # Verify cohort stale rotation
 
-**Status:** owner decision 2026-10-29 (LEADERTOP design question 6, part two). Implemented on `leadertop/cohort-stale-rotation` with tests. **Not merged:** it changes which providers the production validator measures, so the owner and sn-55 time the merge. Part one (claimed-fleet priority) is on main.
+**Status:** owner decision 2026-10-29 (LEADERTOP design question 6, part two). Merged on 2026-10-31 as f45365d84 and deployed the same day, on the owner's go: migration 902 at 06:37Z, api 2026.10.31-outerwerld-1086286270 and alt 2026.10.31-outerwerld-1086288290, then taskworker 2026.10.31-outerwerld-1086289460 at 06:49Z. The first rotation seeded the census at 06:49:57Z with 2,001 members and logged "1 stale members out for 1 waiting (census 2000, active 1999)". Part one (claimed-fleet priority) is on main.
 
 ## Problem
 
@@ -58,6 +58,7 @@ The lifetime set becomes the **active** set: the providers drawn ahead of new on
   - Its quality EMAs are never evicted, and only server-assigned hops are scored, so the census is every provider the server ever admits: at most 3,072, which leaves 1,024 for anything the validator scored outside the cohort.
   - The transition stays near 1.3 MB of its 2 MiB. Per-epoch and per-tempo counts follow the cohort size, which rotation does not change.
   - `controller/verify_controller.go` names the 4,096 bound (`verifyValidatorMaxProviders`) and refuses a `cohort_lifetime_limit` above it.
+- **Production check (2026-10-31 18:15Z, read-only, snow `/srv/sn25/sn-validator/durable/operators/no-1/stats.json`):** the live validator's census is 1,403 of 4,096. That is window 281, ema and ema_ppm 1,402 each (the same set), egress 149, with all four inside the union. The stored EMAs hold no set from outside the cohort, so a server census at its 3,072 cap stays well inside the bound. This settles the headroom question above. The sn-55 session that was to confirm it is no longer running.
 - **Owner:** time the merge. With no claimed fleets it is inert, so it can merge with the first binding that opens on mainnet.
 
 ## Deploy
