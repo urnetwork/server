@@ -162,3 +162,27 @@ server. No deployment is performed by this task. Earlier deployment timestamps
 in CPUOPT2 are historical observations, not evidence that a running release
 contains these fixes. Consumers must build with the corrected connect library
 as well as the server changes.
+
+### Deployed releases (2026-10-30 and 10-31)
+
+Each release below is the running release's exact source plus only the listed
+commits. A rebuild of each base was byte-identical to the running binary.
+
+| Service | Release | Adds | Deployed |
+|---|---|---|---|
+| proxy | `2026.10.30-outerwerld-1085916410` | connect e682f50a (cherry-pick of 239c8eef: keepalive on platform-transport dials) | g1–g10, 10-30 20:24–20:45Z |
+| connect | `2026.10.30-outerwerld-1085953670` | server 24b202b09 (exchange keepalive), d6aab314a (full native exchange deadlines; shared listener keepalive), 499dbaa6e (writev test) | beta, g1–g4, 10-31 02:01–02:44Z |
+
+Neither release contains the platform or relay watchdogs this review removed:
+- **proxy:** its connect tree (0d9b94a0) predates them.
+- **connect service:** it pins connect ea79e1f1.
+
+The proxy does carry the shared pause detector, which the logging finding
+covers. A hosted device's logger discards everything, so its fix (connect
+d9b6b24d) waits for the next proxy build. api `2026.10.30-outerwerld-1085932990`
+was built from connect 2b697716, which still had the watchdog code, but it
+links no PlatformTransport code.
+
+d6aab314a left four writev retention tests on server main asserting the lazy
+re-arm's deadline count. 499dbaa6e restored their pre-9976fe0f4 form, which
+pins one deadline per write.
