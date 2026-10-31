@@ -487,3 +487,48 @@ func TestStEpochUsageWholeWindowLegacyExclusionMatchesOriginal(t *testing.T) {
 		}
 	})
 }
+
+// Workers check a whole window's rows out of order, but the read still names
+// the refusal that comes first in statement order (block order for the
+// whole-window plan), whichever worker reached it first, with any worker count.
+func TestStEpochUsageWholeWindowFirstRefusalInStatementOrder(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		start := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+		providers := newStWholeWindowTestProviders()
+		nonconserving := map[string]any{"version": 1, "byte_count": 10,
+			"providers": []any{map[string]any{"client_id": providers.clients[0].String(), "network_id": providers.networks[0].String(), "byte_count": 9}}}
+		providers.seed(t, ctx, "first-refusal-0", start, payoutartifact.MaxClosedWorkRecords)
+		refused := []server.Id{}
+		for i := 1; i <= 3; i++ {
+			refused = append(refused, addStWholeWindowTestRow(t, ctx, start.Add(30*time.Minute), nonconserving))
+			providers.seed(t, ctx, fmt.Sprintf("first-refusal-%d", i), start, 10*stEpochUsageBatchRows)
+		}
+		server.Db(ctx, func(conn server.PgConn) {
+			server.RaisePgResult(conn.Exec(ctx, `ANALYZE transfer_contract`))
+		})
+		var first server.Id
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT contract_id FROM transfer_contract WHERE contract_id=ANY($1::uuid[]) ORDER BY ctid LIMIT 1`, refused).Scan(&first))
+		})
+		want := fmt.Sprintf("subnet contract %s: nonconserving contract provider usage", first)
+		workers := stEpochUsageCheckWorkers
+		defer func() { stEpochUsageCheckWorkers = workers }()
+		for _, count := range []int{1, 4, 4, 8} {
+			stEpochUsageCheckWorkers = count
+			for _, census := range []bool{true, false} {
+				var err error
+				if census {
+					_, _, _, err = GetStEpochProviderUsageWholeCensus(ctx, 17, start, start.Add(time.Hour))
+				} else {
+					_, err = GetStEpochProviderUsageAtEpoch(ctx, 17, start, start.Add(time.Hour))
+				}
+				if err == nil || err.Error() != want {
+					t.Fatalf("%d workers (census=%t): refusal %v, want the first in statement order: %s", count, census, err, want)
+				}
+			}
+		}
+	})
+}
