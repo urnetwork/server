@@ -66,6 +66,380 @@
     {"id": 49, "type": "timeseries", "title": "FindProviders2 answered providers by band and modern / s", "description": "Providers discovery answered, by band (native, borrowed, online) and whether each was modern (FP2-MODERN.md). With rank_modern_first on, a band holds non-modern providers only where its modern candidates ran short; named providers are not drawn and are not counted.", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 177}, "datasource": {"type": "prometheus", "uid": "warp-mimir"}, "fieldConfig": {"defaults": {"unit": "short", "min": 0}, "overrides": []}, "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}}, "targets": [{"refId": "A", "expr": "sum by (band, modern) (rate(urnetwork_findproviders2_answered_modern_total{env=\"$env\",service=\"api\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))", "legendFormat": "{{band}} modern={{modern}}"}]},
     {"id": 50, "type": "timeseries", "title": "FindProviders2 modern partition reads by state / s", "description": "Score index targets read by a modern-first or modern-only traversal, per source (native, union) and partition state. absent is a target an older export wrote, whose scores read as not modern: it falls to zero once a complete export from the partitioning code has rewritten the index (FP2-MODERN.md, Rollout step 5). stale is a read that straddled two exports' writes, which costs reads, never priority.", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 177}, "datasource": {"type": "prometheus", "uid": "warp-mimir"}, "fieldConfig": {"defaults": {"unit": "short", "min": 0}, "overrides": []}, "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}}, "targets": [{"refId": "A", "expr": "sum by (source, state) (rate(urnetwork_findproviders2_modern_partition_total{env=\"$env\",service=\"api\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))", "legendFormat": "{{source}} {{state}}"}]},
     {"id": 51, "type": "timeseries", "title": "FindProviders2 modern priority incomplete / s", "description": "Answers whose union allowance ended inside a modern phase before the band's modern survivors met its need, so the band filled from non-modern pages while modern pages were unread. Native sources read to exhaustion and never count here.", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 185}, "datasource": {"type": "prometheus", "uid": "warp-mimir"}, "fieldConfig": {"defaults": {"unit": "short", "min": 0}, "overrides": []}, "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}}, "targets": [{"refId": "A", "expr": "sum by (rank_mode) (rate(urnetwork_findproviders2_modern_priority_incomplete_total{env=\"$env\",service=\"api\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))", "legendFormat": "{{rank_mode}}"}]},
-    {"id": 52, "type": "timeseries", "title": "security notices / s by notice and result", "description": "Security notices owed with each payout wallet, subnet wallet, sign-in method and password change, and each API key created or deleted (notice api_key), by result: queued (a new email owed), coalesced (joined an email still waiting out its one-minute window), no_email (the account has no sign-in email, so nothing is owed), failed (the notice could not be owed; the change went through without it). The taskworker's account outbox panel shows their delivery.", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 185}, "datasource": {"type": "prometheus", "uid": "warp-mimir"}, "fieldConfig": {"defaults": {"unit": "short", "min": 0}, "overrides": []}, "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}}, "targets": [{"refId": "A", "expr": "sum by (service, notice, result) (rate(urnetwork_account_message_security_notices_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))", "legendFormat": "{{service}} {{notice}} {{result}}"}]}
+    {"id": 52, "type": "timeseries", "title": "security notices / s by notice and result", "description": "Security notices owed with each payout wallet, subnet wallet, sign-in method and password change, and each API key created or deleted (notice api_key), by result: queued (a new email owed), coalesced (joined an email still waiting out its one-minute window), no_email (the account has no sign-in email, so nothing is owed), failed (the notice could not be owed; the change went through without it). The taskworker's account outbox panel shows their delivery.", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 185}, "datasource": {"type": "prometheus", "uid": "warp-mimir"}, "fieldConfig": {"defaults": {"unit": "short", "min": 0}, "overrides": []}, "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}}, "targets": [{"refId": "A", "expr": "sum by (service, notice, result) (rate(urnetwork_account_message_security_notices_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))", "legendFormat": "{{service}} {{notice}} {{result}}"}]},
+    {
+      "id": 53,
+      "type": "timeseries",
+      "title": "decoded score page cache estimated bytes",
+      "description": "API process-local gauge: estimated decoded-page heap, not RSS or a measured whole-process allocation. Series remain per process; absent telemetry is no-data.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 193
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (block, host, instance) (urnetwork_client_score_page_cache_bytes{env=\"$env\",service=\"api\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "{{host}} {{block}} {{instance}}"
+        }
+      ]
+    },
+    {
+      "id": 54,
+      "type": "timeseries",
+      "title": "decoded score page cache pages",
+      "description": "Current decoded page count retained by each API process. This is neither a fleet-distinct page count nor provider population.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 193
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (block, host, instance) (urnetwork_client_score_page_cache_pages{env=\"$env\",service=\"api\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "{{host}} {{block}} {{instance}}"
+        }
+      ]
+    },
+    {
+      "id": 55,
+      "type": "timeseries",
+      "title": "decoded score page cache events / s",
+      "description": "Rates of the real lookup and eviction counters across selected API processes. Lookup result is bounded hit/miss; an eviction is a cache event, not a provider failure.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 201
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (result) (rate(urnetwork_client_score_page_cache_lookups_total{env=\"$env\",service=\"api\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "lookup {{result}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(urnetwork_client_score_page_cache_evictions_total{env=\"$env\",service=\"api\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "eviction"
+        }
+      ]
+    },
+    {
+      "id": 56,
+      "type": "timeseries",
+      "title": "Friends application events / s",
+      "description": "API-emitted application lifecycle events by fixed result, never applicant identity or form values. Accepted and notified can concern the same application, so these are event rates, not unique applicants.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 201
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (result) (rate(urnetwork_friends_apply_total{env=\"$env\",service=\"api\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{result}}"
+        }
+      ]
+    },
+    {
+      "id": 57,
+      "type": "timeseries",
+      "title": "FindProviders2 empty responses by target kind and reason / s",
+      "description": "Diagnostic counter rates for completed empty API responses, grouped only by fixed capability, target-kind and reason vocabularies. Target kind follows the producer: requested kind or the region/country a location fallback answered from. Caller classes and target country are aggregated; no requested target identity is exposed. These explain empty responses already counted by the outcome family and must not be added to it as independent requests.",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 209
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (capability, target_kind, reason) (rate(urnetwork_findproviders2_empty_outcomes_total{env=\"$env\",service=\"api\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{capability}} {{target_kind}} {{reason}}"
+        }
+      ]
+    },
+    {
+      "id": 58,
+      "type": "timeseries",
+      "title": "admitted supply totals per exporter / IP family",
+      "description": "Each taskworker exporter's snapshot sums its admitted country-target payloads before per-caller exclusions. IP families overlap: do not sum families or exporter snapshots into a distinct fleet population. Shows only observations aged 0–3600 seconds, matching the producer's one-hour publication contract; missing remains no-data. Scope is all taskworker exporters in the selected env, independent of API block/host filters.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 217
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (block, host, instance, ip_family) (urnetwork_client_score_admitted_providers_fleet{env=\"$env\",service=\"taskworker\",instance!=\"\"} and on (env, service, block, host, instance) (urnetwork_client_score_supply_measured_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"} >= time() - 3600 and urnetwork_client_score_supply_measured_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"} <= time()))",
+          "legendFormat": "{{ip_family}} {{host}} {{block}} {{instance}}"
+        }
+      ]
+    },
+    {
+      "id": 59,
+      "type": "timeseries",
+      "title": "score-export snapshot age per exporter",
+      "description": "Age of the same source timestamp used to gate the supply panels. Only non-future observations no older than the producer's one-hour publication bound are shown; absent/stale data is not zero. Scope is all taskworker exporters in the selected env, independent of API block/host filters.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 217
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "time() - max by (block, host, instance) (urnetwork_client_score_supply_measured_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"} >= time() - 3600 and urnetwork_client_score_supply_measured_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"} <= time())",
+          "legendFormat": "{{host}} {{block}} {{instance}}"
+        }
+      ]
+    },
+    {
+      "id": 60,
+      "type": "timeseries",
+      "title": "admitted country-target supply per exporter / IP family",
+      "description": "Per-country, per-family admitted payload counts from each fresh taskworker exporter, not actual providers eligible for a particular caller. Retaining the exporter identity avoids mixing successive snapshots. Country is the bounded two-letter vocabulary; IP-family series can overlap. Scope is selected env taskworker exporters, independent of API block/host filters; missing/stale observations remain no-data.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 225
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (block, host, instance, country, ip_family) (urnetwork_client_score_admitted_providers{env=\"$env\",service=\"taskworker\",instance!=\"\"} and on (env, service, block, host, instance) (urnetwork_client_score_supply_measured_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"} >= time() - 3600 and urnetwork_client_score_supply_measured_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"} <= time()))",
+          "legendFormat": "{{country}} {{ip_family}} {{host}} {{block}} {{instance}}"
+        }
+      ]
+    },
+    {
+      "id": 61,
+      "type": "timeseries",
+      "title": "FindProviders2 location fallback answers / s",
+      "description": "Rate of the real fallback counter by requested target kind and answering level (region/country/none). Strict requests do not climb and are not counted. These are diagnostic events for answers also counted by the outcome family, not additional independent request volume; no target identity is exposed.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 225
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (target_kind, level) (rate(urnetwork_findproviders2_location_fallback_total{env=\"$env\",service=\"api\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{target_kind}} → {{level}}"
+        }
+      ]
+    }
   ]
 }

@@ -60,11 +60,13 @@ const (
 	stDepositRetryDelay      = 15 * time.Minute
 	stFinalizePokeRetryDelay = 5 * time.Minute
 
-	// The close reads every contract closed in the epoch in one census
-	// statement. On Main the 24-hour epoch 0 closed 9.2M contracts, read in
-	// 195-419 s (mean 249 s); the 7-day epoch 1 projects to 64-71M, 30-55
-	// minutes at those rates. Three hours stays inside the 4-hour root commit
-	// window and leaves an hour to commit.
+	// The close reads every contract closed in the epoch in one snapshot. On
+	// Main the 24-hour epoch 0 closed 9.2M contracts; the 7-day epoch 3 closed
+	// ~400M, and its census statement, reading them in close-time index order
+	// (a random heap page per row), ran past this bound twice on 2026-10-30.
+	// A window past the census record bound now reads its usage alone in one
+	// block-ordered pass (model/st_provider_usage.go). Three hours stays inside
+	// the 4-hour root commit window and leaves an hour to commit.
 	stEpochCloseMaxTime = 3 * time.Hour
 )
 

@@ -201,6 +201,7 @@ func TestFindProviders2EmptyOutcomeExplainsTheOutcomeZeroBand(t *testing.T) {
 	zeroBand["result_count"] = "0"
 	explained := maps.Clone(cohort)
 	explained["target_kind"] = "none"
+	explained["target_country"] = ""
 	explained["reason"] = "no_specs"
 	outcomesBefore := selectionMetricCount(t, "urnetwork_findproviders2_outcomes_total", zeroBand)
 	explainedBefore := selectionMetricCount(t, "urnetwork_findproviders2_empty_outcomes_total", explained)
@@ -236,13 +237,13 @@ func TestRecordFindProviders2EmptyOutcomeSharesTheOutcomeCohortLabels(t *testing
 		if err != nil {
 			t.Fatal(err)
 		}
-		explained, err := findProviders2EmptyOutcomesTotal.GetMetricWithLabelValues("v6", "group", wantCountry, RankModeSpeed, "false", "modern", "group", "cache_missing")
+		explained, err := findProviders2EmptyOutcomesTotal.GetMetricWithLabelValues("v6", "group", wantCountry, RankModeSpeed, "false", "modern", "group", "", "cache_missing")
 		if err != nil {
 			t.Fatal(err)
 		}
 		outcomeBefore, explainedBefore := testutil.ToFloat64(outcome), testutil.ToFloat64(explained)
 		recordFindProviders2Outcome(args, callerCountry, 0)
-		recordFindProviders2EmptyOutcome(args, callerCountry, "group", "cache_missing")
+		recordFindProviders2EmptyOutcome(args, callerCountry, "group", "", "cache_missing")
 		if got := testutil.ToFloat64(outcome); got != outcomeBefore+1 {
 			t.Fatalf("%q: outcome zero band = %v, want %v", callerCountry, got, outcomeBefore+1)
 		}

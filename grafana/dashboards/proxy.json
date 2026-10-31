@@ -3153,6 +3153,93 @@
           "legendFormat": "removed-flag read failed"
         }
       ]
+    },
+    {
+      "id": 65,
+      "type": "timeseries",
+      "title": "WireGuard actual device peers",
+      "description": "Current peer-table size on each proxy device, distinct from configured clients (wg_peers). This is a gauge per selected process, not a peer-add rate or a fleet-distinct client count.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 209
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (block, host, instance) (urnetwork_proxy_wg_device_peers{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "{{host}} {{block}} {{instance}}"
+        }
+      ]
+    },
+    {
+      "id": 66,
+      "type": "timeseries",
+      "title": "WireGuard device-lifetime eviction and miss gauges",
+      "description": "The producer exports device-lifetime eviction and bounded peer-miss outcome counts as gauges. Plot their observed values without rate(); they may reset when the device is recreated and are not instantaneous failure rates. Missing outcomes remain no-data.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 209
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (block, host, instance) (urnetwork_proxy_wg_peer_evictions{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "evictions {{host}} {{block}} {{instance}}"
+        },
+        {
+          "refId": "B",
+          "expr": "max by (block, host, instance, outcome) (urnetwork_proxy_wg_peer_misses{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "miss {{outcome}} {{host}} {{block}} {{instance}}"
+        }
+      ]
     }
   ]
 }

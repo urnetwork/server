@@ -70,10 +70,25 @@ func TestSnTopMigrationMissingTablesReachSignal(t *testing.T) {
 func TestSnTopMigrationShapeFaultsReachSignal(t *testing.T) {
 	chainVersion := server.SnChainSchemaMigrationVersion()
 	topVersion := server.SnTopSchemaMigrationVersion()
+	replicaVersion := server.SnTopReplicaSchemaMigrationVersion()
+	const replicaOwner = "SN top-board replica provenance and genesis summary index"
 	faults := []struct {
 		name, owner, sql string
 		version          int
 	}{
+		// Look-alike indexes under the published names: uniqueness and key
+		// order are part of each pinned definition.
+		{name: "binding log position index made non-unique", owner: "SN chain-side top-board custody", version: chainVersion, sql: `DROP INDEX sn_fleet_binding_bound; CREATE INDEX sn_fleet_binding_bound ON sn_fleet_binding (deployment_key, client_id, bound_block, bound_log_index)`},
+		{name: "network position index reordered", owner: "SN top-board snapshots and history", version: topVersion, sql: `DROP INDEX sn_top_network_snapshot_position; CREATE INDEX sn_top_network_snapshot_position ON sn_top_network ("position", snapshot_id)`},
+		{name: "replica validator hotkey absent", owner: replicaOwner, version: replicaVersion, sql: `ALTER TABLE sn_top_snapshot DROP COLUMN replica_validator_hotkey`},
+		{name: "replica epoch narrowed", owner: replicaOwner, version: replicaVersion, sql: `ALTER TABLE sn_top_snapshot ALTER COLUMN replica_native_epoch TYPE integer`},
+		{name: "replica completeness nullable", owner: replicaOwner, version: replicaVersion, sql: `ALTER TABLE sn_top_snapshot ALTER COLUMN replica_complete DROP NOT NULL`},
+		{name: "replica completeness defaults complete", owner: replicaOwner, version: replicaVersion, sql: `ALTER TABLE sn_top_snapshot ALTER COLUMN replica_complete SET DEFAULT true`},
+		{name: "fleet replica availability absent", owner: replicaOwner, version: replicaVersion, sql: `ALTER TABLE sn_top_fleet DROP COLUMN replica_available`},
+		{name: "genesis marker default removed", owner: replicaOwner, version: replicaVersion, sql: `ALTER TABLE sn_head_summary ALTER COLUMN replica_genesis DROP DEFAULT`},
+		{name: "genesis summary index removed", owner: replicaOwner, version: replicaVersion, sql: `DROP INDEX sn_head_summary_replica_genesis`},
+		{name: "genesis summary index covers every summary", owner: replicaOwner, version: replicaVersion, sql: `DROP INDEX sn_head_summary_replica_genesis; CREATE INDEX sn_head_summary_replica_genesis ON sn_head_summary (netuid, validator_hotkey, native_epoch)`},
+		{name: "genesis summary index reordered", owner: replicaOwner, version: replicaVersion, sql: `DROP INDEX sn_head_summary_replica_genesis; CREATE INDEX sn_head_summary_replica_genesis ON sn_head_summary (validator_hotkey, netuid, native_epoch) WHERE replica_genesis = true`},
 		{name: "binding generation narrowed", owner: "SN chain-side top-board custody", version: chainVersion, sql: `ALTER TABLE sn_fleet_binding ALTER COLUMN generation TYPE integer`},
 		{name: "binding hotkey nullable", owner: "SN chain-side top-board custody", version: chainVersion, sql: `ALTER TABLE sn_fleet_binding ALTER COLUMN hotkey DROP NOT NULL`},
 		{name: "sync block hash narrowed", owner: "SN chain-side top-board custody", version: chainVersion, sql: `ALTER TABLE sn_fleet_binding_sync ALTER COLUMN block_hash TYPE varchar(79)`},

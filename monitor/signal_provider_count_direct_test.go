@@ -66,7 +66,7 @@ func TestProviderCountDirectBelowThresholdHasNoHealthySentinel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	findings, err := (providerCountProbe{}).check(context.Background(), env)
+	findings, err := (&providerCountProbe{}).check(context.Background(), env)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +108,7 @@ func TestProviderCountDirectCorrectionPreservesDiscoveryHealthyControl(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	findings, err := (providerCountProbe{}).check(context.Background(), env)
+	findings, err := (&providerCountProbe{}).check(context.Background(), env)
 	if err != nil {
 		t.Fatal(err)
 	}

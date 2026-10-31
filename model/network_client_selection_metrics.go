@@ -4,6 +4,7 @@ package model
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -65,6 +66,8 @@ type findProviders2LoadObservation struct {
 type findProviders2SelectionObservation struct {
 	args                 *FindProviders2Args
 	targetKind           string
+	targetCountry        string // the one country every location spec resolves to, "" otherwise
+	fallbackLevel        string // the region or country level the location fallback answered from, "" otherwise
 	requestClass         string
 	rankMode             string
 	stage                string
@@ -168,6 +171,41 @@ func findProviders2TargetKind(args *FindProviders2Args, countries map[string]ser
 	return kind
 }
 
+// The lowercase code of the one country every spec's location belongs to,
+// through the directory or, for a legacy entry, the country list; "" when the
+// specs name none, two countries, a group or the best available exits, or a
+// location neither resolves.
+func findProviders2TargetCountry(args *FindProviders2Args, countries map[string]server.Id, directory map[server.Id]*locationDirectoryEntry) string {
+	country := ""
+	for _, spec := range args.Specs {
+		if spec == nil {
+			continue
+		}
+		if spec.LocationGroupId != nil || spec.BestAvailable {
+			return ""
+		}
+		if spec.LocationId == nil {
+			continue
+		}
+		next := ""
+		if entry := directory[*spec.LocationId]; entry != nil {
+			next = strings.ToLower(entry.CountryCode)
+		} else {
+			for code, countryId := range countries {
+				if countryId == *spec.LocationId {
+					next = code
+					break
+				}
+			}
+		}
+		if next == "" || (country != "" && next != country) {
+			return ""
+		}
+		country = next
+	}
+	return country
+}
+
 // Ends the previous stage before starting the next; each request owns exactly
 // one inflight increment, which finish also releases on error or panic.
 func (self *findProviders2SelectionObservation) enter(stage string) {
@@ -259,6 +297,33 @@ func (self *findProviders2SelectionObservation) complete(resultCount int) {
 	default:
 		self.reason = self.filterReason()
 	}
+}
+
+// The target kind the answer came from: the requested kind, or the level the
+// location fallback climbed to (network_client_location_fallback.go). A
+// climbed empty answer read its target's country, or its region when the
+// climb ended there, last, so it is explained by that level's supply, not by
+// the narrow target the request named. A climb over targets in more than one
+// country keeps the requested kind, since no one country's supply explains it.
+func (self *findProviders2SelectionObservation) answeredTargetKind() string {
+	if self.fallbackLevel != "" && clientScoreSupplyCountry(self.targetCountry) {
+		return self.fallbackLevel
+	}
+	return self.targetKind
+}
+
+// Whether every target the request has read was published without an
+// admitted provider: the cache_empty boundary of complete, known before the
+// answer is. A missing or partial cache, an unavailable source and a
+// modern-only read that left rows unread are not proof of empty supply, and
+// a target whose admitted providers the request's filters removed was not
+// empty.
+func (self *findProviders2SelectionObservation) targetsWithoutSupply() bool {
+	return self.loaded == 0 &&
+		self.load.missingPages == 0 &&
+		self.load.missingTargets == 0 &&
+		!self.backfillUnavailable &&
+		self.load.unreadNonModernRows == 0
 }
 
 // Classifies actual removed candidates, not the presence of an exclusion

@@ -18,7 +18,7 @@ func TestMigrationsSnowTwoMemberSuccessorContractCustody(t *testing.T) {
 		t.Fatal("settlement checkpoint has wrong column or lifetime")
 	}
 	contract := migrationCurrentSuffixTestContract(t, 897)
-	if contract.artifact.rowColumn != 308 || contract.artifact.removedVersion != 0 || migrationCurrentSuffixTestContract(t, 893).artifact.removedVersion != 897 {
+	if contract.artifact.rowColumn != 308 || contract.artifact.removedVersion != 900 || migrationCurrentSuffixTestContract(t, 893).artifact.removedVersion != 897 {
 		t.Fatal("two-member successor has wrong lifetime or column")
 	}
 	for _, pin := range []string{"public.competition_v2_snow_review_findings_valid(jsonb)", "public.competition_v2_snow_review_findings_valid_v2(jsonb)", "public.competition_v2_snow_review_findings_valid_for_policy(jsonb,text)", "competition_v2_source_authorized", "competition_v2_winner_checkpoint_before_insert", "p.prosrc=", "p.proparallel='s'"} {

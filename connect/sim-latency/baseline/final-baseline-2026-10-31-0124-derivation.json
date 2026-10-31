@@ -1,0 +1,215 @@
+{
+  "status": "DRAFT_PREVIEW_PENDING_HIDDEN_ACCEPTANCE_AND_CUSTODY",
+  "historical_reports_modified": false,
+  "custody_v2_packet_modified": false,
+  "browser_rendered": false,
+  "runtime_operations_performed": false,
+  "private_official_epoch_baseline_used": false,
+  "private_owner_scores_used": false,
+  "hidden_metrics_used": false,
+  "hidden_progress_counts_from_operator_only": true,
+  "future_g2_policy_note": {
+    "authority": "standing operator direction, not a result inferred from public pilot data",
+    "active_epoch1": "inclusive 95%-105% request and received-byte volume corridor",
+    "prospective_epoch2plus": "minimum-work/1: >=95% request/byte lower floors without 105% upper caps",
+    "prospective_policy_active": false,
+    "typed_operational_approval_and_source_image_worker_runtime_qualification_are_separate": true
+  },
+  "integration": {
+    "canonical_target": "connect/sim-latency/baseline/final-baseline.html",
+    "preserve_historical_bytes_at": "connect/sim-latency/baseline/final-baseline-v1-historical.html",
+    "dated_companion": "final-baseline-2026-10-31-derivation.json",
+    "tracked_file_changes_applied_by_this_draft": false
+  },
+  "public_sources": [
+    {
+      "path": "/home/by/urnetwork/server/connect/sim-latency/baseline/prelaunch-public-regression-r9-reduced-2026-10-31/baseline.json",
+      "sha256": "ee85182d88d4622b12fd9178065a06205fb8f64c5f1facd697e616ecb5369795"
+    },
+    {
+      "path": "/home/by/urnetwork/server/connect/sim-latency/baseline/prelaunch-public-regression-r9-reduced-2026-10-31/score.json",
+      "sha256": "c9a63fd3e964f22d86b1c8b777f83eea18331d8f78509508929e6c1feab9dae3"
+    },
+    {
+      "path": "/home/by/urnetwork/server/connect/sim-latency/baseline/prelaunch-public-regression-r9-reduced-2026-10-31/pilot-proof.json",
+      "sha256": "983a4b554a85d04fcfbcded69b3c15a7ab8cdae8cbadd23544363f7c1d6e0436"
+    },
+    {
+      "path": "/home/by/urnetwork/server/connect/sim-latency/baseline/prelaunch-public-regression-r9-reduced-2026-10-31/README.md",
+      "sha256": "cfb5692d779666951855d48e03d6b1de7bcc627799dee71269093c487d692f68"
+    }
+  ],
+  "frozen_definition_sources": [
+    {
+      "path": "/mnt/data/urnetwork-competition-temp/competition-intake-fixed-low-20261028.NVLnwGLW/source/server/connect/sim-latency/score.go",
+      "sha256": "e6be6f69358db5e34e15a5016229c2d22f22b9bfe9dbb395efc4fc50502334c5",
+      "definitions": [
+        "scoreRows: per-run p95 of in-window total_ms with failed rows charged request timeout",
+        "aggregateBaseline/aggregateCandidate: median of run raw scores",
+        "eligibility: all gates AND raw median margin AND Welch improvement AND supported recommendation"
+      ]
+    },
+    {
+      "path": "/mnt/data/urnetwork-competition-temp/competition-intake-fixed-low-20261028.NVLnwGLW/source/server/connect/sim-latency/results.go",
+      "sha256": "d97749b7d6b0e6e63850d5bd9c30072b100cd9f682552f371bdcd5560b599c05",
+      "definitions": [
+        "ttfbValues: success and positive TTFB",
+        "throughputValues: successful download >=1048576 bytes; bytes/(total_ms/1000)",
+        "goodput_bytes_per_s: all in-window row bytes/windowSeconds"
+      ]
+    },
+    {
+      "path": "/mnt/data/urnetwork-competition-temp/competition-intake-fixed-low-20261028.NVLnwGLW/source/server/connect/sim-latency/score_significance.go",
+      "sha256": "a0ad056983b1a0d26d410bc086c4dbf69bc9c897643c9711570249f75f5121d0",
+      "definitions": [
+        "one-sided Welch on independent run raw scores; alpha .05",
+        "sample variance n-1; current critical SE fringe; not universal"
+      ]
+    },
+    {
+      "path": "/mnt/data/urnetwork-competition-temp/competition-intake-fixed-low-20261028.NVLnwGLW/source/server/connect/sim-latency/run.go",
+      "sha256": "664cdd5146679f8b9e93663ea8add260a4d419b4cd441493a6abe264c8094621",
+      "definitions": [
+        "MeasureEndMs = MeasureStartMs + options.Duration.Milliseconds(); public duration3m0s"
+      ]
+    }
+  ],
+  "formulas": {
+    "headline_quantile": "median of 9 per-run named quantiles; not pooled percentile",
+    "decimal_mbps": "bytes_per_second*8/1000000",
+    "aggregate_mbps": "median(received_bytes_per_run)*8/180/1000000; all received payload including partial failed rows",
+    "raw_median_cutoff": "median(baseline.replicates.raw_score)*(1-.269)",
+    "mean_stat_fringe": "reported baseline_mean_raw_score*(1-reported minimum_significant_improvement_percent/100), using current observed variances only",
+    "operating_fringe_lines": "toy mapping only: lower-time metric times q or stat; higher-rate metric divided by q or stat; NOT metric-specific inference",
+    "projection": "q=.731; raw ceiling=L0*q^k. ADDITIONAL assumptions for TTFB=T0*q^k and per-large-transfer Mbps=M0/q^k"
+  },
+  "operating_fringe_is_illustrative": true,
+  "toy_assumptions": [
+    "fixed payload bytes/mix per work item",
+    "uniform scaling of successful total completion time and positive TTFB",
+    "steady concurrency, no other bottleneck/floor/cap/contention",
+    "constant .269 illustrative future margin; future variances and eligibility unknown",
+    "not an aggregate delivered-rate projection or guarantee of six wins"
+  ],
+  "metrics": {
+    "ttfbP50": 158.683,
+    "ttfbP95": 1983.4928499999994,
+    "transferP50": 4.660954769499145,
+    "transferP95": 182.99825723405473,
+    "aggregate": 172.4540592,
+    "candidateAggregate": 172.67135542222223,
+    "rawMedian": 20987.25,
+    "rawCandidate": 21056.75349999999,
+    "rawCutoff": 15341.67975,
+    "meanBaseline": 20771.39661666666,
+    "meanCandidate": 21577.03543888888,
+    "meanStatCeiling": 18045.114236582594,
+    "baselineSd": 2762.7784640007426,
+    "candidateSd": 3751.8670054100157,
+    "q": 0.731,
+    "stat": 0.868748239206191,
+    "margin": 0.269
+  },
+  "rounds": [
+    {
+      "step": 0,
+      "factor": 1,
+      "rawMedianCeiling": 20987.25,
+      "ttfbP50Ms": 158.683,
+      "ttfbP95Ms": 1983.4928499999994,
+      "largeTransferP50Mbps": 4.660954769499145,
+      "largeTransferP95Mbps": 182.99825723405473
+    },
+    {
+      "step": 1,
+      "factor": 0.731,
+      "rawMedianCeiling": 15341.67975,
+      "ttfbP50Ms": 115.99727299999999,
+      "ttfbP95Ms": 1449.9332733499996,
+      "largeTransferP50Mbps": 6.376135115593906,
+      "largeTransferP95Mbps": 250.33961317928146
+    },
+    {
+      "step": 2,
+      "factor": 0.534361,
+      "rawMedianCeiling": 11214.76789725,
+      "ttfbP50Ms": 84.794006563,
+      "ttfbP95Ms": 1059.9012228188496,
+      "largeTransferP50Mbps": 8.722483058267997,
+      "largeTransferP95Mbps": 342.46185113444795
+    },
+    {
+      "step": 3,
+      "factor": 0.390617891,
+      "rawMedianCeiling": 8197.99533288975,
+      "ttfbP50Ms": 61.984418797553,
+      "ttfbP95Ms": 774.7877938805791,
+      "largeTransferP50Mbps": 11.932261365619693,
+      "largeTransferP95Mbps": 468.48406447940897
+    },
+    {
+      "step": 4,
+      "factor": 0.28554167832099997,
+      "rawMedianCeiling": 5992.734588342407,
+      "ttfbP50Ms": 45.31061014101124,
+      "ttfbP95Ms": 566.3698773267033,
+      "largeTransferP50Mbps": 16.32320296254404,
+      "largeTransferP95Mbps": 640.8810731592462
+    },
+    {
+      "step": 5,
+      "factor": 0.20873096685265097,
+      "rawMedianCeiling": 4380.688984078299,
+      "ttfbP50Ms": 33.12205601307921,
+      "ttfbP95Ms": 414.0163803258201,
+      "largeTransferP50Mbps": 22.329963013056148,
+      "largeTransferP95Mbps": 876.7182943354942
+    },
+    {
+      "step": 6,
+      "factor": 0.15258233676928787,
+      "rawMedianCeiling": 3202.283647361237,
+      "ttfbP50Ms": 24.212222945560907,
+      "ttfbP95Ms": 302.6459740181745,
+      "largeTransferP50Mbps": 30.547145024700608,
+      "largeTransferP95Mbps": 1199.3410319227005
+    }
+  ],
+  "status_snapshot": {
+    "authority": "operator-provided parent task, not a live poll",
+    "date": "2026-10-31",
+    "runtime_snapshot_window_utc": "01:23-01:24",
+    "queue_counts_freshly_repolled_by_report": false,
+    "intake_ready": true,
+    "grading_ready": false,
+    "publication_held": true,
+    "production_completed": 4,
+    "production_queued": 13,
+    "public_pilot_accepted": true,
+    "after13_completed": true,
+    "hidden_screen": "running_not_accepted",
+    "hidden_unique_measurements_complete_at_operator_snapshot": 2,
+    "hidden_required_unique_measurements": 36,
+    "independent_acceptance": "pending",
+    "scoped_compliance_custody": "pending",
+    "evaluation_hold_revision": 4,
+    "evaluation_hold_active": true,
+    "reward_hold_revision": 1,
+    "reward_hold_active": true
+  },
+  "frozen_profile": {
+    "providers": 3600,
+    "clients": 200,
+    "evaluation_cpus": 10,
+    "evaluation_memory_gib": 96,
+    "management_cpus": 2,
+    "management_memory_gib": 8,
+    "go_version": "go1.27.3",
+    "repositories": 10,
+    "practical_margin": 0.269,
+    "alpha": 0.05,
+    "control_replicates_once_per_epoch": 9,
+    "candidate_replicates_per_job": 9,
+    "job_cap_seconds": 10800
+  }
+}

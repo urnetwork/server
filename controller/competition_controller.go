@@ -2690,15 +2690,29 @@ func StartMetrics(ctx context.Context) {
 		return
 	}
 	competitionConfigured.Set(1)
+	submissionMetricSettings := defaultCompetitionSubmissionMetricSettings()
+	var submissionMetrics *competitionSubmissionMetricCollector
+	if settings.AutomationPolicy.Enabled {
+		submissionMetrics = newCompetitionSubmissionMetricCollector(submissionMetricSettings, fetchCompetitionSubmissionMetricSnapshot)
+		if err := prometheus.Register(submissionMetrics); err != nil {
+			competitionMetricRefreshErrors.Inc()
+			submissionMetrics = nil
+		}
+	}
 	refresh := func() {
 		if err := refreshOperationalMetrics(ctx, settings); err != nil {
 			competitionMetricRefreshErrors.Inc()
 			glog.Infof("[competition]metric refresh failed: %s\n", err)
 		}
+		if submissionMetrics != nil {
+			if err := submissionMetrics.refresh(ctx, settings); err != nil {
+				competitionMetricRefreshErrors.Inc()
+			}
+		}
 	}
 	refresh()
 	go func() {
-		ticker := time.NewTicker(15 * time.Second)
+		ticker := time.NewTicker(submissionMetricSettings.RefreshInterval)
 		defer ticker.Stop()
 		for {
 			select {

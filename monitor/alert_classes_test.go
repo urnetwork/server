@@ -474,6 +474,7 @@ func TestEveryAlertClassIsClassified(t *testing.T) {
 		"signal_edge_ipv6.go edgeIPv6Findings":                      {"edge-ipv6-http", "edge-ipv6-policy-route", "edge-ipv6-reset", "edge-ipv6-timeout", "edge-ipv6-upstream-drop", "edge-lb-config-rejected"},
 		"signal_egress_coverage.go egressCoverageStallFinding":      {"egress-blackhole-stalled", "egress-full-stalled"},
 		"signal_mimir_continuity.go mimirContinuityHealthyFindings": {"mimir-continuity-gap-unclassified", "mimir-ingestion-gap", "mimir-query-store-visibility-gap"},
+		"signal_provider_count.go assess":                           {"provider-count-effective-empty", "provider-count-small-list"},
 		"signal_provider_count.go providerCountFinding":             {"provider-count-effective-empty", "provider-count-small-list", "provider-count-small-list-unclassified"},
 		// literals elsewhere name these: the finding's own class, the
 		// probeSchemaContract classes, the MinIO error patterns, and the log

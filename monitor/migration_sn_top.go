@@ -238,3 +238,22 @@ var snTopBoardMigrationContracts = []snMainnetMigrationContract{
 		migrationFp2Index("sn_top_ema_state", "sn_top_ema_state_update_time", "update_time", "", false),
 		migrationFp2Index("sn_top_network_daily", "sn_top_network_daily_day", "day", "", false)),
 }
+
+// The replica provenance the corrected reader requires
+// (sn_top_replica_schema.go): each snapshot's authenticated replica checkpoint,
+// each fleet's replica availability and each head summary's genesis marker,
+// all additive with constant defaults. The partial index is the replica's
+// genesis lookup; a full index over the same keys would serve a different
+// read. Its own contract, because the suffix list runs in version order and
+// 900 sits between this and the board's tables.
+var snTopReplicaMigrationContract = migrationCurrentSuffix(server.SnTopReplicaSchemaMigrationVersion(), "SN top-board replica provenance and genesis summary index",
+	snMainnetMigrationColumns("sn_top_snapshot",
+		snMainnetMigrationColumn{name: "replica_validator_hotkey", kind: "bytea"},
+		snMainnetMigrationColumn{name: "replica_native_epoch", kind: "bigint"},
+		snMainnetMigrationColumn{name: "replica_measurement_hash", kind: "text"},
+		snMainnetMigrationColumn{name: "replica_complete", kind: "boolean", notNull: true, defaultExpression: "false"}),
+	snMainnetMigrationColumns("sn_top_fleet",
+		snMainnetMigrationColumn{name: "replica_available", kind: "boolean", notNull: true, defaultExpression: "false"}),
+	snMainnetMigrationColumns("sn_head_summary",
+		snMainnetMigrationColumn{name: "replica_genesis", kind: "boolean", notNull: true, defaultExpression: "false"}),
+	migrationFp2Index("sn_head_summary", "sn_head_summary_replica_genesis", "netuid, validator_hotkey, native_epoch", "(replica_genesis = true)", false))

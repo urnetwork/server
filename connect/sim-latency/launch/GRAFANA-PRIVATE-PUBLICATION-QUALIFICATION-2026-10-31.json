@@ -1,0 +1,107 @@
+{
+  "schema": 1,
+  "kind": "grafana-managed-private-publication-order-qualification",
+  "status": "scoped_synthetic_race_regressions_passed",
+  "source": {
+    "tested_base_commit": "ae96178729a6a288c41684acd49ca43b4da285f6",
+    "fix_commit": "73d81a0d1a44c2b0a61a840dc5e8f171001bf2d1",
+    "files": {
+      "grafana/grafana.go": "b90ca689aab81abc487d28d536da8837d6e899de18a693976c0821ec25f8c83d",
+      "grafana/private_publication_order_test.go": "d48ccf1c52e6140515b08cd69af7b578c5b218cddded98551f90dafd83a9ecaa"
+    },
+    "unchanged_competition_dashboard_sha256": "63a5b271c5e909830ebf33d178124c9bb251a9b40031c65c4f35511794f46923"
+  },
+  "defect": {
+    "condition": "A managed dashboard lacking the source public tag already has a public share, including a manually created share, when new private content is loaded.",
+    "old_order": "All dashboard content was upserted before public shares were reconciled; a later failure could leave new private content publicly shared.",
+    "actual_private_data_leak_observed": false,
+    "classification": "Conditional rollout-order exposure risk demonstrated with a synthetic HTTP server, not an observed production disclosure."
+  },
+  "correction": {
+    "private_update_order": [
+      "Read sharing state for the managed dashboard UID.",
+      "If a share exists, require its identity and successfully delete it before uploading private content.",
+      "A verified 404 permits the private upsert; read, decode, identity or delete failure prevents that upsert."
+    ],
+    "public_tag_publication_preserved": true,
+    "unmanaged_shares_untouched": true,
+    "disabled_private_share_removed_before_upload": true,
+    "repeated_load_idempotency_covered": true
+  },
+  "negative_control": {
+    "artifact_directory": "/mnt/data/grafana-privacy-prefix-20261031.XlbvVmAN/qa",
+    "original_loader_sha256": "1c923dd97ff3f850b36204b6a733e7c4b4e9029ab69c94f17f488ff46e61a046",
+    "test_source_sha256": "d48ccf1c52e6140515b08cd69af7b578c5b218cddded98551f90dafd83a9ecaa",
+    "root": "TestLoadDefaultsRevokesPublicShareBeforePrivateContentUpload",
+    "started_at": "2026-10-31T15:32:30Z",
+    "finished_at": "2026-10-31T15:33:20Z",
+    "invocation_id": "2b973e9eb38745e794d6c8f7d6bfdf72",
+    "test_exit": 1,
+    "expected_failure_wrapper_exit": 0,
+    "top_level_failures": 1,
+    "failure": "private dashboard share was not removed before content upload",
+    "failure_is_the_ordering_assertion_not_setup": true,
+    "test_log_sha256": "fa243f21b682c20835f8709efbc17d9dc464fde05d5520ddb672323203257f27",
+    "race_elf_sha256": "748f46b6d2f969016afb73d7510491da55ca7bd6d04af194b484d0059641fd2f",
+    "evidence_manifest_sha256": "0e424e49c3070977f595d0fa5aed203238e8aa230cdacc412814e4bd20fa4be0",
+    "evidence_manifest_members_independently_verified": true
+  },
+  "positive_controls": {
+    "artifact_directory": "/mnt/data/grafana-privacy-positive-20261031.qH6JapYN/qa",
+    "started_at": "2026-10-31T15:35:47Z",
+    "finished_at": "2026-10-31T15:37:10Z",
+    "invocation_id": "aa5943175b4e4caf81a1bbfa9cf70ac9",
+    "exit": 0,
+    "race_enabled_in_elf_build_metadata": true,
+    "selected_roots": 13,
+    "fresh_passes": 3,
+    "top_level_passes": 39,
+    "package_passes": 3,
+    "failures": 0,
+    "skips": 0,
+    "subtests": 0,
+    "new_regression_roots": [
+      "TestLoadDefaultsRevokesPublicShareBeforePrivateContentUpload",
+      "TestLoadDefaultsPrivateShareReadErrorPreventsContentUpload",
+      "TestLoadDefaultsPrivateShareDeleteErrorPreventsContentUpload",
+      "TestLoadDefaultsPrivateShareMalformedReadPreventsContentUpload",
+      "TestLoadDefaultsPrivateShareMissingIdentityPreventsContentUpload",
+      "TestLoadDefaultsPrivateDisabledShareIsRemovedBeforeContentUpload",
+      "TestLoadDefaultsPrivateUnsharedDashboardNeedsNoDelete",
+      "TestLoadDefaultsPrivateShareRevocationIsIdempotent",
+      "TestLoadDefaultsPreservesPublicTagSharingAndUnmanagedShares"
+    ],
+    "adjacent_roots": [
+      "TestDefaultDashboardDocumentsAreValid",
+      "TestPublicDashboardsQueryOnlyPublicSafeMetrics",
+      "TestCompetitionSubmissionDashboardIsPrivateAndRoundScoped",
+      "TestCompetitionAutomationDashboardHasNoCandidateDisclosure"
+    ],
+    "race_elf_sha256": "0ca7fd30ea92725bba275a866489cab60a78dc29b1f5b48346a78178cac118f1",
+    "log_manifest_sha256": "f3b84ee58416f154777af647a81f16cc3b5864679661670c2a92d3d22123dd98",
+    "evidence_manifest_sha256": "a4edeac8f64d21650e390a23d3ee36166ef15e851d31c7c79b0e668247022de2",
+    "unit_properties_sha256": "93bb00884f600c800703c62db5ebf5f13ba8a67a3ec99a614a946654e99d23e1",
+    "evidence_manifest_members_independently_verified": true,
+    "each_json_log_independently_counted_13_top_level_passes": true,
+    "source_import_input_and_elf_guards_passed": true
+  },
+  "observed_static_qa_profile": {
+    "cpus": "20,22",
+    "memory_max_bytes": 8589934592,
+    "memory_swap_max_bytes": 0,
+    "private_network": true,
+    "source_graph_module_cache_and_toolchain_read_only": true,
+    "full_host_secret_isolation_or_candidate_containment_claimed": false
+  },
+  "boundaries": {
+    "synthetic_httptest_only": true,
+    "production_credentials_or_scores_used": false,
+    "live_grafana_mutation_or_deployment": false,
+    "native_grafana_render_qualification": false,
+    "full_test_suite_or_control_release_requalification": false,
+    "evaluator_policy_or_baseline_changed": false,
+    "services_database_holds_or_cutoffs_changed": false,
+    "calibration_acceptance_or_hold_release_authority": false
+  }
+}
+

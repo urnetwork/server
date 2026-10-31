@@ -507,7 +507,19 @@ func TestUpdateClientScoresPublishesEmptyTargets(t *testing.T) {
 			ClientId: clientIds[0], MeasuredAt: server.NowUtc(),
 			OKCount: 130, Total: 131, TLSAuthenticationFailure: true,
 		})
+		exportStart := server.NowUtc()
 		connect.AssertEqual(t, UpdateClientScores(ctx, time.Hour, 1), nil)
+
+		// the completed export published the admitted supply it measured
+		supply := clientScoreSupplyMetrics.current()
+		if supply == nil || supply.measuredAt.Before(exportStart.Add(-time.Second)) {
+			t.Fatal("the completed export published no current supply measurement")
+		}
+		for key, count := range supply.countries {
+			if !clientScoreSupplyCountry(key.country) || !clientScoreSupplyFamily(key.family) || count < 0 {
+				t.Fatalf("supply %v=%d is outside the bounded vocabulary", key, count)
+			}
+		}
 
 		server.Redis(ctx, func(r server.RedisClient) {
 			for _, key := range []string{

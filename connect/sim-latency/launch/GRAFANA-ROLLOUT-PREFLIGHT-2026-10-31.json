@@ -1,0 +1,60 @@
+{
+  "schema": 1,
+  "kind": "competition-monitoring-read-only-rollout-preflight",
+  "status": "target_version_verified_reviewed_score_panels_not_yet_published",
+  "evidence_directory": "/home/by/urnetwork/temp/monitoring-rollout-readonly-20261031.1BA4MVs7",
+  "observations_sha256": "7108025eb3cbd66da821917e271f623c8d99f33c027e63dc9007aec67ea31c9b",
+  "get_only_auditor_sha256": "db87631ddd110666a50102ea604e267bacad68aba6e1ad7a72f3ef3dd1c0af2c",
+  "authentication": "Existing main credentials resolved in-process; no credentials in arguments or this record.",
+  "live_grafana": {
+    "version": "13.2.0",
+    "database": "ok",
+    "health_response_sha256": "84584ef7514274382c97d142e0438f59f42e22a75400f226350f5a1186cb2218",
+    "competition_dashboard_uid": "urnetwork-competition",
+    "dashboard_version": 2,
+    "dashboard_panels": 26,
+    "panel_ids_31_through_34_present": false,
+    "dashboard_tags": ["urnetwork", "competition"],
+    "tags_alone_do_not_prove_absence_of_a_manual_public_share": true,
+    "dashboard_response_sha256": "1dd971a0dc4123307f888d2f82bce7a633680a3f8593f60f52d00bc0792e70f6"
+  },
+  "live_monitoring": {
+    "nine_grafana_and_mimir_gets_returned_200": true,
+    "two_native_receiver_gets_returned_expected_405": true,
+    "receiver_method_responses_alone_are_not_ingestion_proof": true,
+    "worker_source_heartbeat": {
+      "host": "sille",
+      "service": "competitionworker",
+      "instance": "3077dca8",
+      "source_age_seconds": 14.001918077468872,
+      "response_sha256": "07112aa671f64e5bab7343c8ab36e6281ba8288794667f6c593e732a62631288"
+    },
+    "supervisor_heartbeat_age_seconds": 19.754392,
+    "supervisor_response_sha256": "6665af2b8c022f923d4067a510f1a301e1f47a53342346816a58d836d5e5f74e",
+    "observations_are_dated_not_a_continuing_liveness_claim": true,
+    "synthetic_signal_or_notification_sent": false,
+    "human_notification_delivery_tested": false
+  },
+  "rollout": {
+    "reviewed_source_commit": "7331d7728c1245cd07fa7c60357500e690b85ade",
+    "reviewed_competition_dashboard_panels": 37,
+    "main_api_metrics_owner": "api/run.go starts controller.StartMetrics; deploy the score collector with the main API, not the frozen evaluator.",
+    "steps": [
+      "Verify additive migration 903 is applied through the normal main deployment pipeline before deploying the new main API/metrics producer; this audit did not inspect the current database migration head.",
+      "Deploy the main API/metrics producer containing the reviewed submission-score collector. Its release is not a frozen season source pin.",
+      "From a current reviewed bringyourctl build in main, run: bringyourctl grafana load-defaults --dashboards_only",
+      "That command synchronizes the managed API, proxy and competition dashboards, with private shares revoked before private content upload; --dashboards_only leaves alert routing unchanged.",
+      "Read back the authenticated competition dashboard and verify panels 31 through 34, modern name mapping, no public share, and actual scoped score snapshots/points from Mimir. Do not treat fixture rendering or a receiver 405 as live-data proof."
+    ],
+    "new_grafana_base_image_needed_for_current_validated_version": false,
+    "new_config_vault_or_frozen_evaluator_deployment_required_by_these_charts": false,
+    "current_epoch_worker_restart_required_by_these_charts": false,
+    "deployment_or_dashboard_publication_performed_by_this_audit": false
+  },
+  "authority_boundary": {
+    "grading_restoration_gate": false,
+    "calibration_accepted": false,
+    "grading_or_reward_holds_changed": false,
+    "owner_post_failed_calibration_approval_received": false
+  }
+}

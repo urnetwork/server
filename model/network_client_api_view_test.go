@@ -17,6 +17,7 @@ func TestFindProvidersProviderOmitsReservedIntermediaryIds(t *testing.T) {
 		},
 		RankModeQuality,
 		nil,
+		"",
 	)
 	b, err := json.Marshal(provider)
 	if err != nil {

@@ -1,4 +1,4 @@
-// A reviewed winner's expected host identity is installed only inside fenced,
+// An authorized source's expected host identity is installed only inside fenced,
 // exclusive preparation. This transition never creates runtime-ready evidence.
 package controller
 
@@ -30,23 +30,68 @@ func defaultCompetitionSourceHostInstallSettings() competitionSourceHostInstallS
 	return competitionSourceHostInstallSettings{ProbeTimeout: 2 * time.Minute, DocumentBytes: 256 * 1024, EvidenceBytes: 16 * 1024 * 1024}
 }
 
+// The broker journal and prospective profile use the same operation identity.
+// Instrument builds never borrow a selected product's review reservation.
+type competitionSourceHostBuildIdentity struct {
+	AuthorizationId string
+	BaseImageDigest string
+	AttemptKey      string
+}
+
+// Reviewed builds retain their exact review identity. An instrument transition
+// uses only its validated configured approval, final lock and original image.
+func competitionHostInstallBuildIdentity(settings *Settings, intent *model.CompetitionSourceActivation) (*competitionSourceHostBuildIdentity, error) {
+	if settings == nil || intent == nil {
+		return nil, errors.New("host installation is missing its source authority")
+	}
+	identity, baseImage := "", intent.EvaluatedImageDigest
+	if proof := intent.TrustedInstrument; proof != nil {
+		if err := validateTrustedInstrumentProof(settings, intent); err != nil {
+			return nil, err
+		}
+		baseImage = proof.Approval.InstrumentBaseImageDigest
+		if intent.BaseSourceLockSha256 != proof.Approval.InstrumentBaseSourceLockSha256 ||
+			(intent.EvaluatedImageDigest != "" && intent.EvaluatedImageDigest != baseImage) ||
+			(proof.SelectedProductKind == "reviewed_source_promotion" && intent.EvaluatedImageDigest != baseImage) {
+			return nil, errors.New("instrument host installation lost its exact original image or source lock")
+		}
+		identity = "instrument-" + proof.Approval.ApprovalSha256 + "-" + intent.SourceLockSha256
+	} else {
+		if intent.Kind != "reviewed_source_promotion" || intent.ReviewId == nil || *intent.ReviewId == (server.Id{}) || !sha256Pattern.MatchString(intent.ApprovedPatchSha256) {
+			return nil, errors.New("host identity change requires the exact approved promoted source")
+		}
+		identity = intent.ReviewId.String()
+	}
+	key := sha256.Sum256([]byte(identity))
+	return &competitionSourceHostBuildIdentity{AuthorizationId: identity, BaseImageDigest: baseImage, AttemptKey: hex.EncodeToString(key[:])}, nil
+}
+
 // Validate the exact recorded source/host boundary while retaining every other
 // root field. Only image_digest and qualification_sha256 can change; old reset
 // and readiness markers remain untouched and cannot qualify the new image.
 func competitionReviewedHostInstallContent(settings *Settings, intent *model.CompetitionSourceActivation, active, prospective []byte,
 	receipt CompetitionReviewedSourceBuildReceipt, profile CompetitionProspectiveHostProfile, bootId string) ([]byte, error) {
-	if settings == nil || intent == nil || intent.Kind != "reviewed_source_promotion" || intent.ReviewId == nil || *intent.ReviewId == (server.Id{}) ||
-		!sha256Pattern.MatchString(intent.ApprovedPatchSha256) || intent.EvaluatedImageDigest == intent.EvaluatorImageDigest || bootId == "" ||
+	build, err := competitionHostInstallBuildIdentity(settings, intent)
+	if err != nil {
+		return nil, err
+	}
+	if build.BaseImageDigest == intent.EvaluatorImageDigest || bootId == "" ||
 		intent.EvaluatorImageDigest != settings.EvaluatorImageDigest || intent.HostQualificationSha256 != settings.EvaluationPolicy.HostQualificationSha256 {
 		return nil, errors.New("host identity change requires the exact approved promoted source")
 	}
-	if err := ValidateCompetitionReviewedSourceBuildReceiptForPolicy(receipt, *intent.ReviewId, intent.ApprovedPatchSha256, intent.SourceLockSha256, intent.Staging, intent.WinnerReviewPolicy); err != nil {
-		return nil, err
+	if intent.TrustedInstrument != nil {
+		if receipt != *intent.TrustedInstrument.BuildReceipt {
+			return nil, errors.New("instrument host installation receipt differs from the immutable source proof")
+		}
+	} else {
+		if err := ValidateCompetitionReviewedSourceBuildReceiptForPolicy(receipt, *intent.ReviewId, intent.ApprovedPatchSha256, intent.SourceLockSha256, intent.Staging, intent.WinnerReviewPolicy); err != nil {
+			return nil, err
+		}
 	}
 	if receipt.EvaluatorImageDigest != intent.EvaluatorImageDigest || receipt.HostQualificationSha256 != intent.HostQualificationSha256 ||
 		!sha256Pattern.MatchString(receipt.SandboxId) || profile.Schema != 1 || profile.Kind != "prospective-source-hardware-fingerprint/v1" || profile.RuntimeQualified ||
-		profile.ReviewId != intent.ReviewId.String() || profile.SourceLockSha256 != intent.SourceLockSha256 || profile.BootId != bootId ||
-		profile.ImageId != intent.EvaluatorImageDigest || profile.BaseImageId != intent.EvaluatedImageDigest || profile.QualificationSha256 != intent.HostQualificationSha256 ||
+		profile.ReviewId != build.AuthorizationId || profile.SourceLockSha256 != intent.SourceLockSha256 || profile.BootId != bootId ||
+		profile.ImageId != intent.EvaluatorImageDigest || profile.BaseImageId != build.BaseImageDigest || profile.QualificationSha256 != intent.HostQualificationSha256 ||
 		profile.Prospective.ImageDigest != profile.ImageId || profile.Prospective.QualificationSha256 != profile.QualificationSha256 ||
 		profile.Incumbent.ImageDigest != profile.BaseImageId || !CompetitionHostPhysicalControlsReady(profile.Incumbent, settings.EvaluationPolicy.HardwareId) ||
 		!CompetitionHostPhysicalControlsReady(profile.Prospective, settings.EvaluationPolicy.HardwareId) {
@@ -71,7 +116,7 @@ func competitionReviewedHostInstallContent(settings *Settings, intent *model.Com
 	}
 	var old, candidate competitionQualificationHostConfig
 	if json.Unmarshal(active, &old) != nil || json.Unmarshal(prospective, &candidate) != nil || old.Schema != 1 || candidate.Schema != 1 ||
-		old.ImageDigest != intent.EvaluatedImageDigest || old.QualificationSha256 != profile.Incumbent.QualificationSha256 ||
+		old.ImageDigest != build.BaseImageDigest || old.QualificationSha256 != profile.Incumbent.QualificationSha256 ||
 		candidate.ImageDigest != intent.EvaluatorImageDigest || candidate.QualificationSha256 != "" || old.HardwareId != settings.EvaluationPolicy.HardwareId ||
 		candidate.HardwareId != old.HardwareId || old.ConfigLocalDirectory != settings.ConfigLocalDirectory || candidate.ConfigLocalDirectory != old.ConfigLocalDirectory ||
 		old.VaultLocalDirectory != settings.VaultLocalDirectory || candidate.VaultLocalDirectory != old.VaultLocalDirectory ||
@@ -215,7 +260,11 @@ func ensureCompetitionReviewedHostConfig(ctx context.Context, settings *Settings
 		return nil // Existing exact root provisioning remains supported.
 	}
 	intent := &request.Intent
-	if intent.Kind != "reviewed_source_promotion" || intent.ReviewId == nil || *intent.ReviewId == (server.Id{}) || config.ReviewedBuildStateDirectory == "" {
+	build, err := competitionHostInstallBuildIdentity(settings, intent)
+	if err != nil {
+		return err
+	}
+	if config.ReviewedBuildStateDirectory == "" {
 		return errors.New("host configuration is not provisioned for this source; reviewed build installation is unavailable")
 	}
 	if err := competitionQualificationRootPath(config.ReviewedBuildStateDirectory, true); err != nil {
@@ -225,8 +274,7 @@ func ensureCompetitionReviewedHostConfig(ctx context.Context, settings *Settings
 	if err != nil || rootInfo.Mode().Perm()&0o077 != 0 {
 		return errors.New("reviewed build state must remain root-private")
 	}
-	key := sha256.Sum256([]byte(intent.ReviewId.String()))
-	attempt := filepath.Join(config.ReviewedBuildStateDirectory, ".attempts", hex.EncodeToString(key[:]))
+	attempt := filepath.Join(config.ReviewedBuildStateDirectory, ".attempts", build.AttemptKey)
 	var reservation CompetitionSourceBuildReservation
 	if _, err := readCompetitionReviewedBuildRecord(filepath.Join(attempt, "reservation.json"), limits.DocumentBytes, &reservation); err != nil {
 		return err

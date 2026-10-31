@@ -1,6 +1,6 @@
 # Sim-latency competition live-deployment playbook
 
-## Current production intake and scoring preparation — October 30, 2026
+## Current production intake and scoring preparation — October 31, 2026
 
 The required public opening was **October 28, 2026, 00:00 UTC**; readiness was
 not achieved and that opening was not backdated. The owner subsequently approved
@@ -14,13 +14,110 @@ At 03:14 UTC on October 30, public `/competition/info` reported
 - actual opening: October 29, 13:06:42.413416 UTC;
 - submission close: November 5, 13:06:42.413416 UTC.
 
-Latest **01:04 UTC October 31** checkpoint: the reduced public pilot and native
-13-source exclusion census are accepted. The fresh hidden-seed 36-run screen
-is running under its original committed seed and bounded owner; it is not yet
-accepted. Observe only the live owner in
+Latest **09:24 UTC October 31** checkpoint: the reduced public pilot and native
+13-source exclusion census are accepted. The fresh hidden-seed screen completed
+all 36 unique measurements, but **failed its frozen reference-ordering rule**;
+native completion and exit zero are not calibration acceptance. Independent
+raw-lineage review confirmed the rejected result. The original second seed
+remains unstarted; no rerun, new seed or retrospective acceptance rule is
+authorized. The original execution is terminal: do not restart the owner in
 [HIDDEN-SCREEN-LIVE-2026-10-31.json](launch/HIDDEN-SCREEN-LIVE-2026-10-31.json).
-The read-only control-plane snapshot shows 13 unstarted queued jobs and four
-completed jobs. Both holds remain active; public intake remains open.
+
+The genuine existing worker was restored at **06:51:55 UTC**, before the
+original offline-maintenance expiry. At **09:24:12 UTC**, operator-authenticated
+`/competition/readyz` returned 200 with all eleven checks true; intake is ready,
+grading is not ready and publication remains held. The typed read-only hold
+audit at **07:51:40 UTC** validated evaluation revision 4 and reward-delivery
+revision 1, both active. The separately dated **06:50:46 UTC** queue audit shows
+14 unstarted queued jobs and four completed jobs; later intake may add jobs.
+
+All three failed-screen/public-pilot-view/qualified-source archives now have
+exact-version SHA-equal MinIO readbacks and COMPLIANCE retention through
+**2028-01-01**. New-object replica delivery and off-site backup are not claimed.
+Storage and operational readiness do not authorize hold release. Await the
+owner's explicit provisional-grading or revised-calibration decision; keep the
+November 5 pre-finalization fences and do not create an accepted marker.
+
+At **12:14:48 UTC**, authenticated readiness again returned 200 with all eleven
+checks true and grading/publication still held. The normal control-build SN pin
+was corrected in `8b84ba73e` after a deterministic old-pin capability failure
+and three fresh passing controls. By **12:25:26 UTC**, its clean exact-graph CLI, twelve release
+roots and 147 feature executions passed: 159 outer top-level passes, thirteen
+subtest passes and ten package passes, zero failures/skips. The counter-only
+stop and original event logs remain preserved; only unstarted feature tests
+continued. See the [qualification record](launch/CONTROL-RELEASE-GRAPH-QUALIFICATION-2026-10-31.json).
+This is not new calibration, future-image qualification or permission to release
+either hold. The [current checkpoint](launch/current-state.json) names the
+remaining operator decision and deployment boundaries.
+
+The **13:05:01 UTC** read-only, repeatable-read transaction again validated
+evaluation hold 4 and reward-delivery hold 1 as active. At **13:43:36 UTC**,
+authenticated readiness still reported all eleven checks true, intake ready,
+grading not ready and publication held. The source-test provider fixtures were
+corrected in `a1e20b492`; both mocked completions now identify the independent
+tester rather than the honesty reviewer, and the host-retry regression checks
+its exact intended failure. Five focused regressions and all 207 selected
+G2/source-manager checks (69 roots, three fresh runs) passed with zero failures
+or skips. Earlier failed attempts remain preserved and excluded from those
+counts. See the [selected-scope qualification](launch/CONTROL-G2-MANAGER-QUALIFICATION-2026-10-31.json).
+This does not qualify a future evaluator image or amend the failed calibration.
+
+At **14:44:06 UTC**, the separately installed, inactive future-control bundle
+passed native protected-file admission. It contains four clean Go 1.27.3 control
+programs from `4f46bb0d8`, six passing help/policy smokes, a byte-verified native
+control-provenance image/archive, five guarded wrappers and the exact 17-file
+minimum-work producer closure. The image is **not** an evaluator image or a
+running worker container. No operational wrapper ran, no runtime-config/vault
+was copied, and no existing service was repointed. Its future whole-tuple
+transition requires a separate review after authoritative R1 sealing and old
+worker join; it is not a condition for restoring R1 grading. See the
+[inactive staging evidence](launch/CONTROL-BUNDLE-STAGING-2026-10-31.json).
+At **14:47:09 UTC**, operator readiness remained 200/all eleven checks true,
+with intake ready, grading not ready and publication held. Calibration still
+requires the owner's explicit decision.
+
+The operator score dashboard and future-epoch G2 host handoff code are pushed
+in `766b48358`; 49 focused roots passed three times, zero failures/skips, against
+the actual merged server source with private diagnostic dependency exports.
+That does not prove normal release-lock equivalence or future-image runtime
+qualification. Apply additive migration **903** before deploying the main
+API/metrics producer and competition/API/proxy Grafana dashboards. These
+operator/future-epoch changes are not epoch-one grading-restoration gates.
+
+The managed-dashboard publication-order fix is pushed in `73d81a0d1`:
+an existing public share must be removed before private dashboard content is
+uploaded. Its deterministic pre-fix ordering failure and 39 passing targeted
+race-test executions are recorded in the
+[privacy qualification](launch/GRAFANA-PRIVATE-PUBLICATION-QUALIFICATION-2026-10-31.json).
+No production disclosure was observed, and the fix has not been deployed here.
+The isolated native Grafana 13.2.0 capture exposed a real mapping defect:
+query-filtered transformations reverse frames, while legacy migration binds
+each series by its old ordinal. Commit `7331d7728` fixes all four panels with
+explicit named matchers and the modern plugin-version guard. The deterministic
+old-source regression fails for the intended zero-of-six-series cause; 45
+focused race-test executions pass on the fix. All sixteen native fresh-page
+cases (four panels, dense/sparse/singleton/empty) and twelve actual tooltip
+identities/values are now visually reviewed. Native docking makes the candidate
+points and baseline/fringes unobstructed. A separate forced-orphan test reproduced
+the browser harness's missing-reaper failure; adding browser-only `--init` fixed
+the run at the same resource limits. The frozen evaluator already has Tini and
+was unchanged. Scoped cleanup preserved the original three containers; an
+external task ended before any test container existed, so the raw whole-host
+inventory inequality remains recorded rather than hidden. In-place refresh,
+live PromQL/data and deployment are not claimed. See the
+[native mapping evidence](launch/GRAFANA-NATIVE-MAPPING-QUALIFICATION-2026-10-31.json).
+Neither this operator-chart work nor its deployment is a grading-restoration gate.
+
+A subsequent GET-only [rollout preflight](launch/GRAFANA-ROLLOUT-PREFLIGHT-2026-10-31.json)
+verified that main Grafana is already 13.2.0, with healthy genuine worker and
+supervisor signals. Its live competition dashboard is still version 2 with 26
+panels, not the reviewed 37-panel source. Confirm migration 903 through the
+normal pipeline, deploy the main API's score-metrics collector, then use the
+reviewed `bringyourctl grafana load-defaults --dashboards_only`. This syncs the
+managed dashboards without changing alert routing. Verify actual Mimir points
+and private sharing afterward; neither native fixture proof nor this read-only
+preflight constitutes that rollout.
+
 The dated observations below preserve earlier phases, not current commands.
 
 The later read-only snapshot at **18:39 UTC on October 30** shows four completed
@@ -121,8 +218,13 @@ scoring readiness or permit relabeling failed calibration as accepted.
 
 Epoch 1 keeps inclusive 95–105% request-count and received-byte median bands.
 The owner approved **95% floors with no upper bounds from epoch 2**, under
-`minimum-work/1` and scorer `/2`; the future instrument/image still needs
-qualification. Do not change or rejudge epoch 1. See the
+`minimum-work/1` and scorer `/2`. The exact protected patch now has a separate
+[operator technical approval](launch/G2-INSTRUMENT-APPROVAL-RECORD-2026-10-31.json)
+and its native-validated
+[approval payload](launch/G2-INSTRUMENT-OPERATOR-APPROVAL-2026-10-31.json).
+This does not choose the future product/winner, create an instrument child,
+qualify a new image, configure the live future policy or activate it. Those
+boundaries remain open. Do not change or rejudge epoch 1. See the
 [current/next G2 announcement](README.md#current-and-next-epoch-g2-work-volume-policy)
 and the [current checkpoint](launch/current-state.json) before deployment.
 

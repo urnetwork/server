@@ -65,7 +65,7 @@ func TestSourceBuildQualifierReplaysTestsAfterHostUnavailability(t *testing.T) {
 		providerCalls++
 		stream := sourceTestToolStream(t, "run_prescribed_tests", "{}", false)
 		if providerCalls == 2 {
-			stream = winnerModelFixtureStream(t, `{"passed":true,"summary":"Synthetic provider observed the actual fixed test result."}`)
+			stream = winnerModelFixtureStreamForModel(t, `{"passed":true,"summary":"Synthetic provider observed the actual fixed test result."}`, sourceTestModelName)
 		} else if providerCalls != 1 {
 			t.Fatal("qualifier retried a completed independent test judgment")
 		}
@@ -85,10 +85,11 @@ func TestSourceBuildQualifierReplaysTestsAfterHostUnavailability(t *testing.T) {
 	}
 	profileHash := sha256.Sum256(profileBytes)
 	profileDigest := hex.EncodeToString(profileHash[:])
+	hostUnavailable := errors.New("synthetic host evidence temporarily unavailable")
 	host := func(context.Context, reviewedSourceBuildRequest, sourceBuildArtifacts, string, sourceBuildSandboxSettings, sourceHostProbeSettings) (*sourceProspectiveHostProfile, string, error) {
 		hostCalls++
 		if hostCalls == 1 {
-			return nil, "", errors.New("synthetic host evidence temporarily unavailable")
+			return nil, "", hostUnavailable
 		}
 		if err := publishSourceTestRecord(filepath.Join(artifacts.Directory, "prospective-host-profile.json"), profileBytes); err != nil {
 			return nil, "", err
@@ -96,8 +97,8 @@ func TestSourceBuildQualifierReplaysTestsAfterHostUnavailability(t *testing.T) {
 		return profile, profileDigest, nil
 	}
 	qualification := sourceBuildQualificationRequest{Operation: "qualify_exact_reviewed_source_image", Owner: owner, Build: request, Artifacts: artifacts}
-	if receipt, err := executeSourceBuildQualifier(context.Background(), qualification, settings, client, "synthetic-provider-key", docker, host); err == nil || receipt != nil || starts != 1 || providerCalls != 2 || !daemon.removed {
-		t.Fatal("missing host evidence produced a receipt or lost completed test facts", receipt, err, starts, providerCalls, daemon.removed)
+	if receipt, err := executeSourceBuildQualifier(context.Background(), qualification, settings, client, "synthetic-provider-key", docker, host); !errors.Is(err, hostUnavailable) || receipt != nil || starts != 1 || providerCalls != 2 || hostCalls != 1 || !daemon.removed {
+		t.Fatal("missing host evidence produced a receipt or lost completed test facts", receipt, err, starts, providerCalls, hostCalls, daemon.removed)
 	}
 	if _, err := os.Lstat(filepath.Join(artifacts.Directory, "qualifier-receipt.json")); !os.IsNotExist(err) {
 		t.Fatal("incomplete host qualification published a receipt", err)

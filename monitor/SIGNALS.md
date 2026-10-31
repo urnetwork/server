@@ -11934,15 +11934,12 @@ return zero; one or two requested IDs can correctly return one or two. The
 metric's default `quality` label does not mean ranking ran, and `unknown`
 caller-country is expected when this branch skips the IP-country lookup.
 
-Expected family availability is an independent incident qualifier. When the
-operator explicitly confirms that IPv6 providers are not yet available during
-an ongoing rollout, retained `v6` empty-result cohorts describe that expected
-absence; they do not establish a regression in supported IPv4 selection or
-justify changing family intent or eligibility. Record the operator statement
-and observation clock, keep the measured zero counts, and resume ordinary IPv6
-availability assessment when support is enabled. The current reducer has no
-family-support input, so an emitted IPv6 PAGE must not be silently rewritten as
-healthy. Keep `any` (dualstack then IPv4-only) and `v4` discovery findings,
+Expected family availability is an independent incident qualifier. The owner's
+IPv6 statement and the per-family country supply (country supply, below) are the
+reducer's family-support input: `v6` empty answers for a country without IPv6
+supply over the lookback are expected, and a loss of IPv6 supply still pages.
+An IPv6 PAGE is never silently rewritten as healthy without that supply
+evidence. Keep `any` (dualstack then IPv4-only) and `v4` discovery findings,
 initial-picker errors, and supported-route failures independently actionable.
 An IPv6 ingress address is not evidence of available IPv6 providers. See the
 published-family and incident controls in §2.9c.
@@ -12050,19 +12047,22 @@ be a user left with nothing. Target supply:
 `cache_empty` for a `city` or `region` target (the score export published the
 target without an admitted provider, so it has connected source rows that fail
 the shared reliability, URL and hard-exclusion gates, or it lost its last
-provider within the cache ttl; most cities hold one or two providers). Explained
+provider within the cache ttl; most cities hold one or two providers), except a
+region whose country lost all of its supply (country supply, below). Explained
 zeros leave the denominator as well as the zero count, so the effective-empty
 PAGE and both small-list WARNs judge only the answers neither explains, and
 refill traffic cannot dilute a real platform empty below the ratio. A country,
 group, best-available, mixed or unknown target the export wrote empty still
-counts toward the PAGE, as do missing cache metadata, page gaps, hard, network,
-family and mixed filters and every other reason. Explanations can only lower a
-verdict. A response without them (`zero_explanations=absent`, as from API
+counts toward the PAGE unless a country's own admitted supply explains it
+(country supply, below), as do missing cache metadata, page gaps, hard,
+network, family and mixed filters and every other reason. Explanations can only
+lower a verdict. A response without them (`zero_explanations=absent`, as from API
 processes that predate the counter) is judged on its bands exactly as before; a
 row outside the fixed vocabularies, stale, negative or duplicated means the
 explanations are discarded whole (`zero_explanations=invalid`); a read that
 used them reports `zero_explanations=joined`. An explanation is clamped to the
-zeros it explains, and an explained cohort supplies no recovery credit.
+zeros it explains. An explained cohort's requests are evidence of its own
+recovery (recovery authority, below), never of another cohort's.
 Findings report `zero_explained_by_request`, `zero_explained_by_target_supply`,
 `zero_unexplained` and `considered_requests`.
 
@@ -12081,6 +12081,55 @@ deploy at four requests a minute per rank mode, the cadence of one client's
 while the city's providers failed admission, `filtered_destinations` while the
 request already excluded the admitted ones. That one caller met the 20-request
 PAGE floor by itself. With the explanations joined it raises nothing.
+
+Country supply (2026-10-31, owner-approved): the taskworker's score export
+(`UpdateClientScores`), where admission is decided, publishes the admitted
+providers of every country target per request IP family,
+`urnetwork_client_score_admitted_providers` (labels `country`, `ip_family`),
+with the fleet totals `urnetwork_client_score_admitted_providers_fleet`
+(`ip_family`) and `urnetwork_client_score_supply_measured_timestamp_seconds`.
+`any` counts
+dualstack and IPv4-only providers, `v4` IPv4-only and `v6` dualstack and
+IPv6-only: the facets each request family draws. Admitted means in the
+non-forced union pool, online or native, before per-caller network exclusions.
+That is about 100 countries times three families, with no client, network,
+provider or location identity. A process publishes its measurement for an hour
+after the export that made it, so a taskworker that stopped exporting drops
+out. `urnetwork_findproviders2_empty_outcomes_total` names the
+`target_country` of a `cache_empty` answer for a country, or for a region its
+country, and leaves it empty for every other answer. The probe reads, in the
+same query, each process's measurement and time (the newest is the current
+supply), the 24-hour maximum per country and family, the oldest measurement in
+those 24 hours, and the fleet totals with their 7-day maximum. Judged in the
+cohort's own family, a country's `cache_empty` answers page when the country
+lost its supply (zero now, positive within the 24 hours) or when it has at
+least 10 admitted providers: only that caller country's network exclusions
+could empty a payload that large, and on Main the networks excluding a caller
+country held a handful of connected providers (45 networks excluding AU callers
+held 3 in all on 2026-10-30), so it is a cache or selection failure. A country
+below that floor that was not lost, zero over the whole lookback or a few now,
+explains its answers: they leave the judgment, and a cohort that would have
+paged with them raises the nonpaging `provider-count-country-unsupplied` WARN
+carrying `country_supply_targets` (country/family, current count, 24-hour
+maximum and verdict). Zero over the whole lookback needs a measurement history
+reaching 23 hours back; a shorter one leaves it unknown. A region keeps its
+narrow-target explanation unless its country lost all of its supply, which
+pages. Missing or untrusted supply data keeps the verdict the probe gave
+without it: an absent, stale (newest measurement older than an hour), invalid
+or partial supply part, a country or family the newest measurement lacks, and
+`dualstack` or `unknown` cohorts, which no family count covers. Findings report
+`zero_explained_by_country_supply` and `country_supply=absent|joined|invalid|stale`.
+
+IPv6 egress is offered only where providers have proven IPv6.
+An empty IPv6 answer for a country with no IPv6-capable provider is expected.
+The country rule applies per family, so `v6` empties for a country with no IPv6
+supply over the lookback are explained, a WARN at most. A loss of IPv6 supply still pages:
+in a country, as above, or across the fleet when the fleet's IPv6 total falls
+below half of its 7-day maximum (`fleet_v6_dropped=true`), which takes the
+explanation from every `v6` country and region answer. A `v6` judgment needs
+the fleet totals; without them it keeps the verdict it had without supply data.
+The `v6` outcome label merges `v6-capable` and `v6-only` requests; the count is
+the `v6-capable` supply the standard client asks for.
 
 `caller_country=us` identifies the caller, not the requested/provider country;
 `location` combines different targets and can coexist with explicit ClientId
@@ -12103,24 +12152,36 @@ never a scarcity diagnosis or a healthy sentinel for this band. The existing
 PAGE and >=50 provisional WARN thresholds remain unchanged. Direct cohorts and
 ForceMinimum diagnostics keep their existing separate treatment.
 
-Recovery authority: a successful but intent-unknown 20–<50 all-small ordinary
-cohort cannot clear an existing measured incident. The reducer supplies silent
-clear holds for `provider-count-effective-empty` and `provider-count-small-list`
-at `api-fleet` when any returned ordinary cohort is below the existing 20-call
-sample floor or has that intent-unknown small-list shape, or when no qualified
-ordinary cohort is observed. Direct and ForceMinimum-only traffic cannot supply
+Recovery authority: a measured incident waits only on the evidence of the
+cohorts it was reported for. The notifier's recovery identity excludes the
+cohort frame, so the probe remembers, between executions, every ordinary cohort
+that reported `provider-count-effective-empty` or `provider-count-small-list`.
+A reporting cohort recovers from its class on its own evidence: two
+consecutive executions in which it returns at least the 20-request floor, does
+not report the class and is not in the intent-unknown 20–<50 all-small shape.
+Explained answers count toward that floor, since they too show the cohort no
+longer meets the class; they never vouch for another cohort. Until then, an
+execution in which the cohort is below the floor, in the intent-unknown shape,
+idle, or missing from the response supplies a silent clear hold for its class
+at `api-fleet` and restarts its streak; a healthy sibling cannot certify it.
+A cohort that never reported a class holds nothing, so a sparse, idle or
+intent-unknown sibling cannot keep another cohort's incident open. Main showed
+why that matters: every five-minute evaluation over a day (2026-10-30 to 10-31)
+returned 106 to 286 ordinary cohorts below the floor, and while any such cohort
+held both classes, no effective-empty or small-list incident could ever clear. The
+missing-data guard is unchanged: a response with no ordinary cohort at the
+floor in a judgeable shape holds both classes, a failed, annotated or
+malformed read supplies no absence credit, and a retired execution commits
+neither findings nor memory. Direct and ForceMinimum-only traffic cannot supply
 ordinary recovery evidence. These holds add no alert or incident and do not
-suppress independently measured PAGE/WARN findings. The notifier's existing
-recovery identity excludes the cohort frame, so a currently sparse/unknown
-ordinary cohort conservatively holds those measured classes across the shared
-target; a healthy sibling cannot certify it. Returned historical/eager zero
-cohorts can therefore delay a clear. There is no source authority here to call
-them irrelevant, and no expected-cohort census is invented for omitted series.
-Qualified ordinary recovery can coexist with excluded direct/diagnostic traffic.
-An ordinary >=50 provisional WARN remains a measured, independent threshold
-state and may recover the distinct PAGE; its missing learned-baseline authority
-is unchanged. After uncertainty ends, two complete qualified observations are
-still required by the notifier; an unknown run breaks that absence streak.
+suppress independently measured PAGE/WARN findings. An ordinary >=50
+provisional WARN remains a measured, independent threshold state and may
+recover the distinct PAGE; its missing learned-baseline authority is
+unchanged. Silence is not recovery: a reporting cohort whose traffic stops
+keeps its class held until it returns with the requests to judge, or the
+watcher restarts and forgets both the cohort and the incident. After
+uncertainty ends, two complete qualified observations are still required by the
+notifier; an unknown run of the reporting cohort breaks that absence streak.
 This corrects local monitor recovery bookkeeping, not a proved production
 occurrence, provider repair, or new emitted metric.
 
@@ -29903,6 +29964,44 @@ timestamp`, all NOT NULL with no defaults, keyed by `PRIMARY KEY
 (client_id)`. A missing table, a nullable declaration or a missing key is
 schema drift at 894. The probe reads the catalog only; it does not show how
 many providers declare the capability.
+
+Version 897 retires at 900. The trusted instrument overlay re-creates
+`competition_v2_source_authorized` in place, keeping its oid. The new body
+first projects an authenticated instrument back to its selected product, then
+checks the evaluated path base, so v897's exact source body no longer exists
+at 900. Version 900 republishes the complete v897 custody with the 900 source
+body. It also requires `competition_v2_instrument_lock_digest(jsonb)` (SQL,
+immutable) and `competition_v2_instrument_product_intent(jsonb,text,text,text)`
+(PL/pgSQL, volatile), each with its exact body, argument names and metadata.
+The expected bodies come from the server's migration source. Before 900, the
+900 body is drift owned by 897. From 900 on, these are drift owned by 900: the
+897 body, a body without the projection or the path-base check, and a missing
+or reconfigured instrument function. Without this successor contract, a
+coherent database at 900 or 901 paged with the v897 artifact missing
+(2026-10-30).
+
+Version 901 adds the SN top board's replica provenance to the tables of 898
+and 899 (described above), and its content-derived version follows that DDL.
+It pins the nullable `replica_validator_hotkey bytea`, `replica_native_epoch
+bigint` and `replica_measurement_hash text` on `sn_top_snapshot`, and three
+flags, all `boolean NOT NULL DEFAULT false`: `sn_top_snapshot.replica_complete`,
+`sn_top_fleet.replica_available` and `sn_head_summary.replica_genesis`. It also
+pins the valid, ready partial index `sn_head_summary_replica_genesis` on
+(netuid, validator_hotkey, native_epoch) WHERE (replica_genesis = true). A full
+index over the same keys, a changed key order or a lost default is drift at
+901. These checks read the catalog only. They do not show whether the replica
+or any score is current.
+
+Version 902 adds `verify_cohort_census`, the verify cohort's durable census of
+every provider a deployment ever admitted. It has three columns, all NOT NULL
+with no default: `deployment_key character varying(96)`, `client_id uuid` and
+`admitted_at timestamp`. It is keyed by `PRIMARY KEY (deployment_key,
+client_id)` and has no other check or index. Its content-derived version
+follows its DDL. These are drift at 902: a missing or unlogged table; a changed
+type, nullability or default; and a missing, narrowed or deferrable key. Before
+a database reaches 902, the absent table is not drift. A source head ahead of
+the database raises only the `migration-behind` WARN, which is never promoted
+to a page.
 
 ### 8.10 Client-reliability covering-index drift after partition cutover
 Probe: `reliability-index`

@@ -122,3 +122,15 @@ func CompetitionSnowTwoMemberWinnerReviewBodiesSql() (provider, roundInsertGuard
 		strings.Split(migration, "$winner_source$")[1], strings.Split(migration, "$winner_review$")[1], guards[3],
 		findings[3], findings[1], strings.Split(migration, "$snow_policy_findings$")[1]
 }
+
+// Version 900, the trusted instrument overlay: its two instrument functions
+// and the source authorization it re-creates in place, which projects an
+// authenticated instrument back to its selected product and checks the
+// evaluated path base. This reads published source only; it does not apply a
+// migration.
+func CompetitionTrustedInstrumentBodiesSql() (lockDigest, productIntent, sourceAuthorized string) {
+	migration := competitionTrustedInstrumentMigration()
+	return strings.Split(migration, "$instrument_lock$")[1],
+		strings.Split(migration, "$instrument$")[1],
+		strings.Split(migration, "$source$")[1]
+}

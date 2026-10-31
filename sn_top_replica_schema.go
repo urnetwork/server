@@ -18,3 +18,8 @@ const snTopReplicaSchemaSql = `
         ON sn_head_summary (netuid, validator_hotkey, native_epoch)
         WHERE replica_genesis = true;
 `
+
+// The catalog monitor follows this immutable DDL wherever merges place it.
+func SnTopReplicaSchemaMigrationVersion() int {
+	return sqlMigrationVersion(snTopReplicaSchemaSql)
+}

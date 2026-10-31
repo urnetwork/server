@@ -50,9 +50,13 @@ func providerCountRecoveryPayload(t testing.TB, now time.Time, mode string) stri
 
 // Public Run, the real cadence gate and notifier retain measured incidents through
 // repeated unknown runs, reset interrupted recovery and clear after two healthy runs.
+// Each unknown mode is the incident's own cohort without evidence (unknown,
+// sparse, idle), its absence (direct, diagnostic) or a failed source; a sparse
+// or unknown sibling beside a qualified own cohort is recovery
+// (signal_provider_count_cohort_recovery_test.go).
 func TestProviderCountUnknownResponsesRetainMeasuredRecovery(t *testing.T) {
 	for _, class := range []string{"provider-count-effective-empty", "provider-count-small-list"} {
-		for _, unknown := range []string{"unknown", "sparse", "idle", "direct", "diagnostic", "healthy+sparse", "healthy+unknown", "malformed", "unavailable"} {
+		for _, unknown := range []string{"unknown", "sparse", "idle", "direct", "diagnostic", "malformed", "unavailable"} {
 			t.Run(class+"/"+unknown, func(t *testing.T) {
 				now := time.Date(2026, 10, 29, 2, 0, 0, 0, time.UTC)
 				initial := "page"
@@ -110,7 +114,10 @@ func TestProviderCountUnknownResponsesRetainMeasuredRecovery(t *testing.T) {
 }
 
 // Successful unknown findings hold only measured provider-count identities and
-// stay silent where they were silent; a sibling PAGE is still emitted.
+// stay silent where they were silent; a sibling PAGE is still emitted. On a
+// first execution only the response without any judgeable ordinary cohort
+// holds: an unknown cohort that never reported a class holds nothing beside a
+// sibling with the requests to judge.
 func TestProviderCountUnknownHoldsAreScopedAndKeepPositiveSibling(t *testing.T) {
 	now := time.Date(2026, 10, 29, 2, 0, 0, 0, time.UTC)
 	for _, mode := range []string{"unknown", "sparse", "idle", "direct", "diagnostic", "healthy", "healthy+direct", "positive-sibling"} {
@@ -135,7 +142,11 @@ func TestProviderCountUnknownHoldsAreScopedAndKeepPositiveSibling(t *testing.T) 
 				}
 				return
 			}
-			if len(holds) != 2 {
+			if mode == "positive-sibling" {
+				if len(holds) != 0 {
+					t.Error("an unknown cohort that reported nothing held beside a judgeable sibling")
+				}
+			} else if len(holds) != 2 {
 				t.Error("provider-count recovery: unknown response lost exact measured-class holds")
 			} else {
 				for index, class := range []string{"provider-count-effective-empty", "provider-count-small-list"} {

@@ -47,3 +47,34 @@ func TestPublishedFunctionBodiesAreDelimited(t *testing.T) {
 		t.Fatalf("857 body: %q", body)
 	}
 }
+
+// 900 publishes exactly three dollar-quoted bodies. The source authorization
+// is the reviewed-repository body it replaces with exactly the two published
+// insertions, so the monitor's pin cannot accept a body 900 never wrote.
+func TestTrustedInstrumentBodiesAreDelimited(t *testing.T) {
+	migration := competitionTrustedInstrumentMigration()
+	for _, tag := range []string{"$instrument_lock$", "$instrument$", "$source$"} {
+		if count := strings.Count(migration, tag); count != 2 {
+			t.Fatalf("900 tag %s occurs %d times", tag, count)
+		}
+	}
+	if count := strings.Count(migration, "CREATE OR REPLACE FUNCTION"); count != 3 {
+		t.Fatalf("900 creates %d functions, want the two instrument functions and the source authorization", count)
+	}
+	lockDigest, productIntent, sourceAuthorized := CompetitionTrustedInstrumentBodiesSql()
+	if !strings.Contains(lockDigest, `"development_snapshot":false`) || strings.Contains(lockDigest, "BEGIN") {
+		t.Fatalf("900 lock digest body: %q", lockDigest)
+	}
+	if !strings.HasPrefix(productIntent, "\nDECLARE previous jsonb;") || !strings.HasSuffix(productIntent, "RETURN projected;\nEND ") {
+		t.Fatalf("900 product intent body is not the published function body")
+	}
+	projection := "\n intent:=competition_v2_instrument_product_intent(intent,env,competition,season);"
+	predecessor := CompetitionRepositoryPatchSourceBodySql()
+	if strings.Count(sourceAuthorized, projection) != 1 || strings.Count(sourceAuthorized, competitionTrustedInstrumentPathBaseSql) != 1 {
+		t.Fatal("900 source authorization lacks its projection or path-base check")
+	}
+	restored := strings.Replace(strings.Replace(sourceAuthorized, projection, "", 1), competitionTrustedInstrumentPathBaseSql, "", 1)
+	if sourceAuthorized == predecessor || restored != predecessor {
+		t.Fatal("900 source authorization is not the reviewed-repository body with the two published insertions")
+	}
+}

@@ -137,6 +137,40 @@ func LoadDefaults(ctx context.Context, grafanaUrl string, username string, passw
 		}
 		// the id is per grafana instance. upsert by uid
 		delete(dashboard, "id")
+		uid, _ := dashboard["uid"].(string)
+		publicDashboard := hasTag(dashboard, PublicTag)
+
+		// Revoke an old share before uploading any new private content. A later
+		// read, upload or reconciliation failure must not leave new panels public.
+		if uid != "" && !publicDashboard {
+			publicPath := fmt.Sprintf("/api/dashboards/uid/%s/public-dashboards/", uid)
+			getStatus, getBody, err := do("GET", publicPath, nil)
+			if err != nil {
+				return nil, nil, err
+			}
+			if getStatus != 200 && getStatus != 404 {
+				return nil, nil, errors.New(fmt.Sprintf("Could not read public dashboard for %s (%d): %s", uid, getStatus, string(getBody)))
+			}
+			if getStatus == 200 {
+				var current struct {
+					Uid string `json:"uid"`
+				}
+				if err := json.Unmarshal(getBody, &current); err != nil {
+					return nil, nil, err
+				}
+				if current.Uid == "" {
+					return nil, nil, errors.New(fmt.Sprintf("Could not identify existing public dashboard for %s", uid))
+				}
+				deletePath := fmt.Sprintf("/api/dashboards/uid/%s/public-dashboards/%s", uid, current.Uid)
+				deleteStatus, deleteBody, err := do("DELETE", deletePath, nil)
+				if err != nil {
+					return nil, nil, err
+				}
+				if 400 <= deleteStatus {
+					return nil, nil, errors.New(fmt.Sprintf("Could not unpublish %s (%d): %s", uid, deleteStatus, string(deleteBody)))
+				}
+			}
+		}
 
 		statusCode, responseBody, err := do("POST", "/api/dashboards/db", map[string]any{
 			"dashboard": dashboard,
@@ -154,11 +188,10 @@ func LoadDefaults(ctx context.Context, grafanaUrl string, username string, passw
 		title, _ := dashboard["title"].(string)
 		titles = append(titles, title)
 
-		uid, _ := dashboard["uid"].(string)
 		managed = append(managed, managedDashboard{
 			uid:    uid,
 			title:  title,
-			public: hasTag(dashboard, PublicTag),
+			public: publicDashboard,
 		})
 	}
 
@@ -167,7 +200,7 @@ func LoadDefaults(ctx context.Context, grafanaUrl string, username string, passw
 	// tagged. dashboards outside this managed set are never touched
 	public := []PublicDashboard{}
 	for _, m := range managed {
-		if m.uid == "" {
+		if m.uid == "" || !m.public {
 			continue
 		}
 		publicPath := fmt.Sprintf("/api/dashboards/uid/%s/public-dashboards/", m.uid)
@@ -226,16 +259,6 @@ func LoadDefaults(ctx context.Context, grafanaUrl string, username string, passw
 				}
 			}
 			public = append(public, PublicDashboard{Title: m.title, Uid: m.uid, AccessToken: current.AccessToken})
-		case !m.public && exists:
-			// unpublish (tag removed)
-			deletePath := fmt.Sprintf("/api/dashboards/uid/%s/public-dashboards/%s", m.uid, current.Uid)
-			deleteStatus, deleteBody, err := do("DELETE", deletePath, nil)
-			if err != nil {
-				return nil, nil, err
-			}
-			if 400 <= deleteStatus {
-				return nil, nil, errors.New(fmt.Sprintf("Could not unpublish %s (%d): %s", m.uid, deleteStatus, string(deleteBody)))
-			}
 		}
 	}
 
