@@ -624,7 +624,13 @@ either; a region target from its country
 - `urnetwork_findproviders2_location_fallback_total{target_kind, level}`
   counts each answer to a city or region target that could climb, by the
   level that answered, or `none`. The outcome counters count the final
-  answer, so a fallback answer is not an empty one there.
+  answer, so a fallback answer is not an empty one there;
+- an empty answer after a climb means the city, its region and its country
+  were all empty. `urnetwork_findproviders2_empty_outcomes_total` records it
+  under the level it read last, `country` (or `region` where the climb ended
+  there), with that country's `target_country`, so the provider-count probe
+  judges it by the country's admitted supply as it judges an empty country
+  request. The selection metric keeps the requested kind.
 
 ## Metrics derived for ranking
 

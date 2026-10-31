@@ -237,26 +237,90 @@ func TestFindProviders2LocationFallbackAnswersAnEmptyCityAndRegionFromTheCountry
 	})
 }
 
-// A city whose region and country have no admitted provider either stays
-// empty, explained as today, and is counted as a fallback that found none.
-// The fallback does not cross into another country's supply.
+// A city or region whose country has no admitted provider either stays empty,
+// counted as a fallback that found none. Its empty answer read the country
+// last, so it is explained under the country's kind and code, which the
+// supply probe judges as it judges an empty country; the selection metric
+// keeps the requested kind and the final reason. The fallback does not cross
+// into another country's supply.
 func TestFindProviders2LocationFallbackLeavesAnEmptyCountryEmpty(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		places := testing_newFallbackPlaces(ctx, t)
-		none := testing_fallbackCount(t, LocationTypeCity, findProviders2LocationFallbackNone)
-		explained := map[string]string{"target_kind": LocationTypeCity, "reason": "cache_empty"}
-		explainedBefore := selectionMetricSum(t, "urnetwork_findproviders2_empty_outcomes_total", explained)
-		if providers := testing_findFallback(ctx, t, testing_fallbackArgs(places.cityC1Id), server.NewId()); len(providers) != 0 {
-			t.Fatalf("an empty country answered %d providers", len(providers))
+		emptyOutcomes := func(targetKind string, targetCountry string) float64 {
+			return selectionMetricSum(t, "urnetwork_findproviders2_empty_outcomes_total", map[string]string{"target_kind": targetKind, "target_country": targetCountry, "reason": "cache_empty"})
 		}
-		if after := testing_fallbackCount(t, LocationTypeCity, findProviders2LocationFallbackNone); after != none+1 {
-			t.Fatalf("fallback without supply count=%g, want %g", after, none+1)
+		selections := func(targetKind string) float64 {
+			return selectionMetricSum(t, "urnetwork_findproviders2_selection_outcomes_total", map[string]string{"target_kind": targetKind, "outcome": "zero", "reason": "cache_empty"})
 		}
-		if after := selectionMetricSum(t, "urnetwork_findproviders2_empty_outcomes_total", explained); after != explainedBefore+1 {
-			t.Fatalf("empty country cache_empty explanation=%g, want %g", after, explainedBefore+1)
+		cityNone, regionNone := testing_fallbackCount(t, LocationTypeCity, findProviders2LocationFallbackNone), testing_fallbackCount(t, LocationTypeRegion, findProviders2LocationFallbackNone)
+		countryEmpty, cityEmpty, regionEmpty := emptyOutcomes(LocationTypeCountry, "ca"), emptyOutcomes(LocationTypeCity, ""), emptyOutcomes(LocationTypeRegion, "ca")
+		citySelections, regionSelections := selections(LocationTypeCity), selections(LocationTypeRegion)
+
+		for _, locationId := range []server.Id{places.cityC1Id, places.regionCId} {
+			if providers := testing_findFallback(ctx, t, testing_fallbackArgs(locationId), server.NewId()); len(providers) != 0 {
+				t.Fatalf("an empty country answered %d providers", len(providers))
+			}
 		}
+
+		connect.AssertEqual(t, testing_fallbackCount(t, LocationTypeCity, findProviders2LocationFallbackNone), cityNone+1)
+		connect.AssertEqual(t, testing_fallbackCount(t, LocationTypeRegion, findProviders2LocationFallbackNone), regionNone+1)
+		connect.AssertEqual(t, emptyOutcomes(LocationTypeCountry, "ca"), countryEmpty+2)
+		connect.AssertEqual(t, emptyOutcomes(LocationTypeCity, ""), cityEmpty)
+		connect.AssertEqual(t, emptyOutcomes(LocationTypeRegion, "ca"), regionEmpty)
+		connect.AssertEqual(t, selections(LocationTypeCity), citySelections+1)
+		connect.AssertEqual(t, selections(LocationTypeRegion), regionSelections+1)
 	})
+}
+
+// A climb stops at a level whose admitted providers the request's own
+// exclusions removed, though the country above holds others, and its empty
+// answer is explained by that level and reason.
+func TestFindProviders2LocationFallbackStopsAtAnExcludedLevel(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		places := testing_newFallbackPlaces(ctx, t)
+		emptyOutcomes := func(targetKind string, reason string) float64 {
+			return selectionMetricSum(t, "urnetwork_findproviders2_empty_outcomes_total", map[string]string{"target_kind": targetKind, "target_country": "", "reason": reason})
+		}
+		none := testing_fallbackCount(t, LocationTypeCity, findProviders2LocationFallbackNone)
+		regionExcluded := emptyOutcomes(LocationTypeRegion, "filtered_destinations")
+
+		// city a1 has none, its region holds only aV4, the country more
+		args := testing_fallbackArgs(places.cityA1Id)
+		args.ExcludeDestinations = [][]server.Id{{places.aV4.ClientId}}
+		if providers := testing_findFallback(ctx, t, args, server.NewId()); len(providers) != 0 {
+			t.Fatalf("a climb past an excluded region answered %d providers from the country", len(providers))
+		}
+
+		connect.AssertEqual(t, testing_fallbackCount(t, LocationTypeCity, findProviders2LocationFallbackNone), none+1)
+		connect.AssertEqual(t, emptyOutcomes(LocationTypeRegion, "filtered_destinations"), regionExcluded+1)
+	})
+}
+
+// An empty answer is explained by the level it came from only when the
+// request's targets lie in one country, whose supply can explain it.
+func TestFindProviders2AnsweredTargetKind(t *testing.T) {
+	for _, c := range []struct {
+		targetKind    string
+		fallbackLevel string
+		targetCountry string
+		want          string
+	}{
+		{targetKind: LocationTypeCity, want: LocationTypeCity},
+		{targetKind: LocationTypeCity, targetCountry: "ca", want: LocationTypeCity},
+		{targetKind: LocationTypeCity, fallbackLevel: LocationTypeCountry, targetCountry: "ca", want: LocationTypeCountry},
+		{targetKind: LocationTypeCity, fallbackLevel: LocationTypeRegion, targetCountry: "ca", want: LocationTypeRegion},
+		{targetKind: LocationTypeRegion, fallbackLevel: LocationTypeCountry, targetCountry: "ca", want: LocationTypeCountry},
+		{targetKind: "mixed", fallbackLevel: LocationTypeCountry, targetCountry: "ca", want: LocationTypeCountry},
+		// targets in two countries: no one country's supply explains it
+		{targetKind: LocationTypeCity, fallbackLevel: LocationTypeCountry, want: LocationTypeCity},
+	} {
+		observation := &findProviders2SelectionObservation{targetKind: c.targetKind, fallbackLevel: c.fallbackLevel, targetCountry: c.targetCountry}
+		if got := observation.answeredTargetKind(); got != c.want {
+			t.Fatalf("%+v answered kind %s", c, got)
+		}
+	}
 }
 
 // A city with admitted providers that the request's own exclusions removed
@@ -315,7 +379,8 @@ func TestFindProviders2LocationFallbackStrictKeepsTheExactAnswer(t *testing.T) {
 		for _, level := range []string{LocationTypeRegion, LocationTypeCountry, findProviders2LocationFallbackNone} {
 			before[level] = testing_fallbackCount(t, LocationTypeCity, level)
 		}
-		explained := map[string]string{"target_kind": LocationTypeCity, "reason": "cache_empty"}
+		// a strict city's empty answer is the city's own, without a country
+		explained := map[string]string{"target_kind": LocationTypeCity, "target_country": "", "reason": "cache_empty"}
 		explainedBefore := selectionMetricSum(t, "urnetwork_findproviders2_empty_outcomes_total", explained)
 		for _, cityId := range []server.Id{places.cityA1Id, places.cityB1Id, places.cityC1Id} {
 			args := testing_fallbackArgs(cityId)

@@ -7264,6 +7264,7 @@ func FindProviders2(
 				}
 				if level, ok := fallback.nextLevel(); ok {
 					locationIds, locationGroupIds, match = level.locationIds, map[server.Id]bool{}, level.match
+					observation.fallbackLevel = match
 					specClientIds = nil
 					continue
 				}
@@ -7368,7 +7369,7 @@ func FindProviders2(
 	recordFindProviders2Outcome(findProviders2, callerCountryCode, len(result.Providers))
 	observation.complete(len(result.Providers))
 	if len(result.Providers) == 0 {
-		recordFindProviders2EmptyOutcome(findProviders2, callerCountryCode, observation.targetKind, observation.targetCountry, observation.reason)
+		recordFindProviders2EmptyOutcome(findProviders2, callerCountryCode, observation.answeredTargetKind(), observation.targetCountry, observation.reason)
 	}
 	return result, nil
 }

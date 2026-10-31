@@ -67,6 +67,7 @@ type findProviders2SelectionObservation struct {
 	args                 *FindProviders2Args
 	targetKind           string
 	targetCountry        string // the one country every location spec resolves to, "" otherwise
+	fallbackLevel        string // the region or country level the location fallback answered from, "" otherwise
 	requestClass         string
 	rankMode             string
 	stage                string
@@ -296,6 +297,19 @@ func (self *findProviders2SelectionObservation) complete(resultCount int) {
 	default:
 		self.reason = self.filterReason()
 	}
+}
+
+// The target kind the answer came from: the requested kind, or the level the
+// location fallback climbed to (network_client_location_fallback.go). A
+// climbed empty answer read its target's country, or its region when the
+// climb ended there, last, so it is explained by that level's supply, not by
+// the narrow target the request named. A climb over targets in more than one
+// country keeps the requested kind, since no one country's supply explains it.
+func (self *findProviders2SelectionObservation) answeredTargetKind() string {
+	if self.fallbackLevel != "" && clientScoreSupplyCountry(self.targetCountry) {
+		return self.fallbackLevel
+	}
+	return self.targetKind
 }
 
 // Whether every target the request has read was published without an

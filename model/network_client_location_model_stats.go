@@ -229,11 +229,16 @@ var findProviders2OutcomesTotal = prometheus.NewCounterVec(prometheus.CounterOpt
 // do that: it has no caller country. target_country names the requested
 // country (a region's country for a region) of a cache_empty answer only, so
 // the probe can judge it against that country's admitted supply
-// (network_client_score_supply.go); it is empty for every other answer. All
-// added labels are fixed vocabularies, never a target identity.
+// (network_client_score_supply.go); it is empty for every other answer. For
+// an answer the location fallback climbed (network_client_location_fallback.go),
+// target_kind is the level the answer came from, the target's region or
+// country, so a city that climbed to its empty country is judged by that
+// country's supply rather than explained as a narrow target; the selection
+// metric keeps the requested kind. All added labels are fixed vocabularies,
+// never a target identity.
 var findProviders2EmptyOutcomesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "urnetwork_findproviders2_empty_outcomes_total",
-	Help: "FindProviders2 completed empty responses by the outcome request class, requested target kind, the target country of a supply-empty country or region, and terminal selection reason",
+	Help: "FindProviders2 completed empty responses by the outcome request class, requested target kind (or the region or country a location fallback answered from), the target country of a supply-empty country or region, and terminal selection reason",
 }, []string{"ip_family", "location_kind", "caller_country", "rank_mode", "force_minimum", "capability", "target_kind", "target_country", "reason"})
 
 // The capability filter a request names, as the outcome label reads it.
