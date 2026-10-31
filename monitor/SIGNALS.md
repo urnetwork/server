@@ -29904,6 +29904,33 @@ timestamp`, all NOT NULL with no defaults, keyed by `PRIMARY KEY
 schema drift at 894. The probe reads the catalog only; it does not show how
 many providers declare the capability.
 
+Version 897 retires at 900. The trusted instrument overlay re-creates
+`competition_v2_source_authorized` in place, keeping its oid. The new body
+first projects an authenticated instrument back to its selected product, then
+checks the evaluated path base, so v897's exact source body no longer exists
+at 900. Version 900 republishes the complete v897 custody with the 900 source
+body. It also requires `competition_v2_instrument_lock_digest(jsonb)` (SQL,
+immutable) and `competition_v2_instrument_product_intent(jsonb,text,text,text)`
+(PL/pgSQL, volatile), each with its exact body, argument names and metadata.
+The expected bodies come from the server's migration source. Before 900, the
+900 body is drift owned by 897. From 900 on, these are drift owned by 900: the
+897 body, a body without the projection or the path-base check, and a missing
+or reconfigured instrument function. Without this successor contract, a
+coherent database at 900 or 901 paged with the v897 artifact missing
+(2026-10-30).
+
+Version 901 adds the SN top board's replica provenance to the tables of 898
+and 899 (described above), and its content-derived version follows that DDL.
+It pins the nullable `replica_validator_hotkey bytea`, `replica_native_epoch
+bigint` and `replica_measurement_hash text` on `sn_top_snapshot`, and three
+flags, all `boolean NOT NULL DEFAULT false`: `sn_top_snapshot.replica_complete`,
+`sn_top_fleet.replica_available` and `sn_head_summary.replica_genesis`. It also
+pins the valid, ready partial index `sn_head_summary_replica_genesis` on
+(netuid, validator_hotkey, native_epoch) WHERE (replica_genesis = true). A full
+index over the same keys, a changed key order or a lost default is drift at
+901. These checks read the catalog only. They do not show whether the replica
+or any score is current.
+
 ### 8.10 Client-reliability covering-index drift after partition cutover
 Probe: `reliability-index`
 

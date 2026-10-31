@@ -863,9 +863,15 @@ var migrationCurrentSuffixContracts = slices.Concat(
 			snMainnetMigrationColumns("contract_close",
 				snMainnetMigrationColumn{name: "settlement_completion", kind: "smallint", notNull: true, defaultExpression: "0"},
 				snMainnetMigrationColumn{name: "settlement_completion_checkpoint_byte_count", kind: "bigint"})),
-		migrationCurrentSuffix(897, "two-member provider union review, identity and retained source custody", competitionMigration897ArtifactQuery),
+		// 900 replaces the source authorization body and republishes the rest.
+		migrationCurrentSuffix(897, "two-member provider union review, identity and retained source custody", competitionMigration897ArtifactQuery).removedAt(900),
 	},
 	snTopBoardMigrationContracts,
+	[]snMainnetMigrationContract{
+		migrationCurrentSuffix(900, "trusted instrument overlay with two-member review, identity and retained source custody",
+			competitionMigration900ArtifactQuery),
+		snTopReplicaMigrationContract,
+	},
 )
 
 // Free space a table keeps on every page it writes, so an update of an
