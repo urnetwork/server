@@ -81,6 +81,8 @@ type backupArchiveWriterFixture struct {
 	clearanceState                string
 	storageReadable               *bool
 	storageEvents                 []backupArchiveStorageEventFixture
+	pgbaseUnitState               string
+	pgbaseMainPID                 int64
 }
 
 type backupArchiveStorageEventFixture struct {
@@ -2007,7 +2009,7 @@ func TestBackupArchivesSignalSyntheticRejectsMalformedWriterObservation(t *testi
 		output string
 		want   string
 	}{
-		{name: "missing", output: "github_unit_state=activating", want: "expected 62 properties"},
+		{name: "missing", output: "github_unit_state=activating", want: "expected 64 properties"},
 		{name: "state", output: strings.Replace(valid, "github_unit_state=inactive", "github_unit_state=ACTIVE", 1), want: "invalid github_unit_state"},
 		{name: "pid", output: strings.Replace(valid, "github_main_pid=0", "github_main_pid=nope", 1), want: "invalid main PID"},
 		{name: "github result", output: strings.Replace(valid, "github_result=success", "github_result=EXIT CODE", 1), want: "invalid github_result"},
@@ -2554,6 +2556,9 @@ func backupArchiveWriterFixtureText(fixture backupArchiveWriterFixture) string {
 	if fixture.storageReadable == nil {
 		fixture.storageReadable = boolPointer(true)
 	}
+	if fixture.pgbaseUnitState == "" {
+		fixture.pgbaseUnitState = "inactive"
+	}
 	output := fmt.Sprintf(
 		"github_unit_state=%s\n"+
 			"github_unit_substate=%s\n"+
@@ -2651,6 +2656,11 @@ func backupArchiveWriterFixtureText(fixture backupArchiveWriterFixture) string {
 		fixture.remoteMountLineage,
 		fixture.clearanceState,
 		*fixture.storageReadable,
+	)
+	output += fmt.Sprintf(
+		"pgbase_unit_state=%s\npgbase_main_pid=%d\n",
+		fixture.pgbaseUnitState,
+		fixture.pgbaseMainPID,
 	)
 	output += fmt.Sprintf(
 		"github_failure_journal_status=%s\n"+

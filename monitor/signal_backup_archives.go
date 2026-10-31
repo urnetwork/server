@@ -198,6 +198,10 @@ remote_result=$(systemctl show remote-backup-archive.service -p Result --value 2
 remote_restart=$(systemctl show remote-backup-archive.service -p Restart --value 2>/dev/null || true)
 remote_restart_delay=$(systemctl show remote-backup-archive.service -p RestartUSec --value 2>/dev/null || true)
 remote_exit_status=$(systemctl show remote-backup-archive.service -p ExecMainStatus --value 2>/dev/null || true)
+# The physical PostgreSQL generation pull is a third archive writer; a host
+# without the unit reports it inactive with no PID.
+pgbase_unit_state=$(systemctl show pgbase-archive.service -p ActiveState --value 2>/dev/null || true)
+pgbase_main_pid=$(systemctl show pgbase-archive.service -p MainPID --value 2>/dev/null || true)
 remote_invocation_id=$(systemctl show remote-backup-archive.service -p InvocationID --value 2>/dev/null || true)
 remote_exec_start_monotonic=$(systemctl show remote-backup-archive.service -p ExecMainStartTimestampMonotonic --value 2>/dev/null || true)
 remote_exec_start=$(systemctl show remote-backup-archive.service -p ExecMainStartTimestamp --value 2>/dev/null || true)
@@ -288,6 +292,8 @@ case "${remote_result}" in '') remote_result=unknown ;; esac
 case "${remote_restart}" in '') remote_restart=unknown ;; esac
 case "${remote_restart_delay}" in ''|*[!0-9a-z]*) remote_restart_delay=unknown ;; esac
 case "${remote_exit_status}" in ''|*[!0-9]*) remote_exit_status=0 ;; esac
+case "${pgbase_unit_state}" in '') pgbase_unit_state=unknown ;; esac
+case "${pgbase_main_pid}" in ''|*[!0-9]*) pgbase_main_pid=0 ;; esac
 case "${remote_invocation_id}" in
 	'') remote_invocation_id=none ;;
 	*) remote_invocation_id=present ;;
@@ -350,6 +356,8 @@ printf 'remote_result=%s\n' "${remote_result}"
 printf 'remote_restart=%s\n' "${remote_restart}"
 printf 'remote_restart_delay=%s\n' "${remote_restart_delay}"
 printf 'remote_exit_status=%s\n' "${remote_exit_status}"
+printf 'pgbase_unit_state=%s\n' "${pgbase_unit_state}"
+printf 'pgbase_main_pid=%s\n' "${pgbase_main_pid}"
 printf 'remote_invocation_id=%s\n' "${remote_invocation_id}"
 printf 'remote_exec_start_monotonic=%s\n' "${remote_exec_start_monotonic}"
 printf 'remote_exec_start_epoch=%s\n' "${remote_exec_start_epoch}"
@@ -536,6 +544,8 @@ type backupArchiveWriterObservation struct {
 	clearanceState                string
 	storageReadable               bool
 	storageEvents                 []backupArchiveStorageEvent
+	pgbaseUnitState               string
+	pgbaseMainPID                 int64
 }
 
 type backupArchiveGitHubFailureObservation struct {
@@ -571,8 +581,12 @@ func parseBackupArchiveIntegritySample(
 	validContract := false
 	switch archive {
 	case "pg":
+		// pg-basebackup-sha256 is a physical generation: a directory of
+		// encrypted base-backup pieces and WAL chunks checked in full against
+		// its SHA-256 manifest. It has no legacy form.
 		validContract =
 			(format == "pg-gpg-sha256" && (result == "verified" || result == "invalid")) ||
+				(format == "pg-basebackup-sha256" && (result == "verified" || result == "invalid")) ||
 				(format == "pg-gpg-md5-legacy" && result == "legacy-unverified")
 	case "redis":
 		validContract =
@@ -866,8 +880,14 @@ func evaluateBackupArchiveUnsafeActiveWriter(
 	case "active", "activating", "reloading":
 		githubActive = observation.mainPID > 0
 	}
+	// pgbase-archive.service, the physical PostgreSQL generation pull
+	physicalActive := false
+	switch observation.pgbaseUnitState {
+	case "active", "activating", "reloading":
+		physicalActive = observation.pgbaseMainPID > 0
+	}
 	if observation.remoteMountState != "read-write" || !observation.storageReadable ||
-		latestFault.IsZero() || (!dataActive && !githubActive) || observation.clearanceState == "valid" {
+		latestFault.IsZero() || (!dataActive && !githubActive && !physicalActive) || observation.clearanceState == "valid" {
 		return healthyFinding("observability/backup-archives", tierPage, class, target)
 	}
 
@@ -878,6 +898,9 @@ func evaluateBackupArchiveUnsafeActiveWriter(
 	if githubActive {
 		active = append(active, "github")
 	}
+	if physicalActive {
+		active = append(active, "physical-pg")
+	}
 	return finding{
 		probeId: "observability/backup-archives", tier: tierPage,
 		class: class, target: target, frame: "unsafe-active-writer", sustain: 1,
@@ -885,22 +908,24 @@ func evaluateBackupArchiveUnsafeActiveWriter(
 			"%s has an active archive writer despite an unverified storage recovery boundary",
 			observation.host,
 		),
-		mechanism: "The currently mounted archive lineage has a retained transport, block-I/O, or journal/remount fault, while systemd reports one or both archive writer processes active. Read-write state after reboot and journal replay does not prove an offline filesystem check, and a process started before a write-clearance interlock was deployed does not acquire that protection retroactively.",
-		baseline:  "No data or GitHub archive writer has a MainPID while backup-archive-volume-recovery-unverified is active. A future writer starts only after an operator-recorded offline filesystem check, bounded mounted write/read/delete test, and fault-free probation match the exact stable archive identity.",
+		mechanism: "The currently mounted archive lineage has a retained transport, block-I/O, or journal/remount fault, while systemd reports one or more archive writer processes active (data pull, GitHub archive, or physical PostgreSQL generation pull). Read-write state after reboot and journal replay does not prove an offline filesystem check, and a process started before a write-clearance interlock was deployed does not acquire that protection retroactively.",
+		baseline:  "No data, GitHub, or physical PostgreSQL archive writer has a MainPID while backup-archive-volume-recovery-unverified is active. A future writer starts only after an operator-recorded offline filesystem check, bounded mounted write/read/delete test, and fault-free probation match the exact stable archive identity.",
 		observed: fmt.Sprintf(
-			"active_writers=%s data_unit_state=%s data_main_pid_present=%t github_unit_state=%s github_main_pid_present=%t clearance_state=%s fault_latest=%s mount_state=%s",
+			"active_writers=%s data_unit_state=%s data_main_pid_present=%t github_unit_state=%s github_main_pid_present=%t pgbase_unit_state=%s pgbase_main_pid_present=%t clearance_state=%s fault_latest=%s mount_state=%s",
 			strings.Join(active, ","),
 			observation.remoteUnitState,
 			observation.remoteMainPID > 0,
 			observation.unitState,
 			observation.mainPID > 0,
+			observation.pgbaseUnitState,
+			observation.pgbaseMainPID > 0,
 			observation.clearanceState,
 			latestFault.Format(time.RFC3339),
 			observation.remoteMountState,
 		),
 		evidence: "The probe joins only systemd unit state and MainPID presence with the already-normalized latest fault time for exact devices in the current archive lineage and the installed helper's allowlisted valid, missing, invalid, or unobservable clearance result. It does not return process arguments, helper errors, backup contents, raw kernel text, or physical identifiers.",
 		context:  "This finding makes the unsafe concurrency visible without deciding whether interrupting a large in-flight transfer is less risky than allowing it to finish. The underlying recovery-unverified page remains independently active and retains the hardware/filesystem closure gate.",
-		action:   "Do not start another writer and do not auto-stop the observed process. Require an explicit current-writer operator decision. The safest storage-repair sequence is to stop both writers, verify their children are gone, repair the proven physical boundary, and complete offline e2fsck plus the stable-identity write-clearance workflow before one catch-up run. Installing the interlock blocks future starts but does not protect an already-running shell.",
+		action:   "Do not start another writer and do not auto-stop the observed process. Require an explicit current-writer operator decision. The safest storage-repair sequence is to stop every writer, verify their children are gone, repair the proven physical boundary, and complete offline e2fsck plus the stable-identity write-clearance workflow before one catch-up run. Installing the interlock blocks future starts but does not protect an already-running shell.",
 		verify:   "First observe both units without a MainPID. Then complete the recovery-unverified hardware, offline-filesystem, bounded write/read/delete, 30-minute probation, and stable-identity clearance gates. Start exactly one writer and require one validated atomic generation plus two matching direct Mimir reads; the retained 30-day recovery page clears only by its documented independent policy.",
 		playbook: "SIGNALS.md §11.22",
 	}
@@ -1019,6 +1044,8 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 		"remote_mount_lineage",
 		"remote_clearance_state",
 		"remote_storage_journal_readable",
+		"pgbase_unit_state",
+		"pgbase_main_pid",
 	}
 	if len(values) != len(required) {
 		return backupArchiveWriterObservation{}, fmt.Errorf("expected %d properties; got %q", len(required), strings.TrimSpace(output))
@@ -1040,6 +1067,7 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 		"remote_restart",
 		"remote_timer_state",
 		"remote_timer_unit_file_state",
+		"pgbase_unit_state",
 	} {
 		if matched, _ := regexp.MatchString(`^[a-z-]+$`, values[key]); !matched {
 			return backupArchiveWriterObservation{}, fmt.Errorf("invalid %s %q", key, values[key])
@@ -1180,6 +1208,10 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 			archivePathBools["archive_path_permissions_secure"]) {
 		return backupArchiveWriterObservation{}, fmt.Errorf("archive root state is populated while observation is unobservable")
 	}
+	pgbaseMainPID, err := strconv.ParseInt(values["pgbase_main_pid"], 10, 64)
+	if err != nil || pgbaseMainPID < 0 {
+		return backupArchiveWriterObservation{}, fmt.Errorf("invalid physical pull main PID %q", values["pgbase_main_pid"])
+	}
 	remoteMainPID, err := strconv.ParseInt(values["remote_main_pid"], 10, 64)
 	if err != nil || remoteMainPID < 0 {
 		return backupArchiveWriterObservation{}, fmt.Errorf("invalid remote main PID %q", values["remote_main_pid"])
@@ -1249,6 +1281,8 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 		archivePathsOnMount:           archivePathBools["archive_paths_on_mount"],
 		archivePathPermissionsSecure:  archivePathBools["archive_path_permissions_secure"],
 		remoteUnitState:               values["remote_unit_state"],
+		pgbaseUnitState:               values["pgbase_unit_state"],
+		pgbaseMainPID:                 pgbaseMainPID,
 		remoteUnitSubstate:            values["remote_unit_substate"],
 		remoteMainPID:                 remoteMainPID,
 		remoteResult:                  values["remote_result"],
@@ -2498,7 +2532,7 @@ func evaluateBackupArchiveIntegrity(
 			probeId: "observability/backup-archives", tier: tierPage,
 			class: invalidClass, target: target, frame: "format-validation", sustain: 1,
 			symptom:   fmt.Sprintf("%s latest format-specific archive integrity check failed", target),
-			mechanism: "The destination read the selected archive bytes and the bounded format validator rejected them. PostgreSQL and Redis validate the encrypted artifact against its adjacent SHA-256 record; GitHub validates that checksum plus the xz and tar streams. A failed newly transferred candidate is not eligible for staging or retention promotion.",
+			mechanism: "The destination read the selected archive bytes and the bounded format validator rejected them. A PostgreSQL dump and a Redis bundle validate the encrypted artifact against its adjacent SHA-256 record; a physical PostgreSQL generation validates every base-backup piece and WAL chunk against the sizes and SHA-256 digests in its manifest; GitHub validates that checksum plus the xz and tar streams. A failed newly transferred candidate is not eligible for staging or retention promotion.",
 			baseline:  "The latest integrity report is fresh, names the same generation as the structural latest-timestamp row, and has result=verified.",
 			observed: fmt.Sprintf(
 				"format=%s result=invalid generation=%s checked_at=%s check_age=%s metrics_gateway=%s",

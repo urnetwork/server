@@ -34938,6 +34938,24 @@ The validators never decrypt a database artifact, start PostgreSQL or Redis,
 or prove Git checkout/restore behavior. Byte and bounded container-format
 verification is not a restore drill.
 
+A physical PostgreSQL generation is a directory, `latest/pg/main-pgbase-<UTC
+timestamp>/`, beside the logical dumps and in the same `pg` archive. The edge-5
+base-backup writer (`run-pg-basebackup.sh`) decrypts and checks every piece and
+WAL chunk before it publishes, and Planetoid's `pgbase-archive.service` pulls
+only a published generation. The directory holds `base/` (one encrypted stream
+cut into pieces), `wal/` (encrypted WAL chunks covering the backup's WAL
+range), the producer's `backup-info.json` manifest with every file's size and
+SHA-256, and a combined `SHA256SUMS`. It is structurally complete when the
+manifest says `verified`, names the directory, lists contiguous pieces, and
+every listed file is present at its listed size. Its integrity format is
+`pg-basebackup-sha256`: `verified` only when every piece and chunk matches its
+manifest digest, otherwise `invalid`; it has no legacy form. Its latest
+timestamp is the manifest's file time, which the writer sets to the end of the
+backup's WAL range rather than to its later verification. The newest of the
+dated logical and physical generations is the `pg` recovery point, so the first
+physical generation replaces the logical dump as structural latest during the
+normal Mimir overlap.
+
 Historical key-lifecycle qualifier ([secret-rotation runbook, §3.3–§4.7 and
 October 15 updates](../../factury/postmortem/2026-10-13-secret-rotation.md)):
 the physical-backup writer rereads its passphrase across generation and verify
@@ -35163,8 +35181,9 @@ The configured archive path is a real mountpoint whose direct options contain
 `rw` and contain neither `ro` nor `emergency_ro`. Serial queue and active-phase
 attribution are valid only while this volume contract is healthy. A current
 read-write flag alone does not clear a recent lineage-bound transport,
-block-I/O, journal-abort, or read-only-remount event. Neither writer has a
-MainPID while that recovery boundary is unverified. A future writer must pass
+block-I/O, journal-abort, or read-only-remount event. No writer (data,
+GitHub, or physical PostgreSQL pull) has a MainPID while that recovery boundary
+is unverified. A future writer must pass
 the Xops stable-identity clearance interlock, whose root-owned off-volume marker
 can be recorded only by its offline-e2fsck workflow and subsequent bounded
 mounted write/read/delete test; it also enforces the 30-minute probation and
@@ -35183,8 +35202,9 @@ BROKEN:
   timestamp. Do not coerce these values in Grafana.
 - `backup-archive-integrity-invalid` is immediate when the newest selected
   format-specific report has `result=invalid`. PostgreSQL and Redis reject a
-  ciphertext/SHA-256 mismatch; GitHub rejects that mismatch or an invalid xz or
-  tar stream. The newly transferred candidate must not be staged or promoted.
+  ciphertext/SHA-256 mismatch, and a physical PostgreSQL generation rejects
+  any piece or chunk whose size or digest differs from its manifest; GitHub
+  rejects that mismatch or an invalid xz or tar stream. The newly transferred candidate must not be staged or promoted.
   Preserve it for bounded diagnosis and replace it only through one authorized
   atomic writer run. This result does not say that decryption or a restore was
   attempted.
@@ -35272,9 +35292,10 @@ BROKEN:
   is only the minimum probation before the authorized catch-up gate, not an
   automated clear condition; eventual lookback expiry is not a repair
   certificate.
-- `backup-archive-writer-active-during-recovery` is immediate when either the
-  data or GitHub unit has a MainPID while the same exact lineage still has a
-  retained recovery-unverified fault and the installed Xops helper reports its
+- `backup-archive-writer-active-during-recovery` is immediate when the data,
+  GitHub, or physical PostgreSQL pull (`pgbase-archive.service`) unit has a
+  MainPID while the same exact lineage still has a retained recovery-unverified
+  fault and the installed Xops helper reports its
   current stable-identity clearance as missing or invalid, or the privacy-
   reduced status cannot be observed. The monitor's narrowly allowlisted sudo
   command returns only `valid`, `missing`, or `invalid`; invocation/access or
@@ -35284,7 +35305,7 @@ BROKEN:
   30-day recovery page remains active. Do not auto-stop an in-flight transfer
   or infer that installing the interlock retroactively protects it. Require an
   explicit current-writer operator decision. The safest repair sequence stops
-  both writers before hardware isolation and offline `e2fsck`, then records the
+  every writer before hardware isolation and offline `e2fsck`, then records the
   exact stable identity, performs the helper-owned bounded write/read/delete
   test, observes the 30-minute fault-free probation, and authorizes one writer.
   A missing, mismatched, stale/vacuumed, malformed, or post-fault clearance
