@@ -27,11 +27,11 @@
     "latest_verification_scope": "Read-only live contract behavior, not an exact main binary commit or all-replica identity proof. The earlier release observation is historical, not a season pin.",
     "new_config_vault_or_epoch_one_image_deployment_required": false,
     "negative_owner_feedback_probe_alone_is_not_binary_identity_proof": true,
-    "api_readiness_verified_at": "2026-10-31T06:59:36.524939Z",
+    "api_readiness_verified_at": "2026-10-31T09:24:12Z",
     "api_readiness_operator_authenticated": true,
     "api_readiness_all_eleven_checks_true": true
   },
-  "next_action": "Do NOT restart the completed native hidden screen: all36unique measurements completed, original session88021 exited0, unit is inactive/PID0. Frozen campaign-result21d7de792a84c1b1e2f1736122d82c6765f916555d3ef5e8cfb4402c05975625 is complete=true but ACCEPTED=FALSE: better<no-op failed, no-op<worse passed. Keep this failed result and original second seed unstarted; no reroll/newmeasurement/protocol change is authorized. Original strict owners joined, original3container/4network inventory restored, no F/P open files/mounts, canonical slot free. Real existing worker restored06:51:55Z WITH BOTH HOLDS ACTIVE, before original07:19:42.289655Z offline expiry. Operator-authenticated Ready200/all11 at06:59:36.524939Z; grading remains paused/publication held. Complete independent raw-lineage review and preserve failed F/V/C evidence with qualified custody helper. A first QA preflight stopped before Go because it checked moving historical reference files; unchanged-source corrected immutable-input admission is approved, actual48x3 tests still unproven. Await owner's explicit decision on provisional grading versus revised calibration; no accepted marker, fence cancellation or hold release is authorized by this failed result. Main dashboard/future G2 code remains unqualified WIP, not current grading gates.",
+  "next_action": "The completed hidden screen remains ACCEPTED=FALSE; never restart, reseed, reveal or relabel it. Independent raw-lineage review is complete, and all three F/V/C evidence archives have exact-version COMPLIANCE retention and full SHA-256 readback. The real worker remains online with grading/publication held; operator-authenticated Ready200/all11 at09:24:12Z confirms genuine intake readiness, not statistical acceptance. Await the owner's explicit provisional-grading versus revised-calibration decision; no accepted marker, fence cancellation, hold release or new measurements are authorized. Qualified dashboard and future-G2 host handoff changes are pushed as server766b48358d492eb9444177c13f8164e9adb3f085; 49 focused roots passed three times in an isolated diagnostic dependency snapshot, not full release-lock/runtime qualification. Apply additive migration903 before deploying the main API/metrics producer and Grafana dashboard through the normal pipeline. Future epoch2 instrument/image qualification remains separate and must not change epoch1 or gate its grading recovery.",
   "production": {
     "api": "https://api.bringyour.com",
     "season_id": "sim-latency-production-20261028-r2",
@@ -246,7 +246,8 @@
     "new_hidden_entropy_drawn": true,
     "owner_approved_intake_preserving_maintenance": true,
     "maintenance_deployed_or_activated": true,
-    "worker_stopped": true,
+    "worker_stopped": false,
+    "worker_was_stopped_during_timed_measurements": true,
     "live_transition_report": "server/connect/sim-latency/launch/CALIBRATION-MAINTENANCE-LIVE-2026-10-30.json",
     "live_transition_report_sha256": "14a7e83a285b254cb03d654e1748b51a8a35c70c853586045202bced85c5dfe3",
     "running_public_pilot": {
@@ -391,7 +392,9 @@
         "no_op_raw_less_than_worse": true,
         "no_op_placeable_and_not_takeover": true,
         "all_three_complete_without_failure": true,
-        "independent_full_raw_lineage_review_pending": true,
+        "independent_full_raw_lineage_review_pending": false,
+        "independent_full_raw_lineage_review": "/var/lib/urnetwork/competition-held-out-fresh-single-c2-a9e8e1a7-20261028-v1/INDEPENDENT-REVIEW.private.json",
+        "independent_full_raw_lineage_review_sha256": "db5550dfdf6a3d3c7f154b1354f501846903b17ab907151d42cb1efaf5f22ae3",
         "private_performance_values_not_published": true
       }
     },
@@ -401,17 +404,26 @@
       "pre_format_manifest_sha256": "3648c6f254ae09a18623723addb4d6bcfbce4707f2f65709c49db595f9d73a8d",
       "source_review_pass": true,
       "source_declared_tests": 48,
-      "actual_tests_executed": 0,
-      "compiled_or_installed": false,
-      "original_evidence_unchanged_no_snapshot_created": true,
+      "actual_tests_executed": 144,
+      "fresh_test_processes": 3,
+      "test_failures": 0,
+      "test_skips": 0,
+      "compiled_or_installed": true,
+      "original_evidence_unchanged": true,
+      "public_pilot_snapshot_created": true,
+      "snapshot_receipt_sha256": "253869fe902bf8648617440f0d9e2e6aa05ad41e7c15c204b901f85964016bb1",
       "qualification_after_timed_measurements_only": true,
       "never_grants_calibration_acceptance_or_release": true,
-      "status": "post_format_source_reviewed_first_qa_preflight_failed_before_go_corrected_input_admission_approved_tests_not_yet_proven",
+      "status": "qualified_48_roots_three_race_passes_installed_and_used_for_failed_result_retention",
       "post_format_manifest_sha256": "e0f379699ab40e99f08991f360b95baf36134cd5e855ead8334124368f67383e",
       "first_qa_preflight_failure": "Historical original-reference shards point at moving main; no Go/build/test ran. Actual closed NVL and module-cache sources remain pinned. Corrected driver verifies actual module/package resolution and immutable content, retaining historical manifest identities.",
       "first_qa_preflight_failure_sha256": "fc4996fd19c52c297983ee2097ce4538d6b13c129f7b7519ae5162f12fb603cd",
-      "corrected_driver": "/home/by/urnetwork/temp/custody-v2-qualification-20261031.RAYYsnJY/run.sh",
-      "corrected_driver_sha256": "354602f36034f1faaeee25537836047d36c2606d02aeeb9fb4d092d011f27e59",
+      "first_corrected_driver": "/home/by/urnetwork/temp/custody-v2-qualification-20261031.RAYYsnJY/run.sh",
+      "first_corrected_driver_sha256": "354602f36034f1faaeee25537836047d36c2606d02aeeb9fb4d092d011f27e59",
+      "qualification_evidence_manifest": "/home/by/urnetwork/temp/custody-v2-qualification-20261031.AZss4Sqz/evidence.sha256",
+      "qualification_evidence_manifest_sha256": "c04dd10e816ae8af4d92654722fee4f330cece28d5f43c4f3ac1a0210b6567d2",
+      "installed_native_binary": "/usr/local/libexec/urnetwork/competition-r2-custody-view-20261031-33be886c/retained-archive",
+      "installed_native_binary_sha256": "33be886cb6831a3d954a90b3710cbbaf295aa7e6f0ceda9a78106dfefd67677a",
       "failed_calibration_will_be_retained_as_failure": true
     },
     "maintenance": {
@@ -475,10 +487,10 @@
     },
     "next_serial_actions": [
       "Original native hidden execution is terminal exit0 with36unique measurements; DO NOT restart/prepare/reroll/reveal. Its frozen native result is accepted=false because better<no-op failed. Preserve it and all earlier failed lineages, plus the unstarted historical second seed.",
-      "Real worker has been restored with both holds active before original offline expiry; operator-authenticated Ready200/all11 is genuine. Verify advancing15s heartbeat/Grafana routing; do not fabricate signals.",
-      "Finish independent raw-lineage/census review and corrected immutable-input custody-helper qualification; retain failed F/V/C evidence with exact COMPLIANCE versions/readback without relabeling failure as acceptance.",
+      "Real worker was restored with both holds active before the original offline expiry. Genuine readiness and an advancing producer heartbeat in main Grafana were verified; retain support@ur.xyz ownership and do not fabricate signals.",
+      "Independent raw-lineage review, custody-helper qualification and exact-version COMPLIANCE F/V/C readback are complete. Preserve their failed-calibration interpretation and private evidence; storage success is not acceptance.",
       "Await explicit owner's provisional-grading/revised-calibration decision. Keep holds and Nov5 fences; no accepted marker, new measurements or independent release authority is implied by successful execution/cleanup/readiness.",
-      "Dashboard and future epoch2 G2 source remain unqualified WIP. They are not grading gates; qualify and checkpoint them separately after the operational recovery."
+      "Dashboard and future epoch2 G2 host handoff code are qualified by49focused roots repeated3times and pushed to main. Deploy additive index903 before the main API/metrics producer and Grafana update. Browser rendering, normal release-graph equivalence and the future instrument/image runtime qualification are not claimed; none is a current grading-restoration gate."
     ],
     "serial_action_handoff": "server/connect/sim-latency/launch/reduced-pilot-operator-2026-10-30/NEXT-SERIAL-ACTION.json",
     "serial_action_handoff_sha256": "c15cdedc85bdbdcf04695005a2fa094ed4927e0e1613ee18a1952be552406fdd",
@@ -517,7 +529,7 @@
     "retained_in_git": true,
     "warning": "The 164128-byte historical checkpoint retains all earlier failures, qualifications and source pins. Its old top-level status and next_action are superseded; do not execute them. Read history only for a specific supporting artifact."
   },
-  "observed_at": "2026-10-31T07:02:28Z",
+  "observed_at": "2026-10-31T09:24:12Z",
   "current_public_data_report": {
     "path": "server/connect/sim-latency/baseline/final-baseline.html",
     "sha256": "8d3521b462cd73d60831c0d2245643d0826547bef390fe6ed6c8f2a955f93dd1",
@@ -528,10 +540,15 @@
     "browser_rendered": false,
     "official_private_epoch_baseline_owner_scores_or_hidden_metrics_used": false,
     "old_report_preserved_byte_for_byte": "server/connect/sim-latency/baseline/final-baseline-v1-historical.html",
-    "full_baseline_payload_reverification_deferred_until_timed_work_finishes": true
+    "full_baseline_payload_reverification_deferred_until_timed_work_finishes": false,
+    "full_baseline_payloads_verified": 3704,
+    "baseline_manifest_sha256": "54f6d43d0043619a875a797db5728ea82629e48581458c3774404b84885199c2",
+    "full_payload_verification_log_sha256": "2402d845b891217eac974280964101b2783a87a90510accf6576134bdbc71868",
+    "historical_annotation_manifest_fix_commit": "8756c94566273ceff4739de6cee2034ac2b0563b",
+    "measurement_payload_changed": false
   },
   "future_g2_host_install_source_draft": {
-    "status": "independently_source_reviewed_only_not_formatted_compiled_tested_committed_or_deployed",
+    "status": "formatted_focused_tests_passed_committed_not_instrument_image_built_or_deployed",
     "next_epoch_only_never_an_epoch_one_grading_restoration_gate": true,
     "source_paths": [
       "server/controller/competition_source_host_install.go",
@@ -540,7 +557,8 @@
     ],
     "new_synthetic_test_roots": 8,
     "focused_roots_with_existing_adjacent_tests": 21,
-    "actual_tests_executed": 0,
+    "actual_tests_executed": 24,
+    "actual_test_scope": "Eight new synthetic host handoff roots repeated three times, within the qualified49-root mixed suite. Historical source-only packet below is not the final merged-source proof; see latest_source_checkpoint.",
     "packet": "/home/by/urnetwork/temp/g2-next-epoch-source-handoff-20261031.ZFLXsxBe",
     "packet_manifest_sha256": "284e3c25dc1c28b2f6a49cc4cbb758565055ab0b05122192067aa3422a606db2",
     "handoff_sha256": "cbd38af8c3079f3169ed87225cc526a5c37f5f0214ab3fe60a40ec291aa86ac7",
@@ -551,8 +569,8 @@
     "do_not_deploy_or_claim_qualification_from_source_review": true
   },
   "pending_operator_submission_dashboard": {
-    "status": "independently_source_reviewed_only_unformatted_uncompiled_unrun_unrendered_undeployed",
-    "uncommitted_source": true,
+    "status": "formatted_race_compiled_21_new_roots_three_passes_committed_not_browser_rendered_or_deployed",
+    "uncommitted_source": false,
     "user_request": "Aligned per-submission score plots against the same epoch baseline and actual improvement fringes.",
     "dashboard": "server/grafana/dashboards/competition.json",
     "authenticated_operator_only_public_embargo_unchanged": true,
@@ -575,8 +593,9 @@
       "migration": 1,
       "grafana": 8
     },
-    "actual_tests_executed": 0,
-    "source_pins": {
+    "actual_tests_executed": 63,
+    "actual_test_scope": "Twenty-one new dashboard/collector/index roots repeated three times, plus28new-or-adjacent roots in the same49-root suite. See latest_source_checkpoint for final merged code and actual logs.",
+    "pre_integration_source_pins": {
       "grafana/dashboards/competition.json": "63a5b271c5e909830ebf33d178124c9bb251a9b40031c65c4f35511794f46923",
       "grafana/competition_submission_dashboard_test.go": "0c971ef37e955e1ead63322a553c261ba3bf462a0583e865933a5834bc9a0576",
       "controller/competition_submission_metrics.go": "c629ff4e5228c02ab80ecbff0cd530d50ce52180415ec8a384bf92267908deb2",
@@ -587,25 +606,141 @@
       "db_migrations.go": "292652db5e0202ae8a8a8781772aa02afcc071bbfdc45acd5d327fcaf4933441"
     },
     "remaining": [
-      "After all timed owners join, Max formats and refreezes actual current sources; Low executes tests with the closed dependency cache. Include new controller/root source files rather than claiming the old G2 packet covers current main.",
-      "Run the 21 new roots plus relevant existing metric-inventory and operational tests, preserving actual three-process logs and digests; perform actual native Grafana rendering separately.",
-      "Only after qualification commit/pull/merge/push, then apply the additive completed-score index migration and deploy the main API/metrics producer and Grafana dashboard through the normal pipeline."
+      "Perform actual native Grafana rendering separately; source/embedding/query assertions are not browser-render evidence.",
+      "Apply additive completed-score index migration903, then deploy the main API/metrics producer and Grafana dashboard through the normal pipeline. This source checkpoint does not deploy or change evaluation holds."
     ]
   },
   "pending_full_hold_readback_inspector": {
-    "status": "independently_source_reviewed_only_unformatted_uncompiled_unrun_uninstalled_unexecuted",
+    "status": "qualified_seven_roots_three_passes_installed_actual_read_only_hold_inspection_passed",
     "source_packet": "/home/by/urnetwork/temp/r2-full-hold-inspector-source-20261031.7BR22FIz",
     "source_manifest_sha256": "7e2a443553aad878cbed53bbe3dd43aac4631338a277db3f11d2d7c2427b22bd",
     "synthetic_test_roots": 7,
-    "actual_tests_executed": 0,
-    "actual_database_inspections_executed": 0,
+    "actual_tests_executed": 21,
+    "actual_database_inspections_executed": 1,
     "existing_fresh_hold_readback_requirement_only_not_new_approval_criteria": true,
     "not_a_current_grading_or_worker_restoration_gate": true,
     "no_release_authority_from_source_review": true,
     "post_timed_max_format_refreeze_then_low_qualification_requires_explicit_root_go": true,
     "post_format_source_manifest_sha256": "d0f1c104572acfb2d29c8fd452f66ac13ce0c5651f3e7b79e11129d867783508",
     "format_only_byte_proof_passed": true,
-    "actual_tests_passed_not_yet_observed": true
+    "actual_tests_passed_not_yet_observed": false,
+    "installed_native_binary_sha256": "4be404b9f952384135e78bf2937ff8f219abaea28d95f471d95f72b302340721",
+    "native_library_source_commit": "851581785fad2bc15b0bd94c5cf2a91d106e6155",
+    "read_only_inspection_observed_at": "2026-10-31T07:51:40.823415Z",
+    "read_only_inspection_receipt": "/var/lib/urnetwork/competition-production-r2-20261029-v1/full-hold-readback-20261031.aXfFT1Bn/report.private.json",
+    "read_only_inspection_receipt_sha256": "63d0ed8c5dd5104340a398fa5f9981c9d84cba99d161899fb6e21666d88cb45d",
+    "all_rows_validated": true,
+    "evaluation_revision_four_active": true,
+    "reward_delivery_revision_one_active": true,
+    "fresh_inspection_required_before_any_future_cas": true
+  },
+  "latest_source_checkpoint": {
+    "observed_at": "2026-10-31T09:24:12Z",
+    "repository": "https://github.com/urnetwork/server",
+    "qualified_code_commit": "766b48358d492eb9444177c13f8164e9adb3f085",
+    "qualified_tree": "0e1e0fd228554642fb00a06670733ed698e9ebc1",
+    "tested_main_base": "a8461e23672e16a3b323fcb1a485239b5a6c87ac",
+    "pushed_main_and_remote_verified": true,
+    "canonical_fast_forwarded_with_exact_target_blobs": true,
+    "canonical_clean_at_code_fast_forward": true,
+    "other_eleven_default_branches_pulled_and_pushed": true,
+    "gvisor_remains_on_go_branch": true,
+    "frozen_and_historical_competition_branches_unchanged": true,
+    "not_a_runtime_or_season_pin": true,
+    "source_manifest": "/home/by/urnetwork/temp/current-control-feature-main-integration-20261031.Tksjr2b2/SOURCE.v2.sha256",
+    "source_manifest_sha256": "a012d570d437a4779d7dffb1699653066e5c1488aaa2595ae5465309b084a91a",
+    "checkpoint_receipt": "/home/by/urnetwork/temp/current-control-feature-main-integration-20261031.Tksjr2b2/CHECKPOINT-RECEIPT.v1.json",
+    "checkpoint_receipt_sha256": "40fe5000e0d02a60e8dcf2b3b4727382f0d5eb37f9a2e913a469f925d4ad4040",
+    "tests": {
+      "root_count": 49,
+      "fresh_passes_per_root": 3,
+      "top_level_passes": 147,
+      "package_passes": 9,
+      "failures": 0,
+      "skips": 0,
+      "race": true,
+      "toolchain": "go1.27.3",
+      "started_at": "2026-10-31T09:19:49Z",
+      "finished_at": "2026-10-31T09:20:52Z",
+      "runtime_seconds": 63.020,
+      "artifacts": "/mnt/data/control-feature-qa-20261031.W0hkTgKY/main-integration-test-v2",
+      "test_log_manifest_sha256": "0c2e11d92cff0db23d1cfad1f0da3f5054f33f644e91eaa83fa4216f1bf3ef48",
+      "source_module_18333_selected_input_and_elf_integrity_checks_passed": true,
+      "previous_failed_attempts_preserved": true,
+      "scope": "Actual latest-main server integration with fixed private dependency exports. Five sibling pins differ from the normal release lock: diagnostic qualification only, not release-graph equivalence.",
+      "full_repository_suite_claimed": false,
+      "native_browser_render_claimed": false
+    },
+    "additive_migration_version": 903,
+    "migration_must_precede_api_deployment": true,
+    "api_metrics_and_grafana_deployment_performed": false,
+    "evaluation_policy_or_image_changed": false,
+    "future_g2_instrument_image_runtime_qualification_pending": true,
+    "live_readiness": {
+      "checked_at": "2026-10-31T09:24:12Z",
+      "operator_authenticated": true,
+      "http_status": 200,
+      "all_eleven_checks_true": true,
+      "intake_ready": true,
+      "grading_ready": false,
+      "publication_held": true
+    },
+    "genuine_grafana_heartbeat": {
+      "producer_instance": "010631a5",
+      "source_timestamp_advanced_seconds": 540,
+      "second_observed_source_age_seconds_approximately": 14.426,
+      "second_observation_receipt_sha256": "fae4814fd2c46fe115594e856f447755d4490a56f394887f23287793c1b4f1d1",
+      "second_query_body_sha256": "6a0f573f360e3647b4c38dcec6005ad57400de3f2b5ba55ac4255f0e5004b768",
+      "warning_after_seconds": 30,
+      "owner": "support@ur.xyz",
+      "existing_contact_point": "urnetwork-default-slack",
+      "human_notification_tested": false,
+      "synthetic_heartbeat_used": false
+    },
+    "metadata_checkpoint_does_not_release_holds_or_authorize_calibration": true
+  },
+  "retained_failed_calibration_evidence": {
+    "status": "all_three_exact_source_versions_retained_and_read_back",
+    "summary": "/var/lib/urnetwork/competition-r2-fresh-single-custody-20261030-v1/retention-summary-20261031.VKMmqTBj/SUMMARY.private.json",
+    "summary_sha256": "80ddb52ad914a93a01c9b2aab351b4fd1773e861bfbad769afbcdbe900f7c082",
+    "custody_binding_sha256": "6a1d3e183170965bab0c23b6ac1a2d5c3b7b7f4a26e74538f80adcf88b84c7e4",
+    "total_archive_bytes": 1402478080,
+    "retention_mode": "COMPLIANCE",
+    "retain_until": "2028-01-01T00:00:00Z",
+    "all_original_source_member_and_exact_version_readback_hashes_verified": true,
+    "replica_delivery_for_these_new_objects_verified": false,
+    "offsite_backup_claimed": false,
+    "calibration_accepted": false,
+    "hold_release_or_marker_authority_granted": false,
+    "objects": [
+      {
+        "label": "fresh_single_hidden_evidence",
+        "archive_bytes": 780810752,
+        "archive_sha256": "8847d78393069bcb2de25a628904e8ce68b28d7b832e0ec774734ee803bbb1e4",
+        "version_id": "f7fd8397-6626-4651-8b7f-6fe5af457898",
+        "completed_at": "2026-10-31T08:50:07.492754375Z",
+        "receipt": "/var/lib/urnetwork/competition-r2-fresh-single-retained-archive-45ed14885017919ddb6836e9f28a8c9521115532e07b1587/receipt.private.json",
+        "receipt_sha256": "ca3a60f77577c60bb64ba714ecdcc445bca447ee45dffd2095695bfec8663c7e"
+      },
+      {
+        "label": "public_pilot_custody_view",
+        "archive_bytes": 395339264,
+        "archive_sha256": "1947c0ed1a4091517da0d814f2736db9988d497ecb6a5da80e14b1ce317ce826",
+        "version_id": "6452d96b-6c5b-4b97-85ba-f7205a04ff19",
+        "completed_at": "2026-10-31T09:01:03.997633965Z",
+        "receipt": "/var/lib/urnetwork/competition-r2-fresh-single-retained-archive-bdb1b7c26d22ff508fc875a5bde963e2be1dc47d90d5964d/receipt.private.json",
+        "receipt_sha256": "cd303642da849bf23fe96da402936b028902024a6a3bf7de738c73b0ec3dde00"
+      },
+      {
+        "label": "qualified_source_objects",
+        "archive_bytes": 226328064,
+        "archive_sha256": "7c7d477bea19f132d6eaec135831d32a5e3a42e08436403efe4247dde68c089e",
+        "version_id": "28cb45d2-a147-4b82-8b08-0a1761525875",
+        "completed_at": "2026-10-31T09:06:49.321389222Z",
+        "receipt": "/var/lib/urnetwork/competition-r2-fresh-single-retained-archive-52df7c4819e9886a4e6982a5755570bda293379fd0858787/receipt.private.json",
+        "receipt_sha256": "5f22e628f43f34e289b5da684c38ce823955923a455b552400ff529bc4a9896e"
+      }
+    ]
   },
   "phase_checkpoint_qualification": {
     "status": "focused tests, native API build, standalone guard and static checks passed; not a live release",
