@@ -5805,6 +5805,12 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	ctx = context.WithValue(ctx, clientScoreExportExpiryContextKey{}, manifestTime.Add(ttl))
 	departedTargets, targetManifest := targetMaps.departedTargets(previousTargetManifest, manifestTime, ttl)
 	targets = append(targets, departedTargets...)
+	// the admitted supply these documents hold, published once they all are
+	countryCodes := map[server.Id]string{}
+	for countryCode, countryLocationId := range countryCodeLocationIds() {
+		countryCodes[countryLocationId] = countryCode
+	}
+	supply := newClientScoreSupply(manifestTime, locationClientScores, departedTargets, countryCodes)
 	if err := writeClientScoreTargetManifest(ctx, targetManifest, ttl); err != nil {
 		return fmt.Errorf("publish client score target manifest: %w", err)
 	}
@@ -5952,6 +5958,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		if err := publishProviderOnlineSuccessBaseline(ctx, onlineSuccessBaseline, ttl); err != nil {
 			glog.Errorf("[nclm]publish online url-success guard: %s\n", err)
 		}
+		clientScoreSupplyMetrics.publish(supply)
 		glog.Infof(
 			"[nclm]update %d client locations x %d location scores, %d location group scores, %d of them empty, %d departed targets cleared\n",
 			len(clientLocationIds),
@@ -7034,6 +7041,7 @@ func FindProviders2(
 		observation.enter("directory")
 		directory := locationDirectory()
 		observation.targetKind = findProviders2TargetKind(findProviders2, countryLocations, directory)
+		observation.targetCountry = findProviders2TargetCountry(findProviders2, countryLocations, directory)
 		observation.enter("select")
 
 		// output in order of `clientIds`
@@ -7293,7 +7301,7 @@ func FindProviders2(
 	recordFindProviders2Outcome(findProviders2, callerCountryCode, len(result.Providers))
 	observation.complete(len(result.Providers))
 	if len(result.Providers) == 0 {
-		recordFindProviders2EmptyOutcome(findProviders2, callerCountryCode, observation.targetKind, observation.reason)
+		recordFindProviders2EmptyOutcome(findProviders2, callerCountryCode, observation.targetKind, observation.targetCountry, observation.reason)
 	}
 	return result, nil
 }

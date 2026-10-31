@@ -535,6 +535,7 @@ var alertClassKinds = map[string]alertClassKind{
 	"processor_rate_limit_events":                         incidentAlertClass,
 	"provider-connections-collapse":                       incidentAlertClass,
 	"provider-count-degraded":                             incidentAlertClass,
+	"provider-count-country-unsupplied":                   incidentAlertClass,
 	"provider-count-direct-unclassified":                  incidentAlertClass,
 	"provider-count-effective-empty":                      incidentAlertClass,
 	"provider-count-small-list":                           incidentAlertClass,

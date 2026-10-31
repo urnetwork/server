@@ -242,7 +242,7 @@ func TestProviderCountQueryJoinsEmptyOutcomeExplanations(t *testing.T) {
 	query := providerCountQuery("synthetic")
 	for _, want := range []string{
 		`sum by (ip_family,location_kind,caller_country,rank_mode,force_minimum,result_count) (increase(urnetwork_findproviders2_outcomes_total{env="synthetic",capability!~"modern.*|post_quantum"}[5m]))`,
-		`sum by (ip_family,location_kind,caller_country,rank_mode,force_minimum,target_kind,reason) (increase(urnetwork_findproviders2_empty_outcomes_total{env="synthetic",capability!~"modern.*|post_quantum"}[5m]))`,
+		`sum by (ip_family,location_kind,caller_country,rank_mode,force_minimum,target_kind,target_country,reason) (increase(urnetwork_findproviders2_empty_outcomes_total{env="synthetic",capability!~"modern.*|post_quantum"}[5m]))`,
 		`"monitor_part","empty","",""`,
 		` or `,
 	} {
