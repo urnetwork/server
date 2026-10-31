@@ -68,6 +68,15 @@ and `log.yml`. Keep the current handoff in `message.md`; append chronological
 entries to `log.yml` summarizing all decisions and work, including ownership,
 evidence reviewed, attempted actions, results, verification and next steps.
 Record UTC timestamps and distinguish proposals from actions actually taken.
+Keep `log.yml` as one valid YAML document. Append new records structurally to
+the existing history sequence (`entries`, `history`, or a top-level list),
+preserving every prior field, decision, date, note and record order. JSON syntax
+is valid YAML, but concatenating a JSON object after an existing document is
+not a structured append. Before committing, parse the complete updated document,
+verify a serialization roundtrip preserves its data, and assert the original
+history is unchanged with only the intended chronological entries added. If an
+existing log needs repair, retain its exact original bytes in private evidence
+before changing its structure; do not infer missing history or original causes.
 Update both as work continues so another developer can pick up the issue
 without repeating the investigation. Existing flat alert files may remain in
 place; check both layouts before creating a duplicate. Do not silently escalate
@@ -743,6 +752,19 @@ never reset a file to manufacture contiguous coverage. Root must bind the exact
 source/artifact, private launch selection and collector custody before drawing
 runtime conclusions.
 
+A separately qualified successor may append exactly
+`-admission-diagnostic-dir <new-runtime>/run-admission-diagnostics` while retaining
+its invocation witness, all admission limits and the 15-minute minimum cadence.
+The receiver retains the owned mode-0700 runtime parent; leave this child absent
+for the monitor to create exclusively as mode 0700. The existing passive writer
+records only the first local admission attempt for each of five fixed keys:
+`contract-degradation`, `pg-freeze-age`, `transaction-horizon`,
+`contract-partition-retention-blocked`, and `partition-retention-blocked`.
+Each packet retains its 512-event/128-KiB cap; five fixed attempts allow at most
+640 KiB of packet JSON plus bounded commit receipts. Missing or uncommitted
+packets remain unknown. This future profile neither changes the current watcher
+nor reconstructs the two retention keys' earlier missing invocation cause.
+
 Optional scheduler invocation evidence is a monitor utility, not an implemented
 health probe. `-invocation-witness-output` opts a future continuous CLI launch
 into a new private 0600 sidecar under a private directory, using validated
@@ -767,6 +789,19 @@ registered keys were selected, enabled, due or contacted. Native and effective
 configured cadence fields are policy context; elapsed dispatch time includes
 witness overhead. Preserve standing-drain exemption and post-handler waits.
 
+
+Cached invocation checkpoints are offline utility evidence. Only restoring the
+accepted checkpoint and validating the exact contiguous source bytes establishes
+decoder cursor, sequence, open calls and pending bytes. Physical capture offsets
+and placeholder pending values (including zero or null) do not establish that
+state. Bind the generation, selected-key specifications, original file/receipt
+custody and each declared metadata reference before adopting a checkpoint.
+When original capture metadata does not satisfy a legacy schema, retain the
+refusal and originals; do not add invented adoption fields or rewrite receipts.
+Use a separately qualified original-metadata path, and require each declared
+Root metadata reference to match the actual descriptor. A corrected request
+needs its own admission and preserves the failed request. Call coverage and
+accepted checkpoints do not prove full cadence, current freshness or health.
 
 Continuous mode limits ordinary probe concurrency, applies each alert's sustain
 count, and replaces the bounded log

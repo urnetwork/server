@@ -20,7 +20,7 @@ import (
 // All owner names, times and output are synthetic. No SQL, SSH, network,
 // settings load or process inspection is involved in these controls.
 func admissionControlDiagnostic() *RunAdmissionDiagnostic {
-	return &RunAdmissionDiagnostic{identity: settingsWitnessTestIdentity(), runId: strings.Repeat("a", 32), selection: strings.Repeat("b", 64), pending: make(chan *runAdmissionAttempt, 3)}
+	return &RunAdmissionDiagnostic{identity: settingsWitnessTestIdentity(), runId: strings.Repeat("a", 32), selection: strings.Repeat("b", 64), pending: make(chan *runAdmissionAttempt, runAdmissionAttemptLimit)}
 }
 func admissionControlContext(ctx context.Context, key string) context.Context {
 	return context.WithValue(ctx, runSlotSignalContextKey{}, key)
@@ -285,19 +285,19 @@ func TestRunAdmissionDiagnosticFairnessConserved(t *testing.T) {
 	})
 }
 
-func TestRunAdmissionDiagnosticOnlyThreeFirstAttempts(t *testing.T) {
+func TestRunAdmissionDiagnosticOnlyFiveFirstAttempts(t *testing.T) {
 	diagnostic := admissionControlDiagnostic()
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
-	for _, key := range []string{"contract-degradation", "pg-freeze-age", "transaction-horizon"} {
+	for i, key := range []string{"contract-degradation", "pg-freeze-age", "transaction-horizon", "contract-partition-retention-blocked", "partition-retention-blocked"} {
 		attempt := diagnostic.beginWithLock(ctx, key, true, [4]*runSlotWaiter{}, 0)
-		if attempt == nil || diagnostic.beginWithLock(ctx, key, true, [4]*runSlotWaiter{}, 0) != nil {
+		if attempt == nil || attempt.slot != i+1 || diagnostic.beginWithLock(ctx, key, true, [4]*runSlotWaiter{}, 0) != nil {
 			t.Fatal("finite enrollment changed")
 		}
 		attempt.closeWithLock(true)
 		diagnostic.finish(attempt, runAdmissionForDispatch)
 	}
-	if len(diagnostic.pending) != 3 || diagnostic.beginWithLock(ctx, "task-health", false, [4]*runSlotWaiter{}, 0) != nil {
+	if len(diagnostic.pending) != 5 || diagnostic.beginWithLock(ctx, "task-health", false, [4]*runSlotWaiter{}, 0) != nil {
 		t.Fatal("extra attempt admitted")
 	}
 }
@@ -481,6 +481,9 @@ func TestRunAdmissionDiagnosticStrictCommittedArtifact(t *testing.T) {
 }
 
 func TestRunAdmissionDiagnosticFixedMemoryAndPacketBounds(t *testing.T) {
+	if runAdmissionAttemptLimit != 5 || runAdmissionEventLimit != 512 || runAdmissionPacketLimit != 128*1024 {
+		t.Fatal("finite diagnostic bounds changed")
+	}
 	if reflect.TypeOf(RunAdmissionDiagnostic{}).Size() > 256*1024 {
 		t.Fatal("fixed observation memory exceeds bound")
 	}
@@ -684,5 +687,57 @@ func TestRunAdmissionDiagnosticMalformedCanonicalRehashRefused(t *testing.T) {
 	packet, err := readRunAdmissionArtifact(incomplete, receipt)
 	if err != nil || packet.EventsComplete {
 		t.Fatal("qualified incomplete artifact became complete or was discarded")
+	}
+}
+
+// The retention targets must own finite first-attempt packets without enrolling
+// sibling registry probes or accepting another target's slot.
+func TestRunAdmissionDiagnosticRetentionEnrollmentAndCommittedSlots(t *testing.T) {
+	for i, key := range []string{"contract-partition-retention-blocked", "partition-retention-blocked"} {
+		t.Run(key, func(t *testing.T) {
+			diagnostic := admissionControlDiagnostic()
+			ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+			defer cancel()
+			attempt := diagnostic.beginWithLock(ctx, key, true, [4]*runSlotWaiter{}, 0)
+			if attempt == nil || attempt.slot != i+4 {
+				t.Fatal("retention first attempt unavailable")
+			}
+			diagnostic.eventWithLock(runAdmissionGrant, &runSlotWaiter{signalKey: key, grantOrdinal: 1}, 1)
+			attempt.closeWithLock(true)
+			attempt.terminal = runAdmissionForDispatch
+			packet := diagnostic.packet(attempt)
+			data, err := json.Marshal(packet)
+			if err != nil {
+				t.Fatal(err)
+			}
+			digest := sha256.Sum256(data)
+			receipt, err := json.Marshal(runAdmissionCommit{1, len(data), hex.EncodeToString(digest[:]), diagnostic.runId, i + 4})
+			if err != nil {
+				t.Fatal(err)
+			}
+			decoded, err := readRunAdmissionArtifact(data, receipt)
+			if err != nil || decoded.Key != key || decoded.Slot != i+4 || !decoded.EventsComplete {
+				t.Fatal("retention committed artifact unavailable")
+			}
+			packet.Slot = 1
+			data, err = json.Marshal(packet)
+			if err != nil {
+				t.Fatal(err)
+			}
+			digest = sha256.Sum256(data)
+			receipt, err = json.Marshal(runAdmissionCommit{1, len(data), hex.EncodeToString(digest[:]), diagnostic.runId, 1})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := readRunAdmissionArtifact(data, receipt); err == nil {
+				t.Fatal("retention target accepted another target slot")
+			}
+		})
+	}
+	for _, key := range []string{"", "task-health", "contract-partition-runway", "partition-runway", "contract-partition-retention-blocked-extra"} {
+		diagnostic := admissionControlDiagnostic()
+		if runAdmissionSlot(key) != 0 || diagnostic.beginWithLock(t.Context(), key, true, [4]*runSlotWaiter{}, 0) != nil {
+			t.Fatal("unsupported target enrolled")
+		}
 	}
 }

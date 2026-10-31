@@ -18,6 +18,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+const runAdmissionAttemptLimit = 5
 const runAdmissionEventLimit = 512
 const runAdmissionPacketLimit = 128 * 1024
 
@@ -66,8 +67,8 @@ type runAdmissionAttempt struct {
 type RunAdmissionDiagnostic struct {
 	identity         settingsWitnessIdentity
 	runId, selection string
-	attempts         [3]runAdmissionAttempt
-	used             [3]bool
+	attempts         [runAdmissionAttemptLimit]runAdmissionAttempt
+	used             [runAdmissionAttemptLimit]bool
 	ordinal          uint64
 	pending          chan *runAdmissionAttempt
 	emit             func(*runAdmissionAttempt)
@@ -87,7 +88,7 @@ func NewRunAdmissionDiagnostic(directory string, witness *RunInvocationWitness) 
 	if err != nil {
 		return nil, err
 	}
-	self := &RunAdmissionDiagnostic{identity: witness.identity, runId: witness.runId, selection: witness.selectedKeysSha256, pending: make(chan *runAdmissionAttempt, 3)}
+	self := &RunAdmissionDiagnostic{identity: witness.identity, runId: witness.runId, selection: witness.selectedKeysSha256, pending: make(chan *runAdmissionAttempt, runAdmissionAttemptLimit)}
 	self.emit = func(attempt *runAdmissionAttempt) { self.write(root, attempt) }
 	go func() {
 		defer root.Close()
@@ -193,6 +194,10 @@ func runAdmissionSlot(key string) int {
 		return 2
 	case "transaction-horizon":
 		return 3
+	case "contract-partition-retention-blocked":
+		return 4
+	case "partition-retention-blocked":
+		return 5
 	default:
 		return 0
 	}

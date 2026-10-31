@@ -5073,8 +5073,9 @@ Implementation convention: SIGNALS.md §1.6 (`settings-freshness`) maps to
 Optional `-admission-diagnostic-dir` is off by default and requires an existing
 validated invocation witness plus a NEW private directory. It records only the
 first local global-slot attempt for each of `contract-degradation`,
-`pg-freeze-age`, and `transaction-horizon` in that process generation (three
-attempts total). It preserves the global four-signal/host-two policy, budgets,
+`pg-freeze-age`, `transaction-horizon`, `contract-partition-retention-blocked`,
+and `partition-retention-blocked` in that process generation (five attempts
+total). It preserves the global four-signal/host-two policy, budgets,
 queries, cadence, visibility severity/Sustain, exclusions and incident identity.
 Startup fences the owned mode-0700 parent and newly created child with held
 no-follow directory descriptors and matching device/inode/mode/owner metadata.
@@ -5098,8 +5099,10 @@ While a permit is held, diagnostics do only bounded scalar sealing and a
 nonblocking transfer of preallocated storage. A separate finite emitter performs
 all validation, offset conversion, serialization, hashing and file operations;
 it shares no witness, handler or admission lock and is not joined on shutdown.
-Observation storage is bounded to 256 KiB; each of three packets is capped at
-128 KiB. There is no regular-file write wall-clock guarantee. Event completeness
+Observation storage is bounded to 256 KiB; each of five packets is capped at
+128 KiB (at most 640 KiB of packet JSON across five attempts, plus bounded
+commit receipts). Fixed event storage is five arrays of 512 events; the existing
+256 KiB observation-memory ceiling remains. There is no regular-file write wall-clock guarantee. Event completeness
 is separate from artifact acceptance: a reader requires the fixed committed
 receipt, exact byte count/SHA-256 and strict schema/framing. Data and a pending
 receipt are fully written, synced and closed before the receipt is atomically
@@ -28869,6 +28872,19 @@ and attribute faults to the owning version. Source/custody failure and a newer
 unknown database head remain unknown; these catalog checks do not prove chain
 census correctness, snapshot freshness, application outcomes or deployed schema
 health without an actual qualified observation.
+
+Live-schema authority has its own conservative source bound. The compiled
+server migration count continues to determine real numeric lag and immutable
+identity comparison. It does not certify the monitor's artifact knowledge:
+that knowledge stops at the last contiguous explicit suffix contract after
+the legacy prefix. An omitted appended contract or interior catalog gap leaves
+that and later database heads cannot-observe, even when those heads are in the
+compiled server list. Positional true placeholders do not close this gap.
+Passing older predicates cannot clear drift; failed older live definitions
+cannot select corruption over a legitimate unknown successor. Independent
+immutable identity/catalog faults still page. Synthetic public-path controls
+exercise complete older predicates, a replaced artifact, independent immutable
+fault and unchanged real numeric lag without changing global source catalogs.
 
 Mainnet and native-fee artifact checks belong to this one registered probe.
 Their helpers live in `migration_sn_mainnet.go` and `migration_native_fee.go`;

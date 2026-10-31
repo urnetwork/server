@@ -95,7 +95,7 @@ func TestMigrationsForwardSchemaAuthorityBoundary(t *testing.T) {
 			t.Fatalf("%s: severity, sustain or visibility authority changed", test.name)
 		}
 		if test.wantClass == "cannot-observe" {
-			want := fmt.Sprintf("db_version=%d code_required_version=%d unqualified_artifact_predicates=%d", test.head, head, test.wantUnqualified)
+			want := fmt.Sprintf("db_version=%d code_required_version=%d catalog_known_version=%d unqualified_artifact_predicates=%d", test.head, head, migrationCatalogAuthorityHead(migrationCurrentSuffixContracts), test.wantUnqualified)
 			if alert.Observed != want {
 				t.Fatalf("%s: missing bounded head and unqualified-predicate evidence", test.name)
 			}
