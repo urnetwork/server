@@ -48,6 +48,9 @@ type subnetSettlementCutoverFixture struct {
 	// The vault2 view handler; a test wraps it to fail or contradict a read.
 	vaultV2        subnetReplayTestHandler
 	vaultV2Missing bool
+	// A release owner's enrollment parsed from monitor.yml; nil keeps the
+	// synthetic default.
+	enrollment *SubnetReplaySettings
 }
 
 func newSubnetSettlementCutoverFixture(t *testing.T) *subnetSettlementCutoverFixture {
@@ -115,6 +118,10 @@ func (self *subnetSettlementCutoverFixture) run(t *testing.T, block uint64) Aler
 	self.chain.install(node)
 	settings, source := subnetReplayTestSettings(t, node)
 	settings.SubnetReplay.ReplayFromBlock = subnetSettlementTestDeployBlock
+	if self.enrollment != nil {
+		settings.SubnetReplay = self.enrollment
+		node.settings = self.enrollment
+	}
 	source.api = self.chain.apiHandler(t)
 	settings.SubnetDeployment = NewSubnetReplayPin(subnetSettlementCutoverTestPin())
 	if settings.SubnetDeployment.publicStatus() != subnetReplayPinReviewed || !settings.SubnetDeployment.settlementV2Declared {

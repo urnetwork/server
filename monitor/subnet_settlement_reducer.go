@@ -231,12 +231,15 @@ func evaluateSubnetSettlementCutoverRoot(state *subnetSettlementState, entry *su
 		root = "sweep-leaf-root"
 	}
 	observed := fmt.Sprintf("%s post_cutover_roots=%d first_v2_epoch=%d", root, state.cutover.roots[entry.noId], state.cutover.pools[entry.noId].FirstEpoch)
+	if plannedEpoch, hasPlan := state.cutover.planned[entry.noId]; hasPlan {
+		observed += fmt.Sprintf(" planned_sweep_epoch=%d", plannedEpoch)
+	}
 	return []finding{subnetReplayFinding(subnetSettlementProbeId, "subnet-payout-root", subnetSettlementOperatorTarget(entry.noId), subnetSettlementEpochFrame(entry.epoch, "post-cutover-root"), scope, subnetSettlementPlaybook, subnetReplayIssue{
 		tier: tierPage, sustain: 1, invariant: "post-cutover-v1-root-is-the-sanctioned-sweep",
 		expected: "no-v1-root-or-one-sweep-leaf-root", observed: observed,
 		symptom:   "A v1 payout root exists for an epoch that settlement v2 owns and it is not the one sanctioned carry sweep",
-		mechanism: "From the operator's vault2 first epoch the v1 driver closes and commits nothing, except one owner-approved carry sweep: a single-leaf root equal to vault1 payoutLeaf(vault2.selfColdkey, 10000). Another root, or a second sweep root, lets v1 finalize a payout list for an epoch v2 also settles, or moves v1 carry outside the approved sweep.",
-		baseline:  "After its cutover an operator has no v1 root, or exactly one: the sweep leaf paying vault2's coldkey 10,000 bps, committed in its window by the operator's root signer.",
+		mechanism: "From the operator's vault2 first epoch the v1 driver closes and commits nothing, except one owner-approved carry sweep: a single-leaf root equal to vault1 payoutLeaf(vault2.selfColdkey, 10000), at the planned sweep epoch when one is enrolled. Another root, a sweep root at another epoch, or a second sweep root lets v1 finalize a payout list for an epoch v2 also settles, or moves v1 carry outside the approved sweep.",
+		baseline:  "After its cutover an operator has no v1 root, or exactly one: the sweep leaf paying vault2's coldkey 10,000 bps, at the planned sweep epoch when one is enrolled, committed in its window by the operator's root signer.",
 		action:    "Preserve the root commitment receipt and the artifact by hash. Before the finalize offset, route to the operator's root-signing owner and custody review, and check the v1 driver's cutoff and sweep configuration. Never backdate or invent a root, and never replace one, to clear this alert.",
 		verify:    "Independent replay attributes every post-cutover v1 root and a recorded disposition closes it; the operator then holds at most the one sweep-leaf root after its first v2 epoch.",
 	})}
@@ -254,8 +257,9 @@ func evaluateSubnetSettlementProgress(entry *subnetSettlementEntry, block uint64
 	settled := value.Status == subnetSettlementFinalized || value.Status == subnetSettlementRootMissed || value.Status == subnetSettlementCarried
 	// A rootless row that v2 owns owes v1 no close or root; with the cutover
 	// unknown only the rules that hold either way run. A funded row still
-	// owes finalization, and an unset one can never finalize on v1.
-	v2Owned := entry.cutover != subnetSettlementBeforeCutover && !rootPresent
+	// owes finalization, and an unset one can never finalize on v1. The
+	// planned sweep epoch owes the v1 sweep, so it keeps every ordinary rule.
+	v2Owned := entry.cutover != subnetSettlementBeforeCutover && !rootPresent && !entry.plannedSweep
 	progress := func(condition, invariant string, tier string, sustain int, deadline uint64, symptom, mechanism, action string) {
 		remaining := "0"
 		if block < deadline {

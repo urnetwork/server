@@ -112,8 +112,10 @@ type subnetSettlementEntry struct {
 	entitlement   stabi.STSettlementVaultEntitlement
 	root          stabi.RootCommitmentsOutput
 	// Set by readSubnetSettlementCutover: the settlement version that owns
-	// the row, and whether its root is the sanctioned v1 carry sweep.
+	// the row, whether it is the operator's planned v1 sweep epoch at or after
+	// the cutover, and whether its root is the sanctioned v1 carry sweep.
 	cutover         subnetSettlementCutover
+	plannedSweep    bool
 	sanctionedSweep bool
 }
 
@@ -144,6 +146,10 @@ type subnetSettlementV2Cutover struct {
 	pools     map[uint64]stabi.ISTSettlementVault2Pool
 	// Post-cutover v1 roots of each operator in the census.
 	roots map[uint64]int
+	// The enrolled planned sweep epochs that agree with the chain, and the
+	// public reason when an enrolled one contradicts it.
+	planned    map[uint64]uint64
+	planReason string
 }
 
 // The settlement version that owns one epoch of one operator.
@@ -456,10 +462,11 @@ func subnetSettlementRootOf(view *subnetReplayView) (stabi.RootCommitmentsOutput
 }
 
 // Reads the settlement v2 cutover at the census checkpoint and classifies
-// every row. A gap with a public reason leaves the cutover unknown, so no row
-// that depends on it can read as settled; any other error is returned.
-func readSubnetSettlementCutover(ctx context.Context, rpc *subnetReplayRpc, pin *SubnetReplayPin, state *subnetSettlementState) error {
-	state.cutover = subnetSettlementV2Cutover{declared: pin.settlementV2Declared, roots: map[uint64]int{}}
+// every row against it and the enrolled planned sweep epochs. A gap with a
+// public reason leaves the cutover unknown, so no row that depends on it can
+// read as settled; any other error is returned.
+func readSubnetSettlementCutover(ctx context.Context, rpc *subnetReplayRpc, pin *SubnetReplayPin, state *subnetSettlementState, planned map[uint64]uint64) error {
+	state.cutover = subnetSettlementV2Cutover{declared: pin.settlementV2Declared, roots: map[uint64]int{}, planned: map[uint64]uint64{}}
 	if pin.settlementV2Declared {
 		sweepLeaf, pools, err := readSubnetSettlementV2Pools(ctx, rpc, pin, state.checkpoint, state.operators)
 		if reason := subnetReplayUnknownReason(err); reason != "" {
@@ -472,15 +479,41 @@ func readSubnetSettlementCutover(ctx context.Context, rpc *subnetReplayRpc, pin 
 			state.cutover.pools = pools
 		}
 	}
+	// A plan that names an operator outside a complete census, or an epoch
+	// before its registered pool's first v2 epoch, cannot be the sweep. It is
+	// dropped and reported, never applied to another epoch.
+	census := map[uint64]bool{}
+	for _, operator := range state.operators {
+		census[operator.noId] = true
+	}
+	completeOperators := uint64(len(state.operators)) == state.operatorCount
+	for noId, epoch := range planned {
+		pool := state.cutover.pools[noId]
+		if state.cutover.known && ((completeOperators && !census[noId]) || (pool.Registered && epoch < pool.FirstEpoch)) {
+			state.cutover.planReason = "planned-sweep-inconsistent"
+			continue
+		}
+		state.cutover.planned[noId] = epoch
+	}
 	for _, entry := range state.entries {
 		entry.cutover = state.cutover.of(entry.epoch, entry.noId)
+		plannedEpoch, hasPlan := state.cutover.planned[entry.noId]
+		entry.plannedSweep = hasPlan && plannedEpoch == entry.epoch && entry.cutover != subnetSettlementBeforeCutover
 		if entry.cutover == subnetSettlementAfterCutover && entry.root.PayoutRoot != [32]byte{} {
 			state.cutover.roots[entry.noId] += 1
 		}
 	}
-	// The sweep is sanctioned only as the operator's single post-cutover root.
+	// A planned operator's sweep is sanctioned only at its planned epoch;
+	// without a plan, only as the operator's single post-cutover root.
 	for _, entry := range state.entries {
-		entry.sanctionedSweep = entry.cutover == subnetSettlementAfterCutover && entry.root.PayoutRoot == state.cutover.sweepLeaf && state.cutover.roots[entry.noId] == 1
+		if entry.cutover != subnetSettlementAfterCutover || entry.root.PayoutRoot != state.cutover.sweepLeaf {
+			continue
+		}
+		if plannedEpoch, hasPlan := state.cutover.planned[entry.noId]; hasPlan {
+			entry.sanctionedSweep = entry.epoch == plannedEpoch
+		} else {
+			entry.sanctionedSweep = state.cutover.roots[entry.noId] == 1
+		}
 	}
 	return nil
 }
