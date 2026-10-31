@@ -50,6 +50,18 @@ This is not new calibration, future-image qualification or permission to release
 either hold. The [current checkpoint](launch/current-state.json) names the
 remaining operator decision and deployment boundaries.
 
+The **13:05:01 UTC** read-only, repeatable-read transaction again validated
+evaluation hold 4 and reward-delivery hold 1 as active. At **13:43:36 UTC**,
+authenticated readiness still reported all eleven checks true, intake ready,
+grading not ready and publication held. The source-test provider fixtures were
+corrected in `a1e20b492`; both mocked completions now identify the independent
+tester rather than the honesty reviewer, and the host-retry regression checks
+its exact intended failure. Five focused regressions and all 207 selected
+G2/source-manager checks (69 roots, three fresh runs) passed with zero failures
+or skips. Earlier failed attempts remain preserved and excluded from those
+counts. See the [selected-scope qualification](launch/CONTROL-G2-MANAGER-QUALIFICATION-2026-10-31.json).
+This does not qualify a future evaluator image or amend the failed calibration.
+
 The operator score dashboard and future-epoch G2 host handoff code are pushed
 in `766b48358`; 49 focused roots passed three times, zero failures/skips, against
 the actual merged server source with private diagnostic dependency exports.

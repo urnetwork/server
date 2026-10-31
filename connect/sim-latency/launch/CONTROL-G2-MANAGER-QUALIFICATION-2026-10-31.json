@@ -1,0 +1,241 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-control-g2-manager-static-qualification",
+  "status": "passed_selected_scope_with_preserved_pre_fix_failures",
+  "qualified_source": {
+    "server_commit": "a1e20b49252424ded844a99b7d4fd98ca4bda709",
+    "server_tree": "ffca61d81d41583e698de6c68f8e0f7191430711",
+    "base_commit": "869587b5d787e7769bbfbb9fe53ddea6ae4874af",
+    "source_lock_sha256": "f1ef516bea1f77c79c11dbf0524b37b6fcb337d1baf124f7163f9a924fec589c",
+    "go_version": "go1.27.3",
+    "repository_count": 10,
+    "normal_control_graph_not_frozen_competition_graph": true,
+    "siblings": {
+      "connect": "89d943bb7ba498d3c967e38efa7621880a9ea465",
+      "glog": "1c4954b017d9e8140a4e7020f914eb27410a41c6",
+      "sdk": "215caab72eefd03a08bdf86a4760cf95defd9901",
+      "proxy": "584eac38243a9842200eb3b8577d62667c850c19",
+      "goidenticons": "39ccec1b69db3a6f67e7346d6f44863499e6241d",
+      "userwireguard": "70ecd6e7f97715718f1079cc9be9fd42a8ebe82c",
+      "warp": "a3bb2fb5af5c452978b1db80dfb1eb0cf67771b3",
+      "sn": "dece58e2aee2795c54a79a5e893ebaa01885a5bb",
+      "gvisor": "57c9e137f7407ad6cd41dcca1ba304a446e09c79"
+    }
+  },
+  "fixture_fix": {
+    "files": {
+      "connect/sim-latency/source_build_qualifier_test.go": "4ab1a797f886155c5feefc502cd057da273b7bad78b3420c537a597217545302",
+      "connect/sim-latency/source_build_pipeline_integration_test.go": "dfe10dee91196dc6bb4503403a3423e618b43bdb90e04549b12b42f70db6615c"
+    },
+    "scope": "tests only; explicit independent-test model in mocked terminal response; intended host failure now requires exact sentinel and exactly one host call",
+    "production_model_or_review_policy_changed": false,
+    "root_failure_reproduced_before_fix": true,
+    "pre_fix_core_json_sha256": "7db6787baafa9a13c0d15b3d85c923d94a8d4ecb901d7d21d7eeaa7226aa369d",
+    "adjacent_opt_in_pipeline_mock_also_corrected": true,
+    "real_opt_in_docker_probe_executed": false
+  },
+  "selection": {
+    "original_69_root_plan_sha256": "e8c0db6ece141221d4184cf85d205c055342c10401f6db7c10994c6d18df8dd0",
+    "core_roots": [
+      {
+        "package": "./connect/sim-latency",
+        "root_count": 55,
+        "roots": [
+          "TestTrustedInstrumentSourceModeBindsFinalizedProof",
+          "TestTrustedInstrumentSourceModeBindsExactEpochTwoMapping",
+          "TestTrustedInstrumentGenerationRequiresChangedSelectedProduct",
+          "TestTrustedInstrumentPublicationBindsEveryUnchangedDependency",
+          "TestSourceBuildSealsExecutableBitsFromGitTree",
+          "TestSourceBuildPipelineStopsAtFailedMetadataOrCheck",
+          "TestTrustedInstrumentOverlayPreservesUnknownWinnerGraph",
+          "TestTrustedInstrumentCarryBuildProtocolAndManifest",
+          "TestTrustedInstrumentRejectsProtectedPreimageConflict",
+          "TestTrustedInstrumentPublicationRequiresExplicitProof",
+          "TestTrustedInstrumentPublicationVerifiesActualWinnerPatch",
+          "TestTrustedInstrumentRejectsTamperedApproval",
+          "TestReviewedSourceCarryForwardWithRewardWinner",
+          "TestReviewedSourceCarryForwardRejectsUnshippedWinnerMargin",
+          "TestReviewedSourceDigestBindsEntireRepositoryMap",
+          "TestReviewedSourcePromotionRejectsObsoleteBaseAndMissingApproval",
+          "TestLegacySourceManifestRejectsV2Fields",
+          "TestEvaluatorG2WorkerSchemaRejectsPolicyVersionMismatch",
+          "TestOfficialRunG2SourceGenerationPolicyMismatchFailsClosed",
+          "TestSimulationG2RunGrammarAndLegacyFlagOmission",
+          "TestEvaluatorG2PreparationPinsSeparateProducerBytes",
+          "TestScoreG2MinimumWorkBoundariesAndLegacyUpperBounds",
+          "TestScoreG2MinimumWorkUsesIndependentMedians",
+          "TestScoreG2RejectsInvalidPolicyAndZeroBaseline",
+          "TestScoreG2MinimumWorkAuthenticatedReplay",
+          "TestBuildScoreBaselineCarriesG2PolicyAndRejectsMismatches",
+          "TestScoreG2PolicyMismatchFailsClosed",
+          "TestScoreG2LegacyCodecBytesAndReplay",
+          "TestSourceBuildQualifierReplaysTestsAfterHostUnavailability",
+          "TestSourceBuildQualifierCanceledAdmissionDoesNoWork",
+          "TestSourceBuildBrokerRequiresQualificationOfExactBuiltImage",
+          "TestSourceBuildQualifierDecoderReturnsDecodedReceipt",
+          "TestSourceBuildBrokerCanceledPipelineCannotStartQualification",
+          "TestSourceBuildImageAssemblyAuthenticatesAliasAndOwner",
+          "TestSourceBuildImageContextExcludesAllNonAllowlistedInputs",
+          "TestSourceBuildInfoRequiresExactCompetitionGoVersion",
+          "TestSourceBuildInfoRequiresExactCleanHostExecutable",
+          "TestSourceBuildBinaryRejectsCompilerTextAndNonExecutables",
+          "TestSourceBuildImageInstrumentAdoptionBindsInstalledScriptLabels",
+          "TestSourceBuildImageInheritedMinimumWorkBindsInstalledScriptLabels",
+          "TestSourceBuildImageScriptLabelsRejectUnsealedMissingOrRedirectedInputs",
+          "TestSourceBuildImageLegacyScriptLabelBindingPreservesExactBytes",
+          "TestSourceBuildImagePlanCannotExecuteCandidateCode",
+          "TestSourceBuildImagePlanRejectsUnverifiedArtifacts",
+          "TestSourceBuildLegacyImageKeepsInheritedRunnerAndEntrypoint",
+          "TestSourceBuildAttemptRetainsImageOwnerAndDeadlineAcrossQualificationRetry",
+          "TestSourceBuildAttemptInterruptedPipelineDoesNotBuildAgain",
+          "TestSourceBuildAttemptCompletedPipelineFailureDoesNotRetry",
+          "TestSourceBuildAttemptChangedSettingsCannotResetReviewIdentity",
+          "TestSourceBuildAttemptRevalidatesRetainedBinaryBeforeReceiptReplay",
+          "TestSourceBuildAttemptConcurrentControllerCannotDispatchAnotherPipeline",
+          "TestSourceBuildAttemptExpiredOriginalDeadlineCannotBeExtended",
+          "TestSourceBuildAttemptRevalidatesImageOwnerBeforeReceiptReplay",
+          "TestSourceBuildAttemptRejectsExposedStateBeforePipelineDispatch",
+          "TestRunMainCompleteSixEpochLifecycle"
+        ]
+      },
+      {
+        "package": "./controller",
+        "root_count": 9,
+        "roots": [
+          "TestG2FuturePolicyRetainsCurrentRoundBytesAndReadiness",
+          "TestG2FuturePolicySelectsEpochTwoAndCarriesForward",
+          "TestG2FutureBaselinePreparationProfileIsInactiveForCurrentRound",
+          "TestG2SourceSettingsUseQualifiedFuturePinsOnly",
+          "TestG2FutureSourceCannotBypassApprovedPolicyWithLegacyOmission",
+          "TestG2RoundPolicyRejectsVersionMismatchAndUnknownPolicy",
+          "TestG2FrozenPublicPolicyUsesItsOwnScorerVersion",
+          "TestG2BaselinePolicyMismatchFailsClosed",
+          "TestG2BaselinePreparationUsesSeparateImmutableRelease"
+        ]
+      },
+      {
+        "package": "./model",
+        "root_count": 5,
+        "roots": [
+          "TestCompetitionG2StandaloneLegacyContractCodec",
+          "TestCompetitionG2PolicyVersionsRejectUnknown",
+          "TestCompetitionG2PolicyLegacyCodecOmission",
+          "TestCompetitionG2PolicyLegacyActivationOmission",
+          "TestCompetitionScoreG2PolicyProvenance"
+        ]
+      }
+    ],
+    "fresh_core_processes_per_package": 3,
+    "expected_core_top_level_passes": 207,
+    "expected_core_package_passes": 9,
+    "supplemental_roots": [
+      "TestSourceFixtureGitUsesGlobalIdentity",
+      "TestSourceGitFixtureRetainsExplicitGlobalIdentity",
+      "TestSourceTestModelPinsAuthorityExecutesOnceAndPreservesOpaqueState",
+      "TestSourceTestModelRejectsUnrequestedModelAtEveryPhase",
+      "TestSourceBuildQualifierReplaysTestsAfterHostUnavailability"
+    ],
+    "supplemental_processes": 1,
+    "original_file_census_note": "The original plan omitted sim_test.go from its file-name census, but explicitly selected TestRunMainCompleteSixEpochLifecycle and guarded the whole source tree; the original plan remains unmodified.",
+    "whole_packages_compiled_with_race": true,
+    "full_repository_suite_claimed": false,
+    "full_sim_latency_tests_sh_claimed": false
+  },
+  "execution": {
+    "artifact_root": "/mnt/data/control-g2-manager-fixed-qa-20261031.SX3Nh2rT/qa",
+    "unit": "control-g2-manager-fixed-qualification-20261031-sx3nh2rt.service",
+    "invocation_id": "6cca9102c18a423abb2e380dba557d2f",
+    "observer_session": 39145,
+    "started_at": "2026-10-31T13:37:19Z",
+    "finished_at": "2026-10-31T13:40:46Z",
+    "exit": 0,
+    "new_main_elf_compiled_for_changed_test_sources": true,
+    "previous_failed_graphs_not_overwritten": true,
+    "synthetic_global_git_config_sha256": "914948afa33d82b7cf39e3cb331b431b270265f263fd28552ea4be7d28387e62",
+    "real_global_git_config_or_author_identity_changed": false,
+    "runtime_seconds": 206.92,
+    "core_log_manifest_sha256": "6852e3b6f469368b99cf1a9a236cd8d116f9f81bdc01cfad06af2a877da06c51",
+    "all_ten_log_manifest_sha256": "e48f8e45b8ab6dab3baa74ddaeb4f5db33391ff9b0efc5966a5938c28e2e0d3e",
+    "supplemental_json_sha256": "d06a6657b0222d0cafee5a2035e7853deb091958904700a83abc591a3dde3ccc",
+    "plan_binding_sha256": "d41ca67a3484326ee53f0f3b1a6370e5278afc13b70cf10431ecbc33e19e2656",
+    "all_owners_joined": true,
+    "all_nine_core_verdicts_passed": true,
+    "all_source_dependency_graph_input_elf_and_profile_guards_passed": true,
+    "dependency_input_count": 17673,
+    "dependency_input_manifest_sha256": "b1098779484fb7aa4e71d63dd524f0e55b25259d198ece0884543dd2dfc225e0",
+    "dependency_closure_sha256": "65037bd44d5ae43df18b47f3c2c82f51b87647209174ee829647c0fc22683359",
+    "source_manifest_before_and_after_sha256": "e8ca963c59934bf7586674848c270db8357da8d522d499d8e22754c94ea715db",
+    "graph_before_and_after_sha256": "e462382e92bcb63f0ceff07fc75841bc5d4762d4198ea4475fe2ada63186875e",
+    "driver_script": "/home/by/urnetwork/temp/control-g2-manager-fixed-qualification-20261031-SX3Nh2rT.sh",
+    "driver_script_sha256": "fe98668ef105ef893a7eff4b6f714316569afc760a9cf82d48f1036b0920376d",
+    "fresh_own_git_root_checkouts": true,
+    "git_object_cache": "Read-only canonical alternates; not self-contained source archives.",
+    "requested_profile": {
+      "cpu_set": "20,22",
+      "memory_max_bytes": 8589934592,
+      "memory_swap_max_bytes": 0,
+      "private_network_namespace": true
+    },
+    "effective_systemd_properties_sampled_before_unit_collection": false,
+    "containment_scope": "Trusted static QA only. Accepted launch settings and retained driver are not an independently sampled effective-properties receipt or candidate-containment qualification.",
+    "full_host_filesystem_secret_isolation_claimed": false
+  },
+  "preserved_failed_attempts": [
+    {
+      "artifact_root": "/mnt/data/control-g2-manager-qa-20261031.WapkfKgO/qa/attempt-v2",
+      "core_top_level_passes": 12,
+      "core_failures": 1,
+      "root_cause": "The clean test profile removed the explicit global Git identity required by existing synthetic fixtures.",
+      "core_json_sha256": "188487ac482164d011a18561730416e567a030c37f748de08f8b6a2e98fad675"
+    },
+    {
+      "artifact_root": "/mnt/data/control-g2-manager-qa-20261031.WapkfKgO/qa/attempt-v3",
+      "core_top_level_passes": 38,
+      "core_failures": 1,
+      "supplemental_identity_passes": 2,
+      "root_cause": "Independent test completion mock emitted the honesty-review model rather than the explicitly requested test model.",
+      "core_json_sha256": "7db6787baafa9a13c0d15b3d85c923d94a8d4ecb901d7d21d7eeaa7226aa369d",
+      "evidence_manifest_sha256": "c248c604cf7ece60b616e690f39497f6e16f4985d52254d4219e36a10153bc5e"
+    }
+  ],
+  "live_hold_observation": {
+    "observed_at": "2026-10-31T13:05:01.598534Z",
+    "report_sha256": "eecdcf4a14acd76ba604340dae93a7ce37ec6341aec81afd3f59db72b8d2bf1b",
+    "evaluation_revision": 4,
+    "reward_delivery_revision": 1,
+    "both_active": true,
+    "transaction_read_only": "on",
+    "session_read_only": "off",
+    "transaction_isolation": "repeatable read",
+    "all_rows_validated": true,
+    "no_database_writes": true,
+    "no_leases_claimed": true,
+    "no_release_actions": true,
+    "fresh_inspection_required_before_any_future_hold_update": true
+  },
+  "unchanged_boundaries": {
+    "failed_calibration_still_accepted_false": true,
+    "epoch_one_frozen_source_image_policy_and_shared_baseline": true,
+    "evaluation_and_reward_holds": true,
+    "november_fifth_fences_and_absent_accepted_marker": true,
+    "no_measured_calibration_or_submission_scoring": true,
+    "no_real_model_calls_docker_probe_or_database_write": true,
+    "no_future_g2_image_source_activation_or_rebaseline_qualification_claimed": true
+  },
+  "totals": {
+    "core_top_level_passes": 207,
+    "core_package_passes": 9,
+    "core_subtest_passes": 0,
+    "supplemental_top_level_passes": 5,
+    "supplemental_package_passes": 1,
+    "supplemental_subtest_passes": 0,
+    "failures": 0,
+    "skips": 0,
+    "prior_failed_attempt_counts_included": false
+  },
+  "elf_sha256": {
+    "main": "74101da01668984d57b767489fd938f0c771719cf5c4b4aa2bb9077836623034",
+    "controller": "b015ce1a9b022fbbf05780beb8b65573bcf0cb0bfb2d63e170dde62942ec92f8",
+    "model": "f136443f8d7c75de48318bd887508b60b28381f4c66f2a1b7d00e106578d7359"
+  }
+}
