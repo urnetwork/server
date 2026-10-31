@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -26,14 +27,37 @@ const (
 // signal_provider_count_test.go. It measures completed API responses, not a
 // Redis score-cache surrogate, so a real empty provider list remains visible.
 func NewProviderCountSignal() Signal {
-	return &signalAdapter{number: "2.9a", key: "provider-count", name: "User-visible provider-count degradation", probe: providerCountProbe{}}
+	return &signalAdapter{number: "2.9a", key: "provider-count", name: "User-visible provider-count degradation", probe: &providerCountProbe{recoveryRuns: map[providerCountRecoveryKey]int{}}}
 }
 
-type providerCountProbe struct{}
+// The two classes whose incidents wait on their own cohorts' recovery
+// evidence.
+var providerCountMeasuredClasses = []string{"provider-count-effective-empty", "provider-count-small-list"}
 
-func (providerCountProbe) id() string             { return "mimir/provider-count" }
-func (providerCountProbe) tier() string           { return tierPage }
-func (providerCountProbe) cadence() time.Duration { return time.Minute }
+// The consecutive qualified executions a reporting cohort shows before its
+// class stops waiting on it: the notifier's two complete absent runs.
+const providerCountRecoveryRuns = 2
+
+// One cohort an open incident of a measured class was reported for.
+type providerCountRecoveryKey struct {
+	measuredClass string
+	key           providerCountKey
+}
+
+// Remembers, between executions, every cohort a measured class was reported
+// for until that cohort's own evidence shows recovery. The notifier matches
+// an incident on class and target without the cohort, so this memory is what
+// lets a cohort below the request floor hold only the incidents it reported.
+type providerCountProbe struct {
+	stateLock sync.Mutex
+	// each reporting cohort and its consecutive qualified executions since
+	// it last reported the class
+	recoveryRuns map[providerCountRecoveryKey]int
+}
+
+func (*providerCountProbe) id() string             { return "mimir/provider-count" }
+func (*providerCountProbe) tier() string           { return tierPage }
+func (*providerCountProbe) cadence() time.Duration { return time.Minute }
 
 // The zero-share cohorts count capability-blind requests only. A request
 // that keeps only modern or only post-quantum providers (capability modern,
@@ -120,7 +144,7 @@ func (self providerCountCohort) considered(total float64) (considered, unexplain
 	return total - requestExplained - targetSupply, self.bands["0"] - requestExplained - targetSupply
 }
 
-func (p providerCountProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
+func (self *providerCountProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
 	metricHosts := env.cfg.hostsWithRole("services")
 	if len(metricHosts) == 0 {
 		return nil, fmt.Errorf("provider count: no services host is configured for the loopback Mimir query")
@@ -149,10 +173,28 @@ func (p providerCountProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	if err != nil {
 		return nil, err
 	}
+	findings, assessed := self.assess(ctx, cohorts, metricHost.name)
+	if !assessed {
+		// a retired execution commits no recovery memory and no findings
+		return nil, ctx.Err()
+	}
+	return findings, nil
+}
+
+// Judges one successful response and advances the recovery memory. Returns
+// false, committing nothing, when the execution was retired meanwhile.
+func (self *providerCountProbe) assess(ctx context.Context, cohorts []providerCountCohort, metricHost string) ([]finding, bool) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
 	findings := make([]finding, 0, len(cohorts))
 	observedDiscovery := false
+	// some ordinary cohort has the requests to judge: without one the
+	// response is missing or partial, and no incident may recover from it
 	recoverySample := false
-	recoveryUnknown := false
+	// per measured class, the cohorts that report it now and the cohorts
+	// whose own requests show it no longer holds
+	reporting := map[providerCountRecoveryKey]bool{}
+	qualified := map[providerCountRecoveryKey]bool{}
 	for _, cohort := range cohorts {
 		if cohort.key.forceMinimum != "false" {
 			continue
@@ -165,56 +207,96 @@ func (p providerCountProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		// empty: it leaves both the zeros and the denominator the thresholds
 		// read, so neither can dilute the cohort's remaining answers.
 		considered, unexplained := cohort.considered(total)
-		// Direct specs append caller-chosen IDs without running discovery.
-		// Neither their natural small size nor their absence proves capacity.
-		if cohort.key.locationKind != "direct" {
-			if total > 0 {
-				observedDiscovery = true
-			}
-			// Recovery shares the measured class/target across frames. A
-			// returned ordinary cohort below the existing PAGE sample floor
-			// cannot borrow another cohort's healthy response distribution,
-			// and explained answers are no evidence of platform health.
-			if considered < providerCountPageMin {
-				recoveryUnknown = true
-			} else {
-				recoverySample = true
-			}
-		}
+		cohortFindings := []finding{}
+		unclassified := false
 		small := unexplained + cohort.bands["1-2"]
 		if considered >= providerCountPageMin && unexplained/considered >= .8 {
-			findings = append(findings, providerCountFinding(cohort, tierPage, metricHost.name, "effective-empty"))
+			cohortFindings = append(cohortFindings, providerCountFinding(cohort, tierPage, metricHost, "effective-empty"))
+		} else {
+			if considered >= providerCountWarnMin && small/considered >= .5 {
+				cohortFindings = append(cohortFindings, providerCountFinding(cohort, tierWarn, metricHost, "small-list"))
+			} else if cohort.key.locationKind != "direct" && considered >= providerCountPageMin && considered < providerCountWarnMin && small/considered >= .5 {
+				// Falling below the empty-list PAGE ratio does not establish
+				// recovery when a traffic-bearing cohort remains mostly small.
+				// The sample is below the ordinary WARN floor; retain only an
+				// intent-unknown observation, never a lower-threshold scarcity
+				// rule.
+				cohortFindings = append(cohortFindings, providerCountFinding(cohort, tierWarn, metricHost, "small-list-unclassified"))
+				unclassified = true
+			}
+			// Explained supply gaps never page, but one at product scale
+			// stays visible: at the WARN floor a single client's refill loop,
+			// four requests a minute per rank mode, cannot raise it.
+			if _, targetSupply := cohort.explained(); cohort.key.locationKind != "direct" && total >= providerCountWarnMin && targetSupply/total >= .5 {
+				cohortFindings = append(cohortFindings, providerCountTargetSupplyFinding(cohort, metricHost))
+			}
+		}
+		findings = append(findings, cohortFindings...)
+		// Direct specs append caller-chosen IDs without running discovery.
+		// Neither their natural small size nor their absence proves capacity,
+		// so they report no measured class and supply no recovery evidence.
+		if cohort.key.locationKind == "direct" {
 			continue
 		}
-		if considered >= providerCountWarnMin && small/considered >= .5 {
-			findings = append(findings, providerCountFinding(cohort, tierWarn, metricHost.name, "small-list"))
-		} else if cohort.key.locationKind != "direct" && considered >= providerCountPageMin && considered < providerCountWarnMin && small/considered >= .5 {
-			// Falling below the empty-list PAGE ratio does not establish
-			// recovery when a traffic-bearing cohort remains mostly small.
-			// The sample is below the ordinary WARN floor; retain only an
-			// intent-unknown observation, never a lower-threshold scarcity rule.
-			findings = append(findings, providerCountFinding(cohort, tierWarn, metricHost.name, "small-list-unclassified"))
-			recoveryUnknown = true
+		if total > 0 {
+			observedDiscovery = true
 		}
-		// Explained supply gaps never page, but one at product scale stays
-		// visible: at the WARN floor a single client's refill loop, four
-		// requests a minute per rank mode, cannot raise it.
-		if _, targetSupply := cohort.explained(); cohort.key.locationKind != "direct" && total >= providerCountWarnMin && targetSupply/total >= .5 {
-			findings = append(findings, providerCountTargetSupplyFinding(cohort, metricHost.name))
+		// At least the PAGE's request floor, in a shape the reducer can
+		// judge: the cohort's own evidence. Explained answers count, since
+		// they too show the cohort no longer meets the class.
+		sufficient := providerCountPageMin <= total && !unclassified
+		if sufficient {
+			recoverySample = true
+		}
+		for _, class := range providerCountMeasuredClasses {
+			recoveryKey := providerCountRecoveryKey{measuredClass: class, key: cohort.key}
+			for _, f := range cohortFindings {
+				if f.class == class {
+					reporting[recoveryKey] = true
+				}
+			}
+			if sufficient && !reporting[recoveryKey] {
+				qualified[recoveryKey] = true
+			}
 		}
 	}
-	if !recoverySample || recoveryUnknown {
+	// A cohort that reports a class waits until its own qualified streak
+	// completes. One below the floor, in the intent-unknown shape or missing
+	// from this response holds its class and restarts the streak. A cohort
+	// that never reported the class holds nothing.
+	recoveryRuns := map[providerCountRecoveryKey]int{}
+	held := map[string]bool{}
+	for recoveryKey := range reporting {
+		recoveryRuns[recoveryKey] = 0
+	}
+	for recoveryKey, runs := range self.recoveryRuns {
+		switch {
+		case reporting[recoveryKey]:
+		case qualified[recoveryKey]:
+			if runs+1 < providerCountRecoveryRuns {
+				recoveryRuns[recoveryKey] = runs + 1
+			}
+		default:
+			recoveryRuns[recoveryKey] = 0
+			held[recoveryKey.measuredClass] = true
+		}
+	}
+	if ctx.Err() != nil {
+		return nil, false
+	}
+	self.recoveryRuns = recoveryRuns
+	for _, class := range providerCountMeasuredClasses {
 		// Unknown or excluded-only responses retain measured history without
 		// raising a replacement incident. These exact class/target holds do
 		// not suppress current PAGE/WARN findings or change their thresholds.
-		for _, class := range []string{"provider-count-effective-empty", "provider-count-small-list"} {
+		if held[class] || !recoverySample {
 			findings = append(findings, finding{probeId: "mimir/provider-count", class: class, target: "api-fleet", clearHold: true})
 		}
 	}
 	if len(findings) == 0 && observedDiscovery {
-		return []finding{healthyFinding("mimir/provider-count", tierPage, "provider-count-degraded", "api-fleet")}, nil
+		return []finding{healthyFinding("mimir/provider-count", tierPage, "provider-count-degraded", "api-fleet")}, true
 	}
-	return findings, nil
+	return findings, true
 }
 
 // The cohort's bounded counts as every finding reports them: the raw response
