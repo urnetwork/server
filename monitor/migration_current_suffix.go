@@ -865,6 +865,7 @@ var migrationCurrentSuffixContracts = slices.Concat(
 				snMainnetMigrationColumn{name: "settlement_completion_checkpoint_byte_count", kind: "bigint"})),
 		migrationCurrentSuffix(897, "two-member provider union review, identity and retained source custody", competitionMigration897ArtifactQuery),
 	},
+	snTopBoardMigrationContracts,
 )
 
 // Free space a table keeps on every page it writes, so an update of an

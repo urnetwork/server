@@ -12027,9 +12027,60 @@ these fields or nonempty response sizes. That observation does not establish
 healthy windows. Schema 2 in §2.9c records finite small-result boundaries and
 the exclusion field that actually removed sampled candidates; neither field
 is trusted evidence of client health. The API cannot distinguish durable policy
-from runtime removals within `ExcludeClientIds`, or join this target-kind metric
-to a caller-country cohort. These explanations never suppress this section's
-independent PAGE or provisional WARN.
+from runtime removals within `ExcludeClientIds`, and the §2.9c target-kind
+metric has no caller country, so its reasons never suppress this section's
+independent PAGE or provisional WARN. The per-cohort empty-answer explanations
+below are joined to the outcome cohorts on their own labels instead.
+
+Empty-answer explanations (2026-10-31):
+`urnetwork_findproviders2_empty_outcomes_total` counts every answer of the
+outcome counter's `0` band again, under the same request-class labels
+(`ip_family`, `location_kind`, `caller_country`, `rank_mode`, `force_minimum`,
+`capability`), with the requested `target_kind` and the request's terminal
+selection `reason` from the §2.9c fixed vocabulary. The probe reads both in one
+query at one instant, the explanations tagged `monitor_part="empty"`, and joins
+them on those labels. Two explanations take zeros out of the judgment. The
+request's own: `filtered_destinations` and `intentional_zero` (every candidate
+was a destination the request excluded, and the standard window excludes there
+only the healthy exits it already holds, so the answer is a refill that found
+nothing new; or it asked for zero). `ExcludeClientIds` also carries the
+client's runtime removals of providers that failed it, so `filtered_client_ids`,
+`filtered_explicit_mixed` and `filtered_explicit` still count: such a zero can
+be a user left with nothing. Target supply:
+`cache_empty` for a `city` or `region` target (the score export published the
+target without an admitted provider, so it has connected source rows that fail
+the shared reliability, URL and hard-exclusion gates, or it lost its last
+provider within the cache ttl; most cities hold one or two providers). Explained
+zeros leave the denominator as well as the zero count, so the effective-empty
+PAGE and both small-list WARNs judge only the answers neither explains, and
+refill traffic cannot dilute a real platform empty below the ratio. A country,
+group, best-available, mixed or unknown target the export wrote empty still
+counts toward the PAGE, as do missing cache metadata, page gaps, hard, network,
+family and mixed filters and every other reason. Explanations can only lower a
+verdict. A response without them (`zero_explanations=absent`, as from API
+processes that predate the counter) is judged on its bands exactly as before; a
+row outside the fixed vocabularies, stale, negative or duplicated means the
+explanations are discarded whole (`zero_explanations=invalid`); a read that
+used them reports `zero_explanations=joined`. An explanation is clamped to the
+zeros it explains, and an explained cohort supplies no recovery credit.
+Findings report `zero_explained_by_request`, `zero_explained_by_target_supply`,
+`zero_unexplained` and `considered_requests`.
+
+`provider-count-target-supply-empty` is a nonpaging WARN: at least 50 completed
+ordinary requests in five minutes, at least half of them answered empty from a
+city or region without admitted supply. It keeps a supply gap at product scale
+visible without calling it a selection failure. Whether an app or the platform
+should fall back from such a target to its region or country is a product
+decision this signal does not make.
+
+The case that motivated this, Main 2026-10-25 04:15 UTC to 10-31: the chronic
+`any/location/au/quality` and `any/location/au/speed` PAGEs were about 21
+completed requests in five minutes per mode, steady across every API host and
+deploy at four requests a minute per rank mode, the cadence of one client's
+15-second window resize. Their zeros matched the §2.9c `city` zeros: `cache_empty`
+while the city's providers failed admission, `filtered_destinations` while the
+request already excluded the admitted ones. That one caller met the 20-request
+PAGE floor by itself. With the explanations joined it raises nothing.
 
 `caller_country=us` identifies the caller, not the requested/provider country;
 `location` combines different targets and can coexist with explicit ClientId
@@ -12451,6 +12502,10 @@ positive-subset findings. Global service-placement configuration remains intact.
   request error; PAGE when at least 20 request errors occur in that window.
   This separate denominator prevents surfaced errors from looking like recovery
   merely because they leave successful-empty counts.
+  Thresholds use unrounded paired raw-counter endpoint differences, not
+  extrapolated PromQL `increase`. Public counter summaries round to zero decimal
+  places, so the same displayed value can fall on either side of a threshold.
+  Read counts overlap outcomes and do not enter the request-error PAGE sum.
 - WARN `provider-picker-unobservable`: missing/unreadable/partial/stale/reset
   producer evidence, or fewer than 20 successful initial outcomes for a health
   claim. Search/direct-only or quiet traffic cannot establish initial health.
@@ -22832,6 +22887,30 @@ parsing (including nonnumeric and overflow controls), the per-network probe
 shape of the query, and identifier-free Markdown. Malformed evidence fails the
 probe; it must never be coerced to a low-volume healthy result.
 
+Observation-failure provenance: a typed local signup-quality failure retains
+`signup_quality_stage=source-read` when the runner's `pg` call fails, or
+`signup_quality_stage=aggregate-parse` when that call succeeded but its rows
+fail this probe's exact day/count contract. Aggregate-parse failures use
+`observation-invalid-response`; source-read preserves the original fixed
+error class, context cause and native execution boundaries. Source-read covers
+the entire existing runner, including transport and PostgreSQL CSV decoding;
+it does not identify remote SQL entry, a server error or which deadline ended.
+The stage is code-owned proof, not a token recovered from raw error text.
+Missing typed stage remains unknown. No raw output, row values, SQL or private
+errors are added to alerts; the visibility identity, severity, sustain and
+cohort query/quality thresholds stay unchanged.
+
+False-positive qualifier: source or aggregate failure measures no cohort,
+share, signup acceptance or automation. A malformed aggregate is an observation
+contract failure, not a measured low share. False-negative qualifier: missing
+source, native provenance or original same-attempt timing can conceal real
+quality problems; an unavailable result cannot clear the quality incident.
+Existing source gaps and matured-cohort verification still apply. Synthetic
+public-constructor controls distinguish source errors, malformed aggregates,
+healthy/low-volume/low-share results, parent cancellation, native boundary
+preservation and error-text privacy; source presence is not a test PASS or
+retrospective attribution of a historical timeout.
+
 ### 2.27 Subscription dashboard snapshot liveness
 Probe: `subscription-metrics`
 
@@ -28716,6 +28795,19 @@ head is never schema health. Use a separately qualified monitor that knows the
 applied head; do not roll back services or edit database objects to satisfy an
 older validator. At a source-known head, every still-required artifact retains
 its exact check and immediate drift page.
+
+Published SN top-board migrations are part of that source-known schema. Their
+content-derived versions currently occupy 898 (chain fleet bindings, incentive
+census and signed head summaries) and 899 (trail hops, ranking snapshots, EMA
+and daily history). The owning migration probe checks their twelve durable
+tables, exact column types/widths/nullability/defaults, primary and check
+constraints, and eight ready valid indexes. A matching numeric head with one
+of these artifacts missing remains immediate schema drift, not healthy. The
+missing-table and rolled-back shape controls preserve healthy published prefixes
+and attribute faults to the owning version. Source/custody failure and a newer
+unknown database head remain unknown; these catalog checks do not prove chain
+census correctness, snapshot freshness, application outcomes or deployed schema
+health without an actual qualified observation.
 
 Mainnet and native-fee artifact checks belong to this one registered probe.
 Their helpers live in `migration_sn_mainnet.go` and `migration_native_fee.go`;

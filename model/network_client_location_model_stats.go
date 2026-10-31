@@ -218,6 +218,21 @@ var findProviders2OutcomesTotal = prometheus.NewCounterVec(prometheus.CounterOpt
 	Help: "FindProviders2 completed response outcomes by bounded request class, capability filter and result-count band",
 }, []string{"ip_family", "location_kind", "caller_country", "rank_mode", "force_minimum", "result_count", "capability"})
 
+// findProviders2EmptyOutcomesTotal counts again every answer the outcome
+// counter puts in its "0" band, under the same request-class labels, with the
+// requested target's kind and the request's terminal selection reason
+// (findProviders2SelectionObservation.complete). The provider-count probe
+// (SIGNALS.md §2.9a) joins the two on the shared labels to tell the zeros the
+// request explains (its own exclusions removed every candidate, or the score
+// export holds no admitted provider for the narrow target it named) from the
+// zeros the platform must account for. The selection metric's reasons cannot
+// do that: it has no caller country. Both added labels are fixed
+// vocabularies, never a target identity.
+var findProviders2EmptyOutcomesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "urnetwork_findproviders2_empty_outcomes_total",
+	Help: "FindProviders2 completed empty responses by the outcome request class, requested target kind and terminal selection reason",
+}, []string{"ip_family", "location_kind", "caller_country", "rank_mode", "force_minimum", "capability", "target_kind", "reason"})
+
 // The capability filter a request names, as the outcome label reads it.
 func findProviders2OutcomeCapability(findProviders2 *FindProviders2Args) string {
 	switch {
@@ -246,7 +261,7 @@ func findProviders2MetricRankMode(rankMode RankMode) string {
 }
 
 func init() {
-	prometheus.MustRegister(findProviders2SampleDrops, findProviders2LoadSeconds, findProviders2OutcomesTotal)
+	prometheus.MustRegister(findProviders2SampleDrops, findProviders2LoadSeconds, findProviders2OutcomesTotal, findProviders2EmptyOutcomesTotal)
 }
 
 func findProviders2OutcomeIpFamily(ipFamily string) string {
@@ -311,23 +326,49 @@ func findProviders2OutcomeCountBand(count int) string {
 	}
 }
 
+// The caller's country in the outcome vocabulary: its lowercase ISO code, or
+// unknown.
+func findProviders2OutcomeCallerCountry(callerCountry string) string {
+	callerCountry = strings.ToLower(strings.TrimSpace(callerCountry))
+	if len(callerCountry) != 2 {
+		return "unknown"
+	}
+	return callerCountry
+}
+
 func recordFindProviders2Outcome(
 	findProviders2 *FindProviders2Args,
 	callerCountry string,
 	resultCount int,
 ) {
-	callerCountry = strings.ToLower(strings.TrimSpace(callerCountry))
-	if len(callerCountry) != 2 {
-		callerCountry = "unknown"
-	}
 	findProviders2OutcomesTotal.WithLabelValues(
 		findProviders2OutcomeIpFamily(findProviders2.IpFamily),
 		findProviders2OutcomeLocationKind(findProviders2),
-		callerCountry,
+		findProviders2OutcomeCallerCountry(callerCountry),
 		findProviders2MetricRankMode(findProviders2.RankMode),
 		strconv.FormatBool(findProviders2.ForceMinimum),
 		findProviders2OutcomeCountBand(resultCount),
 		findProviders2OutcomeCapability(findProviders2),
+	).Inc()
+}
+
+// Explains one completed empty answer: targetKind and reason are the
+// request's selection observation's, both from fixed vocabularies.
+func recordFindProviders2EmptyOutcome(
+	findProviders2 *FindProviders2Args,
+	callerCountry string,
+	targetKind string,
+	reason string,
+) {
+	findProviders2EmptyOutcomesTotal.WithLabelValues(
+		findProviders2OutcomeIpFamily(findProviders2.IpFamily),
+		findProviders2OutcomeLocationKind(findProviders2),
+		findProviders2OutcomeCallerCountry(callerCountry),
+		findProviders2MetricRankMode(findProviders2.RankMode),
+		strconv.FormatBool(findProviders2.ForceMinimum),
+		findProviders2OutcomeCapability(findProviders2),
+		targetKind,
+		reason,
 	).Inc()
 }
 

@@ -539,6 +539,7 @@ var alertClassKinds = map[string]alertClassKind{
 	"provider-count-effective-empty":                      incidentAlertClass,
 	"provider-count-small-list":                           incidentAlertClass,
 	"provider-count-small-list-unclassified":              incidentAlertClass,
+	"provider-count-target-supply-empty":                  incidentAlertClass,
 	"provider-score-read-errors":                          incidentAlertClass,
 	"provider-score-read-errors-unobservable":             visibilityAlertClass,
 	"provider-picker-effective-empty":                     incidentAlertClass,

@@ -132,3 +132,8 @@ const snTopSchemaSql = `
 	);
 	CREATE INDEX sn_top_network_daily_day ON sn_top_network_daily (day);
 `
+
+// The catalog monitor follows this immutable DDL wherever merges place it.
+func SnTopSchemaMigrationVersion() int {
+	return sqlMigrationVersion(snTopSchemaSql)
+}
