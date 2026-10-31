@@ -34,13 +34,18 @@ Epoch 3's rows are never built inside the driver's epoch step, so the receiving 
    - Its config is unchanged, so no adoption or re-signing is needed.
    - It audits recovery-free roots exactly as now, so epoch 4's root is unaffected.
    - An old validator would approve a receiving root that pays all of f_k as ordinary funding, which is why this gate comes first.
-3. **api, alt and taskworker.** Deploy these after epoch 4's root commit is confirmed (block ≥ 9,450,028, about 11-06 22:25Z, or epoch 4's `v2commit` publish row confirmed).
+3. **api, alt and taskworker.** Deploy these after both of epoch 4's commits are confirmed: the v2 root (block ≥ 9,450,028, about 11-06 22:25Z, or epoch 4's `v2commit` publish row confirmed) and the v1 sweep root (cutoff block 9,449,928).
    - api and alt decode headers for `/sn/ledger/account`. An old api cannot serve proofs for the receiving root.
-   - Build from the running images' sources plus these commits, or from main once main's other changes are deployable.
+   - The taskworker must keep the sweep chain, which runs until claim and absorb on about 11-08. Build it from the sweep hotfix branch (`hotfix/st-v1-sweep-on-1086372490`) plus these commits.
+     - The cherry-pick has one conflict: the adjacent `else if` in `bringyourctl/main.go`'s st dispatch. Keep both.
+     - The combined tree builds.
+   - api and alt build from their running images' sources plus these commits, or from main once main's other changes are deployable.
    - The changes add no migration.
+   - Folding these commits into the sweep's pre-11-06 taskworker is possible but not recommended. Epoch 4's step would then read the event mirror for the plan, and a mirror lag would delay its build by a one-minute retry.
 4. **Preserve epoch 3's usage.** Read-only, after epoch 4's commit (below).
 5. **Record epoch 3's rows.** This writes and is owner-run (below). Do it before epoch 5's boundary, block 9,499,228, about 11-13 18:25Z.
-6. **Upgrade and assign surplus.** Upgrade `STSettlement2`, then send `assignSurplus`, through the Safe. Do this only after steps 2–5.
+6. **Upgrade and assign surplus.** Upgrade `STSettlement2`, then send `assignSurplus(1, epoch, amount)`, through the Safe. Do this only after steps 2–5.
+   - The phase C wrapper reverts `InvalidEpoch` unless `epoch` = `vault2.lastFundedEpoch(1) + 1`. A call signed for epoch 5 that arrives after epoch 5's close reverts instead of funding epoch 6. Re-sign it with epoch 6.
    - To land in epoch 5, it must be mined before epoch 5's close transaction, which the taskworker sends at block 9,499,228. Leave margin: by about 11-13 12:00Z.
    - Mined after that close, the recovery lands in epoch 6 with nothing else to change.
 7. **Watch the receiving boundary.**

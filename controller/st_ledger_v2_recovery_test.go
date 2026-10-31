@@ -576,3 +576,56 @@ func TestStLedgerV2RecoveryPlanReadsTheMirror(t *testing.T) {
 		}
 	})
 }
+
+// The driver's input for the receiving root carries the planned recovery on
+// its covered epoch with the source epoch's recorded rows; a root that does
+// not cover the receiving epoch carries none, and a lagging mirror refuses
+// the input before anything is built.
+func TestStLedgerV2InputAttachesRecovery(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		s := newLedgerV2RecoveryScenario(t, true)
+		key := s.cfg.DeploymentKey()
+		data, err := json.Marshal(map[string]string{"no_id": "1", "e": "3", "amount": fmt.Sprint(ledgerV2RecoveryAmount + ledgerV2RecoveryOrdinary)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		model.UpsertStEvents(s.ctx, key, []*model.StChainEvent{{BlockNumber: 250, BlockHash: "0x05", LogIndex: 0, TxHash: "0x06", Kind: model.StLedgerV2SurplusAssignedEventKind, DataJson: string(data)}})
+		model.SetStLedgerV2Funding(s.ctx, key, &model.StLedgerV2Funding{NoId: 1, Epoch: 2, BlockNumber: 205})
+		model.SetStLedgerV2Funding(s.ctx, key, &model.StLedgerV2Funding{NoId: 1, Epoch: 3, BlockNumber: 305})
+		log := []string{}
+		chain := newFakeLedgerV2Chain(&log)
+		chain.funded[2] = *uint256.NewInt(1_000_000)
+		chain.funded[3] = *uint256.NewInt(1_000_000 + ledgerV2RecoveryCapture + ledgerV2RecoveryAmount + ledgerV2RecoveryOrdinary)
+
+		model.SetStChainCheckpoint(s.ctx, key, model.StChainCheckpoint{NextBlock: 300, BlockHash: "0x07"})
+		if _, err := stLedgerV2Input(s.ctx, s.cfg, chain, nil, 2, 3); !errors.Is(err, ErrStLedgerV2RecoveryMirror) {
+			t.Fatalf("a lagging mirror: %v", err)
+		}
+		model.SetStChainCheckpoint(s.ctx, key, model.StChainCheckpoint{NextBlock: 400, BlockHash: "0x08"})
+		input, err := stLedgerV2Input(s.ctx, s.cfg, chain, nil, 2, 3)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(input.Epochs) != 2 || len(input.Epochs[0].Recovery) != 0 || len(input.Epochs[1].Recovery) != 1 {
+			t.Fatalf("input %+v", input.Epochs)
+		}
+		component := input.Epochs[1].Recovery[0]
+		if component.Epoch != 1 || component.Amount != ledgerV2RecoveryAmount || component.Rows == nil || !slices.Equal(component.Rows.ProviderChunks, s.record.ProviderChunks) {
+			t.Fatalf("component %+v", component)
+		}
+		// A root for epoch 2 alone does not cover the receiving epoch.
+		earlier, err := stLedgerV2Input(s.ctx, s.cfg, chain, nil, 2, 2)
+		if err != nil || len(earlier.Epochs) != 1 || len(earlier.Epochs[0].Recovery) != 0 {
+			t.Fatalf("root for epoch 2: %+v %v", earlier, err)
+		}
+		// The input builds, and the build lists exactly that component.
+		build, err := stLedgerV2Builder{}.Build(s.ctx, input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		funded := chain.funded[3]
+		if _, _, err := stLedgerV2Commitment(s.ctx, input, build, &funded); err != nil {
+			t.Fatal(err)
+		}
+	})
+}

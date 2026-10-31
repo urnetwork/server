@@ -93,3 +93,42 @@ func TestLedgerObjectRefusals(t *testing.T) {
 		t.Fatalf("corrupted object read: %v", err)
 	}
 }
+
+// Recovery usage objects are written once under their sha256 like ledger
+// objects, but under their own prefix: the public ledger object route never
+// serves one, and the recovery reader never serves a ledger object.
+func TestRecoveryObjectPrefix(t *testing.T) {
+	ctx := context.Background()
+	store := ledgerObjectTestStore(t)
+	usage, ledgerChunk := []byte("usage chunk"), []byte("ledger chunk")
+	ref, err := PutRecoveryObject(ctx, store, usage)
+	if err != nil || ref != LedgerObjectRef(usage) {
+		t.Fatalf("put %q, %v", ref, err)
+	}
+	if again, err := PutRecoveryObject(ctx, store, usage); err != nil || again != ref {
+		t.Fatalf("repeated put = %q, %v", again, err)
+	}
+	if read, err := GetRecoveryObject(ctx, store, ref); err != nil || string(read) != string(usage) {
+		t.Fatalf("read %q, %v", read, err)
+	}
+	if _, err := GetLedgerObject(ctx, store, ref); !errors.Is(err, ErrLedgerObjectNotFound) {
+		t.Fatalf("the ledger route reads a recovery object: %v", err)
+	}
+	ledgerRef, err := PutLedgerObject(ctx, store, ledgerChunk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := GetRecoveryObject(ctx, store, ledgerRef); !errors.Is(err, ErrLedgerObjectNotFound) {
+		t.Fatalf("the recovery reader reads a ledger object: %v", err)
+	}
+	digest, _ := ParseLedgerObjectRef(ref)
+	if key := recoveryObjectKey(store, digest); key != "test/st/v2/recovery/sha256/"+strings.TrimPrefix(ref, "sha256:") {
+		t.Fatalf("key %q", key)
+	}
+	if _, err := GetRecoveryObject(ctx, store, "sha256:"+strings.Repeat("0", 63)); err == nil {
+		t.Fatal("a malformed reference read")
+	}
+	if _, err := PutRecoveryObject(ctx, nil, usage); err == nil {
+		t.Fatal("a put without a store")
+	}
+}
