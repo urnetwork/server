@@ -19,7 +19,8 @@ import (
 // chains, each one task a minute:
 //
 //   - ExtenderMeasurementDns withdraws the live certificates of extenders that
-//     were deactivated or moved to the gated tier or a canary channel (C9),
+//     were moved to the gated tier or a canary channel, or deactivated for
+//     longer than controller.ExtenderMeasurementAwayGrace (C9, amendment 23),
 //     then makes the zone's address records exactly the extenders that serve,
 //     each name at its extender's active addresses, and records which names
 //     are published (C8). It is quick -- reads and one Route 53 listing -- so
@@ -238,8 +239,10 @@ func revokeExtenderMeasurementCerts(
 // the same name, so a key the extender rotated is followed, else the
 // certificate's own -- and is a renewal to the CA too, outside the weekly cap
 // (C7). A certificate of an extender that may not be measured now, or that is
-// for another zone's name, is not renewed; a deactivated extender's is
-// withdrawn by the dns chain.
+// for another zone's name, is not renewed. One of an extender that is not
+// active is not read (model.GetNetworkExtenderMeasurementCertsForRenewal): it
+// is renewed when the extender comes back within the grace, and withdrawn by
+// the dns chain when it does not (amendment 23).
 func renewExtenderMeasurementCerts(
 	ctx context.Context,
 	config *controller.ExtenderConfig,
@@ -298,7 +301,9 @@ func renewExtenderMeasurementCerts(
 // hold, then the rest, each longest waiting first
 // (model.GetPendingNetworkExtenderMeasurements). A request is refused when it
 // is not a valid request for its extender's measurement name, or when its
-// extender may not be measured. A request for a name that still has an
+// extender may not be measured. A request of an extender that is not active is
+// not read: deactivated, it keeps its place in the queue until it activates
+// again (amendment 23). A request for a name that still has an
 // unexpired certificate is a renewal to the CA and goes past the weekly cap,
 // which is how a rotated key and an extender that came back are served; a
 // new extender's waits while the cap is spent, and is read again each pass,
@@ -339,6 +344,12 @@ func issuePendingExtenderMeasurementCerts(
 
 		if measurement.Csr == nil {
 			refuse("the request has no certificate request")
+			continue
+		}
+		if target.Extender != nil && !target.Extender.Active {
+			// deactivated since the queue was read, which leaves out the
+			// requests of extenders that are not active; it keeps its place
+			// for when it activates again (amendment 23)
 			continue
 		}
 		// the request was read at activation; it is read again against the
@@ -491,15 +502,16 @@ func ExtenderMeasurementDnsPost(
 	return nil
 }
 
-// Withdraws the live certificates of every extender that was deactivated, or
-// that is in the gated tier or a canary (C9), and returns how many. An
-// operator's override withdraws at once, in its own transaction (A9); this is
-// what finds a deactivation, and anything that reached those tiers another
-// way.
+// Withdraws the live certificates of every extender that is in the gated tier
+// or a canary, or that was deactivated and is no longer away (C9, amendment
+// 23), and returns how many. An operator's override withdraws at once, in its
+// own transaction (A9); this is what finds a deactivation, and anything that
+// reached those tiers another way. An away extender is out of the zone
+// already, since it may not be measured while it is not active (C8).
 func withdrawExtenderMeasurementCerts(ctx context.Context, now time.Time) int {
 	withdrawn := 0
 	for _, target := range model.GetLiveNetworkExtenderMeasurementCerts(ctx, now) {
-		reason := controller.ExtenderMeasurementWithdrawReason(target.Extender)
+		reason := controller.ExtenderMeasurementWithdrawReason(target.Extender, now)
 		if reason == "" {
 			continue
 		}

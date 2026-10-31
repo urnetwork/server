@@ -224,6 +224,62 @@ func TestNetworkExtenderMeasurementPendingKeepsItsPlaceAndBackoff(t *testing.T) 
 	})
 }
 
+// Neither queue reads an extender that is not active (amendment 23): its
+// pending request keeps its place, and its due certificate waits, until it
+// activates again. Read, deactivated extenders that waited longest would fill
+// a read's limit ahead of the ones that may be served.
+func TestNetworkExtenderMeasurementQueuesLeaveOutInactiveExtenders(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc().Truncate(time.Second)
+		away := testMeasurementActivate(t, ctx, 1).Extender.ExtenderId
+		serving := testMeasurementActivate(t, ctx, 2).Extender.ExtenderId
+		waiting := testMeasurementActivate(t, ctx, 3).Extender.ExtenderId
+		otherWaiting := testMeasurementActivate(t, ctx, 4).Extender.ExtenderId
+
+		// certificates due for renewal, the away extender's the longest
+		for i, extenderId := range []server.Id{away, serving} {
+			key := []byte(fmt.Sprintf("key-%d", i))
+			SetNetworkExtenderMeasurementRequest(ctx, extenderId, append([]byte("csr-"), key...), key, testMeasurementNames(extenderId), now.Add(-70*24*time.Hour))
+			cert := testMeasurementCert(extenderId, key, now.Add(time.Duration(i-62)*24*time.Hour))
+			connect.AssertEqual(t, AddNetworkExtenderMeasurementCert(ctx, cert), true)
+		}
+		// pending requests, the one about to be deactivated waiting the longest
+		for i, extenderId := range []server.Id{waiting, otherWaiting} {
+			key := []byte(fmt.Sprintf("key-waiting-%d", i))
+			SetNetworkExtenderMeasurementRequest(ctx, extenderId, append([]byte("csr-"), key...), key, testMeasurementNames(extenderId), now.Add(time.Duration(i-2)*time.Hour))
+		}
+		renewals := GetNetworkExtenderMeasurementCertsForRenewal(ctx, now, 1)
+		connect.AssertEqual(t, len(renewals), 1)
+		connect.AssertEqual(t, renewals[0].Cert.ExtenderId, away)
+		pending := GetPendingNetworkExtenderMeasurements(ctx, now, 1)
+		connect.AssertEqual(t, len(pending), 1)
+		connect.AssertEqual(t, pending[0].Measurement.ExtenderId, waiting)
+
+		for _, extenderId := range []server.Id{away, waiting} {
+			RecordNetworkExtenderProbeResult(ctx, extenderId, 4, false, now, 1, testRevocationSigner())
+		}
+		renewals = GetNetworkExtenderMeasurementCertsForRenewal(ctx, now, 1)
+		connect.AssertEqual(t, len(renewals), 1)
+		connect.AssertEqual(t, renewals[0].Cert.ExtenderId, serving)
+		pending = GetPendingNetworkExtenderMeasurements(ctx, now, 1)
+		connect.AssertEqual(t, len(pending), 1)
+		connect.AssertEqual(t, pending[0].Measurement.ExtenderId, otherWaiting)
+		// nothing about the request changed while it was left out
+		measurement := Testing_GetNetworkExtenderMeasurement(ctx, waiting)
+		connect.AssertEqual(t, measurement.State, NetworkExtenderMeasurementStatePending)
+		connect.AssertEqual(t, measurement.PendingTime.UTC(), now.Add(-2*time.Hour))
+
+		// back, both are read first again
+		testMeasurementActivate(t, ctx, 1)
+		testMeasurementActivate(t, ctx, 3)
+		renewals = GetNetworkExtenderMeasurementCertsForRenewal(ctx, now, 1)
+		connect.AssertEqual(t, renewals[0].Cert.ExtenderId, away)
+		pending = GetPendingNetworkExtenderMeasurements(ctx, now, 1)
+		connect.AssertEqual(t, pending[0].Measurement.ExtenderId, waiting)
+	})
+}
+
 // The flag is set before an order, and only on an extender that may be
 // measured at that instant (C5): never on a gated one, a canary, or an
 // inactive one.
