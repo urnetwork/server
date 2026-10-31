@@ -1,0 +1,99 @@
+{
+  "schema": 1,
+  "kind": "grafana-submission-native-mapping-qualification",
+  "status": "targeted_race_controls_and_first_dense_native_smoke_passed_full_matrix_pending",
+  "source": {
+    "commit": "7331d7728c1245cd07fa7c60357500e690b85ade",
+    "base_commit": "26bbbf3fdea6b870a327bdf36189401298d39b5d",
+    "files": {
+      "grafana/dashboards/competition.json": "6f24e34c803db6d12d5a85c3e6932edcf5f4a77f896be898ebc1b043d9cca142",
+      "grafana/competition_submission_dashboard_test.go": "97d29520d71973694d489a8215f425b8b6ba6d0a1c8833966fd988c62e81860f",
+      "grafana/competition_submission_native_mapping_test.go": "d3c3bcff9e4b24fc519eca6491a01e37478edade08e53bc2819074ca4e736458"
+    },
+    "only_four_panels_mapping_and_version_changed": true,
+    "queries_transforms_colors_fringe_values_other_panels_and_privacy_unchanged": true
+  },
+  "native_root": {
+    "grafana_version": "13.2.0",
+    "prometheus_plugin_version": "13.1.7",
+    "panel_id": 31,
+    "before_transform_refs": ["A", "B", "C", "D", "E", "F"],
+    "after_transform_refs": ["F", "E", "D", "C", "B", "A"],
+    "effective_legacy_mapping": "manual, byIndex 0 through 5",
+    "failure": "Query-filtered organize transformations reverse the frames, but legacy XY migration binds each uniquely named x/y pair to its old ordinal. No pair matches, so the six-query panel shows No data.",
+    "adjacent_risk": "Absent candidate categories also shift ordinals; an odd-sized panel can retain only its middle series.",
+    "data_boundary": "Actual transformed scene-provider output before visualization field overrides, not complete PanelProps.",
+    "artifact_directory": "/mnt/data/grafana-native-observer-20261031.GznjNBOt",
+    "capture_json_sha256": "e129b349355256c244e80bd34c692698512ca6602570571950238136eb71812c",
+    "evidence_manifest_sha256": "183f60ac6e8abf1d76ab2dea79aed4eb6510b5a8af0b424547107be808f51159",
+    "fixed_time_control_still_showed_no_data": true,
+    "instant_query_cache_eviction_is_not_the_root": true
+  },
+  "correction": {
+    "panel_ids": [31, 32, 33, 34],
+    "mapping": "auto with explicit byName x/y matchers, without ordinal frame selectors",
+    "plugin_version": "13.2.0",
+    "explicit_version_prevents_remigrating_modern_matcher_objects": true
+  },
+  "deterministic_negative_control": {
+    "source": "Base 26bbbf3fd with only the new compatible raw-dimension regression file added.",
+    "root": "TestCompetitionSubmissionNativeMappingsSurviveFilteredFrameReordering",
+    "expected_actual_failure": "panel 31 selects 0 of 6 valid series after native filtered-frame reordering",
+    "test_exit": 1,
+    "expected_failure_wrapper_exit": 0,
+    "top_level_failures": 1,
+    "artifact_directory": "/mnt/data/grafana-mapping-smoke-20261031.2LbhfXH5/prefix/qa",
+    "raw_log_sha256": "227fff1267be014cff9ced3b7180546555b2212ce0bc8b671dfdb36a855525f0",
+    "evidence_manifest_sha256": "482fc4cec98b03d2febd649375d6e17e18d1c5f1d417cd05f37cc3e627f16633"
+  },
+  "positive_controls": {
+    "toolchain": "go1.27.3",
+    "race": true,
+    "selected_roots": 15,
+    "fresh_processes": 3,
+    "top_level_passes": 45,
+    "package_passes": 3,
+    "failures": 0,
+    "skips": 0,
+    "subtests": 0,
+    "new_roots": 3,
+    "new_root_scope": "Focused Go source-contract projections for filtered-frame reordering, sparse/singleton/empty frames and legacy-remigration refusal; not a JavaScript renderer.",
+    "artifact_directory": "/mnt/data/grafana-mapping-smoke-20261031.2LbhfXH5/positive/qa",
+    "race_elf_sha256": "1a8862cbdd74cbc0a82f6c1406a99d3ef0f88b4baeb77f5942b3a5b3c983190a",
+    "evidence_manifest_sha256": "645735a26e5c736c9aa077871d4ba75d151aaa81530d64146eda2b9f86d08fdd",
+    "source_dependency_and_elf_guards_passed": true,
+    "raw_log_censuses_independently_verified": true,
+    "full_repository_suite_claimed": false
+  },
+  "first_fixed_native_smoke": {
+    "finished_at": "2026-10-31T16:42:43Z",
+    "panel_id": 31,
+    "scenario": "dense",
+    "synthetic_data_only": true,
+    "native_mapping": "auto",
+    "transformed_frame_order_still_reversed": true,
+    "canvas_and_all_six_legend_labels_observed": true,
+    "no_data_message_or_panel_alerts": false,
+    "root_viewed_actual_png": true,
+    "visible_reference_values": {"baseline_median_ms": 100, "inclusive_takeover_ceiling_ms": 73.1},
+    "reference_values_are_toy_data_not_competition_measurements": true,
+    "visual_limit": "The native undocked View-panel side pane overlays the final canvas region, obscuring the red gate-failed points. This smoke does not prove unobstructed visibility of every candidate class or tooltip behavior.",
+    "artifact_directory": "/mnt/data/grafana-first-fixed31-20261031.6XejjQja",
+    "png_sha256": "7970e7f8429c76cb77aee3e095b3af02c02d9228f21c1b5feb07faf3ae954149",
+    "capture_json_sha256": "1571cb662de886d87d8f60b103e9daa8fe1f12639014ea8f038f8c6759992f67",
+    "evidence_manifest_sha256": "024e217297044c441d4d6cc25bac1e8f0dfae21962293529b34d0bd3ce20a8c2",
+    "owned_containers_network_and_input_inventory_guards_passed": true
+  },
+  "remaining": [
+    "Unobstructed native rendering of all four panels with dense, sparse, singleton and empty data, including actual candidate tooltip evidence.",
+    "In-place dense-to-empty and empty-to-dense transitions are not proved by fresh-page cases.",
+    "Deploy additive migration 903 before the normal main API/metrics producer rollout and publish the reviewed dashboards using the corrected bringyourctl loader."
+  ],
+  "boundaries": {
+    "full_sixteen_case_native_qualification_claimed": false,
+    "live_grafana_api_database_or_services_changed": false,
+    "evaluator_policy_baseline_or_holds_changed": false,
+    "calibration_acceptance_or_hold_release_authority": false,
+    "operator_dashboard_work_is_not_a_grading_restoration_gate": true
+  }
+}

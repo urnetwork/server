@@ -607,7 +607,7 @@
     "do_not_deploy_or_claim_qualification_from_source_review": true
   },
   "pending_operator_submission_dashboard": {
-    "status": "native_dense31_shows_no_data_root_cause_investigation_not_deployed",
+    "status": "native_mapping_root_fixed_targeted_race_and_first_dense_smoke_passed_full_matrix_pending_not_deployed",
     "uncommitted_source": false,
     "user_request": "Aligned per-submission score plots against the same epoch baseline and actual improvement fringes.",
     "dashboard": "server/grafana/dashboards/competition.json",
@@ -651,6 +651,19 @@
       "targeted_race_top_level_passes": 39,
       "live_grafana_deployment_or_observed_production_disclosure": false
     },
+    "native_mapping_fix": {
+      "commit": "7331d7728c1245cd07fa7c60357500e690b85ade",
+      "qualification": "server/connect/sim-latency/launch/GRAFANA-NATIVE-MAPPING-QUALIFICATION-2026-10-31.json",
+      "root": "Native query-filtered transformations reverse frames while legacy migration binds uniquely named series by old ordinals.",
+      "correction": "Four panels use modern auto mapping with explicit byName x/y selectors and pluginVersion 13.2.0; no ordinal frame selectors.",
+      "current_dashboard_sha256": "6f24e34c803db6d12d5a85c3e6932edcf5f4a77f896be898ebc1b043d9cca142",
+      "deterministic_pre_fix_zero_of_six_failure_verified": true,
+      "focused_race_top_level_passes": 45,
+      "first_fixed_dense31_canvas_and_all_six_legend_labels_observed": true,
+      "first_fixed_capture_visual_limit": "The native undocked side pane obscures the final plot region; complete visibility and tooltips still require qualification.",
+      "full_sixteen_case_native_qualification_claimed": false,
+      "live_grafana_deployment_performed": false
+    },
     "first_native_panel_capture": {
       "finished_at": "2026-10-31T15:56:59Z",
       "grafana_version": "13.2.0",
@@ -659,7 +672,7 @@
       "scenario": "dense",
       "synthetic_data_only": true,
       "result": "page_loaded_but_panel_shows_no_data_despite_successful_datasource_responses",
-      "root_cause_established": false,
+      "root_cause_established_at_this_capture": false,
       "render_qualification_passed": false,
       "capture_directory": "/mnt/data/grafana-first-dense31-pid256-20261031.nHpFuRUv",
       "evidence_manifest_sha256": "d1fe9dbe55f8c4058a4d85402389d902db3cf8889568361b287a99504fb315d3",
@@ -670,7 +683,7 @@
       "live_grafana_or_evaluator_changed": false
     },
     "remaining": [
-      "Diagnose the actual native dense-panel No data result, then qualify all four panels with dense, sparse, singleton and empty data plus visible baseline/fringe and tooltip behavior. Source/embedding/query assertions are not browser-render evidence.",
+      "Complete unobstructed native rendering of all four fixed panels with dense, sparse, singleton and empty data plus visible baseline/fringe and actual tooltip behavior. The first fixed dense31 smoke passes but is not full-matrix proof; source/embedding/query assertions are not browser-render evidence.",
       "Apply additive completed-score index migration903, then deploy the main API/metrics producer and Grafana dashboard through the normal pipeline. This source checkpoint does not deploy or change evaluation holds."
     ]
   },

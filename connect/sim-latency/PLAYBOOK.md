@@ -90,10 +90,17 @@ uploaded. Its deterministic pre-fix ordering failure and 39 passing targeted
 race-test executions are recorded in the
 [privacy qualification](launch/GRAFANA-PRIVATE-PUBLICATION-QUALIFICATION-2026-10-31.json).
 No production disclosure was observed, and the fix has not been deployed here.
-The isolated native Grafana 13.2.0 capture reached the actual score panel, but
-displayed **No data** despite successful datasource responses. Rendering is
-therefore not qualified; mapping and transformation diagnosis continues. Neither
-this operator-chart work nor its deployment is a grading-restoration gate.
+The isolated native Grafana 13.2.0 capture exposed a real mapping defect:
+query-filtered transformations reverse frames, while legacy migration binds
+each series by its old ordinal. Commit `7331d7728` fixes all four panels with
+explicit named matchers and the modern plugin-version guard. The deterministic
+old-source regression fails for the intended zero-of-six-series cause; 45
+focused race-test executions pass on the fix. The first corrected dense panel
+now visibly plots candidates and its baseline/fringe, but the native side pane
+obscures its final region. Unobstructed four-panel/sparse/singleton/empty and
+tooltip qualification remains pending, as does deployment. See the
+[native mapping evidence](launch/GRAFANA-NATIVE-MAPPING-QUALIFICATION-2026-10-31.json).
+Neither this operator-chart work nor its deployment is a grading-restoration gate.
 
 The dated observations below preserve earlier phases, not current commands.
 
