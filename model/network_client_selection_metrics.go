@@ -4,6 +4,7 @@ package model
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -65,6 +66,7 @@ type findProviders2LoadObservation struct {
 type findProviders2SelectionObservation struct {
 	args                 *FindProviders2Args
 	targetKind           string
+	targetCountry        string // the one country every location spec resolves to, "" otherwise
 	requestClass         string
 	rankMode             string
 	stage                string
@@ -166,6 +168,41 @@ func findProviders2TargetKind(args *FindProviders2Args, countries map[string]ser
 		}
 	}
 	return kind
+}
+
+// The lowercase code of the one country every spec's location belongs to,
+// through the directory or, for a legacy entry, the country list; "" when the
+// specs name none, two countries, a group or the best available exits, or a
+// location neither resolves.
+func findProviders2TargetCountry(args *FindProviders2Args, countries map[string]server.Id, directory map[server.Id]*locationDirectoryEntry) string {
+	country := ""
+	for _, spec := range args.Specs {
+		if spec == nil {
+			continue
+		}
+		if spec.LocationGroupId != nil || spec.BestAvailable {
+			return ""
+		}
+		if spec.LocationId == nil {
+			continue
+		}
+		next := ""
+		if entry := directory[*spec.LocationId]; entry != nil {
+			next = strings.ToLower(entry.CountryCode)
+		} else {
+			for code, countryId := range countries {
+				if countryId == *spec.LocationId {
+					next = code
+					break
+				}
+			}
+		}
+		if next == "" || (country != "" && next != country) {
+			return ""
+		}
+		country = next
+	}
+	return country
 }
 
 // Ends the previous stage before starting the next; each request owns exactly

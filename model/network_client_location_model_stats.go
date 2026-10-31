@@ -226,12 +226,15 @@ var findProviders2OutcomesTotal = prometheus.NewCounterVec(prometheus.CounterOpt
 // request explains (its own exclusions removed every candidate, or the score
 // export holds no admitted provider for the narrow target it named) from the
 // zeros the platform must account for. The selection metric's reasons cannot
-// do that: it has no caller country. Both added labels are fixed
-// vocabularies, never a target identity.
+// do that: it has no caller country. target_country names the requested
+// country (a region's country for a region) of a cache_empty answer only, so
+// the probe can judge it against that country's admitted supply
+// (network_client_score_supply.go); it is empty for every other answer. All
+// added labels are fixed vocabularies, never a target identity.
 var findProviders2EmptyOutcomesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "urnetwork_findproviders2_empty_outcomes_total",
-	Help: "FindProviders2 completed empty responses by the outcome request class, requested target kind and terminal selection reason",
-}, []string{"ip_family", "location_kind", "caller_country", "rank_mode", "force_minimum", "capability", "target_kind", "reason"})
+	Help: "FindProviders2 completed empty responses by the outcome request class, requested target kind, the target country of a supply-empty country or region, and terminal selection reason",
+}, []string{"ip_family", "location_kind", "caller_country", "rank_mode", "force_minimum", "capability", "target_kind", "target_country", "reason"})
 
 // The capability filter a request names, as the outcome label reads it.
 func findProviders2OutcomeCapability(findProviders2 *FindProviders2Args) string {
@@ -352,14 +355,18 @@ func recordFindProviders2Outcome(
 	).Inc()
 }
 
-// Explains one completed empty answer: targetKind and reason are the
-// request's selection observation's, both from fixed vocabularies.
+// Explains one completed empty answer: targetKind, targetCountry and reason
+// are the request's selection observation's, all from fixed vocabularies.
 func recordFindProviders2EmptyOutcome(
 	findProviders2 *FindProviders2Args,
 	callerCountry string,
 	targetKind string,
+	targetCountry string,
 	reason string,
 ) {
+	if reason != "cache_empty" || (targetKind != LocationTypeCountry && targetKind != LocationTypeRegion) || !clientScoreSupplyCountry(targetCountry) {
+		targetCountry = ""
+	}
 	findProviders2EmptyOutcomesTotal.WithLabelValues(
 		findProviders2OutcomeIpFamily(findProviders2.IpFamily),
 		findProviders2OutcomeLocationKind(findProviders2),
@@ -368,6 +375,7 @@ func recordFindProviders2EmptyOutcome(
 		strconv.FormatBool(findProviders2.ForceMinimum),
 		findProviders2OutcomeCapability(findProviders2),
 		targetKind,
+		targetCountry,
 		reason,
 	).Inc()
 }
