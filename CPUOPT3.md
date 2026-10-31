@@ -162,6 +162,1173 @@ Each part gives a validation plan per item. They share four rules.
 - **Hold the timing bounds as acceptance criteria,** not just the CPU. These include forward and liveness detection, revocation, probe timing, and the proxy's session interval maxima.
 - **Measure CPU from Mimir and perf,** not from a single short profile. CPUOPT2's GOGC prediction came from one sample that caught a GC cycle.
 
+## Design plans (added 2026-10-31)
+
+The owner asked for a design for each headline item before implementation, with the decisions that need an answer first. Each plan covers:
+- the change and its code locations;
+- why no timing bound moves;
+- compatibility and rollout;
+- failing-first tests and production validation;
+- savings and effort;
+- numbered questions for the owner, each with a recommended answer.
+
+The questions are asked one at a time, and nothing is implemented before they are answered.
+
+| Plan | Item | Est. saving | Effort | Status |
+|---|---|---|---|---|
+| D1 | In-process delivery when the transport's resident is in the same process (A §6.1) | 12–15 cores | 8–12 engineering days, plus a 6-day staged A/B | drafted |
+| D2 | Stop building window clients the strict hard max refuses; a drained client hands over its slot (B #1) | 1.2–2.5 proxy cores, plus 265–383/s fewer mints, retirements and contracts | about 8 engineering days and two proxy releases, then app releases | drafted |
+| D3 | PeerAudit: answer cheaply, stop sending (C #1, B #4) | 1.4–1.7 api cores, 0.3–0.4 proxy cores | — | in progress |
+| D4 | (a) A verified JWT claims cache; (b) a verified certificate-chain cache (C #2, C #3, B #3, B #6) | 2.2–2.9 api cores, 2.3–2.5 taskworker cores, 0.7–0.9 proxy cores | about 3 + 3 engineering days | drafted |
+| D5 | Keep long snapshots off the primary (D #1) | avoids 15–55-core spikes, about 700 core-hours per full dump | a standby host (hardware), plus small interim changes | drafted |
+
+### D1. Deliver in-process when the transport's resident is in the same connect process
+
+Code is cited at server main `3ae2c76f7` and connect `89b15920`, the version main pins. The running connect service is 1085953670: server `37ec4788b` plus connect `ea79e1f1`. Its `ResidentTransport` and exchange paths have the same structure.
+
+**Problem and evidence**
+
+Part A §2.5 and §6.1:
+- **Same-process transports:** on edge-3, 50,334 of 116,592 outbound exchange connections dial a listener owned by the dialing process. That was matched exactly through the DNAT map. The host has 55.4k transport outbound ends, so about 91% of transports are a TCP loop back into their own process. If the other hosts match, that is about 200k loops fleet-wide.
+- **Forwards are almost never local:** 11.2k connections go to another process on the same host and 55.1k cross hosts.
+- **Cost:**
+  - The exchange socket trees are 27% of connect CPU: `ExchangeConnection.Run` 13.2% and `handleExchangeConnection` 13.75%, with their syscalls and inline kernel work.
+  - Local delivery (`process_backlog`) is 3.0% of edge-3 host samples for connect alone.
+  - A relayed packet crosses two transport hops and one forward hop, so transports carry two thirds or more of exchange frames *(inferred)*.
+- **Per local transport today:**
+  - 2 sockets, 1 conntrack entry, about 9 goroutines;
+  - 6 heaped timers: a read deadline, a write deadline and a pinger at each end;
+  - 2 extra 96 KiB channel rings and 2 × 64 KiB read buffers.
+  - Each frame costs a writev and a read syscall, two deadline installs, two framing copies, a pool get, a netpoll wake and three channel hand-offs.
+- **The cause:** `ResidentTransport.Run` always dials (connect/resident.go:3692), even when the resident record names this process's resident. `isLocalResident` (connect/resident_move.go:335) is used only for move takeover.
+
+**Proposed design**
+
+*Where it plugs in.* `ResidentTransport.Run`'s loop (resident.go:3672–3711) resolves the record, runs `takeOverMovedResident`, then dials. D1 adds one branch before the dial:
+
+```go
+if link := self.exchange.attachLocalTransport(self.ctx, headerCopy); link != nil {
+	self.runLocal(link) // returns after detach; the loop continues exactly as after handle()
+} else {
+	// unchanged: NewExchangeConnection + handle
+}
+```
+
+Everything after it stays: the reconnect pacing (`ExchangeReconnectAfterErrorTimeout`), the nomination that replaces the old resident id (:3745), and the client-limit kick.
+
+*Attach.* `(*Exchange).attachLocalTransport(ctx, header)` goes in a new connect/resident_local_transport.go. It returns nil, and the caller dials as today, unless all of these hold:
+1. The code ceiling `ExchangeSettings.EnableLocalTransport` is on, and the runtime control allows this block (see the kill switch).
+2. `matchResidentGeneration(clientId, header.ResidentId)` (resident.go:1444, under `exchange.stateLock`) returns `Current`.
+   - `Missing` and `Changed` go to TCP. The inbound side then waits (up to 30 s, polling 15 s) or refuses, exactly as today.
+3. `!resident.IsDone()`. Drain refuses only missing residents (:1531), so a present local resident is accepted, as inbound does.
+
+Then attach does what the accept path does after its header, in the same order:
+- `registerExchangeConnection(clientId)` (:1954).
+- `resident.addTransportWithEdge(header.transferCarrierProperties(), header.transportEdge())` (:5119). This publishes the same send and receive routes, with the same carrier properties, receive reliability, transport edge for MOVE, and `move.notifyTransportClosed` on close.
+- `resident.localAttachments.Add(1)`.
+- A link context: `context.WithCancel(transport ctx)`, plus `context.AfterFunc(resident.ctx, link.cancel)`. This replaces the accept path's goroutine that waits on resident or handle done and cancels. It propagates cancellation only; it is not an I/O watchdog.
+
+*Two pumps,* each a goroutine owned by the link. They replace the 9 goroutines and the socket.
+
+| TCP loop today | Client pump: `RT.send` → `routeReceive` | Resident pump: `routeSend` → `RT.receive` |
+|---|---|---|
+| Writer gathers up to `ExchangeWriteBatchCount`/`ByteCount` without blocking | same gather from `RT.send` | same gather from `routeSend` (inbound writer, :1628–1647) |
+| `writeBatchByteCount`: MaxMessageLen and uint16 checks fail the write and close the connection | same checks before delivery; on failure, return the batch to the pool and detach with reason `max_message_len` (V(1) log plus counter) | same |
+| Writer installs now+`WriteTimeout` (15 s) per writev (`exchangeDeadline.refresh`, :2666) | batch deadline now+15 s at batch start. Try a non-blocking send first; if it would block, select on `{send, timer, ctx}` with a timer created for the remaining time. Expiry detaches with reason `write_timeout` | same, into `RT.receive` |
+| A zero-length frame is a ping: the reader drops it and calls `resident.UpdateActivity` | zero-length message: return it and update activity | same |
+| Reader and writer call `resident.UpdateActivity` per message or batch | per delivered batch | per delivered batch |
+| Read deadline 30 s, pings every 10 s, keepalive 11 s/1 s×4 | not needed: the peer is this process, and its death is a context edge (below) | same |
+
+- Ordering is FIFO: one producer per pump, FIFO channels, and in-order batch delivery.
+- The timer is created only when a delivery would block, as `sendPooledMessage` already does (:3322). It is never a `Reset` of a heaped timer, so D1 adds no heap-scan trigger (Part A §4).
+
+*Detach* mirrors `closeExchangeTransportQueues` (:3443), in this order:
+1. `closeTransport()`: route removal joins every resident writer still admitted to the old snapshot (connect transfer_route_manager.go:1180–1212).
+2. Cancel the link.
+3. Join both pumps.
+4. `returnReadyPooledMessages(routeSend)` and `returnReadyPooledMessages(routeReceive)`.
+5. `localAttachments.Add(-1)`, `unregisterExchangeConnection`, and the gauge.
+
+`RT.send` and `RT.receive` are not drained. They outlive the link, as they outlive an `ExchangeConnection` today, and `Run`'s defer still closes `RT.receive` after the join.
+
+*Resident activity.* An idle TCP loop refreshes activity at least every 10 s with pings, so an attached transport never lets the resident reach `ExchangeResidentTtl` (300 s). Instead of keeping a ping timer per link, `CancelIfIdle` (:5271) refreshes `lastActivityNanos` and returns false while `localAttachments > 0`. That says exactly "attached ⇒ active", without a timer. TCP-attached transports keep today's ping-driven rule unchanged.
+
+*Accounting and metrics:*
+- **Unchanged:**
+  - transfer and contract accounting: the resident's `connect.Client` sees the same frames on the same routes with the same properties;
+  - the client-facing byte meters (`announce.SendMessage`/`ReceiveMessage`), H1/H3 batching and the speed-test counts;
+  - every resident payload ledger (the transport exchange path updates none).
+- **New metrics,** so that exchange totals stay exact as io + local:
+  - `urnetwork_connect_exchange_local_frames_total` and `…_bytes_total`, with the same `{direction,kind}` labels as `exchange_io_*`;
+  - `exchange_local_attachments` (gauge);
+  - `exchange_local_detaches_total{reason}`: resident_done, transport_done, write_timeout, max_message_len, disabled;
+  - `exchange_local_blocked_seconds`, observed only when a delivery blocks.
+- **New `receive_queue_dropped` boundaries** (resident.go:104–111): `local_transport_send` and `local_transport_receive`.
+- **Dark release only:** add an `op` label to `exchange_io_*`, to measure the transport share of frames before enabling.
+
+*Kill switch.* Add `LocalTransport` to the `{connect_move}control` hash (model/connect_move_control.go:126). It narrows the code ceiling and never widens it, like `TransportDelay`. Values are `off`, `all`, or a block list, so one block can be A/B'd without a restart. Each exchange reads it every refresh interval (the pattern of connect/transport_delay_control.go). When it narrows, two things happen:
+- new attachments take TCP;
+- live links detach with reason `disabled`, paced at `LocalTransportDisableDetachRate` (a setting; for example 500/s per process). Each one then redials over TCP through the normal loop.
+
+*What stays the same:* forwards, the inbound accept path, MOVE takeover, drain, nominations, every H1/H3 deadline and ping, and the exchange header and wire protocol.
+
+*Alternatives considered:*
+- **Register `RT.send` and `RT.receive` directly as the resident's routes,** with no pumps: one fewer hand-off per frame. It loses the framer checks and the independent 15 s stall owner for the resident→client direction, so not now. Revisit only with a proof that no check is lost.
+- **AF_UNIX or socketpair:** keeps the syscalls, timers and goroutines.
+- **Merging `ResidentTransport` into the `Resident`:** a larger refactor with the same savings.
+- **Multiplexing first (§6.7):** higher risk, and it still loops through the kernel for these connections.
+
+**Correctness under the owner rule**
+
+| Bound on today's local TCP loop | Local path | Why it holds, and how it is measured |
+|---|---|---|
+| Exchange write deadline: 15 s per batch write, a stall tears down → reconnect → nominate replacement | batch deadline 15 s per delivered batch in each pump, with the same teardown and the same loop | Same budget per batch (a healthy batch gets the full 15 s) and the same stalled-batch bound. `detaches{write_timeout}`, `local_blocked_seconds` |
+| Per-message 15 s admission into `ExchangeConnection.send` (drop and continue) | that queue no longer exists; the pump blocks only on the route queue, bounded by the same 15 s | No producer blocks longer than today. A stall still ends at 15 s without progress |
+| Read deadline 30 s, pings ≤10 s, TCP keepalive | not applicable: the peer is in this process. Resident or transport end is a context edge, so the link detaches at once | Detection drops from ≤30 s to immediate, never later. `detaches{resident_done,transport_done}` and detach latency |
+| Resident idle TTL 300 s | unchanged value; "attached ⇒ active" replaces the 10 s pings | Exact equivalence for healthy links; a wedged link detaches in 15 s. Covered by a test |
+| Handshake header deadlines (30 s), resident wait (30 s, polling 15 s) | no handshake: the generation is checked under `exchange.stateLock`; non-current generations use TCP | Unchanged where it can wait; immediate where it cannot |
+| MaxMessageLen and uint16 frame limit | same check, same teardown | `detaches{max_message_len}` |
+| Reconnect pacing 1 s, the client limit, H1/H3 deadlines and pings, forward 3 min idle, forward exchange bounds, revocation | untouched | — |
+
+- **Ordering:** FIFO per direction within a link, as on a TCP connection.
+- **Across reattachment:** frames in `RT.send` go to the next link in order. Frames in the route queues are returned, as today when a connection closes. With two transports per client the resident chooses routes, as today, and the transfer layer orders and retransmits end-to-end.
+- **Backpressure:**
+  - The H1 reader still blocks on `RT.send` for reliable lanes; H3 datagram lanes still refuse at once (`sendReceivedMessage`, :3791).
+  - A slow resident fills its route queue, then the pump blocks, then the 15 s bound applies.
+  - A slow client fills `RT.receive`, then the resident pump blocks (15 s bound); the H1 15 s write deadline still owns the client socket.
+  - Buffering before a stall shrinks: one 4096-slot ring and the socket buffers are gone. The per-batch budget is unchanged.
+- **Buffers:** ownership moves on a successful channel send, unchanged.
+  - The client pump owns each batch from dequeue until delivery. On drop, detach or cancel, `sendPooledMessage`-style code returns every undelivered buffer exactly once.
+  - Read-only shares from the resident's writers now reach the H1/H3 writers instead of fresh socket copies. They were checked not to mutate inputs: `FramedMessageConn.WriteMessages` copies into its own storage; the H3 fragmenter copies into scratch; gorilla copies. A test pins this.
+  - The local path removes 2 copies and 1 pool get/return per frame.
+- **Races:**
+  - **Replacement between the generation check and `addTransportWithEdge`:** the old resident's context is done, so `AfterFunc` detaches at once. The loop resolves again and attaches to the new generation. This is the accept path's existing race and handling.
+  - **Detach while a resident writer is blocked on a full `routeSend`:** `closeTransport` waits for that writer's own 15 s write timeout, exactly as `closeExchangeTransportQueues` does today.
+  - **Kill switch during attach:** the attach either completes and is detached by the pacer, or never starts.
+  - **Exchange shutdown:** the link context derives from the transport, and the transport from the handler, so `WaitForIdle` semantics are unchanged.
+- **MOVE:**
+  - A takeover into this process makes the record local, and the next iteration attaches locally.
+  - A move away closes the local resident (registration refresh or replacement), so the link detaches and the loop dials the remote resident over TCP.
+
+**Compatibility and rollout**
+
+- **What changes:**
+  - **Server connect only:** resident.go, the new resident_local_transport.go, model/connect_move_control.go, metrics, the connect.json dashboard, and SIGNALS §8.15 (exchange owners = TCP + local).
+  - **alt** links the same code with the ceiling off.
+  - No sdk, app, proxy or wire change.
+- **Mixed versions:** none matters. The decision is local to one process. Old and new processes reach each other's residents over the unchanged TCP accept path.
+- **Deploy order:**
+  1. A dark release from main with the ceiling off and the `op` label added. Measure the transport frame share and keep a baseline for 2 days.
+  2. Set the control to `beta` for 1 day.
+  3. Set it to `g1` (g1 on all four hosts) for 3 matched days against g2–g4.
+  4. Set it to `all`.
+- **Rollback:** set the control to `off`; links detach, paced, to TCP within minutes. Or deploy the prior release.
+- **The release:** the next connect release from main carries about 400 files of unrelated changes since `37ec4788b`. Shipping dark keeps the D1 A/B clean.
+
+**Tests**
+
+All failing-first, in connect/resident_local_transport_test.go. Clocks are synctest virtual time, and orderings use explicit barriers.
+
+| Test | What it asserts | Mutation it must catch |
+|---|---|---|
+| `TestLocalTransportDialsNoExchangeSocket` | a local resident's transport opens no socket (dial hook), and frames flow both ways in order | removing the branch |
+| `TestLocalTransportBatchDeadlineStallsDetach` | a batch blocked 15 s detaches at exactly 15 s; one that completes at 14.999 s does not | per-message or per-send re-arm (loosens); reusing an earlier deadline (shortens) |
+| `TestLocalTransportResidentPumpDeadline` | the same, for `RT.receive` with the H1 writer stalled | as above |
+| `TestLocalTransportMaxMessageLenTearsDown` | an oversize message detaches and is returned; the next link carries the rest | dropping the check |
+| `TestLocalTransportZeroLengthIsPing` | dropped and counted as activity in both directions | forwarding it |
+| `TestLocalAttachmentKeepsResidentActive` | idle and attached past 300 s: resident alive; detached: retired at TTL | removing the attached rule |
+| `TestLocalTransportPoolOwnershipUnderTeardown` | detach at each barrier (mid-gather, blocked send, resident close) leaves pool outstanding at zero and violations at zero | a double return or a leak on any path |
+| `TestLocalTransportReadOnlyShareUnmodified` | shares written by the resident are byte-identical after the H1, H1+ and H3 writers | an in-place writer |
+| `TestLocalTransportGenerationReplacementRace` | replacement inside the barrier between check and add: prompt detach, attach to the new generation, nothing delivered to a done resident | a missing `AfterFunc` edge |
+| `TestLocalTransportKillSwitchPacedDetach` | narrowing switches new links to TCP and detaches live ones at the set rate; frames already in `RT.send` survive | unpaced or no detach |
+| `TestLocalTransportMoveAwayRedialsTcp` and `TestLocalTransportDrainConvergence` | composed through the real handler and exchange | — |
+| `TestLocalAndTcpPathsDeliverIdenticalSequences` | one deterministic traffic script through both paths gives equal resident-observed frame order, bytes, contract counters and drop counters | any semantic drift |
+
+- **Benchmark:** `BenchmarkTransportFrameLocalVsTcpLoop` on real loopback, measuring CPU µs per frame and allocations per frame.
+- **Production acceptance** (g1 against g2–g4, matched hours over 3 days):
+  - `exchange_active_connections{op="transport"}` on g1 −85–95%;
+  - connect cores per 1k clients on g1 at least 10% lower;
+  - no rise in `h1_sessions_closed_total{reason}`, nominations per client, or `receive_queue_dropped`;
+  - `detaches{write_timeout}` per 1k transports no higher than control-block transport redials;
+  - a rerun of `bpf_adjust.sh` shows smaller heaps.
+
+**Savings and effort**
+
+- **Base:** 10-31 18:27Z: connect 103.5 cores, 0.95M frames/s crossing exchange sockets, exchange trees at 27% of connect, about 60% of frames local.
+- **Estimate:** about 27 µs saved per local frame, less about 1.5 µs for the two hand-offs. That is **12–15 cores**, 7–8% of services busy CPU.
+- **Also:**
+  - about −1.4M goroutines (−10%);
+  - about −75k timers per g-process (−15% heap, so −15% of `adjust`);
+  - about 4 GB of heap per g-process;
+  - −400k sockets and −200k conntrack entries fleet-wide.
+- **Effort:** 4–6 engineering days of code and 4–6 of tests, then a 6-day staged A/B.
+- **Releases:** one connect release, dark, then control flips.
+
+**Risks**
+
+- **Edge-case drift from the TCP loop:** oversize, zero-length and teardown ordering. Mitigated by the parity table and the identical-sequence test.
+- **Lifecycle races:** generation, MOVE, drain, kill switch. Mitigated by barrier tests through the real accept and handler code.
+- **Pool ownership:** read-only shares reach new consumers.
+- **Less buffering before a stall:** the same per-batch bound fires on less queued data.
+- **The 60% frame share is inferred:** the dark release's `op` label measures it before enabling.
+
+**Follow-up: §6.7 multiplexed links**
+
+D1 separates a link's semantics from its carrier: the pumps, batching, checks, batch deadline, activity, drop boundaries and path-labeled metrics. A multiplexed link per process pair would keep the pumps per stream, and replace "no carrier" with one shared socket. That means:
+- stream ids in the frames;
+- per-stream credit standing in for the route queues, so the per-batch deadline becomes a credit-stall bound per stream;
+- one pinger, read deadline, write deadline and keepalive per link instead of 6 timers per connection.
+
+The local path is that design's "link to self". D1's io+local accounting also measures what multiplexing has left: forwards and cross-process transports, about 40% of frames.
+
+**Questions for the owner**
+
+1. **Kill-switch form.**
+   - (a) A code ceiling only (a change needs a block restart and a reconnect wave).
+   - (b) A runtime `{connect_move}control` field `localTransport` (off, all, or a block list).
+   - (c) Both.
+
+   *Recommend (c).* It changes whether the dark release can be A/B'd per block without restarts.
+2. **What "off" does to live links.**
+   - (a) New attachments only.
+   - (b) Also detach live links to TCP, paced, for example at 500/s per process.
+
+   *Recommend (b),* because it makes rollback real. It changes the pacer setting and the pacer test.
+3. **Rollout appetite.**
+   - (a) Dark, then beta 1 day, then g1 for 3 days, then all.
+   - (b) Dark, then g1 for 3 days, then all.
+   - (c) All blocks at once behind the switch.
+
+   *Recommend (a).* It sets the release and soak dates.
+4. **Scope.**
+   - (a) Transports only.
+   - (b) Transports and local forwards in the same release.
+
+   *Recommend (a):* forwards are about 0% same-process today. (b) adds forward-side lifecycle tests for little gain.
+5. **Order against the quick wins** (the pgx and quic-go timer fix, the liveness writer, the key-event resync).
+   - (a) D1 after they ship.
+   - (b) In parallel.
+
+   *Recommend (a):* each A/B then measures one change. It decides which connect release carries D1.
+
+### D2. Stop building window clients the strict hard max will refuse, and let a drained client hand over its slot
+
+Code references are connect 89b15920, as deployed in proxy 1086377170. These files are unchanged at connect main c62b060e. The sdk is at fe265dfc and the server at a8461e236.
+
+**Problem and evidence**
+
+From CPUOPT3 Part B §3.5 and §4 #1:
+- **Churn:** hosted window clients are minted at 269/s fleet-wide and retired at 265/s. That is 13.5 per process per second, against about 5.1k carriers per process. By 19:35Z on 10-31, mints were 383/s, about 44 per device-hour.
+- **Cost:** building and retiring window clients is about 19% of proxy CPU:
+
+  | Part | Share of proxy CPU |
+  |---|---|
+  | TLS dial (x509 verify 5.3% of it) | 6.3% |
+  | contracts and Provide | about 4.5% |
+  | FindProviders2 | 2.9% |
+  | construction and teardown | 2.4% |
+  | mint | 1.4% |
+
+  Every candidate also costs pg a network_client allocation and retirement, Redis an escrow reservation, and a services edge a TLS handshake and a resident.
+
+**The mechanism.** Every low-memory profile runs strict windows: hosted proxy devices, iOS and Android (sdk/mobile_memory_policy.go:535-536). Hosted windows are quality min = max = hard max = 5, speed fixed at 1, with no standing reserve. The loop goes like this:
+1. A client passes its jittered lifetime (60 min × 0.75–1.0, ip_remote_multi_client.go:11969). The lifetime clock starts at the first received packet, and a probe answer counts (20553-20617, 20796).
+2. Resize only warns it, "client drain" (13565-13606). The warned client leaves `clients`, so `len(clients) < targetWindowSize`.
+3. That resets the discovery backoff (ip_remote_multi_client_discovery_retry.go:87-99), and expansion runs (14052).
+4. The enumerator runs FindProviders2 and mints an identity (13115-13144, 13255-13271). `expand` then builds the client: Provide, platform transport with TLS, key registration, a contract and the evaluation ping (14600-14700).
+5. Only then does `strictWindowAdmissionAllowed` refuse the candidate, because the drained client still holds its slot (14326-14341, 15174-15187). The candidate is cancelled and retired.
+6. Collapse runs only above the hard max (14093), so the drained client is never removed. The pass is "unproductive", the backoff runs 10 s → 2 min (discovery_retry.go:42-77), and the cycle repeats as long as the window lives.
+
+**The code contradicts its own contract.** `StrictWindowSizeHardMax` says a new identity is declined "when a flow-carrying warned client cannot yet be collapsed" (593-602). The code also declines when the warned client is flowless and collapsible.
+
+**Beyond CPU, rotation never completes in strict windows.** A drained exit stays warned, and warned exits are excluded from new flows (orderedClients, 15581-15633). A discovery window whose exits have all drained offers no exit to new flows. On a hosted device that clears `MinSatisfied` (15516-15538), which can make `ProxyDevice.Active()` false and trigger a device recreation. This is *inferred* from code: no metric shows it today, and hosted logging is off.
+
+**Proposed design**
+
+There are three parts, plus the under-filled windows.
+
+**0. Counters first** (connect, sdk, server/proxy)
+- **Type:** a new `connect.WindowClientStats`, atomic counters over fixed enums. The precedent is `connect.H1PlusStats` and `server.NewH1PlusCollector` (server/proxy/server.go:38, 171).
+- **Wiring:**
+  - `MultiClientSettings.WindowClientStats *WindowClientStats`; nil means off, so apps pay nothing.
+  - `sdk.DeviceLocalSettings.WindowClientStats`, copied into the multi-client settings at sdk/device_local.go:5136-5141.
+  - The proxy sets one process-wide instance in `newProxyDeviceLocalSettings` (server/proxy/proxy_device.go:1380) and registers a collector.
+- **Series** (labels are fixed vocabularies, never identities):
+  - `urnetwork_proxy_window_candidates_total{window, outcome}`. Outcomes: `admitted`, `admitted_handover`, `declined_strict_cap`, `declined_replacement`, `not_admitted_surplus`, `failed_setup`, `failed_ping`, `failed_contract`, `canceled`.
+  - `urnetwork_proxy_window_expand_passes_total{window, state}`. States:
+    - `below_min`;
+    - `below_target`;
+    - `strict_hole`: fewer kept clients than target, with installed clients at the hard max;
+    - `skipped_strict_full`: new;
+    - `deferred`.
+  - `urnetwork_proxy_window_warnings_total{window, cause}`, counting transitions into the warned state: drain, silent, unhealthy, starved, capacity, quarantine, family_swap.
+  - `urnetwork_proxy_window_removals_total{window, cause}`: verdict, unhealthy, transport_down, collapse, handover, family_swap, closed.
+  - A scrape-time gauge `urnetwork_proxy_windows{state}`, built from the existing per-DeviceLocal iteration (memory_metrics.go:396). States: `selectable_full`, `strict_hole`, `below_min`, `no_selectable`.
+- **Baseline:** the release carrying the counters runs 24 h with the behavior flags off. The split it measures becomes the baseline and the acceptance criteria:
+  - `declined_strict_cap` against the `failed_*` outcomes;
+  - `strict_hole` windows against `below_min` windows;
+  - mints per device-hour.
+
+**1. Capacity check before construction**
+- **One predicate,** `strictAdmissionCapacityWithLock(windowSize) int`. It returns `hardMax − len(self.clients) − reserved`, or unbounded when `!StrictWindowSizeHardMax || hardMax <= 0`. These are the same inputs as `strictWindowAdmissionAllowed`, under the same window `stateLock`. `reserved` is the at most one handover reservation of part 2.
+- **Where it runs:**
+  1. **Resize,** before the deferral and `expand` (14043-14052): `neededCount = min(target − len(clients), capacity + handoverEligible)`. At zero, the pass skips expansion and counts `skipped_strict_full`. It must not call `noteDiscoveryExpandUnproductive`: nothing was attempted, so the backoff state is untouched.
+  2. **The enumerator,** before `enumerateDestinations` and before each mint (13115-13144, 13255): it lists and mints nothing while capacity is zero and no handover is reserved. This is the clause the demand path already has (ip_remote_multi_client_discovery_demand.go:190); the main enumerator lacks it.
+  3. **Admission** keeps `strictWindowAdmissionAllowed` exactly as it is, as the authoritative gate. A same-identity replacement (fixed destinations) bypasses the pre-check, just as `replacing` bypasses the gate.
+- **Why this is exact:** the pre-check suppresses only candidates the gate would refuse at the moment of planning. A slot can free between planning and admission. Every path that frees one already wakes resize: `removeClient` notifies (13393-13400), and so does the `client.Done` watcher (14400-14407). The next pass then starts at once and builds the candidate. So no admission is lost, only re-planned within microseconds. Non-strict windows (desktop) take the unbounded branch and are byte-for-byte the old code.
+
+**2. Slot handover ("collapse at admission")**
+- **Who is eligible:** in resize, after classification, a warned client is eligible when the existing collapse test passes for it. That test (13802-13817) is `StatsWindowGraceperiod ≤ duration && weight ≤ 0 && collapseRemovalAllowed(client, duration)`: flowless, or past the collapse deadline of 2 lifetimes (11950, 15211-15221). Candidates are ordered as collapse orders them (family, weight, duration).
+- **Reservation:** when capacity is zero, the pass reserves one victim per window, `strictHandover{victim, owner}` under `stateLock`. The pass's `expand` defer releases it.
+- **The swap:** in `admitCandidate`, if the gate refuses and this pass holds the reservation, one `stateLock` section does the following:
+  1. checks the victim is still installed and still warned;
+  2. deletes it;
+  3. installs the candidate and notifies.
+
+  The installed count stays at the hard max throughout. After unlocking, the victim takes the ordinary removal path: Close, the Removed monitor event, and retirement by the generator. If the victim was removed meanwhile, the slot is free and the plain gate admits.
+- **A drained client with flows** is not eligible before the collapse deadline, so no candidate is built for it. It keeps serving. Its movable flows were already re-pinned when the drain started (`markDrainMigrateOnce`, 13598-13606). Once it is flowless and its 30 s weight window is empty, it becomes eligible and hands over.
+- **What stays the same:**
+  - warn causes and their thresholds;
+  - selection's exclusion of warned clients;
+  - the hard max on installed clients;
+  - evaluation before install;
+  - family-swap and fixed-destination paths;
+  - every non-strict window.
+- **Transient graphs:** while a window sits at its ceiling, at most one candidate is in evaluation. Today a pass builds up to `multiClientExpandStepMax` = 4 candidates and discards them all.
+
+**3. Under-filled windows**
+- **The pattern:** windows below target whose candidates fail evaluation also build, then discard.
+- **What constrains a fix:**
+  - an identity a provider has seen never follows the window to another provider (ip_remote_multi_client_identity_reuse.go, header);
+  - identities no provider saw are already parked and reused;
+  - the 10 s → 2 min backoff already paces passes.
+- **What D2 does:** it does not change their pacing. It counts them (`failed_*` by pass state `below_min` and `below_target`), so the baseline sizes them. A follow-up design comes only if they dominate (owner question 4).
+
+**Alternatives considered**
+- **Admit one over the ceiling, as non-strict windows do:** breaks the mobile memory envelope and the "never exceed the hard max" requirement.
+- **Remove the drained client first, then build** (the strict family-swap path, 13966-13975): the window sits below its minimum for the whole evaluation, 1–30 s.
+- **Turn strict mode off for hosted devices:** rotation works again through collapse, but with a transient overshoot, and phones are not fixed.
+- **Pre-check only:** stops the waste but leaves rotation broken and the selectable exits decaying.
+
+**Correctness under the owner rule**
+
+Every bound on the path:
+
+| Bound | Value and code | After D2 |
+|---|---|---|
+| Client lifetime | 60 min × [0.75, 1.0), 11969 | Unchanged. The drain still starts at `removeTime`; the handover now completes instead of never. |
+| Collapse deadline | 2 × lifetime, 11950 | Same predicate, now also applied at the ceiling (owner question 1) |
+| Stats grace and weight window | 30 s | Unchanged; reused as is |
+| Resize cadence | `WindowResizeTimeout` 15 s | Unchanged |
+| Discovery backoff | 10 s → 2 min (323-324) | Unchanged; skipped passes neither advance nor reset it |
+| Expansion deadlines | acquisition 15 s, setup 30 s, evaluation ping 30 s (14540-14545) | Unchanged for every candidate built; evaluation still precedes install |
+| Health and probing | blackhole 30 s / 20 s, poll 1.25 s, idle backstop 10 s; cping 10 s rest on the 10 s grid and 30 s ack wait; unhealthy 15 s and 60 s; prober cadence; `ProbeSilenceWarnStreak` | Code untouched |
+| Verdict-removal budget | 2 per 30 s | Untouched; a handover is a collapse, not a verdict |
+| Platform transport timers | ping, 30 s read, 10 s write | Untouched |
+| Refill after a removal | notify, then immediate pass | Unchanged |
+
+Failure modes:
+- **A victim gains a flow between eligibility and the swap.** Warned clients take no new flows, so the window is tiny. `replacementAllowed` (15238-15249) already accepts the same read-then-install race.
+- **A candidate fails evaluation.** The reservation is released at the end of the pass, and the next pass may reserve again on the ordinary backoff.
+- **The window closes mid-pass.** Existing cancellation applies, and the reservation dies with the pass.
+- **Concurrent passes.** Resize is one goroutine per window. The reservation has a single owner and is checked under `stateLock`.
+- **Stats.** A nil `WindowClientStats` is a no-op.
+
+**Compatibility and rollout**
+- **What changes:**
+  - connect: window logic and the stats type;
+  - sdk: one settings field, plumbed through;
+  - server/proxy: the stats instance, the collector, and a proxy.yml kill switch `window_strict_handover` that turns off both the pre-check and the handover;
+  - apps: they inherit the change with their next release.
+- **No wire or protocol change.** The platform sees fewer mints, Provide frames and contracts. Mixed versions are per device: an old app keeps looping until it updates, and nothing on the server depends on the new behavior.
+- **Order:**
+  1. Proxy release N: counters only, behavior flags compiled off. Run 24 h on all blocks for the baseline.
+  2. Release N+1: flags on, g1 first, A/B against g2–g10 for 24 h, then the rest.
+  3. iOS and Android carry it in the next app release after a week on the proxy.
+
+  Desktop is unaffected, because its windows are non-strict.
+- **Rollback:** the kill switch with a block restart, or redeploy N.
+
+**Tests**
+
+Failing-first, composed windows, a fake generator, and deterministic barriers (no sleeps):
+
+| Test | Asserts | Fails on old code because | Mutation it catches |
+|---|---|---|---|
+| `TestStrictWindowLifetimeDrainHandsOverSlot` | 5 installed, 1 drained and flowless. Exactly one candidate is built and admitted by handover. The installed count is 5 at every hook point, and the drained client is retired. | a candidate is built every pass, refused, and the drained client stays | dropping the swap branch; swapping before evaluation, which dips the count to 4 |
+| `TestStrictWindowFullDoesNotMint` | 1 drained client carrying a flow. Over N passes: zero `NextDestinations`, zero mints, zero transports. The flow is still served. | mints every pass | turning the pre-check off |
+| `TestStrictWindowDrainedFlowsHandOverAfterFlowsEnd` | no handover while flows are live; one handover after the last flow ends and the grace and weight windows pass | — | ignoring flows in eligibility |
+| `TestStrictWindowCollapseDeadlineEscape` | past 2 lifetimes, the policy chosen in question 1 | — | — |
+| `TestStrictWindowNeverBelowMinimumDuringHandover` | with a barrier inside admit, a concurrent selection snapshot always sees 5 installed and at least 4 selectable | — | — |
+| `TestStrictAdmissionPrecheckEquivalence` | table over installed count, hard max, eligibility, replacing, and strict on or off: pre-check capacity > 0 exactly when the gate admits or a reservation exists | — | an off-by-one in the predicate |
+| `TestStrictWindowFreedSlotRefillsImmediately` | a victim removed by a blackhole verdict between plan and admission: the next pass starts on notify and admits without waiting 15 s | — | — |
+| `TestEnumeratorSkipsListingWhenStrictFull` | — | — | — |
+| `TestNonStrictWindowTraceUnchanged` | a golden candidate and admission trace for desktop settings | — | — |
+| `TestWindowClientStatsOutcomes` | each outcome counts exactly once; nil stats are safe | — | — |
+
+Existing suites (`ip_remote_multi_client*_test.go`, including the Android loop noted in `window_min_test.go`) must stay green under `-race`.
+
+**Production validation** (g1 against g2–g10, same hours):
+
+| Measure | Acceptance |
+|---|---|
+| `declined_strict_cap` | → 0 |
+| hosted mints per device-hour | from 31–44 at the peak to about 4 (rotation) plus the measured under-filled failures |
+| `admitted_handover` | about installed ÷ 0.875 h |
+| `strict_hole` windows in steady state | → 0 |
+| `below_min`, `no_selectable`, `connect_dial_error` per admission, `connect_timeout` | not higher |
+| perf: x509 and `AuthNetworkClient` shares | fall |
+| proxy-originated `create_contract` and `provide` | fall |
+| mcores per transport | fall in proportion to the strict share of the baseline |
+
+**Savings and effort**
+- **Base:** proxy at the 10-31 evening peak, 12–13.5 cores, with about 19% in the lifecycle (Part B §2.4).
+- **Expected:** 1.2–2.5 cores. The upper end applies if the baseline shows strict declines dominate.
+- **Platform:** 265–383 mints and retirements/s, about 1.25× that in contract opens and closes, and as many edge TLS handshakes and residents.
+- **Phones:** battery, and the api's mint and contract load.
+- **Effort:**
+  - counters 2 days;
+  - pre-check 1.5 days;
+  - handover 2.5 days;
+  - tests and review 2 days.
+
+  That is about 8 engineering days in all.
+- **Releases:** two proxy releases (counters, then behavior), then the next iOS and Android releases.
+
+**Risks**
+- Rotation starts working, so long-lived flows meet the collapse deadline in strict windows for the first time (question 1).
+- If the baseline shows under-filled failures dominate, the CPU saving is closer to 1 core. The functional fix stands either way.
+- Something may implicitly depend on drained exits staying put. Sticky windows never drain (`lifetimeDrainDue`, ip_remote_multi_client_sticky.go:52), and the golden non-strict trace guards desktop.
+
+**Questions for the owner**
+1. **A drained exit in a strict window that still carries flows at 2 lifetimes (90–120 min):** what happens?
+   - (a) Hand over and cut those flows, exactly as non-strict collapse does today. **Recommended.**
+   - (b) Never cut; that slot waits for its flows to end.
+   - (c) A longer strict-only deadline.
+
+   Changes: the eligibility predicate and its test.
+2. **Which warned clients may hand over?**
+   - (a) Only lifetime drains.
+   - (b) Every warned cause whose intent is backfill (drain, probe silence, quarantine, starvation, unhealthy-warned), under the same collapse test. This matches non-strict collapse. **Recommended.**
+
+   Changes: the eligibility filter and two more tests.
+3. **Rollout:** how cautious?
+   - (a) A counters-only release first, for a 24 h baseline. **Recommended.**
+   - (b) Counters and behavior together on g1, with g2–g10 as the baseline. One release, a weaker baseline.
+
+   Changes: one or two proxy releases.
+4. **Under-filled windows:** if the baseline shows they dominate, may an identity that one provider evaluated be kept for that same provider's next attempt within 5 minutes?
+   - (a) Yes, same provider only, with the existing park bounds. It adds no cross-provider linkability. **Recommended for a follow-up design.**
+   - (b) No; keep retiring after any provider contact.
+
+   Changes: scopes the follow-up only; nothing in D2.
+5. **Apps:** should D2 ship to them?
+   - (a) The next iOS and Android release after a week on the proxy. **Recommended.**
+   - (b) Proxy only for now.
+
+   Changes: the release plan.
+
+### D3. PeerAudit frames the server never handles
+
+In progress; added when drafted.
+
+### D4. Cache verified results: JWT claims (a) and TLS certificate chains (b)
+
+Each cache remembers the result of one expensive, deterministic check: an ECDSA signature over
+exact token bytes, or a certificate chain over exact DER bytes. Every check that depends on time,
+state or a name still runs on every use. I read server a8461e236 (deployed) and main 3ae2c76f7,
+and connect 89b15920 (deployed) and main c62b060e. The files involved are the same at both
+revisions.
+
+#### D4(a). A cache of verified JWT claims
+
+**Problem and evidence**
+- **api (CPUOPT3 Part C §2.4).** JWT handling is about 19% of api CPU, or 225–260 µs per
+  authenticated request. It is the ES256 verify and claims decode in `parseByJwtSigned`
+  (session/by_jwt.go:420–449), a second unverified decode in the lag-guest gate
+  (router/lag_guest_credential.go:61 → by_jwt.go:763), and P-256 assembly samples whose stacks
+  are cut off. Part C #2 puts the saving at 2.2–2.9 api cores at the 10-31 peak.
+- **proxy (Part B #6).** `localclient.Authority.parseClaimsPreflight`
+  (localclient/authority.go:125–153) verifies the same window-client token again on every control
+  call; that is 2.2% of proxy CPU.
+- **Tokens repeat.** A busy api process sees 1.6–1.9k distinct networks per 5 minutes against
+  about 330k requests (`urnetwork_session_active_authenticated_networks`).
+- **Many tokens are expired.** On 10-31, 1,463 of about 10k api parses/s carried an expired client
+  token, accepted only because `auth.yml` `reject_expired` is false; 57/s carried no exp
+  (`urnetwork_auth_jwt_legacy_accepts_total`).
+
+**Proposed design**
+- **Where.** One cache per keyring, a new field `byJwtKeyring.verified`
+  (session/by_jwt_keyring.go), consulted only inside `parseByJwtSigned`. Every verifier already
+  goes through that function: api authentication (session/client_session.go:263), the three router
+  gates, connect's transport handshakes (connect/transport.go:1692, 2757), localclient in the
+  proxy, and the auth controllers. Tests that build their own keyrings stay isolated.
+- **Key.** SHA-256 of the whole token string as presented (header, payload and signature). Never
+  a prefix or a single field, so tokens that differ in one signature byte get different keys.
+- **What is stored.** The verified, decoded claims before `fixByJwt`, as a deep copy. Each hit
+  returns a fresh deep copy from `(*ByJwt).clone()`, which copies the four `*server.Id` fields,
+  `Roles`, `Audience` and the three `*NumericDate`. No caller can change the cached object,
+  including mint paths that copy the presented `CreateTime` into derived tokens.
+- **Successes only.** A malformed token, a bad signature, a refused method or a kid miss is never
+  stored; a retry verifies again, as today.
+- **Lifetime.** The base TTL is verify time plus a cap; I propose 10 minutes (Q2).
+  - With `reject_expired` on, an entry also ends at exp plus the 30 s leeway, and a token already
+    past that is not stored.
+  - With `reject_missing_expiration` on, a token without exp is not stored.
+  - While `reject_expired` is off, an expired token is kept for the cap only (Q1). Its exp is
+    still evaluated on every request, and the gate still decides.
+- **Key rotation.** Keys are only ever added while a process runs; a key the vault drops keeps
+  verifying until restart (by_jwt_keyring.go:16–17). A reread that gains keys therefore leaves
+  every entry valid, and must not flush, or anyone sending unknown-kid tokens could force a flush
+  every 10 s. Each entry records the keyring's removal generation; any future code that drops a
+  held key bumps it, which invalidates every entry at once.
+- **Size.** A sharded LRU: 16 shards, each with its own mutex (taken inside the method with
+  `defer Unlock()`). The default is 65,536 entries per process, about 1 KB each, so at most 64 MB.
+  Expired entries are dropped on read and the oldest evicted on insert.
+- **Single-flight.** A miss joins any in-flight verification of the same key
+  (`singleflight.DoChan`; x/sync is already an indirect dependency). Each waiter selects on its own
+  ctx, so its deadline stays its own (AuthTimeout 30 s, session/auth_deadline.go:15). A failed
+  flight goes back to the waiters already joined, and nothing is stored.
+- **The second decode.** `requestLagGuestCredential`, `requestClientCredential`
+  (router/client_credential.go:88) and `requestCredentialNetworkId`
+  (session/intended_network.go:156) each decode the token unverified today.
+  - Each first calls `session.verifiedClaimsCached(token)`, a lookup that never verifies.
+  - On a hit it reads `LagGuest`, `ClientId` or `NetworkId` from the verified claims and skips the
+    unverified decode. These are the same bytes through the same decoder, so the value is the
+    same.
+  - On a miss it decodes unverified, as today. A guest token is still verified through
+    `ParseByJwtForAudience` (now a hit) before it is refused.
+- **Kill switch:** `auth.yml` `jwt_verified_cache_entries`; 0 disables. It is read once per
+  process, like the gates.
+- **Metrics:** `urnetwork_auth_jwt_verified_cache_total{result=hit|miss|shared|store|evict|expired}`
+  and an entries gauge.
+
+**What still runs on a hit.** `ParseByJwtForAudience` (by_jwt.go:466–539) is unchanged:
+- the audience argument check and both gate reads;
+- `validateSessionHorizon`;
+- exp presence (against `reject_missing_expiration`) and exp passed (against `reject_expired`,
+  with the legacy-accept counter);
+- nbf and iat, with leeway;
+- the identity claims: issuer, audience, subject equal to the user, jti and CreateTime;
+- `fixByJwt`.
+
+After that, every caller's state check runs as before: `ValidateByJwtState`/`ForParent`, or
+`validateByJwtStateBeforeQuery`, the answer, then `validateByJwtStateAfterBeforeQuery`. That
+covers the remembered refusals, the session marker, and the Redis revocation-record HMGET or its
+SQL fallback. Skipped on a hit: base64 and JSON decoding, the kid lookup, method pinning and the
+signature. These are fixed properties of the same bytes under the same held keys.
+
+**Alternatives considered:**
+- Cache the whole `ParseByJwtForAudience` result: no; the time and gate checks must run per
+  request.
+- Key by `jti` or a prefix: no; the key must bind the signature.
+- A shared Redis cache: no; a Redis round trip costs about as much CPU as the verify.
+- Cache failures: no; a newly read key version can make a failed token valid within 10 s.
+
+**Correctness under the owner rule**
+- **Revocation.** The state check runs on every request with the same round trip, and none of it
+  is cached. A removed or rotated client is refused on its next request, exactly as today. The
+  replay path's existing `BeforeStateAnswer` contract is unchanged.
+- **Expiry, nbf, iat and session horizon** are evaluated per request from the claims against
+  `NowUtc()`. An expired token is refused (gate on) at the same instant, cached or not. The cap
+  never extends acceptance.
+- **Gates** are read per request. The tests' atomic overrides keep working, because no outcome is
+  cached.
+- **Key rotation.** New key versions sign new tokens, which get new keys; old tokens verify while
+  their key is held, as today.
+- **Key compromise.** Today the key must be removed from the vault and every verifier restarted,
+  since keys are never dropped while running. A restart also empties the cache, so the response is
+  unchanged. Any later in-process removal invalidates every entry through the removal generation
+  (Q3).
+- **Races.** A waiter cancelled mid-flight returns its ctx error. A failed flight stores nothing.
+  LRU operations hold their shard lock, and stored claims are immutable.
+- **Timeouts.** None is added or changed. Single-flight waits are bounded by each caller's ctx.
+
+**Compatibility and rollout**
+- Server only (session and router). The api, alt, connect, taskworker and proxy binaries pick it
+  up in their next release. There is no wire, client or schema change, and each process is
+  independent, so mixed versions are fine.
+- **Order:** the api g1 block first with the kill switch ready, then the other api blocks, then
+  alt, connect and the proxy.
+- **Rollback:** `jwt_verified_cache_entries: 0` plus a restart, or the previous release.
+
+**Tests** (failing first; each catches the mutation named)
+1. `TestByJwtVerifiedCacheSecondParseSkipsSignature`: two parses of one token run one
+   verification, counted through a seam. Catches the cache not being consulted.
+2. `TestByJwtVerifiedCacheKeyIsWholeToken`: a token with the same header and payload but one
+   signature byte changed is verified and rejected. Catches keying by prefix or by claims.
+3. `TestByJwtVerifiedCacheNeverStoresFailures`: a bad-signature token fails twice, then verifies
+   once its key is read. Catches negative caching.
+4. `TestByJwtVerifiedCacheExpiryPerRequest`: cached, clock past exp: refused with `reject_expired`
+   on; accepted and counted on every hit with it off. Catches caching the claims decision.
+5. `TestByJwtVerifiedCacheStateCheckEveryRequest`: authenticate, deactivate the client, then
+   authenticate again from the cache: refused with `no_active_row`. Catches caching the state
+   verdict.
+6. `TestByJwtCloneSharesNothing`: walks every field of `ByJwt` by reflection; changing a returned
+   copy leaves the next hit unchanged. Catches shallow copies, including of fields added later.
+7. `TestByJwtVerifiedCacheRereadDoesNotFlush` and `…RemovalGenerationFlushes`.
+8. `TestByJwtVerifiedCacheSingleFlight`: 32 concurrent cold parses run one verification; a waiter
+   with a cancelled ctx returns at once.
+9. `TestByJwtVerifiedCacheBoundedAndTtl` and `TestLagGuestGateReadsCachedClaims` (no unverified
+   decode on a hit; the same decisions for guest and non-guest tokens on hits and misses).
+
+- **Benchmark:** a hit against a miss in session/by_jwt_bench_test.go; expect about 2 µs against
+  about 150 µs.
+- **Production checks:**
+  - P-256 plus `ParseWithClaims` under 2% of api CPU, and a hit ratio above 90%;
+  - `urnetwork_auth_jwt_rejections_total` and the legacy-accept counter unchanged by cause;
+  - api cores per 1k requests down at least 12% on g1 against g2–g4.
+
+**Savings and effort**
+- api: 2.2–2.9 cores at the 10-31 peak, against a 17.5-core base; 1.9–2.5 cores if expired tokens
+  are not cached (Q1 option A).
+- proxy 1.5–2% of its CPU; connect and alt small.
+- About 3 engineering days; one server release (api, alt, connect, proxy).
+
+**Risks**
+- A clone bug could leak claims between requests (test 6).
+- A wrong bound could use memory; the design caps it at 64 MB.
+- A gate's cache lookup must never become a verification path (test 9).
+
+#### D4(b). A verified-chain cache in connect's TLS client
+
+**Problem and evidence**
+- **taskworker (CPUOPT3 Part C §2.6).** x509 chain verification takes 2.59 cores, 16.9% of
+  taskworker CPU, almost all on the egress probe's control-plane dials (`clientTlsHandshaker`
+  → uTLS `verifyServerCertificate` → `x509.(*Certificate).Verify`). Each tunnel builds a fresh
+  `ClientStrategy` (providertunnel/tunnel.go:522), so its session caches start empty. The probe
+  makes about 4.4 TCP dials per attempt, at 61.5 attempts/s.
+- **proxy (Part B #3).** `Verify` is 5.3% of a proxy process (P-384 4.6%, RSA 0.5%), about one
+  full verification per platform dial; crisp makes 170 such dials/s.
+- **Why it costs so much.** The platform chain is leaf ← YE1 ← Root YE ← ISRG Root X2, plus an X1
+  cross-sign. Go builds about four P-384 ECDSA verifications and one RSA verification per
+  handshake, and its P-384 is generic code: 1.52 ms per verify on an M1 Max, against 0.11 ms for
+  P-256.
+
+**Proposed design**
+- **Where.** connect net_tls_hello.go: `newChromeTlsConfig` (:129) and the Chrome-hello branch of
+  `clientTlsHandshaker.handshake` (:275). The Chrome hello is the default for API dials
+  (net_http.go:378–380), platform and WebSocket dials (net_resilient.go:95–98), and the extender
+  and VLESS inner dials. These run in every connect client: the taskworker probe, proxy hosted
+  devices, apps and providers.
+- **Which configs.** A dial is eligible only if `InsecureSkipVerify` is false,
+  `VerifyPeerCertificate` and `VerifyConnection` are nil, FIPS-only mode is off, and `RootCAs` is a
+  pool connect built and registered.
+  - Registration happens in `sharedDefaultPinnedCertPool` (net_tls.go:89) and in the
+    extra-roots clone in `defaultRootCertPool` (:128). Each records an identity: SHA-256 of the
+    embedded pin PEM plus any extra-roots file bytes.
+  - Not eligible, so unchanged: system roots; the extender and VLESS outer configs (they set
+    `InsecureSkipVerify` and have their own verifiers); peer encryption (transfer_encrypt.go);
+    caller configs in sdk `socket.go`; the Go-hello path; H3/QUIC (Q5).
+- **Verification on an eligible dial.** The uTLS config gets `InsecureSkipVerify = true` and a
+  `VerifyConnection` method on a per-handshake `chainVerification` struct. The method:
+  - computes the key: SHA-256 of "v1", the root identity, the length and bytes of `ServerName`,
+    and the length and DER of each presented certificate;
+  - on a valid hit, one whose window covers now, runs `leaf.VerifyHostname(ServerName)` and
+    accepts;
+  - otherwise runs exactly the verification uTLS would (`Roots`, `CurrentTime` from the config
+    clock, `DNSName = ServerName`, the presented certificates after the leaf as intermediates);
+  - on failure returns `&tls.CertificateVerificationError{UnverifiedCertificates, Err}`, the type
+    the handshaker and its callers classify today, and on success stores the entry.
+- **Verified chains stay visible.** The chosen chains are kept on the struct and attached to
+  `chromeTlsConn`, whose `ConnectionState()` (:181) returns them as `VerifiedChains`. Callers see
+  the same state as today.
+- **Entry, hit rule and expiry.** An entry holds the validity window of the first verified chain,
+  leaf through root (latest NotBefore to earliest NotAfter), the verified chains and the insert
+  time. A hit needs NotBefore ≤ now ≤ NotAfter, Go's own comparison, on the config's clock. An
+  entry expires at the earlier of the earliest NotAfter and insert time plus a 1 h cap. The cache
+  holds 256 entries in an LRU under one mutex.
+- **No single-flight.** A miss costs bounded CPU and no I/O; duplicate verifications happen only
+  in the first milliseconds after a cold start.
+- **On a mismatch.** A different byte in any certificate, a different server name, a different
+  root identity, or a window that no longer covers now is a miss: a full verification, with
+  today's errors. Errors are never cached, and any internal failure falls back to full
+  verification. The only ways to accept are a valid entry plus a hostname check, or a successful
+  `Verify`.
+- **Still checked on every handshake, including hits:** key possession (the TLS 1.3
+  CertificateVerify signature with the leaf key, or in TLS 1.2 the ServerKeyExchange signature or
+  RSA key transport); the Finished MACs; the negotiated version, cipher suite and ALPN; the
+  hostname; the time window. Resumed sessions call `VerifyConnection` too (uTLS
+  handshake_client_tls13.go:769–772), so resumption gets the same checks.
+- **Kill switch:** `connect.SetTlsVerifiedChainCacheEnabled(false)`, plus the env
+  `URNETWORK_CONNECT_TLS_CHAIN_CACHE=off`, read once.
+- **Stats:** `connect.TlsVerifiedChainCacheStats()` reports hit, miss, store and evict counts;
+  server services export them as CounterFuncs.
+
+**Chain cache or session resumption.** I recommend the chain cache.
+- Resumption skips verification only when the next dial reaches the nginx that issued the ticket.
+  The platform name fronts 4 edges × 2 lb blocks, which do not share ticket keys.
+- connect deliberately keeps one ticket cache per dial path (net_tls.go:35–55), so tickets never
+  link a user's egress paths. The probe's per-tunnel strategies leave even that cache empty.
+- Making resumption work needs per-edge ticket keying or shared nginx ticket keys. Either adds a
+  dependency on server state and, for apps, a privacy trade-off.
+- The chain cache needs only the client. It is deterministic, invisible on the wire (the same
+  hello, the same tickets), and works across edges and strategies.
+- Per-edge ticket keying (Part B #3 option 2) stays an optional later step for the proxy, where
+  it would also save handshakes on nginx.
+- Serving a shorter chain from nginx would cut every client's cost. That is a TLS-operations
+  choice that trades away compatibility with clients lacking X2.
+
+**Probe correctness**
+- **The probe's exit checks are out of scope.** Target fetches through the provider dial with
+  `tls.Client(raw, PinnedTlsConfigForHost(...))` (providertunnel/tunnel.go:1252–1257,
+  pinning.go:199): stock crypto/tls, system roots, and an SPKI pin check on `VerifiedChains`.
+  - That config has `RootCAs` nil and a `VerifyPeerCertificate`, so it is ineligible on two counts,
+    and it is not a connect handshaker at all.
+  - `isTlsAuthenticationFailure` (egresshealth.go:1230–1250) sees the same errors.
+    `tls_authentication_failed`, pin mismatches and every other outcome come out exactly as today.
+- **The cached path is the probe's control plane**: taskworker to the api and connect hosts
+  directly, not through the provider. Interception there still fails on a hit:
+  1. The interceptor's own chain (self-signed, private or corporate CA): different bytes, a miss,
+     `UnknownAuthorityError`.
+  2. Another public CA's certificate for our name: a miss, then no chain to the pinned X1 or X2.
+     The pin set is Let's Encrypt only, stricter than system roots.
+  3. The genuine chain replayed without its private key: a hit, but key possession fails and the
+     handshake aborts. That is today's outcome too, since the genuine chain verifies today.
+  4. A genuine chain for another name: the name is part of the key, so a miss and a
+     `HostnameError`. On a hit the hostname is checked anyway.
+  5. An expired or not-yet-valid chain (a stale certificate, clock skew): the window check makes it
+     a miss, and full verification returns `CertificateInvalidError`.
+  6. A changed root set (the extra-roots env): a different identity, so a miss.
+  7. A mis-issued Let's Encrypt certificate with its key: accepted today and with the cache. The
+     cache does not change trust, and Go does not check revocation either way.
+- **Extender and VLESS inner TLS behave the same way**, so a third-party relay cannot use the cache
+  to intercept.
+
+**Correctness under the owner rule**
+- No timeout, deadline, keepalive or probe bound changes. The cache runs inside the handshake,
+  under its existing deadline, and only cuts CPU work.
+- Verification fails closed by construction (the mismatch rules above).
+- No probe outcome changes (Probe correctness above).
+
+**Compatibility and rollout**
+- connect only. Server services take it by pinning the new connect: the taskworker for the probe,
+  the proxy for hosted devices, and api and connect for their few outbound dials. Apps and
+  providers get it in the next SDK release (Q4).
+- There is no wire or server change, so mixed versions are independent.
+- **Order:** the taskworker g1 block first, compared with g2; then one proxy block; then the rest.
+  The SDK goes last.
+- **Rollback:** the env switch, or the previous connect.
+
+**Tests** (in connect, failing first; the test PKI uses a P-384 intermediate shaped like YE1)
+1. `TestChromeTlsChainCacheSecondDialSkipsVerify`: two dials run one `Verify`, counted through a
+   seam. Catches the cache not being used.
+2. `TestChromeTlsChainCacheImpostorWithGenuineChain`: a server presenting the cached chain with a
+   different private key fails on a hit, over TLS 1.3 and TLS 1.2 ECDHE. Catches any hit path
+   that skips key possession.
+3. `TestChromeTlsChainCacheRejectsUntrusted`: self-signed and wrong-CA chains fail with
+   `*tls.CertificateVerificationError`, both cold and after a valid chain is cached. Catches a
+   branch that accepts without checking.
+4. `TestChromeTlsChainCacheHostnameAlwaysChecked`: a forced hit with a mismatched name fails.
+5. `TestChromeTlsChainCacheExpiresOnHit`: with the config clock past NotAfter, or before
+   NotBefore, the dial misses and fails with `CertificateInvalidError`; the same on a resumed
+   session.
+6. `TestChromeTlsChainCacheRootIdentity`, `…IneligibleConfigs` (extender, custom verifiers, system
+   roots and the Go hello unchanged), `…VerifiedChainsExposed`, and `…BoundedAndTtl`.
+7. In server, `TestProviderTunnelTargetTlsNotCached`: two target handshakes through the tunnel's
+   `DialTLSContext` both verify. The existing egresshealth TLS-failure tests pass unchanged.
+
+- **Benchmark:** handshake CPU with a chain shaped like the YE chain, hit against miss.
+- **Production checks:**
+  - taskworker `crypto/x509` share under 1%;
+  - probe `urnetwork_egress_probe_attempts_total{result}` and the TLS-authentication-failure
+    counter unchanged between the A/B blocks;
+  - proxy `Verify` share under 0.5%, and no change in carrier handshake failures.
+
+**Savings and effort**
+- taskworker: 2.3–2.5 cores, against the 15.3-core fleet capture (about 12 cores on the 1 h
+  average).
+- proxy: 0.5–0.6 cores (Part B #3). Apps and providers: battery and dial latency.
+- About 3 engineering days: one connect commit, then taskworker and proxy releases; the SDK
+  later.
+
+**Risks**
+- Once `InsecureSkipVerify` is set, verification depends entirely on our callback, so a bug could
+  accept anything. The single fail-closed structure and tests 2–3 guard against it.
+- A uTLS upgrade could change the callback order; the tests pin it.
+
+#### Questions for the owner
+1. **Cache expired client tokens that are still tolerated while `reject_expired` is off?** That
+   is 1,463/s, about 14% of api parses.
+   - A. No: the TTL never goes past exp. The api saving drops to 1.9–2.5 cores.
+   - **B (recommended).** Yes, for the cap only while the gate is off, and bounded by exp once it
+     is on. Expiry is still checked on every request, so nothing accepted changes.
+   - C. Flip `reject_expired` first. That is a product decision with user impact, outside D4.
+
+   What changes: the TTL rule in the cache's insert.
+2. **How long may a verified JWT signature be reused?** A. 5 min. **B (recommended). 10 min.**
+   C. 30 min. What changes: the working set (memory), and how long a cached result can outlive an
+   in-process key removal (Q3). No per-request bound moves.
+3. **Respond to a JWT key compromise without a restart?**
+   - **A (recommended).** Keep today's response: remove the key from the vault and restart the
+     verifiers, which also empties both caches.
+   - B. Add a `revoked_kids` list in jwt.yml, read by a periodic keyring reread (for example every
+     60 s), which drops the key and flushes the cache. About +1 day, reviewed separately.
+
+   What changes: whether anything bumps the removal generation now.
+4. **When do apps and providers get the chain cache?**
+   - **A (recommended).** On by default in the SDK release after the server services have run it
+     for a week.
+   - B. Opt-in for apps until a longer soak.
+   - C. Server services only.
+
+   What changes: the default of the enable flag in the SDK.
+5. **Include H3/QUIC dials in the first version?**
+   - **A (recommended).** Later. They verify through crypto/tls inside quic-go, where
+     `VerifiedChains` cannot be re-attached, and the measured CPU is on H1 dials.
+   - B. Now, with a quic-go/simnet test; about +1 day.
+
+   What changes: which configs are eligible.
+
+### D5. Keep long snapshots off the primary
+
+**Problem and evidence** (CPUOPT3 Part D §2.7, §2.8, §2.10, #1, #8; read-only checks on 10-31)
+
+- **A long snapshot inflates every OLTP read.** While a transaction holds the
+  xmin horizon, dead tuples in the churn tables (transfer_debit_journal,
+  pending_task, provider_egress_probe_cycle) cannot be removed.
+  - **10-29 pg_dump:** buffer hits rose from 3.4M to 33M/s with commits flat,
+    and edge-2 went from 37 to 92 cores. The excess was 455 core-h in 13.2 h,
+    and the run was stopped about 5 h short under the owner's CPU rule.
+  - **10-30 census:** two attempts of up to 3 h cost about 100 core-h.
+- **The cost grows with pin length.** Excess core-h from the 10-29 curve:
+
+  | Pin | 2 h | 4 h | 6 h | 8 h | 13 h | 18 h |
+  |---|---|---|---|---|---|---|
+  | Excess core-h | 20 | 65 | 120 | 190 | 420 | ~700 (extrapolated) |
+
+  The pin also bloats: the database grew 227 GB in those 13.2 h against
+  about 163 GB normally.
+- **Wraparound.** transfer_contract sets the cluster's freeze age: 329M now,
+  and 450M on 10-30 04:21Z.
+  - While a snapshot is pinned, each completing vacuum can reset the age only
+    to (hours pinned × 18–28M xids/h) + 50M.
+  - That fits 10-29: 197M at 12:51Z against 191M predicted, and 450M on
+    10-30 04:21Z against 455M.
+- **The next pin is about 5 h away.**
+  - `bringyour-backup.timer` is active with `Sun,Thu 00:00` and
+    `Persistent=true`; its next run is Sun 11-01 00:00Z.
+  - The owner decided on 10-31 to keep this schedule and the timer.
+  - Each run stages 1.04–1.46 TB on edge-2's root (5.73 TB free). Under
+    owner decision 2, a generation is deleted once planetoid verifies it.
+- **Other long holders** (pg_stat_statements maximum runtime since 10-23):
+  - **Retention cascade:** 41 calls, mean 447 s, maximum 929 s, about every
+    4.7 h (model/subscription_model.go:6376; 50,000-row batches set at :6111).
+  - **Payout attribution check:** 1,578 s at most.
+  - **Operator tools:** for example, the 10-27 sn-reconcile run left a 2 h
+    orphan query.
+- **No 15-minute bound applies to application transactions.**
+  - The application role `bringyour` is a superuser, and the A6 migration
+    (db_transaction_timeout.go) skips superusers.
+  - So `pg_db_role_setting` holds no transaction_timeout, and
+    `statement_timeout` is 0.
+
+**Proposed design**
+
+A consistent logical dump needs one MVCC snapshot for its whole read, so on
+the instance it reads it always pins the horizon. Removing the pin means
+reading another instance (Part 1). Everything else only shortens the pin
+(Part 2), and since the cost is superlinear, a 4× shorter pin costs about 10×
+less.
+
+**Options**, costed for edge-2 per dump (DB 9.2 TB, heap about 4.4 TB, WAL
+41 MB/s average and 68 MB/s at peak):
+
+| Option | Pin | edge-2 CPU | edge-2 IO and network | Disk | Needs |
+|---|---|---|---|---|---|
+| Today: plain dump on the primary | 18–20 h | ~600–700 core-h, plus ~4 cores of pipeline | heap read at ~66 MB/s | 1.0–1.5 TB staged on edge-2, plus ~0.08 TB bloat | nothing new |
+| (b) `-Fd -j4` on the primary (one synchronized snapshot) | ~4.5 h (transfer_contract's 835 GB heap is read by one worker) | ~65–80 core-h | +265 MB/s; sda is about 50% busy now | same | a format change |
+| (a1) fresh base backup, restored and dumped elsewhere | 0 | ~13 core-h | 9.2 TB read per cycle (12.8 h at 200 MB/s) | at least 12 TB on the restore host | a host with space; 25–30 h per cycle |
+| (a2) streaming hot standby, dump there | 0 | ~0.2–0.3 cores continuously (walsender) | WAL only: 0.33–0.55 Gb/s on 10 GbE | standby: 9.2 TB, plus 2 TB WAL buffer, plus 1.5 TB staging | hardware |
+
+**Hosts with space (measured 10-31): none can take a 9.2 TB copy.**
+- **edge-5:** MinIO's 8 × 3.58 TB drives, each held free by MinIO and
+  base-backup reserves; no single filesystem big enough; load average 100+.
+- **edge-6:** 128 cores and 345 GB of free RAM, but only 1.3 TB of disk.
+- **snow:** a 3.1 TB pool, already running subtensor and the validator.
+- **planetoid:** 14 GB RAM, 2.5 TB on USB, remote over VPN.
+
+So (a) needs hardware; (a2) is preferred over (a1).
+
+**Part 1: a streaming standby, with the logical dump moved to it** (xops and
+provisioning; no application code)
+
+1. **Standby host** (new xops group `pg-standby`, `playbook-pg-standby.yml`
+   modeled on playbook-pg-basebackup.yml's guards):
+   - PostgreSQL 18.6;
+   - `hot_standby = on`, `hot_standby_feedback = off` (the primary's horizon
+     is never held), `max_standby_streaming_delay` left at 30 s;
+   - `primary_conninfo` as a new REPLICATION role `standby` over hostssl on
+     the LAN, `primary_slot_name = standby_1`;
+   - sized at about 20 TB usable SSD (the primary's 15.1 TB, plus WAL buffer
+     and two generations), 256 GB+ RAM, 32+ cores, 10 GbE.
+2. **On the primary** (owner-applied):
+   - one `hostssl replication` line in pg_hba.conf;
+   - the role;
+   - `max_slot_wal_keep_size` 32 → 256 GB. Today's 32 GB is only 8–13 min of
+     WAL; 256 GB is 1–1.7 h of receive outage before a re-seed.
+     `pgbackup-slot-guard.sh` is extended to `standby_*` slots and still drops
+     them below 200 GB free (`pg_basebackup_guard_min_free_bytes`).
+3. **Seed:** `pg_basebackup -X stream -R -S standby_1 --max-rate=200M`, once.
+   That is 12.8 h of +200 MB/s reads at about 1 core, with no snapshot,
+   started off-peak (about 06:00Z).
+4. **Dump job on the standby:** the same `bringyour-backup.timer`
+   (`Sun,Thu 00:00`, Persistent), with a wrapper around bringyour-backup.sh.
+   - **Pre-checks:** `pg_stat_wal_receiver.status = 'streaming'`, replay lag
+     under 5 min, and free disk at least the expected WAL buffer plus 25%.
+   - `pg_wal_replay_pause()`, then wait for
+     `pg_get_wal_replay_pause_state() = 'paused'`.
+   - The unchanged pipeline (bringyour-backup.sh:60: pg_dump → zstd → md5 →
+     gpg → final/).
+   - `pg_wal_replay_resume()` in an EXIT trap and in `ExecStopPost=`. A
+     reboot resumes replay by itself.
+   - **Bounds:** `RuntimeMaxSec=16h` on the unit (kill, resume, publish
+     nothing), and an abort when free disk drops below 1 TB.
+   - **During the pause** the standby buffers 0.9–2.0 TB of WAL for a 6–8 h
+     plain dump, or 0.3–0.7 TB for 2–3 h with `-j`. The walreceiver keeps
+     acknowledging flushes, so the primary's slot keeps advancing.
+   - **Catch-up** takes about 2.5–3.5 h at an assumed 150 MB/s replay
+     *(inferred)*.
+5. **Planetoid pulls from the standby host**
+   (host_files/planetoid/backup/remote-backup-archive.sh). The other agent's
+   verify-then-delete applies there unchanged.
+6. **Cut-over:** edge-2's job is retired after two verified standby
+   generations and one test restore, if Q1 allows.
+
+**Unchanged:** the schedule, format, gpg passphrase (vault backup.yml),
+planetoid rotation and edge-5's physical base backups.
+
+**Variant (a3):** the standby on ZFS.
+- Each dump takes a snapshot, starts a throw-away instance on a clone on
+  another port, dumps it and destroys it.
+- The standby never pauses, so it stays current for failover and reads.
+- The clone needs room for 1–3 TB of rewrites *(inferred)*.
+
+**Part 2: until a standby exists** (xops; the timer stays)
+- **A runtime bound** of `RuntimeMaxSec=30h` on `bringyour-backup.service`,
+  which has none today. A Thursday dump is then dead by Fri 06:00Z, before
+  the 18:25Z epoch close.
+- **An abort watcher** (Q4) that stops pg_dump and publishes nothing when:
+  - transfer_contract's `age(relfrozenxid)` exceeds 1.0B;
+  - edge-2's root has less than 1.5 TB free;
+  - optionally, edge-2 has been busy above an owner-set level for 30 min.
+- **Optionally `-Fd -j4`** (Q3):
+  - the pin falls from 18–20 h to about 4.5 h;
+  - CPU from about 700 to about 70 core-h;
+  - freeze-age growth from +0.35–0.56B to about +0.1B.
+
+**Variants that do not avoid the pin:**
+- a time-boxed abort (if it fires, there is no backup);
+- per-table snapshots (inconsistent across tables; transfer_contract alone
+  pins for about 3.5 h);
+- `--exclude-table-data` (a product call, and it only shortens the pin);
+- "incremental" logical (logical decoding needs `wal_level=logical`, a
+  restart, plus an initial copy; PostgreSQL 17+ incremental backups are
+  physical);
+- an LVM snapshot on edge-2 (`ubuntu-vg` has 0 GB free, checked 10-31, and
+  copy-on-write would amplify every primary write).
+
+**Part 3: the SN census.** It runs at the epoch boundary, which chain time
+fixes (11-06, about 18:25Z). Its root is due about 4 h later (block 9450028,
+about 22:25Z). So it cannot move off-peak; edge-2 runs 42–44 cores then.
+
+- **Keep the deployed bitmap read** (6a523f17d, 7720f0deb): 20–65 min,
+  about 10–20 core-h and about 300 GB read. Its 2 h step MaxTime and its
+  REPEATABLE READ snapshot are unchanged.
+- **No other long reader in the window:** Part 2's 30 h dump bound, and no
+  heavy maintenance from 18:00Z to 23:00Z on close days, including the
+  Phase C sweep on 11-06.
+- **Later (Q5): read the standby behind a freshness gate.**
+  - Take `pg_current_wal_lsn()` on the primary after the boundary, then wait
+    within the same MaxTime until the standby's `pg_last_wal_replay_lsn()`
+    reaches it. Dumps never overlap closes.
+  - This needs a new direct `ReplicaMaintenanceDb` pool. `ReplicaDb`
+    (db.go:703) still uses the primary pool.
+
+**Part 4: the retention cascade in short transactions** (server; ships on
+its own)
+
+- **Why each batch runs long:**
+  - `RemoveCompletedContracts` passes `maxRowCount := 50000`
+    (subscription_model.go:6111) to every pass.
+  - Each `removeDueContractBatches` batch (:6272) is one maintenance
+    transaction: lock, classify, the cascade at :6376, then the contract
+    delete. It runs 447 s on average and 929 s at most.
+  - That overruns the 5-min `reaperRunBudget` (:59), which is checked only
+    between batches.
+  - The batch holds an xid throughout, and a running xid holds the horizon in
+    READ COMMITTED too. So splitting statements inside the transaction would
+    not help.
+- **Change:** unexported, test-settable vars `reaperDeleteBatchRows = 2000`
+  (an estimated ~18 s per transaction) and `reaperAssignBatchRows = 10000`
+  (for `assignCompletedContractReapTimeBatches`, :6171: 21–47 s today,
+  about 4–9 s after). :6111 passes these instead of 50k.
+- **Unchanged:** the per-batch protocol (FOR UPDATE, protected rows set back
+  to NULL, cascade, delete), the 5-min budget (now enforced within about
+  20 s), the 30-min cadence and MaxTime, `force_custom_plan` and
+  `OptNoRetry`.
+- **Throughput** is about the same: roughly 32k contracts per 5-min run,
+  against 50k per 7–15 min.
+
+**Part 5: monitoring**
+- **Horizon:**
+  - confirm that signal §2.4l (monitor/signal_transaction_horizon.go; warns
+    at 15 min, pages at 1 h) is enrolled;
+  - add a postgres_exporter series for the oldest backend_xmin and xid age by
+    backend type.
+- **Wraparound:** `pg_database_wraparound_age_datfrozenxid_seconds` (an xid
+  age): warn at 600M, page at 1.0B. The failsafe at 1.6B leaves 21–30 h of
+  margin.
+- **Pin signature:** blks_hit/s or tup_returned/s more than 3× the same hour
+  the previous day, sustained for 30 min.
+- **Standby:** receiver status, replay lag in bytes and seconds, the
+  primary's `pg_replication_slots.wal_status` and `safe_wal_size`, the
+  standby's pg_wal size and free disk, pause state, and dump duration and
+  result.
+- **Retention:** a per-batch duration histogram (bounded series, V(1) logs
+  only).
+
+**Rejected:**
+- **(a1):** a 9.2 TB read of edge-2 per dump, on the same hardware as (a2).
+- **Logical replication:** needs a restart, and DDL is not replicated.
+- **`max_standby_streaming_delay = -1`:** it would drop a bound. The
+  explicit pause plus `RuntimeMaxSec` covers it.
+- **A chunked census read:** it would change the snapshot semantics of
+  payout roots.
+
+**Correctness under the owner rule**
+
+- **Unchanged bounds:** `wal_sender_timeout` and `wal_receiver_timeout`
+  (60 s), `idle_in_transaction_session_timeout` (60 s),
+  `max_standby_streaming_delay` (30 s), the census step's MaxTime and root
+  deadline, `reaperRunBudget` and the retention MaxTime, PgBouncer's
+  timeouts, and `vacuum_failsafe_age`.
+- **New bounds, all tighter:** the dump's `RuntimeMaxSec` (16 h standby,
+  30 h primary), the abort thresholds, and retention transactions of about
+  20 s instead of up to 929 s.
+- **`max_slot_wal_keep_size`** is a disk cap, not a timing bound, and the
+  200 GB free-space guard stays.
+- **Failure modes:**
+  - **Dump crashes while replay is paused:** the trap or `ExecStopPost`
+    resumes replay; a reboot resumes it too.
+  - **Standby disk runs short:** the job aborts and resumes replay.
+  - **Standby out of contact past the slot cap:** the slot is invalidated,
+    the pre-check refuses to dump stale data, and the standby is re-seeded
+    (with an alert).
+  - **A failed retention batch** rolls back alone, as today.
+- **Dump consistency:** a dump from the standby is consistent as of its
+  replay point, at most 5 min old. That is the same guarantee as a dump
+  started on the primary at that moment.
+
+**Compatibility and rollout**
+
+- **Components:** xops (standby playbook, pg_hba, slot guard, wrapper,
+  planetoid pull, `RuntimeMaxSec`, watcher) and server (retention vars;
+  later, the replica session). No connect, sdk, app or proxy changes.
+- **Mixed versions:** old and new taskworkers each run whole batches, and the
+  RunOnce key serializes runs.
+- **Order:**
+  1. Part 4 in the next taskworker release; reverting one var rolls it back.
+  2. Part 2's bound and watcher, before Sun 11-01 if the owner wants it.
+  3. Hardware, then seed, then a week watching lag and slots, then standby
+     dumps (edge-2's timer moves per Q1), then retire edge-2's job.
+  4. Optionally, the census on the standby.
+- **Rollback:** re-enable edge-2's timer, kept installed until retirement.
+
+**Tests**
+
+- **Server, failing first:**
+  - `TestRemoveDueContractBatchesBoundsRowsPerTransaction`: 5,000 due rows
+    with `reaperDeleteBatchRows = 2000` give 3 transactions of at most 2,000
+    each, counted around MaintenanceTx. Catches passing the shared 50k back.
+  - `TestRemoveCompletedContractsUsesSeparateAssignAndDeleteBatches`: at most
+    10k rows per assign transaction and 2k per delete transaction. Catches a
+    single shared constant.
+  - `TestRemoveDueContractBatchesBudgetStopsWithinOneBatch`: with an injected
+    budget, the run stops after the first batch that crosses it.
+  - Equivalence: the protected, cleared and deleted sets match the
+    single-batch run on the same fixture.
+  - A benchmark of per-batch time.
+- **xops pytest** (as in tests/test_postgresql_config.py):
+  - the wrapper pauses before pg_dump and resumes in the trap and in
+    `ExecStopPost`;
+  - it refuses when lag exceeds 5 min or the receiver is not streaming;
+  - `RuntimeMaxSec` is set on both units;
+  - the slot guard covers `standby_*`.
+- **Production:** during a standby dump, edge-2's busy CPU and blks_hit/s
+  stay within ±10% of the same hours a week earlier, no pg_dump backend
+  appears on edge-2, and the freeze-age sawtooth is unchanged. Replay lag is
+  under 5 min within 4 h of the dump. One restore test a month. Retention
+  batch p99 under 30 s.
+
+**Savings and effort** (base: edge-2 at 37–41 cores, 10-29 to 10-31)
+
+- **Dump on the standby:**
+  - removes about 600–700 core-h per complete dump, about 7–8 cores averaged
+    over a week of two dumps, plus the +50-core peaks;
+  - removes +0.35–0.56B of freeze age per dump;
+  - moves 1.0–1.5 TB of staging and about 0.08 TB of bloat per dump off
+    edge-2. On the disk projection, root reaches 0 on 11-21 rather than
+    11-15 for B1.
+- **Interim `-j4`:** about 90% of that, at once.
+- **Retention:** small CPU, and no more 7–15 min pins every ~4.7 h.
+- **Effort:**
+  - Part 4: 1 day;
+  - Part 2: 0.5–1 day;
+  - Part 1: hardware lead time, plus 4–6 days, plus a 13 h seed and a week of
+    soak;
+  - census on the standby: 2 days.
+- **Releases:** taskworker for Part 4, and xops plays.
+
+**Risks**
+- Until the standby exists, each Sun/Thu dump can cost up to 700 core-h
+  unless Part 2 is adopted. The 11-01 run starts in about 5 h.
+- A receive outage of more than about 1.7 h forces a 13 h re-seed.
+- With (a2), the standby is up to 16 h stale twice a week; (a3) avoids that.
+- A second full copy of the data needs edge-2's encryption-at-rest posture
+  (LUKS).
+- The 91-day contract backlog (the disk design) needs a longer retention duty
+  cycle. Short transactions are what make that safe.
+
+**Questions for the owner**
+
+1. **Where do Sun/Thu logical dumps run once a standby exists?**
+   - Options: (a) move the timer to the standby; (b) the standby, with
+     edge-2 as an automatic fallback; (c) keep edge-2.
+   - Recommended: **(a)**, with a manual fallback to edge-2.
+   - Changes: whether edge-2's job is retired.
+2. **Standby hardware and mode.**
+   - Hardware options: (a) 6 × 7.68 TB SSDs in edge-6, beside Redis; (b) one
+     of edge-7/8, moved off the services plan; (c) a dedicated host matching
+     edge-2, which can also take over on failover.
+   - Mode options: pause replay during dumps (a2), or ZFS clones (a3).
+   - Recommended: **(c) with (a3).** Today there is no replica at all.
+   - Changes: Part 1's sizing, the clone step and the slot cap.
+3. **Dump format.**
+   - Options: (a) keep the plain single `.sql.zst.gpg`; (b) directory format
+     with `-j` (pg_restore -j and per-table restore; planetoid scripts
+     change).
+   - Recommended: **(b), adopted now.** On the primary it cuts the interim
+     pin from 18–20 h to about 4.5 h.
+   - Changes: the wrapper, planetoid verification and the restore runbook.
+4. **When must the on-primary dump stop** (until the standby exists)?
+   - Options: (a) never; (b) on a CPU level for 30 min, freeze age 1.0B or
+     root under 1.5 TB; (c) age and disk only.
+   - Recommended: **(c) plus `RuntimeMaxSec=30h`.** For (b), give the CPU
+     threshold.
+   - Changes: the Part 2 watcher.
+5. **Census source after the standby.**
+   - Options: (a) the primary, about 10–20 core-h a week; (b) the standby
+     behind the replay-LSN gate.
+   - Recommended: **(a)** for 2–3 clean epochs, then (b).
+   - Changes: Part 3 and the replica session.
+6. **The application role is a superuser,** so A6's 15-minute bound is off.
+   - Options: (a) leave it; (b) make `bringyour` non-superuser; (c) a separate
+     non-superuser role for the pooled application.
+   - Recommended: **(c).** It is a security-posture change with its own
+     review.
+   - Changes: the role setup, and A6 taking effect.
+
 ## Part A — Services edges and connect
 
 Domain: by-us-fmt-5-edge-0/1/3/4 (312 logical CPUs) and the connect service.
