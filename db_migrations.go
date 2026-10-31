@@ -11064,4 +11064,19 @@ var migrations = []any{
 	newSqlMigration(competitionTrustedInstrumentMigration()),
 	// Authenticate the exact replica independently of the estimate's cadence.
 	newSqlMigration(snTopReplicaSchemaSql),
+
+	// 902: the verify cohort's durable census (model/verify_cohort_rotation.go):
+	// every provider a deployment ever admitted, which the validator keeps
+	// scoring forever, so stale members can rotate out of the lifetime set
+	// without the census ever being re-admitted after a Redis data loss. A
+	// new table; apply before deploying the api and taskworker that write it.
+	newSqlMigration(`
+		CREATE TABLE verify_cohort_census (
+			deployment_key varchar(96) NOT NULL,
+			client_id uuid NOT NULL,
+			admitted_at timestamp NOT NULL,
+
+			PRIMARY KEY (deployment_key, client_id)
+		)
+	`),
 }

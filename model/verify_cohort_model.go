@@ -97,15 +97,21 @@ type verifyCohortKeys struct {
 	draws    string
 	lifetime string
 	priority string
+	// every provider ever admitted: the validator's census (rotation)
+	census string
+	// set once the census holds every provider ever admitted
+	censusReady string
 }
 
 func newVerifyCohortKeys(deploymentKey StDeploymentKey, epoch uint64) verifyCohortKeys {
 	prefix := fmt.Sprintf("{verify_cohort:%s}", deploymentKey)
 	return verifyCohortKeys{
-		epoch:    fmt.Sprintf("%se%d", prefix, epoch),
-		draws:    fmt.Sprintf("%se%ddraws", prefix, epoch),
-		lifetime: prefix + "lifetime",
-		priority: prefix + "priority",
+		epoch:       fmt.Sprintf("%se%d", prefix, epoch),
+		draws:       fmt.Sprintf("%se%ddraws", prefix, epoch),
+		lifetime:    prefix + "lifetime",
+		priority:    prefix + "priority",
+		census:      prefix + "census",
+		censusReady: prefix + "censusready",
 	}
 }
 
@@ -199,35 +205,67 @@ func SetVerifyCohortPriority(ctx context.Context, deploymentKey StDeploymentKey,
 }
 
 // verifyCohortAdmitScript admits ARGV[1] into the epoch cohort (or confirms it
-// is already a member) and counts one draw. Both caps are checked and applied
-// in one script, so concurrent admissions can never overshoot either. Every
+// is already a member) and counts one draw. Every cap is checked and applied
+// in one script, so concurrent admissions can never overshoot one. Every
 // read, including the draw counter's integer check, comes before the first
 // write: Redis does not roll back a script that fails part way, so corrupt
 // state must fail it before it changes anything.
 //
-//	KEYS[1] epoch cohort set, KEYS[2] epoch draw counter, KEYS[3] lifetime set
+// The lifetime set is the active set: the providers re-admitted ahead of new
+// ones, at most the lifetime limit. Stale members rotate out of it
+// (RotateVerifyCohort) but never out of the census set, every provider ever
+// admitted, which the validator keeps scoring forever. Once the census is
+// ready (it holds every provider ever admitted), a new provider counts
+// against it: an unclaimed one within the lifetime limit, exactly as before
+// rotation, and a claimed fleet's member within the census limit. A census
+// member that rotated out returns at no census cost. Before the census is
+// ready, admission is as it was before rotation; while a durable census
+// exists but Redis has lost its copy, no new provider is admitted.
+//
+//	KEYS[1] epoch cohort set, KEYS[2] epoch draw counter, KEYS[3] lifetime
+//	(active) set, KEYS[4] census set, KEYS[5] census ready marker
 //	ARGV[1] candidate, ARGV[2] cohort size, ARGV[3] lifetime limit,
 //	ARGV[4] a_min (growth gate), ARGV[5] '1' to skip the growth gate (never a
-//	cap), ARGV[6] epoch key ttl seconds, ARGV[7..] excluded ids (for n)
+//	cap), ARGV[6] epoch key ttl seconds, ARGV[7] census limit, ARGV[8] '1'
+//	for a claimed fleet's member, ARGV[9] '1' when a durable census exists,
+//	ARGV[10..] excluded ids (for n)
 //
-// Returns {1, n} when the candidate may be assigned, n being the cohort size
-// net of excluded members, or {0, size} when it is refused.
+// Returns {1, n, new} when the candidate may be assigned, n being the cohort
+// size net of excluded members and new 1 when the candidate entered a ready
+// census (the caller writes it through to Postgres), or {0, size, 0} when it
+// is refused. Before the census is ready, rotation's first run mirrors it.
 const verifyCohortAdmitScript = `
 local member = redis.call('SISMEMBER', KEYS[1], ARGV[1]) == 1
 local size = redis.call('SCARD', KEYS[1])
 local carried = redis.call('SISMEMBER', KEYS[3], ARGV[1]) == 1
 local lifetime = redis.call('SCARD', KEYS[3])
+local ready = redis.call('EXISTS', KEYS[5]) == 1
+local counted = redis.call('SISMEMBER', KEYS[4], ARGV[1]) == 1
+local census = redis.call('SCARD', KEYS[4])
 local raw = redis.call('GET', KEYS[2])
 if raw and not string.match(raw, '^%d+$') then
   return redis.error_reply('verify cohort draw counter is not an integer')
 end
 local draws = tonumber(raw or '0')
+local new = 0
 if not member then
-  if size >= tonumber(ARGV[2]) then return {0, size} end
+  if size >= tonumber(ARGV[2]) then return {0, size, 0} end
   if not carried then
-    if lifetime >= tonumber(ARGV[3]) then return {0, size} end
-    if ARGV[5] ~= '1' and draws < tonumber(ARGV[4]) * size then return {0, size} end
+    if lifetime >= tonumber(ARGV[3]) then return {0, size, 0} end
+    if not (ready and counted) then
+      if ARGV[9] == '1' and not ready then return {0, size, 0} end
+      local ever = lifetime
+      local bound = tonumber(ARGV[3])
+      if ready then
+        ever = census
+        if ARGV[8] == '1' then bound = tonumber(ARGV[7]) end
+      end
+      if ever >= bound then return {0, size, 0} end
+      if ARGV[5] ~= '1' and draws < tonumber(ARGV[4]) * size then return {0, size, 0} end
+      if ready then new = 1 end
+    end
     redis.call('SADD', KEYS[3], ARGV[1])
+    redis.call('SADD', KEYS[4], ARGV[1])
   end
   redis.call('SADD', KEYS[1], ARGV[1])
 end
@@ -235,14 +273,24 @@ redis.call('INCR', KEYS[2])
 redis.call('EXPIRE', KEYS[1], ARGV[6])
 redis.call('EXPIRE', KEYS[2], ARGV[6])
 local n = redis.call('SCARD', KEYS[1])
-for i = 7, #ARGV do
+for i = 10, #ARGV do
   if redis.call('SISMEMBER', KEYS[1], ARGV[i]) == 1 then n = n - 1 end
 end
-return {1, n}
+return {1, n, new}
 `
 
-// admitVerifyCohort runs the admission script for one candidate. Redis
-// errors panic; a refusal is an ordinary false.
+// How one candidate is admitted.
+type verifyCohortAdmission struct {
+	// skip the growth gate, never a cap
+	skipGrowthGate bool
+	// a claimed fleet's member, bounded by the census limit
+	priority bool
+	// a durable census exists, so a missing Redis census refuses new providers
+	censusRequired bool
+}
+
+// admitVerifyCohort runs the admission script for one unclaimed candidate.
+// Redis errors panic; a refusal is an ordinary false.
 func admitVerifyCohort(
 	ctx context.Context,
 	r server.RedisClient,
@@ -252,27 +300,47 @@ func admitVerifyCohort(
 	skipGrowthGate bool,
 	excluded []string,
 ) (admitted bool, n int) {
-	skip := "0"
-	if skipGrowthGate {
-		skip = "1"
+	admitted, n, _ = admitVerifyCohortAs(ctx, r, keys, candidate, settings, verifyCohortAdmission{skipGrowthGate: skipGrowthGate}, excluded)
+	return
+}
+
+// admitVerifyCohortAs runs the admission script; entered is true when the
+// candidate entered the census.
+func admitVerifyCohortAs(
+	ctx context.Context,
+	r server.RedisClient,
+	keys verifyCohortKeys,
+	candidate string,
+	settings *VerifySettings,
+	admission verifyCohortAdmission,
+	excluded []string,
+) (admitted bool, n int, entered bool) {
+	flag := func(value bool) string {
+		if value {
+			return "1"
+		}
+		return "0"
 	}
 	args := []any{
 		candidate,
 		settings.CohortSize,
 		settings.CohortLifetimeLimit,
 		settings.ReliabilityAMin,
-		skip,
+		flag(admission.skipGrowthGate),
 		int64(verifyCohortEpochTtl / time.Second),
+		max(settings.CohortCensusLimit, settings.CohortLifetimeLimit),
+		flag(admission.priority),
+		flag(admission.censusRequired),
 	}
 	for _, id := range excluded {
 		args = append(args, id)
 	}
-	values, err := r.Eval(ctx, verifyCohortAdmitScript, []string{keys.epoch, keys.draws, keys.lifetime}, args...).Int64Slice()
+	values, err := r.Eval(ctx, verifyCohortAdmitScript, []string{keys.epoch, keys.draws, keys.lifetime, keys.census, keys.censusReady}, args...).Int64Slice()
 	server.Raise(err)
-	if len(values) != 2 {
+	if len(values) != 3 {
 		panic(fmt.Errorf("verify cohort admission returned %d values", len(values)))
 	}
-	return values[0] == 1, int(values[1])
+	return values[0] == 1, int(values[1]), values[2] == 1
 }
 
 // verifyCohortEpoch is the coordinator settlement epoch from the st sync
@@ -367,6 +435,13 @@ func sampleVerifyCohortNextHop(
 		return
 	}
 	keys := newVerifyCohortKeys(settings.CohortDeploymentKey, epoch)
+	censusRequired := verifyCohortCensusRequired(ctx, settings.CohortDeploymentKey)
+	var entered *server.Id
+	defer func() {
+		if entered != nil {
+			recordVerifyCohortCensus(ctx, settings.CohortDeploymentKey, *entered)
+		}
+	}()
 
 	excluded := map[string]bool{}
 	excludedList := []string{}
@@ -427,10 +502,14 @@ func sampleVerifyCohortNextHop(
 				excluded[candidate] = true
 				continue
 			}
-			admitted, cohortN := admitVerifyCohort(ctx, r, keys, candidate, settings, skipGrowthGate, excludedList)
+			admitted, cohortN, newToCensus := admitVerifyCohortAs(ctx, r, keys, candidate, settings,
+				verifyCohortAdmission{skipGrowthGate: skipGrowthGate, priority: priority, censusRequired: censusRequired}, excludedList)
 			if !admitted {
 				excluded[candidate] = true
 				continue
+			}
+			if newToCensus {
+				entered = &candidateId
 			}
 			if !SpendVerifyEligibilityToken(ctx, candidateId, settings) {
 				// token exhausted: temporarily unassignable, try another

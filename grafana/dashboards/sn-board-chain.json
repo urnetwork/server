@@ -606,6 +606,71 @@
         },
         "overrides": []
       }
+    },
+    {
+      "id": 20,
+      "type": "stat",
+      "title": "cohort census",
+      "description": "Providers the deployment has ever admitted to the verify cohort, at the last rotation: the validator's census. Unclaimed providers never grow it past the lifetime limit (2,000); claimed fleets' members may grow it to the census limit (3,072, three quarters of the validator's 4,096).",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 12,
+        "y": 34
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(urnetwork_verify_cohort_census_size{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "census",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "cohort rotations",
+      "description": "Stale members rotated out of the lifetime (active) set per interval to make room for claimed fleets' members, and census restores (Redis had lost its copy of the census and new admissions were refused until it was restored from Postgres).",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 34
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(urnetwork_verify_cohort_rotations_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "rotated"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(increase(urnetwork_verify_cohort_census_restores_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "restores"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
     }
   ]
 }

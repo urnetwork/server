@@ -26,6 +26,8 @@ import (
 const testVerifyCohortDeployment StDeploymentKey = "964:0xc18925925e2b7bb9059b7d696b8c92762ae86406"
 
 func testVerifyCohortSettings(size int, lifetimeLimit int) *VerifySettings {
+	// each test has its own database: forget another test's durable census
+	verifyCohortCensusExists = &verifyCohortCensusCache{exists: map[StDeploymentKey]bool{}, readAt: map[StDeploymentKey]time.Time{}}
 	settings := DefaultVerifySettings()
 	settings.CohortSize = size
 	settings.CohortLifetimeLimit = lifetimeLimit

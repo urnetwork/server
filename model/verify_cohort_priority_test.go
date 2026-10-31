@@ -93,10 +93,18 @@ func TestVerifyCohortSamplingDrawsClaimedMembersFirst(t *testing.T) {
 		for hop := range first {
 			unclaimed = hop
 		}
+		// the first draw is random: the claimed and the late providers are
+		// chosen apart from it
 		claimed := []server.Id{}
+		rest := []server.Id{}
 		for _, provider := range providers {
-			if provider.String() != unclaimed && len(claimed) < 3 {
+			if provider.String() == unclaimed {
+				continue
+			}
+			if len(claimed) < 3 {
 				claimed = append(claimed, provider)
+			} else {
+				rest = append(rest, provider)
 			}
 		}
 		if count := SetVerifyCohortPriority(ctx, settings.CohortDeploymentKey, [][]server.Id{claimed[:2], claimed[2:]}, 2); count != 3 {
@@ -113,7 +121,7 @@ func TestVerifyCohortSamplingDrawsClaimedMembersFirst(t *testing.T) {
 			}
 		}
 		// the cohort is full: a new claimed fleet's member waits for room
-		late := providers[len(providers)-1]
+		late := rest[len(rest)-1]
 		if members[late.String()] {
 			t.Fatal("the late provider was already admitted")
 		}
@@ -125,7 +133,7 @@ func TestVerifyCohortSamplingDrawsClaimedMembersFirst(t *testing.T) {
 		// the next epoch has room, but the lifetime set has one slot left
 		testVerifyCohortSetEpoch(ctx, 8)
 		next := newVerifyCohortKeys(settings.CohortDeploymentKey, 8)
-		lateTwo := providers[len(providers)-2]
+		lateTwo := rest[len(rest)-2]
 		SetVerifyCohortPriority(ctx, settings.CohortDeploymentKey, [][]server.Id{{late}, {lateTwo}}, 1)
 		testVerifyCohortSample(t, ctx, settings, 12)
 		lifetime := testVerifyCohortMembers(ctx, keys.lifetime)
