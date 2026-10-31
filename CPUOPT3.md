@@ -176,11 +176,21 @@ The questions are asked one at a time, and nothing is implemented before they ar
 
 | Plan | Item | Est. saving | Effort | Status |
 |---|---|---|---|---|
-| D1 | In-process delivery when the transport's resident is in the same process (A §6.1) | 12–15 cores | 8–12 engineering days, plus a 6-day staged A/B | drafted |
-| D2 | Stop building window clients the strict hard max refuses; a drained client hands over its slot (B #1) | 1.2–2.5 proxy cores, plus 265–383/s fewer mints, retirements and contracts | about 8 engineering days and two proxy releases, then app releases | drafted |
-| D3 | PeerAudit: answer cheaply, stop sending (C #1, B #4) | 1.4–1.7 api cores, 0.3–0.4 proxy cores | — | in progress |
-| D4 | (a) A verified JWT claims cache; (b) a verified certificate-chain cache (C #2, C #3, B #3, B #6) | 2.2–2.9 api cores, 2.3–2.5 taskworker cores, 0.7–0.9 proxy cores | about 3 + 3 engineering days | drafted |
-| D5 | Keep long snapshots off the primary (D #1) | avoids 15–55-core spikes, about 700 core-hours per full dump | a standby host (hardware), plus small interim changes | drafted |
+| D1 | In-process delivery when the transport's resident is in the same process (A §6.1) | 12–15 cores | 8–12 engineering days, plus a 6-day staged A/B | approved; implementing |
+| D2 | Stop building window clients the strict hard max refuses; a drained client hands over its slot (B #1) | 1.2–2.5 proxy cores, plus 265–383/s fewer mints, retirements and contracts | about 8 engineering days and two proxy releases, then app releases | approved; implementing |
+| D3 | PeerAudit: answer cheaply, stop sending (C #1, B #4) | 1.4–1.7 api cores, 0.3–0.4 proxy cores | about 1.5–2 days server and monitor, 1 day connect | approved; implementing |
+| D4 | (a) A verified JWT claims cache; (b) a verified certificate-chain cache (C #2, C #3, B #3, B #6) | 2.2–2.9 api cores, 2.3–2.5 taskworker cores, 0.7–0.9 proxy cores | about 3 + 3 engineering days | deferred |
+| D5 | Keep long snapshots off the primary (D #1) | avoids 15–55-core spikes, about 700 core-hours per full dump | a standby host (hardware), plus small interim changes | minimal fix approved (Part 2 bounds) |
+
+### Owner decisions (2026-10-31)
+
+| Plan | Decision |
+|---|---|
+| D1 | Implement. Q1, the kill switch: both a code default and the runtime field in the Redis move-control hash. The other questions use the recommended answers, which the owner can still override. Q5 is moot: the quick wins aren't scheduled, so D1 ships on its own staged A/B. |
+| D2 | Implement with the recommended answers (the owner can still override): a counters-only release first, then the capacity check and the slot handover. |
+| D3 | Implement with the recommended answers (the owner can still override): answer audit-only packs before authentication, retire PeerAudit, drop ReportAbuse but count it for two weeks, fix the monitor signal now. |
+| D4 | Deferred. The owner was concerned about storage. Both caches are in-process memory, not Redis (the JWT cache is capped at 64 MB per process, the chain cache at 256 entries), and the plan stays here for later. |
+| D5 | The minimal fix only: `RuntimeMaxSec=30h` on the dump unit, plus an abort watcher that stops the dump and publishes nothing above a transfer_contract freeze age of 1.0B or below 1.5 TB free on edge-2's root. No format change. The standby is not scheduled. Separately, the owner chose to delete edge-2's dump generations once planetoid has verified its copy. |
 
 ### D1. Deliver in-process when the transport's resident is in the same connect process
 
@@ -628,9 +638,253 @@ Existing suites (`ip_remote_multi_client*_test.go`, including the Android loop n
 
    Changes: the release plan.
 
-### D3. PeerAudit frames the server never handles
+### D3. `PeerAudit`: answer it without the auth path, and stop sending it
 
-In progress; added when drafted.
+**Problem and evidence** (CPUOPT3 C §2.3, §2.4, §3 #1; B §3.6, §4 #4)
+
+- `SequencePeerAudit.Complete` (connect transfer.go:18781–18811) sends a lone `PeerAudit` frame through `ClientOob().SendControl` and ignores the answer (`func(resultFrames, err) {}`, :18806–18809).
+  - No server package names `PeerAudit`. `ConnectControlFrames` ends in `default: "Cannot handle oob control message: %T"` (controller/connect_controller.go:552).
+- **Rates now** (Mimir, 30 min to 10-31 21:00Z). CPUOPT3's 18:20–19:25Z figures are in brackets.
+  - api 2,646/s [2,601–2,731].
+  - proxy 2,162/s [2,255].
+  - alt 24.5/s [25.4; 87% of alt's control requests].
+  - taskworker 0.02/s; the connect resident 0.
+- **The rate is not stable over months.** It follows live peer relationships (below), not user bytes. No version label exists to tie the steps to releases.
+  - api daily means: 0.2–0.6k/s from 09-11 to 10-12, 1.2k/s from 10-13, 1.8k/s from 10-21, and 2.3–2.4k/s since 10-26.
+  - The proxy went from about 30/s to 1.5–2.3k/s over the same weeks.
+- **Cost of each audit at the api** (about 0.6–0.75 ms of CPU, C §2.4):
+  - the lag-guest claims decode, then ES256 verification and claims checks;
+  - the per-client GCRA `EVALSHA` (controller/connect_control_limit.go:108);
+  - a refusal-replay decode, which returns false;
+  - the revocation-record `HMGET` (session/revocation_record.go:331), or the SQL state query on a miss;
+  - a session last-used sample, at most once a minute per session per process;
+  - a second pack decode;
+  - the error path (`strings.ToLower`, connect_controller.go:195–223), and a JSON reply.
+- **Cost of each audit at the proxy**, in process (localclient/authority.go:244):
+  - P-256 signature and claims checks;
+  - `ValidateByJwtState` (a record `HMGET`; 11% miss to SQL, which is 381/s at the proxy);
+  - the dispatch error, and a `convert` JSON round trip.
+  - In total 2.5–3% of proxy CPU, plus 0.35% on the client side (B §3.6). Audits are 65% of the proxy's 3.3k/s control record checks.
+
+**History** (`git log -S/-G` in connect and server):
+- **2023-07-12, connect 26d51ab3:** added `PeerAudit`. The proto comment reads "the acl will block contracts between two parties with bad audits of each other". The receive path carried FIXMEs ("submit peer audit", "if peer audit has any bad marks, downgrade the connection"). Neither the ACL nor the downgrade was ever built.
+- **2023-10-29, connect e6b36428:** added `Client.ReportAbuse`, an audit with `abuse=true`, for the provider egress policy's Incident verdict.
+- **Until 2024-04:** audits went in-band to `ControlId`. The resident controller had cases only for Provide, CreateContract and CloseContract and no default, so it dropped them silently (server 0ad013fde^:connect/resident_controller.go).
+- **2024-04-02:** connect a63ae0a7 moved `Complete` to `ClientOob().SendControl`. The same day, server 0ad013fde started out-of-band control with CreateContract only and the "Cannot handle" default. Every audit since then has been an API request that fails.
+- **Nothing has ever consumed one:**
+  - No server code ever handled `PeerAudit` or `ReportAbuse`. The only source hit is a perfvar test that widens `MaxPeerAuditDuration`; the other `-S` hits are committed binaries.
+  - Provider reliability (`client_reliability`), contract disputes and provider exclusions are all derived on the server and never read audits.
+  - No document in server or connect plans a consumer. `protocol/audit.proto` (2024-06) is a separate, unbuilt design for provider egress records.
+
+**Who sends it, and when**
+- **Senders:** every connect `Client` built with an `ApiOutOfBandControl`: app and sdk window clients over HTTP to the api or alt (ip_remote_multi_client_api.go:1326), sdk providers over HTTP to the api (sdk device_local_provider.go:227), and proxy hosted window clients in process. The exchange resident uses `NoContractClientOob` (server connect/resident.go:4221) and sends nothing.
+- **Triggers:**
+  1. **Receive sequences.** Each receive sequence (one per peer and stream, transfer.go:15828) holds one audit, created on its first update. The audit completes on:
+     - the first update at least `MaxPeerAuditDuration` (60 s, :1093) after it began;
+     - a verified stream change (`SetStreamId`, :18758, called at :17561);
+     - sequence exit (:15816).
+     The proxy's measured rate is about one audit per window client every 45–60 s (about 100k window clients). That fits one completion per live window client per minute, plus exits. So the rate is about live receive sequences divided by 60 s.
+  2. **Malformed frames.** `Client.run` (:4430) sends one immediately for each malformed inbound transfer frame.
+  3. **Abuse reports.** `ReportAbuse` (:3254) fires for each packet or fragment group that gets an Incident verdict at a provider (ip.go:10209, :10307). Incident covers non-public destinations, and BitTorrent signatures by default (`ReportBittorrentIncident: true`, ip_security_dmca.go:163). There is no dedupe and no rate limit.
+- **Shape:** always one frame per request, because `sendControl` packs exactly the frames it is given (transfer_oob_control.go:180).
+  - The `PeerAudit` message is about 45–60 bytes: peer_id (16 B), stream_id (16 B), duration, abuse and 9 counters.
+  - That becomes about 80 base64 characters and a ~90-byte JSON body. The bearer JWT dominates the ~1 KB of headers.
+- **Finding: abuse reports spend the provider's own budget.** Each report counts against the provider's per-client control budget (6,000/min, burst 3,000; model/connect_control_limit.go:69).
+  - A remote user who pushes about 100 blocked packets/s through a provider gets that provider's real `CreateContract` and `Provide` requests refused with 429.
+  - This needs a modified client: stock clients drop these packets locally.
+
+**Proposed design**
+
+Server: one change that covers api, alt and proxy.
+1. **`controller.DiscardConnectControl(args *ConnectControlArgs) (*ConnectControlResult, bool)`**, in a new file `controller/connect_control_discard.go`.
+   - **Inputs it reads:** only the request body. It reads no credential, Redis, database or clock.
+   - **Conditions for a discard:**
+     - `len(args.Pack) ≤ 2048` (connect sends about 80);
+     - a plain base64 decode, then `proto.Unmarshal` into `protocol.Pack`;
+     - at least one frame;
+     - every frame is `MessageType_TransferPeerAudit` and its bytes decode as `protocol.PeerAudit`. The loop stops at the first frame that is not an audit.
+   - **Anything else** returns false and takes today's path, untouched. This follows the `createsContractsOnly` precedent (localclient/authority_contract_admission.go:122).
+   - **The answer** is `{"pack":"","error":null}`, exactly what an authenticated no-op returns (`connectControlResult(nil, nil)`). It is the same for every caller and grants nothing.
+2. **api and alt.** `router.WrapWithInputRequireClientUnlessAnswered` (router/handler_utils.go:418) gains a first argument, `discard func(T) (R, bool)`.
+   - The wrapper has one caller, api/handlers/connect_handlers.go:22. alt serves the same router (alt/run.go:183).
+   - The discard runs after the JSON decode and before `advanceControlHttpPhase(controlHttpAuthenticate)` (:429).
+   - The route's gates still run first: the intended-network gate, then the lag-guest gate (api/route_authz.go:361–376).
+   - Under Q1 (b), the same check instead runs first in `PrepareConnectControl` (connect_control_limit.go:137), before `checkConnectControlLimit`, and answers with `answer.discarded`. The `BeforeStateAnswer` contract (session/client_session.go:212–219) gains one clause: "or acknowledge, empty, a pack the server discards whole".
+3. **proxy.** `Authority.ConnectControl` (localclient/authority.go:244) calls the same check after its `args == nil` test and the lifecycle checks, so a closed authority still returns `context.Canceled`.
+   - The check runs before contract admission and before `authenticate` (:100). Under (b) it runs after `parseClaimsPreflight` (:125).
+   - It returns `&connect.ConnectControlResult{}` directly, with no `convert` round trip.
+4. **Dispatch no-op.** Add `case *protocol.PeerAudit:` next to `ControlPing` (connect_controller.go:540).
+   - It covers mixed or in-band packs, and audit packs too large for the discard.
+   - It also stops a stray audit's joined error from making the client drop its sibling replies (connect transfer_oob_control.go:211).
+   - The replay gate (:517) stays ahead of it, so an audit inside a replay is still refused.
+5. **Counter.** `urnetwork_connect_control_discarded_requests_total{abuse="claimed|none"}`, with both cells pre-materialized. It counts the requests answered by (1); every connect version sends one frame per request.
+   - The `abuse` label shows whether any frame sets `abuse=true`. It is spoofable and serves as telemetry only, to size Q4.
+   - Nothing is logged at any level: the counter is lossless, and peer ids are identifiers.
+   - **No `peer_audit` frame-metric label** (CPUOPT3 C #1 suggested one). Monitor §2.19e marks a process invalid on any unknown frame label (monitor/signal_control_route_pressure.go:162–172).
+   - **That parser already fails today.** `resident_move_result` was added on 10-22 (65778f4d1), and all 20 api processes now export it, so every api slot reads as unobservable. The monitor's list (:39) gains `resident_move_result`.
+6. **Monitor §2.19e denominators.** Subtract `increase(discarded_requests_total[5m])` from `count` and `requests` (:236–240). The mean and canceled share then cover only requests that do work, so fast discards cannot dilute the 5 s / 20% and 10 s / 50% thresholds.
+
+**What stays the same:**
+- Every pack that is not audit-only takes today's path, check for check.
+- The refusal ring, the escrow, contract and transfer accounting, the GCRA parameters, the revocation-record TTLs and the session deadlines are unchanged. The discard path reads none of them.
+
+Client (connect):
+- **`ClientSettings.SendPeerAudits bool`** (transfer.go:1578), default false.
+  - `NewSequencePeerAudit` (:18746) records the setting. When it is false, `Update` (:18766), `Complete` (:18781) and `SetStreamId` return before `time.Now()` and before building the frame.
+  - `ReportAbuse` and `Client.run`'s `updatePeerAudit` both go through `NewSequencePeerAudit`, so all three senders stop.
+- **Local policy verdicts are untouched.** Blocked packets are still dropped and counted (`recordProviderBlock`). Only the unread report goes away.
+- **sdk:** a connect bump, with no code change. Proxy and taskworker pick it up through the server release lock; apps and providers through their next sdk.
+- **Spec note** in connect api/bringyour.yml, `/connect/control`: an audit-only pack is answered empty and stored by no one (under (a), without reading the credential).
+
+**Alternatives considered:** the dispatch no-op alone (B #4's server variant) keeps the verification and both Redis round trips, so it saves only about 0.1 of the 0.6–0.75 ms. The client change alone leaves old apps and providers on the full path for months. Batching audits still has no consumer. nginx cannot read the protobuf body. The message type must stay so old frames decode. Deleting the client accounting now (about 40 call sites and 12 test files) waits for Q3 and Q4.
+
+**Correctness under the owner rule**
+
+Checks on each path:
+
+| Path | Checks kept | Checks skipped |
+|---|---|---|
+| api/alt audit-only, (a) | per-address limit (nginx `route_rate_limits`; alt/rate_limit.go), intended-network gate, lag-guest gate, 16 MiB body cap, then 2 KiB plus the shape check | signature and claims, session checks, GCRA, revocation record, dispatch |
+| api/alt audit-only, (b) | as (a), plus ES256 and claims, session horizon, session marker (untagged credentials), remembered refusals | GCRA, revocation record, dispatch |
+| api/alt, any other pack | all, unchanged | none |
+| proxy audit-only | lifecycle checks and the shape check; (b) adds `parseClaimsPreflight` | revocation record, dispatch; (a) also skips the signature |
+| proxy, any other pack | all, unchanged | none |
+
+Timing and detection bounds:
+- **`AuthTimeout` (30 s, session/auth_deadline.go:15) and the intended-network check's 30 s:** every authenticating request keeps them. The discard does no I/O on at most 2 KiB, so it needs no deadline.
+- **GCRA, 6,000/min with burst 3,000:** the parameters and the per-client ceiling on state-touching requests are unchanged. Only audit-only requests stop counting against them (Q2).
+- **Revocation-record freshness and TTLs:** unchanged.
+  - Every request from a revoked credential that does something is still refused.
+  - Its audit gets the same empty 200 that recorded refusals already give such a client (connect_control_refusal_replay.go:11–13).
+- **Refusal ring (60 s and 1 h):** unchanged and not consulted.
+- **Proxy:** the per-request `RequestTimeout` (connect transfer_oob_control.go:127) and the contract admission bound are unchanged.
+- **Connect timers:**
+  - `MaxPeerAuditDuration` is a reporting period, not a bound.
+  - Receive `IdleTimeout` and `GapTimeout`, `WriteTimeout` (15 s), ack timers, cping cadence and blackhole detection read nothing from audits.
+  - The backend-degraded gate (3 failures in 2 min, transport.go:416–421) counts only auth and `CreateContract` results (transfer_contract_manager.go:1905, 1931).
+- **Monitor §2.19e:** the thresholds are unchanged; the denominators exclude discards.
+- No new timers, no AfterFunc, no watchdogs.
+
+Failure modes:
+- **A shape-check bug that answered a frame that acts** would be a security bug. The guards are:
+  - an exact type check on every frame;
+  - a full decode;
+  - the size cap;
+  - a fuzz invariant (see Tests).
+- **A malformed body** falls through to today's path.
+- **No races:** the check is a pure function with an atomic counter.
+- **An unauthenticated flood** of audit packs costs about 0.1 ms per request, behind the per-address limits.
+  - That is less than anyone can already cost the route per request: a well-formed token with a bad signature forces a full ES256 verification.
+  - The answer is constant, smaller than the request, and has no token-dependent timing. So it is neither an oracle nor an amplifier.
+
+**Compatibility and rollout**
+- **Mixed versions:**
+  - Every pairing of server and client versions works; there is no protocol change.
+  - Old clients (connect from 2024-04 on) keep sending until they update, and the server path stays at about 0.1 ms per request indefinitely.
+  - New clients send nothing to old servers.
+  - Old clients get an empty 200 where they used to get a 200 with an error, and in place of some 401s, 429s and 503s. The callback discards it, and logout and refresh are driven by transport authorization (`AuthorizationClosed`), not by out-of-band results.
+- **Flags:**
+  - Server: none. The check is a pure function, so canary and redeploy are the rollback.
+  - Connect: `SendPeerAudits`, default off, so a future consumer can turn sending back on.
+- **Order:**
+  1. The monitor label fix, now and independently.
+  2. api on one block for 24 h as an A/B, then the fleet and alt.
+  3. The proxy release.
+  4. Merge connect, then bump the server release lock (proxy, taskworker).
+  5. The sdk bump, then app and provider releases on their normal schedule.
+- **Rollback:** redeploy the previous api, alt or proxy, or flip the connect default back. Nothing is persisted.
+
+**Tests**
+
+All are written to fail first; the mutation each must catch is in brackets.
+
+Server:
+- `TestDiscardConnectControlAnswersAuditOnlyPacks`: packs of one and three audits are answered empty; the counter splits by abuse; the answer equals `connectControlResult(nil, nil)`. [always return false]
+- `TestDiscardConnectControlRefusesEveryOtherShape`: every other `MessageType` value, audit plus CreateContract, audit plus CloseContract, an empty pack, bad base64, bad protobuf, an audit with undecodable bytes, and a pack over 2 KiB all return false. [check only frames[0]; drop the cap; accept on type without decoding]
+- `FuzzDiscardConnectControlNeverAnswersAnAction`: if it answers, every frame is a decodable `PeerAudit`; no input panics.
+- `TestConnectControlRouteDiscardsAuditWithoutCredential` (httptest): no token, and a garbage token, each get `{"pack":"","error":null}`; the JWT parse, the `connectControlLimitAdmit` seam and the record read are never called; the same request with a CreateContract frame gets 401. [move the discard after auth] Under (b): a garbage token gets 401, and admission and the record are still not called.
+- `TestConnectControlRouteDiscardKeepsLagGuestGate`: a lag-guest token still gets 403. [answer before the gate]
+- `TestConnectControlDiscardSpendsNoClientBudget`: GCRA state is unchanged after 100 discards. [discard after the limit]
+- `TestConnectControlFramesTreatsPeerAuditAsNoOp`: in an [audit, close] pack the close applies, there is no error, and the `unhandled_message` counter does not move. [remove the case] `TestReplayStillRefusesUnpreparedPeerAudit`. [case above the replay gate]
+- `TestAuthorityDiscardsAuditBeforeAuthenticate`: an expired token gets an empty result; a closed authority still gets `context.Canceled`. [discard after authenticate]
+- `TestControlRouteMessagesCoverControllerLabels`: the monitor's list includes every controller label. It fails today on `resident_move_result`.
+- `TestControlRoutePressureSubtractsDiscards`: 25% discards plus real requests at 6 s with 25% canceled still raise WARN. [drop the subtraction]
+
+Connect:
+- `TestSequencePeerAuditSendsNothingByDefault` (synctest, with a recording out-of-band control): a 60 s rollover, a stream change and an exit send nothing. [ignore the setting]
+- `TestReportAbuseSendsNothingByDefault` and `TestClientRunMalformedFrameSendsNoAuditByDefault`.
+- `TestSequencePeerAuditSendsWhenEnabled`: exactly 3 single-frame packs, with the old field values.
+- `BenchmarkSequencePeerAuditUpdate`, with the setting on and off.
+- The existing receive-timing tests are the regression gate.
+
+Production (A/B by block, the same hours over at least 3 days). Acceptance:
+- `control_frame_failures_total{cause="unhandled_message"}` below 1/s, and `discarded_requests_total` within ±5% of the old `unhandled_message` rate.
+- api cores down 1.3–1.7 at the peak (0.7–0.9 under (b)).
+- `redis_pool_hits_total` down 5.3k/s at the api and 2.2k/s at the proxy.
+- `jwt_state_record_checks_total{operation="control"}` down 2.6k/s at the api and 2.2k/s at the proxy.
+- `client_limit_total{outcome="limited"}` does not rise.
+- For the remaining requests, the authenticate and controller phase means do not rise, and the contract and rejection rates are unchanged.
+- §2.19e evaluates every slot.
+
+Expected drops that are not regressions: auth attempts (down 2.6k/s), the `active_authenticated_networks` gauge, and 401s from stale-token audits. After the client changes ship, the proxy's discards fall to about 0 with its release; at the api, discards decay as apps and providers update (check weekly).
+
+**Savings and effort**
+
+| Item | Saving | Base |
+|---|---|---|
+| api, (a) | 1.3–1.7 cores; keeping the lag-guest gate leaves about 0.1 ms per request (≈0.26 cores) | 2,646 requests/s × 0.6–0.75 ms; api 13.0 cores mean, 17.4 at the peak (C §2.1) |
+| api, (b) | 0.7–0.9 cores. If the JWT claims cache (CPUOPT3 #4) ships, (a) and (b) differ by less than 0.1 | same |
+| alt | about 0.02 cores | 25 requests/s |
+| proxy | 0.25–0.3 cores from the server side, plus 0.05–0.1 after the connect change | 2,162 requests/s; 12–13.5 proxy cores |
+| Redis | about 7.5k fewer round trips/s, ≈0.7 cores | api 2 × 2,646, plus proxy about 2,200; about 0.09 cores per 1k round trips/s (E #1, #5) |
+
+- Also removed: the SQL fallbacks for credentials whose only checks are audits. Up to about 250/s at the proxy are driven by audits.
+- On every app and provider: one HTTPS request per live peer per minute.
+- **Effort:** server 1.5–2 days (including the monitor), connect 1 day, plus an sdk bump.
+- **Releases:** monitor, api/alt, proxy, the connect pin, then sdk and apps.
+
+**Risks**
+1. **Posture under (a):** one body shape on `/connect/control` is answered without a credential.
+2. **Session last-used** is presentation-only (session_activity.go:1: it "never grants or extends authority"). It will lag for sessions whose only api traffic is audits. The active-networks gauge on the internal api dashboard falls.
+3. **No abuse signal after the clients update.** It was discarded unread all along. `abuse=claimed` gives a sample of about 2 weeks before clients update.
+4. **Residual cost from old clients:** about 0.26 cores now, falling with adoption.
+
+**Questions for the owner**
+1. **Where to answer audit-only packs (auth posture).**
+   - (a) Before authentication, after the route gates: 1.3–1.7 api cores.
+   - (b) After the signature, claims and session checks, before the per-client limit: 0.7–0.9 cores, or within 0.1 of (a) once the JWT claims cache ships.
+   - (c) After the per-client limit: about 0.4 cores. Audits still spend the budget and an `EVALSHA`.
+   - **Recommended: (a).** It reads no credential and returns a constant. It costs less than a bad-signature request anyone can already send, and every frame that acts keeps the full path. Choose (b) if "every 200 on `/connect/control` follows a verified signature" is worth about 0.6 cores (about 0.1 with the claims cache).
+   - **What changes:** where the hook sits (the wrapper or `PrepareConnectControl`), the proxy's placement, the spec note, and the savings row.
+2. **The per-client budget.** Under (a) or (b), audit-only requests stop spending the 6,000/min budget (burst 3,000).
+   - (a) Keep 6,000 and 3,000.
+   - (b) Lower the rate by the audit share (about 4,500/min). That keeps a typical client's allowance for real requests where it is today, and tightens clients that send no audits.
+   - (c) Keep counting audits. This forces Q1 (c).
+   - **Recommended: (a).** The per-client ceiling on state-touching requests is unchanged, and it closes the path by which blocked packets get a provider's own contract requests refused.
+   - **What changes:** `connect_control_limit.yml`, or Q1's placement.
+3. **Keep PeerAudit as a feature?**
+   - (a) Retire it: stop sending, discard forever, and delete the client accounting one release later.
+   - (b) Build a consumer: sampled, batched audits for peer scoring.
+   - (c) Leave the accounting behind `SendPeerAudits` until a scoring design asks for it.
+   - **Recommended: (a).** Reliability, disputes and exclusions already come from server-side evidence, and the 2023 "ACL on bad audits" was never specified.
+   - **What changes:** whether a connect cleanup task is scheduled.
+4. **ReportAbuse.**
+   - (a) Drop it along with PeerAudit. The provider is already protected by the local drop.
+   - (b) A minimal real feature:
+     - a new `AbuseReport` control frame carrying the source client, the verdict's reason class, a count and a window;
+     - on the provider, deduplicated per source and reason, at most once per 5 min, in a bounded map;
+     - sent over the authenticated path;
+     - accepted by the server only from a reporter that holds a recent contract with that source;
+     - stored as a daily count per client, with no automatic action, plus an ops query.
+   - (c) Option (b) plus enforcement (route exclusion or account action), which needs a policy and legal decision.
+   - **Recommended: (a) now.** Read `abuse=claimed` for 2 weeks before clients update, then revisit (b) if the rate is material.
+   - **What changes:** (b) adds about 2–3 days across connect and server.
+5. **Rollout appetite.**
+   - (a) The monitor fix now. Then api on one block for 24 h, then the fleet, alt and proxy. The connect change ships with the next scheduled connect pin and app releases.
+   - (b) As (a), with a dedicated sdk and app release.
+   - (c) Hold the server change until the clients ship.
+   - **Recommended: (a).** The server change alone removes about 85% of the api cost; the client change mainly saves device requests.
+   - **What changes:** the schedule only.
 
 ### D4. Cache verified results: JWT claims (a) and TLS certificate chains (b)
 
