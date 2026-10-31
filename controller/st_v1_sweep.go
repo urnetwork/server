@@ -226,8 +226,13 @@ type StV1SweepClient interface {
 	V1SweepAbsorb(ctx context.Context, epoch uint64, noId uint64, hotkey [32]byte) (string, error)
 }
 
-// A step that failed this many times stops the chain with an alert.
-const stV1SweepMaximumFailures = 10
+// A step that failed this many times stops the chain with an alert. The close
+// is exempt: its operation key is fixed, so a reverted close cannot be retried,
+// and after stV1SweepMaximumCloseAttempts failures the chain defers instead.
+const (
+	stV1SweepMaximumFailures      = 10
+	stV1SweepMaximumCloseAttempts = 3
+)
 
 var stV1SweepClientLock sync.Mutex
 var stV1SweepClientInstance StV1SweepClient
@@ -512,6 +517,9 @@ type stV1SweepInput struct {
 	// (confirmed, skipped or missed), for a window whose root never comes.
 	v2CommitDone func(epoch uint64) bool
 	noId         uint64
+	// closeFailures counts the failed closes; past the close attempts the
+	// chain stops closing and defers once the root key is free.
+	closeFailures int
 }
 
 // stV1SweepQuiet reports whether the root key may send now: no v2 commit
@@ -563,7 +571,7 @@ func stV1SweepNext(in *stV1SweepInput) stV1SweepAction {
 	}
 	// The close is the deposit signer's and bound to the close grace, so it
 	// does not wait for the root key.
-	if sweep.Status == stV1SweepUnset && in.latest+1+stV1SweepCloseMarginBlocks <= chain.End+chain.CloseGrace {
+	if sweep.Status == stV1SweepUnset && in.closeFailures < stV1SweepMaximumCloseAttempts && in.latest+1+stV1SweepCloseMarginBlocks <= chain.End+chain.CloseGrace {
 		return act(stV1SweepActClose, epoch, "capture the reveal-lag stake inside the close grace ending at block %d", chain.End+chain.CloseGrace)
 	}
 	if quiet, reason := stV1SweepQuiet(in); !quiet {
@@ -587,6 +595,10 @@ func stV1SweepNext(in *stV1SweepInput) stV1SweepAction {
 			return act(stV1SweepActAbandon, epoch, "no sweep root was committed by block %d; re-point v1_sweep_epoch to a later epoch", deadline)
 		}
 		if sweep.Status == stV1SweepUnset {
+			// deferMissedEmission reverts until a block past the close grace.
+			if in.latest+1 <= chain.End+chain.CloseGrace {
+				return wait(chain.End+chain.CloseGrace+1, "the close grace ends at block %d; the deferral of epoch %d follows it", chain.End+chain.CloseGrace, epoch)
+			}
 			return act(stV1SweepActDefer, epoch, "the close grace passed without a capture; record zero for epoch %d", epoch)
 		}
 		if sweep.Status != stV1SweepFunded {
@@ -738,11 +750,12 @@ func StV1SweepTurn(ctx context.Context) (*StPublishOutcome, error) {
 	if err != nil {
 		return stV1SweepRetry(err), nil
 	}
+	_, closeFailures := stV1SweepFailures(publishes, stV1SweepActClose)
 	action := stV1SweepNext(&stV1SweepInput{
 		epoch: epoch, firstEpoch: activation.FirstEpoch, chain: chain, latest: latest,
-		v2CommitDone: stV1SweepV2CommitDone(ctx, cfg), noId: cfg.NoId,
+		v2CommitDone: stV1SweepV2CommitDone(ctx, cfg), noId: cfg.NoId, closeFailures: closeFailures,
 	})
-	if kind, failures := stV1SweepFailures(publishes, action.kind); stV1SweepMaximumFailures <= failures {
+	if kind, failures := stV1SweepFailures(publishes, action.kind); action.kind != stV1SweepActClose && stV1SweepMaximumFailures <= failures {
 		action = stV1SweepAction{kind: stV1SweepActRefuse, epoch: epoch, reason: fmt.Sprintf("the %s step failed %d times (last: %s)", action.kind, failures, kind)}
 	}
 	glog.Infof("[st]v1 sweep epoch %d at block %d: %s\n", epoch, chain.HeadBlock, action)
@@ -990,6 +1003,7 @@ func GetStV1SweepStatus(ctx context.Context) (*StV1SweepStatusView, error) {
 		return nil, err
 	}
 	publishes := stV1SweepPublishes(ctx, cfg, epoch)
+	_, closeFailures := stV1SweepFailures(publishes, stV1SweepActClose)
 	root := StV1SweepRoot(chain.Vault2Coldkey)
 	surplus := new(big.Int).Sub(stV1SweepAmount(chain.V2LiveEscrow), stV1SweepAmount(chain.V2Accounted))
 	view.HeadBlock, view.End = chain.HeadBlock, chain.End
@@ -1006,7 +1020,7 @@ func GetStV1SweepStatus(ctx context.Context) (*StV1SweepStatusView, error) {
 	view.SafeCalls = stV1SweepSafeCalls(cfg, epoch, chain, surplus)
 	view.Next = stV1SweepNext(&stV1SweepInput{
 		epoch: epoch, firstEpoch: activation.FirstEpoch, chain: chain, latest: latest,
-		v2CommitDone: stV1SweepV2CommitDone(ctx, cfg), noId: cfg.NoId,
+		v2CommitDone: stV1SweepV2CommitDone(ctx, cfg), noId: cfg.NoId, closeFailures: closeFailures,
 	}).String()
 	view.Publishes = publishes
 	if !view.Committed {

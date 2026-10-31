@@ -321,6 +321,36 @@ func TestStV1SweepPlanClose(t *testing.T) {
 	requireSweepAction(t, "past the close margin", sweepNext(chain, sweepTestEnd+sweepTestGrace-stV1SweepCloseMarginBlocks), stV1SweepActWait, "root key stays with v2")
 }
 
+// A reverted close cannot be retried under its fixed operation key: after the
+// close attempts the chain stops closing, never refuses for it, and defers
+// only once a block past the close grace can execute the deferral.
+func TestStV1SweepPlanCloseGivesUpThenDefersAfterTheGrace(t *testing.T) {
+	chain := sweepTestChain()
+	chain.V2RootPresent, chain.V2RootThrough = true, sweepTestEpoch
+	input := sweepInput(chain, chain.HeadBlock+2)
+	input.closeFailures = stV1SweepMaximumCloseAttempts - 1
+	requireSweepAction(t, "a failed close", stV1SweepNext(input), stV1SweepActClose, "close grace")
+	input.closeFailures = stV1SweepMaximumCloseAttempts
+	action := stV1SweepNext(input)
+	requireSweepAction(t, "closes exhausted inside the grace", action, stV1SweepActWait, "the close grace ends at block 9448948")
+	if action.until != sweepTestEnd+sweepTestGrace+1 {
+		t.Fatalf("wait until %d", action.until)
+	}
+	// A fast v2 root inside the grace, past the close margin, also waits.
+	chain.HeadBlock = sweepTestEnd + sweepTestGrace - 5
+	requireSweepAction(t, "past the margin inside the grace", sweepNext(chain, sweepTestEnd+sweepTestGrace-1), stV1SweepActWait, "deferral of epoch 4 follows it")
+	requireSweepAction(t, "the grace's last executable block", sweepNext(chain, sweepTestEnd+sweepTestGrace), stV1SweepActDefer, "record zero")
+	// Close failures never count toward the refusal budget.
+	reason := "reverted"
+	publishes := []*model.StPublish{}
+	for i := 0; i < stV1SweepMaximumFailures+1; i++ {
+		publishes = append(publishes, &model.StPublish{Kind: StPublishKindV1SweepClose, Status: model.StPublishStatusFailed, Error: &reason})
+	}
+	if _, failures := stV1SweepFailures(publishes, stV1SweepActClose); failures != stV1SweepMaximumFailures+1 {
+		t.Fatalf("close failures %d", failures)
+	}
+}
+
 // No root-key action precedes the v2 root of the sweep epoch: across the
 // whole root window without it, every action is a wait or the deposit
 // signer's close.
