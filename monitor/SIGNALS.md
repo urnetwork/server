@@ -19823,6 +19823,16 @@ Missing inventory, source, range, or diagnostic collectors produces a WARN
 `control-route-pressure-unobservable` finding; independently proven hot slots
 still emit `control-route-pressure`.
 
+The phase and frame diagnostics read only the listed partitions: the four
+phases and the nine frame message kinds below. A partition outside those
+lists is skipped. Before CPUOPT3 D3 any unlisted partition made its process
+invalid, so from 2026-10-22, when every API process began to export
+`resident_move_result` (65778f4d1), every slot read as unobservable and the
+signal could not raise pressure. `TestControlRouteMessagesCoverControllerLabels`
+fails when the controller or router adds a partition the signal does not
+list. A frame series from another ingress, a cell outside the signal's own
+query and a duplicated cell still make the process unobservable.
+
 While the owning context remains live, source-path errors retain that same
 coverage WARN and `Bounded Mimir query unavailable` wording, with the shared
 finite `error_class` and any typed `ssh_admission_failures` phases. A finished
@@ -19883,10 +19893,11 @@ The opt-in API instrumentation adds only fixed cells:
   of its own reaches the state query, a removed or rotated client is told
   only the refusals recorded for it; a revoked session marker or a
   remembered state refusal still answers 401 first.
-- `urnetwork_connect_control_frames_total{ingress,message,outcome}` has 64
-  cells: `http|internal`, eight fixed message kinds (`create_contract`,
+- `urnetwork_connect_control_frames_total{ingress,message,outcome}` has 72
+  cells: `http|internal`, nine fixed message kinds (`create_contract`,
   `close_contract`, `provide`, `encrypted_key`, `client_key`, `control_ping`,
-  `provide_ping`, `other`), and `handler_ok|error|canceled|panic`. Matching
+  `provide_ping`, `resident_move_result`, `other`), and
+  `handler_ok|error|canceled|panic`. Matching
   `urnetwork_connect_control_frames_inflight` and
   `urnetwork_connect_control_frame_seconds_{sum,count}` locate handler
   residence. Every child exists at zero on a capable executable. `internal`

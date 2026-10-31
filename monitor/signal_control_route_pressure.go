@@ -35,10 +35,14 @@ func (controlRoutePressureProbe) id() string             { return "runtime/contr
 func (controlRoutePressureProbe) tier() string           { return tierWarn }
 func (controlRoutePressureProbe) cadence() time.Duration { return time.Minute }
 
+// The partitions a current api exports at zero (router/control_observation.go,
+// controller/connect_control_metrics.go). The diagnostics read only these; a
+// partition outside them is skipped, never a reason to distrust the process.
 var controlRoutePhases = [...]string{"prepare", "authenticate", "controller", "response"}
 var controlRouteMessages = [...]string{
 	"create_contract", "close_contract", "provide", "encrypted_key",
-	"client_key", "control_ping", "provide_ping", "other",
+	"client_key", "control_ping", "provide_ping", "resident_move_result",
+	"other",
 }
 
 // Exact process identity stays in the private join. Render host/block only.
@@ -127,7 +131,11 @@ func (controlRoutePressureProbe) check(ctx context.Context, env *probeEnv) ([]fi
 	return evaluateControlRoutePressure(processes, expected, env.now()), nil
 }
 
-// Reject duplicate/unknown partitions rather than summing incompatible sources.
+// Reject duplicate cells, cells outside the query and frame series from
+// another ingress rather than summing incompatible sources. A phase or frame
+// partition outside the lists is a diagnostic gauge this signal does not
+// read: it is skipped, so a label a newer release adds cannot make every
+// slot unobservable, as resident_move_result did from 2026-10-22.
 func parseControlRoutePressure(payload, environment string, now time.Time) ([]*controlRouteProcess, error) {
 	if len(payload) > controlRouteResponseMax {
 		return nil, fmt.Errorf("response exceeds bounded limit")
@@ -164,12 +172,12 @@ func parseControlRoutePressure(payload, environment string, now time.Time) ([]*c
 					process.invalid = true
 				}
 			}
-			valid := false
+			listed := false
 			for _, item := range allowed {
-				valid = valid || partition == item
+				listed = listed || partition == item
 			}
-			if !valid {
-				process.invalid = true
+			if !listed {
+				continue
 			}
 			name += ":" + partition
 		default:
