@@ -63,6 +63,39 @@ const stEpochProviderUsageSql = `
 		AND outcome IN ('settled','dispute_resolved_to_source','dispute_resolved_to_destination')
 `
 
+// Counts the usage statement's rows, up to $3, in the read's own snapshot. A
+// window past the census record bound holds no undated terminal row: one
+// would gate the statement down to the one or two probe rows.
+const stEpochProviderUsageBoundSql = `SELECT count(*) FROM (SELECT 1 FROM (` + stEpochProviderUsageSql + `) AS usage LIMIT $3) AS bounded`
+
+// A whole window reads the same usage statement in one block-ordered pass. Its
+// rows are scattered through the contract heap (Main, 2026-10-30: a 7-day
+// epoch closed ~400M contracts on ~35% of ~105M heap pages, ~1.15 rows per
+// page in any two minutes), so the close-time index order the planner prefers
+// pays a synchronous random page read per row: 10-40K rows/s on cold pages,
+// past the close's three hours. A bitmap reads each page once, in block order,
+// with asynchronous prefetch: 125-165K rows/s on the same cold pages. The
+// bound proves both undated probes empty, so their plans read nothing; the
+// archive is hashed in memory, and nothing sorts, materializes or spills. One
+// backend keeps the row order deterministic; a forced custom plan keeps a
+// session's cached generic plan from ignoring these settings.
+var stEpochProviderUsageWholeWindowSettings = []string{
+	`SET LOCAL enable_indexscan = off`,
+	`SET LOCAL enable_seqscan = off`,
+	`SET LOCAL max_parallel_workers_per_gather = 0`,
+	`SET LOCAL plan_cache_mode = force_custom_plan`,
+}
+
+// Plans the rest of tx's statements as whole-window reads.
+func stEpochProviderUsageWholeWindowPlanInTx(ctx context.Context, tx server.PgTx) error {
+	for _, setting := range stEpochProviderUsageWholeWindowSettings {
+		if _, err := tx.Exec(ctx, setting); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // A component census comes from the exact same statement snapshot as usage.
 // Existing payout processing can retain unknown evidence when the optional
 // original-row component exceeds capacity; it never publishes a partial census.
@@ -95,7 +128,10 @@ func getStEpochProviderUsage(ctx context.Context, epoch uint64, startTime time.T
 }
 
 // The optional recorder borrows each validated row only until it clones the
-// original jsonb bytes. No second query can race retention or terminal writers.
+// original jsonb bytes. Every statement reads one snapshot, so no retention or
+// terminal writer can race the read. A window past the census record bound
+// reads the usage statement alone, planned as one block-ordered pass; any
+// other window reads exactly as before.
 func getStEpochProviderUsageWithCensus(ctx context.Context, epoch uint64, startTime time.Time, endTime time.Time, census *payoutartifact.ClosedWorkCensus, window **payoutartifact.ClosedWorkWindow) ([]*StProviderUsage, error) {
 	if !startTime.Before(endTime) {
 		return nil, fmt.Errorf("invalid subnet usage window")
@@ -127,12 +163,10 @@ func getStEpochProviderUsageWithCensus(ctx context.Context, epoch uint64, startT
 		census.Records = []payoutartifact.ClosedWorkRecord{}
 	}
 	usagesByClientId := map[server.Id]*StProviderUsage{}
+	usageRows := 0
 	var returnErr error
-	read := func(conn server.PgCanQuery) {
-		query := stEpochProviderUsageSql
-		if census != nil {
-			query = stEpochProviderOriginalUsageSql
-		}
+	// originals: the census statement, with its report and window columns
+	read := func(conn server.PgCanQuery, query string, originals bool) {
 		rows, err := conn.Query(ctx, query, queryStart, queryEnd)
 		if err != nil {
 			returnErr = fmt.Errorf("read epoch provider usage: %w", err)
@@ -147,7 +181,7 @@ func getStEpochProviderUsageWithCensus(ctx context.Context, epoch uint64, startT
 			var originalReports []byte
 			var windowOnly bool
 			columns := []any{&contractId, &data, &closedAt, &duplicate}
-			if census != nil {
+			if originals {
 				columns = append(columns, &originalReports, &windowOnly)
 			}
 			if err := rows.Scan(columns...); err != nil {
@@ -163,6 +197,7 @@ func getStEpochProviderUsageWithCensus(ctx context.Context, epoch uint64, startT
 				}
 				continue
 			}
+			usageRows++
 			if closedAt == nil {
 				returnErr = fmt.Errorf("subnet contract %s has terminal usage without a close time; epoch completeness is unknown", contractId)
 				return
@@ -212,31 +247,25 @@ func getStEpochProviderUsageWithCensus(ctx context.Context, epoch uint64, startT
 		}
 		returnErr = rows.Err()
 	}
-	// One statement reads the whole epoch in one snapshot, so the read cannot
-	// be paged, and a seven-day epoch outlasts the application role's
-	// 15-minute transaction bound (30-55 minutes projected at epoch 0's read
-	// rates). It runs on a direct maintenance session that lifts the bound for
-	// itself; the epoch close's MaxTime still bounds it, and its cancel reaches
-	// that session. A replica takes this read once one exists.
-	if census == nil {
-		server.MaintenanceDb(ctx, func(conn server.PgConn) {
-			server.WithoutTransactionTimeout(ctx, conn, func() {
-				read(conn)
-			})
-		})
-	} else {
-		server.MaintenanceDb(ctx, func(conn server.PgConn) {
-			server.WithoutTransactionTimeout(ctx, conn, func() {
+	// Every statement of a read shares one REPEATABLE READ snapshot, so the
+	// read never pages across commits. A seven-day epoch outlasts the
+	// application role's 15-minute transaction bound, so it runs on a direct
+	// maintenance session that lifts the bound for itself; the caller's MaxTime
+	// still bounds it, and its cancel reaches that session. A replica takes
+	// this read once one exists.
+	server.MaintenanceDb(ctx, func(conn server.PgConn) {
+		server.WithoutTransactionTimeout(ctx, conn, func() {
+			tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+			if err != nil {
+				returnErr = fmt.Errorf("read epoch provider usage: %w", err)
+				return
+			}
+			// read only, so a rollback ends it
+			defer tx.Rollback(context.WithoutCancel(ctx))
+			if census != nil {
 				// The census and the check for close evidence that a partition
 				// cutover holds outside the evidence table read one snapshot, so
 				// the census never misses a moved report: it waits for the swap.
-				tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
-				if err != nil {
-					returnErr = fmt.Errorf("read epoch provider usage: %w", err)
-					return
-				}
-				// read only, so a rollback ends it
-				defer tx.Rollback(context.WithoutCancel(ctx))
 				moved, err := server.CloseEvidenceMovedOutsideTableInTx(ctx, tx)
 				if err != nil {
 					returnErr = fmt.Errorf("read epoch provider usage: %w", err)
@@ -246,10 +275,39 @@ func getStEpochProviderUsageWithCensus(ctx context.Context, epoch uint64, startT
 					returnErr = server.ErrCloseEvidenceCutoverMoving
 					return
 				}
-				read(tx)
-			})
+			}
+			var bounded int
+			if err := tx.QueryRow(ctx, stEpochProviderUsageBoundSql, queryStart, queryEnd, payoutartifact.MaxClosedWorkRecords+1).Scan(&bounded); err != nil {
+				returnErr = fmt.Errorf("read epoch provider usage: %w", err)
+				return
+			}
+			if bounded <= payoutartifact.MaxClosedWorkRecords {
+				if census != nil {
+					read(tx, stEpochProviderOriginalUsageSql, true)
+				} else {
+					read(tx, stEpochProviderUsageSql, false)
+				}
+				return
+			}
+			// Past MaxClosedWorkRecords rows the census can hold no record (the
+			// row that overflows it discards every record before it), so the
+			// census statement's report and window columns would all be
+			// discarded. The usage statement alone returns the same rows.
+			if err := stEpochProviderUsageWholeWindowPlanInTx(ctx, tx); err != nil {
+				returnErr = fmt.Errorf("read epoch provider usage: %w", err)
+				return
+			}
+			glog.Infof("[st]usage window [%s, %s) holds over %d closed contracts; reading it whole, without close reports\n", queryStart.UTC().Format(time.RFC3339), queryEnd.UTC().Format(time.RFC3339), payoutartifact.MaxClosedWorkRecords)
+			if census != nil {
+				census.Records = nil
+			}
+			read(tx, stEpochProviderUsageSql, false)
+			if returnErr == nil && usageRows <= payoutartifact.MaxClosedWorkRecords {
+				// one snapshot cannot return fewer rows than it counted
+				returnErr = fmt.Errorf("read epoch provider usage: %d rows read after %d were counted", usageRows, bounded)
+			}
 		})
-	}
+	})
 	if returnErr != nil {
 		return nil, returnErr
 	}
