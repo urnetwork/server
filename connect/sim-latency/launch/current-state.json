@@ -614,6 +614,17 @@
     "authenticated_operator_only_public_embargo_unchanged": true,
     "frozen_evaluator_policy_baseline_and_runtime_unchanged": true,
     "never_a_current_grading_restoration_gate": true,
+    "rollout_preflight": {
+      "record": "server/connect/sim-latency/launch/GRAFANA-ROLLOUT-PREFLIGHT-2026-10-31.json",
+      "live_grafana_version": "13.2.0",
+      "live_competition_dashboard_version": 2,
+      "live_competition_dashboard_panels": 26,
+      "reviewed_source_dashboard_panels": 37,
+      "new_score_panels_published": false,
+      "api_score_metrics_deployment_and_database_head_not_verified": true,
+      "audit_methods": ["GET"],
+      "grading_or_reward_hold_changes": false
+    },
     "xy_panel_ids": [
       31,
       32,

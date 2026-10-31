@@ -108,6 +108,16 @@ live PromQL/data and deployment are not claimed. See the
 [native mapping evidence](launch/GRAFANA-NATIVE-MAPPING-QUALIFICATION-2026-10-31.json).
 Neither this operator-chart work nor its deployment is a grading-restoration gate.
 
+A subsequent GET-only [rollout preflight](launch/GRAFANA-ROLLOUT-PREFLIGHT-2026-10-31.json)
+verified that main Grafana is already 13.2.0, with healthy genuine worker and
+supervisor signals. Its live competition dashboard is still version 2 with 26
+panels, not the reviewed 37-panel source. Confirm migration 903 through the
+normal pipeline, deploy the main API's score-metrics collector, then use the
+reviewed `bringyourctl grafana load-defaults --dashboards_only`. This syncs the
+managed dashboards without changing alert routing. Verify actual Mimir points
+and private sharing afterward; neither native fixture proof nor this read-only
+preflight constitutes that rollout.
+
 The dated observations below preserve earlier phases, not current commands.
 
 The later read-only snapshot at **18:39 UTC on October 30** shows four completed
