@@ -55,6 +55,9 @@ type StLedgerV2CoveredEpoch struct {
 	Funding uint256.Int
 	// Rows is the epoch's recorded provider rows, or nil when it has none yet.
 	Rows *model.StLedgerV2EpochRows
+	// Recovery lists the epoch's phase C recovery components (§16 step 6),
+	// each allocated by its source epoch's recorded rows.
+	Recovery []*StLedgerV2Recovery
 }
 
 // StLedgerV2Build is a built root.
@@ -69,7 +72,8 @@ type StLedgerV2Build struct {
 	// Accounts are all of the root's accounts in position order. The driver
 	// builds the sum tree from them for the commitment.
 	Accounts []merkle.LedgerAccount
-	// Amounts are each covered epoch's positive amount per coldkey.
+	// Amounts are each covered epoch's positive amount per coldkey. A recovery
+	// component's amounts are its source epoch's.
 	Amounts []*model.StLedgerV2Amount
 }
 
@@ -79,6 +83,8 @@ type StLedgerV2EpochProviders struct {
 	Epoch          uint64
 	ProviderChunks []string
 	Null           bool
+	// Recovery lists the epoch's recovery components as the header lists them.
+	Recovery []*StLedgerV2RecoveryProviders
 }
 
 var stLedgerBuilderLock sync.Mutex

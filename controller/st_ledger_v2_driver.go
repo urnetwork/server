@@ -642,6 +642,9 @@ func stLedgerV2CommitEpoch(ctx context.Context, cfg *StConfig, client StLedgerV2
 	if errors.Is(err, ErrStLedgerV2NoRoot) {
 		return stLedgerV2Conclude(ctx, cfg, epoch, model.StPublishKindV2Commit, model.StPublishStatusSkipped, "%s", err), nil
 	}
+	if errors.Is(err, ErrStLedgerV2RecoveryRows) {
+		stLedgerV2Alert(cfg, StLedgerV2AlertRecoveryRows, fmt.Sprintf("epoch %d", epoch), "%s; record them with st v2-recovery-record before block %d", err, deadline)
+	}
 	if err != nil {
 		return stLedgerV2Retry(err), nil
 	}
@@ -702,7 +705,8 @@ func stLedgerV2MissedCommit(ctx context.Context, cfg *StConfig, epoch uint64, de
 }
 
 // stLedgerV2Input reads one root's inputs: the covered epochs p+1 … e with
-// their funding from vault2 and their recorded provider rows.
+// their funding from vault2 and their recorded provider rows, and the
+// recovery components the chain places in them (§16 step 6).
 func stLedgerV2Input(ctx context.Context, cfg *StConfig, client StLedgerV2Client, previous *StLedgerV2FinalizedRoot, firstEpoch uint64, epoch uint64) (*StLedgerV2BuildInput, error) {
 	covered := firstEpoch - 1
 	if previous != nil {
@@ -733,6 +737,11 @@ func stLedgerV2Input(ctx context.Context, cfg *StConfig, client StLedgerV2Client
 		input.Epochs = append(input.Epochs, coveredEpoch)
 		before = through
 	}
+	plan, err := stLedgerV2RecoveryPlan(ctx, cfg, firstEpoch, covered, epoch)
+	if err != nil {
+		return nil, err
+	}
+	stLedgerV2AttachRecovery(ctx, cfg, input, plan)
 	return input, nil
 }
 
@@ -762,6 +771,14 @@ func stLedgerV2Commitment(ctx context.Context, input *StLedgerV2BuildInput, buil
 			return nil, nil, fmt.Errorf("st ledger v2: epoch %d is null without the operator's declaration", covered.Epoch)
 		case covered.Rows != nil && (covered.Rows.Null() != listed.Null || !slices.Equal(covered.Rows.ProviderChunks, listed.ProviderChunks)):
 			return nil, nil, fmt.Errorf("st ledger v2: the build changes epoch %d's recorded provider rows", covered.Epoch)
+		case len(covered.Recovery) != len(listed.Recovery):
+			return nil, nil, fmt.Errorf("st ledger v2: the build lists %d recovery components of epoch %d, not %d", len(listed.Recovery), covered.Epoch, len(covered.Recovery))
+		}
+		for j, component := range covered.Recovery {
+			got := listed.Recovery[j]
+			if got.Epoch != component.Epoch || got.Amount != component.Amount || component.Rows == nil || got.Null != component.Rows.Null() || !slices.Equal(got.ProviderChunks, component.Rows.ProviderChunks) {
+				return nil, nil, fmt.Errorf("st ledger v2: the build changes epoch %d's recovery of epoch %d", covered.Epoch, component.Epoch)
+			}
 		}
 	}
 	return tree, &StLedgerV2Commitment{Root: root, Total: total, LeafCount: tree.LeafCount(), LedgerHash: sha256.Sum256(build.Header)}, nil

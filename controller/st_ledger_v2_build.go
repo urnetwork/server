@@ -106,6 +106,24 @@ func (self stLedgerV2Builder) Build(ctx context.Context, input *StLedgerV2BuildI
 				build.Amounts = append(build.Amounts, &model.StLedgerV2Amount{NoId: input.NoId, Epoch: epoch.Epoch, Coldkey: delta.Coldkey, Amount: delta.Delta})
 			}
 		}
+		// A recovery component's source rows are recorded, and so published,
+		// before any root lists them; its amounts are its source epoch's.
+		for _, component := range epoch.Recovery {
+			listed := &StLedgerV2RecoveryProviders{Epoch: component.Epoch, Amount: component.Amount, Null: component.Null}
+			if !component.Null {
+				listed.ProviderChunks = make([]string, len(component.Providers))
+				for j, ref := range component.Providers {
+					listed.ProviderChunks[j] = ref.String()
+					published[ref] = true
+				}
+			}
+			providers.Recovery = append(providers.Recovery, listed)
+			for _, delta := range component.Deltas {
+				if !delta.Delta.IsZero() {
+					build.Amounts = append(build.Amounts, &model.StLedgerV2Amount{NoId: input.NoId, Epoch: component.Epoch, Coldkey: delta.Coldkey, Amount: delta.Delta})
+				}
+			}
+		}
 	}
 	refs := []ledger.Ref{}
 	for ref := range built.Objects {
@@ -127,6 +145,10 @@ func (self stLedgerV2Builder) Build(ctx context.Context, input *StLedgerV2BuildI
 // or, when nothing is recorded, rows built from v1's inputs.
 func stLedgerV2EpochInput(ctx context.Context, covered *StLedgerV2CoveredEpoch) (ledger.EpochInput, error) {
 	input := ledger.EpochInput{Epoch: covered.Epoch}
+	var err error
+	if input.Recovery, err = stLedgerV2RecoveryInputs(ctx, covered); err != nil {
+		return input, err
+	}
 	if covered.Rows == nil {
 		rows, err := stLedgerV2NewEpochRows(ctx, covered.Epoch)
 		input.Rows = rows

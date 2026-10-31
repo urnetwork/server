@@ -159,6 +159,8 @@ Usage:
     bringyourctl st v2-unrecoverable --epoch=<epoch> --by=<operator>
     bringyourctl st v2-rebuild --epoch=<epoch> --by=<operator>
     bringyourctl st v2-rebuild-withdraw --epoch=<epoch> --by=<operator>
+    bringyourctl st v2-recovery-usage --epoch=<epoch> --out=<dir> [--store]
+    bringyourctl st v2-recovery-record --epoch=<epoch> --usage=<manifest> [--dir=<dir>] --by=<operator>
     bringyourctl st v2-activation
     bringyourctl st v2-activation-clear --no_id=<no_id> --first_epoch=<first_epoch> --vault_v2_address=<vault_v2_address> --settlement_v2_address=<settlement_v2_address> --by=<operator>
     bringyourctl grafana load-defaults [--grafana_url=<grafana_url>] [--dashboards_only]
@@ -572,6 +574,10 @@ func main() {
 			stV2Rebuild(opts)
 		} else if rebuildWithdraw, _ := opts.Bool("v2-rebuild-withdraw"); rebuildWithdraw {
 			stV2RebuildWithdraw(opts)
+		} else if recoveryUsage, _ := opts.Bool("v2-recovery-usage"); recoveryUsage {
+			stV2RecoveryUsage(opts)
+		} else if recoveryRecord, _ := opts.Bool("v2-recovery-record"); recoveryRecord {
+			stV2RecoveryRecord(opts)
 		} else if activation, _ := opts.Bool("v2-activation"); activation {
 			stV2Activation(opts)
 		} else if activationClear, _ := opts.Bool("v2-activation-clear"); activationClear {

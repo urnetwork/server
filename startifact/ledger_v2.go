@@ -52,9 +52,32 @@ func ledgerObjectKey(store server.BlobStore, digest [32]byte) string {
 	return filepath.ToSlash(filepath.Join(store.Prefix(), "st", "v2", "ledger", "sha256", hex.EncodeToString(digest[:])))
 }
 
+// recoveryObjectKey is where a phase C recovery usage object is kept: beside
+// the ledger objects, but not under the prefix GET /sn/ledger/object serves,
+// because a usage row names its provider's network.
+func recoveryObjectKey(store server.BlobStore, digest [32]byte) string {
+	return filepath.ToSlash(filepath.Join(store.Prefix(), "st", "v2", "recovery", "sha256", hex.EncodeToString(digest[:])))
+}
+
 // PutLedgerObject stores b under its sha256 unless it is already present, then
 // reads the stored object back and requires the same bytes.
 func PutLedgerObject(ctx context.Context, store server.BlobStore, b []byte) (string, error) {
+	return putContentObject(ctx, store, b, ledgerObjectKey)
+}
+
+// PutRecoveryObject stores a recovery usage object as PutLedgerObject stores a
+// ledger object, under the recovery prefix.
+func PutRecoveryObject(ctx context.Context, store server.BlobStore, b []byte) (string, error) {
+	return putContentObject(ctx, store, b, recoveryObjectKey)
+}
+
+// GetRecoveryObject returns the recovery usage object a reference names, as
+// GetLedgerObject returns a ledger object.
+func GetRecoveryObject(ctx context.Context, store server.BlobStore, ref string) ([]byte, error) {
+	return getContentObject(ctx, store, ref, recoveryObjectKey)
+}
+
+func putContentObject(ctx context.Context, store server.BlobStore, b []byte, keyOf func(server.BlobStore, [32]byte) string) (string, error) {
 	if store == nil {
 		return "", errors.New("server/blob store is unavailable")
 	}
@@ -63,7 +86,7 @@ func PutLedgerObject(ctx context.Context, store server.BlobStore, b []byte) (str
 	}
 	ref := LedgerObjectRef(b)
 	digest, _ := ParseLedgerObjectRef(ref)
-	key := ledgerObjectKey(store, digest)
+	key := keyOf(store, digest)
 	tmp, err := os.CreateTemp("", "urnetwork-st-ledger-*.bin")
 	if err != nil {
 		return "", err
@@ -95,6 +118,10 @@ func PutLedgerObject(ctx context.Context, store server.BlobStore, b []byte) (str
 // sha256. A malformed reference is an error; a missing object is
 // ErrLedgerObjectNotFound.
 func GetLedgerObject(ctx context.Context, store server.BlobStore, ref string) ([]byte, error) {
+	return getContentObject(ctx, store, ref, ledgerObjectKey)
+}
+
+func getContentObject(ctx context.Context, store server.BlobStore, ref string, keyOf func(server.BlobStore, [32]byte) string) ([]byte, error) {
 	if store == nil {
 		return nil, errors.New("server/blob store is unavailable")
 	}
@@ -102,7 +129,7 @@ func GetLedgerObject(ctx context.Context, store server.BlobStore, ref string) ([
 	if err != nil {
 		return nil, err
 	}
-	reader, err := store.Get(ctx, ledgerObjectKey(store, digest))
+	reader, err := store.Get(ctx, keyOf(store, digest))
 	if err != nil {
 		return nil, ledgerObjectReadError(ref, err)
 	}

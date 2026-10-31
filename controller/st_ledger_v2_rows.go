@@ -37,6 +37,21 @@ func stLedgerV2NewEpochRows(ctx context.Context, epoch uint64) ([]protocol.Ledge
 	if err != nil {
 		return nil, err
 	}
+	authority, err := stLedgerV2EpochAuthority(ctx, cfg, client, epoch)
+	if err != nil {
+		return nil, err
+	}
+	// the census is canonical: one usage per client, in client id order
+	usages, err := model.GetStEpochProviderUsageAtEpoch(ctx, epoch, authority.StartTime, authority.EndTime)
+	if err != nil {
+		return nil, err
+	}
+	return stLedgerV2RowsFromUsages(ctx, cfg, client, authority, usages)
+}
+
+// stLedgerV2EpochAuthority reads an epoch's authenticated window, under the
+// configured policy, refusing a window the cutoff_utc would clip.
+func stLedgerV2EpochAuthority(ctx context.Context, cfg *StConfig, client StClient, epoch uint64) (*StPayoutEpochAuthority, error) {
 	authority, err := client.PayoutEpochAuthority(ctx, epoch)
 	if err != nil {
 		return nil, err
@@ -51,11 +66,15 @@ func stLedgerV2NewEpochRows(ctx context.Context, epoch uint64) ([]protocol.Ledge
 	if start, _ := transition.SnWindow(authority.StartTime, authority.EndTime); !start.Equal(authority.StartTime) {
 		return nil, fmt.Errorf("%w: epoch %d starts at %s, before %s", ErrStLedgerV2WindowClipped, epoch, authority.StartTime.Format(time.RFC3339), transition.Cutoff.Format(time.RFC3339))
 	}
-	// the census is canonical: one usage per client, in client id order
-	usages, err := model.GetStEpochProviderUsageAtEpoch(ctx, epoch, authority.StartTime, authority.EndTime)
-	if err != nil {
-		return nil, err
-	}
+	return authority, nil
+}
+
+// stLedgerV2RowsFromUsages builds an epoch's provider rows from its census:
+// the coldkey of each provider's wallet selection, zero without one, and the
+// head flag of an active fleet binding at either boundary. The selected
+// wallets' resolutions are retained before the rows are returned.
+func stLedgerV2RowsFromUsages(ctx context.Context, cfg *StConfig, client StClient, authority *StPayoutEpochAuthority, usages []*model.StProviderUsage) ([]protocol.LedgerUsageRow, error) {
+	epoch := authority.Epoch
 	// a signed roster, when one is configured, fixes the provider universe
 	work, workConfigured, err := stLoadProviderWorkAuthority(ctx, cfg, authority)
 	if err == nil {

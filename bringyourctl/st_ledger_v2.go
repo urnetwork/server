@@ -3,12 +3,17 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/docopt/docopt-go"
 
+	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
 )
@@ -63,6 +68,80 @@ func stV2RebuildWithdraw(opts docopt.Opts) {
 		panic(err)
 	}
 	fmt.Printf("epoch %d rebuild request by %s withdrawn by %s\n", epoch, requestedBy, by)
+}
+
+// stV2RecoveryUsage preserves a scheduled recovery source epoch's usage
+// census (VERSION2-FINAL.md §16 step 6) as a content-addressed artifact: a
+// manifest and its usage chunks, written into a new --out directory and,
+// with --store, put once each in the blob store's private recovery prefix.
+// The process is read-only: PostgreSQL refuses every write it attempts, and
+// the census is one REPEATABLE READ, READ ONLY transaction through the
+// whole-window reader. Standard output carries counts and references only.
+func stV2RecoveryUsage(opts docopt.Opts) {
+	server.RequirePgReadOnly()
+	ctx := context.Background()
+	epochStr, _ := opts.String("--epoch")
+	epoch, err := strconv.ParseUint(epochStr, 10, 64)
+	if err != nil {
+		panic(fmt.Errorf("bad --epoch %q: %s", epochStr, err))
+	}
+	out, _ := opts.String("--out")
+	// fail before the census, not after it
+	if _, err := os.Lstat(out); !errors.Is(err, os.ErrNotExist) {
+		panic(fmt.Errorf("--out %q already exists or cannot be checked: %v", out, err))
+	}
+	store, _ := opts.Bool("--store")
+	start := time.Now()
+	usage, err := controller.BuildStLedgerV2RecoveryUsage(ctx, epoch)
+	if err != nil {
+		panic(err)
+	}
+	if err := controller.WriteStLedgerV2RecoveryUsage(usage, out); err != nil {
+		panic(err)
+	}
+	if store {
+		if err := controller.StoreStLedgerV2RecoveryUsage(ctx, usage); err != nil {
+			panic(err)
+		}
+	}
+	writeStV2RecoveryUsageSummary(os.Stdout, usage, out, store, time.Since(start))
+}
+
+func writeStV2RecoveryUsageSummary(w io.Writer, usage *controller.StLedgerV2RecoveryUsage, out string, stored bool, took time.Duration) {
+	manifest := usage.Manifest
+	fmt.Fprintln(w, "st v2 recovery usage: read-only census; nothing was recorded or sent")
+	fmt.Fprintf(w, "%-24s %d (pool %d, deployment %s)\n", "epoch", manifest.Epoch, manifest.NoId, manifest.DeploymentId)
+	fmt.Fprintf(w, "%-24s blocks %d to %d, %s to %s\n", "window", manifest.Start.Block, manifest.End.Block, manifest.Start.Time, manifest.End.Time)
+	fmt.Fprintf(w, "%-24s %d\n", "provider rows", manifest.Rows)
+	fmt.Fprintf(w, "%-24s %s\n", "payout bytes", manifest.PayoutBytes)
+	fmt.Fprintf(w, "%-24s %d\n", "usage chunks", len(manifest.Chunks))
+	fmt.Fprintf(w, "%-24s %s\n", "manifest", usage.Ref)
+	fmt.Fprintf(w, "%-24s %s\n", "written to", out)
+	fmt.Fprintf(w, "%-24s %v\n", "stored in blob store", stored)
+	fmt.Fprintf(w, "%-24s %s\n", "took", took.Round(time.Second))
+}
+
+// stV2RecoveryRecord is the operator's explicit command recording a scheduled
+// recovery source epoch's provider rows, built with the v2 rules from its
+// preserved usage artifact (--usage names the manifest; --dir reads it from
+// a directory instead of the blob store). It publishes the rows' chunks,
+// retains the wallet resolutions and records who made the record. Standard
+// output carries counts and references only.
+func stV2RecoveryRecord(opts docopt.Opts) {
+	epochStr, _ := opts.String("--epoch")
+	epoch, err := strconv.ParseUint(epochStr, 10, 64)
+	if err != nil {
+		panic(fmt.Errorf("bad --epoch %q: %s", epochStr, err))
+	}
+	usage, _ := opts.String("--usage")
+	dir, _ := opts.String("--dir")
+	by, _ := opts.String("--by")
+	record, err := controller.StLedgerV2RecordRecoveryRows(context.Background(), epoch, usage, dir, by)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("epoch %d recovery rows recorded by %s: %d rows, %d eligible with %d coldkeys, %s of %s payout bytes eligible, chunks %s\n",
+		record.Epoch, by, record.Rows, record.EligibleRows, record.Coldkeys, record.EligibleBytes.Dec(), record.PayoutBytes.Dec(), strings.Join(record.ProviderChunks, ","))
 }
 
 // stV2Activation shows, as one JSON object, the settlement v2 activation latch

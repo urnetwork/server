@@ -8,9 +8,11 @@ package model
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"time"
 
 	"github.com/holiman/uint256"
@@ -360,6 +362,65 @@ func getStLedgerV2Amounts(ctx context.Context, deploymentKey StDeploymentKey, wh
 		})
 	})
 	return amounts
+}
+
+// StLedgerV2SurplusAssignedEventKind is the mirrored kind of vault2's
+// SurplusAssigned(noId, epoch, amount) event.
+const StLedgerV2SurplusAssignedEventKind = "V2SurplusAssigned"
+
+// GetStLedgerV2SurplusAssigned returns, per epoch, the total of a pool's
+// mirrored vault2 SurplusAssigned amounts in blocks [minBlock, maxBlock]
+// (VERSION2-FINAL.md §16 step 6). A mirrored event that does not parse is an
+// error: a recovery is never planned from part of the events.
+func GetStLedgerV2SurplusAssigned(ctx context.Context, deploymentKey StDeploymentKey, noId uint64, minBlock uint64, maxBlock uint64) (map[uint64]uint256.Int, error) {
+	key := requireStDeploymentKey(deploymentKey)
+	surplus := map[uint64]uint256.Int{}
+	var parseErr error
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT block_number, log_index, data_json
+				FROM st_event
+				WHERE deployment_key = $1 AND $2 <= block_number AND block_number <= $3 AND kind = $4
+				ORDER BY block_number, log_index
+			`,
+			key, int64(minBlock), int64(maxBlock), StLedgerV2SurplusAssignedEventKind,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var block int64
+				var index int
+				var data string
+				server.Raise(result.Scan(&block, &index, &data))
+				var event struct {
+					NoId   string `json:"no_id"`
+					Epoch  string `json:"e"`
+					Amount string `json:"amount"`
+				}
+				if jsonErr := json.Unmarshal([]byte(data), &event); jsonErr != nil {
+					parseErr = errors.Join(parseErr, fmt.Errorf("st ledger v2: SurplusAssigned log %d of block %d: %w", index, block, jsonErr))
+					continue
+				}
+				eventNoId, noIdErr := uint256.FromDecimal(event.NoId)
+				epoch, epochErr := strconv.ParseUint(event.Epoch, 10, 64)
+				amount, amountErr := uint256.FromDecimal(event.Amount)
+				if noIdErr != nil || epochErr != nil || amountErr != nil {
+					parseErr = errors.Join(parseErr, fmt.Errorf("st ledger v2: SurplusAssigned log %d of block %d does not parse", index, block))
+					continue
+				}
+				if !eventNoId.Eq(uint256.NewInt(noId)) {
+					continue
+				}
+				total := surplus[epoch]
+				surplus[epoch] = *total.Add(&total, amount)
+			}
+		})
+	})
+	if parseErr != nil {
+		return nil, parseErr
+	}
+	return surplus, nil
 }
 
 // StLedgerV2Funding mirrors one epoch's vault2 funding snapshot.

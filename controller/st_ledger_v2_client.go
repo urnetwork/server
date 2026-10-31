@@ -604,7 +604,7 @@ func (self *CoreStClient) stLedgerV2EventDecoders(address common.Address) ([]stE
 			stEvent("V2StakeAbsorbed", v.UnpackStakeAbsorbedEvent, func(e *stabi.STSettlementVault2StakeAbsorbed) map[string]any {
 				return map[string]any{"hotkey": fmt.Sprintf("0x%x", e.Hotkey), "observed": e.Observed.String(), "amount": e.Amount.String(), "caller": e.Caller.Hex()}
 			}),
-			stEvent("V2SurplusAssigned", v.UnpackSurplusAssignedEvent, func(e *stabi.STSettlementVault2SurplusAssigned) map[string]any {
+			stEvent(model.StLedgerV2SurplusAssignedEventKind, v.UnpackSurplusAssignedEvent, func(e *stabi.STSettlementVault2SurplusAssigned) map[string]any {
 				return map[string]any{"no_id": e.NoId.String(), "e": e.Epoch.String(), "amount": e.Amount.String()}
 			}),
 		}, true

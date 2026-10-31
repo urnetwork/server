@@ -20,11 +20,16 @@ import (
 
 // stLedgerV2Finalized runs the readers' finalization hooks for a finalized v2
 // root whose amounts were just recorded: the leaderboard rebuild, and the
-// earnings email of each epoch the root covers.
+// earnings email of each epoch the root covers and of each source epoch it
+// recovers (§16 step 6).
 func stLedgerV2Finalized(ctx context.Context, deploymentKey model.StDeploymentKey, epochs []*StLedgerV2CoveredEpoch) {
 	TriggerRebuildPointsLeaderboard(ctx)
 	for _, covered := range epochs {
 		StNotifyEpochEarnings(ctx, deploymentKey, covered.Epoch)
+		// a recovered source epoch's earnings are its recovery amounts
+		for _, component := range covered.Recovery {
+			StNotifyEpochEarnings(ctx, deploymentKey, component.Epoch)
+		}
 	}
 }
 
