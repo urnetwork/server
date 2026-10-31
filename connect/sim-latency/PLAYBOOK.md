@@ -95,10 +95,16 @@ query-filtered transformations reverse frames, while legacy migration binds
 each series by its old ordinal. Commit `7331d7728` fixes all four panels with
 explicit named matchers and the modern plugin-version guard. The deterministic
 old-source regression fails for the intended zero-of-six-series cause; 45
-focused race-test executions pass on the fix. The first corrected dense panel
-now visibly plots candidates and its baseline/fringe, but the native side pane
-obscures its final region. Unobstructed four-panel/sparse/singleton/empty and
-tooltip qualification remains pending, as does deployment. See the
+focused race-test executions pass on the fix. All sixteen native fresh-page
+cases (four panels, dense/sparse/singleton/empty) and twelve actual tooltip
+identities/values are now visually reviewed. Native docking makes the candidate
+points and baseline/fringes unobstructed. A separate forced-orphan test reproduced
+the browser harness's missing-reaper failure; adding browser-only `--init` fixed
+the run at the same resource limits. The frozen evaluator already has Tini and
+was unchanged. Scoped cleanup preserved the original three containers; an
+external task ended before any test container existed, so the raw whole-host
+inventory inequality remains recorded rather than hidden. In-place refresh,
+live PromQL/data and deployment are not claimed. See the
 [native mapping evidence](launch/GRAFANA-NATIVE-MAPPING-QUALIFICATION-2026-10-31.json).
 Neither this operator-chart work nor its deployment is a grading-restoration gate.
 

@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "kind": "grafana-submission-native-mapping-qualification",
-  "status": "targeted_race_controls_and_first_dense_native_smoke_passed_full_matrix_pending",
+  "status": "four_panel_fresh_page_native_matrix_and_tooltip_values_qualified_not_deployed",
   "source": {
     "commit": "7331d7728c1245cd07fa7c60357500e690b85ade",
     "base_commit": "26bbbf3fdea6b870a327bdf36189401298d39b5d",
@@ -84,13 +84,76 @@
     "evidence_manifest_sha256": "024e217297044c441d4d6cc25bac1e8f0dfae21962293529b34d0bd3ce20a8c2",
     "owned_containers_network_and_input_inventory_guards_passed": true
   },
+  "complete_native_matrix": {
+    "artifact_directory": "/mnt/data/grafana-native-matrix-init-20261031.13eyYe7y",
+    "matrix_json_sha256": "e72b1efdf1effca4c5311bb7b6a1b333f457f550304bede4873ad9c8bbd054d0",
+    "evidence_manifest_sha256": "440d37134fd6f7de16a3e87afe3883adaadfe3fb3cbee45e50b1440887b4b7ad",
+    "manifest_members_independently_verified": 2466,
+    "helper_source_manifest_sha256": "d20763c44d5047bdc167e3cd1c5c3516e22b186add28b75088ea4c536f8d141e",
+    "helper_elf_sha256": "56fbb1c4a94f9bdefc23a8c5e13e8b2f08653d3de002b547a257393a72134302",
+    "helper_static_top_level_passes": 14,
+    "native_cases_observed": 16,
+    "real_tooltip_identities": 12,
+    "fresh_page_cases_only": true,
+    "manual_visual_and_numeric_review_passed": true,
+    "manual_review_method": "Viewed every distinct final plot and tooltip PNG; four final plots and eight tooltip PNGs were byte-identical to previously viewed, retained partial-run cases. Checked each observed tooltip identity against its supplied synthetic value.",
+    "scope": "Panels 31 through 34, each with dense, sparse-C, singleton-C and empty data; original submission-time coordinates, all candidate classes, visible baseline/fringes, singleton reference markers and no fabricated empty zeros.",
+    "toy_tooltip_values": [
+      {"panel": 31, "scenario": "dense", "job": "synthetic-job-01", "value": 70, "unit": "ms"},
+      {"panel": 31, "scenario": "sparse-c", "job": "synthetic-job-06", "value": 103, "unit": "ms"},
+      {"panel": 31, "scenario": "singleton-c", "job": "synthetic-job-05", "value": 95, "unit": "ms"},
+      {"panel": 32, "scenario": "dense", "job": "synthetic-job-01", "value": 70, "unit": "ms"},
+      {"panel": 32, "scenario": "sparse-c", "job": "synthetic-job-06", "value": 104, "unit": "ms"},
+      {"panel": 32, "scenario": "singleton-c", "job": "synthetic-job-05", "value": 96, "unit": "ms"},
+      {"panel": 33, "scenario": "dense", "job": "synthetic-job-02", "value": 31, "unit": "percent"},
+      {"panel": 33, "scenario": "sparse-c", "job": "synthetic-job-05", "value": 4, "unit": "percent"},
+      {"panel": 33, "scenario": "singleton-c", "job": "synthetic-job-05", "value": 4, "unit": "percent"},
+      {"panel": 34, "scenario": "dense", "job": "synthetic-job-02", "value": 0.01, "unit": "p-value"},
+      {"panel": 34, "scenario": "sparse-c", "job": "synthetic-job-06", "value": 0.8, "unit": "p-value"},
+      {"panel": 34, "scenario": "singleton-c", "job": "synthetic-job-05", "value": 0.4, "unit": "p-value"}
+    ],
+    "runtime_exceptions": 0,
+    "console_api_errors": 0,
+    "helper_docking_tooltip_or_event_failures": 0,
+    "expected_local_grafana_live_websocket_auth_errors": 44,
+    "websocket_noise_scope": "Synthetic same-origin HTTP Basic interception does not authenticate GrafanaLive WebSockets. All selected HTTP query/render paths succeeded; this does not prove production streaming authentication.",
+    "cosmetic_limits": "Native numeric timestamp autoscaling spans a wide range for a singleton, while its original point time and tooltip are correct. Native tooltip placement may clip its bottom; reviewed candidate identity and numeric value remain available in the actual PNG/body evidence.",
+    "live_promql_engine_or_real_scores_tested": false
+  },
+  "browser_lifecycle_correction": {
+    "prior_partial_artifact_directory": "/mnt/data/grafana-native-matrix-20261031.EJZ6r1Il",
+    "prior_partial_evidence_manifest_sha256": "51f3812c0119493256fefe0b12a981945d92beb1eb2b6d4389b009dfd8c56fdd",
+    "prior_result": "Ten observed cases, then exact browser cgroup PID exhaustion and Chrome thread/fork EAGAIN; not a product-data failure or OOM.",
+    "runtime_delta": "Browser-only Docker --init, with the same 256-PID limit, 2 GiB memory/swap limit, CPU set, XDG paths, images, helper and dashboard.",
+    "forced_orphan_control_artifact_directory": "/mnt/data/orphan-reaping-control-20261031.vnLLJkQP/native-pair",
+    "forced_orphan_control_evidence_manifest_sha256": "53a8714798419c128d499b66cbb534abf9deb52eedfa518f09688c81b5a97335",
+    "forced_orphan_same_elf_sha256": "3ac4af7eef00d628d0a017f9a27e9654158ed30dd948afb6501a7da755fffb2d",
+    "deterministic_control": "Explicit pipes force direct-child exit, verified same-starttick orphan adoption and then release. Without init, the orphan remains a zombie and the same reap assertion exits 1; with init, it is absent while the owner remains alive and the assertion exits 0.",
+    "screenshot_retries_or_resource_limit_increases": false,
+    "new_run_chrome_thread_or_fork_errors": 0,
+    "cgroup_sample": {"at": "2026-10-31T17:17:43Z", "current": 163, "peak": 207, "maximum": 256, "limit_events": 0, "not_a_final_counter_claim": true},
+    "actual_frozen_evaluator_image_already_has_tini_entrypoint": true,
+    "production_evaluator_changed": false
+  },
+  "scoped_cleanup_reconciliation": {
+    "owned_three_containers_and_network_removed_and_absent": true,
+    "original_three_persistent_container_ids_preserved": true,
+    "network_inventory_equal": true,
+    "source_and_elf_after_guards_passed": true,
+    "raw_running_inventory_before_after_equal": false,
+    "foreign_container_id": "a538b5ebb6aee9cf6ee5a2e51aae4e6e3564370a87773a769250a045c567326a",
+    "foreign_owner_identified": false,
+    "foreign_task_delete_journal_at": "2026-10-31T17:17:05.153068609Z",
+    "first_test_owned_container_created_at": "2026-10-31T17:17:11.764324085Z",
+    "interpretation": "The extra running task ended about 6.6 seconds before any test container existed. Exact-ID/owner-label cleanup touched only the three test-owned containers. The raw whole-list inequality remains recorded; no cause or owner for the external task is invented.",
+    "entire_host_state_unchanged_claimed": false
+  },
   "remaining": [
-    "Unobstructed native rendering of all four panels with dense, sparse, singleton and empty data, including actual candidate tooltip evidence.",
     "In-place dense-to-empty and empty-to-dense transitions are not proved by fresh-page cases.",
-    "Deploy additive migration 903 before the normal main API/metrics producer rollout and publish the reviewed dashboards using the corrected bringyourctl loader."
+    "Confirm additive migration 903 is applied before the normal main API/metrics producer rollout, and publish the reviewed dashboards using the corrected bringyourctl loader."
   ],
   "boundaries": {
-    "full_sixteen_case_native_qualification_claimed": false,
+    "full_sixteen_case_native_qualification_claimed": true,
     "live_grafana_api_database_or_services_changed": false,
     "evaluator_policy_baseline_or_holds_changed": false,
     "calibration_acceptance_or_hold_release_authority": false,
