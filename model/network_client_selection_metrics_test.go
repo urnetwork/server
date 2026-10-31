@@ -43,6 +43,34 @@ func selectionMetricCount(t testing.TB, name string, labels map[string]string) f
 	return 0
 }
 
+// Sums every series of the named counter that carries the fixed labels, for a
+// subset that leaves out a label the test does not control.
+func selectionMetricSum(t testing.TB, name string, labels map[string]string) float64 {
+	t.Helper()
+	families, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := 0.0
+	for _, family := range families {
+		if family.GetName() != name {
+			continue
+		}
+		for _, metric := range family.Metric {
+			matched := 0
+			for _, pair := range metric.Label {
+				if want, ok := labels[pair.GetName()]; ok && want == pair.GetValue() {
+					matched++
+				}
+			}
+			if matched == len(labels) && metric.Counter != nil {
+				sum += metric.Counter.GetValue()
+			}
+		}
+	}
+	return sum
+}
+
 // A deliberately empty specification is not evidence of exhausted discovery.
 func TestFindProviders2SelectionExplainsEmptyRequest(t *testing.T) {
 	labels := map[string]string{"target_kind": "none", "request_class": "default_minimum", "ip_family": "any", "rank_mode": "quality", "outcome": "zero", "reason": "no_specs"}
@@ -173,6 +201,9 @@ func TestFindProviders2SelectionExplainsIntentCacheAndRequestFilters(t *testing.
 			}
 			labels := map[string]string{"target_kind": "location_unknown", "request_class": requestClass, "ip_family": "any", "rank_mode": "quality", "outcome": outcome, "reason": metricReason}
 			before := selectionMetricCount(t, "urnetwork_findproviders2_selection_outcomes_total", labels)
+			// the same zero, explained under the outcome counter's request class
+			explained := map[string]string{"ip_family": "any", "location_kind": "location", "rank_mode": "quality", "force_minimum": "false", "capability": "none", "target_kind": "location_unknown", "reason": metricReason}
+			explainedBefore := selectionMetricSum(t, "urnetwork_findproviders2_empty_outcomes_total", explained)
 			clientSession := testingCreateProviderSearchSession(ctx, session.NewByJwt(networkId, server.NewId(), "selection-metrics-test", false, false))
 			result, err := FindProviders2(args, clientSession)
 			if err != nil {
@@ -183,6 +214,13 @@ func TestFindProviders2SelectionExplainsIntentCacheAndRequestFilters(t *testing.
 			}
 			if after := selectionMetricCount(t, "urnetwork_findproviders2_selection_outcomes_total", labels); after != before+1 {
 				t.Fatalf("%s attribution count=%g, want %g", reason, after, before+1)
+			}
+			wantExplained := explainedBefore
+			if outcome == "zero" {
+				wantExplained += 1
+			}
+			if after := selectionMetricSum(t, "urnetwork_findproviders2_empty_outcomes_total", explained); after != wantExplained {
+				t.Fatalf("%s empty-outcome explanation=%g, want %g", reason, after, wantExplained)
 			}
 		}
 	})

@@ -12027,9 +12027,57 @@ these fields or nonempty response sizes. That observation does not establish
 healthy windows. Schema 2 in §2.9c records finite small-result boundaries and
 the exclusion field that actually removed sampled candidates; neither field
 is trusted evidence of client health. The API cannot distinguish durable policy
-from runtime removals within `ExcludeClientIds`, or join this target-kind metric
-to a caller-country cohort. These explanations never suppress this section's
-independent PAGE or provisional WARN.
+from runtime removals within `ExcludeClientIds`, and the §2.9c target-kind
+metric has no caller country, so its reasons never suppress this section's
+independent PAGE or provisional WARN. The per-cohort empty-answer explanations
+below are joined to the outcome cohorts on their own labels instead.
+
+Empty-answer explanations (2026-10-31):
+`urnetwork_findproviders2_empty_outcomes_total` counts every answer of the
+outcome counter's `0` band again, under the same request-class labels
+(`ip_family`, `location_kind`, `caller_country`, `rank_mode`, `force_minimum`,
+`capability`), with the requested `target_kind` and the request's terminal
+selection `reason` from the §2.9c fixed vocabulary. The probe reads both in one
+query at one instant, the explanations tagged `monitor_part="empty"`, and joins
+them on those labels. Two explanations take zeros out of the judgment. The
+request's own: `filtered_destinations`, `filtered_client_ids`,
+`filtered_explicit`, `filtered_explicit_mixed` and `intentional_zero` (its
+exclusions removed every candidate the target holds, as a window refill that
+excludes the exits it already has does, or it asked for zero). Target supply:
+`cache_empty` for a `city` or `region` target (the score export published the
+target without an admitted provider, so it has connected source rows that fail
+the shared reliability, URL and hard-exclusion gates, or it lost its last
+provider within the cache ttl; most cities hold one or two providers). Explained
+zeros leave the denominator as well as the zero count, so the effective-empty
+PAGE and both small-list WARNs judge only the answers neither explains, and
+refill traffic cannot dilute a real platform empty below the ratio. A country,
+group, best-available, mixed or unknown target the export wrote empty still
+counts toward the PAGE, as do missing cache metadata, page gaps, hard, network,
+family and mixed filters and every other reason. Explanations can only lower a
+verdict. A response without them (`zero_explanations=absent`, as from API
+processes that predate the counter) is judged on its bands exactly as before; a
+row outside the fixed vocabularies, stale, negative or duplicated means the
+explanations are discarded whole (`zero_explanations=invalid`); a read that
+used them reports `zero_explanations=joined`. An explanation is clamped to the
+zeros it explains, and an explained cohort supplies no recovery credit.
+Findings report `zero_explained_by_request`, `zero_explained_by_target_supply`,
+`zero_unexplained` and `considered_requests`.
+
+`provider-count-target-supply-empty` is a nonpaging WARN: at least 50 completed
+ordinary requests in five minutes, at least half of them answered empty from a
+city or region without admitted supply. It keeps a supply gap at product scale
+visible without calling it a selection failure. Whether an app or the platform
+should fall back from such a target to its region or country is a product
+decision this signal does not make.
+
+The case that motivated this, Main 2026-10-25 04:15 UTC to 10-31: the chronic
+`any/location/au/quality` and `any/location/au/speed` PAGEs were about 21
+completed requests in five minutes per mode, steady across every API host and
+deploy at four requests a minute per rank mode, the cadence of one client's
+15-second window resize. Their zeros matched the §2.9c `city` zeros: `cache_empty`
+while the city's providers failed admission, `filtered_destinations` while the
+request already excluded the admitted ones. That one caller met the 20-request
+PAGE floor by itself. With the explanations joined it raises nothing.
 
 `caller_country=us` identifies the caller, not the requested/provider country;
 `location` combines different targets and can coexist with explicit ClientId
