@@ -10,6 +10,11 @@
 //	                       − Σ finalized and carried (total − funded), per operator
 //	implied claim credit = Σ claimed over finalized and carried − totalPaid >= 0
 //
+// From an operator's settlement v2 cutover, its v1 rows owe no close or root,
+// and a v1 root there must be the one sanctioned carry sweep. The identities
+// above do not change: the sweep finalizes funding plus prior carry, and its
+// claim and payment are ordinary.
+//
 // Aggregate contract counters are public chain state and are rendered as
 // exact integers; claimant-level values and identities are never rendered.
 package monitor
@@ -210,8 +215,31 @@ func evaluateSubnetSettlementEntries(state *subnetSettlementState, settings *Sub
 		}
 		findings = append(findings, evaluateSubnetSettlementProgress(entry, block, settings, scope)...)
 		findings = append(findings, evaluateSubnetSettlementRoot(entry, block, scope)...)
+		findings = append(findings, evaluateSubnetSettlementCutoverRoot(state, entry, scope)...)
 	}
 	return findings
+}
+
+// A v1 root at an epoch that v2 owns must be the one sanctioned carry sweep.
+// Every ordinary root and clock rule still applies to any such root.
+func evaluateSubnetSettlementCutoverRoot(state *subnetSettlementState, entry *subnetSettlementEntry, scope subnetReplayScope) []finding {
+	if entry.cutover != subnetSettlementAfterCutover || entry.root.PayoutRoot == [32]byte{} || entry.sanctionedSweep {
+		return nil
+	}
+	root := "different-root"
+	if entry.root.PayoutRoot == state.cutover.sweepLeaf {
+		root = "sweep-leaf-root"
+	}
+	observed := fmt.Sprintf("%s post_cutover_roots=%d first_v2_epoch=%d", root, state.cutover.roots[entry.noId], state.cutover.pools[entry.noId].FirstEpoch)
+	return []finding{subnetReplayFinding(subnetSettlementProbeId, "subnet-payout-root", subnetSettlementOperatorTarget(entry.noId), subnetSettlementEpochFrame(entry.epoch, "post-cutover-root"), scope, subnetSettlementPlaybook, subnetReplayIssue{
+		tier: tierPage, sustain: 1, invariant: "post-cutover-v1-root-is-the-sanctioned-sweep",
+		expected: "no-v1-root-or-one-sweep-leaf-root", observed: observed,
+		symptom:   "A v1 payout root exists for an epoch that settlement v2 owns and it is not the one sanctioned carry sweep",
+		mechanism: "From the operator's vault2 first epoch the v1 driver closes and commits nothing, except one owner-approved carry sweep: a single-leaf root equal to vault1 payoutLeaf(vault2.selfColdkey, 10000). Another root, or a second sweep root, lets v1 finalize a payout list for an epoch v2 also settles, or moves v1 carry outside the approved sweep.",
+		baseline:  "After its cutover an operator has no v1 root, or exactly one: the sweep leaf paying vault2's coldkey 10,000 bps, committed in its window by the operator's root signer.",
+		action:    "Preserve the root commitment receipt and the artifact by hash. Before the finalize offset, route to the operator's root-signing owner and custody review, and check the v1 driver's cutoff and sweep configuration. Never backdate or invent a root, and never replace one, to clear this alert.",
+		verify:    "Independent replay attributes every post-cutover v1 root and a recorded disposition closes it; the operator then holds at most the one sweep-leaf root after its first v2 epoch.",
+	})}
 }
 
 // Clock rules in evm blocks from the effective policy of the epoch itself.
@@ -224,6 +252,10 @@ func evaluateSubnetSettlementProgress(entry *subnetSettlementEntry, block uint64
 	target := subnetSettlementOperatorTarget(entry.noId)
 	rootPresent := entry.root.PayoutRoot != [32]byte{}
 	settled := value.Status == subnetSettlementFinalized || value.Status == subnetSettlementRootMissed || value.Status == subnetSettlementCarried
+	// A rootless row that v2 owns owes v1 no close or root; with the cutover
+	// unknown only the rules that hold either way run. A funded row still
+	// owes finalization, and an unset one can never finalize on v1.
+	v2Owned := entry.cutover != subnetSettlementBeforeCutover && !rootPresent
 	progress := func(condition, invariant string, tier string, sustain int, deadline uint64, symptom, mechanism, action string) {
 		remaining := "0"
 		if block < deadline {
@@ -252,25 +284,25 @@ func evaluateSubnetSettlementProgress(entry *subnetSettlementEntry, block uint64
 	closeDeadline := end + policy.CloseGraceBlocks
 	rootDeadline := end + policy.RootCommitWindowBlocks
 	finalizeAt := end + policy.FinalizeOffsetBlocks
-	if value.Status == subnetSettlementUnset && block <= closeDeadline && closeDeadline-block <= settings.CloseAtRiskBlocks {
+	if !v2Owned && value.Status == subnetSettlementUnset && block <= closeDeadline && closeDeadline-block <= settings.CloseAtRiskBlocks {
 		progress("close", "close-within-grace", tierWarn, 2, closeDeadline,
 			"An operator's epoch close is at risk of missing its grace window",
 			"The close captures the pool stake into escrow only inside the close grace window; after it the epoch records zero and the stake waits for the next timely boundary.",
 			"Check the operator's close task and chain writer for this epoch without resubmitting an ambiguous transaction.")
 	}
-	if value.Status == subnetSettlementUnset && closeDeadline < block && block < finalizeAt {
+	if !v2Owned && value.Status == subnetSettlementUnset && closeDeadline < block && block < finalizeAt {
 		progress("close", "close-within-grace", tierWarn, 2, closeDeadline,
 			"An operator missed its epoch close and the zero record is not yet written",
 			"A missed close must record zero through the permissionless deferral and leave the stake for the next timely boundary; it must never assign a multi-epoch delta to the first missed epoch.",
 			"Confirm the deferral is scheduled and that the next close is timely; do not attempt a late capture.")
 	}
-	if !rootPresent && !settled && block <= rootDeadline && rootDeadline-block <= settings.RootAtRiskBlocks {
+	if !v2Owned && !rootPresent && !settled && block <= rootDeadline && rootDeadline-block <= settings.RootAtRiskBlocks {
 		progress("root", "root-within-window", tierWarn, 2, rootDeadline,
 			"An operator's payout root is at risk of missing its commit window",
 			"The coordinator accepts the operator's root only until the end of the root window; afterwards the epoch finalizes as root-missed and its funding carries forward.",
 			"Check the operator's payout computation, artifact publication and root writer for this epoch; do not resubmit an ambiguous transaction.")
 	}
-	if !rootPresent && rootDeadline < block && block < end+policy.EpochBlocks && value.Status != subnetSettlementCarried {
+	if !v2Owned && !rootPresent && rootDeadline < block && block < end+policy.EpochBlocks && value.Status != subnetSettlementCarried {
 		progress("root", "root-within-window", tierWarn, 2, rootDeadline,
 			"An operator missed its payout root window",
 			"Without a root the epoch finalizes as root-missed: its funding carries to the same operator's next root, and providers of this epoch receive no entitlement from it.",
@@ -282,7 +314,7 @@ func evaluateSubnetSettlementProgress(entry *subnetSettlementEntry, block uint64
 			"The coordinator finalizes only at or after the epoch end plus the finalize offset; an earlier finalized state contradicts the reviewed policy.",
 			"Preserve the finalized state, treat this operator's settlement as unknown and route to deployment governance review (§22.1).")
 	}
-	if !settled && finalizeAt <= block {
+	if !settled && finalizeAt <= block && !(v2Owned && value.Status == subnetSettlementUnset) {
 		tier, sustain := tierWarn, 2
 		symptom := "An epoch is due for finalization"
 		if finalizeAt+settings.FinalizeOverdueBlocks <= block {

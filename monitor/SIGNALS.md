@@ -45625,6 +45625,76 @@ root, deployment, contracts, policy, coordinates or 10,000-bps allocation
 differs from the chain is a counterexample. Unavailable or unverifiable bytes
 leave that root unknown; serving integrity across origins is §22.8's check.
 
+**Settlement v2 cutover and the sanctioned carry sweep.** When the pin
+declares settlement v2, the same checkpoint also reads the v2 pair's links
+and subnet identity (both v2 contracts must name each other, the v1
+coordinator and the pinned subnet), `vault2.selfColdkey()` and each census
+operator's `vault2.pools(noId)`. A row is post-cutover when its operator's
+pool is registered and the epoch is at or after the pool's `firstEpoch`. From
+then on v2 settles the epoch, and the v1 driver closes and commits nothing
+for that operator (VERSION2-FINAL.md SV-4).
+Earlier rows, and every row of an operator without a registered pool, keep
+every rule above. Post-cutover rows are judged as follows:
+
+- Unset with no root: no close, root or finalization rule. v1
+  `finalizeOperatorEpoch` reverts on an unset epoch, so the row can never
+  settle on v1; v2 settles it.
+- Funded with no root (the sweep close before its commit, or a third party's
+  permissionless close or deferral): no close-at-risk, missed-close,
+  root-at-risk or root-missed warning. Finalization due, finalization overdue
+  and finalize-not-before-offset still apply: a funded epoch must still be
+  finalized, and root-missed then carries its funding.
+- A root equal to vault1 `payoutLeaf(vault2.selfColdkey(), 10000)`, that is
+  `keccak256(bytes.concat(keccak256(abi.encode(coldkey, uint256(10000)))))`,
+  which is also the operator's only post-cutover v1 root in the census: the
+  owner-approved one-time carry sweep, a single-leaf tree claimed with an
+  empty proof. It is judged by every ordinary rule above: commit window,
+  committer equal to the operator's root signer, the finalization clock and
+  root rewrite. Its artifact hash names the sweep record of
+  VERSION2-FINAL.md §16, not a payout list, so root reproduction skips it; the
+  root is decided by exact equality with the computed leaf instead.
+- Any other root: PAGE, Sustain 1, `subnet-payout-root`, frame
+  `epoch-N/post-cutover-root`, invariant
+  `post-cutover-v1-root-is-the-sanctioned-sweep`. The observation names the
+  root kind (`different-root` or `sweep-leaf-root`), the operator's
+  post-cutover v1 root count and its first v2 epoch. A second sweep-leaf root
+  at another post-cutover epoch is not unique, so every copy pages, because
+  the chain cannot show which one was approved. The ordinary rules still
+  apply to these roots. Never backdate or invent a root, and never replace
+  one, to clear the page.
+
+The whole-history conservation, carry and claim identities are unchanged and
+hold for the sweep: its finalized total is its funding plus the prior
+same-operator carry, and its single leaf is then claimed and paid in full to
+vault2's coldkey, where `vault2.absorbStake` takes it in. A failed or
+inconsistent vault2 read (an rpc gap, a link or subnet mismatch, a malformed
+pool, a zero coldkey or no code at the pinned address) leaves the cutover
+unknown, never absent. The run is then `partial:settlement-v2-cutover-unknown`,
+and a `settlement-v2-cutover` coverage gap names `subnet-epoch-progress` and
+`subnet-payout-root` as undecided. Rootless rows keep only the rules that hold
+either way, which is finalization of a funded row. Rows with a root keep the
+ordinary rules but not the sanction check. The whole-history identities do
+not depend on the cutover and are still decided.
+
+- **False-positive qualifier:** a post-cutover root page can describe an
+  owner-approved second or re-planned sweep. The chain cannot prove approval,
+  so the page stands until a recorded disposition; the authoritative
+  discriminator is the owner's approval record together with the v1 driver's
+  sweep configuration. An overdue finalization of a funded post-cutover row
+  is not a v2 failure: its funding sits in vault1 pending until a
+  permissionless finalization moves it to carry. Healthy controls: an unset
+  post-cutover epoch past its overdue band is silent, and the sanctioned
+  sweep is silent at every stage through its claim and payment.
+- **False-negative qualifier:** uniqueness is judged over the rows read, so
+  an epoch-bounded partial census can hide an older post-cutover root and let
+  a later sweep-leaf root look sanctioned; a complete census recovers it.
+  This family verifies neither the sweep record behind the sanctioned root
+  nor the later v2 recovery allocation, and it does not replay v2 settlement
+  of post-cutover epochs (the `settlement-v2` gap below), so a missing v2
+  root is not detected here. While the cutover is unknown, a rootless
+  pre-cutover row's close, root and finalization verdicts are withheld; the
+  coverage gap keeps the run from reading healthy.
+
 Bands: a proved identity, carry, claim, payment, root or clock contradiction is
 PAGE with Sustain 1 and is retained; at-risk close or root, a missed root,
 finalization due, persistent dust deferral and an unavailable artifact are WARN
@@ -45637,8 +45707,9 @@ state and are rendered as exact integers; claimant identities, hashes and
 addresses are never rendered. Missing today: the `subnet_replay` enrollment
 (`replay_from_block`, `api_origins`) is not provisioned in vault/main
 monitor.yml, so the journal and root reproduction stay unknown until it is; a
-declared settlement v2 deployment is not read and reports a coverage gap; no
-claimant or keeper SLO is configured.
+declared settlement v2 deployment is not replayed and reports a coverage gap,
+although its cutover facts above are read; no claimant or keeper SLO is
+configured.
 
 ### 22.8 Public artifacts, validator evidence anchors, and audit continuity
 Probe: `subnet-evidence`

@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"math/big"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -113,11 +114,29 @@ func (self *subnetSettlementProbe) check(ctx context.Context, env *probeEnv) (fi
 	if err != nil {
 		return sourceGap(err)
 	}
+	if err := readSubnetSettlementCutover(runCtx, rpc, pin, state); err != nil {
+		return sourceGap(err)
+	}
 	scope.checkpointNumber = state.checkpoint.number
 	scope.completeness = "complete"
+	// Without the cutover, rows it decides are withheld; the whole-history
+	// identities do not depend on it and are still decided.
+	cutoverUnknown := state.cutover.declared && !state.cutover.known
+	partial := []string{}
 	if !state.censusComplete {
-		scope.completeness = "partial:" + state.censusReason
+		partial = append(partial, state.censusReason)
+	}
+	if cutoverUnknown {
+		partial = append(partial, "settlement-v2-cutover-unknown")
+	}
+	if 0 < len(partial) {
+		scope.completeness = "partial:" + strings.Join(partial, ",")
+	}
+	if !state.censusComplete {
 		gaps = append(gaps, coverage("census", state.censusReason, []string{"subnet-vault-conservation", "subnet-carry-isolation", "subnet-claim-credit-payment"}))
+	}
+	if cutoverUnknown {
+		gaps = append(gaps, coverage("settlement-v2-cutover", state.cutover.reason, []string{"subnet-epoch-progress", "subnet-payout-root"}))
 	}
 	verdicts := evaluateSubnetSettlementState(state, settings, scope)
 
