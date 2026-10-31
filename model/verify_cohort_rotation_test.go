@@ -288,3 +288,62 @@ func TestVerifyCohortCensusReadFailureFailsClosed(t *testing.T) {
 		testVerifyCohortSample(t, ctx, settings, 2)
 	})
 }
+
+// Rotation frees only the room the free active slots don't cover: one free
+// slot covers one waiting claimed member, and with the active set full one
+// waiting member rotates one stale member out. The rotation reports the
+// active set after rotating, and the member's admission grows the census by
+// one past the active set it was seeded from. This is the shape of the first
+// production rotation (2026-10-31): "1 stale members out for 1 waiting
+// (census 2000, active 1999)", then 2,001 durable census members.
+func TestVerifyCohortRotationCountsFreeActiveSlots(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		settings := testVerifyCohortRotationSettings()
+		testVerifyCohortSetEpoch(ctx, 6)
+		keys := newVerifyCohortKeys(settings.CohortDeploymentKey, 6)
+		stale := []server.Id{server.NewId(), server.NewId(), server.NewId()}
+		server.Redis(ctx, func(r server.RedisClient) {
+			for _, member := range stale {
+				server.Raise(r.SAdd(ctx, keys.lifetime, member.String()).Err())
+			}
+		})
+		addresses := &testVerifyCohortAddresses{}
+		first := addresses.providers(ctx, settings, 1)[0]
+		SetVerifyCohortPriority(ctx, settings.CohortDeploymentKey, [][]server.Id{{first}}, 3)
+
+		// three of four active: the free slot covers the one waiting member
+		rotation := RotateVerifyCohort(ctx, settings)
+		if rotation == nil || rotation.Demand != 1 || rotation.Rotated != 0 || rotation.Active != 3 || rotation.Census != 3 {
+			t.Fatal("one free slot for one waiting member", rotation)
+		}
+		if hops := testVerifyCohortSample(t, ctx, settings, 1); !hops[first.String()] {
+			t.Fatal("the waiting member did not take the free slot", hops)
+		}
+
+		// four of four active: one waiting member rotates one stale member out
+		second := addresses.providers(ctx, settings, 1)[0]
+		SetVerifyCohortPriority(ctx, settings.CohortDeploymentKey, [][]server.Id{{first}, {second}}, 3)
+		rotation = RotateVerifyCohort(ctx, settings)
+		if rotation == nil || rotation.Demand != 1 || rotation.Rotated != 1 || rotation.Active != 3 || rotation.Census != 4 {
+			t.Fatal("a full active set for one waiting member", rotation)
+		}
+		testVerifyCohortSample(t, ctx, settings, 2)
+		active := testVerifyCohortMembers(ctx, keys.lifetime)
+		if len(active) != 4 || !active[first.String()] || !active[second.String()] {
+			t.Fatal("the waiting member did not take the rotated slot", active)
+		}
+		if census, durable := testVerifyCohortMembers(ctx, keys.census), testVerifyCohortDurableCensus(ctx); len(census) != 5 || len(durable) != 5 {
+			t.Fatal("the admission grows the census by one", census, durable)
+		}
+
+		// the census (5) is now past the lifetime limit, but free slots count
+		// against the active set: a third waiting member rotates one out
+		third := addresses.providers(ctx, settings, 1)[0]
+		SetVerifyCohortPriority(ctx, settings.CohortDeploymentKey, [][]server.Id{{first}, {second}, {third}}, 3)
+		rotation = RotateVerifyCohort(ctx, settings)
+		if rotation == nil || rotation.Demand != 1 || rotation.Rotated != 1 || rotation.Active != 3 || rotation.Census != 5 {
+			t.Fatal("free slots count against the active set, not the census", rotation)
+		}
+	})
+}
