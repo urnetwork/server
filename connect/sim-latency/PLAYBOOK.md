@@ -1,6 +1,6 @@
 # Sim-latency competition live-deployment playbook
 
-## Current production intake and scoring preparation — October 30, 2026
+## Current production intake and scoring preparation — October 31, 2026
 
 The required public opening was **October 28, 2026, 00:00 UTC**; readiness was
 not achieved and that opening was not backdated. The owner subsequently approved
@@ -14,13 +14,38 @@ At 03:14 UTC on October 30, public `/competition/info` reported
 - actual opening: October 29, 13:06:42.413416 UTC;
 - submission close: November 5, 13:06:42.413416 UTC.
 
-Latest **01:04 UTC October 31** checkpoint: the reduced public pilot and native
-13-source exclusion census are accepted. The fresh hidden-seed 36-run screen
-is running under its original committed seed and bounded owner; it is not yet
-accepted. Observe only the live owner in
+Latest **09:24 UTC October 31** checkpoint: the reduced public pilot and native
+13-source exclusion census are accepted. The fresh hidden-seed screen completed
+all 36 unique measurements, but **failed its frozen reference-ordering rule**;
+native completion and exit zero are not calibration acceptance. Independent
+raw-lineage review confirmed the rejected result. The original second seed
+remains unstarted; no rerun, new seed or retrospective acceptance rule is
+authorized. The original execution is terminal: do not restart the owner in
 [HIDDEN-SCREEN-LIVE-2026-10-31.json](launch/HIDDEN-SCREEN-LIVE-2026-10-31.json).
-The read-only control-plane snapshot shows 13 unstarted queued jobs and four
-completed jobs. Both holds remain active; public intake remains open.
+
+The genuine existing worker was restored at **06:51:55 UTC**, before the
+original offline-maintenance expiry. At **09:24:12 UTC**, operator-authenticated
+`/competition/readyz` returned 200 with all eleven checks true; intake is ready,
+grading is not ready and publication remains held. The typed read-only hold
+audit at **07:51:40 UTC** validated evaluation revision 4 and reward-delivery
+revision 1, both active. The separately dated **06:50:46 UTC** queue audit shows
+14 unstarted queued jobs and four completed jobs; later intake may add jobs.
+
+All three failed-screen/public-pilot-view/qualified-source archives now have
+exact-version SHA-equal MinIO readbacks and COMPLIANCE retention through
+**2028-01-01**. New-object replica delivery and off-site backup are not claimed.
+Storage and operational readiness do not authorize hold release. Await the
+owner's explicit provisional-grading or revised-calibration decision; keep the
+November 5 pre-finalization fences and do not create an accepted marker.
+
+The operator score dashboard and future-epoch G2 host handoff code are pushed
+in `766b48358`; 49 focused roots passed three times, zero failures/skips, against
+the actual merged server source with private diagnostic dependency exports.
+That does not prove normal release-lock equivalence or future-image runtime
+qualification. Apply additive migration **903** before deploying the main
+API/metrics producer and competition/API/proxy Grafana dashboards. These
+operator/future-epoch changes are not epoch-one grading-restoration gates.
+
 The dated observations below preserve earlier phases, not current commands.
 
 The later read-only snapshot at **18:39 UTC on October 30** shows four completed

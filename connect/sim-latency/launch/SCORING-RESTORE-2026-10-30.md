@@ -1,6 +1,57 @@
 # R2 scoring restoration: readiness before hold release
 
-## Current maintenance status — October 31, 01:24 UTC
+## Current recovery status — October 31, 09:24 UTC
+
+The original native screen is terminal: all 36 unique measurements finished,
+but the frozen reference-ordering predicate failed. **Calibration is not
+accepted.** Independent lineage review confirms the rejection, and all three
+F/V/C archives have exact-version COMPLIANCE SHA-256 readback through 2028-01-01.
+Preserve the failure and unstarted historical second seed; do not rerun, draw a
+new seed, reinterpret the predicate or create an accepted marker.
+
+The real existing supervisor is **online**, restored at 06:51:55 UTC before the
+original 07:19:42.289655 UTC worker-offline bound. At 09:24:12 UTC, authenticated
+readiness returned 200 with all eleven checks true, intake ready, grading not
+ready and publication held. Full typed readback at 07:51:40 UTC validated
+evaluation revision 4 and reward-delivery revision 1, both active. Those
+observations are dated evidence, never reusable CAS revisions.
+
+**No new release is authorized.** The owner must explicitly choose between:
+
+- keeping grading paused while approving a new prospective calibration plan;
+  or
+- approving provisional grading with the rejected screen preserved, unchanged
+  R9/gates/significance/margin/three-hour limit, reward delivery still held, and
+  both November 5 pre-finalization fences retained.
+
+If the second option is explicitly approved, record a new truthful, reviewed
+recovery artifact binding that amendment to the failed result and retained
+receipts. It must not claim accepted calibration. Freshly inspect both entire
+hold rows using the qualified read-only inspector, then release **only the
+evaluation hold** with the scheduler credential and existing seven-field CAS
+contract in section 4. Re-read and verify the new inactive row and evidence
+digest. Leave reward delivery, the accepted-marker absence and both fences
+unchanged. Do not invoke the old two-hold release sequence or its templates.
+
+Clearing evaluation also unholds publication; the ordinary open-round embargo
+still applies; retain both pre-finalization safeguards exactly as recorded.
+A payout hold alone is not a publication hold. Do not clear
+evaluation merely to obtain a green status, and do not treat a successful
+request as an accepted calibration result.
+
+The actual online unit remains the qualified existing unit, not a new wrapper
+or historical installation. The full-row inspector is installed at
+`/usr/local/libexec/urnetwork/competition-r2-hold-readback-20261031-4be404b9/full-hold-inspector`
+with SHA `4be404b9f952384135e78bf2937ff8f219abaea28d95f471d95f72b302340721`.
+Its one successful prior main inspection is read-only; run a new bounded
+inspection immediately before any future CAS. [Current state](current-state.json)
+pins its qualification, scope, prior result and actual worker identity.
+
+The following dated maintenance/release material is historical. Its accepted-
+calibration requirements are not silently waived, and its old sessions, unit
+pins and release requests must not be replayed as current authority.
+
+## Historical maintenance status — October 31, 01:24 UTC
 
 Production R2 epoch 1 remains open for intake, but evaluation hold **4**
 (`CALIBRATION_MAINTENANCE`) and reward-delivery hold **1** are active. The real

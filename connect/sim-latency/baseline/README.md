@@ -9,9 +9,24 @@ six-round TTFB/throughput projection. Its
 [derivation](final-baseline-2026-10-31-derivation.json) keeps the raw median
 score boundary separate from the conditional mean-based Welch diagnostic.
 It is a **draft preview, not the private production epoch baseline or complete
-launch acceptance**. Hidden calibration, independent review and new scoped
-COMPLIANCE custody remain pending at that report's snapshot. No browser
-rendering, benchmark or test was performed to prepare the report.
+launch acceptance**. At the dated October 31 status refresh, the hidden screen
+is complete but **not accepted**. Independent lineage review confirms the
+rejected result; all three scoped archives have exact-version COMPLIANCE
+readback. Grading and publication remain held. No new performance measurement
+was made for the refresh. Native Chromium desktop/mobile rendering is now
+[recorded with immutable browser/source identities](final-baseline-2026-10-31-browser.json)
+and exact [desktop](final-baseline-2026-10-31-desktop.png) /
+[mobile](final-baseline-2026-10-31-mobile.png) captures. This is static-report
+inspection, not private Grafana, statistical or full launch qualification.
+
+The [earlier 01:24 public preview](final-baseline-2026-10-31-0124-historical.html)
+and its [original derivation](final-baseline-2026-10-31-0124-derivation.json)
+are preserved byte-for-byte. The old HTML's internal companion link retains
+its original filename; use this preserved derivation for its historical status.
+Only operational status and its provenance changed;
+the environment, all public performance plots/improvement fringes, and the
+six-step projection retain their exact earlier section bytes. Public source
+paths in the derivation are relative to this directory for portable checking.
 
 The previous [historical v1 report](final-baseline-v1-historical.html) is
 preserved byte-for-byte at its new path. The

@@ -1,0 +1,68 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-public-report-native-browser-evidence",
+  "scope": "Static public HTML report only; not private Grafana, statistical calibration, provider qualification or full launch acceptance.",
+  "source_html": "final-baseline.html",
+  "source_html_sha256": "3f9e59d19bd97d88da832de39b93bebb34089b9a31472329648ebcab760ee2ab",
+  "browser": "Google Chrome for Testing 156.0.8078.4",
+  "vendor_documentation": "https://playwright.dev/docs/docker",
+  "vendor_tag_observed": "v1.64.1-noble",
+  "image": "mcr.microsoft.com/playwright@sha256:d65108d1a8095d8b0c4a5e32bf1807a40a5ce90ff0c78473e1116b1c243235e8",
+  "image_id": "sha256:d8e19ba36e1441fcd3f8a6d3d84c1eeb713ed5f1f46476918b9c3c1c6e765ead",
+  "platform": "linux/amd64",
+  "started_at": "2026-10-31T10:22:46.712460270Z",
+  "finished_at": "2026-10-31T10:22:52.514147794Z",
+  "exit_code": 0,
+  "oom_killed": false,
+  "visual_inspection_completed": true,
+  "all_four_sections_visibly_rendered": true,
+  "median_practical_and_mean_statistical_fringe_panels_separate": true,
+  "applicable_fringe_lines_and_six_step_projections_visible": true,
+  "rejected_calibration_is_distinct_from_successful_storage_and_readiness": true,
+  "capture_limitations": "Fixed-height captures include unused blank space. The mobile table intentionally scrolls horizontally. No accessibility certification or other browser/OS is claimed.",
+  "containment": {
+    "network": "none",
+    "user": "1000:1000",
+    "user_namespace_remapping_preserved": true,
+    "cpu_set": "20,22",
+    "cpu_quota": 2,
+    "memory_bytes": 1073741824,
+    "swap_disabled": true,
+    "pids_limit": 256,
+    "core_dump_limit": 0,
+    "all_capabilities_dropped": true,
+    "no_new_privileges": true,
+    "root_filesystem_read_only": true,
+    "private_ipc": true,
+    "input": "One read-only public HTML file, never config, vault, credentials, private scores or hidden results.",
+    "output": "Dedicated temporary output directory below a mode-0700 parent.",
+    "browser_container_removed_after_inspection": true,
+    "original_container_network_and_frozen_evaluator_image_inventory_restored": true
+  },
+  "captures": [
+    {
+      "path": "final-baseline-2026-10-31-desktop.png",
+      "width": 1440,
+      "height": 12000,
+      "bytes": 1292085,
+      "sha256": "8acc804ec42636b8494423b63eff395371a664b35134f9642e6a58b5de41baf4"
+    },
+    {
+      "path": "final-baseline-2026-10-31-mobile.png",
+      "width": 390,
+      "height": 22000,
+      "bytes": 1167493,
+      "sha256": "8fd03908e85909ecaeb69c42f3cc23ad0137a2695fcd936740bcfbde9c8a2c27"
+    }
+  ],
+  "private_operation_receipt": "/mnt/data/sim-latency-browser-preview-20261031.Zs5M8O/attempt-4.private.json",
+  "private_operation_receipt_sha256": "cd6fc203849a9580420a094b3b2c2b640239524c00e76f46488827c0c47a807e",
+  "private_log_sha256": "2dc77c3311ddd04d69a82d28200dbe4fcf39b76dce89e67afe14e3a1bfb9108b",
+  "prior_attempts_preserved": [
+    "Chrome crashpad rejected an unwritable configuration database before capture.",
+    "User namespace remapping denied the mode-0400 public input; browser exit zero did not produce images and was not accepted.",
+    "Fragment captures produced incomplete/blank lower sections and were not counted as full visual inspection."
+  ],
+  "calibration_or_launch_acceptance_claimed": false,
+  "evaluation_policy_image_baseline_or_holds_changed": false
+}

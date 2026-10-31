@@ -27,11 +27,11 @@
     "latest_verification_scope": "Read-only live contract behavior, not an exact main binary commit or all-replica identity proof. The earlier release observation is historical, not a season pin.",
     "new_config_vault_or_epoch_one_image_deployment_required": false,
     "negative_owner_feedback_probe_alone_is_not_binary_identity_proof": true,
-    "api_readiness_verified_at": "2026-10-31T09:24:12Z",
+    "api_readiness_verified_at": "2026-10-31T10:43:17Z",
     "api_readiness_operator_authenticated": true,
     "api_readiness_all_eleven_checks_true": true
   },
-  "next_action": "The completed hidden screen remains ACCEPTED=FALSE; never restart, reseed, reveal or relabel it. Independent raw-lineage review is complete, and all three F/V/C evidence archives have exact-version COMPLIANCE retention and full SHA-256 readback. The real worker remains online with grading/publication held; operator-authenticated Ready200/all11 at09:24:12Z confirms genuine intake readiness, not statistical acceptance. Await the owner's explicit provisional-grading versus revised-calibration decision; no accepted marker, fence cancellation, hold release or new measurements are authorized. Qualified dashboard and future-G2 host handoff changes are pushed as server766b48358d492eb9444177c13f8164e9adb3f085; 49 focused roots passed three times in an isolated diagnostic dependency snapshot, not full release-lock/runtime qualification. Apply additive migration903 before deploying the main API/metrics producer and Grafana dashboard through the normal pipeline. Future epoch2 instrument/image qualification remains separate and must not change epoch1 or gate its grading recovery.",
+  "next_action": "The completed hidden screen remains ACCEPTED=FALSE; never restart, reseed, reveal or relabel it. Independent raw-lineage review is complete, and all three F/V/C evidence archives have exact-version COMPLIANCE retention and full SHA-256 readback. The real worker remains online with grading/publication held; operator-authenticated Ready200/all11 at09:24:12Z confirms genuine intake readiness, not statistical acceptance. Await the owner's explicit provisional-grading versus revised-calibration decision; no accepted marker, fence cancellation, hold release or new measurements are authorized. Qualified dashboard and future-G2 host handoff changes are pushed as server766b48358d492eb9444177c13f8164e9adb3f085; 49 focused roots passed three times in an isolated diagnostic dependency snapshot, not full release-lock/runtime qualification. Apply additive migration903 before deploying the main API/metrics producer and Grafana dashboard through the normal pipeline. Future epoch2 instrument/image qualification remains separate and must not change epoch1 or gate its grading recovery. The status-refreshed public report is now native-Chromium desktop/mobile inspected, with exact earlier report/derivation preservation,18 document guard roots repeated3times and3709/3709 baseline payload verification; all performance/fringe/projection section bytes remain unchanged. This is documentation qualification, not accepted calibration or hold-release authority.",
   "production": {
     "api": "https://api.bringyour.com",
     "season_id": "sim-latency-production-20261028-r2",
@@ -529,23 +529,49 @@
     "retained_in_git": true,
     "warning": "The 164128-byte historical checkpoint retains all earlier failures, qualifications and source pins. Its old top-level status and next_action are superseded; do not execute them. Read history only for a specific supporting artifact."
   },
-  "observed_at": "2026-10-31T09:24:12Z",
+  "observed_at": "2026-10-31T10:43:17Z",
   "current_public_data_report": {
     "path": "server/connect/sim-latency/baseline/final-baseline.html",
-    "sha256": "8d3521b462cd73d60831c0d2245643d0826547bef390fe6ed6c8f2a955f93dd1",
-    "status": "four_section_public_calibration_draft_preview_not_full_launch_acceptance",
+    "sha256": "3f9e59d19bd97d88da832de39b93bebb34089b9a31472329648ebcab760ee2ab",
+    "status": "four_section_public_evidence_rejected_calibration_scoring_held_not_full_launch_acceptance",
     "derivation_path": "server/connect/sim-latency/baseline/final-baseline-2026-10-31-derivation.json",
-    "derivation_sha256": "41c1148367232fcc497d235aa8be8c31c79705c93bdff9c5adcb7cd7298c5879",
+    "derivation_sha256": "45e938cf73bb93331d040b852e17d51b1b6087ae4f51cd8aa8425940204fb307",
     "source_math_and_privacy_review_passed": true,
-    "browser_rendered": false,
+    "browser_rendered": true,
+    "browser_rendering_scope": "Static public report at desktop/mobile widths, not the private Grafana dashboard or statistical acceptance.",
+    "browser_evidence": "server/connect/sim-latency/baseline/final-baseline-2026-10-31-browser.json",
+    "browser_evidence_sha256": "e28ca3cb181143fd0e3befa6d0998ed9cfcb4b38a61e91631aefa4b4f0f9a198",
+    "earlier_0124_report_preserved_byte_for_byte": "server/connect/sim-latency/baseline/final-baseline-2026-10-31-0124-historical.html",
+    "earlier_0124_report_sha256": "8d3521b462cd73d60831c0d2245643d0826547bef390fe6ed6c8f2a955f93dd1",
+    "earlier_0124_derivation_preserved_byte_for_byte": "server/connect/sim-latency/baseline/final-baseline-2026-10-31-0124-derivation.json",
+    "earlier_0124_derivation_sha256": "41c1148367232fcc497d235aa8be8c31c79705c93bdff9c5adcb7cd7298c5879",
+    "environment_performance_fringe_and_projection_section_bytes_unchanged": true,
     "official_private_epoch_baseline_owner_scores_or_hidden_metrics_used": false,
     "old_report_preserved_byte_for_byte": "server/connect/sim-latency/baseline/final-baseline-v1-historical.html",
     "full_baseline_payload_reverification_deferred_until_timed_work_finishes": false,
-    "full_baseline_payloads_verified": 3704,
-    "baseline_manifest_sha256": "54f6d43d0043619a875a797db5728ea82629e48581458c3774404b84885199c2",
-    "full_payload_verification_log_sha256": "2402d845b891217eac974280964101b2783a87a90510accf6576134bdbc71868",
+    "full_baseline_payloads_verified": 3709,
+    "baseline_manifest_sha256": "59ab85ce882385d6c59af7df65df5ed7260b64f8ebbe377be7562994a851dd3f",
+    "full_payload_verification_log": "/mnt/data/baseline-report-qualification-v2-20261031.u0jxr7Br/full-verify.log",
+    "full_payload_verification_log_sha256": "4e9f71eb427fab927c69d8d21e69b78d349b87289560f17c0e81e5e6455aa39c",
+    "full_payload_verification_completed_at": "2026-10-31T10:32:05Z",
+    "report_guard_qualification": {
+      "source_sha256": "8daae460021014a96dbf3e1217e1aa701929f0c2788d8b63eaee489b1dc084e2",
+      "roots": 18,
+      "fresh_processes": 3,
+      "top_level_passes": 54,
+      "package_passes": 3,
+      "failures": 0,
+      "skips": 0,
+      "toolchain": "go1.27.3",
+      "stdlib_named_file_scope": true,
+      "full_simulator_suite_claimed": false,
+      "artifacts": "/mnt/data/baseline-report-qualification-v2-20261031.u0jxr7Br",
+      "evidence_manifest_sha256": "d4ca5de2e014ceb48163e932feeb9d571328dfbb7b5e5e7496145ad6283cdc80",
+      "earlier_failure_preserved": true
+    },
     "historical_annotation_manifest_fix_commit": "8756c94566273ceff4739de6cee2034ac2b0563b",
-    "measurement_payload_changed": false
+    "measurement_payload_changed": false,
+    "rendering_and_tests_do_not_authorize_scoring_release": true
   },
   "future_g2_host_install_source_draft": {
     "status": "formatted_focused_tests_passed_committed_not_instrument_image_built_or_deployed",
@@ -669,7 +695,7 @@
       "previous_failed_attempts_preserved": true,
       "scope": "Actual latest-main server integration with fixed private dependency exports. Five sibling pins differ from the normal release lock: diagnostic qualification only, not release-graph equivalence.",
       "full_repository_suite_claimed": false,
-      "native_browser_render_claimed": false
+      "native_grafana_browser_render_claimed": false
     },
     "additive_migration_version": 903,
     "migration_must_precede_api_deployment": true,
@@ -698,6 +724,17 @@
       "synthetic_heartbeat_used": false
     },
     "metadata_checkpoint_does_not_release_holds_or_authorize_calibration": true
+  },
+  "latest_runtime_observation": {
+    "checked_at": "2026-10-31T10:43:17Z",
+    "operator_authenticated": true,
+    "http_status": 200,
+    "all_eleven_checks_true": true,
+    "intake_ready": true,
+    "grading_ready": false,
+    "publication_held": true,
+    "report_browser_containers_removed_original_inventory_restored": true,
+    "scoring_or_reward_hold_release_performed": false
   },
   "retained_failed_calibration_evidence": {
     "status": "all_three_exact_source_versions_retained_and_read_back",

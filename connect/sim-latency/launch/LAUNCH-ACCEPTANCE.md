@@ -10,7 +10,51 @@ acceptance index, not new activation or hold-release authority.
 Historical v1 checkmarks do not qualify a different source,
 image, host manifest, policy or review provider.
 
-## Current maintenance checkpoint — October 30, 23:11 UTC
+## Current recovery checkpoint — October 31, 09:24 UTC
+
+Production R2 remains open for intake, **not fully launch-qualified**. The
+completed 36-measurement hidden screen is **not accepted**: its frozen reference
+ordering failed. Independent raw-lineage review confirms that result. Native
+exit zero, clean containment and successful storage do not change acceptance.
+The earlier failed screen and original unstarted second seed stay preserved.
+
+The real worker was restored at **06:51:55 UTC**, before the original
+**07:19:42.289655 UTC** worker-offline limit. It is online, not stopped. The
+authenticated readiness check at **09:24:12 UTC** returned 200/all eleven checks
+true, `intake_ready=true`, `grading_ready=false`, `publication_held=true`.
+The typed **07:51:40 UTC** read-only hold report validates evaluation revision 4
+and reward-delivery revision 1 active. The **06:50:46 UTC** queue audit records
+four succeeded and fourteen unstarted queued jobs; it is not a live queue count.
+
+The F/V/C failed-screen, byte-preserving public-pilot view and curated-source
+archives total **1,402,478,080 bytes**. Every exact returned MinIO version has
+COMPLIANCE protection through **2028-01-01** and full SHA-256 readback. The
+private combined receipt is pinned by SHA
+`80ddb52ad914a93a01c9b2aab351b4fd1773e861bfbad769afbcdbe900f7c082`.
+Replica delivery of these new objects and independent/off-site restore are
+not claimed. Current immutable receipts and all older failures remain indexed
+in [current-state.json](current-state.json).
+
+The accepted genuine two-member Qwen/Gemma provider tuple remains unchanged;
+no new inference or Muse revival is needed. The operator score plots and
+future-epoch G2 host handoff changes have 49 focused roots repeated three times
+with no failures/skips at server `766b48358`, not full release-lock or future
+image/runtime qualification. Migration **903** must precede their API rollout.
+
+**Current scoring blocker:** the owner must explicitly choose provisional
+grading with the failed calibration preserved, or authorize a revised future
+calibration protocol. No response is recorded in the current checkpoint.
+Neither choice is inferred from earlier urgency, intake approval, a successful
+build, readiness or custody. Keep both holds and November 5 fences; no accepted
+marker, hold release, new measurement or seed draw is authorized here.
+
+The historical matrix and execution order at the end of this file predate R2
+activation and the completed screen. They preserve original requirements and
+receipts, not current worker commands. Never resume their old sessions, replay
+the missed October 28 opening, or treat their historical pending flags as a
+fresh observation. Use the current checkpoint and dated evidence for each gate.
+
+## Historical maintenance checkpoint — October 30, 23:11 UTC
 
 The approved replacement R2 season is open for intake. Grading and publication
 are held under actual maintenance hold **4**; reward-delivery hold **1** remains
@@ -533,9 +577,15 @@ substitute for formal calibration or live readiness.
 
 </details>
 
-## Release gates and required proof
+## Historical release-gate matrix — superseded operational observations
 
-| Gate | Evidence required for acceptance | Current evidence / remaining action |
+The requirement scopes below remain useful, but this matrix's operational
+column predates the current R2 recovery checkpoint. Old `source_not_ready`,
+401, missing-provider and running-session statements are historical, not fresh
+observations. Current observations and immutable receipts are pinned in the
+current checkpoint above and [current-state.json](current-state.json).
+
+| Gate | Evidence required for acceptance | Retained historical evidence / action at that checkpoint |
 | --- | --- | --- |
 | Evaluated source and compiler | Exact ten-repository commits, canonical lock, actual binary build metadata and Go 1.27.3; no operator-proxy dependency | Current C2 server `a9e8e1a7`, image `98c9061c…`, binary `efd1077d…`, actual Go 1.27.3 and canonical lock `ec322ed2…` are bound by the [fresh V2 bridge plan](FRESH-BRIDGE-PLAN-2026-10-27-V2.json) and current-state receipts. Earlier C2 images and C1 identities retain their own historical evidence; none is relabeled as this release. |
 | Full cold evaluation | Nine fresh controls, nine fresh no-op candidates, authenticated score and unchanged G1–G6 inputs, resource/accounting reports, actual total wall time within three hours, exact cleanup | The current C2 corrected R9/R9 bridge has native acceptance `2af963f0…`: 10,290 seconds, all 9+9, score replay, artifact bindings and cleanup. It is an operational compatibility witness, not statistical equivalence. The earlier [corrected-release cold cohort](../baseline/prelaunch-corrected-same-seed-r9-2026-10-25/completed/cohort-01/README.md), 10,498 seconds, retains its own identity and is not relabeled. The recovered first reference also completed 9+9 in 10,306 seconds, but is not a second A/A observation. |
@@ -550,7 +600,7 @@ substitute for formal calibration or live readiness.
 | Monitoring and operations | Delivered heartbeat every 15 seconds, warning after 30 seconds missing; queue/current job/elapsed/significance/backlog panels; delivered alert routed to support@ur.xyz | Existing implementation and historical deployment evidence do not prove delivery for the new runner. Verify actual ingestion and routing after maintenance. |
 | Partner and public handoff | Current immutable contract, source/image distribution, onboarding/revocation proof, Macrocosmos finalize/decision acceptance, published commercial/appeal terms and updated reports | [Partner handoff](APEX-HANDOFF.md) records release deltas. Partner draft still requires reconciliation; final report must use newly qualified data and show improvement fringes wherever baselines appear. |
 
-## Execution order
+## Historical execution order — do not replay old owners
 
 1. Publish the completed cold phase and preserved outcomes before the next
    larger validation. Keep every subsequent scoring attempt serial under the
