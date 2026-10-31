@@ -607,7 +607,7 @@
     "do_not_deploy_or_claim_qualification_from_source_review": true
   },
   "pending_operator_submission_dashboard": {
-    "status": "formatted_race_compiled_21_new_roots_three_passes_committed_not_browser_rendered_or_deployed",
+    "status": "native_dense31_shows_no_data_root_cause_investigation_not_deployed",
     "uncommitted_source": false,
     "user_request": "Aligned per-submission score plots against the same epoch baseline and actual improvement fringes.",
     "dashboard": "server/grafana/dashboards/competition.json",
@@ -643,8 +643,34 @@
       "controller/competition_controller.go": "c9bbaa62857fd75c584123fba8599bbc58fb303ea7cefe505a536f0707057c73",
       "db_migrations.go": "292652db5e0202ae8a8a8781772aa02afcc071bbfdc45acd5d327fcaf4933441"
     },
+    "private_publication_order": {
+      "fix_commit": "73d81a0d1a44c2b0a61a840dc5e8f171001bf2d1",
+      "qualification": "server/connect/sim-latency/launch/GRAFANA-PRIVATE-PUBLICATION-QUALIFICATION-2026-10-31.json",
+      "qualification_sha256": "0ac7afbc2444c28d865bdc3405a7f8a1d543aad103624b602307f9460d143ee0",
+      "deterministic_pre_fix_ordering_failure_verified": true,
+      "targeted_race_top_level_passes": 39,
+      "live_grafana_deployment_or_observed_production_disclosure": false
+    },
+    "first_native_panel_capture": {
+      "finished_at": "2026-10-31T15:56:59Z",
+      "grafana_version": "13.2.0",
+      "prometheus_plugin_version": "13.1.7",
+      "panel_id": 31,
+      "scenario": "dense",
+      "synthetic_data_only": true,
+      "result": "page_loaded_but_panel_shows_no_data_despite_successful_datasource_responses",
+      "root_cause_established": false,
+      "render_qualification_passed": false,
+      "capture_directory": "/mnt/data/grafana-first-dense31-pid256-20261031.nHpFuRUv",
+      "evidence_manifest_sha256": "d1fe9dbe55f8c4058a4d85402389d902db3cf8889568361b287a99504fb315d3",
+      "png_sha256": "d642c6c2f5e0df2a3a779cfe5c15095424db4c33e38a310294c51a45a72d24b6",
+      "capture_json_sha256": "d0fcc0f7a250bb12c1f43727948606294535e657e1ac81e4a166de473108d909",
+      "owned_containers_and_network_removed_original_inventories_and_inputs_verified": true,
+      "earlier_failed_setup_attempts_preserved": true,
+      "live_grafana_or_evaluator_changed": false
+    },
     "remaining": [
-      "Perform actual native Grafana rendering separately; source/embedding/query assertions are not browser-render evidence.",
+      "Diagnose the actual native dense-panel No data result, then qualify all four panels with dense, sparse, singleton and empty data plus visible baseline/fringe and tooltip behavior. Source/embedding/query assertions are not browser-render evidence.",
       "Apply additive completed-score index migration903, then deploy the main API/metrics producer and Grafana dashboard through the normal pipeline. This source checkpoint does not deploy or change evaluation holds."
     ]
   },

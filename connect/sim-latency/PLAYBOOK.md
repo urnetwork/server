@@ -84,6 +84,17 @@ qualification. Apply additive migration **903** before deploying the main
 API/metrics producer and competition/API/proxy Grafana dashboards. These
 operator/future-epoch changes are not epoch-one grading-restoration gates.
 
+The managed-dashboard publication-order fix is pushed in `73d81a0d1`:
+an existing public share must be removed before private dashboard content is
+uploaded. Its deterministic pre-fix ordering failure and 39 passing targeted
+race-test executions are recorded in the
+[privacy qualification](launch/GRAFANA-PRIVATE-PUBLICATION-QUALIFICATION-2026-10-31.json).
+No production disclosure was observed, and the fix has not been deployed here.
+The isolated native Grafana 13.2.0 capture reached the actual score panel, but
+displayed **No data** despite successful datasource responses. Rendering is
+therefore not qualified; mapping and transformation diagnosis continues. Neither
+this operator-chart work nor its deployment is a grading-restoration gate.
+
 The dated observations below preserve earlier phases, not current commands.
 
 The later read-only snapshot at **18:39 UTC on October 30** shows four completed
