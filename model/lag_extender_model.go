@@ -118,8 +118,12 @@ func Testing_ReplaceLagAddressPlaces(lookup func(ip netip.Addr) *LagAddressPlace
 // it nowhere (lag.dev/PLAN.md A4):
 //
 //   - one family placed: its place;
-//   - both in one country: the IPv4 address's, as the sample placed every
-//     extender before;
+//   - both in one country: the address GeoLite2 places more surely, by the
+//     smaller accuracy radius, an unknown radius the least sure, and the IPv4
+//     address's on a tie. The country is the same either way, and the city
+//     and the point are the surer ones: L3 picks near and far by the point,
+//     and a country-only record sits at the country's center, for the US a
+//     point in Kansas;
 //   - in two countries, announced by two autonomous systems, or by one that
 //     GeoLite2 ASN does not know: the IPv6 address's. IPv4 space is leased and
 //     moved between networks, and GeoLite2 goes on placing it where it was. On
@@ -141,6 +145,9 @@ func lagExtenderAddressPlace(v4 *LagAddressPlace, v6 *LagAddressPlace) *LagPlace
 	case v4 == nil:
 		return v6.Place
 	case v4.Place.CountryCode == v6.Place.CountryCode:
+		if lagAccuracyRadiusRank(v6.AccuracyRadiusKm) < lagAccuracyRadiusRank(v4.AccuracyRadiusKm) {
+			return v6.Place
+		}
 		return v4.Place
 	case v4.Asn == 0 || v6.Asn == 0 || v4.Asn != v6.Asn:
 		return v6.Place

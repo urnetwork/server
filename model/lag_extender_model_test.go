@@ -28,12 +28,12 @@ func testLagAddressPlace(countryCode string, city string, accuracyRadiusKm int, 
 	}
 }
 
-// Between an extender's two families, the place is the IPv4 address's when
-// they agree on the country, the IPv6 address's when they disagree and are
-// announced by two networks, and the surer one's, the IPv6 address's on a
-// tie, when they disagree within one network. The fixtures are what GeoLite2
-// said of extenders on Main at 2026-11-01, whose places lag.dev's own round
-// trips settled. Pure.
+// Between an extender's two families, the place is the surer one's, the IPv4
+// address's on a tie, when they agree on the country; the IPv6 address's when
+// they disagree and are announced by two networks; and the surer one's, the
+// IPv6 address's on a tie, when they disagree within one network. The
+// fixtures are what GeoLite2 said of extenders on Main at 2026-11-01, whose
+// places lag.dev's own round trips settled. Pure.
 func TestLagExtenderAddressPlaceFamilies(t *testing.T) {
 	// 213.110.70.211, a block leased to an operator in Hong Kong that GeoLite2
 	// still places in Riga, and the operator's own IPv6 address
@@ -53,9 +53,17 @@ func TestLagExtenderAddressPlaceFamilies(t *testing.T) {
 	// an IPv4 address GeoLite2 ASN has no record for
 	unannounced := testLagAddressPlace("us", "", 1000, 0)
 	ciallo := testLagAddressPlace("hk", "", 20, 202355)
-	// both families in one country
+	// both families in one country: 38.43.93.158 placed in a city and its
+	// IPv6 address only in the country; 15.235.108.83 placed only in the
+	// country and its IPv6 address in Montreal; and one network's two
+	// families placed as surely, both only in the country
 	detroit := testLagAddressPlace("us", "Detroit", 20, 399804)
 	hostodo := testLagAddressPlace("us", "", 1000, 399804)
+	canada := testLagAddressPlace("ca", "", 1000, 16276)
+	montreal := testLagAddressPlace("ca", "Montreal", 20, 16276)
+	franceV4 := testLagAddressPlace("fr", "", 500, 16276)
+	franceV6 := testLagAddressPlace("fr", "", 500, 16276)
+	unknownRadiusUs := testLagAddressPlace("us", "Detroit", 0, 399804)
 	// an unknown radius is the least sure
 	unknownRadius := testLagAddressPlace("hk", "", 0, 154321)
 
@@ -68,7 +76,10 @@ func TestLagExtenderAddressPlaceFamilies(t *testing.T) {
 		{name: "neither family placed", v4: nil, v6: nil, want: nil},
 		{name: "only IPv4 placed", v4: detroit, v6: nil, want: detroit},
 		{name: "only IPv6 placed", v4: nil, v6: landups, want: landups},
-		{name: "one country: IPv4, however less sure", v4: hostodo, v6: detroit, want: hostodo},
+		{name: "one country: IPv4 when it is surer", v4: detroit, v6: hostodo, want: detroit},
+		{name: "one country: IPv6 when it is surer", v4: canada, v6: montreal, want: montreal},
+		{name: "one country, as sure: IPv4", v4: franceV4, v6: franceV6, want: franceV4},
+		{name: "one country: an unknown radius the least sure", v4: unknownRadiusUs, v6: hostodo, want: hostodo},
 		{name: "two networks: IPv6, however sure IPv4 is", v4: riga, v6: landups, want: landups},
 		{name: "two networks, both country only: IPv6", v4: liberally, v6: landups, want: landups},
 		{name: "a network GeoLite2 ASN does not know: IPv6", v4: unannounced, v6: ciallo, want: ciallo},
