@@ -88,7 +88,8 @@ type NetworkExtenderMeasurement struct {
 	Reason      string
 	RequestTime time.Time
 	// when the extender began waiting, kept across requests while it waits:
-	// the order the weekly cap admits in (C7)
+	// the order of the requests the weekly cap does not hold, and the last
+	// tie-break of those it does (C7, amendment 24)
 	PendingTime  *time.Time
 	RetryTime    *time.Time
 	FailureCount int

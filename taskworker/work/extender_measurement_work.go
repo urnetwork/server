@@ -24,7 +24,8 @@ import (
 //   - ExtenderMeasurementDns withdraws the live certificates of extenders that
 //     were moved to the gated tier or a canary channel, or deactivated for
 //     longer than controller.ExtenderMeasurementAwayGrace (C9, amendment 23),
-//     then makes the zone's address records exactly the extenders that serve,
+//     each judged again under its extender's lock (amendment 24), then makes
+//     the zone's address records exactly the extenders that serve,
 //     each name at its extender's active addresses, and records which names
 //     are published (C8). It is quick -- reads and one Route 53 listing -- so
 //     a deactivation leaves dns, and an address change reaches it, within
@@ -32,8 +33,10 @@ import (
 //     reports the name's change in sync, since the lag.dev sample offers a
 //     name only once it is published (A4).
 //   - ExtenderMeasurementIssue revokes what was withdrawn (C9), renews what is
-//     due (C6) and issues for pending requests under the weekly cap (C5,
-//     C7). An order waits on Route 53 and the CA for a minute or more, so this
+//     due (C6) and issues for pending requests under the weekly cap, spread
+//     across countries and networks (C5, C7, amendment 24), asking again for
+//     an extender that came back after its request was withdrawn (C9). An
+//     order waits on Route 53 and the CA for a minute or more, so this
 //     chain is apart from the dns one, runs alone with a longer limit, and
 //     starts no new order once its budget is spent. Each certificate it
 //     stores wakes the dns chain, so the name is published right after its
@@ -47,7 +50,9 @@ import (
 //
 // Both chains do nothing while the measurement block is disabled, and
 // neither fails its task for a failure of one certificate: a failed order
-// backs off on its own row, and the chain re-arms either way.
+// backs off on its own row, or waits out the CA's Retry-After when the CA
+// refused it under a rate limit (amendment 24), and the chain re-arms either
+// way.
 
 const (
 	// How often each chain runs.
@@ -79,7 +84,9 @@ const (
 	// an hour and pauses a name that keeps failing, and it issues the same
 	// name at most five times in seven days, so a name that keeps failing is
 	// tried four times in its first hour and then ever more rarely
-	// (lag.dev/ops/letsencrypt.md).
+	// (lag.dev/ops/letsencrypt.md). A refusal under a rate limit waits for
+	// the CA's Retry-After instead (extenderMeasurementRetryTime, amendment
+	// 24).
 	ExtenderMeasurementFirstRetryTimeout = 5 * time.Minute
 	ExtenderMeasurementMaxRetryTimeout   = 72 * time.Hour
 )
