@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/urnetwork/server"
 )
@@ -505,6 +506,14 @@ sync_exempt_index(index_key, 'p', provider_key, pi_key, present_key, expire_key,
 return {chosen, record, count_path}
 `, providerIntentCountLua)
 
+// The provider intent scripts run by sha: their bodies carry the exempt index
+// library (several KB), which EVAL would send and hash on every call.
+var (
+	providerIntentApplyScript        = redis.NewScript(providerIntentApplyLua)
+	providerIntentCountClientsScript = redis.NewScript(providerIntentCountClientsLua)
+	providerIntentObserveScript      = redis.NewScript(providerIntentObserveLua)
+)
+
 // Returns {normal_count, exempt_count, count_path} for the network.
 var providerIntentCountClientsLua = fmt.Sprintf(`%s
 local normal_count, exempt_count, count_path = count_clients(KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], KEYS[6], KEYS[7], ARGV[1], '', ARGV[3], ARGV[2])
@@ -574,9 +583,9 @@ func applyProviderIntentState(
 		presenceExpiryMs = presenceExpireTime.UnixMilli()
 	}
 	server.Redis(ctx, func(r server.RedisClient) {
-		values, err := r.Eval(
+		values, err := providerIntentApplyScript.Run(
 			ctx,
-			providerIntentApplyLua,
+			r,
 			providerIntentKeys(networkId),
 			string(clientId.Bytes()),
 			expectedRecord,
@@ -803,9 +812,9 @@ func observeProviderIntentAt(
 ) (state *ProviderIntentState) {
 	var record string
 	server.Redis(ctx, func(r server.RedisClient) {
-		value, err := r.Eval(
+		value, err := providerIntentObserveScript.Run(
 			ctx,
-			providerIntentObserveLua,
+			r,
 			providerIntentKeys(networkId),
 			string(clientId.Bytes()),
 			now.UnixMilli(),
@@ -853,9 +862,9 @@ func GetNetworkConnectedClientCounts(ctx context.Context, networkId server.Id) (
 // Counts at an explicit time, for deterministic tests.
 func getNetworkConnectedClientCountsAt(ctx context.Context, networkId server.Id, now time.Time) (normalCount int, providerIntentCount int) {
 	server.Redis(ctx, func(r server.RedisClient) {
-		values, err := r.Eval(
+		values, err := providerIntentCountClientsScript.Run(
 			ctx,
-			providerIntentCountClientsLua,
+			r,
 			providerIntentKeys(networkId),
 			// count only entries whose expiry is still in the future
 			now.UnixMilli()+1,

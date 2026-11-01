@@ -813,6 +813,9 @@ redis.call('SET', mutation_receipt_key, 1, 'EX', receipt_ttl_seconds)
 return 1
 `, providerIntentExemptSyncLua)
 
+// Run by sha, since the body carries the exempt index sync.
+var networkPeerAddScript = redis.NewScript(networkPeerAddLua)
+
 // Commits one registration only if no provide update or lifecycle mutation
 // occurred since canonical modes were loaded.
 func addNetworkPeerAtMutationVersion(
@@ -834,9 +837,9 @@ func addNetworkPeerAtMutationVersion(
 	expiryMs := server.NowUtc().Add(ttl).UnixMilli()
 
 	server.Redis(ctx, func(r server.RedisClient) {
-		addedInt, err := r.Eval(
+		addedInt, err := networkPeerAddScript.Run(
 			ctx,
-			networkPeerAddLua,
+			r,
 			[]string{
 				networkPeerMetaKey(networkId),
 				networkPeerMemberKey(networkId, peer.ClientId),
@@ -973,6 +976,9 @@ redis.call('EXPIRE', mutation_version_key, key_ttl_seconds)
 return 1
 `, providerIntentExemptSyncLua)
 
+// Run by sha, since the body carries the exempt index sync.
+var networkPeerRefreshScript = redis.NewScript(networkPeerRefreshLua)
+
 // Extends one exact registration without producing a visible event. A missing
 // member key is a lost registration, not permission to recreate metadata read
 // before a concurrent replacement.
@@ -992,9 +998,9 @@ func refreshNetworkPeerAtMutationState(
 	}
 
 	server.Redis(ctx, func(r server.RedisClient) {
-		refreshedInt, err := r.Eval(
+		refreshedInt, err := networkPeerRefreshScript.Run(
 			ctx,
-			networkPeerRefreshLua,
+			r,
 			[]string{
 				networkPeerMetaKey(networkId),
 				networkPeerMemberKey(networkId, clientId),
@@ -1390,6 +1396,9 @@ for _, expired_member in ipairs(expired) do
 end
 `, providerIntentExemptSyncLua)
 
+// Run by sha, since the body carries the exempt index sync.
+var networkPeerAddProviderScript = redis.NewScript(networkPeerAddProviderLua)
+
 // Registers a connected provider install. Like a proxy client it is counted
 // (by the provider intent rules, see GetNetworkConnectedClientCounts) and never
 // appears in the peer list or emits events. Refresh by calling again with a
@@ -1405,9 +1414,9 @@ func AddNetworkProviderPeer(
 
 	server.Redis(ctx, func(r server.RedisClient) {
 		// expired installs age out piggybacked on install activity
-		err := r.Eval(
+		err := networkPeerAddProviderScript.Run(
 			ctx,
-			networkPeerAddProviderLua,
+			r,
 			[]string{
 				networkPeerConnectedProviderKey(networkId),
 				providerIntentExemptKey(networkId),

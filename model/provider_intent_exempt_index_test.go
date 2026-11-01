@@ -11,6 +11,7 @@ import (
 	mathrand "math/rand/v2"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -1212,6 +1213,83 @@ func TestProviderIntentExemptIndexRestartsAnUnreadableBuild(t *testing.T) {
 			connect.AssertEqual(t, normalCount, 0)
 			connect.AssertEqual(t, exemptCount, 5)
 			connect.AssertEqual(t, testingProviderIntentExemptBuildState(ctx, networkId), "#ready")
+		}
+	})
+}
+
+// The calls of one redis command the server has executed.
+func testingRedisCommandCalls(t testing.TB, ctx context.Context, name string) (calls int64) {
+	server.Redis(ctx, func(r server.RedisClient) {
+		info, err := r.Info(ctx, "commandstats").Result()
+		server.Raise(err)
+		for _, line := range strings.Split(info, "\n") {
+			stats, ok := strings.CutPrefix(strings.TrimSpace(line), "cmdstat_"+name+":")
+			if !ok {
+				continue
+			}
+			for _, field := range strings.Split(stats, ",") {
+				if value, ok := strings.CutPrefix(field, "calls="); ok {
+					calls, err = strconv.ParseInt(value, 10, 64)
+					server.Raise(err)
+				}
+			}
+		}
+	})
+	return
+}
+
+// The scripts that carry the exempt index library run by sha: each call is an
+// EVALSHA, and only a script the server has not cached is sent whole. Other
+// clients of the server only add EVALSHA calls, so the bound holds whatever
+// else runs.
+func TestProviderIntentExemptScriptsRunBySha(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		now := server.NowUtc()
+		networkId, connectedIds := testingProviderIntentExemptNetwork(t, ctx, now)
+		noProvideModes := func() (map[ProvideMode]bool, error) {
+			return map[ProvideMode]bool{}, nil
+		}
+		residentId := server.NewId()
+		peerId := server.NewId()
+		addNetworkPeerWithProvideModesLoader(ctx, networkId, &NetworkPeer{ClientId: peerId}, residentId, time.Minute, noProvideModes)
+		normal := &ProviderIntentState{
+			Status:      ProviderIntentStatusNormal,
+			AttemptTime: now,
+			CheckTime:   now.Add(ProviderIntentAttemptAllowance),
+		}
+		calls := []struct {
+			name string
+			call func()
+		}{
+			{"slot decision", func() {
+				record, _ := getProviderIntentRecord(ctx, networkId, connectedIds[0], now)
+				applyProviderIntentState(ctx, networkId, connectedIds[0], record, normal, true, 1<<20, now.Add(time.Minute), now)
+			}},
+			{"count", func() {
+				getNetworkConnectedClientCountsAt(ctx, networkId, now)
+			}},
+			{"observe", func() {
+				observeProviderIntentAt(ctx, networkId, connectedIds[1], time.Minute, now)
+			}},
+			{"peer add", func() {
+				addNetworkPeerWithProvideModesLoader(ctx, networkId, &NetworkPeer{ClientId: server.NewId()}, server.NewId(), time.Minute, noProvideModes)
+			}},
+			{"peer refresh", func() {
+				connect.AssertEqual(t, RefreshNetworkPeer(ctx, networkId, peerId, residentId, time.Minute), true)
+			}},
+			{"install", func() {
+				AddNetworkProviderPeer(ctx, networkId, server.NewId(), time.Minute)
+			}},
+		}
+		for _, c := range calls {
+			before := testingRedisCommandCalls(t, ctx, "evalsha")
+			for range 8 {
+				c.call()
+			}
+			if evalShaCount := testingRedisCommandCalls(t, ctx, "evalsha") - before; evalShaCount < 8 {
+				t.Fatalf("%s: %d EVALSHA calls for 8 calls", c.name, evalShaCount)
+			}
 		}
 	})
 }
