@@ -72,6 +72,26 @@ var paymentReconcileApiBudget = 500
 // run.
 var paymentReconcileRenewalLimit = 1000
 
+// appleUnknownToStoreRetryRuns bounds the retry for a renewal whose
+// transaction no App Store environment the deployment accepts knows
+// (TransactionIdNotFoundError from production and, where apple.yml accepts
+// Sandbox, from the sandbox). The answer is retried as a status error, which
+// keeps the watermark in place, so a transaction the API briefly does not
+// know is not written off. Once it has persisted through this many runs
+// within appleUnknownToStoreRetryLookback (about a day of hourly runs), the
+// renewal is recorded once as unknown_to_store and is no longer a store
+// error. On Main one pre-ledger renewal, keyed on an appTransactionId neither
+// environment knows, held the App Store watermark on every run from
+// 2026-10-09. Replaceable by tests.
+var appleUnknownToStoreRetryRuns = 24
+
+// appleUnknownToStoreRetryLookback is how far back the runs that spent the
+// retry are counted.
+const appleUnknownToStoreRetryLookback = 7 * 24 * time.Hour
+
+// appleUnknownToStoreReason marks the status errors that spend the retry.
+const appleUnknownToStoreReason = "transaction_not_found"
+
 // paymentReconcileSolanaFinalityGrace: only re-verify on-chain payments
 // credited at least this long ago, so a just-credited transaction is never
 // judged missing while the chain (or Helius' index) catches up.
@@ -242,8 +262,9 @@ var appleAppStoreServerApiBaseUrl = "https://api.storekit.itunes.apple.com"
 // Replaceable by tests standing up a fake.
 var appleAppStoreServerApiSandboxBaseUrl = "https://api.storekit-sandbox.itunes.apple.com"
 
-// The App Store environment name in notifications, signed transactions and
+// The App Store environment names in notifications, signed transactions and
 // apple.yml app_store_notifications.environments.
+const appleEnvironmentProduction = "Production"
 const appleEnvironmentSandbox = "Sandbox"
 
 // Apple's TransactionIdNotFoundError. Production answers it for a transaction
@@ -500,7 +521,10 @@ type PaymentReconcileStoreResult struct {
 	Errors               int `json:"errors"`
 	// Sandbox counts examined App Store renewals that only the sandbox
 	// environment knows (TestFlight and App Review purchases).
-	Sandbox         int  `json:"sandbox,omitempty"`
+	Sandbox int `json:"sandbox,omitempty"`
+	// UnknownToStore counts examined App Store renewals whose transaction no
+	// accepted environment knows, past the bounded retry (unknown_to_store).
+	UnknownToStore  int  `json:"unknown_to_store,omitempty"`
 	Skipped         bool `json:"skipped,omitempty"`
 	BudgetExhausted bool `json:"budget_exhausted,omitempty"`
 }
@@ -627,21 +651,35 @@ func (self *paymentReconcileRun) recordCreditUnfulfillableOnce(
 	details map[string]any,
 ) {
 	details["leg"] = "credit"
+	self.recordOnce(store, model.PaymentReconcileActionCreditUnfulfillable, networkId, evidence, details)
+}
+
+// recordOnce writes a terminal disposition (credit_unfulfillable,
+// unknown_to_store) once per store object: later runs that see the same
+// object add nothing. A dry run writes its dry_run row like every dry-run
+// event.
+func (self *paymentReconcileRun) recordOnce(
+	store string,
+	action string,
+	networkId *server.Id,
+	evidence string,
+	details map[string]any,
+) {
 	if self.dryRun {
-		self.record(store, model.PaymentReconcileActionCreditUnfulfillable, networkId, evidence, details)
+		self.record(store, action, networkId, evidence, details)
 		return
 	}
 	if _, err := addPaymentReconciliationEventOnce(self.connOwner, self.clientSession.Ctx, &model.PaymentReconciliationEvent{
 		RunId:     self.runId,
 		Store:     store,
 		NetworkId: networkId,
-		Action:    model.PaymentReconcileActionCreditUnfulfillable,
+		Action:    action,
 		Evidence:  evidence,
 		Details:   details,
 	}); err != nil {
 		// the only durable handle was not written: count a store error so the
 		// run shows it and the next run writes it
-		glog.Errorf("[reconcile]could not record %s/%s event: %s\n", store, model.PaymentReconcileActionCreditUnfulfillable, err)
+		glog.Errorf("[reconcile]could not record %s/%s event: %s\n", store, action, err)
 		self.errors += 1
 		self.storeResult(store).Errors += 1
 	}
@@ -704,6 +742,15 @@ func (self *paymentReconcileRun) countSandbox(store string) {
 	summary := self.storeResult(store)
 	summary.Sandbox += 1
 	self.storeDetail(store)["sandbox"] = summary.Sandbox
+}
+
+// countUnknownToStore counts one examined store object the store does not
+// know, past the bounded retry. The count is folded into the heartbeat row,
+// so the object stays visible every run after its one unknown_to_store row.
+func (self *paymentReconcileRun) countUnknownToStore(store string) {
+	summary := self.storeResult(store)
+	summary.UnknownToStore += 1
+	self.storeDetail(store)[model.PaymentReconcileActionUnknownToStore] = summary.UnknownToStore
 }
 
 // creditAction names the audit action for a credit repair: the real action,
@@ -1335,7 +1382,10 @@ func stripeRenewalMatchesInvoiceInConn(connOwner server.PgConn,
 //	    stays 1 until expiry; the rule falls out of the status itself)
 //	production 4040010, the sandbox knows the transaction    -> nothing (a
 //	    TestFlight or App Review purchase; counted as sandbox, not an error)
-//	production 4040010, the sandbox does not know it either  -> status error
+//	4040010 from every accepted environment                  -> status error,
+//	    retried; once it persists through appleUnknownToStoreRetryRuns runs ->
+//	    unknown_to_store, recorded once and counted on the heartbeat; not an
+//	    error, and nothing is credited or ended from it
 //
 // Subscriptions whose last credited window ended up to
 // paymentReconcileLapsedWindow ago are checked too; a lapsed row is only ever
@@ -1348,8 +1398,13 @@ func stripeRenewalMatchesInvoiceInConn(connOwner server.PgConn,
 // answers 4040010 for those. The sandbox answer only establishes the
 // environment: a sandbox purchase moves no money, so the reconciler credits,
 // ends and repairs nothing from sandbox state. Only an answer the sandbox
-// gives counts; a sandbox miss or failure remains a status error, which keeps
-// the watermark in place.
+// gives counts; a sandbox failure remains a status error, which keeps the
+// watermark in place, and so does a sandbox miss until the bounded retry for
+// a transaction no accepted environment knows is spent.
+//
+// The listing ignores since: every run examines each network's latest
+// renewal in the lapsed window, so the watermark only records a complete,
+// error-free pass.
 func reconcileApple(run *paymentReconcileRun, since time.Time) (bool, error) {
 	ctx := run.clientSession.Ctx
 	store := model.SubscriptionMarketApple
@@ -1382,6 +1437,9 @@ func reconcileApple(run *paymentReconcileRun, since time.Time) (bool, error) {
 		}
 
 		statuses, err := appleGetSubscriptionStatuses(ctx, appleAppStoreServerApiBaseUrl, renewal.TransactionId)
+		// every environment the deployment accepts answered
+		// TransactionIdNotFoundError
+		unknownToStore := false
 		if appleTransactionIdNotFound(err) && creds.allowsEnvironment(appleEnvironmentSandbox) {
 			// the sandbox lookup is a second store API call
 			if !run.spend(store) {
@@ -1395,17 +1453,29 @@ func reconcileApple(run *paymentReconcileRun, since time.Time) (bool, error) {
 				run.countSandbox(store)
 				continue
 			}
+			unknownToStore = appleTransactionIdNotFound(sandboxErr)
 			err = fmt.Errorf("App Store sandbox: %w", sandboxErr)
+		} else if appleTransactionIdNotFound(err) {
+			// without Sandbox notifications no sandbox transaction was
+			// credited, so production is the only environment to ask
+			unknownToStore = true
 		} else if err == nil {
 			err = validateAppleSubscriptionStatuses(statuses)
 		}
 		if err != nil {
+			details := map[string]any{"error": err.Error(), "leg": "status"}
+			if unknownToStore {
+				if run.appleUnknownToStore(creds, renewal) {
+					continue
+				}
+				details["reason"] = appleUnknownToStoreReason
+			}
 			run.record(
 				store,
 				model.PaymentReconcileActionError,
 				&renewal.NetworkId,
 				renewal.TransactionId,
-				map[string]any{"error": err.Error(), "leg": "status"},
+				details,
 			)
 			continue
 		}
@@ -1551,6 +1621,59 @@ func reconcileApple(run *paymentReconcileRun, since time.Time) (bool, error) {
 	}
 
 	return true, nil
+}
+
+// appleUnknownToStore applies the bounded retry to a renewal whose transaction
+// no App Store environment the deployment accepts knows. Within the bound it
+// returns false, and the caller records a status error carrying
+// appleUnknownToStoreReason: the watermark stays and the run spends one
+// retry. On the run that spends the last retry, and on every run once the
+// disposition is recorded, it records unknown_to_store once, counts the
+// renewal on the heartbeat and returns true: the renewal is no longer a store
+// error. Nothing is credited or ended from the store's answer, and the next
+// run asks the store again, so an answer the store gives later is reconciled
+// as usual.
+func (self *paymentReconcileRun) appleUnknownToStore(
+	creds *appleServerApiCredentials,
+	renewal *model.ReconcileSubscriptionRenewal,
+) bool {
+	ctx := self.clientSession.Ctx
+	store := model.SubscriptionMarketApple
+	recorded, errorRuns := model.GetPaymentReconcileUnknownToStoreInConn(self.connOwner,
+		ctx,
+		store,
+		renewal.TransactionId,
+		appleUnknownToStoreReason,
+		self.now.Add(-appleUnknownToStoreRetryLookback),
+	)
+	// this run's answer is one more attempt
+	if !recorded && errorRuns+1 < appleUnknownToStoreRetryRuns {
+		return false
+	}
+	self.countUnknownToStore(store)
+	if !recorded {
+		environments := []string{appleEnvironmentProduction}
+		if creds.allowsEnvironment(appleEnvironmentSandbox) {
+			environments = append(environments, appleEnvironmentSandbox)
+		}
+		// a renewal credited before the transaction ledger names the
+		// appTransactionId its notification carried; a ledger renewal names
+		// a transaction the verified claims named
+		_, ledger := model.GetAppleTransactionNetworkIdInConn(self.connOwner, ctx, renewal.TransactionId)
+		self.recordOnce(
+			store,
+			model.PaymentReconcileActionUnknownToStore,
+			&renewal.NetworkId,
+			renewal.TransactionId,
+			map[string]any{
+				"leg":          "status",
+				"reason":       appleUnknownToStoreReason,
+				"environments": environments,
+				"ledger":       ledger,
+			},
+		)
+	}
+	return true
 }
 
 // appleWindowTransactionIds names the renewals that hold the renewal's paid
