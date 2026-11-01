@@ -7,6 +7,7 @@ package model
 import (
 	"context"
 	"fmt"
+	"math"
 	mathrand "math/rand/v2"
 	"slices"
 	"strconv"
@@ -644,9 +645,18 @@ func TestProviderIntentExemptIndexMatchesWalkWhileBuilding(t *testing.T) {
 	})
 }
 
-// The build state of a network's index: "" when none, else its sentinel.
+// The build state of a network's index: "" when none, "#ready" when complete,
+// else its build sentinel.
 func testingProviderIntentExemptBuildState(ctx context.Context, networkId server.Id) (state string) {
 	server.Redis(ctx, func(r server.RedisClient) {
+		_, err := r.ZScore(ctx, providerIntentExemptKey(networkId), "#ready").Result()
+		if err == nil {
+			state = "#ready"
+			return
+		}
+		if err != server.RedisNil {
+			panic(err)
+		}
 		states, err := r.ZRangeByScore(ctx, providerIntentExemptKey(networkId), &redis.ZRangeBy{
 			Min:   "-inf",
 			Max:   "-inf",
@@ -990,5 +1000,114 @@ func TestProviderIntentExemptIndexDroppedWhenItLosesItsSources(t *testing.T) {
 			connect.AssertEqual(t, testutil.ToFloat64(indexCounter)-indexedBefore, float64(1))
 			connect.AssertEqual(t, testingProviderIntentExemptBuildState(ctx, networkId), "#ready")
 		}
+	})
+}
+
+// Sets a complete index's build time, as if it had been built `age` ago on the
+// redis clock.
+func testingAgeProviderIntentExemptIndex(t testing.TB, ctx context.Context, networkId server.Id, age time.Duration) {
+	server.Redis(ctx, func(r server.RedisClient) {
+		now, err := r.Time(ctx).Result()
+		server.Raise(err)
+		added, err := r.ZAddXX(ctx, providerIntentExemptKey(networkId), redis.Z{
+			Score:  float64(-now.Add(-age).UnixMilli()),
+			Member: "#ready",
+		}).Result()
+		server.Raise(err)
+		connect.AssertEqual(t, added, int64(0))
+	})
+}
+
+// A writer without the index fails a client (a rollout or a rollback): the
+// index still counts the client exempt, and the count cannot see it, since the
+// client's registry entry and intent keys are all there. A complete index is
+// trusted for providerIntentExemptRebuildAge on the redis clock; past it, the
+// next count rebuilds the index and agrees with the walk again. An index built
+// before its build time was recorded (`#ready` scored -inf) is rebuilt at once.
+func TestProviderIntentExemptIndexRebuiltPastItsAge(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		for _, built := range []string{"aged", "unrecorded"} {
+			now := server.NowUtc()
+			networkId, connectedIds := testingProviderIntentExemptNetwork(t, ctx, now)
+			failedId := connectedIds[0]
+			server.Redis(ctx, func(r server.RedisClient) {
+				err := r.HSet(ctx, providerIntentKey(networkId), string(failedId.Bytes()), (&ProviderIntentState{
+					Status:      ProviderIntentStatusNormal,
+					AttemptTime: now,
+					CheckTime:   now.Add(ProviderIntentAttemptAllowance),
+				}).record()).Err()
+				server.Raise(err)
+			})
+			oracleNormal, oracleExempt := testingProviderIntentOracleCounts(ctx, networkId, now)
+			connect.AssertEqual(t, oracleNormal, int64(1))
+			connect.AssertEqual(t, oracleExempt, int64(4))
+
+			if built == "aged" {
+				// within the age the index is trusted, and lags the write
+				testingAgeProviderIntentExemptIndex(t, ctx, networkId, providerIntentExemptRebuildAge-10*time.Minute)
+				normalCount, exemptCount := getNetworkConnectedClientCountsAt(ctx, networkId, now)
+				connect.AssertEqual(t, normalCount, 0)
+				connect.AssertEqual(t, exemptCount, 5)
+				testingAgeProviderIntentExemptIndex(t, ctx, networkId, providerIntentExemptRebuildAge+10*time.Minute)
+			} else {
+				server.Redis(ctx, func(r server.RedisClient) {
+					err := r.ZAdd(ctx, providerIntentExemptKey(networkId), redis.Z{Score: math.Inf(-1), Member: "#ready"}).Err()
+					server.Raise(err)
+				})
+			}
+			normalCount, exemptCount := getNetworkConnectedClientCountsAt(ctx, networkId, now)
+			connect.AssertEqual(t, int64(normalCount), oracleNormal)
+			connect.AssertEqual(t, int64(exemptCount), oracleExempt)
+			connect.AssertEqual(t, testingProviderIntentExemptBuildState(ctx, networkId), "#ready")
+			// the rebuilt index records its build time
+			server.Redis(ctx, func(r server.RedisClient) {
+				builtScore, err := r.ZScore(ctx, providerIntentExemptKey(networkId), "#ready").Result()
+				server.Raise(err)
+				redisNow, err := r.Time(ctx).Result()
+				server.Raise(err)
+				if age := redisNow.Sub(time.UnixMilli(int64(-builtScore))); age < 0 || time.Minute < age {
+					t.Fatalf("%s: the rebuilt index records a build %s ago", built, age)
+				}
+			})
+		}
+	})
+}
+
+// An index without exempt entries holds only `#ready`, which no sync writes, so
+// the counts that read it keep its ttl armed: it does not expire a day after
+// its build and become the first key a volatile-ttl eviction takes.
+func TestProviderIntentExemptIndexTtlRearmedByCounts(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		networkId := server.NewId()
+		now := server.NowUtc()
+		for range 4 {
+			clientId := server.NewId()
+			addNetworkPeerWithProvideModesLoader(ctx, networkId, &NetworkPeer{ClientId: clientId}, server.NewId(), 5*time.Minute, func() (map[ProvideMode]bool, error) {
+				return map[ProvideMode]bool{}, nil
+			})
+			testingSetProviderIntentState(t, ctx, networkId, clientId, &ProviderIntentState{
+				Status:      ProviderIntentStatusNormal,
+				AttemptTime: now,
+				CheckTime:   now.Add(ProviderIntentAttemptAllowance),
+			}, 10*time.Minute, now)
+		}
+		normalCount, exemptCount := getNetworkConnectedClientCountsAt(ctx, networkId, now)
+		connect.AssertEqual(t, normalCount, 4)
+		connect.AssertEqual(t, exemptCount, 0)
+		server.Redis(ctx, func(r server.RedisClient) {
+			// a day of ttl has nearly passed
+			err := r.Expire(ctx, providerIntentExemptKey(networkId), 100*time.Second).Err()
+			server.Raise(err)
+		})
+		getNetworkConnectedClientCountsAt(ctx, networkId, now)
+		server.Redis(ctx, func(r server.RedisClient) {
+			ttl, err := r.TTL(ctx, providerIntentExemptKey(networkId)).Result()
+			server.Raise(err)
+			if ttl < networkPeerKeyTtl/2 {
+				t.Fatalf("index ttl %s after a count", ttl)
+			}
+		})
 	})
 }

@@ -39,7 +39,9 @@
 // the walk otherwise, so a count is exact while the index builds. A new build
 // starts by dropping the index, so it never trusts an entry it did not derive.
 // The build state is a sentinel member scored -inf (never counted), so a lost
-// index takes its state with it and the next count rebuilds it.
+// index takes its state with it and the next count rebuilds it. A complete
+// index holds `#ready` scored by its build time negated (never counted either),
+// and a count rebuilds an index older than providerIntentExemptRebuildAge.
 //
 // The cost per call, each command O(log N) in the network's registry size N:
 //   - a count: one sentinel ZSCORE, four ZCOUNTs and up to four ZSCOREs for
@@ -67,6 +69,7 @@ package model
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -109,10 +112,20 @@ func countProviderIntentCountPath(countPath int64) {
 }
 
 // zset: `c`+client id bytes and `p`+client id bytes of exempt registry entries,
-// scored by their first expiry, plus one build state sentinel scored -inf
+// scored by their first expiry, plus one build state sentinel: `#ready` scored
+// by its build time in unix milli negated, or a build in progress scored -inf
 func providerIntentExemptKey(networkId server.Id) string {
 	return fmt.Sprintf("{np_%s}pi_exempt", networkId)
 }
+
+// How long a count trusts a complete index before rebuilding it from its
+// sources. The count's own checks see an index that counts entries without
+// sources, not one that misses entries or holds a stale status, as one left by
+// a writer without the index (a rollout or a rollback) can. The age bounds such
+// a disagreement to an hour and a build. A rebuild costs each counted network
+// one sweep an hour, a walk only for a network above the build limit. The age
+// is measured on the redis clock (TIME), so the callers' clocks do not move it.
+const providerIntentExemptRebuildAge = time.Hour
 
 // The fewest registry members one count derives while the index builds. A
 // count builds at least a quarter of the network's registry members, so a build
@@ -174,7 +187,7 @@ end
 // walk over every live registry member, used while a network's index builds.
 // build_exempt_index advances the build and returns whether the index is
 // complete; its state is `#c <cursor> <sweep end>` or `#p ...` while it
-// sweeps a registry, and `#ready`. sweep_exempt_index takes one step of a
+// sweeps a registry, and `#ready` scored by the negated build time. sweep_exempt_index takes one step of a
 // sweep and returns the members derived and the next cursor, or false at the
 // sweep's end. count_clients_indexed counts from a complete index, or returns
 // false when the index disagrees with its sources. The counts return
@@ -245,12 +258,22 @@ local function sweep_exempt_index(index_key, registry_tag, registry_key, pi_key,
 end
 
 local function build_exempt_index(index_key, pi_key, present_key, expire_key, connected_key, provider_key, build_limit, key_ttl_seconds)
-	if redis.call('ZSCORE', index_key, '#ready') ~= false then
-		return true
+	local time = redis.call('TIME')
+	local now_ms = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
+	local built = redis.call('ZSCORE', index_key, '#ready')
+	if built ~= false then
+		if math.abs(now_ms + tonumber(built)) <= %d then
+			-- an index without exempt entries is written by no sync
+			if redis.call('TTL', index_key) < tonumber(key_ttl_seconds) / 2 then
+				redis.call('EXPIRE', index_key, key_ttl_seconds)
+			end
+			return true
+		end
+		-- past its age, the index is rebuilt from its sources
 	end
 	local registry_tag, cursor, sweep_end = nil, nil, nil
 	local states = redis.call('ZRANGEBYSCORE', index_key, '-inf', '-inf', 'LIMIT', 0, 1)
-	if #states == 1 then
+	if built == false and #states == 1 then
 		registry_tag, cursor, sweep_end = string.match(states[1], '^#([cp]) ([^ ]+) ([^ ]+)$')
 	end
 	if registry_tag == nil then
@@ -279,7 +302,7 @@ local function build_exempt_index(index_key, pi_key, present_key, expire_key, co
 			break
 		end
 		if registry_tag == 'p' then
-			redis.call('ZADD', index_key, '-inf', '#ready')
+			redis.call('ZADD', index_key, -now_ms, '#ready')
 			redis.call('EXPIRE', index_key, key_ttl_seconds)
 			return true
 		end
@@ -317,4 +340,4 @@ local function count_clients_indexed(index_key, pi_key, present_key, expire_key,
 	end
 	return redis.call('ZCOUNT', proxy_key, live_min, '+inf') + live_count - exempt_count, exempt_count
 end
-`, providerIntentExemptSyncLua)
+`, providerIntentExemptSyncLua, providerIntentExemptRebuildAge.Milliseconds())
