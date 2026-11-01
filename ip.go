@@ -623,6 +623,127 @@ func lookupIpInfo(db *mmdb.Reader, schemaType schemaType, addr netip.Addr) (*IpI
 	}
 }
 
+// GeoLite2 ASN (lag.dev/PLAN.md A3): the autonomous system an address is
+// announced by, which lag.dev shows as the visitor's network and compares
+// between an extender's two address families to place it (A4). It is a
+// config mmdb deployed beside GeoLite2 City (`mmdb/geolite2.mmdb`), and
+// optional: a deployment without it answers my-ip-info without `asn`.
+//
+// This product includes GeoLite2 data created by MaxMind, available from
+// https://www.maxmind.com.
+
+// The resource the database is deployed as, resolved like the City database.
+const GeoLite2AsnResourcePath = "mmdb/geolite2-asn.mmdb"
+
+// The one database type the reader decodes. The record shape below is this
+// type's, and the struct decoder would read another type's records as empty
+// rather than fail, so another type is refused when the file is opened.
+const GeoLite2AsnDatabaseType = "GeoLite2-ASN"
+
+// An autonomous system (lag.dev/PLAN.md A3), as GeoLite2 ASN names it. Both
+// fields are always written, so a reader never tests for a missing name.
+type IpAsn struct {
+	Number       uint32 `json:"number"`
+	Organization string `json:"organization"`
+}
+
+// The part of a GeoLite2 ASN record the answer keeps.
+type geoLite2AsnRecord struct {
+	AutonomousSystemNumber       uint32 `maxminddb:"autonomous_system_number"`
+	AutonomousSystemOrganization string `maxminddb:"autonomous_system_organization"`
+}
+
+// The deployed database, opened once per process, or nil when there is none.
+var ipAsnDb = sync.OnceValue(loadIpAsnDb)
+
+// Opens the deployed GeoLite2 ASN file. An absent or unusable file is logged
+// and leaves the answer without `asn`, rather than failing the process: the
+// City database is what my-ip-info cannot do without.
+func loadIpAsnDb() *mmdb.Reader {
+	path, err := Config.ResourcePath(GeoLite2AsnResourcePath)
+	if err != nil {
+		glog.Infof("[ip]no GeoLite2 ASN database (%s); my-ip-info answers without asn\n", err)
+		return nil
+	}
+	db, err := openIpAsnDb(path)
+	if err != nil {
+		glog.Errorf("[ip]GeoLite2 ASN database not used: %s\n", err)
+		return nil
+	}
+	glog.Infof(
+		"[ip]ip asn database type: %s (build %s)\n",
+		db.Metadata.DatabaseType,
+		db.Metadata.BuildTime().UTC().Format(time.DateOnly),
+	)
+	return db
+}
+
+// Opens the database at path and refuses any type but GeoLite2 ASN.
+func openIpAsnDb(path string) (*mmdb.Reader, error) {
+	db, err := mmdb.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	if databaseType := db.Metadata.DatabaseType; databaseType != GeoLite2AsnDatabaseType {
+		db.Close()
+		return nil, fmt.Errorf("ip asn database %s has type %q; only %q is supported", path, databaseType, GeoLite2AsnDatabaseType)
+	}
+	return db, nil
+}
+
+// The autonomous system of addr in db, or nil when db is nil, the address has
+// no record, or the record has no number.
+func lookupIpAsn(db *mmdb.Reader, addr netip.Addr) *IpAsn {
+	if db == nil || !addr.IsValid() {
+		return nil
+	}
+	var record geoLite2AsnRecord
+	if err := db.Lookup(addr.Unmap().WithZone("")).Decode(&record); err != nil {
+		return nil
+	}
+	if record.AutonomousSystemNumber == 0 {
+		return nil
+	}
+	return &IpAsn{
+		Number:       record.AutonomousSystemNumber,
+		Organization: record.AutonomousSystemOrganization,
+	}
+}
+
+// The autonomous system of an address, or nil when it is unknown
+// (lag.dev/PLAN.md A3, A4, A7).
+func GetIpAsn(addr netip.Addr) *IpAsn {
+	return lookupIpAsn(ipAsnDb(), addr)
+}
+
+// Whether this process has a GeoLite2 ASN database to answer from.
+func IpAsnDatabaseDeployed() bool {
+	return ipAsnDb() != nil
+}
+
+// Testing_UseIpAsnDatabase makes GetIpAsn read the GeoLite2 ASN database at
+// path, or no database for an empty path, until restore is called, which
+// puts the process's reader back and closes the one opened here.
+func Testing_UseIpAsnDatabase(path string) (restore func(), err error) {
+	var db *mmdb.Reader
+	if path != "" {
+		db, err = openIpAsnDb(path)
+		if err != nil {
+			return nil, err
+		}
+	}
+	previous := ipAsnDb
+	ipAsnDb = sync.OnceValue(func() *mmdb.Reader {
+		return db
+	})
+	return func() {
+		ipAsnDb = previous
+		if db != nil {
+			db.Close()
+		}
+	}, nil
+}
+
 var HostLatituteLongitude = sync.OnceValues(func() (latitude float64, longitude float64) {
 	settings := GetSettings()
 

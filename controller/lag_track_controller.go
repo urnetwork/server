@@ -344,7 +344,7 @@ func lagTrackSource(header http.Header) string {
 func newLagTrackClient(addr netip.Addr) *model.LagTrackClient {
 	addr = addr.Unmap().WithZone("")
 	client := &model.LagTrackClient{}
-	if asn := GetIpAsn(addr); asn != nil {
+	if asn := server.GetIpAsn(addr); asn != nil {
 		number := int64(asn.Number)
 		client.Asn = &number
 		client.AsnOrg = asn.Organization
