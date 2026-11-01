@@ -325,9 +325,9 @@ func createClientReliabilityPartition(ctx context.Context, parent string, day in
 // remove_old_client_reliability_stats, creates and drops the days
 // (MaintainClientReliabilityPartitions) through its rules: the creation window
 // starts at the retention cutoff, so a late drain block always has its day,
-// and a day expires at the cutoff, which a payout behind holds back as far as
-// ClientExpiration. The registry's runway task also creates ahead, and its
-// retention task analyzes the parent, which autovacuum never does.
+// and a day expires at the cutoff, ClientReliabilityRetention after its end.
+// The registry's runway task also creates ahead, and its retention task
+// analyzes the parent, which autovacuum never does.
 var clientReliabilityPartitionFamily = server.RegisterPartitionFamily(&server.PartitionFamily{
 	Name:                "client_reliability",
 	Description:         "client_reliability, daily by block_number; remove_old_client_reliability_stats drops the days behind the retention cutoff",
@@ -336,12 +336,12 @@ var clientReliabilityPartitionFamily = server.RegisterPartitionFamily(&server.Pa
 	KeyKind:             server.PartitionKeyEpochMinute,
 	Granularity:         server.PartitionGranularityDaily,
 	AheadRanges:         int(reliabilityPartitionAheadDays),
-	Retention:           ClientExpiration,
+	Retention:           ClientReliabilityRetention,
 	RetireByOwnTask:     true,
 	ReindexExempt:       true,
 	MonitorRunwayRanges: 2,
 	CreateFrom: func(ctx context.Context, now time.Time) time.Time {
-		return reliabilityBlockTime(clientReliabilityRetentionCutoffBlock(ctx, now))
+		return reliabilityBlockTime(clientReliabilityRetentionCutoffBlock(now))
 	},
 	CreateLeaf: func(ctx context.Context, table string, r server.PartitionRange) error {
 		day := reliabilityPartitionDay(reliabilityBlockNumber(r.Lower))
@@ -353,7 +353,7 @@ var clientReliabilityPartitionFamily = server.RegisterPartitionFamily(&server.Pa
 		return nil
 	},
 	RangeExpired: func(ctx context.Context, now time.Time, r server.PartitionRange) bool {
-		return reliabilityBlockNumber(r.Upper) <= clientReliabilityRetentionCutoffBlock(ctx, now)
+		return reliabilityBlockNumber(r.Upper) <= clientReliabilityRetentionCutoffBlock(now)
 	},
 })
 
@@ -383,7 +383,7 @@ func dropClientReliabilityPartition(ctx context.Context, name string) (dropped b
 // companion tables to the same horizon. A lock-busy create or drop is skipped
 // and retried on the next run.
 func MaintainClientReliabilityPartitions(ctx context.Context, now time.Time) (created []string, dropped []string) {
-	cutoffBlock := clientReliabilityRetentionCutoffBlock(ctx, now)
+	cutoffBlock := clientReliabilityRetentionCutoffBlock(now)
 
 	// the registry creates every day from the cutoff's through the days ahead
 	// that no partition covers (the family's CreateFrom and CreateLeaf)
@@ -760,7 +760,7 @@ func MigrateClientReliabilityToPartitions(
 	}
 
 	now := server.NowUtc()
-	cutoffBlock := clientReliabilityRetentionCutoffBlock(ctx, now)
+	cutoffBlock := clientReliabilityRetentionCutoffBlock(now)
 	fromDay := reliabilityPartitionDay(cutoffBlock)
 	toDay := reliabilityPartitionDay(reliabilityBlockNumber(now)) + reliabilityPartitionAheadDays
 

@@ -78,6 +78,23 @@ func stV2Activation(opts docopt.Opts) {
 	}
 }
 
+// stV1SweepStatus shows, as one JSON object, the phase C v1 carry sweep of the
+// deployment the loaded st.yml selects: the configured sweep epoch, its
+// windows, the chain facts, the next action of the sweep chain, the record
+// this snapshot would commit with its artifact hash, and the owner's Safe
+// calls that are due. It reads only; it sends nothing.
+func stV1SweepStatus(opts docopt.Opts) {
+	status, err := controller.GetStV1SweepStatus(context.Background())
+	if err != nil {
+		panic(err)
+	}
+	encoder := json.NewEncoder(os.Stdout)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(status); err != nil {
+		panic(err)
+	}
+}
+
 // stV2ActivationClear is the operator's explicit command removing the recorded
 // settlement v2 activation of the deployment the loaded st.yml selects, for a
 // record that names a wrong pool or pair (SV-9). It must name every recorded

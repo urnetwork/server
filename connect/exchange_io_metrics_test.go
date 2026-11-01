@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -46,10 +47,21 @@ type exchangeIOMetricSnapshot struct {
 	bytes  float64
 }
 
+// Sums the series of every exchange operation.
 func snapshotExchangeIO(direction string, kind string) exchangeIOMetricSnapshot {
+	var snapshot exchangeIOMetricSnapshot
+	for _, op := range exchangeIOOpLabels {
+		opSnapshot := snapshotExchangeIOOp(op, direction, kind)
+		snapshot.frames += opSnapshot.frames
+		snapshot.bytes += opSnapshot.bytes
+	}
+	return snapshot
+}
+
+func snapshotExchangeIOOp(op string, direction string, kind string) exchangeIOMetricSnapshot {
 	return exchangeIOMetricSnapshot{
-		frames: testutil.ToFloat64(exchangeIOFramesCounter.WithLabelValues(direction, kind)),
-		bytes:  testutil.ToFloat64(exchangeIOBytesCounter.WithLabelValues(direction, kind)),
+		frames: testutil.ToFloat64(exchangeIOFramesCounter.WithLabelValues(op, direction, kind)),
+		bytes:  testutil.ToFloat64(exchangeIOBytesCounter.WithLabelValues(op, direction, kind)),
 	}
 }
 
@@ -261,4 +273,145 @@ func TestExchangeConnectionTracksActiveOutboundEndpoint(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Every frame carries its connection's exchange operation: a dialed buffer
+// takes it from the header it sends, and an accepted buffer learns it from the
+// header it reads. The dark release measures the transport share by it.
+func TestExchangeBufferLabelsFramesWithTheOperation(t *testing.T) {
+	settings := DefaultExchangeSettings()
+	for _, op := range []ExchangeOp{ExchangeOpTransport, ExchangeOpForward} {
+		opLabel := exchangeOpMetricLabel(op)
+		sender := NewDefaultExchangeBuffer(settings)
+		sender.setIOOp(op)
+		receiver := NewReceiveOnlyExchangeBuffer(settings)
+		senderConn, receiverConn := net.Pipe()
+
+		type labelSet struct{ op, direction, kind string }
+		labelSets := []labelSet{}
+		for _, labelOp := range exchangeIOOpLabels {
+			for _, direction := range exchangeIODirectionLabels {
+				for _, kind := range exchangeIOFrameKindLabels {
+					labelSets = append(labelSets, labelSet{op: labelOp, direction: direction, kind: kind})
+				}
+			}
+		}
+		before := map[labelSet]exchangeIOMetricSnapshot{}
+		for _, labels := range labelSets {
+			before[labels] = snapshotExchangeIOOp(labels.op, labels.direction, labels.kind)
+		}
+
+		writeDone := make(chan error, 1)
+		go func() {
+			if err := sender.WriteHeader(context.Background(), senderConn, &ExchangeHeader{
+				Version:    1,
+				ClientId:   server.NewId(),
+				ResidentId: server.NewId(),
+				Op:         op,
+			}); err != nil {
+				writeDone <- err
+				return
+			}
+			if err := sender.WriteMessage(senderConn, connectlib.MessagePoolGet(21)); err != nil {
+				writeDone <- err
+				return
+			}
+			writeDone <- sender.WriteMessage(senderConn, connectlib.MessagePoolGet(0))
+		}()
+		if _, err := receiver.ReadHeader(context.Background(), receiverConn); err != nil {
+			t.Fatal(err)
+		}
+		for range 2 {
+			message, err := receiver.ReadMessage(receiverConn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			connectlib.MessagePoolReturn(message)
+		}
+		if err := <-writeDone; err != nil {
+			t.Fatal(err)
+		}
+		senderConn.Close()
+		receiverConn.Close()
+
+		for _, labels := range labelSets {
+			after := snapshotExchangeIOOp(labels.op, labels.direction, labels.kind)
+			wantFrames := 0.0
+			if labels.op == opLabel {
+				wantFrames = 1
+			}
+			if delta := after.frames - before[labels].frames; delta != wantFrames {
+				t.Errorf("%s: %+v frame delta = %v, want %v", opLabel, labels, delta, wantFrames)
+			}
+		}
+	}
+}
+
+// An accepted forward labels its handshake and its writer's pings with the
+// operation it read from the header.
+func TestExchangeAcceptedForwardLabelsItsFrames(t *testing.T) {
+	warmLocalTransportPool()
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		settings := DefaultExchangeSettings()
+		settings.ExchangePingTimeout = time.Second
+		resident := newResidentCallbackLifecycleFixture(t, ctx, settings)
+		exchange := &Exchange{
+			ctx:             ctx,
+			cancel:          cancel,
+			settings:        settings,
+			residents:       map[server.Id]*Resident{resident.clientId: resident},
+			residentChanges: map[server.Id]chan struct{}{},
+			connections:     map[server.Id]map[server.Id]context.CancelFunc{},
+		}
+		resident.exchange = exchange
+		resident.residentId = server.NewId()
+		dialerConn, acceptedConn := net.Pipe()
+		handleDone := make(chan struct{})
+		go func() {
+			defer close(handleDone)
+			exchange.handleExchangeConnection(acceptedConn)
+		}()
+
+		handshakeReceivedBefore := snapshotExchangeIOOp("forward", "received", "handshake")
+		pingSentBefore := snapshotExchangeIOOp("forward", "sent", "ping")
+		unknownBefore := snapshotExchangeIOOp("unknown", "received", "handshake")
+		dialer := NewDefaultExchangeBuffer(settings)
+		dialer.setIOOp(ExchangeOpForward)
+		dialerReceive := NewReceiveOnlyExchangeBuffer(settings)
+		dialerReceive.setIOOp(ExchangeOpForward)
+		if err := dialer.WriteHeader(ctx, dialerConn, &ExchangeHeader{
+			Version:    1,
+			ClientId:   resident.clientId,
+			ResidentId: resident.residentId,
+			Op:         ExchangeOpForward,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := dialerReceive.ReadHeader(ctx, dialerConn); err != nil {
+			t.Fatal(err)
+		}
+		ping, err := dialerReceive.ReadMessage(dialerConn)
+		if err != nil || len(ping) != 0 {
+			t.Fatalf("accepted forward ping = %d bytes, %v", len(ping), err)
+		}
+		connectlib.MessagePoolReturn(ping)
+		dialerConn.Close()
+		<-handleDone
+
+		// the accepted side read the header, and the dialer read its echo
+		if delta := snapshotExchangeIOOp("forward", "received", "handshake").frames - handshakeReceivedBefore.frames; delta != 2 {
+			t.Errorf("forward handshakes received = %v, want 2", delta)
+		}
+		if delta := snapshotExchangeIOOp("forward", "sent", "ping").frames - pingSentBefore.frames; delta != 1 {
+			t.Errorf("forward pings sent by the accepted writer = %v, want 1", delta)
+		}
+		if snapshotExchangeIOOp("unknown", "received", "handshake").frames != unknownBefore.frames {
+			t.Error("the accepted header was labeled with an unknown operation")
+		}
+		if err := resident.CloseAndWait(context.Background()); err != nil {
+			t.Error(err)
+		}
+	})
 }

@@ -61,6 +61,13 @@ const (
 	// Why an extender is withdrawn when its owner opts out (C4, C9).
 	ExtenderMeasurementOptOutReason = "the extender's owner opted out of measurement"
 
+	// Why an extender that is not active may not be measured (C5, C8), and
+	// why its certificates are withdrawn once the away grace has passed (C9).
+	// The issuance pass matches this text to ask again, with the stored
+	// request, for an extender that is active again and may be measured
+	// (amendment 24).
+	ExtenderMeasurementInactiveReason = "the extender is not active"
+
 	// How long a deactivated extender keeps its certificate (C9, amendment
 	// 23). Its probes fail when its host restarts or its network drops, and it
 	// comes back with the same name. Withdrawing at once revoked the
@@ -201,7 +208,7 @@ func ExtenderMeasurementEligibleAddresses(
 	case extender == nil:
 		return nil, "the extender is gone"
 	case !extender.Active:
-		return nil, "the extender is not active"
+		return nil, ExtenderMeasurementInactiveReason
 	case extender.DirectoryTier != connect.ExtenderDirectoryTierOpen:
 		return nil, "an extender in the gated tier is never measured"
 	case extender.CanaryChannel != "":
@@ -249,7 +256,7 @@ func ExtenderMeasurementWithdrawReason(extender *model.NetworkExtender, now time
 	case extender.CanaryChannel != "":
 		return "the extender became a canary"
 	case !extender.Active && !ExtenderMeasurementAway(extender, now):
-		return "the extender is not active"
+		return ExtenderMeasurementInactiveReason
 	}
 	return ""
 }
@@ -497,7 +504,14 @@ type ExtenderMeasurementCertResult struct {
 //
 // A withdrawn certificate is answered withdrawn, with its name, until the
 // extender's next request arrives, and never none: a request row is never
-// removed, so an extender that once asked is never answered none again.
+// removed, so an extender that once asked is never answered none again. A
+// request withdrawn or refused because its extender was not active stands
+// only until the extender is active again and may be measured, when the next
+// issuance pass asks again with its stored request (amendment 24). One that
+// may not be measured is still answered withdrawn, so it drops what it holds
+// (C9). An extender since connect 567d4833 asks for an activation pass at
+// once when it reads withdrawn, which carries its request; one from before
+// carries it only with its next activation, up to a day after it came back.
 //
 // The one write is the first issued answer with each certificate, which
 // records its delivery (model.MarkNetworkExtenderMeasurementCertDelivered):

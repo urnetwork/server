@@ -35,6 +35,13 @@ const (
 	// after complete authority reads. This is a durable operator-disposition
 	// event, not a provider/listing error and not a successful credit.
 	PaymentReconcileActionCreditUnfulfillable = "credit_unfulfillable"
+	// The store said it does not know the store object a renewal names (the
+	// App Store's TransactionIdNotFoundError in every environment the
+	// deployment accepts) through the reconciler's whole bounded retry. A
+	// durable operator disposition, written once per store object like
+	// credit_unfulfillable: nothing is credited or ended from it, the store is
+	// still asked every run, and the object no longer counts as a store error.
+	PaymentReconcileActionUnknownToStore = "unknown_to_store"
 )
 
 // Webhook-written operator events (UPGRADE.md §2 S7/S11) that join the
@@ -206,6 +213,67 @@ func AddPaymentReconciliationEventOnceInConn(connOwner server.PgConn,
 	}, func(handledErr error) {
 		added = false
 		err = handledErr
+	})
+	return
+}
+
+// GetPaymentReconcileUnknownToStore reads the bounded-retry state of a store
+// object the store says it does not know: whether its unknown_to_store
+// disposition is recorded, and in how many distinct runs since `since` it got
+// an error event whose details carry reason. Only real (non-dry-run) rows
+// count, so a dry run never spends or stands in for a real run's retry.
+func GetPaymentReconcileUnknownToStore(
+	ctx context.Context,
+	store string,
+	evidence string,
+	reason string,
+	since time.Time,
+) (recorded bool, errorRuns int) {
+	return GetPaymentReconcileUnknownToStoreInConn(nil, ctx, store, evidence, reason, since)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func GetPaymentReconcileUnknownToStoreInConn(connOwner server.PgConn,
+	ctx context.Context,
+	store string,
+	evidence string,
+	reason string,
+	since time.Time,
+) (recorded bool, errorRuns int) {
+	server.DbInConn(ctx, connOwner, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT
+				EXISTS (
+					SELECT 1 FROM payment_reconciliation_event
+					WHERE store = $1
+					  AND action = $2
+					  AND evidence = $3
+					  AND NOT dry_run
+				),
+				(
+					SELECT count(DISTINCT run_id) FROM payment_reconciliation_event
+					WHERE store = $1
+					  AND action = $4
+					  AND evidence = $3
+					  AND NOT dry_run
+					  AND $5 <= event_time
+					  AND details::jsonb ->> 'reason' = $6
+				)
+			`,
+			store,
+			PaymentReconcileActionUnknownToStore,
+			evidence,
+			PaymentReconcileActionError,
+			since,
+			reason,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&recorded, &errorRuns))
+			}
+		})
 	})
 	return
 }

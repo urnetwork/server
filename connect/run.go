@@ -57,6 +57,11 @@ func (self RunOptions) Validate() error {
 
 func exchangeSettingsForRun(options RunOptions) *ExchangeSettings {
 	settings := DefaultExchangeSettings()
+	// The connect service allows in-process delivery to its own residents,
+	// which the Redis control then chooses by block (LocalTransportDefault
+	// keeps it off until it does). alt's embedded exchange keeps the ceiling
+	// off.
+	settings.EnableLocalTransport = true
 	if options.MemoryOwnerLedger {
 		settings.MemoryOwnerLedger = &connectcore.TransferMemoryOwnerLedger{}
 		settings.payloadOwnerLedger = &residentPayloadLedger{}

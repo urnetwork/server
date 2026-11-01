@@ -510,6 +510,9 @@ func TrimExcessWebSearchAnalyticsRows(
 	return removed
 }
 
+// A zero time is a NULL column. Only MarkWebSearchAnalyticsIngestSuccess sets
+// last_success and cursor_time, so a stream whose first attempt failed or was
+// interrupted reads like a new stream except for its LastAttempt.
 type WebSearchAnalyticsIngestState struct {
 	LastAttempt time.Time
 	LastSuccess time.Time
@@ -519,6 +522,7 @@ type WebSearchAnalyticsIngestState struct {
 func GetWebSearchAnalyticsIngestState(ctx context.Context, provider string, site string, stream string) WebSearchAnalyticsIngestState {
 	state := WebSearchAnalyticsIngestState{}
 	server.Db(ctx, func(conn server.PgConn) {
+		var lastAttempt, lastSuccess, cursorTime *time.Time
 		err := conn.QueryRow(
 			ctx,
 			`SELECT last_attempt, last_success, cursor_time
@@ -527,9 +531,18 @@ func GetWebSearchAnalyticsIngestState(ctx context.Context, provider string, site
 			provider,
 			site,
 			stream,
-		).Scan(&state.LastAttempt, &state.LastSuccess, &state.CursorTime)
+		).Scan(&lastAttempt, &lastSuccess, &cursorTime)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			panic(err)
+		}
+		if lastAttempt != nil {
+			state.LastAttempt = *lastAttempt
+		}
+		if lastSuccess != nil {
+			state.LastSuccess = *lastSuccess
+		}
+		if cursorTime != nil {
+			state.CursorTime = *cursorTime
 		}
 	})
 	return state

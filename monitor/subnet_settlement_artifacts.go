@@ -56,6 +56,12 @@ type subnetSettlementCommitted struct {
 func reproduceSubnetSettlementArtifacts(ctx context.Context, client grafanaHTTPClient, origins []string, pin *SubnetReplayPin, state *subnetSettlementState, verified *subnetSettlementVerified, settings *SubnetReplaySettings, scope subnetReplayScope) ([]finding, error) {
 	committed := []subnetSettlementCommitted{}
 	for _, entry := range state.entries {
+		// The sanctioned sweep's artifact hash names a sweep record, not a
+		// payout list (VERSION2-FINAL.md §16); its root is decided by exact
+		// equality with the single sweep leaf instead.
+		if entry.sanctionedSweep {
+			continue
+		}
 		switch {
 		case entry.entitlement.Status == subnetSettlementFinalized || entry.entitlement.Status == subnetSettlementCarried:
 			committed = append(committed, subnetSettlementCommitted{entry: entry, artifactHash: entry.entitlement.ArtifactHash, root: entry.entitlement.PayoutRoot})

@@ -749,22 +749,21 @@ func TestReliabilityCoveredBlockCount(t *testing.T) {
 		// an entirely uncovered window returns 0
 		connect.AssertEqual(t, covered(b+2, b+5), int64(0))
 
-		// expiration deletes fully expired ranges and clamps the straddler. No
-		// payout is behind here, so retention cuts at ClientReliabilityRetention
-		// before the pass time (clientReliabilityRetentionCutoffBlock).
+		// expiration deletes fully expired ranges and clamps the straddler.
+		// Retention cuts at ClientReliabilityRetention before the pass time
+		// (clientReliabilityRetentionCutoffBlock).
 		blockTime := func(blockNumber int64) time.Time {
 			return time.UnixMilli(blockNumber * int64(ReliabilityBlockDuration/time.Millisecond)).UTC()
 		}
 		RemoveOldClientReliabilityStats(ctx, blockTime(b+2).Add(ClientReliabilityRetention), 1000)
 		connect.AssertEqual(t, testingGetReliabilitySyncRanges(ctx), [][2]int64{{b + 1, b + 1}, {b + 5, b + 5}})
 
-		// a payout that is behind keeps the coverage of its window: the last
-		// subsidy epoch ended a day after block b+5, so the cutoff stays at b+5
-		// (the epoch end less its day of margin) although the steady-state
-		// cutoff is three days later
+		// a subsidy epoch no longer holds coverage back: the epoch ended a day
+		// after block b+5, which used to keep the cutoff at b+5, but the pass
+		// three days past b+5's retention removes its range
 		addSubsidyEpochForRetentionTest(ctx, blockTime(b+5).Add(24*time.Hour))
 		RemoveOldClientReliabilityStats(ctx, blockTime(b+5).Add(ClientReliabilityRetention+3*24*time.Hour), 1000)
-		connect.AssertEqual(t, testingGetReliabilitySyncRanges(ctx), [][2]int64{{b + 5, b + 5}})
+		connect.AssertEqual(t, len(testingGetReliabilitySyncRanges(ctx)), 0)
 	})
 }
 

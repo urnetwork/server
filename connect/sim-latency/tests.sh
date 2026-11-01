@@ -49,6 +49,12 @@ if [[ $test_status != 0 ]]; then
     exit $test_status
 fi
 
+# Statfs_t field types differ by platform (Bsize is int64 on Linux and uint32
+# on Darwin). Type-check the archive command for both, whatever the host.
+for goos in linux darwin; do
+    GOOS=$goos go vet ./launch/retained-archive || exit $?
+done
+
 GORACE="log_path=profile/race.out halt_on_error=1" \
     go test -timeout 900m -v -race \
     -cpuprofile profile/cpu -memprofile profile/memory "$@" \

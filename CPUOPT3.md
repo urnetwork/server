@@ -329,6 +329,44 @@ The owner approved an edge-2 disk reclaim plan:
 
 All of these are being built, with a runbook to follow.
 
+#### Contract horizon reaper: a runtime horizon down to 45 days
+
+The reaper merged on 11-01 (7334b3a17) at the owner's 91 days. The owner approved starting it there, with "the 45-day floor follows as a code change". The disk analysis that day found 45 days the shortest horizon with no reader edge case. Branch `feat/contract-reaper-horizon-floor` adds the floor as a runtime field.
+
+**The field:** `HSET {contract_horizon}control horizonDays <days>`.
+- Whole days from 45 to 91. A value below 45 counts as 45, one above 91 as 91.
+- Absent, empty or unparsable (`45.5`, `45d`), it is the code's 91 days. That is the other fields' rule: a value that does not parse narrows as far as it can.
+- It is read before every batch, with the other fields, and a new value applies from the next batch. Raised, it stops deleting inside the new horizon from that batch on. Nothing already deleted comes back.
+- It never turns the reaper on or off; `mode` does. A dry run at 45 days is `mode dry_run` with `horizonDays 45`.
+
+**Reaper-only.** The floor is `ContractHorizonFloor` in `model/contract_horizon_reaper.go`, and the code setting floors there too. `server.ContractRetention` stays 91 days, so nothing else moves:
+- the partition drop, whose `contractWeekBlocker` keeps only payment holds (it needs the reaper's keep rule before any cutover; that is separate work);
+- close evidence and key history retention;
+- the sn-reconcile holders floor;
+- the monitor's partition retention signal.
+
+**Every protection holds at any horizon.** Each check that keeps a contract reads its rows, not its age:
+- open or disputed contracts, and unsettled escrows;
+- payment holds, and incomplete, missing or recent payments;
+- unpaid sweeps of contracts minted before the earning cutoff (the stricter sweep rule), and sweeps staged in a pending plan;
+- rows another transaction holds.
+
+The DB tests check each one at 45 days, with the cutoff inside 91 days as production's is. The settings comment used to cite a planner retention-risk age tied to 91 days. No such age exists: the planner's is `StragglerContractExpiration` minus 7 days (293 days), and it guards the straggler path.
+
+**What users see below 91 days:**
+- **Provider stats:** the 90-day views (`/stats/provider-last-n`, `/stats/providers-overview-last-n`, the legacy `-last-90` routes) undercount the days older than the horizon, by the contracts deleted there. Those are traffic after the earning cutoff and contracts without a sweep, with their contract and client counts.
+- **`/transfer/stats`:** `unpaid_bytes_provided` falls as the unpaid sweeps of contracts minted after the cutoff pass the horizon. The subnet pool pays those, never USDC. Paid bytes are unchanged.
+- **Presentation is an owner call:** clamp the stats windows to the horizon, serve older days from the daily audit rollup, or stop counting subnet-pool sweeps as unpaid.
+
+**Close evidence** keeps its 91 days. Below 91, a deleted contract's evidence outlives it until then; `RemoveExpiredCloseEvidence` takes evidence whose contract is gone.
+
+**Below 45 days** the same analysis found two readers to guard first: operator block points, which read a block's unpaid sweeps while its reliability is retained, and the reach of `bringyourctl stats backfill`.
+
+**Reporting:**
+- `urnetwork_contract_horizon_horizon_seconds` (new, no labels) is the horizon the last control read set.
+- `urnetwork_contract_horizon_horizon_timestamp_seconds` and the lag gauge follow it.
+- The run log line adds `horizon_days=`.
+
 ### D1. Deliver in-process when the transport's resident is in the same connect process
 
 Code is cited at server main `3ae2c76f7` and connect `89b15920`, the version main pins. The running connect service is 1085953670: server `37ec4788b` plus connect `ea79e1f1`. Its `ResidentTransport` and exchange paths have the same structure.

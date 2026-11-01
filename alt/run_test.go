@@ -70,6 +70,14 @@ func TestDefaultSettingsGiveTheConnectHandlerNoListenerAndNoProxyProtocol(t *tes
 	}
 }
 
+// Alt's embedded exchange keeps in-process transport delivery off at the code
+// ceiling, so the connect service's Redis control cannot turn it on in alt.
+func TestDefaultSettingsKeepTheLocalTransportCeilingOff(t *testing.T) {
+	if DefaultSettings().ExchangeSettings.EnableLocalTransport {
+		t.Fatal("alt's exchange allows local transport delivery")
+	}
+}
+
 // The lb-fronted connect service keeps its own listeners and the proxy
 // protocol nginx prepends, so alt's settings cannot have leaked into it.
 func TestLbFrontedConnectKeepsItsListenersAndProxyProtocol(t *testing.T) {

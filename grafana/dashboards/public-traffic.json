@@ -145,7 +145,7 @@
         "type": "prometheus",
         "uid": "warp-mimir"
       },
-      "description": "Current relay data-frame rate across the connect fleet: completed exchange data frames written per second, including the fixed 4-byte frame header and excluding pings and handshakes. Sent is used alone because sent and received are two observations of the same inter-server traffic.",
+      "description": "Current relay data-frame rate across the connect fleet: completed exchange data frames sent per second over exchange sockets, plus the same traffic delivered in process when a transport's resident is in its own connect process, counted as the socket would count it. Includes the fixed 4-byte frame header and excludes pings and handshakes. Sent is used alone because sent and received are two observations of the same inter-server traffic.",
       "fieldConfig": {
         "defaults": {
           "unit": "bps",
@@ -182,7 +182,7 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "sum(rate(urnetwork_connect_exchange_io_bytes_total{direction=\"sent\",kind=\"data\",instance!=\"\"}[$__rate_interval])) * 8",
+          "expr": "(sum(rate(urnetwork_connect_exchange_io_bytes_total{direction=\"sent\",kind=\"data\",instance!=\"\"}[$__rate_interval])) + (sum(rate(urnetwork_connect_exchange_local_bytes_total{direction=\"sent\",kind=\"data\",instance!=\"\"}[$__rate_interval])) or vector(0))) * 8",
           "legendFormat": "throughput",
           "instant": false,
           "range": true
@@ -736,7 +736,7 @@
         "type": "prometheus",
         "uid": "warp-mimir"
       },
-      "description": "Current completed exchange data-frame write rate across the fleet, including the fixed 4-byte exchange frame header and excluding pings and handshakes. Sent is used alone because fleet sent and received are two observations of the same inter-server traffic.",
+      "description": "Current completed exchange data-frame rate across the fleet: frames sent over exchange sockets plus the same traffic delivered in process when a transport's resident is in its own connect process, counted as the socket would count it, so the line stays continuous as in-process delivery turns on. Includes the fixed 4-byte exchange frame header and excludes pings and handshakes. Sent is used alone because fleet sent and received are two observations of the same inter-server traffic.",
       "fieldConfig": {
         "defaults": {
           "unit": "bps",
@@ -795,7 +795,7 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "sum(rate(urnetwork_connect_exchange_io_bytes_total{direction=\"sent\",kind=\"data\",instance!=\"\"}[$__rate_interval])) * 8",
+          "expr": "(sum(rate(urnetwork_connect_exchange_io_bytes_total{direction=\"sent\",kind=\"data\",instance!=\"\"}[$__rate_interval])) + (sum(rate(urnetwork_connect_exchange_local_bytes_total{direction=\"sent\",kind=\"data\",instance!=\"\"}[$__rate_interval])) or vector(0))) * 8",
           "legendFormat": "throughput",
           "instant": false,
           "range": true

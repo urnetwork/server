@@ -543,6 +543,12 @@ func ConnectControlFrames(
 				// activity. Older clients ping the control destination
 				// constantly, so treating these as unhandled floods the log.
 
+			case *protocol.PeerAudit:
+				// nothing consumes an audit, and a pack of only audits was
+				// answered before authentication (connect_control_discard.go).
+				// One in any other pack is a no-op, so its error cannot make
+				// the client drop the replies of the frames beside it.
+
 			case *protocol.ResidentMoveResult:
 				// validated against the client's move intent in Redis, since
 				// any control path can carry it (resident_move_result.go)

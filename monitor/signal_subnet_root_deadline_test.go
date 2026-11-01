@@ -264,6 +264,61 @@ func TestSubnetRootDeadlineV2CutoverAndRootState(t *testing.T) {
 	}
 }
 
+// The one-time v1 carry sweep commits a v1 root at the first v2 epoch. That
+// epoch's deadline is judged on vault2 alone and v1 root state is never read
+// for it, so a committed sweep root cannot satisfy the deadline and a missing
+// sweep root cannot page it, before or after the deadline.
+func TestSubnetRootDeadlineCutoverEpochIgnoresV1Sweep(t *testing.T) {
+	sweep := &stabi.RootCommitmentsOutput{
+		PayoutRoot: subnetSettlementCutoverTestLeaf(), ArtifactHash: [32]byte{0x5e},
+		Committer: common.BigToAddress(big.NewInt(0xa01)), CommitBlock: 1,
+	}
+	for _, tc := range []struct {
+		name          string
+		remaining     int64
+		sweep, v2Root bool
+		page          bool
+	}{
+		{name: "sweep-root-is-not-the-v2-root", remaining: 600, sweep: true, page: true},
+		{name: "sweep-root-after-the-deadline", remaining: -1, sweep: true, page: true},
+		{name: "missing-sweep-root-near-the-deadline", remaining: 600, v2Root: true},
+		{name: "missing-sweep-root-after-the-deadline", remaining: -1, v2Root: true},
+		{name: "sweep-and-v2-roots", remaining: 600, sweep: true, v2Root: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSubnetRootDeadlineFixture(t, 4, tc.remaining, true)
+			if f.pool.FirstEpoch != 4 {
+				t.Fatal("epoch 4 must be the pool's first v2 epoch")
+			}
+			if tc.sweep {
+				f.chain.roots[subnetSettlementKey{epoch: 4, noId: 1}] = sweep
+			}
+			if tc.v2Root {
+				f.pending = stabi.ISTSettlementVault2Pending{Seq: 1, Epoch: 4, Root: [32]byte{4}, Total: big.NewInt(1000)}
+			}
+			coordinator := f.node.contracts[subnetReplayTestCoordinator]
+			ordinary := coordinator.handle
+			coordinator.handle = func(method string, args []any) ([]any, string) {
+				if method == "rootCommitments" {
+					t.Fatal("a v1 root was read for a v2 epoch")
+				}
+				return ordinary(method, args)
+			}
+			alerts := f.run(t)
+			if !tc.page {
+				if len(alerts) != 0 {
+					t.Fatalf("the v1 sweep changed a v2 deadline: %+v", alerts)
+				}
+				return
+			}
+			alert := requireSubnetReplayAlert(t, alerts, "subnet-root-deadline", "subnet-root-deadline/no-1", "epoch-4/root")
+			if len(alerts) != 1 || alert.Severity != SeverityPage || alert.Sustain != 1 || !strings.Contains(alert.Observed, "settlement=v2") {
+				t.Fatalf("a v1 sweep root satisfied a v2 deadline: %+v", alerts)
+			}
+		})
+	}
+}
+
 // Failed or inconsistent reads cannot be interpreted as a missing root or a
 // healthy epoch. In particular, recheck the checkpoint before emitting a page.
 func TestSubnetRootDeadlineSourceGaps(t *testing.T) {
