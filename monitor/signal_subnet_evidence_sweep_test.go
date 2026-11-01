@@ -8,7 +8,6 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 
-	"github.com/urfoundation/sn/merkle"
 	"github.com/urfoundation/sn/stabi"
 )
 
@@ -33,7 +32,7 @@ func newSubnetEvidenceSweepFixture(t *testing.T) *subnetEvidenceSweepFixture {
 	key := subnetSettlementKey{epoch: 3, noId: 1}
 	committed := chain.roots[key]
 	chain.roots[key] = &stabi.RootCommitmentsOutput{
-		PayoutRoot:   [32]byte(merkle.PayoutLeaf(subnetSettlementCutoverTestColdkey, big.NewInt(subnetSettlementBps))),
+		PayoutRoot:   subnetSettlementCutoverTestLeaf(),
 		ArtifactHash: f.recordHash, Committer: committed.Committer, CommitBlock: committed.CommitBlock,
 	}
 	f.settings.SubnetDeployment = NewSubnetReplayPin(subnetSettlementCutoverTestPin())
@@ -45,20 +44,20 @@ func newSubnetEvidenceSweepFixture(t *testing.T) *subnetEvidenceSweepFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	node.contracts[subnetSettlementTestSettlementV2] = &subnetReplayTestContract{contract: settlement, handle: func(method string, _ []any) ([]any, string) {
+	node.contracts[subnetRootDeadlineTestSettlementV2] = &subnetReplayTestContract{contract: settlement, handle: func(method string, _ []any) ([]any, string) {
 		switch method {
 		case "v1Coordinator":
 			return []any{subnetReplayTestCoordinator}, ""
 		case "vault":
-			return []any{subnetSettlementTestVaultV2}, ""
+			return []any{subnetRootDeadlineTestVaultV2}, ""
 		}
 		t.Fatalf("unexpected v2 settlement view %s", method)
 		return nil, ""
 	}}
-	node.contracts[subnetSettlementTestVaultV2] = &subnetReplayTestContract{contract: vault, handle: func(method string, args []any) ([]any, string) {
+	node.contracts[subnetRootDeadlineTestVaultV2] = &subnetReplayTestContract{contract: vault, handle: func(method string, args []any) ([]any, string) {
 		switch method {
 		case "coordinator":
-			return []any{subnetSettlementTestSettlementV2}, ""
+			return []any{subnetRootDeadlineTestSettlementV2}, ""
 		case "netuid":
 			return []any{uint16(25)}, ""
 		case "selfColdkey":
@@ -81,7 +80,7 @@ func newSubnetEvidenceSweepFixture(t *testing.T) *subnetEvidenceSweepFixture {
 func (self *subnetEvidenceSweepFixture) run(t *testing.T) Alerts {
 	t.Helper()
 	alerts := runSubnetEvidence(t, NewSubnetEvidenceSignal(), self.settings)
-	requireSubnetReplayRedacted(t, alerts, subnetSettlementTestSettlementV2.Hex(), subnetSettlementTestVaultV2.Hex(), common.Bytes2Hex(self.recordHash[:]))
+	requireSubnetReplayRedacted(t, alerts, subnetRootDeadlineTestSettlementV2.Hex(), subnetRootDeadlineTestVaultV2.Hex(), common.Bytes2Hex(self.recordHash[:]))
 	return alerts
 }
 

@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/urfoundation/sn/merkle"
 	"github.com/urfoundation/sn/stabi"
 )
 
@@ -271,7 +270,7 @@ func TestSubnetRootDeadlineV2CutoverAndRootState(t *testing.T) {
 // sweep root cannot page it, before or after the deadline.
 func TestSubnetRootDeadlineCutoverEpochIgnoresV1Sweep(t *testing.T) {
 	sweep := &stabi.RootCommitmentsOutput{
-		PayoutRoot: [32]byte(merkle.PayoutLeaf([32]byte{0x5e, 0xc0, 0x1d}, big.NewInt(10_000))), ArtifactHash: [32]byte{0x5e},
+		PayoutRoot: subnetSettlementCutoverTestLeaf(), ArtifactHash: [32]byte{0x5e},
 		Committer: common.BigToAddress(big.NewInt(0xa01)), CommitBlock: 1,
 	}
 	for _, tc := range []struct {

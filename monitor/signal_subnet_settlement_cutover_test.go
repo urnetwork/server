@@ -1,7 +1,6 @@
 package monitor
 
 import (
-	"context"
 	"crypto/sha256"
 	"fmt"
 	"math/big"
@@ -23,14 +22,10 @@ const subnetSettlementCutoverTestFirst uint64 = 2
 var subnetSettlementCutoverTestColdkey = [32]byte{0x5e, 0xc0, 0x1d}
 var subnetSettlementCutoverTestRecord = sha256.Sum256([]byte("synthetic v1 carry sweep record"))
 
-// Synthetic settlement v2 pair addresses.
-var subnetSettlementTestSettlementV2 = common.HexToAddress("0x00000000000000000000000000000000000c0006")
-var subnetSettlementTestVaultV2 = common.HexToAddress("0x00000000000000000000000000000000000c0007")
-
 // The reviewed synthetic pin with the settlement v2 pair declared.
 func subnetSettlementCutoverTestPin() []byte {
 	return append(subnetReplayTestPinBytes(subnetReplayTestGenesis, subnetReplayTestCoordinator, subnetReplayTestVault, subnetReplayTestPolicyHash),
-		[]byte(fmt.Sprintf("  settlement_v2_address: %q\n  vault_v2_address: %q\n", subnetSettlementTestSettlementV2.Hex(), subnetSettlementTestVaultV2.Hex()))...)
+		[]byte(fmt.Sprintf("  settlement_v2_address: %q\n  vault_v2_address: %q\n", subnetRootDeadlineTestSettlementV2.Hex(), subnetRootDeadlineTestVaultV2.Hex()))...)
 }
 
 func subnetSettlementCutoverTestLeaf() [32]byte {
@@ -83,7 +78,7 @@ func newSubnetSettlementCutoverFixture(t *testing.T) *subnetSettlementCutoverFix
 func (self *subnetSettlementCutoverFixture) vaultV2Handler(method string, args []any) ([]any, string) {
 	switch method {
 	case "coordinator":
-		return []any{subnetSettlementTestSettlementV2}, ""
+		return []any{subnetRootDeadlineTestSettlementV2}, ""
 	case "netuid":
 		return []any{uint16(25)}, ""
 	case "selfColdkey":
@@ -135,25 +130,25 @@ func (self *subnetSettlementCutoverFixture) run(t *testing.T, block uint64) Aler
 	if err != nil {
 		t.Fatal(err)
 	}
-	node.contracts[subnetSettlementTestSettlementV2] = &subnetReplayTestContract{contract: settlement, handle: func(method string, _ []any) ([]any, string) {
+	node.contracts[subnetRootDeadlineTestSettlementV2] = &subnetReplayTestContract{contract: settlement, handle: func(method string, _ []any) ([]any, string) {
 		switch method {
 		case "v1Coordinator":
 			return []any{subnetReplayTestCoordinator}, ""
 		case "vault":
-			return []any{subnetSettlementTestVaultV2}, ""
+			return []any{subnetRootDeadlineTestVaultV2}, ""
 		}
 		t.Fatalf("unexpected v2 settlement view %s", method)
 		return nil, ""
 	}}
 	if !self.vaultV2Missing {
-		node.contracts[subnetSettlementTestVaultV2] = &subnetReplayTestContract{contract: vault, handle: self.vaultV2}
+		node.contracts[subnetRootDeadlineTestVaultV2] = &subnetReplayTestContract{contract: vault, handle: self.vaultV2}
 	}
 	alerts := runSubnetSettlement(t, NewSubnetSettlementSignal(), settings)
 	if node.exchanges == 0 || settings.SubnetReplay.RpcMaximumExchanges < node.exchanges {
 		t.Fatalf("relayed exchanges=%d outside the run budget", node.exchanges)
 	}
 	leaf := subnetSettlementCutoverTestLeaf()
-	requireSubnetReplayRedacted(t, alerts, subnetSettlementTestSettlementV2.Hex(), subnetSettlementTestVaultV2.Hex(),
+	requireSubnetReplayRedacted(t, alerts, subnetRootDeadlineTestSettlementV2.Hex(), subnetRootDeadlineTestVaultV2.Hex(),
 		common.Bytes2Hex(subnetSettlementCutoverTestColdkey[:]), common.Bytes2Hex(leaf[:]), common.Bytes2Hex(subnetSettlementCutoverTestRecord[:]))
 	return alerts
 }
@@ -464,24 +459,5 @@ func TestSubnetSettlementPreCutoverRowsKeepV1Rules(t *testing.T) {
 				t.Fatalf("v1 rules changed before the cutover: finalization=%s root=%s", finalization.Severity, root.Severity)
 			}
 		})
-	}
-}
-
-// The cutover read depends on the pinned v2 pair, so a changed v2 address must
-// change the settings generation instead of keeping a stale pin.
-func TestSubnetSettlementCutoverPinGenerationIncludesV2Addresses(t *testing.T) {
-	_, _, settings, _ := newSubnetSettlementFixture(t)
-	settings.SubnetDeployment = NewSubnetReplayPin(subnetSettlementCutoverTestPin())
-	if settings.SubnetDeployment.settlementVaultV2 != subnetSettlementTestVaultV2 || settings.SubnetDeployment.settlementV2 != subnetSettlementTestSettlementV2 {
-		t.Fatal("the pin did not keep the v2 pair")
-	}
-	current := settings.withDefaults()
-	check := NewSettingsGenerationCheck(func() (SignalSettings, error) { return current, nil })
-	if equal, err := check(context.Background(), settings); err != nil || !equal {
-		t.Fatal("equal settings differ")
-	}
-	current.SubnetDeployment.settlementVaultV2 = common.Address{9}
-	if equal, err := check(context.Background(), settings); err != nil || equal {
-		t.Fatal("a changed v2 vault pin kept the settings generation")
 	}
 }

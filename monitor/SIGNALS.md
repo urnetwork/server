@@ -45663,14 +45663,13 @@ leave that root unknown; serving integrity across origins is §22.8's check.
 
 **Settlement v2 cutover and the sanctioned carry sweep.** When the pin
 declares settlement v2, the same checkpoint also reads the v2 pair's links
-and subnet identity (both v2 contracts must name each other, the v1
-coordinator and the pinned subnet), `vault2.selfColdkey()` and each census
-operator's `vault2.pools(noId)`. A row is post-cutover when its operator's
-pool is registered and the epoch is at or after the pool's `firstEpoch`. From
-then on v2 settles the epoch, and the v1 driver closes and commits nothing
-for that operator (VERSION2-FINAL.md SV-4). Earlier rows, and every row of
-an operator without a registered pool, keep every rule above. Post-cutover
-rows are judged as follows:
+and subnet identity (checked exactly as §22.7.1 checks them),
+`vault2.selfColdkey()` and each census operator's `vault2.pools(noId)`. A row
+is post-cutover when its operator's pool is registered and the epoch is at or
+after the pool's `firstEpoch`. From then on v2 settles the epoch, and the v1
+driver closes and commits nothing for that operator (VERSION2-FINAL.md SV-4).
+Earlier rows, and every row of an operator without a registered pool, keep
+every rule above. Post-cutover rows are judged as follows:
 
 - Unset with no root: no close, root or finalization rule. v1
   `finalizeOperatorEpoch` reverts on an unset epoch, so the row can never
@@ -45756,10 +45755,11 @@ names `subnet-epoch-progress` and `subnet-payout-root` as undecided.
   than applied, so its epochs stay withheld until the enrollment is fixed.
   This family verifies neither the sweep record behind the sanctioned root
   nor the later v2 recovery allocation, and it does not replay v2 settlement
-  of post-cutover epochs (the `settlement-v2` gap below), so a missing v2
-  root is not detected here. While the cutover is unknown, a rootless
+  of post-cutover epochs (the `settlement-v2` gap below); §22.7.1 pages a
+  missing v2 root independently. While the cutover is unknown, a rootless
   pre-cutover row's close, root and finalization verdicts are withheld; the
-  coverage gap keeps the run from reading healthy.
+  coverage gap keeps the run from reading healthy, and §22.7.1 still pages
+  the root deadline.
 
 Bands: a proved identity, carry, claim, payment, root or clock contradiction is
 PAGE with Sustain 1 and is retained; at-risk close or root, a missed root,

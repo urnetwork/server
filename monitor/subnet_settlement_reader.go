@@ -55,24 +55,6 @@ var subnetSettlementAbis = sync.OnceValues(func() (subnetSettlementContracts, er
 	return subnetSettlementContracts{coordinator: coordinator, vault: vault, evidence: evidence}, nil
 })
 
-// Parsed abi definitions of the pinned settlement v2 pair.
-type subnetSettlementV2Contracts struct {
-	settlement *abi.ABI
-	vault      *abi.ABI
-}
-
-var subnetSettlementV2Abis = sync.OnceValues(func() (subnetSettlementV2Contracts, error) {
-	settlement, err := stabi.STSettlement2MetaData.ParseABI()
-	if err != nil {
-		return subnetSettlementV2Contracts{}, err
-	}
-	vault, err := stabi.STSettlementVault2MetaData.ParseABI()
-	if err != nil {
-		return subnetSettlementV2Contracts{}, err
-	}
-	return subnetSettlementV2Contracts{settlement: settlement, vault: vault}, nil
-})
-
 // Exact vault counters and constants at the checkpoint.
 type subnetSettlementVault struct {
 	totalCaptured         *big.Int
@@ -519,10 +501,11 @@ func readSubnetSettlementCutover(ctx context.Context, rpc *subnetReplayRpc, pin 
 }
 
 // The pinned v2 pair's links, vault2's coldkey and each operator's pool in
-// one batch at the checkpoint. Both v2 contracts must name each other, the v1
-// coordinator and the pinned subnet before any pool is trusted.
+// one batch at the checkpoint. The links are checked as §22.7.1 checks them:
+// both v2 contracts must name each other, the v1 coordinator and the pinned
+// subnet before any pool is trusted.
 func readSubnetSettlementV2Pools(ctx context.Context, rpc *subnetReplayRpc, pin *SubnetReplayPin, checkpoint subnetReplayEvmCheckpoint, operators []*subnetSettlementOperator) ([32]byte, map[uint64]stabi.ISTSettlementVault2Pool, error) {
-	v2, err := subnetSettlementV2Abis()
+	v2, err := subnetRootDeadlineV2Abis()
 	if err != nil {
 		return [32]byte{}, nil, newSubnetReplayUnknown("binding-unavailable", err)
 	}
