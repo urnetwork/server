@@ -164,7 +164,7 @@ func AddClientCloseRequests(ctx context.Context, clientId server.Id, contractIds
 // exactly one taker.
 func TakeClientCloseRequests(ctx context.Context, clientId server.Id, limit int) *ClientCloseRequests {
 	requests := &ClientCloseRequests{}
-	server.Redis(ctx, func(r server.RedisClient) {
+	server.RedisDoOnce(ctx, func(r server.RedisClient) {
 		members, err := r.SPopN(ctx, clientCloseKey(clientId), int64(limit)).Result()
 		if err == redis.Nil {
 			return
