@@ -140,7 +140,21 @@ func stMarkEpochFinalized(ctx context.Context, deploymentKey model.StDeploymentK
 // earned points inside the epoch window or holds a payout leaf in the epoch.
 // It runs once per epoch (ClaimStEpochNotification) in the background.
 func StNotifyEpochEarnings(ctx context.Context, deploymentKey model.StDeploymentKey, epoch uint64) {
-	if !model.ClaimStEpochNotification(ctx, deploymentKey, epoch) {
+	stNotifyEarnings(deploymentKey, epoch, model.ClaimStEpochNotification(ctx, deploymentKey, epoch))
+}
+
+// StNotifyRecoveryEarnings sends the earnings email of a recovered source
+// epoch when the root carrying its recovery is recorded, once, under its own
+// claim (model.ClaimStRecoveryNotification): v1's finalization of the
+// root-missed epoch has already taken the epoch's own claim.
+func StNotifyRecoveryEarnings(ctx context.Context, deploymentKey model.StDeploymentKey, sourceEpoch uint64) {
+	stNotifyEarnings(deploymentKey, sourceEpoch, model.ClaimStRecoveryNotification(ctx, deploymentKey, sourceEpoch))
+}
+
+// stNotifyEarnings sends an epoch's earnings email in the background when
+// its caller claimed the notification.
+func stNotifyEarnings(deploymentKey model.StDeploymentKey, epoch uint64, claimed bool) {
+	if !claimed {
 		return
 	}
 	go func() {

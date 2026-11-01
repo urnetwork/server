@@ -206,8 +206,9 @@ func (stLedgerV2Builder) Accounts(ctx context.Context, ledgerHash [32]byte) ([]m
 // it; the next root built while no pending root that can still finalize lists
 // the epoch's recorded rows builds them again (stLedgerV2CommitEpoch). It is
 // refused for an epoch the latest finalized root covers, whose rows are final,
-// for an epoch without a record, which the next root builds anyway, and under
-// a v2 pair other than the recorded activation's (SV-9).
+// for a v1 epoch, whose rows are a recovery component's fixed inputs, for an
+// epoch without a record, which the next root builds anyway, and under a v2
+// pair other than the recorded activation's (SV-9).
 func StLedgerV2RebuildEpoch(ctx context.Context, epoch uint64, requestedBy string) error {
 	cfg, client, err := stLedgerV2Require()
 	if err != nil {
@@ -222,6 +223,11 @@ func StLedgerV2RebuildEpoch(ctx context.Context, epoch uint64, requestedBy strin
 	}
 	if state.Latest != nil && epoch <= state.Latest.Epoch {
 		return fmt.Errorf("%w: epoch %d is covered by finalized root %d", ErrStLedgerV2RebuildRefused, epoch, state.Latest.Index)
+	}
+	// A v1 epoch's rows are a recovery component's fixed inputs, recorded by
+	// st v2-recovery-record; a rebuild request would reopen them.
+	if epoch < state.FirstEpoch {
+		return fmt.Errorf("%w: epoch %d is before the pool's first v2 epoch %d", ErrStLedgerV2RebuildRefused, epoch, state.FirstEpoch)
 	}
 	requested, err := model.RequestStLedgerV2EpochRebuild(ctx, cfg.DeploymentKey(), cfg.NoId, epoch, requestedBy)
 	if err != nil {

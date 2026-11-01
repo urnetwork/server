@@ -69,11 +69,25 @@ func stLedgerV2EpochAuthority(ctx context.Context, cfg *StConfig, client StClien
 	return authority, nil
 }
 
-// stLedgerV2RowsFromUsages builds an epoch's provider rows from its census:
-// the coldkey of each provider's wallet selection, zero without one, and the
-// head flag of an active fleet binding at either boundary. The selected
-// wallets' resolutions are retained before the rows are returned.
+// stLedgerV2RowsFromUsages builds an epoch's provider rows from its census
+// (stLedgerV2SelectRows) and retains the selected wallets' resolutions before
+// the rows are returned.
 func stLedgerV2RowsFromUsages(ctx context.Context, cfg *StConfig, client StClient, authority *StPayoutEpochAuthority, usages []*model.StProviderUsage) ([]protocol.LedgerUsageRow, error) {
+	rows, resolutions, err := stLedgerV2SelectRows(ctx, cfg, client, authority, usages)
+	if err != nil {
+		return nil, err
+	}
+	if err := model.AddStPayoutWalletResolutionsBatched(ctx, cfg.DeploymentKey(), authority.Epoch, cfg.NoId, resolutions); err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+// stLedgerV2SelectRows builds an epoch's provider rows from its census: the
+// coldkey of each provider's wallet selection, zero without one, and the head
+// flag of an active fleet binding at either boundary. It returns the selected
+// wallets' resolutions for the caller to retain.
+func stLedgerV2SelectRows(ctx context.Context, cfg *StConfig, client StClient, authority *StPayoutEpochAuthority, usages []*model.StProviderUsage) ([]protocol.LedgerUsageRow, []*model.StPayoutWalletResolution, error) {
 	epoch := authority.Epoch
 	// a signed roster, when one is configured, fixes the provider universe
 	work, workConfigured, err := stLoadProviderWorkAuthority(ctx, cfg, authority)
@@ -81,11 +95,11 @@ func stLedgerV2RowsFromUsages(ctx context.Context, cfg *StConfig, client StClien
 		usages, err = stProviderWorkUsages(ctx, work, usages)
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	resolutions, err := stLedgerV2Wallets(ctx, cfg, work, workConfigured, authority, usages)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	rows := make([]protocol.LedgerUsageRow, 0, len(usages))
 	clientIds := make([][16]byte, 0, len(usages))
@@ -103,7 +117,7 @@ func stLedgerV2RowsFromUsages(ctx context.Context, cfg *StConfig, client StClien
 	}
 	excluded, err := stHeadExcludedClients(ctx, cfg, client, epoch, authority.Start.Block, authority.End.Block, clientIds)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for i := range rows {
 		rows[i].HeadExcluded = excluded[rows[i].ClientID] != nil
@@ -112,10 +126,7 @@ func stLedgerV2RowsFromUsages(ctx context.Context, cfg *StConfig, client StClien
 	for _, resolution := range resolutions {
 		retained = append(retained, resolution)
 	}
-	if err := model.AddStPayoutWalletResolutionsBatched(ctx, cfg.DeploymentKey(), epoch, cfg.NoId, retained); err != nil {
-		return nil, err
-	}
-	return rows, nil
+	return rows, retained, nil
 }
 
 // stLedgerV2Wallets selects each provider's earning wallet as v1 does, in

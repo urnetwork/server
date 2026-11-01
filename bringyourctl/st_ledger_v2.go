@@ -140,8 +140,12 @@ func stV2RecoveryRecord(opts docopt.Opts) {
 	if err != nil {
 		panic(err)
 	}
-	fmt.Printf("epoch %d recovery rows recorded by %s: %d rows, %d eligible with %d coldkeys, %s of %s payout bytes eligible, chunks %s\n",
-		record.Epoch, by, record.Rows, record.EligibleRows, record.Coldkeys, record.EligibleBytes.Dec(), record.PayoutBytes.Dec(), strings.Join(record.ProviderChunks, ","))
+	verb := "recorded by " + by
+	if record.AlreadyRecorded {
+		verb = "already recorded; nothing changed"
+	}
+	fmt.Printf("epoch %d recovery rows %s: %d rows, %d eligible with %d coldkeys, %s of %s payout bytes eligible, chunks %s\n",
+		record.Epoch, verb, record.Rows, record.EligibleRows, record.Coldkeys, record.EligibleBytes.Dec(), record.PayoutBytes.Dec(), strings.Join(record.ProviderChunks, ","))
 }
 
 // stV2Activation shows, as one JSON object, the settlement v2 activation latch

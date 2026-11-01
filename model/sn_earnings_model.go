@@ -340,6 +340,19 @@ func GetStFleetBindingSignature(ctx context.Context, deploymentKey StDeploymentK
 // ClaimStEpochNotification marks the earnings notification for an epoch as
 // taken. Exactly one caller gets true, so several finalize paths and workers
 // send the epoch email once.
+// stRecoveryNotificationBit marks the earnings notification of a v2 recovery
+// component's source epoch (VERSION2-FINAL.md §16 step 6) in the epoch
+// notification claims. The source epoch's own claim may already be taken: v1
+// finalizes a root-missed epoch as finalized, which sends its email first.
+const stRecoveryNotificationBit = uint64(1) << 62
+
+// ClaimStRecoveryNotification marks the earnings notification of a recovery
+// component's source epoch as sent, once, apart from the epoch's own
+// notification, and reports whether this call claimed it.
+func ClaimStRecoveryNotification(ctx context.Context, deploymentKey StDeploymentKey, sourceEpoch uint64) (claimed bool) {
+	return ClaimStEpochNotification(ctx, deploymentKey, sourceEpoch|stRecoveryNotificationBit)
+}
+
 func ClaimStEpochNotification(ctx context.Context, deploymentKey StDeploymentKey, epoch uint64) (claimed bool) {
 	key := requireStDeploymentKey(deploymentKey)
 	server.Tx(ctx, func(tx server.PgTx) {

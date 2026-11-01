@@ -721,6 +721,8 @@ func TestStLedgerV2RebuildEpoch(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		f := newLedgerV2BuildFixture(t)
 		chain := newFakeLedgerV2Chain(&[]string{})
+		// epochs 1 to 3 are v2 epochs; a v1 epoch's rows are not rebuilt
+		chain.firstEpoch, chain.lastFunded, chain.lastCaptured = 1, 0, 0
 		SetStLedgerV2Client(chain)
 		t.Cleanup(func() { SetStLedgerV2Client(nil) })
 		key := f.cfg.DeploymentKey()

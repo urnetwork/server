@@ -7,6 +7,7 @@ package model
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"slices"
 
 	"github.com/urfoundation/sn/protocol"
@@ -28,13 +29,7 @@ func AddStPayoutWalletResolutionsBatched(ctx context.Context, deploymentKey StDe
 	key := requireStDeploymentKey(deploymentKey)
 	ordered := make([]*StPayoutWalletResolution, 0, len(resolutions))
 	for _, resolution := range resolutions {
-		if resolution == nil || resolution.ClientId == (server.Id{}) || resolution.NetworkId == (server.Id{}) {
-			return protocol.ErrWalletMappingIntegrity
-		}
-		// every hotkey field is set in mode hotkey and none in another mode
-		hotkeyMode := resolution.Mode == protocol.EarningWalletModeHotkey
-		hotkeyFields := []bool{resolution.Hotkey != ([32]byte{}), resolution.HotkeyConsentHash != ([32]byte{}), resolution.HotkeyConsentGeneration != 0, resolution.HotkeyConsentHeadHash != ([32]byte{}), resolution.HotkeyConsentHeadGeneration != 0}
-		if !hotkeyMode && resolution.Mode != protocol.EarningWalletModeProvider && resolution.Mode != protocol.EarningWalletModeNetwork || slices.Contains(hotkeyFields, !hotkeyMode) {
+		if !retainableStPayoutWalletResolution(resolution) {
 			return protocol.ErrWalletMappingIntegrity
 		}
 		ordered = append(ordered, resolution)
@@ -79,6 +74,114 @@ func AddStPayoutWalletResolutionsBatched(ctx context.Context, deploymentKey StDe
 	if mismatch {
 		return protocol.ErrWalletMappingIntegrity
 	}
+	return nil
+}
+
+// retainableStPayoutWalletResolution reports a resolution that can be
+// retained: nonzero ids, a known mode, and every hotkey field set in mode
+// hotkey and none in another mode.
+func retainableStPayoutWalletResolution(resolution *StPayoutWalletResolution) bool {
+	if resolution == nil || resolution.ClientId == (server.Id{}) || resolution.NetworkId == (server.Id{}) {
+		return false
+	}
+	hotkeyMode := resolution.Mode == protocol.EarningWalletModeHotkey
+	hotkeyFields := []bool{resolution.Hotkey != ([32]byte{}), resolution.HotkeyConsentHash != ([32]byte{}), resolution.HotkeyConsentGeneration != 0, resolution.HotkeyConsentHeadHash != ([32]byte{}), resolution.HotkeyConsentHeadGeneration != 0}
+	return (hotkeyMode || resolution.Mode == protocol.EarningWalletModeProvider || resolution.Mode == protocol.EarningWalletModeNetwork) && !slices.Contains(hotkeyFields, !hotkeyMode)
+}
+
+// sameStPayoutWalletSelection reports two resolutions of one client that
+// select the same wallet through the same consents: equal but for the heads
+// their chains were verified through, which advance as later generations are
+// signed.
+func sameStPayoutWalletSelection(a StPayoutWalletResolution, b StPayoutWalletResolution) bool {
+	a.HeadHash, a.HeadGeneration, a.HotkeyConsentHeadHash, a.HotkeyConsentHeadGeneration = [32]byte{}, 0, [32]byte{}, 0
+	b.HeadHash, b.HeadGeneration, b.HotkeyConsentHeadHash, b.HotkeyConsentHeadGeneration = [32]byte{}, 0, [32]byte{}, 0
+	return a == b
+}
+
+// RecordStLedgerV2RecoveryRows records a recovery source epoch's provider
+// chunk references and the wallet resolutions its rows were built with, in
+// one transaction, so a record that fails writes neither and a retry meets
+// nothing of its own. A resolution already retained for a client of the
+// epoch is kept when it selects the same wallet through the same consents,
+// whatever head it was verified through (sameStPayoutWalletSelection); one
+// that selects another refuses the record with ErrWalletMappingIntegrity.
+// Recording the same chunks again is a no-op that writes no resolution;
+// other chunks, or a null declaration, already recorded for the epoch are
+// ErrStLedgerV2EpochRowsFixed.
+func RecordStLedgerV2RecoveryRows(ctx context.Context, deploymentKey StDeploymentKey, noId uint64, epoch uint64, providerChunks []string, resolutions []*StPayoutWalletResolution) (returnErr error) {
+	key := requireStDeploymentKey(deploymentKey)
+	if providerChunks == nil {
+		providerChunks = []string{}
+	}
+	ordered := make([]*StPayoutWalletResolution, 0, len(resolutions))
+	for _, resolution := range resolutions {
+		if !retainableStPayoutWalletResolution(resolution) {
+			return protocol.ErrWalletMappingIntegrity
+		}
+		ordered = append(ordered, resolution)
+	}
+	slices.SortStableFunc(ordered, func(a *StPayoutWalletResolution, b *StPayoutWalletResolution) int {
+		return bytes.Compare(a.ClientId[:], b.ClientId[:])
+	})
+	type refusal struct{ err error }
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if refused, ok := recovered.(refusal); ok {
+				returnErr = refused.err
+				return
+			}
+			panic(recovered)
+		}
+	}()
+	server.Tx(ctx, func(tx server.PgTx) {
+		if existing := getStLedgerV2EpochRowsInTx(ctx, tx, key, noId, epoch, epoch)[epoch]; existing != nil {
+			if existing.Null() || !slices.Equal(existing.ProviderChunks, providerChunks) {
+				panic(refusal{fmt.Errorf("%w: epoch %d", ErrStLedgerV2EpochRowsFixed, epoch)})
+			}
+			return
+		}
+		for start := 0; start < len(ordered); start += stPayoutWalletResolutionBatch {
+			batch := ordered[start:min(start+stPayoutWalletResolutionBatch, len(ordered))]
+			clientIds := make([]server.Id, len(batch))
+			for index, resolution := range batch {
+				clientIds[index] = resolution.ClientId
+			}
+			retained := map[server.Id]StPayoutWalletResolution{}
+			rows, err := tx.Query(ctx, `SELECT client_id,`+stPayoutWalletResolutionColumns+` FROM st_payout_wallet_resolution WHERE deployment_key=$1 AND epoch=$2 AND no_id=$3 AND client_id=ANY($4)`, key, int64(epoch), int64(noId), clientIds)
+			server.WithPgResult(rows, err, func() {
+				for rows.Next() {
+					resolution := StPayoutWalletResolution{}
+					scanStPayoutWalletResolution(rows.Scan, &resolution, &resolution.ClientId)
+					retained[resolution.ClientId] = resolution
+				}
+			})
+			inserted := []*StPayoutWalletResolution{}
+			for _, resolution := range batch {
+				if prior, ok := retained[resolution.ClientId]; ok {
+					if !sameStPayoutWalletSelection(prior, *resolution) {
+						panic(refusal{protocol.ErrWalletMappingIntegrity})
+					}
+					continue
+				}
+				retained[resolution.ClientId] = *resolution
+				inserted = append(inserted, resolution)
+			}
+			insertStPayoutWalletResolutionsInTx(ctx, tx, key, epoch, noId, inserted)
+		}
+		tag := server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				INSERT INTO st_ledger_v2_epoch_rows (deployment_key, no_id, epoch, provider_chunks, declared_by, create_time)
+				VALUES ($1, $2, $3, $4, NULL, $5)
+				ON CONFLICT (deployment_key, no_id, epoch) DO NOTHING
+			`,
+			key, int64(noId), int64(epoch), providerChunks, server.NowUtc(),
+		))
+		if tag.RowsAffected() == 0 {
+			panic(refusal{fmt.Errorf("%w: epoch %d", ErrStLedgerV2EpochRowsFixed, epoch)})
+		}
+	})
 	return nil
 }
 

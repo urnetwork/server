@@ -70,6 +70,12 @@ var (
 // because its recovery component's source rows are not recorded.
 const StLedgerV2AlertRecoveryRows = "v2_recovery_rows_missing"
 
+// StLedgerV2AlertRecoveryIncomplete raises a root whose epochs received
+// surplus that left part of the scheduled recovery unplaced, such as a split
+// or short assignment, or that passes the schedule's last epoch with part of
+// it unplaced, which no later surplus places.
+const StLedgerV2AlertRecoveryIncomplete = "v2_recovery_incomplete"
+
 // stLedgerV2RecoverySchedule returns a pool's recovery schedule; tests
 // replace it.
 var stLedgerV2RecoverySchedule = ledger.ScheduledRecovery
@@ -116,6 +122,15 @@ func stLedgerV2RecoveryPlan(ctx context.Context, cfg *StConfig, firstEpoch uint6
 		return nil, err
 	}
 	plan := ledger.PlanRecovery(schedule, surplus, firstEpoch, p, e)
+	if remaining := ledger.RecoveryRemaining(schedule, surplus, firstEpoch, e); !remaining.IsZero() {
+		received := false
+		for k, amount := range surplus {
+			received = received || (p < k && k <= e && !amount.IsZero())
+		}
+		if received || schedule.ThroughEpoch <= e {
+			stLedgerV2Alert(cfg, StLedgerV2AlertRecoveryIncomplete, fmt.Sprintf("epoch %d", e), "%s rao of the scheduled recovery stay unplaced through epoch %d (the schedule places it through epoch %d); assign it in one call before the schedule's last epoch closes", remaining.Dec(), e, schedule.ThroughEpoch)
+		}
+	}
 	if len(plan) == 0 {
 		return nil, nil
 	}
@@ -464,14 +479,80 @@ func ReadStLedgerV2RecoveryUsage(ctx context.Context, ref string, dir string) (*
 }
 
 // StLedgerV2RecoveryRecord summarizes recorded source rows by counts only.
+// AlreadyRecorded reports a record that was in place before the command.
 type StLedgerV2RecoveryRecord struct {
-	Epoch          uint64
-	Rows           int
-	EligibleRows   int
-	Coldkeys       int
-	PayoutBytes    *uint256.Int
-	EligibleBytes  *uint256.Int
-	ProviderChunks []string
+	Epoch           uint64
+	Rows            int
+	EligibleRows    int
+	Coldkeys        int
+	PayoutBytes     *uint256.Int
+	EligibleBytes   *uint256.Int
+	ProviderChunks  []string
+	AlreadyRecorded bool
+}
+
+// stLedgerV2RecoveryRepeat answers a record command for an epoch whose rows
+// are already recorded. The record stands. The census's clients and bytes,
+// after a configured roster fixes the provider universe, must be the recorded
+// rows'; another census is ErrStLedgerV2EpochRowsFixed. It selects no wallets
+// and reads no heads, whose consents and bindings may have advanced since the
+// record, so repeating the command with its usage reports the record.
+func stLedgerV2RecoveryRepeat(ctx context.Context, cfg *StConfig, authority *StPayoutEpochAuthority, ref string, usages []*model.StProviderUsage, existing *model.StLedgerV2EpochRows) (*StLedgerV2RecoveryRecord, error) {
+	epoch := authority.Epoch
+	work, _, err := stLoadProviderWorkAuthority(ctx, cfg, authority)
+	if err == nil {
+		usages, err = stProviderWorkUsages(ctx, work, usages)
+	}
+	if err != nil {
+		return nil, err
+	}
+	inputs, err := stLedgerV2RecoveryInputs(ctx, &StLedgerV2CoveredEpoch{Epoch: epoch, Recovery: []*StLedgerV2Recovery{{Recovery: ledger.Recovery{Epoch: epoch, Amount: 1}, Rows: existing}}})
+	if err != nil {
+		return nil, err
+	}
+	recorded := inputs[0].Rows
+	type censusRow struct {
+		clientId [16]byte
+		bytes    uint64
+	}
+	census := make([]censusRow, 0, len(usages))
+	for _, usage := range usages {
+		// rows are the providers with settled bytes, as stLedgerV2SelectRows builds them
+		if usage.PayoutByteCount > 0 {
+			census = append(census, censusRow{stId16(usage.ClientId), uint64(usage.PayoutByteCount)})
+		}
+	}
+	rows := make([]censusRow, 0, len(recorded))
+	for _, row := range recorded {
+		rows = append(rows, censusRow{row.ClientID, row.UsageBytes})
+	}
+	byClient := func(a censusRow, b censusRow) int {
+		return bytes.Compare(a.clientId[:], b.clientId[:])
+	}
+	slices.SortFunc(census, byClient)
+	slices.SortFunc(rows, byClient)
+	if !slices.Equal(census, rows) {
+		return nil, fmt.Errorf("%w: epoch %d's recorded rows are not the census of usage %s", model.ErrStLedgerV2EpochRowsFixed, epoch, ref)
+	}
+	record := stLedgerV2RecoveryRecordOf(epoch, recorded, existing.ProviderChunks)
+	record.AlreadyRecorded = true
+	return record, nil
+}
+
+// stLedgerV2RecoveryRecordOf counts rows for the record's summary.
+func stLedgerV2RecoveryRecordOf(epoch uint64, rows []protocol.LedgerUsageRow, refs []string) *StLedgerV2RecoveryRecord {
+	record := &StLedgerV2RecoveryRecord{Epoch: epoch, Rows: len(rows), PayoutBytes: new(uint256.Int), EligibleBytes: new(uint256.Int), ProviderChunks: refs}
+	coldkeys := map[[32]byte]bool{}
+	for _, row := range rows {
+		record.PayoutBytes.AddUint64(record.PayoutBytes, row.UsageBytes)
+		if row.Coldkey != ([32]byte{}) && !row.HeadExcluded {
+			record.EligibleRows++
+			record.EligibleBytes.AddUint64(record.EligibleBytes, row.UsageBytes)
+			coldkeys[row.Coldkey] = true
+		}
+	}
+	record.Coldkeys = len(coldkeys)
+	return record
 }
 
 // StLedgerV2RecordRecoveryRows is the operator's explicit command that
@@ -480,13 +561,17 @@ type StLedgerV2RecoveryRecord struct {
 // follow the v2 rules over the source epoch's own window: the usage census
 // of the artifact, which must be for this deployment's pool and exactly the
 // epoch's authenticated boundaries; wallet selection by retained consents
-// (the provider's, its network's, its network's hotkey delegation), retained
-// as the builder retains them; and head exclusion at both of the epoch's
-// boundaries. The chunks are published to the ledger store before the
-// record. It is refused under a v2 pair other than the recorded activation's
-// (SV-9), for an epoch the schedule does not recover, and once other rows or
-// a null declaration are recorded for the epoch. Recording the same rows
-// again changes nothing.
+// (the provider's, its network's, its network's hotkey delegation); and head
+// exclusion at both of the epoch's boundaries. Their chunks are published
+// first; then the wallet resolutions and the record are written in one
+// transaction (model.RecordStLedgerV2RecoveryRows), so a failed record
+// writes nothing and can be retried at once. For a source epoch already
+// recorded, the artifact is checked against the record and the record is
+// returned (stLedgerV2RecoveryRepeat), so a repeat changes nothing and
+// another census is refused. It is refused under a v2 pair other than the recorded
+// activation's (SV-9), for an epoch the schedule does not recover, for one
+// declared unrecoverable, and when a resolution would select another wallet
+// than one retained for the epoch.
 func StLedgerV2RecordRecoveryRows(ctx context.Context, epoch uint64, ref string, dir string, recordedBy string) (*StLedgerV2RecoveryRecord, error) {
 	if recordedBy == "" {
 		return nil, fmt.Errorf("%w: the record must name who makes it", ErrStLedgerV2RecoveryRefused)
@@ -504,6 +589,11 @@ func StLedgerV2RecordRecoveryRows(ctx context.Context, epoch uint64, ref string,
 	if _, err := stLedgerV2RecoveryScheduled(cfg, epoch); err != nil {
 		return nil, err
 	}
+	key := cfg.DeploymentKey()
+	existing := model.GetStLedgerV2EpochRows(ctx, key, cfg.NoId, epoch, epoch)[epoch]
+	if existing != nil && existing.Null() {
+		return nil, fmt.Errorf("%w: epoch %d was declared unrecoverable by %s", ErrStLedgerV2RecoveryRefused, epoch, existing.DeclaredBy)
+	}
 	usage, usages, err := ReadStLedgerV2RecoveryUsage(ctx, ref, dir)
 	if err != nil {
 		return nil, err
@@ -519,7 +609,10 @@ func StLedgerV2RecordRecoveryRows(ctx context.Context, epoch uint64, ref string,
 	if want.Ref != usage.Ref {
 		return nil, fmt.Errorf("%w: usage %s is not epoch %d of pool %d of deployment %s over its authenticated boundaries", ErrStLedgerV2RecoveryRefused, ref, epoch, cfg.NoId, cfg.DeploymentId)
 	}
-	rows, err := stLedgerV2RowsFromUsages(ctx, cfg, client, authority, usages)
+	if existing != nil {
+		return stLedgerV2RecoveryRepeat(ctx, cfg, authority, ref, usages, existing)
+	}
+	rows, resolutions, err := stLedgerV2SelectRows(ctx, cfg, client, authority, usages)
 	if err != nil {
 		return nil, err
 	}
@@ -530,20 +623,10 @@ func StLedgerV2RecordRecoveryRows(ctx context.Context, epoch uint64, ref string,
 			return nil, err
 		}
 	}
-	if err := model.RecordStLedgerV2EpochRows(ctx, cfg.DeploymentKey(), cfg.NoId, epoch, refs); err != nil {
+	if err := model.RecordStLedgerV2RecoveryRows(ctx, key, cfg.NoId, epoch, refs, resolutions); err != nil {
 		return nil, err
 	}
-	record := &StLedgerV2RecoveryRecord{Epoch: epoch, Rows: len(rows), PayoutBytes: new(uint256.Int), EligibleBytes: new(uint256.Int), ProviderChunks: refs}
-	coldkeys := map[[32]byte]bool{}
-	for _, row := range rows {
-		record.PayoutBytes.AddUint64(record.PayoutBytes, row.UsageBytes)
-		if row.Coldkey != ([32]byte{}) && !row.HeadExcluded {
-			record.EligibleRows++
-			record.EligibleBytes.AddUint64(record.EligibleBytes, row.UsageBytes)
-			coldkeys[row.Coldkey] = true
-		}
-	}
-	record.Coldkeys = len(coldkeys)
+	record := stLedgerV2RecoveryRecordOf(epoch, rows, refs)
 	glog.Infof("[st]v2 recovery source epoch %d rows recorded from usage %s by %s: %d rows, %d eligible\n", epoch, ref, recordedBy, record.Rows, record.EligibleRows)
 	return record, nil
 }

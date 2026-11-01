@@ -10,16 +10,22 @@ The v1 sweep moves vault1's carry into vault2. The owner then assigns it as surp
   - The allocation rule is `coldkey_usage_largest_remainder_rao_v1`. The deltas sum exactly to R.
   - Epoch 3's rows use the v2 rules over epoch 3's own window: consent-only wallets and head exclusion at epoch 3's boundaries.
 - **Ordinary funding.** Everything else in the surplus is ordinary funding of the receiving epoch: epoch 1's 3,482.257057872 α, the reveal-lag capture and transfer rounding. The receiving epoch's own rows allocate f_k − R.
-- **Receiving epoch.** It is chosen by the chain, not by configuration: the first epoch whose own `SurplusAssigned` amounts reach R (`ledger.PlanRecovery`).
+- **Receiving epoch.** It is chosen by the chain, not by configuration. The recovery is the first R of the pool's assigned surplus, in epoch order, through the schedule's last epoch, epoch 8 (`ledger.PlanRecovery`).
   - If `assignSurplus` is mined before epoch 5's close, the receiving epoch is 5.
   - If it is mined after, the receiving epoch is 6.
-  - The server reads the mirrored events. The validator reads the logs itself. Both check R against vault1.
+  - A split or short assignment is not dropped. Each epoch places as much of R as its own surplus holds, and the next assignment completes it. The server raises `v2_recovery_incomplete` meanwhile.
+  - Once R is placed, no later surplus is recovery.
+  - Surplus assigned after epoch 8 is ordinary funding. If R is still incomplete then, the alert fires, and extending the bound needs a release.
+  - The server reads the mirrored events. The validator reads the logs itself through a checkpointed index. A node that has not indexed the commit block makes it retry rather than decide. Both check R against vault1.
 - **Schedule.** The schedule (vault2, pool 1, source epoch 3, R) is a code constant in sn `ledger`. No config or `config_hash` changes.
 - **Header format.** The receiving epoch's header entry gains `"recovery":[{"epoch":3,"amount":4132715621039,"providers":[…]}]`.
   - Older decoders refuse it. Every other header is byte-identical to before.
 - **Audit.** The validator approves only a root that lists exactly the component the chain calls for (check 10, CheckRecovery), with epoch 3's rows audited like a covered epoch's.
   - It refuses, without demands, a root that omits the component, inflates it, moves it to another epoch, adds epoch 1 as a source, or shifts recovery leaves.
-- **Amounts.** Recovery amounts are recorded for readers as epoch 3's (`st_ledger_v2_amount.epoch = 3`). Finalizing the receiving root sends epoch 3's earnings email.
+- **Amounts.** Recovery amounts are recorded for readers as epoch 3's (`st_ledger_v2_amount.epoch = 3`). Finalizing the receiving root sends epoch 3's earnings email under its own claim.
+  - The 11-01 finalize poke treats a root-missed epoch as finalized. It has already taken epoch 3's ordinary email claim and sent epoch 3's email with no payout.
+  - Once epoch 3's rows are recorded (step 5), `/account/epochs` and the earnings readers show epoch 3 as a v2 epoch with zero amounts until the receiving root is finalized and recorded.
+- **Watchers.** `snclaim v2 check` has neither vault1 nor the surplus history. It takes the header's recovery components as declared, says so, and still checks their rows, allocation and fit within the epoch's funding. The validator checks the amounts.
 
 Epoch 3's rows are never built inside the driver's epoch step, so the receiving root's 2-hour step reads only its own epoch's usage. They are built once from a preserved usage artifact by an operator command and recorded as fixed inputs. If they are not recorded when the receiving root is built:
 
@@ -30,10 +36,15 @@ Epoch 3's rows are never built inside the driver's epoch step, so the receiving 
 ## Deploy order (gates)
 
 1. **Merge.** Merge sn `phasec/recovery-component`, then server `phasec/recovery-component`. The server builds against the sibling `../sn`, so its build must use the merged sn.
-2. **Validator release.** Build a validator release that includes the audit and deploy it. This can happen any time before step 6.
+2. **Validator and snclaim release.** Build a validator and snclaim release that includes the audit and the watcher change, and deploy the validator. This can happen any time before step 6.
    - Its config is unchanged, so no adoption or re-signing is needed.
    - It audits recovery-free roots exactly as now, so epoch 4's root is unaffected.
    - An old validator would approve a receiving root that pays all of f_k as ordinary funding, which is why this gate comes first.
+   - Old validators misbehave for two roots:
+     - on the receiving root, they fail to decode the header and send demands;
+     - on the next root, they cannot decode the receiving root's header as the previous root (check 2) and refuse.
+   - So every quorum validator must run the new release from the receiving root's commit through the next root's approval.
+   - Old snclaim binaries run with `--demand` would also send paid demands on the receiving root. Announce the snclaim release with the plan.
 3. **api, alt and taskworker.** Deploy these after both of epoch 4's commits are confirmed: the v2 root (block ≥ 9,450,028, about 11-06 22:25Z, or epoch 4's `v2commit` publish row confirmed) and the v1 sweep root (cutoff block 9,449,928).
    - api and alt decode headers for `/sn/ledger/account`. An old api cannot serve proofs for the receiving root.
    - The taskworker must keep the sweep chain, which runs until claim and absorb on about 11-08. Build it from the sweep hotfix branch (`hotfix/st-v1-sweep-on-1086372490`) plus these commits.
@@ -45,6 +56,7 @@ Epoch 3's rows are never built inside the driver's epoch step, so the receiving 
 4. **Preserve epoch 3's usage.** Read-only, after epoch 4's commit (below).
 5. **Record epoch 3's rows.** This writes and is owner-run (below). Do it before epoch 5's boundary, block 9,499,228, about 11-13 18:25Z.
 6. **Upgrade and assign surplus.** Upgrade `STSettlement2`, then send `assignSurplus(1, epoch, amount)`, through the Safe. Do this only after steps 2–5.
+   - Review it with `sn-mainnet owner-call-settlement2 review`. While the recovery is unplaced, the review refuses an amount that leaves part of R unplaced and an epoch after the schedule's last. Assign the whole swept surplus in one call.
    - The phase C wrapper reverts `InvalidEpoch` unless `epoch` = `vault2.lastFundedEpoch(1) + 1`. A call signed for epoch 5 that arrives after epoch 5's close reverts instead of funding epoch 6. Re-sign it with epoch 6.
    - To land in epoch 5, it must be mined before epoch 5's close transaction, which the taskworker sends at block 9,499,228. Leave margin: by about 11-13 12:00Z.
    - Mined after that close, the recovery lands in epoch 6 with nothing else to change.
@@ -83,11 +95,12 @@ bringyourctl st v2-recovery-record --epoch=3 --usage=sha256:<manifest> [--dir=<d
   - wallet selection by retained consents, which also fills the consent verification cache;
   - head exclusion at blocks 9,348,028 and 9,398,428.
 - It then:
-  1. retains epoch 3's wallet resolutions;
-  2. puts the provider chunks in the ledger store;
-  3. records `st_ledger_v2_epoch_rows` (no_id 1, epoch 3).
+  1. puts the provider chunks in the ledger store;
+  2. in one transaction, retains epoch 3's wallet resolutions and records `st_ledger_v2_epoch_rows` (no_id 1, epoch 3).
+- A failure writes neither the resolutions nor the record. **Retry immediately**, before providers sign new consents. A resolution an earlier attempt retained is kept when it selects the same wallet through an older head; one that selects another wallet refuses the record.
 - Output is counts only: rows, eligible rows, coldkeys, payout bytes and eligible bytes. If every row is ineligible, R becomes ordinary funding.
-- A repeat with the same artifact changes nothing. Other rows are refused once rows are recorded.
+- Once recorded, a repeat with the same artifact prints "already recorded; nothing changed". It checks the artifact's census against the recorded rows and selects no wallets and reads no heads, so later consents cannot fail it. An artifact with another census is refused.
+- `bringyourctl st v2-rebuild --epoch=3` is refused: epoch 3 is before the pool's first v2 epoch.
 - To give up on epoch 3's rows, use `bringyourctl st v2-unrecoverable --epoch=3 --by=<name>`. R then becomes ordinary funding of the receiving epoch.
 
 Read-only check:
@@ -109,4 +122,4 @@ Epoch 5 needs every gate done by about 11-13 12:00Z.
 | Record | 11-07 | Wallet selection over epoch 3's providers; owner-run |
 | `STSettlement2` upgrade and `assignSurplus` | after the sweep claim and absorb, about 11-08 18:25Z+ | Ledger signing session; B's upgrade review |
 
-If any gate slips past about 11-13 12:00Z, delay `assignSurplus` until after epoch 5's close. The recovery then lands in epoch 6 (boundary block 9,549,628, about 11-20 18:25Z) with no change to code or config.
+If any gate slips past about 11-13 12:00Z, delay `assignSurplus` until after epoch 5's close. The recovery then lands in epoch 6 (boundary block 9,549,628, about 11-20 18:25Z) with no change to code or config. Epochs 7 and 8 are further margin. After epoch 8 the schedule needs a release.

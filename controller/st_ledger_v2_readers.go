@@ -28,7 +28,7 @@ func stLedgerV2Finalized(ctx context.Context, deploymentKey model.StDeploymentKe
 		StNotifyEpochEarnings(ctx, deploymentKey, covered.Epoch)
 		// a recovered source epoch's earnings are its recovery amounts
 		for _, component := range covered.Recovery {
-			StNotifyEpochEarnings(ctx, deploymentKey, component.Epoch)
+			StNotifyRecoveryEarnings(ctx, deploymentKey, component.Epoch)
 		}
 	}
 }

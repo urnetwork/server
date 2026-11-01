@@ -7,10 +7,13 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/holiman/uint256"
+
+	"github.com/urfoundation/sn/protocol"
 
 	"github.com/urnetwork/server"
 )
@@ -261,6 +264,84 @@ func TestStLedgerV2RecordFinalizedRoots(t *testing.T) {
 		amounts := GetStLedgerV2AmountsForColdkey(ctx, key, testStCkey(1))
 		if len(amounts) != 2 || amounts[0].Epoch != 5 || amounts[1].Epoch != 6 || amounts[1].Amount.Uint64() != 7 || amounts[1].RootIndex != 1 {
 			t.Fatalf("coldkey 1 amounts %+v", amounts)
+		}
+	})
+}
+
+// §16 step 6: a recovery source epoch's rows and the wallet resolutions they
+// were built with are recorded together. A repeat changes nothing whatever
+// heads moved; other chunks, or a null declaration, are refused; a resolution
+// an earlier attempt retained is kept when it selects the same wallet
+// through an older head; and one that selects another wallet refuses the
+// whole record, which then writes neither rows nor resolutions.
+func TestRecordStLedgerV2RecoveryRows(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		key := testStDeploymentKey
+		a, b, network := server.NewId(), server.NewId(), server.NewId()
+		resolution := func(client server.Id, coldkey byte, head uint64) *StPayoutWalletResolution {
+			return &StPayoutWalletResolution{ClientId: client, NetworkId: network, Mode: protocol.EarningWalletModeProvider, Coldkey: [32]byte{coldkey},
+				ConsentHash: [32]byte{7}, ConsentGeneration: 1, HeadHash: [32]byte{byte(head)}, HeadGeneration: head}
+		}
+		heads := func(epoch uint64) map[server.Id]uint64 {
+			out := map[server.Id]uint64{}
+			for _, retained := range GetStPayoutWalletResolutions(ctx, key, epoch, 1) {
+				out[retained.ClientId] = retained.HeadGeneration
+			}
+			return out
+		}
+		chunks := []string{"sha256:" + strings.Repeat("ab", 32)}
+
+		if err := RecordStLedgerV2RecoveryRows(ctx, key, 1, 3, chunks, []*StPayoutWalletResolution{resolution(a, 1, 1), resolution(b, 2, 1)}); err != nil {
+			t.Fatal(err)
+		}
+		if record := GetStLedgerV2EpochRows(ctx, key, 1, 3, 3)[3]; record == nil || !slices.Equal(record.ProviderChunks, chunks) {
+			t.Fatalf("record %+v", record)
+		}
+		if got := heads(3); len(got) != 2 || got[a] != 1 || got[b] != 1 {
+			t.Fatalf("retained %v", got)
+		}
+		// A repeat after the heads moved is a no-op.
+		if err := RecordStLedgerV2RecoveryRows(ctx, key, 1, 3, chunks, []*StPayoutWalletResolution{resolution(a, 1, 2), resolution(b, 2, 2)}); err != nil {
+			t.Fatal(err)
+		}
+		if got := heads(3); got[a] != 1 || got[b] != 1 {
+			t.Fatalf("a repeat rewrote resolutions: %v", got)
+		}
+		if err := RecordStLedgerV2RecoveryRows(ctx, key, 1, 3, []string{"sha256:" + strings.Repeat("cd", 32)}, nil); !errors.Is(err, ErrStLedgerV2EpochRowsFixed) {
+			t.Fatalf("other chunks: %v", err)
+		}
+
+		// An earlier attempt left a's resolution through an older head.
+		if err := AddStPayoutWalletResolutions(ctx, key, 4, 1, []*StPayoutWalletResolution{resolution(a, 1, 1)}); err != nil {
+			t.Fatal(err)
+		}
+		if err := RecordStLedgerV2RecoveryRows(ctx, key, 1, 4, chunks, []*StPayoutWalletResolution{resolution(a, 1, 2), resolution(b, 2, 2)}); err != nil {
+			t.Fatal(err)
+		}
+		if got := heads(4); got[a] != 1 || got[b] != 2 || GetStLedgerV2EpochRows(ctx, key, 1, 4, 4)[4] == nil {
+			t.Fatalf("retained %v", got)
+		}
+
+		// A retained resolution of another wallet refuses the record whole.
+		if err := AddStPayoutWalletResolutions(ctx, key, 5, 1, []*StPayoutWalletResolution{resolution(a, 9, 1)}); err != nil {
+			t.Fatal(err)
+		}
+		if err := RecordStLedgerV2RecoveryRows(ctx, key, 1, 5, chunks, []*StPayoutWalletResolution{resolution(b, 2, 1), resolution(a, 1, 1)}); !errors.Is(err, protocol.ErrWalletMappingIntegrity) {
+			t.Fatalf("another wallet: %v", err)
+		}
+		if got := heads(5); len(got) != 1 || GetStLedgerV2EpochRows(ctx, key, 1, 5, 5)[5] != nil {
+			t.Fatalf("a refused record wrote resolutions %v or rows", got)
+		}
+
+		if err := DeclareStLedgerV2EpochUnrecoverable(ctx, key, 1, 6, "operator@example"); err != nil {
+			t.Fatal(err)
+		}
+		if err := RecordStLedgerV2RecoveryRows(ctx, key, 1, 6, chunks, nil); !errors.Is(err, ErrStLedgerV2EpochRowsFixed) {
+			t.Fatalf("a null declaration: %v", err)
+		}
+		if err := RecordStLedgerV2RecoveryRows(ctx, key, 1, 7, chunks, []*StPayoutWalletResolution{{ClientId: a}}); !errors.Is(err, protocol.ErrWalletMappingIntegrity) {
+			t.Fatalf("a malformed resolution: %v", err)
 		}
 	})
 }

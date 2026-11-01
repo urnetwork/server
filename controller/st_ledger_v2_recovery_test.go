@@ -44,7 +44,7 @@ const (
 func useLedgerV2RecoverySchedule(t testing.TB) {
 	t.Helper()
 	stLedgerV2RecoverySchedule = func(vault [20]byte, noID uint64) *ledger.RecoverySchedule {
-		return &ledger.RecoverySchedule{Vault: vault, NoID: noID, Sources: []ledger.Recovery{{Epoch: 1, Amount: ledgerV2RecoveryAmount}}, FromBlock: 1}
+		return &ledger.RecoverySchedule{Vault: vault, NoID: noID, Sources: []ledger.Recovery{{Epoch: 1, Amount: ledgerV2RecoveryAmount}}, FromBlock: 1, ThroughEpoch: 8}
 	}
 	t.Cleanup(func() { stLedgerV2RecoverySchedule = ledger.ScheduledRecovery })
 }
@@ -518,10 +518,12 @@ func TestStLedgerV2RecoveryPlanReadsTheMirror(t *testing.T) {
 			}
 			return &model.StChainEvent{BlockNumber: block, BlockHash: fmt.Sprintf("0x%064x", block), LogIndex: index, TxHash: fmt.Sprintf("0x%064x", block*10+uint64(index)), Kind: model.StLedgerV2SurplusAssignedEventKind, DataJson: string(data)}
 		}
-		// A small unrelated assignment to epoch 2, another pool's surplus,
-		// then the sweep's two assignments to epoch 3.
+		// A first assignment of 5 rao to epoch 2 places the start of the
+		// recovery there. Another pool's surplus is not this pool's. The
+		// sweep's two assignments to epoch 3 place the rest, and what is left
+		// of them is ordinary funding.
 		model.UpsertStEvents(f.ctx, key, []*model.StChainEvent{
-			surplusEvent(250, 0, 1, 2, 5),
+			surplusEvent(200, 0, 1, 2, 5),
 			surplusEvent(260, 0, 2, 3, ledgerV2RecoveryAmount),
 			surplusEvent(270, 0, 1, 3, ledgerV2RecoveryAmount),
 			surplusEvent(271, 1, 1, 3, ledgerV2RecoveryOrdinary),
@@ -540,19 +542,31 @@ func TestStLedgerV2RecoveryPlanReadsTheMirror(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !reflect.DeepEqual(plan, ledgerV2RecoveryExpected()) {
+		spread := map[uint64][]ledger.Recovery{2: {{Epoch: 1, Amount: 5}}, 3: {{Epoch: 1, Amount: ledgerV2RecoveryAmount - 5}}}
+		if !reflect.DeepEqual(plan, spread) {
 			t.Fatalf("plan %v", plan)
 		}
-		// A root that does not reach epoch 3, or one after a root covering
-		// it, carries nothing.
-		for _, c := range []struct{ p, e uint64 }{{1, 2}, {3, 4}} {
-			if c.e == 4 {
-				model.SetStLedgerV2Funding(f.ctx, key, &model.StLedgerV2Funding{NoId: 1, Epoch: 4, BlockNumber: 305})
-			}
-			if plan, err := stLedgerV2RecoveryPlan(f.ctx, f.cfg, 2, c.p, c.e); err != nil || len(plan) != 0 {
-				t.Fatalf("root over (%d, %d]: %v %v", c.p, c.e, plan, err)
-			}
+		// A root over epoch 2 alone carries the part placed there; a root
+		// after one covering epoch 3 carries nothing.
+		if plan, err := stLedgerV2RecoveryPlan(f.ctx, f.cfg, 2, 1, 2); err != nil || !reflect.DeepEqual(plan, map[uint64][]ledger.Recovery{2: spread[2]}) {
+			t.Fatalf("root over (1, 2]: %v %v", plan, err)
 		}
+		if plan, err := stLedgerV2RecoveryPlan(f.ctx, f.cfg, 2, 2, 3); err != nil || !reflect.DeepEqual(plan, map[uint64][]ledger.Recovery{3: spread[3]}) {
+			t.Fatalf("root over (2, 3]: %v %v", plan, err)
+		}
+		model.SetStLedgerV2Funding(f.ctx, key, &model.StLedgerV2Funding{NoId: 1, Epoch: 4, BlockNumber: 305})
+		if plan, err := stLedgerV2RecoveryPlan(f.ctx, f.cfg, 2, 3, 4); err != nil || len(plan) != 0 {
+			t.Fatalf("root over (3, 4]: %v %v", plan, err)
+		}
+		// The schedule's first block bounds what counts: from block 201 the
+		// whole recovery is placed in epoch 3.
+		stLedgerV2RecoverySchedule = func(vault [20]byte, noID uint64) *ledger.RecoverySchedule {
+			return &ledger.RecoverySchedule{Vault: vault, NoID: noID, Sources: []ledger.Recovery{{Epoch: 1, Amount: ledgerV2RecoveryAmount}}, FromBlock: 201, ThroughEpoch: 8}
+		}
+		if plan, err := stLedgerV2RecoveryPlan(f.ctx, f.cfg, 2, 1, 3); err != nil || !reflect.DeepEqual(plan, ledgerV2RecoveryExpected()) {
+			t.Fatalf("from block 201: %v %v", plan, err)
+		}
+		useLedgerV2RecoverySchedule(t)
 		// vault1 must show the source RootMissed with exactly its funding.
 		f.chain.pool = &StPoolState{Status: 1, PoolTotalRao: big.NewInt(0), ClaimedRao: big.NewInt(0)}
 		if _, err := stLedgerV2RecoveryPlan(f.ctx, f.cfg, 2, 1, 3); !errors.Is(err, ledger.ErrRecoverySource) {
