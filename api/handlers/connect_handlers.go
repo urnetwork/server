@@ -35,14 +35,9 @@ func ConnectControl(w http.ResponseWriter, r *http.Request) {
 	)
 }
 
-// Bind the router-owned notifier without creating a request-owned subscription
-// service or replacing the HTTP request's cancellation and deadline.
-func ConnectControlWithOriginNotifications(notifications *model.ContractOriginNotifications) http.HandlerFunc {
-	return ConnectControlWithOwners(notifications, nil)
-}
-
-// Binds the router-owned notifier and stuck provider reports, either of which
-// may be nil, the same way.
+// Bind the router-owned notifier and stuck provider reports, either of which
+// may be nil, without creating a request-owned subscription service or
+// replacing the HTTP request's cancellation and deadline.
 func ConnectControlWithOwners(notifications *model.ContractOriginNotifications, stuckProviders *controller.StuckProviderSignals) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
