@@ -168,6 +168,7 @@ func subnetOperatorTasks() []subnetOperatorTask {
 		{target: task.NewTaskTarget(controller.RebuildPointsLeaderboard), schedule: controller.ScheduleRebuildPointsLeaderboard},
 		{target: task.NewTaskTarget(controller.ComputeSnTopSnapshot), schedule: controller.ScheduleComputeSnTopSnapshot},
 		{target: task.NewTaskTarget(work.RemoveCompletedContracts), schedule: work.ScheduleRemoveCompletedContracts},
+		{target: task.NewTaskTarget(work.RemoveContractsPastHorizon), schedule: work.ScheduleRemoveContractsPastHorizon},
 		{target: task.NewTaskTarget(work.ReconcileNetEscrow), schedule: work.ScheduleReconcileNetEscrow},
 		{target: work.NewTransferDebitTaskTarget(), schedule: work.ScheduleFlushTransferDebits},
 		{target: task.NewTaskTarget(work.DbMaintenance), schedule: func(clientSession *session.ClientSession, tx server.PgTx) {
