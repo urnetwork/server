@@ -56,6 +56,8 @@ type SubnetReplaySettings struct {
 	FinalizeOverdueBlocks uint64
 	// Remaining root window blocks below which a missing root is at risk.
 	RootAtRiskBlocks uint64
+	// Independent deadline page lead: 600 blocks is two hours at 12 s/block.
+	RootDeadlineLeadBlocks uint64
 	// Remaining close grace blocks below which a missing close is at risk.
 	CloseAtRiskBlocks uint64
 	// Consecutive dust-deferred epochs of one operator before a warning.
@@ -155,6 +157,7 @@ func DefaultSubnetReplaySettings() *SubnetReplaySettings {
 		MaximumCensusEntries:           512,
 		FinalizeOverdueBlocks:          300,
 		RootAtRiskBlocks:               300,
+		RootDeadlineLeadBlocks:         600,
 		CloseAtRiskBlocks:              60,
 		DustDeferralWarnEpochs:         3,
 		MaximumCreditChecks:            256,

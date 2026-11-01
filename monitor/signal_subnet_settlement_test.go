@@ -195,7 +195,8 @@ func TestSubnetSettlementFinalizationDeadlineBeforeAndAfter(t *testing.T) {
 	}
 }
 
-// A missing root warns while at risk and after its window, never pages.
+// The v1 history reader warns about a missing root. The independent §22.7.1
+// deadline reader owns the T-2h page for both settlement versions.
 func TestSubnetSettlementRootWindowAtRiskAndMissed(t *testing.T) {
 	for _, block := range []uint64{1425, 1440} {
 		chain := newHealthySubnetSettlementChain(t)
