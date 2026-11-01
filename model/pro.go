@@ -362,6 +362,15 @@ func Testing_SetEnforceConcurrentClients(enforce bool) func() {
 	return func() { c.EnforceConcurrentClients = prev }
 }
 
+// Testing_SetProviderIntentShadowSampling makes every shadow slot decision
+// sampled (true) or none (false), returning a function that restores the
+// random sampler. Same caveats as Testing_SetEnforceConcurrentClients.
+func Testing_SetProviderIntentShadowSampling(sampled bool) func() {
+	prev := providerIntentShadowSampled
+	providerIntentShadowSampled = func() bool { return sampled }
+	return func() { providerIntentShadowSampled = prev }
+}
+
 // Testing_SetConcurrentClientsLimit overrides the per-tier connected-top-level
 // client limits on the process's parsed config, returning a restore function.
 // Same caveats as Testing_SetEnforceConcurrentClients (mutates the shared
