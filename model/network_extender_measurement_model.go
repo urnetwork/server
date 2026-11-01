@@ -1618,6 +1618,64 @@ func WithdrawNetworkExtenderMeasurementCert(
 	return
 }
 
+// WithdrawNetworkExtenderMeasurementCertIf withdraws one live certificate as
+// WithdrawNetworkExtenderMeasurementCert does, if its extender must still be
+// withdrawn (C9): reasonFor judges the extender as it is now, nil when it is
+// gone, and the certificate is withdrawn with the reason it gives, or left as
+// it is when that is empty. False when it was left, or already withdrawn.
+//
+// The dns chain judges every live certificate from one read
+// (GetLiveNetworkExtenderMeasurementCerts), and an extender can activate
+// between that read and the withdrawal, as one does that comes back right at
+// the end of its away grace (amendment 24). Withdrawn as the read found it, it
+// would be revoked while it serves, and A8 would answer it withdrawn, so it
+// would drop its certificate and order a new one. So the extender row is
+// locked and read again in the withdrawing transaction. An activation writes
+// that row (ActivateNetworkExtender): one that committed first is judged here;
+// one in flight is waited for, and this transaction fails to serialize and
+// runs again on a snapshot that includes it; and one that comes later waits
+// for this transaction and is a return after the withdrawal, which orders
+// again. reasonFor may run more than once, since the transaction may be
+// retried.
+func WithdrawNetworkExtenderMeasurementCertIf(
+	ctx context.Context,
+	certId server.Id,
+	now time.Time,
+	reasonFor func(extender *NetworkExtender) string,
+) (withdrawn bool) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		withdrawn = false
+		var extenderId *server.Id
+		result, err := tx.Query(
+			ctx,
+			`
+			SELECT extender_id
+			FROM network_extender_measurement_cert
+			WHERE cert_id = $1 AND withdraw_time IS NULL
+			`,
+			certId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				var id server.Id
+				server.Raise(result.Scan(&id))
+				extenderId = &id
+			}
+		})
+		if extenderId == nil {
+			return
+		}
+		// the extender row read under its lock, so an activation in flight is
+		// read once it commits, and a later one waits for this withdrawal
+		reason := reasonFor(getNetworkExtenderInTx(ctx, tx, *extenderId))
+		if reason == "" {
+			return
+		}
+		withdrawn = withdrawNetworkExtenderMeasurementCertsInTx(ctx, tx, &certId, nil, reason, now) == 1
+	})
+	return
+}
+
 // Withdraws one certificate, or every live certificate of one extender, inside
 // the caller's transaction, and the requests for their names with them.
 // Returns how many were withdrawn.

@@ -557,14 +557,23 @@ func ExtenderMeasurementDnsPost(
 // own transaction (A9); this is what finds a deactivation, and anything that
 // reached those tiers another way. An away extender is out of the zone
 // already, since it may not be measured while it is not active (C8).
+//
+// The read only picks what to judge. Each certificate is withdrawn only if its
+// extender, locked and read again in the withdrawing transaction, must still
+// be, and with the reason it has then
+// (model.WithdrawNetworkExtenderMeasurementCertIf): an extender that activated
+// since the read, as one does that comes back right at the end of its away
+// grace, keeps its certificate (amendment 24).
 func withdrawExtenderMeasurementCerts(ctx context.Context, now time.Time) int {
+	reasonFor := func(extender *model.NetworkExtender) string {
+		return controller.ExtenderMeasurementWithdrawReason(extender, now)
+	}
 	withdrawn := 0
 	for _, target := range model.GetLiveNetworkExtenderMeasurementCerts(ctx, now) {
-		reason := controller.ExtenderMeasurementWithdrawReason(target.Extender, now)
-		if reason == "" {
+		if reasonFor(target.Extender) == "" {
 			continue
 		}
-		if model.WithdrawNetworkExtenderMeasurementCert(ctx, target.Cert.CertId, reason, now) {
+		if model.WithdrawNetworkExtenderMeasurementCertIf(ctx, target.Cert.CertId, now, reasonFor) {
 			withdrawn += 1
 		}
 	}
