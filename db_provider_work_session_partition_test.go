@@ -162,6 +162,39 @@ func TestProviderWorkSessionEventRetentionBoundary(t *testing.T) {
 	}
 }
 
+// Without a horizon events keep their 13 weeks; with one, the horizon, never
+// below the guard's 35 days nor above 13 weeks. A week and the legacy
+// partition expire at that retention.
+func TestProviderWorkSessionEventRetentionFollowsTheHorizon(t *testing.T) {
+	const day = 24 * time.Hour
+	if retention := ProviderWorkSessionEventRetentionAt(context.Background()); retention != 91*day {
+		t.Fatalf("without a horizon the retention is %s", retention)
+	}
+	for _, test := range []struct{ horizon, want time.Duration }{
+		{91 * day, 91 * day}, {45 * day, 45 * day}, {35 * day, 35 * day}, {20 * day, 35 * day}, {400 * day, 91 * day},
+	} {
+		if retention := ProviderWorkSessionEventRetentionAt(WithContractHorizon(context.Background(), test.horizon)); retention != test.want {
+			t.Errorf("horizon %s keeps events %s, want %s", test.horizon, retention, test.want)
+		}
+	}
+	family := providerWorkSessionEventPartitionFamily
+	if family.RangeExpired == nil {
+		t.Fatal("the family's weeks do not expire at the horizon")
+	}
+	ctx := WithContractHorizon(context.Background(), 35*day)
+	week := family.RangeAt(time.Date(2026, 10, 28, 0, 0, 0, 0, time.UTC))
+	if family.IsExpired(ctx, week.Upper.Add(35*day-time.Nanosecond), week) || !family.IsExpired(ctx, week.Upper.Add(35*day), week) {
+		t.Fatal("a week does not expire 35 days after its upper bound at a 35-day horizon")
+	}
+	if family.IsExpired(context.Background(), week.Upper.Add(35*day), week) {
+		t.Fatal("a week expired at 35 days without a horizon")
+	}
+	legacy := PartitionRange{Upper: week.Lower, Legacy: true}
+	if family.IsExpired(ctx, week.Lower.Add(35*day-time.Nanosecond), legacy) || !family.IsExpired(ctx, week.Lower.Add(35*day), legacy) {
+		t.Fatal("the legacy partition does not expire 35 days after the cutover week")
+	}
+}
+
 // The fence names leaves as the registry does.
 func TestProviderWorkSessionEventLeafNames(t *testing.T) {
 	family := providerWorkSessionEventPartitionFamily
