@@ -17,6 +17,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/urnetwork/server"
 )
 
@@ -481,4 +483,84 @@ func TestRetiredHostedReapRecordsWindowGoneAtDeactivation(t *testing.T) {
 		}
 		requireKeyHistoryImmutable(t, goneKeyHistoryTestStatements(ctx, true, windowId, goneKeyHistoryTestDeleteHeadsSql, goneKeyHistoryTestDeleteHistorySql), "a delete of a window that went today")
 	})
+}
+
+// The run reports the horizon it applied and counts what it deleted by table.
+func TestGoneStClientKeyHistoryReportsItsHorizonAndCountsDeletes(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		removedId := server.NewId()
+		insertGoneKeyHistoryTestRows(t, ctx, removedId, server.NewId())
+		setGoneKeyHistoryTestDays(t, ctx, removedId, 50)
+
+		setGoneKeyHistoryTestContractHorizon(t, ctx, nil)
+		now := goneKeyHistoryTestDbNow(t, ctx)
+		report, _ := RemoveGoneStClientKeyHistory(ctx, now, goneKeyHistoryTestDeleteOnly(now), DefaultStClientKeyHistoryRetentionSettings())
+		if report.RemovedClientCount != 0 || report.Horizon != server.ContractRetention {
+			t.Fatalf("without a control the retention = %+v, want none removed at %v", report, server.ContractRetention)
+		}
+
+		setGoneKeyHistoryTestContractHorizon(t, ctx, map[string]string{ContractHorizonControlFieldHorizonDays: "45"})
+		before := map[string]float64{}
+		for _, table := range retentionTables {
+			before[table] = testutil.ToFloat64(retentionDeletedRowsCounter.WithLabelValues(table))
+		}
+		now = goneKeyHistoryTestDbNow(t, ctx)
+		report, _ = RemoveGoneStClientKeyHistory(ctx, now, goneKeyHistoryTestDeleteOnly(now), DefaultStClientKeyHistoryRetentionSettings())
+		if report.RemovedClientCount != 1 || report.Horizon != 45*24*time.Hour {
+			t.Fatalf("at a 45-day horizon the retention = %+v, want one client at 45 days", report)
+		}
+		for _, table := range []string{RetentionTableStClientKeyHistory, RetentionTableStClientKeyHead, RetentionTableStClientKeyGone} {
+			if moved := testutil.ToFloat64(retentionDeletedRowsCounter.WithLabelValues(table)) - before[table]; moved != 1 {
+				t.Fatalf("the %s deleted row counter moved by %v, want 1", table, moved)
+			}
+		}
+	})
+}
+
+// A control below the reaper's floor counts as the floor, as for the reaper:
+// a client gone a day less than it keeps its history, one gone a day more
+// loses it.
+func TestGoneStClientKeyHistoryHorizonStopsAtTheReaperFloor(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		floorDays := int(ContractHorizonFloor / (24 * time.Hour))
+		keptId, removedId := server.NewId(), server.NewId()
+		for _, clientId := range []server.Id{keptId, removedId} {
+			insertGoneKeyHistoryTestRows(t, ctx, clientId, server.NewId())
+		}
+		setGoneKeyHistoryTestDays(t, ctx, keptId, floorDays-1)
+		setGoneKeyHistoryTestDays(t, ctx, removedId, floorDays+1)
+		setGoneKeyHistoryTestContractHorizon(t, ctx, map[string]string{ContractHorizonControlFieldHorizonDays: "1"})
+
+		now := goneKeyHistoryTestDbNow(t, ctx)
+		report, _ := RemoveGoneStClientKeyHistory(ctx, now, goneKeyHistoryTestDeleteOnly(now), DefaultStClientKeyHistoryRetentionSettings())
+		if report.RemovedClientCount != 1 || report.Horizon != ContractHorizonFloor {
+			t.Fatalf("a one-day control = %+v, want one client at the reaper's floor %v", report, ContractHorizonFloor)
+		}
+		if rows := readGoneKeyHistoryTestRows(t, ctx, keptId); rows.history != 1 || rows.heads != 1 {
+			t.Fatalf("a client gone a day less than the reaper's floor lost key history: %+v", rows)
+		}
+		if rows := readGoneKeyHistoryTestRows(t, ctx, removedId); rows != (goneKeyHistoryTestRows{}) {
+			t.Fatalf("a client gone a day more than the reaper's floor kept key history: %+v", rows)
+		}
+	})
+}
+
+// Pure: whatever the settings, a run's horizon is never below the guard's
+// floor, and a horizon that is not followed is the settings' own.
+func TestStClientKeyHistoryRetentionHorizonKeepsTheGuardFloor(t *testing.T) {
+	settings := DefaultStClientKeyHistoryRetentionSettings()
+	settings.FollowContractHorizon = false
+	settings.Retention = 24 * time.Hour
+	if horizon := settings.horizon(context.Background()); horizon != server.ClientKeyHistoryRetentionFloor {
+		t.Fatalf("a one-day retention ran at %v, want the floor %v", horizon, server.ClientKeyHistoryRetentionFloor)
+	}
+	settings.Retention = 60 * 24 * time.Hour
+	if horizon := settings.horizon(context.Background()); horizon != settings.Retention {
+		t.Fatalf("an unfollowed retention ran at %v, want %v", horizon, settings.Retention)
+	}
+	if server.ClientKeyHistoryRetentionFloor >= ContractHorizonFloor {
+		t.Fatalf("the guard's floor %v is not below the reaper's %v, so the reaper's shortest horizon would be refused", server.ClientKeyHistoryRetentionFloor, ContractHorizonFloor)
+	}
 }

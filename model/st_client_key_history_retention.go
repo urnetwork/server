@@ -1,12 +1,16 @@
-// Signed key history of a client that is gone is deleted 91 days after it
-// went (PARTITION-MAINTENANCE-PLAN.md Part D). Original-close verification
-// reads the history of a report's own client (contract_close_original.go)
-// while that client's contract is open, and a contract opens only between
-// active clients, so the horizon outlasts every close report that can still
-// read it. st_client_key_gone records when each client went
-// (db_identity_retention.go); the history guard admits a delete only from the
-// retention transaction and only for a client gone more than 91 days, with no
-// client row and no head left. Functions are safe concurrently.
+// Signed key history of a client that is gone is deleted once the contract
+// horizon has passed since it went (PARTITION-MAINTENANCE-PLAN.md Part D; owner
+// 2026-11-01): the horizon the contract horizon reaper applies, which its
+// runtime control shortens from 91 days down to the reaper's floor, and never
+// less than the guard's floor, server.ClientKeyHistoryRetentionFloor.
+// Original-close verification reads the history of a report's own client
+// (contract_close_original.go) while that client's contract is open, and a
+// contract opens only between active clients, so the horizon outlasts every
+// close report that can still read it; db_identity_retention.go lists the
+// other readers. st_client_key_gone records when each client went; the history
+// guard admits a delete only from the retention transaction and only for a
+// client gone longer than the floor, with no client row and no head left.
+// Functions are safe concurrently.
 package model
 
 import (
@@ -18,14 +22,26 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/urnetwork/glog"
+
 	"github.com/urnetwork/server"
 )
 
 type StClientKeyHistoryRetentionSettings struct {
-	// history goes this long after its client went. The migration's guard
-	// refuses anything newer than 91 days, so a shorter setting deletes no
-	// earlier.
+	// History goes this long after its client went while FollowContractHorizon
+	// is off or the reaper's control cannot be read: the longest horizon. The
+	// guard refuses anything newer than its floor, so no setting deletes
+	// earlier than server.ClientKeyHistoryRetentionFloor.
 	Retention time.Duration
+	// History goes once the contract horizon reaper's effective horizon has
+	// passed since its client went: the horizonDays of its runtime control as
+	// the reaper narrows it (NarrowContractHorizonControl), whatever the
+	// reaper's mode, so a reaper paused for load leaves this retention running.
+	FollowContractHorizon bool
+	// Gone clients deleted per second at most, so a backlog that comes due at
+	// once, such as the first discovery pass's records, drains at a paced rate.
+	// Zero is unpaced.
+	MaxDeleteClientsPerSecond float64
 	// gone clients whose heads and history one transaction deletes
 	DeleteBatchCount int
 	// heads one discovery transaction reads
@@ -38,12 +54,31 @@ type StClientKeyHistoryRetentionSettings struct {
 
 func DefaultStClientKeyHistoryRetentionSettings() *StClientKeyHistoryRetentionSettings {
 	return &StClientKeyHistoryRetentionSettings{
-		Retention:          server.ContractRetention,
-		DeleteBatchCount:   500,
-		DiscoverBatchCount: 10000,
-		DiscoverInterval:   7 * 24 * time.Hour,
-		RunBudget:          4 * time.Minute,
+		Retention:             server.ContractRetention,
+		FollowContractHorizon: true,
+		// about 86M clients a day while a backlog drains, against about 9M
+		// clients that go each day; a run deletes for half its budget
+		MaxDeleteClientsPerSecond: 1000,
+		DeleteBatchCount:          500,
+		DiscoverBatchCount:        10000,
+		DiscoverInterval:          7 * 24 * time.Hour,
+		RunBudget:                 4 * time.Minute,
 	}
+}
+
+// The horizon of one run: the reaper's, or Retention when it is not followed
+// or its control cannot be read, never below the guard's floor.
+func (self *StClientKeyHistoryRetentionSettings) horizon(ctx context.Context) time.Duration {
+	horizon := self.Retention
+	if self.FollowContractHorizon {
+		control, err := GetContractHorizonControl(ctx, DefaultContractHorizonSettings())
+		if err == nil {
+			horizon = control.Horizon
+		} else {
+			glog.V(1).Infof("[ckh]contract horizon control unread, keeping %s: %s\n", horizon, err)
+		}
+	}
+	return max(horizon, server.ClientKeyHistoryRetentionFloor)
 }
 
 // Where the next run resumes.
@@ -55,6 +90,8 @@ type StClientKeyHistoryRetentionCursor struct {
 }
 
 type StClientKeyHistoryRetentionReport struct {
+	// how long after its client went history was deleted in this run
+	Horizon time.Duration
 	// gone clients whose history was deleted
 	RemovedClientCount  int64
 	RemovedHistoryCount int64
@@ -65,14 +102,14 @@ type StClientKeyHistoryRetentionReport struct {
 }
 
 // One batch of clients gone longer than the retention, oldest first, from
-// st_client_key_gone_gone_time. The bound repeats the guard's 91 days on the
+// st_client_key_gone_gone_time. The bound repeats the guard's floor on the
 // database clock, so a batch never holds a row the guard refuses.
 const stClientKeyHistoryRetentionBatchSql = `
 	SELECT st_client_key_gone.client_id
 	FROM st_client_key_gone
 	WHERE
 		st_client_key_gone.gone_time < $1 AND
-		st_client_key_gone.gone_time < (now() AT TIME ZONE 'UTC') - interval '91 days' AND
+		st_client_key_gone.gone_time < (now() AT TIME ZONE 'UTC') - st_client_key_history_retention_floor() AND
 		NOT EXISTS (
 			SELECT 1 FROM network_client
 			WHERE network_client.client_id = st_client_key_gone.client_id
@@ -133,7 +170,9 @@ func RemoveGoneStClientKeyHistory(
 	deleteDeadline := start.Add(settings.RunBudget / 2)
 	discoverDeadline := start.Add(settings.RunBudget)
 
-	minGoneTime := now.Add(-settings.Retention).UTC()
+	report.Horizon = settings.horizon(ctx)
+	minGoneTime := now.Add(-report.Horizon).UTC()
+	pace := newRetentionPace(settings.MaxDeleteClientsPerSecond)
 	for {
 		select {
 		case <-ctx.Done():
@@ -148,7 +187,7 @@ func RemoveGoneStClientKeyHistory(
 		if len(removedClientIds) < settings.DeleteBatchCount {
 			break
 		}
-		if !time.Now().Before(deleteDeadline) {
+		if !pace.WaitAfter(ctx, len(removedClientIds), deleteDeadline) || !time.Now().Before(deleteDeadline) {
 			report.More = true
 			break
 		}
@@ -184,10 +223,13 @@ func RemoveGoneStClientKeyHistory(
 // archived history (db_client_key_policy_history.go), then the history, then
 // the records. Returns the clients whose history went.
 func removeGoneStClientKeyHistoryBatch(ctx context.Context, minGoneTime time.Time, batchCount int) (removedClientIds []server.Id, removedHistoryCount int64) {
+	var removedHeadCount, removedGoneCount int64
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		// an attempt that does not commit removed nothing
 		removedClientIds = nil
 		removedHistoryCount = 0
+		removedHeadCount = 0
+		removedGoneCount = 0
 
 		server.RaisePgResult(tx.Exec(ctx, `SET LOCAL urnetwork.client_key_history_retention = 'on'`))
 		clientIds := []server.Id{}
@@ -202,7 +244,7 @@ func removeGoneStClientKeyHistoryBatch(ctx context.Context, minGoneTime time.Tim
 		if len(clientIds) == 0 {
 			return
 		}
-		server.RaisePgResult(tx.Exec(
+		headTag := server.RaisePgResult(tx.Exec(
 			ctx,
 			`DELETE FROM st_client_key_head WHERE client_id = ANY($1)`,
 			clientIds,
@@ -212,14 +254,20 @@ func removeGoneStClientKeyHistoryBatch(ctx context.Context, minGoneTime time.Tim
 			`DELETE FROM st_client_key_history WHERE client_id = ANY($1)`,
 			clientIds,
 		))
-		server.RaisePgResult(tx.Exec(
+		goneTag := server.RaisePgResult(tx.Exec(
 			ctx,
 			`DELETE FROM st_client_key_gone WHERE client_id = ANY($1)`,
 			clientIds,
 		))
 		removedClientIds = clientIds
 		removedHistoryCount = tag.RowsAffected()
+		removedHeadCount = headTag.RowsAffected()
+		removedGoneCount = goneTag.RowsAffected()
 	}, server.TxReadCommitted)
+	// counted once the batch committed
+	countRetentionDeletedRows(RetentionTableStClientKeyHead, removedHeadCount)
+	countRetentionDeletedRows(RetentionTableStClientKeyHistory, removedHistoryCount)
+	countRetentionDeletedRows(RetentionTableStClientKeyGone, removedGoneCount)
 	return
 }
 
