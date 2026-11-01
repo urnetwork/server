@@ -9604,6 +9604,33 @@ owners must retain their recovery payloads until applied. Explicit task deletion
 or retiring the target before that point is unsafe. Existing insufficient-escrow,
 dispute, reservation and payout-attribution holds remain unchanged.
 
+Provider-total drain (2026-11-01): the per-task reader could not keep up. A
+provider's rows apply one cohort at a time (one claim group key, at most 64
+members), and each cohort is a chain of serialized round trips, so its rate
+follows the primary's latency. On Main on 2026-11-01 four providers had 82% of
+27M queued rows; a provider took a cohort about every 85 ms with 6 to 18
+members; the reader applied 440 to 915 rows a second with edge-2 CPU under 0.5
+and 46 to 485 at 0.55 and above (hourly correlation -0.90), against about 450
+to 850 a second produced. The oldest-first claim window then filled with the
+hot providers' rows, other claims came back empty and slept their poll timeout,
+and the queue's oldest row reached about 10 hours. `controller.ProviderIntentCheck`
+rows waited behind it just as long.
+
+The fleet-wide `drain_legacy_provider_totals` chain
+(model/subscription_provider_totals_drain.go) now consumes the rows in task id
+order, up to 1,024 per pass, credit and removal in one transaction under the
+complete account owner, at most `rows_per_second` (default 4,000) removed rows.
+Producers schedule each row 5 minutes ahead, so the per-task reader only takes
+rows the drain has not; it stays the fallback. `provider_totals.yml`
+(`drain.enabled`, `drain.rows_per_second`) pauses or paces the drain without a
+deploy. Watch `urnetwork_provider_totals_drain_rows_total{outcome}`,
+`urnetwork_provider_totals_drain_passes_total{result="error"}` and
+`urnetwork_provider_totals_drain_position_timestamp_seconds` (now minus it is the
+drain's lag; it stays at least a minute behind by design). Drained rows are
+deleted, not moved to `finished_task`, so task finishes per second fall below
+submissions without any task being lost. A persistent `left` count with an old
+queue head means rows the per-task reader still holds or cannot apply.
+
 A normalized `panic` log class is not proof of an uncaught worker failure.
 `server.HandleError` recovers a raised error, emits `Unexpected error` unless it
 is an explicit Done, and calls the error handler. In the qualified R59

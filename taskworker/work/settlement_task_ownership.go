@@ -43,11 +43,16 @@ func requireSettlementStartupOwnershipInTx(ctx context.Context, tx server.PgTx, 
 // Production initializers keep this transaction separate from unrelated
 // schedules, admitting the complete queue set before any business statement.
 // The publisher's own check then validates the same set without extending
-// ownership.
+// ownership. The same transaction arms the provider totals drain, which
+// consumes the projection rows every paid settlement queues
+// (model/subscription_provider_totals_drain.go); a pending run keeps its
+// position.
 func ScheduleSettlementAccountingTasks(ctx context.Context) {
-	server.OwnedTx(ctx, transferDebitStartupOwnershipKeys(), func(tx server.PgTx) {
+	keys := append(transferDebitStartupOwnershipKeys(), model.LegacyProviderTotalsDrainOwnershipKey())
+	server.OwnedTx(ctx, keys, func(tx server.PgTx) {
 		owner := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
 		defer owner.Cancel()
 		ScheduleFlushTransferDebits(owner, tx)
+		model.ScheduleDrainLegacyProviderTotals(owner, tx)
 	}, server.TxReadCommitted, server.OptNoRetry())
 }
