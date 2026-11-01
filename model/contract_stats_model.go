@@ -244,24 +244,49 @@ func CountContractHourWindow(ctx context.Context, now time.Time) ContractHourCou
 	return window
 }
 
+// The contracts and disputes created in [$1, $2). [$3, $4) is the window's
+// contract id range (ContractIdCreateTimeRange), so the read is a range of the
+// primary key rather than of an index on create_time; the create_time
+// predicate still decides which contracts count.
+const contractRangeCountSql = `
+	SELECT
+		COUNT(*),
+		COUNT(*) FILTER (WHERE dispute)
+	FROM transfer_contract
+	WHERE
+		$3 <= contract_id AND contract_id < $4 AND
+		$1 <= create_time AND create_time < $2
+`
+
+// The hour buckets of contracts and disputes created in [$1, $2), over the
+// window's contract id range [$3, $4) as in contractRangeCountSql.
+const contractHourBucketsSql = `
+	SELECT
+		DATE_TRUNC('hour', create_time),
+		COUNT(*),
+		COUNT(*) FILTER (WHERE dispute)
+	FROM transfer_contract
+	WHERE
+		$3 <= contract_id AND contract_id < $4 AND
+		$1 <= create_time AND create_time < $2
+	GROUP BY 1
+`
+
 // countContractRange counts one half-open range of create_time directly.
 func countContractRange(ctx context.Context, start time.Time, end time.Time) ContractHourCounts {
 	bucket := ContractHourCounts{}
 	if !start.Before(end) {
 		return bucket
 	}
+	lowerId, upperId := ContractIdCreateTimeRange(start, end)
 	server.ReplicaDb(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
-			`
-			SELECT
-				COUNT(*),
-				COUNT(*) FILTER (WHERE dispute)
-			FROM transfer_contract
-			WHERE $1 <= create_time AND create_time < $2
-			`,
+			contractRangeCountSql,
 			start.UTC(),
 			end.UTC(),
+			lowerId,
+			upperId,
 		)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
@@ -301,20 +326,15 @@ func fillContractHourBuckets(
 	end time.Time,
 ) map[int64]ContractHourCounts {
 	buckets := map[int64]ContractHourCounts{}
+	lowerId, upperId := ContractIdCreateTimeRange(start, end)
 	server.ReplicaDb(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
-			`
-			SELECT
-				DATE_TRUNC('hour', create_time),
-				COUNT(*),
-				COUNT(*) FILTER (WHERE dispute)
-			FROM transfer_contract
-			WHERE $1 <= create_time AND create_time < $2
-			GROUP BY 1
-			`,
+			contractHourBucketsSql,
 			start.UTC(),
 			end.UTC(),
+			lowerId,
+			upperId,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
