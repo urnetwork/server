@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -208,6 +209,140 @@ func TestClientKeyHistoryRetentionMigrationKeepsPopulatedHistory(t *testing.T) {
 		ApplyDbMigrations(ctx)
 		if DbVersion(ctx) != MigrationCount() {
 			t.Fatal("the migrations after key history retention did not apply")
+		}
+	})
+}
+
+// Pure: the floor migration is appended after the key history retention, bounds
+// its lock wait, and changes nothing in the guard but the 91 days, which become
+// the floor function. The floor function returns ClientKeyHistoryRetentionFloor,
+// and the rollback differs from the published floor only in its days.
+func TestClientKeyHistoryRetentionFloorMigration(t *testing.T) {
+	historyVersion := ClientKeyHistoryRetentionMigrationVersion()
+	floorVersion := ClientKeyHistoryRetentionFloorMigrationVersion()
+	if !(historyVersion < floorVersion && floorVersion <= MigrationCount()) {
+		t.Fatalf("versions: key history %d, floor %d, count %d", historyVersion, floorVersion, MigrationCount())
+	}
+	floorMigration, ok := migrations[floorVersion-1].(*SqlMigration)
+	if !ok || !strings.HasPrefix(strings.TrimSpace(floorMigration.sql), "SET LOCAL lock_timeout = '5s';") {
+		t.Fatal("the floor migration does not bound its lock wait")
+	}
+	for _, tag := range []string{"$st_client_key_history_immutable_guard$", "$st_client_key_history_retention_floor$"} {
+		if count := strings.Count(clientKeyHistoryRetentionFloorSql, tag); count != 2 {
+			t.Fatalf("%s occurs %d times", tag, count)
+		}
+	}
+	for _, statement := range []string{"CREATE TABLE", "ALTER TABLE", "CREATE INDEX", "DROP", "UPDATE ", "DELETE FROM", "INSERT INTO"} {
+		if strings.Contains(clientKeyHistoryRetentionFloorSql, statement) {
+			t.Fatalf("the floor migration touches a table: %q", statement)
+		}
+	}
+	guard := ClientKeyHistoryGuardBodySql()
+	if count := strings.Count(guard, "interval '91 days'"); count != 1 {
+		t.Fatalf("the published guard holds its 91 days %d times", count)
+	}
+	if want := strings.Replace(guard, "interval '91 days'", "st_client_key_history_retention_floor()", 1); ClientKeyHistoryFloorGuardBodySql() != want {
+		t.Fatalf("the floor guard changes more than the 91 days:\n%s\nwant\n%s", ClientKeyHistoryFloorGuardBodySql(), want)
+	}
+	floorDays := int(ClientKeyHistoryRetentionFloor / (24 * time.Hour))
+	if ClientKeyHistoryRetentionFloor != time.Duration(floorDays)*24*time.Hour || floorDays != 30 {
+		t.Fatalf("the floor %v is not 30 whole days", ClientKeyHistoryRetentionFloor)
+	}
+	if body := strings.TrimSpace(ClientKeyHistoryRetentionFloorBodySql()); body != fmt.Sprintf("SELECT interval '%d days'", floorDays) {
+		t.Fatalf("the floor function returns %q, not the floor's %d days", body, floorDays)
+	}
+	rollbackBody := strings.Split(ClientKeyHistoryRetentionFloorRollbackSql, "$st_client_key_history_retention_floor$")
+	if len(rollbackBody) != 3 || strings.TrimSpace(rollbackBody[1]) != "SELECT interval '91 days'" ||
+		!strings.Contains(rollbackBody[0], "CREATE OR REPLACE FUNCTION st_client_key_history_retention_floor()") ||
+		!strings.Contains(rollbackBody[0], "RETURNS interval LANGUAGE sql STABLE AS") {
+		t.Fatalf("the rollback does not restore 91 days on the same function: %q", ClientKeyHistoryRetentionFloorRollbackSql)
+	}
+	if ContractRetention != 91*24*time.Hour {
+		t.Fatalf("the rollback's 91 days no longer match the contract retention %v", ContractRetention)
+	}
+}
+
+// DB-backed: under the owner rule this runs only after the branch, with its
+// migrations, is merged to main.
+//
+// Before the floor the guard refuses a client gone 40 days; the floor admits it
+// and still refuses one gone 29 days, an update and a truncate; the rollback
+// refuses the 40-day client again. Nothing the migration ran changed a row.
+func TestClientKeyHistoryRetentionFloorMigrationMovesTheGuard(t *testing.T) {
+	(&TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		version := ClientKeyHistoryRetentionFloorMigrationVersion()
+		ApplyDbMigrationsUpTo(ctx, version-1)
+		domain := []byte(strings.Repeat("d", 32))
+		// a client whose row and heads are gone, recorded gone this many days
+		// before the database clock
+		insertGone := func(clientId Id, fill string, goneDays int) {
+			MaintenanceDb(ctx, func(conn PgConn) {
+				RaisePgResult(conn.Exec(ctx, `
+					INSERT INTO st_client_key_history (client_id, generation, domain_hash, registration_hash, evidence_hash, evidence)
+					VALUES ($1, 1, $2, $3, $4, '{}')
+				`, clientId, domain, []byte(strings.Repeat(fill, 32)), "sha256:"+strings.Repeat(fill, 64)))
+				RaisePgResult(conn.Exec(ctx, `
+					INSERT INTO st_client_key_gone (client_id, gone_time)
+					VALUES ($1, (now() AT TIME ZONE 'UTC') - make_interval(days => $2))
+				`, clientId, goneDays))
+			}, OptReadWrite(), OptNoRetry())
+		}
+		olderId, recentId := NewId(), NewId()
+		insertGone(olderId, "a", 40)
+		insertGone(recentId, "b", 29)
+		statement := func(sql string, clientId Id) (err error) {
+			HandleError(func() {
+				MaintenanceTx(ctx, func(tx PgTx) {
+					RaisePgResult(tx.Exec(ctx, `SET LOCAL urnetwork.client_key_history_retention = 'on'`))
+					if clientId == (Id{}) {
+						RaisePgResult(tx.Exec(ctx, sql))
+					} else {
+						RaisePgResult(tx.Exec(ctx, sql, clientId))
+					}
+				}, TxReadCommitted, OptNoRetry())
+			}, func(e error) { err = e })
+			return
+		}
+		const deleteSql = `DELETE FROM st_client_key_history WHERE client_id = $1`
+		requireRefused := func(err error, what string) {
+			t.Helper()
+			if err == nil || !strings.Contains(err.Error(), "signed client-key history is immutable") {
+				t.Fatalf("%s was not refused by the history guard: %v", what, err)
+			}
+		}
+		historyCount := func() (count int) {
+			MaintenanceDb(ctx, func(conn PgConn) {
+				Raise(conn.QueryRow(ctx, `SELECT count(*) FROM st_client_key_history`).Scan(&count))
+			})
+			return
+		}
+
+		requireRefused(statement(deleteSql, olderId), "a delete of a client gone 40 days before the floor")
+		ApplyDbMigrationsUpTo(ctx, version)
+		if count := historyCount(); count != 2 {
+			t.Fatalf("the floor migration changed signed history: %d rows", count)
+		}
+		requireRefused(statement(deleteSql, recentId), "a delete of a client gone 29 days")
+		requireRefused(statement(`UPDATE st_client_key_history SET evidence = '{"changed":true}' WHERE client_id = $1`, olderId), "an update")
+		requireRefused(statement(`TRUNCATE st_client_key_history CASCADE`, Id{}), "a truncate")
+		if err := statement(deleteSql, olderId); err != nil {
+			t.Fatalf("the floor refused a client gone 40 days: %v", err)
+		}
+		if count := historyCount(); count != 1 {
+			t.Fatalf("the admitted delete left %d rows, want 1", count)
+		}
+
+		MaintenanceDb(ctx, func(conn PgConn) {
+			RaisePgResult(conn.Exec(ctx, ClientKeyHistoryRetentionFloorRollbackSql))
+		}, OptReadWrite(), OptNoRetry())
+		rolledBackId := NewId()
+		insertGone(rolledBackId, "c", 40)
+		requireRefused(statement(deleteSql, rolledBackId), "a delete of a client gone 40 days after the rollback")
+
+		ApplyDbMigrations(ctx)
+		if DbVersion(ctx) != MigrationCount() {
+			t.Fatal("the migrations after the floor did not apply")
 		}
 	})
 }

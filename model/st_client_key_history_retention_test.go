@@ -173,8 +173,8 @@ func TestGoneStClientKeyHistoryKeptAt90DaysDeletedAt92Days(t *testing.T) {
 }
 
 // The guard admits a delete only with the opt-in, only after the heads, and
-// only for a client gone more than 91 days without a client row. An update
-// and a truncate are refused, opted in or not.
+// only for a client gone longer than the floor without a client row. An
+// update and a truncate are refused, opted in or not.
 func TestStClientKeyHistoryGuardAdmitsOnlyRetentionDeletes(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
@@ -184,14 +184,15 @@ func TestStClientKeyHistoryGuardAdmitsOnlyRetentionDeletes(t *testing.T) {
 		for _, clientId := range []server.Id{goneId, recentId, activeId} {
 			insertGoneKeyHistoryTestRows(t, ctx, clientId, networkId)
 		}
-		setGoneKeyHistoryTestDays(t, ctx, goneId, 92)
-		setGoneKeyHistoryTestDays(t, ctx, recentId, 90)
+		floorDays := int(server.ClientKeyHistoryRetentionFloor / (24 * time.Hour))
+		setGoneKeyHistoryTestDays(t, ctx, goneId, floorDays+1)
+		setGoneKeyHistoryTestDays(t, ctx, recentId, floorDays-1)
 		// a record a client that exists must never have
 		setGoneKeyHistoryTestDays(t, ctx, activeId, 92)
 
 		requireKeyHistoryImmutable(t, goneKeyHistoryTestStatements(ctx, false, goneId, goneKeyHistoryTestDeleteHeadsSql, goneKeyHistoryTestDeleteHistorySql), "a delete without the opt-in")
 		requireKeyHistoryImmutable(t, goneKeyHistoryTestStatements(ctx, true, goneId, goneKeyHistoryTestDeleteHistorySql), "a delete before the heads")
-		requireKeyHistoryImmutable(t, goneKeyHistoryTestStatements(ctx, true, recentId, goneKeyHistoryTestDeleteHeadsSql, goneKeyHistoryTestDeleteHistorySql), "a delete of a client gone 90 days")
+		requireKeyHistoryImmutable(t, goneKeyHistoryTestStatements(ctx, true, recentId, goneKeyHistoryTestDeleteHeadsSql, goneKeyHistoryTestDeleteHistorySql), "a delete of a client gone a day less than the floor")
 		requireKeyHistoryImmutable(t, goneKeyHistoryTestStatements(ctx, true, activeId, goneKeyHistoryTestDeleteHeadsSql, goneKeyHistoryTestDeleteHistorySql), "a delete of an existing client")
 		for _, optIn := range []bool{false, true} {
 			requireKeyHistoryImmutable(t, goneKeyHistoryTestStatements(ctx, optIn, goneId, goneKeyHistoryTestUpdateHistorySql), "an update")
