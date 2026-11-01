@@ -378,9 +378,8 @@ func TestMigrationsCurrentSuffixConcurrentIndexReadiness(t *testing.T) {
 				{819, "pending_task", "pending_task_has_reschedule_error"},
 				// the journal's partition preparation republishes the 824 custody
 				{server.ProviderWorkSessionPartitionMigrationVersion(), "provider_work_session_event", "provider_work_session_event_transaction"},
-				// the move guard republishes the 825 custody after 857, and the
-				// horizon guard after it
-				{contractCloseEvidenceMoveGuardMigrationVersion, "contract_close_report_evidence", "contract_close_report_evidence_contract"},
+				// the horizon guard republishes the 825 custody after 857 and the
+				// move guard
 				{contractCloseEvidenceHorizonGuardMigrationVersion, "contract_close_report_evidence", "contract_close_report_evidence_contract"},
 				{826, "provider_egress_probe_cycle", "provider_probe_cycle_completed_waiting"},
 				{827, "provider_egress_probe_cycle", "provider_probe_cycle_slot_completed_waiting"},
