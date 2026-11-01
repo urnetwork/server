@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"testing"
@@ -12,12 +13,13 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// client_reliability retention keeps 21 days in steady state, extends back to
-// the next payout's window start (the last subsidy epoch end), and never keeps
-// more than 30 days. Each test seeds one row per block at fixed day offsets from
-// now, runs the real partition maintenance or legacy row delete, and checks
-// which rows survive. The offsets sit days away from every cutoff, so the
-// outcome does not depend on the time of day the test runs.
+// client_reliability retention keeps 21 days. A subsidy epoch, however
+// recent or stale, no longer extends it (owner decision 2026-10-31: subsidy
+// payouts ended with the epoch that ended 2026-10-05). Each test seeds one row
+// per block at fixed day offsets from now, runs the real partition maintenance
+// or legacy row delete, and checks which rows survive. The offsets sit days
+// away from every cutoff, so the outcome does not depend on the time of day
+// the test runs.
 
 // adds one client_reliability row in the block holding the time
 func addClientReliabilityRowForRetentionTest(ctx context.Context, rowTime time.Time) {
@@ -47,8 +49,8 @@ func countClientReliabilityRowsForRetentionTest(ctx context.Context, rowTime tim
 	return
 }
 
-// records a completed subsidy epoch, which moves the next payout's reliability
-// window start to its end
+// records a completed subsidy epoch ending at endTime, the frontier that used
+// to hold retention back to its end
 func addSubsidyEpochForRetentionTest(ctx context.Context, endTime time.Time) {
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
@@ -107,39 +109,43 @@ func TestClientReliabilityPartitionMaintenanceDropsDaysPastRetention(t *testing.
 	})
 }
 
-// A payout that is behind reads from the last subsidy epoch end, so retention
-// keeps those blocks even past 21 days: a block missing from a payout window
-// is scored as covered with no valid rows and silently cuts provider credit.
-// Blocks entirely before that window (less a day of margin) are still dropped.
-func TestClientReliabilityPartitionMaintenanceKeepsPayoutWindow(t *testing.T) {
+// A subsidy epoch that ended 26 days ago used to hold retention back to its
+// end less a day, keeping the 24-day-old partition (on Main, the 10-05
+// frontier held every day from 10-04 and stopped the nightly drops from
+// 10-25). The cutoff is now 21 days whatever the frontier.
+func TestClientReliabilityPartitionMaintenanceIgnoresSubsidyFrontier(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		now := server.NowUtc()
 
 		addSubsidyEpochForRetentionTest(ctx, now.Add(-26*24*time.Hour))
 
-		beforeWindowTime := now.Add(-29 * 24 * time.Hour)
-		inWindowTime := now.Add(-24 * 24 * time.Hour)
-		partitionClientReliabilityForRetentionTest(t, ctx, now, []time.Time{beforeWindowTime, inWindowTime})
+		pastRetentionTime := now.Add(-24 * 24 * time.Hour)
+		retainedTime := now.Add(-20 * 24 * time.Hour)
+		partitionClientReliabilityForRetentionTest(t, ctx, now, []time.Time{pastRetentionTime, retainedTime})
 
-		MaintainClientReliabilityPartitions(ctx, now)
+		_, droppedNames := MaintainClientReliabilityPartitions(ctx, now)
 
-		connect.AssertEqual(t, countClientReliabilityRowsForRetentionTest(ctx, beforeWindowTime), int64(0))
-		connect.AssertEqual(t, countClientReliabilityRowsForRetentionTest(ctx, inWindowTime), int64(1))
+		pastRetentionName := reliabilityPartitionName(reliabilityPartitionDay(reliabilityBlockNumber(pastRetentionTime)))
+		retainedName := reliabilityPartitionName(reliabilityPartitionDay(reliabilityBlockNumber(retainedTime)))
+		connect.AssertEqual(t, slices.Contains(droppedNames, pastRetentionName), true)
+		connect.AssertEqual(t, slices.Contains(droppedNames, retainedName), false)
+		connect.AssertEqual(t, countClientReliabilityRowsForRetentionTest(ctx, pastRetentionTime), int64(0))
+		connect.AssertEqual(t, countClientReliabilityRowsForRetentionTest(ctx, retainedTime), int64(1))
 	})
 }
 
-// However far behind the payout is, retention never keeps more than 30 days,
-// so a stalled payout cannot grow the table without bound.
-func TestClientReliabilityPartitionMaintenanceNeverKeepsPastThirtyDays(t *testing.T) {
+// A frontier older than 30 days used to keep exactly 30 days, so the
+// 25-day-old partition stayed. It is past the 21-day retention, so it goes.
+func TestClientReliabilityPartitionMaintenanceStaleFrontierKeepsTwentyOneDays(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		now := server.NowUtc()
 
 		addSubsidyEpochForRetentionTest(ctx, now.Add(-45*24*time.Hour))
 
-		expiredTime := now.Add(-40 * 24 * time.Hour)
-		retainedTime := now.Add(-29 * 24 * time.Hour)
+		expiredTime := now.Add(-25 * 24 * time.Hour)
+		retainedTime := now.Add(-20 * 24 * time.Hour)
 		partitionClientReliabilityForRetentionTest(t, ctx, now, []time.Time{expiredTime, retainedTime})
 
 		MaintainClientReliabilityPartitions(ctx, now)
@@ -167,6 +173,50 @@ func TestRemoveOldClientReliabilityStatsDeletesBlocksPastRetention(t *testing.T)
 		connect.AssertEqual(t, removedCount, int64(1))
 		connect.AssertEqual(t, countClientReliabilityRowsForRetentionTest(ctx, expiredTime), int64(0))
 		connect.AssertEqual(t, countClientReliabilityRowsForRetentionTest(ctx, retainedTime), int64(1))
+	})
+}
+
+// The legacy row delete ignores the subsidy frontier too: an epoch that ended
+// 26 days ago no longer keeps the 24-day-old block.
+func TestRemoveOldClientReliabilityStatsIgnoresSubsidyFrontier(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+
+		addSubsidyEpochForRetentionTest(ctx, now.Add(-26*24*time.Hour))
+
+		pastRetentionTime := now.Add(-24 * 24 * time.Hour)
+		retainedTime := now.Add(-20 * 24 * time.Hour)
+		addClientReliabilityRowForRetentionTest(ctx, pastRetentionTime)
+		addClientReliabilityRowForRetentionTest(ctx, retainedTime)
+		connect.AssertEqual(t, IsClientReliabilityPartitioned(ctx), false)
+
+		removedCount := RemoveOldClientReliabilityStats(ctx, now, 1000)
+
+		connect.AssertEqual(t, removedCount, int64(1))
+		connect.AssertEqual(t, countClientReliabilityRowsForRetentionTest(ctx, pastRetentionTime), int64(0))
+		connect.AssertEqual(t, countClientReliabilityRowsForRetentionTest(ctx, retainedTime), int64(1))
+	})
+}
+
+// Operator block points refuse a reliability window that starts before the
+// 21-day cutoff, as a window whose evidence the drop pass removes. A recent
+// subsidy epoch used to move the cutoff back and let such a window read
+// blocks that a later pass would drop.
+func TestOperatorBlockReliabilityExpiresAtRetentionDespiteSubsidyFrontier(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+
+		addSubsidyEpochForRetentionTest(ctx, now.Add(-26*24*time.Hour))
+
+		expiredStart := now.Add(-23 * 24 * time.Hour)
+		_, err := readOperatorBlockReliability(ctx, expiredStart, expiredStart.Add(SubnetBlockDuration), now)
+		connect.AssertEqual(t, errors.Is(err, ErrOperatorBlockPointsReliabilityExpired), true)
+
+		retainedStart := now.Add(-20 * 24 * time.Hour)
+		_, err = readOperatorBlockReliability(ctx, retainedStart, retainedStart.Add(SubnetBlockDuration), now)
+		connect.AssertEqual(t, errors.Is(err, ErrOperatorBlockPointsReliabilityExpired), false)
 	})
 }
 
