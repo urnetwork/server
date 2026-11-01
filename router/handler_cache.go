@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	mathrand "math/rand/v2"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -15,19 +16,58 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
+// A key's fill lease has two roles, each with its own limit. While a fill
+// runs, it makes overlapping misses wait instead of starting duplicate fills,
+// so it must cover a normal fill. After a fill fails, it fences retries. Every
+// API process answers a leased key's misses with 503, so a fence as long as
+// the fill lease would close a key fleet-wide for minutes after a brief Redis
+// or database stall.
 const (
-	// Caps retry suppression after a failed fill. Short-lived cache entries use
-	// their own ttl so the failure fence never outlives the data it protects.
+	// Bounds a fill in progress. Short-lived entries use their own ttl.
 	handlerCacheFillLeaseTtlLimit = 2 * time.Minute
+	// Bounds the fence a failed fill leaves. One retry hint still limits a
+	// failing key to one fill attempt per fence across the fleet, and a client
+	// that honors Retry-After finds the key open again.
+	handlerCacheFailureFenceLimit = handlerCacheRetryAfter
 	handlerCacheRetryAfter        = 5 * time.Second
+	// The fence write runs on failure paths, while Redis may be stalled.
+	handlerCacheFenceRedisTimeout = 2 * time.Second
+	// A stored value expires up to ttl/divisor early; see handlerCacheValueTtl.
+	handlerCacheValueTtlJitterDivisor = 10
 )
 
-// Keeps the failure fence proportional to the corresponding cache lifetime.
+// Keeps a fill-in-progress lease proportional to the cache lifetime.
 func handlerCacheFillLeaseTtl(cacheTtl time.Duration) time.Duration {
 	if 0 < cacheTtl && cacheTtl < handlerCacheFillLeaseTtlLimit {
 		return cacheTtl
 	}
 	return handlerCacheFillLeaseTtlLimit
+}
+
+// Keeps the failure fence within the lifetime of the data it protects.
+func handlerCacheFailureFenceTtl(cacheTtl time.Duration) time.Duration {
+	if 0 < cacheTtl && cacheTtl < handlerCacheFailureFenceLimit {
+		return cacheTtl
+	}
+	return handlerCacheFailureFenceLimit
+}
+
+// A uniform offset in [0, span]. A test fixes it.
+var handlerCacheValueTtlJitter = func(span time.Duration) time.Duration {
+	return time.Duration(mathrand.Int64N(int64(span) + 1))
+}
+
+// A stored value lives for a uniform point of [ttl - ttl/10, ttl]. Values
+// written together, as after a fleet-wide restart, then stop expiring and
+// refilling together, and each refill draws again. Jitter only shortens, so no
+// value outlives the freshness its caller asked for; it costs about 5% more
+// fills.
+func handlerCacheValueTtl(ttl time.Duration) time.Duration {
+	span := ttl / handlerCacheValueTtlJitterDivisor
+	if span <= 0 {
+		return ttl
+	}
+	return ttl - min(max(handlerCacheValueTtlJitter(span), 0), span)
 }
 
 // Physical keys share one Redis Cluster hash tag so publishing a value and
@@ -46,6 +86,7 @@ type handlerCacheStore interface {
 	acquire(context.Context, string, string, time.Duration) (bool, error)
 	publish(context.Context, handlerCacheKeys, string, string, time.Duration) (bool, error)
 	release(context.Context, string, string) error
+	fence(context.Context, string, string, time.Duration) (bool, error)
 }
 
 // Uses the shared Redis cluster for cross-process value and lease ownership.
@@ -179,6 +220,42 @@ func (self redisHandlerCacheStore) release(ctx context.Context, key string, toke
 	})
 }
 
+// Cuts a failed owner's lease to the failure fence. Only the token's own lease
+// changes, and only toward expiry: a lease due sooner keeps its time, and a
+// replacement owner's lease is never touched. The deadline pool bounds the
+// call, which runs on failure paths while Redis may be stalled.
+func (self redisHandlerCacheStore) fence(
+	ctx context.Context,
+	key string,
+	token string,
+	ttl time.Duration,
+) (fenced bool, returnErr error) {
+	const script = `
+		if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+			return 0
+		end
+		local remaining = redis.call('PTTL', KEYS[1])
+		if remaining < 0 or tonumber(ARGV[2]) < remaining then
+			redis.call('PEXPIRE', KEYS[1], ARGV[2])
+		end
+		return 1
+	`
+	operationCtx, cancel := context.WithTimeout(ctx, handlerCacheFenceRedisTimeout)
+	defer cancel()
+	returnErr = server.RedisWithDeadline(operationCtx, func(client server.RedisClient) error {
+		result, err := client.Eval(
+			operationCtx,
+			script,
+			[]string{key},
+			token,
+			max(int64(1), ttl.Milliseconds()),
+		).Int64()
+		fenced = result == 1
+		return err
+	}, server.OptRedisNoPreflight())
+	return
+}
+
 // Decodes a non-null cached result. Unreadable or stale-schema JSON is a miss;
 // JSON null is never a successful handler result.
 func getCachedJson[R any](
@@ -197,10 +274,23 @@ func getCachedJson[R any](
 	return cachedValue, true, nil
 }
 
+// Cuts a lease this request may hold to the failure fence. The caller may be
+// gone, so the write does not inherit its cancellation. If Redis cannot take
+// the write either, the lease keeps its fill-lease expiry.
+func fenceHandlerCacheFill(
+	ctx context.Context,
+	store handlerCacheStore,
+	keys handlerCacheKeys,
+	token string,
+	ttl time.Duration,
+) {
+	_, _ = store.fence(context.WithoutCancel(ctx), keys.fill, token, handlerCacheFailureFenceTtl(ttl))
+}
+
 // Coordinates one cold fill across every API process sharing Redis. A loser
 // rechecks once in case the winner published during acquisition, then fails
 // explicitly; it never returns a nil success. Fill and publication failures
-// deliberately retain the lease until expiry, bounding retry pressure.
+// keep the lease, cut to the short failure fence, bounding retry pressure.
 func cacheJson[R any](
 	ctx context.Context,
 	store handlerCacheStore,
@@ -224,6 +314,11 @@ func cacheJson[R any](
 		if ownerErr == nil && exists && owner == token {
 			acquired = true
 		} else if acquireErr != nil || ownerErr != nil {
+			if acquireErr != nil && ownerErr != nil {
+				// The lost SETNX may still have set this token: a lease that
+				// nobody fills under.
+				fenceHandlerCacheFill(ctx, store, keys, token, ttl)
+			}
 			return nil, &handlerCacheUnavailableError{}
 		}
 	}
@@ -234,12 +329,21 @@ func cacheJson[R any](
 		return nil, &handlerCacheUnavailableError{}
 	}
 
+	// This request owns the lease from here. Every exit that neither publishes
+	// nor releases it, a panicking fill included, cuts it to the failure fence.
+	settled := false
+	defer func() {
+		if !settled {
+			fenceHandlerCacheFill(ctx, store, keys, token, ttl)
+		}
+	}()
+
 	// A prior winner can publish between the first miss and this lease. Do not
 	// recompute it merely because its old lease already disappeared.
 	if cachedValue, ok, err := getCachedJson[R](ctx, store, keys.value); err != nil {
 		return nil, &handlerCacheUnavailableError{}
 	} else if ok {
-		_ = store.release(ctx, keys.fill, token)
+		settled = store.release(ctx, keys.fill, token) == nil
 		return cachedValue, nil
 	}
 
@@ -254,8 +358,9 @@ func cacheJson[R any](
 	if err != nil {
 		return nil, &handlerCacheUnavailableError{}
 	}
-	published, publishErr := store.publish(ctx, keys, token, string(valueJson), ttl)
+	published, publishErr := store.publish(ctx, keys, token, string(valueJson), handlerCacheValueTtl(ttl))
 	if publishErr == nil && published {
+		settled = true
 		return value, nil
 	}
 
@@ -289,7 +394,7 @@ func warmCacheJson[R any](
 		return nil, &handlerCacheUnavailableError{}
 	}
 	keys := newHandlerCacheKeys(key)
-	if err := store.set(ctx, keys.value, string(valueJson), ttl, !force); err != nil {
+	if err := store.set(ctx, keys.value, string(valueJson), handlerCacheValueTtl(ttl), !force); err != nil {
 		return nil, &handlerCacheUnavailableError{}
 	}
 	return value, nil

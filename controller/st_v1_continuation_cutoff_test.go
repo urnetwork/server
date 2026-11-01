@@ -1,4 +1,5 @@
-// Continuations reuse their transaction and preserve the explicit sweep exception.
+// Continuations reuse their transaction; the phase C sweep epoch is no
+// exception for the ordinary v1 tasks (st_v1_sweep.go owns it).
 package controller
 
 import (
@@ -22,7 +23,7 @@ func TestStV1ContinuationUsesRecordedCutoffAndSweep(t *testing.T) {
 			for _, entry := range []struct {
 				epoch   uint64
 				allowed bool
-			}{{epoch: 4, allowed: true}, {epoch: 5, allowed: false}, {epoch: 6, allowed: false}, {epoch: 7, allowed: true}, {epoch: 8, allowed: false}} {
+			}{{epoch: 4, allowed: true}, {epoch: 5, allowed: false}, {epoch: 6, allowed: false}, {epoch: 7, allowed: false}, {epoch: 8, allowed: false}} {
 				allowed, err := StV1TaskContinuationAllowedInTx(f.ctx, tx, entry.epoch)
 				if err != nil || allowed != entry.allowed {
 					t.Fatalf("epoch %d: allowed=%t err=%v", entry.epoch, allowed, err)

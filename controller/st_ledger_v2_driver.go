@@ -253,19 +253,28 @@ func stLedgerV2Window(ctx context.Context, cfg *StConfig, client StLedgerV2Clien
 // after the pool's first v2 epoch.
 var ErrStV1EpochSettledByV2 = errors.New("st: the epoch is settled by v2")
 
-// stLedgerV1SweepEpoch is the phase C hook (VERSION2-FINAL.md §16): the one
-// epoch at or after the pool's first v2 epoch that the v1 driver still closes
-// and commits, to sweep v1 carry into vault2. Phase A has no sweep.
+// stLedgerV1SweepEpoch is the phase C sweep epoch (VERSION2-FINAL.md §16):
+// the one epoch at or after the pool's first v2 epoch whose v1 windows carry
+// the sweep, from st.yml's v1_sweep_epoch. Only the sweep chain
+// (st_v1_sweep.go) acts on it. The ordinary v1 driver never closes, computes
+// or commits it: its close computes a usage payout from the whole epoch
+// census, which would compete with the v2 epoch's own census at the same
+// boundary, and its commit would publish usage leaves where the sweep root
+// is the single vault2 leaf (never invent a root).
 var stLedgerV1SweepEpoch = func(ctx context.Context, cfg *StConfig) (uint64, bool) {
-	return 0, false
+	if cfg == nil || cfg.V1SweepEpoch == 0 {
+		return 0, false
+	}
+	return cfg.V1SweepEpoch, true
 }
 
-// StV1EpochAllowed reports whether the v1 driver may close or commit an
-// epoch: always without settlement v2 or before vault2 registers the pool,
-// and afterwards only below the pool's first v2 epoch, or for the phase C
-// sweep epoch. Once the pool's activation is recorded, its first epoch is the
-// cutoff whatever vault2 is read to answer, and a close or commit without the
-// recorded v2 pair is refused before this is asked (SV-9).
+// StV1EpochAllowed reports whether the ordinary v1 driver may close or commit
+// an epoch: always without settlement v2 or before vault2 registers the pool,
+// and afterwards only below the pool's first v2 epoch. The phase C sweep
+// epoch is not an exception here; its chain has its own admission
+// (stV1SweepAdmission). Once the pool's activation is recorded, its first
+// epoch is the cutoff whatever vault2 is read to answer, and a close or
+// commit without the recorded v2 pair is refused before this is asked (SV-9).
 func StV1EpochAllowed(ctx context.Context, epoch uint64) (bool, error) {
 	return stV1EpochAllowed(ctx, stConfig(), epoch)
 }
@@ -289,11 +298,7 @@ func stV1EpochAllowed(ctx context.Context, cfg *StConfig, epoch uint64) (bool, e
 			return false, err
 		}
 	}
-	if !registered || epoch < firstEpoch {
-		return true, nil
-	}
-	sweepEpoch, sweep := stLedgerV1SweepEpoch(ctx, cfg)
-	return sweep && sweepEpoch == epoch, nil
+	return !registered || epoch < firstEpoch, nil
 }
 
 // Rechecks the durable cutoff while a task's continuation transaction is held.
@@ -316,11 +321,7 @@ func StV1TaskContinuationAllowedInTx(ctx context.Context, tx server.PgTx, epoch 
 	if err := stLedgerV2ActivationRefusal(cfg, activation); err != nil {
 		return false, err
 	}
-	if epoch < activation.FirstEpoch {
-		return true, nil
-	}
-	sweepEpoch, sweep := stLedgerV1SweepEpoch(ctx, cfg)
-	return sweep && sweepEpoch == epoch, nil
+	return epoch < activation.FirstEpoch, nil
 }
 
 func stV1EpochAdmission(ctx context.Context, cfg *StConfig, epoch uint64) error {

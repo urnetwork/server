@@ -406,16 +406,20 @@ func WrapWithInputBodyFormatterRequireClient[T any, R any](
 	)
 }
 
-// WrapWithInputRequireClient, except that a client credential's request may be
-// answered after the checks that need no client state query and before that
-// query (session.ClientSession.AuthUnlessAnswered). prepare decides from the
-// credential's verified client id and the input whether to answer, reading
-// nothing but that client's own rate limit; reply then produces the answer.
-// Both must grant nothing: only a refusal already recorded for that client may
-// be reported again, or the request refused as over the client's rate limit.
-// Every other request authenticates and runs impl exactly as
-// WrapWithInputRequireClient.
+// WrapWithInputRequireClient, except that a request may be answered before
+// its credential is read, and a client credential's request after the checks
+// that need no client state query and before that query
+// (session.ClientSession.AuthUnlessAnswered). discard decides from the input
+// and the request's headers, reading nothing else and verifying nothing,
+// whether to answer before any credential is read; nil discards nothing. prepare decides from the credential's verified
+// client id and the input whether to answer, reading nothing but that
+// client's own rate limit. reply then produces either answer. All three must
+// grant nothing: a discarded input is answered the same for every caller,
+// only a refusal already recorded for that client may be reported again, or
+// the request refused as over the client's rate limit. Every other request
+// authenticates and runs impl exactly as WrapWithInputRequireClient.
 func WrapWithInputRequireClientUnlessAnswered[T any, A any, R any](
+	discard func(*http.Request, T) (A, bool),
 	prepare func(context.Context, server.Id, T) (A, bool),
 	reply func(context.Context, A) (R, error),
 	impl ImplWithInputFunction[T, R],
@@ -426,6 +430,14 @@ func WrapWithInputRequireClientUnlessAnswered[T any, A any, R any](
 	wrapWithInput(
 		RequestBodyFormatter,
 		func(arg T, clientSession *session.ClientSession) (R, error) {
+			// from the input alone, before any credential, limit or state is
+			// read; the route's gates in front of the handler have run
+			if discard != nil {
+				if discarded, ok := discard(req, arg); ok {
+					markControlHttpDiscarded(req, w)
+					return reply(clientSession.Ctx, discarded)
+				}
+			}
 			advanceControlHttpPhase(req, controlHttpAuthenticate)
 			var prepared A
 			answered, err := clientSession.AuthUnlessAnswered(req, func(ctx context.Context, clientId server.Id) bool {

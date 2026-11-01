@@ -29,6 +29,7 @@ type handlerCacheTestStore struct {
 	setErr         error
 
 	acquireTtls []time.Duration
+	fenceTtls   []time.Duration
 }
 
 // Starts with empty value and lease namespaces.
@@ -136,6 +137,23 @@ func (self *handlerCacheTestStore) release(
 	return nil
 }
 
+// Models the token-guarded fence script. This store has no clock, so a fence
+// keeps the lease and records the ttl it was cut to.
+func (self *handlerCacheTestStore) fence(
+	_ context.Context,
+	key string,
+	token string,
+	ttl time.Duration,
+) (bool, error) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if self.fillTokens[key] != token {
+		return false, nil
+	}
+	self.fenceTtls = append(self.fenceTtls, ttl)
+	return true, nil
+}
+
 // Simulates Redis ttl expiry without a wall-clock wait.
 func (self *handlerCacheTestStore) expireFill(key string) {
 	self.stateLock.Lock()
@@ -216,9 +234,9 @@ func TestHandlerCacheCoalescesConcurrentMisses(t *testing.T) {
 	}
 }
 
-// A failed producer retains its fence until Redis expires it. That bounds a
-// failing database query to one attempt per cache ttl instead of one per
-// incoming request.
+// A failed producer keeps its lease, cut to the short failure fence, until
+// Redis expires it. That bounds a failing database query to one attempt per
+// fence instead of one per incoming request.
 func TestHandlerCacheFailedFillRetriesOnlyAfterLeaseExpiry(t *testing.T) {
 	ctx := context.Background()
 	store := newHandlerCacheTestStore()
@@ -236,6 +254,9 @@ func TestHandlerCacheFailedFillRetriesOnlyAfterLeaseExpiry(t *testing.T) {
 	}
 	if !store.hasFill(keys.fill) {
 		t.Fatal("failed fill released its retry-suppression lease")
+	}
+	if want := handlerCacheFailureFenceTtl(15 * time.Second); len(store.fenceTtls) != 1 || store.fenceTtls[0] != want {
+		t.Fatalf("failed fill fences = %v, want its lease cut to one %v fence", store.fenceTtls, want)
 	}
 
 	_, err = cacheJson(ctx, store, logicalKey, 15*time.Second, func() (*handlerCacheTestResult, error) {
@@ -283,6 +304,9 @@ func TestHandlerCachePublishFailureReturnsUnavailableAndRetainsLease(t *testing.
 	}
 	if fillCount != 1 || !store.hasFill(keys.fill) {
 		t.Fatalf("publication failure state: fills=%d lease=%v, want 1 and retained", fillCount, store.hasFill(keys.fill))
+	}
+	if want := handlerCacheFailureFenceTtl(time.Minute); len(store.fenceTtls) != 1 || store.fenceTtls[0] != want {
+		t.Fatalf("publication failure fences = %v, want its lease cut to one %v fence", store.fenceTtls, want)
 	}
 
 	_, err = cacheJson(ctx, store, logicalKey, time.Minute, func() (*handlerCacheTestResult, error) {

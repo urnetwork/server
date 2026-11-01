@@ -185,6 +185,9 @@ func beginHttpRequest(metrics *httpMetrics, route string, writer http.ResponseWr
 // finish records the terminal outcome exactly once for the owning ServeHTTP.
 func (self *requestMetricsObservation) finish(outcome string) {
 	self.metrics.inflight.WithLabelValues(self.route).Dec()
+	if outcome == "canceled" && self.writer.controlDiscard != nil {
+		self.writer.controlDiscard.discardedCanceled.Inc()
+	}
 	status := "none"
 	if self.writer.status != 0 {
 		status = strconv.Itoa(self.writer.status)
@@ -232,6 +235,9 @@ type requestMetricsWriter struct {
 	// a final status has gone out, after which the native writer no longer
 	// reads the header map
 	finalHeaderSent bool
+	// Set only when the observed control handler discards this request;
+	// cancellation is counted with the route's terminal outcome.
+	controlDiscard *controlHttpMetrics
 }
 
 // Unwrap exposes the native writer to http.ResponseController.

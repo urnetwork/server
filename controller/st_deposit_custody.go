@@ -272,6 +272,12 @@ func (self *CoreStClient) validateDepositAttempt(ctx context.Context, client *et
 	if self.coordinator == nil || self.cfg == nil || self.cfg.DepositKey == nil || kind != model.StTxAttemptExecution || !strings.EqualFold(intent.FromAddress, crypto.PubkeyToAddress(self.cfg.DepositKey.PublicKey).Hex()) {
 		return nil
 	}
+	// Besides deposits, the deposit key signs exactly one execution: the
+	// configured phase C sweep's v1 close (st_v1_sweep.go), so that close
+	// never waits behind the root key's nonce sequence.
+	if self.v1SweepCloseIntent(intent) {
+		return nil
+	}
 	state, err := self.readDepositCustody(ctx, client, nil)
 	if err != nil {
 		return err

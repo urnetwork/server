@@ -35,6 +35,8 @@ func DefaultProxyDeviceManagerSettings() *ProxyDeviceManagerSettings {
 		ProxyLockCacheMaxEntries:       16 * 1024,
 		DeviceCreationRetryTimeout:     time.Second,
 		CreationFailureSweepMinEntries: 1024,
+		WindowClientStats:              defaultWindowClientStats,
+		DisableStrictWindowHandover:    !proxyWindowStrictHandoverFromConfig(),
 	}
 }
 
@@ -193,6 +195,15 @@ type ProxyDeviceManagerSettings struct {
 	// their idle timeout. It subscribes to Redis keyspace events, so the
 	// process sets it and tests that do not exercise removal leave it nil.
 	ClientRemoved *ClientRemovedSettings
+
+	// The counters every window of every device this manager opens counts
+	// into (window_client_metrics.go). The default is the process instance
+	// the proxy exports; nil counts nothing.
+	WindowClientStats *connect.WindowClientStats
+	// Each opened device's ProxyDeviceSettings.DisableStrictWindowHandover.
+	// The default comes from proxy.yml `window_strict_handover`
+	// (window_strict_handover.go).
+	DisableStrictWindowHandover bool
 }
 
 type ProxyDeviceManager struct {
@@ -656,6 +667,8 @@ func (self *ProxyDeviceManager) proxyDeviceSettings() *ProxyDeviceSettings {
 	settings.mintAdmission = self.mintAdmission
 	settings.contractAdmission = self.contractAdmission
 	settings.schedulerPauseDetector = self.schedulerPauseDetector
+	settings.windowClientStats = self.settings.WindowClientStats
+	settings.DisableStrictWindowHandover = self.settings.DisableStrictWindowHandover
 	return settings
 }
 
@@ -1110,6 +1123,13 @@ type ProxyDeviceSettings struct {
 	// the owning manager's shared scheduler-pause detector; nil runs one per
 	// multi client
 	schedulerPauseDetector *connect.SchedulerPauseDetector
+	// the owning manager's window client counters; nil counts nothing
+	windowClientStats *connect.WindowClientStats
+	// Turns off the device's strict window handover (sdk
+	// DeviceLocalSettings.DisableStrictWindowHandover): its windows at their
+	// hard max build candidates the hard max refuses, and their warned
+	// clients keep their slots.
+	DisableStrictWindowHandover bool
 }
 
 // The owner's bounds the device's local authority shares.
@@ -1423,6 +1443,10 @@ func newProxyDeviceLocalSettings(
 	// a suspend or a starved scheduler is a fact about this host, judged once
 	// for all of its devices
 	deviceLocalSettings.SchedulerPauseDetector = proxyDeviceSettings.schedulerPauseDetector
+	// every window counts what it does with its window clients into the
+	// process's exported counters
+	deviceLocalSettings.WindowClientStats = proxyDeviceSettings.windowClientStats
+	deviceLocalSettings.DisableStrictWindowHandover = proxyDeviceSettings.DisableStrictWindowHandover
 	return deviceLocalSettings
 }
 

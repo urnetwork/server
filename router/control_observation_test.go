@@ -149,7 +149,7 @@ func TestControlHttpObservationQuietAndUnobservedRoutes(t *testing.T) {
 			}
 		}
 	}
-	if children != 60 || testutil.ToFloat64(metrics.inflight.WithLabelValues("authenticate")) != 0 {
+	if children != 62 || testutil.ToFloat64(metrics.inflight.WithLabelValues("authenticate")) != 0 {
 		t.Fatalf("bounded quiet children = %d", children)
 	}
 }

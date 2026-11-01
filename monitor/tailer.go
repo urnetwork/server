@@ -674,8 +674,15 @@ var logClasses = []logClass{
 		verify:    "Require a source-qualified explanation and corroborating native controls for the original attempted address/resource boundary, plus a complete comparable log window below threshold. Falling or missing log counts alone do not prove allocation recovery, and no fixed self-drain deadline is established.",
 	},
 	{name: "pool-timeout", re: regexp.MustCompile(`redis: connection pool timeout`),
-		rateThreshold: 10, tier: tierWarn, playbook: "SIGNALS.md §4",
-		meaning: "local pool exhausted — backpressure, not the root; find what is slow consuming the pool"},
+		rateThreshold: 10, tier: tierWarn, playbook: "SIGNALS.md §1.5 and §4",
+		meaning:   "the selected log stream reported a Redis pool-wait timeout diagnostic; the actual pool, borrower outcome and cause are unknown",
+		mechanism: "The classifier counts matching diagnostic lines. It does not observe a typed acquisition result, native pool occupancy, held connection, immutable emitting artifact or successful or failed borrower operation.",
+		context:   "Repeated, relayed or quoted diagnostics can share this count. The target identifies the selected service log stream, not a proven process or pool. Missing original lifecycle evidence remains unknown; this text does not establish exhaustion, a slow node, customer impact or a shared provider-picker cause. Driver command attempts, redirects, callback retries and outer retries are separate policies.",
+		action:    "Bind one retained original matching event to its immutable emitter build/dependency, effective client/pool generation, intended acquisition context, typed wait stage/result and native occupancy/hold evidence. Retain the independent borrower terminal outcome. Find the responsible slow or stuck work only after that join; do not change timeouts, capacity or retries from diagnostic volume alone.",
+		verify:    "Require a source-qualified explanation and comparable same-build/same-pool acquisition with independently acknowledged borrower success. Expected cancellation and maintenance without a borrower need separate controls. Complete below-threshold log windows qualify only this diagnostic rate; quiet or missing logs and successful siblings do not prove affected-pool recovery.",
+		sample:    func(string) string { return "redis: connection pool timeout (original context omitted)" },
+		frame:     func(string) string { return "" },
+	},
 	{name: "clusterdown", re: regexp.MustCompile(`CLUSTERDOWN`),
 		rateThreshold: 5, tier: tierPage, playbook: "SIGNALS.md 5.3",
 		meaning: "slot coverage lost; transient during elections is expected and retried"},
@@ -2588,6 +2595,9 @@ func (self *logTailer) drainWindow() []finding {
 			}
 			if c.name == "port-exhaustion" {
 				baseline = "baseline ~0 matching diagnostic lines/minute; counts do not prove retries, native allocation pressure or recovery"
+			}
+			if c.name == "pool-timeout" {
+				baseline = "baseline ~0 matching diagnostic lines/minute; counts do not prove retries, unique failed operations, native pool exhaustion or recovery"
 			}
 			if c.name == "framer-message-too-large" {
 				baseline = "baseline ~0 matching rejection lines/minute; counts do not prove retries, unique failed operations or recovery"

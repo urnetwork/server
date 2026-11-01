@@ -26,7 +26,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -428,6 +427,7 @@ func runSSHCommand(ctx context.Context, args []string, stdin string) (string, st
 	}
 	if observation != nil {
 		observation.recordNativeLifecycle(nativeStartEntered, nativeStartReturned, nativeWaitEntered, nativeWaitReturned, pgOut, pgErr)
+		observation.nativeDiagnosticComplete = !pgOut.eofAt.IsZero() && !pgErr.eofAt.IsZero()
 	}
 	if err != nil {
 		err = &observationBoundaryError{err: err, boundary: boundary}
@@ -522,6 +522,7 @@ func (self *runner) sshTimeout(ctx context.Context, h *host, remoteCmd string, s
 	observation.localPoint(pgLocalCommandReady)
 	observation.stage("ssh_start", "unknown")
 	out, errOut, err := self.runSSH(cmdCtx, sshArgs, stdin)
+	observation.recordSshConnectDiagnostic(ctx, cmdCtx, addr, out, errOut, err)
 	if cmdCtx.Err() == context.DeadlineExceeded {
 		return out, carryObservationBoundary(err, &unreachableError{host: h.name, err: fmt.Errorf("timeout after %s", timeout)})
 	}
@@ -534,17 +535,8 @@ func (self *runner) sshTimeout(ctx context.Context, h *host, remoteCmd string, s
 		if errors.As(err, &boundedFailure) {
 			stderr = strings.TrimSpace(boundedFailure.stderr)
 		}
-		connectTimeoutDiagnostic := false
-		if out == "" {
-			// Keep only a fixed marker for a complete native diagnostic naming
-			// this attempt's selected address, with no remote stdout.
-			portAndReason, targetMatches := strings.CutPrefix(stderr, "ssh: connect to host "+addr+" port ")
-			port, reasonMatches := strings.CutSuffix(portAndReason, ": Connection timed out")
-			if targetMatches && reasonMatches {
-				portNumber, portErr := strconv.Atoi(port)
-				connectTimeoutDiagnostic = portErr == nil && 0 < portNumber && portNumber <= 65535 && strconv.Itoa(portNumber) == port
-			}
-		}
+		connectTimeoutDiagnostic := sshConnectTimeoutDiagnostic(addr, out, stderr)
+
 		if boundedFailure != nil {
 			stderr = ""
 		}

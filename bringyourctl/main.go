@@ -160,6 +160,7 @@ Usage:
     bringyourctl st v2-rebuild --epoch=<epoch> --by=<operator>
     bringyourctl st v2-rebuild-withdraw --epoch=<epoch> --by=<operator>
     bringyourctl st v2-activation
+    bringyourctl st v1-sweep-status
     bringyourctl st v2-activation-clear --no_id=<no_id> --first_epoch=<first_epoch> --vault_v2_address=<vault_v2_address> --settlement_v2_address=<settlement_v2_address> --by=<operator>
     bringyourctl grafana load-defaults [--grafana_url=<grafana_url>] [--dashboards_only]
     bringyourctl grafana reconcile-alerting [--grafana_url=<grafana_url>]
@@ -572,6 +573,8 @@ func main() {
 			stV2Rebuild(opts)
 		} else if rebuildWithdraw, _ := opts.Bool("v2-rebuild-withdraw"); rebuildWithdraw {
 			stV2RebuildWithdraw(opts)
+		} else if sweepStatus, _ := opts.Bool("v1-sweep-status"); sweepStatus {
+			stV1SweepStatus(opts)
 		} else if activation, _ := opts.Bool("v2-activation"); activation {
 			stV2Activation(opts)
 		} else if activationClear, _ := opts.Bool("v2-activation-clear"); activationClear {
@@ -1077,7 +1080,7 @@ func statsMigrate202608(opts docopt.Opts) {
 		{
 			name: "backfill",
 			run: func() string {
-				start := server.NowUtc().Add(-model.ClientExpiration)
+				start := server.NowUtc().Add(-model.ClientReliabilityRetention)
 				end := server.NowUtc()
 				eventCount := model.BackfillProviderAuditEvents(ctx, start, end)
 				deviceEventCount := model.BackfillDeviceAuditEvents(ctx, start, end)
@@ -1169,7 +1172,7 @@ func statsRollupTransfer(opts docopt.Opts) {
 // the real tables retain.
 func statsBackfill(opts docopt.Opts) {
 	ctx := context.Background()
-	start, end := statsDayRange(opts, model.ClientExpiration)
+	start, end := statsDayRange(opts, model.ClientReliabilityRetention)
 	eventCount := model.BackfillProviderAuditEvents(ctx, start, end)
 	fmt.Printf("provider audit backfill: %d events\n", eventCount)
 	deviceEventCount := model.BackfillDeviceAuditEvents(ctx, start, end)
@@ -2836,8 +2839,7 @@ func modelMigrateProxyDeviceConfig(opts docopt.Opts) {
 }
 
 // Converts client_reliability to daily block-range partitions, retaining only
-// the retention window (model.ClientReliabilityRetention, extended up to
-// model.ClientExpiration while a payout is behind; see
+// the retention window (model.ClientReliabilityRetention; see
 // xops/db/client_reliability_partition_plan.md). Safe to
 // rerun: resumes an interrupted copy, no-ops once converted. After validating,
 // rerun with --finalize to drop the old table and reclaim its disk.
