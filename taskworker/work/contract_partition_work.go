@@ -6,6 +6,7 @@ import (
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 	"github.com/urnetwork/server/task"
 )
@@ -13,7 +14,9 @@ import (
 // Partition maintenance and retention of the contract tables
 // (CONTRACT-PARTITION.md; see server.MaintainContractPartitions). Before the
 // cutover a run only guards a prepared cutover and removes expired close
-// evidence, so this build is safe on either side of the cutover.
+// evidence, so this build is safe on either side of the cutover. The evidence
+// goes at the contract horizon, read from the horizon reaper's control once
+// per run (model.WithContractHorizonControl).
 
 type MaintainContractPartitionsArgs struct {
 	Cursor server.ContractRetentionCursor `json:"cursor"`
@@ -47,19 +50,21 @@ func MaintainContractPartitions(
 	maintainContractPartitions *MaintainContractPartitionsArgs,
 	clientSession *session.ClientSession,
 ) (*MaintainContractPartitionsResult, error) {
+	ctx := model.WithContractHorizonControl(clientSession.Ctx)
 	report, cursor := server.MaintainContractPartitions(
-		clientSession.Ctx,
+		ctx,
 		server.NowUtc(),
 		maintainContractPartitions.Cursor,
 		maintainContractPartitionsBudget,
 	)
 	if 0 < len(report.Created) || 0 < len(report.Dropped) || 0 < report.Archived || 0 < report.EvidenceRemoved || report.AbandonedCutover || report.AbandonedEvidenceCutover {
 		glog.Infof(
-			"[cp]created %v, dropped %v, archived %d contracts, removed %d close evidence rows, abandoned cutover %t, abandoned close evidence cutover %t\n",
+			"[cp]created %v, dropped %v, archived %d contracts, removed %d close evidence rows older than %s, abandoned cutover %t, abandoned close evidence cutover %t\n",
 			report.Created,
 			report.Dropped,
 			report.Archived,
 			report.EvidenceRemoved,
+			server.CloseEvidenceRetention(ctx),
 			report.AbandonedCutover,
 			report.AbandonedEvidenceCutover,
 		)

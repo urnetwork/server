@@ -1421,6 +1421,25 @@ Deletes start about 91 days after the oldest evidence rows, around 2027-01-05.
       reason). With `vacuum_truncate = off`, row-deleted space in the legacy
       partition is reused but not returned. Once the row deletes empty it,
       reclaiming it is an owner step.
+  - **At the contract horizon (owner, 2026-11-01):** the evidence follows the
+    contract horizon reaper's runtime horizon (`horizonDays`), 35 to 91 days,
+    instead of a fixed 91 (`db_contract_close_evidence_horizon.go`).
+    - **Guard migration:** the move guard with its retention age at 35 days,
+      the shortest horizon (`CloseEvidenceRetentionFloor`). It only admits:
+      the row deletes take a report accepted longer ago than the horizon,
+      never less than 35 days, of a contract resolved or gone, so the
+      evidence of every contract the reaper deleted goes once it is as old.
+    - **Horizon:** the contract task and the registry's retention task read
+      the control once per run, before any transaction, and pass it in their
+      context (`model.WithContractHorizonControl`); an unreadable control
+      keeps 91 days. The weekly drops expire, fence and check their weeks at
+      the same horizon (`RangeExpired`, the fence, the precondition); the
+      family's `Retention` stays 91 days, the bound the monitor judges by.
+    - **Readers:** admission reads a retained report only while its contract
+      is unresolved, and unresolved contracts keep their evidence at any age;
+      the SN census reads evidence only for an epoch window of at most
+      32,768 closed contracts, which no production epoch is. Nothing else
+      reads it.
 
 ### C6. Later, on size triggers or decisions
 

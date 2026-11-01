@@ -98,7 +98,8 @@ func testCloseEvidenceImmutable(err error) bool {
 // is where the row moves to: from the plain table, the staged parent; from
 // DEFAULT, the weekly partition of its report id's week. A copy that differs,
 // a copy in another week, or a missing destination is refused, as are an
-// update and a truncate under 'move', and retention keeps its 91-day rule.
+// update and a truncate under 'move', and retention keeps its age rule (35
+// days since the horizon guard).
 func TestCloseEvidenceMoveGuard(t *testing.T) {
 	DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -173,7 +174,7 @@ func TestCloseEvidenceMoveGuard(t *testing.T) {
 		insert(weekLeaf, ahead)
 		connect.AssertEqual(t, deleteAs("move", closeEvidenceDefaultLeafName(), ahead), nil)
 
-		// retention still deletes only rows past 91 days
+		// retention still deletes only rows past its age
 		old := testCloseEvidenceReportAt(now.Add(-100*24*time.Hour), NewId(), now.Add(-100*24*time.Hour))
 		insert(closeEvidenceTable, old)
 		connect.AssertEqual(t, testCloseEvidenceImmutable(deleteAs("move", closeEvidenceTable, old)), true)
@@ -536,7 +537,7 @@ func TestCloseEvidenceDropWithoutOptInIsRefused(t *testing.T) {
 		youngAt := PartitionGranularityWeekly.RangeStart(now).Add(-5*7*24*time.Hour + 24*time.Hour)
 		young, youngLeaf := testCloseEvidenceCreateWeek(t, ctx, youngAt)
 		_, err = closeEvidencePartitionFamily.DropRange(ctx, young)
-		if err == nil || !strings.Contains(err.Error(), "is not 91 days past") {
+		if err == nil || !strings.Contains(err.Error(), "is not past its retention of 91 days") {
 			t.Fatalf("a drop of a young week: %v", err)
 		}
 		connect.AssertEqual(t, testCloseEvidenceExists(ctx, youngLeaf), true)

@@ -36,8 +36,8 @@ func TestCloseEvidencePartitionFamilyDeclaration(t *testing.T) {
 		family.DropGuardSetting != "urnetwork.close_evidence_retention" {
 		t.Fatalf("family rules %+v", family)
 	}
-	if family.CreateLeaf == nil || family.DropFence == nil || family.DropPrecondition == nil {
-		t.Fatal("the family lacks its create, fence or precondition")
+	if family.CreateLeaf == nil || family.RangeExpired == nil || family.DropFence == nil || family.DropPrecondition == nil {
+		t.Fatal("the family lacks its create, expiry, fence or precondition")
 	}
 	// leaves are the family's, and stay out of the rotation
 	week := family.RangeAt(time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC))
@@ -114,22 +114,34 @@ func TestCloseEvidenceWeekLeafSql(t *testing.T) {
 
 // The drop precondition is one statement over the week's own leaf: the day
 // after retention, the late index's presence and newest entry, then the few
-// old unresolved contracts looked up in the week.
+// old unresolved contracts looked up in the week. Every age it reads is the
+// retention it is given: 91 days without a horizon, 35 at the shortest.
 func TestCloseEvidenceWeekBlockerSql(t *testing.T) {
 	week := PartitionGranularityWeekly.RangeOf(time.Date(2026, 11, 4, 0, 0, 0, 0, time.UTC))
-	sql := strings.Join(strings.Fields(closeEvidenceWeekBlockerSql("contract_close_report_evidence_w20261102", week)), " ")
-	for _, want := range []string{
-		`'2026-11-10 00:00:00'::timestamp THEN 'within a day of its retention'`,
-		`to_regclass('public.contract_close_report_evidence_w20261102_late')`,
-		`THEN 'no index of its late reports'`,
-		`SELECT max(late.accepted_at) FROM public."contract_close_report_evidence_w20261102" late WHERE late.accepted_at >= '2026-11-10 00:00:00'::timestamp`,
-		`THEN 'a report accepted within 91 days'`,
-		`CROSS JOIN LATERAL ( SELECT 1 FROM public."contract_close_report_evidence_w20261102" evidence WHERE evidence.contract_id = transfer_contract.contract_id LIMIT 1 ) reported`,
-		`transfer_contract.outcome IS NULL AND transfer_contract.contract_id < contract_id_floor(now() - interval '91 days' + interval '86400 seconds')`,
-		`THEN 'a report of an unresolved contract'`,
+	for _, retention := range []struct {
+		retention time.Duration
+		interval  string
+	}{
+		{ContractRetention, "interval '7862400 seconds'"},
+		{CloseEvidenceRetentionFloor, "interval '3024000 seconds'"},
 	} {
-		if !strings.Contains(sql, want) {
-			t.Errorf("precondition lacks %q:\n%s", want, sql)
+		sql := strings.Join(strings.Fields(closeEvidenceWeekBlockerSql("contract_close_report_evidence_w20261102", week, retention.retention)), " ")
+		for _, want := range []string{
+			`(now() AT TIME ZONE 'UTC') - ` + retention.interval + ` < '2026-11-10 00:00:00'::timestamp THEN 'within a day of its retention'`,
+			`to_regclass('public.contract_close_report_evidence_w20261102_late')`,
+			`THEN 'no index of its late reports'`,
+			`(now() AT TIME ZONE 'UTC') - ` + retention.interval + ` <= ( SELECT max(late.accepted_at) FROM public."contract_close_report_evidence_w20261102" late WHERE late.accepted_at >= '2026-11-10 00:00:00'::timestamp`,
+			`THEN 'a report accepted within the retention'`,
+			`CROSS JOIN LATERAL ( SELECT 1 FROM public."contract_close_report_evidence_w20261102" evidence WHERE evidence.contract_id = transfer_contract.contract_id LIMIT 1 ) reported`,
+			`transfer_contract.outcome IS NULL AND transfer_contract.contract_id < contract_id_floor(now() - ` + retention.interval + ` + interval '86400 seconds')`,
+			`THEN 'a report of an unresolved contract'`,
+		} {
+			if !strings.Contains(sql, want) {
+				t.Errorf("precondition at %s lacks %q:\n%s", retention.retention, want, sql)
+			}
+		}
+		if strings.Contains(sql, "days") {
+			t.Errorf("precondition at %s keeps a fixed age:\n%s", retention.retention, sql)
 		}
 	}
 	// the late index and the precondition share one bound

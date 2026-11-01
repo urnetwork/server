@@ -414,25 +414,28 @@ func dropContractWeek(ctx context.Context, week contractWeek) (dropped []string,
 	return contractPartitionFamily.DropRange(ctx, week.partitionRange())
 }
 
-// Deletes close evidence accepted more than ContractRetention ago whose
-// contract is resolved or gone, in batches ordered by contract id. Only a
-// transaction that opts in may delete evidence, and the guard of migration 857
-// admits only rows past the same 91 days. Once the evidence is partitioned the
-// pass deletes from the leaves the drop cannot take (closeEvidenceRemovalTargets):
-// the DEFAULT partition, the expired weeks a straggler keeps, and the legacy
-// partition, one leaf after another; a week the drop will take, and a week
-// not yet expired, are left alone. A pass ends when the last leaf's batch
-// comes up short; the next pass starts over to pick up rows whose contract
-// resolved since.
+// Deletes close evidence accepted longer ago than its retention, ctx's contract
+// horizon (CloseEvidenceRetention), whose contract is resolved or gone, in
+// batches ordered by contract id. A contract the horizon reaper deleted is
+// gone, so its evidence goes once it is as old. Only a transaction that opts in
+// may delete evidence, and the evidence guard admits only rows older than
+// CloseEvidenceRetentionFloor, the shortest retention. Once the evidence is
+// partitioned the pass deletes from the leaves the drop cannot take
+// (closeEvidenceRemovalTargets): the DEFAULT partition, the expired weeks a
+// straggler keeps, and the legacy partition, one leaf after another; a week the
+// drop will take, and a week not yet expired, are left alone. A pass ends when
+// the last leaf's batch comes up short; the next pass starts over to pick up
+// rows whose contract resolved since.
 func RemoveExpiredCloseEvidence(ctx context.Context, now time.Time, cursor CloseEvidenceRemovalCursor, deadline time.Time) (removed int64, next CloseEvidenceRemovalCursor, more bool) {
 	targets, err := closeEvidenceRemovalTargets(ctx, now)
 	if err != nil {
 		glog.Errorf("[cp]close evidence retention: %s\n", err)
 		return 0, cursor, false
 	}
+	retention := CloseEvidenceRetention(ctx)
 	start, from := cursor.resumeIn(targets)
 	for _, target := range targets[start:] {
-		count, last, complete, ok := removeExpiredCloseEvidenceFrom(ctx, target, now, from, deadline)
+		count, last, complete, ok := removeExpiredCloseEvidenceFrom(ctx, target, now, retention, from, deadline)
 		removed += count
 		if !ok {
 			return removed, cursor, false
@@ -445,11 +448,13 @@ func RemoveExpiredCloseEvidence(ctx context.Context, now time.Time, cursor Close
 	return removed, CloseEvidenceRemovalCursor{}, false
 }
 
-// Deletes the expired evidence of one leaf (or of the plain table) from the
-// contract id from, until deadline. complete says a batch came up short, and
+// Deletes the evidence of one leaf (or of the plain table) accepted longer ago
+// than retention, from the contract id from, until deadline. A contract's id is
+// minted before any report of it is accepted, so only contracts minted before
+// the retention can hold such reports. complete says a batch came up short, and
 // ok is false when a batch failed; otherwise last is where the leaf resumes.
-func removeExpiredCloseEvidenceFrom(ctx context.Context, leaf string, now time.Time, from Id, deadline time.Time) (removed int64, last Id, complete bool, ok bool) {
-	upper := ContractIdFloor(now.Add(-ContractRetention))
+func removeExpiredCloseEvidenceFrom(ctx context.Context, leaf string, now time.Time, retention time.Duration, from Id, deadline time.Time) (removed int64, last Id, complete bool, ok bool) {
+	upper := ContractIdFloor(now.Add(-retention))
 	last = from
 	for time.Now().Before(deadline) {
 		var count int64
@@ -466,7 +471,7 @@ func removeExpiredCloseEvidenceFrom(ctx context.Context, leaf string, now time.T
 						SELECT evidence.client_id, evidence.report_id
 						FROM public.%[1]s evidence
 						WHERE $1 <= evidence.contract_id AND evidence.contract_id < $2
-							AND evidence.accepted_at < (now() AT TIME ZONE 'UTC') - interval '91 days'
+							AND evidence.accepted_at < (now() AT TIME ZONE 'UTC') - make_interval(secs => $4)
 							AND NOT EXISTS (
 								SELECT 1 FROM transfer_contract
 								WHERE transfer_contract.contract_id = evidence.contract_id AND transfer_contract.outcome IS NULL
@@ -484,6 +489,7 @@ func removeExpiredCloseEvidenceFrom(ctx context.Context, leaf string, now time.T
 				last,
 				upper,
 				closeEvidenceRetentionBatchSize,
+				float64(closeEvidenceRetentionSeconds(retention)),
 			)
 			WithPgResult(result, err, func() {
 				for result.Next() {
