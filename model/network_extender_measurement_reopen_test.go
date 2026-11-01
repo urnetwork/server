@@ -14,9 +14,10 @@ import (
 )
 
 // A request withdrawn or refused because its extender was not active is asked
-// again once the extender is active again (lag.dev/PLAN.md C9, amendment 24),
-// with the request it holds and by the rules of the same request carried
-// again (SetNetworkExtenderMeasurementRequest), and nothing else is.
+// again once the extender is active again and may be measured
+// (lag.dev/PLAN.md C9, amendment 24), with the request it holds and by the
+// rules of the same request carried again
+// (SetNetworkExtenderMeasurementRequest), and nothing else is.
 
 // The reason the controller gives an extender that is not active
 // (controller.ExtenderMeasurementInactiveReason), which this package cannot
@@ -93,6 +94,12 @@ func testReopenLeft(t testing.TB, ctx context.Context, index int, now time.Time)
 		t.Fatalf("the certificate was not withdrawn")
 	}
 	return extenderId
+}
+
+// A rule that lets every extender be measured, so a test judges the request
+// rules alone.
+func testReopenMayAskAll(*NetworkExtender, []*NetworkExtenderAddress) bool {
+	return true
 }
 
 // A request withdrawn because its extender left, or refused for it (as an
@@ -175,7 +182,7 @@ func TestReopenReturnedNetworkExtenderMeasurementsAsksAgainLikeTheSameRequest(t 
 			befores = append(befores, before)
 		}
 
-		connect.AssertEqual(t, ReopenReturnedNetworkExtenderMeasurements(ctx, testReopenInactiveReason, now), len(cases))
+		connect.AssertEqual(t, ReopenReturnedNetworkExtenderMeasurements(ctx, testReopenInactiveReason, now, testReopenMayAskAll), len(cases))
 
 		for i, c := range cases {
 			reopened := Testing_GetNetworkExtenderMeasurement(ctx, returnedIds[i])
@@ -205,7 +212,7 @@ func TestReopenReturnedNetworkExtenderMeasurementsAsksAgainLikeTheSameRequest(t 
 			}
 		}
 
-		connect.AssertEqual(t, ReopenReturnedNetworkExtenderMeasurements(ctx, testReopenInactiveReason, now.Add(time.Minute)), 0)
+		connect.AssertEqual(t, ReopenReturnedNetworkExtenderMeasurements(ctx, testReopenInactiveReason, now.Add(time.Minute), testReopenMayAskAll), 0)
 	})
 }
 
@@ -288,10 +295,87 @@ func TestReopenReturnedNetworkExtenderMeasurementsLeavesEveryOtherRequest(t *tes
 			connect.AssertEqual(t, getTestMeasurementExtender(t, ctx, extenderId).Active, true)
 		}
 
-		connect.AssertEqual(t, ReopenReturnedNetworkExtenderMeasurements(ctx, testReopenInactiveReason, now), 0)
+		connect.AssertEqual(t, ReopenReturnedNetworkExtenderMeasurements(ctx, testReopenInactiveReason, now, testReopenMayAskAll), 0)
 		for _, u := range untouched {
 			if after := testReopenRow(Testing_GetNetworkExtenderMeasurement(ctx, u.extenderId)); after != befores[u.extenderId] {
 				t.Fatalf("%s: changed from %s to %s", u.name, befores[u.extenderId], after)
+			}
+		}
+	})
+}
+
+// Only an extender that may be measured now is asked for (C9, amendment 24).
+// mayAsk judges each with its extender and active addresses as read, and again
+// under their locks in the transaction that asks for it, and one it refuses at
+// either is left exactly as it was: withdrawn, which its extender reads, so it
+// drops what it holds. Asked for and then refused by the issuance pass, it
+// would read only pending and refused.
+func TestReopenReturnedNetworkExtenderMeasurementsAsksOnlyWhatMayBeMeasured(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc().Truncate(time.Second)
+
+		admitted := testReopenLeft(t, ctx, 1, now)
+		refused := testReopenLeft(t, ctx, 2, now)
+		changed := testReopenLeft(t, ctx, 3, now)
+		extenderIds := []server.Id{admitted, refused, changed}
+		befores := map[server.Id]string{}
+		for i, extenderId := range extenderIds {
+			// back, with an activation that carries no request
+			testMeasurementActivate(t, ctx, 1+i)
+			befores[extenderId] = testReopenRow(Testing_GetNetworkExtenderMeasurement(ctx, extenderId))
+		}
+
+		// a rule that lets none be measured asks for none, and is given each
+		// extender as it is, active with its one address
+		judged := map[server.Id]int{}
+		connect.AssertEqual(t, ReopenReturnedNetworkExtenderMeasurements(
+			ctx,
+			testReopenInactiveReason,
+			now,
+			func(extender *NetworkExtender, addresses []*NetworkExtenderAddress) bool {
+				if extender == nil || !extender.Active || len(addresses) != 1 || !addresses[0].Active {
+					t.Errorf("judged %+v with %d active addresses", extender, len(addresses))
+					return false
+				}
+				judged[extender.ExtenderId] += 1
+				return false
+			},
+		), 0)
+		for _, extenderId := range extenderIds {
+			connect.AssertEqual(t, judged[extenderId], 1)
+			connect.AssertEqual(t, testReopenRow(Testing_GetNetworkExtenderMeasurement(ctx, extenderId)), befores[extenderId])
+		}
+
+		// one may be measured, one may not, and one may be as read but no
+		// longer when it is asked for, as when it activates in between with
+		// its tcp port moved
+		judged = map[server.Id]int{}
+		mayAsk := func(extender *NetworkExtender, addresses []*NetworkExtenderAddress) bool {
+			if extender == nil {
+				return false
+			}
+			judged[extender.ExtenderId] += 1
+			switch extender.ExtenderId {
+			case admitted:
+				return true
+			case changed:
+				return judged[changed] == 1
+			default:
+				return false
+			}
+		}
+		connect.AssertEqual(t, ReopenReturnedNetworkExtenderMeasurements(ctx, testReopenInactiveReason, now, mayAsk), 1)
+		connect.AssertEqual(t, Testing_GetNetworkExtenderMeasurement(ctx, admitted).State, NetworkExtenderMeasurementStatePending)
+		for _, extenderId := range []server.Id{refused, changed} {
+			connect.AssertEqual(t, testReopenRow(Testing_GetNetworkExtenderMeasurement(ctx, extenderId)), befores[extenderId])
+		}
+		// one refused as read is not judged again; the others are, before
+		// they are asked for
+		connect.AssertEqual(t, judged[refused], 1)
+		for _, extenderId := range []server.Id{admitted, changed} {
+			if judged[extenderId] < 2 {
+				t.Fatalf("%s was judged %d times", extenderId, judged[extenderId])
 			}
 		}
 	})

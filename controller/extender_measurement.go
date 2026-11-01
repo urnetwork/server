@@ -64,7 +64,8 @@ const (
 	// Why an extender that is not active may not be measured (C5, C8), and
 	// why its certificates are withdrawn once the away grace has passed (C9).
 	// The issuance pass matches this text to ask again, with the stored
-	// request, for an extender that is active again (amendment 24).
+	// request, for an extender that is active again and may be measured
+	// (amendment 24).
 	ExtenderMeasurementInactiveReason = "the extender is not active"
 
 	// How long a deactivated extender keeps its certificate (C9, amendment
@@ -505,10 +506,12 @@ type ExtenderMeasurementCertResult struct {
 // extender's next request arrives, and never none: a request row is never
 // removed, so an extender that once asked is never answered none again. A
 // request withdrawn or refused because its extender was not active stands
-// only until the extender is active again, when the next issuance pass asks
-// again with its stored request (amendment 24); the extender itself carries
-// its request again only with its next activation, up to a day after it came
-// back.
+// only until the extender is active again and may be measured, when the next
+// issuance pass asks again with its stored request (amendment 24). One that
+// may not be measured is still answered withdrawn, so it drops what it holds
+// (C9). An extender since connect 567d4833 asks for an activation pass at
+// once when it reads withdrawn, which carries its request; one from before
+// carries it only with its next activation, up to a day after it came back.
 //
 // The one write is the first issued answer with each certificate, which
 // records its delivery (model.MarkNetworkExtenderMeasurementCertDelivered):

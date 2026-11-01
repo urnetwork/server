@@ -274,11 +274,11 @@ func scanNetworkExtenderMeasurementCert(result server.PgResult) *NetworkExtender
 // how an extender that comes back after the away grace is given a certificate
 // again, and within the grace it still holds its own (amendment 23). It need
 // not wait for its next activation to carry its request: once it is active
-// again, the issuance pass asks again with its stored request, by these same
-// rules (ReopenReturnedNetworkExtenderMeasurements, amendment 24). An extender
-// that was already waiting keeps its place in the queue (C7), and the same
-// names and key keep the backoff of their failed orders, so asking again
-// cannot hurry the CA.
+// again and may be measured, the issuance pass asks again with its stored
+// request, by these same rules (ReopenReturnedNetworkExtenderMeasurements,
+// amendment 24). An extender that was already waiting keeps its place in the
+// queue (C7), and the same names and key keep the backoff of their failed
+// orders, so asking again cannot hurry the CA.
 func SetNetworkExtenderMeasurementRequest(
 	ctx context.Context,
 	extenderId server.Id,
@@ -1480,22 +1480,82 @@ func ReopenExpiredNetworkExtenderMeasurements(ctx context.Context, now time.Time
 // ReopenReturnedNetworkExtenderMeasurements puts back in the queue the
 // request of every extender that is active again after its request was
 // withdrawn or refused for `reason`, the reason an extender that is not active
-// is given (C9), and returns how many (amendment 24). Such an extender reads
-// withdrawn as nothing held and carries its request again, but only with its
-// next activation, up to a day after it came back (C4). Each stored request is
+// is given (C9), and that may be measured now, and returns how many
+// (amendment 24). mayAsk is whether it may be, the controller's one rule: it
+// judges the extender as it is, nil when it is gone, with its active
+// addresses. Such an extender reads withdrawn as nothing held and carries its
+// request again itself (C4), but one from before connect 567d4833 only with
+// its next activation, up to a day after it came back. Each stored request is
 // asked again by the rules SetNetworkExtenderMeasurementRequest applies to the
 // same names and key carried again after a refusal or withdrawal, which this
 // mirrors: issued at once when a live certificate answers it, else pending
 // from now with the backoff of its failed orders, and either way its reason
 // cleared. Its CSR and request time stay those of the activation that last
-// carried it. Whether the extender may be measured is the issuance pass's to
-// judge, as for any request (C5).
+// carried it.
+//
+// A request whose extender may not be measured now is left as it is (C9).
+// Asked again, it would be refused by the same issuance pass, and its
+// extender would read pending, then refused, but never withdrawn. An extender
+// keeps serving an installed certificate through both (C4), so it would
+// present its revoked certificate until it expired. Left withdrawn, it reads
+// withdrawn, drops what it holds, and asks again itself.
+//
+// The read only picks what to judge, and usually finds nothing. Each request
+// is asked again in a transaction of its own, which locks and reads its
+// extender and active addresses again and asks mayAsk once more, so a change
+// since the read is judged too, as a withdrawal is
+// (WithdrawNetworkExtenderMeasurementCertIf); mayAsk may run more than once,
+// since the transaction may be retried. The write keeps every condition of the
+// read, so an owner's opt-out, or a request an activation stored since, is
+// never overwritten.
 //
 // A request without its CSR or key is never asked again: an owner's opt-out
 // drops the CSR (OptOutNetworkExtenderMeasurement), and only the owner turns
 // measurement back on. A withdrawal for the gated tier or a canary has
 // another reason, as does every other refusal.
-func ReopenReturnedNetworkExtenderMeasurements(ctx context.Context, reason string, now time.Time) (reopened int) {
+func ReopenReturnedNetworkExtenderMeasurements(
+	ctx context.Context,
+	reason string,
+	now time.Time,
+	mayAsk func(extender *NetworkExtender, addresses []*NetworkExtenderAddress) bool,
+) (reopened int) {
+	// a request that is asked again, on the read and again on the write
+	returned := `
+		network_extender_measurement.state IN ($1, $2) AND
+		network_extender_measurement.reason = $3 AND
+		network_extender_measurement.csr IS NOT NULL AND
+		network_extender_measurement.public_key IS NOT NULL AND
+		EXISTS (
+			SELECT 1
+			FROM network_extender
+			WHERE
+				network_extender.extender_id = network_extender_measurement.extender_id AND
+				network_extender.active
+		)
+	`
+	targets := []*NetworkExtenderMeasurementTarget{}
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT `+networkExtenderMeasurementColumns+`
+			FROM network_extender_measurement
+			WHERE `+returned+`
+			`,
+			NetworkExtenderMeasurementStateWithdrawn,
+			NetworkExtenderMeasurementStateRefused,
+			reason,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				targets = append(targets, &NetworkExtenderMeasurementTarget{
+					Measurement: scanNetworkExtenderMeasurement(result),
+				})
+			}
+		})
+		fillNetworkExtenderMeasurementTargetsInConn(ctx, conn, targets)
+	})
+
 	// a live certificate for the request's names and key, which answers it
 	answered := `
 		EXISTS (
@@ -1506,43 +1566,53 @@ func ReopenReturnedNetworkExtenderMeasurements(ctx context.Context, reason strin
 				network_extender_measurement_cert.names = network_extender_measurement.names AND
 				network_extender_measurement_cert.public_key = network_extender_measurement.public_key AND
 				network_extender_measurement_cert.withdraw_time IS NULL AND
-				$1 < network_extender_measurement_cert.not_after
+				$4 < network_extender_measurement_cert.not_after
 		)
 	`
-	server.Tx(ctx, func(tx server.PgTx) {
-		tag := server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-			UPDATE network_extender_measurement
-			SET
-				state = CASE WHEN `+answered+` THEN $2 ELSE $3 END,
-				reason = '',
-				pending_time = CASE WHEN `+answered+` THEN NULL ELSE $1 END,
-				retry_time = CASE WHEN `+answered+` THEN NULL ELSE retry_time END,
-				failure_count = CASE WHEN `+answered+` THEN 0 ELSE failure_count END,
-				update_time = $1
-			WHERE
-				state IN ($4, $5) AND
-				reason = $6 AND
-				csr IS NOT NULL AND
-				public_key IS NOT NULL AND
-				EXISTS (
-					SELECT 1
-					FROM network_extender
-					WHERE
-						network_extender.extender_id = network_extender_measurement.extender_id AND
-						network_extender.active
-				)
-			`,
-			now.UTC(),
-			NetworkExtenderMeasurementStateIssued,
-			NetworkExtenderMeasurementStatePending,
-			NetworkExtenderMeasurementStateWithdrawn,
-			NetworkExtenderMeasurementStateRefused,
-			reason,
-		))
-		reopened = int(tag.RowsAffected())
-	})
+	for _, target := range targets {
+		if !mayAsk(target.Extender, target.Addresses) {
+			continue
+		}
+		extenderId := target.Measurement.ExtenderId
+		asked := false
+		server.Tx(ctx, func(tx server.PgTx) {
+			asked = false
+			// the extender and its active addresses read again under their
+			// locks, so an activation in flight is judged once it commits,
+			// and a later one waits for this one
+			extender := getNetworkExtenderInTx(ctx, tx, extenderId)
+			if !mayAsk(extender, getActiveNetworkExtenderAddressesInTx(ctx, tx, extenderId)) {
+				return
+			}
+			tag := server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+				UPDATE network_extender_measurement
+				SET
+					state = CASE WHEN `+answered+` THEN $5 ELSE $6 END,
+					reason = '',
+					pending_time = CASE WHEN `+answered+` THEN NULL ELSE $4 END,
+					retry_time = CASE WHEN `+answered+` THEN NULL ELSE retry_time END,
+					failure_count = CASE WHEN `+answered+` THEN 0 ELSE failure_count END,
+					update_time = $4
+				WHERE
+					extender_id = $7 AND
+					`+returned+`
+				`,
+				NetworkExtenderMeasurementStateWithdrawn,
+				NetworkExtenderMeasurementStateRefused,
+				reason,
+				now.UTC(),
+				NetworkExtenderMeasurementStateIssued,
+				NetworkExtenderMeasurementStatePending,
+				extenderId,
+			))
+			asked = tag.RowsAffected() == 1
+		})
+		if asked {
+			reopened += 1
+		}
+	}
 	return
 }
 

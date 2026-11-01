@@ -477,12 +477,17 @@ func extenderMeasurementCapHeld(now time.Time) (reason string, held bool) {
 // A request whose certificate ran out un-renewed is put back in the queue
 // first, so nothing stays issued with no certificate behind it. So is the
 // request of an extender that is active again after its request was withdrawn
-// or refused because it was not active (C9): the stored request is asked
-// again, as if the extender had carried it again (C4, amendment 24). The
-// extender reads withdrawn as nothing held, but carries its request again
-// only with its next activation, up to a day after it came back. A request an
-// owner's opt-out dropped, and one withdrawn for the gated tier or a canary,
-// are not asked again.
+// or refused because it was not active (C9), if it may be measured now: the
+// stored request is asked again, as if the extender had carried it again (C4,
+// amendment 24). Since connect 567d4833 an extender that reads withdrawn asks
+// for an activation pass at once, which carries its request; this serves the
+// extenders from before, which carry it only with their next activation, up
+// to a day after they came back. One that may not be measured now is left
+// withdrawn, so it reads withdrawn and drops its revoked certificate: asked
+// again, it would be refused in this same pass and read only pending and
+// refused, through which an extender keeps an installed certificate. A
+// request an owner's opt-out dropped, and one withdrawn for the gated tier or
+// a canary, are not asked again.
 func issuePendingExtenderMeasurementCerts(
 	ctx context.Context,
 	config *controller.ExtenderConfig,
@@ -497,7 +502,15 @@ func issuePendingExtenderMeasurementCerts(
 	measurementZone := config.Measurement.MeasurementZone()
 	issueCap := config.Measurement.WeeklyIssueCap()
 	model.ReopenExpiredNetworkExtenderMeasurements(ctx, now)
-	model.ReopenReturnedNetworkExtenderMeasurements(ctx, controller.ExtenderMeasurementInactiveReason, now)
+	model.ReopenReturnedNetworkExtenderMeasurements(
+		ctx,
+		controller.ExtenderMeasurementInactiveReason,
+		now,
+		func(extender *model.NetworkExtender, addresses []*model.NetworkExtenderAddress) bool {
+			_, reason := controller.ExtenderMeasurementEligibleAddresses(extender, addresses)
+			return reason == ""
+		},
+	)
 	issuedThisWeek := model.CountNetworkExtenderMeasurementCertsCountedSince(ctx, now.Add(-ExtenderMeasurementCapWindow))
 
 	for _, target := range model.GetPendingNetworkExtenderMeasurements(ctx, now, ExtenderMeasurementPendingLimit) {
