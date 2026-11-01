@@ -283,18 +283,14 @@ func TestStuckProviderRecycleDispatchOnlyQueues(t *testing.T) {
 	(&Exchange{ctx: ctx, settings: DefaultExchangeSettings(), residents: map[server.Id]*Resident{}}).handleClientRecycle(server.NewId())
 }
 
-// The workers recycle queued clients one at a time each, at most
-// StuckProviderRecycleWorkerCount at once and no faster than the token
-// bucket. A recycle that raises counts as an error and its worker goes on.
-// Closing the exchange ends them.
-func TestStuckProviderRecycleWorkersArePacedAndBounded(t *testing.T) {
+// Runs count queued recycles through the workers of settings, each lasting
+// duration, the first raising. Returns how long they took from the start of
+// the workers and how many ran at once at most. Closing the exchange ends
+// the workers.
+func runClientRecycleTestWorkers(t *testing.T, settings *ExchangeSettings, count int, duration time.Duration) (time.Duration, int64) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	settings := stuckProviderRecycleTestSettings()
-	settings.StuckProviderRecyclesPerSecond = 20
-	settings.StuckProviderRecycleBurst = 1
-	settings.StuckProviderRecycleWorkerCount = 2
-	settings.StuckProviderRecycleQueueSize = 64
 	exchangeCtx, exchangeCancel := context.WithCancel(ctx)
 	exchange := &Exchange{
 		ctx:         exchangeCtx,
@@ -309,7 +305,7 @@ func TestStuckProviderRecycleWorkersArePacedAndBounded(t *testing.T) {
 
 	raisingClientId := server.NewId()
 	var inFlight, maxInFlight, attempts atomic.Int64
-	attempted := make(chan server.Id, 64)
+	attempted := make(chan server.Id, count)
 	recycle := func(clientId server.Id) {
 		current := inFlight.Add(1)
 		defer inFlight.Add(-1)
@@ -324,10 +320,8 @@ func TestStuckProviderRecycleWorkersArePacedAndBounded(t *testing.T) {
 		if clientId == raisingClientId {
 			panic("synthetic recycle failure")
 		}
-		// longer than the bucket's spacing, so recycles past the worker
-		// count would overlap
 		select {
-		case <-time.After(120 * time.Millisecond):
+		case <-time.After(duration):
 		case <-exchangeCtx.Done():
 		}
 	}
@@ -335,15 +329,15 @@ func TestStuckProviderRecycleWorkersArePacedAndBounded(t *testing.T) {
 	errorBefore := stuckProviderRecycleTestOutcome(stuckProviderRecycleError)
 
 	clientIds := []server.Id{raisingClientId}
-	for range 9 {
+	for len(clientIds) < count {
 		clientIds = append(clientIds, server.NewId())
 	}
-	startTime := time.Now()
 	for _, clientId := range clientIds {
 		if !exchange.stuckProviderRecycle.enqueue(clientId) {
 			t.Fatal("the queue refused a client below its size")
 		}
 	}
+	startTime := time.Now()
 	exchange.stuckProviderRecycle.start()
 	seen := map[server.Id]bool{}
 	for range clientIds {
@@ -358,13 +352,7 @@ func TestStuckProviderRecycleWorkersArePacedAndBounded(t *testing.T) {
 	if len(seen) != len(clientIds) {
 		t.Fatalf("recycled %d distinct clients, want %d", len(seen), len(clientIds))
 	}
-	// a token at once, then one each 50 ms
-	if minElapsed := time.Duration(len(clientIds)-1) * time.Second / 20; elapsed < minElapsed {
-		t.Fatalf("%d recycles took %s, faster than the bucket allows (%s)", len(clientIds), elapsed, minElapsed)
-	}
-	if most := maxInFlight.Load(); int64(settings.StuckProviderRecycleWorkerCount) < most {
-		t.Fatalf("%d recycles ran at once, want at most %d", most, settings.StuckProviderRecycleWorkerCount)
-	}
+	// the raise counts, and its worker went on to the others
 	if !waitFor(ctx, 10*time.Second, func() bool {
 		return errorBefore+1 <= stuckProviderRecycleTestOutcome(stuckProviderRecycleError)
 	}) {
@@ -374,8 +362,39 @@ func TestStuckProviderRecycleWorkersArePacedAndBounded(t *testing.T) {
 	if !exchange.WaitForIdle(ctx) {
 		t.Fatal("the workers outlived the exchange")
 	}
-	if count := attempts.Load(); count != int64(len(clientIds)) {
-		t.Fatalf("%d recycles, want %d", count, len(clientIds))
+	if ran := attempts.Load(); ran != int64(len(clientIds)) {
+		t.Fatalf("%d recycles, want %d", ran, len(clientIds))
+	}
+	return elapsed, maxInFlight.Load()
+}
+
+// The workers recycle no faster than the token bucket, however fast each
+// recycle is: a token at once, then one each 1/rate.
+func TestStuckProviderRecycleWorkersArePaced(t *testing.T) {
+	settings := stuckProviderRecycleTestSettings()
+	settings.StuckProviderRecyclesPerSecond = 10
+	settings.StuckProviderRecycleBurst = 1
+	settings.StuckProviderRecycleWorkerCount = 2
+	settings.StuckProviderRecycleQueueSize = 64
+	// the workers could do 40 a second
+	count := 10
+	elapsed, _ := runClientRecycleTestWorkers(t, settings, count, 50*time.Millisecond)
+	if minElapsed := time.Duration(count-1) * time.Second / 10; elapsed < minElapsed {
+		t.Fatalf("%d recycles took %s, faster than the bucket allows (%s)", count, elapsed, minElapsed)
+	}
+}
+
+// At most StuckProviderRecycleWorkerCount recycles run at once, however many
+// are queued and however fast the bucket admits them.
+func TestStuckProviderRecycleWorkersAreBounded(t *testing.T) {
+	settings := stuckProviderRecycleTestSettings()
+	settings.StuckProviderRecyclesPerSecond = 1000
+	settings.StuckProviderRecycleBurst = 100
+	settings.StuckProviderRecycleWorkerCount = 2
+	settings.StuckProviderRecycleQueueSize = 64
+	_, most := runClientRecycleTestWorkers(t, settings, 10, 200*time.Millisecond)
+	if int64(settings.StuckProviderRecycleWorkerCount) < most {
+		t.Fatalf("%d recycles ran at once, want at most %d", most, settings.StuckProviderRecycleWorkerCount)
 	}
 }
 
