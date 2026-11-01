@@ -13633,7 +13633,9 @@ enough to attribute retention.
   signature. Include rows/call and storage/WAL signals; backend count alone
   understates this load.
 - This is not the rare-value planner landmine (§2.3):
-  `transfer_escrow_sweep_payment_id` exists and is used to find the fan-out.
+  `transfer_escrow_sweep_payment_contract` (payment_id, contract_id) exists
+  and is used to find the fan-out (`transfer_escrow_sweep_payment_id` was
+  dropped by the index diet).
   `ANALYZE` and larger PgBouncer pools do not reduce millions of updates.
 - Action: make retention stamping bounded/chunked or decouple it from the
   synchronous payment transaction. During an incident, correlate it with

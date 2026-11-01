@@ -14,8 +14,10 @@ import (
 )
 
 // Only the attribution reader's columns are needed. Keys, nullability and
-// payment lookup indexes match the production schema; write guards are covered
-// separately by the migrated bonus, recovery and controller tests.
+// payment lookup indexes match the production schema, which finds a payment's
+// sweeps through (payment_id, contract_id) alone since the index diet dropped
+// the payment_id index; write guards are covered separately by the migrated
+// bonus, recovery and controller tests.
 const providerAttributionTestSchema = `
 CREATE TABLE account_payment (
  payment_id uuid PRIMARY KEY, payment_plan_id uuid NOT NULL, network_id uuid NOT NULL,
@@ -30,7 +32,6 @@ CREATE TABLE transfer_escrow_sweep (
  contract_id uuid NOT NULL, balance_id uuid NOT NULL, network_id uuid NOT NULL,
  payout_byte_count bigint NOT NULL, payout_net_revenue_nano_cents bigint NOT NULL,
  payment_id uuid, PRIMARY KEY(contract_id,balance_id,network_id));
-CREATE INDEX transfer_escrow_sweep_payment_id ON transfer_escrow_sweep(payment_id);
 CREATE INDEX transfer_escrow_sweep_payment_contract ON transfer_escrow_sweep(payment_id,contract_id);
 CREATE TABLE account_payment_bonus (
  operation_id uuid NOT NULL, origin_payment_id uuid NOT NULL, payment_id uuid NOT NULL,
@@ -203,7 +204,12 @@ func (self providerAttributionPlan) visits(relation string) float64 {
 }
 
 // A complete selected census must have one sweep pass and contract-key work
-// proportional to that selection, independently of canceled admission.
+// proportional to that selection, independently of canceled admission. The
+// unrelated sweeps belong to 64 other payments, as Main's belong to many
+// (n_distinct 669): the lateral's sweep lookup is keyed by the outer payment,
+// which the planner estimates from n_distinct alone, and one unrelated payment
+// holding nearly every sweep would price half the table per payment and prefer
+// a scan of this small table to the (payment_id, contract_id) index.
 func TestProviderAttributionSelectedRowWork(t *testing.T) {
 	(&server.TestEnv{}).Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -215,7 +221,7 @@ func TestProviderAttributionSelectedRowWork(t *testing.T) {
 					resetProviderAttributionTest(ctx, conn, cutoff)
 					server.RaisePgResult(conn.Exec(ctx, `TRUNCATE transfer_escrow_sweep,transfer_contract`))
 					server.RaisePgResult(conn.Exec(ctx, `INSERT INTO transfer_contract SELECT lpad(to_hex(n),32,'0')::uuid,$2::timestamp,'settled' FROM generate_series(1,$1::int) n`, selected*65, cutoff.Add(-time.Hour)))
-					server.RaisePgResult(conn.Exec(ctx, `INSERT INTO transfer_escrow_sweep SELECT lpad(to_hex(n),32,'0')::uuid,$1,$2,100,17,CASE WHEN CASE WHEN $4::boolean THEN n % 65=0 ELSE n <= $5::int END THEN $3::uuid ELSE $6::uuid END FROM generate_series(1,$5::int*65) n`, providerAttributionTestId(4), providerAttributionTestId(3), providerAttributionTestId(1), interleaved, selected, providerAttributionTestId(10)))
+					server.RaisePgResult(conn.Exec(ctx, `INSERT INTO transfer_escrow_sweep SELECT lpad(to_hex(n),32,'0')::uuid,$1,$2,100,17,CASE WHEN CASE WHEN $4::boolean THEN n % 65=0 ELSE n <= $5::int END THEN $3::uuid ELSE lpad(to_hex($6::bigint + n % 64),32,'0')::uuid END FROM generate_series(1,$5::int*65) n`, providerAttributionTestId(4), providerAttributionTestId(3), providerAttributionTestId(1), interleaved, selected, 10))
 					server.RaisePgResult(conn.Exec(ctx, `UPDATE account_payment SET payout_nano_cents=$1,payout_byte_count=$2`, selected*17, selected*100))
 					server.RaisePgResult(conn.Exec(ctx, `ANALYZE account_payment; ANALYZE transfer_escrow_sweep; ANALYZE transfer_contract`))
 					for _, canceled := range []bool{false, true} {

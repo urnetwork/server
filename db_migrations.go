@@ -11121,4 +11121,16 @@ var migrations = []any{
 	// stream_id before multi-hop contracts launch. A contract's late stream
 	// write (SetContractStream) can then be a HOT update.
 	streamIndexDropMigration,
+
+	// transfer_escrow_sweep_payment_id (7.6 GB, v62). Every reader that
+	// keys sweeps by payment_id also has transfer_escrow_sweep_payment_contract
+	// (payment_id, contract_id, v597), which leads with the same key: payment
+	// attribution, the sweep EXISTS checks, the weekly plan's unpaid arm
+	// (already on it) and canceled arm, and the contract partition's week
+	// blocker. Each insert of a sweep, and each payment assignment, writes one
+	// index entry fewer. Drop it outside the Sunday 10:00 UTC payout, whose
+	// bulk payment_id update holds the sweep table, and only while no
+	// autovacuum runs on transfer_escrow_sweep: a waiting drop cancels a
+	// normal autovacuum.
+	sweepPaymentIndexDropMigration,
 }
