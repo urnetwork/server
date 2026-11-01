@@ -392,9 +392,13 @@ func ReapProberShard(ctx context.Context, key ProberShardKey) (deleted bool, ret
 			return false, err
 		}
 		var cacheOwner *ProberShardOwner
+		// the balances the delete removed, for their net escrow mirrors; a
+		// resumed cleanup knows only the shard's own credit
+		var retiredBalanceIds []server.Id
 		server.Tx(ctx, func(tx server.PgTx) {
 			deleted = false
 			cacheOwner = nil
+			retiredBalanceIds = nil
 			owner, err := scanProberShard(tx.QueryRow(ctx, `SELECT `+proberShardColumns+` FROM prober_shard_run WHERE task_id=$1 AND epoch=$2 FOR UPDATE`, key.TaskId, key.Epoch))
 			server.Raise(err)
 			if owner.Key != key {
@@ -411,7 +415,22 @@ func ReapProberShard(ctx context.Context, key ProberShardKey) (deleted bool, ret
 			if owner.State != "draining" {
 				return
 			}
-			admitted, ownershipErr := tryTransferBalanceOwnershipInTx(ctx, tx, []server.Id{owner.BalanceId})
+			// The private network's balances: the shard's own credit, and any
+			// grant a writer added to the network, such as the daily free grant
+			// before it skipped prober networks. Read their ids before the one
+			// ownership probe, which must name every key the delete will hold.
+			balanceIds := []server.Id{owner.BalanceId}
+			rows, err := tx.Query(ctx, `SELECT balance_id FROM transfer_balance WHERE network_id=$1`, owner.NetworkId)
+			server.WithPgResult(rows, err, func() {
+				for rows.Next() {
+					var id server.Id
+					server.Raise(rows.Scan(&id))
+					balanceIds = append(balanceIds, id)
+				}
+			})
+			slices.SortFunc(balanceIds, func(a, b server.Id) int { return a.Cmp(b) })
+			balanceIds = slices.Compact(balanceIds)
+			admitted, ownershipErr := tryTransferBalanceOwnershipInTx(ctx, tx, ownableTransferBalanceIds(balanceIds))
 			server.Raise(ownershipErr)
 			if !admitted {
 				server.Raise(errTransferBalanceOwnershipBusy)
@@ -422,22 +441,39 @@ func ReapProberShard(ctx context.Context, key ProberShardKey) (deleted bool, ret
 			// Settlement takes a contract lock before the balance lock. This read
 			// never locks contracts while holding a balance: its post-lock snapshot
 			// either sees a completed debit or retains the open/unsettled debt.
-			var found, plain bool
-			rows, err := tx.Query(ctx, `SELECT NOT paid AND NOT pro AND net_revenue_nano_cents=0 AND subsidy_net_revenue_nano_cents=0 FROM transfer_balance WHERE balance_id=$1 AND network_id=$2 FOR UPDATE`, owner.BalanceId, owner.NetworkId)
+			// Every balance of the network is locked, in id order. The shard's
+			// own credit must be there and plain. Another balance goes with the
+			// network only when it is a plain grant too (no payment, no Pro, no
+			// revenue), owned above; one that is not, or that arrived after the
+			// ownership probe, keeps the shard draining for an operator.
+			var ownFound, ownPlain bool
+			othersPlain := true
+			lockedBalanceIds := []server.Id{}
+			rows, err = tx.Query(ctx, `SELECT balance_id, NOT paid AND NOT pro AND net_revenue_nano_cents=0 AND subsidy_net_revenue_nano_cents=0
+				FROM transfer_balance WHERE network_id=$1 ORDER BY balance_id FOR UPDATE`, owner.NetworkId)
 			server.WithPgResult(rows, err, func() {
-				if rows.Next() {
-					server.Raise(rows.Scan(&plain))
-					found = true
+				for rows.Next() {
+					var id server.Id
+					var plain bool
+					server.Raise(rows.Scan(&id, &plain))
+					lockedBalanceIds = append(lockedBalanceIds, id)
+					if id == owner.BalanceId {
+						ownFound, ownPlain = true, plain
+					} else if !plain || !slices.Contains(balanceIds, id) {
+						othersPlain = false
+					}
 				}
 			})
-			if !found || !plain {
+			if !ownFound || !ownPlain {
 				server.Raise(errors.New("probe shard funding record is missing or changed"))
+			}
+			if !othersPlain {
+				return
 			}
 			var blocked bool
 			server.Raise(tx.QueryRow(ctx, `SELECT
-				EXISTS (SELECT 1 FROM transfer_escrow WHERE balance_id=$1 AND NOT settled) OR
-				EXISTS (SELECT 1 FROM transfer_debit_journal WHERE balance_id=$1) OR
-				EXISTS (SELECT 1 FROM transfer_balance WHERE network_id=$2 AND balance_id<>$1)`, owner.BalanceId, owner.NetworkId).Scan(&blocked))
+				EXISTS (SELECT 1 FROM transfer_escrow WHERE balance_id=ANY($1) AND NOT settled) OR
+				EXISTS (SELECT 1 FROM transfer_debit_journal WHERE balance_id=ANY($1))`, lockedBalanceIds).Scan(&blocked))
 			if blocked {
 				return
 			}
@@ -499,12 +535,18 @@ func ReapProberShard(ctx context.Context, key ProberShardKey) (deleted bool, ret
 			speeds AS (DELETE FROM network_client_speed WHERE connection_id IN (SELECT connection_id FROM connections))
 			DELETE FROM network_client_connection WHERE client_id=ANY($1)`, clients))
 			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM provide_key WHERE client_id=ANY($1)`, clients))
+			// A connected client gets a location reliability row, and the
+			// ordinary client reap leaves it to the row's 31-day expiry. A probe
+			// client never provides, so nothing reads its row once it is gone.
+			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM network_client_location_reliability WHERE client_id=ANY($1)`, clients))
+			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM network_client_provider_intent WHERE client_id=ANY($1)`, clients))
 			// every revocation record of the network refuses its clients
 			// before the deletion commits
 			server.Raise(session.RetireNetworkRecords(ctx, owner.NetworkId))
 			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM network_client WHERE network_id=$1`, owner.NetworkId))
 			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM device WHERE network_id=$1`, owner.NetworkId))
-			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM transfer_balance WHERE balance_id=$1 AND network_id=$2`, owner.BalanceId, owner.NetworkId))
+			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM transfer_balance WHERE balance_id=ANY($1) AND network_id=$2`, lockedBalanceIds, owner.NetworkId))
+			retiredBalanceIds = lockedBalanceIds
 			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM network WHERE network_id=$1 AND admin_user_id=$2`, owner.NetworkId, owner.UserId))
 			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM network_user_auth_seedphrase WHERE user_id=$1`, owner.UserId))
 			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM network_user WHERE user_id=$1`, owner.UserId))
@@ -530,7 +572,10 @@ func ReapProberShard(ctx context.Context, key ProberShardKey) (deleted bool, ret
 					server.Raise(err)
 				})
 			})
-			refreshNetEscrow(ctx, []server.Id{cacheOwner.BalanceId})
+			if !slices.Contains(retiredBalanceIds, cacheOwner.BalanceId) {
+				retiredBalanceIds = append(retiredBalanceIds, cacheOwner.BalanceId)
+			}
+			refreshNetEscrow(ctx, retiredBalanceIds)
 			server.Tx(ctx, func(tx server.PgTx) {
 				server.RaisePgResult(tx.Exec(ctx, `UPDATE prober_shard_run SET state='closed',retired_client_ids='{}' WHERE task_id=$1 AND epoch=$2 AND state='deleted'`, key.TaskId, key.Epoch))
 			}, server.TxReadCommitted, server.OptNoRetry())
