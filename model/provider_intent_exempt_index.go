@@ -196,12 +196,13 @@ end
 // build_exempt_index advances the build and returns whether the index is
 // complete; its state is `#c <cursor> <sweep end>` or `#p ...` while it
 // sweeps a registry, and `#ready` scored by the negated build time. The cursor
-// is `start` or a score, the sweep end `none` (an empty registry) or a score. sweep_exempt_index takes one step of a
-// sweep and returns the members derived and the next cursor, or false at the
-// sweep's end. count_clients_indexed counts from a complete index, or returns
-// false when the index disagrees with its sources. The counts return
-// {normal_count, exempt_count} for `live_min` (the decimal unix milli string of
-// the first live expiry) without `skip_member`.
+// is `start` or a score, the sweep end `none` (an empty registry) or a score.
+// sweep_exempt_index takes one step of a sweep and returns the members derived
+// and the next cursor, or false at the sweep's end. count_clients_indexed
+// counts from a complete index, or returns false when the index disagrees with
+// its sources. The counts return {normal_count, exempt_count} for `live_min`
+// (the decimal unix milli string of the first live expiry) without
+// `skip_member`.
 var providerIntentExemptCountLua = fmt.Sprintf(`%s
 local function count_clients_walk(pi_key, present_key, expire_key, connected_key, proxy_key, provider_key, live_min, skip_member)
 	local live_min_ms = tonumber(live_min)
