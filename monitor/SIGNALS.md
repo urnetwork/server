@@ -21656,6 +21656,17 @@ future payload, including a huge finite timestamp, makes stall age
 `cannot-observe`, while independently observed disabled passes still alert.
 Neither a fresh evaluation timestamp nor a future payload proves a recent pass.
 
+If an owner starts live and ends while a desired configuration or metrics
+read returns, keep its cancellation/deadline verdict and returned source error
+graph;
+no retired capability finding is published. Generic visibility may retain
+finite local admission/execution proof, never the source text, body or private
+identity. A nil source adds no proof, and no later gateway is contacted. A live
+owner keeps the existing local unavailable finding. Legacy pre-canceled local
+behavior remains unchanged. Local proof does not establish remote completion,
+a stopped capability chain, failed provider measurement or recovery; missing
+source/phase/outcome authority remains unknown and cannot be backfilled.
+
 False-positive qualifiers: clock skew can cause unknown age without proving
 a failed clock, stalled chain or outage. Ordinary thirty-minute startup grace
 does not prove a stalled chain; exactly thirty minutes remains
