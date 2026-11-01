@@ -370,6 +370,7 @@ func TestControlRoutePressureClampsTheCanceledShare(t *testing.T) {
 // Otherwise 333 canceled discards beside 1,000 successful 6 s requests WARN
 // at 33.3%, even though no request that did work was canceled.
 func TestControlRoutePressureExcludesDiscardedCancellations(t *testing.T) {
+	completed := 0
 	now := time.Date(2026, 11, 1, 6, 0, 0, 0, time.UTC)
 	for _, fixture := range []struct {
 		name                        string
@@ -387,7 +388,7 @@ func TestControlRoutePressureExcludesDiscardedCancellations(t *testing.T) {
 		{name: "real page", canceled: 333 + 500, discardedCanceled: 333, mean: 12, wantTier: tierPage, wantCanceled: "500", wantShare: "50.0%"},
 		{name: "completed audits preserve cancellations", canceled: 500, mean: 12, wantTier: tierPage, wantCanceled: "500", wantShare: "50.0%"},
 	} {
-		t.Run(fixture.name, func(t *testing.T) {
+		func() {
 			process := controlRouteFixture(now, "synthetic-current")
 			discarded := float64(333)
 			if discarded < fixture.discardedCanceled {
@@ -405,19 +406,22 @@ func TestControlRoutePressureExcludesDiscardedCancellations(t *testing.T) {
 			// so the regression fails on the original false-pressure finding.
 			findings := evaluateControlRoutePressure([]*controlRouteProcess{process}, map[string]bool{process.host + "\x00" + process.block: true}, now)
 			if fixture.wantTier == "" && len(findings) != 0 {
-				t.Fatalf("discarded cancellations produced findings: %+v", findings)
+				t.Errorf("%s: discarded cancellations produced findings: %+v", fixture.name, findings)
+				return
 			}
 			alerts := runControlRouteFixture(t, now, controlRouteFixtureJson(t, now, process))
 			requireControlRouteFiniteAlerts(t, alerts)
 			if fixture.wantTier == "" {
 				if len(alerts) != 0 {
-					t.Fatalf("discarded cancellations produced alerts: %+v", alerts)
+					t.Errorf("%s: discarded cancellations produced alerts: %+v", fixture.name, alerts)
+					return
 				}
 				return
 			}
 			alert := requireAlertClass(t, alerts, "control-route-pressure")
 			if len(alerts) != 1 || alert.Severity != Severity(fixture.wantTier) {
-				t.Fatalf("ordinary cancellations changed tier: %+v", alerts)
+				t.Errorf("%s: ordinary cancellations changed tier: %+v", fixture.name, alerts)
+				return
 			}
 			for _, want := range []string{
 				"requests_5m=1000", " canceled_5m=" + fixture.wantCanceled + " ",
@@ -425,9 +429,12 @@ func TestControlRoutePressureExcludesDiscardedCancellations(t *testing.T) {
 				fmt.Sprintf("discarded_canceled_5m=%.0f", fixture.discardedCanceled),
 			} {
 				if !strings.Contains(alert.Markdown(), want) {
-					t.Fatalf("missing %q: %s", want, alert.Markdown())
+					t.Errorf("%s: missing %q: %s", fixture.name, want, alert.Markdown())
+					return
 				}
 			}
-		})
+		}()
+		completed++
 	}
+	t.Logf("discarded cancellation arithmetic cases complete: count=%d", completed)
 }
