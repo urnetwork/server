@@ -19897,7 +19897,8 @@ query and a duplicated cell still make the process unobservable.
 While the owning context remains live, source-path errors retain that same
 coverage WARN and `Bounded Mimir query unavailable` wording, with the shared
 finite `error_class` and any typed `ssh_admission_failures` phases. A finished
-owning context keeps the exact context-error return. Successful malformed,
+owning context keeps its context verdict and error text while retaining already
+returned source causes in the error graph. Successful malformed,
 warning or oversized replies retain the separate parser-unknown path. These
 diagnostics add no request, raw error, body or private gateway identity, and
 change no query, route, gateway order, deadline, response cap, cadence,
@@ -19910,6 +19911,13 @@ a finite set from returned errors, not gateway order, attempt counts or native
 contacts; release failure can follow command execution. False-negative
 qualifier: older coarse warnings cannot recover the discarded causes, and a
 finite legacy command class can still leave the HTTP/query boundary unknown.
+
+When an already-started owner ends during a gateway read, retain the returned
+source error graph and its finite local execution proofs while cancellation or
+deadline remains the lifecycle verdict and rendered error text. Publish no
+retired pressure result and contact no additional gateway. Nil-source returns
+add no proof. These diagnostics do not recover old discarded causes or identify
+remote progress, pressure, customer impact or a shared dependency failure.
 A healthy sibling or different logical query cannot explain this failure or
 certify its coverage. Preserve independently proven pressure and require fresh,
 complete expected-slot evidence plus the existing pressure and product recovery
@@ -20679,6 +20687,14 @@ a started/joined local SSH child alone proves no remote contact. False-negative
 qualifier: an absent boundary marker remains unknown, and an unavailable census
 cannot clear prior quota/security findings or certify recovery. A later valid
 census is a visibility control and needs its own fresh source identity and clocks.
+
+If the owner ends after a census gateway returns, retain that returned source
+error alongside cancellation or deadline expiry. Existing local admission and
+native execution proofs remain available to the generic `cannot-observe`
+projection; no retired census, source clock or provider count is published.
+A nil source adds no execution proof. This preserves next-attempt diagnostic
+authority only; it cannot reconstruct an older discarded error or establish a
+provider cause, remote completion, source completeness or recovery.
 
 A separately bound single-attempt diagnostic can refine this source failure
 when it retains an actual native SSH exit 255 and the existing exact
@@ -23235,6 +23251,16 @@ responding component, no HTTP retry or IPv4 replay, 401/403-specific guidance,
 
 ### 2.28 Current signup progress, route errors, and total consistency
 Probe: `signup-liveness`
+
+If the owning context ends while an already-started metrics read returns,
+retain its source error graph alongside the parent's cancellation/deadline.
+The generic visibility projection may retain only finite local admission and
+execution proofs; retired durable/metrics findings stay unpublished and no
+later demand/total query is added. Nil-source completion invents no proof.
+False-positive qualifier: a returned local boundary is not remote completion,
+failed signup or a shared backend cause. False-negative qualifier: missing
+original error/stage/clock and retired source coverage remain unknown; the
+correction cannot backfill historical causes or establish recovery.
 
 This ten-minute WARN probe is separate from §2.26's matured quality cohort.
 It does not infer an outage, automation, valid customer intent, or failure of

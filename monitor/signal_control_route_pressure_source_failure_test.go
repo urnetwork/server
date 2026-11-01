@@ -149,22 +149,37 @@ func TestControlRoutePressureSourceFailureDoesNotRenderPrivateErrorOrBody(t *tes
 }
 
 func TestControlRoutePressureSourceDiagnosticsPreserveOwnerTermination(t *testing.T) {
+	completed := 0
 	for _, expected := range []error{context.Canceled, context.DeadlineExceeded} {
-		ctx, cancel := context.WithCancel(context.Background())
-		if expected == context.DeadlineExceeded {
+		func() {
+			ctx, cancel := context.WithCancel(context.Background())
+			if expected == context.DeadlineExceeded {
+				cancel()
+				ctx, cancel = context.WithDeadline(context.Background(), time.Unix(1, 0))
+			}
+			defer cancel()
+			sourceCause := errors.New("synthetic-private-owner-failure")
+			admission := &sshAdmissionUnavailableError{err: sourceCause, phase: sshAdmissionFailureRelease}
+			alerts, err := runControlRouteSourceReplies(t, ctx, time.Unix(1_700_000_000, 0).UTC(), 1,
+				controlRouteSourceReply{beforeReturn: cancel, err: admission},
+				controlRouteSourceReply{err: errors.New("synthetic-unreached-gateway")},
+			)
 			cancel()
-			ctx, cancel = context.WithDeadline(context.Background(), time.Unix(1, 0))
-		}
-		t.Cleanup(cancel)
-		alerts, err := runControlRouteSourceReplies(t, ctx, time.Unix(1_700_000_000, 0).UTC(), 1,
-			controlRouteSourceReply{beforeReturn: cancel, err: &sshAdmissionUnavailableError{err: errors.New("synthetic-private-owner-failure"), phase: sshAdmissionFailureRelease}},
-			controlRouteSourceReply{err: errors.New("synthetic-unreached-gateway")},
-		)
-		cancel()
-		if err != expected || len(alerts) != 0 {
-			t.Fatal("terminated owner became a coverage warning or lost its exact context error")
-		}
+			if err == nil {
+				t.Errorf("%s: terminated owner returned nil error", expected)
+				return
+			}
+			if !errors.Is(err, expected) || err.Error() != expected.Error() || len(alerts) != 0 {
+				t.Errorf("%s: terminated owner became a coverage warning or lost its context verdict", expected)
+			}
+			var returned *sshAdmissionUnavailableError
+			if !errors.Is(err, sourceCause) || !errors.As(err, &returned) || returned != admission {
+				t.Errorf("%s: terminated owner discarded its returned typed source authority", expected)
+			}
+		}()
+		completed++
 	}
+	t.Logf("control owner termination cases complete: count=%d", completed)
 }
 
 func TestControlRoutePressureSourceDiagnosticsKeepPressureAndHealthyGatewayControls(t *testing.T) {

@@ -199,8 +199,14 @@ func (signupLivenessProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 	findings := []finding{signupWitnessFinding(durable)}
 	for _, demand := range []bool{true, false} {
 		metrics, err := observeSignupMetrics(ctx, env, durable.at, demand)
-		if ctx.Err() != nil {
-			return findings, ctx.Err()
+		if contextErr := ctx.Err(); contextErr != nil {
+			if err == contextErr {
+				return findings, err
+			}
+			if interrupted, ok := err.(*signalContextError); ok && interrupted != nil && interrupted.contextErr == contextErr {
+				return findings, err
+			}
+			return findings, mimirShellParentError(contextErr, err)
 		}
 		if err != nil {
 			component := "signup-liveness/published-total"
