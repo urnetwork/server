@@ -43235,11 +43235,13 @@ changing routes or containers. Disabled hosts in `monitor.yml` are deliberately
 excluded; this is how an operator-declared offline edge such as edge-5 stays out
 of both the health denominator and remote diagnostics.
 
-A curl exit 7 in less than one second is an immediate refusal only after a
-bounded monitor-local IPv6 route lookup proves the observer has a route. Do not
+A complete curl exit 7 in less than one second records an immediate connection
+failure. The bounded monitor-local IPv6 route lookup must qualify the observer
+route before assigning that failure to the edge; exit 7 alone does not prove a
+refused connection or TCP reset. Do not
 automatically label every such refusal dead-first DNAT. When the interface,
 configured address, LB controller, exact source route, and bound-source egress
-are healthy, the host-local SNI request also refuses in less than one second,
+are healthy, the host-local SNI request also fails in less than one second,
 and no configured LB pool socket is listening, reduce the matching LB journal
 to a count of one exact recent nginx `could not build map_hash` admission
 signature. A positive count emits PAGE `edge-lb-config-rejected`. The probe
@@ -43273,17 +43275,28 @@ after the other admission predicates matched, and the probe emitted both
 failure now terminates that target's causal classification at unknown; a
 synthetic regression proves it cannot fall through to reset.
 
-If the bounded admission discriminator is absent, continue to classify the
-ordinary immediate refusal as `edge-ipv6-reset`. Inspect DNAT rules in order
-and compare every pool target with live listening sockets. During a
-duplicate-to-single rolling transition, an old first rule can point at a
-listener that closed after the overlap scan while shadowing a later live rule.
-Remove only the proven dead target and deploy Warp's final socket-authoritative
-reconciliation on that transition. If the admission observation itself fails,
-emit `cannot-observe` and withhold reset classification when the other bounded
-admission-candidate predicates matched. Never infer a config rejection or a
-dead-first DNAT target from that unknown observation, controller activity, or
-an unbounded log search.
+If the bounded admission discriminator is absent, retain the genuine immediate
+curl connection failure as PAGE under the legacy identity `edge-ipv6-reset`.
+That identity is not a typed TCP-reset diagnosis. Curl exit 7 and sub-second
+duration alone do not prove a reset, a dead listener, or an ordered DNAT cause,
+even if stderr mentions a reset or a historical rolling transition had that
+cause. Preserve the failed exact-target observation and require independent
+same-target listener and ordered-rule evidence before attributing or repairing
+that layer. This observation does not authorize DNAT removal, deployment,
+restart, route or address changes. Curl 35/56 without an HTTP response likewise
+retain their current public failure classification without establishing a reset
+or forwarding cause. Missing/invalid native measurements remain unknown.
+
+The legacy class, PAGE severity, cadence, sustain, target identity, observer
+controls, narrow positive configuration-admission discriminator and three-200
+recovery contract are unchanged. This preserves incident continuity while
+correcting the mechanism and action. False positives: unavailable host controls
+or a rapid failure cannot supply absent causal proof. False negatives: keeping
+the cause unknown must not suppress a complete genuine transport failure. A
+provider IPv6 pause does not suppress public-edge IPv6 observations. If the
+admission observation itself fails, emit `cannot-observe` and withhold this
+classification when the other bounded admission-candidate predicates matched;
+that unknown observation cannot prove config rejection or a dead-first target.
 
 Run the monitor-local route lookup before the exact probes and again after an
 all-target pre-HTTP connection-failure cohort. Every target must have complete

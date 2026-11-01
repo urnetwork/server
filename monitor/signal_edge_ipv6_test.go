@@ -144,8 +144,8 @@ func TestEdgeIPv6SignalSyntheticRootCauseClasses(t *testing.T) {
 	if !strings.Contains(drift.Markdown(), "active services.yml") {
 		t.Fatalf("identity drift lacks source-of-truth detail: %s", drift.Markdown())
 	}
-	if !strings.Contains(reset.Markdown(), "dead-first DNAT") {
-		t.Fatalf("reset lacks stale-rule diagnosis: %s", reset.Markdown())
+	if !strings.Contains(reset.Mechanism, "cause remains unknown") || strings.Contains(reset.Action, "Remove only") {
+		t.Fatalf("immediate failure acquired an unsupported repair diagnosis: %s", reset.Markdown())
 	}
 	if !strings.Contains(drop.Markdown(), "upstream default-drop/ACL") {
 		t.Fatalf("timeout lacks upstream ACL diagnosis: %s", drop.Markdown())
@@ -275,8 +275,8 @@ func TestEdgeIPv6SignalSyntheticLBConfigRejectionIsNotDeadFirstDNAT(t *testing.T
 		}
 	}
 	deadFirst := requireAlertClass(t, alerts, "edge-ipv6-reset")
-	if !strings.Contains(deadFirst.Mechanism, "dead-first DNAT") {
-		t.Fatalf("dead-first control lost reset diagnosis: %s", deadFirst.Markdown())
+	if !strings.Contains(deadFirst.Mechanism, "cause remains unknown") || strings.Contains(deadFirst.Action, "Remove only") {
+		t.Fatalf("unqualified refusal acquired a DNAT diagnosis: %s", deadFirst.Markdown())
 	}
 	for _, alert := range alerts {
 		if strings.Contains(alert.Frame, "synthetic-healthy") {
