@@ -235,7 +235,7 @@ func TestExtenderActivationRefusesOnlyOnTheRequiredTest(t *testing.T) {
 			setup: func(probes *testActivationProbes) {
 				probes.carrierErrs[tcpProbe] = errors.New("connection refused")
 			},
-			wantRefusal: []string{"the tcp carrier did not answer", "connection refused"},
+			wantRefusal: []string{"the tcp carrier failed after", "connection refused"},
 			wantProbes:  []string{tcpProbe},
 		},
 		{
@@ -243,7 +243,7 @@ func TestExtenderActivationRefusesOnlyOnTheRequiredTest(t *testing.T) {
 			setup: func(probes *testActivationProbes) {
 				probes.forwardErr = errors.New("extender hello answered with status 502")
 			},
-			wantRefusal: []string{"the forward did not answer", "status 502"},
+			wantRefusal: []string{"the forward failed after", "status 502"},
 			wantProbes:  []string{tcpProbe, "forward"},
 		},
 		{
@@ -319,19 +319,14 @@ func TestExtenderActivationProbesTheRequiredTestFirst(t *testing.T) {
 // cost it alone (connect#230): the required test has already passed and the
 // dns ports have already been probed, each under its own budget, so the
 // activation is accepted on what answered. Here quic is offered first, and
-// the budget runs out while it waits.
+// the budget runs out while it waits, which its refused entry says.
 func TestExtenderActivationOptionalCarrierThatSpendsTheBudgetLosesOnlyItself(t *testing.T) {
 	probeNames := testOptionalCarrierProbes
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	probes := newTestActivationProbes()
 	probes.answer = func(probeCtx context.Context, probe string) error {
 		if probe == probeNames.quic {
 			// the budget runs out with no answer
-			cancel()
-			<-probeCtx.Done()
-			return probeCtx.Err()
+			return probes.clock.WaitOut(probeCtx)
 		}
 		if err := probeCtx.Err(); err != nil {
 			return fmt.Errorf("%s was probed with the budget spent: %w", probe, err)
@@ -339,7 +334,7 @@ func TestExtenderActivationOptionalCarrierThatSpendsTheBudgetLosesOnlyItself(t *
 		return nil
 	}
 	outcome := probes.judge(
-		ctx,
+		context.Background(),
 		connect.ExtenderCarrierQuic,
 		connect.ExtenderCarrierTcp,
 		connect.ExtenderCarrierDns,
@@ -357,8 +352,9 @@ func TestExtenderActivationOptionalCarrierThatSpendsTheBudgetLosesOnlyItself(t *
 	if refused := testRefusedCarrierNames(t, outcome); !slices.Equal(refused, []string{probeNames.quic}) {
 		t.Fatalf("refused carriers = %v, want only quic", refused)
 	}
-	if !strings.Contains(outcome.refusedCarriers[0].Error, context.Canceled.Error()) {
-		t.Fatalf("quic was left out for %q, want the spent budget", outcome.refusedCarriers[0].Error)
+	wantError := "no answer within the 10 s probe budget: " + context.DeadlineExceeded.Error()
+	if outcome.refusedCarriers[0].Error != wantError {
+		t.Fatalf("quic was left out for %q, want the spent budget %q", outcome.refusedCarriers[0].Error, wantError)
 	}
 }
 
