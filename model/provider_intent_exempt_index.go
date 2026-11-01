@@ -46,10 +46,13 @@
 // and a count rebuilds an index older than providerIntentExemptRebuildAge.
 //
 // The cost per call, each command O(log N) in the network's registry size N:
-//   - a count: one sentinel ZSCORE, four ZCOUNTs and up to four ZSCOREs for
-//     the skipped member, where the walk took two or three commands per member;
-//   - a write: the entry's re-derivation, at most four reads and a ZADD or a
-//     ZREM, and an EXPIRE once per half ttl; a removal, one ZREM;
+//   - a count: TIME, the sentinel ZSCORE and a TTL read (and an EXPIRE once per
+//     half ttl), four ZCOUNTs, an EXISTS while the index holds a live exempt
+//     entry, and up to four ZSCOREs for the skipped member, so at most thirteen
+//     commands, where the walk took two or three per member;
+//   - a write: the entry's re-derivation, at most four reads, then a ZADD and a
+//     TTL read (and an EXPIRE once per half ttl) or a ZREM; a removal, one
+//     ZREM;
 //   - a count while the index builds: the walk, plus at most two sweep steps
 //     deriving max(1024, N/4) members and two more, and any run of equal
 //     scores, at most seven commands each, for at most a handful of counts per
@@ -67,7 +70,9 @@
 // exempt entries than live registry entries, or a live exempt entry while one
 // of the intent keys every exempt entry needs is missing, means the index lost
 // track of its sources. The count drops the index, walks, and the next count
-// rebuilds it.
+// rebuilds it. The checks do not see an index that misses an entry or holds a
+// stale status, or one that lost a registry while the other registry has more
+// live members than the index has entries; the rebuild age bounds those.
 package model
 
 import (
