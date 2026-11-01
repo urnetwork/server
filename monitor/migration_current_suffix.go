@@ -876,6 +876,8 @@ var migrationCurrentSuffixContracts = slices.Concat(
 		// replaces the key history guard body the retention contract pins
 		clientKeyHistoryRetentionFloorMigrationContract,
 	},
+	// the index diet's drops; each version follows its migration's position
+	indexDietMigrationContracts,
 )
 
 // Free space a table keeps on every page it writes, so an update of an
