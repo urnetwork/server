@@ -260,12 +260,16 @@ func CancelProviderBandwidthReservation(ctx context.Context, reservationId serve
 // cutoff safely behind the lookahead window (e.g. now minus a couple of
 // days), since a bucket up to MaxProviderBandwidthLookaheadBuckets hours in
 // the future can still be actively reserved against.
-func RemoveExpiredProviderBandwidthQuota(ctx context.Context, minBucketStart time.Time) {
-	server.MaintenanceTx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`DELETE FROM provider_bandwidth_quota WHERE bucket_start < $1`,
-			minBucketStart.UTC(),
-		))
-	})
+//
+// Deletes oldest first, in bounded batches for at most retentionRunBudget,
+// through provider_bandwidth_quota_bucket_start.
+func RemoveExpiredProviderBandwidthQuota(ctx context.Context, minBucketStart time.Time) (removedCount int64) {
+	removedCount, _ = providerBandwidthQuotaRetention.RemoveBefore(ctx, minBucketStart, retentionBatchSize, time.Now().Add(retentionRunBudget))
+	return
 }
+
+// Reservations are read only for the current bucket and the lookahead after
+// it, so a bucket two days past is never read again.
+const ProviderBandwidthQuotaRetention = 48 * time.Hour
+
+var providerBandwidthQuotaRetention = newIndexedRetention(RetentionTableProviderBandwidthQuota, "provider_bandwidth_quota_id", "bucket_start")

@@ -12,6 +12,12 @@ const (
 	RetentionTableUserAuthReset            = "user_auth_reset"
 	RetentionTableDeviceAddHistory         = "device_add_history"
 	RetentionTableNetworkNameReclaim       = "network_name_reclaim"
+	RetentionTableProviderBlackholeCheck   = "provider_blackhole_check"
+	RetentionTableProviderBandwidthQuota   = "provider_bandwidth_quota"
+	// the gated extender tier's release ledger
+	RetentionTableNetworkExtenderReleaseRequest = "network_extender_release_request"
+	RetentionTableNetworkExtenderRelease        = "network_extender_release"
+	RetentionTableNetworkExtenderBlockReport    = "network_extender_block_report"
 )
 
 var retentionTables = []string{
@@ -20,6 +26,11 @@ var retentionTables = []string{
 	RetentionTableUserAuthReset,
 	RetentionTableDeviceAddHistory,
 	RetentionTableNetworkNameReclaim,
+	RetentionTableProviderBlackholeCheck,
+	RetentionTableProviderBandwidthQuota,
+	RetentionTableNetworkExtenderReleaseRequest,
+	RetentionTableNetworkExtenderRelease,
+	RetentionTableNetworkExtenderBlockReport,
 }
 
 // Rows the expiry and retention tasks deleted, by table: their rate signal,
