@@ -118,7 +118,9 @@ func TestMigrationCurrentSuffixContractsEmitInVersionOrder(t *testing.T) {
 // its own migration.
 func TestIdentityRetentionSchemaFaultsReachSignal(t *testing.T) {
 	indexVersion := server.RetiredChildNetworkClientIndexMigrationVersion()
-	historyVersion := server.ClientKeyHistoryRetentionMigrationVersion()
+	// the floor migration's contract owns the key history custody from its
+	// version on, so a fault at the head is drift of the floor's version
+	historyVersion := server.ClientKeyHistoryRetentionFloorMigrationVersion()
 	faults := []struct {
 		name    string
 		version int
