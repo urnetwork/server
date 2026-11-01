@@ -45,6 +45,7 @@ func TestLagDevDashboardAnswersEachQuestion(t *testing.T) {
 		"download speed":          "urnetwork_stats_lag_download_p50_mbps",
 		"upload speed":            "urnetwork_stats_lag_upload_p50_mbps",
 		"extenders offered":       "urnetwork_stats_lag_extenders_offered",
+		"unstable extenders":      "urnetwork_stats_lag_extenders_unstable",
 		"certificate requests":    "urnetwork_stats_lag_measurement_requests",
 		"opted-out extenders":     "urnetwork_stats_lag_extenders_opted_out",
 		"visitors by country":     "urnetwork_stats_lag_visitors_24h_by_country",

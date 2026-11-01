@@ -78,7 +78,12 @@ var statsLagUploadP50Gauge = newStatsGaugeVec(
 
 var statsLagExtendersOfferedGauge = newStatsGauge(
 	"lag_extenders_offered",
-	"Extenders the lag.dev sample can offer now: published names, issued, delivered, placed (A4)",
+	"Extenders the lag.dev sample can offer now: published names, issued, delivered, placed and stable (A4)",
+)
+
+var statsLagExtendersUnstableGauge = newStatsGauge(
+	"lag_extenders_unstable",
+	"Extenders the lag.dev sample leaves out now because they are unstable: a failed latest uptime probe or a restart loop (A4)",
 )
 
 var statsLagMeasurementRequestsGauge = newStatsGaugeVec(
@@ -175,7 +180,10 @@ func statsRefreshLag(ctx context.Context, now time.Time) {
 	statsLagDownloadP50Gauge.replace(download)
 	statsLagUploadP50Gauge.replace(upload)
 
-	statsLagExtendersOfferedGauge.set(float64(len(loadLagServing(ctx, now).extenders)))
+	serving := loadLagServing(ctx, now)
+	stable := lagStableServing(ctx, serving, now)
+	statsLagExtendersOfferedGauge.set(float64(len(stable.extenders)))
+	statsLagExtendersUnstableGauge.set(float64(len(serving.extenders) - len(stable.extenders)))
 
 	stateCounts := model.CountNetworkExtenderMeasurementsByState(ctx)
 	states := make([]statsLabeledValue, 0, len(statsLagMeasurementStates))

@@ -146,6 +146,7 @@ func TestStatsRefreshLagExportsGauges(t *testing.T) {
 		connect.AssertEqual(t, testutil.ToFloat64(statsLagVisitors24hByCountryGauge.gauge.WithLabelValues("au")), float64(1))
 		// a test env with no extender network offers none
 		connect.AssertEqual(t, testutil.ToFloat64(statsLagExtendersOfferedGauge.gauge), float64(0))
+		connect.AssertEqual(t, testutil.ToFloat64(statsLagExtendersUnstableGauge.gauge), float64(0))
 	})
 }
 
