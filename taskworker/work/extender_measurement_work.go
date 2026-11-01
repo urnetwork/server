@@ -52,7 +52,8 @@ import (
 // Both chains do nothing while the measurement block is disabled, and
 // neither fails its task for a failure of one certificate: a failed order
 // backs off on its own row, or waits out the CA's Retry-After when the CA
-// refused it under a rate limit (amendment 24), and the chain re-arms either
+// refused it under a rate limit, a refusal of a new certificate holding every
+// new certificate until then (amendment 24), and the chain re-arms either
 // way.
 
 const (
