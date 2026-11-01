@@ -20,6 +20,13 @@ import (
 const subnetReplayEnrollmentSchema = "urnetwork-monitor-subnet-replay-v1"
 const maximumSubnetReplaySettingsBytes = 16 * 1024
 const maximumSubnetReplayValidators = 16
+const maximumSubnetReplayPlannedSweeps = 16
+
+// One operator's owner-approved v1 carry sweep epoch (SIGNALS.md §22.7).
+type SubnetReplayPlannedSweep struct {
+	NoId  uint64
+	Epoch uint64
+}
 
 // SubnetReplaySettings is shared by the weight, settlement, evidence and
 // process readers. Durations are wall-clock bounds; counts and byte sizes are
@@ -134,6 +141,10 @@ type SubnetReplaySettings struct {
 	WriterMinimumActions uint64
 	// Per-action gas liability ceiling in wei, decimal; empty leaves runway unknown.
 	WriterActionLiabilityWei string
+	// Each operator's planned v1 carry sweep epoch. That post-cutover epoch
+	// keeps every ordinary v1 progress rule, and only a sweep-leaf root at it
+	// is sanctioned. Absent leaves post-cutover rows to the cutover rules.
+	PlannedV1SweepEpochs []SubnetReplayPlannedSweep
 
 	invalid      bool
 	desiredInput [32]byte
@@ -196,6 +207,7 @@ func cloneSubnetReplaySettings(value *SubnetReplaySettings) *SubnetReplaySetting
 	copy := *value
 	copy.ApiOrigins = append([]string(nil), value.ApiOrigins...)
 	copy.Validators = append([]string(nil), value.Validators...)
+	copy.PlannedV1SweepEpochs = append([]SubnetReplayPlannedSweep(nil), value.PlannedV1SweepEpochs...)
 	return &copy
 }
 
@@ -210,15 +222,22 @@ func effectiveSubnetReplaySettings(value *SubnetReplaySettings) *SubnetReplaySet
 // Only the enrollment fields are read from monitor.yml; budgets keep their
 // single default so a configuration typo cannot silently widen a bound.
 type subnetReplayEnrollmentYaml struct {
-	Schema                   string   `yaml:"schema"`
-	ApiOrigins               []string `yaml:"api_origins"`
-	ReplayFromBlock          uint64   `yaml:"replay_from_block"`
-	EvidenceFromBlock        uint64   `yaml:"evidence_from_block"`
-	Validators               []string `yaml:"validators"`
-	MaximumWeightLimitU16    uint16   `yaml:"maximum_weight_limit_u16"`
-	AnchorDeadlineBlocks     uint64   `yaml:"anchor_deadline_blocks"`
-	WriterMinimumActions     uint64   `yaml:"writer_minimum_actions"`
-	WriterActionLiabilityWei string   `yaml:"writer_action_liability_wei"`
+	Schema                   string                         `yaml:"schema"`
+	ApiOrigins               []string                       `yaml:"api_origins"`
+	ReplayFromBlock          uint64                         `yaml:"replay_from_block"`
+	EvidenceFromBlock        uint64                         `yaml:"evidence_from_block"`
+	Validators               []string                       `yaml:"validators"`
+	MaximumWeightLimitU16    uint16                         `yaml:"maximum_weight_limit_u16"`
+	AnchorDeadlineBlocks     uint64                         `yaml:"anchor_deadline_blocks"`
+	WriterMinimumActions     uint64                         `yaml:"writer_minimum_actions"`
+	WriterActionLiabilityWei string                         `yaml:"writer_action_liability_wei"`
+	PlannedV1SweepEpochs     []subnetReplayPlannedSweepYaml `yaml:"planned_v1_sweep_epochs"`
+}
+
+// One planned sweep entry; unknown keys refuse the whole block.
+type subnetReplayPlannedSweepYaml struct {
+	NoId  uint64 `yaml:"no_id"`
+	Epoch uint64 `yaml:"epoch"`
 }
 
 // An absent block is nil, so every enrollment-dependent check stays unknown.
@@ -256,6 +275,9 @@ func subnetReplaySettingsFromNode(node yaml.Node) *SubnetReplaySettings {
 	value.AnchorDeadlineBlocks = enrollment.AnchorDeadlineBlocks
 	value.WriterMinimumActions = enrollment.WriterMinimumActions
 	value.WriterActionLiabilityWei = enrollment.WriterActionLiabilityWei
+	for _, sweep := range enrollment.PlannedV1SweepEpochs {
+		value.PlannedV1SweepEpochs = append(value.PlannedV1SweepEpochs, SubnetReplayPlannedSweep{NoId: sweep.NoId, Epoch: sweep.Epoch})
+	}
 	value.desiredInput = invalid.desiredInput
 	if value.enrollmentReason() != "" {
 		value.invalid = true
@@ -304,7 +326,32 @@ func (self *SubnetReplaySettings) enrollmentReason() string {
 	if self.WriterActionLiabilityWei != "" && (!subnetReplayDecimal.MatchString(self.WriterActionLiabilityWei) || strings.TrimLeft(self.WriterActionLiabilityWei, "0") == "") {
 		return "enrollment-invalid"
 	}
+	// One sweep per operator. Epoch zero precedes every vault2 first epoch,
+	// so it can never be a sweep epoch.
+	if len(self.PlannedV1SweepEpochs) > maximumSubnetReplayPlannedSweeps {
+		return "enrollment-invalid"
+	}
+	planned := map[uint64]bool{}
+	for _, sweep := range self.PlannedV1SweepEpochs {
+		if sweep.NoId == 0 || sweep.Epoch == 0 || planned[sweep.NoId] {
+			return "enrollment-invalid"
+		}
+		planned[sweep.NoId] = true
+	}
 	return ""
+}
+
+// The planned sweep epoch of each operator, or nil when none is enrolled or
+// the enrollment is malformed and therefore unknown.
+func (self *SubnetReplaySettings) plannedV1SweepEpochs() map[uint64]uint64 {
+	if self == nil || self.enrollmentReason() != "" || len(self.PlannedV1SweepEpochs) == 0 {
+		return nil
+	}
+	planned := map[uint64]uint64{}
+	for _, sweep := range self.PlannedV1SweepEpochs {
+		planned[sweep.NoId] = sweep.Epoch
+	}
+	return planned
 }
 
 // Budgets must be positive for a run to be bounded; an embedder that zeroes
