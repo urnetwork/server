@@ -541,27 +541,30 @@ func (self *NetworkExtenderBlockedSource) BlockedKeys(keyHexes []string, country
 	return blocked
 }
 
-// Drops the release, request and report rows older than `minTime`, which a
-// maintenance task runs past the longest window the policy reads (the client
-// window, R3). Phased: the task that calls it is not wired yet.
-func RemoveExpiredNetworkExtenderReleases(ctx context.Context, minTime time.Time) {
-	server.MaintenanceTx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`DELETE FROM network_extender_release_request WHERE request_time < $1`,
-			minTime.UTC(),
-		))
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`DELETE FROM network_extender_release WHERE release_time < $1`,
-			minTime.UTC(),
-		))
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`DELETE FROM network_extender_block_report WHERE report_time < $1`,
-			minTime.UTC(),
-		))
-	})
+// The policy reads releases over its client window
+// (connect.ExtenderReleaseClientWindow, 30 days, R3) and requests and block
+// reports over shorter ones, so a day past it no reader counts a row.
+const NetworkExtenderReleaseRetention = connect.ExtenderReleaseClientWindow + 24*time.Hour
+
+// Each ledger row is keyed by a time-ordered id (server.NewId), so its expired
+// rows are a range of the primary key; the request table has no index that
+// leads with its time.
+var networkExtenderReleaseRetentions = []*timeOrderedRetention{
+	newTimeOrderedRetention(RetentionTableNetworkExtenderReleaseRequest, "request_id", "request_time"),
+	newTimeOrderedRetention(RetentionTableNetworkExtenderRelease, "release_id", "release_time"),
+	newTimeOrderedRetention(RetentionTableNetworkExtenderBlockReport, "report_id", "report_time"),
+}
+
+// Drops the release, request and report rows older than `minTime`, which the
+// extender latency sweep runs past the longest window the policy reads (the
+// client window, R3): oldest first, in bounded batches, each table for at most
+// retentionRunBudget.
+func RemoveExpiredNetworkExtenderReleases(ctx context.Context, minTime time.Time) (removedCount int64) {
+	for _, retention := range networkExtenderReleaseRetentions {
+		count, _ := retention.RemoveBefore(ctx, minTime, retentionBatchSize, time.Now().Add(retentionRunBudget))
+		removedCount += count
+	}
+	return
 }
 
 // The key map the ledger and the blocked source are built over: hex key to

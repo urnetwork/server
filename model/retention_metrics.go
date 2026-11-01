@@ -1,0 +1,55 @@
+package model
+
+import (
+	"github.com/prometheus/client_golang/prometheus"
+)
+
+// The tables the retention tasks delete from, as their counter labels. Labels
+// come from this list only, never from data.
+const (
+	RetentionTableNetworkUserActionAttempt = "network_user_action_attempt"
+	RetentionTableNetworkCreateAttempt     = "network_create_attempt"
+	RetentionTableUserAuthReset            = "user_auth_reset"
+	RetentionTableDeviceAddHistory         = "device_add_history"
+	RetentionTableNetworkNameReclaim       = "network_name_reclaim"
+	RetentionTableProviderBlackholeCheck   = "provider_blackhole_check"
+	RetentionTableProviderBandwidthQuota   = "provider_bandwidth_quota"
+	// the gated extender tier's release ledger
+	RetentionTableNetworkExtenderReleaseRequest = "network_extender_release_request"
+	RetentionTableNetworkExtenderRelease        = "network_extender_release"
+	RetentionTableNetworkExtenderBlockReport    = "network_extender_block_report"
+)
+
+var retentionTables = []string{
+	RetentionTableNetworkUserActionAttempt,
+	RetentionTableNetworkCreateAttempt,
+	RetentionTableUserAuthReset,
+	RetentionTableDeviceAddHistory,
+	RetentionTableNetworkNameReclaim,
+	RetentionTableProviderBlackholeCheck,
+	RetentionTableProviderBandwidthQuota,
+	RetentionTableNetworkExtenderReleaseRequest,
+	RetentionTableNetworkExtenderRelease,
+	RetentionTableNetworkExtenderBlockReport,
+}
+
+// Rows the expiry and retention tasks deleted, by table: their rate signal,
+// in place of per-row logs.
+var retentionDeletedRowsCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "urnetwork_retention_deleted_rows_total",
+	Help: "Rows the expiry and retention tasks deleted, by table",
+}, []string{"table"})
+
+func init() {
+	for _, table := range retentionTables {
+		retentionDeletedRowsCounter.WithLabelValues(table)
+	}
+	prometheus.MustRegister(retentionDeletedRowsCounter)
+}
+
+// Counts rows a retention delete removed from one of retentionTables.
+func countRetentionDeletedRows(table string, count int64) {
+	if 0 < count {
+		retentionDeletedRowsCounter.WithLabelValues(table).Add(float64(count))
+	}
+}

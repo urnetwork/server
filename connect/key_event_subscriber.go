@@ -41,6 +41,10 @@ var (
 		Name: "urnetwork_key_events_dispatched_client_removed_total",
 		Help: "client removed key events dispatched to the exchange",
 	})
+	keyEventsDispatchedClientRecycle = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "urnetwork_key_events_dispatched_client_recycle_total",
+		Help: "stuck provider recycle flag key events dispatched to the exchange",
+	})
 )
 
 func init() {
@@ -51,6 +55,7 @@ func init() {
 		keyEventResyncs,
 		keyEventsDispatchedClientClose,
 		keyEventsDispatchedClientRemoved,
+		keyEventsDispatchedClientRecycle,
 	)
 }
 
@@ -81,6 +86,9 @@ type keyEventSubscriber struct {
 	// closes what this process holds of a client removed through the api
 	// (CLIENTCLOSE.md); it must not block
 	clientRemoved func(server.Id)
+	// recycles a stuck provider the api reported, if its resident is here
+	// (client_recycle.go); it must not block. Nil ignores the flags.
+	clientRecycle func(server.Id)
 	newPeerDelta  func(context.Context, server.Id, server.Id, string) *model.NetworkPeerDelta
 	// the session revision read behind hints; session.NetworkSessionRevision
 	// when unset
@@ -178,6 +186,13 @@ func (self *keyEventSubscriber) SetClientRemoved(clientRemoved func(server.Id)) 
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	self.clientRemoved = clientRemoved
+}
+
+// Sets what a client's recycle flag event runs. It must not block.
+func (self *keyEventSubscriber) SetClientRecycle(clientRecycle func(server.Id)) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.clientRecycle = clientRecycle
 }
 
 // Kicks every close listener, trickled over the resync spread. Requests added
@@ -323,6 +338,23 @@ func (self *keyEventSubscriber) dispatch(channel string, event string) {
 		}
 		return
 	}
+	if clientId, ok := model.ParseClientRecycleKeyEvent(channel); ok {
+		// a set only if absent emits set only when it sets; the ttl's expire
+		// and expired are not reports
+		if event == "set" {
+			var clientRecycle func(server.Id)
+			func() {
+				self.stateLock.Lock()
+				defer self.stateLock.Unlock()
+				clientRecycle = self.clientRecycle
+			}()
+			if clientRecycle != nil {
+				clientRecycle(clientId)
+				keyEventsDispatchedClientRecycle.Inc()
+			}
+		}
+		return
+	}
 	if clientId, ok := model.ParseClientCloseKeyEvent(channel); ok {
 		// a take (spop) or the set emptying (del) is the listener's own work
 		if event == "sadd" {
@@ -403,6 +435,7 @@ func (self *keyEventSubscriber) run() {
 		model.StreamHopsKeyEventPattern(db),
 		model.ClientRemovedKeyEventPattern(db),
 		model.ClientCloseKeyEventPattern(db),
+		model.ClientRecycleKeyEventPattern(db),
 	}
 
 	for {

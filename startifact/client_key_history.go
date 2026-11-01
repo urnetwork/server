@@ -89,11 +89,31 @@ func sealClientKeyEvidence(deploymentID string, domain protocol.ClientKeyHistory
 // Rechecks the retained exact wrapper and typed payload before the real
 // create-if-absent writes and exact readback. No metadata-only receipt suffices.
 func PublishClientKeyEvidence(ctx context.Context, store server.BlobStore, encoded []byte, contentHash string) (*Published, error) {
-	if ctx == nil || store == nil || len(encoded) == 0 || len(encoded) > MaxClientKeyEvidenceBytes {
+	if ctx == nil || store == nil {
 		return nil, errors.New("client-key publication owner or finite payload is unavailable")
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	evidence, err := PrepareClientKeyEvidence(encoded, contentHash)
+	if err != nil {
+		return nil, err
+	}
+	return evidence.prepared.Publish(ctx, store)
+}
+
+// One retained client-key wrapper, checked once (PrepareClientKeyEvidence),
+// for a writer that makes repeated bounded attempts. Each attempt still owns
+// its create-if-absent and exact readback. Immutable and safe concurrently.
+type PreparedClientKeyEvidence struct {
+	prepared *PreparedEvidence
+}
+
+// Applies PublishClientKeyEvidence's complete wrapper and typed payload
+// checks without any storage request.
+func PrepareClientKeyEvidence(encoded []byte, contentHash string) (*PreparedClientKeyEvidence, error) {
+	if len(encoded) == 0 || len(encoded) > MaxClientKeyEvidenceBytes {
+		return nil, errors.New("client-key publication owner or finite payload is unavailable")
 	}
 	encoded = bytes.Clone(encoded)
 	var envelope EvidenceEnvelope
@@ -124,5 +144,50 @@ func PublishClientKeyEvidence(ctx context.Context, store server.BlobStore, encod
 	if envelope.ChainID != domain.ChainID || envelope.Netuid != domain.Netuid || envelope.GenesisHash != fmt.Sprintf("0x%x", domain.GenesisHash) || sha256.Sum256([]byte(envelope.DeploymentID)) != domain.DeploymentIDHash {
 		return nil, errors.New("client-key payload and public evidence domains differ")
 	}
-	return PublishEvidence(ctx, store, &envelope)
+	prepared, err := PrepareEvidence(&envelope)
+	if err != nil {
+		return nil, err
+	}
+	return &PreparedClientKeyEvidence{prepared: prepared}, nil
+}
+
+// The signed content hash, "sha256:<hex>".
+func (self *PreparedClientKeyEvidence) ContentHash() string {
+	return self.prepared.identity.ContentHash
+}
+
+// The exact wrapper's length in bytes.
+func (self *PreparedClientKeyEvidence) Size() int {
+	return len(self.prepared.encoded)
+}
+
+// The key the evidence is stored under in store.
+func (self *PreparedClientKeyEvidence) ContentKey(store server.BlobStore) (string, error) {
+	return EvidenceContentKey(store, self.prepared.identity.ContentHash)
+}
+
+// Creates the content route if it is absent, then reads it back exactly.
+// created is false when the conditional create found identical bytes stored.
+func (self *PreparedClientKeyEvidence) Publish(ctx context.Context, store server.BlobStore) (created bool, err error) {
+	if ctx == nil || store == nil {
+		return false, errors.New("client-key publication owner or finite payload is unavailable")
+	}
+	_, created, err = self.prepared.publish(ctx, store)
+	return created, err
+}
+
+// Reads the content route first and accepts it, with no write, when it holds
+// exactly these bytes; only an absent object is created and read back. For
+// evidence that is almost always stored already, such as an unchanged key's
+// registration, one GET replaces the conditional PUT and its readback.
+func (self *PreparedClientKeyEvidence) VerifyOrPublish(ctx context.Context, store server.BlobStore) (created bool, err error) {
+	if ctx == nil || store == nil {
+		return false, errors.New("client-key publication owner or finite payload is unavailable")
+	}
+	stored, err := self.prepared.readStored(ctx, store)
+	if err != nil || stored {
+		return false, err
+	}
+	_, created, err = self.prepared.publish(ctx, store)
+	return created, err
 }

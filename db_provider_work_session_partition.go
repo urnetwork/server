@@ -68,6 +68,10 @@ const providerWorkSessionEventTable = "provider_work_session_event"
 // describe are (ContractRetention; decided 2026-10-24).
 const ProviderWorkSessionEventRetention = 13 * 7 * 24 * time.Hour
 
+// The clock skew between a connection id's mint and its admit's observed time
+// that the retire lookup absorbs (provider_work_session_admit_floor's day).
+const providerWorkSessionAdmitSkew = 24 * time.Hour
+
 // The setting the registry's drop transaction sets on before the drop fence.
 const providerWorkSessionRetentionSetting = "urnetwork.provider_work_session_retention"
 
@@ -219,11 +223,20 @@ func providerWorkSessionEventDropFence(ctx context.Context, tx PgTx, r Partition
 // the event parent's write fence. A concurrent retirement either committed its
 // event already or still appears connected here, so neither order loses its
 // admit. This also covers the legacy leaf and clients removed from the directory.
+//
+// Only a connection minted before the leaf's upper bound, plus the admit
+// floor's day of clock skew, can have an admit in it: its admits are appended
+// once its row exists, after its id was minted (providerWorkSessionAdmitFloorSql),
+// and a re-admit comes later still. So the check reads the open connections
+// below that id, a short range of the connection key for any leaf older than
+// the day connections live, rather than every open connection: the recheck
+// runs while the drop holds the event parent's ACCESS EXCLUSIVE lock, which
+// every connection open and close waits behind.
 func providerWorkSessionEventDropBlocker(ctx context.Context, conn PgQuerier, r PartitionRange) string {
 	var needed bool
 	Raise(conn.QueryRow(ctx, fmt.Sprintf(`SELECT EXISTS (
 		SELECT 1 FROM network_client_connection connection
-		WHERE connection.connected AND EXISTS (
+		WHERE connection.connected AND connection.connection_id < %s AND EXISTS (
 			SELECT 1 FROM public.%s event
 			WHERE event.client_id = connection.client_id
 			AND event.connection_id = connection.connection_id AND event.kind = 'admit'
@@ -233,7 +246,7 @@ func providerWorkSessionEventDropBlocker(ctx context.Context, conn PgQuerier, r 
 				AND newer.kind = 'admit' AND newer.sequence > event.sequence
 			)
 		)
-	)`, quoteIdentifier(providerWorkSessionEventLeaf(r)))).Scan(&needed))
+	)`, contractIdLiteral(ContractIdFloor(r.Upper.Add(providerWorkSessionAdmitSkew))), quoteIdentifier(providerWorkSessionEventLeaf(r)))).Scan(&needed))
 	if needed {
 		return "an open connection still needs its admission event"
 	}

@@ -20,6 +20,13 @@
 //     in process when its resident is in the same process (connect
 //     resident_local_transport.go): off, all, or blocks separated by commas
 //     or spaces. Read by the exchanges, not by the mover.
+//   - `stuckProviderSignal`: the api blocks whose processes report a provider
+//     stuck retrying terminal refusals (controller
+//     connect_control_stuck_provider.go): off, all, or blocks, as
+//     `localTransport`. Read by the api processes.
+//   - `stuckProviderRecycle`: the connect blocks whose exchanges recycle a
+//     reported provider they host (connect client_recycle.go): off, all, or
+//     blocks, as `localTransport`. Read by the exchanges, not by the mover.
 //
 // The control can only narrow the code settings, never widen them:
 //   - the mode never goes above what `EnableMove` allows. `MoveDefaultMode` is
@@ -35,12 +42,18 @@
 //   - `localTransport` chooses the blocks, never past `EnableLocalTransport`.
 //     `LocalTransportDefault` is the choice while the control sets none, not
 //     a ceiling: an operator turns in-process delivery on with the control.
+//   - `stuckProviderSignal` and `stuckProviderRecycle` choose blocks the same
+//     way, never past `EnableStuckProviderSignal` and
+//     `EnableStuckProviderRecycle`, with `StuckProviderSignalDefault` and
+//     `StuckProviderRecycleDefault` as their choices while the control sets
+//     none.
 //
 // A field that does not parse narrows as far as it can: mode off,
 // maxPerMinute 0, an infinite tolerance (no balance sources), drain moves off,
-// placement off, transport delay off. A `localTransport` list names only the
-// blocks it lists, so a value that is neither off nor all and names no real
-// block turns in-process delivery off everywhere.
+// placement off, transport delay off. A `localTransport`,
+// `stuckProviderSignal` or `stuckProviderRecycle` list names only the blocks
+// it lists, so a value that is neither off nor all and names no real block
+// turns its switch off everywhere.
 // An absent key or field leaves the code default. A reader that cannot read
 // the control acts as if the mode were off (the mover does); the connect
 // handlers keep the transport delay of their last read, and the exchanges
@@ -69,9 +82,13 @@ const (
 	ConnectMoveControlFieldPlacement      = "placement"
 	ConnectMoveControlFieldTransportDelay = "transportDelay"
 	ConnectMoveControlFieldLocalTransport = "localTransport"
+
+	ConnectMoveControlFieldStuckProviderSignal  = "stuckProviderSignal"
+	ConnectMoveControlFieldStuckProviderRecycle = "stuckProviderRecycle"
 )
 
-// The `localTransport` values that are not block lists.
+// The values of a block list field (`localTransport`, `stuckProviderSignal`,
+// `stuckProviderRecycle`) that are not block lists.
 const (
 	ConnectLocalTransportOff = "off"
 	ConnectLocalTransportAll = "all"
@@ -144,6 +161,20 @@ type ConnectMoveControlCeiling struct {
 	// `LocalTransportDefault`: the blocks while the control sets none, in the
 	// control's syntax. Not a ceiling.
 	LocalTransportDefault string
+	// The api's switch for reporting stuck providers,
+	// `EnableStuckProviderSignal`. Every other reader leaves it false and
+	// ignores the control's stuckProviderSignal.
+	EnableStuckProviderSignal bool
+	// `StuckProviderSignalDefault`: the api blocks while the control sets
+	// none, in the control's syntax. Not a ceiling.
+	StuckProviderSignalDefault string
+	// The exchange's switch for recycling reported providers,
+	// `EnableStuckProviderRecycle`. Every other reader leaves it false and
+	// ignores the control's stuckProviderRecycle.
+	EnableStuckProviderRecycle bool
+	// `StuckProviderRecycleDefault`: the connect blocks while the control sets
+	// none, in the control's syntax. Not a ceiling.
+	StuckProviderRecycleDefault string
 }
 
 // The effective control: the code settings as the Redis control narrowed them.
@@ -170,11 +201,31 @@ type ConnectMoveControl struct {
 	// The connect blocks that deliver transports in process, when not all.
 	// Empty for none.
 	LocalTransportBlocks map[string]bool
+	// Every api block reports stuck providers.
+	StuckProviderSignalAll bool
+	// The api blocks that report stuck providers, when not all. Empty for
+	// none.
+	StuckProviderSignalBlocks map[string]bool
+	// Every connect block recycles reported providers.
+	StuckProviderRecycleAll bool
+	// The connect blocks that recycle reported providers, when not all. Empty
+	// for none.
+	StuckProviderRecycleBlocks map[string]bool
 }
 
 // Whether the exchanges of block deliver transports in process.
 func (self *ConnectMoveControl) LocalTransportAllows(block string) bool {
 	return self.LocalTransportAll || self.LocalTransportBlocks[block]
+}
+
+// Whether the api processes of block report stuck providers.
+func (self *ConnectMoveControl) StuckProviderSignalAllows(block string) bool {
+	return self.StuckProviderSignalAll || self.StuckProviderSignalBlocks[block]
+}
+
+// Whether the exchanges of block recycle reported providers.
+func (self *ConnectMoveControl) StuckProviderRecycleAllows(block string) bool {
+	return self.StuckProviderRecycleAll || self.StuckProviderRecycleBlocks[block]
 }
 
 // The control the fields narrow the ceiling to. Pure: fields is the control
@@ -242,7 +293,23 @@ func NarrowConnectMoveControl(fields map[string]string, ceiling ConnectMoveContr
 		if !localTransportSet {
 			localTransportValue = ceiling.LocalTransportDefault
 		}
-		control.LocalTransportAll, control.LocalTransportBlocks = parseConnectLocalTransport(localTransportValue)
+		control.LocalTransportAll, control.LocalTransportBlocks = parseConnectControlBlocks(localTransportValue)
+	}
+
+	if ceiling.EnableStuckProviderSignal {
+		signalValue, signalSet := fields[ConnectMoveControlFieldStuckProviderSignal]
+		if !signalSet {
+			signalValue = ceiling.StuckProviderSignalDefault
+		}
+		control.StuckProviderSignalAll, control.StuckProviderSignalBlocks = parseConnectControlBlocks(signalValue)
+	}
+
+	if ceiling.EnableStuckProviderRecycle {
+		recycleValue, recycleSet := fields[ConnectMoveControlFieldStuckProviderRecycle]
+		if !recycleSet {
+			recycleValue = ceiling.StuckProviderRecycleDefault
+		}
+		control.StuckProviderRecycleAll, control.StuckProviderRecycleBlocks = parseConnectControlBlocks(recycleValue)
 	}
 
 	if !ceiling.EnableMove {
@@ -254,7 +321,7 @@ func NarrowConnectMoveControl(fields map[string]string, ceiling ConnectMoveContr
 
 // off, all, or a list of blocks separated by commas or white space. An empty
 // value or list names no block.
-func parseConnectLocalTransport(value string) (all bool, blocks map[string]bool) {
+func parseConnectControlBlocks(value string) (all bool, blocks map[string]bool) {
 	value = strings.TrimSpace(value)
 	switch value {
 	case ConnectLocalTransportAll:

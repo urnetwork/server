@@ -489,20 +489,6 @@ func CheckNetworkCreateIpRateLimit(
 	return
 }
 
-// Removes expired seedphrase account-creation histories.
-func RemoveExpiredNetworkCreateIpRateLimitAttempts(ctx context.Context, minTime time.Time) {
-	MaintenanceTx(ctx, func(tx PgTx) {
-		RaisePgResult(tx.Exec(
-			ctx,
-			`
-				DELETE FROM network_create_attempt
-				WHERE create_time < $1
-			`,
-			minTime.UTC(),
-		))
-	})
-}
-
 // Atomically records and checks a wallet-challenge source-address history.
 // Excluded callers receive a zero attempt id and never open PostgreSQL.
 //
