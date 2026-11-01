@@ -113,7 +113,8 @@ func (self *handlerCacheRenewingAttempt) keep(
 
 // A lost or uncertain renewal cancels the exact context used by the expensive
 // fill. The callback must return before this owner returns; it is never left as
-// a detached database operation. Failures retain the existing expiring fence.
+// a detached database operation. Failures keep the lease, which cacheJson then
+// cuts to the failure fence; renewal is joined first, so it cannot extend it.
 func renewingHandlerCacheFill[R any](
 	ctx context.Context,
 	attempt *handlerCacheRenewingAttempt,

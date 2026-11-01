@@ -122,6 +122,20 @@ func (self *renewingCacheTestStore) renew(ctx context.Context, key string, token
 	return true, nil
 }
 
+// Models the fence script: only the current token's lease, only toward expiry.
+func (self *renewingCacheTestStore) fence(_ context.Context, key string, token string, ttl time.Duration) (bool, error) {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+	current, ok := self.getLocked(key)
+	if !ok || current != token {
+		return false, nil
+	}
+	if expires := time.Now().Add(ttl); expires.Before(self.entries[key].expires) {
+		self.entries[key] = renewingCacheTestEntry{token, expires}
+	}
+	return true, nil
+}
+
 func (self *renewingCacheTestStore) counts() (int, int) {
 	self.mu.Lock()
 	defer self.mu.Unlock()
@@ -133,6 +147,11 @@ func (self *renewingCacheTestStore) counts() (int, int) {
 // The opt-in path keeps exactly one callback through 70 seconds and publishes
 // the result for the original 30-second response lifetime.
 func TestHandlerCacheRenewingSlowFillPairedControl(t *testing.T) {
+	// The exact 30s lifetime below needs the value ttl jitter pinned to zero;
+	// TestHandlerCacheValueTtlJitterBound covers the jitter itself.
+	prior := handlerCacheValueTtlJitter
+	defer func() { handlerCacheValueTtlJitter = prior }()
+	handlerCacheValueTtlJitter = func(time.Duration) time.Duration { return 0 }
 	for _, renewing := range []bool{false, true} {
 		name := "baseline"
 		if renewing {
