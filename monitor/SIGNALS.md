@@ -11063,8 +11063,10 @@ Probe: `contract-degradation`
 `model/network_degradation_model.go`. While `config/<env>/degraded.yml` sets
 `enabled: true`, the taskworker's run-once `CheckContractDegradation` task
 runs every 15 minutes. It counts contracts created in the last 60 minutes
-(`transfer_contract_create_time`) and contracts that reached a terminal
-outcome in the last 60 minutes (`transfer_contract_closed_usage`). One check
+(a range of the contract primary key over the window's contract id range,
+`model.ContractIdCreateTimeRange`, filtered by `create_time`) and contracts
+that reached a terminal outcome in the last 60 minutes
+(`transfer_contract_closed_usage`). One check
 with `close_count < 0.7 × open_count` publishes `zero_cost=true` in the Redis
 key `network_degradation:zero_contract_cost:v1`. Charging resumes only on the
 second consecutive healthy check (`close_count >= 0.7 × open_count`, or no

@@ -139,3 +139,29 @@ func TestContractStatsWindowReadsNeedNoCreateTimeIndex(t *testing.T) {
 		}
 	})
 }
+
+// The degradation check's count of contracts created in its window reads only
+// the window's contract id range.
+func TestContractDegradationOpenCountNeedsNoCreateTimeIndex(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		var openStatements []contractReadStatement
+		statements := traceContractReads(t, ctx, func() {
+			if _, _, err := MeasureContractDegradation(ctx, server.NowUtc()); err != nil {
+				t.Fatal(err)
+			}
+		})
+		for _, statement := range statements {
+			// the close count reads its own partial index of terminal outcomes
+			if !strings.Contains(statement.sql, "close_time") {
+				openStatements = append(openStatements, statement)
+			}
+		}
+		if len(openStatements) != 1 {
+			t.Fatalf("the degradation check sent %d open-count statements, want 1", len(openStatements))
+		}
+		requireContractIdRangePlan(t, ctx, openStatements[0], "transfer_contract_create_time")
+	})
+}

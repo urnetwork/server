@@ -245,3 +245,50 @@ func TestContractStatsWindowReadsMatchCreateTime(t *testing.T) {
 		}
 	})
 }
+
+// The degradation check's count of contracts created in its window before the
+// contract id range bounded it.
+const contractDegradationOpenCountByCreateTimeSql = `
+	SELECT count(*)
+	FROM transfer_contract
+	WHERE $1 <= create_time AND create_time < $2
+`
+
+// The degradation check counts exactly the contracts its create_time-only
+// original counts, for windows that end on, just after and between the
+// fixture's boundaries.
+func TestContractDegradationOpenCountMatchesCreateTime(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		base := testContractStatsBase
+		insertContractCreateTimeFixtures(t, ctx, contractCreateTimeFixtures(base))
+		counted := false
+		for _, now := range []time.Time{
+			base,
+			base.Add(time.Microsecond),
+			base.Add(30 * time.Minute),
+			base.Add(time.Hour),
+			base.Add(time.Hour + time.Microsecond),
+			base.Add(2*time.Hour - time.Microsecond),
+			base.Add(2 * time.Hour),
+		} {
+			var original int64
+			server.Db(ctx, func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(ctx, contractDegradationOpenCountByCreateTimeSql, now.Add(-ContractDegradationWindow), now).Scan(&original))
+			})
+			counted = counted || 0 < original
+			openCount, closeCount, err := MeasureContractDegradation(ctx, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if openCount != original || closeCount != 0 {
+				t.Fatalf("window ending %s: open=%d close=%d, the create_time original %d and no closes", now.Format(time.RFC3339Nano), openCount, closeCount, original)
+			}
+		}
+		if !counted {
+			t.Fatal("no window counted a contract")
+		}
+	})
+}
