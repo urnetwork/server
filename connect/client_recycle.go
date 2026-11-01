@@ -17,7 +17,7 @@
 // StuckProviderRecycleDefault ("off") applies while it sets none, and the
 // exchange reads it every StuckProviderRecycleControlRefreshInterval, keeping
 // its last good read. A flag while the switch is off for this block does
-// nothing.
+// nothing but count, where the resident lives, as disabled.
 //
 // Every process receives every flag's event and only the resident's host acts.
 // The flag's cooldown bounds a client to one recycle per cooldown, and a
@@ -44,14 +44,14 @@ import (
 // recycled (its transports here got the moved close and its resident
 // retired), replaced (another resident replaced the local one, which only
 // retired), not_resident (no resident of the client here), resident_done (the
-// local resident had already ended), disabled (the switch is off for this
-// block).
+// local resident had already ended), disabled (a resident here, with the
+// switch off for this block: a recycle it would have made).
 var stuckProviderRecyclesCounter = prometheus.NewCounterVec(
 	prometheus.CounterOpts{
 		Namespace: "urnetwork",
 		Subsystem: "connect",
 		Name:      "stuck_provider_recycles_total",
-		Help:      "Recycle flag events the api set for a stuck provider, handled by this process, by outcome: recycled (its transports here closed with the moved close and its resident retired), replaced (only its replaced local resident retired), not_resident (no resident here), resident_done (the resident had already ended), disabled (the switch is off for this block)",
+		Help:      "Recycle flag events the api set for a stuck provider, handled by this process, by outcome: recycled (its transports here closed with the moved close and its resident retired), replaced (only its replaced local resident retired), not_resident (no resident here), resident_done (the resident had already ended), disabled (a resident here, with the switch off for this block)",
 	},
 	[]string{"outcome"},
 )
@@ -295,20 +295,21 @@ func (self *exchangeStuckProviderRecycle) setAllowed(allowed bool) {
 }
 
 // The key-event dispatch of a client's recycle flag. It must not block: only
-// the switch and the resident map are read here, and the recycle runs on its
-// own worker.
+// the resident map and the switch are read here, and the recycle runs on its
+// own worker. With the switch off a resident here counts as disabled, so a
+// block left off reports the recycles it would have made.
 func (self *Exchange) handleClientRecycle(clientId server.Id) {
 	recycle := self.stuckProviderRecycle
 	if recycle == nil {
 		return
 	}
-	if !recycle.allows() {
-		stuckProviderRecyclesCounter.WithLabelValues(stuckProviderRecycleDisabled).Inc()
-		return
-	}
 	resident := self.localResident(clientId)
 	if resident == nil {
 		stuckProviderRecyclesCounter.WithLabelValues(stuckProviderRecycleNotResident).Inc()
+		return
+	}
+	if !recycle.allows() {
+		stuckProviderRecyclesCounter.WithLabelValues(stuckProviderRecycleDisabled).Inc()
 		return
 	}
 	if !recycle.beginWorker() {

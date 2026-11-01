@@ -131,8 +131,9 @@ func TestStuckProviderRecycleControlReadsTheSwitch(t *testing.T) {
 	}
 }
 
-// Without a resident here a flag only counts, and with the switch off it
-// counts as disabled; neither starts a recycle.
+// A flag only counts: without a resident here as not_resident, whatever the
+// switch, and with a resident here but the switch off as disabled. Neither
+// starts a recycle.
 func TestStuckProviderRecycleFlagWithoutWork(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -148,17 +149,26 @@ func TestStuckProviderRecycleFlagWithoutWork(t *testing.T) {
 	control := &stuckProviderRecycleTestControl{}
 	exchange.stuckProviderRecycle = newExchangeStuckProviderRecycleWithStore(exchangeCtx, settings, exchange.block, control.read)
 
-	disabledBefore := testutil.ToFloat64(stuckProviderRecyclesCounter.WithLabelValues(stuckProviderRecycleDisabled))
-	notResidentBefore := testutil.ToFloat64(stuckProviderRecyclesCounter.WithLabelValues(stuckProviderRecycleNotResident))
+	// a resident here that the switch must keep: never run, only looked up
+	residentClientId := server.NewId()
+	exchange.residents[residentClientId] = &Resident{clientId: residentClientId}
+	counts := func() (disabled float64, notResident float64) {
+		return testutil.ToFloat64(stuckProviderRecyclesCounter.WithLabelValues(stuckProviderRecycleDisabled)),
+			testutil.ToFloat64(stuckProviderRecyclesCounter.WithLabelValues(stuckProviderRecycleNotResident))
+	}
+
+	disabledBefore, notResidentBefore := counts()
+	exchange.handleClientRecycle(residentClientId)
 	exchange.handleClientRecycle(server.NewId())
-	if testutil.ToFloat64(stuckProviderRecyclesCounter.WithLabelValues(stuckProviderRecycleDisabled)) != disabledBefore+1 {
-		t.Fatal("a flag with the switch off was not counted as disabled")
+	if disabled, notResident := counts(); disabled != disabledBefore+1 || notResident != notResidentBefore+1 {
+		t.Fatalf("with the switch off: disabled +%v, not_resident +%v; want +1 each", disabled-disabledBefore, notResident-notResidentBefore)
 	}
 	control.set("g1")
 	exchange.stuckProviderRecycle.refresh()
+	disabledBefore, notResidentBefore = counts()
 	exchange.handleClientRecycle(server.NewId())
-	if testutil.ToFloat64(stuckProviderRecyclesCounter.WithLabelValues(stuckProviderRecycleNotResident)) != notResidentBefore+1 {
-		t.Fatal("a flag without a resident here was not counted")
+	if disabled, notResident := counts(); disabled != disabledBefore || notResident != notResidentBefore+1 {
+		t.Fatalf("with the switch on: disabled +%v, not_resident +%v; want +0 and +1", disabled-disabledBefore, notResident-notResidentBefore)
 	}
 	exchange.Close()
 	if !exchange.WaitForIdle(ctx) {
