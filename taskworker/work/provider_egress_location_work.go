@@ -21,6 +21,9 @@ func ScheduleRemoveExpiredProviderEgressLocations(clientSession *session.ClientS
 		clientSession,
 		task.RunOnce("remove_expired_provider_egress_locations"),
 		task.RunAt(server.NowUtc().Add(6*time.Hour)),
+		// the blackhole and quota retention are each bounded by their own run
+		// budget, about 30 s while a backlog drains
+		task.MaxTime(10*time.Minute),
 	)
 }
 
@@ -43,6 +46,10 @@ func RemoveExpiredProviderEgressLocations(
 	model.RemoveExpiredProviderEgressProbeAttempts(clientSession.Ctx, minAttemptAt)
 	// probe priorities of provider intent chains that ended without removing them
 	model.RemoveExpiredProviderIntentProbePriorities(clientSession.Ctx, now)
+	// blackhole checks a week past their check, and bandwidth reservations of
+	// buckets two days past; deleted rows are counted by table
+	model.RemoveExpiredProviderBlackholeChecks(clientSession.Ctx, now.Add(-model.ProviderBlackholeCheckRetention))
+	model.RemoveExpiredProviderBandwidthQuota(clientSession.Ctx, now.Add(-model.ProviderBandwidthQuotaRetention))
 	return &RemoveExpiredProviderEgressLocationsResult{}, nil
 }
 

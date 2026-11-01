@@ -253,15 +253,23 @@ func CheckAndRecordAccountActionRateLimit(
 	return nil
 }
 
-// RemoveExpiredAccountActionAttempts cleans up attempts older than minTime.
-func RemoveExpiredAccountActionAttempts(ctx context.Context, minTime time.Time) {
-	server.MaintenanceTx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`DELETE FROM network_user_action_attempt WHERE create_time < $1`,
-			minTime.UTC(),
-		))
-	})
+// Attempts are kept twice the longest window that counts them
+// (AccountActionDailyWindow and UserAuthCodeSendWindow, 24 hours), so no
+// rate limit ever reads a deleted attempt.
+const AccountActionAttemptRetention = 48 * time.Hour
+
+var accountActionAttemptRetention = newTimeOrderedRetention(
+	RetentionTableNetworkUserActionAttempt,
+	"network_user_action_attempt_id",
+	"create_time",
+)
+
+// RemoveExpiredAccountActionAttempts removes the attempts older than minTime,
+// oldest first, in bounded batches for at most retentionRunBudget; the next
+// run continues a backlog.
+func RemoveExpiredAccountActionAttempts(ctx context.Context, minTime time.Time) (removedCount int64) {
+	removedCount, _ = accountActionAttemptRetention.RemoveBefore(ctx, minTime, retentionBatchSize, time.Now().Add(retentionRunBudget))
+	return
 }
 
 // checkAndRecordAccountActionRateLimitInTx is CheckAndRecordAccountActionRateLimit
