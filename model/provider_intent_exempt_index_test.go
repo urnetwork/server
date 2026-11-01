@@ -57,7 +57,8 @@ end
 // Advances the index build one step (ARGV[1] build limit, ARGV[2] key ttl),
 // then returns for each (live_min, skip_member) pair of ARGV[3:] the oracle's
 // normal and exempt counts and, when the index is complete, the index's (else
-// -1 and -1), and last 1 when the index is complete.
+// -1 and -1, and -2 and -2 when the index disagrees with its sources), and
+// last 1 when the index is complete.
 var testingProviderIntentExemptCheckLua = fmt.Sprintf(`%s
 %s
 local ready = build_exempt_index(KEYS[7], KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[6], ARGV[1], ARGV[2])
@@ -66,7 +67,10 @@ for i = 3, #ARGV, 2 do
 	local oracle_normal, oracle_exempt = oracle_count_clients(KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], KEYS[6], ARGV[i], ARGV[i + 1])
 	local index_normal, index_exempt = -1, -1
 	if ready then
-		index_normal, index_exempt = count_clients_indexed(KEYS[7], KEYS[4], KEYS[5], KEYS[6], ARGV[i], ARGV[i + 1])
+		index_normal, index_exempt = count_clients_indexed(KEYS[7], KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], KEYS[6], ARGV[i], ARGV[i + 1])
+		if index_normal == false then
+			index_normal, index_exempt = -2, -2
+		end
 	end
 	table.insert(results, oracle_normal)
 	table.insert(results, oracle_exempt)
@@ -454,6 +458,10 @@ func (self *testingExemptHistory) check() (ready bool) {
 	self.indexedCheckCount += 1
 	for _, count := range counts {
 		self.comparedCount += 1
+		if count.indexNormal == -2 {
+			// production writers alone never leave the index behind its sources
+			self.t.Fatalf("live_min %s skip %x: the index disagreed with its sources", count.liveMin, count.skipMember)
+		}
 		if count.indexNormal != count.oracleNormal || count.indexExempt != count.oracleExempt {
 			self.t.Fatalf(
 				"live_min %s skip %x: index normal %d exempt %d, walk normal %d exempt %d",
@@ -874,6 +882,113 @@ func TestProviderIntentExemptIndexFollowsEachWriter(t *testing.T) {
 			if !history.check() {
 				t.Fatalf("%s: the index was not complete after the write", writer.name)
 			}
+		}
+	})
+}
+
+// The walk's counts at `now`, without a skipped member, read only.
+var testingProviderIntentOracleCountLua = fmt.Sprintf(`%s
+local normal_count, exempt_count = oracle_count_clients(KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], KEYS[6], ARGV[1], '')
+return {normal_count, exempt_count}
+`, testingProviderIntentWalkOracleLua)
+
+func testingProviderIntentOracleCounts(ctx context.Context, networkId server.Id, now time.Time) (normalCount int64, exemptCount int64) {
+	server.Redis(ctx, func(r server.RedisClient) {
+		values, err := r.Eval(ctx, testingProviderIntentOracleCountLua, providerIntentKeys(networkId), now.UnixMilli()+1).Int64Slice()
+		server.Raise(err)
+		normalCount = values[0]
+		exemptCount = values[1]
+	})
+	return
+}
+
+// A network of three exempt connected members and two exempt installs, written
+// by the production writers, with a complete index.
+func testingProviderIntentExemptNetwork(t testing.TB, ctx context.Context, now time.Time) (networkId server.Id, connectedIds []server.Id) {
+	networkId = server.NewId()
+	pending := &ProviderIntentState{
+		Status:       ProviderIntentStatusPending,
+		AttemptTime:  now,
+		GraceEndTime: now.Add(providerIntentGraceTimeout),
+		CheckTime:    now.Add(providerIntentGraceTimeout),
+	}
+	for i := range 5 {
+		clientId := server.NewId()
+		if i < 3 {
+			addNetworkPeerWithProvideModesLoader(ctx, networkId, &NetworkPeer{ClientId: clientId}, server.NewId(), 5*time.Minute, func() (map[ProvideMode]bool, error) {
+				return map[ProvideMode]bool{}, nil
+			})
+			connectedIds = append(connectedIds, clientId)
+		} else {
+			AddNetworkProviderPeer(ctx, networkId, clientId, 5*time.Minute)
+		}
+		testingSetProviderIntentState(t, ctx, networkId, clientId, pending, 10*time.Minute, now)
+	}
+	normalCount, exemptCount := getNetworkConnectedClientCountsAt(ctx, networkId, now)
+	connect.AssertEqual(t, normalCount, 0)
+	connect.AssertEqual(t, exemptCount, 5)
+	connect.AssertEqual(t, testingProviderIntentExemptBuildState(ctx, networkId), "#ready")
+	return
+}
+
+// A registry or intent key lost while the index is complete (an eviction, a
+// DEL), or a registration removed by a writer without the index: the next
+// count finds more live exempt entries than live registry entries, or exempt
+// entries without the intent keys every exempt entry needs. It drops the
+// index, walks, and counts the drop; the count after rebuilds the index from
+// what is left and reads it.
+func TestProviderIntentExemptIndexDroppedWhenItLosesItsSources(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		lostCounter := providerIntentCountsCounter.WithLabelValues(providerIntentCountPathLost)
+		indexCounter := providerIntentCountsCounter.WithLabelValues(providerIntentCountPathIndex)
+		losses := []struct {
+			name string
+			lose func(r server.RedisClient, networkId server.Id, connectedIds []server.Id) error
+		}{
+			{"connected", func(r server.RedisClient, networkId server.Id, connectedIds []server.Id) error {
+				return r.Del(ctx, networkPeerConnectedKey(networkId)).Err()
+			}},
+			{"provider", func(r server.RedisClient, networkId server.Id, connectedIds []server.Id) error {
+				return r.Del(ctx, networkPeerConnectedProviderKey(networkId)).Err()
+			}},
+			{"pi_present", func(r server.RedisClient, networkId server.Id, connectedIds []server.Id) error {
+				return r.Del(ctx, providerIntentPresentKey(networkId)).Err()
+			}},
+			{"pi_expire", func(r server.RedisClient, networkId server.Id, connectedIds []server.Id) error {
+				return r.Del(ctx, providerIntentExpireKey(networkId)).Err()
+			}},
+			{"pi", func(r server.RedisClient, networkId server.Id, connectedIds []server.Id) error {
+				return r.Del(ctx, providerIntentKey(networkId)).Err()
+			}},
+			// the remove of a writer without the index
+			{"remove without the index", func(r server.RedisClient, networkId server.Id, connectedIds []server.Id) error {
+				return r.ZRem(ctx, networkPeerConnectedKey(networkId), string(connectedIds[0].Bytes())).Err()
+			}},
+		}
+		for _, loss := range losses {
+			now := server.NowUtc()
+			networkId, connectedIds := testingProviderIntentExemptNetwork(t, ctx, now)
+			server.Redis(ctx, func(r server.RedisClient) {
+				err := loss.lose(r, networkId, connectedIds)
+				server.Raise(err)
+			})
+			oracleNormal, oracleExempt := testingProviderIntentOracleCounts(ctx, networkId, now)
+
+			lostBefore := testutil.ToFloat64(lostCounter)
+			normalCount, exemptCount := getNetworkConnectedClientCountsAt(ctx, networkId, now)
+			t.Logf("lost %s: normal %d exempt %d, walk normal %d exempt %d", loss.name, normalCount, exemptCount, oracleNormal, oracleExempt)
+			connect.AssertEqual(t, int64(normalCount), oracleNormal)
+			connect.AssertEqual(t, int64(exemptCount), oracleExempt)
+			connect.AssertEqual(t, testutil.ToFloat64(lostCounter)-lostBefore, float64(1))
+			connect.AssertEqual(t, testingProviderIntentExemptBuildState(ctx, networkId), "")
+
+			indexedBefore := testutil.ToFloat64(indexCounter)
+			normalCount, exemptCount = getNetworkConnectedClientCountsAt(ctx, networkId, now)
+			connect.AssertEqual(t, int64(normalCount), oracleNormal)
+			connect.AssertEqual(t, int64(exemptCount), oracleExempt)
+			connect.AssertEqual(t, testutil.ToFloat64(indexCounter)-indexedBefore, float64(1))
+			connect.AssertEqual(t, testingProviderIntentExemptBuildState(ctx, networkId), "#ready")
 		}
 	})
 }

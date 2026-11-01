@@ -400,16 +400,22 @@ func providerIntentKeys(networkId server.Id) []string {
 // changes a count; hosted proxy clients are always normal. `live_min` is the
 // decimal unix milli string of the first live expiry. The count reads the
 // network's exempt index (provider_intent_exempt_index.go), a fixed handful of
-// commands, and walks the registries only while the index builds. The third
-// value is the path taken: 1 the index, 2 the walk.
+// commands, and walks the registries only while the index builds, or when the
+// index disagrees with its sources, which drops it for a rebuild. The third
+// value is the path taken: 1 the index, 2 the walk, 3 the walk after a drop.
 var providerIntentCountLua = fmt.Sprintf(`%s
 local function count_clients(pi_key, present_key, expire_key, connected_key, proxy_key, provider_key, index_key, live_min, skip_member, build_limit, key_ttl_seconds)
+	local path = 2
 	if build_exempt_index(index_key, pi_key, present_key, expire_key, connected_key, provider_key, build_limit, key_ttl_seconds) then
-		local normal_count, exempt_count = count_clients_indexed(index_key, connected_key, proxy_key, provider_key, live_min, skip_member)
-		return normal_count, exempt_count, 1
+		local normal_count, exempt_count = count_clients_indexed(index_key, pi_key, present_key, expire_key, connected_key, proxy_key, provider_key, live_min, skip_member)
+		if normal_count then
+			return normal_count, exempt_count, 1
+		end
+		redis.call('UNLINK', index_key)
+		path = 3
 	end
 	local normal_count, exempt_count = count_clients_walk(pi_key, present_key, expire_key, connected_key, proxy_key, provider_key, live_min, skip_member)
-	return normal_count, exempt_count, 2
+	return normal_count, exempt_count, path
 end
 `, providerIntentExemptCountLua)
 

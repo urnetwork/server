@@ -55,7 +55,14 @@
 // entry heals at the member's next write by this code (its registry heartbeat,
 // presence or check) and an entry left without a registry entry stops counting
 // at that entry's former expiry, so the counts converge within a registry ttl
-// after the last such process exits.
+// after the last such process exits. Until then a count is off in either
+// direction, and a normal count can even go negative. The same holds when a
+// registry or intent key is lost (an eviction, a DEL) while the index survives.
+// A count therefore checks the index against what it can afford to: more live
+// exempt entries than live registry entries, or a live exempt entry while one
+// of the intent keys every exempt entry needs is missing, means the index lost
+// track of its sources. The count drops the index, walks, and the next count
+// rebuilds it.
 package model
 
 import (
@@ -68,32 +75,36 @@ import (
 
 var providerIntentCountsCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "urnetwork_provider_intent_counts_total",
-	Help: "Provider intent client counts by how they were made: from the network's exempt index, or by walking its registries while the index builds",
+	Help: "Provider intent client counts by how they were made: from the network's exempt index, by walking its registries while the index builds, or by walking after dropping an index that disagreed with its sources",
 }, []string{"path"})
 
 // the `path` label values of urnetwork_provider_intent_counts_total
 const (
 	providerIntentCountPathIndex = "index"
 	providerIntentCountPathWalk  = "walk"
+	providerIntentCountPathLost  = "lost"
 )
 
 // Every label value is exported from the start, so a rate is defined before
 // the first count.
 func init() {
-	for _, path := range []string{providerIntentCountPathIndex, providerIntentCountPathWalk} {
+	for _, path := range []string{providerIntentCountPathIndex, providerIntentCountPathWalk, providerIntentCountPathLost} {
 		providerIntentCountsCounter.WithLabelValues(path)
 	}
 	prometheus.MustRegister(providerIntentCountsCounter)
 }
 
 // Counts one count by the path its script reports (count_clients): 1 the
-// index, 2 the walk, and anything else no count.
+// index, 2 the walk, 3 the walk after dropping a lost index, and anything else
+// no count.
 func countProviderIntentCountPath(countPath int64) {
 	switch countPath {
 	case 1:
 		providerIntentCountsCounter.WithLabelValues(providerIntentCountPathIndex).Inc()
 	case 2:
 		providerIntentCountsCounter.WithLabelValues(providerIntentCountPathWalk).Inc()
+	case 3:
+		providerIntentCountsCounter.WithLabelValues(providerIntentCountPathLost).Inc()
 	}
 }
 
@@ -165,9 +176,10 @@ end
 // complete; its state is `#c <cursor> <sweep end>` or `#p ...` while it
 // sweeps a registry, and `#ready`. sweep_exempt_index takes one step of a
 // sweep and returns the members derived and the next cursor, or false at the
-// sweep's end. count_clients_indexed counts from a complete index. The counts
-// return {normal_count, exempt_count} for `live_min` (the decimal unix milli
-// string of the first live expiry) without `skip_member`.
+// sweep's end. count_clients_indexed counts from a complete index, or returns
+// false when the index disagrees with its sources. The counts return
+// {normal_count, exempt_count} for `live_min` (the decimal unix milli string of
+// the first live expiry) without `skip_member`.
 var providerIntentExemptCountLua = fmt.Sprintf(`%s
 local function count_clients_walk(pi_key, present_key, expire_key, connected_key, proxy_key, provider_key, live_min, skip_member)
 	local live_min_ms = tonumber(live_min)
@@ -283,10 +295,16 @@ local function build_exempt_index(index_key, pi_key, present_key, expire_key, co
 	return false
 end
 
-local function count_clients_indexed(index_key, connected_key, proxy_key, provider_key, live_min, skip_member)
+local function count_clients_indexed(index_key, pi_key, present_key, expire_key, connected_key, proxy_key, provider_key, live_min, skip_member)
 	local live_min_ms = tonumber(live_min)
 	local live_count = redis.call('ZCOUNT', connected_key, live_min, '+inf') + redis.call('ZCOUNT', provider_key, live_min, '+inf')
 	local exempt_count = redis.call('ZCOUNT', index_key, live_min, '+inf')
+	if live_count < exempt_count then
+		return false
+	end
+	if 0 < exempt_count and redis.call('EXISTS', pi_key, present_key, expire_key) < 3 then
+		return false
+	end
 	for _, registry in ipairs({{'c', connected_key}, {'p', provider_key}}) do
 		local registered = redis.call('ZSCORE', registry[2], skip_member)
 		if registered and live_min_ms <= tonumber(registered) then
