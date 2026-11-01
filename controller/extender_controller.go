@@ -433,14 +433,45 @@ func ExtenderActivate(
 	args *ExtenderActivateArgs,
 	clientSession *session.ClientSession,
 ) (*ExtenderActivateResult, error) {
-	return extenderActivate(args, clientSession, DefaultExtenderActivateSettings())
+	return defaultExtenderActivateService().activate(args, clientSession)
 }
 
+// The activations of one api process (C2): the settings each is judged by and
+// the probes that dial the caller back. The process has one, built on first
+// use; a test builds its own, with its own settings and, where the caller
+// address is not a socket it can bind, fake probes.
+type extenderActivateService struct {
+	settings *ExtenderActivateSettings
+	// replaces the probes of an activation when set: a test's fake, which
+	// answers for the caller without a socket. Nil dials the caller for real,
+	// which is production.
+	testProbes func(clientIp netip.Addr, ipVersion int) *extenderActivationProbes
+}
+
+func newExtenderActivateService(settings *ExtenderActivateSettings) *extenderActivateService {
+	return &extenderActivateService{
+		settings: settings,
+	}
+}
+
+var defaultExtenderActivateService = sync.OnceValue(func() *extenderActivateService {
+	return newExtenderActivateService(DefaultExtenderActivateSettings())
+})
+
+// ExtenderActivate under other settings, on a service of its own.
 func extenderActivate(
 	args *ExtenderActivateArgs,
 	clientSession *session.ClientSession,
 	settings *ExtenderActivateSettings,
 ) (*ExtenderActivateResult, error) {
+	return newExtenderActivateService(settings).activate(args, clientSession)
+}
+
+func (self *extenderActivateService) activate(
+	args *ExtenderActivateArgs,
+	clientSession *session.ClientSession,
+) (*ExtenderActivateResult, error) {
+	settings := self.settings
 	refuse := func(message string) (*ExtenderActivateResult, error) {
 		return &ExtenderActivateResult{
 			Activated: false,
@@ -611,41 +642,45 @@ func extenderActivate(
 
 	// the acceptance rule (C2a) over the real probes: the required test, then
 	// each optional carrier offered, which is left out when it does not answer
+	probes := &extenderActivationProbes{
+		carrier: func(
+			ctx context.Context,
+			connectMode connect.ExtenderConnectMode,
+			port int,
+		) error {
+			_, err := connect.ProbeExtenderCarrier(
+				ctx,
+				connectSettings,
+				clientIp,
+				connectMode,
+				port,
+				dnsTld,
+				serverName,
+				publicKey,
+				apiHost,
+				ExtenderProbeDestinationPort,
+			)
+			return err
+		},
+		forward: func(ctx context.Context) (string, error) {
+			return connect.ProbeExtenderForward(
+				ctx,
+				connectSettings,
+				clientIp,
+				tcpPort,
+				serverName,
+				publicKey,
+				config.ApiUrl,
+				extenderForwardProbeTlsConfig(),
+			)
+		},
+	}
+	if self.testProbes != nil {
+		probes = self.testProbes(clientIp, ipVersion)
+	}
 	outcome := probeExtenderActivation(
 		probeCtx,
-		&extenderActivationProbes{
-			carrier: func(
-				ctx context.Context,
-				connectMode connect.ExtenderConnectMode,
-				port int,
-			) error {
-				_, err := connect.ProbeExtenderCarrier(
-					ctx,
-					connectSettings,
-					clientIp,
-					connectMode,
-					port,
-					dnsTld,
-					serverName,
-					publicKey,
-					apiHost,
-					ExtenderProbeDestinationPort,
-				)
-				return err
-			},
-			forward: func(ctx context.Context) (string, error) {
-				return connect.ProbeExtenderForward(
-					ctx,
-					connectSettings,
-					clientIp,
-					tcpPort,
-					serverName,
-					publicKey,
-					config.ApiUrl,
-					extenderForwardProbeTlsConfig(),
-				)
-			},
-		},
+		probes,
 		carriers,
 		tcpPort,
 		udpPort,

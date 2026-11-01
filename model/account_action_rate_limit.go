@@ -361,6 +361,13 @@ type AccountActionBudget struct {
 	Window time.Duration
 }
 
+// Testing_AccountActionBudgetsBeforeSpend, when set, runs inside the
+// transaction of CheckAndRecordAccountActionBudgets once every budget has been
+// read with room, before any is spent. It exists so a test can hold one spend
+// between its reads and its writes while another spend of the same budgets
+// runs. Test only, and never set in production.
+var Testing_AccountActionBudgetsBeforeSpend func()
+
 // CheckAndRecordAccountActionBudgets spends one attempt from every budget, in
 // one transaction, and only when every one of them has room. A refusal spends
 // nothing from any budget, so an action refused by one budget leaves the
@@ -391,6 +398,9 @@ func CheckAndRecordAccountActionBudgets(ctx context.Context, budgets ...AccountA
 				refusal = maxAccountActionAttemptsRetryError(budget.Action, budget.Window, retryAfter)
 				return
 			}
+		}
+		if Testing_AccountActionBudgetsBeforeSpend != nil {
+			Testing_AccountActionBudgetsBeforeSpend()
 		}
 		for _, budget := range budgets {
 			insertAccountActionAttemptInTx(ctx, tx, budget.Id, budget.Action, now)
