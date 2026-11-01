@@ -11081,4 +11081,31 @@ var migrations = []any{
 	// it. Function definitions only: no table is locked or scanned, and the
 	// running release, which deletes past 91 days, stays within the new guard.
 	newSqlMigration(clientKeyHistoryRetentionFloorSql),
+
+	// The index diet (owner decision 2026-11-01; db_index_diet_migrations.go).
+	// Each index below was audited against pg_stat_user_indexes, whose
+	// counters run from the 2026-10-23 20:08 UTC stats reset (8.2 days of full
+	// traffic, through two Sunday payouts, an epoch close and the November
+	// month boundary), and against every query in this repository and its
+	// siblings. The operator drops each one first, by hand, with the same
+	// DROP INDEX CONCURRENTLY IF EXISTS on a direct session, outside the dump,
+	// payout and maintenance windows, and only while no vacuum runs on its
+	// table. The migration then records the drop, so the schema audit never
+	// recreates the index, and is a no-op; an interrupted drop leaves an
+	// invalid index that the same statement removes. No version is written
+	// down: each is the migration's position wherever a merge places it, and
+	// the monitor and the tests read it through IndexDietMigrationVersion.
+
+	// transfer_contract_reap_pending_create_time (91.6 GB on Main, v493)
+	// served only the straggler stamp, whose 300-day horizon matches no
+	// contract before 2027-03-28: 314 scans and no tuples since the reset. The
+	// stamp now reads a contract id range of the primary key
+	// (assignStragglerReapTimeSQL). A build without that falls back to
+	// transfer_contract_create_time over the same empty range, so
+	// transfer_contract_create_time stays until every running build has the
+	// rewritten stamp; its own drop below waits for that. Every close, and
+	// every later non-HOT update of an unreaped closed contract, writes one
+	// index entry fewer, and each vacuum of the contract table reads 92 GB
+	// fewer.
+	reapPendingIndexDropMigration,
 }
