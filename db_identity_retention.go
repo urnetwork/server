@@ -7,6 +7,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -124,8 +125,12 @@ const clientKeyHistoryRetentionSchemaSql = `
 // younger than it. Every reader of a gone client's history ends well inside
 // it:
 //   - close report admission reads the reporting client's own history
-//     (readOriginalCloseKey), and a client that is gone can no longer report;
-//     an admitted report keeps its own copy of the registration in its
+//     (readOriginalCloseKey). A report is admitted only for a contract the
+//     client is party to, and a contract opens only between active clients
+//     and ends at its deadline, model.DefaultContractExpiration (60 minutes)
+//     after it opened, when the expiry sweep force-closes it; so a gone
+//     client's last report is admitted within hours of its going, not days.
+//     An admitted report keeps its own copy of the registration in its
 //     evidence row;
 //   - the current key readers (GetClientPublicKey, GetClientContractMetadata,
 //     LoadStClientKeyHistory, the provider work owner) refuse a client whose
@@ -137,17 +142,20 @@ const clientKeyHistoryRetentionSchemaSql = `
 // The floor is the SQL function st_client_key_history_retention_floor(), which
 // both the guard and the retention's batch read. So the retention never
 // selects a client the guard refuses, and one statement moves the floor for
-// both (ClientKeyHistoryRetentionFloorRollbackSql restores 91 days).
+// both: ClientKeyHistoryRetentionFloorRollbackSql restores 91 days, and
+// ClientKeyHistoryRetentionFloorRestoreSql the published floor
+// (`bringyourctl db key-history-floor`).
 const ClientKeyHistoryRetentionFloor = 30 * 24 * time.Hour
 
 // Replaces the guard's fixed 91 days with the floor function. Nothing else in
 // the guard changes: the opt-in, the record of when the client went, and the
 // absence of the client's row and heads are still required, and an update or a
 // truncate is still refused. Both statements change only function definitions:
-// no table is locked, scanned or rewritten.
+// no table is locked, scanned or rewritten, and both replace what they find,
+// so a rerun after an interrupted apply completes it.
 const clientKeyHistoryRetentionFloorSql = `
 	SET LOCAL lock_timeout = '5s';
-	CREATE FUNCTION st_client_key_history_retention_floor()
+	CREATE OR REPLACE FUNCTION st_client_key_history_retention_floor()
 	RETURNS interval LANGUAGE sql STABLE AS $st_client_key_history_retention_floor$
 		SELECT interval '30 days'
 	$st_client_key_history_retention_floor$;
@@ -198,6 +206,51 @@ func ClientKeyHistoryFloorGuardBodySql() string {
 
 func ClientKeyHistoryRetentionFloorBodySql() string {
 	return strings.Split(clientKeyHistoryRetentionFloorSql, "$st_client_key_history_retention_floor$")[1]
+}
+
+// The floor function exactly as the floor migration publishes it, the restore
+// after a rollback: the migration's own statement, cut from its text, so its
+// bytes are the body the monitor pins.
+func ClientKeyHistoryRetentionFloorRestoreSql() string {
+	const start = "CREATE OR REPLACE FUNCTION st_client_key_history_retention_floor()"
+	const end = "$st_client_key_history_retention_floor$;"
+	from := strings.Index(clientKeyHistoryRetentionFloorSql, start)
+	to := strings.Index(clientKeyHistoryRetentionFloorSql, end)
+	if from < 0 || to < from {
+		panic(fmt.Errorf("the floor migration has no floor function statement"))
+	}
+	return clientKeyHistoryRetentionFloorSql[from : to+len(end)-1]
+}
+
+// Moves the floor for both the guard and the retention's batch: back to 91
+// days (rollback), or to the published floor (restore). One statement, with
+// the migration's 5-second lock wait.
+func SetClientKeyHistoryRetentionFloor(ctx context.Context, rollback bool) {
+	sql := ClientKeyHistoryRetentionFloorRestoreSql()
+	if rollback {
+		sql = ClientKeyHistoryRetentionFloorRollbackSql
+	}
+	MaintenanceTx(ctx, func(tx PgTx) {
+		RaisePgResult(tx.Exec(ctx, `SET LOCAL lock_timeout = '5s'`))
+		RaisePgResult(tx.Exec(ctx, sql))
+	}, OptNoRetry())
+}
+
+// The floor the database applies, and whether its function holds the
+// published body.
+func GetClientKeyHistoryRetentionFloor(ctx context.Context) (floor string, published bool) {
+	MaintenanceDb(ctx, func(conn PgConn) {
+		Raise(conn.QueryRow(
+			ctx,
+			`
+			SELECT st_client_key_history_retention_floor()::text, p.prosrc = $1
+			FROM pg_proc p
+			WHERE p.oid = 'public.st_client_key_history_retention_floor()'::regprocedure
+			`,
+			ClientKeyHistoryRetentionFloorBodySql(),
+		).Scan(&floor, &published))
+	}, OptReadOnly())
+	return
 }
 
 func ClientKeyRetireDeletedClientBodySql() string {

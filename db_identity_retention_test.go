@@ -260,6 +260,21 @@ func TestClientKeyHistoryRetentionFloorMigration(t *testing.T) {
 	if ContractRetention != 91*24*time.Hour {
 		t.Fatalf("the rollback's 91 days no longer match the contract retention %v", ContractRetention)
 	}
+	// re-runnable: both statements replace what an interrupted apply left
+	if strings.Count(clientKeyHistoryRetentionFloorSql, "CREATE OR REPLACE FUNCTION") != 2 || strings.Contains(strings.ReplaceAll(clientKeyHistoryRetentionFloorSql, "CREATE OR REPLACE FUNCTION", ""), "CREATE FUNCTION") {
+		t.Fatal("the floor migration does not replace both functions")
+	}
+	// the restore is the migration's own floor statement, byte for byte
+	restore := ClientKeyHistoryRetentionFloorRestoreSql()
+	if !strings.HasPrefix(restore, "CREATE OR REPLACE FUNCTION st_client_key_history_retention_floor()") ||
+		!strings.HasSuffix(restore, "$st_client_key_history_retention_floor$") ||
+		!strings.Contains(clientKeyHistoryRetentionFloorSql, restore+";") ||
+		strings.Split(restore, "$st_client_key_history_retention_floor$")[1] != ClientKeyHistoryRetentionFloorBodySql() {
+		t.Fatalf("the restore is not the published floor statement: %q", restore)
+	}
+	if strings.Contains(restore, "immutable_guard") || strings.Contains(restore, "lock_timeout") {
+		t.Fatalf("the restore carries more than the floor function: %q", restore)
+	}
 }
 
 // DB-backed: under the owner rule this runs only after the branch, with its
@@ -339,6 +354,22 @@ func TestClientKeyHistoryRetentionFloorMigrationMovesTheGuard(t *testing.T) {
 		rolledBackId := NewId()
 		insertGone(rolledBackId, "c", 40)
 		requireRefused(statement(deleteSql, rolledBackId), "a delete of a client gone 40 days after the rollback")
+		if floor, published := GetClientKeyHistoryRetentionFloor(ctx); floor != "91 days" || published {
+			t.Fatalf("after the rollback the floor reads %q published=%t", floor, published)
+		}
+
+		// the restore puts the published body back, and a rerun of the
+		// migration, as after an interrupted apply, completes without error
+		SetClientKeyHistoryRetentionFloor(ctx, false)
+		if floor, published := GetClientKeyHistoryRetentionFloor(ctx); floor != "30 days" || !published {
+			t.Fatalf("after the restore the floor reads %q published=%t", floor, published)
+		}
+		MaintenanceTx(ctx, func(tx PgTx) {
+			RaisePgResult(tx.Exec(ctx, clientKeyHistoryRetentionFloorSql))
+		})
+		if err := statement(deleteSql, rolledBackId); err != nil {
+			t.Fatalf("the restored floor refused a client gone 40 days: %v", err)
+		}
 
 		ApplyDbMigrations(ctx)
 		if DbVersion(ctx) != MigrationCount() {
