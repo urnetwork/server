@@ -327,7 +327,13 @@ func providerPickerFindings(e pickerEvidence) []finding {
 		if errors >= 20 {
 			severity = tierPage
 		}
-		add("provider-picker-read-or-request-error", severity, "App location picker read or request failures are observed")
+		add("provider-picker-read-or-request-error", severity, "Picker model error outcomes or read errors are observed")
+		errorFinding := &findings[len(findings)-1]
+		errorFinding.mechanism = "These counters measure initial/search/direct picker model error outcomes (including returned errors or absent model results) and overlapping read errors, not delivered HTTP responses or app failures. Counts are the paired observed-process subset, not unique requests or a complete fleet denominator under partial coverage."
+		errorFinding.baseline = "Any positive model error-outcome or read-error delta warns; 20 model error outcomes over five minutes page. Overlapping read errors do not enter that PAGE sum. Cancellation is not excluded from these counters or thresholds."
+		errorFinding.context = "Caller intent, typed error and delivered outcome are unknown. Expected SDK request replacement or closure can return cancellation; a still-wanted operation abandoned after delay can also end canceled. These source possibilities do not establish the cause of the observed errors."
+		errorFinding.action = "Keep the error finding open. Establish the serving API and client artifacts, then seek retained same-window evidence for one still-wanted attempt: model phase, typed error and cancellation context, any successful replacement, and an independently delivered HTTP or app outcome or continued wanted-operation giveup. Do not infer empty app lists or Redis outage from these counters, or suppress cancellation without that evidence. Preserve eligibility and country-exclusion guards. See SIGNALS.md §2.9b."
+		errorFinding.verify = "Require two complete fresh five-minute windows with at least 20 successful initial outcomes and zero model error outcomes or read errors to clear the counter finding. Separately verify the reported still-wanted operation's terminal outcome; model return does not prove HTTP delivery or app recovery. Partial coverage cannot establish recovery."
 	}
 	if !e.complete {
 		findings = append(findings, providerPickerVisibility(e.reason, e.paired, e.expected))

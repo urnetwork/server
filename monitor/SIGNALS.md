@@ -12617,8 +12617,11 @@ positive-subset findings. Global service-placement configuration remains intact.
 
 - PAGE `provider-picker-effective-empty`: at least 20 successful initial GET
   outcomes in five minutes, at least 80% with no rendered initial rows.
-- WARN `provider-picker-read-or-request-error`: any positive observed read or
-  request error; PAGE when at least 20 request errors occur in that window.
+- WARN `provider-picker-read-or-request-error`: any positive observed model
+  returned-error or read-error delta; PAGE when at least 20 model error outcomes
+  occur in that window. These counters do not establish delivered HTTP responses
+  or app failures, typed error, or caller intent. Cancellation is not excluded
+  from the counters or thresholds.
   This separate denominator prevents surfaced errors from looking like recovery
   merely because they leave successful-empty counts.
   Thresholds use unrounded paired raw-counter endpoint differences, not
@@ -12693,6 +12696,15 @@ empty search results must not be conflated with it. Requests are not unique
 users. A failing observed subset need not describe the whole API fleet, and
 transport cancellation need not indicate backend outage. Preserve the symptom
 while establishing exact request and artifact authority before attribution.
+Expected SDK request replacement or closure can return cancellation and increment
+model error counters without failing a still-wanted operation. A still-wanted
+operation abandoned after delay can also end canceled, so cancellation must not
+be suppressed without retained intent and terminal-outcome evidence. These are
+source possibilities, not an attribution of the observed errors. The error finding
+must seek the
+serving API/client artifacts, same-window model phase and typed error/context,
+any successful replacement, and independently delivered HTTP/app outcome or
+continued wanted-operation giveup; it must not inherit the empty-list verdict.
 
 False negatives: under-volume pockets, failures before entering the model,
 omitted/rejected metric samples, wholly unscraped generations, lost HTTP

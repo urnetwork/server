@@ -141,6 +141,59 @@ func TestProviderPickerSignalRequestErrorPage(t *testing.T) {
 	}
 }
 
+// Error-only model evidence must not acquire the empty-list product verdict.
+func TestProviderPickerSignalErrorOnlyPageKeepsModelOutcomeScope(t *testing.T) {
+	alerts := runPickerFixture(t, pickerTestRows(map[string]float64{"initial/nonempty": 20, "initial/error": 20, "read/filters": 7}))
+	a := requireAlertClass(t, alerts, "provider-picker-read-or-request-error")
+	if len(alerts) != 1 || a.Severity != SeverityPage {
+		t.Fatalf("error-only model cohort: got %d alerts and severity %s", len(alerts), a.Severity)
+	}
+	if !strings.Contains(a.Observed, "initial_nonempty=20 initial_empty=0 initial_error=20 ") || !strings.Contains(a.Observed, "read_filters=7 ") || !strings.Contains(a.Observed, "complete=true ") {
+		t.Fatal("model counters or complete cohort changed")
+	}
+	if strings.Contains(a.Action, "product availability failure") || strings.Contains(a.Symptom, "App location picker") {
+		t.Fatal("model errors acquired an empty-list or app failure verdict")
+	}
+	for _, want := range []string{"model error outcomes", "Caller intent, typed error and delivered outcome are unknown", "Expected SDK request replacement or closure", "still-wanted operation abandoned after delay", "Do not infer empty app lists or Redis outage", "model return does not prove HTTP delivery or app recovery"} {
+		if !strings.Contains(a.Markdown(), want) {
+			t.Fatalf("error PAGE omitted evidence boundary %q", want)
+		}
+	}
+}
+
+func TestProviderPickerSignalReadOnlyWarningKeepsModelOutcomeScope(t *testing.T) {
+	alerts := runPickerFixture(t, pickerTestRows(map[string]float64{"initial/nonempty": 20, "read/filters": 20}))
+	a := requireAlertClass(t, alerts, "provider-picker-read-or-request-error")
+	if len(alerts) != 1 || a.Severity != SeverityWarn || !strings.Contains(a.Observed, "initial_error=0 ") || !strings.Contains(a.Observed, "read_filters=20 ") {
+		t.Fatal("overlapping read counts became model-error PAGE counts")
+	}
+	if !strings.Contains(a.Baseline, "Overlapping read errors do not enter that PAGE sum") || !strings.Contains(a.Baseline, "Cancellation is not excluded") || !strings.Contains(a.Mechanism, "not delivered HTTP responses or app failures") {
+		t.Fatal("read warning lost its measured-error scope")
+	}
+}
+
+func TestProviderPickerSignalPartialErrorPageKeepsUnknownDelivery(t *testing.T) {
+	rows := pickerTestRows(map[string]float64{"initial/nonempty": 20, "initial/error": 20})
+	settings := pickerTestSettings(t, pickerTestPayload(t, rows))
+	settings.LogServiceBlocks["api"] = []string{"blue", "green"}
+	alerts, err := NewProviderPickerSignal().Run(context.Background(), settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := requireAlertClass(t, alerts, "provider-picker-read-or-request-error")
+	requireAlertClass(t, alerts, "provider-picker-unobservable")
+	if len(alerts) != 2 || a.Severity != SeverityPage || !strings.Contains(a.Observed, "paired_processes=1 expected_slots=2 complete=false ") {
+		t.Fatal("partial positive errors lost their PAGE or visibility qualifier")
+	}
+	if !strings.Contains(a.Mechanism, "not unique requests or a complete fleet denominator under partial coverage") || !strings.Contains(a.Context, "delivered outcome are unknown") || !strings.Contains(a.Verify, "Partial coverage cannot establish recovery") {
+		t.Fatal("partial model errors acquired delivery or recovery authority")
+	}
+	complete := requireAlertClass(t, runPickerFixture(t, rows), "provider-picker-read-or-request-error")
+	if a.Identity() != complete.Identity() {
+		t.Fatal("evidence completeness changed the incident identity")
+	}
+}
+
 // Public counters round for display; severity must retain the underlying delta.
 func TestProviderPickerSignalErrorSeverityUsesUnroundedDelta(t *testing.T) {
 	for _, test := range []struct {
