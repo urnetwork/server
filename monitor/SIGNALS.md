@@ -24528,6 +24528,18 @@ Probe: `redis-connections`
   process limit, or persisted sustain/ticket state. If the existing exporter
   history or generation labels are unavailable, restoring that precise source
   is a prerequisite and its coverage remains explicitly unknown.
+- A returned history-query failure keeps the fixed public error text while its
+  original typed/context/local-boundary causes remain in the error graph. If
+  the observation owner ends after history returns, the generic visibility
+  error preserves those returned history and earlier native-source causes;
+  cancellation/deadline remains the lifecycle verdict and error text. Retired
+  client-growth findings and batteries stay unpublished, and a nil source adds
+  no execution proof. This changes no query, fallback order, cadence, threshold
+  or shared-history incident identity. False-positive qualifier: finite local
+  proof and a canceled observation do not establish remote progress, Redis
+  growth, an outage or a shared cause between the two sources. False-negative
+  qualifier: old discarded graphs cannot be recovered; absent source/stage
+  authority and incomplete history stay unknown rather than healthy.
 - On a sustained per-node outlier, the probe runs one bounded `CLIENT LIST`
   battery. Its public schema contains numeric command-class counts, total and
   maximum output memory, and maximum idle/age values; raw client names, users,
