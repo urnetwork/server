@@ -118,8 +118,16 @@ func contractStageLatencyQuery(environment string, settings *ContractStageLatenc
 		fleetPart("hold_expected", "count_over_time(vector(1)["+promDuration(settings.Hold)+":"+promDuration(settings.HoldStep)+"])"),
 	}
 	control := base + `,job="api",route=` + strconv.Quote(controlRouteLabel)
+	// without the requests the API discarded before authentication, by count
+	// and by their own seconds (§2.19e); a release without the collector
+	// subtracts nothing, and a window of only discards has no mean
+	discarded := base + `,job="api"`
+	controlMean := "clamp_min(sum(increase(urnetwork_http_request_duration_seconds_sum{" + control + "}[" + window + "])) - " +
+		"(sum(increase(urnetwork_connect_control_http_discarded_seconds_sum{" + discarded + "}[" + window + "])) or vector(0)), 0) / " +
+		"((sum(increase(urnetwork_http_request_duration_seconds_count{" + control + "}[" + window + "])) - " +
+		"(sum(increase(urnetwork_connect_control_http_discarded_seconds_count{" + discarded + "}[" + window + "])) or vector(0))) > 0)"
 	parts = append(parts,
-		fleetPart("control_mean", "sum(increase(urnetwork_http_request_duration_seconds_sum{"+control+"}["+window+"])) / sum(increase(urnetwork_http_request_duration_seconds_count{"+control+"}["+window+"]))"),
+		fleetPart("control_mean", controlMean),
 		fleetPart("pgbouncer_waiting", pgbouncerWaitingExpression(environment, settings.Freshness)),
 	)
 	if selector := inventory.selector(environment); selector != "" {

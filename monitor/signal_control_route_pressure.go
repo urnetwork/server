@@ -35,10 +35,14 @@ func (controlRoutePressureProbe) id() string             { return "runtime/contr
 func (controlRoutePressureProbe) tier() string           { return tierWarn }
 func (controlRoutePressureProbe) cadence() time.Duration { return time.Minute }
 
+// The partitions a current api exports at zero (router/control_observation.go,
+// controller/connect_control_metrics.go). The diagnostics read only these; a
+// partition outside them is skipped, never a reason to distrust the process.
 var controlRoutePhases = [...]string{"prepare", "authenticate", "controller", "response"}
 var controlRouteMessages = [...]string{
 	"create_contract", "close_contract", "provide", "encrypted_key",
-	"client_key", "control_ping", "provide_ping", "other",
+	"client_key", "control_ping", "provide_ping", "resident_move_result",
+	"other",
 }
 
 // Exact process identity stays in the private join. Render host/block only.
@@ -58,6 +62,11 @@ func controlRoutePressureQuery(environment string) string {
 	sum := "urnetwork_http_request_duration_seconds_sum{" + route + "}"
 	requests := "urnetwork_http_requests_total{" + route + "}"
 	canceled := "urnetwork_http_requests_total{" + route + `,outcome="canceled"}`
+	// requests answered from their body alone, before authentication, and
+	// their own handler seconds (router/control_observation.go); zero on a
+	// release without the collector
+	discarded := "urnetwork_connect_control_http_discarded_seconds_count{" + base + "}"
+	discardedSeconds := "urnetwork_connect_control_http_discarded_seconds_sum{" + base + "}"
 	inflight := "urnetwork_http_requests_inflight{" + route + "}"
 	start := "process_start_time_seconds{" + base + "}"
 	parts := []string{}
@@ -70,6 +79,8 @@ func controlRoutePressureQuery(environment string) string {
 	add("seconds", "increase("+sum+"[5m])")
 	add("requests", "sum by("+identity+")(increase("+requests+"[5m]))")
 	add("canceled", "sum by("+identity+")(increase("+canceled+"[5m])) or on("+identity+") (0 * increase("+count+"[5m]))")
+	add("discarded", "sum by("+identity+")(increase("+discarded+"[5m])) or on("+identity+") (0 * increase("+count+"[5m]))")
+	add("discarded_seconds", "sum by("+identity+")(increase("+discardedSeconds+"[5m])) or on("+identity+") (0 * increase("+count+"[5m]))")
 	add("inflight", inflight)
 	add("inflight_min", "min_over_time("+inflight+"[5m])")
 	add("samples", "count_over_time("+count+"[5m])")
@@ -127,7 +138,11 @@ func (controlRoutePressureProbe) check(ctx context.Context, env *probeEnv) ([]fi
 	return evaluateControlRoutePressure(processes, expected, env.now()), nil
 }
 
-// Reject duplicate/unknown partitions rather than summing incompatible sources.
+// Reject duplicate cells, cells outside the query and frame series from
+// another ingress rather than summing incompatible sources. A phase or frame
+// partition outside the lists is a diagnostic gauge this signal does not
+// read: it is skipped, so a label a newer release adds cannot make every
+// slot unobservable, as resident_move_result did from 2026-10-22.
 func parseControlRoutePressure(payload, environment string, now time.Time) ([]*controlRouteProcess, error) {
 	if len(payload) > controlRouteResponseMax {
 		return nil, fmt.Errorf("response exceeds bounded limit")
@@ -153,7 +168,7 @@ func parseControlRoutePressure(payload, environment string, now time.Time) ([]*c
 		}
 		name := labels["monitor_metric"]
 		switch name {
-		case "start", "start_time", "count", "seconds", "requests", "canceled", "inflight", "inflight_min", "samples", "early_samples", "count_time", "seconds_time", "inflight_time", "requests_time", "seconds_samples", "seconds_early_samples", "inflight_samples", "inflight_early_samples":
+		case "start", "start_time", "count", "seconds", "requests", "canceled", "discarded", "discarded_seconds", "inflight", "inflight_min", "samples", "early_samples", "count_time", "seconds_time", "inflight_time", "requests_time", "seconds_samples", "seconds_early_samples", "inflight_samples", "inflight_early_samples":
 		case "phase", "frame":
 			partition := labels["phase"]
 			allowed := controlRoutePhases[:]
@@ -164,12 +179,12 @@ func parseControlRoutePressure(payload, environment string, now time.Time) ([]*c
 					process.invalid = true
 				}
 			}
-			valid := false
+			listed := false
 			for _, item := range allowed {
-				valid = valid || partition == item
+				listed = listed || partition == item
 			}
-			if !valid {
-				process.invalid = true
+			if !listed {
+				continue
 			}
 			name += ":" + partition
 		default:
@@ -233,11 +248,19 @@ func evaluateControlRoutePressure(processes []*controlRouteProcess, expected map
 		if !complete {
 			gaps = append(gaps, process.host+"/"+process.block+"[phase/frame telemetry unavailable]")
 		}
-		if values["count"] < 100 {
+		// Discarded requests did no handler work: their count leaves both
+		// denominators and their own seconds leave the sum. Both adjusted
+		// denominators must reach 100. The request one may be 3% smaller
+		// within the scrape tolerance, and when discards dominate it reached
+		// zero while the other stayed above 100, a NaN or +Inf share.
+		count := values["count"] - values["discarded"]
+		requests := values["requests"] - values["discarded"]
+		if count < 100 || requests < 100 {
 			continue
 		}
-		mean := values["seconds"] / values["count"]
-		share := values["canceled"] / values["requests"]
+		mean := math.Max(0, values["seconds"]-values["discarded_seconds"]) / count
+		// a canceled count ahead of its requests at a scrape boundary
+		share := math.Min(1, values["canceled"]/requests)
 		if share < 0.20 || mean < 5 {
 			continue
 		}
@@ -250,8 +273,8 @@ func evaluateControlRoutePressure(processes []*controlRouteProcess, expected map
 			target: process.host, frame: process.block, sustain: sustain,
 			symptom:   "Traffic-bearing control requests are canceled while spending substantial time inside the API handler.",
 			mechanism: "Control-plane residence can delay provide-secret registration and contract replies. A provider_unresponsive probe state can include these failures; this is not evidence that the provider exit is dark.",
-			baseline:  "Per newest API process over 5m: WARN requires >=100 completions, >=20% canceled and >=5s mean; PAGE additionally requires >=50% canceled, >=10s mean and >=100 inflight throughout sampled range, sustained twice.",
-			observed:  fmt.Sprintf("requests_5m=%.0f canceled_5m=%.0f canceled_share=%.1f%% mean_seconds=%.3f inflight=%.0f inflight_min_5m=%.0f %s", values["requests"], values["canceled"], 100*share, mean, values["inflight"], values["inflight_min"], diagnostics),
+			baseline:  "Per newest API process over 5m, excluding requests discarded before authentication and their seconds: WARN requires >=100 completions, >=20% canceled and >=5s mean; PAGE additionally requires >=50% canceled, >=10s mean and >=100 inflight throughout sampled range, sustained twice.",
+			observed:  fmt.Sprintf("requests_5m=%.0f discarded_5m=%.0f discarded_seconds_5m=%.1f canceled_5m=%.0f canceled_share=%.1f%% mean_seconds=%.3f inflight=%.0f inflight_min_5m=%.0f %s", requests, values["discarded"], values["discarded_seconds"], values["canceled"], 100*share, mean, values["inflight"], values["inflight_min"], diagnostics),
 			evidence:  "Reset-aware counter increases and underlying source timestamps are joined on the exact newest process; the process and range must span five minutes. Cancellation includes every recorded status, including none and 200.",
 			context:   "Mean is not p95; canceled/none is not an observed HTTP 499. Legitimate holds, caller churn or response loss can contribute. HTTP 200 and frame handler_ok may carry application rejection; completions are not ACKs or distinct providers. Phases do not isolate PG pool wait.",
 			action:    "Compare authenticate versus controller phase residence/inflight, then HTTP-ingress frame completion outcomes and frame residence by fixed message. Corroborate with separate PG pool/CPU and same-source probe DNS path, registration, guard and durable measured coverage. Do not weaken provider/credit guards or infer a DNS-server fault from this signal.",
@@ -271,7 +294,7 @@ func controlRouteComplete(process *controlRouteProcess, now time.Time) bool {
 	if process.invalid {
 		return false
 	}
-	for _, name := range []string{"start", "start_time", "count", "seconds", "requests", "canceled", "inflight", "inflight_min", "samples", "early_samples", "count_time", "seconds_time", "inflight_time", "requests_time", "seconds_samples", "seconds_early_samples", "inflight_samples", "inflight_early_samples"} {
+	for _, name := range []string{"start", "start_time", "count", "seconds", "requests", "canceled", "discarded", "discarded_seconds", "inflight", "inflight_min", "samples", "early_samples", "count_time", "seconds_time", "inflight_time", "requests_time", "seconds_samples", "seconds_early_samples", "inflight_samples", "inflight_early_samples"} {
 		if _, ok := process.values[name]; !ok {
 			return false
 		}

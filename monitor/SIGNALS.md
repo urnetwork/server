@@ -19858,6 +19858,30 @@ Missing inventory, source, range, or diagnostic collectors produces a WARN
 `control-route-pressure-unobservable` finding; independently proven hot slots
 still emit `control-route-pressure`.
 
+Requests the API answered from their body alone, before authentication (a
+pack of one `PeerAudit` frame, CPUOPT3 D3), leave the arithmetic. Their count,
+from `urnetwork_connect_control_http_discarded_seconds_count`, leaves the
+completions, the request denominator and the 100-completion floor; their own
+seconds, from its `_sum`, leave the duration sum. Such a request takes about
+0.1 ms, so counting it would dilute the mean and the canceled share of the
+requests that do work (a quarter of all control requests in 2026-10). Both
+adjusted denominators must reach 100: the request one may be 3% smaller within
+the scrape tolerance, and when discards dominated it could reach zero while the
+other stayed above 100, a NaN or +Inf share. The canceled share is clamped to
+100%. The thresholds are unchanged. A release without the collector reads as
+zero discards. The alert reports `requests_5m` without them, and
+`discarded_5m` and `discarded_seconds_5m` beside it.
+
+The phase and frame diagnostics read only the listed partitions: the four
+phases and the nine frame message kinds below. A partition outside those
+lists is skipped. Before CPUOPT3 D3 any unlisted partition made its process
+invalid, so from 2026-10-22, when every API process began to export
+`resident_move_result` (65778f4d1), every slot read as unobservable and the
+signal could not raise pressure. `TestControlRouteMessagesCoverControllerLabels`
+fails when the controller or router adds a partition the signal does not
+list. A frame series from another ingress, a cell outside the signal's own
+query and a duplicated cell still make the process unobservable.
+
 While the owning context remains live, source-path errors retain that same
 coverage WARN and `Bounded Mimir query unavailable` wording, with the shared
 finite `error_class` and any typed `ssh_admission_failures` phases. A finished
@@ -19898,7 +19922,60 @@ The opt-in API instrumentation adds only fixed cells:
   exactly 16 cells: four phases by `ok|rejected|canceled|panic`. Successful
   transitions count the phase exited, not another logical request. Canceled
   context takes precedence over panic. Early rejection remains in its owning
-  phase; all gauges release during normal return or panic unwind.
+  phase; all gauges release during normal return or panic unwind. A request
+  discarded before authentication (below) goes from `prepare`, which covers
+  its shape check, straight to `response`, and never enters `authenticate`
+  or `controller`.
+- `urnetwork_connect_control_discarded_requests_total{abuse,bearer}` counts
+  `/connect/control` requests whose every frame is a `PeerAudit`, answered
+  `{"pack":"","error":null}` from the body alone: after the route's
+  intended network and lag.dev guest gates, before the credential, the
+  per-client limit, the revocation record or any state is read. The proxy's
+  hosted authority counts its own the same way, after its lifecycle checks
+  and before contract admission. The pack is at most 512 characters of
+  base64 and exactly one frame, a `PeerAudit` that decodes, the only shape
+  any connect version sends (about 80 characters, 220 at most). A wire scan
+  rejects every other shape before decoding anything, so the check costs a
+  fixed handful of small allocations however the bytes are crafted. Any
+  other pack, including two audits, a longer audit or an audit beside a frame
+  of another type, takes the authenticated path, where the dispatch's no-op
+  answers its audits. No
+  server has consumed an audit, and connect stops sending them by default
+  (`ClientSettings.SendPeerAudits`), so the rate falls as clients update.
+  `abuse` is `claimed` when the audit sets `abuse` (a provider's
+  `ReportAbuse`), otherwise `none`. `bearer` is `present` when the request
+  presented a non-empty bearer credential (the hosted authority: a non-empty
+  token), otherwise `absent`; the credential is read and never verified.
+  Both labels are counted before authentication, so anyone can raise either:
+  they size the discards and prove nothing about who sent them. The four
+  children exist at zero. Nothing is logged for these requests at any level.
+  They make no `urnetwork_session_auth_attempts_total` attempt, no
+  `urnetwork_connect_control_client_limit_total` decision and no
+  `urnetwork_jwt_state_record_checks_total` check, and they spend no
+  per-client budget.
+
+  Owner question 4 reads `abuse="claimed"` for two weeks before providers
+  update. Two qualifiers apply to that sample and to the abuse fix:
+  - The count can be inflated. It is recorded before authentication, so a
+    caller with no credential can raise `abuse="claimed",bearer="absent"`
+    at will; `bearer="present"` at least separates requests that carried a
+    credential, unverified, from bare ones.
+  - The fix is partial until providers update their sdk. Abuse reports no
+    longer spend a provider's per-client budget, but an older sdk still
+    sends them, and the load balancer's per-address backstop for
+    `/connect/control` (services.yml `route_rate_limits`; alt's
+    `alt/rate_limit.go`) counts them with the provider's own
+    `CreateContract` and `Provide`. A remote user who drives enough blocked
+    packets through an older provider can still get that provider's real
+    control refused there, until its sdk stops sending reports
+    (`ClientSettings.SendPeerAudits` off by default).
+- `urnetwork_connect_control_http_discarded_seconds_{sum,count}` is the
+  handler residence of the API requests the route's discard answered,
+  whatever their outcome, from the same opt-in observer as the phase
+  families; `count` is those requests. It starts with the control handler,
+  after the route's gates, so it can read a few microseconds short of the
+  route's own duration for the same request. Both exist at zero on a capable
+  executable.
 - `urnetwork_connect_control_refusal_replays_total{cause}` counts API
   `/connect/control` requests answered from route refusals that the
   router's origin notification owner recorded for the credential's own
@@ -19918,10 +19995,12 @@ The opt-in API instrumentation adds only fixed cells:
   of its own reaches the state query, a removed or rotated client is told
   only the refusals recorded for it; a revoked session marker or a
   remembered state refusal still answers 401 first.
-- `urnetwork_connect_control_frames_total{ingress,message,outcome}` has 64
-  cells: `http|internal`, eight fixed message kinds (`create_contract`,
+- `urnetwork_connect_control_frames_total{ingress,message,outcome}` has 72
+  cells: `http|internal`, nine fixed message kinds (`create_contract`,
   `close_contract`, `provide`, `encrypted_key`, `client_key`, `control_ping`,
-  `provide_ping`, `other`), and `handler_ok|error|canceled|panic`. Matching
+  `provide_ping`, `resident_move_result`, `other`), and
+  `handler_ok|error|canceled|panic`. A `PeerAudit` in a pack with other
+  frames is a no-op that completes `handler_ok` under `other`. Matching
   `urnetwork_connect_control_frames_inflight` and
   `urnetwork_connect_control_frame_seconds_{sum,count}` locate handler
   residence. Every child exists at zero on a capable executable. `internal`
@@ -23480,7 +23559,11 @@ new cancellation threshold or customer-failure cause is inferred here.
 Thresholds: WARN when the total mean exceeds 250 ms for 10 minutes; PAGE when
 it exceeds 1 s for 10 minutes. Read it with the `/connect/control` mean
 (`urnetwork_http_request_duration_seconds{job="api",route="POST ^/connect/control$"}`):
-2 ms when healthy, 99 ms at 15:00Z on 10-21 and 150–171 ms through 10-22.
+2 ms when healthy, 99 ms at 15:00Z on 10-21 and 150–171 ms through 10-22. The
+mean leaves out the requests the API discarded before authentication, by
+count and by their own seconds
+(`urnetwork_connect_control_http_discarded_seconds`, §2.19e), so fast discards
+cannot dilute it; a window of only discards shows no mean.
 
 Measurement (one-minute cadence): one bounded loopback Mimir instant query
 through a services gateway, evaluated two minutes behind now so the newest
