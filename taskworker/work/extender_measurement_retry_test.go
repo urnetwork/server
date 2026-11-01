@@ -223,8 +223,14 @@ func TestExtenderMeasurementAcmeRetryBackoff(t *testing.T) {
 	}
 
 	for _, n := range []int{1, 2, 5, 30} {
-		connect.AssertEqual(t, extenderMeasurementAcmeRetryBackoff(n, nil, response(http.StatusTooManyRequests, "3600")), time.Duration(0))
-		connect.AssertEqual(t, extenderMeasurementAcmeRetryBackoff(n, nil, response(http.StatusTooManyRequests, "")), time.Duration(0))
+		// a refusal for longer than a retry waits, or for no time that can be
+		// read, is not retried
+		for _, retryAfter := range []string{"3600", "11", "", "0", "-5", "soon", time.Now().Add(time.Hour).UTC().Format(http.TimeFormat)} {
+			connect.AssertEqual(t, extenderMeasurementAcmeRetryBackoff(n, nil, response(http.StatusTooManyRequests, retryAfter)), time.Duration(0))
+		}
+		// a refusal for seconds is retried after them, as the library would
+		assertWait(extenderMeasurementAcmeRetryBackoff(n, nil, response(http.StatusTooManyRequests, "1")), time.Second+time.Millisecond, 2*time.Second)
+		assertWait(extenderMeasurementAcmeRetryBackoff(n, nil, response(http.StatusTooManyRequests, "10")), 10*time.Second+time.Millisecond, 11*time.Second)
 	}
 
 	for _, statusCode := range []int{http.StatusInternalServerError, http.StatusServiceUnavailable, http.StatusBadRequest} {

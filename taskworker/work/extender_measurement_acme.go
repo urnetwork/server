@@ -141,15 +141,18 @@ const (
 // before retry `n` of one request to the CA, or 0 for no retry (C5, C6, C9;
 // amendment 24).
 //
-// A request the CA refuses with 429 is not retried. The library would retry a
-// 429 itself, and its default backoff waits the Retry-After, so a refusal for
-// hours would hold the order until the order's context ends,
-// ExtenderMeasurementOrderTimeout later, and only then return the CA's error:
-// each refused order would spend five of the eight minutes a pass may start
-// orders in (ExtenderMeasurementIssueBudget). Not retried, the CA's
-// rateLimited error comes back at once with its Retry-After, and the row of
-// the order, renewal or revocation waits that out instead
-// (extenderMeasurementRetryTime, lag.dev/ops/letsencrypt.md).
+// A request the CA refuses with 429 for longer than a retry waits at most,
+// extenderMeasurementAcmeMaxRetryBackoff, or with no Retry-After that can be
+// read, is not retried. The library would retry a 429 itself, and its default
+// backoff waits the Retry-After, so a refusal for hours would hold the order
+// until the order's context ends, ExtenderMeasurementOrderTimeout later, and
+// only then return the CA's error: each refused order would spend five of the
+// eight minutes a pass may start orders in (ExtenderMeasurementIssueBudget).
+// Not retried, the CA's rateLimited error comes back at once with its
+// Retry-After, and the row of the order, renewal or revocation waits that out
+// instead (extenderMeasurementRetryTime, lag.dev/ops/letsencrypt.md). A
+// refusal for seconds, the CA's limit on requests to one endpoint, is retried
+// within the order after its Retry-After, as the library would.
 //
 // Any other response is retried as the library's default backoff retries it,
 // which is reimplemented here since the library does not export it
@@ -158,23 +161,38 @@ const (
 // a second of jitter either way. A Retry-After that has already passed waits
 // the jitter alone, never nothing, which is the library's documented intent.
 func extenderMeasurementAcmeRetryBackoff(n int, _ *http.Request, response *http.Response) time.Duration {
+	jitter := time.Duration(1+mathrand.IntN(1000)) * time.Millisecond
+	retryAfter, hasRetryAfter := extenderMeasurementAcmeRetryAfter(response)
 	if response != nil && response.StatusCode == http.StatusTooManyRequests {
+		if 0 < retryAfter && retryAfter <= extenderMeasurementAcmeMaxRetryBackoff {
+			return retryAfter + jitter
+		}
 		return 0
 	}
-	jitter := time.Duration(1+mathrand.IntN(1000)) * time.Millisecond
-	if response != nil {
-		if values := response.Header.Values("Retry-After"); 0 < len(values) {
-			retryAfter := time.Duration(0)
-			if seconds, err := strconv.Atoi(values[0]); err == nil {
-				retryAfter = time.Duration(seconds) * time.Second
-			} else if date, err := http.ParseTime(values[0]); err == nil {
-				retryAfter = time.Until(date)
-			}
-			return max(retryAfter, 0) + jitter
-		}
+	if hasRetryAfter {
+		return max(retryAfter, 0) + jitter
 	}
 	n = min(max(n, 1), 30)
 	return min(time.Duration(1<<(n-1))*time.Second+jitter, extenderMeasurementAcmeMaxRetryBackoff)
+}
+
+// The Retry-After of a response, in seconds or as a date, and whether it has
+// one; 0 for one that cannot be read.
+func extenderMeasurementAcmeRetryAfter(response *http.Response) (time.Duration, bool) {
+	if response == nil {
+		return 0, false
+	}
+	values := response.Header.Values("Retry-After")
+	if len(values) == 0 {
+		return 0, false
+	}
+	if seconds, err := strconv.Atoi(values[0]); err == nil {
+		return time.Duration(seconds) * time.Second, true
+	}
+	if date, err := http.ParseTime(values[0]); err == nil {
+		return time.Until(date), true
+	}
+	return 0, true
 }
 
 // Makes sure the account exists. Operations create the account the CAA
