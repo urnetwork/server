@@ -6055,6 +6055,14 @@ func AddFreeTransferBalanceToAllNetworks(
 					NOT EXISTS (
 						SELECT 1 FROM lag_guest
 						WHERE lag_guest.network_id = network.network_id
+					) AND
+					-- a prober shard's private network is funded only by its
+					-- own credit (BeginProberShard). A free grant there would
+					-- be data no user owns, and the shard's cleanup refuses to
+					-- remove a network that holds a second balance
+					NOT EXISTS (
+						SELECT 1 FROM prober_shard_run
+						WHERE prober_shard_run.network_id = network.network_id
 					)
 			`,
 			SubscriptionTypeSupporter,
