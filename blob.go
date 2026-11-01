@@ -806,7 +806,14 @@ func (self *minioBlobStore) SetLifecycle(ctx context.Context, rules []BlobLifecy
 	return self.client.SetBucketLifecycle(ctx, self.bucket, config)
 }
 
+// Recover only the cold-location throttle before checking every required
+// protection on the same client. Discovery never replaces those checks.
 func (self *minioBlobStore) checkRetentionConfiguration(ctx context.Context) error {
+	if self.bucketLocationRetry != nil {
+		if err := self.bucketLocationRetry.prepare(ctx, self.client, self.bucket); err != nil {
+			return fmt.Errorf("check minio blob bucket existence: %w", err)
+		}
+	}
 	exists, err := self.client.BucketExists(ctx, self.bucket)
 	if err != nil {
 		return fmt.Errorf("check minio blob bucket existence: %w", err)
