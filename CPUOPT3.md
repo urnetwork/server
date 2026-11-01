@@ -329,43 +329,72 @@ The owner approved an edge-2 disk reclaim plan:
 
 All of these are being built, with a runbook to follow.
 
-#### Contract horizon reaper: a runtime horizon down to 45 days
+#### Contract horizon reaper: a runtime horizon down to 35 days
 
-The reaper merged on 11-01 (7334b3a17) at the owner's 91 days. The owner approved starting it there, with "the 45-day floor follows as a code change". The disk analysis that day found 45 days the shortest horizon with no reader edge case. Branch `feat/contract-reaper-horizon-floor` adds the floor as a runtime field.
+The reaper merged on 11-01 (7334b3a17) at the owner's 91 days, and `horizonDays` followed the same day with a 45-day floor (2bff1b9a5). The owner then set the horizon to **35 days, in force by about 11-08, with guards**: the disk model shows 45 days cannot keep edge-2 above 1.5 TB free, and edge-2 has no free bays. Branch `feat/contract-reaper-horizon-35d` lowers the floor and adds the guards. The control stays unset until an independent review; the owner sets `horizonDays 35` about 11-08.
 
 **The field:** `HSET {contract_horizon}control horizonDays <days>`.
-- Whole days from 45 to 91. A value below 45 counts as 45, one above 91 as 91.
-- Absent, empty or unparsable (`45.5`, `45d`), it is the code's 91 days. That is the other fields' rule: a value that does not parse narrows as far as it can.
+- Whole days from 35 to 91. A value below 35 counts as 35, one above 91 as 91.
+- Absent, empty or unparsable (`35.5`, `35d`), it is the code's 91 days. That is the other fields' rule: a value that does not parse narrows as far as it can.
 - It is read before every batch, with the other fields, and a new value applies from the next batch. Raised, it stops deleting inside the new horizon from that batch on. Nothing already deleted comes back.
-- It never turns the reaper on or off; `mode` does. A dry run at 45 days is `mode dry_run` with `horizonDays 45`.
+- It never turns the reaper on or off; `mode` does. A dry run at 35 days is `mode dry_run` with `horizonDays 35`.
 
 **Reaper-only.** The floor is `ContractHorizonFloor` in `model/contract_horizon_reaper.go`, and the code setting floors there too. `server.ContractRetention` stays 91 days, so nothing else moves:
-- the partition drop, whose `contractWeekBlocker` keeps only payment holds (it needs the reaper's keep rule before any cutover; that is separate work);
+- the partition drop, whose `contractWeekBlocker` keeps only payment holds (it needs the reaper's keep rules before any cutover; that is separate work);
 - close evidence and key history retention;
 - the sn-reconcile holders floor;
 - the monitor's partition retention signal.
 
-**Every protection holds at any horizon.** Each check that keeps a contract reads its rows, not its age:
+**Readers of the deleted rows, and how far back each reads:**
+
+| Reader | What it reads | How far back | At 35 days |
+|---|---|---|---|
+| Operator block points (`ComputeOperatorBlockPoints`: the daily task, `bringyourctl account-points backfill-blocks`) | unpaid sweeps with a sweep time in the block's window, joined to credit-bearing contracts closed after the cutoff | until the block is awarded, and at most until the window start is `ClientReliabilityRetention` (21 days) old, when the award fails closed. By sweep time, which is the settlement: a contract closed long before can settle in a recent block | kept by the new keep rule |
+| Transfer audit rollup (`RollupTransferAuditEvents`: the periodic task, `stats rollup-transfer`, `stats backfill`, `stats migrate-202608`) | transfer_contract joined to contract_close by close time, one UTC day at a time, replacing the day's row | task: 3 days; CLI defaults: 7 days (`rollup-transfer`), 21 days (`backfill`, `migrate-202608`); an explicit `--start` reaches any day | days the reaper can reach keep their rows (the new guard) |
+| Payout planner | unpaid sweeps of contracts minted before the cutoff, sweeps of safely canceled payments, staged sweeps | up to 300 days | kept by `unpaid_legacy`, `payment_incomplete`, `plan_staged` |
+| sn-reconcile (A2 holders, census) | sweeps of pending and safely canceled payments; legacy payments | per payment | kept as payment holds or incomplete payments. The reaper deletes a contract with its sweeps, so A2's rule that a sweep above its floor has its contract still holds |
+| Subnet epoch reads (`GetStEpochProviderUsage`, the v2 ledger, close originals) | live contracts and the usage archive, by close time; close evidence | each epoch's window | unchanged: every deleted credit-bearing contract is archived in the same statement, and evidence keeps its 91 days |
+| Provider stats (`/stats/provider-last-n`, `/stats/providers-overview-last-n`, the legacy `-last-90` routes) and provider payout stats | contracts joined to closes; sweeps by sweep time | up to 366 days | undercount the days older than 35 |
+| `/transfer/stats` | unpaid sweeps | all time | `unpaid_bytes_provided` falls as post-cutoff sweeps pass 35 days |
+
+The disk analysis put block points at 37 days: a 7-day block plus reliability retention stretched to 30 days. That stretch was the subsidy-epoch frontier, which the owner retired on 10-31, so an award now fails closed once its window is 21 days old. Its real exposure is late settlement: a dispute resolved, or a legacy settlement committed, weeks after the close puts an unpaid sweep in a recent block, and no horizon covers that. Before this change, a 91-day reaper could delete such a contract too.
+
+**The block points keep rule (`block_points`).** A contract stays while any unpaid sweep of it has a sweep time inside the window of a block an award can still read (`OperatorBlockPointsPendingWindows`):
+- The candidate blocks run from the cutoff's block through the one after the open block (a sweep can commit there while a run holds the list). Each has traffic past the cutoff and a reliability window inside retention, by the predicate the award checks (`operatorBlockReliabilityRetained`).
+- A block with an award (its `payment_report` row) drops out.
+- The windows are the award's own, clamped to the cutoff.
+- The list is read once a run. An award committed since only keeps more.
+- A contract leaves once its block is awarded, or once the block's reliability passes retention, when an award would fail closed. That is at most 21 days after the block opened.
+- It is a new reason on `urnetwork_contract_horizon_protected_contracts_total`, so one more series, and the classification order puts it last.
+
+**The rollup guard (`TransferAuditRollupFirstDay`).** A rollup never writes a day before the first whole day 33 days back: the 35-day floor less a 2-day margin, since one day's read can take most of a day at Main's churn while the reaper's horizon advances. The row of an earlier day was written while all of its contracts were present, and a re-roll would replace it with a sum of what the reaper left.
+- The CLI path skips those days, and logs that it kept their rows.
+- A periodic chain that fell behind resumes at that day.
+- Neither default window reaches it.
+- No reaper keep rule can serve this reader, since an explicit `--start` can name any day.
+- The first roll of every day happens within about three days, long before 35.
+
+**Every other protection holds at any horizon.** Each check that keeps a contract reads its rows, not its age:
 - open or disputed contracts, and unsettled escrows;
 - payment holds, and incomplete, missing or recent payments;
 - unpaid sweeps of contracts minted before the earning cutoff (the stricter sweep rule), and sweeps staged in a pending plan;
 - rows another transaction holds.
 
-The DB tests check each one at 45 days, with the cutoff inside 91 days as production's is. The settings comment used to cite a planner retention-risk age tied to 91 days. No such age exists: the planner's is `StragglerContractExpiration` minus 7 days (293 days), and it guards the straggler path.
+The DB tests check each one at 35 days, with the cutoff inside 91 days as production's is. The settings comment once cited a planner retention-risk age tied to 91 days. No such age exists: the planner's is `StragglerContractExpiration` minus 7 days (293 days), and it guards the straggler path.
 
-**What users see below 91 days:**
-- **Provider stats:** the 90-day views (`/stats/provider-last-n`, `/stats/providers-overview-last-n`, the legacy `-last-90` routes) undercount the days older than the horizon, by the contracts deleted there. Those are traffic after the earning cutoff and contracts without a sweep, with their contract and client counts.
-- **`/transfer/stats`:** `unpaid_bytes_provided` falls as the unpaid sweeps of contracts minted after the cutoff pass the horizon. The subnet pool pays those, never USDC. Paid bytes are unchanged.
+**What users see at 35 days:**
+- **Provider stats:** the 90-day views lose the days older than 35, days 36 to 90, by the contracts deleted there. Those are traffic after the earning cutoff and contracts without a sweep, with their contract and client counts. Windows past 91 days already undercount.
+- **`/transfer/stats`:** `unpaid_bytes_provided` falls as unpaid sweeps of contracts minted after the cutoff pass 35 days. With the cutoff about 10-06, that starts about 11-10. The subnet pool pays those, never USDC. Paid bytes are unchanged.
+- **Stats re-rolls:** `stats backfill` and `stats rollup-transfer` no longer rewrite days more than 33 days old; those days keep the rows they have.
 - **Presentation is an owner call:** clamp the stats windows to the horizon, serve older days from the daily audit rollup, or stop counting subnet-pool sweeps as unpaid.
 
 **Close evidence** keeps its 91 days. Below 91, a deleted contract's evidence outlives it until then; `RemoveExpiredCloseEvidence` takes evidence whose contract is gone.
 
-**Below 45 days** the same analysis found two readers to guard first: operator block points, which read a block's unpaid sweeps while its reliability is retained, and the reach of `bringyourctl stats backfill`.
-
 **Reporting:**
-- `urnetwork_contract_horizon_horizon_seconds` (new, no labels) is the horizon the last control read set.
+- `urnetwork_contract_horizon_horizon_seconds` (no labels) is the horizon the last control read set.
 - `urnetwork_contract_horizon_horizon_timestamp_seconds` and the lag gauge follow it.
-- The run log line adds `horizon_days=`.
+- The run log line carries `horizon_days=`.
+- `block_points` counts the contracts the new rule keeps.
 
 ### D1. Deliver in-process when the transport's resident is in the same connect process
 
