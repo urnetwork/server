@@ -19931,6 +19931,13 @@ The opt-in API instrumentation adds only fixed cells:
     packets through an older provider can still get that provider's real
     control refused there, until its sdk stops sending reports
     (`ClientSettings.SendPeerAudits` off by default).
+- `urnetwork_connect_control_http_discarded_seconds_{sum,count}` is the
+  handler residence of the API requests the route's discard answered,
+  whatever their outcome, from the same opt-in observer as the phase
+  families; `count` is those requests. It starts with the control handler,
+  after the route's gates, so it can read a few microseconds short of the
+  route's own duration for the same request. Both exist at zero on a capable
+  executable.
 - `urnetwork_connect_control_refusal_replays_total{cause}` counts API
   `/connect/control` requests answered from route refusals that the
   router's origin notification owner recorded for the credential's own

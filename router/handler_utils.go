@@ -434,6 +434,7 @@ func WrapWithInputRequireClientUnlessAnswered[T any, A any, R any](
 			// read; the route's gates in front of the handler have run
 			if discard != nil {
 				if discarded, ok := discard(req, arg); ok {
+					markControlHttpDiscarded(req)
 					return reply(clientSession.Ctx, discarded)
 				}
 			}

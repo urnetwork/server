@@ -8,10 +8,12 @@ package router
 
 import (
 	"context"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -171,5 +173,50 @@ func TestWrapUnlessAnsweredAuthenticatesWhatItDoesNotDiscard(t *testing.T) {
 	}
 	if got := testutil.ToFloat64(metrics.completions.WithLabelValues("authenticate", "rejected")); got != 2 {
 		t.Fatalf("authenticate rejections = %v, want 2", got)
+	}
+}
+
+// The residence of discarded requests, from the collector's own registry.
+func discardTestDiscardedSeconds(t *testing.T, registry *prometheus.Registry) (count uint64, sum float64) {
+	t.Helper()
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, family := range families {
+		if family.GetName() == "urnetwork_connect_control_http_discarded_seconds" {
+			summary := family.GetMetric()[0].GetSummary()
+			return summary.GetSampleCount(), summary.GetSampleSum()
+		}
+	}
+	t.Fatal("the discarded request collector is not registered")
+	return 0, 0
+}
+
+// A discarded request's handler residence counts as a discard's, so the
+// route's mean can leave it out (SIGNALS.md §2.19e); a request that
+// authenticates does not count.
+func TestWrapUnlessAnsweredTimesDiscardedRequests(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	metrics := newControlHttpMetrics(registry)
+	now := time.Unix(1_700_000_000, 0)
+	metrics.now = func() time.Time { return now }
+	calls := &discardTestCalls{}
+	slowDiscard := func(req *http.Request, input discardTestInput) (string, bool) {
+		now = now.Add(3 * time.Millisecond)
+		return calls.discard(req, input)
+	}
+	if writer := discardTestServe(metrics, calls, slowDiscard, `{"discard":true}`, ""); writer.Code != http.StatusOK {
+		t.Fatalf("discarded request: status %d", writer.Code)
+	}
+	if writer := discardTestServe(metrics, calls, slowDiscard, `{"discard":false}`, ""); writer.Code != http.StatusUnauthorized {
+		t.Fatalf("declined request: status %d", writer.Code)
+	}
+	count, sum := discardTestDiscardedSeconds(t, registry)
+	if count != 1 || math.Abs(sum-0.003) > 1e-9 {
+		t.Fatalf("discarded residence = %d requests, %v s; want 1 request, 0.003 s", count, sum)
+	}
+	if total := testutil.ToFloat64(metrics.requests.WithLabelValues("unmarked", "response", "ok")) + testutil.ToFloat64(metrics.requests.WithLabelValues("unmarked", "authenticate", "rejected")); total != 2 {
+		t.Fatalf("logical requests = %v, want 2", total)
 	}
 }
