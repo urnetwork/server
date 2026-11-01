@@ -10,8 +10,8 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-// The device settings a manager built under the current proxy.yml hands its
-// hosted DeviceLocal.
+// Whether a manager built under the current proxy.yml opens hosted devices
+// with the handover off.
 func windowStrictHandoverTestDeviceLocalDisables(t *testing.T) bool {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -21,10 +21,10 @@ func windowStrictHandoverTestDeviceLocalDisables(t *testing.T) bool {
 	settings := manager.proxyDeviceSettings()
 	settings.DisableWindowIdentityPersistence = true
 	deviceLocalSettings := newProxyDeviceLocalSettings(ctx, &model.ProxyDeviceConfig{}, settings)
-	if settings.DisableStrictWindowHandover != deviceLocalSettings.DisableStrictWindowHandover {
-		t.Fatal("the hosted DeviceLocal does not carry the device's handover switch")
+	if settings.DisableStrictWindowHandover == deviceLocalSettings.StrictWindowHandover {
+		t.Fatal("the hosted DeviceLocal does not follow the device's handover switch")
 	}
-	return deviceLocalSettings.DisableStrictWindowHandover
+	return !deviceLocalSettings.StrictWindowHandover
 }
 
 func TestWindowStrictHandoverIsTheDefault(t *testing.T) {

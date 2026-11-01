@@ -1125,10 +1125,10 @@ type ProxyDeviceSettings struct {
 	schedulerPauseDetector *connect.SchedulerPauseDetector
 	// the owning manager's window client counters; nil counts nothing
 	windowClientStats *connect.WindowClientStats
-	// Turns off the device's strict window handover (sdk
-	// DeviceLocalSettings.DisableStrictWindowHandover): its windows at their
-	// hard max build candidates the hard max refuses, and their warned
-	// clients keep their slots.
+	// Turns off the device's strict window handover, which hosted devices
+	// otherwise turn on (sdk DeviceLocalSettings.StrictWindowHandover): its
+	// windows at their hard max build candidates the hard max refuses, and
+	// their warned clients keep their slots.
 	DisableStrictWindowHandover bool
 }
 
@@ -1446,7 +1446,9 @@ func newProxyDeviceLocalSettings(
 	// every window counts what it does with its window clients into the
 	// process's exported counters
 	deviceLocalSettings.WindowClientStats = proxyDeviceSettings.windowClientStats
-	deviceLocalSettings.DisableStrictWindowHandover = proxyDeviceSettings.DisableStrictWindowHandover
+	// hosted windows hand drained slots over (connect StrictWindowHandover,
+	// which apps leave off), unless proxy.yml window_strict_handover is false
+	deviceLocalSettings.StrictWindowHandover = !proxyDeviceSettings.DisableStrictWindowHandover
 	return deviceLocalSettings
 }
 

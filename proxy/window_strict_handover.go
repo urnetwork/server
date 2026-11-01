@@ -1,6 +1,6 @@
-// The kill switch of the strict window handover (connect
-// MultiClientSettings.StrictWindowHandover, CPUOPT3 D2) for every hosted
-// device of the process.
+// The strict window handover (connect MultiClientSettings.StrictWindowHandover,
+// CPUOPT3 D2) for every hosted device of the process: on unless proxy.yml
+// turns it off. Apps and c abi hosts leave it off.
 package proxy
 
 import (
