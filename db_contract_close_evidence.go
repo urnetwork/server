@@ -2,6 +2,8 @@
 // They outlive billing cleanup; legacy empty-id reports keep their existing path.
 package server
 
+import "time"
+
 // No foreign key permits retention after the contract or client directory retires.
 // The owner/report namespace prevents cross-client replay while allowing equal work.
 const contractCloseReportEvidenceSchemaSql = `
@@ -63,6 +65,49 @@ DECLARE
 BEGIN
  IF TG_OP = 'DELETE' AND current_setting('urnetwork.close_evidence_retention', true) = 'on' THEN
   IF OLD.accepted_at < (now() AT TIME ZONE 'UTC') - interval '91 days' THEN
+   RETURN OLD;
+  END IF;
+ ELSIF TG_OP = 'DELETE' AND current_setting('urnetwork.close_evidence_retention', true) = 'move' AND TG_TABLE_SCHEMA = 'public' THEN
+  IF TG_TABLE_NAME = 'contract_close_report_evidence' THEN
+   destination := 'contract_close_report_evidence_p';
+  ELSIF TG_TABLE_NAME = 'contract_close_report_evidence_default' THEN
+   destination := 'contract_close_report_evidence_w' || to_char(date_trunc('week', timestamp '1970-01-01 00:00:00' + ('x' || substr(replace(OLD.report_id::text, '-', ''), 1, 12))::bit(48)::bigint * interval '1 millisecond'), 'YYYYMMDD');
+  END IF;
+  IF destination IS NOT NULL AND to_regclass('public.' || quote_ident(destination)) IS NOT NULL THEN
+   EXECUTE format('SELECT EXISTS (SELECT 1 FROM public.%I moved_row WHERE moved_row.client_id = $1 AND moved_row.report_id = $2 AND moved_row = $3)', destination)
+    INTO moved USING OLD.client_id, OLD.report_id, OLD;
+   IF moved THEN
+    RETURN OLD;
+   END IF;
+  END IF;
+ END IF;
+ RAISE EXCEPTION 'original contract close reports are immutable';
+END $close_report_guard$;
+`
+
+// The shortest close evidence retention, whatever the contract horizon: the
+// age from which the evidence guard admits a retention delete since the
+// horizon guard migration (contractCloseReportEvidenceHorizonGuardSql).
+const CloseEvidenceRetentionFloor = 35 * 24 * time.Hour
+
+// Close evidence retention at the contract horizon (owner, 2026-11-01): the
+// move guard with its retention floor at 35 days, the shortest horizon, in
+// place of 91 (CloseEvidenceRetentionFloor). The guard only admits; which rows
+// go is the retention task's rule (RemoveExpiredCloseEvidence): accepted
+// longer ago than the contract horizon, never less than 35 days, of a contract
+// that is resolved or gone. The move branch is unchanged, and updates and
+// truncates stay refused. CREATE OR REPLACE FUNCTION changes only the
+// function's catalog row, with no table lock and no scan; every delete the old
+// body admits, the new one admits too.
+const contractCloseReportEvidenceHorizonGuardSql = `
+SET LOCAL lock_timeout = '5s';
+CREATE OR REPLACE FUNCTION contract_close_report_evidence_guard() RETURNS trigger LANGUAGE plpgsql AS $close_report_guard$
+DECLARE
+ destination text;
+ moved boolean := false;
+BEGIN
+ IF TG_OP = 'DELETE' AND current_setting('urnetwork.close_evidence_retention', true) = 'on' THEN
+  IF OLD.accepted_at < (now() AT TIME ZONE 'UTC') - interval '35 days' THEN
    RETURN OLD;
   END IF;
  ELSIF TG_OP = 'DELETE' AND current_setting('urnetwork.close_evidence_retention', true) = 'move' AND TG_TABLE_SCHEMA = 'public' THEN

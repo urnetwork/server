@@ -11074,4 +11074,12 @@ var migrations = []any{
 
 	// Bound operator-only immutable score history reads by one exact round.
 	newSqlMigration(competitionSubmissionMetricsMigrationSql),
+
+	// Close evidence retention at the contract horizon (owner, 2026-11-01;
+	// db_contract_close_evidence_horizon.go): the evidence guard admits the
+	// retention delete of a report accepted more than 35 days ago, the
+	// shortest horizon, in place of 91. It replaces the guard's function body
+	// only: no table lock, no scan. Every delete the running release makes
+	// (91 days) stays admitted, so it applies before or after the deploy.
+	newSqlMigration(contractCloseReportEvidenceHorizonGuardSql),
 }
