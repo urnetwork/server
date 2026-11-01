@@ -94,6 +94,9 @@ func TestExtenderActivateResultFieldNames(t *testing.T) {
 		// the optional carriers that were left out of an accepted activation,
 		// and why (EXTENDER.md C2a, connect#230)
 		"refused_carriers",
+		// when the operator has room for the next post, on a refusal that
+		// judged nothing about the caller (connect#230)
+		"retry_after_seconds",
 	}
 	got := jsonFieldNames(reflect.TypeOf(controller.ExtenderActivateResult{}))
 	if !slices.Equal(got, want) {
@@ -139,6 +142,40 @@ func TestExtenderActivateRefusedCarriersWireForm(t *testing.T) {
 		t.Fatalf("the activation result did not encode: %v", err)
 	}
 	connect.AssertEqual(t, string(acceptedBytes), `{"activated":true,"carriers":["tcp"]}`)
+}
+
+// A refusal that judged nothing about the caller -- an operator busy probing
+// other activations -- says when to come back in `retry_after_seconds`, beside
+// the message (connect#230). The activator waits exactly that long instead of
+// backing off, so the name is the wire. Every other answer leaves it out.
+func TestExtenderActivateRetryAfterWireForm(t *testing.T) {
+	busyBytes, err := json.Marshal(&controller.ExtenderActivateResult{
+		Activated:         false,
+		Error:             "The operator is busy probing other extenders. Please try again in 2 minutes.",
+		RetryAfterSeconds: 90,
+	})
+	if err != nil {
+		t.Fatalf("the activation result did not encode: %v", err)
+	}
+	connect.AssertEqual(
+		t,
+		string(busyBytes),
+		`{"activated":false,"error":"The operator is busy probing other extenders. `+
+			`Please try again in 2 minutes.","retry_after_seconds":90}`,
+	)
+
+	refusedBytes, err := json.Marshal(&controller.ExtenderActivateResult{
+		Activated: false,
+		Error:     "the tcp carrier did not answer: connection refused",
+	})
+	if err != nil {
+		t.Fatalf("the activation result did not encode: %v", err)
+	}
+	connect.AssertEqual(
+		t,
+		string(refusedBytes),
+		`{"activated":false,"error":"the tcp carrier did not answer: connection refused"}`,
+	)
 }
 
 // The dns port list travels both ways under the same name (L2): a provider

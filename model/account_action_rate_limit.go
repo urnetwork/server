@@ -106,6 +106,13 @@ func maxAccountActionAttemptsRetryError(action string, window time.Duration, ret
 	)
 }
 
+// A wait as words, the way a refusal by a budget names it, for a refusal of
+// another kind that also knows its wait (an operator too busy to probe an
+// extender activation, connect#230).
+func AccountActionRetryText(retryAfter time.Duration) string {
+	return accountActionRetryText(retryAfter)
+}
+
 // A wait as words, rounded up so that trying again after it is never early:
 // "1 minute", "23 minutes", and whole hours from two hours on.
 func accountActionRetryText(retryAfter time.Duration) string {

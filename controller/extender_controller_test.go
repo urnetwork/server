@@ -677,11 +677,10 @@ func TestExtenderActivateRateLimitIsCappedPerAccount(t *testing.T) {
 		args.TcpPort = closedPort
 		args.Carriers = []string{connect.ExtenderCarrierTcp}
 
-		settings := &ExtenderActivateSettings{
-			ClientRateLimit:  2,
-			AccountRateLimit: 3,
-			RateLimitWindow:  time.Hour,
-		}
+		settings := DefaultExtenderActivateSettings()
+		settings.ClientRateLimit = 2
+		settings.AccountRateLimit = 3
+		settings.RateLimitWindow = time.Hour
 		activate := func(clientSession *session.ClientSession) string {
 			result, err := extenderActivate(args, clientSession, settings)
 			if err != nil {

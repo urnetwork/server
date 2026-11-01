@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	mathrand "math/rand/v2"
 	"net"
 	"net/netip"
 	"slices"
@@ -114,6 +115,17 @@ type ExtenderActivateSettings struct {
 	// and a client refused by this one does not spend its own.
 	AccountRateLimit int
 	RateLimitWindow  time.Duration
+
+	// activations the api process probes at once (connect#230). Each holds a
+	// handler for up to the 10 s probe budget, so a fleet restarting at once
+	// could otherwise hold thousands. One over it is refused as busy before
+	// it spends any budget, with a `retry_after_seconds`. Non-positive refuses
+	// every activation as busy.
+	MaxConcurrentProbes int
+	// the wait a busy refusal asks for, drawn uniformly between the two so
+	// the activations refused together do not all come back together
+	BusyRetryAfterMin time.Duration
+	BusyRetryAfterMax time.Duration
 }
 
 // The actions the activation budgets of one family are recorded under
@@ -160,9 +172,15 @@ func extenderActivateHostIpVersion(host string) int {
 
 func DefaultExtenderActivateSettings() *ExtenderActivateSettings {
 	return &ExtenderActivateSettings{
-		ClientRateLimit:  6,
-		AccountRateLimit: 60,
-		RateLimitWindow:  time.Hour,
+		ClientRateLimit:     6,
+		AccountRateLimit:    60,
+		RateLimitWindow:     time.Hour,
+		MaxConcurrentProbes: 64,
+		// the activator holds a retry at least a minute whatever it is told
+		// (connect/net_extender_activate.go), and three minutes spreads a
+		// fleet's refused posts over three rounds of the guard
+		BusyRetryAfterMin: 1 * time.Minute,
+		BusyRetryAfterMax: 3 * time.Minute,
 	}
 }
 
@@ -264,6 +282,18 @@ type ExtenderActivateResult struct {
 	// base64 of serialized protocol.ExtenderRecord messages of other active
 	// extenders, the directory an app starts from (D6)
 	Bootstrap []string `json:"bootstrap,omitempty"`
+	// on a refusal that judged nothing about the caller -- an operator too
+	// busy to probe, or a spent budget -- the seconds until the operator has
+	// room for the caller's next post of this family, rounded up
+	// (connect#230). The activator waits that long instead of backing off. 0,
+	// and left out, on every other answer.
+	RetryAfterSeconds int `json:"retry_after_seconds,omitempty"`
+}
+
+// The wire form of a wait (`retry_after_seconds`): whole seconds, rounded up
+// so a caller that waits it out is never early, and at least one.
+func extenderActivateRetryAfterSeconds(retryAfter time.Duration) int {
+	return max(1, int((retryAfter+time.Second-1)/time.Second))
 }
 
 // One optional carrier, or one port of the dns carrier, that did not answer
@@ -436,12 +466,16 @@ func ExtenderActivate(
 	return defaultExtenderActivateService().activate(args, clientSession)
 }
 
-// The activations of one api process (C2): the settings each is judged by and
-// the probes that dial the caller back. The process has one, built on first
-// use; a test builds its own, with its own settings and, where the caller
-// address is not a socket it can bind, fake probes.
+// The activations of one api process (C2): the settings each is judged by,
+// the probes that dial the caller back, and the guard on how many of those run
+// at once (connect#230). The process has one, built on first use; a test
+// builds its own, with its own settings and, where the caller address is not
+// a socket it can bind, fake probes. Safe for concurrent use.
 type extenderActivateService struct {
 	settings *ExtenderActivateSettings
+	// one token per activation past the guard (MaxConcurrentProbes), from the
+	// guard to the end of its probe
+	probeSlots chan struct{}
 	// replaces the probes of an activation when set: a test's fake, which
 	// answers for the caller without a socket. Nil dials the caller for real,
 	// which is production.
@@ -450,8 +484,19 @@ type extenderActivateService struct {
 
 func newExtenderActivateService(settings *ExtenderActivateSettings) *extenderActivateService {
 	return &extenderActivateService{
-		settings: settings,
+		settings:   settings,
+		probeSlots: make(chan struct{}, max(0, settings.MaxConcurrentProbes)),
 	}
+}
+
+// The wait a busy refusal asks for, uniform over the settings' bounds.
+func (self *extenderActivateService) busyRetryAfter() time.Duration {
+	retryAfterMin := self.settings.BusyRetryAfterMin
+	retryAfterMax := max(retryAfterMin, self.settings.BusyRetryAfterMax)
+	if retryAfterMin == retryAfterMax {
+		return retryAfterMin
+	}
+	return retryAfterMin + mathrand.N(retryAfterMax-retryAfterMin+1)
 }
 
 var defaultExtenderActivateService = sync.OnceValue(func() *extenderActivateService {
@@ -608,6 +653,29 @@ func (self *extenderActivateService) activate(
 	}
 	connectSettings := ExtenderProbeConnectSettings()
 
+	// The probe guard (connect#230): the process probes at most
+	// MaxConcurrentProbes activations at once. One more is refused as busy
+	// here, after every check that refuses without a probe and before any
+	// budget is spent, so the refused caller loses nothing and is told when to
+	// come back. The token is held to the end of the probe.
+	select {
+	case self.probeSlots <- struct{}{}:
+	default:
+		retryAfter := self.busyRetryAfter()
+		return &ExtenderActivateResult{
+			Activated: false,
+			Error: fmt.Sprintf(
+				"The operator is busy probing other extenders. Please try again in %s.",
+				model.AccountActionRetryText(retryAfter),
+			),
+			RetryAfterSeconds: extenderActivateRetryAfterSeconds(retryAfter),
+		}, nil
+	}
+	releaseProbeSlot := sync.OnceFunc(func() {
+		<-self.probeSlots
+	})
+	defer releaseProbeSlot()
+
 	// The budgets are spent here, at the probe (ExtenderActivateSettings):
 	// after every check that refuses without dialing the caller -- the
 	// arguments, the client, the caller address and its family, the family
@@ -687,6 +755,7 @@ func (self *extenderActivateService) activate(
 		dnsPorts,
 		ipVersion,
 	)
+	releaseProbeSlot()
 	if outcome.refusal != "" {
 		return refuse(outcome.refusal)
 	}
