@@ -59,7 +59,7 @@ func MaintainContractPartitions(
 	)
 	if 0 < len(report.Created) || 0 < len(report.Dropped) || 0 < report.Archived || 0 < report.EvidenceRemoved || report.AbandonedCutover || report.AbandonedEvidenceCutover {
 		glog.Infof(
-			"[cp]created %v, dropped %v, archived %d contracts, removed %d close evidence rows older than %s, abandoned cutover %t, abandoned close evidence cutover %t\n",
+			"[cp]created %v, dropped %v, archived %d contracts, removed %d close evidence rows at a contract horizon of %s, abandoned cutover %t, abandoned close evidence cutover %t\n",
 			report.Created,
 			report.Dropped,
 			report.Archived,

@@ -1431,10 +1431,16 @@ Deletes start about 91 days after the oldest evidence rows, around 2027-01-05.
       evidence of every contract the reaper deleted goes once it is as old.
     - **Horizon:** the contract task and the registry's retention task read
       the control once per run, before any transaction, and pass it in their
-      context (`model.WithContractHorizonControl`); an unreadable control
+      context (`model.WithContractHorizonControl`). The horizon applies only
+      while the reaper's mode is on; off, a dry run or an unreadable control
       keeps 91 days. The weekly drops expire, fence and check their weeks at
       the same horizon (`RangeExpired`, the fence, the precondition); the
       family's `Retention` stays 91 days, the bound the monitor judges by.
+    - **Installed guard:** the row deletes and the drops never go below what
+      the installed guard admits: 35 days only while its body is the horizon
+      guard's, otherwise 91 (`closeEvidenceGuardFloor`). So the code may
+      deploy before the migration, and restoring the move guard's body stops
+      the deletes below 91 days without touching the reaper.
     - **Readers:** admission reads a retained report only while its contract
       is unresolved, and unresolved contracts keep their evidence at any age;
       the SN census reads evidence only for an epoch window of at most
