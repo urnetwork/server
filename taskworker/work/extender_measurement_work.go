@@ -386,7 +386,14 @@ func renewExtenderMeasurementCerts(
 // behind the requests the cap does not hold however many wait.
 //
 // A request whose certificate ran out un-renewed is put back in the queue
-// first, so nothing stays issued with no certificate behind it.
+// first, so nothing stays issued with no certificate behind it. So is the
+// request of an extender that is active again after its request was withdrawn
+// or refused because it was not active (C9): the stored request is asked
+// again, as if the extender had carried it again (C4, amendment 24). The
+// extender reads withdrawn as nothing held, but carries its request again
+// only with its next activation, up to a day after it came back. A request an
+// owner's opt-out dropped, and one withdrawn for the gated tier or a canary,
+// are not asked again.
 func issuePendingExtenderMeasurementCerts(
 	ctx context.Context,
 	config *controller.ExtenderConfig,
@@ -401,6 +408,7 @@ func issuePendingExtenderMeasurementCerts(
 	measurementZone := config.Measurement.MeasurementZone()
 	issueCap := config.Measurement.WeeklyIssueCap()
 	model.ReopenExpiredNetworkExtenderMeasurements(ctx, now)
+	model.ReopenReturnedNetworkExtenderMeasurements(ctx, controller.ExtenderMeasurementInactiveReason, now)
 	issuedThisWeek := model.CountNetworkExtenderMeasurementCertsCountedSince(ctx, now.Add(-ExtenderMeasurementCapWindow))
 
 	for _, target := range model.GetPendingNetworkExtenderMeasurements(ctx, now, ExtenderMeasurementPendingLimit) {
