@@ -71,7 +71,7 @@ func (self *PreparedEvidence) PublishAndVerifyReplicas(ctx context.Context, stor
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			if err := putImmutableFromFile(ctx, store, key, path, self.encoded); err != nil {
+			if _, err := putImmutableFromFile(ctx, store, key, path, self.encoded); err != nil {
 				return fmt.Errorf("replica %d evidence publication: %w", index+1, err)
 			}
 		}
