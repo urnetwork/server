@@ -66,7 +66,11 @@ func TestProberShardUnanchoredDisputedZeroBlocksCleanup(t *testing.T) {
 // of the unresolved-payer index and one scan of the open disputes, plus
 // primary-key report lookups, preserving disputed and zero-byte obligations.
 // The payer's resolved history is never read, and the plans stay the same
-// once the (open,payer_network_id,transfer_byte_count) index is dropped.
+// with and without the (open,payer_network_id,transfer_byte_count) index.
+// The index diet's migration drops that index, which production keeps until
+// the operator drops it by hand, so the test rebuilds it as v377 made it
+// before the statistics are sampled (a later build would rescan the heap and
+// refresh them).
 func TestProberShardContractPlansStayInsidePayerWithFalseZeroStats(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -75,6 +79,10 @@ func TestProberShardContractPlansStayInsidePayerWithFalseZeroStats(t *testing.T)
 		defer cancel()
 		owner := shardTestOwner(t, ctx, shardTestKey(0))
 		peer := newEscrowSelectionTestClients(t, ctx)
+		server.Db(ctx, func(conn server.PgConn) {
+			server.RaisePgResult(conn.Exec(ctx, `CREATE INDEX IF NOT EXISTS transfer_contract_open_payer_network_id_transfer_byte_count
+				ON transfer_contract (open, payer_network_id, transfer_byte_count)`))
+		})
 		seedFalseZeroOpenContractStats(t, ctx, server.NewId(), server.NewId(), server.NewId(), server.NewId())
 		server.Raise(DrainProberShard(ctx, owner.Key))
 		// 1-4 open, 5-6 disputed, 7-12 canceled, and a resolved history of

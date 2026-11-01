@@ -11149,4 +11149,14 @@ var migrations = []any{
 	// autoanalyze refreshes about every 17 minutes on Main, instead of
 	// probing the index for the newest value.
 	createTimeIndexDropMigration,
+
+	// transfer_contract_open_payer_network_id_transfer_byte_count (36.7
+	// GB, v377) served only the prober shard cleanup's payer scan
+	// (model/prober_shard_model.go), which walked both values of open for the
+	// shard payer: 177k scans since the reset, about 5.5M tuples a call. That
+	// scan now reads the unresolved-payer and dispute partial indexes
+	// (04d883882), which plan the same contracts without this index. Drop it
+	// only once every running build has that rewrite and the index's idx_scan
+	// has stopped growing.
+	openPayerIndexDropMigration,
 }
