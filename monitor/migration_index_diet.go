@@ -11,4 +11,7 @@ import (
 var indexDietMigrationContracts = []snMainnetMigrationContract{
 	migrationCurrentSuffix(server.IndexDietMigrationVersion(server.IndexDietReapPendingIndexDrop), "unread reap-pending contract index removed",
 		migrationIndexRemoved("transfer_contract", "transfer_contract_reap_pending_create_time")),
+	// retires the v629 index artifact
+	migrationCurrentSuffix(server.IndexDietMigrationVersion(server.IndexDietStreamIndexDrop), "unread stream index removed",
+		migrationIndexRemoved("transfer_contract", "transfer_contract_stream_id")),
 }

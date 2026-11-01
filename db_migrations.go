@@ -11108,4 +11108,17 @@ var migrations = []any{
 	// index entry fewer, and each vacuum of the contract table reads 92 GB
 	// fewer.
 	reapPendingIndexDropMigration,
+
+	// transfer_contract_stream_id (13.7 GB, v629) has had no scan since
+	// the reset. Its only reader is the orphan sweep's contract_participant
+	// parent probe, and contract_participant is empty: only multi-hop
+	// contracts (with intermediaries) write it. The sweep's participant step
+	// now runs only while an index leading with stream_id exists
+	// (contractParticipantSweepAdmissionSql); without this one it keeps
+	// participant rows unexamined instead of reading the contract heap once
+	// per row. Drop it only while contract_participant is empty, and give the
+	// participant step a parent probe that does not read transfer_contract by
+	// stream_id before multi-hop contracts launch. A contract's late stream
+	// write (SetContractStream) can then be a HOT update.
+	streamIndexDropMigration,
 }
