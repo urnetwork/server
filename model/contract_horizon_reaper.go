@@ -32,8 +32,9 @@
 // sweep the planner can select, so it never races a plan; contracts kept by it
 // age out through the payment completion path or the straggler horizon. The
 // block points rule keeps a contract only until its block is awarded or its
-// reliability passes retention, at most ClientReliabilityRetention after the
-// block opened.
+// reliability passes retention for every award that can still be running, at
+// most ClientReliabilityRetention and OperatorBlockPointsMaxTime and an hour
+// after the block opened.
 //
 // Each contract goes in one transaction with its close reports, closes,
 // escrows, sweeps and extender parties. The usage archive trigger copies a

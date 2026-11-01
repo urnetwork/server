@@ -72,6 +72,11 @@ const operatorBlockPointsLockKey = "operator-block-points/v1"
 // closed. A block's traffic is read once this has passed after its close.
 const OperatorBlockPointsSettleTime = 2 * time.Hour
 
+// An award run's claim bound (controller.AwardOperatorBlockPoints). A block's
+// reads take about an hour on Main, and a run that catches up several blocks
+// takes longer, so a run can still be reading this long after it started.
+const OperatorBlockPointsMaxTime = 12 * time.Hour
+
 // The traffic of a block is read in statements of this much sweep time: about
 // 300k sweeps and 6 s on Main (2026-10-20).
 var operatorBlockPointsSweepReadDuration = 30 * time.Minute
@@ -510,11 +515,15 @@ func operatorBlockReliabilityRetained(minBlockNumber int64, now time.Time) bool 
 	return clientReliabilityRetentionCutoffBlock(now) <= minBlockNumber
 }
 
-// The blocks with traffic past the cutoff whose reliability is still retained
-// at now, ascending, through the block after the open one: an award can still
-// be computed for each, now or once it completes. The block after the open one
+// The blocks with traffic past the cutoff that an award can still read,
+// ascending, through the block after the open one. A block counts while its
+// reliability was still retained when the oldest award that can still be
+// reading started, OperatorBlockPointsMaxTime and an hour before now: that
+// award checked retention at its start and reads for hours after, until its
+// last check on the clock fails it closed. The block after the open one
 // covers a sweep that commits in it while a caller still holds this list. Pure.
 func operatorBlockPointsAwardableBlocks(cutoff time.Time, now time.Time) []int64 {
+	oldestAwardStart := now.Add(-OperatorBlockPointsMaxTime - time.Hour)
 	blocks := []int64{}
 	for block := max(1, pointsBlockOf(cutoff)); block <= pointsBlockOf(now)+1; block += 1 {
 		start, end, ok := OperatorBlockPointsWindow(block, cutoff)
@@ -522,7 +531,7 @@ func operatorBlockPointsAwardableBlocks(cutoff time.Time, now time.Time) []int64
 			continue
 		}
 		minBlockNumber, _ := operatorBlockReliabilityBlockWindow(start, end)
-		if operatorBlockReliabilityRetained(minBlockNumber, now) {
+		if operatorBlockReliabilityRetained(minBlockNumber, oldestAwardStart) {
 			blocks = append(blocks, block)
 		}
 	}
@@ -574,13 +583,13 @@ func readOperatorBlockReliability(ctx context.Context, start time.Time, end time
 		maxBlockNumber: maxBlockNumber,
 		networkWeights: map[server.Id]float64{},
 	}
-	checkRetention := func() error {
-		if !operatorBlockReliabilityRetained(minBlockNumber, now) {
+	checkRetention := func(at time.Time) error {
+		if !operatorBlockReliabilityRetained(minBlockNumber, at) {
 			return fmt.Errorf("%w: window starts at reliability block %d", ErrOperatorBlockPointsReliabilityExpired, minBlockNumber)
 		}
 		return nil
 	}
-	if err := checkRetention(); err != nil {
+	if err := checkRetention(now); err != nil {
 		return nil, err
 	}
 
@@ -668,7 +677,9 @@ func readOperatorBlockReliability(ctx context.Context, start time.Time, end time
 		// progress: a block's reads take hours on Main
 		glog.Infof("[obp]reliability blocks [%d, %d) read to %d: %d clients\n", minBlockNumber, maxBlockNumber, chunkMax, len(clientRead))
 	}
-	if err := checkRetention(); err != nil {
+	// the reads take hours, so retention is checked again on the clock, as
+	// the contract horizon reaper judges the block (operatorBlockPointsAwardableBlocks)
+	if err := checkRetention(server.NowUtc()); err != nil {
 		return nil, err
 	}
 	if len(sums) == 0 {

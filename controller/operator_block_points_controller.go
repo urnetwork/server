@@ -39,8 +39,9 @@ const operatorBlockPointsHourUtc = 12
 const operatorBlockPointsStartupDelay = 15 * time.Minute
 
 // A block's reads take about an hour on Main; a run that catches up several
-// blocks takes longer.
-const operatorBlockPointsMaxTime = 12 * time.Hour
+// blocks takes longer. The contract horizon reaper keeps a block's sweeps for
+// as long as a run started this long ago can read them.
+const operatorBlockPointsMaxTime = model.OperatorBlockPointsMaxTime
 
 func nextOperatorBlockPointsTime(now time.Time) time.Time {
 	now = now.UTC()

@@ -8,9 +8,10 @@ import (
 
 // Pure: the blocks an operator block award can still read are the blocks
 // with traffic past the cutoff, through the one after the open block, whose
-// reliability window starts inside client_reliability retention, to the
-// minute the award checks. Blocks 15 to 21 open on the Sundays from 10-04 to
-// 11-15.
+// reliability window was inside client_reliability retention when the oldest
+// award still running started, 13 hours before now (OperatorBlockPointsMaxTime
+// and an hour), to the minute the award checks. Blocks 15 to 21 open on the
+// Sundays from 10-04 to 11-15.
 func TestOperatorBlockPointsAwardableBlocks(t *testing.T) {
 	at := func(month time.Month, day int, hour int, minute int) time.Time {
 		return time.Date(2026, month, day, hour, minute, 0, 0, time.UTC)
@@ -18,23 +19,27 @@ func TestOperatorBlockPointsAwardableBlocks(t *testing.T) {
 	if !operatorBlockStart(15).Equal(at(time.October, 4, 0, 0)) || !operatorBlockStart(21).Equal(at(time.November, 15, 0, 0)) {
 		t.Fatal("the block numbering moved", operatorBlockStart(15), operatorBlockStart(21))
 	}
+	if OperatorBlockPointsMaxTime != 12*time.Hour {
+		t.Fatal("an award's claim bound is not 12 hours", OperatorBlockPointsMaxTime)
+	}
 	for _, sample := range []struct {
 		name   string
 		cutoff time.Time
 		now    time.Time
 		want   []int64
 	}{
-		// retention reaches back to 10-18 10:00, after block 17 opened
-		{name: "mid block", cutoff: at(time.October, 6, 12, 0), now: at(time.November, 8, 10, 0), want: []int64{18, 19, 20, 21}},
-		// retention reaches back to exactly when block 17 opened
-		{name: "on the retention boundary", cutoff: at(time.October, 6, 12, 0), now: at(time.November, 8, 0, 0), want: []int64{17, 18, 19, 20, 21}},
-		// a minute later block 17's first reliability block is past retention
-		{name: "a minute past the boundary", cutoff: at(time.October, 6, 12, 0), now: at(time.November, 8, 0, 1), want: []int64{18, 19, 20, 21}},
+		// an award started 13 hours ago checked retention back to 10-17 21:00,
+		// before block 17 opened
+		{name: "mid block", cutoff: at(time.October, 6, 12, 0), now: at(time.November, 8, 10, 0), want: []int64{17, 18, 19, 20, 21}},
+		// that award's retention reached back to exactly when block 17 opened
+		{name: "on the retention boundary", cutoff: at(time.October, 6, 12, 0), now: at(time.November, 8, 13, 0), want: []int64{17, 18, 19, 20, 21}},
+		// a minute later block 17's first reliability block was past it
+		{name: "a minute past the boundary", cutoff: at(time.October, 6, 12, 0), now: at(time.November, 8, 13, 1), want: []int64{18, 19, 20, 21}},
 		// the first block's window starts at the cutoff, inside retention
 		{name: "a recent cutoff", cutoff: at(time.October, 30, 12, 0), now: at(time.November, 8, 10, 0), want: []int64{18, 19, 20, 21}},
 		{name: "a cutoff in the open block", cutoff: at(time.November, 9, 0, 0), now: at(time.November, 8, 10, 0), want: []int64{20, 21}},
 		{name: "a cutoff after the next block opens", cutoff: at(time.November, 16, 0, 0), now: at(time.November, 8, 10, 0), want: []int64{21}},
-		{name: "a cutoff before the genesis", cutoff: time.Date(2020, 1, 7, 0, 0, 0, 0, time.UTC), now: at(time.November, 8, 10, 0), want: []int64{18, 19, 20, 21}},
+		{name: "a cutoff before the genesis", cutoff: time.Date(2020, 1, 7, 0, 0, 0, 0, time.UTC), now: at(time.November, 8, 14, 0), want: []int64{18, 19, 20, 21}},
 	} {
 		if got := operatorBlockPointsAwardableBlocks(sample.cutoff, sample.now); !slices.Equal(got, sample.want) {
 			t.Errorf("%s: awardable blocks %v, want %v", sample.name, got, sample.want)
