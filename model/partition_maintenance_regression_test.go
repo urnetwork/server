@@ -89,7 +89,8 @@ func testProviderWorkSessionRetentionChain(t *testing.T, options providerWorkSes
 		if _, err := family.EnsureRangeFor(ctx, now); err != nil {
 			t.Fatal(err)
 		}
-		clientId, networkId, connectionId := server.NewId(), server.NewId(), server.NewId()
+		// the connection's id is minted at its connect, as production mints it
+		clientId, networkId, connectionId := server.NewId(), server.NewId(), horizonTestContractId(admitWeek)
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO network_client (client_id, network_id, active) VALUES ($1, $2, true)`, clientId, networkId))
 			// Historical fixture only: the production trigger always uses now.
