@@ -116,6 +116,11 @@ type ExtenderActivateSettings struct {
 	// and a client refused by this one does not spend its own.
 	AccountRateLimit int
 	RateLimitWindow  time.Duration
+
+	// where every activation's outcome and probe step times are counted
+	// (extender_activation_metrics.go). Nil counts nothing, which is what a
+	// test that builds the settings itself gets.
+	metrics *extenderActivationMetrics
 }
 
 // The actions the activation budgets of one family are recorded under
@@ -165,6 +170,7 @@ func DefaultExtenderActivateSettings() *ExtenderActivateSettings {
 		ClientRateLimit:  6,
 		AccountRateLimit: 60,
 		RateLimitWindow:  time.Hour,
+		metrics:          defaultExtenderActivationMetrics,
 	}
 }
 
@@ -486,7 +492,21 @@ func extenderActivate(
 	// the steps the probe ran, which every answer after it carries, refusals
 	// included
 	var probeSteps []*ExtenderProbeStep
+	// the stage the activation has reached, which is where a refusal is
+	// counted (extender_activation_metrics.go), and how the probe refused
+	// when it was the probe that did
+	stage := extenderActivationStageRequest
+	probeRefusalOutcome := ""
+	// the caller's family as the count labels it, read before the address is
+	// checked so a request refused for anything is counted by family
+	family := extenderActivationFamily(clientSession.ClientAddress)
 	refuse := func(message string) (*ExtenderActivateResult, error) {
+		settings.metrics.observe(
+			stage,
+			extenderActivationRefusalOutcome(stage, probeRefusalOutcome),
+			family,
+			probeSteps,
+		)
 		return &ExtenderActivateResult{
 			Activated:  false,
 			Error:      message,
@@ -605,6 +625,7 @@ func extenderActivate(
 		))
 	}
 
+	stage = extenderActivationStageConfig
 	config, err := EnvExtenderConfig()
 	if err != nil {
 		return refuse(extenderConfigRefusal(err))
@@ -633,6 +654,7 @@ func extenderActivate(
 	// then finds. The calling client's budget and its account's are spent
 	// together or not at all, so a client refused by its account's budget
 	// keeps its own, and both are the budgets of the family the probe dials.
+	stage = extenderActivationStageBudget
 	clientRateLimitAction, accountRateLimitAction := extenderActivateRateLimitActions(ipVersion)
 	if err := model.CheckAndRecordAccountActionBudgets(
 		clientSession.Ctx,
@@ -698,8 +720,11 @@ func extenderActivate(
 	)
 	probeSteps = outcome.steps
 	if outcome.refusal != "" {
+		stage = outcome.refusalStep
+		probeRefusalOutcome = outcome.refusalOutcome
 		return refuse(outcome.refusal)
 	}
+	stage = extenderActivationStageStore
 
 	// The location of the activating address (M1). The country code goes on the
 	// record's country field as it always has; the four location ids go beside
@@ -841,6 +866,12 @@ func extenderActivate(
 		bootstrap = append(bootstrap, otherRecordBase64)
 	}
 
+	settings.metrics.observe(
+		extenderActivationStageStore,
+		extenderActivationOutcomeActivated,
+		family,
+		probeSteps,
+	)
 	extenderId := activated.Extender.ExtenderId
 	return &ExtenderActivateResult{
 		Activated:       true,
@@ -935,9 +966,8 @@ type extenderActivationOutcome struct {
 // and the error its messages are made from.
 type extenderProbeStepRun struct {
 	step *ExtenderProbeStep
-	// how long it ran, and what was left of the shared budget when it started
-	elapsed    time.Duration
-	budgetLeft time.Duration
+	// how long it ran
+	elapsed time.Duration
 	// how long it was allowed to run: what was left of the shared budget, or
 	// a dns port's own budget when that ended first (L2)
 	allowance time.Duration
@@ -1059,7 +1089,6 @@ func probeExtenderActivation(
 				Outcome:      extenderProbeStepOutcomeOk,
 			},
 			elapsed:      elapsed,
-			budgetLeft:   max(0, probeDeadline.Sub(stepStart)),
 			allowance:    max(0, stepDeadline.Sub(stepStart)),
 			sharedBudget: !stepDeadline.Before(probeDeadline),
 			err:          err,
