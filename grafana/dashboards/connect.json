@@ -3336,6 +3336,349 @@
                     "legendFormat": "zero final {{service}}"
                 }
             ]
+        },
+        {
+            "id": 86,
+            "type": "row",
+            "title": "in-process transport delivery (connect/resident_local_transport.go, CPUOPT3 D1)",
+            "collapsed": false,
+            "gridPos": {
+                "h": 1,
+                "w": 24,
+                "x": 0,
+                "y": 307
+            }
+        },
+        {
+            "id": 87,
+            "type": "timeseries",
+            "title": "local transport switch by block",
+            "description": "Whether each connect process attaches transports to its own residents in process: EnableLocalTransport as the Redis move control's localTransport last chose for its block (connect/resident_local_transport.go), 1 on, 0 off. The minimum per host shows a host with any process off. The code default is off, so a deploy changes nothing until an operator sets the control.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 308
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0,
+                    "max": 1
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true,
+                    "calcs": [
+                        "lastNotNull",
+                        "max"
+                    ]
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "min by (block, host) (urnetwork_connect_exchange_local_transport_enabled{env=\"$env\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+                    "legendFormat": "{{block}} {{host}}"
+                }
+            ]
+        },
+        {
+            "id": 88,
+            "type": "timeseries",
+            "title": "transport carriers: in-process links and exchange sockets",
+            "description": "Transports attached in process against outbound transport exchange sockets, by block. A block with the switch on moves the transports of its own residents from sockets to links; the A/B acceptance is a drop of about 85-95% in that block's transport sockets against the other blocks.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 308
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true,
+                    "calcs": [
+                        "lastNotNull",
+                        "max"
+                    ]
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (block) (urnetwork_connect_exchange_local_attachments{env=\"$env\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+                    "legendFormat": "links {{block}}"
+                },
+                {
+                    "refId": "B",
+                    "expr": "sum by (block) (urnetwork_connect_exchange_active_connections{env=\"$env\",block=~\"$block\",host=~\"$host\",instance!=\"\",direction=\"outbound\",op=\"transport\"})",
+                    "legendFormat": "sockets {{block}}"
+                }
+            ]
+        },
+        {
+            "id": 89,
+            "type": "timeseries",
+            "title": "exchange data frames sent / s: sockets by operation, and in process",
+            "description": "Data frames sent over exchange sockets, by operation, and delivered in process. A link counts each frame as its socket counted it, so the exchange total is the socket and local series added: transport frames move from the sockets to local as a block turns the switch on, and the sum stays the same.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 316
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "ops",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true,
+                    "calcs": [
+                        "lastNotNull",
+                        "max"
+                    ]
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (op) (rate(urnetwork_connect_exchange_io_frames_total{env=\"$env\",block=~\"$block\",host=~\"$host\",instance!=\"\",direction=\"sent\",kind=\"data\"}[$__rate_interval]))",
+                    "legendFormat": "socket {{op}}"
+                },
+                {
+                    "refId": "B",
+                    "expr": "sum(rate(urnetwork_connect_exchange_local_frames_total{env=\"$env\",block=~\"$block\",host=~\"$host\",instance!=\"\",direction=\"sent\",kind=\"data\"}[$__rate_interval]))",
+                    "legendFormat": "local transport"
+                }
+            ]
+        },
+        {
+            "id": 90,
+            "type": "timeseries",
+            "title": "exchange data throughput: sockets and in process",
+            "description": "Data bits sent over exchange sockets and delivered in process, each including the 4-byte frame header a socket carries, so the two add to the exchange total.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 316
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "bps",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true,
+                    "calcs": [
+                        "lastNotNull",
+                        "max"
+                    ]
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum(rate(urnetwork_connect_exchange_io_bytes_total{env=\"$env\",block=~\"$block\",host=~\"$host\",instance!=\"\",direction=\"sent\",kind=\"data\"}[$__rate_interval])) * 8",
+                    "legendFormat": "socket"
+                },
+                {
+                    "refId": "B",
+                    "expr": "sum(rate(urnetwork_connect_exchange_local_bytes_total{env=\"$env\",block=~\"$block\",host=~\"$host\",instance!=\"\",direction=\"sent\",kind=\"data\"}[$__rate_interval])) * 8",
+                    "legendFormat": "local transport"
+                }
+            ]
+        },
+        {
+            "id": 91,
+            "type": "timeseries",
+            "title": "local transport detaches / s by reason",
+            "description": "Why links ended: resident_done (the resident ended: replacement, move or drain), transport_done (the client's connection ended), write_timeout (a batch could not be delivered within WriteTimeout, as an exchange write deadline ends a socket), max_message_len (an oversized message failed its batch, as a failed exchange write) and disabled (the switch turned the block off, and the transport redialed over the exchange). Compare write_timeout per 1k transports with the transport redials of the control blocks.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 324
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "ops",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true,
+                    "calcs": [
+                        "lastNotNull",
+                        "max"
+                    ]
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (reason) (rate(urnetwork_connect_exchange_local_detaches_total{env=\"$env\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "{{reason}}"
+                }
+            ]
+        },
+        {
+            "id": 92,
+            "type": "timeseries",
+            "title": "local transport deliveries that waited / s",
+            "description": "Deliveries in process that found their queue full and waited, by block. A wait is bounded by the rest of its batch's WriteTimeout; one that runs out detaches the link with write_timeout.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 324
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "ops",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true,
+                    "calcs": [
+                        "lastNotNull",
+                        "max"
+                    ]
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (block) (rate(urnetwork_connect_exchange_local_blocked_seconds_count{env=\"$env\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "{{block}}"
+                }
+            ]
+        },
+        {
+            "id": 93,
+            "type": "timeseries",
+            "title": "local transport delivery wait p99",
+            "description": "The 99th percentile of the waits counted beside, from the blocked-seconds histogram. A wait near 15 s is a link about to detach with write_timeout.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 332
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "s",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true,
+                    "calcs": [
+                        "lastNotNull",
+                        "max"
+                    ]
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "histogram_quantile(0.99, sum by (le) (rate(urnetwork_connect_exchange_local_blocked_seconds_bucket{env=\"$env\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval])))",
+                    "legendFormat": "p99"
+                }
+            ]
         }
     ]
 }

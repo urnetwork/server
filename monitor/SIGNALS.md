@@ -31611,6 +31611,16 @@ handler entry/exit; it includes authentication and teardown residence and
 does not mean unique clients, authenticated users or admitted residents.
 `urnetwork_connect_exchange_active_connections` supplies finite
 inbound/outbound and transport/forward cells for established exchange owners.
+A transport whose resident is in its own process is attached in process
+instead of dialing a socket back into that process
+(connect/resident_local_transport.go, CPUOPT3 D1), so the established
+transport owners are the outbound transport sockets plus
+`urnetwork_connect_exchange_local_attachments`: one link per attached
+transport, with two pump goroutines and no socket. A block whose
+`exchange_local_transport_enabled` is 1 moves most of its transport sockets
+into that gauge, which is a population change, not a loss of owners. Exchange
+frame and byte totals are `exchange_io` plus `exchange_local`, which counts
+each in-process frame as its socket counted it.
 Neither family is interchangeable with the resident or SDK transfer ledger.
 Require their own unique fresh same-process cells; absence is unknown, and
 an enabled, complete ledger reporting zero says only that its measured owners
@@ -46944,7 +46954,12 @@ customers receive.
 Source (exists): `urnetwork_connect_exchange_io_bytes_total` for all Connect
 traffic and `urnetwork_proxy_session_bytes_total` for hosted proxy sessions.
 Compare bytes/s from each with the median of the same 30-minute window on
-each of the previous 7 days.
+each of the previous 7 days. Connect traffic is
+`urnetwork_connect_exchange_io_bytes_total` plus
+`urnetwork_connect_exchange_local_bytes_total`: a block with in-process
+transport delivery on (§8.15) carries most transport frames without a socket,
+and the socket counter alone would fall by that share, about 60% of exchange
+frames once every block is on.
 
 - WARN `delivered-traffic-floor`: below 50% of that median for 15 minutes.
 - PAGE: below 25% for 10 minutes.
