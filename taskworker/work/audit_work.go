@@ -4,6 +4,8 @@ import (
 	"context"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
@@ -181,6 +183,17 @@ type RollupTransferAuditEventsResult struct {
 
 const transferAuditBackupRetry = 30 * time.Minute
 
+// Rollup runs whose lower bound was raised to the first day the contract
+// horizon reaper cannot reach. Any is a chain that fell weeks behind.
+var transferAuditRollupClamps = prometheus.NewCounter(prometheus.CounterOpts{
+	Name: "urnetwork_transfer_audit_rollup_clamped_total",
+	Help: "Transfer audit rollup runs whose lower bound was raised to the first day the contract horizon reaper cannot reach (model.TransferAuditRollupFirstDay), keeping the rows of the days before",
+})
+
+func init() {
+	prometheus.MustRegister(transferAuditRollupClamps)
+}
+
 // One run reads at most this many chunks, a million contracts: under ten
 // minutes at the slowest daily rate observed on Main (3,469 s for about seven
 // million contracts), well inside the one-hour task budget.
@@ -235,6 +248,8 @@ func rollupTransferAuditEvents(
 	// a chain left behind for weeks resumes where the contract horizon reaper
 	// cannot have reached, and keeps the rows of the days before
 	if firstDay := model.TransferAuditRollupFirstDay(now); minTime.Before(firstDay) {
+		transferAuditRollupClamps.Inc()
+		glog.V(1).Infof("[audit]transfer rollup chain from %s resumes at %s: the contract horizon reaper can reach the days before\n", minTime.UTC().Format(time.RFC3339), firstDay.Format(time.DateOnly))
 		minTime = firstDay
 	}
 	dayStart := minTime.UTC().Truncate(24 * time.Hour)
