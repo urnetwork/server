@@ -1,8 +1,9 @@
-// Retention that silently stops looks like growth. Three cheap read-only
-// checks name the stopped reclaimers behind a runway alert: the payout
-// frontier that pins reliability retention, contract reap stamping, and
-// partition-drop liveness. A bounded list of large append-only relations
-// rides on their findings; by catalog policy it has no alert of its own.
+// Retention that silently stops looks like growth. Two cheap read-only checks
+// name the stopped reclaimers behind a runway alert: contract reap stamping
+// and partition-drop liveness. A bounded list of large append-only relations
+// rides on their findings; by catalog policy it has no alert of its own. The
+// subsidy payout frontier no longer holds any retention (owner decision
+// 2026-10-31), so it is not read.
 package monitor
 
 import (
@@ -34,18 +35,16 @@ func NewRetentionLivenessSignalWithSettings(settings *RetentionLivenessSettings)
 	}
 }
 
-// The thresholds of SIGNALS.md §2.4g. The reliability retention rule mirrors
-// the model's own (clientReliabilityRetentionCutoffBlock) so the monitor
-// judges by the horizon the drop pass acts on.
+// The thresholds of SIGNALS.md §2.4g. The reliability retention mirrors the
+// model's own (model.ClientReliabilityRetention, the only horizon
+// clientReliabilityRetentionCutoffBlock applies) so the monitor judges by the
+// horizon the drop pass acts on.
 type RetentionLivenessSettings struct {
 	// Normal sampling cadence and the whole-run budget for both reads.
 	Cadence   time.Duration
 	RunBudget time.Duration
 	// The primary's statement clock may differ from the monitor's by this.
 	ClockTolerance time.Duration
-	// Warn when the newest subsidy_payment end_time is older than this.
-	FrontierMaxAge  time.Duration
-	FrontierSustain int
 	// Contract reap stamping: the system page-sample percent of
 	// transfer_contract; warn when, among at least ReapMinimumOldRows sampled rows older
 	// than ReapMinimumAge, under ReapMinimumStampedShare have reap_time. A
@@ -58,16 +57,13 @@ type RetentionLivenessSettings struct {
 	ReapSustain             int
 	// The rows wait for this straggler horizon when no payment stamps them.
 	ReapStragglerHorizon time.Duration
-	// client_reliability partitions: steady retention, the longest retention
-	// a pinned payout frontier can hold, the margin kept before the
-	// frontier, and how long past its cutoff the oldest non-empty partition
-	// may survive before the drop pass counts as stuck.
-	ReliabilityRetention      time.Duration
-	ReliabilityMaxRetention   time.Duration
-	ReliabilityFrontierMargin time.Duration
-	PartitionStuckGrace       time.Duration
-	PartitionSustain          int
-	MaxPartitions             int
+	// client_reliability partitions: the retention, and how long past its
+	// cutoff the oldest non-empty partition may survive before the drop pass
+	// counts as stuck.
+	ReliabilityRetention time.Duration
+	PartitionStuckGrace  time.Duration
+	PartitionSustain     int
+	MaxPartitions        int
 	// The append-only list: relations at least this large with no deletes
 	// and some inserts over a statistics window at least this long.
 	GrowthRelationMinimumBytes float64
@@ -78,14 +74,12 @@ type RetentionLivenessSettings struct {
 }
 
 // The §2.4g defaults, with the reliability horizon from the model's own
-// constants and the margin it keeps before the payout frontier.
+// constant.
 func DefaultRetentionLivenessSettings() *RetentionLivenessSettings {
 	return &RetentionLivenessSettings{
 		Cadence:                    time.Hour,
 		RunBudget:                  70 * time.Second,
 		ClockTolerance:             30 * time.Second,
-		FrontierMaxAge:             10 * 24 * time.Hour,
-		FrontierSustain:            1,
 		ReapSamplePercent:          0.0002,
 		ReapMinimumAge:             14 * 24 * time.Hour,
 		ReapMinimumStampedShare:    0.05,
@@ -94,8 +88,6 @@ func DefaultRetentionLivenessSettings() *RetentionLivenessSettings {
 		ReapSustain:                2,
 		ReapStragglerHorizon:       model.StragglerContractExpiration,
 		ReliabilityRetention:       model.ClientReliabilityRetention,
-		ReliabilityMaxRetention:    model.ClientExpiration,
-		ReliabilityFrontierMargin:  24 * time.Hour,
 		PartitionStuckGrace:        2 * 24 * time.Hour,
 		PartitionSustain:           1,
 		MaxPartitions:              4096,
@@ -118,8 +110,9 @@ func (self retentionLivenessProbe) runBudget() time.Duration { return self.setti
 
 const retentionLivenessColumns = 10
 
-// The primary-guarded catalog read: frontier, partitions and the append-only
+// The primary-guarded catalog read: partitions and the append-only
 // candidates. Ten text cells per row; counts in the end row bind the rows.
+// The meta row's eighth cell, once the subsidy payout frontier, stays empty.
 const retentionLivenessCatalogTemplate = `{hostname_guard}
 WITH source AS MATERIALIZED (
  SELECT :'monitor_primary_hostname'::text AS hostname,
@@ -128,7 +121,6 @@ WITH source AS MATERIALIZED (
         CASE WHEN pg_is_in_recovery() THEN '1' ELSE '0' END AS recovery,
         coalesce((SELECT floor(extract(epoch FROM stats_reset) * 1000000)::bigint FROM pg_stat_database WHERE datname = current_database()), 0) AS stats_reset_us,
         coalesce((SELECT relkind::text FROM pg_class WHERE oid = to_regclass('public.client_reliability')), '') AS parent_kind,
-        (SELECT floor(extract(epoch FROM max(end_time)) * 1000000)::bigint FROM subsidy_payment) AS frontier_us,
         coalesce((SELECT relkind::text FROM pg_class WHERE oid = to_regclass('public.transfer_contract')), '') AS contract_kind
 ), partitions AS MATERIALIZED (
  SELECT c.relname::text AS name, pg_relation_size(c.oid)::bigint AS heap_bytes
@@ -158,7 +150,7 @@ WITH source AS MATERIALIZED (
  ORDER BY 3 DESC, 1 LIMIT {growth_limit}
 )
 SELECT 'meta', s.hostname, s.observed_us::text, s.started_us::text, s.recovery, s.stats_reset_us::text, s.parent_kind,
-       coalesce(s.frontier_us::text, 'none'), s.contract_kind, '' FROM source s
+       '', s.contract_kind, '' FROM source s
 UNION ALL SELECT 'partition', p.name, p.heap_bytes::text, '', '', '', '', '', '', '' FROM partitions p
 UNION ALL SELECT 'growth', g.name, g.relation_oid::text, g.total_bytes::text, g.inserted::text, g.deleted::text,
        CASE WHEN g.partitioned THEN '1' ELSE '' END, '', '', '' FROM growth g
@@ -207,8 +199,6 @@ type retentionLivenessCatalog struct {
 	parentKind string
 	// transfer_contract's kind: p once the contract tables are partitioned
 	contractKind string
-	frontier     time.Time
-	hasFrontier  bool
 	partitions   []retentionLivenessPartition
 	growth       []retentionLivenessRelation
 	growthOver   bool
@@ -286,13 +276,6 @@ func (self retentionLivenessProbe) parseCatalog(rows []pgRow, primary string, no
 			}
 			catalog.observed, catalog.started, catalog.statsReset, catalog.parentKind = observed, started, statsReset, row[6]
 			catalog.contractKind = row[8]
-			if row[7] != "none" {
-				frontier, ok := retentionLivenessMicros(row[7])
-				if !ok {
-					return catalog, "invalid-frontier"
-				}
-				catalog.frontier, catalog.hasFrontier = frontier, true
-			}
 		case "partition":
 			heap, ok := pgFreezeAgeInteger(row[2], 0, math.MaxInt64)
 			if !ok || row[1] == "" {
@@ -374,25 +357,14 @@ func (self retentionLivenessProbe) appendOnly(catalog retentionLivenessCatalog, 
 	return listed + fmt.Sprintf(" stats_window_days=%.1f", catalog.observed.Sub(since).Hours()/24)
 }
 
-// The reliability retention cutoff the drop pass acts on: steady retention,
-// moved back to cover the payout frontier, never past the longest retention.
+// The reliability retention cutoff the drop pass acts on.
 func (self retentionLivenessProbe) reliabilityCutoff(catalog retentionLivenessCatalog) time.Time {
-	settings := self.settings
-	cutoff := catalog.observed.Add(-settings.ReliabilityRetention)
-	if catalog.hasFrontier {
-		if frontier := catalog.frontier.Add(-settings.ReliabilityFrontierMargin); frontier.Before(cutoff) {
-			cutoff = frontier
-		}
-	}
-	if longest := catalog.observed.Add(-settings.ReliabilityMaxRetention); cutoff.Before(longest) {
-		cutoff = longest
-	}
-	return cutoff
+	return catalog.observed.Add(-self.settings.ReliabilityRetention)
 }
 
-// Two independent reads: the catalog read feeds the frontier and partition
-// checks, the sampled read feeds reap stamping. A failure in one leaves only
-// its checks unknown.
+// Two independent reads: the catalog read feeds the partition check, the
+// sampled read feeds reap stamping. A failure in one leaves only its check
+// unknown.
 func (self retentionLivenessProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
 	if probeEnded(ctx) {
 		return nil, ctx.Err()
@@ -400,7 +372,7 @@ func (self retentionLivenessProbe) check(ctx context.Context, env *probeEnv) ([]
 	primaries := env.cfg.hostsWithRole("pg-primary")
 	if len(primaries) != 1 {
 		findings := []finding{}
-		for _, check := range []string{"subsidy-frontier", "contract-reap", "client-reliability-partitions"} {
+		for _, check := range []string{"contract-reap", "client-reliability-partitions"} {
 			findings = append(findings, self.unknown("primary/"+check, check, "primary-inventory-unavailable-or-ambiguous", nil, "append_only_relations=unknown"))
 		}
 		return findings, nil
@@ -427,14 +399,10 @@ func (self retentionLivenessProbe) check(ctx context.Context, env *probeEnv) ([]
 	list := self.appendOnly(catalog, catalogReason)
 
 	findings := []finding{}
-	frontierTarget := primary.name + "/subsidy-frontier"
 	partitionTarget := primary.name + "/client-reliability-partitions"
 	if catalogReason != "" {
-		findings = append(findings,
-			self.unknown(frontierTarget, "subsidy-frontier", catalogReason, catalogErr, list),
-			self.unknown(partitionTarget, "client-reliability-partitions", catalogReason, catalogErr, list))
+		findings = append(findings, self.unknown(partitionTarget, "client-reliability-partitions", catalogReason, catalogErr, list))
 	} else {
-		findings = append(findings, self.frontier(frontierTarget, catalog, list)...)
 		findings = append(findings, self.partitions(partitionTarget, catalog, list)...)
 	}
 
@@ -444,47 +412,6 @@ func (self retentionLivenessProbe) check(ctx context.Context, env *probeEnv) ([]
 	}
 	findings = append(findings, self.reap(primary.name, reapRows, reapErr, now, list, catalogReason == "" && catalog.contractKind == "p")...)
 	return findings, nil
-}
-
-// A payout frontier older than the line holds reliability retention and
-// leaves contract rows unstamped.
-func (self retentionLivenessProbe) frontier(target string, catalog retentionLivenessCatalog, list string) []finding {
-	settings := self.settings
-	healthy := []finding{
-		healthyFinding(retentionLivenessProbeId, tierWarn, "retention-frontier-pinned", target),
-		healthyFinding(retentionLivenessProbeId, tierWarn, "retention-liveness-unobservable", target),
-	}
-	if !catalog.hasFrontier {
-		// No subsidy payment has an end time, so none holds retention.
-		return healthy
-	}
-	age := catalog.observed.Sub(catalog.frontier)
-	if age <= settings.FrontierMaxAge {
-		return healthy
-	}
-	steady := catalog.observed.Add(-settings.ReliabilityRetention)
-	held := catalog.frontier.Add(-settings.ReliabilityFrontierMargin)
-	holding := held.Before(steady)
-	holdState := fmt.Sprintf("holding_reliability_retention=%t", holding)
-	if !holding {
-		holdState += fmt.Sprintf(" days_until_hold=%.1f", held.Sub(steady).Hours()/24)
-	}
-	return []finding{
-		{
-			probeId: retentionLivenessProbeId, tier: tierWarn, class: "retention-frontier-pinned", target: target, sustain: settings.FrontierSustain,
-			symptom:   fmt.Sprintf("The newest subsidy payout epoch ended %.1f days ago; payout-held retention has stopped reclaiming", age.Hours()/24),
-			mechanism: "client_reliability retention keeps every block from the last subsidy epoch's end minus a day for the next payout, so a payout frontier that stops advancing stops the nightly partition drops once it is older than the steady retention, until the longest retention forces them. Contract reap stamping also waits on completed payments, so the contract tables stop being reaped as well.",
-			baseline:  fmt.Sprintf("max(subsidy_payment.end_time) is at most %.0f days old.", settings.FrontierMaxAge.Hours()/24),
-			observed: fmt.Sprintf("frontier_age_days=%.1f %s effective_reliability_cutoff_age_days=%.1f",
-				age.Hours()/24, holdState, catalog.observed.Sub(self.reliabilityCutoff(catalog)).Hours()/24),
-			evidence: "One primary-guarded read-only catalog query: max(subsidy_payment.end_time) against the primary's statement clock. " + list,
-			context:  "Retention horizons are owner decisions. The model's own comment notes that a missing reliability block silently cuts provider credit, so a held frontier is protecting the next payout, not a bug in the drop pass.",
-			action:   "Have the payout owner decide whether the next payout will run. Never drop reliability data inside the payout frontier without the owner (§5.14 step 4); size the runway (§2.4f) against the date the longest retention forces the drops.",
-			verify:   "A completed payout advances max(subsidy_payment.end_time) inside the line, or the owner records the retention decision and its runway.",
-			playbook: "SIGNALS.md §2.4g and §5.14",
-		},
-		healthyFinding(retentionLivenessProbeId, tierWarn, "retention-liveness-unobservable", target),
-	}
 }
 
 // The oldest storage-holding partition must be inside its cutoff plus grace.
@@ -538,12 +465,12 @@ func (self retentionLivenessProbe) partitions(target string, catalog retentionLi
 			probeId: retentionLivenessProbeId, tier: tierWarn, class: "partition-retention-stuck", target: target, sustain: settings.PartitionSustain,
 			symptom:   fmt.Sprintf("The oldest non-empty client_reliability partition ended %.1f days before its retention cutoff and was not dropped", cutoff.Sub(upper).Hours()/24),
 			mechanism: "MaintainClientReliabilityPartitions drops every partition whose upper bound is at or before the retention cutoff, each in its own guarded transaction with a short lock timeout, and retries a lock-busy drop on its next run. A partition that outlives its cutoff by days means the maintenance task is not running or every drop keeps losing its lock.",
-			baseline:  fmt.Sprintf("The oldest non-empty daily partition's upper bound is within %.0f days of the cutoff the drop pass computes (steady %.0f days, held back to the payout frontier minus %.0f hours, never past %.0f days).", settings.PartitionStuckGrace.Hours()/24, settings.ReliabilityRetention.Hours()/24, settings.ReliabilityFrontierMargin.Hours(), settings.ReliabilityMaxRetention.Hours()/24),
+			baseline:  fmt.Sprintf("The oldest non-empty daily partition's upper bound is within %.0f days of the cutoff the drop pass computes (%.0f days before now).", settings.PartitionStuckGrace.Hours()/24, settings.ReliabilityRetention.Hours()/24),
 			observed: fmt.Sprintf("oldest_partition=%s upper_bound_age_days=%.1f cutoff_age_days=%.1f days_past_cutoff=%.1f non_empty_partitions=%d partitions=%d ignored_partitions=%d",
 				oldestName, catalog.observed.Sub(upper).Hours()/24, catalog.observed.Sub(cutoff).Hours()/24, cutoff.Sub(upper).Hours()/24, nonEmpty, len(catalog.partitions), ignored),
-			evidence: "One primary-guarded read-only catalog query of the partitions attached to client_reliability, their heap sizes, and the subsidy frontier the cutoff depends on. " + list,
-			context:  "A partition with an empty heap holds no storage and is not counted. A frontier-held cutoff is retention-frontier-pinned, not a stuck drop.",
-			action:   "Check the client reliability maintenance task's recent runs and errors (task canaries) and the lock waits behind its drops. Drop by hand only with the owner's go, one guarded transaction per partition with lock_timeout = '5s', and never inside the payout frontier (§5.14).",
+			evidence: "One primary-guarded read-only catalog query of the partitions attached to client_reliability and their heap sizes. " + list,
+			context:  "A partition with an empty heap holds no storage and is not counted. A taskworker still running a build from before 2026-10-31 holds retention back to the last subsidy epoch end; this check judges by the current 21-day rule.",
+			action:   "Check the client reliability maintenance task's recent runs and errors (task canaries), the deployed taskworker build, and the lock waits behind its drops. Drop by hand only with the owner's go, one guarded transaction per partition with lock_timeout = '5s', and never inside the retention (§5.14).",
 			verify:   "The next maintenance runs drop the partition and a complete observation shows the oldest non-empty partition inside its cutoff plus grace.",
 			playbook: "SIGNALS.md §2.4g and §5.14",
 		},
@@ -586,7 +513,7 @@ func (self retentionLivenessProbe) reap(primary string, rows []pgRow, err error,
 			healthyFinding(retentionLivenessProbeId, tierWarn, "retention-liveness-unobservable", target),
 		}
 	}
-	reapContext := "False-positive qualifier: a page sample clusters rows of similar age, so one run can over- or under-state the share; the sustain covers that. The sample is random per run. Correlate retention-frontier-pinned: a stopped payout is the usual cause."
+	reapContext := "False-positive qualifier: a page sample clusters rows of similar age, so one run can over- or under-state the share; the sustain covers that. The sample is random per run. A stopped payout is the usual cause."
 	if contractsPartitioned {
 		reapContext += " transfer_contract is partitioned: the sample reads pages of every partition, and weeks past the retention horizon leave by partition drops (§2.4i), so unstamped rows only wait for their week to expire."
 	}

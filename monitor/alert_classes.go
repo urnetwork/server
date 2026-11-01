@@ -239,7 +239,6 @@ var alertClassKinds = map[string]alertClassKind{
 	"mover-store-errors":                                  incidentAlertClass,
 	"pg-disk-space-low":                                   incidentAlertClass,
 	"storage-runway":                                      incidentAlertClass,
-	"retention-frontier-pinned":                           incidentAlertClass,
 	"contract-reap-stalled":                               incidentAlertClass,
 	"partition-retention-stuck":                           incidentAlertClass,
 	"contract-partition-runway":                           incidentAlertClass,
