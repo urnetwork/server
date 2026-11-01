@@ -1319,6 +1319,19 @@ as well (2026-10-24), so its retention is a drop that doesn't depend on vacuum.
     - an insert-side `EnsureRangeFor` retry; the runway and its monitor cover
       that case;
     - receipt retention, which is left for when the signer ships.
+  - **At the contract horizon (owner decision pending, 2026-11-01):** the
+    13 weeks matched the contracts the events describe; the contract horizon
+    reaper now deletes contracts at its runtime horizon, 35 days from about
+    11-08. This change drops event weeks at the same horizon, 35 days to 13
+    weeks after their week (`ProviderWorkSessionEventRetentionAt`), as close
+    evidence does.
+    - **Guard migration:** the drop guard with its age at 35 days. It only
+      admits; the fence refuses a week whose upper bound is not past the
+      horizon the retention task read, by the database's clock. Without a
+      horizon, 13 weeks as before.
+    - **Effect:** the legacy partition (everything before the cutover week C)
+      drops at C + H instead of C + 13 weeks, while no open connection still
+      needs an admit in it; production connections reconnect within a day.
 
 ### C5. `contract_close_report_evidence` (170 GB): weekly partitions plus the row deletes (decided 2026-10-24)
 

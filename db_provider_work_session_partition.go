@@ -49,12 +49,13 @@
 // So the family's drop fence asks provider_work_session_event_drop_guard,
 // which refuses unless the transaction opted in with
 // urnetwork.provider_work_session_retention, which only the registry's
-// guarded drop sets (DropGuardSetting), and unless the leaf's upper bound is 13
-// weeks past by the database's clock; the fence then refuses a leaf whose upper
-// bound is not past the contract horizon the retention task read
-// (ProviderWorkSessionEventRetentionAt). The legacy partition's upper bound is
-// the cutover week, so it becomes old enough that long after it. The registry
-// also retains any leaf whose admissions are still needed by open connections.
+// guarded drop sets (DropGuardSetting), and unless the leaf's upper bound is 35
+// days past by the database's clock (13 weeks before the horizon drop guard);
+// the fence then refuses a leaf whose upper bound is not past the contract
+// horizon the retention task read (ProviderWorkSessionEventRetentionAt). The
+// legacy partition's upper bound is the cutover week, so it becomes old enough
+// that long after it. The registry also retains any leaf whose admissions are
+// still needed by open connections.
 package server
 
 import (
@@ -76,9 +77,9 @@ const ProviderWorkSessionEventRetention = 13 * 7 * 24 * time.Hour
 // that the retire lookup absorbs (provider_work_session_admit_floor's day).
 const providerWorkSessionAdmitSkew = 24 * time.Hour
 
-// The shortest event retention, whatever the contract horizon. The drop guard
-// itself admits a leaf only once it is 13 weeks past, until a migration lowers
-// it to this floor.
+// The shortest event retention, whatever the contract horizon: the age from
+// which the drop guard admits a leaf since the horizon drop guard migration
+// (providerWorkSessionEventHorizonDropGuardSql).
 const ProviderWorkSessionEventRetentionFloor = 35 * 24 * time.Hour
 
 // How long a week's events are kept past its upper bound: ctx's contract
@@ -181,6 +182,30 @@ END
 $event_drop_guard$;
 `
 
+// The drop guard at the contract horizon: refuses a leaf whose upper bound is
+// not 35 days past, the shortest horizon, in place of 13 weeks. It only admits;
+// the family's fence refuses a leaf inside ctx's retention
+// (providerWorkSessionEventDropFence). CREATE OR REPLACE FUNCTION changes only
+// the function's catalog row, with no table lock; every drop the old body
+// admits, the new one admits too.
+const providerWorkSessionEventHorizonDropGuardSql = `
+SET LOCAL lock_timeout = '5s';
+CREATE OR REPLACE FUNCTION provider_work_session_event_drop_guard(leaf text) RETURNS void LANGUAGE plpgsql AS $event_drop_guard$
+DECLARE upper_bound timestamp;
+BEGIN
+ IF current_setting('urnetwork.provider_work_session_retention',true) IS DISTINCT FROM 'on' THEN
+  RAISE EXCEPTION 'provider work session events are dropped only by their retention';
+ END IF;
+ SELECT (regexp_match(pg_get_expr(c.relpartbound,c.oid),'TO \(''([^'']*)''\)$'))[1]::timestamp INTO upper_bound
+ FROM pg_inherits i JOIN pg_class c ON c.oid=i.inhrelid
+ WHERE i.inhparent=to_regclass('public.provider_work_session_event') AND c.oid=to_regclass('public.'||quote_ident(leaf));
+ IF upper_bound IS NULL OR (now() AT TIME ZONE 'UTC')-interval '35 days'<upper_bound THEN
+  RAISE EXCEPTION 'provider work session events are kept at least 35 days';
+ END IF;
+END
+$event_drop_guard$;
+`
+
 // The partition preparation of the session journal, correct on the plain and
 // the partitioned table alike. It replaces functions and adds a trigger to the
 // receipt table only, so it takes no lock on the event table; the receipt
@@ -246,8 +271,8 @@ func providerWorkSessionEventRangeExpired(ctx context.Context, now time.Time, r 
 }
 
 // The policy check in the drop transaction, after the registry set the opt-in:
-// the database refuses a leaf whose upper bound is not past its guard's age,
-// and this fence one whose upper bound is not past ctx's retention, both by the
+// the database refuses a leaf whose upper bound is not 35 days past, and this
+// fence one whose upper bound is not past ctx's retention, both by the
 // database's clock.
 func providerWorkSessionEventDropFence(ctx context.Context, tx PgTx, r PartitionRange) {
 	RaisePgResult(tx.Exec(ctx, `SELECT provider_work_session_event_drop_guard($1)`, providerWorkSessionEventLeaf(r)))

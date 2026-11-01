@@ -5,6 +5,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strconv"
 	"strings"
@@ -192,6 +193,29 @@ func TestProviderWorkSessionEventRetentionFollowsTheHorizon(t *testing.T) {
 	legacy := PartitionRange{Upper: week.Lower, Legacy: true}
 	if family.IsExpired(ctx, week.Lower.Add(35*day-time.Nanosecond), legacy) || !family.IsExpired(ctx, week.Lower.Add(35*day), legacy) {
 		t.Fatal("the legacy partition does not expire 35 days after the cutover week")
+	}
+}
+
+// The horizon drop guard is the partition preparation's drop guard with only
+// its age, 35 days, the floor, and its message changed; it follows the
+// preparation in the list and bounds its lock wait.
+func TestProviderWorkSessionEventHorizonDropGuardMigration(t *testing.T) {
+	version := ProviderWorkSessionEventHorizonDropGuardMigrationVersion()
+	if version == 0 || version <= ProviderWorkSessionPartitionMigrationVersion() {
+		t.Fatalf("horizon drop guard version %d, preparation version %d", version, ProviderWorkSessionPartitionMigrationVersion())
+	}
+	if !strings.HasPrefix(strings.TrimSpace(providerWorkSessionEventHorizonDropGuardSql), "SET LOCAL lock_timeout = '5s';") {
+		t.Error("the horizon drop guard does not bound its lock wait")
+	}
+	if count := strings.Count(providerWorkSessionEventHorizonDropGuardSql, "$event_drop_guard$"); count != 2 {
+		t.Fatalf("the delimiter occurs %d times", count)
+	}
+	restored := strings.Replace(strings.Replace(ProviderWorkSessionEventHorizonDropGuardBodySql(), "interval '35 days'", "interval '91 days'", 1), "kept at least 35 days", "kept 13 weeks", 1)
+	if _, _, _, dropGuard := ProviderWorkSessionPartitionBodiesSql(); restored != dropGuard {
+		t.Fatal("the horizon drop guard differs from the drop guard beyond its age and message")
+	}
+	if ProviderWorkSessionEventRetentionFloor != 35*24*time.Hour || !strings.Contains(ProviderWorkSessionEventHorizonDropGuardBodySql(), fmt.Sprintf("interval '%d days'", int64(ProviderWorkSessionEventRetentionFloor/(24*time.Hour)))) {
+		t.Fatal("the guard's age is not the floor")
 	}
 }
 
