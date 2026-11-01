@@ -602,9 +602,17 @@ Probe: `contract-rate`
 
 ```sql
 SELECT count(*) FROM transfer_contract
-WHERE create_time >= date_trunc('minute', now()) - interval '1 minute'
-  AND create_time < date_trunc('minute', now());
+WHERE contract_id >= contract_id_floor(date_trunc('minute', now()) - interval '16 minutes')
+  AND contract_id < contract_id_floor(date_trunc('minute', now()) + interval '15 minutes')
+  AND create_time >= (date_trunc('minute', now()) - interval '1 minute') AT TIME ZONE 'UTC'
+  AND create_time < date_trunc('minute', now()) AT TIME ZONE 'UTC';
 ```
+A contract id leads with the millisecond it was minted, within 15 minutes of
+the contract's `create_time` (`model.ContractIdCreateTimeRange`), so the id
+range holds every contract of the minute and makes the read a range of the
+primary key. Keep that bound in ad hoc reads of `transfer_contract` by
+`create_time`: without an index on `create_time` a bare `create_time` range
+reads the whole contract heap. `create_time` is the UTC clock of the insert.
 - HEALTHY: 8,000–13,000/min (daily cycle; compare against trailing-hour median,
   not a constant).
 - BROKEN: < 50% of trailing median for 3 consecutive minutes = brownout;
@@ -21695,7 +21703,8 @@ described below. It reads only the most recent five-minute PostgreSQL cohort:
 SELECT count(*)
 FROM transfer_contract tc
 JOIN network_client destination ON destination.client_id = tc.destination_id
-WHERE tc.create_time >= now() - interval '5 minutes'
+WHERE tc.contract_id >= contract_id_floor(now() - interval '20 minutes')
+  AND tc.create_time >= (now() - interval '5 minutes') AT TIME ZONE 'UTC'
   AND tc.companion_contract_id IS NULL
   AND NOT destination.active
   AND destination.deactivate_time IS NOT NULL

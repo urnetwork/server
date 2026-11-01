@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/urnetwork/server/model"
 )
 
 // pgStateProbe is SIGNALS.md 1.3: the active / idle-in-tx state split, the
@@ -237,16 +239,25 @@ func (self pgContractRateProbe) id() string             { return "pg/contracts-c
 func (self pgContractRateProbe) tier() string           { return tierPage }
 func (self pgContractRateProbe) cadence() time.Duration { return 60 * time.Second }
 
+// The contracts created in the last complete minute. The minute's contract id
+// range (model.ContractIdCreateTimeRange) makes the read a range of the
+// primary key, so it needs no index on create_time; the create_time predicate
+// decides which contracts count. create_time is the UTC clock of the insert,
+// so the minute is compared as UTC.
+var contractRateCountSql = `
+		SELECT count(*) FROM transfer_contract
+		WHERE contract_id >= ` + model.ContractIdCreatedFromSql(`date_trunc('minute',now())-interval '1 minute'`) + `
+		  AND contract_id <  ` + model.ContractIdCreatedBeforeSql(`date_trunc('minute',now())`) + `
+		  AND create_time >= (date_trunc('minute',now())-interval '1 minute') AT TIME ZONE 'UTC'
+		  AND create_time <  date_trunc('minute',now()) AT TIME ZONE 'UTC';
+	`
+
 func (self pgContractRateProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
 	target := "pg"
 	if h := env.cfg.hostByRole("pg-primary"); h != nil {
 		target = h.name
 	}
-	rows, err := env.runner.pg(ctx, `
-		SELECT count(*) FROM transfer_contract
-		WHERE create_time >= date_trunc('minute',now())-interval '1 minute'
-		  AND create_time <  date_trunc('minute',now());
-	`)
+	rows, err := env.runner.pg(ctx, contractRateCountSql)
 	if err != nil {
 		return nil, err
 	}
