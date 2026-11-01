@@ -16,6 +16,11 @@ import (
 )
 
 func TestCache(t *testing.T) {
+	// The loop below runs for about 50s of the 60s ttl, so pin the value ttl
+	// jitter, which could otherwise end the value up to 6s early.
+	prior := handlerCacheValueTtlJitter
+	defer func() { handlerCacheValueTtlJitter = prior }()
+	handlerCacheValueTtlJitter = func(time.Duration) time.Duration { return 0 }
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
