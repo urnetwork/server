@@ -29,9 +29,10 @@ func setGoneKeyHistoryTestContractHorizon(t testing.TB, ctx context.Context, fie
 	}
 }
 
-// The retention follows the contract horizon reaper's control: at a 45-day
-// horizon a client gone 50 days loses its history and one gone 40 days keeps
-// it, and without the control the 91-day contract retention keeps both.
+// The retention follows the contract horizon reaper's control while its mode
+// is on: at a 45-day horizon a client gone 50 days loses its history and one
+// gone 40 days keeps it, and without the control the 91-day contract
+// retention keeps both.
 func TestGoneStClientKeyHistoryFollowsContractHorizon(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
@@ -54,7 +55,7 @@ func TestGoneStClientKeyHistoryFollowsContractHorizon(t *testing.T) {
 			}
 		}
 
-		setGoneKeyHistoryTestContractHorizon(t, ctx, map[string]string{ContractHorizonControlFieldHorizonDays: "45"})
+		setGoneKeyHistoryTestContractHorizon(t, ctx, map[string]string{ContractHorizonControlFieldMode: "on", ContractHorizonControlFieldHorizonDays: "45"})
 		now = goneKeyHistoryTestDbNow(t, ctx)
 		report, _ = RemoveGoneStClientKeyHistory(ctx, now, goneKeyHistoryTestDeleteOnly(now), DefaultStClientKeyHistoryRetentionSettings())
 		if report.RemovedClientCount != 1 || report.RemovedHistoryCount != 1 {

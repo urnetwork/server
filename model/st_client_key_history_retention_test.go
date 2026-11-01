@@ -500,7 +500,7 @@ func TestGoneStClientKeyHistoryReportsItsHorizonAndCountsDeletes(t *testing.T) {
 			t.Fatalf("without a control the retention = %+v, want none removed at %v", report, server.ContractRetention)
 		}
 
-		setGoneKeyHistoryTestContractHorizon(t, ctx, map[string]string{ContractHorizonControlFieldHorizonDays: "45"})
+		setGoneKeyHistoryTestContractHorizon(t, ctx, map[string]string{ContractHorizonControlFieldMode: "on", ContractHorizonControlFieldHorizonDays: "45"})
 		before := map[string]float64{}
 		for _, table := range retentionTables {
 			before[table] = testutil.ToFloat64(retentionDeletedRowsCounter.WithLabelValues(table))
@@ -531,7 +531,7 @@ func TestGoneStClientKeyHistoryHorizonStopsAtTheReaperFloor(t *testing.T) {
 		}
 		setGoneKeyHistoryTestDays(t, ctx, keptId, floorDays-1)
 		setGoneKeyHistoryTestDays(t, ctx, removedId, floorDays+1)
-		setGoneKeyHistoryTestContractHorizon(t, ctx, map[string]string{ContractHorizonControlFieldHorizonDays: "1"})
+		setGoneKeyHistoryTestContractHorizon(t, ctx, map[string]string{ContractHorizonControlFieldMode: "on", ContractHorizonControlFieldHorizonDays: "1"})
 
 		now := goneKeyHistoryTestDbNow(t, ctx)
 		report, _ := RemoveGoneStClientKeyHistory(ctx, now, goneKeyHistoryTestDeleteOnly(now), DefaultStClientKeyHistoryRetentionSettings())
@@ -563,4 +563,265 @@ func TestStClientKeyHistoryRetentionHorizonKeepsTheGuardFloor(t *testing.T) {
 	if server.ClientKeyHistoryRetentionFloor >= ContractHorizonFloor {
 		t.Fatalf("the guard's floor %v is not below the reaper's %v, so the reaper's shortest horizon would be refused", server.ClientKeyHistoryRetentionFloor, ContractHorizonFloor)
 	}
+}
+
+// Sets the retention's brake for the test's Redis database; nil removes it.
+func setGoneKeyHistoryTestBrake(t testing.TB, ctx context.Context, fields map[string]string) {
+	t.Helper()
+	controlCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if fields == nil {
+		if err := RemoveStClientKeyHistoryRetentionControl(controlCtx); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	if err := SetStClientKeyHistoryRetentionControl(controlCtx, fields); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Makes a control key unreadable as a hash.
+func setGoneKeyHistoryTestUnreadable(t testing.TB, ctx context.Context, key string) {
+	t.Helper()
+	server.Redis(ctx, func(r server.RedisClient) {
+		err := r.Set(ctx, key, "not a hash", 0).Err()
+		server.Raise(err)
+	})
+}
+
+// The reaper's horizon applies only while its mode is on: a dry run, the
+// mode off, and an unreadable control each keep 91 days, so a client gone 50
+// days keeps its history; mode on at 45 days deletes it.
+func TestGoneStClientKeyHistoryFollowsTheReaperOnlyWhileItsModeIsOn(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		goneId := server.NewId()
+		insertGoneKeyHistoryTestRows(t, ctx, goneId, server.NewId())
+		setGoneKeyHistoryTestDays(t, ctx, goneId, 50)
+		run := func() *StClientKeyHistoryRetentionReport {
+			now := goneKeyHistoryTestDbNow(t, ctx)
+			report, _ := RemoveGoneStClientKeyHistory(ctx, now, goneKeyHistoryTestDeleteOnly(now), DefaultStClientKeyHistoryRetentionSettings())
+			return report
+		}
+		for _, mode := range []string{"dry_run", "off"} {
+			setGoneKeyHistoryTestContractHorizon(t, ctx, nil)
+			setGoneKeyHistoryTestContractHorizon(t, ctx, map[string]string{ContractHorizonControlFieldMode: mode, ContractHorizonControlFieldHorizonDays: "45"})
+			if report := run(); report.RemovedClientCount != 0 || report.Horizon != server.ContractRetention {
+				t.Fatalf("with the reaper in %s the retention = %+v, want none removed at 91 days", mode, report)
+			}
+		}
+		setGoneKeyHistoryTestContractHorizon(t, ctx, nil)
+		setGoneKeyHistoryTestUnreadable(t, ctx, contractHorizonControlKey)
+		if report := run(); report.RemovedClientCount != 0 || report.Horizon != server.ContractRetention {
+			t.Fatalf("with an unreadable reaper control the retention = %+v, want none removed at 91 days", report)
+		}
+		if rows := readGoneKeyHistoryTestRows(t, ctx, goneId); rows.history != 1 || rows.heads != 1 {
+			t.Fatalf("a client gone 50 days lost key history without an on reaper: %+v", rows)
+		}
+
+		setGoneKeyHistoryTestContractHorizon(t, ctx, nil)
+		setGoneKeyHistoryTestContractHorizon(t, ctx, map[string]string{ContractHorizonControlFieldMode: "on", ContractHorizonControlFieldHorizonDays: "45"})
+		if report := run(); report.RemovedClientCount != 1 || report.Horizon != 45*24*time.Hour {
+			t.Fatalf("with the reaper on at 45 days the retention = %+v, want one removed", report)
+		}
+	})
+}
+
+// The brake stops the deletes when off, when it sets no rate, and when it
+// cannot be read, and paces them at its rate; without it the default rate
+// applies.
+func TestGoneStClientKeyHistoryBrake(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		goneIds := []server.Id{}
+		for range 3 {
+			goneId := server.NewId()
+			insertGoneKeyHistoryTestRows(t, ctx, goneId, server.NewId())
+			setGoneKeyHistoryTestDays(t, ctx, goneId, 100)
+			goneIds = append(goneIds, goneId)
+		}
+		settings := DefaultStClientKeyHistoryRetentionSettings()
+		settings.DeleteBatchCount = 2
+		run := func() *StClientKeyHistoryRetentionReport {
+			now := goneKeyHistoryTestDbNow(t, ctx)
+			report, _ := RemoveGoneStClientKeyHistory(ctx, now, goneKeyHistoryTestDeleteOnly(now), settings)
+			return report
+		}
+		for _, brake := range []map[string]string{
+			{StClientKeyHistoryRetentionControlFieldMode: "off"},
+			{StClientKeyHistoryRetentionControlFieldMode: "on", StClientKeyHistoryRetentionControlFieldMaxClientsPerSecond: "0"},
+			{StClientKeyHistoryRetentionControlFieldMode: "on", StClientKeyHistoryRetentionControlFieldMaxClientsPerSecond: "fast"},
+		} {
+			setGoneKeyHistoryTestBrake(t, ctx, nil)
+			setGoneKeyHistoryTestBrake(t, ctx, brake)
+			if report := run(); report.RemovedClientCount != 0 || report.DeleteStop != StClientKeyHistoryRetentionStopBrakeOff {
+				t.Fatalf("brake %v: retention = %+v, want nothing removed and brake_off", brake, report)
+			}
+		}
+		setGoneKeyHistoryTestBrake(t, ctx, nil)
+		setGoneKeyHistoryTestUnreadable(t, ctx, stClientKeyHistoryRetentionControlKey)
+		if report := run(); report.RemovedClientCount != 0 || report.DeleteStop != StClientKeyHistoryRetentionStopBrakeUnread {
+			t.Fatalf("an unreadable brake: retention = %+v, want nothing removed and brake_unread", report)
+		}
+
+		// one client a second: the second batch would start after the delete
+		// half of a 2-second budget, so a run deletes one batch and stops
+		setGoneKeyHistoryTestBrake(t, ctx, nil)
+		setGoneKeyHistoryTestBrake(t, ctx, map[string]string{StClientKeyHistoryRetentionControlFieldMode: "on", StClientKeyHistoryRetentionControlFieldMaxClientsPerSecond: "1"})
+		settings.RunBudget = 2 * time.Second
+		if report := run(); report.RemovedClientCount != 2 || !report.More || report.DeleteStop != StClientKeyHistoryRetentionStopBudget {
+			t.Fatalf("at one client a second the retention = %+v, want one batch of 2 and more", report)
+		}
+		setGoneKeyHistoryTestBrake(t, ctx, nil)
+		settings.RunBudget = time.Minute
+		if report := run(); report.RemovedClientCount != 1 || report.DeleteStop != StClientKeyHistoryRetentionStopDue {
+			t.Fatalf("without a brake the retention = %+v, want the last client", report)
+		}
+		for _, goneId := range goneIds {
+			if rows := readGoneKeyHistoryTestRows(t, ctx, goneId); rows != (goneKeyHistoryTestRows{}) {
+				t.Fatalf("client kept rows %+v", rows)
+			}
+		}
+	})
+}
+
+// Pure: the brake narrows to the code's bounds.
+func TestNarrowStClientKeyHistoryRetentionControl(t *testing.T) {
+	settings := DefaultStClientKeyHistoryRetentionSettings()
+	for _, test := range []struct {
+		fields map[string]string
+		on     bool
+		rate   float64
+	}{
+		{nil, true, settings.DefaultDeleteClientsPerSecond},
+		{map[string]string{"mode": "on"}, true, settings.DefaultDeleteClientsPerSecond},
+		{map[string]string{"mode": "off"}, false, settings.DefaultDeleteClientsPerSecond},
+		{map[string]string{"mode": "paused"}, false, settings.DefaultDeleteClientsPerSecond},
+		{map[string]string{"maxClientsPerSecond": "500"}, true, 500},
+		{map[string]string{"maxClientsPerSecond": "1e9"}, true, settings.MaxDeleteClientsPerSecond},
+		{map[string]string{"maxClientsPerSecond": "0"}, false, 0},
+		{map[string]string{"maxClientsPerSecond": "NaN"}, false, 0},
+	} {
+		control := NarrowStClientKeyHistoryRetentionControl(test.fields, settings)
+		if control.On != test.on || control.MaxClientsPerSecond != test.rate || control.Present != (0 < len(test.fields)) {
+			t.Fatalf("fields %v narrowed to %+v, want on=%t rate=%v", test.fields, control, test.on, test.rate)
+		}
+	}
+	if !(settings.DefaultDeleteClientsPerSecond <= 200) {
+		t.Fatalf("the default rate %v is not a cautious start", settings.DefaultDeleteClientsPerSecond)
+	}
+}
+
+// A pass resumes from its cursor, so a record older than the cursor that came
+// due mid-pass waits for the next pass; a short batch ends the pass and the
+// next starts at the oldest record.
+func TestGoneStClientKeyHistoryResumesFromItsCursor(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		goneIds := []server.Id{}
+		for _, days := range []int{100, 99, 98, 97, 96} {
+			goneId := server.NewId()
+			insertGoneKeyHistoryTestRows(t, ctx, goneId, server.NewId())
+			setGoneKeyHistoryTestDays(t, ctx, goneId, days)
+			goneIds = append(goneIds, goneId)
+		}
+		settings := DefaultStClientKeyHistoryRetentionSettings()
+		settings.DeleteBatchCount = 2
+		// one batch a run
+		settings.RunBudget = 0
+		now := goneKeyHistoryTestDbNow(t, ctx)
+		cursor := goneKeyHistoryTestDeleteOnly(now)
+		removed := func(want int) {
+			t.Helper()
+			var report *StClientKeyHistoryRetentionReport
+			report, cursor = RemoveGoneStClientKeyHistory(ctx, now, cursor, settings)
+			if report.RemovedClientCount != int64(want) {
+				t.Fatalf("a run removed %d, want %d: %+v", report.RemovedClientCount, want, report)
+			}
+		}
+		gone := func(goneId server.Id) bool {
+			return readGoneKeyHistoryTestRows(t, ctx, goneId) == goneKeyHistoryTestRows{}
+		}
+
+		removed(2)
+		if cursor.DeleteAfterGoneTime == nil || cursor.DeleteAfterClientId == nil || *cursor.DeleteAfterClientId != goneIds[1] {
+			t.Fatalf("the first run left cursor %+v, want its second client", cursor)
+		}
+		olderId := server.NewId()
+		insertGoneKeyHistoryTestRows(t, ctx, olderId, server.NewId())
+		setGoneKeyHistoryTestDays(t, ctx, olderId, 200)
+		removed(2)
+		if !gone(goneIds[2]) || !gone(goneIds[3]) || gone(olderId) {
+			t.Fatal("the resumed run did not continue after its cursor")
+		}
+		settings.RunBudget = time.Minute
+		removed(1)
+		if cursor.DeleteAfterGoneTime != nil || cursor.DeleteAfterClientId != nil {
+			t.Fatalf("a short batch left cursor %+v, want the pass ended", cursor)
+		}
+		removed(1)
+		if !gone(olderId) {
+			t.Fatal("the next pass did not start at the oldest record")
+		}
+	})
+}
+
+// After the floor's rollback the batch keeps 91 days on the database clock,
+// whatever the horizon, without a refused delete; the restore brings the
+// shorter horizon back.
+func TestGoneStClientKeyHistoryAfterAFloorRollback(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		recentId, oldId := server.NewId(), server.NewId()
+		for _, clientId := range []server.Id{recentId, oldId} {
+			insertGoneKeyHistoryTestRows(t, ctx, clientId, server.NewId())
+		}
+		setGoneKeyHistoryTestDays(t, ctx, recentId, 50)
+		setGoneKeyHistoryTestDays(t, ctx, oldId, 92)
+		setGoneKeyHistoryTestContractHorizon(t, ctx, map[string]string{ContractHorizonControlFieldMode: "on", ContractHorizonControlFieldHorizonDays: "45"})
+		run := func() *StClientKeyHistoryRetentionReport {
+			now := goneKeyHistoryTestDbNow(t, ctx)
+			report, _ := RemoveGoneStClientKeyHistory(ctx, now, goneKeyHistoryTestDeleteOnly(now), DefaultStClientKeyHistoryRetentionSettings())
+			return report
+		}
+
+		server.SetClientKeyHistoryRetentionFloor(ctx, true)
+		if report := run(); report.RemovedClientCount != 1 {
+			t.Fatalf("after the rollback the retention = %+v, want only the client gone 92 days", report)
+		}
+		if rows := readGoneKeyHistoryTestRows(t, ctx, recentId); rows.history != 1 {
+			t.Fatalf("after the rollback a client gone 50 days lost key history: %+v", rows)
+		}
+		server.SetClientKeyHistoryRetentionFloor(ctx, false)
+		if report := run(); report.RemovedClientCount != 1 {
+			t.Fatalf("after the restore the retention = %+v, want the client gone 50 days", report)
+		}
+	})
+}
+
+// On a database without the floor migration the retention's batch cannot
+// read the floor, so it raises and deletes nothing, even of a client gone
+// past the old 91-day guard. A binary that has the change never runs there:
+// it requires its schema head for readiness.
+func TestGoneStClientKeyHistoryWithoutTheFloorMigrationFailsClosed(t *testing.T) {
+	(&server.TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		server.ApplyDbMigrationsUpTo(ctx, server.ClientKeyHistoryRetentionFloorMigrationVersion()-1)
+		goneId := server.NewId()
+		insertGoneKeyHistoryTestRows(t, ctx, goneId, server.NewId())
+		setGoneKeyHistoryTestDays(t, ctx, goneId, 100)
+
+		var runErr error
+		server.HandleError(func() {
+			now := goneKeyHistoryTestDbNow(t, ctx)
+			RemoveGoneStClientKeyHistory(ctx, now, goneKeyHistoryTestDeleteOnly(now), DefaultStClientKeyHistoryRetentionSettings())
+		}, func(err error) { runErr = err })
+		if runErr == nil || !strings.Contains(runErr.Error(), "st_client_key_history_retention_floor") {
+			t.Fatalf("the retention ran without the floor: %v", runErr)
+		}
+		if rows := readGoneKeyHistoryTestRows(t, ctx, goneId); rows.history != 1 || rows.heads != 1 {
+			t.Fatalf("the retention deleted without the floor: %+v", rows)
+		}
+	})
 }
