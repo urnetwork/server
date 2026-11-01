@@ -145,6 +145,8 @@ const (
 	localTransportDetachWriteTimeout
 	localTransportDetachMaxMessageLen
 	localTransportDetachDisabled
+	// a pump raised; the batch it held is returned and counted as dropped
+	localTransportDetachRaised
 	localTransportDetachReasonCount
 )
 
@@ -155,6 +157,7 @@ var localTransportDetachReasonLabels = [localTransportDetachReasonCount]string{
 	"write_timeout",
 	"max_message_len",
 	"disabled",
+	"raised",
 }
 
 // The direction of a pump: client to resident, or resident to client.
@@ -276,34 +279,44 @@ type exchangeLocalTransport struct {
 	// whether this block attaches, as of the last good read of the control,
 	// and before the first as the code default chooses
 	allowed atomic.Bool
-	// one pending wake of the pacer after the switch turns off
-	disableWake chan struct{}
 
 	stateLock sync.Mutex
 	// live links. An attach adds its link while the switch allows, under
-	// stateLock, so a pacer that runs after the switch turns off sees it.
+	// stateLock, so the pacer the switch's turn off starts sees it.
 	links map[*localTransportLink]struct{}
+	// a pacer is detaching links. The switch's turn and the pacer's end are
+	// decided under stateLock, so a turn off after a pacer ends starts another.
+	pacing bool
+
+	// workerLock closes admission before Exchange.WaitForIdle joins the
+	// control loop, a pacer, and every attached link's owner until its detach
+	// completes.
+	workerLock    sync.Mutex
+	workersClosed bool
+	workers       sync.WaitGroup
 
 	// owned by the control loop: the last read failed. A failure is logged
 	// once until a read succeeds.
 	failing bool
+
+	// Nil in production; tests observe each pacer start.
+	afterPacerStartForTest func()
 }
 
-// The exchange's in-process delivery, which reads the control and paces
-// detaches until ctx ends. Nil while EnableLocalTransport is off: nothing is
-// read and every transport dials.
+// The exchange's in-process delivery, which reads the control until ctx ends.
+// Nil while EnableLocalTransport is off: nothing is read and every transport
+// dials.
 func newExchangeLocalTransport(ctx context.Context, settings *ExchangeSettings, block string) *exchangeLocalTransport {
 	if !settings.EnableLocalTransport {
 		return nil
 	}
 	localTransport := newExchangeLocalTransportWithStore(ctx, settings, block, model.GetConnectMoveControl)
-	go server.HandleError(localTransport.run)
-	go server.HandleError(localTransport.runDisablePacer)
+	localTransport.start()
 	return localTransport
 }
 
-// The state over an explicit store, without its loops. Tests drive refresh
-// and the pacer directly.
+// The state over an explicit store, without its control loop. Tests drive
+// refresh directly, or start the loop.
 func newExchangeLocalTransportWithStore(
 	ctx context.Context,
 	settings *ExchangeSettings,
@@ -311,12 +324,11 @@ func newExchangeLocalTransportWithStore(
 	read func(ctx context.Context, ceiling model.ConnectMoveControlCeiling) (*model.ConnectMoveControl, error),
 ) *exchangeLocalTransport {
 	localTransport := &exchangeLocalTransport{
-		ctx:         ctx,
-		settings:    settings,
-		block:       block,
-		read:        read,
-		disableWake: make(chan struct{}, 1),
-		links:       map[*localTransportLink]struct{}{},
+		ctx:      ctx,
+		settings: settings,
+		block:    block,
+		read:     read,
+		links:    map[*localTransportLink]struct{}{},
 	}
 	// until the first read, the code default chooses
 	allowed := model.NarrowConnectMoveControl(nil, localTransport.ceiling()).LocalTransportAllows(block)
@@ -338,18 +350,56 @@ func (self *exchangeLocalTransport) allows() bool {
 	return self.allowed.Load()
 }
 
+// Admits one worker for Exchange.WaitForIdle unless the exchange has closed.
+func (self *exchangeLocalTransport) beginWorker() bool {
+	self.workerLock.Lock()
+	defer self.workerLock.Unlock()
+	if self.workersClosed {
+		return false
+	}
+	self.workers.Add(1)
+	return true
+}
+
+// Releases one worker admitted by beginWorker.
+func (self *exchangeLocalTransport) endWorker() {
+	self.workers.Done()
+}
+
+// Closes worker admission, so Exchange.WaitForIdle's join is final.
+func (self *exchangeLocalTransport) closeWorkers() {
+	self.workerLock.Lock()
+	defer self.workerLock.Unlock()
+	self.workersClosed = true
+}
+
+// Starts the control loop. A pacer starts only when the switch turns off with
+// live links, so a block left off runs only the loop.
+func (self *exchangeLocalTransport) start() {
+	if !self.beginWorker() {
+		return
+	}
+	go server.HandleError(func() {
+		defer self.endWorker()
+		self.run()
+	})
+}
+
 // Reads the control now, then every LocalTransportControlRefreshInterval
-// until ctx ends. A non-positive interval reads once.
+// until ctx ends, on one reused timer. A non-positive interval reads once.
 func (self *exchangeLocalTransport) run() {
+	timer := time.NewTimer(0)
+	defer timer.Stop()
 	for {
 		self.refresh()
 		if self.settings.LocalTransportControlRefreshInterval <= 0 {
 			return
 		}
+		timer.Reset(self.settings.LocalTransportControlRefreshInterval)
 		select {
 		case <-self.ctx.Done():
 			return
-		case <-time.After(self.settings.LocalTransportControlRefreshInterval):
+		case <-timer.C:
 		}
 	}
 }
@@ -383,55 +433,118 @@ func (self *exchangeLocalTransport) refresh() {
 	self.setAllowed(control.LocalTransportAllows(self.block))
 }
 
-// Publishes the switch for new attaches, and wakes the pacer when it turns off.
+// Publishes the switch for new attaches. Turning it off with live links starts
+// a pacer that detaches them, unless one is pacing already or the rate
+// detaches none.
 func (self *exchangeLocalTransport) setAllowed(allowed bool) {
-	if self.allowed.Swap(allowed) == allowed {
+	changed, startPacer := func() (bool, bool) {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		if self.allowed.Load() == allowed {
+			return false, false
+		}
+		self.allowed.Store(allowed)
+		if allowed || self.pacing || len(self.links) == 0 || self.settings.LocalTransportDisableDetachRate <= 0 {
+			return true, false
+		}
+		self.pacing = true
+		return true, true
+	}()
+	if !changed {
 		return
 	}
 	setExchangeLocalTransportEnabledGauge(allowed)
 	glog.Infof("[exchange]local transport control: block %s attach=%t\n", self.block, allowed)
-	if !allowed {
-		select {
-		case self.disableWake <- struct{}{}:
-		default:
-		}
+	if startPacer {
+		self.startPacer()
 	}
 }
 
-// Detaches live links after each time the switch turns off, until ctx ends.
-func (self *exchangeLocalTransport) runDisablePacer() {
-	for {
-		select {
-		case <-self.ctx.Done():
-			return
-		case <-self.disableWake:
-		}
-		self.detachPaced()
-	}
-}
-
-// Detaches one live link per pace interval while the switch stays off. A link
-// that attached before the switch turned off is registered by then, and no
-// link attaches after, so this ends with none left unless the switch turns on
-// again.
-func (self *exchangeLocalTransport) detachPaced() {
-	rate := self.settings.LocalTransportDisableDetachRate
-	if rate <= 0 {
+// Starts the pacer setAllowed claimed.
+func (self *exchangeLocalTransport) startPacer() {
+	if !self.beginWorker() {
+		// the exchange is closing, and its residents' ends detach every link
+		self.endPacing()
 		return
 	}
-	interval := time.Second / time.Duration(rate)
-	for !self.allows() {
-		link := self.takeLink()
+	if afterStart := self.afterPacerStartForTest; afterStart != nil {
+		afterStart()
+	}
+	go server.HandleError(func() {
+		defer self.endWorker()
+		self.detachPaced()
+	}, func(error) {
+		self.endPacing()
+	})
+}
+
+// Detaches one live link per pace interval, on one reused timer, until the
+// switch turns on again or no link is left. No link attaches while the switch
+// is off, so the pacer ends.
+func (self *exchangeLocalTransport) detachPaced() {
+	interval := time.Second / time.Duration(self.settings.LocalTransportDisableDetachRate)
+	timer := time.NewTimer(0)
+	defer timer.Stop()
+	for {
+		link := self.takeLinkWhileOff()
 		if link == nil {
 			return
 		}
 		link.detach(localTransportDetachDisabled)
+		if !self.continuePacing() {
+			return
+		}
+		timer.Reset(interval)
 		select {
 		case <-self.ctx.Done():
+			self.endPacing()
 			return
-		case <-time.After(interval):
+		case <-timer.C:
 		}
 	}
+}
+
+// Withdraws a live link for the pacer while the switch is off. Otherwise ends
+// the pacing in the same critical section as the decision, and returns nil.
+func (self *exchangeLocalTransport) takeLinkWhileOff() *localTransportLink {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if !self.allowed.Load() {
+		for link := range self.links {
+			delete(self.links, link)
+			return link
+		}
+	}
+	self.pacing = false
+	return nil
+}
+
+// Whether another link is left to detach while the switch stays off.
+// Otherwise ends the pacing in the same critical section, so the pacer does
+// not wait out an interval with nothing to do.
+func (self *exchangeLocalTransport) continuePacing() bool {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if !self.allowed.Load() && 0 < len(self.links) {
+		return true
+	}
+	self.pacing = false
+	return false
+}
+
+// Ends the pacing of a pacer that stops early. Only the pacing pacer calls
+// it, and no other starts while it paces.
+func (self *exchangeLocalTransport) endPacing() {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.pacing = false
+}
+
+// Whether a pacer is detaching links.
+func (self *exchangeLocalTransport) isPacing() bool {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.pacing
 }
 
 // Publishes a new link if the switch still allows attaching.
@@ -450,17 +563,6 @@ func (self *exchangeLocalTransport) removeLink(link *localTransportLink) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	delete(self.links, link)
-}
-
-// Withdraws and returns any live link, or nil when none is left.
-func (self *exchangeLocalTransport) takeLink() *localTransportLink {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	for link := range self.links {
-		delete(self.links, link)
-		return link
-	}
-	return nil
 }
 
 // The number of live links.
@@ -505,6 +607,11 @@ func (self *Exchange) attachLocalTransportRoutes(
 	header ExchangeHeader,
 	publish func() (routeSend chan []byte, routeReceive chan []byte, closeTransport func(), err error),
 ) *localTransportLink {
+	// The link's owner is an exchange worker until its detach completes, so
+	// WaitForIdle covers the resident's side as it covers an accepted socket.
+	if !localTransport.beginWorker() {
+		return nil
+	}
 	linkCtx, linkCancel := context.WithCancel(ctx)
 	link := &localTransportLink{
 		ctx:      linkCtx,
@@ -518,6 +625,7 @@ func (self *Exchange) attachLocalTransportRoutes(
 	// and its owner detaches it at once.
 	if !localTransport.addLink(link) {
 		linkCancel()
+		localTransport.endWorker()
 		return nil
 	}
 	self.registerExchangeConnection(header.ClientId)
@@ -526,6 +634,7 @@ func (self *Exchange) attachLocalTransportRoutes(
 		self.unregisterExchangeConnection(header.ClientId)
 		localTransport.removeLink(link)
 		linkCancel()
+		localTransport.endWorker()
 		return nil
 	}
 	link.routeSend = routeSend
@@ -580,8 +689,9 @@ func (self *localTransportLink) detach(reason localTransportDetachReason) {
 
 // Detaches the link in closeExchangeTransportQueues order after the client
 // pump has returned, joins the resident pump, and returns the reason. Called
-// once, by the owner.
+// once, by the owner, which then stops being an exchange worker.
 func (self *localTransportLink) close(pumps *sync.WaitGroup) localTransportDetachReason {
+	defer self.exchange.localTransport.endWorker()
 	self.exchange.localTransport.removeLink(self)
 	self.stopResidentDone()
 	// Route removal joins every resident writer still admitted to the old
@@ -657,10 +767,30 @@ func (self *localTransportPump) deliverBatch(first []byte) bool {
 	link := self.link
 	settings := link.settings
 	self.batch = append(self.batch[:0], first)
+	// The pump owns batch[owned:]. Whatever it still owns when the batch
+	// ends, on an early return or a raise, is returned and counted as
+	// dropped. Then the stale references go too, so a later smaller batch
+	// keeps no payload reachable.
+	owned := 0
+	defer func() {
+		self.drop(self.batch[owned:])
+		clear(self.batch)
+		self.batch = self.batch[:0]
+	}()
+	if beforeGather := link.exchange.beforeLocalTransportGatherForTest; beforeGather != nil {
+		beforeGather(link, self.direction)
+	}
 	batchByteCount := ByteCount(len(first))
 	open := true
 gather:
 	for open && len(self.batch) < settings.ExchangeWriteBatchCount && batchByteCount < settings.ExchangeWriteBatchByteCount {
+		// A link that has ended takes no more from its source, so the next
+		// link carries the rest.
+		select {
+		case <-link.ctx.Done():
+			break gather
+		default:
+		}
 		select {
 		case next, nextOk := <-self.source:
 			if !nextOk {
@@ -673,12 +803,6 @@ gather:
 			break gather
 		}
 	}
-	// Ownership has moved by the end of the batch. Drop the stale references
-	// too, so a later smaller batch keeps no payload reachable.
-	defer func() {
-		clear(self.batch)
-		self.batch = self.batch[:0]
-	}()
 	if afterGather := link.exchange.afterLocalTransportGatherForTest; afterGather != nil {
 		afterGather(link, self.direction, len(self.batch))
 	}
@@ -688,7 +812,6 @@ gather:
 	for _, message := range self.batch {
 		messageLen := len(message)
 		if settings.FramerSettings.MaxMessageLen < messageLen || math.MaxUint16 < messageLen {
-			self.drop(self.batch)
 			if glog.V(1) {
 				glog.Infof(
 					"[rtl]max message len exceeded (%d<%d) %s/%s\n",
@@ -712,12 +835,14 @@ gather:
 	for messageIndex, message := range self.batch {
 		if len(message) == 0 {
 			// a ping: activity, not a delivery
+			owned = messageIndex + 1
 			connect.MessagePoolReturn(message)
 			pingCount += 1
 			continue
 		}
 		select {
 		case self.destination <- message:
+			owned = messageIndex + 1
 			dataFrameCount += 1
 			dataByteCount += len(message)
 			continue
@@ -734,19 +859,18 @@ gather:
 		blockStartTime := time.Now()
 		select {
 		case self.destination <- message:
+			owned = messageIndex + 1
 			exchangeLocalBlockedSecondsHistogram.Observe(time.Since(blockStartTime).Seconds())
 			dataFrameCount += 1
 			dataByteCount += len(message)
 		case <-timer.C:
 			exchangeLocalBlockedSecondsHistogram.Observe(time.Since(blockStartTime).Seconds())
 			recordLocalTransportFrames(dataFrameCount, dataByteCount, pingCount)
-			self.drop(self.batch[messageIndex:])
 			link.detach(localTransportDetachWriteTimeout)
 			return false
 		case <-link.ctx.Done():
 			timer.Stop()
 			recordLocalTransportFrames(dataFrameCount, dataByteCount, pingCount)
-			self.drop(self.batch[messageIndex:])
 			return false
 		}
 	}
@@ -775,13 +899,17 @@ func (self *localTransportPump) drop(messages [][]byte) {
 
 // Runs an attached link until it detaches, and returns why. The client pump
 // runs here, on the Run goroutine; the resident pump on one goroutine the link
-// owns. On return the link is detached and both pumps are joined, also after
-// a raise.
+// owns. A raise in either pump detaches the link with raised, after the pump
+// returned the batch it held, and the loop continues as after a socket's end.
+// On return the link is detached and both pumps are joined.
 func (self *ResidentTransport) runLocal(link *localTransportLink) (reason localTransportDetachReason) {
 	var pumps sync.WaitGroup
 	defer func() {
 		reason = link.close(&pumps)
 	}()
+	raised := func(error) {
+		link.detach(localTransportDetachRaised)
+	}
 
 	residentPump := &localTransportPump{
 		link:         link,
@@ -797,7 +925,7 @@ func (self *ResidentTransport) runLocal(link *localTransportLink) (reason localT
 	go server.HandleError(func() {
 		defer pumps.Done()
 		residentPump.run()
-	}, link.cancel)
+	}, raised)
 
 	clientPump := &localTransportPump{
 		link:         link,
@@ -812,6 +940,6 @@ func (self *ResidentTransport) runLocal(link *localTransportLink) (reason localT
 			link.detach(localTransportDetachTransportDone)
 		},
 	}
-	clientPump.run()
+	server.HandleError(clientPump.run, raised)
 	return
 }

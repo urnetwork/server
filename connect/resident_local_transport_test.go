@@ -129,6 +129,8 @@ type localTransportPumpFixture struct {
 	header         ExchangeHeader
 	routeQueueSize int
 	links          []*localTransportTestLink
+	// called by each link's route removal, so a test can hold a detach there
+	routeRemoval func()
 }
 
 func newLocalTransportPumpFixture(
@@ -192,6 +194,9 @@ func (self *localTransportPumpFixture) attach() *localTransportTestLink {
 		func() (chan []byte, chan []byte, func(), error) {
 			return testLink.routeSend, testLink.routeReceive, func() {
 				testLink.closeTransport.Add(1)
+				if routeRemoval := self.routeRemoval; routeRemoval != nil {
+					routeRemoval()
+				}
 			}, nil
 		},
 	)
@@ -202,10 +207,18 @@ func (self *localTransportPumpFixture) attach() *localTransportTestLink {
 	return testLink
 }
 
-// Runs the link's owner as ResidentTransport.Run does.
+// Runs the link's owner as ResidentTransport.Run does. A raise that escapes
+// runLocal fails the test instead of the process.
 func (self *localTransportPumpFixture) run(testLink *localTransportTestLink) {
 	go func() {
-		testLink.done <- self.transport.runLocal(testLink.link)
+		reason := localTransportDetachNone
+		defer func() {
+			if r := recover(); r != nil {
+				self.t.Errorf("a raise escaped runLocal: %v", r)
+			}
+			testLink.done <- reason
+		}()
+		reason = self.transport.runLocal(testLink.link)
 	}()
 }
 
@@ -1143,11 +1156,8 @@ func TestLocalTransportKillSwitchPacedDetach(t *testing.T) {
 		interval := time.Second / 10
 		base := newLocalTransportPumpFixture(t, ctx, settings, 0)
 		defer base.close()
-		pacerDone := make(chan struct{})
-		go func() {
-			defer close(pacerDone)
-			base.exchange.localTransport.runDisablePacer()
-		}()
+		var pacerStarts atomic.Int64
+		base.exchange.localTransport.afterPacerStartForTest = func() { pacerStarts.Add(1) }
 
 		// five transports of five residents in one exchange
 		const linkCount = 5
@@ -1243,8 +1253,11 @@ func TestLocalTransportKillSwitchPacedDetach(t *testing.T) {
 			}
 			clientconnect.MessagePoolReturn(message)
 		}
+		// one pacer per turn off, each ending when it had nothing left to do
+		if pacerStarts.Load() != 2 || base.exchange.localTransport.isPacing() {
+			t.Errorf("pacer starts = %d pacing=%t, want 2 and none left", pacerStarts.Load(), base.exchange.localTransport.isPacing())
+		}
 		cancel()
-		<-pacerDone
 	})
 }
 
@@ -1257,13 +1270,7 @@ func TestLocalTransportKillSwitchRateZeroKeepsLiveLinks(t *testing.T) {
 		settings.LocalTransportDisableDetachRate = 0
 		f := newLocalTransportPumpFixture(t, context.Background(), settings, 16)
 		defer f.close()
-		pacerCtx, pacerCancel := context.WithCancel(context.Background())
-		f.exchange.localTransport.ctx = pacerCtx
-		pacerDone := make(chan struct{})
-		go func() {
-			defer close(pacerDone)
-			f.exchange.localTransport.runDisablePacer()
-		}()
+		f.exchange.localTransport.afterPacerStartForTest = func() { t.Error("a zero rate started a pacer") }
 		testLink := f.attach()
 		f.run(testLink)
 		f.control.set("off")
@@ -1276,8 +1283,6 @@ func TestLocalTransportKillSwitchRateZeroKeepsLiveLinks(t *testing.T) {
 		if f.exchange.attachLocalTransport(context.Background(), f.header) != nil {
 			t.Error("a zero rate allowed a new attach")
 		}
-		pacerCancel()
-		<-pacerDone
 	})
 }
 
@@ -1329,4 +1334,372 @@ func TestLocalTransportKillSwitchDuringAttach(t *testing.T) {
 	if f.exchange.localTransport.linkCount() != 0 || len(f.exchange.exchangeConnectionCounts) != 0 || f.resident.localAttachments.Load() != 0 {
 		t.Error("the refused attach left accounting behind")
 	}
+}
+
+// Exchange.WaitForIdle covers the resident's side of a link as it covers an
+// accepted socket: after Close it returns only once the link's detach has
+// completed, so the pool and the exchange's accounting are final the moment
+// it returns. The detach is held in its route removal to make the order
+// deterministic.
+func TestLocalTransportWaitForIdleJoinsLinkDetach(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	violations := watchLocalTransportPoolViolations(t)
+	f := newLocalTransportPumpFixture(t, ctx, localTransportTestSettings(), 16)
+	defer f.close()
+	attachmentsBefore := testutil.ToFloat64(exchangeLocalAttachmentsGauge)
+	routeRemovalEntered := make(chan struct{})
+	routeRemovalRelease := make(chan struct{})
+	// a failure must not leave the detach held under the fixture's close
+	releaseRouteRemoval := sync.OnceFunc(func() { close(routeRemovalRelease) })
+	defer releaseRouteRemoval()
+	f.routeRemoval = func() {
+		close(routeRemovalEntered)
+		<-routeRemovalRelease
+	}
+	testLink := f.attach()
+	// a delivered message the resident has not read yet: the detach returns it
+	queued := newLocalTransportTestMessage(1, 64)
+	witness := retainResidentPoolWitness(queued)
+	testLink.routeReceive <- queued
+	f.run(testLink)
+
+	// the exchange's residents end with it, and the link detaches
+	f.exchange.Close()
+	select {
+	case <-routeRemovalEntered:
+	case <-ctx.Done():
+		t.Fatal("the link did not detach when the exchange closed")
+	}
+	heldCtx, heldCancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	idle := f.exchange.WaitForIdle(heldCtx)
+	heldCancel()
+	if idle {
+		t.Fatal("WaitForIdle returned while a link's detach was still removing its routes")
+	}
+	releaseRouteRemoval()
+	if !f.exchange.WaitForIdle(ctx) {
+		t.Fatal("WaitForIdle did not return after the detach completed")
+	}
+	// final at once
+	requireResidentPoolOwnerReturned(t, witness, "a message left on a route at the exchange's close")
+	if len(f.exchange.exchangeConnectionCounts) != 0 || f.exchange.localTransport.linkCount() != 0 ||
+		f.resident.localAttachments.Load() != 0 || testutil.ToFloat64(exchangeLocalAttachmentsGauge) != attachmentsBefore {
+		t.Error("the exchange's accounting was not final when WaitForIdle returned")
+	}
+	// the close ends the resident and the transport together, and either end
+	// may reach the link first
+	if reason := testLink.reason(t); reason != localTransportDetachResidentDone && reason != localTransportDetachTransportDone {
+		t.Errorf("detach reason = %d, want resident_done or transport_done", reason)
+	}
+	if count := violations(); count != 0 {
+		t.Errorf("%d pool violations", count)
+	}
+}
+
+// The control loop is an exchange worker: WaitForIdle after Close waits for a
+// read in progress, and the loop reads nothing after.
+func TestLocalTransportWaitForIdleJoinsTheControlLoop(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	settings := localTransportTestSettings()
+	exchangeCtx, exchangeCancel := context.WithCancel(ctx)
+	exchange := &Exchange{
+		ctx:       exchangeCtx,
+		cancel:    exchangeCancel,
+		settings:  settings,
+		block:     "test-block",
+		residents: map[server.Id]*Resident{},
+	}
+	readEntered := make(chan struct{}, 16)
+	readRelease := make(chan struct{})
+	releaseRead := sync.OnceFunc(func() { close(readRelease) })
+	defer releaseRead()
+	var readCount atomic.Int64
+	read := func(context.Context, model.ConnectMoveControlCeiling) (*model.ConnectMoveControl, error) {
+		readCount.Add(1)
+		readEntered <- struct{}{}
+		// a store slower than the cancellation
+		<-readRelease
+		return nil, errors.New("synthetic slow store")
+	}
+	exchange.localTransport = newExchangeLocalTransportWithStore(exchangeCtx, settings, exchange.block, read)
+	exchange.localTransport.start()
+	<-readEntered
+	exchange.Close()
+	heldCtx, heldCancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	idle := exchange.WaitForIdle(heldCtx)
+	heldCancel()
+	if idle {
+		t.Fatal("WaitForIdle returned while the control loop was in a read")
+	}
+	releaseRead()
+	if !exchange.WaitForIdle(ctx) {
+		t.Fatal("WaitForIdle did not return after the read")
+	}
+	if count := readCount.Load(); count != 1 {
+		t.Errorf("the closed exchange's control loop read %d times, want the one in progress", count)
+	}
+}
+
+// With the switch off and never turned off, an exchange runs only its control
+// loop, which reads every interval on one reused timer. A pacer starts only
+// when the switch turns off with live links, and ends when it has detached
+// them.
+func TestLocalTransportPacerStartsOnlyWhenTheSwitchTurnsOff(t *testing.T) {
+	warmLocalTransportPool()
+	synctest.Test(t, func(t *testing.T) {
+		settings := localTransportTestSettings()
+		settings.LocalTransportDefault = model.ConnectLocalTransportOff
+		f := newLocalTransportPumpFixture(t, context.Background(), settings, 16)
+		defer f.close()
+		localTransport := f.exchange.localTransport
+		var pacerStarts atomic.Int64
+		localTransport.afterPacerStartForTest = func() { pacerStarts.Add(1) }
+		var readCount atomic.Int64
+		read := localTransport.read
+		localTransport.read = func(ctx context.Context, ceiling model.ConnectMoveControlCeiling) (*model.ConnectMoveControl, error) {
+			readCount.Add(1)
+			return read(ctx, ceiling)
+		}
+
+		// dark: the loop reads at the interval and nothing else runs
+		f.control.set("off")
+		localTransport.start()
+		interval := settings.LocalTransportControlRefreshInterval
+		time.Sleep(3*interval + interval/2)
+		synctest.Wait()
+		if readCount.Load() != 4 || pacerStarts.Load() != 0 || localTransport.isPacing() {
+			t.Fatalf("dark: reads=%d pacer starts=%d pacing=%t, want 4, 0, false", readCount.Load(), pacerStarts.Load(), localTransport.isPacing())
+		}
+
+		// turned on, and off again with no live link: still no pacer
+		f.control.set("all")
+		time.Sleep(interval)
+		synctest.Wait()
+		f.control.set("off")
+		time.Sleep(interval)
+		synctest.Wait()
+		if pacerStarts.Load() != 0 {
+			t.Fatalf("a turn off with no live link started %d pacers", pacerStarts.Load())
+		}
+
+		// on with a live link, then off: one pacer, which ends with the link
+		f.control.set("all")
+		time.Sleep(interval)
+		synctest.Wait()
+		testLink := f.attach()
+		f.run(testLink)
+		f.control.set("off")
+		time.Sleep(interval)
+		synctest.Wait()
+		if pacerStarts.Load() != 1 || localTransport.isPacing() || testLink.attached() {
+			t.Fatalf("turn off with a link: pacer starts=%d pacing=%t attached=%t, want 1, false, false", pacerStarts.Load(), localTransport.isPacing(), testLink.attached())
+		}
+		// staying off starts nothing more
+		time.Sleep(3 * interval)
+		synctest.Wait()
+		if pacerStarts.Load() != 1 {
+			t.Fatalf("staying off started %d pacers, want the one", pacerStarts.Load())
+		}
+		f.exchange.Close()
+		if !f.exchange.WaitForIdle(context.Background()) {
+			t.Fatal("the control loop did not end with the exchange")
+		}
+	})
+}
+
+// A raise in either pump detaches the link with raised and returns the batch
+// the pump held, counted as dropped, instead of leaking it or escaping the
+// transport's Run.
+func TestLocalTransportPumpRaiseDetachesAndReturnsTheBatch(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	violations := watchLocalTransportPoolViolations(t)
+	for _, c := range []struct {
+		name      string
+		direction localTransportDirection
+		boundary  string
+	}{
+		{name: "client pump", direction: localTransportDirectionClient, boundary: receiveQueueBoundaryLocalTransportSend},
+		{name: "resident pump", direction: localTransportDirectionResident, boundary: receiveQueueBoundaryLocalTransportReceive},
+	} {
+		f := newLocalTransportPumpFixture(t, ctx, localTransportTestSettings(), 16)
+		testLink := f.attach()
+		var witnesses [][]byte
+		for index := range 3 {
+			message := newLocalTransportTestMessage(index, 64)
+			witnesses = append(witnesses, retainResidentPoolWitness(message))
+			if c.direction == localTransportDirectionClient {
+				f.transport.send <- message
+			} else {
+				testLink.routeSend <- message
+			}
+		}
+		f.exchange.afterLocalTransportGatherForTest = func(_ *localTransportLink, direction localTransportDirection, _ int) {
+			if direction == c.direction {
+				panic("synthetic local transport pump raise")
+			}
+		}
+		dropsBefore, _ := snapshotLocalTransportDrops(c.boundary)
+		raisedBefore := snapshotLocalTransportDetaches(localTransportDetachRaised)
+		f.run(testLink)
+		if reason := testLink.waitDetach(t, c.name); reason != localTransportDetachRaised {
+			t.Errorf("%s: detach reason = %d, want raised", c.name, reason)
+		}
+		requireResidentPoolOwnersReturned(t, witnesses, c.name+" batch at the raise")
+		if drops, _ := snapshotLocalTransportDrops(c.boundary); drops-dropsBefore != 3 {
+			t.Errorf("%s: drops = %v, want the 3 messages it held", c.name, drops-dropsBefore)
+		}
+		if snapshotLocalTransportDetaches(localTransportDetachRaised)-raisedBefore != 1 {
+			t.Errorf("%s: raised detach not counted", c.name)
+		}
+		if 0 < len(testLink.routeReceive) || 0 < len(f.transport.receive) {
+			t.Errorf("%s: a message of the raised batch was delivered", c.name)
+		}
+		f.close()
+	}
+	if count := violations(); count != 0 {
+		t.Errorf("%d pool violations", count)
+	}
+}
+
+// A pump whose link ends while it gathers takes nothing more from its source,
+// so the transport's next link carries the rest of the queue.
+func TestLocalTransportCanceledPumpStopsGathering(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	settings := localTransportTestSettings()
+	if settings.ExchangeWriteBatchCount < 256 {
+		t.Fatal("the production batch bound changed")
+	}
+	f := newLocalTransportPumpFixture(t, ctx, settings, 4096)
+	defer f.close()
+	testLink := f.attach()
+	const queued = 300
+	for index := range queued {
+		f.transport.send <- newLocalTransportTestMessage(index, 64)
+	}
+	gathered := 0
+	f.exchange.beforeLocalTransportGatherForTest = func(_ *localTransportLink, direction localTransportDirection) {
+		if direction == localTransportDirectionClient {
+			f.transport.Cancel()
+		}
+	}
+	f.exchange.afterLocalTransportGatherForTest = func(_ *localTransportLink, direction localTransportDirection, count int) {
+		if direction == localTransportDirectionClient {
+			gathered += count
+		}
+	}
+	f.run(testLink)
+	if reason := testLink.waitDetach(t, "a pump canceled mid-gather"); reason != localTransportDetachTransportDone {
+		t.Fatalf("detach reason = %d, want transport_done", reason)
+	}
+	if gathered != 1 || len(f.transport.send) != queued-1 {
+		t.Fatalf("gathered %d with %d left queued, want the one it held and %d left", gathered, len(f.transport.send), queued-1)
+	}
+}
+
+// A detach removes the routes before it drains them, so the resident's own
+// writer blocked on the detaching route keeps its frame for the routes that
+// remain, as when a socket closes: the route update wakes it to retry. A
+// drain first would take the blocked frame into the dying route and drop it
+// after the writer counted it delivered.
+func TestLocalTransportDetachRemovesRoutesBeforeTheDrain(t *testing.T) {
+	warmLocalTransportPool()
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		settings := localTransportTestSettings()
+		settings.ExchangeBufferSize = 1
+		// the pump holds exactly one frame
+		settings.ExchangeWriteBatchCount = 1
+		exchange := &Exchange{
+			ctx:             ctx,
+			cancel:          cancel,
+			settings:        settings,
+			block:           "test-block",
+			residents:       map[server.Id]*Resident{},
+			residentChanges: map[server.Id]chan struct{}{},
+			connections:     map[server.Id]map[server.Id]context.CancelFunc{},
+		}
+		exchange.localTransport = newExchangeLocalTransportWithStore(ctx, settings, exchange.block, (&localTransportTestControl{}).read)
+		resident := newResidentCallbackLifecycleFixture(t, ctx, settings)
+		resident.exchange = exchange
+		resident.residentId = server.NewId()
+		resident.instanceId = server.NewId()
+		resident.lastActivityNanos.Store(time.Now().UnixNano())
+		exchange.residents[resident.clientId] = resident
+		header := ExchangeHeader{Op: ExchangeOpTransport, ClientId: resident.clientId, ResidentId: resident.residentId}
+		transport := newResidentTransport(ctx, exchange, header, resident.clientId, resident.instanceId)
+		// the client's writer is stalled: its receive queue is full
+		transport.receive <- newLocalTransportTestMessage(1000, 64)
+		link := exchange.attachLocalTransport(transport.ctx, header)
+		if link == nil {
+			t.Fatal("attach refused")
+		}
+		runDone := make(chan localTransportDetachReason, 1)
+		go func() { runDone <- transport.runLocal(link) }()
+		// the client's second transport, whose send route the test reads
+		otherSend, otherReceive, closeOther, err := resident.AddTransport()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// the resident's real route writer fills the pump and both routes, then
+		// blocks on both
+		writer := resident.client.RouteManager().OpenMultiRouteWriter(clientconnect.DestinationId(clientconnect.Id(resident.clientId)))
+		writerCtx, writerCancel := context.WithCancel(ctx)
+		const blockedIndex = 3
+		var writtenCount atomic.Int64
+		writerDone := make(chan struct{})
+		go func() {
+			defer close(writerDone)
+			for index := 0; index <= blockedIndex; index++ {
+				frame := newLocalTransportTestMessage(index, 64)
+				if delivered, err := writer.WriteDetailed(writerCtx, frame, time.Hour); err != nil || !delivered {
+					clientconnect.MessagePoolReturn(frame)
+					return
+				}
+				writtenCount.Add(1)
+			}
+		}()
+		synctest.Wait()
+		if writtenCount.Load() != blockedIndex || len(link.routeSend) != 1 || len(otherSend) != 1 {
+			t.Fatalf("written=%d routes %d and %d, want %d written over two full routes", writtenCount.Load(), len(link.routeSend), len(otherSend), blockedIndex)
+		}
+
+		transport.Cancel()
+		if reason := <-runDone; reason != localTransportDetachTransportDone {
+			t.Fatalf("detach reason = %d, want transport_done", reason)
+		}
+		// the remaining route frees one slot: the blocked frame must take it
+		clientconnect.MessagePoolReturn(<-otherSend)
+		synctest.Wait()
+		select {
+		case frame := <-otherSend:
+			if index := localTransportTestMessageIndex(frame); index != blockedIndex {
+				t.Errorf("the remaining route carried %d, want the blocked frame %d", index, blockedIndex)
+			}
+			clientconnect.MessagePoolReturn(frame)
+		default:
+			t.Error("the frame a resident writer had blocked on the detaching route was dropped with it")
+		}
+		if left := len(link.routeSend); left != 0 {
+			t.Errorf("the detached route kept %d frames", left)
+		}
+
+		writerCancel()
+		<-writerDone
+		resident.client.RouteManager().CloseMultiRouteWriter(writer)
+		closeOther()
+		returnReadyPooledMessages(otherSend)
+		returnReadyPooledMessages(otherReceive)
+		returnReadyPooledMessages(link.routeSend)
+		if err := resident.CloseAndWait(context.Background()); err != nil {
+			t.Error(err)
+		}
+		returnReadyPooledMessages(transport.receive)
+		returnReadyPooledMessages(transport.send)
+	})
 }

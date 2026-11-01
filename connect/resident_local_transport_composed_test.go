@@ -578,11 +578,6 @@ func TestLocalTransportKillSwitchRedialsTcp(t *testing.T) {
 			settings.ExchangeReconnectAfterErrorTimeout = time.Hour
 		})
 		defer f.close()
-		pacerDone := make(chan struct{})
-		go func() {
-			defer close(pacerDone)
-			f.exchange.localTransport.runDisablePacer()
-		}()
 		f.run()
 		synctest.Wait()
 		const messageCount = 200
@@ -616,8 +611,9 @@ func TestLocalTransportKillSwitchRedialsTcp(t *testing.T) {
 		if f.recordResident.IsDone() || len(f.residents) != 1 {
 			t.Fatal("the switch replaced the resident")
 		}
-		f.exchange.cancel()
-		<-pacerDone
+		if f.exchange.localTransport.isPacing() {
+			t.Error("the pacer outlived the last live link")
+		}
 	})
 }
 

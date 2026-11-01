@@ -804,9 +804,11 @@ type Exchange struct {
 	// workers start to verify that cleanup cannot precede map publication.
 	afterResidentWorkersStartedForTest func(*Resident)
 	// Nil in production; local transport tests hold an attach after its
-	// generation check, a pump after it gathers a batch, and a pump before it
-	// waits on a delivery that would block (resident_local_transport.go).
+	// generation check, a pump after it takes a batch's first message and
+	// after it gathers the batch, and a pump before it waits on a delivery
+	// that would block (resident_local_transport.go).
 	beforeLocalTransportAttachForTest func(*Resident)
+	beforeLocalTransportGatherForTest func(*localTransportLink, localTransportDirection)
 	afterLocalTransportGatherForTest  func(*localTransportLink, localTransportDirection, int)
 	beforeLocalTransportBlockForTest  func(*localTransportLink, localTransportDirection)
 
@@ -2439,6 +2441,9 @@ func (self *Exchange) Close() {
 	self.connectionWorkerLock.Lock()
 	self.connectionWorkersClosed = true
 	self.connectionWorkerLock.Unlock()
+	if self.localTransport != nil {
+		self.localTransport.closeWorkers()
+	}
 	// Stop active resident work before any socket or notification-owner join;
 	// a slow Redis close must not postpone the exchange's cancellation edge.
 	self.cancel()
@@ -2460,14 +2465,18 @@ func (self *Exchange) Close() {
 	}
 }
 
-// WaitForIdle waits until every admitted resident, listener, and accepted
-// connection has completed teardown. Close must be called first so neither
+// WaitForIdle waits until every admitted resident, listener, accepted
+// connection, and in-process transport link has completed teardown, with the
+// local transport's control loop and pacer. Close must be called first so no
 // wait group can receive another admission.
 func (self *Exchange) WaitForIdle(ctx context.Context) bool {
 	done := make(chan struct{})
 	go func() {
 		self.residentWorkers.Wait()
 		self.connectionWorkers.Wait()
+		if self.localTransport != nil {
+			self.localTransport.workers.Wait()
+		}
 		close(done)
 	}()
 	select {

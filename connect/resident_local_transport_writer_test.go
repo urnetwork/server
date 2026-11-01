@@ -246,3 +246,107 @@ func TestLocalTransportReadOnlyShareUnmodifiedByH3Writers(t *testing.T) {
 		set.requireUnchanged(t, c.name)
 	}
 }
+
+// The WebSocket (H1) writer with the delay header (connect DELAY.md), which
+// writes each message's header and then its shared payload.
+func TestLocalTransportReadOnlyShareUnmodifiedByH1DelayWriter(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	type serverConn struct {
+		ws      *websocket.Conn
+		delayed clientconnect.H1MessageConn
+	}
+	serverConns := make(chan serverConn, 1)
+	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{ReadBufferSize: 4 * 1024, WriteBufferSize: 4 * 1024}
+		ws, err := upgrader.Upgrade(&connectH1BatchResponseWriter{ResponseWriter: w}, r, connectH1TransportDelayResponseHeader(true, true, r))
+		if err != nil {
+			return
+		}
+		delayed, ok := clientconnect.NewTransportDelayH1PeerConn(ws, clientconnect.Id{})
+		if !ok {
+			ws.Close()
+			return
+		}
+		serverConns <- serverConn{ws: ws, delayed: delayed}
+	}))
+	defer httpServer.Close()
+	header := http.Header{}
+	header.Add("Sec-WebSocket-Protocol", clientconnect.TransportDelayH1Subprotocol)
+	clientWs, _, err := websocket.DefaultDialer.DialContext(ctx, "ws"+strings.TrimPrefix(httpServer.URL, "http"), header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientWs.Close()
+	clientDelayed, ok := clientconnect.NewTransportDelayH1PeerConn(clientWs, clientconnect.Id{})
+	if !ok {
+		t.Fatal("the upgrade did not negotiate the delay header")
+	}
+	var server serverConn
+	select {
+	case server = <-serverConns:
+	case <-ctx.Done():
+		t.Fatal("the server did not negotiate the delay header")
+	}
+	defer server.ws.Close()
+
+	set := newLocalTransportShareSet(localTransportShareByteCounts...)
+	receive := make(chan []byte, len(set.shares))
+	for _, share := range set.shares[1:] {
+		receive <- share
+	}
+	writeBatch := connectH1WriteBatchForConn(server.ws.UnderlyingConn())
+	if writeBatch == nil {
+		t.Fatal("the production upgrade did not install the batching wrapper")
+	}
+	if _, err := writeConnectH1UserReadyBatch(ctx, server.delayed, writeBatch, receive, set.shares[0], true, 15*time.Second, nil); err != nil {
+		t.Fatal(err)
+	}
+	written := [][]byte{}
+	for range set.shares {
+		messageType, message, err := clientDelayed.ReadMessage()
+		if err != nil || messageType != websocket.BinaryMessage {
+			t.Fatalf("read = %d, %v", messageType, err)
+		}
+		written = append(written, message)
+	}
+	set.requireWritten(t, "the H1 delay writer", written)
+	set.requireUnchanged(t, "the H1 delay writer")
+}
+
+// The H3 hybrid stream offer copies a message whose pool root would hold more
+// of the stream queue's byte budget than it allows. The copy only reads the
+// share and returns its reference once, so the sender's retained bytes are
+// unchanged; a message that fits passes through as it is.
+func TestLocalTransportReadOnlyShareUnmodifiedByH3HybridCompaction(t *testing.T) {
+	const maxByteCount = 5000
+	// an 8 KiB root holding 3,000 bytes
+	message := newLocalTransportTestMessage(1, 7000)[:3000]
+	original := bytes.Clone(message)
+	share := clientconnect.MessagePoolShareReadOnly(message)
+	if clientconnect.H3HybridStreamRetainedByteCount(share) <= maxByteCount {
+		t.Fatal("invalid setup: the share's root fits the budget")
+	}
+	compact := compactConnectH3HybridStreamMessage(share, maxByteCount)
+	if &compact[0] == &message[0] {
+		t.Fatal("an oversized root was not compacted")
+	}
+	if !bytes.Equal(compact, original) || maxByteCount < clientconnect.H3HybridStreamRetainedByteCount(compact) {
+		t.Fatal("the compact copy differs or still holds too much")
+	}
+	if !bytes.Equal(message, original) {
+		t.Error("the compaction changed the shared message in place")
+	}
+	clientconnect.MessagePoolReturn(compact)
+	requireResidentPoolOwnerReturned(t, message, "the sender's retained message after compaction")
+
+	fits := newLocalTransportTestMessage(2, 1000)
+	fitsOriginal := bytes.Clone(fits)
+	fitsShare := clientconnect.MessagePoolShareReadOnly(fits)
+	passed := compactConnectH3HybridStreamMessage(fitsShare, maxByteCount)
+	if &passed[0] != &fits[0] || !bytes.Equal(fits, fitsOriginal) {
+		t.Error("a message that fits was copied or changed")
+	}
+	clientconnect.MessagePoolReturn(passed)
+	requireResidentPoolOwnerReturned(t, fits, "the sender's retained message that fit")
+}

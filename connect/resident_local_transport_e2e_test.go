@@ -53,7 +53,7 @@ func waitForLocalTransportE2e(ctx context.Context, t testing.TB, timeout time.Du
 // resident.
 func TestLocalTransportMoveAwayRedialsTcp(t *testing.T) {
 	if testing.Short() {
-		return
+		t.Skip("requires the test DB env")
 	}
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -145,7 +145,7 @@ func TestLocalTransportMoveAwayRedialsTcp(t *testing.T) {
 // detaches, and the sibling attaches the migrated transports in process.
 func TestLocalTransportDrainConvergence(t *testing.T) {
 	if testing.Short() {
-		return
+		t.Skip("requires the test DB env")
 	}
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())
