@@ -298,8 +298,9 @@ func renewExtenderMeasurementCerts(
 }
 
 // Issues for pending requests (C5, C7): first those the weekly cap does not
-// hold, then the rest, each longest waiting first
-// (model.GetPendingNetworkExtenderMeasurements). A request is refused when it
+// hold, longest waiting first, then the rest, each new certificate where it
+// least crowds the more crowded of its country and its network (amendment 24;
+// model.GetPendingNetworkExtenderMeasurements). A request is refused when it
 // is not a valid request for its extender's measurement name, or when its
 // extender may not be measured. A request of an extender that is not active is
 // not read: deactivated, it keeps its place in the queue until it activates

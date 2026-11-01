@@ -1,6 +1,7 @@
 package model
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"slices"
@@ -512,11 +513,22 @@ func RefuseNetworkExtenderMeasurementRequest(
 // come the requests the weekly cap does not hold, those for names with an
 // unexpired certificate (HasUnexpiredNetworkExtenderMeasurementCertForNames),
 // which the CA renews outside its weekly budget: a returning extender, a
-// rotated key, an owner turning measurement back on. Then come the rest. Each
-// part is longest waiting first. A pass notes a capped request and leaves it
-// pending, so while the cap is spent the same capped requests come back every
-// pass; without this order, `limit` of them waiting longer would keep every
-// request the cap does not hold from ever being read.
+// rotated key, an owner turning measurement back on. They are longest waiting
+// first. A pass notes a capped request and leaves it pending, so while the
+// cap is spent the same capped requests come back every pass; without this
+// order, `limit` of them waiting longer would keep every request the cap does
+// not hold from ever being read.
+//
+// Then come the rest, in the order the cap is to issue for them (C7,
+// amendment 24): each new certificate goes where it least crowds the more
+// crowded of its country and its network, counting the extenders that serve
+// there -- active, with a live certificate -- and the requests picked before
+// it in the same read, since one pass places several orders
+// (pickNetworkExtenderMeasurementCandidates). Longest waiting first gave the
+// cap to whoever joined first, and neither a country nor a network alone
+// spreads it: one network supplies nearly every request from the countries
+// where nothing serves yet, and another supplies only US ones. The request of
+// an extender that is gone has no country and no network; a pass refuses it.
 //
 // The request of an extender that is not active is left out: nothing may be
 // ordered for it, and it keeps its pending_time, so it is back in its place
@@ -543,17 +555,15 @@ func GetPendingNetworkExtenderMeasurements(
 					WHERE
 						network_extender.extender_id = network_extender_measurement.extender_id AND
 						NOT network_extender.active
-				)
-			ORDER BY
+				) AND
 				EXISTS (
 					SELECT 1
 					FROM network_extender_measurement_cert
 					WHERE
 						network_extender_measurement_cert.names = network_extender_measurement.names AND
 						$2 < network_extender_measurement_cert.not_after
-				) DESC,
-				pending_time ASC,
-				extender_id ASC
+				)
+			ORDER BY pending_time ASC, extender_id ASC
 			LIMIT $3
 			`,
 			NetworkExtenderMeasurementStatePending,
@@ -567,9 +577,237 @@ func GetPendingNetworkExtenderMeasurements(
 				})
 			}
 		})
+		if count := limit - len(targets); 0 < count {
+			targets = append(targets, getCappedNetworkExtenderMeasurementsInConn(ctx, conn, now, count)...)
+		}
 		fillNetworkExtenderMeasurementTargetsInConn(ctx, conn, targets)
 	})
 	return targets
+}
+
+// The most capped requests one read of the issuance queue weighs (amendment
+// 24). The queue holds a few hundred, so this only bounds a queue gone wrong,
+// whose longest waiting are the ones weighed.
+const networkExtenderMeasurementCandidateLimit = 4096
+
+// Reads the pending requests the weekly cap holds, on the same terms as
+// GetPendingNetworkExtenderMeasurements, and returns `count` of them at most,
+// in the order pickNetworkExtenderMeasurementCandidates picks them, on the
+// caller's connection. A request picked that is no longer pending by the time
+// it is loaded is left out.
+func getCappedNetworkExtenderMeasurementsInConn(
+	ctx context.Context,
+	conn server.PgConn,
+	now time.Time,
+	count int,
+) []*NetworkExtenderMeasurementTarget {
+	targets := []*NetworkExtenderMeasurementTarget{}
+
+	candidates := []*networkExtenderMeasurementCandidate{}
+	result, err := conn.Query(
+		ctx,
+		`
+		SELECT
+			network_extender_measurement.extender_id,
+			COALESCE(network_extender_measurement.pending_time, network_extender_measurement.request_time),
+			COALESCE(network_extender.country_code, ''),
+			network_extender.network_id
+		FROM network_extender_measurement
+		LEFT JOIN network_extender ON
+			network_extender.extender_id = network_extender_measurement.extender_id
+		WHERE
+			network_extender_measurement.state = $1 AND
+			(network_extender_measurement.retry_time IS NULL OR network_extender_measurement.retry_time <= $2) AND
+			(network_extender.extender_id IS NULL OR network_extender.active) AND
+			NOT EXISTS (
+				SELECT 1
+				FROM network_extender_measurement_cert
+				WHERE
+					network_extender_measurement_cert.names = network_extender_measurement.names AND
+					$2 < network_extender_measurement_cert.not_after
+			)
+		ORDER BY network_extender_measurement.pending_time ASC, network_extender_measurement.extender_id ASC
+		LIMIT $3
+		`,
+		NetworkExtenderMeasurementStatePending,
+		now.UTC(),
+		networkExtenderMeasurementCandidateLimit,
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			candidate := &networkExtenderMeasurementCandidate{}
+			var networkId *server.Id
+			server.Raise(result.Scan(
+				&candidate.extenderId,
+				&candidate.pendingTime,
+				&candidate.countryCode,
+				&networkId,
+			))
+			if networkId != nil {
+				candidate.networkId = *networkId
+			}
+			candidates = append(candidates, candidate)
+		}
+	})
+	if len(candidates) == 0 {
+		return targets
+	}
+
+	// the extenders that serve now in each country and in each network
+	countryCounts := map[string]int{}
+	networkCounts := map[server.Id]int{}
+	result, err = conn.Query(
+		ctx,
+		`
+		SELECT
+			network_extender.country_code,
+			network_extender.network_id,
+			COUNT(*)
+		FROM network_extender
+		WHERE
+			network_extender.active AND
+			EXISTS (
+				SELECT 1
+				FROM network_extender_measurement_cert
+				WHERE
+					network_extender_measurement_cert.extender_id = network_extender.extender_id AND
+					network_extender_measurement_cert.withdraw_time IS NULL AND
+					$1 < network_extender_measurement_cert.not_after
+			)
+		GROUP BY network_extender.country_code, network_extender.network_id
+		`,
+		now.UTC(),
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var countryCode string
+			var networkId server.Id
+			var serving int
+			server.Raise(result.Scan(&countryCode, &networkId, &serving))
+			countryCounts[countryCode] += serving
+			networkCounts[networkId] += serving
+		}
+	})
+
+	extenderIds := pickNetworkExtenderMeasurementCandidates(candidates, countryCounts, networkCounts, count)
+	measurements := map[server.Id]*NetworkExtenderMeasurement{}
+	result, err = conn.Query(
+		ctx,
+		`
+		SELECT `+networkExtenderMeasurementColumns+`
+		FROM network_extender_measurement
+		WHERE extender_id = ANY($1) AND state = $2
+		`,
+		extenderIds,
+		NetworkExtenderMeasurementStatePending,
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			measurement := scanNetworkExtenderMeasurement(result)
+			measurements[measurement.ExtenderId] = measurement
+		}
+	})
+	for _, extenderId := range extenderIds {
+		if measurement, ok := measurements[extenderId]; ok {
+			targets = append(targets, &NetworkExtenderMeasurementTarget{Measurement: measurement})
+		}
+	}
+	return targets
+}
+
+// One request the weekly cap holds, as the issuance queue weighs it (C7,
+// amendment 24): when it began waiting, the country its extender last
+// activated from, and the network that activated it, the extender's operator.
+// The country is "" for an extender whose country is not known or that is
+// gone, and the network is the zero id for one that is gone.
+type networkExtenderMeasurementCandidate struct {
+	extenderId  server.Id
+	pendingTime time.Time
+	countryCode string
+	networkId   server.Id
+}
+
+// Picks `count` candidates at most, one at a time, in the order the weekly cap
+// is to issue for them (C7, amendment 24), given the extenders that serve in
+// each country and in each network. Each pick is the candidate whose
+// certificate would least crowd the more crowded of its country and its
+// network: the lowest max(country + 1, network + 1), then the lowest
+// country + network, then the longest waiting, then the lowest extender id. A
+// pick counts in its country and its network for every pick after it, as the
+// certificate it is to get will, so the k-th pick sees the k-1 before it. The
+// counts passed in are not changed.
+//
+// Candidates of one country and one network weigh the same, so a pick weighs
+// only the longest waiting of each such pair.
+func pickNetworkExtenderMeasurementCandidates(
+	candidates []*networkExtenderMeasurementCandidate,
+	countryCounts map[string]int,
+	networkCounts map[server.Id]int,
+	count int,
+) []server.Id {
+	type groupKey struct {
+		countryCode string
+		networkId   server.Id
+	}
+	groupKeys := []groupKey{}
+	groups := map[groupKey][]*networkExtenderMeasurementCandidate{}
+	for _, candidate := range candidates {
+		key := groupKey{countryCode: candidate.countryCode, networkId: candidate.networkId}
+		if _, ok := groups[key]; !ok {
+			groupKeys = append(groupKeys, key)
+		}
+		groups[key] = append(groups[key], candidate)
+	}
+	for _, group := range groups {
+		slices.SortFunc(group, func(a *networkExtenderMeasurementCandidate, b *networkExtenderMeasurementCandidate) int {
+			return cmp.Or(
+				a.pendingTime.Compare(b.pendingTime),
+				a.extenderId.Cmp(b.extenderId),
+			)
+		})
+	}
+
+	// the picks so far in each country and in each network
+	countryPicks := map[string]int{}
+	networkPicks := map[server.Id]int{}
+	picks := []server.Id{}
+	for len(picks) < count {
+		var pickKey groupKey
+		var pickHead *networkExtenderMeasurementCandidate
+		pickLevel := 0
+		pickSum := 0
+		for _, key := range groupKeys {
+			group := groups[key]
+			if len(group) == 0 {
+				continue
+			}
+			head := group[0]
+			country := countryCounts[key.countryCode] + countryPicks[key.countryCode]
+			network := networkCounts[key.networkId] + networkPicks[key.networkId]
+			level := max(country+1, network+1)
+			sum := country + network
+			if pickHead == nil || cmp.Or(
+				cmp.Compare(level, pickLevel),
+				cmp.Compare(sum, pickSum),
+				head.pendingTime.Compare(pickHead.pendingTime),
+				head.extenderId.Cmp(pickHead.extenderId),
+			) < 0 {
+				pickKey = key
+				pickHead = head
+				pickLevel = level
+				pickSum = sum
+			}
+		}
+		if pickHead == nil {
+			// every candidate is picked
+			break
+		}
+		picks = append(picks, pickHead.extenderId)
+		groups[pickKey] = groups[pickKey][1:]
+		countryPicks[pickKey.countryCode] += 1
+		networkPicks[pickKey.networkId] += 1
+	}
+	return picks
 }
 
 // Loads the extender and the active addresses of every target, on the
