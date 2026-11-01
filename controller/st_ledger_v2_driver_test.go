@@ -641,7 +641,8 @@ func TestStLedgerV2DriverRecordsFinalizedRoots(t *testing.T) {
 }
 
 // SV-4: the v1 driver keeps every epoch below the pool's first v2 epoch and
-// never closes or commits one at or after it, except the phase C sweep epoch.
+// never closes or commits one at or after it, the phase C sweep epoch
+// included: only the sweep chain acts on that epoch (st_v1_sweep.go).
 func TestStV1DriverStopsAtFirstV2Epoch(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		f := newLedgerV2Fixture(t)
@@ -689,10 +690,22 @@ func TestStV1DriverStopsAtFirstV2Epoch(t *testing.T) {
 		sweep := stLedgerV1SweepEpoch
 		stLedgerV1SweepEpoch = func(context.Context, *StConfig) (uint64, bool) { return 7, true }
 		defer func() { stLedgerV1SweepEpoch = sweep }()
-		for epoch, want := range map[uint64]bool{6: false, 7: true, 8: false} {
+		// The sweep epoch stays settled by v2 for the ordinary driver: its
+		// close would compute a census payout and its commit publish usage
+		// leaves, so both refuse it like any other v2 epoch.
+		for epoch, want := range map[uint64]bool{4: true, 6: false, 7: false, 8: false} {
 			if allowed, err := StV1EpochAllowed(f.ctx, epoch); err != nil || allowed != want {
 				t.Fatalf("sweep hook: epoch %d allowed %t, %v", epoch, allowed, err)
 			}
+		}
+		if _, err := StCloseOperatorEpoch(f.ctx, 7); !errors.Is(err, ErrStV1EpochSettledByV2) {
+			t.Fatalf("ordinary close of the sweep epoch: %v", err)
+		}
+		if _, err := StCommitEpochRoot(f.ctx, 7); !errors.Is(err, ErrStV1EpochSettledByV2) {
+			t.Fatalf("ordinary commit of the sweep epoch: %v", err)
+		}
+		if _, _, err := StComputeEpochPayout(f.ctx, 7); !errors.Is(err, ErrStV1EpochSettledByV2) {
+			t.Fatalf("ordinary payout of the sweep epoch: %v", err)
 		}
 
 		// Without v2 every epoch stays with v1.

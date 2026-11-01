@@ -685,6 +685,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.StLedgerV2Step,
 			work.StLedgerV2StepPost,
 		),
+		task.NewTaskTargetWithPost(
+			work.StV1Sweep,
+			work.StV1SweepPost,
+		),
 		// LEADERTOP.md §5.7, §6.2
 		task.NewTaskTargetWithPost(
 			work.SnSyncFleetBindings,
