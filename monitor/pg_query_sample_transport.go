@@ -23,6 +23,8 @@ type pgSampleTransportObservation struct {
 	localClock         func() time.Time
 	localOrigin        time.Time
 	localLastNs        int64
+
+	nativeDiagnosticComplete bool
 }
 
 // Finite source facts only. Joined covers the local SSH process and its pipes,
@@ -48,6 +50,8 @@ type pgSampleTransportReceipt struct {
 	StartRefusalRemainingBudgetNs *int64                         `json:"start_refusal_remaining_budget_ns,omitempty"`
 	LocalPhaseTiming              *pgSampleLocalTiming           `json:"local_phase_timing,omitempty"`
 	SharedAdmissionDetail         *pgSampleSharedAdmissionDetail `json:"shared_admission_detail,omitempty"`
+
+	SshConnectDiagnostic *pgSampleSshConnectDiagnostic `json:"ssh_connect_diagnostic,omitempty"`
 }
 
 // Offsets describe local elapsed time, including descheduling. Return marks

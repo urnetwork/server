@@ -3144,6 +3144,28 @@ resolve either.
 ### 1.5 log error-class rates (per service, per minute) — ALWAYS-ON TAIL
 Probe: `log-errors`
 
+`pool-timeout` preserves its literal `redis: connection pool timeout` match,
+WARN tier and >=10 diagnostic lines per service/class window. A fixed exemplar
+omits original context, and the literal supplies no address or pool frame.
+The positive count reports diagnostic text; actual pool, borrower result and
+cause remain unknown until an original event is bound to immutable emitter
+build/dependency, effective pool settings, acquisition context, typed wait
+stage/result, native occupancy/hold evidence and independent borrower outcome.
+Driver command attempts, redirects, callback replay and outer retries are
+separate policies; neither this matcher nor aggregate metrics select them.
+
+False-positive qualifiers: repeated, relayed or quoted diagnostic text does
+not prove unique failed work, native exhaustion, slow nodes, customer impact
+or a provider-picker cause. False-negative qualifiers: alternative text,
+precedence, capped/coalesced windows, missing original clocks/lifecycles and
+incomplete collection can hide failures. Keep missing authority unknown.
+Healthy controls require comparable same-build/same-pool acquisition and
+acknowledged borrower success, with expected cancellation and maintenance
+without borrowers checked separately. Complete below-threshold windows qualify
+only the diagnostic rate; quiet logs or successful siblings do not prove
+recovery. Keep §26.7 accounting/recovery and application dial diagnostics
+separate. No timeout, capacity or retry change follows from this log class.
+
 `port-exhaustion` retains its legacy class name and exact
 `connect: cannot assign requested address` text match, WARN threshold at
 100 matching diagnostic lines per service/class window, and existing
@@ -5881,6 +5903,20 @@ not zero overhead or a missed-sample repair. Marker bytes are charged to the
 existing4MiB raw source-output cap; no cap, retry, deadline or cadence increases.
 Only exact expected markers are removed from successful stdout. Corrupt markers
 cannot be discarded to manufacture an otherwise healthy source.
+
+Optional PG-only `ssh_connect_diagnostic` retains an own joined native attempt's
+complete local stderr assessment before command/parent deadline normalization.
+`reported_connect_timeout` is nullable: only both owned pipe EOFs, at most 4 KiB
+stderr, and a complete final line (or empty stderr) permit a boolean. True requires
+failed native execution, empty stdout and the exact selected-address OpenSSH
+connect-timeout spelling with a canonical port. Wrong-target or other complete
+stderr yields false; incomplete/capped stderr stays null. Callback, preflight and
+start-refusal paths omit the block. Command and parent deadline flags are retained
+separately from existing native exit/lifecycle and owner-budget facts. These
+fields share the receipt's opaque attempt binding; no address, nonce, SQL or raw
+error is serialized. They report a local diagnostic, never remote phase, network
+cause, source health or recovery. Older receipts remain unknown, and later direct
+controls cannot diagnose their absent fields. No query, limits or cadence change.
 
 Optional same-attempt native lifecycle offsets record actual Start/Wait entry
 and return plus explicitly observed local stdout/stderr EOF. Absent copy paths,
@@ -25064,7 +25100,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `systemd-networkd-wait-online.service: Timeout occurred while waiting for network connectivity` after an edge reboot | At least one configured link never reached online. On the 2026-08-28 recovery, unused no-carrier NICs remained `configuring` while every serving interface was already `routable`; this failed the boot wait unit but did not imply a traffic outage. | Use `networkctl list`, source-specific `ip route get`, and public probes. The authoritative edge netplans mark known non-serving links `optional: true`; recurrence after those netplans take effect means a new required-link failure or config drift. Do not restart working networkd during recovery. |
 | `snapd.apparmor.service` failed with parser errors under `snap.lxd.*` while `snapd.service` is active | Installed LXD snap profiles are incompatible with the host AppArmor parser. This is independent of Docker/Warp unless the host intentionally runs production workloads in LXD. | LXD is deliberately absent from main edges; `run-edges.sh` purges it while preserving Snapd and Canonical Livepatch. Confirm `snap list lxd` is absent and both `snapd.service` and `snapd.apparmor.service` are active. A reinstalled LXD snap is configuration drift. |
 | `invalid alert rule: interval (<duration>) should be non-zero and divided exactly by scheduler interval: 10` | A file-provisioned Grafana alert group uses an evaluation interval outside Grafana 13's 10-second scheduler grid. Grafana provisioning fails, the child exits and restarts, `/status` never becomes ready, and Warp keeps the old generation serving. | Fix the rule interval to a positive multiple of 10 seconds and run `go test ./grafana` in Warp; `TestProvisionedAlertIntervalsMatchGrafanaScheduler` validates every embedded alert file. Do not restart Warp or remove the old healthy container—the same invalid image will continue failing. See §11.16. |
-| `redis: connection pool timeout` | Local pool exhausted for PoolTimeout — backpressure, not the root. Deliberately NOT retried in-client (retry amplifies to livelock). | Find what is slow/stuck consuming the pool (usually a wedged node); check pool_timeouts metric per service. |
+| `redis: connection pool timeout` (`pool-timeout`) | The selected log stream reported a Redis pool-wait timeout diagnostic. WARN at >=10 matching lines per service/class window; counts are not unique waits, borrower failures or native pool statistics. Actual pool, borrower outcome and cause remain unknown. | Bind a retained original event to immutable emitter/dependency and effective client/pool generation, acquisition context, typed stage/result, native occupancy/hold evidence and independent borrower outcome. Then find responsible slow/stuck work. Do not infer exhaustion, a wedged node, retry policy or provider-picker cause; do not change timeout/capacity/retries from volume. Require comparable bound acquisition and acknowledged borrower success; quiet logs do not prove recovery. See §1.5. |
 | `FATAL: query_wait_timeout` (`pgbouncer-query-wait`) | A queued query did not receive a server connection before its deadline. Busy established servers, backend-startup blockage and the post-stall handoff livelock (§2.11a: each new server goes to a queued client that has already hung up) can all cause this; the line alone leaves the cause unknown. WARN at one diagnostic line/minute, PAGE at five; fixed sample and precedence over generic panic. | Run §2.11: bind native states/ages/config across all active shards and require a bounded authenticated direct control matching backend endpoint, role, database and TLS mode. Split established-server waits from login-only nonprogress; low direct-PG load or an open listener does not clear the pool path. |
 | `server login has been failing, cached error: sorry, too many clients already (server_login_retry)` (`pg-client-capacity`) | PostgreSQL refused a PgBouncer server login at its connection ceiling and PgBouncer cached the result. A timed-out transaction can leave its old backend unwinding while PgBouncer opens a replacement. A single failed request can also be rendered as `Unexpected error`, route recovery, and goroutine-shaped JSON, so the class takes precedence over generic panic and raw log volume is not unique-failure count. The 2026-09-01 control tied the burst to legacy reindex WAL/storage stalls and 60–66-second `COMMIT`s, not idle retention. | Run direct §1.3a immediately; split active, young idle-in-transaction, idle, and starting owners and correlate PostgreSQL waits/commit latency with PgBouncer connection logs or `SHOW POOLS` where permitted. For the matching legacy-reindex chain, wait for index progress to empty and deploy current-main Taskworker fixes `908a8b2c` and `d8392c83`. Do not first tune pools, raise `max_connections`, restart the database/pools, or mass-terminate sessions; preserve the deployed `work_mem` memory-risk context. |
 | `pgproto3.writeError=write failed: write tcp ...->...:6432: i/o timeout` | The app could not write a request into the nginx/PgBouncer frontend before its socket deadline. Unlike `query_wait_timeout`, it may occur before postgres sees a query; direct-pg active load can stay low. | Split the 6432 nginx frontend, its 32 PgBouncer shard queues/listeners, and direct 5432 with §2.11. Group by route; do not merely increase the timeout. |
