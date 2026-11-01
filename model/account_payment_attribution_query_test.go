@@ -14,8 +14,10 @@ import (
 )
 
 // Only the attribution reader's columns are needed. Keys, nullability and
-// payment lookup indexes match the production schema; write guards are covered
-// separately by the migrated bonus, recovery and controller tests.
+// payment lookup indexes match the production schema, which finds a payment's
+// sweeps through (payment_id, contract_id) alone since the index diet dropped
+// the payment_id index; write guards are covered separately by the migrated
+// bonus, recovery and controller tests.
 const providerAttributionTestSchema = `
 CREATE TABLE account_payment (
  payment_id uuid PRIMARY KEY, payment_plan_id uuid NOT NULL, network_id uuid NOT NULL,
@@ -30,7 +32,6 @@ CREATE TABLE transfer_escrow_sweep (
  contract_id uuid NOT NULL, balance_id uuid NOT NULL, network_id uuid NOT NULL,
  payout_byte_count bigint NOT NULL, payout_net_revenue_nano_cents bigint NOT NULL,
  payment_id uuid, PRIMARY KEY(contract_id,balance_id,network_id));
-CREATE INDEX transfer_escrow_sweep_payment_id ON transfer_escrow_sweep(payment_id);
 CREATE INDEX transfer_escrow_sweep_payment_contract ON transfer_escrow_sweep(payment_id,contract_id);
 CREATE TABLE account_payment_bonus (
  operation_id uuid NOT NULL, origin_payment_id uuid NOT NULL, payment_id uuid NOT NULL,

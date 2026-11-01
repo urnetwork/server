@@ -14,4 +14,6 @@ var indexDietMigrationContracts = []snMainnetMigrationContract{
 	// retires the v629 index artifact
 	migrationCurrentSuffix(server.IndexDietMigrationVersion(server.IndexDietStreamIndexDrop), "unread stream index removed",
 		migrationIndexRemoved("transfer_contract", "transfer_contract_stream_id")),
+	migrationCurrentSuffix(server.IndexDietMigrationVersion(server.IndexDietSweepPaymentIndexDrop), "sweep payment index removed for the payment-contract index",
+		migrationIndexRemoved("transfer_escrow_sweep", "transfer_escrow_sweep_payment_id")),
 }
