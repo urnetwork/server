@@ -53,7 +53,7 @@ func TestWindowStrictHandoverCanBeTurnedOff(t *testing.T) {
 }
 
 func TestWindowStrictHandoverIgnoresAnInvalidValue(t *testing.T) {
-	for _, value := range []string{"sometimes", "0", "1", `"false"`, "null", "[]"} {
+	for _, value := range []string{"sometimes", "0", "1", "null", "[]", "offf", `"disabled"`} {
 		popConfig := server.Config.PushSimpleResource("proxy.yml", []byte("window_strict_handover: "+value+"\n"))
 		enabled := proxyWindowStrictHandoverFromConfig()
 		popConfig()
@@ -80,5 +80,29 @@ func TestWindowStrictHandoverSurvivesUnreadableConfig(t *testing.T) {
 	}
 	if !proxyWindowStrictHandoverFromConfig() {
 		t.Error("an unreadable proxy.yml turned the handover off")
+	}
+}
+
+// An operator who writes the kill switch as a YAML 1.1 word gets what the word
+// says: the parser reads on, off, yes and no as strings.
+func TestWindowStrictHandoverReadsTheYamlBooleanWords(t *testing.T) {
+	for value, want := range map[string]bool{
+		"off":     false,
+		"no":      false,
+		"OFF":     false,
+		"No":      false,
+		`"false"`: false,
+		"false":   false,
+		"on":      true,
+		"yes":     true,
+		`"true"`:  true,
+		"true":    true,
+	} {
+		popConfig := server.Config.PushSimpleResource("proxy.yml", []byte("window_strict_handover: "+value+"\n"))
+		enabled := proxyWindowStrictHandoverFromConfig()
+		popConfig()
+		if enabled != want {
+			t.Errorf("window_strict_handover: %s read as %t, want %t", value, enabled, want)
+		}
 	}
 }
