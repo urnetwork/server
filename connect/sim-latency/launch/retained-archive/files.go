@@ -276,13 +276,15 @@ func syncDirectory(value string) error {
 }
 
 // Statfs observes available bytes only; it does not scan or hash the filesystem.
+// Bsize is int64 on Linux and uint32 on Darwin; the guard bounds the product
+// to MaxInt64, so both int64 conversions and the multiplication are exact.
 func diskAvailableBytes(value string) (int64, error) {
 	var stat syscall.Statfs_t
 	if err := syscall.Statfs(value, &stat); err != nil || stat.Bsize <= 0 ||
 		uint64(stat.Bavail) > uint64(math.MaxInt64)/uint64(stat.Bsize) {
 		return 0, errors.New("disk headroom unavailable")
 	}
-	return int64(stat.Bavail) * stat.Bsize, nil
+	return int64(stat.Bavail) * int64(stat.Bsize), nil
 }
 
 // The original native scoring inode is a narrowly retained legacy exception.
