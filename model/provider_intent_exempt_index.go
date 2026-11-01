@@ -30,10 +30,12 @@
 // A network's index is built lazily. A count that finds it incomplete first
 // advances the build, which sweeps the connected registry and then the
 // provider registry in score order, deriving each member's entry. A sweep runs
-// from -inf to the registry's highest score when the sweep starts: a member
-// above it, or one whose score moves, was written since and its writer derived
-// it. The cursor is a score, inclusive, so a run of equal scores split by a
-// step is resumed whole, and a run longer than a step is taken in one. Score
+// from its start to the registry's highest score when the sweep starts: a
+// member above it, or one whose score moves, was written since and its writer
+// derived it. Past the start the cursor is a score, inclusive, so a run of
+// equal scores split by a step is resumed whole, and a run longer than a step
+// (-inf scores included) is taken in one. An unreadable build state restarts
+// the build. Score
 // order is the same on every replica, so a build survives a failover, which a
 // scan cursor would not. The count uses the index when the build completes and
 // the walk otherwise, so a count is exact while the index builds. A new build
@@ -49,8 +51,9 @@
 //   - a write: the entry's re-derivation, at most four reads and a ZADD or a
 //     ZREM, and an EXPIRE once per half ttl; a removal, one ZREM;
 //   - a count while the index builds: the walk, plus at most two sweep steps
-//     deriving max(1024, N/4) members and any run of equal scores, at most six
-//     commands each, for at most a handful of counts per build.
+//     deriving max(1024, N/4) members and two more, and any run of equal
+//     scores, at most seven commands each, for at most a handful of counts per
+//     build.
 //
 // The index is exact once every process that writes these keys runs this code:
 // a writer without it changes the mirrored state without the index. Such an
@@ -187,7 +190,8 @@ end
 // walk over every live registry member, used while a network's index builds.
 // build_exempt_index advances the build and returns whether the index is
 // complete; its state is `#c <cursor> <sweep end>` or `#p ...` while it
-// sweeps a registry, and `#ready` scored by the negated build time. sweep_exempt_index takes one step of a
+// sweeps a registry, and `#ready` scored by the negated build time. The cursor
+// is `start` or a score, the sweep end `none` (an empty registry) or a score. sweep_exempt_index takes one step of a
 // sweep and returns the members derived and the next cursor, or false at the
 // sweep's end. count_clients_indexed counts from a complete index, or returns
 // false when the index disagrees with its sources. The counts return
@@ -226,22 +230,38 @@ end
 local function exempt_sweep_end(registry_key)
 	local last = redis.call('ZRANGE', registry_key, -1, -1, 'WITHSCORES')
 	if #last == 0 then
-		return '-inf'
+		return 'none'
 	end
 	return last[2]
 end
 
+local function exempt_sweep_token(token, word)
+	if token == word then
+		return true
+	end
+	local score = tonumber(token)
+	return score ~= nil and score == score
+end
+
 local function sweep_exempt_index(index_key, registry_tag, registry_key, pi_key, present_key, expire_key, cursor, sweep_end, budget, key_ttl_seconds)
-	local entries = redis.call('ZRANGEBYSCORE', registry_key, cursor, sweep_end, 'WITHSCORES', 'LIMIT', 0, budget)
+	if sweep_end == 'none' then
+		return 0, false
+	end
+	local min = cursor
+	if cursor == 'start' then
+		min = '-inf'
+	end
+	-- one past the budget tells whether the sweep ends within it
+	local entries = redis.call('ZRANGEBYSCORE', registry_key, min, sweep_end, 'WITHSCORES', 'LIMIT', 0, budget + 1)
 	for i = 1, #entries, 2 do
 		sync_exempt_index(index_key, registry_tag, registry_key, pi_key, present_key, expire_key, entries[i], key_ttl_seconds)
 	end
 	local derived = #entries / 2
-	if derived < budget then
+	if derived <= budget then
 		return derived, false
 	end
 	local last = entries[#entries]
-	if cursor == '-inf' or tonumber(cursor) < tonumber(last) then
+	if cursor == 'start' or tonumber(cursor) < tonumber(last) then
 		-- the next step resumes at the last score, so a run split here is whole
 		return derived, last
 	end
@@ -275,12 +295,16 @@ local function build_exempt_index(index_key, pi_key, present_key, expire_key, co
 	local states = redis.call('ZRANGEBYSCORE', index_key, '-inf', '-inf', 'LIMIT', 0, 1)
 	if built == false and #states == 1 then
 		registry_tag, cursor, sweep_end = string.match(states[1], '^#([cp]) ([^ ]+) ([^ ]+)$')
+		if registry_tag ~= nil and not (exempt_sweep_token(cursor, 'start') and exempt_sweep_token(sweep_end, 'none')) then
+			-- an unreadable state restarts the build
+			registry_tag = nil
+		end
 	end
 	if registry_tag == nil then
 		-- a new build derives every entry itself
 		redis.call('UNLINK', index_key)
 		registry_tag = 'c'
-		cursor = '-inf'
+		cursor = 'start'
 		sweep_end = exempt_sweep_end(connected_key)
 	else
 		redis.call('ZREM', index_key, states[1])
@@ -289,13 +313,15 @@ local function build_exempt_index(index_key, pi_key, present_key, expire_key, co
 		tonumber(build_limit),
 		math.ceil((redis.call('ZCARD', connected_key) + redis.call('ZCARD', provider_key)) / 4)
 	)
-	-- at most one step per registry
+	-- at most one step per registry; the provider step runs on what the
+	-- connected step left, so an empty or short provider registry completes
+	-- the build in the same count
 	while true do
 		local registry_key = connected_key
 		if registry_tag == 'p' then
 			registry_key = provider_key
 		end
-		local derived, next_cursor = sweep_exempt_index(index_key, registry_tag, registry_key, pi_key, present_key, expire_key, cursor, sweep_end, budget, key_ttl_seconds)
+		local derived, next_cursor = sweep_exempt_index(index_key, registry_tag, registry_key, pi_key, present_key, expire_key, cursor, sweep_end, math.max(budget, 0), key_ttl_seconds)
 		budget = budget - derived
 		if next_cursor then
 			cursor = next_cursor
@@ -307,11 +333,8 @@ local function build_exempt_index(index_key, pi_key, present_key, expire_key, co
 			return true
 		end
 		registry_tag = 'p'
-		cursor = '-inf'
+		cursor = 'start'
 		sweep_end = exempt_sweep_end(provider_key)
-		if budget < 1 then
-			break
-		end
 	end
 	redis.call('ZADD', index_key, '-inf', '#' .. registry_tag .. ' ' .. cursor .. ' ' .. sweep_end)
 	redis.call('EXPIRE', index_key, key_ttl_seconds)

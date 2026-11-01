@@ -722,10 +722,10 @@ func TestProviderIntentExemptIndexBuildsLazilyInBoundedSteps(t *testing.T) {
 			connect.AssertEqual(t, providerIntentCount, exemptCount)
 			state := testingProviderIntentExemptBuildState(ctx, networkId)
 			t.Logf("count %d: %d commands, build state %q", counts, commands, state)
-			// a count derives at most the build limit (with distinct expiries no
-			// run of equal scores adds to it), at most six commands each, beside
-			// the walk of at most three per member
-			if int64(3*memberCount+6*providerIntentExemptBuildLimit+64) < commands {
+			// a count derives at most the build limit and two more (with distinct
+			// expiries no run of equal scores adds to it), at most seven commands
+			// each, beside the walk of at most three per member
+			if int64(3*memberCount+7*(providerIntentExemptBuildLimit+2)+64) < commands {
 				t.Fatalf("count %d took %d commands", counts, commands)
 			}
 			if state == "#ready" {
@@ -1109,5 +1109,109 @@ func TestProviderIntentExemptIndexTtlRearmedByCounts(t *testing.T) {
 				t.Fatalf("index ttl %s after a count", ttl)
 			}
 		})
+	})
+}
+
+// Writes `scoreCount` registry members per score, without the index, as
+// registrations from before it.
+func testingProviderIntentLegacyRegistrations(ctx context.Context, registryKey string, scores []float64, scoreCount int) {
+	server.Redis(ctx, func(r server.RedisClient) {
+		pipe := r.TxPipeline()
+		for _, score := range scores {
+			for range scoreCount {
+				pipe.ZAdd(ctx, registryKey, redis.Z{Score: score, Member: string(server.NewId().Bytes())})
+			}
+		}
+		_, err := pipe.Exec(ctx)
+		server.Raise(err)
+	})
+}
+
+// A network of exactly the build limit is built by its first count, which
+// reads the index instead of walking: a step reads one member past its budget
+// to see that the sweep ends within it, and the provider sweep runs on what the
+// connected sweep left.
+func TestProviderIntentExemptIndexBuildLimitNetworkBuiltByFirstCount(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		walkCounter := providerIntentCountsCounter.WithLabelValues(providerIntentCountPathWalk)
+		for _, providerCount := range []int{0, 24} {
+			networkId := server.NewId()
+			now := server.NowUtc()
+			nowMs := float64(now.UnixMilli())
+			connectedScores := []float64{}
+			for i := range providerIntentExemptBuildLimit - providerCount {
+				connectedScores = append(connectedScores, nowMs+float64(time.Hour.Milliseconds()+int64(i)))
+			}
+			providerScores := []float64{}
+			for i := range providerCount {
+				providerScores = append(providerScores, nowMs+float64(time.Hour.Milliseconds()+int64(i)))
+			}
+			testingProviderIntentLegacyRegistrations(ctx, networkPeerConnectedKey(networkId), connectedScores, 1)
+			testingProviderIntentLegacyRegistrations(ctx, networkPeerConnectedProviderKey(networkId), providerScores, 1)
+
+			walksBefore := testutil.ToFloat64(walkCounter)
+			normalCount, exemptCount := getNetworkConnectedClientCountsAt(ctx, networkId, now)
+			connect.AssertEqual(t, normalCount, providerIntentExemptBuildLimit)
+			connect.AssertEqual(t, exemptCount, 0)
+			connect.AssertEqual(t, testingProviderIntentExemptBuildState(ctx, networkId), "#ready")
+			connect.AssertEqual(t, testutil.ToFloat64(walkCounter)-walksBefore, float64(0))
+		}
+	})
+}
+
+// A run of equal scores longer than a build step at the very start of the
+// sweep, -inf scores here, which no production writer gives: the cursor's
+// start is not a score, so the run is taken whole on the next step and the
+// build completes in a handful of counts, each equal to the walk.
+func TestProviderIntentExemptIndexBuildSweepsALongRunAtTheStart(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		networkId := server.NewId()
+		now := server.NowUtc()
+		nowMs := float64(now.UnixMilli())
+		testingProviderIntentLegacyRegistrations(ctx, networkPeerConnectedKey(networkId), []float64{math.Inf(-1)}, providerIntentExemptBuildLimit+64)
+		later := []float64{}
+		for i := range 16 {
+			later = append(later, nowMs+float64(time.Hour.Milliseconds()+int64(i)))
+		}
+		testingProviderIntentLegacyRegistrations(ctx, networkPeerConnectedKey(networkId), later, 1)
+		for counts := 1; ; counts += 1 {
+			oracleNormal, oracleExempt := testingProviderIntentOracleCounts(ctx, networkId, now)
+			normalCount, exemptCount := getNetworkConnectedClientCountsAt(ctx, networkId, now)
+			connect.AssertEqual(t, int64(normalCount), oracleNormal)
+			connect.AssertEqual(t, int64(exemptCount), oracleExempt)
+			state := testingProviderIntentExemptBuildState(ctx, networkId)
+			t.Logf("count %d: build state %q", counts, state)
+			if state == "#ready" {
+				break
+			}
+			if 4 < counts {
+				t.Fatalf("the build did not complete in %d counts", counts)
+			}
+		}
+	})
+}
+
+// A build state that does not read (a corrupted or foreign sentinel) restarts
+// the build instead of failing every count.
+func TestProviderIntentExemptIndexRestartsAnUnreadableBuild(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		for _, state := range []string{"#c abc 123", "#c 1 nan", "#c nan 1", "#q 1 2", "#c start", "#p 5 xyz", "#c start inf none"} {
+			now := server.NowUtc()
+			networkId, _ := testingProviderIntentExemptNetwork(t, ctx, now)
+			server.Redis(ctx, func(r server.RedisClient) {
+				pipe := r.TxPipeline()
+				pipe.ZRem(ctx, providerIntentExemptKey(networkId), "#ready")
+				pipe.ZAdd(ctx, providerIntentExemptKey(networkId), redis.Z{Score: math.Inf(-1), Member: state})
+				_, err := pipe.Exec(ctx)
+				server.Raise(err)
+			})
+			normalCount, exemptCount := getNetworkConnectedClientCountsAt(ctx, networkId, now)
+			connect.AssertEqual(t, normalCount, 0)
+			connect.AssertEqual(t, exemptCount, 5)
+			connect.AssertEqual(t, testingProviderIntentExemptBuildState(ctx, networkId), "#ready")
+		}
 	})
 }
