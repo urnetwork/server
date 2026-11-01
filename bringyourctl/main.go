@@ -1077,7 +1077,7 @@ func statsMigrate202608(opts docopt.Opts) {
 		{
 			name: "backfill",
 			run: func() string {
-				start := server.NowUtc().Add(-model.ClientExpiration)
+				start := server.NowUtc().Add(-model.ClientReliabilityRetention)
 				end := server.NowUtc()
 				eventCount := model.BackfillProviderAuditEvents(ctx, start, end)
 				deviceEventCount := model.BackfillDeviceAuditEvents(ctx, start, end)
@@ -1169,7 +1169,7 @@ func statsRollupTransfer(opts docopt.Opts) {
 // the real tables retain.
 func statsBackfill(opts docopt.Opts) {
 	ctx := context.Background()
-	start, end := statsDayRange(opts, model.ClientExpiration)
+	start, end := statsDayRange(opts, model.ClientReliabilityRetention)
 	eventCount := model.BackfillProviderAuditEvents(ctx, start, end)
 	fmt.Printf("provider audit backfill: %d events\n", eventCount)
 	deviceEventCount := model.BackfillDeviceAuditEvents(ctx, start, end)
@@ -2836,8 +2836,7 @@ func modelMigrateProxyDeviceConfig(opts docopt.Opts) {
 }
 
 // Converts client_reliability to daily block-range partitions, retaining only
-// the retention window (model.ClientReliabilityRetention, extended up to
-// model.ClientExpiration while a payout is behind; see
+// the retention window (model.ClientReliabilityRetention; see
 // xops/db/client_reliability_partition_plan.md). Safe to
 // rerun: resumes an interrupted copy, no-ops once converted. After validating,
 // rerun with --finalize to drop the old table and reclaim its disk.

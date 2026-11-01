@@ -8463,11 +8463,13 @@ only says how long is left, not why. Facts on 10-22:
   2026-10-05. Rows therefore wait for the 300-day straggler horizon
   (`StragglerContractExpiration`); the first reach it on 2027-03-28. See
   `server/CONTRACT-PARTITION.md`.
-- **`client_reliability` retention is pinned to the last subsidy epoch.**
-  `clientReliabilityRetentionCutoffBlock` keeps blocks from that epoch's end
-  minus one day (2026-10-05), for the next payout. Once the 21-day cutoff
-  passes 10-05, nightly drops stop until `ClientExpiration` (30 days) forces
-  them on 11-04.
+- **`client_reliability` retention was pinned to the last subsidy epoch.**
+  `clientReliabilityRetentionCutoffBlock` kept blocks from that epoch's end
+  minus one day (2026-10-05) for the next payout, so the nightly drops stopped
+  from 10-25 (27 daily partitions, 1,142 GB on 10-31). The owner retired that
+  frontier on 2026-10-31, since subsidy payouts ended: retention is a flat 21
+  days (`ClientReliabilityRetention`), and the first pass on the new build
+  drops every day past it.
 - **`st_client_key_history` had no retention.** It is immutable by trigger,
   held 382 GB and 81.6M rows, and grew 4.3 GB/h on 10-22. About 90% of its
   rows belong to inactive clients. Since PARTITION-MAINTENANCE-PLAN.md Part D,
@@ -8478,8 +8480,8 @@ only says how long is left, not why. Facts on 10-22:
   before the migration.
 
 Checks, all cheap and read-only:
-1. `SELECT max(end_time) FROM subsidy_payment`: WARN `retention-frontier-pinned`
-   when it is more than 10 days old. Payout-held frontiers stop reclaiming.
+1. Retired 2026-10-31: the subsidy frontier check (`retention-frontier-pinned`).
+   The frontier no longer holds any retention, so its age is not a finding.
 2. Contract reap stamping: `TABLESAMPLE SYSTEM (0.0002)` on `transfer_contract`.
    WARN `contract-reap-stalled` when fewer than 5% of sampled rows older than
    14 days have `reap_time`.
@@ -8490,8 +8492,8 @@ Checks, all cheap and read-only:
 
 Implementation (2026-10-22). Hourly, two bounded read-only queries run on
 the single enabled `pg-primary`, each behind a `hostname -s`, primary-role and
-30-second statement-clock guard. A catalog read returns the newest
-`subsidy_payment.end_time`, the `client_reliability` parent's kind and every
+30-second statement-clock guard. A catalog read returns the
+`client_reliability` parent's kind and every
 attached partition's name and heap size (at most 4,096), the statistics reset
 and postmaster start, and the public relations of at least 100 GB with their
 insert and delete counters, in fixed ten-cell frames bound by an end row. A
@@ -8500,11 +8502,6 @@ older than 14 days, and those with `reap_time`. A failure in one read leaves
 only its own checks unknown. Targets are the primary's name plus a fixed
 check name; only counts, ages and fixed names leave SQL.
 
-- `retention-frontier-pinned` (target `<primary>/subsidy-frontier`, sustain
-  1): the frontier is more than 10 days old. `holding_reliability_retention`
-  says whether the frontier minus one day already holds the 21-day
-  reliability retention back, and `days_until_hold` when it will. No
-  subsidy payment at all holds nothing and is healthy.
 - `contract-reap-stalled` (target `<primary>/contract-reap`, sustain 2,
   because the page sample is random per run): fewer than 5% of at least 20
   sampled rows older than 14 days have `reap_time`. A sample under 100 rows is
@@ -8513,12 +8510,12 @@ check name; only counts, ages and fixed names leave SQL.
   `<primary>/client-reliability-partitions`, sustain 1): the oldest
   `client_reliability_pYYYYMMDD` partition whose heap holds a page has an
   upper bound more than 2 days before the cutoff the drop pass computes: 21
-  days, held back to the frontier minus one day, never past 30 days (the
-  model's `ClientReliabilityRetention`, `clientReliabilityRetentionCutoffBlock`
-  and `ClientExpiration`). Empty partitions and names the drop pass did not
-  create are not counted; a frontier-held cutoff is the frontier finding,
-  not a stuck drop. A parent that is missing or not partitioned, or an
-  over-cap census, is unknown.
+  days (the model's `ClientReliabilityRetention`, the only horizon
+  `clientReliabilityRetentionCutoffBlock` applies since 2026-10-31). Empty
+  partitions and names the drop pass did not create are not counted. A
+  taskworker still on a build from before 2026-10-31 holds the days back to
+  the last subsidy epoch end, so deploy the taskworker first. A parent that
+  is missing or not partitioned, or an over-cap census, is unknown.
 - Check 4's list rides in the evidence of every retention finding as
   `append_only_relations`: relations of at least 100 GB with inserts and no
   deletes over a statistics window (since the last reset, else since the
@@ -8532,15 +8529,17 @@ check name; only counts, ages and fixed names leave SQL.
 
 Every tunable, including the mirrored reliability horizon, is a field of
 `RetentionLivenessSettings`. Synthetic controls replay the 2026-10-22 state
-(frontier 17.5 days old and 2.5 days from holding, 0.75% stamped, the
-`st_client_key_history` append-only list), every partition cutoff branch,
+(0.75% stamped, the `st_client_key_history` append-only list, an old subsidy
+frontier that raises nothing), the 2026-10-31 state (27 days kept behind the
+frontier, judged stuck by the 21-day rule), every partition cutoff branch,
 reap share edges and sample sufficiency, malformed frames and failed reads,
 the list's window and name rules, inventory authority and cancellation.
 
-ACTION: retention horizons are owner decisions. Never drop data inside a
-payout frontier without the owner: the code's own comment notes that a missing
-reliability block silently cuts provider credit. VERIFY: a complete
-observation inside each line on the next runs (two for the sampled check).
+ACTION: retention horizons are owner decisions. Never drop
+`client_reliability` days inside the 21-day retention by hand: operator block
+points read a completed block's window, and a missing reliability block cuts
+provider credit. VERIFY: a complete observation inside each line on the next
+runs (two for the sampled check).
 
 Partitioned contract tables (2026-10-23, `server/CONTRACT-PARTITION.md`).
 `TABLESAMPLE SYSTEM` on the partitioned `transfer_contract` samples the same
@@ -8854,10 +8853,10 @@ minutes) drops a family's range once its upper bound is the family's declared
 transaction that detaches it; a family with its own task (`client_reliability`)
 drops through that task. Size is bounded only by those drops. This probe
 watches every registered family that drops ranges and names no dedicated probe
-(`RetentionSignal`): today `client_reliability` (30 days, `ClientExpiration`,
-the longest a payout behind can hold its cutoff; §2.4g's
-`partition-retention-stuck` judges the computed cutoff sooner) and
-`provider_egress_health_history` (7 days). The contract tables name §2.4i and
+(`RetentionSignal`): today `client_reliability` (21 days,
+`ClientReliabilityRetention`, the same cutoff §2.4g's
+`partition-retention-stuck` judges) and `provider_egress_health_history` (7
+days). The contract tables name §2.4i and
 `network_ping` names §2.19c.
 
 Check, on the §2.4p catalog read: a partition of the registry's own naming
@@ -27373,11 +27372,13 @@ losing up to 20 GB/h. Each production action needs the owner's go.
    - Drop the time partitions that retention would drop within days anyway
      (`client_reliability_p20261001`..`04`, 236 GB). Run each drop as its own
      guarded transaction with `lock_timeout = '5s'`; each took seconds.
-4. **Respect the payout frontier.** `client_reliability` blocks from the last
-   subsidy epoch's end minus one day are read by the next payout, and dropping
-   them silently cuts provider credit. Check
-   `SELECT max(end_time) FROM subsidy_payment` before dropping anything newer
-   than the 21-day cutoff (§2.4g).
+4. **Respect the reliability readers.** Since 2026-10-31 `client_reliability`
+   retention is a flat 21 days; the subsidy payout frontier no longer holds
+   it. Operator block points read each completed block's window
+   (`AwardDueOperatorBlockPoints`, daily at 12:00Z): before dropping a day
+   inside the 21-day cutoff, check that the blocks covering it are awarded
+   (`payment_report` holds the block's plan id). Restarting subsidy payouts
+   needs the horizon revisited first.
 5. **Not first:**
    - `VACUUM FULL`, which holds an exclusive lock for hours on hot tables;
    - pg_repack, which needs free space equal to the table;
@@ -27717,7 +27718,7 @@ Catalog rows from this incident, none implemented when it closed on 2026-10-22; 
 |---|---|---|---|
 | storage-runway | Mimir node metrics | §2.4f max-of-windows decline per stateful volume | WARN ≤ 72 h, PAGE ≤ 24 h, 2 probes |
 | minio-drive-runway / minio-accounting-divergence / minio-put-surge | Mimir node + MinIO v3 metrics | §11.6b | runway WARN ≤ 14 d, PAGE ≤ 3 d; divergence over 1 TB WARN; PutObject over 3× its 7-day median for 1 h WARN |
-| retention-frontier-pinned / contract-reap-stalled / partition-retention-stuck | pg | §2.4g | WARN |
+| contract-reap-stalled / partition-retention-stuck | pg | §2.4g | WARN |
 | contract-partition-runway / contract-partition-retention-blocked / contract-partition-cutover-pending | pg catalog | §2.4h–§2.4j, added 2026-10-23 for the contract partition cutover | runway PAGE under 2 covered future weeks; retention WARN past 13 + 2 weeks; cutover WARN within 24 h of its week |
 | contract-stage-latency / contract-stage-latency-unobservable | Mimir | §2.30 total mean, implemented by `contract-stage-latency` | WARN over 250 ms, PAGE over 1 s, 10 min held in Mimir |
 | identity-churn / identity-churn-loop / identity-churn-unobservable | Mimir proxy metrics + pg | §14.8, implemented by `identity-churn` | WARN on per-device mints, retire/mint ratio, refusals, unresolved discovery or short-lived identities; PAGE when combined with PgBouncer waiting over 500 or §2.30 over 1 s |

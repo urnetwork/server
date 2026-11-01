@@ -522,7 +522,7 @@ func readOperatorBlockReliability(ctx context.Context, start time.Time, end time
 		networkWeights: map[server.Id]float64{},
 	}
 	checkRetention := func() error {
-		if minBlockNumber < clientReliabilityRetentionCutoffBlock(ctx, now) {
+		if minBlockNumber < clientReliabilityRetentionCutoffBlock(now) {
 			return fmt.Errorf("%w: window starts at reliability block %d", ErrOperatorBlockPointsReliabilityExpired, minBlockNumber)
 		}
 		return nil
