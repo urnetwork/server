@@ -336,3 +336,33 @@ func TestContractStageLatencyCanceledParentPublishesNothing(t *testing.T) {
 		t.Fatalf("canceled run = %+v, %v", alerts, err)
 	}
 }
+
+// The control route mean shown beside the stage means leaves out the requests
+// the API discarded before authentication, by count and by their own
+// seconds, so a quarter of fast discards cannot halve it; a release without
+// the collector subtracts nothing, and a window of only discards shows no
+// mean rather than a division by zero (review of CPUOPT3 D3).
+func TestContractStageLatencyControlMeanLeavesOutDiscards(t *testing.T) {
+	commands := []string{}
+	source := &syntheticSource{hostFn: func(_ HostSettings, command string) (string, error) {
+		commands = append(commands, command)
+		return newContractStageFixture(contractStageNow).json(t), nil
+	}}
+	if _, err := NewContractStageLatencySignal().Run(context.Background(), contractStageSettings(contractStageNow, source)); err != nil {
+		t.Fatal(err)
+	}
+	if len(commands) != 1 {
+		t.Fatalf("fleet read ran %d commands", len(commands))
+	}
+	command, err := url.QueryUnescape(commands[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	control := `env="synthetic",job="api",route="POST ^/connect/control$"`
+	discarded := `env="synthetic",job="api"`
+	want := "clamp_min(sum(increase(urnetwork_http_request_duration_seconds_sum{" + control + "}[300s])) - (sum(increase(urnetwork_connect_control_http_discarded_seconds_sum{" + discarded + "}[300s])) or vector(0)), 0) / " +
+		"((sum(increase(urnetwork_http_request_duration_seconds_count{" + control + "}[300s])) - (sum(increase(urnetwork_connect_control_http_discarded_seconds_count{" + discarded + "}[300s])) or vector(0))) > 0)"
+	if !strings.Contains(command, want) {
+		t.Fatalf("the control mean does not leave out discards; want %s in:\n%s", want, command)
+	}
+}

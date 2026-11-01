@@ -14,7 +14,7 @@ import (
 func controlRouteFixture(now time.Time, instance string) *controlRouteProcess {
 	values := map[string]float64{
 		"start": float64(now.Add(-time.Hour).Unix()),
-		"count": 1000, "requests": 1000, "canceled": 800, "seconds": 12000, "discarded": 0,
+		"count": 1000, "requests": 1000, "canceled": 800, "seconds": 12000, "discarded": 0, "discarded_seconds": 0,
 		"inflight": 500, "inflight_min": 200, "samples": 10, "early_samples": 2,
 		"seconds_samples": 10, "seconds_early_samples": 2, "inflight_samples": 10, "inflight_early_samples": 2,
 	}
@@ -226,7 +226,7 @@ func TestControlRoutePressureQueryUsesBoundedFixedRouteAndHistory(t *testing.T) 
 		"increase(", "[5m]", "count_over_time(", "[1m] offset 4m", "min_over_time(",
 		"timestamp(", "process_start_time_seconds", `ingress="http"`,
 		"urnetwork_connect_control_http_phase_inflight", "urnetwork_connect_control_frames_inflight",
-		"urnetwork_connect_control_discarded_requests_total",
+		"urnetwork_connect_control_http_discarded_seconds_count", "urnetwork_connect_control_http_discarded_seconds_sum",
 	} {
 		if !strings.Contains(query, required) {
 			t.Fatalf("query missing %q", required)
@@ -278,13 +278,89 @@ func TestControlRoutePressureSubtractsDiscards(t *testing.T) {
 		}
 	}
 
-	// the cell is required like every other: a process without it is
+	// the cells are required like every other: a process without one is
 	// incomplete, not one with no discards
-	missing := controlRouteFixture(now, "synthetic-current")
-	delete(missing.values, "discarded")
-	alerts = runControlRouteFixture(t, now, controlRouteFixtureJson(t, now, missing))
-	requireAlertClass(t, alerts, "control-route-pressure-unobservable")
-	if len(alerts) != 1 {
-		t.Fatalf("a process without its discard cell became evidence: %+v", alerts)
+	for _, cell := range []string{"discarded", "discarded_seconds"} {
+		missing := controlRouteFixture(now, "synthetic-current")
+		delete(missing.values, cell)
+		alerts = runControlRouteFixture(t, now, controlRouteFixtureJson(t, now, missing))
+		requireAlertClass(t, alerts, "control-route-pressure-unobservable")
+		if len(alerts) != 1 {
+			t.Fatalf("a process without its %s cell became evidence: %+v", cell, alerts)
+		}
+	}
+}
+
+// No alert carries a share or mean that is not a number.
+func requireControlRouteFiniteAlerts(t *testing.T, alerts Alerts) {
+	t.Helper()
+	for _, alert := range alerts {
+		for _, bad := range []string{"NaN", "Inf"} {
+			if strings.Contains(alert.Markdown(), bad) {
+				t.Fatalf("an alert carries %s: %s", bad, alert.Markdown())
+			}
+		}
+	}
+}
+
+// When discards make up nearly every request, the request denominator can
+// reach zero while the duration denominator, 3% larger within the scrape
+// tolerance, keeps more than 100: the canceled share was 0/0, a NaN WARN, or
+// 200/0, a +Inf PAGE (review of CPUOPT3 D3). Both adjusted denominators must
+// reach 100, so such a process is not traffic-bearing.
+func TestControlRoutePressureDiscardsCannotExhaustADenominator(t *testing.T) {
+	now := time.Date(2026, 11, 1, 6, 0, 0, 0, time.UTC)
+	for _, canceled := range []float64{0, 200} {
+		process := controlRouteFixture(now, "synthetic-current")
+		for name, value := range map[string]float64{
+			"count": 10000, "requests": 9700, "discarded": 9700, "canceled": canceled, "seconds": 100000,
+		} {
+			process.values[name] = value
+		}
+		alerts := runControlRouteFixture(t, now, controlRouteFixtureJson(t, now, process))
+		requireControlRouteFiniteAlerts(t, alerts)
+		if len(alerts) != 0 {
+			t.Fatalf("canceled=%.0f: a process of discards alerted: %+v", canceled, alerts)
+		}
+	}
+}
+
+// The discarded requests' own seconds leave the mean with their count: 300
+// requests that do work at 2 s each, half canceled, beside 1,000 discards
+// that took 3 s each, are healthy, not a 12 s PAGE.
+func TestControlRoutePressureExcludesDiscardedSeconds(t *testing.T) {
+	now := time.Date(2026, 11, 1, 6, 0, 0, 0, time.UTC)
+	process := controlRouteFixture(now, "synthetic-current")
+	for name, value := range map[string]float64{
+		"count": 1300, "requests": 1300, "discarded": 1000, "discarded_seconds": 3000, "seconds": 3600, "canceled": 150,
+	} {
+		process.values[name] = value
+	}
+	if alerts := runControlRouteFixture(t, now, controlRouteFixtureJson(t, now, process)); len(alerts) != 0 {
+		t.Fatalf("the discards' seconds raised the mean: %+v", alerts)
+	}
+	// the same requests slow in their own right still page
+	process.values["seconds"] = 3000 + 300*12
+	alert := requireAlertClass(t, runControlRouteFixture(t, now, controlRouteFixtureJson(t, now, process)), "control-route-pressure")
+	if alert.Severity != Severity(tierPage) || !strings.Contains(alert.Markdown(), "mean_seconds=12.000") {
+		t.Fatalf("slow requests beside discards = %s", alert.Markdown())
+	}
+}
+
+// A canceled count ahead of its requests at a scrape boundary reads as every
+// request canceled, never more.
+func TestControlRoutePressureClampsTheCanceledShare(t *testing.T) {
+	now := time.Date(2026, 11, 1, 6, 0, 0, 0, time.UTC)
+	process := controlRouteFixture(now, "synthetic-current")
+	for name, value := range map[string]float64{
+		"count": 1120, "requests": 1120, "discarded": 1000, "seconds": 120 * 12, "canceled": 150,
+	} {
+		process.values[name] = value
+	}
+	alerts := runControlRouteFixture(t, now, controlRouteFixtureJson(t, now, process))
+	requireControlRouteFiniteAlerts(t, alerts)
+	alert := requireAlertClass(t, alerts, "control-route-pressure")
+	if !strings.Contains(alert.Markdown(), "canceled_share=100.0%") {
+		t.Fatalf("share not clamped: %s", alert.Markdown())
 	}
 }
