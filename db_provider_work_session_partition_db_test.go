@@ -463,6 +463,52 @@ func TestProviderWorkSessionPartitionDropRequiresOptIn(t *testing.T) {
 	})
 }
 
+// The open-admission check reads only the open connections minted before the
+// leaf's upper bound and a day: one minted in the old week whose latest admit
+// is there keeps the week, while one minted after it does not, though a
+// fabricated admit of it sits in the week, since production appends a
+// connection's admits only after its id is minted.
+func TestProviderWorkSessionPartitionAdmissionCheckBoundsConnections(t *testing.T) {
+	DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		currentWeek := PartitionGranularityWeekly.RangeStart(NowUtc())
+		oldWeek := PartitionGranularityWeekly.AddRanges(currentWeek, -14)
+		testProviderWorkSessionOldWeeks(t, ctx, oldWeek)
+		old := PartitionGranularityWeekly.RangeOf(oldWeek)
+		openWithAdmit := func(connectionId Id, admittedAt time.Time) {
+			clientId, networkId := testProviderWorkSessionClient(t, ctx)
+			Tx(ctx, func(tx PgTx) {
+				// historical fixture: the trigger would admit at now
+				RaisePgResult(tx.Exec(ctx, `ALTER TABLE network_client_connection DISABLE TRIGGER provider_work_session_mutation`))
+				RaisePgResult(tx.Exec(ctx, testProviderWorkSessionConnectSql, clientId, connectionId, admittedAt, make([]byte, 32), NewId()))
+				RaisePgResult(tx.Exec(ctx, `ALTER TABLE network_client_connection ENABLE TRIGGER provider_work_session_mutation`))
+			}, TxReadCommitted)
+			testProviderWorkSessionInsertEvent(t, ctx, clientId, &networkId, &connectionId, 1, "admit", admittedAt)
+		}
+		blocker := func() (blocker string) {
+			MaintenanceDb(ctx, func(conn PgConn) {
+				blocker = providerWorkSessionEventDropBlocker(ctx, conn, old)
+			})
+			return
+		}
+
+		admittedAt := old.Lower.Add(2 * time.Hour)
+		// minted today, admitted in the old week: impossible in production
+		openWithAdmit(NewId(), admittedAt)
+		if reason := blocker(); reason != "" {
+			t.Fatalf("a connection minted after the week kept it: %q", reason)
+		}
+		// minted in the old week, as its admit was
+		minted := NewId()
+		floor := ContractIdFloor(admittedAt.Add(-time.Minute))
+		copy(minted[:6], floor[:6])
+		openWithAdmit(minted, admittedAt)
+		if reason := blocker(); reason != "an open connection still needs its admission event" {
+			t.Fatalf("an open connection's admit in the week did not keep it: %q", reason)
+		}
+	})
+}
+
 // The registry's retirement keeps a week 12 weeks and 6 days past and drops
 // the one 13 weeks and 6 days past, with the legacy partition before it; a
 // pass whose clock runs ahead of the database's is refused by the guard.
