@@ -68,7 +68,8 @@ func capabilityProbeShardTestCleanup(t testing.TB, ctx context.Context, key mode
 // probe shard, in a network of its own. Taking the slot retires a stale
 // epoch a previous execution of the probe's task left active, and leaves
 // the URL shard's owner and identity as they were; the pass's own shard is
-// drained and reaped when it returns, and its sweep stands.
+// drained and settled when it returns and keeps its rows until its generation
+// drops, and its sweep stands.
 func TestCapabilityProbeShardLifecycleBesideAUrlShard(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -122,11 +123,15 @@ func TestCapabilityProbeShardLifecycleBesideAUrlShard(t *testing.T) {
 		if err != nil || !finished || !reflect.DeepEqual(next, finishedSweep) || result != pass {
 			t.Fatalf("the pass returned %+v, %+v, %v (finished %t)", next, result, err, finished)
 		}
-		if state := capabilityProbeShardTestState(t, ctx, key); state != "closed" {
-			t.Fatalf("the pass's shard is %q after it, want closed", state)
+		if state := capabilityProbeShardTestState(t, ctx, key); state != "draining" {
+			t.Fatalf("the pass's shard is %q after it, want draining until its generation drops", state)
 		}
+		if rows := capabilityProbeShardTestRows(t, ctx, networkId); rows != 3 {
+			t.Fatalf("the pass's shard holds %d network, client and balance rows, want its 3 until its generation drops", rows)
+		}
+		capabilityProbeShardTestCleanup(t, ctx, key)
 		if rows := capabilityProbeShardTestRows(t, ctx, networkId); rows != 0 {
-			t.Fatalf("the pass's shard left %d network, client and balance rows", rows)
+			t.Fatalf("the reaped pass left %d network, client and balance rows", rows)
 		}
 		if state := capabilityProbeShardTestState(t, ctx, urlKey); state != "active" {
 			t.Fatalf("the URL shard is %q after the capability pass", state)

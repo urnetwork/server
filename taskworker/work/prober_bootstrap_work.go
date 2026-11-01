@@ -15,6 +15,10 @@ import (
 // Each live shard creates its own credit and credential at execution admission.
 const ProberBootstrapTimeout = 5 * time.Minute
 
+// Shards one pass fences or settles. Each settle is a few indexed reads; a
+// reported contract adds one settlement.
+const proberBootstrapSettleLimit = 64
+
 type ProberBootstrapArgs struct{}
 
 type ProberBootstrapResult struct{}
@@ -38,17 +42,20 @@ func scheduleProberBootstrapAt(clientSession *session.ClientSession, tx server.P
 // ProberBootstrap retains the deployed recurring task name for crash cleanup.
 // The legacy singleton remains readable while pre-upgrade work drains, but
 // this task no longer creates, refreshes, or replenishes shared probe accounts.
+// It fences live shards past their deadline and settles drained ones, and
+// deletes nothing: a shard stays until its generation drops
+// (RemoveProberShardGenerations).
 func ProberBootstrap(
 	_ *ProberBootstrapArgs,
 	clientSession *session.ClientSession,
 ) (*ProberBootstrapResult, error) {
-	removed, err := model.ReapDueProberShards(clientSession.Ctx, 32)
+	settled, err := model.SettleDueProberShards(clientSession.Ctx, proberBootstrapSettleLimit)
 	if err != nil {
 		return nil, err
 	}
 
-	if removed > 0 {
-		glog.Infof("[proberboot]removed %d finished probe shard accounts\n", removed)
+	if settled > 0 {
+		glog.Infof("[proberboot]settled %d probe shards\n", settled)
 	}
 
 	return &ProberBootstrapResult{}, nil

@@ -2157,8 +2157,8 @@ func runWithProviderEgressShard(ctx context.Context, key model.ProberShardKey, a
 	return runWithProberShard(ctx, "provider egress", key, credit, time.Duration(args.MaxTimeSeconds)*time.Second, run)
 }
 
-// A prober shard's drain or reap failure after its pass, joined to whatever
-// the pass returned. The recurring prober reaper retries the cleanup, so a
+// A prober shard's drain or settle failure after its pass, joined to whatever
+// the pass returned. The recurring prober bootstrap retries the cleanup, so a
 // caller can tell it from the pass's own failure. Its text is the cleanup
 // step's.
 type proberShardCleanupError struct {
@@ -2174,12 +2174,14 @@ func (self *proberShardCleanupError) Unwrap() error {
 }
 
 // One prober shard's whole lifetime around run: allocation with credit, the
-// identity, and the drain and reap after run returns, which the probe named
+// identity, and the drain and settle after run returns, which the probe named
 // by label owns. The callback owns and joins its tunnels/control client
 // before returning; this boundary persists cleanup even when the caller
 // cancels or a callback fails, and joins a cleanup failure to run's result
-// as a proberShardCleanupError. The URL probe and the capability probe each
-// run their passes in one, in shard slots of their own.
+// as a proberShardCleanupError. The drain fences the shard's identity at
+// once; its rows stay with its generation until the retention drops it
+// (model.RemoveProberShardGenerations). The URL probe and the capability
+// probe each run their passes in one, in shard slots of their own.
 func runWithProberShard[R any](ctx context.Context, label string, key model.ProberShardKey, credit model.ByteCount, lifetime time.Duration, run func(*model.ProberIdentity) (R, error)) (result R, returnErr error) {
 	owner, err := model.BeginProberShard(ctx, key, credit, lifetime)
 	if err != nil {
@@ -2188,14 +2190,14 @@ func runWithProberShard[R any](ctx context.Context, label string, key model.Prob
 	defer func() {
 		// runWithProviderEgressControl and its tunnel owners have joined before
 		// this cleanup runs. Cancellation still records draining durably; the
-		// recurring reaper owns any unsettled or interrupted remainder.
+		// recurring bootstrap owns any unsettled or interrupted remainder.
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 		defer cancel()
 		if err := model.DrainProberShard(cleanupCtx, key); err != nil {
 			returnErr = errors.Join(returnErr, &proberShardCleanupError{err: fmt.Errorf("%s shard drain: %w", label, err)})
 			return
 		}
-		if _, err := model.ReapProberShard(cleanupCtx, key); err != nil {
+		if err := model.SettleProberShard(cleanupCtx, key); err != nil {
 			returnErr = errors.Join(returnErr, &proberShardCleanupError{err: fmt.Errorf("%s shard cleanup: %w", label, err)})
 		}
 	}()
