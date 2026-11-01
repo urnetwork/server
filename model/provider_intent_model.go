@@ -26,6 +26,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	mathrand "math/rand/v2"
 	"strings"
 	"time"
 
@@ -95,7 +96,7 @@ var providerIntentAttemptsCounter = prometheus.NewCounterVec(prometheus.CounterO
 
 var providerIntentSlotDecisionsCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "urnetwork_provider_intent_slot_decisions_total",
-	Help: "Normal client slot decisions for intent clients that failed qualification, enforced or computed in shadow mode",
+	Help: "Normal client slot decisions for intent clients that failed qualification, enforced or computed in shadow mode (shadow decisions sampled 1 in 64)",
 }, []string{"decision", "mode"})
 
 // Every label value is exported from the start, so a rate is defined before
@@ -130,6 +131,24 @@ const (
 	providerIntentEventRecheckFailed = "recheck_failed"
 	providerIntentEventStopped       = "stopped"
 )
+
+// While enforcement is dark a normal slot decision only feeds
+// providerIntentSlotDecisionsCounter, yet deciding one walks every live member
+// of the network's registries (count_clients). A reconnect wave of a large
+// network then saturates the network's redis node, and every key on it stalls.
+// Shadow decisions are sampled, one in providerIntentShadowSampleRate; with
+// enforcement on every decision is made.
+const providerIntentShadowSampleRate = 64
+
+// Draws one shadow sample. A seam for deterministic tests.
+var providerIntentShadowSampled = func() bool {
+	return mathrand.IntN(providerIntentShadowSampleRate) == 0
+}
+
+// Reports whether a failed client's normal slot is decided now.
+func providerIntentDecideSlotNow() bool {
+	return Pro().EnforceConcurrentClients || providerIntentShadowSampled()
+}
 
 // Shadow while enforce_concurrent_clients is false: decisions are computed and
 // counted, and nothing is refused or kicked.
@@ -696,7 +715,7 @@ func connectProviderIntentAt(
 	for attemptIndex := 0; attemptIndex < providerIntentMutationMaxAttempts; attemptIndex += 1 {
 		record, state := getProviderIntentRecord(ctx, networkId, clientId, now)
 		next, started := providerIntentConnectState(state, now)
-		decideSlot := !started && next.Status.Failed()
+		decideSlot := !started && next.Status.Failed() && providerIntentDecideSlotNow()
 		if decideSlot && !normalLimitLoaded {
 			normalLimit = networkNormalClientLimit(ctx, networkId)
 			normalLimitLoaded = true
@@ -879,6 +898,7 @@ func checkProviderIntentAt(ctx context.Context, networkId server.Id, clientId se
 			evidence.ProbeCycleReady = setProviderIntentProbePriority(ctx, clientId, state.AttemptTime)
 		}
 		next, event, decideSlot := providerIntentCheckState(state, evidence, now)
+		decideSlot = decideSlot && providerIntentDecideSlotNow()
 		normalLimit := 0
 		if decideSlot {
 			normalLimit = networkNormalClientLimit(ctx, networkId)

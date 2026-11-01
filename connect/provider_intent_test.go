@@ -624,6 +624,7 @@ func TestConnectProvideIntentShadowServesOverLimitH1(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		defer model.Testing_SetEnforceConcurrentClients(false)()
+		defer model.Testing_SetProviderIntentShadowSampling(true)()
 		defer model.Testing_SetConcurrentClientsLimit(1, 1)()
 		testServer := newProviderIntentTestServer(t, ctx)
 
