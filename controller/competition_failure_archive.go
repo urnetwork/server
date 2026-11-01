@@ -401,18 +401,21 @@ func authenticateFailureArchiveArtifacts(root string, artifacts []evaluationArti
 
 // Runs only after command cleanup; cancellation cannot discard otherwise safe evidence.
 func archiveFailedEvaluation(ctx context.Context, settings *Settings, job *queuedJob, directory, requestSha256 string, originalFailure *CompetitionError, allowStageFailure bool) EvaluationOutcome {
-	archiveFailure := func() EvaluationOutcome {
-		return EvaluationOutcome{Error: infrastructureError("artifact_archive_failed", "durable failure evidence retention failed")}
+	archiveFailure := func(phase string, cause error) EvaluationOutcome {
+		return EvaluationOutcome{
+			Error:          infrastructureError("artifact_archive_failed", "durable failure evidence retention failed"),
+			archiveFailure: competitionArtifactArchiveFailureDetails(phase, cause),
+		}
 	}
 	artifacts, sanitized, err := authenticateFailedEvidence(directory, job)
 	if err != nil {
-		return archiveFailure()
+		return archiveFailure("authenticate_failed_evidence", err)
 	}
 	failure := originalFailure
 	if sanitized {
 		stageFailure, stageArtifact, err := authenticateEvaluatorStageFailure(directory, job)
 		if err != nil {
-			return archiveFailure()
+			return archiveFailure("authenticate_stage_failure", err)
 		}
 		if stageArtifact != nil {
 			artifacts = append(artifacts, *stageArtifact)
@@ -423,29 +426,32 @@ func archiveFailedEvaluation(ctx context.Context, settings *Settings, job *queue
 	}
 	diagnostic, err := writeControllerFailureArtifact(directory, job, originalFailure)
 	if err != nil {
-		return archiveFailure()
+		return archiveFailure("write_failure_diagnostic", err)
 	}
 	artifacts = append(artifacts, diagnostic)
 	patch := evaluationArtifact{Path: "canonical.patch", Sha256: job.PatchSha256, Bytes: int64(len(job.Patch))}
 	stderrFile, err := openFailureArtifactPath(directory, "worker.stderr.log", false)
 	if err != nil {
-		return archiveFailure()
+		return archiveFailure("read_worker_stderr", err)
 	}
 	stderrInfo, err := stderrFile.Stat()
 	if err != nil || stderrInfo.Size() < 0 || maxFailureEvidenceBytes < stderrInfo.Size() {
 		stderrFile.Close()
-		return archiveFailure()
+		if err == nil {
+			err = errors.New("worker stderr size is invalid")
+		}
+		return archiveFailure("read_worker_stderr", err)
 	}
 	stderrHash := sha256.New()
 	stderrBytes, readErr := io.Copy(stderrHash, io.LimitReader(stderrFile, stderrInfo.Size()+1))
 	closeErr := stderrFile.Close()
 	if readErr != nil || closeErr != nil || stderrBytes != stderrInfo.Size() {
-		return archiveFailure()
+		return archiveFailure("read_worker_stderr", errors.Join(readErr, closeErr, errors.New("worker stderr could not be authenticated")))
 	}
 	stderr := evaluationArtifact{Path: "worker.stderr.log", Sha256: hex.EncodeToString(stderrHash.Sum(nil)), Bytes: stderrBytes}
 	selected := append(append([]evaluationArtifact(nil), artifacts...), patch, stderr)
 	if err := authenticateFailureArchiveArtifacts(directory, selected); err != nil {
-		return archiveFailure()
+		return archiveFailure("authenticate_failure_artifacts", err)
 	}
 	manifest := artifactManifest{
 		Schema: 1, JobId: job.JobId.String(), RoundId: job.RoundId.String(),
@@ -456,13 +462,13 @@ func archiveFailedEvaluation(ctx context.Context, settings *Settings, job *queue
 		Artifacts: artifacts, Failure: failure,
 	}
 	if settings.artifactArchive == nil {
-		return archiveFailure()
+		return archiveFailure("archive_unavailable", errors.New("artifact archive is unavailable"))
 	}
 	archiveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), failureArchiveTimeout)
 	defer cancel()
 	archivedManifest, err := settings.artifactArchive.ArchiveAttempt(archiveCtx, settings, job, directory, manifest)
 	if err != nil {
-		return archiveFailure()
+		return archiveFailure("archive_attempt", err)
 	}
 	return EvaluationOutcome{Error: failure, ArtifactManifest: archivedManifest}
 }
