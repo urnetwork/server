@@ -491,6 +491,7 @@ func TestProviderIntentShadowModeCountsDecisionsAndAdmitsAll(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		defer Testing_SetEnforceConcurrentClients(false)()
+		defer Testing_SetProviderIntentShadowSampling(true)()
 		defer Testing_SetConcurrentClientsLimit(1, 1)()
 		networkId := testingProviderIntentNetwork(ctx)
 		now := server.NowUtc()
@@ -516,6 +517,45 @@ func TestProviderIntentShadowModeCountsDecisionsAndAdmitsAll(t *testing.T) {
 		// the gate does no work and refuses nobody while dark
 		connect.AssertEqual(t, CanConnectNetworkPeer(ctx, failedId, true), true)
 		connect.AssertEqual(t, CanConnectNetworkPeer(ctx, server.NewId(), false), true)
+	})
+}
+
+// While enforcement is dark an unsampled connection decides no slot: the walk
+// over the network's live members (count_clients) does not run, the failed
+// client keeps its state and nothing is counted. A reconnect wave of a large
+// network saturated its redis node when every connection decided.
+func TestProviderIntentShadowModeSkipsUnsampledSlotDecisions(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		defer Testing_SetEnforceConcurrentClients(false)()
+		defer Testing_SetProviderIntentShadowSampling(false)()
+		defer Testing_SetConcurrentClientsLimit(1, 1)()
+		networkId := testingProviderIntentNetwork(ctx)
+		now := server.NowUtc()
+
+		testingProviderIntentConnectedClient(ctx, networkId)
+		failedId := testingProviderIntentConnectedClient(ctx, networkId)
+		testingSetProviderIntentState(t, ctx, networkId, failedId, &ProviderIntentState{
+			Status:      ProviderIntentStatusNormal,
+			AttemptTime: now,
+			CheckTime:   now.Add(ProviderIntentAttemptAllowance),
+		}, 0, now)
+
+		shadowOverLimit := providerIntentSlotDecisionsCounter.WithLabelValues("over_limit", "shadow")
+		shadowNormal := providerIntentSlotDecisionsCounter.WithLabelValues("normal_slot", "shadow")
+		overLimitBefore := testutil.ToFloat64(shadowOverLimit)
+		normalBefore := testutil.ToFloat64(shadowNormal)
+
+		result := connectProviderIntentAt(ctx, networkId, failedId, 5*time.Minute, now)
+		// over the limit of 1, a decision would have chosen the over limit record
+		connect.AssertEqual(t, result.State.Status, ProviderIntentStatusNormal)
+		connect.AssertEqual(t, testutil.ToFloat64(shadowOverLimit), overLimitBefore)
+		connect.AssertEqual(t, testutil.ToFloat64(shadowNormal), normalBefore)
+
+		// enforcement on decides every connection, sampled or not
+		defer Testing_SetEnforceConcurrentClients(true)()
+		result = connectProviderIntentAt(ctx, networkId, failedId, 5*time.Minute, now)
+		connect.AssertEqual(t, result.State.Status, ProviderIntentStatusOverLimit)
 	})
 }
 
