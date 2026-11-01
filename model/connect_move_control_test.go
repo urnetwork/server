@@ -178,6 +178,62 @@ func TestConnectMoveControlNarrowsTransportDelay(t *testing.T) {
 	}
 }
 
+// The exchange's in-process delivery (connect resident_local_transport.go):
+// the control chooses the blocks, never past the exchange's switch, the code
+// default decides while the field is absent, and only the exchange's ceiling
+// reads it.
+func TestConnectMoveControlNarrowsLocalTransport(t *testing.T) {
+	dark := ConnectMoveControlCeiling{EnableLocalTransport: true, LocalTransportDefault: "off"}
+	shipped := ConnectMoveControlCeiling{EnableLocalTransport: true, LocalTransportDefault: "all"}
+	ceilingOff := ConnectMoveControlCeiling{EnableLocalTransport: false, LocalTransportDefault: "all"}
+	handling := ConnectMoveControlCeiling{EnableTransportDelay: true}
+	cases := []struct {
+		name    string
+		fields  map[string]string
+		ceiling ConnectMoveControlCeiling
+		allowed []string
+		refused []string
+	}{
+		{name: "absent: dark by default", fields: nil, ceiling: dark, refused: []string{"beta", "g1", "g2"}},
+		{name: "absent: a default of all", fields: nil, ceiling: shipped, allowed: []string{"beta", "g1", "g2"}},
+		{name: "absent: the ceiling off", fields: nil, ceiling: ceilingOff, refused: []string{"beta", "g1"}},
+		{name: "the beta stage", fields: map[string]string{"localTransport": "beta"}, ceiling: dark, allowed: []string{"beta"}, refused: []string{"g1", "g2"}},
+		{name: "g1 against the other blocks", fields: map[string]string{"localTransport": "g1"}, ceiling: dark, allowed: []string{"g1"}, refused: []string{"beta", "g2", "g3", "g4"}},
+		{name: "a list, padded and mixed separators", fields: map[string]string{"localTransport": " beta, g1 g2\tg3 "}, ceiling: dark, allowed: []string{"beta", "g1", "g2", "g3"}, refused: []string{"g4"}},
+		{name: "all", fields: map[string]string{"localTransport": "all"}, ceiling: dark, allowed: []string{"beta", "g1", "g4"}},
+		{name: "the kill switch", fields: map[string]string{"localTransport": "off"}, ceiling: shipped, refused: []string{"beta", "g1"}},
+		{name: "all cannot widen past the ceiling", fields: map[string]string{"localTransport": "all"}, ceiling: ceilingOff, refused: []string{"beta", "g1"}},
+		{name: "a block cannot widen past the ceiling", fields: map[string]string{"localTransport": "g1"}, ceiling: ceilingOff, refused: []string{"g1"}},
+		{name: "an empty value names no block", fields: map[string]string{"localTransport": ""}, ceiling: shipped, refused: []string{"beta", "g1"}},
+		{name: "on is not all: it names a block called on", fields: map[string]string{"localTransport": "on"}, ceiling: dark, refused: []string{"beta", "g1"}},
+		{name: "a keyword is exact", fields: map[string]string{"localTransport": "All"}, ceiling: dark, refused: []string{"beta", "g1"}},
+		{name: "a field name is exact", fields: map[string]string{"localtransport": "all"}, ceiling: dark, refused: []string{"beta", "g1"}},
+		{name: "other ceilings ignore it", fields: map[string]string{"localTransport": "all"}, ceiling: handling, refused: []string{"beta", "g1"}},
+		{name: "other ceilings ignore it with moves", fields: map[string]string{"localTransport": "all"}, ceiling: connectMoveTestCeiling(), refused: []string{"beta", "g1"}},
+	}
+	for _, c := range cases {
+		control := NarrowConnectMoveControl(c.fields, c.ceiling)
+		for _, block := range c.allowed {
+			if !control.LocalTransportAllows(block) {
+				t.Errorf("%s: block %s refused, want allowed", c.name, block)
+			}
+		}
+		for _, block := range c.refused {
+			if control.LocalTransportAllows(block) {
+				t.Errorf("%s: block %s allowed, want refused", c.name, block)
+			}
+		}
+	}
+	// the switch changes nothing the mover or the handlers read
+	both := connectMoveTestCeiling()
+	both.EnableTransportDelay = true
+	both.EnableLocalTransport = true
+	moves := NarrowConnectMoveControl(map[string]string{"mode": "on", "localTransport": "off"}, both)
+	if moves.Mode != ConnectMoveModeOn || moves.MaxPerMinute != 120 || moves.Tolerance != 0.10 || !moves.DrainMoves || !moves.TransportDelay {
+		t.Errorf("local transport off changed another control: %+v", moves)
+	}
+}
+
 // Whatever the control holds, the effective control is never wider than the
 // code: no mode past EnableMove, no rate above the code cap, no band narrower
 // than the code band, no drain moves past EnableDrainMoves.
