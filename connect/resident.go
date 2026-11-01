@@ -955,7 +955,7 @@ func newExchange(
 	if settings.KeyEventDelivery.Enabled {
 		// one shared key-event subscriber per exchange (PEERSSTREAMS2.md §5.1):
 		// residents register their listeners with it in `Resident.Run`
-		exchange.keyEventSubscriber = newKeyEventSubscriber(cancelCtx, &settings.KeyEventDelivery)
+		exchange.keyEventSubscriber = newKeyEventSubscriber(cancelCtx, &settings.KeyEventDelivery, settings.EnableStuckProviderRecycle)
 		exchange.keyEventSubscriber.SetClientRemoved(exchange.handleClientRemoved)
 	}
 	exchange.contractOriginNotifications = model.NewContractOriginNotifications(cancelCtx, model.DefaultContractOriginNotificationSettings())

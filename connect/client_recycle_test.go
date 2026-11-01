@@ -94,6 +94,28 @@ func TestStuckProviderRecycleShipsDark(t *testing.T) {
 	}
 }
 
+// Only an exchange with the recycle ceiling on subscribes the recycle flags'
+// channel: every pattern is matched against every keyspace notification on
+// every master, so a dark exchange, and alt's, must not add one.
+func TestKeyEventSubscriberSubscribesRecycleFlagsOnlyUnderTheCeiling(t *testing.T) {
+	recyclePattern := model.ClientRecycleKeyEventPattern(3)
+	off := (&keyEventSubscriber{clientRecyclePattern: false}).patterns(3)
+	on := (&keyEventSubscriber{clientRecyclePattern: true}).patterns(3)
+	for _, pattern := range off {
+		if pattern == recyclePattern {
+			t.Fatal("a subscriber without the ceiling subscribes the recycle flags")
+		}
+	}
+	if len(on) != len(off)+1 || on[len(on)-1] != recyclePattern {
+		t.Fatalf("a subscriber with the ceiling has patterns %v, want %v and the recycle flags", on, off)
+	}
+	for i, pattern := range off {
+		if on[i] != pattern {
+			t.Fatalf("the ceiling changed pattern %d: %s, want %s", i, on[i], pattern)
+		}
+	}
+}
+
 // The switch follows the control for its own block, keeps its last value
 // through a failed read, and sets the enabled gauge with it.
 func TestStuckProviderRecycleControlReadsTheSwitch(t *testing.T) {
@@ -334,6 +356,9 @@ func TestExchangeRecyclesReportedProviderOnItsBlock(t *testing.T) {
 		if testutil.ToFloat64(stuckProviderRecycleEnabledGauge) != 1 {
 			t.Fatal("the enabled gauge is off")
 		}
+		if !env.exchange.keyEventSubscriber.clientRecyclePattern {
+			t.Fatal("an exchange with the ceiling on does not subscribe the recycle flags")
+		}
 
 		reported := connectClientRecycleTestClient(ctx, t, env, "reported provider")
 		defer reported.close()
@@ -438,6 +463,9 @@ func TestExchangeIgnoresRecycleWhileSwitchOff(t *testing.T) {
 				}
 				if c.mutate != nil && env.exchange.stuckProviderRecycle != nil {
 					t.Fatal("an exchange with the ceiling off has a recycle switch")
+				}
+				if subscribed := env.exchange.keyEventSubscriber.clientRecyclePattern; subscribed != (c.mutate == nil) {
+					t.Fatalf("recycle flags subscribed=%t with the ceiling on=%t", subscribed, c.mutate == nil)
 				}
 
 				reported := connectClientRecycleTestClient(ctx, t, env, "reported provider")
