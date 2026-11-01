@@ -1394,6 +1394,41 @@ func DeferNetworkExtenderMeasurementCertRenewal(ctx context.Context, certId serv
 	})
 }
 
+// PostponeNetworkExtenderMeasurementCertRenewal puts the next renewal of a
+// certificate at renewTime without counting a failure (C6, amendment 24). The
+// issuance task does so with a due certificate it may not renew: its extender
+// may not be measured now, or it is for another zone's name. Left due, such a
+// certificate would come back at the head of every renewal read
+// (GetNetworkExtenderMeasurementCertsForRenewal) until it expired. Only a
+// certificate that is live at `now` and not renewed is postponed; false for
+// one renewed, withdrawn or expired meanwhile, which is left as it is.
+func PostponeNetworkExtenderMeasurementCertRenewal(
+	ctx context.Context,
+	certId server.Id,
+	renewTime time.Time,
+	now time.Time,
+) (postponed bool) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		tag := server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			UPDATE network_extender_measurement_cert
+			SET renew_time = $2
+			WHERE
+				cert_id = $1 AND
+				withdraw_time IS NULL AND
+				renewed_time IS NULL AND
+				$3 < not_after
+			`,
+			certId,
+			renewTime.UTC(),
+			now.UTC(),
+		))
+		postponed = tag.RowsAffected() == 1
+	})
+	return
+}
+
 // ReopenExpiredNetworkExtenderMeasurements puts an issued request whose
 // certificate ran out un-renewed back in the queue, and returns how many. A
 // renewal that keeps failing ends when the certificate expires, since only a

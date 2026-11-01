@@ -277,16 +277,32 @@ func revokeExtenderMeasurementCerts(
 	}
 }
 
+const (
+	// How long the renewal of a due certificate is put off when the pass may
+	// not renew it: its extender may not be measured now, or it is for
+	// another zone's name (C6, amendment 24). A certificate falls due with a
+	// third of its lifetime to run, so once its extender may be measured
+	// again its renewal waits at most this long, and only one with less than
+	// this left runs out first.
+	ExtenderMeasurementRenewalPostponeTimeout = 1 * time.Hour
+)
+
 // Renews the live certificates that are due (C6): two thirds of the way
 // through their lifetime, since the CA's renewal information is not read. A
 // renewal reuses the stored request -- the extender's latest when that is for
 // the same name, so a key the extender rotated is followed, else the
 // certificate's own -- and is a renewal to the CA too, outside the weekly cap
 // (C7). A certificate of an extender that may not be measured now, or that is
-// for another zone's name, is not renewed. One of an extender that is not
-// active is not read (model.GetNetworkExtenderMeasurementCertsForRenewal): it
-// is renewed when the extender comes back within the grace, and withdrawn by
-// the dns chain when it does not (amendment 23).
+// for another zone's name, is not renewed, and its renewal is put off by
+// ExtenderMeasurementRenewalPostponeTimeout without counting a failure
+// (amendment 24). A tcp port moved off the measurement port, the loss of the
+// extender's public inbound address and a change of zone withdraw nothing
+// (C9), so left due, such certificates would come back at the head of every
+// read until they expired, and enough of them could fill its limit and keep
+// every serving extender's renewal from being read. One of an extender that is
+// not active is not read (model.GetNetworkExtenderMeasurementCertsForRenewal):
+// it is renewed when the extender comes back within the grace, and withdrawn
+// by the dns chain when it does not (amendment 23).
 func renewExtenderMeasurementCerts(
 	ctx context.Context,
 	config *controller.ExtenderConfig,
@@ -304,11 +320,24 @@ func renewExtenderMeasurementCerts(
 			return
 		}
 		cert := target.Cert
+		// one this pass may not renew is put off rather than left due, where
+		// every pass would read it first until it expired (amendment 24)
+		postpone := func() {
+			model.PostponeNetworkExtenderMeasurementCertRenewal(
+				ctx,
+				cert.CertId,
+				now.Add(ExtenderMeasurementRenewalPostponeTimeout),
+				now,
+			)
+		}
 		if _, reason := controller.ExtenderMeasurementEligibleAddresses(target.Extender, target.Addresses); reason != "" {
+			postpone()
 			continue
 		}
 		names := []string{controller.ExtenderMeasurementName(cert.ExtenderId, measurementZone)}
 		if !slices.Equal(cert.Names, names) {
+			// a certificate for another zone's name
+			postpone()
 			continue
 		}
 		if !mayOrder() {
