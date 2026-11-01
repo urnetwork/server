@@ -51,13 +51,18 @@ func ScheduleRemoveOldExtenderLatencies(clientSession *session.ClientSession, tx
 	)
 }
 
-// Removes the attestations older than the latency report's retention.
+// Removes the attestations older than the latency report's retention, and the
+// gated tier's release ledger rows past the release policy's longest window.
 func RemoveOldExtenderLatencies(
 	_ *RemoveOldExtenderLatenciesArgs,
 	clientSession *session.ClientSession,
 ) (*RemoveOldExtenderLatenciesResult, error) {
-	minCreateTime := server.NowUtc().Add(-controller.DefaultExtenderLatencyReportSettings().Retention)
+	now := server.NowUtc()
+	minCreateTime := now.Add(-controller.DefaultExtenderLatencyReportSettings().Retention)
 	removedCount := model.RemoveOldNetworkExtenderLatencies(clientSession.Ctx, minCreateTime)
+	// the gated tier's release ledger, past the release policy's longest window;
+	// its deleted rows are counted by table
+	model.RemoveExpiredNetworkExtenderReleases(clientSession.Ctx, now.Add(-model.NetworkExtenderReleaseRetention))
 	return &RemoveOldExtenderLatenciesResult{
 		RemovedCount: removedCount,
 	}, nil

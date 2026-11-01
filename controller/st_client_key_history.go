@@ -125,6 +125,9 @@ func (self *stClientKeyAuthorityOwner) readBoundary(ctx context.Context, request
 // Called directly by the existing authenticated ClientKey control dispatch.
 // Public publication failure does not discard the committed signed generation;
 // the exact same bytes are retried by this API and by observation capture.
+// With remote storage the registration returns once the generation is
+// committed, and the owner's bounded writer publishes it
+// (stClientKeyEvidenceWriter).
 func StRegisterClientKey(ctx context.Context, clientID server.Id, publicKey []byte) error {
 	return StRegisterClientKeyForDomain(ctx, clientID, publicKey, nil)
 }
@@ -165,11 +168,11 @@ func StRegisterClientKeyForDomain(ctx context.Context, clientID server.Id, publi
 	if err != nil || operator.RootSigner != crypto.PubkeyToAddress(owner.rootKey.PublicKey) {
 		return errors.Join(errors.New("client-key registration signer differs from the actual operator version"), err)
 	}
-	record, err := model.StoreStClientKeyRegistration(operationCtx, model.StClientKeyRegistrationInput{Domain: owner.domain, DeploymentID: owner.deploymentID, ClientID: clientID, PublicKey: publicKey, Boundary: boundary, RootKey: owner.rootKey, ArtifactKey: owner.artifactKey, CreatedAt: server.NowUtc()})
+	record, unchanged, err := model.StoreStClientKeyRegistrationReportingRetry(operationCtx, model.StClientKeyRegistrationInput{Domain: owner.domain, DeploymentID: owner.deploymentID, ClientID: clientID, PublicKey: publicKey, Boundary: boundary, RootKey: owner.rootKey, ArtifactKey: owner.artifactKey, CreatedAt: server.NowUtc()})
 	if err != nil {
 		return err
 	}
-	err = reservation.publish(operationCtx, owner.store, record.EvidenceBytes, record.EvidenceHash)
+	err = reservation.publish(operationCtx, owner.store, record.EvidenceBytes, record.EvidenceHash, unchanged)
 	return errors.Join(err, operationCtx.Err())
 }
 

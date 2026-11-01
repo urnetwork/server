@@ -107,33 +107,42 @@ func stClientKeyHistoryRecordAllowanceBytes(record *StClientKeyHistoryRecord, re
 // Exact retries reuse the original signed record, including creation metadata.
 // Only pure encoding/signing happens inside the DB transaction; external blob
 // callbacks and Redis projection cannot retain a row lock through their exit.
-func StoreStClientKeyRegistration(ctx context.Context, input StClientKeyRegistrationInput) (result *StClientKeyHistoryRecord, resultErr error) {
+func StoreStClientKeyRegistration(ctx context.Context, input StClientKeyRegistrationInput) (*StClientKeyHistoryRecord, error) {
+	result, _, err := StoreStClientKeyRegistrationReportingRetry(ctx, input)
+	return result, err
+}
+
+// StoreStClientKeyRegistration, also reporting an exact retry: unchanged is
+// true when the client's current generation already registered this key and
+// was returned as it is. That generation's evidence went to public storage
+// when it was created, so it is almost always stored already.
+func StoreStClientKeyRegistrationReportingRetry(ctx context.Context, input StClientKeyRegistrationInput) (result *StClientKeyHistoryRecord, unchanged bool, resultErr error) {
 	if ctx == nil || input.ClientID == (server.Id{}) || len(input.PublicKey) != 0 && len(input.PublicKey) != 32 || input.CreatedAt.IsZero() || input.RootKey == nil || input.ArtifactKey == nil {
-		return nil, errors.New("client-key registration mutation owner is incomplete")
+		return nil, false, errors.New("client-key registration mutation owner is incomplete")
 	}
 	if err := errors.Join(ctx.Err(), input.Domain.Validate(), input.Boundary.Validate()); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if sha256.Sum256([]byte(input.DeploymentID)) != input.Domain.DeploymentIDHash {
-		return nil, errors.New("client-key registration deployment differs from its namespace")
+		return nil, false, errors.New("client-key registration deployment differs from its namespace")
 	}
 	input.PublicKey = bytes.Clone(input.PublicKey)
 	rootKey, err := ownStClientKeySigner(input.RootKey)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	artifactKey, err := ownStClientKeySigner(input.ArtifactKey)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	domainHash, err := input.Domain.Digest()
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	var publicKey [32]byte
 	copy(publicKey[:], input.PublicKey)
 	if len(input.PublicKey) != 0 && publicKey == ([32]byte{}) {
-		return nil, errors.New("client-key registration cannot publish the zero key")
+		return nil, false, errors.New("client-key registration cannot publish the zero key")
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -145,11 +154,11 @@ func StoreStClientKeyRegistration(ctx context.Context, input StClientKeyRegistra
 		}
 		resultErr = errors.Join(resultErr, ctx.Err())
 		if resultErr != nil {
-			result = nil
+			result, unchanged = nil, false
 		}
 	}()
 	server.Tx(ctx, func(tx server.PgTx) {
-		result = nil
+		result, unchanged = nil, false
 		// The client's custody lock serializes first insertion, rotations and
 		// work owner retention. The client row's lock only keeps the client
 		// active until commit: deactivation and the DELETE whose trigger
@@ -187,7 +196,7 @@ func StoreStClientKeyRegistration(ctx context.Context, input StClientKeyRegistra
 			}
 			if prior.Registration.Domain == input.Domain {
 				if prior.Registration.Present == (len(input.PublicKey) != 0) && prior.Registration.PublicKey == publicKey {
-					result = &prior
+					result, unchanged = &prior, true
 					return
 				}
 				priorRegistration = &prior.Registration
@@ -242,9 +251,9 @@ func StoreStClientKeyRegistration(ctx context.Context, input StClientKeyRegistra
 		result = &StClientKeyHistoryRecord{Registration: registration, RegistrationBytes: registrationBytes, EvidenceHash: evidenceHash, EvidenceBytes: evidenceBytes}
 	}, server.TxReadCommitted)
 	if result == nil {
-		return nil, errors.New("client-key registration transaction lost its completion result")
+		return nil, false, errors.New("client-key registration transaction lost its completion result")
 	}
-	return result, ctx.Err()
+	return result, unchanged, ctx.Err()
 }
 
 // Reads the exact requested policy segment from one repeatable-read snapshot.

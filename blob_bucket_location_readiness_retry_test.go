@@ -20,6 +20,7 @@ import (
 
 // Response settings are copied before the synthetic peer accepts requests.
 type blobReadinessTestConfiguration struct {
+	region                 string
 	objectLock             string
 	versioning             string
 	replicationStatus      string
@@ -109,7 +110,7 @@ func newBlobReadinessRetryFixture(t *testing.T, location func(int) int, config *
 	t.Cleanup(peer.Close)
 	store, err := NewBlobStore(&BlobStoreConfig{
 		Authority: strings.TrimPrefix(peer.URL, "http://"), Bucket: "synthetic-readiness", Prefix: "synthetic",
-		AccessKey: "synthetic-access", SecretKey: "synthetic-secret",
+		AccessKey: "synthetic-access", SecretKey: "synthetic-secret", Region: settings.region,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -128,8 +129,8 @@ func (self *blobReadinessRetryFixture) snapshot() ([]string, int) {
 	return append([]string(nil), self.requests...), self.mutations
 }
 
-// One cold throttle warms the exact startup client, then every protection
-// check still runs; repeated checks use its SDK location cache without I/O.
+// One cold throttle warms the exact startup client, then all protection reads
+// still run. Default proof caching preserves a live HEAD on the next check.
 func TestBlobStoreRetentionReadinessBucketLocationThrottleRecovers(t *testing.T) {
 	fixture := newBlobReadinessRetryFixture(t, func(attempt int) int {
 		if attempt == 1 {
@@ -157,10 +158,55 @@ func TestBlobStoreRetentionReadinessBucketLocationThrottleRecovers(t *testing.T)
 		proof.ObjectLock != "COMPLIANCE" || !proof.Versioning || !reflect.DeepEqual(proof.ReplicationTargets, []string{"arn:aws:s3:::synthetic-backup"}) || ctx.Err() != nil {
 		t.Fatalf("recovered startup protection=%+v error=%v", proof, err)
 	}
-	wanted = append(wanted, "bucket:head", "object-lock", "versioning", "replication", "replication-check")
+	wanted = append(wanted, "bucket:head")
 	requests, mutations = fixture.snapshot()
 	if !reflect.DeepEqual(requests, wanted) || mutations != 0 {
 		t.Fatalf("cached startup requests=%v mutations=%d", requests, mutations)
+	}
+}
+
+// A configured region bypasses discovery even when a location lookup would
+// throttle. The default proof cache still requires a live HEAD on every check.
+func TestBlobStoreRetentionReadinessPinnedRegionAvoidsDiscovery(t *testing.T) {
+	fixture := newBlobReadinessRetryFixture(t, func(int) int { return http.StatusTooManyRequests }, &blobReadinessTestConfiguration{
+		region: DefaultBlobRegion, objectLock: "Enabled", versioning: "Enabled", replicationStatus: "Enabled",
+		replicationTarget: "arn:aws:s3:::synthetic-backup", replicationCheckStatus: http.StatusOK,
+	})
+	fixture.store.bucketLocationRetry.wait = func(context.Context, time.Duration) error {
+		t.Error("pinned region entered location retry backoff")
+		return errors.New("unexpected synthetic retry")
+	}
+	if err := fixture.store.CheckRetention(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	proof, err := fixture.store.CheckProtection(t.Context())
+	if err != nil || proof == nil || proof.ObjectLock != "COMPLIANCE" || !proof.Versioning ||
+		!reflect.DeepEqual(proof.ReplicationTargets, []string{"arn:aws:s3:::synthetic-backup"}) {
+		t.Fatalf("pinned-region protection=%+v error=%v", proof, err)
+	}
+	requests, mutations := fixture.snapshot()
+	wanted := []string{"bucket:head", "object-lock", "versioning", "replication", "replication-check", "bucket:head"}
+	if !reflect.DeepEqual(requests, wanted) || mutations != 0 {
+		t.Fatalf("pinned-region requests=%v mutations=%d", requests, mutations)
+	}
+}
+
+// The sibling owned by a writer's retry policy must not inherit primary-store
+// discovery recovery: even an unpinned cold location is attempted only once.
+func TestBlobStoreRetentionReadinessSingleAttemptKeepsOneLocationAttempt(t *testing.T) {
+	fixture := newBlobReadinessRetryFixture(t, func(int) int { return http.StatusTooManyRequests }, nil)
+	single := SingleAttemptBlobStore(fixture.store).(*minioBlobStore)
+	if single == fixture.store || single.bucketLocationRetry != nil || single.protection != fixture.store.protection {
+		t.Fatal("single-attempt sibling changed retry ownership or protection-cache identity")
+	}
+	err := single.CheckRetention(t.Context())
+	var response minio.ErrorResponse
+	if err == nil || !errors.As(err, &response) || response.StatusCode != http.StatusTooManyRequests || response.Code != "TooManyRequests" {
+		t.Fatalf("single-attempt startup lost its fail-closed cause: %v", err)
+	}
+	requests, mutations := fixture.snapshot()
+	if !reflect.DeepEqual(requests, []string{"location:429"}) || mutations != 0 {
+		t.Fatalf("single-attempt requests=%v mutations=%d", requests, mutations)
 	}
 }
 

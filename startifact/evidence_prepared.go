@@ -79,20 +79,27 @@ func (self *Published) storedKeys() []string {
 // Every route executes its immutable create and exact winner readback using
 // one private synced carrier. Staging the same bytes again for the history
 // route adds a redundant synchronous disk flush to every publication.
-func (self *PreparedEvidence) Publish(ctx context.Context, store server.BlobStore) (result *Published, resultErr error) {
+func (self *PreparedEvidence) Publish(ctx context.Context, store server.BlobStore) (*Published, error) {
+	published, _, err := self.publish(ctx, store)
+	return published, err
+}
+
+// Publish, also reporting whether this publication created any route; false
+// means every route already held exactly these bytes.
+func (self *PreparedEvidence) publish(ctx context.Context, store server.BlobStore) (result *Published, created bool, resultErr error) {
 	if ctx == nil {
-		return nil, errors.New("evidence publication context is missing")
+		return nil, false, errors.New("evidence publication context is missing")
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	published, err := self.publication(store)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	file, err := os.CreateTemp("", "urnetwork-st-artifact-*.json")
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	path := file.Name()
 	defer func() {
@@ -101,35 +108,79 @@ func (self *PreparedEvidence) Publish(ctx context.Context, store server.BlobStor
 		}
 		resultErr = errors.Join(resultErr, os.Remove(path), ctx.Err())
 		if resultErr != nil {
-			result = nil
+			result, created = nil, false
 		}
 	}()
 	if err := file.Chmod(0o600); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if _, err := file.Write(self.encoded); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if err := file.Sync(); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	closeErr := file.Close()
 	file = nil
 	if closeErr != nil {
-		return nil, closeErr
+		return nil, false, closeErr
 	}
 	for _, key := range published.storedKeys() {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, false, err
 		}
-		if err := putImmutableFromFile(ctx, store, key, path, self.encoded); err != nil {
-			return nil, err
+		routeCreated, err := putImmutableFromFile(ctx, store, key, path, self.encoded)
+		if err != nil {
+			return nil, false, err
+		}
+		created = created || routeCreated
+	}
+	return published, created, ctx.Err()
+}
+
+// Reads every stored route back before writing anything. stored is true only
+// when every route already holds exactly these bytes; a route that holds no
+// object ends the check with stored false and no error, and one that holds
+// other bytes is an ImmutableConflictError. The readback is the same exact
+// comparison a publication ends with, so a stored result needs no create.
+func (self *PreparedEvidence) readStored(ctx context.Context, store server.BlobStore) (stored bool, resultErr error) {
+	if ctx == nil {
+		return false, errors.New("evidence verification context is missing")
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	published, err := self.publication(store)
+	if err != nil {
+		return false, err
+	}
+	for _, key := range published.storedKeys() {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		reader, err := store.Get(ctx, key)
+		if err != nil {
+			if server.IsBlobNotFound(err) {
+				return false, nil
+			}
+			return false, err
+		}
+		equal, readErr := compareArtifactReader(ctx, reader, self.encoded)
+		closeErr := reader.Close()
+		if readErr != nil && server.IsBlobNotFound(readErr) {
+			return false, ctx.Err()
+		}
+		if err := errors.Join(readErr, closeErr); err != nil {
+			return false, err
+		}
+		if !equal {
+			return false, &ImmutableConflictError{Key: key}
 		}
 	}
-	return published, ctx.Err()
+	return true, ctx.Err()
 }
 
 // Verify receipt identity and independently read every complete stored route.

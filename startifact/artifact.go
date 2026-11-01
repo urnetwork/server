@@ -128,28 +128,41 @@ func putImmutable(ctx context.Context, store server.BlobStore, key string, b []b
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return putImmutableFromFile(ctx, store, key, path, b)
+	_, err = putImmutableFromFile(ctx, store, key, path, b)
+	return err
+}
+
+// An immutable key already holds other bytes. No retry can repair it.
+type ImmutableConflictError struct {
+	Key string
+}
+
+func (self *ImmutableConflictError) Error() string {
+	return fmt.Sprintf("immutable artifact key %s already contains different bytes", self.Key)
 }
 
 // A caller may retain one fully written, synced source across immutable
 // routes. Each route still owns its conditional write and complete readback.
-func putImmutableFromFile(ctx context.Context, store server.BlobStore, key, path string, b []byte) error {
-	if _, err := store.PutIfAbsent(ctx, key, path, "application/json"); err != nil {
-		return fmt.Errorf("create immutable artifact key: %w", err)
+// created is false when the conditional write found the key already taken
+// and the readback proved it holds exactly these bytes.
+func putImmutableFromFile(ctx context.Context, store server.BlobStore, key, path string, b []byte) (created bool, resultErr error) {
+	created, err := store.PutIfAbsent(ctx, key, path, "application/json")
+	if err != nil {
+		return false, fmt.Errorf("create immutable artifact key: %w", err)
 	}
 	reader, err := store.Get(ctx, key)
 	if err != nil {
-		return err
+		return false, err
 	}
 	equal, readErr := compareArtifactReader(ctx, reader, b)
 	closeErr := reader.Close()
 	if err := errors.Join(readErr, closeErr); err != nil {
-		return err
+		return false, err
 	}
 	if !equal {
-		return fmt.Errorf("immutable artifact key %s already contains different bytes", key)
+		return false, &ImmutableConflictError{Key: key}
 	}
-	return nil
+	return created, nil
 }
 
 func ContentKey(store server.BlobStore, hash string) (string, error) {

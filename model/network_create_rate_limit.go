@@ -77,7 +77,18 @@ func CheckNetworkCreateRateLimit(
 	return nil
 }
 
-// RemoveExpiredNetworkCreateAttempts cleans up attempts older than the window.
-func RemoveExpiredNetworkCreateAttempts(ctx context.Context, minTime time.Time) {
-	server.RemoveExpiredNetworkCreateIpRateLimitAttempts(ctx, minTime)
+// Attempts are kept twice the window that counts them (NetworkCreateDailyWindow).
+const NetworkCreateAttemptRetention = 2 * NetworkCreateDailyWindow
+
+var networkCreateAttemptRetention = newTimeOrderedRetention(
+	RetentionTableNetworkCreateAttempt,
+	"network_create_attempt_id",
+	"create_time",
+)
+
+// RemoveExpiredNetworkCreateAttempts removes the attempts older than minTime,
+// oldest first, in bounded batches for at most retentionRunBudget.
+func RemoveExpiredNetworkCreateAttempts(ctx context.Context, minTime time.Time) (removedCount int64) {
+	removedCount, _ = networkCreateAttemptRetention.RemoveBefore(ctx, minTime, retentionBatchSize, time.Now().Add(retentionRunBudget))
+	return
 }

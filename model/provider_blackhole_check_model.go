@@ -549,18 +549,19 @@ func GetProviderBlackholeCheckDue(
 	return clientIds
 }
 
+// A check is read for ProviderBlackholeCheckMaxAge (8 hours). A provider whose
+// check is deleted is due again at once, as one never checked
+// (getProviderBlackholeCheckDueWithQuery), so a week past its check a row
+// holds only a stale failure streak.
+const ProviderBlackholeCheckRetention = 7 * 24 * time.Hour
+
+var providerBlackholeCheckRetention = newIndexedRetention(RetentionTableProviderBlackholeCheck, "client_id", "checked_at")
+
 // RemoveExpiredProviderBlackholeChecks drops checks older than minCheckedAt, so
 // the table tracks the live population rather than growing without bound as
-// providers come and go.
-func RemoveExpiredProviderBlackholeChecks(ctx context.Context, minCheckedAt time.Time) {
-	server.Tx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-			DELETE FROM provider_blackhole_check
-			WHERE checked_at < $1
-			`,
-			minCheckedAt.UTC(),
-		))
-	})
+// providers come and go: oldest first, in bounded batches for at most
+// retentionRunBudget, through provider_blackhole_check_checked_at.
+func RemoveExpiredProviderBlackholeChecks(ctx context.Context, minCheckedAt time.Time) (removedCount int64) {
+	removedCount, _ = providerBlackholeCheckRetention.RemoveBefore(ctx, minCheckedAt, retentionBatchSize, time.Now().Add(retentionRunBudget))
+	return
 }
