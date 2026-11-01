@@ -1215,7 +1215,8 @@ func TestProviderIntentExemptIndexRebuiltPastItsAge(t *testing.T) {
 
 // An index without exempt entries holds only `#ready`, which no sync writes, so
 // the counts that read it keep its ttl armed: it does not expire a day after
-// its build and become the first key a volatile-ttl eviction takes.
+// its build, and its ttl does not run down toward the short ones a volatile-ttl
+// eviction prefers among the keys it samples.
 func TestProviderIntentExemptIndexTtlRearmedByCounts(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
@@ -1429,5 +1430,88 @@ func TestProviderIntentExemptScriptsRunBySha(t *testing.T) {
 				t.Fatalf("%s: %d EVALSHA calls for 8 calls", c.name, evalShaCount)
 			}
 		}
+	})
+}
+
+// The production count (count_clients, its build step included) and the walk,
+// both without ARGV[2] skipped, in one script:
+// {normal, exempt, path, walk normal, walk exempt}.
+var testingProviderIntentCountAndWalkLua = fmt.Sprintf(`%s
+%s
+local normal, exempt, path = count_clients(KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], KEYS[6], KEYS[7], ARGV[1], ARGV[2], ARGV[3], ARGV[4])
+local walk_normal, walk_exempt = oracle_count_clients(KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], KEYS[6], ARGV[1], ARGV[2])
+return {normal, exempt, path, walk_normal, walk_exempt}
+`, providerIntentCountLua, testingProviderIntentWalkOracleLua)
+
+func testingProviderIntentCountAndWalk(ctx context.Context, networkId server.Id, now time.Time, skipId server.Id) (counts []int64) {
+	server.Redis(ctx, func(r server.RedisClient) {
+		var err error
+		counts, err = r.Eval(
+			ctx,
+			testingProviderIntentCountAndWalkLua,
+			providerIntentKeys(networkId),
+			now.UnixMilli()+1,
+			string(skipId.Bytes()),
+			providerIntentExemptBuildLimit,
+			int64(networkPeerKeyTtl/time.Second),
+		).Int64Slice()
+		server.Raise(err)
+	})
+	return
+}
+
+// A stale entry offset by a live member without one. A writer without the
+// index removes an exempt registration and leaves its entry; a failed client,
+// live and without an entry, makes up the difference, so the counts match
+// before the skip. A slot decision skips the deciding client: taken out, it
+// leaves more live exempt entries than live registrations, and the count drops
+// the index and walks instead of counting a negative normal.
+func TestProviderIntentExemptIndexDroppedWhenTheSkipLeavesStaleEntries(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		now := server.NowUtc()
+		networkId, connectedIds := testingProviderIntentExemptNetwork(t, ctx, now)
+		failedId := server.NewId()
+		addNetworkPeerWithProvideModesLoader(ctx, networkId, &NetworkPeer{ClientId: failedId}, server.NewId(), 5*time.Minute, func() (map[ProvideMode]bool, error) {
+			return map[ProvideMode]bool{}, nil
+		})
+		normal := &ProviderIntentState{
+			Status:      ProviderIntentStatusNormal,
+			AttemptTime: now,
+			CheckTime:   now.Add(ProviderIntentAttemptAllowance),
+		}
+		testingSetProviderIntentState(t, ctx, networkId, failedId, normal, 10*time.Minute, now)
+		server.Redis(ctx, func(r server.RedisClient) {
+			err := r.ZRem(ctx, networkPeerConnectedKey(networkId), string(connectedIds[2].Bytes())).Err()
+			server.Raise(err)
+		})
+
+		// skipping the failed client: 4 live registrations, 5 live exempt entries
+		counts := testingProviderIntentCountAndWalk(ctx, networkId, now, failedId)
+		t.Logf("skipping the failed client: normal %d exempt %d (path %d), walk normal %d exempt %d", counts[0], counts[1], counts[2], counts[3], counts[4])
+		connect.AssertEqual(t, counts[2], int64(3))
+		connect.AssertEqual(t, counts[0], counts[3])
+		connect.AssertEqual(t, counts[1], counts[4])
+		connect.AssertEqual(t, testingProviderIntentExemptBuildState(ctx, networkId), "")
+
+		// the failed client's production slot decision finds the same, with the
+		// rebuilt index: it has no stale entry left to drop
+		lostCounter := providerIntentCountsCounter.WithLabelValues(providerIntentCountPathLost)
+		getNetworkConnectedClientCountsAt(ctx, networkId, now)
+		connect.AssertEqual(t, testingProviderIntentExemptBuildState(ctx, networkId), "#ready")
+		server.Redis(ctx, func(r server.RedisClient) {
+			// the stale entry again, as the writer without the index left it
+			err := r.ZAdd(ctx, providerIntentExemptKey(networkId), redis.Z{
+				Score:  float64(now.Add(5 * time.Minute).UnixMilli()),
+				Member: "c" + string(connectedIds[2].Bytes()),
+			}).Err()
+			server.Raise(err)
+		})
+		lostBefore := testutil.ToFloat64(lostCounter)
+		record, _ := getProviderIntentRecord(ctx, networkId, failedId, now)
+		result := applyProviderIntentState(ctx, networkId, failedId, record, normal, true, 1, now.Add(10*time.Minute), now)
+		connect.AssertEqual(t, result.applied, true)
+		connect.AssertEqual(t, result.overLimit, false)
+		connect.AssertEqual(t, testutil.ToFloat64(lostCounter)-lostBefore, float64(1))
 	})
 }

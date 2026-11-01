@@ -70,9 +70,12 @@
 // exempt entries than live registry entries, or a live exempt entry while one
 // of the intent keys every exempt entry needs is missing, means the index lost
 // track of its sources. The count drops the index, walks, and the next count
-// rebuilds it. The checks do not see an index that misses an entry or holds a
-// stale status, or one that lost a registry while the other registry has more
-// live members than the index has entries; the rebuild age bounds those.
+// rebuilds it. It compares before and after it takes out the skipped member,
+// whose live registration without an entry can offset a stale entry. The
+// checks do not see what is still offset: a stale entry while another live
+// member has no entry, a missing entry, a stale status, or a lost registry
+// while the other registry has more live members than the index has entries.
+// The rebuild age bounds those.
 package model
 
 import (
@@ -130,9 +133,12 @@ func providerIntentExemptKey(networkId server.Id) string {
 // sources. The count's own checks see an index that counts entries without
 // sources, not one that misses entries or holds a stale status, as one left by
 // a writer without the index (a rollout or a rollback) can. The age bounds such
-// a disagreement to an hour and a build. A rebuild costs each counted network
-// one sweep an hour, a walk only for a network above the build limit. The age
-// is measured on the redis clock (TIME), so the callers' clocks do not move it.
+// a disagreement to an hour and a build. A rebuild drops the index and sweeps
+// its registries again, one sweep per counted network an hour. No count walks
+// for a network up to the build limit; a larger one walks for the counts its
+// sweep takes, a quarter of its members each, so a network of 40 to 50
+// thousand members walks four or five counts an hour. The age is measured on
+// the redis clock (TIME), so the callers' clocks do not move it.
 const providerIntentExemptRebuildAge = time.Hour
 
 // The fewest registry members one count derives while the index builds. A
@@ -366,6 +372,10 @@ local function count_clients_indexed(index_key, pi_key, present_key, expire_key,
 				exempt_count = exempt_count - 1
 			end
 		end
+	end
+	-- a skipped member without an entry can have offset a stale entry
+	if live_count < exempt_count then
+		return false
 	end
 	return redis.call('ZCOUNT', proxy_key, live_min, '+inf') + live_count - exempt_count, exempt_count
 end
