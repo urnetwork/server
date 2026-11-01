@@ -237,7 +237,7 @@ func TestApplySchemaFixCreatesMissingIndex(t *testing.T) {
 	DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
-		const indexName = "transfer_contract_create_time"
+		const indexName = "transfer_contract_open_source_id"
 
 		indexExists := func() bool {
 			exists := false
@@ -500,8 +500,8 @@ func TestIntrospectExcludesConstraintIndexes(t *testing.T) {
 		if _, ok := snap.indexes["transfer_contract_pkey"]; ok {
 			t.Fatalf("constraint-backed transfer_contract_pkey should be excluded from the index set")
 		}
-		if _, ok := snap.indexes["transfer_contract_create_time"]; !ok {
-			t.Fatalf("plain index transfer_contract_create_time should be in the index set")
+		if _, ok := snap.indexes["transfer_contract_open_source_id"]; !ok {
+			t.Fatalf("plain index transfer_contract_open_source_id should be in the index set")
 		}
 	})
 }
