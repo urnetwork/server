@@ -606,13 +606,11 @@ func extenderActivate(
 		return refuse(err.Error())
 	}
 
-	probeCtx, probeCancel := context.WithTimeout(clientSession.Ctx, ExtenderActivateProbeTimeout)
-	defer probeCancel()
-
 	// the acceptance rule (C2a) over the real probes: the required test, then
 	// each optional carrier offered, which is left out when it does not answer
 	outcome := probeExtenderActivation(
-		probeCtx,
+		clientSession.Ctx,
+		newExtenderActivationClock(),
 		&extenderActivationProbes{
 			carrier: func(
 				ctx context.Context,
@@ -822,6 +820,27 @@ type extenderActivationProbes struct {
 	forward func(ctx context.Context) (string, error)
 }
 
+// The clock the probes of one activation run on (C2): the time each step is
+// read at, and the deadlines that bound the shared probe budget and each dns
+// port's own. Production is the real clock; a test drives a fake one, so a
+// step that takes 9.5 s, or one that waits out its budget, does so at once
+// and to the instant.
+type extenderActivationClock struct {
+	now func() time.Time
+	// context.WithDeadline on this clock: the context ends with
+	// context.DeadlineExceeded when this clock reaches the deadline
+	withDeadline func(ctx context.Context, deadline time.Time) (context.Context, context.CancelFunc)
+}
+
+// The real clock, whose readings carry the monotonic time, so a step is
+// timed by the time that passed and not by the wall clock.
+func newExtenderActivationClock() *extenderActivationClock {
+	return &extenderActivationClock{
+		now:          time.Now,
+		withDeadline: context.WithDeadline,
+	}
+}
+
 // What the probes of one activation found (C2a).
 type extenderActivationOutcome struct {
 	// why the required test failed, empty when it passed. When it is set no
@@ -854,8 +873,14 @@ type extenderActivationOutcome struct {
 // so the dns carrier always leaves quic the rest of the budget, while quic is
 // bounded only by the budget: a quic carrier that never answers, probed
 // first, would leave the dns carrier no time to answer in.
+//
+// Every step runs on the clock: the shared budget ends
+// ExtenderActivateProbeTimeout after the judging starts, and a dns port ends
+// at its own ExtenderActivateDnsPortProbeTimeout or at the end of the shared
+// budget, whichever comes first.
 func probeExtenderActivation(
-	probeCtx context.Context,
+	ctx context.Context,
+	clock *extenderActivationClock,
 	probes *extenderActivationProbes,
 	carriers []string,
 	tcpPort int,
@@ -863,6 +888,10 @@ func probeExtenderActivation(
 	dnsPorts []int,
 	ipVersion int,
 ) *extenderActivationOutcome {
+	probeDeadline := clock.now().Add(ExtenderActivateProbeTimeout)
+	probeCtx, probeCancel := clock.withDeadline(ctx, probeDeadline)
+	defer probeCancel()
+
 	if err := probes.carrier(probeCtx, connect.ExtenderConnectModeTcpTls, tcpPort); err != nil {
 		return &extenderActivationOutcome{
 			refusal: fmt.Sprintf("the %s carrier did not answer: %s", connect.ExtenderCarrierTcp, err),
@@ -907,10 +936,11 @@ func probeExtenderActivation(
 		// offers 53 and 4053 on a path that blocks 53 is still reachable on
 		// 4053, and the record must say which
 		for _, port := range dnsPorts {
-			portCtx, portCancel := context.WithTimeout(
-				probeCtx,
-				ExtenderActivateDnsPortProbeTimeout,
-			)
+			portDeadline := clock.now().Add(ExtenderActivateDnsPortProbeTimeout)
+			if probeDeadline.Before(portDeadline) {
+				portDeadline = probeDeadline
+			}
+			portCtx, portCancel := clock.withDeadline(probeCtx, portDeadline)
 			err := probes.carrier(portCtx, connect.ExtenderConnectModeDns, port)
 			portCancel()
 			if err == nil {
