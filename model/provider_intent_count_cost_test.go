@@ -1,13 +1,12 @@
-// The redis cost of a provider intent count, measured as the commands the
-// server executes for one slot decision or one count, scripts' commands
-// included. On 2026-11-01 the walk over every registry member (three commands
-// per member) saturated a redis node for one network of about 950 members.
+// The redis cost of a provider intent count, measured as the commands one slot
+// decision or one count runs. On 2026-11-01 the walk over every registry
+// member (two or three commands per member) saturated a redis node for one
+// network of about 950 members.
 package model
 
 import (
 	"context"
-	"strconv"
-	"strings"
+	"fmt"
 	"testing"
 	"time"
 
@@ -16,56 +15,41 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// The commands the redis server has executed, those run inside scripts
-// included, apart from INFO and the script calls themselves.
-func testingRedisCommandsExecuted(t testing.TB, ctx context.Context) (count int64) {
+// Runs a production script's source with its KEYS and ARGV, every redis.call
+// counted by a shim around it. Returns the commands the script ran and its
+// result. The count is the script's own: the server's commandstats would also
+// count every other client of the server, and false-fail.
+func testingCountedScript(t testing.TB, ctx context.Context, script string, keys []string, args ...any) (commands int64, result []any) {
+	counted := fmt.Sprintf(`
+local counted_calls = 0
+local counted_redis = redis
+local redis = setmetatable({
+	call = function(...)
+		counted_calls = counted_calls + 1
+		return counted_redis.call(...)
+	end,
+}, {__index = counted_redis})
+local function counted_script()
+%s
+end
+local counted_result = counted_script()
+return {counted_calls, counted_result}
+`, script)
 	server.Redis(ctx, func(r server.RedisClient) {
-		info, err := r.Info(ctx, "commandstats").Result()
-		if err != nil {
-			t.Fatalf("commandstats: %s", err)
-		}
-		for _, line := range strings.Split(info, "\n") {
-			name, stats, ok := strings.Cut(strings.TrimSpace(line), ":")
-			if !ok || !strings.HasPrefix(name, "cmdstat_") {
-				continue
-			}
-			switch strings.TrimPrefix(name, "cmdstat_") {
-			case "info", "eval", "evalsha", "eval_ro", "evalsha_ro":
-				continue
-			}
-			for _, field := range strings.Split(stats, ",") {
-				if value, ok := strings.CutPrefix(field, "calls="); ok {
-					calls, err := strconv.ParseInt(value, 10, 64)
-					if err != nil {
-						t.Fatalf("commandstats %s: %s", line, err)
-					}
-					count += calls
-				}
-			}
-		}
+		values, err := r.Eval(ctx, counted, keys, args...).Slice()
+		server.Raise(err)
+		commands = values[0].(int64)
+		result, _ = values[1].([]any)
 	})
 	return
-}
-
-// The fewest commands `measure` took over `runs` runs. Other activity on the
-// server only adds commands, so the minimum is the operation's own cost.
-func testingFewestRedisCommands(t testing.TB, ctx context.Context, runs int, measure func()) int64 {
-	fewest := int64(-1)
-	for range runs {
-		before := testingRedisCommandsExecuted(t, ctx)
-		measure()
-		commands := testingRedisCommandsExecuted(t, ctx) - before
-		if fewest < 0 || commands < fewest {
-			fewest = commands
-		}
-	}
-	return fewest
 }
 
 // The commands of one normal slot decision of a failed client (the apply that
 // runs count_clients atomically with its write) and of one network count, in
 // a network of `connectedCount` connected members and half as many provider
-// installs. Half of each are exempt intent clients with a live presence.
+// installs. Half of each are exempt intent clients with a live presence. The
+// measured calls are the production scripts with the production arguments,
+// once the network's index is complete.
 func testingProviderIntentCountCosts(t testing.TB, ctx context.Context, connectedCount int) (decisionCommands int64, countCommands int64) {
 	now := server.NowUtc()
 	networkId := server.NewId()
@@ -107,24 +91,33 @@ func testingProviderIntentCountCosts(t testing.TB, ctx context.Context, connecte
 
 	// every decision finds a free slot and rewrites the same record
 	record, _ := getProviderIntentRecord(ctx, networkId, failedId, now)
-	decisionCommands = testingFewestRedisCommands(t, ctx, 8, func() {
-		result := applyProviderIntentState(ctx, networkId, failedId, record, normal, true, 1<<20, now.Add(time.Hour), now)
-		if !result.applied || result.overLimit {
-			t.Fatalf("decision: applied=%t over_limit=%t", result.applied, result.overLimit)
+	overLimit := *normal
+	overLimit.Status = ProviderIntentStatusOverLimit
+	decisionArgs := providerIntentApplyArgs(failedId, record, normal.record(), overLimit.record(), 1<<20, normal, now.Add(time.Hour), now)
+	// the decisions build the index first, a quarter of the registries or the
+	// build limit per decision; the decision that completes the build reads
+	// the index too, so the decision after it is the one measured
+	for builds := 0; testingProviderIntentExemptBuildState(ctx, networkId) != "#ready"; builds += 1 {
+		_, result := testingCountedScript(t, ctx, providerIntentApplyLua, providerIntentKeys(networkId), decisionArgs...)
+		connect.AssertEqual(t, result[0], int64(1))
+		if 4 < builds {
+			t.Fatalf("decisions did not complete the index in %d decisions", builds)
 		}
-	})
+	}
+	decisionCommands, result := testingCountedScript(t, ctx, providerIntentApplyLua, providerIntentKeys(networkId), decisionArgs...)
+	connect.AssertEqual(t, result[0], int64(1))
+	connect.AssertEqual(t, result[2], int64(1))
 
-	countCommands = testingFewestRedisCommands(t, ctx, 8, func() {
-		normalCount, providerIntentCount := getNetworkConnectedClientCountsAt(ctx, networkId, now)
-		connect.AssertEqual(t, normalCount, connectedCount+providerCount+1-exemptCount)
-		connect.AssertEqual(t, providerIntentCount, exemptCount)
-	})
+	countCommands, result = testingCountedScript(t, ctx, providerIntentCountClientsLua, providerIntentKeys(networkId), providerIntentCountArgs(now)...)
+	connect.AssertEqual(t, result[0], int64(connectedCount+providerCount+1-exemptCount))
+	connect.AssertEqual(t, result[1], int64(exemptCount))
+	connect.AssertEqual(t, result[2], int64(1))
 	return
 }
 
-// A slot decision and a count cost the same handful of redis commands in a
+// A slot decision and a count run the same handful of redis commands in a
 // network of 49 registry members and of 1537, where the walk over every member
-// cost two or three commands per member.
+// ran two or three commands per member.
 func TestProviderIntentCountCostIndependentOfNetworkSize(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
@@ -141,8 +134,8 @@ func TestProviderIntentCountCostIndependentOfNetworkSize(t *testing.T) {
 
 		connect.AssertEqual(t, largeDecision, smallDecision)
 		connect.AssertEqual(t, largeCount, smallCount)
-		if 48 < smallDecision || 16 < smallCount {
-			t.Fatalf("redis commands per decision %d (want at most 48), per count %d (want at most 16)", smallDecision, smallCount)
+		if 48 < smallDecision || 13 < smallCount {
+			t.Fatalf("redis commands per decision %d (want at most 48), per count %d (want at most 13)", smallDecision, smallCount)
 		}
 	})
 }

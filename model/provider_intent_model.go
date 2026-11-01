@@ -578,28 +578,12 @@ func applyProviderIntentState(
 		overLimitState.Status = ProviderIntentStatusOverLimit
 		overLimitRecord = overLimitState.record()
 	}
-	presenceExpiryMs := int64(0)
-	if !presenceExpireTime.IsZero() {
-		presenceExpiryMs = presenceExpireTime.UnixMilli()
-	}
 	server.Redis(ctx, func(r server.RedisClient) {
 		values, err := providerIntentApplyScript.Run(
 			ctx,
 			r,
 			providerIntentKeys(networkId),
-			string(clientId.Bytes()),
-			expectedRecord,
-			nextRecord,
-			overLimitRecord,
-			normalLimit,
-			now.UnixMilli(),
-			// count only entries whose expiry is still in the future
-			now.UnixMilli()+1,
-			next.expireTime(now).UnixMilli(),
-			presenceExpiryMs,
-			int64(networkPeerKeyTtl/time.Second),
-			providerIntentPruneLimit,
-			providerIntentExemptBuildLimit,
+			providerIntentApplyArgs(clientId, expectedRecord, nextRecord, overLimitRecord, normalLimit, next, presenceExpireTime, now)...,
 		).Slice()
 		if err != nil {
 			panic(err)
@@ -625,6 +609,38 @@ func applyProviderIntentState(
 		}
 	})
 	return
+}
+
+// The ARGV of providerIntentApplyLua, in its order.
+func providerIntentApplyArgs(
+	clientId server.Id,
+	expectedRecord string,
+	nextRecord string,
+	overLimitRecord string,
+	normalLimit int,
+	next *ProviderIntentState,
+	presenceExpireTime time.Time,
+	now time.Time,
+) []any {
+	presenceExpiryMs := int64(0)
+	if !presenceExpireTime.IsZero() {
+		presenceExpiryMs = presenceExpireTime.UnixMilli()
+	}
+	return []any{
+		string(clientId.Bytes()),
+		expectedRecord,
+		nextRecord,
+		overLimitRecord,
+		normalLimit,
+		now.UnixMilli(),
+		// count only entries whose expiry is still in the future
+		now.UnixMilli() + 1,
+		next.expireTime(now).UnixMilli(),
+		presenceExpiryMs,
+		int64(networkPeerKeyTtl / time.Second),
+		providerIntentPruneLimit,
+		providerIntentExemptBuildLimit,
+	}
 }
 
 // Rate-limits a conflicting retry; false when the context ended.
@@ -866,10 +882,7 @@ func getNetworkConnectedClientCountsAt(ctx context.Context, networkId server.Id,
 			ctx,
 			r,
 			providerIntentKeys(networkId),
-			// count only entries whose expiry is still in the future
-			now.UnixMilli()+1,
-			int64(networkPeerKeyTtl/time.Second),
-			providerIntentExemptBuildLimit,
+			providerIntentCountArgs(now)...,
 		).Int64Slice()
 		if err != nil {
 			panic(err)
@@ -879,6 +892,16 @@ func getNetworkConnectedClientCountsAt(ctx context.Context, networkId server.Id,
 		countProviderIntentCountPath(values[2])
 	})
 	return
+}
+
+// The ARGV of providerIntentCountClientsLua, in its order.
+func providerIntentCountArgs(now time.Time) []any {
+	return []any{
+		// count only entries whose expiry is still in the future
+		now.UnixMilli() + 1,
+		int64(networkPeerKeyTtl / time.Second),
+		providerIntentExemptBuildLimit,
+	}
 }
 
 // Runs one check of a client's qualification, and returns when the next check

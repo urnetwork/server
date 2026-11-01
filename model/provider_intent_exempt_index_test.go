@@ -56,28 +56,38 @@ local function oracle_count_clients(pi_key, present_key, expire_key, connected_k
 end
 `
 
-// Advances the index build one step (ARGV[1] build limit, ARGV[2] key ttl),
-// then returns for each (live_min, skip_member) pair of ARGV[3:] the oracle's
-// normal and exempt counts and, when the index is complete, the index's (else
-// -1 and -1, and -2 and -2 when the index disagrees with its sources), and
-// last 1 when the index is complete.
+// Counts the first (live_min, skip_member) pair of ARGV[3:] as production
+// does (count_clients, with ARGV[1] build limit and ARGV[2] key ttl): one build
+// step, then the index, or the walk while the index builds or after dropping
+// it. The other pairs read the index when it is complete and the production
+// walk otherwise. Returns for each pair the oracle's normal and exempt counts,
+// the counts and the path (1 index, 2 walk, 3 walk after a drop), and last 1
+// when the index is complete.
 var testingProviderIntentExemptCheckLua = fmt.Sprintf(`%s
 %s
-local ready = build_exempt_index(KEYS[7], KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[6], ARGV[1], ARGV[2])
+local first_normal, first_exempt, first_path = count_clients(KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], KEYS[6], KEYS[7], ARGV[3], ARGV[4], ARGV[1], ARGV[2])
+local ready = redis.call('ZSCORE', KEYS[7], '#ready') ~= false
 local results = {}
 for i = 3, #ARGV, 2 do
 	local oracle_normal, oracle_exempt = oracle_count_clients(KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], KEYS[6], ARGV[i], ARGV[i + 1])
-	local index_normal, index_exempt = -1, -1
-	if ready then
-		index_normal, index_exempt = count_clients_indexed(KEYS[7], KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], KEYS[6], ARGV[i], ARGV[i + 1])
-		if index_normal == false then
-			index_normal, index_exempt = -2, -2
+	local normal, exempt, path = first_normal, first_exempt, first_path
+	if 3 < i then
+		if ready then
+			normal, exempt = count_clients_indexed(KEYS[7], KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], KEYS[6], ARGV[i], ARGV[i + 1])
+			path = 1
+			if normal == false then
+				normal, exempt, path = -1, -1, 3
+			end
+		else
+			normal, exempt = count_clients_walk(KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], KEYS[6], ARGV[i], ARGV[i + 1])
+			path = 2
 		end
 	end
 	table.insert(results, oracle_normal)
 	table.insert(results, oracle_exempt)
-	table.insert(results, index_normal)
-	table.insert(results, index_exempt)
+	table.insert(results, normal)
+	table.insert(results, exempt)
+	table.insert(results, path)
 end
 if ready then
 	table.insert(results, 1)
@@ -87,14 +97,15 @@ end
 return results
 `, providerIntentCountLua, testingProviderIntentWalkOracleLua)
 
-// One count compared: the oracle's and the index's.
+// One count compared: the oracle's and production's, with production's path.
 type testingExemptCount struct {
 	liveMin      string
 	skipMember   string
 	oracleNormal int64
 	oracleExempt int64
-	indexNormal  int64
-	indexExempt  int64
+	normal       int64
+	exempt       int64
+	path         int64
 }
 
 // A randomized history of one network's registry and provider intent writes,
@@ -118,7 +129,15 @@ type testingExemptHistory struct {
 
 	checkCount        int
 	indexedCheckCount int
-	comparedCount     int
+	// checks whose production count walked while the index built
+	walkedCheckCount int
+	comparedCount    int
+	// writes without the index under a complete index, and those after which
+	// the production count dropped the index or still equaled the walk
+	underIndexWriteCount int
+	underIndexLostCount  int
+	underIndexExactCount int
+	sourceLossCount      int
 }
 
 // A history of `memberCount` members on a new network, seeded for replay.
@@ -318,10 +337,10 @@ func (self *testingExemptHistory) dropIndex() {
 	})
 }
 
-// State written without the index, as before it existed, including states the
-// production writers never produce. The index left behind holds a stale live
-// entry and no build state, so the next build must start over.
-func (self *testingExemptHistory) writeLegacyState() {
+// Writes one registry or intent entry of a member directly, as a process
+// without the index does, including states the production writers never
+// produce.
+func (self *testingExemptHistory) writeWithoutTheIndex(pipe redis.Pipeliner) {
 	clientId := self.randomClientId()
 	member := string(clientId.Bytes())
 	nowMs := server.NowUtc().UnixMilli()
@@ -336,22 +355,32 @@ func (self *testingExemptHistory) writeLegacyState() {
 		"pendingx {}",
 		"",
 	}
+	switch self.random.IntN(7) {
+	case 0:
+		pipe.ZAdd(self.ctx, networkPeerConnectedKey(self.networkId), redis.Z{Score: randomScore(), Member: member})
+	case 1:
+		pipe.ZAdd(self.ctx, networkPeerConnectedProviderKey(self.networkId), redis.Z{Score: randomScore(), Member: member})
+	case 2:
+		pipe.ZAdd(self.ctx, providerIntentPresentKey(self.networkId), redis.Z{Score: randomScore(), Member: member})
+	case 3:
+		pipe.ZAdd(self.ctx, providerIntentExpireKey(self.networkId), redis.Z{Score: randomScore(), Member: member})
+	case 4:
+		pipe.HSet(self.ctx, providerIntentKey(self.networkId), member, records[self.random.IntN(len(records))])
+	case 5:
+		pipe.ZRem(self.ctx, providerIntentPresentKey(self.networkId), member)
+	default:
+		pipe.ZRem(self.ctx, networkPeerConnectedKey(self.networkId), member)
+	}
+}
+
+// State written without the index, as before it existed. The index left
+// behind holds a stale live entry and no build state, so the next build must
+// start over.
+func (self *testingExemptHistory) writeLegacyState() {
+	nowMs := server.NowUtc().UnixMilli()
 	server.Redis(self.ctx, func(r server.RedisClient) {
 		pipe := r.TxPipeline()
-		switch self.random.IntN(6) {
-		case 0:
-			pipe.ZAdd(self.ctx, networkPeerConnectedKey(self.networkId), redis.Z{Score: randomScore(), Member: member})
-		case 1:
-			pipe.ZAdd(self.ctx, networkPeerConnectedProviderKey(self.networkId), redis.Z{Score: randomScore(), Member: member})
-		case 2:
-			pipe.ZAdd(self.ctx, providerIntentPresentKey(self.networkId), redis.Z{Score: randomScore(), Member: member})
-		case 3:
-			pipe.ZAdd(self.ctx, providerIntentExpireKey(self.networkId), redis.Z{Score: randomScore(), Member: member})
-		case 4:
-			pipe.HSet(self.ctx, providerIntentKey(self.networkId), member, records[self.random.IntN(len(records))])
-		default:
-			pipe.ZRem(self.ctx, providerIntentPresentKey(self.networkId), member)
-		}
+		self.writeWithoutTheIndex(pipe)
 		pipe.Del(self.ctx, providerIntentExemptKey(self.networkId))
 		pipe.ZAdd(self.ctx, providerIntentExemptKey(self.networkId), redis.Z{
 			Score:  float64(nowMs + time.Hour.Milliseconds()),
@@ -360,6 +389,75 @@ func (self *testingExemptHistory) writeLegacyState() {
 		_, err := pipe.Exec(self.ctx)
 		server.Raise(err)
 	})
+}
+
+// A write by a process without the index while the index stands (a rollout or
+// a rollback). The production count right after it either drops the index for
+// disagreeing with its sources and walks, or reads it, which can lag the
+// write; it never counts a negative normal. The history then ages a complete
+// index past providerIntentExemptRebuildAge, so the next count rebuilds it,
+// and starts a build in progress over.
+func (self *testingExemptHistory) writeUnderTheIndex() {
+	ready := testingProviderIntentExemptBuildState(self.ctx, self.networkId) == "#ready"
+	server.Redis(self.ctx, func(r server.RedisClient) {
+		pipe := r.TxPipeline()
+		self.writeWithoutTheIndex(pipe)
+		_, err := pipe.Exec(self.ctx)
+		server.Raise(err)
+	})
+	now := server.NowUtc()
+	oracleNormal, oracleExempt := testingProviderIntentOracleCounts(self.ctx, self.networkId, now)
+	lostCounter := providerIntentCountsCounter.WithLabelValues(providerIntentCountPathLost)
+	lostBefore := testutil.ToFloat64(lostCounter)
+	normalCount, exemptCount := getNetworkConnectedClientCountsAt(self.ctx, self.networkId, now)
+	if normalCount < 0 || exemptCount < 0 {
+		self.t.Fatalf("a count under a write without the index: normal %d exempt %d", normalCount, exemptCount)
+	}
+	if !ready {
+		self.dropIndex()
+		return
+	}
+	self.underIndexWriteCount += 1
+	if lostBefore < testutil.ToFloat64(lostCounter) {
+		self.underIndexLostCount += 1
+	}
+	if int64(normalCount) == oracleNormal && int64(exemptCount) == oracleExempt {
+		self.underIndexExactCount += 1
+	}
+	if testingProviderIntentExemptBuildState(self.ctx, self.networkId) == "#ready" {
+		testingAgeProviderIntentExemptIndex(self.t, self.ctx, self.networkId, providerIntentExemptRebuildAge+time.Minute)
+	}
+}
+
+// A registry or intent key lost while the index stands (an eviction, a DEL).
+// The production count right after it never counts a negative normal, and
+// equals the walk when an intent key was lost: every live exempt entry needs
+// all three. The history then drops the index, which no longer mirrors its
+// sources at every expiry.
+func (self *testingExemptHistory) loseSourceKey() {
+	keys := []string{
+		providerIntentKey(self.networkId),
+		providerIntentPresentKey(self.networkId),
+		providerIntentExpireKey(self.networkId),
+		networkPeerConnectedKey(self.networkId),
+		networkPeerConnectedProviderKey(self.networkId),
+	}
+	lost := self.random.IntN(len(keys))
+	server.Redis(self.ctx, func(r server.RedisClient) {
+		err := r.Del(self.ctx, keys[lost]).Err()
+		server.Raise(err)
+	})
+	now := server.NowUtc()
+	oracleNormal, oracleExempt := testingProviderIntentOracleCounts(self.ctx, self.networkId, now)
+	normalCount, exemptCount := getNetworkConnectedClientCountsAt(self.ctx, self.networkId, now)
+	if normalCount < 0 || exemptCount < 0 {
+		self.t.Fatalf("a count after losing %s: normal %d exempt %d", keys[lost], normalCount, exemptCount)
+	}
+	if lost < 3 && (int64(normalCount) != oracleNormal || int64(exemptCount) != oracleExempt) {
+		self.t.Fatalf("a count after losing %s: normal %d exempt %d, walk normal %d exempt %d", keys[lost], normalCount, exemptCount, oracleNormal, oracleExempt)
+	}
+	self.sourceLossCount += 1
+	self.dropIndex()
 }
 
 // Runs the check script for every (live_min, skip member) pair.
@@ -385,10 +483,11 @@ func (self *testingExemptHistory) counts(liveMins []string, skipMembers []string
 				skipMember:   skipMember,
 				oracleNormal: values[i],
 				oracleExempt: values[i+1],
-				indexNormal:  values[i+2],
-				indexExempt:  values[i+3],
+				normal:       values[i+2],
+				exempt:       values[i+3],
+				path:         values[i+4],
 			})
-			i += 4
+			i += 5
 		}
 	}
 	return
@@ -454,23 +553,26 @@ func (self *testingExemptHistory) check() (ready bool) {
 
 	counts, ready := self.counts(liveMins, skipMembers)
 	self.checkCount += 1
-	if !ready {
-		return
+	if ready {
+		self.indexedCheckCount += 1
 	}
-	self.indexedCheckCount += 1
+	if counts[0].path == 2 {
+		self.walkedCheckCount += 1
+	}
 	for _, count := range counts {
 		self.comparedCount += 1
-		if count.indexNormal == -2 {
+		if count.path == 3 {
 			// production writers alone never leave the index behind its sources
 			self.t.Fatalf("live_min %s skip %x: the index disagreed with its sources", count.liveMin, count.skipMember)
 		}
-		if count.indexNormal != count.oracleNormal || count.indexExempt != count.oracleExempt {
+		if count.normal != count.oracleNormal || count.exempt != count.oracleExempt {
 			self.t.Fatalf(
-				"live_min %s skip %x: index normal %d exempt %d, walk normal %d exempt %d",
+				"live_min %s skip %x: normal %d exempt %d (path %d), walk normal %d exempt %d",
 				count.liveMin,
 				count.skipMember,
-				count.indexNormal,
-				count.indexExempt,
+				count.normal,
+				count.exempt,
+				count.path,
 				count.oracleNormal,
 				count.oracleExempt,
 			)
@@ -522,6 +624,8 @@ func (self *testingExemptHistory) run(writeCount int, weights []int) {
 		self.countClients,
 		self.dropIndex,
 		self.writeLegacyState,
+		self.writeUnderTheIndex,
+		self.loseSourceKey,
 	}
 	if len(weights) != len(writes) {
 		self.t.Fatalf("%d weights for %d writes", len(weights), len(writes))
@@ -544,23 +648,32 @@ func (self *testingExemptHistory) run(writeCount int, weights []int) {
 }
 
 // Randomized histories of a small network (fewer members than a build step,
-// so a build completes in one count) through every writer: both counts agree
-// at every sampled boundary, skipped member and status.
+// so a build completes in one count) through every writer, with writes by a
+// process without the index under a complete index and lost registry and
+// intent keys: both counts agree at every sampled boundary, skipped member and
+// status.
 func TestProviderIntentExemptIndexMatchesWalk(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		for seed := uint64(1); seed <= 4; seed += 1 {
 			history := newTestingExemptHistory(t, ctx, seed, 24, providerIntentExemptBuildLimit)
-			history.run(400, []int{6, 6, 3, 1, 6, 3, 10, 6, 3, 2, 1, 2})
+			history.run(400, []int{6, 6, 3, 1, 6, 3, 10, 6, 3, 2, 1, 2, 3, 1})
 			t.Logf(
-				"seed %d: %d checks, %d with the index complete, %d counts compared",
+				"seed %d: %d checks, %d with the index complete, %d counts compared; %d writes without the index under it (%d dropped it, %d exact), %d source keys lost",
 				seed,
 				history.checkCount,
 				history.indexedCheckCount,
 				history.comparedCount,
+				history.underIndexWriteCount,
+				history.underIndexLostCount,
+				history.underIndexExactCount,
+				history.sourceLossCount,
 			)
 			if history.indexedCheckCount < history.checkCount*3/4 {
 				t.Fatalf("seed %d: the index was complete for only %d of %d checks", seed, history.indexedCheckCount, history.checkCount)
+			}
+			if history.underIndexWriteCount == 0 || history.sourceLossCount == 0 {
+				t.Fatalf("seed %d: no write without the index under it or no lost key", seed)
 			}
 		}
 	})
@@ -633,15 +746,21 @@ func TestProviderIntentExemptIndexMatchesWalkWhileBuilding(t *testing.T) {
 		history.clientIds = append(history.clientIds, legacyIds[:48]...)
 		history.clientIds = append(history.clientIds, legacyIds[len(legacyIds)-24:]...)
 
-		history.run(240, []int{6, 6, 3, 1, 6, 3, 10, 6, 1, 1, 2, 0})
+		history.run(240, []int{6, 6, 3, 1, 6, 3, 10, 6, 1, 1, 2, 0, 1, 1})
 		t.Logf(
-			"%d checks, %d with the index complete, %d counts compared",
+			"%d checks, %d with the index complete, %d whose production count walked while it built, %d counts compared",
 			history.checkCount,
 			history.indexedCheckCount,
+			history.walkedCheckCount,
 			history.comparedCount,
 		)
 		if history.indexedCheckCount == 0 || history.indexedCheckCount == history.checkCount {
 			t.Fatalf("builds never interleaved with writes: %d of %d checks complete", history.indexedCheckCount, history.checkCount)
+		}
+		// the checks' build limit is below the member count, so the production
+		// count walks while the index builds
+		if history.walkedCheckCount == 0 {
+			t.Fatalf("the production walk never ran")
 		}
 	})
 }
@@ -671,58 +790,58 @@ func testingProviderIntentExemptBuildState(ctx context.Context, networkId server
 	return
 }
 
+// Writes a network's registries and intent state as before the index existed:
+// three build limits of connected members and one of installs, at distinct
+// expiries, a third of them qualified with a live presence. Returns the members
+// and the exempt members.
+func testingProviderIntentPreIndexNetwork(ctx context.Context, now time.Time) (networkId server.Id, memberCount int, exemptCount int) {
+	networkId = server.NewId()
+	nowMs := now.UnixMilli()
+	connectedCount := 3 * providerIntentExemptBuildLimit
+	memberCount = connectedCount + providerIntentExemptBuildLimit
+	server.Redis(ctx, func(r server.RedisClient) {
+		pipe := r.TxPipeline()
+		for i := range memberCount {
+			member := string(server.NewId().Bytes())
+			registryKey := networkPeerConnectedKey(networkId)
+			if connectedCount <= i {
+				registryKey = networkPeerConnectedProviderKey(networkId)
+			}
+			// distinct expiries, as registrations written over time have
+			pipe.ZAdd(ctx, registryKey, redis.Z{Score: float64(nowMs + time.Hour.Milliseconds() + int64(i)), Member: member})
+			if i%3 == 0 {
+				pipe.ZAdd(ctx, providerIntentPresentKey(networkId), redis.Z{Score: float64(nowMs + time.Hour.Milliseconds()), Member: member})
+				pipe.ZAdd(ctx, providerIntentExpireKey(networkId), redis.Z{Score: float64(nowMs + time.Hour.Milliseconds()), Member: member})
+				pipe.HSet(ctx, providerIntentKey(networkId), member, "qualified {}")
+				exemptCount += 1
+			}
+		}
+		_, err := pipe.Exec(ctx)
+		server.Raise(err)
+	})
+	return
+}
+
 // A network with no index (its state predates it) is counted exactly from the
 // first count. Each count derives a bounded share of the registry members, a
 // quarter of them or the build limit, so the build takes a handful of counts
-// that walk; the counts after it read the index. Each count is counted by its
+// that walk; the counts after it read the index. The commands are the count
+// script's own (testingCountedScript). Each production count is counted by its
 // path.
 func TestProviderIntentExemptIndexBuildsLazilyInBoundedSteps(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
-		networkId := server.NewId()
 		now := server.NowUtc()
-		nowMs := now.UnixMilli()
 
-		connectedCount := 3 * providerIntentExemptBuildLimit
-		providerCount := providerIntentExemptBuildLimit
-		exemptCount := 0
-		server.Redis(ctx, func(r server.RedisClient) {
-			pipe := r.TxPipeline()
-			for i := range connectedCount + providerCount {
-				member := string(server.NewId().Bytes())
-				registryKey := networkPeerConnectedKey(networkId)
-				if connectedCount <= i {
-					registryKey = networkPeerConnectedProviderKey(networkId)
-				}
-				// distinct expiries, as registrations written over time have
-				pipe.ZAdd(ctx, registryKey, redis.Z{Score: float64(nowMs + time.Hour.Milliseconds() + int64(i)), Member: member})
-				if i%3 == 0 {
-					pipe.ZAdd(ctx, providerIntentPresentKey(networkId), redis.Z{Score: float64(nowMs + time.Hour.Milliseconds()), Member: member})
-					pipe.ZAdd(ctx, providerIntentExpireKey(networkId), redis.Z{Score: float64(nowMs + time.Hour.Milliseconds()), Member: member})
-					pipe.HSet(ctx, providerIntentKey(networkId), member, "qualified {}")
-					exemptCount += 1
-				}
-			}
-			_, err := pipe.Exec(ctx)
-			server.Raise(err)
-		})
-		memberCount := connectedCount + providerCount
-
-		walkCounter := providerIntentCountsCounter.WithLabelValues(providerIntentCountPathWalk)
-		indexCounter := providerIntentCountsCounter.WithLabelValues(providerIntentCountPathIndex)
-		walksBefore := testutil.ToFloat64(walkCounter)
-		indexedBefore := testutil.ToFloat64(indexCounter)
-
+		networkId, memberCount, exemptCount := testingProviderIntentPreIndexNetwork(ctx, now)
 		counts := 0
 		for {
-			before := testingRedisCommandsExecuted(t, ctx)
-			normalCount, providerIntentCount := getNetworkConnectedClientCountsAt(ctx, networkId, now)
-			commands := testingRedisCommandsExecuted(t, ctx) - before
+			commands, result := testingCountedScript(t, ctx, providerIntentCountClientsLua, providerIntentKeys(networkId), providerIntentCountArgs(now)...)
 			counts += 1
-			connect.AssertEqual(t, normalCount, memberCount-exemptCount)
-			connect.AssertEqual(t, providerIntentCount, exemptCount)
+			connect.AssertEqual(t, result[0], int64(memberCount-exemptCount))
+			connect.AssertEqual(t, result[1], int64(exemptCount))
 			state := testingProviderIntentExemptBuildState(ctx, networkId)
-			t.Logf("count %d: %d commands, build state %q", counts, commands, state)
+			t.Logf("count %d: %d commands, path %d, build state %q", counts, commands, result[2], state)
 			// a count derives at most the build limit and two more (with distinct
 			// expiries no run of equal scores adds to it), at most seven commands
 			// each, beside the walk of at most three per member
@@ -730,8 +849,10 @@ func TestProviderIntentExemptIndexBuildsLazilyInBoundedSteps(t *testing.T) {
 				t.Fatalf("count %d took %d commands", counts, commands)
 			}
 			if state == "#ready" {
+				connect.AssertEqual(t, result[2], int64(1))
 				break
 			}
+			connect.AssertEqual(t, result[2], int64(2))
 			if counts == 1 && state == "" {
 				t.Fatalf("the first count left no build state")
 			}
@@ -743,18 +864,35 @@ func TestProviderIntentExemptIndexBuildsLazilyInBoundedSteps(t *testing.T) {
 		if counts < 2 {
 			t.Fatalf("the build of %d members completed in %d count", memberCount, counts)
 		}
-		// every count before the last walked; the last completed the index and
-		// read it
-		connect.AssertEqual(t, testutil.ToFloat64(walkCounter)-walksBefore, float64(counts-1))
-		connect.AssertEqual(t, testutil.ToFloat64(indexCounter)-indexedBefore, float64(1))
+		indexedCommands, result := testingCountedScript(t, ctx, providerIntentCountClientsLua, providerIntentKeys(networkId), providerIntentCountArgs(now)...)
+		connect.AssertEqual(t, result[2], int64(1))
+		if 13 < indexedCommands {
+			t.Fatalf("a count with the index complete took %d commands", indexedCommands)
+		}
 
-		indexedCommands := testingFewestRedisCommands(t, ctx, 4, func() {
+		// the production count reports its path
+		walkCounter := providerIntentCountsCounter.WithLabelValues(providerIntentCountPathWalk)
+		indexCounter := providerIntentCountsCounter.WithLabelValues(providerIntentCountPathIndex)
+		networkId, memberCount, exemptCount = testingProviderIntentPreIndexNetwork(ctx, now)
+		walksBefore := testutil.ToFloat64(walkCounter)
+		indexedBefore := testutil.ToFloat64(indexCounter)
+		productionCounts := 0
+		for testingProviderIntentExemptBuildState(ctx, networkId) != "#ready" {
 			normalCount, providerIntentCount := getNetworkConnectedClientCountsAt(ctx, networkId, now)
+			productionCounts += 1
 			connect.AssertEqual(t, normalCount, memberCount-exemptCount)
 			connect.AssertEqual(t, providerIntentCount, exemptCount)
-		})
-		if 16 < indexedCommands {
-			t.Fatalf("a count with the index complete took %d commands", indexedCommands)
+			if 8 < productionCounts {
+				t.Fatalf("the build did not complete in %d counts", productionCounts)
+			}
+		}
+		// every count before the last walked; the last completed the index and
+		// read it
+		connect.AssertEqual(t, productionCounts, counts)
+		connect.AssertEqual(t, testutil.ToFloat64(walkCounter)-walksBefore, float64(counts-1))
+		connect.AssertEqual(t, testutil.ToFloat64(indexCounter)-indexedBefore, float64(1))
+		for range 4 {
+			getNetworkConnectedClientCountsAt(ctx, networkId, now)
 		}
 		connect.AssertEqual(t, testutil.ToFloat64(walkCounter)-walksBefore, float64(counts-1))
 		connect.AssertEqual(t, testutil.ToFloat64(indexCounter)-indexedBefore, float64(1+4))
