@@ -279,21 +279,43 @@ func DrainProberShard(ctx context.Context, key ProberShardKey) error {
 	return err
 }
 
-// The full payer index was removed; the newer unresolved-payer partial index
-// excludes disputed contracts. A bare payer/outcome predicate can therefore
-// scan the global outcome index even for an empty private shard. Constrain both
-// leading keys of the retained (open,payer_network_id,transfer_byte_count) index.
-// Keep outcome outside OFFSET 0, so a false-zero global partial index cannot
-// replace these two payer ranges. Both generated-open values are necessary:
-// disputed unresolved and unanchored zero-byte contracts still block deletion.
-// Work is scoped to this short-lived payer's history, not the global live set.
+// The contracts of one shard payer that have no outcome, read through the two
+// partial indexes that hold exactly such contracts. The generated open column
+// is dispute = false AND outcome IS NULL, so they are the union of:
+//   - the payer's undisputed ones, a range of the unresolved-payer index
+//     (transfer_contract_unresolved_payer_transfer_byte_count), keyed by payer;
+//   - the payer's disputed ones, which the dispute index
+//     (transfer_contract_dispute_partial_create_time) holds among the few open
+//     disputes of every payer.
+//
+// Neither index holds a contract once it has an outcome, so the work is the
+// payer's unresolved contracts, not its whole history: a drained shard whose
+// contracts all settled reads nothing. The full payer index was removed, and
+// the reads no longer need (open,payer_network_id,transfer_byte_count) either.
+// The first arm repeats its partial index's predicate and never names outcome
+// bare, so the global outcome index cannot replace the payer range even when
+// its statistics read a false zero. Each arm keeps its own plan behind OFFSET
+// 0. Disputed unresolved and unanchored zero-byte contracts still block
+// deletion.
 const proberShardPayerContractScopeSql = `
-	CROSS JOIN (VALUES (true), (false)) AS contract_state(open)
 	CROSS JOIN LATERAL (
-		SELECT contract_id, outcome
-		FROM transfer_contract
-		WHERE open=contract_state.open AND payer_network_id=payer_scope.network_id
-		OFFSET 0
+		(
+			SELECT contract_id, outcome
+			FROM transfer_contract
+			WHERE
+				(CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
+				payer_network_id = payer_scope.network_id
+			OFFSET 0
+		)
+		UNION ALL
+		(
+			SELECT contract_id, outcome
+			FROM transfer_contract
+			WHERE
+				dispute AND outcome IS NULL AND
+				payer_network_id = payer_scope.network_id
+			OFFSET 0
+		)
 	) AS scoped_contract
 `
 

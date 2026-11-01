@@ -110,17 +110,23 @@ live claims or shorten the remaining tasks' execution budgets.
 
 Cleanup retains unresolved contracts, including disputed and zero-byte ones,
 and retries normal settlement only when both actual final reports exist. Its
-contract reads use both `open` values of the existing full
-`transfer_contract_open_payer_network_id_transfer_byte_count` index, followed
-by exact `contract_close` primary-key reads. Verify that full index is valid
-and ready before deploying this query change; no new migration is required.
-The unresolved-payer partial index excludes disputes and cannot prove that an
-account is safe to remove.
+contract reads take the shard payer's contracts that have no outcome from the
+two partial indexes that hold exactly those: a payer range of
+`transfer_contract_unresolved_payer_transfer_byte_count` (undisputed) and a
+scan of `transfer_contract_dispute_partial_create_time` (the open disputes of
+every payer, a handful), followed by exact `contract_close` primary-key reads.
+Because the generated `open` column is `dispute = false AND outcome IS NULL`,
+the two arms are every unresolved contract of the payer. Neither index holds a
+contract once it has an outcome, so a drained shard whose contracts settled
+reads nothing. The reads no longer use
+`transfer_contract_open_payer_network_id_transfer_byte_count`; before
+2026-11 they walked both `open` values of it, which read the payer's whole
+settled history on every retry (459 ms and about 5.5M tuples per call on Main).
 
-These reads visit only the shard payer's history. Their work is proportional
-to that history, even though settlement returns at most 32 contracts per pass.
-Do not reuse them as a cheap negative check for the old shared account: its
-history may be large. A bounded diagnostic can report per-balance unsettled
+These reads visit only the payer's unresolved contracts and the global open
+disputes, even though settlement returns at most 32 contracts per pass. Do not
+reuse them as a cheap negative check for the old shared account: its
+unresolved set may be large. A bounded diagnostic can report per-balance unsettled
 escrow blockers, but absence of those blockers does not exclude unanchored
 zero-byte contracts or authorize removal of the shared identity.
 
