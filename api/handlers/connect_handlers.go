@@ -23,9 +23,9 @@ func ConnectControl(w http.ResponseWriter, r *http.Request) {
 	r, finish := router.ObserveConnectControl(r)
 	defer finish()
 	router.WrapWithInputRequireClientUnlessAnswered(
-		// before authentication (CPUOPT3 D3 owner question 1 (a)); nil here
-		// and a first call in PrepareConnectControl answers it after the
-		// signature instead (b)
+		// answers a pack of one audit before authentication; nil turns the
+		// discard off, and such a pack then authenticates, spends the client's
+		// limit and is answered by the dispatch's no-op
 		controller.DiscardConnectControl,
 		controller.PrepareConnectControl,
 		controller.ReplyConnectControl,

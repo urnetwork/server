@@ -136,10 +136,9 @@ type ConnectControlAnswer struct {
 // /connect/control. A request over its client's limit is answered with a
 // 429. Every other request counts against the limit and then may be answered
 // from the refusals recorded for it (PrepareConnectControlRefusals). A pack
-// discarded whole never gets here: the route's discard answered it before
-// authentication. To answer it after the signature instead (CPUOPT3 D3 owner
-// question 1 (b)), the handler passes no discard and this calls
-// DiscardConnectControl first.
+// the route's discard answered never gets here. With the discard off (a nil
+// discard), a pack of one audit is limited here and authenticated like any
+// other request.
 func PrepareConnectControl(ctx context.Context, clientId server.Id, connectControl *ConnectControlArgs) (*ConnectControlAnswer, bool) {
 	if limited, retryAfter := checkConnectControlLimit(ctx, clientId); limited {
 		return &ConnectControlAnswer{limited: true, retryAfter: retryAfter}, true

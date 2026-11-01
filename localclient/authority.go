@@ -256,11 +256,10 @@ func (self *Authority) ConnectControl(ctx context.Context, token string, args *c
 			return nil, ctx.Err()
 		default:
 		}
-		// A pack of only audits is answered empty before contract admission
+		// A pack of one audit is answered empty before contract admission
 		// and any credential, Redis or database read
-		// (controller/connect_control_discard.go). To answer it after the
-		// signature instead (owner question 1 (b)), this moves after a
-		// parseClaimsPreflight.
+		// (controller/connect_control_discard.go). Any other pack, more than
+		// one audit included, authenticates below.
 		if controller.DiscardConnectControlPack(args.Pack) {
 			return &connect.ConnectControlResult{}, nil
 		}

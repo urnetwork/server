@@ -33,11 +33,12 @@ package controller
 //	                                                               dispatch
 //	proxy, any other pack   all, unchanged                         none
 //
-// Under answer (b), after the signature, the api handler passes no discard
-// and PrepareConnectControl calls DiscardConnectControl first, before the
-// per-client limit; the proxy calls DiscardConnectControlPack after
-// parseClaimsPreflight. Each path then also keeps the signature, claims and
-// session checks.
+// The api handler passes DiscardConnectControl to its route's wrapper.
+// Passing nil turns the discard off: a pack of one audit then authenticates,
+// spends its client's limit and is answered by the dispatch's no-op, as every
+// other audit-only pack is. The proxy's authority calls
+// DiscardConnectControlPack directly; without that call it behaves the same
+// way.
 //
 // No bound changes for a request that does anything: the authentication
 // deadline, the intended network check's deadline, the per-client limit's
