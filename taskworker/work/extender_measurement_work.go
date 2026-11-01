@@ -2,9 +2,12 @@ package work
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"time"
+
+	"golang.org/x/crypto/acme"
 
 	"github.com/urnetwork/glog"
 
@@ -91,6 +94,45 @@ func extenderMeasurementRetryTimeout(failureCount int) time.Duration {
 		}
 	}
 	return timeout
+}
+
+// How long past the CA's Retry-After the next attempt waits (amendment 24).
+// The CA's clock and ours may differ by seconds, and a Retry-After date names
+// a whole second, so an attempt at the very moment could be refused again.
+// The issuance chain runs once a minute anyway, so the margin delays the
+// attempt by at most one pass.
+const (
+	ExtenderMeasurementRateLimitMargin = 1 * time.Minute
+)
+
+// The time of the next attempt after a failed order, renewal or revocation
+// at `now` (C5, C6, C9). A refusal under one of the CA's rate limits, a
+// rateLimited problem with a Retry-After, is tried again once the Retry-After
+// and ExtenderMeasurementRateLimitMargin have passed, sooner or later than the
+// backoff would have it: the CA says when the name, the domain or the account
+// has room again (lag.dev/ops/letsencrypt.md §5.1), and the doubling by
+// failures is only a guess at that, which can miss it by most of a day
+// (amendment 24). Any other failure, a refusal without a Retry-After among
+// them, backs off by `failureCount`, the failures before this one
+// (extenderMeasurementRetryTimeout).
+//
+// The client returns a refusal at once rather than retrying it
+// (extenderMeasurementAcmeRetryBackoff), and wraps the CA's error, so it is
+// unwrapped before acme.RateLimit reads it.
+//
+// The refusal still counts as a failure of its row, as every failure does
+// (model.DeferPendingNetworkExtenderMeasurement and the like): the count only
+// spaces the attempts the CA gives no time for, it starts over with the next
+// certificate, and a name the CA keeps refusing is one to try more rarely when
+// it then fails some other way.
+func extenderMeasurementRetryTime(err error, failureCount int, now time.Time) time.Time {
+	var acmeErr *acme.Error
+	if errors.As(err, &acmeErr) {
+		if retryAfter, ok := acme.RateLimit(acmeErr); ok && 0 < retryAfter {
+			return now.Add(retryAfter + ExtenderMeasurementRateLimitMargin)
+		}
+	}
+	return now.Add(extenderMeasurementRetryTimeout(failureCount))
 }
 
 type ExtenderMeasurementIssueArgs struct {
@@ -220,10 +262,12 @@ func revokeExtenderMeasurementCerts(
 		}
 		if err != nil {
 			glog.Errorf("[extendermeasurement]%s not revoked: %s\n", cert.CertId, err)
+			// a refusal under a rate limit waits out the CA's Retry-After, and
+			// any other failure backs off (C9, amendment 24)
 			model.DeferNetworkExtenderMeasurementCertRevocation(
 				ctx,
 				cert.CertId,
-				server.NowUtc().Add(extenderMeasurementRetryTimeout(cert.RevokeFailureCount)),
+				extenderMeasurementRetryTime(err, cert.RevokeFailureCount, server.NowUtc()),
 			)
 			result.Failed += 1
 			continue
@@ -284,10 +328,12 @@ func renewExtenderMeasurementCerts(
 		newCert, err := orderExtenderMeasurementCert(ctx, acmeClient, zone, cert.ExtenderId, names, csr, publicKey, false)
 		if err != nil {
 			glog.Errorf("[extendermeasurement]%s not renewed: %s\n", cert.CertId, err)
+			// a refusal under a rate limit waits out the CA's Retry-After, and
+			// any other failure backs off (C6, amendment 24)
 			model.DeferNetworkExtenderMeasurementCertRenewal(
 				ctx,
 				cert.CertId,
-				server.NowUtc().Add(extenderMeasurementRetryTimeout(cert.RenewFailureCount)),
+				extenderMeasurementRetryTime(err, cert.RenewFailureCount, server.NowUtc()),
 			)
 			result.Failed += 1
 			continue
@@ -385,12 +431,14 @@ func issuePendingExtenderMeasurementCerts(
 		cert, err := orderExtenderMeasurementCert(ctx, acmeClient, zone, measurement.ExtenderId, names, request.Csr, request.PublicKey, capCounted)
 		if err != nil {
 			glog.Errorf("[extendermeasurement]%s not issued: %s\n", measurement.ExtenderId, err)
+			// a refusal under a rate limit waits out the CA's Retry-After, and
+			// any other failure backs off (C5, amendment 24)
 			model.DeferPendingNetworkExtenderMeasurement(
 				ctx,
 				measurement.ExtenderId,
 				measurement.Csr,
 				err.Error(),
-				server.NowUtc().Add(extenderMeasurementRetryTimeout(measurement.FailureCount)),
+				extenderMeasurementRetryTime(err, measurement.FailureCount, server.NowUtc()),
 				server.NowUtc(),
 			)
 			result.Failed += 1

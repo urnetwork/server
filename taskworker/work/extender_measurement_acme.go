@@ -10,8 +10,10 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	mathrand "math/rand/v2"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -120,10 +122,59 @@ func newExtenderMeasurementAcme(directoryUrl string, accountKey *ecdsa.PrivateKe
 			HTTPClient: &http.Client{
 				Timeout: ExtenderMeasurementAcmeRequestTimeout,
 			},
-			UserAgent: extenderMeasurementAcmeUserAgent,
+			// a refusal under a rate limit comes back at once, not when the
+			// order's context ends (amendment 24)
+			RetryBackoff: extenderMeasurementAcmeRetryBackoff,
+			UserAgent:    extenderMeasurementAcmeUserAgent,
 		},
 		contacts: slices.Clone(contacts),
 	}
+}
+
+// The longest wait between retries of one request that names no Retry-After,
+// as in the library's default backoff.
+const (
+	extenderMeasurementAcmeMaxRetryBackoff = 10 * time.Second
+)
+
+// extenderMeasurementAcmeRetryBackoff is the client's RetryBackoff: the wait
+// before retry `n` of one request to the CA, or 0 for no retry (C5, C6, C9;
+// amendment 24).
+//
+// A request the CA refuses with 429 is not retried. The library would retry a
+// 429 itself, and its default backoff waits the Retry-After, so a refusal for
+// hours would hold the order until the order's context ends,
+// ExtenderMeasurementOrderTimeout later, and only then return the CA's error:
+// each refused order would spend five of the eight minutes a pass may start
+// orders in (ExtenderMeasurementIssueBudget). Not retried, the CA's
+// rateLimited error comes back at once with its Retry-After, and the row of
+// the order, renewal or revocation waits that out instead
+// (extenderMeasurementRetryTime, lag.dev/ops/letsencrypt.md).
+//
+// Any other response is retried as the library's default backoff retries it,
+// which is reimplemented here since the library does not export it
+// (golang.org/x/crypto/acme v0.58.0, defaultBackoff): after the response's
+// Retry-After when it has one, else after 2^(n-1) seconds up to 10, with up to
+// a second of jitter either way. A Retry-After that has already passed waits
+// the jitter alone, never nothing, which is the library's documented intent.
+func extenderMeasurementAcmeRetryBackoff(n int, _ *http.Request, response *http.Response) time.Duration {
+	if response != nil && response.StatusCode == http.StatusTooManyRequests {
+		return 0
+	}
+	jitter := time.Duration(1+mathrand.IntN(1000)) * time.Millisecond
+	if response != nil {
+		if values := response.Header.Values("Retry-After"); 0 < len(values) {
+			retryAfter := time.Duration(0)
+			if seconds, err := strconv.Atoi(values[0]); err == nil {
+				retryAfter = time.Duration(seconds) * time.Second
+			} else if date, err := http.ParseTime(values[0]); err == nil {
+				retryAfter = time.Until(date)
+			}
+			return max(retryAfter, 0) + jitter
+		}
+	}
+	n = min(max(n, 1), 30)
+	return min(time.Duration(1<<(n-1))*time.Second+jitter, extenderMeasurementAcmeMaxRetryBackoff)
 }
 
 // Makes sure the account exists. Operations create the account the CAA
