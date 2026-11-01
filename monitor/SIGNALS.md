@@ -31648,6 +31648,30 @@ handler entry/exit; it includes authentication and teardown residence and
 does not mean unique clients, authenticated users or admitted residents.
 `urnetwork_connect_exchange_active_connections` supplies finite
 inbound/outbound and transport/forward cells for established exchange owners.
+A transport whose resident is in its own process is attached in process
+instead of dialing a socket back into that process
+(connect/resident_local_transport.go, CPUOPT3 D1), so the established
+transport owners are the outbound transport sockets plus
+`urnetwork_connect_exchange_local_attachments`: one link per attached
+transport, with two pump goroutines and no socket. A block whose
+`exchange_local_transport_enabled` is 1 moves most of its transport sockets
+into that gauge, which is a population change, not a loss of owners. Exchange
+frame and byte totals are `exchange_io` plus `exchange_local`, which counts
+each in-process frame as its socket counted it.
+
+The same release adds an `op` label (`transport`, `forward`, `unknown`) to
+`urnetwork_connect_exchange_io_frames_total` and
+`urnetwork_connect_exchange_io_bytes_total`, to measure the transport share
+before any block turns in-process delivery on. Each process that starts on it
+reports series of a new identity, which every restart already does through
+its new `instance` label: the old label set ends with the old process and the
+new one starts at zero. Every dashboard query on these families (connect.json
+panels 5–10, 89 and 90; public-traffic.json panels 3 and 25) sums, or groups by
+`direction`, `kind` or `op`, so totals stay continuous across the deploy, and
+no alert or monitor probe reads them yet (§25.4 is proposed). A query that
+selects one exact pre-release label set without an aggregation would split
+into one series per `op`; wrap it in `sum`. The label triples the series of
+both families per process, to 18 each.
 Neither family is interchangeable with the resident or SDK transfer ledger.
 Require their own unique fresh same-process cells; absence is unknown, and
 an enabled, complete ledger reporting zero says only that its measured owners
@@ -47025,7 +47049,12 @@ customers receive.
 Source (exists): `urnetwork_connect_exchange_io_bytes_total` for all Connect
 traffic and `urnetwork_proxy_session_bytes_total` for hosted proxy sessions.
 Compare bytes/s from each with the median of the same 30-minute window on
-each of the previous 7 days.
+each of the previous 7 days. Connect traffic is
+`urnetwork_connect_exchange_io_bytes_total` plus
+`urnetwork_connect_exchange_local_bytes_total`: a block with in-process
+transport delivery on (§8.15) carries most transport frames without a socket,
+and the socket counter alone would fall by that share, about 60% of exchange
+frames once every block is on.
 
 - WARN `delivered-traffic-floor`: below 50% of that median for 15 minutes.
 - PAGE: below 25% for 10 minutes.
