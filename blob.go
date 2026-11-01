@@ -314,6 +314,10 @@ type BlobStoreConfig struct {
 	// Empty means log uploads are not stored (see
 	// controller.LoadFeedbackLogStore).
 	FeedbackLogBucket string
+	// Nil selects the bounded cold-location throttle recovery defaults. A non-nil
+	// value belongs to this client and can explicitly disable additional retries.
+	// This programmatic override is not read from minio.yml.
+	BucketLocationRetrySettings *BlobBucketLocationRetrySettings
 }
 
 // defaultLocalBlobRoot is the local backend's root when unset: a `blob`
@@ -481,9 +485,18 @@ func LoadBlobStoreConfig() (config *BlobStoreConfig, present bool) {
 
 // NewBlobStore builds a MinIO-backed store from config.
 func NewBlobStore(config *BlobStoreConfig) (BlobStore, error) {
+	transport, err := minio.DefaultTransport(config.Tls)
+	if err != nil {
+		return nil, err
+	}
+	retrySettings := DefaultBlobBucketLocationRetrySettings()
+	if config.BucketLocationRetrySettings != nil {
+		retrySettings = *config.BucketLocationRetrySettings
+	}
 	client, err := minio.New(config.Authority, &minio.Options{
-		Creds:  credentials.NewStaticV4(config.AccessKey, config.SecretKey, ""),
-		Secure: config.Tls,
+		Creds:     credentials.NewStaticV4(config.AccessKey, config.SecretKey, ""),
+		Secure:    config.Tls,
+		Transport: &blobBucketLocationProbeTransport{base: transport},
 	})
 	if err != nil {
 		return nil, err
@@ -493,19 +506,21 @@ func NewBlobStore(config *BlobStoreConfig) (BlobStore, error) {
 		prefix = DefaultBlobPrefix
 	}
 	return &minioBlobStore{
-		client:    client,
-		bucket:    config.Bucket,
-		prefix:    prefix,
-		authority: config.Authority,
+		client:              client,
+		bucket:              config.Bucket,
+		prefix:              prefix,
+		authority:           config.Authority,
+		bucketLocationRetry: &blobBucketLocationRetry{settings: retrySettings},
 	}, nil
 }
 
 // minioBlobStore is the MinIO implementation of BlobStore.
 type minioBlobStore struct {
-	client    *minio.Client
-	bucket    string
-	prefix    string
-	authority string
+	client              *minio.Client
+	bucket              string
+	prefix              string
+	authority           string
+	bucketLocationRetry *blobBucketLocationRetry
 }
 
 func (self *minioBlobStore) Put(ctx context.Context, key string, localPath string, contentType string) error {
@@ -549,6 +564,11 @@ func (self *minioBlobStore) PutRetained(
 	retainUntil = retainUntil.UTC()
 	if !NowUtc().Before(retainUntil) {
 		return nil, errors.New("blob retention must end in the future")
+	}
+	if self.bucketLocationRetry != nil {
+		if err := self.bucketLocationRetry.prepare(ctx, self.client, self.bucket); err != nil {
+			return nil, err
+		}
 	}
 	upload, err := self.client.FPutObject(ctx, self.bucket, key, localPath, minio.PutObjectOptions{
 		ContentType:     contentType,
