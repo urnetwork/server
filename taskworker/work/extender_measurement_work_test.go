@@ -169,12 +169,14 @@ func newTestMeasurementEnv(t testing.TB, settings testMeasurementEnvSettings) *t
 	previousPollInterval := extenderMeasurementInsyncPollInterval
 	extenderMeasurementInsyncPollInterval = time.Millisecond
 	Testing_ResetExtenderMeasurementAcme()
+	Testing_ResetExtenderMeasurementCapHold()
 	Testing_ResetExtenderMeasurementZones()
 	Testing_ResetExtenderDnsHostedZoneIds()
 	t.Cleanup(func() {
 		newExtenderMeasurementRoute53Api = previousApi
 		extenderMeasurementInsyncPollInterval = previousPollInterval
 		Testing_ResetExtenderMeasurementAcme()
+		Testing_ResetExtenderMeasurementCapHold()
 		Testing_ResetExtenderMeasurementZones()
 		Testing_ResetExtenderDnsHostedZoneIds()
 	})

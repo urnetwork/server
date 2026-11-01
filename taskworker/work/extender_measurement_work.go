@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/acme"
@@ -379,6 +380,85 @@ func renewExtenderMeasurementCerts(
 	}
 }
 
+// The hold on new certificates (C5, C7, amendment 24). An order the weekly cap
+// counts is for a name with no unexpired certificate, so when the CA refuses
+// one under a rate limit, the limit is the registered domain's -- 50 new
+// certificates a week for bringyour.com, which its other names draw on too --
+// or the account's on new orders, not the name's
+// (lag.dev/ops/letsencrypt.md §5.1), and the CA would refuse every other new
+// name the same way. A new name's own limit, five failed validations an hour,
+// is beyond the backoff, which tries a failing name four times in its first
+// hour. Deferred one row at a time, as the refusal of one name's order is,
+// the refusals would come at once, up to ExtenderMeasurementMaxOrdersPerPass
+// a pass, until the whole capped queue waited out one Retry-After, and then
+// all of it would come due within the same minutes and be refused again. So
+// the refusal also holds every order the cap counts until its own next
+// attempt (extenderMeasurementRetryTime): the pass places no more of them, and
+// while the hold lasts each capped request is noted waiting with the CA's
+// limit and the time, neither deferred nor counted a failure. Renewals, orders
+// for a name with an unexpired certificate and revocations go on: the CA
+// renews outside those limits, and a limit of one name's -- five certificates
+// a week for it, its failed validations -- defers only that name's row.
+//
+// The hold is kept in the process, like the ACME clients, so a restart
+// forgets it, which costs at most one more refusal.
+type extenderMeasurementCapHold struct {
+	until  time.Time
+	reason string
+}
+
+var extenderMeasurementCapHoldStateLock sync.Mutex
+var extenderMeasurementCapHoldState extenderMeasurementCapHold
+
+// Testing_ResetExtenderMeasurementCapHold lifts the hold on new certificates,
+// so a test starts with none.
+func Testing_ResetExtenderMeasurementCapHold() {
+	extenderMeasurementCapHoldStateLock.Lock()
+	defer extenderMeasurementCapHoldStateLock.Unlock()
+	extenderMeasurementCapHoldState = extenderMeasurementCapHold{}
+}
+
+// When `err` is the CA's refusal under a rate limit of an order the cap
+// counts, holds new certificates until `retryTime` and returns true. A hold
+// that already reaches later is kept.
+func holdExtenderMeasurementCapCounted(err error, retryTime time.Time) bool {
+	var acmeErr *acme.Error
+	if !errors.As(err, &acmeErr) {
+		return false
+	}
+	if _, ok := acme.RateLimit(acmeErr); !ok {
+		return false
+	}
+	limit := acmeErr.Detail
+	if limit == "" {
+		limit = acmeErr.Error()
+	}
+	extenderMeasurementCapHoldStateLock.Lock()
+	defer extenderMeasurementCapHoldStateLock.Unlock()
+	if extenderMeasurementCapHoldState.until.Before(retryTime) {
+		extenderMeasurementCapHoldState = extenderMeasurementCapHold{
+			until: retryTime,
+			reason: fmt.Sprintf(
+				"waiting until %s for the CA's limit on new certificates: %s",
+				retryTime.UTC().Format(time.RFC3339),
+				limit,
+			),
+		}
+	}
+	return true
+}
+
+// Whether new certificates are held at `now`, and the reason a capped request
+// waits while they are.
+func extenderMeasurementCapHeld(now time.Time) (reason string, held bool) {
+	extenderMeasurementCapHoldStateLock.Lock()
+	defer extenderMeasurementCapHoldStateLock.Unlock()
+	if now.Before(extenderMeasurementCapHoldState.until) {
+		return extenderMeasurementCapHoldState.reason, true
+	}
+	return "", false
+}
+
 // Issues for pending requests (C5, C7): first those the weekly cap does not
 // hold, longest waiting first, then the rest, each new certificate where it
 // least crowds the more crowded of its country and its network (amendment 24;
@@ -390,7 +470,9 @@ func renewExtenderMeasurementCerts(
 // unexpired certificate is a renewal to the CA and goes past the weekly cap,
 // which is how a rotated key and an extender that came back are served; a
 // new extender's waits while the cap is spent, and is read again each pass,
-// behind the requests the cap does not hold however many wait.
+// behind the requests the cap does not hold however many wait. It waits too
+// while the CA's refusal of a new certificate under a rate limit holds them
+// all (extenderMeasurementCapHold).
 //
 // A request whose certificate ran out un-renewed is put back in the queue
 // first, so nothing stays issued with no certificate behind it. So is the
@@ -461,6 +543,14 @@ func issuePendingExtenderMeasurementCerts(
 			wait(fmt.Sprintf("waiting for the weekly cap of %d new certificates", issueCap))
 			continue
 		}
+		if capCounted {
+			// the CA refused a new certificate under the domain's or the
+			// account's limit, which holds the rest (C7, amendment 24)
+			if reason, held := extenderMeasurementCapHeld(now); held {
+				wait(reason)
+				continue
+			}
+		}
 		if !mayOrder() {
 			return
 		}
@@ -477,14 +567,20 @@ func issuePendingExtenderMeasurementCerts(
 			glog.Errorf("[extendermeasurement]%s not issued: %s\n", measurement.ExtenderId, err)
 			// a refusal under a rate limit waits out the CA's Retry-After, and
 			// any other failure backs off (C5, amendment 24)
+			retryTime := extenderMeasurementRetryTime(err, measurement.FailureCount, server.NowUtc())
 			model.DeferPendingNetworkExtenderMeasurement(
 				ctx,
 				measurement.ExtenderId,
 				measurement.Csr,
 				err.Error(),
-				extenderMeasurementRetryTime(err, measurement.FailureCount, server.NowUtc()),
+				retryTime,
 				server.NowUtc(),
 			)
+			// and a refusal of a new certificate holds every other one until
+			// the same time (C7, amendment 24)
+			if capCounted && holdExtenderMeasurementCapCounted(err, retryTime) {
+				glog.Infof("[extendermeasurement]new certificates are held until %s\n", retryTime.UTC().Format(time.RFC3339))
+			}
 			result.Failed += 1
 			continue
 		}
