@@ -1,9 +1,11 @@
-// Contract row retention at the owner's horizon (CONTRACT-PARTITION.md
-// "Retention": R = 13 weeks, server.ContractRetention), on the contract tables
-// as they are today, unpartitioned. Once the partition cutover lands, weekly
-// drops retire whole weeks under the same preconditions; until then this
-// reaper deletes the same contracts row by row. A contract is deleted only when
-// every one of these holds:
+// Contract row retention on the contract tables as they are today,
+// unpartitioned. The horizon is the owner's R (CONTRACT-PARTITION.md
+// "Retention": 13 weeks, server.ContractRetention) unless the runtime control
+// shortens it, to no less than ContractHorizonFloor (45 days). The floor is
+// the reaper's own: nothing else that server.ContractRetention sets moves.
+// Once the partition cutover lands, weekly drops retire whole weeks past R;
+// until then this reaper deletes the same contracts row by row. A contract is
+// deleted only when every one of these holds, at any horizon:
 //   - its id time and its close time are both older than the horizon;
 //   - it is resolved (outcome IS NOT NULL), so it is closed and no dispute is
 //     open: the usage guard makes a set outcome and close time immutable;
@@ -28,7 +30,8 @@
 // credit-bearing contract's proof into st_provider_usage_archive in the same
 // statement, so the subnet usage readers see it either live or archived, never
 // both and never neither. Close evidence keeps its own 91-day retention
-// (server.RemoveExpiredCloseEvidence).
+// (server.RemoveExpiredCloseEvidence), which takes evidence whose contract is
+// gone, so below 91 days a deleted contract's evidence outlives it until then.
 //
 // A pass walks transfer_contract's primary key from a cursor toward the
 // horizon. Each batch takes the next ids from an index-only range of that key,
@@ -52,10 +55,11 @@
 // were protected when it passed them.
 //
 // The runtime control, the Redis hash `{contract_horizon}control`, turns the
-// reaper on, off or to a dry run, and slows it, without a deploy. It can only
-// narrow the code settings, and it is read before every batch: setting the mode
-// off stops a running pass within one batch. A run that cannot read the control
-// stops, as if the mode were off.
+// reaper on, off or to a dry run, slows it and shortens its horizon, without a
+// deploy. It never passes the code's bounds, and it is read before every batch:
+// setting the mode off stops a running pass within one batch, and a new horizon
+// applies from the next batch. A run that cannot read the control stops, as if
+// the mode were off.
 package model
 
 import (
@@ -114,17 +118,31 @@ func (self ContractHorizonMode) String() string {
 	}
 }
 
-// Code settings, which the runtime control narrows.
+// The shortest horizon the reaper applies, whatever its settings or control
+// say (owner, 2026-11-01). It is the reaper's alone: server.ContractRetention,
+// which the partition drop, close evidence and key history retention and the
+// sn-reconcile floor share, stays 91 days. No reader of the deleted rows reaches
+// past 45 days; the furthest, operator block points, reads a block's unpaid
+// sweeps only while its reliability is retained, a 7-day block plus
+// ClientReliabilityRetention. What keeps a contract the payout planner or a
+// recovery can still read is the reaper's row checks, never its horizon.
+//
+// Below 91 days users see less history: the 90-day provider stats views
+// undercount the days past the horizon by the contracts deleted there, and
+// the unpaid bytes of /transfer/stats fall as the unpaid sweeps of contracts
+// minted after the earning cutoff, which the subnet pool pays, pass it.
+const ContractHorizonFloor = 45 * 24 * time.Hour
+
+// Code settings, which bound the runtime control.
 type ContractHorizonSettings struct {
 	// False forces the mode off, whatever the control says.
 	Enable bool
 	// The mode while the control sets none. Off, so a deploy deletes nothing
 	// until an operator sets the control.
 	DefaultMode ContractHorizonMode
-	// How long past its creation and its close a contract is kept. Values
-	// below server.ContractRetention count as server.ContractRetention: the
-	// payout planner assigns the sweeps that retention could reach inside its
-	// plan transaction by that horizon (paymentPlanRetentionRiskAge).
+	// How long past its creation and its close a contract is kept while the
+	// control sets no horizon, and the longest horizon the control can set.
+	// Values below ContractHorizonFloor count as ContractHorizonFloor.
 	Horizon time.Duration
 	// Contracts read per batch transaction, at most. The control can lower it.
 	BatchSize int
@@ -188,9 +206,9 @@ func DefaultContractHorizonSettings() *ContractHorizonSettings {
 	}
 }
 
-// The horizon actually applied: never below the owner's R.
+// The code's horizon: never below the reaper's floor.
 func (self *ContractHorizonSettings) horizon() time.Duration {
-	return max(self.Horizon, server.ContractRetention)
+	return max(self.Horizon, ContractHorizonFloor)
 }
 
 // The control hash. A singleton key on the `{contract_horizon}` slot.
@@ -199,14 +217,19 @@ const contractHorizonControlKey = "{contract_horizon}control"
 // The control's fields, all optional:
 //   - `mode`: off, dry_run or on;
 //   - `maxRowsPerSecond`: contracts read per second, at most the code's;
-//   - `batchSize`: contracts per batch, between the code's minimum and size.
+//   - `batchSize`: contracts per batch, between the code's minimum and size;
+//   - `horizonDays`: the horizon in whole days, between ContractHorizonFloor
+//     (45) and the code's horizon (91); a value past either end counts as that
+//     end. Below 91 days users see less history in the provider stats and
+//     /transfer/stats (ContractHorizonFloor).
 //
 // A field that does not parse narrows as far as it can: mode off, rate zero
-// (which is off), the minimum batch size.
+// (which is off), the minimum batch size, the code's horizon.
 const (
 	ContractHorizonControlFieldMode             = "mode"
 	ContractHorizonControlFieldMaxRowsPerSecond = "maxRowsPerSecond"
 	ContractHorizonControlFieldBatchSize        = "batchSize"
+	ContractHorizonControlFieldHorizonDays      = "horizonDays"
 )
 
 // The effective control: the code settings as the Redis control narrowed them.
@@ -216,6 +239,8 @@ type ContractHorizonControl struct {
 	Mode             ContractHorizonMode
 	MaxRowsPerSecond float64
 	BatchSize        int
+	// How long past its creation and its close a contract is kept.
+	Horizon time.Duration
 }
 
 // The control the fields narrow the settings to. Pure: fields is the control
@@ -226,6 +251,7 @@ func NarrowContractHorizonControl(fields map[string]string, settings *ContractHo
 		Mode:             settings.DefaultMode,
 		MaxRowsPerSecond: min(settings.DefaultMaxRowsPerSecond, settings.MaxRowsPerSecond),
 		BatchSize:        max(settings.MinBatchSize, settings.BatchSize),
+		Horizon:          settings.horizon(),
 	}
 	if value, ok := fields[ContractHorizonControlFieldMode]; ok {
 		// a value that does not parse is off
@@ -246,10 +272,31 @@ func NarrowContractHorizonControl(fields map[string]string, settings *ContractHo
 		}
 		control.BatchSize = max(settings.MinBatchSize, min(control.BatchSize, batchSize))
 	}
+	if value, ok := fields[ContractHorizonControlFieldHorizonDays]; ok {
+		// a value that does not parse keeps the code's horizon, the longest
+		if days, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64); err == nil {
+			control.Horizon = contractHorizonFromDays(days, control.Horizon)
+		}
+	}
 	if !settings.Enable || !(0 < control.MaxRowsPerSecond) {
 		control.Mode = ContractHorizonModeOff
 	}
 	return control
+}
+
+// days as a horizon between ContractHorizonFloor and ceiling, the code's
+// horizon. Clamped while still in days, so that no count of days overflows
+// into a short duration. Pure.
+func contractHorizonFromDays(days int64, ceiling time.Duration) time.Duration {
+	const day = 24 * time.Hour
+	switch {
+	case days <= int64(ContractHorizonFloor/day):
+		return ContractHorizonFloor
+	case int64(ceiling/day) < days:
+		return ceiling
+	default:
+		return time.Duration(days) * day
+	}
 }
 
 // Reads the control and narrows the settings with it. One bounded Redis read,
@@ -372,7 +419,8 @@ var contractHorizonTables = []string{
 type ContractHorizonReport struct {
 	// The mode of the last batch.
 	Mode ContractHorizonMode
-	// The horizon the run applied: contracts minted and closed before it.
+	// The horizon of the last control read, or the code's before the first:
+	// contracts minted and closed before it are past it.
 	HorizonTime time.Time
 	Batches     int
 	// Contracts read.
@@ -445,7 +493,11 @@ var (
 	})
 	contractHorizonHorizonGauge = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "urnetwork_contract_horizon_horizon_timestamp_seconds",
-		Help: "The horizon of the contract horizon reaper's last run",
+		Help: "The horizon of the contract horizon reaper's last control read: contracts minted and closed before it are past it",
+	})
+	contractHorizonHorizonSecondsGauge = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "urnetwork_contract_horizon_horizon_seconds",
+		Help: "How long past its creation and its close a contract is kept, as the contract horizon reaper's last control read set it: 45 to 91 days",
 	})
 	contractHorizonLagGauge = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "urnetwork_contract_horizon_lag_seconds",
@@ -496,6 +548,7 @@ func init() {
 		contractHorizonBatchSizeGauge,
 		contractHorizonCursorGauge,
 		contractHorizonHorizonGauge,
+		contractHorizonHorizonSecondsGauge,
 		contractHorizonLagGauge,
 		contractHorizonPassStartGauge,
 		contractHorizonModeGauge,
@@ -517,16 +570,16 @@ func RemoveContractsPastHorizon(
 	cursor ContractHorizonCursor,
 	settings *ContractHorizonSettings,
 ) (report *ContractHorizonReport, next ContractHorizonCursor, returnErr error) {
-	horizonTime := now.UTC().Add(-settings.horizon())
 	reaper := &contractHorizonReaper{
 		settings:             settings,
-		horizonTime:          horizonTime,
-		horizonId:            server.ContractIdFloor(horizonTime),
+		now:                  now.UTC(),
 		paymentDischargeTime: now.UTC().Add(-CompletedContractExpiration),
 		runEnd:               time.Now().Add(settings.RunBudget),
 	}
+	// the code's horizon until the control is read
+	reaper.setHorizon(settings.horizon())
 	report = &ContractHorizonReport{
-		HorizonTime: horizonTime,
+		HorizonTime: reaper.horizonTime,
 		Deleted:     map[string]int64{},
 		Protected:   map[string]int64{},
 		// every return sets its stop; a panic counts as an error
@@ -536,16 +589,12 @@ func RemoveContractsPastHorizon(
 	if next.PassStartTime.IsZero() {
 		next.PassStartTime = now.UTC()
 	}
-	if next.ContractId != (server.Id{}) {
-		reaper.observeCursor(next.ContractId)
-	}
-	contractHorizonHorizonGauge.Set(float64(horizonTime.Unix()))
 	contractHorizonPassStartGauge.Set(float64(next.PassStartTime.Unix()))
 	defer func() {
 		contractHorizonRunCounter.WithLabelValues(report.Stop).Inc()
 		if glog.V(1) {
 			glog.Infof(
-				"[contract_horizon]run mode=%s stop=%s batches=%d scanned=%d eligible=%d deleted=%v archived=%d protected=%v caught_up=%t horizon=%s\n",
+				"[contract_horizon]run mode=%s stop=%s batches=%d scanned=%d eligible=%d deleted=%v archived=%d protected=%v caught_up=%t horizon_days=%g horizon=%s\n",
 				report.Mode,
 				report.Stop,
 				report.Batches,
@@ -555,7 +604,8 @@ func RemoveContractsPastHorizon(
 				report.Archived,
 				report.Protected,
 				report.CaughtUp,
-				horizonTime.Format(time.RFC3339),
+				reaper.horizon.Hours()/24,
+				report.HorizonTime.Format(time.RFC3339),
 			)
 		}
 	}()
@@ -593,6 +643,9 @@ func RemoveContractsPastHorizon(
 		}
 		report.Mode = control.Mode
 		contractHorizonModeGauge.Set(float64(control.Mode))
+		reaper.setHorizon(control.Horizon)
+		report.HorizonTime = reaper.horizonTime
+		reaper.observeHorizon(next.ContractId)
 		if control.Mode == ContractHorizonModeOff {
 			report.Stop = contractHorizonStopOff
 			return
@@ -677,9 +730,14 @@ func contractHorizonPaceDelay(scanned int64, rate float64, duration time.Duratio
 	return max(0, paced-duration)
 }
 
-// One run's fixed horizon, payout boundaries and budget.
+// One run's clock, horizon, payout boundaries and budget. The horizon follows
+// the control from one batch to the next; the clock stays the run's.
 type contractHorizonReaper struct {
-	settings    *ContractHorizonSettings
+	settings *ContractHorizonSettings
+	// The run's now, which the horizon is measured back from.
+	now time.Time
+	// How long past its creation and its close a contract is kept.
+	horizon     time.Duration
 	horizonTime time.Time
 	horizonId   server.Id
 	// The first contract id whose unpaid sweeps the planner never selects;
@@ -717,6 +775,24 @@ func (self *contractHorizonReaper) observe(batch *contractHorizonBatch, mode Con
 		contractHorizonDeletedRowsCounter.WithLabelValues(table).Add(float64(count))
 	}
 	contractHorizonArchivedCounter.Add(float64(batch.archived))
+}
+
+// The next batch reads the contracts minted and closed more than horizon
+// before the run's now.
+func (self *contractHorizonReaper) setHorizon(horizon time.Duration) {
+	self.horizon = horizon
+	self.horizonTime = self.now.Add(-horizon)
+	self.horizonId = server.ContractIdFloor(self.horizonTime)
+}
+
+// Publishes the horizon a control read set, and the stored cursor's lag
+// behind it.
+func (self *contractHorizonReaper) observeHorizon(cursor server.Id) {
+	contractHorizonHorizonGauge.Set(float64(self.horizonTime.Unix()))
+	contractHorizonHorizonSecondsGauge.Set(self.horizon.Seconds())
+	if cursor != (server.Id{}) {
+		self.observeCursor(cursor)
+	}
 }
 
 func (self *contractHorizonReaper) observeCursor(contractId server.Id) {
