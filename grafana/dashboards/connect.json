@@ -478,7 +478,7 @@
             "id": 9,
             "type": "timeseries",
             "title": "exchange protocol frames / s",
-            "description": "Completed exchange frames by direction and kind. Data is relayed traffic, ping is keepalive/control traffic, and handshake is connection setup. A frame is counted only after the complete frame succeeds.",
+            "description": "Completed exchange frames by direction and kind. Data is relayed traffic, ping is keepalive/control traffic, and handshake is connection setup. A frame is counted only after the complete frame succeeds. The series carry an op label (transport, forward, unknown) since the release that added in-process delivery; a process on that release reports series of a new identity, as every restart does, and this panel sums across op, so the totals stay continuous.",
             "gridPos": {"h": 8, "w": 12, "x": 12, "y": 29},
             "datasource": {"type": "prometheus", "uid": "warp-mimir"},
             "fieldConfig": {
@@ -3449,7 +3449,7 @@
             "id": 89,
             "type": "timeseries",
             "title": "exchange data frames sent / s: sockets by operation, and in process",
-            "description": "Data frames sent over exchange sockets, by operation, and delivered in process. A link counts each frame as its socket counted it, so the exchange total is the socket and local series added: transport frames move from the sockets to local as a block turns the switch on, and the sum stays the same.",
+            "description": "Data frames sent over exchange sockets, by operation, and delivered in process. A link counts each frame as its socket counted it, so the exchange total is the socket and local series added: transport frames move from the sockets to local as a block turns the switch on, and the sum stays the same. The op label begins with the release that added in-process delivery, so the socket series start with each process on it.",
             "gridPos": {
                 "h": 8,
                 "w": 12,
@@ -3549,7 +3549,7 @@
             "id": 91,
             "type": "timeseries",
             "title": "local transport detaches / s by reason",
-            "description": "Why links ended: resident_done (the resident ended: replacement, move or drain), transport_done (the client's connection ended), write_timeout (a batch could not be delivered within WriteTimeout, as an exchange write deadline ends a socket), max_message_len (an oversized message failed its batch, as a failed exchange write) and disabled (the switch turned the block off, and the transport redialed over the exchange). Compare write_timeout per 1k transports with the transport redials of the control blocks.",
+            "description": "Why links ended: resident_done (the resident ended: replacement, move or drain), transport_done (the client's connection ended), write_timeout (a batch could not be delivered within WriteTimeout, as an exchange write deadline ends a socket), max_message_len (an oversized message failed its batch, as a failed exchange write) disabled (the switch turned the block off, and the transport redialed over the exchange) and raised (a pump raised; the batch it held was returned and counted as dropped, and the transport redialed as after a socket's end). Compare write_timeout per 1k transports with the transport redials of the control blocks.",
             "gridPos": {
                 "h": 8,
                 "w": 12,
