@@ -18,7 +18,10 @@
 //     pending or held (server.ContractPaymentRetentionHoldSql), is a legacy
 //     obligation the payout planner can still select, or the evidence a
 //     recovery reads, and keeps its contract. So does a sweep staged in a
-//     payment plan whose assignment is pending;
+//     payment plan whose assignment is pending, and one whose payment
+//     completed under attribution review: completePaymentInTx queues no
+//     retention stamping for it, so the payment completion path keeps its
+//     contracts until the straggler horizon, and so does this reaper;
 //   - no unpaid sweep of it is traffic of an operator block whose points can
 //     still be awarded (OperatorBlockPointsPendingWindows). An award reads a
 //     block's unpaid sweeps by sweep time, the settlement, which can come long
@@ -400,6 +403,9 @@ const (
 	// an unpaid sweep is traffic of an operator block whose points can still
 	// be awarded
 	contractHorizonProtectedBlockPoints = "block_points"
+	// a sweep's payment completed under attribution review, which stamps no
+	// retention on its contracts
+	contractHorizonProtectedPaymentReview = "payment_review"
 )
 
 var contractHorizonProtectedReasons = []string{
@@ -414,6 +420,7 @@ var contractHorizonProtectedReasons = []string{
 	contractHorizonProtectedUnpaidLegacy,
 	contractHorizonProtectedPlanStaged,
 	contractHorizonProtectedBlockPoints,
+	contractHorizonProtectedPaymentReview,
 }
 
 // The tables a deleted contract leaves, dependents first.
@@ -929,7 +936,8 @@ const contractHorizonSweepLockSql = `
 
 // The checks that read other tables, in a snapshot taken after the locks:
 // every escrow settled, every sweep discharged, none staged in a pending plan,
-// none unpaid in the window of an operator block still to be awarded. Each
+// none unpaid in the window of an operator block still to be awarded, none
+// paid by a payment completed under attribution review. Each
 // reads the candidates' rows together, by their ids. A NULL flag counts
 // against deletion. $1 the candidate contract ids, $2 the first contract id
 // past the earning cutoff (paymentPlanUnpaidContractIdBound), NULL without a
@@ -948,7 +956,8 @@ var contractHorizonHoldSql = `
 			bool_or(account_payment.payment_id IS NOT NULL AND (` + server.ContractPaymentRetentionHoldSql + `) IS TRUE) AS payment_hold,
 			bool_or(transfer_escrow_sweep.payment_id IS NOT NULL AND account_payment.completed IS NOT TRUE) AS payment_incomplete,
 			bool_or(account_payment.completed IS TRUE AND (account_payment.complete_time IS NULL OR $3 <= account_payment.complete_time)) AS payment_recent,
-			bool_or(transfer_escrow_sweep.payment_id IS NULL AND ($2::uuid IS NULL OR transfer_escrow_sweep.contract_id < $2::uuid)) AS unpaid_legacy
+			bool_or(transfer_escrow_sweep.payment_id IS NULL AND ($2::uuid IS NULL OR transfer_escrow_sweep.contract_id < $2::uuid)) AS unpaid_legacy,
+			bool_or(account_payment.completed IS TRUE AND account_payment.attribution_review_required IS TRUE) AS payment_review
 		FROM transfer_escrow_sweep
 		LEFT JOIN account_payment ON
 			account_payment.payment_id = transfer_escrow_sweep.payment_id
@@ -980,7 +989,8 @@ var contractHorizonHoldSql = `
 			coalesce(sweep.payment_recent, false) AS payment_recent,
 			coalesce(sweep.unpaid_legacy, false) AS unpaid_legacy,
 			staged.contract_id IS NOT NULL AS plan_staged,
-			block_points.contract_id IS NOT NULL AS block_points
+			block_points.contract_id IS NOT NULL AS block_points,
+			coalesce(sweep.payment_review, false) AS payment_review
 		FROM unnest($1::uuid[]) AS candidate(contract_id)
 		LEFT JOIN unsettled ON unsettled.contract_id = candidate.contract_id
 		LEFT JOIN sweep ON sweep.contract_id = candidate.contract_id
@@ -995,9 +1005,10 @@ var contractHorizonHoldSql = `
 		(SELECT count(*) FROM classified WHERE NOT (unsettled OR payment_hold OR payment_incomplete OR payment_recent) AND unpaid_legacy),
 		(SELECT count(*) FROM classified WHERE NOT (unsettled OR payment_hold OR payment_incomplete OR payment_recent OR unpaid_legacy) AND plan_staged),
 		(SELECT count(*) FROM classified WHERE NOT (unsettled OR payment_hold OR payment_incomplete OR payment_recent OR unpaid_legacy OR plan_staged) AND block_points),
+		(SELECT count(*) FROM classified WHERE NOT (unsettled OR payment_hold OR payment_incomplete OR payment_recent OR unpaid_legacy OR plan_staged OR block_points) AND payment_review),
 		ARRAY(
 			SELECT contract_id FROM classified
-			WHERE NOT (unsettled OR payment_hold OR payment_incomplete OR payment_recent OR unpaid_legacy OR plan_staged OR block_points)
+			WHERE NOT (unsettled OR payment_hold OR payment_incomplete OR payment_recent OR unpaid_legacy OR plan_staged OR block_points OR payment_review)
 			ORDER BY contract_id
 		)
 `
@@ -1104,7 +1115,7 @@ func (self *contractHorizonReaper) removeBatch(
 				return
 			}
 
-			var unsettledCount, paymentHoldCount, paymentIncompleteCount, paymentRecentCount, unpaidLegacyCount, planStagedCount, blockPointsCount int64
+			var unsettledCount, paymentHoldCount, paymentIncompleteCount, paymentRecentCount, unpaidLegacyCount, planStagedCount, blockPointsCount, paymentReviewCount int64
 			server.Raise(tx.QueryRow(
 				ctx,
 				contractHorizonHoldSql,
@@ -1121,6 +1132,7 @@ func (self *contractHorizonReaper) removeBatch(
 				&unpaidLegacyCount,
 				&planStagedCount,
 				&blockPointsCount,
+				&paymentReviewCount,
 				&batch.eligibleIds,
 			))
 			batch.protected[contractHorizonProtectedUnsettled] = unsettledCount
@@ -1130,6 +1142,7 @@ func (self *contractHorizonReaper) removeBatch(
 			batch.protected[contractHorizonProtectedUnpaidLegacy] = unpaidLegacyCount
 			batch.protected[contractHorizonProtectedPlanStaged] = planStagedCount
 			batch.protected[contractHorizonProtectedBlockPoints] = blockPointsCount
+			batch.protected[contractHorizonProtectedPaymentReview] = paymentReviewCount
 			if dryRun || len(batch.eligibleIds) == 0 {
 				return
 			}
