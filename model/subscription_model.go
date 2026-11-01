@@ -6576,6 +6576,10 @@ type sweepOrphanStep struct {
 	// committed page. It keeps sweepOrphanCursor's start, budget and resume
 	// contract, with a cursor shaped by newCursorTargets.
 	sweep func(ctx context.Context, startKey []any, maxRowCount int, sliceSize int) (removedCount int64, rowCount int, endKey []any, done bool)
+	// When set, each page asks it first, in the page's own transaction. False
+	// ends the step for this pass without examining its rows, and the pass
+	// moves on to the next step; the next pass asks again.
+	admitPage func(ctx context.Context, tx server.PgTx) bool
 }
 
 // sweepOrphanSteps pages steps in order starting from start, stopping once every
@@ -6757,10 +6761,16 @@ func sweepOrphanCursor(
 		var targets []any
 		gotRow := false
 		ownershipRefused := false
+		stepRefused := false
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
 			sliceCount = 0
 			deletedCount = 0
 			gotRow = false
+			stepRefused = false
+			if step.admitPage != nil && !step.admitPage(ctx, tx) {
+				stepRefused = true
+				return
+			}
 			targets = step.newCursorTargets()
 			// One aligned array per key column, in key column order.
 			var lockedKeys []any
@@ -6808,6 +6818,11 @@ func sweepOrphanCursor(
 				deletedCount = tag.RowsAffected()
 			}
 		}, server.TxReadCommitted, server.OptNoRetry())
+		if stepRefused {
+			// nothing of this page was examined; the rest of the step waits
+			// for a pass its admission allows
+			return removedCount, rowCount, nil, true
+		}
 		if ownershipRefused {
 			// Keep the refused page's input cursor. Durable orphan rows remain
 			// discoverable after the admitted financial owner has completed.
