@@ -271,6 +271,7 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{name: "dropped full connection disconnect time index rebuilt", version: server.WritePathMigrationVersion(server.WritePathConnectionDisconnectTimeIndexDrop), sql: `CREATE INDEX network_client_connection_connected_disconnect_time ON network_client_connection (connected, disconnect_time)`},
 		// the index diet's drops stay dropped
 		{name: "dropped reap-pending contract index rebuilt", version: server.IndexDietMigrationVersion(server.IndexDietReapPendingIndexDrop), sql: `CREATE INDEX transfer_contract_reap_pending_create_time ON transfer_contract (create_time) WHERE reap_time IS NULL AND close_time IS NOT NULL`},
+		{name: "dropped stream index rebuilt", version: server.IndexDietMigrationVersion(server.IndexDietStreamIndexDrop), sql: `CREATE INDEX transfer_contract_stream_id ON transfer_contract (stream_id) WHERE stream_id IS NOT NULL`},
 		// The retired queue's guard, function and key stay gone; its empty
 		// table keeps the published shape.
 		{name: "retired legacy settlement guard function restored", version: server.LegacySettlementIntentRetirementMigrationVersion(),
@@ -394,6 +395,7 @@ func TestMigrationsCurrentSuffixConcurrentIndexReadiness(t *testing.T) {
 				{server.WritePathMigrationVersion(server.WritePathConnectionAddressIndexDrop), "network_client_connection", "network_client_connection_client_address_hash_connected"},
 				{server.WritePathMigrationVersion(server.WritePathConnectionDisconnectTimeIndexDrop), "network_client_connection", "network_client_connection_connected_disconnect_time"},
 				{server.IndexDietMigrationVersion(server.IndexDietReapPendingIndexDrop), "transfer_contract", "transfer_contract_reap_pending_create_time"},
+				{server.IndexDietMigrationVersion(server.IndexDietStreamIndexDrop), "transfer_contract", "transfer_contract_stream_id"},
 			} {
 				guard := migrationCurrentSuffixTestContract(t, index.version).query
 				var absent bool

@@ -29716,7 +29716,7 @@ This is the version-to-artifact contract checked by the probe:
 | 626 | obsolete profile/deployment nonce constraint absent |
 | 627 | deployment-scoped ST fleet-signature/epoch-notification keys and network-time index |
 | 628 | `transfer_contract.stream_id` plus `contract_participant` and its stream/client primary key |
-| 629 | partial `transfer_contract_stream_id` |
+| 629 | partial `transfer_contract_stream_id` (required until the index diet's stream index drop, which requires it absent) |
 | 630 | `competition_round.staging`, epoch-kind constraint, and enabled staging identity/review/finalization guards |
 | 631 | nullable `transfer_escrow_sweep.provider_payouts` and its nonempty-array shape constraint |
 | 632 | `transfer_contract_unresolved_source_pair_create_time` |
