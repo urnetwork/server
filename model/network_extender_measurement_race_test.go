@@ -230,7 +230,7 @@ func TestNetworkExtenderMeasurementWithdrawIfJudgesTheExtenderAsItIsNow(t *testi
 			judged = append(judged, extender)
 			return reasonFor(extender)
 		})
-		connect.AssertEqual(t, withdrawn, false)
+		connect.AssertEqual(t, withdrawn, 0)
 		connect.AssertEqual(t, 0 < len(judged), true)
 		extender := judged[len(judged)-1]
 		connect.AssertEqual(t, extender.ExtenderId, extenderId)
@@ -275,10 +275,10 @@ func TestNetworkExtenderMeasurementWithdrawIfWithdrawsWithTheReasonItJudges(t *t
 			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM network_extender WHERE extender_id = $1`, gone))
 		})
 
-		connect.AssertEqual(t, WithdrawNetworkExtenderMeasurementCertIf(ctx, leftCert.CertId, now, reasonFor), true)
-		connect.AssertEqual(t, WithdrawNetworkExtenderMeasurementCertIf(ctx, goneCert.CertId, now, reasonFor), true)
-		connect.AssertEqual(t, WithdrawNetworkExtenderMeasurementCertIf(ctx, awayCert.CertId, now, reasonFor), false)
-		connect.AssertEqual(t, WithdrawNetworkExtenderMeasurementCertIf(ctx, leftCert.CertId, now, reasonFor), false)
+		connect.AssertEqual(t, WithdrawNetworkExtenderMeasurementCertIf(ctx, leftCert.CertId, now, reasonFor), 1)
+		connect.AssertEqual(t, WithdrawNetworkExtenderMeasurementCertIf(ctx, goneCert.CertId, now, reasonFor), 1)
+		connect.AssertEqual(t, WithdrawNetworkExtenderMeasurementCertIf(ctx, awayCert.CertId, now, reasonFor), 0)
+		connect.AssertEqual(t, WithdrawNetworkExtenderMeasurementCertIf(ctx, leftCert.CertId, now, reasonFor), 0)
 
 		for extenderId, reason := range map[server.Id]string{
 			left: "the extender is not active",
@@ -332,14 +332,14 @@ func TestNetworkExtenderMeasurementWithdrawIfWaitsForAnActivation(t *testing.T) 
 			)
 		})
 		activationHold.await(t)
-		withdrawn := goTestMeasurementRace(t, &group, func() bool {
+		withdrawn := goTestMeasurementRace(t, &group, func() int {
 			return WithdrawNetworkExtenderMeasurementCertIf(ctx, cert.CertId, now, testMeasurementRaceReasonFor(now))
 		})
 		awaitTestMeasurementRaceLockWait(t, ctx)
 		activationHold.let()
 
 		connect.AssertEqual(t, receiveTestMeasurementRace(t, activated).Extender.Active, true)
-		connect.AssertEqual(t, receiveTestMeasurementRace(t, withdrawn), false)
+		connect.AssertEqual(t, receiveTestMeasurementRace(t, withdrawn), 0)
 		assertTestMeasurementRaceCertKept(t, ctx, extenderId, request, now)
 	})
 }
@@ -362,7 +362,7 @@ func TestNetworkExtenderMeasurementActivationWaitsForWithdrawIf(t *testing.T) {
 		withdrawalHold := newTestMeasurementRaceHold()
 		defer withdrawalHold.let()
 
-		withdrawn := goTestMeasurementRace(t, &group, func() bool {
+		withdrawn := goTestMeasurementRace(t, &group, func() int {
 			return WithdrawNetworkExtenderMeasurementCertIf(ctx, cert.CertId, now, func(extender *NetworkExtender) string {
 				// judged under the extender's lock
 				withdrawalHold.hold()
@@ -381,7 +381,7 @@ func TestNetworkExtenderMeasurementActivationWaitsForWithdrawIf(t *testing.T) {
 		awaitTestMeasurementRaceLockWait(t, ctx)
 		withdrawalHold.let()
 
-		connect.AssertEqual(t, receiveTestMeasurementRace(t, withdrawn), true)
+		connect.AssertEqual(t, receiveTestMeasurementRace(t, withdrawn), 1)
 		connect.AssertEqual(t, receiveTestMeasurementRace(t, activated).Extender.Active, true)
 		certs := Testing_GetNetworkExtenderMeasurementCerts(ctx, extenderId)
 		connect.AssertEqual(t, len(certs), 1)
@@ -393,5 +393,31 @@ func TestNetworkExtenderMeasurementActivationWaitsForWithdrawIf(t *testing.T) {
 		extender := getTestMeasurementExtender(t, ctx, extenderId)
 		connect.AssertEqual(t, extender.Active, true)
 		connect.AssertEqual(t, extender.RevokeTime == nil, true)
+	})
+}
+
+// An extender holds two live certificates while a renewal overlaps the one it
+// replaces, and both go on the one judgment (amendment 24): withdrawn one at
+// a time, an activation between the two would leave the renewal serving with
+// its request withdrawn. The renewal, read next, is withdrawn already.
+func TestNetworkExtenderMeasurementWithdrawIfWithdrawsTheWholeExtender(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc().Truncate(time.Second)
+		reasonFor := testMeasurementRaceReasonFor(now)
+		extenderId, cert := createTestMeasurementRaceCert(t, ctx, 1, now.Add(-time.Hour))
+		renewal := testMeasurementCert(extenderId, []byte("key-race-1"), now)
+		connect.AssertEqual(t, AddNetworkExtenderMeasurementCert(ctx, renewal), true)
+		deactivateTestMeasurementRaceExtender(t, ctx, extenderId, now.Add(-testMeasurementRaceAwayGrace-time.Minute))
+
+		connect.AssertEqual(t, WithdrawNetworkExtenderMeasurementCertIf(ctx, cert.CertId, now, reasonFor), 2)
+		certs := Testing_GetNetworkExtenderMeasurementCerts(ctx, extenderId)
+		connect.AssertEqual(t, len(certs), 2)
+		for _, withdrawnCert := range certs {
+			connect.AssertEqual(t, withdrawnCert.WithdrawTime != nil, true)
+			connect.AssertEqual(t, withdrawnCert.WithdrawReason, "the extender is not active")
+		}
+		connect.AssertEqual(t, Testing_GetNetworkExtenderMeasurement(ctx, extenderId).State, NetworkExtenderMeasurementStateWithdrawn)
+		connect.AssertEqual(t, WithdrawNetworkExtenderMeasurementCertIf(ctx, renewal.CertId, now, reasonFor), 0)
 	})
 }

@@ -617,9 +617,9 @@ func withdrawExtenderMeasurementCerts(ctx context.Context, now time.Time) int {
 		if reasonFor(target.Extender) == "" {
 			continue
 		}
-		if model.WithdrawNetworkExtenderMeasurementCertIf(ctx, target.Cert.CertId, now, reasonFor) {
-			withdrawn += 1
-		}
+		// the extender's other live certificate, a renewal's overlap, goes
+		// with this one, and is already withdrawn when the read comes to it
+		withdrawn += model.WithdrawNetworkExtenderMeasurementCertIf(ctx, target.Cert.CertId, now, reasonFor)
 	}
 	return withdrawn
 }

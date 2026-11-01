@@ -1730,11 +1730,16 @@ func WithdrawNetworkExtenderMeasurementCert(
 	return
 }
 
-// WithdrawNetworkExtenderMeasurementCertIf withdraws one live certificate as
-// WithdrawNetworkExtenderMeasurementCert does, if its extender must still be
-// withdrawn (C9): reasonFor judges the extender as it is now, nil when it is
-// gone, and the certificate is withdrawn with the reason it gives, or left as
-// it is when that is empty. False when it was left, or already withdrawn.
+// WithdrawNetworkExtenderMeasurementCertIf withdraws the live certificates of
+// the extender that one live certificate is for, if the extender must still
+// be withdrawn (C9), and returns how many: reasonFor judges the extender as it
+// is now, nil when it is gone, and its certificates are withdrawn with the
+// reason it gives, or left as they are when that is empty. 0 when they were
+// left, or the certificate was already withdrawn. Every live certificate of
+// the extender goes on the one judgment, since the reason is the extender's:
+// a renewal overlaps the certificate it replaces, and withdrawn one at a time,
+// an activation between the two would leave the renewal serving with its
+// request withdrawn.
 //
 // The dns chain judges every live certificate from one read
 // (GetLiveNetworkExtenderMeasurementCerts), and an extender can activate
@@ -1754,9 +1759,9 @@ func WithdrawNetworkExtenderMeasurementCertIf(
 	certId server.Id,
 	now time.Time,
 	reasonFor func(extender *NetworkExtender) string,
-) (withdrawn bool) {
+) (withdrawn int) {
 	server.Tx(ctx, func(tx server.PgTx) {
-		withdrawn = false
+		withdrawn = 0
 		var extenderId *server.Id
 		result, err := tx.Query(
 			ctx,
@@ -1783,7 +1788,7 @@ func WithdrawNetworkExtenderMeasurementCertIf(
 		if reason == "" {
 			return
 		}
-		withdrawn = withdrawNetworkExtenderMeasurementCertsInTx(ctx, tx, &certId, nil, reason, now) == 1
+		withdrawn = withdrawNetworkExtenderMeasurementCertsInTx(ctx, tx, nil, extenderId, reason, now)
 	})
 	return
 }
