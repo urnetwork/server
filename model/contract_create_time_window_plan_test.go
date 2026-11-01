@@ -165,3 +165,20 @@ func TestContractDegradationOpenCountNeedsNoCreateTimeIndex(t *testing.T) {
 		requireContractIdRangePlan(t, ctx, openStatements[0], "transfer_contract_create_time")
 	})
 }
+
+// The straggler stamp's batch reads only the contract ids of the contracts
+// created before its horizon, with neither create_time index.
+func TestStragglerStampNeedsNoCreateTimeIndex(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		statements := traceContractReads(t, ctx, func() {
+			assignStragglerReapTimeBatches(ctx, server.NowUtc().Add(-StragglerContractExpiration), 1000)
+		})
+		if len(statements) != 1 {
+			t.Fatalf("the straggler stamp sent %d transfer_contract statements, want 1", len(statements))
+		}
+		requireContractIdRangePlan(t, ctx, statements[0], "transfer_contract_reap_pending_create_time", "transfer_contract_create_time")
+	})
+}

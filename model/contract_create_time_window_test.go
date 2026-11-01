@@ -292,3 +292,143 @@ func TestContractDegradationOpenCountMatchesCreateTime(t *testing.T) {
 		}
 	})
 }
+
+// The straggler stamp before the contract id range bounded it.
+var assignStragglerReapTimeByCreateTimeSql = `
+WITH batch AS (
+	SELECT transfer_contract.contract_id
+	FROM transfer_contract
+	WHERE
+		transfer_contract.reap_time IS NULL AND
+		transfer_contract.close_time IS NOT NULL AND
+		transfer_contract.create_time < $1 AND
+		NOT EXISTS (
+			SELECT 1
+			FROM transfer_escrow_sweep
+			INNER JOIN account_payment ON
+				account_payment.payment_id = transfer_escrow_sweep.payment_id
+			WHERE
+				transfer_escrow_sweep.contract_id = transfer_contract.contract_id AND
+				` + server.ContractPaymentRetentionHoldSql + `
+		)
+	ORDER BY transfer_contract.create_time
+	LIMIT $2
+)
+UPDATE transfer_contract
+SET reap_time = now() AT TIME ZONE 'UTC'
+FROM batch
+WHERE transfer_contract.contract_id = batch.contract_id
+`
+
+// The contracts a stamp statement marks, in a transaction that rolls back.
+func stragglerStampTestSelection(t testing.TB, ctx context.Context, sql string, args ...any) map[server.Id]bool {
+	t.Helper()
+	conn := acquireContractLifecycleTestConnection(t, ctx)
+	defer conn.Release()
+	tx, err := conn.Begin(ctx)
+	server.Raise(err)
+	defer func() {
+		_ = tx.Rollback(context.WithoutCancel(ctx))
+	}()
+	selected := map[server.Id]bool{}
+	result, err := tx.Query(ctx, sql+` RETURNING transfer_contract.contract_id`, args...)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var contractId server.Id
+			server.Raise(result.Scan(&contractId))
+			selected[contractId] = true
+		}
+	})
+	return selected
+}
+
+// The straggler stamp marks exactly the contracts its create_time-only original
+// marks: closed, never reaped, created before the horizon and held by no
+// payment, among contracts created on and around the horizon whose ids were
+// minted anywhere within the margin, open ones, already reaped ones and held
+// ones. Batched below the eligible count, the stamp drains the same set.
+func TestStragglerStampMatchesCreateTime(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		horizon := testContractStatsBase
+		margin := ContractIdCreateTimeMargin
+		networkId := server.NewId()
+		usage := &contractUsageSnapshot{Version: 1, ByteCount: 1024,
+			Providers: []contractProviderUsage{{ClientId: networkId, NetworkId: networkId, ByteCount: 1024}}}
+		reaped := horizon.Add(time.Hour)
+		paymentId := server.NewId()
+		server.Tx(ctx, func(tx server.PgTx) {
+			insert := func(contractId server.Id, created time.Time, closed bool, reapTime *time.Time) {
+				var closeTime *time.Time
+				var outcome *ContractOutcome
+				var contractUsage *contractUsageSnapshot
+				if closed {
+					closeTime = &created
+					settled := ContractOutcomeSettled
+					outcome = &settled
+					contractUsage = usage
+				}
+				server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_contract (
+					contract_id,source_network_id,source_id,destination_network_id,destination_id,
+					transfer_byte_count,create_time,close_time,outcome,provider_usage,usage_origin_is_source,reap_time
+				) VALUES ($1,$2,$2,$2,$2,1024,$3,$4,$5,$6,TRUE,$7)`,
+					contractId, networkId, created.UTC(), closeTime, outcome, contractUsage, reapTime))
+			}
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO account_payment (
+				payment_id,payment_plan_id,network_id,payout_byte_count,payout_nano_cents,min_sweep_time,
+				completed,contract_retention_pending
+			) VALUES ($1,$2,$3,1024,1,$4,TRUE,TRUE)`, paymentId, server.NewId(), networkId, horizon.UTC()))
+			for index, created := range []time.Time{
+				horizon.Add(-time.Hour),
+				horizon.Add(-time.Microsecond),
+				horizon,
+				horizon.Add(time.Microsecond),
+				horizon.Add(time.Hour),
+			} {
+				for _, offset := range []time.Duration{0, -margin, margin - time.Millisecond, -time.Millisecond, time.Millisecond} {
+					insert(contractIdMintedAt(created.Add(offset)), created, true, nil)
+				}
+				insert(contractIdMintedAt(created), created, false, nil)
+				insert(contractIdMintedAt(created), created, true, &reaped)
+				held := contractIdMintedAt(created.Add(-time.Millisecond * time.Duration(index+2)))
+				insert(held, created, true, nil)
+				server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_escrow_sweep (
+					contract_id,balance_id,network_id,payout_byte_count,payout_net_revenue_nano_cents,payment_id
+				) VALUES ($1,$2,$3,1024,1,$4)`, held, server.NewId(), networkId, paymentId))
+			}
+			// the highest id below the horizon's id bound
+			highest := server.ContractIdFloor(horizon.Add(margin - time.Millisecond))
+			for index := 6; index < len(highest); index += 1 {
+				highest[index] = 0xff
+			}
+			insert(highest, horizon.Add(-time.Microsecond), true, nil)
+		})
+
+		original := stragglerStampTestSelection(t, ctx, assignStragglerReapTimeByCreateTimeSql, horizon.UTC(), 1000)
+		rewritten := stragglerStampTestSelection(t, ctx, assignStragglerReapTimeSQL, horizon.UTC(), 1000,
+			server.ContractIdFloor(horizon.Add(stragglerContractIdMargin)))
+		if len(original) == 0 || !maps.Equal(rewritten, original) {
+			t.Fatalf("the stamp selects %d contracts, the create_time original %d: %v vs %v", len(rewritten), len(original), rewritten, original)
+		}
+
+		if assigned := assignStragglerReapTimeBatches(ctx, horizon, 3); assigned != int64(len(original)) {
+			t.Fatalf("batches of 3 stamped %d contracts, want %d", assigned, len(original))
+		}
+		stamped := map[server.Id]bool{}
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(ctx, `SELECT contract_id FROM transfer_contract WHERE reap_time IS NOT NULL AND reap_time <> $1`, reaped.UTC())
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					var contractId server.Id
+					server.Raise(result.Scan(&contractId))
+					stamped[contractId] = true
+				}
+			})
+		})
+		if !maps.Equal(stamped, original) {
+			t.Fatalf("the batches stamped %v, the create_time original %v", stamped, original)
+		}
+	})
+}
