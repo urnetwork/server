@@ -1,13 +1,15 @@
 package controller
 
 // Stuck provider reports (connect_control_stuck_provider.go): the run
-// thresholds, the bound, the report results, the switch, and which replays
-// count. The fake store and clock keep these off Redis; the last test runs
-// the real control read and flag write.
+// thresholds, the bound, the report results and pacing, the switch, and which
+// replays count. The fake store and clock keep these off Redis; the last test
+// runs the real control read and flag write.
 
 import (
 	"context"
 	"errors"
+	"fmt"
+	"math/rand/v2"
 	"sync"
 	"testing"
 	"time"
@@ -50,25 +52,29 @@ func (self *stuckProviderTestClock) Set(offset time.Duration) time.Time {
 type stuckProviderTestStore struct {
 	stateLock sync.Mutex
 	clientIds []server.Id
+	ttls      []time.Duration
 	results   []stuckProviderTestResult
 	hold      chan struct{}
 	calls     chan server.Id
 }
 
+// One write's answer: set, or the flag found with its set time, or err.
 type stuckProviderTestResult struct {
-	set bool
-	err error
+	set      bool
+	flagTime time.Time
+	err      error
 }
 
 func newStuckProviderTestStore() *stuckProviderTestStore {
 	return &stuckProviderTestStore{calls: make(chan server.Id, 64)}
 }
 
-func (self *stuckProviderTestStore) SetRecycle(ctx context.Context, clientId server.Id, cooldown time.Duration) (bool, error) {
+func (self *stuckProviderTestStore) SetRecycle(ctx context.Context, clientId server.Id, ttl time.Duration) (bool, time.Time, error) {
 	hold, result := func() (chan struct{}, stuckProviderTestResult) {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
 		self.clientIds = append(self.clientIds, clientId)
+		self.ttls = append(self.ttls, ttl)
 		result := stuckProviderTestResult{set: true}
 		if 0 < len(self.results) {
 			result = self.results[0]
@@ -81,13 +87,19 @@ func (self *stuckProviderTestStore) SetRecycle(ctx context.Context, clientId ser
 		select {
 		case <-hold:
 		case <-ctx.Done():
-			return false, ctx.Err()
+			return false, time.Time{}, ctx.Err()
 		}
 	}
-	if _, ok := ctx.Deadline(); !ok || cooldown <= 0 {
-		return false, errors.New("a report without a deadline or cooldown")
+	if _, ok := ctx.Deadline(); !ok || ttl <= 0 {
+		return false, time.Time{}, errors.New("a report without a deadline or ttl")
 	}
-	return result.set, result.err
+	return result.set, result.flagTime, result.err
+}
+
+func (self *stuckProviderTestStore) Ttls() []time.Duration {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return append([]time.Duration{}, self.ttls...)
 }
 
 func (self *stuckProviderTestStore) Calls() []server.Id {
@@ -181,7 +193,7 @@ func stuckProviderTestDecisions(t *testing.T, result string) float64 {
 func noteStuckProviderRetries(signals *StuckProviderSignals, clock *stuckProviderTestClock, clientId server.Id, offsets ...time.Duration) []time.Duration {
 	crossings := []time.Duration{}
 	for _, offset := range offsets {
-		if signals.noteRetry(clientId, clock.Set(offset)) {
+		if signals.noteRetry(clientId, clock.Set(offset).UnixNano()) {
 			crossings = append(crossings, offset)
 		}
 	}
@@ -208,29 +220,60 @@ func sameOffsets(a []time.Duration, b []time.Duration) bool {
 	return true
 }
 
+// The defaults the thresholds follow from (the file header): a run of 20 to
+// 30 minutes, which no route an sdk stops asking for by itself spans, and two
+// generations of at least 64Ki clients.
+func TestStuckProviderDefaultsSpanTheRetryCadence(t *testing.T) {
+	settings := DefaultStuckProviderSignalSettings()
+	if settings.MinRetryDuration < 20*time.Minute || 30*time.Minute < settings.MinRetryDuration {
+		t.Errorf("MinRetryDuration %s, want 20 to 30 min", settings.MinRetryDuration)
+	}
+	if settings.MinRetryCount < 6 {
+		t.Errorf("MinRetryCount %d, want at least 6", settings.MinRetryCount)
+	}
+	if settings.TrackedClientCount < 65536 {
+		t.Errorf("TrackedClientCount %d, want at least 65536", settings.TrackedClientCount)
+	}
+	if settings.ControlMaxFailedReads <= 0 {
+		t.Errorf("ControlMaxFailedReads %d keeps an unreadable control on forever", settings.ControlMaxFailedReads)
+	}
+	if settings.SignalsPerSecond <= 0 || settings.SignalBurst <= 0 {
+		t.Errorf("reports unpaced or closed: %v a second, burst %d", settings.SignalsPerSecond, settings.SignalBurst)
+	}
+	if settings.StillStuckAge < settings.MaxRetryGap || settings.MinRetryDuration < settings.StillStuckAge {
+		t.Errorf("StillStuckAge %s, want between the gap %s and the run %s", settings.StillStuckAge, settings.MaxRetryGap, settings.MinRetryDuration)
+	}
+}
+
 // A run is reported once it has lasted MinRetryDuration with at least
 // MinRetryCount answers and no silence longer than MaxRetryGap, and then
-// starts over.
+// starts over. The default thresholds.
 func TestStuckProviderRunCrossesItsThresholds(t *testing.T) {
 	signals, _, _, clock := newStuckProviderTestSignals(t, stuckProviderTestSettings(), "g1", map[string]string{"stuckProviderSignal": "g1"})
 
+	everyMinute := []float64{}
+	for minute := 0; minute <= 15; minute += 1 {
+		everyMinute = append(everyMinute, float64(minute))
+	}
 	cases := []struct {
 		name    string
 		offsets []time.Duration
 		want    []time.Duration
 	}{
-		// a stuck route as one process sees it: at 10 min, then a new run
-		{name: "a steady run", offsets: minutes(0, 3, 6, 9, 10, 11, 14, 17, 20, 21), want: minutes(10, 21)},
+		// a stuck route as one process sees it: at 20 min, then a new run
+		{name: "a steady run", offsets: minutes(0, 3, 6, 9, 12, 15, 18, 20, 21, 24, 27, 30, 33, 36, 39, 41), want: minutes(20, 41)},
+		// a quarter hour of answers is not a run
+		{name: "fifteen minutes", offsets: minutes(everyMinute...), want: minutes()},
 		// one contract wait's answers span 30 s, however many there are
 		{name: "one burst", offsets: minutes(0, 0.1, 0.2, 0.3, 0.4, 0.45, 0.5), want: minutes()},
-		// long enough but too few answers, until the fourth
-		{name: "too few answers", offsets: minutes(0, 5, 10, 11), want: minutes(11)},
+		// long enough but too few answers, until the sixth
+		{name: "too few answers", offsets: minutes(0, 5, 10, 15, 20, 21), want: minutes(21)},
 		// a silence longer than the gap starts the run over at 14
-		{name: "a gap", offsets: minutes(0, 4, 8, 14, 18, 22, 24), want: minutes(24)},
+		{name: "a gap", offsets: minutes(0, 4, 8, 14, 18, 22, 26, 30, 33, 34), want: minutes(34)},
 		// a silence of exactly the gap continues the run
-		{name: "exactly the gap", offsets: minutes(0, 5, 10, 10.5), want: minutes(10.5)},
+		{name: "exactly the gap", offsets: minutes(0, 5, 10, 15, 20, 20.5), want: minutes(20.5)},
 		// bursts more than the gap apart never make a run
-		{name: "sparse bursts", offsets: minutes(0, 0.2, 6, 6.2, 12, 12.2, 18, 18.2), want: minutes()},
+		{name: "sparse bursts", offsets: minutes(0, 0.2, 6, 6.2, 12, 12.2, 18, 18.2, 24, 24.2), want: minutes()},
 	}
 	for _, c := range cases {
 		crossings := noteStuckProviderRetries(signals, clock, server.NewId(), c.offsets...)
@@ -274,68 +317,89 @@ func TestStuckProviderTrackerIsBounded(t *testing.T) {
 		}
 	}
 
-	// kept's run was dropped too by now, as dropped's was: both start over
-	if crossings := noteStuckProviderRetries(signals, clock, kept, minutes(4.5, 5, 6, 10)...); len(crossings) != 0 {
+	// kept's run was dropped too by now, as dropped's was: both start over,
+	// where a kept start would cross at 20
+	if crossings := noteStuckProviderRetries(signals, clock, kept, minutes(4.5, 5, 6, 10, 15, 20)...); len(crossings) != 0 {
 		t.Fatalf("a dropped run crossed at %v", crossings)
 	}
-	if crossings := noteStuckProviderRetries(signals, clock, dropped, minutes(4.5, 5, 6, 10)...); len(crossings) != 0 {
+	if crossings := noteStuckProviderRetries(signals, clock, dropped, minutes(4.5, 5, 6, 10, 15, 20)...); len(crossings) != 0 {
 		t.Fatalf("a dropped run crossed at %v", crossings)
 	}
 
-	// a run answered within the turnovers keeps its start
+	// a run answered within the turnovers keeps its start: three clients
+	// after it turn the generations over at most once
 	survivor := server.NewId()
-	noteStuckProviderRetries(signals, clock, survivor, minutes(20, 22)...)
-	for range 2 {
-		noteStuckProviderRetries(signals, clock, server.NewId(), minutes(23)...)
+	noteStuckProviderRetries(signals, clock, survivor, minutes(21, 23)...)
+	for range 3 {
+		noteStuckProviderRetries(signals, clock, server.NewId(), minutes(24)...)
 	}
-	noteStuckProviderRetries(signals, clock, server.NewId(), minutes(23)...)
-	if crossings := noteStuckProviderRetries(signals, clock, survivor, minutes(25, 30)...); !sameOffsets(crossings, minutes(30)) {
-		t.Fatalf("a surviving run crossed at %v, want 30m", crossings)
+	if crossings := noteStuckProviderRetries(signals, clock, survivor, minutes(26, 30, 35, 40, 41)...); !sameOffsets(crossings, minutes(41)) {
+		t.Fatalf("a surviving run crossed at %v, want 41m", crossings)
+	}
+}
+
+// Answers clientId through a run that crosses at start+20 min.
+func crossStuckProviderRun(signals *StuckProviderSignals, clock *stuckProviderTestClock, clientId server.Id, start float64) {
+	for _, offset := range minutes(start, start+4, start+8, start+12, start+16, start+20) {
+		clock.Set(offset)
+		signals.observeTerminalRetry(clientId)
+	}
+}
+
+func waitForStuckProviderDecisions(t *testing.T, result string, want float64) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for stuckProviderTestDecisions(t, result) < want {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s decisions %v, want %v", result, stuckProviderTestDecisions(t, result), want)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
 // A crossing reports the client off the request. The results count by the
-// flag write's outcome, and a report past MaxConcurrentSignals is dropped.
+// flag write's outcome: a flag found long after it was set is a client still
+// stuck after its recycle, one found soon after or unreadable a cooldown. A
+// report past MaxConcurrentSignals is dropped. Every flag's ttl is the
+// cooldown and up to a quarter more.
 func TestStuckProviderReportsCountTheirResults(t *testing.T) {
 	settings := stuckProviderTestSettings()
 	settings.MaxConcurrentSignals = 1
 	signals, _, store, clock := newStuckProviderTestSignals(t, settings, "g1", map[string]string{"stuckProviderSignal": "g1"})
-	store.results = []stuckProviderTestResult{{set: true}, {set: false}, {err: errors.New("unavailable")}}
-
-	cross := func(clientId server.Id, start float64) {
-		for _, offset := range minutes(start, start+3, start+6, start+9, start+10) {
-			clock.Set(offset)
-			signals.observeTerminalRetry(clientId)
-		}
-	}
-	waitFor := func(result string, want float64) {
-		t.Helper()
-		deadline := time.Now().Add(10 * time.Second)
-		for stuckProviderTestDecisions(t, result) < want {
-			if time.Now().After(deadline) {
-				t.Fatalf("%s decisions %v, want %v", result, stuckProviderTestDecisions(t, result), want)
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
+	// the flag found 1 min, 30 min, and an unreadable time after it was set,
+	// as of each report's crossing
+	store.results = []stuckProviderTestResult{
+		{set: true},
+		{flagTime: clock.start.Add(41*time.Minute - 1*time.Minute)},
+		{flagTime: clock.start.Add(62*time.Minute - 30*time.Minute)},
+		{},
+		{err: errors.New("unavailable")},
 	}
 
-	setBefore := stuckProviderTestDecisions(t, stuckProviderRecycleSet)
-	cooldownBefore := stuckProviderTestDecisions(t, stuckProviderRecycleCooldown)
-	errorBefore := stuckProviderTestDecisions(t, stuckProviderRecycleError)
-	droppedBefore := stuckProviderTestDecisions(t, stuckProviderRecycleDropped)
+	before := map[string]float64{}
+	for _, result := range []string{stuckProviderRecycleSet, stuckProviderRecycleCooldown, stuckProviderRecycleStillStuck, stuckProviderRecycleError, stuckProviderRecycleDropped} {
+		before[result] = stuckProviderTestDecisions(t, result)
+	}
 
 	clientId := server.NewId()
-	cross(clientId, 0)
+	crossStuckProviderRun(signals, clock, clientId, 0)
 	store.RequireCall(t, clientId)
-	waitFor(stuckProviderRecycleSet, setBefore+1)
-	// the next run of the same client finds the flag in its cooldown
-	cross(clientId, 11)
+	waitForStuckProviderDecisions(t, stuckProviderRecycleSet, before[stuckProviderRecycleSet]+1)
+	// the next runs of the same client find the flag: a minute old, a
+	// cooldown; half an hour old, still stuck; unreadable, a cooldown
+	crossStuckProviderRun(signals, clock, clientId, 21)
 	store.RequireCall(t, clientId)
-	waitFor(stuckProviderRecycleCooldown, cooldownBefore+1)
+	waitForStuckProviderDecisions(t, stuckProviderRecycleCooldown, before[stuckProviderRecycleCooldown]+1)
+	crossStuckProviderRun(signals, clock, clientId, 42)
+	store.RequireCall(t, clientId)
+	waitForStuckProviderDecisions(t, stuckProviderRecycleStillStuck, before[stuckProviderRecycleStillStuck]+1)
+	crossStuckProviderRun(signals, clock, clientId, 63)
+	store.RequireCall(t, clientId)
+	waitForStuckProviderDecisions(t, stuckProviderRecycleCooldown, before[stuckProviderRecycleCooldown]+2)
 	otherClientId := server.NewId()
-	cross(otherClientId, 0)
+	crossStuckProviderRun(signals, clock, otherClientId, 0)
 	store.RequireCall(t, otherClientId)
-	waitFor(stuckProviderRecycleError, errorBefore+1)
+	waitForStuckProviderDecisions(t, stuckProviderRecycleError, before[stuckProviderRecycleError]+1)
 
 	// one report in flight: the next is dropped without a write
 	hold := make(chan struct{})
@@ -345,11 +409,11 @@ func TestStuckProviderReportsCountTheirResults(t *testing.T) {
 		store.hold = hold
 	}()
 	heldClientId := server.NewId()
-	cross(heldClientId, 30)
+	crossStuckProviderRun(signals, clock, heldClientId, 100)
 	store.RequireCall(t, heldClientId)
 	droppedClientId := server.NewId()
-	cross(droppedClientId, 30)
-	waitFor(stuckProviderRecycleDropped, droppedBefore+1)
+	crossStuckProviderRun(signals, clock, droppedClientId, 100)
+	waitForStuckProviderDecisions(t, stuckProviderRecycleDropped, before[stuckProviderRecycleDropped]+1)
 	close(hold)
 	signals.Close()
 	for _, called := range store.Calls() {
@@ -357,14 +421,91 @@ func TestStuckProviderReportsCountTheirResults(t *testing.T) {
 			t.Fatal("a dropped report wrote the flag")
 		}
 	}
-	if len(store.Calls()) != 4 {
-		t.Fatalf("%d writes, want 4", len(store.Calls()))
+	if len(store.Calls()) != 6 {
+		t.Fatalf("%d writes, want 6", len(store.Calls()))
+	}
+	for _, ttl := range store.Ttls() {
+		if ttl < settings.Cooldown || settings.Cooldown+settings.Cooldown/4 <= ttl {
+			t.Fatalf("a flag ttl %s, want [%s, %s)", ttl, settings.Cooldown, settings.Cooldown+settings.Cooldown/4)
+		}
+	}
+}
+
+// A flag's ttl is the cooldown and a random part of up to a quarter of it,
+// so the flags of clients reported together expire apart.
+func TestStuckProviderFlagTtlSpreadsOverAQuarterOfTheCooldown(t *testing.T) {
+	settings := stuckProviderTestSettings()
+	signals, _, _, _ := newStuckProviderTestSignals(t, settings, "g1", map[string]string{"stuckProviderSignal": "g1"})
+	cooldown := settings.Cooldown
+	signals.randInt64N = func(n int64) int64 {
+		if n != int64(cooldown/4) {
+			t.Fatalf("drew from [0, %d), want [0, %d)", n, int64(cooldown/4))
+		}
+		return 0
+	}
+	if ttl := signals.flagTtl(); ttl != cooldown {
+		t.Fatalf("the least ttl %s, want %s", ttl, cooldown)
+	}
+	signals.randInt64N = func(n int64) int64 { return n - 1 }
+	if ttl := signals.flagTtl(); ttl != cooldown+cooldown/4-1 {
+		t.Fatalf("the most ttl %s, want %s", ttl, cooldown+cooldown/4-1)
+	}
+	signals.randInt64N = rand.Int64N
+	distinct := map[time.Duration]bool{}
+	for range 100 {
+		ttl := signals.flagTtl()
+		if ttl < cooldown || cooldown+cooldown/4 <= ttl {
+			t.Fatalf("a ttl %s outside [%s, %s)", ttl, cooldown, cooldown+cooldown/4)
+		}
+		distinct[ttl] = true
+	}
+	if len(distinct) < 90 {
+		t.Fatalf("%d distinct ttls of 100", len(distinct))
+	}
+}
+
+// Reports are paced by the token bucket: past its burst a crossing counts as
+// rate_limited without a write, its client starts a new run, and once a token
+// has refilled the client's next crossing is reported.
+func TestStuckProviderReportsArePaced(t *testing.T) {
+	settings := stuckProviderTestSettings()
+	// one token an hour, two at once
+	settings.SignalsPerSecond = 1.0 / 3600
+	settings.SignalBurst = 2
+	signals, _, store, clock := newStuckProviderTestSignals(t, settings, "g1", map[string]string{"stuckProviderSignal": "g1"})
+	rateLimitedBefore := stuckProviderTestDecisions(t, stuckProviderRecycleRateLimited)
+	setBefore := stuckProviderTestDecisions(t, stuckProviderRecycleSet)
+
+	first, second, paced := server.NewId(), server.NewId(), server.NewId()
+	crossStuckProviderRun(signals, clock, first, 0)
+	store.RequireCall(t, first)
+	crossStuckProviderRun(signals, clock, second, 0)
+	store.RequireCall(t, second)
+	// the third at the same minute is past the burst
+	crossStuckProviderRun(signals, clock, paced, 0)
+	waitForStuckProviderDecisions(t, stuckProviderRecycleRateLimited, rateLimitedBefore+1)
+	// its run started over: 15 more minutes do not cross
+	for _, offset := range minutes(21, 25, 29, 33, 36) {
+		clock.Set(offset)
+		signals.observeTerminalRetry(paced)
+	}
+	if rateLimited := stuckProviderTestDecisions(t, stuckProviderRecycleRateLimited); rateLimited != rateLimitedBefore+1 {
+		t.Fatalf("a run that started over crossed: rate limited +%v", rateLimited-rateLimitedBefore)
+	}
+	// an hour after the burst a token has refilled
+	crossStuckProviderRun(signals, clock, paced, 60)
+	store.RequireCall(t, paced)
+	waitForStuckProviderDecisions(t, stuckProviderRecycleSet, setBefore+3)
+	signals.Close()
+	if len(store.Calls()) != 3 {
+		t.Fatalf("%d writes, want 3", len(store.Calls()))
 	}
 }
 
 // Off by default, off past the ceiling, off for another block, and turned off
-// at run time: nothing is tracked or written. Turning off forgets every run,
-// and a failed read keeps the last switch.
+// at run time: nothing is tracked or written. Turning off forgets every run.
+// A failed read keeps the last switch until ControlMaxFailedReads fail in a
+// row, which turn it off.
 func TestStuckProviderSwitchGatesReports(t *testing.T) {
 	answerFor := func(signals *StuckProviderSignals, clock *stuckProviderTestClock, clientId server.Id) {
 		for _, offset := range minutes(0, 3, 6, 9, 10, 12, 15, 18, 20) {
@@ -415,7 +556,8 @@ func TestStuckProviderSwitchGatesReports(t *testing.T) {
 	}
 
 	// one block on: it reports
-	signals, control, store, clock := newStuckProviderTestSignals(t, stuckProviderTestSettings(), "g1", map[string]string{"stuckProviderSignal": "g1"})
+	settings := stuckProviderTestSettings()
+	signals, control, store, clock := newStuckProviderTestSignals(t, settings, "g1", map[string]string{"stuckProviderSignal": "g1"})
 	if !signals.allows() || stuckProviderTestGauge(t, "urnetwork_connect_stuck_provider_signal_enabled") != 1 {
 		t.Fatal("the named block is off")
 	}
@@ -423,17 +565,57 @@ func TestStuckProviderSwitchGatesReports(t *testing.T) {
 	answerFor(signals, clock, reportedClientId)
 	store.RequireCall(t, reportedClientId)
 
-	// a failed read keeps the switch on
-	control.Set(nil, errors.New("unavailable"))
+	// failed reads keep the switch on until the limit fail in a row, and a
+	// good read starts the count over
+	unavailable := errors.New("unavailable")
+	failReads := func(count int) {
+		control.Set(nil, unavailable)
+		for range count {
+			signals.refresh()
+		}
+	}
+	failReads(settings.ControlMaxFailedReads - 1)
+	if !signals.allows() {
+		t.Fatal("fewer failed reads than the limit turned the switch off")
+	}
+	control.Set(map[string]string{"stuckProviderSignal": "g1"}, nil)
+	signals.refresh()
+	failReads(settings.ControlMaxFailedReads - 1)
+	if !signals.allows() {
+		t.Fatal("failed reads on either side of a good one turned the switch off")
+	}
+	// a run under way when the control becomes unreadable is forgotten
+	unreadableClientId := server.NewId()
+	for _, offset := range minutes(21, 25, 29, 33) {
+		clock.Set(offset)
+		signals.observeTerminalRetry(unreadableClientId)
+	}
+	failReads(1)
+	if signals.allows() || stuckProviderTestGauge(t, "urnetwork_connect_stuck_provider_signal_enabled") != 0 {
+		t.Fatal("an unreadable control kept the switch on")
+	}
+	for _, offset := range minutes(34, 35) {
+		clock.Set(offset)
+		signals.observeTerminalRetry(unreadableClientId)
+	}
+	control.Set(map[string]string{"stuckProviderSignal": "g1"}, nil)
 	signals.refresh()
 	if !signals.allows() {
-		t.Fatal("a failed read turned the switch off")
+		t.Fatal("a good read did not turn the switch back on")
+	}
+	// a run kept from 21 would cross at 41
+	for _, offset := range minutes(36, 38, 41) {
+		clock.Set(offset)
+		signals.observeTerminalRetry(unreadableClientId)
+	}
+	if !waitForNoWrite(store) {
+		t.Fatal("a run from before the unreadable control was reported")
 	}
 
 	// turned off mid-run: the run is forgotten, and once back on a client
 	// starts from zero
 	clientId := server.NewId()
-	for _, offset := range minutes(30, 33, 36, 39) {
+	for _, offset := range minutes(60, 63, 66, 69) {
 		clock.Set(offset)
 		signals.observeTerminalRetry(clientId)
 	}
@@ -442,29 +624,34 @@ func TestStuckProviderSwitchGatesReports(t *testing.T) {
 	if signals.allows() || stuckProviderTestGauge(t, "urnetwork_connect_stuck_provider_signal_enabled") != 0 {
 		t.Fatal("the kill switch left the block on")
 	}
-	clock.Set(40 * time.Minute)
+	clock.Set(70 * time.Minute)
 	signals.observeTerminalRetry(clientId)
 	control.Set(map[string]string{"stuckProviderSignal": "g1"}, nil)
 	signals.refresh()
-	for _, offset := range minutes(41, 42, 44) {
+	// a run kept from 60 would cross at 80
+	for _, offset := range minutes(71, 72, 74, 77, 80) {
 		clock.Set(offset)
 		signals.observeTerminalRetry(clientId)
 	}
 	if !waitForNoWrite(store) {
 		t.Fatal("a run from before the kill switch was reported")
 	}
-	for _, offset := range minutes(47, 50, 51) {
+	for _, offset := range minutes(83, 86, 89, 91) {
 		clock.Set(offset)
 		signals.observeTerminalRetry(clientId)
 	}
 	store.RequireCall(t, clientId)
 }
 
-// Only a replay whose every refusal is terminal, for a pack none of whose
-// frames carries a sender role, counts toward a run. A sender role on any
-// frame, or any frame refused for a missing origin or a missing row, keeps
-// the client out of the tracker; the answer is the same either way.
-func TestReplayCountsOnlyTerminalRetriesWithoutSenderRole(t *testing.T) {
+// Only a replay whose every refusal is terminal and was refused to a
+// top-level source, for a pack none of whose frames carries a sender role,
+// counts toward a run. The production cohort is the non-companion request of
+// an old provider to a removed window client, so a companion flag is not
+// required. A sender role on any frame, a source that is a derived client
+// (the window client of an old consumer retrying a removed provider) or
+// inactive or missing, or any frame refused for a missing origin or a missing
+// row, keeps the client out of the tracker; the answer is the same either way.
+func TestReplayCountsOnlyTerminalRetriesOfTopLevelSourcesWithoutSenderRole(t *testing.T) {
 	ctx := newRefusalReplayOwnerContext(t)
 	owner := model.GetContractOriginNotifications(ctx)
 	signals, _, store, clock := newStuckProviderTestSignals(t, stuckProviderTestSettings(), "g1", map[string]string{"stuckProviderSignal": "g1"})
@@ -472,6 +659,11 @@ func TestReplayCountsOnlyTerminalRetriesWithoutSenderRole(t *testing.T) {
 
 	missingRow := refusalReplayInactive()
 	missingRow.Relationship.DestinationLifecycle = model.NetworkClientLifecycleMissing
+	inactiveFrom := func(sourceLifecycle model.NetworkClientLifecycle) model.ContractRouteRejection {
+		rejection := refusalReplayInactive()
+		rejection.Relationship.SourceLifecycle = sourceLifecycle
+		return rejection
+	}
 	withRole := func(destinationId server.Id, role protocol.SequenceRole) *protocol.CreateContract {
 		createContract := refusalReplayCreate(destinationId, false)
 		createContract.SenderRole = &role
@@ -489,16 +681,39 @@ func TestReplayCountsOnlyTerminalRetriesWithoutSenderRole(t *testing.T) {
 		clientId := server.NewId()
 		cases = append(cases, replayCase{name: name, clientId: clientId, args: build(clientId), eligible: eligible})
 	}
-	addCase("one terminal frame", true, func(clientId server.Id) *ConnectControlArgs {
+	addCase("one terminal frame of a top-level source", true, func(clientId server.Id) *ConnectControlArgs {
 		retiredId := server.NewId()
 		owner.RecordRouteRejection(clientId, retiredId, false, refusalReplayInactive(), nil)
 		return refusalReplayArgs(t, refusalReplayCreate(retiredId, false))
+	})
+	addCase("a companion terminal frame of a top-level source", true, func(clientId server.Id) *ConnectControlArgs {
+		retiredId := server.NewId()
+		owner.RecordRouteRejection(clientId, retiredId, true, refusalReplayInactive(), nil)
+		return refusalReplayArgs(t, refusalReplayCreate(retiredId, true))
 	})
 	addCase("two terminal frames", true, func(clientId server.Id) *ConnectControlArgs {
 		retiredId, otherRetiredId := server.NewId(), server.NewId()
 		owner.RecordRouteRejection(clientId, retiredId, false, refusalReplayInactive(), nil)
 		owner.RecordRouteRejection(clientId, otherRetiredId, true, refusalReplayInactive(), nil)
 		return refusalReplayArgs(t, refusalReplayCreate(retiredId, false), refusalReplayCreate(otherRetiredId, true))
+	})
+	for _, sourceLifecycle := range []model.NetworkClientLifecycle{
+		model.NetworkClientLifecycleActiveDerived,
+		model.NetworkClientLifecycleInactiveTop,
+		model.NetworkClientLifecycleInactiveDerived,
+		model.NetworkClientLifecycleMissing,
+	} {
+		addCase(fmt.Sprintf("a terminal frame of a source %s", sourceLifecycle), false, func(clientId server.Id) *ConnectControlArgs {
+			retiredId := server.NewId()
+			owner.RecordRouteRejection(clientId, retiredId, false, inactiveFrom(sourceLifecycle), nil)
+			return refusalReplayArgs(t, refusalReplayCreate(retiredId, false))
+		})
+	}
+	addCase("a derived source on one frame of two", false, func(clientId server.Id) *ConnectControlArgs {
+		retiredId, otherRetiredId := server.NewId(), server.NewId()
+		owner.RecordRouteRejection(clientId, retiredId, false, refusalReplayInactive(), nil)
+		owner.RecordRouteRejection(clientId, otherRetiredId, false, inactiveFrom(model.NetworkClientLifecycleActiveDerived), nil)
+		return refusalReplayArgs(t, refusalReplayCreate(retiredId, false), refusalReplayCreate(otherRetiredId, false))
 	})
 	addCase("a server sender role", false, func(clientId server.Id) *ConnectControlArgs {
 		retiredId := server.NewId()
@@ -533,18 +748,22 @@ func TestReplayCountsOnlyTerminalRetriesWithoutSenderRole(t *testing.T) {
 		return refusalReplayArgs(t, refusalReplayCreate(deletedId, false))
 	})
 
+	eligibleCount := 0
 	for _, c := range cases {
 		refusals, ok := PrepareConnectControlRefusals(ctx, c.clientId, c.args)
 		if !ok {
 			t.Fatalf("%s: not prepared", c.name)
 		}
-		if refusals.terminalWithoutSenderRole != c.eligible {
-			t.Fatalf("%s: terminal without a sender role = %t, want %t", c.name, refusals.terminalWithoutSenderRole, c.eligible)
+		if refusals.stuckProviderRetry != c.eligible {
+			t.Fatalf("%s: a stuck provider retry = %t, want %t", c.name, refusals.stuckProviderRetry, c.eligible)
+		}
+		if c.eligible {
+			eligibleCount += 1
 		}
 	}
 
-	// every client keeps retrying for 12 minutes, one replay a minute
-	for minute := 0; minute <= 12; minute += 1 {
+	// every client keeps retrying for 22 minutes, one replay every 2
+	for minute := 0; minute <= 22; minute += 2 {
 		clock.Set(time.Duration(minute) * time.Minute)
 		for _, c := range cases {
 			refusals, ok := PrepareConnectControlRefusals(ctx, c.clientId, c.args)
@@ -558,17 +777,17 @@ func TestReplayCountsOnlyTerminalRetriesWithoutSenderRole(t *testing.T) {
 		}
 	}
 	reported := map[server.Id]int{}
-	for range 2 {
+	for range eligibleCount {
 		select {
 		case clientId := <-store.calls:
 			reported[clientId] += 1
 		case <-time.After(10 * time.Second):
-			t.Fatalf("%d reports, want 2", len(reported))
+			t.Fatalf("%d reports, want %d", len(reported), eligibleCount)
 		}
 	}
 	signals.Close()
-	if len(store.Calls()) != 2 {
-		t.Fatalf("%d reports, want 2", len(store.Calls()))
+	if len(store.Calls()) != eligibleCount {
+		t.Fatalf("%d reports, want %d", len(store.Calls()), eligibleCount)
 	}
 	for _, c := range cases {
 		if c.eligible && reported[c.clientId] != 1 {
@@ -581,8 +800,9 @@ func TestReplayCountsOnlyTerminalRetriesWithoutSenderRole(t *testing.T) {
 }
 
 // With the real control and flag: an api process of the named block sets the
-// client's flag once, with the cooldown as its ttl; a process of another
-// block, and any process with the switch off, sets none.
+// client's flag once, with the cooldown and up to a quarter more as its ttl,
+// and a second process's report finds it; a process of another block, and any
+// process with the switch off, sets none.
 func TestStuckProviderSignalSetsTheFlagOnlyOnItsBlock(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -598,7 +818,7 @@ func TestStuckProviderSignalSetsTheFlagOnlyOnItsBlock(t *testing.T) {
 		}
 		decisions := func() float64 {
 			total := float64(0)
-			for _, result := range []string{stuckProviderRecycleSet, stuckProviderRecycleCooldown, stuckProviderRecycleError, stuckProviderRecycleDropped} {
+			for _, result := range []string{stuckProviderRecycleSet, stuckProviderRecycleCooldown, stuckProviderRecycleStillStuck, stuckProviderRecycleError, stuckProviderRecycleRateLimited, stuckProviderRecycleDropped} {
 				total += testutil.ToFloat64(stuckProviderRecycleDecisionsCounter.WithLabelValues(result))
 			}
 			return total
@@ -607,10 +827,7 @@ func TestStuckProviderSignalSetsTheFlagOnlyOnItsBlock(t *testing.T) {
 		// its result before the close, which cancels reports in flight
 		answer := func(signals *StuckProviderSignals, clock *stuckProviderTestClock, clientId server.Id) {
 			decisionsBefore := decisions()
-			for _, offset := range minutes(0, 3, 6, 9, 10) {
-				clock.Set(offset)
-				signals.observeTerminalRetry(clientId)
-			}
+			crossStuckProviderRun(signals, clock, clientId, 0)
 			deadline := time.Now().Add(2 * time.Second)
 			for decisions() == decisionsBefore && time.Now().Before(deadline) {
 				time.Sleep(10 * time.Millisecond)
@@ -640,9 +857,25 @@ func TestStuckProviderSignalSetsTheFlagOnlyOnItsBlock(t *testing.T) {
 		}
 		clientId := server.NewId()
 		onSignals, onClock := newSignals("g1")
+		setBefore := testutil.ToFloat64(stuckProviderRecycleDecisionsCounter.WithLabelValues(stuckProviderRecycleSet))
 		answer(onSignals, onClock, clientId)
-		if ttl := flagTtl(clientId); ttl <= 0 || settings.Cooldown < ttl {
-			t.Fatalf("the named block's flag ttl %s, want (0, %s]", ttl, settings.Cooldown)
+		if set := testutil.ToFloat64(stuckProviderRecycleDecisionsCounter.WithLabelValues(stuckProviderRecycleSet)); set != setBefore+1 {
+			t.Fatalf("the named block's report set +%v flags, want +1", set-setBefore)
+		}
+		if ttl := flagTtl(clientId); ttl <= 0 || settings.Cooldown+settings.Cooldown/4 < ttl {
+			t.Fatalf("the named block's flag ttl %s, want (0, %s]", ttl, settings.Cooldown+settings.Cooldown/4)
+		}
+		// another process of the block reports the client: it finds the
+		// flag, and reads back its set time (the age is the fake store's test)
+		found := func() float64 {
+			return testutil.ToFloat64(stuckProviderRecycleDecisionsCounter.WithLabelValues(stuckProviderRecycleCooldown)) +
+				testutil.ToFloat64(stuckProviderRecycleDecisionsCounter.WithLabelValues(stuckProviderRecycleStillStuck))
+		}
+		foundBefore := found()
+		secondSignals, secondClock := newSignals("g1")
+		answer(secondSignals, secondClock, clientId)
+		if foundAfter := found(); foundAfter != foundBefore+1 {
+			t.Fatalf("a second report found +%v flags, want +1", foundAfter-foundBefore)
 		}
 		otherBlockClientId := server.NewId()
 		otherSignals, otherClock := newSignals("g2")
