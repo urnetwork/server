@@ -525,9 +525,10 @@ func RefuseNetworkExtenderMeasurementRequest(
 //
 // Then come the rest, in the order the cap is to issue for them (C7,
 // amendment 24): each new certificate goes where it least crowds the more
-// crowded of its country and its network, counting the extenders that serve
-// there -- active, with a live certificate -- and the requests picked before
-// it in the same read, since one pass places several orders
+// crowded of its country and its network, counting the extenders that hold a
+// live certificate there -- serving, or away, to serve again with no new order
+// when they activate (amendment 23) -- and the requests picked before it in
+// the same read, since one pass places several orders
 // (pickNetworkExtenderMeasurementCandidates). Longest waiting first gave the
 // cap to whoever joined first, and neither a country nor a network alone
 // spreads it: one network supplies nearly every request from the countries
@@ -657,7 +658,10 @@ func getCappedNetworkExtenderMeasurementsInConn(
 		return targets
 	}
 
-	// the extenders that serve now in each country and in each network
+	// the extenders that hold a live certificate in each country and in each
+	// network. One that is away holds it still, and counts: an unstable network
+	// whose extenders come and go would otherwise count only those active at
+	// the read, and be given more than its share
 	countryCounts := map[string]int{}
 	networkCounts := map[server.Id]int{}
 	result, err = conn.Query(
@@ -669,7 +673,6 @@ func getCappedNetworkExtenderMeasurementsInConn(
 			COUNT(*)
 		FROM network_extender
 		WHERE
-			network_extender.active AND
 			EXISTS (
 				SELECT 1
 				FROM network_extender_measurement_cert
@@ -732,8 +735,9 @@ type networkExtenderMeasurementCandidate struct {
 }
 
 // Picks `count` candidates at most, one at a time, in the order the weekly cap
-// is to issue for them (C7, amendment 24), given the extenders that serve in
-// each country and in each network. Each pick is the candidate whose
+// is to issue for them (C7, amendment 24), given the extenders that hold a
+// live certificate in each country and in each network. Each pick is the
+// candidate whose
 // certificate would least crowd the more crowded of its country and its
 // network: the lowest max(country + 1, network + 1), then the lowest
 // country + network, then the longest waiting, then the lowest extender id. A

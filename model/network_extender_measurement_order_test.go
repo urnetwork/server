@@ -215,11 +215,11 @@ func testMeasurementOrderRequest(ctx context.Context, extenderId server.Id, key 
 
 // The queue as read (C7, amendment 24): the requests the weekly cap does not
 // hold first, however recent; then the capped ones as the cap is to issue for
-// them, weighed against the extenders that serve -- active, with a live
-// certificate, so not one that is away, one whose certificate was withdrawn,
-// or one whose certificate expired. The request of an extender that is not
-// active is left out of either part, and that of an extender that is gone is
-// read, for the pass to refuse. `limit` bounds the two parts together.
+// them, weighed against the extenders that hold a live certificate -- one that
+// is away among them, but not one whose certificate was withdrawn or expired.
+// The request of an extender that is not active is left out of either part,
+// and that of an extender that is gone is read, for the pass to refuse.
+// `limit` bounds the two parts together.
 func TestNetworkExtenderMeasurementPendingReadsTheCapsOrder(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -281,10 +281,11 @@ func TestNetworkExtenderMeasurementPendingReadsTheCapsOrder(t *testing.T) {
 			return extenderIds
 		}
 
-		// the US has none that serve and hk has one, so the US's request goes
-		// first, and the gone extender's before hk's, at level 1 too
+		// the US holds one certificate, the away extender's, and hk one, so
+		// the gone extender's request goes first, at level 1, then the US's
+		// and hk's at level 2, the US's waiting longer
 		pending := GetPendingNetworkExtenderMeasurements(ctx, now, 10)
-		want := []server.Id{rotating, inUs, gone, inHk}
+		want := []server.Id{rotating, gone, inUs, inHk}
 		got := []server.Id{}
 		for _, target := range pending {
 			got = append(got, target.Measurement.ExtenderId)
@@ -293,9 +294,9 @@ func TestNetworkExtenderMeasurementPendingReadsTheCapsOrder(t *testing.T) {
 			t.Fatalf("pending = %v, want %v", got, want)
 		}
 		connect.AssertEqual(t, pending[0].Extender.ExtenderId, rotating)
-		connect.AssertEqual(t, pending[1].Extender.CountryCode, "us")
-		connect.AssertEqual(t, len(pending[1].Addresses), 1)
-		connect.AssertEqual(t, pending[2].Extender == nil, true)
+		connect.AssertEqual(t, pending[1].Extender == nil, true)
+		connect.AssertEqual(t, pending[2].Extender.CountryCode, "us")
+		connect.AssertEqual(t, len(pending[2].Addresses), 1)
 		connect.AssertEqual(t, pending[3].Extender.CountryCode, "hk")
 
 		// the limit takes the head of the same order, the uncapped first
@@ -307,9 +308,10 @@ func TestNetworkExtenderMeasurementPendingReadsTheCapsOrder(t *testing.T) {
 		}
 
 		// both back: the away extender's request is read with the uncapped,
-		// and it serves in the US again, so the US's requests are at 2,
-		// behind the gone extender's. The one back from inactive is the US's
-		// first, its longest waiting, and puts the other at 3, behind hk's
+		// and its certificate still counts in the US, so the US's requests are
+		// at 2, behind the gone extender's. The one back from inactive is the
+		// US's first, its longest waiting, and puts the other at 3, behind
+		// hk's
 		testMeasurementOrderActivate(t, ctx, 3, "us", formerNetwork)
 		testMeasurementOrderActivate(t, ctx, 8, "us", usNetwork)
 		want = []server.Id{rotating, away, gone, inactive, inHk, inUs}
