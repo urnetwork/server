@@ -1720,6 +1720,27 @@ the existing gate ownership, preserving whole-suite coverage, assertions,
 fixture exclusions and native-child controls. It is not a product fix, an
 automatic retry, or grounds to split, skip or weaken the race gate.
 
+Size stdout and stderr capture limits separately. A declared 32 MiB combined
+allowance of 16 MiB per stream does not let stdout borrow unused stderr space.
+On 2026-10-31, a prior complete full-suite capture had 16,596,015 stdout bytes,
+near that stdout cap. A later attempt observed 16,777,387 bytes (16 MiB + 171),
+retained only 16 MiB and overflowed; the capture killed its known native group.
+Complete lines in the retained prefix had no test failure; the capture ended
+with a partial JSON line. Unread output and future tests remain unknown. This was a capture
+STOP, not a demonstrated product failure or a package PASS.
+
+The separately admitted combined qualification profile uses 32 MiB stdout and
+16 MiB stderr for NORMAL/RACE; CLI, vet and build retain 16 MiB per stream.
+These are finite limits for that selected profile, not universal required caps
+or a guarantee that a future suite fits. Overflow must still stop qualification.
+Preserve the original terminal, clipped prefix and owned-process/container
+cleanup evidence. Qualify an envelope correction through bounded cap-dispatch
+controls and an unchanged-runner source comparison, then fresh outputs and an
+independently owned fixture after prior consumers retire. Bind the new runner,
+runtime and profile before launch. Keep test selections, assertions, output
+semantics, native-child attestations and all timeouts unchanged; a larger
+capture bound does not recover missing evidence or qualify the first attempt.
+
 Account for deadline propagation before sizing that profile. The retry wrapper
 forwards the underlying test's Deadline; the migration fixture derives its
 context from t.Deadline minus thirty seconds, with its existing fallback when
