@@ -19,8 +19,9 @@ type controlHttpMetrics struct {
 	requestTime *prometheus.SummaryVec
 	requestLive *prometheus.GaugeVec
 	// requests the route's discard answered before authentication
-	discarded prometheus.Summary
-	now       func() time.Time
+	discarded         prometheus.Summary
+	discardedCanceled prometheus.Counter
+	now               func() time.Time
 }
 
 type controlHttpPhase uint8
@@ -67,6 +68,10 @@ func newControlHttpMetrics(registerer prometheus.Registerer) *controlHttpMetrics
 			Name: "urnetwork_connect_control_http_discarded_seconds",
 			Help: "Control HTTP handler residence of requests the route's discard answered before authentication, whatever their outcome; sum/count is a mean and count the requests.",
 		}),
+		discardedCanceled: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "urnetwork_connect_control_http_discarded_canceled_requests_total",
+			Help: "Control HTTP requests answered by the pre-authentication discard whose final router outcome is canceled, across all statuses.",
+		}),
 		now: time.Now,
 	}
 	for _, phase := range controlHttpPhases {
@@ -85,7 +90,7 @@ func newControlHttpMetrics(registerer prometheus.Registerer) *controlHttpMetrics
 			}
 		}
 	}
-	registerer.MustRegister(metrics.completions, metrics.duration, metrics.inflight, metrics.requests, metrics.requestTime, metrics.requestLive, metrics.discarded)
+	registerer.MustRegister(metrics.completions, metrics.duration, metrics.inflight, metrics.requests, metrics.requestTime, metrics.requestLive, metrics.discarded, metrics.discardedCanceled)
 	return metrics
 }
 
@@ -161,14 +166,33 @@ func advanceControlHttpPhase(req *http.Request, phase controlHttpPhase) {
 	observation.metrics.inflight.WithLabelValues(controlHttpPhases[phase]).Inc()
 }
 
-// Records that the route's discard answered the request, so its residence
-// also counts as a discarded request's. Unobserved routes are a no-op.
-func markControlHttpDiscarded(req *http.Request) {
+// Records that the route's discard answered the request. Its residence is
+// recorded at handler exit, but cancellation uses the router's final outcome:
+// the caller can cancel after the handler returns, and the router classifies
+// dependency cancellation, panic and transport abort separately.
+// Unobserved routes are a no-op; writer wrappers may expose an Unwrap chain.
+func markControlHttpDiscarded(req *http.Request, w http.ResponseWriter) {
 	observation, _ := req.Context().Value(controlHttpObservationKey{}).(*controlHttpObservation)
 	if observation == nil {
 		return
 	}
 	observation.discarded = true
+	for {
+		switch writer := w.(type) {
+		case interface{ markControlHttpDiscarded(*controlHttpMetrics) }:
+			writer.markControlHttpDiscarded(observation.metrics)
+			return
+		case interface{ Unwrap() http.ResponseWriter }:
+			w = writer.Unwrap()
+		default:
+			return
+		}
+	}
+}
+
+// The router's capability-preserving wrappers promote this method.
+func (self *requestMetricsWriter) markControlHttpDiscarded(metrics *controlHttpMetrics) {
+	self.controlDiscard = metrics
 }
 
 // Only fixed internal enums reach this observer; metrics retain no request data.

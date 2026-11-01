@@ -19827,15 +19827,21 @@ Requests the API answered from their body alone, before authentication (a
 pack of one `PeerAudit` frame, CPUOPT3 D3), leave the arithmetic. Their count,
 from `urnetwork_connect_control_http_discarded_seconds_count`, leaves the
 completions, the request denominator and the 100-completion floor; their own
-seconds, from its `_sum`, leave the duration sum. Such a request takes about
-0.1 ms, so counting it would dilute the mean and the canceled share of the
-requests that do work (a quarter of all control requests in 2026-10). Both
-adjusted denominators must reach 100: the request one may be 3% smaller within
-the scrape tolerance, and when discards dominated it could reach zero while the
-other stayed above 100, a NaN or +Inf share. The canceled share is clamped to
-100%. The thresholds are unchanged. A release without the collector reads as
-zero discards. The alert reports `requests_5m` without them, and
-`discarded_5m` and `discarded_seconds_5m` beside it.
+seconds, from its `_sum`, leave the duration sum. Their canceled outcomes,
+from `urnetwork_connect_control_http_discarded_canceled_requests_total`,
+leave the cancellation numerator too. That counter uses the router's final
+outcome, including cancellation after the control handler returns; it does
+not count a panic or transport abort classified separately by the router.
+Such a request takes about 0.1 ms, so counting it would dilute the mean and
+the canceled share of the requests that do work (a quarter of all control
+requests in 2026-10). Both adjusted denominators must reach 100: the request
+one may be 3% smaller within the scrape tolerance, and when discards dominated
+it could reach zero while the other stayed above 100, a NaN or +Inf share.
+The adjusted canceled count is
+clamped to zero and its share to 100% across scrape boundaries. The thresholds
+are unchanged. A release without a collector reads as zero for that discard
+measurement. The alert reports `requests_5m` and `canceled_5m` without discards,
+and `discarded_5m`, `discarded_seconds_5m` and `discarded_canceled_5m` beside them.
 
 The phase and frame diagnostics read only the listed partitions: the four
 phases and the nine frame message kinds below. A partition outside those
@@ -19941,6 +19947,12 @@ The opt-in API instrumentation adds only fixed cells:
   after the route's gates, so it can read a few microseconds short of the
   route's own duration for the same request. Both exist at zero on a capable
   executable.
+- `urnetwork_connect_control_http_discarded_canceled_requests_total` counts
+  those discarded control requests whose final router outcome is `canceled`,
+  across all statuses. It is recorded alongside the route's outcome, so late
+  cancellation and dependency cancellation use the same classification as
+  `urnetwork_http_requests_total`. It has no labels and exists at zero on a
+  capable executable.
 - `urnetwork_connect_control_refusal_replays_total{cause}` counts API
   `/connect/control` requests answered from route refusals that the
   router's origin notification owner recorded for the credential's own
