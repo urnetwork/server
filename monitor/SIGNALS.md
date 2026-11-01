@@ -8474,12 +8474,14 @@ only says how long is left, not why. Facts on 10-22:
   held 382 GB and 81.6M rows, and grew 4.3 GB/h on 10-22. About 90% of its
   rows belong to inactive clients. Since PARTITION-MAINTENANCE-PLAN.md Part D,
   `remove_gone_st_client_key_history` deletes a client's history once the
-  contract horizon reaper's horizon (91 days, or the control's `horizonDays`,
-  down to the reaper's floor) has passed since the client went
-  (`st_client_key_gone`), and never sooner than the guard's 30-day floor
-  (migration 904). It stays on this append-only list until the first deletes,
-  which come when the oldest gone records reach the horizon: records start
-  2026-10-24, so about 2026-12-08 at a 45-day horizon.
+  contract horizon reaper's horizon has passed since the client went
+  (`st_client_key_gone`): the control's `horizonDays`, down to the reaper's
+  floor, while the reaper's `mode` is `on`, and 91 days otherwise; never
+  sooner than the guard's 30-day floor (migration 904). Its brake,
+  `{client_key_history_retention}control`, stops or paces the deletes. It
+  stays on this append-only list until the first deletes, which come when the
+  oldest gone records (2026-10-24) reach the horizon: about 2026-11-28 at a
+  35-day horizon, 2026-12-08 at 45 days.
 
 Checks, all cheap and read-only:
 1. Retired 2026-10-31: the subsidy frontier check (`retention-frontier-pinned`).
@@ -30212,8 +30214,8 @@ documented rollback, `ClientKeyHistoryRetentionFloorRollbackSql`, is drift
 until the floor is restored), and a floor with another volatility,
 strictness or configuration. The retention task deletes a gone client's
 history once the contract horizon reaper's horizon has passed since the
-client went, never below the floor; the catalog checks do not show where the
-retention task is.
+client went while the reaper's mode is on, never below the floor; the catalog
+checks do not show where the retention task is.
 
 ### 8.10 Client-reliability covering-index drift after partition cutover
 Probe: `reliability-index`

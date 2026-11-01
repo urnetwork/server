@@ -1649,18 +1649,24 @@ Changes:
 
 - **Updated (owner, 2026-11-01): key history follows the contract horizon.**
   - The retention deletes a gone client's history once the contract horizon
-    reaper's effective horizon has passed since the client went: the
-    `horizonDays` of `{contract_horizon}control` as the reaper narrows it (91
-    days by default, 45 floor-ready, 35 planned from about 2026-11-08),
-    whatever the reaper's mode, and 91 days when the control cannot be read.
+    reaper's horizon has passed since the client went, while the reaper's
+    `mode` is `on`: the `horizonDays` of `{contract_horizon}control` as the
+    reaper narrows it. That is 91 days by default; the reaper's floor is 45
+    days, and 35 is planned from about 2026-11-08. A dry run, the reaper off,
+    no control or an unreadable one keep 91 days.
   - Migration 904 moves the guard's fixed 91 days to
     `st_client_key_history_retention_floor()`, 30 days
     (`server.ClientKeyHistoryRetentionFloor`). Both the guard and the
     retention's batch read it. It changes function definitions only, and its
     rollback (`ClientKeyHistoryRetentionFloorRollbackSql`) restores 91 days for
     both. The readers it keeps safe are listed in `db_identity_retention.go`.
-  - Deletes are paced to 1,000 clients a second in each run's delete half. The
-    first come when the oldest records (2026-10-24) reach the horizon.
+  - The deletes have their own brake, `{client_key_history_retention}control`:
+    `mode` on or off and `maxClientsPerSecond`, read before every batch, 150 a
+    second by default (about 5M clients a day) so a backlog ramps under
+    watch. A pass resumes from a (gone_time, client_id) cursor. The first
+    deletes come when the oldest records (2026-10-24) reach the horizon:
+    about 2026-11-28 at 35 days, when the 2026-10-24..27 records (about 58M
+    clients) come due together.
 
 ## Cutover requirements
 
