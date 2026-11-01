@@ -660,6 +660,7 @@ func TestConnectProvideIntentShadowServesOverLimitH1(t *testing.T) {
 // nothing is recorded for the client.
 func TestConnectProvideIntentHeaderStartsQualification(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		defer model.Testing_SetProviderIntentShadowSampling(true)()
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		testServer := newProviderIntentTestServer(t, ctx)

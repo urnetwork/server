@@ -391,6 +391,7 @@ func testingSetProviderIntentState(t testing.TB, ctx context.Context, networkId 
 // refreshing its presence and counts as a normal client again.
 func TestProviderIntentExemptionNeedsLiveIntentConnection(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		defer Testing_SetProviderIntentShadowSampling(true)()
 		ctx := t.Context()
 		networkId := testingProviderIntentNetwork(ctx)
 		now := server.NowUtc()
@@ -443,6 +444,7 @@ func TestProviderIntentExemptionNeedsLiveIntentConnection(t *testing.T) {
 // made again on each new connection of the client.
 func TestProviderIntentFailedClientTakesFreeNormalSlot(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		defer Testing_SetProviderIntentShadowSampling(true)()
 		ctx := t.Context()
 		defer Testing_SetConcurrentClientsLimit(2, 2)()
 		networkId := testingProviderIntentNetwork(ctx)
@@ -731,6 +733,7 @@ func TestProviderIntentEvidenceWindow(t *testing.T) {
 // provider, and the chain stops when the client has no live intent connection.
 func TestProviderIntentCheckChain(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		defer Testing_SetProviderIntentShadowSampling(true)()
 		ctx := t.Context()
 		networkId := testingProviderIntentNetwork(ctx)
 		clientId := testingProviderIntentConnectedClient(ctx, networkId)
@@ -791,6 +794,7 @@ func TestProviderIntentCheckChain(t *testing.T) {
 // into a normal slot decision, and leaves no probe priority behind.
 func TestProviderIntentCheckFailsWithoutPassingProbe(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		defer Testing_SetProviderIntentShadowSampling(true)()
 		ctx := t.Context()
 		defer Testing_SetConcurrentClientsLimit(1, 1)()
 		networkId := testingProviderIntentNetwork(ctx)
@@ -1096,6 +1100,7 @@ func TestNetworkProviderInstallsKeepPeerList(t *testing.T) {
 // intent rules, never in the network's peer list.
 func TestNetworkProviderInstallsNeverPeers(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		defer Testing_SetProviderIntentShadowSampling(true)()
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
