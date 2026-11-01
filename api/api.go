@@ -26,8 +26,9 @@ func Routes() []*router.Route {
 // The background owners only the API lifecycle supplies. A nil owner leaves
 // its route bare: the route never starts one itself.
 type routeOwners struct {
-	notifications *model.ContractOriginNotifications
-	appearances   *model.ProviderAppearances
+	notifications  *model.ContractOriginNotifications
+	appearances    *model.ProviderAppearances
+	stuckProviders *controller.StuckProviderSignals
 }
 
 // Only the API lifecycle supplies this authenticated cache; the route never
@@ -37,8 +38,8 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 	verifyRequestClosure := handlers.NewVerifyRequestClosureHandlers()
 	providerWorkBody := router.StreamingBody{IdleTimeout: 60 * time.Second, TransferTimeout: 60 * time.Second, ResponseTimeout: 300 * time.Second, DrainTimeout: 5 * time.Second}
 	connectControl := handlers.ConnectControl
-	if owners.notifications != nil {
-		connectControl = handlers.ConnectControlWithOriginNotifications(owners.notifications)
+	if owners.notifications != nil || owners.stuckProviders != nil {
+		connectControl = handlers.ConnectControlWithOwners(owners.notifications, owners.stuckProviders)
 	}
 	findProviders2 := handlers.NetworkFindProviders2
 	if owners.appearances != nil {

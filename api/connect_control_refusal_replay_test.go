@@ -28,6 +28,7 @@ import (
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/router"
 	"github.com/urnetwork/server/session"
 )
 
@@ -104,6 +105,16 @@ type controlReplayFixture struct {
 // The caller must defer the returned close inside its TestEnv callback.
 func newControlReplayFixture(t testing.TB, ctx context.Context) (*controlReplayFixture, func()) {
 	t.Helper()
+	return newControlReplayFixtureWithRouter(t, ctx, NewRouter)
+}
+
+// The fixture over the router newRouter makes.
+func newControlReplayFixtureWithRouter(
+	t testing.TB,
+	ctx context.Context,
+	newRouter func(context.Context, context.Context) (*router.Router, func(), error),
+) (*controlReplayFixture, func()) {
+	t.Helper()
 	fixture := &controlReplayFixture{
 		networkId:  server.NewId(),
 		userId:     server.NewId(),
@@ -123,7 +134,7 @@ func newControlReplayFixture(t testing.TB, ctx context.Context) (*controlReplayF
 	if err != nil {
 		t.Fatal(err)
 	}
-	owned, closeOwned, err := NewRouter(ctx, ctx)
+	owned, closeOwned, err := newRouter(ctx, ctx)
 	if err != nil {
 		scope.Close()
 		t.Fatal(err)

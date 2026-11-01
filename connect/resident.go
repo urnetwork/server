@@ -604,6 +604,8 @@ type ExchangeSettings struct {
 	ExchangeMoverSettings
 
 	ExchangeLocalTransportSettings
+
+	ExchangeStuckProviderRecycleSettings
 }
 
 // Reports one exchange writer ping timer arm to a test.
@@ -727,6 +729,8 @@ func DefaultExchangeSettingsWithBufferSize(bufferSize int) *ExchangeSettings {
 		ExchangeMoverSettings: *DefaultExchangeMoverSettings(),
 
 		ExchangeLocalTransportSettings: *DefaultExchangeLocalTransportSettings(),
+
+		ExchangeStuckProviderRecycleSettings: *DefaultExchangeStuckProviderRecycleSettings(),
 	}
 }
 
@@ -815,6 +819,10 @@ type Exchange struct {
 	// in-process delivery of transports to local residents; nil while
 	// EnableLocalTransport is off (resident_local_transport.go)
 	localTransport *exchangeLocalTransport
+
+	// recycles of stuck providers the api reports; nil while
+	// EnableStuckProviderRecycle is off (client_recycle.go)
+	stuckProviderRecycle *exchangeStuckProviderRecycle
 
 	// the shared key-event subscriber (PEERSSTREAMS2.md); nil unless
 	// KeyEventDelivery.Enabled
@@ -952,6 +960,13 @@ func newExchange(
 	}
 	exchange.contractOriginNotifications = model.NewContractOriginNotifications(cancelCtx, model.DefaultContractOriginNotificationSettings())
 	exchange.localTransport = newExchangeLocalTransport(cancelCtx, settings, block)
+	// flags arrive only as key events
+	if exchange.keyEventSubscriber != nil {
+		exchange.stuckProviderRecycle = newExchangeStuckProviderRecycle(cancelCtx, settings, block)
+		if exchange.stuckProviderRecycle != nil {
+			exchange.keyEventSubscriber.SetClientRecycle(exchange.handleClientRecycle)
+		}
+	}
 	if settings.EnableMove {
 		inventoryProcessHost := host
 		if settings.edgeInventoryProcessHostForTest != "" {
@@ -2444,6 +2459,9 @@ func (self *Exchange) Close() {
 	if self.localTransport != nil {
 		self.localTransport.closeWorkers()
 	}
+	if self.stuckProviderRecycle != nil {
+		self.stuckProviderRecycle.closeWorkers()
+	}
 	// Stop active resident work before any socket or notification-owner join;
 	// a slow Redis close must not postpone the exchange's cancellation edge.
 	self.cancel()
@@ -2467,8 +2485,9 @@ func (self *Exchange) Close() {
 
 // WaitForIdle waits until every admitted resident, listener, accepted
 // connection, and in-process transport link has completed teardown, with the
-// local transport's control loop and pacer. Close must be called first so no
-// wait group can receive another admission.
+// local transport's control loop and pacer and the stuck provider recycle's
+// control loop and recycles. Close must be called first so no wait group can
+// receive another admission.
 func (self *Exchange) WaitForIdle(ctx context.Context) bool {
 	done := make(chan struct{})
 	go func() {
@@ -2476,6 +2495,9 @@ func (self *Exchange) WaitForIdle(ctx context.Context) bool {
 		self.connectionWorkers.Wait()
 		if self.localTransport != nil {
 			self.localTransport.workers.Wait()
+		}
+		if self.stuckProviderRecycle != nil {
+			self.stuckProviderRecycle.workers.Wait()
 		}
 		close(done)
 	}()

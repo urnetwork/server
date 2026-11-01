@@ -62,8 +62,9 @@ type ContractRouteRejection struct {
 // are never reused (session/state_refusal_cache.go relies on the same
 // invariant), so the route stays refused. A missing row is not terminal here,
 // and neither is a write-boundary refusal, whose labels carry the earlier
-// read's active lifecycle.
-func (self ContractRouteRejection) terminal() bool {
+// read's active lifecycle. The api's stuck provider tracker reads the same
+// verdict (controller/connect_control_stuck_provider.go).
+func (self ContractRouteRejection) Terminal() bool {
 	if self.Cause != ContractRouteDestinationInactive {
 		return false
 	}
@@ -237,7 +238,7 @@ type contractTerminalRouteRejection struct {
 	validUntil time.Time
 }
 
-// Terminal refusals (see `ContractRouteRejection.terminal`), keyed like the
+// Terminal refusals (see `ContractRouteRejection.Terminal`), keyed like the
 // ring. An origin edge cannot open such a route, so edges and acknowledgements
 // leave these entries alone. Two bounded generations: a refusal enters the
 // current generation; a full current generation becomes the previous one and
@@ -358,7 +359,7 @@ func (self *ContractOriginNotifications) RecordRouteRejection(
 		return false
 	}
 	key := newContractRouteRejectionKey(sourceId, destinationId, companion)
-	if rejection.terminal() {
+	if rejection.Terminal() {
 		return self.terminalRouteRejections.put(key, rejection)
 	}
 	return self.routeRejections.put(key, rejection, fence)
