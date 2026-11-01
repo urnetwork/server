@@ -26,10 +26,13 @@ type stClientKeyRegistrationPublication struct {
 	err         error
 }
 
-// Unknown and remote backends retain their independent publication path. Only
-// an existing authority reservation may queue local work, once, after its Sql
-// result exists. Waiting for the worker also joins this member's actual writes.
-func (self *stClientKeyRegistrationReservation) publish(ctx context.Context, store server.BlobStore, encoded []byte, contentHash string) error {
+// Only an existing authority reservation may publish, once, after its Sql
+// result exists. Local work joins a quota window, and waiting for the worker
+// also joins this member's actual writes. Unknown and remote backends hand the
+// retained wrapper to the owner's bounded writer (stClientKeyEvidenceWriter)
+// and return without waiting for storage. unchanged marks an exact retry,
+// whose evidence the writer reads before it writes.
+func (self *stClientKeyRegistrationReservation) publish(ctx context.Context, store server.BlobStore, encoded []byte, contentHash string, unchanged bool) error {
 	if self == nil || self.cohort == nil || self.cohort.parent == nil || ctx == nil || store == nil || len(encoded) == 0 || len(encoded) > startifact.MaxClientKeyEvidenceBytes || len(contentHash) > 128 {
 		return errors.New("client-key registration publication owner is incomplete")
 	}
@@ -73,7 +76,7 @@ func (self *stClientKeyRegistrationReservation) publish(ctx context.Context, sto
 		return err
 	}
 	if !local {
-		_, err := startifact.PublishClientKeyEvidence(ctx, store, request.encoded, contentHash)
+		err := parent.evidenceWriter().enqueue(store, request.encoded, contentHash, unchanged)
 		return errors.Join(err, ctx.Err())
 	}
 	if start {
