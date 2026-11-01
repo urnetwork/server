@@ -156,7 +156,9 @@ func newCloseEvidencePartitionFamily() *PartitionFamily {
 		ReindexExempt:    true,
 		// A client clock behind by days keeps its weeks that much longer,
 		// by design: the week waits for its stragglers' retention. A quarter
-		// past the longest retention is worth a look.
+		// past the longest retention is worth a look. The monitor does not
+		// read the horizon, so at a 35-day horizon a stuck week is reported
+		// only this long after the 91 days, not after its own retention.
 		MonitorRetentionGrace: ContractRetention,
 		Settings: &PartitionFamilySettings{
 			CreateLockTimeout:    3 * time.Second,
@@ -407,14 +409,14 @@ func closeEvidenceRangeExpired(ctx context.Context, now time.Time, r PartitionRa
 // Runs first in a week's drop transaction, after the registry set the guard's
 // opt-in: refuses, by raising, a drop that is not the retention task's (one
 // without the opt-in, of the legacy or DEFAULT partition, or of a week whose
-// upper bound is not past ctx's evidence retention by the database's clock),
-// and a busy table. Then takes the locks the detach needs, parent first, so a
-// lock wait happens before any change.
+// upper bound is not past the evidence retention by the database's clock,
+// ctx's bounded by the installed guard), and a busy table. Then takes the locks
+// the detach needs, parent first, so a lock wait happens before any change.
 func fenceCloseEvidenceDrop(ctx context.Context, tx PgTx, r PartitionRange, settings *CloseEvidencePartitionSettings) {
 	if r.Legacy || r.Default || r.Lower.IsZero() || r.Upper.IsZero() {
 		panic(errors.New("the legacy and DEFAULT partitions of the close evidence are never dropped"))
 	}
-	retention := CloseEvidenceRetention(ctx)
+	retention := closeEvidenceRetentionIn(ctx, tx)
 	var optedIn bool
 	var expired bool
 	Raise(tx.QueryRow(
@@ -469,7 +471,7 @@ func closeEvidenceWeekBlocker(ctx context.Context, conn PgQuerier, r PartitionRa
 	}
 	leaf := closeEvidencePartitionFamily.LeafName(closeEvidenceTable, r)
 	var blocker string
-	Raise(conn.QueryRow(ctx, closeEvidenceWeekBlockerSql(leaf, r, CloseEvidenceRetention(ctx))).Scan(&blocker))
+	Raise(conn.QueryRow(ctx, closeEvidenceWeekBlockerSql(leaf, r, closeEvidenceRetentionIn(ctx, conn))).Scan(&blocker))
 	return blocker
 }
 

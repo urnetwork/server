@@ -415,24 +415,33 @@ func dropContractWeek(ctx context.Context, week contractWeek) (dropped []string,
 }
 
 // Deletes close evidence accepted longer ago than its retention, ctx's contract
-// horizon (CloseEvidenceRetention), whose contract is resolved or gone, in
-// batches ordered by contract id. A contract the horizon reaper deleted is
-// gone, so its evidence goes once it is as old. Only a transaction that opts in
-// may delete evidence, and the evidence guard admits only rows older than
-// CloseEvidenceRetentionFloor, the shortest retention. Once the evidence is
-// partitioned the pass deletes from the leaves the drop cannot take
-// (closeEvidenceRemovalTargets): the DEFAULT partition, the expired weeks a
-// straggler keeps, and the legacy partition, one leaf after another; a week the
-// drop will take, and a week not yet expired, are left alone. A pass ends when
-// the last leaf's batch comes up short; the next pass starts over to pick up
-// rows whose contract resolved since.
+// horizon bounded by the installed guard (closeEvidenceRetentionIn), whose
+// contract is resolved or gone, in batches ordered by contract id. A contract
+// the horizon reaper deleted is gone, so its evidence goes once it is as old.
+// Only a transaction that opts in may delete evidence, and the evidence guard
+// admits only rows older than CloseEvidenceRetentionFloor, the shortest
+// retention. Once the evidence is partitioned the pass deletes from the leaves
+// the drop cannot take (closeEvidenceRemovalTargets): the DEFAULT partition,
+// the expired weeks a straggler keeps, and the legacy partition, one leaf after
+// another; a week the drop will take, and a week not yet expired, are left
+// alone. A pass ends when the last leaf's batch comes up short; the next pass
+// starts over to pick up rows whose contract resolved since.
 func RemoveExpiredCloseEvidence(ctx context.Context, now time.Time, cursor CloseEvidenceRemovalCursor, deadline time.Time) (removed int64, next CloseEvidenceRemovalCursor, more bool) {
 	targets, err := closeEvidenceRemovalTargets(ctx, now)
 	if err != nil {
 		glog.Errorf("[cp]close evidence retention: %s\n", err)
 		return 0, cursor, false
 	}
-	retention := CloseEvidenceRetention(ctx)
+	var retention time.Duration
+	err = partitionRegistryRun(func() {
+		MaintenanceDb(ctx, func(conn PgConn) {
+			retention = closeEvidenceRetentionIn(ctx, conn)
+		})
+	})
+	if err != nil {
+		glog.Errorf("[cp]close evidence retention: %s\n", err)
+		return 0, cursor, false
+	}
 	start, from := cursor.resumeIn(targets)
 	for _, target := range targets[start:] {
 		count, last, complete, ok := removeExpiredCloseEvidenceFrom(ctx, target, now, retention, from, deadline)

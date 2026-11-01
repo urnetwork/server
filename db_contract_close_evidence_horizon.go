@@ -35,8 +35,24 @@
 // The tasks that delete or drop evidence read the horizon from the reaper's
 // control once per run, before any transaction, and carry it in their context
 // (WithContractHorizon, through model.WithContractHorizonControl), so no Redis
-// read ever happens while a drop holds its locks. A run that cannot read the
-// control keeps ContractRetention.
+// read ever happens while a drop holds its locks. The horizon applies only
+// while the reaper's mode is on: a run that finds it off or in a dry run, or
+// cannot read the control, keeps ContractRetention, so setting the mode off
+// stops the evidence deletes below 91 days from the next run too.
+//
+// The installed evidence guard bounds the retention as well
+// (closeEvidenceRetentionIn): until the horizon guard migration is applied,
+// or after its body is replaced again, the guard admits only rows older than
+// 91 days, so the row deletes and the weekly drops keep 91 days. A drop
+// bypasses the row guard, so without that bound a release ahead of its
+// migration would drop weeks the database's guard still keeps. The code may
+// therefore deploy before or after the migration.
+//
+// A census of a small window (above) can still miss reports in one case: a
+// contract that stays unresolved longer than the horizon keeps its reports,
+// but once it resolves the ones accepted before the horizon go at the next
+// pass, while the epoch it closed in may not have been read yet. No production
+// window is small enough to read reports at all.
 package server
 
 import (
@@ -63,6 +79,29 @@ func CloseEvidenceRetention(ctx context.Context) time.Duration {
 		return ContractRetention
 	}
 	return min(max(horizon, CloseEvidenceRetentionFloor), ContractRetention)
+}
+
+// The age from which the installed evidence guard admits a retention delete:
+// CloseEvidenceRetentionFloor when its body is the horizon guard's, and
+// ContractRetention for any other body (857's, the move guard's, or one an
+// operator restored to stop the deletes). Read through conn, which may be the
+// drop's own transaction.
+func closeEvidenceGuardFloor(ctx context.Context, conn PgQuerier) time.Duration {
+	var body string
+	err := conn.QueryRow(
+		ctx,
+		`SELECT coalesce((SELECT prosrc FROM pg_proc WHERE oid = to_regprocedure('public.contract_close_report_evidence_guard()')), '')`,
+	).Scan(&body)
+	if err == nil && body == ContractCloseEvidenceHorizonGuardBodySql() {
+		return CloseEvidenceRetentionFloor
+	}
+	return ContractRetention
+}
+
+// The retention the row deletes and the drops apply: ctx's
+// (CloseEvidenceRetention), and never less than the installed guard admits.
+func closeEvidenceRetentionIn(ctx context.Context, conn PgQuerier) time.Duration {
+	return max(CloseEvidenceRetention(ctx), closeEvidenceGuardFloor(ctx, conn))
 }
 
 // A retention as whole seconds, for an interval literal.

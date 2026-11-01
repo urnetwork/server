@@ -11080,6 +11080,8 @@ var migrations = []any{
 	// retention delete of a report accepted more than 35 days ago, the
 	// shortest horizon, in place of 91. It replaces the guard's function body
 	// only: no table lock, no scan. Every delete the running release makes
-	// (91 days) stays admitted, so it applies before or after the deploy.
+	// (91 days) stays admitted, and the release that follows the horizon keeps
+	// 91 days until it finds this body installed (closeEvidenceGuardFloor), so
+	// it applies before or after the deploy.
 	newSqlMigration(contractCloseReportEvidenceHorizonGuardSql),
 }

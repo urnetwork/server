@@ -12,7 +12,8 @@ import (
 )
 
 // The control sets the horizon for the reaper and the evidence alike. Without
-// it both keep 91 days, so nothing here is touched. At horizonDays 45 the
+// it both keep 91 days, so nothing here is touched; the evidence keeps them
+// too while the reaper's mode is not on. At horizonDays 45, mode on, the
 // reaper deletes a settled contract 60 days old, which leaves its close
 // reports without a contract, and the evidence pass then deletes them; the
 // reports of an open contract of the same age, and of a settled contract 30
@@ -98,7 +99,20 @@ func TestCloseEvidenceGoesWithTheReapedContract(t *testing.T) {
 			t.Fatalf("the code's horizon removed %d evidence rows, or the 60-day contract", removed)
 		}
 
-		setHorizonTestControl(t, ctx, map[string]string{ContractHorizonControlFieldHorizonDays: "45"})
+		// the horizon applies only while the reaper's mode is on: without a
+		// mode (the code's default, off), off and in a dry run, 91 days
+		for _, mode := range []string{"", "off", "dry_run"} {
+			removeHorizonTestControl(t, ctx)
+			fields := map[string]string{ContractHorizonControlFieldHorizonDays: "45"}
+			if mode != "" {
+				fields[ContractHorizonControlFieldMode] = mode
+			}
+			setHorizonTestControl(t, ctx, fields)
+			if retention := server.CloseEvidenceRetention(WithContractHorizonControl(ctx)); retention != server.ContractRetention {
+				t.Fatalf("at horizonDays 45 and mode %q the evidence keeps %s", mode, retention)
+			}
+		}
+		setHorizonTestControl(t, ctx, map[string]string{ContractHorizonControlFieldMode: "on", ContractHorizonControlFieldHorizonDays: "45"})
 		if retention := server.CloseEvidenceRetention(WithContractHorizonControl(ctx)); retention != 45*day {
 			t.Fatalf("at horizonDays 45 the evidence keeps %s", retention)
 		}

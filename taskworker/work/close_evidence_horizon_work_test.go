@@ -135,7 +135,10 @@ func setCloseEvidenceHorizonTestControl(t testing.TB, ctx context.Context, horiz
 	t.Helper()
 	controlCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	server.Raise(model.SetContractHorizonControl(controlCtx, map[string]string{model.ContractHorizonControlFieldHorizonDays: horizonDays}))
+	server.Raise(model.SetContractHorizonControl(controlCtx, map[string]string{
+		model.ContractHorizonControlFieldMode:        "on",
+		model.ContractHorizonControlFieldHorizonDays: horizonDays,
+	}))
 }
 
 func removeCloseEvidenceHorizonTestControl(t testing.TB, ctx context.Context) {

@@ -109,9 +109,10 @@ func TestCloseEvidenceWeekDropsAtTheHorizon(t *testing.T) {
 			return WithContractHorizon(ctx, horizon)
 		}
 
-		// upper bounds 42 to 49 days past, and 49 to 56
+		// upper bounds 42 to 49 days past, 49 to 56, and 56 to 63
 		cleanWeek, cleanLeaf := testCloseEvidenceCreateWeek(t, ctx, weekStart(7).Add(day))
 		stragglerWeek, stragglerLeaf := testCloseEvidenceCreateWeek(t, ctx, weekStart(8).Add(day))
+		unresolvedWeek, unresolvedLeaf := testCloseEvidenceCreateWeek(t, ctx, weekStart(9).Add(day))
 		// upper bound 28 to 35 days past
 		youngWeek, youngLeaf := testCloseEvidenceCreateWeek(t, ctx, weekStart(5).Add(day))
 
@@ -119,7 +120,12 @@ func TestCloseEvidenceWeekDropsAtTheHorizon(t *testing.T) {
 		qualifying := testCloseEvidenceReportAt(stragglerWeek.Lower.Add(day), testContractIdAt(stragglerWeek.Lower), stragglerWeek.Lower.Add(day))
 		straggler := testCloseEvidenceReportAt(stragglerWeek.Lower.Add(day), testContractIdAt(stragglerWeek.Lower), now.Add(-20*day))
 		young := testCloseEvidenceReportAt(youngWeek.Lower.Add(day), testContractIdAt(youngWeek.Lower), youngWeek.Lower.Add(day))
-		for _, report := range []testCloseEvidenceReport{clean, qualifying, straggler, young} {
+		// a report of a contract that is still open, in a week otherwise past
+		// the horizon
+		unresolvedContractId := testContractIdAt(unresolvedWeek.Lower)
+		testInsertContractRows(t, ctx, unresolvedContractId, false)
+		unresolved := testCloseEvidenceReportAt(unresolvedWeek.Lower.Add(day), unresolvedContractId, unresolvedWeek.Lower.Add(day))
+		for _, report := range []testCloseEvidenceReport{clean, qualifying, straggler, young, unresolved} {
 			connect.AssertEqual(t, testInsertCloseEvidenceReport(ctx, report), true)
 		}
 		connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, clean), cleanLeaf)
@@ -127,7 +133,7 @@ func TestCloseEvidenceWeekDropsAtTheHorizon(t *testing.T) {
 
 		// without a horizon, and at one longer than the weeks' age, nothing
 		// expires, and the fence refuses the drop
-		for _, ctx := range []context.Context{ctx, horizon(60 * day)} {
+		for _, ctx := range []context.Context{ctx, horizon(70 * day)} {
 			report, _ := closeEvidencePartitionFamily.Retire(ctx, now, PartitionFamilyState{}, time.Now().Add(time.Minute))
 			connect.AssertEqual(t, len(report.Dropped), 0)
 			connect.AssertEqual(t, len(report.Blocked), 0)
@@ -149,9 +155,70 @@ func TestCloseEvidenceWeekDropsAtTheHorizon(t *testing.T) {
 		report, _ := closeEvidencePartitionFamily.Retire(horizon(35*day), now, PartitionFamilyState{}, time.Now().Add(time.Minute))
 		connect.AssertEqual(t, report.Dropped, []string{cleanLeaf})
 		connect.AssertEqual(t, report.Blocked[stragglerLeaf], closeEvidenceBlockerRecentReport)
+		connect.AssertEqual(t, report.Blocked[unresolvedLeaf], closeEvidenceBlockerUnresolved)
+		connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, unresolved), unresolvedLeaf)
 		connect.AssertEqual(t, testCloseEvidenceExists(ctx, cleanLeaf), false)
 		connect.AssertEqual(t, testCloseEvidenceExists(ctx, youngLeaf), true)
 		connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, straggler), stragglerLeaf)
 		connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, young), youngLeaf)
+	})
+}
+
+// A release that follows the horizon keeps 91 days while the installed guard
+// admits only 91, as before the horizon guard migration or after an operator
+// restores the move guard to stop the deletes: the row pass deletes only rows
+// past 91 days, without failing on the younger ones the guard refuses, and the
+// drop fence refuses a week inside 91 days. Once the horizon guard is back, the
+// horizon applies again.
+func TestCloseEvidenceRetentionWaitsForTheHorizonGuard(t *testing.T) {
+	DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := NowUtc()
+		const day = 24 * time.Hour
+		horizon := WithContractHorizon(ctx, 35*day)
+		guardFloor := func() (floor time.Duration) {
+			MaintenanceDb(ctx, func(conn PgConn) {
+				floor = closeEvidenceGuardFloor(ctx, conn)
+			})
+			return
+		}
+		connect.AssertEqual(t, guardFloor(), CloseEvidenceRetentionFloor)
+
+		// the move guard's 91 days, as a database without the migration has
+		testCloseEvidenceNoError(t, testCloseEvidenceExec(ctx, contractCloseReportEvidenceMoveGuardSql))
+		connect.AssertEqual(t, guardFloor(), ContractRetention)
+
+		aged := testCloseEvidenceReportAt(now.Add(-92*day), testContractIdAt(now.Add(-93*day)), now.Add(-92*day))
+		inside := testCloseEvidenceReportAt(now.Add(-50*day), testContractIdAt(now.Add(-51*day)), now.Add(-50*day))
+		for _, report := range []testCloseEvidenceReport{aged, inside} {
+			connect.AssertEqual(t, testInsertCloseEvidenceReport(ctx, report), true)
+		}
+		removed, _, _ := RemoveExpiredCloseEvidence(horizon, now, CloseEvidenceRemovalCursor{}, time.Now().Add(time.Minute))
+		connect.AssertEqual(t, removed, int64(1))
+		connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, aged), "")
+		connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, inside) != "", true)
+
+		// the horizon guard back: the horizon applies
+		testCloseEvidenceNoError(t, testCloseEvidenceExec(ctx, contractCloseReportEvidenceHorizonGuardSql))
+		connect.AssertEqual(t, guardFloor(), CloseEvidenceRetentionFloor)
+		removed, _, _ = RemoveExpiredCloseEvidence(horizon, now, CloseEvidenceRemovalCursor{}, time.Now().Add(time.Minute))
+		connect.AssertEqual(t, removed, int64(1))
+		connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, inside), "")
+
+		// partitioned, under the move guard again: a week 42 to 49 days past
+		// stays at a 35-day horizon
+		testCloseEvidencePartitionedInThePast(t, ctx, now)
+		testCloseEvidenceNoError(t, testCloseEvidenceExec(ctx, contractCloseReportEvidenceMoveGuardSql))
+		weekStart := PartitionGranularityWeekly.RangeStart(now).Add(-7 * 7 * day)
+		week, leaf := testCloseEvidenceCreateWeek(t, ctx, weekStart.Add(day))
+		connect.AssertEqual(t, testInsertCloseEvidenceReport(ctx, testCloseEvidenceReportAt(week.Lower.Add(day), testContractIdAt(week.Lower), week.Lower.Add(day))), true)
+		if _, err := closeEvidencePartitionFamily.DropRange(horizon, week); err == nil || !strings.Contains(err.Error(), "is not past its retention of 91 days") {
+			t.Fatalf("a drop the installed guard does not admit: %v", err)
+		}
+		connect.AssertEqual(t, testCloseEvidenceExists(ctx, leaf), true)
+		testCloseEvidenceNoError(t, testCloseEvidenceExec(ctx, contractCloseReportEvidenceHorizonGuardSql))
+		dropped, err := closeEvidencePartitionFamily.DropRange(horizon, week)
+		testCloseEvidenceNoError(t, err)
+		connect.AssertEqual(t, dropped, []string{leaf})
 	})
 }
