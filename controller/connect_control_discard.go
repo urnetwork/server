@@ -50,11 +50,16 @@ package controller
 // every other request it makes is refused.
 //
 // urnetwork_connect_control_discarded_requests_total counts the requests
-// answered here. Nothing is logged at any level: the counter is lossless and
+// answered here, by whether the audit claims abuse and whether the request
+// presented a bearer credential. Both are read before authentication, so
+// anyone can raise either: they size the discards, they prove nothing about
+// who sent them. Nothing is logged at any level: the counter is lossless and
 // an audit carries peer ids.
 
 import (
 	"encoding/base64"
+	"net/http"
+	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/protobuf/encoding/protowire"
@@ -64,6 +69,9 @@ import (
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 )
+
+// The Authorization scheme of a client's credential (session.authBearerPrefix).
+const connectControlDiscardBearerPrefix = "Bearer "
 
 // The longest encoded pack the discard decodes. Every connect version sends
 // one audit per pack: about 80 characters, and about 220 with every counter
@@ -112,13 +120,14 @@ func connectControlDiscardField(message proto.Message, name protoreflect.Name) p
 
 var connectControlDiscardCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "urnetwork_connect_control_discarded_requests_total",
-	Help: "Connect control requests whose every frame is a PeerAudit, answered empty before any credential, per-client limit, Redis or database read. abuse is claimed when any frame sets abuse: client-supplied and spoofable, telemetry only.",
-}, []string{"abuse"})
+	Help: "Connect control requests of one PeerAudit frame, answered empty before any credential, per-client limit, Redis or database read. abuse is claimed when the audit sets abuse; bearer is present when the request presented a non-empty bearer credential, which is not verified. Both are client-supplied telemetry with no authority.",
+}, []string{"abuse", "bearer"})
 
-var (
-	connectControlDiscardAbuseClaimed = connectControlDiscardCounter.WithLabelValues("claimed")
-	connectControlDiscardAbuseNone    = connectControlDiscardCounter.WithLabelValues("none")
-)
+// The four children, by abuse claimed and bearer present.
+var connectControlDiscardCounts = [2][2]prometheus.Counter{
+	{connectControlDiscardCounter.WithLabelValues("none", "absent"), connectControlDiscardCounter.WithLabelValues("none", "present")},
+	{connectControlDiscardCounter.WithLabelValues("claimed", "absent"), connectControlDiscardCounter.WithLabelValues("claimed", "present")},
+}
 
 func init() {
 	prometheus.MustRegister(connectControlDiscardCounter)
@@ -137,7 +146,10 @@ func init() {
 // refused input costs one base64 decode, and an answered one a fixed handful
 // of small allocations whatever its content
 // (TestDiscardConnectControlCostIsBoundedAtTheCap).
-func DiscardConnectControlPack(encodedPack string) bool {
+//
+// bearerPresented labels the count only: whether the request presented a
+// bearer credential, read and never verified.
+func DiscardConnectControlPack(encodedPack string, bearerPresented bool) bool {
 	if connectControlDiscardMaxPackLength < len(encodedPack) {
 		return false
 	}
@@ -164,11 +176,14 @@ func DiscardConnectControlPack(encodedPack string) bool {
 	if !ok || peerAudit.GetAbuse() != abuse {
 		return false
 	}
+	abuseIndex, bearerIndex := 0, 0
 	if abuse {
-		connectControlDiscardAbuseClaimed.Inc()
-	} else {
-		connectControlDiscardAbuseNone.Inc()
+		abuseIndex = 1
 	}
+	if bearerPresented {
+		bearerIndex = 1
+	}
+	connectControlDiscardCounts[abuseIndex][bearerIndex].Inc()
 	return true
 }
 
@@ -244,9 +259,15 @@ func scanConnectControlAuditPack(packBytes []byte) (frameBytes []byte, abuse boo
 
 // The discard of router.WrapWithInputRequireClientUnlessAnswered for
 // /connect/control, run before any credential is read. A discarded request is
-// replied to by ReplyConnectControl with the empty answer.
-func DiscardConnectControl(connectControl *ConnectControlArgs) (*ConnectControlAnswer, bool) {
-	if connectControl == nil || !DiscardConnectControlPack(connectControl.Pack) {
+// replied to by ReplyConnectControl with the empty answer. The request's
+// Authorization header labels the count and is not verified.
+func DiscardConnectControl(req *http.Request, connectControl *ConnectControlArgs) (*ConnectControlAnswer, bool) {
+	if connectControl == nil {
+		return nil, false
+	}
+	authorization := req.Header.Get("Authorization")
+	bearerPresented := strings.HasPrefix(authorization, connectControlDiscardBearerPrefix) && len(connectControlDiscardBearerPrefix) < len(authorization)
+	if !DiscardConnectControlPack(connectControl.Pack, bearerPresented) {
 		return nil, false
 	}
 	return &ConnectControlAnswer{discarded: true}, true

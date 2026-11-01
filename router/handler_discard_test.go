@@ -24,15 +24,18 @@ type discardTestInput struct {
 	Discard bool `json:"discard"`
 }
 
-// The calls each function of the wrapper received.
+// The calls each function of the wrapper received, and the Authorization
+// header the discard saw.
 type discardTestCalls struct {
-	discards int
-	prepares int
-	impls    int
+	discards      int
+	prepares      int
+	impls         int
+	authorization string
 }
 
-func (self *discardTestCalls) discard(input discardTestInput) (string, bool) {
+func (self *discardTestCalls) discard(req *http.Request, input discardTestInput) (string, bool) {
 	self.discards += 1
+	self.authorization = req.Header.Get("Authorization")
 	return "discarded", input.Discard
 }
 
@@ -70,7 +73,7 @@ func discardTestAuthAttempts(t *testing.T) float64 {
 func discardTestServe(
 	metrics *controlHttpMetrics,
 	calls *discardTestCalls,
-	discard func(discardTestInput) (string, bool),
+	discard func(*http.Request, discardTestInput) (string, bool),
 	body string,
 	authorization string,
 ) *httptest.ResponseRecorder {
@@ -110,6 +113,10 @@ func TestWrapUnlessAnsweredDiscardsBeforeAuthentication(t *testing.T) {
 		if calls.discards != 1 || calls.prepares != 0 || calls.impls != 0 {
 			t.Fatalf("authorization %q: calls = %+v, want only the discard", authorization, calls)
 		}
+		// the discard reads the request's headers, which it may label by
+		if calls.authorization != authorization {
+			t.Fatalf("the discard saw authorization %q, want %q", calls.authorization, authorization)
+		}
 	}
 	if attempts := discardTestAuthAttempts(t) - attemptsBefore; attempts != 0 {
 		t.Fatalf("discarded requests attempted authentication %v times", attempts)
@@ -141,7 +148,7 @@ func TestWrapUnlessAnsweredAuthenticatesWhatItDoesNotDiscard(t *testing.T) {
 	for _, c := range []struct {
 		name    string
 		calls   *discardTestCalls
-		discard func(discardTestInput) (string, bool)
+		discard func(*http.Request, discardTestInput) (string, bool)
 		body    string
 	}{
 		{name: "declined", calls: declined, discard: declined.discard, body: `{"discard":false}`},

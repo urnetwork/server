@@ -260,7 +260,7 @@ func (self *Authority) ConnectControl(ctx context.Context, token string, args *c
 		// and any credential, Redis or database read
 		// (controller/connect_control_discard.go). Any other pack, more than
 		// one audit included, authenticates below.
-		if controller.DiscardConnectControlPack(args.Pack) {
+		if controller.DiscardConnectControlPack(args.Pack, token != "") {
 			return &connect.ConnectControlResult{}, nil
 		}
 		if self.contractAdmission != nil && createsContractsOnly(args.Pack) {

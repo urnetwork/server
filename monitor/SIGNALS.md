@@ -19888,7 +19888,7 @@ The opt-in API instrumentation adds only fixed cells:
   discarded before authentication (below) goes from `prepare`, which covers
   its shape check, straight to `response`, and never enters `authenticate`
   or `controller`.
-- `urnetwork_connect_control_discarded_requests_total{abuse}` counts
+- `urnetwork_connect_control_discarded_requests_total{abuse,bearer}` counts
   `/connect/control` requests whose every frame is a `PeerAudit`, answered
   `{"pack":"","error":null}` from the body alone: after the route's
   intended network and lag.dev guest gates, before the credential, the
@@ -19904,13 +19904,33 @@ The opt-in API instrumentation adds only fixed cells:
   answers its audits. No
   server has consumed an audit, and connect stops sending them by default
   (`ClientSettings.SendPeerAudits`), so the rate falls as clients update.
-  `abuse` is `claimed` when any frame sets `abuse` (a provider's
-  `ReportAbuse`), otherwise `none`; it is client-supplied telemetry with no
-  authority. Both children exist at zero. Nothing is logged for these
-  requests at any level. They make no `urnetwork_session_auth_attempts_total`
-  attempt, no `urnetwork_connect_control_client_limit_total` decision and no
+  `abuse` is `claimed` when the audit sets `abuse` (a provider's
+  `ReportAbuse`), otherwise `none`. `bearer` is `present` when the request
+  presented a non-empty bearer credential (the hosted authority: a non-empty
+  token), otherwise `absent`; the credential is read and never verified.
+  Both labels are counted before authentication, so anyone can raise either:
+  they size the discards and prove nothing about who sent them. The four
+  children exist at zero. Nothing is logged for these requests at any level.
+  They make no `urnetwork_session_auth_attempts_total` attempt, no
+  `urnetwork_connect_control_client_limit_total` decision and no
   `urnetwork_jwt_state_record_checks_total` check, and they spend no
   per-client budget.
+
+  Owner question 4 reads `abuse="claimed"` for two weeks before providers
+  update. Two qualifiers apply to that sample and to the abuse fix:
+  - The count can be inflated. It is recorded before authentication, so a
+    caller with no credential can raise `abuse="claimed",bearer="absent"`
+    at will; `bearer="present"` at least separates requests that carried a
+    credential, unverified, from bare ones.
+  - The fix is partial until providers update their sdk. Abuse reports no
+    longer spend a provider's per-client budget, but an older sdk still
+    sends them, and the load balancer's per-address backstop for
+    `/connect/control` (services.yml `route_rate_limits`; alt's
+    `alt/rate_limit.go`) counts them with the provider's own
+    `CreateContract` and `Provide`. A remote user who drives enough blocked
+    packets through an older provider can still get that provider's real
+    control refused there, until its sdk stops sending reports
+    (`ClientSettings.SendPeerAudits` off by default).
 - `urnetwork_connect_control_refusal_replays_total{cause}` counts API
   `/connect/control` requests answered from route refusals that the
   router's origin notification owner recorded for the credential's own

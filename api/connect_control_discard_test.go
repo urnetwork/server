@@ -96,6 +96,30 @@ func connectControlDiscardFamilyTotal(t testing.TB, name string) float64 {
 	return total
 }
 
+// The discard count of one abuse and bearer label pair.
+func connectControlDiscardLabeledCount(t testing.TB, abuse string, bearer string) float64 {
+	t.Helper()
+	families, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, family := range families {
+		if family.GetName() != "urnetwork_connect_control_discarded_requests_total" {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			labels := map[string]string{}
+			for _, label := range metric.GetLabel() {
+				labels[label.GetName()] = label.GetValue()
+			}
+			if labels["abuse"] == abuse && labels["bearer"] == bearer {
+				return metric.GetCounter().GetValue()
+			}
+		}
+	}
+	return 0
+}
+
 // The families a request that reads a credential always moves, and the
 // discard count.
 var connectControlDiscardFamilies = []string{
@@ -115,8 +139,10 @@ func connectControlDiscardTotals(t testing.TB) map[string]float64 {
 
 // No credential, one that does not verify, and a valid client token are each
 // answered the empty pack, and none of them attempts authentication, asks the
-// per-client limit or reads a revocation record. The same requests with a
-// frame that acts authenticate, and without a valid credential are a 401.
+// per-client limit or reads a revocation record. Each is counted with
+// bearer=absent or bearer=present by the header alone. The same requests
+// with a frame that acts authenticate, and without a valid credential are a
+// 401.
 func TestConnectControlRouteDiscardsAuditWithoutCredential(t *testing.T) {
 	handler := router.NewRouter(t.Context(), Routes())
 	clientToken := session.NewByJwt(server.NewId(), server.NewId(), "synthetic", false, false).Client(server.NewId(), server.NewId()).Testing_Sign()
@@ -125,10 +151,19 @@ func TestConnectControlRouteDiscardsAuditWithoutCredential(t *testing.T) {
 	authorizations := []string{"", "Bearer synthetic-unverifiable-token", "Bearer " + clientToken}
 
 	before := connectControlDiscardTotals(t)
-	for _, authorization := range authorizations {
+	for i, authorization := range authorizations {
+		// labeled by whether a bearer credential was presented, unverified
+		bearer := "present"
+		if i == 0 {
+			bearer = "absent"
+		}
+		labeledBefore := connectControlDiscardLabeledCount(t, "claimed", bearer)
 		w := connectControlDiscardServe(handler, audit, map[string]string{"Authorization": authorization})
 		if w.Code != http.StatusOK || strings.TrimSpace(w.Body.String()) != `{"pack":"","error":null}` {
 			t.Fatalf("authorization %.20q: %d %s, want the empty pack", authorization, w.Code, w.Body.String())
+		}
+		if labeled := connectControlDiscardLabeledCount(t, "claimed", bearer) - labeledBefore; labeled != 1 {
+			t.Fatalf("authorization %.20q counted %v discards with abuse=claimed bearer=%s, want 1", authorization, labeled, bearer)
 		}
 	}
 	after := connectControlDiscardTotals(t)

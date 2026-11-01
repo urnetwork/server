@@ -13,6 +13,8 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"runtime"
 	"sort"
@@ -79,12 +81,24 @@ func discardTestArgs(t testing.TB, messages ...proto.Message) *ConnectControlArg
 	return discardTestArgsOfFrames(t, frames...)
 }
 
-// The two discard counts, claimed and none.
-func discardTestCounts() [2]float64 {
-	return [2]float64{
-		testutil.ToFloat64(connectControlDiscardAbuseClaimed),
-		testutil.ToFloat64(connectControlDiscardAbuseNone),
+// The four discard counts, by abuse claimed and bearer presented.
+func discardTestCounts() [2][2]float64 {
+	counts := [2][2]float64{}
+	for abuse, abuseLabel := range []string{"none", "claimed"} {
+		for bearer, bearerLabel := range []string{"absent", "present"} {
+			counts[abuse][bearer] = testutil.ToFloat64(connectControlDiscardCounter.WithLabelValues(abuseLabel, bearerLabel))
+		}
 	}
+	return counts
+}
+
+// A control request with the Authorization header, none when empty.
+func discardTestRequest(authorization string) *http.Request {
+	request := httptest.NewRequest(http.MethodPost, "/connect/control", nil)
+	if authorization != "" {
+		request.Header.Set("Authorization", authorization)
+	}
+	return request
 }
 
 // The largest audit connect can build: both ids and every counter at its
@@ -148,7 +162,8 @@ func discardTestFrameFields(messageType protocol.MessageType, messageBytes []byt
 }
 
 // A pack of one audit is answered with exactly what an authenticated pack
-// that does nothing gets, and counted once by whether it claims abuse.
+// that does nothing gets, and counted once by whether it claims abuse and
+// whether the request presented a bearer credential, which is not verified.
 func TestDiscardConnectControlAnswersAuditOnlyPacks(t *testing.T) {
 	want, err := connectControlResult(nil, nil)
 	if err != nil {
@@ -157,35 +172,40 @@ func TestDiscardConnectControlAnswersAuditOnlyPacks(t *testing.T) {
 	for _, c := range []struct {
 		name  string
 		args  *ConnectControlArgs
-		abuse bool
+		abuse int
 	}{
 		{name: "one audit", args: discardTestArgs(t, discardTestAudit(false))},
-		{name: "one abuse report", args: discardTestArgs(t, discardTestAudit(true)), abuse: true},
+		{name: "one abuse report", args: discardTestArgs(t, discardTestAudit(true)), abuse: 1},
 		{name: "an audit with no fields", args: discardTestArgs(t, &protocol.PeerAudit{})},
-		{name: "the largest audit", args: discardTestArgs(t, discardTestLargestAudit()), abuse: true},
+		{name: "the largest audit", args: discardTestArgs(t, discardTestLargestAudit()), abuse: 1},
 	} {
-		before := discardTestCounts()
-		answer, ok := DiscardConnectControl(c.args)
-		if !ok || answer == nil {
-			t.Fatalf("%s was not discarded", c.name)
-		}
-		result, err := ReplyConnectControl(t.Context(), answer)
-		if err != nil || !reflect.DeepEqual(result, want) {
-			t.Fatalf("%s: answer = %+v, %v; want %+v", c.name, result, err, want)
-		}
-		body, err := json.Marshal(result)
-		if err != nil || string(body) != `{"pack":"","error":null}` {
-			t.Fatalf("%s: encoded answer = %s, %v", c.name, body, err)
-		}
-		after := discardTestCounts()
-		wantAfter := before
-		if c.abuse {
-			wantAfter[0] += 1
-		} else {
-			wantAfter[1] += 1
-		}
-		if after != wantAfter {
-			t.Fatalf("%s: counts (claimed, none) = %v, want %v", c.name, after, wantAfter)
+		for _, credential := range []struct {
+			authorization string
+			bearer        int
+		}{
+			{authorization: "", bearer: 0},
+			{authorization: "Bearer ", bearer: 0},
+			{authorization: "Basic synthetic", bearer: 0},
+			{authorization: "Bearer synthetic-unverifiable-token", bearer: 1},
+		} {
+			before := discardTestCounts()
+			answer, ok := DiscardConnectControl(discardTestRequest(credential.authorization), c.args)
+			if !ok || answer == nil {
+				t.Fatalf("%s was not discarded", c.name)
+			}
+			result, err := ReplyConnectControl(t.Context(), answer)
+			if err != nil || !reflect.DeepEqual(result, want) {
+				t.Fatalf("%s: answer = %+v, %v; want %+v", c.name, result, err, want)
+			}
+			body, err := json.Marshal(result)
+			if err != nil || string(body) != `{"pack":"","error":null}` {
+				t.Fatalf("%s: encoded answer = %s, %v", c.name, body, err)
+			}
+			wantAfter := before
+			wantAfter[c.abuse][credential.bearer] += 1
+			if after := discardTestCounts(); after != wantAfter {
+				t.Fatalf("%s with authorization %q: counts [abuse][bearer] = %v, want %v", c.name, credential.authorization, after, wantAfter)
+			}
 		}
 	}
 }
@@ -283,7 +303,7 @@ func TestDiscardConnectControlRefusesEveryOtherShape(t *testing.T) {
 
 	for _, c := range cases {
 		before := discardTestCounts()
-		if answer, ok := DiscardConnectControl(c.args); ok || answer != nil {
+		if answer, ok := DiscardConnectControl(discardTestRequest("Bearer synthetic-unverifiable-token"), c.args); ok || answer != nil {
 			t.Errorf("%s was discarded", c.name)
 		}
 		if after := discardTestCounts(); after != before {
@@ -298,10 +318,10 @@ func TestDiscardConnectControlRefusesEveryOtherShape(t *testing.T) {
 // longer pack authenticates and reaches the dispatch's no-op.
 func TestDiscardConnectControlCapIsExact(t *testing.T) {
 	atCap, pastCap := discardTestAuditPackAtLength(t, 512)
-	if !DiscardConnectControlPack(atCap.Pack) {
+	if !DiscardConnectControlPack(atCap.Pack, true) {
 		t.Fatalf("a pack of %d characters, the cap, was not discarded", len(atCap.Pack))
 	}
-	if DiscardConnectControlPack(pastCap.Pack) {
+	if DiscardConnectControlPack(pastCap.Pack, true) {
 		t.Fatalf("a pack of %d characters, past the cap, was discarded", len(pastCap.Pack))
 	}
 }
@@ -368,12 +388,12 @@ func TestDiscardConnectControlCostIsBoundedAtTheCap(t *testing.T) {
 	const runs = 50
 	for name, input := range discardTestInputsAtTheCap(t) {
 		allocs := testing.AllocsPerRun(runs, func() {
-			DiscardConnectControlPack(input)
+			DiscardConnectControlPack(input, true)
 		})
 		var before, after runtime.MemStats
 		runtime.ReadMemStats(&before)
 		for range runs {
-			DiscardConnectControlPack(input)
+			DiscardConnectControlPack(input, true)
 		}
 		runtime.ReadMemStats(&after)
 		allocatedBytes := float64(after.TotalAlloc-before.TotalAlloc) / runs
@@ -397,7 +417,7 @@ func BenchmarkDiscardConnectControlPack(b *testing.B) {
 		b.Run(name, func(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
-				DiscardConnectControlPack(input)
+				DiscardConnectControlPack(input, true)
 			}
 		})
 	}
@@ -428,7 +448,7 @@ func FuzzDiscardConnectControlNeverAnswersAnAction(f *testing.F) {
 	f.Add([]byte("not a pack"))
 	f.Fuzz(func(t *testing.T, packBytes []byte) {
 		for _, encodedPack := range []string{base64.StdEncoding.EncodeToString(packBytes), string(packBytes)} {
-			if !DiscardConnectControlPack(encodedPack) {
+			if !DiscardConnectControlPack(encodedPack, false) {
 				continue
 			}
 			if connectControlDiscardMaxPackLength < len(encodedPack) {

@@ -33,6 +33,30 @@ func authorityDiscardTestAudit(abuse bool) *protocol.PeerAudit {
 	}
 }
 
+// The discard count of one abuse and bearer label pair.
+func authorityDiscardTestCount(t testing.TB, abuse string, bearer string) float64 {
+	t.Helper()
+	families, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, family := range families {
+		if family.GetName() != "urnetwork_connect_control_discarded_requests_total" {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			labels := map[string]string{}
+			for _, label := range metric.GetLabel() {
+				labels[label.GetName()] = label.GetValue()
+			}
+			if labels["abuse"] == abuse && labels["bearer"] == bearer {
+				return metric.GetCounter().GetValue()
+			}
+		}
+	}
+	return 0
+}
+
 // No credential, one that does not verify and the authority's own expired
 // token each get the empty result, with the contract creation bound full,
 // and no admission refusal is counted. A pack with a frame that acts, or with
@@ -53,9 +77,18 @@ func TestAuthorityDiscardsAuditBeforeAuthenticate(t *testing.T) {
 	defer admission.release()
 	refusals := testutil.ToFloat64(contractAdmissionRefusals)
 	for _, token := range []string{"", "synthetic-unverifiable-token", expired.Testing_Sign()} {
+		// labeled by whether a token was presented, unverified
+		bearer := "present"
+		if token == "" {
+			bearer = "absent"
+		}
+		labeledBefore := authorityDiscardTestCount(t, "claimed", bearer)
 		result, err := authority.ConnectControl(t.Context(), token, audits)
 		if err != nil || result == nil || result.Pack != "" || result.Error != nil {
 			t.Fatalf("an audit-only pack = %+v, %#v; want the empty result", result, err)
+		}
+		if labeled := authorityDiscardTestCount(t, "claimed", bearer) - labeledBefore; labeled != 1 {
+			t.Fatalf("counted %v discards with abuse=claimed bearer=%s, want 1", labeled, bearer)
 		}
 	}
 	if counted := testutil.ToFloat64(contractAdmissionRefusals) - refusals; counted != 0 {
