@@ -155,3 +155,67 @@ func TestWebSearchAnalyticsCleanup(t *testing.T) {
 		}
 	})
 }
+
+// Only MarkWebSearchAnalyticsIngestSuccess sets last_success and cursor_time.
+// A stream whose first attempt was interrupted or failed has neither and must
+// read with zero times, not fail the read. A stream that succeeded keeps both
+// through a later error.
+func TestWebSearchAnalyticsIngestStateReadsStreamsWithoutSuccess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		attemptTime := time.Date(2026, time.October, 30, 4, 52, 0, 0, time.UTC)
+		errorTime := attemptTime.Add(time.Minute)
+		// interrupted: the run stopped between its attempt and any outcome
+		MarkWebSearchAnalyticsIngestAttempt(ctx, "google", "ur.io", "web", attemptTime)
+		// failed, as the providers record it
+		MarkWebSearchAnalyticsIngestAttempt(ctx, "google", "ur.io", "image", attemptTime)
+		MarkWebSearchAnalyticsIngestError(ctx, "google", "ur.io", "image", errorTime, "request_failed")
+		// an error inserts the row when no attempt row exists
+		MarkWebSearchAnalyticsIngestError(ctx, "bing", "ur.io", "web", errorTime, "invalid_auth")
+		// the schema allows a row with every time NULL
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`INSERT INTO web_search_ingest_state (provider, site, stream, update_time)
+				 VALUES ('yandex', 'ur.io', 'web', $1)`,
+				errorTime,
+			))
+		})
+
+		for _, stream := range []struct {
+			provider    string
+			site        string
+			stream      string
+			lastAttempt time.Time
+		}{
+			{"google", "ur.io", "web", attemptTime},
+			{"google", "ur.io", "image", errorTime},
+			{"bing", "ur.io", "web", errorTime},
+			{"yandex", "ur.io", "web", time.Time{}},
+			// no row: a new stream
+			{"baidu", "*", "manual", time.Time{}},
+		} {
+			state := GetWebSearchAnalyticsIngestState(ctx, stream.provider, stream.site, stream.stream)
+			if !state.LastAttempt.Equal(stream.lastAttempt) || !state.LastSuccess.IsZero() || !state.CursorTime.IsZero() {
+				t.Fatalf(
+					"%s %s %s state = %+v, want last attempt %s with zero success and cursor",
+					stream.provider,
+					stream.site,
+					stream.stream,
+					state,
+					stream.lastAttempt,
+				)
+			}
+		}
+
+		successTime := errorTime.Add(time.Hour)
+		cursor := time.Date(2026, time.October, 27, 0, 0, 0, 0, time.UTC)
+		MarkWebSearchAnalyticsIngestSuccess(ctx, "google", "ur.io", "image", successTime, cursor)
+		laterErrorTime := successTime.Add(time.Hour)
+		MarkWebSearchAnalyticsIngestError(ctx, "google", "ur.io", "image", laterErrorTime, "request_failed")
+		state := GetWebSearchAnalyticsIngestState(ctx, "google", "ur.io", "image")
+		if !state.LastAttempt.Equal(laterErrorTime) || !state.LastSuccess.Equal(successTime) || !state.CursorTime.Equal(cursor) {
+			t.Fatalf("state after a success then an error = %+v", state)
+		}
+	})
+}

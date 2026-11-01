@@ -232,6 +232,11 @@ func rollupTransferAuditEvents(
 	if args != nil && args.MinTime != nil && args.MinTime.Before(now) {
 		minTime = *args.MinTime
 	}
+	// a chain left behind for weeks resumes where the contract horizon reaper
+	// cannot have reached, and keeps the rows of the days before
+	if firstDay := model.TransferAuditRollupFirstDay(now); minTime.Before(firstDay) {
+		minTime = firstDay
+	}
 	dayStart := minTime.UTC().Truncate(24 * time.Hour)
 	// resume only a checkpoint of this exact day
 	var day *model.TransferCloseByteSum

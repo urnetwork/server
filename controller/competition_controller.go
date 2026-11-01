@@ -408,23 +408,29 @@ func (self *blobArtifactArchive) retainFile(
 ) (*retainedArtifact, error) {
 	retention, err := self.store.PutRetained(ctx, key, localPath, contentType, settings.RetainUntil)
 	if err != nil {
-		return nil, fmt.Errorf("retain competition artifact %s: %w", logicalPath, err)
+		return nil, competitionArtifactArchivePhaseError("retain_object", err)
 	}
 	if retention == nil || retention.Key != key || retention.Size != expectedBytes ||
 		retention.RetainUntil.Before(settings.RetainUntil.Add(-time.Second)) ||
 		retention.Mode != "COMPLIANCE" && retention.Mode != "LOCAL" {
-		return nil, fmt.Errorf("retention proof for %s is invalid", logicalPath)
+		return nil, competitionArtifactArchivePhaseError("retention_proof", errors.New("retention proof is invalid"))
 	}
 	reader, err := self.store.GetVersion(ctx, key, retention.VersionId)
 	if err != nil {
-		return nil, fmt.Errorf("read retained competition artifact %s: %w", logicalPath, err)
+		return nil, competitionArtifactArchivePhaseError("open_retained_version", err)
 	}
 	hash := sha256.New()
 	readBytes, readErr := io.Copy(hash, io.LimitReader(reader, expectedBytes+1))
 	closeErr := reader.Close()
-	if readErr != nil || closeErr != nil || readBytes != expectedBytes ||
+	if readErr != nil {
+		return nil, competitionArtifactArchivePhaseError("read_retained_version", errors.Join(readErr, closeErr))
+	}
+	if closeErr != nil {
+		return nil, competitionArtifactArchivePhaseError("close_retained_version", closeErr)
+	}
+	if readBytes != expectedBytes ||
 		hex.EncodeToString(hash.Sum(nil)) != expectedSha256 {
-		return nil, fmt.Errorf("retained competition artifact %s failed authentication", logicalPath)
+		return nil, competitionArtifactArchivePhaseError("authenticate_retained_version", errors.New("retained artifact hash or size mismatch"))
 	}
 	return &retainedArtifact{
 		Path: logicalPath, Key: key, Sha256: expectedSha256, Bytes: expectedBytes,
@@ -1431,7 +1437,9 @@ func (self CommandEvaluator) Evaluate(ctx context.Context, settings *Settings, j
 		manifest,
 	)
 	if err != nil {
-		return infrastructureFailure("artifact_archive_failed", "durable artifact retention failed")
+		outcome := infrastructureFailure("artifact_archive_failed", "durable artifact retention failed")
+		outcome.archiveFailure = competitionArtifactArchiveFailureDetails("archive_attempt", err)
+		return outcome
 	}
 	return EvaluationOutcome{
 		Score: result.Score, Error: result.EvalError,
@@ -6255,6 +6263,7 @@ type EvaluationOutcome struct {
 	ArtifactManifest    json.RawMessage
 	RoundBaselineJson   []byte
 	RoundBaselineSha256 string
+	archiveFailure      *competitionArtifactArchiveFailure
 }
 
 // Schedules an infrastructure retry only when it can begin before the one
@@ -6410,11 +6419,11 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 				if outcome.Error != nil {
 					errorCode = outcome.Error.Code
 				}
-				appendEvent(ctx, tx, jobId, now, "infrastructure_retry", workerId, map[string]any{
+				appendEvent(ctx, tx, jobId, now, "infrastructure_retry", workerId, competitionArtifactArchiveEventData(outcome, map[string]any{
 					"attempt": attempts, "error_code": errorCode,
 					"artifact_manifest_sha256": manifestHash,
 					"api_image_digest":         apiImageDigest, "worker_image_digest": workerImageDigest,
-				})
+				}))
 			} else {
 				if outcome.Error != nil && outcome.Error.Retriable {
 					terminalError := *outcome.Error
@@ -6434,10 +6443,10 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 						artifact_manifest_sha256 = $7
 					WHERE job_id = $1
 				`, jobId, terminal, now, scoreJson, errorJson, nullableBytes(manifestJson), manifestHash))
-				appendEvent(ctx, tx, jobId, now, terminal, workerId, map[string]any{
+				appendEvent(ctx, tx, jobId, now, terminal, workerId, competitionArtifactArchiveEventData(outcome, map[string]any{
 					"attempt": attempts, "api_image_digest": apiImageDigest,
 					"worker_image_digest": workerImageDigest,
-				})
+				}))
 			}
 			server.RaisePgResult(tx.Exec(ctx, `
 				UPDATE competition_worker_slot SET worker_id = NULL, job_id = NULL,

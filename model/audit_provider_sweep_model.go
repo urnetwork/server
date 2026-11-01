@@ -1022,25 +1022,53 @@ func startOfUtcDay(t time.Time) time.Time {
 // and this feed does not fabricate one (the packets series reads zero).
 //
 // Idempotent by replacement per day. Days on/after today are skipped (still
-// accumulating); rerun a recent day to pick up late closes. Each day is read
-// in bounded chunks and runs to completion here; the task checkpoints a day
-// across runs with AdvanceTransferAuditRollupDay instead.
+// accumulating); rerun a recent day to pick up late closes. Days before
+// TransferAuditRollupFirstDay keep their rows. Each day is read in bounded
+// chunks and runs to completion here; the task checkpoints a day across runs
+// with AdvanceTransferAuditRollupDay instead.
 func RollupTransferAuditEvents(
 	ctx context.Context,
 	minTime time.Time,
 	maxTime time.Time,
 ) (dayCount int) {
 	dayCount = 0
-	today := startOfUtcDay(server.NowUtc())
+	now := server.NowUtc()
+	today := startOfUtcDay(now)
 	end := startOfUtcDay(maxTime)
 	if today.Before(end) {
 		end = today
 	}
-	for dayStart := startOfUtcDay(minTime); dayStart.Before(end); dayStart = dayStart.Add(24 * time.Hour) {
+	start := startOfUtcDay(minTime)
+	if firstDay := TransferAuditRollupFirstDay(now); start.Before(firstDay) {
+		glog.Infof("[audit]transfer rollup keeps the rows of the days before %s: the contract horizon reaper can reach their contracts\n", firstDay.Format(time.DateOnly))
+		start = firstDay
+	}
+	for dayStart := start; dayStart.Before(end); dayStart = dayStart.Add(24 * time.Hour) {
 		AdvanceTransferAuditRollupDay(ctx, NewTransferAuditRollupDay(dayStart), math.MaxInt)
 		dayCount += 1
 	}
 	return
+}
+
+// A day a rollup writes stays this far inside the contract horizon reaper's
+// floor: one day's read can take most of a day at Main's churn, plus a backup
+// deferral, and the reaper's horizon advances meanwhile.
+const transferAuditRollupReaperMargin = 2 * 24 * time.Hour
+
+// The first UTC day a transfer rollup may write at now. The contract horizon
+// reaper can delete the contracts minted and closed before now -
+// ContractHorizonFloor, whatever its control says now, so a day before that,
+// rolled again, would replace the row written while all of its contracts
+// were present with a sum of what the reaper left. The periodic rollup reads
+// the last three days and a CLI backfill the last 21 by default, so only an
+// explicit start older than this is held back.
+func TransferAuditRollupFirstDay(now time.Time) time.Time {
+	reach := now.UTC().Add(-ContractHorizonFloor + transferAuditRollupReaperMargin)
+	day := startOfUtcDay(reach)
+	if day.Before(reach) {
+		day = day.Add(24 * time.Hour)
+	}
+	return day
 }
 
 // Marks the rollup's chunk statements in pg_stat_activity.

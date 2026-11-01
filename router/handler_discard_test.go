@@ -220,3 +220,110 @@ func TestWrapUnlessAnsweredTimesDiscardedRequests(t *testing.T) {
 		t.Fatalf("logical requests = %v, want 2", total)
 	}
 }
+
+type discardTestWriter struct{ http.ResponseWriter }
+
+func (self *discardTestWriter) Unwrap() http.ResponseWriter { return self.ResponseWriter }
+
+// The cancellation subtraction must count the same terminal outcomes as the
+// router, including cancellation after the control observer has finished and
+// dependency cancellation while the request context is still live.
+func TestWrapUnlessAnsweredCountsDiscardedRouterCancellations(t *testing.T) {
+	for _, fixture := range []struct {
+		name               string
+		discard            bool
+		cancelReply        bool
+		cancelAfterHandler bool
+		replyPanic         any
+		wrapWriter         bool
+		status, outcome    string
+		canceledDiscards   float64
+	}{
+		{name: "completed discard", discard: true, status: "200", outcome: "completed"},
+		{name: "canceled discard", discard: true, cancelReply: true, status: "200", outcome: "canceled", canceledDiscards: 1},
+		{name: "late cancellation", discard: true, cancelAfterHandler: true, status: "200", outcome: "canceled", canceledDiscards: 1},
+		{name: "wrapped writer", discard: true, cancelReply: true, wrapWriter: true, status: "200", outcome: "canceled", canceledDiscards: 1},
+		{name: "dependency cancellation", discard: true, replyPanic: context.Canceled, status: "503", outcome: "canceled", canceledDiscards: 1},
+		{name: "canceled panic", discard: true, cancelReply: true, replyPanic: "synthetic failure", status: "500", outcome: "panic"},
+		{name: "canceled abort", discard: true, cancelReply: true, replyPanic: http.ErrAbortHandler, status: "none", outcome: "aborted"},
+		{name: "ordinary cancellation", cancelAfterHandler: true, status: "401", outcome: "canceled"},
+		{name: "ordinary completion", status: "401", outcome: "completed"},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			registry := prometheus.NewRegistry()
+			controlMetrics := newControlHttpMetrics(registry)
+			httpMetrics := newHttpMetrics(registry)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			requestCtx, cancelRequest := context.WithCancel(ctx)
+			defer cancelRequest()
+			calls := &discardTestCalls{}
+			route := NewRoute(http.MethodPost, "/connect/control", func(w http.ResponseWriter, r *http.Request) {
+				if fixture.cancelAfterHandler {
+					defer cancelRequest() // after finish, before the router's outcome
+				}
+				r, finish := observeConnectControl(r, controlMetrics)
+				defer finish()
+				if fixture.wrapWriter {
+					w = &discardTestWriter{w}
+				}
+				WrapWithInputRequireClientUnlessAnswered(
+					calls.discard, calls.prepare,
+					func(_ context.Context, answer string) (map[string]string, error) {
+						if fixture.cancelReply {
+							cancelRequest()
+						}
+						if fixture.replyPanic != nil {
+							panic(fixture.replyPanic)
+						}
+						return map[string]string{"answer": answer}, nil
+					},
+					calls.impl, w, r,
+				)
+			})
+			router := NewRouter(ctx, []*Route{route})
+			router.metrics = httpMetrics
+			body := `{"discard":false}`
+			if fixture.discard {
+				body = `{"discard":true}`
+			}
+			request := httptest.NewRequest(http.MethodPost, "/connect/control", strings.NewReader(body)).WithContext(requestCtx)
+			func() {
+				defer func() {
+					recovered := recover()
+					if fixture.outcome == "aborted" {
+						if recovered != http.ErrAbortHandler {
+							t.Fatalf("abort panic = %v", recovered)
+						}
+					} else if recovered != nil {
+						t.Fatalf("unexpected panic: %v", recovered)
+					}
+				}()
+				router.ServeHTTP(httptest.NewRecorder(), request)
+			}()
+			if got := testutil.ToFloat64(httpMetrics.requests.WithLabelValues(route.id, fixture.status, fixture.outcome)); got != 1 {
+				t.Fatalf("router %s/%s completions = %v, want 1", fixture.status, fixture.outcome, got)
+			}
+			wantDiscards := uint64(0)
+			if fixture.discard {
+				wantDiscards = 1
+			}
+			if count, _ := discardTestDiscardedSeconds(t, registry); count != wantDiscards {
+				t.Fatalf("discard count = %d, want %d", count, wantDiscards)
+			}
+			families, err := registry.Gather()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, family := range families {
+				if family.GetName() == "urnetwork_connect_control_http_discarded_canceled_requests_total" {
+					if len(family.Metric) != 1 || len(family.Metric[0].Label) != 0 || family.Metric[0].GetCounter().GetValue() != fixture.canceledDiscards {
+						t.Fatalf("canceled discard metric = %v, want one unlabeled counter at %v", family, fixture.canceledDiscards)
+					}
+					return
+				}
+			}
+			t.Fatal("the discarded cancellation counter is not registered")
+		})
+	}
+}

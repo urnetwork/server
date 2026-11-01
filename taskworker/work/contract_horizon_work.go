@@ -9,13 +9,14 @@ import (
 	"github.com/urnetwork/server/task"
 )
 
-// Contract row retention at the owner's 91-day horizon
-// (model.RemoveContractsPastHorizon). One chain: each run reaps from its cursor
-// for a bounded budget and returns where it stopped; Post hands that cursor to
-// the next run, soon while the pass has work left, and after the idle interval
-// once it reaches the horizon or finds the reaper off. A failed batch hands its
-// last committed cursor to the retry. Idle until the runtime control
-// `{contract_horizon}control` sets a mode.
+// Contract row retention past the reaper's horizon
+// (model.RemoveContractsPastHorizon): the owner's 91 days, or as few as 45
+// once the runtime control's horizonDays shortens it. One chain: each run
+// reaps from its cursor for a bounded budget and returns where it stopped;
+// Post hands that cursor to the next run, soon while the pass has work left,
+// and after the idle interval once it reaches the horizon or finds the reaper
+// off. A failed batch hands its last committed cursor to the retry. Idle until
+// the runtime control `{contract_horizon}control` sets a mode.
 
 type RemoveContractsPastHorizonArgs struct {
 	// where the previous run stopped; the zero value starts a pass at the

@@ -14,7 +14,7 @@ import (
 func controlRouteFixture(now time.Time, instance string) *controlRouteProcess {
 	values := map[string]float64{
 		"start": float64(now.Add(-time.Hour).Unix()),
-		"count": 1000, "requests": 1000, "canceled": 800, "seconds": 12000, "discarded": 0, "discarded_seconds": 0,
+		"count": 1000, "requests": 1000, "canceled": 800, "seconds": 12000, "discarded": 0, "discarded_seconds": 0, "discarded_canceled": 0,
 		"inflight": 500, "inflight_min": 200, "samples": 10, "early_samples": 2,
 		"seconds_samples": 10, "seconds_early_samples": 2, "inflight_samples": 10, "inflight_early_samples": 2,
 	}
@@ -227,6 +227,7 @@ func TestControlRoutePressureQueryUsesBoundedFixedRouteAndHistory(t *testing.T) 
 		"timestamp(", "process_start_time_seconds", `ingress="http"`,
 		"urnetwork_connect_control_http_phase_inflight", "urnetwork_connect_control_frames_inflight",
 		"urnetwork_connect_control_http_discarded_seconds_count", "urnetwork_connect_control_http_discarded_seconds_sum",
+		"urnetwork_connect_control_http_discarded_canceled_requests_total",
 	} {
 		if !strings.Contains(query, required) {
 			t.Fatalf("query missing %q", required)
@@ -280,7 +281,7 @@ func TestControlRoutePressureSubtractsDiscards(t *testing.T) {
 
 	// the cells are required like every other: a process without one is
 	// incomplete, not one with no discards
-	for _, cell := range []string{"discarded", "discarded_seconds"} {
+	for _, cell := range []string{"discarded", "discarded_seconds", "discarded_canceled"} {
 		missing := controlRouteFixture(now, "synthetic-current")
 		delete(missing.values, cell)
 		alerts = runControlRouteFixture(t, now, controlRouteFixtureJson(t, now, missing))
@@ -362,5 +363,71 @@ func TestControlRoutePressureClampsTheCanceledShare(t *testing.T) {
 	alert := requireAlertClass(t, alerts, "control-route-pressure")
 	if !strings.Contains(alert.Markdown(), "canceled_share=100.0%") {
 		t.Fatalf("share not clamped: %s", alert.Markdown())
+	}
+}
+
+// Canceled audit-only requests leave the numerator with their denominator.
+// Otherwise 333 canceled discards beside 1,000 successful 6 s requests WARN
+// at 33.3%, even though no request that did work was canceled.
+func TestControlRoutePressureExcludesDiscardedCancellations(t *testing.T) {
+	now := time.Date(2026, 11, 1, 6, 0, 0, 0, time.UTC)
+	for _, fixture := range []struct {
+		name                        string
+		canceled, discardedCanceled float64
+		mean                        float64
+		wantTier                    string
+		wantCanceled, wantShare     string
+	}{
+		{name: "only audits canceled", canceled: 333, discardedCanceled: 333, mean: 6},
+		{name: "only audits canceled on slow route", canceled: 600, discardedCanceled: 600, mean: 12},
+		{name: "below warn", canceled: 333 + 199, discardedCanceled: 333, mean: 6},
+		{name: "scrape skew", canceled: 333, discardedCanceled: 334, mean: 12},
+		{name: "real warn", canceled: 333 + 200, discardedCanceled: 333, mean: 6, wantTier: tierWarn, wantCanceled: "200", wantShare: "20.0%"},
+		{name: "below page", canceled: 333 + 499, discardedCanceled: 333, mean: 12, wantTier: tierWarn, wantCanceled: "499", wantShare: "49.9%"},
+		{name: "real page", canceled: 333 + 500, discardedCanceled: 333, mean: 12, wantTier: tierPage, wantCanceled: "500", wantShare: "50.0%"},
+		{name: "completed audits preserve cancellations", canceled: 500, mean: 12, wantTier: tierPage, wantCanceled: "500", wantShare: "50.0%"},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			process := controlRouteFixture(now, "synthetic-current")
+			discarded := float64(333)
+			if discarded < fixture.discardedCanceled {
+				discarded = fixture.discardedCanceled
+			}
+			for name, value := range map[string]float64{
+				"count": 1000 + discarded, "requests": 1000 + discarded,
+				"discarded": discarded, "discarded_seconds": discarded * 0.0001,
+				"discarded_canceled": fixture.discardedCanceled, "canceled": fixture.canceled,
+				"seconds": 1000*fixture.mean + discarded*0.0001,
+			} {
+				process.values[name] = value
+			}
+			// Exercise the arithmetic independently of parsing the new cell,
+			// so the regression fails on the original false-pressure finding.
+			findings := evaluateControlRoutePressure([]*controlRouteProcess{process}, map[string]bool{process.host + "\x00" + process.block: true}, now)
+			if fixture.wantTier == "" && len(findings) != 0 {
+				t.Fatalf("discarded cancellations produced findings: %+v", findings)
+			}
+			alerts := runControlRouteFixture(t, now, controlRouteFixtureJson(t, now, process))
+			requireControlRouteFiniteAlerts(t, alerts)
+			if fixture.wantTier == "" {
+				if len(alerts) != 0 {
+					t.Fatalf("discarded cancellations produced alerts: %+v", alerts)
+				}
+				return
+			}
+			alert := requireAlertClass(t, alerts, "control-route-pressure")
+			if len(alerts) != 1 || alert.Severity != Severity(fixture.wantTier) {
+				t.Fatalf("ordinary cancellations changed tier: %+v", alerts)
+			}
+			for _, want := range []string{
+				"requests_5m=1000", " canceled_5m=" + fixture.wantCanceled + " ",
+				"canceled_share=" + fixture.wantShare, fmt.Sprintf("mean_seconds=%.3f", fixture.mean),
+				fmt.Sprintf("discarded_canceled_5m=%.0f", fixture.discardedCanceled),
+			} {
+				if !strings.Contains(alert.Markdown(), want) {
+					t.Fatalf("missing %q: %s", want, alert.Markdown())
+				}
+			}
+		})
 	}
 }
