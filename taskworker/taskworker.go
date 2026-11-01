@@ -126,6 +126,8 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleSetMissingConnectionLocations(clientSession, tx)
 		work.ScheduleRemoveLocationLookupResults(clientSession, tx)
 		work.ScheduleRemoveCompletedContracts(clientSession, tx)
+		// idle until the runtime control `{contract_horizon}control` sets a mode
+		work.ScheduleRemoveContractsPastHorizon(clientSession, tx)
 		work.ScheduleReconcileNetEscrow(clientSession, tx)
 		work.ScheduleDbMaintenance(clientSession, tx, 0)
 		// seeded only when its chain has no task (PARTITION-MAINTENANCE-PLAN.md A4)
@@ -436,6 +438,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.RemoveCompletedContracts,
 			work.RemoveCompletedContractsPost,
 		),
+		task.NewTaskTargetWithPost(
+			work.RemoveContractsPastHorizon,
+			work.RemoveContractsPastHorizonPost,
+		),
 		work.NewTransferDebitTaskTarget(),
 		task.NewTaskTargetWithPost(
 			work.ReconcileNetEscrow,
@@ -684,6 +690,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.StLedgerV2Step,
 			work.StLedgerV2StepPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.StV1Sweep,
+			work.StV1SweepPost,
 		),
 		// LEADERTOP.md §5.7, §6.2
 		task.NewTaskTargetWithPost(

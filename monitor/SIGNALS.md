@@ -8463,11 +8463,13 @@ only says how long is left, not why. Facts on 10-22:
   2026-10-05. Rows therefore wait for the 300-day straggler horizon
   (`StragglerContractExpiration`); the first reach it on 2027-03-28. See
   `server/CONTRACT-PARTITION.md`.
-- **`client_reliability` retention is pinned to the last subsidy epoch.**
-  `clientReliabilityRetentionCutoffBlock` keeps blocks from that epoch's end
-  minus one day (2026-10-05), for the next payout. Once the 21-day cutoff
-  passes 10-05, nightly drops stop until `ClientExpiration` (30 days) forces
-  them on 11-04.
+- **`client_reliability` retention was pinned to the last subsidy epoch.**
+  `clientReliabilityRetentionCutoffBlock` kept blocks from that epoch's end
+  minus one day (2026-10-05) for the next payout, so the nightly drops stopped
+  from 10-25 (27 daily partitions, 1,142 GB on 10-31). The owner retired that
+  frontier on 2026-10-31, since subsidy payouts ended: retention is a flat 21
+  days (`ClientReliabilityRetention`), and the first pass on the new build
+  drops every day past it.
 - **`st_client_key_history` had no retention.** It is immutable by trigger,
   held 382 GB and 81.6M rows, and grew 4.3 GB/h on 10-22. About 90% of its
   rows belong to inactive clients. Since PARTITION-MAINTENANCE-PLAN.md Part D,
@@ -8478,8 +8480,8 @@ only says how long is left, not why. Facts on 10-22:
   before the migration.
 
 Checks, all cheap and read-only:
-1. `SELECT max(end_time) FROM subsidy_payment`: WARN `retention-frontier-pinned`
-   when it is more than 10 days old. Payout-held frontiers stop reclaiming.
+1. Retired 2026-10-31: the subsidy frontier check (`retention-frontier-pinned`).
+   The frontier no longer holds any retention, so its age is not a finding.
 2. Contract reap stamping: `TABLESAMPLE SYSTEM (0.0002)` on `transfer_contract`.
    WARN `contract-reap-stalled` when fewer than 5% of sampled rows older than
    14 days have `reap_time`.
@@ -8490,8 +8492,8 @@ Checks, all cheap and read-only:
 
 Implementation (2026-10-22). Hourly, two bounded read-only queries run on
 the single enabled `pg-primary`, each behind a `hostname -s`, primary-role and
-30-second statement-clock guard. A catalog read returns the newest
-`subsidy_payment.end_time`, the `client_reliability` parent's kind and every
+30-second statement-clock guard. A catalog read returns the
+`client_reliability` parent's kind and every
 attached partition's name and heap size (at most 4,096), the statistics reset
 and postmaster start, and the public relations of at least 100 GB with their
 insert and delete counters, in fixed ten-cell frames bound by an end row. A
@@ -8500,11 +8502,6 @@ older than 14 days, and those with `reap_time`. A failure in one read leaves
 only its own checks unknown. Targets are the primary's name plus a fixed
 check name; only counts, ages and fixed names leave SQL.
 
-- `retention-frontier-pinned` (target `<primary>/subsidy-frontier`, sustain
-  1): the frontier is more than 10 days old. `holding_reliability_retention`
-  says whether the frontier minus one day already holds the 21-day
-  reliability retention back, and `days_until_hold` when it will. No
-  subsidy payment at all holds nothing and is healthy.
 - `contract-reap-stalled` (target `<primary>/contract-reap`, sustain 2,
   because the page sample is random per run): fewer than 5% of at least 20
   sampled rows older than 14 days have `reap_time`. A sample under 100 rows is
@@ -8513,12 +8510,12 @@ check name; only counts, ages and fixed names leave SQL.
   `<primary>/client-reliability-partitions`, sustain 1): the oldest
   `client_reliability_pYYYYMMDD` partition whose heap holds a page has an
   upper bound more than 2 days before the cutoff the drop pass computes: 21
-  days, held back to the frontier minus one day, never past 30 days (the
-  model's `ClientReliabilityRetention`, `clientReliabilityRetentionCutoffBlock`
-  and `ClientExpiration`). Empty partitions and names the drop pass did not
-  create are not counted; a frontier-held cutoff is the frontier finding,
-  not a stuck drop. A parent that is missing or not partitioned, or an
-  over-cap census, is unknown.
+  days (the model's `ClientReliabilityRetention`, the only horizon
+  `clientReliabilityRetentionCutoffBlock` applies since 2026-10-31). Empty
+  partitions and names the drop pass did not create are not counted. A
+  taskworker still on a build from before 2026-10-31 holds the days back to
+  the last subsidy epoch end, so deploy the taskworker first. A parent that
+  is missing or not partitioned, or an over-cap census, is unknown.
 - Check 4's list rides in the evidence of every retention finding as
   `append_only_relations`: relations of at least 100 GB with inserts and no
   deletes over a statistics window (since the last reset, else since the
@@ -8532,15 +8529,17 @@ check name; only counts, ages and fixed names leave SQL.
 
 Every tunable, including the mirrored reliability horizon, is a field of
 `RetentionLivenessSettings`. Synthetic controls replay the 2026-10-22 state
-(frontier 17.5 days old and 2.5 days from holding, 0.75% stamped, the
-`st_client_key_history` append-only list), every partition cutoff branch,
+(0.75% stamped, the `st_client_key_history` append-only list, an old subsidy
+frontier that raises nothing), the 2026-10-31 state (27 days kept behind the
+frontier, judged stuck by the 21-day rule), every partition cutoff branch,
 reap share edges and sample sufficiency, malformed frames and failed reads,
 the list's window and name rules, inventory authority and cancellation.
 
-ACTION: retention horizons are owner decisions. Never drop data inside a
-payout frontier without the owner: the code's own comment notes that a missing
-reliability block silently cuts provider credit. VERIFY: a complete
-observation inside each line on the next runs (two for the sampled check).
+ACTION: retention horizons are owner decisions. Never drop
+`client_reliability` days inside the 21-day retention by hand: operator block
+points read a completed block's window, and a missing reliability block cuts
+provider credit. VERIFY: a complete observation inside each line on the next
+runs (two for the sampled check).
 
 Partitioned contract tables (2026-10-23, `server/CONTRACT-PARTITION.md`).
 `TABLESAMPLE SYSTEM` on the partitioned `transfer_contract` samples the same
@@ -8854,10 +8853,10 @@ minutes) drops a family's range once its upper bound is the family's declared
 transaction that detaches it; a family with its own task (`client_reliability`)
 drops through that task. Size is bounded only by those drops. This probe
 watches every registered family that drops ranges and names no dedicated probe
-(`RetentionSignal`): today `client_reliability` (30 days, `ClientExpiration`,
-the longest a payout behind can hold its cutoff; §2.4g's
-`partition-retention-stuck` judges the computed cutoff sooner) and
-`provider_egress_health_history` (7 days). The contract tables name §2.4i and
+(`RetentionSignal`): today `client_reliability` (21 days,
+`ClientReliabilityRetention`, the same cutoff §2.4g's
+`partition-retention-stuck` judges) and `provider_egress_health_history` (7
+days). The contract tables name §2.4i and
 `network_ping` names §2.19c.
 
 Check, on the §2.4p catalog read: a partition of the registry's own naming
@@ -19859,6 +19858,30 @@ Missing inventory, source, range, or diagnostic collectors produces a WARN
 `control-route-pressure-unobservable` finding; independently proven hot slots
 still emit `control-route-pressure`.
 
+Requests the API answered from their body alone, before authentication (a
+pack of one `PeerAudit` frame, CPUOPT3 D3), leave the arithmetic. Their count,
+from `urnetwork_connect_control_http_discarded_seconds_count`, leaves the
+completions, the request denominator and the 100-completion floor; their own
+seconds, from its `_sum`, leave the duration sum. Such a request takes about
+0.1 ms, so counting it would dilute the mean and the canceled share of the
+requests that do work (a quarter of all control requests in 2026-10). Both
+adjusted denominators must reach 100: the request one may be 3% smaller within
+the scrape tolerance, and when discards dominated it could reach zero while the
+other stayed above 100, a NaN or +Inf share. The canceled share is clamped to
+100%. The thresholds are unchanged. A release without the collector reads as
+zero discards. The alert reports `requests_5m` without them, and
+`discarded_5m` and `discarded_seconds_5m` beside it.
+
+The phase and frame diagnostics read only the listed partitions: the four
+phases and the nine frame message kinds below. A partition outside those
+lists is skipped. Before CPUOPT3 D3 any unlisted partition made its process
+invalid, so from 2026-10-22, when every API process began to export
+`resident_move_result` (65778f4d1), every slot read as unobservable and the
+signal could not raise pressure. `TestControlRouteMessagesCoverControllerLabels`
+fails when the controller or router adds a partition the signal does not
+list. A frame series from another ingress, a cell outside the signal's own
+query and a duplicated cell still make the process unobservable.
+
 While the owning context remains live, source-path errors retain that same
 coverage WARN and `Bounded Mimir query unavailable` wording, with the shared
 finite `error_class` and any typed `ssh_admission_failures` phases. A finished
@@ -19899,7 +19922,60 @@ The opt-in API instrumentation adds only fixed cells:
   exactly 16 cells: four phases by `ok|rejected|canceled|panic`. Successful
   transitions count the phase exited, not another logical request. Canceled
   context takes precedence over panic. Early rejection remains in its owning
-  phase; all gauges release during normal return or panic unwind.
+  phase; all gauges release during normal return or panic unwind. A request
+  discarded before authentication (below) goes from `prepare`, which covers
+  its shape check, straight to `response`, and never enters `authenticate`
+  or `controller`.
+- `urnetwork_connect_control_discarded_requests_total{abuse,bearer}` counts
+  `/connect/control` requests whose every frame is a `PeerAudit`, answered
+  `{"pack":"","error":null}` from the body alone: after the route's
+  intended network and lag.dev guest gates, before the credential, the
+  per-client limit, the revocation record or any state is read. The proxy's
+  hosted authority counts its own the same way, after its lifecycle checks
+  and before contract admission. The pack is at most 512 characters of
+  base64 and exactly one frame, a `PeerAudit` that decodes, the only shape
+  any connect version sends (about 80 characters, 220 at most). A wire scan
+  rejects every other shape before decoding anything, so the check costs a
+  fixed handful of small allocations however the bytes are crafted. Any
+  other pack, including two audits, a longer audit or an audit beside a frame
+  of another type, takes the authenticated path, where the dispatch's no-op
+  answers its audits. No
+  server has consumed an audit, and connect stops sending them by default
+  (`ClientSettings.SendPeerAudits`), so the rate falls as clients update.
+  `abuse` is `claimed` when the audit sets `abuse` (a provider's
+  `ReportAbuse`), otherwise `none`. `bearer` is `present` when the request
+  presented a non-empty bearer credential (the hosted authority: a non-empty
+  token), otherwise `absent`; the credential is read and never verified.
+  Both labels are counted before authentication, so anyone can raise either:
+  they size the discards and prove nothing about who sent them. The four
+  children exist at zero. Nothing is logged for these requests at any level.
+  They make no `urnetwork_session_auth_attempts_total` attempt, no
+  `urnetwork_connect_control_client_limit_total` decision and no
+  `urnetwork_jwt_state_record_checks_total` check, and they spend no
+  per-client budget.
+
+  Owner question 4 reads `abuse="claimed"` for two weeks before providers
+  update. Two qualifiers apply to that sample and to the abuse fix:
+  - The count can be inflated. It is recorded before authentication, so a
+    caller with no credential can raise `abuse="claimed",bearer="absent"`
+    at will; `bearer="present"` at least separates requests that carried a
+    credential, unverified, from bare ones.
+  - The fix is partial until providers update their sdk. Abuse reports no
+    longer spend a provider's per-client budget, but an older sdk still
+    sends them, and the load balancer's per-address backstop for
+    `/connect/control` (services.yml `route_rate_limits`; alt's
+    `alt/rate_limit.go`) counts them with the provider's own
+    `CreateContract` and `Provide`. A remote user who drives enough blocked
+    packets through an older provider can still get that provider's real
+    control refused there, until its sdk stops sending reports
+    (`ClientSettings.SendPeerAudits` off by default).
+- `urnetwork_connect_control_http_discarded_seconds_{sum,count}` is the
+  handler residence of the API requests the route's discard answered,
+  whatever their outcome, from the same opt-in observer as the phase
+  families; `count` is those requests. It starts with the control handler,
+  after the route's gates, so it can read a few microseconds short of the
+  route's own duration for the same request. Both exist at zero on a capable
+  executable.
 - `urnetwork_connect_control_refusal_replays_total{cause}` counts API
   `/connect/control` requests answered from route refusals that the
   router's origin notification owner recorded for the credential's own
@@ -19919,10 +19995,12 @@ The opt-in API instrumentation adds only fixed cells:
   of its own reaches the state query, a removed or rotated client is told
   only the refusals recorded for it; a revoked session marker or a
   remembered state refusal still answers 401 first.
-- `urnetwork_connect_control_frames_total{ingress,message,outcome}` has 64
-  cells: `http|internal`, eight fixed message kinds (`create_contract`,
+- `urnetwork_connect_control_frames_total{ingress,message,outcome}` has 72
+  cells: `http|internal`, nine fixed message kinds (`create_contract`,
   `close_contract`, `provide`, `encrypted_key`, `client_key`, `control_ping`,
-  `provide_ping`, `other`), and `handler_ok|error|canceled|panic`. Matching
+  `provide_ping`, `resident_move_result`, `other`), and
+  `handler_ok|error|canceled|panic`. A `PeerAudit` in a pack with other
+  frames is a no-op that completes `handler_ok` under `other`. Matching
   `urnetwork_connect_control_frames_inflight` and
   `urnetwork_connect_control_frame_seconds_{sum,count}` locate handler
   residence. Every child exists at zero on a capable executable. `internal`
@@ -23481,7 +23559,11 @@ new cancellation threshold or customer-failure cause is inferred here.
 Thresholds: WARN when the total mean exceeds 250 ms for 10 minutes; PAGE when
 it exceeds 1 s for 10 minutes. Read it with the `/connect/control` mean
 (`urnetwork_http_request_duration_seconds{job="api",route="POST ^/connect/control$"}`):
-2 ms when healthy, 99 ms at 15:00Z on 10-21 and 150–171 ms through 10-22.
+2 ms when healthy, 99 ms at 15:00Z on 10-21 and 150–171 ms through 10-22. The
+mean leaves out the requests the API discarded before authentication, by
+count and by their own seconds
+(`urnetwork_connect_control_http_discarded_seconds`, §2.19e), so fast discards
+cannot dilute it; a window of only discards shows no mean.
 
 Measurement (one-minute cadence): one bounded loopback Mimir instant query
 through a services gateway, evaluated two minutes behind now so the newest
@@ -27373,11 +27455,13 @@ losing up to 20 GB/h. Each production action needs the owner's go.
    - Drop the time partitions that retention would drop within days anyway
      (`client_reliability_p20261001`..`04`, 236 GB). Run each drop as its own
      guarded transaction with `lock_timeout = '5s'`; each took seconds.
-4. **Respect the payout frontier.** `client_reliability` blocks from the last
-   subsidy epoch's end minus one day are read by the next payout, and dropping
-   them silently cuts provider credit. Check
-   `SELECT max(end_time) FROM subsidy_payment` before dropping anything newer
-   than the 21-day cutoff (§2.4g).
+4. **Respect the reliability readers.** Since 2026-10-31 `client_reliability`
+   retention is a flat 21 days; the subsidy payout frontier no longer holds
+   it. Operator block points read each completed block's window
+   (`AwardDueOperatorBlockPoints`, daily at 12:00Z): before dropping a day
+   inside the 21-day cutoff, check that the blocks covering it are awarded
+   (`payment_report` holds the block's plan id). Restarting subsidy payouts
+   needs the horizon revisited first.
 5. **Not first:**
    - `VACUUM FULL`, which holds an exclusive lock for hours on hot tables;
    - pg_repack, which needs free space equal to the table;
@@ -27717,7 +27801,7 @@ Catalog rows from this incident, none implemented when it closed on 2026-10-22; 
 |---|---|---|---|
 | storage-runway | Mimir node metrics | §2.4f max-of-windows decline per stateful volume | WARN ≤ 72 h, PAGE ≤ 24 h, 2 probes |
 | minio-drive-runway / minio-accounting-divergence / minio-put-surge | Mimir node + MinIO v3 metrics | §11.6b | runway WARN ≤ 14 d, PAGE ≤ 3 d; divergence over 1 TB WARN; PutObject over 3× its 7-day median for 1 h WARN |
-| retention-frontier-pinned / contract-reap-stalled / partition-retention-stuck | pg | §2.4g | WARN |
+| contract-reap-stalled / partition-retention-stuck | pg | §2.4g | WARN |
 | contract-partition-runway / contract-partition-retention-blocked / contract-partition-cutover-pending | pg catalog | §2.4h–§2.4j, added 2026-10-23 for the contract partition cutover | runway PAGE under 2 covered future weeks; retention WARN past 13 + 2 weeks; cutover WARN within 24 h of its week |
 | contract-stage-latency / contract-stage-latency-unobservable | Mimir | §2.30 total mean, implemented by `contract-stage-latency` | WARN over 250 ms, PAGE over 1 s, 10 min held in Mimir |
 | identity-churn / identity-churn-loop / identity-churn-unobservable | Mimir proxy metrics + pg | §14.8, implemented by `identity-churn` | WARN on per-device mints, retire/mint ratio, refusals, unresolved discovery or short-lived identities; PAGE when combined with PgBouncer waiting over 500 or §2.30 over 1 s |
@@ -31647,6 +31731,30 @@ handler entry/exit; it includes authentication and teardown residence and
 does not mean unique clients, authenticated users or admitted residents.
 `urnetwork_connect_exchange_active_connections` supplies finite
 inbound/outbound and transport/forward cells for established exchange owners.
+A transport whose resident is in its own process is attached in process
+instead of dialing a socket back into that process
+(connect/resident_local_transport.go, CPUOPT3 D1), so the established
+transport owners are the outbound transport sockets plus
+`urnetwork_connect_exchange_local_attachments`: one link per attached
+transport, with two pump goroutines and no socket. A block whose
+`exchange_local_transport_enabled` is 1 moves most of its transport sockets
+into that gauge, which is a population change, not a loss of owners. Exchange
+frame and byte totals are `exchange_io` plus `exchange_local`, which counts
+each in-process frame as its socket counted it.
+
+The same release adds an `op` label (`transport`, `forward`, `unknown`) to
+`urnetwork_connect_exchange_io_frames_total` and
+`urnetwork_connect_exchange_io_bytes_total`, to measure the transport share
+before any block turns in-process delivery on. Each process that starts on it
+reports series of a new identity, which every restart already does through
+its new `instance` label: the old label set ends with the old process and the
+new one starts at zero. Every dashboard query on these families (connect.json
+panels 5–10, 89 and 90; public-traffic.json panels 3 and 25) sums, or groups by
+`direction`, `kind` or `op`, so totals stay continuous across the deploy, and
+no alert or monitor probe reads them yet (§25.4 is proposed). A query that
+selects one exact pre-release label set without an aggregation would split
+into one series per `op`; wrap it in `sum`. The label triples the series of
+both families per process, to 18 each.
 Neither family is interchangeable with the resident or SDK transfer ledger.
 Require their own unique fresh same-process cells; absence is unknown, and
 an enabled, complete ledger reporting zero says only that its measured owners
@@ -45661,6 +45769,106 @@ root, deployment, contracts, policy, coordinates or 10,000-bps allocation
 differs from the chain is a counterexample. Unavailable or unverifiable bytes
 leave that root unknown; serving integrity across origins is §22.8's check.
 
+**Settlement v2 cutover and the sanctioned carry sweep.** When the pin
+declares settlement v2, the same checkpoint also reads the v2 pair's links
+and subnet identity (checked exactly as §22.7.1 checks them),
+`vault2.selfColdkey()` and each census operator's `vault2.pools(noId)`. A row
+is post-cutover when its operator's pool is registered and the epoch is at or
+after the pool's `firstEpoch`. From then on v2 settles the epoch, and the v1
+driver closes and commits nothing for that operator (VERSION2-FINAL.md SV-4).
+Earlier rows, and every row of an operator without a registered pool, keep
+every rule above. Post-cutover rows are judged as follows:
+
+- Unset with no root: no close, root or finalization rule. v1
+  `finalizeOperatorEpoch` reverts on an unset epoch, so the row can never
+  settle on v1; v2 settles it.
+- Funded with no root (the sweep close before its commit, or a third party's
+  permissionless close or deferral): no close-at-risk, missed-close,
+  root-at-risk or root-missed warning. Finalization due, finalization overdue
+  and finalize-not-before-offset still apply: a funded epoch must still be
+  finalized, and root-missed then carries its funding.
+- A root equal to vault1 `payoutLeaf(vault2.selfColdkey(), 10000)`, that is
+  `keccak256(bytes.concat(keccak256(abi.encode(coldkey, uint256(10000)))))`,
+  which is also the operator's only post-cutover v1 root in the census, or
+  with a planned sweep epoch enrolled the root at that epoch: the
+  owner-approved one-time carry sweep, a single-leaf tree claimed with an
+  empty proof. It is judged by every ordinary rule above: commit window,
+  committer equal to the operator's root signer, the finalization clock and
+  root rewrite. Its artifact hash names the sweep record of
+  VERSION2-FINAL.md §16, not a payout list, so root reproduction skips it; the
+  root is decided by exact equality with the computed leaf instead.
+- Any other root: PAGE, Sustain 1, `subnet-payout-root`, frame
+  `epoch-N/post-cutover-root`, invariant
+  `post-cutover-v1-root-is-the-sanctioned-sweep`. The observation names the
+  root kind (`different-root` or `sweep-leaf-root`), the operator's
+  post-cutover v1 root count, its first v2 epoch and any planned sweep epoch.
+  Without a plan, a second sweep-leaf root at another post-cutover epoch is
+  not unique, so every copy pages, because the chain cannot show which one
+  was approved. The ordinary rules still apply to these roots. Never
+  backdate or invent a root, and never replace one, to clear the page.
+
+The whole-history conservation, carry and claim identities are unchanged and
+hold for the sweep: its finalized total is its funding plus the prior
+same-operator carry, and its single leaf is then claimed and paid in full to
+vault2's coldkey, where `vault2.absorbStake` takes it in. A failed or
+inconsistent vault2 read (an rpc gap, a link or subnet mismatch, a malformed
+pool, a zero coldkey or no code at the pinned address) leaves the cutover
+unknown, never absent. The run is then `partial:settlement-v2-cutover-unknown`,
+and a `settlement-v2-cutover` coverage gap names `subnet-epoch-progress` and
+`subnet-payout-root` as undecided. Rootless rows keep only the rules that hold
+either way, which is finalization of a funded row. Rows with a root keep the
+ordinary rules but not the sanction check. The whole-history identities do
+not depend on the cutover and are still decided.
+
+**Planned sweep epoch.** The optional enrollment `planned_v1_sweep_epochs`
+names each operator's owner-approved sweep epoch as a list of
+`{no_id, epoch}`. Without it the rules above stand, so an unset epoch is
+silent even when the sweep was meant to happen there. With it, the planned
+epoch, once it is at or after the operator's first v2 epoch or while the
+cutover is unknown, keeps every ordinary v1 progress rule: close at risk,
+missed close, root at risk, root missed, and finalization due and overdue.
+A planned sweep that never closes or commits therefore warns and finally
+pages instead of reading as a v2 epoch. Only a sweep-leaf root at the
+planned epoch is sanctioned, even beside a second sweep root. Every other
+post-cutover root, including a unique sweep-leaf root at another epoch,
+pages as above. The block is strict: one positive epoch per positive
+operator, known keys only, at most sixteen entries. Anything else makes the
+whole enrollment `enrollment-invalid`; with settlement v2 declared, that gap
+also leaves `subnet-epoch-progress` undecided, because a hidden plan decides
+post-cutover progress. A plan that contradicts the chain, naming an epoch
+before the operator's registered first v2 epoch or an operator outside a
+complete census, is dropped and never applied to another epoch: the run is
+`partial:planned-sweep-inconsistent`, and a `planned-sweep` coverage gap
+names `subnet-epoch-progress` and `subnet-payout-root` as undecided.
+
+- **False-positive qualifier:** a post-cutover root page can describe an
+  owner-approved second or re-planned sweep. The chain cannot prove approval,
+  so the page stands until a recorded disposition; the authoritative
+  discriminator is the owner's approval record together with the v1 driver's
+  sweep configuration. An overdue finalization of a funded post-cutover row
+  is not a v2 failure: its funding sits in vault1 pending until a
+  permissionless finalization moves it to carry. A planned epoch the owner
+  later moves keeps warning on the old epoch, and the moved sweep root pages
+  as unplanned, until the enrollment follows the current approval record.
+  Healthy controls: an unset post-cutover epoch past its overdue band is
+  silent; the sanctioned sweep is silent at every stage through its claim
+  and payment, with or without a plan; and an unplanned unset post-cutover
+  epoch stays silent beside a plan.
+- **False-negative qualifier:** without a plan, a sweep that never closes or
+  commits is silent by the cutover rule; enrolling `planned_v1_sweep_epochs`
+  recovers it. Without a plan, uniqueness is judged over the rows read, so
+  an epoch-bounded partial census can hide an older post-cutover root and let
+  a later sweep-leaf root look sanctioned; a complete census or a plan
+  recovers it. A malformed or inconsistent plan is reported unknown rather
+  than applied, so its epochs stay withheld until the enrollment is fixed.
+  This family verifies neither the sweep record behind the sanctioned root
+  nor the later v2 recovery allocation, and it does not replay v2 settlement
+  of post-cutover epochs (the `settlement-v2` gap below); §22.7.1 pages a
+  missing v2 root independently. While the cutover is unknown, a rootless
+  pre-cutover row's close, root and finalization verdicts are withheld; the
+  coverage gap keeps the run from reading healthy, and §22.7.1 still pages
+  the root deadline.
+
 Bands: a proved identity, carry, claim, payment, root or clock contradiction is
 PAGE with Sustain 1 and is retained; at-risk close or root, a missed root,
 finalization due, persistent dust deferral and an unavailable artifact are WARN
@@ -45671,10 +45879,57 @@ offset pages on the same `epoch-N/finalization` identity. Targets are
 `subnet-settlement/coverage`. Aggregate contract counters are public chain
 state and are rendered as exact integers; claimant identities, hashes and
 addresses are never rendered. Missing today: the `subnet_replay` enrollment
-(`replay_from_block`, `api_origins`) is not provisioned in vault/main
-monitor.yml, so the journal and root reproduction stay unknown until it is; a
-declared settlement v2 deployment is not read and reports a coverage gap; no
-claimant or keeper SLO is configured.
+(`replay_from_block`, `api_origins`, `planned_v1_sweep_epochs`) is not
+provisioned in vault/main monitor.yml, so the journal and root reproduction
+stay unknown until it is and a planned sweep epoch cannot warn; a declared
+settlement v2 deployment is not replayed and reports a coverage gap, although
+its cutover facts above are read; no claimant or keeper SLO is configured.
+The independent deadline page in §22.7.1 covers root presence for both
+versions without this replay enrollment.
+
+### 22.7.1 Independent payout root deadline
+Probe: `subnet-root-deadline`
+
+`signal_subnet_root_deadline.go` checks the latest closed epoch every five
+minutes using the reviewed `sn.yml` deployment pin and a configured archive
+node. It reads the finalized chain checkpoint, coordinator epoch clock and
+operator census, and each operator's root state. All views use the same
+canonical block hash; a closing checkpoint recheck precedes every verdict.
+The bounded read needs no producer database, payout leaves, task result,
+artifact API, replay frontier or optional `subnet_replay` enrollment. Thus a
+census that runs through the deadline cannot suppress the alert.
+
+| Alert class | Trip condition | Severity and action |
+|---|---|---|
+| `subnet-root-deadline` | A due operator still has no confirmed root with at most `RootDeadlineLeadBlocks` remaining. Default 600 blocks is about T-2h at mainnet's 12 s/block. | Page, Sustain 1 on the first observation. Inspect close/computation/publication/commit immediately; resolve an ambiguous transaction before retrying. |
+
+The root deadline is `epochEndBlock(e) + policyAt(e).rootCommitWindowBlocks`,
+inclusive. Before an operator's `vault2.pools(noId).firstEpoch`, or when its
+v2 pool is unregistered, the check uses the active v1 `operatorAt` and
+`rootCommitments(e,noId)`. From `firstEpoch` it uses v2 `pending(noId)` and
+the latest finalized `roots` entry. A root for an older epoch does not
+satisfy the current deadline, and a v1 root cannot satisfy a v2 epoch.
+That includes the one-time v1 carry sweep root at a v2 epoch (§22.7): v1
+root state is never read for a v2 epoch, so a committed sweep root cannot
+satisfy that epoch's deadline and a missing one cannot page it.
+Both contract pairs' links and subnet identities must match the reviewed pin.
+
+A v2 epoch needs no new root when `lastFundedEpoch >= e` and
+`fundedThrough(e)` equals the latest finalized root's total (zero before the
+first root). An absent close must still page even if `fundedThrough(e)` reads
+zero. An intentional no-allocation outcome based on provider usage requires
+operator investigation; a producer's assertion alone cannot suppress the
+independent page. Pausing the writer also does not stop the deadline clock.
+
+Targets are `subnet-root-deadline/no-N`, frame `epoch-N/root`. The same page
+continues after the deadline, with `deadline_passed=true`, until a root is
+observed or the next epoch becomes due. Preserve missed-window incidents for
+follow-up; never backdate a root. The check does not certify root contents,
+auditor approvals, challenge completion, claims or v2 conservation.
+RPC failures, missing deployment/source configuration, census bounds or an
+inconsistent checkpoint emit `subnet-monitor-coverage` with unknown state,
+Sustain 1, target `subnet-root-deadline/coverage`. They never prove a missing
+root or healthy settlement.
 
 ### 22.8 Public artifacts, validator evidence anchors, and audit continuity
 Probe: `subnet-evidence`
@@ -45751,6 +46006,30 @@ application is not implemented. Missing today: the `subnet_replay` enrollment
 (`api_origins`, `evidence_from_block`, `anchor_deadline_blocks`) is not
 provisioned, and `/sn/evidence/history` is not enumerated because its public
 contract requires a known kind and run id.
+
+With settlement v2 declared, the family reads the §22.7 cutover at the same
+checkpoint and leaves the sanctioned v1 carry sweep root out of the
+committed-artifact checks: listing, reading, byte verification, loss and the
+audit traversal. Its artifact hash names a sweep record, not a payout
+artifact, so the payout verifier would misjudge it as lost or tampered. While
+the cutover is unknown, any committed root could be the sweep, so every
+committed artifact stays undecided under a `settlement-v2-cutover` coverage
+gap naming `subnet-artifact-integrity` and `subnet-history-availability`,
+and the run is `partial:settlement-v2-cutover-unknown`.
+
+- **False-positive qualifier:** a sweep record absent from both origins, or
+  served as bytes that are not a payout artifact, is not a lost or tampered
+  payout artifact. The authoritative discriminator is the §22.7 sanction:
+  the root equals the single sweep leaf and is the operator's sanctioned
+  post-cutover root. Healthy control: the sweep record absent or served is
+  silent, while an ordinary committed artifact lost at every origin still
+  pages.
+- **False-negative qualifier:** the sweep record itself is neither listed,
+  read nor verified here, so its loss is invisible to this family; recovering
+  that needs a reader that checks the served bytes' sha256 against the
+  committed hash. While the cutover is unknown, a real loss or tampering of
+  an ordinary committed artifact is withheld; the coverage gap keeps the run
+  from reading healthy.
 
 ### 22.8a Enrolled payout artifact availability — partial reader
 Probe: `subnet-artifacts`
@@ -45884,8 +46163,10 @@ progress-file reader in this server monitor. `subnet-process` currently reads
 operator database/task/intent state and explicitly reports the missing
 validator/miner process exporters; `subnet-weights` reads the native chain.
 `subnet-settlement` replays v1 and reports
-`settlement-v2-reader-unimplemented` for a declared V2 pair. Registering these
-probes does not establish enrollment, deployment, metric ingestion or delivered
+`settlement-v2-reader-unimplemented` for a declared V2 pair. The independent
+`subnet-root-deadline` (§22.7.1) reads v1/v2 root presence and funding for the
+current deadline; it does not implement full V2 settlement replay. Registering
+these probes does not establish enrollment, deployment, metric ingestion or delivered
 alerts. Keep those gaps visible alongside a successful direct health check.
 The existing `subnet-head` pool census is also v1-based: it does not resolve
 the epoch-specific V2 `settlementAt` destination. Its allowed-recipient verdict
@@ -46980,7 +47261,12 @@ customers receive.
 Source (exists): `urnetwork_connect_exchange_io_bytes_total` for all Connect
 traffic and `urnetwork_proxy_session_bytes_total` for hosted proxy sessions.
 Compare bytes/s from each with the median of the same 30-minute window on
-each of the previous 7 days.
+each of the previous 7 days. Connect traffic is
+`urnetwork_connect_exchange_io_bytes_total` plus
+`urnetwork_connect_exchange_local_bytes_total`: a block with in-process
+transport delivery on (§8.15) carries most transport frames without a socket,
+and the socket counter alone would fall by that share, about 60% of exchange
+frames once every block is on.
 
 - WARN `delivered-traffic-floor`: below 50% of that median for 15 minutes.
 - PAGE: below 25% for 10 minutes.

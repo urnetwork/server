@@ -1600,6 +1600,11 @@ var publicSafeMetrics = append(append([]string{
 	"urnetwork_connect_transfer_bytes",
 	"urnetwork_connect_resident_clients",
 	"urnetwork_connect_exchange_io_bytes_total",
+	// the same exchange traffic delivered in process instead of over a
+	// socket (connect/resident_local_transport.go), published with it so the
+	// live throughput stays continuous as blocks turn in-process delivery on
+	// (owner decision, 2026-10-31)
+	"urnetwork_connect_exchange_local_bytes_total",
 	"urnetwork_connect_connection_new",
 }, networkMeasurementMetrics...), networkLabeledMeasurementMetrics...)
 
@@ -1962,9 +1967,21 @@ func TestExchangeTrafficDashboardsUseLiveIoWithoutDoubleCounting(t *testing.T) {
 	if throughput == nil || len(throughput.Targets) != 1 {
 		t.Fatal("public live exchange throughput panel is missing")
 	}
-	wantPublic := `sum(rate(urnetwork_connect_exchange_io_bytes_total{direction="sent",kind="data",instance!=""}[$__rate_interval])) * 8`
+	// Socket plus in-process bytes, each counted once as sent: a link counts
+	// a frame as its socket counted it, so the sum is continuous as blocks
+	// turn in-process delivery on. The local term falls back to zero, so the
+	// panel keeps the socket bytes while no process exports local series yet.
+	wantPublic := `(sum(rate(urnetwork_connect_exchange_io_bytes_total{direction="sent",kind="data",instance!=""}[$__rate_interval])) + (sum(rate(urnetwork_connect_exchange_local_bytes_total{direction="sent",kind="data",instance!=""}[$__rate_interval])) or vector(0))) * 8`
 	if throughput.Targets[0].Expr != wantPublic {
 		t.Errorf("public live exchange throughput query = %q, want %q", throughput.Targets[0].Expr, wantPublic)
+	}
+	// the header stat publishes the same number
+	headline := dashboardPanelById(public, 25)
+	if headline == nil || len(headline.Targets) != 1 {
+		t.Fatal("public live throughput stat is missing")
+	}
+	if headline.Targets[0].Expr != wantPublic {
+		t.Errorf("public live throughput stat query = %q, want %q", headline.Targets[0].Expr, wantPublic)
 	}
 
 	internal := readTestDashboard(t, "connect.json")

@@ -41,7 +41,7 @@ func TestSubnetCorrectnessDocumentationCoversRequiredAlertClasses(t *testing.T) 
 		"subnet-path-proof-invalid", "subnet-verify-poisoning", "subnet-attempt-history-gap", "subnet-measurement-coverage", "subnet-pool-quality-mismatch", "subnet-egress-attribution", "subnet-measurement-bias",
 		"subnet-head-selection", "subnet-head-weight-bypass", "subnet-promotion-churn", "subnet-tier-double-pay", "subnet-head-native-payout", "subnet-promotion-economics",
 		"subnet-weight-vector", "subnet-crv4-lifecycle", "subnet-consensus-divergence", "subnet-validator-native-payout",
-		"subnet-epoch-progress", "subnet-capture-delta", "subnet-payout-root", "subnet-claim-correctness", "subnet-claim-credit-payment", "subnet-carry-isolation", "subnet-vault-conservation",
+		"subnet-epoch-progress", "subnet-root-deadline", "subnet-capture-delta", "subnet-payout-root", "subnet-claim-correctness", "subnet-claim-credit-payment", "subnet-carry-isolation", "subnet-vault-conservation",
 		"subnet-artifact-integrity", "subnet-evidence-anchor", "subnet-history-availability", "subnet-audit-replay-gap",
 		"subnet-runtime-liveness", "subnet-state-durability", "subnet-capacity-margin", "subnet-rpc-read-ownership", "subnet-observation-quota", "subnet-evidence-stream-capacity",
 		"subnet-writer-funding", "subnet-adversarial-resilience", "subnet-monitor-coverage",

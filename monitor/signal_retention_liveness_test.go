@@ -1,6 +1,5 @@
-// Synthetic catalog and sampled-page frames exercise the three retention
-// checks and the append-only list through the public signal. No database is
-// read.
+// Synthetic catalog and sampled-page frames exercise the two retention checks
+// and the append-only list through the public signal. No database is read.
 package monitor
 
 import (
@@ -27,34 +26,36 @@ type retentionTestRelation struct {
 
 // One catalog frame and one sampled frame as the primary returns them.
 type retentionTestSource struct {
-	now           time.Time
-	started       time.Time
-	statsReset    time.Time
-	parentKind    string
-	frontier      time.Time
-	partitions    []retentionTestPartition
-	growth        []retentionTestRelation
-	sampled       int64
-	old           int64
-	stamped       int64
-	catalogErr    error
-	reapErr       error
-	mutateCatalog func([]Row) []Row
-	mutateReap    func([]Row) []Row
+	now        time.Time
+	started    time.Time
+	statsReset time.Time
+	parentKind string
+	// The newest subsidy_payment end_time on the primary. The catalog read
+	// no longer asks for it; a read that does gets it in the meta row's
+	// eighth cell, as the read before 2026-10-31 did.
+	subsidyFrontier time.Time
+	partitions      []retentionTestPartition
+	growth          []retentionTestRelation
+	sampled         int64
+	old             int64
+	stamped         int64
+	catalogErr      error
+	reapErr         error
+	mutateCatalog   func([]Row) []Row
+	mutateReap      func([]Row) []Row
 }
 
 func retentionTestMicros(at time.Time) string { return strconv.FormatInt(at.UnixMicro(), 10) }
 
-// A healthy main-shaped primary at the synthetic clock: a recent payout,
-// daily partitions inside retention, reaped contracts and no append-only
-// relation.
+// A healthy main-shaped primary at the synthetic clock: daily partitions
+// inside retention, reaped contracts and no append-only relation.
 func retentionTestHealthy() retentionTestSource {
 	now := syntheticSettings(nil).Now()
 	source := retentionTestSource{
 		now: now, started: now.Add(-40 * 24 * time.Hour), statsReset: now.Add(-30 * 24 * time.Hour),
-		parentKind: "p", frontier: now.Add(-3 * 24 * time.Hour),
-		growth:  []retentionTestRelation{{name: "transfer_contract", oid: 16400, total: 1895 * storageRunwayTestGigabyte, inserted: 2000000000, deleted: 1000}},
-		sampled: 5000, old: 400, stamped: 300,
+		parentKind: "p",
+		growth:     []retentionTestRelation{{name: "transfer_contract", oid: 16400, total: 1895 * storageRunwayTestGigabyte, inserted: 2000000000, deleted: 1000}},
+		sampled:    5000, old: 400, stamped: 300,
 	}
 	for day := -20; day <= 3; day++ {
 		at := now.Add(time.Duration(day) * 24 * time.Hour)
@@ -63,10 +64,13 @@ func retentionTestHealthy() retentionTestSource {
 	return source
 }
 
-func (self retentionTestSource) catalogRows() []Row {
-	frontier := "none"
-	if !self.frontier.IsZero() {
-		frontier = retentionTestMicros(self.frontier)
+func (self retentionTestSource) catalogRows(readsFrontier bool) []Row {
+	frontier := ""
+	if readsFrontier {
+		frontier = "none"
+		if !self.subsidyFrontier.IsZero() {
+			frontier = retentionTestMicros(self.subsidyFrontier)
+		}
 	}
 	statsReset := "0"
 	if !self.statsReset.IsZero() {
@@ -107,12 +111,12 @@ func retentionTestSettings(t *testing.T, source retentionTestSource) SignalSetti
 			}
 			return source.reapRows(), source.reapErr
 		}
-		for _, want := range []string{"hostname -s", "pg_is_in_recovery()", "to_regclass('public.client_reliability')", "max(end_time)) * 1000000)::bigint FROM subsidy_payment", "pg_total_relation_size(c.oid) >= 100000000000"} {
+		for _, want := range []string{"hostname -s", "pg_is_in_recovery()", "to_regclass('public.client_reliability')", "pg_total_relation_size(c.oid) >= 100000000000"} {
 			if !strings.Contains(query, want) {
 				t.Fatalf("retention catalog read lost %q", want)
 			}
 		}
-		return source.catalogRows(), source.catalogErr
+		return source.catalogRows(strings.Contains(query, "FROM subsidy_payment")), source.catalogErr
 	}})
 	at := source.now
 	settings.Now = func() time.Time { return at }
@@ -151,15 +155,14 @@ func TestRetentionLivenessHealthy(t *testing.T) {
 }
 
 // The 2026-10-22 shape: the subsidy epoch ended 10-05, under 1% of old
-// contract rows are stamped, and st_client_key_history only grows. The
-// partition drops still run because the frontier has not yet passed the
-// steady retention.
+// contract rows are stamped, and st_client_key_history only grows. The old
+// subsidy frontier is not a finding: it no longer holds any retention.
 func TestRetentionLivenessSyntheticIncident(t *testing.T) {
 	source := retentionTestHealthy()
 	source.now = time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
 	source.started = source.now.Add(-60 * 24 * time.Hour)
 	source.statsReset = source.now.Add(-30 * 24 * time.Hour)
-	source.frontier = time.Date(2026, 10, 5, 0, 0, 0, 0, time.UTC)
+	source.subsidyFrontier = time.Date(2026, 10, 5, 0, 0, 0, 0, time.UTC)
 	source.partitions = nil
 	for day := time.Date(2026, 10, 5, 0, 0, 0, 0, time.UTC); day.Before(source.now.Add(72 * time.Hour)); day = day.Add(24 * time.Hour) {
 		source.partitions = append(source.partitions, retentionTestPartition{name: "client_reliability_p" + day.Format("20060102"), heap: 60 * 1000 * 1000 * 1000})
@@ -167,26 +170,44 @@ func TestRetentionLivenessSyntheticIncident(t *testing.T) {
 	source.growth = append(source.growth, retentionTestRelation{name: "st_client_key_history", oid: 16500, total: 382 * storageRunwayTestGigabyte, inserted: 81600000})
 	source.sampled, source.old, source.stamped = 4664, 4000, 30
 	alerts := retentionTestRun(t, NewRetentionLivenessSignal(), source)
-	if len(alerts) != 2 {
-		t.Fatalf("got %d alerts, want the pinned frontier and the stalled reap", len(alerts))
+	if len(alerts) != 1 {
+		t.Fatalf("got %d alerts, want only the stalled reap", len(alerts))
 	}
-	frontier := requireAlertClass(t, alerts, "retention-frontier-pinned")
-	if frontier.Target != "pg-1/subsidy-frontier" || frontier.Severity != SeverityWarn || frontier.Sustain != 1 ||
-		!strings.Contains(frontier.Observed, "frontier_age_days=17.5 holding_reliability_retention=false days_until_hold=2.5") {
-		t.Fatalf("wrong frontier alert: %s", frontier.Observed)
-	}
+	requireNoAlertClass(t, alerts, "retention-frontier-pinned")
 	reap := requireAlertClass(t, alerts, "contract-reap-stalled")
 	if reap.Target != "pg-1/contract-reap" || reap.Severity != SeverityWarn || reap.Sustain != 2 ||
 		!strings.Contains(reap.Observed, "old_rows=4000 old_rows_with_reap_time=30 stamped_share_pct=0.75") {
 		t.Fatalf("wrong reap alert: %s", reap.Observed)
 	}
-	for _, alert := range []Alert{frontier, reap} {
-		if !strings.Contains(alert.Evidence, "append_only_relations=[st_client_key_history total_gb=382.0 inserted_rows=81600000]") ||
-			strings.Contains(alert.Evidence, "transfer_contract total_gb") {
-			t.Fatalf("append-only list is wrong: %s", alert.Evidence)
-		}
+	if !strings.Contains(reap.Evidence, "append_only_relations=[st_client_key_history total_gb=382.0 inserted_rows=81600000]") ||
+		strings.Contains(reap.Evidence, "transfer_contract total_gb") {
+		t.Fatalf("append-only list is wrong: %s", reap.Evidence)
 	}
 	requireNoAlertClass(t, alerts, "partition-retention-stuck")
+}
+
+// The 2026-10-31 shape: the subsidy frontier is 26 days old and the drop pass
+// before the owner's decision held every day from 10-05, so the oldest
+// partition ended 25.75 days before the observation. The 21-day rule counts
+// it stuck: the pass drops it on its next run once the new rule is deployed,
+// and a frontier-held cutoff no longer hides a stopped drop.
+func TestRetentionLivenessJudgesByTwentyOneDaysDespiteSubsidyFrontier(t *testing.T) {
+	source := retentionTestHealthy()
+	source.now = time.Date(2026, 10, 31, 18, 0, 0, 0, time.UTC)
+	source.started = source.now.Add(-7 * 24 * time.Hour)
+	source.statsReset = time.Time{}
+	source.subsidyFrontier = time.Date(2026, 10, 5, 23, 59, 59, 0, time.UTC)
+	source.partitions = []retentionTestPartition{{name: "client_reliability_p20261004", heap: 0}}
+	for day := time.Date(2026, 10, 5, 0, 0, 0, 0, time.UTC); day.Before(source.now.Add(72 * time.Hour)); day = day.Add(24 * time.Hour) {
+		source.partitions = append(source.partitions, retentionTestPartition{name: "client_reliability_p" + day.Format("20060102"), heap: 50 * 1000 * 1000 * 1000})
+	}
+	alerts := retentionTestRun(t, NewRetentionLivenessSignal(), source)
+	requireNoAlertClass(t, alerts, "retention-frontier-pinned")
+	stuck := requireAlertClass(t, alerts, "partition-retention-stuck")
+	if stuck.Target != "pg-1/client-reliability-partitions" ||
+		!strings.Contains(stuck.Observed, "oldest_partition=client_reliability_p20261005 upper_bound_age_days=25.8 cutoff_age_days=21.0 days_past_cutoff=4.8") {
+		t.Fatalf("wrong partition alert: %s", stuck.Observed)
+	}
 }
 
 // The oldest non-empty partition decides; empty and foreign partitions are
@@ -202,14 +223,14 @@ func TestRetentionLivenessPartitionCutoffs(t *testing.T) {
 		oldest   string
 		stuck    bool
 	}{
-		{name: "steady retention passed", frontier: now.Add(-3 * 24 * time.Hour), oldest: day(-28), stuck: true},
-		{name: "steady retention inside grace", frontier: now.Add(-3 * 24 * time.Hour), oldest: day(-23)},
-		{name: "frontier holds", frontier: now.Add(-25 * 24 * time.Hour), oldest: day(-27)},
-		{name: "longest retention forces", frontier: now.Add(-40 * 24 * time.Hour), oldest: day(-34), stuck: true},
-		{name: "no frontier", frontier: time.Time{}, oldest: day(-25), stuck: true},
+		{name: "retention passed", oldest: day(-28), stuck: true},
+		{name: "retention inside grace", oldest: day(-23)},
+		{name: "a recent subsidy frontier holds nothing", frontier: now.Add(-25 * 24 * time.Hour), oldest: day(-27), stuck: true},
+		{name: "a stale subsidy frontier holds nothing", frontier: now.Add(-40 * 24 * time.Hour), oldest: day(-26), stuck: true},
+		{name: "no frontier", oldest: day(-25), stuck: true},
 	} {
 		source := retentionTestHealthy()
-		source.frontier = test.frontier
+		source.subsidyFrontier = test.frontier
 		source.partitions = append(source.partitions,
 			retentionTestPartition{name: test.oldest, heap: 1},
 			retentionTestPartition{name: day(-60), heap: 0},
@@ -267,7 +288,7 @@ func TestRetentionLivenessFramesAndFailuresStayUnknown(t *testing.T) {
 		targets []string
 		reason  string
 	}
-	both := []string{"pg-1/subsidy-frontier", "pg-1/client-reliability-partitions"}
+	both := []string{"pg-1/client-reliability-partitions"}
 	for _, test := range []mutation{
 		{name: "catalog error", mutate: func(s *retentionTestSource) { s.catalogErr = errors.New("exit status 3: private-source-canary") }, targets: both, reason: "catalog-source-unavailable"},
 		{name: "wrong host", mutate: func(s *retentionTestSource) {
@@ -376,7 +397,7 @@ func TestRetentionLivenessInventoryAuthority(t *testing.T) {
 			settings.Hosts = append(settings.Hosts, HostSettings{Name: "pg-2", Roles: []string{"pg-primary"}})
 		}
 		alerts, err := NewRetentionLivenessSignal().Run(context.Background(), settings)
-		if err != nil || len(alerts) != 3 {
+		if err != nil || len(alerts) != 2 {
 			t.Fatalf("%s primary did not leave every check unknown", mode)
 		}
 		for _, alert := range alerts {
@@ -406,7 +427,7 @@ func TestRetentionLivenessCancellationKeepsOriginalCause(t *testing.T) {
 			if reap {
 				return source.reapRows(), nil
 			}
-			return source.catalogRows(), nil
+			return source.catalogRows(strings.Contains(query, "FROM subsidy_payment")), nil
 		}}
 		if stage == "before" {
 			cancel()

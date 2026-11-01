@@ -178,10 +178,28 @@ func (self *subnetEvidenceProbe) check(ctx context.Context, env *probeEnv) (find
 	if err != nil {
 		return sourceGap(err)
 	}
+	// The §22.7 cutover names the sanctioned v1 carry sweep, whose artifact
+	// hash is a sweep record rather than a payout artifact.
+	if err := readSubnetSettlementCutover(runCtx, rpc, pin, state, settings.plannedV1SweepEpochs()); err != nil {
+		return sourceGap(err)
+	}
+	cutoverUnknown := state.cutover.declared && !state.cutover.known
 	scope.checkpointNumber = state.checkpoint.number
 	scope.completeness = "complete"
+	partial := []string{}
 	if !state.censusComplete {
-		scope.completeness = "partial:" + state.censusReason
+		partial = append(partial, state.censusReason)
+	}
+	if cutoverUnknown {
+		partial = append(partial, "settlement-v2-cutover-unknown")
+	}
+	if 0 < len(partial) {
+		scope.completeness = "partial:" + strings.Join(partial, ",")
+	}
+	// Without the cutover any committed root could be the sweep, so committed
+	// artifacts stay undecided rather than paged or cleared.
+	if cutoverUnknown {
+		gaps = append(gaps, coverage("settlement-v2-cutover", state.cutover.reason, []string{"subnet-artifact-integrity", "subnet-history-availability"}))
 	}
 	verdicts := []finding{}
 
@@ -578,8 +596,14 @@ func (self *subnetEvidenceProbe) checkSubnetEvidenceHistory(ctx context.Context,
 		if hash == [32]byte{} {
 			continue
 		}
-		committedArtifacts = append(committedArtifacts, committed{entry: entry, hash: hash})
 		committedHashes[hash] = true
+		// The sanctioned sweep commits a sweep record (§22.7), so the payout
+		// artifact verifier cannot judge it; with the cutover unknown any
+		// committed root could be that sweep.
+		if entry.sanctionedSweep || entry.cutover == subnetSettlementCutoverUnknown {
+			continue
+		}
+		committedArtifacts = append(committedArtifacts, committed{entry: entry, hash: hash})
 	}
 	sort.SliceStable(committedArtifacts, func(i, j int) bool { return committedArtifacts[j].entry.epoch < committedArtifacts[i].entry.epoch })
 	outcomes := map[[32]byte][]string{}

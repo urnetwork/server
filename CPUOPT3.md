@@ -14,6 +14,8 @@ Five read-only investigations, one per CPU domain, wrote the five parts:
 
 Evidence came from Mimir, short perf and bpftrace captures (data files deleted on the hosts), `pg_stat_statements`, Redis INFO and SLOWLOG, and code read at the deployed revisions (server a8461e236, connect 89b15920). No production state was changed.
 
+What has been built from the plans, and where each change stands, is under "Design plans", in "Changes made so far".
+
 Section numbers inside a part are local to that part: A §6.1 is Part A's section 6.1. Raw outputs and scripts are cited as `<scratch>/…`. They stayed in the analysis workspace and are not committed.
 
 **Owner rule (binding):** "We can't sacrifice correctness of performance timings for the cpu savings." Nothing proposed here loosens a timeout, deadline, keepalive, probe, detection or revocation bound. Each part lists what it rejected under that rule.
@@ -191,6 +193,141 @@ The questions are asked one at a time, and nothing is implemented before they ar
 | D3 | Implement with the recommended answers (the owner can still override): answer audit-only packs before authentication, retire PeerAudit, drop ReportAbuse but count it for two weeks, fix the monitor signal now. |
 | D4 | Deferred. The owner was concerned about storage. Both caches are in-process memory, not Redis (the JWT cache is capped at 64 MB per process, the chain cache at 256 entries), and the plan stays here for later. |
 | D5 | The minimal fix only: `RuntimeMaxSec=30h` on the dump unit, plus an abort watcher that stops the dump and publishes nothing above a transfer_contract freeze age of 1.0B or below 1.5 TB free on edge-2's root. No format change. The standby is not scheduled. Separately, the owner chose to delete edge-2's dump generations once planetoid has verified its copy. |
+
+### Changes made so far (status 2026-11-01 05:00Z)
+
+What has been built from these plans, and where each change stands.
+- **Nothing here is deployed yet.** Each change goes through an independent review, then a staged rollout.
+- **Server releases are hotfixes for now.** Server changes are kept cherry-pickable onto the running release revision (a8461e236 plus its hotfixes), because origin/main needs migration 903, which production applies separately.
+
+| Plan | Branch and head | State |
+|---|---|---|
+| D1 | server `feat/cpuopt3-d1-inprocess-delivery` @ 37b2782c4 | Built, ships dark; independent review in progress |
+| D2 | connect, sdk and server `feat/cpuopt3-d2-window-handover` | Being built: counters-only step first |
+| D3 | server `feat/cpuopt3-d3-peeraudit` @ dafc7d60e; connect `feat/cpuopt3-d3-peeraudit` @ c034364a | Built; independent review in progress |
+| D4 | none | Deferred by the owner |
+| D5 | xops `feat/edge2-release-verified-dumps` @ 0e44e1d, more commits to come | Bounds and delete-after-verify built; the parallel format and planetoid retention are being added; not applied |
+
+#### D1: in-process delivery
+
+**Commits:**
+- 4366f8156: model;
+- 87bdcdd88: connect;
+- 445e940d6: dashboard and docs;
+- 37b2782c4: the public throughput counts in-process bytes.
+
+They cherry-pick cleanly onto a8461e236 as 51ee9f3d2, 1fcd93787, 1a0a2371d and 9310d499c, with no migration.
+
+**What changed:**
+- `connect/resident_local_transport.go` (new): when a transport's resident is in its own process, the transport attaches to it in memory instead of dialing it over loopback TCP.
+  - Two pumps per link replace about 9 goroutines and two sockets.
+  - Each pump keeps the socket writer's contract: FIFO batches, framer limits over the whole batch, zero-length messages as pings, activity per delivered batch, and every undelivered buffer returned exactly once.
+- Each batch gets 15 s from its start. The timer exists only while a delivery blocks, and a stalled batch detaches into the normal reconnect.
+- `connect/resident.go`:
+  - one branch in `ResidentTransport.Run`;
+  - `CancelIfIdle` counts an attached link as activity;
+  - an `op` label on `exchange_io_*`.
+- `model/connect_move_control.go`: the `localTransport` field.
+
+**Kill switch (owner, D1 Q1: both):**
+- **The code default** `LocalTransportDefault` is off.
+- **The runtime field:** `HSET {connect_move}control localTransport beta|g1|all|off`, which each process re-reads every 10 s.
+- **Turning it off:** new attaches go to TCP, and live links detach back to TCP at 500/s per process.
+
+**Metrics:**
+- `exchange_local_frames_total`, `exchange_local_bytes_total`, `exchange_local_attachments`, `exchange_local_detaches_total{reason}`, `exchange_local_blocked_seconds`, `exchange_local_transport_enabled`;
+- the drop boundaries `local_transport_send` and `local_transport_receive`.
+
+Exchange totals are now io plus local, with no double counting.
+
+**Public dashboard (owner decision):** the live exchange throughput panel and the live throughput header stat count socket plus in-process bytes, so the published number stays continuous through the rollout.
+
+**Evidence:**
+- 31 tests, 5× under -race, plus DB end-to-end tests through the gate containers;
+- 26 faithful mutants caught, among them a per-delivery timer re-arm, a deadline started before the batch, a leaked or double-returned buffer, unpaced or missing detach, and writers that modify shared buffers;
+- **Benchmark:** the hop costs 1.4 µs per frame in process against 4.0 µs over loopback (−63%), with 1 allocation instead of 2.
+
+**Rollout:**
+1. Deploy dark.
+2. Enable beta for 1 day, then g1 for 3 days against the other blocks, then all.
+
+#### D2: window-client handover
+
+Being built in two separable steps:
+1. A counters-only release (`connect.WindowClientStats` through the sdk to a proxy collector) for the 24 h baseline.
+2. The capacity check before candidate construction, and the atomic slot handover for drained clients.
+
+#### D3: PeerAudit
+
+**Commits:**
+- e1b5b142b: monitor partitions;
+- 87bf51944: monitor denominators;
+- dafc7d60e: the discard;
+- connect c034364a.
+
+The server commits cherry-pick cleanly onto a8461e236.
+
+**What changed:**
+- **`controller/connect_control_discard.go` (new):** a pack of at most 2,048 base64 characters, made only of PeerAudit or abuse-report frames, gets an empty reply before authentication.
+  - The route gates (lag-guest, intended-network) have already run by then.
+  - Mixed or malformed packs take the normal path unchanged.
+  - Counter: `urnetwork_connect_control_discarded_requests_total{abuse="claimed|none"}`, with no logging.
+  - api and alt share the router path. The proxy's localclient runs its lifecycle checks, then the discard, before contract admission and authentication.
+- **Monitor §2.19e (control route pressure) works again.** It had been blind since 10-22, because its parser rejected the new `resident_move_result` label: the old parser marks 20 of 20 api slots unobservable, the fixed one 0 of 20. It also subtracts discarded requests from its denominators.
+- **Abuse reports no longer spend a provider's control budget.** A DB regression test goes from 429 to 200.
+- **connect:** `SendPeerAudits`, default off, stops all three senders. The off path costs 4.8 ns per call against 84.9 ns.
+
+**Evidence:**
+- failing-first runs on the base;
+- 15 mutants caught;
+- 60 s of fuzzing, 136k executions;
+- every new test, DB-backed ones included, passes under -race.
+
+**Rollout:**
+1. The monitor commits.
+2. The api on one block for 24 h, then the fleet and alt.
+3. The proxy.
+4. Merge connect and bump the server release lock.
+5. The sdk, then apps on their normal schedule.
+
+The server change alone removes about 85% of the api cost.
+
+#### D5: backups (the minimal fix, plus the owner's later choices)
+
+- **c920b07, delete after verify:**
+  - Planetoid writes a verified marker to edge-2 only after a full copy matches the dump's sha256.
+  - An hourly unit on edge-2 then deletes that generation. It can write only `final/` and `verified/`, with no network and no capabilities.
+- **0e44e1d, dump bounds:**
+  - `TimeoutStartSec=30h` (`RuntimeMaxSec` has no effect on a oneshot unit).
+  - A guard checks before the dump and every 5 min. It refuses to start, or aborts, when transfer_contract's `age(relfrozenxid)` (partition-aware) exceeds 1.0B, when edge-2's root has under 1.5 TB free, or after three failed reads in a row.
+  - It publishes nothing, removes the stage, and exits 1.
+- **Being added:**
+  - `pg_dump -Fd -j4` from the 11-05 dump, about a 4.5 h snapshot hold instead of 18–20 h. The output is tarred and encrypted into one artifact, so planetoid's pull and the release step stay the same.
+  - Planetoid retention:
+    - remove the stale 294 GB partial now;
+    - remove the two legacy xz monthlies only after a newer verified generation exists;
+    - keep latest 2 / week 1 / month 1.
+- **Tests:** 19 release tests and 12 guard tests, failing first; `systemd-analyze verify` on systemd 255.
+- **Apply:** edge-2 is applied only when no dump is running. Planetoid can be applied before the 11-01 generation's pull.
+
+**The 11-01 00:00Z dump**, still single-stream, runs under the owner's 10-29 stop rule: CPU at or above 97% on two consecutive 10-minute readings, or more than 50 PgBouncer clients waiting on two. From 04:07 to 04:48Z it read:
+
+| Measure | Range |
+|---|---|
+| CPU | 90.7–96.1% |
+| PgBouncer waiting | 0–89 |
+| Debit-flush lag | 4,610–6,901 s |
+
+#### Related changes from Part D's findings
+
+The owner approved an edge-2 disk reclaim plan:
+- REINDEX CONCURRENTLY of the bloated partial indexes and of network_client's;
+- partitioning provider_egress_health_history;
+- VACUUM FULL of the queue tables in no-dump windows;
+- client_reliability back to 21-day retention, with the subsidy-payment pin removed;
+- a 91-day contract row reaper.
+
+All of these are being built, with a runbook to follow.
 
 ### D1. Deliver in-process when the transport's resident is in the same connect process
 

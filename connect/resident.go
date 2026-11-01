@@ -109,6 +109,11 @@ const (
 	receiveQueueBoundaryExchangeForwardSend     = "exchange_forward_send"
 	receiveQueueBoundaryResidentClientControl   = "resident_client_control"
 	receiveQueueBoundaryResidentClientForward   = "resident_client_forward"
+	// A local transport link's pumps (resident_local_transport.go): messages
+	// a pump dequeued and did not deliver, into the resident's receive route
+	// (send) or into the transport's receive queue (receive).
+	receiveQueueBoundaryLocalTransportSend    = "local_transport_send"
+	receiveQueueBoundaryLocalTransportReceive = "local_transport_receive"
 )
 
 var receiveQueueDroppedMessagesCounter = prometheus.NewCounterVec(
@@ -140,15 +145,17 @@ func recordReceiveQueueDrop(boundary string, byteCount int) {
 // recorded only after its complete 4-byte header and payload have been read or
 // written, so retries and failed partial writes cannot inflate the totals.
 // These labels are deliberately closed sets: this is one of the hottest paths
-// in connect and must not create per-peer or per-client series.
+// in connect and must not create per-peer or per-client series. The op label
+// is the connection's exchange operation, which measures the transport share
+// that in-process delivery takes off the sockets (resident_local_transport.go).
 var exchangeIOFramesCounter = prometheus.NewCounterVec(
 	prometheus.CounterOpts{
 		Namespace: "urnetwork",
 		Subsystem: "connect",
 		Name:      "exchange_io_frames_total",
-		Help:      "Completed exchange protocol frames, partitioned by I/O direction and frame kind",
+		Help:      "Completed exchange protocol frames, partitioned by exchange operation, I/O direction and frame kind",
 	},
-	[]string{"direction", "kind"},
+	[]string{"op", "direction", "kind"},
 )
 
 var exchangeIOBytesCounter = prometheus.NewCounterVec(
@@ -156,9 +163,9 @@ var exchangeIOBytesCounter = prometheus.NewCounterVec(
 		Namespace: "urnetwork",
 		Subsystem: "connect",
 		Name:      "exchange_io_bytes_total",
-		Help:      "Bytes in completed exchange protocol frames, including each 4-byte frame header, partitioned by I/O direction and frame kind",
+		Help:      "Bytes in completed exchange protocol frames, including each 4-byte frame header, partitioned by exchange operation, I/O direction and frame kind",
 	},
-	[]string{"direction", "kind"},
+	[]string{"op", "direction", "kind"},
 )
 
 var exchangeActiveConnectionsGauge = prometheus.NewGaugeVec(
@@ -188,10 +195,34 @@ const (
 	exchangeIOFrameKindCount
 )
 
+// The exchange operation of a connection's frames, as the op label names it.
+// Unknown until an accepted connection has read its header.
+type exchangeIOOp uint8
+
+const (
+	exchangeIOOpUnknown exchangeIOOp = iota
+	exchangeIOOpTransport
+	exchangeIOOpForward
+	exchangeIOOpCount
+)
+
 const exchangeIOFrameHeaderByteCount = 4
 
+var exchangeIOOpLabels = [exchangeIOOpCount]string{"unknown", "transport", "forward"}
 var exchangeIODirectionLabels = [exchangeIODirectionCount]string{"sent", "received"}
 var exchangeIOFrameKindLabels = [exchangeIOFrameKindCount]string{"data", "ping", "handshake"}
+
+// The op label index of an exchange operation.
+func exchangeIOOpOf(op ExchangeOp) exchangeIOOp {
+	switch op {
+	case ExchangeOpTransport:
+		return exchangeIOOpTransport
+	case ExchangeOpForward:
+		return exchangeIOOpForward
+	default:
+		return exchangeIOOpUnknown
+	}
+}
 
 type exchangeIOCollectors struct {
 	frames prometheus.Counter
@@ -200,10 +231,10 @@ type exchangeIOCollectors struct {
 
 // Pre-bind every label combination once rather than performing a CounterVec
 // lookup for every frame on this multi-billion-call path.
-var exchangeIOCollectorsByLabel [exchangeIODirectionCount][exchangeIOFrameKindCount]exchangeIOCollectors
+var exchangeIOCollectorsByLabel [exchangeIOOpCount][exchangeIODirectionCount][exchangeIOFrameKindCount]exchangeIOCollectors
 
-func recordExchangeIO(direction exchangeIODirection, kind exchangeIOFrameKind, payloadByteCount int) {
-	collectors := &exchangeIOCollectorsByLabel[direction][kind]
+func recordExchangeIO(op exchangeIOOp, direction exchangeIODirection, kind exchangeIOFrameKind, payloadByteCount int) {
+	collectors := &exchangeIOCollectorsByLabel[op][direction][kind]
 	collectors.frames.Inc()
 	collectors.bytes.Add(float64(exchangeIOFrameHeaderByteCount + payloadByteCount))
 }
@@ -349,17 +380,21 @@ func init() {
 		drainRefusalsCounter.WithLabelValues(carrier).Add(0)
 	}
 
-	for direction := exchangeIODirection(0); direction < exchangeIODirectionCount; direction++ {
-		for kind := exchangeIOFrameKind(0); kind < exchangeIOFrameKindCount; kind++ {
-			exchangeIOCollectorsByLabel[direction][kind] = exchangeIOCollectors{
-				frames: exchangeIOFramesCounter.WithLabelValues(
-					exchangeIODirectionLabels[direction],
-					exchangeIOFrameKindLabels[kind],
-				),
-				bytes: exchangeIOBytesCounter.WithLabelValues(
-					exchangeIODirectionLabels[direction],
-					exchangeIOFrameKindLabels[kind],
-				),
+	for op := exchangeIOOp(0); op < exchangeIOOpCount; op++ {
+		for direction := exchangeIODirection(0); direction < exchangeIODirectionCount; direction++ {
+			for kind := exchangeIOFrameKind(0); kind < exchangeIOFrameKindCount; kind++ {
+				exchangeIOCollectorsByLabel[op][direction][kind] = exchangeIOCollectors{
+					frames: exchangeIOFramesCounter.WithLabelValues(
+						exchangeIOOpLabels[op],
+						exchangeIODirectionLabels[direction],
+						exchangeIOFrameKindLabels[kind],
+					),
+					bytes: exchangeIOBytesCounter.WithLabelValues(
+						exchangeIOOpLabels[op],
+						exchangeIODirectionLabels[direction],
+						exchangeIOFrameKindLabels[kind],
+					),
+				}
 			}
 		}
 	}
@@ -379,6 +414,8 @@ func init() {
 		receiveQueueBoundaryExchangeForwardSend,
 		receiveQueueBoundaryResidentClientControl,
 		receiveQueueBoundaryResidentClientForward,
+		receiveQueueBoundaryLocalTransportSend,
+		receiveQueueBoundaryLocalTransportReceive,
 	} {
 		receiveQueueDroppedMessagesCounter.WithLabelValues(boundary).Add(0)
 		receiveQueueDroppedBytesCounter.WithLabelValues(boundary).Add(0)
@@ -565,6 +602,8 @@ type ExchangeSettings struct {
 
 	ExchangeMoveSettings
 	ExchangeMoverSettings
+
+	ExchangeLocalTransportSettings
 }
 
 // Reports one exchange writer ping timer arm to a test.
@@ -686,6 +725,8 @@ func DefaultExchangeSettingsWithBufferSize(bufferSize int) *ExchangeSettings {
 
 		ExchangeMoveSettings:  *DefaultExchangeMoveSettings(),
 		ExchangeMoverSettings: *DefaultExchangeMoverSettings(),
+
+		ExchangeLocalTransportSettings: *DefaultExchangeLocalTransportSettings(),
 	}
 }
 
@@ -762,6 +803,18 @@ type Exchange struct {
 	// Nil in production; nomination tests wait for retirement after lifecycle
 	// workers start to verify that cleanup cannot precede map publication.
 	afterResidentWorkersStartedForTest func(*Resident)
+	// Nil in production; local transport tests hold an attach after its
+	// generation check, a pump after it takes a batch's first message and
+	// after it gathers the batch, and a pump before it waits on a delivery
+	// that would block (resident_local_transport.go).
+	beforeLocalTransportAttachForTest func(*Resident)
+	beforeLocalTransportGatherForTest func(*localTransportLink, localTransportDirection)
+	afterLocalTransportGatherForTest  func(*localTransportLink, localTransportDirection, int)
+	beforeLocalTransportBlockForTest  func(*localTransportLink, localTransportDirection)
+
+	// in-process delivery of transports to local residents; nil while
+	// EnableLocalTransport is off (resident_local_transport.go)
+	localTransport *exchangeLocalTransport
 
 	// the shared key-event subscriber (PEERSSTREAMS2.md); nil unless
 	// KeyEventDelivery.Enabled
@@ -898,6 +951,7 @@ func newExchange(
 		exchange.keyEventSubscriber.SetClientRemoved(exchange.handleClientRemoved)
 	}
 	exchange.contractOriginNotifications = model.NewContractOriginNotifications(cancelCtx, model.DefaultContractOriginNotificationSettings())
+	exchange.localTransport = newExchangeLocalTransport(cancelCtx, settings, block)
 	if settings.EnableMove {
 		inventoryProcessHost := host
 		if settings.edgeInventoryProcessHostForTest != "" {
@@ -1619,6 +1673,7 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 			defer handleCancel()
 
 			sendBuffer := NewDefaultExchangeBuffer(self.settings)
+			sendBuffer.setIOOp(header.Op)
 			pinger := newExchangePinger(self.settings)
 			defer pinger.stop()
 			batch := make([][]byte, 0, self.settings.ExchangeWriteBatchCount)
@@ -1799,6 +1854,7 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 			defer handleCancel()
 
 			sendBuffer := NewDefaultExchangeBuffer(self.settings)
+			sendBuffer.setIOOp(header.Op)
 			// this side of a forward sends only pings, so it is always idle:
 			// one reused timer paces them, an interval after each ping
 			pingTimer := time.NewTimer(self.settings.ExchangePingTimeout)
@@ -2385,6 +2441,9 @@ func (self *Exchange) Close() {
 	self.connectionWorkerLock.Lock()
 	self.connectionWorkersClosed = true
 	self.connectionWorkerLock.Unlock()
+	if self.localTransport != nil {
+		self.localTransport.closeWorkers()
+	}
 	// Stop active resident work before any socket or notification-owner join;
 	// a slow Redis close must not postpone the exchange's cancellation edge.
 	self.cancel()
@@ -2406,14 +2465,18 @@ func (self *Exchange) Close() {
 	}
 }
 
-// WaitForIdle waits until every admitted resident, listener, and accepted
-// connection has completed teardown. Close must be called first so neither
+// WaitForIdle waits until every admitted resident, listener, accepted
+// connection, and in-process transport link has completed teardown, with the
+// local transport's control loop and pacer. Close must be called first so no
 // wait group can receive another admission.
 func (self *Exchange) WaitForIdle(ctx context.Context) bool {
 	done := make(chan struct{})
 	go func() {
 		self.residentWorkers.Wait()
 		self.connectionWorkers.Wait()
+		if self.localTransport != nil {
+			self.localTransport.workers.Wait()
+		}
 		close(done)
 	}()
 	select {
@@ -2536,6 +2599,10 @@ type ExchangeBuffer struct {
 	readDeadline  exchangeDeadline
 	writeDeadline exchangeDeadline
 
+	// the op label of the frames this buffer records. An accepted
+	// connection's buffer learns it from the header it reads.
+	ioOp exchangeIOOp
+
 	// Test-only scalar observation after the real native writev returns.
 	afterWritevForTest func(messageCount int, writtenByteCount int64, writeErr error)
 }
@@ -2551,6 +2618,11 @@ func NewDefaultExchangeBuffer(settings *ExchangeSettings) *ExchangeBuffer {
 
 func NewReceiveOnlyExchangeBuffer(settings *ExchangeSettings) *ExchangeBuffer {
 	return NewDefaultExchangeBuffer(settings)
+}
+
+// Labels the frames this buffer records with the connection's operation.
+func (self *ExchangeBuffer) setIOOp(op ExchangeOp) {
+	self.ioOp = exchangeIOOpOf(op)
 }
 
 func (self *ExchangeBuffer) connReader(conn net.Conn) *bufio.Reader {
@@ -2578,7 +2650,7 @@ func (self *ExchangeBuffer) WriteHeader(ctx context.Context, conn net.Conn, head
 	if err := self.framer.Write(conn, headerBytes); err != nil {
 		return err
 	}
-	recordExchangeIO(exchangeIODirectionSent, exchangeIOFrameKindHandshake, len(headerBytes))
+	recordExchangeIO(self.ioOp, exchangeIODirectionSent, exchangeIOFrameKindHandshake, len(headerBytes))
 	return nil
 }
 
@@ -2592,13 +2664,17 @@ func (self *ExchangeBuffer) ReadHeader(ctx context.Context, conn net.Conn) (*Exc
 		return nil, err
 	}
 	defer connect.MessagePoolReturn(headerBytes)
-	recordExchangeIO(exchangeIODirectionReceived, exchangeIOFrameKindHandshake, len(headerBytes))
 
 	var header ExchangeHeader
 
 	b := bytes.NewBuffer(headerBytes)
 	e := gob.NewDecoder(b)
 	err = e.Decode(&header)
+	// an accepted connection's buffer learns its operation from the header
+	if err == nil && self.ioOp == exchangeIOOpUnknown {
+		self.setIOOp(header.Op)
+	}
+	recordExchangeIO(self.ioOp, exchangeIODirectionReceived, exchangeIOFrameKindHandshake, len(headerBytes))
 	if err != nil {
 		return nil, err
 	}
@@ -2628,7 +2704,7 @@ func (self *ExchangeBuffer) WriteMessage(conn net.Conn, transferFrameBytes []byt
 		self.writeStorage,
 	)
 	if err == nil {
-		recordExchangeIO(exchangeIODirectionSent, exchangeIOMessageKind(transferFrameBytes), len(transferFrameBytes))
+		recordExchangeIO(self.ioOp, exchangeIODirectionSent, exchangeIOMessageKind(transferFrameBytes), len(transferFrameBytes))
 	}
 	connect.MessagePoolReturn(transferFrameBytes)
 	return err
@@ -2698,7 +2774,7 @@ func (self *ExchangeBuffer) WriteMessages(conn net.Conn, transferFrameBytesBatch
 	for _, transferFrameBytes := range transferFrameBytesBatch {
 		frameByteCount := int64(exchangeIOFrameHeaderByteCount + len(transferFrameBytes))
 		if frameByteCount <= n {
-			recordExchangeIO(exchangeIODirectionSent, exchangeIOMessageKind(transferFrameBytes), len(transferFrameBytes))
+			recordExchangeIO(self.ioOp, exchangeIODirectionSent, exchangeIOMessageKind(transferFrameBytes), len(transferFrameBytes))
 			n -= frameByteCount
 		} else {
 			// No later frame belongs to the completed prefix, even if it is
@@ -2718,7 +2794,7 @@ func (self *ExchangeBuffer) ReadMessage(conn net.Conn) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	recordExchangeIO(exchangeIODirectionReceived, exchangeIOMessageKind(transferFrameBytes), len(transferFrameBytes))
+	recordExchangeIO(self.ioOp, exchangeIODirectionReceived, exchangeIOMessageKind(transferFrameBytes), len(transferFrameBytes))
 	return transferFrameBytes, nil
 }
 
@@ -2889,7 +2965,9 @@ func NewExchangeConnection(
 	}()
 
 	sendBuffer := NewDefaultExchangeBuffer(settings)
+	sendBuffer.setIOOp(header.Op)
 	receiveBuffer := NewReceiveOnlyExchangeBuffer(settings)
+	receiveBuffer.setIOOp(header.Op)
 	receiveQueueSize := settings.ExchangeBufferSize
 	if header.Op == ExchangeOpForward {
 		// Forward endpoints only read pings and discard unexpected payloads.
@@ -3557,6 +3635,14 @@ func newResidentTransport(
 }
 
 func (self *ResidentTransport) Run() {
+	self.runWithResidentLookup(model.GetResidentForClientWithInstance)
+}
+
+// Keeps resident discovery at the transport owner; the argument permits
+// isolated loop tests without a live Redis connection, as for forwards.
+func (self *ResidentTransport) runWithResidentLookup(
+	lookup func(context.Context, server.Id, server.Id, time.Duration) *model.NetworkClientResident,
+) {
 	defer func() {
 		self.sendAdmission.close()
 		self.cancel()
@@ -3672,7 +3758,7 @@ func (self *ResidentTransport) Run() {
 		reconnect := connect.NewReconnect(self.exchange.settings.ExchangeReconnectAfterErrorTimeout)
 		// Routing does not own the registration heartbeat. Failed dialing must
 		// not keep a departed resident's registration alive.
-		resident := model.GetResidentForClientWithInstance(self.ctx, self.clientId, self.instanceId, 0)
+		resident := lookup(self.ctx, self.clientId, self.instanceId, 0)
 		// A client arriving by a move takes over its resident here instead of
 		// forwarding to it (MOVE.md §5.3); then route to the local resident.
 		if resident != nil && self.exchange.takeOverMovedResident(
@@ -3682,39 +3768,56 @@ func (self *ResidentTransport) Run() {
 			resident,
 			self.admission.ProvideIntent,
 		) {
-			resident = model.GetResidentForClientWithInstance(self.ctx, self.clientId, self.instanceId, 0)
+			resident = lookup(self.ctx, self.clientId, self.instanceId, 0)
 		}
 		if resident != nil && 0 < len(resident.ResidentInternalPorts) {
-			port := resident.ResidentInternalPorts[rand.Intn(len(resident.ResidentInternalPorts))]
 			headerCopy := self.header
 			headerCopy.ClientId = self.clientId
 			headerCopy.ResidentId = resident.ResidentId
-			exchangeConnection, err := NewExchangeConnection(
-				self.ctx,
-				headerCopy,
-				resident.ResidentHost,
-				port,
-				self.exchange.routes,
-				self.exchange.settings,
-			)
-
-			if err != nil {
-				if glog.V(1) {
-					glog.Infof("[rt]exchange connection error %s->%s@%s:%d = %s\n", self.clientId, resident.ResidentId, resident.ResidentHost, port, err)
+			// A resident in this process takes the transport in process, with
+			// the accept path's checks, instead of a socket back into this
+			// process (resident_local_transport.go).
+			if link := self.exchange.attachLocalTransport(self.ctx, headerCopy); link != nil {
+				if self.runLocal(link) == localTransportDetachDisabled {
+					// The switch detached a link to a resident that still serves:
+					// redial it over the exchange now, with no reconnect wait and no
+					// replacement nomination.
+					select {
+					case <-self.ctx.Done():
+						return
+					default:
+					}
+					continue
 				}
-			}
+			} else {
+				port := resident.ResidentInternalPorts[rand.Intn(len(resident.ResidentInternalPorts))]
+				exchangeConnection, err := NewExchangeConnection(
+					self.ctx,
+					headerCopy,
+					resident.ResidentHost,
+					port,
+					self.exchange.routes,
+					self.exchange.settings,
+				)
 
-			if err == nil {
-				c := func() {
-					handle(exchangeConnection)
+				if err != nil {
+					if glog.V(1) {
+						glog.Infof("[rt]exchange connection error %s->%s@%s:%d = %s\n", self.clientId, resident.ResidentId, resident.ResidentHost, port, err)
+					}
 				}
-				if glog.V(2) {
-					server.Trace(
-						fmt.Sprintf("[rt]exchange connection %s->%s@%s:%d", self.clientId, resident.ResidentId, resident.ResidentHost, port),
-						c,
-					)
-				} else {
-					c()
+
+				if err == nil {
+					c := func() {
+						handle(exchangeConnection)
+					}
+					if glog.V(2) {
+						server.Trace(
+							fmt.Sprintf("[rt]exchange connection %s->%s@%s:%d", self.clientId, resident.ResidentId, resident.ResidentHost, port),
+							c,
+						)
+					} else {
+						c()
+					}
 				}
 			}
 		}
@@ -4133,6 +4236,10 @@ type Resident struct {
 	// activity is tracked with an atomic, not stateLock, so UpdateActivity is
 	// lock-free on the per-frame inbound and forward paths
 	lastActivityNanos atomic.Int64
+	// transports attached in process (resident_local_transport.go). While
+	// any is attached the resident is active, as an exchange socket's pings
+	// kept it.
+	localAttachments atomic.Int64
 
 	// set when the teardown is caused by a server drain / migrate rather than
 	// a client disconnect. The cleanup then skips the peer disconnect marker:
@@ -5273,6 +5380,15 @@ func (self *Resident) CancelIfIdle() bool {
 	case <-self.ctx.Done():
 		return true
 	default:
+	}
+
+	// An attached local transport is activity, as the at most
+	// ExchangePingTimeout pings of an exchange socket were. Refreshing here
+	// rearms the watcher a full ttl out instead of every wake; a wedged link
+	// detaches within WriteTimeout, which refreshes once more.
+	if 0 < self.localAttachments.Load() {
+		self.lastActivityNanos.Store(time.Now().UnixNano())
+		return false
 	}
 
 	idleTimeout := time.Since(time.Unix(0, self.lastActivityNanos.Load()))

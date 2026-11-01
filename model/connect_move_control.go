@@ -16,6 +16,10 @@
 //   - `transportDelay`: whether the connect handlers accept the per-message
 //     delay header on new connections (connect DELAY.md §11); true or false.
 //     Read by the connect handlers, not by the mover.
+//   - `localTransport`: the connect blocks whose exchanges deliver a transport
+//     in process when its resident is in the same process (connect
+//     resident_local_transport.go): off, all, or blocks separated by commas
+//     or spaces. Read by the exchanges, not by the mover.
 //
 // The control can only narrow the code settings, never widen them:
 //   - the mode never goes above what `EnableMove` allows. `MoveDefaultMode` is
@@ -28,13 +32,19 @@
 //   - `placement` can turn placement off, never on past `EnablePlacement`.
 //   - `transportDelay` can turn the delay header off, never on past
 //     `EnableTransportDelay`.
+//   - `localTransport` chooses the blocks, never past `EnableLocalTransport`.
+//     `LocalTransportDefault` is the choice while the control sets none, not
+//     a ceiling: an operator turns in-process delivery on with the control.
 //
 // A field that does not parse narrows as far as it can: mode off,
 // maxPerMinute 0, an infinite tolerance (no balance sources), drain moves off,
-// placement off, transport delay off.
+// placement off, transport delay off. A `localTransport` list names only the
+// blocks it lists, so a value that is neither off nor all and names no real
+// block turns in-process delivery off everywhere.
 // An absent key or field leaves the code default. A reader that cannot read
 // the control acts as if the mode were off (the mover does); the connect
-// handlers keep the transport delay of their last read.
+// handlers keep the transport delay of their last read, and the exchanges
+// the local transport of theirs.
 package model
 
 import (
@@ -58,6 +68,13 @@ const (
 	ConnectMoveControlFieldDrainMoves     = "drainMoves"
 	ConnectMoveControlFieldPlacement      = "placement"
 	ConnectMoveControlFieldTransportDelay = "transportDelay"
+	ConnectMoveControlFieldLocalTransport = "localTransport"
+)
+
+// The `localTransport` values that are not block lists.
+const (
+	ConnectLocalTransportOff = "off"
+	ConnectLocalTransportAll = "all"
 )
 
 // The mover's mode, ordered from narrowest to widest.
@@ -120,6 +137,13 @@ type ConnectMoveControlCeiling struct {
 	// `EnableTransportDelay`. The mover and the placement leave it false and
 	// ignore the control's transportDelay.
 	EnableTransportDelay bool
+	// The exchange's switch for in-process transport delivery,
+	// `EnableLocalTransport`. The mover, the placement and the handlers leave
+	// it false and ignore the control's localTransport.
+	EnableLocalTransport bool
+	// `LocalTransportDefault`: the blocks while the control sets none, in the
+	// control's syntax. Not a ceiling.
+	LocalTransportDefault string
 }
 
 // The effective control: the code settings as the Redis control narrowed them.
@@ -141,6 +165,16 @@ type ConnectMoveControl struct {
 	// Connect handlers accept the delay header on new connections that offer
 	// it.
 	TransportDelay bool
+	// Every connect block delivers transports in process.
+	LocalTransportAll bool
+	// The connect blocks that deliver transports in process, when not all.
+	// Empty for none.
+	LocalTransportBlocks map[string]bool
+}
+
+// Whether the exchanges of block deliver transports in process.
+func (self *ConnectMoveControl) LocalTransportAllows(block string) bool {
+	return self.LocalTransportAll || self.LocalTransportBlocks[block]
 }
 
 // The control the fields narrow the ceiling to. Pure: fields is the control
@@ -203,11 +237,40 @@ func NarrowConnectMoveControl(fields map[string]string, ceiling ConnectMoveContr
 		control.TransportDelay = ceiling.EnableTransportDelay && parsed && transportDelay
 	}
 
+	if ceiling.EnableLocalTransport {
+		localTransportValue, localTransportSet := fields[ConnectMoveControlFieldLocalTransport]
+		if !localTransportSet {
+			localTransportValue = ceiling.LocalTransportDefault
+		}
+		control.LocalTransportAll, control.LocalTransportBlocks = parseConnectLocalTransport(localTransportValue)
+	}
+
 	if !ceiling.EnableMove {
 		control.Mode = ConnectMoveModeOff
 		control.DrainMoves = false
 	}
 	return control
+}
+
+// off, all, or a list of blocks separated by commas or white space. An empty
+// value or list names no block.
+func parseConnectLocalTransport(value string) (all bool, blocks map[string]bool) {
+	value = strings.TrimSpace(value)
+	switch value {
+	case ConnectLocalTransportAll:
+		return true, nil
+	case ConnectLocalTransportOff:
+		return false, nil
+	}
+	for _, block := range strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == '\n'
+	}) {
+		if blocks == nil {
+			blocks = map[string]bool{}
+		}
+		blocks[block] = true
+	}
+	return false, blocks
 }
 
 // true/false, 1/0 and on/off.

@@ -2,9 +2,13 @@ package work
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
+	"sync"
 	"time"
+
+	"golang.org/x/crypto/acme"
 
 	"github.com/urnetwork/glog"
 
@@ -21,7 +25,8 @@ import (
 //   - ExtenderMeasurementDns withdraws the live certificates of extenders that
 //     were moved to the gated tier or a canary channel, or deactivated for
 //     longer than controller.ExtenderMeasurementAwayGrace (C9, amendment 23),
-//     then makes the zone's address records exactly the extenders that serve,
+//     each judged again under its extender's lock (amendment 24), then makes
+//     the zone's address records exactly the extenders that serve,
 //     each name at its extender's active addresses, and records which names
 //     are published (C8). It is quick -- reads and one Route 53 listing -- so
 //     a deactivation leaves dns, and an address change reaches it, within
@@ -29,8 +34,10 @@ import (
 //     reports the name's change in sync, since the lag.dev sample offers a
 //     name only once it is published (A4).
 //   - ExtenderMeasurementIssue revokes what was withdrawn (C9), renews what is
-//     due (C6) and issues for pending requests under the weekly cap (C5,
-//     C7). An order waits on Route 53 and the CA for a minute or more, so this
+//     due (C6) and issues for pending requests under the weekly cap, spread
+//     across countries and networks (C5, C7, amendment 24), asking again for
+//     an extender that came back after its request was withdrawn (C9). An
+//     order waits on Route 53 and the CA for a minute or more, so this
 //     chain is apart from the dns one, runs alone with a longer limit, and
 //     starts no new order once its budget is spent. Each certificate it
 //     stores wakes the dns chain, so the name is published right after its
@@ -44,7 +51,10 @@ import (
 //
 // Both chains do nothing while the measurement block is disabled, and
 // neither fails its task for a failure of one certificate: a failed order
-// backs off on its own row, and the chain re-arms either way.
+// backs off on its own row, or waits out the CA's Retry-After when the CA
+// refused it under a rate limit, a refusal of a new certificate holding every
+// new certificate until then (amendment 24), and the chain re-arms either
+// way.
 
 const (
 	// How often each chain runs.
@@ -76,7 +86,9 @@ const (
 	// an hour and pauses a name that keeps failing, and it issues the same
 	// name at most five times in seven days, so a name that keeps failing is
 	// tried four times in its first hour and then ever more rarely
-	// (lag.dev/ops/letsencrypt.md).
+	// (lag.dev/ops/letsencrypt.md). A refusal under a rate limit waits for
+	// the CA's Retry-After instead (extenderMeasurementRetryTime, amendment
+	// 24).
 	ExtenderMeasurementFirstRetryTimeout = 5 * time.Minute
 	ExtenderMeasurementMaxRetryTimeout   = 72 * time.Hour
 )
@@ -91,6 +103,45 @@ func extenderMeasurementRetryTimeout(failureCount int) time.Duration {
 		}
 	}
 	return timeout
+}
+
+// How long past the CA's Retry-After the next attempt waits (amendment 24).
+// The CA's clock and ours may differ by seconds, and a Retry-After date names
+// a whole second, so an attempt at the very moment could be refused again.
+// The issuance chain runs once a minute anyway, so the margin delays the
+// attempt by at most one pass.
+const (
+	ExtenderMeasurementRateLimitMargin = 1 * time.Minute
+)
+
+// The time of the next attempt after a failed order, renewal or revocation
+// at `now` (C5, C6, C9). A refusal under one of the CA's rate limits, a
+// rateLimited problem with a Retry-After, is tried again once the Retry-After
+// and ExtenderMeasurementRateLimitMargin have passed, sooner or later than the
+// backoff would have it: the CA says when the name, the domain or the account
+// has room again (lag.dev/ops/letsencrypt.md §5.1), and the doubling by
+// failures is only a guess at that, which can miss it by most of a day
+// (amendment 24). Any other failure, a refusal without a Retry-After among
+// them, backs off by `failureCount`, the failures before this one
+// (extenderMeasurementRetryTimeout).
+//
+// The client returns a refusal at once rather than retrying it
+// (extenderMeasurementAcmeRetryBackoff), and wraps the CA's error, so it is
+// unwrapped before acme.RateLimit reads it.
+//
+// The refusal still counts as a failure of its row, as every failure does
+// (model.DeferPendingNetworkExtenderMeasurement and the like): the count only
+// spaces the attempts the CA gives no time for, it starts over with the next
+// certificate, and a name the CA keeps refusing is one to try more rarely when
+// it then fails some other way.
+func extenderMeasurementRetryTime(err error, failureCount int, now time.Time) time.Time {
+	var acmeErr *acme.Error
+	if errors.As(err, &acmeErr) {
+		if retryAfter, ok := acme.RateLimit(acmeErr); ok && 0 < retryAfter {
+			return now.Add(retryAfter + ExtenderMeasurementRateLimitMargin)
+		}
+	}
+	return now.Add(extenderMeasurementRetryTimeout(failureCount))
 }
 
 type ExtenderMeasurementIssueArgs struct {
@@ -220,10 +271,12 @@ func revokeExtenderMeasurementCerts(
 		}
 		if err != nil {
 			glog.Errorf("[extendermeasurement]%s not revoked: %s\n", cert.CertId, err)
+			// a refusal under a rate limit waits out the CA's Retry-After, and
+			// any other failure backs off (C9, amendment 24)
 			model.DeferNetworkExtenderMeasurementCertRevocation(
 				ctx,
 				cert.CertId,
-				server.NowUtc().Add(extenderMeasurementRetryTimeout(cert.RevokeFailureCount)),
+				extenderMeasurementRetryTime(err, cert.RevokeFailureCount, server.NowUtc()),
 			)
 			result.Failed += 1
 			continue
@@ -233,16 +286,32 @@ func revokeExtenderMeasurementCerts(
 	}
 }
 
+const (
+	// How long the renewal of a due certificate is put off when the pass may
+	// not renew it: its extender may not be measured now, or it is for
+	// another zone's name (C6, amendment 24). A certificate falls due with a
+	// third of its lifetime to run, so once its extender may be measured
+	// again its renewal waits at most this long, and only one with less than
+	// this left runs out first.
+	ExtenderMeasurementRenewalPostponeTimeout = 1 * time.Hour
+)
+
 // Renews the live certificates that are due (C6): two thirds of the way
 // through their lifetime, since the CA's renewal information is not read. A
 // renewal reuses the stored request -- the extender's latest when that is for
 // the same name, so a key the extender rotated is followed, else the
 // certificate's own -- and is a renewal to the CA too, outside the weekly cap
 // (C7). A certificate of an extender that may not be measured now, or that is
-// for another zone's name, is not renewed. One of an extender that is not
-// active is not read (model.GetNetworkExtenderMeasurementCertsForRenewal): it
-// is renewed when the extender comes back within the grace, and withdrawn by
-// the dns chain when it does not (amendment 23).
+// for another zone's name, is not renewed, and its renewal is put off by
+// ExtenderMeasurementRenewalPostponeTimeout without counting a failure
+// (amendment 24). A tcp port moved off the measurement port, the loss of the
+// extender's public inbound address and a change of zone withdraw nothing
+// (C9), so left due, such certificates would come back at the head of every
+// read until they expired, and enough of them could fill its limit and keep
+// every serving extender's renewal from being read. One of an extender that is
+// not active is not read (model.GetNetworkExtenderMeasurementCertsForRenewal):
+// it is renewed when the extender comes back within the grace, and withdrawn
+// by the dns chain when it does not (amendment 23).
 func renewExtenderMeasurementCerts(
 	ctx context.Context,
 	config *controller.ExtenderConfig,
@@ -260,11 +329,24 @@ func renewExtenderMeasurementCerts(
 			return
 		}
 		cert := target.Cert
+		// one this pass may not renew is put off rather than left due, where
+		// every pass would read it first until it expired (amendment 24)
+		postpone := func() {
+			model.PostponeNetworkExtenderMeasurementCertRenewal(
+				ctx,
+				cert.CertId,
+				now.Add(ExtenderMeasurementRenewalPostponeTimeout),
+				now,
+			)
+		}
 		if _, reason := controller.ExtenderMeasurementEligibleAddresses(target.Extender, target.Addresses); reason != "" {
+			postpone()
 			continue
 		}
 		names := []string{controller.ExtenderMeasurementName(cert.ExtenderId, measurementZone)}
 		if !slices.Equal(cert.Names, names) {
+			// a certificate for another zone's name
+			postpone()
 			continue
 		}
 		if !mayOrder() {
@@ -284,10 +366,12 @@ func renewExtenderMeasurementCerts(
 		newCert, err := orderExtenderMeasurementCert(ctx, acmeClient, zone, cert.ExtenderId, names, csr, publicKey, false)
 		if err != nil {
 			glog.Errorf("[extendermeasurement]%s not renewed: %s\n", cert.CertId, err)
+			// a refusal under a rate limit waits out the CA's Retry-After, and
+			// any other failure backs off (C6, amendment 24)
 			model.DeferNetworkExtenderMeasurementCertRenewal(
 				ctx,
 				cert.CertId,
-				server.NowUtc().Add(extenderMeasurementRetryTimeout(cert.RenewFailureCount)),
+				extenderMeasurementRetryTime(err, cert.RenewFailureCount, server.NowUtc()),
 			)
 			result.Failed += 1
 			continue
@@ -297,9 +381,89 @@ func renewExtenderMeasurementCerts(
 	}
 }
 
+// The hold on new certificates (C5, C7, amendment 24). An order the weekly cap
+// counts is for a name with no unexpired certificate, so when the CA refuses
+// one under a rate limit, the limit is the registered domain's -- 50 new
+// certificates a week for bringyour.com, which its other names draw on too --
+// or the account's on new orders, not the name's
+// (lag.dev/ops/letsencrypt.md §5.1), and the CA would refuse every other new
+// name the same way. A new name's own limit, five failed validations an hour,
+// is beyond the backoff, which tries a failing name four times in its first
+// hour. Deferred one row at a time, as the refusal of one name's order is,
+// the refusals would come at once, up to ExtenderMeasurementMaxOrdersPerPass
+// a pass, until the whole capped queue waited out one Retry-After, and then
+// all of it would come due within the same minutes and be refused again. So
+// the refusal also holds every order the cap counts until its own next
+// attempt (extenderMeasurementRetryTime): the pass places no more of them, and
+// while the hold lasts each capped request is noted waiting with the CA's
+// limit and the time, neither deferred nor counted a failure. Renewals, orders
+// for a name with an unexpired certificate and revocations go on: the CA
+// renews outside those limits, and a limit of one name's -- five certificates
+// a week for it, its failed validations -- defers only that name's row.
+//
+// The hold is kept in the process, like the ACME clients, so a restart
+// forgets it, which costs at most one more refusal.
+type extenderMeasurementCapHold struct {
+	until  time.Time
+	reason string
+}
+
+var extenderMeasurementCapHoldStateLock sync.Mutex
+var extenderMeasurementCapHoldState extenderMeasurementCapHold
+
+// Testing_ResetExtenderMeasurementCapHold lifts the hold on new certificates,
+// so a test starts with none.
+func Testing_ResetExtenderMeasurementCapHold() {
+	extenderMeasurementCapHoldStateLock.Lock()
+	defer extenderMeasurementCapHoldStateLock.Unlock()
+	extenderMeasurementCapHoldState = extenderMeasurementCapHold{}
+}
+
+// When `err` is the CA's refusal under a rate limit of an order the cap
+// counts, holds new certificates until `retryTime` and returns true. A hold
+// that already reaches later is kept.
+func holdExtenderMeasurementCapCounted(err error, retryTime time.Time) bool {
+	var acmeErr *acme.Error
+	if !errors.As(err, &acmeErr) {
+		return false
+	}
+	if _, ok := acme.RateLimit(acmeErr); !ok {
+		return false
+	}
+	limit := acmeErr.Detail
+	if limit == "" {
+		limit = acmeErr.Error()
+	}
+	extenderMeasurementCapHoldStateLock.Lock()
+	defer extenderMeasurementCapHoldStateLock.Unlock()
+	if extenderMeasurementCapHoldState.until.Before(retryTime) {
+		extenderMeasurementCapHoldState = extenderMeasurementCapHold{
+			until: retryTime,
+			reason: fmt.Sprintf(
+				"waiting until %s for the CA's limit on new certificates: %s",
+				retryTime.UTC().Format(time.RFC3339),
+				limit,
+			),
+		}
+	}
+	return true
+}
+
+// Whether new certificates are held at `now`, and the reason a capped request
+// waits while they are.
+func extenderMeasurementCapHeld(now time.Time) (reason string, held bool) {
+	extenderMeasurementCapHoldStateLock.Lock()
+	defer extenderMeasurementCapHoldStateLock.Unlock()
+	if now.Before(extenderMeasurementCapHoldState.until) {
+		return extenderMeasurementCapHoldState.reason, true
+	}
+	return "", false
+}
+
 // Issues for pending requests (C5, C7): first those the weekly cap does not
-// hold, then the rest, each longest waiting first
-// (model.GetPendingNetworkExtenderMeasurements). A request is refused when it
+// hold, longest waiting first, then the rest, each new certificate where it
+// least crowds the more crowded of its country and its network (amendment 24;
+// model.GetPendingNetworkExtenderMeasurements). A request is refused when it
 // is not a valid request for its extender's measurement name, or when its
 // extender may not be measured. A request of an extender that is not active is
 // not read: deactivated, it keeps its place in the queue until it activates
@@ -307,10 +471,24 @@ func renewExtenderMeasurementCerts(
 // unexpired certificate is a renewal to the CA and goes past the weekly cap,
 // which is how a rotated key and an extender that came back are served; a
 // new extender's waits while the cap is spent, and is read again each pass,
-// behind the requests the cap does not hold however many wait.
+// behind the requests the cap does not hold however many wait. It waits too
+// while the CA's refusal of a new certificate under a rate limit holds them
+// all (extenderMeasurementCapHold).
 //
 // A request whose certificate ran out un-renewed is put back in the queue
-// first, so nothing stays issued with no certificate behind it.
+// first, so nothing stays issued with no certificate behind it. So is the
+// request of an extender that is active again after its request was withdrawn
+// or refused because it was not active (C9), if it may be measured now: the
+// stored request is asked again, as if the extender had carried it again (C4,
+// amendment 24). Since connect 567d4833 an extender that reads withdrawn asks
+// for an activation pass at once, which carries its request; this serves the
+// extenders from before, which carry it only with their next activation, up
+// to a day after they came back. One that may not be measured now is left
+// withdrawn, so it reads withdrawn and drops its revoked certificate: asked
+// again, it would be refused in this same pass and read only pending and
+// refused, through which an extender keeps an installed certificate. A
+// request an owner's opt-out dropped, and one withdrawn for the gated tier or
+// a canary, are not asked again.
 func issuePendingExtenderMeasurementCerts(
 	ctx context.Context,
 	config *controller.ExtenderConfig,
@@ -325,6 +503,15 @@ func issuePendingExtenderMeasurementCerts(
 	measurementZone := config.Measurement.MeasurementZone()
 	issueCap := config.Measurement.WeeklyIssueCap()
 	model.ReopenExpiredNetworkExtenderMeasurements(ctx, now)
+	model.ReopenReturnedNetworkExtenderMeasurements(
+		ctx,
+		controller.ExtenderMeasurementInactiveReason,
+		now,
+		func(extender *model.NetworkExtender, addresses []*model.NetworkExtenderAddress) bool {
+			_, reason := controller.ExtenderMeasurementEligibleAddresses(extender, addresses)
+			return reason == ""
+		},
+	)
 	issuedThisWeek := model.CountNetworkExtenderMeasurementCertsCountedSince(ctx, now.Add(-ExtenderMeasurementCapWindow))
 
 	for _, target := range model.GetPendingNetworkExtenderMeasurements(ctx, now, ExtenderMeasurementPendingLimit) {
@@ -370,6 +557,14 @@ func issuePendingExtenderMeasurementCerts(
 			wait(fmt.Sprintf("waiting for the weekly cap of %d new certificates", issueCap))
 			continue
 		}
+		if capCounted {
+			// the CA refused a new certificate under the domain's or the
+			// account's limit, which holds the rest (C7, amendment 24)
+			if reason, held := extenderMeasurementCapHeld(now); held {
+				wait(reason)
+				continue
+			}
+		}
 		if !mayOrder() {
 			return
 		}
@@ -384,14 +579,22 @@ func issuePendingExtenderMeasurementCerts(
 		cert, err := orderExtenderMeasurementCert(ctx, acmeClient, zone, measurement.ExtenderId, names, request.Csr, request.PublicKey, capCounted)
 		if err != nil {
 			glog.Errorf("[extendermeasurement]%s not issued: %s\n", measurement.ExtenderId, err)
+			// a refusal under a rate limit waits out the CA's Retry-After, and
+			// any other failure backs off (C5, amendment 24)
+			retryTime := extenderMeasurementRetryTime(err, measurement.FailureCount, server.NowUtc())
 			model.DeferPendingNetworkExtenderMeasurement(
 				ctx,
 				measurement.ExtenderId,
 				measurement.Csr,
 				err.Error(),
-				server.NowUtc().Add(extenderMeasurementRetryTimeout(measurement.FailureCount)),
+				retryTime,
 				server.NowUtc(),
 			)
+			// and a refusal of a new certificate holds every other one until
+			// the same time (C7, amendment 24)
+			if capCounted && holdExtenderMeasurementCapCounted(err, retryTime) {
+				glog.Infof("[extendermeasurement]new certificates are held until %s\n", retryTime.UTC().Format(time.RFC3339))
+			}
 			result.Failed += 1
 			continue
 		}
@@ -508,16 +711,25 @@ func ExtenderMeasurementDnsPost(
 // own transaction (A9); this is what finds a deactivation, and anything that
 // reached those tiers another way. An away extender is out of the zone
 // already, since it may not be measured while it is not active (C8).
+//
+// The read only picks what to judge. Each certificate is withdrawn only if its
+// extender, locked and read again in the withdrawing transaction, must still
+// be, and with the reason it has then
+// (model.WithdrawNetworkExtenderMeasurementCertIf): an extender that activated
+// since the read, as one does that comes back right at the end of its away
+// grace, keeps its certificate (amendment 24).
 func withdrawExtenderMeasurementCerts(ctx context.Context, now time.Time) int {
+	reasonFor := func(extender *model.NetworkExtender) string {
+		return controller.ExtenderMeasurementWithdrawReason(extender, now)
+	}
 	withdrawn := 0
 	for _, target := range model.GetLiveNetworkExtenderMeasurementCerts(ctx, now) {
-		reason := controller.ExtenderMeasurementWithdrawReason(target.Extender, now)
-		if reason == "" {
+		if reasonFor(target.Extender) == "" {
 			continue
 		}
-		if model.WithdrawNetworkExtenderMeasurementCert(ctx, target.Cert.CertId, reason, now) {
-			withdrawn += 1
-		}
+		// the extender's other live certificate, a renewal's overlap, goes
+		// with this one, and is already withdrawn when the read comes to it
+		withdrawn += model.WithdrawNetworkExtenderMeasurementCertIf(ctx, target.Cert.CertId, now, reasonFor)
 	}
 	return withdrawn
 }

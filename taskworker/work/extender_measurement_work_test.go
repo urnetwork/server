@@ -169,12 +169,14 @@ func newTestMeasurementEnv(t testing.TB, settings testMeasurementEnvSettings) *t
 	previousPollInterval := extenderMeasurementInsyncPollInterval
 	extenderMeasurementInsyncPollInterval = time.Millisecond
 	Testing_ResetExtenderMeasurementAcme()
+	Testing_ResetExtenderMeasurementCapHold()
 	Testing_ResetExtenderMeasurementZones()
 	Testing_ResetExtenderDnsHostedZoneIds()
 	t.Cleanup(func() {
 		newExtenderMeasurementRoute53Api = previousApi
 		extenderMeasurementInsyncPollInterval = previousPollInterval
 		Testing_ResetExtenderMeasurementAcme()
+		Testing_ResetExtenderMeasurementCapHold()
 		Testing_ResetExtenderMeasurementZones()
 		Testing_ResetExtenderDnsHostedZoneIds()
 	})
@@ -583,8 +585,10 @@ func TestExtenderMeasurementRefusesWhatMayNotBeIssued(t *testing.T) {
 }
 
 // C7: new certificates stop at the weekly cap, longest waiting first, and the
-// rest wait. Only a new extender spends the cap: a rotated key asks for a
-// name that already has a certificate, which is a renewal to the CA.
+// rest wait. The extenders are alike, each in the same country with a network
+// of its own, so the spread across them (amendment 24) leaves waiting to
+// decide. Only a new extender spends the cap: a rotated key asks for a name
+// that already has a certificate, which is a renewal to the CA.
 func TestExtenderMeasurementWaitsForTheWeeklyCap(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()

@@ -137,7 +137,10 @@ func TestNetworkExtenderMeasurementRequestStates(t *testing.T) {
 // leaves every capped request pending, so a read that took the longest
 // waiting first would find the same capped requests on every pass, and a
 // backlog of them as long as the read would keep a request the cap does not
-// hold from ever being read. Within each part, the longest waiting is first.
+// hold from ever being read. Within each part, the longest waiting is first:
+// the capped extenders here are alike, each in the same country with a network
+// of its own, so the spread across them (amendment 24) leaves waiting to
+// decide.
 func TestNetworkExtenderMeasurementPendingReadsUncappedFirst(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()

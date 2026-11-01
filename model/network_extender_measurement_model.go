@@ -1,6 +1,7 @@
 package model
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"slices"
@@ -87,7 +88,8 @@ type NetworkExtenderMeasurement struct {
 	Reason      string
 	RequestTime time.Time
 	// when the extender began waiting, kept across requests while it waits:
-	// the order the weekly cap admits in (C7)
+	// the order of the requests the weekly cap does not hold, and the last
+	// tie-break of those it does (C7, amendment 24)
 	PendingTime  *time.Time
 	RetryTime    *time.Time
 	FailureCount int
@@ -268,12 +270,15 @@ func scanNetworkExtenderMeasurementCert(result server.PgResult) *NetworkExtender
 // issued at once, and the certificate is renewed in its time (C6).
 //
 // Anything else is pending: other names or another key, or the same request
-// again after it was refused or its certificate was withdrawn (C9), which is
+// again after it was refused or its certificate was withdrawn (C9). That is
 // how an extender that comes back after the away grace is given a certificate
-// again; within the grace it still holds its own (amendment 23). An extender
-// that was already waiting keeps its place in the queue (C7), and the same
-// names and key keep the backoff of their failed orders, so asking again
-// cannot hurry the CA.
+// again, and within the grace it still holds its own (amendment 23). It need
+// not wait for its next activation to carry its request: once it is active
+// again and may be measured, the issuance pass asks again with its stored
+// request, by these same rules (ReopenReturnedNetworkExtenderMeasurements,
+// amendment 24). An extender that was already waiting keeps its place in the
+// queue (C7), and the same names and key keep the backoff of their failed
+// orders, so asking again cannot hurry the CA.
 func SetNetworkExtenderMeasurementRequest(
 	ctx context.Context,
 	extenderId server.Id,
@@ -512,11 +517,23 @@ func RefuseNetworkExtenderMeasurementRequest(
 // come the requests the weekly cap does not hold, those for names with an
 // unexpired certificate (HasUnexpiredNetworkExtenderMeasurementCertForNames),
 // which the CA renews outside its weekly budget: a returning extender, a
-// rotated key, an owner turning measurement back on. Then come the rest. Each
-// part is longest waiting first. A pass notes a capped request and leaves it
-// pending, so while the cap is spent the same capped requests come back every
-// pass; without this order, `limit` of them waiting longer would keep every
-// request the cap does not hold from ever being read.
+// rotated key, an owner turning measurement back on. They are longest waiting
+// first. A pass notes a capped request and leaves it pending, so while the
+// cap is spent the same capped requests come back every pass; without this
+// order, `limit` of them waiting longer would keep every request the cap does
+// not hold from ever being read.
+//
+// Then come the rest, in the order the cap is to issue for them (C7,
+// amendment 24): each new certificate goes where it least crowds the more
+// crowded of its country and its network, counting the extenders that hold a
+// live certificate there -- serving, or away, to serve again with no new order
+// when they activate (amendment 23) -- and the requests picked before it in
+// the same read, since one pass places several orders
+// (pickNetworkExtenderMeasurementCandidates). Longest waiting first gave the
+// cap to whoever joined first, and neither a country nor a network alone
+// spreads it: one network supplies nearly every request from the countries
+// where nothing serves yet, and another supplies only US ones. The request of
+// an extender that is gone has no country and no network; a pass refuses it.
 //
 // The request of an extender that is not active is left out: nothing may be
 // ordered for it, and it keeps its pending_time, so it is back in its place
@@ -543,17 +560,15 @@ func GetPendingNetworkExtenderMeasurements(
 					WHERE
 						network_extender.extender_id = network_extender_measurement.extender_id AND
 						NOT network_extender.active
-				)
-			ORDER BY
+				) AND
 				EXISTS (
 					SELECT 1
 					FROM network_extender_measurement_cert
 					WHERE
 						network_extender_measurement_cert.names = network_extender_measurement.names AND
 						$2 < network_extender_measurement_cert.not_after
-				) DESC,
-				pending_time ASC,
-				extender_id ASC
+				)
+			ORDER BY pending_time ASC, extender_id ASC
 			LIMIT $3
 			`,
 			NetworkExtenderMeasurementStatePending,
@@ -567,9 +582,240 @@ func GetPendingNetworkExtenderMeasurements(
 				})
 			}
 		})
+		if count := limit - len(targets); 0 < count {
+			targets = append(targets, getCappedNetworkExtenderMeasurementsInConn(ctx, conn, now, count)...)
+		}
 		fillNetworkExtenderMeasurementTargetsInConn(ctx, conn, targets)
 	})
 	return targets
+}
+
+// The most capped requests one read of the issuance queue weighs (amendment
+// 24). The queue holds a few hundred, so this only bounds a queue gone wrong,
+// whose longest waiting are the ones weighed.
+const networkExtenderMeasurementCandidateLimit = 4096
+
+// Reads the pending requests the weekly cap holds, on the same terms as
+// GetPendingNetworkExtenderMeasurements, and returns `count` of them at most,
+// in the order pickNetworkExtenderMeasurementCandidates picks them, on the
+// caller's connection. A request picked that is no longer pending by the time
+// it is loaded is left out.
+func getCappedNetworkExtenderMeasurementsInConn(
+	ctx context.Context,
+	conn server.PgConn,
+	now time.Time,
+	count int,
+) []*NetworkExtenderMeasurementTarget {
+	targets := []*NetworkExtenderMeasurementTarget{}
+
+	candidates := []*networkExtenderMeasurementCandidate{}
+	result, err := conn.Query(
+		ctx,
+		`
+		SELECT
+			network_extender_measurement.extender_id,
+			COALESCE(network_extender_measurement.pending_time, network_extender_measurement.request_time),
+			COALESCE(network_extender.country_code, ''),
+			network_extender.network_id
+		FROM network_extender_measurement
+		LEFT JOIN network_extender ON
+			network_extender.extender_id = network_extender_measurement.extender_id
+		WHERE
+			network_extender_measurement.state = $1 AND
+			(network_extender_measurement.retry_time IS NULL OR network_extender_measurement.retry_time <= $2) AND
+			(network_extender.extender_id IS NULL OR network_extender.active) AND
+			NOT EXISTS (
+				SELECT 1
+				FROM network_extender_measurement_cert
+				WHERE
+					network_extender_measurement_cert.names = network_extender_measurement.names AND
+					$2 < network_extender_measurement_cert.not_after
+			)
+		ORDER BY network_extender_measurement.pending_time ASC, network_extender_measurement.extender_id ASC
+		LIMIT $3
+		`,
+		NetworkExtenderMeasurementStatePending,
+		now.UTC(),
+		networkExtenderMeasurementCandidateLimit,
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			candidate := &networkExtenderMeasurementCandidate{}
+			var networkId *server.Id
+			server.Raise(result.Scan(
+				&candidate.extenderId,
+				&candidate.pendingTime,
+				&candidate.countryCode,
+				&networkId,
+			))
+			if networkId != nil {
+				candidate.networkId = *networkId
+			}
+			candidates = append(candidates, candidate)
+		}
+	})
+	if len(candidates) == 0 {
+		return targets
+	}
+
+	// the extenders that hold a live certificate in each country and in each
+	// network. One that is away holds it still, and counts: an unstable network
+	// whose extenders come and go would otherwise count only those active at
+	// the read, and be given more than its share
+	countryCounts := map[string]int{}
+	networkCounts := map[server.Id]int{}
+	result, err = conn.Query(
+		ctx,
+		`
+		SELECT
+			network_extender.country_code,
+			network_extender.network_id,
+			COUNT(*)
+		FROM network_extender
+		WHERE
+			EXISTS (
+				SELECT 1
+				FROM network_extender_measurement_cert
+				WHERE
+					network_extender_measurement_cert.extender_id = network_extender.extender_id AND
+					network_extender_measurement_cert.withdraw_time IS NULL AND
+					$1 < network_extender_measurement_cert.not_after
+			)
+		GROUP BY network_extender.country_code, network_extender.network_id
+		`,
+		now.UTC(),
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var countryCode string
+			var networkId server.Id
+			var serving int
+			server.Raise(result.Scan(&countryCode, &networkId, &serving))
+			countryCounts[countryCode] += serving
+			networkCounts[networkId] += serving
+		}
+	})
+
+	extenderIds := pickNetworkExtenderMeasurementCandidates(candidates, countryCounts, networkCounts, count)
+	measurements := map[server.Id]*NetworkExtenderMeasurement{}
+	result, err = conn.Query(
+		ctx,
+		`
+		SELECT `+networkExtenderMeasurementColumns+`
+		FROM network_extender_measurement
+		WHERE extender_id = ANY($1) AND state = $2
+		`,
+		extenderIds,
+		NetworkExtenderMeasurementStatePending,
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			measurement := scanNetworkExtenderMeasurement(result)
+			measurements[measurement.ExtenderId] = measurement
+		}
+	})
+	for _, extenderId := range extenderIds {
+		if measurement, ok := measurements[extenderId]; ok {
+			targets = append(targets, &NetworkExtenderMeasurementTarget{Measurement: measurement})
+		}
+	}
+	return targets
+}
+
+// One request the weekly cap holds, as the issuance queue weighs it (C7,
+// amendment 24): when it began waiting, the country its extender last
+// activated from, and the network that activated it, the extender's operator.
+// The country is "" for an extender whose country is not known or that is
+// gone, and the network is the zero id for one that is gone.
+type networkExtenderMeasurementCandidate struct {
+	extenderId  server.Id
+	pendingTime time.Time
+	countryCode string
+	networkId   server.Id
+}
+
+// Picks `count` candidates at most, one at a time, in the order the weekly cap
+// is to issue for them (C7, amendment 24), given the extenders that hold a
+// live certificate in each country and in each network. Each pick is the
+// candidate whose
+// certificate would least crowd the more crowded of its country and its
+// network: the lowest max(country + 1, network + 1), then the lowest
+// country + network, then the longest waiting, then the lowest extender id. A
+// pick counts in its country and its network for every pick after it, as the
+// certificate it is to get will, so the k-th pick sees the k-1 before it. The
+// counts passed in are not changed.
+//
+// Candidates of one country and one network weigh the same, so a pick weighs
+// only the longest waiting of each such pair.
+func pickNetworkExtenderMeasurementCandidates(
+	candidates []*networkExtenderMeasurementCandidate,
+	countryCounts map[string]int,
+	networkCounts map[server.Id]int,
+	count int,
+) []server.Id {
+	type groupKey struct {
+		countryCode string
+		networkId   server.Id
+	}
+	groupKeys := []groupKey{}
+	groups := map[groupKey][]*networkExtenderMeasurementCandidate{}
+	for _, candidate := range candidates {
+		key := groupKey{countryCode: candidate.countryCode, networkId: candidate.networkId}
+		if _, ok := groups[key]; !ok {
+			groupKeys = append(groupKeys, key)
+		}
+		groups[key] = append(groups[key], candidate)
+	}
+	for _, group := range groups {
+		slices.SortFunc(group, func(a *networkExtenderMeasurementCandidate, b *networkExtenderMeasurementCandidate) int {
+			return cmp.Or(
+				a.pendingTime.Compare(b.pendingTime),
+				a.extenderId.Cmp(b.extenderId),
+			)
+		})
+	}
+
+	// the picks so far in each country and in each network
+	countryPicks := map[string]int{}
+	networkPicks := map[server.Id]int{}
+	picks := []server.Id{}
+	for len(picks) < count {
+		var pickKey groupKey
+		var pickHead *networkExtenderMeasurementCandidate
+		pickLevel := 0
+		pickSum := 0
+		for _, key := range groupKeys {
+			group := groups[key]
+			if len(group) == 0 {
+				continue
+			}
+			head := group[0]
+			country := countryCounts[key.countryCode] + countryPicks[key.countryCode]
+			network := networkCounts[key.networkId] + networkPicks[key.networkId]
+			level := max(country+1, network+1)
+			sum := country + network
+			if pickHead == nil || cmp.Or(
+				cmp.Compare(level, pickLevel),
+				cmp.Compare(sum, pickSum),
+				head.pendingTime.Compare(pickHead.pendingTime),
+				head.extenderId.Cmp(pickHead.extenderId),
+			) < 0 {
+				pickKey = key
+				pickHead = head
+				pickLevel = level
+				pickSum = sum
+			}
+		}
+		if pickHead == nil {
+			// every candidate is picked
+			break
+		}
+		picks = append(picks, pickHead.extenderId)
+		groups[pickKey] = groups[pickKey][1:]
+		countryPicks[pickKey.countryCode] += 1
+		networkPicks[pickKey.networkId] += 1
+	}
+	return picks
 }
 
 // Loads the extender and the active addresses of every target, on the
@@ -1156,6 +1402,41 @@ func DeferNetworkExtenderMeasurementCertRenewal(ctx context.Context, certId serv
 	})
 }
 
+// PostponeNetworkExtenderMeasurementCertRenewal puts the next renewal of a
+// certificate at renewTime without counting a failure (C6, amendment 24). The
+// issuance task does so with a due certificate it may not renew: its extender
+// may not be measured now, or it is for another zone's name. Left due, such a
+// certificate would come back at the head of every renewal read
+// (GetNetworkExtenderMeasurementCertsForRenewal) until it expired. Only a
+// certificate that is live at `now` and not renewed is postponed; false for
+// one renewed, withdrawn or expired meanwhile, which is left as it is.
+func PostponeNetworkExtenderMeasurementCertRenewal(
+	ctx context.Context,
+	certId server.Id,
+	renewTime time.Time,
+	now time.Time,
+) (postponed bool) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		tag := server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			UPDATE network_extender_measurement_cert
+			SET renew_time = $2
+			WHERE
+				cert_id = $1 AND
+				withdraw_time IS NULL AND
+				renewed_time IS NULL AND
+				$3 < not_after
+			`,
+			certId,
+			renewTime.UTC(),
+			now.UTC(),
+		))
+		postponed = tag.RowsAffected() == 1
+	})
+	return
+}
+
 // ReopenExpiredNetworkExtenderMeasurements puts an issued request whose
 // certificate ran out un-renewed back in the queue, and returns how many. A
 // renewal that keeps failing ends when the certificate expires, since only a
@@ -1193,6 +1474,145 @@ func ReopenExpiredNetworkExtenderMeasurements(ctx context.Context, now time.Time
 		))
 		reopened = int(tag.RowsAffected())
 	})
+	return
+}
+
+// ReopenReturnedNetworkExtenderMeasurements puts back in the queue the
+// request of every extender that is active again after its request was
+// withdrawn or refused for `reason`, the reason an extender that is not active
+// is given (C9), and that may be measured now, and returns how many
+// (amendment 24). mayAsk is whether it may be, the controller's one rule: it
+// judges the extender as it is, nil when it is gone, with its active
+// addresses. Such an extender reads withdrawn as nothing held and carries its
+// request again itself (C4), but one from before connect 567d4833 only with
+// its next activation, up to a day after it came back. Each stored request is
+// asked again by the rules SetNetworkExtenderMeasurementRequest applies to the
+// same names and key carried again after a refusal or withdrawal, which this
+// mirrors: issued at once when a live certificate answers it, else pending
+// from now with the backoff of its failed orders, and either way its reason
+// cleared. Its CSR and request time stay those of the activation that last
+// carried it.
+//
+// A request whose extender may not be measured now is left as it is (C9).
+// Asked again, it would be refused by the same issuance pass, and its
+// extender would read pending, then refused, but never withdrawn. An extender
+// keeps serving an installed certificate through both (C4), so it would
+// present its revoked certificate until it expired. Left withdrawn, it reads
+// withdrawn, drops what it holds, and asks again itself.
+//
+// The read only picks what to judge, and usually finds nothing. Each request
+// is asked again in a transaction of its own, which locks and reads its
+// extender and active addresses again and asks mayAsk once more, so a change
+// since the read is judged too, as a withdrawal is
+// (WithdrawNetworkExtenderMeasurementCertIf); mayAsk may run more than once,
+// since the transaction may be retried. The write keeps every condition of the
+// read, so an owner's opt-out, or a request an activation stored since, is
+// never overwritten.
+//
+// A request without its CSR or key is never asked again: an owner's opt-out
+// drops the CSR (OptOutNetworkExtenderMeasurement), and only the owner turns
+// measurement back on. A withdrawal for the gated tier or a canary has
+// another reason, as does every other refusal.
+func ReopenReturnedNetworkExtenderMeasurements(
+	ctx context.Context,
+	reason string,
+	now time.Time,
+	mayAsk func(extender *NetworkExtender, addresses []*NetworkExtenderAddress) bool,
+) (reopened int) {
+	// a request that is asked again, on the read and again on the write
+	returned := `
+		network_extender_measurement.state IN ($1, $2) AND
+		network_extender_measurement.reason = $3 AND
+		network_extender_measurement.csr IS NOT NULL AND
+		network_extender_measurement.public_key IS NOT NULL AND
+		EXISTS (
+			SELECT 1
+			FROM network_extender
+			WHERE
+				network_extender.extender_id = network_extender_measurement.extender_id AND
+				network_extender.active
+		)
+	`
+	targets := []*NetworkExtenderMeasurementTarget{}
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT `+networkExtenderMeasurementColumns+`
+			FROM network_extender_measurement
+			WHERE `+returned+`
+			`,
+			NetworkExtenderMeasurementStateWithdrawn,
+			NetworkExtenderMeasurementStateRefused,
+			reason,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				targets = append(targets, &NetworkExtenderMeasurementTarget{
+					Measurement: scanNetworkExtenderMeasurement(result),
+				})
+			}
+		})
+		fillNetworkExtenderMeasurementTargetsInConn(ctx, conn, targets)
+	})
+
+	// a live certificate for the request's names and key, which answers it
+	answered := `
+		EXISTS (
+			SELECT 1
+			FROM network_extender_measurement_cert
+			WHERE
+				network_extender_measurement_cert.extender_id = network_extender_measurement.extender_id AND
+				network_extender_measurement_cert.names = network_extender_measurement.names AND
+				network_extender_measurement_cert.public_key = network_extender_measurement.public_key AND
+				network_extender_measurement_cert.withdraw_time IS NULL AND
+				$4 < network_extender_measurement_cert.not_after
+		)
+	`
+	for _, target := range targets {
+		if !mayAsk(target.Extender, target.Addresses) {
+			continue
+		}
+		extenderId := target.Measurement.ExtenderId
+		asked := false
+		server.Tx(ctx, func(tx server.PgTx) {
+			asked = false
+			// the extender and its active addresses read again under their
+			// locks, so an activation in flight is judged once it commits,
+			// and a later one waits for this one
+			extender := getNetworkExtenderInTx(ctx, tx, extenderId)
+			if !mayAsk(extender, getActiveNetworkExtenderAddressesInTx(ctx, tx, extenderId)) {
+				return
+			}
+			tag := server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+				UPDATE network_extender_measurement
+				SET
+					state = CASE WHEN `+answered+` THEN $5 ELSE $6 END,
+					reason = '',
+					pending_time = CASE WHEN `+answered+` THEN NULL ELSE $4 END,
+					retry_time = CASE WHEN `+answered+` THEN NULL ELSE retry_time END,
+					failure_count = CASE WHEN `+answered+` THEN 0 ELSE failure_count END,
+					update_time = $4
+				WHERE
+					extender_id = $7 AND
+					`+returned+`
+				`,
+				NetworkExtenderMeasurementStateWithdrawn,
+				NetworkExtenderMeasurementStateRefused,
+				reason,
+				now.UTC(),
+				NetworkExtenderMeasurementStateIssued,
+				NetworkExtenderMeasurementStatePending,
+				extenderId,
+			))
+			asked = tag.RowsAffected() == 1
+		})
+		if asked {
+			reopened += 1
+		}
+	}
 	return
 }
 
@@ -1376,6 +1796,69 @@ func WithdrawNetworkExtenderMeasurementCert(
 ) (withdrawn bool) {
 	server.Tx(ctx, func(tx server.PgTx) {
 		withdrawn = withdrawNetworkExtenderMeasurementCertsInTx(ctx, tx, &certId, nil, reason, now) == 1
+	})
+	return
+}
+
+// WithdrawNetworkExtenderMeasurementCertIf withdraws the live certificates of
+// the extender that one live certificate is for, if the extender must still
+// be withdrawn (C9), and returns how many: reasonFor judges the extender as it
+// is now, nil when it is gone, and its certificates are withdrawn with the
+// reason it gives, or left as they are when that is empty. 0 when they were
+// left, or the certificate was already withdrawn. Every live certificate of
+// the extender goes on the one judgment, since the reason is the extender's:
+// a renewal overlaps the certificate it replaces, and withdrawn one at a time,
+// an activation between the two would leave the renewal serving with its
+// request withdrawn.
+//
+// The dns chain judges every live certificate from one read
+// (GetLiveNetworkExtenderMeasurementCerts), and an extender can activate
+// between that read and the withdrawal, as one does that comes back right at
+// the end of its away grace (amendment 24). Withdrawn as the read found it, it
+// would be revoked while it serves, and A8 would answer it withdrawn, so it
+// would drop its certificate and order a new one. So the extender row is
+// locked and read again in the withdrawing transaction. An activation writes
+// that row (ActivateNetworkExtender): one that committed first is judged here;
+// one in flight is waited for, and this transaction fails to serialize and
+// runs again on a snapshot that includes it; and one that comes later waits
+// for this transaction and is a return after the withdrawal, which orders
+// again. reasonFor may run more than once, since the transaction may be
+// retried.
+func WithdrawNetworkExtenderMeasurementCertIf(
+	ctx context.Context,
+	certId server.Id,
+	now time.Time,
+	reasonFor func(extender *NetworkExtender) string,
+) (withdrawn int) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		withdrawn = 0
+		var extenderId *server.Id
+		result, err := tx.Query(
+			ctx,
+			`
+			SELECT extender_id
+			FROM network_extender_measurement_cert
+			WHERE cert_id = $1 AND withdraw_time IS NULL
+			`,
+			certId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				var id server.Id
+				server.Raise(result.Scan(&id))
+				extenderId = &id
+			}
+		})
+		if extenderId == nil {
+			return
+		}
+		// the extender row read under its lock, so an activation in flight is
+		// read once it commits, and a later one waits for this withdrawal
+		reason := reasonFor(getNetworkExtenderInTx(ctx, tx, *extenderId))
+		if reason == "" {
+			return
+		}
+		withdrawn = withdrawNetworkExtenderMeasurementCertsInTx(ctx, tx, nil, extenderId, reason, now)
 	})
 	return
 }

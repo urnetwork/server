@@ -2557,6 +2557,21 @@ func writeConnectQuicAuthResponse(
 
 // The batch owner releases all gathered messages on every result, including a
 // rejected deadline. Accounting only observes a completed write.
+// Copies a message whose pool root would hold more of the hybrid stream
+// queue's byte budget than maxByteCount allows into a compact root, when its
+// bytes fit one. Takes message, and the caller owns the returned message. The
+// source is only read, so a read-only share a resident's sender still retains
+// comes through unchanged.
+func compactConnectH3HybridStreamMessage(message []byte, maxByteCount int) []byte {
+	if maxByteCount < connect.H3HybridStreamRetainedByteCount(message) &&
+		len(message) <= maxByteCount-connect.MessagePoolMetaByteCount {
+		compactMessage := connect.MessagePoolCopy(message)
+		connect.MessagePoolReturn(message)
+		return compactMessage
+	}
+	return message
+}
+
 func writeConnectQuicBatchWithDeadline(
 	framing connectQuicStreamFraming,
 	stream connectQuicDeadlineWriter,
@@ -3291,14 +3306,8 @@ func (self *ConnectHandler) connectQuicWithCarrier(conn *quic.Conn, carrier Resi
 				defer handleCancel()
 				defer close(streamSend)
 				offerStream := func(message []byte) bool {
+					message = compactConnectH3HybridStreamMessage(message, streamSendBudget.MaxByteCount())
 					retainedByteCount := connect.H3HybridStreamRetainedByteCount(message)
-					if streamSendBudget.MaxByteCount() < retainedByteCount &&
-						len(message) <= streamSendBudget.MaxByteCount()-connect.MessagePoolMetaByteCount {
-						compactMessage := connect.MessagePoolCopy(message)
-						connect.MessagePoolReturn(message)
-						message = compactMessage
-						retainedByteCount = connect.H3HybridStreamRetainedByteCount(message)
-					}
 					if !streamSendBudget.Acquire(handleCtx, retainedByteCount) {
 						connect.MessagePoolReturn(message)
 						if handleCtx.Err() == nil && glog.V(2) {

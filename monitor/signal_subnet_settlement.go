@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"math/big"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -79,7 +80,13 @@ func (self *subnetSettlementProbe) check(ctx context.Context, env *probeEnv) (fi
 	gaps := []finding{}
 	enrollmentValid := settings.enrollmentReason() == ""
 	if !enrollmentValid {
-		gaps = append(gaps, coverage("enrollment", settings.enrollmentReason(), append(append([]string(nil), subnetSettlementJournalClasses...), "subnet-payout-root")))
+		undecided := append(append([]string(nil), subnetSettlementJournalClasses...), "subnet-payout-root")
+		// A malformed block may hide a planned sweep epoch, which decides
+		// post-cutover progress.
+		if pin.settlementV2Declared {
+			undecided = append(undecided, "subnet-epoch-progress")
+		}
+		gaps = append(gaps, coverage("enrollment", settings.enrollmentReason(), undecided))
 	}
 	if pin.settlementV2Declared {
 		gaps = append(gaps, coverage("settlement-v2", "settlement-v2-reader-unimplemented", subnetSettlementClasses))
@@ -113,11 +120,36 @@ func (self *subnetSettlementProbe) check(ctx context.Context, env *probeEnv) (fi
 	if err != nil {
 		return sourceGap(err)
 	}
+	if err := readSubnetSettlementCutover(runCtx, rpc, pin, state, settings.plannedV1SweepEpochs()); err != nil {
+		return sourceGap(err)
+	}
 	scope.checkpointNumber = state.checkpoint.number
 	scope.completeness = "complete"
+	// Without the cutover, rows it decides are withheld; the whole-history
+	// identities do not depend on it and are still decided. A plan that
+	// contradicts the chain is dropped and leaves the same classes unknown.
+	cutoverUnknown := state.cutover.declared && !state.cutover.known
+	partial := []string{}
 	if !state.censusComplete {
-		scope.completeness = "partial:" + state.censusReason
+		partial = append(partial, state.censusReason)
+	}
+	if cutoverUnknown {
+		partial = append(partial, "settlement-v2-cutover-unknown")
+	}
+	if state.cutover.planReason != "" {
+		partial = append(partial, state.cutover.planReason)
+	}
+	if 0 < len(partial) {
+		scope.completeness = "partial:" + strings.Join(partial, ",")
+	}
+	if !state.censusComplete {
 		gaps = append(gaps, coverage("census", state.censusReason, []string{"subnet-vault-conservation", "subnet-carry-isolation", "subnet-claim-credit-payment"}))
+	}
+	if cutoverUnknown {
+		gaps = append(gaps, coverage("settlement-v2-cutover", state.cutover.reason, []string{"subnet-epoch-progress", "subnet-payout-root"}))
+	}
+	if state.cutover.planReason != "" {
+		gaps = append(gaps, coverage("planned-sweep", state.cutover.planReason, []string{"subnet-epoch-progress", "subnet-payout-root"}))
 	}
 	verdicts := evaluateSubnetSettlementState(state, settings, scope)
 
