@@ -298,6 +298,10 @@ func TestStV1SweepAfterTurnCountsAlertsAndAbandons(t *testing.T) {
 	if reset, _ := StV1SweepAfterTurn(context.Background(), 4, failures, &StPublishOutcome{Status: model.StPublishStatusSkipped, Retry: true}, nil); reset != 0 {
 		t.Fatalf("a good turn left %d failures", reset)
 	}
+	// Past the commit cutoff with no commit intent reserved, the count abandons.
+	cutoff := uint64(sweepTestEnd + sweepTestWindow - stV1SweepCommitMarginBlocks)
+	SetStV1SweepClient(&sweepCommitFactsClient{latest: cutoff, cutoff: cutoff})
+	t.Cleanup(func() { SetStV1SweepClient(nil) })
 	if failures, stop = StV1SweepAfterTurn(context.Background(), 4, stV1SweepAbandonFailures-1, failed, nil); !stop || failures != stV1SweepAbandonFailures {
 		t.Fatalf("uncommitted: %d %t", failures, stop)
 	}

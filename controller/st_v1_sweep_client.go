@@ -378,6 +378,48 @@ func (self *CoreStClient) V1SweepCommitted(ctx context.Context, epoch uint64, no
 	return [32]byte(intent.Calldata[len(expected)-32:]), true, nil
 }
 
+// V1SweepCommitFacts reads the latest block, the epoch's commit cutoff and
+// whether any root:E:N commit intent is reserved.
+func (self *CoreStClient) V1SweepCommitFacts(ctx context.Context, epoch uint64, noId uint64) (uint64, uint64, bool, error) {
+	if err := self.v1SweepRequire(); err != nil {
+		return 0, 0, false, err
+	}
+	latest, err := self.LedgerV2LatestBlock(ctx)
+	if err != nil {
+		return 0, 0, false, err
+	}
+	e := new(big.Int).SetUint64(epoch)
+	end, err := stViewAt(self, ctx, self.cfg.ContractAddress, self.coordinator.PackEpochEndBlock(e), self.coordinator.UnpackEpochEndBlock)
+	if err != nil || end == nil || !end.IsUint64() {
+		return 0, 0, false, fmt.Errorf("epochEndBlock(%d): %v", epoch, err)
+	}
+	policy, err := stViewAt(self, ctx, self.cfg.ContractAddress, self.coordinator.PackPolicyAt(e), self.coordinator.UnpackPolicyAt)
+	if err != nil {
+		return 0, 0, false, fmt.Errorf("policyAt(%d): %w", epoch, err)
+	}
+	cutoff := end.Uint64() + policy.RootCommitWindowBlocks - stV1SweepCommitMarginBlocks
+	logicalKey, err := stTransactionLogicalKey(self.cfg, fmt.Sprintf("root:%d:%d", epoch, noId))
+	if err != nil {
+		return 0, 0, false, err
+	}
+	reserved, err := stV1SweepIntentReserved(ctx, logicalKey)
+	if err != nil {
+		return 0, 0, false, err
+	}
+	return latest, cutoff, reserved, nil
+}
+
+// stV1SweepIntentReserved reads whether an intent is reserved under a logical
+// key; a failed read is an error, never "not reserved".
+func stV1SweepIntentReserved(ctx context.Context, logicalKey string) (reserved bool, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			reserved, err = false, fmt.Errorf("st: transaction intent read: %v", r)
+		}
+	}()
+	return model.GetStTransactionIntent(ctx, logicalKey) != nil, nil
+}
+
 func (self *CoreStClient) V1SweepFinalize(ctx context.Context, epoch uint64, noId uint64) (string, error) {
 	if err := self.v1SweepRequire(); err != nil {
 		return "", err

@@ -261,6 +261,10 @@ type StV1SweepClient interface {
 	// V1SweepCommitted returns the artifact hash of a commit intent already
 	// reserved for the epoch, so a retry repeats its exact calldata.
 	V1SweepCommitted(ctx context.Context, epoch uint64, noId uint64, root [32]byte) ([32]byte, bool, error)
+	// V1SweepCommitFacts reads what the failure count's abandon depends on:
+	// the latest block, the epoch's commit cutoff (end + root window − the
+	// commit margin) and whether any root:E:N commit intent is reserved.
+	V1SweepCommitFacts(ctx context.Context, epoch uint64, noId uint64) (latest uint64, cutoff uint64, reserved bool, err error)
 	V1SweepFinalize(ctx context.Context, epoch uint64, noId uint64) (string, error)
 	V1SweepClaim(ctx context.Context, epoch uint64, noId uint64, coldkey [32]byte) (string, error)
 	V1SweepWithdraw(ctx context.Context, epoch uint64, noId uint64, attempt uint64, coldkey [32]byte) (string, error)
@@ -858,7 +862,19 @@ func StV1SweepAfterTurn(ctx context.Context, epoch uint64, failures int, outcome
 			return failures, false
 		}
 	}
-	message := fmt.Sprintf("abandoned after %d consecutive failed turns before the sweep root was committed (last: %s); re-point v1_sweep_epoch to a later epoch", failures, reason)
+	// Abandoning is irreversible, so the count abandons only once no commit
+	// can still land: the latest block at or past the commit cutoff, and no
+	// root:E:N intent reserved (a commit whose send timed out may still be
+	// included). Before that, or with the facts unreadable, it only alerts.
+	client := stV1SweepClient()
+	if client == nil {
+		return failures, false
+	}
+	latest, cutoff, reserved, factsErr := client.V1SweepCommitFacts(ctx, epoch, cfg.NoId)
+	if factsErr != nil || latest < cutoff || reserved {
+		return failures, false
+	}
+	message := fmt.Sprintf("abandoned after %d consecutive failed turns: block %d is past the commit cutoff %d and no sweep commit intent is reserved (last: %s); it does not finalize the epoch; re-point v1_sweep_epoch to a later epoch", failures, latest, cutoff, reason)
 	stV1SweepAlertSink(fmt.Sprintf("epoch %d", epoch), message)
 	stV1SweepRecordOutcome(ctx, cfg, epoch, StPublishKindV1SweepAbandon, &StPublishOutcome{Status: model.StPublishStatusSkipped, Reason: message})
 	return failures, true
@@ -1084,7 +1100,8 @@ func stV1SweepSafeCalls(cfg *StConfig, epoch uint64, chain *StV1SweepChain, surp
 			calls = append(calls, StV1SweepSafeCall{Name: "recordV1Sweep", To: to, Calldata: stV1SweepHex(calldata), Note: fmt.Sprintf("record the committed sweep root of epoch %d (artifact %s) for readers", epoch, stV1SweepHex(chain.Sweep.RootArtifact[:]))})
 		}
 	}
-	absorbed := chain.Sweep.Status == stV1SweepFinalized && chain.LeafClaimed && stV1SweepAmount(chain.ClaimCredit).Sign() == 0 && stV1SweepAmount(chain.Absorbable).Sign() == 0
+	// Dust below the absorb threshold neither re-absorbs nor hides the call.
+	absorbed := chain.Sweep.Status == stV1SweepFinalized && chain.LeafClaimed && stV1SweepAmount(chain.ClaimCredit).Sign() == 0 && stV1SweepAmount(chain.Absorbable).Cmp(big.NewInt(stV1SweepMinimumAbsorbRao)) < 0
 	if chain.AssignSelector && absorbed && big.NewInt(stV1SweepMinimumAssignRao).Cmp(surplus) <= 0 {
 		amount := surplus
 		if total := stV1SweepAmount(chain.Sweep.Total); total.Cmp(amount) < 0 {
@@ -1104,7 +1121,8 @@ func GetStV1SweepStatus(ctx context.Context) (*StV1SweepStatusView, error) {
 		return nil, errStNotConfigured
 	}
 	epoch, sweep := stLedgerV1SweepEpoch(ctx, cfg)
-	view := &StV1SweepStatusView{Configured: sweep, Epoch: epoch}
+	// A refused sweep config leaves the sweep off; its reason still shows.
+	view := &StV1SweepStatusView{Configured: sweep, Epoch: epoch, ConfigError: cfg.V1SweepConfigError}
 	if !sweep {
 		return view, nil
 	}
@@ -1141,7 +1159,7 @@ func GetStV1SweepStatus(ctx context.Context) (*StV1SweepStatusView, error) {
 	view.CarryRao, view.FundedRao, view.TotalRao = stV1SweepAmount(chain.Carry).String(), stV1SweepAmount(chain.Sweep.Funded).String(), stV1SweepAmount(chain.Sweep.Total).String()
 	view.LeafClaimed, view.AbsorbableRao, view.V2SurplusRao, view.AssignLive = chain.LeafClaimed, stV1SweepAmount(chain.Absorbable).String(), surplus.String(), chain.AssignSelector
 	view.Recorded = stV1SweepRecorded(epoch, chain)
-	view.RecordedEpoch, view.RecordReadError, view.AssignReadError, view.ConfigError = chain.RecordedEpoch, chain.RecordReadError, chain.AssignReadError, cfg.V1SweepConfigError
+	view.RecordedEpoch, view.RecordReadError, view.AssignReadError = chain.RecordedEpoch, chain.RecordReadError, chain.AssignReadError
 	view.SafeCalls = stV1SweepSafeCalls(cfg, epoch, chain, surplus)
 	view.Next = stV1SweepNext(&stV1SweepInput{
 		epoch: epoch, firstEpoch: activation.FirstEpoch, chain: chain, latest: latest,

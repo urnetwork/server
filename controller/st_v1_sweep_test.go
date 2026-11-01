@@ -529,6 +529,9 @@ func (self *sweepFakeClient) V1SweepCommitted(context.Context, uint64, uint64, [
 	}
 	return [32]byte{}, false, nil
 }
+func (self *sweepFakeClient) V1SweepCommitFacts(context.Context, uint64, uint64) (uint64, uint64, bool, error) {
+	return 0, 0, false, errors.New("no commit facts")
+}
 func (self *sweepFakeClient) V1SweepFinalize(_ context.Context, epoch uint64, noId uint64) (string, error) {
 	return self.record(fmt.Sprintf("finalize %d %d", epoch, noId))
 }
@@ -681,7 +684,8 @@ func TestStV1SweepSafeCalls(t *testing.T) {
 	if len(calls) != 1 || calls[0].Name != "assignSurplus" || calls[0].Calldata != wantAssign || !strings.Contains(calls[0].Note, "epoch 5") {
 		t.Fatalf("assign call %+v", calls)
 	}
-	chain.Absorbable = sweepRao(1)
+	// An absorbable amount at the absorb threshold hides the call until it is absorbed.
+	chain.Absorbable = sweepRao(stV1SweepMinimumAbsorbRao)
 	if calls := stV1SweepSafeCalls(cfg, sweepTestEpoch, chain, sweepRao(sweepTestTotal-1)); len(calls) != 0 {
 		t.Fatalf("unabsorbed: %+v", calls)
 	}
