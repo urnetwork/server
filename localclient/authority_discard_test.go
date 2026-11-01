@@ -35,8 +35,8 @@ func authorityDiscardTestAudit(abuse bool) *protocol.PeerAudit {
 
 // No credential, one that does not verify and the authority's own expired
 // token each get the empty result, with the contract creation bound full,
-// and no admission refusal is counted. A pack with a frame that acts is
-// authenticated, and its credential fails the preflight.
+// and no admission refusal is counted. A pack with a frame that acts, or with
+// two audits, is authenticated, and its credential fails the preflight.
 func TestAuthorityDiscardsAuditBeforeAuthenticate(t *testing.T) {
 	defer session.Testing_SetRejectExpired(true)()
 	admission := NewContractAdmission(1)
@@ -44,7 +44,8 @@ func TestAuthorityDiscardsAuditBeforeAuthenticate(t *testing.T) {
 	authority := contractAdmissionTestAuthority(admission)
 	expired := session.NewByJwt(authority.networkId, authority.userId, "synthetic", false, false).Client(authority.deviceId, authority.clientId)
 	expired.ExpiresAt = gojwt.NewNumericDate(time.Now().Add(-time.Hour))
-	audits := contractAdmissionTestArgs(t, authorityDiscardTestAudit(false), authorityDiscardTestAudit(true))
+	// one audit a request, as every connect version sends
+	audits := contractAdmissionTestArgs(t, authorityDiscardTestAudit(true))
 
 	if !admission.tryAcquire() {
 		t.Fatal("a fresh bound refused its first slot")
@@ -67,6 +68,10 @@ func TestAuthorityDiscardsAuditBeforeAuthenticate(t *testing.T) {
 	creates := contractAdmissionTestArgs(t, authorityDiscardTestAudit(false), contractAdmissionTestCreate())
 	_, err = authority.ConnectControl(t.Context(), "", creates)
 	contractAdmissionExpectStatus(t, err, http.StatusUnauthorized, "a pack with a creation and an audit")
+	// more than one audit is not a shape any connect version sends
+	twoAudits := contractAdmissionTestArgs(t, authorityDiscardTestAudit(false), authorityDiscardTestAudit(true))
+	_, err = authority.ConnectControl(t.Context(), "", twoAudits)
+	contractAdmissionExpectStatus(t, err, http.StatusUnauthorized, "a pack of two audits")
 }
 
 // A closed authority, and a request whose context has ended, report their

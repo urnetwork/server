@@ -120,3 +120,29 @@ func (self connectControlDiscardAnswers) requireEmpty(t testing.TB, count int) {
 		t.Fatalf("audit-only answers = %v, want %d empty packs", self, count)
 	}
 }
+
+// An audit-only pack the discard declines authenticates like any other
+// request, and the dispatch's no-op answers it: an empty pack and no error,
+// after one authentication and no discard.
+func TestConnectControlDeclinedAuditPackIsAnsweredByTheDispatch(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		self := newRouteAccessDbFixture(t, ctx)
+		_, clientToken := self.mintClient(t, self.root(), nil)
+		for name, body := range connectControlDiscardDeclinedBodies(t) {
+			before := connectControlDiscardTotals(t)
+			w := connectControlDiscardControl(t, self, body, clientToken, http.StatusOK)
+			if strings.TrimSpace(w.Body.String()) != `{"pack":"","error":null}` {
+				t.Fatalf("%s was answered %s, want the dispatch's empty answer", name, w.Body.String())
+			}
+			after := connectControlDiscardTotals(t)
+			if attempts := after["urnetwork_session_auth_attempts_total"] - before["urnetwork_session_auth_attempts_total"]; attempts != 1 {
+				t.Fatalf("%s attempted authentication %v times, want 1", name, attempts)
+			}
+			if discarded := after["urnetwork_connect_control_discarded_requests_total"] - before["urnetwork_connect_control_discarded_requests_total"]; discarded != 0 {
+				t.Fatalf("%s was counted as %v discards", name, discarded)
+			}
+		}
+	})
+}

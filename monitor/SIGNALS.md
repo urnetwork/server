@@ -19894,9 +19894,14 @@ The opt-in API instrumentation adds only fixed cells:
   intended network and lag.dev guest gates, before the credential, the
   per-client limit, the revocation record or any state is read. The proxy's
   hosted authority counts its own the same way, after its lifecycle checks
-  and before contract admission. The pack is at most 2 KiB of base64 and
-  every frame must decode as a `PeerAudit`; any other pack, including one
-  that adds a single frame of another type, takes the authenticated path. No
+  and before contract admission. The pack is at most 512 characters of
+  base64 and exactly one frame, a `PeerAudit` that decodes, the only shape
+  any connect version sends (about 80 characters, 220 at most). A wire scan
+  rejects every other shape before decoding anything, so the check costs a
+  fixed handful of small allocations however the bytes are crafted. Any
+  other pack, including two audits, a longer audit or an audit beside a frame
+  of another type, takes the authenticated path, where the dispatch's no-op
+  answers its audits. No
   server has consumed an audit, and connect stops sending them by default
   (`ClientSettings.SendPeerAudits`), so the rate falls as clients update.
   `abuse` is `claimed` when any frame sets `abuse` (a provider's

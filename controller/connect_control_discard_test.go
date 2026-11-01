@@ -8,14 +8,18 @@ package controller
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"math"
 	"reflect"
+	"runtime"
 	"sort"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/urnetwork/connect"
@@ -83,9 +87,68 @@ func discardTestCounts() [2]float64 {
 	}
 }
 
-// A pack of one or more audits, abuse reports among them, is answered with
-// exactly what an authenticated pack that does nothing gets, and counted once
-// by whether any frame claims abuse.
+// The largest audit connect can build: both ids and every counter at its
+// widest encoding.
+func discardTestLargestAudit() *protocol.PeerAudit {
+	return &protocol.PeerAudit{
+		PeerId:              server.NewId().Bytes(),
+		StreamId:            server.NewId().Bytes(),
+		Duration:            math.MaxUint64,
+		Abuse:               true,
+		BadContractCount:    math.MaxUint64,
+		DiscardedByteCount:  math.MaxUint64,
+		DiscardedCount:      math.MaxUint64,
+		BadMessageByteCount: math.MaxUint64,
+		BadMessageCount:     math.MaxUint64,
+		SendByteCount:       math.MaxUint64,
+		SendCount:           math.MaxUint64,
+		ResendByteCount:     math.MaxUint64,
+		ResendCount:         math.MaxUint64,
+	}
+}
+
+// The request of one audit whose encoded pack is exactly length characters,
+// padded through its peer id, and the same audit one byte longer.
+func discardTestAuditPackAtLength(t testing.TB, length int) (atLength *ConnectControlArgs, past *ConnectControlArgs) {
+	t.Helper()
+	for peerIdLength := 0; peerIdLength < 2*length && past == nil; peerIdLength += 1 {
+		audit := discardTestAudit(false)
+		audit.PeerId = make([]byte, peerIdLength)
+		args := discardTestArgs(t, audit)
+		switch {
+		case len(args.Pack) == length:
+			atLength = args
+		case length < len(args.Pack) && atLength != nil:
+			past = args
+		}
+	}
+	if atLength == nil || past == nil {
+		t.Fatalf("no audit pack lands exactly at %d characters", length)
+	}
+	return atLength, past
+}
+
+// The request of the raw pack bytes, as a client could encode them.
+func discardTestArgsOfBytes(packBytes []byte) *ConnectControlArgs {
+	return &ConnectControlArgs{Pack: base64.StdEncoding.EncodeToString(packBytes)}
+}
+
+// One frames record holding frameBytes.
+func discardTestPackOfFrameBytes(frameBytes []byte) []byte {
+	b := protowire.AppendTag(nil, connectControlDiscardPackFrames, protowire.BytesType)
+	return protowire.AppendBytes(b, frameBytes)
+}
+
+// A frame's message type and message bytes, as fields.
+func discardTestFrameFields(messageType protocol.MessageType, messageBytes []byte) []byte {
+	b := protowire.AppendTag(nil, connectControlDiscardFrameMessageType, protowire.VarintType)
+	b = protowire.AppendVarint(b, uint64(messageType))
+	b = protowire.AppendTag(b, connectControlDiscardFrameMessageBytes, protowire.BytesType)
+	return protowire.AppendBytes(b, messageBytes)
+}
+
+// A pack of one audit is answered with exactly what an authenticated pack
+// that does nothing gets, and counted once by whether it claims abuse.
 func TestDiscardConnectControlAnswersAuditOnlyPacks(t *testing.T) {
 	want, err := connectControlResult(nil, nil)
 	if err != nil {
@@ -98,9 +161,8 @@ func TestDiscardConnectControlAnswersAuditOnlyPacks(t *testing.T) {
 	}{
 		{name: "one audit", args: discardTestArgs(t, discardTestAudit(false))},
 		{name: "one abuse report", args: discardTestArgs(t, discardTestAudit(true)), abuse: true},
-		{name: "three audits", args: discardTestArgs(t, discardTestAudit(false), discardTestAudit(false), discardTestAudit(false))},
-		{name: "three audits with one abuse report", args: discardTestArgs(t, discardTestAudit(false), discardTestAudit(true), discardTestAudit(false)), abuse: true},
 		{name: "an audit with no fields", args: discardTestArgs(t, &protocol.PeerAudit{})},
+		{name: "the largest audit", args: discardTestArgs(t, discardTestLargestAudit()), abuse: true},
 	} {
 		before := discardTestCounts()
 		answer, ok := DiscardConnectControl(c.args)
@@ -128,11 +190,21 @@ func TestDiscardConnectControlAnswersAuditOnlyPacks(t *testing.T) {
 	}
 }
 
-// Anything but a pack made only of decodable audits within the cap takes the
-// ordinary path: every other message type alone and after an audit (each
-// carrying an audit's own bytes, so only the type can refuse it), an action
-// before or after an audit, an audit whose bytes do not decode, and empty,
-// absent, malformed or oversized packs. None is counted.
+// Every connect version's largest audit fits the cap with room to spare.
+func TestDiscardConnectControlCapFitsTheLargestAudit(t *testing.T) {
+	if length := len(discardTestArgs(t, discardTestLargestAudit()).Pack); connectControlDiscardMaxPackLength/2 < length {
+		t.Fatalf("the largest audit encodes to %d characters, more than half the %d cap", length, connectControlDiscardMaxPackLength)
+	}
+}
+
+// Anything but a pack of exactly one decodable audit within the cap takes the
+// ordinary path: more than one audit, every other message type alone and
+// after an audit (each carrying an audit's own bytes, so only the type can
+// refuse it), an action before or after an audit, an audit whose bytes do not
+// decode, a frame or audit that repeats a field, carries a field outside its
+// schema or a field with the wrong wire type, a pack with any field beside
+// its frame, and empty, absent, malformed or oversized packs. None is
+// counted.
 func TestDiscardConnectControlRefusesEveryOtherShape(t *testing.T) {
 	auditFrames := discardTestFrames(t, discardTestAudit(false))
 	defer returnConnectControlFrames(auditFrames)
@@ -162,6 +234,19 @@ func TestDiscardConnectControlRefusesEveryOtherShape(t *testing.T) {
 		{name: "an audit with undecodable bytes", args: discardTestArgsOfFrames(t, &protocol.Frame{MessageType: protocol.MessageType_TransferPeerAudit, MessageBytes: []byte{0x0a, 0x7f, 0x01}})},
 		{name: "an audit then one with undecodable bytes", args: discardTestArgsOfFrames(t, auditFrame, &protocol.Frame{MessageType: protocol.MessageType_TransferPeerAudit, MessageBytes: []byte{0x0a, 0x7f, 0x01}})},
 		{name: "an unknown message type", args: discardTestArgsOfFrames(t, &protocol.Frame{MessageType: protocol.MessageType(1 << 20), MessageBytes: auditFrame.MessageBytes})},
+		{name: "two audits", args: discardTestArgsOfFrames(t, auditFrame, auditFrame)},
+		{name: "three audits with an abuse report", args: discardTestArgs(t, discardTestAudit(false), discardTestAudit(true), discardTestAudit(false))},
+		{name: "an audit marked raw", args: discardTestArgsOfFrames(t, &protocol.Frame{MessageType: protocol.MessageType_TransferPeerAudit, MessageBytes: auditFrame.MessageBytes, Raw: true})},
+		{name: "a frame with its message bytes twice", args: discardTestArgsOfBytes(discardTestPackOfFrameBytes(protowire.AppendBytes(protowire.AppendTag(discardTestFrameFields(protocol.MessageType_TransferPeerAudit, auditFrame.MessageBytes), connectControlDiscardFrameMessageBytes, protowire.BytesType), auditFrame.MessageBytes)))},
+		// proto decodes the last message type, so this frame is a CreateContract
+		{name: "a frame typed audit then create", args: discardTestArgsOfBytes(discardTestPackOfFrameBytes(protowire.AppendVarint(protowire.AppendTag(discardTestFrameFields(protocol.MessageType_TransferPeerAudit, createFrame.MessageBytes), connectControlDiscardFrameMessageType, protowire.VarintType), uint64(protocol.MessageType_TransferCreateContract))))},
+		{name: "a frame with its message type as bytes", args: discardTestArgsOfBytes(discardTestPackOfFrameBytes(protowire.AppendBytes(protowire.AppendTag(nil, connectControlDiscardFrameMessageType, protowire.BytesType), []byte{byte(protocol.MessageType_TransferPeerAudit)})))},
+		{name: "an audit with its peer id twice", args: discardTestArgsOfBytes(discardTestPackOfFrameBytes(discardTestFrameFields(protocol.MessageType_TransferPeerAudit, protowire.AppendBytes(protowire.AppendTag(auditFrame.MessageBytes, 1, protowire.BytesType), server.NewId().Bytes()))))},
+		{name: "an audit with a field outside its schema", args: discardTestArgsOfBytes(discardTestPackOfFrameBytes(discardTestFrameFields(protocol.MessageType_TransferPeerAudit, protowire.AppendVarint(protowire.AppendTag(auditFrame.MessageBytes, 99, protowire.VarintType), 1))))},
+		{name: "an audit with its duration as bytes", args: discardTestArgsOfBytes(discardTestPackOfFrameBytes(discardTestFrameFields(protocol.MessageType_TransferPeerAudit, protowire.AppendBytes(protowire.AppendTag(nil, 2, protowire.BytesType), []byte{60}))))},
+		{name: "a pack with a message id beside its audit", args: discardTestArgsOfBytes(append(protowire.AppendBytes(protowire.AppendTag(nil, 1, protowire.BytesType), server.NewId().Bytes()), discardTestPackOfFrameBytes(discardTestFrameFields(protocol.MessageType_TransferPeerAudit, auditFrame.MessageBytes))...))},
+		{name: "a pack with trailing bytes", args: discardTestArgsOfBytes(append(discardTestPackOfFrameBytes(discardTestFrameFields(protocol.MessageType_TransferPeerAudit, auditFrame.MessageBytes)), 0x00))},
+		{name: "a frames record that is a varint", args: discardTestArgsOfBytes(protowire.AppendVarint(protowire.AppendTag(nil, connectControlDiscardPackFrames, protowire.VarintType), 13))},
 	}
 	names := make([]string, 0, len(protocol.MessageType_value))
 	for name := range protocol.MessageType_value {
@@ -207,28 +292,12 @@ func TestDiscardConnectControlRefusesEveryOtherShape(t *testing.T) {
 	}
 }
 
-// The cap is exact: one audit whose encoded pack is the cap's length is
-// discarded, and the same audit a byte longer is not.
+// The cap is exactly 512 characters: one audit whose encoded pack is that
+// long is discarded, and the same audit a byte longer is not. Every connect
+// version's audit fits (TestDiscardConnectControlCapFitsTheLargestAudit); a
+// longer pack authenticates and reaches the dispatch's no-op.
 func TestDiscardConnectControlCapIsExact(t *testing.T) {
-	encodedLength := func(peerIdLength int) (*ConnectControlArgs, int) {
-		audit := discardTestAudit(false)
-		audit.PeerId = make([]byte, peerIdLength)
-		args := discardTestArgs(t, audit)
-		return args, len(args.Pack)
-	}
-	var atCap, pastCap *ConnectControlArgs
-	for peerIdLength := 0; peerIdLength < 2*connectControlDiscardMaxPackLength && pastCap == nil; peerIdLength += 1 {
-		args, length := encodedLength(peerIdLength)
-		switch {
-		case length == connectControlDiscardMaxPackLength:
-			atCap = args
-		case connectControlDiscardMaxPackLength < length && atCap != nil:
-			pastCap = args
-		}
-	}
-	if atCap == nil || pastCap == nil {
-		t.Fatal("no pack lands exactly at the cap")
-	}
+	atCap, pastCap := discardTestAuditPackAtLength(t, 512)
 	if !DiscardConnectControlPack(atCap.Pack) {
 		t.Fatalf("a pack of %d characters, the cap, was not discarded", len(atCap.Pack))
 	}
@@ -237,8 +306,106 @@ func TestDiscardConnectControlCapIsExact(t *testing.T) {
 	}
 }
 
-// Whatever the input, the discard either declines, or every frame of the pack
-// it answered is a PeerAudit that decodes, within the cap. It never panics.
+// Inputs of exactly the cap's length that each push one part of the discard
+// hardest: an answered audit, and refused frames, repeats and noise.
+func discardTestInputsAtTheCap(t testing.TB) map[string]string {
+	t.Helper()
+	atCap, _ := discardTestAuditPackAtLength(t, connectControlDiscardMaxPackLength)
+	packByteCount := base64.StdEncoding.DecodedLen(connectControlDiscardMaxPackLength)
+	// the most records whose pack still fits the cap
+	grow := func(build func(records int) []byte) []byte {
+		records := 0
+		for len(build(records+1)) <= packByteCount {
+			records += 1
+		}
+		return build(records)
+	}
+	emptyFrames := grow(func(records int) []byte {
+		b := []byte{}
+		for range records {
+			b = protowire.AppendBytes(protowire.AppendTag(b, connectControlDiscardPackFrames, protowire.BytesType), nil)
+		}
+		return b
+	})
+	repeatedMessageBytes := grow(func(records int) []byte {
+		b := protowire.AppendVarint(protowire.AppendTag(nil, connectControlDiscardFrameMessageType, protowire.VarintType), uint64(protocol.MessageType_TransferPeerAudit))
+		for range records {
+			b = protowire.AppendBytes(protowire.AppendTag(b, connectControlDiscardFrameMessageBytes, protowire.BytesType), []byte{0})
+		}
+		return discardTestPackOfFrameBytes(b)
+	})
+	repeatedPeerIds := grow(func(records int) []byte {
+		b := []byte{}
+		for range records {
+			b = protowire.AppendBytes(protowire.AppendTag(b, 1, protowire.BytesType), []byte{0})
+		}
+		return discardTestPackOfFrameBytes(discardTestFrameFields(protocol.MessageType_TransferPeerAudit, b))
+	})
+	noise := make([]byte, packByteCount)
+	if _, err := rand.Read(noise); err != nil {
+		t.Fatal(err)
+	}
+	inputs := map[string]string{
+		"an audit":                      atCap.Pack,
+		"empty frames":                  discardTestArgsOfBytes(emptyFrames).Pack,
+		"a frame of repeated bytes":     discardTestArgsOfBytes(repeatedMessageBytes).Pack,
+		"an audit of repeated peer ids": discardTestArgsOfBytes(repeatedPeerIds).Pack,
+		"noise":                         discardTestArgsOfBytes(noise).Pack,
+	}
+	for name, input := range inputs {
+		if len(input) < connectControlDiscardMaxPackLength-4 || connectControlDiscardMaxPackLength < len(input) {
+			t.Fatalf("%s is %d characters, not at the %d cap", name, len(input), connectControlDiscardMaxPackLength)
+		}
+	}
+	return inputs
+}
+
+// At the cap, before any credential is read, the discard allocates a fixed
+// handful of small objects whatever the input: at most 8 allocations and
+// 2 KiB a request. Before the one-frame scan, the empty frames cost one
+// object each, several hundred at the old cap.
+func TestDiscardConnectControlCostIsBoundedAtTheCap(t *testing.T) {
+	const runs = 50
+	for name, input := range discardTestInputsAtTheCap(t) {
+		allocs := testing.AllocsPerRun(runs, func() {
+			DiscardConnectControlPack(input)
+		})
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		for range runs {
+			DiscardConnectControlPack(input)
+		}
+		runtime.ReadMemStats(&after)
+		allocatedBytes := float64(after.TotalAlloc-before.TotalAlloc) / runs
+		if 8 < allocs || 2048 < allocatedBytes {
+			t.Errorf("%s at the cap: %.0f allocations and %.0f bytes a request, want at most 8 and 2048", name, allocs, allocatedBytes)
+		}
+	}
+}
+
+// The discard at the cap, on each input that pushes one part of it hardest.
+func BenchmarkDiscardConnectControlPack(b *testing.B) {
+	inputs := discardTestInputsAtTheCap(b)
+	inputs["the largest audit"] = discardTestArgs(b, discardTestLargestAudit()).Pack
+	names := make([]string, 0, len(inputs))
+	for name := range inputs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		input := inputs[name]
+		b.Run(name, func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				DiscardConnectControlPack(input)
+			}
+		})
+	}
+}
+
+// Whatever the input, the discard either declines, or the pack it answered is
+// within the cap and is exactly one frame, a PeerAudit that decodes. It never
+// panics.
 func FuzzDiscardConnectControlNeverAnswersAnAction(f *testing.F) {
 	for _, messages := range [][]proto.Message{
 		{discardTestAudit(false)},
@@ -256,7 +423,8 @@ func FuzzDiscardConnectControlNeverAnswersAnAction(f *testing.F) {
 		}
 		f.Add(packBytes)
 	}
-	f.Add([]byte{0x0a, 0x04, 0x08, 0x0d, 0x12, 0x00})
+	f.Add([]byte{0x2a, 0x04, 0x08, 0x0d, 0x12, 0x00})
+	f.Add(discardTestPackOfFrameBytes(discardTestFrameFields(protocol.MessageType_TransferPeerAudit, []byte{0x18, 0x01, 0x18, 0x00})))
 	f.Add([]byte("not a pack"))
 	f.Fuzz(func(t *testing.T, packBytes []byte) {
 		for _, encodedPack := range []string{base64.StdEncoding.EncodeToString(packBytes), string(packBytes)} {
@@ -271,8 +439,8 @@ func FuzzDiscardConnectControlNeverAnswersAnAction(f *testing.F) {
 				t.Fatalf("a pack that is not base64 was discarded: %v", err)
 			}
 			pack := &protocol.Pack{}
-			if err := proto.Unmarshal(decoded, pack); err != nil || len(pack.Frames) == 0 {
-				t.Fatalf("a pack without frames was discarded: %v", err)
+			if err := proto.Unmarshal(decoded, pack); err != nil || len(pack.Frames) != 1 {
+				t.Fatalf("a pack of %d frames was discarded: %v", len(pack.Frames), err)
 			}
 			for _, frame := range pack.Frames {
 				message, err := connect.FromFrame(frame)

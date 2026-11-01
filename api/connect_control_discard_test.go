@@ -120,12 +120,13 @@ func connectControlDiscardTotals(t testing.TB) map[string]float64 {
 func TestConnectControlRouteDiscardsAuditWithoutCredential(t *testing.T) {
 	handler := router.NewRouter(t.Context(), Routes())
 	clientToken := session.NewByJwt(server.NewId(), server.NewId(), "synthetic", false, false).Client(server.NewId(), server.NewId()).Testing_Sign()
-	audits := connectControlDiscardBody(t, connectControlDiscardAudit(false), connectControlDiscardAudit(true))
+	// one audit a request, as every connect version sends
+	audit := connectControlDiscardBody(t, connectControlDiscardAudit(true))
 	authorizations := []string{"", "Bearer synthetic-unverifiable-token", "Bearer " + clientToken}
 
 	before := connectControlDiscardTotals(t)
 	for _, authorization := range authorizations {
-		w := connectControlDiscardServe(handler, audits, map[string]string{"Authorization": authorization})
+		w := connectControlDiscardServe(handler, audit, map[string]string{"Authorization": authorization})
 		if w.Code != http.StatusOK || strings.TrimSpace(w.Body.String()) != `{"pack":"","error":null}` {
 			t.Fatalf("authorization %.20q: %d %s, want the empty pack", authorization, w.Code, w.Body.String())
 		}
@@ -179,5 +180,41 @@ func TestConnectControlRouteDiscardKeepsRouteGates(t *testing.T) {
 	}
 	if discarded := connectControlDiscardFamilyTotal(t, "urnetwork_connect_control_discarded_requests_total") - discardedBefore; discarded != 0 {
 		t.Fatalf("requests a gate refused were counted as %v discards", discarded)
+	}
+}
+
+// Audit-only packs the discard declines: two audits, and one audit longer
+// than its 512-character cap. Every connect version sends one audit of at
+// most about 220 characters.
+func connectControlDiscardDeclinedBodies(t testing.TB) map[string][]byte {
+	t.Helper()
+	longAudit := connectControlDiscardAudit(false)
+	longAudit.PeerId = make([]byte, 512)
+	return map[string][]byte{
+		"two audits":        connectControlDiscardBody(t, connectControlDiscardAudit(false), connectControlDiscardAudit(true)),
+		"an audit too long": connectControlDiscardBody(t, longAudit),
+	}
+}
+
+// An audit-only pack the discard declines takes the authenticated path: no
+// credential, or one that does not verify, is a 401, each request attempts
+// authentication once, and none is counted as a discard.
+func TestConnectControlRouteAuthenticatesAuditPacksItDoesNotDiscard(t *testing.T) {
+	handler := router.NewRouter(t.Context(), Routes())
+	for name, body := range connectControlDiscardDeclinedBodies(t) {
+		for _, authorization := range []string{"", "Bearer synthetic-unverifiable-token"} {
+			before := connectControlDiscardTotals(t)
+			w := connectControlDiscardServe(handler, body, map[string]string{"Authorization": authorization})
+			if w.Code != http.StatusUnauthorized {
+				t.Fatalf("%s, authorization %.20q: %d %s, want 401", name, authorization, w.Code, w.Body.String())
+			}
+			after := connectControlDiscardTotals(t)
+			if attempts := after["urnetwork_session_auth_attempts_total"] - before["urnetwork_session_auth_attempts_total"]; attempts != 1 {
+				t.Fatalf("%s attempted authentication %v times, want 1", name, attempts)
+			}
+			if discarded := after["urnetwork_connect_control_discarded_requests_total"] - before["urnetwork_connect_control_discarded_requests_total"]; discarded != 0 {
+				t.Fatalf("%s was counted as %v discards", name, discarded)
+			}
+		}
 	}
 }
