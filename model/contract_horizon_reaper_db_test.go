@@ -29,6 +29,9 @@ type horizonTestContract struct {
 	unswept bool
 	// the sweep's payment; nil is unpaid
 	paymentId *server.Id
+	// the sweep's settlement; nil settles at the close, or at creation for a
+	// contract without one
+	sweepTime *time.Time
 }
 
 // A contract id minted at the millisecond of at, with a random nonzero tail.
@@ -86,9 +89,15 @@ func insertHorizonTestContracts(t testing.TB, ctx context.Context, f netEscrowOr
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_escrow(contract_id,balance_id,balance_byte_count,settled)
 				VALUES($1,$2,0,$3)`, contract.contractId, f.balanceId, contract.settled))
 			if !contract.unswept {
+				sweepTime := contract.createTime.UTC()
+				if contract.sweepTime != nil {
+					sweepTime = contract.sweepTime.UTC()
+				} else if closeTime != nil {
+					sweepTime = *closeTime
+				}
 				server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_escrow_sweep
-					(contract_id,balance_id,network_id,payout_byte_count,payout_net_revenue_nano_cents,payment_id)
-					VALUES($1,$2,$3,0,0,$4)`, contract.contractId, f.balanceId, f.destinationNetworkId, contract.paymentId))
+					(contract_id,balance_id,network_id,payout_byte_count,payout_net_revenue_nano_cents,payment_id,sweep_time)
+					VALUES($1,$2,$3,0,0,$4,$5)`, contract.contractId, f.balanceId, f.destinationNetworkId, contract.paymentId, sweepTime))
 			}
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO contract_extender(contract_id,extender_id,party,client_id,network_id)
 				VALUES($1,$2,'source',$3,$4)`, contract.contractId, server.NewId(), f.sourceId, f.sourceNetworkId))
