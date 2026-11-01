@@ -72,7 +72,7 @@ func TestParseContractHorizonMode(t *testing.T) {
 }
 
 // Pure: the code's horizon is the owner's 91 days. A shorter setting applies
-// down to the reaper's 45-day floor and no closer, and the floor is the
+// down to the reaper's 35-day floor and no closer, and the floor is the
 // reaper's own: server.ContractRetention, which the partition drop and the
 // other retentions share, stays 91 days.
 func TestContractHorizonNeverBelowFloor(t *testing.T) {
@@ -84,12 +84,16 @@ func TestContractHorizonNeverBelowFloor(t *testing.T) {
 	if settings.horizon() != 60*24*time.Hour {
 		t.Fatal("a horizon setting above the floor was not applied", settings.horizon())
 	}
+	settings.Horizon = 40 * 24 * time.Hour
+	if settings.horizon() != 40*24*time.Hour {
+		t.Fatal("a 40-day horizon setting was not applied", settings.horizon())
+	}
 	settings.Horizon = 30 * 24 * time.Hour
-	if settings.horizon() != 45*24*time.Hour {
+	if settings.horizon() != 35*24*time.Hour {
 		t.Fatal("a horizon setting below the floor was not raised to it", settings.horizon())
 	}
 	settings.Horizon = 0
-	if settings.horizon() != 45*24*time.Hour {
+	if settings.horizon() != 35*24*time.Hour {
 		t.Fatal("a zero horizon setting was not raised to the floor", settings.horizon())
 	}
 	settings.Horizon = 120 * 24 * time.Hour

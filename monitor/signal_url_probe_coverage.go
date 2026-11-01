@@ -156,7 +156,7 @@ func (self urlProbeCoverageProbe) check(ctx context.Context, env *probeEnv) ([]f
 	out, _, err := mimirShellFirstServiceGatewayParsed(ctx, env.runner, gateways, nil, command, urlProbeCoverageResponseMax)
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return nil, err
 		}
 		observation.CensusReason = "transport_unavailable"
 		return []finding{urlProbeCoverageUnknown("bounded Mimir observation unavailable " + observationFailureDetails(err, classifyObservationError(err)))}, nil

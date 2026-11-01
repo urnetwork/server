@@ -127,7 +127,7 @@ func (controlRoutePressureProbe) check(ctx context.Context, env *probeEnv) ([]fi
 	out, _, err := mimirShellFirstServiceGatewayParsed(ctx, env.runner, gateways, nil, command, controlRouteResponseMax)
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return nil, err
 		}
 		unobservable := controlRouteUnknown("Bounded Mimir query unavailable")
 		unobservable.observed += " " + observationFailureDetails(err, classifyObservationError(err))
