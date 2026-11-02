@@ -5,12 +5,15 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/urnetwork/server/model"
 )
 
 func TestStaleContractsSignalSyntheticInactiveBeforeCreate(t *testing.T) {
 	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 		for _, want := range []string{
-			"tc.create_time >= now() - interval '5 minutes'",
+			"tc.contract_id >= " + model.ContractIdCreatedFromSql("now() - interval '5 minutes'") + " AND",
+			"tc.create_time >= (now() - interval '5 minutes') AT TIME ZONE 'UTC'",
 			"tc.companion_contract_id IS NULL",
 			"NOT destination.active",
 			"destination.deactivate_time <= tc.create_time",

@@ -1,0 +1,13 @@
+{{define "title"}}Renew UR Pro by {{.EndDate}}{{end}}
+{{define "preheader"}}Your UR Pro year has ended. Payments in {{.AssetName}} don't renew on their own, so Pro keeps working until {{.EndDate}} while you renew.{{end}}
+{{define "eyebrow"}}Reminder{{end}}
+{{define "accent"}}#eff7bb{{end}}
+{{define "headline"}}Renew UR Pro by {{.EndDate}}{{end}}
+{{define "why"}}Sent to the address on your URnetwork account 14 days and 2 days before UR Pro paid in {{.AssetName}} stops. Payments in {{.AssetName}} don't renew by themselves.{{end}}
+{{define "content"}}
+<p class="ur-text" style="margin:16px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:16px; line-height:26px; color:#2b3036;">Your UR Pro year, paid in {{.AssetName}}, ended on {{.TermEndDate}}. Payments in {{.AssetName}} don't renew on their own, so Pro keeps working until {{.EndDate}} while you renew.</p>
+<table role="presentation" class="ur-btn-t" cellpadding="0" cellspacing="0" border="0" style="margin:28px 0 0;"><tr>
+<td class="ur-btn" style="border-radius:100px; background-color:#0039de; mso-padding-alt:14px 32px;"><a class="ur-btn-a" href="{{.RenewUrl}}" style="display:inline-block; padding:14px 32px; font-family:Geist, Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:16px; line-height:20px; font-weight:600; color:#ffffff; text-decoration:none; border-radius:100px;">Renew UR Pro</a></td>
+</tr></table>
+<p class="ur-muted" style="margin:20px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:13px; line-height:20px; color:#5f6a74;">A renewal starts a new year on the day you pay, so renewing now loses you nothing. If you'd rather go back to the free plan, there's nothing to do. Questions? Contact <a class="ur-link" href="mailto:support@ur.io" style="color:#0039de; text-decoration:underline;">support@ur.io</a>.</p>
+{{end}}

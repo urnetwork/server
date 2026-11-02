@@ -659,3 +659,32 @@ func colContains(cols []auditColumn, name string) bool {
 	}
 	return false
 }
+
+// Only a migration whose whole statement drops one index counts as a pending
+// drop; a statement that drops several, or does more, does not.
+func TestMigrationIndexDropPattern(t *testing.T) {
+	for sql, want := range map[string]string{
+		`DROP INDEX CONCURRENTLY IF EXISTS transfer_contract_create_time`:                  "transfer_contract_create_time",
+		`DROP INDEX IF EXISTS transfer_contract_create_time`:                               "transfer_contract_create_time",
+		"\n        DROP INDEX IF EXISTS proxy_client_client_id_instance_id_proxy_id\n    ": "proxy_client_client_id_instance_id_proxy_id",
+		`drop index account_api_key_network_id;`:                                           "account_api_key_network_id",
+		`DROP INDEX a, b`:                                                                  "",
+		`DROP INDEX a; CREATE INDEX a ON t (x)`:                                            "",
+		`CREATE INDEX a ON t (x)`:                                                          "",
+		`DROP TABLE a`:                                                                     "",
+	} {
+		got := ""
+		if match := migrationIndexDropPattern.FindStringSubmatch(sql); match != nil {
+			got = strings.ToLower(match[1])
+		}
+		if got != want {
+			t.Errorf("%q drops %q, want %q", sql, got, want)
+		}
+	}
+	if drops := pendingMigrationIndexDrops(MigrationCount()); len(drops) != 0 {
+		t.Errorf("the head has pending index drops: %v", drops)
+	}
+	if drops := pendingMigrationIndexDrops(0); !drops["transfer_contract_open_payer_network_id_transfer_byte_count"] {
+		t.Errorf("an empty database's pending drops miss the plain drop of the open payer index: %v", drops)
+	}
+}

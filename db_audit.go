@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -315,6 +316,9 @@ type SchemaDiff struct {
 	missingIdx         []string
 	extraIdx           []string
 	changedIdx         []indexChange
+	// expected at this version but dropped ahead of the pending migration that
+	// drops them (acceptPendingIndexDrops): not drift, and never rebuilt
+	pendingDroppedIdx []string
 
 	// adoptConstraintIndex[name] means a missing PK/UNIQUE constraint should be
 	// added with ADD CONSTRAINT ... USING INDEX name, because a bare index of that
@@ -599,6 +603,12 @@ func (d *SchemaDiff) Report() string {
 		b.WriteString("\nINDEXES with a definition that differs from expected:\n")
 		for _, ic := range d.changedIdx {
 			fmt.Fprintf(&b, "  ~ %s\n      expected: %s\n      actual:   %s\n", ic.name, ic.expectedDef, ic.actualDef)
+		}
+	}
+	if len(d.pendingDroppedIdx) > 0 {
+		b.WriteString("\nINDEXES dropped ahead of the pending migration that drops them (not drift, never rebuilt):\n")
+		for _, name := range d.pendingDroppedIdx {
+			fmt.Fprintf(&b, "  . %s  ON %s\n", name, d.expected.indexes[name].table)
 		}
 	}
 
@@ -900,11 +910,56 @@ func AuditSchema(ctx context.Context) *SchemaAuditResult {
 	actual := introspectSchema(ctx)
 	expected := buildExpectedSchema(ctx, dbVersion)
 
+	diff := diffSchemas(expected, actual)
+	diff.acceptPendingIndexDrops(pendingMigrationIndexDrops(dbVersion))
 	return &SchemaAuditResult{
 		DbVersion:    dbVersion,
 		LocalVersion: localVersion,
-		Diff:         diffSchemas(expected, actual),
+		Diff:         diff,
 	}
+}
+
+// A migration whose whole statement drops one index, in its production or its
+// audit form.
+var migrationIndexDropPattern = regexp.MustCompile(`(?i)^\s*DROP\s+INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+EXISTS\s+)?([a-z_][a-z0-9_]*)\s*;?\s*$`)
+
+// The indexes that the pending migrations, at slice indices [dbVersion,
+// len(migrations)), drop.
+func pendingMigrationIndexDrops(dbVersion int) map[string]bool {
+	drops := map[string]bool{}
+	for i := max(dbVersion, 0); i < len(migrations); i += 1 {
+		var sql string
+		switch m := migrations[i].(type) {
+		case *SqlMigration:
+			sql = m.sql
+		case *OnlineSqlMigration:
+			sql = m.auditSql
+		}
+		if match := migrationIndexDropPattern.FindStringSubmatch(sql); match != nil {
+			drops[strings.ToLower(match[1])] = true
+		}
+	}
+	return drops
+}
+
+// An index absent ahead of the pending migration that drops it is not drift.
+// The operator drops a large index by hand, with DROP INDEX CONCURRENTLY on a
+// direct session, before the migration that records the drop runs. Until that
+// migration runs the database's version still expects the index, and the fix
+// would rebuild it with a plain
+// CREATE INDEX, which blocks the table's writes for the whole build. Such an
+// index is reported apart and never rebuilt. An index absent without a pending
+// drop is still missing.
+func (d *SchemaDiff) acceptPendingIndexDrops(drops map[string]bool) {
+	kept := d.missingIdx[:0]
+	for _, name := range d.missingIdx {
+		if drops[name] {
+			d.pendingDroppedIdx = append(d.pendingDroppedIdx, name)
+		} else {
+			kept = append(kept, name)
+		}
+	}
+	d.missingIdx = kept
 }
 
 // ApplySchemaFix executes the reconciliation statements against the database

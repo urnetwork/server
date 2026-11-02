@@ -6150,10 +6150,9 @@ func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 	assignCompletedContractReapTimeBatches(ctx, maxRowCount)
 
 	// assign pass: give aged closed-but-never-completed contracts a reap_time so
-	// the delete pass removes them. Bounded by the
-	// transfer_contract_reap_pending_create_time partial index (reap_time IS NULL
-	// AND close_time IS NOT NULL, ordered by create_time), so this is an index
-	// range-scan, not the anti-join it replaces.
+	// the delete pass removes them. Bounded by the contract ids of the contracts
+	// created before the straggler horizon, so this is a range of the primary
+	// key, not the anti-join it replaces.
 	assignStragglerReapTimeBatches(ctx, server.NowUtc().Add(-StragglerContractExpiration), maxRowCount)
 
 	// delete pass: hard delete every contract whose reap_time is due, with its
@@ -6458,16 +6457,32 @@ func removeContractBatches(ctx context.Context, sql string, minTime time.Time, m
 	}
 }
 
-// reap_time is a timestamp without zone on the UTC storage clock. Preserve
-// the transaction-start clock while making its storage zone explicit.
+// Every contract created before the straggler horizon has an id below the
+// floor of the horizon plus this margin (ContractIdCreateTimeRange). A var
+// so a test whose fixture ages contracts by rewriting create_time, which
+// leaves each id at its real creation, can widen the id bound by that age.
+var stragglerContractIdMargin = ContractIdCreateTimeMargin
+
+// The closed, never-reaped contracts created before $1 that no payment holds,
+// at most $2, oldest id first. $3 bounds the ids of contracts created before
+// $1, so the batch is a range of the primary key from its oldest id, and the
+// create_time predicate still decides which contracts are stragglers, as a
+// filter (IS TRUE, see ContractIdCreateTimeRange). Neither
+// transfer_contract_reap_pending_create_time nor transfer_contract_create_time
+// is needed. Keep this read bounded by contract_id: once those indexes are
+// gone, a batch ordered or bounded by create_time alone seq-scans and sorts
+// the whole contract heap. reap_time is a timestamp without zone on the UTC
+// storage clock. Preserve the transaction-start clock while making its
+// storage zone explicit.
 const assignStragglerReapTimeSQL = `
 WITH batch AS (
 	SELECT transfer_contract.contract_id
 	FROM transfer_contract
 	WHERE
+		transfer_contract.contract_id < $3 AND
 		transfer_contract.reap_time IS NULL AND
 		transfer_contract.close_time IS NOT NULL AND
-		transfer_contract.create_time < $1 AND
+		(transfer_contract.create_time < $1) IS TRUE AND
 		NOT EXISTS (
 			SELECT 1
 			FROM transfer_escrow_sweep
@@ -6477,7 +6492,7 @@ WITH batch AS (
 				transfer_escrow_sweep.contract_id = transfer_contract.contract_id AND
 				` + server.ContractPaymentRetentionHoldSql + `
 		)
-	ORDER BY transfer_contract.create_time
+	ORDER BY transfer_contract.contract_id
 	LIMIT $2
 )
 UPDATE transfer_contract
@@ -6490,13 +6505,13 @@ WHERE transfer_contract.contract_id = batch.contract_id
 // that were never reaped (reap_time IS NULL), are older than minCreateTime, and
 // are not held by an active/ambiguous payment. This is the straggler + sweep-less
 // cleanup: safely unplanned value otherwise lives forever. Bounded by the
-// transfer_contract_reap_pending_create_time partial index (reap_time IS NULL
-// AND close_time IS NOT NULL), this is an index range-scan, not the anti-join
-// full scan it replaces.
+// contract ids of the contracts created before minCreateTime, this is a range
+// of the primary key from its oldest id, not the anti-join full scan it
+// replaces.
 //
 // Runs one bounded batch per maintenance tx (no long lock) until a batch marks
 // fewer than maxRowCount rows. Each candidate is a distinct transfer_contract row
-// (from the primary key) that gets reap_time set and so leaves the partial index,
+// (from the primary key) that gets reap_time set and so leaves the eligible set,
 // so the eligible set strictly shrinks and a short batch means drained.
 func assignStragglerReapTimeBatches(ctx context.Context, minCreateTime time.Time, maxRowCount int) (assignedCount int64) {
 	// Cap the work per call to a time budget so a large one-time backlog -- e.g.
@@ -6505,19 +6520,21 @@ func assignStragglerReapTimeBatches(ctx context.Context, minCreateTime time.Time
 	// bounded runs instead of one unbounded run that pegs the DB. The task
 	// reschedules every 30 min, so the backlog is still worked down steadily.
 	budgetEnd := server.NowUtc().Add(reaperRunBudget)
+	stragglerIdBound := server.ContractIdFloor(minCreateTime.Add(stragglerContractIdMargin))
 	for {
 		var batchCount int64
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
 			// UPDATE ... LIMIT is not valid Postgres; bound the batch with a CTE
 			// that picks the contract ids first, then update exactly those rows.
-			// ORDER BY create_time makes the planner take the ordered
-			// transfer_contract_reap_pending_create_time partial-index path (oldest
-			// stragglers first) rather than risking a seq scan.
+			// ORDER BY contract_id below the id bound makes the planner take the
+			// primary key's ordered range from its oldest id (oldest stragglers
+			// first) rather than risking a seq scan.
 			tag := server.RaisePgResult(tx.Exec(
 				ctx,
 				assignStragglerReapTimeSQL,
 				minCreateTime.UTC(),
 				maxRowCount,
+				stragglerIdBound,
 			))
 			batchCount = tag.RowsAffected()
 		}, server.TxReadCommitted)
@@ -6584,6 +6601,10 @@ type sweepOrphanStep struct {
 	// committed page. It keeps sweepOrphanCursor's start, budget and resume
 	// contract, with a cursor shaped by newCursorTargets.
 	sweep func(ctx context.Context, startKey []any, maxRowCount int, sliceSize int) (removedCount int64, rowCount int, endKey []any, done bool)
+	// When set, each page asks it first, in the page's own transaction. False
+	// ends the step for this pass without examining its rows, and the pass
+	// moves on to the next step; the next pass asks again.
+	admitPage func(ctx context.Context, tx server.PgTx) bool
 }
 
 // sweepOrphanSteps pages steps in order starting from start, stopping once every
@@ -6765,10 +6786,16 @@ func sweepOrphanCursor(
 		var targets []any
 		gotRow := false
 		ownershipRefused := false
+		stepRefused := false
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
 			sliceCount = 0
 			deletedCount = 0
 			gotRow = false
+			stepRefused = false
+			if step.admitPage != nil && !step.admitPage(ctx, tx) {
+				stepRefused = true
+				return
+			}
 			targets = step.newCursorTargets()
 			// One aligned array per key column, in key column order.
 			var lockedKeys []any
@@ -6816,6 +6843,11 @@ func sweepOrphanCursor(
 				deletedCount = tag.RowsAffected()
 			}
 		}, server.TxReadCommitted, server.OptNoRetry())
+		if stepRefused {
+			// nothing of this page was examined; the rest of the step waits
+			// for a pass its admission allows
+			return removedCount, rowCount, nil, true
+		}
 		if ownershipRefused {
 			// Keep the refused page's input cursor. Durable orphan rows remain
 			// discoverable after the admitted financial owner has completed.

@@ -23,7 +23,8 @@ func TestStragglerReapTimestampUsesUTC(t *testing.T) {
 				usage := &contractUsageSnapshot{Version: 1, ByteCount: 1024,
 					Providers: []contractProviderUsage{{ClientId: networkId, NetworkId: networkId, ByteCount: 1024}}}
 				insert := func(created time.Time, closed bool, reaped *time.Time) server.Id {
-					id := server.NewId()
+					// minted at its creation, as every creation path mints it
+					id := contractIdMintedAt(created)
 					var closeTime *time.Time
 					var outcome *ContractOutcome
 					if closed {
@@ -61,7 +62,8 @@ func TestStragglerReapTimestampUsesUTC(t *testing.T) {
 					contract_id,balance_id,network_id,payout_byte_count,payout_net_revenue_nano_cents,payment_id
 				) VALUES ($1,$2,$3,1024,1,$4)`, held, server.NewId(), networkId, paymentId))
 				for _, want := range []int64{2, 1, 0} {
-					got := server.RaisePgResult(tx.Exec(ctx, assignStragglerReapTimeSQL, cutoff.UTC(), 2)).RowsAffected()
+					got := server.RaisePgResult(tx.Exec(ctx, assignStragglerReapTimeSQL, cutoff.UTC(), 2,
+						server.ContractIdFloor(cutoff.Add(stragglerContractIdMargin)))).RowsAffected()
 					if got != want {
 						t.Fatalf("zone=%s assigned=%d, want bounded batch %d", zone, got, want)
 					}

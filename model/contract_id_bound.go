@@ -15,15 +15,63 @@ package model
 import (
 	"fmt"
 	"time"
+
+	"github.com/urnetwork/server"
 )
 
+// A contract's id leads with the millisecond its creator minted it, and its
+// create_time is the database clock of its insert (clock_timestamp() in every
+// creation path). The id precedes the insert by the admission wait, and the
+// hosts' clocks differ by their skew, so the two agree to within this margin
+// either way.
+const ContractIdCreateTimeMargin = 15 * time.Minute
+
 // An unexpired contract's id is at least the smallest id of this long ago: the
-// lifetime plus 15 minutes for the id preceding the database creation clock
-// (admission waits, server clock skew). Every creation path sets the deadline
-// to the creation clock plus the lifetime, and a deadline is only ever lowered
-// afterwards. An open contract older than this is past its deadline, and
-// closing it belongs to the force-close sweep.
-const unexpiredContractIdAge = DefaultContractExpiration + 15*time.Minute
+// lifetime plus the margin for the id preceding the database creation clock.
+// Every creation path sets the deadline to the creation clock plus the
+// lifetime, and a deadline is only ever lowered afterwards. An open contract
+// older than this is past its deadline, and closing it belongs to the
+// force-close sweep.
+const unexpiredContractIdAge = DefaultContractExpiration + ContractIdCreateTimeMargin
+
+// The contract id range [lower, upper) that holds every contract created in
+// [start, end). A read of a create_time window bounds the contract id by it,
+// so it reads a range of the primary key instead of needing an index on
+// create_time, and keeps its create_time predicate, so the window is still
+// exact.
+//
+// Write that predicate as (…) IS TRUE, which keeps the window out of every
+// index condition and keeps its selectivity estimate. PostgreSQL cannot
+// interpolate inside a uuid histogram bucket, so it estimates any contract id
+// range at 0.5% of the table. A bare create_time range is an index condition
+// of transfer_contract_destination_id_create_time through a skip scan, one
+// descent per destination (332k on Main), and once no index leads with
+// create_time the planner would prefer that over the primary key range. With
+// create_time a filter, the primary key range is the only index path, with or
+// without an index on create_time.
+func ContractIdCreateTimeRange(start time.Time, end time.Time) (lower server.Id, upper server.Id) {
+	return server.ContractIdFloor(start.Add(-ContractIdCreateTimeMargin)), server.ContractIdFloor(end.Add(ContractIdCreateTimeMargin))
+}
+
+// ContractIdCreateTimeRange's lower bound for a timestamptz SQL expression: the
+// smallest id a contract created at or after start can have.
+func ContractIdCreatedFromSql(startExpression string) string {
+	return contractIdFloorSql(fmt.Sprintf(
+		`(%s) - interval '%d milliseconds'`,
+		startExpression,
+		ContractIdCreateTimeMargin.Milliseconds(),
+	))
+}
+
+// ContractIdCreateTimeRange's upper bound for a timestamptz SQL expression:
+// every contract created before end has a smaller id.
+func ContractIdCreatedBeforeSql(endExpression string) string {
+	return contractIdFloorSql(fmt.Sprintf(
+		`(%s) + interval '%d milliseconds'`,
+		endExpression,
+		ContractIdCreateTimeMargin.Milliseconds(),
+	))
+}
 
 // The smallest contract id of the millisecond of a timestamptz SQL expression,
 // contract_id_floor's body. A timestamp without time zone would be read as UTC

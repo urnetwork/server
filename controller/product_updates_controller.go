@@ -162,15 +162,16 @@ func BrevoWebhook(
 
 	if webhookArgs.Event == "unsubscribe" || webhookArgs.Event == "unsubscribed" {
 		glog.Infof("[product_updates]unsubscribe %s\n", maskEmail(webhookArgs.Email))
-		model.AccountProductUpdatesSetForEmail(
+		model.AccountProductUpdatesUnsubscribeForEmail(
 			clientSession.Ctx,
 			webhookArgs.Email,
-			false,
+			server.NowUtc(),
 		)
 	}
 
-	// the onboarding campaign's delivery events (attributed by message id)
+	// the campaigns' delivery events (attributed by message id)
 	handleOnboardingBrevoWebhook(clientSession.Ctx, webhookArgs)
+	handleReengagementBrevoWebhook(clientSession.Ctx, webhookArgs)
 
 	return &BrevoWebhookResult{}, nil
 }
