@@ -1,11 +1,14 @@
 // A streamed contract's stream id is written by its insert.
 //
 // Contract creation used to insert the row without its stream and join the
-// stream after commit with a second UPDATE of the same row. stream_id is
-// indexed (the contract orphan sweep's contract_participant parent probe reads
-// transfer_contract_stream_id), so that UPDATE was never HOT: it wrote a full
-// row version and re-inserted the fresh contract into every transfer_contract
-// index, at the right-edge pages that every concurrent creation also writes.
+// stream after commit with a second UPDATE of the same row. stream_id was
+// indexed (transfer_contract_stream_id, for the contract orphan sweep's
+// contract_participant parent probe), so that UPDATE was never HOT: it wrote a
+// full row version and re-inserted the fresh contract into every
+// transfer_contract index, at the right-edge pages that every concurrent
+// creation also writes. The index diet dropped that index; a late stream write
+// can now be HOT when its page has room, and the insert still writes the
+// stream once in the common case.
 //
 // The creation request now carries a binding in its context. Immediately
 // before the creation transaction begins, its owner reads the Redis stream

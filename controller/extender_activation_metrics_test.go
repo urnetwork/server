@@ -56,12 +56,13 @@ func testActivationStepHistogram(t testing.TB, metrics *extenderActivationMetric
 
 // Every series an activation can end in exists at zero from the start, and
 // there are no others: a request refusal by each family and an unreadable
-// one, and every other stage's outcomes by each family. Every step is timed
-// by step and outcome alone.
+// one, and every other stage's outcomes by each family -- a busy api and each
+// budget among them (connect#230). Every step is timed by step and outcome
+// alone.
 func TestExtenderActivationMetricsAreFixedCardinality(t *testing.T) {
 	registry := prometheus.NewRegistry()
 	metrics := newExtenderActivationMetrics(registry)
-	connect.AssertEqual(t, testutil.CollectAndCount(metrics.activations), 21)
+	connect.AssertEqual(t, testutil.CollectAndCount(metrics.activations), 31)
 	connect.AssertEqual(t, testutil.CollectAndCount(metrics.stepSeconds), 12)
 	for stage, outcomes := range extenderActivationStageOutcomes {
 		for _, outcome := range outcomes {
@@ -73,7 +74,7 @@ func TestExtenderActivationMetricsAreFixedCardinality(t *testing.T) {
 		}
 	}
 	// the cells above are the ones that already existed
-	connect.AssertEqual(t, testutil.CollectAndCount(metrics.activations), 21)
+	connect.AssertEqual(t, testutil.CollectAndCount(metrics.activations), 31)
 }
 
 // One activation is counted once, where it ended, and each step it probed is
@@ -103,25 +104,49 @@ func TestExtenderActivationMetricsCountOneActivation(t *testing.T) {
 	noMetrics.observe(extenderActivationStageStore, extenderActivationOutcomeActivated, extenderActivationFamilyIpv4, nil)
 }
 
-// A refusal is counted as its stage ends: a request or a budget refuses, the
-// operator's configuration or storing fails, and a step of the required test
-// ends as its probe did.
+// A refusal is counted as its stage ends: a request refuses, the operator's
+// configuration or storing fails, a step of the required test ends as its
+// probe did, a busy api names why it was busy, and a budget refusal names the
+// budget (connect#230).
 func TestExtenderActivationRefusalOutcomeByStage(t *testing.T) {
 	for _, c := range []struct {
-		stage               string
-		probeRefusalOutcome string
-		want                string
+		stage        string
+		stageOutcome string
+		want         string
 	}{
 		{stage: extenderActivationStageRequest, want: "refused"},
 		{stage: extenderActivationStageConfig, want: "error"},
-		{stage: extenderActivationStageBudget, want: "refused"},
-		{stage: extenderActivationStageTcp, probeRefusalOutcome: extenderProbeStepOutcomeError, want: "error"},
-		{stage: extenderActivationStageTcp, probeRefusalOutcome: extenderProbeStepOutcomeTimeout, want: "timeout"},
-		{stage: extenderActivationStageForward, probeRefusalOutcome: extenderProbeRefusalOtherFamily, want: "other_family"},
+		{stage: extenderActivationStageBusy, stageOutcome: extenderActivationOutcomeProbes, want: "probes"},
+		{stage: extenderActivationStageBusy, stageOutcome: extenderActivationOutcomeBudgetLock, want: "budget_lock"},
+		{stage: extenderActivationStageBudget, stageOutcome: extenderActivationOutcomeClient, want: "client"},
+		{stage: extenderActivationStageBudget, stageOutcome: extenderActivationOutcomeAddress, want: "address"},
+		{stage: extenderActivationStageBudget, stageOutcome: extenderActivationOutcomeProvenAddress, want: "proven_address"},
+		{stage: extenderActivationStageBudget, stageOutcome: extenderActivationOutcomeAccount, want: "account"},
+		{stage: extenderActivationStageTcp, stageOutcome: extenderProbeStepOutcomeError, want: "error"},
+		{stage: extenderActivationStageTcp, stageOutcome: extenderProbeStepOutcomeTimeout, want: "timeout"},
+		{stage: extenderActivationStageForward, stageOutcome: extenderProbeRefusalOtherFamily, want: "other_family"},
 		{stage: extenderActivationStageStore, want: "error"},
 	} {
-		if got := extenderActivationRefusalOutcome(c.stage, c.probeRefusalOutcome); got != c.want {
-			t.Fatalf("a refusal at %s %s is counted as %s, want %s", c.stage, c.probeRefusalOutcome, got, c.want)
+		if got := extenderActivationRefusalOutcome(c.stage, c.stageOutcome); got != c.want {
+			t.Fatalf("a refusal at %s %s is counted as %s, want %s", c.stage, c.stageOutcome, got, c.want)
+		}
+	}
+}
+
+// A budget refusal is counted under the budget that refused, by its action:
+// the calling client's, the caller address's, or the account's (connect#230).
+func TestExtenderActivationBudgetOutcomeNamesTheBudget(t *testing.T) {
+	for _, ipVersion := range []int{4, 6} {
+		clientAction, addressAction, accountAction := extenderActivateRateLimitActions(ipVersion)
+		for action, want := range map[string]string{
+			clientAction:  "client",
+			addressAction: "address",
+			extenderActivateProvenAddressRateLimitAction(ipVersion): "proven_address",
+			accountAction: "account",
+		} {
+			if got := extenderActivationBudgetOutcome(action); got != want {
+				t.Errorf("a refusal by %s is counted as %s, want %s", action, got, want)
+			}
 		}
 	}
 }

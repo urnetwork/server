@@ -11163,6 +11163,68 @@ var migrations = []any{
 		ON network_reengagement_email (network_id, sent_at)
 	`),
 
+	// The index diet (owner decision 2026-11-01; db_index_diet_migrations.go).
+	// Each index below was audited against pg_stat_user_indexes, whose
+	// counters run from the 2026-10-23 20:08 UTC stats reset (8.2 days of full
+	// traffic, through two Sunday payouts, an epoch close and the November
+	// month boundary), and against every query in this repository and its
+	// siblings. The operator drops each one first, by hand, with the same
+	// DROP INDEX CONCURRENTLY IF EXISTS on a direct session, outside the dump,
+	// payout and maintenance windows, and only while no vacuum runs on its
+	// table. The migration then records the drop, so the schema audit never
+	// recreates the index, and is a no-op; an interrupted drop leaves an
+	// invalid index that the same statement removes. No version is written
+	// down: each is the migration's position wherever a merge places it, and
+	// the monitor and the tests read it through IndexDietMigrationVersion.
+
+	// transfer_contract_reap_pending_create_time (91.6 GB on Main, v493)
+	// served only the straggler stamp, whose 300-day horizon matches no
+	// contract before 2027-03-28: 314 scans and no tuples since the reset. The
+	// stamp now reads a contract id range of the primary key
+	// (assignStragglerReapTimeSQL). A build without that falls back to
+	// transfer_contract_create_time over the same empty range, so
+	// transfer_contract_create_time stays until every running build has the
+	// rewritten stamp; its own drop below waits for that. Every close, and
+	// every later non-HOT update of an unreaped closed contract, writes one
+	// index entry fewer, and each vacuum of the contract table reads 92 GB
+	// fewer.
+	reapPendingIndexDropMigration,
+
+	// transfer_contract_stream_id (13.7 GB, v629) has had no scan since
+	// the reset. Its only reader is the orphan sweep's contract_participant
+	// parent probe, and contract_participant is empty: only multi-hop
+	// contracts (with intermediaries) write it. The sweep's participant step
+	// now runs only while an index leading with stream_id exists
+	// (contractParticipantSweepAdmissionSql); without this one it keeps
+	// participant rows unexamined instead of reading the contract heap once
+	// per row. Drop it only while contract_participant is empty, and give the
+	// participant step a parent probe that does not read transfer_contract by
+	// stream_id before multi-hop contracts launch. A contract's late stream
+	// write (SetContractStream) can then be a HOT update.
+	streamIndexDropMigration,
+
+	// transfer_escrow_sweep_payment_id (7.6 GB, v62). Every reader that
+	// keys sweeps by payment_id also has transfer_escrow_sweep_payment_contract
+	// (payment_id, contract_id, v597), which leads with the same key: payment
+	// attribution, the sweep EXISTS checks, the weekly plan's unpaid arm
+	// (already on it) and canceled arm, and the contract partition's week
+	// blocker. Each insert of a sweep, and each payment assignment, writes one
+	// index entry fewer. Drop it outside the Sunday 10:00 UTC payout, whose
+	// bulk payment_id update holds the sweep table, and only while no
+	// autovacuum runs on transfer_escrow_sweep: a waiting drop cancels a
+	// normal autovacuum.
+	sweepPaymentIndexDropMigration,
+
+	// Close evidence retention at the contract horizon (owner, 2026-11-01;
+	// db_contract_close_evidence_horizon.go): the evidence guard admits the
+	// retention delete of a report accepted more than 35 days ago, the
+	// shortest horizon, in place of 91. It replaces the guard's function body
+	// only: no table lock, no scan. Every delete the running release makes
+	// (91 days) stays admitted, and the release that follows the horizon keeps
+	// 91 days until it finds this body installed (closeEvidenceGuardFloor), so
+	// it applies before or after the deploy.
+	newSqlMigration(contractCloseReportEvidenceHorizonGuardSql),
+
 	// The country a store sold each subscription row in: the App Store
 	// storefront or the Google Play region, recorded beside the price tier from
 	// now on (subscription_renewal_country_schema.go). The re-engagement
