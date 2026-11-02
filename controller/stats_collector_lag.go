@@ -78,7 +78,12 @@ var statsLagUploadP50Gauge = newStatsGaugeVec(
 
 var statsLagExtendersOfferedGauge = newStatsGauge(
 	"lag_extenders_offered",
-	"Extenders the lag.dev sample can offer now: published names, issued, delivered, placed (A4)",
+	"Extenders the lag.dev sample can offer now: published names, issued, delivered, placed and in no restart loop (A4)",
+)
+
+var statsLagExtendersRestartingGauge = newStatsGauge(
+	"lag_extenders_restarting",
+	"Extenders that serve the measurement api but the lag.dev sample leaves out now because they are in a restart loop (A4)",
 )
 
 var statsLagMeasurementRequestsGauge = newStatsGaugeVec(
@@ -175,7 +180,16 @@ func statsRefreshLag(ctx context.Context, now time.Time) {
 	statsLagDownloadP50Gauge.replace(download)
 	statsLagUploadP50Gauge.replace(upload)
 
-	statsLagExtendersOfferedGauge.set(float64(len(loadLagServing(ctx, now).extenders)))
+	serving := loadLagServing(ctx, now)
+	stable, loopsRead := lagStableServing(ctx, serving, now)
+	statsLagExtendersOfferedGauge.set(float64(len(stable.extenders)))
+	if loopsRead {
+		statsLagExtendersRestartingGauge.set(float64(len(serving.extenders) - len(stable.extenders)))
+	} else {
+		// the sample offers every serving extender, but how many are in a
+		// loop is not known, which a 0 would claim
+		statsLagExtendersRestartingGauge.unset()
+	}
 
 	stateCounts := model.CountNetworkExtenderMeasurementsByState(ctx)
 	states := make([]statsLabeledValue, 0, len(statsLagMeasurementStates))

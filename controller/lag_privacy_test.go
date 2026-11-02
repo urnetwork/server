@@ -167,7 +167,7 @@ func TestLagTrackClientFields(t *testing.T) {
 		// the extender's place is the sample's, which these tests set
 		places := map[string]*model.LagPlace{}
 		useLagAddressPlaces(t, places)
-		useIpAsnDb(t, writeTestIpAsnDb(t, geoLite2AsnDatabaseType, map[string]IpAsn{
+		useIpAsnDb(t, writeTestIpAsnDb(t, server.GeoLite2AsnDatabaseType, map[string]IpAsn{
 			"198.51.100.0/24": {Number: 64500, Organization: "Example Access"},
 		}))
 		useLagTestCityDb(t, map[string]lagTestCityBlock{
@@ -315,7 +315,7 @@ func TestLagStoresNoClientAddress(t *testing.T) {
 		// The IPv6 visitor is in 3fff::/20, the other documentation range:
 		// the release gate's suite fixture lists 2001:db8::/32 in its
 		// ip_overrides, which GetIpInfo answers before this test's GeoLite2.
-		useIpAsnDb(t, writeTestIpAsnDb(t, geoLite2AsnDatabaseType, map[string]IpAsn{
+		useIpAsnDb(t, writeTestIpAsnDb(t, server.GeoLite2AsnDatabaseType, map[string]IpAsn{
 			"203.0.113.0/24": {Number: 64500, Organization: "Example Access"},
 			"3fff::/20":      {Number: 64501, Organization: "Example Six"},
 		}))
