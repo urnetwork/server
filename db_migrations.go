@@ -11279,4 +11279,9 @@ var migrations = []any{
 	// extender whose api its probes cannot reach. A new table; apply before
 	// deploying the taskworker that writes it and the api that reads it.
 	newSqlMigration(networkExtenderMeasurementProbeSchemaSql),
+
+	// The camouflage key an extender's activation posts, and the network that
+	// posted it (connect/EXTENDER.md P6, phase 14b): two nullable columns,
+	// db_extender_camouflage_key.go.
+	extenderCamouflageKeyMigration,
 }

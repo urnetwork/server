@@ -86,6 +86,26 @@ type NetworkExtender struct {
 	// describes the same state the record does, and is never set before the
 	// name resolves.
 	MeasurementCertNotAfter *time.Time
+	// The camouflage key the extender's records carry (connect/EXTENDER.md P6,
+	// EXTENDER-UPDATE2 §3, phase 14b): the X25519 key its latest passing
+	// activation posted, nil when it posted none. A reader returns the key
+	// only while the network that posted it still holds the identity key, so
+	// a key never follows an identity to another network, whatever moved the
+	// row. RecordRealityPublicKey is what a record signs.
+	RealityPublicKey []byte
+}
+
+// The size of the camouflage key a record carries, an X25519 public key.
+const networkExtenderRealityPublicKeySize = 32
+
+// RecordRealityPublicKey is the camouflage key a record of the extender carries
+// (phase 14b): the stored key when it is an X25519 key's size, else nil, so a
+// record never carries a malformed key. The slice is the caller's.
+func (self *NetworkExtender) RecordRealityPublicKey() []byte {
+	if len(self.RealityPublicKey) != networkExtenderRealityPublicKeySize {
+		return nil
+	}
+	return slices.Clone(self.RealityPublicKey)
 }
 
 // Whether the extender may be carried by an open channel at all (R1, R4):
@@ -151,6 +171,10 @@ type NetworkExtenderProbeTarget struct {
 	IpVersion  int
 	Ip         netip.Addr
 	Carriers   []string
+	// the camouflage key the extender's records carry (phase 14b), which the
+	// probe fronts its camouflaged attempt with, so a splicing extender
+	// passes; nil when its records carry none
+	RealityPublicKey []byte
 }
 
 // One address the geo dns sets are sampled from (C5), flattened the same way
@@ -257,6 +281,12 @@ type NetworkExtenderActivation struct {
 	CityLocationId    *server.Id
 	RegionLocationId  *server.Id
 	CountryLocationId *server.Id
+	// the camouflage key the activation posted (connect/EXTENDER.md P6, phase
+	// 14b), parsed and checked by the caller, or nil for none. A passing
+	// activation stores it, with the activating network as the network that
+	// posted it, and nil clears a stored key, so the records carry what the
+	// extender's latest passing activation asked for.
+	RealityPublicKey []byte
 }
 
 // WithLocation stores the location the activating address resolved to (M1),
@@ -440,7 +470,8 @@ func getNetworkExtenderInTx(
 			revoke_time,
 			record_issue_time,
 			directory_tier,
-			COALESCE(canary_channel, '')
+			COALESCE(canary_channel, ''),
+			CASE WHEN reality_public_key_network_id = network_id THEN reality_public_key END
 		FROM network_extender
 		WHERE extender_id = $1
 		FOR UPDATE
@@ -465,6 +496,7 @@ func getNetworkExtenderInTx(
 				&e.RecordIssueTime,
 				&e.DirectoryTier,
 				&e.CanaryChannel,
+				&e.RealityPublicKey,
 			))
 			extender = e
 		}
@@ -558,6 +590,10 @@ func ActivateNetworkExtender(
 		// operator accepted that exposure (lag.dev/PLAN.md A9); the tier the
 		// row keeps is the one the record is signed into
 		var directoryTier int
+		// the camouflage key this activation stored, as a record reads it
+		// (phase 14b): the posting network is the activating one, which the
+		// upsert only ever updates the row of
+		var realityPublicKey []byte
 		result, err := tx.Query(
 			ctx,
 			`
@@ -579,9 +615,11 @@ func ActivateNetworkExtender(
 				city_location_id,
 				region_location_id,
 				country_location_id,
-				directory_tier
+				directory_tier,
+				reality_public_key,
+				reality_public_key_network_id
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true, NULL, $11, $12, $13, $14, $15, $16)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true, NULL, $11, $12, $13, $14, $15, $16, $17, $2)
 			ON CONFLICT (public_key) DO UPDATE
 			SET
 				client_id = $3,
@@ -604,9 +642,16 @@ func ActivateNetworkExtender(
 						$16 != 0
 					THEN network_extender.directory_tier
 					ELSE $16
-				END
+				END,
+				reality_public_key = $17,
+				reality_public_key_network_id = $2
 			WHERE network_extender.network_id = $2
-			RETURNING extender_id, create_time, COALESCE(canary_channel, ''), directory_tier
+			RETURNING
+				extender_id,
+				create_time,
+				COALESCE(canary_channel, ''),
+				directory_tier,
+				CASE WHEN network_extender.reality_public_key_network_id = network_extender.network_id THEN network_extender.reality_public_key END
 			`,
 			server.NewId(),
 			activation.NetworkId,
@@ -624,10 +669,11 @@ func ActivateNetworkExtender(
 			activation.RegionLocationId,
 			activation.CountryLocationId,
 			activation.DirectoryTier,
+			activation.RealityPublicKey,
 		)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
-				server.Raise(result.Scan(&extenderId, &createTime, &canaryChannel, &directoryTier))
+				server.Raise(result.Scan(&extenderId, &createTime, &canaryChannel, &directoryTier, &realityPublicKey))
 				stored = true
 			}
 		})
@@ -704,6 +750,7 @@ func ActivateNetworkExtender(
 			DirectoryTier:           directoryTier,
 			CanaryChannel:           canaryChannel,
 			MeasurementCertNotAfter: networkExtenderMeasurementCertNotAfterInTx(ctx, tx, extenderId),
+			RealityPublicKey:        realityPublicKey,
 		}
 		addresses := getActiveNetworkExtenderAddressesInTx(ctx, tx, extenderId)
 
@@ -995,7 +1042,8 @@ func GetActiveNetworkExtenderProbeTargets(ctx context.Context) []*NetworkExtende
 				network_extender.dns_tld,
 				network_extender_address.ip_version,
 				network_extender_address.ip,
-				network_extender_address.carriers
+				network_extender_address.carriers,
+				CASE WHEN network_extender.reality_public_key_network_id = network_extender.network_id THEN network_extender.reality_public_key END
 			FROM network_extender
 			INNER JOIN network_extender_address ON
 				network_extender_address.extender_id = network_extender.extender_id AND
@@ -1016,6 +1064,7 @@ func GetActiveNetworkExtenderProbeTargets(ctx context.Context) []*NetworkExtende
 					&target.IpVersion,
 					&target.Ip,
 					&carriers,
+					&target.RealityPublicKey,
 				))
 				target.Carriers = splitExtenderCarriers(carriers)
 				targets = append(targets, target)
@@ -1227,6 +1276,7 @@ func GetRandomActiveNetworkExtenders(
 				network_extender.country_code,
 				COALESCE(LOWER(derived_country.country_code::text), ''),
 				network_extender.record_issue_time,
+				CASE WHEN network_extender.reality_public_key_network_id = network_extender.network_id THEN network_extender.reality_public_key END,
 				network_extender_address.ip_version,
 				network_extender_address.ip,
 				network_extender_address.carriers,
@@ -1283,6 +1333,7 @@ func GetRandomActiveNetworkExtenders(
 					&extender.CountryCode,
 					&extender.DerivedCountryCode,
 					&extender.RecordIssueTime,
+					&extender.RealityPublicKey,
 					&address.IpVersion,
 					&address.Ip,
 					&carriers,

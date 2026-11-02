@@ -906,6 +906,8 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	[]snMainnetMigrationContract{extenderActivationRunMigrationContract},
 	// lag.dev's measurement api probes; the version follows the migration's position
 	[]snMainnetMigrationContract{extenderMeasurementProbeMigrationContract},
+	// the extender camouflage key (phase 14b), versioned by its position
+	[]snMainnetMigrationContract{extenderCamouflageKeyMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an

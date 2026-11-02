@@ -433,9 +433,19 @@ func Testing_SetExtenderForwardProbeRootCAs(rootCAs *x509.CertPool) (restore fun
 
 type ExtenderActivateArgs struct {
 	PublicKeyHex string `json:"public_key_hex"`
-	TcpPort      int    `json:"tcp_port"`
-	UdpPort      int    `json:"udp_port"`
-	DnsPort      int    `json:"dns_port"`
+	// the hex X25519 static public key of the extender's tcp camouflage
+	// (connect/EXTENDER.md P1, P6; EXTENDER-UPDATE2 §3, phase 14b), which a
+	// client fronts its camouflaged hello with. A passing activation stores
+	// it and every record of the extender then carries it, while the network
+	// that posted it holds the identity key. Empty, an extender with
+	// camouflage off, clears a stored key. A key that is not a usable X25519
+	// key is refused before anything is probed. Nothing here proves the
+	// extender holds the private half: in Phase A the probe passes over the
+	// legacy attempt whatever the key.
+	RealityPublicKeyHex string `json:"reality_public_key_hex,omitempty"`
+	TcpPort             int    `json:"tcp_port"`
+	UdpPort             int    `json:"udp_port"`
+	DnsPort             int    `json:"dns_port"`
 	// every dns port the caller is listening on, each probed on its own (L2).
 	// Empty offers DnsPort alone, which is what an extender that predates the
 	// list sends.
@@ -738,7 +748,9 @@ func SignExtenderRecord(
 		// the extender's id while it serves the lag.dev measurement api, from
 		// which a reader computes its measurement name (lag.dev/PLAN.md C10)
 		MeasurementId: extenderMeasurementId(config, extender, addresses, issueTime),
-		// the camouflage key, once the server stores it (14b)
+		// the camouflage key the extender's latest passing activation posted,
+		// while the posting network holds the key (connect/EXTENDER.md P6,
+		// phase 14b); nil when it posted none
 		RealityPublicKey: extenderRecordRealityPublicKey(extender),
 	}
 	// what a client must declare before a release hands the record out
@@ -1031,6 +1043,12 @@ func (self *extenderActivateService) activate(
 	if err != nil {
 		return refuse(fmt.Sprintf("the extender public key is not readable: %s", err))
 	}
+	// the camouflage key the records are to carry (phase 14b), checked like
+	// every other argument, before anything is probed or spent
+	realityPublicKey, err := parseExtenderActivateRealityPublicKey(args.RealityPublicKeyHex)
+	if err != nil {
+		return refuse(fmt.Sprintf("the extender camouflage key is not readable: %s", err))
+	}
 
 	carriers := []string{}
 	for _, carrier := range args.Carriers {
@@ -1296,7 +1314,12 @@ func (self *extenderActivateService) activate(
 			connectMode connect.ExtenderConnectMode,
 			port int,
 		) error {
-			_, err := connect.ProbeExtenderCarrier(
+			// a splicing (Phase B) extender sends a legacy hello to its
+			// borrowed site, so the tcp probe also runs the camouflaged
+			// attempt with the posted key (connect
+			// net_extender_camouflage_probe.go); it passes on either attempt
+			// and claims nothing about the key
+			_, err := connect.ProbeExtenderCarrierWithCamouflageKey(
 				ctx,
 				connectSettings,
 				clientIp,
@@ -1305,19 +1328,21 @@ func (self *extenderActivateService) activate(
 				dnsTld,
 				serverName,
 				publicKey,
+				realityPublicKey,
 				apiHost,
 				ExtenderProbeDestinationPort,
 			)
 			return err
 		},
 		forward: func(ctx context.Context) (string, error) {
-			return connect.ProbeExtenderForward(
+			return connect.ProbeExtenderForwardWithCamouflageKey(
 				ctx,
 				connectSettings,
 				clientIp,
 				tcpPort,
 				serverName,
 				publicKey,
+				realityPublicKey,
 				config.ApiUrl,
 				extenderForwardProbeTlsConfig(),
 			)
@@ -1431,6 +1456,9 @@ func (self *extenderActivateService) activate(
 			RunId:        runId,
 			RunStartTime: runStartTime,
 			PreviousExit: previousExit,
+			// stored only by this passing activation, for the network that
+			// holds the key (phase 14b)
+			RealityPublicKey: realityPublicKey,
 		}).WithLocation(activationLocation),
 		func(
 			extender *model.NetworkExtender,
