@@ -441,6 +441,7 @@
           "legendFormat": "{{target_kind}} → {{level}}"
         }
       ]
-    }
+    },
+    {"id": 63, "type": "timeseries", "title": "FindProviders2 strict window handover override for apps", "description": "The override of the apps' strict window handover that the api processes of each block put on their find-providers2 answers, as the Redis move control's windowStrictHandover last set it (controller/window_strict_handover_control.go): -1 off, 0 none and 1 on, where none and on both leave each app's own setting. Lowest and highest across the block's processes, which agree within the 10 s control refresh. Apps take it at their next listing; hosted proxy devices never see it.", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 233}, "datasource": {"type": "prometheus", "uid": "warp-mimir"}, "fieldConfig": {"defaults": {"unit": "short", "min": -1, "max": 1, "decimals": 0}, "overrides": []}, "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}}, "targets": [{"refId": "A", "expr": "min by (block) (urnetwork_api_window_strict_handover_override{env=\"$env\",service=\"api\",block=~\"$block\",host=~\"$host\",instance!=\"\"})", "legendFormat": "lowest {{block}}"}, {"refId": "B", "expr": "max by (block) (urnetwork_api_window_strict_handover_override{env=\"$env\",service=\"api\",block=~\"$block\",host=~\"$host\",instance!=\"\"})", "legendFormat": "highest {{block}}"}]}
   ]
 }

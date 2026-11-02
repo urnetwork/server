@@ -324,8 +324,22 @@ func newRouterWithStuckProviderSignals(
 	// nil while the ceiling is off
 	block, _ := server.Block()
 	stuckProviders := controller.NewStuckProviderSignals(routeCtx, stuckProviderSettings, block)
-	owners := routeOwners{notifications: notifications, appearances: appearances, stuckProviders: stuckProviders}
+	// FindProviders2 answers served here carry the platform's override of the
+	// apps' strict window handover, as the Redis control last set it
+	windowStrictHandover := controller.NewWindowStrictHandoverControl(routeCtx, controller.DefaultWindowStrictHandoverControlSettings())
+	owners := routeOwners{
+		notifications:        notifications,
+		appearances:          appearances,
+		stuckProviders:       stuckProviders,
+		windowStrictHandover: windowStrictHandover,
+	}
 	return router.NewRouter(routeCtx, routesWithReservedAttemptUpload(reservedUpload, owners)),
-		func() { notifications.Close(); appearances.Close(); stuckProviders.Close(); reservedUpload.Close() },
+		func() {
+			notifications.Close()
+			appearances.Close()
+			stuckProviders.Close()
+			windowStrictHandover.Close()
+			reservedUpload.Close()
+		},
 		nil
 }

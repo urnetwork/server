@@ -27,6 +27,13 @@
 //   - `stuckProviderRecycle`: the connect blocks whose exchanges recycle a
 //     reported provider they host (connect client_recycle.go): off, all, or
 //     blocks, as `localTransport`. Read by the exchanges, not by the mover.
+//   - `windowStrictHandover`: the platform's override of the apps' strict
+//     window handover (connect `MultiClientSettings.StrictWindowHandover`),
+//     which every find-providers2 answer the api serves over http carries as
+//     `window_strict_handover` (controller window_strict_handover_control.go):
+//     off turns the handover off in the apps from their next listing, and on
+//     leaves each app's own setting; true or false, 1 or 0, on or off. Read by
+//     the api processes. Hosted devices discover in process and never see it.
 //
 // The control can only narrow the code settings, never widen them:
 //   - the mode never goes above what `EnableMove` allows. `MoveDefaultMode` is
@@ -47,13 +54,17 @@
 //     `EnableStuckProviderRecycle`, with `StuckProviderSignalDefault` and
 //     `StuckProviderRecycleDefault` as their choices while the control sets
 //     none.
+//   - `windowStrictHandover` can turn the apps' handover off, never on past an
+//     app's own setting.
 //
 // A field that does not parse narrows as far as it can: mode off,
 // maxPerMinute 0, an infinite tolerance (no balance sources), drain moves off,
 // placement off, transport delay off. A `localTransport`,
 // `stuckProviderSignal` or `stuckProviderRecycle` list names only the blocks
 // it lists, so a value that is neither off nor all and names no real block
-// turns its switch off everywhere.
+// turns its switch off everywhere. A `windowStrictHandover` that does not
+// parse overrides nothing, as an absent one does: the field is an off switch
+// whose default is each app's own setting.
 // An absent key or field leaves the code default. A reader that cannot read
 // the control acts as if the mode were off (the mover does); the connect
 // handlers keep the transport delay of their last read, and the exchanges
@@ -85,6 +96,8 @@ const (
 
 	ConnectMoveControlFieldStuckProviderSignal  = "stuckProviderSignal"
 	ConnectMoveControlFieldStuckProviderRecycle = "stuckProviderRecycle"
+
+	ConnectMoveControlFieldWindowStrictHandover = "windowStrictHandover"
 )
 
 // The values of a block list field (`localTransport`, `stuckProviderSignal`,
@@ -211,6 +224,9 @@ type ConnectMoveControl struct {
 	// The connect blocks that recycle reported providers, when not all. Empty
 	// for none.
 	StuckProviderRecycleBlocks map[string]bool
+	// The platform's override of the apps' strict window handover: false turns
+	// it off, true leaves each app's own setting. Nil overrides nothing.
+	WindowStrictHandover *bool
 }
 
 // Whether the exchanges of block deliver transports in process.
@@ -310,6 +326,13 @@ func NarrowConnectMoveControl(fields map[string]string, ceiling ConnectMoveContr
 			recycleValue = ceiling.StuckProviderRecycleDefault
 		}
 		control.StuckProviderRecycleAll, control.StuckProviderRecycleBlocks = parseConnectControlBlocks(recycleValue)
+	}
+
+	if value, ok := fields[ConnectMoveControlFieldWindowStrictHandover]; ok {
+		// a value that does not parse overrides nothing
+		if windowStrictHandover, parsed := parseConnectMoveControlBool(value); parsed {
+			control.WindowStrictHandover = &windowStrictHandover
+		}
 	}
 
 	if !ceiling.EnableMove {

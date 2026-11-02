@@ -444,3 +444,41 @@ func TestConnectMoveControlInRedis(t *testing.T) {
 		}
 	})
 }
+
+// The platform's override of the apps' strict window handover: true or false,
+// 1 or 0, on or off, and a value that does not parse overrides nothing, as an
+// absent field does, so the off switch defaults to each app's own setting. It
+// reads no ceiling and changes nothing the mover reads.
+func TestConnectMoveControlWindowStrictHandover(t *testing.T) {
+	off, on := false, true
+	cases := []struct {
+		name     string
+		fields   map[string]string
+		override *bool
+	}{
+		{name: "absent", fields: nil, override: nil},
+		{name: "other fields keep none", fields: map[string]string{"mode": "on", "placement": "off"}, override: nil},
+		{name: "off", fields: map[string]string{"windowStrictHandover": "off"}, override: &off},
+		{name: "false", fields: map[string]string{"windowStrictHandover": "false"}, override: &off},
+		{name: "0, padded", fields: map[string]string{"windowStrictHandover": " 0 "}, override: &off},
+		{name: "on", fields: map[string]string{"windowStrictHandover": "on"}, override: &on},
+		{name: "true", fields: map[string]string{"windowStrictHandover": "true"}, override: &on},
+		{name: "1", fields: map[string]string{"windowStrictHandover": "1"}, override: &on},
+		{name: "a value that does not parse overrides nothing", fields: map[string]string{"windowStrictHandover": "disabled"}, override: nil},
+		{name: "an empty value overrides nothing", fields: map[string]string{"windowStrictHandover": ""}, override: nil},
+		{name: "a field name is exact", fields: map[string]string{"windowstricthandover": "off"}, override: nil},
+	}
+	for _, c := range cases {
+		for _, ceiling := range []ConnectMoveControlCeiling{{}, connectMoveTestCeiling()} {
+			control := NarrowConnectMoveControl(c.fields, ceiling)
+			if (control.WindowStrictHandover == nil) != (c.override == nil) ||
+				(c.override != nil && *control.WindowStrictHandover != *c.override) {
+				t.Errorf("%s: override = %v, want %v", c.name, control.WindowStrictHandover, c.override)
+			}
+		}
+	}
+	moves := NarrowConnectMoveControl(map[string]string{"mode": "on", "windowStrictHandover": "off"}, connectMoveTestCeiling())
+	if moves.Mode != ConnectMoveModeOn || moves.MaxPerMinute != 120 || moves.Tolerance != 0.10 || !moves.DrainMoves {
+		t.Errorf("the handover override changed the mover's control: %+v", moves)
+	}
+}
