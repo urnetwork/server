@@ -75,18 +75,30 @@ var contractCloseEvidenceMoveGuardMigrationVersion = server.ContractCloseEvidenc
 // has its copy; every leaf carries the row guard's clone and its own TRUNCATE
 // guard; no foreign key exists on the parent or a leaf; and the only unique
 // indexes are the key and, on the leaves, its attached copies.
-var contractCloseEvidenceMoveArtifactQuery = `(` +
-	migrationContractTable("contract_close_report_evidence") + ` AND ` +
-	financialColumnsArtifact("contract_close_report_evidence", `('client_id','uuid','NO',NULL),('report_id','uuid','NO',NULL),('contract_id','uuid','NO',NULL),('party','character varying','NO',NULL),('acked_byte_count','bigint','NO',NULL),('unacked_byte_count','numeric','NO',NULL),('checkpoint','boolean','NO',NULL),('accepted_at','timestamp without time zone','NO',NULL),('original_report','bytea','YES',NULL),('original_key_registration','bytea','YES',NULL),('original_key_issue','character varying','NO','''''::character varying'),('original_inventory','bytea','YES',NULL)`) + ` AND ` +
-	financialConstraintsArtifact("contract_close_report_evidence", `('PRIMARY KEY (client_id, report_id)'),('CHECK (((party)::text = ANY ((ARRAY[''source''::character varying, ''destination''::character varying])::text[])))'),('CHECK ((acked_byte_count >= 0))'),('CHECK (((unacked_byte_count >= (0)::numeric) AND (unacked_byte_count <= ''18446744073709551615''::numeric)))'),('CHECK (((original_report IS NULL) OR ((octet_length(original_report) >= 1) AND (octet_length(original_report) <= 1024))))'),('CHECK (((original_key_registration IS NULL) OR ((octet_length(original_key_registration) >= 1) AND (octet_length(original_key_registration) <= 8192))))'),('CHECK (((original_key_issue)::text = ANY ((ARRAY[''''::character varying, ''history_not_found''::character varying, ''history_capacity''::character varying, ''history_read_unavailable''::character varying])::text[])))'),('CHECK ((((original_key_issue)::text = ''''::text) OR ((original_report IS NOT NULL) AND (original_key_registration IS NULL))))'),('CHECK (((original_key_registration IS NULL) OR (original_report IS NOT NULL)))'),('CHECK (((original_inventory IS NULL) OR ((octet_length(original_inventory) >= 1) AND (octet_length(original_inventory) <= 1024))))'),('CHECK (((original_inventory IS NULL) OR (original_report IS NOT NULL)))')`) + ` AND ` +
-	`EXISTS(SELECT 1 FROM pg_index i JOIN pg_class index_relation ON index_relation.oid=i.indexrelid
+var contractCloseEvidenceMoveArtifactQuery = contractCloseEvidencePartitionedCustodyArtifact(server.ContractCloseEvidenceMoveGuardBodySql())
+
+// The version of the migration whose guard keeps retention deletes to the
+// shortest contract horizon, 35 days (owner, 2026-11-01), found by its SQL.
+var contractCloseEvidenceHorizonGuardMigrationVersion = server.ContractCloseEvidenceHorizonGuardMigrationVersion()
+
+// The horizon guard replaces only the guard body and republishes the custody
+// of the move guard in either layout.
+var contractCloseEvidenceHorizonArtifactQuery = contractCloseEvidencePartitionedCustodyArtifact(server.ContractCloseEvidenceHorizonGuardBodySql())
+
+// The evidence custody in either layout with guardBody as both guards' body.
+func contractCloseEvidencePartitionedCustodyArtifact(guardBody string) string {
+	return `(` +
+		migrationContractTable("contract_close_report_evidence") + ` AND ` +
+		financialColumnsArtifact("contract_close_report_evidence", `('client_id','uuid','NO',NULL),('report_id','uuid','NO',NULL),('contract_id','uuid','NO',NULL),('party','character varying','NO',NULL),('acked_byte_count','bigint','NO',NULL),('unacked_byte_count','numeric','NO',NULL),('checkpoint','boolean','NO',NULL),('accepted_at','timestamp without time zone','NO',NULL),('original_report','bytea','YES',NULL),('original_key_registration','bytea','YES',NULL),('original_key_issue','character varying','NO','''''::character varying'),('original_inventory','bytea','YES',NULL)`) + ` AND ` +
+		financialConstraintsArtifact("contract_close_report_evidence", `('PRIMARY KEY (client_id, report_id)'),('CHECK (((party)::text = ANY ((ARRAY[''source''::character varying, ''destination''::character varying])::text[])))'),('CHECK ((acked_byte_count >= 0))'),('CHECK (((unacked_byte_count >= (0)::numeric) AND (unacked_byte_count <= ''18446744073709551615''::numeric)))'),('CHECK (((original_report IS NULL) OR ((octet_length(original_report) >= 1) AND (octet_length(original_report) <= 1024))))'),('CHECK (((original_key_registration IS NULL) OR ((octet_length(original_key_registration) >= 1) AND (octet_length(original_key_registration) <= 8192))))'),('CHECK (((original_key_issue)::text = ANY ((ARRAY[''''::character varying, ''history_not_found''::character varying, ''history_capacity''::character varying, ''history_read_unavailable''::character varying])::text[])))'),('CHECK ((((original_key_issue)::text = ''''::text) OR ((original_report IS NOT NULL) AND (original_key_registration IS NULL))))'),('CHECK (((original_key_registration IS NULL) OR (original_report IS NOT NULL)))'),('CHECK (((original_inventory IS NULL) OR ((octet_length(original_inventory) >= 1) AND (octet_length(original_inventory) <= 1024))))'),('CHECK (((original_inventory IS NULL) OR (original_report IS NOT NULL)))')`) + ` AND ` +
+		`EXISTS(SELECT 1 FROM pg_index i JOIN pg_class index_relation ON index_relation.oid=i.indexrelid
  WHERE i.indrelid=to_regclass('public.contract_close_report_evidence')
  AND i.indexrelid=to_regclass('public.contract_close_original_census') AND i.indisvalid AND i.indisready
  AND regexp_replace(pg_get_indexdef(i.indexrelid), '^(CREATE (UNIQUE )?INDEX \S+ ON )ONLY ', '\1')='CREATE INDEX contract_close_original_census ON public.contract_close_report_evidence USING btree (contract_id, client_id, report_id)') AND ` +
-	migrationIndexRemoved("contract_close_report_evidence", "contract_close_report_evidence_contract") + ` AND ` +
-	financialGuardArtifact("contract_close_report_evidence", "contract_close_report_evidence_guard", "contract_close_report_evidence_guard", server.ContractCloseEvidenceMoveGuardBodySql(), 27) + ` AND ` +
-	financialGuardArtifact("contract_close_report_evidence", "contract_close_report_evidence_truncate_guard", "contract_close_report_evidence_guard", server.ContractCloseEvidenceMoveGuardBodySql(), 34) + ` AND ` +
-	migrationContractLeafTriggers("contract_close_report_evidence", "contract_close_report_evidence_guard", "contract_close_report_evidence_truncate_guard") + ` AND
+		migrationIndexRemoved("contract_close_report_evidence", "contract_close_report_evidence_contract") + ` AND ` +
+		financialGuardArtifact("contract_close_report_evidence", "contract_close_report_evidence_guard", "contract_close_report_evidence_guard", guardBody, 27) + ` AND ` +
+		financialGuardArtifact("contract_close_report_evidence", "contract_close_report_evidence_truncate_guard", "contract_close_report_evidence_guard", guardBody, 34) + ` AND ` +
+		migrationContractLeafTriggers("contract_close_report_evidence", "contract_close_report_evidence_guard", "contract_close_report_evidence_truncate_guard") + ` AND
  EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='contract_close_report_evidence' AND column_name='party' AND character_maximum_length=16) AND
  EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='contract_close_report_evidence' AND column_name='unacked_byte_count' AND numeric_precision=20 AND numeric_scale=0) AND
  EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='contract_close_report_evidence' AND column_name='original_key_issue' AND character_maximum_length=64) AND
@@ -99,3 +111,4 @@ var contractCloseEvidenceMoveArtifactQuery = `(` +
  WHERE tree.relid<>to_regclass('public.contract_close_report_evidence') AND i.indisunique
  AND NOT EXISTS(SELECT 1 FROM pg_inherits attached WHERE attached.inhrelid=i.indexrelid
  AND attached.inhparent=to_regclass('public.contract_close_report_evidence_pkey'))))`
+}

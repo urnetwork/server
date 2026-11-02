@@ -7,6 +7,7 @@ import (
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 	"github.com/urnetwork/server/task"
 )
@@ -18,7 +19,9 @@ import (
 // downtime its first run catches up at once. The retention chain analyzes the
 // parents and closed leaves and retires expired ranges, carrying each family's
 // resume state from run to run. A family with its own task leaves either part
-// to it (AnalyzeByOwnTask, RetireByOwnTask).
+// to it (AnalyzeByOwnTask, RetireByOwnTask). The close evidence weeks expire at
+// the contract horizon, read from the horizon reaper's control once per run
+// (model.WithContractHorizonControl).
 
 // Cadences and budgets of the two chains.
 type PartitionRegistryTaskSettings struct {
@@ -136,7 +139,7 @@ func MaintainPartitionRetention(
 	clientSession *session.ClientSession,
 ) (*MaintainPartitionRetentionResult, error) {
 	report, state := server.MaintainPartitionRetention(
-		clientSession.Ctx,
+		model.WithContractHorizonControl(clientSession.Ctx),
 		server.NowUtc(),
 		maintainPartitionRetention.State,
 		DefaultPartitionRegistryTaskSettings().RetentionBudget,
