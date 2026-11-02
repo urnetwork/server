@@ -324,7 +324,7 @@ The owner approved an edge-2 disk reclaim plan:
 - REINDEX CONCURRENTLY of the bloated partial indexes and of network_client's;
 - partitioning provider_egress_health_history;
 - VACUUM FULL of the queue tables in no-dump windows;
-- client_reliability back to 21-day retention, with the subsidy-payment pin removed;
+- client_reliability back to 21-day retention, with the subsidy-payment pin removed (the owner moved it to 14 days on 2026-11-02);
 - a 91-day contract row reaper.
 
 All of these are being built, with a runbook to follow.
@@ -360,7 +360,7 @@ The reaper merged on 11-01 (7334b3a17) at the owner's 91 days, and `horizonDays`
 | Provider stats (`/stats/provider-last-n`, `/stats/providers-overview-last-n`, the legacy `-last-90` routes) and provider payout stats | contracts joined to closes; sweeps by sweep time | up to 366 days | undercount the days older than 35 |
 | `/transfer/stats` | unpaid sweeps | all time | `unpaid_bytes_provided` falls as post-cutoff sweeps pass 35 days |
 
-The disk analysis put block points at 37 days: a 7-day block plus reliability retention stretched to 30 days. That stretch was the subsidy-epoch frontier, which the owner retired on 10-31, so an award now fails closed once its window is 21 days old. Its real exposure is late settlement: a dispute resolved, or a legacy settlement committed, weeks after the close puts an unpaid sweep in a recent block, and no horizon covers that. Before this change, a 91-day reaper could delete such a contract too.
+The disk analysis put block points at 37 days: a 7-day block plus reliability retention stretched to 30 days. That stretch was the subsidy-epoch frontier, which the owner retired on 10-31, so an award now fails closed once its window is 14 days old (21 until 2026-11-02). Its real exposure is late settlement: a dispute resolved, or a legacy settlement committed, weeks after the close puts an unpaid sweep in a recent block, and no horizon covers that. Before this change, a 91-day reaper could delete such a contract too.
 
 **The block points keep rule (`block_points`).** A contract stays while any unpaid sweep of it has a sweep time inside the window of a block an award can still read (`OperatorBlockPointsPendingWindows`):
 - The candidate blocks run from the cutoff's block through the one after the open block (a sweep can commit there while a run holds the list). Each has traffic past the cutoff and a reliability window inside retention, by the predicate the award checks (`operatorBlockReliabilityRetained`).
@@ -368,7 +368,7 @@ The disk analysis put block points at 37 days: a 7-day block plus reliability re
 - The windows are the award's own, clamped to the cutoff.
 - The list is read once a run. An award committed since only keeps more.
 - A block's retention is judged at the start of the oldest award that can still be reading, `OperatorBlockPointsMaxTime` (12 hours) and an hour before the run. The award checks retention again on the clock after its reads, so one that outlives the block's retention fails closed.
-- A contract leaves once its block is awarded, or once the block's reliability is past retention for every award that can still be running. That is at most 21 days and 13 hours after the block opened.
+- A contract leaves once its block is awarded, or once the block's reliability is past retention for every award that can still be running. That is at most 14 days and 13 hours after the block opened.
 - It is a new reason on `urnetwork_contract_horizon_protected_contracts_total`, one more series, last in the classification order but for `payment_review`.
 
 **The rollup guard (`TransferAuditRollupFirstDay`).** A rollup never writes a day before the first whole day 33 days back: the 35-day floor less a 2-day margin, since one day's read can take most of a day at Main's churn while the reaper's horizon advances. The row of an earlier day was written while all of its contracts were present, and a re-roll would replace it with a sum of what the reaper left.
