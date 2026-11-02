@@ -752,6 +752,93 @@ func NetworkStripeBillingCountry(ctx context.Context, networkId server.Id) (coun
 	return strings.ToUpper(strings.TrimSpace(country))
 }
 
+// NetworkClientContext is what a network's own clients last reported about
+// themselves, read when its onboarding row is missing or lacks a part: the
+// platform and the locale of its newest client events (POST /client/events,
+// sent by the apps since 2026-09-09), and the device spec its newest client's
+// app last sent on auth-client, each with when it was reported. Nothing here
+// comes from an IP.
+type NetworkClientContext struct {
+	EventPlatform   string
+	EventPlatformAt *time.Time
+	EventLocale     string
+	EventLocaleAt   *time.Time
+	// the device of the network's newest client, and that client's last
+	// authentication or connection
+	DeviceSpec   string
+	DeviceSpecAt *time.Time
+}
+
+// GetNetworkClientContext reads the newest client-reported platform and locale
+// (client events only: the server's own events carry the platform it was
+// told) and the newest client's device spec. Each part is one backward read
+// of a per-network index.
+func GetNetworkClientContext(ctx context.Context, networkId server.Id) *NetworkClientContext {
+	c := &NetworkClientContext{}
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT
+					event_platform.platform,
+					event_platform.at,
+					event_locale.locale,
+					event_locale.at,
+					newest_device.device_spec,
+					newest_device.auth_time
+				FROM (SELECT 1) one
+				LEFT JOIN LATERAL (
+					SELECT platform, at FROM network_onboarding_event
+					WHERE network_id = $1 AND name = ANY($2::text[]) AND platform <> ''
+					ORDER BY at DESC
+					LIMIT 1
+				) event_platform ON true
+				LEFT JOIN LATERAL (
+					SELECT locale, at FROM network_onboarding_event
+					WHERE network_id = $1 AND name = ANY($2::text[]) AND locale <> ''
+					ORDER BY at DESC
+					LIMIT 1
+				) event_locale ON true
+				LEFT JOIN LATERAL (
+					SELECT device.device_spec, newest.auth_time
+					FROM (
+						SELECT device_id, auth_time FROM network_client
+						WHERE network_id = $1 AND device_id IS NOT NULL
+						ORDER BY create_time DESC
+						LIMIT 1
+					) newest
+					INNER JOIN device ON device.device_id = newest.device_id
+				) newest_device ON true
+			`,
+			networkId,
+			ClientEventNames(),
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				var eventPlatform, eventLocale, deviceSpec *string
+				server.Raise(result.Scan(
+					&eventPlatform,
+					&c.EventPlatformAt,
+					&eventLocale,
+					&c.EventLocaleAt,
+					&deviceSpec,
+					&c.DeviceSpecAt,
+				))
+				if eventPlatform != nil {
+					c.EventPlatform = *eventPlatform
+				}
+				if eventLocale != nil {
+					c.EventLocale = *eventLocale
+				}
+				if deviceSpec != nil {
+					c.DeviceSpec = *deviceSpec
+				}
+			}
+		})
+	})
+	return c
+}
+
 // ----- consent evidence and suppression (account_preferences) -----
 
 // NetworkMailState is the network's product-updates preference, how it was
@@ -810,47 +897,48 @@ func SetNetworkProductUpdatesSource(ctx context.Context, networkId server.Id, so
 	})
 }
 
-// SuppressNetworkMarketing stops every campaign's mail to the network. The
+// SuppressNetworkMarketingInTx stops every campaign's mail to the network. The
 // first suppression's time and reason stay.
-func SuppressNetworkMarketing(ctx context.Context, networkId server.Id, reason string, now time.Time) {
-	server.Tx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-				INSERT INTO account_preferences (network_id, product_updates, marketing_suppressed_at, marketing_suppressed_reason)
-				VALUES ($1, true, $3, $2)
-				ON CONFLICT (network_id) DO UPDATE SET
-					marketing_suppressed_at = COALESCE(account_preferences.marketing_suppressed_at, $3),
-					marketing_suppressed_reason = CASE
-						WHEN account_preferences.marketing_suppressed_at IS NULL THEN $2
-						ELSE account_preferences.marketing_suppressed_reason
-					END
-			`,
-			networkId,
-			reason,
-			now,
-		))
-	})
+//
+// Callers use controller.SuppressNetworkMarketing, which mirrors the
+// suppression to Brevo's lists in the same transaction.
+func SuppressNetworkMarketingInTx(tx server.PgTx, ctx context.Context, networkId server.Id, reason string, now time.Time) {
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			INSERT INTO account_preferences (network_id, product_updates, marketing_suppressed_at, marketing_suppressed_reason)
+			VALUES ($1, true, $3, $2)
+			ON CONFLICT (network_id) DO UPDATE SET
+				marketing_suppressed_at = COALESCE(account_preferences.marketing_suppressed_at, $3),
+				marketing_suppressed_reason = CASE
+					WHEN account_preferences.marketing_suppressed_at IS NULL THEN $2
+					ELSE account_preferences.marketing_suppressed_reason
+				END
+		`,
+		networkId,
+		reason,
+		now,
+	))
 }
 
-// LiftNetworkMarketingSuppression clears a suppression whose reason is in
+// LiftNetworkMarketingSuppressionInTx clears a suppression whose reason is in
 // `liftable` (a connection renews the relationship after a sunset; a bounce,
 // complaint or unsubscribe never lifts). Returns whether it lifted.
-func LiftNetworkMarketingSuppression(ctx context.Context, networkId server.Id, liftable []string) (lifted bool) {
-	server.Tx(ctx, func(tx server.PgTx) {
-		tag := server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-				UPDATE account_preferences
-				SET marketing_suppressed_at = NULL, marketing_suppressed_reason = ''
-				WHERE network_id = $1 AND marketing_suppressed_at IS NOT NULL AND marketing_suppressed_reason = ANY($2::text[])
-			`,
-			networkId,
-			liftable,
-		))
-		lifted = 0 < tag.RowsAffected()
-	})
-	return
+//
+// Callers use controller.LiftNetworkMarketingSuppression, which mirrors the
+// lift to Brevo's lists in the same transaction.
+func LiftNetworkMarketingSuppressionInTx(tx server.PgTx, ctx context.Context, networkId server.Id, liftable []string) (lifted bool) {
+	tag := server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			UPDATE account_preferences
+			SET marketing_suppressed_at = NULL, marketing_suppressed_reason = ''
+			WHERE network_id = $1 AND marketing_suppressed_at IS NOT NULL AND marketing_suppressed_reason = ANY($2::text[])
+		`,
+		networkId,
+		liftable,
+	))
+	return 0 < tag.RowsAffected()
 }
 
 // ListLiftableSuppressedNetworksConnectedOn are networks suppressed for a

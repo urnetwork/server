@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"errors"
 
 	"github.com/urnetwork/server"
@@ -72,4 +73,27 @@ func GetStripeCustomer(
 
 	return
 
+}
+
+// CreateStripeCustomerForNetwork is CreateStripeCustomer without a session:
+// the re-engagement program's W1 step makes the customer a win-back promotion
+// code is restricted to before the network signs in again.
+func CreateStripeCustomerForNetwork(ctx context.Context, networkId server.Id, stripeCustomerId string) (err error) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		tag := server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				INSERT INTO stripe_customer
+				(network_id, stripe_customer_id)
+				VALUES ($1, $2)
+				ON CONFLICT DO NOTHING
+			`,
+			networkId,
+			stripeCustomerId,
+		))
+		if tag.RowsAffected() == 0 {
+			err = errors.New("stripe_customer already exists")
+		}
+	})
+	return
 }

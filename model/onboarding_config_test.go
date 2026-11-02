@@ -14,6 +14,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/onboarding"
+	"github.com/urnetwork/server/reengagement"
 )
 
 func testExperiment(id string, allocation map[string]float64, variants ...string) *OnboardingExperiment {
@@ -395,6 +396,50 @@ func TestReengagementConfigFile(t *testing.T) {
 	for _, e := range c.Experiments {
 		connect.AssertEqual(t, true, strings.HasPrefix(e.Surface, "reengagement."))
 	}
+
+	// the comeback offer, once the config carries it: the accepted shape,
+	// shipped off, keeping the rule over every offer at every price tier of
+	// the shipped pro.yml against the shipped welcome offer
+	w := c.WinbackOffer
+	if w.Plan == "" && !w.Enabled {
+		return
+	}
+	connect.AssertEqual(t, PlanMonthly, w.Plan)
+	connect.AssertEqual(t, 50, w.PercentOff)
+	connect.AssertEqual(t, 14, w.ValidityDays)
+	connect.AssertEqual(t, "winback_monthly_50", w.StripeCouponId)
+	connect.AssertEqual(t, "winback-monthly-50", w.PlayOfferTag)
+	if w.AppleOfferUrl != "" {
+		connect.AssertEqual(t, w.AppleOfferUrl, c.WinbackAppleOfferUrl())
+	}
+	welcomePercentOff := 25
+	if data, err := os.ReadFile(filepath.Join(root, "main", "onboarding.yml")); err == nil {
+		var onboarding onboardingYaml
+		connect.AssertEqual(t, nil, yaml.Unmarshal(data, &onboarding))
+		welcomePercentOff = onboarding.Onboarding.Offer.PercentOff
+	}
+	if data, err := os.ReadFile(filepath.Join(root, "all", "pro.yml")); err == nil {
+		var pro proConfigYaml
+		connect.AssertEqual(t, nil, yaml.Unmarshal(data, &pro))
+		tiers := parseProPriceTiers(pro.Pro.PriceTiers)
+		connect.AssertEqual(t, true, 1 < len(tiers))
+		enabled := *c
+		enabled.WinbackOffer.Enabled = true
+		connect.AssertEqual(t, "", enabled.winbackOfferRefusal(welcomePercentOff, tiers))
+	}
+	// the W experiment: a holdout, and the mailed split offer against none
+	var winback *OnboardingExperiment
+	for _, e := range c.Experiments {
+		if e.Surface == ExperimentSurfaceReengagementWinback {
+			winback = e
+		}
+	}
+	if winback == nil {
+		t.Fatal("winback_offer is configured without the W experiment")
+	}
+	connect.AssertEqual(t, 20.0, winback.Allocation[ExperimentVariantHoldout])
+	connect.AssertEqual(t, winback.Allocation[reengagement.ArmControl], winback.Allocation[reengagement.ArmOffer])
+	connect.AssertEqual(t, 80.0, winback.Allocation[reengagement.ArmControl]+winback.Allocation[reengagement.ArmOffer])
 }
 
 func TestCountryCodeFromStorefront(t *testing.T) {
