@@ -3250,8 +3250,19 @@ result record, `egress-health: provider=<id> ok=48/50 ... failed=cachefly,reddit
 (qualityprobe/prober), names in `failed=` the destinations one provider failed
 in a measurement that ran. It is the measurement working, judged by §2.19b
 `egress-site-pool` and §2.23 `egress-outcomes`, not an error of the emitting
-Taskworker, and it stays out of `novel` by its `ok=<n>/<n>` tally. The
-prober's `did not run` and `skipped` lines carry no tally and stay eligible.
+Taskworker. Only a complete recognized producer record stays out of `novel`;
+a tally embedded in unrelated text or followed by an unknown error does not.
+The prober's `did not run` and `skipped` lines stay eligible. The two explicit
+unmeasured-result suffixes remain measurement diagnostics, without proving a
+provider outcome. Admission accepts ordered known summary fields, canonical
+bounded counters, fixed failure stages and safe comma-separated name tokens.
+The producer does not escape arbitrary destination names, so ambiguous names,
+unknown classes/fields and future schema variants stay novel-eligible pending
+source review; this conservative boundary can produce a format false positive.
+Known taxonomy classes retain precedence, owner projection and replay rules.
+This is a classifier boundary, not evidence of an operational occurrence or
+provider health. The composed control verified the substring counterexample against the original
+classifier and passed with the corrected classifier in normal and race runs.
 On 2026-10-18 these records were Main's top novel shape (46/min of 178/min
 across 21 shapes), so the alert's sample showed a provider's DNS timeout
 instead of the unclassified errors beside it. Controls:
