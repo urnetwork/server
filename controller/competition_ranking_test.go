@@ -54,6 +54,7 @@ func newCompetitionRankingFixture(t testing.TB, staging bool) *competitionRankin
 func (self *competitionRankingFixture) addJob(t testing.TB) *queuedJob {
 	t.Helper()
 	self.now = self.now.Add(time.Second)
+	leaseUntil := self.now.Add(time.Duration(self.settings.WorkerLeaseSeconds) * time.Second)
 	jobId := server.NewId()
 	patch := []byte("synthetic-ranking-patch-" + jobId.String() + "\n")
 	patchDigest := sha256.Sum256(patch)
@@ -62,22 +63,24 @@ func (self *competitionRankingFixture) addJob(t testing.TB) *queuedJob {
 			JobId: jobId, RoundId: self.round.RoundId,
 			PatchSha256: hex.EncodeToString(patchDigest[:]),
 		},
-		Patch: patch, AttemptCount: 1, Round: *self.round,
+		Patch: patch, AttemptCount: 1, Round: *self.round, LeaseExpiresAt: &leaseUntil,
 	}
-	server.Db(context.Background(), func(conn server.PgConn) {
+	server.Tx(context.Background(), func(conn server.PgTx) {
 		server.RaisePgResult(conn.Exec(context.Background(), `
 			INSERT INTO competition_job (
 				job_id, round_id, patch_bytes, patch_sha256, cache_key, state,
-				submitted_at, available_at, started_at, lease_owner, attempt_count,
+				submitted_at, available_at, started_at, lease_owner, lease_expires_at, attempt_count,
 				artifact_retain_until, api_image_digest, worker_image_digest
-			) VALUES ($1, $2, $3, $4, $4, 'running', $5, $5, $5, 'ranking-worker', 1, $6, $7, $8)
+			) VALUES ($1, $2, $3, $4, $4, 'running', $5, $5, $5, 'ranking-worker', $9, 1, $6, $7, $8)
 		`, job.JobId, job.RoundId, job.Patch, job.PatchSha256, self.now,
-			self.settings.RetainUntil, testApiImageDigest(), testWorkerImageDigest()))
+			self.settings.RetainUntil, testApiImageDigest(), testWorkerImageDigest(), leaseUntil))
+		server.RaisePgResult(conn.Exec(context.Background(), `UPDATE competition_worker_slot
+		 SET worker_id='ranking-worker',job_id=$1,lease_expires_at=$2,heartbeat_at=$3 WHERE slot_id=1`, job.JobId, leaseUntil, self.now))
 		server.RaisePgResult(conn.Exec(context.Background(), `
 			INSERT INTO competition_job_principal (job_id, principal_id, first_seen_at)
 			VALUES ($1, 'synthetic-ranking-submitter', $2)
 		`, job.JobId, self.now))
-	}, server.OptReadWrite())
+	})
 	self.jobs = append(self.jobs, job)
 	return job
 }
@@ -114,12 +117,15 @@ func (self *competitionRankingFixture) completeJobs(t testing.TB, shared bool) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			server.Db(context.Background(), func(conn server.PgConn) {
+			server.Tx(context.Background(), func(conn server.PgTx) {
 				server.RaisePgResult(conn.Exec(context.Background(), `
 					UPDATE competition_job SET state = 'succeeded', completed_at = $2,
-						lease_owner = NULL, score_json = $3::jsonb WHERE job_id = $1
+						lease_owner = NULL, lease_expires_at = NULL, score_json = $3::jsonb WHERE job_id = $1
 				`, job.JobId, self.now, string(scoreBytes)))
-			}, server.OptReadWrite())
+				server.RaisePgResult(conn.Exec(context.Background(), `UPDATE competition_worker_slot
+				 SET worker_id=NULL,job_id=NULL,lease_expires_at=NULL,heartbeat_at=$1
+				 WHERE slot_id=1 AND worker_id='ranking-worker' AND job_id=$2`, self.now, job.JobId))
+			})
 		}
 	}
 }

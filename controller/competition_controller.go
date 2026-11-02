@@ -4289,6 +4289,10 @@ type Store interface {
 type PostgresStore struct {
 	now                      func() time.Time
 	dequeueCompetitionSignal func(context.Context, *Settings) (*server.Id, error)
+	// Nil preserves real row locking; tests admit an exact held-lock boundary.
+	beforeLeaseRowLockForTest func(string)
+	// Nil preserves normal baseline work; tests advance time at its completion.
+	afterCompletionBaselineForTest func()
 	// bounds the admission upload in Enqueue; zero selects defaultSubmissionArchiveTimeout
 	submissionArchiveTimeout time.Duration
 }
@@ -6211,50 +6215,66 @@ func (self PostgresStore) Claim(ctx context.Context, settings *Settings, workerI
 	return job, err
 }
 
+// Lock both existing authorities before reading the renewal clock. Expired or
+// mismatched ownership rolls back the whole transaction, including either update.
 func (self PostgresStore) Heartbeat(ctx context.Context, settings *Settings, workerId string, jobId server.Id) error {
-	now := self.nowUtc()
-	leaseUntil := now.Add(time.Duration(settings.WorkerLeaseSeconds) * time.Second)
-	leaseLost := false
-	err := captureDatabaseError(func() {
+	return captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
-			// server.Tx can rerun the callback; every run starts from empty results.
-			leaseLost = false
 			if settings.AutomationPolicy.Enabled {
 				automationScopeLockInTx(ctx, tx, settings)
+			}
+			var slotLease, jobLease time.Time
+			var actualRoundId server.Id
+			if self.beforeLeaseRowLockForTest != nil {
+				self.beforeLeaseRowLockForTest("worker_slot")
+			}
+			loadError := tx.QueryRow(ctx, `SELECT lease_expires_at FROM competition_worker_slot
+			 WHERE slot_id=1 AND worker_id=$1 AND job_id=$2 AND lease_expires_at IS NOT NULL FOR UPDATE`, workerId, jobId).Scan(&slotLease)
+			if errors.Is(loadError, pgx.ErrNoRows) {
+				panic(ErrLeaseLost)
+			}
+			server.Raise(loadError)
+			if self.beforeLeaseRowLockForTest != nil {
+				self.beforeLeaseRowLockForTest("job")
+			}
+			loadError = tx.QueryRow(ctx, `SELECT lease_expires_at,round_id FROM competition_job
+			 WHERE job_id=$1 AND state='running' AND lease_owner=$2 AND lease_expires_at IS NOT NULL FOR UPDATE`, jobId, workerId).Scan(&jobLease, &actualRoundId)
+			if errors.Is(loadError, pgx.ErrNoRows) {
+				panic(ErrLeaseLost)
+			}
+			server.Raise(loadError)
+			if settings.AutomationPolicy.Enabled {
 				if settings.automationLease != nil {
 					server.Raise(self.requireAutomationLeaseInTx(ctx, tx, settings, *settings.automationLease))
-					var actualRoundId server.Id
-					server.Raise(tx.QueryRow(ctx, `SELECT round_id FROM competition_job WHERE job_id=$1`, jobId).Scan(&actualRoundId))
 					if actualRoundId != settings.automationRoundId {
 						panic(ErrLeaseLost)
 					}
 				}
 				server.RaisePgResult(tx.Exec(ctx, `SET LOCAL urnetwork.competition_v2_worker = 'on'`))
 			}
+			now := self.nowUtc()
+			if !now.Before(slotLease) || !now.Before(jobLease) {
+				panic(ErrLeaseLost)
+			}
+			leaseUntil := now.Add(time.Duration(settings.WorkerLeaseSeconds) * time.Second)
 			result, err := tx.Exec(ctx, `
 				UPDATE competition_worker_slot SET lease_expires_at = $3, heartbeat_at = $4
-				WHERE slot_id = 1 AND worker_id = $1 AND job_id = $2
+				WHERE slot_id = 1 AND worker_id = $1 AND job_id = $2 AND $4 < lease_expires_at
 			`, workerId, jobId, leaseUntil, now)
 			server.Raise(err)
 			if result.RowsAffected() != 1 {
-				leaseLost = true
-				return
+				panic(ErrLeaseLost)
 			}
 			result, err = tx.Exec(ctx, `
 				UPDATE competition_job SET lease_expires_at = $3
-				WHERE job_id = $1 AND state = 'running' AND lease_owner = $2
-			`, jobId, workerId, leaseUntil)
+				WHERE job_id = $1 AND state = 'running' AND lease_owner = $2 AND $4 < lease_expires_at
+			`, jobId, workerId, leaseUntil, now)
 			server.Raise(err)
 			if result.RowsAffected() != 1 {
-				leaseLost = true
-				return
+				panic(ErrLeaseLost)
 			}
 		})
 	})
-	if err == nil && leaseLost {
-		return ErrLeaseLost
-	}
-	return err
 }
 
 type EvaluationOutcome struct {
@@ -6280,20 +6300,28 @@ func infrastructureRetrySchedule(
 	return retryAt, attempts < settings.MaxInfrastructureAttempts && retryAt.Before(deadline)
 }
 
+// Completion locks both current authorities before recording a result. Any
+// lost authority or suppressed update rolls back the result, event and release.
 func (self PostgresStore) Complete(ctx context.Context, settings *Settings, workerId string, jobId server.Id, outcome EvaluationOutcome) (retry bool, err error) {
-	now := self.nowUtc()
-	leaseLost := false
 	err = captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
 			// server.Tx can rerun the callback; every run starts from empty results.
-			retry, leaseLost = false, false
+			retry = false
 			if settings.AutomationPolicy.Enabled {
 				automationScopeLockInTx(ctx, tx, settings)
-				if settings.automationLease != nil {
-					server.Raise(self.requireAutomationLeaseInTx(ctx, tx, settings, *settings.automationLease))
-				}
-				server.RaisePgResult(tx.Exec(ctx, `SET LOCAL urnetwork.competition_v2_worker = 'on'`))
 			}
+			var slotWorker *string
+			var slotJob *server.Id
+			var slotLease, jobLease *time.Time
+			if self.beforeLeaseRowLockForTest != nil {
+				self.beforeLeaseRowLockForTest("completion_slot")
+			}
+			loadError := tx.QueryRow(ctx, `SELECT worker_id,job_id,lease_expires_at
+			 FROM competition_worker_slot WHERE slot_id=1 FOR UPDATE`).Scan(&slotWorker, &slotJob, &slotLease)
+			if errors.Is(loadError, pgx.ErrNoRows) {
+				panic(ErrLeaseLost)
+			}
+			server.Raise(loadError)
 			var state, owner string
 			var attempts int
 			var apiImageDigest, workerImageDigest string
@@ -6302,24 +6330,40 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 			var providersSha256 string
 			var policyJson []byte
 			var startedAt time.Time
-			server.Raise(tx.QueryRow(ctx, `
+			if self.beforeLeaseRowLockForTest != nil {
+				self.beforeLeaseRowLockForTest("completion_job")
+			}
+			loadError = tx.QueryRow(ctx, `
 				SELECT state, COALESCE(lease_owner, ''), attempt_count,
 				       api_image_digest, COALESCE(worker_image_digest, ''), started_at,
-			       job.round_id, round.staging, round.providers_sha256, round.policy_json
+			       job.round_id, round.staging, round.providers_sha256, round.policy_json, job.lease_expires_at
 				FROM competition_job AS job
 				JOIN competition_round AS round ON round.round_id = job.round_id
 				WHERE job.job_id = $1 FOR UPDATE OF job
 			`, jobId).Scan(
 				&state, &owner, &attempts, &apiImageDigest, &workerImageDigest, &startedAt,
-				&roundId, &staging, &providersSha256, &policyJson,
-			))
-			if state != "running" || owner != workerId {
-				leaseLost = true
-				return
-			}
-			if settings.automationLease != nil && roundId != settings.automationRoundId {
+				&roundId, &staging, &providersSha256, &policyJson, &jobLease,
+			)
+			if errors.Is(loadError, pgx.ErrNoRows) {
 				panic(ErrLeaseLost)
 			}
+			server.Raise(loadError)
+			requireAuthority := func() time.Time {
+				if settings.AutomationPolicy.Enabled {
+					if settings.automationLease != nil {
+						server.Raise(self.requireAutomationLeaseInTx(ctx, tx, settings, *settings.automationLease))
+					}
+					server.RaisePgResult(tx.Exec(ctx, `SET LOCAL urnetwork.competition_v2_worker = 'on'`))
+				}
+				now := self.nowUtc()
+				if state != "running" || owner != workerId || slotWorker == nil || *slotWorker != workerId ||
+					slotJob == nil || *slotJob != jobId || slotLease == nil || jobLease == nil ||
+					!now.Before(*slotLease) || !now.Before(*jobLease) || settings.automationLease != nil && roundId != settings.automationRoundId {
+					panic(ErrLeaseLost)
+				}
+				return now
+			}
+			now := requireAuthority()
 			if outcome.Score != nil && outcome.Error == nil {
 				policy, policyErr := decodeRoundPolicySnapshot(policyJson)
 				server.Raise(policyErr)
@@ -6329,16 +6373,6 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 			}
 			if !imageDigestPattern.MatchString(apiImageDigest) || !imageDigestPattern.MatchString(workerImageDigest) {
 				panic(errors.New("competition job runtime image identity is invalid"))
-			}
-			retryAt, retryBudgetAvailable := infrastructureRetrySchedule(settings, startedAt, now, attempts)
-			retryableInfrastructure := outcome.Error != nil &&
-				outcome.Error.Kind == "infrastructure" && outcome.Error.Retriable
-			if retryableInfrastructure && attempts < settings.MaxInfrastructureAttempts && !retryBudgetAvailable {
-				outcome.Score = nil
-				outcome.Error = terminalInfrastructureError(
-					"evaluation_time_budget_exhausted",
-					"submission exhausted its total evaluation time budget",
-				)
 			}
 			manifestJson := []byte(outcome.ArtifactManifest)
 			manifestHash := any(nil)
@@ -6408,13 +6442,33 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 					panic(errors.New("evaluator outcome conflicts with the immutable round baseline"))
 				}
 			}
+			if self.afterCompletionBaselineForTest != nil {
+				self.afterCompletionBaselineForTest()
+			}
+			// Baseline insertion/conflict and shared reads can wait after the first
+			// check. Revalidate before publishing any terminal or retry transition.
+			now = requireAuthority()
+			retryAt, retryBudgetAvailable := infrastructureRetrySchedule(settings, startedAt, now, attempts)
+			retryableInfrastructure := outcome.Error != nil &&
+				outcome.Error.Kind == "infrastructure" && outcome.Error.Retriable
+			if retryableInfrastructure && attempts < settings.MaxInfrastructureAttempts && !retryBudgetAvailable {
+				outcome.Score = nil
+				outcome.Error = terminalInfrastructureError(
+					"evaluation_time_budget_exhausted",
+					"submission exhausted its total evaluation time budget",
+				)
+			}
 			if retryableInfrastructure && retryBudgetAvailable {
 				retry = true
-				server.RaisePgResult(tx.Exec(ctx, `
+				updated, updateError := tx.Exec(ctx, `
 					UPDATE competition_job SET state = 'queued', available_at = $2,
 						lease_owner = NULL, lease_expires_at = NULL
 					WHERE job_id = $1
-				`, jobId, retryAt))
+				`, jobId, retryAt)
+				server.Raise(updateError)
+				if updated.RowsAffected() != 1 {
+					panic(ErrLeaseLost)
+				}
 				errorCode := "unknown_infrastructure_error"
 				if outcome.Error != nil {
 					errorCode = outcome.Error.Code
@@ -6435,30 +6489,38 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 				if outcome.Score != nil && outcome.Error == nil {
 					terminal = "succeeded"
 				}
-				server.RaisePgResult(tx.Exec(ctx, `
+				updated, updateError := tx.Exec(ctx, `
 					UPDATE competition_job SET state = $2, completed_at = $3,
 						lease_owner = NULL, lease_expires_at = NULL,
 						score_json = $4::jsonb, eval_error_json = $5::jsonb,
 						artifact_manifest_json = $6::jsonb,
 						artifact_manifest_sha256 = $7
 					WHERE job_id = $1
-				`, jobId, terminal, now, scoreJson, errorJson, nullableBytes(manifestJson), manifestHash))
+				`, jobId, terminal, now, scoreJson, errorJson, nullableBytes(manifestJson), manifestHash)
+				server.Raise(updateError)
+				if updated.RowsAffected() != 1 {
+					panic(ErrLeaseLost)
+				}
 				appendEvent(ctx, tx, jobId, now, terminal, workerId, competitionArtifactArchiveEventData(outcome, map[string]any{
 					"attempt": attempts, "api_image_digest": apiImageDigest,
 					"worker_image_digest": workerImageDigest,
 				}))
 			}
-			server.RaisePgResult(tx.Exec(ctx, `
+			updated, updateError := tx.Exec(ctx, `
 				UPDATE competition_worker_slot SET worker_id = NULL, job_id = NULL,
 					lease_expires_at = NULL, heartbeat_at = $1
 				WHERE slot_id = 1 AND worker_id = $2 AND job_id = $3
-			`, now, workerId, jobId))
+			`, now, workerId, jobId)
+			server.Raise(updateError)
+			if updated.RowsAffected() != 1 {
+				panic(ErrLeaseLost)
+			}
 		})
 	})
-	if err == nil && leaseLost {
-		err = ErrLeaseLost
+	if err != nil {
+		return false, err
 	}
-	if err == nil && retry {
+	if retry {
 		if signalErr := enqueueCompetitionJob(ctx, settings, jobId); signalErr != nil {
 			glog.Warningf(
 				"[competition]Redis FIFO retry signal failed; PostgreSQL retry remains queued job=%s: %s\n",
@@ -6763,7 +6825,11 @@ type Worker struct {
 	pollTickForTest, hostTickForTest <-chan time.Time
 	// Nil retains the production ticker; tests force the exact failure edge.
 	evaluationTickForTest <-chan time.Time
-	heartbeatSettings     competitionHeartbeatSettings
+	// Nil uses the original submission deadline; tests force that exact stop edge.
+	evaluationContextForTest func(context.Context, time.Time) (context.Context, context.CancelFunc)
+	// Nil does nothing; tests acknowledge a fully completed heartbeat cycle.
+	evaluationHeartbeatForTest func()
+	heartbeatSettings          competitionHeartbeatSettings
 }
 
 func NewWorker(settings *Settings, store Store, evaluator Evaluator, workerId string) (*Worker, error) {
@@ -7031,6 +7097,10 @@ func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostChec
 		_ = self.handBack(job.JobId, "missing_execution_start")
 		return fmt.Errorf("competition job %s has no execution start", job.JobId)
 	}
+	confirmedLeaseExpiresAt := time.Time{}
+	if job.LeaseExpiresAt != nil {
+		confirmedLeaseExpiresAt = *job.LeaseExpiresAt
+	}
 	executionDeadline := job.StartedAt.Add(
 		time.Duration(self.settings.EvaluationPolicy.ScoreTimeoutSeconds) * time.Second,
 	)
@@ -7041,13 +7111,7 @@ func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostChec
 				"submission exhausted its total evaluation time budget",
 			),
 		}
-		retry, err := self.store.Complete(
-			context.WithoutCancel(parent),
-			self.settings,
-			self.workerId,
-			job.JobId,
-			outcome,
-		)
+		retry, err := self.completeWithRetry(parent, job, confirmedLeaseExpiresAt, outcome)
 		if err != nil {
 			return fmt.Errorf("complete expired competition job %s: %w", job.JobId, err)
 		}
@@ -7056,7 +7120,11 @@ func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostChec
 		}
 		return nil
 	}
-	evalCtx, cancel := context.WithDeadline(parent, executionDeadline)
+	newEvaluationContext := context.WithDeadline
+	if self.evaluationContextForTest != nil {
+		newEvaluationContext = self.evaluationContextForTest
+	}
+	evalCtx, cancel := newEvaluationContext(parent, executionDeadline)
 	defer cancel()
 	type evalReturn struct{ outcome EvaluationOutcome }
 	done := make(chan evalReturn, 1)
@@ -7083,7 +7151,7 @@ func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostChec
 					}
 				}
 			}
-			retry, err := self.store.Complete(context.WithoutCancel(parent), self.settings, self.workerId, job.JobId, result.outcome)
+			retry, err := self.completeWithRetry(parent, job, confirmedLeaseExpiresAt, result.outcome)
 			if err != nil {
 				return fmt.Errorf("complete competition job %s: %w", job.JobId, err)
 			}
@@ -7097,18 +7165,30 @@ func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostChec
 			}
 			return nil
 		case <-heartbeatTick:
-			if err := self.store.Heartbeat(parent, self.settings, self.workerId, job.JobId); err != nil {
+			attemptStartedAt, err := retryCompetitionLeaseOperation(evalCtx, confirmedLeaseExpiresAt, self.heartbeatSettings.LeaseRetry, func(ctx context.Context) error {
+				return self.store.Heartbeat(ctx, self.settings, self.workerId, job.JobId)
+			})
+			if err != nil {
 				cancel()
 				<-done
 				_ = self.handBack(job.JobId, "heartbeat_failed", err)
 				return fmt.Errorf("heartbeat competition job %s: %w", job.JobId, safeCompetitionHeartbeatError(err))
 			}
+			// PostgreSQL computes renewal time after its lock/fence waits. The
+			// successful public operation's start is a conservative committed bound.
+			confirmedLeaseExpiresAt = attemptStartedAt.Add(time.Duration(self.settings.WorkerLeaseSeconds) * time.Second)
 
-			if err := self.store.RegisterHost(parent, self.settings, hostCheck); err != nil {
+			_, err = retryCompetitionLeaseOperation(evalCtx, confirmedLeaseExpiresAt, self.heartbeatSettings.LeaseRetry, func(ctx context.Context) error {
+				return self.store.RegisterHost(ctx, self.settings, hostCheck)
+			})
+			if err != nil {
 				cancel()
 				<-done
 				_ = self.handBack(job.JobId, "host_heartbeat_failed", err)
 				return fmt.Errorf("refresh evaluator host during job %s: %w", job.JobId, safeCompetitionHeartbeatError(err))
+			}
+			if self.evaluationHeartbeatForTest != nil {
+				self.evaluationHeartbeatForTest()
 			}
 		case <-parent.Done():
 			cancel()
@@ -7119,6 +7199,20 @@ func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostChec
 			return parent.Err()
 		}
 	}
+}
+
+// Persists the same finished outcome without another claim or evaluation. Its
+// detached, bounded metadata lifetime never renews expired authority or scoring.
+func (self *Worker) completeWithRetry(parent context.Context, job *queuedJob, leaseExpiresAt time.Time, outcome EvaluationOutcome) (bool, error) {
+	var retry bool
+	_, err := retryCompetitionLeaseOperation(context.WithoutCancel(parent), leaseExpiresAt, self.heartbeatSettings.CompletionRetry, func(ctx context.Context) error {
+		completedRetry, err := self.store.Complete(ctx, self.settings, self.workerId, job.JobId, outcome)
+		if err == nil {
+			retry = completedRetry
+		}
+		return err
+	})
+	return err == nil && retry, err
 }
 
 func (self *Worker) handBack(jobId server.Id, reason string, failures ...error) error {

@@ -263,13 +263,19 @@ func authenticateFailedEvidence(root string, job *queuedJob) ([]evaluationArtifa
 	seenPaths := map[string]bool{}
 	var totalBytes int64
 	for _, declared := range manifest.Artifacts {
-		if !safeFailureEvidencePath(declared.Path) || seenPaths[declared.Path] || declared.Bytes == nil ||
+		// The frozen sanitizer keeps these root inventory files; omit their content,
+		// not their declaration checks or their contribution to the manifest budget.
+		omitted := declared.Path == "failed-evidence/evaluation-sources.json" || declared.Path == "failed-evidence/evaluation-sources.json.new"
+		if (!safeFailureEvidencePath(declared.Path) && !omitted) || seenPaths[declared.Path] || declared.Bytes == nil ||
 			*declared.Bytes < 0 || maxFailureEvidenceBytes-totalBytes < *declared.Bytes ||
 			!sha256Pattern.MatchString(declared.Sha256) {
 			return nil, true, errors.New("failure evidence manifest contains an unsafe artifact")
 		}
 		seenPaths[declared.Path] = true
 		totalBytes += *declared.Bytes
+		if omitted {
+			continue
+		}
 		artifacts = append(artifacts, evaluationArtifact{Path: declared.Path, Sha256: declared.Sha256, Bytes: *declared.Bytes})
 	}
 	if !seenPaths["failed-evidence/failure.json"] {

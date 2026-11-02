@@ -127,14 +127,18 @@ func addCompetitionAutomationJob(t testing.TB, fixture *competitionRankingFixtur
 func addCompetitionAutomationJobWithManifest(t testing.TB, fixture *competitionRankingFixture, raw float64, archive func(*queuedJob, *ScoreResult) (json.RawMessage, error)) *queuedJob {
 	t.Helper()
 	fixture.now = fixture.now.Add(time.Second)
+	leaseUntil := fixture.now.Add(time.Duration(fixture.settings.WorkerLeaseSeconds) * time.Second)
 	jobId := server.NewId()
 	patch := []byte("synthetic-automation-patch-" + jobId.String())
 	digest := sha256.Sum256(patch)
 	job := &queuedJob{ScoreJobResult: ScoreJobResult{JobId: jobId, RoundId: fixture.round.RoundId, PatchSha256: hex.EncodeToString(digest[:]), SubmittedAt: fixture.now}, Patch: patch, AttemptCount: 1, Round: *fixture.round}
+	job.LeaseExpiresAt = &leaseUntil
 	server.Tx(context.Background(), func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(context.Background(), `SET LOCAL urnetwork.competition_v2_worker='on'`))
-		server.RaisePgResult(tx.Exec(context.Background(), `INSERT INTO competition_job(job_id,round_id,patch_bytes,patch_sha256,cache_key,state,submitted_at,available_at,started_at,lease_owner,attempt_count,artifact_retain_until,api_image_digest,worker_image_digest)
-	 VALUES($1,$2,$3,$4,$4,'running',$5,$5,$5,'synthetic-worker',1,$6,$7,$8)`, jobId, job.RoundId, patch, job.PatchSha256, fixture.now, fixture.settings.RetainUntil, testApiImageDigest(), testWorkerImageDigest()))
+		server.RaisePgResult(tx.Exec(context.Background(), `INSERT INTO competition_job(job_id,round_id,patch_bytes,patch_sha256,cache_key,state,submitted_at,available_at,started_at,lease_owner,lease_expires_at,attempt_count,artifact_retain_until,api_image_digest,worker_image_digest)
+	 VALUES($1,$2,$3,$4,$4,'running',$5,$5,$5,'synthetic-worker',$9,1,$6,$7,$8)`, jobId, job.RoundId, patch, job.PatchSha256, fixture.now, fixture.settings.RetainUntil, testApiImageDigest(), testWorkerImageDigest(), leaseUntil))
+		server.RaisePgResult(tx.Exec(context.Background(), `UPDATE competition_worker_slot
+		 SET worker_id='synthetic-worker',job_id=$1,lease_expires_at=$2,heartbeat_at=$3 WHERE slot_id=1`, jobId, leaseUntil, fixture.now))
 	})
 	score := competitionRankingScore(raw, 120)
 	if fixture.settings.AutomationPolicy.Staging {

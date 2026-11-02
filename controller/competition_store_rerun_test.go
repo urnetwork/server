@@ -428,11 +428,9 @@ func TestCompetitionCompleteRerunReportsNoRetryAfterTheLeaseMoved(t *testing.T) 
 	})
 }
 
-// A heartbeat whose first attempt rolls back after finding the job no longer
-// leased to its worker, and whose rerun finds the lease back, reports the
-// lease its committed attempt extended. Production keeps the slot and the
-// job's lease together; this test parts them by hand to reach the branch.
-func TestCompetitionHeartbeatRerunReportsTheCommittedLease(t *testing.T) {
+// A serialization rollback permits rechecking fresh authority, but losing the
+// job between attempts must not commit a partial singleton-slot extension.
+func TestCompetitionHeartbeatRerunReportsLeaseLossWithoutPartialExtension(t *testing.T) {
 	testEnv := server.DefaultTestEnv()
 	testEnv.RerunCount = 0
 	testEnv.Run(t, func(t testing.TB) {
@@ -460,31 +458,28 @@ func TestCompetitionHeartbeatRerunReportsTheCommittedLease(t *testing.T) {
 				}, server.OptReadWrite())
 			})
 		}
-		if err := setLeaseOwner("worker-z"); err != nil {
-			t.Fatalf("part the job's lease from the slot: %v", err)
-		}
 		armCompetitionCommitFault(ctx, "heartbeat_rerun", "competition_worker_slot", "UPDATE", "true")
 		competitor := &rerunCompetitor{compete: func() error {
-			return setLeaseOwner("worker-a")
+			return setLeaseOwner("worker-z")
 		}}
 
 		fixture.clock = fixture.clock.Add(time.Minute)
 		err = fixture.store.Heartbeat(competitor.context(ctx), fixture.settings, "worker-a", claimed.JobId)
 		competitor.require(t)
-		if err != nil {
-			t.Fatalf("heartbeat whose rerun found the lease = %v, want the lease extended", err)
+		if !errors.Is(err, ErrLeaseLost) {
+			t.Fatalf("heartbeat whose rerun lost authority = %v, want lease lost", err)
 		}
-		var leaseExpiresAt time.Time
+		var leaseExpiresAt, slotExpiresAt time.Time
 		server.Db(ctx, func(conn server.PgConn) {
 			server.Raise(conn.QueryRow(
 				ctx,
 				`SELECT lease_expires_at FROM competition_job WHERE job_id = $1`,
 				claimed.JobId,
 			).Scan(&leaseExpiresAt))
+			server.Raise(conn.QueryRow(ctx, `SELECT lease_expires_at FROM competition_worker_slot WHERE slot_id=1`).Scan(&slotExpiresAt))
 		})
-		wantLease := fixture.clock.Add(time.Duration(fixture.settings.WorkerLeaseSeconds) * time.Second)
-		if !leaseExpiresAt.Equal(wantLease) {
-			t.Fatalf("job lease expires at %s, want %s from the committed heartbeat", leaseExpiresAt, wantLease)
+		if !leaseExpiresAt.Equal(*claimed.LeaseExpiresAt) || !slotExpiresAt.Equal(*claimed.LeaseExpiresAt) {
+			t.Fatalf("lost rerun partially extended authority: job=%s slot=%s original=%s", leaseExpiresAt, slotExpiresAt, *claimed.LeaseExpiresAt)
 		}
 	})
 }

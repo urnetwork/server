@@ -1,5 +1,5 @@
-// Heartbeat failures keep bounded, non-secret diagnostic evidence without
-// changing cancellation, fencing, ownership or retry decisions.
+// Per-worker liveness and finished-outcome persistence have independent bounded
+// retry policies; failures retain only non-secret diagnostic evidence.
 package controller
 
 import (
@@ -14,15 +14,19 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// The existing cleanup budget belongs to each worker; non-positive selects
-// the historical default rather than shortening an already-owned cleanup.
+// One worker owns cleanup, liveness retry and separate metadata-persistence
+// policies. A non-positive handback timeout retains historical cleanup bounds.
 type competitionHeartbeatSettings struct {
 	HandBackTimeout time.Duration
+	LeaseRetry      competitionLeaseRetrySettings
+	// Independent metadata budget; never extends the evaluation or its lease.
+	CompletionRetry competitionLeaseRetrySettings
 }
 
-// Retains the existing fifteen-second cleanup bound in one defaults location.
+// Retains fifteen-second cleanup and independently owned default retry policies.
 func defaultCompetitionHeartbeatSettings() competitionHeartbeatSettings {
-	return competitionHeartbeatSettings{HandBackTimeout: 15 * time.Second}
+	return competitionHeartbeatSettings{HandBackTimeout: 15 * time.Second,
+		LeaseRetry: defaultCompetitionLeaseRetrySettings(), CompletionRetry: defaultCompetitionLeaseRetrySettings()}
 }
 
 // Only fixed categories, a validated PostgreSQL code and an opaque digest are
