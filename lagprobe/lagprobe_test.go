@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"math/big"
@@ -578,6 +579,160 @@ func TestProbeAllCountsThePassSuccessesWhenProbingAgain(t *testing.T) {
 	pass := ProbeAll(context.Background(), refused(1), map[int]int{}, settings)
 	if got := outcomes(pass); !slices.Equal(got, []Outcome{OutcomeDial}) {
 		t.Fatalf("one still failing: %v", got)
+	}
+}
+
+// Writes bytes after the request head until the probe goes away, as an extender
+// modified to harm its prober would, and reports how many got out.
+func serveEndlessTest(t testing.TB, ca *testCa, head string, chunk []byte, gap time.Duration) (netip.AddrPort, *atomic.Int64) {
+	t.Helper()
+	sent := &atomic.Int64{}
+	addr := serveRawTest(t, 4, func(conn net.Conn) {
+		tlsConn := tls.Server(conn, &tls.Config{
+			Certificates: []tls.Certificate{ca.issue(t, testName)},
+			NextProtos:   []string{"http/1.1"},
+		})
+		if err := tlsConn.Handshake(); err != nil {
+			return
+		}
+		buffer := make([]byte, 4096)
+		if _, err := tlsConn.Read(buffer); err != nil {
+			return
+		}
+		if _, err := tlsConn.Write([]byte(head)); err != nil {
+			return
+		}
+		for {
+			count, err := tlsConn.Write(chunk)
+			sent.Add(int64(count))
+			if err != nil {
+				return
+			}
+			if 0 < gap {
+				time.Sleep(gap)
+			}
+		}
+	})
+	return addr, sent
+}
+
+// An extender is untrusted, and no answer of its can hold a probe past its
+// timeouts or make it keep what it sends. net/http's parser would grow a line or
+// a header map for as long as bytes came: at 1 Gbps an endless status line took 3
+// GB and 17 s. So the head stops at its limit at once, a head that drips ends at
+// the response timeout, and a body, whatever it declares, is never read.
+func TestProbeBoundsWhatAHostileExtenderSends(t *testing.T) {
+	ca := newTestCa(t)
+	settings := testSettings(ca)
+	settings.ResponseTimeout = 3 * time.Second
+	refusal := "HTTP/1.1 400 Bad Request\r\nAccess-Control-Allow-Origin: https://lag.dev\r\n"
+	manyHeaders := strings.Builder{}
+	for i := 0; manyHeaders.Len() < 64*1024; i++ {
+		fmt.Fprintf(&manyHeaders, "X-%d: y\r\n", i)
+	}
+	long := []byte(strings.Repeat("a", 64*1024))
+
+	for _, test := range []struct {
+		name    string
+		head    string
+		chunk   []byte
+		gap     time.Duration
+		outcome Outcome
+		// the probe must end well inside this, rather than wait out a timeout
+		within time.Duration
+		// how long it must have waited, for the drip
+		atLeast time.Duration
+	}{
+		{name: "an endless status line", head: "HTTP/1.1 ", chunk: long, outcome: OutcomeHttp, within: 2 * time.Second},
+		{name: "one endless header", head: refusal + "X: ", chunk: long, outcome: OutcomeHttp, within: 2 * time.Second},
+		{name: "endless short headers", head: refusal, chunk: []byte(manyHeaders.String()), outcome: OutcomeHttp, within: 2 * time.Second},
+		{
+			name:    "a header drip",
+			head:    "HTTP/1.1 400 Bad Request\r\n",
+			chunk:   []byte("X: y\r\n"),
+			gap:     20 * time.Millisecond,
+			outcome: OutcomeHttpTimeout,
+			within:  settings.ResponseTimeout + 2*time.Second,
+			atLeast: settings.ResponseTimeout - 500*time.Millisecond,
+		},
+		{name: "an endless body of a declared length", head: refusal + "Content-Length: 100000000000\r\n\r\n", chunk: long, outcome: OutcomeOk, within: 2 * time.Second},
+		{name: "an endless chunked body", head: refusal + "Transfer-Encoding: chunked\r\n\r\n", chunk: []byte("10000\r\n" + string(long) + "\r\n"), outcome: OutcomeOk, within: 2 * time.Second},
+		{name: "a body that drips", head: refusal + "Content-Length: 1000\r\n\r\n", chunk: []byte("x"), gap: 50 * time.Millisecond, outcome: OutcomeOk, within: 2 * time.Second},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			addr, _ := serveEndlessTest(t, ca, test.head, test.chunk, test.gap)
+			start := time.Now()
+			outcome, err := Probe(context.Background(), Target{Name: testName, Addr: addr}, settings)
+			elapsed := time.Since(start)
+			if outcome != test.outcome {
+				t.Fatalf("%s (%v) after %s, want %s", outcome, err, elapsed, test.outcome)
+			}
+			if test.within < elapsed || elapsed < test.atLeast {
+				t.Fatalf("%s after %s, want between %s and %s", outcome, elapsed, test.atLeast, test.within)
+			}
+		})
+	}
+}
+
+// The limit is on the head: one that fits passes, and one a byte over fails,
+// whatever it says.
+func TestProbeLimitsTheResponseHead(t *testing.T) {
+	ca := newTestCa(t)
+	settings := testSettings(ca)
+	head := func(length int) string {
+		lead := "HTTP/1.1 400 Bad Request\r\nAccess-Control-Allow-Origin: https://lag.dev\r\nX: "
+		tail := "\r\n\r\n"
+		return lead + strings.Repeat("a", length-len(lead)-len(tail)) + tail
+	}
+	answer := func(text string) netip.AddrPort {
+		return serveRawTest(t, 4, func(conn net.Conn) {
+			tlsConn := tls.Server(conn, &tls.Config{
+				Certificates: []tls.Certificate{ca.issue(t, testName)},
+				NextProtos:   []string{"http/1.1"},
+			})
+			if err := tlsConn.Handshake(); err != nil {
+				return
+			}
+			buffer := make([]byte, 4096)
+			if _, err := tlsConn.Read(buffer); err != nil {
+				return
+			}
+			tlsConn.Write([]byte(text))
+			// held open, so only the limit can end the read
+			tlsConn.Read(buffer)
+		})
+	}
+
+	outcome, err := Probe(context.Background(), Target{Name: testName, Addr: answer(head(responseHeadMaxBytes))}, settings)
+	if outcome != OutcomeOk {
+		t.Fatalf("a head of the limit: %s (%v)", outcome, err)
+	}
+	outcome, err = Probe(context.Background(), Target{Name: testName, Addr: answer(head(responseHeadMaxBytes + 1))}, settings)
+	if outcome != OutcomeHttp {
+		t.Fatalf("a head a byte over the limit: %s (%v)", outcome, err)
+	}
+}
+
+// A panic while probing one address is that address's failure, and the pass, and
+// the worker it runs in, go on.
+func TestProbeAllSurvivesAProbeThatPanics(t *testing.T) {
+	ca := newTestCa(t)
+	settings := testSettings(ca)
+	ok := serveTest(t, 4, ca.issue(t, testName), []string{"http/1.1"}, extenderHandler)
+	bad := netip.AddrPortFrom(netip.MustParseAddr("192.0.2.7"), 443)
+	useRoutes(t, func(addr netip.Addr) bool {
+		if addr == bad.Addr() {
+			panic("a parser met bytes it did not expect")
+		}
+		return true
+	})
+
+	pass := ProbeAll(context.Background(), []Target{{Name: testName, Addr: bad}, {Name: testName, Addr: ok}, {Name: testName, Addr: ok}}, nil, settings)
+	if pass.Results[0] == nil || pass.Results[0].Outcome != OutcomeHttp || !strings.Contains(pass.Results[0].Err.Error(), "a parser met bytes") {
+		t.Fatalf("%+v", pass.Results[0])
+	}
+	if pass.Results[1].Outcome != OutcomeOk || pass.Results[2].Outcome != OutcomeOk {
+		t.Fatalf("the others: %s, %s", pass.Results[1].Outcome, pass.Results[2].Outcome)
 	}
 }
 

@@ -31,6 +31,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/netip"
@@ -148,6 +149,14 @@ type Result struct {
 // the probe to anyone looking at the traffic.
 const userAgent = "urnetwork-measurement-probe/1"
 
+// The most of a response read: its status line and headers. The extender is
+// untrusted, and net/http's parser grows one line or a header map without bound
+// for as long as bytes arrive, so a deadline alone lets one modified extender
+// on a gigabit port fill this process's memory: 3 GB in 17 s, measured. The
+// refusal's head is a few hundred bytes. connect/net_extender.go guards the same
+// call the same way.
+const responseHeadMaxBytes = 16 * 1024
+
 // Probe makes one probe of the target. It returns no outcome, and ctx's
 // error, when ctx ends before the probe has one: a probe cut short by the
 // prober says nothing about the extender.
@@ -213,12 +222,13 @@ func Probe(ctx context.Context, target Target, settings Settings) (Outcome, erro
 	if err := request.Write(tlsConn); err != nil {
 		return responseFailure(ctx, err)
 	}
-	response, err := http.ReadResponse(bufio.NewReader(tlsConn), request)
+	response, err := http.ReadResponse(bufio.NewReader(io.LimitReader(tlsConn, responseHeadMaxBytes)), request)
 	if err != nil {
 		return responseFailure(ctx, err)
 	}
-	// the refusal has no body, and nothing in one would change the outcome
-	response.Body.Close()
+	// the body is never read or closed: the refusal has none, nothing in one
+	// would change the outcome, closing one drains it until the deadline, and
+	// the connection closes on return
 
 	if response.StatusCode != http.StatusBadRequest {
 		return OutcomeStatus, fmt.Errorf("answered %d rather than 400", response.StatusCode)
@@ -266,7 +276,8 @@ var hasRoute = func(addr netip.Addr) bool {
 var errNoRoute = errors.New("this host has no route to the address")
 
 // What one pass found: Results[i] answers targets[i], nil when the target was
-// not probed, because the budget ran out or ctx ended first.
+// not probed, because the budget ran out or ctx ended first. A panic while
+// probing an address is that address's failure.
 type Pass struct {
 	Results []*Result
 	// the families most of whose probes failed, at least the quorum of them,
@@ -310,6 +321,13 @@ targets:
 			defer func() {
 				<-workers
 				wait.Done()
+			}()
+			// the peer is untrusted, the parsers run on its bytes, and a panic in
+			// a goroutine of ours would take the whole worker down
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					results[i] = &Result{Outcome: OutcomeHttp, Err: fmt.Errorf("the probe panicked: %v", recovered)}
+				}
 			}()
 			if !hasRoute(target.Addr.Addr()) {
 				results[i] = &Result{Outcome: OutcomeUnprobed, Err: errNoRoute}
