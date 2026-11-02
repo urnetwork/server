@@ -51,7 +51,19 @@ var providerWorkSessionReceiptForeignKeyArtifactQuery = `(NOT EXISTS(SELECT 1 FR
 // The custody that migration publishes, in 824's order, with the journal, the
 // receipt and the published functions read as they are after it.
 func providerWorkSessionPartitionCustodyPredicates() []string {
-	admitFloor, sessionAppend, receiptReference, dropGuard := server.ProviderWorkSessionPartitionBodiesSql()
+	_, _, _, dropGuard := server.ProviderWorkSessionPartitionBodiesSql()
+	return providerWorkSessionPartitionCustodyPredicatesWithDropGuard(dropGuard)
+}
+
+// The horizon drop guard replaces only the drop guard's body and republishes
+// the rest of the custody.
+func providerWorkSessionHorizonCustodyPredicates() []string {
+	return providerWorkSessionPartitionCustodyPredicatesWithDropGuard(server.ProviderWorkSessionEventHorizonDropGuardBodySql())
+}
+
+// The custody with dropGuard as the drop guard's body.
+func providerWorkSessionPartitionCustodyPredicatesWithDropGuard(dropGuard string) []string {
+	admitFloor, sessionAppend, receiptReference, _ := server.ProviderWorkSessionPartitionBodiesSql()
 	return []string{
 		migrationFp2Table("provider_work_session_head"),
 		snMainnetMigrationColumns("provider_work_session_head",

@@ -98,6 +98,17 @@ func ProviderWorkSessionPartitionBodiesSql() (admitFloor, sessionAppend, receipt
 		strings.Split(providerWorkSessionEventDropGuardSql, "$event_drop_guard$")[1]
 }
 
+// The journal's drop guard at the contract horizon's 35-day floor.
+func ProviderWorkSessionEventHorizonDropGuardBodySql() string {
+	return strings.Split(providerWorkSessionEventHorizonDropGuardSql, "$event_drop_guard$")[1]
+}
+
+// The version of the migration that publishes the horizon drop guard, found by
+// its SQL. Zero when the list lacks it.
+func ProviderWorkSessionEventHorizonDropGuardMigrationVersion() int {
+	return sqlMigrationVersion(providerWorkSessionEventHorizonDropGuardSql)
+}
+
 // Read-only consumers pin the provider successor's exact bodies without
 // changing any historical migration or reproducing its replacement logic.
 func CompetitionWinnerReviewProviderBodiesSql() (provider, roundInsertGuard, winnerSourceAuthorized, winnerReviewGuard string) {

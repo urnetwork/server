@@ -5,6 +5,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strconv"
 	"strings"
@@ -159,6 +160,62 @@ func TestProviderWorkSessionEventRetentionBoundary(t *testing.T) {
 	}
 	if !family.IsExpired(ctx, cutoverWeek.AddDate(0, 0, 13*7), legacy) {
 		t.Error("the legacy partition did not expire at the cutover week plus 13 weeks")
+	}
+}
+
+// Without a horizon events keep their 13 weeks; with one, the horizon, never
+// below the guard's 35 days nor above 13 weeks. A week and the legacy
+// partition expire at that retention.
+func TestProviderWorkSessionEventRetentionFollowsTheHorizon(t *testing.T) {
+	const day = 24 * time.Hour
+	if retention := ProviderWorkSessionEventRetentionAt(context.Background()); retention != 91*day {
+		t.Fatalf("without a horizon the retention is %s", retention)
+	}
+	for _, test := range []struct{ horizon, want time.Duration }{
+		{91 * day, 91 * day}, {45 * day, 45 * day}, {35 * day, 35 * day}, {20 * day, 35 * day}, {400 * day, 91 * day},
+	} {
+		if retention := ProviderWorkSessionEventRetentionAt(WithContractHorizon(context.Background(), test.horizon)); retention != test.want {
+			t.Errorf("horizon %s keeps events %s, want %s", test.horizon, retention, test.want)
+		}
+	}
+	family := providerWorkSessionEventPartitionFamily
+	if family.RangeExpired == nil {
+		t.Fatal("the family's weeks do not expire at the horizon")
+	}
+	ctx := WithContractHorizon(context.Background(), 35*day)
+	week := family.RangeAt(time.Date(2026, 10, 28, 0, 0, 0, 0, time.UTC))
+	if family.IsExpired(ctx, week.Upper.Add(35*day-time.Nanosecond), week) || !family.IsExpired(ctx, week.Upper.Add(35*day), week) {
+		t.Fatal("a week does not expire 35 days after its upper bound at a 35-day horizon")
+	}
+	if family.IsExpired(context.Background(), week.Upper.Add(35*day), week) {
+		t.Fatal("a week expired at 35 days without a horizon")
+	}
+	legacy := PartitionRange{Upper: week.Lower, Legacy: true}
+	if family.IsExpired(ctx, week.Lower.Add(35*day-time.Nanosecond), legacy) || !family.IsExpired(ctx, week.Lower.Add(35*day), legacy) {
+		t.Fatal("the legacy partition does not expire 35 days after the cutover week")
+	}
+}
+
+// The horizon drop guard is the partition preparation's drop guard with only
+// its age, 35 days, the floor, and its message changed; it follows the
+// preparation in the list and bounds its lock wait.
+func TestProviderWorkSessionEventHorizonDropGuardMigration(t *testing.T) {
+	version := ProviderWorkSessionEventHorizonDropGuardMigrationVersion()
+	if version == 0 || version <= ProviderWorkSessionPartitionMigrationVersion() {
+		t.Fatalf("horizon drop guard version %d, preparation version %d", version, ProviderWorkSessionPartitionMigrationVersion())
+	}
+	if !strings.HasPrefix(strings.TrimSpace(providerWorkSessionEventHorizonDropGuardSql), "SET LOCAL lock_timeout = '5s';") {
+		t.Error("the horizon drop guard does not bound its lock wait")
+	}
+	if count := strings.Count(providerWorkSessionEventHorizonDropGuardSql, "$event_drop_guard$"); count != 2 {
+		t.Fatalf("the delimiter occurs %d times", count)
+	}
+	restored := strings.Replace(strings.Replace(ProviderWorkSessionEventHorizonDropGuardBodySql(), "interval '35 days'", "interval '91 days'", 1), "kept at least 35 days", "kept 13 weeks", 1)
+	if _, _, _, dropGuard := ProviderWorkSessionPartitionBodiesSql(); restored != dropGuard {
+		t.Fatal("the horizon drop guard differs from the drop guard beyond its age and message")
+	}
+	if ProviderWorkSessionEventRetentionFloor != 35*24*time.Hour || !strings.Contains(ProviderWorkSessionEventHorizonDropGuardBodySql(), fmt.Sprintf("interval '%d days'", int64(ProviderWorkSessionEventRetentionFloor/(24*time.Hour)))) {
+		t.Fatal("the guard's age is not the floor")
 	}
 }
 
