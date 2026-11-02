@@ -115,6 +115,13 @@ var accountMessageTemplates = map[string]func() Template{
 	(&SecurityApiKeyChangedTemplate{}).Name(): func() Template {
 		return &SecurityApiKeyChangedTemplate{}
 	},
+	// the service reminders (service_reminders_controller.go)
+	(&ProEndingTemplate{}).Name(): func() Template {
+		return &ProEndingTemplate{}
+	},
+	(&TrialEndingTemplate{}).Name(): func() Template {
+		return &TrialEndingTemplate{}
+	},
 }
 
 // Counts delivery outcomes by template and result (sent, retried, abandoned,

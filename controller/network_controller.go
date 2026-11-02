@@ -4,7 +4,9 @@ import (
 	// "time"
 	"fmt"
 
+	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/onboarding"
 	"github.com/urnetwork/server/session"
 )
 
@@ -87,6 +89,13 @@ func NetworkCreate(
 	productUpdates := ProductUpdatesFromCreateArgs(&networkCreate)
 	if result.Network != nil {
 		model.AccountPreferencesSetForNetwork(clientSession.Ctx, result.Network.NetworkId, productUpdates)
+		// the consent evidence: whether this sign-up's form showed the switch
+		// (the request carried the field) or an older client never did
+		source := onboarding.ConsentSourceSignupDefault
+		if networkCreate.ProductUpdates != nil {
+			source = onboarding.ConsentSourceSignupSwitch
+		}
+		model.SetNetworkProductUpdatesSource(clientSession.Ctx, result.Network.NetworkId, source, server.NowUtc())
 		WriteServerEvent(clientSession, result.Network.NetworkId, model.EventSignupOptoutChanged, map[string]any{
 			"product_updates": productUpdates,
 		}, "")
