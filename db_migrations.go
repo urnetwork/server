@@ -11162,4 +11162,9 @@ var migrations = []any{
 		CREATE INDEX network_reengagement_email_network_sent
 		ON network_reengagement_email (network_id, sent_at)
 	`),
+
+	// The camouflage key an extender's activation posts, and the network that
+	// posted it (connect/EXTENDER.md P6, phase 14b): two nullable columns,
+	// db_extender_camouflage_key.go.
+	extenderCamouflageKeyMigration,
 }

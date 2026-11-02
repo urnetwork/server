@@ -878,6 +878,8 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	},
 	// 905-909: the campaigns' consent evidence and the re-engagement tables
 	reengagementMigrationContracts,
+	// the extender camouflage key (phase 14b), versioned by its position
+	[]snMainnetMigrationContract{extenderCamouflageKeyMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an
