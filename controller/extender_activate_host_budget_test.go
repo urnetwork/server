@@ -315,22 +315,31 @@ func TestExtenderActivateRampsANewFleet(t *testing.T) {
 	})
 }
 
-// One address is probed at most 6 times an hour per family, whatever clients
-// and accounts post from it (connect#230), since the address is what the probe
-// dials. Before, the budgets were the client's and the account's, so K
-// accounts posting from one address had it probed up to K × 60 times an hour.
-// Another /32 is another address, the families are apart, an ipv6 address is
-// its /64, and the refusal spends nothing.
+// One address is probed at most 6 times an hour per family for keys new to
+// it, whatever clients and accounts post from it (connect#230), since the
+// address is what the probe dials. Before, the budgets were the client's and
+// the account's, so K accounts posting from one address had it probed up to
+// K × 60 times an hour. Another /32 is another address, the families are
+// apart, an ipv6 address is its /64, and the refusal spends nothing. A key
+// that passed at the address spends a budget of its own there instead
+// (TestExtenderActivateKeepsAProvenKeysAddressBudgetItsOwn), so every post
+// here is of a key new to the address.
 func TestExtenderActivateBudgetsEachAddress(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		installTestExtenderConfig(t, nil)
 
+		// seven clients over two accounts, each with a key of its own
 		firstAccount := newTestExtenderAccount(ctx)
 		secondAccount := newTestExtenderAccount(ctx)
-		firstHost := firstAccount.newHost(t, ctx)
-		secondHost := firstAccount.newHost(t, ctx)
-		thirdHost := secondAccount.newHost(t, ctx)
+		hosts := []*testExtenderHost{}
+		for range 4 {
+			hosts = append(hosts, firstAccount.newHost(t, ctx))
+		}
+		for range 3 {
+			hosts = append(hosts, secondAccount.newHost(t, ctx))
+		}
+		seventhHost := hosts[6]
 
 		service := newExtenderActivateService(DefaultExtenderActivateSettings())
 		service.testProbes = testFakeExtenderProbes(nil)
@@ -353,30 +362,20 @@ func TestExtenderActivateBudgetsEachAddress(t *testing.T) {
 			connect.AssertEqual(t, testTotalAccountActionAttemptCount(t, ctx), attemptCount)
 		}
 
-		// six posts from one address, over two accounts and three clients
+		// six posts from one address, over two accounts and six clients
 		const ipv4 = "198.51.100.7"
-		for i, host := range []*testExtenderHost{firstHost, firstHost, firstHost, secondHost, secondHost, thirdHost} {
+		for i, host := range hosts[:6] {
 			requireActivated(fmt.Sprintf("post %d", i+1), host, ipv4)
 		}
-		requireAddressRefused("the seventh post", thirdHost, ipv4, "IPv4")
-		requireActivated("a post from another /32", thirdHost, "198.51.100.8")
+		requireAddressRefused("the seventh post", seventhHost, ipv4, "IPv4")
+		requireActivated("a post from another /32", seventhHost, "198.51.100.8")
 
-		// ipv6 has a budget of its own, kept by /64
-		for i, post := range []struct {
-			host *testExtenderHost
-			ip   string
-		}{
-			{host: thirdHost, ip: "2001:db8:7::1"},
-			{host: firstHost, ip: "2001:db8:7::2"},
-			{host: firstHost, ip: "2001:db8:7::3"},
-			{host: firstHost, ip: "2001:db8:7::4"},
-			{host: secondHost, ip: "2001:db8:7::5"},
-			{host: secondHost, ip: "2001:db8:7::6"},
-		} {
-			requireActivated(fmt.Sprintf("ipv6 post %d", i+1), post.host, post.ip)
+		// ipv6 has a budget of its own, kept by /64, where no key has passed
+		for i, host := range hosts[:6] {
+			requireActivated(fmt.Sprintf("ipv6 post %d", i+1), host, fmt.Sprintf("2001:db8:7::%d", i+1))
 		}
-		requireAddressRefused("the seventh post from the /64", thirdHost, "2001:db8:7:0:ffff::1", "IPv6")
-		requireActivated("a post from another /64", thirdHost, "2001:db8:7:1::1")
+		requireAddressRefused("the seventh post from the /64", seventhHost, "2001:db8:7:0:ffff::1", "IPv6")
+		requireActivated("a post from another /64", seventhHost, "2001:db8:7:1::1")
 	})
 }
 
@@ -403,7 +402,7 @@ func TestExtenderActivateFailingHostsDoNotRaiseTheLimit(t *testing.T) {
 			service.testProbes = probes.probes(errors.New("connection refused"))
 			for i := firstHost; i < firstHost+60; i += 1 {
 				result := testActivateHost(t, ctx, service, hosts[i], testExtenderFleetIp(t, i, 4))
-				if result.Activated || !strings.Contains(result.Error, "tcp carrier did not answer") {
+				if result.Activated || !strings.Contains(result.Error, "the tcp carrier failed after ") {
 					t.Fatalf("%s: host %d was not refused by its probe: activated %t, %q", hour, i+1, result.Activated, result.Error)
 				}
 			}
