@@ -202,7 +202,7 @@ func runWithDependencies(
 	closeApiRouter := func() {}
 	var err error
 	if admitted {
-		apiRouter, closeApiRouter, err = NewRouter(processCtx, ctx)
+		apiRouter, closeApiRouter, err = newApiRouter(processCtx, ctx)
 		if err != nil {
 			return err
 		}
@@ -293,7 +293,27 @@ func startReservedAttemptUpload(ctx context.Context, start func(context.Context)
 // routeCtx owns the router and its stats. uploadCtx owns the reserved
 // validator staging cache, whose refresh loop stops when a drain begins while
 // the routes stay served until the close joins its leases.
+//
+// The stuck provider reports keep their code ceiling off here, as alt needs;
+// the api service's own router allows them (newApiRouter).
 func NewRouter(routeCtx context.Context, uploadCtx context.Context) (*router.Router, func(), error) {
+	return newRouterWithStuckProviderSignals(routeCtx, uploadCtx, controller.DefaultStuckProviderSignalSettings())
+}
+
+// The api service's router: NewRouter with stuck provider reports allowed, for
+// the Redis control to choose by block (controller/connect_control_stuck_provider.go).
+// StuckProviderSignalDefault keeps them off until it does.
+func newApiRouter(routeCtx context.Context, uploadCtx context.Context) (*router.Router, func(), error) {
+	stuckProviderSettings := controller.DefaultStuckProviderSignalSettings()
+	stuckProviderSettings.EnableStuckProviderSignal = true
+	return newRouterWithStuckProviderSignals(routeCtx, uploadCtx, stuckProviderSettings)
+}
+
+func newRouterWithStuckProviderSignals(
+	routeCtx context.Context,
+	uploadCtx context.Context,
+	stuckProviderSettings *controller.StuckProviderSignalSettings,
+) (*router.Router, func(), error) {
 	// The settlement v2 ledger routes read committed trees through the builder.
 	controller.InstallStLedgerBuilder()
 	reservedUpload := startReservedAttemptUpload(uploadCtx, controller.NewStReservedAttemptUpload)
@@ -301,7 +321,11 @@ func NewRouter(routeCtx context.Context, uploadCtx context.Context) (*router.Rou
 	// FindProviders2 answers served here count toward each provider's
 	// appearance histogram; the close writes what the drain left
 	appearances := model.NewProviderAppearances(routeCtx, model.DefaultProviderAppearanceSettings())
-	return router.NewRouter(routeCtx, routesWithReservedAttemptUpload(reservedUpload, routeOwners{notifications: notifications, appearances: appearances})),
-		func() { notifications.Close(); appearances.Close(); reservedUpload.Close() },
+	// nil while the ceiling is off
+	block, _ := server.Block()
+	stuckProviders := controller.NewStuckProviderSignals(routeCtx, stuckProviderSettings, block)
+	owners := routeOwners{notifications: notifications, appearances: appearances, stuckProviders: stuckProviders}
+	return router.NewRouter(routeCtx, routesWithReservedAttemptUpload(reservedUpload, owners)),
+		func() { notifications.Close(); appearances.Close(); stuckProviders.Close(); reservedUpload.Close() },
 		nil
 }

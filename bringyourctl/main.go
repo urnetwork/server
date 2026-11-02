@@ -1176,7 +1176,8 @@ func statsDayRange(opts docopt.Opts, defaultLookback time.Duration) (time.Time, 
 }
 
 // statsRollupTransfer (re-)rolls the daily settled-transfer audit rows for a
-// day range. Idempotent per day.
+// day range. Idempotent per day. A day the contract horizon reaper can reach
+// keeps its row (model.TransferAuditRollupFirstDay).
 func statsRollupTransfer(opts docopt.Opts) {
 	start, end := statsDayRange(opts, model.CompletedContractExpiration)
 	dayCount := model.RollupTransferAuditEvents(context.Background(), start, end)
@@ -1187,7 +1188,9 @@ func statsRollupTransfer(opts docopt.Opts) {
 // client_reliability blocks (reach bounded by that table's retention,
 // model.ClientReliabilityRetention)
 // and rolls up the settled-transfer days still present in the contract
-// tables. Explicitly labeled reconstruction (event_details provenance
+// tables; a day the contract horizon reaper can reach keeps its row
+// (model.TransferAuditRollupFirstDay). Explicitly labeled reconstruction
+// (event_details provenance
 // markers), idempotent by replacement — see model.BackfillProviderAuditEvents
 // for the stated approximations. It does NOT fabricate history beyond what
 // the real tables retain.

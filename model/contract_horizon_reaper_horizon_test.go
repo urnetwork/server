@@ -6,15 +6,15 @@ import (
 	"time"
 )
 
-// Pure: the control's horizonDays picks the horizon between the 45-day floor
+// Pure: the control's horizonDays picks the horizon between the 35-day floor
 // and the code's horizon, 91 days. It reads whole days. Absent or unparsable,
 // it keeps the code's horizon, the longest; a value past either end counts as
-// that end, so no value reaches inside 45 days, including one whose days would
+// that end, so no value reaches inside 35 days, including one whose days would
 // overflow a duration. It moves no other field, and no other field moves it.
 func TestNarrowContractHorizonControlHorizonDays(t *testing.T) {
 	const day = 24 * time.Hour
-	if ContractHorizonFloor != 45*day || ContractHorizonControlFieldHorizonDays != "horizonDays" {
-		t.Fatal("the floor is not 45 days, or the field is not horizonDays", ContractHorizonFloor, ContractHorizonControlFieldHorizonDays)
+	if ContractHorizonFloor != 35*day || ContractHorizonControlFieldHorizonDays != "horizonDays" {
+		t.Fatal("the floor is not 35 days, or the field is not horizonDays", ContractHorizonFloor, ContractHorizonControlFieldHorizonDays)
 	}
 	codeHorizon := func(horizon time.Duration) func(*ContractHorizonSettings) {
 		return func(settings *ContractHorizonSettings) {
@@ -29,15 +29,17 @@ func TestNarrowContractHorizonControlHorizonDays(t *testing.T) {
 	}{
 		{name: "absent", fields: map[string]string{}, horizon: 91 * day},
 		{name: "absent beside the other fields", fields: map[string]string{"mode": "on", "maxRowsPerSecond": "100", "batchSize": "500"}, horizon: 91 * day},
-		{name: "the floor", fields: map[string]string{"horizonDays": "45"}, horizon: 45 * day},
-		{name: "a day past the floor", fields: map[string]string{"horizonDays": "46"}, horizon: 46 * day},
+		{name: "the floor", fields: map[string]string{"horizonDays": "35"}, horizon: 35 * day},
+		{name: "a day past the floor", fields: map[string]string{"horizonDays": "36"}, horizon: 36 * day},
+		{name: "the earlier floor", fields: map[string]string{"horizonDays": "45"}, horizon: 45 * day},
 		{name: "between", fields: map[string]string{"mode": "on", "horizonDays": " 60 "}, horizon: 60 * day},
 		{name: "the code's horizon", fields: map[string]string{"horizonDays": "91"}, horizon: 91 * day},
-		{name: "a day below the floor", fields: map[string]string{"horizonDays": "44"}, horizon: 45 * day},
-		{name: "one day", fields: map[string]string{"horizonDays": "1"}, horizon: 45 * day},
-		{name: "zero", fields: map[string]string{"horizonDays": "0"}, horizon: 45 * day},
-		{name: "negative", fields: map[string]string{"horizonDays": "-30"}, horizon: 45 * day},
-		{name: "the most negative", fields: map[string]string{"horizonDays": "-9223372036854775808"}, horizon: 45 * day},
+		{name: "a day below the floor", fields: map[string]string{"horizonDays": "34"}, horizon: 35 * day},
+		{name: "thirty days", fields: map[string]string{"horizonDays": "30"}, horizon: 35 * day},
+		{name: "one day", fields: map[string]string{"horizonDays": "1"}, horizon: 35 * day},
+		{name: "zero", fields: map[string]string{"horizonDays": "0"}, horizon: 35 * day},
+		{name: "negative", fields: map[string]string{"horizonDays": "-30"}, horizon: 35 * day},
+		{name: "the most negative", fields: map[string]string{"horizonDays": "-9223372036854775808"}, horizon: 35 * day},
 		{name: "a day above the code's horizon", fields: map[string]string{"horizonDays": "92"}, horizon: 91 * day},
 		{name: "a year", fields: map[string]string{"horizonDays": "365"}, horizon: 91 * day},
 		// 106752 days is past the largest duration: multiplied first, it
@@ -47,15 +49,15 @@ func TestNarrowContractHorizonControlHorizonDays(t *testing.T) {
 		{name: "out of range", fields: map[string]string{"horizonDays": "99999999999999999999"}, horizon: 91 * day},
 		{name: "empty", fields: map[string]string{"horizonDays": ""}, horizon: 91 * day},
 		{name: "garbage", fields: map[string]string{"mode": "on", "horizonDays": "soon"}, horizon: 91 * day},
-		{name: "fractional", fields: map[string]string{"horizonDays": "45.5"}, horizon: 91 * day},
-		{name: "with a unit", fields: map[string]string{"horizonDays": "45d"}, horizon: 91 * day},
-		{name: "a duration", fields: map[string]string{"horizonDays": "1080h"}, horizon: 91 * day},
-		{name: "hexadecimal", fields: map[string]string{"horizonDays": "0x2d"}, horizon: 91 * day},
+		{name: "fractional", fields: map[string]string{"horizonDays": "35.5"}, horizon: 91 * day},
+		{name: "with a unit", fields: map[string]string{"horizonDays": "35d"}, horizon: 91 * day},
+		{name: "a duration", fields: map[string]string{"horizonDays": "840h"}, horizon: 91 * day},
+		{name: "hexadecimal", fields: map[string]string{"horizonDays": "0x23"}, horizon: 91 * day},
 		{name: "NaN", fields: map[string]string{"horizonDays": "NaN"}, horizon: 91 * day},
-		{name: "beside the code switch off", fields: map[string]string{"mode": "on", "horizonDays": "45"}, mutate: func(s *ContractHorizonSettings) { s.Enable = false },
-			horizon: 45 * day},
-		{name: "a code horizon below the floor", fields: map[string]string{}, mutate: codeHorizon(30 * day), horizon: 45 * day},
-		{name: "a code horizon below the floor caps the control", fields: map[string]string{"horizonDays": "60"}, mutate: codeHorizon(30 * day), horizon: 45 * day},
+		{name: "beside the code switch off", fields: map[string]string{"mode": "on", "horizonDays": "35"}, mutate: func(s *ContractHorizonSettings) { s.Enable = false },
+			horizon: 35 * day},
+		{name: "a code horizon below the floor", fields: map[string]string{}, mutate: codeHorizon(30 * day), horizon: 35 * day},
+		{name: "a code horizon below the floor caps the control", fields: map[string]string{"horizonDays": "60"}, mutate: codeHorizon(30 * day), horizon: 35 * day},
 		{name: "a longer code horizon", fields: map[string]string{}, mutate: codeHorizon(120 * day), horizon: 120 * day},
 		{name: "inside a longer code horizon", fields: map[string]string{"horizonDays": "100"}, mutate: codeHorizon(120 * day), horizon: 100 * day},
 		{name: "past a longer code horizon", fields: map[string]string{"horizonDays": "200"}, mutate: codeHorizon(120 * day), horizon: 120 * day},
@@ -89,16 +91,17 @@ func TestContractHorizonFromDays(t *testing.T) {
 		ceiling time.Duration
 		want    time.Duration
 	}{
+		{days: 35, ceiling: 91 * day, want: 35 * day},
 		{days: 45, ceiling: 91 * day, want: 45 * day},
 		{days: 60, ceiling: 91 * day, want: 60 * day},
 		{days: 91, ceiling: 91 * day, want: 91 * day},
-		{days: 44, ceiling: 91 * day, want: 45 * day},
-		{days: -1 << 63, ceiling: 91 * day, want: 45 * day},
+		{days: 34, ceiling: 91 * day, want: 35 * day},
+		{days: -1 << 63, ceiling: 91 * day, want: 35 * day},
 		{days: 92, ceiling: 91 * day, want: 91 * day},
 		{days: 1<<63 - 1, ceiling: 91 * day, want: 91 * day},
 		// a ceiling at the floor admits nothing else
-		{days: 46, ceiling: 45 * day, want: 45 * day},
-		{days: 46, ceiling: 45*day + time.Hour, want: 45*day + time.Hour},
+		{days: 36, ceiling: 35 * day, want: 35 * day},
+		{days: 36, ceiling: 35*day + time.Hour, want: 35*day + time.Hour},
 	} {
 		if got := contractHorizonFromDays(sample.days, sample.ceiling); got != sample.want {
 			t.Errorf("%d days under %s: %s, want %s", sample.days, sample.ceiling, got, sample.want)

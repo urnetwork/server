@@ -43,8 +43,11 @@ func queueLegacyProviderTotalsInTx(ctx context.Context, tx server.PgTx, contract
 	server.Raise(err)
 	owner := session.NewLocalClientSession(ctx, "", nil)
 	defer owner.Cancel()
+	// The drain removes the row before the per-task reader may claim it
+	// (subscription_provider_totals_drain.go).
 	scheduled, taskId := task.ScheduleTaskInTxIfAbsent(tx, ApplyLegacyProviderTotals, json.RawMessage(data), owner,
-		task.RunOnce("legacy_provider_totals", contractId), task.MaxTime(10*time.Second), task.RequireQueueOwnership(tx))
+		task.RunOnce("legacy_provider_totals", contractId), task.RunAt(server.NowUtc().Add(legacyProviderTotalsDeferral)),
+		task.MaxTime(10*time.Second), task.RequireQueueOwnership(tx))
 	if !scheduled {
 		// Never merge a second allocation into an existing task's immutable
 		// arguments. The contract outcome must admit exactly one insertion.

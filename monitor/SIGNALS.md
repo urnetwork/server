@@ -9608,6 +9608,33 @@ owners must retain their recovery payloads until applied. Explicit task deletion
 or retiring the target before that point is unsafe. Existing insufficient-escrow,
 dispute, reservation and payout-attribution holds remain unchanged.
 
+Provider-total drain (2026-11-01): the per-task reader could not keep up. A
+provider's rows apply one cohort at a time (one claim group key, at most 64
+members), and each cohort is a chain of serialized round trips, so its rate
+follows the primary's latency. On Main on 2026-11-01 four providers had 82% of
+27M queued rows; a provider took a cohort about every 85 ms with 6 to 18
+members; the reader applied 440 to 915 rows a second with edge-2 CPU under 0.5
+and 46 to 485 at 0.55 and above (hourly correlation -0.90), against about 450
+to 850 a second produced. The oldest-first claim window then filled with the
+hot providers' rows, other claims came back empty and slept their poll timeout,
+and the queue's oldest row reached about 10 hours. `controller.ProviderIntentCheck`
+rows waited behind it just as long.
+
+The fleet-wide `drain_legacy_provider_totals` chain
+(model/subscription_provider_totals_drain.go) now consumes the rows in task id
+order, up to 1,024 per pass, credit and removal in one transaction under the
+complete account owner, at most `rows_per_second` (default 4,000) removed rows.
+Producers schedule each row 5 minutes ahead, so the per-task reader only takes
+rows the drain has not; it stays the fallback. `provider_totals.yml`
+(`drain.enabled`, `drain.rows_per_second`) pauses or paces the drain without a
+deploy. Watch `urnetwork_provider_totals_drain_rows_total{outcome}`,
+`urnetwork_provider_totals_drain_passes_total{result="error"}` and
+`urnetwork_provider_totals_drain_position_timestamp_seconds` (now minus it is the
+drain's lag; it stays at least a minute behind by design). Drained rows are
+deleted, not moved to `finished_task`, so task finishes per second fall below
+submissions without any task being lost. A persistent `left` count with an old
+queue head means rows the per-task reader still holds or cannot apply.
+
 A normalized `panic` log class is not proof of an uncaught worker failure.
 `server.HandleError` recovers a raised error, emits `Unexpected error` unless it
 is an explicit Done, and calls the error handler. In the qualified R59
@@ -19907,7 +19934,8 @@ query and a duplicated cell still make the process unobservable.
 While the owning context remains live, source-path errors retain that same
 coverage WARN and `Bounded Mimir query unavailable` wording, with the shared
 finite `error_class` and any typed `ssh_admission_failures` phases. A finished
-owning context keeps the exact context-error return. Successful malformed,
+owning context keeps its context verdict and error text while retaining already
+returned source causes in the error graph. Successful malformed,
 warning or oversized replies retain the separate parser-unknown path. These
 diagnostics add no request, raw error, body or private gateway identity, and
 change no query, route, gateway order, deadline, response cap, cadence,
@@ -19920,6 +19948,13 @@ a finite set from returned errors, not gateway order, attempt counts or native
 contacts; release failure can follow command execution. False-negative
 qualifier: older coarse warnings cannot recover the discarded causes, and a
 finite legacy command class can still leave the HTTP/query boundary unknown.
+
+When an already-started owner ends during a gateway read, retain the returned
+source error graph and its finite local execution proofs while cancellation or
+deadline remains the lifecycle verdict and rendered error text. Publish no
+retired pressure result and contact no additional gateway. Nil-source returns
+add no proof. These diagnostics do not recover old discarded causes or identify
+remote progress, pressure, customer impact or a shared dependency failure.
 A healthy sibling or different logical query cannot explain this failure or
 certify its coverage. Preserve independently proven pressure and require fresh,
 complete expected-slot evidence plus the existing pressure and product recovery
@@ -20695,6 +20730,14 @@ a started/joined local SSH child alone proves no remote contact. False-negative
 qualifier: an absent boundary marker remains unknown, and an unavailable census
 cannot clear prior quota/security findings or certify recovery. A later valid
 census is a visibility control and needs its own fresh source identity and clocks.
+
+If the owner ends after a census gateway returns, retain that returned source
+error alongside cancellation or deadline expiry. Existing local admission and
+native execution proofs remain available to the generic `cannot-observe`
+projection; no retired census, source clock or provider count is published.
+A nil source adds no execution proof. This preserves next-attempt diagnostic
+authority only; it cannot reconstruct an older discarded error or establish a
+provider cause, remote completion, source completeness or recovery.
 
 A separately bound single-attempt diagnostic can refine this source failure
 when it retains an actual native SSH exit 255 and the existing exact
@@ -21643,6 +21686,17 @@ absent. There is no supported payload clock-lead allowance. An invalid or
 future payload, including a huge finite timestamp, makes stall age
 `cannot-observe`, while independently observed disabled passes still alert.
 Neither a fresh evaluation timestamp nor a future payload proves a recent pass.
+
+If an owner starts live and ends while a desired configuration or metrics
+read returns, keep its cancellation/deadline verdict and returned source error
+graph;
+no retired capability finding is published. Generic visibility may retain
+finite local admission/execution proof, never the source text, body or private
+identity. A nil source adds no proof, and no later gateway is contacted. A live
+owner keeps the existing local unavailable finding. Legacy pre-canceled local
+behavior remains unchanged. Local proof does not establish remote completion,
+a stopped capability chain, failed provider measurement or recovery; missing
+source/phase/outcome authority remains unknown and cannot be backfilled.
 
 False-positive qualifiers: clock skew can cause unknown age without proving
 a failed clock, stalled chain or outage. Ordinary thirty-minute startup grace
@@ -23252,6 +23306,16 @@ responding component, no HTTP retry or IPv4 replay, 401/403-specific guidance,
 ### 2.28 Current signup progress, route errors, and total consistency
 Probe: `signup-liveness`
 
+If the owning context ends while an already-started metrics read returns,
+retain its source error graph alongside the parent's cancellation/deadline.
+The generic visibility projection may retain only finite local admission and
+execution proofs; retired durable/metrics findings stay unpublished and no
+later demand/total query is added. Nil-source completion invents no proof.
+False-positive qualifier: a returned local boundary is not remote completion,
+failed signup or a shared backend cause. False-negative qualifier: missing
+original error/stage/clock and retired source coverage remain unknown; the
+correction cannot backfill historical causes or establish recovery.
+
 This ten-minute WARN probe is separate from §2.26's matured quality cohort.
 It does not infer an outage, automation, valid customer intent, or failure of
 every auth branch from a net-total plateau or an empty signup window. Four
@@ -24495,6 +24559,18 @@ Probe: `redis-connections`
   process limit, or persisted sustain/ticket state. If the existing exporter
   history or generation labels are unavailable, restoring that precise source
   is a prerequisite and its coverage remains explicitly unknown.
+- A returned history-query failure keeps the fixed public error text while its
+  original typed/context/local-boundary causes remain in the error graph. If
+  the observation owner ends after history returns, the generic visibility
+  error preserves those returned history and earlier native-source causes;
+  cancellation/deadline remains the lifecycle verdict and error text. Retired
+  client-growth findings and batteries stay unpublished, and a nil source adds
+  no execution proof. This changes no query, fallback order, cadence, threshold
+  or shared-history incident identity. False-positive qualifier: finite local
+  proof and a canceled observation do not establish remote progress, Redis
+  growth, an outage or a shared cause between the two sources. False-negative
+  qualifier: old discarded graphs cannot be recovered; absent source/stage
+  authority and incomplete history stay unknown rather than healthy.
 - On a sustained per-node outlier, the probe runs one bounded `CLIENT LIST`
   battery. Its public schema contains numeric command-class counts, total and
   maximum output memory, and maximum idle/age values; raw client names, users,
@@ -43206,11 +43282,13 @@ changing routes or containers. Disabled hosts in `monitor.yml` are deliberately
 excluded; this is how an operator-declared offline edge such as edge-5 stays out
 of both the health denominator and remote diagnostics.
 
-A curl exit 7 in less than one second is an immediate refusal only after a
-bounded monitor-local IPv6 route lookup proves the observer has a route. Do not
+A complete curl exit 7 in less than one second records an immediate connection
+failure. The bounded monitor-local IPv6 route lookup must qualify the observer
+route before assigning that failure to the edge; exit 7 alone does not prove a
+refused connection or TCP reset. Do not
 automatically label every such refusal dead-first DNAT. When the interface,
 configured address, LB controller, exact source route, and bound-source egress
-are healthy, the host-local SNI request also refuses in less than one second,
+are healthy, the host-local SNI request also fails in less than one second,
 and no configured LB pool socket is listening, reduce the matching LB journal
 to a count of one exact recent nginx `could not build map_hash` admission
 signature. A positive count emits PAGE `edge-lb-config-rejected`. The probe
@@ -43244,17 +43322,28 @@ after the other admission predicates matched, and the probe emitted both
 failure now terminates that target's causal classification at unknown; a
 synthetic regression proves it cannot fall through to reset.
 
-If the bounded admission discriminator is absent, continue to classify the
-ordinary immediate refusal as `edge-ipv6-reset`. Inspect DNAT rules in order
-and compare every pool target with live listening sockets. During a
-duplicate-to-single rolling transition, an old first rule can point at a
-listener that closed after the overlap scan while shadowing a later live rule.
-Remove only the proven dead target and deploy Warp's final socket-authoritative
-reconciliation on that transition. If the admission observation itself fails,
-emit `cannot-observe` and withhold reset classification when the other bounded
-admission-candidate predicates matched. Never infer a config rejection or a
-dead-first DNAT target from that unknown observation, controller activity, or
-an unbounded log search.
+If the bounded admission discriminator is absent, retain the genuine immediate
+curl connection failure as PAGE under the legacy identity `edge-ipv6-reset`.
+That identity is not a typed TCP-reset diagnosis. Curl exit 7 and sub-second
+duration alone do not prove a reset, a dead listener, or an ordered DNAT cause,
+even if stderr mentions a reset or a historical rolling transition had that
+cause. Preserve the failed exact-target observation and require independent
+same-target listener and ordered-rule evidence before attributing or repairing
+that layer. This observation does not authorize DNAT removal, deployment,
+restart, route or address changes. Curl 35/56 without an HTTP response likewise
+retain their current public failure classification without establishing a reset
+or forwarding cause. Missing/invalid native measurements remain unknown.
+
+The legacy class, PAGE severity, cadence, sustain, target identity, observer
+controls, narrow positive configuration-admission discriminator and three-200
+recovery contract are unchanged. This preserves incident continuity while
+correcting the mechanism and action. False positives: unavailable host controls
+or a rapid failure cannot supply absent causal proof. False negatives: keeping
+the cause unknown must not suppress a complete genuine transport failure. A
+provider IPv6 pause does not suppress public-edge IPv6 observations. If the
+admission observation itself fails, emit `cannot-observe` and withhold this
+classification when the other bounded admission-candidate predicates matched;
+that unknown observation cannot prove config rejection or a dead-first target.
 
 Run the monitor-local route lookup before the exact probes and again after an
 all-target pre-HTTP connection-failure cohort. Every target must have complete

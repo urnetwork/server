@@ -501,6 +501,59 @@ func operatorBlockReliabilityBlockWindow(start time.Time, end time.Time) (minBlo
 	return paymentPlanReliabilityBlockWindow(start, end.Add(-time.Nanosecond))
 }
 
+// The reliability window that starts at minBlockNumber is still inside
+// client_reliability retention at now, so an award of it can still be
+// computed. One predicate for the award (readOperatorBlockReliability), which
+// fails closed past it, and for the blocks whose sweeps the contract horizon
+// reaper keeps (OperatorBlockPointsPendingWindows).
+func operatorBlockReliabilityRetained(minBlockNumber int64, now time.Time) bool {
+	return clientReliabilityRetentionCutoffBlock(now) <= minBlockNumber
+}
+
+// The blocks with traffic past the cutoff whose reliability is still retained
+// at now, ascending, through the block after the open one: an award can still
+// be computed for each, now or once it completes. The block after the open one
+// covers a sweep that commits in it while a caller still holds this list. Pure.
+func operatorBlockPointsAwardableBlocks(cutoff time.Time, now time.Time) []int64 {
+	blocks := []int64{}
+	for block := max(1, pointsBlockOf(cutoff)); block <= pointsBlockOf(now)+1; block += 1 {
+		start, end, ok := OperatorBlockPointsWindow(block, cutoff)
+		if !ok {
+			continue
+		}
+		minBlockNumber, _ := operatorBlockReliabilityBlockWindow(start, end)
+		if operatorBlockReliabilityRetained(minBlockNumber, now) {
+			blocks = append(blocks, block)
+		}
+	}
+	return blocks
+}
+
+// The traffic windows, [starts[i], ends[i]), that an award can still read
+// (ComputeOperatorBlockPoints): those of the awardable blocks
+// (operatorBlockPointsAwardableBlocks) that have no award yet. An award reads
+// the unpaid sweeps whose sweep time is in its window, and a sweep's time is
+// its settlement, so a contract minted and closed long before can still have
+// one there. Outside these windows a block is awarded, can never be awarded
+// because its reliability is past retention (the award fails closed), or has
+// no traffic past the cutoff.
+func OperatorBlockPointsPendingWindows(ctx context.Context, cutoff time.Time, now time.Time) (starts []time.Time, ends []time.Time, returnErr error) {
+	defer recoverOperatorBlockPointsError(&returnErr)
+	blocks := operatorBlockPointsAwardableBlocks(cutoff, now)
+	awarded := GetOperatorBlockPointsAwarded(ctx, blocks)
+	starts = []time.Time{}
+	ends = []time.Time{}
+	for _, block := range blocks {
+		if awarded[block] {
+			continue
+		}
+		start, end, _ := OperatorBlockPointsWindow(block, cutoff)
+		starts = append(starts, start)
+		ends = append(ends, end)
+	}
+	return starts, ends, nil
+}
+
 // A network's clients in one country; hasCountry is false for a valid client
 // location without a country.
 type operatorBlockReliabilityKey struct {
@@ -522,7 +575,7 @@ func readOperatorBlockReliability(ctx context.Context, start time.Time, end time
 		networkWeights: map[server.Id]float64{},
 	}
 	checkRetention := func() error {
-		if minBlockNumber < clientReliabilityRetentionCutoffBlock(now) {
+		if !operatorBlockReliabilityRetained(minBlockNumber, now) {
 			return fmt.Errorf("%w: window starts at reliability block %d", ErrOperatorBlockPointsReliabilityExpired, minBlockNumber)
 		}
 		return nil

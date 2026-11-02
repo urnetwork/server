@@ -4,6 +4,7 @@ package monitor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -72,7 +73,7 @@ func (self *redisConnectionsProbe) check(ctx context.Context, env *probeEnv) ([]
 	at := env.now().UTC().Truncate(time.Second)
 	history, historyErr := observeRedisClientsHistory(ctx, env, targets, at)
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, mimirShellParentError(err, errors.Join(nativeErr, historyErr))
 	}
 	targetNames := make([]string, 0, len(targets))
 	for target := range targets {
@@ -86,7 +87,7 @@ func (self *redisConnectionsProbe) check(ctx context.Context, env *probeEnv) ([]
 	}
 	for _, target := range targetNames {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, mimirShellParentError(err, errors.Join(nativeErr, historyErr))
 		}
 		temporal, found := history[target]
 		if historyErr != nil || !found {
@@ -121,7 +122,7 @@ func (self *redisConnectionsProbe) check(ctx context.Context, env *probeEnv) ([]
 			return redisConnectionBattery(ctx, env, node.host, node.port)
 		})
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, mimirShellParentError(err, errors.Join(nativeErr, historyErr))
 		}
 		if currentSpike {
 			diagnosis := diagnoseRedisConnectionSpike(evidence)

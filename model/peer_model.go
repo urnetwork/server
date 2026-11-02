@@ -763,6 +763,59 @@ func prepareNetworkPeerMutation(
 	return
 }
 
+// Registers one member at the expected mutation version. The member's
+// provider intent exempt index entry follows its connected entry
+// (provider_intent_exempt_index.go).
+var networkPeerAddLua = fmt.Sprintf(`%s
+local meta_key = KEYS[1]
+local member_key = KEYS[2]
+local connected_key = KEYS[3]
+local disconnected_key = KEYS[4]
+local event_id_key = KEYS[5]
+local mutation_version_key = KEYS[6]
+local mutation_receipt_key = KEYS[7]
+local exempt_key = KEYS[8]
+local pi_key = KEYS[9]
+local present_key = KEYS[10]
+local expire_key = KEYS[11]
+
+local member = ARGV[1]
+local expected_mutation_version = ARGV[2]
+local meta = ARGV[3]
+local expiry_ms = ARGV[4]
+local member_ttl_ms = ARGV[5]
+local key_ttl_seconds = ARGV[6]
+local receipt_ttl_seconds = ARGV[7]
+
+local previous_result = redis.call('GET', mutation_receipt_key)
+if previous_result ~= false then
+	return tonumber(previous_result)
+end
+
+if redis.call('GET', mutation_version_key) ~= expected_mutation_version then
+	return 0
+end
+
+redis.call('HSET', meta_key, member, meta)
+redis.call('SET', member_key, meta, 'PX', member_ttl_ms)
+redis.call('ZADD', connected_key, expiry_ms, member)
+redis.call('ZREM', disconnected_key, member)
+redis.call('INCR', mutation_version_key)
+redis.call('INCR', event_id_key)
+sync_exempt_index(exempt_key, 'c', connected_key, pi_key, present_key, expire_key, member, key_ttl_seconds)
+
+redis.call('EXPIRE', meta_key, key_ttl_seconds)
+redis.call('EXPIRE', connected_key, key_ttl_seconds)
+redis.call('EXPIRE', disconnected_key, key_ttl_seconds)
+redis.call('EXPIRE', mutation_version_key, key_ttl_seconds)
+redis.call('EXPIRE', event_id_key, key_ttl_seconds)
+redis.call('SET', mutation_receipt_key, 1, 'EX', receipt_ttl_seconds)
+return 1
+`, providerIntentExemptSyncLua)
+
+// Run by sha, since the body carries the exempt index sync.
+var networkPeerAddScript = redis.NewScript(networkPeerAddLua)
+
 // Commits one registration only if no provide update or lifecycle mutation
 // occurred since canonical modes were loaded.
 func addNetworkPeerAtMutationVersion(
@@ -784,49 +837,9 @@ func addNetworkPeerAtMutationVersion(
 	expiryMs := server.NowUtc().Add(ttl).UnixMilli()
 
 	server.Redis(ctx, func(r server.RedisClient) {
-		addedInt, err := r.Eval(
+		addedInt, err := networkPeerAddScript.Run(
 			ctx,
-			`
-			local meta_key = KEYS[1]
-			local member_key = KEYS[2]
-			local connected_key = KEYS[3]
-			local disconnected_key = KEYS[4]
-			local event_id_key = KEYS[5]
-			local mutation_version_key = KEYS[6]
-			local mutation_receipt_key = KEYS[7]
-
-			local member = ARGV[1]
-			local expected_mutation_version = ARGV[2]
-			local meta = ARGV[3]
-			local expiry_ms = ARGV[4]
-			local member_ttl_ms = ARGV[5]
-			local key_ttl_seconds = ARGV[6]
-			local receipt_ttl_seconds = ARGV[7]
-
-			local previous_result = redis.call('GET', mutation_receipt_key)
-			if previous_result ~= false then
-				return tonumber(previous_result)
-			end
-
-			if redis.call('GET', mutation_version_key) ~= expected_mutation_version then
-				return 0
-			end
-
-			redis.call('HSET', meta_key, member, meta)
-			redis.call('SET', member_key, meta, 'PX', member_ttl_ms)
-			redis.call('ZADD', connected_key, expiry_ms, member)
-			redis.call('ZREM', disconnected_key, member)
-			redis.call('INCR', mutation_version_key)
-			redis.call('INCR', event_id_key)
-
-			redis.call('EXPIRE', meta_key, key_ttl_seconds)
-			redis.call('EXPIRE', connected_key, key_ttl_seconds)
-			redis.call('EXPIRE', disconnected_key, key_ttl_seconds)
-			redis.call('EXPIRE', mutation_version_key, key_ttl_seconds)
-			redis.call('EXPIRE', event_id_key, key_ttl_seconds)
-			redis.call('SET', mutation_receipt_key, 1, 'EX', receipt_ttl_seconds)
-			return 1
-			`,
+			r,
 			[]string{
 				networkPeerMetaKey(networkId),
 				networkPeerMemberKey(networkId, peer.ClientId),
@@ -835,6 +848,10 @@ func addNetworkPeerAtMutationVersion(
 				networkPeerEventIdKey(networkId),
 				networkPeerMutationVersionKey(networkId, peer.ClientId),
 				networkPeerMutationReceiptKey(networkId, operationId),
+				providerIntentExemptKey(networkId),
+				providerIntentKey(networkId),
+				providerIntentPresentKey(networkId),
+				providerIntentExpireKey(networkId),
 			},
 			member,
 			expectedMutationVersion,
@@ -907,6 +924,61 @@ func AddNetworkPeer(
 	})
 }
 
+// Extends one exact registration. The member's provider intent exempt index
+// entry follows its connected entry (provider_intent_exempt_index.go).
+var networkPeerRefreshLua = fmt.Sprintf(`%s
+local meta_key = KEYS[1]
+local member_key = KEYS[2]
+local connected_key = KEYS[3]
+local disconnected_key = KEYS[4]
+local mutation_version_key = KEYS[5]
+local exempt_key = KEYS[6]
+local pi_key = KEYS[7]
+local present_key = KEYS[8]
+local expire_key = KEYS[9]
+
+local member = ARGV[1]
+local expected_meta = ARGV[2]
+local expected_version_exists = ARGV[3] == '1'
+local expected_version = ARGV[4]
+local expiry_ms = ARGV[5]
+local member_ttl_ms = ARGV[6]
+local key_ttl_seconds = ARGV[7]
+
+if redis.call('HGET', meta_key, member) ~= expected_meta then
+	return 0
+end
+local mutation_version = redis.call('GET', mutation_version_key)
+if expected_version_exists then
+	if mutation_version == false or mutation_version ~= expected_version then
+		return 0
+	end
+elseif mutation_version ~= false then
+	return 0
+end
+
+local member_meta = redis.call('GET', member_key)
+local member_ttl = redis.call('PTTL', member_key)
+if member_meta == false or member_meta ~= expected_meta or member_ttl <= 0 then
+	return 2
+end
+
+if mutation_version == false then
+	redis.call('SET', mutation_version_key, 0, 'EX', key_ttl_seconds)
+end
+redis.call('ZADD', connected_key, expiry_ms, member)
+sync_exempt_index(exempt_key, 'c', connected_key, pi_key, present_key, expire_key, member, key_ttl_seconds)
+redis.call('PEXPIRE', member_key, member_ttl_ms)
+redis.call('EXPIRE', meta_key, key_ttl_seconds)
+redis.call('EXPIRE', connected_key, key_ttl_seconds)
+redis.call('EXPIRE', disconnected_key, key_ttl_seconds)
+redis.call('EXPIRE', mutation_version_key, key_ttl_seconds)
+return 1
+`, providerIntentExemptSyncLua)
+
+// Run by sha, since the body carries the exempt index sync.
+var networkPeerRefreshScript = redis.NewScript(networkPeerRefreshLua)
+
 // Extends one exact registration without producing a visible event. A missing
 // member key is a lost registration, not permission to recreate metadata read
 // before a concurrent replacement.
@@ -926,58 +998,19 @@ func refreshNetworkPeerAtMutationState(
 	}
 
 	server.Redis(ctx, func(r server.RedisClient) {
-		refreshedInt, err := r.Eval(
+		refreshedInt, err := networkPeerRefreshScript.Run(
 			ctx,
-			`
-			local meta_key = KEYS[1]
-			local member_key = KEYS[2]
-			local connected_key = KEYS[3]
-			local disconnected_key = KEYS[4]
-			local mutation_version_key = KEYS[5]
-
-			local member = ARGV[1]
-			local expected_meta = ARGV[2]
-			local expected_version_exists = ARGV[3] == '1'
-			local expected_version = ARGV[4]
-			local expiry_ms = ARGV[5]
-			local member_ttl_ms = ARGV[6]
-			local key_ttl_seconds = ARGV[7]
-
-			if redis.call('HGET', meta_key, member) ~= expected_meta then
-				return 0
-			end
-			local mutation_version = redis.call('GET', mutation_version_key)
-			if expected_version_exists then
-				if mutation_version == false or mutation_version ~= expected_version then
-					return 0
-				end
-			elseif mutation_version ~= false then
-				return 0
-			end
-
-			local member_meta = redis.call('GET', member_key)
-			local member_ttl = redis.call('PTTL', member_key)
-			if member_meta == false or member_meta ~= expected_meta or member_ttl <= 0 then
-				return 2
-			end
-
-			if mutation_version == false then
-				redis.call('SET', mutation_version_key, 0, 'EX', key_ttl_seconds)
-			end
-			redis.call('ZADD', connected_key, expiry_ms, member)
-			redis.call('PEXPIRE', member_key, member_ttl_ms)
-			redis.call('EXPIRE', meta_key, key_ttl_seconds)
-			redis.call('EXPIRE', connected_key, key_ttl_seconds)
-			redis.call('EXPIRE', disconnected_key, key_ttl_seconds)
-			redis.call('EXPIRE', mutation_version_key, key_ttl_seconds)
-			return 1
-			`,
+			r,
 			[]string{
 				networkPeerMetaKey(networkId),
 				networkPeerMemberKey(networkId, clientId),
 				networkPeerConnectedKey(networkId),
 				networkPeerDisconnectedKey(networkId),
 				networkPeerMutationVersionKey(networkId, clientId),
+				providerIntentExemptKey(networkId),
+				providerIntentKey(networkId),
+				providerIntentPresentKey(networkId),
+				providerIntentExpireKey(networkId),
 			},
 			member,
 			state.metaBytes,
@@ -1063,6 +1096,7 @@ func removeNetworkPeerAtMutationState(
 			local event_id_key = KEYS[5]
 			local mutation_version_key = KEYS[6]
 			local mutation_receipt_key = KEYS[7]
+			local exempt_key = KEYS[8]
 
 			local member = ARGV[1]
 			local expected_meta = ARGV[2]
@@ -1096,6 +1130,8 @@ func removeNetworkPeerAtMutationState(
 			redis.call('HDEL', meta_key, member)
 			redis.call('DEL', member_key)
 			redis.call('ZREM', connected_key, member)
+			-- the provider intent exempt index entry leaves with the connected entry
+			redis.call('ZREM', exempt_key, 'c' .. member)
 			redis.call('ZADD', disconnected_key, disconnect_time_ms, member)
 			redis.call('INCR', event_id_key)
 
@@ -1115,6 +1151,7 @@ func removeNetworkPeerAtMutationState(
 				networkPeerEventIdKey(networkId),
 				networkPeerMutationVersionKey(networkId, clientId),
 				networkPeerMutationReceiptKey(networkId, operationId),
+				providerIntentExemptKey(networkId),
 			},
 			member,
 			state.metaBytes,
@@ -1241,6 +1278,7 @@ func isolateNetworkPeer(ctx context.Context, networkId server.Id, clientId serve
 			local event_id_key = KEYS[5]
 			local mutation_version_key = KEYS[6]
 			local isolated_key = KEYS[7]
+			local exempt_key = KEYS[8]
 
 			local member = ARGV[1]
 			local key_ttl_seconds = ARGV[2]
@@ -1262,6 +1300,9 @@ func isolateNetworkPeer(ctx context.Context, networkId server.Id, clientId serve
 			redis.call('HDEL', meta_key, member)
 			redis.call('DEL', member_key)
 			redis.call('ZREM', connected_key, member)
+			-- the provider intent exempt index entry leaves with the connected
+			-- entry; the isolated zset is always counted as normal
+			redis.call('ZREM', exempt_key, 'c' .. member)
 			redis.call('ZREM', disconnected_key, member)
 			if expiry ~= false then
 				redis.call('ZADD', isolated_key, expiry, member)
@@ -1279,6 +1320,7 @@ func isolateNetworkPeer(ctx context.Context, networkId server.Id, clientId serve
 				networkPeerEventIdKey(networkId),
 				networkPeerMutationVersionKey(networkId, clientId),
 				networkPeerConnectedProxyKey(networkId),
+				providerIntentExemptKey(networkId),
 			},
 			member,
 			int64(networkPeerKeyTtl/time.Second),
@@ -1327,6 +1369,36 @@ func GetNetworkConnectedCount(ctx context.Context, networkId server.Id) (count i
 	return
 }
 
+// Registers or refreshes one provider install, then ages out expired installs,
+// a bounded batch per call. The provider intent exempt index entries follow
+// the provider entries (provider_intent_exempt_index.go).
+var networkPeerAddProviderLua = fmt.Sprintf(`%s
+local provider_key = KEYS[1]
+local exempt_key = KEYS[2]
+local pi_key = KEYS[3]
+local present_key = KEYS[4]
+local expire_key = KEYS[5]
+
+local member = ARGV[1]
+local expiry_ms = ARGV[2]
+local now = ARGV[3]
+local key_ttl_seconds = ARGV[4]
+local prune_limit = tonumber(ARGV[5])
+
+redis.call('ZADD', provider_key, expiry_ms, member)
+redis.call('EXPIRE', provider_key, key_ttl_seconds)
+sync_exempt_index(exempt_key, 'p', provider_key, pi_key, present_key, expire_key, member, key_ttl_seconds)
+
+local expired = redis.call('ZRANGEBYSCORE', provider_key, '-inf', now, 'LIMIT', 0, prune_limit)
+for _, expired_member in ipairs(expired) do
+	redis.call('ZREM', provider_key, expired_member)
+	redis.call('ZREM', exempt_key, 'p' .. expired_member)
+end
+`, providerIntentExemptSyncLua)
+
+// Run by sha, since the body carries the exempt index sync.
+var networkPeerAddProviderScript = redis.NewScript(networkPeerAddProviderLua)
+
 // Registers a connected provider install. Like a proxy client it is counted
 // (by the provider intent rules, see GetNetworkConnectedClientCounts) and never
 // appears in the peer list or emits events. Refresh by calling again with a
@@ -1338,33 +1410,34 @@ func AddNetworkProviderPeer(
 	ttl time.Duration,
 ) {
 	member := string(clientId.Bytes())
-	expiryMs := server.NowUtc().Add(ttl).UnixMilli()
+	now := server.NowUtc()
 
 	server.Redis(ctx, func(r server.RedisClient) {
-		pipe := r.TxPipeline()
-		pipe.ZAdd(ctx, networkPeerConnectedProviderKey(networkId), redis.Z{
-			Score:  float64(expiryMs),
-			Member: member,
-		})
-		pipe.Expire(ctx, networkPeerConnectedProviderKey(networkId), networkPeerKeyTtl)
-		_, err := pipe.Exec(ctx)
-		if err != nil {
-			panic(err)
-		}
-		// age out expired installs, piggybacked on install activity
-		err = r.ZRemRangeByScore(
+		// expired installs age out piggybacked on install activity
+		err := networkPeerAddProviderScript.Run(
 			ctx,
-			networkPeerConnectedProviderKey(networkId),
-			"-inf",
-			strconv.FormatInt(server.NowUtc().UnixMilli(), 10),
+			r,
+			[]string{
+				networkPeerConnectedProviderKey(networkId),
+				providerIntentExemptKey(networkId),
+				providerIntentKey(networkId),
+				providerIntentPresentKey(networkId),
+				providerIntentExpireKey(networkId),
+			},
+			member,
+			now.Add(ttl).UnixMilli(),
+			now.UnixMilli(),
+			int64(networkPeerKeyTtl/time.Second),
+			providerIntentPruneLimit,
 		).Err()
-		if err != nil {
+		if err != nil && err != server.RedisNil {
 			panic(err)
 		}
 	})
 }
 
-// Removes a connected provider install.
+// Removes a connected provider install, with its provider intent exempt index
+// entry.
 func RemoveNetworkProviderPeer(
 	ctx context.Context,
 	networkId server.Id,
@@ -1372,7 +1445,10 @@ func RemoveNetworkProviderPeer(
 ) {
 	member := string(clientId.Bytes())
 	server.Redis(ctx, func(r server.RedisClient) {
-		err := r.ZRem(ctx, networkPeerConnectedProviderKey(networkId), member).Err()
+		pipe := r.TxPipeline()
+		pipe.ZRem(ctx, networkPeerConnectedProviderKey(networkId), member)
+		pipe.ZRem(ctx, providerIntentExemptKey(networkId), "p"+member)
+		_, err := pipe.Exec(ctx)
 		if err != nil {
 			panic(err)
 		}
@@ -1729,6 +1805,7 @@ func pruneNetworkPeerCandidates(
 		networkPeerDisconnectedKey(networkId),
 		networkPeerEventIdKey(networkId),
 		networkPeerMutationReceiptKey(networkId, operationId),
+		providerIntentExemptKey(networkId),
 	}
 	args := []any{
 		cutoffMs,
@@ -1755,6 +1832,7 @@ func pruneNetworkPeerCandidates(
 		local disconnected_key = KEYS[3]
 		local event_id_key = KEYS[4]
 		local mutation_receipt_key = KEYS[5]
+		local exempt_key = KEYS[6]
 
 		local cutoff_ms = tonumber(ARGV[1])
 		local key_ttl_seconds = ARGV[2]
@@ -1768,7 +1846,7 @@ func pruneNetworkPeerCandidates(
 
 		for candidate_index = 1, #ARGV - 3 do
 			local member = ARGV[candidate_index + 3]
-			local member_key_index = 6 + (candidate_index - 1) * 2
+			local member_key_index = 7 + (candidate_index - 1) * 2
 			local member_key = KEYS[member_key_index]
 			local mutation_version_key = KEYS[member_key_index + 1]
 			local current_expiry_ms = redis.call('ZSCORE', connected_key, member)
@@ -1783,6 +1861,8 @@ func pruneNetworkPeerCandidates(
 				redis.call('HDEL', meta_key, member)
 				redis.call('DEL', member_key)
 				redis.call('ZREM', connected_key, member)
+				-- the provider intent exempt index entry leaves with the connected entry
+				redis.call('ZREM', exempt_key, 'c' .. member)
 				redis.call('ZADD', disconnected_key, current_expiry_ms, member)
 				pruned_count = pruned_count + 1
 			end

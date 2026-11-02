@@ -213,7 +213,11 @@ func capabilityProbeQuery(environment string, settings capabilityProbeSettings) 
 }
 
 func (self capabilityProbeProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
+	enteredLive := ctx.Err() == nil
 	desired, err := self.loadDesired()
+	if contextErr := ctx.Err(); enteredLive && contextErr != nil {
+		return nil, mimirShellParentError(contextErr, err)
+	}
 	if err != nil {
 		return []finding{cannotObserveFinding("capability-probe/desired-config", err)}, nil
 	}
@@ -231,6 +235,11 @@ func (self capabilityProbeProbe) check(ctx context.Context, env *probeEnv) ([]fi
 	queryUrl := "http://127.0.0.1:3100/prometheus/api/v1/query?query=" + url.QueryEscape(capabilityProbeQuery(env.cfg.env, self.settings))
 	output, _, err := mimirShellFirstServiceGatewayParsed(ctx, env.runner, metricHosts, nil,
 		"curl -fsS --max-time 15 --max-filesize "+strconv.Itoa(self.settings.responseMaxByteCount)+" '"+queryUrl+"'", self.settings.responseMaxByteCount)
+	// The adapter retires findings after owner termination; keep the source
+	// error graph available instead of converting it to a discarded finding.
+	if enteredLive && ctx.Err() != nil {
+		return nil, err
+	}
 	if err != nil {
 		return []finding{cannotObserveFinding("capability-probe/metrics", fmt.Errorf("query Mimir through service gateways: %w", err))}, nil
 	}

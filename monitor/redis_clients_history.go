@@ -88,6 +88,18 @@ func redisClientsHistoryQuery(environment string, targets map[string]redisClient
 		`,node=~` + strconv.Quote(strings.Join(ports, "|")) + `}[` + strconv.Itoa(int(redisClientsHistoryLookback/time.Second)) + `s]`
 }
 
+// Keep the reader's fixed public error text while preserving typed returned
+// source causes for lifecycle and finite diagnostic projection.
+type redisClientsHistoryQueryError struct{ err error }
+
+// Raw source text, host labels and command bytes never enter this message.
+func (self *redisClientsHistoryQueryError) Error() string {
+	return "Redis client history query unavailable"
+}
+
+// The source already returned; keeping its identity adds no query or wait.
+func (self *redisClientsHistoryQueryError) Unwrap() error { return self.err }
+
 // One bounded query reads existing Mimir history through the established
 // service gateway. Missing transport or schema authority remains unknown.
 func observeRedisClientsHistory(ctx context.Context, env *probeEnv, targets map[string]redisClientsHistoryTarget, at time.Time) (map[string]redisClientsHistoryObservation, error) {
@@ -102,7 +114,7 @@ func observeRedisClientsHistory(ctx context.Context, env *probeEnv, targets map[
 		" 'http://127.0.0.1:3100/prometheus/api/v1/query'"
 	out, _, err := mimirShellFirstServiceGatewayParsed(ctx, env.runner, metricHosts, nil, command, redisClientsHistoryMaxBytes)
 	if err != nil {
-		return nil, fmt.Errorf("Redis client history query unavailable")
+		return nil, &redisClientsHistoryQueryError{err: err}
 	}
 	return parseRedisClientsHistory(out, env.cfg.env, targets, at)
 }

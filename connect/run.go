@@ -62,6 +62,10 @@ func exchangeSettingsForRun(options RunOptions) *ExchangeSettings {
 	// keeps it off until it does). alt's embedded exchange keeps the ceiling
 	// off.
 	settings.EnableLocalTransport = true
+	// The same for recycles of the stuck providers the api reports
+	// (client_recycle.go): StuckProviderRecycleDefault keeps them off until
+	// the control names a block, and alt's exchange keeps the ceiling off.
+	settings.EnableStuckProviderRecycle = true
 	if options.MemoryOwnerLedger {
 		settings.MemoryOwnerLedger = &connectcore.TransferMemoryOwnerLedger{}
 		settings.payloadOwnerLedger = &residentPayloadLedger{}

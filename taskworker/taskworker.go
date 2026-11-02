@@ -371,6 +371,8 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.SweepOrphanNetworkClientDataPost,
 		),
 		model.NewLegacyProviderTotalsTaskTarget(),
+		// armed by work.ScheduleSettlementAccountingTasks
+		model.NewLegacyProviderTotalsDrainTaskTarget(),
 		model.NewLegacyNetEscrowMirrorTaskTarget(),
 		model.NewQuarantineReservationReleaseTaskTarget(),
 		model.NewClosePayerDueContractsTaskTarget(),

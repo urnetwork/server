@@ -76,7 +76,7 @@ func (self *stClientKeyRegistrationPublicationQueueTest) start(contexts []contex
 	for index, member := range self.members {
 		go func() {
 			defer self.workers.Done()
-			err := member.publish(contexts[index], stores[index], records[index].EvidenceBytes, records[index].EvidenceHash)
+			err := member.publish(contexts[index], stores[index], records[index].EvidenceBytes, records[index].EvidenceHash, false)
 			member.release()
 			self.results <- stClientKeyRegistrationPublicationResultTest{index: index, err: err}
 		}()
@@ -220,7 +220,7 @@ func TestStClientKeyRegistrationCohortPublicationUsesBoundedReadyWindows(t *test
 	owner.parent.slots = 1
 	retry := &stClientKeyRegistrationReservation{cohort: &stClientKeyRegistrationCohort{parent: owner.parent, finished: true}}
 	record := owner.fixture.histories[0][0]
-	err = retry.publish(contexts[0], owner.fixture.store, record.EvidenceBytes, record.EvidenceHash)
+	err = retry.publish(contexts[0], owner.fixture.store, record.EvidenceBytes, record.EvidenceHash, false)
 	retry.release()
 	stClientKeyRegistrationAssertPublicationIdle(t, owner.parent)
 	if err != nil || len(windows) != 3 || windows[2] == windows[0] || windows[2] == windows[1] || counts[2] != 1 || observedErr != nil {
@@ -398,7 +398,7 @@ func TestStClientKeyRegistrationCohortPublicationJoinsPanickedWorkers(t *testing
 		owner.parent.slots = 1
 		retry := &stClientKeyRegistrationReservation{cohort: &stClientKeyRegistrationCohort{parent: owner.parent, finished: true}}
 		record := owner.fixture.histories[0][0]
-		err := retry.publish(owner.ctx, owner.fixture.store, record.EvidenceBytes, record.EvidenceHash)
+		err := retry.publish(owner.ctx, owner.fixture.store, record.EvidenceBytes, record.EvidenceHash, false)
 		retry.release()
 		if err != nil {
 			t.Fatal("panicked worker retained storage or queue ownership", fault, err)
@@ -410,8 +410,9 @@ func TestStClientKeyRegistrationCohortPublicationJoinsPanickedWorkers(t *testing
 // This adapter intentionally does not advertise a local batch source.
 type stClientKeyRegistrationPublicationUnknownTest struct{ server.BlobStore }
 
-// Completed reservations remain mandatory, and unknown backends retain the
-// original typed publication/readback path without joining the local queue.
+// Completed reservations remain mandatory, and unknown backends hand the
+// original typed publication/readback to the owner's bounded writer without
+// joining the local queue.
 func TestStClientKeyRegistrationCohortPublicationRejectsUnownedAndKeepsUnknownPath(t *testing.T) {
 	fixture := newStClientKeyPublicationFixtureTest(t, 1)
 	record := fixture.histories[0][0]
@@ -435,7 +436,7 @@ func TestStClientKeyRegistrationCohortPublicationRejectsUnownedAndKeepsUnknownPa
 			parent.slots = 0
 		}
 		slots := parent.slots
-		if err := member.publish(t.Context(), fixture.store, record.EvidenceBytes, record.EvidenceHash); err == nil {
+		if err := member.publish(t.Context(), fixture.store, record.EvidenceBytes, record.EvidenceHash, false); err == nil {
 			t.Fatal("publication accepted an unowned reservation", fault)
 		}
 		if parent.slots != slots || len(parent.publications) != 0 || parent.publicationRunning || len(fixture.store.contexts) != 0 {
@@ -446,9 +447,11 @@ func TestStClientKeyRegistrationCohortPublicationRejectsUnownedAndKeepsUnknownPa
 	parent.slots = 1
 	parent.beforePublicationForTest = func(context.Context) { panic("unknown backend entered local worker") }
 	parent.afterPublicationAdmissionForTest = func() { panic("unknown backend queued local work") }
+	parent.evidence = newStClientKeyEvidenceWriterTest(t, stClientKeyEvidenceWriterSettingsTest())
 	member := &stClientKeyRegistrationReservation{cohort: &stClientKeyRegistrationCohort{parent: parent, finished: true}}
-	err := member.publish(t.Context(), &stClientKeyRegistrationPublicationUnknownTest{BlobStore: fixture.store}, record.EvidenceBytes, record.EvidenceHash)
+	err := member.publish(t.Context(), &stClientKeyRegistrationPublicationUnknownTest{BlobStore: fixture.store}, record.EvidenceBytes, record.EvidenceHash, false)
 	member.release()
+	waitStClientKeyEvidenceIdleTest(t, parent.evidence)
 	if err != nil || len(fixture.store.contexts) != startifact.ClientKeyEvidenceStoredObjects || fixture.store.gets != startifact.ClientKeyEvidenceStoredObjects || fixture.store.closes != startifact.ClientKeyEvidenceStoredObjects {
 		t.Fatal("unknown backend lost original signed publication", err)
 	}
