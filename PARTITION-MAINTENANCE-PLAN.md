@@ -1651,9 +1651,9 @@ Changes:
   - The retention deletes a gone client's history once the contract horizon
     reaper's horizon has passed since the client went, while the reaper's
     `mode` is `on`: the `horizonDays` of `{contract_horizon}control` as the
-    reaper narrows it. That is 91 days by default; the reaper's floor is 45
-    days, and 35 is planned from about 2026-11-08. A dry run, the reaper off,
-    no control or an unreadable one keep 91 days.
+    reaper narrows it. That is 91 days by default, down to the reaper's floor,
+    35 days since 6558752b0. A dry run, the reaper off, no control or an
+    unreadable one keep 91 days.
   - Migration 904 moves the guard's fixed 91 days to
     `st_client_key_history_retention_floor()`, 30 days
     (`server.ClientKeyHistoryRetentionFloor`). Both the guard and the
