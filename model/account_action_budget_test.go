@@ -193,10 +193,11 @@ func TestAccountActionBudgetRefusalWaitsForTheAttemptThatMakesRoom(t *testing.T)
 }
 
 // A budget's extended limit (ExtendLimitInTx, connect#230) is read only once
-// its count has reached the floor, in the spending transaction, and a value
-// below the floor leaves the floor. The refusal it makes is an
-// *AccountActionBudgetRefusal with the wait, which an extender activation
-// answers as retry_after_seconds.
+// its count has reached the floor, and a value below the floor leaves the
+// floor. A spend with room reads it twice, without the locks and then in the
+// spending transaction; a refusal reads it once, without the locks, and goes no
+// further. The refusal it makes is an *AccountActionBudgetRefusal with the
+// wait, which an extender activation answers as retry_after_seconds.
 func TestCheckAndRecordAccountActionBudgetsReadsTheExtendedLimitPastTheFloor(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -222,7 +223,7 @@ func TestCheckAndRecordAccountActionBudgetsReadsTheExtendedLimitPastTheFloor(t *
 		if err := CheckAndRecordAccountActionBudgets(ctx, budget); err != nil {
 			t.Fatalf("the spend past the floor was refused under the extended limit: %s", err)
 		}
-		connect.AssertEqual(t, extendCount, 1)
+		connect.AssertEqual(t, extendCount, 2)
 
 		err := CheckAndRecordAccountActionBudgets(ctx, budget)
 		var refusal *AccountActionBudgetRefusal
@@ -234,7 +235,7 @@ func TestCheckAndRecordAccountActionBudgetsReadsTheExtendedLimitPastTheFloor(t *
 		if refusal.RetryAfter <= 59*time.Minute || time.Hour < refusal.RetryAfter {
 			t.Errorf("the refusal waits %s, want the rest of the hour", refusal.RetryAfter)
 		}
-		connect.AssertEqual(t, extendCount, 2)
+		connect.AssertEqual(t, extendCount, 3)
 
 		// an extended limit below the floor leaves the floor
 		extendedLimit = 0

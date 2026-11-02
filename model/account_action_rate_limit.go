@@ -440,10 +440,11 @@ type AccountActionBudget struct {
 	Action string
 	Limit  int
 	Window time.Duration
-	// when set, the limit once the count has reached Limit, read in the
-	// spending transaction: a limit that grows with what its owner has proven
-	// (an account's proven extender hosts, connect#230) is read only by an
-	// owner that has spent its floor. A value below Limit leaves Limit.
+	// when set, the limit once the count has reached Limit, read in each
+	// transaction that reads the budget: a limit that grows with what its
+	// owner has proven (an account's proven extender hosts, connect#230) is
+	// read only by an owner that has spent its floor. A value below Limit
+	// leaves Limit.
 	ExtendLimitInTx func(ctx context.Context, tx server.PgTx) int
 	// when positive, the attempt is recorded at a time drawn uniformly over
 	// this much before the spend, each budget's on its own, so the attempts
