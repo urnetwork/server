@@ -1217,6 +1217,32 @@ var errorShapedRe = regexp.MustCompile(`(?i)\berror\b|\bfatal\b|\bpanic\b|\bfail
 // no ok= tally and stay novel-eligible.
 var egressHealthResultRecordRe = regexp.MustCompile(`egress-health: provider=\S+ ok=[0-9]+/[0-9]+ `)
 
+// The payer-close result is a counter record, not an error merely because
+// its complete schema includes failed=0. Unknown fields and error records
+// stay eligible; a zero failure counter does not establish business success.
+var payerDueCloseZeroFailureSummaryRe = regexp.MustCompile(`^(?:\[I\]\[([^\]\r\n]+)\]\[subscription_payer_due_close\.go:[1-9][0-9]*\] ?)?\[payer-due-close\][0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12} due=(0|[1-9][0-9]*) closed=(0|[1-9][0-9]*) already_closed=(0|[1-9][0-9]*) busy=(0|[1-9][0-9]*) failed=0 more=(true|false)$`)
+
+func isPayerDueCloseZeroFailureSummary(line string) bool {
+	if bounds := warpLogIdentityRe.FindStringIndex(line); len(bounds) == 2 && bounds[0] == 0 {
+		line = line[bounds[1]:]
+	}
+	match := payerDueCloseZeroFailureSummaryRe.FindStringSubmatch(line)
+	if len(match) != 7 {
+		return false
+	}
+	if match[1] != "" {
+		if _, err := time.Parse(time.RFC3339Nano, match[1]); err != nil {
+			return false
+		}
+	}
+	for _, value := range match[2:6] {
+		if _, err := strconv.Atoi(value); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
 // novelNormalizeRes strip identifiers so distinct occurrences of one shape
 // group together: hex ids, uuids, ips, ports, numbers.
 var logIDRe = regexp.MustCompile(`[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}`)
@@ -2449,7 +2475,7 @@ func (self *logTailer) classifyLocked(line string, deduplicate bool, count bool,
 			return
 		}
 	}
-	if errorShapedRe.MatchString(line) && !egressHealthResultRecordRe.MatchString(line) {
+	if errorShapedRe.MatchString(line) && !egressHealthResultRecordRe.MatchString(line) && !isPayerDueCloseZeroFailureSummary(line) {
 		if deduplicate && self.standingReplayLocked(line, now) {
 			return
 		}

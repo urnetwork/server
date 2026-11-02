@@ -25217,6 +25217,30 @@ redis-cli -p <port> SLOWLOG GET 8       # the key names attribute it
 The single most valuable diagnostic skill from the incident: reading the
 error CLASS, not the volume. Classes, causes, and the action each implies:
 
+A complete `[payer-due-close]` result summary with canonical payer identity,
+bounded nonnegative counters, `failed=0` and a boolean `more` is not a novel
+error merely because the counter is named `failed`. The tailer recognizes only
+that full ordered schema, either as its exact message or under the expected
+informational `subscription_payer_due_close.go` envelope (and optional Warp
+identity prefix). Unknown sources or severity, invalid timestamps or counters,
+missing, repeated, reordered or additional fields and trailing error text do
+not receive this exception. Positive failure counters and the separate
+`closed nothing, N failed: ...` error/cancellation records remain eligible for
+the existing taxonomy or novel detector. Known classes are evaluated first;
+the panic aggregate and overlapping normalized-owner counts are unchanged.
+
+This corrects a monitor attribution boundary, not payer-close behavior. A
+zero failure counter proves neither successful settlement, committed closes,
+backlog health nor recovery of an adjacent `ReadPayerDueContracts` panic.
+Novel rates count matching log lines, not unique payers, tasks or incidents.
+False positives: do not page on a complete expected summary's field name.
+False negatives: malformed or unavailable records and companion failures must
+remain visible; absence from one bounded exemplar is not a quiet-window proof.
+Before claiming deployed correction, bind the actual emitter and watcher
+artifacts, preserve the original private evidence, qualify the composed
+classifier/window/ticket regression and unchanged reader/cancellation/owner
+controls, then observe complete fresh coverage through the normal alert window.
+
 | Class (grep) | Meaning | Action |
 |---|---|---|
 | `[peerconn]teardown stalled for 5s at <stage>` (`peerconn-teardown-stalled`) | One finite-stage watchdog header is one diagnostic stall; later per-goroutine stack records are not additional stalls. WARN at one header/minute and PAGE at five/minute per service/stage. `starting` is not a unique blocked primitive. Legacy whole-process stack fan-out can itself prolong teardown and obscure other logs; a capped or HTTP-429 reconciliation makes absence unknown. | Bind the exact process/artifact and finite stage, retain only bounded private stack evidence, then repair the owning lifecycle primitive. Deploy the bounded diagnostic separately when authorized. Require comparable connection churn, resource release, ten quiet minutes, and two complete overlap reconciliations; do not attribute provider-probe throughput without a process/task join. See §1.5. |
