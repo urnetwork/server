@@ -746,8 +746,9 @@ var migrationCurrentSuffixContracts = slices.Concat(
 		migrationCurrentSuffix(858, "production and staging source authorization of the ten live repositories", competitionMigration858ArtifactQuery).removedAt(859),
 		migrationCurrentSuffix(859, "scheduled round opening bound to its intent", competitionMigration859ArtifactQuery).removedAt(891),
 		migrationCurrentSuffix(860, "raw table and index bloat measurements", dbBloatMeasurementArtifactQuery),
+		// the horizon guard replaces the guard body and republishes the rest
 		migrationCurrentSuffix(contractCloseEvidenceMoveGuardMigrationVersion, "close evidence custody with moves into its partitions",
-			contractCloseEvidenceMoveArtifactQuery),
+			contractCloseEvidenceMoveArtifactQuery).removedAt(contractCloseEvidenceHorizonGuardMigrationVersion),
 	},
 	providerUsageArchivePartitionContracts(),
 	[]snMainnetMigrationContract{
@@ -880,6 +881,11 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	reengagementMigrationContracts,
 	// the index diet's drops; each version follows its migration's position
 	indexDietMigrationContracts,
+	[]snMainnetMigrationContract{
+		// after the index diet's drops, as in the migration list
+		migrationCurrentSuffix(contractCloseEvidenceHorizonGuardMigrationVersion, "close evidence custody with retention at the contract horizon",
+			contractCloseEvidenceHorizonArtifactQuery),
+	},
 )
 
 // Free space a table keeps on every page it writes, so an update of an
