@@ -92,6 +92,10 @@ var ReengagementFlowStepValues = []string{"r1", "r2", "r3", "n1", "f1", "w1"}
 // ReengagementStreamValues are the streams.
 var ReengagementStreamValues = []string{"lapsed", "never_activated", "fix", "winback"}
 
+// ReengagementCountrySourceValues are where an episode's country came from
+// (reengagement.CountrySources): the evidence kept with each episode.
+var ReengagementCountrySourceValues = []string{"onboarding", "app_store", "play", "stripe"}
+
 // Event platforms (the `platform` field of every client event).
 var EventPlatforms = []string{"ios", "macos", "android", "web", "windows", "linux"}
 
@@ -302,6 +306,9 @@ var eventSpecs = func() map[string]*EventSpec {
 			"stream":     propEnum(true, ReengagementStreamValues...),
 			"experiment": propToken(false),
 			"arm":        propToken(false),
+			// the country the mail policy read (ISO alpha-2) and its source
+			"country":        &EventPropSpec{Kind: EventPropToken, MaxLen: 2},
+			"country_source": propEnum(false, ReengagementCountrySourceValues...),
 		}},
 		{Name: EventReengageEmailSent, ServerOnly: true, Owner: EventOwnerS2, Props: reengageEmailProps()},
 		{Name: EventReengageEmailDelivered, ServerOnly: true, Owner: EventOwnerS2, Props: reengageEmailProps()},
