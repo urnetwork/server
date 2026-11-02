@@ -133,7 +133,7 @@ func TestCloseEvidenceRetentionBatchBoundsItsLockWait(t *testing.T) {
 		if 15*time.Second < waited {
 			t.Fatalf("the batch waited %s for a held row", waited)
 		}
-		connect.AssertEqual(t, removal.Stop, CloseEvidenceRemovalStopError)
+		connect.AssertEqual(t, removal.Stop, CloseEvidenceRemovalStopLockTimeout)
 		connect.AssertEqual(t, removal.Removed, int64(0))
 		connect.AssertEqual(t, more, false)
 		connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, report) != "", true)
@@ -317,21 +317,28 @@ func TestCloseEvidenceRetentionBatchOnAPartitionedParentReadsNothing(t *testing.
 		connect.AssertEqual(t, ctidOf(unresolved), ctidOf(expired))
 
 		settings := DefaultCloseEvidenceRetentionSettings()
-		upper := ContractIdFloor(now.Add(-45 * day))
-		batch, err := removeCloseEvidenceBatch(ctx, closeEvidenceTable, closeEvidenceKey{}, upper, 45*day, settings)
+		argsFor := func(leaf string) closeEvidenceBatchArgs {
+			return closeEvidenceBatchArgs{
+				leaf:      leaf,
+				upper:     ContractIdFloor(now.Add(-45 * day)),
+				retention: 45 * day,
+				size:      settings.BatchSize,
+			}
+		}
+		batch, err := removeCloseEvidenceBatch(ctx, argsFor(closeEvidenceTable), settings)
 		testCloseEvidenceNoError(t, err)
 		connect.AssertEqual(t, batch.removed, int64(0))
 		connect.AssertEqual(t, batch.scanned, int64(0))
 		connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, unresolved), unresolvedLeaf)
 		connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, expired), expiredLeaf)
 
-		batch, err = removeCloseEvidenceBatch(ctx, unresolvedLeaf, closeEvidenceKey{}, upper, 45*day, settings)
+		batch, err = removeCloseEvidenceBatch(ctx, argsFor(unresolvedLeaf), settings)
 		testCloseEvidenceNoError(t, err)
 		connect.AssertEqual(t, batch.removed, int64(0))
 		connect.AssertEqual(t, batch.scanned, int64(1))
 		connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, unresolved), unresolvedLeaf)
 
-		batch, err = removeCloseEvidenceBatch(ctx, expiredLeaf, closeEvidenceKey{}, upper, 45*day, settings)
+		batch, err = removeCloseEvidenceBatch(ctx, argsFor(expiredLeaf), settings)
 		testCloseEvidenceNoError(t, err)
 		connect.AssertEqual(t, batch.removed, int64(1))
 		connect.AssertEqual(t, batch.scanned, int64(1))

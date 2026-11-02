@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"slices"
@@ -9,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgerrcode"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/urnetwork/glog"
@@ -219,7 +222,9 @@ func (self *closeEvidenceRetentionPace) WaitAfter(ctx context.Context, count int
 	}
 }
 
-// Why a run's deletes stopped.
+// Why a run's deletes stopped. Each run counts its stop in
+// urnetwork_close_evidence_retention_stops_total, so a brake left off does not
+// chart like a retention that is caught up.
 const (
 	// the pass is complete
 	CloseEvidenceRemovalStopDone = "done"
@@ -229,10 +234,37 @@ const (
 	CloseEvidenceRemovalStopBrakeOff = "brake_off"
 	// the brake could not be read
 	CloseEvidenceRemovalStopBrakeUnread = "brake_unread"
-	CloseEvidenceRemovalStopCanceled    = "canceled"
-	// the targets, the retention or a batch failed; the next run retries
+	// the run's context ended
+	CloseEvidenceRemovalStopCanceled = "canceled"
+	// a lock wait reached its lock timeout; the batch rolled back and the next
+	// run retries
+	CloseEvidenceRemovalStopLockTimeout = "lock_timeout"
+	// a statement was canceled, by its statement timeout or an operator; the
+	// batch rolled back and the next run retries
+	CloseEvidenceRemovalStopStatementTimeout = "statement_timeout"
+	// the targets, the retention or a batch failed otherwise; the next run
+	// retries
 	CloseEvidenceRemovalStopError = "error"
 )
+
+// The stop for a step that failed with err: the run's context ended, a lock
+// wait past its timeout (55P03), a statement canceled while the context lives
+// (57014), or anything else.
+func closeEvidenceFailureStop(ctx context.Context, err error) string {
+	if ctx.Err() != nil {
+		return CloseEvidenceRemovalStopCanceled
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		switch pgErr.Code {
+		case pgerrcode.LockNotAvailable:
+			return CloseEvidenceRemovalStopLockTimeout
+		case pgerrcode.QueryCanceled:
+			return CloseEvidenceRemovalStopStatementTimeout
+		}
+	}
+	return CloseEvidenceRemovalStopError
+}
 
 // One run of the row retention.
 type CloseEvidenceRemovalReport struct {
@@ -338,8 +370,28 @@ var closeEvidenceRetentionSecondsGauge = prometheus.NewGauge(
 	},
 )
 
+var closeEvidenceRetentionStopCounter = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "urnetwork_close_evidence_retention_stops_total",
+		Help: "Close evidence row retention runs, by why they stopped",
+	},
+	[]string{"stop"},
+)
+
 func init() {
-	prometheus.MustRegister(closeEvidenceRetentionRemovedCounter, closeEvidenceRetentionSecondsGauge)
+	for _, stop := range []string{
+		CloseEvidenceRemovalStopDone,
+		CloseEvidenceRemovalStopBudget,
+		CloseEvidenceRemovalStopBrakeOff,
+		CloseEvidenceRemovalStopBrakeUnread,
+		CloseEvidenceRemovalStopCanceled,
+		CloseEvidenceRemovalStopLockTimeout,
+		CloseEvidenceRemovalStopStatementTimeout,
+		CloseEvidenceRemovalStopError,
+	} {
+		closeEvidenceRetentionStopCounter.WithLabelValues(stop)
+	}
+	prometheus.MustRegister(closeEvidenceRetentionRemovedCounter, closeEvidenceRetentionSecondsGauge, closeEvidenceRetentionStopCounter)
 }
 
 // Deletes close evidence accepted longer ago than its retention, ctx's contract
@@ -363,35 +415,77 @@ func RemoveExpiredCloseEvidence(ctx context.Context, now time.Time, cursor Close
 func removeExpiredCloseEvidenceWith(ctx context.Context, now time.Time, cursor CloseEvidenceRemovalCursor, deadline time.Time, settings *CloseEvidenceRetentionSettings) (report CloseEvidenceRemovalReport, next CloseEvidenceRemovalCursor, more bool) {
 	removal := &closeEvidenceRemoval{
 		settings: settings,
+		steps:    closeEvidenceRemovalStore{},
 		pace:     newCloseEvidenceRetentionPace(),
 		deadline: deadline,
 	}
 	return removal.run(ctx, now, cursor)
 }
 
+// The database and Redis steps of a run. Tests drive a run through their own.
+type closeEvidenceRemovalSteps interface {
+	// The tables to delete from, in order (closeEvidenceRemovalTargets).
+	Targets(ctx context.Context, now time.Time) ([]string, error)
+	// The retention to apply (closeEvidenceRetentionIn).
+	Retention(ctx context.Context) (time.Duration, error)
+	// The brake, read now.
+	Brake(ctx context.Context, settings *CloseEvidenceRetentionSettings) (*CloseEvidenceRetentionControl, error)
+	// One batch, in its own transaction.
+	Batch(ctx context.Context, args closeEvidenceBatchArgs, settings *CloseEvidenceRetentionSettings) (closeEvidenceBatch, error)
+}
+
+// The steps against PostgreSQL and Redis.
+type closeEvidenceRemovalStore struct{}
+
+func (closeEvidenceRemovalStore) Targets(ctx context.Context, now time.Time) ([]string, error) {
+	return closeEvidenceRemovalTargets(ctx, now)
+}
+
+func (closeEvidenceRemovalStore) Retention(ctx context.Context) (retention time.Duration, err error) {
+	err = partitionRegistryRun(func() {
+		MaintenanceDb(ctx, func(conn PgConn) {
+			retention = closeEvidenceRetentionIn(ctx, conn)
+		})
+	})
+	return
+}
+
+func (closeEvidenceRemovalStore) Brake(ctx context.Context, settings *CloseEvidenceRetentionSettings) (*CloseEvidenceRetentionControl, error) {
+	return GetCloseEvidenceRetentionControl(ctx, settings)
+}
+
+func (closeEvidenceRemovalStore) Batch(ctx context.Context, args closeEvidenceBatchArgs, settings *CloseEvidenceRetentionSettings) (closeEvidenceBatch, error) {
+	return removeCloseEvidenceBatch(ctx, args, settings)
+}
+
 // One run of the row retention. Not safe for concurrent use.
 type closeEvidenceRemoval struct {
 	settings *CloseEvidenceRetentionSettings
+	steps    closeEvidenceRemovalSteps
 	pace     *closeEvidenceRetentionPace
 	deadline time.Time
 }
 
+// Runs the deletes and counts why they stopped. A panic, the end of the task's
+// session, counts nothing.
 func (self *closeEvidenceRemoval) run(ctx context.Context, now time.Time, cursor CloseEvidenceRemovalCursor) (report CloseEvidenceRemovalReport, next CloseEvidenceRemovalCursor, more bool) {
+	report, next, more = self.remove(ctx, now, cursor)
+	closeEvidenceRetentionStopCounter.WithLabelValues(report.Stop).Inc()
+	return
+}
+
+func (self *closeEvidenceRemoval) remove(ctx context.Context, now time.Time, cursor CloseEvidenceRemovalCursor) (report CloseEvidenceRemovalReport, next CloseEvidenceRemovalCursor, more bool) {
 	next = cursor
-	targets, err := closeEvidenceRemovalTargets(ctx, now)
+	targets, err := self.steps.Targets(ctx, now)
 	if err != nil {
 		glog.Errorf("[cp]close evidence retention: %s\n", err)
-		report.Stop = CloseEvidenceRemovalStopError
+		report.Stop = closeEvidenceFailureStop(ctx, err)
 		return
 	}
-	err = partitionRegistryRun(func() {
-		MaintenanceDb(ctx, func(conn PgConn) {
-			report.Retention = closeEvidenceRetentionIn(ctx, conn)
-		})
-	})
+	report.Retention, err = self.steps.Retention(ctx)
 	if err != nil {
 		glog.Errorf("[cp]close evidence retention: %s\n", err)
-		report.Stop = CloseEvidenceRemovalStopError
+		report.Stop = closeEvidenceFailureStop(ctx, err)
 		return
 	}
 	closeEvidenceRetentionSecondsGauge.Set(report.Retention.Seconds())
@@ -417,7 +511,7 @@ func (self *closeEvidenceRemoval) run(ctx context.Context, now time.Time, cursor
 				return report, pass.at(targets[index], after), true
 			}
 			// the brake, before every batch
-			brake, err := GetCloseEvidenceRetentionControl(ctx, self.settings)
+			brake, err := self.steps.Brake(ctx, self.settings)
 			if err != nil {
 				glog.V(1).Infof("[cp]close evidence retention control unread, deleting nothing more this run: %s\n", err)
 				report.Stop = CloseEvidenceRemovalStopBrakeUnread
@@ -427,10 +521,16 @@ func (self *closeEvidenceRemoval) run(ctx context.Context, now time.Time, cursor
 				report.Stop = CloseEvidenceRemovalStopBrakeOff
 				return report, pass.at(targets[index], after), false
 			}
-			batch, err := removeCloseEvidenceBatch(ctx, targets[index], after, upper, report.Retention, self.settings)
+			batch, err := self.steps.Batch(ctx, closeEvidenceBatchArgs{
+				leaf:      targets[index],
+				after:     after,
+				upper:     upper,
+				retention: report.Retention,
+				size:      self.settings.BatchSize,
+			}, self.settings)
 			if err != nil {
 				glog.Errorf("[cp]close evidence retention of %s: %s\n", targets[index], err)
-				report.Stop = CloseEvidenceRemovalStopError
+				report.Stop = closeEvidenceFailureStop(ctx, err)
 				return report, pass.at(targets[index], after), false
 			}
 			report.Removed += batch.removed
@@ -472,6 +572,16 @@ func (self CloseEvidenceRemovalCursor) complete(upper Id) CloseEvidenceRemovalCu
 		lowWater = *self.PassLowWater
 	}
 	return CloseEvidenceRemovalCursor{LowWater: &lowWater, FullPassDay: self.FullPassDay}
+}
+
+// One batch: the rows of leaf after the key and below upper, size of them, by
+// the retention.
+type closeEvidenceBatchArgs struct {
+	leaf      string
+	after     closeEvidenceKey
+	upper     Id
+	retention time.Duration
+	size      int
 }
 
 // One batch's outcome.
@@ -539,34 +649,40 @@ const closeEvidenceRetentionBatchSql = `
 	) AS last ON true
 `
 
-func removeCloseEvidenceBatch(ctx context.Context, leaf string, after closeEvidenceKey, upper Id, retention time.Duration, settings *CloseEvidenceRetentionSettings) (batch closeEvidenceBatch, err error) {
+func removeCloseEvidenceBatch(ctx context.Context, args closeEvidenceBatchArgs, settings *CloseEvidenceRetentionSettings) (batch closeEvidenceBatch, err error) {
 	err = contractPartitionTx(ctx, func(tx PgTx) {
-		batch = closeEvidenceBatch{}
-		RaisePgResult(tx.Exec(ctx, fmt.Sprintf("SET LOCAL statement_timeout = '%dms'", settings.StatementTimeout.Milliseconds())))
-		RaisePgResult(tx.Exec(ctx, fmt.Sprintf("SET LOCAL lock_timeout = '%dms'", settings.LockTimeout.Milliseconds())))
-		RaisePgResult(tx.Exec(ctx, `SET LOCAL urnetwork.close_evidence_retention = 'on'`))
-		var lastContractId, lastClientId, lastReportId, lowWater *Id
-		Raise(tx.QueryRow(
-			ctx,
-			fmt.Sprintf(closeEvidenceRetentionBatchSql, quoteIdentifier(leaf)),
-			after.contractId,
-			after.clientId,
-			after.reportId,
-			upper,
-			settings.BatchSize,
-			float64(closeEvidenceRetentionSeconds(retention)),
-		).Scan(
-			&batch.removed,
-			&batch.scanned,
-			&lastContractId,
-			&lastClientId,
-			&lastReportId,
-			&lowWater,
-		))
-		if lastContractId != nil && lastClientId != nil && lastReportId != nil {
-			batch.last = closeEvidenceKey{contractId: *lastContractId, clientId: *lastClientId, reportId: *lastReportId}
-		}
-		batch.lowWater = lowWater
+		batch = removeCloseEvidenceBatchIn(ctx, tx, args, settings)
 	})
+	return
+}
+
+// The batch in tx: its statement and lock bounds and the guard's opt-in, then
+// the statement. Raises on a failure.
+func removeCloseEvidenceBatchIn(ctx context.Context, tx PgTx, args closeEvidenceBatchArgs, settings *CloseEvidenceRetentionSettings) (batch closeEvidenceBatch) {
+	RaisePgResult(tx.Exec(ctx, fmt.Sprintf("SET LOCAL statement_timeout = '%dms'", settings.StatementTimeout.Milliseconds())))
+	RaisePgResult(tx.Exec(ctx, fmt.Sprintf("SET LOCAL lock_timeout = '%dms'", settings.LockTimeout.Milliseconds())))
+	RaisePgResult(tx.Exec(ctx, `SET LOCAL urnetwork.close_evidence_retention = 'on'`))
+	var lastContractId, lastClientId, lastReportId, lowWater *Id
+	Raise(tx.QueryRow(
+		ctx,
+		fmt.Sprintf(closeEvidenceRetentionBatchSql, quoteIdentifier(args.leaf)),
+		args.after.contractId,
+		args.after.clientId,
+		args.after.reportId,
+		args.upper,
+		args.size,
+		float64(closeEvidenceRetentionSeconds(args.retention)),
+	).Scan(
+		&batch.removed,
+		&batch.scanned,
+		&lastContractId,
+		&lastClientId,
+		&lastReportId,
+		&lowWater,
+	))
+	if lastContractId != nil && lastClientId != nil && lastReportId != nil {
+		batch.last = closeEvidenceKey{contractId: *lastContractId, clientId: *lastClientId, reportId: *lastReportId}
+	}
+	batch.lowWater = lowWater
 	return
 }
