@@ -398,6 +398,7 @@ The DB tests check each one at 35 days, with the cutoff inside 91 days as produc
 - `urnetwork_contract_horizon_horizon_timestamp_seconds` and the lag gauge follow it.
 - The run log line carries `horizon_days=`.
 - `block_points` and `payment_review` count the contracts those rules keep.
+- **Monitor:** `contract-horizon-reaper` (SIGNALS.md §2.4r) warns when the chain stops running, when runs fail or cannot read the control without progress, when the pass falls behind while on, and when block points keep contracts. `usage-archive-hash-budget` (§2.4s) warns while twice the largest archive week passes half of what the usage read's hash holds in one batch.
 
 **The epoch usage read's archive join (fixed 11-01).** The live arm of `stEpochProviderUsageSql` flags a contract that is also archived by joining `st_provider_usage_archive` on `contract_id`. Unbounded, that join hashed the whole archive in every read: the v1 close, the v2 epoch step and the recovery census.
 - On Main, for epoch 3's window, the hash built on all 27 partitions, 20.35M rows, against 3.66 GB of hash memory (work_mem 234 MB times hash_mem_multiplier 16), which holds about 60M.
