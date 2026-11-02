@@ -394,7 +394,7 @@ func SignExtenderRecord(
 		// Older tier-aware readers must also suppress open redistribution.
 		directoryTier = connect.ExtenderDirectoryTierGated
 	}
-	record, err := connect.SignExtenderRecord(rootPrivateKey, &protocol.ExtenderRecordBody{
+	body := &protocol.ExtenderRecordBody{
 		PublicKey:   extender.PublicKey,
 		Addresses:   recordAddresses,
 		TcpPort:     uint32(extender.TcpPort),
@@ -419,8 +419,13 @@ func SignExtenderRecord(
 		// the camouflage key the extender's latest passing activation posted,
 		// while the posting network holds the key (connect/EXTENDER.md P6,
 		// phase 14b); nil when it posted none
-		RealityPublicKey: extender.RecordRealityPublicKey(),
-	})
+		RealityPublicKey: extenderRecordRealityPublicKey(extender),
+	}
+	// what a client must declare before a release hands the record out
+	// (connect/EXTENDER-UPDATE2.md §3.2), decided from the body as signed, so
+	// a release's compatibility check reads exactly what the record says
+	body.RequiredCapabilities = config.RecordRequiredCapabilities(extender, body.RealityPublicKey)
+	record, err := connect.SignExtenderRecord(rootPrivateKey, body)
 	if err != nil {
 		return nil, nil, err
 	}

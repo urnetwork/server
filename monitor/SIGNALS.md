@@ -8488,10 +8488,12 @@ only says how long is left, not why. Facts on 10-22:
   (`st_client_key_gone`): the control's `horizonDays`, down to the reaper's
   floor, while the reaper's `mode` is `on`, and 91 days otherwise; never
   sooner than the guard's 30-day floor (migration 904). Its brake,
-  `{client_key_history_retention}control`, stops or paces the deletes. It
-  stays on this append-only list until the first deletes, which come when the
-  oldest gone records (2026-10-24) reach the horizon: about 2026-11-28 at a
-  35-day horizon, 2026-12-08 at 45 days.
+  `{client_key_history_retention}control`, stops or paces the deletes, and its
+  `horizonDays` can set the retention's own horizon, down to that floor. It
+  stays on this append-only list until the first deletes. Those come when the
+  30-day reap has recorded the children deactivated from 2026-10-09, at their
+  deactivation times, and those times reach the horizon: about 2026-11-13 at a
+  35-day horizon, 2026-11-08 at a 30-day one.
 
 Checks, all cheap and read-only:
 1. Retired 2026-10-31: the subsidy frontier check (`retention-frontier-pinned`).
