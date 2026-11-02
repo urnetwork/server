@@ -30436,6 +30436,15 @@ history once the contract horizon reaper's horizon has passed since the
 client went while the reaper's mode is on, never below the floor; the catalog
 checks do not show where the retention task is.
 
+The onboarding results' purchase.started count
+(`onboarding_results_purchase_started_schema.go`) adds one column to
+`onboarding_results_daily`: `purchase_started_7d integer NOT NULL DEFAULT 0`,
+the in-app offer's leading metric. Its content-derived version follows its
+DDL. From that version a missing column, another type, a nullable column, and
+a lost or changed default are drift; before it, the absent column is only
+numeric migration lag. The check reads the catalog only and does not show
+whether the nightly rollup has filled the column.
+
 ### 8.10 Client-reliability covering-index drift after partition cutover
 Probe: `reliability-index`
 

@@ -11233,6 +11233,36 @@ var migrations = []any{
 	// running release makes (13 weeks) stays admitted.
 	newSqlMigration(providerWorkSessionEventHorizonDropGuardSql),
 
+	// The country a store sold each subscription row in: the App Store
+	// storefront or the Google Play region, recorded beside the price tier from
+	// now on (subscription_renewal_country_schema.go). The re-engagement
+	// program reads it as the network's country when the network has no
+	// onboarding row (mmm/reengagement/PLAN.md "Server" 10). Rows credited
+	// earlier stay NULL. A nullable column without a default: no table
+	// rewrite. Apply before deploying the api and taskworker that write it.
+	newSqlMigration(subscriptionRenewalCountrySchemaSql),
+
+	// purchase_started_7d on the onboarding results
+	// (onboarding_results_purchase_started_schema.go): the networks with a
+	// purchase.started in the 7 days after their cohort time, the in-app
+	// offer's leading metric, which both arms can reach. Constant default: no
+	// table rewrite. Apply before deploying the api and taskworker that read
+	// and write it; the next nightly rollup fills it for its whole window.
+	newSqlMigration(onboardingResultsPurchaseStartedSql),
+
+	// The re-engagement results (mmm/reengagement/PLAN.md "MEASUREMENT"):
+	// the nightly per-cohort-day episode counts the experiment readout reads
+	// (reengagement_results_schema.go). A new table; apply before deploying
+	// the taskworker that writes it and the api that reads it.
+	newSqlMigration(reengagementResultsDailySchemaSql),
+
+	// The re-engagement program's win-back offers (network_winback_offer_schema.go,
+	// mmm/reengagement/PLAN.md "THE STORES" 6): one row per offer, the
+	// network's offers in time order through its index. A new table: nothing
+	// is rewritten, and older binaries never read it. Apply before deploying
+	// the api and taskworker that write it.
+	newSqlMigration(networkWinbackOfferSchemaSql),
+
 	// Which run of the extender process sent each activation
 	// (connect/EXTENDER.md G3, extender_activation_run_schema.go), so a
 	// restart shows as a new run among an extender's activations rather than
