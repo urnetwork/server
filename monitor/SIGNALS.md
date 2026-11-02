@@ -8887,6 +8887,95 @@ drop bypasses the family's guards and preconditions. VERIFY: the next runs drop
 the range and a complete observation shows no partition past the horizon plus
 grace.
 
+### 2.4r Contract horizon reaper — runs that stop, fail or fall behind
+Probe: `contract-horizon-reaper`
+
+The contract horizon reaper (`model.RemoveContractsPastHorizon`, CPUOPT3.md
+"Contract horizon reaper") deletes resolved, discharged contracts past its
+horizon, 35 to 91 days by the runtime control `{contract_horizon}control`. It
+runs as one taskworker chain (`remove_contracts_past_horizon`), one run at a
+time on whichever process claims it: every 15 seconds while its pass has work,
+every 5 minutes otherwise, also with the mode off. When it stops, edge-2's
+contract tables grow by the day's contracts (about 85M on 11-01).
+
+Every 5 minutes one instant Mimir read through a services host's loopback
+Mimir evaluates, over the last hour across all taskworker processes, the
+reaper's runs by stop (`urnetwork_contract_horizon_runs_total`), and the
+contracts block points kept
+(`urnetwork_contract_horizon_protected_contracts_total{reason="block_points"}`).
+It also reads, from the processes that ran the reaper in the hour, now and six
+hours ago, its mode, lag and pass start gauges. A process that ran the reaper
+once keeps its last gauge values, so the gauges count only from processes that
+ran it in the hour ending at each time.
+
+- `contract-horizon-reaper-stalled` (sustain 2): no run ended in the hour.
+  The chain is lost or never claimed.
+- `contract-horizon-reaper-failing` (sustain 2): at least 3 runs stopped with
+  an error and none reached the horizon or its run budget. A batch that fails
+  every time stops the pass at its cursor.
+- `contract-horizon-control-unavailable` (sustain 2): at least 3 runs could
+  not read the control and none made progress. A run that cannot read it
+  stops as if off.
+- `contract-horizon-reaper-behind` (sustain 2): with the mode on, the lag (the
+  horizon less the mint time of the last contract the pass committed past)
+  grew by at least 2 hours in 6 hours within one pass (the pass start
+  unchanged). The pass deletes more slowly than contracts cross the horizon. A
+  rescan restarts the pass and is not judged; neither is a dry run.
+- `contract-horizon-block-points-holding` (sustain 1): the reaper kept a
+  contract past its horizon for operator block points in the hour. A contract
+  settled long after it closed, or a block's award is overdue.
+- `contract-horizon-reaper-unobservable` (sustain 2): a run count or the block
+  points count is missing, or, when the reaper ran, its mode, lag or pass start;
+  or a part is stale, duplicate or invalid. A positive its own parts prove
+  still raises.
+
+Every tunable is a field of `ContractHorizonReaperSettings`. Synthetic controls
+cover a keeping-up, off, catching-up, dry-run and rescanned reaper, errors among
+progress, each finding's edge, and each unobservable reason.
+
+ACTION: retention horizons are owner decisions, and the reaper's own control
+narrows or stops it (`mode off`). Never delete contract or archive rows by
+hand. VERIFY: a complete read inside every line for two cadences.
+
+### 2.4s Usage archive hash budget — an epoch window's archive hash in one batch
+Probe: `usage-archive-hash-budget`
+
+The epoch usage read (`stEpochProviderUsageSql`: the v1 close, the v2 epoch
+step and the recovery census) flags a live contract that is also archived by
+hashing the archive rows that closed in its window. Until 2026-11-01 (669c57fe8)
+it hashed the whole archive: on Main, for epoch 3's window, all 27 partitions
+and 20.35M rows, against about 60M that 3.66 GB of hash memory (work_mem 234 MB
+times hash_mem_multiplier 16) holds. The contract horizon reaper archives
+every credit-bearing contract it deletes. Past the hash's memory the hash runs
+in batches and spills toward the 150 GB `temp_file_limit`, and an epoch step
+that fails misses its root.
+
+Hourly, one bounded read-only catalog frame on the single enabled
+`pg-primary`, behind a `hostname -s`, primary-role and 30-second
+statement-clock guard, returns `work_mem` (kB) and `hash_mem_multiplier` from
+`pg_settings`, and `st_provider_usage_archive`'s kind and estimated rows
+(`reltuples`). It also returns each attached partition's estimated rows, at
+most 4,096, bound by an end row. A seven-day window's archived contracts sit
+in at most two contract weeks, so the window estimate is twice the largest
+partition, or the whole table while the archive is plain. The hash holds
+`work_mem * 1024 * hash_mem_multiplier / 64` rows.
+
+- `usage-archive-hash-budget` (sustain 1): the window estimate passes half of
+  what the hash holds.
+- `usage-archive-hash-budget-unobservable` (sustain 2): no or several
+  primaries, a failed read, a wrong host or role, a skewed clock, settings not
+  in kB, a missing archive, a partitioned archive without partitions, or an
+  incomplete or malformed frame.
+
+Estimates come from `ANALYZE`. The read's own session may set `work_mem`
+differently from the catalog's.
+
+ACTION: before the next epoch close, EXPLAIN (ANALYZE) the window's usage read
+on a replica or in a maintenance window, raise the read session's `work_mem`,
+or slow the reaper's `maxRowsPerSecond`. Never delete archive rows: the
+subnet's epochs read them. VERIFY: twice the largest week back under the line,
+or one hash batch in the window's plan.
+
 ### 2.5 Task-system meta-health
 Probe: `task-health`
 
@@ -27902,6 +27991,8 @@ Catalog rows from this incident, none implemented when it closed on 2026-10-22; 
 | storage-runway | Mimir node metrics | §2.4f max-of-windows decline per stateful volume | WARN ≤ 72 h, PAGE ≤ 24 h, 2 probes |
 | minio-drive-runway / minio-accounting-divergence / minio-put-surge | Mimir node + MinIO v3 metrics | §11.6b | runway WARN ≤ 14 d, PAGE ≤ 3 d; divergence over 1 TB WARN; PutObject over 3× its 7-day median for 1 h WARN |
 | contract-reap-stalled / partition-retention-stuck | pg | §2.4g | WARN |
+| contract-horizon-reaper-stalled / contract-horizon-reaper-failing / contract-horizon-control-unavailable / contract-horizon-reaper-behind / contract-horizon-block-points-holding / contract-horizon-reaper-unobservable | Mimir taskworker metrics | §2.4r, added 2026-11-01 after the 35-day horizon review, implemented by `contract-horizon-reaper` | WARN: no run in 1 h; 3 error or control-unavailable runs without progress in 1 h; lag growth of 2 h in 6 h while on; any block points keep |
+| usage-archive-hash-budget / usage-archive-hash-budget-unobservable | pg catalog | §2.4s, implemented by `usage-archive-hash-budget` | WARN when twice the largest archive week passes half of work_mem * hash_mem_multiplier / 64 B |
 | contract-partition-runway / contract-partition-retention-blocked / contract-partition-cutover-pending | pg catalog | §2.4h–§2.4j, added 2026-10-23 for the contract partition cutover | runway PAGE under 2 covered future weeks; retention WARN past 13 + 2 weeks; cutover WARN within 24 h of its week |
 | contract-stage-latency / contract-stage-latency-unobservable | Mimir | §2.30 total mean, implemented by `contract-stage-latency` | WARN over 250 ms, PAGE over 1 s, 10 min held in Mimir |
 | identity-churn / identity-churn-loop / identity-churn-unobservable | Mimir proxy metrics + pg | §14.8, implemented by `identity-churn` | WARN on per-device mints, retire/mint ratio, refusals, unresolved discovery or short-lived identities; PAGE when combined with PgBouncer waiting over 500 or §2.30 over 1 s |
