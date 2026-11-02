@@ -242,6 +242,13 @@ type NetworkExtenderActivation struct {
 	// address, the extender's genesis confidence (connect/GEOMAP.md §5.1),
 	// kept on the history row; nil when the lookup gave none
 	AccuracyKm *float32
+	// the run of the extender process that sent the activation
+	// (connect/EXTENDER.md G3), kept on the history row: its id, when the
+	// process started, and how the run before it ended. Each is nil when the
+	// extender sent none or the caller dropped it as malformed.
+	RunId        *string
+	RunStartTime *time.Time
+	PreviousExit *string
 	// the location the activating address resolved to (M1), already created in
 	// the location table by the caller. Each field is nil when the lookup did
 	// not reach that granularity; all four nil is a lookup that failed, which

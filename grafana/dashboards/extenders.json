@@ -3742,6 +3742,85 @@
     }
    ],
    "description": "Records signed for an extender in a configured capability cohort (extender.yml directory.capability_cohorts; docs/operations/extender-capability-cohort.md), per hour, by capability (unknown for a configured value the server does not know) and how the requirement was decided: required, the record requires the capability; no_camouflage_key, the record carries no camouflage key, so tcp-camouflage-v1 is not required and the cohort is still inert; not_release_only, the extender is reached by an open channel, so nothing is required. A Phase B cohort may splice only once its members show required and no other result for at least one record lifetime. Any unknown series is a misspelled cohort, which withholds those extenders from every release."
+  },
+  {
+   "id": 72,
+   "type": "row",
+   "title": "restarts",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 146
+   },
+   "panels": []
+  },
+  {
+   "id": 73,
+   "type": "timeseries",
+   "title": "restarting extenders (24h)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 147
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_extenders_restarting_24h{env=\"$env\"})",
+     "refId": "A",
+     "legendFormat": "5 or more runs"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_extenders_reporting_runs_24h{env=\"$env\"})",
+     "refId": "B",
+     "legendFormat": "reporting runs"
+    }
+   ],
+   "description": "Extenders whose activations in the last 24 hours carried 5 or more distinct process run ids, beside the extenders that report a run id at all. Each activation names the run of the process that sent it, so a new run id is a restart; a process that restarts every half hour shows about 48 runs a day. Run ids arrive with a connect release, so a zero means no restarts only beside a population that reports them. Which extenders, and how their runs ended, is the query in connect/EXTENDER-ACTIVATION.md section 5."
   }
  ]
 }

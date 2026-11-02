@@ -241,5 +241,54 @@ func CountExtenderContractsByHour(ctx context.Context, hourStart time.Time) []Ex
 	return counts
 }
 
+// The extenders whose activations reported the runs of their processes
+// (connect/EXTENDER.md G3) over a window of activations.
+type ExtenderRunCounts struct {
+	// extenders with at least one activation that carried a run id
+	Reporting int64
+	// of those, the ones whose activations carried at least the asked number
+	// of distinct run ids
+	Restarting int64
+}
+
+// CountExtenderRuns counts, over the activations at or after `since`, the
+// extenders that reported a run and, of those, the ones that reported at least
+// `minRuns` distinct runs, in one scan of the window.
+//
+// A run is one start of an extender process, and a process keeps its run for
+// as long as it runs: one that runs through the window is one run, and one
+// that restarts every half hour is about two an hour. Every slot of one sn
+// miner process shares its run, so many clients activating one key from one
+// process are one run. Separate processes activating one key -- copies of an
+// identity on several hosts -- are a run each, so such a key counts as
+// restarting once that many copies activate within the window. Only stored
+// activations count: a run whose every post was refused leaves no row.
+//
+// The activations have no retention and no index on the time alone. PostgreSQL
+// 18 serves this with a skip scan of the extender and time index, so it reads
+// one descent per extender and the rows in the window, not the history.
+func CountExtenderRuns(ctx context.Context, since time.Time, minRuns int) ExtenderRunCounts {
+	var counts ExtenderRunCounts
+	server.ReplicaDb(ctx, func(conn server.PgConn) {
+		server.Raise(conn.QueryRow(
+			ctx,
+			`
+			SELECT
+				count(*),
+				count(*) FILTER (WHERE $2 <= extender_run.run_count)
+			FROM (
+				SELECT count(DISTINCT run_id) AS run_count
+				FROM network_extender_activation
+				WHERE $1 <= activate_time AND run_id IS NOT NULL
+				GROUP BY extender_id
+			) extender_run
+			`,
+			since.UTC(),
+			minRuns,
+		).Scan(&counts.Reporting, &counts.Restarting))
+	})
+	return counts
+}
+
 // The ping counts the extenders dashboard reads are in network_ping_model.go,
 // beside the table they count.

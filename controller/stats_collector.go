@@ -56,6 +56,12 @@ package controller
 //	urnetwork_stats_derive_residual_km               the last derivation's RMS ping residual {at} (redis, written by the derivation)
 //	urnetwork_stats_derive_last_run_seconds          unix time of the last derivation (redis, written by the derivation)
 //
+// the extender restart gauges are internal (connect/EXTENDER.md G3) and are
+// read only by grafana/dashboards/extenders.json:
+//
+//	urnetwork_stats_extenders_restarting_24h         extenders with 5 or more distinct process run ids in the trailing 24 hours (db)
+//	urnetwork_stats_extenders_reporting_runs_24h     extenders with any run id in the trailing 24 hours, what the first is drawn from (db)
+//
 // the lag.dev gauges are internal (lag.dev/PLAN.md X9), listed in
 // stats_collector_lag.go and read only by grafana/dashboards/lag-dev.json.
 //
@@ -488,6 +494,32 @@ var statsExtenderGossipExtenders24hGauge = newStatsGaugeVec(
 	"Distinct extenders behind the gossip messages released in the last 24 hours, per kind",
 	"kind",
 )
+
+// The restarts of the extender processes (connect/EXTENDER.md G3), read only
+// by the extenders dashboard. Two plain counts with no label, so the series
+// count does not grow with the population; which extenders they are, and how
+// their runs ended, is the query of connect/EXTENDER-ACTIVATION.md §5.
+//
+// The second is the population the first is drawn from: run ids arrive with a
+// connect release, so a zero restarting reads as no restarts only beside a
+// population of extenders that report them.
+var statsExtendersRestarting24hGauge = newStatsGauge(
+	"extenders_restarting_24h",
+	"Extenders whose activations in the last 24 hours carried 5 or more distinct process run ids",
+)
+var statsExtendersReportingRuns24hGauge = newStatsGauge(
+	"extenders_reporting_runs_24h",
+	"Extenders whose activations in the last 24 hours carried a process run id",
+)
+
+// The distinct runs in a window that make an extender restarting. One process
+// that runs through the window is one run and a restart every half hour is
+// about 48 a day, so five stands well clear of a host that was only updated or
+// rebooted a few times.
+const statsExtenderRestartingMinRuns = 5
+
+// The window of the extender restart gauges.
+const statsExtenderRunsWindow = 24 * time.Hour
 
 // statsExtenderContractsCounter is the one metric that names extenders, and it
 // is a COUNTER rather than a windowed gauge on purpose.
@@ -1279,6 +1311,21 @@ func statsRefreshExtenders(ctx context.Context, now time.Time) {
 	server.HandleError(func() {
 		statsRefreshDerivedLocations(ctx)
 	})
+	// isolated the same way: a database the run columns' migration has not
+	// reached costs these two gauges alone
+	server.HandleError(func() {
+		statsRefreshExtenderRuns(ctx, now)
+	})
+}
+
+// Publishes how many extenders restarted often in the trailing window, beside
+// how many report their runs at all (connect/EXTENDER.md G3). Both are
+// published when zero: a zero is the count, and it is what they read until a
+// connect release with run ids reaches the extenders.
+func statsRefreshExtenderRuns(ctx context.Context, now time.Time) {
+	counts := model.CountExtenderRuns(ctx, now.Add(-statsExtenderRunsWindow), statsExtenderRestartingMinRuns)
+	statsExtendersRestarting24hGauge.set(float64(counts.Restarting))
+	statsExtendersReportingRuns24hGauge.set(float64(counts.Reporting))
 }
 
 // Publishes the published rows and the last derivation. Every kind and

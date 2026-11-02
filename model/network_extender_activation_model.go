@@ -33,6 +33,12 @@ type NetworkExtenderActivationRecord struct {
 	// the lookup's accuracy radius in km (connect/GEOMAP.md §5.1); nil when
 	// it gave none, and on rows written before the column
 	AccuracyKm *float32
+	// the run of the extender process that sent the activation
+	// (connect/EXTENDER.md G3); each nil when the extender sent none, sent it
+	// malformed, or predates it, and on rows written before the columns
+	RunId        *string
+	RunStartTime *time.Time
+	PreviousExit *string
 }
 
 // Writes the history row of one activation inside the activation transaction.
@@ -57,9 +63,12 @@ func insertNetworkExtenderActivationInTx(
 			city_location_id,
 			region_location_id,
 			country_location_id,
-			accuracy_km
+			accuracy_km,
+			run_id,
+			run_start_time,
+			previous_exit
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 		`,
 		server.NewId(),
 		extenderId,
@@ -72,7 +81,19 @@ func insertNetworkExtenderActivationInTx(
 		activation.RegionLocationId,
 		activation.CountryLocationId,
 		activation.AccuracyKm,
+		activation.RunId,
+		utcTimeOrNil(activation.RunStartTime),
+		activation.PreviousExit,
 	))
+}
+
+// The time in utc, the form every timestamp column holds, or nil.
+func utcTimeOrNil(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	utc := t.UTC()
+	return &utc
 }
 
 // GetNetworkExtenderActivations reads the activation history of one extender
@@ -97,7 +118,10 @@ func GetNetworkExtenderActivations(
 				city_location_id,
 				region_location_id,
 				country_location_id,
-				accuracy_km
+				accuracy_km,
+				run_id,
+				run_start_time,
+				previous_exit
 			FROM network_extender_activation
 			WHERE extender_id = $1 AND $2 <= activate_time
 			ORDER BY activate_time ASC
@@ -119,6 +143,9 @@ func GetNetworkExtenderActivations(
 					&activation.RegionLocationId,
 					&activation.CountryLocationId,
 					&activation.AccuracyKm,
+					&activation.RunId,
+					&activation.RunStartTime,
+					&activation.PreviousExit,
 				))
 				activations = append(activations, activation)
 			}

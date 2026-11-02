@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
@@ -117,6 +118,12 @@ type ExtenderActivateSettings struct {
 	AccountRateLimit int
 	RateLimitWindow  time.Duration
 
+	// how far past the operator's clock a run start may be and still be stored
+	// (extenderActivationRun): the skew a host's clock may have. An hour keeps
+	// a clock that drifted, and drops one that is plainly wrong. Zero allows
+	// none.
+	RunStartMaxSkew time.Duration
+
 	// where every activation's outcome and probe step times are counted
 	// (extender_activation_metrics.go). Nil counts nothing, which is what a
 	// test that builds the settings itself gets.
@@ -170,6 +177,7 @@ func DefaultExtenderActivateSettings() *ExtenderActivateSettings {
 		ClientRateLimit:  6,
 		AccountRateLimit: 60,
 		RateLimitWindow:  time.Hour,
+		RunStartMaxSkew:  time.Hour,
 		metrics:          defaultExtenderActivationMetrics,
 	}
 }
@@ -236,6 +244,101 @@ type ExtenderActivateArgs struct {
 	// withdraws its measurement name, and a request carried beside it is not
 	// stored. Unset, the default, changes nothing on its own.
 	MeasurementDisabled bool `json:"measurement_disabled,omitempty"`
+	// the run of the extender process that posted this activation
+	// (connect/EXTENDER.md G3): 32 hex characters, the same for every
+	// activation of one process and new at each start. The three run fields
+	// are stored on the activation's history row when they are well formed
+	// and never refuse an activation (extenderActivationRun). An extender
+	// that predates them sends none.
+	RunId string `json:"run_id,omitempty"`
+	// when that process started, rfc 3339 in utc. A string here rather than a
+	// time.Time, whose decoding would answer a malformed time with a 400 and
+	// so refuse the activation
+	RunStartTime string `json:"run_start_time,omitempty"`
+	// how the run before it ended, as the host that restarted the process
+	// reported it: one of extenderActivationPreviousExits, or exit-<code>
+	PreviousExit string `json:"previous_exit,omitempty"`
+}
+
+// The random bytes of a run id, 32 hex characters on the wire
+// (connect/EXTENDER.md G3).
+const extenderActivationRunIdByteCount = 16
+
+// The earliest run start an activation may name: the day the run fields were
+// added (connect/EXTENDER.md G3), before which no process carried one, and long
+// after the 1970 a host without a battery-backed clock starts at before its
+// clock is set.
+var extenderActivationRunStartFloor = time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+
+// The words of a previous exit besides exit-<code>, for a code from 0 to 255
+// (connect/EXTENDER.md G3): the host knew the run ran out of memory, the host
+// stopped it on purpose, a signal ended it -- each of these, or another.
+var extenderActivationPreviousExits = map[string]bool{
+	"oom":     true,
+	"stop":    true,
+	"signal":  true,
+	"sighup":  true,
+	"sigint":  true,
+	"sigquit": true,
+	"sigill":  true,
+	"sigtrap": true,
+	"sigabrt": true,
+	"sigbus":  true,
+	"sigfpe":  true,
+	"sigkill": true,
+	"sigsegv": true,
+	"sigpipe": true,
+	"sigalrm": true,
+	"sigterm": true,
+}
+
+// The run an activation reports, as its history row stores it
+// (connect/EXTENDER.md G3): the id as 32 lower case hex characters, the start
+// in utc when it is no earlier than the floor and no later than the settings'
+// skew past `now`, and the previous exit when it is one of the operator's
+// words. Each field is judged on its own, and a malformed one is stored as null
+// rather than refusing the activation: the run is a diagnostic, and an extender
+// whose clock is wrong, or whose host names an exit the operator does not know,
+// is still published.
+func extenderActivationRun(
+	args *ExtenderActivateArgs,
+	now time.Time,
+	settings *ExtenderActivateSettings,
+) (runId *string, runStartTime *time.Time, previousExit *string) {
+	if runIdBytes, err := hex.DecodeString(args.RunId); err == nil && len(runIdBytes) == extenderActivationRunIdByteCount {
+		normalizedRunId := hex.EncodeToString(runIdBytes)
+		runId = &normalizedRunId
+	}
+	if startTime, err := time.Parse(time.RFC3339, args.RunStartTime); err == nil {
+		startTime = startTime.UTC()
+		if !startTime.Before(extenderActivationRunStartFloor) && !now.Add(settings.RunStartMaxSkew).Before(startTime) {
+			runStartTime = &startTime
+		}
+	}
+	if normalizedPreviousExit := strings.ToLower(strings.TrimSpace(args.PreviousExit)); extenderActivationPreviousExitKnown(normalizedPreviousExit) {
+		previousExit = &normalizedPreviousExit
+	}
+	return
+}
+
+// Whether a previous exit is one of the operator's words, or exit-<code> for a
+// code from 0 to 255 written without a sign or a leading zero.
+func extenderActivationPreviousExitKnown(previousExit string) bool {
+	if extenderActivationPreviousExits[previousExit] {
+		return true
+	}
+	code, ok := strings.CutPrefix(previousExit, "exit-")
+	if !ok || code == "" || 3 < len(code) || (1 < len(code) && code[0] == '0') {
+		return false
+	}
+	value := 0
+	for _, digit := range code {
+		if digit < '0' || '9' < digit {
+			return false
+		}
+		value = 10*value + int(digit-'0')
+	}
+	return value <= 255
 }
 
 type ExtenderActivateResult struct {
@@ -780,6 +883,10 @@ func extenderActivate(
 		optOutExtenderMeasurement(clientSession.Ctx, publicKey, server.NowUtc())
 	}
 
+	// the run of the extender process that posted, kept with the history row
+	// so a restart shows as a new run id (connect/EXTENDER.md G3)
+	runId, runStartTime, previousExit := extenderActivationRun(args, server.NowUtc(), settings)
+
 	var record *protocol.ExtenderRecord
 	var expireTime time.Time
 	activated := model.ActivateNetworkExtender(
@@ -804,6 +911,10 @@ func extenderActivate(
 
 			ClientAddressHash: clientAddressHash,
 			AccuracyKm:        activationAccuracyKm,
+
+			RunId:        runId,
+			RunStartTime: runStartTime,
+			PreviousExit: previousExit,
 		}).WithLocation(activationLocation),
 		func(
 			extender *model.NetworkExtender,

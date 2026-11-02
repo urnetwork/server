@@ -878,6 +878,10 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	},
 	// 905-909: the campaigns' consent evidence and the re-engagement tables
 	reengagementMigrationContracts,
+	[]snMainnetMigrationContract{
+		// which run of the extender process sent each activation
+		extenderActivationRunMigrationContract,
+	},
 )
 
 // Free space a table keeps on every page it writes, so an update of an
