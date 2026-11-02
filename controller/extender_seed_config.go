@@ -34,8 +34,10 @@ import (
 // records, and at least the client's low-water mark of four (connect
 // ExtenderNetworkClientSettings.LowWaterCount), since a client holding fewer
 // usable records runs its dns bootstrap first, which can stall for 30 seconds
-// where DoH is black-holed. Unset is eight. A pool with fewer open extenders
-// gets a shorter cohort, which grows within the hour once the pool does.
+// where DoH is black-holed. Unset is eight, which also gives each address family
+// four records where the pool allows, so a single-family client holds the mark
+// too. A pool with fewer open extenders gets a shorter cohort, which grows within
+// the hour once the pool does.
 //
 // record_lifetime_hours is how long the bundle's records, and so the bundle,
 // stay valid. A bundle never outlives its records (§2.3), so the publisher

@@ -48423,7 +48423,9 @@ is the target `origin`, a route `<mirror>/<route>`):
   (5-minute clock allowance).
 - WARN `extender-seed-mirror-rollback`: a source's sequence below its own
   6-hour peak for 2 minutes. Clients persist the highest sequence they
-  accepted and refuse a lower one.
+  accepted and refuse a lower one. For the origin, the next pass publishes
+  above every claimed sequence (reason `behind_claim`), so it heals within
+  10 minutes while the claims last (7 days).
 - `extender-seed-mirrors-unobservable`: the read failed, a series is
   ambiguous or missing at an evaluation, or no taskworker exported the
   chain's state (`seed_state_missing`: a build that predates it, or a chain

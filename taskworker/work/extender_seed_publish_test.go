@@ -599,6 +599,63 @@ func TestExtenderSeedSequenceNeverRegresses(t *testing.T) {
 	}
 }
 
+// A latest.bin behind a claimed sequence is replaced on the next pass, not at the
+// next refresh: a mirror or a client may hold the higher sequence and refuse the
+// stored bundle. That covers a publish that died between its claim and latest.bin,
+// and a latest.bin restored from an older copy. Once above the claim, nothing more
+// is due.
+func TestExtenderSeedPublisherGoesAboveAClaimLatestDoesNotHold(t *testing.T) {
+	operator := newTestExtenderSeedOperator(t)
+	fleet := newTestExtenderSeedFleet()
+	for range 12 {
+		fleet.add(t, connect.ExtenderDirectoryTierOpen, "", 4, 6)
+	}
+	publisher := operator.publisher(t, fleet)
+	ctx := context.Background()
+	now := testExtenderSeedEpochStart.Add(time.Hour)
+	if result := publisher.publish(ctx, now); result.outcome != extenderSeedOutcomePublished {
+		t.Fatalf("initial: %s", result.outcome)
+	}
+	first, firstArtifact := operator.stored(t, now)
+	stagePath := t.TempDir() + "/first.bin"
+	if err := os.WriteFile(stagePath, firstArtifact, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(10 * time.Minute)
+	if result := publisher.publish(ctx, now); result.outcome != extenderSeedOutcomeCurrent {
+		t.Fatalf("nothing due: %s (%s)", result.outcome, result.reason)
+	}
+
+	// a publish that claimed a higher sequence and died before latest.bin
+	claimed := first.Sequence + 1_000_000
+	if created, err := operator.store.PutIfAbsent(ctx, controller.ExtenderSeedSequenceKey(operator.store, testExtenderSeedHost, claimed), stagePath, controller.ExtenderSeedContentType); err != nil || !created {
+		t.Fatalf("claim: %t %v", created, err)
+	}
+	now = now.Add(10 * time.Minute)
+	result := publisher.publish(ctx, now)
+	if result.outcome != extenderSeedOutcomePublished || result.reason != "behind_claim" {
+		t.Fatalf("behind a claim: %s (%s)", result.outcome, result.reason)
+	}
+	above := result.stored.Sequence
+	if above <= claimed {
+		t.Fatalf("sequence %d is not above the claimed %d", above, claimed)
+	}
+	now = now.Add(10 * time.Minute)
+	if result := publisher.publish(ctx, now); result.outcome != extenderSeedOutcomeCurrent {
+		t.Fatalf("above the claim: %s (%s)", result.outcome, result.reason)
+	}
+
+	// latest.bin restored from the older copy: the claims outlive it
+	if err := operator.store.Put(ctx, controller.ExtenderSeedLatestKey(operator.store, testExtenderSeedHost), stagePath, controller.ExtenderSeedContentType); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(10 * time.Minute)
+	result = publisher.publish(ctx, now)
+	if result.outcome != extenderSeedOutcomePublished || result.reason != "behind_claim" || result.stored.Sequence <= above {
+		t.Fatalf("restored from an older copy: %s (%s), sequence after %d", result.outcome, result.reason, above)
+	}
+}
+
 // A store whose first claim is beaten by another writer.
 type testRacingSeedStore struct {
 	server.BlobStore

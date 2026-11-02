@@ -33,11 +33,11 @@ import (
 // A new bundle is due when none is stored or the stored one does not verify,
 // every ExtenderSeedRefreshTimeout, when the cohort epoch turns (the planned
 // update), when the configured lifetime changed, when a member left the open
-// pool, when a member was revoked, and, at most every
-// extenderSeedShortRetryTimeout, when a cohort short of the client's low-water
-// mark (extenderSeedMinRecordCount) could hold more of the open pool. Otherwise
-// the pass stores nothing, so the sequence advances only when the bundle changes
-// or ages.
+// pool, when a member was revoked, when a claimed sequence is above the stored
+// bundle's, and, at most every extenderSeedShortRetryTimeout, when a cohort short
+// of the client's low-water mark (extenderSeedMinRecordCount) could hold more of
+// the open pool. Otherwise the pass stores nothing, so the sequence advances only
+// when the bundle changes or ages.
 //
 // Validity. A bundle never outlives the records it promises: its expiry is the
 // expiry of its records, which are signed at the bundle's issue time with the
@@ -287,7 +287,7 @@ func (self *extenderSeedPublisher) publish(ctx context.Context, now time.Time) *
 	}
 	revocations := self.revoked(ctx, storedPublicKeys)
 
-	result.reason = self.dueReason(stored.bundle, now, epoch, lifetime, draw, revocations)
+	result.reason = self.dueReason(stored.bundle, claimedFloor, now, epoch, lifetime, draw, revocations)
 	if result.reason == "" {
 		result.outcome = extenderSeedOutcomeCurrent
 		return result
@@ -361,6 +361,7 @@ func (self *extenderSeedPublisher) publish(ctx context.Context, now time.Time) *
 // Why a new bundle is due at now, or empty when the stored one stands.
 func (self *extenderSeedPublisher) dueReason(
 	stored *connect.ExtenderSeedBundle,
+	claimedFloor uint64,
 	now time.Time,
 	epoch uint64,
 	lifetime time.Duration,
@@ -370,6 +371,13 @@ func (self *extenderSeedPublisher) dueReason(
 	switch {
 	case stored == nil:
 		return "initial"
+	case stored.Sequence < claimedFloor:
+		// a publish claimed a higher sequence that latest.bin does not hold: it
+		// died before replacing latest.bin, or latest.bin was restored from an
+		// older copy. A mirror or a client may hold the higher one and refuse
+		// this bundle, so the next one goes above the claim now, not at the
+		// next refresh.
+		return "behind_claim"
 	case connect.ExtenderEpoch(stored.IssueTime, ExtenderSeedCohortEpochTimeout) != epoch:
 		return "epoch"
 	case controller.ExtenderSeedRefreshTimeout <= now.Sub(stored.IssueTime):
