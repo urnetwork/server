@@ -87,11 +87,15 @@ An already-dispatched row exits before reading `provider_egress.yml` or creating
 any network client, and its post-step schedules no successor. Re-enabling and
 running `taskworker init-tasks` seeds a fresh canonical shard set.
 
-Each shard execution owns its network, client, and grant. `ProberBootstrap`
-runs cleanup immediately at startup and every five minutes after a successful
-pass; it no longer replenishes the legacy shared identity. The operator ingest
-secret remains in `vault/<env>/provider_egress.yml`; it is never serialized into
-task arguments.
+Each shard execution owns its network, client, and grant. When a pass ends it
+drains its shard (every client deactivated, its credit ended) and settles the
+contracts whose two final reports exist; it deletes nothing. `ProberBootstrap`
+runs that settle sweep (`SettleDueProberShards`) immediately at startup and
+every five minutes after a successful pass, fencing any live pass past its
+deadline; it no longer replenishes the legacy shared identity. The shard's rows
+stay until its generation drops (see "Retention by shard generation" below).
+The operator ingest secret remains in `vault/<env>/provider_egress.yml`; it is
+never serialized into task arguments.
 
 The production `ProberBootstrap` target caps failure backoff at five minutes,
 including its two-minute execution timeout. Failed attempts retain the same
@@ -110,17 +114,23 @@ live claims or shorten the remaining tasks' execution budgets.
 
 Cleanup retains unresolved contracts, including disputed and zero-byte ones,
 and retries normal settlement only when both actual final reports exist. Its
-contract reads use both `open` values of the existing full
-`transfer_contract_open_payer_network_id_transfer_byte_count` index, followed
-by exact `contract_close` primary-key reads. Verify that full index is valid
-and ready before deploying this query change; no new migration is required.
-The unresolved-payer partial index excludes disputes and cannot prove that an
-account is safe to remove.
+contract reads take the shard payer's contracts that have no outcome from the
+two partial indexes that hold exactly those: a payer range of
+`transfer_contract_unresolved_payer_transfer_byte_count` (undisputed) and a
+scan of `transfer_contract_dispute_partial_create_time` (the open disputes of
+every payer, a handful), followed by exact `contract_close` primary-key reads.
+Because the generated `open` column is `dispute = false AND outcome IS NULL`,
+the two arms are every unresolved contract of the payer. Neither index holds a
+contract once it has an outcome, so a drained shard whose contracts settled
+reads nothing. The reads no longer use
+`transfer_contract_open_payer_network_id_transfer_byte_count`; before
+2026-11 they walked both `open` values of it, which read the payer's whole
+settled history on every retry (459 ms and about 5.5M tuples per call on Main).
 
-These reads visit only the shard payer's history. Their work is proportional
-to that history, even though settlement returns at most 32 contracts per pass.
-Do not reuse them as a cheap negative check for the old shared account: its
-history may be large. A bounded diagnostic can report per-balance unsettled
+These reads visit only the payer's unresolved contracts and the global open
+disputes, even though settlement returns at most 32 contracts per pass. Do not
+reuse them as a cheap negative check for the old shared account: its
+unresolved set may be large. A bounded diagnostic can report per-balance unsettled
 escrow blockers, but absence of those blockers does not exclude unanchored
 zero-byte contracts or authorize removal of the shared identity.
 
@@ -134,6 +144,82 @@ processes up to 256 explicit balance IDs per transaction. This uses the existing
 The streaming reader retains at most 256 IDs and holds a read snapshot for the
 pass; the maintenance pool must allow at least two concurrent connections for
 that reader and the short delete transactions.
+
+## Retention by shard generation
+
+The owner's rule (2026-11-01): the probe retention window is sharded, old
+shards are dropped, and the retention is bounded, not cut. Probe volume is
+unchanged.
+
+**The shard key.** Every row a prober writes belongs to the private network of
+one probe pass (`prober_shard_run`): the pass's network, user, authentication,
+device and credit; the clients it mints with their provide keys, connections,
+TLS certificates, roles and location reliability rows; and every contract it
+funds, whose payer is that network and whose source (an origin) or destination
+(a reply companion) is one of its clients.
+
+**The window.** A generation is the passes created in one UTC day. The
+retention keeps the newest eight generations, today's included, and drops the
+oldest as a unit once a day begins. A pass ends by draining its shard and
+settling its reported contracts (`SettleProberShard`); nothing deletes it
+before its generation drops. A settled shard waits with `next_cleanup_time`
+`'infinity'`.
+
+**The drop** (`model.RemoveProberShardGenerations`, task
+`remove_prober_shard_generations`) takes the passes of dropped generations
+oldest first and, for each:
+
+1. deletes its zero-byte contracts: resolved and closed before the cutoff,
+   every escrow settled, no sweep and no destination close with bytes. Such a
+   contract adds nothing to any byte sum (the daily transfer rollup, the clock
+   backfill, the subnet usage weight, payouts, payment plans, operator block
+   awards). The capture trigger archives a credit-bearing contract's usage in
+   the same statement. The rows deleted are the contract horizon reaper's own.
+2. deletes its identity in `ReapProberShard`'s transaction, which refuses a pass
+   with an unresolved contract, an unsettled escrow, a pending debit, a
+   connected client or a balance that is not a plain grant. A refused pass is
+   retried after an hour, and a pass whose drop failed after a minute.
+3. deletes its registry row.
+
+A run ends when its four-minute budget does; a pass whose contracts the budget
+interrupted keeps its identity until the next run finishes them, since a pass's
+contracts are found through its clients.
+
+It keeps, for the retention that owns each: contracts that carry bytes (the
+contract horizon reaper, because the transfer rollup can re-sum their day until
+`TransferAuditRollupFirstDay` passes it); close evidence (its own retention);
+provider work events and heads (guarded; the C4 partition's retention).
+
+**Rotation.** A pass in flight never loses its identity: a generation drops only
+after seven more have begun (the control cannot keep fewer than two), a pass
+drops only once its deadline is six hours past, and the identity transaction
+refuses anything still unresolved or connected.
+
+**The control.** The drop is off until an operator sets the Redis hash
+`{prober_retention}control` (read before every pass; a run that cannot read it
+stops):
+
+```
+HSET {prober_retention}control mode dry_run          # count what a drop would delete
+HSET {prober_retention}control mode on               # drop
+HSET {prober_retention}control mode off              # stop within one pass
+HSET {prober_retention}control retainedGenerations 8 # 2..30 UTC days kept
+HSET {prober_retention}control maxContractsPerSecond 200   # up to 2000; 0 is off
+HSET {prober_retention}control maxShardsPerMinute 30        # passes dropped a minute, up to 600; 0 is off
+HSET {prober_retention}control contracts off         # drop identities only
+DEL  {prober_retention}control                       # code defaults (off)
+```
+
+**Metrics.** `urnetwork_prober_retention_*`: the mode, the kept generations,
+the cutoff, the oldest registered pass and the due backlog (gauges); passes
+dropped, refused (by reason) and failed; contracts deleted, kept for bytes, kept
+unsettled or busy; archived contracts; deleted rows by table; step durations;
+runs by why they stopped. While the drop keeps up, the oldest registered pass is
+within a generation of the cutoff.
+
+**Settling.** `ProberBootstrap` runs `SettleDueProberShards` every five minutes:
+it fences a live pass past its deadline in any generation and settles drained
+passes of kept generations. It deletes nothing.
 
 ## Network boundaries
 
