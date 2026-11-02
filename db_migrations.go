@@ -11179,4 +11179,10 @@ var migrations = []any{
 	// table rewrite. Apply before deploying the api and taskworker that read
 	// and write it; the next nightly rollup fills it for its whole window.
 	newSqlMigration(onboardingResultsPurchaseStartedSql),
+
+	// The re-engagement results (mmm/reengagement/PLAN.md "MEASUREMENT"):
+	// the nightly per-cohort-day episode counts the experiment readout reads
+	// (reengagement_results_schema.go). A new table; apply before deploying
+	// the taskworker that writes it and the api that reads it.
+	newSqlMigration(reengagementResultsDailySchemaSql),
 }

@@ -95,6 +95,7 @@ Usage:
     bringyourctl reengagement status --network_id=<network_id>
     bringyourctl reengagement preview --network_id=<network_id> --step=<step>
     bringyourctl reengagement scan [--dry-run]
+    bringyourctl reengagement rollup [--from=<from>] [--to=<to>]
     bringyourctl reengagement send-test --email=<email> --template=<template> [--variant=<variant>] [--locale=<locale>]
     bringyourctl reengagement mirror-suppressions
     bringyourctl payments reconcile [--dry-run] [--store=<store>]
@@ -397,6 +398,8 @@ func main() {
 			reengagementPreview(opts)
 		} else if scan, _ := opts.Bool("scan"); scan {
 			reengagementScan(opts)
+		} else if rollup, _ := opts.Bool("rollup"); rollup {
+			reengagementRollup(opts)
 		} else if sendTest, _ := opts.Bool("send-test"); sendTest {
 			reengagementSendTest(opts)
 		} else if mirrorSuppressions, _ := opts.Bool("mirror-suppressions"); mirrorSuppressions {
@@ -3349,6 +3352,30 @@ func reengagementScan(opts docopt.Opts) {
 	clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
 	defer clientSession.Cancel()
 	result, err := controller.ReengagementScan(&controller.ReengagementScanArgs{DryRun: dryRun}, clientSession)
+	if err != nil {
+		panic(err)
+	}
+	printJson(result)
+}
+
+// reengagementRollup recomputes reengagement_results_daily for the cohort
+// days [--from, --to] (default: the configured window ending yesterday),
+// exactly as the nightly task does. The first backfill after deploy:
+//
+//	bringyourctl reengagement rollup --from=<the first send's day> --to=<yesterday>
+func reengagementRollup(opts docopt.Opts) {
+	parse := func(flag string) time.Time {
+		value, _ := opts.String(flag)
+		if value == "" {
+			return time.Time{}
+		}
+		t, err := time.Parse("2006-01-02", value)
+		if err != nil {
+			panic(fmt.Errorf("%s must be YYYY-MM-DD: %w", flag, err))
+		}
+		return t.UTC()
+	}
+	result, err := controller.RunReengagementResultsRollup(context.Background(), parse("--from"), parse("--to"))
 	if err != nil {
 		panic(err)
 	}

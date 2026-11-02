@@ -885,6 +885,8 @@ var migrationCurrentSuffixContracts = slices.Concat(
 		// the migration's position
 		onboardingResultsPurchaseStartedMigrationContract,
 	},
+	// the re-engagement results, wherever merges place them
+	[]snMainnetMigrationContract{reengagementResultsMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an
