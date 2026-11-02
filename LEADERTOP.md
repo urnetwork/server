@@ -86,6 +86,22 @@ The "top 200" is the head. The validator never ranks individual providers or net
 - **Weights today** are pool 1/10 and reserves 9/20 each.
 - **Support policy:** don't register for Top 200 until we announce that it works (factury `support/notes/policies.md:48`).
 
+### 3.7 Binding open
+
+`snTopBindingOpen` is true, by the owner's decision: `GET /sn/top` answers `binding_open: true` and an empty `binding_note`, the claim prompt is live and the "claiming isn't open yet" banner is gone (Q16). The value is stored in each snapshot by the taskworker that folds it, so the apps follow at the first fold of that build, and a client pinning an older snapshot still sees it closed. `GET /sn/head` and `POST /sn/head/binding` never read the flag.
+
+Opening rests on, in this order:
+
+- **Weights.** The validator steers again and its row pays selected fleets: UID 145 earned 3% of miner incentive from block 9,402,996 until the validator's last write at block 9,410,050, and nothing under the fallback row after it.
+- **Mirrors.** `sn-commitment-oracle` runs live on snow (xops `SN-MAINNET-COMMITMENT-ORACLE.md`). Without it every `bindFleetMember` reverts `StaleCommitment()`.
+- **Authority.** The owner's reviewed fleet runtime authority is published (sn `miner/FLEET-MAINNET-RUNTIME.md`). Each runtime upgrade needs a new one.
+
+Limits a fleet meets once it binds:
+
+- **At most 7 members draw ahead of the rest** (`VerifyCohortPriorityPerFleet`, the 1,500 cohort over 200 seats). A bound member outside the cohort earns no head score and no pool share, so a larger fleet's other members earn nothing unless they are already in the census.
+- **The census allows 3,072 providers over the deployment's life.** It held 2,001 on 2026-11-02, so about 1,071 new claimed members can ever be admitted: about 153 fleets of 7.
+- **A registered UID with no emission can be replaced** once its 21,600-block immunity ends, about 3 days, and a binding starts no earlier than the next 7-day epoch.
+
 ## 4. What the operator ranks today
 
 | Board | Route | Ranks by | Window | Notes |
@@ -158,7 +174,7 @@ Each row also carries:
 | **unlikely** | below the cutoff by more than M |
 | **not measurable** | not in the cohort, or not verify-eligible, so the validator can't score it whatever the projection says |
 
-The first value of M is design question 13. While fleet binding is blocked on mainnet, every response says so (§3.6).
+The first value of M is design question 13. While fleet binding is closed on mainnet, every response says so (§3.7).
 
 **What the API serves for the apps (owner, 2026-10-29):**
 - The top 400, so networks just outside the 200 line can track their progress.
@@ -239,7 +255,7 @@ Public, with optional auth. Rate-limited like the points leaderboard.
     "id": "…", "tempo_index": 0, "block": 0, "computed_at": "…",
     "settlement_epoch": 0, "head_seats": 200, "claimed_fleets": 0, "open_seats": 200,
     "projected_cutoff": 0.0, "claimed_cutoff": null,
-    "binding_open": false, "binding_note": "Top 200 binding isn't open on mainnet yet",
+    "binding_open": true, "binding_note": "",
     "cohort": { "measured_providers": 0, "capacity": 1500 },
     "validator_summary_at": null, "incentive_at": null,
     "agreement": { "precision_at_200": null }
@@ -460,8 +476,8 @@ The recommendation is (a) for the ranking plus (c) in `/me`.
 - **Cohort freeze.**
   - With a 2,000-provider lifetime cap and carried members first, the validator can only ever measure a fixed few thousand providers. About 700k are online.
   - Without design question 6, the board can only say "not measurable" to most miners.
-- **Binding is blocked on mainnet.** The commitment oracle isn't deployed and the fleet runtime authority hasn't shipped. The board's main question can't turn into a claim until both land.
-- **Possible validator bug, unverified.** The treasury path refuses the whole row when a selected head UID rounds to 0 in u16 (sn `validator/recycle_planner.go:352-358`). A bound fleet that stays in the census but isn't observed decays by ¾ each tempo and never reaches zero, so one idle fleet could stop steering within about a day. Test this before the head goes live.
+- **Binding depends on the validator.** Binding is open (§3.7), but a selected fleet earns only while the validator steers. Under the fallback row, a bound fleet earns nothing and its members still leave the pool.
+- **Validator refuses the whole row for one idle fleet.** The treasury path refuses the row when a selected head UID rounds to 0 in u16 (sn `validator/recycle_planner.go:352-358`). A bound fleet that stays in the census but isn't observed decays by ¾ each tempo and never reaches zero. Reproduced on 2026-11-02 against `completeOwnerRecycleRow`: refused after 32 idle tempos (38 h) with one other fleet at EMA 1, and after 14 idle tempos (17 h) with 199 others at EMA 3. Steering then stops for every fleet and pool until the idle fleet returns, its binding ends or the validator changes.
 - **Gaming.** Networks can split or merge to change claim counts, or run Sybil networks behind shared prefixes. The board mirrors the validator's rules and doesn't add its own; unusual patterns get a flag.
 - **Validator randomness.** Hop draws and trail completion are random, so a projection is an estimate. The board shows its confidence (§5.6) and the measured agreement (§6.3).
 - **Plumbing defects found while researching:**

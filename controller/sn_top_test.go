@@ -150,8 +150,45 @@ func TestSnTopSnapshotWireShape(t *testing.T) {
 	empty := snTopEmptySnapshot()
 	connect.AssertEqual(t, empty.HeadSeats, 200)
 	connect.AssertEqual(t, empty.OpenSeats, 200)
-	connect.AssertEqual(t, empty.BindingOpen, false)
-	connect.AssertEqual(t, empty.BindingNote, "Top 200 binding isn't open on mainnet yet")
+	connect.AssertEqual(t, empty.BindingOpen, true)
+	connect.AssertEqual(t, empty.BindingNote, "")
+}
+
+// Binding is open, the note is empty when it is, and it says so when it isn't.
+func TestSnTopBindingOpen(t *testing.T) {
+	connect.AssertEqual(t, snTopBindingOpen, true)
+	connect.AssertEqual(t, snTopBindingNote(true), "")
+	connect.AssertEqual(t, snTopBindingNote(false), "Top 200 binding isn't open on mainnet yet")
+}
+
+// A snapshot serves what it stored, so one written before binding opened stays
+// closed when a client pins it, and the board follows the newest snapshot.
+func TestSnTopSnapshotServesItsStoredBindingState(t *testing.T) {
+	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	closed := snTopSnapshotFromModel(&model.SnTopSnapshot{
+		SnapshotId:  server.NewId(),
+		ComputedAt:  now.Add(-time.Hour),
+		BindingOpen: false,
+		BindingNote: snTopBindingNote(false),
+	}, now)
+	connect.AssertEqual(t, closed.BindingOpen, false)
+	connect.AssertEqual(t, closed.BindingNote, "Top 200 binding isn't open on mainnet yet")
+	open := snTopSnapshotFromModel(&model.SnTopSnapshot{
+		SnapshotId:  server.NewId(),
+		ComputedAt:  now,
+		BindingOpen: true,
+		BindingNote: snTopBindingNote(true),
+	}, now)
+	connect.AssertEqual(t, open.BindingOpen, true)
+	connect.AssertEqual(t, open.BindingNote, "")
+	body, err := json.Marshal(open)
+	connect.AssertEqual(t, err, nil)
+	// The apps read these two fields by name, and the empty note stays on the wire.
+	for _, field := range []string{`"binding_open":true`, `"binding_note":""`} {
+		if !strings.Contains(string(body), field) {
+			t.Fatalf("snapshot json lacks %s: %s", field, body)
+		}
+	}
 }
 
 // One fold per tempo: wait for it to settle, never fold one twice, and never
