@@ -34,6 +34,18 @@ func TestIdentityRetentionMigrationContracts(t *testing.T) {
 				strings.ReplaceAll(server.ClientKeyRetireDeletedClientBodySql(), "'", "''"),
 			},
 		},
+		{
+			contract: clientKeyHistoryRetentionFloorMigrationContract,
+			version:  server.ClientKeyHistoryRetentionFloorMigrationVersion(),
+			pins: []string{
+				"st_client_key_history_truncate_guard",
+				"st_client_key_gone_gone_time",
+				"public.st_client_key_history_retention_floor()",
+				strings.ReplaceAll(server.ClientKeyHistoryFloorGuardBodySql(), "'", "''"),
+				strings.ReplaceAll(server.ClientKeyHistoryRetentionFloorBodySql(), "'", "''"),
+				strings.ReplaceAll(server.ClientKeyRetireDeletedClientBodySql(), "'", "''"),
+			},
+		},
 	} {
 		artifact := test.contract.artifact
 		if artifact.requiredVersion != test.version || artifact.rowColumn != test.version-589 {
@@ -47,6 +59,25 @@ func TestIdentityRetentionMigrationContracts(t *testing.T) {
 				t.Fatalf("%s does not pin %q", artifact.name, pin)
 			}
 		}
+	}
+}
+
+// Pure: the floor replaces the guard body the retention contract pins, so the
+// retention contract ends at the floor's version and the floor's contract
+// keeps everything else it required, on the new body only.
+func TestClientKeyHistoryRetentionFloorSupersedesTheRetentionContract(t *testing.T) {
+	floor := server.ClientKeyHistoryRetentionFloorMigrationVersion()
+	if removed := clientKeyHistoryRetentionMigrationContract.artifact.removedVersion; removed != floor {
+		t.Fatalf("the retention contract ends at %d, want the floor's %d", removed, floor)
+	}
+	if removed := clientKeyHistoryRetentionFloorMigrationContract.artifact.removedVersion; removed != 0 {
+		t.Fatalf("the floor contract ends at %d", removed)
+	}
+	if !strings.Contains(clientKeyHistoryRetentionArtifactQuery, clientKeyGoneArtifactQuery) || !strings.Contains(clientKeyHistoryRetentionFloorArtifactQuery, clientKeyGoneArtifactQuery) {
+		t.Fatal("the floor contract does not keep the record of when a client went")
+	}
+	if strings.Contains(clientKeyHistoryRetentionFloorArtifactQuery, strings.ReplaceAll(server.ClientKeyHistoryGuardBodySql(), "'", "''")) {
+		t.Fatal("the floor contract still accepts the 91-day guard body")
 	}
 }
 
@@ -87,7 +118,9 @@ func TestMigrationCurrentSuffixContractsEmitInVersionOrder(t *testing.T) {
 // its own migration.
 func TestIdentityRetentionSchemaFaultsReachSignal(t *testing.T) {
 	indexVersion := server.RetiredChildNetworkClientIndexMigrationVersion()
-	historyVersion := server.ClientKeyHistoryRetentionMigrationVersion()
+	// the floor migration's contract owns the key history custody from its
+	// version on, so a fault at the head is drift of the floor's version
+	historyVersion := server.ClientKeyHistoryRetentionFloorMigrationVersion()
 	faults := []struct {
 		name    string
 		version int

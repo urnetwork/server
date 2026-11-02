@@ -11,14 +11,22 @@ import (
 	"github.com/urnetwork/server/taskworker/work"
 )
 
-// Ordinary queue turns per provider totals lane turn: an eighth of all claims
-// while totals are due.
-const legacyProviderTotalsClaimSharePeriod = 4
+// Ordinary queue turns per provider totals lane turn: a sixteenth of all claims
+// while totals are due. The drain below applies them in bulk; the per-task lane
+// takes the rows it leaves.
+const legacyProviderTotalsClaimSharePeriod = 8
+
+// The provider totals drain (model/subscription_provider_totals_drain.go) is
+// one run-once chain. Behind the totals backlog its next run waited for its
+// lane turn, one claim in about two hundred: 85 seconds in
+// TestProductionProviderTotalsDrainOutpacesHotProviderProduction. It takes one
+// of every eight ordinary turns while that run is due, a sixteenth of all claims.
+const legacyProviderTotalsDrainClaimSharePeriod = 8
 
 // The debit flush and the payment sender each own one run-once chain per shard
 // or payment, and behind the totals backlog each waited over a minute per
 // claim, one rotation turn in about two hundred. Each now takes one of every
-// eight ordinary turns, a sixteenth of all claims, while it is due. The three
+// eight ordinary turns, a sixteenth of all claims, while it is due. The four
 // shares spend exactly the half of the ordinary turns the scheduler allows;
 // the other half stays oldest first.
 const financialOwnerClaimSharePeriod = 8
@@ -60,6 +68,7 @@ func taskWorkerSettingsForProfile(settings *task.TaskWorkerSettings, profile Wor
 		ownerSettings.TargetClaimShares = map[string]int{}
 	}
 	ownerSettings.TargetClaimShares[task.NewTaskTarget(model.ApplyLegacyProviderTotals).TargetFunctionName()] = legacyProviderTotalsClaimSharePeriod
+	ownerSettings.TargetClaimShares[model.NewLegacyProviderTotalsDrainTaskTarget().TargetFunctionName()] = legacyProviderTotalsDrainClaimSharePeriod
 	ownerSettings.TargetClaimShares[task.NewTaskTarget(work.FlushTransferDebits).TargetFunctionName()] = financialOwnerClaimSharePeriod
 	ownerSettings.TargetClaimShares[task.NewTaskTarget(controller.AdvancePayment).TargetFunctionName()] = financialOwnerClaimSharePeriod
 	if profile == WorkloadProfileProduction {

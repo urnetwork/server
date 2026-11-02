@@ -76,7 +76,9 @@ func TestProberBootstrapPostKeepsTheRecurringCadence(t *testing.T) {
 	})
 }
 
-func TestProberBootstrapReapsShardsWithoutRecreatingSharedCredit(t *testing.T) {
+// Crash recovery fences a dead pass's shard and settles it; the shard's rows
+// stay with its generation until the retention drops them.
+func TestProberBootstrapFencesShardsWithoutRecreatingSharedCredit(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		s := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
@@ -105,12 +107,13 @@ func TestProberBootstrapReapsShardsWithoutRecreatingSharedCredit(t *testing.T) {
 			t.Fatal(err)
 		}
 		server.Db(ctx, func(conn server.PgConn) {
-			var grants int
-			var closed bool
+			var grants, live int
+			var fenced bool
 			server.Raise(conn.QueryRow(ctx, `SELECT
 				(SELECT count(*) FROM transfer_balance WHERE network_id=$1),
-				(SELECT state='closed' FROM prober_shard_run WHERE task_id=$2 AND epoch=$3)`, *legacy.NetworkId, key.TaskId, key.Epoch).Scan(&grants, &closed))
-			if grants != 0 || !closed {
+				(SELECT count(*) FROM network_client c JOIN prober_shard_run r USING (network_id) WHERE r.task_id=$2 AND r.epoch=$3 AND c.active),
+				(SELECT state='draining' AND next_cleanup_time='infinity' FROM prober_shard_run WHERE task_id=$2 AND epoch=$3)`, *legacy.NetworkId, key.TaskId, key.Epoch).Scan(&grants, &live, &fenced))
+			if grants != 0 || live != 0 || !fenced {
 				t.Fatal("recurring cleanup replenished shared credit or failed crash recovery")
 			}
 		})

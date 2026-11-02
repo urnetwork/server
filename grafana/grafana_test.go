@@ -2564,10 +2564,11 @@ func TestEpochClockMeasurementsAndBlockAliases(t *testing.T) {
 	}
 }
 
-// Flipping reject_expired waits on network tokens: a client token refreshes on
-// its half-life, a network token only at POST /auth/network-refresh. The
-// authentication panel keeps the legacy accepts split by credential kind and
-// charts the network refresh outcomes beside them.
+// Flipping reject_expired waits on network tokens: a client token refreshes
+// between 40% and 50% of its lifetime, a network token only at
+// POST /auth/network-refresh. The authentication panel keeps the legacy
+// accepts split by credential kind and charts the network refresh outcomes
+// beside them.
 func TestAuthenticationPanelSplitsLegacyAcceptsByCredentialKind(t *testing.T) {
 	dashboard := readTestDashboard(t, "signals.json")
 	var panel *testPanel

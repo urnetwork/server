@@ -58,6 +58,15 @@ const CompletedContractExpiration = 7 * 24 * time.Hour
 // the mid-backlog stop.
 var reaperRunBudget = 5 * time.Minute
 
+// Wall clock for one RemoveCompletedContracts run, after which its delete pass
+// starts no batch. The task's MaxTime is 30 minutes, and a run that reaches it
+// is canceled: its batch in flight rolls back, its Post does not run, and it
+// retries within seconds. The earlier passes take about ten minutes at most
+// (one 50,000-contract assign batch past its five-minute budget), so this
+// leaves the delete pass its own budget and the run ten minutes of margin. A
+// var so tests can spend it.
+var removeCompletedContractsRunBudget = 20 * time.Minute
+
 func ByteCountHumanReadable(count ByteCount) string {
 	trimFloatString := func(value float64, precision int, suffix string) string {
 		s := fmt.Sprintf("%."+strconv.Itoa(precision)+"f", value)
@@ -6055,6 +6064,14 @@ func AddFreeTransferBalanceToAllNetworks(
 					NOT EXISTS (
 						SELECT 1 FROM lag_guest
 						WHERE lag_guest.network_id = network.network_id
+					) AND
+					-- a prober shard's private network is funded only by its
+					-- own credit (BeginProberShard). A free grant there would
+					-- be data no user owns, and the shard's cleanup refuses to
+					-- remove a network that holds a second balance
+					NOT EXISTS (
+						SELECT 1 FROM prober_shard_run
+						WHERE prober_shard_run.network_id = network.network_id
 					)
 			`,
 			SubscriptionTypeSupporter,
@@ -6108,6 +6125,9 @@ func AddFreeTransferBalanceToAllNetworks(
 }
 
 func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
+	// The delete pass, last, starts no batch past this, so the run returns
+	// and its Post schedules the next one well inside the task's MaxTime.
+	runEnd := server.NowUtc().Add(removeCompletedContractsRunBudget)
 	maxRowCount := 50000
 
 	removeCompletedTransferBalanceBatches(ctx, minTime)
@@ -6142,10 +6162,9 @@ func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 	assignCompletedContractReapTimeBatches(ctx, maxRowCount)
 
 	// assign pass: give aged closed-but-never-completed contracts a reap_time so
-	// the delete pass removes them. Bounded by the
-	// transfer_contract_reap_pending_create_time partial index (reap_time IS NULL
-	// AND close_time IS NOT NULL, ordered by create_time), so this is an index
-	// range-scan, not the anti-join it replaces.
+	// the delete pass removes them. Bounded by the contract ids of the contracts
+	// created before the straggler horizon, so this is a range of the primary
+	// key, not the anti-join it replaces.
 	assignStragglerReapTimeBatches(ctx, server.NowUtc().Add(-StragglerContractExpiration), maxRowCount)
 
 	// delete pass: hard delete every contract whose reap_time is due, with its
@@ -6153,15 +6172,16 @@ func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 	// This reaps both completed contracts (reap_time = complete_time +
 	// CompletedContractExpiration) and the stragglers just assigned above.
 	// Candidate contract_ids are distinct (from the transfer_contract primary
-	// key). removeDueContractBatches drains until an empty batch; protected
+	// key). The pass drains in batches of dueContractReapBatchSize until no
+	// contract is due, a bound stops it, or the run's budget ends; protected
 	// candidates are repaired back to reap_time = NULL instead of deleted.
 	reapTime := server.NowUtc()
-	removeDueContractBatches(
-		ctx,
+	newDueContractReaper(
 		reapTime,
 		reapTime.Add(-StragglerContractExpiration),
-		maxRowCount,
-	)
+		dueContractReapBatchSize,
+		runEnd,
+	).removeDue(ctx)
 }
 
 // assignCompletedContractReapTimeBatches drains the durable retention queue set
@@ -6253,174 +6273,6 @@ func assignCompletedContractReapTimeBatches(ctx context.Context, maxRowCount int
 	}
 }
 
-// removeDueContractBatches consumes the first bounded slice of the reap_time
-// index before doing any payment lookup. Due contracts held by an active or
-// ambiguous payment are repaired to reap_time = NULL. So are unpaid contracts
-// stamped by the former 90-day rule that have not yet reached the new 300-day
-// horizon. All other due contracts and their dependent rows are deleted.
-// Classifying only the already-bounded slice avoids turning the safety checks
-// into an anti-join over contract history. The payment guard also covers
-// completed payments whose queued retention cursor has not finished yet.
-//
-// Every write names its contracts with contract_id = ANY(ids), which lets each
-// statement prune to the partitions holding them. The classification locks the
-// due contracts before their dependent rows are deleted. A close report or close
-// is written only under its contract's lock, so the deletes see every one
-// committed before that lock, and none can follow it. Close reports are deleted
-// here because the partition cutover drops their cascade from transfer_contract;
-// until then the cascade finds them already gone.
-func removeDueContractBatches(ctx context.Context, minTime time.Time, minStragglerCreateTime time.Time, maxRowCount int) {
-	budgetEnd := server.NowUtc().Add(reaperRunBudget)
-	for {
-		var processedCount int64
-		server.MaintenanceTx(ctx, func(tx server.PgTx) {
-			// A cached generic plan cannot prune partitions by an array
-			// parameter, so plan every statement with its actual ids.
-			server.RaisePgResult(tx.Exec(ctx, `SET LOCAL plan_cache_mode = force_custom_plan`))
-			// Fix the bounded contract slice before shared balance ownership.
-			// The mutation below can only revisit these admitted identities;
-			// newly due contracts remain for the next pass.
-			var contractIds []server.Id
-			rows, err := tx.Query(ctx, `SELECT contract_id FROM transfer_contract
- WHERE reap_time IS NOT NULL AND reap_time<$1 ORDER BY reap_time LIMIT $2`, minTime.UTC(), maxRowCount)
-			server.WithPgResult(rows, err, func() {
-				for rows.Next() {
-					var id server.Id
-					server.Raise(rows.Scan(&id))
-					contractIds = append(contractIds, id)
-				}
-			})
-			// A zero balance id on a due contract's escrow would fail this
-			// head-of-index slice on every pass and stop all reaping behind it.
-			balanceIds, err := contractTransferBalanceIdsInTx(ctx, tx, contractIds)
-			server.Raise(err)
-			admitted, err := tryTransferBalanceOwnershipInTx(ctx, tx, ownableTransferBalanceIds(balanceIds))
-			server.Raise(err)
-			if !admitted || len(contractIds) == 0 {
-				return
-			}
-			var candidateIds []server.Id
-			server.Raise(tx.QueryRow(
-				ctx,
-				`
-				WITH due AS MATERIALIZED (
-					SELECT
-						transfer_contract.contract_id,
-						transfer_contract.create_time
-					FROM transfer_contract
-					WHERE
-						transfer_contract.reap_time IS NOT NULL AND
-						transfer_contract.reap_time < $1 AND
-						transfer_contract.contract_id=ANY($4::uuid[])
-					ORDER BY transfer_contract.reap_time
-					LIMIT $3
-					FOR UPDATE
-				), protected AS MATERIALIZED (
-					SELECT due.contract_id
-					FROM due
-					WHERE
-						EXISTS (
-							SELECT 1
-							FROM transfer_escrow_sweep
-							INNER JOIN account_payment ON
-								account_payment.payment_id = transfer_escrow_sweep.payment_id
-							WHERE
-								transfer_escrow_sweep.contract_id = due.contract_id AND
-								`+server.ContractPaymentRetentionHoldSql+`
-						) OR
-						(
-							due.create_time >= $2 AND
-							NOT EXISTS (
-								SELECT 1
-								FROM transfer_escrow_sweep
-								INNER JOIN account_payment ON
-									account_payment.payment_id = transfer_escrow_sweep.payment_id
-								WHERE
-									transfer_escrow_sweep.contract_id = due.contract_id AND
-									account_payment.completed
-							)
-						)
-				), cleared AS (
-					UPDATE transfer_contract
-					SET reap_time = NULL
-					FROM protected
-					WHERE
-						transfer_contract.contract_id=ANY($4::uuid[]) AND
-						transfer_contract.contract_id = protected.contract_id
-					RETURNING transfer_contract.contract_id
-				)
-				SELECT
-					(SELECT COUNT(*) FROM due),
-					ARRAY(
-						SELECT due.contract_id
-						FROM due
-						WHERE NOT EXISTS (
-							SELECT 1
-							FROM protected
-							WHERE protected.contract_id = due.contract_id
-						)
-						ORDER BY due.contract_id
-					)
-				`,
-				minTime.UTC(),
-				minStragglerCreateTime.UTC(),
-				maxRowCount,
-				contractIds,
-			).Scan(&processedCount, &candidateIds))
-			if len(candidateIds) == 0 {
-				return
-			}
-			server.RaisePgResult(tx.Exec(
-				ctx,
-				`
-				WITH deleted_report AS (
-					DELETE FROM contract_close_report
-					WHERE contract_close_report.contract_id = ANY($1::uuid[])
-				), deleted_close AS (
-					DELETE FROM contract_close
-					WHERE contract_close.contract_id = ANY($1::uuid[])
-				), deleted_escrow AS (
-					DELETE FROM transfer_escrow
-					WHERE transfer_escrow.contract_id = ANY($1::uuid[])
-				), deleted_sweep AS (
-					DELETE FROM transfer_escrow_sweep
-					WHERE transfer_escrow_sweep.contract_id = ANY($1::uuid[])
-				)
-				DELETE FROM contract_extender
-				WHERE contract_extender.contract_id = ANY($1::uuid[])
-				`,
-				candidateIds,
-			))
-			result, err := tx.Query(
-				ctx,
-				`
-				DELETE FROM transfer_contract
-				WHERE transfer_contract.contract_id = ANY($1::uuid[])
-				RETURNING transfer_contract.contract_id, source_id, destination_id,
-					outcome IS NULL AS unresolved
-				`,
-				candidateIds,
-			)
-			server.WithPgResult(result, err, func() {
-				for result.Next() {
-					var contractId, sourceId, destinationId server.Id
-					var unresolved bool
-					server.Raise(result.Scan(&contractId, &sourceId, &destinationId, &unresolved))
-					// Deleting unresolved custody is its terminal lifecycle event.
-					// Read the deleted version so a concurrent outcome wins once.
-					if unresolved {
-						server.AddTxCommitCount(tx, &contractClosedCounter, 1)
-					}
-					contractHoleEventInTx(ctx, tx, contractId, sourceId, destinationId, "remove")
-				}
-			})
-		}, server.TxReadCommitted, server.OptNoRetry())
-		if processedCount == 0 || budgetEnd.Before(server.NowUtc()) {
-			return
-		}
-	}
-}
-
 // removeContractBatches repeatedly runs a bounded contract-delete cascade (one
 // batch per maintenance tx, so no long lock is held) until a batch deletes no
 // contracts, meaning the eligible set is drained. This decouples retention
@@ -6450,16 +6302,32 @@ func removeContractBatches(ctx context.Context, sql string, minTime time.Time, m
 	}
 }
 
-// reap_time is a timestamp without zone on the UTC storage clock. Preserve
-// the transaction-start clock while making its storage zone explicit.
+// Every contract created before the straggler horizon has an id below the
+// floor of the horizon plus this margin (ContractIdCreateTimeRange). A var
+// so a test whose fixture ages contracts by rewriting create_time, which
+// leaves each id at its real creation, can widen the id bound by that age.
+var stragglerContractIdMargin = ContractIdCreateTimeMargin
+
+// The closed, never-reaped contracts created before $1 that no payment holds,
+// at most $2, oldest id first. $3 bounds the ids of contracts created before
+// $1, so the batch is a range of the primary key from its oldest id, and the
+// create_time predicate still decides which contracts are stragglers, as a
+// filter (IS TRUE, see ContractIdCreateTimeRange). Neither
+// transfer_contract_reap_pending_create_time nor transfer_contract_create_time
+// is needed. Keep this read bounded by contract_id: once those indexes are
+// gone, a batch ordered or bounded by create_time alone seq-scans and sorts
+// the whole contract heap. reap_time is a timestamp without zone on the UTC
+// storage clock. Preserve the transaction-start clock while making its
+// storage zone explicit.
 const assignStragglerReapTimeSQL = `
 WITH batch AS (
 	SELECT transfer_contract.contract_id
 	FROM transfer_contract
 	WHERE
+		transfer_contract.contract_id < $3 AND
 		transfer_contract.reap_time IS NULL AND
 		transfer_contract.close_time IS NOT NULL AND
-		transfer_contract.create_time < $1 AND
+		(transfer_contract.create_time < $1) IS TRUE AND
 		NOT EXISTS (
 			SELECT 1
 			FROM transfer_escrow_sweep
@@ -6469,7 +6337,7 @@ WITH batch AS (
 				transfer_escrow_sweep.contract_id = transfer_contract.contract_id AND
 				` + server.ContractPaymentRetentionHoldSql + `
 		)
-	ORDER BY transfer_contract.create_time
+	ORDER BY transfer_contract.contract_id
 	LIMIT $2
 )
 UPDATE transfer_contract
@@ -6482,13 +6350,13 @@ WHERE transfer_contract.contract_id = batch.contract_id
 // that were never reaped (reap_time IS NULL), are older than minCreateTime, and
 // are not held by an active/ambiguous payment. This is the straggler + sweep-less
 // cleanup: safely unplanned value otherwise lives forever. Bounded by the
-// transfer_contract_reap_pending_create_time partial index (reap_time IS NULL
-// AND close_time IS NOT NULL), this is an index range-scan, not the anti-join
-// full scan it replaces.
+// contract ids of the contracts created before minCreateTime, this is a range
+// of the primary key from its oldest id, not the anti-join full scan it
+// replaces.
 //
 // Runs one bounded batch per maintenance tx (no long lock) until a batch marks
 // fewer than maxRowCount rows. Each candidate is a distinct transfer_contract row
-// (from the primary key) that gets reap_time set and so leaves the partial index,
+// (from the primary key) that gets reap_time set and so leaves the eligible set,
 // so the eligible set strictly shrinks and a short batch means drained.
 func assignStragglerReapTimeBatches(ctx context.Context, minCreateTime time.Time, maxRowCount int) (assignedCount int64) {
 	// Cap the work per call to a time budget so a large one-time backlog -- e.g.
@@ -6497,19 +6365,21 @@ func assignStragglerReapTimeBatches(ctx context.Context, minCreateTime time.Time
 	// bounded runs instead of one unbounded run that pegs the DB. The task
 	// reschedules every 30 min, so the backlog is still worked down steadily.
 	budgetEnd := server.NowUtc().Add(reaperRunBudget)
+	stragglerIdBound := server.ContractIdFloor(minCreateTime.Add(stragglerContractIdMargin))
 	for {
 		var batchCount int64
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
 			// UPDATE ... LIMIT is not valid Postgres; bound the batch with a CTE
 			// that picks the contract ids first, then update exactly those rows.
-			// ORDER BY create_time makes the planner take the ordered
-			// transfer_contract_reap_pending_create_time partial-index path (oldest
-			// stragglers first) rather than risking a seq scan.
+			// ORDER BY contract_id below the id bound makes the planner take the
+			// primary key's ordered range from its oldest id (oldest stragglers
+			// first) rather than risking a seq scan.
 			tag := server.RaisePgResult(tx.Exec(
 				ctx,
 				assignStragglerReapTimeSQL,
 				minCreateTime.UTC(),
 				maxRowCount,
+				stragglerIdBound,
 			))
 			batchCount = tag.RowsAffected()
 		}, server.TxReadCommitted)
@@ -6576,6 +6446,10 @@ type sweepOrphanStep struct {
 	// committed page. It keeps sweepOrphanCursor's start, budget and resume
 	// contract, with a cursor shaped by newCursorTargets.
 	sweep func(ctx context.Context, startKey []any, maxRowCount int, sliceSize int) (removedCount int64, rowCount int, endKey []any, done bool)
+	// When set, each page asks it first, in the page's own transaction. False
+	// ends the step for this pass without examining its rows, and the pass
+	// moves on to the next step; the next pass asks again.
+	admitPage func(ctx context.Context, tx server.PgTx) bool
 }
 
 // sweepOrphanSteps pages steps in order starting from start, stopping once every
@@ -6757,10 +6631,16 @@ func sweepOrphanCursor(
 		var targets []any
 		gotRow := false
 		ownershipRefused := false
+		stepRefused := false
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
 			sliceCount = 0
 			deletedCount = 0
 			gotRow = false
+			stepRefused = false
+			if step.admitPage != nil && !step.admitPage(ctx, tx) {
+				stepRefused = true
+				return
+			}
 			targets = step.newCursorTargets()
 			// One aligned array per key column, in key column order.
 			var lockedKeys []any
@@ -6808,6 +6688,11 @@ func sweepOrphanCursor(
 				deletedCount = tag.RowsAffected()
 			}
 		}, server.TxReadCommitted, server.OptNoRetry())
+		if stepRefused {
+			// nothing of this page was examined; the rest of the step waits
+			// for a pass its admission allows
+			return removedCount, rowCount, nil, true
+		}
 		if ownershipRefused {
 			// Keep the refused page's input cursor. Durable orphan rows remain
 			// discoverable after the admitted financial owner has completed.

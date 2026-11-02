@@ -1,0 +1,14 @@
+{{define "title"}}Your UR Pro trial ends on {{.EndDate}}{{end}}
+{{define "preheader"}}If you keep it, your subscription starts that day. You can cancel before then.{{end}}
+{{define "eyebrow"}}Reminder{{end}}
+{{define "accent"}}#eff7bb{{end}}
+{{define "headline"}}Your UR Pro trial ends on {{.EndDate}}{{end}}
+{{define "why"}}Sent to the address on your URnetwork account two days before a UR Pro free trial ends, as the trial screen said we would.{{end}}
+{{define "content"}}
+<p class="ur-text" style="margin:16px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:16px; line-height:26px; color:#2b3036;">{{.ChargeLine}}</p>
+<p class="ur-text" style="margin:16px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:16px; line-height:26px; color:#2b3036;">{{.CancelLine}}</p>
+{{if .Stripe}}<table role="presentation" class="ur-btn-t" cellpadding="0" cellspacing="0" border="0" style="margin:28px 0 0;"><tr>
+<td class="ur-btn" style="border-radius:100px; background-color:#0039de; mso-padding-alt:14px 32px;"><a class="ur-btn-a" href="{{.ManageUrl}}" style="display:inline-block; padding:14px 32px; font-family:Geist, Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:16px; line-height:20px; font-weight:600; color:#ffffff; text-decoration:none; border-radius:100px;">Manage subscription</a></td>
+</tr></table>
+{{end}}<p class="ur-muted" style="margin:20px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:13px; line-height:20px; color:#5f6a74;">Questions? Contact <a class="ur-link" href="mailto:support@ur.io" style="color:#0039de; text-decoration:underline;">support@ur.io</a>.</p>
+{{end}}

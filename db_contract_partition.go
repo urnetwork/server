@@ -39,7 +39,8 @@ var ContractPartitionTables = []string{
 
 // The retention horizon (owner decision 2026-10-23): a week's partitions are
 // dropped once the week ended longer ago than this and it holds nothing that
-// must stay. The close evidence guard (migration 857) uses the same 91 days.
+// must stay. Close evidence keeps at most the same 91 days, and as little as
+// the contract horizon (CloseEvidenceRetention).
 const ContractRetention = 13 * 7 * 24 * time.Hour
 
 // Weeks after the current one that always have partitions. An insert past the

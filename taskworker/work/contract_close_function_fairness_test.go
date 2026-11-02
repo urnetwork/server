@@ -382,6 +382,42 @@ func TestCloseScheduledBacklogKeepsFinancialAndRecurringProgress(t *testing.T) {
 		release := func() { releaseOnce.Do(func() { close(closeTarget.release) }) }
 		defer func() { release(); worker.Close(); cancel(); <-done }()
 		go func() { defer close(done); server.HandleError(worker.Run, func(err error) { runErr = err }) }()
+		// Producers schedule provider totals for the drain
+		// (model/subscription_provider_totals_drain.go). This worker registers
+		// only the per-task reader, so the deferral elapses at once and totals
+		// are due as they were before the drain; a held row waits a tick.
+		dueStop, dueDone := make(chan struct{}), make(chan struct{})
+		go func() {
+			defer close(dueDone)
+			ticker := time.NewTicker(20 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-dueStop:
+					return
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+				}
+				server.HandleError(func() {
+					server.Tx(ctx, func(tx server.PgTx) {
+						now := server.NowUtc()
+						server.RaisePgResult(tx.Exec(ctx, `UPDATE pending_task SET run_at=$2
+							WHERE ctid=ANY(ARRAY(SELECT ctid FROM pending_task WHERE function_name=$1 AND run_at>$2 FOR UPDATE SKIP LOCKED))`,
+							model.NewLegacyProviderTotalsTaskTarget().TargetFunctionName(), now))
+					}, server.TxReadCommitted, server.OptNoRetry())
+				})
+			}
+		}()
+		stopDue := func() {
+			select {
+			case <-dueStop:
+			default:
+				close(dueStop)
+			}
+			<-dueDone
+		}
+		defer stopDue()
 		select {
 		case <-closeTarget.prefix:
 		case <-done:
@@ -439,6 +475,7 @@ func TestCloseScheduledBacklogKeepsFinancialAndRecurringProgress(t *testing.T) {
 				t.Fatal("financial drain did not reach durable completion", current, ctx.Err())
 			}
 		}
+		stopDue()
 		worker.Drain()
 		<-done
 		if runErr != nil || worker.InflightCount() != 0 || worker.DrainCanceledCount() != 0 {

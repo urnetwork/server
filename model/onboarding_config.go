@@ -114,23 +114,30 @@ const (
 // the recipient's locale (else the locale's language, else `en`). ok is false
 // when nothing usable is configured.
 func (c *OnboardingBrevoConfig) TemplateId(step string, variant string, locale string) (int, bool) {
+	id, _, ok := c.TemplateIdLocale(step, variant, locale)
+	return id, ok
+}
+
+// TemplateIdLocale is TemplateId with the store locale the chosen template was
+// rendered in, which the params' dates and words must follow.
+func (c *OnboardingBrevoConfig) TemplateIdLocale(step string, variant string, locale string) (int, string, bool) {
 	variants, ok := c.Templates[step]
 	if !ok {
-		return 0, false
+		return 0, "", false
 	}
 	locales, ok := variants[variant]
 	if !ok || len(locales) == 0 {
 		locales, ok = variants[TemplateVariantDefault]
 		if !ok || len(locales) == 0 {
-			return 0, false
+			return 0, "", false
 		}
 	}
 	for _, candidate := range TemplateLocaleCandidates(locale) {
 		if id, ok := locales[candidate]; ok && 0 < id {
-			return id, true
+			return id, candidate, true
 		}
 	}
-	return 0, false
+	return 0, "", false
 }
 
 // TemplateLocaleCandidates orders the locales to try for a recipient: the exact
@@ -178,6 +185,12 @@ type OnboardingOfferConfig struct {
 	// Apple is the App Store Connect one-time code top-up (S2); credentials in
 	// vault/main/apple_app_store_connect.yml
 	Apple OnboardingAppleOfferCodesConfig `yaml:"apple"`
+	// AppleEmailEnabled lets the path-B offer emails (E4b, E5b) go to App
+	// Store networks (platform ios or macos). Off until the App Store build
+	// can redeem an emailed offer: the store build of 2026-08 has no offer
+	// route and the one-time codes were never assigned (REVIEW.md findings 2
+	// and 3), so those emails promised a price nobody could get.
+	AppleEmailEnabled bool `yaml:"apple_email_enabled"`
 }
 
 type OnboardingScheduleConfig struct {
@@ -213,6 +226,11 @@ type OnboardingExperiment struct {
 	Secondary     []string                  `yaml:"secondary"`
 	Guardrails    map[string]float64        `yaml:"guardrails"`
 	MinExposures  int                       `yaml:"min_exposures"`
+	// the planned control rate on the primary metric, fixed before the start;
+	// the readout's sequential-test prior (mmm/onboarding/analyze.mjs)
+	BaseRate float64 `yaml:"base_rate"`
+	// why the experiment stopped or how to read it (a voided run, a restart)
+	Note string `yaml:"note"`
 }
 
 type OnboardingConfig struct {
@@ -229,6 +247,40 @@ type OnboardingConfig struct {
 	Experiment  OnboardingHoldoutConfig  `yaml:"experiment"`
 	Experiments []*OnboardingExperiment  `yaml:"experiments"`
 	Results     OnboardingResultsConfig  `yaml:"results"`
+	// who the campaign emails (onboarding and re-engagement) may go to
+	Policy OnboardingPolicyConfig `yaml:"policy"`
+}
+
+// OnboardingPolicyConfig is the mail policy (onboarding/policy.go): the
+// country lists and the consent-evidence rule. An absent list takes the
+// default; an explicitly empty list (`[]`) means none.
+type OnboardingPolicyConfig struct {
+	// the onboarding campaign applies the policy (the re-engagement program
+	// always does). Off by default so that deploying the server does not by
+	// itself change who gets onboarding mail; the reviewed config turns it on.
+	ApplyToOnboarding          bool      `yaml:"apply_to_onboarding"`
+	NoMarketingCountries       *[]string `yaml:"no_marketing_countries"`
+	NoOfferCountries           *[]string `yaml:"no_offer_countries"`
+	EvidenceCountries          *[]string `yaml:"evidence_countries"`
+	EvidenceWhenCountryUnknown *bool     `yaml:"evidence_when_country_unknown"`
+}
+
+// MailPolicy is the configured policy over the defaults.
+func (c *OnboardingConfig) MailPolicy() onboarding.MailPolicy {
+	p := onboarding.DefaultMailPolicy()
+	if c.Policy.NoMarketingCountries != nil {
+		p.NoMarketingCountries = *c.Policy.NoMarketingCountries
+	}
+	if c.Policy.NoOfferCountries != nil {
+		p.NoOfferCountries = *c.Policy.NoOfferCountries
+	}
+	if c.Policy.EvidenceCountries != nil {
+		p.EvidenceCountries = *c.Policy.EvidenceCountries
+	}
+	if c.Policy.EvidenceWhenCountryUnknown != nil {
+		p.EvidenceWhenCountryUnknown = *c.Policy.EvidenceWhenCountryUnknown
+	}
+	return p
 }
 
 // OnboardingResultsConfig tunes the nightly results rollup and the admin

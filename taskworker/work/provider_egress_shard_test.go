@@ -65,18 +65,29 @@ func TestProviderEgressShardCleanupOnSuccessFailureCancelAndPanic(t *testing.T) 
 				outcome == "error" && !errors.Is(runErr, failure) || outcome == "cancel" && !errors.Is(runErr, context.Canceled) || outcome == "success" && runErr != nil {
 				t.Fatalf("%s: callback outcome changed: error=%v panic=%v", outcome, runErr, recovered)
 			}
-			server.Db(t.Context(), func(conn server.PgConn) {
-				var retained int
-				var state string
-				server.Raise(conn.QueryRow(t.Context(), `SELECT
-					(SELECT count(*) FROM network WHERE network_id=$1)+
-					(SELECT count(*) FROM network_client WHERE network_id=$1)+
-					(SELECT count(*) FROM transfer_balance WHERE network_id=$1),state
-					FROM prober_shard_run WHERE task_id=$2 AND epoch=$3`, networkId, key.TaskId, key.Epoch).Scan(&retained, &state))
-				if retained != 0 || state != "closed" {
-					t.Fatalf("%s: pass left disposable resources after return: rows=%d state=%s", outcome, retained, state)
-				}
-			})
+			// the pass fenced its account at return: every client is inactive
+			// and the shard settled, waiting for its generation to drop
+			shardRows := func() (retained int, live int, state string, settled bool) {
+				server.Db(t.Context(), func(conn server.PgConn) {
+					server.Raise(conn.QueryRow(t.Context(), `SELECT
+						(SELECT count(*) FROM network WHERE network_id=$1)+
+						(SELECT count(*) FROM network_client WHERE network_id=$1)+
+						(SELECT count(*) FROM transfer_balance WHERE network_id=$1),
+						(SELECT count(*) FROM network_client WHERE network_id=$1 AND active),
+						state, next_cleanup_time='infinity'
+						FROM prober_shard_run WHERE task_id=$2 AND epoch=$3`, networkId, key.TaskId, key.Epoch).Scan(&retained, &live, &state, &settled))
+				})
+				return
+			}
+			if retained, live, state, settled := shardRows(); retained != 4 || live != 0 || state != "draining" || !settled {
+				t.Fatalf("%s: pass did not fence and settle its account at return: rows=%d live=%d state=%s settled=%t", outcome, retained, live, state, settled)
+			}
+			if deleted, err := model.ReapProberShard(t.Context(), key); err != nil || !deleted {
+				t.Fatalf("%s: the settled account was not reaped: %t %v", outcome, deleted, err)
+			}
+			if retained, _, state, _ := shardRows(); retained != 0 || state != "closed" {
+				t.Fatalf("%s: the reap left disposable resources: rows=%d state=%s", outcome, retained, state)
+			}
 		}
 	})
 }

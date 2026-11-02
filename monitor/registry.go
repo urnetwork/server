@@ -70,6 +70,8 @@ func NewSignals() []Signal {
 		NewPgFreezeAgeSignal(),
 		NewStorageRunwaySignal(),
 		NewRetentionLivenessSignal(),
+		NewContractHorizonReaperSignal(),
+		NewUsageArchiveHashBudgetSignal(),
 		NewContractPartitionRunwaySignal(),
 		NewContractPartitionRetentionBlockedSignal(),
 		NewContractPartitionCutoverPendingSignal(),
@@ -226,6 +228,7 @@ func NewSignals() []Signal {
 		NewContractReplyCollapseSignal(),
 		NewHostedContractCapSignal(),
 		NewContractStageInflightSignal(),
+		NewExtenderSeedMirrorsSignal(),
 	}
 }
 

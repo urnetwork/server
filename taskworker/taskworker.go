@@ -90,6 +90,10 @@ func initTaskSchedule(ctx context.Context) {
 		controller.ScheduleAppleOfferCodeTopUp(clientSession, tx, server.NowUtc().Add(1*time.Hour))
 		controller.ScheduleOnboardingResultsRollup(clientSession, tx, onboarding.NextRollupAt(server.NowUtc()))
 		controller.ScheduleOnboardingEmailTrackerSync(clientSession, tx, server.NowUtc())
+		// the re-engagement scan (02:30 UTC; inert until reengagement.yml enables it)
+		controller.ScheduleReengagementScan(clientSession, tx, controller.NextReengagementScanAt(server.NowUtc()))
+		// the service reminders (03:00 UTC; each kind off until reengagement.yml turns it on)
+		controller.ScheduleServiceReminders(clientSession, tx, controller.NextServiceRemindersAt(server.NowUtc()))
 		controller.ScheduleSubscriptionMetricsSync(clientSession, tx, server.NowUtc())
 		controller.ScheduleDeliverAccountMessages(clientSession, tx)
 		work.SchedulePayout(clientSession, tx)
@@ -128,6 +132,9 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleRemoveCompletedContracts(clientSession, tx)
 		// idle until the runtime control `{contract_horizon}control` sets a mode
 		work.ScheduleRemoveContractsPastHorizon(clientSession, tx)
+		// the prober shard generations past their retention; idle until the
+		// runtime control `{prober_retention}control` sets a mode
+		work.ScheduleRemoveProberShardGenerations(clientSession, tx)
 		work.ScheduleReconcileNetEscrow(clientSession, tx)
 		work.ScheduleDbMaintenance(clientSession, tx, 0)
 		// seeded only when its chain has no task (PARTITION-MAINTENANCE-PLAN.md A4)
@@ -150,6 +157,10 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleRollupProviderEgressTallies(clientSession, tx)
 		work.ScheduleExtenderProbe(clientSession, tx)
 		work.ScheduleExtenderPublish(clientSession, tx)
+		// the public seed bundle and its mirror check
+		// (connect/EXTENDER-UPDATE2.md §2); idle until extender.yml enables
+		// the seed block
+		work.ScheduleExtenderSeed(clientSession, tx)
 		// lag.dev measurement certificates and names (lag.dev/PLAN.md C5-C9);
 		// both idle until extender.yml enables the measurement block
 		work.ScheduleExtenderMeasurementIssue(clientSession, tx)
@@ -371,6 +382,8 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.SweepOrphanNetworkClientDataPost,
 		),
 		model.NewLegacyProviderTotalsTaskTarget(),
+		// armed by work.ScheduleSettlementAccountingTasks
+		model.NewLegacyProviderTotalsDrainTaskTarget(),
 		model.NewLegacyNetEscrowMirrorTaskTarget(),
 		model.NewQuarantineReservationReleaseTaskTarget(),
 		model.NewClosePayerDueContractsTaskTarget(),
@@ -434,13 +447,14 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.RemoveLocationLookupResults,
 			work.RemoveLocationLookupResultsPost,
 		),
-		task.NewTaskTargetWithPost(
-			work.RemoveCompletedContracts,
-			work.RemoveCompletedContractsPost,
-		),
+		work.NewRemoveCompletedContractsTaskTarget(),
 		task.NewTaskTargetWithPost(
 			work.RemoveContractsPastHorizon,
 			work.RemoveContractsPastHorizonPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.RemoveProberShardGenerations,
+			work.RemoveProberShardGenerationsPost,
 		),
 		work.NewTransferDebitTaskTarget(),
 		task.NewTaskTargetWithPost(
@@ -504,6 +518,11 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.ExtenderPublish,
 			work.ExtenderPublishPost,
+		),
+		// connect/EXTENDER-UPDATE2.md §2
+		task.NewTaskTargetWithPost(
+			work.ExtenderSeed,
+			work.ExtenderSeedPost,
 		),
 		// lag.dev/PLAN.md C5-C9
 		task.NewTaskTargetWithPost(
@@ -629,6 +648,21 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			controller.OnboardingEmailTrackerSync,
 			controller.OnboardingEmailTrackerSyncPost,
+		),
+		// the re-engagement program: the daily scan that opens episodes, and
+		// one task per network, episode and step
+		task.NewTaskTargetWithPost(
+			controller.ReengagementScan,
+			controller.ReengagementScanPost,
+		),
+		task.NewTaskTargetWithPost(
+			controller.ReengagementStep,
+			controller.ReengagementStepPost,
+		),
+		// crypto Pro and store trials about to end, through the account mailer
+		task.NewTaskTargetWithPost(
+			controller.ServiceReminders,
+			controller.ServiceRemindersPost,
 		),
 		task.NewTaskTargetWithPost(
 			controller.SubscriptionMetricsSync,

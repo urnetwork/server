@@ -90,18 +90,30 @@ func TestExtenderActivateResultFieldNames(t *testing.T) {
 		"extender_id",
 		"ip",
 		"ip_version",
+		// every probe step the activation ran, timed (EXTENDER.md C2,
+		// connect#230)
+		"probe_steps",
 		"record",
 		// the optional carriers that were left out of an accepted activation,
 		// and why (EXTENDER.md C2a, connect#230)
 		"refused_carriers",
+		// when the operator has room for the next post, on a refusal that
+		// judged nothing about the caller (connect#230)
+		"retry_after_seconds",
 	}
 	got := jsonFieldNames(reflect.TypeOf(controller.ExtenderActivateResult{}))
 	if !slices.Equal(got, want) {
 		t.Fatalf("ExtenderActivateResult fields = %v, want exactly %v", got, want)
 	}
-	wantRefusal := []string{"carrier", "error", "port"}
+	// each left out carrier says how long its probe ran and what was left of
+	// the probe budget when it started (connect#230)
+	wantRefusal := []string{"budget_left_ms", "carrier", "elapsed_ms", "error", "port"}
 	if got := jsonFieldNames(reflect.TypeOf(controller.ExtenderCarrierRefusal{})); !slices.Equal(got, wantRefusal) {
 		t.Fatalf("ExtenderCarrierRefusal fields = %v, want exactly %v", got, wantRefusal)
+	}
+	wantStep := []string{"budget_left_ms", "elapsed_ms", "ip_version", "name", "outcome", "port"}
+	if got := jsonFieldNames(reflect.TypeOf(controller.ExtenderProbeStep{})); !slices.Equal(got, wantStep) {
+		t.Fatalf("ExtenderProbeStep fields = %v, want exactly %v", got, wantStep)
 	}
 }
 
@@ -115,8 +127,20 @@ func TestExtenderActivateRefusedCarriersWireForm(t *testing.T) {
 		Carriers:  []string{"tcp", "dns"},
 		DnsPorts:  []int{4053},
 		RefusedCarriers: []*controller.ExtenderCarrierRefusal{
-			{Carrier: "quic", Port: 443, Error: "timeout: no recent network activity"},
-			{Carrier: "dns", Port: 53, Error: "context deadline exceeded"},
+			{
+				Carrier:      "quic",
+				Port:         443,
+				Error:        "connection refused",
+				ElapsedMs:    12,
+				BudgetLeftMs: 6400,
+			},
+			{
+				Carrier:      "dns",
+				Port:         53,
+				Error:        "no answer within 3 s: context deadline exceeded",
+				ElapsedMs:    3000,
+				BudgetLeftMs: 9400,
+			},
 		},
 	})
 	if err != nil {
@@ -126,8 +150,9 @@ func TestExtenderActivateRefusedCarriersWireForm(t *testing.T) {
 		t,
 		string(resultBytes),
 		`{"activated":true,"carriers":["tcp","dns"],"dns_ports":[4053],"refused_carriers":[`+
-			`{"carrier":"quic","port":443,"error":"timeout: no recent network activity"},`+
-			`{"carrier":"dns","port":53,"error":"context deadline exceeded"}]}`,
+			`{"carrier":"quic","port":443,"error":"connection refused","elapsed_ms":12,"budget_left_ms":6400},`+
+			`{"carrier":"dns","port":53,"error":"no answer within 3 s: context deadline exceeded",`+
+			`"elapsed_ms":3000,"budget_left_ms":9400}]}`,
 	)
 
 	acceptedBytes, err := json.Marshal(&controller.ExtenderActivateResult{
@@ -139,6 +164,132 @@ func TestExtenderActivateRefusedCarriersWireForm(t *testing.T) {
 		t.Fatalf("the activation result did not encode: %v", err)
 	}
 	connect.AssertEqual(t, string(acceptedBytes), `{"activated":true,"carriers":["tcp"]}`)
+}
+
+// A refusal that judged nothing about the caller -- an operator busy probing
+// other activations -- says when to come back in `retry_after_seconds`, beside
+// the message (connect#230). The activator waits exactly that long instead of
+// backing off, so the name is the wire. Every other answer leaves it out.
+func TestExtenderActivateRetryAfterWireForm(t *testing.T) {
+	busyBytes, err := json.Marshal(&controller.ExtenderActivateResult{
+		Activated:         false,
+		Error:             "The operator is busy probing other extenders. Please try again in 2 minutes.",
+		RetryAfterSeconds: 90,
+	})
+	if err != nil {
+		t.Fatalf("the activation result did not encode: %v", err)
+	}
+	connect.AssertEqual(
+		t,
+		string(busyBytes),
+		`{"activated":false,"error":"The operator is busy probing other extenders. `+
+			`Please try again in 2 minutes.","retry_after_seconds":90}`,
+	)
+
+	refusedBytes, err := json.Marshal(&controller.ExtenderActivateResult{
+		Activated: false,
+		Error:     "the tcp carrier did not answer: connection refused",
+	})
+	if err != nil {
+		t.Fatalf("the activation result did not encode: %v", err)
+	}
+	connect.AssertEqual(
+		t,
+		string(refusedBytes),
+		`{"activated":false,"error":"the tcp carrier did not answer: connection refused"}`,
+	)
+}
+
+// Every answer after the probe lists its steps, refusals included (C2,
+// connect#230): the step, its family and port, how long it ran, what was left
+// of the probe budget when it started, and how it ended. The refusal's last
+// step is the one that refused it. The document is literal, because it is
+// what an extender reads; an answer refused before the probe carries no
+// list at all.
+func TestExtenderActivateProbeStepsWireForm(t *testing.T) {
+	refusalBytes, err := json.Marshal(&controller.ExtenderActivateResult{
+		Activated: false,
+		Error:     "the forward did not answer within the 0.5 s left of the 10 s probe budget: context deadline exceeded",
+		ProbeSteps: []*controller.ExtenderProbeStep{
+			{Name: "tcp", IpVersion: 4, Port: 443, ElapsedMs: 9500, BudgetLeftMs: 10000, Outcome: "ok"},
+			{Name: "forward", IpVersion: 4, Port: 443, ElapsedMs: 500, BudgetLeftMs: 500, Outcome: "timeout"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("the activation result did not encode: %v", err)
+	}
+	connect.AssertEqual(
+		t,
+		string(refusalBytes),
+		`{"activated":false,"probe_steps":[`+
+			`{"name":"tcp","ip_version":4,"port":443,"elapsed_ms":9500,"budget_left_ms":10000,"outcome":"ok"},`+
+			`{"name":"forward","ip_version":4,"port":443,"elapsed_ms":500,"budget_left_ms":500,"outcome":"timeout"}],`+
+			`"error":"the forward did not answer within the 0.5 s left of the 10 s probe budget: context deadline exceeded"}`,
+	)
+
+	unprobedBytes, err := json.Marshal(&controller.ExtenderActivateResult{
+		Activated: false,
+		Error:     "an activation must offer the tcp carrier",
+	})
+	if err != nil {
+		t.Fatalf("the activation result did not encode: %v", err)
+	}
+	connect.AssertEqual(t, string(unprobedBytes), `{"activated":false,"error":"an activation must offer the tcp carrier"}`)
+}
+
+// The answer stays readable to the providers already shipped, which decode it
+// into connect's ExtenderActivateResult: the step list and the timing of the
+// refused carriers are fields that type does not have, so they are skipped,
+// and what it does read -- whether the extender is active, why not, the
+// carriers, the record -- reads as before. Both a refusal and an accepted
+// activation are read here exactly as connect's activation post reads them.
+func TestExtenderActivateAnswerReadsOnAShippedProvider(t *testing.T) {
+	steps := []*controller.ExtenderProbeStep{
+		{Name: "tcp", IpVersion: 6, Port: 443, ElapsedMs: 120, BudgetLeftMs: 10000, Outcome: "ok"},
+		{Name: "forward", IpVersion: 6, Port: 443, ElapsedMs: 310, BudgetLeftMs: 9880, Outcome: "ok"},
+		{Name: "dns", IpVersion: 6, Port: 4053, ElapsedMs: 3000, BudgetLeftMs: 9570, Outcome: "timeout"},
+	}
+	for _, result := range []*controller.ExtenderActivateResult{
+		{
+			Activated:  false,
+			Error:      "the forward failed after 0.31 s: extender hello answered with status 502",
+			ProbeSteps: steps[:2],
+		},
+		{
+			Activated: true,
+			Ip:        "2001:db8::10",
+			IpVersion: 6,
+			Carriers:  []string{"tcp"},
+			RefusedCarriers: []*controller.ExtenderCarrierRefusal{
+				{
+					Carrier:      "dns",
+					Port:         4053,
+					Error:        "no answer within 3 s: context deadline exceeded",
+					ElapsedMs:    3000,
+					BudgetLeftMs: 9570,
+				},
+			},
+			ProbeSteps: steps,
+			Record:     "cmVjb3Jk",
+		},
+	} {
+		resultBytes, err := json.Marshal(result)
+		if err != nil {
+			t.Fatalf("the activation result did not encode: %v", err)
+		}
+		shipped := &connect.ExtenderActivateResult{}
+		if err := json.Unmarshal(resultBytes, shipped); err != nil {
+			t.Fatalf("a shipped provider cannot read the answer %s: %v", resultBytes, err)
+		}
+		connect.AssertEqual(t, shipped.Activated, result.Activated)
+		connect.AssertEqual(t, shipped.Error, result.Error)
+		connect.AssertEqual(t, shipped.Ip, result.Ip)
+		connect.AssertEqual(t, shipped.IpVersion, result.IpVersion)
+		if !slices.Equal(shipped.Carriers, result.Carriers) {
+			t.Fatalf("a shipped provider read carriers %v, want %v", shipped.Carriers, result.Carriers)
+		}
+		connect.AssertEqual(t, shipped.Record, result.Record)
+	}
 }
 
 // The dns port list travels both ways under the same name (L2): a provider

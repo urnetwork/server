@@ -125,6 +125,13 @@ func (self *operatorBlockPointsBackfillFixture) points(t testing.TB) map[server.
 // creates nothing new: blocks that have their points are skipped.
 func TestOperatorBlockPointsBackfillDryRunDigestAndIdempotence(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		// the awards must carry points, and the release gate's fixture
+		// subsidy.yml configures none
+		subsidyConfig := model.EnvSubsidyConfig()
+		previous := *subsidyConfig
+		defer func() { *subsidyConfig = previous }()
+		subsidyConfig.AccountPointsPerPayout = 1000000
+
 		ctx := context.Background()
 		now := server.NowUtc()
 		current := int64(model.SubnetBlockNumber(now))

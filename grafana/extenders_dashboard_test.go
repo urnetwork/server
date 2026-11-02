@@ -54,6 +54,15 @@ func TestExtendersDashboardCoversGossipDnsAndPopularity(t *testing.T) {
 		"solve time and budget": "urnetwork_stats_derive_solve_seconds",
 		"solve heap and budget": "urnetwork_stats_derive_solve_bytes",
 		"reading the day":       "urnetwork_stats_derive_ingest_seconds",
+		"how activations end":   "urnetwork_extender_activations_total",
+		"activation step times": "urnetwork_extender_activation_step_seconds",
+		// the refusals for room, which the activator waits out rather than
+		// backing off (connect#230)
+		"busy and budget refusals": `urnetwork_extender_activations_total{env="$env",stage=~"busy|budget"}`,
+		// the gated release's rollout gates (connect/EXTENDER-UPDATE2.md)
+		"how releases end":               "urnetwork_extender_releases_total",
+		"release outcomes by country":    "urnetwork_extender_release_country_outcomes_total",
+		"capability requirements signed": "urnetwork_extender_record_capability_requirements_total",
 	} {
 		found := false
 		for _, expression := range expressions {

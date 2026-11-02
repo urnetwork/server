@@ -50,6 +50,8 @@ Usage:
     bringyourctl db backfill-contract-reap-time [--batch=<n>]
     bringyourctl db sweep-orphans [--slice=<n>]
     bringyourctl db scrub-client-addresses
+    bringyourctl db key-history-floor [--rollback | --restore]
+    bringyourctl db close-evidence-retention [--mode=<mode>] [--max-rows-per-second=<n>] [--remove]
     bringyourctl search --realm=<realm> --type=<type> add <value>
     bringyourctl search --realm=<realm> --type=<type> around --distance=<distance> <value>
     bringyourctl search --realm=<realm> --type=<type> remove <value>
@@ -91,6 +93,10 @@ Usage:
     bringyourctl onboarding webhook-ensure
     bringyourctl onboarding rollup [--from=<from>] [--to=<to>]
     bringyourctl onboarding experiments [--resume | --pause] [--experiment=<experiment>] [--variant=<variant>] [--reason=<reason>]
+    bringyourctl reengagement status --network_id=<network_id>
+    bringyourctl reengagement preview --network_id=<network_id> --step=<step>
+    bringyourctl reengagement scan [--dry-run]
+    bringyourctl reengagement send-test --email=<email> --template=<template> [--variant=<variant>] [--locale=<locale>]
     bringyourctl payments reconcile [--dry-run] [--store=<store>]
     bringyourctl payments stripe-dunning [--send]
     bringyourctl crypto list [--asset=<asset>] [--state=<state>] [--limit=<n>]
@@ -206,6 +212,15 @@ Options:
     --verify       Check the partitioned egress health history against the
                    old table.
     --drop-old     Drop the old egress health history once --verify passes.
+    --mode=<mode>  With db close-evidence-retention, set the close evidence
+                   row retention's brake: on, or off to stop the row deletes
+                   from their next batch. The weekly drops of partitioned
+                   evidence never read it.
+    --max-rows-per-second=<n>  With db close-evidence-retention, set the
+                   brake's rate: rows deleted a second, at most 5000; 0 stops
+                   the deletes.
+    --remove       With db close-evidence-retention, delete the brake, so the
+                   code's default rate (1000 a second) applies.
     --enable       Enable Embed for the network, once its sales contract is
                    signed: its data-cap and ACL-group APIs open.
     --client-limit=<limit>  With --enable, also set the network's client
@@ -287,6 +302,10 @@ func main() {
 			dbSweepOrphans(opts)
 		} else if scrubClientAddresses, _ := opts.Bool("scrub-client-addresses"); scrubClientAddresses {
 			dbScrubClientAddresses(opts)
+		} else if keyHistoryFloor, _ := opts.Bool("key-history-floor"); keyHistoryFloor {
+			dbKeyHistoryFloor(opts)
+		} else if closeEvidenceRetention, _ := opts.Bool("close-evidence-retention"); closeEvidenceRetention {
+			dbCloseEvidenceRetention(opts)
 		}
 	} else if search, _ := opts.Bool("search"); search {
 		if add, _ := opts.Bool("add"); add {
@@ -381,6 +400,16 @@ func main() {
 			payoutByPaymentId(opts)
 		} else if pending, _ := opts.Bool("pending"); pending {
 			payoutPending()
+		}
+	} else if reengagement_, _ := opts.Bool("reengagement"); reengagement_ {
+		if status, _ := opts.Bool("status"); status {
+			reengagementStatus(opts)
+		} else if preview, _ := opts.Bool("preview"); preview {
+			reengagementPreview(opts)
+		} else if scan, _ := opts.Bool("scan"); scan {
+			reengagementScan(opts)
+		} else if sendTest, _ := opts.Bool("send-test"); sendTest {
+			reengagementSendTest(opts)
 		}
 	} else if onboarding_, _ := opts.Bool("onboarding"); onboarding_ {
 		if status, _ := opts.Bool("status"); status {
@@ -617,6 +646,82 @@ func dbScrubClientAddresses(opts docopt.Opts) {
 	fmt.Printf("Scrubbing raw client addresses from task and audit rows ...\n")
 	scrubbedTaskCount, scrubbedAuditCount := server.ScrubTaskAndAuditClientAddresses(context.Background())
 	fmt.Printf("Scrubbed %d task row(s) and %d audit blob(s).\n", scrubbedTaskCount, scrubbedAuditCount)
+}
+
+// dbKeyHistoryFloor prints the floor the key history guard and the retention's
+// batch apply (migration 904, server.ClientKeyHistoryRetentionFloor), and
+// with --rollback moves it back to 91 days or with --restore puts the
+// published floor back, then prints it again.
+func dbKeyHistoryFloor(opts docopt.Opts) {
+	ctx := context.Background()
+	floor, published := server.GetClientKeyHistoryRetentionFloor(ctx)
+	fmt.Printf("Key history retention floor: %s (published body: %t)\n", floor, published)
+	rollback, _ := opts.Bool("--rollback")
+	restore, _ := opts.Bool("--restore")
+	if !rollback && !restore {
+		return
+	}
+	server.SetClientKeyHistoryRetentionFloor(ctx, rollback)
+	floor, published = server.GetClientKeyHistoryRetentionFloor(ctx)
+	fmt.Printf("Key history retention floor now: %s (published body: %t)\n", floor, published)
+}
+
+// dbCloseEvidenceRetention prints the close evidence row retention's brake
+// ({close_evidence_retention}control, server.RemoveExpiredCloseEvidence) and
+// the floor the installed evidence guard admits, after setting the brake's
+// fields with --mode and --max-rows-per-second, or deleting it with --remove.
+// The brake stops or paces the row deletes from their next batch, without
+// touching the contract horizon reaper. It is the way to stop them. It does not
+// stop the weekly drops of partitioned evidence, which never read it. Putting
+// the guard's 91-day body back stops both below 91 days, but pages
+// migration-schema-drift.
+func dbCloseEvidenceRetention(opts docopt.Opts) {
+	ctx := context.Background()
+	settings := server.DefaultCloseEvidenceRetentionSettings()
+	fields, remove, err := closeEvidenceRetentionBrakeChange(opts)
+	if err != nil {
+		panic(err)
+	}
+	if remove || 0 < len(fields) {
+		writeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		if remove {
+			err := server.RemoveCloseEvidenceRetentionControl(writeCtx)
+			server.Raise(err)
+		}
+		err := server.SetCloseEvidenceRetentionControl(writeCtx, fields)
+		server.Raise(err)
+	}
+	stored, err := server.GetCloseEvidenceRetentionControlFields(ctx, settings)
+	server.Raise(err)
+	control := server.NarrowCloseEvidenceRetentionControl(stored, settings)
+	fmt.Printf("Close evidence retention brake: %v, deletes on %t at up to %g rows a second\n", stored, control.On, control.MaxRowsPerSecond)
+	floor, horizonGuard := server.GetCloseEvidenceRetentionGuardFloor(ctx)
+	fmt.Printf("Close evidence guard floor: %s (horizon guard installed: %t)\n", floor, horizonGuard)
+}
+
+// The brake fields and removal the options ask for. A mode other than on or
+// off, or a rate that is not a number of zero or more, is refused.
+func closeEvidenceRetentionBrakeChange(opts docopt.Opts) (fields map[string]string, remove bool, err error) {
+	fields = map[string]string{}
+	remove, _ = opts.Bool("--remove")
+	if mode, _ := opts.String("--mode"); mode != "" {
+		if mode != "on" && mode != "off" {
+			return nil, false, fmt.Errorf("--mode must be on or off, not %q", mode)
+		}
+		fields[server.CloseEvidenceRetentionControlFieldMode] = mode
+	}
+	if rate, _ := opts.String("--max-rows-per-second"); rate != "" {
+		value, parseErr := strconv.ParseFloat(rate, 64)
+		if parseErr != nil || math.IsNaN(value) || value < 0 {
+			return nil, false, fmt.Errorf("--max-rows-per-second must be a rate of zero or more, not %q", rate)
+		}
+		fields[server.CloseEvidenceRetentionControlFieldMaxRowsPerSecond] = rate
+	}
+	if remove && 0 < len(fields) {
+		return nil, false, errors.New("--remove deletes the brake; set fields without it")
+	}
+	return
 }
 
 // dbAudit compares the live DB schema against the schema its recorded migration
@@ -3264,6 +3369,72 @@ func stFinalize(opts docopt.Opts) {
 		panic(err)
 	}
 	fmt.Printf("finalize epoch %d: %s\n", epoch, outcome)
+}
+
+// ----- re-engagement (mmm/reengagement/PLAN.md) -----
+
+func printJson(v any) {
+	out, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("%s\n", out)
+}
+
+// reengagementStatus prints a network's re-engagement row, mail state, sends
+// and the facts a step decision would see now.
+func reengagementStatus(opts docopt.Opts) {
+	networkIdStr, _ := opts.String("--network_id")
+	networkId, err := server.ParseId(networkIdStr)
+	if err != nil {
+		panic(err)
+	}
+	printJson(controller.ReengagementNetworkStatus(context.Background(), networkId))
+}
+
+// reengagementPreview renders the decision a step would make now; nothing is sent.
+func reengagementPreview(opts docopt.Opts) {
+	networkIdStr, _ := opts.String("--network_id")
+	step, _ := opts.String("--step")
+	networkId, err := server.ParseId(networkIdStr)
+	if err != nil {
+		panic(err)
+	}
+	preview, err := controller.ReengagementNetworkPreview(context.Background(), networkId, step)
+	if err != nil {
+		panic(err)
+	}
+	printJson(preview)
+}
+
+// reengagementScan runs the day's scan now. --dry-run counts the candidates
+// per stream and opens nothing (a scan also opens nothing while the program is
+// disabled).
+func reengagementScan(opts docopt.Opts) {
+	dryRun, _ := opts.Bool("--dry-run")
+	ctx := context.Background()
+	clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
+	defer clientSession.Cancel()
+	result, err := controller.ReengagementScan(&controller.ReengagementScanArgs{DryRun: dryRun}, clientSession)
+	if err != nil {
+		panic(err)
+	}
+	printJson(result)
+}
+
+// reengagementSendTest sends ONE template to an explicit address with sample
+// data (behind reengagement.enabled).
+func reengagementSendTest(opts docopt.Opts) {
+	email, _ := opts.String("--email")
+	template, _ := opts.String("--template")
+	variant, _ := opts.String("--variant")
+	locale, _ := opts.String("--locale")
+	messageId, err := controller.ReengagementSendTest(context.Background(), email, template, variant, locale)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "reengagement send-test: %s\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("sent %s/%s/%s: message %s\n", template, variant, locale, messageId)
 }
 
 // ----- onboarding campaign (mmm/onboarding/PLAN.md) -----

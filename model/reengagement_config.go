@@ -1,0 +1,296 @@
+package model
+
+// Reengagement is the parsed re-engagement program config
+// (config/<env>/reengagement.yml; mmm/reengagement/PLAN.md). Like
+// onboarding.yml it is data, shipped by config injection, and OPTIONAL: without
+// the file the program is inert (nothing is scanned, nothing is sent).
+//
+//	reengagement:
+//	  enabled: false             # master switch of every outbound side effect
+//	  brevo:
+//	    templates: {...}         # machine-written by mmm/reengagement/build.mjs
+//	    reply_to: support@ur.io
+//	    company_line: ""
+//	  schedule: { dormant_days: 30, r2_after_r1_days: 7, ... }
+//	  streams: { lapsed: true, never_activated: true, fix: true, winback: true }
+//	  scan: { batch_limit: 2000, catch_up_days: 3 }
+//	  pq_ready: false
+//	  highlights:
+//	    - id: outages
+//	      released: { "*": 2026-10-27 }
+//	      last_connect_from: 2026-10-12
+//	      last_connect_to: 2026-10-27
+//	  experiments: [...]         # the onboarding registry's shape; surfaces reengagement.<stream>
+//	  service_reminders:         # account-mailer notices; service mail, not gated by `enabled`
+//	    pro_ending: false        # crypto Pro stops in 14 and 2 days
+//	    trial_ending: false      # an App Store or Play trial ends in 2 days
+//	    trial_ending_stores: [apple, play]
+//
+// The mail policy (who may be mailed, by country and consent evidence) is
+// onboarding.yml `policy`, shared by both programs.
+
+import (
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/urnetwork/glog"
+
+	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/onboarding"
+	"github.com/urnetwork/server/reengagement"
+)
+
+type reengagementYaml struct {
+	Reengagement ReengagementConfig `yaml:"reengagement"`
+}
+
+type ReengagementScheduleConfig struct {
+	DormantDays      int    `yaml:"dormant_days"`
+	R2AfterR1Days    int    `yaml:"r2_after_r1_days"`
+	R3Day            int    `yaml:"r3_day"`
+	EndAfterR3Days   int    `yaml:"end_after_r3_days"`
+	NeverActiveDay   int    `yaml:"never_active_day"`
+	NKeepAfterN1Days int    `yaml:"n_keep_after_n1_days"`
+	CooldownDays     int    `yaml:"cooldown_days"`
+	QuietDays        int    `yaml:"quiet_days"`
+	FixWindowDays    int    `yaml:"fix_window_days"`
+	WinbackDays      int    `yaml:"winback_days"`
+	StoreRetryDays   int    `yaml:"store_retry_days"`
+	KeepDays         int    `yaml:"keep_days"`
+	MinGapDays       int    `yaml:"min_gap_days"`
+	MaxPerYear       int    `yaml:"max_per_year"`
+	SendHour         int    `yaml:"send_hour"`
+	SendWindow       string `yaml:"send_window"`
+}
+
+type ReengagementStreamsConfig struct {
+	Lapsed         bool `yaml:"lapsed"`
+	NeverActivated bool `yaml:"never_activated"`
+	Fix            bool `yaml:"fix"`
+	Winback        bool `yaml:"winback"`
+}
+
+type ReengagementScanConfig struct {
+	// the most episodes one scan opens per stream (the rest wait for the next day)
+	BatchLimit int `yaml:"batch_limit"`
+	// how many days a missed scan catches up
+	CatchUpDays int `yaml:"catch_up_days"`
+}
+
+type ReengagementHighlightConfig struct {
+	Id        string            `yaml:"id"`
+	Platforms []string          `yaml:"platforms"`
+	Countries []string          `yaml:"countries"`
+	Released  map[string]string `yaml:"released"`
+	// only networks whose last connection fell in [from, to)
+	LastConnectFrom string   `yaml:"last_connect_from"`
+	LastConnectTo   string   `yaml:"last_connect_to"`
+	Fixes           []string `yaml:"fixes"`
+}
+
+// ReengagementServiceRemindersConfig turns on the account-mailer notices
+// (controller/service_reminders_controller.go). They are service mail, not
+// marketing: `enabled` above does not gate them, these do.
+type ReengagementServiceRemindersConfig struct {
+	// crypto Pro stops in 14 and 2 days
+	ProEnding bool `yaml:"pro_ending"`
+	// an App Store or Play trial ends in 2 days
+	TrialEnding bool `yaml:"trial_ending"`
+	// the stores whose trials get the notice; default apple and play (Stripe
+	// sends its own when its dashboard setting is on: add stripe otherwise)
+	TrialEndingStores []string `yaml:"trial_ending_stores"`
+}
+
+// EffectiveTrialEndingStores are the configured stores, or apple and play.
+func (c ReengagementServiceRemindersConfig) EffectiveTrialEndingStores() []string {
+	if len(c.TrialEndingStores) == 0 {
+		return []string{OnboardingStoreApple, OnboardingStorePlay}
+	}
+	return c.TrialEndingStores
+}
+
+type ReengagementConfig struct {
+	Enabled  bool                       `yaml:"enabled"`
+	Brevo    OnboardingBrevoConfig      `yaml:"brevo"`
+	Schedule ReengagementScheduleConfig `yaml:"schedule"`
+	Streams  ReengagementStreamsConfig  `yaml:"streams"`
+	Scan     ReengagementScanConfig     `yaml:"scan"`
+	// the post-quantum discovery fix is live: the trust email may point at the switch
+	PqReady     bool                           `yaml:"pq_ready"`
+	Highlights  []*ReengagementHighlightConfig `yaml:"highlights"`
+	Experiments []*OnboardingExperiment        `yaml:"experiments"`
+	// the service notices, each off unless turned on
+	ServiceReminders ReengagementServiceRemindersConfig `yaml:"service_reminders"`
+
+	highlights []*reengagement.Highlight
+}
+
+// Experiment surfaces, one per stream.
+const (
+	ExperimentSurfaceReengagementLapsed         = "reengagement.lapsed"
+	ExperimentSurfaceReengagementNeverActivated = "reengagement.never_activated"
+	ExperimentSurfaceReengagementFix            = "reengagement.fix"
+	ExperimentSurfaceReengagementWinback        = "reengagement.winback"
+)
+
+// ExperimentSurfaceForStream is a stream's experiment surface.
+func ExperimentSurfaceForStream(stream string) string {
+	return "reengagement." + stream
+}
+
+var reengagementConfig = sync.OnceValue(func() *ReengagementConfig {
+	resource, err := server.Config.SimpleResource("reengagement.yml")
+	if err != nil {
+		glog.Infof("[reengagement]reengagement.yml is not present; the re-engagement program is inert. err = %s\n", err)
+		return &ReengagementConfig{}
+	}
+	var y reengagementYaml
+	if err := resource.UnmarshalYamlE(&y); err != nil {
+		glog.Errorf("[reengagement]reengagement.yml could not be parsed; the re-engagement program is inert. err = %s\n", err)
+		return &ReengagementConfig{}
+	}
+	return newReengagementConfig(&y.Reengagement)
+})
+
+// Reengagement returns the parsed config (cached; parsed once per process).
+func Reengagement() *ReengagementConfig {
+	return reengagementConfig()
+}
+
+func newReengagementConfig(c *ReengagementConfig) *ReengagementConfig {
+	c.Experiments = validExperiments(c.Experiments)
+	c.highlights = parseReengagementHighlights(c.Highlights)
+	return c
+}
+
+// NewReengagementConfigForTest builds a config the way the loader does.
+func NewReengagementConfigForTest(c *ReengagementConfig) *ReengagementConfig {
+	return newReengagementConfig(c)
+}
+
+func parseReengagementHighlights(configs []*ReengagementHighlightConfig) []*reengagement.Highlight {
+	out := []*reengagement.Highlight{}
+	for _, c := range configs {
+		if c == nil || strings.TrimSpace(c.Id) == "" {
+			continue
+		}
+		h := &reengagement.Highlight{
+			Id:        strings.TrimSpace(c.Id),
+			Platforms: c.Platforms,
+			Countries: c.Countries,
+			Released:  map[string]time.Time{},
+			Fixes:     c.Fixes,
+		}
+		ok := true
+		for platform, day := range c.Released {
+			t, err := parseExperimentDay(day)
+			if err != nil || t == nil {
+				glog.Errorf("[reengagement]highlight %q released.%s: %q is not a date; the highlight is skipped\n", c.Id, platform, day)
+				ok = false
+				break
+			}
+			h.Released[strings.ToLower(strings.TrimSpace(platform))] = *t
+		}
+		for _, bound := range []struct {
+			value string
+			into  **time.Time
+		}{{c.LastConnectFrom, &h.LastConnectFrom}, {c.LastConnectTo, &h.LastConnectTo}} {
+			if strings.TrimSpace(bound.value) == "" {
+				continue
+			}
+			t, err := parseExperimentDay(bound.value)
+			if err != nil {
+				glog.Errorf("[reengagement]highlight %q: %q is not a date; the highlight is skipped\n", c.Id, bound.value)
+				ok = false
+				break
+			}
+			*bound.into = t
+		}
+		if ok {
+			out = append(out, h)
+		}
+	}
+	return out
+}
+
+// ParsedHighlights are the "what changed" items with their dates parsed.
+func (c *ReengagementConfig) ParsedHighlights() []*reengagement.Highlight {
+	return c.highlights
+}
+
+// ScheduleValue is the schedule with defaults filled in.
+func (c *ReengagementConfig) ScheduleValue() reengagement.Schedule {
+	s := c.Schedule
+	return reengagement.Schedule{
+		DormantDays: s.DormantDays, R2AfterR1Days: s.R2AfterR1Days, R3Day: s.R3Day, EndAfterR3Days: s.EndAfterR3Days,
+		NeverActiveDay: s.NeverActiveDay, NKeepAfterN1Days: s.NKeepAfterN1Days, CooldownDays: s.CooldownDays,
+		QuietDays: s.QuietDays, FixWindowDays: s.FixWindowDays, WinbackDays: s.WinbackDays, StoreRetryDays: s.StoreRetryDays, KeepDays: s.KeepDays,
+		MinGapDays: s.MinGapDays, MaxPerYear: s.MaxPerYear, SendHour: s.SendHour, SendWindow: s.SendWindow,
+	}.WithDefaults()
+}
+
+// StreamEnabled reports whether the scan opens episodes for a stream.
+func (c *ReengagementConfig) StreamEnabled(stream string) bool {
+	switch stream {
+	case reengagement.StreamLapsed:
+		return c.Streams.Lapsed
+	case reengagement.StreamNeverActivated:
+		return c.Streams.NeverActivated
+	case reengagement.StreamFix:
+		return c.Streams.Fix
+	case reengagement.StreamWinback:
+		return c.Streams.Winback
+	}
+	return false
+}
+
+func (c *ReengagementConfig) BatchLimit() int {
+	if c.Scan.BatchLimit <= 0 {
+		return 2000
+	}
+	return c.Scan.BatchLimit
+}
+
+func (c *ReengagementConfig) CatchUpDays() int {
+	if c.Scan.CatchUpDays <= 0 {
+		return 3
+	}
+	return c.Scan.CatchUpDays
+}
+
+// The site, company line and reply-to fall back to onboarding's.
+func (c *ReengagementConfig) EffectiveSiteUrl() string {
+	return Onboarding().EffectiveSiteUrl()
+}
+
+func (c *ReengagementConfig) EffectiveCompanyLine() string {
+	if v := strings.TrimSpace(c.Brevo.CompanyLine); v != "" {
+		return v
+	}
+	return Onboarding().EffectiveCompanyLine()
+}
+
+func (c *ReengagementConfig) EffectiveReplyTo() string {
+	if v := strings.TrimSpace(c.Brevo.ReplyTo); v != "" {
+		return v
+	}
+	return Onboarding().EffectiveReplyTo()
+}
+
+// AssignmentForSurface is the network's variant of the experiment running on a
+// surface at `now`, or nil. Paused variants are served as control, as in
+// onboarding.
+func (c *ReengagementConfig) AssignmentForSurface(networkId server.Id, surface string, now time.Time) *ExperimentAssignment {
+	for _, e := range c.Experiments {
+		if e.Surface != surface || !e.Active(now) {
+			continue
+		}
+		variant := e.Assign(networkId)
+		if paused := PausedVariantsForExperiment(e.Id, now); len(paused) != 0 {
+			variant = onboarding.EffectiveVariant(variant, e.VariantNames(), paused)
+		}
+		return &ExperimentAssignment{ExperimentId: e.Id, Variant: variant}
+	}
+	return nil
+}

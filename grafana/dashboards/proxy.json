@@ -3240,6 +3240,295 @@
           "legendFormat": "miss {{outcome}} {{host}} {{block}} {{instance}}"
         }
       ]
+    },
+    {
+      "id": 67,
+      "type": "row",
+      "title": "hosted window clients (CPUOPT3 D2: proxy/window_client_metrics.go)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 217
+      },
+      "panels": []
+    },
+    {
+      "id": 68,
+      "type": "timeseries",
+      "title": "window client candidates / s by window and outcome",
+      "description": "Every candidate a hosted window's expansion built, by how it ended: admitted, admitted_handover (installed in the slot a warned client handed over), declined_strict_cap (evaluated, then refused by the strict hard max), declined_replacement, not_admitted_surplus, failed_setup, failed_ping, failed_contract, canceled. A hosted window mints, dials, registers and evaluates each candidate it builds, and retires every one it does not keep, so every outcome but the two admitted ones is that cost without a client. D2 expects declined_strict_cap to fall to zero once the handover is on.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 218
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (window, outcome) (rate(urnetwork_proxy_window_candidates_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{window}} {{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 69,
+      "type": "timeseries",
+      "title": "candidates built per device-hour and discarded share",
+      "description": "Left axis: candidates built per hour for each live proxy device, by window. D2 sized hosted mints at 31 to 44 per device-hour at the 10-31 evening peak, against about 4 for rotation alone. Right axis: the share of candidates built only to be discarded, every outcome but admitted and admitted_handover. No data while no candidate is built.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 218
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percentunit"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "min",
+                "value": 0
+              },
+              {
+                "id": "max",
+                "value": 1
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (window) (rate(urnetwork_proxy_window_candidates_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval])) * 3600 / scalar(sum(urnetwork_proxy_devices_live{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}) > 0)",
+          "legendFormat": "candidates / device-hour {{window}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (window) (rate(urnetwork_proxy_window_candidates_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\",outcome!~\"admitted|admitted_handover\"}[$__rate_interval])) / (sum by (window) (rate(urnetwork_proxy_window_candidates_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval])) > 0)",
+          "legendFormat": "discarded share {{window}}"
+        }
+      ]
+    },
+    {
+      "id": 70,
+      "type": "timeseries",
+      "title": "resize passes that wanted to grow / s by window and state",
+      "description": "Resize passes that wanted more clients, by the window state they found: below_min, below_target, strict_hole (fewer kept clients than the target while a strict window's installed clients, warned ones included, fill its hard max), skipped_strict_full (a strict window at its hard max with no warned client that may hand over, so the pass built nothing) and deferred (the expansion backoff or a fixed destination's re-dial pacing held the pass).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 226
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (window, state) (rate(urnetwork_proxy_window_expand_passes_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{window}} {{state}}"
+        }
+      ]
+    },
+    {
+      "id": 71,
+      "type": "timeseries",
+      "title": "live hosted windows by last resize state",
+      "description": "Live hosted windows by the state their last resize pass ended in: selectable_full (at least the target of selectable clients), below_target, strict_hole (admission refuses another identity while warned clients fill the hard max), below_min and no_selectable (no exit for new flows). D2 expects strict_hole windows to fall to zero in steady state, without more below_min or no_selectable windows.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 226
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (window, state) (urnetwork_proxy_windows{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "{{window}} {{state}}"
+        }
+      ]
+    },
+    {
+      "id": 72,
+      "type": "timeseries",
+      "title": "window clients warned / s by window and cause",
+      "description": "Window clients that entered the warned state, out of new-flow selection, once per transition: drain (past its lifetime), silent (repeated all-silent probe passes), unhealthy (a stats or blackhole verdict), starved (its provider is failing dials), capacity (at the window's source-count limit), quarantine (benched by a soft verdict while carrying flows) and family_swap (giving its slot to a v6-capable candidate).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 234
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (window, cause) (rate(urnetwork_proxy_window_warnings_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{window}} {{cause}}"
+        }
+      ]
+    },
+    {
+      "id": 73,
+      "type": "timeseries",
+      "title": "window clients removed / s by window and cause",
+      "description": "Window clients removed from their window: verdict (a blackhole verdict, send stall, contract reliability result or failed ping), unhealthy, transport_down (its routes stayed down for the whole migration grace), collapse (capacity collapse above the hard max), handover (it handed its slot to an admitted candidate), family_swap and closed (canceled without another error, or its window closed).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 234
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (window, cause) (rate(urnetwork_proxy_window_removals_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{window}} {{cause}}"
+        }
+      ]
     }
   ]
 }

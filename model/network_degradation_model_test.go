@@ -54,7 +54,8 @@ func enableNetworkDegradationForTest(t testing.TB) {
 }
 
 // Inserts createdCount synthetic contracts created at createTime, of which the
-// first closedCount reached a terminal outcome at closeTime.
+// first closedCount reached a terminal outcome at closeTime. Each id leads with
+// the millisecond of createTime, as every creation path mints it.
 func insertContractDegradationTestContracts(t testing.TB, ctx context.Context, createTime time.Time, closeTime time.Time, createdCount int, closedCount int) {
 	t.Helper()
 	label := server.NewId().String()
@@ -74,10 +75,13 @@ func insertContractDegradationTestContracts(t testing.TB, ctx context.Context, c
 					close_time
 				)
 				SELECT
-					md5($1 || '-' || n)::uuid,
+					(
+						lpad(to_hex(floor(extract(epoch FROM $6::timestamp) * 1000)::bigint), 12, '0') ||
+						substr(md5($1 || '-' || n), 1, 20)
+					)::uuid,
 					$2, $3, $4, $5,
 					1024,
-					$6,
+					$6::timestamp,
 					CASE WHEN n <= $8 THEN 'canceled' END,
 					CASE WHEN n <= $8 THEN $7::timestamp END
 				FROM generate_series(1, $9::int) AS n
@@ -436,36 +440,48 @@ func TestZeroContractCostChargesNormallyForUntrustedState(t *testing.T) {
 }
 
 // Each count is a range over its named index. The test database is small, so
-// sequential scans are disabled to show the predicates match the indexes.
+// sequential scans are disabled to show the predicates match the indexes. The
+// open count is planned without transfer_contract_create_time, which it does
+// not need: it reads its window's contract id range of the primary key. The
+// index drop rolls back with the transaction.
 func TestContractDegradationCountsUseTheirIndexes(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		now := server.NowUtc()
-		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `SET LOCAL enable_seqscan = off`))
-			for _, test := range []struct {
-				name  string
-				sql   string
-				index string
-			}{
-				{name: "open", sql: contractDegradationOpenCountSql, index: "transfer_contract_create_time"},
-				{name: "close", sql: contractDegradationCloseCountSql, index: "transfer_contract_closed_usage"},
-			} {
-				plan := []string{}
-				result, err := tx.Query(ctx, `EXPLAIN `+test.sql, now.Add(-ContractDegradationWindow), now)
-				server.WithPgResult(result, err, func() {
-					for result.Next() {
-						var line string
-						server.Raise(result.Scan(&line))
-						plan = append(plan, line)
-					}
-				})
-				if !strings.Contains(strings.Join(plan, "\n"), test.index) {
-					t.Errorf("%s count does not use %s:\n%s", test.name, test.index, strings.Join(plan, "\n"))
+		windowStart := now.Add(-ContractDegradationWindow)
+		lowerId, upperId := ContractIdCreateTimeRange(windowStart, now)
+		conn := acquireContractLifecycleTestConnection(t, ctx)
+		defer conn.Release()
+		tx, err := conn.Begin(ctx)
+		server.Raise(err)
+		defer func() {
+			_ = tx.Rollback(context.WithoutCancel(ctx))
+		}()
+		server.RaisePgResult(tx.Exec(ctx, `DROP INDEX IF EXISTS transfer_contract_create_time`))
+		server.RaisePgResult(tx.Exec(ctx, `SET LOCAL enable_seqscan = off`))
+		for _, test := range []struct {
+			name  string
+			sql   string
+			args  []any
+			index string
+		}{
+			{name: "open", sql: contractDegradationOpenCountSql, args: []any{windowStart, now, lowerId, upperId}, index: "transfer_contract_pkey"},
+			{name: "close", sql: contractDegradationCloseCountSql, args: []any{windowStart, now}, index: "transfer_contract_closed_usage"},
+		} {
+			plan := []string{}
+			result, err := tx.Query(ctx, `EXPLAIN `+test.sql, test.args...)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					var line string
+					server.Raise(result.Scan(&line))
+					plan = append(plan, line)
 				}
+			})
+			if !strings.Contains(strings.Join(plan, "\n"), test.index) {
+				t.Errorf("%s count does not use %s:\n%s", test.name, test.index, strings.Join(plan, "\n"))
 			}
-		})
+		}
 	})
 }

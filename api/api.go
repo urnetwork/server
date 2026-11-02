@@ -29,6 +29,9 @@ type routeOwners struct {
 	notifications  *model.ContractOriginNotifications
 	appearances    *model.ProviderAppearances
 	stuckProviders *controller.StuckProviderSignals
+	// the override of the apps' strict window handover the find-providers2
+	// answers carry
+	windowStrictHandover *controller.WindowStrictHandoverControl
 }
 
 // Only the API lifecycle supplies this authenticated cache; the route never
@@ -42,8 +45,8 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		connectControl = handlers.ConnectControlWithOwners(owners.notifications, owners.stuckProviders)
 	}
 	findProviders2 := handlers.NetworkFindProviders2
-	if owners.appearances != nil {
-		findProviders2 = handlers.NetworkFindProviders2WithAppearances(owners.appearances)
+	if owners.appearances != nil || owners.windowStrictHandover != nil {
+		findProviders2 = handlers.NetworkFindProviders2WithOwners(owners.appearances, owners.windowStrictHandover)
 	}
 	routes := []*router.Route{
 		router.NewStreamingRoute("POST", "/provider-work/v1/owners", providerWork.ServeHTTP, providerWorkBody),
@@ -152,6 +155,9 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		// an extender's lag.dev measurement certificate, polled with its
 		// activation credential (lag.dev/PLAN.md A8)
 		router.NewRoute("GET", "/network/extender-measurement-cert", handlers.ExtenderMeasurementCert),
+		// the public seed bundle, the origin every seed mirror copies
+		// (connect/EXTENDER-UPDATE2.md §2.3, controller.ExtenderSeedPath)
+		router.NewRoute("GET", "/v1/seed\\.bin", handlers.ExtenderSeed),
 		router.NewRoute("POST", "/network/provider-egress-location", handlers.ProviderEgressLocationSubmit),
 		router.NewRoute("GET", "/network/provider-egress-due", handlers.ProviderEgressLocationDue),
 		router.NewRoute("GET", "/network/provider-blackhole-due", handlers.ProviderBlackholeCheckDue),

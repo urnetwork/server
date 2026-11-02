@@ -42,9 +42,11 @@ func TestClientRecycleKeyEvents(t *testing.T) {
 	}
 }
 
-// The flag is set once per cooldown: a second set inside the cooldown is a
-// miss, another client's flag is its own, and the ttl is the cooldown. A
-// cooldown that is not positive sets nothing, so no flag is ever immortal.
+// The flag is set once per ttl: a second set inside it is a miss that reads
+// back when the flag was set, another client's flag is its own, and the ttl
+// is the one given. Once the flag expires it can be set again. A flag whose
+// value is unreadable is a miss with no set time. A ttl that is not positive
+// sets nothing, so no flag is ever immortal.
 func TestSetClientRecycleOncePerCooldown(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := connectMoveTestContext(t)
@@ -52,41 +54,69 @@ func TestSetClientRecycleOncePerCooldown(t *testing.T) {
 		otherClientId := server.NewId()
 		cooldown := time.Hour
 
-		set, err := SetClientRecycle(ctx, clientId, cooldown)
-		if err != nil || !set {
-			t.Fatalf("first set = %t, %v; want set", set, err)
+		setTime := server.NowUtc()
+		set, flagTime, err := SetClientRecycle(ctx, clientId, cooldown)
+		if err != nil || !set || !flagTime.IsZero() {
+			t.Fatalf("first set = %t, %s, %v; want set", set, flagTime, err)
 		}
-		set, err = SetClientRecycle(ctx, clientId, cooldown)
+		set, flagTime, err = SetClientRecycle(ctx, clientId, cooldown)
 		if err != nil || set {
 			t.Fatalf("set inside the cooldown = %t, %v; want a miss", set, err)
 		}
-		set, err = SetClientRecycle(ctx, otherClientId, cooldown)
+		// the first set's time, to the millisecond
+		if flagTime.Before(setTime.Truncate(time.Millisecond)) || server.NowUtc().Before(flagTime) {
+			t.Fatalf("the miss read back %s, want the first set at %s", flagTime, setTime)
+		}
+		set, _, err = SetClientRecycle(ctx, otherClientId, cooldown)
 		if err != nil || !set {
 			t.Fatalf("another client's set = %t, %v; want set", set, err)
 		}
 
-		var ttl time.Duration
-		server.Redis(ctx, func(r server.RedisClient) {
-			var err error
-			ttl, err = r.PTTL(ctx, clientRecycleKey(clientId)).Result()
-			server.Raise(err)
-		})
-		if ttl <= 0 || cooldown < ttl {
+		pttl := func(clientId server.Id) time.Duration {
+			var ttl time.Duration
+			server.Redis(ctx, func(r server.RedisClient) {
+				var err error
+				ttl, err = r.PTTL(ctx, clientRecycleKey(clientId)).Result()
+				server.Raise(err)
+			})
+			return ttl
+		}
+		if ttl := pttl(clientId); ttl <= 0 || cooldown < ttl {
 			t.Fatalf("recycle flag ttl %s, want (0, %s]", ttl, cooldown)
 		}
 
-		// past the cooldown the flag can be set again
+		// a flag that expires can be set again
+		shortClientId := server.NewId()
+		shortTtl := 1500 * time.Millisecond
+		if set, _, err := SetClientRecycle(ctx, shortClientId, shortTtl); err != nil || !set {
+			t.Fatalf("a short flag = %t, %v; want set", set, err)
+		}
+		if set, _, err := SetClientRecycle(ctx, shortClientId, shortTtl); err != nil || set {
+			t.Fatalf("a short flag inside its ttl = %t, %v; want a miss", set, err)
+		}
+		deadline := time.Now().Add(10 * time.Second)
+		for 0 < pttl(shortClientId) {
+			if time.Now().After(deadline) {
+				t.Fatal("the short flag never expired")
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		if set, _, err := SetClientRecycle(ctx, shortClientId, shortTtl); err != nil || !set {
+			t.Fatalf("set after the flag expired = %t, %v; want set", set, err)
+		}
+
+		// an unreadable value: a miss with no set time
+		garbledClientId := server.NewId()
 		server.Redis(ctx, func(r server.RedisClient) {
-			server.Raise(r.Del(ctx, clientRecycleKey(clientId)).Err())
+			server.Raise(r.Set(ctx, clientRecycleKey(garbledClientId), "not-a-time", time.Minute).Err())
 		})
-		set, err = SetClientRecycle(ctx, clientId, cooldown)
-		if err != nil || !set {
-			t.Fatalf("set after the cooldown = %t, %v; want set", set, err)
+		if set, flagTime, err := SetClientRecycle(ctx, garbledClientId, cooldown); err != nil || set || !flagTime.IsZero() {
+			t.Fatalf("an unreadable flag = %t, %s, %v; want a miss with no time", set, flagTime, err)
 		}
 
 		unsetClientId := server.NewId()
-		if set, err := SetClientRecycle(ctx, unsetClientId, 0); err == nil || set {
-			t.Fatalf("a zero cooldown = %t, %v; want an error", set, err)
+		if set, _, err := SetClientRecycle(ctx, unsetClientId, 0); err == nil || set {
+			t.Fatalf("a zero ttl = %t, %v; want an error", set, err)
 		}
 		var exists int64
 		server.Redis(ctx, func(r server.RedisClient) {
@@ -95,7 +125,7 @@ func TestSetClientRecycleOncePerCooldown(t *testing.T) {
 			server.Raise(err)
 		})
 		if exists != 0 {
-			t.Fatal("a zero cooldown set a flag")
+			t.Fatal("a zero ttl set a flag")
 		}
 	})
 }

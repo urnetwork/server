@@ -341,6 +341,21 @@ func BackfillInitialTransferBalancePost(
 	return nil
 }
 
+// A failed run, a canceled one at MaxTime included, retries no sooner than the
+// chain's own 30-minute gap. Without a Post nothing else re-arms that gap, and
+// the ordinary backoff restarts the first failures within seconds: a run that
+// keeps reaching MaxTime would hold the database back to back.
+const removeCompletedContractsErrorRetryFloor = 30 * time.Minute
+
+// The registered retention target keeps its function name. Its failures keep
+// their text, count and missing post; only the delay has a floor.
+func NewRemoveCompletedContractsTaskTarget() task.Target {
+	return task.WithErrorRetryFloor(task.NewTaskTargetWithPost(
+		RemoveCompletedContracts,
+		RemoveCompletedContractsPost,
+	), removeCompletedContractsErrorRetryFloor)
+}
+
 type RemoveCompletedContractsArgs struct {
 }
 

@@ -31,7 +31,7 @@ Sizes are decimal GB, as SIGNALS.md §5.14 measures them.
 | C4 | `provider_work_session_event`: weekly partitions, dropped after 13 weeks. |
 | C5 | `contract_close_report_evidence`: weekly `report_id` partitions dropped once they expire, with the built row deletes kept for the rest. |
 | C6 | `st_provider_usage_archive`: weekly partitions by contract week, 1-year retention. |
-| D | Retired hosted identities and their provide keys are hard-deleted after 1 day. Key history of a client that is gone is deleted 91 days after it's gone. The mint rate is a product question outside this plan. |
+| D | Retired hosted identities and their provide keys are hard-deleted after 1 day. Key history of a client that is gone is deleted 91 days after it's gone; since 2026-11-01, at the contract reaper's horizon (see Part D). The mint rate is a product question outside this plan. |
 | Contract-dependent work | A7's reuse of the contract checks and retiring `legacy_settlement_intent` go ahead now: the contract-partition review fixes are merged (`09cd98565`). |
 | `search_projection` | Left as is. |
 | `search_provider_stats` | Change guard only; the open hour keeps its one-minute rollup. |
@@ -1322,11 +1322,13 @@ as well (2026-10-24), so its retention is a drop that doesn't depend on vacuum.
 
 ### C5. `contract_close_report_evidence` (170 GB): weekly partitions plus the row deletes (decided 2026-10-24)
 
-Deletes start about 91 days after the oldest evidence rows, around 2027-01-05.
+Deletes start about 91 days after the oldest evidence rows, around 2027-01-05;
+at the contract horizon (below), 35 days after, around 2026-11-10.
 
 - **Built, and kept:** migration 857 and `RemoveExpiredCloseEvidence` (every 15
   minutes) delete rows accepted more than 91 days ago whose contracts are
-  resolved.
+  resolved; since the horizon guard (below), more than the contract horizon
+  ago while the reaper's mode is on, 35 days at the shortest.
   - At 1.3 GB an hour (SIGNALS.md §2.4f), 91 days is about 2.8 TB. Row deletes
     alone would mean tens of millions of guarded deletes a day.
 - **Design: weekly `RANGE (report_id)`, dropped when a week expires.**
@@ -1335,7 +1337,8 @@ Deletes start about 91 days after the oldest evidence rows, around 2027-01-05.
     `ON CONFLICT (client_id, report_id)` stays enforceable.
   - **Drop rule:** a week drops once its upper bound is 91 days past and every
     row in it meets the 857 rule (accepted more than 91 days ago, contract
-    resolved or gone). The check runs again in the transaction that detaches
+    resolved or gone); at the contract horizon (below), the same rule at the
+    horizon's age. The check runs again in the transaction that detaches
     the week. A week holding a straggler stays. Its qualifying rows are
     row-deleted as today, and it drops once the rest qualify.
   - **Guard:** a drop bypasses the 857 row guard, so only the retention task
@@ -1421,6 +1424,157 @@ Deletes start about 91 days after the oldest evidence rows, around 2027-01-05.
       reason). With `vacuum_truncate = off`, row-deleted space in the legacy
       partition is reused but not returned. Once the row deletes empty it,
       reclaiming it is an owner step.
+  - **At the contract horizon (owner, 2026-11-01):** the evidence follows the
+    contract horizon reaper's runtime horizon (`horizonDays`), 35 to 91 days,
+    instead of a fixed 91 (`db_contract_close_evidence_horizon.go`).
+    - **Guard migration:** the move guard with its retention age at 35 days,
+      the shortest horizon (`CloseEvidenceRetentionFloor`). It only admits:
+      the row deletes take a report accepted longer ago than the horizon,
+      never less than 35 days, of a contract resolved or gone, so the
+      evidence of every contract the reaper deleted goes once it is as old.
+    - **Horizon:** the contract task and the registry's retention task read
+      the control once per run, before any transaction, and pass it in their
+      context (`model.WithContractHorizonControl`). The horizon applies only
+      while the reaper's mode is on; off, a dry run or an unreadable control
+      keeps 91 days. The weekly drops expire, fence and check their weeks at
+      the same horizon (`RangeExpired`, the fence, the precondition); the
+      family's `Retention` stays 91 days, the bound the monitor judges by.
+    - **Installed guard:** the row deletes and the drops never go below what
+      the installed guard admits: 35 days only while its body is the horizon
+      guard's, otherwise 91 (`closeEvidenceGuardFloor`); a missing guard or a
+      failed read keeps 91 too. So the code may deploy before the migration,
+      and restoring the move guard's body stops the deletes below 91 days
+      without touching the reaper, though the migration's monitor contract
+      then pages migration-schema-drift; the brake below is the way to stop
+      them.
+    - **Readers:** admission reads the retained report first, to answer an
+      exact retry and refuse a reused report id; it writes a report only
+      while its contract is unresolved, and unresolved contracts keep their
+      evidence at any age. After the deletion an exact retry is answered from
+      the contract's close report, the receipt, while the contract stays, and
+      refused once it is gone. The SN census reads evidence only for an epoch
+      window of at most 32,768 closed contracts, which no production epoch
+      is. Nothing else reads it.
+    - **Not the reaper's keep rules:** a resolved contract the reaper keeps
+      (a payment hold, block points, an unsettled escrow) loses its evidence
+      at the horizon all the same. With the reaper's mode on at
+      `horizonDays 35`, the deletes permanently remove about a billion rows,
+      the evidence accepted from 2026-10-06 on, as each day of it passes 35
+      days.
+    - **Brake and pace (review, 2026-11-02):** the row deletes have their own
+      brake, the Redis hash `{close_evidence_retention}control` (`mode`
+      on/off, `maxRowsPerSecond`), read before every batch, so they slow or
+      stop without touching the reaper. Without it they run at 1,000 rows a
+      second, about 65M a day of a backlog's day (the deletes take a third of
+      the task's run, which continues a minute later while work is left); the
+      brake goes up to 5,000. `bringyourctl db close-evidence-retention
+      [--mode=on|off] [--max-rows-per-second=<n>] [--remove]` shows and sets
+      it. The brake is the way to stop the row deletes. It does not stop the
+      weekly drops after the cutover, which never read it
+      (`fenceCloseEvidenceDrop`); the reaper's `mode off` stops those below 91
+      days, from the next run. Restoring the move guard's body stops both
+      below 91 days, but pages migration-schema-drift. A run's pace ends with
+      it and the next run's first batch follows a minute later, so a rate
+      below about 83 rows a second (5,000 a minute) reads smaller batches, and
+      holds down to one row a minute.
+      `urnetwork_close_evidence_retention_removed_rows_total` counts the rows,
+      `urnetwork_close_evidence_retention_seconds` is the retention the last
+      run applied, and `urnetwork_close_evidence_retention_stops_total` counts
+      each run by why it stopped, so a brake left off does not chart as caught
+      up. The task's log line names the retention and the stop on a run that
+      did anything.
+    - **The batch:** each reads the next 5,000 rows in the census index's
+      order, (contract_id, client_id, report_id), and deletes the expired ones
+      by ctid in the same statement, with `statement_timeout` 30 s and
+      `lock_timeout` 2 s, the reaper's. Both name `ONLY` the target. A run
+      reads its targets once, so a cutover during the run can leave a batch
+      naming the partitioned parent, where a ctid is not unique: without
+      `ONLY` the delete takes the row at each ctid in every leaf, which on
+      PostgreSQL 18.4 took a 50-day-old report of an unresolved contract along
+      with an expired report. With it the parent reads no row.
+    - **Low water:** a new pass starts at the lowest contract of a row the
+      last pass kept for being accepted inside the retention, or at the last
+      pass's retention bound, instead of contract id 0, so a caught-up pass
+      reads only what came due since. The day's first pass (by UTC day)
+      starts from the first key, for the evidence of contracts that resolved
+      since and anything written below the low water.
+    - **Load:** at 35 days the deletes follow the evidence written 35 days
+      before: about 18-24M rows a day from about 11-10, about 60M a day by
+      late November, and 100M a day and more from about 12-06. The default
+      1,000 rows a second (about 65M a day of a backlog's day) keeps up until
+      about 12-06; from then the brake needs about 1,500 a second for 100M a
+      day, and more beyond. The table then levels off near 35 days of
+      evidence, about 2-3.5B rows or 0.6-1.0 TB at 60-100M rows a day, against
+      1.6-2.7 TB at 91 days.
+    - **Autovacuum (drafted for the owner, not applied):** on 11-02 at 05:21Z
+      the table was 349 GB (heap 154.6 GB, census index 101.4 GB, primary key
+      86.2 GB) and 1.15B rows, with no options of its own and no deletes yet.
+      The A5 trial is live: `autovacuum-tuning.conf` sets the global pace to
+      2 ms and 320 a round, which the workers share, and 10 workers; the scale
+      factor stays 0.2 under `autovacuum_vacuum_max_threshold` 100M.
+      PostgreSQL 18's insert trigger vacuums the table about 33 times a day
+      (310 vacuums from 10-23, 0.4 h in all), and the db maintenance task's
+      database-wide ANALYZE covers it (19 since 10-23), so analyze needs no
+      setting.
+      - **Index passes (estimates):** those vacuums skip index cleanup until
+        2% of the heap's pages hold dead items (about 380k pages now, about
+        30-40M rows by 11-10 and 40-70M at the plateau). The primary key leads
+        with `client_id`, so the deletes scatter across it: every pass with
+        index cleanup reads both indexes whole (188 GB now, about 0.35-0.55 TB
+        at the plateau) and writes nearly every primary key leaf page as a
+        full-page image (`checkpoint_timeout` is 5 min). That makes about one
+        such pass every day or two from 11-10, and 1-2 a day at the plateau:
+        about 0.1-0.2 TB of WAL a day there, a few percent of the cluster's
+        3.7 TB, and 0.5-1 TB of index reads.
+      - **The draft** is the table's entry in the A5 block's table list
+        (xops `feat/close-evidence-autovacuum`, `playbook-dbs.yml`): a fixed
+        threshold of 50M dead rows (scale factor 0), and the pace the list
+        sets for the contract tables, 2 ms and 200 a round, so a pass over the
+        plateau's indexes (about 2 h by the cost settings; about 1 h now) does
+        not draw on the workers' shared 320.
+        The insert trigger stays PostgreSQL's, so vacuums keep landing
+        between `vacuum_freeze_table_age` and `autovacuum_freeze_max_age` at
+        this XID rate and the freezing stays in cancellable passes.
+      - **Monitor:** the `pg/dead-tuples` warning fires above max(10M, the
+        table's own threshold) dead rows. At 60-100M deletes a day dead rows
+        grow 2.5-4M an hour, so 2.5-4 hours without a finished vacuum (a long
+        index pass, or a stalled one) crosses 10M on the planned stream; with
+        the draft the line is 50M.
+      - **Apply to this table alone.** On 11-02, 17 of the trial's 19 tables
+        had their options. `transfer_contract` and `transfer_escrow` still
+        lacked their limit of 200, so they run at 2 ms and the global 320;
+        `transfer_contract` spent about 207 of the 228 hours since 10-23 under
+        autovacuum, which probably outlasted the play's retries. Running the
+        tag as it stands would lower those two as well, a separate decision
+        while the reaper feeds their vacuums. So replace the list for the run
+        (the entry is in `playbook-dbs.yml`, whose note has the full `-e`),
+        `--check` first, as `./run-dbs.sh --tags autovacuum_tuning -e
+        '{"autovacuum_tuning_tables": [<this table's entry>]}'`. That is one
+        `ALTER TABLE ... SET` (SHARE UPDATE EXCLUSIVE, catalog only) under
+        `lock_timeout = '500ms'`, retried while an autovacuum holds the table,
+        so set it before about 11-10: this table's vacuums are short today, and
+        index passes of hours will outlast those retries too. A later
+        `-e autovacuum_tuning_revert=true` reverts the whole trial, this table
+        included only while it is in the list. A plain run of the tag refuses,
+        so it cannot lower those two by accident;
+        `-e autovacuum_tuning_full_list=true` asks for the whole list. As a
+        reviewed migration instead it would need the same lock timeout and a
+        retry:
+
+        ```sql
+        ALTER TABLE contract_close_report_evidence SET (
+            autovacuum_vacuum_cost_delay = 2,
+            autovacuum_vacuum_cost_limit = 200,
+            autovacuum_vacuum_scale_factor = 0,
+            autovacuum_vacuum_threshold = 50000000
+        );
+        ```
+
+      - **At the C5 cutover** the entry moves to
+        `contract_close_report_evidence_legacy`, the plain table's new name,
+        which keeps its options. The old name is then the partitioned parent,
+        where `ALTER TABLE ... SET` of these options errors ("cannot specify
+        storage parameters for a partitioned table"), so the tag would fail.
 
 ### C6. Later, on size triggers or decisions
 
@@ -1646,6 +1800,63 @@ Changes:
     `transaction_timeout`, so the migration runner now runs every online
     migration through `WithoutTransactionTimeout`. This branch carries a
     minimal version of it; `feat/pm-horizon` owns the helper.
+
+- **Updated (owner, 2026-11-01): key history follows the contract horizon.**
+  - The retention deletes a gone client's history once the contract horizon
+    reaper's horizon has passed since the client went, while the reaper's
+    `mode` is `on`: the `horizonDays` of `{contract_horizon}control` as the
+    reaper narrows it. That is 91 days by default, down to the reaper's floor,
+    35 days since 6558752b0. A dry run, the reaper off, no control or an
+    unreadable one keep 91 days.
+  - Migration 904 moves the guard's fixed 91 days to
+    `st_client_key_history_retention_floor()`, 30 days
+    (`server.ClientKeyHistoryRetentionFloor`). Both the guard and the
+    retention's batch read it. It changes function definitions only, and its
+    rollback (`ClientKeyHistoryRetentionFloorRollbackSql`) restores 91 days for
+    both. The readers it keeps safe are listed in `db_identity_retention.go`.
+  - The deletes have their own brake, `{client_key_history_retention}control`:
+    `mode` on or off and `maxClientsPerSecond`, read before every batch, 150 a
+    second by default (about 5M clients a day) so a backlog ramps under
+    watch. A pass resumes from a (gone_time, client_id) cursor. The first
+    deletes come when the oldest records (2026-10-24) reach the horizon:
+    about 2026-11-28 at 35 days, when the 2026-10-24..27 records (about 58M
+    clients) come due together.
+- **Measured on main (2026-11-02): the records already carry the true time,
+  and the first deletes come about 2026-11-13, not 11-28.**
+  - The table starts at 2026-10-09 17:52, its first signed row. Nothing in it
+    reaches the guard's 30 days before 11-08.
+  - A child's record carries its deactivation whenever the record is written.
+    In a sample of 1,656 gone clients, `gone_time` was within an hour of the
+    client's last key registration for 92.5% and within a day for all, and no
+    close report landed more than 3.3 s after it. The 2026-10-24..27 records are
+    hosted windows that went on those days, so they have no earlier time to
+    move to.
+  - About 94M registrations of children deactivated 10-09..10-23 (three samples:
+    88M to 101M) are still in `network_client`. The 30-day reap records them from
+    11-08 with those deactivation times, so they come due first, 11-13..11-27 at
+    35 days. About 43M more, of children deactivated since 10-24 and not yet
+    reaped, come due with their own day.
+  - Top-level clients, the only ones recorded at their reap rather than at their
+    deactivation, hold under 1% of the rows and add under 100k a day. Recording
+    their deactivation would save 3 to 7 GB at steady state, which doesn't justify
+    a trigger migration.
+  - There is nothing to backfill. Recorded children already carry their
+    deactivation, and no top-level client with key history can reach its 30-day
+    reap before 11-08. A child reaped while active leaves only `auth_time`, which
+    a connection lasting weeks doesn't move, so it proves no earlier time.
+  - The brake's default of 150 a second is 5M to 8.6M clients a day. That is below
+    today's 13.7M registrations a day and the cohorts of up to 19M a day due from
+    11-15, so it has to be raised before then.
+- **Updated (2026-11-02): the brake can set the retention's own horizon.**
+  - `horizonDays` on `{client_key_history_retention}control` takes the place of
+    the reaper's horizon for key history, whatever the reaper's mode, down to the
+    guard's 30-day floor. A value that doesn't parse keeps 91 days. Without the
+    field nothing changes. It is read once a run.
+  - At 30 days the first deletes come about 11-08, when the 30-day reap first
+    records children with key history, and the table peaks about five days of
+    registrations lower, about 190 GB at today's rate. The readers it keeps safe
+    are the ones `db_identity_retention.go` lists for the floor; none reads key
+    history for a contract the reaper keeps.
 
 ## Cutover requirements
 
