@@ -61,10 +61,12 @@ const (
 	extenderActivationOutcomeProbes     = "probes"
 	extenderActivationOutcomeBudgetLock = "budget_lock"
 	// the budget stage: the budget that refused it, the calling client's, the
-	// caller address's, or the account's (ExtenderActivateSettings)
-	extenderActivationOutcomeClient  = "client"
-	extenderActivationOutcomeAddress = "address"
-	extenderActivationOutcomeAccount = "account"
+	// caller address's, a key's at the address its network proved it at, or
+	// the account's (ExtenderActivateSettings)
+	extenderActivationOutcomeClient        = "client"
+	extenderActivationOutcomeAddress       = "address"
+	extenderActivationOutcomeProvenAddress = "proven_address"
+	extenderActivationOutcomeAccount       = "account"
 )
 
 // The family of the caller's address. Unknown is a request refused because
@@ -86,6 +88,7 @@ var extenderActivationStageOutcomes = map[string][]string{
 	extenderActivationStageBudget: {
 		extenderActivationOutcomeClient,
 		extenderActivationOutcomeAddress,
+		extenderActivationOutcomeProvenAddress,
 		extenderActivationOutcomeAccount,
 	},
 	extenderActivationStageTcp: {
@@ -129,7 +132,7 @@ func newExtenderActivationMetrics(registerer prometheus.Registerer) *extenderAct
 			Help: "Extender activations (POST /network/extender-activate) by the stage that ended them, how, and the caller's address family. " +
 				"Stages: request, refused before any budget was spent; config, the operator's extender configuration is unusable; " +
 				"busy, the api was too busy to take it before any budget was spent (probes, it was probing as many activations as it takes at once; budget_lock, other spends held a budget past the lock bound); " +
-				"budget, an activation budget refused it, the outcome naming which (client, address, account); " +
+				"budget, an activation budget refused it, the outcome naming which (client, address, proven_address -- a key's own at the address it was proved at -- or account); " +
 				"tcp and forward, the required test, which fails on its own (error), runs out of the 10 s probe budget (timeout), or forwards on the other family (other_family); " +
 				"store, activated, or storing the passed activation failed.",
 		}, []string{"stage", "outcome", "family"}),
@@ -208,6 +211,8 @@ func extenderActivationBudgetOutcome(action string) string {
 		return extenderActivationOutcomeClient
 	case model.AccountActionExtenderActivateAddressV4, model.AccountActionExtenderActivateAddressV6:
 		return extenderActivationOutcomeAddress
+	case model.AccountActionExtenderActivateProvenAddressV4, model.AccountActionExtenderActivateProvenAddressV6:
+		return extenderActivationOutcomeProvenAddress
 	default:
 		return extenderActivationOutcomeAccount
 	}

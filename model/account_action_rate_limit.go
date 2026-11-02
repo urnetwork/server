@@ -29,17 +29,20 @@ const (
 	// the extender endpoints' budgets (controller/extender_*.go), named here
 	// so a refusal says which budget was spent. An activation is budgeted per
 	// address family, for the calling client, for the address it is probed
-	// at, and for its account, so one family's attempts never spend the
-	// other's (support inbox 8083, connect#230).
-	AccountActionExtenderActivateV4        = "extender_activate_v4"
-	AccountActionExtenderActivateV6        = "extender_activate_v6"
-	AccountActionExtenderActivateAddressV4 = "extender_activate_address_v4"
-	AccountActionExtenderActivateAddressV6 = "extender_activate_address_v6"
-	AccountActionExtenderActivateAccountV4 = "extender_activate_account_v4"
-	AccountActionExtenderActivateAccountV6 = "extender_activate_account_v6"
-	AccountActionExtenderPingReport        = "ping_report"
-	AccountActionExtenderLatencyReport     = "extender_latency_report"
-	AccountActionExtenderBlockReport       = "extender_block_report"
+	// at -- or, for a key its network already proved there, for that key at
+	// that address -- and for its account, so one family's attempts never
+	// spend the other's (support inbox 8083, connect#230).
+	AccountActionExtenderActivateV4              = "extender_activate_v4"
+	AccountActionExtenderActivateV6              = "extender_activate_v6"
+	AccountActionExtenderActivateAddressV4       = "extender_activate_address_v4"
+	AccountActionExtenderActivateAddressV6       = "extender_activate_address_v6"
+	AccountActionExtenderActivateProvenAddressV4 = "extender_activate_proven_address_v4"
+	AccountActionExtenderActivateProvenAddressV6 = "extender_activate_proven_address_v6"
+	AccountActionExtenderActivateAccountV4       = "extender_activate_account_v4"
+	AccountActionExtenderActivateAccountV6       = "extender_activate_account_v6"
+	AccountActionExtenderPingReport              = "ping_report"
+	AccountActionExtenderLatencyReport           = "extender_latency_report"
+	AccountActionExtenderBlockReport             = "extender_block_report"
 )
 
 const (
@@ -67,22 +70,24 @@ const (
 // rate-limit error message, so a client can tell which of the several
 // limits it hit instead of seeing one generic message for all of them.
 var actionDisplayNames = map[string]string{
-	AccountActionAddAuth:                   "adding a sign-in method",
-	AccountActionRemoveAuth:                "removing a sign-in method",
-	AccountActionClaimNetworkName:          "setting your network name",
-	AccountActionChangeNetworkName:         "changing your network name",
-	AccountActionGenerateSeedphrase:        "generating a seedphrase",
-	AccountActionRegenerateSeedphrase:      "regenerating a seedphrase",
-	AccountActionVerifyStorePurchase:       "verifying a store purchase",
-	AccountActionExtenderActivateV4:        "activating an extender over IPv4",
-	AccountActionExtenderActivateV6:        "activating an extender over IPv6",
-	AccountActionExtenderActivateAddressV4: "activating an extender from this address over IPv4",
-	AccountActionExtenderActivateAddressV6: "activating an extender from this address over IPv6",
-	AccountActionExtenderActivateAccountV4: "activating your account's extenders over IPv4",
-	AccountActionExtenderActivateAccountV6: "activating your account's extenders over IPv6",
-	AccountActionExtenderPingReport:        "reporting extender pings",
-	AccountActionExtenderLatencyReport:     "reporting extender latency",
-	AccountActionExtenderBlockReport:       "reporting a blocked extender",
+	AccountActionAddAuth:                         "adding a sign-in method",
+	AccountActionRemoveAuth:                      "removing a sign-in method",
+	AccountActionClaimNetworkName:                "setting your network name",
+	AccountActionChangeNetworkName:               "changing your network name",
+	AccountActionGenerateSeedphrase:              "generating a seedphrase",
+	AccountActionRegenerateSeedphrase:            "regenerating a seedphrase",
+	AccountActionVerifyStorePurchase:             "verifying a store purchase",
+	AccountActionExtenderActivateV4:              "activating an extender over IPv4",
+	AccountActionExtenderActivateV6:              "activating an extender over IPv6",
+	AccountActionExtenderActivateAddressV4:       "activating an extender from this address over IPv4",
+	AccountActionExtenderActivateAddressV6:       "activating an extender from this address over IPv6",
+	AccountActionExtenderActivateProvenAddressV4: "re-activating an extender from its own address over IPv4",
+	AccountActionExtenderActivateProvenAddressV6: "re-activating an extender from its own address over IPv6",
+	AccountActionExtenderActivateAccountV4:       "activating your account's extenders over IPv4",
+	AccountActionExtenderActivateAccountV6:       "activating your account's extenders over IPv6",
+	AccountActionExtenderPingReport:              "reporting extender pings",
+	AccountActionExtenderLatencyReport:           "reporting extender latency",
+	AccountActionExtenderBlockReport:             "reporting a blocked extender",
 }
 
 // The display name of an action, "this action" for one that has none.

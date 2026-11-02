@@ -142,6 +142,57 @@ func GetNetworkExtenderProvenHostCandidatesInTx(
 	return candidates
 }
 
+// Where the extender with one identity key last passed activation on one
+// family, and the network it belongs to (connect#230): what tells a post of a
+// key its network already proved at the caller's address from any other post
+// from that address.
+type NetworkExtenderKeyAddress struct {
+	NetworkId    server.Id
+	Ip           netip.Addr
+	ActivateTime time.Time
+}
+
+// GetNetworkExtenderKeyAddress reads where the extender with `publicKey` last
+// passed activation on `ipVersion`, and its network, or nil when the key has
+// never passed on that family. An address the uptime probes since deactivated
+// is still where it passed.
+func GetNetworkExtenderKeyAddress(
+	ctx context.Context,
+	publicKey []byte,
+	ipVersion int,
+) *NetworkExtenderKeyAddress {
+	var keyAddress *NetworkExtenderKeyAddress
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT
+				network_extender.network_id,
+				network_extender_address.ip,
+				network_extender_address.activate_time
+			FROM network_extender
+			INNER JOIN network_extender_address ON
+				network_extender_address.extender_id = network_extender.extender_id AND
+				network_extender_address.ip_version = $2
+			WHERE network_extender.public_key = $1
+			`,
+			publicKey,
+			ipVersion,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				keyAddress = &NetworkExtenderKeyAddress{}
+				server.Raise(result.Scan(
+					&keyAddress.NetworkId,
+					&keyAddress.Ip,
+					&keyAddress.ActivateTime,
+				))
+			}
+		})
+	})
+	return keyAddress
+}
+
 // GetNetworkExtenderActivations reads the activation history of one extender
 // at or after `minActivateTime`, oldest first.
 func GetNetworkExtenderActivations(

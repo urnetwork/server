@@ -498,3 +498,77 @@ func TestExtenderActivateColdStartSimulation(t *testing.T) {
 		t.Errorf("1,000 hosts at today's limit were done at minute %d, want past three days", doneMinute)
 	}
 }
+
+// A post of a key is its network's own extender re-activating where it proved
+// itself (connect#230) when the key belongs to the caller's network and its
+// last pass on the family was from the same /32 or /64 at most 7 days ago.
+// Any other post from the address -- another network's, a key that passed
+// elsewhere or long ago, or one never seen -- spends the address's budget.
+func TestExtenderActivateKeyProvenAtAddressRules(t *testing.T) {
+	settings := DefaultExtenderActivateSettings()
+	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	networkId := server.NewId()
+	keyAddress := func(ip string, age time.Duration) *model.NetworkExtenderKeyAddress {
+		return &model.NetworkExtenderKeyAddress{
+			NetworkId:    networkId,
+			Ip:           netip.MustParseAddr(ip),
+			ActivateTime: now.Add(-age),
+		}
+	}
+	otherNetwork := keyAddress("198.51.100.7", time.Hour)
+	otherNetwork.NetworkId = server.NewId()
+	cases := []struct {
+		name       string
+		keyAddress *model.NetworkExtenderKeyAddress
+		clientIp   string
+		want       bool
+	}{
+		{name: "never passed", keyAddress: nil, clientIp: "198.51.100.7", want: false},
+		{name: "the same address", keyAddress: keyAddress("198.51.100.7", time.Hour), clientIp: "198.51.100.7", want: true},
+		{name: "passed a minute ago", keyAddress: keyAddress("198.51.100.7", time.Minute), clientIp: "198.51.100.7", want: true},
+		{name: "an ipv4-mapped caller", keyAddress: keyAddress("198.51.100.7", time.Hour), clientIp: "::ffff:198.51.100.7", want: true},
+		{name: "another /32", keyAddress: keyAddress("198.51.100.7", time.Hour), clientIp: "198.51.100.8", want: false},
+		{name: "another network's key", keyAddress: otherNetwork, clientIp: "198.51.100.7", want: false},
+		{name: "passed 7 days ago", keyAddress: keyAddress("198.51.100.7", 7*24*time.Hour), clientIp: "198.51.100.7", want: true},
+		{name: "passed 7 days and a minute ago", keyAddress: keyAddress("198.51.100.7", 7*24*time.Hour+time.Minute), clientIp: "198.51.100.7", want: false},
+		{name: "the same /64", keyAddress: keyAddress("2001:db8:1:2::1", time.Hour), clientIp: "2001:db8:1:2:ffff::9", want: true},
+		{name: "another /64", keyAddress: keyAddress("2001:db8:1:2::1", time.Hour), clientIp: "2001:db8:1:3::1", want: false},
+		{name: "the other family", keyAddress: keyAddress("198.51.100.7", time.Hour), clientIp: "2001:db8:1:2::1", want: false},
+	}
+	for _, c := range cases {
+		if got := settings.keyProvenAtAddress(c.keyAddress, networkId, netip.MustParseAddr(c.clientIp), now); got != c.want {
+			t.Errorf("%s: proven at the address %t, want %t", c.name, got, c.want)
+		}
+	}
+}
+
+// The budget a key has at the address its network proved it at is that key's
+// at that /32 or /64 alone: another key at the address, and the address's own
+// budget, are other budgets, and the id holds no address (connect#230).
+func TestExtenderActivateProvenAddressBudgetIdIsTheKeysAtTheAddress(t *testing.T) {
+	t.Cleanup(server.Vault.PushSimpleResource(
+		"client.yml",
+		[]byte("client_ip_hash_pepper: synthetic-extender-activation-budget-test-only\n"),
+	))
+	settings := DefaultExtenderActivateSettings()
+	firstKey := []byte("first synthetic extender key, 32")
+	secondKey := []byte("second synthetic extender key 32")
+	id := func(ip string, publicKey []byte) server.Id {
+		return settings.provenAddressBudgetId(netip.MustParseAddr(ip), publicKey)
+	}
+	connect.AssertEqual(t, id("198.51.100.7", firstKey), id("::ffff:198.51.100.7", firstKey))
+	connect.AssertEqual(t, id("2001:db8:1:2::1", firstKey), id("2001:db8:1:2::9", firstKey))
+	for _, pair := range [][2]server.Id{
+		{id("198.51.100.7", firstKey), id("198.51.100.7", secondKey)},
+		{id("198.51.100.7", firstKey), id("198.51.100.8", firstKey)},
+		{id("198.51.100.7", firstKey), settings.addressBudgetId(netip.MustParseAddr("198.51.100.7"))},
+	} {
+		if pair[0] == pair[1] {
+			t.Errorf("two budgets share the id %s", pair[0])
+		}
+	}
+	budgetId := id("198.51.100.7", firstKey)
+	if bytes.Contains(budgetId[:], netip.MustParseAddr("198.51.100.7").AsSlice()) {
+		t.Errorf("the budget id %s holds the address", budgetId)
+	}
+}

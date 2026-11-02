@@ -690,3 +690,75 @@ func TestExtenderActivateCountsBusyAndBudgetRefusals(t *testing.T) {
 		}
 	})
 }
+
+// A public extender relays posts to the api from its own address, so any
+// account's posts through it spend that address's budget. Six junk posts an
+// hour through an extender, from another account, used to refuse the
+// extender's own re-activation from its own address for the rest of the
+// hour, renewably (connect#230). A key its network already proved at the
+// address now spends a budget of its own there, which no other post can: the
+// junk posts leave its re-activation alone, the other account posting that
+// same key from the address still spends the address's budget, and the key's
+// own posts are held to 6 an hour.
+func TestExtenderActivateKeepsAProvenKeysAddressBudgetItsOwn(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		installTestExtenderConfig(t, nil)
+
+		const extenderIp = "198.51.100.50"
+		owner := newTestExtenderAccount(ctx)
+		ownerHost := owner.newHost(t, ctx)
+		seedTestProvenExtenderHost(t, ctx, ownerHost, map[int]string{4: extenderIp}, server.NowUtc().Add(-2*time.Hour))
+		secondOwnerHost := owner.newHost(t, ctx)
+		other := newTestExtenderAccount(ctx)
+		otherHost := other.newHost(t, ctx)
+		otherSecondHost := other.newHost(t, ctx)
+
+		// another account's junk posts through the extender, each with a key
+		// the extender does not hold, so each probe fails after its spend
+		junkService := newExtenderActivateService(DefaultExtenderActivateSettings())
+		junkService.testProbes = testFakeExtenderProbes(errors.New("the extender answered with another identity key"))
+		for i := range 6 {
+			junk := testActivateHost(t, ctx, junkService, &testExtenderHost{
+				byJwt:     otherHost.byJwt,
+				publicKey: owner.newHost(t, ctx).publicKey,
+			}, extenderIp)
+			if junk.Activated || !strings.Contains(junk.Error, "another identity key") {
+				t.Fatalf("junk post %d: activated %t, %q", i+1, junk.Activated, junk.Error)
+			}
+		}
+
+		service := newExtenderActivateService(DefaultExtenderActivateSettings())
+		service.testProbes = testFakeExtenderProbes(nil)
+		if result := testActivateHost(t, ctx, service, ownerHost, extenderIp); !result.Activated {
+			t.Fatalf("the extender's re-activation from its own address was refused: %q", result.Error)
+		}
+
+		// the other account posting the extender's own key from its address,
+		// from a client with its own budget whole, is no re-activation of its
+		// own, and the address's budget is spent
+		theirs := testActivateHost(t, ctx, service, &testExtenderHost{
+			byJwt:     otherSecondHost.byJwt,
+			publicKey: ownerHost.publicKey,
+		}, extenderIp)
+		if theirs.Activated || !strings.Contains(theirs.Error, "activating an extender from this address over IPv4") {
+			t.Fatalf("another account's post of the extender's key from its address: activated %t, %q", theirs.Activated, theirs.Error)
+		}
+
+		// the key's own budget at the address: five more over two clients of
+		// its network, and the seventh is refused by it
+		for i, host := range []*testExtenderHost{ownerHost, ownerHost, secondOwnerHost, secondOwnerHost, secondOwnerHost} {
+			result := testActivateHost(t, ctx, service, &testExtenderHost{byJwt: host.byJwt, publicKey: ownerHost.publicKey}, extenderIp)
+			if !result.Activated {
+				t.Fatalf("re-activation %d of the extender from its own address was refused: %q", i+2, result.Error)
+			}
+		}
+		seventh := testActivateHost(t, ctx, service, &testExtenderHost{byJwt: secondOwnerHost.byJwt, publicKey: ownerHost.publicKey}, extenderIp)
+		if seventh.Activated || !strings.Contains(seventh.Error, "re-activating an extender from its own address over IPv4") {
+			t.Fatalf("the seventh re-activation in the hour: activated %t, %q", seventh.Activated, seventh.Error)
+		}
+		if seventh.RetryAfterSeconds <= 0 {
+			t.Errorf("the seventh re-activation's refusal asks for no wait")
+		}
+	})
+}

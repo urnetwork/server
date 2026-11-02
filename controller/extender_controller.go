@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
@@ -129,6 +130,15 @@ type ExtenderActivateSettings struct {
 	AddressRateLimit          int
 	AddressIpv4PrefixBitCount int
 	AddressIpv6PrefixBitCount int
+	// activations per family per window of a key its network already proved
+	// at the caller's address, which spend this budget, kept for that key at
+	// that address, rather than the address's (connect#230). A public
+	// extender relays posts to the api from its own address, so other
+	// accounts' posts through it spend the address's budget; its own
+	// re-activation spends one no other post can. Proved means the key's
+	// last pass on the family was from the same /32 or /64, at most
+	// ProvenHostMaxAge ago.
+	ProvenAddressRateLimit int
 	// the floor of the account's activations per family per window, over all
 	// of its clients: a new account's limit. A client refused by its own
 	// budget does not spend this one, and a client refused by this one does
@@ -254,6 +264,59 @@ func (self *ExtenderActivateSettings) addressBudgetId(clientIp netip.Addr) serve
 	return server.Id([16]byte(addressHash[:16]))
 }
 
+// The action of the budget of a key its network proved at the caller's
+// address (ProvenAddressRateLimit).
+func extenderActivateProvenAddressRateLimitAction(ipVersion int) string {
+	if ipVersion == 6 {
+		return model.AccountActionExtenderActivateProvenAddressV6
+	}
+	return model.AccountActionExtenderActivateProvenAddressV4
+}
+
+// The id the budget of one key at one caller address is recorded under
+// (ProvenAddressRateLimit): the hash of the address's peppered hash and the
+// key, cut to an id, so it is the key's at that /32 or /64 alone and holds no
+// address.
+func (self *ExtenderActivateSettings) provenAddressBudgetId(clientIp netip.Addr, publicKey []byte) server.Id {
+	addressHash := server.ClientIpHashForAddrPrefix(
+		clientIp.WithZone(""),
+		self.AddressIpv4PrefixBitCount,
+		self.AddressIpv6PrefixBitCount,
+	)
+	keyHash := sha256.New()
+	keyHash.Write(addressHash[:])
+	keyHash.Write(publicKey)
+	return server.Id([16]byte(keyHash.Sum(nil)[:16]))
+}
+
+// Whether a post of a key from `clientIp` by `networkId` is the network's own
+// extender re-activating where it proved itself (ProvenAddressRateLimit): the
+// key's network is the caller's, its last pass on the family was from the
+// same /32 or /64, and that pass was at most ProvenHostMaxAge ago.
+func (self *ExtenderActivateSettings) keyProvenAtAddress(
+	keyAddress *model.NetworkExtenderKeyAddress,
+	networkId server.Id,
+	clientIp netip.Addr,
+	now time.Time,
+) bool {
+	if keyAddress == nil || keyAddress.NetworkId != networkId {
+		return false
+	}
+	if keyAddress.ActivateTime.Before(now.Add(-self.ProvenHostMaxAge)) {
+		return false
+	}
+	keyIp := keyAddress.Ip.Unmap().WithZone("")
+	clientIp = clientIp.Unmap().WithZone("")
+	if server.IpVersionForAddr(keyIp) != server.IpVersionForAddr(clientIp) {
+		return false
+	}
+	prefixBitCount := self.AddressIpv4PrefixBitCount
+	if clientIp.Is6() {
+		prefixBitCount = self.AddressIpv6PrefixBitCount
+	}
+	return netip.PrefixFrom(keyIp, prefixBitCount).Masked() == netip.PrefixFrom(clientIp, prefixBitCount).Masked()
+}
+
 // The family an activation claims by the host it was posted to (C2): 4 for a
 // `[<env>-]api-v4` name and 6 for a `[<env>-]api-v6` name, the family api
 // hosts an extender activates each of its families on. 0 for any other host
@@ -293,6 +356,7 @@ func DefaultExtenderActivateSettings() *ExtenderActivateSettings {
 		AddressRateLimit:                  6,
 		AddressIpv4PrefixBitCount:         32,
 		AddressIpv6PrefixBitCount:         64,
+		ProvenAddressRateLimit:            6,
 		AccountRateLimit:                  60,
 		AccountRateLimitPerProvenHost:     6,
 		AccountRateLimitCeiling:           1200,
@@ -969,6 +1033,31 @@ func (self *extenderActivateService) activate(
 	stage = extenderActivationStageBudget
 	clientRateLimitAction, addressRateLimitAction, accountRateLimitAction := extenderActivateRateLimitActions(ipVersion)
 	networkId := clientSession.ByJwt.NetworkId
+	addressBudget := model.AccountActionBudget{
+		Id:     settings.addressBudgetId(clientIp),
+		Action: addressRateLimitAction,
+		Limit:  settings.AddressRateLimit,
+		Window: settings.RateLimitWindow,
+	}
+	// a key its network already proved at this address is the network's own
+	// extender re-activating where it lives. A public extender relays posts
+	// to the api from its own address, so any account's posts through it
+	// spend the address's budget; the key's own posts there spend a budget
+	// of their own, which no other post can, so others cannot hold its
+	// re-activation off (connect#230)
+	if settings.keyProvenAtAddress(
+		model.GetNetworkExtenderKeyAddress(clientSession.Ctx, publicKey, ipVersion),
+		networkId,
+		clientIp,
+		server.NowUtc(),
+	) {
+		addressBudget = model.AccountActionBudget{
+			Id:     settings.provenAddressBudgetId(clientIp, publicKey),
+			Action: extenderActivateProvenAddressRateLimitAction(ipVersion),
+			Limit:  settings.ProvenAddressRateLimit,
+			Window: settings.RateLimitWindow,
+		}
+	}
 	if err := model.CheckAndRecordAccountActionBudgets(
 		clientSession.Ctx,
 		model.AccountActionBudget{
@@ -977,12 +1066,7 @@ func (self *extenderActivateService) activate(
 			Limit:  settings.ClientRateLimit,
 			Window: settings.RateLimitWindow,
 		},
-		model.AccountActionBudget{
-			Id:     settings.addressBudgetId(clientIp),
-			Action: addressRateLimitAction,
-			Limit:  settings.AddressRateLimit,
-			Window: settings.RateLimitWindow,
-		},
+		addressBudget,
 		model.AccountActionBudget{
 			Id:     clientSession.ByJwt.UserId,
 			Action: accountRateLimitAction,
