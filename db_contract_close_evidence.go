@@ -31,6 +31,9 @@ CREATE TRIGGER contract_close_report_evidence_truncate_guard BEFORE TRUNCATE ON 
 // than the 13-week contract horizon, and only from a transaction that sets
 // urnetwork.close_evidence_retention. 91 days is that horizon
 // (ContractRetention); a newer row, an update and a truncate stay refused.
+// This is migration 857's body, as published: the horizon guard has since
+// replaced it (contractCloseReportEvidenceHorizonGuardSql), and evidence now
+// follows the contract horizon (db_contract_close_evidence_horizon.go).
 const contractCloseReportEvidenceRetentionGuardSql = `
 SET LOCAL lock_timeout = '5s';
 CREATE OR REPLACE FUNCTION contract_close_report_evidence_guard() RETURNS trigger LANGUAGE plpgsql AS $close_report_guard$
