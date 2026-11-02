@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/urnetwork/connect"
 )
 
@@ -108,4 +110,29 @@ func TestNarrowProberShardRetentionControl(t *testing.T) {
 	noContracts := *settings
 	noContracts.DropContracts = false
 	connect.AssertEqual(t, NarrowProberShardRetentionControl(map[string]string{"contracts": "on"}, &noContracts).DropContracts, false)
+}
+
+// A run publishes its clock with the backlog it read, so a reader that takes
+// the taskworker with the newest clock (the taskworker dashboard's prober
+// retention stats) reads that run's backlog. With every pass closed, the
+// oldest is the run's clock.
+func TestProberShardRetentionPublishesItsClockWithTheBacklog(t *testing.T) {
+	settings := DefaultProberShardRetentionSettings()
+	now := time.Date(2026, 11, 9, 13, 30, 0, 0, time.UTC)
+	run := &proberShardRetentionRun{settings: settings, now: now, report: newProberShardRetentionReport()}
+	oldest := time.Date(2026, 10, 30, 4, 0, 0, 0, time.UTC)
+	run.publishBacklog(7, &oldest)
+	connect.AssertEqual(t, run.report.DueShards, int64(7))
+	connect.AssertEqual(t, *run.report.OldestShard, oldest)
+	connect.AssertEqual(t, testutil.ToFloat64(proberShardRetentionDueGauge), float64(7))
+	connect.AssertEqual(t, testutil.ToFloat64(proberShardRetentionOldestGauge), float64(oldest.Unix()))
+	connect.AssertEqual(t, testutil.ToFloat64(proberShardRetentionRunTimestampGauge), float64(now.Unix()))
+
+	later := &proberShardRetentionRun{settings: settings, now: now.Add(5 * time.Minute), report: newProberShardRetentionReport()}
+	later.publishBacklog(0, nil)
+	connect.AssertEqual(t, later.report.DueShards, int64(0))
+	connect.AssertEqual(t, later.report.OldestShard == nil, true)
+	connect.AssertEqual(t, testutil.ToFloat64(proberShardRetentionDueGauge), float64(0))
+	connect.AssertEqual(t, testutil.ToFloat64(proberShardRetentionOldestGauge), float64(later.now.Unix()))
+	connect.AssertEqual(t, testutil.ToFloat64(proberShardRetentionRunTimestampGauge), float64(later.now.Unix()))
 }

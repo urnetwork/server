@@ -1,9 +1,14 @@
 package model
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"strings"
+
+	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
 )
@@ -134,9 +139,70 @@ func newSweepLockedKeyTargets(cursorTargets []any) []any {
 	return lockedKeyTargets
 }
 
+// The participant step proves a stream unreferenced by probing transfer_contract
+// for a row with its stream_id, once per participant row. Contract ids, not
+// stream ids, key the contract table, so only an index that leads with
+// stream_id answers that probe: transfer_contract_stream_id (v629), which is
+// dropped while contract_participant is empty. Without such an index each
+// probe would read the whole contract heap. So each page first checks for a
+// valid, ready btree index leading with stream_id, unconditional or limited to
+// stream_id IS NOT NULL, and without one the step does not run: participant
+// rows are kept, never deleted unproven, and the pass moves on.
+// contract_participant is written only for multi-hop contracts (contracts with
+// intermediaries) and is empty while those are off. Before they launch without
+// that index, give this step a parent probe that does not read
+// transfer_contract by stream_id.
+const contractParticipantSweepAdmissionSql = `
+	SELECT
+		EXISTS (
+			SELECT 1
+			FROM pg_index index_record
+			JOIN pg_class index_relation ON index_relation.oid = index_record.indexrelid
+			JOIN pg_am access_method ON access_method.oid = index_relation.relam
+			JOIN pg_attribute key_column ON
+				key_column.attrelid = index_record.indrelid AND
+				key_column.attnum = index_record.indkey[0]
+			WHERE
+				index_record.indrelid = to_regclass('public.transfer_contract') AND
+				key_column.attname = 'stream_id' AND
+				access_method.amname = 'btree' AND
+				index_record.indisvalid AND index_record.indisready AND index_record.indislive AND (
+					index_record.indpred IS NULL OR
+					pg_get_expr(index_record.indpred, index_record.indrelid) = '(stream_id IS NOT NULL)'
+				)
+		),
+		EXISTS (SELECT 1 FROM contract_participant)
+`
+
+var orphanSweepParticipantRefusals = prometheus.NewCounter(prometheus.CounterOpts{
+	Name: "urnetwork_orphan_sweep_participant_refusals_total",
+	Help: "Orphan sweep passes that kept every contract_participant row unexamined because contract_participant has rows and no index on transfer_contract answers the stream_id parent probe.",
+})
+
+func init() {
+	prometheus.MustRegister(orphanSweepParticipantRefusals)
+}
+
+// Admits a participant page only while an index answers its parent probe. A
+// refusal with participant rows present is counted and logged once per pass;
+// with none, the step has nothing to examine either way.
+func admitContractParticipantSweepPageInTx(ctx context.Context, tx server.PgTx) bool {
+	var indexed, participants bool
+	server.Raise(tx.QueryRow(ctx, contractParticipantSweepAdmissionSql).Scan(&indexed, &participants))
+	if !indexed && participants {
+		orphanSweepParticipantRefusals.Inc()
+		glog.Warningf("[sweep]contract_participant kept unexamined: no index on transfer_contract answers its stream_id parent probe\n")
+	}
+	return indexed
+}
+
 // Step order is the persisted cursor's table identity; keep existing positions
 // stable. Each child's leading primary-key column is its parent lookup key.
 func sweepOrphanContractSteps() []sweepOrphanStep {
+	participantStep := newSweepOrphanContractStep("contract_participant", []string{"stream_id", "client_id"}, func() []any {
+		return []any{new(server.Id), new(server.Id)}
+	})
+	participantStep.admitPage = admitContractParticipantSweepPageInTx
 	return []sweepOrphanStep{
 		newSweepOrphanContractStep("contract_close", []string{"contract_id", "party"}, func() []any {
 			return []any{new(server.Id), new(string)}
@@ -147,9 +213,7 @@ func sweepOrphanContractSteps() []sweepOrphanStep {
 		newSweepOrphanContractStep("transfer_escrow_sweep", []string{"contract_id", "balance_id", "network_id"}, func() []any {
 			return []any{new(server.Id), new(server.Id), new(server.Id)}
 		}),
-		newSweepOrphanContractStep("contract_participant", []string{"stream_id", "client_id"}, func() []any {
-			return []any{new(server.Id), new(server.Id)}
-		}),
+		participantStep,
 		newSweepOrphanContractStep("contract_extender", []string{"contract_id", "extender_id", "party"}, func() []any {
 			return []any{new(server.Id), new(server.Id), new(string)}
 		}),

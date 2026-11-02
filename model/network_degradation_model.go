@@ -90,12 +90,17 @@ const contractDegradationClockSkew = time.Minute
 
 const contractDegradationStateKey = "network_degradation:zero_contract_cost:v1"
 
-// Counts the contracts created in [$1, $2) over transfer_contract_create_time
-// (create_time, open, contract_id).
+// Counts the contracts created in [$1, $2). [$3, $4) is the window's contract
+// id range (ContractIdCreateTimeRange), so the count reads a range of the
+// primary key rather than an index on create_time; the create_time predicate
+// decides which contracts count, as a filter (IS TRUE, see
+// ContractIdCreateTimeRange).
 const contractDegradationOpenCountSql = `
 	SELECT count(*)
 	FROM transfer_contract
-	WHERE $1 <= create_time AND create_time < $2
+	WHERE
+		$3 <= contract_id AND contract_id < $4 AND
+		($1 <= create_time AND create_time < $2) IS TRUE
 `
 
 // Counts the terminal outcomes claimed in [$1, $2) over the partial
@@ -354,10 +359,11 @@ func publishContractDegradationState(ctx context.Context, readRaw string, readPr
 // and bounded by a statement timeout.
 func MeasureContractDegradation(ctx context.Context, now time.Time) (openCount int64, closeCount int64, returnErr error) {
 	windowStart := now.Add(-ContractDegradationWindow)
+	lowerId, upperId := ContractIdCreateTimeRange(windowStart, now)
 	server.HandleError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, fmt.Sprintf(`SET LOCAL statement_timeout = '%dms'`, contractDegradationStatementTimeout.Milliseconds())))
-			server.Raise(tx.QueryRow(ctx, contractDegradationOpenCountSql, windowStart, now).Scan(&openCount))
+			server.Raise(tx.QueryRow(ctx, contractDegradationOpenCountSql, windowStart, now, lowerId, upperId).Scan(&openCount))
 			server.Raise(tx.QueryRow(ctx, contractDegradationCloseCountSql, windowStart, now).Scan(&closeCount))
 		}, pgx.ReadOnly, server.OptNoRetry())
 	}, func(err error) {

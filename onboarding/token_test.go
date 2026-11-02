@@ -219,3 +219,23 @@ func TestDestination(t *testing.T) {
 	connect.AssertEqual(t, DestinationConnect, Destination("something_else"))
 	connect.AssertEqual(t, DestinationConnect, Destination(""))
 }
+
+// Re-engagement tokens share the signing and the endpoints: they carry the
+// landing slug as the step and a re-engagement flow step. An unknown flow step
+// is still refused, so the vocabulary stays closed.
+func TestReengagementTokens(t *testing.T) {
+	key := []byte(strings.Repeat("k", 32))
+	now := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	for _, step := range ReengagementFlowSteps() {
+		claims := &TokenClaims{NetworkId: server.Id{15: 7}, Step: "keep", FlowStep: step, ExpiresAt: now.Add(time.Hour).Unix()}
+		token, err := SignToken(key, claims)
+		connect.AssertEqual(t, nil, err)
+		parsed, err := ParseToken([][]byte{key}, token, now)
+		connect.AssertEqual(t, nil, err)
+		connect.AssertEqual(t, step, parsed.FlowStep)
+		connect.AssertEqual(t, "keep", parsed.Step)
+		connect.AssertEqual(t, false, IsFlowStep(step))
+	}
+	_, err := SignToken(key, &TokenClaims{NetworkId: server.Id{15: 7}, Step: "keep", FlowStep: "r9", ExpiresAt: now.Add(time.Hour).Unix()})
+	connect.AssertEqual(t, ErrTokenInvalid, err)
+}

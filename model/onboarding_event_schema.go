@@ -60,7 +60,37 @@ const (
 	// retention_d30 read (network_client_connection is pruned 8 h after
 	// disconnect and cannot back them).
 	EventConnectDay = "connect.day"
+	// EventFeedbackTapped is a one-tap answer from a campaign feedback email
+	// (ur.io/f/<token>?r=n | ?why=reason), recorded when the link resolves, so
+	// the answer counts even if the reader never finishes the in-app form
+	// (REVIEW.md finding 14).
+	EventFeedbackTapped = "feedback.tapped"
 )
+
+// The re-engagement program's events (mmm/reengagement/PLAN.md
+// "Measurement"). Their own names keep them out of the onboarding tracker and
+// rollup, which read email.* and landing.clicked.
+const (
+	EventReengageEpisodeStarted    = "reengage.episode.started"
+	EventReengageEmailSent         = "reengage.email.sent"
+	EventReengageEmailDelivered    = "reengage.email.delivered"
+	EventReengageEmailClicked      = "reengage.email.clicked"
+	EventReengageEmailBounced      = "reengage.email.bounced"
+	EventReengageEmailComplained   = "reengage.email.complained"
+	EventReengageEmailUnsubscribed = "reengage.email.unsubscribed"
+	// a holdout network's step at the moment it would have been mailed
+	EventReengageVirtualSend    = "reengage.virtual_send"
+	EventReengageLandingClicked = "reengage.landing.clicked"
+	EventReengageReason         = "reengage.reason"
+	EventReengageKeep           = "reengage.keep"
+	EventReengageExit           = "reengage.exit"
+)
+
+// ReengagementFlowStepValues are the re-engagement positions events may carry.
+var ReengagementFlowStepValues = []string{"r1", "r2", "r3", "n1", "f1", "w1"}
+
+// ReengagementStreamValues are the streams.
+var ReengagementStreamValues = []string{"lapsed", "never_activated", "fix", "winback"}
 
 // Event platforms (the `platform` field of every client event).
 var EventPlatforms = []string{"ios", "macos", "android", "web", "windows", "linux"}
@@ -168,6 +198,16 @@ func purchaseProps() map[string]*EventPropSpec {
 	}
 }
 
+func reengageEmailProps() map[string]*EventPropSpec {
+	return map[string]*EventPropSpec{
+		"step":       propToken(true),
+		"flow_step":  propEnum(true, ReengagementFlowStepValues...),
+		"variant":    propToken(false),
+		"experiment": propToken(false),
+		"arm":        propToken(false),
+	}
+}
+
 func emailProps() map[string]*EventPropSpec {
 	return map[string]*EventPropSpec{
 		"step":       propToken(true),
@@ -253,6 +293,38 @@ var eventSpecs = func() map[string]*EventSpec {
 			"connect_days": propInt(false, 0, 7),
 		}},
 		{Name: EventConnectDay, ServerOnly: true, Owner: EventOwnerS3, Props: map[string]*EventPropSpec{}},
+		{Name: EventFeedbackTapped, ServerOnly: true, Owner: EventOwnerS2, Props: map[string]*EventPropSpec{
+			"rating":    propInt(false, 1, 5),
+			"reason":    propEnum(false, "not_needed", "not_working", "trust", "other"),
+			"flow_step": propEnum(false, "e1", "e2", "e3", "e4", "e5"),
+		}},
+		{Name: EventReengageEpisodeStarted, ServerOnly: true, Owner: EventOwnerS2, Props: map[string]*EventPropSpec{
+			"stream":     propEnum(true, ReengagementStreamValues...),
+			"experiment": propToken(false),
+			"arm":        propToken(false),
+		}},
+		{Name: EventReengageEmailSent, ServerOnly: true, Owner: EventOwnerS2, Props: reengageEmailProps()},
+		{Name: EventReengageEmailDelivered, ServerOnly: true, Owner: EventOwnerS2, Props: reengageEmailProps()},
+		{Name: EventReengageEmailClicked, ServerOnly: true, Owner: EventOwnerS2, Props: reengageEmailProps()},
+		{Name: EventReengageEmailBounced, ServerOnly: true, Owner: EventOwnerS2, Props: reengageEmailProps()},
+		{Name: EventReengageEmailComplained, ServerOnly: true, Owner: EventOwnerS2, Props: reengageEmailProps()},
+		{Name: EventReengageEmailUnsubscribed, ServerOnly: true, Owner: EventOwnerS2, Props: reengageEmailProps()},
+		{Name: EventReengageVirtualSend, ServerOnly: true, Owner: EventOwnerS2, Props: reengageEmailProps()},
+		{Name: EventReengageLandingClicked, ServerOnly: true, Owner: EventOwnerS2, Props: map[string]*EventPropSpec{
+			"step":      propToken(true),
+			"flow_step": propEnum(true, ReengagementFlowStepValues...),
+		}},
+		{Name: EventReengageReason, ServerOnly: true, Owner: EventOwnerS2, Props: map[string]*EventPropSpec{
+			"reason":    propEnum(true, "stopped", "slow", "not_needed", "switched", "other"),
+			"flow_step": propEnum(true, ReengagementFlowStepValues...),
+		}},
+		{Name: EventReengageKeep, ServerOnly: true, Owner: EventOwnerS2, Props: map[string]*EventPropSpec{
+			"flow_step": propEnum(true, ReengagementFlowStepValues...),
+		}},
+		{Name: EventReengageExit, ServerOnly: true, Owner: EventOwnerS2, Props: map[string]*EventPropSpec{
+			"stream": propEnum(true, ReengagementStreamValues...),
+			"reason": propToken(true),
+		}},
 		{Name: EventRetentionD30, ServerOnly: true, Owner: EventOwnerS3, Props: map[string]*EventPropSpec{
 			"connect_days": propInt(false, 0, 30),
 		}},

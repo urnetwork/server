@@ -11081,4 +11081,85 @@ var migrations = []any{
 	// it. Function definitions only: no table is locked or scanned, and the
 	// running release, which deletes past 91 days, stays within the new guard.
 	newSqlMigration(clientKeyHistoryRetentionFloorSql),
+
+	// The campaigns' consent evidence and marketing suppression
+	// (mmm/onboarding/REVIEW.md finding 12, mmm/reengagement/PLAN.md "Server"
+	// 6 and 9): how the product-updates preference was set (the sign-up
+	// switch, the server's default for clients that never showed it,
+	// settings, an unsubscribe, an opt-in) and when, and a suppression every
+	// campaign respects (a bounce or complaint on any program, a
+	// re-engagement sunset). Constant defaults: no table rewrite. Apply
+	// before deploying the api and taskworker that write them.
+	newSqlMigration(`
+		SET LOCAL lock_timeout = '5s';
+		ALTER TABLE account_preferences
+			ADD COLUMN product_updates_source varchar(32) NOT NULL DEFAULT '',
+			ADD COLUMN product_updates_source_time timestamp NULL,
+			ADD COLUMN marketing_suppressed_at timestamp NULL,
+			ADD COLUMN marketing_suppressed_reason varchar(32) NOT NULL DEFAULT ''
+	`),
+
+	// The re-engagement program's state, one row per network
+	// (mmm/reengagement/PLAN.md): the current or last episode (stream, start,
+	// steps), the fix list (a reported problem waiting for its fix), the
+	// quiet and keep windows. A new episode reuses the row. New tables only.
+	newSqlMigration(`
+		CREATE TABLE network_reengagement (
+			network_id uuid NOT NULL,
+			stream varchar(32) NOT NULL,
+			episode int NOT NULL DEFAULT 1,
+			started_at timestamp NOT NULL,
+			last_connect_at timestamp NULL,
+			platform varchar(16) NOT NULL DEFAULT '',
+			locale varchar(32) NOT NULL DEFAULT '',
+			time_zone varchar(64) NOT NULL DEFAULT '',
+			country varchar(2) NOT NULL DEFAULT '',
+			experiment_id varchar(64) NOT NULL DEFAULT '',
+			variant varchar(64) NOT NULL DEFAULT '',
+			last_step varchar(8) NOT NULL DEFAULT '',
+			next_step varchar(8) NOT NULL DEFAULT '',
+			next_send_at timestamp NULL,
+			last_sent_at timestamp NULL,
+			reason varchar(32) NOT NULL DEFAULT '',
+			reason_at timestamp NULL,
+			fix_reason varchar(32) NOT NULL DEFAULT '',
+			fix_reason_at timestamp NULL,
+			fix_platform varchar(16) NOT NULL DEFAULT '',
+			fix_sent_at timestamp NULL,
+			quiet_until timestamp NULL,
+			keep_until timestamp NULL,
+			exit_reason varchar(32) NOT NULL DEFAULT '',
+			exited_at timestamp NULL,
+			send_failures int NOT NULL DEFAULT 0,
+			last_send_error varchar(256) NOT NULL DEFAULT '',
+			PRIMARY KEY (network_id)
+		)
+	`),
+	newSqlMigration(`
+		CREATE INDEX network_reengagement_fix_pending
+		ON network_reengagement (fix_reason_at)
+		WHERE fix_reason_at IS NOT NULL AND fix_sent_at IS NULL
+	`),
+	// One row per re-engagement email sent through Brevo, keyed by Brevo's
+	// message id, so the transactional webhook events can be attributed (the
+	// onboarding sends have their own table, network_onboarding_email).
+	newSqlMigration(`
+		CREATE TABLE network_reengagement_email (
+			message_id varchar(256) NOT NULL,
+			network_id uuid NOT NULL,
+			step varchar(8) NOT NULL,
+			template varchar(32) NOT NULL,
+			variant varchar(32) NOT NULL,
+			experiment varchar(64) NOT NULL DEFAULT '',
+			experiment_variant varchar(64) NOT NULL DEFAULT '',
+			template_id int NOT NULL DEFAULT 0,
+			locale varchar(32) NOT NULL DEFAULT '',
+			sent_at timestamp NOT NULL,
+			PRIMARY KEY (message_id)
+		)
+	`),
+	newSqlMigration(`
+		CREATE INDEX network_reengagement_email_network_sent
+		ON network_reengagement_email (network_id, sent_at)
+	`),
 }

@@ -1,0 +1,1 @@
+URnetwork: your UR Pro trial ends on {{.EndDate}}. If you keep it, the subscription starts then. {{.CancelShort}}
