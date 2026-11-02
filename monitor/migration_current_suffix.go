@@ -756,8 +756,10 @@ var migrationCurrentSuffixContracts = slices.Concat(
 		clientKeyHistoryRetentionMigrationContract,
 		migrationCurrentSuffix(server.TaskHeartbeatFillfactorMigrationVersion(), "task queue pages keep room for heartbeat versions",
 			pendingTaskFillfactorArtifactQuery),
+		// the horizon drop guard replaces the drop guard body and republishes
+		// the rest
 		migrationCurrentSuffix(server.ProviderWorkSessionPartitionMigrationVersion(), "provider session custody on either layout of the weekly journal",
-			providerWorkSessionPartitionCustodyPredicates()...),
+			providerWorkSessionPartitionCustodyPredicates()...).removedAt(server.ProviderWorkSessionEventHorizonDropGuardMigrationVersion()),
 	},
 	finishedTaskPartitionContracts(),
 	[]snMainnetMigrationContract{
@@ -885,6 +887,8 @@ var migrationCurrentSuffixContracts = slices.Concat(
 		// after the index diet's drops, as in the migration list
 		migrationCurrentSuffix(contractCloseEvidenceHorizonGuardMigrationVersion, "close evidence custody with retention at the contract horizon",
 			contractCloseEvidenceHorizonArtifactQuery),
+		migrationCurrentSuffix(server.ProviderWorkSessionEventHorizonDropGuardMigrationVersion(), "provider session custody with drops at the contract horizon",
+			providerWorkSessionHorizonCustodyPredicates()...),
 		// which run of the extender process sent each activation
 		extenderActivationRunMigrationContract,
 	},
