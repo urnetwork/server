@@ -2,7 +2,9 @@
 
 Written 2026-11-02 with the server half of connect/EXTENDER-UPDATE2.md §3.2.
 Nothing here has been applied. The vault resource is unchanged, no cohort is
-configured, and no extender splices.
+configured, and no extender splices. connect/EXTENDER-SPLICE-ROLLOUT.md is the
+pilot's runbook, and this one is its server half: which records require the
+capability.
 
 A Phase B extender splices an unauthenticated TCP hello to its borrowed site.
 A client that cannot send the authenticated camouflage hello therefore
@@ -57,7 +59,9 @@ names operator hosts.
 
 1. Phase 14b is deployed: cohort records carry `RealityPublicKey`. Check that
    `urnetwork_extender_record_capability_requirements_total` shows `required`
-   for the cohort and not `no_camouflage_key`.
+   for the cohort and not `no_camouflage_key`. The uptime probe must also use
+   the stored key. Without it a splicing extender fails its probe, is
+   deactivated after six failures, and is never judged blocked meanwhile.
 2. Supported clients declare `tcp-camouflage-v1` only when they can complete
    a camouflaged dial: the record carries the key, and the fingerprint switch
    is not `go`. This is the SDK's capability decision (slice F).

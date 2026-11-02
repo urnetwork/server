@@ -54,15 +54,12 @@ import (
 // ExtenderReleasePolicy). docs/operations/extender-capability-cohort.md is the
 // rollout and rollback runbook.
 
-// The capability of a client that sends the authenticated camouflage hello and
-// works with spliced extenders (contract R). Slice F's connect constant
-// replaces this once it is on connect main.
-const extenderCapabilityTcpCamouflageV1 = "tcp-camouflage-v1"
-
-// The capabilities this server knows. A requirement outside it is never
-// satisfied, and a declared value outside it is ignored.
+// The capabilities this server labels and reads a declaration of, connect's
+// own set. connect.ExtenderCapabilitiesSatisfied decides every match: a
+// requirement it does not know is never satisfied, and a declared value it
+// does not know is ignored.
 var extenderKnownCapabilities = []string{
-	extenderCapabilityTcpCamouflageV1,
+	connect.ExtenderCapabilityTcpCamouflageV1,
 }
 
 // One cohort of extenders whose records require a capability.
@@ -71,61 +68,19 @@ type ExtenderCapabilityCohortConfig struct {
 	ExtenderPublicKeysHex []string `yaml:"extender_public_keys_hex"`
 }
 
-// How much of a client's declared list is read, as connect reads one: the
-// first extenderMaxOfferedCapabilityCount values, each at most
-// extenderMaxOfferedCapabilityByteCount bytes.
-const (
-	extenderMaxOfferedCapabilityCount     = 16
-	extenderMaxOfferedCapabilityByteCount = 64
-)
-
-// A capability as it is compared and signed: trimmed and lower case.
+// A capability as it is signed, as connect.ExtenderCapabilitiesSatisfied
+// compares it: trimmed and lower case.
 func normalizeExtenderCapability(capability string) string {
 	return strings.ToLower(strings.TrimSpace(capability))
 }
 
-// The normalized values of a declared list that are read.
-func extenderOfferedCapabilities(offered []string) map[string]bool {
-	offeredCapabilities := map[string]bool{}
-	for i, capability := range offered {
-		if extenderMaxOfferedCapabilityCount <= i {
-			break
-		}
-		if extenderMaxOfferedCapabilityByteCount < len(capability) {
-			continue
-		}
-		offeredCapabilities[normalizeExtenderCapability(capability)] = true
-	}
-	return offeredCapabilities
-}
-
-// Whether `offered` covers every one of `required`, with the semantics of
-// slice F's connect.ExtenderCapabilitiesSatisfied, which replaces this once it
-// is on connect main: an unknown required value is unsatisfied, an empty one
-// is skipped, an unknown offered value is ignored, values compare trimmed and
-// case-insensitively, and only the bounded head of `offered` is read.
-func extenderCapabilitiesSatisfied(required []string, offered []string) bool {
-	offeredCapabilities := extenderOfferedCapabilities(offered)
-	for _, capability := range required {
-		capability = normalizeExtenderCapability(capability)
-		if capability == "" {
-			continue
-		}
-		if !slices.Contains(extenderKnownCapabilities, capability) || !offeredCapabilities[capability] {
-			return false
-		}
-	}
-	return true
-}
-
 // The capabilities a client declared that this server knows, each once, in
-// the known order, read as extenderCapabilitiesSatisfied reads them.
+// the known order, read as connect.ExtenderCapabilitiesSatisfied reads them.
 // Everything else a client sends is ignored.
 func extenderDeclaredCapabilities(capabilities []string) []string {
-	offeredCapabilities := extenderOfferedCapabilities(capabilities)
 	declared := []string{}
 	for _, capability := range extenderKnownCapabilities {
-		if offeredCapabilities[capability] {
+		if connect.ExtenderCapabilitiesSatisfied([]string{capability}, capabilities) {
 			declared = append(declared, capability)
 		}
 	}
@@ -166,7 +121,7 @@ func (self *ExtenderConfig) RecordRequiredCapabilities(
 			defaultExtenderCapabilityMetrics.observe(label, extenderCapabilityResultNotReleaseOnly)
 			continue
 		}
-		if capability == extenderCapabilityTcpCamouflageV1 && len(realityPublicKey) != extenderRealityPublicKeySize {
+		if capability == connect.ExtenderCapabilityTcpCamouflageV1 && len(realityPublicKey) != extenderRealityPublicKeySize {
 			defaultExtenderCapabilityMetrics.observe(label, extenderCapabilityResultNoCamouflageKey)
 			continue
 		}

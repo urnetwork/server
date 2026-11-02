@@ -47,7 +47,7 @@ func TestExtenderCapabilityCohortConfigShape(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(config.Directory.CapabilityCohorts) != 1 ||
-		config.Directory.CapabilityCohorts[0].Capability != extenderCapabilityTcpCamouflageV1 ||
+		config.Directory.CapabilityCohorts[0].Capability != connect.ExtenderCapabilityTcpCamouflageV1 ||
 		len(config.Directory.CapabilityCohorts[0].ExtenderPublicKeysHex) != 1 {
 		t.Fatalf("cohorts = %+v", config.Directory.CapabilityCohorts)
 	}
@@ -103,11 +103,11 @@ func TestExtenderRecordRequiredCapabilitiesRule(t *testing.T) {
 	}
 }
 
-// The matcher has slice F's semantics (connect.ExtenderCapabilitiesSatisfied on
-// feat/eu2-splice): an unknown requirement is unsatisfied, an empty one is
-// skipped, an unknown declaration is ignored, values compare trimmed and
-// case-insensitively, only the first 16 declared values of at most 64 bytes
-// are read, and nothing required is always satisfied.
+// What a release relies on from connect.ExtenderCapabilitiesSatisfied, and the
+// declared list read the same way: an unknown requirement is unsatisfied, an
+// empty one is skipped, an unknown declaration is ignored, values compare
+// trimmed and case-insensitively, only the first 16 declared values of at most
+// 64 bytes are read, and nothing required is always satisfied.
 func TestExtenderCapabilitiesSatisfied(t *testing.T) {
 	// F's bounds: the first 16 declared values, each at most 64 bytes
 	sixteenOthers := []string{}
@@ -136,7 +136,7 @@ func TestExtenderCapabilitiesSatisfied(t *testing.T) {
 		{[]string{"tcp-camouflage-v1"}, []string{tooLong}, false},
 	}
 	for _, c := range cases {
-		if got := extenderCapabilitiesSatisfied(c.required, c.offered); got != c.want {
+		if got := connect.ExtenderCapabilitiesSatisfied(c.required, c.offered); got != c.want {
 			t.Errorf("required %v offered %v = %t, want %t", c.required, c.offered, got, c.want)
 		}
 	}

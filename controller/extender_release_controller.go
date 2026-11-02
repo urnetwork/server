@@ -104,7 +104,7 @@ func extenderRelease(
 ) (*ExtenderReleaseResult, error) {
 	family := extenderReleaseFamilyUnknown
 	declared := extenderDeclaredCapabilities(args.Capabilities)
-	capable := slices.Contains(declared, extenderCapabilityTcpCamouflageV1)
+	capable := slices.Contains(declared, connect.ExtenderCapabilityTcpCamouflageV1)
 	countryCode := ""
 	answer := func(result *ExtenderReleaseResult) (*ExtenderReleaseResult, error) {
 		metrics.observe(result.Outcome, family, capable, countryCode)
@@ -206,7 +206,7 @@ func extenderRelease(
 	}
 	compatible := func(keyHex string) bool {
 		releaseRecord := sign(keyHex)
-		return releaseRecord != nil && extenderCapabilitiesSatisfied(releaseRecord.requiredCapabilities, declared)
+		return releaseRecord != nil && connect.ExtenderCapabilitiesSatisfied(releaseRecord.requiredCapabilities, declared)
 	}
 
 	policy := connect.NewExtenderReleasePolicy(
