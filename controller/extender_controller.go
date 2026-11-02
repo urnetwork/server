@@ -166,10 +166,22 @@ type ExtenderActivateSettings struct {
 	ProvenHostsPerBlock               int
 	ProvenHostBlockIpv4PrefixBitCount int
 	ProvenHostBlockIpv6PrefixBitCount int
-	// how long the process reuses an account's count of proven hosts. It is
-	// read only once the account's spends reach the floor, and then for each
-	// of a fleet's posts. Non-positive counts every time.
+	// how long the process reuses an account's proven host candidates, which
+	// it counts at each read's own time. They are read only once the
+	// account's spends reach the floor, and then for each of a fleet's posts.
+	// Non-positive reads them every time.
 	ProvenHostCountTimeout time.Duration
+	// how far past the moment a budget has room again its refusal's wait is
+	// drawn, uniformly (connect#230). Without it the hosts one budget refuses
+	// together are told the same second, and come back together into the
+	// probe guard. Non-positive asks for the moment itself.
+	BudgetRetryAfterJitter time.Duration
+	// how far before the spend each budget's attempt is recorded, drawn
+	// uniformly for each on its own, so the attempts of one spend share no
+	// create_time that joins the caller address's hashed row to its client's
+	// and account's rows (connect#230). A second is far below every budget's
+	// hour. Non-positive records the spend's time.
+	BudgetAttemptTimeSpread time.Duration
 
 	// activations the api process probes at once (connect#230). Each holds a
 	// handler for up to the 10 s probe budget, so a fleet restarting at once
@@ -367,6 +379,8 @@ func DefaultExtenderActivateSettings() *ExtenderActivateSettings {
 		ProvenHostBlockIpv4PrefixBitCount: 24,
 		ProvenHostBlockIpv6PrefixBitCount: 48,
 		ProvenHostCountTimeout:            1 * time.Minute,
+		BudgetRetryAfterJitter:            1 * time.Minute,
+		BudgetAttemptTimeSpread:           1 * time.Second,
 		MaxConcurrentProbes:               64,
 		// the activator holds a retry at least a minute whatever it is told
 		// (connect/net_extender_activate.go), and three minutes spreads a
@@ -821,6 +835,15 @@ func (self *extenderActivateService) provenHostCount(
 	return self.settings.provenHostCount(candidates, ipVersion, now)
 }
 
+// The wait a budget refusal asks for: the moment the budget has room, and up
+// to BudgetRetryAfterJitter past it, uniformly.
+func (self *extenderActivateService) budgetRetryAfter(retryAfter time.Duration) time.Duration {
+	if self.settings.BudgetRetryAfterJitter <= 0 {
+		return retryAfter
+	}
+	return retryAfter + mathrand.N(self.settings.BudgetRetryAfterJitter+1)
+}
+
 // The wait a busy refusal asks for, uniform over the settings' bounds.
 func (self *extenderActivateService) busyRetryAfter() time.Duration {
 	retryAfterMin := self.settings.BusyRetryAfterMin
@@ -1052,10 +1075,11 @@ func (self *extenderActivateService) activate(
 	clientRateLimitAction, addressRateLimitAction, accountRateLimitAction := extenderActivateRateLimitActions(ipVersion)
 	networkId := clientSession.ByJwt.NetworkId
 	addressBudget := model.AccountActionBudget{
-		Id:     settings.addressBudgetId(clientIp),
-		Action: addressRateLimitAction,
-		Limit:  settings.AddressRateLimit,
-		Window: settings.RateLimitWindow,
+		Id:                settings.addressBudgetId(clientIp),
+		Action:            addressRateLimitAction,
+		Limit:             settings.AddressRateLimit,
+		Window:            settings.RateLimitWindow,
+		AttemptTimeSpread: settings.BudgetAttemptTimeSpread,
 	}
 	// a key its network already proved at this address is the network's own
 	// extender re-activating where it lives. A public extender relays posts
@@ -1070,26 +1094,29 @@ func (self *extenderActivateService) activate(
 		server.NowUtc(),
 	) {
 		addressBudget = model.AccountActionBudget{
-			Id:     settings.provenAddressBudgetId(clientIp, publicKey),
-			Action: extenderActivateProvenAddressRateLimitAction(ipVersion),
-			Limit:  settings.ProvenAddressRateLimit,
-			Window: settings.RateLimitWindow,
+			Id:                settings.provenAddressBudgetId(clientIp, publicKey),
+			Action:            extenderActivateProvenAddressRateLimitAction(ipVersion),
+			Limit:             settings.ProvenAddressRateLimit,
+			Window:            settings.RateLimitWindow,
+			AttemptTimeSpread: settings.BudgetAttemptTimeSpread,
 		}
 	}
 	if err := model.CheckAndRecordAccountActionBudgets(
 		clientSession.Ctx,
 		model.AccountActionBudget{
-			Id:     *clientSession.ByJwt.ClientId,
-			Action: clientRateLimitAction,
-			Limit:  settings.ClientRateLimit,
-			Window: settings.RateLimitWindow,
+			Id:                *clientSession.ByJwt.ClientId,
+			Action:            clientRateLimitAction,
+			Limit:             settings.ClientRateLimit,
+			Window:            settings.RateLimitWindow,
+			AttemptTimeSpread: settings.BudgetAttemptTimeSpread,
 		},
 		addressBudget,
 		model.AccountActionBudget{
-			Id:     clientSession.ByJwt.UserId,
-			Action: accountRateLimitAction,
-			Limit:  settings.AccountRateLimit,
-			Window: settings.RateLimitWindow,
+			Id:                clientSession.ByJwt.UserId,
+			Action:            accountRateLimitAction,
+			Limit:             settings.AccountRateLimit,
+			Window:            settings.RateLimitWindow,
+			AttemptTimeSpread: settings.BudgetAttemptTimeSpread,
 			// past the floor the account's limit is what its proven hosts
 			// raised it to (connect#230)
 			ExtendLimitInTx: func(ctx context.Context, tx server.PgTx) int {
@@ -1115,7 +1142,11 @@ func (self *extenderActivateService) activate(
 		var budgetRefusal *model.AccountActionBudgetRefusal
 		if errors.As(err, &budgetRefusal) {
 			stageOutcome = extenderActivationBudgetOutcome(budgetRefusal.Action)
-			return refuseWithRetryAfter(err.Error(), budgetRefusal.RetryAfter)
+			// the hosts a budget refuses together are spread over the
+			// minute after it has room, rather than told the same second
+			jitteredRefusal := *budgetRefusal
+			jitteredRefusal.RetryAfter = self.budgetRetryAfter(budgetRefusal.RetryAfter)
+			return refuseWithRetryAfter(jitteredRefusal.Error(), jitteredRefusal.RetryAfter)
 		}
 		stageOutcome = extenderActivationOutcomeAccount
 		return refuse(err.Error())

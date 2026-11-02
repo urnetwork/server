@@ -24,6 +24,10 @@ import (
 // the database: what a fleet can activate at once, how often one address is
 // probed, and that the budgets of an activation are spent one spend at a time.
 
+// How far past the moment a budget has room its refusal may ask a host to
+// wait (BudgetRetryAfterJitter), in seconds.
+var testBudgetRetryAfterJitterSeconds = int(DefaultExtenderActivateSettings().BudgetRetryAfterJitter / time.Second)
+
 // The address of host i of a fleet on one family: the ipv4 hosts spread over
 // the three documentation /24s in turn, and each ipv6 host in a /48 of its
 // own.
@@ -292,7 +296,7 @@ func TestExtenderActivateRampsANewFleet(t *testing.T) {
 		if refused.Activated || !strings.Contains(refused.Error, "activating your account's extenders over IPv4") {
 			t.Fatalf("host 61 was not refused by the account's floor: activated %t, %q", refused.Activated, refused.Error)
 		}
-		if refused.RetryAfterSeconds <= 50*60 || 60*60 < refused.RetryAfterSeconds {
+		if refused.RetryAfterSeconds <= 50*60 || 60*60+testBudgetRetryAfterJitterSeconds < refused.RetryAfterSeconds {
 			t.Errorf("the refusal of host 61 asks for %d seconds, want the rest of the hour", refused.RetryAfterSeconds)
 		}
 		connect.AssertEqual(t, probes.count(4), 60)
@@ -343,7 +347,7 @@ func TestExtenderActivateBudgetsEachAddress(t *testing.T) {
 			if refused.Activated || !strings.Contains(refused.Error, "activating an extender from this address over "+family) {
 				t.Fatalf("%s from %s was not refused by the address's budget: activated %t, %q", name, ip, refused.Activated, refused.Error)
 			}
-			if refused.RetryAfterSeconds <= 50*60 || 60*60 < refused.RetryAfterSeconds {
+			if refused.RetryAfterSeconds <= 50*60 || 60*60+testBudgetRetryAfterJitterSeconds < refused.RetryAfterSeconds {
 				t.Errorf("%s: the refusal asks for %d seconds, want the rest of the hour", name, refused.RetryAfterSeconds)
 			}
 			connect.AssertEqual(t, testTotalAccountActionAttemptCount(t, ctx), attemptCount)
@@ -490,7 +494,7 @@ func TestExtenderActivateHoldsTheAccountAtItsCeiling(t *testing.T) {
 					"ipv%d: activation %d of the hour was not refused by the account's limit: activated %t, %q",
 					c.ipVersion, c.limit+1, refused.Activated, refused.Error)
 			}
-			if refused.RetryAfterSeconds <= 25*60 || 30*60 < refused.RetryAfterSeconds {
+			if refused.RetryAfterSeconds <= 25*60 || 30*60+testBudgetRetryAfterJitterSeconds < refused.RetryAfterSeconds {
 				t.Errorf("ipv%d: the refusal asks for %d seconds, want the half hour until the oldest attempt leaves", c.ipVersion, refused.RetryAfterSeconds)
 			}
 		}
@@ -759,6 +763,46 @@ func TestExtenderActivateKeepsAProvenKeysAddressBudgetItsOwn(t *testing.T) {
 		}
 		if seventh.RetryAfterSeconds <= 0 {
 			t.Errorf("the seventh re-activation's refusal asks for no wait")
+		}
+	})
+}
+
+// The attempts one activation records for its budgets -- the client's, the
+// caller address's, the account's -- share no create_time (connect#230). They
+// were all recorded at the spend's one time, which joined the address's hashed
+// row to the client's and the account's exactly.
+func TestExtenderActivateRecordsItsBudgetAttemptsAtTimesOfTheirOwn(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		installTestExtenderConfig(t, nil)
+
+		account := newTestExtenderAccount(ctx)
+		host := account.newHost(t, ctx)
+		service := newExtenderActivateService(DefaultExtenderActivateSettings())
+		service.testProbes = testFakeExtenderProbes(nil)
+		if result := testActivateHost(t, ctx, service, host, "198.51.100.9"); !result.Activated {
+			t.Fatalf("the activation was refused: %q", result.Error)
+		}
+
+		actionTimes := map[string]time.Time{}
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(ctx, `SELECT action, create_time FROM network_user_action_attempt`)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					var action string
+					var createTime time.Time
+					server.Raise(result.Scan(&action, &createTime))
+					actionTimes[action] = createTime
+				}
+			})
+		})
+		connect.AssertEqual(t, len(actionTimes), 3)
+		seenTimes := map[time.Time]string{}
+		for action, createTime := range actionTimes {
+			if otherAction, ok := seenTimes[createTime]; ok {
+				t.Fatalf("the %s and %s attempts share the create_time %s", action, otherAction, createTime)
+			}
+			seenTimes[createTime] = action
 		}
 	})
 }

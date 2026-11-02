@@ -30,6 +30,7 @@ func TestExtenderActivateSettingsHoldThePerHostNumbers(t *testing.T) {
 	connect.AssertEqual(t, settings.AddressRateLimit, 6)
 	connect.AssertEqual(t, settings.AddressIpv4PrefixBitCount, 32)
 	connect.AssertEqual(t, settings.AddressIpv6PrefixBitCount, 64)
+	connect.AssertEqual(t, settings.ProvenAddressRateLimit, 6)
 	connect.AssertEqual(t, settings.AccountRateLimit, 60)
 	connect.AssertEqual(t, settings.AccountRateLimitPerProvenHost, 6)
 	connect.AssertEqual(t, settings.AccountRateLimitCeiling, 1200)
@@ -216,12 +217,14 @@ type testActivationColdStart struct {
 }
 
 // The settings of the server before connect#230: the account's limit fixed at
-// 60 an hour per family, and no address budget.
+// 60 an hour per family, no address budget, and a refusal that names the
+// moment there is room with no jitter.
 func testTodayExtenderActivateSettings() *ExtenderActivateSettings {
 	settings := DefaultExtenderActivateSettings()
 	settings.AddressRateLimit = 1 << 30
 	settings.AccountRateLimitPerProvenHost = 0
 	settings.AccountRateLimitCeiling = settings.AccountRateLimit
+	settings.BudgetRetryAfterJitter = 0
 	return settings
 }
 
@@ -360,10 +363,23 @@ func runTestActivationColdStart(scenario testActivationColdStart) (doneMinute in
 			{attemptTimes: &family.addressAttemptTimes, limit: settings.AddressRateLimit},
 			{attemptTimes: ipVersionAccountAttemptTimes[ipVersion], limit: settings.AccountRateLimit, extendLimit: accountExtendLimit},
 		}
+		// the longest wait of the budgets with no room, and up to
+		// BudgetRetryAfterJitter past it, as the server answers
+		// (model.CheckAndRecordAccountActionBudgets, budgetRetryAfter), drawn
+		// from the simulation's own seed
+		refused := false
+		longestRetryAfter := time.Duration(0)
 		for _, budget := range budgets {
 			if allow, retryAfter := testColdStartBudgetRead(budget.attemptTimes, budget.limit, budget.extendLimit, window, now); !allow {
-				return false, retryAfter
+				refused = true
+				longestRetryAfter = max(longestRetryAfter, retryAfter)
 			}
+		}
+		if refused {
+			if 0 < settings.BudgetRetryAfterJitter {
+				longestRetryAfter += time.Duration(random.Int64N(int64(settings.BudgetRetryAfterJitter) + 1))
+			}
+			return false, longestRetryAfter
 		}
 		for _, budget := range budgets {
 			*budget.attemptTimes = append(*budget.attemptTimes, now)
@@ -629,4 +645,31 @@ func TestExtenderActivateCountsReusedProvenHostCandidatesAtEachReadsTime(t *test
 	service.provenHostCount(networkId, 6, readCandidates)
 	service.provenHostCount(networkId, 6, readCandidates)
 	connect.AssertEqual(t, len(readMinActivateTimes), 4)
+}
+
+// A budget refusal asks for the moment the budget has room plus up to a
+// minute, drawn uniformly, so the hosts one budget refuses together do not
+// come back in the same second (connect#230). No jitter asks for the moment.
+func TestExtenderActivateBudgetRetryAfterIsJitteredWithinAMinute(t *testing.T) {
+	settings := DefaultExtenderActivateSettings()
+	connect.AssertEqual(t, settings.BudgetRetryAfterJitter, time.Minute)
+	connect.AssertEqual(t, settings.BudgetAttemptTimeSpread, time.Second)
+	service := newExtenderActivateService(settings)
+	const moment = 50 * time.Minute
+	shortest := moment + time.Minute
+	longest := moment
+	for range 10000 {
+		retryAfter := service.budgetRetryAfter(moment)
+		if retryAfter < moment || moment+time.Minute < retryAfter {
+			t.Fatalf("a budget refusal asked for %s, outside %s to %s", retryAfter, moment, moment+time.Minute)
+		}
+		shortest = min(shortest, retryAfter)
+		longest = max(longest, retryAfter)
+	}
+	if time.Second < shortest-moment || time.Second < moment+time.Minute-longest {
+		t.Errorf("the budget waits ranged only %s to %s past the moment", shortest-moment, longest-moment)
+	}
+
+	settings.BudgetRetryAfterJitter = 0
+	connect.AssertEqual(t, newExtenderActivateService(settings).budgetRetryAfter(moment), moment)
 }

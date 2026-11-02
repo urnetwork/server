@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	mathrand "math/rand/v2"
 	"slices"
 	"sync"
 	"time"
@@ -444,6 +445,13 @@ type AccountActionBudget struct {
 	// (an account's proven extender hosts, connect#230) is read only by an
 	// owner that has spent its floor. A value below Limit leaves Limit.
 	ExtendLimitInTx func(ctx context.Context, tx server.PgTx) int
+	// when positive, the attempt is recorded at a time drawn uniformly over
+	// this much before the spend, each budget's on its own, so the attempts
+	// one spend records share no time that joins them (connect#230): an
+	// address's hashed budget row is not tied to its client's and its
+	// account's rows by an identical create_time. Zero records the spend's
+	// time.
+	AttemptTimeSpread time.Duration
 }
 
 // The refusal of a spend by one of its budgets
@@ -556,9 +564,11 @@ func lockAccountActionBudgetsInTx(ctx context.Context, tx server.PgTx, lockKeys 
 // one transaction, and only when every one of them has room. A refusal spends
 // nothing from any budget, so an action refused by one budget leaves the
 // others as they were: a client refused by its account's budget keeps its
-// own. The refusal, an *AccountActionBudgetRefusal, names the first budget, in
-// the order given, that has no room, its window, and how long until it has
-// room again.
+// own. The refusal, an *AccountActionBudgetRefusal, names the budget with no
+// room that has the longest wait, the first of them in the order given on a
+// tie, its window, and that wait (connect#230): a caller that waits it out
+// finds every budget with room, where the first budget's wait could end
+// before another's.
 //
 // A spend that waits past its bound for a budget's database lock, which
 // another spend holds, returns ErrAccountActionBudgetsBusy and spends nothing.
@@ -597,22 +607,30 @@ func CheckAndRecordAccountActionBudgets(ctx context.Context, budgets ...AccountA
 			refusal = nil
 			lockAccountActionBudgetsInTx(ctx, tx, lockKeys)
 			now := server.NowUtc()
+			var budgetRefusal *AccountActionBudgetRefusal
 			for _, budget := range budgets {
 				allow, retryAfter := readAccountActionBudgetLimitInTx(ctx, tx, budget, now)
-				if !allow {
-					refusal = &AccountActionBudgetRefusal{
+				if !allow && (budgetRefusal == nil || budgetRefusal.RetryAfter < retryAfter) {
+					budgetRefusal = &AccountActionBudgetRefusal{
 						Action:     budget.Action,
 						Window:     budget.Window,
 						RetryAfter: retryAfter,
 					}
-					return
 				}
+			}
+			if budgetRefusal != nil {
+				refusal = budgetRefusal
+				return
 			}
 			if Testing_AccountActionBudgetsBeforeSpend != nil {
 				Testing_AccountActionBudgetsBeforeSpend()
 			}
 			for _, budget := range budgets {
-				insertAccountActionAttemptInTx(ctx, tx, budget.Id, budget.Action, now)
+				attemptTime := now
+				if 0 < budget.AttemptTimeSpread {
+					attemptTime = now.Add(-mathrand.N(budget.AttemptTimeSpread)).Truncate(time.Microsecond)
+				}
+				insertAccountActionAttemptInTx(ctx, tx, budget.Id, budget.Action, attemptTime)
 			}
 		}, server.TxReadCommitted, server.TxLockTimeout(accountActionBudgetsLockTimeout))
 	}()

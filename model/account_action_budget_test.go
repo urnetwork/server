@@ -397,3 +397,37 @@ func TestCheckAndRecordAccountActionBudgetsAnswersBusyPastTheLockBound(t *testin
 		connect.AssertEqual(t, attemptCount, 0)
 	})
 }
+
+// A spend refused by more than one budget waits for the longest of their
+// waits, and names that budget (connect#230): a caller that waits it out finds
+// every budget with room. The refusal named the first budget in the order
+// given instead, so a client refused by its own budget for 10 minutes, whose
+// address had room again only in 50, came back in 10 and was refused again.
+func TestCheckAndRecordAccountActionBudgetsNamesTheLongestWait(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+		clientId := server.NewId()
+		addressId := server.NewId()
+		server.Tx(ctx, func(tx server.PgTx) {
+			insertAccountActionAttemptInTx(ctx, tx, clientId, AccountActionExtenderActivateV4, now.Add(-50*time.Minute))
+			insertAccountActionAttemptInTx(ctx, tx, addressId, AccountActionExtenderActivateAddressV4, now.Add(-10*time.Minute))
+		})
+		err := CheckAndRecordAccountActionBudgets(
+			ctx,
+			AccountActionBudget{Id: clientId, Action: AccountActionExtenderActivateV4, Limit: 1, Window: time.Hour},
+			AccountActionBudget{Id: addressId, Action: AccountActionExtenderActivateAddressV4, Limit: 1, Window: time.Hour},
+		)
+		var refusal *AccountActionBudgetRefusal
+		if !errors.As(err, &refusal) {
+			t.Fatalf("the spend with both budgets spent was not refused: %v", err)
+		}
+		connect.AssertEqual(t, refusal.Action, AccountActionExtenderActivateAddressV4)
+		if refusal.RetryAfter <= 49*time.Minute || 50*time.Minute < refusal.RetryAfter {
+			t.Errorf("the refusal waits %s, want the address budget's 50 minutes", refusal.RetryAfter)
+		}
+		if !strings.Contains(err.Error(), "from this address over IPv4") {
+			t.Errorf("the refusal %q does not name the address's budget", err.Error())
+		}
+	})
+}
