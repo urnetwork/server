@@ -111,6 +111,24 @@ func contractPartitionGlogf(format string, args ...any) {
 	glog.Infof("[cp]"+format+"\n", args...)
 }
 
+// Where the close evidence row retention resumes: evidence_removal, or the
+// pass in progress that a cursor from before 2026-11-02 holds in its old fields.
+func (self ContractRetentionCursor) evidenceRemovalCursor() CloseEvidenceRemovalCursor {
+	if self.EvidenceRemoval != nil {
+		return *self.EvidenceRemoval
+	}
+	return CloseEvidenceRemovalCursor{Leaf: self.EvidenceLeaf, ContractId: self.EvidenceCursor}
+}
+
+// This cursor with where the close evidence row retention resumes, in
+// evidence_removal alone.
+func (self ContractRetentionCursor) withEvidenceRemoval(removal CloseEvidenceRemovalCursor) ContractRetentionCursor {
+	self.EvidenceRemoval = &removal
+	self.EvidenceLeaf = ""
+	self.EvidenceCursor = nil
+	return self
+}
+
 // budget bounds the run: two thirds for the partitions and the rest for the
 // close evidence, so neither backlog starves the other. The close evidence's
 // own partitions (db_contract_close_evidence_partition.go) are created and
@@ -147,22 +165,16 @@ func MaintainContractPartitions(ctx context.Context, now time.Time, cursor Contr
 
 	report.AbandonedEvidenceCutover = abandonStaleCloseEvidenceCutover(ctx, now, DefaultCloseEvidencePartitionSettings(), contractPartitionGlogf)
 
-	evidenceCursor := CloseEvidenceRemovalCursor{Leaf: cursor.EvidenceLeaf, ContractId: cursor.EvidenceCursor}
-	if cursor.EvidenceRemoval != nil {
-		evidenceCursor = *cursor.EvidenceRemoval
-	}
 	evidenceReport, evidenceNext, more := RemoveExpiredCloseEvidence(
 		ctx,
 		now,
-		evidenceCursor,
+		cursor.evidenceRemovalCursor(),
 		time.Now().Add(budget/3),
 	)
 	report.EvidenceRemoved = evidenceReport.Removed
 	report.EvidenceRetention = evidenceReport.Retention
 	report.EvidenceStop = evidenceReport.Stop
-	next.EvidenceRemoval = &evidenceNext
-	next.EvidenceLeaf = ""
-	next.EvidenceCursor = nil
+	next = next.withEvidenceRemoval(evidenceNext)
 	if more {
 		report.More = true
 	}

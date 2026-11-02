@@ -5,6 +5,8 @@ package server
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -278,6 +280,16 @@ func TestCloseEvidenceRetentionStartsAtTheLowWater(t *testing.T) {
 	})
 }
 
+// The steps of a run that read its targets just before the cutover: the table
+// by its plain name, now the partitioned parent's.
+type testCloseEvidenceTargetsBeforeCutover struct {
+	closeEvidenceRemovalStore
+}
+
+func (testCloseEvidenceTargetsBeforeCutover) Targets(ctx context.Context, now time.Time) ([]string, error) {
+	return []string{closeEvidenceTable}, nil
+}
+
 // A cutover during a run leaves a batch naming the partitioned parent, where
 // each leaf's first row has the same ctid. The batch reads nothing there and
 // deletes nothing, so a report of an unresolved contract stays beside an
@@ -317,6 +329,24 @@ func TestCloseEvidenceRetentionBatchOnAPartitionedParentReadsNothing(t *testing.
 		connect.AssertEqual(t, ctidOf(unresolved), ctidOf(expired))
 
 		settings := DefaultCloseEvidenceRetentionSettings()
+		horizon := WithContractHorizon(ctx, 45*day)
+
+		// a run that read its targets before the cutover ends its pass there,
+		// with nothing deleted
+		removal := &closeEvidenceRemoval{
+			settings: settings,
+			steps:    testCloseEvidenceTargetsBeforeCutover{},
+			pace:     newCloseEvidenceRetentionPace(),
+			deadline: time.Now().Add(time.Minute),
+		}
+		report, cursor, more := removal.run(horizon, now, CloseEvidenceRemovalCursor{})
+		connect.AssertEqual(t, report.Stop, CloseEvidenceRemovalStopDone)
+		connect.AssertEqual(t, report.Removed, int64(0))
+		connect.AssertEqual(t, more, false)
+		connect.AssertEqual(t, *cursor.LowWater, ContractIdFloor(now.Add(-45*day)))
+		connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, unresolved), unresolvedLeaf)
+		connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, expired), expiredLeaf)
+
 		argsFor := func(leaf string) closeEvidenceBatchArgs {
 			return closeEvidenceBatchArgs{
 				leaf:      leaf,
@@ -343,6 +373,249 @@ func TestCloseEvidenceRetentionBatchOnAPartitionedParentReadsNothing(t *testing.
 		connect.AssertEqual(t, batch.removed, int64(1))
 		connect.AssertEqual(t, batch.scanned, int64(1))
 		connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, expired), "")
+	})
+}
+
+// A batch gives up at its statement timeout instead of holding the transaction
+// horizon: the slow statement rolls back, the run says why, and the next run
+// deletes the row.
+func TestCloseEvidenceRetentionBatchBoundsItsStatement(t *testing.T) {
+	DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := NowUtc()
+		const day = 24 * time.Hour
+		horizon := WithContractHorizon(ctx, 45*day)
+		report := testCloseEvidenceReportAt(now.Add(-50*day), testContractIdAt(now.Add(-50*day)), now.Add(-50*day))
+		connect.AssertEqual(t, testInsertCloseEvidenceReport(ctx, report), true)
+		testCloseEvidenceNoError(t, testCloseEvidenceExec(
+			ctx,
+			`CREATE FUNCTION test_close_evidence_slow_delete() RETURNS trigger LANGUAGE plpgsql AS $slow$ BEGIN PERFORM pg_sleep(20); RETURN OLD; END $slow$`,
+			`CREATE TRIGGER test_close_evidence_slow_delete BEFORE DELETE ON contract_close_report_evidence FOR EACH ROW EXECUTE FUNCTION test_close_evidence_slow_delete()`,
+		))
+
+		settings := DefaultCloseEvidenceRetentionSettings()
+		settings.StatementTimeout = time.Second
+		start := time.Now()
+		removal, _, more := removeExpiredCloseEvidenceWith(horizon, now, CloseEvidenceRemovalCursor{}, time.Now().Add(time.Minute), settings)
+		if waited := time.Since(start); 15*time.Second < waited {
+			t.Fatalf("the batch ran %s past its statement timeout", waited)
+		}
+		connect.AssertEqual(t, removal.Stop, CloseEvidenceRemovalStopStatementTimeout)
+		connect.AssertEqual(t, removal.Removed, int64(0))
+		connect.AssertEqual(t, more, false)
+		connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, report) != "", true)
+
+		testCloseEvidenceNoError(t, testCloseEvidenceExec(ctx, `DROP TRIGGER test_close_evidence_slow_delete ON contract_close_report_evidence`))
+		removal, _, _ = removeExpiredCloseEvidenceWith(horizon, now, CloseEvidenceRemovalCursor{}, time.Now().Add(time.Minute), settings)
+		connect.AssertEqual(t, removal.Removed, int64(1))
+		connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, report), "")
+	})
+}
+
+// Waits until a batch's statement waits for a lock.
+func testCloseEvidenceAwaitBatchLockWait(t testing.TB, ctx context.Context) {
+	t.Helper()
+	deadline := time.Now().Add(time.Minute)
+	for {
+		var waiting bool
+		MaintenanceDb(ctx, func(conn PgConn) {
+			Raise(conn.QueryRow(
+				ctx,
+				`SELECT EXISTS (
+					SELECT 1 FROM pg_stat_activity
+					WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%scanned AS MATERIALIZED%'
+				)`,
+			).Scan(&waiting))
+		})
+		if waiting {
+			return
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatal("no batch came to wait for a lock")
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+// A row the batch read changes under its delete by ctid: another transaction
+// is deleting it when the delete reaches it. Once that commits the batch skips
+// the row and deletes only the others, and once it rolls back the batch deletes
+// the row as well. Either way the statement reads what it read and no other row
+// goes.
+func TestCloseEvidenceRetentionBatchFollowsARowChangingUnderIt(t *testing.T) {
+	DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := NowUtc()
+		const day = 24 * time.Hour
+		settings := DefaultCloseEvidenceRetentionSettings()
+		settings.LockTimeout = time.Minute
+		// a report inside the retention, which stays through both
+		young := testCloseEvidenceReportAt(now.Add(-30*day), testContractIdAt(now.Add(-30*day)), now.Add(-30*day))
+		connect.AssertEqual(t, testInsertCloseEvidenceReport(ctx, young), true)
+
+		for _, test := range []struct {
+			name    string
+			commit  bool
+			removed int64
+		}{
+			{name: "the other delete commits", commit: true, removed: 2},
+			{name: "the other delete rolls back", commit: false, removed: 3},
+		} {
+			reports := []testCloseEvidenceReport{}
+			for range 3 {
+				report := testCloseEvidenceReportAt(now.Add(-50*day), testContractIdAt(now.Add(-50*day)), now.Add(-50*day))
+				connect.AssertEqual(t, testInsertCloseEvidenceReport(ctx, report), true)
+				reports = append(reports, report)
+			}
+			changing := reports[1]
+
+			deleting := make(chan struct{})
+			release := make(chan struct{})
+			otherDone := make(chan error, 1)
+			go func() {
+				otherDone <- contractPartitionTx(ctx, func(tx PgTx) {
+					RaisePgResult(tx.Exec(ctx, `SET LOCAL urnetwork.close_evidence_retention = 'on'`))
+					RaisePgResult(tx.Exec(
+						ctx,
+						`DELETE FROM contract_close_report_evidence WHERE client_id = $1 AND report_id = $2`,
+						changing.clientId,
+						changing.reportId,
+					))
+					close(deleting)
+					<-release
+					if !test.commit {
+						panic(errors.New("roll back"))
+					}
+				})
+			}()
+			<-deleting
+
+			type outcome struct {
+				batch closeEvidenceBatch
+				err   error
+			}
+			batchDone := make(chan outcome, 1)
+			go func() {
+				batch, err := removeCloseEvidenceBatch(ctx, closeEvidenceBatchArgs{
+					leaf:      closeEvidenceTable,
+					upper:     ContractIdFloor(now.Add(-45 * day)),
+					retention: 45 * day,
+					size:      settings.BatchSize,
+				}, settings)
+				batchDone <- outcome{batch: batch, err: err}
+			}()
+			testCloseEvidenceAwaitBatchLockWait(t, ctx)
+			close(release)
+			otherErr := <-otherDone
+			if test.commit {
+				testCloseEvidenceNoError(t, otherErr)
+			} else if otherErr == nil {
+				t.Fatalf("%s: the other delete did not roll back", test.name)
+			}
+			done := <-batchDone
+			testCloseEvidenceNoError(t, done.err)
+			if done.batch.removed != test.removed || done.batch.scanned != 3 {
+				t.Fatalf("%s: removed %d of %d rows read, want %d of 3", test.name, done.batch.removed, done.batch.scanned, test.removed)
+			}
+			for _, report := range reports {
+				connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, report), "")
+			}
+			connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, young) != "", true)
+		}
+	})
+}
+
+// The retention lengthens during a pass: a row the longer retention keeps
+// stays, and when it shortens again the same day, the next pass deletes it.
+func TestCloseEvidenceRetentionLengthenedMidPass(t *testing.T) {
+	DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := NowUtc()
+		const day = 24 * time.Hour
+		short := WithContractHorizon(ctx, 45*day)
+		long := WithContractHorizon(ctx, 60*day)
+		settings := DefaultCloseEvidenceRetentionSettings()
+		settings.BatchSize = 1
+		slow := *settings
+		slow.DefaultRowsPerSecond = 0.1
+
+		first := testCloseEvidenceReportAt(now.Add(-50*day), testContractIdAt(now.Add(-50*day)), now.Add(-50*day))
+		second := testCloseEvidenceReportAt(now.Add(-49*day), testContractIdAt(now.Add(-49*day)), now.Add(-49*day))
+		for _, report := range []testCloseEvidenceReport{first, second} {
+			connect.AssertEqual(t, testInsertCloseEvidenceReport(ctx, report), true)
+		}
+
+		// stopped after the first row by its pace
+		report, cursor, more := removeExpiredCloseEvidenceWith(short, now, CloseEvidenceRemovalCursor{}, time.Now().Add(5*time.Second), &slow)
+		connect.AssertEqual(t, report.Stop, CloseEvidenceRemovalStopBudget)
+		connect.AssertEqual(t, report.Removed, int64(1))
+		connect.AssertEqual(t, more, true)
+		connect.AssertEqual(t, cursor.InProgress(), true)
+		connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, first), "")
+
+		// 60 days keeps the other
+		report, cursor, more = removeExpiredCloseEvidenceWith(long, now, cursor, time.Now().Add(time.Minute), settings)
+		connect.AssertEqual(t, report.Stop, CloseEvidenceRemovalStopDone)
+		connect.AssertEqual(t, report.Retention, 60*day)
+		connect.AssertEqual(t, report.Removed, int64(0))
+		connect.AssertEqual(t, more, false)
+		connect.AssertEqual(t, *cursor.LowWater, ContractIdFloor(now.Add(-60*day)))
+		connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, second) != "", true)
+
+		// back to 45
+		report, _, _ = removeExpiredCloseEvidenceWith(short, now, cursor, time.Now().Add(time.Minute), settings)
+		connect.AssertEqual(t, report.Stop, CloseEvidenceRemovalStopDone)
+		connect.AssertEqual(t, report.Removed, int64(1))
+		connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, second), "")
+	})
+}
+
+// The contract task's arguments carry the cursor from run to run, through JSON
+// as the task stores them. Arguments from before 2026-11-02 resume at their
+// contract, above an older row; a run with no time left keeps the pass in the
+// new field; and the next day's first pass takes the older row.
+func TestMaintainContractPartitionsCarriesTheEvidenceCursor(t *testing.T) {
+	DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := NowUtc()
+		const day = 24 * time.Hour
+		horizon := WithContractHorizon(ctx, 45*day)
+		older := testCloseEvidenceReportAt(now.Add(-60*day), testContractIdAt(now.Add(-60*day)), now.Add(-60*day))
+		newer := testCloseEvidenceReportAt(now.Add(-50*day), testContractIdAt(now.Add(-50*day)), now.Add(-50*day))
+		for _, report := range []testCloseEvidenceReport{older, newer} {
+			connect.AssertEqual(t, testInsertCloseEvidenceReport(ctx, report), true)
+		}
+		throughTheTask := func(cursor ContractRetentionCursor) (stored ContractRetentionCursor) {
+			encoded, err := json.Marshal(cursor)
+			testCloseEvidenceNoError(t, err)
+			testCloseEvidenceNoError(t, json.Unmarshal(encoded, &stored))
+			return
+		}
+
+		legacy := ContractRetentionCursor{EvidenceCursor: &newer.contractId}
+		report, next := MaintainContractPartitions(horizon, now, throughTheTask(legacy), 0)
+		connect.AssertEqual(t, report.EvidenceStop, CloseEvidenceRemovalStopBudget)
+		connect.AssertEqual(t, report.EvidenceRemoved, int64(0))
+		connect.AssertEqual(t, report.More, true)
+		connect.AssertEqual(t, next.EvidenceCursor == nil, true)
+		connect.AssertEqual(t, next.EvidenceLeaf, "")
+		connect.AssertEqual(t, next.EvidenceRemoval.InProgress(), true)
+		connect.AssertEqual(t, *next.EvidenceRemoval.ContractId, newer.contractId)
+
+		report, next = MaintainContractPartitions(horizon, now, throughTheTask(next), time.Minute)
+		connect.AssertEqual(t, report.EvidenceStop, CloseEvidenceRemovalStopDone)
+		connect.AssertEqual(t, report.EvidenceRemoved, int64(1))
+		connect.AssertEqual(t, next.EvidenceRemoval.InProgress(), false)
+		connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, newer), "")
+		connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, older) != "", true)
+
+		report, _ = MaintainContractPartitions(horizon, now, throughTheTask(next), time.Minute)
+		connect.AssertEqual(t, report.EvidenceRemoved, int64(1))
+		connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, older), "")
 	})
 }
 
