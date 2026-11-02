@@ -7,11 +7,15 @@ package server
 // network, whatever moves the row.
 //
 // Two nullable columns with no default: a catalog-only change that rewrites
-// nothing, under a short lock timeout. The running code names its columns in
-// every read and write of network_extender, so it tolerates the columns before
-// it reads them.
+// nothing. The running code names its columns in every read and write of
+// network_extender, so it tolerates the columns before it reads them.
+//
+// While ADD COLUMN waits for its ACCESS EXCLUSIVE lock, new readers of
+// network_extender queue behind it, so the wait is bounded at 2 s. The runner
+// has no retry: a timeout fails `db migrate` with nothing applied, and running it
+// again resumes at this migration.
 var extenderCamouflageKeyMigration = newSqlMigration(`
-	SET LOCAL lock_timeout = '5s';
+	SET LOCAL lock_timeout = '2s';
 	ALTER TABLE network_extender
 		ADD COLUMN reality_public_key bytea NULL,
 		ADD COLUMN reality_public_key_network_id uuid NULL
