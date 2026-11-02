@@ -38,3 +38,29 @@ func TestInitTasksArmsTheLagSweep(t *testing.T) {
 		}
 	})
 }
+
+// The measurement api probes' chain (lag.dev/PLAN.md A4) is pinned the same
+// way. Unarmed, the sample's probes would go stale and it would offer every
+// extender, stalled ones included, with nothing to say so.
+func TestInitTasksArmsTheMeasurementProbe(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		taskWorker := InitTaskWorker(ctx)
+		if !taskWorker.HasTarget("github.com/urnetwork/server/taskworker/work.ExtenderMeasurementProbe") {
+			t.Fatal("the measurement api probe is not a registered task target")
+		}
+
+		for range 2 {
+			InitTasks(ctx)
+			var count int
+			server.Db(ctx, func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(
+					ctx,
+					`SELECT COUNT(*) FROM pending_task WHERE run_once_key = '["extender_measurement_probe"]'`,
+				).Scan(&count))
+			})
+			connect.AssertEqual(t, count, 1)
+		}
+	})
+}

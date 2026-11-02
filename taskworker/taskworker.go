@@ -161,6 +161,9 @@ func initTaskSchedule(ctx context.Context) {
 		// both idle until extender.yml enables the measurement block
 		work.ScheduleExtenderMeasurementIssue(clientSession, tx)
 		work.ScheduleExtenderMeasurementDns(clientSession, tx)
+		// probes of the measurement api, which the lag.dev sample reads
+		// (lag.dev/PLAN.md A4); idle likewise
+		work.ScheduleExtenderMeasurementProbe(clientSession, tx)
 		work.ScheduleRemoveOldExtenderLatencies(clientSession, tx)
 		work.ScheduleRemoveExpiredPings(clientSession, tx)
 		work.ScheduleDeriveLocations(clientSession, tx)
@@ -523,6 +526,11 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.ExtenderMeasurementDns,
 			work.ExtenderMeasurementDnsPost,
+		),
+		// lag.dev/PLAN.md A4
+		task.NewTaskTargetWithPost(
+			work.ExtenderMeasurementProbe,
+			work.ExtenderMeasurementProbePost,
 		),
 		task.NewTaskTargetWithPost(
 			work.RemoveOldExtenderLatencies,

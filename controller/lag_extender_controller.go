@@ -83,7 +83,8 @@ func lagStillServing(ctx context.Context, extenders []*lagServingExtender, now t
 }
 
 // The serving set without the extenders in a restart loop now
-// (lagStableServing), read again when the cached one is older than maxAge.
+// (lagStableServing) or whose measurement api the probes cannot reach
+// (lagReachableServing), read again when the cached one is older than maxAge.
 func getLagServing(ctx context.Context, now time.Time, maxAge time.Duration) *lagServingSet {
 	lagServingCache.Lock()
 	defer lagServingCache.Unlock()
@@ -91,38 +92,33 @@ func getLagServing(ctx context.Context, now time.Time, maxAge time.Duration) *la
 		return set
 	}
 	set, _ := lagStableServing(ctx, loadLagServing(ctx, now), now)
+	set, _ = lagReachableServing(ctx, set, now)
 	lagServingCache.set = set
 	return set
 }
 
-// Reads the extenders that serve the measurement api: published, issued, and
-// delivered (lagStillServing). Each is placed where the issuance order counts
-// it (A4, C7; model.GetLagExtenderPlaces): by GeoLite2 City for its
-// addresses, choosing between its two families when they disagree, and moved
-// to its derived location only within that country. An extender that cannot
-// be placed is left out: lag.dev picks its dots by distance (L3), and a dot it
-// cannot place it cannot pick. A deployment with no extender network serves
-// none, and neither does one whose measurement block is off, whose records
-// then carry no measurement id either (C10).
-func loadLagServing(ctx context.Context, now time.Time) *lagServingSet {
-	set := &lagServingSet{
-		loadTime:  now,
-		extenders: []*lagServingExtender{},
-		byId:      map[server.Id]*lagServingExtender{},
-	}
+// GetLagServingHosts reads the extenders that serve the measurement api:
+// published, issued, and delivered (lagStillServing), with the addresses their
+// names resolve to. A deployment with no extender network serves none, and
+// neither does one whose measurement block is off, whose records then carry no
+// measurement id either (C10). The sample draws from these (loadLagServing),
+// and the probes probe them whether or not the sample can place them or leaves
+// them out now, so an extender left out for its probes comes back with its
+// first success (lagReachableServing).
+func GetLagServingHosts(ctx context.Context, now time.Time) []*ExtenderMeasurementHost {
+	hosts := []*ExtenderMeasurementHost{}
 	config, err := EnvExtenderConfig()
 	if err != nil || !config.Measurement.Enabled {
-		return set
+		return hosts
 	}
 
-	hosts := GetExtenderMeasurementHosts(ctx, config, now)
-	extenderIds := make([]server.Id, 0, len(hosts))
-	for _, host := range hosts {
+	published := GetExtenderMeasurementHosts(ctx, config, now)
+	extenderIds := make([]server.Id, 0, len(published))
+	for _, host := range published {
 		extenderIds = append(extenderIds, host.ExtenderId)
 	}
 	measurements := model.GetLagExtenderMeasurements(ctx, extenderIds, now)
-	places := model.GetLagExtenderPlaces(ctx, extenderIds)
-	for _, host := range hosts {
+	for _, host := range published {
 		if len(host.Ips) == 0 {
 			continue
 		}
@@ -130,6 +126,32 @@ func loadLagServing(ctx context.Context, now time.Time) *lagServingSet {
 		if measurement == nil || !measurement.Serving() {
 			continue
 		}
+		hosts = append(hosts, host)
+	}
+	return hosts
+}
+
+// Reads the extenders that serve the measurement api (GetLagServingHosts).
+// Each is placed where the issuance order counts it (A4, C7;
+// model.GetLagExtenderPlaces): by GeoLite2 City for its addresses, choosing
+// between its two families when they disagree, and moved to its derived
+// location only within that country. An extender that cannot be placed is left
+// out: lag.dev picks its dots by distance (L3), and a dot it cannot place it
+// cannot pick.
+func loadLagServing(ctx context.Context, now time.Time) *lagServingSet {
+	set := &lagServingSet{
+		loadTime:  now,
+		extenders: []*lagServingExtender{},
+		byId:      map[server.Id]*lagServingExtender{},
+	}
+
+	hosts := GetLagServingHosts(ctx, now)
+	extenderIds := make([]server.Id, 0, len(hosts))
+	for _, host := range hosts {
+		extenderIds = append(extenderIds, host.ExtenderId)
+	}
+	places := model.GetLagExtenderPlaces(ctx, extenderIds)
+	for _, host := range hosts {
 		place := places[host.ExtenderId]
 		if place == nil {
 			continue
