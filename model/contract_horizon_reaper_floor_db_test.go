@@ -495,3 +495,46 @@ func TestContractHorizonKeepsSweepsOperatorBlockPointsStillRead(t *testing.T) {
 		}
 	})
 }
+
+// A payment that completed under attribution review queues no retention
+// stamping for its contracts (completePaymentInTx), so the payment completion
+// path keeps them until the straggler horizon while the review is open. Past
+// the horizon the reaper keeps a contract that payment paid, and still deletes
+// one paid as long ago by an ordinary payment.
+func TestContractHorizonKeepsContractsUnderAttributionReview(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		defer removeHorizonTestControl(t, ctx)
+		const day = 24 * time.Hour
+		now := server.NowUtc().Truncate(time.Microsecond)
+		usePayoutTransitionAt(t, now.Add(-70*day).Truncate(time.Second))
+		f := newNetEscrowOrderingTestFixture(t, ctx)
+		reviewedPaymentId := insertHorizonTestPayment(t, ctx, f.destinationNetworkId, horizonTestPayment{
+			completed: true, completeTime: horizonTestPointer(now.Add(-30 * day)), attributionReview: true})
+		paidPaymentId := insertHorizonTestPayment(t, ctx, f.destinationNetworkId, horizonTestPayment{
+			completed: true, completeTime: horizonTestPointer(now.Add(-30 * day))})
+		underReview := newHorizonTestContract(now.Add(-60*day), "settled")
+		underReview.paymentId = &reviewedPaymentId
+		paid := newHorizonTestContract(now.Add(-60*day+time.Second), "settled")
+		paid.paymentId = &paidPaymentId
+		insertHorizonTestContracts(t, ctx, f, underReview, paid)
+		before, _ := countHorizonTestRows(t, ctx, underReview.contractId)
+
+		setHorizonTestControl(t, ctx, map[string]string{horizonTestDaysField: "35"})
+		report, _, err := RemoveContractsPastHorizon(ctx, now, ContractHorizonCursor{}, horizonTestSettings())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rows, archived := countHorizonTestRows(t, ctx, underReview.contractId); rows != before || archived != 0 {
+			t.Fatalf("a contract paid under attribution review was removed: rows %v, was %v, archived %d, %+v", rows, before, archived, report)
+		}
+		if rows, archived := countHorizonTestRows(t, ctx, paid.contractId); rows != [6]int{} || archived != 1 {
+			t.Fatalf("a contract paid as long ago without review was kept: rows %v, archived %d", rows, archived)
+		}
+		if report.Protected["payment_review"] != 1 || report.Eligible != 1 {
+			t.Fatalf("wrong report: %+v", report)
+		}
+	})
+}

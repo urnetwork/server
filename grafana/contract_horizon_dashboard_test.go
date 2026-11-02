@@ -30,6 +30,7 @@ const (
 	contractHorizonKeptPanel      = 59
 	contractHorizonPositionPanel  = 60
 	contractHorizonBatchPanel     = 62
+	contractHorizonRunsPanel      = 63
 	contractHorizonRetentionPanel = 65
 )
 
@@ -40,14 +41,15 @@ const contractHorizonTaskworkerFilter = `env="$env",service="taskworker",block=~
 // dashboard's filters, and reads a counter or histogram only through a rate or
 // an increase. The three panels an operator watches while the reaper runs are
 // rows deleted by table, contracts kept by reason, and the pass's lag beside
-// its cursor and horizon.
+// its cursor and horizon. The runs panel also counts the transfer audit
+// rollups that resumed at the first day the reaper cannot reach.
 func TestContractHorizonReaperDashboardPanels(t *testing.T) {
 	dashboard := readTestDashboard(t, "taskworker.json")
 	if slices.Contains(dashboard.Tags, PublicTag) {
 		t.Fatal("reaper diagnostics must remain authenticated")
 	}
 	selectors := regexp.MustCompile(`\{[^}]*\}`)
-	counters := regexp.MustCompile(`(\w*\()?(urnetwork_(?:contract_horizon|retention)_\w*(?:_total|_bucket|_count))\{`)
+	counters := regexp.MustCompile(`(\w*\()?(urnetwork_(?:contract_horizon|retention|transfer_audit_rollup)_\w*(?:_total|_bucket|_count))\{`)
 	for id := contractHorizonModePanel; id <= contractHorizonRetentionPanel; id++ {
 		panel := dashboardPanelById(dashboard, id)
 		if panel == nil {
@@ -80,10 +82,18 @@ func TestContractHorizonReaperDashboardPanels(t *testing.T) {
 		kept.Targets[0].Expr != "sum by (reason) (rate(urnetwork_contract_horizon_protected_contracts_total{"+contractHorizonTaskworkerFilter+"}[$__rate_interval]))" {
 		t.Errorf("kept contracts panel lost its per-reason rate: %+v", kept.Targets)
 	}
-	for _, reason := range []string{"open", "unresolved", "recent_close", "busy", "unsettled", "payment_hold", "payment_incomplete", "payment_recent", "unpaid_legacy", "plan_staged", "block_points"} {
+	for _, reason := range []string{"open", "unresolved", "recent_close", "busy", "unsettled", "payment_hold", "payment_incomplete", "payment_recent", "unpaid_legacy", "plan_staged", "block_points", "payment_review"} {
 		if !strings.Contains(kept.Description, reason) {
 			t.Errorf("kept contracts panel does not explain %s", reason)
 		}
+	}
+	runs := dashboardPanelById(dashboard, contractHorizonRunsPanel)
+	clamps := "sum(increase(urnetwork_transfer_audit_rollup_clamped_total{" + contractHorizonTaskworkerFilter + "}[1h]))"
+	if len(runs.Targets) != 3 || runs.Targets[2].RefId != "C" || runs.Targets[2].Expr != clamps {
+		t.Errorf("runs panel must count the transfer audit rollups clamped in the trailing hour: %+v", runs.Targets)
+	}
+	if !strings.Contains(runs.Description, "TransferAuditRollupFirstDay") {
+		t.Error("runs panel does not explain the transfer audit rollup clamp")
 	}
 
 	position := dashboardPanelById(dashboard, contractHorizonPositionPanel)
