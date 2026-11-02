@@ -557,6 +557,8 @@ var (
 )
 
 type Settings struct {
+	reevaluationRuntime        *model.CompetitionJobReevaluationRuntime
+	reevaluationRuntimeSha256  string
 	AutomationPolicy           model.CompetitionAutomationPolicy `yaml:"automation_policy"`
 	Enabled                    bool                              `yaml:"enabled"`
 	CompetitionId              string                            `yaml:"competition_id"`
@@ -2755,7 +2757,8 @@ func refreshOperationalMetrics(ctx context.Context, settings *Settings) error {
 		server.Db(ctx, func(conn server.PgConn) {
 			rows, queryErr := conn.Query(ctx, `
 				SELECT job.state, count(*),
-				       COALESCE(extract(epoch FROM ($2::timestamp - min(job.submitted_at))), 0)
+				       COALESCE(extract(epoch FROM ($2::timestamp - min(CASE WHEN job.evaluation_cycle>0 AND job.state='queued'
+				         THEN job.available_at ELSE job.submitted_at END))), 0)
 				FROM competition_job AS job
 				JOIN competition_round AS round ON round.round_id = job.round_id
 				WHERE round.competition_id = $1
@@ -2806,13 +2809,13 @@ func refreshOperationalMetrics(ctx context.Context, settings *Settings) error {
 			var startedAt time.Time
 			scanErr := conn.QueryRow(ctx, `
 				SELECT job.job_id::text, job.round_id::text, job.patch_sha256,
-				       job.attempt_count, job.started_at
+				       job.attempt_count, COALESCE(job.cycle_started_at,job.started_at)
 				FROM competition_job AS job
 				JOIN competition_round AS round ON round.round_id = job.round_id
 				WHERE round.competition_id = $1
 				  AND job.state = 'running'
 				  AND job.started_at IS NOT NULL
-				ORDER BY job.started_at, job.job_id
+				ORDER BY COALESCE(job.cycle_started_at,job.started_at), job.job_id
 				LIMIT 1
 			`, settings.CompetitionId).Scan(
 				&jobId, &roundId, &patchSha256, &attempt, &startedAt,
@@ -2854,13 +2857,13 @@ func refreshOperationalMetrics(ctx context.Context, settings *Settings) error {
 					$2::double precision
 				)
 				FROM (
-					SELECT extract(epoch FROM (job.completed_at - job.started_at))::double precision AS duration_seconds
+					SELECT extract(epoch FROM (job.completed_at - COALESCE(job.cycle_started_at,job.started_at)))::double precision AS duration_seconds
 					FROM competition_job AS job
 					JOIN competition_round AS round ON round.round_id = job.round_id
 					WHERE round.competition_id = $1
 					  AND job.state = 'succeeded'
 					  AND job.started_at IS NOT NULL
-					  AND job.completed_at >= job.started_at
+					  AND job.completed_at >= COALESCE(job.cycle_started_at,job.started_at)
 					ORDER BY job.completed_at DESC
 					LIMIT 20
 				) AS recent
@@ -5853,6 +5856,8 @@ const jobSelect = `
 	       j.started_at, j.completed_at, j.cache_key, j.score_json,
 	       j.eval_error_json, j.patch_bytes, j.attempt_count, COALESCE(j.lease_owner, ''),
 	       j.lease_expires_at, j.api_image_digest, COALESCE(j.worker_image_digest, ''),
+	       j.evaluation_cycle,j.cycle_attempt_offset,j.cycle_started_at,
+	       (SELECT receipt_json FROM competition_job_reevaluation recovery WHERE recovery.job_id=j.job_id),
 	       r.competition_id, r.workload_commitment, r.seed_nonce,
 	       r.seed_ciphertext, r.providers_sha256, r.providers_path,
 	       r.policy_json, r.opens_at, r.closes_at,
@@ -5863,12 +5868,13 @@ const jobSelect = `
 
 func scanJob(row pgx.Row, includePatch bool, now time.Time) (*queuedJob, error) {
 	job := &queuedJob{}
-	var scoreJson, errorJson, policyJson []byte
+	var scoreJson, errorJson, policyJson, reevaluationJson []byte
 	err := row.Scan(
 		&job.JobId, &job.RoundId, &job.PatchSha256, &job.State,
 		&job.SubmittedAt, &job.StartedAt, &job.CompletedAt, &job.CacheKey,
 		&scoreJson, &errorJson, &job.Patch, &job.AttemptCount, &job.LeaseOwner,
 		&job.LeaseExpiresAt, &job.ApiImageDigest, &job.WorkerImageDigest,
+		&job.EvaluationCycle, &job.CycleAttemptOffset, &job.CycleStartedAt, &reevaluationJson,
 		&job.Round.CompetitionId,
 		&job.Round.WorkloadCommitment, &job.Round.SeedNonce,
 		&job.Round.SeedCiphertext, &job.Round.ProvidersSha256,
@@ -5885,6 +5891,23 @@ func scanJob(row pgx.Row, includePatch bool, now time.Time) (*queuedJob, error) 
 	job.Staging = job.Round.Staging
 	job.Round.ScoreSchema = ScoreSchema
 	job.Round.PolicyJson = policyJson
+	if job.EvaluationCycle > 0 {
+		var receipt model.CompetitionJobReevaluationReceipt
+		if err := decodeFailureEvidenceJson(reevaluationJson, &receipt); err != nil {
+			return nil, err
+		}
+		if receipt.Cycle != job.EvaluationCycle || receipt.AttemptOffset != job.CycleAttemptOffset || receipt.JobId != job.JobId ||
+			receipt.RoundId != job.RoundId || receipt.PatchSha256 != job.PatchSha256 {
+			return nil, ErrConflict
+		}
+		receipt.StartedAt = job.CycleStartedAt
+		if err := model.ValidateCompetitionJobReevaluationCycle(&receipt.CompetitionJobReevaluationCycle); err != nil {
+			return nil, err
+		}
+		job.Reevaluation = &receipt.CompetitionJobReevaluationCycle
+	} else if len(reevaluationJson) != 0 {
+		return nil, ErrConflict
+	}
 	job.EvaluatorImageDigest, err = evaluatorImageDigestFromPolicy(policyJson)
 	if err != nil {
 		return nil, err
@@ -6088,6 +6111,11 @@ func (self PostgresStore) Claim(ctx context.Context, settings *Settings, workerI
 			if slotWorker != nil && slotLease != nil && now.Before(*slotLease) {
 				return
 			}
+			cleared, clearError := self.clearExpiredCompetitionRecoverySlotInTx(ctx, tx, settings, slotJob)
+			server.Raise(clearError)
+			if cleared {
+				slotWorker, slotJob, slotLease = nil, nil, nil
+			}
 			rows, queryErr := tx.Query(ctx, `
 				UPDATE competition_job AS job
 				SET state = 'failed', completed_at = $2,
@@ -6182,12 +6210,18 @@ func (self PostgresStore) Claim(ctx context.Context, settings *Settings, workerI
 					return
 				}
 			}
+			if job.EvaluationCycle > 0 && (job.Reevaluation == nil || workerImageDigest != job.Reevaluation.FixedWorkerImageDigest) {
+				panic(ErrLeaseLost)
+			}
+			server.Raise(setCompetitionJobAuthorityInTx(ctx, tx, job.JobId, job.EvaluationCycle, job.AttemptCount))
 			server.RaisePgResult(tx.Exec(ctx, `
 				UPDATE competition_job SET state = 'running', started_at = COALESCE(started_at, $2),
+					cycle_started_at=CASE WHEN evaluation_cycle>0 THEN COALESCE(cycle_started_at,$2) ELSE cycle_started_at END,
 					lease_owner = $3, lease_expires_at = $4, attempt_count = attempt_count + 1,
 					worker_image_digest = $5
 				WHERE job_id = $1
 			`, job.JobId, now, workerId, leaseUntil, workerImageDigest))
+			server.Raise(setCompetitionJobAuthorityInTx(ctx, tx, job.JobId, job.EvaluationCycle, job.AttemptCount+1))
 			server.RaisePgResult(tx.Exec(ctx, `
 				UPDATE competition_worker_slot SET worker_id = $1, job_id = $2,
 					lease_expires_at = $3, heartbeat_at = $4 WHERE slot_id = 1
@@ -6197,6 +6231,10 @@ func (self PostgresStore) Claim(ctx context.Context, settings *Settings, workerI
 			})
 			job.State = "running"
 			job.AttemptCount++
+			if job.EvaluationCycle > 0 && job.CycleStartedAt == nil {
+				job.CycleStartedAt = &now
+				job.Reevaluation.StartedAt = &now
+			}
 			job.LeaseOwner = workerId
 			job.LeaseExpiresAt = &leaseUntil
 			job.WorkerImageDigest = workerImageDigest
@@ -6225,6 +6263,7 @@ func (self PostgresStore) Heartbeat(ctx context.Context, settings *Settings, wor
 			}
 			var slotLease, jobLease time.Time
 			var actualRoundId server.Id
+			var evaluationCycle, attempts int
 			if self.beforeLeaseRowLockForTest != nil {
 				self.beforeLeaseRowLockForTest("worker_slot")
 			}
@@ -6237,12 +6276,13 @@ func (self PostgresStore) Heartbeat(ctx context.Context, settings *Settings, wor
 			if self.beforeLeaseRowLockForTest != nil {
 				self.beforeLeaseRowLockForTest("job")
 			}
-			loadError = tx.QueryRow(ctx, `SELECT lease_expires_at,round_id FROM competition_job
-			 WHERE job_id=$1 AND state='running' AND lease_owner=$2 AND lease_expires_at IS NOT NULL FOR UPDATE`, jobId, workerId).Scan(&jobLease, &actualRoundId)
+			loadError = tx.QueryRow(ctx, `SELECT lease_expires_at,round_id,evaluation_cycle,attempt_count FROM competition_job
+			 WHERE job_id=$1 AND state='running' AND lease_owner=$2 AND lease_expires_at IS NOT NULL FOR UPDATE`, jobId, workerId).Scan(&jobLease, &actualRoundId, &evaluationCycle, &attempts)
 			if errors.Is(loadError, pgx.ErrNoRows) {
 				panic(ErrLeaseLost)
 			}
 			server.Raise(loadError)
+			server.Raise(requireCompetitionJobAuthorityInTx(ctx, tx, jobId, evaluationCycle, attempts))
 			if settings.AutomationPolicy.Enabled {
 				if settings.automationLease != nil {
 					server.Raise(self.requireAutomationLeaseInTx(ctx, tx, settings, *settings.automationLease))
@@ -6323,7 +6363,8 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 			}
 			server.Raise(loadError)
 			var state, owner string
-			var attempts int
+			var attempts, evaluationCycle, attemptOffset int
+			var cycleStartedAt *time.Time
 			var apiImageDigest, workerImageDigest string
 			var roundId server.Id
 			var staging bool
@@ -6335,13 +6376,13 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 			}
 			loadError = tx.QueryRow(ctx, `
 				SELECT state, COALESCE(lease_owner, ''), attempt_count,
-				       api_image_digest, COALESCE(worker_image_digest, ''), started_at,
+				       api_image_digest, COALESCE(worker_image_digest, ''), started_at,evaluation_cycle,cycle_attempt_offset,cycle_started_at,
 			       job.round_id, round.staging, round.providers_sha256, round.policy_json, job.lease_expires_at
 				FROM competition_job AS job
 				JOIN competition_round AS round ON round.round_id = job.round_id
 				WHERE job.job_id = $1 FOR UPDATE OF job
 			`, jobId).Scan(
-				&state, &owner, &attempts, &apiImageDigest, &workerImageDigest, &startedAt,
+				&state, &owner, &attempts, &apiImageDigest, &workerImageDigest, &startedAt, &evaluationCycle, &attemptOffset, &cycleStartedAt,
 				&roundId, &staging, &providersSha256, &policyJson, &jobLease,
 			)
 			if errors.Is(loadError, pgx.ErrNoRows) {
@@ -6349,6 +6390,7 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 			}
 			server.Raise(loadError)
 			requireAuthority := func() time.Time {
+				server.Raise(requireCompetitionJobAuthorityInTx(ctx, tx, jobId, evaluationCycle, attempts))
 				if settings.AutomationPolicy.Enabled {
 					if settings.automationLease != nil {
 						server.Raise(self.requireAutomationLeaseInTx(ctx, tx, settings, *settings.automationLease))
@@ -6359,6 +6401,9 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 				if state != "running" || owner != workerId || slotWorker == nil || *slotWorker != workerId ||
 					slotJob == nil || *slotJob != jobId || slotLease == nil || jobLease == nil ||
 					!now.Before(*slotLease) || !now.Before(*jobLease) || settings.automationLease != nil && roundId != settings.automationRoundId {
+					panic(ErrLeaseLost)
+				}
+				if evaluationCycle > 0 && (cycleStartedAt == nil || attempts <= attemptOffset) {
 					panic(ErrLeaseLost)
 				}
 				return now
@@ -6448,10 +6493,15 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 			// Baseline insertion/conflict and shared reads can wait after the first
 			// check. Revalidate before publishing any terminal or retry transition.
 			now = requireAuthority()
-			retryAt, retryBudgetAvailable := infrastructureRetrySchedule(settings, startedAt, now, attempts)
+			executionStartedAt := startedAt
+			if evaluationCycle > 0 {
+				executionStartedAt = *cycleStartedAt
+			}
+			cycleAttempts := attempts - attemptOffset
+			retryAt, retryBudgetAvailable := infrastructureRetrySchedule(settings, executionStartedAt, now, cycleAttempts)
 			retryableInfrastructure := outcome.Error != nil &&
 				outcome.Error.Kind == "infrastructure" && outcome.Error.Retriable
-			if retryableInfrastructure && attempts < settings.MaxInfrastructureAttempts && !retryBudgetAvailable {
+			if retryableInfrastructure && cycleAttempts < settings.MaxInfrastructureAttempts && !retryBudgetAvailable {
 				outcome.Score = nil
 				outcome.Error = terminalInfrastructureError(
 					"evaluation_time_budget_exhausted",
@@ -6542,6 +6592,17 @@ func (self PostgresStore) handBackWithFailure(ctx context.Context, workerId stri
 	now := self.nowUtc()
 	return captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `SELECT 1 FROM competition_worker_slot WHERE slot_id=1 FOR UPDATE`))
+			var cycle, attempt int
+			loadError := tx.QueryRow(ctx, `SELECT evaluation_cycle,attempt_count FROM competition_job WHERE job_id=$1 FOR UPDATE`, jobId).Scan(&cycle, &attempt)
+			if errors.Is(loadError, pgx.ErrNoRows) {
+				if authority, present := ctx.Value(competitionJobAuthorityKey{}).(competitionJobAuthority); present && authority.Cycle > 0 {
+					panic(ErrLeaseLost)
+				}
+			} else {
+				server.Raise(loadError)
+				server.Raise(requireCompetitionJobAuthorityInTx(ctx, tx, jobId, cycle, attempt))
+			}
 			server.RaisePgResult(tx.Exec(ctx, `SET LOCAL urnetwork.competition_v2_worker = 'on'`))
 			result, err := tx.Exec(ctx, `
 				UPDATE competition_job SET state = 'queued', available_at = $3,
@@ -6704,13 +6765,16 @@ type roundBaselineRecord struct {
 
 type queuedJob struct {
 	ScoreJobResult
-	Patch          []byte
-	PrincipalId    string
-	AttemptCount   int
-	LeaseOwner     string
-	LeaseExpiresAt *time.Time
-	Round          roundRecord
-	RoundBaseline  *roundBaselineRecord
+	EvaluationCycle    int
+	CycleAttemptOffset int
+	CycleStartedAt     *time.Time
+	Patch              []byte
+	PrincipalId        string
+	AttemptCount       int
+	LeaseOwner         string
+	LeaseExpiresAt     *time.Time
+	Round              roundRecord
+	RoundBaseline      *roundBaselineRecord
 }
 
 type HostSelfCheck struct {
@@ -7082,6 +7146,7 @@ func (self *Worker) finishEpoch(ctx context.Context) (bool, error) {
 }
 
 func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostCheck HostSelfCheck) error {
+	parent = withCompetitionJobAuthority(parent, job)
 	startedAt := time.Now()
 	metricOutcome := "infrastructure_failed"
 	defer func() {
@@ -7090,18 +7155,26 @@ func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostChec
 	}()
 	if (!job.Staging || roundUsesAutomation(&job.Round)) && (!hostCheck.RebaselinePassed || hostCheck.RebaselineRoundId == nil || *hostCheck.RebaselineRoundId != job.RoundId) {
 		metricOutcome = "rebaseline_mismatch"
-		_ = self.handBack(job.JobId, "round_rebaseline_mismatch")
+		_ = self.handBackJob(job, "round_rebaseline_mismatch")
 		return fmt.Errorf("competition evaluator host is not re-baselined for round %s", job.RoundId)
 	}
 	if job.StartedAt == nil {
-		_ = self.handBack(job.JobId, "missing_execution_start")
+		_ = self.handBackJob(job, "missing_execution_start")
 		return fmt.Errorf("competition job %s has no execution start", job.JobId)
 	}
 	confirmedLeaseExpiresAt := time.Time{}
 	if job.LeaseExpiresAt != nil {
 		confirmedLeaseExpiresAt = *job.LeaseExpiresAt
 	}
-	executionDeadline := job.StartedAt.Add(
+	executionStartedAt := job.StartedAt
+	if job.EvaluationCycle > 0 {
+		if job.CycleStartedAt == nil || job.CycleAttemptOffset < 1 || job.AttemptCount <= job.CycleAttemptOffset {
+			_ = self.handBackJob(job, "missing_cycle_authority")
+			return ErrLeaseLost
+		}
+		executionStartedAt = job.CycleStartedAt
+	}
+	executionDeadline := executionStartedAt.Add(
 		time.Duration(self.settings.EvaluationPolicy.ScoreTimeoutSeconds) * time.Second,
 	)
 	if !server.NowUtc().Before(executionDeadline) {
@@ -7171,7 +7244,7 @@ func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostChec
 			if err != nil {
 				cancel()
 				<-done
-				_ = self.handBack(job.JobId, "heartbeat_failed", err)
+				_ = self.handBackJob(job, "heartbeat_failed", err)
 				return fmt.Errorf("heartbeat competition job %s: %w", job.JobId, safeCompetitionHeartbeatError(err))
 			}
 			// PostgreSQL computes renewal time after its lock/fence waits. The
@@ -7184,7 +7257,7 @@ func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostChec
 			if err != nil {
 				cancel()
 				<-done
-				_ = self.handBack(job.JobId, "host_heartbeat_failed", err)
+				_ = self.handBackJob(job, "host_heartbeat_failed", err)
 				return fmt.Errorf("refresh evaluator host during job %s: %w", job.JobId, safeCompetitionHeartbeatError(err))
 			}
 			if self.evaluationHeartbeatForTest != nil {
@@ -7193,7 +7266,7 @@ func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostChec
 		case <-parent.Done():
 			cancel()
 			<-done
-			if err := self.handBack(job.JobId, "worker_shutdown"); err != nil {
+			if err := self.handBackJob(job, "worker_shutdown"); err != nil {
 				return fmt.Errorf("hand back competition job %s: %w", job.JobId, err)
 			}
 			return parent.Err()
@@ -7205,7 +7278,7 @@ func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostChec
 // detached, bounded metadata lifetime never renews expired authority or scoring.
 func (self *Worker) completeWithRetry(parent context.Context, job *queuedJob, leaseExpiresAt time.Time, outcome EvaluationOutcome) (bool, error) {
 	var retry bool
-	_, err := retryCompetitionLeaseOperation(context.WithoutCancel(parent), leaseExpiresAt, self.heartbeatSettings.CompletionRetry, func(ctx context.Context) error {
+	_, err := retryCompetitionLeaseOperation(withCompetitionJobAuthority(context.WithoutCancel(parent), job), leaseExpiresAt, self.heartbeatSettings.CompletionRetry, func(ctx context.Context) error {
 		completedRetry, err := self.store.Complete(ctx, self.settings, self.workerId, job.JobId, outcome)
 		if err == nil {
 			retry = completedRetry
@@ -7216,11 +7289,21 @@ func (self *Worker) completeWithRetry(parent context.Context, job *queuedJob, le
 }
 
 func (self *Worker) handBack(jobId server.Id, reason string, failures ...error) error {
+	return self.handBackContext(context.Background(), jobId, reason, failures...)
+}
+
+// Recovery cleanup carries the exact claim even after evaluator cancellation.
+func (self *Worker) handBackJob(job *queuedJob, reason string, failures ...error) error {
+	return self.handBackContext(withCompetitionJobAuthority(context.Background(), job), job.JobId, reason, failures...)
+}
+
+// The bounded detached cleanup owns metadata persistence, never evaluation.
+func (self *Worker) handBackContext(parent context.Context, jobId server.Id, reason string, failures ...error) error {
 	timeout := self.heartbeatSettings.HandBackTimeout
 	if timeout <= 0 {
 		timeout = defaultCompetitionHeartbeatSettings().HandBackTimeout
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	if len(failures) != 0 && failures[0] != nil {
 		if store, ok := self.store.(competitionHeartbeatFailureStore); ok {
@@ -7377,46 +7460,52 @@ var apexSubmissionIdPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,
 // staging records are explicitly fee-free. PrivateScore is owner-only feedback,
 // never publication or approval. Public outcomes require finalized publication.
 type ApexAdapterRecord struct {
-	Sequence              uint64             `json:"sequence"`
-	SubmissionId          string             `json:"submission_id"`
-	InputPatchSha256      string             `json:"input_patch_sha256"`
-	RoundId               server.Id          `json:"round_id,omitempty"`
-	JobId                 server.Id          `json:"job_id,omitempty"`
-	CanonicalPatchSha256  string             `json:"canonical_patch_sha256,omitempty"`
-	StatusUrl             string             `json:"status_url,omitempty"`
-	Staging               bool               `json:"staging"`
-	FeeUsd                int                `json:"fee_usd"`
-	FeeReceipt            string             `json:"fee_receipt,omitempty"`
-	State                 string             `json:"state"`
-	EvaluationStatus      string             `json:"evaluation_status,omitempty"`
-	EvaluationFailure     *EvaluationFailure `json:"evaluation_failure,omitempty"`
-	Published             bool               `json:"published"`
-	Winner                bool               `json:"winner,omitempty"`
-	HonestyReview         string             `json:"honesty_review,omitempty"`
-	PrivateScore          *ScoreResult       `json:"private_score,omitempty"`
-	PrivateScoreRefreshAt *time.Time         `json:"private_score_refresh_at,omitempty"`
-	Score                 *ScoreResult       `json:"score,omitempty"`
-	EvalError             *CompetitionError  `json:"eval_error,omitempty"`
-	SubmittedAt           time.Time          `json:"submitted_at"`
-	UpdatedAt             time.Time          `json:"updated_at"`
-	DecisionMode          string             `json:"decision_mode,omitempty"`
-	RequiredApiCapability string             `json:"required_api_capability,omitempty"`
-	CompetitionId         string             `json:"competition_id,omitempty"`
+	Reevaluation          *model.CompetitionJobReevaluationCycle `json:"reevaluation,omitempty"`
+	ReevaluationHistory   []ApexReevaluationObservation          `json:"reevaluation_history,omitempty"`
+	Sequence              uint64                                 `json:"sequence"`
+	SubmissionId          string                                 `json:"submission_id"`
+	InputPatchSha256      string                                 `json:"input_patch_sha256"`
+	RoundId               server.Id                              `json:"round_id,omitempty"`
+	JobId                 server.Id                              `json:"job_id,omitempty"`
+	CanonicalPatchSha256  string                                 `json:"canonical_patch_sha256,omitempty"`
+	StatusUrl             string                                 `json:"status_url,omitempty"`
+	Staging               bool                                   `json:"staging"`
+	FeeUsd                int                                    `json:"fee_usd"`
+	FeeReceipt            string                                 `json:"fee_receipt,omitempty"`
+	State                 string                                 `json:"state"`
+	EvaluationStatus      string                                 `json:"evaluation_status,omitempty"`
+	EvaluationFailure     *EvaluationFailure                     `json:"evaluation_failure,omitempty"`
+	Published             bool                                   `json:"published"`
+	Winner                bool                                   `json:"winner,omitempty"`
+	HonestyReview         string                                 `json:"honesty_review,omitempty"`
+	PrivateScore          *ScoreResult                           `json:"private_score,omitempty"`
+	PrivateScoreRefreshAt *time.Time                             `json:"private_score_refresh_at,omitempty"`
+	Score                 *ScoreResult                           `json:"score,omitempty"`
+	EvalError             *CompetitionError                      `json:"eval_error,omitempty"`
+	SubmittedAt           time.Time                              `json:"submitted_at"`
+	UpdatedAt             time.Time                              `json:"updated_at"`
+	DecisionMode          string                                 `json:"decision_mode,omitempty"`
+	RequiredApiCapability string                                 `json:"required_api_capability,omitempty"`
+	CompetitionId         string                                 `json:"competition_id,omitempty"`
 }
 
 type apexAdapterState struct {
-	Schema                  int                 `json:"schema"`
-	NextSequence            uint64              `json:"next_sequence"`
-	PrivateScoreRefreshNext bool                `json:"private_score_refresh_next,omitempty"`
-	Records                 []ApexAdapterRecord `json:"records"`
+	ReevaluationRefreshCursor int                  `json:"reevaluation_refresh_cursor,omitempty"`
+	ReevaluationRefreshNext   bool                 `json:"reevaluation_refresh_next,omitempty"`
+	ReevaluationRefreshAt     map[string]time.Time `json:"reevaluation_refresh_at,omitempty"`
+	Schema                    int                  `json:"schema"`
+	NextSequence              uint64               `json:"next_sequence"`
+	PrivateScoreRefreshNext   bool                 `json:"private_score_refresh_next,omitempty"`
+	Records                   []ApexAdapterRecord  `json:"records"`
 }
 
 // ApexAdapterFileStore persists the emulator's admission identity in one
 // fsync-and-rename state file. Methods are safe for concurrent goroutines and
 // cooperating processes on the evaluator host.
 type ApexAdapterFileStore struct {
-	directory string
-	stateLock sync.Mutex
+	reevaluationSettings apexReevaluationRefreshSettings
+	directory            string
+	stateLock            sync.Mutex
 }
 
 // NewApexAdapterFileStore opens or creates a private state directory. Symlinks
@@ -7437,7 +7526,7 @@ func NewApexAdapterFileStore(directory string) (*ApexAdapterFileStore, error) {
 	if err != nil || !info.IsDir() || info.Mode()&0077 != 0 {
 		return nil, errors.New("Apex adapter state directory must be private and must not be a symlink")
 	}
-	store := &ApexAdapterFileStore{directory: absDirectory}
+	store := &ApexAdapterFileStore{directory: absDirectory, reevaluationSettings: defaultApexReevaluationRefreshSettings()}
 	if err := store.read(func(*apexAdapterState) error { return nil }); err != nil {
 		return nil, err
 	}
@@ -7624,6 +7713,14 @@ func scoreJobEvaluationStatusMatchesState(state string, status string) bool {
 // evidence. A sanitized failure summary is terminal metadata, not publication
 // of the embargoed evaluator result.
 func validateScoreJobPoll(job ScoreJobResult) error {
+	if job.Reevaluation != nil {
+		if err := model.ValidateCompetitionJobReevaluationCycle(job.Reevaluation); err != nil {
+			return err
+		}
+		if job.Reevaluation.JobId != job.JobId || job.Reevaluation.RoundId != job.RoundId || job.Reevaluation.PatchSha256 != job.PatchSha256 {
+			return ErrConflict
+		}
+	}
 	if !scoreJobEvaluationStatusMatchesState(job.State, job.EvaluationStatus) {
 		return errors.New("competition poll returned contradictory evaluation state")
 	}
@@ -7704,10 +7801,7 @@ func (self *ApexAdapterFileStore) RecordPoll(submissionId string, job ScoreJobRe
 			return errors.New("competition poll changed an immutable job identity")
 		}
 		updateRecord := func(record *ApexAdapterRecord) error {
-			if record.DecisionMode != "" {
-				return recordApexV2Poll(record, job, now)
-			}
-			return recordApexLegacyPoll(record, job, now)
+			return recordApexReevaluationAwarePoll(record, job, now)
 		}
 		for i := range state.Records {
 			record := &state.Records[i]
@@ -8055,10 +8149,16 @@ func (self *ApexAdapterFileStore) withState(write bool, operation func(*apexAdap
 }
 
 func validateApexAdapterState(state *apexAdapterState) error {
+	if err := validateApexReevaluationRefreshState(state); err != nil {
+		return err
+	}
 	seenSubmissionIds := map[string]bool{}
 	jobIdRecords := map[server.Id]ApexAdapterRecord{}
 	lastSequence := uint64(0)
 	for _, record := range state.Records {
+		if err := validateApexReevaluationRecord(record); err != nil {
+			return err
+		}
 		if record.DecisionMode != "" || record.RequiredApiCapability != "" || record.CompetitionId != "" {
 			if record.DecisionMode != model.CompetitionDecisionModeV2 || !model.SupportsCompetitionAutomationCapability(record.RequiredApiCapability) ||
 				!tokenNamePattern.MatchString(record.CompetitionId) || record.Winner || record.HonestyReview != "" {
@@ -8327,7 +8427,7 @@ func (self *ApexAdapter) Submit(ctx context.Context, submissionId string, patch 
 // completed production jobs. Durable reservations bound rolling-replica retries
 // and preserve fairness even across cooperating adapter instances.
 func (self *ApexAdapter) PollNext(ctx context.Context) (*ApexAdapterRecord, error) {
-	record, err := self.store.nextPrivateScoreAwarePoll(self.now(), self.privateScoreRefreshEvery)
+	record, err := self.store.nextApexReevaluationAwarePoll(self.now(), self.privateScoreRefreshEvery)
 	if err != nil || record == nil {
 		return nil, err
 	}

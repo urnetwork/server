@@ -129,6 +129,11 @@ func (self PostgresStore) ReserveRoundBaseline(ctx context.Context, settings *Se
 			if slotOwner != nil && slotDeadline != nil && now.Before(*slotDeadline) && !recoveryOwnsSlot {
 				return
 			}
+			cleared, clearError := self.clearExpiredCompetitionRecoverySlotInTx(ctx, tx, settings, slotJob)
+			server.Raise(clearError)
+			if cleared {
+				slotOwner, slotJob, slotDeadline = nil, nil, nil
+			}
 			job, err := scanJob(tx.QueryRow(ctx, jobSelect+roundBaselinePreparationJobSql, settings.CompetitionId, optionalAutomationRoundId(settings), now), true, now)
 			if errors.Is(err, pgx.ErrNoRows) {
 				return

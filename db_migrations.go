@@ -11284,4 +11284,8 @@ var migrations = []any{
 	// posted it (connect/EXTENDER.md P6, phase 14b): two nullable columns,
 	// db_extender_camouflage_key.go.
 	extenderCamouflageKeyMigration,
+
+	// Audited single-use evaluator recovery; legacy cycle-zero writers remain
+	// compatible. Deploy compatible API/worker before authorizing any cycle.
+	competitionJobReevaluationMigration,
 }
