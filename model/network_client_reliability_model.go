@@ -43,7 +43,10 @@ import (
 // client_reliability retention: every block older than this is removed.
 // Recurring readers reach at most 7 days back (the running network window),
 // and an operator block's points read the block's own 7-day window soon after
-// it closes (AwardDueOperatorBlockPoints), which leaves two weeks of margin.
+// it closes (AwardDueOperatorBlockPoints), which leaves about 6 days of margin:
+// an award that first runs later than that fails closed
+// (ErrOperatorBlockPointsReliabilityExpired). The owner moved this from 21 to 14
+// days on 2026-11-02 for disk: about 370 GB on main.
 //
 // Retention used to extend back to the last subsidy epoch end, up to 30 days,
 // for a payout that was behind. Subsidy payouts ended with the epoch that
@@ -52,7 +55,7 @@ import (
 // A legacy payout plan reading a window older than this would score the
 // missing blocks as covered with no valid rows and cut provider credit:
 // restarting subsidy payouts needs this horizon revisited first.
-const ClientReliabilityRetention = 21 * 24 * time.Hour
+const ClientReliabilityRetention = 14 * 24 * time.Hour
 
 var ClientLookbacks = []time.Duration{
 	5 * time.Minute,
