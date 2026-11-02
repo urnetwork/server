@@ -380,6 +380,16 @@ binary's `vcs.modified` bit: Go reports that bit for the main module, while code
 from a dirty local replacement can still be compiled into the service. This is
 coordination and evidence for the existing local-checkout workflow, not a
 Warpctl clean-worktree gate or a replacement build design.
+
+For a release epoch governed by `local/source-graph/lock.yml`, compare every
+recorded sibling revision with that exact checked-in lock before admitting the
+source graph or launching Go. A clean, stable checkout and matching `go.mod`
+prove identity, not agreement with the lock or compatibility of exported APIs.
+Retain the complete comparison and stop on a missing or different revision;
+review intentional lock changes explicitly. A lock-matching graph still needs
+actual compilation of the selected service packages before release tests can
+qualify it. Do not replace missing dependency APIs with guessed server constants.
+
 The exact local `warpctl` resolved for the build and every installed
 managed-host copy must expose a parseable full Go VCS base revision and Boolean
 modified bit; `modified=true` is context, not a fault. A desired version label,
