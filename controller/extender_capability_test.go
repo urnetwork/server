@@ -109,11 +109,12 @@ func TestExtenderRecordRequiredCapabilitiesRule(t *testing.T) {
 // case-insensitively, only the first 16 declared values of at most 64 bytes
 // are read, and nothing required is always satisfied.
 func TestExtenderCapabilitiesSatisfied(t *testing.T) {
+	// F's bounds: the first 16 declared values, each at most 64 bytes
 	sixteenOthers := []string{}
-	for i := range extenderMaxOfferedCapabilityCount {
+	for i := range 16 {
 		sixteenOthers = append(sixteenOthers, fmt.Sprintf("other-%d", i))
 	}
-	tooLong := strings.Repeat(" ", extenderMaxOfferedCapabilityByteCount) + "tcp-camouflage-v1"
+	tooLong := strings.Repeat(" ", 64) + "tcp-camouflage-v1"
 	cases := []struct {
 		required []string
 		offered  []string
