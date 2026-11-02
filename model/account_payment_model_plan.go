@@ -509,8 +509,9 @@ func (self *PaymentPlanner) planPayments() (returnErr error) {
 	// driver and so full-scans the whole transfer_escrow_sweep table every run:
 	//
 	//   (a) unpaid   — the sweep was never assigned a payment (payment_id IS
-	//       NULL). btree indexes NULLs, so transfer_escrow_sweep_payment_id
-	//       seeks these directly.
+	//       NULL). btree indexes NULLs, so transfer_escrow_sweep_payment_contract
+	//       (payment_id, contract_id) seeks these directly, up to the arm's
+	//       contract id bound past the earning boundary.
 	//   (b) safely canceled — the sweep's payment was canceled before a Circle
 	//       submit, or after Circle explicitly reported terminal CANCELLED and
 	//       its retry markers were cleared. A canceled row that still carries an

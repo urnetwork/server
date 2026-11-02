@@ -878,6 +878,8 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	},
 	// 905-909: the campaigns' consent evidence and the re-engagement tables
 	reengagementMigrationContracts,
+	// the index diet's drops; each version follows its migration's position
+	indexDietMigrationContracts,
 	[]snMainnetMigrationContract{
 		// which run of the extender process sent each activation
 		extenderActivationRunMigrationContract,
