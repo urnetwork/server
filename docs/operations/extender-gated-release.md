@@ -9,8 +9,12 @@ fleet to draw from, and that the blocked state's inputs are recorded.
 
 A record is skipped in a country when both hold:
 
-- At least 3 distinct clients there reported it within 24 hours
-  (`POST /network/extender-block-report`).
+- At least 3 distinct networks there reported it within 24 hours
+  (`POST /network/extender-block-report`). A network counts once however many of
+  its clients report, so one account's three devices are one reporter. The network
+  is the operator's `network_client` row for the client id in the report's verified
+  token, never anything the request says. A report whose client row has since been
+  reaped no longer counts.
 - The operator's probe (the taskworker's extender probe, every 5 minutes)
   reaches it now: every active address's latest probe succeeded within the
   last hour.
@@ -71,8 +75,9 @@ key, and counts over fixed labels only.
 
 Read reports as reachability evidence: they say the record did not answer these
 clients while the probe reached it. The operator's rules decide from there, as
-above. The server counts distinct clients, not networks, so three devices behind one
-firewall can reach the threshold.
+above. The server counts networks, which are accounts, and not sites: three accounts
+behind one office firewall or carrier NAT are three reporters and can still reach the
+threshold.
 
 A jump in `pairs_at_threshold_1d` across most gated records of a country at once
 points at a client build or a network there, not at a censor that found each record.
@@ -98,10 +103,11 @@ WITH raw(metric, n) AS (
 		('reports_1d', (SELECT COUNT(*) FROM network_extender_block_report WHERE (now() AT TIME ZONE 'utc') - interval '1 day' <= report_time)),
 		('pairs_at_threshold_1d', (
 			SELECT COUNT(*) FROM (
-				SELECT 1 FROM network_extender_block_report
-				WHERE (now() AT TIME ZONE 'utc') - interval '1 day' <= report_time
-				GROUP BY extender_id, country_code
-				HAVING 3 <= COUNT(DISTINCT client_id)
+				SELECT 1 FROM network_extender_block_report AS report
+				INNER JOIN network_client AS client ON client.client_id = report.client_id
+				WHERE (now() AT TIME ZONE 'utc') - interval '1 day' <= report.report_time
+				GROUP BY report.extender_id, report.country_code
+				HAVING 3 <= COUNT(DISTINCT client.network_id)
 			) AS pairs
 		)),
 		('release_requests_all', (SELECT COUNT(*) FROM network_extender_release_request)),
