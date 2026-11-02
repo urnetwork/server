@@ -918,10 +918,10 @@ func handleOnboardingBrevoWebhook(ctx context.Context, args *BrevoWebhookArgs) {
 	case model.EventEmailBounced:
 		model.MarkNetworkOnboardingBounced(ctx, email.NetworkId)
 		// every campaign stops for an address that bounced
-		model.SuppressNetworkMarketing(ctx, email.NetworkId, onboarding.ExitBounced, at)
+		SuppressNetworkMarketing(ctx, email.NetworkId, onboarding.ExitBounced, at)
 	case model.EventEmailComplained:
 		model.MarkNetworkOnboardingComplained(ctx, email.NetworkId, email.Step)
-		model.SuppressNetworkMarketing(ctx, email.NetworkId, onboarding.ExitComplained, at)
+		SuppressNetworkMarketing(ctx, email.NetworkId, onboarding.ExitComplained, at)
 	}
 	if reason := onboarding.WebhookExit(name); reason != "" {
 		if model.ExitNetworkOnboarding(ctx, email.NetworkId, reason, at) {

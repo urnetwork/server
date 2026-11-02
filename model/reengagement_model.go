@@ -810,47 +810,48 @@ func SetNetworkProductUpdatesSource(ctx context.Context, networkId server.Id, so
 	})
 }
 
-// SuppressNetworkMarketing stops every campaign's mail to the network. The
+// SuppressNetworkMarketingInTx stops every campaign's mail to the network. The
 // first suppression's time and reason stay.
-func SuppressNetworkMarketing(ctx context.Context, networkId server.Id, reason string, now time.Time) {
-	server.Tx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-				INSERT INTO account_preferences (network_id, product_updates, marketing_suppressed_at, marketing_suppressed_reason)
-				VALUES ($1, true, $3, $2)
-				ON CONFLICT (network_id) DO UPDATE SET
-					marketing_suppressed_at = COALESCE(account_preferences.marketing_suppressed_at, $3),
-					marketing_suppressed_reason = CASE
-						WHEN account_preferences.marketing_suppressed_at IS NULL THEN $2
-						ELSE account_preferences.marketing_suppressed_reason
-					END
-			`,
-			networkId,
-			reason,
-			now,
-		))
-	})
+//
+// Callers use controller.SuppressNetworkMarketing, which mirrors the
+// suppression to Brevo's lists in the same transaction.
+func SuppressNetworkMarketingInTx(tx server.PgTx, ctx context.Context, networkId server.Id, reason string, now time.Time) {
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			INSERT INTO account_preferences (network_id, product_updates, marketing_suppressed_at, marketing_suppressed_reason)
+			VALUES ($1, true, $3, $2)
+			ON CONFLICT (network_id) DO UPDATE SET
+				marketing_suppressed_at = COALESCE(account_preferences.marketing_suppressed_at, $3),
+				marketing_suppressed_reason = CASE
+					WHEN account_preferences.marketing_suppressed_at IS NULL THEN $2
+					ELSE account_preferences.marketing_suppressed_reason
+				END
+		`,
+		networkId,
+		reason,
+		now,
+	))
 }
 
-// LiftNetworkMarketingSuppression clears a suppression whose reason is in
+// LiftNetworkMarketingSuppressionInTx clears a suppression whose reason is in
 // `liftable` (a connection renews the relationship after a sunset; a bounce,
 // complaint or unsubscribe never lifts). Returns whether it lifted.
-func LiftNetworkMarketingSuppression(ctx context.Context, networkId server.Id, liftable []string) (lifted bool) {
-	server.Tx(ctx, func(tx server.PgTx) {
-		tag := server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-				UPDATE account_preferences
-				SET marketing_suppressed_at = NULL, marketing_suppressed_reason = ''
-				WHERE network_id = $1 AND marketing_suppressed_at IS NOT NULL AND marketing_suppressed_reason = ANY($2::text[])
-			`,
-			networkId,
-			liftable,
-		))
-		lifted = 0 < tag.RowsAffected()
-	})
-	return
+//
+// Callers use controller.LiftNetworkMarketingSuppression, which mirrors the
+// lift to Brevo's lists in the same transaction.
+func LiftNetworkMarketingSuppressionInTx(tx server.PgTx, ctx context.Context, networkId server.Id, liftable []string) (lifted bool) {
+	tag := server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			UPDATE account_preferences
+			SET marketing_suppressed_at = NULL, marketing_suppressed_reason = ''
+			WHERE network_id = $1 AND marketing_suppressed_at IS NOT NULL AND marketing_suppressed_reason = ANY($2::text[])
+		`,
+		networkId,
+		liftable,
+	))
+	return 0 < tag.RowsAffected()
 }
 
 // ListLiftableSuppressedNetworksConnectedOn are networks suppressed for a
