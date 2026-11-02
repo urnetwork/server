@@ -339,11 +339,12 @@ The reaper merged on 11-01 (7334b3a17) at the owner's 91 days, and `horizonDays`
 - It is read before every batch, with the other fields, and a new value applies from the next batch. Raised, it stops deleting inside the new horizon from that batch on. Nothing already deleted comes back.
 - It never turns the reaper on or off; `mode` does. A dry run at 35 days is `mode dry_run` with `horizonDays 35`.
 
-**Reaper-only, except key history while the mode is on.** The floor is `ContractHorizonFloor` in `model/contract_horizon_reaper.go`, and the code setting floors there too. `server.ContractRetention` stays 91 days, so nothing else moves:
+**Reaper-only, except key history and close evidence while the mode is on.** The floor is `ContractHorizonFloor` in `model/contract_horizon_reaper.go`, and the code setting floors there too. `server.ContractRetention` stays 91 days, so nothing else moves:
 - the partition drop, whose `contractWeekBlocker` keeps only payment holds (it needs the reaper's keep rules before any cutover; that is separate work);
-- close evidence retention;
 - the sn-reconcile holders floor;
 - the monitor's partition retention signal.
+
+**Close evidence follows `horizonDays` while `mode` is `on` (owner, 2026-11-01).** `maintain_contract_partitions` then permanently deletes the close report evidence accepted longer ago than the horizon whose contract is resolved or gone, never under the evidence guard's 35-day floor (the horizon guard migration, 905). It does not apply the reaper's keep rules: a contract the reaper keeps for a payment hold, block points or an unsettled escrow loses its evidence at the horizon all the same. At `horizonDays 35` that is about a billion rows, the evidence accepted from 10-06 on, as each day of it passes 35 days, from about 11-10. With `mode dry_run`, `mode off`, no control, or an unreadable one, evidence keeps 91 days. The deletes have their own brake, `{close_evidence_retention}control` (`mode` on/off, `maxRowsPerSecond`, default 1,000 a second), read before every batch; `bringyourctl db close-evidence-retention` shows and sets it.
 
 **Key history follows `horizonDays` while `mode` is `on` (owner, 2026-11-01).** `remove_gone_st_client_key_history` then permanently deletes the signed key history of clients gone longer than the horizon, never under the guard's 30-day floor (migration 904). With `mode dry_run`, `mode off`, no control, or an unreadable one, key history keeps 91 days, so a dry run at any horizon deletes no key history. The deletes have their own brake, `{client_key_history_retention}control` (`mode` on/off, `maxClientsPerSecond`, default 150 a second), read before every batch.
 
@@ -355,7 +356,7 @@ The reaper merged on 11-01 (7334b3a17) at the owner's 91 days, and `horizonDays`
 | Transfer audit rollup (`RollupTransferAuditEvents`: the periodic task, `stats rollup-transfer`, `stats backfill`, `stats migrate-202608`) | transfer_contract joined to contract_close by close time, one UTC day at a time, replacing the day's row | task: 3 days; CLI defaults: 7 days (`rollup-transfer`), 21 days (`backfill`, `migrate-202608`); an explicit `--start` reaches any day | days the reaper can reach keep their rows (the new guard) |
 | Payout planner | unpaid sweeps of contracts minted before the cutoff, sweeps of safely canceled payments, staged sweeps | up to 300 days | kept by `unpaid_legacy`, `payment_incomplete`, `plan_staged` |
 | sn-reconcile (A2 holders, census) | sweeps of pending and safely canceled payments; legacy payments | per payment | kept as payment holds or incomplete payments. The reaper deletes a contract with its sweeps, so A2's rule that a sweep above its floor has its contract still holds |
-| Subnet epoch reads (`GetStEpochProviderUsage`, the v2 ledger, close originals) | live contracts and the usage archive, by close time; close evidence | each epoch's window | unchanged in result: every deleted credit-bearing contract is archived in the same statement, and evidence keeps its 91 days. The read's duplicate probe once hashed the whole archive, which the reaper grows; see below |
+| Subnet epoch reads (`GetStEpochProviderUsage`, the v2 ledger, close originals) | live contracts and the usage archive, by close time; close evidence | each epoch's window | unchanged in result: every deleted credit-bearing contract is archived in the same statement. Evidence follows the horizon with the mode on, but the census reads reports only for a window of at most 32,768 closed contracts, which no production epoch is. The read's duplicate probe once hashed the whole archive, which the reaper grows; see below |
 | Provider stats (`/stats/provider-last-n`, `/stats/providers-overview-last-n`, the legacy `-last-90` routes) and provider payout stats | contracts joined to closes; sweeps by sweep time | up to 366 days | undercount the days older than 35 |
 | `/transfer/stats` | unpaid sweeps | all time | `unpaid_bytes_provided` falls as post-cutoff sweeps pass 35 days |
 
@@ -393,7 +394,7 @@ The DB tests check each one at 35 days, with the cutoff inside 91 days as produc
 - **Stats re-rolls:** `stats backfill` and `stats rollup-transfer` no longer rewrite days more than 33 days old; those days keep the rows they have.
 - **Presentation is an owner call:** clamp the stats windows to the horizon, serve older days from the daily audit rollup, or stop counting subnet-pool sweeps as unpaid.
 
-**Close evidence** keeps its 91 days. Below 91, a deleted contract's evidence outlives it until then; `RemoveExpiredCloseEvidence` takes evidence whose contract is gone.
+**Close evidence** follows the horizon while the mode is on, as above: the evidence of a deleted contract goes once it is as old, and so does that of a resolved contract the reaper keeps. An exact retry of a deleted report is answered from the contract's close report while the contract stays, and refused once it is gone.
 
 **Reporting:**
 - `urnetwork_contract_horizon_horizon_seconds` (no labels) is the horizon the last control read set.

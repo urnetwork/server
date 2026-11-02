@@ -12,7 +12,10 @@ exists, where the build differs from this plan, and the production runbook.
 - **Granularity: weekly**, Monday 00:00 UTC bounds, the same on every table.
 - **`contract_close_report_evidence`: the same horizon, by age.** A migration
   lets only the retention task delete rows older than R, in batches; the
-  table stays plain and otherwise immutable.
+  table stays plain and otherwise immutable. Since the horizon guard migration
+  (905, owner 2026-11-01) the rows go at the contract horizon reaper's horizon
+  while its mode is on, 35 days at the shortest, whatever the reaper's keep
+  rules.
 - **The cascade foreign key `contract_close_report -> transfer_contract` is
   dropped at cutover.** Reports leave with their contracts' partitions.
 - Defaults taken: no MinIO export before a drop for now (MinIO is days from
@@ -532,8 +535,10 @@ Step 7 needs no action: the maintenance task drops each week once it qualifies.
   Splitting it by copy into monthly partitions after the storage expansion is
   still the faster way to reclaim it.
 - **Close evidence** is deleted once accepted more than 91 days ago, if its
-  contract is resolved or gone. The oldest evidence on main is from
-  2026-10-06, so deletes begin around 2027-01-05.
+  contract is resolved or gone; while the contract horizon reaper's mode is
+  on, once accepted longer ago than its horizon, down to 35 days. The oldest
+  evidence on main is from 2026-10-06, so at 35 days deletes begin around
+  2026-11-10 (at 91, around 2027-01-05), at the pace of their own brake.
 - **Archive growth needs its own decision.** `st_provider_usage_archive` is
   1.5 GB for 8.7 M rows today, about 176 bytes a row. Once retention archives
   every contract, it grows about as fast as contracts are created: about
