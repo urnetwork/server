@@ -761,9 +761,10 @@ allow it, because the session parse honors the gates.
 - `urnetwork_auth_network_refreshes_total{outcome}`: `renewed`,
   `refused_client`, `refused_api_key`, `state_invalid`.
 - `urnetwork_auth_jwt_legacy_accepts_total` gains a `kind` label (`network`
-  or `client`). A client token refreshes on its half-life, so its expired
-  accepts fade on their own. The network kind's expired count is the one
-  that decides when `reject_expired` can be flipped on.
+  or `client`). A client token refreshes between 40% and 50% of its
+  lifetime, so its expired accepts fade on their own. The network kind's
+  expired count is the one that decides when `reject_expired` can be flipped
+  on.
 - The signals dashboard's "authentication decisions / s" panel charts both
   (`TestAuthenticationPanelSplitsLegacyAcceptsByCredentialKind`).
 - `POST /auth/network-refresh` state checks count under the `api/refresh`
