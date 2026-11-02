@@ -303,6 +303,9 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		router.NewRoute("GET", "/admin/onboarding/results", handlers.AdminOnboardingResults),
 		router.NewRoute("GET", "/admin/onboarding/email-tracker", handlers.AdminOnboardingEmailTracker),
 		router.NewRoute("GET", "/admin/onboarding/experiments", handlers.AdminOnboardingExperiments),
+		// the re-engagement results (mmm/reengagement/PLAN.md "MEASUREMENT"),
+		// behind the same admin bearers
+		router.NewRoute("GET", "/admin/reengagement/results", handlers.AdminReengagementResults),
 		router.NewRoute("POST", "/subscription/stripe/payment-sheet", handlers.StripePaymentSheet),
 		router.NewRoute("GET", "/subscription/stripe/prices", handlers.StripePrices),
 		// the "Manage subscription" screen: every store billing the network with

@@ -214,6 +214,7 @@ var routeAccessByRoute = map[string]routeAccess{
 	"GET /admin/onboarding/results":                 routeAccessPublic,
 	"GET /admin/onboarding/email-tracker":           routeAccessPublic,
 	"GET /admin/onboarding/experiments":             routeAccessPublic,
+	"GET /admin/reengagement/results":               routeAccessPublic,
 	"POST /subscription/stripe/payment-sheet":       routeAccessClient,
 	"GET /subscription/stripe/prices":               routeAccessClient,
 	"GET /subscription/details":                     routeAccessNetwork, // subscription and billing details

@@ -11,6 +11,7 @@ import (
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/onboarding"
+	"github.com/urnetwork/server/reengagement"
 	"github.com/urnetwork/server/session"
 	"github.com/urnetwork/server/task"
 	"github.com/urnetwork/server/taskworker/work"
@@ -92,6 +93,8 @@ func initTaskSchedule(ctx context.Context) {
 		controller.ScheduleOnboardingEmailTrackerSync(clientSession, tx, server.NowUtc())
 		// the re-engagement scan (02:30 UTC; inert until reengagement.yml enables it)
 		controller.ScheduleReengagementScan(clientSession, tx, controller.NextReengagementScanAt(server.NowUtc()))
+		// the re-engagement results rollup (02:45 UTC, after the scan)
+		controller.ScheduleReengagementResultsRollup(clientSession, tx, reengagement.NextResultsRollupAt(server.NowUtc()))
 		// the service reminders (03:00 UTC; each kind off until reengagement.yml turns it on)
 		controller.ScheduleServiceReminders(clientSession, tx, controller.NextServiceRemindersAt(server.NowUtc()))
 		controller.ScheduleSubscriptionMetricsSync(clientSession, tx, server.NowUtc())
@@ -658,6 +661,12 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			controller.ReengagementStep,
 			controller.ReengagementStepPost,
+		),
+		// the nightly re-engagement results rollup (02:45 UTC):
+		// reengagement_results_daily over the last rollup_days cohort days
+		task.NewTaskTargetWithPost(
+			controller.ReengagementResultsRollup,
+			controller.ReengagementResultsRollupPost,
 		),
 		// crypto Pro and store trials about to end, through the account mailer
 		task.NewTaskTargetWithPost(
