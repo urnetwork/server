@@ -11162,4 +11162,12 @@ var migrations = []any{
 		CREATE INDEX network_reengagement_email_network_sent
 		ON network_reengagement_email (network_id, sent_at)
 	`),
+
+	// lag.dev's measurement api probes (lag.dev/PLAN.md A4,
+	// network_extender_measurement_probe_schema.go): the latest probe of each
+	// published family of each extender the sample serves, which the
+	// taskworker writes every two minutes and the sample reads to leave out an
+	// extender whose api its probes cannot reach. A new table; apply before
+	// deploying the taskworker that writes it and the api that reads it.
+	newSqlMigration(networkExtenderMeasurementProbeSchemaSql),
 }
