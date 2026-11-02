@@ -283,20 +283,20 @@ func newCompetitionSupervisedCompletionPgFixture(t testing.TB, ctx context.Conte
 	fixture.store.now = clock.Now
 	lease, err := fixture.store.AcquireAutomationLease(ctx, fixture.settings, "synthetic-completion-supervisor", time.Minute)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("acquire synthetic completion supervisor: %v", err)
 	}
 	fixture.settings.automationLease, fixture.settings.automationRoundId = lease, fixture.round.RoundId
 	fixture.settings.WorkerLeaseSeconds = 1800
-	patch, err := ValidateAndCanonicalizePatch(testPatch("synthetic-completion-fence"), fixture.settings.PatchPolicy)
-	if err != nil {
-		t.Fatal(err)
+	patch, patchError := ValidateAndCanonicalizePatch(testPatch("synthetic-completion-fence"), fixture.settings.PatchPolicy)
+	if patchError != nil {
+		t.Fatalf("canonicalize synthetic supervised completion patch: %v", patchError)
 	}
 	if _, _, err := fixture.store.Enqueue(ctx, fixture.settings, fixture.round.RoundId, patch, "synthetic-completion-submitter", testApiImageDigest()); err != nil {
-		t.Fatal(err)
+		t.Fatalf("enqueue synthetic supervised completion: %v", err)
 	}
 	job, err := fixture.store.Claim(ctx, fixture.settings, "synthetic-completion-worker", testWorkerImageDigest())
 	if err != nil || job == nil {
-		t.Fatalf("claim synthetic supervised completion: %v", err)
+		t.Fatalf("claim synthetic supervised completion: missing_job=%t error=%v", job == nil, err)
 	}
 	return fixture, job, clock
 }
