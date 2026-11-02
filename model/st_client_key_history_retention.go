@@ -4,7 +4,9 @@
 // mode is on, which its runtime control shortens from 91 days down to the
 // reaper's floor, and 91 days otherwise; never less than the guard's floor,
 // server.ClientKeyHistoryRetentionFloor. A runtime brake of its own
-// (st_client_key_history_retention_control.go) stops or paces the deletes.
+// (st_client_key_history_retention_control.go) stops or paces the deletes,
+// and its `horizonDays` can set the retention's own horizon in place of the
+// reaper's, down to the guard's floor.
 // Original-close verification reads the history of a report's own client
 // (contract_close_original.go) while that client's contract is open, and a
 // contract opens only between active clients, so the horizon outlasts every
@@ -39,7 +41,8 @@ type StClientKeyHistoryRetentionSettings struct {
 	// its client went, while the reaper's mode is on: the horizonDays of its
 	// runtime control as the reaper narrows it (NarrowContractHorizonControl).
 	// A dry run, the reaper off, no control or an unreadable one keep
-	// Retention, so trying a horizon in dry run deletes no key history.
+	// Retention, so trying a horizon in dry run deletes no key history. The
+	// brake's own horizonDays, when set, takes the place of both.
 	FollowContractHorizon bool
 	// Gone clients deleted per second while the brake sets no rate: a cautious
 	// start, so a backlog that comes due at once, such as the 2026-10-24..27
@@ -92,6 +95,16 @@ func (self *StClientKeyHistoryRetentionSettings) horizon(ctx context.Context) ti
 		}
 	}
 	return max(horizon, server.ClientKeyHistoryRetentionFloor)
+}
+
+// The horizon of one run: the brake's own horizon when it sets one, otherwise
+// horizon's. brake is the run's first read of the brake, nil when it could not
+// be read; a run that cannot read the brake deletes nothing either way.
+func (self *StClientKeyHistoryRetentionSettings) runHorizon(ctx context.Context, brake *StClientKeyHistoryRetentionControl) time.Duration {
+	if brake != nil && brake.Horizon != nil {
+		return max(*brake.Horizon, server.ClientKeyHistoryRetentionFloor)
+	}
+	return self.horizon(ctx)
 }
 
 // Where the next run resumes.
@@ -219,7 +232,13 @@ func RemoveGoneStClientKeyHistory(
 	deleteDeadline := start.Add(settings.RunBudget / 2)
 	discoverDeadline := start.Add(settings.RunBudget)
 
-	report.Horizon = settings.horizon(ctx)
+	// the brake's own horizon is read once a run; the deletes reread the brake
+	// before every batch
+	runBrake, runBrakeErr := GetStClientKeyHistoryRetentionControl(ctx, settings)
+	if runBrakeErr != nil {
+		runBrake = nil
+	}
+	report.Horizon = settings.runHorizon(ctx, runBrake)
 	minGoneTime := now.Add(-report.Horizon).UTC()
 	pace := newRetentionPace()
 	for {

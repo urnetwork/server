@@ -345,7 +345,7 @@ The reaper merged on 11-01 (7334b3a17) at the owner's 91 days, and `horizonDays`
 - the sn-reconcile holders floor;
 - the monitor's partition retention signal.
 
-**Key history follows `horizonDays` while `mode` is `on` (owner, 2026-11-01).** `remove_gone_st_client_key_history` then permanently deletes the signed key history of clients gone longer than the horizon, never under the guard's 30-day floor (migration 904). With `mode dry_run`, `mode off`, no control, or an unreadable one, key history keeps 91 days, so a dry run at any horizon deletes no key history. The deletes have their own brake, `{client_key_history_retention}control` (`mode` on/off, `maxClientsPerSecond`, default 150 a second), read before every batch.
+**Key history follows `horizonDays` while `mode` is `on` (owner, 2026-11-01).** `remove_gone_st_client_key_history` then permanently deletes the signed key history of clients gone longer than the horizon, never under the guard's 30-day floor (migration 904). With `mode dry_run`, `mode off`, no control, or an unreadable one, key history keeps 91 days, so a dry run at any horizon deletes no key history. The deletes have their own brake, `{client_key_history_retention}control` (`mode` on/off, `maxClientsPerSecond`, default 150 a second), read before every batch. Its `horizonDays`, when set, takes the place of the reaper's horizon for key history, whatever the reaper's mode, down to the guard's floor; it is read once a run.
 
 **Readers of the deleted rows, and how far back each reads:**
 

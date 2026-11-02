@@ -5,6 +5,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/urnetwork/server"
 )
@@ -18,16 +19,25 @@ import (
 //   - `maxClientsPerSecond`: gone clients deleted per second, at most the
 //     code's MaxDeleteClientsPerSecond; zero, or a value that does not parse,
 //     is off.
+//   - `horizonDays`: the retention's own horizon in whole days, in place of
+//     the contract horizon reaper's: history goes once this long has passed
+//     since its client went, whatever the reaper's mode. It is never below the
+//     guard's floor (server.ClientKeyHistoryRetentionFloor, 30 days), which a
+//     smaller value counts as, nor above the retention's longest horizon
+//     (91 days), which a value that does not parse keeps. It is read once a
+//     run, so a change applies from the next run, and removing it returns the
+//     retention to the reaper's horizon.
 //
-// Without the hash the retention deletes at DefaultDeleteClientsPerSecond. A
-// run that cannot read the hash deletes nothing more in that run. The weekly
-// discovery of clients gone without a record only records them, and runs
-// either way.
+// Without the hash the retention deletes at DefaultDeleteClientsPerSecond, at
+// the reaper's horizon. A run that cannot read the hash deletes nothing more
+// in that run. The weekly discovery of clients gone without a record only
+// records them, and runs either way.
 const stClientKeyHistoryRetentionControlKey = "{client_key_history_retention}control"
 
 const (
 	StClientKeyHistoryRetentionControlFieldMode                = "mode"
 	StClientKeyHistoryRetentionControlFieldMaxClientsPerSecond = "maxClientsPerSecond"
+	StClientKeyHistoryRetentionControlFieldHorizonDays         = "horizonDays"
 )
 
 // The effective brake: the code settings as the Redis hash narrowed them.
@@ -38,11 +48,15 @@ type StClientKeyHistoryRetentionControl struct {
 	On bool
 	// gone clients deleted per second at most, while On
 	MaxClientsPerSecond float64
+	// the retention's own horizon, from `horizonDays`; nil follows the
+	// contract horizon reaper (StClientKeyHistoryRetentionSettings.horizon)
+	Horizon *time.Duration
 }
 
 // The brake the fields narrow the settings to. Pure: fields is the hash as
 // read, empty when the key is absent. A field narrows as far as it can: a
-// mode other than on is off, and a rate that does not parse is zero, off.
+// mode other than on is off, a rate that does not parse is zero, off, and a
+// horizon that does not parse is the longest.
 func NarrowStClientKeyHistoryRetentionControl(fields map[string]string, settings *StClientKeyHistoryRetentionSettings) *StClientKeyHistoryRetentionControl {
 	control := &StClientKeyHistoryRetentionControl{
 		Present:             0 < len(fields),
@@ -60,10 +74,34 @@ func NarrowStClientKeyHistoryRetentionControl(fields map[string]string, settings
 			control.MaxClientsPerSecond = 0
 		}
 	}
+	if value, ok := fields[StClientKeyHistoryRetentionControlFieldHorizonDays]; ok {
+		horizon := max(settings.Retention, server.ClientKeyHistoryRetentionFloor)
+		if days, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64); err == nil {
+			horizon = stClientKeyHistoryHorizonFromDays(days, settings.Retention)
+		}
+		control.Horizon = &horizon
+	}
 	if !(0 < control.MaxClientsPerSecond) {
 		control.On = false
 	}
 	return control
+}
+
+// days as a horizon between the guard's floor and ceiling, the retention's
+// longest. Clamped while still in days, so that no count of days overflows
+// into a short duration. Pure.
+func stClientKeyHistoryHorizonFromDays(days int64, ceiling time.Duration) time.Duration {
+	const day = 24 * time.Hour
+	floor := server.ClientKeyHistoryRetentionFloor
+	ceiling = max(ceiling, floor)
+	switch {
+	case days <= int64(floor/day):
+		return floor
+	case int64(ceiling/day) < days:
+		return ceiling
+	default:
+		return time.Duration(days) * day
+	}
 }
 
 // Reads the brake and narrows the settings with it. One bounded Redis read,

@@ -34,6 +34,13 @@ import (
 //	  - migration.example
 //	api_url: https://api.ur.example
 //	gossip_identity_key_hex: <ed25519 seed>
+//	directory:
+//	  durable_network_ids:
+//	    - <operator account network id>
+//	  capability_cohorts:
+//	    - capability: tcp-camouflage-v1
+//	      extender_public_keys_hex:
+//	        - <extender identity public key, hex>
 //	dns:
 //	  enabled: false
 //	  hosted_zone_id: <zone>
@@ -56,6 +63,14 @@ import (
 //	  aws_region: <region>
 //	  aws_access_key_id: <key id>
 //	  aws_secret_access_key: <secret>
+//	seed:
+//	  enabled: false
+//	  record_count: 8
+//	  mirrors:
+//	    - name: origin
+//	      url: https://api.ur.example/v1/seed.bin
+//	      dial_addresses:
+//	        - <address>
 //
 // The private key signs; the public list is what clients accept, and is a list
 // so a key can be rotated by publishing both before the old one is dropped.
@@ -69,6 +84,9 @@ import (
 // carried here so operations configure one resource rather than two. The
 // measurement block is the lag.dev measurement certificates and their zone
 // (lag.dev/PLAN.md C), read by the issuance and dns tasks and the activation.
+// The seed block is the public seed bundle and its mirrors
+// (connect/EXTENDER-UPDATE2.md §2, extender_seed_config.go), read by the seed
+// publisher, the mirror check and the api's ExtenderSeedPath.
 //
 // The resource is optional. An operator that has not configured it runs with
 // no extender network at all: hello serves no root keys and activation
@@ -94,6 +112,8 @@ type ExtenderConfig struct {
 	Directory ExtenderDirectoryConfig `yaml:"directory"`
 	// the lag.dev measurement certificates and names (lag.dev/PLAN.md C)
 	Measurement ExtenderMeasurementConfig `yaml:"measurement"`
+	// the public seed bundle and its mirrors (connect/EXTENDER-UPDATE2.md §2)
+	Seed ExtenderSeedConfig `yaml:"seed"`
 }
 
 // The lag.dev measurement certificates (lag.dev/PLAN.md C5-C10). Disabled, the
@@ -131,6 +151,10 @@ type ExtenderMeasurementConfig struct {
 // is the directory as it was.
 type ExtenderDirectoryConfig struct {
 	DurableNetworkIds []string `yaml:"durable_network_ids"`
+	// The gated extenders whose records require a client capability
+	// (connect/EXTENDER-UPDATE2.md §3.2, extender_capability.go). Unset
+	// requires nothing, which is the directory as it was.
+	CapabilityCohorts []ExtenderCapabilityCohortConfig `yaml:"capability_cohorts"`
 }
 
 // The hmac domain the directory secret is derived under.
@@ -259,6 +283,7 @@ func readExtenderConfig() *extenderConfigResult {
 			err: &extenderConfigError{message: "the extender configuration is not readable", cause: err},
 		}
 	}
+	warnUnknownExtenderCapabilities(config)
 	return &extenderConfigResult{config: config}
 }
 
