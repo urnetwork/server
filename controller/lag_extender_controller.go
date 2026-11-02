@@ -95,12 +95,14 @@ func getLagServing(ctx context.Context, now time.Time, maxAge time.Duration) *la
 }
 
 // Reads the extenders that serve the measurement api: published, issued, and
-// delivered (lagStillServing). Each is placed by its derived location, else by
-// GeoLite2 City for its first address (A4). An extender that cannot be placed
-// is left out: lag.dev picks its dots by distance (L3), and a dot it cannot
-// place it cannot pick. A deployment with no extender network serves none,
-// and neither does one whose measurement block is off, whose records then
-// carry no measurement id either (C10).
+// delivered (lagStillServing). Each is placed where the issuance order counts
+// it (A4, C7; model.GetLagExtenderPlaces): by GeoLite2 City for its
+// addresses, choosing between its two families when they disagree, and moved
+// to its derived location only within that country. An extender that cannot
+// be placed is left out: lag.dev picks its dots by distance (L3), and a dot it
+// cannot place it cannot pick. A deployment with no extender network serves
+// none, and neither does one whose measurement block is off, whose records
+// then carry no measurement id either (C10).
 func loadLagServing(ctx context.Context, now time.Time) *lagServingSet {
 	set := &lagServingSet{
 		loadTime:  now,
@@ -118,7 +120,7 @@ func loadLagServing(ctx context.Context, now time.Time) *lagServingSet {
 		extenderIds = append(extenderIds, host.ExtenderId)
 	}
 	measurements := model.GetLagExtenderMeasurements(ctx, extenderIds, now)
-	derivedPlaces := model.GetLagExtenderDerivedPlaces(ctx, extenderIds)
+	places := model.GetLagExtenderPlaces(ctx, extenderIds)
 	for _, host := range hosts {
 		if len(host.Ips) == 0 {
 			continue
@@ -127,10 +129,7 @@ func loadLagServing(ctx context.Context, now time.Time) *lagServingSet {
 		if measurement == nil || !measurement.Serving() {
 			continue
 		}
-		place := derivedPlaces[host.ExtenderId]
-		if place == nil {
-			place = lagAddressPlace(host.Ips[0])
-		}
+		place := places[host.ExtenderId]
 		if place == nil {
 			continue
 		}
