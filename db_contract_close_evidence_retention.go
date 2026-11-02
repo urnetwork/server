@@ -487,7 +487,13 @@ type closeEvidenceBatch struct {
 
 // One batch: reads the next rows of leaf after the key, below upper, and
 // deletes the expired ones by ctid, in one statement. $1-$3 the key, $4 upper,
-// $5 the rows to read, $6 the retention in seconds.
+// $5 the rows to read, $6 the retention in seconds. Both name ONLY the target.
+// A run reads its targets once, so a cutover during the run can leave a batch
+// naming the partitioned parent, where a ctid is not unique: a plain scan
+// would read every leaf, and the delete would take the row at each ctid in
+// every leaf, whatever its age or contract. ONLY reads no row of a parent, so
+// that target ends and the next run reads the leaves; on a leaf or the plain
+// table it changes nothing.
 const closeEvidenceRetentionBatchSql = `
 	WITH scanned AS MATERIALIZED (
 		SELECT
@@ -496,7 +502,7 @@ const closeEvidenceRetentionBatchSql = `
 			evidence.client_id,
 			evidence.report_id,
 			evidence.accepted_at < (now() AT TIME ZONE 'UTC') - make_interval(secs => $6) AS aged
-		FROM public.%[1]s evidence
+		FROM ONLY public.%[1]s evidence
 		WHERE
 			(evidence.contract_id, evidence.client_id, evidence.report_id) > ($1::uuid, $2::uuid, $3::uuid) AND
 			evidence.contract_id < $4::uuid
@@ -513,7 +519,7 @@ const closeEvidenceRetentionBatchSql = `
 			) AS unresolved
 		FROM scanned
 	), removed AS (
-		DELETE FROM public.%[1]s evidence
+		DELETE FROM ONLY public.%[1]s evidence
 		WHERE evidence.ctid = ANY (ARRAY(SELECT classified.row_ctid FROM classified WHERE classified.aged AND NOT classified.unresolved))
 		RETURNING 1
 	)

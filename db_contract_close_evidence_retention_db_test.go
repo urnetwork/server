@@ -278,6 +278,67 @@ func TestCloseEvidenceRetentionStartsAtTheLowWater(t *testing.T) {
 	})
 }
 
+// A cutover during a run leaves a batch naming the partitioned parent, where
+// each leaf's first row has the same ctid. The batch reads nothing there and
+// deletes nothing, so a report of an unresolved contract stays beside an
+// expired report at the same ctid; each leaf then behaves as the plain table
+// did.
+func TestCloseEvidenceRetentionBatchOnAPartitionedParentReadsNothing(t *testing.T) {
+	DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := NowUtc()
+		const day = 24 * time.Hour
+		testCloseEvidencePartitionedInThePast(t, ctx, now)
+		weeksAgo := func(weeks int) time.Time {
+			return PartitionGranularityWeekly.RangeStart(now).Add(-time.Duration(weeks)*7*day + day)
+		}
+		_, unresolvedLeaf := testCloseEvidenceCreateWeek(t, ctx, weeksAgo(8))
+		_, expiredLeaf := testCloseEvidenceCreateWeek(t, ctx, weeksAgo(7))
+		unresolvedId := testContractIdAt(now.Add(-60 * day))
+		testInsertContractRows(t, ctx, unresolvedId, false)
+		unresolved := testCloseEvidenceReportAt(weeksAgo(8), unresolvedId, now.Add(-50*day))
+		expired := testCloseEvidenceReportAt(weeksAgo(7), testContractIdAt(now.Add(-60*day)), now.Add(-50*day))
+		for _, report := range []testCloseEvidenceReport{unresolved, expired} {
+			connect.AssertEqual(t, testInsertCloseEvidenceReport(ctx, report), true)
+		}
+		connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, unresolved), unresolvedLeaf)
+		connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, expired), expiredLeaf)
+		ctidOf := func(report testCloseEvidenceReport) (ctid string) {
+			MaintenanceDb(ctx, func(conn PgConn) {
+				Raise(conn.QueryRow(
+					ctx,
+					`SELECT ctid::text FROM contract_close_report_evidence WHERE client_id = $1 AND report_id = $2`,
+					report.clientId,
+					report.reportId,
+				).Scan(&ctid))
+			})
+			return
+		}
+		connect.AssertEqual(t, ctidOf(unresolved), ctidOf(expired))
+
+		settings := DefaultCloseEvidenceRetentionSettings()
+		upper := ContractIdFloor(now.Add(-45 * day))
+		batch, err := removeCloseEvidenceBatch(ctx, closeEvidenceTable, closeEvidenceKey{}, upper, 45*day, settings)
+		testCloseEvidenceNoError(t, err)
+		connect.AssertEqual(t, batch.removed, int64(0))
+		connect.AssertEqual(t, batch.scanned, int64(0))
+		connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, unresolved), unresolvedLeaf)
+		connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, expired), expiredLeaf)
+
+		batch, err = removeCloseEvidenceBatch(ctx, unresolvedLeaf, closeEvidenceKey{}, upper, 45*day, settings)
+		testCloseEvidenceNoError(t, err)
+		connect.AssertEqual(t, batch.removed, int64(0))
+		connect.AssertEqual(t, batch.scanned, int64(1))
+		connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, unresolved), unresolvedLeaf)
+
+		batch, err = removeCloseEvidenceBatch(ctx, expiredLeaf, closeEvidenceKey{}, upper, 45*day, settings)
+		testCloseEvidenceNoError(t, err)
+		connect.AssertEqual(t, batch.removed, int64(1))
+		connect.AssertEqual(t, batch.scanned, int64(1))
+		connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, expired), "")
+	})
+}
+
 // A guard function that cannot be found keeps 91 days, whatever the horizon,
 // and the horizon applies again once it is back.
 func TestCloseEvidenceRetentionKeeps91DaysWithoutTheGuard(t *testing.T) {

@@ -5,6 +5,8 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -91,6 +93,23 @@ func TestCloseEvidenceGuardFloorOf(t *testing.T) {
 	ctx := WithContractHorizon(context.Background(), CloseEvidenceRetentionFloor)
 	if retention := closeEvidenceRetentionIn(ctx, testFailingQuerier{}); retention != ContractRetention {
 		t.Fatalf("a guard read that fails keeps %s, want %s", retention, ContractRetention)
+	}
+}
+
+// A batch reads and deletes only its target, never a partitioned parent's
+// leaves through it: on a parent, a ctid names a row in every leaf
+// (TestCloseEvidenceRetentionBatchOnAPartitionedParentReadsNothing runs this
+// against PostgreSQL).
+func TestCloseEvidenceRetentionBatchNamesOnlyItsTarget(t *testing.T) {
+	sql := fmt.Sprintf(closeEvidenceRetentionBatchSql, quoteIdentifier("a_target"))
+	target := `ONLY public."a_target" evidence`
+	for _, statement := range []string{"FROM " + target, "DELETE FROM " + target} {
+		if !strings.Contains(sql, statement) {
+			t.Errorf("the batch lacks %q:\n%s", statement, sql)
+		}
+	}
+	if count := strings.Count(sql, `public."a_target"`); count != 2 || strings.Count(sql, target) != 2 {
+		t.Errorf("the batch names its target %d times, %d of them with ONLY:\n%s", count, strings.Count(sql, target), sql)
 	}
 }
 
