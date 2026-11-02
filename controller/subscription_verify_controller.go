@@ -270,7 +270,14 @@ func playLinkedNetworkId(
 
 // Resolve the account link without acquiring another PostgreSQL session.
 func playLinkedNetworkIdInConn(connOwner server.PgConn, clientSession *session.ClientSession, sub *PlaySubscription) (*server.Id, bool) {
-	identifiers := sub.ExternalAccountIdentifiers
+	return playNetworkIdForIdentifiersInConn(connOwner, clientSession, sub.ExternalAccountIdentifiers)
+}
+
+// playNetworkIdForIdentifiersInConn is the network account identifiers name:
+// the external account id, or the obfuscated external account id as a
+// subscription payment id falling back to a plain network id. nil (with ok)
+// when they name none; ok=false when present but unparseable.
+func playNetworkIdForIdentifiersInConn(connOwner server.PgConn, clientSession *session.ClientSession, identifiers *PlayExternalAccountIdentifiers) (*server.Id, bool) {
 	if identifiers == nil {
 		return nil, true
 	}

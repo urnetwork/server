@@ -11162,4 +11162,121 @@ var migrations = []any{
 		CREATE INDEX network_reengagement_email_network_sent
 		ON network_reengagement_email (network_id, sent_at)
 	`),
+
+	// The index diet (owner decision 2026-11-01; db_index_diet_migrations.go).
+	// Each index below was audited against pg_stat_user_indexes, whose
+	// counters run from the 2026-10-23 20:08 UTC stats reset (8.2 days of full
+	// traffic, through two Sunday payouts, an epoch close and the November
+	// month boundary), and against every query in this repository and its
+	// siblings. The operator drops each one first, by hand, with the same
+	// DROP INDEX CONCURRENTLY IF EXISTS on a direct session, outside the dump,
+	// payout and maintenance windows, and only while no vacuum runs on its
+	// table. The migration then records the drop, so the schema audit never
+	// recreates the index, and is a no-op; an interrupted drop leaves an
+	// invalid index that the same statement removes. No version is written
+	// down: each is the migration's position wherever a merge places it, and
+	// the monitor and the tests read it through IndexDietMigrationVersion.
+
+	// transfer_contract_reap_pending_create_time (91.6 GB on Main, v493)
+	// served only the straggler stamp, whose 300-day horizon matches no
+	// contract before 2027-03-28: 314 scans and no tuples since the reset. The
+	// stamp now reads a contract id range of the primary key
+	// (assignStragglerReapTimeSQL). A build without that falls back to
+	// transfer_contract_create_time over the same empty range, so
+	// transfer_contract_create_time stays until every running build has the
+	// rewritten stamp; its own drop below waits for that. Every close, and
+	// every later non-HOT update of an unreaped closed contract, writes one
+	// index entry fewer, and each vacuum of the contract table reads 92 GB
+	// fewer.
+	reapPendingIndexDropMigration,
+
+	// transfer_contract_stream_id (13.7 GB, v629) has had no scan since
+	// the reset. Its only reader is the orphan sweep's contract_participant
+	// parent probe, and contract_participant is empty: only multi-hop
+	// contracts (with intermediaries) write it. The sweep's participant step
+	// now runs only while an index leading with stream_id exists
+	// (contractParticipantSweepAdmissionSql); without this one it keeps
+	// participant rows unexamined instead of reading the contract heap once
+	// per row. Drop it only while contract_participant is empty, and give the
+	// participant step a parent probe that does not read transfer_contract by
+	// stream_id before multi-hop contracts launch. A contract's late stream
+	// write (SetContractStream) can then be a HOT update.
+	streamIndexDropMigration,
+
+	// transfer_escrow_sweep_payment_id (7.6 GB, v62). Every reader that
+	// keys sweeps by payment_id also has transfer_escrow_sweep_payment_contract
+	// (payment_id, contract_id, v597), which leads with the same key: payment
+	// attribution, the sweep EXISTS checks, the weekly plan's unpaid arm
+	// (already on it) and canceled arm, and the contract partition's week
+	// blocker. Each insert of a sweep, and each payment assignment, writes one
+	// index entry fewer. Drop it outside the Sunday 10:00 UTC payout, whose
+	// bulk payment_id update holds the sweep table, and only while no
+	// autovacuum runs on transfer_escrow_sweep: a waiting drop cancels a
+	// normal autovacuum.
+	sweepPaymentIndexDropMigration,
+
+	// Close evidence retention at the contract horizon (owner, 2026-11-01;
+	// db_contract_close_evidence_horizon.go): the evidence guard admits the
+	// retention delete of a report accepted more than 35 days ago, the
+	// shortest horizon, in place of 91. It replaces the guard's function body
+	// only: no table lock, no scan. Every delete the running release makes
+	// (91 days) stays admitted, and the release that follows the horizon keeps
+	// 91 days until it finds this body installed (closeEvidenceGuardFloor), so
+	// it applies before or after the deploy.
+	newSqlMigration(contractCloseReportEvidenceHorizonGuardSql),
+
+	// Provider work session events at the contract horizon (C4,
+	// db_provider_work_session_partition.go): the drop guard admits a leaf
+	// whose upper bound is 35 days past, the shortest horizon, in place of 13
+	// weeks; the family's fence keeps a leaf inside the current horizon. It
+	// replaces the guard's function body only: no table lock. Every drop the
+	// running release makes (13 weeks) stays admitted.
+	newSqlMigration(providerWorkSessionEventHorizonDropGuardSql),
+
+	// The country a store sold each subscription row in: the App Store
+	// storefront or the Google Play region, recorded beside the price tier from
+	// now on (subscription_renewal_country_schema.go). The re-engagement
+	// program reads it as the network's country when the network has no
+	// onboarding row (mmm/reengagement/PLAN.md "Server" 10). Rows credited
+	// earlier stay NULL. A nullable column without a default: no table
+	// rewrite. Apply before deploying the api and taskworker that write it.
+	newSqlMigration(subscriptionRenewalCountrySchemaSql),
+
+	// purchase_started_7d on the onboarding results
+	// (onboarding_results_purchase_started_schema.go): the networks with a
+	// purchase.started in the 7 days after their cohort time, the in-app
+	// offer's leading metric, which both arms can reach. Constant default: no
+	// table rewrite. Apply before deploying the api and taskworker that read
+	// and write it; the next nightly rollup fills it for its whole window.
+	newSqlMigration(onboardingResultsPurchaseStartedSql),
+
+	// The re-engagement results (mmm/reengagement/PLAN.md "MEASUREMENT"):
+	// the nightly per-cohort-day episode counts the experiment readout reads
+	// (reengagement_results_schema.go). A new table; apply before deploying
+	// the taskworker that writes it and the api that reads it.
+	newSqlMigration(reengagementResultsDailySchemaSql),
+
+	// The re-engagement program's win-back offers (network_winback_offer_schema.go,
+	// mmm/reengagement/PLAN.md "THE STORES" 6): one row per offer, the
+	// network's offers in time order through its index. A new table: nothing
+	// is rewritten, and older binaries never read it. Apply before deploying
+	// the api and taskworker that write it.
+	newSqlMigration(networkWinbackOfferSchemaSql),
+
+	// Which run of the extender process sent each activation
+	// (connect/EXTENDER.md G3, extender_activation_run_schema.go), so a
+	// restart shows as a new run among an extender's activations rather than
+	// being inferred from its platform connections. Three nullable columns on
+	// the activation history: a catalog change only, and the running release,
+	// which names its columns, writes and reads on. Apply before deploying the
+	// api and taskworker that write and count them.
+	newSqlMigration(extenderActivationRunSchemaSql),
+
+	// lag.dev's measurement api probes (lag.dev/PLAN.md A4,
+	// network_extender_measurement_probe_schema.go): the latest probe of each
+	// published family of each extender the sample serves, which the
+	// taskworker writes every two minutes and the sample reads to leave out an
+	// extender whose api its probes cannot reach. A new table; apply before
+	// deploying the taskworker that writes it and the api that reads it.
+	newSqlMigration(networkExtenderMeasurementProbeSchemaSql),
 }

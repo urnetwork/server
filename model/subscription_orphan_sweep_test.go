@@ -51,12 +51,25 @@ func orphanSweepTestKey(step, n int, minimum bool) []any {
 	}
 }
 
-// Use the migrated tables, indexes and triggers. Zero-byte metadata keeps this
-// query-work fixture separate from billing; real funded retention controls also
-// run in the focused gate. A duplicate stream reference exercises EXISTS rather
-// than assuming a unique parent stream.
+// The participant step runs only while an index answers its stream_id parent
+// probe (contractParticipantSweepAdmissionSql). The migrations drop
+// transfer_contract_stream_id while contract_participant is empty, so a
+// fixture that sweeps participants builds it again.
+func createContractParticipantParentIndex(t testing.TB, ctx context.Context) {
+	t.Helper()
+	server.MaintenanceDb(ctx, func(conn server.PgConn) {
+		server.RaisePgResult(conn.Exec(ctx, `CREATE INDEX IF NOT EXISTS transfer_contract_stream_id ON transfer_contract (stream_id) WHERE stream_id IS NOT NULL`))
+	}, server.OptReadWrite(), server.OptNoRetry())
+}
+
+// Use the migrated tables, indexes and triggers, and the participant step's
+// parent index. Zero-byte metadata keeps this query-work fixture separate from
+// billing; real funded retention controls also run in the focused gate. A
+// duplicate stream reference exercises EXISTS rather than assuming a unique
+// parent stream.
 func seedOrphanSweepTestHistory(t testing.TB, ctx context.Context, parents, orphans int) {
 	t.Helper()
+	createContractParticipantParentIndex(t, ctx)
 	clients := newEscrowSelectionTestClients(t, ctx)
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_contract

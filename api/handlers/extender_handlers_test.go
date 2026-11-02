@@ -64,7 +64,11 @@ func TestExtenderActivateArgsFieldNames(t *testing.T) {
 		// the lag.dev measurement request and opt-out (lag.dev/PLAN.md C4)
 		"measurement_csr",
 		"measurement_disabled",
+		// the run of the process that posted (connect/EXTENDER.md G3)
+		"previous_exit",
 		"public_key_hex",
+		"run_id",
+		"run_start_time",
 		"tcp_port",
 		"udp_port",
 	}
@@ -97,6 +101,9 @@ func TestExtenderActivateResultFieldNames(t *testing.T) {
 		// the optional carriers that were left out of an accepted activation,
 		// and why (EXTENDER.md C2a, connect#230)
 		"refused_carriers",
+		// when the operator has room for the next post, on a refusal that
+		// judged nothing about the caller (connect#230)
+		"retry_after_seconds",
 	}
 	got := jsonFieldNames(reflect.TypeOf(controller.ExtenderActivateResult{}))
 	if !slices.Equal(got, want) {
@@ -161,6 +168,40 @@ func TestExtenderActivateRefusedCarriersWireForm(t *testing.T) {
 		t.Fatalf("the activation result did not encode: %v", err)
 	}
 	connect.AssertEqual(t, string(acceptedBytes), `{"activated":true,"carriers":["tcp"]}`)
+}
+
+// A refusal that judged nothing about the caller -- an operator busy probing
+// other activations -- says when to come back in `retry_after_seconds`, beside
+// the message (connect#230). The activator waits exactly that long instead of
+// backing off, so the name is the wire. Every other answer leaves it out.
+func TestExtenderActivateRetryAfterWireForm(t *testing.T) {
+	busyBytes, err := json.Marshal(&controller.ExtenderActivateResult{
+		Activated:         false,
+		Error:             "The operator is busy probing other extenders. Please try again in 2 minutes.",
+		RetryAfterSeconds: 90,
+	})
+	if err != nil {
+		t.Fatalf("the activation result did not encode: %v", err)
+	}
+	connect.AssertEqual(
+		t,
+		string(busyBytes),
+		`{"activated":false,"error":"The operator is busy probing other extenders. `+
+			`Please try again in 2 minutes.","retry_after_seconds":90}`,
+	)
+
+	refusedBytes, err := json.Marshal(&controller.ExtenderActivateResult{
+		Activated: false,
+		Error:     "the tcp carrier did not answer: connection refused",
+	})
+	if err != nil {
+		t.Fatalf("the activation result did not encode: %v", err)
+	}
+	connect.AssertEqual(
+		t,
+		string(refusedBytes),
+		`{"activated":false,"error":"the tcp carrier did not answer: connection refused"}`,
+	)
 }
 
 // Every answer after the probe lists its steps, refusals included (C2,
@@ -253,6 +294,44 @@ func TestExtenderActivateAnswerReadsOnAShippedProvider(t *testing.T) {
 		}
 		connect.AssertEqual(t, shipped.Record, result.Record)
 	}
+}
+
+// The run of the process that posted (connect/EXTENDER.md G3) decodes from the
+// document an extender sends, and a document that predates it, which is what
+// every extender on an older release sends, leaves all three unset. The
+// document is literal because it is the wire.
+func TestExtenderActivateRunWireForm(t *testing.T) {
+	args := &controller.ExtenderActivateArgs{}
+	if err := json.Unmarshal([]byte(
+		`{"public_key_hex":"aabb","carriers":["tcp"],`+
+			`"run_id":"00112233445566778899aabbccddeeff",`+
+			`"run_start_time":"2026-11-02T03:04:05.000006Z","previous_exit":"sigkill"}`,
+	), args); err != nil {
+		t.Fatalf("the activation args document did not decode: %v", err)
+	}
+	connect.AssertEqual(t, args.RunId, "00112233445566778899aabbccddeeff")
+	connect.AssertEqual(t, args.RunStartTime, "2026-11-02T03:04:05.000006Z")
+	connect.AssertEqual(t, args.PreviousExit, "sigkill")
+
+	// a start that is no time still decodes, so it is judged and dropped with
+	// the rest of the run rather than refusing the request
+	malformedArgs := &controller.ExtenderActivateArgs{}
+	if err := json.Unmarshal([]byte(
+		`{"public_key_hex":"aabb","carriers":["tcp"],"run_start_time":"yesterday"}`,
+	), malformedArgs); err != nil {
+		t.Fatalf("a malformed run start failed the whole request: %v", err)
+	}
+	connect.AssertEqual(t, malformedArgs.RunStartTime, "yesterday")
+
+	oldArgs := &controller.ExtenderActivateArgs{}
+	if err := json.Unmarshal([]byte(
+		`{"public_key_hex":"aabb","carriers":["tcp"]}`,
+	), oldArgs); err != nil {
+		t.Fatalf("the old activation args document did not decode: %v", err)
+	}
+	connect.AssertEqual(t, oldArgs.RunId, "")
+	connect.AssertEqual(t, oldArgs.RunStartTime, "")
+	connect.AssertEqual(t, oldArgs.PreviousExit, "")
 }
 
 // The dns port list travels both ways under the same name (L2): a provider

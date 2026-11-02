@@ -3338,7 +3338,7 @@
      "legendFormat": "{{stage}} {{outcome}}"
     }
    ],
-   "description": "Every extender activation the api answered, per hour, by the stage that ended it and how (connect/EXTENDER.md C2): store activated is an extender published; request and budget refused it before any probe; config error is the operator's extender configuration; tcp and forward are the required test (C2a), error when the step failed on its own, timeout when it ran out of the 10 s probe budget, other_family when the forward arrived on the other family. A climb in tcp or forward timeouts is extenders answering late or not at all; a climb in budget is fleets restarting at once."
+   "description": "Every extender activation the api answered, per hour, by the stage that ended it and how (connect/EXTENDER.md C2): store activated is an extender published; request refused it before any probe; busy is the api too busy to take it, refused before any budget was spent: probes when it was already probing as many activations as it takes at once, budget_lock when other spends held one of its budgets past the lock bound; budget is an activation budget that refused it, by which -- client, address, proven_address, account (connect#230); config error is the operator's extender configuration; tcp and forward are the required test (C2a), error when the step failed on its own, timeout when it ran out of the 10 s probe budget, other_family when the forward arrived on the other family. A climb in tcp or forward timeouts is extenders answering late or not at all; a climb in budget or busy is fleets restarting at once."
   },
   {
    "id": 64,
@@ -3510,6 +3510,374 @@
     }
    ],
    "description": "Activation probe steps per hour by step and outcome: ok, error when the step failed on its own, timeout when its budget ran out before it answered. An optional carrier (dns, quic) that times out is left out of the record and does not refuse the activation (C2a); a tcp or forward that does refuses it."
+  },
+  {
+   "id": 72,
+   "type": "timeseries",
+   "title": "busy and budget refusals (per hour)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 24,
+    "x": 0,
+    "y": 128
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum by (stage, outcome, family) (increase(urnetwork_extender_activations_total{env=\"$env\",stage=~\"busy|budget\"}[1h]))",
+     "refId": "A",
+     "legendFormat": "{{stage}} {{outcome}} {{family}}"
+    }
+   ],
+   "description": "The activations refused for room rather than for anything the extender did, per hour, each answered with the wait until there is room (retry_after_seconds), which the activator waits out (connect#230). busy probes: the api was already probing as many activations as it takes at once; busy budget_lock: other spends held one of the budgets past the lock bound. budget: client is one client's 6 an hour, address one caller address's 6 an hour (its /32 or /64) over every account, proven_address the 6 an hour a key has of its own at the address its network proved it at, account the account's 60 an hour plus 6 per proven host, at most 1200. A run of account refusals is a fleet ramping or restarting; address refusals on one family are posts from a shared address."
+  },
+  {
+   "id": 67,
+   "type": "row",
+   "title": "gated release",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 136
+   },
+   "panels": []
+  },
+  {
+   "id": 68,
+   "type": "timeseries",
+   "title": "releases by outcome (per hour)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 137
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum by (outcome) (increase(urnetwork_extender_releases_total{env=\"$env\"}[1h]))",
+     "refId": "A",
+     "legendFormat": "{{outcome}}"
+    }
+   ],
+   "description": "Every gated release the api answered (POST /network/extender-release, connect/EXTENDER.md R3), per hour, by outcome (connect/EXTENDER-UPDATE2.md \u00a71.1): ok, records released; empty, nothing in the identity's partition was eligible (no record of its family, all blocked in its country, or no gated fleet); epoch_spent and probation, the identity's records for the epoch are spent and none is eligible now; country_capacity, every eligible record is at its per-country limit; rate_limited, an identity or vantage request limit; incompatible, only records requiring an undeclared capability were eligible; unavailable, the configuration, the ledger or the request. Before gated preference is enabled by cohort, read country_capacity and epoch_spent against ok: they are the fleet running short, and a client that gets them falls back to the open tier."
+  },
+  {
+   "id": 69,
+   "type": "timeseries",
+   "title": "releases not ok, by family and capability (per hour)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 137
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum by (family, capable, outcome) (increase(urnetwork_extender_releases_total{env=\"$env\",outcome!=\"ok\"}[1h]))",
+     "refId": "A",
+     "legendFormat": "{{family}} capable={{capable}} {{outcome}}"
+    }
+   ],
+   "description": "The gated releases that released nothing, per hour, by the address families the client can dial (any, ipv4, ipv6; unknown when refused before they were read), whether it declared tcp-camouflage-v1 (capable), and outcome. empty on ipv6 alone is a gated fleet short of v6 addresses. incompatible with capable=false is legacy clients whose partitions hold only Phase B (capability cohort) extenders: before a cohort grows, this must stay near zero, or legacy clients are falling back to open records."
+  },
+  {
+   "id": 70,
+   "type": "table",
+   "title": "releases by country and outcome (top 20)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 9,
+    "w": 12,
+    "x": 0,
+    "y": 145
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "showHeader": true,
+    "cellHeight": "sm",
+    "sortBy": [
+     {
+      "displayName": "Value",
+      "desc": true
+     }
+    ]
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "topk(20, sum by (country, outcome) (increase(urnetwork_extender_release_country_outcomes_total{env=\"$env\"}[$__range])))",
+     "legendFormat": "{{country}} {{outcome}}",
+     "format": "table",
+     "instant": true,
+     "range": false,
+     "editorMode": "code",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     }
+    }
+   ],
+   "description": "Gated releases over the dashboard's time range by the caller's country, a lower case ISO 3166 alpha-2 code (unknown when unlocated), and outcome, most first, top 20. The country label is bounded to two-letter codes. A country where country_capacity or epoch_spent rivals ok is where the gated fleet is too small for the clients asking; record its baseline before enabling gated preference for a cohort there. Internal only: country by outcome describes where the gated fleet is in demand."
+  },
+  {
+   "id": 71,
+   "type": "timeseries",
+   "title": "capability requirements signed (per hour)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 9,
+    "w": 12,
+    "x": 12,
+    "y": 145
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum by (capability, result) (increase(urnetwork_extender_record_capability_requirements_total{env=\"$env\"}[1h]))",
+     "refId": "A",
+     "legendFormat": "{{capability}} {{result}}"
+    }
+   ],
+   "description": "Records signed for an extender in a configured capability cohort (extender.yml directory.capability_cohorts; docs/operations/extender-capability-cohort.md), per hour, by capability (unknown for a configured value the server does not know) and how the requirement was decided: required, the record requires the capability; no_camouflage_key, the record carries no camouflage key, so tcp-camouflage-v1 is not required and the cohort is still inert; not_release_only, the extender is reached by an open channel, so nothing is required. A Phase B cohort may splice only once its members show required and no other result for at least one record lifetime. Any unknown series is a misspelled cohort, which withholds those extenders from every release."
+  },
+  {
+   "id": 73,
+   "type": "row",
+   "title": "restarts",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 154
+   },
+   "panels": []
+  },
+  {
+   "id": 74,
+   "type": "timeseries",
+   "title": "restarting extenders (24h)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 155
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_extenders_restarting_24h{env=\"$env\"})",
+     "refId": "A",
+     "legendFormat": "5 or more runs started"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_extenders_reporting_runs_24h{env=\"$env\"})",
+     "refId": "B",
+     "legendFormat": "reporting runs"
+    }
+   ],
+   "description": "Extenders with 5 or more distinct process runs started in the last 24 hours, beside the extenders that report a run id at all. Each activation names the run of the process that sent it, so a run that started in the window is a restart; a process that restarts every half hour starts about 48 a day, and long-lived copies of one key start none. Run ids arrive with a connect release, so a zero means no restarts only beside a population that reports them. A gap is a read that failed. Which extenders, and how their runs ended, is the query in connect/EXTENDER-ACTIVATION.md section 7."
   }
  ]
 }

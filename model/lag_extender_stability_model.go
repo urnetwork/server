@@ -32,9 +32,11 @@ import (
 //     span 90 minutes but four span at least 150: a burst takes four passes
 //     within two hours.
 //
-// The uptime probes themselves are not read: a probe forwards through the
-// extender to the api host, which tests more than a lag.dev measurement uses,
-// and extenders whose probes failed answered on their measurement api.
+// The uptime probes themselves are not read. A probe forwards nothing: it tests
+// the outer tls under the identity key, admission and a signed challenge, which
+// is not the path a lag.dev measurement uses. The probe was left out because on
+// 1 November it failed for extenders whose measurement api answered, in 157 of
+// 199 checks, and why is not known yet.
 
 // LagExtenderRestartLoopRule is what makes a burst of restarts.
 type LagExtenderRestartLoopRule struct {

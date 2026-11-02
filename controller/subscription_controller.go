@@ -194,6 +194,10 @@ type SubscriptionBalanceResult struct {
 	PriceTier *PriceTierResult `json:"price_tier,omitempty"`
 	// OnboardingOffer is the caller's welcome offer, null when none was issued.
 	OnboardingOffer *OnboardingOfferResult `json:"onboarding_offer"`
+	// WinbackOffer is the caller's active win-back offer (the re-engagement
+	// program's W1, winback_offer_controller.go). Omitted when there is none,
+	// or it expired or was redeemed, and from an older server.
+	WinbackOffer *WinbackOfferResult `json:"winback_offer,omitempty"`
 	// Experiments is the caller's variant per experiment surface.
 	Experiments map[string]*model.ExperimentAssignment `json:"experiments,omitempty"`
 
@@ -824,6 +828,20 @@ type PlaySubscription struct {
 	// LatestOrderId is the order id of the latest charge (GPA....), the id on
 	// the customer's Google Play receipt
 	LatestOrderId string `json:"latestOrderId,omitempty"`
+	// OutOfAppPurchaseContext is set on a re-subscription bought in the Play
+	// Store's subscriptions center ("Resubscribe") after the previous
+	// subscription of the product expired, until the purchase is
+	// acknowledged. Such a purchase carries no account identifiers of its own
+	// (playOutOfAppNetworkIdInConn).
+	OutOfAppPurchaseContext *PlayOutOfAppPurchaseContext `json:"outOfAppPurchaseContext,omitempty"`
+}
+
+// PlayOutOfAppPurchaseContext names the expired subscription a
+// re-subscription follows: its account identifiers (the obfuscated account id
+// the app set on the original purchase) and its token.
+type PlayOutOfAppPurchaseContext struct {
+	ExpiredExternalAccountIdentifiers *PlayExternalAccountIdentifiers `json:"expiredExternalAccountIdentifiers,omitempty"`
+	ExpiredPurchaseToken              string                          `json:"expiredPurchaseToken,omitempty"`
 }
 
 // playAcknowledgeSubscription acknowledges the purchase with Google, unless
@@ -1122,13 +1140,24 @@ func PlayWebhook(
 			} else {
 				// no account identifiers (a purchase outside the app's billing
 				// flow): only a binding made by the verify endpoint names the
-				// network (play_purchase_binding_controller.go)
+				// network (play_purchase_binding_controller.go), or, for a
+				// Play Store "Resubscribe", the expired subscription's account
+				// identifiers, which bind it
 				boundNetworkId, bound := playPurchaseBindingLookupFunc(nil,
 					clientSession.Ctx,
 					rtdnMessage.SubscriptionNotification.PurchaseToken,
 					sub.LinkedPurchaseToken,
 					true,
 				)
+				if !bound {
+					resubscribedNetworkId, ok := playOutOfAppNetworkIdFunc(nil, clientSession, sub, rtdnMessage.SubscriptionNotification.PurchaseToken)
+					if !ok {
+						return nil, fmt.Errorf("Google Play re-subscription malformed expired account identifiers")
+					}
+					if resubscribedNetworkId != nil {
+						boundNetworkId, bound = *resubscribedNetworkId, true
+					}
+				}
 				if !bound {
 					// paid but nothing names its network: keep it visible to the
 					// owner (a later verify binding credits it and resolves it)
@@ -1636,6 +1665,9 @@ func playCreditSubscriptionInTx(
 		// the regional price tier and the welcome offer, from the
 		// store's region code and offer tag
 		playRecordOnboardingInTx(tx, clientSession, sub, renewal)
+		// the re-engagement program's win-back offer, from its offer tag,
+		// under its own savepoint
+		playRecordWinbackInTx(tx, clientSession.Ctx, sub, renewal)
 
 		// a supporter subscription -> carries the Pro entitlement
 		transferBalance := &model.TransferBalance{

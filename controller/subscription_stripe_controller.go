@@ -2085,14 +2085,19 @@ func StripeCreateCheckoutSession(
 			return stripeCheckoutError(PurchaseErrorCodeAlreadySubscribed, stripeAlreadySubscribedMessage), nil
 		}
 
-		// the caller's regional tier price, and the welcome-offer coupon when
-		// the offer is redeemable (yearly only)
-		priceId, discounts, onboardingMetadata, err := stripeCheckoutTierAndDiscount(args.ItemId, args.StorefrontCountry, clientSession)
+		// the caller's regional tier price, the welcome-offer coupon when the
+		// offer is redeemable (yearly only), and the win-back offer's
+		// promotion code (monthly only), which Stripe applies only for the
+		// customer it was made for
+		priceId, discounts, onboardingMetadata, discountCustomerId, err := stripeCheckoutTierAndDiscount(args.ItemId, args.StorefrontCountry, clientSession)
 		if err != nil || priceId == "" {
 			glog.Errorf("[stripe]no subscription price configured for %s: %v\n", args.ItemId, err)
 			return stripeCheckoutError(PurchaseErrorCodePlanUnavailable, "That plan is not available."), nil
 		}
 		params.Discounts = discounts
+		if discountCustomerId != "" {
+			params.Customer = stripe.String(discountCustomerId)
+		}
 
 		params.Mode = stripe.String(string(stripe.CheckoutSessionModeSubscription))
 		params.LineItems = []*stripe.CheckoutSessionLineItemParams{

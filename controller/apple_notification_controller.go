@@ -458,6 +458,9 @@ func appleCreditSubscriptionTransactionInTx(
 	// the regional price tier (from the storefront) and the welcome offer (an
 	// offer-code purchase)
 	appleRecordOnboardingInTx(tx, ctx, transaction)
+	// the re-engagement program's win-back offer (a win-back offer purchase),
+	// under its own savepoint
+	appleRecordWinbackInTx(tx, ctx, transaction)
 
 	model.AddTransferBalanceInTx(ctx, tx, &model.TransferBalance{
 		NetworkId:             transaction.networkId,

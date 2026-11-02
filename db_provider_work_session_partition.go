@@ -39,7 +39,8 @@
 // reference is enforced by provider_work_session_receipt_reference when the
 // receipt is inserted, the only time one can be (receipts and events are both
 // append-only), and the cutover drops the foreign key. A week's events are
-// dropped after 13 weeks; their receipts stay.
+// dropped at the contract horizon, 35 days to 13 weeks after it; their
+// receipts stay.
 //
 // # The drop
 //
@@ -48,10 +49,13 @@
 // So the family's drop fence asks provider_work_session_event_drop_guard,
 // which refuses unless the transaction opted in with
 // urnetwork.provider_work_session_retention, which only the registry's
-// guarded drop sets (DropGuardSetting), and unless the leaf's upper bound is 13
-// weeks past by the database's clock. The legacy partition's upper bound is the
-// cutover week, so it becomes old enough 13 weeks after it. The registry also
-// retains any leaf whose admissions are still needed by open connections.
+// guarded drop sets (DropGuardSetting), and unless the leaf's upper bound is 35
+// days past by the database's clock (13 weeks before the horizon drop guard);
+// the fence then refuses a leaf whose upper bound is not past the contract
+// horizon the retention task read (ProviderWorkSessionEventRetentionAt). The
+// legacy partition's upper bound is the cutover week, so it becomes old enough
+// that long after it. The registry also retains any leaf whose admissions are
+// still needed by open connections.
 package server
 
 import (
@@ -64,13 +68,32 @@ import (
 
 const providerWorkSessionEventTable = "provider_work_session_event"
 
-// Events are kept at least 13 weeks after their week ends, as the contracts they
-// describe are (ContractRetention; decided 2026-10-24).
+// Events are kept at most 13 weeks after their week ends, as the contracts they
+// describe were (ContractRetention; decided 2026-10-24), and since the horizon
+// drop guard, at the contract horizon (ProviderWorkSessionEventRetentionAt).
 const ProviderWorkSessionEventRetention = 13 * 7 * 24 * time.Hour
 
 // The clock skew between a connection id's mint and its admit's observed time
 // that the retire lookup absorbs (provider_work_session_admit_floor's day).
 const providerWorkSessionAdmitSkew = 24 * time.Hour
+
+// The shortest event retention, whatever the contract horizon: the age from
+// which the drop guard admits a leaf since the horizon drop guard migration
+// (providerWorkSessionEventHorizonDropGuardSql).
+const ProviderWorkSessionEventRetentionFloor = 35 * 24 * time.Hour
+
+// How long a week's events are kept past its upper bound: ctx's contract
+// horizon (WithContractHorizon), between ProviderWorkSessionEventRetentionFloor
+// and ProviderWorkSessionEventRetention, so a session's events never outlive
+// the contracts they describe by more than the floor. Without a horizon in
+// ctx, the 13 weeks.
+func ProviderWorkSessionEventRetentionAt(ctx context.Context) time.Duration {
+	horizon, ok := ctx.Value(contractHorizonContextKey{}).(time.Duration)
+	if !ok {
+		return ProviderWorkSessionEventRetention
+	}
+	return min(max(horizon, ProviderWorkSessionEventRetentionFloor), ProviderWorkSessionEventRetention)
+}
 
 // The setting the registry's drop transaction sets on before the drop fence.
 const providerWorkSessionRetentionSetting = "urnetwork.provider_work_session_retention"
@@ -159,6 +182,30 @@ END
 $event_drop_guard$;
 `
 
+// The drop guard at the contract horizon: refuses a leaf whose upper bound is
+// not 35 days past, the shortest horizon, in place of 13 weeks. It only admits;
+// the family's fence refuses a leaf inside ctx's retention
+// (providerWorkSessionEventDropFence). CREATE OR REPLACE FUNCTION changes only
+// the function's catalog row, with no table lock; every drop the old body
+// admits, the new one admits too.
+const providerWorkSessionEventHorizonDropGuardSql = `
+SET LOCAL lock_timeout = '5s';
+CREATE OR REPLACE FUNCTION provider_work_session_event_drop_guard(leaf text) RETURNS void LANGUAGE plpgsql AS $event_drop_guard$
+DECLARE upper_bound timestamp;
+BEGIN
+ IF current_setting('urnetwork.provider_work_session_retention',true) IS DISTINCT FROM 'on' THEN
+  RAISE EXCEPTION 'provider work session events are dropped only by their retention';
+ END IF;
+ SELECT (regexp_match(pg_get_expr(c.relpartbound,c.oid),'TO \(''([^'']*)''\)$'))[1]::timestamp INTO upper_bound
+ FROM pg_inherits i JOIN pg_class c ON c.oid=i.inhrelid
+ WHERE i.inhparent=to_regclass('public.provider_work_session_event') AND c.oid=to_regclass('public.'||quote_ident(leaf));
+ IF upper_bound IS NULL OR (now() AT TIME ZONE 'UTC')-interval '35 days'<upper_bound THEN
+  RAISE EXCEPTION 'provider work session events are kept at least 35 days';
+ END IF;
+END
+$event_drop_guard$;
+`
+
 // The partition preparation of the session journal, correct on the plain and
 // the partitioned table alike. It replaces functions and adds a trigger to the
 // receipt table only, so it takes no lock on the event table; the receipt
@@ -185,15 +232,18 @@ func ProviderWorkSessionPartitionMigrationVersion() int {
 // longer be finalized in time.
 var providerWorkSessionEventPartitionFamily = RegisterPartitionFamily(&PartitionFamily{
 	Name:        "provider_work_session_event",
-	Description: "provider work session journal: weekly observed_at partitions dropped 13 weeks after their week (PARTITION-MAINTENANCE-PLAN.md C4)",
+	Description: "provider work session journal: weekly observed_at partitions dropped at the contract horizon, 35 days to 13 weeks after their week (PARTITION-MAINTENANCE-PLAN.md C4)",
 	Tables:      []string{providerWorkSessionEventTable},
 	KeyColumn:   "observed_at",
 	KeyKind:     PartitionKeyTimestamp,
 	Granularity: PartitionGranularityWeekly,
 	// events take the database's clock, so the runway only has to stay ahead
 	// of now; the monitor pages below two weeks
-	AheadRanges:      4,
+	AheadRanges: 4,
+	// the longest retention, which the monitor judges blocked weeks by; a
+	// week expires at the contract horizon (providerWorkSessionEventRangeExpired)
 	Retention:        ProviderWorkSessionEventRetention,
+	RangeExpired:     providerWorkSessionEventRangeExpired,
 	DropGuardSetting: providerWorkSessionRetentionSetting,
 	// late events never land in a closed week, so one analyze settles it
 	LeafAnalyzeDelay: 24 * time.Hour,
@@ -212,10 +262,33 @@ func providerWorkSessionEventLeaf(r PartitionRange) string {
 	return fmt.Sprintf("%s_%s%s", providerWorkSessionEventTable, PartitionGranularityWeekly.namePrefix(), r.Lower.UTC().Format("20060102"))
 }
 
+// Whether the week r, or the legacy partition, whose upper bound is the cutover
+// week, has expired at now (the family's RangeExpired): its upper bound is past
+// ctx's event retention, the contract horizon. Never later than the family's
+// Retention, which is the longest retention.
+func providerWorkSessionEventRangeExpired(ctx context.Context, now time.Time, r PartitionRange) bool {
+	return !now.Before(r.Upper.Add(ProviderWorkSessionEventRetentionAt(ctx)))
+}
+
 // The policy check in the drop transaction, after the registry set the opt-in:
-// the database refuses a leaf whose upper bound is not 13 weeks past.
+// the database refuses a leaf whose upper bound is not 35 days past, and this
+// fence one whose upper bound is not past ctx's retention, both by the
+// database's clock.
 func providerWorkSessionEventDropFence(ctx context.Context, tx PgTx, r PartitionRange) {
 	RaisePgResult(tx.Exec(ctx, `SELECT provider_work_session_event_drop_guard($1)`, providerWorkSessionEventLeaf(r)))
+	retention := ProviderWorkSessionEventRetentionAt(ctx)
+	var expired bool
+	Raise(tx.QueryRow(
+		ctx,
+		fmt.Sprintf(
+			`SELECT %s::timestamp + interval '%d seconds' <= (now() AT TIME ZONE 'UTC')`,
+			PartitionKeyTimestamp.BoundSql(r.Upper),
+			int64(retention/time.Second),
+		),
+	).Scan(&expired))
+	if !expired {
+		panic(fmt.Errorf("provider work session events are kept %d days", int64(retention/(24*time.Hour))))
+	}
 }
 
 // An open connection still needs its admit's network identity when it retires.
