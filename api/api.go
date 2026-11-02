@@ -149,6 +149,9 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		// (connect/EXTENDER.md R3, R4)
 		router.NewRoute("POST", "/network/extender-release", handlers.ExtenderRelease),
 		router.NewRoute("POST", "/network/extender-block-report", handlers.ExtenderBlockReport),
+		// what a client's and an extender's tcp camouflage came to, which only
+		// increments counters (connect/EXTENDER-SPLICE-ROLLOUT.md)
+		router.NewRoute("POST", "/network/extender-camouflage-report", handlers.ExtenderCamouflageReport),
 		// the pings a provider or an extender measured, reported by the pinger
 		// with the target's co-signature (connect/GEOMAP.md §2.5)
 		router.NewRoute("POST", "/network/ping-report", handlers.ExtenderPingReport),
