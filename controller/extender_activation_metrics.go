@@ -28,6 +28,9 @@ const (
 	extenderActivationStageRequest = "request"
 	// the operator's extender configuration is unusable
 	extenderActivationStageConfig = "config"
+	// the key is registered to another network, which no activation moves
+	// (model.ActivateNetworkExtender)
+	extenderActivationStageOwner = "owner"
 	// an activation budget refused it (ExtenderActivateSettings)
 	extenderActivationStageBudget = "budget"
 	// the steps of the required test (C2a): the tcp challenge, and the forward
@@ -64,6 +67,7 @@ const (
 var extenderActivationStageOutcomes = map[string][]string{
 	extenderActivationStageRequest: {extenderActivationOutcomeRefused},
 	extenderActivationStageConfig:  {extenderActivationOutcomeError},
+	extenderActivationStageOwner:   {extenderActivationOutcomeRefused},
 	extenderActivationStageBudget:  {extenderActivationOutcomeRefused},
 	extenderActivationStageTcp: {
 		extenderActivationOutcomeError,
@@ -104,7 +108,7 @@ func newExtenderActivationMetrics(registerer prometheus.Registerer) *extenderAct
 		activations: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "urnetwork_extender_activations_total",
 			Help: "Extender activations (POST /network/extender-activate) by the stage that ended them, how, and the caller's address family. " +
-				"Stages: request, refused before any budget was spent; config, the operator's extender configuration is unusable; budget, an activation budget refused it; " +
+				"Stages: request, refused before any budget was spent; config, the operator's extender configuration is unusable; owner, the key is registered to another network; budget, an activation budget refused it; " +
 				"tcp and forward, the required test, which fails on its own (error), runs out of the 10 s probe budget (timeout), or forwards on the other family (other_family); " +
 				"store, activated, or storing the passed activation failed.",
 		}, []string{"stage", "outcome", "family"}),

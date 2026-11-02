@@ -28,10 +28,11 @@ func testStatsActivate(
 	location *Location,
 ) *NetworkExtenderWithAddresses {
 	sign, _ := testRecordSigner()
+	publicKey := []byte("extender-stats-" + name)
 	activation := &NetworkExtenderActivation{
-		NetworkId:   server.NewId(),
+		NetworkId:   testExtenderNetworkId(publicKey),
 		ClientId:    server.NewId(),
-		PublicKey:   []byte("extender-stats-" + name),
+		PublicKey:   publicKey,
 		TcpPort:     443,
 		UdpPort:     443,
 		DnsPort:     53,

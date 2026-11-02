@@ -506,6 +506,16 @@ func insertNetworkExtenderPublishInTx(
 // what makes the new record win over any revocation the directory already has
 // (B5).
 //
+// A key belongs to the network that first activated it. A re-activation by
+// another client of that network carries the new client; an activation by any
+// other network stores nothing, signs nothing and returns nil
+// (GetNetworkExtenderKeyNetworkId tells the caller why). The activation probes
+// prove that the caller's address answers for the key, not that the caller
+// holds it: an open extender signs any challenge and forwards any request to
+// the api (A4, A5), so a post relayed through a listed extender passes them,
+// and would otherwise move the extender, and the contract parties its row
+// names (J2), to the poster's network.
+//
 // Everything is one transaction: the upserts, the signature over what they
 // wrote, and the publish row. A caller that signed outside it could publish an
 // address set that was never stored.
@@ -520,6 +530,9 @@ func ActivateNetworkExtender(
 		activated = nil
 		issueTime := server.NowUtc()
 
+		// false when the key is another network's: the upsert neither
+		// inserts nor updates, and returns no row
+		stored := false
 		var extenderId server.Id
 		var createTime time.Time
 		// the canary designation is the operator's and outlives a
@@ -556,7 +569,6 @@ func ActivateNetworkExtender(
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true, NULL, $11, $12, $13, $14, $15, $16)
 			ON CONFLICT (public_key) DO UPDATE
 			SET
-				network_id = $2,
 				client_id = $3,
 				tcp_port = $6,
 				udp_port = $7,
@@ -578,6 +590,7 @@ func ActivateNetworkExtender(
 					THEN network_extender.directory_tier
 					ELSE $16
 				END
+			WHERE network_extender.network_id = $2
 			RETURNING extender_id, create_time, COALESCE(canary_channel, ''), directory_tier
 			`,
 			server.NewId(),
@@ -600,8 +613,14 @@ func ActivateNetworkExtender(
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
 				server.Raise(result.Scan(&extenderId, &createTime, &canaryChannel, &directoryTier))
+				stored = true
 			}
 		})
+		if !stored {
+			// the key is another network's: no address, no history row, no
+			// record and no publish
+			return
+		}
 
 		server.RaisePgResult(tx.Exec(
 			ctx,
@@ -689,6 +708,35 @@ func ActivateNetworkExtender(
 	})
 
 	return activated
+}
+
+// GetNetworkExtenderKeyNetworkId returns the network an identity key is
+// registered to, and false for a key that no network has activated. An
+// activation reads it before it probes, so a key another network holds is
+// refused without dialing the caller or spending a budget, and
+// ActivateNetworkExtender refuses it again, atomically, when it stores.
+func GetNetworkExtenderKeyNetworkId(
+	ctx context.Context,
+	publicKey []byte,
+) (networkId server.Id, registered bool) {
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT network_id
+			FROM network_extender
+			WHERE public_key = $1
+			`,
+			publicKey,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&networkId))
+				registered = true
+			}
+		})
+	})
+	return
 }
 
 // Testing_NetworkExtenderProbeBarrier, when set, runs inside the probe result

@@ -3,6 +3,7 @@ package model
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"net/netip"
 	"slices"
@@ -52,9 +53,10 @@ func testRevocationSigner() NetworkExtenderRevocationSigner {
 	}
 }
 
+// One activation of publicKey by a new client of the key's test network.
 func testExtenderActivation(publicKey []byte, ipVersion int, ip string) *NetworkExtenderActivation {
 	return &NetworkExtenderActivation{
-		NetworkId:   server.NewId(),
+		NetworkId:   testExtenderNetworkId(publicKey),
 		ClientId:    server.NewId(),
 		PublicKey:   publicKey,
 		TcpPort:     443,
@@ -66,6 +68,15 @@ func testExtenderActivation(publicKey []byte, ipVersion int, ip string) *Network
 		Ip:          netip.MustParseAddr(ip),
 		Carriers:    []string{connect.ExtenderCarrierTcp, connect.ExtenderCarrierQuic},
 	}
+}
+
+// The network a test activates publicKey from: one per key, so a test that
+// activates a key again does it from the network that holds the key, as an
+// extender does. ActivateNetworkExtender never moves a key to another network;
+// a test of that sets another NetworkId itself.
+func testExtenderNetworkId(publicKey []byte) server.Id {
+	digest := sha256.Sum256(append([]byte("extender-test-network:"), publicKey...))
+	return server.Id(digest[:16])
 }
 
 // The directory, activation history, and latency attestations exist on a fresh
@@ -1221,10 +1232,12 @@ func TestMarkExtenderPublishPublishedLeavesAStampedRowAlone(t *testing.T) {
 	})
 }
 
-// Re-activating one identity key carries the new ports, tld, country and owner
-// onto the same extender row. An operator that moved its extender to another
-// client or another port must not leave the directory advertising the old one,
-// and the record signed by the re-activation is what the directory keeps (B5).
+// Re-activating one identity key carries the new ports, tld, country and
+// client onto the same extender row. An operator that moved its extender to
+// another client of its network or another port must not leave the directory
+// advertising the old one, and the record signed by the re-activation is what
+// the directory keeps (B5). Another network is refused instead
+// (TestActivateNetworkExtenderNeverMovesAKeyToAnotherNetwork).
 func TestActivateNetworkExtenderUpdatesThePortsAndOwnerOfOneKey(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
