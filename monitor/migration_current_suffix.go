@@ -878,6 +878,13 @@ var migrationCurrentSuffixContracts = slices.Concat(
 		competitionSubmissionMetricsMigrationContract,
 		// replaces the key history guard body the retention contract pins
 		clientKeyHistoryRetentionFloorMigrationContract,
+	},
+	// 905-909: the campaigns' consent evidence and the re-engagement tables
+	reengagementMigrationContracts,
+	// the index diet's drops; each version follows its migration's position
+	indexDietMigrationContracts,
+	[]snMainnetMigrationContract{
+		// after the index diet's drops, as in the migration list
 		migrationCurrentSuffix(contractCloseEvidenceHorizonGuardMigrationVersion, "close evidence custody with retention at the contract horizon",
 			contractCloseEvidenceHorizonArtifactQuery),
 		migrationCurrentSuffix(server.ProviderWorkSessionEventHorizonDropGuardMigrationVersion(), "provider session custody with drops at the contract horizon",

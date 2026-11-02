@@ -1340,7 +1340,8 @@ at the contract horizon (below), 35 days after, around 2026-11-10.
 
 - **Built, and kept:** migration 857 and `RemoveExpiredCloseEvidence` (every 15
   minutes) delete rows accepted more than 91 days ago whose contracts are
-  resolved.
+  resolved; since the horizon guard (below), more than the contract horizon
+  ago while the reaper's mode is on, 35 days at the shortest.
   - At 1.3 GB an hour (SIGNALS.md §2.4f), 91 days is about 2.8 TB. Row deletes
     alone would mean tens of millions of guarded deletes a day.
 - **Design: weekly `RANGE (report_id)`, dropped when a week expires.**
@@ -1349,7 +1350,8 @@ at the contract horizon (below), 35 days after, around 2026-11-10.
     `ON CONFLICT (client_id, report_id)` stays enforceable.
   - **Drop rule:** a week drops once its upper bound is 91 days past and every
     row in it meets the 857 rule (accepted more than 91 days ago, contract
-    resolved or gone). The check runs again in the transaction that detaches
+    resolved or gone); at the contract horizon (below), the same rule at the
+    horizon's age. The check runs again in the transaction that detaches
     the week. A week holding a straggler stays. Its qualifying rows are
     row-deleted as today, and it drops once the rest qualify.
   - **Guard:** a drop bypasses the 857 row guard, so only the retention task
@@ -1497,46 +1499,59 @@ at the contract horizon (below), 35 days after, around 2026-11-10.
       starts from the first key, for the evidence of contracts that resolved
       since and anything written below the low water.
     - **Load:** at 35 days the deletes follow the evidence written 35 days
-      before: about 18-40M rows a day from 11-10 (the evidence of 10-06 to
-      10-20), about 60M a day by late November, and 100M a day and more from
-      about 12-06. The table then levels off near 35 days of evidence, about
-      2-3.5B rows or 0.6-1.0 TB at 60-100M rows a day, against 1.6-2.7 TB at
-      91 days.
-    - **Autovacuum (drafted for the owner, not applied):** the table has no
-      per-table settings, and the global ones are `cost_delay` 0, scale 0.2
-      and `autovacuum_vacuum_max_threshold` 100M. PostgreSQL 18's insert
-      trigger vacuums it about 33 times a day (305 vacuums from 10-23 to
-      11-02), and those passes skip index cleanup until 2% of the heap's pages
-      hold dead items. The primary key leads with `client_id`, so the deletes
-      scatter across it: every pass with index cleanup reads both indexes
-      whole (186 GB on 11-02, about 0.35-0.55 TB at 35 days) and writes nearly
-      every primary key page as a full-page image (`checkpoint_timeout` is
-      5 min). The 2% rule makes that about 1-2 passes a day at 20-100M deletes
-      a day: about 0.1-0.2 TB of WAL a day at the plateau, a few percent of the
-      cluster's 3.7 TB, and 0.5-1 TB of index reads. Unthrottled, such a pass
-      is the July buffer-cache eviction again. The draft, for the A5 block's
-      per-table task or a reviewed migration (SHARE UPDATE EXCLUSIVE with
-      `lock_timeout = 500ms`, catalog only, `RESET` reverts it):
+      before: about 18-24M rows a day from about 11-10, about 60M a day by
+      late November, and 100M a day and more from about 12-06. The default
+      1,000 rows a second (about 65M a day of a backlog's day) keeps up until
+      about 12-06; from then the brake needs about 1,500 a second for 100M a
+      day, and more beyond. The table then levels off near 35 days of
+      evidence, about 2-3.5B rows or 0.6-1.0 TB at 60-100M rows a day, against
+      1.6-2.7 TB at 91 days.
+    - **Autovacuum (drafted for the owner, not applied):** on 11-02 at 05:21Z
+      the table was 349 GB (heap 154.6 GB, census index 101.4 GB, primary key
+      86.2 GB) and 1.15B rows, with no options of its own and no deletes yet.
+      The A5 trial is live: `autovacuum-tuning.conf` sets the global pace to
+      2 ms and 320 a round, which the workers share, and 10 workers; the scale
+      factor stays 0.2 under `autovacuum_vacuum_max_threshold` 100M.
+      PostgreSQL 18's insert trigger vacuums the table about 33 times a day
+      (310 vacuums from 10-23, 0.4 h in all), and the partition registry
+      analyzes it itself (19 ANALYZEs), so analyze needs no setting.
+      - **Index passes:** those vacuums skip index cleanup until 2% of the
+        heap's pages hold dead items (about 380k pages now, and more as the
+        heap grows to the plateau). The primary key leads with `client_id`, so
+        the deletes scatter across it: every pass with index cleanup reads both
+        indexes whole (188 GB now, about 0.35-0.55 TB at the plateau) and
+        writes nearly every primary key leaf page as a full-page image
+        (`checkpoint_timeout` is 5 min). That makes about 1-2 such passes a
+        day from 11-10 on: about 0.1-0.2 TB of WAL a day at the plateau, a few
+        percent of the cluster's 3.7 TB, and 0.5-1 TB of index reads.
+      - **The draft** is the table's entry in the A5 block's table list
+        (xops `feat/close-evidence-autovacuum`, `playbook-dbs.yml`): a fixed
+        threshold of 50M dead rows (scale factor 0), and the contract tables'
+        own pace, 2 ms and 200 a round, so a pass over the plateau's indexes
+        (about 2 h; about 1 h now) does not draw on the workers' shared 320.
+        The insert trigger stays PostgreSQL's, so vacuums keep landing
+        between `vacuum_freeze_table_age` and `autovacuum_freeze_max_age` at
+        this XID rate and the freezing stays in cancellable passes.
+      - **Monitor:** the `pg/dead-tuples` warning fires above max(10M, the
+        table's own threshold) dead rows. At 60-100M deletes a day dead rows
+        grow 2.5-4M an hour, so a long index pass or a stalled vacuum crosses
+        10M on the planned stream; with the draft the line is 50M.
+      - **Apply:** `./run-dbs.sh --tags autovacuum_tuning`, `--check` first.
+        The trial's file and the other tables already match, so it changes
+        only this table: one `ALTER TABLE ... SET` (SHARE UPDATE EXCLUSIVE,
+        catalog only) under `lock_timeout = '500ms'`, retried while an
+        autovacuum holds the table. `-e autovacuum_tuning_revert=true` reverts
+        the whole trial, this table included. As a reviewed migration instead
+        it would need the same lock timeout and a retry:
 
-      ```sql
-      ALTER TABLE contract_close_report_evidence SET (
-          autovacuum_vacuum_cost_delay = 2,
-          autovacuum_vacuum_cost_limit = 200,
-          autovacuum_vacuum_scale_factor = 0,
-          autovacuum_vacuum_threshold = 50000000,
-          autovacuum_analyze_scale_factor = 0,
-          autovacuum_analyze_threshold = 10000000
-      );
-      ```
-
-      The pace is the contract tables' (2 ms, 200 a round): about 2 h for a
-      plateau pass with index cleanup. The insert trigger stays PostgreSQL's,
-      so vacuums keep landing between `vacuum_freeze_table_age` and
-      `autovacuum_freeze_max_age` at this XID rate and the freezing stays in
-      cancellable passes. The monitor's `pg/dead-tuples` warning fires at more
-      than max(10M, the table's fixed threshold) dead rows: without the draft,
-      a long pass or a stalled vacuum at 60-100M deletes a day crosses 10M;
-      with it, the line is 50M.
+        ```sql
+        ALTER TABLE contract_close_report_evidence SET (
+            autovacuum_vacuum_cost_delay = 2,
+            autovacuum_vacuum_cost_limit = 200,
+            autovacuum_vacuum_scale_factor = 0,
+            autovacuum_vacuum_threshold = 50000000
+        );
+        ```
 
 ### C6. Later, on size triggers or decisions
 

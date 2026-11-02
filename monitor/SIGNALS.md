@@ -13633,7 +13633,9 @@ enough to attribute retention.
   signature. Include rows/call and storage/WAL signals; backend count alone
   understates this load.
 - This is not the rare-value planner landmine (§2.3):
-  `transfer_escrow_sweep_payment_id` exists and is used to find the fan-out.
+  `transfer_escrow_sweep_payment_contract` (payment_id, contract_id) exists
+  and is used to find the fan-out (`transfer_escrow_sweep_payment_id` was
+  dropped by the index diet).
   `ANALYZE` and larger PgBouncer pools do not reduce millions of updates.
 - Action: make retention stamping bounded/chunked or decouple it from the
   synchronous payment transaction. During an incident, correlate it with
@@ -29716,7 +29718,7 @@ This is the version-to-artifact contract checked by the probe:
 | 626 | obsolete profile/deployment nonce constraint absent |
 | 627 | deployment-scoped ST fleet-signature/epoch-notification keys and network-time index |
 | 628 | `transfer_contract.stream_id` plus `contract_participant` and its stream/client primary key |
-| 629 | partial `transfer_contract_stream_id` |
+| 629 | partial `transfer_contract_stream_id` (required until the index diet's stream index drop, which requires it absent) |
 | 630 | `competition_round.staging`, epoch-kind constraint, and enabled staging identity/review/finalization guards |
 | 631 | nullable `transfer_escrow_sweep.provider_payouts` and its nonempty-array shape constraint |
 | 632 | `transfer_contract_unresolved_source_pair_create_time` |
