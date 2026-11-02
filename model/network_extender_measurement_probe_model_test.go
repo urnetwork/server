@@ -217,6 +217,48 @@ func TestRecordNetworkExtenderMeasurementProbesStoresAPass(t *testing.T) {
 	})
 }
 
+// A pass's probes read back by the time they were stored at, and only while they
+// are their family's latest: a later probe of one family takes that family out
+// of what is left of the pass, and leaves the others.
+func TestGetNetworkExtenderMeasurementProbesAtReadsWhatIsLeftOfAPass(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		passTime := testMeasurementProbeNow().Add(-time.Hour)
+		a := server.NewId()
+		b := server.NewId()
+		other := server.NewId()
+		RecordNetworkExtenderMeasurementProbes(ctx, []*NetworkExtenderMeasurementProbeResult{
+			{ExtenderId: a, Ip: netip.MustParseAddr("192.0.2.1"), Outcome: lagprobe.OutcomeTlsTimeout},
+			{ExtenderId: a, Ip: netip.MustParseAddr("2001:db8::1"), Outcome: lagprobe.OutcomeOk},
+			{ExtenderId: b, Ip: netip.MustParseAddr("192.0.2.2"), Outcome: lagprobe.OutcomeUnprobed},
+		}, passTime, testMeasurementProbeRunGap)
+		recordTestMeasurementProbe(ctx, other, "192.0.2.3", lagprobe.OutcomeDial, passTime.Add(-2*time.Minute))
+
+		read := func() map[[2]string]lagprobe.Outcome {
+			outcomes := map[[2]string]lagprobe.Outcome{}
+			for _, probe := range GetNetworkExtenderMeasurementProbesAt(ctx, passTime) {
+				connect.AssertEqual(t, probe.ProbeTime.UTC(), passTime)
+				outcomes[[2]string{probe.ExtenderId.String(), probe.Ip.String()}] = probe.Outcome
+			}
+			return outcomes
+		}
+		connect.AssertEqual(t, read(), map[[2]string]lagprobe.Outcome{
+			{a.String(), "192.0.2.1"}:   lagprobe.OutcomeTlsTimeout,
+			{a.String(), "2001:db8::1"}: lagprobe.OutcomeOk,
+			{b.String(), "192.0.2.2"}:   lagprobe.OutcomeUnprobed,
+		})
+
+		// a second look at one family moves it on
+		recordTestMeasurementProbe(ctx, a, "192.0.2.1", lagprobe.OutcomeTlsTimeout, passTime.Add(30*time.Second))
+		connect.AssertEqual(t, read(), map[[2]string]lagprobe.Outcome{
+			{a.String(), "2001:db8::1"}: lagprobe.OutcomeOk,
+			{b.String(), "192.0.2.2"}:   lagprobe.OutcomeUnprobed,
+		})
+
+		connect.AssertEqual(t, len(GetNetworkExtenderMeasurementProbesAt(ctx, passTime.Add(time.Second))), 0)
+	})
+}
+
 // The retention takes what was probed before the cut and nothing else, and
 // says how many.
 func TestRemoveNetworkExtenderMeasurementProbesBefore(t *testing.T) {

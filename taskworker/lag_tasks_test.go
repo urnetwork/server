@@ -50,6 +50,11 @@ func TestInitTasksArmsTheMeasurementProbe(t *testing.T) {
 		if !taskWorker.HasTarget("github.com/urnetwork/server/taskworker/work.ExtenderMeasurementProbe") {
 			t.Fatal("the measurement api probe is not a registered task target")
 		}
+		// its second look at what failed is scheduled by the chain's post, not
+		// armed here; with no target it would wait on the skew backoff
+		if !taskWorker.HasTarget("github.com/urnetwork/server/taskworker/work.ExtenderMeasurementRecheck") {
+			t.Fatal("the measurement api recheck is not a registered task target")
+		}
 
 		for range 2 {
 			InitTasks(ctx)

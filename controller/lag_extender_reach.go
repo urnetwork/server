@@ -64,17 +64,15 @@ type lagExtenderReachRule struct {
 // from a laptop for 2.4 hours on 2026-11-02, the only extenders down for longer
 // than one poll were two of Saginaw's stalls. Of the 39 down for one poll, 35
 // came in two moments when 16 and 32 of the 37 addresses failed together.
-// Replayed at the two-minute cadence, one failure leaves out extenders that
-// answer for 16 extender-minutes, and two for under 2.
 //
-// An extender that is really down loses little by it. On a poll of 2026-11-01,
-// with extenders down throughout and two of Saginaw's stalls, two left out 89%
-// of the time they were down, one 97% and three 83%.
-//
-// What two gives up is the short stall. Acting 2 to 4 minutes in, it leaves out
-// on average 8% of a 3 minute stall, 25% of a 4 minute one and 61% of an 8 minute
-// one, where one would leave out 67%, 75% and 87%. Those are mostly one
-// extender's, which the restart loop rule holds out between them.
+// The second probe costs little, since it comes about 30 s after the first
+// rather than at the next pass (work.ExtenderMeasurementRecheck). Replayed through
+// this rule, in those 2.4 hours it leaves out extenders that answer for under one
+// extender-minute, where one failure does for 7. It leaves out on average 50% of
+// a 3 minute stall and 81% of an 8 minute one, where one failure leaves out 67%
+// and 87%, and two failures a whole pass apart 8% and 61%. On a poll of
+// 2026-11-01, with extenders down throughout and two of Saginaw's stalls, it left
+// out 93% of the time they were down, one failure 97%, and two a pass apart 84%.
 var lagExtenderUnreachableRule = lagExtenderReachRule{
 	ConsecutiveFailures: 2,
 	ProbeMaxAge:         ExtenderMeasurementProbeMaxAge,

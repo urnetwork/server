@@ -167,24 +167,66 @@ func GetNetworkExtenderMeasurementProbes(
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
-				probe := &NetworkExtenderMeasurementProbe{}
-				var outcome string
-				server.Raise(result.Scan(
-					&probe.ExtenderId,
-					&probe.IpVersion,
-					&probe.Ip,
-					&probe.ProbeTime,
-					&outcome,
-					&probe.SuccessTime,
-					&probe.ConsecutiveFailures,
-				))
-				probe.Ip = probe.Ip.Unmap().WithZone("")
-				probe.Outcome = lagprobe.Outcome(outcome)
+				probe := scanNetworkExtenderMeasurementProbe(result)
 				probes[probe.ExtenderId] = append(probes[probe.ExtenderId], probe)
 			}
 		})
 	})
 	return probes
+}
+
+// GetNetworkExtenderMeasurementProbesAt reads the probes stored at exactly
+// probeTime that are still their family's latest: what is left of one pass, once
+// any later probe has replaced part of it. The table holds at most two rows per
+// extender that served in the retention, so this reads it all.
+func GetNetworkExtenderMeasurementProbesAt(
+	ctx context.Context,
+	probeTime time.Time,
+) []*NetworkExtenderMeasurementProbe {
+	probes := []*NetworkExtenderMeasurementProbe{}
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT
+				extender_id,
+				ip_version,
+				ip,
+				probe_time,
+				outcome,
+				success_time,
+				consecutive_failures
+			FROM network_extender_measurement_probe
+			WHERE probe_time = $1
+			ORDER BY extender_id, ip_version
+			`,
+			probeTime.UTC(),
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				probes = append(probes, scanNetworkExtenderMeasurementProbe(result))
+			}
+		})
+	})
+	return probes
+}
+
+// One row of the columns both reads select, in their order.
+func scanNetworkExtenderMeasurementProbe(result server.PgResult) *NetworkExtenderMeasurementProbe {
+	probe := &NetworkExtenderMeasurementProbe{}
+	var outcome string
+	server.Raise(result.Scan(
+		&probe.ExtenderId,
+		&probe.IpVersion,
+		&probe.Ip,
+		&probe.ProbeTime,
+		&outcome,
+		&probe.SuccessTime,
+		&probe.ConsecutiveFailures,
+	))
+	probe.Ip = probe.Ip.Unmap().WithZone("")
+	probe.Outcome = lagprobe.Outcome(outcome)
+	return probe
 }
 
 // RemoveNetworkExtenderMeasurementProbesBefore deletes every probe made before

@@ -28,9 +28,16 @@ import (
 // Two minutes is the shortest of the two to five the plan allows. A pass is
 // about 60 to 100 handshakes among 30 to 60 extenders, a few seconds of network
 // wait, and the extender answers with its cheapest refusal, before admission.
-// The rule takes two failures in a row, so the cadence is what decides how soon
-// an extender that stalls for 2 to 15 minutes leaves the sample, 2 to 4 minutes
-// in, and how soon it returns.
+//
+// An address that failed is probed once more about 30 seconds later, by a task of
+// its own that the pass's Post schedules, and that counts as a probe like any
+// other. The rule takes two failures in a row, so an extender that stalls leaves
+// the sample about 30 seconds to two and a half minutes in, where two passes
+// alone would take 2 to 4 minutes and miss most of the 3 to 8 minute stalls seen
+// on Main. Almost every other failure is over by then, so the second failure
+// still tells them apart. The wait is not spent in the pass: a task waiting in a
+// worker's slot would hold that slot, and hold up the rest of the worker when an
+// isolated task is next (task.TaskWorker).
 //
 // The taskworker hosts reach IPv6. Main's uptime probes run in the same
 // processes and dial every address directly, about 30% of them IPv6. None of
@@ -53,6 +60,9 @@ const (
 	// How often the probes run.
 	ExtenderMeasurementProbeTimeout = 2 * time.Minute
 
+	// How long after a pass its failures are probed again.
+	ExtenderMeasurementRecheckTimeout = 30 * time.Second
+
 	// How long the row of a family no longer probed is kept: the week an
 	// extender that went away may come back in with its certificate
 	// (controller.ExtenderMeasurementAwayGrace). Its latest success and outcome
@@ -70,6 +80,9 @@ type ExtenderMeasurementProbeArgs struct {
 }
 
 type ExtenderMeasurementProbeResult struct {
+	// the time a pass's probes are stored at, which its recheck finds them by;
+	// zero when it probed nothing, and for a recheck
+	PassTime time.Time `json:"pass_time"`
 	// counts only, as for the uptime probes; which extender failed is in the
 	// table and the log
 	Probed   int `json:"probed"`
@@ -102,23 +115,29 @@ func ExtenderMeasurementProbe(
 	if err != nil || !config.Measurement.Enabled {
 		return result, nil
 	}
-	probeExtenderMeasurementHosts(clientSession.Ctx, server.NowUtc(), result)
+	// as the column stores it, so the recheck finds the pass by this time
+	probeExtenderMeasurementHosts(clientSession.Ctx, server.NowUtc().Truncate(time.Microsecond), result)
 	return result, nil
 }
 
+// Re-arms the chain, and has what failed probed again in about 30 seconds.
 func ExtenderMeasurementProbePost(
 	_ *ExtenderMeasurementProbeArgs,
-	_ *ExtenderMeasurementProbeResult,
+	result *ExtenderMeasurementProbeResult,
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
 	ScheduleExtenderMeasurementProbe(clientSession, tx)
+	if result != nil && 0 < result.Failed {
+		scheduleExtenderMeasurementRecheck(clientSession, tx, result.PassTime)
+	}
 	return nil
 }
 
 // One pass as the clock reads `now`, into `result`: every published address of
 // every serving extender, stored as of `now`.
 func probeExtenderMeasurementHosts(ctx context.Context, now time.Time, result *ExtenderMeasurementProbeResult) {
+	result.PassTime = now
 	extenderIds := []server.Id{}
 	targets := []lagprobe.Target{}
 	for _, host := range controller.GetLagServingHosts(ctx, now) {
@@ -137,8 +156,96 @@ func probeExtenderMeasurementHosts(ctx context.Context, now time.Time, result *E
 		targets[i], targets[j] = targets[j], targets[i]
 	})
 
-	pass := probeExtenderMeasurementApis(ctx, targets, lagprobe.DefaultSettings())
+	pass := probeExtenderMeasurementApis(ctx, targets, nil, lagprobe.DefaultSettings())
+	storeExtenderMeasurementProbes(ctx, now, extenderIds, targets, pass, result)
+	result.Removed = int(model.RemoveNetworkExtenderMeasurementProbesBefore(ctx, now.Add(-ExtenderMeasurementProbeRetention)))
+}
 
+type ExtenderMeasurementRecheckArgs struct {
+	// the pass whose failures to probe again
+	PassTime time.Time `json:"pass_time"`
+}
+
+func scheduleExtenderMeasurementRecheck(clientSession *session.ClientSession, tx server.PgTx, passTime time.Time) {
+	task.ScheduleTaskInTx(
+		tx,
+		ExtenderMeasurementRecheck,
+		&ExtenderMeasurementRecheckArgs{PassTime: passTime},
+		clientSession,
+		task.RunOnce("extender_measurement_recheck", passTime.UnixMicro()),
+		task.RunAt(server.NowUtc().Add(ExtenderMeasurementRecheckTimeout)),
+	)
+}
+
+// ExtenderMeasurementRecheck probes the failures of one pass once more (A4). It
+// has no Post: what fails here is probed again by the next pass, so one failure
+// asks for one more probe and no more.
+func ExtenderMeasurementRecheck(
+	args *ExtenderMeasurementRecheckArgs,
+	clientSession *session.ClientSession,
+) (*ExtenderMeasurementProbeResult, error) {
+	result := &ExtenderMeasurementProbeResult{}
+	config, err := controller.EnvExtenderConfig()
+	if err != nil || !config.Measurement.Enabled {
+		return result, nil
+	}
+	recheckExtenderMeasurementProbes(
+		clientSession.Ctx,
+		config.Measurement.MeasurementZone(),
+		args.PassTime,
+		server.NowUtc().Truncate(time.Microsecond),
+		result,
+	)
+	return result, nil
+}
+
+// Probes again what is still a failure of the pass at passTime, as the clock
+// reads `now`, into `result`. A row a later pass has replaced is not the pass's,
+// so a recheck that runs too late finds nothing to do, rather than probing a new
+// failure seconds after it. What succeeded in the pass goes to the family rule
+// beside what is probed now (lagprobe.ProbeAll). The addresses are the ones
+// probed, read from their rows: an extender that stops serving or moves within
+// these seconds costs one more probe, and its row is of an address the sample
+// no longer reads.
+func recheckExtenderMeasurementProbes(
+	ctx context.Context,
+	zone string,
+	passTime time.Time,
+	now time.Time,
+	result *ExtenderMeasurementProbeResult,
+) {
+	extenderIds := []server.Id{}
+	targets := []lagprobe.Target{}
+	alreadySucceeded := map[int]int{}
+	for _, probe := range model.GetNetworkExtenderMeasurementProbesAt(ctx, passTime) {
+		switch {
+		case probe.Outcome == lagprobe.OutcomeOk:
+			alreadySucceeded[probe.IpVersion] += 1
+		case probe.Outcome.Failed():
+			extenderIds = append(extenderIds, probe.ExtenderId)
+			targets = append(targets, lagprobe.Target{
+				Name: controller.ExtenderMeasurementName(probe.ExtenderId, zone),
+				Addr: netip.AddrPortFrom(probe.Ip, controller.ExtenderMeasurementPort),
+			})
+		}
+	}
+	if len(targets) == 0 {
+		return
+	}
+	pass := probeExtenderMeasurementApis(ctx, targets, alreadySucceeded, lagprobe.DefaultSettings())
+	storeExtenderMeasurementProbes(ctx, now, extenderIds, targets, pass, result)
+}
+
+// Stores what one round of probes found, as of `now`, and counts and logs it.
+// extenderIds[i] is the extender of targets[i].
+func storeExtenderMeasurementProbes(
+	ctx context.Context,
+	now time.Time,
+	extenderIds []server.Id,
+	targets []lagprobe.Target,
+	pass *lagprobe.Pass,
+	result *ExtenderMeasurementProbeResult,
+) {
 	records := make([]*model.NetworkExtenderMeasurementProbeResult, 0, len(targets))
 	for i, probe := range pass.Results {
 		if probe == nil {
@@ -170,7 +277,6 @@ func probeExtenderMeasurementHosts(ctx context.Context, now time.Time, result *E
 		})
 	}
 	model.RecordNetworkExtenderMeasurementProbes(ctx, records, now, controller.ExtenderMeasurementProbeMaxAge)
-	result.Removed = int(model.RemoveNetworkExtenderMeasurementProbesBefore(ctx, now.Add(-ExtenderMeasurementProbeRetention)))
 
 	for _, ipVersion := range pass.UnreachableIpVersions {
 		// nothing else says so: the extenders are offered as if nothing had

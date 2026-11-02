@@ -541,6 +541,7 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.ExtenderMeasurementProbe,
 			work.ExtenderMeasurementProbePost,
 		),
+		task.NewTaskTarget(work.ExtenderMeasurementRecheck),
 		task.NewTaskTargetWithPost(
 			work.RemoveOldExtenderLatencies,
 			work.RemoveOldExtenderLatenciesPost,
