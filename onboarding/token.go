@@ -53,7 +53,7 @@ func (c *TokenClaims) Expiry() time.Time {
 // SignToken encodes and signs claims with one key: base64url(json) "." base64url(hmac-sha256).
 func SignToken(key []byte, claims *TokenClaims) (string, error) {
 	if claims == nil || claims.NetworkId == (server.Id{}) || strings.TrimSpace(claims.Step) == "" ||
-		(claims.FlowStep != "" && !IsFlowStep(claims.FlowStep)) {
+		(claims.FlowStep != "" && !IsTokenFlowStep(claims.FlowStep)) {
 		return "", ErrTokenInvalid
 	}
 	payload, err := json.Marshal(claims)
@@ -106,7 +106,7 @@ func ParseToken(keys [][]byte, token string, now time.Time) (*TokenClaims, error
 		return nil, ErrTokenInvalid
 	}
 	if claims.NetworkId == (server.Id{}) || strings.TrimSpace(claims.Step) == "" ||
-		(claims.FlowStep != "" && !IsFlowStep(claims.FlowStep)) {
+		(claims.FlowStep != "" && !IsTokenFlowStep(claims.FlowStep)) {
 		return nil, ErrTokenInvalid
 	}
 	if claims.ExpiresAt <= 0 || !now.Before(claims.Expiry()) {
@@ -129,6 +129,40 @@ func IsFlowStep(step string) bool {
 // FlowSteps returns the ordered, bounded flow-step vocabulary.
 func FlowSteps() []string {
 	return []string{StepE1, StepE2, StepE3, StepE4, StepE5}
+}
+
+// The re-engagement program's flow steps (mmm/reengagement/PLAN.md "THE
+// SEQUENCES"). Its tokens share this signing and these endpoints; its events
+// carry their own names (reengage.*), so these steps never enter the
+// onboarding tracker or rollup.
+const (
+	StepR1 = "r1"
+	StepR2 = "r2"
+	StepR3 = "r3"
+	StepN1 = "n1"
+	StepF1 = "f1"
+	StepW1 = "w1"
+)
+
+// IsReengagementFlowStep reports whether step is a re-engagement position.
+func IsReengagementFlowStep(step string) bool {
+	switch step {
+	case StepR1, StepR2, StepR3, StepN1, StepF1, StepW1:
+		return true
+	default:
+		return false
+	}
+}
+
+// ReengagementFlowSteps returns the re-engagement vocabulary, in order.
+func ReengagementFlowSteps() []string {
+	return []string{StepR1, StepR2, StepR3, StepN1, StepF1, StepW1}
+}
+
+// IsTokenFlowStep reports whether a token may carry step: an onboarding or a
+// re-engagement position.
+func IsTokenFlowStep(step string) bool {
+	return IsFlowStep(step) || IsReengagementFlowStep(step)
 }
 
 // NewToken signs claims with the deployment's current key.
@@ -173,7 +207,7 @@ func Destination(step string) string {
 		return DestinationFeedback
 	case strings.Contains(s, "widget"):
 		return DestinationWidgets
-	case strings.Contains(s, "offer"), strings.Contains(s, "last_chance"), strings.Contains(s, "lastchance"), strings.Contains(s, "pro"):
+	case strings.Contains(s, "offer"), strings.Contains(s, "last_chance"), strings.Contains(s, "lastchance"), strings.Contains(s, "pro"), strings.Contains(s, "winback"):
 		return DestinationOffer
 	default:
 		return DestinationConnect

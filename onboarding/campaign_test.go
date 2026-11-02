@@ -30,6 +30,9 @@ func TestGlobalExitsInOrder(t *testing.T) {
 		{"deleted", func(f *Facts) { f.NetworkExists = false }, ExitNetworkDeleted},
 		{"holdout", func(f *Facts) { f.Holdout = true }, ExitHoldout},
 		{"opt out", func(f *Facts) { f.ProductUpdates = false }, ExitOptOut},
+		{"suppressed", func(f *Facts) { f.Suppressed = true }, ExitSuppressed},
+		{"country policy", func(f *Facts) { f.PolicyExit = ExitCountryNoMarketing }, ExitCountryNoMarketing},
+		{"consent evidence", func(f *Facts) { f.PolicyExit = ExitConsentEvidence }, ExitConsentEvidence},
 		{"pro", func(f *Facts) { f.Pro = true }, ExitPro},
 		{"complained", func(f *Facts) { f.Complained = true }, ExitComplained},
 		{"bounced", func(f *Facts) { f.Bounced = true }, ExitBounced},
@@ -94,19 +97,17 @@ func TestPathA(t *testing.T) {
 			t.Errorf("e3a %q: %+v", state, d)
 		}
 	}
-	// E4a: feedback, engaged by opens or a connection
+	// E4a: feedback, engaged only by a connection. Opens never count: Apple
+	// Mail Privacy Protection opens every message, and a network that never
+	// connected was told "You've connected on 0 of your first 6 days".
 	f = healthy(PathA)
 	d = Decide(StepE4, f)
 	if d.Action != ActionSend || d.Template != TemplateE4Feedback || d.Variant != VariantNotActivated || d.NextStep != "" {
 		t.Errorf("e4a not activated: %+v", d)
 	}
-	f.EmailOpens = 2
-	if d := Decide(StepE4, f); d.Variant != VariantEngaged {
-		t.Errorf("e4a two opens: %+v", d)
-	}
-	f.EmailOpens = 1
+	f.EmailOpens = 5
 	if d := Decide(StepE4, f); d.Variant != VariantNotActivated {
-		t.Errorf("e4a one open: %+v", d)
+		t.Errorf("e4a opens without a connection must stay not activated: %+v", d)
 	}
 	f.HasConnected = true
 	if d := Decide(StepE4, f); d.Variant != VariantEngaged {
@@ -164,6 +165,35 @@ func TestPathB(t *testing.T) {
 	f = healthy("")
 	if d := Decide(StepE4, f); !d.IssueOffer {
 		t.Errorf("empty path must behave as B: %+v", d)
+	}
+}
+
+// The offer steps stand down when the offer may not be emailed (a no-offer
+// country) or can't be redeemed from the email (the App Store build without the
+// offer route): no E3a, no E4b (so no offer is issued by email), no E5b. The
+// rest of the sequence is untouched.
+func TestOfferStepsStandDownWithoutAnEmailOffer(t *testing.T) {
+	f := healthy(PathA)
+	f.OfferState = OfferStateActive
+	f.NoOfferEmail = true
+	if d := Decide(StepE3, f); d.Action != ActionSkip || d.NextStep != StepE4 {
+		t.Errorf("e3a without an email offer: %+v", d)
+	}
+	f = healthy(PathB)
+	f.NoOfferEmail = true
+	if d := Decide(StepE4, f); d.Action != ActionSkip || d.IssueOffer || d.NextStep != StepE5 {
+		t.Errorf("e4b without an email offer: %+v", d)
+	}
+	f.OfferState = OfferStateActive
+	if d := Decide(StepE5, f); d.Action != ActionSkip {
+		t.Errorf("e5b without an email offer: %+v", d)
+	}
+	if d := Decide(StepE1, f); d.Action != ActionSend {
+		t.Errorf("e1 must still go: %+v", d)
+	}
+	f.HasConnected = true
+	if d := Decide(StepE3, f); d.Action != ActionSend || d.Template != TemplateE4Feedback {
+		t.Errorf("e3b feedback must still go: %+v", d)
 	}
 }
 
@@ -276,13 +306,19 @@ func TestFormatting(t *testing.T) {
 
 // Every template's params are exactly the manifest's keys.
 func TestParamsMatchManifests(t *testing.T) {
-	root := filepath.Join("..", "..", "mmm", "onboarding", "templates")
+	// URNETWORK_MMM_ROOT points at another mmm checkout (a worktree)
+	mmm := filepath.Join("..", "..", "mmm")
+	if v := os.Getenv("URNETWORK_MMM_ROOT"); v != "" {
+		mmm = v
+	}
+	root := filepath.Join(mmm, "onboarding", "templates")
 	if _, err := os.Stat(root); err != nil {
 		t.Skip("mmm/onboarding/templates is not checked out next to server")
 	}
 	expires := time.Date(2026, 9, 14, 22, 5, 0, 0, time.UTC)
 	base := ParamsInput{
-		Platform: "iPhone", DailyDataGb: 30, DaysActive: 3, ConnectDays: 2, ProvidersOnline: 4812, CountriesOnline: 91,
+		// an iPhone: the App Store bills it (the direct branch is TestOfferParamsStoreBilled's)
+		Platform: "iPhone", StoreBilled: true, DailyDataGb: 30, DaysActive: 3, ConnectDays: 2, ProvidersOnline: 4812, CountriesOnline: 91,
 		OfferExpiresAt: &expires, OfferPriceUsd: 29.99, RegularYearUsd: 39.99, TrialDays: 14,
 		Location: time.UTC, Now: expires.Add(-4 * 24 * time.Hour), Token: "tok", SiteUrl: "https://ur.io", CompanyLine: "co",
 	}
@@ -328,7 +364,7 @@ func TestParamsMatchManifests(t *testing.T) {
 		t.Errorf("rating url: %s", p["rating_url_5"])
 	}
 	p = BuildParams(ParamsInput{Template: TemplateE4Feedback, Variant: VariantNotActivated, Token: "T", SiteUrl: "https://ur.io"})
-	if p["reason_url_2"] != "https://ur.io/f/T?why=2" || p["days_active"] != "5" {
+	if p["reason_url_2"] != "https://ur.io/f/T?why=not_working" || p["days_active"] != "5" {
 		t.Errorf("reason url / floor: %v", p)
 	}
 	p = BuildParams(ParamsInput{Template: TemplateE1Connect, Token: "T", SiteUrl: "https://ur.io", DailyDataGb: 30})
@@ -361,7 +397,8 @@ func TestConnectDaysNeverExceedDaysActive(t *testing.T) {
 		{TemplateE2Widget, VariantActivated, 1, 3, "2", "2"},
 		{TemplateE4Feedback, VariantEngaged, 6, 7, "6", "6"},
 		{TemplateE4Feedback, VariantEngaged, 5, 3, "3", "5"},
-		// engaged by email opens alone
+		// the params never exceed the facts, even for a combination the
+		// decision no longer produces (engaged with no connection)
 		{TemplateE4Feedback, VariantEngaged, 5, 0, "0", "5"},
 	} {
 		p := BuildParams(ParamsInput{
@@ -375,6 +412,34 @@ func TestConnectDaysNeverExceedDaysActive(t *testing.T) {
 		if p["connect_days"] != c.wantConnect || p["days_active"] != c.wantActive {
 			t.Errorf("%s/%s with %d connection days in %d days: connected on %s of %s days, want %s of %s",
 				c.template, c.variant, c.connectDays, c.daysActive, p["connect_days"], p["days_active"], c.wantConnect, c.wantActive)
+		}
+	}
+}
+
+// The App Store and Google Play charge their own local price, so the offer
+// emails name none for the networks they bill (REVIEW.md finding 7); the
+// direct (Stripe) platforms keep the amount.
+func TestOfferParamsStoreBilled(t *testing.T) {
+	expires := time.Date(2026, 9, 14, 22, 5, 0, 0, time.UTC)
+	for _, platform := range []string{"ios", "macos", "android"} {
+		if !StoreBilledPlatform(platform) {
+			t.Fatalf("%s is store billed", platform)
+		}
+	}
+	for _, platform := range []string{"web", "windows", "linux", ""} {
+		if StoreBilledPlatform(platform) {
+			t.Fatalf("%s is billed directly", platform)
+		}
+	}
+	for _, template := range []string{TemplateE3LastChance, TemplateE4bOffer} {
+		in := ParamsInput{Template: template, Variant: VariantDefault, OfferExpiresAt: &expires, OfferPriceUsd: 30, RegularYearUsd: 40, TrialDays: 14,
+			Location: time.UTC, Now: expires.Add(-24 * time.Hour), Token: "tok", SiteUrl: "https://ur.io"}
+		if got := BuildParams(in)["store_billed"]; got != "" {
+			t.Fatalf("%s: direct billing has store_billed %q", template, got)
+		}
+		in.StoreBilled = true
+		if got := BuildParams(in)["store_billed"]; got != "1" {
+			t.Fatalf("%s: store billing has store_billed %q", template, got)
 		}
 	}
 }

@@ -1,0 +1,12 @@
+{{define "headline"}}YOUR UR PRO TRIAL ENDS ON {{.EndDateUpper}}{{end}}
+{{define "why"}}Sent to the address on your URnetwork account two days before a
+UR Pro free trial ends, as the trial screen said we would.{{end}}
+{{define "content"}}
+Your free UR Pro trial ends on {{.EndDate}}.
+
+{{.ChargeLine}}
+
+{{.CancelLine}}
+
+Questions? Contact support@ur.io.
+{{end}}

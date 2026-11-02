@@ -92,6 +92,10 @@ Usage:
     bringyourctl onboarding webhook-ensure
     bringyourctl onboarding rollup [--from=<from>] [--to=<to>]
     bringyourctl onboarding experiments [--resume | --pause] [--experiment=<experiment>] [--variant=<variant>] [--reason=<reason>]
+    bringyourctl reengagement status --network_id=<network_id>
+    bringyourctl reengagement preview --network_id=<network_id> --step=<step>
+    bringyourctl reengagement scan [--dry-run]
+    bringyourctl reengagement send-test --email=<email> --template=<template> [--variant=<variant>] [--locale=<locale>]
     bringyourctl payments reconcile [--dry-run] [--store=<store>]
     bringyourctl payments stripe-dunning [--send]
     bringyourctl crypto list [--asset=<asset>] [--state=<state>] [--limit=<n>]
@@ -384,6 +388,16 @@ func main() {
 			payoutByPaymentId(opts)
 		} else if pending, _ := opts.Bool("pending"); pending {
 			payoutPending()
+		}
+	} else if reengagement_, _ := opts.Bool("reengagement"); reengagement_ {
+		if status, _ := opts.Bool("status"); status {
+			reengagementStatus(opts)
+		} else if preview, _ := opts.Bool("preview"); preview {
+			reengagementPreview(opts)
+		} else if scan, _ := opts.Bool("scan"); scan {
+			reengagementScan(opts)
+		} else if sendTest, _ := opts.Bool("send-test"); sendTest {
+			reengagementSendTest(opts)
 		}
 	} else if onboarding_, _ := opts.Bool("onboarding"); onboarding_ {
 		if status, _ := opts.Bool("status"); status {
@@ -3285,6 +3299,72 @@ func stFinalize(opts docopt.Opts) {
 		panic(err)
 	}
 	fmt.Printf("finalize epoch %d: %s\n", epoch, outcome)
+}
+
+// ----- re-engagement (mmm/reengagement/PLAN.md) -----
+
+func printJson(v any) {
+	out, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("%s\n", out)
+}
+
+// reengagementStatus prints a network's re-engagement row, mail state, sends
+// and the facts a step decision would see now.
+func reengagementStatus(opts docopt.Opts) {
+	networkIdStr, _ := opts.String("--network_id")
+	networkId, err := server.ParseId(networkIdStr)
+	if err != nil {
+		panic(err)
+	}
+	printJson(controller.ReengagementNetworkStatus(context.Background(), networkId))
+}
+
+// reengagementPreview renders the decision a step would make now; nothing is sent.
+func reengagementPreview(opts docopt.Opts) {
+	networkIdStr, _ := opts.String("--network_id")
+	step, _ := opts.String("--step")
+	networkId, err := server.ParseId(networkIdStr)
+	if err != nil {
+		panic(err)
+	}
+	preview, err := controller.ReengagementNetworkPreview(context.Background(), networkId, step)
+	if err != nil {
+		panic(err)
+	}
+	printJson(preview)
+}
+
+// reengagementScan runs the day's scan now. --dry-run counts the candidates
+// per stream and opens nothing (a scan also opens nothing while the program is
+// disabled).
+func reengagementScan(opts docopt.Opts) {
+	dryRun, _ := opts.Bool("--dry-run")
+	ctx := context.Background()
+	clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
+	defer clientSession.Cancel()
+	result, err := controller.ReengagementScan(&controller.ReengagementScanArgs{DryRun: dryRun}, clientSession)
+	if err != nil {
+		panic(err)
+	}
+	printJson(result)
+}
+
+// reengagementSendTest sends ONE template to an explicit address with sample
+// data (behind reengagement.enabled).
+func reengagementSendTest(opts docopt.Opts) {
+	email, _ := opts.String("--email")
+	template, _ := opts.String("--template")
+	variant, _ := opts.String("--variant")
+	locale, _ := opts.String("--locale")
+	messageId, err := controller.ReengagementSendTest(context.Background(), email, template, variant, locale)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "reengagement send-test: %s\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("sent %s/%s/%s: message %s\n", template, variant, locale, messageId)
 }
 
 // ----- onboarding campaign (mmm/onboarding/PLAN.md) -----
