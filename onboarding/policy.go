@@ -6,8 +6,8 @@ package onboarding
 // product-updates preference (mmm/onboarding/REVIEW.md finding 12,
 // mmm/reengagement/PLAN.md "Audiences" and RESEARCH.md §5). Pure: the
 // controllers pass the facts and the configured lists, so every rule has a
-// unit test. Counsel reviews the lists; they are data in onboarding.yml
-// `policy`, and these are only the defaults.
+// unit test. The lists are data in onboarding.yml `policy`, and these are only
+// the defaults.
 
 import (
 	"strings"
