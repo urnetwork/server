@@ -835,8 +835,10 @@ func stripeResolveInvoiceCredit(
 	credit := &stripeInvoiceCredit{
 		networkId:      *networkId,
 		subscriptionId: subscriptionId,
-		startTime:      time.Unix(periodStart, 0),
-		endTime:        time.Unix(periodEnd, 0).Add(manualPaymentGracePeriod),
+		// in UTC, as the timestamp columns these reach hold it: pgx writes such
+		// a column from a time's wall clock and drops its zone
+		startTime: time.Unix(periodStart, 0).UTC(),
+		endTime:   time.Unix(periodEnd, 0).UTC().Add(manualPaymentGracePeriod),
 	}
 	return credit, nil
 }
