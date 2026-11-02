@@ -10,14 +10,13 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-// The lag.dev sample (lag.dev/PLAN.md A4) leaves out an extender that is
-// unstable now, and the tickets (A6) leave it out with it, since both read the
-// same serving set. An extender is unstable when the latest uptime probe of
-// one of its active addresses failed, or while it is in a restart loop: three
-// activation passes that each activated both families, within 90 minutes, the
-// last less than two hours ago (model.GetLagExtenderStability). An extender
-// that stalls answers tcp but not tls until it restarts, so a ticket issued in
-// the minutes before a restart gets no result far more often than another.
+// The lag.dev sample (lag.dev/PLAN.md A4) leaves out an extender that is in a
+// restart loop, and the tickets (A6) leave it out with it, since both read the
+// same serving set: three activation passes that each activated both families,
+// within 90 minutes, the last less than two hours ago
+// (model.GetLagExtenderRestartLoops). An extender that stalls answers tcp but
+// not tls until it restarts, so a ticket issued in the minutes before a
+// restart gets no result far more often than another.
 //
 // The thresholds come from a replay of Main's activations of the 48 hours to
 // 2026-11-01 22:45 UTC:
@@ -38,7 +37,13 @@ import (
 //
 // The hold bridges the gaps between a loop's restarts, which went up to two
 // hours, and ends the exclusion two hours after a loop's last burst.
-var lagExtenderStabilityRule = model.LagExtenderStabilityRule{
+//
+// An extender's uptime probes do not decide: a probe forwards through the
+// extender to the api host, which a measurement does not use, and on Main
+// most of the minutes a failed latest probe would have left an extender out,
+// its measurement api answered. An outage is left to the probes' revocation,
+// as before, and the page's spares.
+var lagExtenderRestartLoopRule = model.LagExtenderRestartLoopRule{
 	PassGap:          30 * time.Second,
 	BurstPasses:      3,
 	BurstWindow:      90 * time.Minute,
@@ -46,14 +51,14 @@ var lagExtenderStabilityRule = model.LagExtenderStabilityRule{
 	RevocationWindow: 30 * time.Minute,
 }
 
-// Reads the stability evidence of extenders. A variable so a test can make
+// Reads which extenders are in a restart loop. A variable so a test can make
 // the read fail.
-var lagReadExtenderStability = model.GetLagExtenderStability
+var lagReadRestartLoops = model.GetLagExtenderRestartLoops
 
-// The extenders of a serving set that are stable at `now`, in one read. The
-// read runs with the set's load, so an extender that becomes unstable is left
-// out within extender_sample_cache. If the stability cannot be read, the set
-// is offered as it is, as it was before there was a stability rule.
+// The extenders of a serving set that are not in a restart loop at `now`, in
+// one read. The read runs with the set's load, so an extender whose loop
+// starts is left out within extender_sample_cache. If the loops cannot be
+// read, the set is offered as it is, as it was before there was a rule.
 func lagStableServing(ctx context.Context, set *lagServingSet, now time.Time) *lagServingSet {
 	if len(set.extenders) == 0 {
 		return set
@@ -62,11 +67,11 @@ func lagStableServing(ctx context.Context, set *lagServingSet, now time.Time) *l
 	for _, extender := range set.extenders {
 		extenderIds = append(extenderIds, extender.ExtenderId)
 	}
-	var stabilities map[server.Id]*model.LagExtenderStability
+	var loops map[server.Id]time.Time
 	if recovered := server.HandleError(func() {
-		stabilities = lagReadExtenderStability(ctx, extenderIds, now, &lagExtenderStabilityRule)
+		loops = lagReadRestartLoops(ctx, extenderIds, now, &lagExtenderRestartLoopRule)
 	}); recovered != nil {
-		glog.Errorf("[lag]the extenders' stability is not readable, offering every serving extender: %v\n", recovered)
+		glog.Errorf("[lag]the extenders' restart loops are not readable, offering every serving extender: %v\n", recovered)
 		return set
 	}
 
@@ -76,13 +81,12 @@ func lagStableServing(ctx context.Context, set *lagServingSet, now time.Time) *l
 		byId:      map[server.Id]*lagServingExtender{},
 	}
 	for _, extender := range set.extenders {
-		if stability := stabilities[extender.ExtenderId]; stability != nil && stability.Unstable() {
+		if burstPassTime, ok := loops[extender.ExtenderId]; ok {
 			if glog.V(1) {
 				glog.Infof(
-					"[lag]extender %s is unstable and not offered: probe failed=%t, restart burst=%v\n",
+					"[lag]extender %s is in a restart loop and not offered: its latest burst ended %s\n",
 					extender.ExtenderId,
-					stability.ProbeFailed,
-					stability.BurstPassTime,
+					burstPassTime.Format(time.RFC3339),
 				)
 			}
 			continue

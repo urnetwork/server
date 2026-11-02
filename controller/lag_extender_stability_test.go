@@ -13,10 +13,10 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-// Tests of the stability rule of the extender sample (lag.dev/PLAN.md A4):
-// an extender in a restart loop, or whose latest uptime probe failed, is not
-// offered, and the connect behaviours that post activations without a restart
-// leave an extender offered.
+// Tests of the restart loop rule of the extender sample (lag.dev/PLAN.md A4):
+// an extender in a restart loop is not offered, and the connect behaviours that
+// post activations without a restart, or a failed uptime probe, leave an
+// extender offered.
 
 // One activation row per family of `ipVersions` at each of `ago`, the
 // families of one pass 2 seconds apart, as an activation pass writes them.
@@ -51,14 +51,13 @@ func lagTestSortedIds(extenders ...*lagTestExtender) []server.Id {
 	return ids
 }
 
-// A restart loop and a failed latest probe keep an extender out of the sample
-// and out of the tickets' set. A healthy extender stays in, and so do the
-// activations that are not restarts: one family re-posted on its backoff while
-// the other is refused, on an IPv6-only or a dual-stack extender, full passes
-// an hour apart from connect's address check, and re-activations after the
-// probes revoked the extender. An extender whose probe answers again is
-// offered again.
-func TestLagExtendersLeaveOutUnstableExtenders(t *testing.T) {
+// A restart loop keeps an extender out of the sample and out of the tickets'
+// set. A healthy extender stays in, and so do the activations that are not
+// restarts: one family re-posted on its backoff while the other is refused, on
+// an IPv6-only or a dual-stack extender, full passes an hour apart from
+// connect's address check, and re-activations after the probes revoked the
+// extender. A failed latest uptime probe alone leaves an extender in.
+func TestLagExtendersLeaveOutRestartLoops(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		installLagTestExtenderConfig(t, true)
@@ -74,11 +73,9 @@ func TestLagExtendersLeaveOutUnstableExtenders(t *testing.T) {
 		looping := newLagServingTestExtender(t, ctx, places, lagTestPlace("Saginaw", "us", 43.4, -83.9), "192.0.2.31", "2001:db8:31::1")
 		addLagTestPasses(ctx, looping, now, []int{4, 6}, minutes(80), minutes(50), minutes(20))
 
-		// its daily pass, and probes that answer
+		// its daily pass
 		healthy := newLagServingTestExtender(t, ctx, places, lagTestPlace("Paris", "fr", 48.9, 2.4), "192.0.2.32", "2001:db8:32::1")
 		addLagTestPasses(ctx, healthy, now, []int{4, 6}, minutes(180))
-		model.RecordNetworkExtenderProbeResult(ctx, healthy.extenderId, 4, true, now.Add(-minutes(2)), 6, nil)
-		model.RecordNetworkExtenderProbeResult(ctx, healthy.extenderId, 6, true, now.Add(-minutes(2)), 6, nil)
 
 		// IPv4 refused since a start 75 minutes ago: IPv6 is re-posted 10,
 		// 20 and 40 minutes apart, and the extender has only that address
@@ -95,44 +92,37 @@ func TestLagExtendersLeaveOutUnstableExtenders(t *testing.T) {
 		addLagTestPasses(ctx, hourly, now, []int{4, 6}, minutes(119.5), minutes(59.75), minutes(0.5))
 
 		// re-activated 10 minutes after each of three revocations by its
-		// probes, which answer now
+		// probes
 		reactivated := newLagServingTestExtender(t, ctx, places, lagTestPlace("Riga", "lv", 56.9, 24.1), "192.0.2.37", "2001:db8:37::1")
 		for _, ago := range []time.Duration{minutes(80), minutes(50), minutes(20)} {
 			model.Testing_AddNetworkExtenderRevocation(ctx, reactivated.extenderId, now.Add(-ago-minutes(10)))
 			addLagTestPasses(ctx, reactivated, now, []int{4, 6}, ago)
 		}
-		model.RecordNetworkExtenderProbeResult(ctx, reactivated.extenderId, 4, true, now.Add(-minutes(1)), 6, nil)
-		model.RecordNetworkExtenderProbeResult(ctx, reactivated.extenderId, 6, true, now.Add(-minutes(1)), 6, nil)
 
-		// its latest IPv4 probe failed
+		// the latest probes of both its addresses failed: an uptime probe
+		// forwards through the extender, which a measurement does not use
 		probeFailed := newLagServingTestExtender(t, ctx, places, lagTestPlace("Kuala Lumpur", "my", 3.1, 101.7), "192.0.2.36", "2001:db8:36::1")
+		addLagTestPasses(ctx, probeFailed, now, []int{4, 6}, minutes(240))
 		model.RecordNetworkExtenderProbeResult(ctx, probeFailed.extenderId, 4, true, now.Add(-minutes(7)), 6, nil)
 		model.RecordNetworkExtenderProbeResult(ctx, probeFailed.extenderId, 4, false, now.Add(-minutes(2)), 6, nil)
-		model.RecordNetworkExtenderProbeResult(ctx, probeFailed.extenderId, 6, true, now.Add(-minutes(2)), 6, nil)
+		model.RecordNetworkExtenderProbeResult(ctx, probeFailed.extenderId, 6, false, now.Add(-minutes(2)), 6, nil)
 		Testing_ResetLagServing()
 
 		result, err := LagExtenders(newLagTestGuestSession(t, ctx, "198.51.100.30:1234"))
 		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, lagTestSampleIds(result), lagTestSortedIds(healthy, backoffIpv6Only, backoffDualStack, hourly, reactivated))
+		connect.AssertEqual(t, lagTestSampleIds(result), lagTestSortedIds(healthy, backoffIpv6Only, backoffDualStack, hourly, reactivated, probeFailed))
 
 		// the tickets (A6) read the same set
 		set := getLagServing(ctx, server.NowUtc(), DefaultLagSettings().ExtenderSampleCache)
 		connect.AssertEqual(t, set.get(looping.extenderId), (*lagServingExtender)(nil))
-		connect.AssertEqual(t, set.get(probeFailed.extenderId), (*lagServingExtender)(nil))
+		connect.AssertEqual(t, set.get(probeFailed.extenderId) != nil, true)
 		connect.AssertEqual(t, set.get(healthy.extenderId) != nil, true)
-
-		// its probe answers again
-		model.RecordNetworkExtenderProbeResult(ctx, probeFailed.extenderId, 4, true, server.NowUtc(), 6, nil)
-		Testing_ResetLagServing()
-		result, err = LagExtenders(newLagTestGuestSession(t, ctx, "198.51.100.30:1234"))
-		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, lagTestSampleIds(result), lagTestSortedIds(healthy, backoffIpv6Only, backoffDualStack, hourly, reactivated, probeFailed))
 	})
 }
 
-// When the stability cannot be read, every serving extender is offered, as
-// before the rule.
-func TestLagExtendersOfferEveryExtenderWhenStabilityIsUnreadable(t *testing.T) {
+// When the restart loops cannot be read, every serving extender is offered,
+// as before the rule.
+func TestLagExtendersOfferEveryExtenderWhenRestartLoopsAreUnreadable(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		installLagTestExtenderConfig(t, true)
@@ -143,33 +133,32 @@ func TestLagExtendersOfferEveryExtenderWhenStabilityIsUnreadable(t *testing.T) {
 
 		looping := newLagServingTestExtender(t, ctx, places, lagTestPlace("Saginaw", "us", 43.4, -83.9), "192.0.2.41", "2001:db8:41::1")
 		addLagTestPasses(ctx, looping, now, []int{4, 6}, 80*time.Minute, 50*time.Minute, 20*time.Minute)
-		probeFailed := newLagServingTestExtender(t, ctx, places, lagTestPlace("Paris", "fr", 48.9, 2.4), "192.0.2.42")
-		model.RecordNetworkExtenderProbeResult(ctx, probeFailed.extenderId, 4, false, now.Add(-2*time.Minute), 6, nil)
+		healthy := newLagServingTestExtender(t, ctx, places, lagTestPlace("Paris", "fr", 48.9, 2.4), "192.0.2.42")
 
-		previous := lagReadExtenderStability
-		lagReadExtenderStability = func(
+		previous := lagReadRestartLoops
+		lagReadRestartLoops = func(
 			ctx context.Context,
 			extenderIds []server.Id,
 			now time.Time,
-			rule *model.LagExtenderStabilityRule,
-		) map[server.Id]*model.LagExtenderStability {
-			server.Raise(errors.New("the stability query failed"))
+			rule *model.LagExtenderRestartLoopRule,
+		) map[server.Id]time.Time {
+			server.Raise(errors.New("the restart loop query failed"))
 			return nil
 		}
 		t.Cleanup(func() {
-			lagReadExtenderStability = previous
+			lagReadRestartLoops = previous
 		})
 		Testing_ResetLagServing()
 
 		result, err := LagExtenders(newLagTestGuestSession(t, ctx, "198.51.100.30:1234"))
 		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, lagTestSampleIds(result), lagTestSortedIds(looping, probeFailed))
+		connect.AssertEqual(t, lagTestSampleIds(result), lagTestSortedIds(looping, healthy))
 
-		// with the read restored, both are left out
-		lagReadExtenderStability = previous
+		// with the read restored, the loop is left out
+		lagReadRestartLoops = previous
 		Testing_ResetLagServing()
 		result, err = LagExtenders(newLagTestGuestSession(t, ctx, "198.51.100.30:1234"))
 		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, len(result.Extenders), 0)
+		connect.AssertEqual(t, lagTestSampleIds(result), lagTestSortedIds(healthy))
 	})
 }

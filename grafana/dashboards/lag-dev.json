@@ -1028,12 +1028,12 @@
       "type": "prometheus",
       "uid": "warp-mimir"
      },
-     "expr": "max(urnetwork_stats_lag_extenders_unstable{env=\"$env\"})",
+     "expr": "max(urnetwork_stats_lag_extenders_restarting{env=\"$env\"})",
      "refId": "C",
-     "legendFormat": "unstable, not offered"
+     "legendFormat": "in a restart loop, not offered"
     }
    ],
-   "description": "Extenders offered beside the requests by state over time, so a drop in offered extenders can be read against issuance and withdrawals, and beside the extenders that serve but are left out as unstable now: a failed latest uptime probe or a restart loop (A4). The stats collector runs in every taskworker and each publishes the same database count, so this reads the gauge with max across hosts rather than a bare series; series are per process and keyed by instance, and during a redeploy the draining and starting processes both push."
+   "description": "Extenders offered beside the requests by state over time, so a drop in offered extenders can be read against issuance and withdrawals, and beside the extenders that serve but are left out because they are in a restart loop now (A4). The stats collector runs in every taskworker and each publishes the same database count, so this reads the gauge with max across hosts rather than a bare series; series are per process and keyed by instance, and during a redeploy the draining and starting processes both push."
   },
   {
    "id": 19,

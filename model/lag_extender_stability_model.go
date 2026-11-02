@@ -7,16 +7,10 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// Whether an extender the lag.dev sample could offer is stable now
-// (lag.dev/PLAN.md A4). Two kinds of evidence say it is not.
+// Whether an extender the lag.dev sample could offer is in a restart loop now
+// (lag.dev/PLAN.md A4).
 //
-// Its uptime probes: the latest probe of one of its active addresses failed
-// (connect/EXTENDER.md C3). That is the address row's last probe time without
-// a success at that time. An activation resets the failure count but leaves
-// both times, so an extender that restarted after a failed probe stays
-// unstable until its next probe answers.
-//
-// Its restarts: an extender that restarts runs an activation pass at once, one
+// An extender that restarts runs an activation pass at once, one
 // network_extender_activation row per family a few seconds apart. A burst of
 // passes that each activated both families is a restart loop. What else
 // starts a pass is not counted:
@@ -26,58 +20,50 @@ import (
 //     and such an extender often holds only that family's address, so its
 //     passes cannot be told from a single-stack extender's; and a key many
 //     clients activate posts from each of them. So an extender with one family
-//     is unstable only by its probes;
+//     is never in a loop by this rule;
 //   - a pass soon after one of the extender's revocations, which re-activates
-//     it once it reads that its probes withdrew it. The probes are what judge
-//     that;
+//     it once it reads that its uptime probes withdrew it;
 //   - connect's hourly address check, which starts a full pass when the caller
 //     address flips between families. It starts at most one an hour, so a
 //     burst window shorter than two hours never counts three of those.
+//
+// The uptime probes themselves are not read: a probe forwards through the
+// extender to the api host, which tests more than a lag.dev measurement uses,
+// and extenders whose probes failed answered on their measurement api.
 
-// LagExtenderStabilityRule is what makes a burst of restarts.
-type LagExtenderStabilityRule struct {
+// LagExtenderRestartLoopRule is what makes a burst of restarts.
+type LagExtenderRestartLoopRule struct {
 	// activation rows of one extender less than this apart are one pass
 	PassGap time.Duration
 	// BurstPasses passes that each activated both families, the first less
 	// than BurstWindow before the last, are a burst
 	BurstPasses int
 	BurstWindow time.Duration
-	// an extender is unstable until BurstHold after the last pass of a burst
+	// an extender is in a restart loop until BurstHold after the last pass of
+	// a burst
 	BurstHold time.Duration
 	// a pass less than this after a revocation of the extender is its
 	// re-activation, and is not counted
 	RevocationWindow time.Duration
 }
 
-// LagExtenderStability is the evidence that an extender is unstable now.
-type LagExtenderStability struct {
-	// the latest pass that ended a burst less than BurstHold ago, nil when
-	// none did
-	BurstPassTime *time.Time
-	// the latest probe of one of its active addresses failed
-	ProbeFailed bool
-}
-
-// Unstable reports whether the extender should not be offered now.
-func (self *LagExtenderStability) Unstable() bool {
-	return self.ProbeFailed || self.BurstPassTime != nil
-}
-
-// GetLagExtenderStability reads the stability evidence of the given extenders
-// at `now` in one query. An extender without evidence is absent.
+// GetLagExtenderRestartLoops reads which of the given extenders are in a
+// restart loop at `now`, in one query: each with the start of the latest pass
+// that ended a burst less than BurstHold ago. An extender not in a loop is
+// absent.
 //
 // The passes are read from the activations of the last BurstHold plus
 // BurstWindow; a counted pass ends a burst when the counted pass
 // BurstPasses-1 before it started less than BurstWindow earlier.
-func GetLagExtenderStability(
+func GetLagExtenderRestartLoops(
 	ctx context.Context,
 	extenderIds []server.Id,
 	now time.Time,
-	rule *LagExtenderStabilityRule,
-) map[server.Id]*LagExtenderStability {
-	stabilities := map[server.Id]*LagExtenderStability{}
+	rule *LagExtenderRestartLoopRule,
+) map[server.Id]time.Time {
+	loops := map[server.Id]time.Time{}
 	if len(extenderIds) == 0 {
-		return stabilities
+		return loops
 	}
 	burstOffset := max(rule.BurstPasses-1, 0)
 	activationStart := now.Add(-(rule.BurstHold + rule.BurstWindow + rule.PassGap))
@@ -152,32 +138,15 @@ func GetLagExtenderStability(
 						PARTITION BY extender_id ORDER BY pass_time
 					) AS burst_span
 				FROM restart_pass
-			),
-			burst AS (
-				SELECT
-					extender_id,
-					max(pass_time) AS burst_pass_time
-				FROM burst_pass
-				WHERE
-					burst_span < make_interval(secs => $5) AND
-					$7 < pass_time
-				GROUP BY extender_id
-			),
-			probe_failure AS (
-				SELECT DISTINCT extender_id
-				FROM network_extender_address
-				WHERE
-					extender_id = ANY($1) AND
-					active AND
-					last_probe_time IS NOT NULL AND
-					(last_probe_success_time IS NULL OR last_probe_success_time < last_probe_time)
 			)
 			SELECT
-				COALESCE(burst.extender_id, probe_failure.extender_id),
-				burst.burst_pass_time,
-				probe_failure.extender_id IS NOT NULL
-			FROM burst
-			FULL OUTER JOIN probe_failure ON probe_failure.extender_id = burst.extender_id
+				extender_id,
+				max(pass_time)
+			FROM burst_pass
+			WHERE
+				burst_span < make_interval(secs => $5) AND
+				$7 < pass_time
+			GROUP BY extender_id
 			`,
 			extenderIds,
 			activationStart.UTC(),
@@ -193,17 +162,13 @@ func GetLagExtenderStability(
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 				var extenderId server.Id
-				stability := &LagExtenderStability{}
-				server.Raise(result.Scan(
-					&extenderId,
-					&stability.BurstPassTime,
-					&stability.ProbeFailed,
-				))
-				stabilities[extenderId] = stability
+				var burstPassTime time.Time
+				server.Raise(result.Scan(&extenderId, &burstPassTime))
+				loops[extenderId] = burstPassTime
 			}
 		})
 	})
-	return stabilities
+	return loops
 }
 
 // Testing_AddNetworkExtenderActivation writes the activation history row of

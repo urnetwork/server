@@ -14,7 +14,7 @@ import (
 // The rule of these tests: three passes of both families within 90 minutes,
 // held two hours, with rows less than 30 seconds apart one pass, and a pass
 // less than 30 minutes after a revocation not counted.
-var testLagExtenderStabilityRule = &LagExtenderStabilityRule{
+var testLagExtenderRestartLoopRule = &LagExtenderRestartLoopRule{
 	PassGap:          30 * time.Second,
 	BurstPasses:      3,
 	BurstWindow:      90 * time.Minute,
@@ -60,10 +60,9 @@ func testLagStabilityPass(ctx context.Context, extenderId server.Id, at time.Tim
 
 // A burst is three passes of both families within the window, the last within
 // the hold; rows a pass gap or more apart are separate passes, and passes of
-// one family, or soon after a revocation, never count. The latest uptime probe
-// of an active address that failed makes an extender unstable, and one of an
-// inactive address, one that succeeded or none at all does not.
-func TestGetLagExtenderStability(t *testing.T) {
+// one family, or soon after a revocation, never count. The uptime probes are
+// not read.
+func TestGetLagExtenderRestartLoops(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		now := server.NowUtc()
@@ -129,42 +128,15 @@ func TestGetLagExtenderStability(t *testing.T) {
 			Testing_AddNetworkExtenderRevocation(ctx, revokedEarlier, minutes(m+31))
 			testLagStabilityPass(ctx, revokedEarlier, minutes(m), 5*time.Second)
 		}
-
-		// the latest probe of the IPv6 address failed
+		// its latest probes failed, and it has one pass
 		probeFailed := testLagStabilityExtender(ctx, 4, 6)
-		RecordNetworkExtenderProbeResult(ctx, probeFailed, 4, true, minutes(3), 6, nil)
-		RecordNetworkExtenderProbeResult(ctx, probeFailed, 6, true, minutes(8), 6, nil)
+		testLagStabilityPass(ctx, probeFailed, minutes(30), 5*time.Second)
+		RecordNetworkExtenderProbeResult(ctx, probeFailed, 4, false, minutes(3), 6, nil)
 		RecordNetworkExtenderProbeResult(ctx, probeFailed, 6, false, minutes(3), 6, nil)
-		// a failure before the latest success does not count
-		probeRecovered := testLagStabilityExtender(ctx, 4)
-		RecordNetworkExtenderProbeResult(ctx, probeRecovered, 4, false, minutes(8), 6, nil)
-		RecordNetworkExtenderProbeResult(ctx, probeRecovered, 4, true, minutes(3), 6, nil)
-		// a failed probe stands through a later activation, which resets the
-		// failure count but proves nothing about the next probe
-		probeRestarted := testLagStabilityExtender(ctx, 4)
-		RecordNetworkExtenderProbeResult(ctx, probeRestarted, 4, false, minutes(4), 6, nil)
-		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(
-				ctx,
-				`UPDATE network_extender_address SET consecutive_probe_failures = 0, activate_time = $2 WHERE extender_id = $1`,
-				probeRestarted,
-				minutes(1),
-			))
-		})
-		// the failed address is no longer active, and the other serves
-		inactiveFailed := testLagStabilityExtender(ctx, 4, 6)
-		RecordNetworkExtenderProbeResult(ctx, inactiveFailed, 6, false, minutes(3), 6, nil)
-		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(
-				ctx,
-				`UPDATE network_extender_address SET active = false WHERE extender_id = $1 AND ip_version = 6`,
-				inactiveFailed,
-			))
-		})
-		// never probed and never activated
+		// never activated
 		unknown := testLagStabilityExtender(ctx, 4, 6)
 
-		stabilities := GetLagExtenderStability(ctx, []server.Id{
+		loops := GetLagExtenderRestartLoops(ctx, []server.Id{
 			looping,
 			held,
 			recovered,
@@ -175,39 +147,34 @@ func TestGetLagExtenderStability(t *testing.T) {
 			reactivated,
 			revokedEarlier,
 			probeFailed,
-			probeRecovered,
-			probeRestarted,
-			inactiveFailed,
 			unknown,
-		}, now, testLagExtenderStabilityRule)
+		}, now, testLagExtenderRestartLoopRule)
 
-		unstable := func(extenderId server.Id) bool {
-			stability := stabilities[extenderId]
-			return stability != nil && stability.Unstable()
+		looped := []server.Id{}
+		for _, extenderId := range []server.Id{
+			looping,
+			held,
+			recovered,
+			spread,
+			split,
+			joined,
+			oneFamily,
+			reactivated,
+			revokedEarlier,
+			probeFailed,
+			unknown,
+		} {
+			if _, ok := loops[extenderId]; ok {
+				looped = append(looped, extenderId)
+			}
 		}
-		connect.AssertEqual(t, unstable(looping), true)
-		connect.AssertEqual(t, unstable(held), true)
-		connect.AssertEqual(t, unstable(recovered), false)
-		connect.AssertEqual(t, unstable(spread), false)
-		connect.AssertEqual(t, unstable(split), false)
-		connect.AssertEqual(t, unstable(joined), true)
-		connect.AssertEqual(t, unstable(oneFamily), false)
-		connect.AssertEqual(t, unstable(reactivated), false)
-		connect.AssertEqual(t, unstable(revokedEarlier), true)
-		connect.AssertEqual(t, unstable(probeFailed), true)
-		connect.AssertEqual(t, unstable(probeRecovered), false)
-		connect.AssertEqual(t, unstable(probeRestarted), true)
-		connect.AssertEqual(t, unstable(inactiveFailed), false)
-		connect.AssertEqual(t, unstable(unknown), false)
-		connect.AssertEqual(t, len(stabilities), 6)
+		connect.AssertEqual(t, looped, []server.Id{looping, held, joined, revokedEarlier})
+		connect.AssertEqual(t, len(loops), 4)
 
-		// the evidence: the burst's last pass, and the failed probe
-		connect.AssertEqual(t, stabilities[looping].ProbeFailed, false)
-		connect.AssertEqual(t, stabilities[looping].BurstPassTime.Sub(minutes(10)).Abs() < time.Millisecond, true)
-		connect.AssertEqual(t, stabilities[held].BurstPassTime.Sub(minutes(119)).Abs() < time.Millisecond, true)
-		connect.AssertEqual(t, stabilities[probeFailed].ProbeFailed, true)
-		connect.AssertEqual(t, stabilities[probeFailed].BurstPassTime, (*time.Time)(nil))
+		// each with the start of the pass that ended its latest burst
+		connect.AssertEqual(t, loops[looping].Sub(minutes(10)).Abs() < time.Millisecond, true)
+		connect.AssertEqual(t, loops[held].Sub(minutes(119)).Abs() < time.Millisecond, true)
 
-		connect.AssertEqual(t, len(GetLagExtenderStability(ctx, nil, now, testLagExtenderStabilityRule)), 0)
+		connect.AssertEqual(t, len(GetLagExtenderRestartLoops(ctx, nil, now, testLagExtenderRestartLoopRule)), 0)
 	})
 }
