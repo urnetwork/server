@@ -586,6 +586,11 @@ func init() {
 // use it to stop a run at an exact batch boundary.
 var contractHorizonBatchCommitted func(batch int, last server.Id)
 
+// Observes each batch that read contracts, inside its transaction, once its
+// settings are in place and before its checks. Nil in production; tests read
+// the batch's settings through it.
+var contractHorizonBatchObserved func(ctx context.Context, tx server.PgTx)
+
 // One run: batches from cursor toward the horizon of now, until the horizon,
 // the budget, the mode or ctx stops it. next is where the following run
 // resumes, also when err is set: every batch before the failed one committed.
@@ -1077,6 +1082,13 @@ func (self *contractHorizonReaper) removeBatch(
 				deleted:   map[string]int64{},
 			}
 			server.RaisePgResult(tx.Exec(ctx, fmt.Sprintf(`SET LOCAL statement_timeout = %d`, self.settings.StatementTimeout.Milliseconds())))
+			// The batch's statements are short, but the misestimated escrow
+			// and close counts (on Main, 2026-11-02, n_distinct 185,552 for
+			// transfer_escrow.contract_id over 4.96 billion rows, about 1.6
+			// escrows per contract in truth) cost them past jit_above_cost, so
+			// each compiled: 89% of the hold check's time, about a second a
+			// batch, and 70% of the dependents delete's (pg_stat_statements).
+			server.RaisePgResult(tx.Exec(ctx, `SET LOCAL jit = off`))
 			// plan each statement for its actual ids
 			server.RaisePgResult(tx.Exec(ctx, `SET LOCAL plan_cache_mode = force_custom_plan`))
 
@@ -1089,6 +1101,9 @@ func (self *contractHorizonReaper) removeBatch(
 			batch.lastId = windowIds[len(windowIds)-1]
 			for _, setting := range contractHorizonBitmapSettings {
 				server.RaisePgResult(tx.Exec(ctx, setting))
+			}
+			if contractHorizonBatchObserved != nil {
+				contractHorizonBatchObserved(ctx, tx)
 			}
 
 			scanSql := contractHorizonScanLockSql

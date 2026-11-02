@@ -529,7 +529,9 @@ func RefuseNetworkExtenderMeasurementRequest(
 // live certificate there -- serving, or away, to serve again with no new order
 // when they activate (amendment 23) -- and the requests picked before it in
 // the same read, since one pass places several orders
-// (pickNetworkExtenderMeasurementCandidates). Longest waiting first gave the
+// (pickNetworkExtenderMeasurementCandidates). An extender's country is the
+// one the lag.dev sample places it in (GetLagExtenderPlaces), so the cap
+// spreads over the countries visitors see. Longest waiting first gave the
 // cap to whoever joined first, and neither a country nor a network alone
 // spreads it: one network supplies nearly every request from the countries
 // where nothing serves yet, and another supplies only US ones. The request of
@@ -608,6 +610,81 @@ func getCappedNetworkExtenderMeasurementsInConn(
 ) []*NetworkExtenderMeasurementTarget {
 	targets := []*NetworkExtenderMeasurementTarget{}
 
+	candidates := getNetworkExtenderMeasurementCandidatesInConn(ctx, conn, now)
+	if len(candidates) == 0 {
+		return targets
+	}
+	holders := getNetworkExtenderMeasurementHoldersInConn(ctx, conn, now)
+	placeNetworkExtenderMeasurementOrderInConn(ctx, conn, candidates, holders)
+
+	// the extenders that hold a live certificate in each country and in each
+	// network. One that is away holds it still, and counts: an unstable network
+	// whose extenders come and go would otherwise count only those active at
+	// the read, and be given more than its share
+	countryCounts := map[string]int{}
+	networkCounts := map[server.Id]int{}
+	for _, holder := range holders {
+		countryCounts[holder.countryCode] += 1
+		networkCounts[holder.networkId] += 1
+	}
+
+	extenderIds := pickNetworkExtenderMeasurementCandidates(candidates, countryCounts, networkCounts, count)
+	measurements := map[server.Id]*NetworkExtenderMeasurement{}
+	result, err := conn.Query(
+		ctx,
+		`
+		SELECT `+networkExtenderMeasurementColumns+`
+		FROM network_extender_measurement
+		WHERE extender_id = ANY($1) AND state = $2
+		`,
+		extenderIds,
+		NetworkExtenderMeasurementStatePending,
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			measurement := scanNetworkExtenderMeasurement(result)
+			measurements[measurement.ExtenderId] = measurement
+		}
+	})
+	for _, extenderId := range extenderIds {
+		if measurement, ok := measurements[extenderId]; ok {
+			targets = append(targets, &NetworkExtenderMeasurementTarget{Measurement: measurement})
+		}
+	}
+	return targets
+}
+
+// One request the weekly cap holds, as the issuance queue weighs it (C7,
+// amendment 24): when it began waiting, the country of its extender, and the
+// network that activated it, the extender's operator. The country is where
+// the lag.dev sample places the extender (GetLagExtenderPlaces), else the
+// country it last activated from, "" when that is not known either or the
+// extender is gone; the network is the zero id for one that is gone.
+type networkExtenderMeasurementCandidate struct {
+	extenderId  server.Id
+	pendingTime time.Time
+	countryCode string
+	networkId   server.Id
+}
+
+// One extender that holds a live measurement certificate, serving or away,
+// as the issuance queue counts it (C7, amendment 24): in its country, which
+// is a candidate's, and in its network.
+type networkExtenderMeasurementHolder struct {
+	extenderId  server.Id
+	countryCode string
+	networkId   server.Id
+}
+
+// The pending requests the weekly cap holds, longest waiting first, up to
+// networkExtenderMeasurementCandidateLimit, each with the country its
+// extender last activated from, which
+// placeNetworkExtenderMeasurementOrderInConn then places.
+func getNetworkExtenderMeasurementCandidatesInConn(
+	ctx context.Context,
+	conn server.PgConn,
+	now time.Time,
+) []*networkExtenderMeasurementCandidate {
 	candidates := []*networkExtenderMeasurementCandidate{}
 	result, err := conn.Query(
 		ctx,
@@ -654,23 +731,25 @@ func getCappedNetworkExtenderMeasurementsInConn(
 			candidates = append(candidates, candidate)
 		}
 	})
-	if len(candidates) == 0 {
-		return targets
-	}
+	return candidates
+}
 
-	// the extenders that hold a live certificate in each country and in each
-	// network. One that is away holds it still, and counts: an unstable network
-	// whose extenders come and go would otherwise count only those active at
-	// the read, and be given more than its share
-	countryCounts := map[string]int{}
-	networkCounts := map[server.Id]int{}
-	result, err = conn.Query(
+// The extenders that hold a live certificate at `now`, serving or away, each
+// with the country it last activated from, which
+// placeNetworkExtenderMeasurementOrderInConn then places.
+func getNetworkExtenderMeasurementHoldersInConn(
+	ctx context.Context,
+	conn server.PgConn,
+	now time.Time,
+) []*networkExtenderMeasurementHolder {
+	holders := []*networkExtenderMeasurementHolder{}
+	result, err := conn.Query(
 		ctx,
 		`
 		SELECT
+			network_extender.extender_id,
 			network_extender.country_code,
-			network_extender.network_id,
-			COUNT(*)
+			network_extender.network_id
 		FROM network_extender
 		WHERE
 			EXISTS (
@@ -681,57 +760,70 @@ func getCappedNetworkExtenderMeasurementsInConn(
 					network_extender_measurement_cert.withdraw_time IS NULL AND
 					$1 < network_extender_measurement_cert.not_after
 			)
-		GROUP BY network_extender.country_code, network_extender.network_id
 		`,
 		now.UTC(),
 	)
 	server.WithPgResult(result, err, func() {
 		for result.Next() {
-			var countryCode string
-			var networkId server.Id
-			var serving int
-			server.Raise(result.Scan(&countryCode, &networkId, &serving))
-			countryCounts[countryCode] += serving
-			networkCounts[networkId] += serving
+			holder := &networkExtenderMeasurementHolder{}
+			server.Raise(result.Scan(
+				&holder.extenderId,
+				&holder.countryCode,
+				&holder.networkId,
+			))
+			holders = append(holders, holder)
 		}
 	})
-
-	extenderIds := pickNetworkExtenderMeasurementCandidates(candidates, countryCounts, networkCounts, count)
-	measurements := map[server.Id]*NetworkExtenderMeasurement{}
-	result, err = conn.Query(
-		ctx,
-		`
-		SELECT `+networkExtenderMeasurementColumns+`
-		FROM network_extender_measurement
-		WHERE extender_id = ANY($1) AND state = $2
-		`,
-		extenderIds,
-		NetworkExtenderMeasurementStatePending,
-	)
-	server.WithPgResult(result, err, func() {
-		for result.Next() {
-			measurement := scanNetworkExtenderMeasurement(result)
-			measurements[measurement.ExtenderId] = measurement
-		}
-	})
-	for _, extenderId := range extenderIds {
-		if measurement, ok := measurements[extenderId]; ok {
-			targets = append(targets, &NetworkExtenderMeasurementTarget{Measurement: measurement})
-		}
-	}
-	return targets
+	return holders
 }
 
-// One request the weekly cap holds, as the issuance queue weighs it (C7,
-// amendment 24): when it began waiting, the country its extender last
-// activated from, and the network that activated it, the extender's operator.
-// The country is "" for an extender whose country is not known or that is
-// gone, and the network is the zero id for one that is gone.
-type networkExtenderMeasurementCandidate struct {
-	extenderId  server.Id
-	pendingTime time.Time
-	countryCode string
-	networkId   server.Id
+// Gives each candidate and each holder the country the lag.dev sample places
+// its extender in (GetLagExtenderPlaces), where it places it; the rest keep
+// the country they last activated from.
+func placeNetworkExtenderMeasurementOrderInConn(
+	ctx context.Context,
+	conn server.PgConn,
+	candidates []*networkExtenderMeasurementCandidate,
+	holders []*networkExtenderMeasurementHolder,
+) {
+	extenderIds := []server.Id{}
+	for _, candidate := range candidates {
+		extenderIds = append(extenderIds, candidate.extenderId)
+	}
+	for _, holder := range holders {
+		extenderIds = append(extenderIds, holder.extenderId)
+	}
+	places := getLagExtenderPlacesInConn(ctx, conn, extenderIds)
+	for _, candidate := range candidates {
+		if place := places[candidate.extenderId]; place != nil {
+			candidate.countryCode = place.CountryCode
+		}
+	}
+	for _, holder := range holders {
+		if place := places[holder.extenderId]; place != nil {
+			holder.countryCode = place.CountryCode
+		}
+	}
+}
+
+// Testing_GetNetworkExtenderMeasurementOrderCountries returns the country the
+// issuance queue counts each extender in at `now` (C7), by extender id: the
+// extender of every request the weekly cap holds, and every extender that
+// holds a live certificate.
+func Testing_GetNetworkExtenderMeasurementOrderCountries(ctx context.Context, now time.Time) map[server.Id]string {
+	countries := map[server.Id]string{}
+	server.Db(ctx, func(conn server.PgConn) {
+		candidates := getNetworkExtenderMeasurementCandidatesInConn(ctx, conn, now)
+		holders := getNetworkExtenderMeasurementHoldersInConn(ctx, conn, now)
+		placeNetworkExtenderMeasurementOrderInConn(ctx, conn, candidates, holders)
+		for _, candidate := range candidates {
+			countries[candidate.extenderId] = candidate.countryCode
+		}
+		for _, holder := range holders {
+			countries[holder.extenderId] = holder.countryCode
+		}
+	})
+	return countries
 }
 
 // Picks `count` candidates at most, one at a time, in the order the weekly cap

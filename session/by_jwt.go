@@ -39,10 +39,11 @@ const (
 	//
 	// The one-day value bounded stale authorization for a client that stays
 	// online indefinitely, which is a real thing to want. It rested on
-	// "conforming clients rotate at half-life" -- and that is true of the sdk
-	// only since the half-life refresh landed on 2026-08-06. It is not true of
-	// anything else holding a token: an app build older than that, or any client
-	// issued a token it does not refresh.
+	// "conforming clients rotate by half-life" -- and that is true of the sdk
+	// only since its lifetime-derived refresh landed on 2026-08-06 (at the
+	// half-life then; between 40% and 50% of the lifetime since 2026-11-01). It
+	// is not true of anything else holding a token: an app build older than
+	// that, or any client issued a token it does not refresh.
 	//
 	// Those clients do not fail loudly at the deadline. They stay connected and
 	// keep accepting connections while carrying nothing, so they look healthy
@@ -53,8 +54,9 @@ const (
 	//
 	// 30 days does not fix the non-refreshing client, it only makes the deadline
 	// rare enough to notice. The durable protections are elsewhere and stay in
-	// place: the sdk's half-life rotation, and the server refusing to advertise
-	// a provider whose egress health has aged out (ProviderEgressHealthMaxAge).
+	// place: the sdk's rotation by half-life (between 40% and 50% of the
+	// lifetime), and the server refusing to advertise a provider whose egress
+	// health has aged out (ProviderEgressHealthMaxAge).
 	// Shortening this again should wait until a client that ignores the deadline
 	// is the exception rather than the rule.
 	expiryDuration = 30 * 24 * time.Hour
@@ -329,8 +331,8 @@ const (
 
 // AuthCredentialKind is the bounded kind of a credential a migration gate let
 // through: a network token (the network's sign-in token, with no client) or a
-// client token. A client token refreshes on its half-life, so its legacy
-// accepts fade on their own; a network token renews only at
+// client token. A client token refreshes between 40% and 50% of its lifetime,
+// so its legacy accepts fade on their own; a network token renews only at
 // POST /auth/network-refresh, so its count is the one that decides when
 // reject_expired can be flipped on.
 type AuthCredentialKind string
