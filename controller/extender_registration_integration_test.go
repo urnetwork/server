@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"reflect"
 	"slices"
 	"testing"
 	"time"
@@ -203,11 +202,6 @@ func TestExtenderRegistrationWithoutAMeasurementKeyStoresNoRequest(t *testing.T)
 // The run of connect's own activation loop reaches the history row
 // (connect/EXTENDER.md G3): every activation of one process stores the one run
 // id, as 32 hex characters, and a start from before that process's first post.
-//
-// This builds against whichever connect the module is replaced with. One that
-// predates the run sends none and every row holds null, which the test reads
-// from connect's own args and says, so neither repository's merge has to come
-// first. Once connect carries the field, the test holds the two sides to it.
 func TestExtenderRegistrationStoresTheRunOfTheLoop(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -232,16 +226,6 @@ func TestExtenderRegistrationStoresTheRunOfTheLoop(t *testing.T) {
 				t.Fatalf("the loop stored %d activations, expected a second pass", len(activations))
 			}
 			time.Sleep(100 * time.Millisecond)
-		}
-
-		if _, sendsRun := reflect.TypeOf(connect.ExtenderActivateArgs{}).FieldByName("RunId"); !sendsRun {
-			t.Log("this connect predates the run, so every row holds null")
-			for _, activation := range activations {
-				if activation.RunId != nil || activation.RunStartTime != nil || activation.PreviousExit != nil {
-					t.Fatalf("a connect with no run stored %v %v %v", activation.RunId, activation.RunStartTime, activation.PreviousExit)
-				}
-			}
-			return
 		}
 
 		first := activations[0]
