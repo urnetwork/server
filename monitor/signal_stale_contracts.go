@@ -62,8 +62,9 @@ type staleContractObservation struct {
 // marked inactive. The window's contract id lower bound
 // (model.ContractIdCreateTimeRange) makes the contract read a range of the
 // primary key, so it needs no index on create_time; the create_time predicate
-// decides the window. create_time is the UTC clock of the insert, so the
-// window is compared as UTC.
+// decides the window, as a filter (IS TRUE, see
+// model.ContractIdCreateTimeRange). create_time is the UTC clock of the
+// insert, so the window is compared as UTC.
 var staleContractsSql = `
 		WITH stale_success AS MATERIALIZED (
 			SELECT
@@ -91,7 +92,7 @@ var staleContractsSql = `
 			LEFT JOIN network_client source_parent ON source_parent.client_id = source.source_client_id
 			WHERE
 				tc.contract_id >= ` + model.ContractIdCreatedFromSql(`now() - interval '`+staleContractRange+`'`) + ` AND
-				tc.create_time >= (now() - interval '` + staleContractRange + `') AT TIME ZONE 'UTC' AND
+				(tc.create_time >= (now() - interval '` + staleContractRange + `') AT TIME ZONE 'UTC') IS TRUE AND
 				tc.companion_contract_id IS NULL AND
 				NOT destination.active AND
 				destination.deactivate_time IS NOT NULL AND

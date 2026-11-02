@@ -242,14 +242,15 @@ func (self pgContractRateProbe) cadence() time.Duration { return 60 * time.Secon
 // The contracts created in the last complete minute. The minute's contract id
 // range (model.ContractIdCreateTimeRange) makes the read a range of the
 // primary key, so it needs no index on create_time; the create_time predicate
-// decides which contracts count. create_time is the UTC clock of the insert,
-// so the minute is compared as UTC.
+// decides which contracts count, as a filter (IS TRUE, see
+// model.ContractIdCreateTimeRange). create_time is the UTC clock of the
+// insert, so the minute is compared as UTC.
 var contractRateCountSql = `
 		SELECT count(*) FROM transfer_contract
 		WHERE contract_id >= ` + model.ContractIdCreatedFromSql(`date_trunc('minute',now())-interval '1 minute'`) + `
 		  AND contract_id <  ` + model.ContractIdCreatedBeforeSql(`date_trunc('minute',now())`) + `
-		  AND create_time >= (date_trunc('minute',now())-interval '1 minute') AT TIME ZONE 'UTC'
-		  AND create_time <  date_trunc('minute',now()) AT TIME ZONE 'UTC';
+		  AND (create_time >= (date_trunc('minute',now())-interval '1 minute') AT TIME ZONE 'UTC'
+		   AND create_time <  date_trunc('minute',now()) AT TIME ZONE 'UTC') IS TRUE;
 	`
 
 func (self pgContractRateProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {

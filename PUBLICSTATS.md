@@ -177,8 +177,11 @@ A bucket's contract and dispute counts are one range scan of the
 Contract ids lead with the millisecond they were minted, within 15 minutes of
 the contract's `create_time` (`model.ContractIdCreateTimeRange`), so the
 bucket's contract id range holds every contract it counts, and its
-`create_time` predicate stays as the filter that decides the bucket. No index
-on `create_time` is needed. Its
+`create_time` predicate stays as the filter that decides the bucket, wrapped
+in `IS TRUE` so it is never an index condition (a skip scan of
+`transfer_contract_destination_id_create_time` otherwise outbids the id range,
+whose selectivity PostgreSQL cannot estimate). No index on `create_time` is
+needed. Its
 extender count is a range scan of `contract_extender` by the
 `(create_time, contract_id)` index the extender work added, so it is never a
 probe per contract. Every party row of one contract copies the contract's own

@@ -6458,7 +6458,8 @@ var stragglerContractIdMargin = ContractIdCreateTimeMargin
 // The closed, never-reaped contracts created before $1 that no payment holds,
 // at most $2, oldest id first. $3 bounds the ids of contracts created before
 // $1, so the batch is a range of the primary key from its oldest id, and the
-// create_time predicate still decides which contracts are stragglers. Neither
+// create_time predicate still decides which contracts are stragglers, as a
+// filter (IS TRUE, see ContractIdCreateTimeRange). Neither
 // transfer_contract_reap_pending_create_time nor transfer_contract_create_time
 // is needed. Keep this read bounded by contract_id: once those indexes are
 // gone, a batch ordered or bounded by create_time alone seq-scans and sorts
@@ -6473,7 +6474,7 @@ WITH batch AS (
 		transfer_contract.contract_id < $3 AND
 		transfer_contract.reap_time IS NULL AND
 		transfer_contract.close_time IS NOT NULL AND
-		transfer_contract.create_time < $1 AND
+		(transfer_contract.create_time < $1) IS TRUE AND
 		NOT EXISTS (
 			SELECT 1
 			FROM transfer_escrow_sweep

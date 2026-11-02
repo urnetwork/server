@@ -39,6 +39,16 @@ const unexpiredContractIdAge = DefaultContractExpiration + ContractIdCreateTimeM
 // so it reads a range of the primary key instead of needing an index on
 // create_time, and keeps its create_time predicate, so the window is still
 // exact.
+//
+// Write that predicate as (…) IS TRUE, which keeps the window out of every
+// index condition and keeps its selectivity estimate. PostgreSQL cannot
+// interpolate inside a uuid histogram bucket, so it estimates any contract id
+// range at 0.5% of the table. A bare create_time range is an index condition
+// of transfer_contract_destination_id_create_time through a skip scan, one
+// descent per destination (332k on Main), and once no index leads with
+// create_time the planner would prefer that over the primary key range. With
+// create_time a filter, the primary key range is the only index path, with or
+// without an index on create_time.
 func ContractIdCreateTimeRange(start time.Time, end time.Time) (lower server.Id, upper server.Id) {
 	return server.ContractIdFloor(start.Add(-ContractIdCreateTimeMargin)), server.ContractIdFloor(end.Add(ContractIdCreateTimeMargin))
 }

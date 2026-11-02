@@ -93,13 +93,14 @@ const contractDegradationStateKey = "network_degradation:zero_contract_cost:v1"
 // Counts the contracts created in [$1, $2). [$3, $4) is the window's contract
 // id range (ContractIdCreateTimeRange), so the count reads a range of the
 // primary key rather than an index on create_time; the create_time predicate
-// decides which contracts count.
+// decides which contracts count, as a filter (IS TRUE, see
+// ContractIdCreateTimeRange).
 const contractDegradationOpenCountSql = `
 	SELECT count(*)
 	FROM transfer_contract
 	WHERE
 		$3 <= contract_id AND contract_id < $4 AND
-		$1 <= create_time AND create_time < $2
+		($1 <= create_time AND create_time < $2) IS TRUE
 `
 
 // Counts the terminal outcomes claimed in [$1, $2) over the partial
