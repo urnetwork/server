@@ -796,6 +796,16 @@ decoder cursor, sequence, open calls and pending bytes. Physical capture offsets
 and placeholder pending values (including zero or null) do not establish that
 state. Bind the generation, selected-key specifications, original file/receipt
 custody and each declared metadata reference before adopting a checkpoint.
+At the preparer boundary, decode a validated checkpoint's `Pending: null` as
+empty bytes only when the independently accepted pending length is the exact
+integer zero. Every other value must be a strict Base64 string whose decoded
+bytes match the exact accepted length, contain no LF and have fewer than 4,096
+bytes; an empty string therefore also requires an accepted zero length. Refuse
+missing fields, unknown or boolean lengths, null with a nonzero length, and
+malformed encodings. This rule never turns a physical metadata placeholder into
+checkpoint authority. Test serialized null and string cases at the actual
+preparer assignment and frame boundary; retain the failed attempt and use a
+fresh, separately admitted request.
 When original capture metadata does not satisfy a legacy schema, retain the
 refusal and originals; do not add invented adoption fields or rewrite receipts.
 Use a separately qualified original-metadata path, and require each declared
