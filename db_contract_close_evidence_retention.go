@@ -412,6 +412,11 @@ func (self *closeEvidenceRemoval) run(ctx context.Context, now time.Time, cursor
 				return report, pass.at(targets[index], after), true
 			default:
 			}
+			// a run past its deadline starts no batch
+			if !time.Now().Before(self.deadline) {
+				report.Stop = CloseEvidenceRemovalStopBudget
+				return report, pass.at(targets[index], after), true
+			}
 			// the brake, before every batch
 			brake, err := GetCloseEvidenceRetentionControl(ctx, self.settings)
 			if err != nil {
