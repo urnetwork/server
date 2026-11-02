@@ -314,8 +314,19 @@ func TestProberShardNewEpochRetiresOldAuthorityAndCrashReaps(t *testing.T) {
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE prober_shard_run SET deadline=now()-interval '1 second',next_cleanup_time=now()-interval '1 second' WHERE task_id=$1 AND epoch=$2`, key.TaskId, key.Epoch))
 		})
-		if count, err := ReapDueProberShards(ctx, 8); err != nil || count != 1 {
-			t.Fatal("crashed epoch did not hard-delete", err)
+		if count, err := SettleDueProberShards(ctx, 8); err != nil || count != 1 {
+			t.Fatal("crashed epoch was not fenced", err)
+		}
+		if _, err := ProberShardIdentity(ctx, current); !errors.Is(err, ErrProberShardRetired) {
+			t.Fatal("crashed epoch could still mint authority", err)
+		}
+		if n, c, b := shardTestRows(t, ctx, current); n != 1 || c != 1 || b != 1 {
+			t.Fatal("the crash fence deleted rows before the generation dropped")
+		}
+		settings := DefaultProberShardRetentionSettings()
+		settings.DefaultMode = ProberShardRetentionModeOn
+		if report, err := RemoveProberShardGenerations(ctx, server.NowUtc().Add(9*24*time.Hour), settings); err != nil || report.Shards[proberShardRetentionShardDropped] != 1 {
+			t.Fatal("crashed epoch did not hard-delete with its generation", err)
 		}
 		if n, c, b := shardTestRows(t, ctx, current); n != 0 || c != 0 || b != 0 {
 			t.Fatal("crash cleanup left owned rows")
@@ -593,20 +604,30 @@ func TestProberShardReaperContinuesPastFailedOwner(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		server.Redis(ctx, func(r server.RedisClient) {
-			server.Raise(r.Set(ctx, verifyClientEgressKey(a.ClientId), "wrong-type", 0).Err())
-		})
-		if done, err := ReapDueProberShards(ctx, 2); err == nil || done != 1 {
+		// the first owner's funding record changed, which its settle refuses
+		setFundingChanged := func(changed bool) {
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET pro=$2 WHERE balance_id=$1`, a.BalanceId, changed))
+			})
+		}
+		setFundingChanged(true)
+		if done, err := SettleDueProberShards(ctx, 2); err == nil || done != 1 {
 			t.Fatal("failed first owner blocked another due owner", err)
 		}
-		if done, err := ReapDueProberShards(ctx, 1); err != nil || done != 1 {
+		if done, err := SettleDueProberShards(ctx, 1); err != nil || done != 1 {
 			t.Fatal("failed owner monopolized the next cleanup page", err)
 		}
-		server.Redis(ctx, func(r server.RedisClient) {
-			server.Raise(r.Del(ctx, verifyClientEgressKey(a.ClientId)).Err())
-		})
-		if done, err := ReapProberShard(ctx, a.Key); err != nil || !done {
+		setFundingChanged(false)
+		if err := SettleProberShard(ctx, a.Key); err != nil {
 			t.Fatal("failed owner's durable retry did not finish", err)
 		}
+		server.Db(ctx, func(conn server.PgConn) {
+			var settled int
+			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM prober_shard_run WHERE network_id=ANY($1) AND next_cleanup_time='infinity'`,
+				[]server.Id{a.NetworkId, b.NetworkId, c.NetworkId}).Scan(&settled))
+			if settled != 3 {
+				t.Fatalf("%d of 3 drained owners settled", settled)
+			}
+		})
 	})
 }

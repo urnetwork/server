@@ -21,6 +21,7 @@ const (
 	legacyProviderTotalsAppliedMarker
 	legacyProviderTotalsCommit
 	legacyProviderTotalsBatchWait
+	legacyProviderTotalsDrainRemove
 )
 
 func (self legacyProviderTotalsPhase) String() string {
@@ -43,6 +44,8 @@ func (self legacyProviderTotalsPhase) String() string {
 		return "commit"
 	case legacyProviderTotalsBatchWait:
 		return "batch_wait"
+	case legacyProviderTotalsDrainRemove:
+		return "drain_remove"
 	default:
 		return "unknown"
 	}

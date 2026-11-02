@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/urnetwork/connect"
 )
@@ -40,6 +41,11 @@ type testActivationProbes struct {
 	// the caller address the forward reports
 	forwardClientAddress string
 	forwardErr           error
+	// answers the forward in place of forwardErr when set
+	forwardAnswer func(ctx context.Context) error
+
+	// the clock the activation is judged on, which only the fakes move
+	clock *testActivationClock
 
 	probes []string
 }
@@ -48,6 +54,7 @@ func newTestActivationProbes() *testActivationProbes {
 	return &testActivationProbes{
 		carrierErrs:          map[string]error{},
 		forwardClientAddress: "192.0.2.10:443",
+		clock:                newTestActivationClock(),
 	}
 }
 
@@ -76,7 +83,11 @@ func (self *testActivationProbes) activationProbes() *extenderActivationProbes {
 		},
 		forward: func(ctx context.Context) (string, error) {
 			self.probes = append(self.probes, "forward")
-			if self.forwardErr != nil {
+			if self.forwardAnswer != nil {
+				if err := self.forwardAnswer(ctx); err != nil {
+					return "", err
+				}
+			} else if self.forwardErr != nil {
 				return "", self.forwardErr
 			}
 			return self.forwardClientAddress, nil
@@ -89,6 +100,7 @@ func (self *testActivationProbes) activationProbes() *extenderActivationProbes {
 func (self *testActivationProbes) judge(ctx context.Context, carriers ...string) *extenderActivationOutcome {
 	return probeExtenderActivation(
 		ctx,
+		self.clock.activationClock(),
 		self.activationProbes(),
 		carriers,
 		testAcceptanceTcpPort,
@@ -223,7 +235,7 @@ func TestExtenderActivationRefusesOnlyOnTheRequiredTest(t *testing.T) {
 			setup: func(probes *testActivationProbes) {
 				probes.carrierErrs[tcpProbe] = errors.New("connection refused")
 			},
-			wantRefusal: []string{"the tcp carrier did not answer", "connection refused"},
+			wantRefusal: []string{"the tcp carrier failed after", "connection refused"},
 			wantProbes:  []string{tcpProbe},
 		},
 		{
@@ -231,7 +243,7 @@ func TestExtenderActivationRefusesOnlyOnTheRequiredTest(t *testing.T) {
 			setup: func(probes *testActivationProbes) {
 				probes.forwardErr = errors.New("extender hello answered with status 502")
 			},
-			wantRefusal: []string{"the forward did not answer", "status 502"},
+			wantRefusal: []string{"the forward failed after", "status 502"},
 			wantProbes:  []string{tcpProbe, "forward"},
 		},
 		{
@@ -307,19 +319,14 @@ func TestExtenderActivationProbesTheRequiredTestFirst(t *testing.T) {
 // cost it alone (connect#230): the required test has already passed and the
 // dns ports have already been probed, each under its own budget, so the
 // activation is accepted on what answered. Here quic is offered first, and
-// the budget runs out while it waits.
+// the budget runs out while it waits, which its refused entry says.
 func TestExtenderActivationOptionalCarrierThatSpendsTheBudgetLosesOnlyItself(t *testing.T) {
 	probeNames := testOptionalCarrierProbes
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	probes := newTestActivationProbes()
 	probes.answer = func(probeCtx context.Context, probe string) error {
 		if probe == probeNames.quic {
 			// the budget runs out with no answer
-			cancel()
-			<-probeCtx.Done()
-			return probeCtx.Err()
+			return probes.clock.WaitOut(probeCtx)
 		}
 		if err := probeCtx.Err(); err != nil {
 			return fmt.Errorf("%s was probed with the budget spent: %w", probe, err)
@@ -327,7 +334,7 @@ func TestExtenderActivationOptionalCarrierThatSpendsTheBudgetLosesOnlyItself(t *
 		return nil
 	}
 	outcome := probes.judge(
-		ctx,
+		context.Background(),
 		connect.ExtenderCarrierQuic,
 		connect.ExtenderCarrierTcp,
 		connect.ExtenderCarrierDns,
@@ -345,24 +352,40 @@ func TestExtenderActivationOptionalCarrierThatSpendsTheBudgetLosesOnlyItself(t *
 	if refused := testRefusedCarrierNames(t, outcome); !slices.Equal(refused, []string{probeNames.quic}) {
 		t.Fatalf("refused carriers = %v, want only quic", refused)
 	}
-	if !strings.Contains(outcome.refusedCarriers[0].Error, context.Canceled.Error()) {
-		t.Fatalf("quic was left out for %q, want the spent budget", outcome.refusedCarriers[0].Error)
+	wantError := "no answer within the 10 s probe budget: " + context.DeadlineExceeded.Error()
+	if outcome.refusedCarriers[0].Error != wantError {
+		t.Fatalf("quic was left out for %q, want the spent budget %q", outcome.refusedCarriers[0].Error, wantError)
 	}
 }
 
 // Each dns port is probed under a budget of its own (L2), and the other
-// carriers under the shared one, so a dns port that waits out its budget
-// leaves the shared budget to what comes after it. The shared context here
-// has no deadline, which tells the two apart without a clock.
+// steps under the shared one, on the activation's clock: the tcp challenge,
+// the forward and quic until the shared budget ends, 10 s after the judging
+// starts, and each dns port until its own 3 s are up. So a dns port that
+// waits out its budget costs 3 s and leaves the rest of the shared budget to
+// what comes after it.
 func TestExtenderActivationBoundsEachDnsPortOnItsOwn(t *testing.T) {
 	probes := newTestActivationProbes()
-	deadlines := map[string]bool{}
+	start := probes.clock.Now()
+	probeDeadline := start.Add(ExtenderActivateProbeTimeout)
+	deadlines := map[string]time.Time{}
 	probes.answer = func(probeCtx context.Context, probe string) error {
-		_, hasDeadline := probeCtx.Deadline()
-		deadlines[probe] = hasDeadline
-		if probe == testOptionalCarrierProbes.dns53 {
-			return context.DeadlineExceeded
+		deadline, ok := probeCtx.Deadline()
+		if !ok {
+			return fmt.Errorf("%s was probed with no deadline", probe)
 		}
+		deadlines[probe] = deadline
+		if probe == testOptionalCarrierProbes.dns53 {
+			return probes.clock.WaitOut(probeCtx)
+		}
+		return nil
+	}
+	probes.forwardAnswer = func(ctx context.Context) error {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			return errors.New("the forward was probed with no deadline")
+		}
+		deadlines["forward"] = deadline
 		return nil
 	}
 	outcome := probes.judge(
@@ -375,18 +398,21 @@ func TestExtenderActivationBoundsEachDnsPortOnItsOwn(t *testing.T) {
 		t.Fatalf("the activation was refused: %s", outcome.refusal)
 	}
 	tcpProbe := fmt.Sprintf("%s:%d", connect.ExtenderCarrierTcp, testAcceptanceTcpPort)
-	for probe, wantDeadline := range map[string]bool{
-		tcpProbe:                          false,
-		testOptionalCarrierProbes.dns53:   true,
-		testOptionalCarrierProbes.dns4053: true,
-		testOptionalCarrierProbes.quic:    false,
+	for probe, wantDeadline := range map[string]time.Time{
+		tcpProbe:  probeDeadline,
+		"forward": probeDeadline,
+		// its own 3 s, which it waits out
+		testOptionalCarrierProbes.dns53: start.Add(ExtenderActivateDnsPortProbeTimeout),
+		// its own 3 s from when the first port's ended
+		testOptionalCarrierProbes.dns4053: start.Add(2 * ExtenderActivateDnsPortProbeTimeout),
+		testOptionalCarrierProbes.quic:    probeDeadline,
 	} {
-		hasDeadline, probed := deadlines[probe]
+		deadline, probed := deadlines[probe]
 		if !probed {
 			t.Fatalf("%s was not probed", probe)
 		}
-		if hasDeadline != wantDeadline {
-			t.Fatalf("%s probed with a deadline of its own = %t, want %t", probe, hasDeadline, wantDeadline)
+		if !deadline.Equal(wantDeadline) {
+			t.Fatalf("%s was probed with a deadline %s after the start, want %s", probe, deadline.Sub(start), wantDeadline.Sub(start))
 		}
 	}
 	wantCarriers := []string{
@@ -399,5 +425,49 @@ func TestExtenderActivationBoundsEachDnsPortOnItsOwn(t *testing.T) {
 	}
 	if !slices.Equal(outcome.dnsPorts, []int{4053}) {
 		t.Fatalf("dns ports = %v, want only 4053", outcome.dnsPorts)
+	}
+}
+
+// A dns port's own budget never runs past the shared one: a port probed with
+// less than its 3 s left of the shared budget is probed until the shared
+// budget ends, and the ports after it get nothing more.
+func TestExtenderActivationBoundsADnsPortByWhatIsLeftOfTheBudget(t *testing.T) {
+	probes := newTestActivationProbes()
+	start := probes.clock.Now()
+	probeDeadline := start.Add(ExtenderActivateProbeTimeout)
+	tcpProbe := fmt.Sprintf("%s:%d", connect.ExtenderCarrierTcp, testAcceptanceTcpPort)
+	deadlines := map[string]time.Time{}
+	probes.answer = func(probeCtx context.Context, probe string) error {
+		deadline, ok := probeCtx.Deadline()
+		if !ok {
+			return fmt.Errorf("%s was probed with no deadline", probe)
+		}
+		deadlines[probe] = deadline
+		if err := probeCtx.Err(); err != nil {
+			// a probe whose budget is already spent fails at once
+			return err
+		}
+		switch probe {
+		case tcpProbe:
+			// the challenge answers with 2 s of the budget left
+			probes.clock.Advance(ExtenderActivateProbeTimeout - 2*time.Second)
+			return nil
+		case testOptionalCarrierProbes.dns53:
+			return probes.clock.WaitOut(probeCtx)
+		}
+		return nil
+	}
+	outcome := probes.judge(context.Background(), connect.ExtenderCarrierTcp, connect.ExtenderCarrierDns)
+	if outcome.refusal != "" {
+		t.Fatalf("the activation was refused: %s", outcome.refusal)
+	}
+	if deadline := deadlines[testOptionalCarrierProbes.dns53]; !deadline.Equal(probeDeadline) {
+		t.Fatalf("dns:53 was probed with a deadline %s after the start, want the shared budget's %s", deadline.Sub(start), ExtenderActivateProbeTimeout)
+	}
+	if deadline, probed := deadlines[testOptionalCarrierProbes.dns4053]; probed && deadline.After(probeDeadline) {
+		t.Fatalf("dns:4053 was probed past the shared budget, %s after the start", deadline.Sub(start))
+	}
+	if refused := testRefusedCarrierNames(t, outcome); !slices.Equal(refused, []string{testOptionalCarrierProbes.dns53, testOptionalCarrierProbes.dns4053}) {
+		t.Fatalf("refused carriers = %v, want both dns ports", refused)
 	}
 }

@@ -8473,11 +8473,15 @@ only says how long is left, not why. Facts on 10-22:
 - **`st_client_key_history` had no retention.** It is immutable by trigger,
   held 382 GB and 81.6M rows, and grew 4.3 GB/h on 10-22. About 90% of its
   rows belong to inactive clients. Since PARTITION-MAINTENANCE-PLAN.md Part D,
-  `remove_gone_st_client_key_history` deletes a client's history 91 days after
-  the client went (`st_client_key_gone`), so it stays on this append-only list
-  until the first deletes. Those can come about 61 days after that migration:
-  a child the 30-day reap deletes then went at its deactivation, up to 30 days
-  before the migration.
+  `remove_gone_st_client_key_history` deletes a client's history once the
+  contract horizon reaper's horizon has passed since the client went
+  (`st_client_key_gone`): the control's `horizonDays`, down to the reaper's
+  floor, while the reaper's `mode` is `on`, and 91 days otherwise; never
+  sooner than the guard's 30-day floor (migration 904). Its brake,
+  `{client_key_history_retention}control`, stops or paces the deletes. It
+  stays on this append-only list until the first deletes, which come when the
+  oldest gone records (2026-10-24) reach the horizon: about 2026-11-28 at a
+  35-day horizon, 2026-12-08 at 45 days.
 
 Checks, all cheap and read-only:
 1. Retired 2026-10-31: the subsidy frontier check (`retention-frontier-pinned`).
@@ -8886,6 +8890,95 @@ Check that the task runs. Never drop or detach a family's partition by hand: a
 drop bypasses the family's guards and preconditions. VERIFY: the next runs drop
 the range and a complete observation shows no partition past the horizon plus
 grace.
+
+### 2.4r Contract horizon reaper — runs that stop, fail or fall behind
+Probe: `contract-horizon-reaper`
+
+The contract horizon reaper (`model.RemoveContractsPastHorizon`, CPUOPT3.md
+"Contract horizon reaper") deletes resolved, discharged contracts past its
+horizon, 35 to 91 days by the runtime control `{contract_horizon}control`. It
+runs as one taskworker chain (`remove_contracts_past_horizon`), one run at a
+time on whichever process claims it: every 15 seconds while its pass has work,
+every 5 minutes otherwise, also with the mode off. When it stops, edge-2's
+contract tables grow by the day's contracts (about 85M on 11-01).
+
+Every 5 minutes one instant Mimir read through a services host's loopback
+Mimir evaluates, over the last hour across all taskworker processes, the
+reaper's runs by stop (`urnetwork_contract_horizon_runs_total`), and the
+contracts block points kept
+(`urnetwork_contract_horizon_protected_contracts_total{reason="block_points"}`).
+It also reads, from the processes that ran the reaper in the hour, now and six
+hours ago, its mode, lag and pass start gauges. A process that ran the reaper
+once keeps its last gauge values, so the gauges count only from processes that
+ran it in the hour ending at each time.
+
+- `contract-horizon-reaper-stalled` (sustain 2): no run ended in the hour.
+  The chain is lost or never claimed.
+- `contract-horizon-reaper-failing` (sustain 2): at least 3 runs stopped with
+  an error and none reached the horizon or its run budget. A batch that fails
+  every time stops the pass at its cursor.
+- `contract-horizon-control-unavailable` (sustain 2): at least 3 runs could
+  not read the control and none made progress. A run that cannot read it
+  stops as if off.
+- `contract-horizon-reaper-behind` (sustain 2): with the mode on, the lag (the
+  horizon less the mint time of the last contract the pass committed past)
+  grew by at least 2 hours in 6 hours within one pass (the pass start
+  unchanged). The pass deletes more slowly than contracts cross the horizon. A
+  rescan restarts the pass and is not judged; neither is a dry run.
+- `contract-horizon-block-points-holding` (sustain 1): the reaper kept a
+  contract past its horizon for operator block points in the hour. A contract
+  settled long after it closed, or a block's award is overdue.
+- `contract-horizon-reaper-unobservable` (sustain 2): a run count or the block
+  points count is missing, or, when the reaper ran, its mode, lag or pass start;
+  or a part is stale, duplicate or invalid. A positive its own parts prove
+  still raises.
+
+Every tunable is a field of `ContractHorizonReaperSettings`. Synthetic controls
+cover a keeping-up, off, catching-up, dry-run and rescanned reaper, errors among
+progress, each finding's edge, and each unobservable reason.
+
+ACTION: retention horizons are owner decisions, and the reaper's own control
+narrows or stops it (`mode off`). Never delete contract or archive rows by
+hand. VERIFY: a complete read inside every line for two cadences.
+
+### 2.4s Usage archive hash budget — an epoch window's archive hash in one batch
+Probe: `usage-archive-hash-budget`
+
+The epoch usage read (`stEpochProviderUsageSql`: the v1 close, the v2 epoch
+step and the recovery census) flags a live contract that is also archived by
+hashing the archive rows that closed in its window. Until 2026-11-01 (669c57fe8)
+it hashed the whole archive: on Main, for epoch 3's window, all 27 partitions
+and 20.35M rows, against about 60M that 3.66 GB of hash memory (work_mem 234 MB
+times hash_mem_multiplier 16) holds. The contract horizon reaper archives
+every credit-bearing contract it deletes. Past the hash's memory the hash runs
+in batches and spills toward the 150 GB `temp_file_limit`, and an epoch step
+that fails misses its root.
+
+Hourly, one bounded read-only catalog frame on the single enabled
+`pg-primary`, behind a `hostname -s`, primary-role and 30-second
+statement-clock guard, returns `work_mem` (kB) and `hash_mem_multiplier` from
+`pg_settings`, and `st_provider_usage_archive`'s kind and estimated rows
+(`reltuples`). It also returns each attached partition's estimated rows, at
+most 4,096, bound by an end row. A seven-day window's archived contracts sit
+in at most two contract weeks, so the window estimate is twice the largest
+partition, or the whole table while the archive is plain. The hash holds
+`work_mem * 1024 * hash_mem_multiplier / 64` rows.
+
+- `usage-archive-hash-budget` (sustain 1): the window estimate passes half of
+  what the hash holds.
+- `usage-archive-hash-budget-unobservable` (sustain 2): no or several
+  primaries, a failed read, a wrong host or role, a skewed clock, settings not
+  in kB, a missing archive, a partitioned archive without partitions, or an
+  incomplete or malformed frame.
+
+Estimates come from `ANALYZE`. The read's own session may set `work_mem`
+differently from the catalog's.
+
+ACTION: before the next epoch close, EXPLAIN (ANALYZE) the window's usage read
+on a replica or in a maintenance window, raise the read session's `work_mem`,
+or slow the reaper's `maxRowsPerSecond`. Never delete archive rows: the
+subnet's epochs read them. VERIFY: twice the largest week back under the line,
+or one hash batch in the window's plan.
 
 ### 2.5 Task-system meta-health
 Probe: `task-health`
@@ -9603,6 +9696,33 @@ or a quiet log is not proof of complete projection, and failed or unsupported
 owners must retain their recovery payloads until applied. Explicit task deletion
 or retiring the target before that point is unsafe. Existing insufficient-escrow,
 dispute, reservation and payout-attribution holds remain unchanged.
+
+Provider-total drain (2026-11-01): the per-task reader could not keep up. A
+provider's rows apply one cohort at a time (one claim group key, at most 64
+members), and each cohort is a chain of serialized round trips, so its rate
+follows the primary's latency. On Main on 2026-11-01 four providers had 82% of
+27M queued rows; a provider took a cohort about every 85 ms with 6 to 18
+members; the reader applied 440 to 915 rows a second with edge-2 CPU under 0.5
+and 46 to 485 at 0.55 and above (hourly correlation -0.90), against about 450
+to 850 a second produced. The oldest-first claim window then filled with the
+hot providers' rows, other claims came back empty and slept their poll timeout,
+and the queue's oldest row reached about 10 hours. `controller.ProviderIntentCheck`
+rows waited behind it just as long.
+
+The fleet-wide `drain_legacy_provider_totals` chain
+(model/subscription_provider_totals_drain.go) now consumes the rows in task id
+order, up to 1,024 per pass, credit and removal in one transaction under the
+complete account owner, at most `rows_per_second` (default 4,000) removed rows.
+Producers schedule each row 5 minutes ahead, so the per-task reader only takes
+rows the drain has not; it stays the fallback. `provider_totals.yml`
+(`drain.enabled`, `drain.rows_per_second`) pauses or paces the drain without a
+deploy. Watch `urnetwork_provider_totals_drain_rows_total{outcome}`,
+`urnetwork_provider_totals_drain_passes_total{result="error"}` and
+`urnetwork_provider_totals_drain_position_timestamp_seconds` (now minus it is the
+drain's lag; it stays at least a minute behind by design). Drained rows are
+deleted, not moved to `finished_task`, so task finishes per second fall below
+submissions without any task being lost. A persistent `left` count with an old
+queue head means rows the per-task reader still holds or cannot apply.
 
 A normalized `panic` log class is not proof of an uncaught worker failure.
 `server.HandleError` recovers a raised error, emits `Unexpected error` unless it
@@ -24528,6 +24648,18 @@ Probe: `redis-connections`
   process limit, or persisted sustain/ticket state. If the existing exporter
   history or generation labels are unavailable, restoring that precise source
   is a prerequisite and its coverage remains explicitly unknown.
+- A returned history-query failure keeps the fixed public error text while its
+  original typed/context/local-boundary causes remain in the error graph. If
+  the observation owner ends after history returns, the generic visibility
+  error preserves those returned history and earlier native-source causes;
+  cancellation/deadline remains the lifecycle verdict and error text. Retired
+  client-growth findings and batteries stay unpublished, and a nil source adds
+  no execution proof. This changes no query, fallback order, cadence, threshold
+  or shared-history incident identity. False-positive qualifier: finite local
+  proof and a canceled observation do not establish remote progress, Redis
+  growth, an outage or a shared cause between the two sources. False-negative
+  qualifier: old discarded graphs cannot be recovered; absent source/stage
+  authority and incomplete history stay unknown rather than healthy.
 - On a sustained per-node outlier, the probe runs one bounded `CLIENT LIST`
   battery. Its public schema contains numeric command-class counts, total and
   maximum output memory, and maximum idle/age values; raw client names, users,
@@ -27863,6 +27995,8 @@ Catalog rows from this incident, none implemented when it closed on 2026-10-22; 
 | storage-runway | Mimir node metrics | §2.4f max-of-windows decline per stateful volume | WARN ≤ 72 h, PAGE ≤ 24 h, 2 probes |
 | minio-drive-runway / minio-accounting-divergence / minio-put-surge | Mimir node + MinIO v3 metrics | §11.6b | runway WARN ≤ 14 d, PAGE ≤ 3 d; divergence over 1 TB WARN; PutObject over 3× its 7-day median for 1 h WARN |
 | contract-reap-stalled / partition-retention-stuck | pg | §2.4g | WARN |
+| contract-horizon-reaper-stalled / contract-horizon-reaper-failing / contract-horizon-control-unavailable / contract-horizon-reaper-behind / contract-horizon-block-points-holding / contract-horizon-reaper-unobservable | Mimir taskworker metrics | §2.4r, added 2026-11-01 after the 35-day horizon review, implemented by `contract-horizon-reaper` | WARN: no run in 1 h; 3 error or control-unavailable runs without progress in 1 h; lag growth of 2 h in 6 h while on; any block points keep |
+| usage-archive-hash-budget / usage-archive-hash-budget-unobservable | pg catalog | §2.4s, implemented by `usage-archive-hash-budget` | WARN when twice the largest archive week passes half of work_mem * hash_mem_multiplier / 64 B |
 | contract-partition-runway / contract-partition-retention-blocked / contract-partition-cutover-pending | pg catalog | §2.4h–§2.4j, added 2026-10-23 for the contract partition cutover | runway PAGE under 2 covered future weeks; retention WARN past 13 + 2 weeks; cutover WARN within 24 h of its week |
 | contract-stage-latency / contract-stage-latency-unobservable | Mimir | §2.30 total mean, implemented by `contract-stage-latency` | WARN over 250 ms, PAGE over 1 s, 10 min held in Mimir |
 | identity-churn / identity-churn-loop / identity-churn-unobservable | Mimir proxy metrics + pg | §14.8, implemented by `identity-churn` | WARN on per-device mints, retire/mint ratio, refusals, unresolved discovery or short-lived identities; PAGE when combined with PgBouncer waiting over 500 or §2.30 over 1 s |
@@ -30233,6 +30367,22 @@ index, changed key order, method, uniqueness or predicate is drift from903;
 before903 its absence is only numeric migration lag. Catalog checks do not
 prove a score snapshot is fresh or a dashboard was served. An unreviewed
 later schema remains unknown until its own explicit contract is qualified.
+
+Version 904 moves the `st_client_key_history` guard's horizon from a fixed 91
+days to `st_client_key_history_retention_floor()`, a SQL function (STABLE, no
+arguments) whose exact body returns `interval '30 days'`
+(`server.ClientKeyHistoryRetentionFloor`). The guard body is the published
+one with only its `interval '91 days'` replaced by that call, so the 904
+contract supersedes the key history retention contract and republishes its
+custody: `st_client_key_gone` with its key and `gone_time` index, the row and
+truncate triggers on the new body, and the client delete trigger's unchanged
+body. These are drift at 904: the 91-day body, any other floor body (the
+documented rollback, `ClientKeyHistoryRetentionFloorRollbackSql`, is drift
+until the floor is restored), and a floor with another volatility,
+strictness or configuration. The retention task deletes a gone client's
+history once the contract horizon reaper's horizon has passed since the
+client went while the reaper's mode is on, never below the floor; the catalog
+checks do not show where the retention task is.
 
 ### 8.10 Client-reliability covering-index drift after partition cutover
 Probe: `reliability-index`
@@ -43223,11 +43373,13 @@ changing routes or containers. Disabled hosts in `monitor.yml` are deliberately
 excluded; this is how an operator-declared offline edge such as edge-5 stays out
 of both the health denominator and remote diagnostics.
 
-A curl exit 7 in less than one second is an immediate refusal only after a
-bounded monitor-local IPv6 route lookup proves the observer has a route. Do not
+A complete curl exit 7 in less than one second records an immediate connection
+failure. The bounded monitor-local IPv6 route lookup must qualify the observer
+route before assigning that failure to the edge; exit 7 alone does not prove a
+refused connection or TCP reset. Do not
 automatically label every such refusal dead-first DNAT. When the interface,
 configured address, LB controller, exact source route, and bound-source egress
-are healthy, the host-local SNI request also refuses in less than one second,
+are healthy, the host-local SNI request also fails in less than one second,
 and no configured LB pool socket is listening, reduce the matching LB journal
 to a count of one exact recent nginx `could not build map_hash` admission
 signature. A positive count emits PAGE `edge-lb-config-rejected`. The probe
@@ -43261,17 +43413,28 @@ after the other admission predicates matched, and the probe emitted both
 failure now terminates that target's causal classification at unknown; a
 synthetic regression proves it cannot fall through to reset.
 
-If the bounded admission discriminator is absent, continue to classify the
-ordinary immediate refusal as `edge-ipv6-reset`. Inspect DNAT rules in order
-and compare every pool target with live listening sockets. During a
-duplicate-to-single rolling transition, an old first rule can point at a
-listener that closed after the overlap scan while shadowing a later live rule.
-Remove only the proven dead target and deploy Warp's final socket-authoritative
-reconciliation on that transition. If the admission observation itself fails,
-emit `cannot-observe` and withhold reset classification when the other bounded
-admission-candidate predicates matched. Never infer a config rejection or a
-dead-first DNAT target from that unknown observation, controller activity, or
-an unbounded log search.
+If the bounded admission discriminator is absent, retain the genuine immediate
+curl connection failure as PAGE under the legacy identity `edge-ipv6-reset`.
+That identity is not a typed TCP-reset diagnosis. Curl exit 7 and sub-second
+duration alone do not prove a reset, a dead listener, or an ordered DNAT cause,
+even if stderr mentions a reset or a historical rolling transition had that
+cause. Preserve the failed exact-target observation and require independent
+same-target listener and ordered-rule evidence before attributing or repairing
+that layer. This observation does not authorize DNAT removal, deployment,
+restart, route or address changes. Curl 35/56 without an HTTP response likewise
+retain their current public failure classification without establishing a reset
+or forwarding cause. Missing/invalid native measurements remain unknown.
+
+The legacy class, PAGE severity, cadence, sustain, target identity, observer
+controls, narrow positive configuration-admission discriminator and three-200
+recovery contract are unchanged. This preserves incident continuity while
+correcting the mechanism and action. False positives: unavailable host controls
+or a rapid failure cannot supply absent causal proof. False negatives: keeping
+the cause unknown must not suppress a complete genuine transport failure. A
+provider IPv6 pause does not suppress public-edge IPv6 observations. If the
+admission observation itself fails, emit `cannot-observe` and withhold this
+classification when the other bounded admission-candidate predicates matched;
+that unknown observation cannot prove config rejection or a dead-first target.
 
 Run the monitor-local route lookup before the exact probes and again after an
 all-target pre-HTTP connection-failure cohort. Every target must have complete

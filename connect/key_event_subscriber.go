@@ -89,7 +89,11 @@ type keyEventSubscriber struct {
 	// recycles a stuck provider the api reported, if its resident is here
 	// (client_recycle.go); it must not block. Nil ignores the flags.
 	clientRecycle func(server.Id)
-	newPeerDelta  func(context.Context, server.Id, server.Id, string) *model.NetworkPeerDelta
+	// whether the subscription includes the recycle flags' channel. Every
+	// keyspace notification on every master is matched against every
+	// pattern, so only an exchange whose recycle ceiling is on subscribes it
+	clientRecyclePattern bool
+	newPeerDelta         func(context.Context, server.Id, server.Id, string) *model.NetworkPeerDelta
 	// the session revision read behind hints; session.NetworkSessionRevision
 	// when unset
 	sessionRevision func(context.Context, server.Id) (string, int64, error)
@@ -98,19 +102,37 @@ type keyEventSubscriber struct {
 	resyncCancel context.CancelFunc
 }
 
-func newKeyEventSubscriber(ctx context.Context, settings *KeyEventDeliverySettings) *keyEventSubscriber {
+// clientRecyclePattern subscribes the recycle flags' channel; an exchange
+// passes its EnableStuckProviderRecycle.
+func newKeyEventSubscriber(ctx context.Context, settings *KeyEventDeliverySettings, clientRecyclePattern bool) *keyEventSubscriber {
 	cancelCtx, cancel := context.WithCancel(ctx)
 	s := &keyEventSubscriber{
-		ctx:            cancelCtx,
-		cancel:         cancel,
-		settings:       settings,
-		peerListeners:  map[server.Id]map[int64]*model.NetworkPeerListener{},
-		hopListeners:   map[server.Id]map[int64]*model.StreamHopListener{},
-		closeListeners: map[server.Id]map[int64]*clientCloseListener{},
-		newPeerDelta:   model.NewNetworkPeerDelta,
+		ctx:                  cancelCtx,
+		cancel:               cancel,
+		settings:             settings,
+		peerListeners:        map[server.Id]map[int64]*model.NetworkPeerListener{},
+		hopListeners:         map[server.Id]map[int64]*model.StreamHopListener{},
+		closeListeners:       map[server.Id]map[int64]*clientCloseListener{},
+		clientRecyclePattern: clientRecyclePattern,
+		newPeerDelta:         model.NewNetworkPeerDelta,
 	}
 	go server.HandleError(s.run)
 	return s
+}
+
+// The psubscribe patterns of every (re)subscription on db.
+func (self *keyEventSubscriber) patterns(db int) []string {
+	patterns := []string{
+		model.NetworkPeerKeyEventPattern(db),
+		sessionEventPattern(db),
+		model.StreamHopsKeyEventPattern(db),
+		model.ClientRemovedKeyEventPattern(db),
+		model.ClientCloseKeyEventPattern(db),
+	}
+	if self.clientRecyclePattern {
+		patterns = append(patterns, model.ClientRecycleKeyEventPattern(db))
+	}
+	return patterns
 }
 
 // AddPeerListener registers a network's peer listener for key-event deltas.
@@ -428,15 +450,7 @@ func (self *keyEventSubscriber) dispatch(channel string, event string) {
 func (self *keyEventSubscriber) run() {
 	defer self.cancel()
 
-	db := server.RedisDb()
-	patterns := []string{
-		model.NetworkPeerKeyEventPattern(db),
-		sessionEventPattern(db),
-		model.StreamHopsKeyEventPattern(db),
-		model.ClientRemovedKeyEventPattern(db),
-		model.ClientCloseKeyEventPattern(db),
-		model.ClientRecycleKeyEventPattern(db),
-	}
+	patterns := self.patterns(server.RedisDb())
 
 	for {
 		select {

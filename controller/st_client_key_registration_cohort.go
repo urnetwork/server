@@ -46,6 +46,8 @@ type stClientKeyRegistrationCohorts struct {
 	active             *stClientKeyRegistrationCohort
 	publications       []*stClientKeyRegistrationPublication
 	publicationRunning bool
+	// Remote evidence publication, started by the first remote registration.
+	evidence *stClientKeyEvidenceWriter
 	// Private timing/observation seams never provide authority or write results.
 	beforeSealForTest                func(context.Context)
 	afterAdmissionForTest            func()
@@ -99,6 +101,16 @@ func (self *CoreStClient) registrationCohorts() *stClientKeyRegistrationCohorts 
 		self.clientKeyRegistrations = newStClientKeyRegistrationCohorts(stClientKeyRegistrationCollection)
 	}
 	return self.clientKeyRegistrations
+}
+
+// The writer that publishes this owner's registrations to remote storage.
+func (self *stClientKeyRegistrationCohorts) evidenceWriter() *stClientKeyEvidenceWriter {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if self.evidence == nil {
+		self.evidence = newStClientKeyEvidenceWriter(stClientKeyEvidenceWriterSettingsFromConfig(), defaultStClientKeyEvidenceMetrics)
+	}
+	return self.evidence
 }
 
 // Pure comparisons run under the owner lock; no external call is made there.

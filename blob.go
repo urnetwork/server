@@ -21,10 +21,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -47,6 +49,22 @@ import (
 // It is the object-key namespace used when `minio.yml` sets no
 // explicit prefix.
 const DefaultBlobPrefix = "blob"
+
+// DefaultBlobRegion is the region MinIO serves when its site sets none, as
+// every urnetwork MinIO does: GetBucketLocation answers an empty location,
+// which the SDK reads as us-east-1. A server with a site region names it in
+// `minio.yml` (`region`).
+const DefaultBlobRegion = "us-east-1"
+
+// The default and largest client-key evidence writer concurrency per process
+// (`minio.yml` `client_key_evidence_concurrency`). Each concurrent publication
+// holds at most one MinIO request at a time, so the fleet holds at most
+// processes x concurrency of MinIO's request pool: on 2026-11-01, 62 writers
+// (20 connect, 20 proxy, 20 api, 2 alt) x 4 = 248 of edge-5's 1,024.
+const (
+	DefaultClientKeyEvidenceConcurrency = 4
+	MaxClientKeyEvidenceConcurrency     = 64
+)
 
 // blobPartialSuffix reserves local staging and coordination files. Public
 // writes cannot select it, and listings never expose these private owners.
@@ -318,6 +336,18 @@ type BlobStoreConfig struct {
 	// value belongs to this client and can explicitly disable additional retries.
 	// This programmatic override is not read from minio.yml.
 	BucketLocationRetrySettings *BlobBucketLocationRetrySettings
+	// The region requests are signed for (`region`, default DefaultBlobRegion
+	// in LoadBlobStoreConfig). With a region the SDK never sends
+	// GetBucketLocation. Without one it looks each bucket up before its first
+	// request, and a failed lookup is not cached: under MinIO's 429s on
+	// 2026-11-01 every request first repeated a refused lookup. Empty keeps
+	// the SDK's discovery, for programmatic configurations.
+	Region string
+	// Concurrent client-key evidence publications per process
+	// (`client_key_evidence_concurrency`, default
+	// DefaultClientKeyEvidenceConcurrency, at most
+	// MaxClientKeyEvidenceConcurrency). Read when the writer starts.
+	ClientKeyEvidenceConcurrency int
 }
 
 // defaultLocalBlobRoot is the local backend's root when unset: a `blob`
@@ -461,18 +491,35 @@ func LoadBlobStoreConfig() (config *BlobStoreConfig, present bool) {
 			durable.Path, _ = declaration["path"].(string)
 			durable.Sha256, _ = declaration["sha256"].(string)
 		}
+		region := strings.TrimSpace(str("region"))
+		if region == "" {
+			region = DefaultBlobRegion
+		}
+		evidenceConcurrency := DefaultClientKeyEvidenceConcurrency
+		switch value := values["client_key_evidence_concurrency"].(type) {
+		case int:
+			if 0 < value {
+				evidenceConcurrency = min(value, MaxClientKeyEvidenceConcurrency)
+			}
+		case int64:
+			if 0 < value {
+				evidenceConcurrency = int(min(value, MaxClientKeyEvidenceConcurrency))
+			}
+		}
 		load.config = &BlobStoreConfig{
-			Authority:         authority,
-			AccessKey:         str("access_key"),
-			SecretKey:         str("secret_key"),
-			Bucket:            str("bucket"),
-			Tls:               tls,
-			Prefix:            prefix,
-			Local:             local,
-			LocalPath:         localPath,
-			LocalMaxBytes:     localMaxBytes,
-			DurableVolumes:    durable,
-			FeedbackLogBucket: strings.TrimSpace(str("feedback_log_bucket")),
+			Authority:                    authority,
+			AccessKey:                    str("access_key"),
+			SecretKey:                    str("secret_key"),
+			Bucket:                       str("bucket"),
+			Tls:                          tls,
+			Prefix:                       prefix,
+			Local:                        local,
+			LocalPath:                    localPath,
+			LocalMaxBytes:                localMaxBytes,
+			DurableVolumes:               durable,
+			FeedbackLogBucket:            strings.TrimSpace(str("feedback_log_bucket")),
+			Region:                       region,
+			ClientKeyEvidenceConcurrency: evidenceConcurrency,
 		}
 		return load, true
 	})
@@ -493,11 +540,20 @@ func NewBlobStore(config *BlobStoreConfig) (BlobStore, error) {
 	if config.BucketLocationRetrySettings != nil {
 		retrySettings = *config.BucketLocationRetrySettings
 	}
-	client, err := minio.New(config.Authority, &minio.Options{
+	options := minio.Options{
 		Creds:     credentials.NewStaticV4(config.AccessKey, config.SecretKey, ""),
 		Secure:    config.Tls,
 		Transport: &blobBucketLocationProbeTransport{base: transport},
-	})
+		Region:    config.Region,
+	}
+	client, err := minio.New(config.Authority, &options)
+	if err != nil {
+		return nil, err
+	}
+	// The SDK reads MaxRetries 1 as one attempt and no retries.
+	singleAttemptOptions := options
+	singleAttemptOptions.MaxRetries = 1
+	singleAttemptClient, err := minio.New(config.Authority, &singleAttemptOptions)
 	if err != nil {
 		return nil, err
 	}
@@ -505,13 +561,23 @@ func NewBlobStore(config *BlobStoreConfig) (BlobStore, error) {
 	if prefix == "" {
 		prefix = DefaultBlobPrefix
 	}
-	return &minioBlobStore{
+	store := &minioBlobStore{
 		client:              client,
 		bucket:              config.Bucket,
 		prefix:              prefix,
 		authority:           config.Authority,
 		bucketLocationRetry: &blobBucketLocationRetry{settings: retrySettings},
-	}, nil
+		protection:          &blobProtectionCache{},
+	}
+	store.singleAttempt = &minioBlobStore{
+		client:     singleAttemptClient,
+		bucket:     config.Bucket,
+		prefix:     prefix,
+		authority:  config.Authority,
+		protection: store.protection,
+	}
+	store.singleAttempt.singleAttempt = store.singleAttempt
+	return store, nil
 }
 
 // minioBlobStore is the MinIO implementation of BlobStore.
@@ -521,6 +587,88 @@ type minioBlobStore struct {
 	prefix              string
 	authority           string
 	bucketLocationRetry *blobBucketLocationRetry
+	// The verified bucket protection, shared with the single-attempt sibling.
+	// Nil re-reads the bucket configuration on every check.
+	protection *blobProtectionCache
+	// The same bucket through a client that sends every request once, sharing
+	// this client's connection pool (see SingleAttemptBlobStore). Nil for a
+	// store built without NewBlobStore.
+	singleAttempt *minioBlobStore
+}
+
+// SingleAttemptBlobStore returns the store a writer with its own retry and
+// backoff policy uses. For MinIO it is the same bucket through a client that
+// sends each request exactly once: the SDK otherwise retries a 429 or 503 up
+// to ten times, 0.2 to 1 s apart, which on 2026-11-01 turned every refused
+// client-key evidence write into a burst of further requests at edge-5's
+// already full request pool. Other stores make no hidden retries and are
+// returned unchanged.
+func SingleAttemptBlobStore(store BlobStore) BlobStore {
+	if minioStore, ok := store.(*minioBlobStore); ok && minioStore != nil && minioStore.singleAttempt != nil {
+		return minioStore.singleAttempt
+	}
+	return store
+}
+
+// IsBlobThrottled reports a storage refusal that asks the caller to slow
+// down: HTTP 429 (MinIO answers TooManyRequests at once when its request pool
+// is full), 503 (SlowDown, SlowDownRead, SlowDownWrite, ServiceUnavailable),
+// or an S3 throttling code under any status.
+func IsBlobThrottled(err error) bool {
+	response, ok := blobErrorResponse(err)
+	if !ok {
+		return false
+	}
+	switch response.StatusCode {
+	case http.StatusTooManyRequests, http.StatusServiceUnavailable:
+		return true
+	}
+	switch response.Code {
+	case "TooManyRequests", "SlowDown", "SlowDownRead", "SlowDownWrite", "ServiceUnavailable",
+		"Throttling", "ThrottlingException", "RequestThrottled", "RequestLimitExceeded":
+		return true
+	}
+	return false
+}
+
+// IsBlobNotFound reports a read of a key that holds no object: MinIO's
+// NoSuchKey or a local store's missing file. A missing bucket is not.
+func IsBlobNotFound(err error) bool {
+	if errors.Is(err, fs.ErrNotExist) {
+		return true
+	}
+	response, ok := blobErrorResponse(err)
+	return ok && response.Code == minio.NoSuchKey
+}
+
+// IsBlobRequestRefused reports a storage answer that the same request will
+// get again: a 4xx such as AccessDenied or NoSuchBucket. A request timeout, a
+// conflict with a concurrent write (409), throttling, 5xx and transport
+// failures may succeed on a later attempt.
+func IsBlobRequestRefused(err error) bool {
+	response, ok := blobErrorResponse(err)
+	if !ok || IsBlobThrottled(err) {
+		return false
+	}
+	switch response.StatusCode {
+	case http.StatusRequestTimeout, http.StatusConflict:
+		return false
+	}
+	return 400 <= response.StatusCode && response.StatusCode < 500
+}
+
+// The SDK's error response anywhere in a wrapped or joined chain, as a value
+// or a pointer.
+func blobErrorResponse(err error) (minio.ErrorResponse, bool) {
+	var response minio.ErrorResponse
+	if errors.As(err, &response) {
+		return response, true
+	}
+	var pointer *minio.ErrorResponse
+	if errors.As(err, &pointer) && pointer != nil {
+		return *pointer, true
+	}
+	return minio.ErrorResponse{}, false
 }
 
 func (self *minioBlobStore) Put(ctx context.Context, key string, localPath string, contentType string) error {
@@ -806,14 +954,103 @@ func (self *minioBlobStore) SetLifecycle(ctx context.Context, rules []BlobLifecy
 	return self.client.SetBucketLifecycle(ctx, self.bucket, config)
 }
 
-func (self *minioBlobStore) checkRetentionConfiguration(ctx context.Context) error {
+// A verified protection proof is reused this long. From 2026-10-24 to 11-01
+// every check read the bucket's object lock, versioning and replication (and
+// validated replication) about 1.2 million times each, mostly the api's 15 s
+// competition metric refresh and readiness checks, competing with writes for
+// MinIO's request pool. That configuration changes only by an operator's
+// hand, so a change reaches checks within this TTL.
+const blobProtectionProofTtl = 5 * time.Minute
+
+// The last verified proof of one bucket's protection. A re-verification is
+// serialized, so one runs per TTL however many checks arrive together; a
+// waiting check keeps its own context. Safe for concurrent use.
+type blobProtectionCache struct {
+	stateLock  sync.Mutex
+	proof      *BlobProtection
+	verifiedAt time.Time
+	// held by the one check re-reading the configuration
+	refresh chan struct{}
+	// tests advance time without waiting
+	now func() time.Time
+}
+
+func (self *blobProtectionCache) nowUtc() time.Time {
+	if self.now != nil {
+		return self.now()
+	}
+	return time.Now()
+}
+
+// A copy of the proof while it is younger than the TTL, else nil.
+func (self *blobProtectionCache) fresh() *BlobProtection {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if self.proof == nil || blobProtectionProofTtl <= self.nowUtc().Sub(self.verifiedAt) {
+		return nil
+	}
+	proof := *self.proof
+	proof.ReplicationTargets = slices.Clone(self.proof.ReplicationTargets)
+	return &proof
+}
+
+func (self *blobProtectionCache) remember(proof *BlobProtection) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	copied := *proof
+	copied.ReplicationTargets = slices.Clone(proof.ReplicationTargets)
+	self.proof = &copied
+	self.verifiedAt = self.nowUtc()
+}
+
+func (self *blobProtectionCache) forget() {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.proof = nil
+}
+
+// Takes the re-verification turn, or returns the caller's cancellation.
+func (self *blobProtectionCache) acquireRefresh(ctx context.Context) (release func(), err error) {
+	refresh := func() chan struct{} {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		if self.refresh == nil {
+			self.refresh = make(chan struct{}, 1)
+		}
+		return self.refresh
+	}()
+	select {
+	case refresh <- struct{}{}:
+		return func() { <-refresh }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// One live request per check: an unreachable MinIO, refused credentials or a
+// missing bucket fail the check at once, whatever proof is remembered.
+// Cold discovery uses the same client's bounded retry owner before that HEAD;
+// a pinned region or cached location adds no discovery requests.
+func (self *minioBlobStore) checkBucketLive(ctx context.Context) error {
+	if self.bucketLocationRetry != nil {
+		if err := self.bucketLocationRetry.prepare(ctx, self.client, self.bucket); err != nil {
+			return fmt.Errorf("check minio blob bucket existence: %w", err)
+		}
+	}
 	exists, err := self.client.BucketExists(ctx, self.bucket)
 	if err != nil {
 		return fmt.Errorf("check minio blob bucket existence: %w", err)
 	}
 	if !exists {
+		if self.protection != nil {
+			self.protection.forget()
+		}
 		return errors.New("minio blob bucket does not exist")
 	}
+	return nil
+}
+
+func (self *minioBlobStore) checkRetentionConfiguration(ctx context.Context) error {
 	objectLock, _, _, _, err := self.client.GetObjectLockConfig(ctx, self.bucket)
 	if err != nil {
 		return fmt.Errorf("read minio blob bucket object-lock configuration: %w", err)
@@ -856,7 +1093,39 @@ func enabledReplicationTargets(config replication.Config) ([]string, error) {
 	return targets, nil
 }
 
+// Every check sends HeadBucket (checkBucketLive). The configuration reads
+// behind it are reused for blobProtectionProofTtl after they verify; a failed
+// read forgets the proof, so the next check reads them again.
 func (self *minioBlobStore) CheckProtection(ctx context.Context) (*BlobProtection, error) {
+	if err := self.checkBucketLive(ctx); err != nil {
+		return nil, err
+	}
+	if self.protection == nil {
+		return self.readProtection(ctx)
+	}
+	if proof := self.protection.fresh(); proof != nil {
+		return proof, nil
+	}
+	release, err := self.protection.acquireRefresh(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	// a check that held the turn before this one may have verified it
+	if proof := self.protection.fresh(); proof != nil {
+		return proof, nil
+	}
+	proof, err := self.readProtection(ctx)
+	if err != nil {
+		self.protection.forget()
+		return nil, err
+	}
+	self.protection.remember(proof)
+	return proof, nil
+}
+
+// Reads and validates the bucket's complete protection configuration.
+func (self *minioBlobStore) readProtection(ctx context.Context) (*BlobProtection, error) {
 	if err := self.checkRetentionConfiguration(ctx); err != nil {
 		return nil, err
 	}

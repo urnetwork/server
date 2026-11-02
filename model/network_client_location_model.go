@@ -5104,6 +5104,12 @@ type FindProviders2Args struct {
 
 type FindProviders2Result struct {
 	Providers []*FindProvidersProvider `json:"providers"`
+	// The platform's override of the clients' strict window handover, from
+	// the Redis move control's `windowStrictHandover`: false turns it off, true
+	// leaves each client's own setting. Only the api's http route sets it
+	// (controller window_strict_handover_control.go); FindProviders2 and its
+	// in-process callers leave it nil, and nil is absent from the wire.
+	WindowStrictHandover *bool `json:"window_strict_handover,omitempty"`
 }
 
 type FindProvidersProvider struct {

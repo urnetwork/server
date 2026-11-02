@@ -8,10 +8,12 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"math"
 	mathrand "math/rand/v2"
 	"net"
 	"net/netip"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -169,6 +171,11 @@ type ExtenderActivateSettings struct {
 	// the activations refused together do not all come back together
 	BusyRetryAfterMin time.Duration
 	BusyRetryAfterMax time.Duration
+
+	// where every activation's outcome and probe step times are counted
+	// (extender_activation_metrics.go). Nil counts nothing, which is what a
+	// test that builds the settings itself gets.
+	metrics *extenderActivationMetrics
 }
 
 // The actions the activation budgets of one family are recorded under
@@ -302,6 +309,7 @@ func DefaultExtenderActivateSettings() *ExtenderActivateSettings {
 		// fleet's refused posts over three rounds of the guard
 		BusyRetryAfterMin: 1 * time.Minute,
 		BusyRetryAfterMax: 3 * time.Minute,
+		metrics:           defaultExtenderActivationMetrics,
 	}
 }
 
@@ -385,15 +393,25 @@ type ExtenderActivateResult struct {
 	// carrier was not offered or no port answered.
 	DnsPorts []int `json:"dns_ports,omitempty"`
 	// the optional carriers that were offered and did not answer, each dns
-	// port that did not, in the order offered, with the port and the probe's
-	// error (C2a). They are left out of the stored address and the signed
-	// record, so the extender is published on the carriers that answered and
-	// no others. Empty on a refusal, which probes no optional carrier.
+	// port that did not, in the order offered, with the port, the probe's
+	// error and its timing (C2a). They are left out of the stored address and
+	// the signed record, so the extender is published on the carriers that
+	// answered and no others. Empty on a refusal, which probes no optional
+	// carrier.
 	RefusedCarriers []*ExtenderCarrierRefusal `json:"refused_carriers,omitempty"`
+	// every probe step the activation ran, in the order run -- the tcp
+	// challenge, the forward through it, each dns port, then quic -- with how
+	// long it ran, how much of the probe budget was left when it started, and
+	// how it ended (C2). A refusal's last step is the one that refused it.
+	// Empty when the activation was refused before anything was probed.
+	ProbeSteps []*ExtenderProbeStep `json:"probe_steps,omitempty"`
 	// why the activation was refused, empty on success. A refusal is a normal
 	// answer, not a request error: the caller is told which part of the
 	// required test failed -- the tcp carrier, the forward through it, or the
 	// family the forward arrived on (C2a) -- so it can fix its own binding.
+	// A probe refusal also says how long the step ran and, when its budget ran
+	// out first, how much it had, so a late answer reads differently from no
+	// answer (connect#230).
 	Error      string     `json:"error,omitempty"`
 	ExpireTime *time.Time `json:"expire_time,omitempty"`
 	// the operator patterns this extender may forward to (A5)
@@ -423,8 +441,38 @@ type ExtenderCarrierRefusal struct {
 	Carrier string `json:"carrier"`
 	// the port the carrier was probed on
 	Port int `json:"port"`
-	// why the probe failed
+	// why the probe failed. A probe whose budget ran out first says how much
+	// time it had: "no answer within 3 s" for a dns port (L2), or within what
+	// was left of the probe budget.
 	Error string `json:"error"`
+	// how long the probe ran
+	ElapsedMs int64 `json:"elapsed_ms"`
+	// how much of the activation's probe budget was left when the probe
+	// started. A dns port is also bounded by its own 3 s.
+	BudgetLeftMs int64 `json:"budget_left_ms"`
+}
+
+// One probe step of an activation (C2): the challenge on one carrier and
+// port, or the forward through the tcp carrier, timed on the operator's
+// clock. The steps share one probe budget, so a step that ran out of it is
+// told apart from one that failed on its own, and from one that was starved
+// by the steps before it (connect#230).
+type ExtenderProbeStep struct {
+	// tcp, forward, dns or quic
+	Name string `json:"name"`
+	// the family the step dialed, 4 or 6
+	IpVersion int `json:"ip_version"`
+	// the extender port the step dialed. The forward runs over the tcp carrier
+	// and names its port.
+	Port int `json:"port"`
+	// how long the step ran
+	ElapsedMs int64 `json:"elapsed_ms"`
+	// how much of the activation's probe budget was left when the step
+	// started. A dns port is also bounded by its own 3 s.
+	BudgetLeftMs int64 `json:"budget_left_ms"`
+	// ok; error, the step failed before its budget ran out; or timeout, its
+	// budget ran out before it answered
+	Outcome string `json:"outcome"`
 }
 
 // The carrier of a connect mode, and which of an extender's ports it is
@@ -719,10 +767,28 @@ func (self *extenderActivateService) activate(
 	clientSession *session.ClientSession,
 ) (*ExtenderActivateResult, error) {
 	settings := self.settings
+	// the steps the probe ran, which every answer after it carries, refusals
+	// included
+	var probeSteps []*ExtenderProbeStep
+	// the stage the activation has reached, which is where a refusal is
+	// counted (extender_activation_metrics.go), and how the probe refused
+	// when it was the probe that did
+	stage := extenderActivationStageRequest
+	probeRefusalOutcome := ""
+	// the caller's family as the count labels it, read before the address is
+	// checked so a request refused for anything is counted by family
+	family := extenderActivationFamily(clientSession.ClientAddress)
 	refuse := func(message string) (*ExtenderActivateResult, error) {
+		settings.metrics.observe(
+			stage,
+			extenderActivationRefusalOutcome(stage, probeRefusalOutcome),
+			family,
+			probeSteps,
+		)
 		return &ExtenderActivateResult{
-			Activated: false,
-			Error:     message,
+			Activated:  false,
+			Error:      message,
+			ProbeSteps: probeSteps,
 		}, nil
 	}
 
@@ -837,6 +903,7 @@ func (self *extenderActivateService) activate(
 		))
 	}
 
+	stage = extenderActivationStageConfig
 	config, err := EnvExtenderConfig()
 	if err != nil {
 		return refuse(extenderConfigRefusal(err))
@@ -890,6 +957,7 @@ func (self *extenderActivateService) activate(
 	// account's budget keeps its own, and all are the budgets of the family
 	// the probe dials. A refusal says when the budget that refused has room
 	// again, which the activator waits out (`retry_after_seconds`).
+	stage = extenderActivationStageBudget
 	clientRateLimitAction, addressRateLimitAction, accountRateLimitAction := extenderActivateRateLimitActions(ipVersion)
 	networkId := clientSession.ByJwt.NetworkId
 	if err := model.CheckAndRecordAccountActionBudgets(
@@ -928,9 +996,6 @@ func (self *extenderActivateService) activate(
 		}
 		return refusal, nil
 	}
-
-	probeCtx, probeCancel := context.WithTimeout(clientSession.Ctx, ExtenderActivateProbeTimeout)
-	defer probeCancel()
 
 	// the acceptance rule (C2a) over the real probes: the required test, then
 	// each optional carrier offered, which is left out when it does not answer
@@ -971,7 +1036,8 @@ func (self *extenderActivateService) activate(
 		probes = self.testProbes(clientIp, ipVersion)
 	}
 	outcome := probeExtenderActivation(
-		probeCtx,
+		clientSession.Ctx,
+		newExtenderActivationClock(),
 		probes,
 		carriers,
 		tcpPort,
@@ -980,9 +1046,13 @@ func (self *extenderActivateService) activate(
 		ipVersion,
 	)
 	releaseProbeSlot()
+	probeSteps = outcome.steps
 	if outcome.refusal != "" {
+		stage = outcome.refusalStep
+		probeRefusalOutcome = outcome.refusalOutcome
 		return refuse(outcome.refusal)
 	}
+	stage = extenderActivationStageStore
 
 	// The location of the activating address (M1). The country code goes on the
 	// record's country field as it always has; the four location ids go beside
@@ -1124,6 +1194,12 @@ func (self *extenderActivateService) activate(
 		bootstrap = append(bootstrap, otherRecordBase64)
 	}
 
+	settings.metrics.observe(
+		extenderActivationStageStore,
+		extenderActivationOutcomeActivated,
+		family,
+		probeSteps,
+	)
 	extenderId := activated.Extender.ExtenderId
 	return &ExtenderActivateResult{
 		Activated:       true,
@@ -1133,6 +1209,7 @@ func (self *extenderActivateService) activate(
 		Carriers:        outcome.carriers,
 		DnsPorts:        outcome.dnsPorts,
 		RefusedCarriers: outcome.refusedCarriers,
+		ProbeSteps:      outcome.steps,
 		ExpireTime:      &expireTime,
 		AllowedHosts:    config.AllowedHosts(),
 		Record:          recordBase64,
@@ -1150,11 +1227,56 @@ type extenderActivationProbes struct {
 	forward func(ctx context.Context) (string, error)
 }
 
+// The clock the probes of one activation run on (C2): the time each step is
+// read at, and the deadlines that bound the shared probe budget and each dns
+// port's own. Production is the real clock; a test drives a fake one, so a
+// step that takes 9.5 s, or one that waits out its budget, does so at once
+// and to the instant.
+type extenderActivationClock struct {
+	now func() time.Time
+	// context.WithDeadline on this clock: the context ends with
+	// context.DeadlineExceeded when this clock reaches the deadline
+	withDeadline func(ctx context.Context, deadline time.Time) (context.Context, context.CancelFunc)
+}
+
+// The real clock, whose readings carry the monotonic time, so a step is
+// timed by the time that passed and not by the wall clock.
+func newExtenderActivationClock() *extenderActivationClock {
+	return &extenderActivationClock{
+		now:          time.Now,
+		withDeadline: context.WithDeadline,
+	}
+}
+
+// The names of the probe steps of one activation (ExtenderProbeStep): each
+// carrier's challenge, which is the carrier's name, and the forward.
+const extenderProbeStepForward = "forward"
+
+// How a probe step ended (ExtenderProbeStep).
+const (
+	// it answered
+	extenderProbeStepOutcomeOk = "ok"
+	// it failed on its own, before its budget ran out
+	extenderProbeStepOutcomeError = "error"
+	// its budget ran out before it answered
+	extenderProbeStepOutcomeTimeout = "timeout"
+)
+
+// How the required test of an activation refused it (C2a), for the outcome
+// count: the step failed or timed out, or the forward answered on the other
+// family.
+const extenderProbeRefusalOtherFamily = "other_family"
+
 // What the probes of one activation found (C2a).
 type extenderActivationOutcome struct {
 	// why the required test failed, empty when it passed. When it is set no
 	// optional carrier was probed and nothing may be stored.
 	refusal string
+	// the step of the required test that refused the activation, tcp or
+	// forward, and how: error, timeout or other_family. Empty when the
+	// required test passed.
+	refusalStep    string
+	refusalOutcome string
 	// the carriers that answered, in the order offered: the tcp carrier the
 	// required test passed on, and each optional carrier that answered
 	carriers []string
@@ -1163,6 +1285,72 @@ type extenderActivationOutcome struct {
 	// the optional carriers, and the dns ports, that did not answer, in the
 	// order offered
 	refusedCarriers []*ExtenderCarrierRefusal
+	// every step probed, in the order probed. A refusal's last step is the
+	// one that refused it.
+	steps []*ExtenderProbeStep
+}
+
+// One probe step as it ran (C2): the step the answer lists, and the times
+// and the error its messages are made from.
+type extenderProbeStepRun struct {
+	step *ExtenderProbeStep
+	// how long it ran
+	elapsed time.Duration
+	// how long it was allowed to run: what was left of the shared budget, or
+	// a dns port's own budget when that ended first (L2)
+	allowance time.Duration
+	// the shared budget, rather than a dns port's own, bounded it
+	sharedBudget bool
+	err          error
+}
+
+// How much time a step was given, as its timeout says it: "within 3 s" for a
+// dns port that ran out of its own budget, "within the 10 s probe budget" for
+// a step that had all of the shared budget, and "within the 0.5 s left of the
+// 10 s probe budget" for one that ran out of what was left of it.
+func (self *extenderProbeStepRun) withinText() string {
+	if !self.sharedBudget {
+		return fmt.Sprintf("within %s", extenderProbeSecondsText(self.allowance))
+	}
+	budgetText := extenderProbeSecondsText(ExtenderActivateProbeTimeout)
+	if leftText := extenderProbeSecondsText(self.allowance); leftText != budgetText {
+		return fmt.Sprintf("within the %s left of the %s probe budget", leftText, budgetText)
+	}
+	return fmt.Sprintf("within the %s probe budget", budgetText)
+}
+
+// The refusal of a step of the required test that did not pass (C2a). One
+// that timed out says how much time it had, so an extender that answers late
+// can tell that from one that does not answer at all (connect#230); one that
+// failed on its own says when, and makes no claim about the budget.
+func (self *extenderProbeStepRun) refusal(subject string) string {
+	if self.step.Outcome == extenderProbeStepOutcomeTimeout {
+		return fmt.Sprintf("the %s did not answer %s: %s", subject, self.withinText(), self.err)
+	}
+	return fmt.Sprintf("the %s failed after %s: %s", subject, extenderProbeSecondsText(self.elapsed), self.err)
+}
+
+// Why an optional carrier, or a dns port, was left out (C2a): the probe's own
+// error, and for a probe whose budget ran out first, how much time it had.
+func (self *extenderProbeStepRun) carrierRefusal(carrier string, port int) *ExtenderCarrierRefusal {
+	errorText := self.err.Error()
+	if self.step.Outcome == extenderProbeStepOutcomeTimeout {
+		errorText = fmt.Sprintf("no answer %s: %s", self.withinText(), self.err)
+	}
+	return &ExtenderCarrierRefusal{
+		Carrier:      carrier,
+		Port:         port,
+		Error:        errorText,
+		ElapsedMs:    self.step.ElapsedMs,
+		BudgetLeftMs: self.step.BudgetLeftMs,
+	}
+}
+
+// A duration as an activation message gives it, in seconds to the hundredth:
+// "3 s", "0.5 s", "2.43 s".
+func extenderProbeSecondsText(d time.Duration) string {
+	seconds := math.Round(d.Seconds()*100) / 100
+	return strconv.FormatFloat(seconds, 'f', -1, 64) + " s"
 }
 
 // Judges one activation by the acceptance rule of C2a.
@@ -1182,8 +1370,18 @@ type extenderActivationOutcome struct {
 // so the dns carrier always leaves quic the rest of the budget, while quic is
 // bounded only by the budget: a quic carrier that never answers, probed
 // first, would leave the dns carrier no time to answer in.
+//
+// Every step runs on the clock: the shared budget ends
+// ExtenderActivateProbeTimeout after the judging starts, and a dns port ends
+// at its own ExtenderActivateDnsPortProbeTimeout or at the end of the shared
+// budget, whichever comes first. Each step is timed, and the outcome lists
+// every step with how long it ran and what was left of the shared budget when
+// it started. A step whose budget ran out before it answered timed out, and
+// its refusal says how much time it had; a late answer and no answer were the
+// same "context deadline exceeded" before (connect#230).
 func probeExtenderActivation(
-	probeCtx context.Context,
+	ctx context.Context,
+	clock *extenderActivationClock,
 	probes *extenderActivationProbes,
 	carriers []string,
 	tcpPort int,
@@ -1191,41 +1389,94 @@ func probeExtenderActivation(
 	dnsPorts []int,
 	ipVersion int,
 ) *extenderActivationOutcome {
-	if err := probes.carrier(probeCtx, connect.ExtenderConnectModeTcpTls, tcpPort); err != nil {
+	probeDeadline := clock.now().Add(ExtenderActivateProbeTimeout)
+	probeCtx, probeCancel := clock.withDeadline(ctx, probeDeadline)
+	defer probeCancel()
+
+	steps := []*ExtenderProbeStep{}
+	// runs one step under stepCtx, which ends at the shared budget or sooner,
+	// and records it. A step that failed once its context had reached its
+	// deadline timed out; any other failure is the step's own.
+	runStep := func(
+		stepCtx context.Context,
+		name string,
+		port int,
+		probe func(ctx context.Context) error,
+	) *extenderProbeStepRun {
+		stepStart := clock.now()
+		err := probe(stepCtx)
+		elapsed := clock.now().Sub(stepStart)
+		stepDeadline, _ := stepCtx.Deadline()
+		run := &extenderProbeStepRun{
+			step: &ExtenderProbeStep{
+				Name:         name,
+				IpVersion:    ipVersion,
+				Port:         port,
+				ElapsedMs:    elapsed.Milliseconds(),
+				BudgetLeftMs: max(0, probeDeadline.Sub(stepStart)).Milliseconds(),
+				Outcome:      extenderProbeStepOutcomeOk,
+			},
+			elapsed:      elapsed,
+			allowance:    max(0, stepDeadline.Sub(stepStart)),
+			sharedBudget: !stepDeadline.Before(probeDeadline),
+			err:          err,
+		}
+		if err != nil {
+			run.step.Outcome = extenderProbeStepOutcomeError
+			if errors.Is(stepCtx.Err(), context.DeadlineExceeded) {
+				run.step.Outcome = extenderProbeStepOutcomeTimeout
+			}
+		}
+		steps = append(steps, run.step)
+		return run
+	}
+	refuse := func(run *extenderProbeStepRun, refusal string, refusalOutcome string) *extenderActivationOutcome {
 		return &extenderActivationOutcome{
-			refusal: fmt.Sprintf("the %s carrier did not answer: %s", connect.ExtenderCarrierTcp, err),
+			refusal:        refusal,
+			refusalStep:    run.step.Name,
+			refusalOutcome: refusalOutcome,
+			steps:          steps,
 		}
 	}
-	forwardClientAddress, err := probes.forward(probeCtx)
-	if err != nil {
-		return &extenderActivationOutcome{
-			refusal: fmt.Sprintf("the forward did not answer: %s", err),
-		}
+
+	tcpRun := runStep(probeCtx, connect.ExtenderCarrierTcp, tcpPort, func(ctx context.Context) error {
+		return probes.carrier(ctx, connect.ExtenderConnectModeTcpTls, tcpPort)
+	})
+	if tcpRun.err != nil {
+		return refuse(tcpRun, tcpRun.refusal(connect.ExtenderCarrierTcp+" carrier"), tcpRun.step.Outcome)
+	}
+	var forwardClientAddress string
+	// the forward runs over the tcp carrier, so it is the tcp port it dials
+	forwardRun := runStep(probeCtx, extenderProbeStepForward, tcpPort, func(ctx context.Context) error {
+		var err error
+		forwardClientAddress, err = probes.forward(ctx)
+		return err
+	})
+	if forwardRun.err != nil {
+		return refuse(forwardRun, forwardRun.refusal(extenderProbeStepForward), forwardRun.step.Outcome)
 	}
 	// an extender must egress on the family it was reached on (A7); a forward
 	// that arrives on the other family would publish an address that does not
 	// carry the traffic the record promises
 	if forwardIpVersion := server.ClientAddressIpVersion(forwardClientAddress); forwardIpVersion != ipVersion {
-		return &extenderActivationOutcome{
-			refusal: fmt.Sprintf(
-				"the forward arrived on ipv%d, not ipv%d",
+		// the forward answered, but not as the required test needs
+		forwardRun.step.Outcome = extenderProbeStepOutcomeError
+		return refuse(
+			forwardRun,
+			fmt.Sprintf(
+				"the forward arrived on ipv%d, not ipv%d, after %s",
 				forwardIpVersion,
 				ipVersion,
+				extenderProbeSecondsText(forwardRun.elapsed),
 			),
-		}
+			extenderProbeRefusalOtherFamily,
+		)
 	}
 
 	answered := map[string]bool{
 		connect.ExtenderCarrierTcp: true,
 	}
 	refusals := map[string][]*ExtenderCarrierRefusal{}
-	refuseCarrier := func(carrier string, port int, err error) {
-		refusals[carrier] = append(refusals[carrier], &ExtenderCarrierRefusal{
-			Carrier: carrier,
-			Port:    port,
-			Error:   err.Error(),
-		})
-	}
 
 	// the dns ports that answered, which is what the address row and the
 	// record list (L2). Empty unless the dns carrier was offered and answered.
@@ -1235,25 +1486,37 @@ func probeExtenderActivation(
 		// offers 53 and 4053 on a path that blocks 53 is still reachable on
 		// 4053, and the record must say which
 		for _, port := range dnsPorts {
-			portCtx, portCancel := context.WithTimeout(
-				probeCtx,
-				ExtenderActivateDnsPortProbeTimeout,
-			)
-			err := probes.carrier(portCtx, connect.ExtenderConnectModeDns, port)
+			portDeadline := clock.now().Add(ExtenderActivateDnsPortProbeTimeout)
+			if probeDeadline.Before(portDeadline) {
+				portDeadline = probeDeadline
+			}
+			portCtx, portCancel := clock.withDeadline(probeCtx, portDeadline)
+			portRun := runStep(portCtx, connect.ExtenderCarrierDns, port, func(ctx context.Context) error {
+				return probes.carrier(ctx, connect.ExtenderConnectModeDns, port)
+			})
 			portCancel()
-			if err == nil {
+			if portRun.err == nil {
 				activeDnsPorts = append(activeDnsPorts, port)
 			} else {
-				refuseCarrier(connect.ExtenderCarrierDns, port, err)
+				refusals[connect.ExtenderCarrierDns] = append(
+					refusals[connect.ExtenderCarrierDns],
+					portRun.carrierRefusal(connect.ExtenderCarrierDns, port),
+				)
 			}
 		}
 		answered[connect.ExtenderCarrierDns] = 0 < len(activeDnsPorts)
 	}
 	if slices.Contains(carriers, connect.ExtenderCarrierQuic) {
-		if err := probes.carrier(probeCtx, connect.ExtenderConnectModeQuic, udpPort); err == nil {
+		quicRun := runStep(probeCtx, connect.ExtenderCarrierQuic, udpPort, func(ctx context.Context) error {
+			return probes.carrier(ctx, connect.ExtenderConnectModeQuic, udpPort)
+		})
+		if quicRun.err == nil {
 			answered[connect.ExtenderCarrierQuic] = true
 		} else {
-			refuseCarrier(connect.ExtenderCarrierQuic, udpPort, err)
+			refusals[connect.ExtenderCarrierQuic] = append(
+				refusals[connect.ExtenderCarrierQuic],
+				quicRun.carrierRefusal(connect.ExtenderCarrierQuic, udpPort),
+			)
 		}
 	}
 
@@ -1263,6 +1526,7 @@ func probeExtenderActivation(
 		carriers:        []string{},
 		dnsPorts:        activeDnsPorts,
 		refusedCarriers: []*ExtenderCarrierRefusal{},
+		steps:           steps,
 	}
 	for _, carrier := range carriers {
 		if answered[carrier] {
