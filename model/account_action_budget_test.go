@@ -431,3 +431,40 @@ func TestCheckAndRecordAccountActionBudgetsNamesTheLongestWait(t *testing.T) {
 		}
 	})
 }
+
+// Two budgets spent by the same spends wait apart by less than the spread of
+// their attempts' times, so such waits are one wait: the refusal names the
+// first of the budgets in the order given, and asks for the longest wait
+// (connect#230). With every attempt of a spend at a time of its own, the
+// budget with the longest wait was the one whose attempt happened to be drawn
+// latest, so one client's seventh post from one address was refused by its
+// client's budget or by its address's at random.
+func TestCheckAndRecordAccountActionBudgetsNamesTheFirstOfWaitsWithinTheSpread(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+		clientId := server.NewId()
+		addressId := server.NewId()
+		// one spend, its attempts drawn 900 ms apart within a 1 s spread
+		addressAttemptTime := now.Add(-10 * time.Minute)
+		server.Tx(ctx, func(tx server.PgTx) {
+			insertAccountActionAttemptInTx(ctx, tx, clientId, AccountActionExtenderActivateV4, addressAttemptTime.Add(-900*time.Millisecond))
+			insertAccountActionAttemptInTx(ctx, tx, addressId, AccountActionExtenderActivateAddressV4, addressAttemptTime)
+		})
+		err := CheckAndRecordAccountActionBudgets(
+			ctx,
+			AccountActionBudget{Id: clientId, Action: AccountActionExtenderActivateV4, Limit: 1, Window: time.Hour, AttemptTimeSpread: time.Second},
+			AccountActionBudget{Id: addressId, Action: AccountActionExtenderActivateAddressV4, Limit: 1, Window: time.Hour, AttemptTimeSpread: time.Second},
+		)
+		spendEndTime := server.NowUtc()
+		var refusal *AccountActionBudgetRefusal
+		if !errors.As(err, &refusal) {
+			t.Fatalf("the spend with both budgets spent was not refused: %v", err)
+		}
+		connect.AssertEqual(t, refusal.Action, AccountActionExtenderActivateV4)
+		// the address budget's wait, read no later than the spend ended
+		if longestRetryAfter := addressAttemptTime.Add(time.Hour).Sub(spendEndTime); refusal.RetryAfter < longestRetryAfter {
+			t.Errorf("the refusal waits %s, want at least the address budget's %s", refusal.RetryAfter, longestRetryAfter)
+		}
+	})
+}

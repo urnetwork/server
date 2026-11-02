@@ -565,10 +565,13 @@ func lockAccountActionBudgetsInTx(ctx context.Context, tx server.PgTx, lockKeys 
 // nothing from any budget, so an action refused by one budget leaves the
 // others as they were: a client refused by its account's budget keeps its
 // own. The refusal, an *AccountActionBudgetRefusal, names the budget with no
-// room that has the longest wait, the first of them in the order given on a
-// tie, its window, and that wait (connect#230): a caller that waits it out
-// finds every budget with room, where the first budget's wait could end
-// before another's.
+// room that has the longest wait, and its window, and asks for that wait
+// (connect#230): a caller that waits it out finds every budget with room,
+// where the first budget's wait could end before another's. Waits apart by
+// no more than the budgets' AttemptTimeSpread are one wait, and the first of
+// their budgets in the order given is named, with the longest of them: two
+// budgets spent by the same spends wait apart by less than the spread, and
+// would otherwise be named at random.
 //
 // A spend that waits past its bound for a budget's database lock, which
 // another spend holds, returns ErrAccountActionBudgetsBusy and spends nothing.
@@ -607,28 +610,42 @@ func CheckAndRecordAccountActionBudgets(ctx context.Context, budgets ...AccountA
 			refusal = nil
 			lockAccountActionBudgetsInTx(ctx, tx, lockKeys)
 			now := server.NowUtc()
-			var budgetRefusal *AccountActionBudgetRefusal
+			budgetRefusals := []*AccountActionBudgetRefusal{}
+			retryAfter := time.Duration(0)
+			waitSpread := time.Duration(0)
 			for _, budget := range budgets {
-				allow, retryAfter := readAccountActionBudgetLimitInTx(ctx, tx, budget, now)
-				if !allow && (budgetRefusal == nil || budgetRefusal.RetryAfter < retryAfter) {
-					budgetRefusal = &AccountActionBudgetRefusal{
+				allow, budgetRetryAfter := readAccountActionBudgetLimitInTx(ctx, tx, budget, now)
+				if !allow {
+					budgetRefusals = append(budgetRefusals, &AccountActionBudgetRefusal{
 						Action:     budget.Action,
 						Window:     budget.Window,
-						RetryAfter: retryAfter,
-					}
+						RetryAfter: budgetRetryAfter,
+					})
+					retryAfter = max(retryAfter, budgetRetryAfter)
 				}
+				waitSpread = max(waitSpread, budget.AttemptTimeSpread)
 			}
-			if budgetRefusal != nil {
-				refusal = budgetRefusal
-				return
+			for _, budgetRefusal := range budgetRefusals {
+				if retryAfter-budgetRefusal.RetryAfter <= waitSpread {
+					budgetRefusal.RetryAfter = retryAfter
+					refusal = budgetRefusal
+					return
+				}
 			}
 			if Testing_AccountActionBudgetsBeforeSpend != nil {
 				Testing_AccountActionBudgetsBeforeSpend()
 			}
+			// each attempt at a time of its own, so no two rows of a spend
+			// share a create_time
+			attemptTimes := map[time.Time]bool{}
 			for _, budget := range budgets {
 				attemptTime := now
 				if 0 < budget.AttemptTimeSpread {
 					attemptTime = now.Add(-mathrand.N(budget.AttemptTimeSpread)).Truncate(time.Microsecond)
+					for attemptTimes[attemptTime] {
+						attemptTime = attemptTime.Add(-time.Microsecond)
+					}
+					attemptTimes[attemptTime] = true
 				}
 				insertAccountActionAttemptInTx(ctx, tx, budget.Id, budget.Action, attemptTime)
 			}
