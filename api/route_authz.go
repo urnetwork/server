@@ -139,6 +139,7 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /network/extender-block-report":           routeAccessClient,
 	"POST /network/ping-report":                     routeAccessClient,
 	"GET /network/extender-measurement-cert":        routeAccessClient, // the caller's own extender's certificate (lag.dev/PLAN.md A8)
+	"GET /v1/seed\\.bin":                            routeAccessPublic, // the public seed bundle (connect/EXTENDER-UPDATE2.md §2.3)
 	"POST /network/provider-egress-location":        routeAccessPublic,
 	"GET /network/provider-egress-due":              routeAccessPublic,
 	"GET /network/provider-blackhole-due":           routeAccessPublic,

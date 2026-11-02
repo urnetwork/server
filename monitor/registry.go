@@ -228,6 +228,7 @@ func NewSignals() []Signal {
 		NewContractReplyCollapseSignal(),
 		NewHostedContractCapSignal(),
 		NewContractStageInflightSignal(),
+		NewExtenderSeedMirrorsSignal(),
 	}
 }
 
