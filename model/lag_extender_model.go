@@ -6,9 +6,11 @@ import (
 	"net/netip"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/urnetwork/connect"
+	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
 )
@@ -46,6 +48,13 @@ type LagPlace struct {
 // of 114 derived points had crossed a border.
 const LagExtenderDerivedPlaceMaxResidualKm = 50.0
 
+// How long before an away extender's most recently working family another of
+// its families may have last worked for it to place the extender too. Probes
+// deactivate one family at a time and keep the row, so a family that stopped
+// working weeks before the extender went away, after a move to another host,
+// would otherwise place it by an address it no longer has.
+const LagExtenderAwayFamilyWindow = time.Hour
+
 // What GeoLite2 says of one address of an extender.
 type LagAddressPlace struct {
 	// GeoLite2 City's place for the address, with a country
@@ -58,16 +67,42 @@ type LagAddressPlace struct {
 	Asn uint32
 }
 
+// Whether this process has logged that it places no extender, for want of a
+// GeoLite2 City database.
+var lagCityDatabaseMissingLogged atomic.Bool
+
+// Where that is logged. Tests replace it.
+var lagCityDatabaseMissingLogf = glog.Errorf
+
 // What GeoLite2 says of each address, by address: an entry for each address
 // GeoLite2 City places in a country, and none for the rest. An extender's
 // address is public through its measurement name (lag.dev/PLAN.md §2), so its
 // place keeps the block's own coordinates, which serve distance (L3) better
 // than the city's; a visitor's place is the city's point, never this
-// (controller lagClientPlace). Without a GeoLite2 City database there is no
-// entry at all, which is logged once per call rather than once per address.
-// Tests replace it.
+// (controller lagClientPlace).
+//
+// The sample, in the api, and the issuance order, in the taskworker, agree on
+// a place only while both processes read the same GeoLite2 City and ASN
+// builds. Each opens them once, the api as it starts and the taskworker at
+// its first issuance pass, and reads them until it restarts, so a new build
+// reaches each as it is restarted on it.
+//
+// Without a GeoLite2 City database, which only a process that does not warm
+// it up can be without, there is no entry at all and nothing is looked up:
+// the sample offers no extender and the order counts the countries the
+// extenders last activated from. That is logged once per process. Tests
+// replace it.
 var lagAddressPlaces = func(ips []netip.Addr) map[netip.Addr]*LagAddressPlace {
 	addressPlaces := map[netip.Addr]*LagAddressPlace{}
+	if !server.IpInfoDatabaseDeployed() {
+		if lagCityDatabaseMissingLogged.CompareAndSwap(false, true) {
+			lagCityDatabaseMissingLogf(
+				"[lag]no GeoLite2 City database (%s): extenders are not placed; the order counts stored countries (lag.dev/PLAN.md A4, C7)\n",
+				server.GeoLite2CityResourcePath,
+			)
+		}
+		return addressPlaces
+	}
 	server.HandleError(func() {
 		for _, ip := range ips {
 			ipInfo, err := server.GetIpInfo(ip)
@@ -213,13 +248,52 @@ func GetLagExtenderPlaces(ctx context.Context, extenderIds []server.Id) map[serv
 	return places
 }
 
-// GetLagExtenderPlaces on the caller's connection.
-//
-// An extender is placed by the addresses it is measured at: its active
-// addresses that carry tcp, which are the ones the sample lists and its name
+// One family's address row of an extender, that carries tcp, as lag.dev
+// places the extender by it.
+type lagExtenderAddressRow struct {
+	ip                   netip.Addr
+	active               bool
+	lastProbeSuccessTime *time.Time
+}
+
+// The addresses, by family, an extender is placed by, from its rows that
+// carry tcp: its active addresses, the ones the sample lists and its name
 // resolves to (A4, N3). An extender with none active is away, or about to be
-// (amendment 23), and is placed by the last address of each family it had,
-// so the order counts a holder that is away where it is to serve again.
+// (amendment 23), and is placed by its most recently working family, the one
+// whose last probe success is the latest, and by any other family that last
+// worked within LagExtenderAwayFamilyWindow of it, so the order counts a
+// holder that is away where it is to serve again. A family that never passed
+// a probe comes after every one that did: it places an away extender only
+// when none of its families ever passed one, and then they all do.
+func lagExtenderFamilyAddresses(rows map[int]*lagExtenderAddressRow) map[int]netip.Addr {
+	addresses := map[int]netip.Addr{}
+	for ipVersion, row := range rows {
+		if row.active {
+			addresses[ipVersion] = row.ip
+		}
+	}
+	if 0 < len(addresses) {
+		return addresses
+	}
+	var latest *time.Time
+	for _, row := range rows {
+		if row.lastProbeSuccessTime != nil && (latest == nil || latest.Before(*row.lastProbeSuccessTime)) {
+			latest = row.lastProbeSuccessTime
+		}
+	}
+	for ipVersion, row := range rows {
+		switch {
+		case latest == nil:
+			addresses[ipVersion] = row.ip
+		case row.lastProbeSuccessTime != nil && !row.lastProbeSuccessTime.Before(latest.Add(-LagExtenderAwayFamilyWindow)):
+			addresses[ipVersion] = row.ip
+		}
+	}
+	return addresses
+}
+
+// GetLagExtenderPlaces on the caller's connection. Each extender is placed by
+// the addresses lagExtenderFamilyAddresses picks from its rows.
 func getLagExtenderPlacesInConn(ctx context.Context, conn server.PgConn, extenderIds []server.Id) map[server.Id]*LagPlace {
 	places := map[server.Id]*LagPlace{}
 	if len(extenderIds) == 0 {
@@ -227,8 +301,7 @@ func getLagExtenderPlacesInConn(ctx context.Context, conn server.PgConn, extende
 	}
 
 	// by extender, by family
-	activeAddresses := map[server.Id]map[int]netip.Addr{}
-	lastAddresses := map[server.Id]map[int]netip.Addr{}
+	addressRows := map[server.Id]map[int]*lagExtenderAddressRow{}
 	result, err := conn.Query(
 		ctx,
 		`
@@ -237,7 +310,8 @@ func getLagExtenderPlacesInConn(ctx context.Context, conn server.PgConn, extende
 			ip_version,
 			ip,
 			carriers,
-			active
+			active,
+			last_probe_success_time
 		FROM network_extender_address
 		WHERE extender_id = ANY($1)
 		`,
@@ -247,30 +321,24 @@ func getLagExtenderPlacesInConn(ctx context.Context, conn server.PgConn, extende
 		for result.Next() {
 			var extenderId server.Id
 			var ipVersion int
-			var ip netip.Addr
 			var carriers string
-			var active bool
+			row := &lagExtenderAddressRow{}
 			server.Raise(result.Scan(
 				&extenderId,
 				&ipVersion,
-				&ip,
+				&row.ip,
 				&carriers,
-				&active,
+				&row.active,
+				&row.lastProbeSuccessTime,
 			))
 			if !slices.Contains(splitExtenderCarriers(carriers), connect.ExtenderCarrierTcp) {
 				continue
 			}
-			ip = ip.Unmap().WithZone("")
-			if lastAddresses[extenderId] == nil {
-				lastAddresses[extenderId] = map[int]netip.Addr{}
+			row.ip = row.ip.Unmap().WithZone("")
+			if addressRows[extenderId] == nil {
+				addressRows[extenderId] = map[int]*lagExtenderAddressRow{}
 			}
-			lastAddresses[extenderId][ipVersion] = ip
-			if active {
-				if activeAddresses[extenderId] == nil {
-					activeAddresses[extenderId] = map[int]netip.Addr{}
-				}
-				activeAddresses[extenderId][ipVersion] = ip
-			}
+			addressRows[extenderId][ipVersion] = row
 		}
 	})
 
@@ -319,23 +387,18 @@ func getLagExtenderPlacesInConn(ctx context.Context, conn server.PgConn, extende
 		}
 	})
 
-	familyAddresses := func(extenderId server.Id) map[int]netip.Addr {
-		if addresses := activeAddresses[extenderId]; 0 < len(addresses) {
-			return addresses
-		}
-		return lastAddresses[extenderId]
-	}
-
+	familyAddresses := map[server.Id]map[int]netip.Addr{}
 	ips := []netip.Addr{}
-	for extenderId := range lastAddresses {
-		for _, ip := range familyAddresses(extenderId) {
+	for extenderId, rows := range addressRows {
+		addresses := lagExtenderFamilyAddresses(rows)
+		familyAddresses[extenderId] = addresses
+		for _, ip := range addresses {
 			ips = append(ips, ip)
 		}
 	}
 	addressPlaces := lagAddressPlaces(ips)
 
-	for extenderId := range lastAddresses {
-		addresses := familyAddresses(extenderId)
+	for extenderId, addresses := range familyAddresses {
 		var v4 *LagAddressPlace
 		if ip, ok := addresses[4]; ok {
 			v4 = addressPlaces[ip]

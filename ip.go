@@ -252,6 +252,9 @@ const (
 	schemaTypeArinDb       schemaType = "urnetwork arindb"
 )
 
+// The resource the GeoLite2 City database is deployed as.
+const GeoLite2CityResourcePath = "mmdb/geolite2.mmdb"
+
 // MaxMind GeoLite2 City (connect/GEOMAP.md §3), the one packaged source of
 // location. It carries no ip-quality verdicts: hosting and proxy come only
 // from the egress prober, and the foreign check from our own ARIN build
@@ -260,11 +263,34 @@ var ipDb = sync.OnceValues(loadIpDb)
 
 // Opens the deployed GeoLite2 City file of the config resources.
 func loadIpDb() (*mmdb.Reader, schemaType) {
-	path, err := Config.ResourcePath("mmdb/geolite2.mmdb")
+	path, err := Config.ResourcePath(GeoLite2CityResourcePath)
 	if err != nil {
 		panic(err)
 	}
 	return openIpDb(path)
+}
+
+// Whether this process reads GeoLite2 City, decided once per process
+// (ipDbOpens).
+var ipDbDeployed = sync.OnceValue(ipDbOpens)
+
+// Whether ipDb opens: the deployed file is there and is GeoLite2 City. When
+// it is not, ipDb panics, and panics again at every lookup, since a
+// sync.OnceValues replays its panic. The failure is logged here, with its
+// cause.
+func ipDbOpens() bool {
+	return HandleError(func() {
+		ipDb()
+	}) == nil
+}
+
+// Whether this process has a GeoLite2 City database to answer from. A caller
+// that can do without a location, such as the lag.dev extender places, asks
+// this first rather than recover from a panic at every lookup. The api fails
+// its warmup without the database (WarmupTargetIPDatabase), so this answers
+// false only in a process that does not warm it up, such as the taskworker.
+func IpInfoDatabaseDeployed() bool {
+	return ipDbDeployed()
 }
 
 // Opens the database at path and refuses any type but GeoLite2 City.
@@ -662,7 +688,7 @@ var ipAsnDb = sync.OnceValue(loadIpAsnDb)
 func loadIpAsnDb() *mmdb.Reader {
 	path, err := Config.ResourcePath(GeoLite2AsnResourcePath)
 	if err != nil {
-		glog.Infof("[ip]no GeoLite2 ASN database (%s); my-ip-info answers without asn\n", err)
+		glog.Infof("[ip]no GeoLite2 ASN database (%s); my-ip-info answers without asn, and lag.dev places an extender whose two address families are in two countries by its IPv6 address\n", err)
 		return nil
 	}
 	db, err := openIpAsnDb(path)

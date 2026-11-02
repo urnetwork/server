@@ -2,10 +2,12 @@ package model
 
 import (
 	"context"
+	"maps"
 	"math"
 	"net/netip"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/urnetwork/connect"
 
@@ -165,6 +167,95 @@ func testLagPlaceAddress(ip string, active bool) *NetworkExtenderAddress {
 	return &NetworkExtenderAddress{Ip: netip.MustParseAddr(ip), Active: active}
 }
 
+// An address that last passed a probe at lastProbeSuccessTime.
+func testLagPlaceAddressWorked(ip string, active bool, lastProbeSuccessTime time.Time) *NetworkExtenderAddress {
+	address := testLagPlaceAddress(ip, active)
+	lastProbeSuccessTime = lastProbeSuccessTime.UTC()
+	address.LastProbeSuccessTime = &lastProbeSuccessTime
+	return address
+}
+
+// An active extender is placed by its active families. One that is away is
+// placed by its most recently working family and by any other that last
+// worked within LagExtenderAwayFamilyWindow of it; a family that never
+// passed a probe comes last, and places it only when none of its families
+// ever did. Pure.
+func TestLagExtenderFamilyAddresses(t *testing.T) {
+	now := time.Date(2026, 11, 1, 20, 0, 0, 0, time.UTC)
+	v4 := netip.MustParseAddr("192.0.2.1")
+	v6 := netip.MustParseAddr("2001:db8::1")
+	worked := func(at time.Time) *time.Time {
+		return &at
+	}
+	row := func(ip netip.Addr, active bool, lastProbeSuccessTime *time.Time) *lagExtenderAddressRow {
+		return &lagExtenderAddressRow{ip: ip, active: active, lastProbeSuccessTime: lastProbeSuccessTime}
+	}
+
+	for _, c := range []struct {
+		name string
+		rows map[int]*lagExtenderAddressRow
+		want map[int]netip.Addr
+	}{
+		{
+			name: "active: its active families, however long ago the others worked",
+			rows: map[int]*lagExtenderAddressRow{
+				4: row(v4, true, worked(now.Add(-21*24*time.Hour))),
+				6: row(v6, false, worked(now)),
+			},
+			want: map[int]netip.Addr{4: v4},
+		},
+		{
+			name: "away: a family that stopped working weeks before the other does not place it",
+			rows: map[int]*lagExtenderAddressRow{
+				4: row(v4, false, worked(now)),
+				6: row(v6, false, worked(now.Add(-21*24*time.Hour))),
+			},
+			want: map[int]netip.Addr{4: v4},
+		},
+		{
+			name: "away: the most recently working family may be either",
+			rows: map[int]*lagExtenderAddressRow{
+				4: row(v4, false, worked(now.Add(-2*time.Hour))),
+				6: row(v6, false, worked(now)),
+			},
+			want: map[int]netip.Addr{6: v6},
+		},
+		{
+			name: "away: both, when they last worked within the window",
+			rows: map[int]*lagExtenderAddressRow{
+				4: row(v4, false, worked(now.Add(-LagExtenderAwayFamilyWindow))),
+				6: row(v6, false, worked(now)),
+			},
+			want: map[int]netip.Addr{4: v4, 6: v6},
+		},
+		{
+			name: "away: a family that never worked comes after one that did",
+			rows: map[int]*lagExtenderAddressRow{
+				4: row(v4, false, nil),
+				6: row(v6, false, worked(now.Add(-21*24*time.Hour))),
+			},
+			want: map[int]netip.Addr{6: v6},
+		},
+		{
+			name: "away: every family, when none ever worked",
+			rows: map[int]*lagExtenderAddressRow{
+				4: row(v4, false, nil),
+				6: row(v6, false, nil),
+			},
+			want: map[int]netip.Addr{4: v4, 6: v6},
+		},
+		{
+			name: "no rows",
+			rows: map[int]*lagExtenderAddressRow{},
+			want: map[int]netip.Addr{},
+		},
+	} {
+		if got := lagExtenderFamilyAddresses(c.rows); !maps.Equal(got, c.want) {
+			t.Fatalf("%s: %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
 // Replaces GeoLite2 for the rest of the test with `records`, by address.
 func useTestLagAddressPlaces(t testing.TB, records map[string]*LagAddressPlace) {
 	t.Helper()
@@ -174,10 +265,10 @@ func useTestLagAddressPlaces(t testing.TB, records map[string]*LagAddressPlace) 
 }
 
 // An extender is placed by the addresses it is measured at: its active
-// addresses that carry tcp, or, when none is active, the last address of each
-// family it had, so a holder that is away is counted where it is to serve
-// again. An extender GeoLite2 places nowhere, and one that is gone, have no
-// place.
+// addresses that carry tcp, or, when none is active, its most recently
+// working family and any other that worked within an hour of it, so a holder
+// that is away is counted where it is to serve again. An extender GeoLite2
+// places nowhere, and one that is gone, have no place.
 func TestGetLagExtenderPlaces(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -250,6 +341,25 @@ func TestGetLagExtenderPlaces(t *testing.T) {
 			testLagPlaceAddress("2001:db8:6::1", false),
 		)
 		connect.AssertEqual(t, GetLagExtenderPlaces(ctx, []server.Id{partly})[partly].CountryCode, "fr")
+
+		// away, its IPv4 address the one it last worked at, in the US, and its
+		// IPv6 address one that stopped working three weeks before, in Hong
+		// Kong: the stale family does not outvote the one it served on. Had
+		// both worked within the hour, two families in two networks would be
+		// placed by the IPv6 address
+		now := server.NowUtc()
+		awayStale := testLagPlaceExtender(ctx, false, "us",
+			testLagPlaceAddressWorked("192.0.2.3", false, now.Add(-10*time.Minute)),
+			testLagPlaceAddressWorked("2001:db8:1::1", false, now.Add(-21*24*time.Hour)),
+		)
+		awayRecent := testLagPlaceExtender(ctx, false, "us",
+			testLagPlaceAddressWorked("203.0.113.6", false, now.Add(-10*time.Minute)),
+			testLagPlaceAddressWorked("2001:db8:2::1", false, now.Add(-40*time.Minute)),
+		)
+		places = GetLagExtenderPlaces(ctx, []server.Id{awayStale, awayRecent})
+		connect.AssertEqual(t, places[awayStale].CountryCode, "us")
+		connect.AssertEqual(t, places[awayStale].City, "Detroit")
+		connect.AssertEqual(t, places[awayRecent].CountryCode, "my")
 
 		connect.AssertEqual(t, len(GetLagExtenderPlaces(ctx, nil)), 0)
 	})
