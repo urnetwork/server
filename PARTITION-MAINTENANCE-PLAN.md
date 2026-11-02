@@ -1469,16 +1469,29 @@ at the contract horizon (below), 35 days after, around 2026-11-10.
       the task's run, which continues a minute later while work is left); the
       brake goes up to 5,000. `bringyourctl db close-evidence-retention
       [--mode=on|off] [--max-rows-per-second=<n>] [--remove]` shows and sets
-      it. The brake is the way to stop the deletes: restoring the move
-      guard's body stops them below 91 days too, but pages
-      migration-schema-drift. `urnetwork_close_evidence_retention_removed_rows_total`
-      counts the rows, `urnetwork_close_evidence_retention_seconds` is the
-      retention the last run applied, and the task's log line names it and
-      why the run stopped.
+      it. The brake is the way to stop the row deletes. It does not stop the
+      weekly drops after the cutover, which never read it
+      (`fenceCloseEvidenceDrop`); the reaper's `mode off` stops those below 91
+      days, from the next run. Restoring the move guard's body stops both
+      below 91 days, but pages migration-schema-drift. A run's pace ends with
+      it and the next run's first batch follows a minute later, so a rate
+      below about 83 rows a second (5,000 a minute) reads smaller batches, and
+      holds down to one row a minute.
+      `urnetwork_close_evidence_retention_removed_rows_total` counts the rows,
+      `urnetwork_close_evidence_retention_seconds` is the retention the last
+      run applied, and `urnetwork_close_evidence_retention_stops_total` counts
+      each run by why it stopped, so a brake left off does not chart as caught
+      up. The task's log line names the retention and the stop on a run that
+      did anything.
     - **The batch:** each reads the next 5,000 rows in the census index's
       order, (contract_id, client_id, report_id), and deletes the expired ones
       by ctid in the same statement, with `statement_timeout` 30 s and
-      `lock_timeout` 2 s, the reaper's.
+      `lock_timeout` 2 s, the reaper's. Both name `ONLY` the target. A run
+      reads its targets once, so a cutover during the run can leave a batch
+      naming the partitioned parent, where a ctid is not unique: without
+      `ONLY` the delete takes the row at each ctid in every leaf, which on
+      PostgreSQL 18.4 took a 50-day-old report of an unresolved contract along
+      with an expired report. With it the parent reads no row.
     - **Low water:** a new pass starts at the lowest contract of a row the
       last pass kept for being accepted inside the retention, or at the last
       pass's retention bound, instead of contract id 0, so a caught-up pass
@@ -1542,8 +1555,11 @@ at the contract horizon (below), 35 days after, around 2026-11-10.
         so set it before about 11-10: this table's vacuums are short today, and
         index passes of hours will outlast those retries too. A later
         `-e autovacuum_tuning_revert=true` reverts the whole trial, this table
-        included only while it is in the list. As a reviewed migration instead
-        it would need the same lock timeout and a retry:
+        included only while it is in the list. A plain run of the tag refuses,
+        so it cannot lower those two by accident;
+        `-e autovacuum_tuning_full_list=true` asks for the whole list. As a
+        reviewed migration instead it would need the same lock timeout and a
+        retry:
 
         ```sql
         ALTER TABLE contract_close_report_evidence SET (
@@ -1553,6 +1569,12 @@ at the contract horizon (below), 35 days after, around 2026-11-10.
             autovacuum_vacuum_threshold = 50000000
         );
         ```
+
+      - **At the C5 cutover** the entry moves to
+        `contract_close_report_evidence_legacy`, the plain table's new name,
+        which keeps its options. The old name is then the partitioned parent,
+        where `ALTER TABLE ... SET` of these options errors ("cannot specify
+        storage parameters for a partitioned table"), so the tag would fail.
 
 ### C6. Later, on size triggers or decisions
 

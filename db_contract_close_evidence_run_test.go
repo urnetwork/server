@@ -574,3 +574,58 @@ func TestContractRetentionCursorCarriesTheEvidenceRemoval(t *testing.T) {
 		t.Errorf("the old fields won: %+v", both.evidenceRemovalCursor())
 	}
 }
+
+// A batch reads a minute of a rate too low for whole batches, since the next
+// run's first batch follows a minute after a run stops: one batch a minute of
+// that size is the rate, where whole batches would be about 83 rows a second
+// at any rate below it. At the default rate and above, batches stay whole.
+func TestCloseEvidenceRetentionBatchSizeFollowsALowRate(t *testing.T) {
+	settings := DefaultCloseEvidenceRetentionSettings()
+	for _, test := range []struct {
+		rate float64
+		size int
+	}{
+		{rate: settings.MaxRowsPerSecond, size: 5000},
+		{rate: settings.DefaultRowsPerSecond, size: 5000},
+		{rate: 84, size: 5000},
+		{rate: 83, size: 4980},
+		{rate: 50, size: 3000},
+		{rate: 10, size: 600},
+		{rate: 1, size: 60},
+		{rate: 0.1, size: 6},
+		// below a row a minute, a row a minute
+		{rate: 0.001, size: 1},
+	} {
+		if size := settings.batchSizeAt(test.rate); size != test.size {
+			t.Errorf("at %g rows a second a batch reads %d rows, want %d", test.rate, size, test.size)
+		}
+	}
+
+	// each batch of a run takes its size from the brake read before it, and a
+	// batch that fills that size is not the target's last
+	short := DefaultCloseEvidenceRetentionSettings()
+	short.BatchSize = 100
+	short.MaxBatchWait = 10 * time.Millisecond
+	now := NowUtc()
+	steps := &testCloseEvidenceSteps{
+		targets:   []string{closeEvidenceTable},
+		retention: 45 * 24 * time.Hour,
+		brakes:    []testCloseEvidenceBrake{testCloseEvidenceBrakeOn(1000), testCloseEvidenceBrakeOn(2000), testCloseEvidenceBrakeOn(5000)},
+		batches: []testCloseEvidenceBatchOutcome{
+			{batch: closeEvidenceBatch{removed: 10, scanned: 10, last: closeEvidenceKey{contractId: ContractIdFloor(now.Add(-40 * 24 * time.Hour))}}},
+			{batch: closeEvidenceBatch{removed: 20, scanned: 20, last: closeEvidenceKey{contractId: ContractIdFloor(now.Add(-39 * 24 * time.Hour))}}},
+			{batch: closeEvidenceBatch{removed: 49, scanned: 49}},
+		},
+	}
+	report, _, more := steps.run(context.Background(), now, CloseEvidenceRemovalCursor{}, time.Now().Add(time.Minute), short)
+	sizes := []int{}
+	for _, args := range steps.batchArgs {
+		sizes = append(sizes, args.size)
+	}
+	if !reflect.DeepEqual(sizes, []int{10, 20, 50}) {
+		t.Fatalf("the batches read %v rows", sizes)
+	}
+	connect.AssertEqual(t, report.Stop, CloseEvidenceRemovalStopDone)
+	connect.AssertEqual(t, report.Removed, int64(79))
+	connect.AssertEqual(t, more, false)
+}

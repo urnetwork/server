@@ -542,8 +542,9 @@ Step 7 needs no action: the maintenance task drops each week once it qualifies.
   the mode on at `horizonDays` 35 they permanently delete about a billion
   rows, the evidence accepted from 2026-10-06 on, whether or not the reaper's
   keep rules keep the contract. The brake
-  (`bringyourctl db close-evidence-retention`) stops them; the reaper's
-  `mode off` stops them below 91 days, from the next run.
+  (`bringyourctl db close-evidence-retention`) stops the row deletes, but not
+  the weekly drops once the evidence is partitioned, which never read it; the
+  reaper's `mode off` stops both below 91 days, from the next run.
 - **Archive growth needs its own decision.** `st_provider_usage_archive` is
   1.5 GB for 8.7 M rows today, about 176 bytes a row. Once retention archives
   every contract, it grows about as fast as contracts are created: about

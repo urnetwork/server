@@ -29,15 +29,19 @@ import (
 // applies from the next batch. Its fields, all optional:
 //   - `mode`: on or off. Off, or any other value, deletes nothing.
 //   - `maxRowsPerSecond`: rows deleted per second at most, at most the code's
-//     MaxRowsPerSecond; zero, or a value that does not parse, is off.
+//     MaxRowsPerSecond; zero, or a value that does not parse, is off. A rate
+//     below about 83 a second reads smaller batches, so it holds down to one
+//     row a minute (batchSizeAt).
 //
 // Without the hash the deletes run at DefaultRowsPerSecond. A run that cannot
 // read the hash deletes nothing more in that run. `bringyourctl db
 // close-evidence-retention` shows the brake and sets it. The brake is how an
-// operator stops the deletes. Restoring the evidence guard's 91-day body
-// stops the deletes below 91 days as well (closeEvidenceGuardFloor), but the
-// horizon guard migration's monitor contract then pages
-// migration-schema-drift.
+// operator stops the row deletes. It does not stop the weekly drops: once the
+// evidence is partitioned, the registry drops whole expired weeks without
+// reading it (fenceCloseEvidenceDrop). The reaper's mode off stops those below
+// 91 days, from the next run. Restoring the evidence guard's 91-day body stops
+// both below 91 days (closeEvidenceGuardFloor), but the horizon guard
+// migration's monitor contract then pages migration-schema-drift.
 //
 // # The batch
 //
@@ -83,8 +87,12 @@ type CloseEvidenceRetentionSettings struct {
 	MaxRowsPerSecond float64
 	// Bounds each brake read.
 	ControlTimeout time.Duration
-	// Rows one batch reads; it deletes the expired ones among them.
+	// Rows one batch reads at most; it deletes the expired ones among them.
 	BatchSize int
+	// A batch reads at most this long of the brake's rate (batchSizeAt): how
+	// soon after a run stops with work left the contract task's next run
+	// starts its first batch.
+	MaxBatchWait time.Duration
 	// Each batch's statement and lock bounds, the contract horizon reaper's.
 	StatementTimeout time.Duration
 	LockTimeout      time.Duration
@@ -96,9 +104,24 @@ func DefaultCloseEvidenceRetentionSettings() *CloseEvidenceRetentionSettings {
 		MaxRowsPerSecond:     5000,
 		ControlTimeout:       2 * time.Second,
 		BatchSize:            5000,
+		MaxBatchWait:         time.Minute,
 		StatementTimeout:     30 * time.Second,
 		LockTimeout:          2 * time.Second,
 	}
+}
+
+// Rows a batch reads at rate rows a second. A run paces its own batches, but
+// the pace ends with the run: one whose next batch would start past its
+// deadline stops, and the next run's first batch follows MaxBatchWait later. So
+// whole batches would overshoot a rate below BatchSize/MaxBatchWait, about 83
+// rows a second by default, at one batch every MaxBatchWait. Below that a batch
+// reads MaxBatchWait of the rate, so the rate holds, down to one row every
+// MaxBatchWait. At the default rate nothing changes.
+func (self *CloseEvidenceRetentionSettings) batchSizeAt(rate float64) int {
+	if limit := math.Ceil(rate * self.MaxBatchWait.Seconds()); limit < float64(self.BatchSize) {
+		return max(1, int(limit))
+	}
+	return self.BatchSize
 }
 
 // The effective brake: the code settings as the Redis hash narrowed them.
@@ -521,12 +544,13 @@ func (self *closeEvidenceRemoval) remove(ctx context.Context, now time.Time, cur
 				report.Stop = CloseEvidenceRemovalStopBrakeOff
 				return report, pass.at(targets[index], after), false
 			}
+			size := self.settings.batchSizeAt(brake.MaxRowsPerSecond)
 			batch, err := self.steps.Batch(ctx, closeEvidenceBatchArgs{
 				leaf:      targets[index],
 				after:     after,
 				upper:     upper,
 				retention: report.Retention,
-				size:      self.settings.BatchSize,
+				size:      size,
 			}, self.settings)
 			if err != nil {
 				glog.Errorf("[cp]close evidence retention of %s: %s\n", targets[index], err)
@@ -539,7 +563,7 @@ func (self *closeEvidenceRemoval) remove(ctx context.Context, now time.Time, cur
 				lowWater := *batch.lowWater
 				pass.PassLowWater = &lowWater
 			}
-			if batch.scanned < int64(self.settings.BatchSize) {
+			if batch.scanned < int64(size) {
 				leafDone = true
 				continue
 			}

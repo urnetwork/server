@@ -213,8 +213,9 @@ Options:
                    old table.
     --drop-old     Drop the old egress health history once --verify passes.
     --mode=<mode>  With db close-evidence-retention, set the close evidence
-                   row retention's brake: on, or off to stop the deletes from
-                   their next batch.
+                   row retention's brake: on, or off to stop the row deletes
+                   from their next batch. The weekly drops of partitioned
+                   evidence never read it.
     --max-rows-per-second=<n>  With db close-evidence-retention, set the
                    brake's rate: rows deleted a second, at most 5000; 0 stops
                    the deletes.
@@ -669,9 +670,10 @@ func dbKeyHistoryFloor(opts docopt.Opts) {
 // ({close_evidence_retention}control, server.RemoveExpiredCloseEvidence) and
 // the floor the installed evidence guard admits, after setting the brake's
 // fields with --mode and --max-rows-per-second, or deleting it with --remove.
-// The brake stops or paces the deletes from their next batch, without
-// touching the contract horizon reaper. It is the way to stop them: putting
-// the guard's 91-day body back stops them below 91 days too, but pages
+// The brake stops or paces the row deletes from their next batch, without
+// touching the contract horizon reaper. It is the way to stop them. It does not
+// stop the weekly drops of partitioned evidence, which never read it. Putting
+// the guard's 91-day body back stops both below 91 days, but pages
 // migration-schema-drift.
 func dbCloseEvidenceRetention(opts docopt.Opts) {
 	ctx := context.Background()

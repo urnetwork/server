@@ -51,7 +51,7 @@ func TestCloseEvidenceRetentionDashboardPanels(t *testing.T) {
 		deleted.Targets[0].Expr != "sum(rate(urnetwork_close_evidence_retention_removed_rows_total{"+contractHorizonTaskworkerFilter+"}[$__rate_interval]))" {
 		t.Errorf("deleted rows panel lost its rate: %+v", deleted.Targets)
 	}
-	for _, part := range []string{"{close_evidence_retention}control", "maxRowsPerSecond", "1,000", "5,000", "bringyourctl db close-evidence-retention", "ctid"} {
+	for _, part := range []string{"{close_evidence_retention}control", "maxRowsPerSecond", "1,000", "5,000", "bringyourctl db close-evidence-retention", "ctid", "never reads the brake"} {
 		if !strings.Contains(deleted.Description, part) {
 			t.Errorf("deleted rows panel does not explain %s", part)
 		}

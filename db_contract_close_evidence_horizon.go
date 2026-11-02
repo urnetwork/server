@@ -19,8 +19,10 @@
 // escrow, loses its evidence at the horizon all the same. With the reaper's
 // mode on at horizonDays 35 the deletes are permanent and large: about a
 // billion rows, the evidence accepted from 2026-10-06 on, as each day of it
-// passes 35 days, from about 2026-11-10. They are paced and stopped by their
-// own brake (db_contract_close_evidence_retention.go), not the reaper's.
+// passes 35 days, from about 2026-11-10. The row deletes are paced and stopped
+// by their own brake (db_contract_close_evidence_retention.go), not the
+// reaper's. The weekly drops never read that brake, and follow the reaper's
+// mode.
 //
 // The readers of close evidence, and why the horizon keeps what each needs:
 //   - close report admission (model/contract_close_report.go) reads the

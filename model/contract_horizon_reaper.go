@@ -244,7 +244,8 @@ const contractHorizonControlKey = "{contract_horizon}control"
 //     it (ContractHorizonFloor). At 35 the close evidence deletes permanently
 //     remove about a billion rows, the evidence accepted from 2026-10-06 on,
 //     whatever the reaper's keep rules; their own brake
-//     (server.RemoveExpiredCloseEvidence) stops them.
+//     (server.RemoveExpiredCloseEvidence) stops the row deletes, and this mode
+//     alone the weekly drops once the evidence is partitioned.
 //
 // A field that does not parse narrows as far as it can: mode off, rate zero
 // (which is off), the minimum batch size, the code's horizon.
