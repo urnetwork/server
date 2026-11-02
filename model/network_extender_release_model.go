@@ -387,6 +387,10 @@ func (self *networkExtenderReleaseTx) RecordRelease(identity []byte, keyHex stri
 	))
 }
 
+// Holds a block report between reading the extender's probe rows, which it
+// keeps locked, and recording it. Test only, and never set in production.
+var Testing_NetworkExtenderBlockReportBarrier func()
+
 // Records that a client in a country could not reach an extender (R4), and
 // whether it was recorded.
 //
@@ -395,10 +399,15 @@ func (self *networkExtenderReleaseTx) RecordRelease(identity []byte, keyHex stri
 // the extender has no active address, or while any active address's latest
 // probe failed or is older than the probe window: then the extender is down,
 // or partly down on a family the report cannot name, and the report describes
-// that rather than a block. The tables keep only the latest probe of each
-// address, so a report sent before the first failed probe of an outage is
-// still recorded; the read rule (NetworkExtenderBlockedInCountry) holds while
-// that outage lasts.
+// that rather than a block. The tables keep only each address's latest probe,
+// so a failed probe also sets aside every report made before it
+// (DiscountNetworkExtenderBlockReports): a report sent between an outage's
+// start and the first probe that saw it would otherwise count again once the
+// extender answers.
+//
+// The probe rows are read under a share lock held until the report commits.
+// A failed probe that commits first refuses the report; one that commits
+// after waits for it, and its discount then sees the report and sets it aside.
 func RecordNetworkExtenderBlockReport(
 	ctx context.Context,
 	extenderId server.Id,
@@ -408,33 +417,84 @@ func RecordNetworkExtenderBlockReport(
 ) (recorded bool) {
 	probeWindow := connect.DefaultExtenderBlockedStateSettings().ProbeWindow
 	server.Tx(ctx, func(tx server.PgTx) {
-		tag, err := tx.Exec(
+		recorded = false
+		activeAddressCount := 0
+		reachedAddressCount := 0
+		result, err := tx.Query(
+			ctx,
+			`
+			SELECT
+				COUNT(*),
+				COUNT(*) FILTER (WHERE
+					probe.consecutive_probe_failures = 0 AND
+					$2 <= probe.last_probe_success_time
+				)
+			FROM (
+				SELECT consecutive_probe_failures, last_probe_success_time
+				FROM network_extender_address
+				WHERE extender_id = $1 AND active
+				FOR SHARE
+			) AS probe
+			`,
+			extenderId,
+			reportTime.Add(-probeWindow).UTC(),
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&activeAddressCount, &reachedAddressCount))
+			}
+		})
+		if activeAddressCount == 0 || reachedAddressCount != activeAddressCount {
+			return
+		}
+		if Testing_NetworkExtenderBlockReportBarrier != nil {
+			Testing_NetworkExtenderBlockReportBarrier()
+		}
+		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
 			INSERT INTO network_extender_block_report (report_id, extender_id, client_id, country_code, report_time)
-			SELECT $1, $2, $3, $4, $5
-			WHERE EXISTS (
-				SELECT 1 FROM network_extender_address
-				WHERE extender_id = $2 AND active
-			) AND NOT EXISTS (
-				SELECT 1 FROM network_extender_address
-				WHERE extender_id = $2 AND active AND (
-					consecutive_probe_failures != 0 OR
-					last_probe_success_time IS NULL OR
-					last_probe_success_time < $6
-				)
-			)
+			VALUES ($1, $2, $3, $4, $5)
 			`,
 			server.NewId(),
 			extenderId,
 			clientId,
 			strings.ToLower(strings.TrimSpace(countryCode)),
 			reportTime.UTC(),
-			reportTime.Add(-probeWindow).UTC(),
+		))
+		recorded = true
+	}, server.TxReadCommitted)
+	return
+}
+
+// Sets aside the block reports against an extender made at or before
+// `failureTime`, when the operator's probe failed on one of its active
+// addresses (connect/EXTENDER-UPDATE2.md §1.3; the reference rule is
+// connect.ExtenderBlockedState.ProbeFailed). They describe the outage that
+// probe found rather than a block, so none of them counts toward a block once
+// the extender answers again, in any country. Reports are refused while the
+// probe fails (RecordNetworkExtenderBlockReport), so what this removes is what
+// was said before the probe saw the outage. The probe task calls it after the
+// failed result commits, at the time it does so, so every report that result
+// did not refuse is already visible here. Returns how many were set aside.
+func DiscountNetworkExtenderBlockReports(
+	ctx context.Context,
+	extenderId server.Id,
+	failureTime time.Time,
+) (discountedCount int64) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		tag, err := tx.Exec(
+			ctx,
+			`
+			DELETE FROM network_extender_block_report
+			WHERE extender_id = $1 AND report_time <= $2
+			`,
+			extenderId,
+			failureTime.UTC(),
 		)
 		server.Raise(err)
-		recorded = tag.RowsAffected() == 1
-	})
+		discountedCount = tag.RowsAffected()
+	}, server.TxReadCommitted)
 	return
 }
 

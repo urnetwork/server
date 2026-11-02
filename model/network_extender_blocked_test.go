@@ -4,10 +4,12 @@ package model
 // connect/EXTENDER-UPDATE2.md §1.3): the distinct-reporter threshold and the
 // operator's probe are both required, the probe must reach the extender now
 // on every family it serves, a report sent while it does not is not recorded,
-// and a blocked canary blocks no other record.
+// a failed probe sets aside the reports made before it, and a blocked canary
+// blocks no other record.
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -210,4 +212,166 @@ func testWithoutKey(keyHexes []string, removed string) []string {
 		}
 	}
 	return kept
+}
+
+// A probe failure as the probe task records it: the result, then the discount.
+func testFailExtenderProbe(t testing.TB, ctx context.Context, extenderId server.Id, ipVersion int) int64 {
+	t.Helper()
+	RecordNetworkExtenderProbeResult(
+		ctx,
+		extenderId,
+		ipVersion,
+		false,
+		server.NowUtc(),
+		6,
+		func(extender *NetworkExtender, issueTime time.Time) ([]byte, error) {
+			return nil, fmt.Errorf("one failed probe revokes nothing")
+		},
+	)
+	return DiscountNetworkExtenderBlockReports(ctx, extenderId, server.NowUtc())
+}
+
+func testSucceedExtenderProbe(t testing.TB, ctx context.Context, extenderId server.Id, ipVersion int) {
+	t.Helper()
+	RecordNetworkExtenderProbeResult(ctx, extenderId, ipVersion, true, server.NowUtc(), 6, nil)
+}
+
+// Root cause guarded (§1.3): the tables keep only each address's latest probe,
+// so the reports sent in an outage's first minutes, before the probe saw it,
+// counted again once the extender answered, and an extender that was simply
+// down was blocked in their country for the rest of the report window. A
+// failed probe on any family sets aside every report made before it, in every
+// country, and nothing of another extender or made after it.
+func TestExtenderBlockReportsBeforeAFailedProbeNeverCount(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		keyHex, extenderId := testGatedReleaseExtender(t, ctx, 1, "", 4, 6)
+		_, otherId := testGatedReleaseExtender(t, ctx, 2, "", 4)
+		source := NewNetworkExtenderBlockedSource(ctx, map[string]server.Id{keyHex: extenderId}, nil)
+		threshold := connect.DefaultExtenderBlockedStateSettings().ReportThreshold
+		reportAll := func(id server.Id, countryCode string) {
+			t.Helper()
+			for range threshold {
+				if !RecordNetworkExtenderBlockReport(ctx, id, server.NewId(), countryCode, server.NowUtc()) {
+					t.Fatal("a report against an extender the probe reaches was not recorded")
+				}
+			}
+		}
+		reportAll(extenderId, "aa")
+		reportAll(extenderId, "bb")
+		reportAll(otherId, "aa")
+		if !source.Blocked(keyHex, "aa") || !source.Blocked(keyHex, "bb") {
+			t.Fatal("reports at the threshold, with the probe reaching the extender, are no block")
+		}
+
+		// one family fails once, and answers at the next probe
+		discounted := testFailExtenderProbe(t, ctx, extenderId, 6)
+		testSucceedExtenderProbe(t, ctx, extenderId, 6)
+		if source.Blocked(keyHex, "aa") || source.Blocked(keyHex, "bb") {
+			t.Fatal("the reports made before an outage made a block after it")
+		}
+		if discounted != int64(2*threshold) {
+			t.Fatalf("the failed probe set aside %d reports, want the %d made before it", discounted, 2*threshold)
+		}
+		if testBlockReportCount(t, ctx, extenderId) != 0 || testBlockReportCount(t, ctx, otherId) != threshold {
+			t.Fatal("the discount touched what it should not, or left what it should not")
+		}
+
+		// a report made after the failure is not the failure's to set aside
+		failureTime := server.NowUtc()
+		if !RecordNetworkExtenderBlockReport(ctx, extenderId, server.NewId(), "aa", failureTime.Add(time.Second)) {
+			t.Fatal("a report after the recovery was not recorded")
+		}
+		if discounted := DiscountNetworkExtenderBlockReports(ctx, extenderId, failureTime); discounted != 0 {
+			t.Fatalf("the discount set aside %d reports made after it", discounted)
+		}
+
+		// reports made since the recovery count as before
+		reportAll(extenderId, "aa")
+		if !source.Blocked(keyHex, "aa") || source.Blocked(keyHex, "bb") {
+			t.Fatal("reports after the recovery did not make a block there alone")
+		}
+	})
+}
+
+// Root cause guarded (§1.3): a report reads the probe rows, and a failed probe
+// that committed and set aside the reports before that report committed left
+// it to count once the extender answered again. The report holds the probe
+// rows it read until it commits, so the probe waits for it, and the discount
+// after the probe sees it. (A faithful revert reads the rows without the lock:
+// the probe does not wait, and the report outlives its outage.)
+func TestExtenderBlockReportRacingAFailedProbeIsSetAside(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		keyHex, extenderId := testGatedReleaseExtender(t, ctx, 1, "", 4)
+		source := NewNetworkExtenderBlockedSource(ctx, map[string]server.Id{keyHex: extenderId}, nil)
+		threshold := connect.DefaultExtenderBlockedStateSettings().ReportThreshold
+
+		checked := make(chan struct{})
+		release := make(chan struct{})
+		Testing_NetworkExtenderBlockReportBarrier = func() {
+			close(checked)
+			<-release
+		}
+		defer func() {
+			Testing_NetworkExtenderBlockReportBarrier = nil
+		}()
+		reported := make(chan bool, 1)
+		go func() {
+			reported <- RecordNetworkExtenderBlockReport(ctx, extenderId, server.NewId(), "aa", server.NowUtc())
+		}()
+		// the report found the extender reached, and has not recorded yet
+		<-checked
+		Testing_NetworkExtenderBlockReportBarrier = nil
+
+		probed := make(chan int64, 1)
+		go func() {
+			probed <- testFailExtenderProbe(t, ctx, extenderId, 4)
+		}()
+		// the failing probe either waits on the rows the report holds, or
+		// finishes before the report records
+		discounted := int64(-1)
+		for waiting := false; !waiting && discounted < 0; {
+			select {
+			case discounted = <-probed:
+				continue
+			default:
+			}
+			server.Db(ctx, func(conn server.PgConn) {
+				result, err := conn.Query(ctx, `
+					SELECT COUNT(*) FROM pg_stat_activity
+					WHERE datname = current_database() AND wait_event_type = 'Lock'
+				`)
+				server.WithPgResult(result, err, func() {
+					if result.Next() {
+						count := 0
+						server.Raise(result.Scan(&count))
+						waiting = 0 < count
+					}
+				})
+			})
+			if !waiting {
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
+		close(release)
+		<-reported
+		if discounted < 0 {
+			discounted = <-probed
+		}
+		if discounted != 1 || testBlockReportCount(t, ctx, extenderId) != 0 {
+			t.Fatalf("a report racing the failed probe outlived it (set aside %d, %d left)", discounted, testBlockReportCount(t, ctx, extenderId))
+		}
+
+		// it answers again: one short of the threshold since is no block
+		testSucceedExtenderProbe(t, ctx, extenderId, 4)
+		for range threshold - 1 {
+			if !RecordNetworkExtenderBlockReport(ctx, extenderId, server.NewId(), "aa", server.NowUtc()) {
+				t.Fatal("a report after the recovery was not recorded")
+			}
+		}
+		if source.Blocked(keyHex, "aa") {
+			t.Fatal("a report made before the outage counted after it")
+		}
+	})
 }
