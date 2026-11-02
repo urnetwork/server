@@ -54,10 +54,11 @@ func TestCloseEvidenceRowRetentionFollowsTheHorizon(t *testing.T) {
 			return testCloseEvidencePartitionOf(t, ctx, report) != ""
 		}
 		remove := func(ctx context.Context) int64 {
-			removed, cursor, more := RemoveExpiredCloseEvidence(ctx, now, CloseEvidenceRemovalCursor{}, time.Now().Add(time.Minute))
+			report, cursor, more := RemoveExpiredCloseEvidence(ctx, now, CloseEvidenceRemovalCursor{}, time.Now().Add(time.Minute))
 			connect.AssertEqual(t, more, false)
-			connect.AssertEqual(t, cursor, CloseEvidenceRemovalCursor{})
-			return removed
+			connect.AssertEqual(t, report.Stop, CloseEvidenceRemovalStopDone)
+			connect.AssertEqual(t, cursor.InProgress(), false)
+			return report.Removed
 		}
 
 		// without a horizon, and at one longer than every report's age
@@ -147,8 +148,8 @@ func TestCloseEvidenceWeekDropsAtTheHorizon(t *testing.T) {
 
 		// at 35 days the row deletes take the straggler week's qualifying row
 		// and leave the clean week to the drop
-		removed, _, _ := RemoveExpiredCloseEvidence(horizon(35*day), now, CloseEvidenceRemovalCursor{}, time.Now().Add(time.Minute))
-		connect.AssertEqual(t, removed, int64(1))
+		removal, _, _ := RemoveExpiredCloseEvidence(horizon(35*day), now, CloseEvidenceRemovalCursor{}, time.Now().Add(time.Minute))
+		connect.AssertEqual(t, removal.Removed, int64(1))
 		connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, qualifying), "")
 		connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, clean), cleanLeaf)
 
@@ -193,16 +194,16 @@ func TestCloseEvidenceRetentionWaitsForTheHorizonGuard(t *testing.T) {
 		for _, report := range []testCloseEvidenceReport{aged, inside} {
 			connect.AssertEqual(t, testInsertCloseEvidenceReport(ctx, report), true)
 		}
-		removed, _, _ := RemoveExpiredCloseEvidence(horizon, now, CloseEvidenceRemovalCursor{}, time.Now().Add(time.Minute))
-		connect.AssertEqual(t, removed, int64(1))
+		removal, _, _ := RemoveExpiredCloseEvidence(horizon, now, CloseEvidenceRemovalCursor{}, time.Now().Add(time.Minute))
+		connect.AssertEqual(t, removal.Removed, int64(1))
 		connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, aged), "")
 		connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, inside) != "", true)
 
 		// the horizon guard back: the horizon applies
 		testCloseEvidenceNoError(t, testCloseEvidenceExec(ctx, contractCloseReportEvidenceHorizonGuardSql))
 		connect.AssertEqual(t, guardFloor(), CloseEvidenceRetentionFloor)
-		removed, _, _ = RemoveExpiredCloseEvidence(horizon, now, CloseEvidenceRemovalCursor{}, time.Now().Add(time.Minute))
-		connect.AssertEqual(t, removed, int64(1))
+		removal, _, _ = RemoveExpiredCloseEvidence(horizon, now, CloseEvidenceRemovalCursor{}, time.Now().Add(time.Minute))
+		connect.AssertEqual(t, removal.Removed, int64(1))
 		connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, inside), "")
 
 		// partitioned, under the move guard again: a week 42 to 49 days past

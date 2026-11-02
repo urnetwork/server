@@ -465,10 +465,11 @@ func TestCloseEvidenceStragglerWeekStaysAndItsRowsAreDeleted(t *testing.T) {
 
 		// the row deletes take the stragglers' weeks, DEFAULT and the legacy
 		// partition, and leave the clean and young weeks to the drop
-		removed, cursor, more := RemoveExpiredCloseEvidence(ctx, now, CloseEvidenceRemovalCursor{}, time.Now().Add(time.Minute))
-		connect.AssertEqual(t, removed, int64(5))
+		removal, cursor, more := RemoveExpiredCloseEvidence(ctx, now, CloseEvidenceRemovalCursor{}, time.Now().Add(time.Minute))
+		connect.AssertEqual(t, removal.Removed, int64(5))
+		connect.AssertEqual(t, removal.Stop, CloseEvidenceRemovalStopDone)
 		connect.AssertEqual(t, more, false)
-		connect.AssertEqual(t, cursor, CloseEvidenceRemovalCursor{})
+		connect.AssertEqual(t, cursor.InProgress(), false)
 		for _, report := range []testCloseEvidenceReport{resolved, gone, recentGone, legacy, uncreated} {
 			connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, report), "")
 		}
