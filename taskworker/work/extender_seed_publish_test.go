@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/netip"
 	"os"
+	"slices"
 	"testing"
 	"time"
 
@@ -376,6 +377,11 @@ func TestExtenderSeedPublisherStaysWithinEnvelopeLimits(t *testing.T) {
 	if len(bundle.Revocations) != connect.ExtenderSeedMaxRevocationCount {
 		t.Fatalf("%d revocations, want the limit of %d after %d were revoked", len(bundle.Revocations), connect.ExtenderSeedMaxRevocationCount, len(fleet.revoked))
 	}
+	// a full cohort of ordinary records with the most revocations is raw
+	// binary well under the 64 KiB + 1 bytes a client reads from a mirror
+	if len(bundle.Records) != ExtenderSeedMaxRecordCount || 16*1024 < len(artifact) {
+		t.Fatalf("a bundle of %d records and %d revocations is %d bytes", len(bundle.Records), len(bundle.Revocations), len(artifact))
+	}
 }
 
 // No record that is expired, expires before the bundle, or is issued after it
@@ -519,8 +525,15 @@ func TestExtenderSeedSequenceNeverRegresses(t *testing.T) {
 	}
 	record(publisher.publish(ctx, now))
 
-	// the clock steps back two hours, and a member leaves so a bundle is due
-	fleet.remove(fleet.order[0])
+	// the clock steps back two hours, and a member leaves so a bundle is due:
+	// a member of the stored cohort, which the root key's ranking picks, not
+	// whichever extender was added first
+	first, _ := operator.stored(t, now)
+	for extenderId, extender := range fleet.extenders {
+		if string(extender.PublicKey) == string(first.Records[0].Body.PublicKey) {
+			fleet.remove(extenderId)
+		}
+	}
 	record(publisher.publish(ctx, now.Add(-2*time.Hour)))
 
 	// another publish claimed a far higher sequence and never stored it
@@ -748,6 +761,68 @@ func TestExtenderSeedPublisherCarriesARevocationWhileAnyRecordItDominatesLives(t
 	if carries() {
 		t.Fatalf("the revocation is still carried after every record it dominates expired")
 	}
+}
+
+// A cohort short of the client's low-water mark grows within the hour once
+// the open pool can fill it, not only at the six-hour refresh, and a pool
+// that cannot fill it does not re-publish on every pass.
+func TestExtenderSeedPublisherGrowsACohortShortOfTheLowWaterMark(t *testing.T) {
+	operator := newTestExtenderSeedOperator(t)
+	// a configured count below the mark is raised to it
+	operator.config.Seed.RecordCount = 2
+	fleet := newTestExtenderSeedFleet()
+	for range 2 {
+		fleet.add(t, connect.ExtenderDirectoryTierOpen, "", 4, 6)
+	}
+	// open, but with no public address: never publishable
+	unpublishable := fleet.add(t, connect.ExtenderDirectoryTierOpen, "", 4)
+	for _, address := range fleet.addresses[unpublishable] {
+		address.Ip = netip.MustParseAddr("10.0.0.7")
+	}
+	publisher := operator.publisher(t, fleet)
+	ctx := context.Background()
+	now := testExtenderSeedEpochStart.Add(time.Hour)
+	expect := func(outcome string, reason string, records int) {
+		t.Helper()
+		result := publisher.publish(ctx, now)
+		if result.outcome != outcome || result.reason != reason {
+			t.Fatalf("at %s: %s (%s), want %s (%s)", now.Sub(testExtenderSeedEpochStart), result.outcome, result.reason, outcome, reason)
+		}
+		bundle, artifact := operator.stored(t, now)
+		assertExtenderSeedBundleInvariants(t, bundle, artifact, now)
+		if len(bundle.Records) != records {
+			t.Fatalf("at %s: %d records, want %d", now.Sub(testExtenderSeedEpochStart), len(bundle.Records), records)
+		}
+	}
+	expect(extenderSeedOutcomePublished, "initial", 2)
+	// the unpublishable candidate keeps the pool larger than the cohort, yet
+	// asks for a new bundle at most once an hour
+	for range 5 {
+		now = now.Add(10 * time.Minute)
+		expect(extenderSeedOutcomeCurrent, "", 2)
+	}
+	now = now.Add(10 * time.Minute)
+	expect(extenderSeedOutcomePublished, "short", 2)
+	now = now.Add(10 * time.Minute)
+	expect(extenderSeedOutcomeCurrent, "", 2)
+
+	// the pool grows: the next hourly draw fills the cohort to the mark and
+	// keeps the members it had
+	for range 6 {
+		fleet.add(t, connect.ExtenderDirectoryTierOpen, "", 4, 6)
+	}
+	before, _ := operator.stored(t, now)
+	now = before.IssueTime.Add(extenderSeedShortRetryTimeout)
+	expect(extenderSeedOutcomePublished, "short", 4)
+	after, _ := operator.stored(t, now)
+	for _, keyHex := range extenderSeedBundleKeyHexes(before) {
+		if !slices.Contains(extenderSeedBundleKeyHexes(after), keyHex) {
+			t.Fatalf("growing the cohort dropped a member")
+		}
+	}
+	// at the mark, nothing more is due until the refresh
+	now = now.Add(extenderSeedShortRetryTimeout)
+	expect(extenderSeedOutcomeCurrent, "", 4)
 }
 
 // An empty open pool stores nothing: the stored bundle stays and ages out.

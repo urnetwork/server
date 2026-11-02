@@ -33,8 +33,11 @@ import (
 // A new bundle is due when none is stored or the stored one does not verify,
 // every ExtenderSeedRefreshTimeout, when the cohort epoch turns (the planned
 // update), when the configured lifetime changed, when a member left the open
-// pool, and when a member was revoked. Otherwise the pass stores nothing, so the
-// sequence advances only when the bundle changes or ages.
+// pool, when a member was revoked, and, at most every
+// extenderSeedShortRetryTimeout, when a cohort short of the client's low-water
+// mark (extenderSeedMinRecordCount) could hold more of the open pool. Otherwise
+// the pass stores nothing, so the sequence advances only when the bundle changes
+// or ages.
 //
 // Validity. A bundle never outlives the records it promises: its expiry is the
 // expiry of its records, which are signed at the bundle's issue time with the
@@ -75,6 +78,13 @@ const (
 // The margin the running size estimate keeps below the envelope cap for the
 // envelope's own fields and the body header.
 const extenderSeedEnvelopeOverheadBytes = 1024
+
+// How long a cohort short of the client's low-water mark stands before a pass
+// draws again for it. Shorter than the refresh, so a pool that grew fills the
+// cohort within the hour; not every pass, since a candidate the publisher
+// passes over (no public address, an address another member lists) would
+// otherwise ask for a new bundle each time.
+const extenderSeedShortRetryTimeout = time.Hour
 
 // Reads the open pool, an extender's record inputs, and the revoked members.
 // Variables of the publisher so a test can stand in for the database.
@@ -367,8 +377,6 @@ func (self *extenderSeedPublisher) dueReason(
 	case stored.ExpireTime.Sub(stored.IssueTime) != lifetime:
 		return "lifetime"
 	}
-	// a short cohort grows at the next refresh rather than on every pass: a
-	// candidate the publisher passes over would otherwise ask again each time
 	revokedKeys := map[string]bool{}
 	for _, revocation := range stored.Revocations {
 		revokedKeys[string(revocation.Body.PublicKey)] = true
@@ -382,6 +390,14 @@ func (self *extenderSeedPublisher) dueReason(
 		if !draw.open(keyHex) {
 			return "member_gone"
 		}
+	}
+	// a cohort under the client's low-water mark grows as soon as the pool
+	// holds more, at most every extenderSeedShortRetryTimeout; above the
+	// mark, a short cohort grows at the next refresh
+	if len(stored.Records) < extenderSeedMinRecordCount() &&
+		len(stored.Records) < draw.candidateCount() &&
+		extenderSeedShortRetryTimeout <= now.Sub(stored.IssueTime) {
+		return "short"
 	}
 	return ""
 }

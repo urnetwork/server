@@ -51,6 +51,15 @@ const ExtenderSeedCohortEpochTimeout = 7 * 24 * time.Hour
 // The largest cohort, the envelope's record limit (§2.2).
 const ExtenderSeedMaxRecordCount = 8
 
+// The smallest cohort the publisher aims for, where the open pool allows: the
+// client's low-water mark (connect ExtenderNetworkClientSettings.LowWaterCount,
+// 4). A client that holds fewer usable records than that after applying a seed
+// runs its dns bootstrap first, which can stall for its 30 second budget where
+// DoH is black-holed, so a seed below it does not restore reach promptly.
+func extenderSeedMinRecordCount() int {
+	return min(ExtenderSeedMaxRecordCount, max(1, connect.DefaultExtenderNetworkClientSettings().LowWaterCount))
+}
+
 // The channel and vantage the cohort's ranking is keyed under. "seed" is a key
 // space of its own, apart from the dns, feed and gated channels.
 const (
@@ -59,12 +68,12 @@ const (
 )
 
 // The cohort size of a configured record count: the limit when unset or above
-// it.
+// it, and never below the client's low-water mark.
 func extenderSeedRecordCount(configured int) int {
 	if configured <= 0 || ExtenderSeedMaxRecordCount < configured {
 		return ExtenderSeedMaxRecordCount
 	}
-	return configured
+	return max(configured, extenderSeedMinRecordCount())
 }
 
 // One open extender the cohort may hold: its identity key, as the dns pools
@@ -269,6 +278,11 @@ func (self *extenderSeedCohortDraw) accept(candidate *extenderSeedCandidate) {
 func (self *extenderSeedCohortDraw) open(keyHex string) bool {
 	_, ok := self.candidates[keyHex]
 	return ok
+}
+
+// How many open candidates this draw's pool holds.
+func (self *extenderSeedCohortDraw) candidateCount() int {
+	return len(self.candidates)
 }
 
 // selectExtenderSeedCohort is the draw with every offered candidate accepted:

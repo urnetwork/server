@@ -131,6 +131,23 @@ func TestExtenderSeedCohortExcludesGatedAndChannelRestrictedRecords(t *testing.T
 // The cohort never exceeds the record limit or the configured count, and is
 // drawn from the dns default sets' partition of each family, which the geo
 // dns already discloses, while that partition holds a cohort.
+// The cohort never aims below the client's low-water mark: a client holding
+// fewer usable records after a seed runs its dns bootstrap first, which can
+// stall where DoH is black-holed.
+func TestExtenderSeedRecordCountKeepsTheClientLowWaterMark(t *testing.T) {
+	lowWater := connect.DefaultExtenderNetworkClientSettings().LowWaterCount
+	if lowWater != 4 || extenderSeedMinRecordCount() != lowWater {
+		t.Fatalf("minimum %d, client low-water mark %d, want both 4", extenderSeedMinRecordCount(), lowWater)
+	}
+	for _, c := range []struct{ configured, want int }{
+		{-1, 8}, {0, 8}, {1, 4}, {3, 4}, {4, 4}, {6, 6}, {8, 8}, {9, 8},
+	} {
+		if got := extenderSeedRecordCount(c.configured); got != c.want {
+			t.Errorf("record_count %d: cohort %d, want %d", c.configured, got, c.want)
+		}
+	}
+}
+
 func TestExtenderSeedCohortIsBoundedToTheDnsDefaultPartitions(t *testing.T) {
 	pool := newTestExtenderSeedPool()
 	for range 300 {
@@ -156,11 +173,15 @@ func TestExtenderSeedCohortIsBoundedToTheDnsDefaultPartitions(t *testing.T) {
 	if len(partition) < ExtenderSeedMaxRecordCount {
 		t.Fatalf("the default partitions hold %d members; the test needs a full cohort", len(partition))
 	}
-	for _, count := range []int{0, 3, 8, 20} {
-		want := count
-		if count <= 0 || ExtenderSeedMaxRecordCount < count {
-			want = ExtenderSeedMaxRecordCount
-		}
+	for _, c := range []struct{ count, want int }{
+		{0, ExtenderSeedMaxRecordCount},
+		// below the client's low-water mark: raised to it
+		{3, 4},
+		{5, 5},
+		{8, 8},
+		{20, ExtenderSeedMaxRecordCount},
+	} {
+		count, want := c.count, c.want
 		for epoch := uint64(1); epoch <= 30; epoch += 1 {
 			cohort := selectExtenderSeedCohort(pool.addresses, testExtenderSeedSecret, epoch, nil, count)
 			if len(cohort) != want {

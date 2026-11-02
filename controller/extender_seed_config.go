@@ -30,8 +30,12 @@ import (
 // key the rest of `extender.yml` already holds, and a mirror receives only the
 // signed artifact.
 //
-// record_count is the cohort size, at most the envelope's limit of eight
-// records; unset is the limit.
+// record_count is the cohort size: at most the envelope's limit of eight
+// records, and at least the client's low-water mark of four (connect
+// ExtenderNetworkClientSettings.LowWaterCount), since a client holding fewer
+// usable records runs its dns bootstrap first, which can stall for 30 seconds
+// where DoH is black-holed. Unset is eight. A pool with fewer open extenders
+// gets a shorter cohort, which grows within the hour once the pool does.
 //
 // record_lifetime_hours is how long the bundle's records, and so the bundle,
 // stay valid. A bundle never outlives its records (§2.3), so the publisher
