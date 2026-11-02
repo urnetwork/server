@@ -88,6 +88,12 @@ func TestEmailTemplatesRender(t *testing.T) {
 		{securitySignInNoticeSample(model.SecuritySignInAdded, model.SecuritySignInRemoved), false},
 		{securityApiKeyNoticeSample(model.SecurityApiKeyCreated, model.SecurityApiKeyDeleted), false},
 		{&AuthPasswordSetTemplate{PasswordSetNotice: model.PasswordSetNotice{ChangeTime: &paymentFailedNextAttempt, Via: model.SecurityNoticeViaWeb}}, true},
+		// the service reminders (service_reminders_controller.go)
+		{&ProEndingTemplate{TermEndTime: server.NowUtc().Add(-16 * 24 * time.Hour), EndTime: server.NowUtc().Add(14 * 24 * time.Hour), Asset: model.SubscriptionMarketMonero}, true},
+		{&ProEndingTemplate{TermEndTime: server.NowUtc().Add(-28 * 24 * time.Hour), EndTime: server.NowUtc().Add(2 * 24 * time.Hour), Asset: model.SubscriptionMarketSolana}, true},
+		{&TrialEndingTemplate{EndTime: server.NowUtc().Add(2 * 24 * time.Hour), Store: model.OnboardingStoreApple}, true},
+		{&TrialEndingTemplate{EndTime: server.NowUtc().Add(2 * 24 * time.Hour), Store: model.OnboardingStorePlay}, true},
+		{&TrialEndingTemplate{EndTime: server.NowUtc().Add(2 * 24 * time.Hour), Store: model.OnboardingStoreStripe}, true},
 	}
 
 	imageSrc := regexp.MustCompile(`src="([^"]+)"`)

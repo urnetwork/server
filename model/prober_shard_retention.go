@@ -460,6 +460,10 @@ var (
 		Name: "urnetwork_prober_retention_due_shards",
 		Help: "Registered prober shard passes not closed in dropped generations, at the start of the last run: the retention's backlog",
 	})
+	proberShardRetentionRunTimestampGauge = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "urnetwork_prober_retention_run_timestamp_seconds",
+		Help: "The clock of the last prober shard retention run this process made that read its control and its backlog: the run's start. Each taskworker keeps its own last run's gauges, so readers take the process with the newest clock",
+	})
 	proberShardRetentionShardsCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "urnetwork_prober_retention_shards_total",
 		Help: "Prober shard passes of dropped generations the retention took up, by outcome",
@@ -539,6 +543,7 @@ func init() {
 		proberShardRetentionCutoffGauge,
 		proberShardRetentionOldestGauge,
 		proberShardRetentionDueGauge,
+		proberShardRetentionRunTimestampGauge,
 		proberShardRetentionShardsCounter,
 		proberShardRetentionBlockedCounter,
 		proberShardRetentionContractsCounter,
@@ -799,6 +804,17 @@ func (self *proberShardRetentionRun) observeBacklog(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	self.publishBacklog(due, oldest)
+	return nil
+}
+
+// Reports and publishes the backlog the run read, then the run's clock. The
+// clock goes last and only with a backlog, so a reader that takes the process
+// with the newest clock reads that run's backlog: a run whose backlog read
+// failed leaves the process's previous clock, and its previous backlog with
+// it. oldest is nil when every pass is closed; the oldest is then the run's
+// clock.
+func (self *proberShardRetentionRun) publishBacklog(due int64, oldest *time.Time) {
 	self.report.DueShards = due
 	self.report.OldestShard = oldest
 	proberShardRetentionDueGauge.Set(float64(due))
@@ -807,7 +823,7 @@ func (self *proberShardRetentionRun) observeBacklog(ctx context.Context) error {
 	} else {
 		proberShardRetentionOldestGauge.Set(float64(self.now.Unix()))
 	}
-	return nil
+	proberShardRetentionRunTimestampGauge.Set(float64(self.now.Unix()))
 }
 
 // The due passes of dropped generations, oldest first: not closed, created

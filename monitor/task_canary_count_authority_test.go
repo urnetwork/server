@@ -198,7 +198,7 @@ func TestTaskCanaryRequiredCountInvalidKeepsIndependentSignal(t *testing.T) {
 		case strings.Contains(query, taskCanaryAggregateFixture().queryMarker):
 			canaryReads++
 			return []Row{{"-1"}}, nil
-		case strings.Contains(query, "create_time >= date_trunc('minute',now())"):
+		case strings.Contains(query, "SELECT count(*) FROM transfer_contract"):
 			contractReads++
 			return []Row{{"0"}}, nil
 		default:

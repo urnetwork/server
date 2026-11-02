@@ -67,6 +67,9 @@ const (
 	ExitBounced        = "bounced"
 	ExitComplained     = "complained"
 	ExitDone           = "done"
+	// marketing mail is suppressed for the network (a bounce or complaint on
+	// any program, a re-engagement sunset): account_preferences.marketing_suppressed_at
+	ExitSuppressed = "suppressed"
 )
 
 // Actions of a decision.
@@ -164,13 +167,22 @@ type Facts struct {
 	Bounced        bool
 	Complained     bool
 	ComplainedStep string
+	// marketing mail is suppressed for the network (every program)
+	Suppressed bool
+	// the mail policy's exit (policy.go: country and consent evidence), or ""
+	PolicyExit string
+	// the offer steps (E3a, E4b, E5b) may not go: the country gets no offers by
+	// email, or the network's store cannot redeem the emailed offer yet
+	NoOfferEmail bool
 
 	// ----- step conditions -----
 	HasConnected      bool
 	WidgetAdded       bool
 	OfferState        string // "" (none) | active | redeemed | expired
 	FeedbackSubmitted bool
-	EmailOpens        int
+	// recorded for the status tooling only: opens decide nothing (Apple Mail
+	// Privacy Protection and proxies open every message; REVIEW.md finding 1)
+	EmailOpens int
 }
 
 // Offer states, as model.OnboardingOfferState reports them.
@@ -196,10 +208,13 @@ type Decision struct {
 	NextStep string
 }
 
-// engaged is the plan's feedback-variant rule: two or more email opens or one
-// connection.
+// engaged is the feedback-variant rule: the network connected. Opens used to
+// count too (two or more), but machine opens (Apple Mail Privacy Protection,
+// proxies) made a network that never connected "engaged", and its feedback
+// email then said "You've connected on 0 of your first 6 days"
+// (mmm/onboarding/REVIEW.md finding 1).
 func engaged(f Facts) bool {
-	return 2 <= f.EmailOpens || f.HasConnected
+	return f.HasConnected
 }
 
 // GlobalExit is the exit that applies before any step, or "" when none does.
@@ -216,6 +231,10 @@ func GlobalExit(f Facts) string {
 		return ExitPaused
 	case !f.ProductUpdates:
 		return ExitOptOut
+	case f.Suppressed:
+		return ExitSuppressed
+	case f.PolicyExit != "":
+		return f.PolicyExit
 	case f.Pro:
 		return ExitPro
 	case f.Complained:
@@ -271,7 +290,7 @@ func Decide(step string, f Facts) Decision {
 	case StepE3:
 		if path == PathA {
 			// E3a day 4: the in-app offer's last day, still free
-			if f.OfferState == OfferStateActive {
+			if f.OfferState == OfferStateActive && !f.NoOfferEmail {
 				d := send(TemplateE3LastChance, VariantDefault)
 				d.Opening = OpeningJoined
 				return d
@@ -285,8 +304,9 @@ func Decide(step string, f Facts) Decision {
 			// E4a day 6: feedback
 			return feedback()
 		}
-		// E4b day 7: issue the offer by email when none exists yet
-		if f.OfferState == OfferStateNone {
+		// E4b day 7: issue the offer by email when none exists yet, and only
+		// where the offer may be emailed and redeemed
+		if f.OfferState == OfferStateNone && !f.NoOfferEmail {
 			d := send(TemplateE4bOffer, VariantDefault)
 			d.IssueOffer = true
 			return d
@@ -295,7 +315,7 @@ func Decide(step string, f Facts) Decision {
 	case StepE5:
 		if path == PathB {
 			// E5b day 11: the emailed offer's last day, no complaint on E4b
-			if f.OfferState == OfferStateActive && !(f.Complained && f.ComplainedStep == StepE4) {
+			if f.OfferState == OfferStateActive && !f.NoOfferEmail && !(f.Complained && f.ComplainedStep == StepE4) {
 				d := send(TemplateE3LastChance, VariantDefault)
 				d.Opening = OpeningLastNote
 				return d
