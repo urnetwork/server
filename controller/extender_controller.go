@@ -713,6 +713,18 @@ func extenderConfigRefusal(err error) string {
 	return "the extender network is not configured"
 }
 
+// The refusal of an activation whose key is registered to another network.
+// Nothing the caller does can pass it with that key: the extender needs a new
+// key, or support has to move the key's registration.
+const extenderKeyOtherNetworkRefusal = "This extender key is registered to another network, so it cannot be activated for this one. Generate a new extender key, or ask support to move the key to this network."
+
+// Whether the key is registered to a network other than networkId. A key no
+// network has activated is not.
+func extenderKeyHeldByAnotherNetwork(ctx context.Context, publicKey []byte, networkId server.Id) bool {
+	keyNetworkId, registered := model.GetNetworkExtenderKeyNetworkId(ctx, publicKey)
+	return registered && keyNetworkId != networkId
+}
+
 func ExtenderActivate(
 	args *ExtenderActivateArgs,
 	clientSession *session.ClientSession,
@@ -1042,6 +1054,20 @@ func (self *extenderActivateService) activate(
 	}
 	connectSettings := ExtenderProbeConnectSettings()
 
+	// A key belongs to the network that first activated it
+	// (model.ActivateNetworkExtender), and one another network holds is
+	// refused here, before anything is probed or spent. The probes cannot
+	// tell the key's owner from anyone else: an open extender signs any
+	// challenge and forwards any request to the api (A4, A5), so a post
+	// relayed through a listed extender passes them with its key, and would
+	// otherwise take its record, and the contract parties its row names (J2),
+	// to the poster's network.
+	stage = extenderActivationStageOwner
+	networkId := clientSession.ByJwt.NetworkId
+	if extenderKeyHeldByAnotherNetwork(clientSession.Ctx, publicKey, networkId) {
+		return refuse(extenderKeyOtherNetworkRefusal)
+	}
+
 	// The probe guard (connect#230): the process probes at most
 	// MaxConcurrentProbes activations at once. One more is refused as busy
 	// here, after every check that refuses without a probe and before any
@@ -1069,18 +1095,18 @@ func (self *extenderActivateService) activate(
 	// The budgets are spent here, at the probe (ExtenderActivateSettings):
 	// after every check that refuses without dialing the caller -- the
 	// arguments, the client, the caller address and its family, the family
-	// the activation was posted for, the operator's configuration -- and
-	// before the first dial. A malformed request, a post that crossed families
-	// and an operator that cannot probe spend nothing, while every activation
-	// that dials the caller is counted before it dials, whatever the probe
-	// then finds. The calling client's budget, its address's and its
-	// account's are spent together or not at all, so a client refused by its
-	// account's budget keeps its own, and all are the budgets of the family
-	// the probe dials. A refusal says when the budget that refused has room
-	// again, which the activator waits out (`retry_after_seconds`).
+	// the activation was posted for, the operator's configuration, the key's
+	// network -- and before the first dial. A malformed request, a post that
+	// crossed families, an operator that cannot probe and a key another
+	// network holds spend nothing, while every activation that dials the
+	// caller is counted before it dials, whatever the probe then finds. The
+	// calling client's budget, its address's and its account's are spent
+	// together or not at all, so a client refused by its account's budget
+	// keeps its own, and all are the budgets of the family the probe dials. A
+	// refusal says when the budget that refused has room again, which the
+	// activator waits out (`retry_after_seconds`).
 	stage = extenderActivationStageBudget
 	clientRateLimitAction, addressRateLimitAction, accountRateLimitAction := extenderActivateRateLimitActions(ipVersion)
-	networkId := clientSession.ByJwt.NetworkId
 	addressBudget := model.AccountActionBudget{
 		Id:                settings.addressBudgetId(clientIp),
 		Action:            addressRateLimitAction,
@@ -1258,8 +1284,15 @@ func (self *extenderActivateService) activate(
 
 	// an owner who opted out of lag.dev measurement is withdrawn now, with the
 	// key proven by the probes, and before this activation signs its record,
-	// so the record already carries no measurement id (lag.dev/PLAN.md C9)
+	// so the record already carries no measurement id (lag.dev/PLAN.md C9).
+	// The withdrawal is keyed by the key alone, so the key's network is read
+	// again first: another network may have activated it while this one
+	// probed, and its measurement is not this caller's to withdraw
 	if args.MeasurementDisabled {
+		if extenderKeyHeldByAnotherNetwork(clientSession.Ctx, publicKey, networkId) {
+			stage = extenderActivationStageOwner
+			return refuse(extenderKeyOtherNetworkRefusal)
+		}
 		optOutExtenderMeasurement(clientSession.Ctx, publicKey, server.NowUtc())
 	}
 
@@ -1309,6 +1342,12 @@ func (self *extenderActivateService) activate(
 		},
 	)
 	if activated == nil || record == nil {
+		// the store refuses a key another network holds, which another
+		// network may have activated while this one probed
+		if extenderKeyHeldByAnotherNetwork(clientSession.Ctx, publicKey, networkId) {
+			stage = extenderActivationStageOwner
+			return refuse(extenderKeyOtherNetworkRefusal)
+		}
 		return refuse("the activation could not be stored")
 	}
 

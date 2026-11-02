@@ -115,7 +115,7 @@ func reactivateTestMeasurementRenewExtender(t testing.TB, ctx context.Context, i
 		return []byte("record"), nil
 	}
 	if model.ActivateNetworkExtender(ctx, &model.NetworkExtenderActivation{
-		NetworkId:   server.NewId(),
+		NetworkId:   testMeasurementExtenderNetworkId(index),
 		ClientId:    server.NewId(),
 		PublicKey:   testMeasurementExtenderPublicKey(index),
 		TcpPort:     tcpPort,

@@ -797,7 +797,7 @@ func TestExtenderActivateCountsBusyAndBudgetRefusals(t *testing.T) {
 // hour, renewably (connect#230). A key its network already proved at the
 // address now spends a budget of its own there, which no other post can: the
 // junk posts leave its re-activation alone, the other account posting that
-// same key from the address still spends the address's budget, and the key's
+// same key from the address is refused for the key's network, and the key's
 // own posts are held to 6 an hour.
 func TestExtenderActivateKeepsAProvenKeysAddressBudgetItsOwn(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
@@ -834,13 +834,13 @@ func TestExtenderActivateKeepsAProvenKeysAddressBudgetItsOwn(t *testing.T) {
 		}
 
 		// the other account posting the extender's own key from its address,
-		// from a client with its own budget whole, is no re-activation of its
-		// own, and the address's budget is spent
+		// from a client with its own budget whole, is refused for the key's
+		// network before any budget
 		theirs := testActivateHost(t, ctx, service, &testExtenderHost{
 			byJwt:     otherSecondHost.byJwt,
 			publicKey: ownerHost.publicKey,
 		}, extenderIp)
-		if theirs.Activated || !strings.Contains(theirs.Error, "activating an extender from this address over IPv4") {
+		if !testKeyOtherNetworkRefusal(theirs) {
 			t.Fatalf("another account's post of the extender's key from its address: activated %t, %q", theirs.Activated, theirs.Error)
 		}
 
@@ -858,6 +858,58 @@ func TestExtenderActivateKeepsAProvenKeysAddressBudgetItsOwn(t *testing.T) {
 		}
 		if seventh.RetryAfterSeconds <= 0 {
 			t.Errorf("the seventh re-activation's refusal asks for no wait")
+		}
+	})
+}
+
+// The key's network is checked first, then the probe guard, then the budgets.
+// Another network's post of a stored key takes no probe slot and records no
+// budget attempt, however many it posts, so posts relayed through an extender
+// with its own key cannot spend its address's budget. With no probe slot free
+// the post still reads as the key's refusal, not as a busy api.
+func TestExtenderActivateChecksTheKeysNetworkBeforeTheGuardAndTheBudgets(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		installTestExtenderConfig(t, nil)
+
+		const extenderIp = "198.51.100.51"
+		owner := newTestExtenderAccount(ctx)
+		ownerHost := owner.newHost(t, ctx)
+		seedTestProvenExtenderHost(t, ctx, ownerHost, map[int]string{4: extenderIp}, server.NowUtc().Add(-2*time.Hour))
+		other := newTestExtenderAccount(ctx)
+		otherHost := other.newHost(t, ctx)
+		theirPost := &testExtenderHost{byJwt: otherHost.byJwt, publicKey: ownerHost.publicKey}
+
+		noSlotSettings := DefaultExtenderActivateSettings()
+		noSlotSettings.MaxConcurrentProbes = 0
+		noSlotService := newExtenderActivateService(noSlotSettings)
+		if refused := testActivateHost(t, ctx, noSlotService, theirPost, extenderIp); !testKeyOtherNetworkRefusal(refused) {
+			t.Fatalf("with no probe slot free: activated %t, %q", refused.Activated, refused.Error)
+		}
+
+		settings := DefaultExtenderActivateSettings()
+		service := newExtenderActivateService(settings)
+		probes := newTestCountingProbes()
+		service.testProbes = probes.probes(nil)
+		attemptCount := testTotalAccountActionAttemptCount(t, ctx)
+		for i := range settings.AddressRateLimit + 1 {
+			if refused := testActivateHost(t, ctx, service, theirPost, extenderIp); !testKeyOtherNetworkRefusal(refused) {
+				t.Fatalf("post %d of another network's key: activated %t, %q", i+1, refused.Activated, refused.Error)
+			}
+		}
+		if got := testTotalAccountActionAttemptCount(t, ctx); got != attemptCount {
+			t.Fatalf("the refused posts recorded %d budget attempts", got-attemptCount)
+		}
+		if got := probes.count(4); got != 0 {
+			t.Fatalf("the refused posts were probed %d times", got)
+		}
+
+		// the address's budget is whole for the other account's own key
+		if result := testActivateHost(t, ctx, service, otherHost, extenderIp); !result.Activated {
+			t.Fatalf("the other account's own key was refused: %q", result.Error)
+		}
+		if got := probes.count(4); got != 1 {
+			t.Fatalf("the other account's own key was probed %d times", got)
 		}
 	})
 }
