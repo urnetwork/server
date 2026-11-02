@@ -11162,6 +11162,7 @@ var migrations = []any{
 		CREATE INDEX network_reengagement_email_network_sent
 		ON network_reengagement_email (network_id, sent_at)
 	`),
+
 	// The index diet (owner decision 2026-11-01; db_index_diet_migrations.go).
 	// Each index below was audited against pg_stat_user_indexes, whose
 	// counters run from the 2026-10-23 20:08 UTC stats reset (8.2 days of full
@@ -11213,6 +11214,16 @@ var migrations = []any{
 	// autovacuum runs on transfer_escrow_sweep: a waiting drop cancels a
 	// normal autovacuum.
 	sweepPaymentIndexDropMigration,
+
+	// Close evidence retention at the contract horizon (owner, 2026-11-01;
+	// db_contract_close_evidence_horizon.go): the evidence guard admits the
+	// retention delete of a report accepted more than 35 days ago, the
+	// shortest horizon, in place of 91. It replaces the guard's function body
+	// only: no table lock, no scan. Every delete the running release makes
+	// (91 days) stays admitted, and the release that follows the horizon keeps
+	// 91 days until it finds this body installed (closeEvidenceGuardFloor), so
+	// it applies before or after the deploy.
+	newSqlMigration(contractCloseReportEvidenceHorizonGuardSql),
 
 	// Which run of the extender process sent each activation
 	// (connect/EXTENDER.md G3, extender_activation_run_schema.go), so a

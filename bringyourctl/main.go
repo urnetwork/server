@@ -51,6 +51,7 @@ Usage:
     bringyourctl db sweep-orphans [--slice=<n>]
     bringyourctl db scrub-client-addresses
     bringyourctl db key-history-floor [--rollback | --restore]
+    bringyourctl db close-evidence-retention [--mode=<mode>] [--max-rows-per-second=<n>] [--remove]
     bringyourctl search --realm=<realm> --type=<type> add <value>
     bringyourctl search --realm=<realm> --type=<type> around --distance=<distance> <value>
     bringyourctl search --realm=<realm> --type=<type> remove <value>
@@ -211,6 +212,15 @@ Options:
     --verify       Check the partitioned egress health history against the
                    old table.
     --drop-old     Drop the old egress health history once --verify passes.
+    --mode=<mode>  With db close-evidence-retention, set the close evidence
+                   row retention's brake: on, or off to stop the row deletes
+                   from their next batch. The weekly drops of partitioned
+                   evidence never read it.
+    --max-rows-per-second=<n>  With db close-evidence-retention, set the
+                   brake's rate: rows deleted a second, at most 5000; 0 stops
+                   the deletes.
+    --remove       With db close-evidence-retention, delete the brake, so the
+                   code's default rate (1000 a second) applies.
     --enable       Enable Embed for the network, once its sales contract is
                    signed: its data-cap and ACL-group APIs open.
     --client-limit=<limit>  With --enable, also set the network's client
@@ -294,6 +304,8 @@ func main() {
 			dbScrubClientAddresses(opts)
 		} else if keyHistoryFloor, _ := opts.Bool("key-history-floor"); keyHistoryFloor {
 			dbKeyHistoryFloor(opts)
+		} else if closeEvidenceRetention, _ := opts.Bool("close-evidence-retention"); closeEvidenceRetention {
+			dbCloseEvidenceRetention(opts)
 		}
 	} else if search, _ := opts.Bool("search"); search {
 		if add, _ := opts.Bool("add"); add {
@@ -652,6 +664,64 @@ func dbKeyHistoryFloor(opts docopt.Opts) {
 	server.SetClientKeyHistoryRetentionFloor(ctx, rollback)
 	floor, published = server.GetClientKeyHistoryRetentionFloor(ctx)
 	fmt.Printf("Key history retention floor now: %s (published body: %t)\n", floor, published)
+}
+
+// dbCloseEvidenceRetention prints the close evidence row retention's brake
+// ({close_evidence_retention}control, server.RemoveExpiredCloseEvidence) and
+// the floor the installed evidence guard admits, after setting the brake's
+// fields with --mode and --max-rows-per-second, or deleting it with --remove.
+// The brake stops or paces the row deletes from their next batch, without
+// touching the contract horizon reaper. It is the way to stop them. It does not
+// stop the weekly drops of partitioned evidence, which never read it. Putting
+// the guard's 91-day body back stops both below 91 days, but pages
+// migration-schema-drift.
+func dbCloseEvidenceRetention(opts docopt.Opts) {
+	ctx := context.Background()
+	settings := server.DefaultCloseEvidenceRetentionSettings()
+	fields, remove, err := closeEvidenceRetentionBrakeChange(opts)
+	if err != nil {
+		panic(err)
+	}
+	if remove || 0 < len(fields) {
+		writeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		if remove {
+			err := server.RemoveCloseEvidenceRetentionControl(writeCtx)
+			server.Raise(err)
+		}
+		err := server.SetCloseEvidenceRetentionControl(writeCtx, fields)
+		server.Raise(err)
+	}
+	stored, err := server.GetCloseEvidenceRetentionControlFields(ctx, settings)
+	server.Raise(err)
+	control := server.NarrowCloseEvidenceRetentionControl(stored, settings)
+	fmt.Printf("Close evidence retention brake: %v, deletes on %t at up to %g rows a second\n", stored, control.On, control.MaxRowsPerSecond)
+	floor, horizonGuard := server.GetCloseEvidenceRetentionGuardFloor(ctx)
+	fmt.Printf("Close evidence guard floor: %s (horizon guard installed: %t)\n", floor, horizonGuard)
+}
+
+// The brake fields and removal the options ask for. A mode other than on or
+// off, or a rate that is not a number of zero or more, is refused.
+func closeEvidenceRetentionBrakeChange(opts docopt.Opts) (fields map[string]string, remove bool, err error) {
+	fields = map[string]string{}
+	remove, _ = opts.Bool("--remove")
+	if mode, _ := opts.String("--mode"); mode != "" {
+		if mode != "on" && mode != "off" {
+			return nil, false, fmt.Errorf("--mode must be on or off, not %q", mode)
+		}
+		fields[server.CloseEvidenceRetentionControlFieldMode] = mode
+	}
+	if rate, _ := opts.String("--max-rows-per-second"); rate != "" {
+		value, parseErr := strconv.ParseFloat(rate, 64)
+		if parseErr != nil || math.IsNaN(value) || value < 0 {
+			return nil, false, fmt.Errorf("--max-rows-per-second must be a rate of zero or more, not %q", rate)
+		}
+		fields[server.CloseEvidenceRetentionControlFieldMaxRowsPerSecond] = rate
+	}
+	if remove && 0 < len(fields) {
+		return nil, false, errors.New("--remove deletes the brake; set fields without it")
+	}
+	return
 }
 
 // dbAudit compares the live DB schema against the schema its recorded migration
