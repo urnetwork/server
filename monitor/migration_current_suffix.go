@@ -876,6 +876,8 @@ var migrationCurrentSuffixContracts = slices.Concat(
 		// replaces the key history guard body the retention contract pins
 		clientKeyHistoryRetentionFloorMigrationContract,
 	},
+	// 905-909: the campaigns' consent evidence and the re-engagement tables
+	reengagementMigrationContracts,
 )
 
 // Free space a table keeps on every page it writes, so an update of an
