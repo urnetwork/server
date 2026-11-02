@@ -123,6 +123,8 @@ func TestAccountActionConstantsAreDistinctAndHaveDisplayNames(t *testing.T) {
 		AccountActionVerifyStorePurchase,
 		AccountActionExtenderActivateV4,
 		AccountActionExtenderActivateV6,
+		AccountActionExtenderActivateAddressV4,
+		AccountActionExtenderActivateAddressV6,
 		AccountActionExtenderActivateAccountV4,
 		AccountActionExtenderActivateAccountV6,
 		AccountActionExtenderPingReport,

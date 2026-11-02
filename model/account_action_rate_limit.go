@@ -3,6 +3,9 @@ package model
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
+	"slices"
+	"sync"
 	"time"
 
 	"github.com/urnetwork/server"
@@ -11,7 +14,8 @@ import (
 // Account-based (not IP-based) rate limits on sensitive actions. Each action
 // has its own independent counter over its own trailing window, keyed by the
 // id its caller passes: the user for an account action, the calling client for
-// a per-client budget such as an extender activation.
+// a per-client budget such as an extender activation, or a keyed hash of the
+// caller's address for a per-address one.
 
 const (
 	AccountActionAddAuth              = "add_auth"
@@ -23,10 +27,13 @@ const (
 	AccountActionVerifyStorePurchase  = "verify_store_purchase"
 	// the extender endpoints' budgets (controller/extender_*.go), named here
 	// so a refusal says which budget was spent. An activation is budgeted per
-	// address family, for the calling client and for its account, so one
-	// family's attempts never spend the other's (support inbox 8083).
+	// address family, for the calling client, for the address it is probed
+	// at, and for its account, so one family's attempts never spend the
+	// other's (support inbox 8083, connect#230).
 	AccountActionExtenderActivateV4        = "extender_activate_v4"
 	AccountActionExtenderActivateV6        = "extender_activate_v6"
+	AccountActionExtenderActivateAddressV4 = "extender_activate_address_v4"
+	AccountActionExtenderActivateAddressV6 = "extender_activate_address_v6"
 	AccountActionExtenderActivateAccountV4 = "extender_activate_account_v4"
 	AccountActionExtenderActivateAccountV6 = "extender_activate_account_v6"
 	AccountActionExtenderPingReport        = "ping_report"
@@ -68,6 +75,8 @@ var actionDisplayNames = map[string]string{
 	AccountActionVerifyStorePurchase:       "verifying a store purchase",
 	AccountActionExtenderActivateV4:        "activating an extender over IPv4",
 	AccountActionExtenderActivateV6:        "activating an extender over IPv6",
+	AccountActionExtenderActivateAddressV4: "activating an extender from this address over IPv4",
+	AccountActionExtenderActivateAddressV6: "activating an extender from this address over IPv6",
 	AccountActionExtenderActivateAccountV4: "activating your account's extenders over IPv4",
 	AccountActionExtenderActivateAccountV6: "activating your account's extenders over IPv6",
 	AccountActionExtenderPingReport:        "reporting extender pings",
@@ -302,7 +311,7 @@ func checkAndRecordAccountActionRateLimitInTx(
 
 // Reads the budget of `action` by userId at `now`, in the caller's
 // transaction: whether it has room for one more attempt, and when it has none,
-// how long until the oldest attempt it counted leaves the window.
+// how long until it has (AccountActionBudgetRetryAfter).
 func readAccountActionBudgetInTx(
 	ctx context.Context,
 	tx server.PgTx,
@@ -312,7 +321,31 @@ func readAccountActionBudgetInTx(
 	window time.Duration,
 	now time.Time,
 ) (allow bool, retryAfter time.Duration) {
+	return readAccountActionBudgetLimitInTx(
+		ctx,
+		tx,
+		AccountActionBudget{
+			Id:     userId,
+			Action: action,
+			Limit:  limit,
+			Window: window,
+		},
+		now,
+	)
+}
+
+// Reads one budget at `now`, in the caller's transaction: whether it has room
+// for one more attempt, and when it has none, how long until it has. A budget
+// whose count has reached Limit asks its ExtendLimitInTx, when it has one, for
+// the limit it has grown to.
+func readAccountActionBudgetLimitInTx(
+	ctx context.Context,
+	tx server.PgTx,
+	budget AccountActionBudget,
+	now time.Time,
+) (allow bool, retryAfter time.Duration) {
 	// a utc cutoff computed here, as in countRecentAccountActionAttempts
+	cutoff := now.Add(-budget.Window)
 	var count int
 	var oldestTime *time.Time
 	result, err := tx.Query(
@@ -322,21 +355,55 @@ func readAccountActionBudgetInTx(
 		WHERE user_id = $1 AND action = $2
 		  AND $3 <= create_time
 		`,
-		userId, action, now.Add(-window),
+		budget.Id, budget.Action, cutoff,
 	)
 	server.WithPgResult(result, err, func() {
 		if result.Next() {
 			server.Raise(result.Scan(&count, &oldestTime))
 		}
 	})
-	if limit <= count {
-		retryAfter = window
-		if oldestTime != nil {
-			retryAfter = oldestTime.Add(window).Sub(now)
-		}
-		return false, min(max(retryAfter, time.Second), window)
+	limit := budget.Limit
+	if limit <= count && budget.ExtendLimitInTx != nil {
+		limit = max(limit, budget.ExtendLimitInTx(ctx, tx))
 	}
-	return true, 0
+	if count < limit {
+		return true, 0
+	}
+	// the attempt whose leaving makes room: the oldest while the count is at
+	// the limit, and a later one when the limit is below the count, which a
+	// limit that shrank leaves (connect#230)
+	boundaryTime := oldestTime
+	if limit < count {
+		boundaryTime = nil
+		result, err := tx.Query(
+			ctx,
+			`
+			SELECT create_time FROM network_user_action_attempt
+			WHERE user_id = $1 AND action = $2
+			  AND $3 <= create_time
+			ORDER BY create_time ASC
+			OFFSET $4 LIMIT 1
+			`,
+			budget.Id, budget.Action, cutoff, count-max(limit, 0),
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&boundaryTime))
+			}
+		})
+	}
+	return false, AccountActionBudgetRetryAfter(boundaryTime, budget.Window, now)
+}
+
+// How long until a budget with no room has room again: until the attempt whose
+// leaving makes room, `boundaryTime`, leaves the trailing window. At least a
+// second and at most the window; the window when no attempt can make room.
+func AccountActionBudgetRetryAfter(boundaryTime *time.Time, window time.Duration, now time.Time) time.Duration {
+	retryAfter := window
+	if boundaryTime != nil {
+		retryAfter = boundaryTime.Add(window).Sub(now)
+	}
+	return min(max(retryAfter, time.Second), window)
 }
 
 // Records one attempt of `action` by userId at `now`, in the caller's
@@ -360,12 +427,30 @@ func insertAccountActionAttemptInTx(
 
 // One attempt budget: at most Limit attempts of Action by Id in the trailing
 // Window. Id is the user for an account's budget, the calling client for a
-// client's own.
+// client's own, and a keyed hash of the caller's address for an address's.
 type AccountActionBudget struct {
 	Id     server.Id
 	Action string
 	Limit  int
 	Window time.Duration
+	// when set, the limit once the count has reached Limit, read in the
+	// spending transaction: a limit that grows with what its owner has proven
+	// (an account's proven extender hosts, connect#230) is read only by an
+	// owner that has spent its floor. A value below Limit leaves Limit.
+	ExtendLimitInTx func(ctx context.Context, tx server.PgTx) int
+}
+
+// The refusal of a spend by one of its budgets
+// (CheckAndRecordAccountActionBudgets): the budget that had no room, and how
+// long until it has.
+type AccountActionBudgetRefusal struct {
+	Action     string
+	Window     time.Duration
+	RetryAfter time.Duration
+}
+
+func (self *AccountActionBudgetRefusal) Error() string {
+	return maxAccountActionAttemptsRetryError(self.Action, self.Window, self.RetryAfter).Error()
 }
 
 // Testing_AccountActionBudgetsBeforeSpend, when set, runs inside the
@@ -375,34 +460,115 @@ type AccountActionBudget struct {
 // runs. Test only, and never set in production.
 var Testing_AccountActionBudgetsBeforeSpend func()
 
+// Testing_AccountActionBudgetsLockWait, when set, runs when a spend finds a
+// budget it spends held by another spend in this process, before it waits for
+// that spend to end. Test only, and never set in production.
+var Testing_AccountActionBudgetsLockWait func()
+
+// The process locks of the budgets, by a hash of the budget. A spend holds the
+// locks of its budgets for its whole transaction, so the spends of one budget
+// in one process wait here, where waiting holds no database connection, and
+// the database lock each spend also takes (lockAccountActionBudgetsInTx)
+// queues at most one spend of a budget per process. A queue of waiters there
+// would each hold a pooler server (server.PgLockTimeout), and an account's
+// fleet restarting at once is exactly a queue of spends of one budget.
+var accountActionBudgetProcessLocks [256]sync.Mutex
+
+// The lock keys of a spend's budgets, in the one order every spend takes them:
+// sorted and distinct, so two spends that share budgets never each hold one the
+// other waits for.
+func accountActionBudgetLockKeys(budgets []AccountActionBudget) []string {
+	lockKeys := []string{}
+	for _, budget := range budgets {
+		lockKeys = append(lockKeys, fmt.Sprintf("account-action-budget/v1:%s:%s", budget.Action, budget.Id))
+	}
+	slices.Sort(lockKeys)
+	return slices.Compact(lockKeys)
+}
+
+// Takes the process locks of a spend's budgets, in the order of their indexes,
+// and returns their release.
+func lockAccountActionBudgetsInProcess(lockKeys []string) (unlock func()) {
+	lockIndexes := []int{}
+	for _, lockKey := range lockKeys {
+		lockHash := fnv.New32a()
+		lockHash.Write([]byte(lockKey))
+		lockIndexes = append(lockIndexes, int(lockHash.Sum32()%uint32(len(accountActionBudgetProcessLocks))))
+	}
+	slices.Sort(lockIndexes)
+	lockIndexes = slices.Compact(lockIndexes)
+	for _, lockIndex := range lockIndexes {
+		processLock := &accountActionBudgetProcessLocks[lockIndex]
+		if !processLock.TryLock() {
+			if Testing_AccountActionBudgetsLockWait != nil {
+				Testing_AccountActionBudgetsLockWait()
+			}
+			processLock.Lock()
+		}
+	}
+	return func() {
+		for i := len(lockIndexes) - 1; 0 <= i; i -= 1 {
+			accountActionBudgetProcessLocks[lockIndexes[i]].Unlock()
+		}
+	}
+}
+
+// Takes the database lock of each of a spend's budgets, in the caller's
+// transaction, so the spends of a budget in every process run one after
+// another and each reads what the one before it spent. That takes read
+// committed isolation: a repeatable read transaction keeps the snapshot of
+// its first statement, which precedes the wait, and would miss what the spend
+// it waited for wrote.
+func lockAccountActionBudgetsInTx(ctx context.Context, tx server.PgTx, lockKeys []string) {
+	for _, lockKey := range lockKeys {
+		var isolation string
+		server.Raise(tx.QueryRow(
+			ctx,
+			`SELECT current_setting('transaction_isolation') FROM pg_advisory_xact_lock(hashtextextended($1, 0))`,
+			lockKey,
+		).Scan(&isolation))
+		if isolation != "read committed" {
+			panic(fmt.Errorf("the account action budget lock requires read committed isolation, not %s", isolation))
+		}
+	}
+}
+
 // CheckAndRecordAccountActionBudgets spends one attempt from every budget, in
 // one transaction, and only when every one of them has room. A refusal spends
 // nothing from any budget, so an action refused by one budget leaves the
 // others as they were: a client refused by its account's budget keeps its
-// own. The refusal names the first budget, in the order given, that has no
-// room, its window, and how long until it has room again.
+// own. The refusal, an *AccountActionBudgetRefusal, names the first budget, in
+// the order given, that has no room, its window, and how long until it has
+// room again.
+//
+// The spends of a budget run one at a time (connect#230): each takes the locks
+// of its budgets, in this process and in the database, before it reads them.
+// Two spends that both read a budget one short of its limit would otherwise
+// both spend it, and the budget would be passed by as many spends as ran at
+// once.
 //
 // Like CheckAndRecordAccountActionRateLimit, call it only once every check
 // that can refuse without doing the work has passed, and immediately before
 // the work the budgets pay for.
 func CheckAndRecordAccountActionBudgets(ctx context.Context, budgets ...AccountActionBudget) error {
+	lockKeys := accountActionBudgetLockKeys(budgets)
+	unlockInProcess := lockAccountActionBudgetsInProcess(lockKeys)
+	defer unlockInProcess()
+
 	var refusal error
 	server.Tx(ctx, func(tx server.PgTx) {
 		// a transaction that is run again decides again from what it reads
 		refusal = nil
+		lockAccountActionBudgetsInTx(ctx, tx, lockKeys)
 		now := server.NowUtc()
 		for _, budget := range budgets {
-			allow, retryAfter := readAccountActionBudgetInTx(
-				ctx,
-				tx,
-				budget.Id,
-				budget.Action,
-				budget.Limit,
-				budget.Window,
-				now,
-			)
+			allow, retryAfter := readAccountActionBudgetLimitInTx(ctx, tx, budget, now)
 			if !allow {
-				refusal = maxAccountActionAttemptsRetryError(budget.Action, budget.Window, retryAfter)
+				refusal = &AccountActionBudgetRefusal{
+					Action:     budget.Action,
+					Window:     budget.Window,
+					RetryAfter: retryAfter,
+				}
 				return
 			}
 		}
@@ -412,6 +578,6 @@ func CheckAndRecordAccountActionBudgets(ctx context.Context, budgets ...AccountA
 		for _, budget := range budgets {
 			insertAccountActionAttemptInTx(ctx, tx, budget.Id, budget.Action, now)
 		}
-	})
+	}, server.TxReadCommitted)
 	return refusal
 }
