@@ -718,9 +718,9 @@ type extenderActivateService struct {
 	now func() time.Time
 
 	stateLock sync.Mutex
-	// the proven host counts this process read, each reused until its expire
-	// time (ProvenHostCountTimeout)
-	provenHostCounts map[extenderProvenHostCountKey]*extenderProvenHostCount
+	// the proven host candidates this process read, each reused until its
+	// expire time (ProvenHostCountTimeout) and counted at each read's own time
+	provenHostCandidates map[extenderProvenHostCountKey]*extenderProvenHostCandidates
 }
 
 // An account's proven hosts of one family: the network's, since an extender
@@ -730,17 +730,17 @@ type extenderProvenHostCountKey struct {
 	ipVersion int
 }
 
-type extenderProvenHostCount struct {
-	provenHostCount int
-	expireTime      time.Time
+type extenderProvenHostCandidates struct {
+	candidates []*model.NetworkExtenderProvenHostCandidate
+	expireTime time.Time
 }
 
 func newExtenderActivateService(settings *ExtenderActivateSettings) *extenderActivateService {
 	return &extenderActivateService{
-		settings:         settings,
-		probeSlots:       make(chan struct{}, max(0, settings.MaxConcurrentProbes)),
-		now:              server.NowUtc,
-		provenHostCounts: map[extenderProvenHostCountKey]*extenderProvenHostCount{},
+		settings:             settings,
+		probeSlots:           make(chan struct{}, max(0, settings.MaxConcurrentProbes)),
+		now:                  server.NowUtc,
+		provenHostCandidates: map[extenderProvenHostCountKey]*extenderProvenHostCandidates{},
 	}
 }
 
@@ -761,11 +761,20 @@ func (self *extenderActivateService) provenHostCountInTx(
 	)
 }
 
-// The proven hosts of one family of a network, from the candidates
-// `readCandidates` reads since a time, or the count this process read within
-// ProvenHostCountTimeout. The spend asks only once the account has reached its
-// floor, so most activations never read it, and a fleet's posts past the
-// floor read it once a minute per process rather than once each.
+// The proven hosts of one family of a network at this read's own time, from
+// the candidates `readCandidates` reads since a time, or those this process
+// read within ProvenHostCountTimeout. The spend asks only once the account has
+// reached its floor, so most activations never read them, and a fleet's posts
+// past the floor read them once a minute per process rather than once each.
+//
+// What is reused is the candidates, never the count (connect#230): a host
+// becomes proven an hour after its first pass whether or not anything is
+// read, and a count reused through that moment held the account's limit at
+// its floor while other processes admitted past it, so a post here met a
+// limit below the count and was told to wait about an hour. A read reaches
+// back the reuse's length less than the lookback, so a candidate's earliest
+// pass is within the lookback of every count the read serves; a host whose
+// only pass in the lookback is in that edge waits for the next read.
 func (self *extenderActivateService) provenHostCount(
 	networkId server.Id,
 	ipVersion int,
@@ -777,43 +786,39 @@ func (self *extenderActivateService) provenHostCount(
 	}
 	now := self.now()
 	reuse := 0 < self.settings.ProvenHostCountTimeout
+	var candidates []*model.NetworkExtenderProvenHostCandidate
+	reused := false
 	if reuse {
-		provenHostCount, ok := func() (int, bool) {
+		candidates, reused = func() ([]*model.NetworkExtenderProvenHostCandidate, bool) {
 			self.stateLock.Lock()
 			defer self.stateLock.Unlock()
-			if count, ok := self.provenHostCounts[key]; ok && now.Before(count.expireTime) {
-				return count.provenHostCount, true
+			if read, ok := self.provenHostCandidates[key]; ok && now.Before(read.expireTime) {
+				return read.candidates, true
 			}
-			return 0, false
+			return nil, false
 		}()
-		if ok {
-			return provenHostCount
+	}
+	if !reused {
+		candidates = readCandidates(now.Add(max(self.settings.ProvenHostCountTimeout, 0) - self.settings.ProvenHostMaxAge))
+		if reuse {
+			func() {
+				self.stateLock.Lock()
+				defer self.stateLock.Unlock()
+				// the reads that ran out go, so the map holds only the
+				// networks whose spends reached their floor within the timeout
+				for readKey, read := range self.provenHostCandidates {
+					if !now.Before(read.expireTime) {
+						delete(self.provenHostCandidates, readKey)
+					}
+				}
+				self.provenHostCandidates[key] = &extenderProvenHostCandidates{
+					candidates: candidates,
+					expireTime: now.Add(self.settings.ProvenHostCountTimeout),
+				}
+			}()
 		}
 	}
-
-	provenHostCount := self.settings.provenHostCount(
-		readCandidates(now.Add(-self.settings.ProvenHostMaxAge)),
-		ipVersion,
-		now,
-	)
-	if reuse {
-		func() {
-			self.stateLock.Lock()
-			defer self.stateLock.Unlock()
-			// the counts that ran out go, so the map holds only the networks
-			// whose spends reached their floor within the timeout
-			for countKey, count := range self.provenHostCounts {
-				if !now.Before(count.expireTime) {
-					delete(self.provenHostCounts, countKey)
-				}
-			}
-			self.provenHostCounts[key] = &extenderProvenHostCount{
-				provenHostCount: provenHostCount,
-				expireTime:      now.Add(self.settings.ProvenHostCountTimeout),
-			}
-		}()
-	}
-	return provenHostCount
+	return self.settings.provenHostCount(candidates, ipVersion, now)
 }
 
 // The wait a busy refusal asks for, uniform over the settings' bounds.

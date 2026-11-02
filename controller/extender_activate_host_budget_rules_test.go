@@ -572,3 +572,61 @@ func TestExtenderActivateProvenAddressBudgetIdIsTheKeysAtTheAddress(t *testing.T
 		t.Errorf("the budget id %s holds the address", budgetId)
 	}
 }
+
+// The process reuses the proven host candidates it read for a minute and
+// counts them at each read's own time (connect#230). It reused the count
+// instead: a count read just before a fleet's first hosts became proven held
+// the floor for its minute while other processes, whose counts were fresh,
+// admitted past it, so a post to this process met a limit below the count and
+// was told to wait about an hour while the account had hundreds of slots.
+// Each read reaches far enough back that every count it serves is within its
+// own 7 days.
+func TestExtenderActivateCountsReusedProvenHostCandidatesAtEachReadsTime(t *testing.T) {
+	settings := DefaultExtenderActivateSettings()
+	service := newExtenderActivateService(settings)
+	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	service.now = func() time.Time {
+		return now
+	}
+	networkId := server.NewId()
+
+	// 60 hosts that first passed 59m30s before the first read, each in a /48
+	// of its own
+	candidates := []*model.NetworkExtenderProvenHostCandidate{}
+	for i := range 60 {
+		candidates = append(candidates, &model.NetworkExtenderProvenHostCandidate{
+			ExtenderId:        server.NewId(),
+			Ip:                netip.MustParseAddr(fmt.Sprintf("2001:db8:%x::1", i+1)),
+			FirstActivateTime: now.Add(-59*time.Minute - 30*time.Second),
+		})
+	}
+	readMinActivateTimes := []time.Time{}
+	readCandidates := func(minActivateTime time.Time) []*model.NetworkExtenderProvenHostCandidate {
+		readMinActivateTimes = append(readMinActivateTimes, minActivateTime)
+		return candidates
+	}
+
+	firstReadTime := now
+	connect.AssertEqual(t, service.provenHostCount(networkId, 6, readCandidates), 0)
+	connect.AssertEqual(t, len(readMinActivateTimes), 1)
+
+	// 40 seconds on, within the minute the read is reused, the hosts passed
+	// an hour ago
+	now = now.Add(40 * time.Second)
+	if count := service.provenHostCount(networkId, 6, readCandidates); count != 60 {
+		t.Fatalf("the reused read counts %d proven hosts 40 s on, want the 60 that have passed an hour ago by then", count)
+	}
+	connect.AssertEqual(t, len(readMinActivateTimes), 1)
+
+	// past the minute, it is read again
+	now = now.Add(30 * time.Second)
+	connect.AssertEqual(t, service.provenHostCount(networkId, 6, readCandidates), 60)
+	connect.AssertEqual(t, len(readMinActivateTimes), 2)
+	connect.AssertEqual(t, readMinActivateTimes[0], firstReadTime.Add(settings.ProvenHostCountTimeout-settings.ProvenHostMaxAge))
+
+	// with no reuse, every count reads
+	settings.ProvenHostCountTimeout = 0
+	service.provenHostCount(networkId, 6, readCandidates)
+	service.provenHostCount(networkId, 6, readCandidates)
+	connect.AssertEqual(t, len(readMinActivateTimes), 4)
+}
