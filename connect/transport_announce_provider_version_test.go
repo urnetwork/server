@@ -129,7 +129,7 @@ func TestProviderVersionConnections(t *testing.T) {
 	}
 
 	// a long connection moves from its release day to its month
-	later := now.Add(providerAppVersionDayWindow)
+	later := now.Add(server.AppVersionLabelDayWindow)
 	a.update(true, later)
 	values = gatherProviderConnections(t, gauge)
 	if _, ok := values["2026.10.1"]; ok || values["2026.10"] != 1 {

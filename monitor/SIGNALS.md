@@ -8563,7 +8563,7 @@ reap share edges and sample sufficiency, malformed frames and failed reads,
 the list's window and name rules, inventory authority and cancellation.
 
 ACTION: retention horizons are owner decisions. Never drop
-`client_reliability` days inside the 21-day retention by hand: operator block
+`client_reliability` days inside the 14-day retention by hand: operator block
 points read a completed block's window, and a missing reliability block cuts
 provider credit. VERIFY: a complete observation inside each line on the next
 runs (two for the sampled check).
@@ -8880,7 +8880,7 @@ minutes) drops a family's range once its upper bound is the family's declared
 transaction that detaches it; a family with its own task (`client_reliability`)
 drops through that task. Size is bounded only by those drops. This probe
 watches every registered family that drops ranges and names no dedicated probe
-(`RetentionSignal`): today `client_reliability` (21 days,
+(`RetentionSignal`): today `client_reliability` (14 days,
 `ClientReliabilityRetention`, the same cutoff §2.4g's
 `partition-retention-stuck` judges) and `provider_egress_health_history` (7
 days). The contract tables name §2.4i and
@@ -27701,7 +27701,7 @@ losing up to 20 GB/h. Each production action needs the owner's go.
      (`client_reliability_p20261001`..`04`, 236 GB). Run each drop as its own
      guarded transaction with `lock_timeout = '5s'`; each took seconds.
 4. **Respect the reliability readers.** Since 2026-10-31 `client_reliability`
-   retention is a flat 21 days; the subsidy payout frontier no longer holds
+   retention is a flat 14 days since 2026-11-02 (21 before); the subsidy payout frontier no longer holds
    it. Operator block points read each completed block's window
    (`AwardDueOperatorBlockPoints`, daily at 12:00Z): before dropping a day
    inside the 21-day cutoff, check that the blocks covering it are awarded
@@ -30435,6 +30435,15 @@ strictness or configuration. The retention task deletes a gone client's
 history once the contract horizon reaper's horizon has passed since the
 client went while the reaper's mode is on, never below the floor; the catalog
 checks do not show where the retention task is.
+
+The onboarding results' purchase.started count
+(`onboarding_results_purchase_started_schema.go`) adds one column to
+`onboarding_results_daily`: `purchase_started_7d integer NOT NULL DEFAULT 0`,
+the in-app offer's leading metric. Its content-derived version follows its
+DDL. From that version a missing column, another type, a nullable column, and
+a lost or changed default are drift; before it, the absent column is only
+numeric migration lag. The check reads the catalog only and does not show
+whether the nightly rollup has filled the column.
 
 ### 8.10 Client-reliability covering-index drift after partition cutover
 Probe: `reliability-index`

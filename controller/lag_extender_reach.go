@@ -19,8 +19,8 @@ import (
 // (taskworker/work/extender_measurement_probe_work.go, lagprobe) make what a
 // page makes first, at each address the extender's name publishes, so they
 // test what a measurement uses and nothing else, which the uptime probes do
-// not: those forward through the extender, and failed for extenders whose
-// measurement api answered.
+// not: those test the outer tls under the identity key, admission and a signed
+// challenge, and failed for extenders whose measurement api answered.
 //
 // An extender is left out while, on every family it publishes and the probes
 // could reach, its latest probes failed lagExtenderUnreachableRule's number of

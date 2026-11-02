@@ -15,6 +15,8 @@ func TestSchemaMigrationVersionsNameTheirMigrations(t *testing.T) {
 		{"SN top board", snTopSchemaSql, SnTopSchemaMigrationVersion},
 		{"SN top replica provenance", snTopReplicaSchemaSql, SnTopReplicaSchemaMigrationVersion},
 		{"verify cohort census", verifyCohortCensusSchemaSql, VerifyCohortCensusSchemaMigrationVersion},
+		{"subscription store country", subscriptionRenewalCountrySchemaSql, SubscriptionRenewalCountrySchemaMigrationVersion},
+		{"extender activation run", extenderActivationRunSchemaSql, ExtenderActivationRunSchemaMigrationVersion},
 		{"extender measurement api probes", networkExtenderMeasurementProbeSchemaSql, NetworkExtenderMeasurementProbeSchemaMigrationVersion},
 	} {
 		registered := 0

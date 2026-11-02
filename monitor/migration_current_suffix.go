@@ -891,10 +891,21 @@ var migrationCurrentSuffixContracts = slices.Concat(
 			providerWorkSessionHorizonCustodyPredicates()...),
 	},
 	[]snMainnetMigrationContract{
-		// lag.dev's measurement api probes; the version follows the
-		// migration's position
-		extenderMeasurementProbeMigrationContract,
+		// the store country of each subscription row
+		subscriptionRenewalCountryMigrationContract,
+		// the onboarding results' purchase.started count; its version follows
+		// the migration's position
+		onboardingResultsPurchaseStartedMigrationContract,
 	},
+	// the re-engagement results, wherever merges place them
+	[]snMainnetMigrationContract{reengagementResultsMigrationContract},
+	// the re-engagement program's win-back offers; its version follows
+	// the migration's position
+	[]snMainnetMigrationContract{networkWinbackOfferMigrationContract},
+	// which run of the extender process sent each activation
+	[]snMainnetMigrationContract{extenderActivationRunMigrationContract},
+	// lag.dev's measurement api probes; the version follows the migration's position
+	[]snMainnetMigrationContract{extenderMeasurementProbeMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an

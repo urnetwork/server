@@ -390,6 +390,24 @@ func TestExtenderProbePostRearmsTheChain(t *testing.T) {
 		if runAt.Before(want.Add(-time.Second)) || want.Add(5*time.Second).Before(runAt) {
 			t.Fatalf("probe run_at = %s, want about %s", runAt, want)
 		}
+
+		// and a pass may outlast the task default, or an outage across the
+		// directory would be cut off every time
+		var runMaxTimeSeconds int
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`SELECT run_max_time_seconds FROM pending_task WHERE run_once_key = $1`,
+				fmt.Sprintf("[%q]", "extender_probe"),
+			)
+			server.WithPgResult(result, err, func() {
+				if !result.Next() {
+					t.Fatal("no extender_probe task was scheduled")
+				}
+				server.Raise(result.Scan(&runMaxTimeSeconds))
+			})
+		})
+		connect.AssertEqual(t, runMaxTimeSeconds, int(ExtenderProbeMaxTime/time.Second))
 	})
 }
 
@@ -552,6 +570,52 @@ func TestExtenderProbeBoundsTheConcurrency(t *testing.T) {
 				maxInFlight,
 				ExtenderProbeConcurrency,
 			)
+		}
+	})
+}
+
+// A pass's context ends with its task: the task's max time, or a drain. The
+// probes in flight then find the writes of their results raising on the done
+// context, and a raise that reaches the top of a goroutine takes the process
+// and every task it is running with it, so it ends that address instead and the
+// pass returns. A failure that only says the task ended charges nothing.
+func TestExtenderProbeReturnsWhenItsContextEndsDuringAProbe(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		installTestExtenderWorkConfig(t)
+		extenderIds := []server.Id{
+			createTestExtender(ctx, 7, 4),
+			createTestExtender(ctx, 8, 4, 6),
+		}
+
+		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
+		defer clientSession.Cancel()
+		previous := probeExtenderAddress
+		probeExtenderAddress = func(
+			ctx context.Context,
+			target *model.NetworkExtenderProbeTarget,
+			serverName string,
+			destinationHost string,
+		) error {
+			clientSession.Cancel()
+			return fmt.Errorf("the probe ended with its task")
+		}
+		t.Cleanup(func() {
+			probeExtenderAddress = previous
+		})
+
+		result, err := ExtenderProbe(&ExtenderProbeArgs{}, clientSession)
+		if err != nil {
+			t.Fatalf("the probe task must not fail when its context ends: %v", err)
+		}
+		connect.AssertEqual(t, result.Probed, 3)
+		connect.AssertEqual(t, result.Failed, 0)
+
+		for _, extenderId := range extenderIds {
+			for _, address := range model.Testing_GetNetworkExtender(ctx, extenderId).Addresses {
+				connect.AssertEqual(t, address.Active, true)
+				connect.AssertEqual(t, address.ConsecutiveProbeFailures, 0)
+			}
 		}
 	})
 }

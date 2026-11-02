@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"testing"
 	"time"
@@ -195,6 +196,68 @@ func TestExtenderRegistrationWithoutAMeasurementKeyStoresNoRequest(t *testing.T)
 		time.Sleep(2 * time.Second)
 		if measurement := model.Testing_GetNetworkExtenderMeasurement(ctx, extenderId); measurement != nil {
 			t.Fatalf("a request was stored with no measurement key: %v", measurement.State)
+		}
+	})
+}
+
+// The run of connect's own activation loop reaches the history row
+// (connect/EXTENDER.md G3): every activation of one process stores the one run
+// id, as 32 hex characters, and a start from before that process's first post.
+//
+// This builds against whichever connect the module is replaced with. One that
+// predates the run sends none and every row holds null, which the test reads
+// from connect's own args and says, so neither repository's merge has to come
+// first. Once connect carries the field, the test holds the two sides to it.
+func TestExtenderRegistrationStoresTheRunOfTheLoop(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		fixture := newTestExtenderFixture(t)
+		installTestExtenderConfig(t, fixture.api)
+		clientSession := newTestExtenderSession(t, ctx, fixture.clientAddress("127.0.0.1"))
+		apiUrl := newTestExtenderRegistrationApi(t, clientSession)
+
+		activator := startTestExtenderRegistration(t, ctx, fixture, apiUrl, nil)
+		extenderId := waitTestExtenderRegistered(t, ctx, fixture)
+		// a second pass of the same process
+		activator.Reactivate()
+		deadline := time.Now().Add(30 * time.Second)
+		var activations []*model.NetworkExtenderActivationRecord
+		for {
+			activations = model.GetNetworkExtenderActivations(ctx, extenderId, time.Time{})
+			if 2 <= len(activations) {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("the loop stored %d activations, expected a second pass", len(activations))
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+
+		if _, sendsRun := reflect.TypeOf(connect.ExtenderActivateArgs{}).FieldByName("RunId"); !sendsRun {
+			t.Log("this connect predates the run, so every row holds null")
+			for _, activation := range activations {
+				if activation.RunId != nil || activation.RunStartTime != nil || activation.PreviousExit != nil {
+					t.Fatalf("a connect with no run stored %v %v %v", activation.RunId, activation.RunStartTime, activation.PreviousExit)
+				}
+			}
+			return
+		}
+
+		first := activations[0]
+		if first.RunId == nil || len(*first.RunId) != 32 {
+			t.Fatalf("the loop's run id was stored as %v", first.RunId)
+		}
+		if first.RunStartTime == nil || first.RunStartTime.After(first.ActivateTime) {
+			t.Fatalf("the loop's run start was stored as %v, its first activation at %s", first.RunStartTime, first.ActivateTime)
+		}
+		for _, activation := range activations[1:] {
+			if activation.RunId == nil || *activation.RunId != *first.RunId {
+				t.Fatalf("a later pass stored run id %v, expected %s", activation.RunId, *first.RunId)
+			}
+			if activation.RunStartTime == nil || !activation.RunStartTime.Equal(*first.RunStartTime) {
+				t.Fatalf("a later pass stored run start %v, expected %s", activation.RunStartTime, *first.RunStartTime)
+			}
 		}
 	})
 }
