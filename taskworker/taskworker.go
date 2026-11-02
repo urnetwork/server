@@ -447,10 +447,7 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.RemoveLocationLookupResults,
 			work.RemoveLocationLookupResultsPost,
 		),
-		task.NewTaskTargetWithPost(
-			work.RemoveCompletedContracts,
-			work.RemoveCompletedContractsPost,
-		),
+		work.NewRemoveCompletedContractsTaskTarget(),
 		task.NewTaskTargetWithPost(
 			work.RemoveContractsPastHorizon,
 			work.RemoveContractsPastHorizonPost,

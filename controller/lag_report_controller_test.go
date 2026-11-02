@@ -160,16 +160,30 @@ func signLagTestReport(t testing.TB, body *protocol.LagReportBody, privateKey ed
 	return base64.StdEncoding.EncodeToString(reportBytes)
 }
 
-// Replaces the GeoLite2 City place lookup for the rest of the test.
+// Replaces GeoLite2 for the extenders' places for the rest of the test: an
+// address in `places` is placed there, 20 km sure, announced by a network
+// GeoLite2 ASN does not know, and every other address nowhere. The map is
+// read at each lookup, so a test may add to it after this.
 func useLagAddressPlaces(t testing.TB, places map[string]*model.LagPlace) {
 	t.Helper()
-	previous := lagAddressPlace
-	lagAddressPlace = func(ip netip.Addr) *model.LagPlace {
-		return places[ip.Unmap().String()]
-	}
-	t.Cleanup(func() {
-		lagAddressPlace = previous
+	useLagAddressRecords(t, func(ip string) *model.LagAddressPlace {
+		place := places[ip]
+		if place == nil {
+			return nil
+		}
+		return &model.LagAddressPlace{Place: place, AccuracyRadiusKm: 20}
 	})
+}
+
+// Replaces GeoLite2 for the extenders' places for the rest of the test with
+// `lookup`, by the address's canonical text, nil for an address it places
+// nowhere.
+func useLagAddressRecords(t testing.TB, lookup func(ip string) *model.LagAddressPlace) {
+	t.Helper()
+	restore := model.Testing_ReplaceLagAddressPlaces(func(ip netip.Addr) *model.LagAddressPlace {
+		return lookup(ip.Unmap().String())
+	})
+	t.Cleanup(restore)
 }
 
 // Every row of a table as json text, for looking for what must not be there.

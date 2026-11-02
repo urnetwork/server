@@ -1371,6 +1371,230 @@
           "instant": true
         }
       ]
+    },
+    {
+      "type": "row",
+      "title": "re-engagement (mmm/reengagement; inert while reengagement.yml has enabled: false)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 99
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "re-engagement scan outcomes / day by stream and result",
+      "description": "The daily scan (02:30 UTC) per stream: opened, dry_run (the program is disabled, so it only counts), policy (the mail policy refused the network), skipped (not eligible now).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 100
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (stream, result) (increase(urnetwork_reengagement_episodes_total{env=\"$env\"}[1d]))",
+          "refId": "A",
+          "legendFormat": "{{stream}} {{result}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "re-engagement step outcomes / h by step and result",
+      "description": "Each step task's outcome: sent, virtual (a holdout network's send that is only logged), skipped, deferred (one campaign email a week), dry_run (disabled), failed (a Brevo error).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 100
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (step, result) (increase(urnetwork_reengagement_emails_total{env=\"$env\"}[1h]))",
+          "refId": "A",
+          "legendFormat": "{{step}} {{result}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "re-engagement exits / day by stream and reason",
+      "description": "Episodes ending, by stream and reason (reactivated, answered, engaged, kept, sunset, capped, onboarding_active, and the global exits).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 108
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (stream, reason) (increase(urnetwork_reengagement_exits_total{env=\"$env\"}[1d]))",
+          "refId": "A",
+          "legendFormat": "{{stream}} {{reason}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "re-engagement webhook events / h by event and template",
+      "description": "Brevo transactional webhook events attributed to a re-engagement send. Opens are not counted (Apple Mail Privacy Protection makes them meaningless); a bounce or complaint suppresses the network on every program.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 108
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (event, template) (increase(urnetwork_reengagement_webhook_events_total{env=\"$env\"}[1h]))",
+          "refId": "A",
+          "legendFormat": "{{event}} {{template}}"
+        }
+      ]
     }
   ]
 }
