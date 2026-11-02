@@ -58,7 +58,7 @@ var reengagementWinbackOffersTotal = prometheus.NewCounterVec(prometheus.Counter
 	Namespace: "urnetwork",
 	Subsystem: "reengagement",
 	Name:      "winback_offers_total",
-	Help:      "W1 comeback offer outcomes at send time by store: issued, existing (a replayed W1 found its own offer), or why none was issued (disabled, no_store, holdout, no_offer_arm, country, never_paid, recent_offer, apple_ineligible, apple_error, store_error).",
+	Help:      "W1 comeback offer outcomes at send time by store: issued, existing (a replayed W1 found its own offer), or why none was issued (disabled, no_store, holdout, no_offer_arm, below_minimum_charge, country, never_paid, recent_offer, apple_ineligible, apple_error, store_error).",
 }, []string{"store", "result"})
 
 var reengagementWinbackRedemptionsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{

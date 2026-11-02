@@ -1599,7 +1599,7 @@
     {
       "type": "timeseries",
       "title": "re-engagement win-back offers / day by store and result",
-      "description": "W1's comeback offer at each real send: issued, existing (a replayed W1 mailed the offer it issued), or why none went out (disabled, no_store for crypto, holdout, no_offer_arm, country, never_paid, recent_offer, apple_ineligible, apple_error, store_error). Google Play and Stripe offers go to the W experiment's offer arm; the App Store's to every mailed arm Apple lists.",
+      "description": "W1's comeback offer at each real send: issued, existing (a replayed W1 mailed the offer it issued), or why none went out (disabled, no_store for crypto, holdout, no_offer_arm, below_minimum_charge for a Stripe network on a tier where half the month is under Stripe's 0.50 USD minimum, country, never_paid, recent_offer, apple_ineligible, apple_error, store_error). Google Play and Stripe offers go to the W experiment's offer arm; the App Store's to every mailed arm Apple lists.",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
