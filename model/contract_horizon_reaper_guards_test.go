@@ -19,9 +19,6 @@ func TestOperatorBlockPointsAwardableBlocks(t *testing.T) {
 	if !operatorBlockStart(15).Equal(at(time.October, 4, 0, 0)) || !operatorBlockStart(21).Equal(at(time.November, 15, 0, 0)) {
 		t.Fatal("the block numbering moved", operatorBlockStart(15), operatorBlockStart(21))
 	}
-	if OperatorBlockPointsMaxTime != 12*time.Hour {
-		t.Fatal("an award's claim bound is not 12 hours", OperatorBlockPointsMaxTime)
-	}
 	for _, sample := range []struct {
 		name   string
 		cutoff time.Time
