@@ -3801,7 +3801,7 @@
    "description": "Records signed for an extender in a configured capability cohort (extender.yml directory.capability_cohorts; docs/operations/extender-capability-cohort.md), per hour, by capability (unknown for a configured value the server does not know) and how the requirement was decided: required, the record requires the capability; no_camouflage_key, the record carries no camouflage key, so tcp-camouflage-v1 is not required and the cohort is still inert; not_release_only, the extender is reached by an open channel, so nothing is required. A Phase B cohort may splice only once its members show required and no other result for at least one record lifetime. Any unknown series is a misspelled cohort, which withholds those extenders from every release."
   },
   {
-   "id": 72,
+   "id": 73,
    "type": "row",
    "title": "restarts",
    "collapsed": false,
@@ -3809,12 +3809,12 @@
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 146
+    "y": 154
    },
    "panels": []
   },
   {
-   "id": 73,
+   "id": 74,
    "type": "timeseries",
    "title": "restarting extenders (24h)",
    "datasource": {
@@ -3825,7 +3825,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 147
+    "y": 155
    },
    "fieldConfig": {
     "defaults": {
