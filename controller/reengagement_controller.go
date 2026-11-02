@@ -203,6 +203,15 @@ func ReengagementScan(args *ReengagementScanArgs, clientSession *session.ClientS
 		for _, grace := range []bool{true, false} {
 			endDay := today.Add(-time.Duration(s.WinbackAfterDays(grace)) * day)
 			for _, c := range model.ListWinbackReengagementCandidates(ctx, endDay.Add(-catchUp), endDay.Add(day), grace, limit) {
+				// W is for networks that paid (PLAN.md "AUDIENCES AND
+				// STREAMS"): the candidate query counts any supporter window
+				// with revenue, which takes in App Store trial markers and Play
+				// trial windows; the offer's strict check decides
+				if !model.NetworkHasPaidSupporterPeriod(ctx, c.NetworkId) {
+					result.Candidates[reengagement.StreamWinback]++
+					reengagementEpisodesTotal.WithLabelValues(reengagement.StreamWinback, "skipped").Inc()
+					continue
+				}
 				open(reengagement.StreamWinback, c, reengagement.StepW1, nil)
 			}
 		}
