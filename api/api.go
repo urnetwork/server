@@ -155,6 +155,9 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		// an extender's lag.dev measurement certificate, polled with its
 		// activation credential (lag.dev/PLAN.md A8)
 		router.NewRoute("GET", "/network/extender-measurement-cert", handlers.ExtenderMeasurementCert),
+		// the public seed bundle, the origin every seed mirror copies
+		// (connect/EXTENDER-UPDATE2.md §2.3, controller.ExtenderSeedPath)
+		router.NewRoute("GET", "/v1/seed\\.bin", handlers.ExtenderSeed),
 		router.NewRoute("POST", "/network/provider-egress-location", handlers.ProviderEgressLocationSubmit),
 		router.NewRoute("GET", "/network/provider-egress-due", handlers.ProviderEgressLocationDue),
 		router.NewRoute("GET", "/network/provider-blackhole-due", handlers.ProviderBlackholeCheckDue),

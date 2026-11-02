@@ -157,6 +157,10 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleRollupProviderEgressTallies(clientSession, tx)
 		work.ScheduleExtenderProbe(clientSession, tx)
 		work.ScheduleExtenderPublish(clientSession, tx)
+		// the public seed bundle and its mirror check
+		// (connect/EXTENDER-UPDATE2.md §2); idle until extender.yml enables
+		// the seed block
+		work.ScheduleExtenderSeed(clientSession, tx)
 		// lag.dev measurement certificates and names (lag.dev/PLAN.md C5-C9);
 		// both idle until extender.yml enables the measurement block
 		work.ScheduleExtenderMeasurementIssue(clientSession, tx)
@@ -514,6 +518,11 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.ExtenderPublish,
 			work.ExtenderPublishPost,
+		),
+		// connect/EXTENDER-UPDATE2.md §2
+		task.NewTaskTargetWithPost(
+			work.ExtenderSeed,
+			work.ExtenderSeedPost,
 		),
 		// lag.dev/PLAN.md C5-C9
 		task.NewTaskTargetWithPost(
