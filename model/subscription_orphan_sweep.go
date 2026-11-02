@@ -142,9 +142,9 @@ func newSweepLockedKeyTargets(cursorTargets []any) []any {
 // The participant step proves a stream unreferenced by probing transfer_contract
 // for a row with its stream_id, once per participant row. Contract ids, not
 // stream ids, key the contract table, so only an index that leads with
-// stream_id answers that probe: transfer_contract_stream_id (v629), which is
-// dropped while contract_participant is empty. Without such an index each
-// probe would read the whole contract heap. So each page first checks for a
+// stream_id answers that probe. transfer_contract_stream_id (v629) answered it
+// until the index diet dropped it while contract_participant was empty, and
+// without such an index each probe would read the whole contract heap. So each page first checks for a
 // valid, ready btree index leading with stream_id, unconditional or limited to
 // stream_id IS NOT NULL, and without one the step does not run: participant
 // rows are kept, never deleted unproven, and the pass moves on.

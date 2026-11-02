@@ -67,11 +67,14 @@ type ContractRetentionCursor struct {
 	// the partition whose usage proof is being archived, and the next id
 	ArchivePartition string `json:"archive_partition,omitempty"`
 	ArchiveCursor    *Id    `json:"archive_cursor,omitempty"`
-	// the next close evidence contract id to consider
-	EvidenceCursor *Id `json:"evidence_cursor,omitempty"`
-	// the close evidence partition that id is in, once the evidence is
-	// partitioned (RemoveExpiredCloseEvidence)
-	EvidenceLeaf string `json:"evidence_leaf,omitempty"`
+	// where the close evidence row retention resumes, or starts its next
+	// pass (RemoveExpiredCloseEvidence)
+	EvidenceRemoval *CloseEvidenceRemovalCursor `json:"evidence_removal,omitempty"`
+	// the close evidence cursor before 2026-11-02, a pass in progress: the
+	// next contract id to consider and the partition it is in. Read once into
+	// EvidenceRemoval.
+	EvidenceCursor *Id    `json:"evidence_cursor,omitempty"`
+	EvidenceLeaf   string `json:"evidence_leaf,omitempty"`
 	// the week whose parents were last analyzed
 	AnalyzedWeek string `json:"analyzed_week,omitempty"`
 }
@@ -84,6 +87,10 @@ type ContractPartitionReport struct {
 	Dropped          []string
 	Archived         int64
 	EvidenceRemoved  int64
+	// the retention the close evidence row deletes applied, and why they
+	// stopped (CloseEvidenceRemovalReport)
+	EvidenceRetention time.Duration
+	EvidenceStop      string
 	// expired weeks that stay, with the reason
 	Blocked map[string]string
 	// the fewest weeks after the current one with a partition, across tables
@@ -96,14 +103,30 @@ type ContractPartitionReport struct {
 
 const contractArchiveBatchSize = 10000
 
-const closeEvidenceRetentionBatchSize = 5000
-
 // A weekly partition is analyzed this long after its week, when late closes
 // and settlements have landed.
 const contractPartitionAnalyzeDelay = 24 * time.Hour
 
 func contractPartitionGlogf(format string, args ...any) {
 	glog.Infof("[cp]"+format+"\n", args...)
+}
+
+// Where the close evidence row retention resumes: evidence_removal, or the
+// pass in progress that a cursor from before 2026-11-02 holds in its old fields.
+func (self ContractRetentionCursor) evidenceRemovalCursor() CloseEvidenceRemovalCursor {
+	if self.EvidenceRemoval != nil {
+		return *self.EvidenceRemoval
+	}
+	return CloseEvidenceRemovalCursor{Leaf: self.EvidenceLeaf, ContractId: self.EvidenceCursor}
+}
+
+// This cursor with where the close evidence row retention resumes, in
+// evidence_removal alone.
+func (self ContractRetentionCursor) withEvidenceRemoval(removal CloseEvidenceRemovalCursor) ContractRetentionCursor {
+	self.EvidenceRemoval = &removal
+	self.EvidenceLeaf = ""
+	self.EvidenceCursor = nil
+	return self
 }
 
 // budget bounds the run: two thirds for the partitions and the rest for the
@@ -142,15 +165,16 @@ func MaintainContractPartitions(ctx context.Context, now time.Time, cursor Contr
 
 	report.AbandonedEvidenceCutover = abandonStaleCloseEvidenceCutover(ctx, now, DefaultCloseEvidencePartitionSettings(), contractPartitionGlogf)
 
-	removed, evidenceCursor, more := RemoveExpiredCloseEvidence(
+	evidenceReport, evidenceNext, more := RemoveExpiredCloseEvidence(
 		ctx,
 		now,
-		CloseEvidenceRemovalCursor{Leaf: cursor.EvidenceLeaf, ContractId: cursor.EvidenceCursor},
+		cursor.evidenceRemovalCursor(),
 		time.Now().Add(budget/3),
 	)
-	report.EvidenceRemoved = removed
-	next.EvidenceLeaf = evidenceCursor.Leaf
-	next.EvidenceCursor = evidenceCursor.ContractId
+	report.EvidenceRemoved = evidenceReport.Removed
+	report.EvidenceRetention = evidenceReport.Retention
+	report.EvidenceStop = evidenceReport.Stop
+	next = next.withEvidenceRemoval(evidenceNext)
 	if more {
 		report.More = true
 	}
@@ -412,99 +436,4 @@ func dropContractWeek(ctx context.Context, week contractWeek) (dropped []string,
 		return nil, fmt.Errorf("%d long transaction(s) hold contract table locks; retried next run", busy)
 	}
 	return contractPartitionFamily.DropRange(ctx, week.partitionRange())
-}
-
-// Deletes close evidence accepted more than ContractRetention ago whose
-// contract is resolved or gone, in batches ordered by contract id. Only a
-// transaction that opts in may delete evidence, and the guard of migration 857
-// admits only rows past the same 91 days. Once the evidence is partitioned the
-// pass deletes from the leaves the drop cannot take (closeEvidenceRemovalTargets):
-// the DEFAULT partition, the expired weeks a straggler keeps, and the legacy
-// partition, one leaf after another; a week the drop will take, and a week
-// not yet expired, are left alone. A pass ends when the last leaf's batch
-// comes up short; the next pass starts over to pick up rows whose contract
-// resolved since.
-func RemoveExpiredCloseEvidence(ctx context.Context, now time.Time, cursor CloseEvidenceRemovalCursor, deadline time.Time) (removed int64, next CloseEvidenceRemovalCursor, more bool) {
-	targets, err := closeEvidenceRemovalTargets(ctx, now)
-	if err != nil {
-		glog.Errorf("[cp]close evidence retention: %s\n", err)
-		return 0, cursor, false
-	}
-	start, from := cursor.resumeIn(targets)
-	for _, target := range targets[start:] {
-		count, last, complete, ok := removeExpiredCloseEvidenceFrom(ctx, target, now, from, deadline)
-		removed += count
-		if !ok {
-			return removed, cursor, false
-		}
-		if !complete {
-			return removed, CloseEvidenceRemovalCursor{Leaf: target, ContractId: &last}, true
-		}
-		from = Id{}
-	}
-	return removed, CloseEvidenceRemovalCursor{}, false
-}
-
-// Deletes the expired evidence of one leaf (or of the plain table) from the
-// contract id from, until deadline. complete says a batch came up short, and
-// ok is false when a batch failed; otherwise last is where the leaf resumes.
-func removeExpiredCloseEvidenceFrom(ctx context.Context, leaf string, now time.Time, from Id, deadline time.Time) (removed int64, last Id, complete bool, ok bool) {
-	upper := ContractIdFloor(now.Add(-ContractRetention))
-	last = from
-	for time.Now().Before(deadline) {
-		var count int64
-		batchLast := last
-		err := contractPartitionTx(ctx, func(tx PgTx) {
-			count = 0
-			batchLast = last
-			RaisePgResult(tx.Exec(ctx, `SET LOCAL urnetwork.close_evidence_retention = 'on'`))
-			result, err := tx.Query(
-				ctx,
-				fmt.Sprintf(
-					`
-					WITH batch AS (
-						SELECT evidence.client_id, evidence.report_id
-						FROM public.%[1]s evidence
-						WHERE $1 <= evidence.contract_id AND evidence.contract_id < $2
-							AND evidence.accepted_at < (now() AT TIME ZONE 'UTC') - interval '91 days'
-							AND NOT EXISTS (
-								SELECT 1 FROM transfer_contract
-								WHERE transfer_contract.contract_id = evidence.contract_id AND transfer_contract.outcome IS NULL
-							)
-						ORDER BY evidence.contract_id
-						LIMIT $3
-					)
-					DELETE FROM public.%[1]s evidence
-					USING batch
-					WHERE evidence.client_id = batch.client_id AND evidence.report_id = batch.report_id
-					RETURNING evidence.contract_id
-					`,
-					quoteIdentifier(leaf),
-				),
-				last,
-				upper,
-				closeEvidenceRetentionBatchSize,
-			)
-			WithPgResult(result, err, func() {
-				for result.Next() {
-					var contractId Id
-					Raise(result.Scan(&contractId))
-					count += 1
-					if batchLast.Less(contractId) {
-						batchLast = contractId
-					}
-				}
-			})
-		})
-		if err != nil {
-			glog.Errorf("[cp]close evidence retention of %s: %s\n", leaf, err)
-			return removed, last, false, false
-		}
-		removed += count
-		last = batchLast
-		if count < closeEvidenceRetentionBatchSize {
-			return removed, last, true, true
-		}
-	}
-	return removed, last, false, true
 }
