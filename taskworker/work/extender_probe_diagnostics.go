@@ -321,16 +321,21 @@ func classifyExtenderProbeFailure(err error) (class string, detail string) {
 	}
 }
 
-// Anything in a detail that reads as an ip, with its port: a v6 address is
-// two colons with hex between, which no sentence in an error has.
+// Anything in a detail that reads as an ip, with its port. A v6 address is two
+// colons with hex between, which no sentence in an error has. The v4 expression
+// runs first, because the v6 one would read the end of "192.0.2.1:443: " as an
+// address and leave the first three octets behind.
 var (
+	extenderProbeDetailIpv4 = regexp.MustCompile(`(::[Ff]{4}:)?[0-9]{1,3}(\.[0-9]{1,3}){3}(:[0-9]+)?`)
 	extenderProbeDetailIpv6 = regexp.MustCompile(`\[?[0-9A-Fa-f]*:[0-9A-Fa-f]*:[0-9A-Fa-f:.]*(%[0-9A-Za-z]+)?\]?(:[0-9]+)?`)
-	extenderProbeDetailIpv4 = regexp.MustCompile(`[0-9]{1,3}(\.[0-9]{1,3}){3}(:[0-9]+)?`)
 )
 
 // What an error says, with no address in it: an OpError's operation and cause
 // without the socket ends it names, anything else as it reads, either way
-// scrubbed of anything that reads as an ip and cut to a length.
+// scrubbed of anything that reads as an ip and cut to a length. This does more
+// than extenderProbeErrorText, which takes out the one address dialed: a read or
+// a write also names the prober's own end of the socket, and this line names no
+// address at all.
 func extenderProbeFailureDetail(err error) string {
 	detail := err.Error()
 	var opErr *net.OpError
@@ -347,8 +352,8 @@ func extenderProbeFailureDetail(err error) string {
 		}
 		detail = fmt.Sprintf("%s: %s", opErr.Op, causeText)
 	}
-	detail = extenderProbeDetailIpv6.ReplaceAllString(detail, "<ip>")
-	detail = extenderProbeDetailIpv4.ReplaceAllString(detail, "<ip>")
+	detail = extenderProbeDetailIpv4.ReplaceAllString(detail, "<address>")
+	detail = extenderProbeDetailIpv6.ReplaceAllString(detail, "<address>")
 	if detailRunes := []rune(detail); extenderProbeDiagnosticDetailMaxLength < len(detailRunes) {
 		detail = string(detailRunes[:extenderProbeDiagnosticDetailMaxLength]) + "..."
 	}

@@ -348,7 +348,7 @@ func TestExtenderProbeDiagnosticClassifiesTheProbeErrors(t *testing.T) {
 		{"timeout after bytes", connected(readErr(os.ErrDeadlineExceeded), 2900), extenderProbeFailureTimeout, "read: i/o timeout"},
 		{"unwatched eof", io.EOF, extenderProbeFailureClosed, "EOF"},
 		{"unwatched", errors.New("the extender did not answer"), extenderProbeFailureOther, "did not answer"},
-		{"quoted addresses", connected(errors.New("odd answer from 192.0.2.80:443 via [2001:db8::80]:443 and ::ffff:192.0.2.81"), 40), extenderProbeFailureOther, "odd answer from <ip> via <ip> and <ip>"},
+		{"quoted addresses", connected(errors.New("odd answer from 192.0.2.80:443 via [2001:db8::80]:443 and ::ffff:192.0.2.81"), 40), extenderProbeFailureOther, "odd answer from <address> via <address> and <address>"},
 	}
 	for _, c := range cases {
 		class, detail := classifyExtenderProbeFailure(c.err)
@@ -358,7 +358,7 @@ func TestExtenderProbeDiagnosticClassifiesTheProbeErrors(t *testing.T) {
 		if !strings.Contains(detail, c.detail) {
 			t.Errorf("%s: detail = %q, want it to contain %q", c.name, detail, c.detail)
 		}
-		for _, address := range []string{"192.0.2.8", "10.20.30.40", "50123", "2001:db8", "ffff"} {
+		for _, address := range []string{"192.0.2", "10.20.30", "50123", "2001", "ffff"} {
 			if strings.Contains(detail, address) {
 				t.Errorf("%s: detail %q names an address", c.name, detail)
 			}
@@ -431,6 +431,31 @@ func TestExtenderProbeDiagnosticLineNamesTheExtenderNotTheAddress(t *testing.T) 
 	connect.AssertEqual(t, strings.Contains(line, " class=other "), true)
 	connect.AssertEqual(t, strings.Contains(line, " elapsed=? connect=? server_bytes=? since_activation=? since_uptime_ok=? failures_before=?"), true)
 	connect.AssertEqual(t, strings.Contains(line, "192.0.2.90"), false)
+
+	// the rule of the probe's other lines holds here too, inside an error's
+	// text: the forms extenderProbeErrorText is tested on, typed and flattened,
+	// and the prober's own end of a read, which that function leaves alone
+	for _, lineErr := range []error{
+		errors.New("dial tcp 192.0.2.90:443: i/o timeout"),
+		errors.New("dial tcp [2001:db8::90]:443: connect: connection refused"),
+		errors.New("dial tcp 192.0.2.90:443: i/o timeout, again ::ffff:192.0.2.90"),
+		errors.New("read tcp 10.20.30.40:50123->192.0.2.90:443: read: connection reset by peer"),
+		errors.New("read tcp [2001:db8::40]:50123->[2001:db8::90]:443: i/o timeout"),
+		&net.OpError{
+			Op:     "read",
+			Net:    "tcp",
+			Source: &net.TCPAddr{IP: net.ParseIP("10.20.30.40"), Port: 50123},
+			Addr:   &net.TCPAddr{IP: net.ParseIP("192.0.2.90"), Port: 443},
+			Err:    &os.SyscallError{Syscall: "read", Err: syscall.ECONNRESET},
+		},
+	} {
+		line := extenderProbeDiagnosticLine(target, testDiagnosticSpoofName, lineErr, state, now)
+		for _, address := range []string{"192.0.2", "10.20.30", "50123", "2001", "ffff"} {
+			if strings.Contains(line, address) {
+				t.Errorf("%s\nleft %q in: %s", lineErr, address, line)
+			}
+		}
+	}
 }
 
 // One line per address an hour over every taskworker: the first failure in
