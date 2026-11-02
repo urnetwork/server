@@ -387,36 +387,65 @@ func (self *networkExtenderReleaseTx) RecordRelease(identity []byte, keyHex stri
 	))
 }
 
-// Records that a client in a country could not reach an extender (R4).
+// Records that a client in a country could not reach an extender (R4), and
+// whether it was recorded.
+//
+// A report is evidence of a block only while the operator's own probe reaches
+// the extender (connect/EXTENDER-UPDATE2.md §1.3). It is not recorded while
+// the extender has no active address, or while any active address's latest
+// probe failed or is older than the probe window: then the extender is down,
+// or partly down on a family the report cannot name, and the report describes
+// that rather than a block. The tables keep only the latest probe of each
+// address, so a report sent before the first failed probe of an outage is
+// still recorded; the read rule (NetworkExtenderBlockedInCountry) holds while
+// that outage lasts.
 func RecordNetworkExtenderBlockReport(
 	ctx context.Context,
 	extenderId server.Id,
 	clientId server.Id,
 	countryCode string,
 	reportTime time.Time,
-) {
+) (recorded bool) {
+	probeWindow := connect.DefaultExtenderBlockedStateSettings().ProbeWindow
 	server.Tx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
+		tag, err := tx.Exec(
 			ctx,
 			`
 			INSERT INTO network_extender_block_report (report_id, extender_id, client_id, country_code, report_time)
-			VALUES ($1, $2, $3, $4, $5)
+			SELECT $1, $2, $3, $4, $5
+			WHERE EXISTS (
+				SELECT 1 FROM network_extender_address
+				WHERE extender_id = $2 AND active
+			) AND NOT EXISTS (
+				SELECT 1 FROM network_extender_address
+				WHERE extender_id = $2 AND active AND (
+					consecutive_probe_failures != 0 OR
+					last_probe_success_time IS NULL OR
+					last_probe_success_time < $6
+				)
+			)
 			`,
 			server.NewId(),
 			extenderId,
 			clientId,
 			strings.ToLower(strings.TrimSpace(countryCode)),
 			reportTime.UTC(),
-		))
+			reportTime.Add(-probeWindow).UTC(),
+		)
+		server.Raise(err)
+		recorded = tag.RowsAffected() == 1
 	})
+	return
 }
 
 // Whether an extender is blocked in a country at `now` (R4,
 // connect.ExtenderBlockedState's rule over the tables): at least
 // `reportThreshold` distinct clients there reported it since the report
-// window began, and the operator's own probe reached one of its active
-// addresses since the probe window began, so an extender that is simply down
-// is not blocked.
+// window began, and the operator's own probe reaches the extender now: it has
+// an active address, and every active address's latest probe succeeded
+// within the probe window (connect/EXTENDER-UPDATE2.md §1.3). An extender that
+// is down, or failing on one of its families, is not blocked, however many
+// report it.
 func NetworkExtenderBlockedInCountry(
 	ctx context.Context,
 	extenderId server.Id,
@@ -440,7 +469,16 @@ func NetworkExtenderBlockedInCountry(
 				(
 					SELECT COUNT(*)
 					FROM network_extender_address
-					WHERE extender_id = $1 AND active AND $4 <= last_probe_success_time
+					WHERE extender_id = $1 AND active
+				),
+				(
+					SELECT COUNT(*)
+					FROM network_extender_address
+					WHERE
+						extender_id = $1 AND
+						active AND
+						consecutive_probe_failures = 0 AND
+						$4 <= last_probe_success_time
 				)
 			`,
 			extenderId,
@@ -451,9 +489,12 @@ func NetworkExtenderBlockedInCountry(
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
 				var reporterCount int
-				var probedAddressCount int
-				server.Raise(result.Scan(&reporterCount, &probedAddressCount))
-				blocked = reportThreshold <= reporterCount && 0 < probedAddressCount
+				var activeAddressCount int
+				var reachedAddressCount int
+				server.Raise(result.Scan(&reporterCount, &activeAddressCount, &reachedAddressCount))
+				blocked = reportThreshold <= reporterCount &&
+					0 < activeAddressCount &&
+					reachedAddressCount == activeAddressCount
 			}
 		})
 	})
@@ -500,7 +541,8 @@ func (self *NetworkExtenderBlockedSource) Blocked(keyHex string, countryCode str
 }
 
 // Loads one partition's blocked flags in one database round trip, outside the
-// admission transaction. Unknown or removed records have no live blocked flag.
+// admission transaction, under NetworkExtenderBlockedInCountry's rule. Unknown
+// or removed records have no live blocked flag.
 func (self *NetworkExtenderBlockedSource) BlockedKeys(keyHexes []string, countryCode string) map[string]bool {
 	keyHexesById := map[server.Id]string{}
 	extenderIds := []server.Id{}
@@ -526,7 +568,14 @@ func (self *NetworkExtenderBlockedSource) BlockedKeys(keyHexes []string, country
 				WHERE extender_id = candidate.extender_id AND country_code = $2 AND $4 <= report_time
 			) >= $3 AND EXISTS (
 				SELECT 1 FROM network_extender_address
-				WHERE extender_id = candidate.extender_id AND active AND $5 <= last_probe_success_time
+				WHERE extender_id = candidate.extender_id AND active
+			) AND NOT EXISTS (
+				SELECT 1 FROM network_extender_address
+				WHERE extender_id = candidate.extender_id AND active AND (
+					consecutive_probe_failures != 0 OR
+					last_probe_success_time IS NULL OR
+					last_probe_success_time < $5
+				)
 			)
 		`, extenderIds, strings.ToLower(strings.TrimSpace(countryCode)), self.settings.ReportThreshold,
 			now.Add(-self.settings.ReportWindow).UTC(), now.Add(-self.settings.ProbeWindow).UTC())

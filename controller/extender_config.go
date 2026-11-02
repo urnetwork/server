@@ -34,6 +34,13 @@ import (
 //	  - migration.example
 //	api_url: https://api.ur.example
 //	gossip_identity_key_hex: <ed25519 seed>
+//	directory:
+//	  durable_network_ids:
+//	    - <operator account network id>
+//	  capability_cohorts:
+//	    - capability: tcp-camouflage-v1
+//	      extender_public_keys_hex:
+//	        - <extender identity public key, hex>
 //	dns:
 //	  enabled: false
 //	  hosted_zone_id: <zone>
@@ -131,6 +138,10 @@ type ExtenderMeasurementConfig struct {
 // is the directory as it was.
 type ExtenderDirectoryConfig struct {
 	DurableNetworkIds []string `yaml:"durable_network_ids"`
+	// The gated extenders whose records require a client capability
+	// (connect/EXTENDER-UPDATE2.md §3.2, extender_capability.go). Unset
+	// requires nothing, which is the directory as it was.
+	CapabilityCohorts []ExtenderCapabilityCohortConfig `yaml:"capability_cohorts"`
 }
 
 // The hmac domain the directory secret is derived under.
@@ -259,6 +270,7 @@ func readExtenderConfig() *extenderConfigResult {
 			err: &extenderConfigError{message: "the extender configuration is not readable", cause: err},
 		}
 	}
+	warnUnknownExtenderCapabilities(config)
 	return &extenderConfigResult{config: config}
 }
 
