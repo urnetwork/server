@@ -681,6 +681,75 @@ func TestExtenderSeedPublisherReplacesTheBundleOnlyWhenDue(t *testing.T) {
 	expect(extenderSeedOutcomePublished, "epoch")
 }
 
+// A revocation is carried bundle to bundle while any record it dominates may
+// still be valid anywhere: with a seed lifetime shorter than a day, that is
+// the day a record of every other channel lives, and once both have passed it
+// is dropped.
+func TestExtenderSeedPublisherCarriesARevocationWhileAnyRecordItDominatesLives(t *testing.T) {
+	operator := newTestExtenderSeedOperator(t)
+	// the shortest lifetime the publisher signs
+	operator.config.Seed.RecordLifetimeHours = 1
+	lifetime := operator.config.Seed.RecordLifetime()
+	if controller.ExtenderRecordExpireTimeout <= lifetime {
+		t.Fatalf("the test needs a seed lifetime under a day, got %s", lifetime)
+	}
+	fleet := newTestExtenderSeedFleet()
+	for range 20 {
+		fleet.add(t, connect.ExtenderDirectoryTierOpen, "", 4, 6)
+	}
+	publisher := operator.publisher(t, fleet)
+	ctx := context.Background()
+	now := testExtenderSeedEpochStart.Add(time.Hour)
+	if result := publisher.publish(ctx, now); result.outcome != extenderSeedOutcomePublished {
+		t.Fatalf("initial: %s", result.outcome)
+	}
+	first, _ := operator.stored(t, now)
+	revokedKey := first.Records[0].Body.PublicKey
+	revokeTime := now.Add(9 * time.Minute)
+	for extenderId, extender := range fleet.extenders {
+		if string(extender.PublicKey) == string(revokedKey) {
+			fleet.revoke(extenderId, revokeTime)
+		}
+	}
+	now = now.Add(10 * time.Minute)
+	if result := publisher.publish(ctx, now); result.outcome != extenderSeedOutcomePublished || result.reason != "revoked" {
+		t.Fatalf("revoked: %s %s", result.outcome, result.reason)
+	}
+	carries := func() bool {
+		bundle, artifact := operator.stored(t, now)
+		assertExtenderSeedBundleInvariants(t, bundle, artifact, now)
+		for _, revocation := range bundle.Revocations {
+			if string(revocation.Body.PublicKey) == string(revokedKey) {
+				return true
+			}
+		}
+		return false
+	}
+	if !carries() {
+		t.Fatalf("the revoked member's revocation is not in the bundle")
+	}
+
+	// every refresh through the day keeps it, though the seed lifetime is
+	// long past: a day's record of the drip or the dns sets may still be held
+	for now.Before(revokeTime.Add(controller.ExtenderRecordExpireTimeout)) {
+		now = now.Add(controller.ExtenderSeedRefreshTimeout)
+		if result := publisher.publish(ctx, now); result.outcome != extenderSeedOutcomePublished {
+			t.Fatalf("refresh at %s: %s", now.Sub(revokeTime), result.outcome)
+		}
+		if now.Before(revokeTime.Add(controller.ExtenderRecordExpireTimeout)) && !carries() {
+			t.Fatalf("the revocation was dropped %s after it was issued, within a record's day", now.Sub(revokeTime))
+		}
+	}
+	// past the day and the clock allowance, it is dropped
+	now = revokeTime.Add(controller.ExtenderRecordExpireTimeout + connect.ExtenderSeedClockSkew + controller.ExtenderSeedRefreshTimeout)
+	if result := publisher.publish(ctx, now); result.outcome != extenderSeedOutcomePublished {
+		t.Fatalf("after the day: %s", result.outcome)
+	}
+	if carries() {
+		t.Fatalf("the revocation is still carried after every record it dominates expired")
+	}
+}
+
 // An empty open pool stores nothing: the stored bundle stays and ages out.
 func TestExtenderSeedPublisherKeepsTheBundleWhenNothingIsOpen(t *testing.T) {
 	operator := newTestExtenderSeedOperator(t)

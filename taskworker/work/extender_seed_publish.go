@@ -536,8 +536,12 @@ func (self *extenderSeedPublisher) revocations(
 		byKey[key] = &entry{revocation: revocation, issueTimeMs: issueTimeMs}
 	}
 
-	// a record a revocation older than this dominates has expired
-	carryAfterMs := uint64(max(0, now.Add(-lifetime-connect.ExtenderSeedClockSkew).UnixMilli()))
+	// A record a revocation older than this dominates has expired. A seed
+	// record lives the bundle's lifetime and a record of every other channel
+	// (controller.SignExtenderRecord) a day, and a client may hold either, so
+	// the longer of the two.
+	carryLifetime := max(lifetime, controller.ExtenderRecordExpireTimeout)
+	carryAfterMs := uint64(max(0, now.Add(-carryLifetime-connect.ExtenderSeedClockSkew).UnixMilli()))
 	if stored != nil {
 		for _, revocation := range stored.Revocations {
 			if carryAfterMs < revocation.Body.IssueTimeMs {

@@ -190,6 +190,32 @@ func TestExtenderSeedMirrorCheckOutcomes(t *testing.T) {
 	}
 }
 
+// A mirror is verified under the roots a client verifies it with -- connect's
+// default TLS roots, the pinned Let's Encrypt set -- never the system roots:
+// a mirror whose certificate only the system roots accept is one every client
+// refuses, and the check must not report it up.
+func TestExtenderSeedMirrorCheckTrustsOnlyTheClientRoots(t *testing.T) {
+	clientTlsConfig, err := connect.DefaultTlsConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := extenderSeedMirrorRootCAs()
+	if roots == nil || !roots.Equal(clientTlsConfig.RootCAs) {
+		t.Fatalf("the mirror check does not verify mirrors under the client's roots")
+	}
+	if system, err := x509.SystemCertPool(); err == nil && roots.Equal(system) {
+		t.Fatalf("the mirror check verifies mirrors under the system roots")
+	}
+
+	// a mirror whose certificate chains outside the client's roots reports
+	// tls, with the default roots in place
+	mirror := newTestExtenderSeedMirror(t)
+	extenderSeedMirrorRootCAs = extenderSeedMirrorClientRootCAs
+	if result := mirror.check(t, mirror.route(t, "example.com", controller.ExtenderSeedPath)); result.outcome != extenderSeedMirrorOutcomeTls || result.observation.up {
+		t.Fatalf("a certificate outside the client's roots: %s up=%t", result.outcome, result.observation.up)
+	}
+}
+
 // Every route's result is counted and observed under its configured name and
 // route, and nothing else.
 func TestExtenderSeedMirrorCheckRecordsBoundedLabels(t *testing.T) {

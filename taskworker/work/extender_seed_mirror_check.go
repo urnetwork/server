@@ -24,10 +24,14 @@ import (
 //
 // Each pass fetches the bundle from every route of every mirror in the seed
 // block -- the mirror's url resolved as usual, and each dial address, dialed
-// directly with the url's host as the TLS server name and ordinary certificate
-// verification, which is the DNS-independent route a client takes -- and
-// verifies it exactly as a client does (connect.VerifyExtenderSeed) under the
-// root keys and hosts of `extender.yml`. A route reports up only for a bundle
+// directly with the url's host as the TLS server name, which is the
+// DNS-independent route a client takes -- with the certificate verified under
+// the roots a client verifies mirrors with (extenderSeedMirrorRootCAs), and
+// verifies the bundle exactly as a client does (connect.VerifyExtenderSeed)
+// under the root keys and hosts of `extender.yml`. A client without a dial
+// address resolves the url with the device's system resolver, not the
+// network's DoH, so the address routes are the ones that matter where the
+// seed matters. A route reports up only for a bundle
 // that verified and is fresh; its sequence, issue and expiry are reported for
 // any bundle that verified, so an expired or lagging mirror shows how far
 // behind it is. The comparison with the stored bundle -- stale, rolled back,
@@ -76,9 +80,24 @@ var extenderSeedMirrorVerifyOutcomes = map[string]bool{
 	connect.ExtenderSeedCodeExpired:           true,
 }
 
-// The roots a mirror's certificate is verified against; nil is the system
-// roots. A variable so a test can trust its own httptest certificate.
-var extenderSeedMirrorRootCAs func() *x509.CertPool = func() *x509.CertPool { return nil }
+// The roots a mirror's certificate is verified against: the roots a client
+// verifies a mirror with, connect's default TLS roots (the pinned Let's
+// Encrypt set, connect/net_tls.go). A mirror whose certificate the system
+// roots accept but the pinned set does not is refused by every client, so the
+// check refuses it too rather than report it up. A variable so a test can
+// trust its own httptest certificate.
+var extenderSeedMirrorRootCAs func() *x509.CertPool = extenderSeedMirrorClientRootCAs
+
+// connect's default client roots, or an empty pool when they cannot be built
+// (a malformed extra root file): every route then reports tls, never a check
+// that trusts more than a client does.
+func extenderSeedMirrorClientRootCAs() *x509.CertPool {
+	tlsConfig, err := connect.DefaultTlsConfig()
+	if err != nil || tlsConfig.RootCAs == nil {
+		return x509.NewCertPool()
+	}
+	return tlsConfig.RootCAs
+}
 
 // What one route's check found.
 type extenderSeedMirrorResult struct {
