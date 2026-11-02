@@ -876,6 +876,8 @@ var migrationCurrentSuffixContracts = slices.Concat(
 		snTopReplicaMigrationContract,
 		verifyCohortCensusMigrationContract,
 		competitionSubmissionMetricsMigrationContract,
+		// replaces the key history guard body the retention contract pins
+		clientKeyHistoryRetentionFloorMigrationContract,
 		migrationCurrentSuffix(contractCloseEvidenceHorizonGuardMigrationVersion, "close evidence custody with retention at the contract horizon",
 			contractCloseEvidenceHorizonArtifactQuery),
 		migrationCurrentSuffix(server.ProviderWorkSessionEventHorizonDropGuardMigrationVersion(), "provider session custody with drops at the contract horizon",

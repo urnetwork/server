@@ -19,9 +19,9 @@ package controller
 // request, so every per-frame counter reads as for a route rejection hit.
 // urnetwork_connect_control_refusal_replays_total counts the requests
 // answered this way, which run no state query. A replay whose every refusal
-// is terminal, for a pack without a sender role, also counts toward the
-// client's stuck provider run (connect_control_stuck_provider.go), after the
-// answer is made.
+// is terminal and was refused to a top-level source, for a pack without a
+// sender role, also counts toward the client's stuck provider run
+// (connect_control_stuck_provider.go), after the answer is made.
 
 import (
 	"context"
@@ -67,10 +67,10 @@ type ConnectControlRefusals struct {
 	frames             []*protocol.Frame
 	routeKeyRejections map[connectControlRefusalKey]model.ContractRouteRejection
 	cause              string
-	// every frame's refusal is terminal and no frame carries a sender role:
-	// the retry of an sdk that cannot retire the route
-	// (connect_control_stuck_provider.go)
-	terminalWithoutSenderRole bool
+	// every frame's refusal is terminal and was refused to a top-level source,
+	// and no frame carries a sender role: the retry of a provider sdk that
+	// cannot retire the route (connect_control_stuck_provider.go)
+	stuckProviderRetry bool
 }
 
 // Decides from the owner's recorded refusals alone whether every frame of the
@@ -91,10 +91,10 @@ func PrepareConnectControlRefusals(ctx context.Context, clientId server.Id, conn
 		return nil, false
 	}
 	refusals := &ConnectControlRefusals{
-		clientId:                  clientId,
-		frames:                    pack.Frames,
-		routeKeyRejections:        map[connectControlRefusalKey]model.ContractRouteRejection{},
-		terminalWithoutSenderRole: true,
+		clientId:           clientId,
+		frames:             pack.Frames,
+		routeKeyRejections: map[connectControlRefusalKey]model.ContractRouteRejection{},
+		stuckProviderRetry: true,
 	}
 	for _, frame := range pack.Frames {
 		message, err := connect.FromFrame(frame)
@@ -114,8 +114,10 @@ func PrepareConnectControlRefusals(ctx context.Context, clientId server.Id, conn
 			return nil, false
 		}
 		refusals.routeKeyRejections[connectControlRefusalKey{destinationId: destinationId, companion: createContract.Companion}] = rejection
-		if !rejection.Terminal() || createContract.SenderRole != nil {
-			refusals.terminalWithoutSenderRole = false
+		if !rejection.Terminal() ||
+			rejection.Relationship.SourceLifecycle != model.NetworkClientLifecycleActiveTop ||
+			createContract.SenderRole != nil {
+			refusals.stuckProviderRetry = false
 		}
 		cause := "inactive_destination"
 		if rejection.Cause == model.ContractRouteMissingOrigin {
@@ -157,7 +159,7 @@ func ReplayConnectControlRefusals(ctx context.Context, refusals *ConnectControlR
 		return nil, err
 	}
 	connectControlRefusalReplayCounter.WithLabelValues(refusals.cause).Inc()
-	if refusals.terminalWithoutSenderRole {
+	if refusals.stuckProviderRetry {
 		stuckProviderSignalsFromContext(ctx).observeTerminalRetry(refusals.clientId)
 	}
 	return result, nil

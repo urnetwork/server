@@ -147,3 +147,60 @@ func TestCloseEvidenceGoesWithTheReapedContract(t *testing.T) {
 		}
 	})
 }
+
+// The evidence retention does not apply the reaper's keep rules: a resolved
+// contract the reaper keeps, here for its sweep's pending payment, loses its
+// reports at the horizon all the same, and the contract stays.
+func TestCloseEvidenceGoesFromAContractTheReaperKeeps(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		defer removeHorizonTestControl(t, ctx)
+		f := newNetEscrowOrderingTestFixture(t, ctx)
+		const day = 24 * time.Hour
+		now := server.NowUtc().Truncate(time.Millisecond)
+
+		pendingPaymentId := insertHorizonTestPayment(t, ctx, f.destinationNetworkId, horizonTestPayment{})
+		kept := newHorizonTestContract(now.Add(-60*day), "settled")
+		kept.paymentId = &pendingPaymentId
+		insertHorizonTestContracts(t, ctx, f, kept)
+		acceptedAt := kept.createTime.Add(time.Minute)
+		server.Tx(ctx, func(tx server.PgTx) {
+			for _, party := range []struct {
+				name     string
+				clientId server.Id
+			}{{"source", f.sourceId}, {"destination", f.destinationId}} {
+				server.RaisePgResult(tx.Exec(ctx, `INSERT INTO contract_close_report_evidence
+					(client_id,report_id,contract_id,party,acked_byte_count,unacked_byte_count,checkpoint,accepted_at)
+					VALUES($1,$2,$3,$4,0,0,true,$5)`,
+					party.clientId, horizonTestContractId(acceptedAt), kept.contractId, party.name, acceptedAt.UTC()))
+			}
+		}, server.TxReadCommitted, server.OptNoRetry())
+		evidence := func() (count int) {
+			server.Db(ctx, func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM contract_close_report_evidence WHERE contract_id=$1`, kept.contractId).Scan(&count))
+			})
+			return
+		}
+		contractPresent := func() bool {
+			rows, _ := countHorizonTestRows(t, ctx, kept.contractId)
+			return rows[0] == 1
+		}
+
+		setHorizonTestControl(t, ctx, map[string]string{ContractHorizonControlFieldMode: "on", ContractHorizonControlFieldHorizonDays: "45"})
+		if _, _, err := RemoveContractsPastHorizon(ctx, now, ContractHorizonCursor{}, horizonTestSettings()); err != nil {
+			t.Fatal(err)
+		}
+		if !contractPresent() {
+			t.Fatal("the reaper deleted a contract whose sweep's payment is pending")
+		}
+		report, _ := server.MaintainContractPartitions(WithContractHorizonControl(ctx), server.NowUtc(), server.ContractRetentionCursor{}, time.Minute)
+		if report.EvidenceRemoved != 2 || evidence() != 0 {
+			t.Fatalf("the evidence pass removed %d rows and left %d of a kept contract's reports accepted 60 days ago", report.EvidenceRemoved, evidence())
+		}
+		if !contractPresent() {
+			t.Fatal("the evidence pass deleted the contract")
+		}
+	})
+}

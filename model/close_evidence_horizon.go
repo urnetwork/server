@@ -21,7 +21,7 @@ import (
 func WithContractHorizonControl(ctx context.Context) context.Context {
 	control, err := GetContractHorizonControl(ctx, DefaultContractHorizonSettings())
 	if err != nil {
-		glog.Warningf("[cp]could not read the contract horizon control; close evidence keeps %s: %s\n", server.ContractRetention, err)
+		glog.V(1).Infof("[cp]contract horizon control unread, close evidence keeps %s: %s\n", server.ContractRetention, err)
 		return ctx
 	}
 	if control.Mode != ContractHorizonModeOn {

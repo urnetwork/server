@@ -807,8 +807,8 @@ func classifyEdgeIPv6Failure(result edgeIPv6Result) (class, mechanism, action st
 				"Build and deploy a Warp LB artifact whose generated nginx HTTP configuration explicitly sizes map_hash_bucket_size for its longest generated status-map key and passes production-capable nginx validation. Do not edit live generated config, remove DNAT targets, change routes, or restart the unchanged artifact."
 		}
 		return "edge-ipv6-reset",
-			"The exact public tuple rejected immediately. During a rolling LB drain this is the dead-first DNAT signature: an earlier rule can target a pool port whose nginx listener has closed while a later live target is shadowed.",
-			"Inspect ordered IPv4/IPv6 DNAT rules and live sockets. Remove only a fully proven dead target, and deploy the Warp duplicate-to-single socket reconciliation; do not change the IPv6 address or route to treat a reset."
+			"The complete public request observation records an immediate curl connection failure before an HTTP response. Its duration and exit code do not establish a TCP reset or identify the failed listener, forwarding rule, or network layer. The cause remains unknown without independent same-target evidence.",
+			"Preserve the exact-target curl outcome and compare qualified observer routing, host-local HTTPS, listener state, and ordered forwarding rules. Change only a layer independently shown to be wrong; this observation does not authorize listener, forwarding, route, or address changes."
 	}
 	return "edge-ipv6-http",
 		"The exact-address request did not complete the expected api-v6 HTTP/1.1 200 response. The native outcome alone does not prove a completed connection or TLS handshake; inspect its status/error before attributing TLS/SNI, LB ownership, or application readiness.",

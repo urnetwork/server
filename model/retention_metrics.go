@@ -18,6 +18,10 @@ const (
 	RetentionTableNetworkExtenderReleaseRequest = "network_extender_release_request"
 	RetentionTableNetworkExtenderRelease        = "network_extender_release"
 	RetentionTableNetworkExtenderBlockReport    = "network_extender_block_report"
+	// gone clients' signed key history
+	RetentionTableStClientKeyHistory = "st_client_key_history"
+	RetentionTableStClientKeyHead    = "st_client_key_head"
+	RetentionTableStClientKeyGone    = "st_client_key_gone"
 )
 
 var retentionTables = []string{
@@ -31,6 +35,9 @@ var retentionTables = []string{
 	RetentionTableNetworkExtenderReleaseRequest,
 	RetentionTableNetworkExtenderRelease,
 	RetentionTableNetworkExtenderBlockReport,
+	RetentionTableStClientKeyHistory,
+	RetentionTableStClientKeyHead,
+	RetentionTableStClientKeyGone,
 }
 
 // Rows the expiry and retention tasks deleted, by table: their rate signal,

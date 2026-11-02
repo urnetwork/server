@@ -16,7 +16,8 @@ import (
 // cutover a run only guards a prepared cutover and removes expired close
 // evidence, so this build is safe on either side of the cutover. The evidence
 // goes at the contract horizon, read from the horizon reaper's control once
-// per run (model.WithContractHorizonControl).
+// per run (model.WithContractHorizonControl), at the pace of its own brake,
+// read before every batch (server.RemoveExpiredCloseEvidence).
 
 type MaintainContractPartitionsArgs struct {
 	Cursor server.ContractRetentionCursor `json:"cursor"`
@@ -59,12 +60,13 @@ func MaintainContractPartitions(
 	)
 	if 0 < len(report.Created) || 0 < len(report.Dropped) || 0 < report.Archived || 0 < report.EvidenceRemoved || report.AbandonedCutover || report.AbandonedEvidenceCutover {
 		glog.Infof(
-			"[cp]created %v, dropped %v, archived %d contracts, removed %d close evidence rows at a contract horizon of %s, abandoned cutover %t, abandoned close evidence cutover %t\n",
+			"[cp]created %v, dropped %v, archived %d contracts, removed %d close evidence rows at a retention of %s (stop %s), abandoned cutover %t, abandoned close evidence cutover %t\n",
 			report.Created,
 			report.Dropped,
 			report.Archived,
 			report.EvidenceRemoved,
-			server.CloseEvidenceRetention(ctx),
+			report.EvidenceRetention,
+			report.EvidenceStop,
 			report.AbandonedCutover,
 			report.AbandonedEvidenceCutover,
 		)

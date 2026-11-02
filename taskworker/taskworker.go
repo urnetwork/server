@@ -128,6 +128,9 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleRemoveCompletedContracts(clientSession, tx)
 		// idle until the runtime control `{contract_horizon}control` sets a mode
 		work.ScheduleRemoveContractsPastHorizon(clientSession, tx)
+		// the prober shard generations past their retention; idle until the
+		// runtime control `{prober_retention}control` sets a mode
+		work.ScheduleRemoveProberShardGenerations(clientSession, tx)
 		work.ScheduleReconcileNetEscrow(clientSession, tx)
 		work.ScheduleDbMaintenance(clientSession, tx, 0)
 		// seeded only when its chain has no task (PARTITION-MAINTENANCE-PLAN.md A4)
@@ -371,6 +374,8 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.SweepOrphanNetworkClientDataPost,
 		),
 		model.NewLegacyProviderTotalsTaskTarget(),
+		// armed by work.ScheduleSettlementAccountingTasks
+		model.NewLegacyProviderTotalsDrainTaskTarget(),
 		model.NewLegacyNetEscrowMirrorTaskTarget(),
 		model.NewQuarantineReservationReleaseTaskTarget(),
 		model.NewClosePayerDueContractsTaskTarget(),
@@ -441,6 +446,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.RemoveContractsPastHorizon,
 			work.RemoveContractsPastHorizonPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.RemoveProberShardGenerations,
+			work.RemoveProberShardGenerationsPost,
 		),
 		work.NewTransferDebitTaskTarget(),
 		task.NewTaskTargetWithPost(

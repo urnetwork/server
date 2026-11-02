@@ -45,6 +45,7 @@ func TestProviderProbeClaimAdmissionIsProductionOnly(t *testing.T) {
 	production.TargetClaimLimits = nil
 	shares := map[string]int{
 		task.NewTaskTarget(model.ApplyLegacyProviderTotals).TargetFunctionName(): legacyProviderTotalsClaimSharePeriod,
+		model.NewLegacyProviderTotalsDrainTaskTarget().TargetFunctionName():      legacyProviderTotalsDrainClaimSharePeriod,
 		task.NewTaskTarget(work.FlushTransferDebits).TargetFunctionName():        financialOwnerClaimSharePeriod,
 		task.NewTaskTarget(controller.AdvancePayment).TargetFunctionName():       financialOwnerClaimSharePeriod,
 	}

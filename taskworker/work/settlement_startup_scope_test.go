@@ -56,9 +56,9 @@ func TestSettlementFamilyStartupRefusesHeldWrittenQueue(t *testing.T) {
 	}
 }
 
-// The production initializer admits the debit family before calling its
-// publisher; the publisher's validation must not create a second acquisition.
-// No legacy settlement shard is published.
+// The production initializer admits the debit family and the provider totals
+// drain before calling their publishers; the publisher's validation must not
+// create a second acquisition. No legacy settlement shard is published.
 func TestSettlementAccountingStartupPredeclaresDebitFamily(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -72,16 +72,17 @@ func TestSettlementAccountingStartupPredeclaresDebitFamily(t *testing.T) {
 			}
 		})
 		ScheduleSettlementAccountingTasks(ctx)
-		if len(admissions) != 1 || len(admissions[0].Keys) != 16 || admissions[0].TransactionScoped {
+		if len(admissions) != 1 || len(admissions[0].Keys) != 17 || admissions[0].TransactionScoped {
 			t.Fatal("combined initializer did not predeclare one complete owner", admissions)
 		}
 		server.Db(ctx, func(conn server.PgConn) {
-			var total, debit, legacy int
+			var total, debit, drain, legacy int
 			server.Raise(conn.QueryRow(ctx, `SELECT count(*),
 count(*) FILTER(WHERE run_once_key LIKE '["flush_transfer_debits_%'),
-count(*) FILTER(WHERE run_once_key LIKE '["flush_legacy_settlements_%') FROM pending_task`).Scan(&total, &debit, &legacy))
-			if total != 16 || debit != 16 || legacy != 0 {
-				t.Fatal("initializer omitted the debit family or published a retired one", total, debit, legacy)
+count(*) FILTER(WHERE run_once_key='["legacy_provider_totals_drain"]'),
+count(*) FILTER(WHERE run_once_key LIKE '["flush_legacy_settlements_%') FROM pending_task`).Scan(&total, &debit, &drain, &legacy))
+			if total != 17 || debit != 16 || drain != 1 || legacy != 0 {
+				t.Fatal("initializer omitted the debit family or the provider totals drain, or published a retired one", total, debit, drain, legacy)
 			}
 		})
 	})
