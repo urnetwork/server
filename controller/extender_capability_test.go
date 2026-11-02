@@ -7,6 +7,7 @@ package controller
 import (
 	"bytes"
 	"encoding/hex"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -68,8 +69,8 @@ func TestExtenderRecordRequiredCapabilitiesRule(t *testing.T) {
 		Directory: ExtenderDirectoryConfig{
 			CapabilityCohorts: []ExtenderCapabilityCohortConfig{
 				{Capability: " tcp-camouflage-v1 ", ExtenderPublicKeysHex: []string{hex.EncodeToString(bytes.Repeat([]byte{cohortKey}, 32)), "not a key"}},
-				// listed twice: required once
-				{Capability: "tcp-camouflage-v1", ExtenderPublicKeysHex: []string{hex.EncodeToString(bytes.Repeat([]byte{cohortKey}, 32))}},
+				// listed twice, once in another case: required once, as compared
+				{Capability: "TCP-Camouflage-V1", ExtenderPublicKeysHex: []string{hex.EncodeToString(bytes.Repeat([]byte{cohortKey}, 32))}},
 				{Capability: "tcp-camoflage-v1", ExtenderPublicKeysHex: []string{hex.EncodeToString(bytes.Repeat([]byte{otherKey}, 32))}},
 				{Capability: "", ExtenderPublicKeysHex: []string{hex.EncodeToString(bytes.Repeat([]byte{otherKey}, 32))}},
 			},
@@ -102,9 +103,17 @@ func TestExtenderRecordRequiredCapabilitiesRule(t *testing.T) {
 	}
 }
 
-// The matcher has slice F's semantics: an unknown requirement is unsatisfied,
-// an unknown declaration is ignored, and nothing required is always satisfied.
+// The matcher has slice F's semantics (connect.ExtenderCapabilitiesSatisfied on
+// feat/eu2-splice): an unknown requirement is unsatisfied, an empty one is
+// skipped, an unknown declaration is ignored, values compare trimmed and
+// case-insensitively, only the first 16 declared values of at most 64 bytes
+// are read, and nothing required is always satisfied.
 func TestExtenderCapabilitiesSatisfied(t *testing.T) {
+	sixteenOthers := []string{}
+	for i := range extenderMaxOfferedCapabilityCount {
+		sixteenOthers = append(sixteenOthers, fmt.Sprintf("other-%d", i))
+	}
+	tooLong := strings.Repeat(" ", extenderMaxOfferedCapabilityByteCount) + "tcp-camouflage-v1"
 	cases := []struct {
 		required []string
 		offered  []string
@@ -112,19 +121,29 @@ func TestExtenderCapabilitiesSatisfied(t *testing.T) {
 	}{
 		{nil, nil, true},
 		{nil, []string{"anything"}, true},
+		{[]string{""}, nil, true},
 		{[]string{"tcp-camouflage-v1"}, nil, false},
 		{[]string{"tcp-camouflage-v1"}, []string{"tcp-camouflage-v1"}, true},
 		{[]string{"tcp-camouflage-v1"}, []string{"other", "tcp-camouflage-v1"}, true},
+		{[]string{" TCP-Camouflage-V1 "}, []string{"tcp-camouflage-v1"}, true},
+		{[]string{"tcp-camouflage-v1"}, []string{" TCP-CAMOUFLAGE-V1"}, true},
 		{[]string{"tcp-camoflage-v1"}, []string{"tcp-camoflage-v1"}, false},
 		{[]string{"tcp-camouflage-v1", "future-v2"}, []string{"tcp-camouflage-v1", "future-v2"}, false},
+		// past the bounded head of the list
+		{[]string{"tcp-camouflage-v1"}, append(slices.Clone(sixteenOthers), "tcp-camouflage-v1"), false},
+		{[]string{"tcp-camouflage-v1"}, append(slices.Clone(sixteenOthers[1:]), "tcp-camouflage-v1"), true},
+		{[]string{"tcp-camouflage-v1"}, []string{tooLong}, false},
 	}
 	for _, c := range cases {
 		if got := extenderCapabilitiesSatisfied(c.required, c.offered); got != c.want {
 			t.Errorf("required %v offered %v = %t, want %t", c.required, c.offered, got, c.want)
 		}
 	}
-	if declared := extenderDeclaredCapabilities([]string{"x", "tcp-camouflage-v1", "tcp-camouflage-v1", " tcp-camouflage-v1"}); !slices.Equal(declared, []string{"tcp-camouflage-v1"}) {
+	if declared := extenderDeclaredCapabilities([]string{"x", "TCP-CAMOUFLAGE-V1", "tcp-camouflage-v1", " tcp-camouflage-v1"}); !slices.Equal(declared, []string{"tcp-camouflage-v1"}) {
 		t.Fatalf("declared = %v, want the known capability once", declared)
+	}
+	if declared := extenderDeclaredCapabilities(append(slices.Clone(sixteenOthers), "tcp-camouflage-v1")); len(declared) != 0 {
+		t.Fatalf("a capability past the read head was declared: %v", declared)
 	}
 	if declared := extenderDeclaredCapabilities(nil); len(declared) != 0 {
 		t.Fatalf("nothing declared = %v", declared)

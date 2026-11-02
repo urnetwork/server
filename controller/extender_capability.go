@@ -44,9 +44,10 @@ import (
 //     camouflage key (RealityPublicKey); without the key, no client can
 //     authenticate to the camouflaged carrier. The server does not sign the key
 //     yet (connect/EXTENDER.md phase 14b), so a cohort is inert until it does.
-//   - The server keeps a capability it does not know as a requirement that no
-//     client satisfies. A misspelled capability withholds the extender from
-//     every release rather than handing it to clients that cannot use it.
+//   - Capabilities are trimmed and compared in lower case, and signed that
+//     way. The server keeps a capability it does not know as a requirement
+//     that no client satisfies. A misspelled capability withholds the extender
+//     from every release rather than handing it to clients that cannot use it.
 //
 // Capabilities decide eligibility only. The identity's count, partition and
 // epoch disclosures are the same whatever a client declares (connect
@@ -70,12 +71,47 @@ type ExtenderCapabilityCohortConfig struct {
 	ExtenderPublicKeysHex []string `yaml:"extender_public_keys_hex"`
 }
 
-// Whether `offered` covers every one of `required`. An unknown required value
-// is unsatisfied and an unknown offered value is ignored, the semantics of
-// connect's ExtenderCapabilitiesSatisfied once it lands there.
+// How much of a client's declared list is read, as connect reads one: the
+// first extenderMaxOfferedCapabilityCount values, each at most
+// extenderMaxOfferedCapabilityByteCount bytes.
+const (
+	extenderMaxOfferedCapabilityCount     = 16
+	extenderMaxOfferedCapabilityByteCount = 64
+)
+
+// A capability as it is compared and signed: trimmed and lower case.
+func normalizeExtenderCapability(capability string) string {
+	return strings.ToLower(strings.TrimSpace(capability))
+}
+
+// The normalized values of a declared list that are read.
+func extenderOfferedCapabilities(offered []string) map[string]bool {
+	offeredCapabilities := map[string]bool{}
+	for i, capability := range offered {
+		if extenderMaxOfferedCapabilityCount <= i {
+			break
+		}
+		if extenderMaxOfferedCapabilityByteCount < len(capability) {
+			continue
+		}
+		offeredCapabilities[normalizeExtenderCapability(capability)] = true
+	}
+	return offeredCapabilities
+}
+
+// Whether `offered` covers every one of `required`, with the semantics of
+// slice F's connect.ExtenderCapabilitiesSatisfied, which replaces this once it
+// is on connect main: an unknown required value is unsatisfied, an empty one
+// is skipped, an unknown offered value is ignored, values compare trimmed and
+// case-insensitively, and only the bounded head of `offered` is read.
 func extenderCapabilitiesSatisfied(required []string, offered []string) bool {
+	offeredCapabilities := extenderOfferedCapabilities(offered)
 	for _, capability := range required {
-		if !slices.Contains(extenderKnownCapabilities, capability) || !slices.Contains(offered, capability) {
+		capability = normalizeExtenderCapability(capability)
+		if capability == "" {
+			continue
+		}
+		if !slices.Contains(extenderKnownCapabilities, capability) || !offeredCapabilities[capability] {
 			return false
 		}
 	}
@@ -83,11 +119,13 @@ func extenderCapabilitiesSatisfied(required []string, offered []string) bool {
 }
 
 // The capabilities a client declared that this server knows, each once, in
-// the known order. Everything else a client sends is ignored.
+// the known order, read as extenderCapabilitiesSatisfied reads them.
+// Everything else a client sends is ignored.
 func extenderDeclaredCapabilities(capabilities []string) []string {
+	offeredCapabilities := extenderOfferedCapabilities(capabilities)
 	declared := []string{}
 	for _, capability := range extenderKnownCapabilities {
-		if slices.Contains(capabilities, capability) {
+		if offeredCapabilities[capability] {
 			declared = append(declared, capability)
 		}
 	}
@@ -117,7 +155,9 @@ func (self *ExtenderConfig) RecordRequiredCapabilities(
 	}
 	keyHex := hex.EncodeToString(extender.PublicKey)
 	for _, cohort := range self.Directory.CapabilityCohorts {
-		capability := strings.TrimSpace(cohort.Capability)
+		// signed as compared, so the extender's own gate and every client
+		// read the same value
+		capability := normalizeExtenderCapability(cohort.Capability)
 		if capability == "" || !extenderCohortListsKey(cohort, keyHex) {
 			continue
 		}
@@ -168,7 +208,7 @@ func extenderCohortListsKey(cohort ExtenderCapabilityCohortConfig, keyHex string
 // the entry is corrected. The value is the operator's own configuration.
 func warnUnknownExtenderCapabilities(config *ExtenderConfig) {
 	for _, cohort := range config.Directory.CapabilityCohorts {
-		capability := strings.TrimSpace(cohort.Capability)
+		capability := normalizeExtenderCapability(cohort.Capability)
 		if capability != "" && !slices.Contains(extenderKnownCapabilities, capability) {
 			glog.Errorf("[extender]capability cohort %q is not a known capability; its extenders are withheld from every release\n", capability)
 		}

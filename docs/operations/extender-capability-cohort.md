@@ -41,9 +41,12 @@ directory:
 - A misspelled or unknown capability is kept as a requirement that no client
   satisfies. The api logs it once at startup, and the listed extenders are
   withheld from every release until the entry is fixed.
-- The resource is read once per process. A change takes effect when the api
-  (activation and release) and the taskworker (drip and dns TXT) restart. Do
-  those in waves, as for any api restart.
+- The resource is read once per process. A change takes effect when every
+  process that signs records has restarted: the api and alt (both serve
+  activation and release; alt runs the api routes in process) and the
+  taskworker (drip and dns TXT). Until then, processes that have and have not
+  read the change sign the same host's records differently. Restart in waves,
+  as for any api restart.
 
 To find a host's key, use the read-only query
 `SELECT encode(public_key, 'hex') FROM network_extender WHERE client_id = '<the host's client id>'`
@@ -72,8 +75,8 @@ names operator hosts.
 
 ## Rollout (Phase A to Phase B for one cohort)
 
-1. Add the cohort's keys to `capability_cohorts` and restart the api and the
-   taskworker.
+1. Add the cohort's keys to `capability_cohorts` and restart the api, alt and
+   the taskworker.
 2. Verify:
    - The extenders dashboard panel "capability requirements signed" shows
      `required` for the capability, and nothing else for these extenders.
@@ -104,8 +107,8 @@ shortens this window.
 1. Turn the extender-side splice flag off first. New connections are
    terminated again, as in Phase A, and working sessions are kept where
    possible.
-2. Then remove the keys from `capability_cohorts` and restart the api and the
-   taskworker. In the opposite order, legacy clients would be handed the
+2. Then remove the keys from `capability_cohorts` and restart the api, alt and
+   the taskworker. In the opposite order, legacy clients would be handed the
    host's record while it still splices them away. That lasts until the host
    re-activates.
 3. Verify that `required` stops for the capability and that
