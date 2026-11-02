@@ -58,6 +58,15 @@ const CompletedContractExpiration = 7 * 24 * time.Hour
 // the mid-backlog stop.
 var reaperRunBudget = 5 * time.Minute
 
+// Wall clock for one RemoveCompletedContracts run, after which its delete pass
+// starts no batch. The task's MaxTime is 30 minutes, and a run that reaches it
+// is canceled: its batch in flight rolls back, its Post does not run, and it
+// retries within seconds. The earlier passes take about ten minutes at most
+// (one 50,000-contract assign batch past its five-minute budget), so this
+// leaves the delete pass its own budget and the run ten minutes of margin. A
+// var so tests can spend it.
+var removeCompletedContractsRunBudget = 20 * time.Minute
+
 func ByteCountHumanReadable(count ByteCount) string {
 	trimFloatString := func(value float64, precision int, suffix string) string {
 		s := fmt.Sprintf("%."+strconv.Itoa(precision)+"f", value)
@@ -6116,6 +6125,9 @@ func AddFreeTransferBalanceToAllNetworks(
 }
 
 func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
+	// The delete pass, last, starts no batch past this, so the run returns
+	// and its Post schedules the next one well inside the task's MaxTime.
+	runEnd := server.NowUtc().Add(removeCompletedContractsRunBudget)
 	maxRowCount := 50000
 
 	removeCompletedTransferBalanceBatches(ctx, minTime)
@@ -6161,15 +6173,16 @@ func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 	// This reaps both completed contracts (reap_time = complete_time +
 	// CompletedContractExpiration) and the stragglers just assigned above.
 	// Candidate contract_ids are distinct (from the transfer_contract primary
-	// key). removeDueContractBatches drains until an empty batch; protected
+	// key). The pass drains in batches of dueContractReapBatchSize until no
+	// contract is due, a bound stops it, or the run's budget ends; protected
 	// candidates are repaired back to reap_time = NULL instead of deleted.
 	reapTime := server.NowUtc()
-	removeDueContractBatches(
-		ctx,
+	newDueContractReaper(
 		reapTime,
 		reapTime.Add(-StragglerContractExpiration),
-		maxRowCount,
-	)
+		dueContractReapBatchSize,
+		runEnd,
+	).removeDue(ctx)
 }
 
 // assignCompletedContractReapTimeBatches drains the durable retention queue set
@@ -6256,174 +6269,6 @@ func assignCompletedContractReapTimeBatches(ctx context.Context, maxRowCount int
 		}, server.TxReadCommitted)
 		assignedCount += stampedCount
 		if !processedPayment || budgetEnd.Before(server.NowUtc()) {
-			return
-		}
-	}
-}
-
-// removeDueContractBatches consumes the first bounded slice of the reap_time
-// index before doing any payment lookup. Due contracts held by an active or
-// ambiguous payment are repaired to reap_time = NULL. So are unpaid contracts
-// stamped by the former 90-day rule that have not yet reached the new 300-day
-// horizon. All other due contracts and their dependent rows are deleted.
-// Classifying only the already-bounded slice avoids turning the safety checks
-// into an anti-join over contract history. The payment guard also covers
-// completed payments whose queued retention cursor has not finished yet.
-//
-// Every write names its contracts with contract_id = ANY(ids), which lets each
-// statement prune to the partitions holding them. The classification locks the
-// due contracts before their dependent rows are deleted. A close report or close
-// is written only under its contract's lock, so the deletes see every one
-// committed before that lock, and none can follow it. Close reports are deleted
-// here because the partition cutover drops their cascade from transfer_contract;
-// until then the cascade finds them already gone.
-func removeDueContractBatches(ctx context.Context, minTime time.Time, minStragglerCreateTime time.Time, maxRowCount int) {
-	budgetEnd := server.NowUtc().Add(reaperRunBudget)
-	for {
-		var processedCount int64
-		server.MaintenanceTx(ctx, func(tx server.PgTx) {
-			// A cached generic plan cannot prune partitions by an array
-			// parameter, so plan every statement with its actual ids.
-			server.RaisePgResult(tx.Exec(ctx, `SET LOCAL plan_cache_mode = force_custom_plan`))
-			// Fix the bounded contract slice before shared balance ownership.
-			// The mutation below can only revisit these admitted identities;
-			// newly due contracts remain for the next pass.
-			var contractIds []server.Id
-			rows, err := tx.Query(ctx, `SELECT contract_id FROM transfer_contract
- WHERE reap_time IS NOT NULL AND reap_time<$1 ORDER BY reap_time LIMIT $2`, minTime.UTC(), maxRowCount)
-			server.WithPgResult(rows, err, func() {
-				for rows.Next() {
-					var id server.Id
-					server.Raise(rows.Scan(&id))
-					contractIds = append(contractIds, id)
-				}
-			})
-			// A zero balance id on a due contract's escrow would fail this
-			// head-of-index slice on every pass and stop all reaping behind it.
-			balanceIds, err := contractTransferBalanceIdsInTx(ctx, tx, contractIds)
-			server.Raise(err)
-			admitted, err := tryTransferBalanceOwnershipInTx(ctx, tx, ownableTransferBalanceIds(balanceIds))
-			server.Raise(err)
-			if !admitted || len(contractIds) == 0 {
-				return
-			}
-			var candidateIds []server.Id
-			server.Raise(tx.QueryRow(
-				ctx,
-				`
-				WITH due AS MATERIALIZED (
-					SELECT
-						transfer_contract.contract_id,
-						transfer_contract.create_time
-					FROM transfer_contract
-					WHERE
-						transfer_contract.reap_time IS NOT NULL AND
-						transfer_contract.reap_time < $1 AND
-						transfer_contract.contract_id=ANY($4::uuid[])
-					ORDER BY transfer_contract.reap_time
-					LIMIT $3
-					FOR UPDATE
-				), protected AS MATERIALIZED (
-					SELECT due.contract_id
-					FROM due
-					WHERE
-						EXISTS (
-							SELECT 1
-							FROM transfer_escrow_sweep
-							INNER JOIN account_payment ON
-								account_payment.payment_id = transfer_escrow_sweep.payment_id
-							WHERE
-								transfer_escrow_sweep.contract_id = due.contract_id AND
-								`+server.ContractPaymentRetentionHoldSql+`
-						) OR
-						(
-							due.create_time >= $2 AND
-							NOT EXISTS (
-								SELECT 1
-								FROM transfer_escrow_sweep
-								INNER JOIN account_payment ON
-									account_payment.payment_id = transfer_escrow_sweep.payment_id
-								WHERE
-									transfer_escrow_sweep.contract_id = due.contract_id AND
-									account_payment.completed
-							)
-						)
-				), cleared AS (
-					UPDATE transfer_contract
-					SET reap_time = NULL
-					FROM protected
-					WHERE
-						transfer_contract.contract_id=ANY($4::uuid[]) AND
-						transfer_contract.contract_id = protected.contract_id
-					RETURNING transfer_contract.contract_id
-				)
-				SELECT
-					(SELECT COUNT(*) FROM due),
-					ARRAY(
-						SELECT due.contract_id
-						FROM due
-						WHERE NOT EXISTS (
-							SELECT 1
-							FROM protected
-							WHERE protected.contract_id = due.contract_id
-						)
-						ORDER BY due.contract_id
-					)
-				`,
-				minTime.UTC(),
-				minStragglerCreateTime.UTC(),
-				maxRowCount,
-				contractIds,
-			).Scan(&processedCount, &candidateIds))
-			if len(candidateIds) == 0 {
-				return
-			}
-			server.RaisePgResult(tx.Exec(
-				ctx,
-				`
-				WITH deleted_report AS (
-					DELETE FROM contract_close_report
-					WHERE contract_close_report.contract_id = ANY($1::uuid[])
-				), deleted_close AS (
-					DELETE FROM contract_close
-					WHERE contract_close.contract_id = ANY($1::uuid[])
-				), deleted_escrow AS (
-					DELETE FROM transfer_escrow
-					WHERE transfer_escrow.contract_id = ANY($1::uuid[])
-				), deleted_sweep AS (
-					DELETE FROM transfer_escrow_sweep
-					WHERE transfer_escrow_sweep.contract_id = ANY($1::uuid[])
-				)
-				DELETE FROM contract_extender
-				WHERE contract_extender.contract_id = ANY($1::uuid[])
-				`,
-				candidateIds,
-			))
-			result, err := tx.Query(
-				ctx,
-				`
-				DELETE FROM transfer_contract
-				WHERE transfer_contract.contract_id = ANY($1::uuid[])
-				RETURNING transfer_contract.contract_id, source_id, destination_id,
-					outcome IS NULL AS unresolved
-				`,
-				candidateIds,
-			)
-			server.WithPgResult(result, err, func() {
-				for result.Next() {
-					var contractId, sourceId, destinationId server.Id
-					var unresolved bool
-					server.Raise(result.Scan(&contractId, &sourceId, &destinationId, &unresolved))
-					// Deleting unresolved custody is its terminal lifecycle event.
-					// Read the deleted version so a concurrent outcome wins once.
-					if unresolved {
-						server.AddTxCommitCount(tx, &contractClosedCounter, 1)
-					}
-					contractHoleEventInTx(ctx, tx, contractId, sourceId, destinationId, "remove")
-				}
-			})
-		}, server.TxReadCommitted, server.OptNoRetry())
-		if processedCount == 0 || budgetEnd.Before(server.NowUtc()) {
 			return
 		}
 	}
