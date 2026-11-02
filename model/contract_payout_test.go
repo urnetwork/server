@@ -860,6 +860,7 @@ func TestContractParticipantPayoutDisputeOutcomes(t *testing.T) {
 func TestContractParticipantOrphanSweep(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
+		createContractParticipantParentIndex(t, ctx)
 		contractId := server.NewId()
 		liveStreamId := server.NewId()
 		orphanStreamId := server.NewId()
