@@ -3696,7 +3696,7 @@
             "id": 95,
             "type": "timeseries",
             "title": "api stuck provider reports / s by result",
-            "description": "Clients an api process found answered only from terminal refusals, for packs without a sender role, for at least 10 minutes and 4 answers with no gap over 5 minutes, and reported for a recycle: set (the client's recycle flag was set), cooldown (it was already set; a client is recycled at most once an hour however many processes report it), error (the write failed), dropped (no report worker was free; the client starts a new run). Api processes only: the block and host filters do not apply. Nothing is counted while the switch is off.",
+            "description": "Clients an api process found answered only from terminal refusals to a top-level source, for packs without a sender role, for at least 20 minutes and 6 answers with no gap over 5 minutes, and reported for a recycle: set (the client's recycle flag was set), cooldown (it was already set; a client is recycled at most once per flag ttl, an hour and up to a quarter more, however many processes report it), still_stuck (the flag found was set over 10 minutes before: the client kept retrying after its recycle), error (the write failed), rate_limited (past the process's 5 reports a second, burst 20; the client starts a new run), dropped (no report worker was free; the client starts a new run). Api processes only: the block and host filters do not apply. Nothing is counted while the switch is off.",
             "gridPos": {
                 "h": 8,
                 "w": 12,
@@ -3737,7 +3737,7 @@
             "id": 96,
             "type": "timeseries",
             "title": "api stuck provider tracking: clients tracked and processes reporting",
-            "description": "Left axis: the clients with a run of terminal refusal answers tracked by the busiest api process of each block, in both generations (at most 16,384 each). Right axis: the api processes of each block whose switch is on (EnableStuckProviderSignal as the Redis move control's stuckProviderSignal last chose for the block), beside all of them. Api processes only: the block and host filters do not apply.",
+            "description": "Left axis: the clients with a run of terminal refusal answers tracked by the busiest api process of each block, in both generations (at most 65,536 each). Right axis: the api processes of each block whose switch is on (EnableStuckProviderSignal as the Redis move control's stuckProviderSignal last chose for the block; three failed control reads in a row turn it off), beside all of them. Api processes only: the block and host filters do not apply.",
             "gridPos": {
                 "h": 8,
                 "w": 12,
@@ -3821,7 +3821,7 @@
             "id": 97,
             "type": "timeseries",
             "title": "recycle flag events / s by outcome",
-            "description": "Recycle flag key events dispatched to each connect exchange, and how the exchanges handled them. Every process receives every flag's event and only the host of the client's resident acts, so not_resident counts one event per other process. recycled: the client's transports here got the moved close and its resident retired, so the client redials at once; replaced: another resident replaced the local one, which only retired; resident_done: the local resident had already ended; disabled: a resident here, with the switch off for this block.",
+            "description": "Recycle flag key events dispatched to each connect exchange, and how the exchanges handled them. Every process receives every flag's event and each one that holds the client's transports or its resident acts, so not_held counts one event per other process. recycled: its resident here retired and at least one of its transports here got the moved close, so the client redials at once; resident_only: its resident here retired, with none of its transports here; replaced: a resident another replaced only idled here and retired; transport_only: only its transports here closed, their resident lives elsewhere; resident_done: the local resident had already ended; disabled: held here, with the switch off for this block; removed: a removed client, left to its removal; queue_full: past the recycle queue (1,024; the workers recycle at most 5 a second, burst 20); error: the removed flag was unreadable or the recycle failed.",
             "gridPos": {
                 "h": 8,
                 "w": 12,
@@ -3866,8 +3866,8 @@
         {
             "id": 98,
             "type": "timeseries",
-            "title": "recycle switch and transports closed by recycles",
-            "description": "Left axis: client transports a stuck provider recycle closed with the moved close (4006), so none of them nominates the same process again. Right axis: whether each connect process recycles, EnableStuckProviderRecycle as the Redis move control's stuckProviderRecycle last chose for its block, 1 on, 0 off; the minimum per host shows a host with any process off. The code default is off.",
+            "title": "recycle switch, transports closed and excuses written by recycles",
+            "description": "Left axis: client transports a stuck provider recycle closed with the moved close (4006), so none of them nominates the same process again, and the drain excuses written first, one by each process that closes any, so the reconnect counts as excused and not against the provider's reliability. Right axis: whether each connect process recycles, EnableStuckProviderRecycle as the Redis move control's stuckProviderRecycle last chose for its block, 1 on, 0 off (three failed control reads in a row turn it off); the minimum per host shows a host with any process off. The code default is off.",
             "gridPos": {
                 "h": 8,
                 "w": 12,
@@ -3931,6 +3931,11 @@
                     "refId": "B",
                     "expr": "min by (block, host) (urnetwork_connect_stuck_provider_recycle_enabled{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
                     "legendFormat": "recycle switch {{block}} {{host}}"
+                },
+                {
+                    "refId": "C",
+                    "expr": "sum(rate(urnetwork_connect_stuck_provider_recycle_excuses_total{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "drain excuses written / s"
                 }
             ]
         },
