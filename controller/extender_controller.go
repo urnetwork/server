@@ -771,17 +771,18 @@ func (self *extenderActivateService) activate(
 	// included
 	var probeSteps []*ExtenderProbeStep
 	// the stage the activation has reached, which is where a refusal is
-	// counted (extender_activation_metrics.go), and how the probe refused
-	// when it was the probe that did
+	// counted (extender_activation_metrics.go), and how it ended there when
+	// the stage says more than refused: how the probe refused, why the api was
+	// busy, or which budget refused
 	stage := extenderActivationStageRequest
-	probeRefusalOutcome := ""
+	stageOutcome := ""
 	// the caller's family as the count labels it, read before the address is
 	// checked so a request refused for anything is counted by family
 	family := extenderActivationFamily(clientSession.ClientAddress)
 	refuse := func(message string) (*ExtenderActivateResult, error) {
 		settings.metrics.observe(
 			stage,
-			extenderActivationRefusalOutcome(stage, probeRefusalOutcome),
+			extenderActivationRefusalOutcome(stage, stageOutcome),
 			family,
 			probeSteps,
 		)
@@ -790,6 +791,13 @@ func (self *extenderActivateService) activate(
 			Error:      message,
 			ProbeSteps: probeSteps,
 		}, nil
+	}
+	// a refusal that judged nothing about the caller -- a busy api, a spent
+	// budget -- with the wait until there is room (connect#230)
+	refuseWithRetryAfter := func(message string, retryAfter time.Duration) (*ExtenderActivateResult, error) {
+		result, err := refuse(message)
+		result.RetryAfterSeconds = extenderActivateRetryAfterSeconds(retryAfter)
+		return result, err
 	}
 
 	publicKey, err := connect.ParseExtenderPublicKeyHex(args.PublicKeyHex)
@@ -930,15 +938,16 @@ func (self *extenderActivateService) activate(
 	select {
 	case self.probeSlots <- struct{}{}:
 	default:
+		stage = extenderActivationStageBusy
+		stageOutcome = extenderActivationOutcomeProbes
 		retryAfter := self.busyRetryAfter()
-		return &ExtenderActivateResult{
-			Activated: false,
-			Error: fmt.Sprintf(
+		return refuseWithRetryAfter(
+			fmt.Sprintf(
 				"The operator is busy probing other extenders. Please try again in %s.",
 				model.AccountActionRetryText(retryAfter),
 			),
-			RetryAfterSeconds: extenderActivateRetryAfterSeconds(retryAfter),
-		}, nil
+			retryAfter,
+		)
 	}
 	releaseProbeSlot := sync.OnceFunc(func() {
 		<-self.probeSlots
@@ -986,15 +995,13 @@ func (self *extenderActivateService) activate(
 			},
 		},
 	); err != nil {
-		refusal := &ExtenderActivateResult{
-			Activated: false,
-			Error:     err.Error(),
-		}
 		var budgetRefusal *model.AccountActionBudgetRefusal
 		if errors.As(err, &budgetRefusal) {
-			refusal.RetryAfterSeconds = extenderActivateRetryAfterSeconds(budgetRefusal.RetryAfter)
+			stageOutcome = extenderActivationBudgetOutcome(budgetRefusal.Action)
+			return refuseWithRetryAfter(err.Error(), budgetRefusal.RetryAfter)
 		}
-		return refusal, nil
+		stageOutcome = extenderActivationOutcomeAccount
+		return refuse(err.Error())
 	}
 
 	// the acceptance rule (C2a) over the real probes: the required test, then
@@ -1049,7 +1056,7 @@ func (self *extenderActivateService) activate(
 	probeSteps = outcome.steps
 	if outcome.refusal != "" {
 		stage = outcome.refusalStep
-		probeRefusalOutcome = outcome.refusalOutcome
+		stageOutcome = outcome.refusalOutcome
 		return refuse(outcome.refusal)
 	}
 	stage = extenderActivationStageStore

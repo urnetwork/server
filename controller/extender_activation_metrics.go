@@ -9,6 +9,7 @@ import (
 	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
 )
 
 // The activation metrics of connect/EXTENDER.md C2: how each activation
@@ -28,7 +29,11 @@ const (
 	extenderActivationStageRequest = "request"
 	// the operator's extender configuration is unusable
 	extenderActivationStageConfig = "config"
-	// an activation budget refused it (ExtenderActivateSettings)
+	// the api was too busy to take it, before any budget was spent
+	// (connect#230): it was probing MaxConcurrentProbes activations already
+	extenderActivationStageBusy = "busy"
+	// an activation budget refused it (ExtenderActivateSettings); the outcome
+	// names the budget
 	extenderActivationStageBudget = "budget"
 	// the steps of the required test (C2a): the tcp challenge, and the forward
 	// through it, which is also where a forward on the other family ends
@@ -50,6 +55,13 @@ const (
 	extenderActivationOutcomeTimeout = extenderProbeStepOutcomeTimeout
 	// the forward arrived on the other family (A7)
 	extenderActivationOutcomeOtherFamily = extenderProbeRefusalOtherFamily
+	// the busy stage: the process's concurrent probes were all taken
+	extenderActivationOutcomeProbes = "probes"
+	// the budget stage: the budget that refused it, the calling client's, the
+	// caller address's, or the account's (ExtenderActivateSettings)
+	extenderActivationOutcomeClient  = "client"
+	extenderActivationOutcomeAddress = "address"
+	extenderActivationOutcomeAccount = "account"
 )
 
 // The family of the caller's address. Unknown is a request refused because
@@ -64,7 +76,12 @@ const (
 var extenderActivationStageOutcomes = map[string][]string{
 	extenderActivationStageRequest: {extenderActivationOutcomeRefused},
 	extenderActivationStageConfig:  {extenderActivationOutcomeError},
-	extenderActivationStageBudget:  {extenderActivationOutcomeRefused},
+	extenderActivationStageBusy:    {extenderActivationOutcomeProbes},
+	extenderActivationStageBudget: {
+		extenderActivationOutcomeClient,
+		extenderActivationOutcomeAddress,
+		extenderActivationOutcomeAccount,
+	},
 	extenderActivationStageTcp: {
 		extenderActivationOutcomeError,
 		extenderActivationOutcomeTimeout,
@@ -104,7 +121,9 @@ func newExtenderActivationMetrics(registerer prometheus.Registerer) *extenderAct
 		activations: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "urnetwork_extender_activations_total",
 			Help: "Extender activations (POST /network/extender-activate) by the stage that ended them, how, and the caller's address family. " +
-				"Stages: request, refused before any budget was spent; config, the operator's extender configuration is unusable; budget, an activation budget refused it; " +
+				"Stages: request, refused before any budget was spent; config, the operator's extender configuration is unusable; " +
+				"busy, the api was too busy to take it before any budget was spent (probes, it was probing as many activations as it takes at once); " +
+				"budget, an activation budget refused it, the outcome naming which (client, address, account); " +
 				"tcp and forward, the required test, which fails on its own (error), runs out of the 10 s probe budget (timeout), or forwards on the other family (other_family); " +
 				"store, activated, or storing the passed activation failed.",
 		}, []string{"stage", "outcome", "family"}),
@@ -157,17 +176,34 @@ func (self *extenderActivationMetrics) observe(
 	}
 }
 
-// How a refusal at a stage ended: a request or a budget refuses, the
-// operator's configuration or storing fails, and a step of the required test
-// ends as its probe did.
-func extenderActivationRefusalOutcome(stage string, probeRefusalOutcome string) string {
+// How a refusal at a stage ended: a request refuses, the operator's
+// configuration or storing fails, and a step of the required test, the busy
+// api and a budget end as `stageOutcome` says: how the probe ended, why the
+// api was busy, and which budget refused.
+func extenderActivationRefusalOutcome(stage string, stageOutcome string) string {
 	switch stage {
 	case extenderActivationStageConfig, extenderActivationStageStore:
 		return extenderActivationOutcomeError
-	case extenderActivationStageTcp, extenderActivationStageForward:
-		return probeRefusalOutcome
+	case extenderActivationStageTcp,
+		extenderActivationStageForward,
+		extenderActivationStageBusy,
+		extenderActivationStageBudget:
+		return stageOutcome
 	default:
 		return extenderActivationOutcomeRefused
+	}
+}
+
+// The budget outcome of a budget refusal (extenderActivationStageBudget): the
+// kind of the budget that refused, by its action.
+func extenderActivationBudgetOutcome(action string) string {
+	switch action {
+	case model.AccountActionExtenderActivateV4, model.AccountActionExtenderActivateV6:
+		return extenderActivationOutcomeClient
+	case model.AccountActionExtenderActivateAddressV4, model.AccountActionExtenderActivateAddressV6:
+		return extenderActivationOutcomeAddress
+	default:
+		return extenderActivationOutcomeAccount
 	}
 }
 

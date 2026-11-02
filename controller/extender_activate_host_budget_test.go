@@ -11,6 +11,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
@@ -589,5 +592,101 @@ func TestExtenderActivateSpendsTheLastAttemptOnce(t *testing.T) {
 		connect.AssertEqual(t, probes.count(4), 1)
 		attempts := testAccountActionAttempts(t, ctx, account.userId)
 		connect.AssertEqual(t, attempts[model.AccountActionExtenderActivateAccountV4], 60)
+	})
+}
+
+// A busy api and each budget's refusal are counted where they ended
+// (urnetwork_extender_activations_total, connect#230): stage busy with why,
+// and stage budget with the budget that refused -- the client's, the
+// address's, the account's. Before, both refusals were answered around the
+// count, so neither a fleet's busy refusals nor which budget held it back
+// showed on the extenders dashboard.
+func TestExtenderActivateCountsBusyAndBudgetRefusals(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		installTestExtenderConfig(t, nil)
+
+		metrics := newExtenderActivationMetrics(prometheus.NewRegistry())
+		settings := DefaultExtenderActivateSettings()
+		settings.metrics = metrics
+		settings.ClientRateLimit = 1
+		settings.AddressRateLimit = 1
+		settings.AccountRateLimit = 2
+		settings.MaxConcurrentProbes = 1
+		settings.BusyRetryAfterMin = 90 * time.Second
+		settings.BusyRetryAfterMax = 90 * time.Second
+		service := newExtenderActivateService(settings)
+
+		// the first probe holds the one slot until it is let go
+		probeStarted := make(chan struct{}, 8)
+		probeRelease := make(chan struct{})
+		holdFirst := &atomic.Bool{}
+		holdFirst.Store(true)
+		service.testProbes = func(clientIp netip.Addr, ipVersion int) *extenderActivationProbes {
+			probes := testFakeExtenderProbes(nil)(clientIp, ipVersion)
+			passCarrier := probes.carrier
+			probes.carrier = func(ctx context.Context, connectMode connect.ExtenderConnectMode, port int) error {
+				if holdFirst.CompareAndSwap(true, false) {
+					probeStarted <- struct{}{}
+					<-probeRelease
+				}
+				return passCarrier(ctx, connectMode, port)
+			}
+			return probes
+		}
+
+		account := newTestExtenderAccount(ctx)
+		firstHost := account.newHost(t, ctx)
+		secondHost := account.newHost(t, ctx)
+		thirdHost := account.newHost(t, ctx)
+
+		held := make(chan *ExtenderActivateResult, 1)
+		go func() {
+			result, err := service.activate(firstHost.activateArgs(), firstHost.session(ctx, "198.51.100.1"))
+			if err != nil {
+				t.Error(err)
+			}
+			held <- result
+		}()
+		<-probeStarted
+		busy := testActivateHost(t, ctx, service, secondHost, "198.51.100.2")
+		connect.AssertEqual(t, busy.Activated, false)
+		connect.AssertEqual(t, busy.RetryAfterSeconds, 90)
+		close(probeRelease)
+		if result := <-held; result == nil || !result.Activated {
+			t.Fatalf("the held activation was refused: %+v", result)
+		}
+
+		// the first client's second post, its own budget spent
+		clientRefused := testActivateHost(t, ctx, service, firstHost, "198.51.100.1")
+		// another client from the first client's address, its budget spent
+		addressRefused := testActivateHost(t, ctx, service, secondHost, "198.51.100.1")
+		// a second activation of the account spends its floor of 2, and a
+		// third client of it is refused by the account
+		if result := testActivateHost(t, ctx, service, secondHost, "198.51.100.2"); !result.Activated {
+			t.Fatalf("the account's second activation was refused: %q", result.Error)
+		}
+		accountRefused := testActivateHost(t, ctx, service, thirdHost, "198.51.100.3")
+		for _, refused := range []*ExtenderActivateResult{clientRefused, addressRefused, accountRefused} {
+			if refused.Activated || refused.RetryAfterSeconds <= 0 {
+				t.Fatalf("expected a budget refusal with a wait, got activated %t, %q, %d", refused.Activated, refused.Error, refused.RetryAfterSeconds)
+			}
+		}
+
+		for _, c := range []struct {
+			stage   string
+			outcome string
+			want    float64
+		}{
+			{stage: "busy", outcome: "probes", want: 1},
+			{stage: "budget", outcome: "client", want: 1},
+			{stage: "budget", outcome: "address", want: 1},
+			{stage: "budget", outcome: "account", want: 1},
+			{stage: "store", outcome: "activated", want: 2},
+		} {
+			if got := testutil.ToFloat64(metrics.activations.WithLabelValues(c.stage, c.outcome, "ipv4")); got != c.want {
+				t.Errorf("%s %s ipv4 counted %v, want %v", c.stage, c.outcome, got, c.want)
+			}
+		}
 	})
 }
