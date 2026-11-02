@@ -423,6 +423,33 @@ func Testing_SetSkuPrices(proMonthlyUsd float64, proData ByteCount, dataCodeSkus
 	}
 }
 
+// Testing_SetProPriceTiers replaces the price tiers (the first is the default
+// tier and sets pro.price_usd, as pro.yml requires) on the process's parsed
+// config, returning a restore function. Same caveats as
+// Testing_SetEnforceConcurrentClients. For tests that price a purchase by
+// country, whatever the environment's pro.yml says.
+func Testing_SetProPriceTiers(tiers ...proPriceTierYaml) func() {
+	c := Pro()
+	prevTiers := c.priceTiers
+	prevMonthlyUsd := c.Pro.PriceMonthlyUsd
+	prevYearlyUsd := c.Pro.PriceYearlyUsd
+	c.priceTiers = parseProPriceTiers(tiers)
+	if 0 < len(c.priceTiers) {
+		c.Pro.PriceMonthlyUsd = c.priceTiers[0].MonthlyUsd
+		c.Pro.PriceYearlyUsd = c.priceTiers[0].YearlyUsd
+	}
+	return func() {
+		c.priceTiers = prevTiers
+		c.Pro.PriceMonthlyUsd = prevMonthlyUsd
+		c.Pro.PriceYearlyUsd = prevYearlyUsd
+	}
+}
+
+// Testing_ProPriceTier is one tier for Testing_SetProPriceTiers.
+func Testing_ProPriceTier(name string, monthlyUsd float64, yearlyUsd float64, countries ...string) proPriceTierYaml {
+	return proPriceTierYaml{Name: name, MonthlyUsd: monthlyUsd, YearlyUsd: yearlyUsd, Countries: countries}
+}
+
 // Tier returns the free or pro tier limits/features.
 func (c *ProConfig) Tier(pro bool) *ProTier {
 	if pro {

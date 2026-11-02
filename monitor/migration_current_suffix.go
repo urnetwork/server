@@ -887,6 +887,9 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	},
 	// the re-engagement results, wherever merges place them
 	[]snMainnetMigrationContract{reengagementResultsMigrationContract},
+	// the re-engagement program's win-back offers; its version follows
+	// the migration's position
+	[]snMainnetMigrationContract{networkWinbackOfferMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an
