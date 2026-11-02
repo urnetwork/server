@@ -719,7 +719,7 @@
           "legendFormat": "{{verdict}}"
         }
       ],
-      "description": "What each extender report said of its coverage (extender.ExtenderCamouflageStatus), one per report, about one per extender per hour, so a rate is a count of extenders: covered, or why not, camouflage_off, splice_off, splice_gate_closed, no_verified_target, splice_fallback_active; other for anything else. Only covered is camouflage coverage. A deployment in any other state must not be reported as covered, and a Phase A cohort is splice_off by design."
+      "description": "What each extender report said of its coverage (extender.ExtenderCamouflageStatus), one per report, about one per extender per hour, so a rate is a count of extenders: covered, or why not, camouflage_off, splice_off, splice_gate_closed, no_verified_target, splice_fallback_active, coverage_incomplete (the splice runs, but a name its supported clients select did not verify or a list is past its age); other for anything else. Only covered is camouflage coverage. A deployment in any other state must not be reported as covered, and a Phase A cohort is splice_off by design."
     },
     {
       "id": 16,

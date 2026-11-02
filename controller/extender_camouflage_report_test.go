@@ -680,6 +680,7 @@ func TestExtenderCamouflageReportLabelsAreFixedSets(t *testing.T) {
 			{false, extender.ExtenderCamouflageDegradedGateClosed, "splice_gate_closed"},
 			{false, extender.ExtenderCamouflageDegradedNoVerifiedTarget, "no_verified_target"},
 			{false, extender.ExtenderCamouflageDegradedFallbackActive, "splice_fallback_active"},
+			{false, extender.ExtenderCamouflageDegradedCoverageIncomplete, "coverage_incomplete"},
 			{false, "covered", "other"},
 			{false, "198.51.100.30", "other"},
 		} {

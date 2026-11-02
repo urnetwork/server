@@ -67,6 +67,7 @@ const (
 	extenderCamouflageReportVerdictSpliceGateClosed     = "splice_gate_closed"
 	extenderCamouflageReportVerdictNoVerifiedTarget     = "no_verified_target"
 	extenderCamouflageReportVerdictSpliceFallbackActive = "splice_fallback_active"
+	extenderCamouflageReportVerdictCoverageIncomplete   = "coverage_incomplete"
 )
 
 const (
@@ -128,7 +129,7 @@ func newExtenderCamouflageReportMetrics(registerer prometheus.Registerer) *exten
 		}, []string{"outcome", "client_version", "resource_version"}),
 		statusReports: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "urnetwork_extender_camouflage_status_reports_total",
-			Help: "Extenders' reports by the coverage verdict each carried (extender.ExtenderCamouflageStatus), one per report: covered, or the degraded reason (camouflage_off, splice_off, splice_gate_closed, no_verified_target, splice_fallback_active), other for anything else, by the extender's country and the families it dials. Only covered is camouflage coverage.",
+			Help: "Extenders' reports by the coverage verdict each carried (extender.ExtenderCamouflageStatus), one per report: covered, or the degraded reason (camouflage_off, splice_off, splice_gate_closed, no_verified_target, splice_fallback_active, coverage_incomplete), other for anything else, by the extender's country and the families it dials. Only covered is camouflage coverage.",
 		}, []string{"verdict", "country", "family"}),
 		statusVersionReports: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "urnetwork_extender_camouflage_status_version_reports_total",

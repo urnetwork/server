@@ -676,7 +676,8 @@ func extenderCamouflageReportVerdict(covered bool, degradedReason string) string
 		extenderCamouflageReportVerdictSpliceOff,
 		extenderCamouflageReportVerdictSpliceGateClosed,
 		extenderCamouflageReportVerdictNoVerifiedTarget,
-		extenderCamouflageReportVerdictSpliceFallbackActive:
+		extenderCamouflageReportVerdictSpliceFallbackActive,
+		extenderCamouflageReportVerdictCoverageIncomplete:
 		return degradedReason
 	}
 	return extenderCamouflageReportLabelOther
