@@ -56,6 +56,10 @@ func TestExtendersDashboardCoversGossipDnsAndPopularity(t *testing.T) {
 		"reading the day":       "urnetwork_stats_derive_ingest_seconds",
 		"how activations end":   "urnetwork_extender_activations_total",
 		"activation step times": "urnetwork_extender_activation_step_seconds",
+		// the gated release's rollout gates (connect/EXTENDER-UPDATE2.md)
+		"how releases end":               "urnetwork_extender_releases_total",
+		"release outcomes by country":    "urnetwork_extender_release_country_outcomes_total",
+		"capability requirements signed": "urnetwork_extender_record_capability_requirements_total",
 	} {
 		found := false
 		for _, expression := range expressions {
