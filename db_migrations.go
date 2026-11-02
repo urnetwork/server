@@ -11162,4 +11162,13 @@ var migrations = []any{
 		CREATE INDEX network_reengagement_email_network_sent
 		ON network_reengagement_email (network_id, sent_at)
 	`),
+
+	// The country a store sold each subscription row in: the App Store
+	// storefront or the Google Play region, recorded beside the price tier from
+	// now on (subscription_renewal_country_schema.go). The re-engagement
+	// program reads it as the network's country when the network has no
+	// onboarding row (mmm/reengagement/PLAN.md "Server" 10). Rows credited
+	// earlier stay NULL. A nullable column without a default: no table
+	// rewrite. Apply before deploying the api and taskworker that write it.
+	newSqlMigration(subscriptionRenewalCountrySchemaSql),
 }

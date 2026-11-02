@@ -1595,6 +1595,112 @@
           "legendFormat": "{{event}} {{template}}"
         }
       ]
+    },
+    {
+      "type": "timeseries",
+      "title": "re-engagement scan candidates / day by stream and country source",
+      "description": "Where each scan candidate's country came from (mmm/reengagement/PLAN.md Server 10): onboarding (the onboarding row), app_store (the storefront of its latest App Store subscription row), play (the region of its latest Play row), stripe (its card's billing country), unknown. Never an IP lookup. The mail policy treats an unknown country as an evidence country, so a network without consent evidence is refused. Stacked, each candidate counts once.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 116
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (stream, source) (increase(urnetwork_reengagement_context_sources_total{env=\"$env\", part=\"country\"}[1d]))",
+          "refId": "A",
+          "legendFormat": "{{stream}} {{source}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "re-engagement scan candidates / day by locale, platform and time zone source",
+      "description": "Where each scan candidate's locale, platform and time zone came from (mmm/reengagement/PLAN.md Server 7): onboarding (the onboarding row), client_event (its newest client event), device (the device spec of its newest client), unknown. Only the onboarding row keeps a time zone; an unknown one sends in UTC. Not stacked: each candidate counts once per part.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 116
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (part, source) (increase(urnetwork_reengagement_context_sources_total{env=\"$env\", part!=\"country\"}[1d]))",
+          "refId": "A",
+          "legendFormat": "{{part}} {{source}}"
+        }
+      ]
     }
   ]
 }

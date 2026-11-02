@@ -61,12 +61,20 @@ var reengagementWebhookEventsTotal = prometheus.NewCounterVec(prometheus.Counter
 	Help:      "Brevo transactional webhook events attributed to a re-engagement send, by event and template.",
 }, []string{"event", "template"})
 
+var reengagementContextSourcesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "urnetwork",
+	Subsystem: "reengagement",
+	Name:      "context_sources_total",
+	Help:      "Scan candidates by stream and where each part of their mail context came from: part is country, locale, platform or time_zone; source is onboarding, app_store, play, stripe, client_event, device or unknown.",
+}, []string{"stream", "part", "source"})
+
 func init() {
 	prometheus.MustRegister(
 		reengagementEpisodesTotal,
 		reengagementEmailsTotal,
 		reengagementExitsTotal,
 		reengagementWebhookEventsTotal,
+		reengagementContextSourcesTotal,
 	)
 }
 
@@ -139,7 +147,9 @@ func ReengagementScan(args *ReengagementScanArgs, clientSession *session.ClientS
 
 	open := func(stream string, candidate *model.ReengagementCandidate, firstStep string, lastConnect *time.Time) {
 		result.Candidates[stream]++
-		if refusal := reengagementOpenRefusal(ctx, candidate.NetworkId, stream, now); refusal != "" {
+		mailContext := reengagementContext(ctx, candidate.NetworkId)
+		countReengagementContextSources(stream, mailContext)
+		if refusal := reengagementPolicyExit(ctx, candidate.NetworkId, stream, mailContext.Country, now); refusal != "" {
 			result.Refused[stream]++
 			reengagementEpisodesTotal.WithLabelValues(stream, "policy").Inc()
 			return
@@ -148,7 +158,7 @@ func ReengagementScan(args *ReengagementScanArgs, clientSession *session.ClientS
 			reengagementEpisodesTotal.WithLabelValues(stream, "dry_run").Inc()
 			return
 		}
-		if openReengagementEpisode(clientSession, candidate.NetworkId, stream, firstStep, lastConnect, now) {
+		if openReengagementEpisode(clientSession, candidate.NetworkId, stream, firstStep, lastConnect, mailContext, now) {
 			result.Opened[stream]++
 			reengagementEpisodesTotal.WithLabelValues(stream, "opened").Inc()
 		} else {
@@ -221,19 +231,6 @@ func ReengagementScanPost(args *ReengagementScanArgs, result *ReengagementScanRe
 	return nil
 }
 
-// reengagementContext is the locale, zone, platform and country a network is
-// mailed with: the onboarding row when it exists; the Stripe billing country
-// fills a missing country.
-func reengagementContext(ctx context.Context, networkId server.Id) (locale string, timeZone string, platform string, country string) {
-	if onb := model.GetNetworkOnboarding(ctx, networkId); onb != nil {
-		locale, timeZone, platform, country = onb.Locale, onb.TimeZone, onb.Platform, onb.Country
-	}
-	if country == "" {
-		country = model.NetworkStripeBillingCountry(ctx, networkId)
-	}
-	return
-}
-
 func reengagementPurpose(stream string) string {
 	if stream == reengagement.StreamWinback {
 		return onboarding.PurposeWinback
@@ -254,34 +251,28 @@ func reengagementPolicyExit(ctx context.Context, networkId server.Id, stream str
 	})
 }
 
-// reengagementOpenRefusal is why a candidate gets no episode (the policy), or "".
-func reengagementOpenRefusal(ctx context.Context, networkId server.Id, stream string, now time.Time) string {
-	_, _, _, country := reengagementContext(ctx, networkId)
-	return reengagementPolicyExit(ctx, networkId, stream, country, now)
-}
-
-// openReengagementEpisode starts the episode and schedules its first step.
-func openReengagementEpisode(clientSession *session.ClientSession, networkId server.Id, stream string, firstStep string, lastConnect *time.Time, now time.Time) bool {
+// openReengagementEpisode starts the episode in the network's resolved mail
+// context and schedules its first step.
+func openReengagementEpisode(clientSession *session.ClientSession, networkId server.Id, stream string, firstStep string, lastConnect *time.Time, mailContext ReengagementContext, now time.Time) bool {
 	ctx := clientSession.Ctx
 	cfg := model.Reengagement()
 	s := cfg.ScheduleValue()
-	locale, timeZone, platform, country := reengagementContext(ctx, networkId)
 	row := &model.NetworkReengagement{
 		NetworkId:     networkId,
 		Stream:        stream,
 		StartedAt:     now,
 		LastConnectAt: lastConnect,
-		Platform:      platform,
-		Locale:        locale,
-		TimeZone:      timeZone,
-		Country:       country,
+		Platform:      mailContext.Platform,
+		Locale:        mailContext.Locale,
+		TimeZone:      mailContext.TimeZone,
+		Country:       mailContext.Country,
 		NextStep:      firstStep,
 	}
 	if a := cfg.AssignmentForSurface(networkId, model.ExperimentSurfaceForStream(stream), now); a != nil {
 		row.ExperimentId = a.ExperimentId
 		row.Variant = a.Variant
 	}
-	at := reengagement.SendAt(now, 0, onboarding.LoadLocation(timeZone), s, now)
+	at := reengagement.SendAt(now, 0, onboarding.LoadLocation(mailContext.TimeZone), s, now)
 	row.NextSendAt = &at
 	cooldownBefore := now.Add(-time.Duration(s.CooldownDays) * day)
 	if !model.StartNetworkReengagement(ctx, row, cooldownBefore, now) {
@@ -296,7 +287,13 @@ func openReengagementEpisode(clientSession *session.ClientSession, networkId ser
 		props["experiment"] = row.ExperimentId
 		props["arm"] = row.Variant
 	}
-	WriteServerEventWithContext(ctx, networkId, model.EventReengageEpisodeStarted, props, platform)
+	if mailContext.Country != "" {
+		// the country signal and its source, kept with the episode
+		// (PLAN.md "Compliance" 7)
+		props["country"] = mailContext.Country
+		props["country_source"] = mailContext.CountrySource
+	}
+	WriteServerEventWithContext(ctx, networkId, model.EventReengageEpisodeStarted, props, mailContext.Platform)
 	server.Tx(ctx, func(tx server.PgTx) {
 		scheduleReengagementStepInTx(tx, clientSession, networkId, started.Episode, firstStep, at)
 	})
@@ -742,6 +739,8 @@ type ReengagementStatus struct {
 	MailState *model.NetworkMailState           `json:"mail_state"`
 	Emails    []*model.NetworkReengagementEmail `json:"emails"`
 	Facts     *reengagement.Facts               `json:"facts,omitempty"`
+	// the context a scan would open an episode in now, with its sources
+	Context ReengagementContext `json:"context"`
 }
 
 func ReengagementNetworkStatus(ctx context.Context, networkId server.Id) *ReengagementStatus {
@@ -749,6 +748,7 @@ func ReengagementNetworkStatus(ctx context.Context, networkId server.Id) *Reenga
 		Row:       model.GetNetworkReengagement(ctx, networkId),
 		MailState: model.GetNetworkMailState(ctx, networkId),
 		Emails:    model.ListNetworkReengagementEmails(ctx, networkId),
+		Context:   reengagementContext(ctx, networkId),
 	}
 	if status.Row != nil {
 		facts := loadReengagementFacts(ctx, status.Row, server.NowUtc())
