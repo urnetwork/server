@@ -3,12 +3,14 @@ package controller
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"math"
+	mathrand "math/rand/v2"
 	"net"
 	"net/netip"
 	"slices"
@@ -100,22 +102,97 @@ const (
 // 8051). The account keeps a budget of its own, ten clients' worth, so
 // creating more clients does not multiply what one account can probe.
 //
-// Both budgets are kept per address family, each family with the limits
+// Every budget is kept per address family, each family with the limits
 // below. One budget for both families let a dual-stack client's failing
 // family spend the other's: three restarts of a provider whose ipv4 posts
 // failed spent the hour, and its ipv6 could not activate either (support inbox
 // 8083). A family's budget is spent by the probes of that family's address.
+//
+// The budgets are per host (connect#230). The address a probe dials has a
+// budget of its own, over every client and every account, which bounds what
+// any number of accounts can have the operator send one address; the account
+// budget never did. The account's limit grows with the hosts it has proven, so
+// a fleet that has passed activation restarts at once rather than queueing an
+// hour per 60 hosts, while a new account keeps the floor and a new fleet ramps
+// an hour at a time. Hosts that fail never raise it.
 type ExtenderActivateSettings struct {
 	// activations per client per family per window. A client posts one
 	// activation per family a pass, and a refused pass backs off ten minutes
 	// doubling (connect/net_extender_activate.go), so a client that keeps
 	// failing posts three a family in its first hour and fewer after
 	ClientRateLimit int
-	// activations per account per family per window, over all of its
-	// clients. A client refused by its own budget does not spend this one,
-	// and a client refused by this one does not spend its own.
+	// activations per caller address per family per window, over every client
+	// and every account: the address is what the probe dials. The address is
+	// the /32 of an ipv4 caller and the /64 of an ipv6 one, kept only as a
+	// keyed hash. One client's whole budget, so a host posting alone never
+	// meets it; a shared address, a NAT or a relay, does, and an extender
+	// behind NAT cannot pass activation anyway.
+	AddressRateLimit          int
+	AddressIpv4PrefixBitCount int
+	AddressIpv6PrefixBitCount int
+	// activations per family per window of a key its network already proved
+	// at the caller's address, which spend this budget, kept for that key at
+	// that address, rather than the address's (connect#230). A public
+	// extender relays posts to the api from its own address, so other
+	// accounts' posts through it spend the address's budget; its own
+	// re-activation spends one no other post can. Proved means the key's
+	// last pass on the family was from the same /32 or /64, at most
+	// ProvenHostMaxAge ago.
+	ProvenAddressRateLimit int
+	// the floor of the account's activations per family per window, over all
+	// of its clients: a new account's limit. A client refused by its own
+	// budget does not spend this one, and a client refused by this one does
+	// not spend its own.
 	AccountRateLimit int
-	RateLimitWindow  time.Duration
+	// what each proven host of the account adds to its limit: a host's own
+	// budgets, so the limit never binds below what the account's proven hosts
+	// could each spend
+	AccountRateLimitPerProvenHost int
+	// the most the account's limit grows to, twenty a minute: one account's
+	// share of the probes
+	AccountRateLimitCeiling int
+	RateLimitWindow         time.Duration
+
+	// a proven host is an identity key of the account that passed activation
+	// on the family -- the tcp challenge and the verified forward (C2a) -- at
+	// least ProvenHostMinAge and at most ProvenHostMaxAge ago. The least age
+	// keeps the limit from growing inside the window it is spending, and the
+	// most lets a host that lapsed stop counting.
+	ProvenHostMinAge time.Duration
+	ProvenHostMaxAge time.Duration
+	// proven hosts count once per address (the address budget's /32 or /64)
+	// and at most ProvenHostsPerBlock per /24 of ipv4 or /48 of ipv6, so
+	// renting addresses in one block buys little
+	ProvenHostsPerBlock               int
+	ProvenHostBlockIpv4PrefixBitCount int
+	ProvenHostBlockIpv6PrefixBitCount int
+	// how long the process reuses an account's proven host candidates, which
+	// it counts at each read's own time. They are read only once the
+	// account's spends reach the floor, and then for each of a fleet's posts.
+	// Non-positive reads them every time.
+	ProvenHostCountTimeout time.Duration
+	// how far past the moment a budget has room again its refusal's wait is
+	// drawn, uniformly (connect#230). Without it the hosts one budget refuses
+	// together are told the same second, and come back together into the
+	// probe guard. Non-positive asks for the moment itself.
+	BudgetRetryAfterJitter time.Duration
+	// how far before the spend each budget's attempt is recorded, drawn
+	// uniformly for each on its own, so the attempts of one spend share no
+	// create_time that joins the caller address's hashed row to its client's
+	// and account's rows (connect#230). A second is far below every budget's
+	// hour. Non-positive records the spend's time.
+	BudgetAttemptTimeSpread time.Duration
+
+	// activations the api process probes at once (connect#230). Each holds a
+	// handler for up to the 10 s probe budget, so a fleet restarting at once
+	// could otherwise hold thousands. One over it is refused as busy before
+	// it spends any budget, with a `retry_after_seconds`. Non-positive refuses
+	// every activation as busy.
+	MaxConcurrentProbes int
+	// the wait a busy refusal asks for, drawn uniformly between the two so
+	// the activations refused together do not all come back together
+	BusyRetryAfterMin time.Duration
+	BusyRetryAfterMax time.Duration
 
 	// where every activation's outcome and probe step times are counted
 	// (extender_activation_metrics.go). Nil counts nothing, which is what a
@@ -124,12 +201,132 @@ type ExtenderActivateSettings struct {
 }
 
 // The actions the activation budgets of one family are recorded under
-// (ExtenderActivateSettings): the calling client's, and its account's.
-func extenderActivateRateLimitActions(ipVersion int) (clientAction string, accountAction string) {
+// (ExtenderActivateSettings): the calling client's, the caller address's, and
+// the account's.
+func extenderActivateRateLimitActions(ipVersion int) (clientAction string, addressAction string, accountAction string) {
 	if ipVersion == 6 {
-		return model.AccountActionExtenderActivateV6, model.AccountActionExtenderActivateAccountV6
+		return model.AccountActionExtenderActivateV6,
+			model.AccountActionExtenderActivateAddressV6,
+			model.AccountActionExtenderActivateAccountV6
 	}
-	return model.AccountActionExtenderActivateV4, model.AccountActionExtenderActivateAccountV4
+	return model.AccountActionExtenderActivateV4,
+		model.AccountActionExtenderActivateAddressV4,
+		model.AccountActionExtenderActivateAccountV4
+}
+
+// The account's activation limit of one family with `provenHostCount` proven
+// hosts (connect#230): the floor, AccountRateLimitPerProvenHost more for each
+// proven host, and no more than the ceiling. Never below the floor.
+func (self *ExtenderActivateSettings) accountRateLimit(provenHostCount int) int {
+	limit := self.AccountRateLimit + self.AccountRateLimitPerProvenHost*max(provenHostCount, 0)
+	return max(self.AccountRateLimit, min(limit, self.AccountRateLimitCeiling))
+}
+
+// The proven hosts of one family among an account's candidates at `now`
+// (connect#230): those whose first activation of the family since
+// ProvenHostMaxAge ago is at least ProvenHostMinAge old, counted once per
+// address, and at most ProvenHostsPerBlock in a block.
+func (self *ExtenderActivateSettings) provenHostCount(
+	candidates []*model.NetworkExtenderProvenHostCandidate,
+	ipVersion int,
+	now time.Time,
+) int {
+	addressBitCount := self.AddressIpv4PrefixBitCount
+	blockBitCount := self.ProvenHostBlockIpv4PrefixBitCount
+	if ipVersion == 6 {
+		addressBitCount = self.AddressIpv6PrefixBitCount
+		blockBitCount = self.ProvenHostBlockIpv6PrefixBitCount
+	}
+	minActivateTime := now.Add(-self.ProvenHostMaxAge)
+	maxActivateTime := now.Add(-self.ProvenHostMinAge)
+	blockAddresses := map[netip.Prefix]map[netip.Prefix]bool{}
+	for _, candidate := range candidates {
+		ip := candidate.Ip.Unmap()
+		if server.IpVersionForAddr(ip) != ipVersion {
+			continue
+		}
+		if candidate.FirstActivateTime.Before(minActivateTime) || maxActivateTime.Before(candidate.FirstActivateTime) {
+			continue
+		}
+		block := netip.PrefixFrom(ip, blockBitCount).Masked()
+		addresses, ok := blockAddresses[block]
+		if !ok {
+			addresses = map[netip.Prefix]bool{}
+			blockAddresses[block] = addresses
+		}
+		addresses[netip.PrefixFrom(ip, addressBitCount).Masked()] = true
+	}
+	provenHostCount := 0
+	for _, addresses := range blockAddresses {
+		provenHostCount += min(len(addresses), self.ProvenHostsPerBlock)
+	}
+	return provenHostCount
+}
+
+// The id the address budget of a caller address is recorded under
+// (connect#230): the peppered hash of its /32 or /64, as the activation history
+// keeps an address, cut to an id. No address is stored, and an ipv4-mapped
+// address and a zoned one are the address they name.
+func (self *ExtenderActivateSettings) addressBudgetId(clientIp netip.Addr) server.Id {
+	addressHash := server.ClientIpHashForAddrPrefix(
+		clientIp.WithZone(""),
+		self.AddressIpv4PrefixBitCount,
+		self.AddressIpv6PrefixBitCount,
+	)
+	return server.Id([16]byte(addressHash[:16]))
+}
+
+// The action of the budget of a key its network proved at the caller's
+// address (ProvenAddressRateLimit).
+func extenderActivateProvenAddressRateLimitAction(ipVersion int) string {
+	if ipVersion == 6 {
+		return model.AccountActionExtenderActivateProvenAddressV6
+	}
+	return model.AccountActionExtenderActivateProvenAddressV4
+}
+
+// The id the budget of one key at one caller address is recorded under
+// (ProvenAddressRateLimit): the hash of the address's peppered hash and the
+// key, cut to an id, so it is the key's at that /32 or /64 alone and holds no
+// address.
+func (self *ExtenderActivateSettings) provenAddressBudgetId(clientIp netip.Addr, publicKey []byte) server.Id {
+	addressHash := server.ClientIpHashForAddrPrefix(
+		clientIp.WithZone(""),
+		self.AddressIpv4PrefixBitCount,
+		self.AddressIpv6PrefixBitCount,
+	)
+	keyHash := sha256.New()
+	keyHash.Write(addressHash[:])
+	keyHash.Write(publicKey)
+	return server.Id([16]byte(keyHash.Sum(nil)[:16]))
+}
+
+// Whether a post of a key from `clientIp` by `networkId` is the network's own
+// extender re-activating where it proved itself (ProvenAddressRateLimit): the
+// key's network is the caller's, its last pass on the family was from the
+// same /32 or /64, and that pass was at most ProvenHostMaxAge ago.
+func (self *ExtenderActivateSettings) keyProvenAtAddress(
+	keyAddress *model.NetworkExtenderKeyAddress,
+	networkId server.Id,
+	clientIp netip.Addr,
+	now time.Time,
+) bool {
+	if keyAddress == nil || keyAddress.NetworkId != networkId {
+		return false
+	}
+	if keyAddress.ActivateTime.Before(now.Add(-self.ProvenHostMaxAge)) {
+		return false
+	}
+	keyIp := keyAddress.Ip.Unmap().WithZone("")
+	clientIp = clientIp.Unmap().WithZone("")
+	if server.IpVersionForAddr(keyIp) != server.IpVersionForAddr(clientIp) {
+		return false
+	}
+	prefixBitCount := self.AddressIpv4PrefixBitCount
+	if clientIp.Is6() {
+		prefixBitCount = self.AddressIpv6PrefixBitCount
+	}
+	return netip.PrefixFrom(keyIp, prefixBitCount).Masked() == netip.PrefixFrom(clientIp, prefixBitCount).Masked()
 }
 
 // The family an activation claims by the host it was posted to (C2): 4 for a
@@ -167,10 +364,30 @@ func extenderActivateHostIpVersion(host string) int {
 
 func DefaultExtenderActivateSettings() *ExtenderActivateSettings {
 	return &ExtenderActivateSettings{
-		ClientRateLimit:  6,
-		AccountRateLimit: 60,
-		RateLimitWindow:  time.Hour,
-		metrics:          defaultExtenderActivationMetrics,
+		ClientRateLimit:                   6,
+		AddressRateLimit:                  6,
+		AddressIpv4PrefixBitCount:         32,
+		AddressIpv6PrefixBitCount:         64,
+		ProvenAddressRateLimit:            6,
+		AccountRateLimit:                  60,
+		AccountRateLimitPerProvenHost:     6,
+		AccountRateLimitCeiling:           1200,
+		RateLimitWindow:                   time.Hour,
+		ProvenHostMinAge:                  1 * time.Hour,
+		ProvenHostMaxAge:                  7 * 24 * time.Hour,
+		ProvenHostsPerBlock:               32,
+		ProvenHostBlockIpv4PrefixBitCount: 24,
+		ProvenHostBlockIpv6PrefixBitCount: 48,
+		ProvenHostCountTimeout:            1 * time.Minute,
+		BudgetRetryAfterJitter:            1 * time.Minute,
+		BudgetAttemptTimeSpread:           1 * time.Second,
+		MaxConcurrentProbes:               64,
+		// the activator holds a retry at least a minute whatever it is told
+		// (connect/net_extender_activate.go), and three minutes spreads a
+		// fleet's refused posts over three rounds of the guard
+		BusyRetryAfterMin: 1 * time.Minute,
+		BusyRetryAfterMax: 3 * time.Minute,
+		metrics:           defaultExtenderActivationMetrics,
 	}
 }
 
@@ -282,6 +499,18 @@ type ExtenderActivateResult struct {
 	// base64 of serialized protocol.ExtenderRecord messages of other active
 	// extenders, the directory an app starts from (D6)
 	Bootstrap []string `json:"bootstrap,omitempty"`
+	// on a refusal that judged nothing about the caller -- an operator too
+	// busy to probe, or a spent budget -- the seconds until the operator has
+	// room for the caller's next post of this family, rounded up
+	// (connect#230). The activator waits that long instead of backing off. 0,
+	// and left out, on every other answer.
+	RetryAfterSeconds int `json:"retry_after_seconds,omitempty"`
+}
+
+// The wire form of a wait (`retry_after_seconds`): whole seconds, rounded up
+// so a caller that waits it out is never early, and at least one.
+func extenderActivateRetryAfterSeconds(retryAfter time.Duration) int {
+	return max(1, int((retryAfter+time.Second-1)/time.Second))
 }
 
 // One optional carrier, or one port of the dns carrier, that did not answer
@@ -488,29 +717,184 @@ func ExtenderActivate(
 	args *ExtenderActivateArgs,
 	clientSession *session.ClientSession,
 ) (*ExtenderActivateResult, error) {
-	return extenderActivate(args, clientSession, DefaultExtenderActivateSettings())
+	return defaultExtenderActivateService().activate(args, clientSession)
 }
 
+// The activations of one api process (C2): the settings each is judged by,
+// the probes that dial the caller back, and the guard on how many of those run
+// at once (connect#230). The process has one, built on first use; a test
+// builds its own, with its own settings and, where the caller address is not
+// a socket it can bind, fake probes. Safe for concurrent use.
+type extenderActivateService struct {
+	settings *ExtenderActivateSettings
+	// one token per activation past the guard (MaxConcurrentProbes), from the
+	// guard to the end of its probe
+	probeSlots chan struct{}
+	// replaces the probes of an activation when set: a test's fake, which
+	// answers for the caller without a socket. Nil dials the caller for real,
+	// which is production.
+	testProbes func(clientIp netip.Addr, ipVersion int) *extenderActivationProbes
+	// the clock proven hosts are counted and their reads reused by:
+	// server.NowUtc, and a test's own where it steps through a cache's life
+	now func() time.Time
+
+	stateLock sync.Mutex
+	// the proven host candidates this process read, each reused until its
+	// expire time (ProvenHostCountTimeout) and counted at each read's own time
+	provenHostCandidates map[extenderProvenHostCountKey]*extenderProvenHostCandidates
+}
+
+// An account's proven hosts of one family: the network's, since an extender
+// row belongs to a network.
+type extenderProvenHostCountKey struct {
+	networkId server.Id
+	ipVersion int
+}
+
+type extenderProvenHostCandidates struct {
+	candidates []*model.NetworkExtenderProvenHostCandidate
+	expireTime time.Time
+}
+
+func newExtenderActivateService(settings *ExtenderActivateSettings) *extenderActivateService {
+	return &extenderActivateService{
+		settings:             settings,
+		probeSlots:           make(chan struct{}, max(0, settings.MaxConcurrentProbes)),
+		now:                  server.NowUtc,
+		provenHostCandidates: map[extenderProvenHostCountKey]*extenderProvenHostCandidates{},
+	}
+}
+
+// The proven hosts of one family of a network (connect#230), read in the
+// caller's transaction, which is the budget spend's (provenHostCount).
+func (self *extenderActivateService) provenHostCountInTx(
+	ctx context.Context,
+	tx server.PgTx,
+	networkId server.Id,
+	ipVersion int,
+) int {
+	return self.provenHostCount(
+		networkId,
+		ipVersion,
+		func(minActivateTime time.Time) []*model.NetworkExtenderProvenHostCandidate {
+			return model.GetNetworkExtenderProvenHostCandidatesInTx(ctx, tx, networkId, ipVersion, minActivateTime)
+		},
+	)
+}
+
+// The proven hosts of one family of a network at this read's own time, from
+// the candidates `readCandidates` reads since a time, or those this process
+// read within ProvenHostCountTimeout. The spend asks only once the account has
+// reached its floor, so most activations never read them, and a fleet's posts
+// past the floor read them once a minute per process rather than once each.
+//
+// What is reused is the candidates, never the count (connect#230): a host
+// becomes proven an hour after its first pass whether or not anything is
+// read, and a count reused through that moment held the account's limit at
+// its floor while other processes admitted past it, so a post here met a
+// limit below the count and was told to wait about an hour. A read reaches
+// back the reuse's length less than the lookback, so a candidate's earliest
+// pass is within the lookback of every count the read serves; a host whose
+// only pass in the lookback is in that edge waits for the next read.
+func (self *extenderActivateService) provenHostCount(
+	networkId server.Id,
+	ipVersion int,
+	readCandidates func(minActivateTime time.Time) []*model.NetworkExtenderProvenHostCandidate,
+) int {
+	key := extenderProvenHostCountKey{
+		networkId: networkId,
+		ipVersion: ipVersion,
+	}
+	now := self.now()
+	reuse := 0 < self.settings.ProvenHostCountTimeout
+	var candidates []*model.NetworkExtenderProvenHostCandidate
+	reused := false
+	if reuse {
+		candidates, reused = func() ([]*model.NetworkExtenderProvenHostCandidate, bool) {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+			if read, ok := self.provenHostCandidates[key]; ok && now.Before(read.expireTime) {
+				return read.candidates, true
+			}
+			return nil, false
+		}()
+	}
+	if !reused {
+		candidates = readCandidates(now.Add(max(self.settings.ProvenHostCountTimeout, 0) - self.settings.ProvenHostMaxAge))
+		if reuse {
+			func() {
+				self.stateLock.Lock()
+				defer self.stateLock.Unlock()
+				// the reads that ran out go, so the map holds only the
+				// networks whose spends reached their floor within the timeout
+				for readKey, read := range self.provenHostCandidates {
+					if !now.Before(read.expireTime) {
+						delete(self.provenHostCandidates, readKey)
+					}
+				}
+				self.provenHostCandidates[key] = &extenderProvenHostCandidates{
+					candidates: candidates,
+					expireTime: now.Add(self.settings.ProvenHostCountTimeout),
+				}
+			}()
+		}
+	}
+	return self.settings.provenHostCount(candidates, ipVersion, now)
+}
+
+// The wait a budget refusal asks for: the moment the budget has room, and up
+// to BudgetRetryAfterJitter past it, uniformly.
+func (self *extenderActivateService) budgetRetryAfter(retryAfter time.Duration) time.Duration {
+	if self.settings.BudgetRetryAfterJitter <= 0 {
+		return retryAfter
+	}
+	return retryAfter + mathrand.N(self.settings.BudgetRetryAfterJitter+1)
+}
+
+// The wait a busy refusal asks for, uniform over the settings' bounds.
+func (self *extenderActivateService) busyRetryAfter() time.Duration {
+	retryAfterMin := self.settings.BusyRetryAfterMin
+	retryAfterMax := max(retryAfterMin, self.settings.BusyRetryAfterMax)
+	if retryAfterMin == retryAfterMax {
+		return retryAfterMin
+	}
+	return retryAfterMin + mathrand.N(retryAfterMax-retryAfterMin+1)
+}
+
+var defaultExtenderActivateService = sync.OnceValue(func() *extenderActivateService {
+	return newExtenderActivateService(DefaultExtenderActivateSettings())
+})
+
+// ExtenderActivate under other settings, on a service of its own.
 func extenderActivate(
 	args *ExtenderActivateArgs,
 	clientSession *session.ClientSession,
 	settings *ExtenderActivateSettings,
 ) (*ExtenderActivateResult, error) {
+	return newExtenderActivateService(settings).activate(args, clientSession)
+}
+
+func (self *extenderActivateService) activate(
+	args *ExtenderActivateArgs,
+	clientSession *session.ClientSession,
+) (*ExtenderActivateResult, error) {
+	settings := self.settings
 	// the steps the probe ran, which every answer after it carries, refusals
 	// included
 	var probeSteps []*ExtenderProbeStep
 	// the stage the activation has reached, which is where a refusal is
-	// counted (extender_activation_metrics.go), and how the probe refused
-	// when it was the probe that did
+	// counted (extender_activation_metrics.go), and how it ended there when
+	// the stage says more than refused: how the probe refused, why the api was
+	// busy, or which budget refused
 	stage := extenderActivationStageRequest
-	probeRefusalOutcome := ""
+	stageOutcome := ""
 	// the caller's family as the count labels it, read before the address is
 	// checked so a request refused for anything is counted by family
 	family := extenderActivationFamily(clientSession.ClientAddress)
 	refuse := func(message string) (*ExtenderActivateResult, error) {
 		settings.metrics.observe(
 			stage,
-			extenderActivationRefusalOutcome(stage, probeRefusalOutcome),
+			extenderActivationRefusalOutcome(stage, stageOutcome),
 			family,
 			probeSteps,
 		)
@@ -519,6 +903,13 @@ func extenderActivate(
 			Error:      message,
 			ProbeSteps: probeSteps,
 		}, nil
+	}
+	// a refusal that judged nothing about the caller -- a busy api, a spent
+	// budget -- with the wait until there is room (connect#230)
+	refuseWithRetryAfter := func(message string, retryAfter time.Duration) (*ExtenderActivateResult, error) {
+		result, err := refuse(message)
+		result.RetryAfterSeconds = extenderActivateRetryAfterSeconds(retryAfter)
+		return result, err
 	}
 
 	publicKey, err := connect.ParseExtenderPublicKeyHex(args.PublicKeyHex)
@@ -651,6 +1042,30 @@ func extenderActivate(
 	}
 	connectSettings := ExtenderProbeConnectSettings()
 
+	// The probe guard (connect#230): the process probes at most
+	// MaxConcurrentProbes activations at once. One more is refused as busy
+	// here, after every check that refuses without a probe and before any
+	// budget is spent, so the refused caller loses nothing and is told when to
+	// come back. The token is held to the end of the probe.
+	select {
+	case self.probeSlots <- struct{}{}:
+	default:
+		stage = extenderActivationStageBusy
+		stageOutcome = extenderActivationOutcomeProbes
+		retryAfter := self.busyRetryAfter()
+		return refuseWithRetryAfter(
+			fmt.Sprintf(
+				"The operator is busy probing other extenders. Please try again in %s.",
+				model.AccountActionRetryText(retryAfter),
+			),
+			retryAfter,
+		)
+	}
+	releaseProbeSlot := sync.OnceFunc(func() {
+		<-self.probeSlots
+	})
+	defer releaseProbeSlot()
+
 	// The budgets are spent here, at the probe (ExtenderActivateSettings):
 	// after every check that refuses without dialing the caller -- the
 	// arguments, the client, the caller address and its family, the family
@@ -658,77 +1073,145 @@ func extenderActivate(
 	// before the first dial. A malformed request, a post that crossed families
 	// and an operator that cannot probe spend nothing, while every activation
 	// that dials the caller is counted before it dials, whatever the probe
-	// then finds. The calling client's budget and its account's are spent
-	// together or not at all, so a client refused by its account's budget
-	// keeps its own, and both are the budgets of the family the probe dials.
+	// then finds. The calling client's budget, its address's and its
+	// account's are spent together or not at all, so a client refused by its
+	// account's budget keeps its own, and all are the budgets of the family
+	// the probe dials. A refusal says when the budget that refused has room
+	// again, which the activator waits out (`retry_after_seconds`).
 	stage = extenderActivationStageBudget
-	clientRateLimitAction, accountRateLimitAction := extenderActivateRateLimitActions(ipVersion)
+	clientRateLimitAction, addressRateLimitAction, accountRateLimitAction := extenderActivateRateLimitActions(ipVersion)
+	networkId := clientSession.ByJwt.NetworkId
+	addressBudget := model.AccountActionBudget{
+		Id:                settings.addressBudgetId(clientIp),
+		Action:            addressRateLimitAction,
+		Limit:             settings.AddressRateLimit,
+		Window:            settings.RateLimitWindow,
+		AttemptTimeSpread: settings.BudgetAttemptTimeSpread,
+	}
+	// a key its network already proved at this address is the network's own
+	// extender re-activating where it lives. A public extender relays posts
+	// to the api from its own address, so any account's posts through it
+	// spend the address's budget; the key's own posts there spend a budget
+	// of their own, which no other post can, so others cannot hold its
+	// re-activation off (connect#230)
+	if settings.keyProvenAtAddress(
+		model.GetNetworkExtenderKeyAddress(clientSession.Ctx, publicKey, ipVersion),
+		networkId,
+		clientIp,
+		server.NowUtc(),
+	) {
+		addressBudget = model.AccountActionBudget{
+			Id:                settings.provenAddressBudgetId(clientIp, publicKey),
+			Action:            extenderActivateProvenAddressRateLimitAction(ipVersion),
+			Limit:             settings.ProvenAddressRateLimit,
+			Window:            settings.RateLimitWindow,
+			AttemptTimeSpread: settings.BudgetAttemptTimeSpread,
+		}
+	}
 	if err := model.CheckAndRecordAccountActionBudgets(
 		clientSession.Ctx,
 		model.AccountActionBudget{
-			Id:     *clientSession.ByJwt.ClientId,
-			Action: clientRateLimitAction,
-			Limit:  settings.ClientRateLimit,
-			Window: settings.RateLimitWindow,
+			Id:                *clientSession.ByJwt.ClientId,
+			Action:            clientRateLimitAction,
+			Limit:             settings.ClientRateLimit,
+			Window:            settings.RateLimitWindow,
+			AttemptTimeSpread: settings.BudgetAttemptTimeSpread,
 		},
+		addressBudget,
 		model.AccountActionBudget{
-			Id:     clientSession.ByJwt.UserId,
-			Action: accountRateLimitAction,
-			Limit:  settings.AccountRateLimit,
-			Window: settings.RateLimitWindow,
+			Id:                clientSession.ByJwt.UserId,
+			Action:            accountRateLimitAction,
+			Limit:             settings.AccountRateLimit,
+			Window:            settings.RateLimitWindow,
+			AttemptTimeSpread: settings.BudgetAttemptTimeSpread,
+			// past the floor the account's limit is what its proven hosts
+			// raised it to (connect#230)
+			ExtendLimitInTx: func(ctx context.Context, tx server.PgTx) int {
+				return settings.accountRateLimit(self.provenHostCountInTx(ctx, tx, networkId, ipVersion))
+			},
 		},
 	); err != nil {
+		if errors.Is(err, model.ErrAccountActionBudgetsBusy) {
+			// other spends held a budget past the lock bound: nothing was
+			// spent, so the caller is busy-refused like one over the probe
+			// guard rather than answered with an error (connect#230)
+			stage = extenderActivationStageBusy
+			stageOutcome = extenderActivationOutcomeBudgetLock
+			retryAfter := self.busyRetryAfter()
+			return refuseWithRetryAfter(
+				fmt.Sprintf(
+					"The operator is busy activating other extenders. Please try again in %s.",
+					model.AccountActionRetryText(retryAfter),
+				),
+				retryAfter,
+			)
+		}
+		var budgetRefusal *model.AccountActionBudgetRefusal
+		if errors.As(err, &budgetRefusal) {
+			stageOutcome = extenderActivationBudgetOutcome(budgetRefusal.Action)
+			// the hosts a budget refuses together are spread over the
+			// minute after it has room, rather than told the same second
+			jitteredRefusal := *budgetRefusal
+			jitteredRefusal.RetryAfter = self.budgetRetryAfter(budgetRefusal.RetryAfter)
+			return refuseWithRetryAfter(jitteredRefusal.Error(), jitteredRefusal.RetryAfter)
+		}
+		stageOutcome = extenderActivationOutcomeAccount
 		return refuse(err.Error())
 	}
 
 	// the acceptance rule (C2a) over the real probes: the required test, then
 	// each optional carrier offered, which is left out when it does not answer
+	probes := &extenderActivationProbes{
+		carrier: func(
+			ctx context.Context,
+			connectMode connect.ExtenderConnectMode,
+			port int,
+		) error {
+			_, err := connect.ProbeExtenderCarrier(
+				ctx,
+				connectSettings,
+				clientIp,
+				connectMode,
+				port,
+				dnsTld,
+				serverName,
+				publicKey,
+				apiHost,
+				ExtenderProbeDestinationPort,
+			)
+			return err
+		},
+		forward: func(ctx context.Context) (string, error) {
+			return connect.ProbeExtenderForward(
+				ctx,
+				connectSettings,
+				clientIp,
+				tcpPort,
+				serverName,
+				publicKey,
+				config.ApiUrl,
+				extenderForwardProbeTlsConfig(),
+			)
+		},
+	}
+	if self.testProbes != nil {
+		probes = self.testProbes(clientIp, ipVersion)
+	}
 	outcome := probeExtenderActivation(
 		clientSession.Ctx,
 		newExtenderActivationClock(),
-		&extenderActivationProbes{
-			carrier: func(
-				ctx context.Context,
-				connectMode connect.ExtenderConnectMode,
-				port int,
-			) error {
-				_, err := connect.ProbeExtenderCarrier(
-					ctx,
-					connectSettings,
-					clientIp,
-					connectMode,
-					port,
-					dnsTld,
-					serverName,
-					publicKey,
-					apiHost,
-					ExtenderProbeDestinationPort,
-				)
-				return err
-			},
-			forward: func(ctx context.Context) (string, error) {
-				return connect.ProbeExtenderForward(
-					ctx,
-					connectSettings,
-					clientIp,
-					tcpPort,
-					serverName,
-					publicKey,
-					config.ApiUrl,
-					extenderForwardProbeTlsConfig(),
-				)
-			},
-		},
+		probes,
 		carriers,
 		tcpPort,
 		udpPort,
 		dnsPorts,
 		ipVersion,
 	)
+	releaseProbeSlot()
 	probeSteps = outcome.steps
 	if outcome.refusal != "" {
 		stage = outcome.refusalStep
-		probeRefusalOutcome = outcome.refusalOutcome
+		stageOutcome = outcome.refusalOutcome
 		return refuse(outcome.refusal)
 	}
 	stage = extenderActivationStageStore

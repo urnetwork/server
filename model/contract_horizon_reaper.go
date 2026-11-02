@@ -40,9 +40,11 @@
 // escrows, sweeps and extender parties. The usage archive trigger copies a
 // credit-bearing contract's proof into st_provider_usage_archive in the same
 // statement, so the subnet usage readers see it either live or archived, never
-// both and never neither. Close evidence keeps its own 91-day retention
-// (server.RemoveExpiredCloseEvidence), which takes evidence whose contract is
-// gone, so below 91 days a deleted contract's evidence outlives it until then.
+// both and never neither. Close evidence is not deleted here: while the mode
+// is on, its own retention (server.RemoveExpiredCloseEvidence) follows this
+// horizon, down to its guard's 35 days, and takes the evidence of a resolved
+// or deleted contract once it is as old, whether or not these keep rules keep
+// the contract, at the pace of its own brake.
 //
 // A pass walks transfer_contract's primary key from a cursor toward the
 // horizon. Each batch takes the next ids from an index-only range of that key,
@@ -131,14 +133,17 @@ func (self ContractHorizonMode) String() string {
 
 // The shortest horizon the reaper applies, whatever its settings or control
 // say (owner, 2026-11-01: 35 days). It is the reaper's: server.ContractRetention,
-// which the partition drop, close evidence retention and the sn-reconcile
-// floor share, stays 91 days. Key history retention follows the reaper's
-// horizon while its mode is on (RemoveGoneStClientKeyHistory), over the key
-// history guard's own 30-day floor (server.ClientKeyHistoryRetentionFloor),
-// and keeps 91 days in a dry run. What keeps a contract the payout planner,
-// operator block points or a recovery can still read is the reaper's row
-// checks, never its horizon. The transfer audit rollup never replaces a day
-// the floor can reach (TransferAuditRollupFirstDay).
+// which the partition drop and the sn-reconcile floor share, stays 91 days.
+// Key history and close evidence retention follow the reaper's horizon while
+// its mode is on: key history (RemoveGoneStClientKeyHistory) over its guard's
+// 30-day floor (server.ClientKeyHistoryRetentionFloor), close evidence
+// (server.RemoveExpiredCloseEvidence) over its guard's 35-day floor
+// (server.CloseEvidenceRetentionFloor), each with its own brake; both keep 91
+// days in a dry run, with the mode off, or without the control. What keeps a
+// contract the payout planner, operator block points or a recovery can still
+// read is the reaper's row checks, never its horizon. The transfer audit
+// rollup never replaces a day the floor can reach
+// (TransferAuditRollupFirstDay).
 //
 // Below 91 days users see less history: the 90-day provider stats views
 // undercount the days past the horizon by the contracts deleted there, and
@@ -234,7 +239,13 @@ const contractHorizonControlKey = "{contract_horizon}control"
 //   - `horizonDays`: the horizon in whole days, between ContractHorizonFloor
 //     (35) and the code's horizon (91); a value past either end counts as that
 //     end. Below 91 days users see less history in the provider stats and
-//     /transfer/stats (ContractHorizonFloor).
+//     /transfer/stats (ContractHorizonFloor). It moves more than the reaper:
+//     while the mode is on, close evidence and key history retention follow
+//     it (ContractHorizonFloor). At 35 the close evidence deletes permanently
+//     remove about a billion rows, the evidence accepted from 2026-10-06 on,
+//     whatever the reaper's keep rules; their own brake
+//     (server.RemoveExpiredCloseEvidence) stops the row deletes, and this mode
+//     alone the weekly drops once the evidence is partitioned.
 //
 // A field that does not parse narrows as far as it can: mode off, rate zero
 // (which is off), the minimum batch size, the code's horizon.
