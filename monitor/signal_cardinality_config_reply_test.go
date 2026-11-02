@@ -264,6 +264,34 @@ func TestCardinalityNativeConfigMalformedWholeReplyIsUnknown(t *testing.T) {
 	}
 }
 
+// POSIX leaves NUL in awk's input undefined, and awks differ: mawk keeps the byte
+// in its record, while the BSD awk ends the record at it. This stand-in loses every
+// NUL, so on any machine the reply's NUL must become a visible invalid byte before
+// awk reads it.
+func TestCardinalityNativeConfigNulCannotVanishInAwk(t *testing.T) {
+	awkLosingNul := `#!/bin/sh
+tr -d '\000' | PATH=/usr/bin:/bin awk "$@"
+`
+	for _, body := range []string{
+		"latency-tracking\nno\n\x00",
+		"latency-tracking\nno\x00\n",
+		"latency-tracking\x00\nno\n",
+		"latency-tracking\nyes\x00\n",
+	} {
+		reply := cardinalityConfigReply{body: body}
+		fixture := newCardinalityConfigNativeFixture(t, []cardinalityConfigReply{reply, reply}, cardinalityConfigMetrics(false))
+		if err := os.WriteFile(filepath.Join(fixture.directory, "awk"), []byte(awkLosingNul), 0700); err != nil {
+			t.Fatal(err)
+		}
+		alerts, err := NewCardinalitySignal().Run(context.Background(), fixture.settings)
+		if err != nil || len(alerts) != 1 {
+			t.Fatal("a NUL that awk lost made a malformed CONFIG reply source health or drift")
+		}
+		fixture.requireCalls(t, 1)
+		requireCardinalityConfigUnknown(t, alerts, 2, 0)
+	}
+}
+
 // Ordinary key/no/LF is still complete disabled-source authority and quiet output.
 func TestCardinalityNativeConfigTwoLineNoIsHealthy(t *testing.T) {
 	reply := cardinalityConfigReply{body: "latency-tracking\nno\n"}
