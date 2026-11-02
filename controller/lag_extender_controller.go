@@ -7,6 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/urnetwork/glog"
+
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
@@ -82,19 +84,67 @@ func lagStillServing(ctx context.Context, extenders []*lagServingExtender, now t
 	return serving
 }
 
-// The serving set without the extenders in a restart loop now
-// (lagStableServing) or whose measurement api the probes cannot reach
-// (lagReachableServing), read again when the cached one is older than maxAge.
+// What the sample offers as of one read, and what each rule made of the set.
+type lagOffer struct {
+	// the extenders that serve and can be placed
+	serving *lagServingSet
+	// those in no restart loop (lagStableServing), and whether that read answered
+	stable    *lagServingSet
+	loopsRead bool
+	// those the probes can also reach (lagReachableServing), and whether that read
+	// answered
+	reachable  *lagServingSet
+	probesRead bool
+	// what the sample offers: reachable, unless that leaves nothing
+	offered *lagServingSet
+	// the rules would have left out every serving extender
+	floored bool
+}
+
+// Reads the serving set and applies the rules. They steer a visitor from a bad
+// dot to a good one, so they have nothing to say when no good one is left. If
+// together they would leave out every serving extender, the whole set is offered:
+// a page of dots that may fail is no worse than a page with none, and on a small
+// deployment one that restarts and one that stalls would otherwise empty lag.dev,
+// where more often than not the rules or the prober are what is wrong.
+func loadLagOffer(ctx context.Context, now time.Time) *lagOffer {
+	serving := loadLagServing(ctx, now)
+	stable, loopsRead := lagStableServing(ctx, serving, now)
+	reachable, probesRead := lagReachableServing(ctx, stable, now)
+	offer := &lagOffer{
+		serving:    serving,
+		stable:     stable,
+		loopsRead:  loopsRead,
+		reachable:  reachable,
+		probesRead: probesRead,
+		offered:    reachable,
+	}
+	if 0 < len(serving.extenders) && len(reachable.extenders) == 0 {
+		offer.offered = serving
+		offer.floored = true
+	}
+	return offer
+}
+
+// What the sample offers now (loadLagOffer), read again when the cached one is
+// older than maxAge.
 func getLagServing(ctx context.Context, now time.Time, maxAge time.Duration) *lagServingSet {
 	lagServingCache.Lock()
 	defer lagServingCache.Unlock()
 	if set := lagServingCache.set; set != nil && !now.Before(set.loadTime) && now.Sub(set.loadTime) < maxAge {
 		return set
 	}
-	set, _ := lagStableServing(ctx, loadLagServing(ctx, now), now)
-	set, _ = lagReachableServing(ctx, set, now)
-	lagServingCache.set = set
-	return set
+	offer := loadLagOffer(ctx, now)
+	if offer.floored {
+		glog.Errorf(
+			"[lag]the restart loop and probe rules would leave out all %d serving extenders (%d in a restart loop, %d unreachable), offering them all\n",
+			len(offer.serving.extenders),
+			len(offer.serving.extenders)-len(offer.stable.extenders),
+			len(offer.stable.extenders)-len(offer.reachable.extenders),
+		)
+	}
+	lagServingCache.set = offer.offered
+	return offer.offered
 }
 
 // GetLagServingHosts reads the extenders that serve the measurement api:

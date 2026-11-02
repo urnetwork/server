@@ -6,6 +6,8 @@ import (
 	"net/netip"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
@@ -37,7 +39,9 @@ import (
 // on Main. Almost every other failure is over by then, so the second failure
 // still tells them apart. The wait is not spent in the pass: a task waiting in a
 // worker's slot would hold that slot, and hold up the rest of the worker when an
-// isolated task is next (task.TaskWorker).
+// isolated task is next (task.TaskWorker). A recheck has no guard against this
+// host's own network (lagprobe.Recheck): a moment of it that falls on one gives
+// what failed once a false second failure, until the next pass.
 //
 // The taskworker hosts reach IPv6. Main's uptime probes run in the same
 // processes and dial every address directly, about 30% of them IPv6. None of
@@ -45,9 +49,12 @@ import (
 // its addresses, so no process that ran one lacked IPv6, and all 65 active IPv6
 // addresses have passed. A host that can't reach a family is told apart anyway.
 // An address it has no route to, and every failure of a family most of whose
-// probes failed, is recorded unprobed, which the sample doesn't count against an
-// extender (lagprobe.ProbeAll). Failed, those would take every extender of the
-// family out of the sample.
+// probes failed in a pass, is recorded unprobed, which the sample doesn't count
+// against an extender (lagprobe.ProbeAll). Failed, those would take every extender
+// of the family out of the sample. A tripped guard therefore leaves
+// lag_extenders_unreachable at 0, as a stopped chain does, so each has a signal of
+// its own: lag_probe_guard_trips_total, and lag_extender_probes and
+// lag_extender_probe_age_seconds (controller/stats_collector_lag.go).
 //
 // A failed probe is this task's data, not its error, as for the uptime probes:
 // returning one would skip the Post and put the chain on a backoff, and stale
@@ -71,10 +78,38 @@ const (
 	ExtenderMeasurementProbeRetention = controller.ExtenderMeasurementAwayGrace
 )
 
-// Makes one pass of probes. A variable so a test can answer as it needs,
-// without an extender behind every address. Production never replaces it; the
-// probe itself is proved against in-process servers in package lagprobe.
-var probeExtenderMeasurementApis = lagprobe.ProbeAll
+// Makes one pass of probes, and one recheck. Variables so a test can answer as it
+// needs, without an extender behind every address. Production never replaces
+// them; the probe itself is proved against in-process servers in package lagprobe.
+var (
+	probeExtenderMeasurementApis   = lagprobe.ProbeAll
+	recheckExtenderMeasurementApis = lagprobe.Recheck
+)
+
+// Passes that took a family for one this host cannot reach (lagprobe.ProbeAll).
+// Its extenders are offered as if they had not been probed, so nothing else counts
+// them. Bounded by the two families, and read from grafana/dashboards/lag-dev.json.
+var extenderMeasurementProbeGuardTripsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "urnetwork",
+	Subsystem: "lag",
+	Name:      "probe_guard_trips_total",
+	Help:      "Passes of the lag.dev measurement api probes in which most of a family failed, at least three addresses, so the prober held it to be its own fault and recorded the failures unprobed, by family",
+}, []string{"ip_family"})
+
+func init() {
+	prometheus.MustRegister(extenderMeasurementProbeGuardTripsTotal)
+	for _, family := range []string{"ipv4", "ipv6"} {
+		extenderMeasurementProbeGuardTripsTotal.WithLabelValues(family)
+	}
+}
+
+// The family label of an ip version, as the lag gauges name it.
+func extenderMeasurementProbeFamilyLabel(ipVersion int) string {
+	if ipVersion == 6 {
+		return "ipv6"
+	}
+	return "ipv4"
+}
 
 type ExtenderMeasurementProbeArgs struct {
 }
@@ -136,8 +171,14 @@ func ExtenderMeasurementProbePost(
 
 // One pass as the clock reads `now`, into `result`: every published address of
 // every serving extender, stored as of `now`.
+//
+// The store comes last. A task that raises runs again, and a pass that had stored
+// its failures would count one stutter twice, seconds apart, with no recheck
+// between them.
 func probeExtenderMeasurementHosts(ctx context.Context, now time.Time, result *ExtenderMeasurementProbeResult) {
 	result.PassTime = now
+	result.Removed = int(model.RemoveNetworkExtenderMeasurementProbesBefore(ctx, now.Add(-ExtenderMeasurementProbeRetention)))
+
 	extenderIds := []server.Id{}
 	targets := []lagprobe.Target{}
 	for _, host := range controller.GetLagServingHosts(ctx, now) {
@@ -156,9 +197,8 @@ func probeExtenderMeasurementHosts(ctx context.Context, now time.Time, result *E
 		targets[i], targets[j] = targets[j], targets[i]
 	})
 
-	pass := probeExtenderMeasurementApis(ctx, targets, nil, lagprobe.DefaultSettings())
+	pass := probeExtenderMeasurementApis(ctx, targets, lagprobe.DefaultSettings())
 	storeExtenderMeasurementProbes(ctx, now, extenderIds, targets, pass, result)
-	result.Removed = int(model.RemoveNetworkExtenderMeasurementProbesBefore(ctx, now.Add(-ExtenderMeasurementProbeRetention)))
 }
 
 type ExtenderMeasurementRecheckArgs struct {
@@ -202,11 +242,14 @@ func ExtenderMeasurementRecheck(
 // Probes again what is still a failure of the pass at passTime, as the clock
 // reads `now`, into `result`. A row a later pass has replaced is not the pass's,
 // so a recheck that runs too late finds nothing to do, rather than probing a new
-// failure seconds after it. What succeeded in the pass goes to the family rule
-// beside what is probed now (lagprobe.ProbeAll). The addresses are the ones
-// probed, read from their rows: an extender that stops serving or moves within
-// these seconds costs one more probe, and its row is of an address the sample
-// no longer reads.
+// failure seconds after it. The addresses are the ones probed, read from their
+// rows: an extender that stops serving or moves within these seconds costs one more
+// probe, and its row is of an address the sample no longer reads.
+//
+// There is no family rule here, and it could not fire if there were: a pass that
+// did not trip it leaves at most half of a family to probe again, or fewer than
+// three (lagprobe.Recheck). So what fails here stands as a failure, whatever its
+// cause.
 func recheckExtenderMeasurementProbes(
 	ctx context.Context,
 	zone string,
@@ -216,23 +259,20 @@ func recheckExtenderMeasurementProbes(
 ) {
 	extenderIds := []server.Id{}
 	targets := []lagprobe.Target{}
-	alreadySucceeded := map[int]int{}
 	for _, probe := range model.GetNetworkExtenderMeasurementProbesAt(ctx, passTime) {
-		switch {
-		case probe.Outcome == lagprobe.OutcomeOk:
-			alreadySucceeded[probe.IpVersion] += 1
-		case probe.Outcome.Failed():
-			extenderIds = append(extenderIds, probe.ExtenderId)
-			targets = append(targets, lagprobe.Target{
-				Name: controller.ExtenderMeasurementName(probe.ExtenderId, zone),
-				Addr: netip.AddrPortFrom(probe.Ip, controller.ExtenderMeasurementPort),
-			})
+		if !probe.Outcome.Failed() {
+			continue
 		}
+		extenderIds = append(extenderIds, probe.ExtenderId)
+		targets = append(targets, lagprobe.Target{
+			Name: controller.ExtenderMeasurementName(probe.ExtenderId, zone),
+			Addr: netip.AddrPortFrom(probe.Ip, controller.ExtenderMeasurementPort),
+		})
 	}
 	if len(targets) == 0 {
 		return
 	}
-	pass := probeExtenderMeasurementApis(ctx, targets, alreadySucceeded, lagprobe.DefaultSettings())
+	pass := recheckExtenderMeasurementApis(ctx, targets, lagprobe.DefaultSettings())
 	storeExtenderMeasurementProbes(ctx, now, extenderIds, targets, pass, result)
 }
 
@@ -279,8 +319,8 @@ func storeExtenderMeasurementProbes(
 	model.RecordNetworkExtenderMeasurementProbes(ctx, records, now, controller.ExtenderMeasurementProbeMaxAge)
 
 	for _, ipVersion := range pass.UnreachableIpVersions {
-		// nothing else says so: the extenders are offered as if nothing had
-		// been probed
+		extenderMeasurementProbeGuardTripsTotal.WithLabelValues(extenderMeasurementProbeFamilyLabel(ipVersion)).Inc()
+		// the extenders are offered as if nothing had been probed
 		glog.Errorf(
 			"[extendermeasurement]most ipv%d measurement api probes failed, so this host is taken not to reach ipv%d and they are recorded unprobed\n",
 			ipVersion,

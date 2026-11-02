@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
@@ -78,29 +80,37 @@ func createTestMeasurementProbeHost(t testing.TB, ctx context.Context, index int
 
 var testMeasurementProbeServing = testMeasurementProbeHost{delivered: true, published: true}
 
-// One pass as the stub saw it.
+// One pass or recheck as the stub saw it.
 type testMeasurementProbePass struct {
-	targets          []lagprobe.Target
-	alreadySucceeded map[int]int
-	settings         lagprobe.Settings
+	targets  []lagprobe.Target
+	recheck  bool
+	settings lagprobe.Settings
 }
 
-// Replaces the pass with a stub that answers each target as told, and records
-// what it was asked.
+// Replaces the pass and the recheck with stubs that answer each target as told,
+// and records what they were asked. Only a pass can report an unreachable family.
 func stubMeasurementProbes(t testing.TB, answer func(target lagprobe.Target) *lagprobe.Result, unreachable ...int) *[]*testMeasurementProbePass {
 	t.Helper()
 	passes := &[]*testMeasurementProbePass{}
 	previous := probeExtenderMeasurementApis
-	probeExtenderMeasurementApis = func(ctx context.Context, targets []lagprobe.Target, alreadySucceeded map[int]int, settings lagprobe.Settings) *lagprobe.Pass {
-		*passes = append(*passes, &testMeasurementProbePass{targets: targets, alreadySucceeded: alreadySucceeded, settings: settings})
+	previousRecheck := recheckExtenderMeasurementApis
+	answerAll := func(targets []lagprobe.Target, settings lagprobe.Settings, recheck bool) []*lagprobe.Result {
+		*passes = append(*passes, &testMeasurementProbePass{targets: targets, recheck: recheck, settings: settings})
 		results := make([]*lagprobe.Result, len(targets))
 		for i, target := range targets {
 			results[i] = answer(target)
 		}
-		return &lagprobe.Pass{Results: results, UnreachableIpVersions: unreachable}
+		return results
+	}
+	probeExtenderMeasurementApis = func(ctx context.Context, targets []lagprobe.Target, settings lagprobe.Settings) *lagprobe.Pass {
+		return &lagprobe.Pass{Results: answerAll(targets, settings, false), UnreachableIpVersions: unreachable}
+	}
+	recheckExtenderMeasurementApis = func(ctx context.Context, targets []lagprobe.Target, settings lagprobe.Settings) *lagprobe.Pass {
+		return &lagprobe.Pass{Results: answerAll(targets, settings, true)}
 	}
 	t.Cleanup(func() {
 		probeExtenderMeasurementApis = previous
+		recheckExtenderMeasurementApis = previousRecheck
 	})
 	return passes
 }
@@ -339,10 +349,15 @@ func TestExtenderMeasurementProbeStoresAnUnreachableFamilyUnprobed(t *testing.T)
 			}
 			return &lagprobe.Result{Outcome: lagprobe.OutcomeDial, Err: errors.New("refused")}
 		}, 6)
+		tripsV4 := testutil.ToFloat64(extenderMeasurementProbeGuardTripsTotal.WithLabelValues("ipv4"))
+		tripsV6 := testutil.ToFloat64(extenderMeasurementProbeGuardTripsTotal.WithLabelValues("ipv6"))
 		result := runTestMeasurementProbe(t, ctx)
 		connect.AssertEqual(t, testMeasurementProbeCounts(result), ExtenderMeasurementProbeResult{Probed: 2, Failed: 1, Unprobed: 1})
 		connect.AssertEqual(t, getTestMeasurementProbeRow(ctx, extenderId, 6).Outcome, lagprobe.OutcomeUnprobed)
 		connect.AssertEqual(t, getTestMeasurementProbeRow(ctx, extenderId, 4).Outcome, lagprobe.OutcomeDial)
+		// the trip is counted, since the extenders are otherwise offered unremarked
+		connect.AssertEqual(t, testutil.ToFloat64(extenderMeasurementProbeGuardTripsTotal.WithLabelValues("ipv6")), tripsV6+1)
+		connect.AssertEqual(t, testutil.ToFloat64(extenderMeasurementProbeGuardTripsTotal.WithLabelValues("ipv4")), tripsV4)
 	})
 }
 
@@ -497,11 +512,10 @@ func TestExtenderMeasurementProbePostSchedulesTheRecheck(t *testing.T) {
 	})
 }
 
-// The second look probes exactly what failed in the pass, at the name and port
-// it was probed at, and tells the family rule what succeeded beside it. It counts
-// as a probe like any other: a failure makes two in a row, and a success clears
-// the one. What passed, and what could not be probed, is left as the pass stored
-// it.
+// The second look probes exactly what failed in the pass, at the name and port it
+// was probed at, and with no family rule (lagprobe.Recheck). It counts as a probe
+// like any other: a failure makes two in a row, and a success clears the one. What
+// passed, and what could not be probed, is left as the pass stored it.
 func TestExtenderMeasurementRecheckProbesWhatFailed(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -541,8 +555,7 @@ func TestExtenderMeasurementRecheckProbesWhatFailed(t *testing.T) {
 		}
 		slices.Sort(want)
 		connect.AssertEqual(t, got, want)
-		// what passed in the pass, IPv4 and IPv6, beside what is probed now
-		connect.AssertEqual(t, (*passes)[0].alreadySucceeded, map[int]int{4: 1, 6: 1})
+		connect.AssertEqual(t, (*passes)[0].recheck, true)
 		connect.AssertEqual(t, (*passes)[0].settings.Origin, lagprobe.DefaultSettings().Origin)
 
 		row := getTestMeasurementProbeRow(ctx, stillFailing, 4)
@@ -742,8 +755,7 @@ func testMeasurementProbeOffered(t testing.TB, ctx context.Context) []server.Id 
 // What the sample does as the chain runs. One failure leaves an extender offered,
 // the second look's failure takes it out, within the 30 s or so between them, and
 // it comes back with the next success. A second look that passes leaves it
-// offered throughout, so a stutter never reaches the sample. A second look that
-// the family rule takes for this host's own moment clears the first failure.
+// offered throughout, so a stutter never reaches the sample.
 func TestExtenderMeasurementRecheckMovesTheSample(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -800,19 +812,78 @@ func TestExtenderMeasurementRecheckMovesTheSample(t *testing.T) {
 		connect.AssertEqual(t, getTestMeasurementProbeRow(ctx, extenderId, 4).ConsecutiveFailures, 0)
 		connect.AssertEqual(t, getTestMeasurementProbeRow(ctx, extenderId, 6).ConsecutiveFailures, 0)
 		connect.AssertEqual(t, offered(), both)
+	})
+}
 
-		// this host's own moment: the second look's failures are recorded
-		// unprobed, as the family rule recorded them, and leave nothing counted
-		stubMeasurementProbes(t, answerTestMeasurementProbes(failing))
-		pass = runTestMeasurementProbe(t, ctx)
-		stubMeasurementProbes(t, func(target lagprobe.Target) *lagprobe.Result {
-			return &lagprobe.Result{Outcome: lagprobe.OutcomeUnprobed, Err: errors.New("most of the family failed")}
-		}, 4, 6)
-		result := runTestMeasurementRecheck(t, ctx, pass.PassTime)
-		connect.AssertEqual(t, *result, ExtenderMeasurementProbeResult{Probed: 2, Unprobed: 2})
-		connect.AssertEqual(t, getTestMeasurementProbeRow(ctx, extenderId, 4).ConsecutiveFailures, 0)
-		connect.AssertEqual(t, getTestMeasurementProbeRow(ctx, extenderId, 6).ConsecutiveFailures, 0)
-		connect.AssertEqual(t, offered(), both)
+// A pass runs again when its task raises, so it must not raise once it has stored
+// its failures: the same stutter would count as a second failure in a row seconds
+// later, with no recheck between them, and take the extender out. So the retention,
+// which can raise, comes first. Here it raises, the pass stores nothing, and the
+// run that follows counts the stutter once.
+func TestExtenderMeasurementProbeRetriedPassCountsOneFailure(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		installTestMeasurementProbeConfig(t)
+		extenderId := createTestMeasurementProbeHost(t, ctx, 1, testMeasurementProbeServing, "192.0.2.1")
+		createTestMeasurementProbeHost(t, ctx, 2, testMeasurementProbeServing, "192.0.2.2")
+		passes := stubMeasurementProbes(t, answerTestMeasurementProbes(map[string]lagprobe.Outcome{"192.0.2.1": lagprobe.OutcomeTlsTimeout}))
+		worker := newTestMeasurementProbeWorker(t, ctx)
+
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `
+				CREATE FUNCTION test_measurement_probe_retention_raises() RETURNS trigger LANGUAGE plpgsql AS $$
+				BEGIN
+					RAISE EXCEPTION 'the retention failed';
+				END
+				$$
+			`))
+			server.RaisePgResult(tx.Exec(ctx, `
+				CREATE TRIGGER test_measurement_probe_retention_raises
+				BEFORE DELETE ON network_extender_measurement_probe
+				FOR EACH STATEMENT EXECUTE FUNCTION test_measurement_probe_retention_raises()
+			`))
+		})
+
+		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
+		defer clientSession.Cancel()
+		server.Tx(ctx, func(tx server.PgTx) {
+			ScheduleExtenderMeasurementProbe(clientSession, tx)
+		})
+		chainTaskId := func() (taskId server.Id) {
+			server.Db(ctx, func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(
+					ctx,
+					`SELECT task_id FROM pending_task WHERE run_once_key = '["extender_measurement_probe"]'`,
+				).Scan(&taskId))
+			})
+			return
+		}
+
+		// the retention raises: nothing was probed or stored, and it will run again
+		dueTestMeasurementTask(t, ctx, chainTaskId())
+		finished, retried, _, err := worker.EvalTasks(1)
+		if err != nil || len(finished) != 0 || len(retried) != 1 {
+			t.Fatalf("the pass should have failed and been rescheduled: %v %v %v", finished, retried, err)
+		}
+		connect.AssertEqual(t, len(*passes), 0)
+		connect.AssertEqual(t, getTestMeasurementProbeRow(ctx, extenderId, 4), (*model.NetworkExtenderMeasurementProbe)(nil))
+		connect.AssertEqual(t, len(getTestMeasurementRecheckRows(t, ctx)), 0)
+
+		// it runs again, with the retention working: one failure, and its recheck
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `DROP TRIGGER test_measurement_probe_retention_raises ON network_extender_measurement_probe`))
+		})
+		// its claim outlives the failure, and its retry waits on a backoff; the test
+		// clears both rather than sleeping
+		connect.AssertEqual(t, task.ReleaseTask(ctx, chainTaskId()), true)
+		dueTestMeasurementTask(t, ctx, chainTaskId())
+		finished, retried, posts, err := worker.EvalTasks(1)
+		if err != nil || len(finished) != 1 || 0 < len(retried)+len(posts) {
+			t.Fatalf("the pass did not run again: %v %v %v %v", finished, retried, posts, err)
+		}
+		connect.AssertEqual(t, len(*passes), 1)
+		connect.AssertEqual(t, getTestMeasurementProbeRow(ctx, extenderId, 4).ConsecutiveFailures, 1)
+		connect.AssertEqual(t, len(getTestMeasurementRecheckRows(t, ctx)), 1)
 	})
 }
 

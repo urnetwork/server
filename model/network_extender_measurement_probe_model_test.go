@@ -259,6 +259,41 @@ func TestGetNetworkExtenderMeasurementProbesAtReadsWhatIsLeftOfAPass(t *testing.
 	})
 }
 
+// The stats count the rows probed since the cut by outcome, a row older than the
+// cut in no count, and name the newest probe of any row, however old: that age is
+// what says the chain stopped. An empty table has no newest probe.
+func TestGetNetworkExtenderMeasurementProbeStats(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := testMeasurementProbeNow()
+		cut := now.Add(-15 * time.Minute)
+
+		empty := GetNetworkExtenderMeasurementProbeStats(ctx, cut)
+		connect.AssertEqual(t, len(empty.OutcomeCounts), 0)
+		connect.AssertEqual(t, empty.NewestProbeTime, (*time.Time)(nil))
+
+		// a pass an hour ago, past the cut
+		recordTestMeasurementProbe(ctx, server.NewId(), "192.0.2.1", lagprobe.OutcomeTlsTimeout, now.Add(-time.Hour))
+		stale := GetNetworkExtenderMeasurementProbeStats(ctx, cut)
+		connect.AssertEqual(t, stale.OutcomeCounts, map[string]int64{string(lagprobe.OutcomeTlsTimeout): 0})
+		connect.AssertEqual(t, stale.NewestProbeTime.UTC(), now.Add(-time.Hour))
+
+		// and the last one, with a guard that tripped
+		RecordNetworkExtenderMeasurementProbes(ctx, []*NetworkExtenderMeasurementProbeResult{
+			{ExtenderId: server.NewId(), Ip: netip.MustParseAddr("192.0.2.2"), Outcome: lagprobe.OutcomeOk},
+			{ExtenderId: server.NewId(), Ip: netip.MustParseAddr("192.0.2.3"), Outcome: lagprobe.OutcomeOk},
+			{ExtenderId: server.NewId(), Ip: netip.MustParseAddr("2001:db8::1"), Outcome: lagprobe.OutcomeUnprobed},
+		}, now.Add(-time.Minute), testMeasurementProbeRunGap)
+		stats := GetNetworkExtenderMeasurementProbeStats(ctx, cut)
+		connect.AssertEqual(t, stats.OutcomeCounts, map[string]int64{
+			string(lagprobe.OutcomeOk):         2,
+			string(lagprobe.OutcomeUnprobed):   1,
+			string(lagprobe.OutcomeTlsTimeout): 0,
+		})
+		connect.AssertEqual(t, stats.NewestProbeTime.UTC(), now.Add(-time.Minute))
+	})
+}
+
 // The retention takes what was probed before the cut and nothing else, and
 // says how many.
 func TestRemoveNetworkExtenderMeasurementProbesBefore(t *testing.T) {

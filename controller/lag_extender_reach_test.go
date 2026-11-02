@@ -484,3 +484,122 @@ func TestStatsRefreshLagCountsUnreachableExtenders(t *testing.T) {
 		connect.AssertEqual(t, testutil.ToFloat64(statsLagExtendersUnreachableGauge.gauge), float64(1))
 	})
 }
+
+// The rules steer a visitor from a bad dot to a good one. If together they would
+// leave none, every extender that serves is offered. Two extenders is enough to
+// show it, and is a deployment where it happens: both stalling, or one stalling and
+// one restarting, would otherwise empty lag.dev. With a good one back, the rules
+// apply again.
+func TestLagExtendersOfferThemAllWhenTheRulesWouldLeaveNone(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		installLagTestExtenderConfig(t, true)
+		defer Testing_SetLagSettings(DefaultLagSettings())()
+		places := map[string]*model.LagPlace{}
+		useLagAddressPlaces(t, places)
+		now := server.NowUtc()
+		guest := newLagTestGuestSession(t, ctx, "198.51.100.30:1234")
+		offered := func() []server.Id {
+			Testing_ResetLagServing()
+			result, err := LagExtenders(guest)
+			connect.AssertEqual(t, err, nil)
+			return lagTestSampleIds(result)
+		}
+
+		// no extender serves: nothing to offer, and no floor to apply
+		connect.AssertEqual(t, offered(), []server.Id{})
+		connect.AssertEqual(t, loadLagOffer(ctx, now).floored, false)
+
+		a := newLagServingTestExtender(t, ctx, places, lagTestPlace("Saginaw", "us", 43.4, -83.9), "192.0.2.21", "2001:db8:21::1")
+		b := newLagServingTestExtender(t, ctx, places, lagTestPlace("Paris", "fr", 48.9, 2.4), "192.0.2.22")
+		both := lagTestSortedIds(a, b)
+		connect.AssertEqual(t, offered(), both)
+		connect.AssertEqual(t, loadLagOffer(ctx, now).floored, false)
+
+		// one down: the rule applies
+		addLagTestFailedProbes(ctx, b, now, "192.0.2.22")
+		connect.AssertEqual(t, offered(), lagTestSortedIds(a))
+		connect.AssertEqual(t, loadLagOffer(ctx, now).floored, false)
+		statsRefreshLag(ctx, now)
+		connect.AssertEqual(t, testutil.ToFloat64(statsLagExtendersOfferedGauge.gauge), float64(1))
+		connect.AssertEqual(t, testutil.ToFloat64(statsLagExtendersUnreachableGauge.gauge), float64(1))
+
+		// both down: both offered, the tickets' set too, and the gauges say what the
+		// rule found
+		addLagTestFailedProbes(ctx, a, now, "192.0.2.21", "2001:db8:21::1")
+		connect.AssertEqual(t, offered(), both)
+		set := getLagServing(ctx, server.NowUtc(), time.Minute)
+		connect.AssertEqual(t, set.get(a.extenderId) != nil, true)
+		connect.AssertEqual(t, set.get(b.extenderId) != nil, true)
+		connect.AssertEqual(t, loadLagOffer(ctx, now).floored, true)
+		statsRefreshLag(ctx, now)
+		connect.AssertEqual(t, testutil.ToFloat64(statsLagExtendersOfferedGauge.gauge), float64(2))
+		connect.AssertEqual(t, testutil.ToFloat64(statsLagExtendersRestartingGauge.gauge), float64(0))
+		connect.AssertEqual(t, testutil.ToFloat64(statsLagExtendersUnreachableGauge.gauge), float64(2))
+
+		// one back on one family: the other is left out again
+		addLagTestProbe(ctx, a, "2001:db8:21::1", lagprobe.OutcomeOk, now)
+		connect.AssertEqual(t, offered(), lagTestSortedIds(a))
+		connect.AssertEqual(t, loadLagOffer(ctx, now).floored, false)
+
+		// and the two rules together: one restarting, the other unreachable
+		addLagTestPasses(ctx, a, now, []int{4, 6}, 110*time.Minute, 80*time.Minute, 50*time.Minute, 20*time.Minute)
+		connect.AssertEqual(t, offered(), both)
+		connect.AssertEqual(t, loadLagOffer(ctx, now).floored, true)
+		statsRefreshLag(ctx, now)
+		connect.AssertEqual(t, testutil.ToFloat64(statsLagExtendersOfferedGauge.gauge), float64(2))
+		connect.AssertEqual(t, testutil.ToFloat64(statsLagExtendersRestartingGauge.gauge), float64(1))
+		connect.AssertEqual(t, testutil.ToFloat64(statsLagExtendersUnreachableGauge.gauge), float64(1))
+	})
+}
+
+// A tripped guard and a stopped chain both leave the unreachable gauge at 0, so the
+// probes have gauges of their own. A trip reads as unprobed rows. A stopped chain
+// reads as no recent rows, every outcome at 0, and an age past what the sample
+// reads. With no probe at all the age has no value, and an outcome this server does
+// not know counts as other.
+func TestStatsRefreshLagExportsTheProbesHealth(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		installLagTestExtenderConfig(t, true)
+		defer Testing_SetLagSettings(DefaultLagSettings())()
+		places := map[string]*model.LagPlace{}
+		useLagAddressPlaces(t, places)
+		now := server.NowUtc().Truncate(time.Microsecond)
+		outcome := func(name lagprobe.Outcome) float64 {
+			return testutil.ToFloat64(statsLagExtenderProbesGauge.gauge.WithLabelValues(string(name)))
+		}
+
+		a := newLagServingTestExtender(t, ctx, places, lagTestPlace("Saginaw", "us", 43.4, -83.9), "192.0.2.11", "2001:db8:11::1")
+		b := newLagServingTestExtender(t, ctx, places, lagTestPlace("Paris", "fr", 48.9, 2.4), "192.0.2.12")
+		c := newLagServingTestExtender(t, ctx, places, lagTestPlace("Riga", "lv", 56.9, 24.1), "192.0.2.13")
+
+		// a pass a minute ago: one of each, and IPv6 held to be the prober's fault
+		addLagTestProbe(ctx, a, "192.0.2.11", lagprobe.OutcomeOk, now.Add(-time.Minute))
+		addLagTestProbe(ctx, a, "2001:db8:11::1", lagprobe.OutcomeUnprobed, now.Add(-time.Minute))
+		addLagTestProbe(ctx, b, "192.0.2.12", lagprobe.OutcomeTlsTimeout, now.Add(-time.Minute))
+		addLagTestProbe(ctx, c, "192.0.2.13", lagprobe.Outcome("from_newer_build"), now.Add(-time.Minute))
+		statsRefreshLag(ctx, now)
+		connect.AssertEqual(t, outcome(lagprobe.OutcomeOk), float64(1))
+		connect.AssertEqual(t, outcome(lagprobe.OutcomeUnprobed), float64(1))
+		connect.AssertEqual(t, outcome(lagprobe.OutcomeTlsTimeout), float64(1))
+		connect.AssertEqual(t, outcome(lagprobe.OutcomeDial), float64(0))
+		connect.AssertEqual(t, testutil.ToFloat64(statsLagExtenderProbesGauge.gauge.WithLabelValues("other")), float64(1))
+		connect.AssertEqual(t, testutil.ToFloat64(statsLagExtenderProbeAgeGauge.gauge), float64(60))
+		connect.AssertEqual(t, testutil.ToFloat64(statsLagExtendersUnreachableGauge.gauge), float64(0))
+
+		// the chain stops: the unreachable gauge still reads 0, and these do not
+		statsRefreshLag(ctx, now.Add(20*time.Minute))
+		for _, name := range lagprobe.Outcomes {
+			connect.AssertEqual(t, outcome(name), float64(0))
+		}
+		connect.AssertEqual(t, testutil.ToFloat64(statsLagExtenderProbeAgeGauge.gauge), (21 * time.Minute).Seconds())
+		connect.AssertEqual(t, testutil.ToFloat64(statsLagExtendersUnreachableGauge.gauge), float64(0))
+
+		// no probe at all, which a number would misstate
+		model.RemoveNetworkExtenderMeasurementProbesBefore(ctx, now.Add(time.Hour))
+		statsRefreshLag(ctx, now)
+		connect.AssertEqual(t, math.IsNaN(testutil.ToFloat64(statsLagExtenderProbeAgeGauge.gauge)), true)
+		connect.AssertEqual(t, outcome(lagprobe.OutcomeOk), float64(0))
+	})
+}

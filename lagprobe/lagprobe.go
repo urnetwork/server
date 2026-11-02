@@ -70,6 +70,19 @@ const (
 	OutcomeCors Outcome = "cors"
 )
 
+// Every outcome, for a reader that counts them by name.
+var Outcomes = []Outcome{
+	OutcomeOk,
+	OutcomeUnprobed,
+	OutcomeDial,
+	OutcomeTls,
+	OutcomeTlsTimeout,
+	OutcomeHttp,
+	OutcomeHttpTimeout,
+	OutcomeStatus,
+	OutcomeCors,
+}
+
 // Whether the outcome is a failure of the extender's api, as opposed to a
 // success or a probe that could not be made.
 func (self Outcome) Failed() bool {
@@ -286,10 +299,7 @@ type Pass struct {
 }
 
 // ProbeAll probes every target, at most settings.Concurrency at once, and
-// starts none after settings.Budget or once ctx ends. To probe part of a family
-// again, alreadySucceeded counts by family, 4 or 6, the addresses that succeeded
-// in its pass and are not among the targets. A family judged only on what failed
-// would always look like most of it had. It is nil for a whole pass.
+// starts none after settings.Budget or once ctx ends.
 //
 // An address this host has no route to is not probed but recorded unprobed:
 // that says nothing about the extender. So is every failure of a family more
@@ -300,7 +310,33 @@ type Pass struct {
 // laptop, failed 17 of 22 IPv4 addresses and all 15 IPv6 ones in one pass, with
 // the 5 that connected first succeeding. Such a family's extenders are left to
 // their other family, or offered.
-func ProbeAll(ctx context.Context, targets []Target, alreadySucceeded map[int]int, settings Settings) *Pass {
+func ProbeAll(ctx context.Context, targets []Target, settings Settings) *Pass {
+	results := probeEach(ctx, targets, settings)
+	return &Pass{
+		Results:               results,
+		UnreachableIpVersions: applyFamilyQuorum(targets, results, settings.FamilyQuorum),
+	}
+}
+
+// Recheck probes again what failed in a pass, as ProbeAll probes it, but with no
+// family rule, since that rule has nothing to say here. A pass that did not trip
+// it left at most half of a family failing, or fewer than the quorum, and a second
+// look can only keep or reduce those failures, with the pass's successes still
+// standing. So it could never fire on the whole family, and judged on these
+// targets alone it would fire on any three extenders stalling at once.
+//
+// So a recheck cannot tell a moment of this host's own network from the extenders'.
+// Probing only what failed, it has nothing healthy to compare with, and a moment
+// that falls on it gives what failed once a false second failure, until the next
+// pass, about 90 s on.
+func Recheck(ctx context.Context, targets []Target, settings Settings) *Pass {
+	return &Pass{Results: probeEach(ctx, targets, settings)}
+}
+
+// Probes every target, at most settings.Concurrency at once, starting none after
+// settings.Budget or once ctx ends. results[i] answers targets[i], nil when it was
+// not probed.
+func probeEach(ctx context.Context, targets []Target, settings Settings) []*Result {
 	results := make([]*Result, len(targets))
 	budgetEnd := time.Now().Add(settings.Budget)
 	workers := make(chan struct{}, max(settings.Concurrency, 1))
@@ -342,22 +378,17 @@ targets:
 		}()
 	}
 	wait.Wait()
-
-	return &Pass{
-		Results:               results,
-		UnreachableIpVersions: applyFamilyQuorum(targets, results, alreadySucceeded, settings.FamilyQuorum),
-	}
+	return results
 }
 
 // Records unprobed every failure of a family more than half of whose probes
 // failed, at least quorum of them, and returns those families. A probe with no
-// result, or that was already unprobed, counts for neither side, and the
-// alreadySucceeded of the family count as successes.
-func applyFamilyQuorum(targets []Target, results []*Result, alreadySucceeded map[int]int, quorum int) []int {
+// result, or that was already unprobed, counts for neither side.
+func applyFamilyQuorum(targets []Target, results []*Result, quorum int) []int {
 	unreachable := []int{}
 	for _, ipVersion := range []int{4, 6} {
 		failed := 0
-		succeeded := alreadySucceeded[ipVersion]
+		succeeded := 0
 		for i, result := range results {
 			if result == nil || targets[i].IpVersion() != ipVersion {
 				continue

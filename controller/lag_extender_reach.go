@@ -42,6 +42,9 @@ import (
 //     failed is still left out, where the taskworker cannot probe IPv6: its
 //     name's IPv4 failing is what a stall on both families looks like from
 //     there.
+//
+// If this rule and the loop rule together would leave out every serving
+// extender, all of them are offered (loadLagOffer).
 
 const (
 	// How old a probe may be and still count. The chain runs every two

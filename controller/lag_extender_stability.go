@@ -46,8 +46,8 @@ import (
 // An extender's uptime probes do not decide: a probe forwards through the
 // extender to the api host, which a measurement does not use, and on Main
 // most of the minutes a failed latest probe would have left an extender out,
-// its measurement api answered. An outage is left to the probes' revocation,
-// as before, and the page's spares.
+// its measurement api answered. An outage is left to the probes of the
+// measurement api itself (lag_extender_reach.go), and the page's spares.
 var lagExtenderRestartLoopRule = model.LagExtenderRestartLoopRule{
 	PassGap:          30 * time.Second,
 	BurstPasses:      4,

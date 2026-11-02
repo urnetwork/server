@@ -229,6 +229,48 @@ func scanNetworkExtenderMeasurementProbe(result server.PgResult) *NetworkExtende
 	return probe
 }
 
+// What the probes' rows say of the chain, for the dashboards: what it found, and
+// whether it still runs.
+type NetworkExtenderMeasurementProbeStats struct {
+	// the rows probed since the cut, by the outcome of their latest probe
+	OutcomeCounts map[string]int64
+	// the newest probe of any row, nil when the table is empty
+	NewestProbeTime *time.Time
+}
+
+// GetNetworkExtenderMeasurementProbeStats reads the rows' outcomes and the newest
+// probe, in one query over the small table.
+func GetNetworkExtenderMeasurementProbeStats(ctx context.Context, since time.Time) *NetworkExtenderMeasurementProbeStats {
+	stats := &NetworkExtenderMeasurementProbeStats{OutcomeCounts: map[string]int64{}}
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT
+				outcome,
+				count(*) FILTER (WHERE $1 <= probe_time),
+				max(probe_time)
+			FROM network_extender_measurement_probe
+			GROUP BY outcome
+			`,
+			since.UTC(),
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var outcome string
+				var count int64
+				var newest time.Time
+				server.Raise(result.Scan(&outcome, &count, &newest))
+				stats.OutcomeCounts[outcome] = count
+				if stats.NewestProbeTime == nil || stats.NewestProbeTime.Before(newest) {
+					stats.NewestProbeTime = &newest
+				}
+			}
+		})
+	})
+	return stats
+}
+
 // RemoveNetworkExtenderMeasurementProbesBefore deletes every probe made before
 // `before`, which are those of extenders the sample stopped serving, and
 // returns how many.

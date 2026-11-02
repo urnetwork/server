@@ -1190,6 +1190,182 @@
     }
    ],
    "description": "What the lag sweep removed (A2, A5): expired guest networks after their day, tickets after 48 h, and results and their tracks after the 7 day retention. A flat zero for a day while measurements arrive means the sweep has stopped. Counted by the taskworker and read as increase() over the trailing hour, summed across processes, which are keyed by instance."
+  },
+  {
+   "id": 23,
+   "type": "row",
+   "title": "measurement api probes",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 86
+   },
+   "panels": []
+  },
+  {
+   "id": 24,
+   "type": "timeseries",
+   "title": "probes by outcome",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 87
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "normal",
+       "group": "A"
+      }
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max by (outcome) (urnetwork_stats_lag_extender_probes{env=\"$env\"})",
+     "refId": "A",
+     "legendFormat": "{{outcome}}"
+    }
+   ],
+   "description": "The latest measurement api probe of each extender's family by outcome, among those recent enough for the sample to read (A4): ok, what failed, or unprobed. A lot of unprobed means the prober held a family's failures to be its own fault, or has no route to it, and those extenders are offered unjudged. All of them at 0 means the chain has stopped. The stats collector runs in every taskworker and each publishes the same database reading, so this reads the gauge with max across hosts rather than a bare series; series are per process and keyed by instance, and during a redeploy the draining and starting processes both push."
+  },
+  {
+   "id": 25,
+   "type": "timeseries",
+   "title": "age of the newest probe",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 6,
+    "x": 12,
+    "y": 87
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": true
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_lag_extender_probe_age_seconds{env=\"$env\"})",
+     "refId": "A",
+     "legendFormat": "newest probe"
+    }
+   ],
+   "description": "How long ago any extender was last probed. It stays under about 2 minutes while the chain runs. From 15 minutes the sample reads no probe and offers every extender, with the unreachable gauge at 0, so this is what shows the chain has stopped. The stats collector runs in every taskworker and each publishes the same database reading, so this reads the gauge with max across hosts rather than a bare series; series are per process and keyed by instance, and during a redeploy the draining and starting processes both push."
+  },
+  {
+   "id": 26,
+   "type": "timeseries",
+   "title": "probe guard trips per hour",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 6,
+    "x": 18,
+    "y": 87
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": true
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum by (ip_family) (increase(urnetwork_lag_probe_guard_trips_total{env=\"$env\"}[1h]))",
+     "refId": "A",
+     "legendFormat": "{{ip_family}}"
+    }
+   ],
+   "description": "Passes in which most of a family failed, at least three addresses, so the prober held it to be its own fault and recorded the failures unprobed rather than failed (lagprobe.ProbeAll). The unreachable gauge reads 0 meanwhile. One now and then is a moment of the taskworker's own network; a run of them means the probes are blind to that family. A recheck has no such guard. The counter is per process, so this is summed across processes through increase()."
   }
  ]
 }

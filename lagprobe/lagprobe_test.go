@@ -427,7 +427,7 @@ func TestProbeCutShortHasNoOutcome(t *testing.T) {
 	pass := ProbeAll(passCtx, []Target{
 		{Name: testName, Addr: stalled},
 		{Name: testName, Addr: stalled},
-	}, nil, settings)
+	}, settings)
 	if pass.Results[0] != nil || pass.Results[1] != nil {
 		t.Fatalf("probes cut short have %+v and %+v", pass.Results[0], pass.Results[1])
 	}
@@ -449,7 +449,7 @@ func TestProbeAllRecordsAnAddressWithoutARouteUnprobed(t *testing.T) {
 		{Name: testName, Addr: unrouted},
 		{Name: testName, Addr: ok},
 		{Name: testName, Addr: refused},
-	}, nil, settings)
+	}, settings)
 	outcomes := []Outcome{}
 	for _, result := range pass.Results {
 		outcomes = append(outcomes, result.Outcome)
@@ -484,7 +484,7 @@ func TestProbeAllTakesAFamilyThatMostlyFailedAsUnreachable(t *testing.T) {
 	}
 
 	// three failures of three
-	pass := ProbeAll(context.Background(), []Target{refused(), refused(), refused()}, nil, settings)
+	pass := ProbeAll(context.Background(), []Target{refused(), refused(), refused()}, settings)
 	if got := outcomes(pass); !slices.Equal(got, []Outcome{OutcomeUnprobed, OutcomeUnprobed, OutcomeUnprobed}) {
 		t.Fatalf("three of three failed: %v", got)
 	}
@@ -496,7 +496,7 @@ func TestProbeAllTakesAFamilyThatMostlyFailedAsUnreachable(t *testing.T) {
 	}
 
 	// two failures of two are under the quorum
-	pass = ProbeAll(context.Background(), []Target{refused(), refused()}, nil, settings)
+	pass = ProbeAll(context.Background(), []Target{refused(), refused()}, settings)
 	if got := outcomes(pass); !slices.Equal(got, []Outcome{OutcomeDial, OutcomeDial}) {
 		t.Fatalf("two of two failed: %v", got)
 	}
@@ -504,7 +504,7 @@ func TestProbeAllTakesAFamilyThatMostlyFailedAsUnreachable(t *testing.T) {
 	// three failures beside a success, the shape of a moment's outage of this
 	// host's network: the probes that connected first succeeded
 	okTarget := Target{Name: testName, Addr: ok}
-	pass = ProbeAll(context.Background(), []Target{refused(), okTarget, refused(), refused()}, nil, settings)
+	pass = ProbeAll(context.Background(), []Target{refused(), okTarget, refused(), refused()}, settings)
 	if got := outcomes(pass); !slices.Equal(got, []Outcome{OutcomeUnprobed, OutcomeOk, OutcomeUnprobed, OutcomeUnprobed}) {
 		t.Fatalf("three of four failed: %v", got)
 	}
@@ -513,7 +513,7 @@ func TestProbeAllTakesAFamilyThatMostlyFailedAsUnreachable(t *testing.T) {
 	}
 
 	// three failures beside three successes are not more than half
-	pass = ProbeAll(context.Background(), []Target{refused(), okTarget, refused(), okTarget, refused(), okTarget}, nil, settings)
+	pass = ProbeAll(context.Background(), []Target{refused(), okTarget, refused(), okTarget, refused(), okTarget}, settings)
 	if got := outcomes(pass); !slices.Equal(got, []Outcome{OutcomeDial, OutcomeOk, OutcomeDial, OutcomeOk, OutcomeDial, OutcomeOk}) {
 		t.Fatalf("three of six failed: %v", got)
 	}
@@ -522,63 +522,40 @@ func TestProbeAllTakesAFamilyThatMostlyFailedAsUnreachable(t *testing.T) {
 	}
 
 	// one extender stalling among healthy ones, which is what the rule is for
-	pass = ProbeAll(context.Background(), []Target{okTarget, refused(), okTarget, okTarget}, nil, settings)
+	pass = ProbeAll(context.Background(), []Target{okTarget, refused(), okTarget, okTarget}, settings)
 	if got := outcomes(pass); !slices.Equal(got, []Outcome{OutcomeOk, OutcomeDial, OutcomeOk, OutcomeOk}) {
 		t.Fatalf("one of four failed: %v", got)
 	}
 }
 
-// A second look at a pass's failures probes only them, so the family rule counts
-// what succeeded in the pass beside them. Only failures that are still most of
-// their family are taken for this host's own: a stall or two among healthy
-// extenders stands, however many of the probes made now failed.
-func TestProbeAllCountsThePassSuccessesWhenProbingAgain(t *testing.T) {
+// A recheck has no family rule: three of three still failing stand, where a pass
+// would take them for this host's own. Each address has its outcome in its place.
+func TestRecheckHasNoFamilyRule(t *testing.T) {
 	ca := newTestCa(t)
 	settings := testSettings(ca)
-	refused := func(count int) []Target {
-		targets := []Target{}
-		for range count {
-			targets = append(targets, Target{Name: testName, Addr: closedTestAddr(t, 4)})
-		}
-		return targets
+	targets := []Target{}
+	for range 3 {
+		targets = append(targets, Target{Name: testName, Addr: closedTestAddr(t, 4)})
 	}
-	outcomes := func(pass *Pass) []Outcome {
-		outcomes := []Outcome{}
-		for _, result := range pass.Results {
-			outcomes = append(outcomes, result.Outcome)
-		}
-		return outcomes
-	}
-	dials := []Outcome{OutcomeDial, OutcomeDial, OutcomeDial}
-	unprobed := []Outcome{OutcomeUnprobed, OutcomeUnprobed, OutcomeUnprobed}
+	recovered := serveTest(t, 4, ca.issue(t, testName), []string{"http/1.1"}, extenderHandler)
+	targets = append(targets, Target{Name: testName, Addr: recovered})
 
-	for _, test := range []struct {
-		name             string
-		alreadySucceeded map[int]int
-		want             []Outcome
-		unreachable      []int
-	}{
-		{name: "nothing else in the family", want: unprobed, unreachable: []int{4}},
-		{name: "fewer successes than failures", alreadySucceeded: map[int]int{4: 2}, want: unprobed, unreachable: []int{4}},
-		{name: "as many successes as failures", alreadySucceeded: map[int]int{4: 3}, want: dials, unreachable: []int{}},
-		{name: "many successes", alreadySucceeded: map[int]int{4: 20}, want: dials, unreachable: []int{}},
-		{name: "the other family's successes do not count", alreadySucceeded: map[int]int{6: 20}, want: unprobed, unreachable: []int{4}},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			pass := ProbeAll(context.Background(), refused(3), test.alreadySucceeded, settings)
-			if got := outcomes(pass); !slices.Equal(got, test.want) {
-				t.Fatalf("outcomes %v, want %v", got, test.want)
-			}
-			if !slices.Equal(pass.UnreachableIpVersions, test.unreachable) {
-				t.Fatalf("unreachable families %v, want %v", pass.UnreachableIpVersions, test.unreachable)
-			}
-		})
+	pass := Recheck(context.Background(), targets, settings)
+	outcomes := []Outcome{}
+	for _, result := range pass.Results {
+		outcomes = append(outcomes, result.Outcome)
+	}
+	if !slices.Equal(outcomes, []Outcome{OutcomeDial, OutcomeDial, OutcomeDial, OutcomeOk}) {
+		t.Fatalf("outcomes %v", outcomes)
+	}
+	if len(pass.UnreachableIpVersions) != 0 {
+		t.Fatalf("unreachable families %v", pass.UnreachableIpVersions)
 	}
 
-	// one address still failing is under the quorum, whatever it is beside
-	pass := ProbeAll(context.Background(), refused(1), map[int]int{}, settings)
-	if got := outcomes(pass); !slices.Equal(got, []Outcome{OutcomeDial}) {
-		t.Fatalf("one still failing: %v", got)
+	// the same probes in a pass, for contrast
+	pass = ProbeAll(context.Background(), targets, settings)
+	if pass.Results[0].Outcome != OutcomeUnprobed || !slices.Equal(pass.UnreachableIpVersions, []int{4}) {
+		t.Fatalf("a pass: %s, %v", pass.Results[0].Outcome, pass.UnreachableIpVersions)
 	}
 }
 
@@ -727,12 +704,33 @@ func TestProbeAllSurvivesAProbeThatPanics(t *testing.T) {
 		return true
 	})
 
-	pass := ProbeAll(context.Background(), []Target{{Name: testName, Addr: bad}, {Name: testName, Addr: ok}, {Name: testName, Addr: ok}}, nil, settings)
-	if pass.Results[0] == nil || pass.Results[0].Outcome != OutcomeHttp || !strings.Contains(pass.Results[0].Err.Error(), "a parser met bytes") {
-		t.Fatalf("%+v", pass.Results[0])
+	for name, run := range map[string]func() *Pass{
+		"a pass": func() *Pass {
+			return ProbeAll(context.Background(), []Target{{Name: testName, Addr: bad}, {Name: testName, Addr: ok}, {Name: testName, Addr: ok}}, settings)
+		},
+		"a recheck": func() *Pass {
+			return Recheck(context.Background(), []Target{{Name: testName, Addr: bad}, {Name: testName, Addr: ok}, {Name: testName, Addr: ok}}, settings)
+		},
+	} {
+		pass := run()
+		if pass.Results[0] == nil || pass.Results[0].Outcome != OutcomeHttp || !strings.Contains(pass.Results[0].Err.Error(), "a parser met bytes") {
+			t.Fatalf("%s: %+v", name, pass.Results[0])
+		}
+		if pass.Results[1].Outcome != OutcomeOk || pass.Results[2].Outcome != OutcomeOk {
+			t.Fatalf("%s: the others: %s, %s", name, pass.Results[1].Outcome, pass.Results[2].Outcome)
+		}
 	}
-	if pass.Results[1].Outcome != OutcomeOk || pass.Results[2].Outcome != OutcomeOk {
-		t.Fatalf("the others: %s, %s", pass.Results[1].Outcome, pass.Results[2].Outcome)
+}
+
+// Every outcome a probe can have is listed for the gauges, and fits its column.
+func TestOutcomesAreListed(t *testing.T) {
+	if len(Outcomes) != 9 {
+		t.Fatalf("%d outcomes", len(Outcomes))
+	}
+	for _, outcome := range Outcomes {
+		if 16 < len(outcome) {
+			t.Fatalf("%s does not fit network_extender_measurement_probe.outcome", outcome)
+		}
 	}
 }
 
@@ -761,7 +759,7 @@ func TestApplyFamilyQuorumJudgesEachFamily(t *testing.T) {
 		// a mapped address is IPv4's
 		{Outcome: OutcomeStatus, Err: errors.New("421")},
 	}
-	unreachable := applyFamilyQuorum(targets, results, nil, 3)
+	unreachable := applyFamilyQuorum(targets, results, 3)
 	if !slices.Equal(unreachable, []int{6}) {
 		t.Fatalf("unreachable families %v", unreachable)
 	}
@@ -784,7 +782,7 @@ func TestApplyFamilyQuorumJudgesEachFamily(t *testing.T) {
 		nil,
 		nil,
 	}
-	if unreachable := applyFamilyQuorum(targets, results, nil, 3); len(unreachable) != 0 {
+	if unreachable := applyFamilyQuorum(targets, results, 3); len(unreachable) != 0 {
 		t.Fatalf("under the quorum: unreachable families %v", unreachable)
 	}
 	if results[0].Outcome != OutcomeDial {
@@ -823,7 +821,7 @@ func TestProbeAllBoundsConcurrencyAndBudget(t *testing.T) {
 		targets = append(targets, Target{Name: testName, Addr: stalled})
 	}
 	start := time.Now()
-	pass := ProbeAll(context.Background(), targets, nil, settings)
+	pass := ProbeAll(context.Background(), targets, settings)
 	elapsed := time.Since(start)
 	for i, result := range pass.Results {
 		if result == nil || result.Outcome != OutcomeTlsTimeout {
@@ -842,7 +840,7 @@ func TestProbeAllBoundsConcurrencyAndBudget(t *testing.T) {
 	// two at a time for 400 ms each: within a 600 ms budget the first four
 	// start, and the last two do not
 	settings.Budget = 600 * time.Millisecond
-	pass = ProbeAll(context.Background(), targets, nil, settings)
+	pass = ProbeAll(context.Background(), targets, settings)
 	probed := 0
 	for _, result := range pass.Results {
 		if result != nil {
