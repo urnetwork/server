@@ -1215,7 +1215,107 @@ var errorShapedRe = regexp.MustCompile(`(?i)\berror\b|\bfatal\b|\bpanic\b|\bfail
 // measurement that ran, judged by §2.19b and §2.23; the record is not an error
 // of the emitting process. The prober's "did not run" and "skipped" lines have
 // no ok= tally and stay novel-eligible.
-var egressHealthResultRecordRe = regexp.MustCompile(`egress-health: provider=\S+ ok=[0-9]+/[0-9]+ `)
+// Only complete producer records are exempt from novelty. Unknown fields or
+// unsafe, unescaped destination names remain eligible; no outcome is inferred.
+var egressHealthResultRecordRe = regexp.MustCompile(
+	`^(?:\[([^\]\r\n]+)\])?(?:([0-9]{4}/[0-9]{2}/[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}) )?` +
+		`egress-health: provider=[A-Za-z0-9][A-Za-z0-9._-]* ok=(?:0|[1-9][0-9]*)/(?:0|[1-9][0-9]*)` +
+		`(?: dns=(?:0|[1-9][0-9]*)/(?:0|[1-9][0-9]*))?(?: connectivity=(?:0|[1-9][0-9]*)/(?:0|[1-9][0-9]*))?(?: cdn=(?:0|[1-9][0-9]*)/(?:0|[1-9][0-9]*))?(?: site=(?:0|[1-9][0-9]*)/(?:0|[1-9][0-9]*))?` +
+		`(?: table=[1-9][0-9]*)?(?: retried=[1-9][0-9]*)?(?: not_measured=[1-9][0-9]*)?` +
+		`(?: short=(?:dns|connectivity|cdn|site)(?:,(?:dns|connectivity|cdn|site))*)?` +
+		`(?: canary=(?:0|[1-9][0-9]*)/(?:0|[1-9][0-9]*))?(?: exit=unobserved)?(?: tls_authentication_failure=true)?` +
+		`(?: failure_stages=(?:dial_dns|dial_tcp|dial_dns_or_socket|tls|policy|request_build|request_dns_timeout|request_dial_timeout|request_tls_timeout|request_connect_timeout|request_write_timeout|request_response_timeout|request_timeout|request_canceled|request_eof|request_unknown|response_body|response_judgment|tunnel_unavailable|local_control_registration|local_contract_acquisition|local_transport_admission|run_ended|unknown):[1-9][0-9]*(?:,(?:dial_dns|dial_tcp|dial_dns_or_socket|tls|policy|request_build|request_dns_timeout|request_dial_timeout|request_tls_timeout|request_connect_timeout|request_write_timeout|request_response_timeout|request_timeout|request_canceled|request_eof|request_unknown|response_body|response_judgment|tunnel_unavailable|local_control_registration|local_contract_acquisition|local_transport_admission|run_ended|unknown):[1-9][0-9]*)*)?` +
+		`(?: dns_timed=[1-9][0-9]* dns_ms=(?:0|[1-9][0-9]*)\.[0-9])?` +
+		`(?: first_byte=[1-9][0-9]* connect_ttfb_ms=(?:0|[1-9][0-9]*)\.[0-9] ttfb_ms=(?:0|[1-9][0-9]*)\.[0-9])?` +
+		`(?: failed=[A-Za-z0-9][A-Za-z0-9._-]*(?:,[A-Za-z0-9][A-Za-z0-9._-]*)*)?(?: not-measured=[A-Za-z0-9][A-Za-z0-9._-]*(?:,[A-Za-z0-9][A-Za-z0-9._-]*)*)?(?: canary-failed=[A-Za-z0-9][A-Za-z0-9._-]*(?:,[A-Za-z0-9][A-Za-z0-9._-]*)*)?` +
+		`(?: -- nothing measured; not submitted| -- quality unmeasured; publishing independent URL security evidence)?$`,
+)
+var egressHealthResultNumberRe = regexp.MustCompile(`[0-9]+`)
+
+// Match the reviewed prober fields, then validate timestamps and integer bounds.
+// Destination names outside the conservative token grammar need new evidence.
+func isEgressHealthResultRecord(line string) bool {
+	if bounds := warpLogIdentityRe.FindStringIndex(line); len(bounds) == 2 && bounds[0] == 0 {
+		line = line[bounds[1]:]
+	}
+	match := egressHealthResultRecordRe.FindStringSubmatch(line)
+	if len(match) != 3 {
+		return false
+	}
+	if match[1] != "" {
+		if _, err := time.Parse(time.RFC3339Nano, match[1]); err != nil {
+			return false
+		}
+	}
+	if match[2] != "" {
+		if _, err := time.Parse("2006/01/02 15:04:05", match[2]); err != nil {
+			return false
+		}
+	}
+	if strings.Contains(line, " -- ") && !strings.Contains(line, " ok=0/0") {
+		return false
+	}
+	// Provider and destination names are not counters.
+	values := "ok=" + strings.SplitN(line, " ok=", 2)[1]
+	for _, marker := range []string{" failed=", " not-measured=", " canary-failed="} {
+		values = strings.SplitN(values, marker, 2)[0]
+	}
+	for _, value := range egressHealthResultNumberRe.FindAllString(values, -1) {
+		if _, err := strconv.Atoi(value); err != nil {
+			return false
+		}
+	}
+	for _, field := range strings.Fields(values) {
+		pair := strings.SplitN(field, "=", 2)
+		if len(pair) != 2 {
+			continue
+		}
+		if tally := strings.Split(pair[1], "/"); len(tally) == 2 {
+			passed, _ := strconv.Atoi(tally[0])
+			total, _ := strconv.Atoi(tally[1])
+			if passed > total {
+				return false
+			}
+		}
+		if pair[0] == "short" || pair[0] == "failure_stages" {
+			seen := map[string]bool{}
+			for _, item := range strings.Split(pair[1], ",") {
+				name := strings.SplitN(item, ":", 2)[0]
+				if seen[name] {
+					return false
+				}
+				seen[name] = true
+			}
+		}
+	}
+	return true
+}
+
+// The payer-close result is a counter record, not an error merely because
+// its complete schema includes failed=0. Unknown fields and error records
+// stay eligible; a zero failure counter does not establish business success.
+var payerDueCloseZeroFailureSummaryRe = regexp.MustCompile(`^(?:\[I\]\[([^\]\r\n]+)\]\[subscription_payer_due_close\.go:[1-9][0-9]*\] ?)?\[payer-due-close\][0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12} due=(0|[1-9][0-9]*) closed=(0|[1-9][0-9]*) already_closed=(0|[1-9][0-9]*) busy=(0|[1-9][0-9]*) failed=0 more=(true|false)$`)
+
+func isPayerDueCloseZeroFailureSummary(line string) bool {
+	if bounds := warpLogIdentityRe.FindStringIndex(line); len(bounds) == 2 && bounds[0] == 0 {
+		line = line[bounds[1]:]
+	}
+	match := payerDueCloseZeroFailureSummaryRe.FindStringSubmatch(line)
+	if len(match) != 7 {
+		return false
+	}
+	if match[1] != "" {
+		if _, err := time.Parse(time.RFC3339Nano, match[1]); err != nil {
+			return false
+		}
+	}
+	for _, value := range match[2:6] {
+		if _, err := strconv.Atoi(value); err != nil {
+			return false
+		}
+	}
+	return true
+}
 
 // novelNormalizeRes strip identifiers so distinct occurrences of one shape
 // group together: hex ids, uuids, ips, ports, numbers.
@@ -2449,7 +2549,7 @@ func (self *logTailer) classifyLocked(line string, deduplicate bool, count bool,
 			return
 		}
 	}
-	if errorShapedRe.MatchString(line) && !egressHealthResultRecordRe.MatchString(line) {
+	if errorShapedRe.MatchString(line) && !isEgressHealthResultRecord(line) && !isPayerDueCloseZeroFailureSummary(line) {
 		if deduplicate && self.standingReplayLocked(line, now) {
 			return
 		}

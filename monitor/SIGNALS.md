@@ -3260,8 +3260,19 @@ result record, `egress-health: provider=<id> ok=48/50 ... failed=cachefly,reddit
 (qualityprobe/prober), names in `failed=` the destinations one provider failed
 in a measurement that ran. It is the measurement working, judged by §2.19b
 `egress-site-pool` and §2.23 `egress-outcomes`, not an error of the emitting
-Taskworker, and it stays out of `novel` by its `ok=<n>/<n>` tally. The
-prober's `did not run` and `skipped` lines carry no tally and stay eligible.
+Taskworker. Only a complete recognized producer record stays out of `novel`;
+a tally embedded in unrelated text or followed by an unknown error does not.
+The prober's `did not run` and `skipped` lines stay eligible. The two explicit
+unmeasured-result suffixes remain measurement diagnostics, without proving a
+provider outcome. Admission accepts ordered known summary fields, canonical
+bounded counters, fixed failure stages and safe comma-separated name tokens.
+The producer does not escape arbitrary destination names, so ambiguous names,
+unknown classes/fields and future schema variants stay novel-eligible pending
+source review; this conservative boundary can produce a format false positive.
+Known taxonomy classes retain precedence, owner projection and replay rules.
+This is a classifier boundary, not evidence of an operational occurrence or
+provider health. The composed control verified the substring counterexample against the original
+classifier and passed with the corrected classifier in normal and race runs.
 On 2026-10-18 these records were Main's top novel shape (46/min of 178/min
 across 21 shapes), so the alert's sample showed a provider's DNS timeout
 instead of the unclassified errors beside it. Controls:
@@ -8552,7 +8563,7 @@ reap share edges and sample sufficiency, malformed frames and failed reads,
 the list's window and name rules, inventory authority and cancellation.
 
 ACTION: retention horizons are owner decisions. Never drop
-`client_reliability` days inside the 21-day retention by hand: operator block
+`client_reliability` days inside the 14-day retention by hand: operator block
 points read a completed block's window, and a missing reliability block cuts
 provider credit. VERIFY: a complete observation inside each line on the next
 runs (two for the sampled check).
@@ -8869,7 +8880,7 @@ minutes) drops a family's range once its upper bound is the family's declared
 transaction that detaches it; a family with its own task (`client_reliability`)
 drops through that task. Size is bounded only by those drops. This probe
 watches every registered family that drops ranges and names no dedicated probe
-(`RetentionSignal`): today `client_reliability` (21 days,
+(`RetentionSignal`): today `client_reliability` (14 days,
 `ClientReliabilityRetention`, the same cutoff §2.4g's
 `partition-retention-stuck` judges) and `provider_egress_health_history` (7
 days). The contract tables name §2.4i and
@@ -13635,7 +13646,9 @@ enough to attribute retention.
   signature. Include rows/call and storage/WAL signals; backend count alone
   understates this load.
 - This is not the rare-value planner landmine (§2.3):
-  `transfer_escrow_sweep_payment_id` exists and is used to find the fan-out.
+  `transfer_escrow_sweep_payment_contract` (payment_id, contract_id) exists
+  and is used to find the fan-out (`transfer_escrow_sweep_payment_id` was
+  dropped by the index diet).
   `ANALYZE` and larger PgBouncer pools do not reduce millions of updates.
 - Action: make retention stamping bounded/chunked or decouple it from the
   synchronous payment transaction. During an incident, correlate it with
@@ -25352,6 +25365,30 @@ redis-cli -p <port> SLOWLOG GET 8       # the key names attribute it
 The single most valuable diagnostic skill from the incident: reading the
 error CLASS, not the volume. Classes, causes, and the action each implies:
 
+A complete `[payer-due-close]` result summary with canonical payer identity,
+bounded nonnegative counters, `failed=0` and a boolean `more` is not a novel
+error merely because the counter is named `failed`. The tailer recognizes only
+that full ordered schema, either as its exact message or under the expected
+informational `subscription_payer_due_close.go` envelope (and optional Warp
+identity prefix). Unknown sources or severity, invalid timestamps or counters,
+missing, repeated, reordered or additional fields and trailing error text do
+not receive this exception. Positive failure counters and the separate
+`closed nothing, N failed: ...` error/cancellation records remain eligible for
+the existing taxonomy or novel detector. Known classes are evaluated first;
+the panic aggregate and overlapping normalized-owner counts are unchanged.
+
+This corrects a monitor attribution boundary, not payer-close behavior. A
+zero failure counter proves neither successful settlement, committed closes,
+backlog health nor recovery of an adjacent `ReadPayerDueContracts` panic.
+Novel rates count matching log lines, not unique payers, tasks or incidents.
+False positives: do not page on a complete expected summary's field name.
+False negatives: malformed or unavailable records and companion failures must
+remain visible; absence from one bounded exemplar is not a quiet-window proof.
+Before claiming deployed correction, bind the actual emitter and watcher
+artifacts, preserve the original private evidence, qualify the composed
+classifier/window/ticket regression and unchanged reader/cancellation/owner
+controls, then observe complete fresh coverage through the normal alert window.
+
 | Class (grep) | Meaning | Action |
 |---|---|---|
 | `[peerconn]teardown stalled for 5s at <stage>` (`peerconn-teardown-stalled`) | One finite-stage watchdog header is one diagnostic stall; later per-goroutine stack records are not additional stalls. WARN at one header/minute and PAGE at five/minute per service/stage. `starting` is not a unique blocked primitive. Legacy whole-process stack fan-out can itself prolong teardown and obscure other logs; a capped or HTTP-429 reconciliation makes absence unknown. | Bind the exact process/artifact and finite stage, retain only bounded private stack evidence, then repair the owning lifecycle primitive. Deploy the bounded diagnostic separately when authorized. Require comparable connection churn, resource release, ten quiet minutes, and two complete overlap reconciliations; do not attribute provider-probe throughput without a process/task join. See §1.5. |
@@ -27664,7 +27701,7 @@ losing up to 20 GB/h. Each production action needs the owner's go.
      (`client_reliability_p20261001`..`04`, 236 GB). Run each drop as its own
      guarded transaction with `lock_timeout = '5s'`; each took seconds.
 4. **Respect the reliability readers.** Since 2026-10-31 `client_reliability`
-   retention is a flat 21 days; the subsidy payout frontier no longer holds
+   retention is a flat 14 days since 2026-11-02 (21 before); the subsidy payout frontier no longer holds
    it. Operator block points read each completed block's window
    (`AwardDueOperatorBlockPoints`, daily at 12:00Z): before dropping a day
    inside the 21-day cutoff, check that the blocks covering it are awarded
@@ -29718,7 +29755,7 @@ This is the version-to-artifact contract checked by the probe:
 | 626 | obsolete profile/deployment nonce constraint absent |
 | 627 | deployment-scoped ST fleet-signature/epoch-notification keys and network-time index |
 | 628 | `transfer_contract.stream_id` plus `contract_participant` and its stream/client primary key |
-| 629 | partial `transfer_contract_stream_id` |
+| 629 | partial `transfer_contract_stream_id` (required until the index diet's stream index drop, which requires it absent) |
 | 630 | `competition_round.staging`, epoch-kind constraint, and enabled staging identity/review/finalization guards |
 | 631 | nullable `transfer_escrow_sweep.provider_payouts` and its nonempty-array shape constraint |
 | 632 | `transfer_contract_unresolved_source_pair_create_time` |
@@ -30398,6 +30435,15 @@ strictness or configuration. The retention task deletes a gone client's
 history once the contract horizon reaper's horizon has passed since the
 client went while the reaper's mode is on, never below the floor; the catalog
 checks do not show where the retention task is.
+
+The onboarding results' purchase.started count
+(`onboarding_results_purchase_started_schema.go`) adds one column to
+`onboarding_results_daily`: `purchase_started_7d integer NOT NULL DEFAULT 0`,
+the in-app offer's leading metric. Its content-derived version follows its
+DDL. From that version a missing column, another type, a nullable column, and
+a lost or changed default are drift; before it, the absent column is only
+numeric migration lag. The check reads the catalog only and does not show
+whether the nightly rollup has filled the column.
 
 ### 8.10 Client-reliability covering-index drift after partition cutover
 Probe: `reliability-index`

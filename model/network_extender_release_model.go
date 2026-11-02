@@ -389,6 +389,21 @@ func (self *networkExtenderReleaseTx) RecordRelease(identity []byte, keyHex stri
 	))
 }
 
+// A client of `networkId`, as the operator's table knows it, for a test that makes
+// block reports. Test only.
+func Testing_CreateBlockReportClient(ctx context.Context, networkId server.Id) server.Id {
+	clientId := server.NewId()
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`INSERT INTO network_client (client_id, network_id) VALUES ($1, $2)`,
+			clientId,
+			networkId,
+		))
+	})
+	return clientId
+}
+
 // Holds a block report between reading the extender's probe rows, which it
 // keeps locked, and recording it. Test only, and never set in production.
 var Testing_NetworkExtenderBlockReportBarrier func()
@@ -502,12 +517,18 @@ func DiscountNetworkExtenderBlockReports(
 
 // Whether an extender is blocked in a country at `now` (R4,
 // connect.ExtenderBlockedState's rule over the tables): at least
-// `reportThreshold` distinct clients there reported it since the report
+// `reportThreshold` distinct networks there reported it since the report
 // window began, and the operator's own probe reaches the extender now: it has
 // an active address, and every active address's latest probe succeeded
 // within the probe window (connect/EXTENDER-UPDATE2.md §1.3). An extender that
 // is down, or failing on one of its families, is not blocked, however many
 // report it.
+//
+// A network counts once however many of its clients report, so one account's
+// devices behind one firewall cannot block a record for a whole country. The
+// network is network_client's row for the client id of the report's verified
+// token, never anything the request says. A report whose client has since been
+// reaped has no network and counts for nothing, which errs toward no block.
 func NetworkExtenderBlockedInCountry(
 	ctx context.Context,
 	extenderId server.Id,
@@ -524,9 +545,13 @@ func NetworkExtenderBlockedInCountry(
 			`
 			SELECT
 				(
-					SELECT COUNT(DISTINCT client_id)
+					SELECT COUNT(DISTINCT network_client.network_id)
 					FROM network_extender_block_report
-					WHERE extender_id = $1 AND country_code = $2 AND $3 <= report_time
+					INNER JOIN network_client ON network_client.client_id = network_extender_block_report.client_id
+					WHERE
+						network_extender_block_report.extender_id = $1 AND
+						network_extender_block_report.country_code = $2 AND
+						$3 <= network_extender_block_report.report_time
 				),
 				(
 					SELECT COUNT(*)
@@ -550,11 +575,11 @@ func NetworkExtenderBlockedInCountry(
 		)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
-				var reporterCount int
+				var reportingNetworkCount int
 				var activeAddressCount int
 				var reachedAddressCount int
-				server.Raise(result.Scan(&reporterCount, &activeAddressCount, &reachedAddressCount))
-				blocked = reportThreshold <= reporterCount &&
+				server.Raise(result.Scan(&reportingNetworkCount, &activeAddressCount, &reachedAddressCount))
+				blocked = reportThreshold <= reportingNetworkCount &&
 					0 < activeAddressCount &&
 					reachedAddressCount == activeAddressCount
 			}
@@ -626,8 +651,13 @@ func (self *NetworkExtenderBlockedSource) BlockedKeys(keyHexes []string, country
 			SELECT candidate.extender_id
 			FROM unnest($1::uuid[]) AS candidate(extender_id)
 			WHERE (
-				SELECT COUNT(DISTINCT client_id) FROM network_extender_block_report
-				WHERE extender_id = candidate.extender_id AND country_code = $2 AND $4 <= report_time
+				SELECT COUNT(DISTINCT network_client.network_id)
+				FROM network_extender_block_report
+				INNER JOIN network_client ON network_client.client_id = network_extender_block_report.client_id
+				WHERE
+					network_extender_block_report.extender_id = candidate.extender_id AND
+					network_extender_block_report.country_code = $2 AND
+					$4 <= network_extender_block_report.report_time
 			) >= $3 AND EXISTS (
 				SELECT 1 FROM network_extender_address
 				WHERE extender_id = candidate.extender_id AND active

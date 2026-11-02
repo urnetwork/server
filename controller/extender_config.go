@@ -71,6 +71,8 @@ import (
 //	      url: https://api.ur.example/v1/seed.bin
 //	      dial_addresses:
 //	        - <address>
+//	camouflage_report:
+//	  enabled: false
 //
 // The private key signs; the public list is what clients accept, and is a list
 // so a key can be rotated by publishing both before the old one is dropped.
@@ -86,7 +88,9 @@ import (
 // (lag.dev/PLAN.md C), read by the issuance and dns tasks and the activation.
 // The seed block is the public seed bundle and its mirrors
 // (connect/EXTENDER-UPDATE2.md §2, extender_seed_config.go), read by the seed
-// publisher, the mirror check and the api's ExtenderSeedPath.
+// publisher, the mirror check and the api's ExtenderSeedPath. The
+// camouflage_report block turns the camouflage report route on, and off again
+// (extender_camouflage_report.go).
 //
 // The resource is optional. An operator that has not configured it runs with
 // no extender network at all: hello serves no root keys and activation
@@ -114,6 +118,15 @@ type ExtenderConfig struct {
 	Measurement ExtenderMeasurementConfig `yaml:"measurement"`
 	// the public seed bundle and its mirrors (connect/EXTENDER-UPDATE2.md §2)
 	Seed ExtenderSeedConfig `yaml:"seed"`
+	// the camouflage report route (extender_camouflage_report.go)
+	CamouflageReport ExtenderCamouflageReportConfig `yaml:"camouflage_report"`
+}
+
+// The camouflage report route. Disabled, the default, it answers disabled to
+// every report and counts nothing, which is also the kill switch. Like the rest
+// of this resource it is read once per process, so a change takes an api restart.
+type ExtenderCamouflageReportConfig struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 // The lag.dev measurement certificates (lag.dev/PLAN.md C5-C10). Disabled, the

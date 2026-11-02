@@ -92,52 +92,80 @@ type nativeBrowsingColdRequest struct {
 }
 
 // Fixed receipts bound all500 original requests; socket identities stay private.
+// Only the first rejected hold records immutable scalars; no packet/session
+// pointer or hot-path event log is retained.
+type nativeBrowsingHoldPremiseFailure struct {
+	Kind                     nativeBrowsingColdBodyKind `json:"kind"`
+	Page                     int                        `json:"page"`
+	Slot                     int                        `json:"slot"`
+	ClientAcquisitions       int                        `json:"client_acquisitions"`
+	ServerAttempts           int                        `json:"server_attempts"`
+	BodyOpened               bool                       `json:"body_opened"`
+	ReceivedBytes            int64                      `json:"received_bytes"`
+	LatestClientAcquisitions int                        `json:"latest_client_acquisitions"`
+	LatestServerAttempts     int                        `json:"latest_server_attempts"`
+	RequestOwnerUnchanged    bool                       `json:"request_owner_unchanged"`
+	RequestDispatched        bool                       `json:"request_dispatched"`
+	RequestContextLive       bool                       `json:"request_context_live"`
+	ExactGate                bool                       `json:"exact_gate"`
+	VerifiedTLS              bool                       `json:"verified_tls"`
+	ServerOwned              bool                       `json:"server_owned"`
+	ServerTuplePresent       bool                       `json:"server_tuple_present"`
+	ServerProvider           int                        `json:"server_provider"`
+	Started                  bool                       `json:"started"`
+	Finished                 bool                       `json:"finished"`
+	BodyClosed               bool                       `json:"body_closed"`
+	CancelRequested          bool                       `json:"cancel_requested"`
+}
+
 type nativeBrowsingColdLinkObservation struct {
-	InitialWindow            sdkBrowsingSetupSnapshot         `json:"initial_window"`
-	ColdEdgeWindow           sdkBrowsingSetupSnapshot         `json:"cold_edge_window"`
-	ColdEdgeWindowObserved   bool                             `json:"cold_edge_window_observed"`
-	Protocol                 string                           `json:"inner_protocol"`
-	ColdEdges                int                              `json:"cold_edges"`
-	VisitedDestinationEdges  int                              `json:"visited_destination_edges"`
-	SameSessionEdges         int                              `json:"same_session_edges"`
-	Html                     int                              `json:"validated_html"`
-	Assets                   int                              `json:"validated_or_canceled_assets"`
-	ClientAcquisitions       int                              `json:"client_acquisitions"`
-	ServerAttempts           int                              `json:"server_attempts"`
-	ClientSessions           int                              `json:"client_sessions"`
-	ServerSessions           int                              `json:"server_sessions"`
-	CssBodyReadBytes         int64                            `json:"css_body_read_bytes_at_cold_html"`
-	JsBodyReadBytes          int64                            `json:"js_body_read_bytes_at_cold_html"`
-	CssOwnerRetained         bool                             `json:"css_public_owner_retained"`
-	ColdClientReused         bool                             `json:"cold_client_reused"`
-	ColdServerProvider       int                              `json:"cold_server_provider"`
-	ColdTupleOwned           bool                             `json:"cold_server_tuple_owned"`
-	AdmissionChain           string                           `json:"admission_chain"`
-	Refusals                 [sdkBrowsingProviderCount]uint64 `json:"actual_old_provider_refusals"`
-	FirstRefusalNs           [sdkBrowsingProviderCount]int64  `json:"first_refusal_ns"`
-	LateConstructedNs        int64                            `json:"late_constructed_ns"`
-	LatePublicApiVisibleNs   int64                            `json:"late_public_api_visible_ns"`
-	LateReady                bool                             `json:"late_ready"`
-	ControllerWaitNs         [nativeBrowsingPageCount]int64   `json:"controller_wait_ns"`
-	CombinedFirstByteNs      [nativeBrowsingPageCount]int64   `json:"tap_to_first_byte_ns"`
-	PublicationIsAdmission   bool                             `json:"publication_is_admission"`
-	BodyReadIsPacketCustody  bool                             `json:"body_read_is_packet_custody"`
-	PhysicalPauseAttribution string                           `json:"physical_pause_attribution"`
+	HoldPremiseFailure       *nativeBrowsingHoldPremiseFailure `json:"hold_premise_failure,omitempty"`
+	InitialWindow            sdkBrowsingSetupSnapshot          `json:"initial_window"`
+	ColdEdgeWindow           sdkBrowsingSetupSnapshot          `json:"cold_edge_window"`
+	ColdEdgeWindowObserved   bool                              `json:"cold_edge_window_observed"`
+	Protocol                 string                            `json:"inner_protocol"`
+	ColdEdges                int                               `json:"cold_edges"`
+	VisitedDestinationEdges  int                               `json:"visited_destination_edges"`
+	SameSessionEdges         int                               `json:"same_session_edges"`
+	Html                     int                               `json:"validated_html"`
+	Assets                   int                               `json:"validated_or_canceled_assets"`
+	ClientAcquisitions       int                               `json:"client_acquisitions"`
+	ServerAttempts           int                               `json:"server_attempts"`
+	ClientSessions           int                               `json:"client_sessions"`
+	ServerSessions           int                               `json:"server_sessions"`
+	CssBodyReadBytes         int64                             `json:"css_body_read_bytes_at_cold_html"`
+	JsBodyReadBytes          int64                             `json:"js_body_read_bytes_at_cold_html"`
+	CssOwnerRetained         bool                              `json:"css_public_owner_retained"`
+	ColdClientReused         bool                              `json:"cold_client_reused"`
+	ColdServerProvider       int                               `json:"cold_server_provider"`
+	ColdTupleOwned           bool                              `json:"cold_server_tuple_owned"`
+	AdmissionChain           string                            `json:"admission_chain"`
+	Refusals                 [sdkBrowsingProviderCount]uint64  `json:"actual_old_provider_refusals"`
+	FirstRefusalNs           [sdkBrowsingProviderCount]int64   `json:"first_refusal_ns"`
+	LateConstructedNs        int64                             `json:"late_constructed_ns"`
+	LatePublicApiVisibleNs   int64                             `json:"late_public_api_visible_ns"`
+	LateReady                bool                              `json:"late_ready"`
+	ControllerWaitNs         [nativeBrowsingPageCount]int64    `json:"controller_wait_ns"`
+	CombinedFirstByteNs      [nativeBrowsingPageCount]int64    `json:"tap_to_first_byte_ns"`
+	PublicationIsAdmission   bool                              `json:"publication_is_admission"`
+	BodyReadIsPacketCustody  bool                              `json:"body_read_is_packet_custody"`
+	PhysicalPauseAttribution string                            `json:"physical_pause_attribution"`
 }
 
 type nativeBrowsingColdLinkWitness struct {
-	stateLock         sync.Mutex
-	scenario          *sdkBrowsingScenario
-	pressure          *nativeBrowsingPressureObservation
-	http2             bool
-	css               nativeBrowsingColdBodyHold
-	js                [nativeBrowsingPageCount - 1]nativeBrowsingColdBodyHold
-	requests          [nativeBrowsingPageCount][nativeBrowsingAssetCount + 1]nativeBrowsingColdRequest
-	tap               [nativeBrowsingPageCount]time.Time
-	row               nativeBrowsingColdLinkObservation
-	firstErr          error
-	constructorCtx    context.Context
-	constructorCancel context.CancelFunc
+	afterHoldSnapshotForTest func()
+	stateLock                sync.Mutex
+	scenario                 *sdkBrowsingScenario
+	pressure                 *nativeBrowsingPressureObservation
+	http2                    bool
+	css                      nativeBrowsingColdBodyHold
+	js                       [nativeBrowsingPageCount - 1]nativeBrowsingColdBodyHold
+	requests                 [nativeBrowsingPageCount][nativeBrowsingAssetCount + 1]nativeBrowsingColdRequest
+	tap                      [nativeBrowsingPageCount]time.Time
+	row                      nativeBrowsingColdLinkObservation
+	firstErr                 error
+	constructorCtx           context.Context
+	constructorCancel        context.CancelFunc
 }
 
 func newNativeBrowsingColdLinkWitness(scenario *sdkBrowsingScenario, pressure *nativeBrowsingPressureObservation, http2 bool) *nativeBrowsingColdLinkWitness {
@@ -186,7 +214,12 @@ func (self *nativeBrowsingColdLinkWitness) checkHold(hold *nativeBrowsingColdBod
 	}
 	self.stateLock.Lock()
 	request, firstErr := self.requests[hold.page][hold.slot], self.firstErr
+	progress := &self.pressure.assets[hold.page][hold.slot]
+	bodyOpened, received := progress.bodyOpened.Load(), progress.receivedBytes.Load()
 	self.stateLock.Unlock()
+	if hook := self.afterHoldSnapshotForTest; hook != nil {
+		hook()
+	}
 	if firstErr != nil {
 		return firstErr
 	}
@@ -202,9 +235,9 @@ func (self *nativeBrowsingColdLinkWitness) checkHold(hold *nativeBrowsingColdBod
 		request.serverAttempts == 0 && (request.serverOwned || request.serverTuple != "") {
 		return errors.New("cold-link original request has invalid observed TLS/server ownership")
 	}
-	progress := &self.pressure.assets[hold.page][hold.slot]
-	if (progress.bodyOpened.Load() || progress.receivedBytes.Load() != 0 || kind == nativeBrowsingColdCss) &&
+	if (bodyOpened || received != 0 || kind == nativeBrowsingColdCss) &&
 		(request.clientAcquisitions != 1 || request.serverAttempts != 1) {
+		self.recordHoldPremiseFailure(hold, request, bodyOpened, received)
 		return errors.New("cold-link opened body/CSS premise lacks established original ownership")
 	}
 	return nativeBrowsingUnfinishedBodyOwner(hold.gate, &self.pressure.assets[hold.page][hold.slot],
@@ -534,16 +567,24 @@ func (self *nativeBrowsingColdLinkWitness) snapshot() (nativeBrowsingColdLinkObs
 	return row, errors.Join(self.firstErr, scenarioErr)
 }
 
+// Preserve the original verdict and expose only a typed post-work numeric-miss classification.
 func (self *nativeBrowsingColdLinkWitness) verdict() error {
+	err, _ := self.verdictWithLatencyForTest()
+	return err
+}
+
+// Preserve the first error. A numeric miss requires every fixed timepoint
+// to be positive; a later missing value cannot be hidden by an earlier stall.
+func (self *nativeBrowsingColdLinkWitness) verdictWithLatencyForTest() (error, bool) {
 	row, err := self.snapshot()
 	if err != nil {
-		return err
+		return err, false
 	}
 	if row.Html != 100 || row.Assets != 400 || row.ClientAcquisitions != 500 || row.ServerAttempts != 500 || row.ColdEdges != 1 || row.VisitedDestinationEdges != 98 || !row.CssOwnerRetained || row.ColdClientReused || !row.ColdTupleOwned {
-		return fmt.Errorf("cold-link original request/body/session census: %+v", row)
+		return fmt.Errorf("cold-link original request/body/session census: %+v", row), false
 	}
 	if self.http2 && (row.SameSessionEdges != 98 || row.ClientSessions != 5 || row.ServerSessions != 5) {
-		return errors.New("cold-link H2 did not retain98warm same-session edges")
+		return errors.New("cold-link H2 did not retain98warm same-session edges"), false
 	}
 	self.stateLock.Lock()
 	var requestErr error
@@ -560,12 +601,48 @@ func (self *nativeBrowsingColdLinkWitness) verdict() error {
 	}
 	self.stateLock.Unlock()
 	if requestErr != nil {
-		return requestErr
+		return requestErr, false
 	}
 	for page, duration := range row.CombinedFirstByteNs {
 		if duration <= 0 || duration >= int64(sdk.DefaultDeviceLocalSettings().SendTimeout) {
-			return fmt.Errorf("NATIVE_BROWSING_NAVIGATION_STALL: page=%d combined_tap_to_first_byte=%s", page, time.Duration(duration))
+			numericLatencyMiss := duration > 0
+			if numericLatencyMiss {
+				for _, remaining := range row.CombinedFirstByteNs[page+1:] {
+					if remaining <= 0 {
+						numericLatencyMiss = false
+						break
+					}
+				}
+			}
+			return fmt.Errorf("NATIVE_BROWSING_NAVIGATION_STALL: page=%d combined_tap_to_first_byte=%s", page, time.Duration(duration)), numericLatencyMiss
 		}
 	}
-	return nil
+	return nil, false
+}
+
+// A rejected premise retains one bounded first-failure receipt, including the
+// current publication state so a stale snapshot is distinguishable from absence.
+func (self *nativeBrowsingColdLinkWitness) recordHoldPremiseFailure(hold *nativeBrowsingColdBodyHold, observed nativeBrowsingColdRequest, bodyOpened bool, received int64) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if self.row.HoldPremiseFailure != nil {
+		return
+	}
+	current := self.requests[hold.page][hold.slot]
+	progress := &self.pressure.assets[hold.page][hold.slot]
+	owner := current.requestOwner
+	snapshot := &nativeBrowsingHoldPremiseFailure{Kind: hold.kind, Page: hold.page, Slot: hold.slot,
+		ClientAcquisitions: observed.clientAcquisitions, ServerAttempts: observed.serverAttempts,
+		BodyOpened: bodyOpened, ReceivedBytes: received, LatestClientAcquisitions: current.clientAcquisitions,
+		LatestServerAttempts: current.serverAttempts, RequestOwnerUnchanged: owner == observed.requestOwner,
+		ExactGate:   current.bodyGate == hold.gate && owner != nil && owner.gate == hold.gate,
+		VerifiedTLS: current.verifiedClientTls, ServerOwned: current.serverOwned,
+		ServerTuplePresent: current.serverTuple != "", ServerProvider: current.serverProvider,
+		Started: progress.started.Load(), Finished: progress.finished.Load(),
+		BodyClosed: progress.bodyClosed.Load(), CancelRequested: progress.cancelRequested.Load()}
+	if owner != nil {
+		snapshot.RequestDispatched = owner.dispatched.Load()
+		snapshot.RequestContextLive = owner.ctx != nil && owner.ctx.Err() == nil
+	}
+	self.row.HoldPremiseFailure = snapshot
 }

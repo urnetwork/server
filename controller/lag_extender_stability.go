@@ -43,11 +43,12 @@ import (
 // The hold bridges the gaps between a loop's restarts, which went up to two
 // hours, and ends the exclusion two hours after a loop's last burst.
 //
-// An extender's uptime probes do not decide: a probe forwards through the
-// extender to the api host, which a measurement does not use, and on Main
-// most of the minutes a failed latest probe would have left an extender out,
-// its measurement api answered. An outage is left to the probes' revocation,
-// as before, and the page's spares.
+// An extender's uptime probes do not decide. A probe forwards nothing: it tests
+// the outer tls under the identity key, admission and a signed challenge, which
+// is not the path a measurement uses. The probe was left out because on 1
+// November it failed for extenders whose measurement api answered, in 157 of
+// 199 checks, and why is not known yet. An outage is left to the probes of the
+// measurement api itself (lag_extender_reach.go), and the page's spares.
 var lagExtenderRestartLoopRule = model.LagExtenderRestartLoopRule{
 	PassGap:          30 * time.Second,
 	BurstPasses:      4,

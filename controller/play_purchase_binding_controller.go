@@ -59,6 +59,10 @@ type playUnlinkedPurchase struct {
 	sub           *PlaySubscription
 	startTime     time.Time
 	maxExpiryTime time.Time
+	// resubscribedNetworkId is the network a Play Store "Resubscribe" names
+	// through the expired subscription's account identifiers
+	// (playOutOfAppAccountNetworkIdInConn), nil for any other purchase
+	resubscribedNetworkId *server.Id
 }
 
 // playPurchaseBindingTx is the transactional state the binding rules read and
@@ -187,6 +191,18 @@ func playBindUnlinkedPurchase(
 			}
 			return playCreditBound(store, purchase, sessionNetworkId)
 		}
+	}
+
+	if purchase.resubscribedNetworkId != nil {
+		// a Play Store "Resubscribe": the expired subscription's account
+		// identifiers name the network, as an in-app purchase's do
+		if *purchase.resubscribedNetworkId != sessionNetworkId {
+			return playPurchaseBindingResult{status: VerifyPurchaseStatusWrongNetwork, reason: "re-subscription of another network's subscription"}
+		}
+		if !store.Bind(purchase.purchaseToken, purchase.purchaseToken, sessionNetworkId, model.PlayPurchaseBindingResubscribe) {
+			return playPurchaseRefused("purchase is already bound")
+		}
+		return playCreditBound(store, purchase, sessionNetworkId)
 	}
 
 	offer := store.OfferForUpdate(sessionNetworkId)
@@ -339,12 +355,17 @@ func verifyPlayUnlinkedPurchase(
 	if err != nil {
 		return NewVerifyStorePurchaseInvalid(), nil
 	}
+	resubscribedNetworkId, ok := playOutOfAppAccountNetworkIdInConn(nil, clientSession, sub, purchaseToken)
+	if !ok {
+		return NewVerifyStorePurchaseInvalid(), nil
+	}
 	purchase := &playUnlinkedPurchase{
-		packageName:   packageName,
-		purchaseToken: purchaseToken,
-		sub:           sub,
-		startTime:     startTime,
-		maxExpiryTime: maxExpiryTime,
+		packageName:           packageName,
+		purchaseToken:         purchaseToken,
+		sub:                   sub,
+		startTime:             startTime,
+		maxExpiryTime:         maxExpiryTime,
+		resubscribedNetworkId: resubscribedNetworkId,
 	}
 	match := playWelcomeOfferMatchFunc()
 	result := playPurchaseBindingRunFunc(clientSession, func(store playPurchaseBindingTx) playPurchaseBindingResult {
@@ -408,9 +429,12 @@ var playPurchaseBindingLookupFunc = func(
 }
 
 // playResolveNetworkId is the network a purchase belongs to, for the paths
-// that cannot bind (the RTDN webhook, the reconciler): the account link when
-// present, else the binding. ok=false when the link is present but malformed;
-// a nil network (with ok) when the purchase is unlinked and was never bound.
+// that cannot bind a welcome offer (the RTDN webhook, the reconciler): the
+// account link when present, else the binding, else a Play Store
+// "Resubscribe"'s expired account identifiers, which bind it only with
+// inherit (a reconcile pass, inherit false, writes no binding). ok=false when
+// the link is present but malformed; a nil network (with ok) when the
+// purchase is unlinked and was never bound.
 func playResolveNetworkId(
 	clientSession *session.ClientSession,
 	sub *PlaySubscription,
@@ -437,5 +461,74 @@ func playResolveNetworkIdInConn(connOwner server.PgConn,
 	if networkId, bound := playPurchaseBindingLookupFunc(connOwner, clientSession.Ctx, purchaseToken, sub.LinkedPurchaseToken, inherit); bound {
 		return &networkId, true
 	}
+	if inherit {
+		return playOutOfAppNetworkIdFunc(connOwner, clientSession, sub, purchaseToken)
+	}
+	return playOutOfAppAccountNetworkIdInConn(connOwner, clientSession, sub, purchaseToken)
+}
+
+// playOutOfAppAccountNetworkIdInConn is the network a Play Store
+// "Resubscribe" names: a SUBSCRIPTION_PURCHASED bought in the subscriptions
+// center after the previous subscription of the product expired carries no
+// account identifiers of its own, but its outOfAppPurchaseContext carries the
+// expired subscription's -- the obfuscated account id the app set on the
+// original purchase, resolved as for any purchase -- and the expired token,
+// whose own binding names the network when the original was bound. nil (with
+// ok) when the purchase carries no context naming a network; ok=false when
+// its identifiers are present but unparseable. Google removes the context
+// when the purchase is acknowledged, so the caller binds the token
+// (playOutOfAppNetworkIdInConn) before the acknowledgement.
+func playOutOfAppAccountNetworkIdInConn(
+	connOwner server.PgConn,
+	clientSession *session.ClientSession,
+	sub *PlaySubscription,
+	purchaseToken string,
+) (*server.Id, bool) {
+	outOfApp := sub.OutOfAppPurchaseContext
+	if outOfApp == nil || purchaseToken == "" {
+		return nil, true
+	}
+	networkId, ok := playNetworkIdForIdentifiersInConn(connOwner, clientSession, outOfApp.ExpiredExternalAccountIdentifiers)
+	if !ok {
+		return nil, false
+	}
+	if networkId != nil {
+		return networkId, true
+	}
+	if expired := outOfApp.ExpiredPurchaseToken; expired != "" && expired != purchaseToken {
+		if boundNetworkId, _, bound := model.GetPlayPurchaseBindingInConn(connOwner, clientSession.Ctx, expired); bound {
+			return &boundNetworkId, true
+		}
+	}
 	return nil, true
 }
+
+// playOutOfAppNetworkIdInConn resolves a Play Store "Resubscribe" and binds
+// its token to the network, so its renewals, which arrive after the
+// acknowledgement removed the context, resolve through the binding. An
+// existing binding of the token is the answer and never changes.
+func playOutOfAppNetworkIdInConn(
+	connOwner server.PgConn,
+	clientSession *session.ClientSession,
+	sub *PlaySubscription,
+	purchaseToken string,
+) (*server.Id, bool) {
+	networkId, ok := playOutOfAppAccountNetworkIdInConn(connOwner, clientSession, sub, purchaseToken)
+	if !ok || networkId == nil {
+		return nil, ok
+	}
+	boundNetworkId, bound := model.BindPlayResubscriptionInConn(connOwner, clientSession.Ctx, purchaseToken, *networkId)
+	if !bound {
+		return nil, true
+	}
+	if boundNetworkId != *networkId {
+		glog.Warningf(
+			"[sub]play re-subscription %s names network %s but is bound to %s; the binding stands\n",
+			purchaseToken, *networkId, boundNetworkId,
+		)
+	}
+	return &boundNetworkId, true
+}
+
+// playOutOfAppNetworkIdFunc is playOutOfAppNetworkIdInConn. Tests replace it.
+var playOutOfAppNetworkIdFunc = playOutOfAppNetworkIdInConn

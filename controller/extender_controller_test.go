@@ -576,6 +576,10 @@ func TestExtenderActivateRateLimitsPerClient(t *testing.T) {
 // activations an hour, and a second device was refused "for this action
 // today" by the first one's retries (inbox 8051). The refusal names the action
 // and its hourly window.
+//
+// Both clients are probed on the one loopback address, whose own budget
+// (connect#230) the first client's six attempts would fill; that budget is
+// TestExtenderActivateBudgetsEachAddress's, and it is set aside here.
 func TestExtenderActivateRateLimitIsPerClient(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -598,6 +602,10 @@ func TestExtenderActivateRateLimitIsPerClient(t *testing.T) {
 		firstSession := newTestExtenderSession(t, ctx, fixture.clientAddress("127.0.0.1"))
 		secondSession := newTestExtenderAccountSession(ctx, firstSession)
 
+		settings := DefaultExtenderActivateSettings()
+		settings.AddressRateLimit = 64
+		service := newExtenderActivateService(settings)
+
 		rateLimited := func(result *ExtenderActivateResult) bool {
 			return strings.Contains(result.Error, "maximum number of attempts")
 		}
@@ -605,7 +613,7 @@ func TestExtenderActivateRateLimitIsPerClient(t *testing.T) {
 		// the first client spends its whole budget
 		refusal := ""
 		for range 64 {
-			result, err := ExtenderActivate(args, firstSession)
+			result, err := service.activate(args, firstSession)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -622,7 +630,7 @@ func TestExtenderActivateRateLimitIsPerClient(t *testing.T) {
 			t.Errorf("the refusal does not name the action and its window: %q", refusal)
 		}
 
-		result, err := ExtenderActivate(args, secondSession)
+		result, err := service.activate(args, secondSession)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -680,11 +688,10 @@ func TestExtenderActivateRateLimitIsCappedPerAccount(t *testing.T) {
 		args.TcpPort = closedPort
 		args.Carriers = []string{connect.ExtenderCarrierTcp}
 
-		settings := &ExtenderActivateSettings{
-			ClientRateLimit:  2,
-			AccountRateLimit: 3,
-			RateLimitWindow:  time.Hour,
-		}
+		settings := DefaultExtenderActivateSettings()
+		settings.ClientRateLimit = 2
+		settings.AccountRateLimit = 3
+		settings.RateLimitWindow = time.Hour
 		activate := func(clientSession *session.ClientSession) string {
 			result, err := extenderActivate(args, clientSession, settings)
 			if err != nil {
