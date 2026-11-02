@@ -140,3 +140,20 @@ func ResolvePlayPurchaseBindingInConn(connOwner server.PgConn,
 	})
 	return
 }
+
+// PlayPurchaseBindingResubscribe marks a binding made for a Play Store
+// re-subscription through the expired subscription's account identifiers
+// (controller playOutOfAppNetworkIdInConn).
+const PlayPurchaseBindingResubscribe = "resubscribe"
+
+// BindPlayResubscriptionInConn binds a re-subscription's token to the network
+// the expired subscription named, unless the token is bound already, and
+// returns the network the token is bound to: an existing binding is the
+// answer and never changes.
+func BindPlayResubscriptionInConn(connOwner server.PgConn, ctx context.Context, purchaseToken string, networkId server.Id) (boundNetworkId server.Id, ok bool) {
+	server.TxInConn(ctx, connOwner, func(tx server.PgTx) {
+		BindPlayPurchaseInTx(tx, ctx, purchaseToken, purchaseToken, networkId, PlayPurchaseBindingResubscribe)
+		boundNetworkId, _, ok = GetPlayPurchaseBindingInTx(tx, ctx, purchaseToken)
+	})
+	return
+}
