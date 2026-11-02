@@ -48372,8 +48372,12 @@ operations-managed static mirrors copy the api's answer
 (xops/main/ansible/EXTENDER-SEED-MIRRORS.md). Each pass also fetches the
 bundle from every configured mirror route -- the url resolved as usual
 (`dns`), and each configured dial address (`ipv4`, `ipv6`) dialed directly
-with the url's host as the TLS server name, the DNS-independent route -- and
-verifies it as a client does.
+with the url's host as the TLS server name, the DNS-independent route -- with
+the certificate verified under the roots a client verifies mirrors with
+(connect's pinned Let's Encrypt set, never the system roots), and verifies the
+bundle as a client does. A client given no dial address for a mirror resolves
+its name with the device's system resolver, not DoH, so the address routes are
+the ones that matter where the seed matters.
 
 ### 27.1 Extender seed mirrors
 
@@ -48437,7 +48441,8 @@ blocked only in a censored country reads healthy here.
 
 ACTION: read the route's check outcomes on the extender seed dashboard
 (`urnetwork-extender-seed`): `unreachable` or `tls` points at the mirror host,
-its address or its certificate; `signature` or `foreign_network` at a mirror
+its address or its certificate (it must chain to ISRG Root X1 or X2, because
+clients pin Let's Encrypt); `signature` or `foreign_network` at a mirror
 serving someone else's bundle; an older sequence at the mirror's sync. For the
 origin, read the publisher's outcomes (`store_error`, `sign_error`,
 `self_check_failed`: the signing key is not in `root_public_keys_hex`).

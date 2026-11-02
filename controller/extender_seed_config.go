@@ -49,9 +49,14 @@ import (
 // the only thing about a mirror that reaches a metric label or an alert, so it
 // is a short fixed word; the url and the addresses stay in this file. Each
 // dial address is a DNS-independent route: it is dialed directly, with the
-// url's host as the TLS server name and ordinary certificate verification. A
-// mirror carries at most one address per family, because the check reports a
-// route by its family and two addresses of one family would share a series.
+// url's host as the TLS server name, and the certificate is verified under the
+// roots a client verifies mirrors with, connect's pinned Let's Encrypt set
+// (taskworker/work/extender_seed_mirror_check.go), so a mirror needs a Let's
+// Encrypt certificate. A client given no address for a mirror resolves its
+// name with the device's system resolver, not DoH, so the address routes are
+// the ones that matter. A mirror carries at most one address per family,
+// because the check reports a route by its family and two addresses of one
+// family would share a series.
 type ExtenderSeedConfig struct {
 	Enabled             bool                       `yaml:"enabled"`
 	RecordCount         int                        `yaml:"record_count"`
