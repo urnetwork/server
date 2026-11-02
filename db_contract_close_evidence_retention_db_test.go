@@ -75,17 +75,22 @@ func TestCloseEvidenceRetentionBrakeStopsTheDeletes(t *testing.T) {
 			connect.AssertEqual(t, remaining(), 3)
 		}
 
-		// on at a rate, and without the brake
+		// on at a rate
 		testSetCloseEvidenceRetentionControl(t, map[string]string{CloseEvidenceRetentionControlFieldMode: "on", CloseEvidenceRetentionControlFieldMaxRowsPerSecond: "500"})
 		report, _, _ := RemoveExpiredCloseEvidence(horizon, now, CloseEvidenceRemovalCursor{}, time.Now().Add(time.Minute))
-		connect.AssertEqual(t, report.Removed, int64(2))
+		connect.AssertEqual(t, report.Removed, int64(3))
 		connect.AssertEqual(t, report.Stop, CloseEvidenceRemovalStopDone)
 		connect.AssertEqual(t, report.Retention, 45*day)
-		connect.AssertEqual(t, remaining(), 1)
+		connect.AssertEqual(t, remaining(), 0)
+
+		// without the brake, at the code's default rate
 		testRemoveCloseEvidenceRetentionControl(t)
+		another := testCloseEvidenceReportAt(now.Add(-48*day), testContractIdAt(now.Add(-48*day)), now.Add(-48*day))
+		connect.AssertEqual(t, testInsertCloseEvidenceReport(ctx, another), true)
 		report, _, _ = RemoveExpiredCloseEvidence(horizon, now, CloseEvidenceRemovalCursor{}, time.Now().Add(time.Minute))
 		connect.AssertEqual(t, report.Removed, int64(1))
-		connect.AssertEqual(t, remaining(), 0)
+		connect.AssertEqual(t, report.Stop, CloseEvidenceRemovalStopDone)
+		connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, another), "")
 	})
 }
 
@@ -140,7 +145,9 @@ func TestCloseEvidenceRetentionBatchBoundsItsLockWait(t *testing.T) {
 }
 
 // The batch deletes the rows it read by their ctid, a TID scan, not by
-// probing the primary key for each one.
+// probing the primary key for each one. The test's table is a page or two,
+// where a sequential scan costs the same, so the plan is read with sequential
+// scans off: the delete's only other access is then by an index.
 func TestCloseEvidenceRetentionBatchDeletesByCtid(t *testing.T) {
 	DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -155,6 +162,7 @@ func TestCloseEvidenceRetentionBatchDeletesByCtid(t *testing.T) {
 		})
 		var plan []string
 		testCloseEvidenceNoError(t, contractPartitionTx(ctx, func(tx PgTx) {
+			RaisePgResult(tx.Exec(ctx, `SET LOCAL enable_seqscan = off`))
 			result, err := tx.Query(
 				ctx,
 				"EXPLAIN "+fmt.Sprintf(closeEvidenceRetentionBatchSql, quoteIdentifier(closeEvidenceTable)),
