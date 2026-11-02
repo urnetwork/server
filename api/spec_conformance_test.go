@@ -206,6 +206,9 @@ func registry() []specEndpoint {
 		{method: "POST", path: "/subscription/stripe/payment-sheet", argType: rt(controller.StripePaymentSheetArgs{}), resultType: rt(controller.StripePaymentSheetResult{})},
 		{method: "POST", path: "/subscription/cancel", argType: rt(controller.SubscriptionCancelArgs{}), resultType: rt(controller.SubscriptionCancelResult{})},
 		{method: "POST", path: "/subscription/resume", argType: rt(controller.SubscriptionCancelArgs{}), resultType: rt(controller.SubscriptionCancelResult{})},
+		// the re-engagement results page: its row's JSON names are the
+		// analysis's contract
+		{"GET", "/admin/reengagement/results", nil, rt(controller.AdminReengagementResultsResult{})},
 		{"POST", "/pay/data/checkout", rt(controller.PayDataCheckoutArgs{}), rt(controller.PayDataCheckoutResult{})},
 		{"POST", "/pay/data/network-lookup", rt(controller.PayDataNetworkLookupArgs{}), rt(controller.PayDataNetworkLookupResult{})},
 		{method: "POST", path: "/pay/data/solana-intent", argType: rt(controller.PayDataSolanaIntentArgs{}), resultType: rt(controller.PayDataSolanaIntentResult{})},

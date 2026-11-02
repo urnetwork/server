@@ -21,6 +21,8 @@ package model
 //	      last_connect_from: 2026-10-12
 //	      last_connect_to: 2026-10-27
 //	  experiments: [...]         # the onboarding registry's shape; surfaces reengagement.<stream>
+//	  results:
+//	    rollup_days: 120         # cohort days the nightly results rollup recomputes
 //	  service_reminders:         # account-mailer notices; service mail, not gated by `enabled`
 //	    pro_ending: false        # crypto Pro stops in 14 and 2 days
 //	    trial_ending: false      # an App Store or Play trial ends in 2 days
@@ -78,6 +80,20 @@ type ReengagementScanConfig struct {
 	CatchUpDays int `yaml:"catch_up_days"`
 }
 
+// ReengagementResultsConfig tunes the nightly results rollup
+// (controller/reengagement_results_controller.go). The admin endpoint's
+// volume floor is onboarding.yml `results.min_exposures`, shared with
+// GET /admin/onboarding/results.
+type ReengagementResultsConfig struct {
+	// how many cohort days back the nightly rollup recomputes, so the
+	// windows (up to 90 days after the first step) mature in place
+	RollupDays int `yaml:"rollup_days"`
+}
+
+// ReengagementResultsRollupDaysDefault covers retention_90d's window with a
+// month to spare.
+const ReengagementResultsRollupDaysDefault = 120
+
 type ReengagementHighlightConfig struct {
 	Id        string            `yaml:"id"`
 	Platforms []string          `yaml:"platforms"`
@@ -120,6 +136,8 @@ type ReengagementConfig struct {
 	PqReady     bool                           `yaml:"pq_ready"`
 	Highlights  []*ReengagementHighlightConfig `yaml:"highlights"`
 	Experiments []*OnboardingExperiment        `yaml:"experiments"`
+	// the nightly results rollup
+	Results ReengagementResultsConfig `yaml:"results"`
 	// the service notices, each off unless turned on
 	ServiceReminders ReengagementServiceRemindersConfig `yaml:"service_reminders"`
 
@@ -257,6 +275,14 @@ func (c *ReengagementConfig) CatchUpDays() int {
 		return 3
 	}
 	return c.Scan.CatchUpDays
+}
+
+// EffectiveResultsRollupDays is results.rollup_days or the default.
+func (c *ReengagementConfig) EffectiveResultsRollupDays() int {
+	if c.Results.RollupDays <= 0 {
+		return ReengagementResultsRollupDaysDefault
+	}
+	return c.Results.RollupDays
 }
 
 // The site, company line and reply-to fall back to onboarding's.
