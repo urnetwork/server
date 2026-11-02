@@ -11162,4 +11162,12 @@ var migrations = []any{
 		CREATE INDEX network_reengagement_email_network_sent
 		ON network_reengagement_email (network_id, sent_at)
 	`),
+
+	// purchase_started_7d on the onboarding results
+	// (onboarding_results_purchase_started_schema.go): the networks with a
+	// purchase.started in the 7 days after their cohort time, the in-app
+	// offer's leading metric, which both arms can reach. Constant default: no
+	// table rewrite. Apply before deploying the api and taskworker that read
+	// and write it; the next nightly rollup fills it for its whole window.
+	newSqlMigration(onboardingResultsPurchaseStartedSql),
 }
