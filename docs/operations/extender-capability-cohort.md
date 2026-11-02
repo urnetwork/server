@@ -38,8 +38,9 @@ directory:
   - A release alone reaches it: the gated tier, ordinary or a gated canary. An
     open or dns-canary extender in the list is ignored, because open channels
     cannot ask a client what it can do.
-  - Its record carries a camouflage key (`RealityPublicKey`). Until the server
-    signs the key (connect/EXTENDER.md phase 14b), every cohort is inert.
+  - Its record carries a camouflage key (`RealityPublicKey`). The server signs
+    the key an extender's passing activation posts (connect/EXTENDER.md phase
+    14b), so a member is inert until its extender turns camouflage on.
 - A misspelled or unknown capability is kept as a requirement that no client
   satisfies. The api logs it once at startup, and the listed extenders are
   withheld from every release until the entry is fixed.
