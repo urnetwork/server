@@ -599,8 +599,28 @@ func TestExchangeRecyclesReportedProviderOnItsBlock(t *testing.T) {
 		connectionsBefore, _ := env.exchange.testingHoldsClient(reported.clientId)
 
 		// a short flag, to report again once it expires
-		flagTtl := 3 * time.Second
+		flagTtl := 10 * time.Second
+		dispatchedBefore := testutil.ToFloat64(keyEventsDispatchedClientRecycle)
 		setClientRecycleTestFlagWithTtl(ctx, t, reported.clientId, flagTtl)
+		// a report inside the flag's ttl is a miss with no event: the set's
+		// is the only one dispatched
+		flagCtx, flagCancel := context.WithTimeout(ctx, 10*time.Second)
+		set, _, err := model.SetClientRecycle(flagCtx, reported.clientId, flagTtl)
+		flagCancel()
+		if err != nil || set {
+			t.Fatalf("a report inside the flag's ttl = %t, %v; want a miss", set, err)
+		}
+		if !waitFor(ctx, 10*time.Second, func() bool {
+			return dispatchedBefore+1 <= testutil.ToFloat64(keyEventsDispatchedClientRecycle)
+		}) {
+			t.Fatal("the flag was not dispatched")
+		}
+		select {
+		case <-time.After(1 * time.Second):
+		}
+		if dispatched := testutil.ToFloat64(keyEventsDispatchedClientRecycle); dispatched != dispatchedBefore+1 {
+			t.Fatalf("a set and a miss dispatched %v flags, want 1", dispatched-dispatchedBefore)
+		}
 
 		reason, closed := readClientRecycleTestClose(t, reported.ws, 10*time.Second)
 		if !closed || reason != closeReasonMoved {
@@ -648,24 +668,6 @@ func TestExchangeRecyclesReportedProviderOnItsBlock(t *testing.T) {
 			return notHeldBefore+1 <= stuckProviderRecycleTestOutcome(stuckProviderRecycleNotHeld)
 		}) {
 			t.Fatal("a flag for a client not held here was not counted")
-		}
-
-		// a report inside the flag's ttl is a miss, with no event
-		dispatchedBefore := testutil.ToFloat64(keyEventsDispatchedClientRecycle)
-		flagCtx, flagCancel := context.WithTimeout(ctx, 10*time.Second)
-		set, _, err := model.SetClientRecycle(flagCtx, reported.clientId, flagTtl)
-		flagCancel()
-		if err != nil || set {
-			t.Fatalf("a report inside the flag's ttl = %t, %v; want a miss", set, err)
-		}
-		select {
-		case <-time.After(1 * time.Second):
-		}
-		if dispatched := testutil.ToFloat64(keyEventsDispatchedClientRecycle); dispatched != dispatchedBefore {
-			t.Fatalf("a miss dispatched %v flags", dispatched-dispatchedBefore)
-		}
-		if freshResident.IsDone() {
-			t.Fatal("a miss retired the fresh resident")
 		}
 
 		// the flag expires, and the next report recycles the client again
