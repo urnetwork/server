@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/urnetwork/server"
 )
 
@@ -702,6 +704,131 @@ func TestSweepOrphanContractPagesDeleteByKeyAcrossPartitions(t *testing.T) {
 		}
 		if partitioned != 4 {
 			t.Fatal("the contract child steps changed", partitioned)
+		}
+	})
+}
+
+// The participant rows of the seeded history, and those whose stream no
+// contract references.
+func orphanSweepTestParticipantCounts(t testing.TB, ctx context.Context) (count int, orphanCount int) {
+	t.Helper()
+	server.Db(ctx, func(conn server.PgConn) {
+		server.Raise(conn.QueryRow(ctx, `SELECT count(*),count(*) FILTER(WHERE NOT EXISTS(
+			SELECT 1 FROM transfer_contract p WHERE p.stream_id=c.stream_id)) FROM contract_participant c`).Scan(&count, &orphanCount))
+	})
+	return
+}
+
+// Without an index that answers the participant step's stream_id parent probe,
+// each probe would read the whole contract heap. The step then keeps every
+// participant row unexamined, counts the refusal, and the pass still sweeps
+// the other tables and completes. Once the index is back, the next pass sweeps
+// the same participant orphans.
+func TestSweepOrphanContractParticipantStepNeedsParentIndex(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		const parents, orphans = 3, 2
+		seedOrphanSweepTestHistory(t, ctx, parents, orphans)
+		server.MaintenanceDb(ctx, func(conn server.PgConn) {
+			server.RaisePgResult(conn.Exec(ctx, `DROP INDEX IF EXISTS transfer_contract_stream_id`))
+		}, server.OptReadWrite(), server.OptNoRetry())
+
+		refusals := testutil.ToFloat64(orphanSweepParticipantRefusals)
+		removed, cursor, done := SweepOrphanContractData(ctx, SweepOrphanCursor{}, 0, 2)
+		if !done || !reflect.DeepEqual(cursor, SweepOrphanCursor{}) {
+			t.Fatalf("a refused participant step stopped the pass: done=%t cursor=%+v", done, cursor)
+		}
+		if removed != 4*orphans {
+			t.Fatalf("removed %d rows without the parent index, want the %d orphans of the four other steps", removed, 4*orphans)
+		}
+		if count, orphanCount := orphanSweepTestParticipantCounts(t, ctx); count != parents+orphans+2 || orphanCount != orphans {
+			t.Fatalf("participants count=%d orphans=%d without the parent index, want all %d kept with %d orphans", count, orphanCount, parents+orphans+2, orphans)
+		}
+		if got := testutil.ToFloat64(orphanSweepParticipantRefusals) - refusals; got != 1 {
+			t.Fatalf("participant refusals counted %v, want 1", got)
+		}
+		server.Db(ctx, func(conn server.PgConn) {
+			for i, step := range sweepOrphanContractSteps() {
+				if step.table == "contract_participant" {
+					continue
+				}
+				var count, orphanCount int
+				server.Raise(conn.QueryRow(ctx, `SELECT count(*),count(*) FILTER(WHERE NOT EXISTS(
+					SELECT 1 FROM transfer_contract p WHERE p.`+orphanSweepTestKeys[i][0]+`=c.`+orphanSweepTestKeys[i][0]+`)) FROM `+step.table+` c`).Scan(&count, &orphanCount))
+				if count != parents+2 || orphanCount != 0 {
+					t.Fatalf("%s lost retained rows or kept orphans: count=%d orphans=%d", step.table, count, orphanCount)
+				}
+			}
+		})
+
+		server.MaintenanceDb(ctx, func(conn server.PgConn) {
+			server.RaisePgResult(conn.Exec(ctx, `CREATE INDEX transfer_contract_stream_id ON transfer_contract (stream_id) WHERE stream_id IS NOT NULL`))
+		}, server.OptReadWrite(), server.OptNoRetry())
+		refusals = testutil.ToFloat64(orphanSweepParticipantRefusals)
+		removed, _, done = SweepOrphanContractData(ctx, SweepOrphanCursor{}, 0, 2)
+		if !done || removed != orphans {
+			t.Fatalf("with the parent index the pass removed %d (done=%t), want the %d participant orphans", removed, done, orphans)
+		}
+		if count, orphanCount := orphanSweepTestParticipantCounts(t, ctx); count != parents+2 || orphanCount != 0 {
+			t.Fatalf("participants count=%d orphans=%d with the parent index, want %d and none", count, orphanCount, parents+2)
+		}
+		if got := testutil.ToFloat64(orphanSweepParticipantRefusals) - refusals; got != 0 {
+			t.Fatalf("an admitted pass counted %v participant refusals", got)
+		}
+	})
+}
+
+// The participant step's admission accepts exactly the indexes that answer
+// stream_id = $1 on transfer_contract: a btree leading with stream_id, with no
+// predicate or the published stream_id IS NOT NULL. Each shape is built and
+// read in a transaction that rolls back.
+func TestContractParticipantSweepAdmissionReadsUsableIndexes(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		conn := acquireContractLifecycleTestConnection(t, ctx)
+		defer conn.Release()
+		tx, err := conn.Begin(ctx)
+		server.Raise(err)
+		defer func() {
+			_ = tx.Rollback(context.WithoutCancel(ctx))
+		}()
+		admitted := func() bool {
+			var indexed, participants bool
+			server.Raise(tx.QueryRow(ctx, contractParticipantSweepAdmissionSql).Scan(&indexed, &participants))
+			if participants {
+				t.Fatal("the fixture database has participant rows")
+			}
+			return indexed
+		}
+		server.RaisePgResult(tx.Exec(ctx, `DROP INDEX IF EXISTS transfer_contract_stream_id`))
+		if admitted() {
+			t.Fatal("admitted without any stream_id index")
+		}
+		for _, shape := range []struct {
+			name  string
+			sql   string
+			admit bool
+		}{
+			{name: "published partial", sql: `CREATE INDEX synthetic_stream ON transfer_contract (stream_id) WHERE stream_id IS NOT NULL`, admit: true},
+			{name: "unconditional", sql: `CREATE INDEX synthetic_stream ON transfer_contract (stream_id)`, admit: true},
+			{name: "stream_id leading a composite key", sql: `CREATE INDEX synthetic_stream ON transfer_contract (stream_id, contract_id)`, admit: true},
+			{name: "stream_id second", sql: `CREATE INDEX synthetic_stream ON transfer_contract (contract_id, stream_id)`},
+			{name: "a predicate the probe cannot prove", sql: `CREATE INDEX synthetic_stream ON transfer_contract (stream_id) WHERE outcome IS NULL`},
+			{name: "only null streams", sql: `CREATE INDEX synthetic_stream ON transfer_contract (stream_id) WHERE stream_id IS NULL`},
+			{name: "an expression of the stream", sql: `CREATE INDEX synthetic_stream ON transfer_contract ((stream_id IS NOT NULL))`},
+			{name: "not a btree", sql: `CREATE INDEX synthetic_stream ON transfer_contract USING hash (stream_id)`},
+			{name: "another table", sql: `CREATE INDEX synthetic_stream ON contract_participant (stream_id)`},
+		} {
+			server.RaisePgResult(tx.Exec(ctx, `SAVEPOINT admission_shape`))
+			server.RaisePgResult(tx.Exec(ctx, shape.sql))
+			if got := admitted(); got != shape.admit {
+				t.Fatalf("%s: admitted=%t, want %t", shape.name, got, shape.admit)
+			}
+			server.RaisePgResult(tx.Exec(ctx, `ROLLBACK TO SAVEPOINT admission_shape`))
 		}
 	})
 }

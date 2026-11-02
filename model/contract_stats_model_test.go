@@ -22,14 +22,16 @@ import (
 var testContractStatsBase = time.Date(2026, 3, 15, 12, 0, 0, 0, time.UTC)
 
 // One contract lands in an exact hour bucket. A terminal stats fixture has
-// explicit zero delivered work: allocated capacity is not completed usage.
+// explicit zero delivered work: allocated capacity is not completed usage. Its
+// id is minted at its create_time, as every creation path mints it, since the
+// counts read the window's contract id range.
 func testContractStatsContract(
 	ctx context.Context,
 	createTime time.Time,
 	dispute bool,
 	outcome *string,
 ) server.Id {
-	contractId := server.NewId()
+	contractId := contractIdMintedAt(createTime)
 	var closedAt *time.Time
 	var usage *contractUsageSnapshot
 	if outcome != nil {
