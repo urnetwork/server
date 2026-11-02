@@ -1799,6 +1799,42 @@ Changes:
     deletes come when the oldest records (2026-10-24) reach the horizon:
     about 2026-11-28 at 35 days, when the 2026-10-24..27 records (about 58M
     clients) come due together.
+- **Measured on main (2026-11-02): the records already carry the true time,
+  and the first deletes come about 2026-11-13, not 11-28.**
+  - The table starts at 2026-10-09 17:52, its first signed row. Nothing in it
+    reaches the guard's 30 days before 11-08.
+  - A child's record carries its deactivation whenever the record is written.
+    In a sample of 1,656 gone clients, `gone_time` was within an hour of the
+    client's last key registration for 92.5% and within a day for all, and no
+    close report landed more than 3.3 s after it. The 2026-10-24..27 records are
+    hosted windows that went on those days, so they have no earlier time to
+    move to.
+  - About 94M registrations of children deactivated 10-09..10-23 (three samples:
+    88M to 101M) are still in `network_client`. The 30-day reap records them from
+    11-08 with those deactivation times, so they come due first, 11-13..11-27 at
+    35 days. About 43M more, of children deactivated since 10-24 and not yet
+    reaped, come due with their own day.
+  - Top-level clients, the only ones recorded at their reap rather than at their
+    deactivation, hold under 1% of the rows and add under 100k a day. Recording
+    their deactivation would save 3 to 7 GB at steady state, which doesn't justify
+    a trigger migration.
+  - There is nothing to backfill. Recorded children already carry their
+    deactivation, and no top-level client with key history can reach its 30-day
+    reap before 11-08. A child reaped while active leaves only `auth_time`, which
+    a connection lasting weeks doesn't move, so it proves no earlier time.
+  - The brake's default of 150 a second is 5M to 8.6M clients a day. That is below
+    today's 13.7M registrations a day and the cohorts of up to 19M a day due from
+    11-15, so it has to be raised before then.
+- **Updated (2026-11-02): the brake can set the retention's own horizon.**
+  - `horizonDays` on `{client_key_history_retention}control` takes the place of
+    the reaper's horizon for key history, whatever the reaper's mode, down to the
+    guard's 30-day floor. A value that doesn't parse keeps 91 days. Without the
+    field nothing changes. It is read once a run.
+  - At 30 days the first deletes come about 11-08, when the 30-day reap first
+    records children with key history, and the table peaks about five days of
+    registrations lower, about 190 GB at today's rate. The readers it keeps safe
+    are the ones `db_identity_retention.go` lists for the floor; none reads key
+    history for a contract the reaper keeps.
 
 ## Cutover requirements
 

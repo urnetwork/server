@@ -13,7 +13,8 @@
 //
 // A client never presents an alt name, so alt loads no certificate of its
 // own. Its own limits (L5) are enforced here because there is no nginx in
-// front to enforce them.
+// front to enforce them, and for the same reason alt sets the forwarding
+// headers nginx would set (ingress.go).
 package alt
 
 import (
@@ -161,8 +162,10 @@ func NewAlt(
 		transportTls:   connectHandler.TransportTls(),
 		quicConfig:     connectHandler.NewQuicConfig(),
 		connectHandler: connectHandler,
+		// alt is the api's ingress: there is no nginx in front of it to set
+		// the forwarding headers the session trusts (ingress.go)
 		apiServer: &http3.Server{
-			Handler: NewLimitedHandler(apiHandler, limits),
+			Handler: newApiFrontHandler(apiHandler, limits),
 		},
 		limits:         limits,
 		listenerStates: map[altListenerKey]bool{},
