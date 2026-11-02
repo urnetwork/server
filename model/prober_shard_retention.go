@@ -396,6 +396,8 @@ const (
 	proberShardRetentionShardError = "error"
 	// the run's budget ended inside its contract step; the next run resumes it
 	proberShardRetentionShardDeferred = "deferred"
+	// its registry row went before this run reached it: another run dropped it
+	proberShardRetentionShardGone = "gone"
 	// a dry run read it
 	proberShardRetentionShardDryRun = "dry_run"
 )
@@ -495,6 +497,7 @@ func init() {
 		proberShardRetentionShardBlocked,
 		proberShardRetentionShardError,
 		proberShardRetentionShardDeferred,
+		proberShardRetentionShardGone,
 		proberShardRetentionShardDryRun,
 	} {
 		proberShardRetentionShardsCounter.WithLabelValues(outcome)
@@ -899,6 +902,10 @@ func (self *proberShardRetentionRun) dropShard(ctx context.Context, owner *Probe
 
 	// a pass that crashed is still live: fence it before anything is read
 	if err := DrainProberShard(ctx, owner.Key); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			outcome = proberShardRetentionShardGone
+			return
+		}
 		fail("drain", err)
 		return
 	}
@@ -924,6 +931,10 @@ func (self *proberShardRetentionRun) dropShard(ctx context.Context, owner *Probe
 	reap, err := reapProberShard(ctx, owner.Key)
 	if err != nil {
 		proberShardRetentionBatchDuration.WithLabelValues("identity", "error").Observe(time.Since(start).Seconds())
+		if errors.Is(err, pgx.ErrNoRows) {
+			outcome = proberShardRetentionShardGone
+			return
+		}
 		fail("identity", err)
 		return
 	}

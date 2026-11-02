@@ -442,10 +442,13 @@ func ReapProberShard(ctx context.Context, key ProberShardKey) (deleted bool, ret
 func reapProberShard(ctx context.Context, key ProberShardKey) (*proberShardReap, error) {
 	return server.HandleError2(func() (*proberShardReap, error) {
 		// Persist retry progress before settlement or Redis work can fail. A
-		// broken owner must not monopolize the next bounded cleanup page.
+		// broken owner must not monopolize the next bounded cleanup page. The
+		// stamp never moves a retry earlier: the retention has postponed the
+		// pass it is dropping past its run's clock, and a run's later page
+		// must not take the pass up again while this one still works on it.
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE prober_shard_run
-				SET next_cleanup_time=(clock_timestamp() AT TIME ZONE 'UTC')+interval '1 minute'
+				SET next_cleanup_time=GREATEST(next_cleanup_time,(clock_timestamp() AT TIME ZONE 'UTC')+interval '1 minute')
 				WHERE task_id=$1 AND epoch=$2 AND state IN ('draining','deleted')`, key.TaskId, key.Epoch))
 		}, server.TxReadCommitted, server.OptNoRetry())
 		if err := settleReportedProberShardContracts(ctx, key); err != nil {

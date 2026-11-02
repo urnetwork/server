@@ -576,3 +576,29 @@ func TestBeginProberShardRefusesAnEndedExecutionsEpoch(t *testing.T) {
 		}
 	})
 }
+
+// A pass whose registry row went before the run reached it, as when another
+// run dropped it first, counts as gone, not as a failure.
+func TestProberShardRetentionCountsAVanishedPassAsGone(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		owner := shardTestOwner(t, ctx, shardTestKey(0))
+		server.Raise(DrainProberShard(ctx, owner.Key))
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM prober_shard_run WHERE task_id=$1 AND epoch=$2`, owner.Key.TaskId, owner.Key.Epoch))
+		})
+		settings := proberRetentionTestSettings()
+		run := &proberShardRetentionRun{
+			settings: settings,
+			now:      proberRetentionTestLater(),
+			runEnd:   time.Now().Add(time.Minute),
+			report:   newProberShardRetentionReport(),
+		}
+		run.cutoff = ProberShardRetentionCutoff(run.now, settings.GenerationDuration, settings.RetainedGenerations)
+		run.dropShard(ctx, owner, NarrowProberShardRetentionControl(map[string]string{}, settings))
+		connect.AssertEqual(t, run.report.Shards[proberShardRetentionShardGone], int64(1))
+		connect.AssertEqual(t, run.report.Shards[proberShardRetentionShardError], int64(0))
+	})
+}
