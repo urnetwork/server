@@ -371,3 +371,78 @@ func TestExtenderBlockReportRouteRecordsOnlyWhileProbed(t *testing.T) {
 		}
 	})
 }
+
+// The route counts the network of the authenticated client, whatever the request
+// says: a body has no field for a network, and the client id comes from the verified
+// token (connect/EXTENDER-UPDATE2.md §1.3). Three clients of one network are one
+// reporter even with a request that claims otherwise, and three networks are three.
+func TestExtenderBlockReportRouteCountsTheCallersNetwork(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		installTestReleaseConfig(t)
+		settings := connect.DefaultExtenderBlockedStateSettings()
+		blocked := func(extenderId server.Id, countryCode string) bool {
+			t.Helper()
+			return model.NetworkExtenderBlockedInCountry(
+				ctx,
+				extenderId,
+				countryCode,
+				settings.ReportThreshold,
+				settings.ReportWindow,
+				settings.ProbeWindow,
+				server.NowUtc(),
+			)
+		}
+		report := func(keyHex string, networkId server.Id) {
+			t.Helper()
+			clientId := model.Testing_CreateBlockReportClient(ctx, networkId)
+			clientSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
+				NetworkId: networkId,
+				UserId:    server.NewId(),
+				ClientId:  &clientId,
+			})
+			t.Cleanup(clientSession.Cancel)
+			clientSession.ClientAddress = "192.0.2.80:4500"
+			// a claim of another network in the body goes nowhere
+			var args ExtenderBlockReportArgs
+			body := fmt.Sprintf(`{"public_key_hex":%q,"network_id":%q}`, keyHex, server.NewId())
+			if err := json.Unmarshal([]byte(body), &args); err != nil {
+				t.Fatal(err)
+			}
+			result, err := ExtenderBlockReport(&args, clientSession)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !result.Recorded || result.Error != "" {
+				t.Fatalf("a report against a probed extender = %+v", result)
+			}
+		}
+		countryCode := func() string {
+			clientIp, err := netip.ParseAddr("192.0.2.80")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ipInfo, err := server.GetIpInfo(clientIp); err == nil {
+				return ipInfo.CountryCode
+			}
+			return ""
+		}()
+
+		oneKeyHex, oneId := createTestReleaseExtender(t, ctx, 0)
+		networkId := server.NewId()
+		for range settings.ReportThreshold {
+			report(oneKeyHex, networkId)
+		}
+		if blocked(oneId, countryCode) {
+			t.Fatal("three clients of one network made a block through the route")
+		}
+
+		threeKeyHex, threeId := createTestReleaseExtender(t, ctx, 1)
+		for range settings.ReportThreshold {
+			report(threeKeyHex, server.NewId())
+		}
+		if !blocked(threeId, countryCode) {
+			t.Fatal("three networks made no block through the route")
+		}
+	})
+}

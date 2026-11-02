@@ -28,8 +28,8 @@ import (
 // connect.ExtenderReleasePolicy over the database ledger, and signed fresh so
 // the identity refreshes them by asking again. A block report is a client's
 // word that it could not reach an extender, from the country its address
-// places it in; enough distinct reporters while the operator's own probe
-// still reaches the extender is the per-country blocked state a release
+// places it in; enough distinct networks reporting while the operator's own
+// probe still reaches the extender is the per-country blocked state a release
 // skips (model.NetworkExtenderBlockedInCountry).
 //
 // Both are 200 answers with an `error` field on refusal, as activation is:
