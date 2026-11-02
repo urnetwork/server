@@ -312,9 +312,11 @@ type StripePaymentSheetResult struct {
 	RegularPeriodUsd     float64 `json:"regular_period_usd"`
 	TrialDays            int     `json:"trial_days"`
 	// TrialEndAt is set when the plan carries a trial
-	TrialEndAt   *time.Time       `json:"trial_end_at,omitempty"`
-	OfferApplied bool             `json:"offer_applied"`
-	Error        *OnboardingError `json:"error,omitempty"`
+	TrialEndAt   *time.Time `json:"trial_end_at,omitempty"`
+	OfferApplied bool       `json:"offer_applied"`
+	// the network's win-back offer discounts the first month (monthly plan)
+	WinbackOfferApplied bool             `json:"winback_offer_applied"`
+	Error               *OnboardingError `json:"error,omitempty"`
 }
 
 // stripePaymentSheetError is a refused payment sheet: a `PurchaseErrorCode*`
@@ -376,6 +378,9 @@ func StripePaymentSheet(
 	stripeCancelPendingPaymentSheetSubscriptions(customerId, networkId)
 
 	couponId, offer := stripeOnboardingDiscount(clientSession, plan)
+	// the win-back offer: the monthly plan's first month, through the
+	// network's own promotion code (the welcome offer is yearly only)
+	winbackPromotionCodeId, winbackOffer := stripeWinbackDiscount(clientSession, plan, tier.Tier.PriceUsd(plan), customerId)
 
 	metadata := map[string]string{
 		stripeMetadataNetworkId:    networkId.String(),
@@ -385,6 +390,9 @@ func StripePaymentSheet(
 	}
 	if offer != nil && couponId != "" {
 		metadata[stripeMetadataOnboardingOffer] = "1"
+	}
+	if winbackOffer != nil {
+		metadata[stripeMetadataWinbackOffer] = winbackOffer.OfferId.String()
 	}
 	params := &stripe.SubscriptionParams{
 		Customer:        stripe.String(customerId),
@@ -411,6 +419,8 @@ func StripePaymentSheet(
 	}
 	if couponId != "" {
 		params.Discounts = []*stripe.SubscriptionDiscountParams{{Coupon: stripe.String(couponId)}}
+	} else if winbackOffer != nil {
+		params.Discounts = []*stripe.SubscriptionDiscountParams{{PromotionCode: stripe.String(winbackPromotionCodeId)}}
 	}
 
 	sub, err := subscription.New(params)
@@ -436,6 +446,8 @@ func StripePaymentSheet(
 	first := regular
 	if offer != nil && couponId != "" {
 		first = model.Onboarding().OfferPriceUsd(regular)
+	} else if winbackOffer != nil {
+		first = math.Round(regular*float64(100-winbackOffer.PercentOff)) / 100
 	}
 	result := &StripePaymentSheetResult{
 		CustomerId:           customerId,
@@ -449,6 +461,7 @@ func StripePaymentSheet(
 		RegularPeriodUsd:     regular,
 		TrialDays:            trialDays,
 		OfferApplied:         offer != nil && couponId != "",
+		WinbackOfferApplied:  winbackOffer != nil && couponId == "",
 	}
 	if 0 < sub.TrialEnd {
 		trialEnd := time.Unix(sub.TrialEnd, 0).UTC()
@@ -466,8 +479,8 @@ func StripePaymentSheet(
 		return stripePaymentSheetError(PurchaseErrorCodeStartFailed, purchaseStartFailedMessage), nil
 	}
 	glog.Infof(
-		"[stripe]payment sheet: subscription %s for network %s plan %s tier %s (%s) offer=%t\n",
-		sub.ID, networkId, plan, tier.Tier.Name, tier.Source, result.OfferApplied,
+		"[stripe]payment sheet: subscription %s for network %s plan %s tier %s (%s) offer=%t winback=%t\n",
+		sub.ID, networkId, plan, tier.Tier.Name, tier.Source, result.OfferApplied, result.WinbackOfferApplied,
 	)
 	return result, nil
 }
@@ -591,14 +604,16 @@ func stripeCancelPendingPaymentSheetSubscriptions(customerId string, networkId s
 // ----- the Checkout path -----
 
 // stripeCheckoutTierAndDiscount is what StripeCreateCheckoutSession needs from the
-// onboarding program: the tier's price id for the item and the coupon to apply
-// when the caller's welcome offer is redeemable (yearly only). The metadata to
-// stamp on the subscription is returned as well.
+// onboarding and re-engagement programs: the tier's price id for the item, the
+// coupon to apply when the caller's welcome offer is redeemable (yearly only),
+// or the promotion code of the caller's win-back offer (monthly only) with the
+// customer the code is restricted to, which the session must be created for.
+// The metadata to stamp on the subscription is returned as well.
 func stripeCheckoutTierAndDiscount(
 	itemId string,
 	storefrontCountry string,
 	clientSession *session.ClientSession,
-) (priceId string, discounts []*stripe.CheckoutSessionDiscountParams, metadata map[string]string, err error) {
+) (priceId string, discounts []*stripe.CheckoutSessionDiscountParams, metadata map[string]string, customerId string, err error) {
 	plan := model.PlanMonthly
 	if itemId == StripeItemProYearly {
 		plan = model.PlanYearly
@@ -606,7 +621,7 @@ func stripeCheckoutTierAndDiscount(
 	tier := ResolvePriceTier(clientSession, storefrontCountry)
 	priceId, err = StripePriceIdForTier(tier.Tier, plan)
 	if err != nil {
-		return "", nil, nil, err
+		return "", nil, nil, "", err
 	}
 	metadata = map[string]string{
 		stripeMetadataPlan:      plan,
@@ -615,8 +630,22 @@ func stripeCheckoutTierAndDiscount(
 	if couponId, offer := stripeOnboardingDiscount(clientSession, plan); offer != nil && couponId != "" {
 		discounts = []*stripe.CheckoutSessionDiscountParams{{Coupon: stripe.String(couponId)}}
 		metadata[stripeMetadataOnboardingOffer] = "1"
+		return priceId, discounts, metadata, "", nil
 	}
-	return priceId, discounts, metadata, nil
+	if stripeWinbackOfferForPurchase(clientSession, plan, tier.Tier.PriceUsd(plan), server.NowUtc()) != nil {
+		// only a network with an offer to apply gets a customer made here
+		id, customerErr := stripeCustomerIdForSession(clientSession)
+		if customerErr != nil {
+			glog.Errorf("[stripe]checkout: no customer for the win-back offer of network %s: %s\n", clientSession.ByJwt.NetworkId, customerErr)
+			return priceId, nil, metadata, "", nil
+		}
+		if promotionCodeId, winbackOffer := stripeWinbackDiscount(clientSession, plan, tier.Tier.PriceUsd(plan), id); winbackOffer != nil {
+			discounts = []*stripe.CheckoutSessionDiscountParams{{PromotionCode: stripe.String(promotionCodeId)}}
+			metadata[stripeMetadataWinbackOffer] = winbackOffer.OfferId.String()
+			return priceId, discounts, metadata, id, nil
+		}
+	}
+	return priceId, nil, metadata, "", nil
 }
 
 // ----- webhooks -----
@@ -645,6 +674,7 @@ func stripeHandleInvoicePaidWithOnboarding(
 	if sub != nil {
 		stripeRecordOnboardingForInvoice(clientSession, sub, invoice.Id)
 		stripeRecordTrialOutcomeForInvoice(clientSession.Ctx, sub, invoice)
+		stripeRecordWinbackForInvoice(clientSession.Ctx, sub)
 	}
 	return result, nil
 }

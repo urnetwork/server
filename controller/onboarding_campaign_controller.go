@@ -918,10 +918,10 @@ func handleOnboardingBrevoWebhook(ctx context.Context, args *BrevoWebhookArgs) {
 	case model.EventEmailBounced:
 		model.MarkNetworkOnboardingBounced(ctx, email.NetworkId)
 		// every campaign stops for an address that bounced
-		model.SuppressNetworkMarketing(ctx, email.NetworkId, onboarding.ExitBounced, at)
+		SuppressNetworkMarketing(ctx, email.NetworkId, onboarding.ExitBounced, at)
 	case model.EventEmailComplained:
 		model.MarkNetworkOnboardingComplained(ctx, email.NetworkId, email.Step)
-		model.SuppressNetworkMarketing(ctx, email.NetworkId, onboarding.ExitComplained, at)
+		SuppressNetworkMarketing(ctx, email.NetworkId, onboarding.ExitComplained, at)
 	}
 	if reason := onboarding.WebhookExit(name); reason != "" {
 		if model.ExitNetworkOnboarding(ctx, email.NetworkId, reason, at) {
@@ -932,76 +932,30 @@ func handleOnboardingBrevoWebhook(ctx context.Context, args *BrevoWebhookArgs) {
 
 // ----- webhook registration -----
 
-type brevoWebhookListResult struct {
-	Webhooks []struct {
-		Id   int64  `json:"id"`
-		Url  string `json:"url"`
-		Type string `json:"type"`
-	} `json:"webhooks"`
-	Code    string `json:"code"`
-	Message string `json:"message"`
-}
-
-type brevoWebhookCreateArgs struct {
-	Url         string   `json:"url"`
-	Description string   `json:"description"`
-	Events      []string `json:"events"`
-	Type        string   `json:"type"`
-}
-
-// The transactional events the campaign records (Brevo's webhook event names).
+// The transactional events the campaigns record (Brevo's webhook event names).
 var onboardingBrevoWebhookEvents = []string{
 	"delivered", "opened", "uniqueOpened", "click", "hardBounce", "softBounce", "blocked", "spam", "unsubscribed", "invalid",
 }
 
-// EnsureOnboardingBrevoWebhook registers the transactional webhook for
-// onboarding.brevo.webhook_url once (idempotent by url). Refuses while the
-// engine is disabled. Returns what it did.
-func EnsureOnboardingBrevoWebhook(ctx context.Context) (string, error) {
+// EnsureOnboardingBrevoWebhook makes the transactional webhook for
+// onboarding.brevo.webhook_url carry a credential POST /updates/brevo accepts
+// and every campaign event: it creates the webhook, or updates the registered
+// one in place (ensureBrevoTransactionalWebhook). credential is how the
+// webhook carries it: "url" (the default) or "header". Refuses while the
+// engine is disabled. Returns what it did, the credential masked.
+func EnsureOnboardingBrevoWebhook(ctx context.Context, credential string) (string, error) {
 	if !OnboardingCampaignEnabled() {
 		return "", fmt.Errorf("onboarding campaign is disabled (onboarding.yml enabled: false); not registering")
+	}
+	carrier, err := parseBrevoWebhookCredentialCarrier(credential)
+	if err != nil {
+		return "", err
 	}
 	url := strings.TrimSpace(model.Onboarding().Brevo.WebhookUrl)
 	if url == "" {
 		return "skipped: onboarding.brevo.webhook_url is empty", nil
 	}
-	status, list, err := server.HttpGetWithStatus[brevoWebhookListResult](
-		ctx,
-		brevoApiUrl("webhooks?type=transactional"),
-		brevoHeader,
-		brevoResponseJsonObject[brevoWebhookListResult],
-	)
-	if err != nil {
-		return "", fmt.Errorf("list webhooks: %w", err)
-	}
-	if status != nil && status.Code != 404 && (status.Code < 200 || 300 <= status.Code) {
-		return "", fmt.Errorf("list webhooks: %s %s", status.Status, list.Message)
-	}
-	for _, w := range list.Webhooks {
-		if strings.EqualFold(strings.TrimRight(w.Url, "/"), strings.TrimRight(url, "/")) {
-			return fmt.Sprintf("exists: webhook %d %s", w.Id, w.Url), nil
-		}
-	}
-	created := &brevoWebhookCreateArgs{
-		Url:         url,
-		Description: "URnetwork onboarding campaign (server-registered)",
-		Events:      onboardingBrevoWebhookEvents,
-		Type:        "transactional",
-	}
-	status, r, err := server.HttpPostWithStatus[brevoContactResult](
-		ctx,
-		brevoApiUrl("webhooks"),
-		created,
-		brevoHeader,
-		brevoResponseJsonObject[brevoContactResult],
-	)
-	if err != nil {
-		return "", fmt.Errorf("create webhook: %w", err)
-	}
-	if status == nil || status.Code < 200 || 300 <= status.Code {
-		return "", fmt.Errorf("create webhook: %s %s %s", status.Status, r.Code, r.Message)
-	}
-	return fmt.Sprintf("created: webhook %d %s", r.Id, url), nil
+	return ensureBrevoTransactionalWebhook(ctx, url, onboardingBrevoWebhookEvents, carrier)
 }
 
 // ----- tooling (bringyourctl onboarding) -----

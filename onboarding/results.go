@@ -24,6 +24,7 @@ const (
 	WindowConnect        = 7 * 24 * time.Hour
 	WindowWidget         = 7 * 24 * time.Hour
 	WindowFeedback       = 7 * 24 * time.Hour
+	WindowPurchaseStart  = 7 * 24 * time.Hour
 	WindowProStart       = 14 * 24 * time.Hour
 	WindowTrialToPaid    = 35 * 24 * time.Hour
 	WindowRefund         = 60 * 24 * time.Hour
@@ -53,6 +54,7 @@ const (
 	EventConnectFirst      = "connect.first"
 	EventWidgetAdded       = "widget.added"
 	EventFeedbackSubmitted = "feedback.submitted"
+	EventPurchaseStarted   = "purchase.started"
 	EventPurchaseCompleted = "purchase.completed"
 	EventTrialConverted    = "trial.converted"
 	EventTrialCancelled    = "trial.cancelled"
@@ -102,13 +104,17 @@ type Outcomes struct {
 	Connect7d      bool
 	Widget7d       bool
 	Feedback7d     bool
-	ProStart14d    bool
-	TrialToPaid35d bool
-	Refund60d      bool
-	RetentionD7    bool
-	RetentionD30   bool
-	Unsubscribe    bool
-	Complaint      bool
+	// PurchaseStarted7d is the in-app offer's leading metric: both arms can
+	// start a purchase (the holdout from the regular plan picker), while only
+	// the offer arm ever sends the offer screen's own events.
+	PurchaseStarted7d bool
+	ProStart14d       bool
+	TrialToPaid35d    bool
+	Refund60d         bool
+	RetentionD7       bool
+	RetentionD30      bool
+	Unsubscribe       bool
+	Complaint         bool
 }
 
 // ComputeOutcomes applies the fixed windows to one network at `now`. The exact
@@ -121,6 +127,9 @@ type Outcomes struct {
 //   - connect_7d: a connection day, or connect.first, within 7 days of the cohort
 //   - widget_7d, feedback_7d: widget.added / feedback (event or the feedback
 //     table) within 7 days
+//   - purchase_started_7d: a purchase.started (the app started a store, card
+//     or crypto purchase of any plan, from the offer screen or the regular
+//     plan picker) within 7 days
 //   - pro_start_14d: the first subscription renewal (trial included) or a
 //     purchase.completed within 14 days
 //   - trial_to_paid_35d: trial.converted within 35 days
@@ -165,6 +174,9 @@ func ComputeOutcomes(f NetworkFacts, now time.Time) Outcomes {
 	if matured(WindowFeedback) {
 		o.Feedback7d = f.within(EventFeedbackSubmitted, WindowFeedback) ||
 			(f.FirstFeedbackAt != nil && !f.FirstFeedbackAt.Before(f.CohortAt) && f.FirstFeedbackAt.Before(f.CohortAt.Add(WindowFeedback)))
+	}
+	if matured(WindowPurchaseStart) {
+		o.PurchaseStarted7d = f.within(EventPurchaseStarted, WindowPurchaseStart)
 	}
 	if matured(WindowProStart) {
 		o.ProStart14d = f.within(EventPurchaseCompleted, WindowProStart) ||

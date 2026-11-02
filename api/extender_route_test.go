@@ -110,3 +110,42 @@ func TestNewRouterBuildsTheTableBothFrontsServe(t *testing.T) {
 		closeApiRouter()
 	})
 }
+
+// The camouflage report (connect/EXTENDER-SPLICE-ROLLOUT.md): one route, POST only,
+// and only with a client jwt, since a report is rate limited per client. No body is
+// read for a caller without one.
+func TestExtenderCamouflageReportRouteRequiresAClientJwt(t *testing.T) {
+	routeIds := []string{}
+	for _, route := range Routes() {
+		if strings.Contains(route.String(), "extender-camouflage-report") {
+			routeIds = append(routeIds, route.String())
+		}
+	}
+	if !slices.Equal(routeIds, []string{"POST ^/network/extender-camouflage-report$"}) {
+		t.Fatalf("routes = %v", routeIds)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	apiRouter := router.NewRouter(ctx, Routes())
+
+	r := httptest.NewRequest(
+		http.MethodPost,
+		"/network/extender-camouflage-report",
+		strings.NewReader(`{"report_id":"0123456789abcdef0123456789abcdef","client":{"refused":1}}`),
+	)
+	r.RemoteAddr = "198.51.100.30:4000"
+	w := httptest.NewRecorder()
+	apiRouter.ServeHTTP(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 without a client jwt", w.Code)
+	}
+
+	r = httptest.NewRequest(http.MethodGet, "/network/extender-camouflage-report", nil)
+	r.RemoteAddr = "198.51.100.30:4000"
+	w = httptest.NewRecorder()
+	apiRouter.ServeHTTP(w, r)
+	if w.Code == http.StatusUnauthorized || w.Code == http.StatusOK {
+		t.Fatalf("a GET reached the report handler: %d", w.Code)
+	}
+}

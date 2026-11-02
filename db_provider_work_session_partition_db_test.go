@@ -430,8 +430,9 @@ func testProviderWorkSessionLeafExists(t testing.TB, ctx context.Context, r Part
 	return testContractPartitionScalar[bool](t, ctx, `SELECT to_regclass($1) IS NOT NULL`, "public."+providerWorkSessionEventLeaf(r))
 }
 
-// A drop without the opt-in is refused, whatever the leaf's age; with it, the
-// database's clock still refuses a leaf less than 13 weeks past.
+// A drop without the opt-in is refused, whatever the leaf's age; with it, and
+// without a contract horizon, the fence refuses a leaf less than 13 weeks past
+// by the database's clock, and the guard one that is not a leaf.
 func TestProviderWorkSessionPartitionDropRequiresOptIn(t *testing.T) {
 	DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -449,7 +450,7 @@ func TestProviderWorkSessionPartitionDropRequiresOptIn(t *testing.T) {
 		if _, message := testProviderWorkSessionRolledBack(ctx, `SELECT provider_work_session_event_drop_guard($1)`, providerWorkSessionEventLeaf(old)); !strings.Contains(message, "dropped only by their retention") {
 			t.Fatalf("the guard called without the opt-in: %q", message)
 		}
-		if _, err := providerWorkSessionEventPartitionFamily.DropRange(ctx, recent); err == nil || !strings.Contains(err.Error(), "kept 13 weeks") {
+		if _, err := providerWorkSessionEventPartitionFamily.DropRange(ctx, recent); err == nil || !strings.Contains(err.Error(), "are kept 91 days") {
 			t.Fatalf("a drop of a week 12 weeks past: %v", err)
 		}
 		for _, r := range []PartitionRange{old, recent} {
@@ -457,7 +458,7 @@ func TestProviderWorkSessionPartitionDropRequiresOptIn(t *testing.T) {
 				t.Fatalf("a refused drop removed %s", providerWorkSessionEventLeaf(r))
 			}
 		}
-		if _, message := testProviderWorkSessionRolledBack(ctx, `SET LOCAL urnetwork.provider_work_session_retention = 'on'; SELECT provider_work_session_event_drop_guard('network_client')`); !strings.Contains(message, "kept 13 weeks") {
+		if _, message := testProviderWorkSessionRolledBack(ctx, `SET LOCAL urnetwork.provider_work_session_retention = 'on'; SELECT provider_work_session_event_drop_guard('network_client')`); !strings.Contains(message, "kept at least 35 days") {
 			t.Fatalf("the guard admitted a relation that is not a leaf: %q", message)
 		}
 	})
@@ -539,13 +540,77 @@ func TestProviderWorkSessionPartitionRetentionDropsOnlyThirteenWeeks(t *testing.
 		}
 
 		// the pass's clock says the kept week is 13 weeks past; the database's
-		// does not, and refuses
+		// does not, and the fence refuses
 		report, _ = family.Retire(ctx, kept.Upper.AddDate(0, 0, 13*7), PartitionFamilyState{}, time.Now().Add(time.Minute))
-		if blocker := report.Blocked[providerWorkSessionEventLeaf(kept)]; !strings.Contains(blocker, "kept 13 weeks") || len(report.Dropped) != 0 {
+		if blocker := report.Blocked[providerWorkSessionEventLeaf(kept)]; !strings.Contains(blocker, "are kept 91 days") || len(report.Dropped) != 0 {
 			t.Fatalf("a drop ahead of the database's clock: %+v", report)
 		}
 		if !testProviderWorkSessionLeafExists(t, ctx, kept) {
 			t.Fatal("the refused drop removed the week")
+		}
+	})
+}
+
+// At a 35-day contract horizon the registry drops the legacy partition and
+// every week whose upper bound is 35 days past, and keeps the younger weeks;
+// without the horizon, and at one of 13 weeks, nothing younger than 13 weeks
+// goes. The fence refuses a week inside a longer horizon that the guard's 35
+// days admit, and the guard a week inside 35 days, whatever the horizon.
+func TestProviderWorkSessionPartitionRetentionAtTheHorizon(t *testing.T) {
+	DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		currentWeek := PartitionGranularityWeekly.RangeStart(NowUtc())
+		oldWeek := PartitionGranularityWeekly.AddRanges(currentWeek, -8)
+		clientId := testProviderWorkSessionOldWeeks(t, ctx, oldWeek)
+		family := providerWorkSessionEventPartitionFamily
+		horizon := func(horizon time.Duration) context.Context {
+			return WithContractHorizon(ctx, horizon)
+		}
+		week := func(weeksBack int) PartitionRange {
+			return PartitionGranularityWeekly.RangeOf(PartitionGranularityWeekly.AddRanges(currentWeek, -weeksBack))
+		}
+		now := NowUtc()
+
+		for _, ctx := range []context.Context{ctx, horizon(13 * 7 * 24 * time.Hour)} {
+			report, _ := family.Retire(ctx, now, PartitionFamilyState{}, time.Now().Add(time.Minute))
+			if len(report.Dropped) != 0 || len(report.Blocked) != 0 {
+				t.Fatalf("a 13-week retention retired %v, blocked %v", report.Dropped, report.Blocked)
+			}
+		}
+
+		// the week 6 back ends 35 to 42 days ago: past the guard's 35 days, but
+		// inside a 60-day horizon
+		if _, err := family.DropRange(horizon(60*24*time.Hour), week(6)); err == nil || !strings.Contains(err.Error(), "are kept 60 days") {
+			t.Fatalf("a drop inside a 60-day horizon: %v", err)
+		}
+		// the week 5 back ends 28 to 35 days ago: inside the guard's 35 days,
+		// which a horizon below the floor does not shorten
+		if _, err := family.DropRange(horizon(7*24*time.Hour), week(5)); err == nil || !strings.Contains(err.Error(), "kept at least 35 days") {
+			t.Fatalf("a drop inside 35 days: %v", err)
+		}
+		for _, r := range []PartitionRange{week(6), week(5)} {
+			if !testProviderWorkSessionLeafExists(t, ctx, r) {
+				t.Fatalf("a refused drop removed %s", providerWorkSessionEventLeaf(r))
+			}
+		}
+
+		// weeks 8 back to 6 back end 49 to 35 days before the current week
+		report, _ := family.Retire(horizon(35*24*time.Hour), now, PartitionFamilyState{}, time.Now().Add(time.Minute))
+		if len(report.Blocked) != 0 {
+			t.Fatalf("blocked %v", report.Blocked)
+		}
+		want := []string{PartitionLegacyLeafName(providerWorkSessionEventTable), providerWorkSessionEventLeaf(week(8)), providerWorkSessionEventLeaf(week(7)), providerWorkSessionEventLeaf(week(6))}
+		if !slices.Equal(report.Dropped, want) {
+			t.Fatalf("dropped %v, want %v", report.Dropped, want)
+		}
+		for weeksBack := 5; 0 <= weeksBack; weeksBack -= 1 {
+			if !testProviderWorkSessionLeafExists(t, ctx, week(weeksBack)) {
+				t.Fatalf("the drop took the week %d back", weeksBack)
+			}
+		}
+		events := testProviderWorkSessionEvents(t, ctx, clientId)
+		if len(events) == 0 || events[0].leaf != providerWorkSessionEventLeaf(week(5)) {
+			t.Fatalf("remaining events %+v", events)
 		}
 	})
 }

@@ -149,6 +149,9 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		// (connect/EXTENDER.md R3, R4)
 		router.NewRoute("POST", "/network/extender-release", handlers.ExtenderRelease),
 		router.NewRoute("POST", "/network/extender-block-report", handlers.ExtenderBlockReport),
+		// what a client's and an extender's tcp camouflage came to, which only
+		// increments counters (connect/EXTENDER-SPLICE-ROLLOUT.md)
+		router.NewRoute("POST", "/network/extender-camouflage-report", handlers.ExtenderCamouflageReport),
 		// the pings a provider or an extender measured, reported by the pinger
 		// with the target's co-signature (connect/GEOMAP.md §2.5)
 		router.NewRoute("POST", "/network/ping-report", handlers.ExtenderPingReport),
@@ -303,6 +306,9 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		router.NewRoute("GET", "/admin/onboarding/results", handlers.AdminOnboardingResults),
 		router.NewRoute("GET", "/admin/onboarding/email-tracker", handlers.AdminOnboardingEmailTracker),
 		router.NewRoute("GET", "/admin/onboarding/experiments", handlers.AdminOnboardingExperiments),
+		// the re-engagement results (mmm/reengagement/PLAN.md "MEASUREMENT"),
+		// behind the same admin bearers
+		router.NewRoute("GET", "/admin/reengagement/results", handlers.AdminReengagementResults),
 		router.NewRoute("POST", "/subscription/stripe/payment-sheet", handlers.StripePaymentSheet),
 		router.NewRoute("GET", "/subscription/stripe/prices", handlers.StripePrices),
 		// the "Manage subscription" screen: every store billing the network with
