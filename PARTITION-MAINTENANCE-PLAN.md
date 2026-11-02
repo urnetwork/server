@@ -1513,35 +1513,49 @@ at the contract horizon (below), 35 days after, around 2026-11-10.
       2 ms and 320 a round, which the workers share, and 10 workers; the scale
       factor stays 0.2 under `autovacuum_vacuum_max_threshold` 100M.
       PostgreSQL 18's insert trigger vacuums the table about 33 times a day
-      (310 vacuums from 10-23, 0.4 h in all), and the partition registry
-      analyzes it itself (19 ANALYZEs), so analyze needs no setting.
-      - **Index passes:** those vacuums skip index cleanup until 2% of the
-        heap's pages hold dead items (about 380k pages now, and more as the
-        heap grows to the plateau). The primary key leads with `client_id`, so
-        the deletes scatter across it: every pass with index cleanup reads both
-        indexes whole (188 GB now, about 0.35-0.55 TB at the plateau) and
-        writes nearly every primary key leaf page as a full-page image
-        (`checkpoint_timeout` is 5 min). That makes about 1-2 such passes a
-        day from 11-10 on: about 0.1-0.2 TB of WAL a day at the plateau, a few
-        percent of the cluster's 3.7 TB, and 0.5-1 TB of index reads.
+      (310 vacuums from 10-23, 0.4 h in all), and the db maintenance task's
+      database-wide ANALYZE covers it (19 since 10-23), so analyze needs no
+      setting.
+      - **Index passes (estimates):** those vacuums skip index cleanup until
+        2% of the heap's pages hold dead items (about 380k pages now, about
+        30-40M rows by 11-10 and 40-70M at the plateau). The primary key leads
+        with `client_id`, so the deletes scatter across it: every pass with
+        index cleanup reads both indexes whole (188 GB now, about 0.35-0.55 TB
+        at the plateau) and writes nearly every primary key leaf page as a
+        full-page image (`checkpoint_timeout` is 5 min). That makes about one
+        such pass every day or two from 11-10, and 1-2 a day at the plateau:
+        about 0.1-0.2 TB of WAL a day there, a few percent of the cluster's
+        3.7 TB, and 0.5-1 TB of index reads.
       - **The draft** is the table's entry in the A5 block's table list
         (xops `feat/close-evidence-autovacuum`, `playbook-dbs.yml`): a fixed
-        threshold of 50M dead rows (scale factor 0), and the contract tables'
-        own pace, 2 ms and 200 a round, so a pass over the plateau's indexes
-        (about 2 h; about 1 h now) does not draw on the workers' shared 320.
+        threshold of 50M dead rows (scale factor 0), and the pace the list
+        sets for the contract tables, 2 ms and 200 a round, so a pass over the
+        plateau's indexes (about 2 h by the cost settings; about 1 h now) does
+        not draw on the workers' shared 320.
         The insert trigger stays PostgreSQL's, so vacuums keep landing
         between `vacuum_freeze_table_age` and `autovacuum_freeze_max_age` at
         this XID rate and the freezing stays in cancellable passes.
       - **Monitor:** the `pg/dead-tuples` warning fires above max(10M, the
         table's own threshold) dead rows. At 60-100M deletes a day dead rows
-        grow 2.5-4M an hour, so a long index pass or a stalled vacuum crosses
-        10M on the planned stream; with the draft the line is 50M.
-      - **Apply:** `./run-dbs.sh --tags autovacuum_tuning`, `--check` first.
-        The trial's file and the other tables already match, so it changes
-        only this table: one `ALTER TABLE ... SET` (SHARE UPDATE EXCLUSIVE,
-        catalog only) under `lock_timeout = '500ms'`, retried while an
-        autovacuum holds the table. `-e autovacuum_tuning_revert=true` reverts
-        the whole trial, this table included. As a reviewed migration instead
+        grow 2.5-4M an hour, so 2.5-4 hours without a finished vacuum (a long
+        index pass, or a stalled one) crosses 10M on the planned stream; with
+        the draft the line is 50M.
+      - **Apply to this table alone.** On 11-02, 17 of the trial's 19 tables
+        had their options. `transfer_contract` and `transfer_escrow` still
+        lacked their limit of 200, so they run at 2 ms and the global 320;
+        `transfer_contract` spent about 207 of the 228 hours since 10-23 under
+        autovacuum, which probably outlasted the play's retries. Running the
+        tag as it stands would lower those two as well, a separate decision
+        while the reaper feeds their vacuums. So replace the list for the run
+        (the entry is in `playbook-dbs.yml`, whose note has the full `-e`),
+        `--check` first, as `./run-dbs.sh --tags autovacuum_tuning -e
+        '{"autovacuum_tuning_tables": [<this table's entry>]}'`. That is one
+        `ALTER TABLE ... SET` (SHARE UPDATE EXCLUSIVE, catalog only) under
+        `lock_timeout = '500ms'`, retried while an autovacuum holds the table,
+        so set it before about 11-10: this table's vacuums are short today, and
+        index passes of hours will outlast those retries too. A later
+        `-e autovacuum_tuning_revert=true` reverts the whole trial, this table
+        included only while it is in the list. As a reviewed migration instead
         it would need the same lock timeout and a retry:
 
         ```sql
