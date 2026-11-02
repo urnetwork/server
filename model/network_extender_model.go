@@ -510,13 +510,14 @@ func insertNetworkExtenderPublishInTx(
 // wrote, and the publish row. A caller that signed outside it could publish an
 // address set that was never stored.
 //
-// A re-activation of an address that is still active on the same ip keeps its
-// consecutive probe failures (C3). Passing the activation probe is not passing
-// the uptime probe, and an extender that re-activated more often than its
-// failure budget lasts was otherwise never deactivated, however long its
-// uptime probes failed. An address the probes deactivated, or one now on
-// another ip, starts again at zero: it is new to the probes, and a budget
-// spent before a revocation would deactivate it again on its first failure.
+// A re-activation of an address that is still active on the same ip and tcp
+// port keeps its consecutive probe failures (C3). Passing the activation probe
+// is not passing the uptime probe, and an extender that re-activated more often
+// than its failure budget lasts was otherwise never deactivated, however long
+// its uptime probes failed. An address the probes deactivated, or one now on
+// another ip or tcp port, starts again at zero: it is new to the probes, and a
+// budget spent before a revocation would deactivate it again on its first
+// failure. The tcp port is the extender's, so a new one clears every family.
 func ActivateNetworkExtender(
 	ctx context.Context,
 	activation *NetworkExtenderActivation,
@@ -526,6 +527,29 @@ func ActivateNetworkExtender(
 
 	server.Tx(ctx, func(tx server.PgTx) {
 		activated = nil
+
+		// the probes dial every family of an extender on its one tcp port, so
+		// what they found says nothing of a new port. The extender upsert
+		// overwrites the port, so this reads it first; it matches nothing while
+		// the port stands, or for a network that does not hold the key
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			UPDATE network_extender_address
+			SET consecutive_probe_failures = 0
+			FROM network_extender
+			WHERE
+				network_extender.public_key = $1 AND
+				network_extender.network_id = $2 AND
+				network_extender.tcp_port != $3 AND
+				network_extender_address.extender_id = network_extender.extender_id AND
+				network_extender_address.active
+			`,
+			activation.PublicKey,
+			activation.NetworkId,
+			activation.TcpPort,
+		))
+
 		issueTime := server.NowUtc()
 
 		var extenderId server.Id

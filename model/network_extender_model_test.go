@@ -1383,11 +1383,11 @@ func TestGetActiveNetworkExtenderProbeTargetsTakeTheOldestProbeFirst(t *testing.
 }
 
 // A re-activation keeps the consecutive probe failures of an address that is
-// still active on the same ip, so an extender that re-activates more often
-// than its failure budget lasts is still deactivated while its uptime probes
-// keep failing. An address the probes deactivated, or one now on another ip,
-// starts again at zero, and a probe success still clears the count. One
-// database holds every case, each on its own key.
+// still active on the same ip and tcp port, so an extender that re-activates
+// more often than its failure budget lasts is still deactivated while its
+// uptime probes keep failing. An address the probes deactivated, or one now on
+// another ip or tcp port, starts again at zero, and a probe success still
+// clears the count. One database holds every case, each on its own key.
 func TestActivateNetworkExtenderKeepsTheProbeFailuresOfAnActiveUnchangedAddress(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -1490,5 +1490,46 @@ func TestActivateNetworkExtenderKeepsTheProbeFailuresOfAnActiveUnchangedAddress(
 		probe(answered, 6, true)
 		connect.AssertEqual(t, address(answered, 6).ConsecutiveProbeFailures, 0)
 		connect.AssertEqual(t, address(answered, 6).LastProbeSuccessTime != nil, true)
+
+		// a new tcp port is new to the probes on every family, whichever family
+		// brings it, and the count runs again from there
+		portKey := []byte("extender-public-key-keepfail-0005")
+		portActivation := func(ipVersion int, ip string, networkId server.Id, tcpPort int) *NetworkExtenderActivation {
+			activation := testExtenderActivation(portKey, ipVersion, ip)
+			activation.NetworkId = networkId
+			activation.TcpPort = tcpPort
+			return activation
+		}
+		portNetworkId := testExtenderActivation(portKey, 4, "192.0.2.75").NetworkId
+		ported := ActivateNetworkExtender(ctx, portActivation(4, "192.0.2.75", portNetworkId, 443), sign).Extender.ExtenderId
+		ActivateNetworkExtender(ctx, portActivation(6, "2001:db8::75", portNetworkId, 443), sign)
+		for range 3 {
+			probe(ported, 4, false)
+			probe(ported, 6, false)
+		}
+		ActivateNetworkExtender(ctx, portActivation(4, "192.0.2.75", portNetworkId, 8443), sign)
+		connect.AssertEqual(t, Testing_GetNetworkExtender(ctx, ported).Extender.TcpPort, 8443)
+		connect.AssertEqual(t, address(ported, 4).ConsecutiveProbeFailures, 0)
+		connect.AssertEqual(t, address(ported, 6).ConsecutiveProbeFailures, 0)
+		probe(ported, 4, false)
+		probe(ported, 6, false)
+		ActivateNetworkExtender(ctx, portActivation(6, "2001:db8::75", portNetworkId, 8443), sign)
+		connect.AssertEqual(t, address(ported, 4).ConsecutiveProbeFailures, 1)
+		connect.AssertEqual(t, address(ported, 6).ConsecutiveProbeFailures, 1)
+
+		// a deactivated family keeps the count it was deactivated on
+		for range ExtenderTestingMaxConsecutiveProbeFailures - 1 {
+			probe(ported, 6, false)
+		}
+		connect.AssertEqual(t, address(ported, 6).Active, false)
+		ActivateNetworkExtender(ctx, portActivation(4, "192.0.2.75", portNetworkId, 9443), sign)
+		connect.AssertEqual(t, address(ported, 4).ConsecutiveProbeFailures, 0)
+		connect.AssertEqual(t, address(ported, 6).ConsecutiveProbeFailures, ExtenderTestingMaxConsecutiveProbeFailures)
+
+		// and an activation by a network that does not hold the key clears
+		// nothing, whether it moves the key or is refused
+		probe(ported, 4, false)
+		ActivateNetworkExtender(ctx, portActivation(4, "192.0.2.75", server.NewId(), 10443), sign)
+		connect.AssertEqual(t, address(ported, 4).ConsecutiveProbeFailures, 1)
 	})
 }
