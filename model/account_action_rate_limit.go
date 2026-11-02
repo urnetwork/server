@@ -560,6 +560,39 @@ func lockAccountActionBudgetsInTx(ctx context.Context, tx server.PgTx, lockKeys 
 	}
 }
 
+// Reads a spend's budgets in the caller's transaction: the refusal of the
+// budget with no room that has the longest wait, nil when every one has room
+// (see CheckAndRecordAccountActionBudgets).
+func readAccountActionBudgetsRefusalInTx(
+	ctx context.Context,
+	tx server.PgTx,
+	budgets []AccountActionBudget,
+	now time.Time,
+) *AccountActionBudgetRefusal {
+	budgetRefusals := []*AccountActionBudgetRefusal{}
+	retryAfter := time.Duration(0)
+	waitSpread := time.Duration(0)
+	for _, budget := range budgets {
+		allow, budgetRetryAfter := readAccountActionBudgetLimitInTx(ctx, tx, budget, now)
+		if !allow {
+			budgetRefusals = append(budgetRefusals, &AccountActionBudgetRefusal{
+				Action:     budget.Action,
+				Window:     budget.Window,
+				RetryAfter: budgetRetryAfter,
+			})
+			retryAfter = max(retryAfter, budgetRetryAfter)
+		}
+		waitSpread = max(waitSpread, budget.AttemptTimeSpread)
+	}
+	for _, budgetRefusal := range budgetRefusals {
+		if retryAfter-budgetRefusal.RetryAfter <= waitSpread {
+			budgetRefusal.RetryAfter = retryAfter
+			return budgetRefusal
+		}
+	}
+	return nil
+}
+
 // CheckAndRecordAccountActionBudgets spends one attempt from every budget, in
 // one transaction, and only when every one of them has room. A refusal spends
 // nothing from any budget, so an action refused by one budget leaves the
@@ -582,10 +615,25 @@ func lockAccountActionBudgetsInTx(ctx context.Context, tx server.PgTx, lockKeys 
 // both spend it, and the budget would be passed by as many spends as ran at
 // once.
 //
+// A budget that is already spent refuses first, on a read without the locks: a
+// wave of a fleet's posts that its account's budget refuses all share that one
+// budget, and each would otherwise queue on its locks, holding a pooler server
+// in the database, to be told what the read says. The read only ever refuses.
+// It can be behind by a spend not yet committed, so what it finds room for is
+// decided again under the locks.
+//
 // Like CheckAndRecordAccountActionRateLimit, call it only once every check
 // that can refuse without doing the work has passed, and immediately before
 // the work the budgets pay for.
 func CheckAndRecordAccountActionBudgets(ctx context.Context, budgets ...AccountActionBudget) error {
+	var spentRefusal *AccountActionBudgetRefusal
+	server.Tx(ctx, func(tx server.PgTx) {
+		spentRefusal = readAccountActionBudgetsRefusalInTx(ctx, tx, budgets, server.NowUtc())
+	}, server.TxReadCommitted)
+	if spentRefusal != nil {
+		return spentRefusal
+	}
+
 	lockKeys := accountActionBudgetLockKeys(budgets)
 	unlockInProcess := lockAccountActionBudgetsInProcess(lockKeys)
 	defer unlockInProcess()
@@ -610,27 +658,9 @@ func CheckAndRecordAccountActionBudgets(ctx context.Context, budgets ...AccountA
 			refusal = nil
 			lockAccountActionBudgetsInTx(ctx, tx, lockKeys)
 			now := server.NowUtc()
-			budgetRefusals := []*AccountActionBudgetRefusal{}
-			retryAfter := time.Duration(0)
-			waitSpread := time.Duration(0)
-			for _, budget := range budgets {
-				allow, budgetRetryAfter := readAccountActionBudgetLimitInTx(ctx, tx, budget, now)
-				if !allow {
-					budgetRefusals = append(budgetRefusals, &AccountActionBudgetRefusal{
-						Action:     budget.Action,
-						Window:     budget.Window,
-						RetryAfter: budgetRetryAfter,
-					})
-					retryAfter = max(retryAfter, budgetRetryAfter)
-				}
-				waitSpread = max(waitSpread, budget.AttemptTimeSpread)
-			}
-			for _, budgetRefusal := range budgetRefusals {
-				if retryAfter-budgetRefusal.RetryAfter <= waitSpread {
-					budgetRefusal.RetryAfter = retryAfter
-					refusal = budgetRefusal
-					return
-				}
+			if budgetRefusal := readAccountActionBudgetsRefusalInTx(ctx, tx, budgets, now); budgetRefusal != nil {
+				refusal = budgetRefusal
+				return
 			}
 			if Testing_AccountActionBudgetsBeforeSpend != nil {
 				Testing_AccountActionBudgetsBeforeSpend()

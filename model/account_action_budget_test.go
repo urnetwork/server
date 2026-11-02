@@ -398,6 +398,78 @@ func TestCheckAndRecordAccountActionBudgetsAnswersBusyPastTheLockBound(t *testin
 	})
 }
 
+// A budget that is already spent refuses without taking its locks (connect#230).
+// A fleet's wave of posts that its account's budget refuses all share that one
+// budget, and each would otherwise queue on its locks, holding a pooler server
+// in the database, to be told what a read without them says. Before, the
+// refusal waited out every other spend of the budget, here and in the database.
+func TestCheckAndRecordAccountActionBudgetsRefusesASpentBudgetWithoutItsLocks(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		budget := AccountActionBudget{
+			Id:     server.NewId(),
+			Action: AccountActionExtenderActivateAddressV4,
+			Limit:  2,
+			Window: time.Hour,
+		}
+		for range budget.Limit {
+			connect.AssertEqual(t, CheckAndRecordAccountActionBudgets(ctx, budget), nil)
+		}
+		lockKeys := accountActionBudgetLockKeys([]AccountActionBudget{budget})
+
+		// another spend in this process holds the process lock, and another
+		// process's spend holds the database lock, until this spend has ended
+		unlockInProcess := lockAccountActionBudgetsInProcess(lockKeys)
+		held := make(chan struct{})
+		release := make(chan struct{})
+		released := make(chan struct{})
+		go func() {
+			defer close(released)
+			server.Tx(ctx, func(tx server.PgTx) {
+				lockAccountActionBudgetsInTx(ctx, tx, lockKeys)
+				close(held)
+				<-release
+			}, server.TxReadCommitted)
+		}()
+		<-held
+		unlock := func() {
+			close(release)
+			<-released
+			unlockInProcess()
+		}
+
+		done := make(chan error, 1)
+		go func() {
+			done <- CheckAndRecordAccountActionBudgets(ctx, budget)
+		}()
+		var err error
+		select {
+		case err = <-done:
+			unlock()
+		case <-time.After(30 * time.Second):
+			unlock()
+			<-done
+			t.Fatalf("the spend of a spent budget waited for the budget's locks")
+		}
+
+		var refusal *AccountActionBudgetRefusal
+		if !errors.As(err, &refusal) {
+			t.Fatalf("the spend of a spent budget ended %v, want its refusal", err)
+		}
+		connect.AssertEqual(t, refusal.Action, budget.Action)
+		connect.AssertEqual(t, refusal.Window, budget.Window)
+		var attemptCount int
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(
+				ctx,
+				`SELECT COUNT(*) FROM network_user_action_attempt WHERE user_id = $1`,
+				budget.Id,
+			).Scan(&attemptCount))
+		})
+		connect.AssertEqual(t, attemptCount, budget.Limit)
+	})
+}
+
 // A spend refused by more than one budget waits for the longest of their
 // waits, and names that budget (connect#230): a caller that waits it out finds
 // every budget with room. The refusal named the first budget in the order
