@@ -61,7 +61,7 @@ func testActivationStepHistogram(t testing.TB, metrics *extenderActivationMetric
 func TestExtenderActivationMetricsAreFixedCardinality(t *testing.T) {
 	registry := prometheus.NewRegistry()
 	metrics := newExtenderActivationMetrics(registry)
-	connect.AssertEqual(t, testutil.CollectAndCount(metrics.activations), 21)
+	connect.AssertEqual(t, testutil.CollectAndCount(metrics.activations), 23)
 	connect.AssertEqual(t, testutil.CollectAndCount(metrics.stepSeconds), 12)
 	for stage, outcomes := range extenderActivationStageOutcomes {
 		for _, outcome := range outcomes {
@@ -73,7 +73,7 @@ func TestExtenderActivationMetricsAreFixedCardinality(t *testing.T) {
 		}
 	}
 	// the cells above are the ones that already existed
-	connect.AssertEqual(t, testutil.CollectAndCount(metrics.activations), 21)
+	connect.AssertEqual(t, testutil.CollectAndCount(metrics.activations), 23)
 }
 
 // One activation is counted once, where it ended, and each step it probed is
@@ -114,6 +114,7 @@ func TestExtenderActivationRefusalOutcomeByStage(t *testing.T) {
 	}{
 		{stage: extenderActivationStageRequest, want: "refused"},
 		{stage: extenderActivationStageConfig, want: "error"},
+		{stage: extenderActivationStageOwner, want: "refused"},
 		{stage: extenderActivationStageBudget, want: "refused"},
 		{stage: extenderActivationStageTcp, probeRefusalOutcome: extenderProbeStepOutcomeError, want: "error"},
 		{stage: extenderActivationStageTcp, probeRefusalOutcome: extenderProbeStepOutcomeTimeout, want: "timeout"},
