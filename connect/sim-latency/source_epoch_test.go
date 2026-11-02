@@ -17,7 +17,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Fixture commands retain the explicitly configured global Git identity.
+// Fixture commands operate on disposable repositories with synthetic local identity.
 func sourceTestGit(t *testing.T, repositoryRoot string, args ...string) string {
 	t.Helper()
 	commandArgs := append([]string{"-C", repositoryRoot}, args...)
@@ -37,6 +37,8 @@ func sourceTestRepository(t *testing.T, repositoriesRoot string, name string) st
 		t.Fatal(err)
 	}
 	sourceTestGit(t, repositoryRoot, "init", "--quiet", "--initial-branch=sim-latency")
+	sourceTestGit(t, repositoryRoot, "config", "--local", "user.name", "Synthetic Source Fixture")
+	sourceTestGit(t, repositoryRoot, "config", "--local", "user.email", "source@fixture.example")
 	if err := os.WriteFile(filepath.Join(repositoryRoot, "source.txt"), []byte(name+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -55,6 +57,32 @@ func sourceTestRepository(t *testing.T, repositoriesRoot string, name string) st
 	sourceTestGit(t, repositoryRoot, "add", "--all")
 	sourceTestGit(t, repositoryRoot, "commit", "--quiet", "--no-gpg-sign", "-m", "source base")
 	return sourceTestGit(t, repositoryRoot, "rev-parse", "HEAD")
+}
+
+// Clearing ambient identity forces commits to use the disposable repo's own
+// synthetic configuration, including when a later fixture appends a commit.
+func TestSourceTestRepositoryCommitsWithoutAmbientIdentity(t *testing.T) {
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+	t.Setenv("GIT_CONFIG_COUNT", "0")
+	for _, name := range []string{"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "EMAIL"} {
+		t.Setenv(name, "")
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root := t.TempDir()
+	commit := sourceTestRepository(t, root, "synthetic")
+	repository := filepath.Join(root, "synthetic")
+	sourceTestGit(t, repository, "commit", "--quiet", "--allow-empty", "--no-gpg-sign", "-m", "synthetic follow-up")
+	if sourceTestGit(t, repository, "rev-parse", "HEAD") == commit {
+		t.Fatal("follow-up fixture commit was not created")
+	}
+	identity := sourceTestGit(t, repository, "log", "-1", "--format=%an|%ae|%cn|%ce")
+	if identity != "Synthetic Source Fixture|source@fixture.example|Synthetic Source Fixture|source@fixture.example" {
+		t.Fatal("fixture commit depended on an ambient identity")
+	}
 }
 
 // sourceTestManifest builds the complete baseline ledger required by validation.
