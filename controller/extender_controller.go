@@ -713,6 +713,9 @@ type extenderActivateService struct {
 	// answers for the caller without a socket. Nil dials the caller for real,
 	// which is production.
 	testProbes func(clientIp netip.Addr, ipVersion int) *extenderActivationProbes
+	// the clock proven hosts are counted and their reads reused by:
+	// server.NowUtc, and a test's own where it steps through a cache's life
+	now func() time.Time
 
 	stateLock sync.Mutex
 	// the proven host counts this process read, each reused until its expire
@@ -736,31 +739,49 @@ func newExtenderActivateService(settings *ExtenderActivateSettings) *extenderAct
 	return &extenderActivateService{
 		settings:         settings,
 		probeSlots:       make(chan struct{}, max(0, settings.MaxConcurrentProbes)),
+		now:              server.NowUtc,
 		provenHostCounts: map[extenderProvenHostCountKey]*extenderProvenHostCount{},
 	}
 }
 
 // The proven hosts of one family of a network (connect#230), read in the
-// caller's transaction, which is the budget spend's, or the count this process
-// read within ProvenHostCountTimeout. The spend asks only once the account has
-// reached its floor, so most activations never read it, and a fleet's posts
-// past the floor read it once a minute per process rather than once each.
+// caller's transaction, which is the budget spend's (provenHostCount).
 func (self *extenderActivateService) provenHostCountInTx(
 	ctx context.Context,
 	tx server.PgTx,
 	networkId server.Id,
 	ipVersion int,
 ) int {
+	return self.provenHostCount(
+		networkId,
+		ipVersion,
+		func(minActivateTime time.Time) []*model.NetworkExtenderProvenHostCandidate {
+			return model.GetNetworkExtenderProvenHostCandidatesInTx(ctx, tx, networkId, ipVersion, minActivateTime)
+		},
+	)
+}
+
+// The proven hosts of one family of a network, from the candidates
+// `readCandidates` reads since a time, or the count this process read within
+// ProvenHostCountTimeout. The spend asks only once the account has reached its
+// floor, so most activations never read it, and a fleet's posts past the
+// floor read it once a minute per process rather than once each.
+func (self *extenderActivateService) provenHostCount(
+	networkId server.Id,
+	ipVersion int,
+	readCandidates func(minActivateTime time.Time) []*model.NetworkExtenderProvenHostCandidate,
+) int {
 	key := extenderProvenHostCountKey{
 		networkId: networkId,
 		ipVersion: ipVersion,
 	}
+	now := self.now()
 	reuse := 0 < self.settings.ProvenHostCountTimeout
 	if reuse {
 		provenHostCount, ok := func() (int, bool) {
 			self.stateLock.Lock()
 			defer self.stateLock.Unlock()
-			if count, ok := self.provenHostCounts[key]; ok && time.Now().Before(count.expireTime) {
+			if count, ok := self.provenHostCounts[key]; ok && now.Before(count.expireTime) {
 				return count.provenHostCount, true
 			}
 			return 0, false
@@ -770,15 +791,8 @@ func (self *extenderActivateService) provenHostCountInTx(
 		}
 	}
 
-	now := server.NowUtc()
 	provenHostCount := self.settings.provenHostCount(
-		model.GetNetworkExtenderProvenHostCandidatesInTx(
-			ctx,
-			tx,
-			networkId,
-			ipVersion,
-			now.Add(-self.settings.ProvenHostMaxAge),
-		),
+		readCandidates(now.Add(-self.settings.ProvenHostMaxAge)),
 		ipVersion,
 		now,
 	)
@@ -788,15 +802,14 @@ func (self *extenderActivateService) provenHostCountInTx(
 			defer self.stateLock.Unlock()
 			// the counts that ran out go, so the map holds only the networks
 			// whose spends reached their floor within the timeout
-			expireNow := time.Now()
 			for countKey, count := range self.provenHostCounts {
-				if !expireNow.Before(count.expireTime) {
+				if !now.Before(count.expireTime) {
 					delete(self.provenHostCounts, countKey)
 				}
 			}
 			self.provenHostCounts[key] = &extenderProvenHostCount{
 				provenHostCount: provenHostCount,
-				expireTime:      expireNow.Add(self.settings.ProvenHostCountTimeout),
+				expireTime:      now.Add(self.settings.ProvenHostCountTimeout),
 			}
 		}()
 	}
