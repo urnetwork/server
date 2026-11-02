@@ -259,6 +259,13 @@ func TestCheckAndRecordAccountActionBudgetsReadsTheExtendedLimitPastTheFloor(t *
 func TestCheckAndRecordAccountActionBudgetsWaitsForAnotherProcessesSpend(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
+		// the spend waits as long as the test holds it, rather than racing the
+		// main pool's 2 s lock bound while the test looks for its wait
+		previousLockTimeout := accountActionBudgetsLockTimeout
+		accountActionBudgetsLockTimeout = 30 * time.Second
+		defer func() {
+			accountActionBudgetsLockTimeout = previousLockTimeout
+		}()
 		budget := AccountActionBudget{
 			Id:     server.NewId(),
 			Action: AccountActionExtenderActivateAddressV4,
@@ -331,5 +338,62 @@ func TestCheckAndRecordAccountActionBudgetsWaitsForAnotherProcessesSpend(t *test
 		if !errors.As(err, &refusal) {
 			t.Fatalf("the spend after the other process spent the last attempt was not refused: %v", err)
 		}
+	})
+}
+
+// A spend that waits past its bound for a budget another spend holds ends with
+// ErrAccountActionBudgetsBusy and spends nothing (connect#230). Before, the
+// wait's 55P03 raised out of the spend, and an extender activation answered
+// it as an unexpected 500.
+func TestCheckAndRecordAccountActionBudgetsAnswersBusyPastTheLockBound(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		previousLockTimeout := accountActionBudgetsLockTimeout
+		accountActionBudgetsLockTimeout = 200 * time.Millisecond
+		defer func() {
+			accountActionBudgetsLockTimeout = previousLockTimeout
+		}()
+		budget := AccountActionBudget{
+			Id:     server.NewId(),
+			Action: AccountActionExtenderActivateAddressV4,
+			Limit:  2,
+			Window: time.Hour,
+		}
+
+		// another process's spend holds the budget until this spend has ended
+		held := make(chan struct{})
+		release := make(chan struct{})
+		released := make(chan struct{})
+		go func() {
+			defer close(released)
+			server.Tx(ctx, func(tx server.PgTx) {
+				lockAccountActionBudgetsInTx(ctx, tx, accountActionBudgetLockKeys([]AccountActionBudget{budget}))
+				close(held)
+				<-release
+			}, server.TxReadCommitted)
+		}()
+		<-held
+
+		var err error
+		raised := server.HandleError(func() {
+			err = CheckAndRecordAccountActionBudgets(ctx, budget)
+		})
+		close(release)
+		<-released
+		if raised != nil {
+			t.Fatalf("the spend raised past the lock bound: %v", raised)
+		}
+		if !errors.Is(err, ErrAccountActionBudgetsBusy) {
+			t.Fatalf("the spend past the lock bound ended %v, want ErrAccountActionBudgetsBusy", err)
+		}
+		var attemptCount int
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(
+				ctx,
+				`SELECT COUNT(*) FROM network_user_action_attempt WHERE user_id = $1`,
+				budget.Id,
+			).Scan(&attemptCount))
+		})
+		connect.AssertEqual(t, attemptCount, 0)
 	})
 }

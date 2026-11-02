@@ -995,6 +995,21 @@ func (self *extenderActivateService) activate(
 			},
 		},
 	); err != nil {
+		if errors.Is(err, model.ErrAccountActionBudgetsBusy) {
+			// other spends held a budget past the lock bound: nothing was
+			// spent, so the caller is busy-refused like one over the probe
+			// guard rather than answered with an error (connect#230)
+			stage = extenderActivationStageBusy
+			stageOutcome = extenderActivationOutcomeBudgetLock
+			retryAfter := self.busyRetryAfter()
+			return refuseWithRetryAfter(
+				fmt.Sprintf(
+					"The operator is busy activating other extenders. Please try again in %s.",
+					model.AccountActionRetryText(retryAfter),
+				),
+				retryAfter,
+			)
+		}
 		var budgetRefusal *model.AccountActionBudgetRefusal
 		if errors.As(err, &budgetRefusal) {
 			stageOutcome = extenderActivationBudgetOutcome(budgetRefusal.Action)

@@ -3338,7 +3338,7 @@
      "legendFormat": "{{stage}} {{outcome}}"
     }
    ],
-   "description": "Every extender activation the api answered, per hour, by the stage that ended it and how (connect/EXTENDER.md C2): store activated is an extender published; request refused it before any probe; busy is the api already probing as many activations as it takes at once (probes), refused before any budget was spent; budget is an activation budget that refused it, by which -- client, address, account (connect#230); config error is the operator's extender configuration; tcp and forward are the required test (C2a), error when the step failed on its own, timeout when it ran out of the 10 s probe budget, other_family when the forward arrived on the other family. A climb in tcp or forward timeouts is extenders answering late or not at all; a climb in budget or busy is fleets restarting at once."
+   "description": "Every extender activation the api answered, per hour, by the stage that ended it and how (connect/EXTENDER.md C2): store activated is an extender published; request refused it before any probe; busy is the api too busy to take it, refused before any budget was spent: probes when it was already probing as many activations as it takes at once, budget_lock when other spends held one of its budgets past the lock bound; budget is an activation budget that refused it, by which -- client, address, account (connect#230); config error is the operator's extender configuration; tcp and forward are the required test (C2a), error when the step failed on its own, timeout when it ran out of the 10 s probe budget, other_family when the forward arrived on the other family. A climb in tcp or forward timeouts is extenders answering late or not at all; a climb in budget or busy is fleets restarting at once."
   },
   {
    "id": 64,
@@ -3566,7 +3566,7 @@
      "legendFormat": "{{stage}} {{outcome}} {{family}}"
     }
    ],
-   "description": "The activations refused for room rather than for anything the extender did, per hour, each answered with the wait until there is room (retry_after_seconds), which the activator waits out (connect#230). busy probes: the api was already probing as many activations as it takes at once. budget: client is one client's 6 an hour, address one caller address's 6 an hour (its /32 or /64) over every account, account the account's 60 an hour plus 6 per proven host, at most 1200. A run of account refusals is a fleet ramping or restarting; address refusals on one family are posts from a shared address."
+   "description": "The activations refused for room rather than for anything the extender did, per hour, each answered with the wait until there is room (retry_after_seconds), which the activator waits out (connect#230). busy probes: the api was already probing as many activations as it takes at once; busy budget_lock: other spends held one of the budgets past the lock bound. budget: client is one client's 6 an hour, address one caller address's 6 an hour (its /32 or /64) over every account, account the account's 60 an hour plus 6 per proven host, at most 1200. A run of account refusals is a fleet ramping or restarting; address refusals on one family are posts from a shared address."
   }
  ]
 }

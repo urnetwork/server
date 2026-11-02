@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"slices"
@@ -460,6 +461,19 @@ func (self *AccountActionBudgetRefusal) Error() string {
 // runs. Test only, and never set in production.
 var Testing_AccountActionBudgetsBeforeSpend func()
 
+// The refusal of a spend that waited past its lock bound for budgets another
+// spend held (accountActionBudgetsLockTimeout, connect#230): nothing was
+// spent, and the caller may try again shortly. The wait's 55P03 used to raise
+// out of the spend, and the route answered it as an unexpected error.
+var ErrAccountActionBudgetsBusy = errors.New("the budgets are held by another spend")
+
+// How long a spend waits for the database lock of each of its budgets: the
+// main pool's bound (server.PgLockTimeout), past which waiters each holding a
+// pooler server would queue on one hot budget. A test that holds a spend's
+// budgets on purpose lengthens it, and one that needs the bound to end a
+// wait shortens it.
+var accountActionBudgetsLockTimeout = server.PgLockTimeout
+
 // Testing_AccountActionBudgetsLockWait, when set, runs when a spend finds a
 // budget it spends held by another spend in this process, before it waits for
 // that spend to end. Test only, and never set in production.
@@ -541,6 +555,9 @@ func lockAccountActionBudgetsInTx(ctx context.Context, tx server.PgTx, lockKeys 
 // the order given, that has no room, its window, and how long until it has
 // room again.
 //
+// A spend that waits past its bound for a budget's database lock, which
+// another spend holds, returns ErrAccountActionBudgetsBusy and spends nothing.
+//
 // The spends of a budget run one at a time (connect#230): each takes the locks
 // of its budgets, in this process and in the database, before it reads them.
 // Two spends that both read a budget one short of its limit would otherwise
@@ -556,28 +573,46 @@ func CheckAndRecordAccountActionBudgets(ctx context.Context, budgets ...AccountA
 	defer unlockInProcess()
 
 	var refusal error
-	server.Tx(ctx, func(tx server.PgTx) {
-		// a transaction that is run again decides again from what it reads
-		refusal = nil
-		lockAccountActionBudgetsInTx(ctx, tx, lockKeys)
-		now := server.NowUtc()
-		for _, budget := range budgets {
-			allow, retryAfter := readAccountActionBudgetLimitInTx(ctx, tx, budget, now)
-			if !allow {
-				refusal = &AccountActionBudgetRefusal{
-					Action:     budget.Action,
-					Window:     budget.Window,
-					RetryAfter: retryAfter,
+	// a wait for a budget's database lock that ran past its bound ends the
+	// spend with nothing spent, which is a busy answer for the caller rather
+	// than an error of the request (connect#230); every other raise is the
+	// caller's as it was
+	busy := false
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				if !server.IsLockTimeoutRefusal(r) {
+					panic(r)
 				}
-				return
+				busy = true
 			}
-		}
-		if Testing_AccountActionBudgetsBeforeSpend != nil {
-			Testing_AccountActionBudgetsBeforeSpend()
-		}
-		for _, budget := range budgets {
-			insertAccountActionAttemptInTx(ctx, tx, budget.Id, budget.Action, now)
-		}
-	}, server.TxReadCommitted)
+		}()
+		server.Tx(ctx, func(tx server.PgTx) {
+			// a transaction that is run again decides again from what it reads
+			refusal = nil
+			lockAccountActionBudgetsInTx(ctx, tx, lockKeys)
+			now := server.NowUtc()
+			for _, budget := range budgets {
+				allow, retryAfter := readAccountActionBudgetLimitInTx(ctx, tx, budget, now)
+				if !allow {
+					refusal = &AccountActionBudgetRefusal{
+						Action:     budget.Action,
+						Window:     budget.Window,
+						RetryAfter: retryAfter,
+					}
+					return
+				}
+			}
+			if Testing_AccountActionBudgetsBeforeSpend != nil {
+				Testing_AccountActionBudgetsBeforeSpend()
+			}
+			for _, budget := range budgets {
+				insertAccountActionAttemptInTx(ctx, tx, budget.Id, budget.Action, now)
+			}
+		}, server.TxReadCommitted, server.TxLockTimeout(accountActionBudgetsLockTimeout))
+	}()
+	if busy {
+		return ErrAccountActionBudgetsBusy
+	}
 	return refusal
 }

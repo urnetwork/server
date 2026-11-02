@@ -30,7 +30,8 @@ const (
 	// the operator's extender configuration is unusable
 	extenderActivationStageConfig = "config"
 	// the api was too busy to take it, before any budget was spent
-	// (connect#230): it was probing MaxConcurrentProbes activations already
+	// (connect#230): it was probing MaxConcurrentProbes activations already,
+	// or other spends held one of its budgets past the lock bound
 	extenderActivationStageBusy = "busy"
 	// an activation budget refused it (ExtenderActivateSettings); the outcome
 	// names the budget
@@ -55,8 +56,10 @@ const (
 	extenderActivationOutcomeTimeout = extenderProbeStepOutcomeTimeout
 	// the forward arrived on the other family (A7)
 	extenderActivationOutcomeOtherFamily = extenderProbeRefusalOtherFamily
-	// the busy stage: the process's concurrent probes were all taken
-	extenderActivationOutcomeProbes = "probes"
+	// the busy stage: the process's concurrent probes were all taken, or a
+	// budget's lock was held by other spends past its bound
+	extenderActivationOutcomeProbes     = "probes"
+	extenderActivationOutcomeBudgetLock = "budget_lock"
 	// the budget stage: the budget that refused it, the calling client's, the
 	// caller address's, or the account's (ExtenderActivateSettings)
 	extenderActivationOutcomeClient  = "client"
@@ -76,7 +79,10 @@ const (
 var extenderActivationStageOutcomes = map[string][]string{
 	extenderActivationStageRequest: {extenderActivationOutcomeRefused},
 	extenderActivationStageConfig:  {extenderActivationOutcomeError},
-	extenderActivationStageBusy:    {extenderActivationOutcomeProbes},
+	extenderActivationStageBusy: {
+		extenderActivationOutcomeProbes,
+		extenderActivationOutcomeBudgetLock,
+	},
 	extenderActivationStageBudget: {
 		extenderActivationOutcomeClient,
 		extenderActivationOutcomeAddress,
@@ -122,7 +128,7 @@ func newExtenderActivationMetrics(registerer prometheus.Registerer) *extenderAct
 			Name: "urnetwork_extender_activations_total",
 			Help: "Extender activations (POST /network/extender-activate) by the stage that ended them, how, and the caller's address family. " +
 				"Stages: request, refused before any budget was spent; config, the operator's extender configuration is unusable; " +
-				"busy, the api was too busy to take it before any budget was spent (probes, it was probing as many activations as it takes at once); " +
+				"busy, the api was too busy to take it before any budget was spent (probes, it was probing as many activations as it takes at once; budget_lock, other spends held a budget past the lock bound); " +
 				"budget, an activation budget refused it, the outcome naming which (client, address, account); " +
 				"tcp and forward, the required test, which fails on its own (error), runs out of the 10 s probe budget (timeout), or forwards on the other family (other_family); " +
 				"store, activated, or storing the passed activation failed.",
