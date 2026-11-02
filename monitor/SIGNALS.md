@@ -3260,8 +3260,19 @@ result record, `egress-health: provider=<id> ok=48/50 ... failed=cachefly,reddit
 (qualityprobe/prober), names in `failed=` the destinations one provider failed
 in a measurement that ran. It is the measurement working, judged by §2.19b
 `egress-site-pool` and §2.23 `egress-outcomes`, not an error of the emitting
-Taskworker, and it stays out of `novel` by its `ok=<n>/<n>` tally. The
-prober's `did not run` and `skipped` lines carry no tally and stay eligible.
+Taskworker. Only a complete recognized producer record stays out of `novel`;
+a tally embedded in unrelated text or followed by an unknown error does not.
+The prober's `did not run` and `skipped` lines stay eligible. The two explicit
+unmeasured-result suffixes remain measurement diagnostics, without proving a
+provider outcome. Admission accepts ordered known summary fields, canonical
+bounded counters, fixed failure stages and safe comma-separated name tokens.
+The producer does not escape arbitrary destination names, so ambiguous names,
+unknown classes/fields and future schema variants stay novel-eligible pending
+source review; this conservative boundary can produce a format false positive.
+Known taxonomy classes retain precedence, owner projection and replay rules.
+This is a classifier boundary, not evidence of an operational occurrence or
+provider health. The composed control verified the substring counterexample against the original
+classifier and passed with the corrected classifier in normal and race runs.
 On 2026-10-18 these records were Main's top novel shape (46/min of 178/min
 across 21 shapes), so the alert's sample showed a provider's DNS timeout
 instead of the unclassified errors beside it. Controls:
@@ -25353,6 +25364,30 @@ redis-cli -p <port> SLOWLOG GET 8       # the key names attribute it
 
 The single most valuable diagnostic skill from the incident: reading the
 error CLASS, not the volume. Classes, causes, and the action each implies:
+
+A complete `[payer-due-close]` result summary with canonical payer identity,
+bounded nonnegative counters, `failed=0` and a boolean `more` is not a novel
+error merely because the counter is named `failed`. The tailer recognizes only
+that full ordered schema, either as its exact message or under the expected
+informational `subscription_payer_due_close.go` envelope (and optional Warp
+identity prefix). Unknown sources or severity, invalid timestamps or counters,
+missing, repeated, reordered or additional fields and trailing error text do
+not receive this exception. Positive failure counters and the separate
+`closed nothing, N failed: ...` error/cancellation records remain eligible for
+the existing taxonomy or novel detector. Known classes are evaluated first;
+the panic aggregate and overlapping normalized-owner counts are unchanged.
+
+This corrects a monitor attribution boundary, not payer-close behavior. A
+zero failure counter proves neither successful settlement, committed closes,
+backlog health nor recovery of an adjacent `ReadPayerDueContracts` panic.
+Novel rates count matching log lines, not unique payers, tasks or incidents.
+False positives: do not page on a complete expected summary's field name.
+False negatives: malformed or unavailable records and companion failures must
+remain visible; absence from one bounded exemplar is not a quiet-window proof.
+Before claiming deployed correction, bind the actual emitter and watcher
+artifacts, preserve the original private evidence, qualify the composed
+classifier/window/ticket regression and unchanged reader/cancellation/owner
+controls, then observe complete fresh coverage through the normal alert window.
 
 | Class (grep) | Meaning | Action |
 |---|---|---|
