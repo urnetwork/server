@@ -112,6 +112,24 @@ func TestAppleEarlyRenewalIsAccepted(t *testing.T) {
 	}
 }
 
+// The timestamp columns hold UTC without a zone, and pgx writes one from a
+// time's wall clock, dropping its zone. A time in the process's zone would store
+// a window shifted by the zone's offset, and a year whose two ends have different
+// offsets, across daylight saving, with the wrong length. time.UnixMilli answers
+// in Local on every machine, even one whose zone is UTC, so an unconverted claim
+// fails here wherever this runs.
+func TestAppleTransactionTimesAreUtc(t *testing.T) {
+	signedAt := time.Date(2026, 11, 2, 22, 21, 20, 0, time.UTC)
+	claims := appleEarlyRenewalClaims(server.NewId(), "supporter_yearly", "utc-claims", signedAt, 8*time.Hour, 365*24*time.Hour)
+	transaction, err := validateAppleTransaction(claims, []string{"supporter_yearly_26"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if transaction.purchaseTime.Location() != time.UTC || transaction.expiresTime.Location() != time.UTC {
+		t.Fatal("the period's times were left in the process's zone, want them in time.UTC")
+	}
+}
+
 // The webhook credits a yearly renewal when Apple charges it: the next period
 // is credited as its own window, the current one stays, and a redelivery is
 // acknowledged without a second credit.
@@ -161,21 +179,31 @@ func TestAppleEarlyDidRenewCreditsTheNextPeriod(t *testing.T) {
 		connect.AssertEqual(t, model.IsProNetwork(ctx, networkId), true)
 
 		// The next period starts where the current one expires and lasts the
-		// year it paid for. The windows are compared with each other, as the
-		// timestamp columns store them.
+		// year it paid for. The timestamp columns hold UTC, so each time is the
+		// instant of its claim, whatever the zone of this process.
 		var renewals int
-		var currentEnd, renewalStart, renewalEnd time.Time
+		var signedDate, currentEnd, renewalStart, renewalEnd time.Time
+		renewalNotificationId, err := server.ParseId(renewal.NotificationUUID)
+		connect.AssertEqual(t, err, nil)
 		server.Db(ctx, func(conn server.PgConn) {
 			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM subscription_renewal WHERE network_id = $1`, networkId).Scan(&renewals))
+			server.Raise(conn.QueryRow(ctx, `SELECT signed_date FROM apple_notification WHERE notification_uuid = $1`,
+				renewalNotificationId).Scan(&signedDate))
 			server.Raise(conn.QueryRow(ctx, `SELECT end_time FROM subscription_renewal WHERE network_id = $1 AND transaction_id = $2`,
 				networkId, currentTransactionId).Scan(&currentEnd))
 			server.Raise(conn.QueryRow(ctx, `SELECT start_time, end_time FROM subscription_renewal WHERE network_id = $1 AND transaction_id = $2`,
 				networkId, renewTransactionId).Scan(&renewalStart, &renewalEnd))
 		})
 		connect.AssertEqual(t, renewals, 2)
-		if !renewalStart.Equal(currentEnd.Add(-SubscriptionGracePeriod)) || renewalEnd.Sub(renewalStart) != year+SubscriptionGracePeriod {
-			t.Fatalf("the renewal was credited for [%s, %s), want the year from the current period's expiry %s",
-				renewalStart, renewalEnd, currentEnd.Add(-SubscriptionGracePeriod))
+		if !signedDate.Equal(now) {
+			t.Fatalf("the notification was stored as signed at %s, want %s", signedDate, now)
+		}
+		periodStart := now.Add(8 * time.Hour)
+		if !currentEnd.Equal(periodStart.Add(SubscriptionGracePeriod)) {
+			t.Fatalf("the current period was credited to %s, want %s", currentEnd, periodStart.Add(SubscriptionGracePeriod))
+		}
+		if !renewalStart.Equal(periodStart) || !renewalEnd.Equal(periodStart.Add(year+SubscriptionGracePeriod)) {
+			t.Fatalf("the renewal was credited for [%s, %s), want the year from %s, then the grace", renewalStart, renewalEnd, periodStart)
 		}
 
 		// Apple redelivers the same notification: acknowledged, not credited again
