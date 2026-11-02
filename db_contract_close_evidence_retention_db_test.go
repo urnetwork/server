@@ -241,7 +241,12 @@ func TestCloseEvidenceRetentionStartsAtTheLowWater(t *testing.T) {
 		// the unresolved contract resolves; the day's next pass starts at the
 		// low water, above it
 		MaintenanceTx(ctx, func(tx PgTx) {
-			RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET outcome = 'settled', close_time = $2 WHERE contract_id = $1`, unresolvedId, now))
+			RaisePgResult(tx.Exec(
+				ctx,
+				`UPDATE transfer_contract SET outcome = 'settled', close_time = $2, provider_usage = '{"version":1,"byte_count":1,"providers":[]}' WHERE contract_id = $1`,
+				unresolvedId,
+				now,
+			))
 		}, TxReadCommitted, OptNoRetry())
 		report, cursor, _ = removeExpiredCloseEvidenceWith(horizon, now, cursor, time.Now().Add(time.Minute), settings)
 		connect.AssertEqual(t, report.FullPass, false)
