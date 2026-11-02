@@ -211,11 +211,16 @@ DEL  {prober_retention}control                       # code defaults (off)
 ```
 
 **Metrics.** `urnetwork_prober_retention_*`: the mode, the kept generations,
-the cutoff, the oldest registered pass and the due backlog (gauges); passes
-dropped, refused (by reason) and failed; contracts deleted, kept for bytes, kept
-unsettled or busy; archived contracts; deleted rows by table; step durations;
-runs by why they stopped. While the drop keeps up, the oldest registered pass is
-within a generation of the cutoff.
+the cutoff, the oldest registered pass, the due backlog and the run's clock
+(gauges); passes dropped, refused (by reason) and failed; contracts deleted,
+kept for bytes, kept unsettled or busy; archived contracts; deleted rows by
+table; step durations; runs by why they stopped. While the drop keeps up, the
+oldest registered pass is within a generation of the cutoff. Each taskworker
+keeps the gauges of the last run it made, and a run publishes its clock with
+the backlog it read, so a reader takes the taskworker with the newest clock.
+The taskworker dashboard's prober shard retention row does: its stats read the
+taskworker whose run started last, and only while that run started within 30
+minutes.
 
 **Settling.** `ProberBootstrap` runs `SettleDueProberShards` every five minutes:
 it fences a live pass past its deadline in any generation and settles drained
