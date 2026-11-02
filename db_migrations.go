@@ -11162,4 +11162,10 @@ var migrations = []any{
 		CREATE INDEX network_reengagement_email_network_sent
 		ON network_reengagement_email (network_id, sent_at)
 	`),
+
+	// The re-engagement results (mmm/reengagement/PLAN.md "MEASUREMENT"):
+	// the nightly per-cohort-day episode counts the experiment readout reads
+	// (reengagement_results_schema.go). A new table; apply before deploying
+	// the taskworker that writes it and the api that reads it.
+	newSqlMigration(reengagementResultsDailySchemaSql),
 }
