@@ -29,6 +29,9 @@ const (
 	extenderActivationStageRequest = "request"
 	// the operator's extender configuration is unusable
 	extenderActivationStageConfig = "config"
+	// the key is registered to another network, which no activation moves
+	// (model.ActivateNetworkExtender)
+	extenderActivationStageOwner = "owner"
 	// the api was too busy to take it, before any budget was spent
 	// (connect#230): it was probing MaxConcurrentProbes activations already,
 	// or other spends held one of its budgets past the lock bound
@@ -81,6 +84,7 @@ const (
 var extenderActivationStageOutcomes = map[string][]string{
 	extenderActivationStageRequest: {extenderActivationOutcomeRefused},
 	extenderActivationStageConfig:  {extenderActivationOutcomeError},
+	extenderActivationStageOwner:   {extenderActivationOutcomeRefused},
 	extenderActivationStageBusy: {
 		extenderActivationOutcomeProbes,
 		extenderActivationOutcomeBudgetLock,
@@ -130,7 +134,7 @@ func newExtenderActivationMetrics(registerer prometheus.Registerer) *extenderAct
 		activations: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "urnetwork_extender_activations_total",
 			Help: "Extender activations (POST /network/extender-activate) by the stage that ended them, how, and the caller's address family. " +
-				"Stages: request, refused before any budget was spent; config, the operator's extender configuration is unusable; " +
+				"Stages: request, refused before any budget was spent; config, the operator's extender configuration is unusable; owner, the key is registered to another network; " +
 				"busy, the api was too busy to take it before any budget was spent (probes, it was probing as many activations as it takes at once; budget_lock, other spends held a budget past the lock bound); " +
 				"budget, an activation budget refused it, the outcome naming which (client, address, proven_address -- a key's own at the address it was proved at -- or account); " +
 				"tcp and forward, the required test, which fails on its own (error), runs out of the 10 s probe budget (timeout), or forwards on the other family (other_family); " +
