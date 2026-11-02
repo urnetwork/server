@@ -18,7 +18,12 @@ func TestExtenderCamouflageKeyMigrationBoundsItsLockWait(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("migration identity %s", identity)
+	t.Logf(
+		"migration identity %s, version %d of %d",
+		identity,
+		ExtenderCamouflageKeyMigrationVersion(),
+		MigrationCount(),
+	)
 }
 
 // A reader holding network_extender makes the migration give up with a lock

@@ -262,6 +262,65 @@ func TestExtenderActivateRefusesAnUnusableCamouflageKey(t *testing.T) {
 	})
 }
 
+// The key is parsed with the other arguments, ahead of the probe guard and the
+// budgets, so an unusable one spends neither. With the guard full it is refused
+// for itself and not as busy, and a budget of one activation is still whole
+// after it.
+func TestExtenderActivateUnusableCamouflageKeySpendsNothing(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		fixture := newTestExtenderFixture(t)
+		installTestExtenderConfig(t, fixture.api)
+		clientSession := newTestExtenderSession(t, ctx, fixture.clientAddress("127.0.0.1"))
+
+		settings := DefaultExtenderActivateSettings()
+		settings.ClientRateLimit = 1
+		settings.MaxConcurrentProbes = 1
+		service := newExtenderActivateService(settings)
+
+		unusable := fixture.activateArgs()
+		unusable.RealityPublicKeyHex = "not hex"
+		post := func(when string) {
+			t.Helper()
+			for range 3 {
+				result, err := service.activate(unusable, clientSession)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if result.Activated || !strings.Contains(result.Error, "camouflage key is not readable") {
+					t.Fatalf("%s: activated %t %q", when, result.Activated, result.Error)
+				}
+			}
+		}
+
+		// an activation that reached the budget would spend it, and be refused
+		// by it from the second post on
+		post("with the probe guard free")
+
+		// an activation that reached the guard would be refused as busy
+		service.probeSlots <- struct{}{}
+		post("with the probe guard full")
+		<-service.probeSlots
+
+		// the budget of one is whole, and spent by this activation, so it was
+		// live all along
+		result, err := service.activate(fixture.activateArgs(), clientSession)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !result.Activated {
+			t.Fatalf("the activation after the unusable keys was refused: %s", result.Error)
+		}
+		result, err = service.activate(fixture.activateArgs(), clientSession)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Activated {
+			t.Fatal("a budget of one allowed a second activation")
+		}
+	})
+}
+
 // A borrowed site for the splice that accepts and hangs up: a spliced hello
 // meets something that is not the extender, and the B3 leaf check fails it.
 func newTestBorrowSite(t testing.TB) connect.DialContextFunction {
