@@ -89,7 +89,7 @@ Usage:
     bringyourctl onboarding status --network_id=<network_id>
     bringyourctl onboarding preview --network_id=<network_id> --step=<step>
     bringyourctl onboarding send-test --email=<email> --template=<template> [--variant=<variant>] [--locale=<locale>]
-    bringyourctl onboarding webhook-ensure
+    bringyourctl onboarding webhook-ensure [--credential=<credential>]
     bringyourctl onboarding rollup [--from=<from>] [--to=<to>]
     bringyourctl onboarding experiments [--resume | --pause] [--experiment=<experiment>] [--variant=<variant>] [--reason=<reason>]
     bringyourctl reengagement status --network_id=<network_id>
@@ -407,7 +407,7 @@ func main() {
 		} else if sendTest, _ := opts.Bool("send-test"); sendTest {
 			onboardingSendTest(opts)
 		} else if webhookEnsure, _ := opts.Bool("webhook-ensure"); webhookEnsure {
-			onboardingWebhookEnsure()
+			onboardingWebhookEnsure(opts)
 		} else if rollup, _ := opts.Bool("rollup"); rollup {
 			onboardingRollup(opts)
 		} else if experiments, _ := opts.Bool("experiments"); experiments {
@@ -3479,17 +3479,23 @@ func onboardingSendTest(opts docopt.Opts) {
 	fmt.Printf("Sent %s/%s/%s to %s (message id %s)\n", template, variant, locale, email, messageId)
 }
 
-// onboardingWebhookEnsure registers the Brevo transactional webhook once.
+// onboardingWebhookEnsure registers the Brevo transactional webhook with the
+// credential POST /updates/brevo accepts, or fixes the registered one in place.
+// --credential=url (the default) puts the first brevo.webhook_bearers user,
+// with an empty password, in the webhook url (Brevo's username and password
+// authentication); --credential=header sends the same Basic value as a custom
+// Authorization header instead. It prints what it did, the credential masked.
 // A disabled campaign is a refusal, not a fault: the gate exists so nothing
 // touches the live Brevo account until onboarding.enabled is set, so say what
 // to flip and exit non-zero without a stack trace.
-func onboardingWebhookEnsure() {
+func onboardingWebhookEnsure(opts docopt.Opts) {
 	if !model.Onboarding().Enabled {
 		fmt.Fprintln(os.Stderr, "onboarding campaign is disabled: set onboarding.enabled: true in config/main/onboarding.yml (and deploy the config) before registering the Brevo webhook")
 		os.Exit(1)
 	}
+	credential, _ := opts.String("--credential")
 	ctx := context.Background()
-	outcome, err := controller.EnsureOnboardingBrevoWebhook(ctx)
+	outcome, err := controller.EnsureOnboardingBrevoWebhook(ctx, credential)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "onboarding webhook-ensure: %s\n", err)
 		os.Exit(1)

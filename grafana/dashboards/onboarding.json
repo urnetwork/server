@@ -1070,13 +1070,128 @@
       ]
     },
     {
+      "type": "timeseries",
+      "title": "webhook refusals / h by reason",
+      "description": "POST /updates/brevo requests refused before any event is recorded, for every Brevo webhook (both campaigns and product updates). no_credential: no Authorization header, the webhook was registered without the credential; wrong_credential: an Authorization value that is no brevo.webhook_bearers user with an empty password; verification_unavailable: vault brevo.yml names no usable user. Brevo does not retry a refused event, so each one is lost. Fix: bringyourctl onboarding webhook-ensure (vault brevo.yml for verification_unavailable).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 64
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (result) (increase(urnetwork_brevo_webhook_requests_total{env=\"$env\",result!=\"accepted\"}[1h]))",
+          "refId": "A",
+          "legendFormat": "{{result}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "webhook requests / h: accepted and refused",
+      "description": "Every Brevo webhook request, whether or not a campaign send claims it: the events of a send-test count here and nowhere else. After webhook-ensure, accepted rises with the next send and refused stays at zero.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 64
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(increase(urnetwork_brevo_webhook_requests_total{env=\"$env\",result=\"accepted\"}[1h]))",
+          "refId": "A",
+          "legendFormat": "accepted"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(increase(urnetwork_brevo_webhook_requests_total{env=\"$env\",result!=\"accepted\"}[1h]))",
+          "refId": "B",
+          "legendFormat": "refused"
+        }
+      ]
+    },
+    {
       "type": "row",
       "title": "app store one-time offer codes",
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 64
+        "y": 72
       },
       "collapsed": false,
       "panels": []
@@ -1092,7 +1207,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 65
+        "y": 73
       },
       "fieldConfig": {
         "defaults": {
@@ -1144,7 +1259,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 65
+        "y": 73
       },
       "fieldConfig": {
         "defaults": {
@@ -1192,7 +1307,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 73
+        "y": 81
       },
       "collapsed": false,
       "panels": []
@@ -1204,7 +1319,7 @@
         "h": 5,
         "w": 24,
         "x": 0,
-        "y": 74
+        "y": 82
       },
       "options": {
         "mode": "markdown",
@@ -1223,7 +1338,7 @@
         "h": 4,
         "w": 6,
         "x": 0,
-        "y": 79
+        "y": 87
       },
       "fieldConfig": {
         "defaults": {
@@ -1257,7 +1372,7 @@
       "title": "networks sent",
       "description": "Distinct network/flow-step exposures in the rolling 28-day send cohort.",
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},
-      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 79},
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 87},
       "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
       "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "value", "graphMode": "none", "textMode": "value"},
       "targets": [
@@ -1273,7 +1388,7 @@
       "title": "high-intent engagement rate",
       "description": "Engaged networks divided by sent networks; mailbox-open-only activity is excluded.",
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},
-      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 79},
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 87},
       "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1}, "overrides": []},
       "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "value", "graphMode": "none", "textMode": "value"},
       "targets": [
@@ -1289,7 +1404,7 @@
       "title": "ambiguous legacy attribution",
       "description": "Networks whose historical template-only event could not safely distinguish E3 from E5. This is uncertainty, not engagement.",
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},
-      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 79},
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 87},
       "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 1}]}}, "overrides": []},
       "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "value", "graphMode": "none", "textMode": "value"},
       "targets": [
@@ -1305,7 +1420,7 @@
       "title": "networks sent by flow step",
       "description": "The denominator for every per-step engagement rate.",
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 83},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 91},
       "fieldConfig": {"defaults": {"unit": "short", "min": 0}, "overrides": []},
       "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "orientation": "auto", "showValue": "always", "stacking": "none"},
       "targets": [
@@ -1323,7 +1438,7 @@
       "title": "email funnel by flow step",
       "description": "Distinct networks at each delivery stage. Open is diagnostic and is not itself high-intent engagement.",
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 83},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 91},
       "fieldConfig": {"defaults": {"unit": "short", "min": 0}, "overrides": []},
       "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true}, "orientation": "auto", "showValue": "auto", "stacking": "none"},
       "targets": [
@@ -1341,7 +1456,7 @@
       "title": "downstream engagement by flow step",
       "description": "What sent networks did within the step's bounded attribution window.",
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 91},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 99},
       "fieldConfig": {"defaults": {"unit": "short", "min": 0}, "overrides": []},
       "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true}, "orientation": "auto", "showValue": "auto", "stacking": "none"},
       "targets": [
@@ -1359,7 +1474,7 @@
       "title": "delivery risk and attribution quality by flow step",
       "description": "Safety outcomes and historical attribution uncertainty; all are distinct-network counts.",
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 91},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 99},
       "fieldConfig": {"defaults": {"unit": "short", "min": 0}, "overrides": []},
       "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true}, "orientation": "auto", "showValue": "auto", "stacking": "none"},
       "targets": [
@@ -1379,7 +1494,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 99
+        "y": 107
       },
       "collapsed": false,
       "panels": []
@@ -1396,7 +1511,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 100
+        "y": 108
       },
       "fieldConfig": {
         "defaults": {
@@ -1449,7 +1564,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 100
+        "y": 108
       },
       "fieldConfig": {
         "defaults": {
@@ -1502,7 +1617,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 108
+        "y": 116
       },
       "fieldConfig": {
         "defaults": {
@@ -1555,7 +1670,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 108
+        "y": 116
       },
       "fieldConfig": {
         "defaults": {

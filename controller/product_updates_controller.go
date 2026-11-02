@@ -138,26 +138,11 @@ func BrevoWebhook(
 ) (*BrevoWebhookResult, error) {
 	// glog.Infof("[product_updates]brevo webhook: (%v) %v\n", clientSession.Header, webhookArgs)
 
-	// fails closed: without a usable configured user nothing is accepted
-	expectedAuths, err := brevoWebhookExpectedAuths()
-	if err != nil {
-		glog.Warningf("[product_updates]brevo webhook refused, verification users unavailable: %s\n", err)
-		return nil, errWebhookVerificationUnavailable
-	}
-	auth := func() bool {
-		auths, ok := clientSession.Header["Authorization"]
-		if !ok {
-			return false
-		}
-		for _, auth := range auths {
-			if expectedAuths[strings.ToLower(auth)] {
-				return true
-			}
-		}
-		return false
-	}()
-	if !auth {
-		return nil, fmt.Errorf("%d Not authorized.", http.StatusUnauthorized)
+	// fails closed: without a usable configured user nothing is accepted. A
+	// refusal is counted by reason (urnetwork_brevo_webhook_requests_total) and
+	// logged at most once a minute (brevo_webhook_auth.go).
+	if err := verifyBrevoWebhookAuthorization(clientSession.Header); err != nil {
+		return nil, err
 	}
 
 	if webhookArgs.Event == "unsubscribe" || webhookArgs.Event == "unsubscribed" {
