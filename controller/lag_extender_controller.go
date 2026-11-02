@@ -82,14 +82,15 @@ func lagStillServing(ctx context.Context, extenders []*lagServingExtender, now t
 	return serving
 }
 
-// The serving set, read again when the cached one is older than maxAge.
+// The serving set without the extenders in a restart loop now
+// (lagStableServing), read again when the cached one is older than maxAge.
 func getLagServing(ctx context.Context, now time.Time, maxAge time.Duration) *lagServingSet {
 	lagServingCache.Lock()
 	defer lagServingCache.Unlock()
 	if set := lagServingCache.set; set != nil && !now.Before(set.loadTime) && now.Sub(set.loadTime) < maxAge {
 		return set
 	}
-	set := loadLagServing(ctx, now)
+	set, _ := lagStableServing(ctx, loadLagServing(ctx, now), now)
 	lagServingCache.set = set
 	return set
 }
