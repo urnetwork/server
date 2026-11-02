@@ -962,7 +962,7 @@ func newExchange(
 	exchange.localTransport = newExchangeLocalTransport(cancelCtx, settings, block)
 	// flags arrive only as key events
 	if exchange.keyEventSubscriber != nil {
-		exchange.stuckProviderRecycle = newExchangeStuckProviderRecycle(cancelCtx, settings, block)
+		exchange.stuckProviderRecycle = newExchangeStuckProviderRecycle(cancelCtx, settings, block, exchange.recycleStuckProvider)
 		if exchange.stuckProviderRecycle != nil {
 			exchange.keyEventSubscriber.SetClientRecycle(exchange.handleClientRecycle)
 		}

@@ -7,55 +7,72 @@ package controller
 // send sequence's contract wait asks at 0, 1, 3, 7, 12, 17, 22 and 27 s of
 // each 30 s wait, then the next return packet starts another), until its
 // connection is replaced. Every connect deploy replaces them all, which is the
-// creep's sawtooth. A replay answered entirely from terminal refusals (the
-// destination row present and inactive, `model.ContractRouteRejection.Terminal`)
-// for a pack none of whose frames carries a `SenderRole` (connect builds before
-// v2026.9.4) is such a retry. This owner counts those per client and, once a
-// client has kept retrying long enough, sets the client's recycle flag
-// (model/client_recycle_model.go). The connect process hosting the client's
-// resident then recycles it as a deploy would (connect/client_recycle.go).
-// Nothing here changes an answer: the replay, the refusal caches and the
-// client's limit run as before, and a report runs off the request.
+// creep's sawtooth. A replay counts here when every refusal it answers is
+// terminal (the destination row present and inactive,
+// `model.ContractRouteRejection.Terminal`), was refused to a top-level source,
+// and no frame of the pack carries a `SenderRole` (connect builds before
+// v2026.9.4). The top-level source keeps out the window clients of old
+// consumer apps, derived clients that retry forward contracts to removed
+// providers and that a recycle would not cure. It is not limited to companion
+// requests: in production those old providers' returns are mostly
+// non-companion requests that settle as a Stream fallback.
+//
+// This owner counts those replays per client and, once a client has kept
+// retrying long enough, sets the client's recycle flag
+// (model/client_recycle_model.go). Every connect process that holds the
+// client's transports or resident then recycles it as a deploy would
+// (connect/client_recycle.go). Nothing here changes an answer: the replay, the
+// refusal caches and the client's limit run as before, and a report runs off
+// the request.
 //
 // Thresholds. The load balancers spread one provider's retries over about 20
 // api processes, so a process sees one stuck route about every 100 s
 // (5 s × 20), and a provider stuck on k routes k times as often. Each process
 // decides alone, from what it sees:
-//   - MinRetryDuration, 10 min: the client's run of terminal answers on this
+//   - MinRetryDuration, 20 min: the client's run of terminal answers on this
 //     process has lasted this long. One contract wait lasts 30 s, so a route
 //     the provider stops asking for by itself never spans it.
-//   - MinRetryCount, 4: at least this many answers in the run. A stuck route
-//     gives about 6 in 10 min here, and 4 or more with probability about 0.85.
+//   - MinRetryCount, 6: at least this many answers in the run, of about 12 a
+//     stuck route gives in 20 min here.
 //   - MaxRetryGap, 5 min: a longer silence on this process starts the run
 //     over. For a stuck route a gap this long has probability e^-3, about
 //     0.05, and a client that paused or stopped starts again from zero.
-// So a single stuck route crosses on a given process within one 10 min window
-// with probability about 0.6, and on at least one of the 20 within about 10
-// to 15 min almost surely. A provider whose terminal answers come in brief
-// bursts, one contract wait each, crosses only if this process sees a burst
-// at least every 5 min for 10 min. More api processes slow each one down and
-// add as many chances; fewer speed each one up.
+// So a single stuck route crosses on a given process within one 20 min window
+// with probability about one half (no gap over 5 min in about 12), and on at
+// least one of the 20 within about 20 to 25 min almost surely. A provider
+// whose terminal answers come in brief bursts, one contract wait each, crosses
+// only if this process sees a burst at least every 5 min for 20 min. More api
+// processes slow each one down and add as many chances; fewer speed each one
+// up.
 //
-// A crossing starts the run over, so a process reports a client at most once
-// per MinRetryDuration. The flag is set only if absent, with a ttl of
-// Cooldown, so a client is recycled at most once per Cooldown however many
-// processes report it; the other reports count a cooldown.
+// Reports. A crossing starts the run over, so a process reports a client at
+// most once per MinRetryDuration. Reports are paced by a per-process token
+// bucket of SignalsPerSecond with SignalBurst; a report past it is counted
+// rate_limited and its client starts a new run. The flag is set only if
+// absent, with a ttl of Cooldown plus a random part of up to a quarter of it,
+// so a client is recycled at most once per cooldown however many processes
+// report it, and recurring flags spread out. A report that finds the flag
+// counts a cooldown, or still_stuck when the flag is older than StillStuckAge:
+// the client kept retrying after its recycle.
 //
 // The switch: EnableStuckProviderSignal is the code ceiling, off by default
 // and on only in the api service (api/run.go). The Redis move control's
 // `stuckProviderSignal` (model/connect_move_control.go) chooses api blocks,
 // StuckProviderSignalDefault ("off") applies while it sets none, and the owner
-// reads it every ControlRefreshInterval, keeping its last good read. While the
-// switch is off nothing is counted or written, and turning it off forgets
-// every run.
+// reads it every ControlRefreshInterval. A failed read keeps the last value
+// until ControlMaxFailedReads fail in a row, which turn the switch off, so an
+// unreadable control cannot keep it on. While the switch is off nothing is
+// counted or written, and turning it off forgets every run.
 //
 // Bounded: two generations of at most TrackedClientCount clients each, as the
-// terminal refusal registry (model/contract_route_rejection.go), and at most
-// MaxConcurrentSignals reports in flight; a report past that is dropped and
-// counted, and its client starts a new run. Safe for concurrent use.
+// terminal refusal registry (model/contract_route_rejection.go), held without
+// pointers, and at most MaxConcurrentSignals reports in flight; a report past
+// that is dropped and counted, and its client starts a new run. Safe for
+// concurrent use.
 
 import (
 	"context"
+	"math/rand/v2"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -69,13 +86,15 @@ import (
 )
 
 // One count per report this process decided to send, by result: set (the
-// recycle flag was set), cooldown (it was already set), error (the write
-// failed), dropped (no report worker was free). Their sum is the decisions.
+// recycle flag was set), cooldown (it was already set), still_stuck (it was
+// set longer than StillStuckAge ago), error (the write failed), rate_limited
+// (past the token bucket), dropped (no report worker was free). Their sum is
+// the decisions.
 var stuckProviderRecycleDecisionsCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "urnetwork",
 	Subsystem: "connect",
 	Name:      "stuck_provider_recycle_decisions_total",
-	Help:      "Clients this api process found answered only from terminal refusals, for packs without a sender role, long enough to report for a recycle, by result: set (the recycle flag was set), cooldown (it was already set), error (the write failed), dropped (no report worker was free)",
+	Help:      "Clients this api process found answered only from terminal refusals, as a top-level source, for packs without a sender role, long enough to report for a recycle, by result: set (the recycle flag was set), cooldown (it was already set), still_stuck (it was set longer than the still stuck age ago: retrying after its recycle), error (the write failed), rate_limited (past the report rate), dropped (no report worker was free)",
 }, []string{"result"})
 
 var stuckProviderTrackedClientsGauge = prometheus.NewGauge(prometheus.GaugeOpts{
@@ -93,17 +112,21 @@ var stuckProviderSignalEnabledGauge = prometheus.NewGauge(prometheus.GaugeOpts{
 })
 
 const (
-	stuckProviderRecycleSet      = "set"
-	stuckProviderRecycleCooldown = "cooldown"
-	stuckProviderRecycleError    = "error"
-	stuckProviderRecycleDropped  = "dropped"
+	stuckProviderRecycleSet         = "set"
+	stuckProviderRecycleCooldown    = "cooldown"
+	stuckProviderRecycleStillStuck  = "still_stuck"
+	stuckProviderRecycleError       = "error"
+	stuckProviderRecycleRateLimited = "rate_limited"
+	stuckProviderRecycleDropped     = "dropped"
 )
 
 func init() {
 	for _, result := range []string{
 		stuckProviderRecycleSet,
 		stuckProviderRecycleCooldown,
+		stuckProviderRecycleStillStuck,
 		stuckProviderRecycleError,
+		stuckProviderRecycleRateLimited,
 		stuckProviderRecycleDropped,
 	} {
 		stuckProviderRecycleDecisionsCounter.WithLabelValues(result)
@@ -131,6 +154,9 @@ type StuckProviderSignalSettings struct {
 	ControlRefreshInterval time.Duration
 	// Bounds one read of the control.
 	ControlReadTimeout time.Duration
+	// This many failed reads in a row turn the switch off. Non-positive keeps
+	// the last value through any number.
+	ControlMaxFailedReads int
 
 	// How long a client's run of terminal answers on this process lasts
 	// before it is reported.
@@ -144,13 +170,21 @@ type StuckProviderSignalSettings struct {
 	// Non-positive tracks none.
 	TrackedClientCount int
 
-	// The recycle flag's ttl: the fleet-wide cooldown between two recycles of
-	// a client.
+	// The flag's ttl, before its random part of up to a quarter more: the
+	// fleet-wide cooldown between two recycles of a client.
 	Cooldown time.Duration
+	// A report that finds a flag older than this counts still_stuck.
+	StillStuckAge time.Duration
+	// The report rate of this process, and its burst. Non-positive sends none.
+	SignalsPerSecond float64
+	SignalBurst      int
 	// Bounds one report's write.
 	SignalTimeout time.Duration
 	// The most reports in flight. A report past it is dropped.
 	MaxConcurrentSignals int
+
+	// The clock of runs and reports. Nil is the system clock; tests step it.
+	Now func() time.Time
 }
 
 func DefaultStuckProviderSignalSettings() *StuckProviderSignalSettings {
@@ -159,21 +193,26 @@ func DefaultStuckProviderSignalSettings() *StuckProviderSignalSettings {
 		StuckProviderSignalDefault: model.ConnectLocalTransportOff,
 		ControlRefreshInterval:     10 * time.Second,
 		ControlReadTimeout:         5 * time.Second,
-		MinRetryDuration:           10 * time.Minute,
-		MinRetryCount:              4,
+		ControlMaxFailedReads:      3,
+		MinRetryDuration:           20 * time.Minute,
+		MinRetryCount:              6,
 		MaxRetryGap:                5 * time.Minute,
-		TrackedClientCount:         16384,
+		TrackedClientCount:         65536,
 		Cooldown:                   1 * time.Hour,
+		StillStuckAge:              10 * time.Minute,
+		SignalsPerSecond:           5,
+		SignalBurst:                20,
 		SignalTimeout:              5 * time.Second,
 		MaxConcurrentSignals:       16,
 	}
 }
 
-// One client's current run of terminal answers on this process.
+// One client's current run of terminal answers on this process, in unix
+// nanos, so the generations hold no pointers.
 type stuckProviderRetry struct {
-	firstTime time.Time
-	lastTime  time.Time
-	count     int
+	firstNanos int64
+	lastNanos  int64
+	count      int64
 }
 
 // The per-process owner of stuck provider reports. Nil while the ceiling is
@@ -185,8 +224,12 @@ type StuckProviderSignals struct {
 	block    string
 
 	readControl func(ctx context.Context, ceiling model.ConnectMoveControlCeiling) (*model.ConnectMoveControl, error)
-	setRecycle  func(ctx context.Context, clientId server.Id, cooldown time.Duration) (bool, error)
+	setRecycle  func(ctx context.Context, clientId server.Id, ttl time.Duration) (bool, time.Time, error)
 	now         func() time.Time
+	// the random part of a flag's ttl, in [0, n)
+	randInt64N func(n int64) int64
+
+	signalBucket *server.TokenBucket
 
 	// whether this block reports, as of the last good read of the control,
 	// and before the first as the code default chooses
@@ -203,9 +246,9 @@ type StuckProviderSignals struct {
 	signalsRunning int
 	workers        sync.WaitGroup
 
-	// owned by the control loop: the last read failed. A failure is logged
-	// once until a read succeeds.
-	failing bool
+	// owned by the control loop: failed reads in a row. The first failure is
+	// logged once until a read succeeds.
+	failedReads int
 }
 
 // The owner for the api processes of block, which reads the control until
@@ -214,7 +257,11 @@ func NewStuckProviderSignals(ctx context.Context, settings *StuckProviderSignalS
 	if settings == nil || !settings.EnableStuckProviderSignal {
 		return nil
 	}
-	signals := newStuckProviderSignalsWithStore(ctx, settings, block, model.GetConnectMoveControl, model.SetClientRecycle, time.Now)
+	now := settings.Now
+	if now == nil {
+		now = time.Now
+	}
+	signals := newStuckProviderSignalsWithStore(ctx, settings, block, model.GetConnectMoveControl, model.SetClientRecycle, now)
 	signals.start()
 	return signals
 }
@@ -226,7 +273,7 @@ func newStuckProviderSignalsWithStore(
 	settings *StuckProviderSignalSettings,
 	block string,
 	readControl func(ctx context.Context, ceiling model.ConnectMoveControlCeiling) (*model.ConnectMoveControl, error),
-	setRecycle func(ctx context.Context, clientId server.Id, cooldown time.Duration) (bool, error),
+	setRecycle func(ctx context.Context, clientId server.Id, ttl time.Duration) (bool, time.Time, error),
 	now func() time.Time,
 ) *StuckProviderSignals {
 	cancelCtx, cancel := context.WithCancel(ctx)
@@ -238,6 +285,8 @@ func newStuckProviderSignalsWithStore(
 		readControl:           readControl,
 		setRecycle:            setRecycle,
 		now:                   now,
+		randInt64N:            rand.Int64N,
+		signalBucket:          server.NewTokenBucket(settings.SignalsPerSecond, settings.SignalBurst),
 		currentClientRetries:  map[server.Id]stuckProviderRetry{},
 		previousClientRetries: map[server.Id]stuckProviderRetry{},
 	}
@@ -331,7 +380,8 @@ func (self *StuckProviderSignals) run() {
 	}
 }
 
-// Reads the control once. A read that fails or raises keeps the last value.
+// Reads the control once. A read that fails or raises keeps the last value
+// until ControlMaxFailedReads fail in a row, which turn the switch off.
 // Called only by the loop; tests call it in the loop's place.
 func (self *StuckProviderSignals) refresh() {
 	var control *model.ConnectMoveControl
@@ -348,15 +398,18 @@ func (self *StuckProviderSignals) refresh() {
 			// the owner is closing
 			return
 		}
-		if !self.failing {
-			self.failing = true
+		self.failedReads += 1
+		if self.failedReads == 1 {
 			glog.Infof("[stuck]stuck provider control unavailable, keeping report=%t (%s)\n", self.allows(), err)
 		} else if glog.V(1) {
 			glog.Infof("[stuck]stuck provider control unavailable (%s)\n", err)
 		}
+		if 0 < self.settings.ControlMaxFailedReads && self.settings.ControlMaxFailedReads <= self.failedReads {
+			self.setAllowed(false)
+		}
 		return
 	}
-	self.failing = false
+	self.failedReads = 0
 	self.setAllowed(control.StuckProviderSignalAllows(self.block))
 }
 
@@ -384,22 +437,22 @@ func (self *StuckProviderSignals) setAllowed(allowed bool) {
 	glog.Infof("[stuck]stuck provider control: block %s report=%t\n", self.block, allowed)
 }
 
-// Counts one replay answered only from terminal refusals for a pack without a
-// sender role, and reports the client once its run crosses the thresholds.
-// Never blocks on I/O.
+// Counts one replay answered only from terminal refusals of a top-level
+// source for a pack without a sender role, and reports the client once its
+// run crosses the thresholds. Never blocks on I/O.
 func (self *StuckProviderSignals) observeTerminalRetry(clientId server.Id) {
 	if !self.allows() {
 		return
 	}
-	if !self.noteRetry(clientId, self.now()) {
+	if !self.noteRetry(clientId, self.now().UnixNano()) {
 		return
 	}
 	self.signal(clientId)
 }
 
-// Adds one answer at now to the client's run. Returns whether the run crossed
-// the thresholds, in which case it starts over.
-func (self *StuckProviderSignals) noteRetry(clientId server.Id, now time.Time) bool {
+// Adds one answer at nowNanos to the client's run. Returns whether the run
+// crossed the thresholds, in which case it starts over.
+func (self *StuckProviderSignals) noteRetry(clientId server.Id, nowNanos int64) bool {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	if self.settings.TrackedClientCount <= 0 || !self.allowed.Load() {
@@ -411,22 +464,21 @@ func (self *StuckProviderSignals) noteRetry(clientId server.Id, now time.Time) b
 			delete(self.previousClientRetries, clientId)
 		}
 	}
-	if ok && 0 < self.settings.MaxRetryGap && self.settings.MaxRetryGap < now.Sub(retry.lastTime) {
+	if ok && 0 < self.settings.MaxRetryGap && int64(self.settings.MaxRetryGap) < nowNanos-retry.lastNanos {
 		ok = false
 	}
 	if ok {
-		if retry.lastTime.Before(now) {
-			retry.lastTime = now
-		}
+		retry.lastNanos = max(retry.lastNanos, nowNanos)
 		retry.count += 1
 	} else {
 		retry = stuckProviderRetry{
-			firstTime: now,
-			lastTime:  now,
-			count:     1,
+			firstNanos: nowNanos,
+			lastNanos:  nowNanos,
+			count:      1,
 		}
 	}
-	crossed := self.settings.MinRetryCount <= retry.count && self.settings.MinRetryDuration <= now.Sub(retry.firstTime)
+	crossed := int64(self.settings.MinRetryCount) <= retry.count &&
+		int64(self.settings.MinRetryDuration) <= nowNanos-retry.firstNanos
 	if crossed {
 		delete(self.currentClientRetries, clientId)
 	} else {
@@ -446,8 +498,22 @@ func (self *StuckProviderSignals) putWithLock(clientId server.Id, retry stuckPro
 	self.currentClientRetries[clientId] = retry
 }
 
-// Reports the client off the request: sets its recycle flag if absent.
+// The flag's ttl: the cooldown plus a random part of up to a quarter of it.
+func (self *StuckProviderSignals) flagTtl() time.Duration {
+	ttl := self.settings.Cooldown
+	if spread := int64(ttl / 4); 0 < spread {
+		ttl += time.Duration(self.randInt64N(spread))
+	}
+	return ttl
+}
+
+// Reports the client off the request, paced by the token bucket: sets its
+// recycle flag if absent.
 func (self *StuckProviderSignals) signal(clientId server.Id) {
+	if !self.signalBucket.Take(self.now()) {
+		stuckProviderRecycleDecisionsCounter.WithLabelValues(stuckProviderRecycleRateLimited).Inc()
+		return
+	}
 	if !self.beginSignal() {
 		stuckProviderRecycleDecisionsCounter.WithLabelValues(stuckProviderRecycleDropped).Inc()
 		return
@@ -460,11 +526,14 @@ func (self *StuckProviderSignals) signal(clientId server.Id) {
 			signalCtx, signalCancel := context.WithTimeout(self.ctx, self.settings.SignalTimeout)
 			defer signalCancel()
 			var set bool
-			set, err = self.setRecycle(signalCtx, clientId, self.settings.Cooldown)
+			var flagTime time.Time
+			set, flagTime, err = self.setRecycle(signalCtx, clientId, self.flagTtl())
 			switch {
 			case err != nil:
 			case set:
 				result = stuckProviderRecycleSet
+			case !flagTime.IsZero() && self.settings.StillStuckAge < self.now().Sub(flagTime):
+				result = stuckProviderRecycleStillStuck
 			default:
 				result = stuckProviderRecycleCooldown
 			}
