@@ -509,6 +509,14 @@ func insertNetworkExtenderPublishInTx(
 // Everything is one transaction: the upserts, the signature over what they
 // wrote, and the publish row. A caller that signed outside it could publish an
 // address set that was never stored.
+//
+// A re-activation of an address that is still active on the same ip keeps its
+// consecutive probe failures (C3). Passing the activation probe is not passing
+// the uptime probe, and an extender that re-activated more often than its
+// failure budget lasts was otherwise never deactivated, however long its
+// uptime probes failed. An address the probes deactivated, or one now on
+// another ip, starts again at zero: it is new to the probes, and a budget
+// spent before a revocation would deactivate it again on its first failure.
 func ActivateNetworkExtender(
 	ctx context.Context,
 	activation *NetworkExtenderActivation,
@@ -623,7 +631,13 @@ func ActivateNetworkExtender(
 				carriers = $4,
 				dns_ports = $5,
 				activate_time = $6,
-				consecutive_probe_failures = 0,
+				consecutive_probe_failures = CASE
+					WHEN
+						network_extender_address.active AND
+						network_extender_address.ip = EXCLUDED.ip
+					THEN network_extender_address.consecutive_probe_failures
+					ELSE 0
+				END,
 				active = true
 			`,
 			extenderId,
