@@ -25,6 +25,15 @@ package model
 //	    pro_ending: false        # crypto Pro stops in 14 and 2 days
 //	    trial_ending: false      # an App Store or Play trial ends in 2 days
 //	    trial_ending_stores: [apple, play]
+//	  winback_offer:             # W1's comeback offer; inert unless enabled
+//	    enabled: false
+//	    percent_off: 50
+//	    plan: monthly
+//	    validity_days: 14
+//	    stripe_coupon_id: winback_monthly_50
+//	    play_offer_tag: winback-monthly-50
+//	    apple_offer_id: ""       # the App Store win-back offer's identifier
+//	    apple_offer_url: ""      # its direct link, https://apps.apple.com/win-back/<Apple ID>
 //
 // The mail policy (who may be mailed, by country and consent evidence) is
 // onboarding.yml `policy`, shared by both programs.
@@ -32,6 +41,7 @@ package model
 import (
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/urnetwork/glog"
@@ -110,6 +120,37 @@ func (c ReengagementServiceRemindersConfig) EffectiveTrialEndingStores() []strin
 	return c.TrialEndingStores
 }
 
+// ReengagementWinbackOfferConfig is the comeback offer W1 issues
+// (mmm/reengagement/PLAN.md "THE STORES", decision 5): the monthly plan's
+// first month at percent_off on Google Play and Stripe for the W experiment's
+// offer arm, and Apple's own win-back offer on the monthly product for the
+// networks Apple lists; nothing on yearly, nothing for crypto. Inert unless
+// enabled, and refused whole when its shape breaks the rule over every offer
+// (reengagement.WinbackShapeRefusal).
+type ReengagementWinbackOfferConfig struct {
+	Enabled    bool   `yaml:"enabled"`
+	PercentOff int    `yaml:"percent_off"`
+	Plan       string `yaml:"plan"`
+	// how long an issued offer stays redeemable: its real deadline
+	ValidityDays int `yaml:"validity_days"`
+	// the Stripe coupon (percent_off, duration once), created or fetched by
+	// the server; each offer is a per-customer promotion code on it
+	StripeCouponId string `yaml:"stripe_coupon_id"`
+	// the tag of the developer-determined offer on the Play monthly base plan
+	PlayOfferTag string `yaml:"play_offer_tag"`
+	// the App Store Connect win-back offer's identifier, as the App Store
+	// Server API lists it in eligibleWinBackOfferIds; empty = no App Store offer
+	AppleOfferId string `yaml:"apple_offer_id"`
+	// the offer's direct link as App Store Connect shows it
+	// (https://apps.apple.com/win-back/<the offer's Apple ID>); the W1 landing
+	// opens it for the networks Apple lists. Empty = the plan screen.
+	AppleOfferUrl string `yaml:"apple_offer_url"`
+}
+
+// AppleWinbackOfferUrlPrefix is the form of an App Store win-back offer's
+// direct link (StoreKit "Supporting win-back offers in your app").
+const AppleWinbackOfferUrlPrefix = "https://apps.apple.com/win-back/"
+
 type ReengagementConfig struct {
 	Enabled  bool                       `yaml:"enabled"`
 	Brevo    OnboardingBrevoConfig      `yaml:"brevo"`
@@ -122,6 +163,8 @@ type ReengagementConfig struct {
 	Experiments []*OnboardingExperiment        `yaml:"experiments"`
 	// the service notices, each off unless turned on
 	ServiceReminders ReengagementServiceRemindersConfig `yaml:"service_reminders"`
+	// W1's comeback offer, off unless turned on
+	WinbackOffer ReengagementWinbackOfferConfig `yaml:"winback_offer"`
 
 	highlights []*reengagement.Highlight
 }
@@ -155,7 +198,23 @@ var reengagementConfig = sync.OnceValue(func() *ReengagementConfig {
 
 // Reengagement returns the parsed config (cached; parsed once per process).
 func Reengagement() *ReengagementConfig {
+	if c := reengagementConfigOverride.Load(); c != nil {
+		return c
+	}
 	return reengagementConfig()
+}
+
+var reengagementConfigOverride atomic.Pointer[ReengagementConfig]
+
+// Testing_SetReengagementConfig makes Reengagement() answer c, built the way
+// the loader builds it, until the returned function restores the previous
+// answer. For tests of the program's controllers, which no reengagement.yml
+// reaches.
+func Testing_SetReengagementConfig(c *ReengagementConfig) func() {
+	previous := reengagementConfigOverride.Swap(newReengagementConfig(c))
+	return func() {
+		reengagementConfigOverride.Store(previous)
+	}
 }
 
 func newReengagementConfig(c *ReengagementConfig) *ReengagementConfig {
@@ -276,6 +335,73 @@ func (c *ReengagementConfig) EffectiveReplyTo() string {
 		return v
 	}
 	return Onboarding().EffectiveReplyTo()
+}
+
+// WinbackOfferRefusal is why W1 may not issue the comeback offer at all, or ""
+// when it may: turned on, with a deadline, and a shape that keeps the rule
+// over every offer against the configured welcome offer at every Pro price
+// tier.
+func (c *ReengagementConfig) WinbackOfferRefusal() string {
+	return c.winbackOfferRefusal(Onboarding().Offer.PercentOff, Pro().PriceTiers())
+}
+
+func (c *ReengagementConfig) winbackOfferRefusal(welcomePercentOff int, tiers []*ProPriceTier) string {
+	w := c.WinbackOffer
+	if !w.Enabled {
+		return "winback_offer.enabled is false"
+	}
+	if w.ValidityDays <= 0 {
+		return "winback_offer.validity_days is not set"
+	}
+	prices := make([]reengagement.WinbackTierPrices, 0, len(tiers))
+	for _, tier := range tiers {
+		prices = append(prices, reengagement.WinbackTierPrices{Name: tier.Name, MonthlyUsd: tier.MonthlyUsd, YearlyUsd: tier.YearlyUsd})
+	}
+	if refusal := reengagement.WinbackShapeRefusal(strings.TrimSpace(w.Plan), w.PercentOff, welcomePercentOff, prices); refusal != "" {
+		winbackShapeRefusalLog.Do(func() {
+			glog.Errorf("[reengagement]winback_offer is refused: %s; W1 issues no offer\n", refusal)
+		})
+		return refusal
+	}
+	return ""
+}
+
+var winbackShapeRefusalLog sync.Once
+
+// WinbackOfferEnabled is WinbackOfferRefusal() == "".
+func (c *ReengagementConfig) WinbackOfferEnabled() bool {
+	return c.WinbackOfferRefusal() == ""
+}
+
+// WinbackOfferValidity is how long an issued offer stays redeemable.
+func (c *ReengagementConfig) WinbackOfferValidity() time.Duration {
+	return time.Duration(c.WinbackOffer.ValidityDays) * 24 * time.Hour
+}
+
+// WinbackStoreHandle is the configured handle of a store's offer: the Stripe
+// coupon, the Play offer tag or the App Store offer identifier. "" when the
+// store has none, which means no offer on that store.
+func (c *ReengagementConfig) WinbackStoreHandle(store string) string {
+	switch store {
+	case reengagement.WinbackStoreStripe:
+		return strings.TrimSpace(c.WinbackOffer.StripeCouponId)
+	case reengagement.WinbackStorePlay:
+		return strings.TrimSpace(c.WinbackOffer.PlayOfferTag)
+	case reengagement.WinbackStoreApple:
+		return strings.TrimSpace(c.WinbackOffer.AppleOfferId)
+	}
+	return ""
+}
+
+// WinbackAppleOfferUrl is the App Store win-back offer's direct link when one
+// of the documented form is configured, else "".
+func (c *ReengagementConfig) WinbackAppleOfferUrl() string {
+	link := strings.TrimSpace(c.WinbackOffer.AppleOfferUrl)
+	id, ok := strings.CutPrefix(link, AppleWinbackOfferUrlPrefix)
+	if !ok || id == "" || strings.Trim(id, "0123456789") != "" {
+		return ""
+	}
+	return link
 }
 
 // AssignmentForSurface is the network's variant of the experiment running on a

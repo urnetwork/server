@@ -1595,6 +1595,112 @@
           "legendFormat": "{{event}} {{template}}"
         }
       ]
+    },
+    {
+      "type": "timeseries",
+      "title": "re-engagement win-back offers / day by store and result",
+      "description": "W1's comeback offer at each real send: issued, existing (a replayed W1 mailed the offer it issued), or why none went out (disabled, no_store for crypto, holdout, no_offer_arm, country, never_paid, recent_offer, apple_ineligible, apple_error, store_error). Google Play and Stripe offers go to the W experiment's offer arm; the App Store's to every mailed arm Apple lists.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 116
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (store, result) (increase(urnetwork_reengagement_winback_offers_total{env=\"$env\"}[1d]))",
+          "refId": "A",
+          "legendFormat": "{{store}} {{result}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "re-engagement win-back redemptions / day by store and result",
+      "description": "Purchases made under a win-back offer's handle: redeemed (stamped the network's offer), unissued (no offer was ever issued to the network on that store: on Play, a client selecting the developer-determined offer on its own), unmatched (outside the network's unredeemed offer), failed (the stamp was not written; the credit went through).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 116
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (store, result) (increase(urnetwork_reengagement_winback_redemptions_total{env=\"$env\"}[1d]))",
+          "refId": "A",
+          "legendFormat": "{{store}} {{result}}"
+        }
+      ]
     }
   ]
 }

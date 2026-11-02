@@ -380,12 +380,15 @@ func ReengagementStep(args *ReengagementStepArgs, clientSession *session.ClientS
 	var sentAt *time.Time
 	switch decision.Action {
 	case reengagement.ActionSend:
-		outcome, err := sendReengagementEmail(ctx, row, args.Step, decision, facts, now)
+		outcome, sent, err := sendReengagementEmail(ctx, row, args.Step, decision, facts, now)
 		if err != nil {
 			reengagementEmailsTotal.WithLabelValues(args.Step, decision.Template, decision.Variant, "failed").Inc()
 			model.RecordNetworkReengagementSendFailure(ctx, row.NetworkId, err.Error())
 			return nil, err
 		}
+		// W1 goes out without its offer when none could be issued
+		decision = sent
+		result.Variant = decision.Variant
 		reengagementEmailsTotal.WithLabelValues(args.Step, decision.Template, decision.Variant, outcome).Inc()
 		if outcome == "sent" {
 			sentAt = &now
@@ -482,6 +485,10 @@ func loadReengagementFacts(ctx context.Context, row *model.NetworkReengagement, 
 			}
 			f.Highlights = reengagement.FixHighlights(cfg.ParsedHighlights(), platform, row.Country, row.FixReason, *row.FixReasonAt, now)
 		}
+	case reengagement.StreamWinback:
+		// the comeback offer (Google Play and Stripe, the offer arm); the App
+		// Store's is decided at the send, where Apple is asked
+		f.OfferAllowed = winbackComebackOfferAllowed(winbackOfferFacts(ctx, row, now))
 	}
 	f.Clicked = model.NetworkHasEventSince(ctx, row.NetworkId, model.EventReengageLandingClicked, row.StartedAt)
 	return f
@@ -511,7 +518,10 @@ func reengagementProEndedAt(ctx context.Context, networkId server.Id) *time.Time
 	return &end
 }
 
-func buildReengagementSendPlan(ctx context.Context, row *model.NetworkReengagement, step string, decision reengagement.Decision, facts reengagement.Facts, now time.Time) (*ReengagementSendPlan, error) {
+// buildReengagementSendPlan resolves a send. offer is the win-back offer W1
+// issued for this send; without one, an offer variant (a dry run, a preview)
+// shows the expiry an offer issued now would have.
+func buildReengagementSendPlan(ctx context.Context, row *model.NetworkReengagement, step string, decision reengagement.Decision, facts reengagement.Facts, offer *model.WinbackOffer, now time.Time) (*ReengagementSendPlan, error) {
 	cfg := model.Reengagement()
 	templateId, locale, ok := cfg.Brevo.TemplateIdLocale(decision.Template, decision.Variant, row.Locale)
 	if !ok || templateId <= 0 {
@@ -543,6 +553,17 @@ func buildReengagementSendPlan(ctx context.Context, row *model.NetworkReengageme
 	}
 	if decision.Template == reengagement.TemplateW1Winback {
 		in.ProEndedAt = reengagementProEndedAt(ctx, row.NetworkId)
+		switch {
+		case offer != nil && offer.Store == reengagement.WinbackStoreApple:
+			// Apple's offer: the App Store line, never a price or a date of ours
+			in.AppleOfferHint = true
+		case offer != nil:
+			expiresAt := offer.ExpiresAt
+			in.OfferExpiresAt = &expiresAt
+		case decision.Variant == reengagement.VariantOffer:
+			expiresAt := now.Add(cfg.WinbackOfferValidity())
+			in.OfferExpiresAt = &expiresAt
+		}
 	}
 	return &ReengagementSendPlan{
 		Step:       step,
@@ -573,24 +594,40 @@ func brevoSendReengagementTemplate(ctx context.Context, to string, plan *Reengag
 }
 
 // sendReengagementEmail renders and sends one step. Returns "sent" or
-// "dry_run"; an error means retry.
-func sendReengagementEmail(ctx context.Context, row *model.NetworkReengagement, step string, decision reengagement.Decision, facts reengagement.Facts, now time.Time) (string, error) {
+// "dry_run" and the decision the email went out with (W1 drops to its default
+// variant when no offer could be issued); an error means retry. W1 issues its
+// win-back offer here, after the one-a-week deferral and right before the
+// send, so the offer's deadline starts with the email; a dry run issues
+// nothing.
+func sendReengagementEmail(ctx context.Context, row *model.NetworkReengagement, step string, decision reengagement.Decision, facts reengagement.Facts, now time.Time) (string, reengagement.Decision, error) {
 	_, userAuth, ok := model.GetNetworkAdminUserAuth(ctx, row.NetworkId)
 	if !ok || !strings.Contains(userAuth, "@") {
-		return "", fmt.Errorf("network %s has no admin email", row.NetworkId)
-	}
-	plan, err := buildReengagementSendPlan(ctx, row, step, decision, facts, now)
-	if err != nil {
-		return "", err
+		return "", decision, fmt.Errorf("network %s has no admin email", row.NetworkId)
 	}
 	if !ReengagementEnabled() {
+		plan, err := buildReengagementSendPlan(ctx, row, step, decision, facts, nil, now)
+		if err != nil {
+			return "", decision, err
+		}
 		glog.V(1).Infof("[reengagement]dry run: would send %s/%s/%s (template %d) to %s for network %s\n",
 			plan.Template, plan.Variant, plan.Locale, plan.TemplateId, maskEmail(userAuth), row.NetworkId)
-		return "dry_run", nil
+		return "dry_run", decision, nil
+	}
+	var offer *model.WinbackOffer
+	if decision.Template == reengagement.TemplateW1Winback {
+		var err error
+		offer, decision, err = issueWinbackOfferForSend(ctx, row, decision, now)
+		if err != nil {
+			return "", decision, err
+		}
+	}
+	plan, err := buildReengagementSendPlan(ctx, row, step, decision, facts, offer, now)
+	if err != nil {
+		return "", decision, err
 	}
 	messageId, err := brevoSendReengagementTemplate(ctx, userAuth, plan)
 	if err != nil {
-		return "", err
+		return "", decision, err
 	}
 	server.Tx(ctx, func(tx server.PgTx) {
 		model.AddNetworkReengagementEmailInTx(tx, ctx, &model.NetworkReengagementEmail{
@@ -607,7 +644,7 @@ func sendReengagementEmail(ctx context.Context, row *model.NetworkReengagement, 
 		})
 	})
 	writeReengagementEmailEvent(ctx, row, model.EventReengageEmailSent, plan.Template, plan.Variant, step, now)
-	return "sent", nil
+	return "sent", decision, nil
 }
 
 func writeReengagementEmailEvent(ctx context.Context, row *model.NetworkReengagement, name string, template string, variant string, step string, at time.Time) {
@@ -775,7 +812,7 @@ func ReengagementNetworkPreview(ctx context.Context, networkId server.Id, step s
 	decision := reengagement.Decide(step, facts, model.Reengagement().ScheduleValue())
 	preview := &ReengagementPreview{Decision: decision}
 	if decision.Action == reengagement.ActionSend || decision.Action == reengagement.ActionVirtual {
-		plan, err := buildReengagementSendPlan(ctx, row, step, decision, facts, now)
+		plan, err := buildReengagementSendPlan(ctx, row, step, decision, facts, nil, now)
 		if err != nil {
 			preview.Error = err.Error()
 		} else {

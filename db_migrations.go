@@ -11162,4 +11162,11 @@ var migrations = []any{
 		CREATE INDEX network_reengagement_email_network_sent
 		ON network_reengagement_email (network_id, sent_at)
 	`),
+
+	// The re-engagement program's win-back offers (network_winback_offer_schema.go,
+	// mmm/reengagement/PLAN.md "THE STORES" 6): one row per offer, the
+	// network's offers in time order through its index. A new table: nothing
+	// is rewritten, and older binaries never read it. Apply before deploying
+	// the api and taskworker that write it.
+	newSqlMigration(networkWinbackOfferSchemaSql),
 }
