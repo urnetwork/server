@@ -7,8 +7,6 @@ import (
 
 	"github.com/urnetwork/glog"
 
-	"github.com/urnetwork/connect"
-
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
@@ -68,19 +66,10 @@ var probeExtenderAddress = func(
 	serverName string,
 	destinationHost string,
 ) error {
-	_, err := connect.ProbeExtenderCarrier(
-		ctx,
-		controller.ExtenderProbeConnectSettings(),
-		target.Ip,
-		connect.ExtenderConnectModeTcpTls,
-		target.TcpPort,
-		target.DnsTld,
-		serverName,
-		target.PublicKey,
-		destinationHost,
-		controller.ExtenderProbeDestinationPort,
-	)
-	return err
+	// the dial, with the camouflage key the extender's records carry, is the
+	// controller's, so it is proved against an in-process extender in both
+	// phases (phase 14b)
+	return controller.ProbeExtenderUptime(ctx, target, serverName, destinationHost)
 }
 
 type ExtenderProbeArgs struct {
