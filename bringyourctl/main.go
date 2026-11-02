@@ -96,6 +96,7 @@ Usage:
     bringyourctl reengagement preview --network_id=<network_id> --step=<step>
     bringyourctl reengagement scan [--dry-run]
     bringyourctl reengagement send-test --email=<email> --template=<template> [--variant=<variant>] [--locale=<locale>]
+    bringyourctl reengagement mirror-suppressions
     bringyourctl payments reconcile [--dry-run] [--store=<store>]
     bringyourctl payments stripe-dunning [--send]
     bringyourctl crypto list [--asset=<asset>] [--state=<state>] [--limit=<n>]
@@ -398,6 +399,8 @@ func main() {
 			reengagementScan(opts)
 		} else if sendTest, _ := opts.Bool("send-test"); sendTest {
 			reengagementSendTest(opts)
+		} else if mirrorSuppressions, _ := opts.Bool("mirror-suppressions"); mirrorSuppressions {
+			reengagementMirrorSuppressions(opts)
 		}
 	} else if onboarding_, _ := opts.Bool("onboarding"); onboarding_ {
 		if status, _ := opts.Bool("status"); status {
@@ -3365,6 +3368,15 @@ func reengagementSendTest(opts docopt.Opts) {
 		os.Exit(1)
 	}
 	fmt.Printf("sent %s/%s/%s: message %s\n", template, variant, locale, messageId)
+}
+
+// reengagementMirrorSuppressions queues the Brevo mirror of every marketing
+// suppression (the product-updates sync of each suppressed network's admin):
+// run once after the mirror deploys, for the suppressions recorded before it.
+// Safe to repeat.
+func reengagementMirrorSuppressions(opts docopt.Opts) {
+	queued := controller.MirrorNetworkMarketingSuppressions(context.Background())
+	fmt.Printf("queued the product-updates sync for %d suppressed networks\n", queued)
 }
 
 // ----- onboarding campaign (mmm/onboarding/PLAN.md) -----

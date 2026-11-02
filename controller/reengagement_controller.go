@@ -202,7 +202,7 @@ func ReengagementScan(args *ReengagementScanArgs, clientSession *session.ClientS
 		// a connection renews the relationship a sunset or a "switched" ended
 		liftable := []string{reengagement.SuppressSunset, reengagement.SuppressSwitched}
 		for _, networkId := range model.ListLiftableSuppressedNetworksConnectedOn(ctx, today.Add(-day), today.Add(day), liftable, limit) {
-			if model.LiftNetworkMarketingSuppression(ctx, networkId, liftable) {
+			if LiftNetworkMarketingSuppression(ctx, networkId, liftable) {
 				result.Lifted++
 			}
 		}
@@ -426,7 +426,7 @@ func ReengagementStepPost(args *ReengagementStepArgs, result *ReengagementStepRe
 func applyReengagementExit(ctx context.Context, row *model.NetworkReengagement, reason string, suppress string, joinFix string, quiet bool, now time.Time) {
 	s := model.Reengagement().ScheduleValue()
 	if suppress != "" {
-		model.SuppressNetworkMarketing(ctx, row.NetworkId, suppress, now)
+		SuppressNetworkMarketing(ctx, row.NetworkId, suppress, now)
 	}
 	if joinFix != "" {
 		model.JoinNetworkReengagementFix(ctx, row.NetworkId, joinFix, row.Platform, now)
@@ -687,10 +687,10 @@ func handleReengagementBrevoWebhook(ctx context.Context, args *BrevoWebhookArgs)
 	writeReengagementEmailEvent(ctx, &eventRow, name, email.Template, email.Variant, email.Step, at)
 	switch name {
 	case model.EventReengageEmailBounced:
-		model.SuppressNetworkMarketing(ctx, email.NetworkId, reengagement.ExitBounced, at)
+		SuppressNetworkMarketing(ctx, email.NetworkId, reengagement.ExitBounced, at)
 		applyReengagementExit(ctx, row, reengagement.ExitBounced, "", "", false, at)
 	case model.EventReengageEmailComplained:
-		model.SuppressNetworkMarketing(ctx, email.NetworkId, reengagement.ExitComplained, at)
+		SuppressNetworkMarketing(ctx, email.NetworkId, reengagement.ExitComplained, at)
 		applyReengagementExit(ctx, row, reengagement.ExitComplained, "", "", false, at)
 	case model.EventReengageEmailUnsubscribed:
 		applyReengagementExit(ctx, row, reengagement.ExitOptOut, "", "", false, at)
