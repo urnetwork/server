@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"errors"
+	"math"
 	"net/netip"
 	"strings"
 	"testing"
@@ -41,7 +43,7 @@ func TestExtenderActivationRunKeepsOnlyAWellFormedId(t *testing.T) {
 		// a uuid is 128 bits too, but not the form the field names
 		{runId: "00112233-4455-6677-8899-aabbccddeeff", expected: ""},
 	} {
-		runId, _, _ := extenderActivationRun(&ExtenderActivateArgs{RunId: c.runId}, now, DefaultExtenderActivateSettings())
+		runId, _, _ := extenderActivationRun(&ExtenderActivateArgs{RunId: c.runId}, now)
 		if c.expected == "" {
 			if runId != nil {
 				t.Errorf("run id %q was kept as %q", c.runId, *runId)
@@ -76,7 +78,7 @@ func TestExtenderActivationRunKeepsOnlyASaneStart(t *testing.T) {
 		// the same instant as now, written in another zone
 		{name: "another zone", startTime: now.In(time.FixedZone("test", 5*60*60)), kept: true},
 	} {
-		_, runStartTime, _ := extenderActivationRun(&ExtenderActivateArgs{RunStartTime: c.startTime.Format(time.RFC3339Nano)}, now, DefaultExtenderActivateSettings())
+		_, runStartTime, _ := extenderActivationRun(&ExtenderActivateArgs{RunStartTime: c.startTime.Format(time.RFC3339Nano)}, now)
 		if !c.kept {
 			if runStartTime != nil {
 				t.Errorf("%s: start %s was kept", c.name, c.startTime)
@@ -94,7 +96,7 @@ func TestExtenderActivationRunKeepsOnlyASaneStart(t *testing.T) {
 
 	// no start is no start, and a string that is no time is none either
 	for _, startTime := range []string{"", "yesterday", "2026-11-02", "1793620800"} {
-		_, runStartTime, _ := extenderActivationRun(&ExtenderActivateArgs{RunStartTime: startTime}, now, DefaultExtenderActivateSettings())
+		_, runStartTime, _ := extenderActivationRun(&ExtenderActivateArgs{RunStartTime: startTime}, now)
 		if runStartTime != nil {
 			t.Errorf("start %q was stored as %s", startTime, runStartTime)
 		}
@@ -133,7 +135,7 @@ func TestExtenderActivationRunKeepsOnlyAKnownPreviousExit(t *testing.T) {
 		{previousExit: "killed by the kernel for memory", expected: ""},
 		{previousExit: "sigkill; drop table", expected: ""},
 	} {
-		_, _, previousExit := extenderActivationRun(&ExtenderActivateArgs{PreviousExit: c.previousExit}, now, DefaultExtenderActivateSettings())
+		_, _, previousExit := extenderActivationRun(&ExtenderActivateArgs{PreviousExit: c.previousExit}, now)
 		if c.expected == "" {
 			if previousExit != nil {
 				t.Errorf("previous exit %q was kept as %q", c.previousExit, *previousExit)
@@ -155,26 +157,6 @@ func TestExtenderActivationRunKeepsOnlyAKnownPreviousExit(t *testing.T) {
 	}
 }
 
-// The skew is the settings': the default an hour, and zero allows none.
-func TestExtenderActivationRunTakesTheSkewFromItsSettings(t *testing.T) {
-	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
-	args := &ExtenderActivateArgs{RunStartTime: now.Add(time.Minute).Format(time.RFC3339)}
-
-	_, runStartTime, _ := extenderActivationRun(args, now, DefaultExtenderActivateSettings())
-	if runStartTime == nil {
-		t.Fatal("a start a minute ahead was dropped under the default skew")
-	}
-	_, runStartTime, _ = extenderActivationRun(args, now, &ExtenderActivateSettings{})
-	if runStartTime != nil {
-		t.Fatalf("a start a minute ahead was kept with no skew: %s", runStartTime)
-	}
-	args.RunStartTime = now.Format(time.RFC3339)
-	_, runStartTime, _ = extenderActivationRun(args, now, &ExtenderActivateSettings{})
-	if runStartTime == nil {
-		t.Fatal("a start at the operator's own instant was dropped with no skew")
-	}
-}
-
 // The fields are judged one by one, so one that is malformed costs only itself.
 func TestExtenderActivationRunJudgesEachFieldOnItsOwn(t *testing.T) {
 	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
@@ -183,7 +165,7 @@ func TestExtenderActivationRunJudgesEachFieldOnItsOwn(t *testing.T) {
 		RunId:        testExtenderRunId,
 		RunStartTime: wrongClock.Format(time.RFC3339),
 		PreviousExit: "sigkill",
-	}, now, DefaultExtenderActivateSettings())
+	}, now)
 	if runId == nil || *runId != testExtenderRunId {
 		t.Fatalf("the well formed id was lost beside a wrong clock: %v", runId)
 	}
@@ -285,8 +267,77 @@ func TestExtenderActivateWithoutARunStoresNull(t *testing.T) {
 	})
 }
 
-// Activates a new key once per run, so its history holds each of the runs.
-func testActivateExtenderRuns(ctx context.Context, name string, runIds ...string) server.Id {
+// A refusal of any stage stores nothing of the run: the run is read only once
+// the probes have passed, past the busy, budget and probe refusals' returns. Each
+// refused post names a run of its own, and the history keeps the one activation
+// that was stored.
+func TestExtenderActivateRefusedStoresNoRun(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		installTestExtenderConfig(t, nil)
+
+		account := newTestExtenderAccount(ctx)
+		host := account.newHost(t, ctx)
+		const hostIp = "198.51.100.4"
+		runStartTime := server.NowUtc().Add(-time.Minute).Format(time.RFC3339Nano)
+		// spent by the activation that is stored and the probe that is refused
+		const budget = 2
+		activate := func(
+			settings *ExtenderActivateSettings,
+			carrierErr error,
+			runId string,
+		) *ExtenderActivateResult {
+			service := newExtenderActivateService(settings)
+			service.testProbes = testFakeExtenderProbes(carrierErr)
+			args := host.activateArgs()
+			args.RunId = runId
+			args.RunStartTime = runStartTime
+			args.PreviousExit = "sigkill"
+			result, err := service.activate(args, host.session(ctx, hostIp))
+			if err != nil {
+				t.Fatal(err)
+			}
+			return result
+		}
+
+		settings := DefaultExtenderActivateSettings()
+		settings.ClientRateLimit = budget
+		stored := activate(settings, nil, testExtenderRunId)
+		if !stored.Activated {
+			t.Fatalf("the first activation was refused: %s", stored.Error)
+		}
+		extenderId := *stored.ExtenderId
+		expectStoredOnly := func(refusal string, result *ExtenderActivateResult) {
+			t.Helper()
+			if result.Activated {
+				t.Fatalf("the %s was activated", refusal)
+			}
+			activations := model.GetNetworkExtenderActivations(ctx, extenderId, time.Time{})
+			connect.AssertEqual(t, len(activations), 1)
+			if activations[0].RunId == nil || *activations[0].RunId != testExtenderRunId {
+				t.Fatalf("after the %s the history holds run %v", refusal, activations[0].RunId)
+			}
+		}
+
+		busySettings := DefaultExtenderActivateSettings()
+		busySettings.MaxConcurrentProbes = 0
+		busy := activate(busySettings, nil, "11112233445566778899aabbccddeeff")
+		connect.AssertEqual(t, 0 < busy.RetryAfterSeconds, true)
+		expectStoredOnly("busy refusal", busy)
+
+		probeRefused := activate(settings, errors.New("test carrier refused"), "22222233445566778899aabbccddeeff")
+		connect.AssertEqual(t, probeRefused.RetryAfterSeconds, 0)
+		expectStoredOnly("probe refusal", probeRefused)
+
+		budgetRefused := activate(settings, nil, "33332233445566778899aabbccddeeff")
+		connect.AssertEqual(t, 0 < budgetRefused.RetryAfterSeconds, true)
+		expectStoredOnly("budget refusal", budgetRefused)
+	})
+}
+
+// Activates a new key once per run, each run started at `runStartTime`, so its
+// history holds each of the runs. An empty run id is an activation with none.
+func testActivateExtenderRuns(ctx context.Context, name string, runStartTime time.Time, runIds ...string) server.Id {
 	publicKey := []byte("extender-run-test-" + name)
 	var extenderId server.Id
 	for _, runId := range runIds {
@@ -305,6 +356,7 @@ func testActivateExtenderRuns(ctx context.Context, name string, runIds ...string
 		}
 		if runId != "" {
 			activation.RunId = &runId
+			activation.RunStartTime = &runStartTime
 		}
 		activated := model.ActivateNetworkExtender(ctx, activation, func(
 			extender *model.NetworkExtender,
@@ -318,33 +370,78 @@ func testActivateExtenderRuns(ctx context.Context, name string, runIds ...string
 	return extenderId
 }
 
-// The gauges count extenders, not activations: five distinct runs in the window
-// make an extender restarting, four do not, and one run re-activating many
-// times is one run. An extender on an older release, with no run id, is in
-// neither. Both publish a zero rather than go silent: a zero is the count.
-func TestStatsRefreshExtenderRunsCountsRestartingExtenders(t *testing.T) {
+// The gauges count extenders, through the refresh the collector runs: five runs
+// started in the window make an extender restarting, four do not, and one run
+// re-activating many times is one run. Long-lived copies of one key, which
+// started before the window, are no restart however many there are. An extender
+// on an older release, with no run id, is in neither. Both publish a zero rather
+// than go silent: a zero is the count.
+func TestStatsRefreshExtendersCountsRestartingExtenders(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		now := server.NowUtc()
+		startedInTheWindow := now.Add(-time.Hour)
+		startedBeforeTheWindow := now.Add(-3 * statsExtenderRunsWindow)
 
 		// nothing reports yet, which is the fleet until a connect release
 		// with run ids reaches it
-		testActivateExtenderRuns(ctx, "older-release", "", "", "", "", "", "")
-		statsRefreshExtenderRuns(ctx, now)
+		testActivateExtenderRuns(ctx, "older-release", time.Time{}, "", "", "", "", "", "")
+		statsRefreshExtenders(ctx, now)
 		connect.AssertEqual(t, testStatsGaugeValue(t, statsExtendersRestarting24hGauge), float64(0))
 		connect.AssertEqual(t, testStatsGaugeValue(t, statsExtendersReportingRuns24hGauge), float64(0))
 
-		testActivateExtenderRuns(ctx, "restarting", "run-1", "run-2", "run-3", "run-4", "run-5")
-		testActivateExtenderRuns(ctx, "restarted-a-few-times", "run-1", "run-2", "run-3", "run-4")
-		testActivateExtenderRuns(ctx, "stable", "run-1", "run-1", "run-1", "run-1", "run-1", "run-1")
-		statsRefreshExtenderRuns(ctx, now)
+		testActivateExtenderRuns(ctx, "restarting", startedInTheWindow, "run-1", "run-2", "run-3", "run-4", "run-5")
+		testActivateExtenderRuns(ctx, "restarted-a-few-times", startedInTheWindow, "run-1", "run-2", "run-3", "run-4")
+		testActivateExtenderRuns(ctx, "stable", startedInTheWindow, "run-1", "run-1", "run-1", "run-1", "run-1", "run-1")
+		testActivateExtenderRuns(ctx, "long-lived-copies", startedBeforeTheWindow, "copy-1", "copy-2", "copy-3", "copy-4", "copy-5")
+		statsRefreshExtenders(ctx, now)
 		connect.AssertEqual(t, testStatsGaugeValue(t, statsExtendersRestarting24hGauge), float64(1))
-		connect.AssertEqual(t, testStatsGaugeValue(t, statsExtendersReportingRuns24hGauge), float64(3))
+		connect.AssertEqual(t, testStatsGaugeValue(t, statsExtendersReportingRuns24hGauge), float64(4))
 
 		// the window trails the collector's clock: a day on, those runs have
 		// left it, and the gauges read zero again
 		statsRefreshExtenderRuns(ctx, now.Add(statsExtenderRunsWindow+time.Hour))
 		connect.AssertEqual(t, testStatsGaugeValue(t, statsExtendersRestarting24hGauge), float64(0))
 		connect.AssertEqual(t, testStatsGaugeValue(t, statsExtendersReportingRuns24hGauge), float64(0))
+	})
+}
+
+// A read that fails withdraws both gauges rather than hold their last values
+// through a database incident, whether it was their own read or an earlier one
+// of the refresh that never reached it, and the next read that works publishes
+// them again.
+func TestStatsExtenderRunsAreWithdrawnWhenAReadFails(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+		testActivateExtenderRuns(ctx, "reporting", now.Add(-time.Hour), "run-1")
+
+		expectPublished := func() {
+			t.Helper()
+			statsRefreshExtenderRuns(ctx, now)
+			connect.AssertEqual(t, testStatsGaugeValue(t, statsExtendersRestarting24hGauge), float64(0))
+			connect.AssertEqual(t, testStatsGaugeValue(t, statsExtendersReportingRuns24hGauge), float64(1))
+		}
+		expectWithdrawn := func() {
+			t.Helper()
+			if value := testStatsGaugeValue(t, statsExtendersRestarting24hGauge); !math.IsNaN(value) {
+				t.Fatalf("extenders_restarting_24h = %f, want it withdrawn", value)
+			}
+			if value := testStatsGaugeValue(t, statsExtendersReportingRuns24hGauge); !math.IsNaN(value) {
+				t.Fatalf("extenders_reporting_runs_24h = %f, want it withdrawn", value)
+			}
+		}
+		failedCtx, cancel := context.WithCancel(ctx)
+		cancel()
+
+		expectPublished()
+		statsRefreshExtenderRuns(failedCtx, now)
+		expectWithdrawn()
+
+		expectPublished()
+		statsRefreshDbIsolated(failedCtx, newStatsEpochClock().window(now))
+		expectWithdrawn()
+
+		expectPublished()
 	})
 }

@@ -93,37 +93,45 @@ func TestExtenderActivationStoresTheRun(t *testing.T) {
 	})
 }
 
-// The run counts are of extenders, by the distinct runs among their
-// activations in the window: not activations, not families, and not anything
-// that left the window.
+// The run counts are of extenders, by the distinct runs among their activations
+// in the window that started in it: not activations, not families, not anything
+// that left the window, and not long-lived copies of a key.
 func TestCountExtenderRunsCountsDistinctRunsInTheWindow(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		sign, _ := testRecordSigner()
 		now := server.NowUtc()
 		since := now.Add(-24 * time.Hour)
+		startedInTheWindow := now.Add(-time.Hour)
 
-		// one activation per run id, an empty id being none
-		activate := func(name string, runIds ...string) server.Id {
+		// one activation per run id on the family, an empty id being none and a
+		// nil start one the operator dropped as malformed
+		activateFamily := func(name string, ipVersion int, ip string, runStartTime *time.Time, runIds ...string) server.Id {
 			publicKey := []byte("extender-public-key-count-" + name)
 			var extenderId server.Id
 			for _, runId := range runIds {
-				activation := testExtenderActivation(publicKey, 4, "192.0.2.62")
+				activation := testExtenderActivation(publicKey, ipVersion, ip)
 				if runId != "" {
 					activation.RunId = &runId
+					activation.RunStartTime = runStartTime
 				}
 				extenderId = ActivateNetworkExtender(ctx, activation, sign).Extender.ExtenderId
 			}
 			return extenderId
 		}
-		// moves the rows of the given runs out of the window
+		activate := func(name string, runIds ...string) server.Id {
+			return activateFamily(name, 4, "192.0.2.62", &startedInTheWindow, runIds...)
+		}
+		// moves the rows of the given runs out of the window, the start with them
 		age := func(extenderId server.Id, runIds ...string) {
 			server.Tx(ctx, func(tx server.PgTx) {
 				server.RaisePgResult(tx.Exec(
 					ctx,
 					`
 					UPDATE network_extender_activation
-					SET activate_time = activate_time - interval '25 hours'
+					SET
+						activate_time = activate_time - interval '25 hours',
+						run_start_time = run_start_time - interval '25 hours'
 					WHERE extender_id = $1 AND run_id = ANY($2)
 					`,
 					extenderId,
@@ -144,17 +152,37 @@ func TestCountExtenderRunsCountsDistinctRunsInTheWindow(t *testing.T) {
 		activate("mixed", "a", "", "b", "", "c", "")
 		connect.AssertEqual(t, CountExtenderRuns(ctx, since, 5), ExtenderRunCounts{Reporting: 4, Restarting: 1})
 
+		// four runs that each post both families are still four runs
+		activate("both-families", "a", "b", "c", "d")
+		activateFamily("both-families", 6, "2001:db8::62", &startedInTheWindow, "a", "b", "c", "d")
+		connect.AssertEqual(t, CountExtenderRuns(ctx, since, 5), ExtenderRunCounts{Reporting: 5, Restarting: 1})
+
 		// five runs of which two left the window are three in it
 		leaving := activate("leaving", "a", "b", "c", "d", "e")
 		age(leaving, "a", "b")
-		connect.AssertEqual(t, CountExtenderRuns(ctx, since, 5), ExtenderRunCounts{Reporting: 5, Restarting: 1})
+		connect.AssertEqual(t, CountExtenderRuns(ctx, since, 5), ExtenderRunCounts{Reporting: 6, Restarting: 1})
 
 		// five runs all gone from the window are not reporting at all
 		gone := activate("gone", "a", "b", "c", "d", "e")
 		age(gone, "a", "b", "c", "d", "e")
-		connect.AssertEqual(t, CountExtenderRuns(ctx, since, 5), ExtenderRunCounts{Reporting: 5, Restarting: 1})
+		connect.AssertEqual(t, CountExtenderRuns(ctx, since, 5), ExtenderRunCounts{Reporting: 6, Restarting: 1})
 
-		// the threshold is the caller's
-		connect.AssertEqual(t, CountExtenderRuns(ctx, since, 4), ExtenderRunCounts{Reporting: 5, Restarting: 2})
+		// five long-lived copies of one key, each re-activating on its tick,
+		// report but restarted nothing: they started before the window
+		startedBeforeTheWindow := now.Add(-72 * time.Hour)
+		activateFamily("long-lived-copies", 4, "192.0.2.62", &startedBeforeTheWindow, "a", "b", "c", "d", "e")
+		connect.AssertEqual(t, CountExtenderRuns(ctx, since, 5), ExtenderRunCounts{Reporting: 7, Restarting: 1})
+
+		// and a copy among them that does restart counts its own starts alone
+		activateFamily("copies-one-restarting", 4, "192.0.2.62", &startedBeforeTheWindow, "a", "b", "c", "d")
+		activateFamily("copies-one-restarting", 4, "192.0.2.62", &startedInTheWindow, "e")
+		connect.AssertEqual(t, CountExtenderRuns(ctx, since, 5), ExtenderRunCounts{Reporting: 8, Restarting: 1})
+
+		// five runs whose starts the operator dropped report and never count
+		activateFamily("no-start", 4, "192.0.2.62", nil, "a", "b", "c", "d", "e")
+		connect.AssertEqual(t, CountExtenderRuns(ctx, since, 5), ExtenderRunCounts{Reporting: 9, Restarting: 1})
+
+		// the threshold is the caller's: five and four and both-families
+		connect.AssertEqual(t, CountExtenderRuns(ctx, since, 4), ExtenderRunCounts{Reporting: 9, Restarting: 3})
 	})
 }

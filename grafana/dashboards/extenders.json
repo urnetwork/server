@@ -3865,7 +3865,7 @@
      },
      "expr": "max(urnetwork_stats_extenders_restarting_24h{env=\"$env\"})",
      "refId": "A",
-     "legendFormat": "5 or more runs"
+     "legendFormat": "5 or more runs started"
     },
     {
      "datasource": {
@@ -3877,7 +3877,7 @@
      "legendFormat": "reporting runs"
     }
    ],
-   "description": "Extenders whose activations in the last 24 hours carried 5 or more distinct process run ids, beside the extenders that report a run id at all. Each activation names the run of the process that sent it, so a new run id is a restart; a process that restarts every half hour shows about 48 runs a day. Run ids arrive with a connect release, so a zero means no restarts only beside a population that reports them. Which extenders, and how their runs ended, is the query in connect/EXTENDER-ACTIVATION.md section 5."
+   "description": "Extenders with 5 or more distinct process runs started in the last 24 hours, beside the extenders that report a run id at all. Each activation names the run of the process that sent it, so a run that started in the window is a restart; a process that restarts every half hour starts about 48 a day, and long-lived copies of one key start none. Run ids arrive with a connect release, so a zero means no restarts only beside a population that reports them. A gap is a read that failed. Which extenders, and how their runs ended, is the query in connect/EXTENDER-ACTIVATION.md section 7."
   }
  ]
 }

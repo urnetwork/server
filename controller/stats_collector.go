@@ -59,7 +59,7 @@ package controller
 // the extender restart gauges are internal (connect/EXTENDER.md G3) and are
 // read only by grafana/dashboards/extenders.json:
 //
-//	urnetwork_stats_extenders_restarting_24h         extenders with 5 or more distinct process run ids in the trailing 24 hours (db)
+//	urnetwork_stats_extenders_restarting_24h         extenders with 5 or more process runs started in the trailing 24 hours (db)
 //	urnetwork_stats_extenders_reporting_runs_24h     extenders with any run id in the trailing 24 hours, what the first is drawn from (db)
 //
 // the lag.dev gauges are internal (lag.dev/PLAN.md X9), listed in
@@ -498,23 +498,23 @@ var statsExtenderGossipExtenders24hGauge = newStatsGaugeVec(
 // The restarts of the extender processes (connect/EXTENDER.md G3), read only
 // by the extenders dashboard. Two plain counts with no label, so the series
 // count does not grow with the population; which extenders they are, and how
-// their runs ended, is the query of connect/EXTENDER-ACTIVATION.md §5.
+// their runs ended, is the query of connect/EXTENDER-ACTIVATION.md §7.
 //
 // The second is the population the first is drawn from: run ids arrive with a
 // connect release, so a zero restarting reads as no restarts only beside a
 // population of extenders that report them.
 var statsExtendersRestarting24hGauge = newStatsGauge(
 	"extenders_restarting_24h",
-	"Extenders whose activations in the last 24 hours carried 5 or more distinct process run ids",
+	"Extenders whose activations in the last 24 hours carried 5 or more distinct process runs that started in those 24 hours",
 )
 var statsExtendersReportingRuns24hGauge = newStatsGauge(
 	"extenders_reporting_runs_24h",
 	"Extenders whose activations in the last 24 hours carried a process run id",
 )
 
-// The distinct runs in a window that make an extender restarting. One process
-// that runs through the window is one run and a restart every half hour is
-// about 48 a day, so five stands well clear of a host that was only updated or
+// The runs started in a window that make an extender restarting. A process that
+// runs through the window started none and a restart every half hour is about
+// 48 a day, so five stands well clear of a host that was only updated or
 // rebooted a few times.
 const statsExtenderRestartingMinRuns = 5
 
@@ -862,9 +862,7 @@ func StartStatsCollector(ctx context.Context) <-chan struct{} {
 				server.HandleError(func() {
 					statsRefreshProviderCapabilities(ctx)
 				})
-				server.HandleError(func() {
-					statsRefreshDb(ctx, window)
-				})
+				statsRefreshDbIsolated(ctx, window)
 			} else {
 				if !statsEpochUsersState.attempted || statsEpochUsersState.epoch != window.Epoch {
 					// a new epoch publishes its users, and the finished epoch's
@@ -1013,6 +1011,16 @@ func statsPublishEpochAlpha(ctx context.Context, deploymentKey model.StDeploymen
 	prevClaimsRao, prevMinersClaimed := source.claims(ctx, deploymentKey, window.PrevStartBlock, window.StartBlock)
 	statsPrevEpochMinerClaimsAlphaGauge.set(statsRaoToAlpha(prevClaimsRao))
 	statsPrevEpochMinersClaimedGauge.set(float64(prevMinersClaimed))
+}
+
+// One db refresh of the collector, whose failure never stops it. The first read
+// that fails ends the refresh, so in a database incident the extender run
+// gauges' own read is never reached: they are withdrawn here too, rather than
+// held at their last values for as long as it lasts.
+func statsRefreshDbIsolated(ctx context.Context, window statsEpochWindow) {
+	server.HandleError(func() {
+		statsRefreshDb(ctx, window)
+	}, statsWithdrawExtenderRuns)
 }
 
 func statsRefreshDb(ctx context.Context, window statsEpochWindow) {
@@ -1311,21 +1319,28 @@ func statsRefreshExtenders(ctx context.Context, now time.Time) {
 	server.HandleError(func() {
 		statsRefreshDerivedLocations(ctx)
 	})
-	// isolated the same way: a database the run columns' migration has not
-	// reached costs these two gauges alone
-	server.HandleError(func() {
-		statsRefreshExtenderRuns(ctx, now)
-	})
+	statsRefreshExtenderRuns(ctx, now)
 }
 
 // Publishes how many extenders restarted often in the trailing window, beside
 // how many report their runs at all (connect/EXTENDER.md G3). Both are
 // published when zero: a zero is the count, and it is what they read until a
-// connect release with run ids reaches the extenders.
+// connect release with run ids reaches the extenders. A read that fails costs
+// these two gauges alone, and withdraws them.
 func statsRefreshExtenderRuns(ctx context.Context, now time.Time) {
-	counts := model.CountExtenderRuns(ctx, now.Add(-statsExtenderRunsWindow), statsExtenderRestartingMinRuns)
-	statsExtendersRestarting24hGauge.set(float64(counts.Restarting))
-	statsExtendersReportingRuns24hGauge.set(float64(counts.Reporting))
+	server.HandleError(func() {
+		counts := model.CountExtenderRuns(ctx, now.Add(-statsExtenderRunsWindow), statsExtenderRestartingMinRuns)
+		statsExtendersRestarting24hGauge.set(float64(counts.Restarting))
+		statsExtendersReportingRuns24hGauge.set(float64(counts.Reporting))
+	}, statsWithdrawExtenderRuns)
+}
+
+// The count of a read that failed is not known, which a 0 or the last value
+// would claim, and a flat line through a database incident would read as a
+// fleet that stopped restarting.
+func statsWithdrawExtenderRuns() {
+	statsExtendersRestarting24hGauge.unset()
+	statsExtendersReportingRuns24hGauge.unset()
 }
 
 // Publishes the published rows and the last derivation. Every kind and

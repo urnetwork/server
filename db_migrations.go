@@ -11163,14 +11163,12 @@ var migrations = []any{
 		ON network_reengagement_email (network_id, sent_at)
 	`),
 
-	// 910 (PROVISIONAL: the number is this branch's next one and moves when
-	// the branch merges after other migrations; the monitor's contract finds
-	// it by its SQL): which run of the extender process sent each activation
+	// Which run of the extender process sent each activation
 	// (connect/EXTENDER.md G3, extender_activation_run_schema.go), so a
-	// restart shows as a new run id among an extender's activations rather
-	// than being inferred from its platform connections. Three nullable
-	// columns on the activation history: a catalog change only, and the
-	// running release, which names its columns, writes and reads on. Apply
-	// before deploying the api and taskworker that write and count them.
+	// restart shows as a new run among an extender's activations rather than
+	// being inferred from its platform connections. Three nullable columns on
+	// the activation history: a catalog change only, and the running release,
+	// which names its columns, writes and reads on. Apply before deploying the
+	// api and taskworker that write and count them.
 	newSqlMigration(extenderActivationRunSchemaSql),
 }
