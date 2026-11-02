@@ -23,6 +23,7 @@ func TestComputeOutcomesWindows(t *testing.T) {
 	f.FirstEventAt[EventAppOpened] = d(2.5)
 	f.FirstEventAt[EventWidgetAdded] = d(6.9)
 	f.FirstEventAt[EventFeedbackSubmitted] = d(7.5) // outside the 7 day window
+	f.FirstEventAt[EventPurchaseStarted] = d(2.9)
 	f.FirstEventAt[EventPurchaseCompleted] = d(3)
 	f.FirstEventAt[EventTrialConverted] = d(17)
 	f.FirstEventAt[EventRefund] = d(40)
@@ -36,7 +37,7 @@ func TestComputeOutcomesWindows(t *testing.T) {
 	want := Outcomes{
 		Sent: true, Delivered: true, Opened: true, Clicked: true, LandingClicked: true,
 		AppOpen48h: true, Connect7d: true, Widget7d: true, Feedback7d: false,
-		ProStart14d: true, TrialToPaid35d: true, Refund60d: true,
+		PurchaseStarted7d: true, ProStart14d: true, TrialToPaid35d: true, Refund60d: true,
 		RetentionD7: true, RetentionD30: true, Unsubscribe: true, Complaint: false,
 	}
 	if o != want {
@@ -45,7 +46,7 @@ func TestComputeOutcomesWindows(t *testing.T) {
 
 	// at day 8: the 7 day windows and retention_d7 are matured, nothing longer
 	o = ComputeOutcomes(f, d(8))
-	if !o.Connect7d || !o.Widget7d || !o.RetentionD7 {
+	if !o.Connect7d || !o.Widget7d || !o.PurchaseStarted7d || !o.RetentionD7 {
 		t.Fatalf("day 8 outcomes missing the matured windows: %+v", o)
 	}
 	if o.ProStart14d || o.TrialToPaid35d || o.Refund60d || o.RetentionD30 {
@@ -77,6 +78,43 @@ func TestComputeOutcomesWindows(t *testing.T) {
 	g.FirstFeedbackAt = &fb
 	if !ComputeOutcomes(g, d(61)).Feedback7d {
 		t.Fatalf("feedback_7d ignored the feedback table")
+	}
+}
+
+// TestComputeOutcomesPurchaseStarted pins purchase_started_7d, the in-app
+// offer's leading metric: a purchase.started in [cohort, cohort+7d), reported
+// only once the 7 days have passed, whichever arm the network is in.
+func TestComputeOutcomesPurchaseStarted(t *testing.T) {
+	cohort := time.Date(2026, 11, 24, 15, 30, 0, 0, time.UTC)
+	started := func(at time.Time) NetworkFacts {
+		f := cohortFacts(cohort)
+		f.FirstEventAt[EventPurchaseStarted] = at
+		return f
+	}
+	matured := cohort.Add(WindowPurchaseStart)
+
+	// the first minutes and the last moment of the window count
+	for _, at := range []time.Time{cohort, cohort.Add(time.Minute), matured.Add(-time.Second)} {
+		if !ComputeOutcomes(started(at), matured).PurchaseStarted7d {
+			t.Fatalf("a purchase.started at %s missed the window", at)
+		}
+	}
+	// the window is half open, and an event before the cohort never counts
+	for _, at := range []time.Time{matured, cohort.Add(-time.Minute)} {
+		if ComputeOutcomes(started(at), matured.Add(24*time.Hour)).PurchaseStarted7d {
+			t.Fatalf("a purchase.started at %s counted outside the window", at)
+		}
+	}
+	// not yet matured reports false, like every windowed column
+	if ComputeOutcomes(started(cohort.Add(time.Hour)), matured.Add(-time.Second)).PurchaseStarted7d {
+		t.Fatalf("purchase_started_7d reported before its window matured")
+	}
+	// a completed purchase alone is not a start: pro_start_14d counts it
+	completed := cohortFacts(cohort)
+	completed.FirstEventAt[EventPurchaseCompleted] = cohort.Add(time.Hour)
+	o := ComputeOutcomes(completed, cohort.Add(WindowProStart))
+	if o.PurchaseStarted7d || !o.ProStart14d {
+		t.Fatalf("a purchase.completed without a start = %+v", o)
 	}
 }
 

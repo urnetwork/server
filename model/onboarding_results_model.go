@@ -43,13 +43,16 @@ type OnboardingResultsRow struct {
 	Connect7d      int       `json:"connect_7d"`
 	Widget7d       int       `json:"widget_7d"`
 	Feedback7d     int       `json:"feedback_7d"`
-	ProStart14d    int       `json:"pro_start_14d"`
-	TrialToPaid35d int       `json:"trial_to_paid_35d"`
-	Refund60d      int       `json:"refund_60d"`
-	RetentionD7    int       `json:"retention_d7"`
-	RetentionD30   int       `json:"retention_d30"`
-	Unsubscribe    int       `json:"unsubscribe"`
-	Complaint      int       `json:"complaint"`
+	// PurchaseStarted7d is the in-app offer's leading metric, reachable from
+	// both arms (onboarding.Outcomes.PurchaseStarted7d)
+	PurchaseStarted7d int `json:"purchase_started_7d"`
+	ProStart14d       int `json:"pro_start_14d"`
+	TrialToPaid35d    int `json:"trial_to_paid_35d"`
+	Refund60d         int `json:"refund_60d"`
+	RetentionD7       int `json:"retention_d7"`
+	RetentionD30      int `json:"retention_d30"`
+	Unsubscribe       int `json:"unsubscribe"`
+	Complaint         int `json:"complaint"`
 	// MaturedDays is the cohort's age at rollup time: an outcome window longer
 	// than this has not been measured yet (its count is provisional).
 	MaturedDays int       `json:"matured_days"`
@@ -86,6 +89,7 @@ func (r *OnboardingResultsRow) Add(o onboarding.Outcomes) {
 	inc(o.Connect7d, &r.Connect7d)
 	inc(o.Widget7d, &r.Widget7d)
 	inc(o.Feedback7d, &r.Feedback7d)
+	inc(o.PurchaseStarted7d, &r.PurchaseStarted7d)
 	inc(o.ProStart14d, &r.ProStart14d)
 	inc(o.TrialToPaid35d, &r.TrialToPaid35d)
 	inc(o.Refund60d, &r.Refund60d)
@@ -137,21 +141,21 @@ func ReplaceOnboardingResults(ctx context.Context, from time.Time, to time.Time,
 					INSERT INTO onboarding_results_daily (
 						cohort_day, experiment, variant, surface, platform, tier, path,
 						exposures, sent, delivered, opened, clicked, landing_clicked,
-						app_open_48h, connect_7d, widget_7d, feedback_7d, pro_start_14d,
+						app_open_48h, connect_7d, widget_7d, feedback_7d, purchase_started_7d, pro_start_14d,
 						trial_to_paid_35d, refund_60d, retention_d7, retention_d30,
 						unsubscribe, complaint, matured_days, computed_at
 					)
-					VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
+					VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
 					ON CONFLICT (cohort_day, experiment, variant, surface, platform, tier, path) DO UPDATE
 					SET
 						exposures = $8, sent = $9, delivered = $10, opened = $11, clicked = $12, landing_clicked = $13,
-						app_open_48h = $14, connect_7d = $15, widget_7d = $16, feedback_7d = $17, pro_start_14d = $18,
-						trial_to_paid_35d = $19, refund_60d = $20, retention_d7 = $21, retention_d30 = $22,
-						unsubscribe = $23, complaint = $24, matured_days = $25, computed_at = $26
+						app_open_48h = $14, connect_7d = $15, widget_7d = $16, feedback_7d = $17, purchase_started_7d = $18, pro_start_14d = $19,
+						trial_to_paid_35d = $20, refund_60d = $21, retention_d7 = $22, retention_d30 = $23,
+						unsubscribe = $24, complaint = $25, matured_days = $26, computed_at = $27
 				`,
 				r.CohortDay, r.Experiment, r.Variant, r.Surface, r.Platform, r.Tier, r.Path,
 				r.Exposures, r.Sent, r.Delivered, r.Opened, r.Clicked, r.LandingClicked,
-				r.AppOpen48h, r.Connect7d, r.Widget7d, r.Feedback7d, r.ProStart14d,
+				r.AppOpen48h, r.Connect7d, r.Widget7d, r.Feedback7d, r.PurchaseStarted7d, r.ProStart14d,
 				r.TrialToPaid35d, r.Refund60d, r.RetentionD7, r.RetentionD30,
 				r.Unsubscribe, r.Complaint, r.MaturedDays, computedAt,
 			))
@@ -181,7 +185,7 @@ const onboardingResultsSelect = `
 	SELECT
 		cohort_day, experiment, variant, surface, platform, tier, path,
 		exposures, sent, delivered, opened, clicked, landing_clicked,
-		app_open_48h, connect_7d, widget_7d, feedback_7d, pro_start_14d,
+		app_open_48h, connect_7d, widget_7d, feedback_7d, purchase_started_7d, pro_start_14d,
 		trial_to_paid_35d, refund_60d, retention_d7, retention_d30,
 		unsubscribe, complaint, matured_days, computed_at
 	FROM onboarding_results_daily
@@ -192,7 +196,7 @@ func scanOnboardingResultsRow(result pgx.Rows) *OnboardingResultsRow {
 	server.Raise(result.Scan(
 		&r.CohortDay, &r.Experiment, &r.Variant, &r.Surface, &r.Platform, &r.Tier, &r.Path,
 		&r.Exposures, &r.Sent, &r.Delivered, &r.Opened, &r.Clicked, &r.LandingClicked,
-		&r.AppOpen48h, &r.Connect7d, &r.Widget7d, &r.Feedback7d, &r.ProStart14d,
+		&r.AppOpen48h, &r.Connect7d, &r.Widget7d, &r.Feedback7d, &r.PurchaseStarted7d, &r.ProStart14d,
 		&r.TrialToPaid35d, &r.Refund60d, &r.RetentionD7, &r.RetentionD30,
 		&r.Unsubscribe, &r.Complaint, &r.MaturedDays, &r.ComputedAt,
 	))

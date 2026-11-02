@@ -881,6 +881,9 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	[]snMainnetMigrationContract{
 		// the store country of each subscription row
 		subscriptionRenewalCountryMigrationContract,
+		// the onboarding results' purchase.started count; its version follows
+		// the migration's position
+		onboardingResultsPurchaseStartedMigrationContract,
 	},
 )
 
