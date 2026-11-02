@@ -224,8 +224,12 @@ func TestCloseEvidenceRetentionStartsAtTheLowWater(t *testing.T) {
 		}
 		today := now.UTC().Format(time.DateOnly)
 
-		// the day's first pass, stopped after its first batch by its deadline
-		report, cursor, more := removeExpiredCloseEvidenceWith(horizon, now, CloseEvidenceRemovalCursor{}, time.Now(), settings)
+		// the day's first pass, stopped after its first batch by its pace: at a
+		// row every ten seconds, the next batch would start past the run's
+		// 5-second deadline
+		slow := *settings
+		slow.DefaultRowsPerSecond = 0.1
+		report, cursor, more := removeExpiredCloseEvidenceWith(horizon, now, CloseEvidenceRemovalCursor{}, time.Now().Add(5*time.Second), &slow)
 		connect.AssertEqual(t, report.FullPass, true)
 		connect.AssertEqual(t, report.Stop, CloseEvidenceRemovalStopBudget)
 		connect.AssertEqual(t, more, true)
