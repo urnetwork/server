@@ -50,8 +50,8 @@ func TestOperatorBlockPointsAwardableBlocks(t *testing.T) {
 func TestOperatorBlockReliabilityRetainedIsTheRetention(t *testing.T) {
 	now := time.Date(2026, time.November, 8, 10, 30, 15, 0, time.UTC)
 	cutoffBlock := clientReliabilityRetentionCutoffBlock(now)
-	if cutoffBlock != reliabilityBlockNumber(now.Add(-21*24*time.Hour)) {
-		t.Fatal("client_reliability retention is not 21 days")
+	if cutoffBlock != reliabilityBlockNumber(now.Add(-14*24*time.Hour)) {
+		t.Fatal("client_reliability retention is not 14 days")
 	}
 	if !operatorBlockReliabilityRetained(cutoffBlock, now) || !operatorBlockReliabilityRetained(cutoffBlock+1, now) {
 		t.Fatal("a window inside retention counts as expired")

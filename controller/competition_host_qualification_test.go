@@ -613,8 +613,23 @@ func TestCompetitionHostQualificationRefusesRunningJobWithoutSlot(t *testing.T) 
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		fixture := newCompetitionRankingFixture(t, false)
-		fixture.addJob(t)
-		if err := reserveCompetitionQualificationSlot(context.Background(), "synthetic-host-qualifier", server.NowUtc().Add(time.Minute)); !errors.Is(err, ErrEvaluationRunning) {
+		job := fixture.addJob(t)
+		ctx := context.Background()
+		var slotWorker *string
+		var slotJob *server.Id
+		var slotLease, jobLease *time.Time
+		var state string
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE competition_worker_slot
+			 SET worker_id=NULL,job_id=NULL,lease_expires_at=NULL WHERE slot_id=1`))
+			server.Raise(tx.QueryRow(ctx, `SELECT s.worker_id,s.job_id,s.lease_expires_at,j.state,j.lease_expires_at
+			 FROM competition_worker_slot s CROSS JOIN competition_job j WHERE s.slot_id=1 AND j.job_id=$1`, job.JobId).
+				Scan(&slotWorker, &slotJob, &slotLease, &state, &jobLease))
+		})
+		if slotWorker != nil || slotJob != nil || slotLease != nil || state != "running" || jobLease == nil || !fixture.now.Before(*jobLease) {
+			t.Fatal("fixture did not preserve a live running job behind an empty singleton slot")
+		}
+		if err := reserveCompetitionQualificationSlot(ctx, "synthetic-host-qualifier", server.NowUtc().Add(time.Minute)); !errors.Is(err, ErrEvaluationRunning) {
 			t.Fatalf("live job was ignored: %v", err)
 		}
 	})

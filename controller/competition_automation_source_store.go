@@ -72,14 +72,37 @@ func (self PostgresStore) RenewAutomationLease(ctx context.Context, settings *Se
 	if ttl < 10*time.Second || ttl > 5*time.Minute {
 		return nil, ErrConflict
 	}
+	if lease.Environment != settings.AutomationPolicy.Environment || lease.CompetitionId != settings.CompetitionId || lease.SeasonId != settings.AutomationPolicy.SeasonId {
+		return nil, ErrLeaseLost
+	}
 	err = captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
 			result = nil
 			automationScopeLockInTx(ctx, tx, settings)
+			var previousExpiry time.Time
+			if self.beforeLeaseRowLockForTest != nil {
+				self.beforeLeaseRowLockForTest("supervisor")
+			}
+			loadError := tx.QueryRow(ctx, `SELECT lease_expires_at FROM competition_supervisor_lease
+			 WHERE environment=$1 AND competition_id=$2 AND season_id=$3 AND owner_id=$4 AND fencing_token=$5 FOR UPDATE`,
+				lease.Environment, lease.CompetitionId, lease.SeasonId, lease.OwnerId, lease.FencingToken).Scan(&previousExpiry)
+			if errors.Is(loadError, pgx.ErrNoRows) {
+				panic(ErrLeaseLost)
+			}
+			server.Raise(loadError)
 			server.Raise(self.requireAutomationLeaseInTx(ctx, tx, settings, lease))
 			now := self.nowUtc()
+			if !now.Before(previousExpiry) {
+				panic(ErrLeaseLost)
+			}
 			lease.LeaseExpiresAt = now.Add(ttl)
-			server.RaisePgResult(tx.Exec(ctx, `UPDATE competition_supervisor_lease SET lease_expires_at=$4,heartbeat_at=$5 WHERE environment=$1 AND competition_id=$2 AND season_id=$3`, lease.Environment, lease.CompetitionId, lease.SeasonId, lease.LeaseExpiresAt, now))
+			updated, updateError := tx.Exec(ctx, `UPDATE competition_supervisor_lease SET lease_expires_at=$4,heartbeat_at=$5
+			 WHERE environment=$1 AND competition_id=$2 AND season_id=$3 AND owner_id=$6 AND fencing_token=$7 AND $5<lease_expires_at`,
+				lease.Environment, lease.CompetitionId, lease.SeasonId, lease.LeaseExpiresAt, now, lease.OwnerId, lease.FencingToken)
+			server.Raise(updateError)
+			if updated.RowsAffected() != 1 {
+				panic(ErrLeaseLost)
+			}
 			copyLease := lease
 			result = &copyLease
 		})

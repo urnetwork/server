@@ -40,7 +40,7 @@ func TestExtenderProbeFailureDiscountsTheBlockReportsBeforeIt(t *testing.T) {
 			)
 		}
 		report := func() bool {
-			return model.RecordNetworkExtenderBlockReport(ctx, extenderId, server.NewId(), "aa", server.NowUtc())
+			return model.RecordNetworkExtenderBlockReport(ctx, extenderId, model.Testing_CreateBlockReportClient(ctx, server.NewId()), "aa", server.NowUtc())
 		}
 		failing := false
 		stubExtenderProbe(t, func() error {

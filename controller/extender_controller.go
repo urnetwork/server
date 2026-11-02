@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
@@ -432,9 +433,19 @@ func Testing_SetExtenderForwardProbeRootCAs(rootCAs *x509.CertPool) (restore fun
 
 type ExtenderActivateArgs struct {
 	PublicKeyHex string `json:"public_key_hex"`
-	TcpPort      int    `json:"tcp_port"`
-	UdpPort      int    `json:"udp_port"`
-	DnsPort      int    `json:"dns_port"`
+	// the hex X25519 static public key of the extender's tcp camouflage
+	// (connect/EXTENDER.md P1, P6; EXTENDER-UPDATE2 §3, phase 14b), which a
+	// client fronts its camouflaged hello with. A passing activation stores
+	// it and every record of the extender then carries it, while the network
+	// that posted it holds the identity key. Empty, an extender with
+	// camouflage off, clears a stored key. A key that is not a usable X25519
+	// key is refused before anything is probed. Nothing here proves the
+	// extender holds the private half: in Phase A the probe passes over the
+	// legacy attempt whatever the key.
+	RealityPublicKeyHex string `json:"reality_public_key_hex,omitempty"`
+	TcpPort             int    `json:"tcp_port"`
+	UdpPort             int    `json:"udp_port"`
+	DnsPort             int    `json:"dns_port"`
 	// every dns port the caller is listening on, each probed on its own (L2).
 	// Empty offers DnsPort alone, which is what an extender that predates the
 	// list sends.
@@ -453,6 +464,108 @@ type ExtenderActivateArgs struct {
 	// withdraws its measurement name, and a request carried beside it is not
 	// stored. Unset, the default, changes nothing on its own.
 	MeasurementDisabled bool `json:"measurement_disabled,omitempty"`
+	// the run of the extender process that posted this activation
+	// (connect/EXTENDER.md G3): 32 hex characters, the same for every
+	// activation of one process and new at each start. The three run fields
+	// are json strings. A well-typed one never refuses an activation: each is
+	// stored on the activation's history row when it is well formed, and as
+	// null otherwise (extenderActivationRun). A value of another json type
+	// fails the request's decoding, as any field's does. An extender that
+	// predates them sends none.
+	RunId string `json:"run_id,omitempty"`
+	// when that process started, rfc 3339 in utc. A string here rather than a
+	// time.Time, whose decoding would answer a malformed time with a 400 and
+	// so refuse the activation
+	RunStartTime string `json:"run_start_time,omitempty"`
+	// how the run before it ended, as the host that restarted the process
+	// reported it: one of extenderActivationPreviousExits, or exit-<code>
+	PreviousExit string `json:"previous_exit,omitempty"`
+}
+
+// The random bytes of a run id, 32 hex characters on the wire
+// (connect/EXTENDER.md G3).
+const extenderActivationRunIdByteCount = 16
+
+// The earliest run start an activation may name: the day the run fields were
+// added (connect/EXTENDER.md G3), before which no process carried one, and long
+// after the 1970 a host without a battery-backed clock starts at before its
+// clock is set.
+var extenderActivationRunStartFloor = time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+
+// How far past the operator's clock a run start may be: the skew a host's clock
+// may have. An hour keeps a clock that drifted, and drops one that is plainly
+// wrong.
+const extenderActivationRunStartSkew = time.Hour
+
+// The words of a previous exit besides exit-<code>, for a code from 0 to 255
+// (connect/EXTENDER.md G3): the host knew the run ran out of memory, the host
+// stopped it on purpose, a signal ended it -- each of these, or another.
+var extenderActivationPreviousExits = map[string]bool{
+	"oom":     true,
+	"stop":    true,
+	"signal":  true,
+	"sighup":  true,
+	"sigint":  true,
+	"sigquit": true,
+	"sigill":  true,
+	"sigtrap": true,
+	"sigabrt": true,
+	"sigbus":  true,
+	"sigfpe":  true,
+	"sigkill": true,
+	"sigsegv": true,
+	"sigpipe": true,
+	"sigalrm": true,
+	"sigterm": true,
+}
+
+// The run an activation reports, as its history row stores it
+// (connect/EXTENDER.md G3): the id as 32 lower case hex characters, the start
+// in utc when it is no earlier than the floor and no later than the skew past
+// `now`, and the previous exit when it is one of the operator's words. Each
+// field is judged on its own, and a malformed one is stored as null rather than
+// refusing the activation: the run is a diagnostic, and an extender whose clock
+// is wrong, or whose host names an exit the operator does not know, is still
+// published. It is read only once the probes have passed, so a refusal of any
+// stage, busy and the budgets among them, stores nothing of the run.
+func extenderActivationRun(
+	args *ExtenderActivateArgs,
+	now time.Time,
+) (runId *string, runStartTime *time.Time, previousExit *string) {
+	if runIdBytes, err := hex.DecodeString(args.RunId); err == nil && len(runIdBytes) == extenderActivationRunIdByteCount {
+		normalizedRunId := hex.EncodeToString(runIdBytes)
+		runId = &normalizedRunId
+	}
+	if startTime, err := time.Parse(time.RFC3339, args.RunStartTime); err == nil {
+		startTime = startTime.UTC()
+		if !startTime.Before(extenderActivationRunStartFloor) && !now.Add(extenderActivationRunStartSkew).Before(startTime) {
+			runStartTime = &startTime
+		}
+	}
+	if normalizedPreviousExit := strings.ToLower(strings.TrimSpace(args.PreviousExit)); extenderActivationPreviousExitKnown(normalizedPreviousExit) {
+		previousExit = &normalizedPreviousExit
+	}
+	return
+}
+
+// Whether a previous exit is one of the operator's words, or exit-<code> for a
+// code from 0 to 255 written without a sign or a leading zero.
+func extenderActivationPreviousExitKnown(previousExit string) bool {
+	if extenderActivationPreviousExits[previousExit] {
+		return true
+	}
+	code, ok := strings.CutPrefix(previousExit, "exit-")
+	if !ok || code == "" || 3 < len(code) || (1 < len(code) && code[0] == '0') {
+		return false
+	}
+	value := 0
+	for _, digit := range code {
+		if digit < '0' || '9' < digit {
+			return false
+		}
+		value = 10*value + int(digit-'0')
+	}
+	return value <= 255
 }
 
 type ExtenderActivateResult struct {
@@ -635,7 +748,9 @@ func SignExtenderRecord(
 		// the extender's id while it serves the lag.dev measurement api, from
 		// which a reader computes its measurement name (lag.dev/PLAN.md C10)
 		MeasurementId: extenderMeasurementId(config, extender, addresses, issueTime),
-		// the camouflage key, once the server stores it (14b)
+		// the camouflage key the extender's latest passing activation posted,
+		// while the posting network holds the key (connect/EXTENDER.md P6,
+		// phase 14b); nil when it posted none
 		RealityPublicKey: extenderRecordRealityPublicKey(extender),
 	}
 	// what a client must declare before a release hands the record out
@@ -711,6 +826,18 @@ func extenderConfigRefusal(err error) string {
 		return configErr.message
 	}
 	return "the extender network is not configured"
+}
+
+// The refusal of an activation whose key is registered to another network.
+// Nothing the caller does can pass it with that key: the extender needs a new
+// key, or support has to move the key's registration.
+const extenderKeyOtherNetworkRefusal = "This extender key is registered to another network, so it cannot be activated for this one. Generate a new extender key, or ask support to move the key to this network."
+
+// Whether the key is registered to a network other than networkId. A key no
+// network has activated is not.
+func extenderKeyHeldByAnotherNetwork(ctx context.Context, publicKey []byte, networkId server.Id) bool {
+	keyNetworkId, registered := model.GetNetworkExtenderKeyNetworkId(ctx, publicKey)
+	return registered && keyNetworkId != networkId
 }
 
 func ExtenderActivate(
@@ -916,6 +1043,12 @@ func (self *extenderActivateService) activate(
 	if err != nil {
 		return refuse(fmt.Sprintf("the extender public key is not readable: %s", err))
 	}
+	// the camouflage key the records are to carry (phase 14b), checked like
+	// every other argument, before anything is probed or spent
+	realityPublicKey, err := parseExtenderActivateRealityPublicKey(args.RealityPublicKeyHex)
+	if err != nil {
+		return refuse(fmt.Sprintf("the extender camouflage key is not readable: %s", err))
+	}
 
 	carriers := []string{}
 	for _, carrier := range args.Carriers {
@@ -1042,6 +1175,20 @@ func (self *extenderActivateService) activate(
 	}
 	connectSettings := ExtenderProbeConnectSettings()
 
+	// A key belongs to the network that first activated it
+	// (model.ActivateNetworkExtender), and one another network holds is
+	// refused here, before anything is probed or spent. The probes cannot
+	// tell the key's owner from anyone else: an open extender signs any
+	// challenge and forwards any request to the api (A4, A5), so a post
+	// relayed through a listed extender passes them with its key, and would
+	// otherwise take its record, and the contract parties its row names (J2),
+	// to the poster's network.
+	stage = extenderActivationStageOwner
+	networkId := clientSession.ByJwt.NetworkId
+	if extenderKeyHeldByAnotherNetwork(clientSession.Ctx, publicKey, networkId) {
+		return refuse(extenderKeyOtherNetworkRefusal)
+	}
+
 	// The probe guard (connect#230): the process probes at most
 	// MaxConcurrentProbes activations at once. One more is refused as busy
 	// here, after every check that refuses without a probe and before any
@@ -1069,18 +1216,18 @@ func (self *extenderActivateService) activate(
 	// The budgets are spent here, at the probe (ExtenderActivateSettings):
 	// after every check that refuses without dialing the caller -- the
 	// arguments, the client, the caller address and its family, the family
-	// the activation was posted for, the operator's configuration -- and
-	// before the first dial. A malformed request, a post that crossed families
-	// and an operator that cannot probe spend nothing, while every activation
-	// that dials the caller is counted before it dials, whatever the probe
-	// then finds. The calling client's budget, its address's and its
-	// account's are spent together or not at all, so a client refused by its
-	// account's budget keeps its own, and all are the budgets of the family
-	// the probe dials. A refusal says when the budget that refused has room
-	// again, which the activator waits out (`retry_after_seconds`).
+	// the activation was posted for, the operator's configuration, the key's
+	// network -- and before the first dial. A malformed request, a post that
+	// crossed families, an operator that cannot probe and a key another
+	// network holds spend nothing, while every activation that dials the
+	// caller is counted before it dials, whatever the probe then finds. The
+	// calling client's budget, its address's and its account's are spent
+	// together or not at all, so a client refused by its account's budget
+	// keeps its own, and all are the budgets of the family the probe dials. A
+	// refusal says when the budget that refused has room again, which the
+	// activator waits out (`retry_after_seconds`).
 	stage = extenderActivationStageBudget
 	clientRateLimitAction, addressRateLimitAction, accountRateLimitAction := extenderActivateRateLimitActions(ipVersion)
-	networkId := clientSession.ByJwt.NetworkId
 	addressBudget := model.AccountActionBudget{
 		Id:                settings.addressBudgetId(clientIp),
 		Action:            addressRateLimitAction,
@@ -1167,7 +1314,12 @@ func (self *extenderActivateService) activate(
 			connectMode connect.ExtenderConnectMode,
 			port int,
 		) error {
-			_, err := connect.ProbeExtenderCarrier(
+			// a splicing (Phase B) extender sends a legacy hello to its
+			// borrowed site, so the tcp probe also runs the camouflaged
+			// attempt with the posted key (connect
+			// net_extender_camouflage_probe.go); it passes on either attempt
+			// and claims nothing about the key
+			_, err := connect.ProbeExtenderCarrierWithCamouflageKey(
 				ctx,
 				connectSettings,
 				clientIp,
@@ -1176,19 +1328,21 @@ func (self *extenderActivateService) activate(
 				dnsTld,
 				serverName,
 				publicKey,
+				realityPublicKey,
 				apiHost,
 				ExtenderProbeDestinationPort,
 			)
 			return err
 		},
 		forward: func(ctx context.Context) (string, error) {
-			return connect.ProbeExtenderForward(
+			return connect.ProbeExtenderForwardWithCamouflageKey(
 				ctx,
 				connectSettings,
 				clientIp,
 				tcpPort,
 				serverName,
 				publicKey,
+				realityPublicKey,
 				config.ApiUrl,
 				extenderForwardProbeTlsConfig(),
 			)
@@ -1258,10 +1412,21 @@ func (self *extenderActivateService) activate(
 
 	// an owner who opted out of lag.dev measurement is withdrawn now, with the
 	// key proven by the probes, and before this activation signs its record,
-	// so the record already carries no measurement id (lag.dev/PLAN.md C9)
+	// so the record already carries no measurement id (lag.dev/PLAN.md C9).
+	// The withdrawal is keyed by the key alone, so the key's network is read
+	// again first: another network may have activated it while this one
+	// probed, and its measurement is not this caller's to withdraw
 	if args.MeasurementDisabled {
+		if extenderKeyHeldByAnotherNetwork(clientSession.Ctx, publicKey, networkId) {
+			stage = extenderActivationStageOwner
+			return refuse(extenderKeyOtherNetworkRefusal)
+		}
 		optOutExtenderMeasurement(clientSession.Ctx, publicKey, server.NowUtc())
 	}
+
+	// the run of the extender process that posted, kept with the history row
+	// so a restart shows as a new run id (connect/EXTENDER.md G3)
+	runId, runStartTime, previousExit := extenderActivationRun(args, server.NowUtc())
 
 	var record *protocol.ExtenderRecord
 	var expireTime time.Time
@@ -1287,6 +1452,13 @@ func (self *extenderActivateService) activate(
 
 			ClientAddressHash: clientAddressHash,
 			AccuracyKm:        activationAccuracyKm,
+
+			RunId:        runId,
+			RunStartTime: runStartTime,
+			PreviousExit: previousExit,
+			// stored only by this passing activation, for the network that
+			// holds the key (phase 14b)
+			RealityPublicKey: realityPublicKey,
 		}).WithLocation(activationLocation),
 		func(
 			extender *model.NetworkExtender,
@@ -1309,6 +1481,12 @@ func (self *extenderActivateService) activate(
 		},
 	)
 	if activated == nil || record == nil {
+		// the store refuses a key another network holds, which another
+		// network may have activated while this one probed
+		if extenderKeyHeldByAnotherNetwork(clientSession.Ctx, publicKey, networkId) {
+			stage = extenderActivationStageOwner
+			return refuse(extenderKeyOtherNetworkRefusal)
+		}
 		return refuse("the activation could not be stored")
 	}
 

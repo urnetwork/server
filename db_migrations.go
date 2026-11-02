@@ -11262,4 +11262,30 @@ var migrations = []any{
 	// is rewritten, and older binaries never read it. Apply before deploying
 	// the api and taskworker that write it.
 	newSqlMigration(networkWinbackOfferSchemaSql),
+
+	// Which run of the extender process sent each activation
+	// (connect/EXTENDER.md G3, extender_activation_run_schema.go), so a
+	// restart shows as a new run among an extender's activations rather than
+	// being inferred from its platform connections. Three nullable columns on
+	// the activation history: a catalog change only, and the running release,
+	// which names its columns, writes and reads on. Apply before deploying the
+	// api and taskworker that write and count them.
+	newSqlMigration(extenderActivationRunSchemaSql),
+
+	// lag.dev's measurement api probes (lag.dev/PLAN.md A4,
+	// network_extender_measurement_probe_schema.go): the latest probe of each
+	// published family of each extender the sample serves, which the
+	// taskworker writes every two minutes and the sample reads to leave out an
+	// extender whose api its probes cannot reach. A new table; apply before
+	// deploying the taskworker that writes it and the api that reads it.
+	newSqlMigration(networkExtenderMeasurementProbeSchemaSql),
+
+	// The camouflage key an extender's activation posts, and the network that
+	// posted it (connect/EXTENDER.md P6, phase 14b): two nullable columns,
+	// db_extender_camouflage_key.go.
+	extenderCamouflageKeyMigration,
+
+	// Audited single-use evaluator recovery; legacy cycle-zero writers remain
+	// compatible. Deploy compatible API/worker before authorizing any cycle.
+	competitionJobReevaluationMigration,
 }

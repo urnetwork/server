@@ -21,6 +21,50 @@ The actual compiler must be **Go 1.27.3**. Select that installed toolchain on
 
 ## Current competition contract
 
+### Evaluator-caused failure recovery
+
+A terminal infrastructure code alone is not permission to resample a patch.
+When retained evidence proves an evaluator defect, a privileged operator can
+authorize one audited recovery cycle after deploying and qualifying the fix.
+Genuine submission failures and already scored submissions are not eligible.
+The original failure, admission identity, patch, source, shared epoch baseline
+and fee remain unchanged. The additional execution cycle has one three-hour
+budget starting at its first claim; retries do not reset that budget. Global
+attempt numbers continue increasing, and stale workers cannot write the new
+cycle. An evaluation hold must be active and no evaluation may be running when
+authorization is granted.
+
+The root-only control command is built with
+`go build -o competitionreevaluate ./cli/competitionreevaluate` from the server
+repository. Once the additive migration and compatible API/worker release are
+deployed, invoke it in the main control environment:
+
+```bash
+sudo competitionreevaluate \
+  --authorization /etc/urnetwork/recovery/authorization.json \
+  --authorization-file-sha256 AUTHORIZATION_FILE_SHA256 \
+  --runtime /etc/urnetwork/recovery/runtime-qualification.json \
+  --runtime-file-sha256 RUNTIME_FILE_SHA256 \
+  --token-file /etc/urnetwork/recovery/scoped-control-token \
+  --idempotency-key OPERATOR_RECOVERY_REQUEST_ID
+```
+
+All files must be private, single-link, root-owned regular files beneath
+protected root-owned directories, without symlinks. The raw file SHA-256 pins
+are distinct from canonical document digests. The authorization must bind the
+exact terminal snapshot, immutable incident event, rejected inventory
+declaration, frozen policy/baseline and fixed-runtime qualification. The token
+must have the exact competition/environment/season scheduler or operator scope;
+legacy unscoped credentials are insufficient. Standard output contains only the
+receipt. This command does not clear the maintenance hold or start evaluation.
+An exact replay returns the original receipt; it cannot grant another cycle.
+
+Owner polling exposes optional `reevaluation` metadata so an authenticated
+recovery can supersede a cached infrastructure failure without erasing its
+history. Integrations must retain that history and reject stale or conflicting
+cycle receipts. This recovery capability is not a claim that a particular
+runtime has been deployed or qualified.
+
 The original **2026-10-28 00:00 UTC** opening was missed, not backdated.
 The approved replacement production season, R2 epoch 1, opened submission intake
 at **2026-10-29 13:06:42.413416 UTC**. As verified on **2026-11-02**, intake and

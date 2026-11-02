@@ -176,6 +176,11 @@ type CompetitionSupervisor struct {
 	Now           func() time.Time
 	PollInterval  time.Duration
 	LeaseDuration time.Duration
+	// Nil retains per-owner defaults; tests inject retry time and exact renewal edges.
+	leaseRetrySettings *competitionLeaseRetrySettings
+	renewTickForTest   <-chan time.Time
+	// Nil does nothing; tests acknowledge an accepted renewed authority window.
+	renewedForTest func()
 
 	// Preparation-only reconciliation may publish an existing intent and obtain
 	// real role evidence, but never activates source or runs ordinary evaluation.
@@ -374,22 +379,38 @@ func (self *CompetitionSupervisor) Reconcile(ctx context.Context) (state string,
 		return "lease_unavailable", err
 	}
 	operationCtx, cancel := context.WithCancel(ctx)
+	retrySettings := defaultCompetitionLeaseRetrySettings()
+	if self.leaseRetrySettings != nil {
+		retrySettings = *self.leaseRetrySettings
+	}
 	renewed := make(chan error, 1)
 	go func() {
 		current := *lease
 		for {
+			renewTick := self.renewTickForTest
+			if renewTick == nil {
+				renewTick = time.After(leaseDuration / 3)
+			}
 			select {
 			case <-operationCtx.Done():
 				renewed <- nil
 				return
-			case <-time.After(leaseDuration / 3):
-				next, renewErr := self.Driver.Renew(operationCtx, current, leaseDuration)
+			case <-renewTick:
+				var next *model.CompetitionSupervisorLease
+				_, renewErr := retryCompetitionLeaseOperation(operationCtx, current.LeaseExpiresAt, retrySettings, func(ctx context.Context) error {
+					var err error
+					next, err = self.Driver.Renew(ctx, current, leaseDuration)
+					return err
+				})
 				if renewErr != nil {
 					cancel()
 					renewed <- renewErr
 					return
 				}
 				current = *next
+				if self.renewedForTest != nil {
+					self.renewedForTest()
+				}
 			}
 		}
 	}()

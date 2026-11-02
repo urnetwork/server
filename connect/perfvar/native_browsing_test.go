@@ -347,6 +347,7 @@ func measureNativeBrowsing100WithSettings(ctx context.Context, path *fullTunPath
 	transport := newNativeBrowsingInnerTransport(dialOrigin, settings)
 
 	defer func() {
+		cleanupFailed := false
 		cancelWork()
 		nativeBrowsingReleasePages(pages[:])
 		transport.CloseIdleConnections()
@@ -355,6 +356,7 @@ func measureNativeBrowsing100WithSettings(ctx context.Context, path *fullTunPath
 		for _, httpServer := range servers {
 			if httpServer != nil {
 				if err := httpServer.Shutdown(joinCtx); err != nil {
+					cleanupFailed = true
 					resultErr = errors.Join(resultErr, fmt.Errorf("synthetic browsing handler shutdown: %w", err), httpServer.Close())
 				}
 			}
@@ -364,6 +366,7 @@ func measureNativeBrowsing100WithSettings(ctx context.Context, path *fullTunPath
 		select {
 		case <-joined:
 		case <-joinCtx.Done():
+			cleanupFailed = true
 			resultErr = errors.Join(resultErr, errors.New("synthetic browsing owners did not join"))
 		}
 		if settings.afterOriginsClosedForTest != nil {
@@ -372,10 +375,15 @@ func measureNativeBrowsing100WithSettings(ctx context.Context, path *fullTunPath
 		observation.MaximumConcurrentAssetHandlers = peakHandlers.Load()
 		observation.MaximumConcurrentLogicalAssets = peakAssets.Load()
 		if liveHandlers.Load() != 0 {
+			cleanupFailed = true
 			resultErr = errors.Join(resultErr, errors.New("synthetic browsing retained asset handlers"))
 		}
 		if liveAssets.Load() != 0 {
+			cleanupFailed = true
 			resultErr = errors.Join(resultErr, errors.New("synthetic browsing retained logical assets"))
+		}
+		if cleanupFailed {
+			resultErr = &c48ReturnFlightWorkloadOwnerFailure{cause: resultErr}
 		}
 	}()
 	for index := range listeners {

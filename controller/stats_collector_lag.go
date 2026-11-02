@@ -8,6 +8,7 @@ import (
 
 	"github.com/urnetwork/connect/protocol"
 
+	"github.com/urnetwork/server/lagprobe"
 	"github.com/urnetwork/server/model"
 )
 
@@ -22,6 +23,10 @@ import (
 //	urnetwork_stats_lag_download_p50_mbps        median of their download p50 {ip_family} (db)
 //	urnetwork_stats_lag_upload_p50_mbps          median of their upload p50 {ip_family} (db)
 //	urnetwork_stats_lag_extenders_offered        extenders the lag.dev sample can offer now (A4)
+//	urnetwork_stats_lag_extenders_restarting     extenders it leaves out for a restart loop (A4)
+//	urnetwork_stats_lag_extenders_unreachable    extenders it leaves out because the probes cannot reach their measurement api (A4)
+//	urnetwork_stats_lag_extender_probes          the probes' latest outcome per extender and family, among rows the sample can read {outcome} (db)
+//	urnetwork_stats_lag_extender_probe_age_seconds  age of the newest probe of any extender (db)
 //	urnetwork_stats_lag_measurement_requests     extenders' measurement certificate requests {state} (db)
 //	urnetwork_stats_lag_extenders_opted_out      extenders whose owner opted out of measurement (db)
 //	urnetwork_stats_lag_visitors_24h_by_country  visitors who started a track in the trailing day, the top 10 countries and "other" {country_code} (db)
@@ -78,12 +83,28 @@ var statsLagUploadP50Gauge = newStatsGaugeVec(
 
 var statsLagExtendersOfferedGauge = newStatsGauge(
 	"lag_extenders_offered",
-	"Extenders the lag.dev sample can offer now: published names, issued, delivered, placed and in no restart loop (A4)",
+	"Extenders the lag.dev sample can offer now: published names, issued, delivered, placed, in no restart loop and not found unreachable by the measurement api probes (A4), or every one that serves when those two rules would leave out them all",
 )
 
 var statsLagExtendersRestartingGauge = newStatsGauge(
 	"lag_extenders_restarting",
 	"Extenders that serve the measurement api but the lag.dev sample leaves out now because they are in a restart loop (A4)",
+)
+
+var statsLagExtendersUnreachableGauge = newStatsGauge(
+	"lag_extenders_unreachable",
+	"Extenders in no restart loop that serve the measurement api but the probes failed on every family they probed, twice in a row or more, which the lag.dev sample leaves out unless that would leave out every extender (A4). 0 also when a guard tripped or the chain stopped: read it beside lag_extender_probes and lag_extender_probe_age_seconds",
+)
+
+var statsLagExtenderProbesGauge = newStatsGaugeVec(
+	"lag_extender_probes",
+	"The latest lag.dev measurement api probe of each extender's family, among those recent enough for the sample to read (A4), by outcome: ok, what failed, or unprobed, as when the prober held a family's failures to be its own fault. All 0 when the chain has stopped",
+	"outcome",
+)
+
+var statsLagExtenderProbeAgeGauge = newStatsGauge(
+	"lag_extender_probe_age_seconds",
+	"Age of the newest lag.dev measurement api probe of any extender. It stays under about 2 minutes while the chain runs, and from 15 minutes the sample reads no probe and offers every extender (A4). No value while there has been no probe",
 )
 
 var statsLagMeasurementRequestsGauge = newStatsGaugeVec(
@@ -152,6 +173,15 @@ var statsLagMeasurementStates = []string{
 	model.NetworkExtenderMeasurementStateWithdrawn,
 }
 
+// Every outcome a probe's row can hold, published every refresh, zero included.
+var statsLagExtenderProbeOutcomes = func() []string {
+	outcomes := make([]string, 0, len(lagprobe.Outcomes))
+	for _, outcome := range lagprobe.Outcomes {
+		outcomes = append(outcomes, string(outcome))
+	}
+	return outcomes
+}()
+
 // Refreshes the lag.dev gauges as the clock reads `now`.
 func statsRefreshLag(ctx context.Context, now time.Time) {
 	statsLagResults1hGauge.replace(statsLagResultValues(model.CountLagResultsSince(ctx, now.Add(-time.Hour))))
@@ -180,15 +210,37 @@ func statsRefreshLag(ctx context.Context, now time.Time) {
 	statsLagDownloadP50Gauge.replace(download)
 	statsLagUploadP50Gauge.replace(upload)
 
-	serving := loadLagServing(ctx, now)
-	stable, loopsRead := lagStableServing(ctx, serving, now)
-	statsLagExtendersOfferedGauge.set(float64(len(stable.extenders)))
-	if loopsRead {
-		statsLagExtendersRestartingGauge.set(float64(len(serving.extenders) - len(stable.extenders)))
+	offer := loadLagOffer(ctx, now)
+	statsLagExtendersOfferedGauge.set(float64(len(offer.offered.extenders)))
+	if offer.loopsRead {
+		statsLagExtendersRestartingGauge.set(float64(len(offer.serving.extenders) - len(offer.stable.extenders)))
 	} else {
 		// the sample offers every serving extender, but how many are in a
 		// loop is not known, which a 0 would claim
 		statsLagExtendersRestartingGauge.unset()
+	}
+	if offer.probesRead {
+		// an extender both restarting and unreachable counts as restarting, so
+		// offered, restarting and unreachable add up to the serving set. When the
+		// rules would leave out every extender they are all offered anyway
+		// (loadLagOffer), and these still say what the rules found, so the sum
+		// over the serving set is that floor showing
+		statsLagExtendersUnreachableGauge.set(float64(len(offer.stable.extenders) - len(offer.reachable.extenders)))
+	} else {
+		// likewise: the sample leaves no one out for its probes, but how many
+		// they would is not known
+		statsLagExtendersUnreachableGauge.unset()
+	}
+
+	// A tripped guard and a stopped chain both leave the gauge above at 0, so what
+	// the probes found, and how recently, are gauges of their own. A row older than
+	// the sample reads counts for no outcome.
+	probes := model.GetNetworkExtenderMeasurementProbeStats(ctx, now.Add(-ExtenderMeasurementProbeMaxAge))
+	statsLagExtenderProbesGauge.replace(statsLagEnumValues(statsLagExtenderProbeOutcomes, probes.OutcomeCounts))
+	if probes.NewestProbeTime != nil {
+		statsLagExtenderProbeAgeGauge.set(max(now.Sub(*probes.NewestProbeTime).Seconds(), 0))
+	} else {
+		statsLagExtenderProbeAgeGauge.unset()
 	}
 
 	stateCounts := model.CountNetworkExtenderMeasurementsByState(ctx)
