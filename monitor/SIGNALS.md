@@ -48363,6 +48363,94 @@ rollout, not only the block, on any breach.
   median and 1,869/s peak in B, 1,608/s in the 10-25 aftershock. They
   corroborate a storm, but are counted only when a caller's deadline passes.
 
+## 27. Extender seed bundle — EXTENDER-UPDATE2
+
+The public extender seed bundle (connect/EXTENDER-UPDATE2.md §2) is the
+signed, small, stable set of open-tier extender records a client fetches from
+an HTTPS mirror when DNS bootstrap and the control route are blocked. The
+taskworker's seed chain (`ExtenderSeed`, every 10 minutes) publishes it to the
+origin store, the api serves it at `/v1/seed.bin` on every services edge, and
+operations-managed static mirrors copy the api's answer
+(xops/main/ansible/EXTENDER-SEED-MIRRORS.md). Each pass also fetches the
+bundle from every configured mirror route -- the url resolved as usual
+(`dns`), and each configured dial address (`ipv4`, `ipv6`) dialed directly
+with the url's host as the TLS server name, the DNS-independent route -- with
+the certificate verified under the roots a client verifies mirrors with
+(connect's pinned Let's Encrypt set, never the system roots), and verifies the
+bundle as a client does. A client given no dial address for a mirror resolves
+its name with the device's system resolver, not DoH, so the address routes are
+the ones that matter where the seed matters.
+
+### 27.1 Extender seed mirrors
+
+Probe: `extender-seed-mirrors`
+
+Status: proposed 2026-11-02 with the seed publisher; the probe above
+implements it. The publisher ships off (`extender.yml` `seed.enabled: false`),
+and while it is off the probe reports `extender-seed-off`, a configured state.
+
+Source (new): the seed chain's gauges, exported only by a taskworker that
+observed them in the last 30 minutes, labeled by the mirror's configured name
+and the route's family, never an address:
+
+- `urnetwork_taskworker_extender_seed_enabled`;
+- the stored bundle: `urnetwork_taskworker_extender_seed_published_sequence`,
+  `..._published_issued_timestamp_seconds`,
+  `..._published_expires_timestamp_seconds`;
+- each route: `urnetwork_taskworker_extender_seed_mirror_up` (a bundle that
+  verified and was fresh), `..._mirror_sequence`,
+  `..._mirror_issued_timestamp_seconds`,
+  `..._mirror_expires_timestamp_seconds` (any bundle that verified).
+
+```promql
+max by (mirror, route) (urnetwork_taskworker_extender_seed_mirror_up{env="main"})
+max by (mirror, route) (urnetwork_taskworker_extender_seed_mirror_expires_timestamp_seconds{env="main"}) - time()
+max by (mirror, route) (max_over_time(urnetwork_taskworker_extender_seed_mirror_sequence{env="main"}[6h]))
+  - max by (mirror, route) (urnetwork_taskworker_extender_seed_mirror_sequence{env="main"})
+```
+
+Healthy: the publisher replaces the bundle every 6 hours (sooner when a member
+leaves the open pool or is revoked); every route serves the stored bundle
+within minutes of each publish; every source has at least the record lifetime
+less 6 hours of validity (18 hours with the default day); no sequence falls.
+
+Thresholds (each judged at every one-minute evaluation of its hold; the origin
+is the target `origin`, a route `<mirror>/<route>`):
+
+- WARN `extender-seed-mirror-stale`: a route not up, or serving a bundle
+  issued before the stored one, for 60 minutes; the origin with no verified
+  bundle stored for 60 minutes while the chain runs enabled.
+- WARN `extender-seed-mirror-expired`: a source's bundle with less than 6
+  hours of validity left for 10 minutes. At zero every client refuses it
+  (5-minute clock allowance).
+- WARN `extender-seed-mirror-rollback`: a source's sequence below its own
+  6-hour peak for 2 minutes. Clients persist the highest sequence they
+  accepted and refuse a lower one. For the origin, the next pass publishes
+  above every claimed sequence (reason `behind_claim`), so it heals within
+  10 minutes while the claims last (7 days).
+- `extender-seed-mirrors-unobservable`: the read failed, a series is
+  ambiguous or missing at an evaluation, or no taskworker exported the
+  chain's state (`seed_state_missing`: a build that predates it, or a chain
+  that stopped).
+- `extender-seed-off`: the seed block is off (configured state, not an
+  incident).
+
+False-positive qualifiers: a mirror lags each publish by its sync interval and
+the api origin by its one-minute cache, which the 60-minute hold covers. Two
+taskworkers' fresh observations merge by `max`, which can delay a rollback
+report by up to 30 minutes. A route removed from the seed block stops
+reporting; its open tickets need a manual close. False-negative qualifiers: the
+check runs from the taskworkers, on the operator's own network; a mirror
+blocked only in a censored country reads healthy here.
+
+ACTION: read the route's check outcomes on the extender seed dashboard
+(`urnetwork-extender-seed`): `unreachable` or `tls` points at the mirror host,
+its address or its certificate (it must chain to ISRG Root X1 or X2, because
+clients pin Let's Encrypt); `signature` or `foreign_network` at a mirror
+serving someone else's bundle; an older sequence at the mirror's sync. For the
+origin, read the publisher's outcomes (`store_error`, `sign_error`,
+`self_check_failed`: the signing key is not in `root_public_keys_hex`).
+
 ## Shared provider-egress dashboard refresh
 
 Every Taskworker process starts its own stats collector. The provider-egress

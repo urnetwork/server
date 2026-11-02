@@ -1,0 +1,703 @@
+{
+  "uid": "urnetwork-extender-seed",
+  "title": "urnetwork / extender seed",
+  "tags": [
+    "urnetwork",
+    "extenders"
+  ],
+  "description": "The public extender seed bundle (connect/EXTENDER-UPDATE2.md §2): what the publisher stored, how fresh it is, and what every configured mirror route serves, with its sequence and expiry. Fed by the taskworker's seed chain (taskworker/work/extender_seed_metrics.go) and the api's origin (controller/extender_seed_origin.go). Alerts are the monitor's (monitor/SIGNALS.md §27.1).",
+  "editable": false,
+  "graphTooltip": 1,
+  "schemaVersion": 39,
+  "refresh": "5m",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "timezone": "",
+  "templating": {
+    "list": [
+      {
+        "name": "env",
+        "label": "env",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "warp-mimir"
+        },
+        "query": "label_values(urnetwork_taskworker_extender_seed_enabled, env)",
+        "refresh": 2,
+        "sort": 1
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "publisher",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "seed enabled",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_taskworker_extender_seed_enabled{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "",
+          "instant": true
+        }
+      ],
+      "description": "1 while extender.yml enables the public seed bundle in the taskworker that ran the last pass, 0 while it is off (the default). No value: no taskworker ran the seed chain in the last 30 minutes, or the build predates it."
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "published bundle age",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 5,
+        "x": 4,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "time() - max(urnetwork_taskworker_extender_seed_published_issued_timestamp_seconds{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "",
+          "instant": true
+        }
+      ],
+      "description": "How long ago the bundle the origin store holds was issued. The publisher replaces it every 6 hours, or sooner when a member leaves the open pool or is revoked, so a healthy value stays under 6 hours."
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "published bundle validity left",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 5,
+        "x": 9,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_taskworker_extender_seed_published_expires_timestamp_seconds{env=\"$env\"}) - time()",
+          "refId": "A",
+          "legendFormat": "",
+          "instant": true
+        }
+      ],
+      "description": "How long the stored bundle stays valid. The validity is the records' lifetime (a day unless record_lifetime_hours says otherwise), so a healthy value is at least the lifetime less 6 hours; under that, the publisher is missing its refresh, and at zero every client refuses the bundle as expired."
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "records by family",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 14,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (ip_version) (urnetwork_taskworker_extender_seed_published_records{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "ipv{{ip_version}}",
+          "instant": true
+        }
+      ],
+      "description": "Records of the stored bundle with an address of each family: an IPv4-only and an IPv6-only client each need some. A dual-stack record counts in both. At most 8 records."
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "revocations",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_taskworker_extender_seed_published_revocations{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "",
+          "instant": true
+        }
+      ],
+      "description": "Root-signed revocations the stored bundle carries: members the operator revoked, kept while a record they dominate could still be valid. At most 32."
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "publisher passes by outcome (per hour)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (outcome) (increase(urnetwork_taskworker_extender_seed_publishes_total{env=\"$env\"}[1h]))",
+          "refId": "A",
+          "legendFormat": "{{outcome}}"
+        }
+      ],
+      "description": "Each 10-minute pass of the seed chain: published (a new bundle was stored), current (nothing was due), empty (no open record to publish; the stored bundle is kept and ages out), claimed or superseded (another pass took the sequence; the next pass goes above it), and the failures config_error, store_error, sign_error, self_check_failed (the signed bundle does not verify under root_public_keys_hex) and sequence_exhausted."
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "sequence: origin and mirrors",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_taskworker_extender_seed_published_sequence{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "origin"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (mirror, route) (urnetwork_taskworker_extender_seed_mirror_sequence{env=\"$env\"})",
+          "refId": "B",
+          "legendFormat": "{{mirror}} {{route}}"
+        }
+      ],
+      "description": "The sequence of the stored bundle and of the bundle each mirror route served at its last check (a verified bundle only). Sequences only rise: a mirror's line below the origin's is a mirror behind, and any line that falls is a rollback, which clients refuse. A sequence is the issue time in unix milliseconds, raised past the last one when the clock is behind."
+    },
+    {
+      "id": 9,
+      "type": "row",
+      "title": "mirrors",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 13
+      },
+      "panels": []
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "mirror routes up",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 14
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (mirror, route) (urnetwork_taskworker_extender_seed_mirror_up{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "{{mirror}} {{route}}"
+        }
+      ],
+      "description": "1 when the route's last check fetched a bundle that verified under the root keys and was fresh. A route is a mirror's url resolved as usual (dns) or one configured dial address (ipv4, ipv6), dialed directly with the url's host as the TLS server name: the DNS-independent route a client takes. Mirrors are labeled by their configured name, never an address."
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "mirror lag behind the origin",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 14
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "scalar(max(urnetwork_taskworker_extender_seed_published_issued_timestamp_seconds{env=\"$env\"})) - max by (mirror, route) (urnetwork_taskworker_extender_seed_mirror_issued_timestamp_seconds{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "{{mirror}} {{route}}"
+        }
+      ],
+      "description": "How much older the bundle a mirror route serves is than the one the origin store holds. Mirrors copy the origin every few minutes, so a healthy route is at 0 within minutes of each publish; a route that stays behind past an hour is stale. Negative is a mirror ahead of the origin: the origin rolled back."
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "mirror validity left",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 22
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (mirror, route) (urnetwork_taskworker_extender_seed_mirror_expires_timestamp_seconds{env=\"$env\"}) - time()",
+          "refId": "A",
+          "legendFormat": "{{mirror}} {{route}}"
+        }
+      ],
+      "description": "How long the bundle each mirror route serves stays valid. A client refuses an expired bundle (with a 5-minute clock allowance), so a route near zero is about to stop bootstrapping anyone."
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "mirror checks by outcome (per hour)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 22
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (mirror, route, outcome) (increase(urnetwork_taskworker_extender_seed_mirror_checks_total{env=\"$env\"}[1h]))",
+          "refId": "A",
+          "legendFormat": "{{mirror}} {{route}} {{outcome}}"
+        }
+      ],
+      "description": "Every mirror route check by outcome: ok, the fetch failures unreachable, tls (the certificate does not verify for the url's host), redirect (a first-party mirror never redirects), http_status and too_large, and the verification refusals of connect.VerifyExtenderSeed (malformed, signature, foreign_network, record_invalid, gated_record, expired, not_yet_valid and the rest)."
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "origin answers at /v1/seed.bin (per hour)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 30
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (outcome) (increase(urnetwork_extender_seed_origin_responses_total{env=\"$env\"}[1h]))",
+          "refId": "A",
+          "legendFormat": "{{outcome}}"
+        }
+      ],
+      "description": "The api's answers at the seed path, the origin every mirror copies: served, not_modified (a conditional request for the current bundle), disabled (the seed is off: 404), absent (nothing stored: 404) and unavailable (no stored bundle verifies, or the store cannot be read past the last good copy: 503)."
+    }
+  ]
+}
