@@ -6,9 +6,11 @@ package server
 // then a new run id among an extender's activations. Nullable columns with no
 // default: the migration rewrites nothing, the running release, which names
 // the columns it writes, writes on, and a row written before the migration or
-// by an extender that predates the run reads null.
+// by an extender that predates the run reads null. The short lock wait is so
+// the alter never queues against the activation path: one that cannot have the
+// table within it fails and is run again.
 const extenderActivationRunSchemaSql = `
-		SET LOCAL lock_timeout = '5s';
+		SET LOCAL lock_timeout = '2s';
 		ALTER TABLE network_extender_activation
 			ADD COLUMN run_id varchar(32) NULL,
 			ADD COLUMN run_start_time timestamp NULL,
