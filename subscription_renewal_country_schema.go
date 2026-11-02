@@ -8,7 +8,7 @@ package server
 // table's writers behind a long transaction. The migration list's text,
 // unchanged, so its published identity stays the same.
 const subscriptionRenewalCountrySchemaSql = `
-		SET LOCAL lock_timeout = '5s';
+		SET LOCAL lock_timeout = '2s';
 		ALTER TABLE subscription_renewal ADD COLUMN country varchar(2) NULL
 	`
 

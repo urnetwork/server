@@ -8,7 +8,7 @@ package server
 // 4). A constant default: no table rewrite, and the rollup of an older binary,
 // which does not name the column, writes 0.
 const onboardingResultsPurchaseStartedSql = `
-		SET LOCAL lock_timeout = '5s';
+		SET LOCAL lock_timeout = '2s';
 		ALTER TABLE onboarding_results_daily
 			ADD COLUMN purchase_started_7d integer NOT NULL DEFAULT 0
 	`
