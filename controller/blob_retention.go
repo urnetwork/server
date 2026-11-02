@@ -30,6 +30,9 @@ func applyBlobRetention(ctx context.Context, streamStore, feedbackStore server.B
 		streamRules = stats.StreamLifecycleRules(streamStore, env)
 		// st evidence is published to the same store (server.LoadBlobStore)
 		streamRules = append(streamRules, stClientKeyEvidenceHistoryLifecycleRules(streamStore)...)
+		// so are the extender seed bundle's claimed sequences
+		// (extender_seed_store.go)
+		streamRules = append(streamRules, extenderSeedHistoryLifecycleRules(streamStore)...)
 	}
 	if feedbackStore != nil {
 		feedbackRules = feedbackLogLifecycleRules(feedbackStore)

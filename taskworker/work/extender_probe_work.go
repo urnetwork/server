@@ -33,6 +33,12 @@ import (
 // same transaction that deactivates the address, so the directory cannot learn
 // the extender is gone without also getting the proof.
 //
+// The probe is also the operator's half of the per-country blocked state (R4,
+// connect/EXTENDER-UPDATE2.md §1.3): a record is blocked only while every
+// active address answers it, and a failed probe sets aside the block reports
+// made before it, since those describe the outage rather than a block
+// (model.DiscountNetworkExtenderBlockReports).
+//
 // The task never fails on probe failures. They are what it went to find out;
 // returning them as an error would stop the chain re-arming and the whole
 // directory would silently stop being checked.
@@ -94,6 +100,9 @@ type ExtenderProbeResult struct {
 	Failed      int `json:"failed"`
 	Deactivated int `json:"deactivated"`
 	Revoked     int `json:"revoked"`
+	// block reports a failed probe set aside, since they describe an outage
+	// rather than a block (connect/EXTENDER-UPDATE2.md §1.3)
+	DiscountedBlockReports int `json:"discounted_block_reports,omitempty"`
 }
 
 func ScheduleExtenderProbe(clientSession *session.ClientSession, tx server.PgTx) {
@@ -196,9 +205,23 @@ func ExtenderProbe(
 					return message, err
 				},
 			)
+			// A failed probe is an outage. The block reports made before it
+			// describe that outage, not a block, so none of them counts
+			// again once the extender answers (connect/EXTENDER-UPDATE2.md
+			// §1.3). Set aside after the result commits, so every report the
+			// failure did not refuse is already visible.
+			discountedCount := int64(0)
+			if probeErr != nil {
+				discountedCount = model.DiscountNetworkExtenderBlockReports(
+					clientSession.Ctx,
+					target.ExtenderId,
+					server.NowUtc(),
+				)
+			}
 
 			stateLock.Lock()
 			defer stateLock.Unlock()
+			result.DiscountedBlockReports += int(discountedCount)
 			if probeErr == nil {
 				result.Succeeded += 1
 			} else {
@@ -235,12 +258,13 @@ func ExtenderProbe(
 	wait.Wait()
 
 	glog.Infof(
-		"[extenderprobe]probed %d addresses: %d ok, %d failed, %d deactivated, %d revoked\n",
+		"[extenderprobe]probed %d addresses: %d ok, %d failed, %d deactivated, %d revoked, %d block reports discounted\n",
 		result.Probed,
 		result.Succeeded,
 		result.Failed,
 		result.Deactivated,
 		result.Revoked,
+		result.DiscountedBlockReports,
 	)
 	return result, nil
 }

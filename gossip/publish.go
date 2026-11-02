@@ -3,8 +3,12 @@
 // Rows reach `network_extender_publish` from three writers -- an activation
 // (C2), a probe that loses an extender's last address (C3) and the drip (C4) --
 // each of which signs inside the transaction that wrote the state the message
-// describes. Nothing here signs or judges: it takes the oldest rows the claim
-// hands it, puts each on the topic and stamps it.
+// describes. Nothing here signs: it takes the oldest rows the claim hands it,
+// puts each on the topic and stamps it. It judges one thing only, as the last
+// guard of the mesh: a record that is not an ordinary open one -- the gated
+// tier or a canary channel -- is never published, whichever writer queued it
+// (connect/EXTENDER.md R1, R4; connect/EXTENDER-UPDATE2.md §1.3). Revocations
+// name a key and no address, so they always go.
 //
 // The claim locks with SKIP LOCKED and releases at the end of its own
 // transaction, so publishing never holds a database lock and a second replica
@@ -21,6 +25,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/glog"
 
@@ -47,6 +52,9 @@ type publishOutcome struct {
 	Published int
 	// stamped without being published, because the row does not decode
 	Dropped int
+	// stamped without being published, because its record is gated or
+	// channel restricted
+	Withheld int
 	// left for the next drain
 	Failed int
 }
@@ -96,6 +104,19 @@ func drainPublishes(ctx context.Context, publisher messagePublisher, limit int) 
 			outcome.Dropped += 1
 			continue
 		}
+		if !openChannelMessage(message) {
+			// a writer queued what the open mesh must never carry. Stamped
+			// rather than retried, since it can never be published; an error
+			// log, since every writer already leaves these rows out
+			glog.Errorf(
+				"[gossip]publish %s (kind %d) carries a gated or channel restricted record and is withheld\n",
+				publish.PublishId,
+				publish.Kind,
+			)
+			model.MarkExtenderPublishPublished(ctx, publish.PublishId)
+			outcome.Withheld += 1
+			continue
+		}
 		if err := publisher.Publish(ctx, message); err != nil {
 			glog.Errorf("[gossip]publish %s failed and is kept: %s\n", publish.PublishId, err)
 			outcome.Failed += 1
@@ -107,12 +128,28 @@ func drainPublishes(ctx context.Context, publisher messagePublisher, limit int) 
 
 	if 0 < outcome.Claimed && glog.V(1) {
 		glog.Infof(
-			"[gossip]drained %d claimed, %d published, %d dropped, %d kept\n",
+			"[gossip]drained %d claimed, %d published, %d dropped, %d withheld, %d kept\n",
 			outcome.Claimed,
 			outcome.Published,
 			outcome.Dropped,
+			outcome.Withheld,
 			outcome.Failed,
 		)
 	}
 	return outcome
+}
+
+// Whether a message may go on the open mesh: a revocation, or a record whose
+// signed body is an ordinary open one (connect.ExtenderRecordOpen). A record
+// body that does not decode cannot be shown to be open, so it does not go.
+func openChannelMessage(message *protocol.ExtenderGossipMessage) bool {
+	record := message.GetRecord()
+	if record == nil {
+		return true
+	}
+	body := &protocol.ExtenderRecordBody{}
+	if err := proto.Unmarshal(record.GetBody(), body); err != nil {
+		return false
+	}
+	return connect.ExtenderRecordOpen(body)
 }
