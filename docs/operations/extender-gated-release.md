@@ -108,8 +108,9 @@ From the battery above, on main:
 
 - Block reports: none recorded within the 31-day retention. No client sends
   them: neither connect nor the SDK calls the route.
-- Releases: no request and no release recorded. The SDK does not call the
-  route yet (EXTENDER-UPDATE2 slice A).
+- Releases: no request and no release recorded. No deployed client calls the
+  route. The SDK's fetch (slice A) reached sdk main on 2026-11-02, and it asks
+  only for a space a cohort has turned gated preference on for.
 - Gated fleet: none. Every active extender address is in the open tier, so a
   release answers `empty` for every identity.
 - Probe: running. Every active address in both families was probed within
