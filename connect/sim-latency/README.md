@@ -23,10 +23,12 @@ The actual compiler must be **Go 1.27.3**. Select that installed toolchain on
 
 The original **2026-10-28 00:00 UTC** opening was missed, not backdated.
 The approved replacement production season, R2 epoch 1, opened submission intake
-at **2026-10-29 13:06:42.413416 UTC**. Intake remains open while grading and
-publication are held for calibration. The reduced public R9/R9 pilot and native
-13-source exclusion census are accepted; the fresh hidden-seed 36-run screen
-is now running and **not yet accepted**. Follow the
+at **2026-10-29 13:06:42.413416 UTC**. As verified on **2026-11-02**, intake and
+provisional grading are active. Completed scores are available privately to
+their owners; public rankings and winner decisions retain the round embargo.
+Provisional grading is not acceptance of the unfinished calibration or closing
+pipeline qualification. Historical launch records below retain their original
+dates and must not be read as the current runtime state. Follow the
 [current checkpoint](launch/current-state.json),
 the [live hidden-screen record](launch/HIDDEN-SCREEN-LIVE-2026-10-31.json), and
 [`launch/PRODUCTION-2026-10-28.md`](launch/PRODUCTION-2026-10-28.md) and its
@@ -43,7 +45,7 @@ calibration; it is not a claim that the new checkpoint has passed calibration.
 |---|---|
 | Evaluator host | one 128 GiB-class Ubuntu host with 12 isolated CPUs |
 | CPU boundary | 10 evaluation CPUs; 2 management/cleanup CPUs |
-| Workload | Frozen epoch-one profile: 3,600 providers, 200 clients and 80 arrivals/minute; accepted public pilot, independent-seed screen running |
+| Workload | Frozen epoch-one profile: 3,600 providers, 200 clients and 80 arrivals/minute; provisional grading active, final calibration acceptance outstanding |
 | Selection | quality window 2; 4 exchange hosts; 4 fleet shards |
 | Measurement | 180 seconds with provider impairment enabled |
 | Aggregation | one immutable 9-run control per epoch; median of 9 fresh runs per candidate |
@@ -70,6 +72,10 @@ state.
 
 See:
 
+- [`evaluator/PATCH-SURFACE.md`](evaluator/PATCH-SURFACE.md) for the current
+  ten-repository mono-root patch format and protected instrument boundary;
+- [`EPOCH-1-SOURCE.md`](EPOCH-1-SOURCE.md) for exact production epoch-1 commits
+  and the distinction between canonical and raw source-lock hashes;
 - [`OFFICIAL-RUN.md`](OFFICIAL-RUN.md) for the evaluator and artifact contract;
 - [`PLAYBOOK.md`](PLAYBOOK.md) for live deployment and epoch operation;
 - [`RUN-MAIN.md`](RUN-MAIN.md) for the six-epoch agent harness and mandatory

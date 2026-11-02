@@ -1,9 +1,17 @@
 # Sim-latency submitter onboarding draft
 
-Status: integration draft; live qualification and the publication records
-called out below must be bound to the production release before public use.
+Current production pointers, verified 2026-11-02:
 
-## Current production preparation — October 26, 2026
+- [Submission format](../evaluator/PATCH-SURFACE.md): all ten locked repositories
+  in mono-root coordinates, except the protected instrument.
+- [Exact epoch-1 source](../EPOCH-1-SOURCE.md): commits and canonical digest.
+- The selected winner-review policy is `elected_winner_snow_union_v2`, not the
+  older model policy in the historical preparation record below.
+- Intake and provisional grading are active. An owning submitter can retrieve
+  its completed private score before reveal; public rankings and winner
+  decisions remain embargoed. Pending qualification is not claimed complete.
+
+## Historical production preparation — October 26, 2026
 
 The public opening is fixed at **2026-10-28 00:00 UTC**. The planned production
 contract is explicitly v2, with winner-review policy
