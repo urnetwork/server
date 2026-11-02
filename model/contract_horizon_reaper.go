@@ -239,7 +239,12 @@ const contractHorizonControlKey = "{contract_horizon}control"
 //   - `horizonDays`: the horizon in whole days, between ContractHorizonFloor
 //     (35) and the code's horizon (91); a value past either end counts as that
 //     end. Below 91 days users see less history in the provider stats and
-//     /transfer/stats (ContractHorizonFloor).
+//     /transfer/stats (ContractHorizonFloor). It moves more than the reaper:
+//     while the mode is on, close evidence and key history retention follow
+//     it (ContractHorizonFloor). At 35 the close evidence deletes permanently
+//     remove about a billion rows, the evidence accepted from 2026-10-06 on,
+//     whatever the reaper's keep rules; their own brake
+//     (server.RemoveExpiredCloseEvidence) stops them.
 //
 // A field that does not parse narrows as far as it can: mode off, rate zero
 // (which is off), the minimum batch size, the code's horizon.

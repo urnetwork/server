@@ -72,10 +72,9 @@ type CloseEvidenceRetentionSettings struct {
 	// take a third of the contract task's run, and a run that leaves work
 	// continues a minute later, so a rate holds for about three quarters of a
 	// day that has a backlog: 1,000 a second is about 65M rows a day. The
-	// rows that come due at 35 days are about 20-40M a day from 2026-11-10
-	// (the evidence of 10-06 to 10-20), about 60-90M a day from late
-	// November, and about 100M a day from early December. The brake raises
-	// it.
+	// rows that come due at 35 days are about 18-24M a day from about
+	// 2026-11-10, about 60M a day by late November, and 100M a day and more
+	// from about 2026-12-06. The brake raises it.
 	DefaultRowsPerSecond float64
 	// The highest rate the brake can set.
 	MaxRowsPerSecond float64
