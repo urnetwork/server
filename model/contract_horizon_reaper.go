@@ -130,13 +130,15 @@ func (self ContractHorizonMode) String() string {
 }
 
 // The shortest horizon the reaper applies, whatever its settings or control
-// say (owner, 2026-11-01: 35 days). It is the reaper's alone:
-// server.ContractRetention, which the partition drop, close evidence and key
-// history retention and the sn-reconcile floor share, stays 91 days. What
-// keeps a contract the payout planner, operator block points or a recovery can
-// still read is the reaper's row checks, never its horizon. The transfer audit
-// rollup never replaces a day the floor can reach
-// (TransferAuditRollupFirstDay).
+// say (owner, 2026-11-01: 35 days). It is the reaper's: server.ContractRetention,
+// which the partition drop, close evidence retention and the sn-reconcile
+// floor share, stays 91 days. Key history retention follows the reaper's
+// horizon while its mode is on (RemoveGoneStClientKeyHistory), over the key
+// history guard's own 30-day floor (server.ClientKeyHistoryRetentionFloor),
+// and keeps 91 days in a dry run. What keeps a contract the payout planner,
+// operator block points or a recovery can still read is the reaper's row
+// checks, never its horizon. The transfer audit rollup never replaces a day
+// the floor can reach (TransferAuditRollupFirstDay).
 //
 // Below 91 days users see less history: the 90-day provider stats views
 // undercount the days past the horizon by the contracts deleted there, and

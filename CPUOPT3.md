@@ -339,11 +339,13 @@ The reaper merged on 11-01 (7334b3a17) at the owner's 91 days, and `horizonDays`
 - It is read before every batch, with the other fields, and a new value applies from the next batch. Raised, it stops deleting inside the new horizon from that batch on. Nothing already deleted comes back.
 - It never turns the reaper on or off; `mode` does. A dry run at 35 days is `mode dry_run` with `horizonDays 35`.
 
-**Reaper-only.** The floor is `ContractHorizonFloor` in `model/contract_horizon_reaper.go`, and the code setting floors there too. `server.ContractRetention` stays 91 days, so nothing else moves:
+**Reaper-only, except key history while the mode is on.** The floor is `ContractHorizonFloor` in `model/contract_horizon_reaper.go`, and the code setting floors there too. `server.ContractRetention` stays 91 days, so nothing else moves:
 - the partition drop, whose `contractWeekBlocker` keeps only payment holds (it needs the reaper's keep rules before any cutover; that is separate work);
-- close evidence and key history retention;
+- close evidence retention;
 - the sn-reconcile holders floor;
 - the monitor's partition retention signal.
+
+**Key history follows `horizonDays` while `mode` is `on` (owner, 2026-11-01).** `remove_gone_st_client_key_history` then permanently deletes the signed key history of clients gone longer than the horizon, never under the guard's 30-day floor (migration 904). With `mode dry_run`, `mode off`, no control, or an unreadable one, key history keeps 91 days, so a dry run at any horizon deletes no key history. The deletes have their own brake, `{client_key_history_retention}control` (`mode` on/off, `maxClientsPerSecond`, default 150 a second), read before every batch.
 
 **Readers of the deleted rows, and how far back each reads:**
 

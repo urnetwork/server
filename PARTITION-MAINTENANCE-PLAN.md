@@ -31,7 +31,7 @@ Sizes are decimal GB, as SIGNALS.md §5.14 measures them.
 | C4 | `provider_work_session_event`: weekly partitions, dropped after 13 weeks. |
 | C5 | `contract_close_report_evidence`: weekly `report_id` partitions dropped once they expire, with the built row deletes kept for the rest. |
 | C6 | `st_provider_usage_archive`: weekly partitions by contract week, 1-year retention. |
-| D | Retired hosted identities and their provide keys are hard-deleted after 1 day. Key history of a client that is gone is deleted 91 days after it's gone. The mint rate is a product question outside this plan. |
+| D | Retired hosted identities and their provide keys are hard-deleted after 1 day. Key history of a client that is gone is deleted 91 days after it's gone; since 2026-11-01, at the contract reaper's horizon (see Part D). The mint rate is a product question outside this plan. |
 | Contract-dependent work | A7's reuse of the contract checks and retiring `legacy_settlement_intent` go ahead now: the contract-partition review fixes are merged (`09cd98565`). |
 | `search_projection` | Left as is. |
 | `search_provider_stats` | Change guard only; the open hour keeps its one-minute rollup. |
@@ -1646,6 +1646,27 @@ Changes:
     `transaction_timeout`, so the migration runner now runs every online
     migration through `WithoutTransactionTimeout`. This branch carries a
     minimal version of it; `feat/pm-horizon` owns the helper.
+
+- **Updated (owner, 2026-11-01): key history follows the contract horizon.**
+  - The retention deletes a gone client's history once the contract horizon
+    reaper's horizon has passed since the client went, while the reaper's
+    `mode` is `on`: the `horizonDays` of `{contract_horizon}control` as the
+    reaper narrows it. That is 91 days by default, down to the reaper's floor,
+    35 days since 6558752b0. A dry run, the reaper off, no control or an
+    unreadable one keep 91 days.
+  - Migration 904 moves the guard's fixed 91 days to
+    `st_client_key_history_retention_floor()`, 30 days
+    (`server.ClientKeyHistoryRetentionFloor`). Both the guard and the
+    retention's batch read it. It changes function definitions only, and its
+    rollback (`ClientKeyHistoryRetentionFloorRollbackSql`) restores 91 days for
+    both. The readers it keeps safe are listed in `db_identity_retention.go`.
+  - The deletes have their own brake, `{client_key_history_retention}control`:
+    `mode` on or off and `maxClientsPerSecond`, read before every batch, 150 a
+    second by default (about 5M clients a day) so a backlog ramps under
+    watch. A pass resumes from a (gone_time, client_id) cursor. The first
+    deletes come when the oldest records (2026-10-24) reach the horizon:
+    about 2026-11-28 at 35 days, when the 2026-10-24..27 records (about 58M
+    clients) come due together.
 
 ## Cutover requirements
 

@@ -873,6 +873,8 @@ var migrationCurrentSuffixContracts = slices.Concat(
 		snTopReplicaMigrationContract,
 		verifyCohortCensusMigrationContract,
 		competitionSubmissionMetricsMigrationContract,
+		// replaces the key history guard body the retention contract pins
+		clientKeyHistoryRetentionFloorMigrationContract,
 	},
 )
 
