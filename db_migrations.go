@@ -11225,6 +11225,14 @@ var migrations = []any{
 	// it applies before or after the deploy.
 	newSqlMigration(contractCloseReportEvidenceHorizonGuardSql),
 
+	// Provider work session events at the contract horizon (C4,
+	// db_provider_work_session_partition.go): the drop guard admits a leaf
+	// whose upper bound is 35 days past, the shortest horizon, in place of 13
+	// weeks; the family's fence keeps a leaf inside the current horizon. It
+	// replaces the guard's function body only: no table lock. Every drop the
+	// running release makes (13 weeks) stays admitted.
+	newSqlMigration(providerWorkSessionEventHorizonDropGuardSql),
+
 	// lag.dev's measurement api probes (lag.dev/PLAN.md A4,
 	// network_extender_measurement_probe_schema.go): the latest probe of each
 	// published family of each extender the sample serves, which the

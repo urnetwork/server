@@ -2,6 +2,7 @@ package work
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
@@ -93,7 +94,7 @@ type ExtenderProbeArgs struct {
 }
 
 type ExtenderProbeResult struct {
-	// counts only; which address failed is in the log, and a task result is
+	// counts only; which extender failed is in the log, and a task result is
 	// not a place anything should be reading the directory back out of
 	Probed      int `json:"probed"`
 	Succeeded   int `json:"succeeded"`
@@ -230,18 +231,18 @@ func ExtenderProbe(
 				// the count below is the unconditional signal
 				if glog.V(1) {
 					glog.Infof(
-						"[extenderprobe]%s ipv%d did not answer: %s\n",
-						target.Ip,
+						"[extenderprobe]extender %s ipv%d did not answer: %s\n",
+						target.ExtenderId,
 						target.IpVersion,
-						probeErr,
+						extenderProbeErrorText(target, probeErr),
 					)
 				}
 			}
 			if outcome.AddressDeactivated {
 				result.Deactivated += 1
 				glog.Errorf(
-					"[extenderprobe]%s ipv%d deactivated after %d consecutive failures\n",
-					target.Ip,
+					"[extenderprobe]extender %s ipv%d deactivated after %d consecutive failures\n",
+					target.ExtenderId,
 					target.IpVersion,
 					ExtenderMaxConsecutiveProbeFailures,
 				)
@@ -267,6 +268,18 @@ func ExtenderProbe(
 		result.DiscountedBlockReports,
 	)
 	return result, nil
+}
+
+// The text of a failed probe for a log line. A gated address must never reach a
+// log (connect/EXTENDER.md R1), so the lines here name an extender by its id and
+// family, and this takes the address out of what a failed dial says, which is
+// where it would come back: "dial tcp <address>:443: i/o timeout".
+func extenderProbeErrorText(target *model.NetworkExtenderProbeTarget, probeErr error) string {
+	text := probeErr.Error()
+	for _, address := range []string{target.Ip.String(), target.Ip.Unmap().String()} {
+		text = strings.ReplaceAll(text, address, "<address>")
+	}
+	return text
 }
 
 func ExtenderProbePost(
