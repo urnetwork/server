@@ -36,18 +36,19 @@ func sdkBrowsingInitialQualityProvider(ordinal int) bool {
 // Publication follows complete transport, NAT and public-mode registration.
 // All non-atomic fields remain immutable after ready becomes true.
 type sdkBrowsingSetupProvider struct {
-	ready        atomic.Bool
-	id           clientconnect.Id
-	carrier      *clientconnect.Tun
-	strategy     *clientconnect.ClientStrategy
-	client       *clientconnect.Client
-	transport    *clientconnect.PlatformTransport
-	localNat     *clientconnect.LocalUserNat
-	remoteNat    *clientconnect.RemoteUserNatProvider
-	resendBudget *clientconnect.TransferMemoryBudget
-	noAck        *noAckSendTracker
-	packs        *sendPackLifecycleTracker
-	returns      *providerReturnSendTracker
+	ready                            atomic.Bool
+	id                               clientconnect.Id
+	carrier                          *clientconnect.Tun
+	strategy                         *clientconnect.ClientStrategy
+	client                           *clientconnect.Client
+	transport                        *clientconnect.PlatformTransport
+	localNat                         *clientconnect.LocalUserNat
+	remoteNat                        *clientconnect.RemoteUserNatProvider
+	resendBudget                     *clientconnect.TransferMemoryBudget
+	noAck                            *noAckSendTracker
+	packs                            *sendPackLifecycleTracker
+	returns                          *providerReturnSendTracker
+	returnRecoveryPacketLimitForTest int
 }
 
 // Every acquired resource is retained until joined, including partial setup.
@@ -155,7 +156,11 @@ func newSdkBrowsingSetupFixture(t testing.TB, plan *nativeBrowsingPressurePlan, 
 			return &sdkBrowsingOriginPolicy{SecurityPolicy: clientconnect.DefaultSecurityPolicyWithStats(ctx, stats), native: native}
 		})
 	}
-	device.SetTransportSettings(&sdk.TransportSettings{Mode: sdk.TransportModeH1})
+	if plan.autoH1OnlyForTest {
+		device.SetTransportSettings(nativeBrowsingAutoH1OnlySettingsForTest())
+	} else {
+		device.SetTransportSettings(&sdk.TransportSettings{Mode: sdk.TransportModeH1})
+	}
 	device.SetRouteLocal(false)
 	specs := sdk.NewProviderSpecList()
 	specs.Add(&sdk.ProviderSpec{BestAvailable: true})
@@ -181,6 +186,16 @@ func (self *sdkBrowsingSetupFixture) readyProviderIds() [sdkBrowsingProviderCoun
 	return ids
 }
 
+// Ordinary providers keep their constructor policy. Only an explicit research
+// plan changes recovery; each initial or late provider receives fresh settings.
+func sdkBrowsingProviderNatSettings(plan *nativeBrowsingPressurePlan) *clientconnect.LocalUserNatSettings {
+	settings := clientconnect.DefaultLocalUserNatSettings()
+	if plan.providerReturnRecoveryMaxPacketCountForTest > 0 {
+		settings.TcpBufferSettings.ReturnRecoveryMaxPacketCount = plan.providerReturnRecoveryMaxPacketCountForTest
+	}
+	return settings
+}
+
 // Construction repeats the existing real provider hierarchy and publishes last.
 func (self *sdkBrowsingSetupFixture) buildProvider(ordinal int, plan *nativeBrowsingPressurePlan) error {
 	provider := &self.providers[ordinal]
@@ -203,7 +218,8 @@ func (self *sdkBrowsingSetupFixture) buildProvider(ordinal int, plan *nativeBrow
 	if !waitForPlatform(self.setupCtx, provider.transport) {
 		return errors.New("provider H1 transport did not connect")
 	}
-	localSettings := clientconnect.DefaultLocalUserNatSettings()
+	localSettings := sdkBrowsingProviderNatSettings(plan)
+	provider.returnRecoveryPacketLimitForTest = c48ReturnFlightConfiguredPacketLimit(localSettings.TcpBufferSettings)
 	if self.scenario != nil {
 		localSettings.TcpBufferSettings.DialContextSettings = &clientconnect.DialContextSettings{DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
 			if native := self.native.Load(); native != nil {
