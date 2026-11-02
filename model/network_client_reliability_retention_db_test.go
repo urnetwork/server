@@ -13,7 +13,7 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// client_reliability retention keeps 21 days. A subsidy epoch, however
+// client_reliability retention keeps 14 days. A subsidy epoch, however
 // recent or stale, no longer extends it (owner decision 2026-10-31: subsidy
 // payouts ended with the epoch that ended 2026-10-05). Each test seeds one row
 // per block at fixed day offsets from now, runs the real partition maintenance
@@ -84,7 +84,7 @@ func partitionClientReliabilityForRetentionTest(t testing.TB, ctx context.Contex
 	}
 }
 
-// With no payout behind, a day partition entirely older than 21 days is
+// With no payout behind, a day partition entirely older than 14 days is
 // dropped and one inside the window is kept. Retention used to be 30 days,
 // which kept the 25-day-old partition and with it 9 daily partitions (about
 // 480 GB on Main) that no recurring reader needs.
@@ -93,8 +93,8 @@ func TestClientReliabilityPartitionMaintenanceDropsDaysPastRetention(t *testing.
 		ctx := context.Background()
 		now := server.NowUtc()
 
-		expiredTime := now.Add(-25 * 24 * time.Hour)
-		retainedTime := now.Add(-20 * 24 * time.Hour)
+		expiredTime := now.Add(-16 * 24 * time.Hour)
+		retainedTime := now.Add(-13 * 24 * time.Hour)
 		partitionClientReliabilityForRetentionTest(t, ctx, now, []time.Time{expiredTime, retainedTime})
 
 		_, droppedNames := MaintainClientReliabilityPartitions(ctx, now)
@@ -112,7 +112,7 @@ func TestClientReliabilityPartitionMaintenanceDropsDaysPastRetention(t *testing.
 // A subsidy epoch that ended 26 days ago used to hold retention back to its
 // end less a day, keeping the 24-day-old partition (on Main, the 10-05
 // frontier held every day from 10-04 and stopped the nightly drops from
-// 10-25). The cutoff is now 21 days whatever the frontier.
+// 10-25). The cutoff is now 14 days whatever the frontier.
 func TestClientReliabilityPartitionMaintenanceIgnoresSubsidyFrontier(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -121,7 +121,7 @@ func TestClientReliabilityPartitionMaintenanceIgnoresSubsidyFrontier(t *testing.
 		addSubsidyEpochForRetentionTest(ctx, now.Add(-26*24*time.Hour))
 
 		pastRetentionTime := now.Add(-24 * 24 * time.Hour)
-		retainedTime := now.Add(-20 * 24 * time.Hour)
+		retainedTime := now.Add(-13 * 24 * time.Hour)
 		partitionClientReliabilityForRetentionTest(t, ctx, now, []time.Time{pastRetentionTime, retainedTime})
 
 		_, droppedNames := MaintainClientReliabilityPartitions(ctx, now)
@@ -136,16 +136,16 @@ func TestClientReliabilityPartitionMaintenanceIgnoresSubsidyFrontier(t *testing.
 }
 
 // A frontier older than 30 days used to keep exactly 30 days, so the
-// 25-day-old partition stayed. It is past the 21-day retention, so it goes.
-func TestClientReliabilityPartitionMaintenanceStaleFrontierKeepsTwentyOneDays(t *testing.T) {
+// 25-day-old partition stayed. It is past the 14-day retention, so it goes.
+func TestClientReliabilityPartitionMaintenanceStaleFrontierKeepsTheRetention(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		now := server.NowUtc()
 
 		addSubsidyEpochForRetentionTest(ctx, now.Add(-45*24*time.Hour))
 
-		expiredTime := now.Add(-25 * 24 * time.Hour)
-		retainedTime := now.Add(-20 * 24 * time.Hour)
+		expiredTime := now.Add(-16 * 24 * time.Hour)
+		retainedTime := now.Add(-13 * 24 * time.Hour)
 		partitionClientReliabilityForRetentionTest(t, ctx, now, []time.Time{expiredTime, retainedTime})
 
 		MaintainClientReliabilityPartitions(ctx, now)
@@ -162,8 +162,8 @@ func TestRemoveOldClientReliabilityStatsDeletesBlocksPastRetention(t *testing.T)
 		ctx := context.Background()
 		now := server.NowUtc()
 
-		expiredTime := now.Add(-25 * 24 * time.Hour)
-		retainedTime := now.Add(-20 * 24 * time.Hour)
+		expiredTime := now.Add(-16 * 24 * time.Hour)
+		retainedTime := now.Add(-13 * 24 * time.Hour)
 		addClientReliabilityRowForRetentionTest(ctx, expiredTime)
 		addClientReliabilityRowForRetentionTest(ctx, retainedTime)
 		connect.AssertEqual(t, IsClientReliabilityPartitioned(ctx), false)
@@ -186,7 +186,7 @@ func TestRemoveOldClientReliabilityStatsIgnoresSubsidyFrontier(t *testing.T) {
 		addSubsidyEpochForRetentionTest(ctx, now.Add(-26*24*time.Hour))
 
 		pastRetentionTime := now.Add(-24 * 24 * time.Hour)
-		retainedTime := now.Add(-20 * 24 * time.Hour)
+		retainedTime := now.Add(-13 * 24 * time.Hour)
 		addClientReliabilityRowForRetentionTest(ctx, pastRetentionTime)
 		addClientReliabilityRowForRetentionTest(ctx, retainedTime)
 		connect.AssertEqual(t, IsClientReliabilityPartitioned(ctx), false)
@@ -200,7 +200,7 @@ func TestRemoveOldClientReliabilityStatsIgnoresSubsidyFrontier(t *testing.T) {
 }
 
 // Operator block points refuse a reliability window that starts before the
-// 21-day cutoff, as a window whose evidence the drop pass removes. A recent
+// 14-day cutoff, as a window whose evidence the drop pass removes. A recent
 // subsidy epoch used to move the cutoff back and let such a window read
 // blocks that a later pass would drop.
 func TestOperatorBlockReliabilityExpiresAtRetentionDespiteSubsidyFrontier(t *testing.T) {
@@ -210,11 +210,11 @@ func TestOperatorBlockReliabilityExpiresAtRetentionDespiteSubsidyFrontier(t *tes
 
 		addSubsidyEpochForRetentionTest(ctx, now.Add(-26*24*time.Hour))
 
-		expiredStart := now.Add(-23 * 24 * time.Hour)
+		expiredStart := now.Add(-16 * 24 * time.Hour)
 		_, err := readOperatorBlockReliability(ctx, expiredStart, expiredStart.Add(SubnetBlockDuration), now)
 		connect.AssertEqual(t, errors.Is(err, ErrOperatorBlockPointsReliabilityExpired), true)
 
-		retainedStart := now.Add(-20 * 24 * time.Hour)
+		retainedStart := now.Add(-13 * 24 * time.Hour)
 		_, err = readOperatorBlockReliability(ctx, retainedStart, retainedStart.Add(SubnetBlockDuration), now)
 		connect.AssertEqual(t, errors.Is(err, ErrOperatorBlockPointsReliabilityExpired), false)
 	})
@@ -223,7 +223,7 @@ func TestOperatorBlockReliabilityExpiresAtRetentionDespiteSubsidyFrontier(t *tes
 // The first pass after an operator exported and detached the 9 oldest day
 // partitions, dropping some of them, leaves those days alone: no day below the
 // cutoff is re-created, a detached table is not dropped, the partition that
-// straddles the 21-day cutoff is kept, and nothing attached is dropped. The
+// straddles the 14-day cutoff is kept, and nothing attached is dropped. The
 // next day's pass drops exactly that straddling partition. The former 30-day
 // pass re-created every dropped day, each under an ACCESS EXCLUSIVE lock on
 // the parent.
@@ -238,10 +238,10 @@ func TestClientReliabilityPartitionMaintenanceLeavesDetachedDays(t *testing.T) {
 			connect.AssertEqual(t, dropClientReliabilityPartition(ctx, name), true)
 		}
 
-		// midday, so the 21-day cutoff falls inside a day partition
+		// midday, so the 14-day cutoff falls inside a day partition
 		day := reliabilityPartitionDay(reliabilityBlockNumber(server.NowUtc()))
 		now := time.Unix(day*24*60*60, 0).UTC().Add(12 * time.Hour)
-		for d := day - 30; d <= day; d += 1 {
+		for d := day - 23; d <= day; d += 1 {
 			connect.AssertEqual(t, ensureClientReliabilityPartition(ctx, clientReliabilityTable, d), true)
 		}
 
@@ -251,7 +251,7 @@ func TestClientReliabilityPartitionMaintenanceLeavesDetachedDays(t *testing.T) {
 			}, server.OptReadWrite())
 		}
 		detachedNames := []string{}
-		for d := day - 30; d <= day-22; d += 1 {
+		for d := day - 23; d <= day-15; d += 1 {
 			name := reliabilityPartitionName(d)
 			execDdl(fmt.Sprintf(`ALTER TABLE %s DETACH PARTITION %s`, clientReliabilityTable, name))
 			detachedNames = append(detachedNames, name)
@@ -280,9 +280,9 @@ func TestClientReliabilityPartitionMaintenanceLeavesDetachedDays(t *testing.T) {
 			connect.AssertEqual(t, exists, true)
 			connect.AssertEqual(t, slices.Contains(attachedNames, name), false)
 		}
-		connect.AssertEqual(t, attachedNames[0], reliabilityPartitionName(day-21))
+		connect.AssertEqual(t, attachedNames[0], reliabilityPartitionName(day-14))
 
 		_, droppedPartitionNames = MaintainClientReliabilityPartitions(ctx, now.Add(24*time.Hour))
-		connect.AssertEqual(t, droppedPartitionNames, []string{reliabilityPartitionName(day - 21)})
+		connect.AssertEqual(t, droppedPartitionNames, []string{reliabilityPartitionName(day - 14)})
 	})
 }

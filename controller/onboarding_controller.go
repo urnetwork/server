@@ -345,6 +345,7 @@ func DecoratePlan(result *SubscriptionBalanceResult, storefrontCountry string, c
 	tier := ResolvePriceTier(clientSession, storefrontCountry)
 	result.PriceTier = tier.Result()
 	result.OnboardingOffer = onboardingOfferResult(model.GetOnboardingOffer(clientSession.Ctx, networkId), tier.Tier, now)
+	result.WinbackOffer = winbackPlanOfferResult(model.GetActiveWinbackOffer(clientSession.Ctx, networkId, now), tier.Tier, now)
 	result.Experiments = model.Onboarding().AssignExperiments(networkId, now)
 	// the crypto methods ride on the plan response every app already reads
 	decorateCryptoPay(result, clientSession)
@@ -653,13 +654,18 @@ type OnboardingClickResult struct {
 	// (expired ones too), so the landing page can still route the user
 	Step        string `json:"step,omitempty"`
 	Destination string `json:"destination,omitempty"`
+	// OpenUrl, when set, is where the landing page opens instead of the app: a
+	// W1 click by a network whose win-back offer is the App Store's opens
+	// Apple's direct link to it (https://apps.apple.com/win-back/<Apple ID>).
+	OpenUrl string `json:"open_url,omitempty"`
 	// invalid | expired
 	Error string `json:"error,omitempty"`
 }
 
 // OnboardingClick records a landing-page click (the campaign's attribution event)
 // and tells the page where in the app to send the user. No auth: the token is the
-// credential, and the response carries nothing about the network.
+// credential, and the response carries nothing about the network beyond where
+// its email's button leads (Apple's win-back link, for a W1 that named it).
 func OnboardingClick(
 	args *OnboardingClickArgs,
 	clientSession *session.ClientSession,
@@ -685,8 +691,17 @@ func OnboardingClick(
 		return &OnboardingClickResult{Ok: false, Error: "invalid"}, nil
 	}
 	slug := onboarding.LandingSlug(claims.Step)
+	result := &OnboardingClickResult{
+		Ok:          true,
+		Step:        slug,
+		Destination: onboarding.Destination(slug),
+	}
 	if onboarding.IsReengagementFlowStep(claims.FlowStep) {
 		recordReengagementClick(clientSession, claims, slug)
+		if slug == onboarding.SlugWinback {
+			// the email named the App Store's offer: its link, not our plan screen
+			result.OpenUrl = winbackLandingOpenUrl(clientSession.Ctx, claims.NetworkId, now)
+		}
 	} else {
 		props := map[string]any{"step": claims.Step}
 		if onboarding.IsFlowStep(claims.FlowStep) {
@@ -694,11 +709,7 @@ func OnboardingClick(
 		}
 		WriteServerEvent(clientSession, claims.NetworkId, model.EventLandingClicked, props, "")
 	}
-	return &OnboardingClickResult{
-		Ok:          true,
-		Step:        slug,
-		Destination: onboarding.Destination(slug),
-	}, nil
+	return result, nil
 }
 
 type OnboardingFeedbackTokenResult struct {
