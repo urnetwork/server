@@ -156,7 +156,7 @@ func testRequiredAggregateShape(t *testing.T, fixture requiredAggregateFixture) 
 			case strings.Contains(query, fixture.queryMarker):
 				ownerReads++
 				return nil, nil
-			case strings.Contains(query, "create_time >= date_trunc('minute',now())"):
+			case strings.Contains(query, "SELECT count(*) FROM transfer_contract"):
 				siblingReads++
 				return []Row{{"0"}}, nil
 			default:

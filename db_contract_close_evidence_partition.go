@@ -20,12 +20,13 @@
 //     weeks, from a clock far ahead or far behind, so no report is ever
 //     refused. Never dropped; the row deletes empty it.
 //
-// A week drops once its upper bound is 91 days past and every row in it meets
-// the rule of the evidence guard (migration 857): accepted more than 91 days
-// ago, its contract resolved or gone (closeEvidenceWeekBlocker). The drop
-// bypasses that row guard, so only the retention task drops, under the guard's
-// opt-in (DropGuardSetting, checked by fenceCloseEvidenceDrop), and the
-// registry checks again on the detached week. A week holding a straggler stays;
+// A week drops once its upper bound is past the evidence retention, the
+// contract horizon (CloseEvidenceRetention: 35 to 91 days), and every row in it
+// meets the retention's rule: accepted longer ago than the retention, its
+// contract resolved or gone (closeEvidenceWeekBlocker). The drop bypasses the
+// evidence guard, so only the retention task drops, under the guard's opt-in
+// (DropGuardSetting, checked by fenceCloseEvidenceDrop), and the registry
+// checks again on the detached week. A week holding a straggler stays;
 // RemoveExpiredCloseEvidence row-deletes its qualifying rows as before, along
 // with the legacy and DEFAULT partitions, and the week drops once the rest
 // qualify.
@@ -47,9 +48,10 @@ const closeEvidenceTable = "contract_close_report_evidence"
 const closeEvidenceRetentionSetting = "urnetwork.close_evidence_retention"
 
 // A weekly partition indexes the reports it accepts more than this long after
-// its week ends, the only ones that can be younger than 91 days once the week
-// is 91 days past (closeEvidenceLateIndexSql). Each partition's index carries
-// the bound in its predicate, so this is a fact of the schema, not a tunable.
+// its week ends, the only ones that can be younger than the retention once the
+// week's upper bound is a day past it (closeEvidenceLateIndexSql), whatever the
+// retention. Each partition's index carries the bound in its predicate, so this
+// is a fact of the schema, not a tunable.
 const closeEvidenceLateAcceptance = 24 * time.Hour
 
 // A contract's id is minted by the server that creates it before any report
@@ -141,7 +143,9 @@ func newCloseEvidencePartitionFamily() *PartitionFamily {
 		KeyKind:     PartitionKeyId,
 		Granularity: PartitionGranularityWeekly,
 		AheadRanges: ContractPartitionAheadWeeks,
-		Retention:   ContractRetention,
+		// the longest retention, which the monitor judges blocked weeks by;
+		// a week expires at the contract horizon (closeEvidenceRangeExpired)
+		Retention: ContractRetention,
 		// clocks outside the created weeks
 		DefaultPartition: true,
 		// the table before the cutover, emptied by the row deletes
@@ -151,8 +155,10 @@ func newCloseEvidencePartitionFamily() *PartitionFamily {
 		LeafAnalyzeDelay: 24 * time.Hour,
 		ReindexExempt:    true,
 		// A client clock behind by days keeps its weeks that much longer,
-		// by design: the week waits for its stragglers' 91 days. A quarter
-		// past retention is worth a look.
+		// by design: the week waits for its stragglers' retention. A quarter
+		// past the longest retention is worth a look. The monitor does not
+		// read the horizon, so at a 35-day horizon a stuck week is reported
+		// only this long after the 91 days, not after its own retention.
 		MonitorRetentionGrace: ContractRetention,
 		Settings: &PartitionFamilySettings{
 			CreateLockTimeout:    3 * time.Second,
@@ -162,6 +168,7 @@ func newCloseEvidencePartitionFamily() *PartitionFamily {
 		CreateLeaf: func(ctx context.Context, table string, r PartitionRange) error {
 			return createCloseEvidenceLeaf(ctx, table, r, DefaultCloseEvidencePartitionSettings())
 		},
+		RangeExpired: closeEvidenceRangeExpired,
 		DropFence: func(ctx context.Context, tx PgTx, r PartitionRange) {
 			fenceCloseEvidenceDrop(ctx, tx, r, DefaultCloseEvidencePartitionSettings())
 		},
@@ -256,7 +263,8 @@ func closeEvidenceColumnList(ctx context.Context, conn PgQuerier, table string) 
 
 // The weekly partition's index of the reports it accepts more than a day
 // after its week ends. Partial, so it holds only stragglers: it lets the drop
-// precondition prove every row older than 91 days without reading the week.
+// precondition prove every row older than the retention without reading the
+// week.
 func closeEvidenceLateIndexSql(leaf string, r PartitionRange) string {
 	return fmt.Sprintf(
 		"CREATE INDEX %s ON public.%s USING btree (accepted_at) WHERE accepted_at >= %s",
@@ -391,30 +399,40 @@ func createCloseEvidenceLeaf(ctx context.Context, table string, r PartitionRange
 	})
 }
 
+// Whether the week r has expired at now (the family's RangeExpired): its upper
+// bound is past ctx's evidence retention, the contract horizon. Never later
+// than the family's Retention, which is the longest retention.
+func closeEvidenceRangeExpired(ctx context.Context, now time.Time, r PartitionRange) bool {
+	return !now.Before(r.Upper.Add(CloseEvidenceRetention(ctx)))
+}
+
 // Runs first in a week's drop transaction, after the registry set the guard's
 // opt-in: refuses, by raising, a drop that is not the retention task's (one
 // without the opt-in, of the legacy or DEFAULT partition, or of a week whose
-// upper bound is not 91 days past), and a busy table. Then takes the locks the
-// detach needs, parent first, so a lock wait happens before any change.
+// upper bound is not past the evidence retention by the database's clock,
+// ctx's bounded by the installed guard), and a busy table. Then takes the locks
+// the detach needs, parent first, so a lock wait happens before any change.
 func fenceCloseEvidenceDrop(ctx context.Context, tx PgTx, r PartitionRange, settings *CloseEvidencePartitionSettings) {
 	if r.Legacy || r.Default || r.Lower.IsZero() || r.Upper.IsZero() {
 		panic(errors.New("the legacy and DEFAULT partitions of the close evidence are never dropped"))
 	}
+	retention := closeEvidenceRetentionIn(ctx, tx)
 	var optedIn bool
 	var expired bool
 	Raise(tx.QueryRow(
 		ctx,
 		fmt.Sprintf(
-			`SELECT coalesce(current_setting('%s', true) = 'on', false), %s + interval '91 days' <= (now() AT TIME ZONE 'UTC')`,
+			`SELECT coalesce(current_setting('%s', true) = 'on', false), %s + interval '%d seconds' <= (now() AT TIME ZONE 'UTC')`,
 			closeEvidenceRetentionSetting,
 			PartitionKeyTimestamp.BoundSql(r.Upper)+"::timestamp",
+			closeEvidenceRetentionSeconds(retention),
 		),
 	).Scan(&optedIn, &expired))
 	if !optedIn {
 		panic(fmt.Errorf("a close evidence week is dropped only by the retention task, under %s", closeEvidenceRetentionSetting))
 	}
 	if !expired {
-		panic(fmt.Errorf("the close evidence week of %s is not 91 days past", r.Lower.Format(time.DateOnly)))
+		panic(fmt.Errorf("the close evidence week of %s is not past its retention of %d days", r.Lower.Format(time.DateOnly), int64(retention/(24*time.Hour))))
 	}
 	requireCloseEvidenceQuiet(ctx, tx, settings)
 	RaisePgResult(tx.Exec(ctx, fmt.Sprintf("LOCK TABLE ONLY public.%s IN ACCESS EXCLUSIVE MODE", quoteIdentifier(closeEvidenceTable))))
@@ -424,23 +442,24 @@ func fenceCloseEvidenceDrop(ctx context.Context, tx PgTx, r PartitionRange, sett
 // The reasons a week stays.
 const (
 	// the week's rows accepted before its late index starts may be younger
-	// than 91 days for one more day; it drops the next day, and the row
+	// than the retention for one more day; it drops the next day, and the row
 	// deletes leave it alone
 	closeEvidenceBlockerRetentionDay = "within a day of its retention"
 	closeEvidenceBlockerNoLateIndex  = "no index of its late reports"
-	closeEvidenceBlockerRecentReport = "a report accepted within 91 days"
+	closeEvidenceBlockerRecentReport = "a report accepted within the retention"
 	closeEvidenceBlockerUnresolved   = "a report of an unresolved contract"
 )
 
 // Why the expired week r must stay, or "" when every row in it meets the
-// evidence guard's rule (the family's DropPrecondition): accepted more than 91
-// days ago, its contract resolved or gone. It reads indexes only:
-//   - rows accepted up to a day after the week are older than 91 days once the
-//     week is a day past its retention, and the week's late index holds every
+// retention's rule (the family's DropPrecondition): accepted longer ago than
+// ctx's evidence retention, its contract resolved or gone. It reads indexes
+// only:
+//   - rows accepted up to a day after the week are older than the retention
+//     once the week is a day past it, and the week's late index holds every
 //     row accepted after that, so its newest entry decides the rest;
-//   - every row is then older than 91 days, and a contract's id is minted
-//     before any report of it is accepted, so only an unresolved contract
-//     with an id from before then can be one of the week's: those few
+//   - every row is then older than the retention, and a contract's id is
+//     minted before any report of it is accepted, so only an unresolved
+//     contract with an id from before then can be one of the week's: those few
 //     (transfer_contract_outcome_null) are each looked up in the week's
 //     contract index.
 //
@@ -452,23 +471,23 @@ func closeEvidenceWeekBlocker(ctx context.Context, conn PgQuerier, r PartitionRa
 	}
 	leaf := closeEvidencePartitionFamily.LeafName(closeEvidenceTable, r)
 	var blocker string
-	Raise(conn.QueryRow(ctx, closeEvidenceWeekBlockerSql(leaf, r)).Scan(&blocker))
+	Raise(conn.QueryRow(ctx, closeEvidenceWeekBlockerSql(leaf, r, closeEvidenceRetentionIn(ctx, conn))).Scan(&blocker))
 	return blocker
 }
 
 // The precondition as one statement, so it reads one snapshot. The late index
 // is read through a predicate equal to its own, so the planner proves the
 // partial index applies and reads its newest entry.
-func closeEvidenceWeekBlockerSql(leaf string, r PartitionRange) string {
+func closeEvidenceWeekBlockerSql(leaf string, r PartitionRange, retention time.Duration) string {
 	lateBound := closeEvidenceLateBoundSql(r)
 	return fmt.Sprintf(
 		`
 		SELECT CASE
-			WHEN (now() AT TIME ZONE 'UTC') - interval '91 days' < %[2]s
+			WHEN (now() AT TIME ZONE 'UTC') - interval '%[9]d seconds' < %[2]s
 				THEN '%[3]s'
 			WHEN NOT coalesce((SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass('public.%[4]s')), false)
 				THEN '%[5]s'
-			WHEN (now() AT TIME ZONE 'UTC') - interval '91 days' <= (
+			WHEN (now() AT TIME ZONE 'UTC') - interval '%[9]d seconds' <= (
 				SELECT max(late.accepted_at) FROM public.%[1]s late WHERE late.accepted_at >= %[2]s
 			)
 				THEN '%[6]s'
@@ -481,7 +500,7 @@ func closeEvidenceWeekBlockerSql(leaf string, r PartitionRange) string {
 					LIMIT 1
 				) reported
 				WHERE transfer_contract.outcome IS NULL
-					AND transfer_contract.contract_id < contract_id_floor(now() - interval '91 days' + interval '%[7]d seconds')
+					AND transfer_contract.contract_id < contract_id_floor(now() - interval '%[9]d seconds' + interval '%[7]d seconds')
 			)
 				THEN '%[8]s'
 			ELSE ''
@@ -495,6 +514,7 @@ func closeEvidenceWeekBlockerSql(leaf string, r PartitionRange) string {
 		closeEvidenceBlockerRecentReport,
 		int64(closeEvidenceContractClockMargin/time.Second),
 		closeEvidenceBlockerUnresolved,
+		closeEvidenceRetentionSeconds(retention),
 	)
 }
 
@@ -527,32 +547,6 @@ func closeEvidenceRemovalTargets(ctx context.Context, now time.Time) (targets []
 		return nil, err
 	}
 	return closeEvidenceRemovalOrder(leaves, blockers), nil
-}
-
-// Where an unfinished close evidence pass resumes: the leaf it was deleting
-// from (the table itself while it is plain) and the next contract id there.
-type CloseEvidenceRemovalCursor struct {
-	Leaf       string
-	ContractId *Id
-}
-
-// The index of the target the pass resumes at, and the contract id it resumes
-// from there. A cursor without a leaf comes from before the leaf was recorded,
-// so it belongs to the plain table. A leaf that is no longer a target (dropped,
-// or no longer kept by a straggler) starts the pass over.
-func (self CloseEvidenceRemovalCursor) resumeIn(targets []string) (start int, from Id) {
-	leaf := self.Leaf
-	if leaf == "" && self.ContractId != nil {
-		leaf = closeEvidenceTable
-	}
-	start = slices.Index(targets, leaf)
-	if start < 0 {
-		return 0, Id{}
-	}
-	if self.ContractId != nil {
-		from = *self.ContractId
-	}
-	return
 }
 
 // The removal targets of leaves, given the blockers of the expired weeks (see

@@ -15,14 +15,15 @@ import (
 )
 
 // The move guard's contract is the version the migration list gives its SQL,
-// it supersedes 857, and it is the only contract at that version.
+// it supersedes 857, the horizon guard supersedes it, and it is the only
+// contract at that version.
 func TestMigrationsCloseEvidenceMoveGuardContract(t *testing.T) {
 	version := server.ContractCloseEvidenceMoveGuardMigrationVersion()
 	if version == 0 || version != contractCloseEvidenceMoveGuardMigrationVersion {
 		t.Fatalf("move guard version %d, contract version %d", version, contractCloseEvidenceMoveGuardMigrationVersion)
 	}
 	contract := migrationCurrentSuffixTestContract(t, version)
-	if contract.query != contractCloseEvidenceMoveArtifactQuery || contract.artifact.removedVersion != 0 || contract.artifact.rowColumn != version-589 {
+	if contract.query != contractCloseEvidenceMoveArtifactQuery || contract.artifact.removedVersion != contractCloseEvidenceHorizonGuardMigrationVersion || contract.artifact.rowColumn != version-589 {
 		t.Fatalf("move guard contract %+v", contract.artifact)
 	}
 	if retention := migrationCurrentSuffixTestContract(t, 857); retention.artifact.removedVersion != version {
@@ -37,6 +38,32 @@ func TestMigrationsCloseEvidenceMoveGuardContract(t *testing.T) {
 		if !strings.Contains(contractCloseEvidenceMoveArtifactQuery, want) {
 			t.Errorf("move guard artifact lacks %q", want)
 		}
+	}
+}
+
+// The horizon guard's contract is the version the migration list gives its
+// SQL, after the move guard; it republishes the move guard's custody in either
+// layout with only the guard body replaced, by the 35-day body, and it is not
+// superseded.
+func TestMigrationsCloseEvidenceHorizonGuardContract(t *testing.T) {
+	version := server.ContractCloseEvidenceHorizonGuardMigrationVersion()
+	if version == 0 || version != contractCloseEvidenceHorizonGuardMigrationVersion || version <= contractCloseEvidenceMoveGuardMigrationVersion {
+		t.Fatalf("horizon guard version %d, contract version %d, move guard version %d", version, contractCloseEvidenceHorizonGuardMigrationVersion, contractCloseEvidenceMoveGuardMigrationVersion)
+	}
+	contract := migrationCurrentSuffixTestContract(t, version)
+	if contract.query != contractCloseEvidenceHorizonArtifactQuery || contract.artifact.removedVersion != 0 || contract.artifact.rowColumn != version-589 {
+		t.Fatalf("horizon guard contract %+v", contract.artifact)
+	}
+	moveBody := snMainnetMigrationLiteral(server.ContractCloseEvidenceMoveGuardBodySql())
+	horizonBody := snMainnetMigrationLiteral(server.ContractCloseEvidenceHorizonGuardBodySql())
+	if !strings.Contains(contractCloseEvidenceMoveArtifactQuery, moveBody) || strings.Contains(contractCloseEvidenceHorizonArtifactQuery, moveBody) {
+		t.Fatal("the custody artifacts do not pin their own guard bodies")
+	}
+	if strings.ReplaceAll(contractCloseEvidenceHorizonArtifactQuery, horizonBody, moveBody) != contractCloseEvidenceMoveArtifactQuery {
+		t.Fatal("the horizon guard's custody differs from the move guard's beyond the guard body")
+	}
+	if !strings.Contains(server.ContractCloseEvidenceHorizonGuardBodySql(), "interval '35 days'") {
+		t.Fatal("the horizon guard body does not hold the 35-day floor")
 	}
 }
 
@@ -71,7 +98,7 @@ func TestMigrationsCloseEvidencePartitionedCatalog(t *testing.T) {
 
 		family := server.GetPartitionFamily("close_evidence")
 		weekLeaf := family.LeafName("contract_close_report_evidence", family.RangeAt(week))
-		artifact := fmt.Sprintf("%s@v%d", migrationCurrentSuffixTestContract(t, contractCloseEvidenceMoveGuardMigrationVersion).artifact.name, contractCloseEvidenceMoveGuardMigrationVersion)
+		artifact := fmt.Sprintf("%s@v%d", migrationCurrentSuffixTestContract(t, contractCloseEvidenceHorizonGuardMigrationVersion).artifact.name, contractCloseEvidenceHorizonGuardMigrationVersion)
 		for _, fault := range []struct {
 			name string
 			sql  string

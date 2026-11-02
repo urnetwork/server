@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/urnetwork/glog"
 
@@ -138,39 +139,25 @@ func BrevoWebhook(
 ) (*BrevoWebhookResult, error) {
 	// glog.Infof("[product_updates]brevo webhook: (%v) %v\n", clientSession.Header, webhookArgs)
 
-	// fails closed: without a usable configured user nothing is accepted
-	expectedAuths, err := brevoWebhookExpectedAuths()
-	if err != nil {
-		glog.Warningf("[product_updates]brevo webhook refused, verification users unavailable: %s\n", err)
-		return nil, errWebhookVerificationUnavailable
-	}
-	auth := func() bool {
-		auths, ok := clientSession.Header["Authorization"]
-		if !ok {
-			return false
-		}
-		for _, auth := range auths {
-			if expectedAuths[strings.ToLower(auth)] {
-				return true
-			}
-		}
-		return false
-	}()
-	if !auth {
-		return nil, fmt.Errorf("%d Not authorized.", http.StatusUnauthorized)
+	// fails closed: without a usable configured user nothing is accepted. A
+	// refusal is counted by reason (urnetwork_brevo_webhook_requests_total) and
+	// logged at most once a minute (brevo_webhook_auth.go).
+	if err := verifyBrevoWebhookAuthorization(clientSession.Header); err != nil {
+		return nil, err
 	}
 
 	if webhookArgs.Event == "unsubscribe" || webhookArgs.Event == "unsubscribed" {
 		glog.Infof("[product_updates]unsubscribe %s\n", maskEmail(webhookArgs.Email))
-		model.AccountProductUpdatesSetForEmail(
+		model.AccountProductUpdatesUnsubscribeForEmail(
 			clientSession.Ctx,
 			webhookArgs.Email,
-			false,
+			server.NowUtc(),
 		)
 	}
 
-	// the onboarding campaign's delivery events (attributed by message id)
+	// the campaigns' delivery events (attributed by message id)
 	handleOnboardingBrevoWebhook(clientSession.Ctx, webhookArgs)
+	handleReengagementBrevoWebhook(clientSession.Ctx, webhookArgs)
 
 	return &BrevoWebhookResult{}, nil
 }
@@ -541,32 +528,53 @@ func SyncInitialProductUpdates(ctx context.Context) error {
 }
 
 type SyncProductUpdatesForUserArgs struct {
+	// the user whose logins are synced. Rows queued before the args carried
+	// it hold the zero id and sync the scheduling session's user.
 	UserId server.Id `json:"user_id"`
 }
 
 type SyncProductUpdatesForUserResult struct {
 }
 
+// ScheduleSyncProductUpdatesForUser queues the sync of the user's logins with
+// Brevo's lists. Requests for the same user coalesce, and one made while the
+// sync runs gets a successor, so the last change is always read by a later run.
 func ScheduleSyncProductUpdatesForUser(clientSession *session.ClientSession, userId server.Id, tx server.PgTx) {
 	task.ScheduleTaskInTx(
 		tx,
 		SyncProductUpdatesForUser,
-		&SyncProductUpdatesForUserArgs{},
+		&SyncProductUpdatesForUserArgs{
+			UserId: userId,
+		},
 		clientSession,
 		task.RunOnce("sync_product_updates_for_user", userId),
 	)
 }
 
+// SyncProductUpdatesForUser makes Brevo's lists match the state at run time:
+// the user's email logins are on network_users while the network's product
+// updates are on and its marketing is not suppressed, and on neither list
+// otherwise. Every Brevo call is idempotent, so a replay or a successor
+// converges on the same lists; a provider failure fails the task, which
+// retries.
 func SyncProductUpdatesForUser(
 	syncProductUpdatesForUser *SyncProductUpdatesForUserArgs,
 	clientSession *session.ClientSession,
 ) (*SyncProductUpdatesForUserResult, error) {
+	userId := syncProductUpdatesForUser.UserId
+	if userId == (server.Id{}) {
+		if clientSession.ByJwt == nil {
+			glog.Warningf("[product_updates]sync names no user\n")
+			return &SyncProductUpdatesForUserResult{}, nil
+		}
+		userId = clientSession.ByJwt.UserId
+	}
 
-	productUpdates, userEmails := model.GetProductUpdateUserEmailsForUser(
+	productUpdates, marketingSuppressed, userEmails := model.GetProductUpdateUserEmailsForUser(
 		clientSession.Ctx,
-		clientSession.ByJwt.UserId,
+		userId,
 	)
-	if productUpdates {
+	if productUpdates && !marketingSuppressed {
 		for i, userEmail := range userEmails {
 			glog.Infof("[product_updates][%d/%d]add to product updates %s\n", i+1, len(userEmails), maskEmail(userEmail))
 			err := BrevoAddToList(clientSession.Ctx, userEmail, productUpdatesListId())
@@ -575,13 +583,18 @@ func SyncProductUpdatesForUser(
 			}
 		}
 	} else {
+		// an opt-out, or a marketing suppression the lists mirror
+		reason := "opted out"
+		if productUpdates {
+			reason = "marketing suppressed"
+		}
 		for i, userEmail := range userEmails {
-			glog.Infof("[product_updates][%d/%d]remove from new networks %s\n", i+1, len(userEmails), maskEmail(userEmail))
+			glog.Infof("[product_updates][%d/%d]remove from new networks %s (%s)\n", i+1, len(userEmails), maskEmail(userEmail), reason)
 			err := BrevoRemoveFromList(clientSession.Ctx, userEmail, newNetworksListId())
 			if err != nil {
 				return nil, err
 			}
-			glog.Infof("[product_updates][%d/%d]remove from product updates %s\n", i+1, len(userEmails), maskEmail(userEmail))
+			glog.Infof("[product_updates][%d/%d]remove from product updates %s (%s)\n", i+1, len(userEmails), maskEmail(userEmail), reason)
 			err = BrevoRemoveFromList(clientSession.Ctx, userEmail, productUpdatesListId())
 			if err != nil {
 				return nil, err
@@ -599,6 +612,83 @@ func SyncProductUpdatesForUserPost(
 	tx server.PgTx,
 ) error {
 	return nil
+}
+
+// ----- the marketing suppression's Brevo mirror -----
+
+// SuppressNetworkMarketing stops every campaign's mail to the network (the
+// first suppression's time and reason stay) and mirrors it to Brevo: the
+// product-updates sync, queued in the same transaction, takes the admin's
+// email logins off the lists. Every call queues the sync, so a replayed bounce
+// or complaint also mirrors a suppression recorded before the mirror existed.
+func SuppressNetworkMarketing(ctx context.Context, networkId server.Id, reason string, now time.Time) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		model.SuppressNetworkMarketingInTx(tx, ctx, networkId, reason, now)
+		scheduleSyncProductUpdatesForNetworkInTx(tx, ctx, networkId)
+	})
+}
+
+// LiftNetworkMarketingSuppression clears a suppression whose reason is in
+// `liftable` (the scan's: a sunset or a "switched" answer, never a bounce or
+// complaint) and, when it lifted one, queues the product-updates sync in the
+// same transaction. The sync puts the admin's email logins back on
+// network_users only if product updates are still on when it runs. Returns
+// whether it lifted.
+func LiftNetworkMarketingSuppression(ctx context.Context, networkId server.Id, liftable []string) (lifted bool) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		lifted = model.LiftNetworkMarketingSuppressionInTx(tx, ctx, networkId, liftable)
+		if lifted {
+			scheduleSyncProductUpdatesForNetworkInTx(tx, ctx, networkId)
+		}
+	})
+	return
+}
+
+// scheduleSyncProductUpdatesForNetworkInTx queues the sync of the network
+// admin's logins. A network that no longer exists has nothing to sync: its
+// removal queued RemoveProductUpdates, which deletes the contacts.
+func scheduleSyncProductUpdatesForNetworkInTx(tx server.PgTx, ctx context.Context, networkId server.Id) {
+	userId, ok := model.GetNetworkAdminUserIdInTx(tx, ctx, networkId)
+	if !ok {
+		return
+	}
+	// an in-process owner of no user and no address: the args name the user.
+	// A worker built before they did fails such a task, and it retries until
+	// a current worker runs it, rather than syncing the old way (which never
+	// removes for a suppression).
+	clientSession := session.NewLocalClientSession(ctx, "", nil)
+	defer clientSession.Cancel()
+	ScheduleSyncProductUpdatesForUser(clientSession, userId, tx)
+}
+
+// MirrorNetworkMarketingSuppressions queues the product-updates sync for the
+// admin of every network whose marketing is suppressed, for the suppressions
+// recorded before the mirror existed (bringyourctl reengagement
+// mirror-suppressions). Safe to repeat: queued syncs coalesce per user, and
+// the sync of a mirrored suppression changes nothing. Returns how many
+// networks it queued.
+func MirrorNetworkMarketingSuppressions(ctx context.Context) (queued int) {
+	return mirrorNetworkMarketingSuppressions(ctx, 1000)
+}
+
+func mirrorNetworkMarketingSuppressions(ctx context.Context, pageSize int) (queued int) {
+	var after *server.Id
+	for {
+		admins := model.ListMarketingSuppressedNetworkAdmins(ctx, after, pageSize)
+		if len(admins) == 0 {
+			return
+		}
+		server.Tx(ctx, func(tx server.PgTx) {
+			// the owner scheduleSyncProductUpdatesForNetworkInTx uses
+			clientSession := session.NewLocalClientSession(ctx, "", nil)
+			defer clientSession.Cancel()
+			for _, admin := range admins {
+				ScheduleSyncProductUpdatesForUser(clientSession, admin.AdminUserId, tx)
+			}
+		})
+		queued += len(admins)
+		after = &admins[len(admins)-1].NetworkId
+	}
 }
 
 type RemoveProductUpdatesArgs struct {

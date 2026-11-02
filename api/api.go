@@ -29,6 +29,9 @@ type routeOwners struct {
 	notifications  *model.ContractOriginNotifications
 	appearances    *model.ProviderAppearances
 	stuckProviders *controller.StuckProviderSignals
+	// the override of the apps' strict window handover the find-providers2
+	// answers carry
+	windowStrictHandover *controller.WindowStrictHandoverControl
 }
 
 // Only the API lifecycle supplies this authenticated cache; the route never
@@ -42,8 +45,8 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		connectControl = handlers.ConnectControlWithOwners(owners.notifications, owners.stuckProviders)
 	}
 	findProviders2 := handlers.NetworkFindProviders2
-	if owners.appearances != nil {
-		findProviders2 = handlers.NetworkFindProviders2WithAppearances(owners.appearances)
+	if owners.appearances != nil || owners.windowStrictHandover != nil {
+		findProviders2 = handlers.NetworkFindProviders2WithOwners(owners.appearances, owners.windowStrictHandover)
 	}
 	routes := []*router.Route{
 		router.NewStreamingRoute("POST", "/provider-work/v1/owners", providerWork.ServeHTTP, providerWorkBody),
@@ -146,12 +149,18 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		// (connect/EXTENDER.md R3, R4)
 		router.NewRoute("POST", "/network/extender-release", handlers.ExtenderRelease),
 		router.NewRoute("POST", "/network/extender-block-report", handlers.ExtenderBlockReport),
+		// what a client's and an extender's tcp camouflage came to, which only
+		// increments counters (connect/EXTENDER-SPLICE-ROLLOUT.md)
+		router.NewRoute("POST", "/network/extender-camouflage-report", handlers.ExtenderCamouflageReport),
 		// the pings a provider or an extender measured, reported by the pinger
 		// with the target's co-signature (connect/GEOMAP.md §2.5)
 		router.NewRoute("POST", "/network/ping-report", handlers.ExtenderPingReport),
 		// an extender's lag.dev measurement certificate, polled with its
 		// activation credential (lag.dev/PLAN.md A8)
 		router.NewRoute("GET", "/network/extender-measurement-cert", handlers.ExtenderMeasurementCert),
+		// the public seed bundle, the origin every seed mirror copies
+		// (connect/EXTENDER-UPDATE2.md §2.3, controller.ExtenderSeedPath)
+		router.NewRoute("GET", "/v1/seed\\.bin", handlers.ExtenderSeed),
 		router.NewRoute("POST", "/network/provider-egress-location", handlers.ProviderEgressLocationSubmit),
 		router.NewRoute("GET", "/network/provider-egress-due", handlers.ProviderEgressLocationDue),
 		router.NewRoute("GET", "/network/provider-blackhole-due", handlers.ProviderBlackholeCheckDue),
@@ -297,6 +306,9 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		router.NewRoute("GET", "/admin/onboarding/results", handlers.AdminOnboardingResults),
 		router.NewRoute("GET", "/admin/onboarding/email-tracker", handlers.AdminOnboardingEmailTracker),
 		router.NewRoute("GET", "/admin/onboarding/experiments", handlers.AdminOnboardingExperiments),
+		// the re-engagement results (mmm/reengagement/PLAN.md "MEASUREMENT"),
+		// behind the same admin bearers
+		router.NewRoute("GET", "/admin/reengagement/results", handlers.AdminReengagementResults),
 		router.NewRoute("POST", "/subscription/stripe/payment-sheet", handlers.StripePaymentSheet),
 		router.NewRoute("GET", "/subscription/stripe/prices", handlers.StripePrices),
 		// the "Manage subscription" screen: every store billing the network with

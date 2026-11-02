@@ -282,23 +282,10 @@ func platformFromDeviceSpec(spec string) string {
 	return ""
 }
 
-// platformDeviceName is the `platform` template param ("iPhone").
+// platformDeviceName is the `platform` template param in English ("iPhone");
+// sends use onboarding.DeviceName with the template's locale.
 func platformDeviceName(platform string) string {
-	switch platform {
-	case "ios":
-		return "iPhone"
-	case "android":
-		return "Android"
-	case "macos":
-		return "Mac"
-	case "windows":
-		return "Windows PC"
-	case "linux":
-		return "Linux"
-	case "web":
-		return "browser"
-	}
-	return "device"
+	return onboarding.DeviceName(platform, "en")
 }
 
 func localeFromSession(clientSession *session.ClientSession) string {
@@ -506,17 +493,43 @@ func loadOnboardingFacts(ctx context.Context, row *model.NetworkOnboarding, now 
 	// feedback step) reads this one fact: the connection rows, connect.day and
 	// connect.first, as the send plan's connect_days counts them
 	_, connected := model.NetworkConnectDays(ctx, row.NetworkId, row.CreatedAt)
+	// who may be mailed (country, consent evidence) and whether the offer
+	// steps may go (REVIEW.md findings 2, 3, 9 and 12)
+	cfg := model.Onboarding()
+	policy := cfg.MailPolicy()
+	mail := model.GetNetworkMailState(ctx, row.NetworkId)
+	appleStore := row.Platform == "ios" || row.Platform == "macos"
+	// the country and consent rules reach the live campaign only when the
+	// config says so (policy.apply_to_onboarding): the reviewed config
+	// injection, not a server deploy, changes who gets onboarding mail
+	policyExit := ""
+	offerByCountry := true
+	if cfg.Policy.ApplyToOnboarding {
+		policyExit = policy.Exit(onboarding.PurposeOnboarding, onboarding.MailFacts{
+			Country:       row.Country,
+			ConsentSource: mail.Source,
+			CreatedAt:     row.CreatedAt,
+			Now:           now,
+		})
+		offerByCountry = policy.OfferAllowed(row.Country)
+	}
 	facts := onboarding.Facts{
-		Path:              path,
-		HasEmail:          row.Email,
-		Holdout:           row.EmailVariant == model.ExperimentVariantHoldout,
-		Paused:            row.ExperimentId != "" && model.PausedVariantsForExperiment(row.ExperimentId, now)[row.EmailVariant],
-		ProductUpdates:    model.NetworkProductUpdates(ctx, row.NetworkId),
-		Pro:               model.IsProNetwork(ctx, row.NetworkId),
-		NetworkExists:     model.NetworkExists(ctx, row.NetworkId),
-		Bounced:           row.Bounced,
-		Complained:        row.Complained,
-		ComplainedStep:    row.ComplainedStep,
+		Path:           path,
+		HasEmail:       row.Email,
+		Holdout:        row.EmailVariant == model.ExperimentVariantHoldout,
+		Paused:         row.ExperimentId != "" && model.PausedVariantsForExperiment(row.ExperimentId, now)[row.EmailVariant],
+		ProductUpdates: model.NetworkProductUpdates(ctx, row.NetworkId),
+		Pro:            model.IsProNetwork(ctx, row.NetworkId),
+		NetworkExists:  model.NetworkExists(ctx, row.NetworkId),
+		Bounced:        row.Bounced,
+		Complained:     row.Complained,
+		ComplainedStep: row.ComplainedStep,
+		Suppressed:     mail.SuppressedAt != nil,
+		PolicyExit:     policyExit,
+		// an App Store network on path B could not redeem the emailed offer
+		// while no code reaches it (REVIEW.md finding 2): no offer email until
+		// offer.apple_email_enabled says the codes flow
+		NoOfferEmail:      !offerByCountry || (appleStore && path != onboarding.PathA && !cfg.Offer.AppleEmailEnabled),
 		HasConnected:      connected,
 		WidgetAdded:       model.HasOnboardingEvent(ctx, row.NetworkId, model.EventWidgetAdded),
 		OfferState:        offerState,
@@ -542,7 +555,7 @@ type OnboardingSendPlan struct {
 
 func buildOnboardingSendPlan(ctx context.Context, row *model.NetworkOnboarding, step string, decision onboarding.Decision, offer *model.OnboardingOffer, now time.Time) (*OnboardingSendPlan, error) {
 	cfg := model.Onboarding()
-	templateId, ok := cfg.Brevo.TemplateId(decision.Template, decision.Variant, row.Locale)
+	templateId, templateLocale, ok := cfg.Brevo.TemplateIdLocale(decision.Template, decision.Variant, row.Locale)
 	if !ok || templateId <= 0 {
 		return nil, fmt.Errorf("no Brevo template for %s/%s/%s", decision.Template, decision.Variant, row.Locale)
 	}
@@ -574,7 +587,9 @@ func buildOnboardingSendPlan(ctx context.Context, row *model.NetworkOnboarding, 
 		Template:        decision.Template,
 		Variant:         decision.Variant,
 		Opening:         decision.Opening,
-		Platform:        platformDeviceName(row.Platform),
+		Platform:        onboarding.DeviceName(row.Platform, templateLocale),
+		StoreBilled:     onboarding.StoreBilledPlatform(row.Platform),
+		Locale:          templateLocale,
 		DailyDataGb:     float64(model.Pro().Free.Data) / float64(model.Gib),
 		DaysActive:      int(now.Sub(row.CreatedAt).Hours() / 24),
 		ConnectDays:     connectDays,
@@ -594,7 +609,7 @@ func buildOnboardingSendPlan(ctx context.Context, row *model.NetworkOnboarding, 
 		Step:       step,
 		Template:   decision.Template,
 		Variant:    decision.Variant,
-		Locale:     row.Locale,
+		Locale:     templateLocale,
 		TemplateId: templateId,
 		Params:     onboarding.BuildParams(in),
 		Tags:       []string{"onboarding", decision.Template, decision.Variant},
@@ -672,14 +687,19 @@ func brevoSendTemplate(ctx context.Context, to string, plan *OnboardingSendPlan)
 		return "", fmt.Errorf("onboarding campaign is disabled (onboarding.yml enabled: false)")
 	}
 	cfg := model.Onboarding()
-	args := &brevoSmtpEmailArgs{
+	return brevoPostSmtpEmail(ctx, &brevoSmtpEmailArgs{
 		To:         []brevoEmailAddress{{Email: to}},
 		TemplateId: plan.TemplateId,
 		Params:     plan.Params,
 		Tags:       plan.Tags,
 		ReplyTo:    &brevoEmailAddress{Email: cfg.EffectiveReplyTo()},
 		Headers:    map[string]string{"X-Mailin-custom": "onboarding:" + plan.Step + ":" + plan.Template + ":" + plan.Variant},
-	}
+	})
+}
+
+// brevoPostSmtpEmail posts one transactional template send (both campaigns;
+// each caller checks its own switch first).
+func brevoPostSmtpEmail(ctx context.Context, args *brevoSmtpEmailArgs) (messageId string, err error) {
 	status, r, err := server.HttpPostWithStatus[brevoSmtpEmailResult](
 		ctx,
 		brevoApiUrl("smtp/email"),
@@ -897,8 +917,11 @@ func handleOnboardingBrevoWebhook(ctx context.Context, args *BrevoWebhookArgs) {
 	switch name {
 	case model.EventEmailBounced:
 		model.MarkNetworkOnboardingBounced(ctx, email.NetworkId)
+		// every campaign stops for an address that bounced
+		SuppressNetworkMarketing(ctx, email.NetworkId, onboarding.ExitBounced, at)
 	case model.EventEmailComplained:
 		model.MarkNetworkOnboardingComplained(ctx, email.NetworkId, email.Step)
+		SuppressNetworkMarketing(ctx, email.NetworkId, onboarding.ExitComplained, at)
 	}
 	if reason := onboarding.WebhookExit(name); reason != "" {
 		if model.ExitNetworkOnboarding(ctx, email.NetworkId, reason, at) {
@@ -909,76 +932,30 @@ func handleOnboardingBrevoWebhook(ctx context.Context, args *BrevoWebhookArgs) {
 
 // ----- webhook registration -----
 
-type brevoWebhookListResult struct {
-	Webhooks []struct {
-		Id   int64  `json:"id"`
-		Url  string `json:"url"`
-		Type string `json:"type"`
-	} `json:"webhooks"`
-	Code    string `json:"code"`
-	Message string `json:"message"`
-}
-
-type brevoWebhookCreateArgs struct {
-	Url         string   `json:"url"`
-	Description string   `json:"description"`
-	Events      []string `json:"events"`
-	Type        string   `json:"type"`
-}
-
-// The transactional events the campaign records (Brevo's webhook event names).
+// The transactional events the campaigns record (Brevo's webhook event names).
 var onboardingBrevoWebhookEvents = []string{
 	"delivered", "opened", "uniqueOpened", "click", "hardBounce", "softBounce", "blocked", "spam", "unsubscribed", "invalid",
 }
 
-// EnsureOnboardingBrevoWebhook registers the transactional webhook for
-// onboarding.brevo.webhook_url once (idempotent by url). Refuses while the
-// engine is disabled. Returns what it did.
-func EnsureOnboardingBrevoWebhook(ctx context.Context) (string, error) {
+// EnsureOnboardingBrevoWebhook makes the transactional webhook for
+// onboarding.brevo.webhook_url carry a credential POST /updates/brevo accepts
+// and every campaign event: it creates the webhook, or updates the registered
+// one in place (ensureBrevoTransactionalWebhook). credential is how the
+// webhook carries it: "url" (the default) or "header". Refuses while the
+// engine is disabled. Returns what it did, the credential masked.
+func EnsureOnboardingBrevoWebhook(ctx context.Context, credential string) (string, error) {
 	if !OnboardingCampaignEnabled() {
 		return "", fmt.Errorf("onboarding campaign is disabled (onboarding.yml enabled: false); not registering")
+	}
+	carrier, err := parseBrevoWebhookCredentialCarrier(credential)
+	if err != nil {
+		return "", err
 	}
 	url := strings.TrimSpace(model.Onboarding().Brevo.WebhookUrl)
 	if url == "" {
 		return "skipped: onboarding.brevo.webhook_url is empty", nil
 	}
-	status, list, err := server.HttpGetWithStatus[brevoWebhookListResult](
-		ctx,
-		brevoApiUrl("webhooks?type=transactional"),
-		brevoHeader,
-		brevoResponseJsonObject[brevoWebhookListResult],
-	)
-	if err != nil {
-		return "", fmt.Errorf("list webhooks: %w", err)
-	}
-	if status != nil && status.Code != 404 && (status.Code < 200 || 300 <= status.Code) {
-		return "", fmt.Errorf("list webhooks: %s %s", status.Status, list.Message)
-	}
-	for _, w := range list.Webhooks {
-		if strings.EqualFold(strings.TrimRight(w.Url, "/"), strings.TrimRight(url, "/")) {
-			return fmt.Sprintf("exists: webhook %d %s", w.Id, w.Url), nil
-		}
-	}
-	created := &brevoWebhookCreateArgs{
-		Url:         url,
-		Description: "URnetwork onboarding campaign (server-registered)",
-		Events:      onboardingBrevoWebhookEvents,
-		Type:        "transactional",
-	}
-	status, r, err := server.HttpPostWithStatus[brevoContactResult](
-		ctx,
-		brevoApiUrl("webhooks"),
-		created,
-		brevoHeader,
-		brevoResponseJsonObject[brevoContactResult],
-	)
-	if err != nil {
-		return "", fmt.Errorf("create webhook: %w", err)
-	}
-	if status == nil || status.Code < 200 || 300 <= status.Code {
-		return "", fmt.Errorf("create webhook: %s %s %s", status.Status, r.Code, r.Message)
-	}
-	return fmt.Sprintf("created: webhook %d %s", r.Id, url), nil
+	return ensureBrevoTransactionalWebhook(ctx, url, onboardingBrevoWebhookEvents, carrier)
 }
 
 // ----- tooling (bringyourctl onboarding) -----

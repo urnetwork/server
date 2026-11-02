@@ -1070,13 +1070,128 @@
       ]
     },
     {
+      "type": "timeseries",
+      "title": "webhook refusals / h by reason",
+      "description": "POST /updates/brevo requests refused before any event is recorded, for every Brevo webhook (both campaigns and product updates). no_credential: no Authorization header, the webhook was registered without the credential; wrong_credential: an Authorization value that is no brevo.webhook_bearers user with an empty password; verification_unavailable: vault brevo.yml names no usable user. Brevo does not retry a refused event, so each one is lost. Fix: bringyourctl onboarding webhook-ensure (vault brevo.yml for verification_unavailable).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 64
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (result) (increase(urnetwork_brevo_webhook_requests_total{env=\"$env\",result!=\"accepted\"}[1h]))",
+          "refId": "A",
+          "legendFormat": "{{result}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "webhook requests / h: accepted and refused",
+      "description": "Every Brevo webhook request, whether or not a campaign send claims it: the events of a send-test count here and nowhere else. After webhook-ensure, accepted rises with the next send and refused stays at zero.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 64
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(increase(urnetwork_brevo_webhook_requests_total{env=\"$env\",result=\"accepted\"}[1h]))",
+          "refId": "A",
+          "legendFormat": "accepted"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(increase(urnetwork_brevo_webhook_requests_total{env=\"$env\",result!=\"accepted\"}[1h]))",
+          "refId": "B",
+          "legendFormat": "refused"
+        }
+      ]
+    },
+    {
       "type": "row",
       "title": "app store one-time offer codes",
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 64
+        "y": 72
       },
       "collapsed": false,
       "panels": []
@@ -1092,7 +1207,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 65
+        "y": 73
       },
       "fieldConfig": {
         "defaults": {
@@ -1144,7 +1259,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 65
+        "y": 73
       },
       "fieldConfig": {
         "defaults": {
@@ -1192,7 +1307,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 73
+        "y": 81
       },
       "collapsed": false,
       "panels": []
@@ -1204,7 +1319,7 @@
         "h": 5,
         "w": 24,
         "x": 0,
-        "y": 74
+        "y": 82
       },
       "options": {
         "mode": "markdown",
@@ -1223,7 +1338,7 @@
         "h": 4,
         "w": 6,
         "x": 0,
-        "y": 79
+        "y": 87
       },
       "fieldConfig": {
         "defaults": {
@@ -1257,7 +1372,7 @@
       "title": "networks sent",
       "description": "Distinct network/flow-step exposures in the rolling 28-day send cohort.",
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},
-      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 79},
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 87},
       "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
       "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "value", "graphMode": "none", "textMode": "value"},
       "targets": [
@@ -1273,7 +1388,7 @@
       "title": "high-intent engagement rate",
       "description": "Engaged networks divided by sent networks; mailbox-open-only activity is excluded.",
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},
-      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 79},
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 87},
       "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1}, "overrides": []},
       "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "value", "graphMode": "none", "textMode": "value"},
       "targets": [
@@ -1289,7 +1404,7 @@
       "title": "ambiguous legacy attribution",
       "description": "Networks whose historical template-only event could not safely distinguish E3 from E5. This is uncertainty, not engagement.",
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},
-      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 79},
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 87},
       "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 1}]}}, "overrides": []},
       "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "value", "graphMode": "none", "textMode": "value"},
       "targets": [
@@ -1305,7 +1420,7 @@
       "title": "networks sent by flow step",
       "description": "The denominator for every per-step engagement rate.",
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 83},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 91},
       "fieldConfig": {"defaults": {"unit": "short", "min": 0}, "overrides": []},
       "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "orientation": "auto", "showValue": "always", "stacking": "none"},
       "targets": [
@@ -1323,7 +1438,7 @@
       "title": "email funnel by flow step",
       "description": "Distinct networks at each delivery stage. Open is diagnostic and is not itself high-intent engagement.",
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 83},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 91},
       "fieldConfig": {"defaults": {"unit": "short", "min": 0}, "overrides": []},
       "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true}, "orientation": "auto", "showValue": "auto", "stacking": "none"},
       "targets": [
@@ -1341,7 +1456,7 @@
       "title": "downstream engagement by flow step",
       "description": "What sent networks did within the step's bounded attribution window.",
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 91},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 99},
       "fieldConfig": {"defaults": {"unit": "short", "min": 0}, "overrides": []},
       "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true}, "orientation": "auto", "showValue": "auto", "stacking": "none"},
       "targets": [
@@ -1359,7 +1474,7 @@
       "title": "delivery risk and attribution quality by flow step",
       "description": "Safety outcomes and historical attribution uncertainty; all are distinct-network counts.",
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 91},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 99},
       "fieldConfig": {"defaults": {"unit": "short", "min": 0}, "overrides": []},
       "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true}, "orientation": "auto", "showValue": "auto", "stacking": "none"},
       "targets": [
@@ -1369,6 +1484,668 @@
           "refId": "A",
           "legendFormat": "{{step}} {{outcome}}",
           "instant": true
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "re-engagement (mmm/reengagement; inert while reengagement.yml has enabled: false)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 107
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "re-engagement scan outcomes / day by stream and result",
+      "description": "The daily scan (02:30 UTC) per stream: opened, dry_run (the program is disabled, so it only counts), policy (the mail policy refused the network), skipped (not eligible now).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 108
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (stream, result) (increase(urnetwork_reengagement_episodes_total{env=\"$env\"}[1d]))",
+          "refId": "A",
+          "legendFormat": "{{stream}} {{result}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "re-engagement step outcomes / h by step and result",
+      "description": "Each step task's outcome: sent, virtual (a holdout network's send that is only logged), skipped, deferred (one campaign email a week), dry_run (disabled), failed (a Brevo error).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 108
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (step, result) (increase(urnetwork_reengagement_emails_total{env=\"$env\"}[1h]))",
+          "refId": "A",
+          "legendFormat": "{{step}} {{result}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "re-engagement exits / day by stream and reason",
+      "description": "Episodes ending, by stream and reason (reactivated, answered, engaged, kept, sunset, capped, onboarding_active, and the global exits).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 116
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (stream, reason) (increase(urnetwork_reengagement_exits_total{env=\"$env\"}[1d]))",
+          "refId": "A",
+          "legendFormat": "{{stream}} {{reason}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "re-engagement webhook events / h by event and template",
+      "description": "Brevo transactional webhook events attributed to a re-engagement send. Opens are not counted (Apple Mail Privacy Protection makes them meaningless); a bounce or complaint suppresses the network on every program.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 116
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (event, template) (increase(urnetwork_reengagement_webhook_events_total{env=\"$env\"}[1h]))",
+          "refId": "A",
+          "legendFormat": "{{event}} {{template}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "re-engagement scan candidates / day by stream and country source",
+      "description": "Where each scan candidate's country came from (mmm/reengagement/PLAN.md Server 10): onboarding (the onboarding row), app_store (the storefront of its latest App Store subscription row), play (the region of its latest Play row), stripe (its card's billing country), unknown. Never an IP lookup. The mail policy treats an unknown country as an evidence country, so a network without consent evidence is refused. Stacked, each candidate counts once.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 124
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (stream, source) (increase(urnetwork_reengagement_context_sources_total{env=\"$env\", part=\"country\"}[1d]))",
+          "refId": "A",
+          "legendFormat": "{{stream}} {{source}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "re-engagement scan candidates / day by locale, platform and time zone source",
+      "description": "Where each scan candidate's locale, platform and time zone came from (mmm/reengagement/PLAN.md Server 7): onboarding (the onboarding row), client_event (its newest client event), device (the device spec of its newest client), unknown. Only the onboarding row keeps a time zone; an unknown one sends in UTC. Not stacked: each candidate counts once per part.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 124
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (part, source) (increase(urnetwork_reengagement_context_sources_total{env=\"$env\", part!=\"country\"}[1d]))",
+          "refId": "A",
+          "legendFormat": "{{part}} {{source}}"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "re-engagement results rows (last rollup)",
+      "description": "Rows of reengagement_results_daily the last completed nightly rollup (02:45 UTC) wrote over its cohort window (reengagement.results.rollup_days, 120 by default). GET /admin/reengagement/results serves them.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 132
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_reengagement_results_rows{env=\"$env\"})",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "re-engagement episodes in the results window",
+      "description": "Episodes (a first real or virtual send) in the cohort days the last completed rollup recomputed, every stream, the holdout included.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 132
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(max by (stream, send) (urnetwork_reengagement_results_episodes{env=\"$env\"}))",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "re-engagement results rollup runs / day by result",
+      "description": "Nightly results rollup runs: ok, failed. A failed run leaves the cohort days it reached rewritten and is retried; the next night rewrites the whole window.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 132
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (result) (increase(urnetwork_reengagement_results_rollup_total{env=\"$env\"}[1d]))",
+          "refId": "A",
+          "legendFormat": "{{result}}"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "re-engagement results rollup duration (last run)",
+      "description": "How long the last results rollup ran, ok or failed: one statement per cohort day. The task stops at 30 minutes.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 132
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_reengagement_results_rollup_duration_seconds{env=\"$env\"})",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "re-engagement results episodes by stream and first send (rollup window)",
+      "description": "Episodes in the last completed rollup's cohort window, by stream and first send: real (mailed) or virtual (the holdout, logged on the same clock and never mailed). The experiment readout compares the two arms in GET /admin/reengagement/results.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 136
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (stream, send) (urnetwork_reengagement_results_episodes{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "{{stream}} {{send}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "re-engagement win-back offers / day by store and result",
+      "description": "W1's comeback offer at each real send: issued, existing (a replayed W1 mailed the offer it issued), or why none went out (disabled, no_store for crypto, holdout, no_offer_arm, below_minimum_charge for a Stripe network on a tier where half the month is under Stripe's 0.50 USD minimum, country, never_paid, recent_offer, apple_ineligible, apple_error, store_error). Google Play and Stripe offers go to the W experiment's offer arm; the App Store's to every mailed arm Apple lists.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 144
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (store, result) (increase(urnetwork_reengagement_winback_offers_total{env=\"$env\"}[1d]))",
+          "refId": "A",
+          "legendFormat": "{{store}} {{result}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "re-engagement win-back redemptions / day by store and result",
+      "description": "Purchases made under a win-back offer's handle: redeemed (stamped the network's offer), unissued (no offer was ever issued to the network on that store: on Play, a client selecting the developer-determined offer on its own), unmatched (outside the network's unredeemed offer), failed (the stamp was not written; the credit went through).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 144
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (store, result) (increase(urnetwork_reengagement_winback_redemptions_total{env=\"$env\"}[1d]))",
+          "refId": "A",
+          "legendFormat": "{{store}} {{result}}"
         }
       ]
     }

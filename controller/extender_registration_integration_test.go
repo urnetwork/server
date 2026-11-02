@@ -198,3 +198,50 @@ func TestExtenderRegistrationWithoutAMeasurementKeyStoresNoRequest(t *testing.T)
 		}
 	})
 }
+
+// The run of connect's own activation loop reaches the history row
+// (connect/EXTENDER.md G3): every activation of one process stores the one run
+// id, as 32 hex characters, and a start from before that process's first post.
+func TestExtenderRegistrationStoresTheRunOfTheLoop(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		fixture := newTestExtenderFixture(t)
+		installTestExtenderConfig(t, fixture.api)
+		clientSession := newTestExtenderSession(t, ctx, fixture.clientAddress("127.0.0.1"))
+		apiUrl := newTestExtenderRegistrationApi(t, clientSession)
+
+		activator := startTestExtenderRegistration(t, ctx, fixture, apiUrl, nil)
+		extenderId := waitTestExtenderRegistered(t, ctx, fixture)
+		// a second pass of the same process
+		activator.Reactivate()
+		deadline := time.Now().Add(30 * time.Second)
+		var activations []*model.NetworkExtenderActivationRecord
+		for {
+			activations = model.GetNetworkExtenderActivations(ctx, extenderId, time.Time{})
+			if 2 <= len(activations) {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("the loop stored %d activations, expected a second pass", len(activations))
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+
+		first := activations[0]
+		if first.RunId == nil || len(*first.RunId) != 32 {
+			t.Fatalf("the loop's run id was stored as %v", first.RunId)
+		}
+		if first.RunStartTime == nil || first.RunStartTime.After(first.ActivateTime) {
+			t.Fatalf("the loop's run start was stored as %v, its first activation at %s", first.RunStartTime, first.ActivateTime)
+		}
+		for _, activation := range activations[1:] {
+			if activation.RunId == nil || *activation.RunId != *first.RunId {
+				t.Fatalf("a later pass stored run id %v, expected %s", activation.RunId, *first.RunId)
+			}
+			if activation.RunStartTime == nil || !activation.RunStartTime.Equal(*first.RunStartTime) {
+				t.Fatalf("a later pass stored run start %v, expected %s", activation.RunStartTime, *first.RunStartTime)
+			}
+		}
+	})
+}

@@ -208,14 +208,14 @@ The reason: a password reset sets `credential_change_time = now()`, and in Postg
 - An `Api` keeps the network credential (the sign-in token or an API key) beside the device's client token.
 - The request seam picks the credential by route class. It is a copy of `route_authz.go`'s AppAdmin and Network classes.
 - An admin call with no network credential fails locally with `ErrNetworkCredentialRequired`, and nothing is sent. The SDK never falls back to the client token. `Api.HasNetworkCredential()` reports which case applies.
-- Client tokens refresh on their half-life. The kept sign-in token renews on its half-life at `/auth/network-refresh` and is saved to `LocalState` with a compare-and-swap.
+- Client tokens refresh at a point between 40% and 50% of their lifetime, never later than the half-life. The kept sign-in token renews in the same window at `/auth/network-refresh` and is saved to `LocalState` with a compare-and-swap.
 - The app signs out only when the server rejects the client-token refresh, with a 401 or a result error. A 401 on an admin call only drops the network credential from memory.
 
 **ur.io** stores the network token. It refreshes the token at `POST /auth/network-refresh` on load, after purchases and when the SDK reports stale claims. A 401 or 403 there signs out.
 
 **sn miner** (`sn/clientauth`, `sn/miner`):
 
-- Each `provide` process renews its `<state>/jwt` on its half-life.
+- Each `provide` process renews its `<state>/jwt` at a point between 40% and 50% of its lifetime, never later than the half-life.
 - A `<jwt>.lineage` file keeps revoked clients blocked across renewals.
 - Explicit sign-ins write under the same lock (`WriteNetworkTokenWithContext`).
 - Under `--all-operators --auto-register`, a token the server rejects is set aside and the supervisor signs in again with the hotkey, with a rate limit.

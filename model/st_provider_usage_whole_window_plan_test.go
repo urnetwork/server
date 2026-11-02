@@ -19,6 +19,8 @@ type stWholeWindowPlanNode struct {
 	HashBatches                float64
 	// the indexes of a bitmap heap scan's own bitmap
 	Bitmaps []string
+	// an index scan's condition, empty for a scan of the whole index
+	IndexCond string
 }
 
 func stWholeWindowPlanNodes(value any, nodes []stWholeWindowPlanNode) []stWholeWindowPlanNode {
@@ -35,6 +37,7 @@ func stWholeWindowPlanNodes(value any, nodes []stWholeWindowPlanNode) []stWholeW
 			read, _ := node["Temp Read Blocks"].(float64)
 			planNode.TempBlocks = written + read
 			planNode.HashBatches, _ = node["Hash Batches"].(float64)
+			planNode.IndexCond, _ = node["Index Cond"].(string)
 			children, _ := node["Plans"].([]any)
 			for _, child := range children {
 				if child, ok := child.(map[string]any); ok && child["Node Type"] == "Bitmap Index Scan" {

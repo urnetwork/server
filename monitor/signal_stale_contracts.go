@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/urnetwork/server/model"
 )
 
 const (
@@ -56,8 +58,14 @@ type staleContractObservation struct {
 	crossDistinctSourceDevices int64
 }
 
-func (staleContractsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
-	rows, err := env.runner.pg(ctx, `
+// The successful contracts of the last five minutes to destinations already
+// marked inactive. The window's contract id lower bound
+// (model.ContractIdCreateTimeRange) makes the contract read a range of the
+// primary key, so it needs no index on create_time; the create_time predicate
+// decides the window, as a filter (IS TRUE, see
+// model.ContractIdCreateTimeRange). create_time is the UTC clock of the
+// insert, so the window is compared as UTC.
+var staleContractsSql = `
 		WITH stale_success AS MATERIALIZED (
 			SELECT
 				tc.source_id,
@@ -83,7 +91,8 @@ func (staleContractsProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 			LEFT JOIN network_client source ON source.client_id = tc.source_id
 			LEFT JOIN network_client source_parent ON source_parent.client_id = source.source_client_id
 			WHERE
-				tc.create_time >= now() - interval '5 minutes' AND
+				tc.contract_id >= ` + model.ContractIdCreatedFromSql(`now() - interval '`+staleContractRange+`'`) + ` AND
+				(tc.create_time >= (now() - interval '` + staleContractRange + `') AT TIME ZONE 'UTC') IS TRUE AND
 				tc.companion_contract_id IS NULL AND
 				NOT destination.active AND
 				destination.deactivate_time IS NOT NULL AND
@@ -115,7 +124,10 @@ func (staleContractsProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 		FROM stale_success
 		GROUP BY boundary_class
 		ORDER BY boundary_class;
-	`)
+	`
+
+func (staleContractsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
+	rows, err := env.runner.pg(ctx, staleContractsSql)
 	if err != nil {
 		return nil, err
 	}

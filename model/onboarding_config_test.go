@@ -4,6 +4,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +13,8 @@ import (
 	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/onboarding"
+	"github.com/urnetwork/server/reengagement"
 )
 
 func testExperiment(id string, allocation map[string]float64, variants ...string) *OnboardingExperiment {
@@ -280,17 +283,30 @@ func TestTemplateId(t *testing.T) {
 	connect.AssertEqual(t, false, ok)
 }
 
-// TestOnboardingRegistryFile parses the checked-in config/main/onboarding.yml
-// when the config repo sits next to the server checkout, pinning the two
-// registry entries the program ships with.
-func TestOnboardingRegistryFile(t *testing.T) {
-	path := filepath.Join("..", "..", "config", "main", "onboarding.yml")
-	data, err := os.ReadFile(path)
+// configRepoFile is a file of the config repo: URNETWORK_CONFIG_ROOT (a
+// worktree, say) or the checkout next to the server's.
+func configRepoFile(t *testing.T, rel string) []byte {
+	root := os.Getenv("URNETWORK_CONFIG_ROOT")
+	if root == "" {
+		root = filepath.Join("..", "..", "config")
+	}
+	data, err := os.ReadFile(filepath.Join(root, rel))
 	if err != nil {
 		t.Skipf("config repo not next to the server checkout: %s", err)
 	}
+	return data
+}
+
+// TestOnboardingRegistryFile parses the checked-in config/main/onboarding.yml
+// when the config repo sits next to the server checkout (or at
+// URNETWORK_CONFIG_ROOT), pinning what the program ships with. It holds before
+// and after the 2026-11 registry change (the launch experiments voided, the
+// restart drafted), so the two repos merge in either order.
+func TestOnboardingRegistryFile(t *testing.T) {
+	data := configRepoFile(t, filepath.Join("main", "onboarding.yml"))
 	var y onboardingYaml
 	connect.AssertEqual(t, nil, yaml.Unmarshal(data, &y))
+	rawCount := len(y.Onboarding.Experiments)
 	c := newOnboardingConfig(&y)
 
 	connect.AssertEqual(t, true, c.OfferEnabled())
@@ -299,19 +315,56 @@ func TestOnboardingRegistryFile(t *testing.T) {
 	connect.AssertEqual(t, 5, c.Offer.ValidityDays)
 	connect.AssertEqual(t, "onboarding25", c.Offer.StripeCouponId)
 	connect.AssertEqual(t, "onboarding25", c.Offer.PlayOfferTag)
-	connect.AssertEqual(t, 2, len(c.Experiments))
-	connect.AssertEqual(t, "offer_screen", c.Experiments[0].Id)
-	connect.AssertEqual(t, ExperimentSurfaceOfferInApp, c.Experiments[0].Surface)
-	connect.AssertEqual(t, 80.0, c.Experiments[0].Allocation["control"])
-	connect.AssertEqual(t, 20.0, c.Experiments[0].Allocation["holdout"])
-	connect.AssertEqual(t, "email_sequence", c.Experiments[1].Id)
-	connect.AssertEqual(t, ExperimentSurfaceEmailSequence, c.Experiments[1].Surface)
-	connect.AssertEqual(t, 90.0, c.Experiments[1].Allocation["control"])
-	connect.AssertEqual(t, 10.0, c.Experiments[1].Allocation["holdout"])
+	// every registry entry is valid: none is dropped by the loader
+	connect.AssertEqual(t, rawCount, len(c.Experiments))
+	byId := map[string]*OnboardingExperiment{}
+	for _, e := range c.Experiments {
+		byId[e.Id] = e
+	}
+	offerScreen, emailSequence := byId["offer_screen"], byId["email_sequence"]
+	connect.AssertEqual(t, true, offerScreen != nil && emailSequence != nil)
+	connect.AssertEqual(t, ExperimentSurfaceOfferInApp, offerScreen.Surface)
+	connect.AssertEqual(t, 80.0, offerScreen.Allocation["control"])
+	connect.AssertEqual(t, 20.0, offerScreen.Allocation["holdout"])
+	connect.AssertEqual(t, ExperimentSurfaceEmailSequence, emailSequence.Surface)
+	connect.AssertEqual(t, 90.0, emailSequence.Allocation["control"])
+	connect.AssertEqual(t, 10.0, emailSequence.Allocation["holdout"])
+	// a voided run says why
+	for _, e := range []*OnboardingExperiment{offerScreen, emailSequence} {
+		if e.Status == ExperimentStatusDone {
+			connect.AssertEqual(t, true, strings.Contains(e.Note, "Void"))
+		}
+	}
+	// the restart, when present: 50/50 with a planned base rate
+	if restart := byId["email_sequence_2"]; restart != nil {
+		connect.AssertEqual(t, ExperimentSurfaceEmailSequence, restart.Surface)
+		connect.AssertEqual(t, 50.0, restart.Allocation["control"])
+		connect.AssertEqual(t, 50.0, restart.Allocation["holdout"])
+		connect.AssertEqual(t, true, 0 < restart.BaseRate)
+	}
+	// two experiments on one surface may not run at once
+	now := server.NowUtc()
+	running := map[string]string{}
+	for _, e := range c.Experiments {
+		if !e.Active(now) {
+			continue
+		}
+		if other, ok := running[e.Surface]; ok {
+			t.Fatalf("%s and %s both run on %s", other, e.Id, e.Surface)
+		}
+		running[e.Surface] = e.Id
+	}
 	connect.AssertEqual(t, 1, c.Schedule.E1Day)
 	connect.AssertEqual(t, 11, c.Schedule.E5bDay)
 	connect.AssertEqual(t, 20, c.Experiment.InAppOfferHoldoutPercent)
 	connect.AssertEqual(t, 10, c.Experiment.EmailHoldoutPercent)
+	// the policy, when the config sets it, keeps the default no-marketing pair
+	if c.Policy.NoMarketingCountries != nil {
+		p := c.MailPolicy()
+		connect.AssertEqual(t, "country_no_marketing", p.Exit("onboarding", onboarding.MailFacts{Country: "RU", Now: now}))
+		connect.AssertEqual(t, "country_no_marketing", p.Exit("onboarding", onboarding.MailFacts{Country: "CN", Now: now}))
+		connect.AssertEqual(t, false, p.OfferAllowed("IR"))
+	}
 	// the templates block is step -> variant -> locale
 	if id, ok := c.Brevo.TemplateId("e1_connect", "default", "en"); ok {
 		connect.AssertEqual(t, true, 0 < id)
@@ -319,6 +372,74 @@ func TestOnboardingRegistryFile(t *testing.T) {
 	if id, ok := c.Brevo.TemplateId("e2_widget", "activated", "de-CH"); ok {
 		connect.AssertEqual(t, true, 0 < id)
 	}
+}
+
+// TestReengagementConfigFile parses config/main/reengagement.yml, when there is
+// one: it ships inert, and every highlight's dates parse.
+func TestReengagementConfigFile(t *testing.T) {
+	root := os.Getenv("URNETWORK_CONFIG_ROOT")
+	if root == "" {
+		root = filepath.Join("..", "..", "config")
+	}
+	data, err := os.ReadFile(filepath.Join(root, "main", "reengagement.yml"))
+	if err != nil {
+		t.Skipf("no reengagement.yml in the config repo: %s", err)
+	}
+	var y reengagementYaml
+	connect.AssertEqual(t, nil, yaml.Unmarshal(data, &y))
+	rawHighlights := len(y.Reengagement.Highlights)
+	c := newReengagementConfig(&y.Reengagement)
+	connect.AssertEqual(t, rawHighlights, len(c.ParsedHighlights()))
+	s := c.ScheduleValue()
+	connect.AssertEqual(t, true, 0 < s.DormantDays && 0 < s.MinGapDays && 0 < s.MaxPerYear)
+	connect.AssertEqual(t, true, s.WinbackAfterDays(false) >= s.WinbackDays)
+	for _, e := range c.Experiments {
+		connect.AssertEqual(t, true, strings.HasPrefix(e.Surface, "reengagement."))
+	}
+
+	// the comeback offer, once the config carries it: the accepted shape,
+	// shipped off, keeping the rule over every offer at every price tier of
+	// the shipped pro.yml against the shipped welcome offer
+	w := c.WinbackOffer
+	if w.Plan == "" && !w.Enabled {
+		return
+	}
+	connect.AssertEqual(t, PlanMonthly, w.Plan)
+	connect.AssertEqual(t, 50, w.PercentOff)
+	connect.AssertEqual(t, 14, w.ValidityDays)
+	connect.AssertEqual(t, "winback_monthly_50", w.StripeCouponId)
+	connect.AssertEqual(t, "winback-monthly-50", w.PlayOfferTag)
+	if w.AppleOfferUrl != "" {
+		connect.AssertEqual(t, w.AppleOfferUrl, c.WinbackAppleOfferUrl())
+	}
+	welcomePercentOff := 25
+	if data, err := os.ReadFile(filepath.Join(root, "main", "onboarding.yml")); err == nil {
+		var onboarding onboardingYaml
+		connect.AssertEqual(t, nil, yaml.Unmarshal(data, &onboarding))
+		welcomePercentOff = onboarding.Onboarding.Offer.PercentOff
+	}
+	if data, err := os.ReadFile(filepath.Join(root, "all", "pro.yml")); err == nil {
+		var pro proConfigYaml
+		connect.AssertEqual(t, nil, yaml.Unmarshal(data, &pro))
+		tiers := parseProPriceTiers(pro.Pro.PriceTiers)
+		connect.AssertEqual(t, true, 1 < len(tiers))
+		enabled := *c
+		enabled.WinbackOffer.Enabled = true
+		connect.AssertEqual(t, "", enabled.winbackOfferRefusal(welcomePercentOff, tiers))
+	}
+	// the W experiment: a holdout, and the mailed split offer against none
+	var winback *OnboardingExperiment
+	for _, e := range c.Experiments {
+		if e.Surface == ExperimentSurfaceReengagementWinback {
+			winback = e
+		}
+	}
+	if winback == nil {
+		t.Fatal("winback_offer is configured without the W experiment")
+	}
+	connect.AssertEqual(t, 20.0, winback.Allocation[ExperimentVariantHoldout])
+	connect.AssertEqual(t, winback.Allocation[reengagement.ArmControl], winback.Allocation[reengagement.ArmOffer])
+	connect.AssertEqual(t, 80.0, winback.Allocation[reengagement.ArmControl]+winback.Allocation[reengagement.ArmOffer])
 }
 
 func TestCountryCodeFromStorefront(t *testing.T) {

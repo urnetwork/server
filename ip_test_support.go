@@ -3,6 +3,8 @@
 package server
 
 import (
+	"fmt"
+	"sync/atomic"
 	"testing"
 
 	mmdb "github.com/oschwald/maxminddb-golang/v2"
@@ -22,12 +24,43 @@ func UseIpDbFileForTest(t testing.TB, path string) {
 		t.Fatal(r)
 	}
 	previous := ipDb
+	previousDeployed := ipDbDeployed
 	ipDb = func() (*mmdb.Reader, schemaType) {
 		return db, databaseType
 	}
+	ipDbDeployed = func() bool {
+		return true
+	}
 	t.Cleanup(func() {
 		ipDb = previous
+		ipDbDeployed = previousDeployed
 	})
+}
+
+// Makes the process have no GeoLite2 City database for the rest of a serial
+// test, as a process whose config home has none: IpInfoDatabaseDeployed
+// answers false, and a lookup panics, as the runtime's does. Returns how many
+// times a lookup read the missing database, so a test can assert that its
+// caller did not try. Puts the process's reader back afterwards.
+func UseNoIpDbForTest(t testing.TB) (reads func() int) {
+	t.Helper()
+	var readCount atomic.Int64
+	previous := ipDb
+	previousDeployed := ipDbDeployed
+	ipDb = func() (*mmdb.Reader, schemaType) {
+		readCount.Add(1)
+		panic(fmt.Errorf("no GeoLite2 City database at %s (test)", GeoLite2CityResourcePath))
+	}
+	ipDbDeployed = func() bool {
+		return false
+	}
+	t.Cleanup(func() {
+		ipDb = previous
+		ipDbDeployed = previousDeployed
+	})
+	return func() int {
+		return int(readCount.Load())
+	}
 }
 
 // Makes no ip_overrides subnet answer for the rest of a test, and puts the

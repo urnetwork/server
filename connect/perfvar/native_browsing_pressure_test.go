@@ -444,13 +444,15 @@ func (self *nativeBrowsingPressureObservation) finish(start time.Time) {
 // All rebuilt clients at an endpoint retain one strict retry owner. The
 // configured profiles, lane policy and deadline are the frozen pressure plan.
 type nativeBrowsingPressurePlan struct {
-	profile             networkProfile
-	provider            networkProfile
-	resources           tunResourceProfile
-	deadline            time.Duration
-	maxLivePages        int
-	deviceRetryBudget   *clientconnect.TransferMemoryBudget
-	providerRetryBudget *clientconnect.TransferMemoryBudget
+	autoH1OnlyForTest                           bool
+	providerReturnRecoveryMaxPacketCountForTest int
+	profile                                     networkProfile
+	provider                                    networkProfile
+	resources                                   tunResourceProfile
+	deadline                                    time.Duration
+	maxLivePages                                int
+	deviceRetryBudget                           *clientconnect.TransferMemoryBudget
+	providerRetryBudget                         *clientconnect.TransferMemoryBudget
 }
 
 // Construct fresh endpoint budgets without changing pacing or window sizing.

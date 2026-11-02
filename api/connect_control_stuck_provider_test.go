@@ -8,6 +8,7 @@ package api
 import (
 	"context"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,15 +20,34 @@ import (
 	"github.com/urnetwork/server/router"
 )
 
-// Reports on the third answered retry of a run, at any span, with the switch
-// on for every block while the control sets none.
-func newStuckProviderTestRouter(ctx context.Context, uploadCtx context.Context) (*router.Router, func(), error) {
-	settings := controller.DefaultStuckProviderSignalSettings()
-	settings.EnableStuckProviderSignal = true
-	settings.StuckProviderSignalDefault = model.ConnectLocalTransportAll
-	settings.MinRetryDuration = 0
-	settings.MinRetryCount = 3
-	return newRouterWithStuckProviderSignals(ctx, uploadCtx, settings)
+// A clock the test steps.
+type stuckProviderTestClock struct {
+	stateLock sync.Mutex
+	now       time.Time
+}
+
+func (self *stuckProviderTestClock) Now() time.Time {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.now
+}
+
+func (self *stuckProviderTestClock) Set(now time.Time) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.now = now
+}
+
+// Reports with the default thresholds on clock, with the switch on for every
+// block while the control sets none.
+func newStuckProviderTestRouter(clock *stuckProviderTestClock) func(ctx context.Context, uploadCtx context.Context) (*router.Router, func(), error) {
+	return func(ctx context.Context, uploadCtx context.Context) (*router.Router, func(), error) {
+		settings := controller.DefaultStuckProviderSignalSettings()
+		settings.EnableStuckProviderSignal = true
+		settings.StuckProviderSignalDefault = model.ConnectLocalTransportAll
+		settings.Now = clock.Now
+		return newRouterWithStuckProviderSignals(ctx, uploadCtx, settings)
+	}
 }
 
 func createContractFrameWithRole(t testing.TB, destinationId server.Id, role protocol.SequenceRole) *protocol.Frame {
@@ -68,39 +88,52 @@ func waitForStuckProviderTestFlag(ctx context.Context, clientId server.Id, timeo
 	return true
 }
 
+// With the default thresholds: a provider retrying a terminal refusal every
+// 2 minutes is reported once its run has lasted 20 minutes, and not before.
 func TestConnectControlRouteReportsAStuckProvider(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
-		fixture, closeFixture := newControlReplayFixtureWithRouter(t, ctx, newStuckProviderTestRouter)
+		start := time.Now()
+		clock := &stuckProviderTestClock{now: start}
+		fixture, closeFixture := newControlReplayFixtureWithRouter(t, ctx, newStuckProviderTestRouter(clock))
 		defer closeFixture()
 		retiredId := fixture.retiredIds[0]
+		defaults := controller.DefaultStuckProviderSignalSettings()
 
 		// a provider on a newer sdk names its lane: answered, never reported
 		roleDeviceId, roleProviderId := server.NewId(), server.NewId()
 		model.Testing_CreateDevice(ctx, fixture.networkId, roleDeviceId, roleProviderId, "synthetic-role-provider", "synthetic")
 		roleToken := fixture.token(roleDeviceId, roleProviderId, nil)
-		for range 6 {
-			code, results, _ := fixture.post(t, roleToken, createContractFrameWithRole(t, retiredId, protocol.SequenceRole_SequenceRoleServer))
-			if code != http.StatusOK || !isReliabilityRefusal(results, 1) {
-				t.Fatalf("a retry with a sender role was not refused: status=%d results=%+v", code, results)
-			}
-		}
-
-		// an old provider: the first request reads the lifecycle, the next
-		// three are replays, and the third replay crosses the run
 		token := fixture.token(fixture.deviceId, fixture.providerId, nil)
-		for range 4 {
-			code, results, _ := fixture.post(t, token, createContractFrame(t, retiredId))
+		post := func(token string, frame *protocol.Frame) {
+			t.Helper()
+			code, results, _ := fixture.post(t, token, frame)
 			if code != http.StatusOK || !isReliabilityRefusal(results, 1) {
 				t.Fatalf("a retry was not refused: status=%d results=%+v", code, results)
 			}
 		}
+
+		// an old provider: the first request reads the lifecycle, and the
+		// replays after it, every 2 minutes, make the run
+		post(token, createContractFrame(t, retiredId))
+		for minute := 0; minute < 20; minute += 2 {
+			clock.Set(start.Add(time.Duration(minute) * time.Minute))
+			post(roleToken, createContractFrameWithRole(t, retiredId, protocol.SequenceRole_SequenceRoleServer))
+			post(token, createContractFrame(t, retiredId))
+		}
+		// ten replays over 18 minutes: not yet
+		if waitForStuckProviderTestFlag(ctx, fixture.providerId, 1*time.Second) {
+			t.Fatal("the provider was reported before its run lasted the minimum")
+		}
+		clock.Set(start.Add(defaults.MinRetryDuration))
+		post(roleToken, createContractFrameWithRole(t, retiredId, protocol.SequenceRole_SequenceRoleServer))
+		post(token, createContractFrame(t, retiredId))
 		if !waitForStuckProviderTestFlag(ctx, fixture.providerId, 10*time.Second) {
 			t.Fatal("the stuck provider was not reported")
 		}
-		if ttl := stuckProviderTestFlagTtl(ctx, fixture.providerId); controller.DefaultStuckProviderSignalSettings().Cooldown < ttl {
-			t.Fatalf("the flag's ttl %s is past the cooldown", ttl)
+		if ttl := stuckProviderTestFlagTtl(ctx, fixture.providerId); ttl <= 0 || defaults.Cooldown+defaults.Cooldown/4 < ttl {
+			t.Fatalf("the flag's ttl %s, want (0, %s]", ttl, defaults.Cooldown+defaults.Cooldown/4)
 		}
 		if 0 < stuckProviderTestFlagTtl(ctx, roleProviderId) {
 			t.Fatal("a provider with a sender role was reported")

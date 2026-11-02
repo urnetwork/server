@@ -1,13 +1,16 @@
 // Identity churn retention (PARTITION-MAINTENANCE-PLAN.md Part D): retired
 // hosted identities, the children a hosted proxy device mints, are hard
 // deleted a day after their deactivation, and the signed key history of a
-// client that is gone is deleted 91 days after it went. Heads go first, then
+// client that is gone is deleted once the contract horizon has passed since it
+// went, never sooner than ClientKeyHistoryRetentionFloor. Heads go first, then
 // the history they named, then the record of when the client went.
 package server
 
 import (
+	"context"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // The retired hosted client reap (model.RemoveRetiredHostedNetworkClients)
@@ -114,9 +117,141 @@ const clientKeyHistoryRetentionSchemaSql = `
 	FOR EACH STATEMENT EXECUTE FUNCTION st_client_key_history_immutable_guard();
 `
 
+// The shortest time a gone client's signed key history is kept, whatever the
+// retention's horizon (owner, 2026-11-01). The retention follows the contract
+// horizon reaper's effective horizon, which never goes below the reaper's own
+// floor, unless its brake's `horizonDays` sets its own, which may reach this
+// floor; this floor is the guard's, below every horizon the reaper applies,
+// so a task, a setting or an operator statement can never delete history
+// younger than it. Every reader of a gone client's history ends well inside
+// it:
+//   - close report admission reads the reporting client's own history
+//     (readOriginalCloseKey). A report is admitted only for a contract the
+//     client is party to, and a contract opens only between active clients
+//     and ends at its deadline, model.DefaultContractExpiration (60 minutes)
+//     after it opened, when the expiry sweep force-closes it; so a gone
+//     client's last report is admitted within hours of its going, not days.
+//     An admitted report keeps its own copy of the registration in its
+//     evidence row;
+//   - the current key readers (GetClientPublicKey, GetClientContractMetadata,
+//     LoadStClientKeyHistory, the provider work owner) refuse a client whose
+//     row is gone or inactive either way, and the retention deletes the
+//     legacy Redis key with the heads;
+//   - the epoch close's key overlay (overlayStClientKeyCurrent) reads the
+//     heads of the providers of an epoch, which closes within days of its end.
+//
+// The floor is the SQL function st_client_key_history_retention_floor(), which
+// both the guard and the retention's batch read. So the retention never
+// selects a client the guard refuses, and one statement moves the floor for
+// both: ClientKeyHistoryRetentionFloorRollbackSql restores 91 days, and
+// ClientKeyHistoryRetentionFloorRestoreSql the published floor
+// (`bringyourctl db key-history-floor`).
+const ClientKeyHistoryRetentionFloor = 30 * 24 * time.Hour
+
+// Replaces the guard's fixed 91 days with the floor function. Nothing else in
+// the guard changes: the opt-in, the record of when the client went, and the
+// absence of the client's row and heads are still required, and an update or a
+// truncate is still refused. Both statements change only function definitions:
+// no table is locked, scanned or rewritten, and both replace what they find,
+// so a rerun after an interrupted apply completes it.
+const clientKeyHistoryRetentionFloorSql = `
+	SET LOCAL lock_timeout = '5s';
+	CREATE OR REPLACE FUNCTION st_client_key_history_retention_floor()
+	RETURNS interval LANGUAGE sql STABLE AS $st_client_key_history_retention_floor$
+		SELECT interval '30 days'
+	$st_client_key_history_retention_floor$;
+	CREATE OR REPLACE FUNCTION st_client_key_history_immutable_guard()
+	RETURNS trigger LANGUAGE plpgsql AS $st_client_key_history_immutable_guard$
+	BEGIN
+		IF TG_OP = 'DELETE' AND current_setting('urnetwork.client_key_history_retention', true) = 'on' THEN
+			IF EXISTS (
+				SELECT 1 FROM st_client_key_gone
+				WHERE
+					st_client_key_gone.client_id = OLD.client_id AND
+					st_client_key_gone.gone_time < (now() AT TIME ZONE 'UTC') - st_client_key_history_retention_floor()
+			) AND NOT EXISTS (
+				SELECT 1 FROM st_client_key_head
+				WHERE st_client_key_head.client_id = OLD.client_id
+			) AND NOT EXISTS (
+				SELECT 1 FROM network_client
+				WHERE network_client.client_id = OLD.client_id
+			) THEN
+				RETURN OLD;
+			END IF;
+		END IF;
+		RAISE EXCEPTION 'signed client-key history is immutable';
+	END
+	$st_client_key_history_immutable_guard$;
+`
+
+// The floor's rollback, run by an operator: the guard and the retention's
+// batch then keep 91 days again, as before the floor, while the code that
+// reads the floor keeps working. The monitor reports the changed floor body as
+// drift until the floor is restored.
+const ClientKeyHistoryRetentionFloorRollbackSql = `
+	CREATE OR REPLACE FUNCTION st_client_key_history_retention_floor()
+	RETURNS interval LANGUAGE sql STABLE AS $st_client_key_history_retention_floor$
+		SELECT interval '91 days'
+	$st_client_key_history_retention_floor$
+`
+
 // The monitor pins the exact published function bodies.
 func ClientKeyHistoryGuardBodySql() string {
 	return strings.Split(clientKeyHistoryRetentionSchemaSql, "$st_client_key_history_immutable_guard$")[1]
+}
+
+// The guard body that reads the floor, published by the floor migration.
+func ClientKeyHistoryFloorGuardBodySql() string {
+	return strings.Split(clientKeyHistoryRetentionFloorSql, "$st_client_key_history_immutable_guard$")[1]
+}
+
+func ClientKeyHistoryRetentionFloorBodySql() string {
+	return strings.Split(clientKeyHistoryRetentionFloorSql, "$st_client_key_history_retention_floor$")[1]
+}
+
+// The floor function exactly as the floor migration publishes it, the restore
+// after a rollback: the migration's own statement, cut from its text, so its
+// bytes are the body the monitor pins.
+func ClientKeyHistoryRetentionFloorRestoreSql() string {
+	const start = "CREATE OR REPLACE FUNCTION st_client_key_history_retention_floor()"
+	const end = "$st_client_key_history_retention_floor$;"
+	from := strings.Index(clientKeyHistoryRetentionFloorSql, start)
+	to := strings.Index(clientKeyHistoryRetentionFloorSql, end)
+	if from < 0 || to < from {
+		panic(fmt.Errorf("the floor migration has no floor function statement"))
+	}
+	return clientKeyHistoryRetentionFloorSql[from : to+len(end)-1]
+}
+
+// Moves the floor for both the guard and the retention's batch: back to 91
+// days (rollback), or to the published floor (restore). One statement, with
+// the migration's 5-second lock wait.
+func SetClientKeyHistoryRetentionFloor(ctx context.Context, rollback bool) {
+	sql := ClientKeyHistoryRetentionFloorRestoreSql()
+	if rollback {
+		sql = ClientKeyHistoryRetentionFloorRollbackSql
+	}
+	MaintenanceTx(ctx, func(tx PgTx) {
+		RaisePgResult(tx.Exec(ctx, `SET LOCAL lock_timeout = '5s'`))
+		RaisePgResult(tx.Exec(ctx, sql))
+	}, OptNoRetry())
+}
+
+// The floor the database applies, and whether its function holds the
+// published body.
+func GetClientKeyHistoryRetentionFloor(ctx context.Context) (floor string, published bool) {
+	MaintenanceDb(ctx, func(conn PgConn) {
+		Raise(conn.QueryRow(
+			ctx,
+			`
+			SELECT st_client_key_history_retention_floor()::text, p.prosrc = $1
+			FROM pg_proc p
+			WHERE p.oid = 'public.st_client_key_history_retention_floor()'::regprocedure
+			`,
+			ClientKeyHistoryRetentionFloorBodySql(),
+		).Scan(&floor, &published))
+	}, OptReadOnly())
+	return
 }
 
 func ClientKeyRetireDeletedClientBodySql() string {
@@ -131,6 +266,10 @@ func RetiredChildNetworkClientIndexMigrationVersion() int {
 
 func ClientKeyHistoryRetentionMigrationVersion() int {
 	return migrationVersionOf(clientKeyHistoryRetentionSchemaSql)
+}
+
+func ClientKeyHistoryRetentionFloorMigrationVersion() int {
+	return migrationVersionOf(clientKeyHistoryRetentionFloorSql)
 }
 
 // The 1-based version of the one migration whose SQL is exactly sql.

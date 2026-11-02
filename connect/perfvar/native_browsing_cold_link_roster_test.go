@@ -27,14 +27,21 @@ type nativeBrowsingRosterControl struct {
 
 // A positive handshake supplies verified chains and ALPN; the native registry
 // supplies the registered controlled full tuple and the fixture's last valid role.
-func newNativeBrowsingRosterControl(t *testing.T) *nativeBrowsingRosterControl {
+func newNativeBrowsingRosterControl(t *testing.T, protocols ...string) *nativeBrowsingRosterControl {
 	t.Helper()
+	protocol := "http/1.1"
+	if len(protocols) != 0 {
+		if len(protocols) != 1 || protocols[0] != "h2" {
+			t.Fatal("one supported TLS protocol required")
+		}
+		protocol = protocols[0]
+	}
 	fixture := &sdkBrowsingSetupFixture{}
 	scenario := newSdkBrowsingScenario(nil)
 	native := &sdkBrowsingNative{fixture: fixture, scenario: scenario, upstreamConns: map[sdkBrowsingOriginTuple]*sdkBrowsingOriginConn{}, originCount: nativeBrowsingOriginCount}
 	native.ports[0] = 51006
 	scenario.fixture, scenario.native = fixture, native
-	witness := newNativeBrowsingColdLinkWitness(scenario, &nativeBrowsingPressureObservation{}, false)
+	witness := newNativeBrowsingColdLinkWitness(scenario, &nativeBrowsingPressureObservation{}, protocol == "h2")
 	witness.row.Html, witness.row.Assets, witness.row.ColdEdges, witness.row.VisitedDestinationEdges = 100, 400, 1, 98
 	witness.row.CssOwnerRetained, witness.row.ColdTupleOwned = true, true
 	for page := range witness.requests {
@@ -62,6 +69,7 @@ func newNativeBrowsingRosterControl(t *testing.T) *nativeBrowsingRosterControl {
 	}
 	serverConfig = serverConfig.Clone()
 	clientConfig = clientConfig.Clone()
+	serverConfig.NextProtos, clientConfig.NextProtos = []string{protocol}, []string{protocol}
 	// One positive handshake has no ticket or resumption work to leave pending.
 	serverConfig.SessionTicketsDisabled, clientConfig.SessionTicketsDisabled = true, true
 	clientConfig.ServerName = "origin0.test"
@@ -106,6 +114,9 @@ func newNativeBrowsingRosterControl(t *testing.T) *nativeBrowsingRosterControl {
 // and both sides of the same real registry tuple; nothing is source-guessed.
 func (self *nativeBrowsingRosterControl) request(target string) *http.Request {
 	request := httptest.NewRequest(http.MethodGet, target, nil)
+	if self.witness.http2 {
+		request.Proto, request.ProtoMajor, request.ProtoMinor = "HTTP/2.0", 2, 0
+	}
 	request.RemoteAddr = self.owned.LocalAddr().String()
 	state := self.server.ConnectionState()
 	request.TLS = &state

@@ -13,11 +13,41 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// The contract of the journal's partition preparation, at its computed
-// version.
+// The contract of the journal's current custody, at its computed version:
+// the horizon drop guard's, which republishes the partition preparation's.
 func migrationProviderWorkSessionPartitionTestContract(t testing.TB) snMainnetMigrationContract {
 	t.Helper()
-	return migrationCurrentSuffixTestContract(t, server.ProviderWorkSessionPartitionMigrationVersion())
+	return migrationCurrentSuffixTestContract(t, server.ProviderWorkSessionEventHorizonDropGuardMigrationVersion())
+}
+
+// The partition preparation's contract ends at the horizon drop guard, whose
+// contract republishes the same custody with only the drop guard's body
+// replaced, by the 35-day body, and is not superseded.
+func TestMigrationsProviderWorkSessionHorizonDropGuardContract(t *testing.T) {
+	version := server.ProviderWorkSessionEventHorizonDropGuardMigrationVersion()
+	preparation := server.ProviderWorkSessionPartitionMigrationVersion()
+	if version == 0 || version <= preparation {
+		t.Fatalf("horizon drop guard version %d, partition preparation version %d", version, preparation)
+	}
+	if contract := migrationCurrentSuffixTestContract(t, preparation); contract.artifact.removedVersion != version {
+		t.Fatalf("the partition preparation's contract is removed at %d, want %d", contract.artifact.removedVersion, version)
+	}
+	contract := migrationCurrentSuffixTestContract(t, version)
+	if contract.artifact.removedVersion != 0 || contract.artifact.rowColumn != version-589 {
+		t.Fatalf("horizon drop guard contract %+v", contract.artifact)
+	}
+	_, _, _, dropGuard := server.ProviderWorkSessionPartitionBodiesSql()
+	horizonGuard := server.ProviderWorkSessionEventHorizonDropGuardBodySql()
+	preparationQuery := migrationCurrentSuffixTestContract(t, preparation).query
+	if !strings.Contains(contract.query, snMainnetMigrationLiteral(horizonGuard)) || strings.Contains(contract.query, snMainnetMigrationLiteral(dropGuard)) {
+		t.Fatal("the horizon contract does not pin the horizon drop guard's body")
+	}
+	if strings.ReplaceAll(contract.query, snMainnetMigrationLiteral(horizonGuard), snMainnetMigrationLiteral(dropGuard)) != preparationQuery {
+		t.Fatal("the horizon contract differs from the partition preparation's beyond the drop guard's body")
+	}
+	if strings.Replace(dropGuard, "interval '91 days'", "interval '35 days'", 1) != strings.Replace(horizonGuard, "kept at least 35 days", "kept 13 weeks", 1) {
+		t.Fatal("the horizon drop guard is not the drop guard with only its age and message changed")
+	}
 }
 
 // The custody holds and nothing drifts while the journal is plain, prepared

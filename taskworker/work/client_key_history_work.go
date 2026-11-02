@@ -11,9 +11,12 @@ import (
 	"github.com/urnetwork/server/task"
 )
 
-// Signed key history of a client that is gone is deleted 91 days after it
-// went (model.RemoveGoneStClientKeyHistory). Each run deletes what is due and
-// continues the discovery pass of clients gone without a record.
+// Signed key history of a client that is gone is deleted once the contract
+// horizon has passed since it went, or the horizon its brake sets, never sooner
+// than the guard's floor (model.RemoveGoneStClientKeyHistory), at the pace and
+// under the off switch of its brake, `{client_key_history_retention}control`.
+// Each run deletes what is due from where the last stopped, and continues the
+// discovery pass of clients gone without a record.
 
 // bounds a stranded claim; the retention's run budget is well under it
 const removeGoneStClientKeyHistoryMaxTime = 30 * time.Minute
@@ -65,10 +68,12 @@ func RemoveGoneStClientKeyHistory(
 	)
 	if 0 < report.RemovedClientCount || 0 < report.DiscoveredClientCount {
 		glog.Infof(
-			"[ckh]removed the key history of %d gone clients (%d registrations), recorded %d more as gone\n",
+			"[ckh]removed the key history of %d clients gone over %s (%d registrations), recorded %d more as gone, deletes ended %s\n",
 			report.RemovedClientCount,
+			report.Horizon,
 			report.RemovedHistoryCount,
 			report.DiscoveredClientCount,
+			report.DeleteStop,
 		)
 	}
 	return &RemoveGoneStClientKeyHistoryResult{

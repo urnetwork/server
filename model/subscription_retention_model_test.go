@@ -928,6 +928,10 @@ func TestSweepOrphanContractDataStaleCursorRestarts(t *testing.T) {
 func TestRemoveStragglerContracts(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
+		// The contracts are aged by rewriting create_time, which leaves each id
+		// at its real creation: widen the stamp's id bound by that age.
+		defer func() { stragglerContractIdMargin = ContractIdCreateTimeMargin }()
+		stragglerContractIdMargin = StragglerContractExpiration + 48*time.Hour
 
 		sourceNetworkId, sourceId, destinationNetworkId, destinationId, contractIds := testingSettledPayoutContracts(ctx, t)
 
@@ -1070,6 +1074,10 @@ func TestRemoveStragglerContracts(t *testing.T) {
 func TestBackfillContractReapTime(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
+		// The straggler is aged by rewriting create_time, which leaves its id at
+		// its real creation: widen the stamp's id bound by that age.
+		defer func() { stragglerContractIdMargin = ContractIdCreateTimeMargin }()
+		stragglerContractIdMargin = StragglerContractExpiration + 48*time.Hour
 
 		sourceNetworkId, sourceId, destinationNetworkId, destinationId, paidContractIds := testingSettledPayoutContracts(ctx, t)
 
@@ -1452,7 +1460,8 @@ func TestAssignStragglerReapTimeRespectsBudget(t *testing.T) {
 			Providers: []contractProviderUsage{{ClientId: networkId, NetworkId: networkId, ByteCount: 1024}}}
 		server.Tx(ctx, func(tx server.PgTx) {
 			for range 5 {
-				contractId := server.NewId()
+				// minted at its creation, as every creation path mints it
+				contractId := contractIdMintedAt(aged)
 				// closed (outcome set -> open = false; close_time set) and never
 				// reaped (reap_time IS NULL), aged past the straggler window -> a
 				// straggler the assign pass targets. Its original terminal usage

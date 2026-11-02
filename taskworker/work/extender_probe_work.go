@@ -2,12 +2,11 @@ package work
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/urnetwork/glog"
-
-	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
@@ -33,6 +32,12 @@ import (
 // same transaction that deactivates the address, so the directory cannot learn
 // the extender is gone without also getting the proof.
 //
+// The probe is also the operator's half of the per-country blocked state (R4,
+// connect/EXTENDER-UPDATE2.md §1.3): a record is blocked only while every
+// active address answers it, and a failed probe sets aside the block reports
+// made before it, since those describe the outage rather than a block
+// (model.DiscountNetworkExtenderBlockReports).
+//
 // The task never fails on probe failures. They are what it went to find out;
 // returning them as an error would stop the chain re-arming and the whole
 // directory would silently stop being checked.
@@ -52,6 +57,13 @@ const (
 
 	// Consecutive failures that deactivate an address.
 	ExtenderMaxConsecutiveProbeFailures = 6
+
+	// How long one pass may run before its context ends. A pass takes about
+	// half a minute while most addresses answer, but each address that does not
+	// answer holds a worker for ExtenderProbeAddressTimeout, so an outage across
+	// 430 addresses takes about seven minutes, which the task default of two
+	// would cut off every time.
+	ExtenderProbeMaxTime = 10 * time.Minute
 )
 
 // probeExtenderAddress dials one address's tcp carrier and requires a
@@ -68,32 +80,26 @@ var probeExtenderAddress = func(
 	serverName string,
 	destinationHost string,
 ) error {
-	_, err := connect.ProbeExtenderCarrier(
-		ctx,
-		controller.ExtenderProbeConnectSettings(),
-		target.Ip,
-		connect.ExtenderConnectModeTcpTls,
-		target.TcpPort,
-		target.DnsTld,
-		serverName,
-		target.PublicKey,
-		destinationHost,
-		controller.ExtenderProbeDestinationPort,
-	)
-	return err
+	// the dial, with the camouflage key the extender's records carry, is the
+	// controller's, so it is proved against an in-process extender in both
+	// phases (phase 14b)
+	return controller.ProbeExtenderUptime(ctx, target, serverName, destinationHost)
 }
 
 type ExtenderProbeArgs struct {
 }
 
 type ExtenderProbeResult struct {
-	// counts only; which address failed is in the log, and a task result is
+	// counts only; which extender failed is in the log, and a task result is
 	// not a place anything should be reading the directory back out of
 	Probed      int `json:"probed"`
 	Succeeded   int `json:"succeeded"`
 	Failed      int `json:"failed"`
 	Deactivated int `json:"deactivated"`
 	Revoked     int `json:"revoked"`
+	// block reports a failed probe set aside, since they describe an outage
+	// rather than a block (connect/EXTENDER-UPDATE2.md §1.3)
+	DiscountedBlockReports int `json:"discounted_block_reports,omitempty"`
 }
 
 func ScheduleExtenderProbe(clientSession *session.ClientSession, tx server.PgTx) {
@@ -112,6 +118,7 @@ func scheduleExtenderProbeAt(
 		clientSession,
 		task.RunOnce("extender_probe"),
 		task.RunAt(runAt),
+		task.MaxTime(ExtenderProbeMaxTime),
 	)
 }
 
@@ -167,82 +174,121 @@ func ExtenderProbe(
 				wait.Done()
 			}()
 
-			serverName, err := config.ProbeServerName()
-			if err != nil {
-				glog.Errorf("[extenderprobe]no probe name: %s\n", err)
-				return
-			}
-			probeCtx, probeCancel := context.WithTimeout(
-				clientSession.Ctx,
-				ExtenderProbeAddressTimeout,
-			)
-			defer probeCancel()
+			// A raise that reaches the top of a goroutine takes the process with
+			// it, and the writes below raise once the pass's context has ended:
+			// the task's max time, or a drain. It ends this address instead, and
+			// the pass returns with the task.
+			server.HandleError(func() {
+				serverName, err := config.ProbeServerName()
+				if err != nil {
+					glog.Errorf("[extenderprobe]no probe name: %s\n", err)
+					return
+				}
+				probeCtx, probeCancel := context.WithTimeout(
+					clientSession.Ctx,
+					ExtenderProbeAddressTimeout,
+				)
+				defer probeCancel()
 
-			probeErr := probeExtenderAddress(probeCtx, target, serverName, destinationHost)
-			outcome := model.RecordNetworkExtenderProbeResult(
-				clientSession.Ctx,
-				target.ExtenderId,
-				target.IpVersion,
-				probeErr == nil,
-				server.NowUtc(),
-				ExtenderMaxConsecutiveProbeFailures,
-				func(extender *model.NetworkExtender, issueTime time.Time) ([]byte, error) {
-					_, message, err := controller.SignExtenderRevocation(
-						config,
-						rootPrivateKey,
-						extender,
-						issueTime,
-					)
-					return message, err
-				},
-			)
-
-			stateLock.Lock()
-			defer stateLock.Unlock()
-			if probeErr == nil {
-				result.Succeeded += 1
-			} else {
-				result.Failed += 1
-				// one line per unreachable address is a lot during an outage;
-				// the count below is the unconditional signal
-				if glog.V(1) {
-					glog.Infof(
-						"[extenderprobe]%s ipv%d did not answer: %s\n",
-						target.Ip,
-						target.IpVersion,
-						probeErr,
+				// TEMPORARY (ExtenderProbeFailureDiagnostics): the same dial, watched,
+				// and how a failure failed, at most once an hour for each address
+				probeCtx, probeSocket := withExtenderProbeSocket(probeCtx)
+				probeErr := probeExtenderAddress(probeCtx, target, serverName, destinationHost)
+				if probeErr != nil && ExtenderProbeFailureDiagnostics {
+					logExtenderProbeFailure(clientSession.Ctx, target, serverName, probeSocket.observed(probeErr), server.NowUtc())
+				}
+				outcome := model.RecordNetworkExtenderProbeResult(
+					clientSession.Ctx,
+					target.ExtenderId,
+					target.IpVersion,
+					probeErr == nil,
+					server.NowUtc(),
+					ExtenderMaxConsecutiveProbeFailures,
+					func(extender *model.NetworkExtender, issueTime time.Time) ([]byte, error) {
+						_, message, err := controller.SignExtenderRevocation(
+							config,
+							rootPrivateKey,
+							extender,
+							issueTime,
+						)
+						return message, err
+					},
+				)
+				// A failed probe is an outage. The block reports made before it
+				// describe that outage, not a block, so none of them counts
+				// again once the extender answers (connect/EXTENDER-UPDATE2.md
+				// §1.3). Set aside after the result commits, so every report the
+				// failure did not refuse is already visible.
+				discountedCount := int64(0)
+				if probeErr != nil {
+					discountedCount = model.DiscountNetworkExtenderBlockReports(
+						clientSession.Ctx,
+						target.ExtenderId,
+						server.NowUtc(),
 					)
 				}
-			}
-			if outcome.AddressDeactivated {
-				result.Deactivated += 1
-				glog.Errorf(
-					"[extenderprobe]%s ipv%d deactivated after %d consecutive failures\n",
-					target.Ip,
-					target.IpVersion,
-					ExtenderMaxConsecutiveProbeFailures,
-				)
-			}
-			if outcome.ExtenderRevoked {
-				result.Revoked += 1
-				glog.Errorf(
-					"[extenderprobe]extender %s revoked, it has no active address left\n",
-					target.ExtenderId,
-				)
-			}
+
+				stateLock.Lock()
+				defer stateLock.Unlock()
+				result.DiscountedBlockReports += int(discountedCount)
+				if probeErr == nil {
+					result.Succeeded += 1
+				} else {
+					result.Failed += 1
+					// one line per unreachable address is a lot during an outage;
+					// the count below is the unconditional signal
+					if glog.V(1) {
+						glog.Infof(
+							"[extenderprobe]extender %s ipv%d did not answer: %s\n",
+							target.ExtenderId,
+							target.IpVersion,
+							extenderProbeErrorText(target, probeErr),
+						)
+					}
+				}
+				if outcome.AddressDeactivated {
+					result.Deactivated += 1
+					glog.Errorf(
+						"[extenderprobe]extender %s ipv%d deactivated after %d consecutive failures\n",
+						target.ExtenderId,
+						target.IpVersion,
+						ExtenderMaxConsecutiveProbeFailures,
+					)
+				}
+				if outcome.ExtenderRevoked {
+					result.Revoked += 1
+					glog.Errorf(
+						"[extenderprobe]extender %s revoked, it has no active address left\n",
+						target.ExtenderId,
+					)
+				}
+			})
 		}()
 	}
 	wait.Wait()
 
 	glog.Infof(
-		"[extenderprobe]probed %d addresses: %d ok, %d failed, %d deactivated, %d revoked\n",
+		"[extenderprobe]probed %d addresses: %d ok, %d failed, %d deactivated, %d revoked, %d block reports discounted\n",
 		result.Probed,
 		result.Succeeded,
 		result.Failed,
 		result.Deactivated,
 		result.Revoked,
+		result.DiscountedBlockReports,
 	)
 	return result, nil
+}
+
+// The text of a failed probe for a log line. A gated address must never reach a
+// log (connect/EXTENDER.md R1), so the lines here name an extender by its id and
+// family, and this takes the address out of what a failed dial says, which is
+// where it would come back: "dial tcp <address>:443: i/o timeout".
+func extenderProbeErrorText(target *model.NetworkExtenderProbeTarget, probeErr error) string {
+	text := probeErr.Error()
+	for _, address := range []string{target.Ip.String(), target.Ip.Unmap().String()} {
+		text = strings.ReplaceAll(text, address, "<address>")
+	}
+	return text
 }
 
 func ExtenderProbePost(

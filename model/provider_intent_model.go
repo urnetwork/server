@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/urnetwork/server"
 )
@@ -389,6 +390,7 @@ func providerIntentKeys(networkId server.Id) []string {
 		networkPeerConnectedKey(networkId),
 		networkPeerConnectedProxyKey(networkId),
 		networkPeerConnectedProviderKey(networkId),
+		providerIntentExemptKey(networkId),
 	}
 }
 
@@ -397,37 +399,26 @@ func providerIntentKeys(networkId server.Id) []string {
 // exempt status, a live record and a live intent connection). Peers and
 // provider installs follow the same rules, so the registry category never
 // changes a count; hosted proxy clients are always normal. `live_min` is the
-// decimal unix milli string of the first live expiry.
-const providerIntentCountLua = `
-local function count_clients(pi_key, present_key, expire_key, connected_key, proxy_key, provider_key, live_min, skip_member)
-	local live_min_ms = tonumber(live_min)
-	local normal_count = redis.call('ZCOUNT', proxy_key, live_min, '+inf')
-	local exempt_count = 0
-	for _, registry_key in ipairs({connected_key, provider_key}) do
-		local members = redis.call('ZRANGEBYSCORE', registry_key, live_min, '+inf')
-		for _, member in ipairs(members) do
-			if member ~= skip_member then
-				local exempt = false
-				local present = redis.call('ZSCORE', present_key, member)
-				local expire = redis.call('ZSCORE', expire_key, member)
-				if present and expire and live_min_ms <= tonumber(present) and live_min_ms <= tonumber(expire) then
-					local record = redis.call('HGET', pi_key, member)
-					if record then
-						local status = string.match(record, '^(%S+)')
-						exempt = status == 'pending' or status == 'qualified'
-					end
-				end
-				if exempt then
-					exempt_count = exempt_count + 1
-				else
-					normal_count = normal_count + 1
-				end
-			end
+// decimal unix milli string of the first live expiry. The count reads the
+// network's exempt index (provider_intent_exempt_index.go), a fixed handful of
+// commands, and walks the registries only while the index builds, or when the
+// index disagrees with its sources, which drops it for a rebuild. The third
+// value is the path taken: 1 the index, 2 the walk, 3 the walk after a drop.
+var providerIntentCountLua = fmt.Sprintf(`%s
+local function count_clients(pi_key, present_key, expire_key, connected_key, proxy_key, provider_key, index_key, live_min, skip_member, build_limit, key_ttl_seconds)
+	local path = 2
+	if build_exempt_index(index_key, pi_key, present_key, expire_key, connected_key, provider_key, build_limit, key_ttl_seconds) then
+		local normal_count, exempt_count = count_clients_indexed(index_key, pi_key, present_key, expire_key, connected_key, proxy_key, provider_key, live_min, skip_member)
+		if normal_count then
+			return normal_count, exempt_count, 1
 		end
+		redis.call('UNLINK', index_key)
+		path = 3
 	end
-	return normal_count, exempt_count
+	local normal_count, exempt_count = count_clients_walk(pi_key, present_key, expire_key, connected_key, proxy_key, provider_key, live_min, skip_member)
+	return normal_count, exempt_count, path
 end
-`
+`, providerIntentExemptCountLua)
 
 // Compares the client's record with the one the caller read and, when they
 // match, writes the next record. An expired record compares as none. With an
@@ -435,8 +426,11 @@ end
 // count: the next record when the normal count (without this client) is under
 // the limit, else the over limit record. Presence is refreshed when asked.
 // Expired records and presences are pruned first, a bounded batch per call.
-// Returns {chosen, record}: chosen 0 when the comparison failed (record is the
-// current one), 1 for the next record and 2 for the over limit record.
+// The client's exempt index entries follow every write.
+// Returns {chosen, record, count_path}: chosen 0 when the comparison failed
+// (record is the current one, and there is no count_path), 1 for the next
+// record and 2 for the over limit record; count_path is 0 without a count,
+// else count_clients' path.
 var providerIntentApplyLua = fmt.Sprintf(`%s
 local pi_key = KEYS[1]
 local present_key = KEYS[2]
@@ -444,6 +438,7 @@ local expire_key = KEYS[3]
 local connected_key = KEYS[4]
 local proxy_key = KEYS[5]
 local provider_key = KEYS[6]
+local index_key = KEYS[7]
 
 local member = ARGV[1]
 local expected_record = ARGV[2]
@@ -456,6 +451,7 @@ local record_expiry_ms = ARGV[8]
 local presence_expiry_ms = ARGV[9]
 local key_ttl_seconds = ARGV[10]
 local prune_limit = tonumber(ARGV[11])
+local build_limit = ARGV[12]
 local now_ms = tonumber(now)
 
 local expired = redis.call('ZRANGEBYSCORE', expire_key, '-inf', now, 'LIMIT', 0, prune_limit)
@@ -463,10 +459,12 @@ for _, expired_member in ipairs(expired) do
 	redis.call('HDEL', pi_key, expired_member)
 	redis.call('ZREM', expire_key, expired_member)
 	redis.call('ZREM', present_key, expired_member)
+	redis.call('ZREM', index_key, 'c' .. expired_member, 'p' .. expired_member)
 end
 local expired_presences = redis.call('ZRANGEBYSCORE', present_key, '-inf', now, 'LIMIT', 0, prune_limit)
 for _, expired_member in ipairs(expired_presences) do
 	redis.call('ZREM', present_key, expired_member)
+	redis.call('ZREM', index_key, 'c' .. expired_member, 'p' .. expired_member)
 end
 
 local current_record = redis.call('HGET', pi_key, member)
@@ -485,8 +483,10 @@ end
 
 local chosen = 1
 local record = next_record
+local count_path = 0
 if over_limit_record ~= '' and 0 < limit then
-	local normal_count, exempt_count = count_clients(pi_key, present_key, expire_key, connected_key, proxy_key, provider_key, live_min, member)
+	local normal_count, exempt_count
+	normal_count, exempt_count, count_path = count_clients(pi_key, present_key, expire_key, connected_key, proxy_key, provider_key, index_key, live_min, member, build_limit, key_ttl_seconds)
 	if limit <= normal_count then
 		chosen = 2
 		record = over_limit_record
@@ -501,21 +501,35 @@ end
 redis.call('EXPIRE', pi_key, key_ttl_seconds)
 redis.call('EXPIRE', present_key, key_ttl_seconds)
 redis.call('EXPIRE', expire_key, key_ttl_seconds)
-return {chosen, record}
+sync_exempt_index(index_key, 'c', connected_key, pi_key, present_key, expire_key, member, key_ttl_seconds)
+sync_exempt_index(index_key, 'p', provider_key, pi_key, present_key, expire_key, member, key_ttl_seconds)
+return {chosen, record, count_path}
 `, providerIntentCountLua)
 
-// Returns {normal_count, exempt_count} for the network.
+// The provider intent scripts run by sha: their bodies carry the exempt index
+// library (several KB), which EVAL would send and hash on every call.
+var (
+	providerIntentApplyScript        = redis.NewScript(providerIntentApplyLua)
+	providerIntentCountClientsScript = redis.NewScript(providerIntentCountClientsLua)
+	providerIntentObserveScript      = redis.NewScript(providerIntentObserveLua)
+)
+
+// Returns {normal_count, exempt_count, count_path} for the network.
 var providerIntentCountClientsLua = fmt.Sprintf(`%s
-local normal_count, exempt_count = count_clients(KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], KEYS[6], ARGV[1], '')
-return {normal_count, exempt_count}
+local normal_count, exempt_count, count_path = count_clients(KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], KEYS[6], KEYS[7], ARGV[1], '', ARGV[3], ARGV[2])
+return {normal_count, exempt_count, count_path}
 `, providerIntentCountLua)
 
 // Refreshes the presence of a client with a live record and returns the
-// record, or false when the client has no live record.
-const providerIntentObserveLua = `
+// record, or false when the client has no live record. The client's exempt
+// index entries follow the presence.
+var providerIntentObserveLua = fmt.Sprintf(`%s
 local pi_key = KEYS[1]
 local present_key = KEYS[2]
 local expire_key = KEYS[3]
+local connected_key = KEYS[4]
+local provider_key = KEYS[6]
+local index_key = KEYS[7]
 
 local member = ARGV[1]
 local now_ms = tonumber(ARGV[2])
@@ -529,8 +543,10 @@ if record == false or expire == false or tonumber(expire) <= now_ms then
 end
 redis.call('ZADD', present_key, presence_expiry_ms, member)
 redis.call('EXPIRE', present_key, key_ttl_seconds)
+sync_exempt_index(index_key, 'c', connected_key, pi_key, present_key, expire_key, member, key_ttl_seconds)
+sync_exempt_index(index_key, 'p', provider_key, pi_key, present_key, expire_key, member, key_ttl_seconds)
 return record
-`
+`, providerIntentExemptSyncLua)
 
 // The outcome of one apply.
 type providerIntentApplyResult struct {
@@ -562,33 +578,22 @@ func applyProviderIntentState(
 		overLimitState.Status = ProviderIntentStatusOverLimit
 		overLimitRecord = overLimitState.record()
 	}
-	presenceExpiryMs := int64(0)
-	if !presenceExpireTime.IsZero() {
-		presenceExpiryMs = presenceExpireTime.UnixMilli()
-	}
 	server.Redis(ctx, func(r server.RedisClient) {
-		values, err := r.Eval(
+		values, err := providerIntentApplyScript.Run(
 			ctx,
-			providerIntentApplyLua,
+			r,
 			providerIntentKeys(networkId),
-			string(clientId.Bytes()),
-			expectedRecord,
-			nextRecord,
-			overLimitRecord,
-			normalLimit,
-			now.UnixMilli(),
-			// count only entries whose expiry is still in the future
-			now.UnixMilli()+1,
-			next.expireTime(now).UnixMilli(),
-			presenceExpiryMs,
-			int64(networkPeerKeyTtl/time.Second),
-			providerIntentPruneLimit,
+			providerIntentApplyArgs(clientId, expectedRecord, nextRecord, overLimitRecord, normalLimit, next, presenceExpireTime, now)...,
 		).Slice()
 		if err != nil {
 			panic(err)
 		}
 		chosen := values[0].(int64)
 		record, _ := values[1].(string)
+		if 2 < len(values) {
+			countPath, _ := values[2].(int64)
+			countProviderIntentCountPath(countPath)
+		}
 		switch {
 		case chosen == 1:
 			result = providerIntentApplyResult{applied: true, record: record}
@@ -604,6 +609,38 @@ func applyProviderIntentState(
 		}
 	})
 	return
+}
+
+// The ARGV of providerIntentApplyLua, in its order.
+func providerIntentApplyArgs(
+	clientId server.Id,
+	expectedRecord string,
+	nextRecord string,
+	overLimitRecord string,
+	normalLimit int,
+	next *ProviderIntentState,
+	presenceExpireTime time.Time,
+	now time.Time,
+) []any {
+	presenceExpiryMs := int64(0)
+	if !presenceExpireTime.IsZero() {
+		presenceExpiryMs = presenceExpireTime.UnixMilli()
+	}
+	return []any{
+		string(clientId.Bytes()),
+		expectedRecord,
+		nextRecord,
+		overLimitRecord,
+		normalLimit,
+		now.UnixMilli(),
+		// count only entries whose expiry is still in the future
+		now.UnixMilli() + 1,
+		next.expireTime(now).UnixMilli(),
+		presenceExpiryMs,
+		int64(networkPeerKeyTtl / time.Second),
+		providerIntentPruneLimit,
+		providerIntentExemptBuildLimit,
+	}
 }
 
 // Rate-limits a conflicting retry; false when the context ended.
@@ -791,10 +828,10 @@ func observeProviderIntentAt(
 ) (state *ProviderIntentState) {
 	var record string
 	server.Redis(ctx, func(r server.RedisClient) {
-		value, err := r.Eval(
+		value, err := providerIntentObserveScript.Run(
 			ctx,
-			providerIntentObserveLua,
-			providerIntentKeys(networkId)[:3],
+			r,
+			providerIntentKeys(networkId),
 			string(clientId.Bytes()),
 			now.UnixMilli(),
 			now.Add(presenceTimeout).UnixMilli(),
@@ -832,7 +869,8 @@ func providerIntentPresent(ctx context.Context, networkId server.Id, clientId se
 
 // Counts the live connected top-level clients of a network that count toward
 // its concurrent client limit (normal clients, failed intent clients and hosted
-// proxy clients) and, separately, the intent clients exempt from it.
+// proxy clients) and, separately, the intent clients exempt from it. A fixed
+// handful of redis commands once the network's exempt index is built.
 func GetNetworkConnectedClientCounts(ctx context.Context, networkId server.Id) (normalCount int, providerIntentCount int) {
 	return getNetworkConnectedClientCountsAt(ctx, networkId, server.NowUtc())
 }
@@ -840,20 +878,30 @@ func GetNetworkConnectedClientCounts(ctx context.Context, networkId server.Id) (
 // Counts at an explicit time, for deterministic tests.
 func getNetworkConnectedClientCountsAt(ctx context.Context, networkId server.Id, now time.Time) (normalCount int, providerIntentCount int) {
 	server.Redis(ctx, func(r server.RedisClient) {
-		values, err := r.Eval(
+		values, err := providerIntentCountClientsScript.Run(
 			ctx,
-			providerIntentCountClientsLua,
+			r,
 			providerIntentKeys(networkId),
-			// count only entries whose expiry is still in the future
-			now.UnixMilli()+1,
+			providerIntentCountArgs(now)...,
 		).Int64Slice()
 		if err != nil {
 			panic(err)
 		}
 		normalCount = int(values[0])
 		providerIntentCount = int(values[1])
+		countProviderIntentCountPath(values[2])
 	})
 	return
+}
+
+// The ARGV of providerIntentCountClientsLua, in its order.
+func providerIntentCountArgs(now time.Time) []any {
+	return []any{
+		// count only entries whose expiry is still in the future
+		now.UnixMilli() + 1,
+		int64(networkPeerKeyTtl / time.Second),
+		providerIntentExemptBuildLimit,
+	}
 }
 
 // Runs one check of a client's qualification, and returns when the next check

@@ -98,13 +98,21 @@ func TestEventSchemaLists(t *testing.T) {
 		connect.AssertEqual(t, EventOwnerClient, spec.Owner)
 	}
 	serverNames := ServerEventNames()
-	connect.AssertEqual(t, 15, len(serverNames))
+	// 15 onboarding events, feedback.tapped and the 12 reengage.* events
+	connect.AssertEqual(t, 28, len(serverNames))
 	for _, name := range serverNames {
 		spec := EventSpecFor(name)
 		connect.AssertEqual(t, true, spec.ServerOnly)
 		connect.AssertEqual(t, true, spec.Owner != EventOwnerClient)
 	}
 	connect.AssertEqual(t, true, EventSpecFor("nope") == nil)
+	// a tap on an email's feedback link and the re-engagement record are the
+	// server's to write: no client may forge them
+	for _, name := range []string{EventFeedbackTapped, EventReengageEpisodeStarted, EventReengageEmailSent, EventReengageReason, EventReengageKeep, EventReengageExit} {
+		connect.AssertEqual(t, true, EventSpecFor(name) != nil && EventSpecFor(name).ServerOnly)
+		_, err := ValidateClientEvent(name, map[string]any{})
+		connect.AssertEqual(t, true, err != nil)
+	}
 	// connect.day is the server's connection history: never from a client
 	connect.AssertEqual(t, true, EventSpecFor(EventConnectDay).ServerOnly)
 	_, err := ValidateClientEvent(EventConnectDay, map[string]any{})

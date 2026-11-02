@@ -37,6 +37,20 @@ func GetStEpochProviderUsageAtEpoch(ctx context.Context, epoch uint64, startTime
 // statement snapshot as live/archive usage, including while retention moves it.
 // The live partial index excludes ordinary open/canceled rows; archive custody
 // contains only credit-bearing outcomes and uses its existing close-time index.
+//
+// The live arm's duplicate probe joins only the archive rows that closed in the
+// window, so each archive partition reads its close-time index range rather
+// than all of it. Unbounded, the join hashed the whole archive, which the
+// contract horizon reaper grows by every contract it deletes, and past
+// work_mem * hash_mem_multiplier the hash spills in batches (Main, 2026-11-01:
+// all 27 partitions, 20.35M rows, against 3.66 GB that holds about 60M). The
+// bound loses no duplicate of a live row: an archived row is an exact copy of
+// its live contract's close time when it is written
+// (ProviderUsageArchiveGuardFunctionBodySql), a terminal close time never
+// changes (the contract usage guard), and a NULL close time on either side
+// stops the read through missing_time. Only a contract id inserted again
+// after its archive with another close time, which nothing writes, would
+// escape it.
 const stEpochProviderUsageSql = `
 	WITH missing_time AS MATERIALIZED (
 		(SELECT contract_id, NULL::jsonb AS provider_usage, close_time, false AS duplicate
@@ -54,6 +68,7 @@ const stEpochProviderUsageSql = `
 		archive.contract_id IS NOT NULL AS duplicate
 	FROM transfer_contract AS source
 	LEFT JOIN st_provider_usage_archive AS archive ON archive.contract_id=source.contract_id
+		AND $1 <= archive.close_time AND archive.close_time < $2
 	WHERE NOT EXISTS (SELECT 1 FROM missing_time)
 		AND $1 <= source.close_time AND source.close_time < $2
 		AND source.outcome IN ('settled','dispute_resolved_to_source','dispute_resolved_to_destination')
@@ -77,7 +92,8 @@ const stEpochProviderUsageBoundSql = `SELECT count(*) FROM (SELECT 1 FROM (` + s
 // past the close's three hours. A bitmap reads each page once, in block order,
 // with asynchronous prefetch: 125-165K rows/s on the same cold pages. The
 // bound proves both undated probes empty, so their plans read nothing; the
-// archive is hashed in memory, and nothing sorts, materializes or spills. One
+// window's archive rows are hashed in memory, and nothing sorts, materializes
+// or spills. One
 // backend keeps the row order deterministic; a forced custom plan keeps a
 // session's cached generic plan from ignoring these settings.
 var stEpochProviderUsageWholeWindowSettings = []string{

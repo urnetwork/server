@@ -305,7 +305,7 @@ var migrationArtifacts = append(append(append([]migrationArtifact{
 	{name: "legacy profile/deployment nonce constraint removed", requiredVersion: 626, rowColumn: 37},
 	{name: "ST signature/notification deployment identity", requiredVersion: 627, rowColumn: 38},
 	{name: "transfer_contract.stream_id+contract_participant", requiredVersion: 628, rowColumn: 39},
-	{name: "transfer_contract_stream_id", requiredVersion: 629, rowColumn: 40},
+	{name: "transfer_contract_stream_id", requiredVersion: 629, removedVersion: server.IndexDietMigrationVersion(server.IndexDietStreamIndexDrop), rowColumn: 40},
 	{name: "competition staging identity and initial guards", requiredVersion: 630, removedVersion: 652, rowColumn: 41},
 	{name: "transfer_escrow_sweep.provider_payouts", requiredVersion: 631, rowColumn: 42},
 	{name: "transfer_contract_unresolved_source_pair_create_time", requiredVersion: 632, rowColumn: 43},

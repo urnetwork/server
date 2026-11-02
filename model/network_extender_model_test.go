@@ -3,6 +3,7 @@ package model
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"net/netip"
 	"slices"
@@ -52,9 +53,10 @@ func testRevocationSigner() NetworkExtenderRevocationSigner {
 	}
 }
 
+// One activation of publicKey by a new client of the key's test network.
 func testExtenderActivation(publicKey []byte, ipVersion int, ip string) *NetworkExtenderActivation {
 	return &NetworkExtenderActivation{
-		NetworkId:   server.NewId(),
+		NetworkId:   testExtenderNetworkId(publicKey),
 		ClientId:    server.NewId(),
 		PublicKey:   publicKey,
 		TcpPort:     443,
@@ -66,6 +68,15 @@ func testExtenderActivation(publicKey []byte, ipVersion int, ip string) *Network
 		Ip:          netip.MustParseAddr(ip),
 		Carriers:    []string{connect.ExtenderCarrierTcp, connect.ExtenderCarrierQuic},
 	}
+}
+
+// The network a test activates publicKey from: one per key, so a test that
+// activates a key again does it from the network that holds the key, as an
+// extender does. ActivateNetworkExtender never moves a key to another network;
+// a test of that sets another NetworkId itself.
+func testExtenderNetworkId(publicKey []byte) server.Id {
+	digest := sha256.Sum256(append([]byte("extender-test-network:"), publicKey...))
+	return server.Id(digest[:16])
 }
 
 // The directory, activation history, and latency attestations exist on a fresh
@@ -1221,10 +1232,12 @@ func TestMarkExtenderPublishPublishedLeavesAStampedRowAlone(t *testing.T) {
 	})
 }
 
-// Re-activating one identity key carries the new ports, tld, country and owner
-// onto the same extender row. An operator that moved its extender to another
-// client or another port must not leave the directory advertising the old one,
-// and the record signed by the re-activation is what the directory keeps (B5).
+// Re-activating one identity key carries the new ports, tld, country and
+// client onto the same extender row. An operator that moved its extender to
+// another client of its network or another port must not leave the directory
+// advertising the old one, and the record signed by the re-activation is what
+// the directory keeps (B5). Another network is refused instead
+// (TestActivateNetworkExtenderNeverMovesAKeyToAnotherNetwork).
 func TestActivateNetworkExtenderUpdatesThePortsAndOwnerOfOneKey(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -1379,5 +1392,116 @@ func TestGetActiveNetworkExtenderProbeTargetsTakeTheOldestProbeFirst(t *testing.
 		connect.AssertEqual(t, head.IpVersion, 4)
 		connect.AssertEqual(t, slices.Equal(head.Carriers, []string{"tcp", "dns"}), true)
 		connect.AssertEqual(t, 0 < len(head.PublicKey), true)
+	})
+}
+
+// A re-activation keeps the consecutive probe failures of an address that is
+// still active on the same ip, so an extender that re-activates more often
+// than its failure budget lasts is still deactivated while its uptime probes
+// keep failing. An address the probes deactivated, or one now on another ip,
+// starts again at zero, and a probe success still clears the count. One
+// database holds every case, each on its own key.
+func TestActivateNetworkExtenderKeepsTheProbeFailuresOfAnActiveUnchangedAddress(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		sign, _ := testRecordSigner()
+
+		activate := func(publicKey []byte, ipVersion int, ip string) server.Id {
+			activated := ActivateNetworkExtender(ctx, testExtenderActivation(publicKey, ipVersion, ip), sign)
+			if activated == nil {
+				t.Fatalf("the activation of %s stored nothing", ip)
+			}
+			return activated.Extender.ExtenderId
+		}
+		probe := func(extenderId server.Id, ipVersion int, success bool) *NetworkExtenderProbeOutcome {
+			return RecordNetworkExtenderProbeResult(
+				ctx,
+				extenderId,
+				ipVersion,
+				success,
+				server.NowUtc(),
+				ExtenderTestingMaxConsecutiveProbeFailures,
+				testRevocationSigner(),
+			)
+		}
+		address := func(extenderId server.Id, ipVersion int) *NetworkExtenderAddress {
+			for _, address := range Testing_GetNetworkExtender(ctx, extenderId).Addresses {
+				if address.IpVersion == ipVersion {
+					return address
+				}
+			}
+			t.Fatalf("extender %s has no ipv%d address", extenderId, ipVersion)
+			return nil
+		}
+
+		// an active address re-activated on its own ip keeps its count, and
+		// the failure after it is the next of the same run: the sixth in a row
+		// deactivates it, the re-activation in the middle notwithstanding
+		keptKey := []byte("extender-public-key-keepfail-0001")
+		kept := activate(keptKey, 4, "192.0.2.70")
+		for range 3 {
+			probe(kept, 4, false)
+		}
+		activateTime := address(kept, 4).ActivateTime
+		activate(keptKey, 4, "192.0.2.70")
+		connect.AssertEqual(t, address(kept, 4).Active, true)
+		connect.AssertEqual(t, address(kept, 4).ConsecutiveProbeFailures, 3)
+		connect.AssertEqual(t, !address(kept, 4).ActivateTime.Before(activateTime), true)
+		outcome := probe(kept, 4, false)
+		connect.AssertEqual(t, outcome.AddressDeactivated, false)
+		connect.AssertEqual(t, address(kept, 4).ConsecutiveProbeFailures, 4)
+		probe(kept, 4, false)
+		outcome = probe(kept, 4, false)
+		connect.AssertEqual(t, outcome.AddressDeactivated, true)
+		connect.AssertEqual(t, outcome.ExtenderRevoked, true)
+
+		// the revoked extender activates again with its whole budget, so the
+		// loop after a revocation is no faster than before
+		activate(keptKey, 4, "192.0.2.70")
+		connect.AssertEqual(t, Testing_GetNetworkExtender(ctx, kept).Extender.Active, true)
+		connect.AssertEqual(t, address(kept, 4).Active, true)
+		connect.AssertEqual(t, address(kept, 4).ConsecutiveProbeFailures, 0)
+		outcome = probe(kept, 4, false)
+		connect.AssertEqual(t, outcome.AddressDeactivated, false)
+		connect.AssertEqual(t, address(kept, 4).ConsecutiveProbeFailures, 1)
+
+		// one family the probes deactivated, while the other kept the
+		// extender active, starts again at zero
+		lostKey := []byte("extender-public-key-keepfail-0002")
+		lost := activate(lostKey, 4, "192.0.2.71")
+		activate(lostKey, 6, "2001:db8::71")
+		for range ExtenderTestingMaxConsecutiveProbeFailures {
+			probe(lost, 4, false)
+		}
+		connect.AssertEqual(t, address(lost, 4).Active, false)
+		connect.AssertEqual(t, Testing_GetNetworkExtender(ctx, lost).Extender.Active, true)
+		activate(lostKey, 4, "192.0.2.71")
+		connect.AssertEqual(t, address(lost, 4).Active, true)
+		connect.AssertEqual(t, address(lost, 4).ConsecutiveProbeFailures, 0)
+		outcome = probe(lost, 4, false)
+		connect.AssertEqual(t, outcome.AddressDeactivated, false)
+		connect.AssertEqual(t, address(lost, 4).ConsecutiveProbeFailures, 1)
+
+		// an address now on another ip is new to the probes
+		movedKey := []byte("extender-public-key-keepfail-0003")
+		moved := activate(movedKey, 4, "192.0.2.72")
+		for range 3 {
+			probe(moved, 4, false)
+		}
+		activate(movedKey, 4, "192.0.2.73")
+		connect.AssertEqual(t, address(moved, 4).Ip.String(), "192.0.2.73")
+		connect.AssertEqual(t, address(moved, 4).ConsecutiveProbeFailures, 0)
+
+		// and a probe success still clears a count a re-activation kept
+		answeredKey := []byte("extender-public-key-keepfail-0004")
+		answered := activate(answeredKey, 6, "2001:db8::74")
+		for range 3 {
+			probe(answered, 6, false)
+		}
+		activate(answeredKey, 6, "2001:db8::74")
+		connect.AssertEqual(t, address(answered, 6).ConsecutiveProbeFailures, 3)
+		probe(answered, 6, true)
+		connect.AssertEqual(t, address(answered, 6).ConsecutiveProbeFailures, 0)
+		connect.AssertEqual(t, address(answered, 6).LastProbeSuccessTime != nil, true)
 	})
 }

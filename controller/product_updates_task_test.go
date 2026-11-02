@@ -6,13 +6,17 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/onboarding"
+	"github.com/urnetwork/server/reengagement"
 	"github.com/urnetwork/server/session"
 	"github.com/urnetwork/server/task"
 )
@@ -225,4 +229,398 @@ func TestRemoveProductUpdatesTaskPropagatesProviderOutcome(t *testing.T) {
 	if _, err := RemoveProductUpdates(&RemoveProductUpdatesArgs{UserAuth: "+12025550100"}, owner); err != nil || requests.Load() != before {
 		t.Fatal("non-email removal contacted provider", err)
 	}
+}
+
+// brevoListFixture is a fake Brevo that keeps one address's contact and list
+// memberships the way the provider answers the sync's calls: a duplicate
+// contact, an add to a list the address is on, and a removal from a list it is
+// not on are the provider's refusals the sync treats as done.
+type brevoListFixture struct {
+	t            *testing.T
+	email        string
+	mutex        sync.Mutex
+	contact      bool
+	lists        map[string]bool
+	failRemovals atomic.Bool
+	requests     atomic.Int64
+}
+
+func newBrevoListFixture(t *testing.T, email string) *brevoListFixture {
+	fixture := &brevoListFixture{t: t, email: email, lists: map[string]bool{}}
+	writeJson := func(w http.ResponseWriter, statusCode int, value any) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(statusCode)
+		_ = json.NewEncoder(w).Encode(value)
+	}
+	newBrevoProtocolTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fixture.requests.Add(1)
+		fixture.mutex.Lock()
+		defer fixture.mutex.Unlock()
+		if r.Method == http.MethodPost && r.URL.Path == "/v3/contacts" {
+			var args BrevoContactArgs
+			if err := json.NewDecoder(r.Body).Decode(&args); err != nil || args.Email != email {
+				t.Error("contact request lost the synced identity")
+				writeJson(w, http.StatusBadRequest, BrevoContactResult{Code: "invalid_json"})
+				return
+			}
+			if fixture.contact {
+				writeJson(w, http.StatusBadRequest, BrevoContactResult{Code: "duplicate_parameter"})
+				return
+			}
+			fixture.contact = true
+			writeJson(w, http.StatusCreated, BrevoContactResult{Id: 1})
+			return
+		}
+		listId, operation, ok := strings.Cut(strings.TrimPrefix(r.URL.Path, "/v3/contacts/lists/"), "/contacts/")
+		if r.Method != http.MethodPost || !ok || !strings.HasPrefix(r.URL.Path, "/v3/contacts/lists/") {
+			t.Error("unexpected Brevo request", r.Method, r.URL.Path)
+			writeJson(w, http.StatusBadRequest, BrevoContactResult{Code: "not_found"})
+			return
+		}
+		var args BrevoListArgs
+		if err := json.NewDecoder(r.Body).Decode(&args); err != nil || len(args.Emails) != 1 || args.Emails[0] != email {
+			t.Error("list request lost the synced identity")
+			writeJson(w, http.StatusBadRequest, BrevoListResult{Code: "invalid_json"})
+			return
+		}
+		switch operation {
+		case "add":
+			if fixture.lists[listId] || !fixture.contact {
+				writeJson(w, http.StatusBadRequest, BrevoListResult{Code: "invalid_parameter"})
+				return
+			}
+			fixture.lists[listId] = true
+		case "remove":
+			if fixture.failRemovals.Load() {
+				writeJson(w, http.StatusServiceUnavailable, BrevoListResult{Code: "synthetic_unavailable"})
+				return
+			}
+			if !fixture.lists[listId] {
+				writeJson(w, http.StatusBadRequest, BrevoListResult{Code: "invalid_parameter"})
+				return
+			}
+			delete(fixture.lists, listId)
+		default:
+			t.Error("unexpected list operation", operation)
+			writeJson(w, http.StatusNotFound, BrevoListResult{Code: "not_found"})
+			return
+		}
+		writeJson(w, http.StatusOK, BrevoListResult{Contacts: &BrevoListResultContacts{Success: args.Emails}})
+	}))
+	return fixture
+}
+
+// on reports whether the address is on the list.
+func (self *brevoListFixture) on(listId int) bool {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	return self.lists[strconv.Itoa(listId)]
+}
+
+func (self *brevoListFixture) put(listId int) {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	self.lists[strconv.Itoa(listId)] = true
+}
+
+// pendingProductUpdatesSyncs are the queued per-user syncs, by run-once key.
+func pendingProductUpdatesSyncs(ctx context.Context) map[string]*task.Task {
+	syncs := map[string]*task.Task{}
+	for _, pending := range task.GetTasks(ctx, task.ListPendingTasks(ctx)...) {
+		if strings.HasPrefix(pending.RunOnceKey, `["sync_product_updates_for_user",`) {
+			syncs[pending.RunOnceKey] = pending
+		}
+	}
+	return syncs
+}
+
+// requireQueuedMirror returns the one sync queued for the user and checks the
+// shape the mirror queues it in: the user in the args and no session user.
+func requireQueuedMirror(tb testing.TB, ctx context.Context, userId server.Id) *task.Task {
+	tb.Helper()
+	syncs := pendingProductUpdatesSyncs(ctx)
+	queued := syncs[task.RunOnce("sync_product_updates_for_user", userId).String()]
+	if queued == nil {
+		tb.Fatal("no product-updates sync queued for the user", len(syncs))
+	}
+	var args SyncProductUpdatesForUserArgs
+	if err := json.Unmarshal([]byte(queued.ArgsJson), &args); err != nil || args.UserId != userId {
+		tb.Fatal("the queued sync does not name the user in its args", err)
+	}
+	if queued.ClientByJwtJson != "" {
+		tb.Fatal("the mirror queued its sync with a session user")
+	}
+	return queued
+}
+
+// A suppression takes the admin's address off both lists through the
+// product-updates sync, which retries a provider failure; a replay converges;
+// a lift puts the address back on network_users only while product updates
+// are on; a bounce or complaint is never lifted, and the settings switch does
+// not override it.
+func TestProductUpdatesMirrorMarketingSuppression(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(tb testing.TB) {
+		ctx := tb.Context()
+		networkId, userId := server.NewId(), server.NewId()
+		email := model.Testing_CreateNetwork(ctx, networkId, "synthetic-suppression-mirror", userId)
+		model.AccountPreferencesSetForNetwork(ctx, networkId, true)
+		previousNetworks, previousUpdates := newNetworksListId, productUpdatesListId
+		newNetworksListId, productUpdatesListId = func() int { return 101 }, func() int { return 102 }
+		defer func() { newNetworksListId, productUpdatesListId = previousNetworks, previousUpdates }()
+		brevo := newBrevoListFixture(t, email)
+
+		target := task.NewTaskTargetWithPost(SyncProductUpdatesForUser, SyncProductUpdatesForUserPost)
+		settings := task.DefaultTaskWorkerSettings()
+		settings.ClaimRegisteredTargetsOnly = true
+		worker := task.NewTaskWorker(ctx, settings)
+		defer worker.Close()
+		worker.AddTargets(target)
+		run := func(label string) {
+			tb.Helper()
+			syncs := pendingProductUpdatesSyncs(ctx)
+			queued := syncs[task.RunOnce("sync_product_updates_for_user", userId).String()]
+			if len(syncs) != 1 || queued == nil {
+				tb.Fatal(label, "expected one queued sync for the user", len(syncs))
+			}
+			// a task queued now is claimable from the next second
+			deadline := time.Now().Add(time.Minute)
+			for {
+				finished, retried, posts, err := worker.EvalTasks(1)
+				if err != nil || 1 < len(finished) || len(finished) == 1 && finished[0] != queued.TaskId || len(retried)+len(posts) != 0 {
+					tb.Fatal(label, "sync did not finish", finished, retried, posts, err)
+				}
+				if len(finished) == 1 {
+					return
+				}
+				if time.Now().After(deadline) {
+					tb.Fatal(label, "the queued sync was never claimed")
+				}
+				select {
+				case <-ctx.Done():
+					tb.Fatal(label, ctx.Err())
+				case <-time.After(100 * time.Millisecond):
+				}
+			}
+		}
+		expectLists := func(label string, newNetworks bool, networkUsers bool) {
+			tb.Helper()
+			if brevo.on(101) != newNetworks || brevo.on(102) != networkUsers {
+				tb.Fatal(label, "lists", brevo.on(101), brevo.on(102), "want", newNetworks, networkUsers)
+			}
+		}
+		owner := session.Testing_CreateClientSession(ctx, &session.ByJwt{NetworkId: networkId, UserId: userId})
+		owner.ClientAddress = ""
+		defer owner.Cancel()
+		setProductUpdates := func(productUpdates bool) {
+			if _, err := AccountPreferencesSet(&model.AccountPreferencesSetArgs{ProductUpdates: productUpdates}, owner); err != nil {
+				tb.Fatal(err)
+			}
+		}
+		liftable := []string{reengagement.SuppressSunset, reengagement.SuppressSwitched}
+		now := server.NowUtc()
+
+		// subscribed through settings; the initial sync put it on new_networks
+		setProductUpdates(true)
+		run("subscribe")
+		brevo.put(101)
+		expectLists("subscribed", true, true)
+
+		SuppressNetworkMarketing(ctx, networkId, reengagement.SuppressSunset, now)
+		queued := requireQueuedMirror(tb, ctx, userId)
+		brevo.failRemovals.Store(true)
+		if _, _, err := target.RunSpecific(ctx, queued); err == nil {
+			tb.Fatal("a provider failure was acknowledged")
+		}
+		expectLists("provider failure", true, true)
+		brevo.failRemovals.Store(false)
+		run("suppress")
+		expectLists("suppressed", false, false)
+
+		// a replayed suppression keeps the first reason and converges
+		SuppressNetworkMarketing(ctx, networkId, onboarding.ExitBounced, now.Add(time.Minute))
+		requireQueuedMirror(tb, ctx, userId)
+		run("replayed suppression")
+		expectLists("replayed suppression", false, false)
+		if state := model.GetNetworkMailState(ctx, networkId); state.SuppressedReason != reengagement.SuppressSunset {
+			tb.Fatal("a replay replaced the first suppression's reason", state.SuppressedReason)
+		}
+
+		// a lift puts the address back on network_users; a replayed lift does nothing
+		if !LiftNetworkMarketingSuppression(ctx, networkId, liftable) {
+			tb.Fatal("a sunset was not lifted")
+		}
+		requireQueuedMirror(tb, ctx, userId)
+		run("lift")
+		expectLists("lifted", false, true)
+		if LiftNetworkMarketingSuppression(ctx, networkId, liftable) || len(pendingProductUpdatesSyncs(ctx)) != 0 {
+			tb.Fatal("a replayed lift lifted or queued a sync")
+		}
+
+		// a lift never re-adds an address whose product updates are off
+		SuppressNetworkMarketing(ctx, networkId, reengagement.SuppressSwitched, now)
+		run("switched")
+		setProductUpdates(false)
+		run("opt out")
+		if !LiftNetworkMarketingSuppression(ctx, networkId, liftable) {
+			tb.Fatal("a switched answer was not lifted")
+		}
+		run("lift while opted out")
+		expectLists("lifted while opted out", false, false)
+
+		// a complaint is never lifted, and the settings switch does not put the
+		// address back while it stands
+		setProductUpdates(true)
+		run("subscribe again")
+		expectLists("subscribed again", false, true)
+		SuppressNetworkMarketing(ctx, networkId, onboarding.ExitComplained, now)
+		run("complaint")
+		expectLists("complained", false, false)
+		if LiftNetworkMarketingSuppression(ctx, networkId, liftable) || len(pendingProductUpdatesSyncs(ctx)) != 0 {
+			tb.Fatal("a complaint was lifted")
+		}
+		setProductUpdates(true)
+		run("settings switch while suppressed")
+		expectLists("settings switch while suppressed", false, false)
+
+		// the args name the user even when a session carries another one
+		other := session.Testing_CreateClientSession(ctx, &session.ByJwt{NetworkId: server.NewId(), UserId: server.NewId()})
+		defer other.Cancel()
+		before := brevo.requests.Load()
+		if _, err := SyncProductUpdatesForUser(&SyncProductUpdatesForUserArgs{UserId: userId}, other); err != nil || brevo.requests.Load() != before+2 {
+			tb.Fatal("the sync did not follow its args", err, brevo.requests.Load()-before)
+		}
+
+		// a network that no longer exists queues nothing
+		SuppressNetworkMarketing(ctx, server.NewId(), onboarding.ExitBounced, now)
+		if len(pendingProductUpdatesSyncs(ctx)) != 0 {
+			tb.Fatal("a missing network queued a sync")
+		}
+	})
+}
+
+// The campaigns' bounce and complaint webhooks and a re-engagement exit that
+// suppresses queue the mirror for the network's admin, one per user, and call
+// Brevo for nothing themselves.
+func TestCampaignSuppressionsQueueBrevoMirror(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(tb testing.TB) {
+		ctx := tb.Context()
+		newBrevoProtocolTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Error("a suppression called Brevo instead of queueing the sync", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusBadRequest)
+		}))
+		networkId, userId := server.NewId(), server.NewId()
+		model.Testing_CreateNetwork(ctx, networkId, "synthetic-webhook-mirror", userId)
+		exitNetworkId, exitUserId := server.NewId(), server.NewId()
+		model.Testing_CreateNetwork(ctx, exitNetworkId, "synthetic-exit-mirror", exitUserId)
+		now := server.NowUtc()
+		onboardingMessageId := "synthetic-onboarding-" + server.NewId().String()
+		reengagementMessageId := "synthetic-reengagement-" + server.NewId().String()
+		server.Tx(ctx, func(tx server.PgTx) {
+			model.AddNetworkOnboardingEmailInTx(tx, ctx, &model.NetworkOnboardingEmail{
+				MessageId: onboardingMessageId, NetworkId: networkId, Step: onboarding.StepE1,
+				Template: onboarding.TemplateE1Connect, Variant: onboarding.VariantDefault, Locale: "en", SentAt: now,
+			})
+			model.AddNetworkReengagementEmailInTx(tx, ctx, &model.NetworkReengagementEmail{
+				MessageId: reengagementMessageId, NetworkId: networkId, Step: reengagement.StepR1,
+				Template: reengagement.TemplateR1News, Variant: reengagement.StreamLapsed, Locale: "en", SentAt: now,
+			})
+		})
+		expectReason := func(networkId server.Id, reason string) {
+			tb.Helper()
+			if state := model.GetNetworkMailState(ctx, networkId); state.SuppressedAt == nil || state.SuppressedReason != reason {
+				tb.Fatal("suppression", state.SuppressedAt, state.SuppressedReason, "want", reason)
+			}
+		}
+
+		handleOnboardingBrevoWebhook(ctx, &BrevoWebhookArgs{Event: "hard_bounce", MessageId: "synthetic-unknown"})
+		if len(pendingProductUpdatesSyncs(ctx)) != 0 {
+			tb.Fatal("a bounce for an unknown message queued a sync")
+		}
+
+		handleOnboardingBrevoWebhook(ctx, &BrevoWebhookArgs{Event: "hard_bounce", MessageId: onboardingMessageId})
+		requireQueuedMirror(tb, ctx, userId)
+		expectReason(networkId, onboarding.ExitBounced)
+
+		// a complaint on the other program keeps the bounce and joins the queued sync
+		handleReengagementBrevoWebhook(ctx, &BrevoWebhookArgs{Event: "spam", MessageId: reengagementMessageId})
+		requireQueuedMirror(tb, ctx, userId)
+		expectReason(networkId, onboarding.ExitBounced)
+		if syncs := pendingProductUpdatesSyncs(ctx); len(syncs) != 1 {
+			tb.Fatal("the second suppression queued a second sync", len(syncs))
+		}
+
+		applyReengagementExit(ctx, &model.NetworkReengagement{NetworkId: exitNetworkId, Stream: reengagement.StreamLapsed},
+			reengagement.ExitSunset, reengagement.SuppressSunset, "", false, now)
+		requireQueuedMirror(tb, ctx, exitUserId)
+		expectReason(exitNetworkId, reengagement.SuppressSunset)
+		if syncs := pendingProductUpdatesSyncs(ctx); len(syncs) != 2 {
+			tb.Fatal("expected one queued sync per suppressed network", len(syncs))
+		}
+	})
+}
+
+// A sync that names no user, in its args or its session, has nothing to sync
+// and finishes without calling Brevo.
+func TestSyncProductUpdatesForUserWithoutUser(t *testing.T) {
+	newBrevoProtocolTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("a sync without a user called Brevo", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	clientSession := session.NewLocalClientSession(t.Context(), "0.0.0.0:0", nil)
+	defer clientSession.Cancel()
+	if result, err := SyncProductUpdatesForUser(&SyncProductUpdatesForUserArgs{}, clientSession); err != nil || result == nil {
+		t.Fatal("a sync without a user failed", result, err)
+	}
+}
+
+// The backfill queues the mirror for every suppressed network that still
+// exists, across pages, and calls Brevo for nothing itself; repeating it
+// queues nothing new.
+func TestMirrorNetworkMarketingSuppressionsQueuesEverySuppressedNetwork(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(tb testing.TB) {
+		ctx := tb.Context()
+		newBrevoProtocolTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Error("the backfill called Brevo instead of queueing the sync", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusBadRequest)
+		}))
+		now := server.NowUtc()
+		suppressedUserIds := []server.Id{}
+		for i, reason := range []string{onboarding.ExitBounced, onboarding.ExitComplained, reengagement.SuppressSunset} {
+			networkId, userId := server.NewId(), server.NewId()
+			model.Testing_CreateNetwork(ctx, networkId, "synthetic-backfill-"+strconv.Itoa(i), userId)
+			// recorded before the mirror existed: no sync queued
+			server.Tx(ctx, func(tx server.PgTx) {
+				model.SuppressNetworkMarketingInTx(tx, ctx, networkId, reason, now)
+			})
+			suppressedUserIds = append(suppressedUserIds, userId)
+		}
+		subscribedNetworkId := server.NewId()
+		model.Testing_CreateNetwork(ctx, subscribedNetworkId, "synthetic-backfill-subscribed", server.NewId())
+		model.AccountPreferencesSetForNetwork(ctx, subscribedNetworkId, true)
+		// a suppression a removed network left behind
+		server.Tx(ctx, func(tx server.PgTx) {
+			model.SuppressNetworkMarketingInTx(tx, ctx, server.NewId(), onboarding.ExitBounced, now)
+		})
+		if len(pendingProductUpdatesSyncs(ctx)) != 0 {
+			tb.Fatal("a sync was queued before the backfill")
+		}
+
+		for range 2 {
+			if queued := mirrorNetworkMarketingSuppressions(ctx, 2); queued != len(suppressedUserIds) {
+				tb.Fatal("the backfill queued", queued, "want", len(suppressedUserIds))
+			}
+			for _, userId := range suppressedUserIds {
+				requireQueuedMirror(tb, ctx, userId)
+			}
+			if syncs := pendingProductUpdatesSyncs(ctx); len(syncs) != len(suppressedUserIds) {
+				tb.Fatal("expected one queued sync per suppressed network", len(syncs))
+			}
+		}
+	})
 }

@@ -18,7 +18,10 @@
 //     pending or held (server.ContractPaymentRetentionHoldSql), is a legacy
 //     obligation the payout planner can still select, or the evidence a
 //     recovery reads, and keeps its contract. So does a sweep staged in a
-//     payment plan whose assignment is pending;
+//     payment plan whose assignment is pending, and one whose payment
+//     completed under attribution review: completePaymentInTx queues no
+//     retention stamping for it, so the payment completion path keeps its
+//     contracts until the straggler horizon, and so does this reaper;
 //   - no unpaid sweep of it is traffic of an operator block whose points can
 //     still be awarded (OperatorBlockPointsPendingWindows). An award reads a
 //     block's unpaid sweeps by sweep time, the settlement, which can come long
@@ -29,16 +32,19 @@
 // sweep the planner can select, so it never races a plan; contracts kept by it
 // age out through the payment completion path or the straggler horizon. The
 // block points rule keeps a contract only until its block is awarded or its
-// reliability passes retention, at most ClientReliabilityRetention after the
-// block opened.
+// reliability passes retention for every award that can still be running, at
+// most ClientReliabilityRetention and OperatorBlockPointsMaxTime and an hour
+// after the block opened.
 //
 // Each contract goes in one transaction with its close reports, closes,
 // escrows, sweeps and extender parties. The usage archive trigger copies a
 // credit-bearing contract's proof into st_provider_usage_archive in the same
 // statement, so the subnet usage readers see it either live or archived, never
-// both and never neither. Close evidence keeps its own 91-day retention
-// (server.RemoveExpiredCloseEvidence), which takes evidence whose contract is
-// gone, so below 91 days a deleted contract's evidence outlives it until then.
+// both and never neither. Close evidence is not deleted here: while the mode
+// is on, its own retention (server.RemoveExpiredCloseEvidence) follows this
+// horizon, down to its guard's 35 days, and takes the evidence of a resolved
+// or deleted contract once it is as old, whether or not these keep rules keep
+// the contract, at the pace of its own brake.
 //
 // A pass walks transfer_contract's primary key from a cursor toward the
 // horizon. Each batch takes the next ids from an index-only range of that key,
@@ -126,11 +132,16 @@ func (self ContractHorizonMode) String() string {
 }
 
 // The shortest horizon the reaper applies, whatever its settings or control
-// say (owner, 2026-11-01: 35 days). It is the reaper's alone:
-// server.ContractRetention, which the partition drop, close evidence and key
-// history retention and the sn-reconcile floor share, stays 91 days. What
-// keeps a contract the payout planner, operator block points or a recovery can
-// still read is the reaper's row checks, never its horizon. The transfer audit
+// say (owner, 2026-11-01: 35 days). It is the reaper's: server.ContractRetention,
+// which the partition drop and the sn-reconcile floor share, stays 91 days.
+// Key history and close evidence retention follow the reaper's horizon while
+// its mode is on: key history (RemoveGoneStClientKeyHistory) over its guard's
+// 30-day floor (server.ClientKeyHistoryRetentionFloor), close evidence
+// (server.RemoveExpiredCloseEvidence) over its guard's 35-day floor
+// (server.CloseEvidenceRetentionFloor), each with its own brake; both keep 91
+// days in a dry run, with the mode off, or without the control. What keeps a
+// contract the payout planner, operator block points or a recovery can still
+// read is the reaper's row checks, never its horizon. The transfer audit
 // rollup never replaces a day the floor can reach
 // (TransferAuditRollupFirstDay).
 //
@@ -228,7 +239,13 @@ const contractHorizonControlKey = "{contract_horizon}control"
 //   - `horizonDays`: the horizon in whole days, between ContractHorizonFloor
 //     (35) and the code's horizon (91); a value past either end counts as that
 //     end. Below 91 days users see less history in the provider stats and
-//     /transfer/stats (ContractHorizonFloor).
+//     /transfer/stats (ContractHorizonFloor). It moves more than the reaper:
+//     while the mode is on, close evidence and key history retention follow
+//     it (ContractHorizonFloor). At 35 the close evidence deletes permanently
+//     remove about a billion rows, the evidence accepted from 2026-10-06 on,
+//     whatever the reaper's keep rules; their own brake
+//     (server.RemoveExpiredCloseEvidence) stops the row deletes, and this mode
+//     alone the weekly drops once the evidence is partitioned.
 //
 // A field that does not parse narrows as far as it can: mode off, rate zero
 // (which is off), the minimum batch size, the code's horizon.
@@ -400,6 +417,9 @@ const (
 	// an unpaid sweep is traffic of an operator block whose points can still
 	// be awarded
 	contractHorizonProtectedBlockPoints = "block_points"
+	// a sweep's payment completed under attribution review, which stamps no
+	// retention on its contracts
+	contractHorizonProtectedPaymentReview = "payment_review"
 )
 
 var contractHorizonProtectedReasons = []string{
@@ -414,6 +434,7 @@ var contractHorizonProtectedReasons = []string{
 	contractHorizonProtectedUnpaidLegacy,
 	contractHorizonProtectedPlanStaged,
 	contractHorizonProtectedBlockPoints,
+	contractHorizonProtectedPaymentReview,
 }
 
 // The tables a deleted contract leaves, dependents first.
@@ -570,6 +591,11 @@ func init() {
 // Observes each committed batch, after its commit. Nil in production; tests
 // use it to stop a run at an exact batch boundary.
 var contractHorizonBatchCommitted func(batch int, last server.Id)
+
+// Observes each batch that read contracts, inside its transaction, once its
+// settings are in place and before its checks. Nil in production; tests read
+// the batch's settings through it.
+var contractHorizonBatchObserved func(ctx context.Context, tx server.PgTx)
 
 // One run: batches from cursor toward the horizon of now, until the horizon,
 // the budget, the mode or ctx stops it. next is where the following run
@@ -929,7 +955,8 @@ const contractHorizonSweepLockSql = `
 
 // The checks that read other tables, in a snapshot taken after the locks:
 // every escrow settled, every sweep discharged, none staged in a pending plan,
-// none unpaid in the window of an operator block still to be awarded. Each
+// none unpaid in the window of an operator block still to be awarded, none
+// paid by a payment completed under attribution review. Each
 // reads the candidates' rows together, by their ids. A NULL flag counts
 // against deletion. $1 the candidate contract ids, $2 the first contract id
 // past the earning cutoff (paymentPlanUnpaidContractIdBound), NULL without a
@@ -948,7 +975,8 @@ var contractHorizonHoldSql = `
 			bool_or(account_payment.payment_id IS NOT NULL AND (` + server.ContractPaymentRetentionHoldSql + `) IS TRUE) AS payment_hold,
 			bool_or(transfer_escrow_sweep.payment_id IS NOT NULL AND account_payment.completed IS NOT TRUE) AS payment_incomplete,
 			bool_or(account_payment.completed IS TRUE AND (account_payment.complete_time IS NULL OR $3 <= account_payment.complete_time)) AS payment_recent,
-			bool_or(transfer_escrow_sweep.payment_id IS NULL AND ($2::uuid IS NULL OR transfer_escrow_sweep.contract_id < $2::uuid)) AS unpaid_legacy
+			bool_or(transfer_escrow_sweep.payment_id IS NULL AND ($2::uuid IS NULL OR transfer_escrow_sweep.contract_id < $2::uuid)) AS unpaid_legacy,
+			bool_or(account_payment.completed IS TRUE AND account_payment.attribution_review_required IS TRUE) AS payment_review
 		FROM transfer_escrow_sweep
 		LEFT JOIN account_payment ON
 			account_payment.payment_id = transfer_escrow_sweep.payment_id
@@ -980,7 +1008,8 @@ var contractHorizonHoldSql = `
 			coalesce(sweep.payment_recent, false) AS payment_recent,
 			coalesce(sweep.unpaid_legacy, false) AS unpaid_legacy,
 			staged.contract_id IS NOT NULL AS plan_staged,
-			block_points.contract_id IS NOT NULL AS block_points
+			block_points.contract_id IS NOT NULL AS block_points,
+			coalesce(sweep.payment_review, false) AS payment_review
 		FROM unnest($1::uuid[]) AS candidate(contract_id)
 		LEFT JOIN unsettled ON unsettled.contract_id = candidate.contract_id
 		LEFT JOIN sweep ON sweep.contract_id = candidate.contract_id
@@ -995,9 +1024,10 @@ var contractHorizonHoldSql = `
 		(SELECT count(*) FROM classified WHERE NOT (unsettled OR payment_hold OR payment_incomplete OR payment_recent) AND unpaid_legacy),
 		(SELECT count(*) FROM classified WHERE NOT (unsettled OR payment_hold OR payment_incomplete OR payment_recent OR unpaid_legacy) AND plan_staged),
 		(SELECT count(*) FROM classified WHERE NOT (unsettled OR payment_hold OR payment_incomplete OR payment_recent OR unpaid_legacy OR plan_staged) AND block_points),
+		(SELECT count(*) FROM classified WHERE NOT (unsettled OR payment_hold OR payment_incomplete OR payment_recent OR unpaid_legacy OR plan_staged OR block_points) AND payment_review),
 		ARRAY(
 			SELECT contract_id FROM classified
-			WHERE NOT (unsettled OR payment_hold OR payment_incomplete OR payment_recent OR unpaid_legacy OR plan_staged OR block_points)
+			WHERE NOT (unsettled OR payment_hold OR payment_incomplete OR payment_recent OR unpaid_legacy OR plan_staged OR block_points OR payment_review)
 			ORDER BY contract_id
 		)
 `
@@ -1058,6 +1088,13 @@ func (self *contractHorizonReaper) removeBatch(
 				deleted:   map[string]int64{},
 			}
 			server.RaisePgResult(tx.Exec(ctx, fmt.Sprintf(`SET LOCAL statement_timeout = %d`, self.settings.StatementTimeout.Milliseconds())))
+			// The batch's statements are short, but the misestimated escrow
+			// and close counts (on Main, 2026-11-02, n_distinct 185,552 for
+			// transfer_escrow.contract_id over 4.96 billion rows, about 1.6
+			// escrows per contract in truth) cost them past jit_above_cost, so
+			// each compiled: 89% of the hold check's time, about a second a
+			// batch, and 70% of the dependents delete's (pg_stat_statements).
+			server.RaisePgResult(tx.Exec(ctx, `SET LOCAL jit = off`))
 			// plan each statement for its actual ids
 			server.RaisePgResult(tx.Exec(ctx, `SET LOCAL plan_cache_mode = force_custom_plan`))
 
@@ -1070,6 +1107,9 @@ func (self *contractHorizonReaper) removeBatch(
 			batch.lastId = windowIds[len(windowIds)-1]
 			for _, setting := range contractHorizonBitmapSettings {
 				server.RaisePgResult(tx.Exec(ctx, setting))
+			}
+			if contractHorizonBatchObserved != nil {
+				contractHorizonBatchObserved(ctx, tx)
 			}
 
 			scanSql := contractHorizonScanLockSql
@@ -1104,7 +1144,7 @@ func (self *contractHorizonReaper) removeBatch(
 				return
 			}
 
-			var unsettledCount, paymentHoldCount, paymentIncompleteCount, paymentRecentCount, unpaidLegacyCount, planStagedCount, blockPointsCount int64
+			var unsettledCount, paymentHoldCount, paymentIncompleteCount, paymentRecentCount, unpaidLegacyCount, planStagedCount, blockPointsCount, paymentReviewCount int64
 			server.Raise(tx.QueryRow(
 				ctx,
 				contractHorizonHoldSql,
@@ -1121,6 +1161,7 @@ func (self *contractHorizonReaper) removeBatch(
 				&unpaidLegacyCount,
 				&planStagedCount,
 				&blockPointsCount,
+				&paymentReviewCount,
 				&batch.eligibleIds,
 			))
 			batch.protected[contractHorizonProtectedUnsettled] = unsettledCount
@@ -1130,6 +1171,7 @@ func (self *contractHorizonReaper) removeBatch(
 			batch.protected[contractHorizonProtectedUnpaidLegacy] = unpaidLegacyCount
 			batch.protected[contractHorizonProtectedPlanStaged] = planStagedCount
 			batch.protected[contractHorizonProtectedBlockPoints] = blockPointsCount
+			batch.protected[contractHorizonProtectedPaymentReview] = paymentReviewCount
 			if dryRun || len(batch.eligibleIds) == 0 {
 				return
 			}

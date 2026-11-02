@@ -11,6 +11,7 @@ import (
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/onboarding"
+	"github.com/urnetwork/server/reengagement"
 	"github.com/urnetwork/server/session"
 	"github.com/urnetwork/server/task"
 	"github.com/urnetwork/server/taskworker/work"
@@ -90,6 +91,12 @@ func initTaskSchedule(ctx context.Context) {
 		controller.ScheduleAppleOfferCodeTopUp(clientSession, tx, server.NowUtc().Add(1*time.Hour))
 		controller.ScheduleOnboardingResultsRollup(clientSession, tx, onboarding.NextRollupAt(server.NowUtc()))
 		controller.ScheduleOnboardingEmailTrackerSync(clientSession, tx, server.NowUtc())
+		// the re-engagement scan (02:30 UTC; inert until reengagement.yml enables it)
+		controller.ScheduleReengagementScan(clientSession, tx, controller.NextReengagementScanAt(server.NowUtc()))
+		// the re-engagement results rollup (02:45 UTC, after the scan)
+		controller.ScheduleReengagementResultsRollup(clientSession, tx, reengagement.NextResultsRollupAt(server.NowUtc()))
+		// the service reminders (03:00 UTC; each kind off until reengagement.yml turns it on)
+		controller.ScheduleServiceReminders(clientSession, tx, controller.NextServiceRemindersAt(server.NowUtc()))
 		controller.ScheduleSubscriptionMetricsSync(clientSession, tx, server.NowUtc())
 		controller.ScheduleDeliverAccountMessages(clientSession, tx)
 		work.SchedulePayout(clientSession, tx)
@@ -128,6 +135,9 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleRemoveCompletedContracts(clientSession, tx)
 		// idle until the runtime control `{contract_horizon}control` sets a mode
 		work.ScheduleRemoveContractsPastHorizon(clientSession, tx)
+		// the prober shard generations past their retention; idle until the
+		// runtime control `{prober_retention}control` sets a mode
+		work.ScheduleRemoveProberShardGenerations(clientSession, tx)
 		work.ScheduleReconcileNetEscrow(clientSession, tx)
 		work.ScheduleDbMaintenance(clientSession, tx, 0)
 		// seeded only when its chain has no task (PARTITION-MAINTENANCE-PLAN.md A4)
@@ -150,10 +160,17 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleRollupProviderEgressTallies(clientSession, tx)
 		work.ScheduleExtenderProbe(clientSession, tx)
 		work.ScheduleExtenderPublish(clientSession, tx)
+		// the public seed bundle and its mirror check
+		// (connect/EXTENDER-UPDATE2.md §2); idle until extender.yml enables
+		// the seed block
+		work.ScheduleExtenderSeed(clientSession, tx)
 		// lag.dev measurement certificates and names (lag.dev/PLAN.md C5-C9);
 		// both idle until extender.yml enables the measurement block
 		work.ScheduleExtenderMeasurementIssue(clientSession, tx)
 		work.ScheduleExtenderMeasurementDns(clientSession, tx)
+		// probes of the measurement api, which the lag.dev sample reads
+		// (lag.dev/PLAN.md A4); idle likewise
+		work.ScheduleExtenderMeasurementProbe(clientSession, tx)
 		work.ScheduleRemoveOldExtenderLatencies(clientSession, tx)
 		work.ScheduleRemoveExpiredPings(clientSession, tx)
 		work.ScheduleDeriveLocations(clientSession, tx)
@@ -371,6 +388,8 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.SweepOrphanNetworkClientDataPost,
 		),
 		model.NewLegacyProviderTotalsTaskTarget(),
+		// armed by work.ScheduleSettlementAccountingTasks
+		model.NewLegacyProviderTotalsDrainTaskTarget(),
 		model.NewLegacyNetEscrowMirrorTaskTarget(),
 		model.NewQuarantineReservationReleaseTaskTarget(),
 		model.NewClosePayerDueContractsTaskTarget(),
@@ -434,13 +453,14 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.RemoveLocationLookupResults,
 			work.RemoveLocationLookupResultsPost,
 		),
-		task.NewTaskTargetWithPost(
-			work.RemoveCompletedContracts,
-			work.RemoveCompletedContractsPost,
-		),
+		work.NewRemoveCompletedContractsTaskTarget(),
 		task.NewTaskTargetWithPost(
 			work.RemoveContractsPastHorizon,
 			work.RemoveContractsPastHorizonPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.RemoveProberShardGenerations,
+			work.RemoveProberShardGenerationsPost,
 		),
 		work.NewTransferDebitTaskTarget(),
 		task.NewTaskTargetWithPost(
@@ -505,6 +525,11 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.ExtenderPublish,
 			work.ExtenderPublishPost,
 		),
+		// connect/EXTENDER-UPDATE2.md §2
+		task.NewTaskTargetWithPost(
+			work.ExtenderSeed,
+			work.ExtenderSeedPost,
+		),
 		// lag.dev/PLAN.md C5-C9
 		task.NewTaskTargetWithPost(
 			work.ExtenderMeasurementIssue,
@@ -514,6 +539,12 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.ExtenderMeasurementDns,
 			work.ExtenderMeasurementDnsPost,
 		),
+		// lag.dev/PLAN.md A4
+		task.NewTaskTargetWithPost(
+			work.ExtenderMeasurementProbe,
+			work.ExtenderMeasurementProbePost,
+		),
+		task.NewTaskTarget(work.ExtenderMeasurementRecheck),
 		task.NewTaskTargetWithPost(
 			work.RemoveOldExtenderLatencies,
 			work.RemoveOldExtenderLatenciesPost,
@@ -629,6 +660,27 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			controller.OnboardingEmailTrackerSync,
 			controller.OnboardingEmailTrackerSyncPost,
+		),
+		// the re-engagement program: the daily scan that opens episodes, and
+		// one task per network, episode and step
+		task.NewTaskTargetWithPost(
+			controller.ReengagementScan,
+			controller.ReengagementScanPost,
+		),
+		task.NewTaskTargetWithPost(
+			controller.ReengagementStep,
+			controller.ReengagementStepPost,
+		),
+		// the nightly re-engagement results rollup (02:45 UTC):
+		// reengagement_results_daily over the last rollup_days cohort days
+		task.NewTaskTargetWithPost(
+			controller.ReengagementResultsRollup,
+			controller.ReengagementResultsRollupPost,
+		),
+		// crypto Pro and store trials about to end, through the account mailer
+		task.NewTaskTargetWithPost(
+			controller.ServiceReminders,
+			controller.ServiceRemindersPost,
 		),
 		task.NewTaskTargetWithPost(
 			controller.SubscriptionMetricsSync,

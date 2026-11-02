@@ -15,6 +15,7 @@ import (
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/onboarding"
+	"github.com/urnetwork/server/reengagement"
 	"github.com/urnetwork/server/session"
 )
 
@@ -344,6 +345,7 @@ func DecoratePlan(result *SubscriptionBalanceResult, storefrontCountry string, c
 	tier := ResolvePriceTier(clientSession, storefrontCountry)
 	result.PriceTier = tier.Result()
 	result.OnboardingOffer = onboardingOfferResult(model.GetOnboardingOffer(clientSession.Ctx, networkId), tier.Tier, now)
+	result.WinbackOffer = winbackPlanOfferResult(model.GetActiveWinbackOffer(clientSession.Ctx, networkId, now), tier.Tier, now)
 	result.Experiments = model.Onboarding().AssignExperiments(networkId, now)
 	// the crypto methods ride on the plan response every app already reads
 	decorateCryptoPay(result, clientSession)
@@ -652,13 +654,18 @@ type OnboardingClickResult struct {
 	// (expired ones too), so the landing page can still route the user
 	Step        string `json:"step,omitempty"`
 	Destination string `json:"destination,omitempty"`
+	// OpenUrl, when set, is where the landing page opens instead of the app: a
+	// W1 click by a network whose win-back offer is the App Store's opens
+	// Apple's direct link to it (https://apps.apple.com/win-back/<Apple ID>).
+	OpenUrl string `json:"open_url,omitempty"`
 	// invalid | expired
 	Error string `json:"error,omitempty"`
 }
 
 // OnboardingClick records a landing-page click (the campaign's attribution event)
 // and tells the page where in the app to send the user. No auth: the token is the
-// credential, and the response carries nothing about the network.
+// credential, and the response carries nothing about the network beyond where
+// its email's button leads (Apple's win-back link, for a W1 that named it).
 func OnboardingClick(
 	args *OnboardingClickArgs,
 	clientSession *session.ClientSession,
@@ -668,27 +675,41 @@ func OnboardingClick(
 	}
 	now := server.NowUtc()
 	claims, err := onboarding.Parse(args.Token, now)
+	// The landing page routes by the returned step, which must be a landing
+	// slug: onboarding tokens carry the template name (e4b_offer), and the page
+	// sent every such click to Connect (REVIEW.md finding 14).
 	if err == onboarding.ErrTokenExpired && claims != nil {
+		slug := onboarding.LandingSlug(claims.Step)
 		return &OnboardingClickResult{
 			Ok:          false,
-			Step:        claims.Step,
-			Destination: onboarding.Destination(claims.Step),
+			Step:        slug,
+			Destination: onboarding.Destination(slug),
 			Error:       "expired",
 		}, nil
 	}
 	if err != nil || claims == nil {
 		return &OnboardingClickResult{Ok: false, Error: "invalid"}, nil
 	}
-	props := map[string]any{"step": claims.Step}
-	if onboarding.IsFlowStep(claims.FlowStep) {
-		props["flow_step"] = claims.FlowStep
-	}
-	WriteServerEvent(clientSession, claims.NetworkId, model.EventLandingClicked, props, "")
-	return &OnboardingClickResult{
+	slug := onboarding.LandingSlug(claims.Step)
+	result := &OnboardingClickResult{
 		Ok:          true,
-		Step:        claims.Step,
-		Destination: onboarding.Destination(claims.Step),
-	}, nil
+		Step:        slug,
+		Destination: onboarding.Destination(slug),
+	}
+	if onboarding.IsReengagementFlowStep(claims.FlowStep) {
+		recordReengagementClick(clientSession, claims, slug)
+		if slug == onboarding.SlugWinback {
+			// the email named the App Store's offer: its link, not our plan screen
+			result.OpenUrl = winbackLandingOpenUrl(clientSession.Ctx, claims.NetworkId, now)
+		}
+	} else {
+		props := map[string]any{"step": claims.Step}
+		if onboarding.IsFlowStep(claims.FlowStep) {
+			props["flow_step"] = claims.FlowStep
+		}
+		WriteServerEvent(clientSession, claims.NetworkId, model.EventLandingClicked, props, "")
+	}
+	return result, nil
 }
 
 type OnboardingFeedbackTokenResult struct {
@@ -722,7 +743,7 @@ func OnboardingFeedbackToken(
 	}
 	result := &OnboardingFeedbackTokenResult{
 		Ok:     true,
-		Step:   claims.Step,
+		Step:   onboarding.LandingSlug(claims.Step),
 		Rating: claims.Rating,
 		Reason: claims.Reason,
 	}
@@ -737,6 +758,38 @@ func OnboardingFeedbackToken(
 	}
 	if result.Rating < 1 || 5 < result.Rating {
 		result.Rating = 0
+	}
+
+	if onboarding.IsReengagementFlowStep(claims.FlowStep) {
+		// an R2 answer: recorded and routed now; the app's feedback screen
+		// opens with the closest of its own four reasons
+		if reengagement.IsR2Reason(result.Reason) {
+			recordReengagementAnswer(clientSession, claims, result.Reason)
+			result.Reason = reengagement.AppReason(result.Reason)
+		} else {
+			result.Reason = ""
+		}
+		result.Step = onboarding.SlugFeedback
+		return result, nil
+	}
+
+	// The onboarding feedback email: the tap is the answer ("one tap is
+	// enough"), recorded here so it counts even when the reader never sends
+	// the in-app form. Older links carry the reason as 1..4.
+	result.Reason = onboarding.FeedbackReasonCode(result.Reason)
+	props := map[string]any{}
+	if 0 < result.Rating {
+		props["rating"] = result.Rating
+	}
+	switch result.Reason {
+	case onboarding.ReasonNotNeeded, onboarding.ReasonNotWorking, onboarding.ReasonTrust, onboarding.ReasonOther:
+		props["reason"] = result.Reason
+	}
+	if onboarding.IsFlowStep(claims.FlowStep) {
+		props["flow_step"] = claims.FlowStep
+	}
+	if props["rating"] != nil || props["reason"] != nil {
+		WriteServerEvent(clientSession, claims.NetworkId, model.EventFeedbackTapped, props, "")
 	}
 	return result, nil
 }
