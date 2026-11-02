@@ -100,7 +100,7 @@ func TestMigrationsContractPartitionedCatalog(t *testing.T) {
 		// only the contract tables' parent indexes lose ONLY
 		server.Db(ctx, func(conn server.PgConn) {
 			for index, want := range map[string]string{
-				"transfer_contract_stream_id":                 "CREATE INDEX transfer_contract_stream_id ON public.transfer_contract USING btree (stream_id) WHERE (stream_id IS NOT NULL)",
+				"transfer_contract_closed_usage":              "CREATE INDEX transfer_contract_closed_usage ON public.transfer_contract USING btree (close_time, contract_id) WHERE (outcome IS NOT NULL)",
 				"contract_close_report_pkey":                  "CREATE UNIQUE INDEX contract_close_report_pkey ON public.contract_close_report USING btree (contract_id, party, report_id)",
 				"network_ping_target_extender_id_create_time": "CREATE INDEX network_ping_target_extender_id_create_time ON ONLY public.network_ping USING btree (target_extender_id, create_time)",
 			} {
@@ -127,8 +127,8 @@ func TestMigrationsContractPartitionedCatalog(t *testing.T) {
 		}{
 			{
 				name:     "parent index dropped",
-				sql:      `DROP INDEX transfer_contract_stream_id`,
-				artifact: "transfer_contract_stream_id@v629",
+				sql:      `DROP INDEX transfer_contract_closed_usage`,
+				artifact: "transfer_contract_closed_usage lookup index@v743",
 			},
 			{
 				name:     "parent index reshaped",
