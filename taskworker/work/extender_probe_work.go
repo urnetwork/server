@@ -178,7 +178,13 @@ func ExtenderProbe(
 			)
 			defer probeCancel()
 
+			// TEMPORARY (ExtenderProbeFailureDiagnostics): the same dial, watched,
+			// and how a failure failed, at most once an hour for each address
+			probeCtx, probeSocket := withExtenderProbeSocket(probeCtx)
 			probeErr := probeExtenderAddress(probeCtx, target, serverName, destinationHost)
+			if probeErr != nil && ExtenderProbeFailureDiagnostics {
+				logExtenderProbeFailure(clientSession.Ctx, target, serverName, probeSocket.observed(probeErr), server.NowUtc())
+			}
 			outcome := model.RecordNetworkExtenderProbeResult(
 				clientSession.Ctx,
 				target.ExtenderId,
