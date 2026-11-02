@@ -209,7 +209,7 @@ func (self *testExtenderSeedOperator) stored(t *testing.T, now time.Time) (*conn
 }
 
 // Every property a stored bundle must have, whatever the source data held.
-func assertExtenderSeedBundleInvariants(t *testing.T, bundle *connect.ExtenderSeedBundle, artifact []byte, now time.Time) {
+func assertExtenderSeedBundleInvariants(t testing.TB, bundle *connect.ExtenderSeedBundle, artifact []byte, now time.Time) {
 	t.Helper()
 	if connect.ExtenderSeedMaxEnvelopeByteCount < len(artifact) {
 		t.Fatalf("the artifact is %d bytes", len(artifact))
