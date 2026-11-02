@@ -476,7 +476,8 @@ func extenderSeedPublicAddress(ip netip.Addr) bool {
 }
 
 // The check of one signed record before it enters a bundle, whatever signed
-// it: open tier with no canary channel, of the bundle's host, issued no later
+// it: open tier with no canary channel and no capability requirement, of the
+// bundle's host, issued no later
 // than the bundle and expiring no earlier, listing only public addresses no
 // other record lists. Returns the record's addresses.
 func extenderSeedRecordPublishable(
@@ -494,6 +495,12 @@ func extenderSeedRecordPublishable(
 		return nil, false
 	}
 	if !connect.ExtenderRecordOpen(body) {
+		return nil, false
+	}
+	// A seed is for every client, and a client too old to read a capability
+	// requirement would dial the record anyway and fail. Issuance keeps
+	// requirements off open records; this keeps the rule whatever signed it.
+	if len(body.RequiredCapabilities) != 0 {
 		return nil, false
 	}
 	if connect.NormalizeExtenderNetworkHost(body.NetworkHost) != host || len(body.PublicKey) != ed25519.PublicKeySize {

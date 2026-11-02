@@ -222,6 +222,9 @@ func assertExtenderSeedBundleInvariants(t *testing.T, bundle *connect.ExtenderSe
 		if !connect.ExtenderRecordOpen(record.Body) {
 			t.Fatalf("the bundle carries a gated or channel-restricted record")
 		}
+		if len(record.Body.RequiredCapabilities) != 0 {
+			t.Fatalf("the bundle carries a record requiring a capability")
+		}
 		if uint64(now.UnixMilli()) >= record.Body.ExpireTimeMs {
 			t.Fatalf("the bundle carries an expired record")
 		}
@@ -303,6 +306,50 @@ func TestExtenderSeedPublisherNeverPublishesGatedOrChannelRestrictedRecords(t *t
 			}
 		}
 		now = now.Add(controller.ExtenderSeedRefreshTimeout)
+	}
+}
+
+// A record that requires a capability never enters a bundle, whatever signed it:
+// a seed is for every client, and one too old to read the requirement would dial
+// the record anyway and fail.
+func TestExtenderSeedPublisherNeverPublishesARecordRequiringACapability(t *testing.T) {
+	operator := newTestExtenderSeedOperator(t)
+	fleet := newTestExtenderSeedFleet()
+	for range 12 {
+		fleet.add(t, connect.ExtenderDirectoryTierOpen, "", 4, 6)
+	}
+	publisher := operator.publisher(t, fleet)
+	signRecord := publisher.signRecord
+	requiring := map[string]bool{}
+	signed := 0
+	publisher.signRecord = func(extender *model.NetworkExtender, addresses []*model.NetworkExtenderAddress, issueTime time.Time, lifetime time.Duration) (*protocol.ExtenderRecord, error) {
+		record, err := signRecord(extender, addresses, issueTime, lifetime)
+		signed += 1
+		if err != nil || signed%2 == 0 {
+			return record, err
+		}
+		requiring[hex.EncodeToString(extender.PublicKey)] = true
+		body := &protocol.ExtenderRecordBody{}
+		if err := proto.Unmarshal(record.Body, body); err != nil {
+			return nil, err
+		}
+		body.RequiredCapabilities = []string{connect.ExtenderCapabilityTcpCamouflageV1}
+		return connect.SignExtenderRecord(operator.rootPrivateKey, body)
+	}
+
+	now := testExtenderSeedEpochStart.Add(time.Hour)
+	if result := publisher.publish(context.Background(), now); result.outcome != extenderSeedOutcomePublished {
+		t.Fatalf("first pass: %s", result.outcome)
+	}
+	bundle, artifact := operator.stored(t, now)
+	assertExtenderSeedBundleInvariants(t, bundle, artifact, now)
+	if len(bundle.Records) == 0 || len(requiring) == 0 {
+		t.Fatalf("%d records published, %d passed over", len(bundle.Records), len(requiring))
+	}
+	for _, record := range bundle.Records {
+		if requiring[hex.EncodeToString(record.Body.PublicKey)] || len(record.Body.RequiredCapabilities) != 0 {
+			t.Fatalf("a record requiring a capability was published")
+		}
 	}
 }
 
