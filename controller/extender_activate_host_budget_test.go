@@ -263,6 +263,102 @@ func TestExtenderActivateRestartsAProvenFleetAtOnce(t *testing.T) {
 	})
 }
 
+// A host the uptime probes revoked still counts as proven until 7 days after
+// its last pass (connect#230): a fleet that went down is the fleet whose restart
+// must not queue. Six failed probes leave its address inactive and its extender
+// revoked (model.RecordNetworkExtenderProbeResult), and neither touches the
+// history of its passes or the address it passed from, which are what a proven
+// host is read from. Here 10 hosts that passed 6 days ago and were revoked 5 days
+// ago raise the account's limit to 60 + 6 × 10 = 120 to the attempt, one that
+// last passed 8 days ago does not, and a revoked host's post from its own
+// address is not held off by that address's spent budget.
+func TestExtenderActivateCountsHostsTheUptimeProbesRevoked(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		installTestExtenderConfig(t, nil)
+
+		settings := DefaultExtenderActivateSettings()
+		service := newExtenderActivateService(settings)
+		service.testProbes = testFakeExtenderProbes(nil)
+
+		account := newTestExtenderAccount(ctx)
+		const hostCount = 10
+		hosts := []*testExtenderHost{}
+		extenderIds := []server.Id{}
+		for i := range hostCount {
+			host := account.newHost(t, ctx)
+			result := testActivateHost(t, ctx, service, host, testExtenderFleetIp(t, i, 4))
+			if !result.Activated || result.ExtenderId == nil {
+				t.Fatalf("host %d did not activate: %q", i+1, result.Error)
+			}
+			hosts = append(hosts, host)
+			extenderIds = append(extenderIds, *result.ExtenderId)
+		}
+		shiftTestExtenderActivationsBack(t, ctx, 6*24*time.Hour)
+
+		probeTime := server.NowUtc().Add(-5 * 24 * time.Hour)
+		for i, extenderId := range extenderIds {
+			var outcome *model.NetworkExtenderProbeOutcome
+			for range 6 {
+				outcome = model.RecordNetworkExtenderProbeResult(
+					ctx,
+					extenderId,
+					4,
+					false,
+					probeTime,
+					6,
+					func(extender *model.NetworkExtender, issueTime time.Time) ([]byte, error) {
+						return []byte("revocation"), nil
+					},
+				)
+			}
+			if !outcome.AddressDeactivated || !outcome.ExtenderRevoked {
+				t.Fatalf("the probes did not revoke host %d: %+v", i+1, outcome)
+			}
+		}
+		// went down too, but its last pass has left the 7 days
+		seedTestProvenExtenderHost(t, ctx, account.newHost(t, ctx), map[int]string{
+			4: testExtenderFleetIp(t, hostCount, 4),
+		}, server.NowUtc().Add(-8*24*time.Hour))
+
+		// the account has spent its floor, and the first host's address its
+		// budget: the first host comes back all the same
+		const accountAction = model.AccountActionExtenderActivateAccountV4
+		attemptTime := server.NowUtc().Add(-time.Minute)
+		seedTestAccountActionAttempts(t, ctx, account.userId, accountAction, settings.AccountRateLimit, attemptTime)
+		firstIp := testExtenderFleetIp(t, 0, 4)
+		seedTestAccountActionAttempts(
+			t,
+			ctx,
+			settings.addressBudgetId(netip.MustParseAddr(firstIp)),
+			model.AccountActionExtenderActivateAddressV4,
+			settings.AddressRateLimit,
+			attemptTime,
+		)
+		if result := testActivateHost(t, ctx, service, hosts[0], firstIp); !result.Activated {
+			t.Fatalf("a revoked host was refused at its restart past the floor: %q", result.Error)
+		}
+
+		// the floor and the first host's attempt are spent: spend up to one
+		// short of the limit, 119 of 120
+		seedTestAccountActionAttempts(
+			t,
+			ctx,
+			account.userId,
+			accountAction,
+			settings.AccountRateLimitPerProvenHost*hostCount-2,
+			attemptTime,
+		)
+		if result := testActivateHost(t, ctx, service, hosts[1], testExtenderFleetIp(t, 1, 4)); !result.Activated {
+			t.Fatalf("the account's 120th attempt was refused: %q", result.Error)
+		}
+		refused := testActivateHost(t, ctx, service, hosts[2], testExtenderFleetIp(t, 2, 4))
+		if refused.Activated || !strings.Contains(refused.Error, "your account's extenders over IPv4") {
+			t.Fatalf("the account's 121st attempt was not refused by its budget: activated %t, %q", refused.Activated, refused.Error)
+		}
+	})
+}
+
 // A new fleet ramps up an hour at a time (connect#230). In its first hour the
 // account has its floor of 60 an hour: the 61st host is refused, with the wait
 // until the hour's first attempt leaves the window in `retry_after_seconds`.
