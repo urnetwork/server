@@ -181,9 +181,15 @@ func statsRefreshLag(ctx context.Context, now time.Time) {
 	statsLagUploadP50Gauge.replace(upload)
 
 	serving := loadLagServing(ctx, now)
-	stable := lagStableServing(ctx, serving, now)
+	stable, loopsRead := lagStableServing(ctx, serving, now)
 	statsLagExtendersOfferedGauge.set(float64(len(stable.extenders)))
-	statsLagExtendersRestartingGauge.set(float64(len(serving.extenders) - len(stable.extenders)))
+	if loopsRead {
+		statsLagExtendersRestartingGauge.set(float64(len(serving.extenders) - len(stable.extenders)))
+	} else {
+		// the sample offers every serving extender, but how many are in a
+		// loop is not known, which a 0 would claim
+		statsLagExtendersRestartingGauge.unset()
+	}
 
 	stateCounts := model.CountNetworkExtenderMeasurementsByState(ctx)
 	states := make([]statsLabeledValue, 0, len(statsLagMeasurementStates))

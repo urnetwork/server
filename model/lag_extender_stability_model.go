@@ -13,19 +13,24 @@ import (
 // An extender that restarts runs an activation pass at once, one
 // network_extender_activation row per family a few seconds apart. A burst of
 // passes that each activated both families is a restart loop. What else
-// starts a pass is not counted:
+// starts a pass is not counted, or is too sparse to make a burst:
 //
-//   - a pass of one family. Connect re-posts the working family of a host
-//     whose other family is refused on its backoff (10, 20, 40 minutes ...),
-//     and such an extender often holds only that family's address, so its
-//     passes cannot be told from a single-stack extender's; and a key many
-//     clients activate posts from each of them. So an extender with one family
-//     is never in a loop by this rule;
-//   - a pass soon after one of the extender's revocations, which re-activates
-//     it once it reads that its uptime probes withdrew it;
-//   - connect's hourly address check, which starts a full pass when the caller
-//     address flips between families. It starts at most one an hour, so a
-//     burst window shorter than two hours never counts three of those.
+//   - a pass of one family is not counted. Connect re-posts the working family
+//     of a host whose other family is refused on its backoff (10, 20, 40
+//     minutes ...), and such an extender often holds only that family's
+//     address, so its passes cannot be told from a single-stack extender's;
+//     and a key many clients activate posts from each of them. So an extender
+//     with one family is never in a loop by this rule;
+//   - a pass soon after one of the extender's revocations is not counted: it
+//     re-activates the extender once it reads that its uptime probes withdrew
+//     it;
+//   - connect's timers start full passes too. The hourly address check starts
+//     one when the caller address flips between families, and a backoff retry
+//     becomes one once the refused family is accepted, 10, 30 or 70 minutes
+//     after the pass it retries. An hour of a host's timer grid holds at most
+//     one such pass, 0, 10 or 30 minutes past its check, so three of them can
+//     span 90 minutes but four span at least 150: a burst takes four passes
+//     within two hours.
 //
 // The uptime probes themselves are not read: a probe forwards through the
 // extender to the api host, which tests more than a lag.dev measurement uses,
@@ -105,7 +110,7 @@ func GetLagExtenderRestartLoops(
 				GROUP BY extender_id, pass_number
 				HAVING bool_or(ip_version = 4) AND bool_or(ip_version = 6)
 			),
-			revocation AS (
+			revocation AS MATERIALIZED (
 				SELECT
 					extender_id,
 					create_time

@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"errors"
+	"math"
 	"testing"
 	"time"
 
@@ -147,6 +149,46 @@ func TestStatsRefreshLagExportsGauges(t *testing.T) {
 		// a test env with no extender network offers none
 		connect.AssertEqual(t, testutil.ToFloat64(statsLagExtendersOfferedGauge.gauge), float64(0))
 		connect.AssertEqual(t, testutil.ToFloat64(statsLagExtendersRestartingGauge.gauge), float64(0))
+	})
+}
+
+// The offered gauge counts the serving extenders in no restart loop, and the
+// restarting gauge the ones left out for a loop. When the loops cannot be
+// read, every serving extender is offered and counted so, and the restarting
+// gauge goes stale rather than read 0.
+func TestStatsRefreshLagCountsRestartLoops(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		installLagTestExtenderConfig(t, true)
+		defer Testing_SetLagSettings(DefaultLagSettings())()
+		places := map[string]*model.LagPlace{}
+		useLagAddressPlaces(t, places)
+		now := server.NowUtc()
+
+		looping := newLagServingTestExtender(t, ctx, places, lagTestPlace("Saginaw", "us", 43.4, -83.9), "192.0.2.71", "2001:db8:71::1")
+		addLagTestPasses(ctx, looping, now, []int{4, 6}, 110*time.Minute, 80*time.Minute, 50*time.Minute, 20*time.Minute)
+		newLagServingTestExtender(t, ctx, places, lagTestPlace("Paris", "fr", 48.9, 2.4), "192.0.2.72")
+
+		statsRefreshLag(ctx, now)
+		connect.AssertEqual(t, testutil.ToFloat64(statsLagExtendersOfferedGauge.gauge), float64(1))
+		connect.AssertEqual(t, testutil.ToFloat64(statsLagExtendersRestartingGauge.gauge), float64(1))
+
+		previous := lagReadRestartLoops
+		lagReadRestartLoops = func(
+			ctx context.Context,
+			extenderIds []server.Id,
+			now time.Time,
+			rule *model.LagExtenderRestartLoopRule,
+		) map[server.Id]time.Time {
+			server.Raise(errors.New("the restart loop query failed"))
+			return nil
+		}
+		t.Cleanup(func() {
+			lagReadRestartLoops = previous
+		})
+		statsRefreshLag(ctx, now)
+		connect.AssertEqual(t, testutil.ToFloat64(statsLagExtendersOfferedGauge.gauge), float64(2))
+		connect.AssertEqual(t, math.IsNaN(testutil.ToFloat64(statsLagExtendersRestartingGauge.gauge)), true)
 	})
 }
 

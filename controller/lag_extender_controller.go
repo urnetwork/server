@@ -90,7 +90,7 @@ func getLagServing(ctx context.Context, now time.Time, maxAge time.Duration) *la
 	if set := lagServingCache.set; set != nil && !now.Before(set.loadTime) && now.Sub(set.loadTime) < maxAge {
 		return set
 	}
-	set := lagStableServing(ctx, loadLagServing(ctx, now), now)
+	set, _ := lagStableServing(ctx, loadLagServing(ctx, now), now)
 	lagServingCache.set = set
 	return set
 }
