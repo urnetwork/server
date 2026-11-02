@@ -339,11 +339,13 @@ The reaper merged on 11-01 (7334b3a17) at the owner's 91 days, and `horizonDays`
 - It is read before every batch, with the other fields, and a new value applies from the next batch. Raised, it stops deleting inside the new horizon from that batch on. Nothing already deleted comes back.
 - It never turns the reaper on or off; `mode` does. A dry run at 35 days is `mode dry_run` with `horizonDays 35`.
 
-**Reaper-only.** The floor is `ContractHorizonFloor` in `model/contract_horizon_reaper.go`, and the code setting floors there too. `server.ContractRetention` stays 91 days, so nothing else moves:
+**Reaper-only, except key history while the mode is on.** The floor is `ContractHorizonFloor` in `model/contract_horizon_reaper.go`, and the code setting floors there too. `server.ContractRetention` stays 91 days, so nothing else moves:
 - the partition drop, whose `contractWeekBlocker` keeps only payment holds (it needs the reaper's keep rules before any cutover; that is separate work);
-- close evidence and key history retention;
+- close evidence retention;
 - the sn-reconcile holders floor;
 - the monitor's partition retention signal.
+
+**Key history follows `horizonDays` while `mode` is `on` (owner, 2026-11-01).** `remove_gone_st_client_key_history` then permanently deletes the signed key history of clients gone longer than the horizon, never under the guard's 30-day floor (migration 904). With `mode dry_run`, `mode off`, no control, or an unreadable one, key history keeps 91 days, so a dry run at any horizon deletes no key history. The deletes have their own brake, `{client_key_history_retention}control` (`mode` on/off, `maxClientsPerSecond`, default 150 a second), read before every batch.
 
 **Readers of the deleted rows, and how far back each reads:**
 
@@ -353,7 +355,7 @@ The reaper merged on 11-01 (7334b3a17) at the owner's 91 days, and `horizonDays`
 | Transfer audit rollup (`RollupTransferAuditEvents`: the periodic task, `stats rollup-transfer`, `stats backfill`, `stats migrate-202608`) | transfer_contract joined to contract_close by close time, one UTC day at a time, replacing the day's row | task: 3 days; CLI defaults: 7 days (`rollup-transfer`), 21 days (`backfill`, `migrate-202608`); an explicit `--start` reaches any day | days the reaper can reach keep their rows (the new guard) |
 | Payout planner | unpaid sweeps of contracts minted before the cutoff, sweeps of safely canceled payments, staged sweeps | up to 300 days | kept by `unpaid_legacy`, `payment_incomplete`, `plan_staged` |
 | sn-reconcile (A2 holders, census) | sweeps of pending and safely canceled payments; legacy payments | per payment | kept as payment holds or incomplete payments. The reaper deletes a contract with its sweeps, so A2's rule that a sweep above its floor has its contract still holds |
-| Subnet epoch reads (`GetStEpochProviderUsage`, the v2 ledger, close originals) | live contracts and the usage archive, by close time; close evidence | each epoch's window | unchanged: every deleted credit-bearing contract is archived in the same statement, and evidence keeps its 91 days |
+| Subnet epoch reads (`GetStEpochProviderUsage`, the v2 ledger, close originals) | live contracts and the usage archive, by close time; close evidence | each epoch's window | unchanged in result: every deleted credit-bearing contract is archived in the same statement, and evidence keeps its 91 days. The read's duplicate probe once hashed the whole archive, which the reaper grows; see below |
 | Provider stats (`/stats/provider-last-n`, `/stats/providers-overview-last-n`, the legacy `-last-90` routes) and provider payout stats | contracts joined to closes; sweeps by sweep time | up to 366 days | undercount the days older than 35 |
 | `/transfer/stats` | unpaid sweeps | all time | `unpaid_bytes_provided` falls as post-cutoff sweeps pass 35 days |
 
@@ -364,11 +366,13 @@ The disk analysis put block points at 37 days: a 7-day block plus reliability re
 - A block with an award (its `payment_report` row) drops out.
 - The windows are the award's own, clamped to the cutoff.
 - The list is read once a run. An award committed since only keeps more.
-- A contract leaves once its block is awarded, or once the block's reliability passes retention, when an award would fail closed. That is at most 21 days after the block opened.
-- It is a new reason on `urnetwork_contract_horizon_protected_contracts_total`, so one more series, and the classification order puts it last.
+- A block's retention is judged at the start of the oldest award that can still be reading, `OperatorBlockPointsMaxTime` (12 hours) and an hour before the run. The award checks retention again on the clock after its reads, so one that outlives the block's retention fails closed.
+- A contract leaves once its block is awarded, or once the block's reliability is past retention for every award that can still be running. That is at most 21 days and 13 hours after the block opened.
+- It is a new reason on `urnetwork_contract_horizon_protected_contracts_total`, one more series, last in the classification order but for `payment_review`.
 
 **The rollup guard (`TransferAuditRollupFirstDay`).** A rollup never writes a day before the first whole day 33 days back: the 35-day floor less a 2-day margin, since one day's read can take most of a day at Main's churn while the reaper's horizon advances. The row of an earlier day was written while all of its contracts were present, and a re-roll would replace it with a sum of what the reaper left.
 - The CLI path skips those days, and logs that it kept their rows.
+- A periodic chain clamped this way counts in `urnetwork_transfer_audit_rollup_clamped_total` and logs at V(1); any is a chain that fell weeks behind.
 - A periodic chain that fell behind resumes at that day.
 - Neither default window reaches it.
 - No reaper keep rule can serve this reader, since an explicit `--start` can name any day.
@@ -378,7 +382,8 @@ The disk analysis put block points at 37 days: a 7-day block plus reliability re
 - open or disputed contracts, and unsettled escrows;
 - payment holds, and incomplete, missing or recent payments;
 - unpaid sweeps of contracts minted before the earning cutoff (the stricter sweep rule), and sweeps staged in a pending plan;
-- rows another transaction holds.
+- rows another transaction holds;
+- sweeps paid by a payment that completed under attribution review (`payment_review`). `completePaymentInTx` queues no retention stamping for such a payment, so the payment completion path keeps its contracts until the straggler horizon, and so does the reaper. The rule is the reaper's own: `ContractPaymentRetentionHoldSql`, which the straggler pass shares, is unchanged.
 
 The DB tests check each one at 35 days, with the cutoff inside 91 days as production's is. The settings comment once cited a planner retention-risk age tied to 91 days. No such age exists: the planner's is `StragglerContractExpiration` minus 7 days (293 days), and it guards the straggler path.
 
@@ -394,7 +399,14 @@ The DB tests check each one at 35 days, with the cutoff inside 91 days as produc
 - `urnetwork_contract_horizon_horizon_seconds` (no labels) is the horizon the last control read set.
 - `urnetwork_contract_horizon_horizon_timestamp_seconds` and the lag gauge follow it.
 - The run log line carries `horizon_days=`.
-- `block_points` counts the contracts the new rule keeps.
+- `block_points` and `payment_review` count the contracts those rules keep.
+- **Monitor:** `contract-horizon-reaper` (SIGNALS.md §2.4r) warns when the chain stops running, when runs fail or cannot read the control without progress, when the pass falls behind while on, and when block points keep contracts. `usage-archive-hash-budget` (§2.4s) warns while twice the largest archive week passes half of what the usage read's hash holds in one batch.
+
+**The epoch usage read's archive join (fixed 11-01).** The live arm of `stEpochProviderUsageSql` flags a contract that is also archived by joining `st_provider_usage_archive` on `contract_id`. Unbounded, that join hashed the whole archive in every read: the v1 close, the v2 epoch step and the recovery census.
+- On Main, for epoch 3's window, the hash built on all 27 partitions, 20.35M rows, against 3.66 GB of hash memory (work_mem 234 MB times hash_mem_multiplier 16), which holds about 60M.
+- The reaper archives every credit-bearing contract it deletes, about 75M a day by the review's estimate, and the archive went from about 20M to 23M rows in an hour on 11-01. Past about 60M rows the hash spills in batches toward the 150 GB `temp_file_limit`, and an epoch step that fails misses its root, as epoch 3's did.
+- The join now takes only the archive rows that closed in the window, so each partition reads its close-time index range. It loses no duplicate of a live row: an archived row is an exact copy of its contract's close time, a terminal close time never changes, and a NULL close time on either side stops the read.
+- The owner paused the reaper (mode off, 11-01 22:38Z) until a taskworker with the fix runs.
 
 ### D1. Deliver in-process when the transport's resident is in the same connect process
 

@@ -239,6 +239,10 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 			LANGUAGE plpgsql AS 'BEGIN RAISE EXCEPTION ''original contract close reports are immutable''; END'`},
 		{name: "close evidence guard back at its 91-day retention", version: contractCloseEvidenceHorizonGuardMigrationVersion, sql: `CREATE OR REPLACE FUNCTION contract_close_report_evidence_guard() RETURNS trigger
 			LANGUAGE plpgsql AS ` + snMainnetMigrationLiteral(server.ContractCloseEvidenceMoveGuardBodySql())},
+		{name: "key history guard back on its fixed 91 days", version: server.ClientKeyHistoryRetentionFloorMigrationVersion(), sql: `CREATE OR REPLACE FUNCTION st_client_key_history_immutable_guard()
+			RETURNS trigger LANGUAGE plpgsql AS $guard$` + server.ClientKeyHistoryGuardBodySql() + `$guard$`},
+		{name: "key history floor rolled back to 91 days", version: server.ClientKeyHistoryRetentionFloorMigrationVersion(), sql: server.ClientKeyHistoryRetentionFloorRollbackSql},
+		{name: "key history floor made immutable", version: server.ClientKeyHistoryRetentionFloorMigrationVersion(), sql: `ALTER FUNCTION st_client_key_history_retention_floor() IMMUTABLE`},
 		{name: "task queue pages filled again", version: server.TaskHeartbeatFillfactorMigrationVersion(), sql: `ALTER TABLE pending_task RESET (fillfactor)`},
 		{name: "task queue pages filled to 70", version: server.TaskHeartbeatFillfactorMigrationVersion(), sql: `ALTER TABLE pending_task SET (fillfactor = 70)`},
 		{name: "legacy auth attempt table recreated", version: server.WritePathMigrationVersion(server.WritePathUserAuthAttemptDrop), sql: `CREATE TABLE user_auth_attempt (user_auth_attempt_id uuid PRIMARY KEY)`},

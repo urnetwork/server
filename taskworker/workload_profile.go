@@ -151,6 +151,8 @@ func subnetOperatorTasks() []subnetOperatorTask {
 		{target: task.NewTaskTarget(work.SweepOrphanNetworkClientData), schedule: work.ScheduleSweepOrphanNetworkClientData},
 		{target: task.NewTaskTarget(model.RemoveNetworkClientsTask)},
 		{target: model.NewLegacyProviderTotalsTaskTarget()},
+		// armed by work.ScheduleSettlementAccountingTasks, as in production
+		{target: model.NewLegacyProviderTotalsDrainTaskTarget()},
 		{target: model.NewLegacyNetEscrowMirrorTaskTarget()},
 		// Queued by a contract quarantine in its commit.
 		{target: model.NewQuarantineReservationReleaseTaskTarget()},

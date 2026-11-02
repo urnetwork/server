@@ -54,6 +54,8 @@ func TestExtendersDashboardCoversGossipDnsAndPopularity(t *testing.T) {
 		"solve time and budget": "urnetwork_stats_derive_solve_seconds",
 		"solve heap and budget": "urnetwork_stats_derive_solve_bytes",
 		"reading the day":       "urnetwork_stats_derive_ingest_seconds",
+		"how activations end":   "urnetwork_extender_activations_total",
+		"activation step times": "urnetwork_extender_activation_step_seconds",
 	} {
 		found := false
 		for _, expression := range expressions {

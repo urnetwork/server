@@ -5,7 +5,7 @@
   "urnetwork",
   "extenders"
  ],
- "description": "The extender network: population and reachability, what is published in dns, the gossip release queue, which extenders carry the contract load, the pings providers and extenders measure of each other, with how targets answer them (connect/GEOMAP.md \u00a72.7), and the locations derived from those pings (\u00a75.4), with what deriving them costs against the solve's budget (\u00a75.3). Fed by the stats collector (controller/stats_collector.go) and the dns publish tick (taskworker/work/extender_dns_metrics.go).",
+ "description": "The extender network: population and reachability, what is published in dns, the gossip release queue, which extenders carry the contract load, the pings providers and extenders measure of each other, with how targets answer them (connect/GEOMAP.md \u00a72.7), and the locations derived from those pings (\u00a75.4), with what deriving them costs against the solve's budget (\u00a75.3), and how the api's activations end and how long their probe steps take (connect/EXTENDER.md C2). Fed by the stats collector (controller/stats_collector.go), the dns publish tick (taskworker/work/extender_dns_metrics.go) and the api's activation handler (controller/extender_activation_metrics.go).",
  "editable": false,
  "graphTooltip": 1,
  "schemaVersion": 39,
@@ -3269,6 +3269,247 @@
     }
    ],
    "description": "Each derivation's peak heap over its read of the day and its solve, the planner's projection of the next, and MaxSolveBytes, over time (GEOMAP \u00a75.3, \"Scale\"). The aggregation keeps a bounded reservoir of samples per ordered pair, so the heap follows the pairs, not the pings. A projection climbing toward the budget is the fleet outgrowing the host's memory; SIGNALS.md \u00a72.19c finds it at 80 %."
+  },
+  {
+   "id": 62,
+   "type": "row",
+   "title": "activations",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 111
+   },
+   "panels": []
+  },
+  {
+   "id": 63,
+   "type": "timeseries",
+   "title": "activations by how they ended (per hour)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 112
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum by (stage, outcome) (increase(urnetwork_extender_activations_total{env=\"$env\"}[1h]))",
+     "refId": "A",
+     "legendFormat": "{{stage}} {{outcome}}"
+    }
+   ],
+   "description": "Every extender activation the api answered, per hour, by the stage that ended it and how (connect/EXTENDER.md C2): store activated is an extender published; request and budget refused it before any probe; config error is the operator's extender configuration; tcp and forward are the required test (C2a), error when the step failed on its own, timeout when it ran out of the 10 s probe budget, other_family when the forward arrived on the other family. A climb in tcp or forward timeouts is extenders answering late or not at all; a climb in budget is fleets restarting at once."
+  },
+  {
+   "id": 64,
+   "type": "timeseries",
+   "title": "refusals by family (per hour)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 112
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum by (family, stage) (increase(urnetwork_extender_activations_total{env=\"$env\",outcome!=\"activated\"}[1h]))",
+     "refId": "A",
+     "legendFormat": "{{family}} {{stage}}"
+    }
+   ],
+   "description": "The activations that were not published, per hour, by the caller's address family and the stage that refused them. One family refusing while the other passes is that family's path: a v6 egress that cannot reach the api fails the forward on ipv6 alone. unknown is a request whose caller address could not be read."
+  },
+  {
+   "id": 65,
+   "type": "timeseries",
+   "title": "probe step time, p95",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 120
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "decimals": 2,
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "histogram_quantile(0.95, sum by (le, step) (rate(urnetwork_extender_activation_step_seconds_bucket{env=\"$env\"}[$__rate_interval])))",
+     "refId": "A",
+     "legendFormat": "{{step}}"
+    }
+   ],
+   "description": "The 95th percentile of how long each activation probe step ran: the tcp challenge, the forward through it, each dns port, quic. The steps share one 10 s budget, in that order, and a dns port has 3 s of its own, so a tcp challenge near 10 s leaves the forward nothing; the buckets end at 10 s."
+  },
+  {
+   "id": 66,
+   "type": "timeseries",
+   "title": "probe steps by outcome (per hour)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 120
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum by (step, outcome) (increase(urnetwork_extender_activation_step_seconds_count{env=\"$env\"}[1h]))",
+     "refId": "A",
+     "legendFormat": "{{step}} {{outcome}}"
+    }
+   ],
+   "description": "Activation probe steps per hour by step and outcome: ok, error when the step failed on its own, timeout when its budget ran out before it answered. An optional carrier (dns, quic) that times out is left out of the record and does not refuse the activation (C2a); a tcp or forward that does refuses it."
   }
  ]
 }

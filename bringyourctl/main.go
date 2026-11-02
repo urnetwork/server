@@ -50,6 +50,7 @@ Usage:
     bringyourctl db backfill-contract-reap-time [--batch=<n>]
     bringyourctl db sweep-orphans [--slice=<n>]
     bringyourctl db scrub-client-addresses
+    bringyourctl db key-history-floor [--rollback | --restore]
     bringyourctl search --realm=<realm> --type=<type> add <value>
     bringyourctl search --realm=<realm> --type=<type> around --distance=<distance> <value>
     bringyourctl search --realm=<realm> --type=<type> remove <value>
@@ -287,6 +288,8 @@ func main() {
 			dbSweepOrphans(opts)
 		} else if scrubClientAddresses, _ := opts.Bool("scrub-client-addresses"); scrubClientAddresses {
 			dbScrubClientAddresses(opts)
+		} else if keyHistoryFloor, _ := opts.Bool("key-history-floor"); keyHistoryFloor {
+			dbKeyHistoryFloor(opts)
 		}
 	} else if search, _ := opts.Bool("search"); search {
 		if add, _ := opts.Bool("add"); add {
@@ -617,6 +620,24 @@ func dbScrubClientAddresses(opts docopt.Opts) {
 	fmt.Printf("Scrubbing raw client addresses from task and audit rows ...\n")
 	scrubbedTaskCount, scrubbedAuditCount := server.ScrubTaskAndAuditClientAddresses(context.Background())
 	fmt.Printf("Scrubbed %d task row(s) and %d audit blob(s).\n", scrubbedTaskCount, scrubbedAuditCount)
+}
+
+// dbKeyHistoryFloor prints the floor the key history guard and the retention's
+// batch apply (migration 904, server.ClientKeyHistoryRetentionFloor), and
+// with --rollback moves it back to 91 days or with --restore puts the
+// published floor back, then prints it again.
+func dbKeyHistoryFloor(opts docopt.Opts) {
+	ctx := context.Background()
+	floor, published := server.GetClientKeyHistoryRetentionFloor(ctx)
+	fmt.Printf("Key history retention floor: %s (published body: %t)\n", floor, published)
+	rollback, _ := opts.Bool("--rollback")
+	restore, _ := opts.Bool("--restore")
+	if !rollback && !restore {
+		return
+	}
+	server.SetClientKeyHistoryRetentionFloor(ctx, rollback)
+	floor, published = server.GetClientKeyHistoryRetentionFloor(ctx)
+	fmt.Printf("Key history retention floor now: %s (published body: %t)\n", floor, published)
 }
 
 // dbAudit compares the live DB schema against the schema its recorded migration

@@ -11075,6 +11075,13 @@ var migrations = []any{
 	// Bound operator-only immutable score history reads by one exact round.
 	newSqlMigration(competitionSubmissionMetricsMigrationSql),
 
+	// The key history guard keeps a gone client's history 30 days, not 91
+	// (db_identity_retention.go, owner 2026-11-01): the retention follows the
+	// contract horizon reaper's horizon, and the guard's floor now sits below
+	// it. Function definitions only: no table is locked or scanned, and the
+	// running release, which deletes past 91 days, stays within the new guard.
+	newSqlMigration(clientKeyHistoryRetentionFloorSql),
+
 	// Close evidence retention at the contract horizon (owner, 2026-11-01;
 	// db_contract_close_evidence_horizon.go): the evidence guard admits the
 	// retention delete of a report accepted more than 35 days ago, the

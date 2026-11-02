@@ -116,6 +116,9 @@ type horizonTestPayment struct {
 	retentionPending   bool
 	paymentRecord      *string
 	circleIdempotentId *server.Id
+	// completed under attribution review, which completePaymentInTx leaves
+	// without retention pending
+	attributionReview bool
 }
 
 func insertHorizonTestPayment(t testing.TB, ctx context.Context, networkId server.Id, payment horizonTestPayment) server.Id {
@@ -129,10 +132,11 @@ func insertHorizonTestPayment(t testing.TB, ctx context.Context, networkId serve
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO account_payment
 			(payment_id,payment_plan_id,network_id,payout_byte_count,payout_nano_cents,subsidy_payout_nano_cents,min_sweep_time,
-			 completed,complete_time,canceled,contract_retention_pending,payment_record,circle_idempotency_key)
-			VALUES($1,$2,$3,0,0,0,$4,$5,$6,$7,$8,$9,$10)`,
+			 completed,complete_time,canceled,contract_retention_pending,payment_record,circle_idempotency_key,attribution_review_required)
+			VALUES($1,$2,$3,0,0,0,$4,$5,$6,$7,$8,$9,$10,$11)`,
 			paymentId, server.NewId(), networkId, server.NowUtc(),
-			payment.completed, completeTime, payment.canceled, payment.retentionPending, payment.paymentRecord, payment.circleIdempotentId))
+			payment.completed, completeTime, payment.canceled, payment.retentionPending, payment.paymentRecord, payment.circleIdempotentId,
+			payment.attributionReview))
 	}, server.TxReadCommitted, server.OptNoRetry())
 	return paymentId
 }
