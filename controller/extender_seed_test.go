@@ -307,6 +307,88 @@ func serveTestExtenderSeed(t *testing.T, now time.Time, header http.Header) (*ht
 	return response, outcome
 }
 
+// A read of the store is the process's, not a request's: a client that goes away
+// does not cancel it, it has its own bound, and while it runs every other request
+// is answered at once from the copy at hand, with no second read. A stalled store
+// must not queue this public route's requests.
+func TestExtenderSeedOriginReadHoldsUpNoOtherRequest(t *testing.T) {
+	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	config := &ExtenderConfig{}
+	good := []byte("a verified artifact")
+
+	type read struct {
+		ctx     context.Context
+		release chan error
+	}
+	reads := make(chan *read, 4)
+	cache := &extenderSeedOriginCache{
+		readStored: func(ctx context.Context, _ *ExtenderConfig) ([]byte, bool, error) {
+			r := &read{ctx: ctx, release: make(chan error, 1)}
+			reads <- r
+			if err := <-r.release; err != nil {
+				return nil, false, err
+			}
+			return good, false, nil
+		},
+	}
+
+	// a request already gone still gets its read through, under its own bound
+	gone, cancelGone := context.WithCancel(context.Background())
+	cancelGone()
+	type answer struct {
+		copy    *extenderSeedOriginCopy
+		outcome string
+	}
+	getAsync := func(ctx context.Context, at time.Time) chan answer {
+		answers := make(chan answer, 1)
+		go func() {
+			copy, outcome := cache.get(ctx, config, at)
+			answers <- answer{copy: copy, outcome: outcome}
+		}()
+		return answers
+	}
+	first := getAsync(gone, now)
+	r := <-reads
+	if r.ctx.Err() != nil {
+		t.Fatalf("the read ended with the request that found it due: %v", r.ctx.Err())
+	}
+	deadline, ok := r.ctx.Deadline()
+	if !ok || extenderSeedOriginReadTimeout < time.Until(deadline) {
+		t.Fatalf("the read has no bound of its own: %v %t", deadline, ok)
+	}
+	r.release <- nil
+	if a := <-first; a.copy == nil || !bytes.Equal(a.copy.artifact, good) {
+		t.Fatalf("the first read: %+v", a)
+	}
+
+	// the next read stalls: only the request that found it due waits for it
+	due := now.Add(extenderSeedOriginCacheTimeout)
+	claimer := getAsync(context.Background(), due)
+	r = <-reads
+	other := getAsync(context.Background(), due)
+	select {
+	case a := <-other:
+		if a.copy == nil || !bytes.Equal(a.copy.artifact, good) {
+			t.Fatalf("another request during the read: %+v", a)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatalf("a stalled read held up another request")
+	}
+	if 0 < len(reads) {
+		t.Fatalf("another request started a second read")
+	}
+
+	// the stalled read fails: the copy at hand stands, and the next read is a
+	// cache timeout away
+	r.release <- errors.New("synthetic stalled store")
+	if a := <-claimer; a.copy == nil || !bytes.Equal(a.copy.artifact, good) {
+		t.Fatalf("after a failed read: %+v", a)
+	}
+	if a := <-getAsync(context.Background(), due.Add(time.Second)); a.copy == nil || 0 < len(reads) {
+		t.Fatalf("a read inside the cache timeout: %+v, %d reads", a, len(reads))
+	}
+}
+
 func TestServeExtenderSeed(t *testing.T) {
 	server.UseLocalBlobStoreForTest(t, t.TempDir(), "blob", 1<<20)
 	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)

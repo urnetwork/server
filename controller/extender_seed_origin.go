@@ -38,9 +38,21 @@ import (
 // monitor tell a stalled publisher from an unreachable origin. A store that
 // cannot be read keeps the last good copy for up to ExtenderSeedRefreshTimeout,
 // and a stored object that does not verify is never served.
+//
+// The read belongs to the process, not to the request that happened to find it
+// due: a client that goes away does not cancel it, it has its own bound
+// (extenderSeedOriginReadTimeout), and no lock is held across it, so while it
+// runs every other request is answered at once from the copy at hand. This route
+// is public, and a stalled store must not queue its requests.
 
 // How long one process serves a copy before reading the store again.
 const extenderSeedOriginCacheTimeout = time.Minute
+
+// The longest one read of the store may take. The object is at most the envelope
+// limit, so a healthy read is milliseconds, and a client's own attempt is 15
+// seconds; past this the copy at hand is served and the next read is a cache
+// timeout away.
+const extenderSeedOriginReadTimeout = 5 * time.Second
 
 // The answers, the fixed label set of the counter.
 const (
@@ -70,15 +82,18 @@ type extenderSeedOriginCopy struct {
 }
 
 type extenderSeedOriginCache struct {
+	// reads the store: the verified artifact, or absent when none is stored
+	readStored func(ctx context.Context, config *ExtenderConfig) (artifact []byte, absent bool, returnErr error)
+
 	stateLock sync.Mutex
 	copy      *extenderSeedOriginCopy
-	// when the store was last read, whatever it answered
+	// when a read of the store last started, whatever it answered
 	checkedAt time.Time
 	// the store answered that it holds no bundle
 	absent bool
 }
 
-var extenderSeedOrigin = &extenderSeedOriginCache{}
+var extenderSeedOrigin = &extenderSeedOriginCache{readStored: readVerifiedExtenderSeed}
 
 // Testing_ResetExtenderSeedOrigin drops every process copy of the bundle.
 func Testing_ResetExtenderSeedOrigin() {
@@ -91,27 +106,52 @@ func Testing_ResetExtenderSeedOrigin() {
 
 // The copy to serve at now and the answer's outcome when there is none.
 func (self *extenderSeedOriginCache) get(ctx context.Context, config *ExtenderConfig, now time.Time) (*extenderSeedOriginCopy, string) {
+	if self.claimRead(now) {
+		self.read(ctx, config, now)
+	}
+	return self.current(now)
+}
+
+// Whether a read of the store is due at now; the caller that gets true does it.
+func (self *extenderSeedOriginCache) claimRead(now time.Time) bool {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
-
-	if self.checkedAt.IsZero() || extenderSeedOriginCacheTimeout <= now.Sub(self.checkedAt) {
-		self.checkedAt = now
-		artifact, absent, err := readVerifiedExtenderSeed(ctx, config)
-		switch {
-		case err != nil:
-			glog.V(1).Infof("[extenderseed]origin read: %s\n", err)
-		case absent:
-			self.copy, self.absent = nil, true
-		default:
-			digest := sha256.Sum256(artifact)
-			self.copy = &extenderSeedOriginCopy{
-				artifact: artifact,
-				etag:     `"` + hex.EncodeToString(digest[:]) + `"`,
-				readAt:   now,
-			}
-			self.absent = false
-		}
+	if !self.checkedAt.IsZero() && now.Sub(self.checkedAt) < extenderSeedOriginCacheTimeout {
+		return false
 	}
+	self.checkedAt = now
+	return true
+}
+
+// One read of the store, with no lock held. A failed read keeps the copy at hand.
+func (self *extenderSeedOriginCache) read(ctx context.Context, config *ExtenderConfig, now time.Time) {
+	readCtx, readCancel := context.WithTimeout(context.WithoutCancel(ctx), extenderSeedOriginReadTimeout)
+	defer readCancel()
+	artifact, absent, err := self.readStored(readCtx, config)
+	if err != nil {
+		glog.V(1).Infof("[extenderseed]origin read: %s\n", err)
+		return
+	}
+
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if absent {
+		self.copy, self.absent = nil, true
+		return
+	}
+	digest := sha256.Sum256(artifact)
+	self.copy = &extenderSeedOriginCopy{
+		artifact: artifact,
+		etag:     `"` + hex.EncodeToString(digest[:]) + `"`,
+		readAt:   now,
+	}
+	self.absent = false
+}
+
+// The copy at hand at now, or the outcome when there is none.
+func (self *extenderSeedOriginCache) current(now time.Time) (*extenderSeedOriginCopy, string) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
 	if self.copy != nil && now.Sub(self.copy.readAt) < ExtenderSeedRefreshTimeout {
 		return self.copy, ""
 	}
