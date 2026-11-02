@@ -117,6 +117,7 @@ func registry() []specEndpoint {
 		// connect/EXTENDER-UPDATE2.md contract R)
 		{method: "POST", path: "/network/extender-release", argType: rt(controller.ExtenderReleaseArgs{}), resultType: rt(controller.ExtenderReleaseResult{})},
 		{method: "POST", path: "/network/extender-block-report", argType: rt(controller.ExtenderBlockReportArgs{}), resultType: rt(controller.ExtenderBlockReportResult{})},
+		{method: "POST", path: "/network/extender-camouflage-report", argType: rt(controller.ExtenderCamouflageReportArgs{}), resultType: rt(controller.ExtenderCamouflageReportResult{})},
 		{method: "POST", path: "/network/ping-report", argType: rt(controller.ExtenderPingReportArgs{}), resultType: rt(controller.ExtenderPingReportResult{})},
 		// an extender's lag.dev measurement certificate (lag.dev/PLAN.md A8)
 		{method: "GET", path: "/network/extender-measurement-cert", argType: nil, resultType: rt(controller.ExtenderMeasurementCertResult{})},

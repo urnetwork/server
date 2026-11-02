@@ -1,0 +1,1006 @@
+{
+  "uid": "urnetwork-extender-camouflage",
+  "title": "urnetwork / extender camouflage",
+  "tags": [
+    "urnetwork",
+    "extenders"
+  ],
+  "description": "What clients' and extenders' tcp camouflage came to across the fleet, from their reports (connect/EXTENDER-SPLICE-ROLLOUT.md, Reporting path; controller/extender_camouflage_report.go): the numbers the rollout gates of EXTENDER-UPDATE2 §3 are judged against. Off by default on both sides, so this is empty until a cohort reports. Every failure on the path undercounts and none overcounts, and clients that cannot reach the api are not here. Internal only.",
+  "editable": false,
+  "graphTooltip": 1,
+  "schemaVersion": 39,
+  "refresh": "5m",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "timezone": "",
+  "templating": {
+    "list": [
+      {
+        "name": "env",
+        "label": "env",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "warp-mimir"
+        },
+        "query": "label_values(urnetwork_extender_camouflage_reports_total, env)",
+        "refresh": 2,
+        "sort": 1
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "reports",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "reports by how they ended (per hour)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (outcome) (increase(urnetwork_extender_camouflage_reports_total{env=\"$env\"}[1h]))",
+          "refId": "A",
+          "legendFormat": "{{outcome}}"
+        }
+      ],
+      "description": "Every report the api answered at POST /network/extender-camouflage-report: accepted, counted; accepted_extender_ignored, counted without its extender part, since the caller has no active extender; duplicate, a retry of a report already counted, which added nothing; rate_limited, past the client's 12 an hour; disabled, reports are off (camouflage_report.enabled in extender.yml, the kill switch); too_large, malformed and out_of_bounds, refused for what it holds; unavailable, Redis or the fleet read could not answer. Nothing but rate_limited and unavailable is posted again. No reports at all means no cohort is on: the sender is off unless its space sets ExtenderGatedPreference, or connectctl extender runs with --camouflage_report."
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "reports not counted (per hour)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (outcome) (increase(urnetwork_extender_camouflage_reports_total{env=\"$env\",outcome!~\"accepted|accepted_extender_ignored|duplicate\"}[1h]))",
+          "refId": "A",
+          "legendFormat": "{{outcome}}"
+        }
+      ],
+      "description": "The reports that added nothing and were not a retry of one that did. Each of these is a report the numbers below do not hold, so read a rise here before reading a change below. A sender stays inside every bound, so too_large, malformed and out_of_bounds that persist are not senders that behave. accepted_extender_ignored on the panel to the left that does not fall is clients claiming to be extenders; their extender part is dropped."
+    },
+    {
+      "id": 4,
+      "type": "row",
+      "title": "clients",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 9
+      },
+      "panels": []
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "what clients' tcp camouflage dials came to (per hour)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 10
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (outcome) (increase(urnetwork_extender_camouflage_client_outcomes_total{env=\"$env\"}[1h]))",
+          "refId": "A",
+          "legendFormat": "{{outcome}}"
+        }
+      ],
+      "description": "From clients' reports, one line per counter of connect.ExtenderTcpCamouflageClientStats: camouflage_won, legacy_won (the Phase A fallback), both_failed (the Phase B loss a skewed or legacy-fronted client meets), refused, camouflage_unauthenticated (Phase A terminate), camouflage_leaf_rejected (Phase B splice), and the reasons a dial ran legacy alone, legacy_only_no_key, legacy_only_fingerprint, legacy_only_no_front_name. A client's counts are its own word: one identity can add at most 65,536 per counter per report and 12 reports an hour, so a line that jumps alone is worth checking against the reports panel before it moves a gate."
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "camouflage won, of races decided",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 10
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 2,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(increase(urnetwork_extender_camouflage_client_outcomes_total{env=\"$env\",outcome=\"camouflage_won\"}[1h])) / sum(increase(urnetwork_extender_camouflage_client_outcomes_total{env=\"$env\",outcome=~\"camouflage_won|legacy_won|both_failed\"}[1h]))",
+          "refId": "A",
+          "legendFormat": "camouflage won"
+        }
+      ],
+      "description": "camouflage_won over camouflage_won, legacy_won and both_failed, over the last hour: the compatible-client connection success of readiness gate 3 in EXTENDER-SPLICE-ROLLOUT.md, read against the baseline recorded for the cohort. Clients that cannot reach the api to report are not in this number, and one whose report was given up is not either, so a real outage reads better here than it is: read it beside both_failed by country and the release denials on the extenders dashboard."
+    },
+    {
+      "id": 7,
+      "type": "table",
+      "title": "client outcomes by country and family (top 30)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 18
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "sortBy": [
+          {
+            "displayName": "Value",
+            "desc": true
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(30, sum by (country, family, outcome) (increase(urnetwork_extender_camouflage_client_outcomes_total{env=\"$env\"}[$__range])))",
+          "legendFormat": "{{country}} {{family}} {{outcome}}",
+          "format": "table",
+          "instant": true,
+          "range": false,
+          "editorMode": "code",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ],
+      "description": "Over the dashboard's time range, by the caller's country, the server's own lookup of its address and never the report's word, a lower case ISO 3166 alpha-2 code; relayed when the report crossed an extender, whose country says nothing of where the client is; unknown when unlocated. A relay the operator does not know, a VLESS server or a user's proxy, reads as that relay's country. family is the families the client dials, any, ipv4 or ipv6. Internal only."
+    },
+    {
+      "id": 8,
+      "type": "table",
+      "title": "client outcomes by version (top 30)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 18
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "sortBy": [
+          {
+            "displayName": "Value",
+            "desc": true
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(30, sum by (client_version, resource_version, outcome) (increase(urnetwork_extender_camouflage_client_version_outcomes_total{env=\"$env\"}[$__range])))",
+          "legendFormat": "{{client_version}} {{resource_version}} {{outcome}}",
+          "format": "table",
+          "instant": true,
+          "range": false,
+          "editorMode": "code",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ],
+      "description": "Over the dashboard's time range, by the client's build, a calendar release day while recent and its month after, unknown or other; and the version of the borrow list it reads, none, a version near the api's own, or other."
+    },
+    {
+      "id": 9,
+      "type": "row",
+      "title": "extenders",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 27
+      },
+      "panels": []
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "extender tcp connections by classification (per hour)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 28
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (outcome) (increase(urnetwork_extender_camouflage_extender_outcomes_total{env=\"$env\",outcome=~\"authenticated|spliced|terminated|splice_fallback_terminated\"}[1h]))",
+          "refId": "A",
+          "legendFormat": "{{outcome}}"
+        }
+      ],
+      "description": "How reporting extenders classified their tcp connections, one partition: authenticated, spliced, terminated, and splice_fallback_terminated, the degraded exposure of EXTENDER-UPDATE2 §3.3, splice on with no reachable target, which shows a prober the old response. Only a client that activated an active extender can add to these."
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "authenticated share of tcp connections",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 28
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 2,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(increase(urnetwork_extender_camouflage_extender_outcomes_total{env=\"$env\",outcome=\"authenticated\"}[1h])) / sum(increase(urnetwork_extender_camouflage_extender_outcomes_total{env=\"$env\",outcome=~\"authenticated|spliced|terminated|splice_fallback_terminated\"}[1h]))",
+          "refId": "A",
+          "legendFormat": "authenticated"
+        }
+      ],
+      "description": "authenticated over every classified tcp connection, over the last hour: the authenticated-outcome share of readiness gate 3. It falls as probers and legacy clients rise and as the cohort moves off legacy, so hold it to the floor recorded for the cohort."
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "refusals and target failures (per hour)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 36
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (outcome) (increase(urnetwork_extender_camouflage_extender_outcomes_total{env=\"$env\",outcome=~\"splice_fallback_terminated|splice_dial_failed|borrow_verify_failed|replay_refused|time_window_failed\"}[1h]))",
+          "refId": "A",
+          "legendFormat": "{{outcome}}"
+        }
+      ],
+      "description": "The ceilings of readiness gate 3: splice_fallback_terminated and splice_dial_failed must be rare, and borrow_verify_failed low enough that verified-target coverage holds. replay_refused and time_window_failed are replays and clock skew. Crossing a ceiling recorded for a cohort rolls it back to Phase A (EXTENDER-SPLICE-ROLLOUT.md)."
+    },
+    {
+      "id": 13,
+      "type": "table",
+      "title": "extender outcomes by country and family (top 30)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 36
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "sortBy": [
+          {
+            "displayName": "Value",
+            "desc": true
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(30, sum by (country, family, outcome) (increase(urnetwork_extender_camouflage_extender_outcomes_total{env=\"$env\"}[$__range])))",
+          "legendFormat": "{{country}} {{family}} {{outcome}}",
+          "format": "table",
+          "instant": true,
+          "range": false,
+          "editorMode": "code",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ],
+      "description": "Over the dashboard's time range, by the extender's country, the server's own lookup of the address the report came from, and the families it dials. Internal only: this is where the reporting fleet is."
+    },
+    {
+      "id": 14,
+      "type": "table",
+      "title": "extender outcomes by version (top 30)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 44
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "sortBy": [
+          {
+            "displayName": "Value",
+            "desc": true
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(30, sum by (client_version, resource_version, outcome) (increase(urnetwork_extender_camouflage_extender_version_outcomes_total{env=\"$env\"}[$__range])))",
+          "legendFormat": "{{client_version}} {{resource_version}} {{outcome}}",
+          "format": "table",
+          "instant": true,
+          "range": false,
+          "editorMode": "code",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ],
+      "description": "Over the dashboard's time range, by the extender's build and the version of the borrow list it reads."
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "coverage verdicts (reports per hour)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 44
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (verdict) (increase(urnetwork_extender_camouflage_status_reports_total{env=\"$env\"}[1h]))",
+          "refId": "A",
+          "legendFormat": "{{verdict}}"
+        }
+      ],
+      "description": "What each extender report said of its coverage (extender.ExtenderCamouflageStatus), one per report, about one per extender per hour, so a rate is a count of extenders: covered, or why not, camouflage_off, splice_off, splice_gate_closed, no_verified_target, splice_fallback_active; other for anything else. Only covered is camouflage coverage. A deployment in any other state must not be reported as covered, and a Phase A cohort is splice_off by design."
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "covered share of extender reports",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 52
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 2,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(increase(urnetwork_extender_camouflage_status_reports_total{env=\"$env\",verdict=\"covered\"}[1h])) / sum(increase(urnetwork_extender_camouflage_status_reports_total{env=\"$env\"}[1h]))",
+          "refId": "A",
+          "legendFormat": "covered"
+        }
+      ],
+      "description": "covered over every verdict, over the last hour. Coverage of the reporting extenders, not of the fleet: an extender that does not report is not in it. Read it beside online extenders on the extenders dashboard."
+    },
+    {
+      "id": 17,
+      "type": "table",
+      "title": "verdicts by country and family (top 30)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 52
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "sortBy": [
+          {
+            "displayName": "Value",
+            "desc": true
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(30, sum by (country, family, verdict) (increase(urnetwork_extender_camouflage_status_reports_total{env=\"$env\"}[$__range])))",
+          "legendFormat": "{{country}} {{family}} {{verdict}}",
+          "format": "table",
+          "instant": true,
+          "range": false,
+          "editorMode": "code",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ],
+      "description": "Coverage verdicts over the dashboard's time range by the extender's country and the families it dials. Internal only."
+    },
+    {
+      "id": 18,
+      "type": "table",
+      "title": "verdicts by version (top 30)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 60
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "sortBy": [
+          {
+            "displayName": "Value",
+            "desc": true
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(30, sum by (client_version, resource_version, verdict) (increase(urnetwork_extender_camouflage_status_version_reports_total{env=\"$env\"}[$__range])))",
+          "legendFormat": "{{client_version}} {{resource_version}} {{verdict}}",
+          "format": "table",
+          "instant": true,
+          "range": false,
+          "editorMode": "code",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ],
+      "description": "Coverage verdicts over the dashboard's time range by the extender's build and the version of the borrow list it reads. no_verified_target on one list version alone says that version's names are what failed."
+    },
+    {
+      "id": 19,
+      "type": "row",
+      "title": "borrowed sites",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 68
+      },
+      "panels": []
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "splices per borrowed site (per hour)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 69
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "topk(20, sum by (target) (increase(urnetwork_extender_camouflage_target_splices_total{env=\"$env\"}[1h])))",
+          "refId": "A",
+          "legendFormat": "{{target}}"
+        }
+      ],
+      "description": "Splices that began to each borrowed site, summed over every extender that reported them: the aggregate of readiness gate 7, which per-extender caps do not bound. A site's name appears only when the api's own bundled borrow lists hold it; everything else is other, and while the lists are empty placeholders that is all there is. Compare a site's line against what the site can absorb before a cohort expands."
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "bytes per borrowed site (per hour)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 69
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "topk(20, sum by (target) (increase(urnetwork_extender_camouflage_target_relayed_bytes_total{env=\"$env\"}[1h])))",
+          "refId": "A",
+          "legendFormat": "{{target}}"
+        }
+      ],
+      "description": "Bytes spliced to and from each borrowed site, each way summed, over every extender that reported them, the same names and the same other as the panel to the left."
+    }
+  ]
+}
