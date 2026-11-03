@@ -10,9 +10,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 	"strconv"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/urnetwork/server"
@@ -106,17 +108,72 @@ func (self PostgresStore) clearExpiredCompetitionRecoverySlotInTx(ctx context.Co
 }
 
 // Canonical JSONB-object identity is independent of PostgreSQL key order and
-// whitespace. Duplicate keys, nonobjects and malformed documents fail closed.
+// whitespace. Data keys are case-sensitive, not typed protocol fields. Repeated
+// keys, nonobjects, invalid utf-8, excessive nesting and trailing data refuse.
 func CompetitionJobReevaluationSnapshotDigest(content json.RawMessage) (string, error) {
-	var fields map[string]json.RawMessage
-	if err := decodeFailureEvidenceJson(content, &fields); err != nil || fields == nil {
+	if !utf8.Valid(content) {
 		return "", ErrConflict
 	}
-	var value any
 	decoder := json.NewDecoder(bytes.NewReader(content))
 	decoder.UseNumber()
-	if err := decoder.Decode(&value); err != nil {
-		return "", err
+	var readValue func(int) (any, error)
+	readValue = func(depth int) (any, error) {
+		if 64 < depth {
+			return nil, ErrConflict
+		}
+		token, err := decoder.Token()
+		if err != nil {
+			return nil, ErrConflict
+		}
+		delimiter, ok := token.(json.Delim)
+		if !ok {
+			return token, nil
+		}
+		switch delimiter {
+		case '{':
+			fields := map[string]any{}
+			for decoder.More() {
+				keyToken, err := decoder.Token()
+				key, ok := keyToken.(string)
+				if err != nil || !ok {
+					return nil, ErrConflict
+				}
+				if _, duplicate := fields[key]; duplicate {
+					return nil, ErrConflict
+				}
+				value, err := readValue(depth + 1)
+				if err != nil {
+					return nil, err
+				}
+				fields[key] = value
+			}
+			if end, err := decoder.Token(); err != nil || end != json.Delim('}') {
+				return nil, ErrConflict
+			}
+			return fields, nil
+		case '[':
+			values := []any{}
+			for decoder.More() {
+				value, err := readValue(depth + 1)
+				if err != nil {
+					return nil, err
+				}
+				values = append(values, value)
+			}
+			if end, err := decoder.Token(); err != nil || end != json.Delim(']') {
+				return nil, ErrConflict
+			}
+			return values, nil
+		default:
+			return nil, ErrConflict
+		}
+	}
+	value, err := readValue(0)
+	if _, ok := value.(map[string]any); err != nil || !ok {
+		return "", ErrConflict
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return "", ErrConflict
 	}
 	return model.CompetitionAutomationDigest(value)
 }

@@ -42,7 +42,12 @@ type snReservedAttemptEndpoint struct {
 // as an API process; only physical storage and finite capacities are local.
 func newSnReservedAttemptEndpoint(t testing.TB, authority *snReservedAttemptAuthority, replicaNoID uint64) *snReservedAttemptEndpoint {
 	t.Helper()
-	owner := authority.start(t, replicaNoID)
+	return newSnReservedAttemptEndpointWithLane(t, authority, replicaNoID, authority.start(t, replicaNoID))
+}
+
+// The same endpoint serving the lane a test supplies.
+func newSnReservedAttemptEndpointWithLane(t testing.TB, authority *snReservedAttemptAuthority, replicaNoID uint64, lane SnReservedAttemptUploadLane) *snReservedAttemptEndpoint {
+	t.Helper()
 	_, client := snAttemptUploadTestIdentity(t)
 	self := &snReservedAttemptEndpoint{client: client}
 	store := server.NewLocalBlobStore(t.TempDir(), fmt.Sprintf("replica-%d", replicaNoID))
@@ -56,7 +61,7 @@ func newSnReservedAttemptEndpoint(t testing.TB, authority *snReservedAttemptAuth
 			r.Body = &snAttemptTestReadCloser{Reader: snAttemptTestReadFunc(func(data []byte) (int, error) { self.reads.Add(1); return original.Read(data) }), close: original.Close}
 			serveSnAttemptUpload(w, r, load, func(ctx context.Context, userID server.Id, size uint64) error {
 				return model.ReserveStAttemptUpload(ctx, ordinary, userID, size, budget)
-			}, snAttemptTestBounds(), writeSlots, owner)
+			}, snAttemptTestBounds(), writeSlots, lane)
 		} else {
 			serveSnAttemptArtifact(w, r, load, snAttemptTestBounds(), readSlots)
 		}

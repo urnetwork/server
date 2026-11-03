@@ -14,6 +14,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -49,6 +50,10 @@ type snReservedAttemptAuthority struct {
 	// under the hash of its header
 	headers   map[string]types.Header
 	finalized types.Hash
+	// Set before an owner starts, these make the complete refresh fail or stay
+	// in flight at its event scan, after the dial has succeeded.
+	refuseEventScan atomic.Bool
+	holdEventScan   atomic.Pointer[chan struct{}]
 }
 
 // A native block's hash is the Blake2b-256 of its complete SCALE header, which
@@ -190,6 +195,16 @@ func newSnReservedAttemptAuthority(t testing.TB) *snReservedAttemptAuthority {
 // WaitReady observes the real historical/current refresh, not cache allocation.
 func (self *snReservedAttemptAuthority) start(t testing.TB, replicaNoID uint64) *controller.StReservedAttemptUpload {
 	t.Helper()
+	owner := self.startUnrefreshed(t, replicaNoID)
+	if err := owner.WaitReady(t.Context()); err != nil {
+		t.Fatalf("real protected API authority prerequisite: %v", err)
+	}
+	return owner
+}
+
+// The production constructor alone: the admission's first refresh is its own.
+func (self *snReservedAttemptAuthority) startUnrefreshed(t testing.TB, replicaNoID uint64) *controller.StReservedAttemptUpload {
+	t.Helper()
 	config := &controller.StConfig{Enabled: true, Profile: "testnet", DeploymentId: "reserved-http-fixture", ChainId: 945, GenesisHash: self.record.Domain.GenesisHash, Netuid: 521, NoId: replicaNoID,
 		ContractAddress: common.Address(self.record.Domain.Coordinator), SettlementVault: common.Address(self.record.Domain.SettlementVault), RpcUrls: []string{self.endpoint.URL}}
 	config.ReservedAttemptUpload = &controller.StReservedAttemptUploadConfig{NativeRPCURLs: []string{self.endpoint.URL}, Budget: model.StReservedAttemptUploadBudget{RetryRequestsPerHour: 2, ObjectsPerHour: 3, BytesPerHour: 256},
@@ -200,9 +215,6 @@ func (self *snReservedAttemptAuthority) start(t testing.TB, replicaNoID uint64) 
 		t.Fatal(err)
 	}
 	t.Cleanup(owner.Close)
-	if err := owner.WaitReady(t.Context()); err != nil {
-		t.Fatalf("real protected API authority prerequisite: %v", err)
-	}
 	return owner
 }
 
@@ -295,6 +307,12 @@ func (self *snReservedAttemptAuthority) result(method string, args []json.RawMes
 		}
 		return hexutil.Bytes{0x60, 0, 0}, nil
 	case "eth_getLogs":
+		if hold := self.holdEventScan.Load(); hold != nil {
+			<-*hold
+		}
+		if self.refuseEventScan.Load() {
+			return nil, errors.New("synthetic chain endpoint outage")
+		}
 		var filter struct {
 			Address common.Address `json:"address"`
 			From    string         `json:"fromBlock"`
