@@ -631,11 +631,13 @@ func RefreshToken(clientSession *session.ClientSession) (*RefreshTokenResult, er
 
 	// The refreshed token keeps the presented token's create time, as every
 	// derived credential keeps its root's (AuthCodeCreate, AuthNetworkClient).
-	// A password reset expires the tokens created before it
-	// (credential_change_time), and stamps its transaction's start, so a reset
-	// that commits after the router's state check can still be stamped before
-	// this mint. A fresh create time would outlive that reset; the presented
-	// token's expires with it.
+	// A password reset expires the tokens created before its cutoff
+	// (credential_change_time). The renewal checks the presented token again
+	// under the session lifecycle lock the reset holds exclusively, so a reset
+	// that commits after the router's state check refuses it with 401. A reset
+	// that commits after the renewal expires the refreshed token too: its cutoff
+	// is read from the resetting host's clock, and a fresh create time stamped
+	// here, by a clock ahead of that one, would outlive it.
 	runRefreshMintHook(clientSession)
 	signed, err := session.RenewSessionCredential(clientSession, networkName, isPro)
 	if err != nil {
@@ -729,6 +731,11 @@ func NetworkRefreshToken(clientSession *session.ClientSession) (*NetworkRefreshT
 	runRefreshMintHook(clientSession)
 	signed, err := session.RenewSessionCredential(clientSession, network.NetworkName, isPro)
 	if err != nil {
+		if session.RenewalRefused(err) {
+			// rotated or revoked after the router's state check: the 401
+			// authentication gives the same token
+			networkRefreshCounter.WithLabelValues(networkRefreshStateInvalid).Inc()
+		}
 		return nil, err
 	}
 	networkRefreshCounter.WithLabelValues(networkRefreshRenewed).Inc()

@@ -35,17 +35,23 @@ func TestReadinessCheck(t *testing.T) {
 	})
 }
 
+// A failing check surfaces as a value (for the /status latch), never a panic
+// or a crash. A canceled ctx no longer reaches a check: since 27242d349 a
+// stopped startup returns its context's cause before any check runs
+// (router.TestStartupReadinessPreservesStoppedContextCause), and no dependency
+// failed, so none is named. A database without a migration history fails the
+// first check for real: pg's read of migration_audit.
 func TestReadinessCheckFailure(t *testing.T) {
-	server.DefaultTestEnv().Run(t, func(t testing.TB) {
-		// a canceled ctx forces both checks to fail deterministically; the
-		// error must surface as a value (for the /status latch), never a
-		// panic or a crash
-		ctx, cancel := context.WithCancel(context.Background())
+	(&server.TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
+		canceled, cancel := context.WithCancel(context.Background())
 		cancel()
+		if err := ReadinessCheck(canceled); !errors.Is(err, context.Canceled) {
+			t.Fatalf("a stopped startup = %v, want its context's cause", err)
+		}
 
-		err := ReadinessCheck(ctx)
+		err := ReadinessCheck(context.Background())
 		if err == nil {
-			t.Fatalf("expected a readiness error with a canceled ctx")
+			t.Fatalf("expected a readiness error against a database without migrations")
 		}
 		// the first failing check (pg) names itself so the latched /status
 		// reads `error not ready: pg: ...`
