@@ -32875,6 +32875,14 @@ Classes, all targeted at the inventory host name (`<host>/<bucket>` for quota):
   exports no bucket usage snapshot (or a quota without its usage); warns after
   two.
 
+The three request-error classes above are incident findings, not visibility
+findings. A measured request violation keeps its own incident present through
+its two-observation sustain gate; it does not make otherwise complete MinIO
+observations unknown or block recovery of another class. Missing drive or
+write-tolerance authority still reports `minio-metrics-unobservable` and
+prevents recovery from that incomplete execution. A newly computed class with
+no classification retains the conservative visibility fallback.
+
 Root-cause fixtures. On 2026-10-11 edge-6's shared `/mnt/data` filled; MinIO
 reached its floor, every Loki, Mimir and blob write returned 507, and the Mimir
 bucket index went stale behind them (§11.18 detected only that downstream

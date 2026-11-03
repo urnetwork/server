@@ -28,6 +28,7 @@ the original claim query and unknown-target retry behavior.
 
 | Task family | Why the operator profile keeps it |
 | --- | --- |
+| `SnClaimRelay` | The settlement v2 claim relay: one chain, at most one pass at a time. With no relayer key a pass only says so. |
 | `StSyncChain`, `StEpochClose`, `StCommitRoot`, `StDeposit`, `StFinalizePoke` | Contract epoch/event mirror, payout root, operator commit/deposit and finalization. Every parent/child and post retry remains available. |
 | `SweepVerifyTrails`, `RollupVerifyProviderStats`, `RemoveOldVerifyProviderStats`, `RefreshVerifyProxyEgress` | Full `/verify` trail lifecycle, provider statistics, and proxy egress index refresh. |
 | `RollupSearchProviderStats`, `RemoveOldSearchProviderStats` | Provider search evidence and retention. |

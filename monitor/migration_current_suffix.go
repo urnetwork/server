@@ -908,6 +908,9 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	[]snMainnetMigrationContract{extenderMeasurementProbeMigrationContract},
 	// the extender camouflage key (phase 14b), versioned by its position
 	[]snMainnetMigrationContract{extenderCamouflageKeyMigrationContract},
+	// the audited single-use competition job recovery; its version follows the
+	// migration's position
+	[]snMainnetMigrationContract{competitionJobReevaluationMigrationContract},
 	// the usage archive's export ledger, versioned by its position
 	[]snMainnetMigrationContract{usageArchiveExportLedgerMigrationContract},
 )

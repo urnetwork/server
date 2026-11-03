@@ -157,3 +157,11 @@ func CompetitionTrustedInstrumentBodiesSql() (lockDigest, productIntent, sourceA
 		strings.Split(migration, "$instrument$")[1],
 		strings.Split(migration, "$source$")[1]
 }
+
+// The audited job recovery (db_competition_reevaluation.go): its audit's insert
+// and commit guards, the job guard it re-creates in place and the worker slot's
+// guard. This reads published source only; it does not apply a migration.
+func CompetitionJobReevaluationBodiesSql() (insertGuard, commitGuard, jobImmutableGuard, slotGuard string) {
+	guards := strings.Split(competitionJobReevaluationMigration.sql, "$guard$")
+	return guards[1], guards[3], guards[5], guards[7]
+}
