@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -110,4 +111,55 @@ func LatestExports(ctx context.Context, conn *pgx.Conn) (map[string]*LedgerExpor
 		exports[export.Leaf] = export
 	}
 	return exports, rows.Err()
+}
+
+// The SHA-256 of every file the ledger holds.
+func RegisteredFiles(ctx context.Context, conn *pgx.Conn) (map[string]bool, error) {
+	rows, err := conn.Query(ctx, `SELECT file_sha256 FROM `+LedgerTable)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	files := map[string]bool{}
+	for rows.Next() {
+		var sha string
+		if err := rows.Scan(&sha); err != nil {
+			return nil, err
+		}
+		files[sha] = true
+	}
+	return files, rows.Err()
+}
+
+// Registers every verified copy in dir the ledger does not hold yet, such as
+// copies made before the ledger existed, each read back once more first.
+// Returns the files it registered, oldest leaf first; it stops at the first
+// copy that does not verify.
+func RegisterStoredCopies(ctx context.Context, conn *pgx.Conn, dir string, location string) (written []string, returnErr error) {
+	registered, err := RegisteredFiles(ctx, conn)
+	if err != nil {
+		return nil, err
+	}
+	manifests, err := ListManifests(dir)
+	if err != nil {
+		return nil, err
+	}
+	leaves := make([]string, 0, len(manifests))
+	for leaf := range manifests {
+		leaves = append(leaves, leaf)
+	}
+	sort.Strings(leaves)
+	for _, leaf := range leaves {
+		for _, manifest := range manifests[leaf] {
+			if registered[manifest.FileSha256] {
+				continue
+			}
+			if _, wrote, err := Register(ctx, conn, ManifestPathOf(filepath.Join(dir, manifest.File)), location); err != nil {
+				return written, fmt.Errorf("register %s: %w", manifest.File, err)
+			} else if wrote {
+				written = append(written, manifest.File)
+			}
+		}
+	}
+	return written, nil
 }
