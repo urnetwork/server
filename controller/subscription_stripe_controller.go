@@ -188,10 +188,10 @@ type StripeEventChargeObject struct {
 	Refunds *StripeEventChargeRefundList `json:"refunds"`
 }
 
-// keepsPaidAmount reports whether the charge still holds part of its money with
-// this refund of refundAmount counted, so what it bought stays paid for. A
-// charge read back before it shows the refund has the refund itself to go on,
-// and one that does not state its amount counts as given back.
+// Whether the charge still holds part of its money with this refund of
+// refundAmount counted, so what it bought stays paid for. A charge read back
+// before it shows the refund has the refund itself to go on, and one that does
+// not state its amount counts as given back.
 func (self *StripeEventChargeObject) keepsPaidAmount(refundAmount int) bool {
 	return max(self.AmountRefunded, refundAmount) < self.Amount
 }
@@ -1284,8 +1284,7 @@ func stripeHandleRefundCreated(
 	return &StripeWebhookResult{}, nil
 }
 
-// stripeHandleDisputeFunds claws back what a dispute's charge bought, once the
-// funds have left. An inquiry (status warning_*) takes no money and may close with
+// Claws back what a dispute's charge bought, once the funds have left. An inquiry (status warning_*) takes no money and may close with
 // nothing more, so it ends nothing; if it becomes a dispute,
 // charge.dispute.funds_withdrawn arrives then. The stripe_refund ledger, keyed on
 // the dispute id, makes the two events of an ordinary dispute one clawback.
@@ -1322,15 +1321,9 @@ func stripeHandleDisputeFunds(
 	return &StripeWebhookResult{}, nil
 }
 
-// A won dispute's key on the stripe_refund ledger; the dispute id alone is the
-// key of its clawback.
-func stripeDisputeWonLedgerId(disputeId string) string {
-	return "won/" + disputeId
-}
-
-// stripeHandleDisputeClosed gives a network back the paid window a dispute cut,
-// when the dispute is won: Stripe returned the money, so the purchase is paid
-// again. A lost dispute's clawback stands, and an inquiry that closed took no
+// Gives a network back the paid window a dispute cut, when the dispute is won:
+// Stripe returned the money, so the purchase is paid again. A lost dispute's
+// clawback stands, and an inquiry that closed took no
 // money. One delivery restores, gated by the stripe_refund ledger, and every
 // restoration or reason not to is one operator event.
 //
@@ -1410,7 +1403,8 @@ func stripeHandleDisputeClosed(
 	if credit != nil {
 		eventNetworkId = &credit.networkId
 	}
-	ledgerId := stripeDisputeWonLedgerId(dispute.Id)
+	// the dispute id alone is the key of its clawback
+	ledgerId := "won/" + dispute.Id
 	server.Tx(ctx, func(tx server.PgTx) {
 		handled = false
 		restored = nil

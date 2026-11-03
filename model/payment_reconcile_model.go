@@ -671,8 +671,8 @@ func GetReconcileSubscriptionRenewalsInConn(connOwner server.PgConn,
 	return renewals
 }
 
-// DisputeEndedEntitlementInTx reports whether the dispute's clawback ended a
-// window: its disputed event in the operator stream says so. A dispute that found
+// Whether the dispute's clawback ended a window: its disputed event in the
+// operator stream says so. A dispute that found
 // the window already over ended nothing, and has nothing to give back.
 func DisputeEndedEntitlementInTx(tx server.PgTx, ctx context.Context, disputeId string) (ended bool) {
 	result, err := tx.Query(
@@ -706,8 +706,7 @@ func DisputeEndedEntitlementInTx(tx server.PgTx, ctx context.Context, disputeId 
 	return
 }
 
-// RestoreDisputedStripeEntitlementInTx gives back the paid window a dispute's
-// clawback cut: the invoice's renewal on the network, starting at startTime, and
+// Gives back the paid window a dispute's clawback cut: the invoice's renewal on the network, starting at startTime, and
 // the Pro balance it granted, matched by its cut window, get endTime. It returns
 // the restored renewal, or nil when the renewal is gone or isn't cut (a
 // redelivery, or a window that never ended). The caller has established that the
