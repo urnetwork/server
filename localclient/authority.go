@@ -358,6 +358,11 @@ func (self *Authority) Get(ctx context.Context, requestUrl, token string) ([]byt
 		case "/auth/refresh":
 			var refreshed *controller.RefreshTokenResult
 			refreshed, err = controller.RefreshToken(s)
+			if session.RenewalRefused(err) {
+				// rotated, removed or revoked after authenticate's check: the
+				// 401 authenticate gives the same token
+				return nil, &connect.HttpStatusError{StatusCode: http.StatusUnauthorized}
+			}
 			result = refreshed
 			if err == nil && refreshed != nil && refreshed.Error == nil && refreshed.ByJwt != "" {
 				self.stateLock.Lock()
