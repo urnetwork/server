@@ -7,7 +7,9 @@ package controller
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"math/big"
 	"net/http/httptest"
 	"strings"
@@ -454,6 +456,46 @@ func TestDbClaimRelayRequests(t *testing.T) {
 	})
 }
 
+// A paid claim's record in Redis: one per account of a deployment, the next one in
+// place of the one before, kept about the Claim now period, and none for a record
+// that does not decode.
+func TestDbClaimRelayClaimRecords(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		key := model.StDeploymentKey("945:" + server.NewId().String())
+		other := model.StDeploymentKey("945:" + server.NewId().String())
+		if claim := model.GetSnClaimRelayClaim(ctx, key, 1, 7); claim != nil {
+			t.Fatalf("no record yet: %+v", claim)
+		}
+		first := &model.SnClaimRelayClaim{TxHash: "0x" + strings.Repeat("1", 64), Cumulative: "100", AmountRao: "100"}
+		model.SetSnClaimRelayClaim(ctx, key, 1, 7, first)
+		if claim := model.GetSnClaimRelayClaim(ctx, key, 1, 7); claim == nil || *claim != *first {
+			t.Fatalf("record %+v", claim)
+		}
+		// another account, pool or deployment has its own
+		if model.GetSnClaimRelayClaim(ctx, key, 1, 8) != nil || model.GetSnClaimRelayClaim(ctx, key, 2, 7) != nil || model.GetSnClaimRelayClaim(ctx, other, 1, 7) != nil {
+			t.Fatal("a record answers for another account")
+		}
+		second := &model.SnClaimRelayClaim{TxHash: "0x" + strings.Repeat("2", 64), Cumulative: "250", AmountRao: "150"}
+		model.SetSnClaimRelayClaim(ctx, key, 1, 7, second)
+		if claim := model.GetSnClaimRelayClaim(ctx, key, 1, 7); claim == nil || *claim != *second {
+			t.Fatalf("replaced record %+v", claim)
+		}
+		redisKey := fmt.Sprintf("sn_claim_relay_claim:%s:%d/%d", key, 1, 7)
+		server.Redis(ctx, func(r server.RedisClient) {
+			ttl, err := r.PTTL(ctx, redisKey).Result()
+			server.Raise(err)
+			if ttl < 29*24*time.Hour || 30*24*time.Hour < ttl {
+				t.Fatalf("ttl %s", ttl)
+			}
+			server.Raise(r.Set(ctx, redisKey, "not a record", time.Hour).Err())
+		})
+		if claim := model.GetSnClaimRelayClaim(ctx, key, 1, 7); claim != nil {
+			t.Fatalf("a record that does not decode: %+v", claim)
+		}
+	})
+}
+
 // claimRelayDbWorld is a pool with a finalized root on the real tables, and a chain
 // fixture that answers what vault2 holds.
 type claimRelayDbWorld struct {
@@ -600,6 +642,20 @@ func TestDbClaimRelayWholePass(t *testing.T) {
 			t.Fatalf("sent %d", len(world.fixture.sent))
 		}
 
+		// the claim it paid is named to the network it paid, with what it paid,
+		// on the wire too
+		paidAnswer, err := SnClaimRelay(world.session(0))
+		if err != nil || paidAnswer.Error != nil || len(paidAnswer.Accounts) != 1 {
+			t.Fatalf("paid answer %+v (%v)", paidAnswer, err)
+		}
+		if paidAccount := paidAnswer.Accounts[0]; paidAccount.ClaimTxHash != strings.ToLower(tx.Hash().Hex()) || paidAccount.ClaimAmountRao != int64(world.leaves[0].Cumulative.Uint64()) || paidAccount.ClaimableRao != 0 {
+			t.Fatalf("paid account %+v, want %s", paidAccount, tx.Hash().Hex())
+		}
+		wire, err := json.Marshal(paidAnswer)
+		if err != nil || !strings.Contains(string(wire), `"claim_tx_hash":"`+strings.ToLower(tx.Hash().Hex())+`"`) || !strings.Contains(string(wire), fmt.Sprintf(`"claim_amount_rao":%d`, world.leaves[0].Cumulative.Uint64())) {
+			t.Fatalf("on the wire %s (%v)", wire, err)
+		}
+
 		// the api says why the other one waits, and that it can be tapped
 		clientSession := world.session(1)
 		answer, err := SnClaimRelay(clientSession)
@@ -609,6 +665,10 @@ func TestDbClaimRelayWholePass(t *testing.T) {
 		account := answer.Accounts[0]
 		if account.Reason != SnClaimRelayReasonUnderThreshold || !account.ClaimNowAvailable || account.Index != 1 {
 			t.Fatalf("account %+v", account)
+		}
+		// nothing claimed yet, nothing named
+		if account.ClaimTxHash != "" || account.ClaimAmountRao != 0 {
+			t.Fatalf("an unclaimed account names a claim: %+v", account)
 		}
 		if answer.AutomaticThresholdRao < 2_959_000_000 || 2_960_000_000 < answer.AutomaticThresholdRao || answer.ClaimNowPeriodDays != 30 {
 			t.Fatalf("answer %+v", answer)
@@ -651,6 +711,10 @@ func TestDbClaimRelayWholePass(t *testing.T) {
 		answer, err = SnClaimRelay(clientSession)
 		if err != nil || answer.Accounts[0].Reason != SnClaimRelayReasonNothingPending || answer.Accounts[0].ClaimableRao != 0 {
 			t.Fatalf("paid %+v (%v)", answer.Accounts[0], err)
+		}
+		// the tapped claim is named, the transaction the relay sent for it
+		if tapped := world.fixture.sent[1]; answer.Accounts[0].ClaimTxHash != strings.ToLower(tapped.Hash().Hex()) || answer.Accounts[0].ClaimAmountRao != int64(world.leaves[1].Cumulative.Uint64()) {
+			t.Fatalf("tapped claim %+v, want %s", answer.Accounts[0], tapped.Hash().Hex())
 		}
 		if answer.Accounts[0].ClaimNowNextAtMillis < server.NowUtc().Add(29*24*time.Hour).UnixMilli() {
 			t.Fatalf("next at %d", answer.Accounts[0].ClaimNowNextAtMillis)
