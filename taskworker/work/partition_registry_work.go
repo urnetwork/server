@@ -138,8 +138,11 @@ func MaintainPartitionRetention(
 	maintainPartitionRetention *MaintainPartitionRetentionArgs,
 	clientSession *session.ClientSession,
 ) (*MaintainPartitionRetentionResult, error) {
+	// both controls are read once, before any transaction
+	ctx := server.WithProviderUsageArchiveExportControl(model.WithContractHorizonControl(clientSession.Ctx))
+	exportActive := server.ProviderUsageArchiveExportActive(ctx)
 	report, state := server.MaintainPartitionRetention(
-		model.WithContractHorizonControl(clientSession.Ctx),
+		ctx,
 		server.NowUtc(),
 		maintainPartitionRetention.State,
 		DefaultPartitionRegistryTaskSettings().RetentionBudget,
@@ -152,6 +155,11 @@ func MaintainPartitionRetention(
 			glog.Infof("[partitions]%s dropped %v, archived %v\n", retired.Family, retired.Dropped, retired.Archived)
 		}
 		for leaf, reason := range retired.Blocked {
+			if exportActive && retired.Family == server.ProviderUsageArchiveFamilyName {
+				// the weeks the export control lets through, and why each stays
+				glog.Infof("[partitions]%s expired %s stays: %s\n", retired.Family, leaf, reason)
+				continue
+			}
 			glog.V(1).Infof("[partitions]%s expired %s stays: %s\n", retired.Family, leaf, reason)
 		}
 	}
