@@ -246,6 +246,20 @@ client. The network-wide payout routes were already Network only. The class
 is separate from App admin so the flip in decision 1 leaves the provider apps'
 own payout open.
 
+Since 2026-11-02 the class also covers six later routes, ten in all:
+- a device's own part of a Top 200 claim (66d51e1f1): `GET /sn/fleet/device`,
+  `POST /sn/fleet/device/signature`, `GET /sn/fleet/device/binding` and
+  `POST /sn/fleet/device/leave`. Their handlers take client tokens only;
+- the claim relay (53e9402dd): `GET /sn/claim-relay` and
+  `POST /sn/claim-relay/claim-now`. They act on the network's coldkeys, but a
+  claim only ever pays the network's own consented coldkey, and the apps show
+  the status and tap Claim now on a device.
+
+The network's own part of a Top 200 claim (`GET /sn/fleet/claim`,
+`POST /sn/fleet/authorization`, `/sn/fleet/hotkey-signatures`,
+`/sn/fleet/top-up`) is Network only. The spec documents
+`EmbedClientJwtRefused` on the ten and `ClientJwtRefused` on those four.
+
 **Decision 4 (confirm): the 403 and its message.** These are new responses on
 the admin routes. The OpenAPI spec (`connect/api/bringyour.yml`) does not
 list 403 for them yet. That is a spec follow-up in connect, and the route
