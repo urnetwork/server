@@ -466,3 +466,58 @@ func TestProviderUsageArchiveExportControlReadsRedis(t *testing.T) {
 		connect.AssertEqual(t, ProviderUsageArchiveExportActive(WithProviderUsageArchiveExportControl(ctx)), false)
 	})
 }
+
+// A copy verified before the ledger existed, or whose registration failed, is
+// recorded by the next run, once; a copy that no longer verifies is not.
+func TestProviderUsageArchiveExportRegistersStoredCopies(t *testing.T) {
+	DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		family := providerUsageArchivePartitionFamily
+		week := family.RangeAt(NowUtc().Add(-20 * contractPartitionWeek))
+		_, err := family.EnsureRangeFor(ctx, week.Lower)
+		connect.AssertEqual(t, err, nil)
+		leaf := family.LeafName(testArchiveTable, week)
+		closeTime := week.Lower.Add(time.Hour)
+		dir := t.TempDir()
+		clock := testExportClock()
+		files := []string{}
+		for i := range 3 {
+			testExportArchiveContract(t, ctx, week.Lower.Add(time.Duration(i+1)*time.Hour), &closeTime, testArchiveUsage(int64(i+1)))
+			manifest, _ := testExportWeek(t, ctx, leaf, dir, clock)
+			files = append(files, manifest.File)
+		}
+		register := func() ([]string, error) {
+			var written []string
+			var err error
+			MaintenanceDb(ctx, func(conn PgConn) {
+				written, err = usagearchive.RegisterStoredCopies(ctx, conn.Conn(), dir, "test:"+dir)
+			})
+			return written, err
+		}
+		ledgerRows := func() int64 {
+			return testContractPartitionScalar[int64](t, ctx, `SELECT count(*) FROM st_provider_usage_archive_export`)
+		}
+		// the newest copy no longer verifies: the two before it are recorded
+		copyPath := filepath.Join(dir, files[2])
+		data, err := os.ReadFile(copyPath)
+		connect.AssertEqual(t, err, nil)
+		data[len(data)/2] ^= 0x01
+		connect.AssertEqual(t, os.WriteFile(copyPath, data, 0o640), nil)
+		written, err := register()
+		if err == nil || !strings.Contains(err.Error(), files[2]) {
+			t.Fatalf("a copy that does not verify was registered: %v", err)
+		}
+		connect.AssertEqual(t, written, files[:2])
+		connect.AssertEqual(t, ledgerRows(), int64(2))
+		// once recorded, a copy is not recorded again
+		data[len(data)/2] ^= 0x01
+		connect.AssertEqual(t, os.WriteFile(copyPath, data, 0o640), nil)
+		written, err = register()
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, written, files[2:])
+		written, err = register()
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(written), 0)
+		connect.AssertEqual(t, ledgerRows(), int64(3))
+	})
+}
