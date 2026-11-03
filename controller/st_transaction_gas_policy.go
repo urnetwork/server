@@ -32,6 +32,9 @@ func (self *CoreStClient) operatorGasAdmission(ctx context.Context, signingAccou
 	if self.cfg == nil {
 		return nil, nil, errStNotConfigured
 	}
+	if self.claimRelay.exemptFromOperatorGasPolicy(signingAccounts) {
+		return nil, nil, nil
+	}
 	policy := self.cfg.OperatorGasPolicy.Clone()
 	if policy == nil && self.cfg.Profile == "testnet" && self.cfg.ChainId == 945 {
 		if env, _ := server.Env(); env != "main" {

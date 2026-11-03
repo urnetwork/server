@@ -59,6 +59,12 @@ type ledgerV2RPC struct {
 	estimates map[string]uint64
 	needs     map[string]uint64
 	withheld  int
+	// baseFee, when set, puts a base fee in every block and answers the tip
+	// method with zero. balance answers eth_getBalance. receiptHook sees each
+	// receipt as it is made.
+	baseFee     *big.Int
+	balance     *big.Int
+	receiptHook func(*types.Transaction, *types.Receipt)
 }
 
 func newLedgerV2RPC(t testing.TB) *ledgerV2RPC {
@@ -121,12 +127,22 @@ func (self *ledgerV2RPC) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			} else if selector != "latest" && selector != "finalized" {
 				block, _ = hexutil.DecodeUint64(selector)
 			}
-			result = stTransactionReconcileBlock(block)
+			header := stTransactionReconcileBlock(block)
+			if self.baseFee != nil {
+				header["baseFeePerGas"] = hexutil.EncodeBig(self.baseFee)
+			}
+			result = header
 		case "eth_getTransactionCount":
 			result = hexutil.EncodeUint64(self.nonce)
+		case "eth_getBalance":
+			result = hexutil.EncodeBig(self.balance)
 		case "eth_gasPrice":
 			result = "0x64"
 		case "eth_maxPriorityFeePerGas":
+			if self.baseFee != nil {
+				result = "0x0"
+				break
+			}
 			response["error"] = map[string]any{"code": -32601, "message": "method not found"}
 		case "eth_call", "eth_estimateGas":
 			var message struct {
@@ -173,6 +189,9 @@ func (self *ledgerV2RPC) ServeHTTP(writer http.ResponseWriter, request *http.Req
 				Type: transaction.Type(), TxHash: transaction.Hash(), BlockHash: stTransactionReconcileBlockHash(self.finalizedBlock - 1),
 				BlockNumber: new(big.Int).SetUint64(self.finalizedBlock - 1), Status: status,
 				CumulativeGasUsed: transaction.Gas(), GasUsed: transaction.Gas(), EffectiveGasPrice: transaction.GasPrice(), Logs: []*types.Log{},
+			}
+			if self.receiptHook != nil {
+				self.receiptHook(&transaction, self.receipts[hash])
 			}
 		case "eth_getTransactionReceipt":
 			var hash string

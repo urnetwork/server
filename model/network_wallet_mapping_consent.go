@@ -269,6 +269,43 @@ type NetworkWalletMappingConsentView struct {
 
 // Nil when the network has no accepted consent in the domain. A retained row
 // that no longer verifies is an error, never a displayed wallet.
+// GetNetworkWalletMappingConsentColdkeys returns the coldkey of each consent the
+// network ever signed, newest first: an earlier coldkey's account keeps its
+// balance after a wallet change. Each original is verified as when it was accepted.
+func GetNetworkWalletMappingConsentColdkeys(ctx context.Context, domain protocol.ClientKeyHistoryDomain, networkId server.Id) ([][32]byte, error) {
+	digest, err := domain.Digest()
+	if err != nil {
+		return nil, err
+	}
+	originals := [][]byte{}
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(ctx, `SELECT original FROM network_wallet_mapping_consent WHERE domain_hash=$1 AND network_id=$2 ORDER BY generation DESC`, digest[:], networkId)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var original []byte
+				server.Raise(result.Scan(&original))
+				originals = append(originals, original)
+			}
+		})
+	})
+	coldkeys := make([][32]byte, 0, len(originals))
+	for _, raw := range originals {
+		var original protocol.WalletMappingConsent
+		if err := json.Unmarshal(raw, &original); err != nil {
+			return nil, errors.Join(protocol.ErrWalletMappingIntegrity, err)
+		}
+		statement, _, err := protocol.VerifyNetworkWalletMappingConsent(ctx, original)
+		if err != nil {
+			return nil, err
+		}
+		if statement.NetworkId != [16]byte(networkId) || statement.Domain != domain {
+			return nil, protocol.ErrWalletMappingIntegrity
+		}
+		coldkeys = append(coldkeys, statement.Coldkey)
+	}
+	return coldkeys, nil
+}
+
 func GetNetworkWalletMappingConsent(ctx context.Context, domain protocol.ClientKeyHistoryDomain, networkId server.Id) (*NetworkWalletMappingConsentView, error) {
 	digest, err := domain.Digest()
 	if err != nil {
