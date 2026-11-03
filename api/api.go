@@ -36,7 +36,7 @@ type routeOwners struct {
 
 // Only the API lifecycle supplies this authenticated cache; the route never
 // starts a background owner or dials a provider on an upload request.
-func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUpload, owners routeOwners) []*router.Route {
+func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLane, owners routeOwners) []*router.Route {
 	providerWork := handlers.NewProviderWorkHandlers()
 	verifyRequestClosure := handlers.NewVerifyRequestClosureHandlers()
 	providerWorkBody := router.StreamingBody{IdleTimeout: 60 * time.Second, TransferTimeout: 60 * time.Second, ResponseTimeout: 300 * time.Second, DrainTimeout: 5 * time.Second}
