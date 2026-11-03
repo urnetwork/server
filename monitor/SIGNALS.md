@@ -40767,6 +40767,9 @@ How it works:
   `st_client_key_history` row (about 4.7 KB on disk) and two MinIO evidence
   objects (§11.6b), as well as its contracts and close reports. Identity churn
   is therefore storage growth on edge-2 and on MinIO at the same time.
+- Hosted window clients keep their keys local from the proxy release with
+  `KeepWindowClientKeysLocal` (`FP2FIX.md`). From then on their churn adds no key
+  history or evidence, only network_client rows, contracts and close reports.
 
 | | 10-15 (baseline) | 10-21 01:00Z to 10-22 06:00Z |
 |---|---|---|
