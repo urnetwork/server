@@ -180,10 +180,19 @@ type StripeEventChargeObject struct {
 	Id             string `json:"id"`
 	Invoice        string `json:"invoice"`
 	PaymentIntent  string `json:"payment_intent"`
+	Amount         int    `json:"amount"`
 	AmountRefunded int    `json:"amount_refunded"`
 	// embedded on older API versions' charge.refunded payloads; newer
 	// versions omit it and the refunds are listed by charge instead
 	Refunds *StripeEventChargeRefundList `json:"refunds"`
+}
+
+// Whether the charge still holds part of its money with this refund of
+// refundAmount counted, so what it bought stays paid for. A charge read back
+// before it shows the refund has the refund itself to go on, and one that does
+// not state its amount counts as given back.
+func (self *StripeEventChargeObject) keepsPaidAmount(refundAmount int) bool {
+	return max(self.AmountRefunded, refundAmount) < self.Amount
 }
 
 type StripeEventDisputeObject struct {
@@ -1107,6 +1116,10 @@ func stripeCreditInvoicePaidInTx(
 //
 // decision table (charge -> what was granted -> clawback):
 //
+//	a refund that leaves part of the charge paid (a partial refund)
+//	    -> nothing ends: what the charge bought stays paid for. The refund is
+//	       on the ledger and in the operator stream, and the refund that gives
+//	       back the rest of the charge is the one that claws back
 //	charge carries an invoice, invoice in the stripe_invoice ledger
 //	    -> end the invoice's renewal + the pro balance it granted
 //	       (EndReconciledEntitlementForTransactions, market=stripe scoped to
@@ -1189,6 +1202,7 @@ func stripeHandleChargeRefunded(
 			model.PaymentReconcileActionRefunded,
 			"charge.refunded",
 			refund.Amount,
+			charge.keepsPaidAmount(refund.Amount),
 		); err != nil {
 			return nil, err
 		}
@@ -1217,6 +1231,7 @@ func stripeHandleRefundCreated(
 		model.PaymentReconcileActionRefunded,
 		"refund.created",
 		refund.Amount,
+		charge.keepsPaidAmount(refund.Amount),
 	); err != nil {
 		return nil, err
 	}
@@ -1244,6 +1259,7 @@ func stripeHandleDisputeCreated(
 		model.PaymentReconcileActionDisputed,
 		"charge.dispute.created",
 		dispute.Amount,
+		false,
 	); err != nil {
 		return nil, err
 	}
@@ -1257,6 +1273,7 @@ func stripeHandleDisputeCreated(
 // retries it. Where the charge cannot be mapped to anything we granted, a
 // refund_unmatched event is recorded for the operator instead of guessing --
 // and the handler still answers 200, since a retry cannot do better.
+// keepsPaidAmount: the charge keeps part of its money, so nothing is clawed back.
 func stripeHandleRefund(
 	clientSession *session.ClientSession,
 	refundId string,
@@ -1266,6 +1283,7 @@ func stripeHandleRefund(
 	action string,
 	eventType string,
 	amount int,
+	keepsPaidAmount bool,
 ) error {
 	ctx := clientSession.Ctx
 	now := server.NowUtc()
@@ -1307,6 +1325,9 @@ func stripeHandleRefund(
 	if 0 < amount {
 		details["amount"] = amount
 	}
+	if keepsPaidAmount {
+		details["partial"] = true
+	}
 	endedNetworkIds := []server.Id{}
 
 	server.Tx(ctx, func(tx server.PgTx) {
@@ -1330,7 +1351,9 @@ func stripeHandleRefund(
 
 		if invoiceId != "" {
 			details["invoice"] = invoiceId
-			if ledgerNetworkId != nil {
+			if ledgerNetworkId != nil && keepsPaidAmount {
+				details["ended"] = false
+			} else if ledgerNetworkId != nil {
 				// a subscription invoice we credited: end its renewal and the
 				// pro balance it granted
 				endedNetworkIds = model.EndReconciledEntitlementForTransactionsInTx(
@@ -1349,19 +1372,21 @@ func stripeHandleRefund(
 			}
 		} else if stripeSessionId != "" {
 			details["checkout_session"] = stripeSessionId
-			found, voidedCount, clawedNetworkIds := model.ClawbackBalanceCodesForPurchaseEventInTx(
-				tx,
-				ctx,
-				stripeSessionId,
-				now,
-			)
-			if found {
-				endedNetworkIds = clawedNetworkIds
-				details["voided_codes"] = voidedCount
-				details["ended_balances"] = len(clawedNetworkIds)
-			} else {
-				eventAction = model.PaymentReconcileActionRefundUnmatched
-				details["reason"] = "no_balance_code_for_session"
+			if !keepsPaidAmount {
+				found, voidedCount, clawedNetworkIds := model.ClawbackBalanceCodesForPurchaseEventInTx(
+					tx,
+					ctx,
+					stripeSessionId,
+					now,
+				)
+				if found {
+					endedNetworkIds = clawedNetworkIds
+					details["voided_codes"] = voidedCount
+					details["ended_balances"] = len(clawedNetworkIds)
+				} else {
+					eventAction = model.PaymentReconcileActionRefundUnmatched
+					details["reason"] = "no_balance_code_for_session"
+				}
 			}
 		} else {
 			// no invoice and no checkout session: this charge maps to nothing

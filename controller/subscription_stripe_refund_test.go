@@ -520,3 +520,202 @@ func TestStripeLegacyInvoiceEmailMatchIsNotCredited(t *testing.T) {
 		)
 	})
 }
+
+// TestStripePartialRefundKeepsTheWindow pins that giving back part of a charge
+// does not end what the charge bought: the renewal, its Pro balance and Pro
+// stay, the refund is still on the ledger and in the operator stream, and only
+// the refund that completes the charge ends the window.
+func TestStripePartialRefundKeepsTheWindow(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		newStripeRefundTestEnv(t)
+
+		networkId := server.NewId()
+		userId := server.NewId()
+		model.Testing_CreateNetwork(ctx, networkId, "stripepartial", userId)
+
+		invoiceId := "in_partial_refund_1"
+		credited, err := stripeCreditInvoicePaid(
+			ctx, networkId, invoiceId, model.UsdToNanoCents(40.00),
+			server.NowUtc().Add(-24*time.Hour), server.NowUtc().Add(300*24*time.Hour),
+		)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, credited, true)
+
+		partial := map[string]any{
+			"id":              "ch_partial_refund_1",
+			"invoice":         invoiceId,
+			"amount":          4000,
+			"amount_refunded": 1000,
+			"refunds": map[string]any{
+				"data": []map[string]any{
+					{"id": "re_partial_1", "charge": "ch_partial_refund_1", "amount": 1000},
+				},
+			},
+		}
+		result, err := StripeWebhook(stripeWebhookEvent(t, "charge.refunded", partial), reconcileTestSession(t, ctx))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, result, nil)
+
+		connect.AssertEqual(t, activeRenewalCount(t, ctx, networkId, model.SubscriptionMarketStripe), 1)
+		connect.AssertEqual(t, len(model.GetActiveTransferBalances(ctx, networkId)), 1)
+		connect.AssertEqual(t, model.IsProNetwork(ctx, networkId), true)
+		connect.AssertEqual(
+			t,
+			countPaymentReconciliationEventRows(t, ctx, model.SubscriptionMarketStripe, model.PaymentReconcileActionRefunded, "re_partial_1"),
+			1,
+		)
+
+		// the refund that gives back the rest ends the window
+		full := map[string]any{
+			"id":              "ch_partial_refund_1",
+			"invoice":         invoiceId,
+			"amount":          4000,
+			"amount_refunded": 4000,
+			"refunds": map[string]any{
+				"data": []map[string]any{
+					{"id": "re_partial_1", "charge": "ch_partial_refund_1", "amount": 1000},
+					{"id": "re_partial_2", "charge": "ch_partial_refund_1", "amount": 3000},
+				},
+			},
+		}
+		result, err = StripeWebhook(stripeWebhookEvent(t, "charge.refunded", full), reconcileTestSession(t, ctx))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, result, nil)
+
+		connect.AssertEqual(t, activeRenewalCount(t, ctx, networkId, model.SubscriptionMarketStripe), 0)
+		connect.AssertEqual(t, len(model.GetActiveTransferBalances(ctx, networkId)), 0)
+		connect.AssertEqual(t, model.IsProNetwork(ctx, networkId), false)
+		connect.AssertEqual(
+			t,
+			countPaymentReconciliationEventRows(t, ctx, model.SubscriptionMarketStripe, model.PaymentReconcileActionRefunded, "re_partial_1"),
+			1,
+		)
+		connect.AssertEqual(
+			t,
+			countPaymentReconciliationEventRows(t, ctx, model.SubscriptionMarketStripe, model.PaymentReconcileActionRefunded, "re_partial_2"),
+			1,
+		)
+	})
+}
+
+// TestStripeRefundCreatedPartialKeepsTheWindow is the refund.created delivery
+// of a partial refund: it carries only the refund, so the charge read back
+// decides.
+func TestStripeRefundCreatedPartialKeepsTheWindow(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		env := newStripeRefundTestEnv(t)
+
+		networkId := server.NewId()
+		userId := server.NewId()
+		model.Testing_CreateNetwork(ctx, networkId, "stripepartial2", userId)
+
+		invoiceId := "in_partial_refund_2"
+		credited, err := stripeCreditInvoicePaid(
+			ctx, networkId, invoiceId, model.UsdToNanoCents(40.00),
+			server.NowUtc().Add(-24*time.Hour), server.NowUtc().Add(300*24*time.Hour),
+		)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, credited, true)
+
+		env.charges["ch_partial_refund_2"] = map[string]any{
+			"id":              "ch_partial_refund_2",
+			"invoice":         invoiceId,
+			"amount":          4000,
+			"amount_refunded": 1000,
+		}
+		refund := map[string]any{"id": "re_partial_3", "charge": "ch_partial_refund_2", "amount": 1000}
+		result, err := StripeWebhook(stripeWebhookEvent(t, "refund.created", refund), reconcileTestSession(t, ctx))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, result, nil)
+
+		connect.AssertEqual(t, activeRenewalCount(t, ctx, networkId, model.SubscriptionMarketStripe), 1)
+		connect.AssertEqual(t, model.IsProNetwork(ctx, networkId), true)
+		connect.AssertEqual(
+			t,
+			countPaymentReconciliationEventRows(t, ctx, model.SubscriptionMarketStripe, model.PaymentReconcileActionRefunded, "re_partial_3"),
+			1,
+		)
+	})
+}
+
+// TestStripeDataPackPartialRefundKeepsTheCode is the single-charge path: a code
+// whose charge kept part of its money stays redeemable.
+func TestStripeDataPackPartialRefundKeepsTheCode(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		env := newStripeRefundTestEnv(t)
+
+		sessionId := "cs_partial_refund_1"
+		err := CreateBalanceCode(
+			ctx,
+			1*model.Tib,
+			30*24*time.Hour,
+			model.UsdToNanoCents(5.00),
+			sessionId,
+			"test-record",
+			"buyer@bringyour.com",
+			nil,
+		)
+		connect.AssertEqual(t, err, nil)
+
+		env.charges["ch_partial_pack_1"] = map[string]any{
+			"id":              "ch_partial_pack_1",
+			"payment_intent":  "pi_partial_pack_1",
+			"amount":          500,
+			"amount_refunded": 100,
+		}
+		env.sessionsByPaymentIntent["pi_partial_pack_1"] = []map[string]any{{"id": sessionId}}
+
+		refund := map[string]any{"id": "re_partial_pack_1", "charge": "ch_partial_pack_1", "amount": 100}
+		result, err := StripeWebhook(stripeWebhookEvent(t, "refund.created", refund), reconcileTestSession(t, ctx))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, result, nil)
+		connect.AssertEqual(
+			t,
+			countPaymentReconciliationEventRows(t, ctx, model.SubscriptionMarketStripe, model.PaymentReconcileActionRefunded, "re_partial_pack_1"),
+			1,
+		)
+
+		balanceCodeId, err := model.GetBalanceCodeIdForPurchaseEventId(ctx, sessionId)
+		connect.AssertEqual(t, err, nil)
+		balanceCode, err := model.GetBalanceCode(ctx, balanceCodeId)
+		connect.AssertEqual(t, err, nil)
+
+		redeemNetworkId := server.NewId()
+		testingCreatePaymentNetworkRow(ctx, redeemNetworkId)
+		redeemResult, err := model.RedeemBalanceCode(&model.RedeemBalanceCodeArgs{
+			Secret:    balanceCode.Secret,
+			NetworkId: redeemNetworkId,
+		}, ctx)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, redeemResult.Error, nil)
+		connect.AssertEqual(t, len(model.GetActiveTransferBalances(ctx, redeemNetworkId)), 1)
+	})
+}
+
+// A partial refund keeps what the charge bought; a full one, or a charge that
+// does not state its amount, does not.
+func TestStripeChargeKeepsPaidAmount(t *testing.T) {
+	cases := []struct {
+		chargeAmount   int
+		amountRefunded int
+		refundAmount   int
+		keeps          bool
+	}{
+		{chargeAmount: 4000, amountRefunded: 1000, refundAmount: 1000, keeps: true},
+		{chargeAmount: 4000, amountRefunded: 4000, refundAmount: 3000, keeps: false},
+		{chargeAmount: 4000, amountRefunded: 4000, refundAmount: 4000, keeps: false},
+		// a charge read back before it shows the refund: the refund itself is the whole charge
+		{chargeAmount: 4000, amountRefunded: 0, refundAmount: 4000, keeps: false},
+		{chargeAmount: 0, amountRefunded: 500, refundAmount: 500, keeps: false},
+		{chargeAmount: 0, amountRefunded: 0, refundAmount: 0, keeps: false},
+	}
+	for _, c := range cases {
+		charge := &StripeEventChargeObject{Amount: c.chargeAmount, AmountRefunded: c.amountRefunded}
+		if keeps := charge.keepsPaidAmount(c.refundAmount); keeps != c.keeps {
+			t.Errorf("charge %d refunded %d refund %d: keeps = %t, want %t", c.chargeAmount, c.amountRefunded, c.refundAmount, keeps, c.keeps)
+		}
+	}
+}
