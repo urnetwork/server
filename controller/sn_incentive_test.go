@@ -54,6 +54,7 @@ func snIncentiveTestCensus() *stmetagraph.Census {
 func TestSnIncentiveSnapshotStaleness(t *testing.T) {
 	readAt := time.Date(2026, 10, 29, 18, 0, 0, 0, time.UTC)
 	fallback := []stmetagraph.WeightEntry{{Uid: 169, Value: 14563}, {Uid: 170, Value: 65535}, {Uid: 250, Value: 65535}}
+	fallbackV2 := []stmetagraph.WeightEntry{{Uid: 67, Value: 14563}, {Uid: 170, Value: 65535}, {Uid: 250, Value: 65535}}
 	for _, test := range []struct {
 		name      string
 		change    func(*stmetagraph.Census)
@@ -63,6 +64,7 @@ func TestSnIncentiveSnapshotStaleness(t *testing.T) {
 	}{
 		{name: "healthy", change: func(*stmetagraph.Census) {}, reference: new(uint16(1)), reasons: []string{}},
 		{name: "fallback row", change: func(census *stmetagraph.Census) { census.ValidatorRows[0].Row = fallback }, reference: new(uint16(1)), reasons: []string{model.SnIncentiveStaleFallbackRow}},
+		{name: "settlement v2 fallback row", change: func(census *stmetagraph.Census) { census.ValidatorRows[0].Row = fallbackV2 }, reference: new(uint16(1)), reasons: []string{model.SnIncentiveStaleFallbackRow}},
 		{name: "a row like the fallback is not it", change: func(census *stmetagraph.Census) { census.ValidatorRows[0].Row = fallback[:2] }, reference: new(uint16(1)), reasons: []string{}},
 		{name: "inactive", change: func(census *stmetagraph.Census) { census.LastUpdate[1] = 7_000_000 - 5_001 }, reference: new(uint16(1)), reasons: []string{model.SnIncentiveStaleReferenceInactive}},
 		{name: "at the cutoff is active", change: func(census *stmetagraph.Census) { census.LastUpdate[1] = 7_000_000 - 5_000 }, reference: new(uint16(1)), reasons: []string{}},
