@@ -93,7 +93,7 @@ func testTimestampStoresTheInstant(t *testing.T, zone string) {
 			{"local", local, instant},
 			{"unix milli", time.UnixMilli(instant.UnixMilli()), instant.Truncate(time.Millisecond)},
 			{"parsed offset", parsed, instant},
-			{"in a zone", instant.In(kolkata), instant},
+			{"zoned", instant.In(kolkata), instant},
 			{"pointer", &local, instant},
 			{"pgtype", pgtype.Timestamp{Time: local, Valid: true}, instant},
 		}
