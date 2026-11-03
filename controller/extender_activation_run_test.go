@@ -337,12 +337,15 @@ func TestExtenderActivateRefusedStoresNoRun(t *testing.T) {
 
 // Activates a new key once per run, each run started at `runStartTime`, so its
 // history holds each of the runs. An empty run id is an activation with none.
+// Every run is a client of the one network that holds the key: an activation
+// from any other network is refused and stores nothing.
 func testActivateExtenderRuns(ctx context.Context, name string, runStartTime time.Time, runIds ...string) server.Id {
 	publicKey := []byte("extender-run-test-" + name)
+	networkId := server.NewId()
 	var extenderId server.Id
 	for _, runId := range runIds {
 		activation := &model.NetworkExtenderActivation{
-			NetworkId:   server.NewId(),
+			NetworkId:   networkId,
 			ClientId:    server.NewId(),
 			PublicKey:   publicKey,
 			TcpPort:     443,

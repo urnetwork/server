@@ -34,7 +34,7 @@ var reservedUploadStartupFailedGauge = prometheus.NewGauge(prometheus.GaugeOpts{
 	Namespace: "urnetwork",
 	Subsystem: "api",
 	Name:      "reserved_upload_startup_failed",
-	Help:      "1 when the configured reserved validator upload admission could not start; reserved uploads are then refused while every other route serves",
+	Help:      "1 while the configured reserved validator upload admission has not started on this process; it retries, reserved uploads are answered 503 until it starts, and every other route serves",
 })
 
 func init() {
@@ -266,23 +266,6 @@ func runWithDependencies(
 	flushStats()
 	glog.Infof("[api]close\n")
 	return nil
-}
-
-// A reserved upload admission the running API cannot start, such as a pinned
-// validator config newer than this build's validator package, disables only
-// the reserved upload lane: requests carrying the reserved header are refused
-// and every other route keeps serving. Failing NewRouter instead made every
-// restarting API block exit on one configuration mismatch.
-func startReservedAttemptUpload(ctx context.Context, start func(context.Context) (*controller.StReservedAttemptUpload, error)) *controller.StReservedAttemptUpload {
-	reservedUpload, err := start(ctx)
-	if err != nil {
-		reservedUpload.Close()
-		reservedUploadStartupFailedGauge.Set(1)
-		glog.Infof("[api]reserved validator staging unavailable: %s\n", err)
-		return nil
-	}
-	reservedUploadStartupFailedGauge.Set(0)
-	return reservedUpload
 }
 
 // NewRouter builds the complete api route table together with the close that
