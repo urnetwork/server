@@ -1072,7 +1072,7 @@
     {
       "type": "timeseries",
       "title": "webhook refusals / h by reason",
-      "description": "POST /updates/brevo requests refused before any event is recorded, for every Brevo webhook (both campaigns and product updates). no_credential: no Authorization header, the webhook was registered without the credential; wrong_credential: an Authorization value that is no brevo.webhook_bearers user with an empty password; verification_unavailable: vault brevo.yml names no usable user. Brevo does not retry a refused event, so each one is lost. Fix: bringyourctl onboarding webhook-ensure (vault brevo.yml for verification_unavailable).",
+      "description": "POST /updates/brevo requests refused before any event is recorded, for every Brevo webhook (both campaigns and product updates). no_credential: no Authorization header, the webhook was registered without the credential; wrong_credential: an Authorization value that is no brevo.webhook_bearers user, as Basic with an empty password or as a Bearer token; verification_unavailable: vault brevo.yml names no usable user. Brevo does not retry a refused event, so each one is lost. Fix: bringyourctl onboarding webhook-ensure (vault brevo.yml for verification_unavailable).",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
