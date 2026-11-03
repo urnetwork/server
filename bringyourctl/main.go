@@ -160,7 +160,8 @@ Usage:
     bringyourctl model upgrade-client-reliability-index [--parallel=<n>]
     bringyourctl refresh-transfer-balances
     bringyourctl st status [--epoch=<epoch>]
-    bringyourctl st deposit [--alpha_rao=<alpha_rao>]
+    bringyourctl st deposit [--alpha_rao=<alpha_rao>] [--convert]
+    bringyourctl st demand-status
     bringyourctl st commit --epoch=<epoch>
     bringyourctl st finalize --epoch=<epoch>
     bringyourctl st payout-dry-run --epoch=<epoch> [--out=<path>]
@@ -594,6 +595,8 @@ func main() {
 		// manual ops fallback for the st epoch pipeline (D-3/D-11)
 		if status, _ := opts.Bool("status"); status {
 			stStatus(opts)
+		} else if demandStatus, _ := opts.Bool("demand-status"); demandStatus {
+			stDemandStatus()
 		} else if deposit, _ := opts.Bool("deposit"); deposit {
 			stDeposit(opts)
 		} else if commit, _ := opts.Bool("commit"); commit {
@@ -3319,11 +3322,31 @@ func stDeposit(opts docopt.Opts) {
 	}
 	epoch := state.PendingEpoch
 
-	outcome, err := controller.StDepositForEpoch(ctx, epoch, overrideRao)
+	// A size named by hand spends no USDC unless --convert says it may.
+	deposit := controller.StDepositForEpoch
+	if convert, _ := opts.Bool("--convert"); convert {
+		deposit = controller.StDepositForEpochConverting
+	}
+	outcome, err := deposit(ctx, epoch, overrideRao)
 	if err != nil {
 		panic(err)
 	}
 	fmt.Printf("deposit epoch %d: %s\n", epoch, outcome)
+}
+
+// stDemandStatus prints the demand deposit wallets and what is under way, the price
+// in force for this epoch, its signer, the next scheduled entry and the last usage
+// statement. It signs and fetches nothing.
+func stDemandStatus() {
+	status, err := controller.StDemandStatus(context.Background())
+	if err != nil {
+		panic(err)
+	}
+	encoded, err := json.MarshalIndent(status, "", "  ")
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(string(encoded))
 }
 
 func stCommit(opts docopt.Opts) {

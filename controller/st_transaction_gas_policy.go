@@ -105,7 +105,10 @@ func stOperatorGasPolicyBinding(policy *server.StOperatorGasPolicy, cfg *StConfi
 }
 
 // A pending result is reconstructed only from its durable exact unsigned
-// envelope. Changed fees or a request to cancel cannot overwrite that owner.
+// envelope. Changed fees or a request to cancel cannot overwrite that owner. The
+// one exception is model.RetireStTransactionGasExecution: a staging transfer whose
+// epoch has rolled, with no attempt recorded, which nothing can have broadcast
+// because this process signs in place and broadcasts only recorded attempts.
 func (self *CoreStClient) signReservedStTransaction(ctx context.Context, client *ethclient.Client, key *ecdsa.PrivateKey, intent *model.StTransactionIntent, requestedKind string, reservation *model.StTransactionGasReservation, policy *server.StOperatorGasPolicy, authority *server.StOperatorGasAuthority) (result *model.StTransactionAttempt, resultErr error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
