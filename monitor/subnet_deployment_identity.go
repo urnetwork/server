@@ -32,6 +32,8 @@ type SubnetDeploymentIdentity struct {
 	Coordinator     string
 	SettlementVault string
 	PolicyHash      string
+	// VaultV2 is settlement v2's vault, "" while the deployment declares none.
+	VaultV2 string
 }
 
 // A fixed reason for a deployment that cannot pin the readers.
@@ -101,5 +103,6 @@ func subnetDeploymentIdentityFromBytes(data []byte) SubnetDeploymentIdentity {
 		Coordinator:     strings.ToLower(mainnet.Coordinator),
 		SettlementVault: strings.ToLower(mainnet.SettlementVault),
 		PolicyHash:      strings.ToLower(mainnet.PolicyHash),
+		VaultV2:         strings.ToLower(mainnet.VaultV2Address),
 	}
 }

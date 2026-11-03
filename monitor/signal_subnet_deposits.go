@@ -6,14 +6,19 @@
 // observations, pairs every Deposit and ConvictionAdded event with its
 // ReservePrincipalAdded receipt over a bounded finalized frontier, replays the
 // validators' exact deposit audit against the signed, committed prior-epoch
-// payout artifact, and checks that applied native weight rows after the
-// audit's native cycle give a noncompliant pool no weight.
+// payout artifact, or under settlement v2 the operator's signed usage statement,
+// at the signed price sheet's rates for the epoch, and checks that applied native
+// weight rows after the audit's native cycle give a noncompliant pool no weight.
 package monitor
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
+	"net/url"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -24,6 +29,8 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	ethtypes "github.com/ethereum/go-ethereum/core/types"
 
+	"github.com/urfoundation/sn/demand/pricesheet"
+	"github.com/urfoundation/sn/demand/usage"
 	"github.com/urfoundation/sn/payoutartifact"
 	"github.com/urfoundation/sn/protocol"
 	"github.com/urfoundation/sn/stabi"
@@ -40,13 +47,29 @@ const (
 	subnetReservePrincipalClass        = "subnet-reserve-principal"
 	subnetReserveCreditDeltaClass      = "subnet-reserve-credit-delta"
 	subnetReserveYieldClass            = "subnet-reserve-yield"
+	subnetPriceSheetClass              = "subnet-price-sheet"
+	subnetUsageStatementClass          = "subnet-usage-statement"
+	subnetDepositLandingClass          = "subnet-deposit-landing"
+	subnetCampaignHeadroomClass        = "subnet-campaign-headroom"
+)
+
+const (
+	// How long a priced deposit may stay unpaid once its source totals exist: an
+	// attempt converts within about 12 minutes and each send finalizes within 8, and
+	// a refusal retries after 15. At 12 seconds a block this is 3 hours.
+	subnetDepositLandingGraceBlocks = 900
+	// A statement's chunk list is bounded by usage.MaxBytes, and its envelope adds
+	// one small frame. A run's statements are few: one, and one more per rebuild.
+	maximumSubnetUsageEnvelopeBytes = usage.MaxBytes + 8192
+	maximumSubnetUsageHistoryBytes  = 64 * 1024
+	maximumSubnetUsageObjects       = 8
 )
 
 var subnetDepositsFamily = subnetFamily{
 	number: "22.3", key: "subnet-deposits", probeId: "subnet/deposits",
 	title:   "operator demand deposits, conviction and reserve",
-	classes: []string{subnetDepositAttributionClass, subnetOperatorDepositMismatchClass, subnetDepositPenaltyBypassClass, subnetReservePrincipalClass, subnetReserveCreditDeltaClass, subnetReserveYieldClass},
-	sources: "the agreed finalized checkpoint, the reserve sink and coordinator deposit views, the staking precompile, native Delegates, ChildkeyTake, Weights, LastUpdate and ValidatorPermit, Deposit, ConvictionAdded and ReservePrincipalAdded logs over a bounded frontier, the committed prior-epoch payout artifacts at both API origins, and the reviewed policy document and operator signers",
+	classes: []string{subnetDepositAttributionClass, subnetOperatorDepositMismatchClass, subnetDepositPenaltyBypassClass, subnetReservePrincipalClass, subnetReserveCreditDeltaClass, subnetReserveYieldClass, subnetPriceSheetClass, subnetUsageStatementClass, subnetDepositLandingClass, subnetCampaignHeadroomClass},
+	sources: "the agreed finalized checkpoint, the reserve sink and coordinator deposit views, the staking precompile, native Delegates, ChildkeyTake, Weights, LastUpdate and ValidatorPermit, Deposit, ConvictionAdded and ReservePrincipalAdded logs over a bounded frontier, the committed prior-epoch payout artifacts and usage statements at both API origins, the published price sheet under the deployment's pinned signer, vault2's pools, and the reviewed policy document and operator signers",
 }
 
 func NewSubnetDepositsSignal() Signal {
@@ -65,10 +88,46 @@ type subnetDepositsProbe struct {
 	depositLogs *subnetLogFrontier
 	ledger      *subnetDepositLedger
 	latch       *subnetReplayLatch
+	sheet       *subnetPriceSheetMemory
+	totals      *subnetDepositTotalsMemory
+	campaign    *subnetCampaignMemory
 }
 
 func newSubnetDepositsProbe() *subnetDepositsProbe {
-	return &subnetDepositsProbe{runtimes: newSubnetRuntimeCache(), depositLogs: newSubnetLogFrontier(), ledger: &subnetDepositLedger{census: newSubnetDepositCensus()}, latch: newSubnetReplayLatch()}
+	return &subnetDepositsProbe{runtimes: newSubnetRuntimeCache(), depositLogs: newSubnetLogFrontier(), ledger: &subnetDepositLedger{census: newSubnetDepositCensus()}, latch: newSubnetReplayLatch(), sheet: &subnetPriceSheetMemory{}, totals: &subnetDepositTotalsMemory{}, campaign: &subnetCampaignMemory{}}
+}
+
+// The block this probe first saw a usage statement of each source epoch, since a
+// statement carries the epoch's end as its time, not when it was published. A restart
+// only delays the landing check.
+type subnetDepositTotalsMemory struct {
+	stateLock sync.Mutex
+	first     map[[2]uint64]uint64
+}
+
+func (self *subnetDepositTotalsMemory) firstSeen(run *subnetRun, noId, epoch, block uint64) uint64 {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	key := [2]uint64{noId, epoch}
+	if first, ok := self.first[key]; ok {
+		return first
+	}
+	run.afterPublish(func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		if self.first == nil {
+			self.first = map[[2]uint64]uint64{}
+		}
+		if _, ok := self.first[key]; !ok {
+			self.first[key] = block
+		}
+		for known := range self.first {
+			if known[1]+2 < epoch {
+				delete(self.first, known)
+			}
+		}
+	})
+	return block
 }
 
 func (*subnetDepositsProbe) id() string               { return "subnet/deposits" }
@@ -289,7 +348,7 @@ func (self *subnetDepositsProbe) observe(ctx context.Context, run *subnetRun) ([
 		return nil, err
 	}
 	findings = append(findings, events...)
-	audits, auditFindings, err := observeSubnetDepositAudits(ctx, run, checkpoint, state, deposits, sourceStart, sourceEnd)
+	audits, auditFindings, err := self.observeDepositAudits(ctx, run, checkpoint, state, deposits, sourceStart, sourceEnd)
 	if err != nil {
 		return nil, err
 	}
@@ -724,11 +783,12 @@ type subnetDepositAuditResult struct {
 	decided bool
 }
 
-// Replays the validators' deposit audit for every on-chain operator against
-// the signed, committed prior-epoch payout artifact and the reviewed policy.
-// Both underdeposit and overdeposit are mismatches; a pending artifact before
-// its deadline is not.
-func observeSubnetDepositAudits(ctx context.Context, run *subnetRun, checkpoint *subnetCheckpoint, state *subnetDeploymentState, deposits map[uint64]*subnetOperatorDeposits, sourceStart, sourceEnd subnetEvmBlock) ([]subnetDepositAuditResult, []finding, error) {
+// Replays the validators' deposit audit for every on-chain operator at the rates
+// in force for the epoch, against what settled its source epoch: the signed,
+// committed payout artifact under v1, the signed usage statement under v2. Both
+// underdeposit and overdeposit are mismatches; a pending source before its deadline
+// is not.
+func (self *subnetDepositsProbe) observeDepositAudits(ctx context.Context, run *subnetRun, checkpoint *subnetCheckpoint, state *subnetDeploymentState, deposits map[uint64]*subnetOperatorDeposits, sourceStart, sourceEnd subnetEvmBlock) ([]subnetDepositAuditResult, []finding, error) {
 	document, ok := run.settings.policyDocumentBytes()
 	if !ok {
 		return nil, []finding{subnetUnknown(subnetDepositsFamily, subnetOperatorDepositMismatchClass, "subnet-deposits/operators", "policy-document-not-enrolled", subnetConfigurationSustain, "the exact reviewed policy document with the deposit tiers and caps")}, nil
@@ -751,6 +811,34 @@ func observeSubnetDepositAudits(ctx context.Context, run *subnetRun, checkpoint 
 	deadline := subnetEpochStartBlock(state.policies, epoch) + state.currentPolicy.RootCommitWindowBlocks
 	results := []subnetDepositAuditResult{}
 	findings := []finding{}
+	sheet, err := self.sheet.read(ctx, run)
+	if err != nil {
+		return nil, nil, err
+	}
+	findings = append(findings, subnetPriceSheetFindings(run, checkpoint, sheet)...)
+	// A sheet never verified, as on a host that cannot reach the published address or
+	// after a restart during an outage, prices under the reviewed document, as validators
+	// with no sheet do. Its unavailability is the sheet finding's alone.
+	effective := pricesheet.Effective(sheet.sheet, epoch, policy.Deposit)
+	inForce, scheduled := subnetDepositPriced(sheet.sheet, epoch, policy.Deposit)
+	// The pools decide which settlement owned a source epoch, never whether a v1 root
+	// exists, because the phase C sweep commits one on a v2 epoch. Nothing here reads
+	// them while nothing is priced.
+	var pools map[uint64]stabi.ISTSettlementVault2Pool
+	poolsKnown := false
+	if deployment.VaultV2 != "" && (inForce || scheduled) && lag <= epoch {
+		pools, poolsKnown, err = readSubnetDepositV2Pools(ctx, checkpoint, common.HexToAddress(deployment.VaultV2), state.operatorIds)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	settledByV2 := func(noId, source uint64) bool {
+		pool := pools[noId]
+		return pool.Registered && pool.FirstEpoch <= source
+	}
+	statementOf := func(noId uint64) (subnetUsageStatementRead, error) {
+		return readSubnetUsageStatement(ctx, run, noId, epoch-lag, signers[noId], sourceStart, sourceEnd)
+	}
 	mismatched := 0
 	for _, noId := range state.operatorIds {
 		operator := deposits[noId]
@@ -762,14 +850,55 @@ func observeSubnetDepositAudits(ctx context.Context, run *subnetRun, checkpoint 
 			findings = append(findings, subnetUnknown(subnetDepositsFamily, subnetOperatorDepositMismatchClass, target, "conviction-underflow", subnetTransientSustain, "consistent cumulative conviction and epoch counters"))
 			continue
 		}
+		v2Declared := deployment.VaultV2 != "" && (inForce || scheduled) && lag <= epoch
 		var audit validator.DepositAudit
+		totalsAt := uint64(0)
 		switch {
-		case policy.Deposit.IsZeroPrice():
+		case effective.IsZeroPrice():
 			audit = validator.ZeroPriceDepositAudit(epoch, max(epoch, lag)-lag, noId, observed, conviction)
+			// Nothing is owed. Once a price is scheduled, the pipeline that price
+			// will need is checked ahead of it.
+			if v2Declared && scheduled && poolsKnown && settledByV2(noId, epoch-lag) {
+				if _, reviewed := signers[noId]; reviewed {
+					read, err := statementOf(noId)
+					if err != nil {
+						return nil, nil, err
+					}
+					findings = append(findings, subnetUsageStatementFinding(run, checkpoint, target, read, deadline, false))
+				}
+			}
 		case epoch < lag:
 			audit = validator.DepositAudit{NoID: noId, Epoch: epoch, Status: validator.DepositAuditBootstrap, Compliant: observed.Sign() == 0, Disposition: "zero_pool_weight_bootstrap"}
 			if observed.Sign() != 0 {
 				audit.Status = validator.DepositAuditMismatch
+			}
+		case v2Declared && !poolsKnown:
+			findings = append(findings, subnetUnknown(subnetDepositsFamily, subnetOperatorDepositMismatchClass, target, "v2-pool-unavailable", subnetTransientSustain, "this operator's vault2 pool, which decides what settled the source epoch"))
+			continue
+		case v2Declared && settledByV2(noId, epoch-lag):
+			if _, reviewed := signers[noId]; !reviewed {
+				findings = append(findings, subnetUnknown(subnetDepositsFamily, subnetOperatorDepositMismatchClass, target, "artifact-signer-not-reviewed", subnetConfigurationSustain, "the reviewed artifact signer of this operator"))
+				continue
+			}
+			read, err := statementOf(noId)
+			if err != nil {
+				return nil, nil, err
+			}
+			findings = append(findings, subnetUsageStatementFinding(run, checkpoint, target, read, deadline, true))
+			switch {
+			case read.statement != nil:
+				audit = subnetEvaluateUsageStatement(read.statement, epoch, epoch-lag, noId, observed, conviction, effective)
+				totalsAt = self.totals.firstSeen(run, noId, epoch-lag, checkpoint.evm.number)
+			case read.status != "":
+				audit = validator.FailedDepositAudit(epoch, epoch-lag, noId, observed, conviction, read.status, nil)
+			case read.absent:
+				audit = validator.FailedDepositAudit(epoch, epoch-lag, noId, observed, conviction, validator.DepositAuditUnavailablePending, nil)
+				if checkpoint.evm.number > deadline {
+					audit.Status = validator.DepositAuditUnavailable
+				}
+			default:
+				findings = append(findings, subnetUnknown(subnetDepositsFamily, subnetOperatorDepositMismatchClass, target, read.reason, subnetTransientSustain, "the operator's signed usage statement at an enrolled API origin"))
+				continue
 			}
 		case operator.commitment.CommitBlock == 0:
 			audit = validator.FailedDepositAudit(epoch, epoch-lag, noId, observed, conviction, validator.DepositAuditUnavailablePending, nil)
@@ -805,13 +934,17 @@ func observeSubnetDepositAudits(ctx context.Context, run *subnetRun, checkpoint 
 					End:        payoutartifact.Boundary{Number: sourceEnd.number, Hash: strings.ToLower(sourceEnd.hash.Hex())},
 					PayoutRoot: operator.commitment.PayoutRoot, ArtifactHash: operator.commitment.ArtifactHash,
 					Committer: operator.commitment.Committer, RootSigner: operator.sourceVersion.RootSigner, CommitBlock: operator.commitment.CommitBlock,
-				}, epoch, observed, conviction, policy.Deposit)
+				}, epoch, observed, conviction, effective)
+				totalsAt = operator.commitment.CommitBlock
 			}
 		}
 		audit.ObservedAtBlock = checkpoint.evm.number
 		audit.ArtifactDeadlineBlock = deadline
 		decided := audit.Status != validator.DepositAuditUnavailablePending
 		results = append(results, subnetDepositAuditResult{noId: noId, audit: audit, decided: decided})
+		if totalsAt != 0 {
+			findings = append(findings, subnetDepositLandingFinding(run, checkpoint, target, audit, observed, totalsAt))
+		}
 		if audit.Compliant || audit.Status == validator.DepositAuditZeroPrice || audit.Status == validator.DepositAuditUnavailablePending {
 			findings = append(findings, subnetHealthy(subnetDepositsFamily, subnetOperatorDepositMismatchClass, target))
 			continue
@@ -823,8 +956,8 @@ func observeSubnetDepositAudits(ctx context.Context, run *subnetRun, checkpoint 
 				tier: tierWarn, sustain: subnetConfigurationSustain,
 				invariant: "operator-deposit-matches-signed-claim", expected: "compliant", observed: fmt.Sprint(audit.Disposition),
 				symptom:   "An operator's demand deposit does not match its signed usage claim",
-				mechanism: "The exact deposit audit validators run, replayed against the committed, signed prior-epoch payout artifact, found the observed deposit unequal to the required one, or found the artifact invalid, equivocating or unavailable after its root window. Both underdeposit and overdeposit are mismatches; validators give such a pool zero weight.",
-				baseline:  "Each operator's epoch deposit equals the required deposit for its signed prior-epoch usage, or its artifact is still pending before the root window closes, or the reviewed policy is zero-price.",
+				mechanism: "The exact deposit audit validators run, replayed against the committed, signed prior-epoch payout artifact or usage statement at the rates in force for the epoch, found the observed deposit unequal to the required one, or found the claim invalid, equivocating or unavailable after its root window. Both underdeposit and overdeposit are mismatches; validators give such a pool zero weight.",
+				baseline:  "Each operator's epoch deposit equals the required deposit for its signed prior-epoch usage, or its artifact is still pending before the root window closes, or the price in force is zero.",
 				action:    "Notify the responsible operator with the private audit record. Do not treat a pre-deadline pending artifact or an authorized bootstrap rule as dishonesty.",
 				verify:    "The operator's next epoch audit is compliant, or its artifact becomes available and verifies.",
 			},
@@ -848,7 +981,403 @@ func observeSubnetDepositAudits(ctx context.Context, run *subnetRun, checkpoint 
 			details:  fmt.Sprintf("failing_operators=%d", mismatched),
 		}))
 	}
-	return results, findings, nil
+	headroom, err := self.observeCampaignHeadroom(ctx, run, checkpoint, state, results, effective.IsZeroPrice())
+	if err != nil {
+		return nil, nil, err
+	}
+	return results, append(findings, headroom...), nil
+}
+
+// The campaign cap is a lifetime limit on every deposit's reserve, and a deposit past
+// it reverts, after which validators give the pool no weight. The headroom left is
+// judged in epochs of deposits at the latest required deposit, summed over the
+// operators, each epoch under the cap of the version in force at it, so a raise that
+// takes effect in time counts: under subnetCampaignWarnEpochs it warns, under
+// subnetCampaignPageEpochs it pages. Each operator's latest requirement is this
+// epoch's once its source totals exist, and its last one seen before that. At zero
+// price nothing is required and nothing is read.
+const (
+	subnetCampaignWarnEpochs = 8
+	subnetCampaignPageEpochs = 2
+)
+
+// Each operator's latest decided required deposit.
+type subnetCampaignMemory struct {
+	stateLock sync.Mutex
+	required  map[uint64]*big.Int
+}
+
+func (self *subnetCampaignMemory) last() map[uint64]*big.Int {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	last := map[uint64]*big.Int{}
+	for noId, amount := range self.required {
+		last[noId] = amount
+	}
+	return last
+}
+
+func (self *subnetCampaignMemory) remember(required map[uint64]*big.Int) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.required = required
+}
+
+// subnetCampaignEpochsLeft counts the epochs, from this one on and at most limit, whose
+// deposits of required each still fit under the campaign cap of the version in force at
+// their epoch.
+func subnetCampaignEpochsLeft(policies []stabi.STCoordinatorPolicySnapshot, epoch uint64, reserved *big.Int, required *big.Int, limit int) int {
+	used := new(big.Int).Set(reserved)
+	for left := range limit {
+		version, ok := subnetPolicyAtEpoch(policies, epoch+uint64(left))
+		if !ok || version.CampaignDepositCapRao == nil {
+			return left
+		}
+		used.Add(used, required)
+		if used.Cmp(version.CampaignDepositCapRao) > 0 {
+			return left
+		}
+	}
+	return limit
+}
+
+func (self *subnetDepositsProbe) observeCampaignHeadroom(ctx context.Context, run *subnetRun, checkpoint *subnetCheckpoint, state *subnetDeploymentState, results []subnetDepositAuditResult, zeroPrice bool) ([]finding, error) {
+	target := "subnet-deposits/campaign-headroom"
+	if zeroPrice {
+		run.afterPublish(func() { self.campaign.remember(nil) })
+		return []finding{subnetHealthy(subnetDepositsFamily, subnetCampaignHeadroomClass, target)}, nil
+	}
+	// An operator not decided this run counts at its last known requirement, so one
+	// whose source totals are late does not shrink the sum.
+	latest := self.campaign.last()
+	decided := false
+	for _, result := range results {
+		amount, ok := new(big.Int).SetString(result.audit.RequiredDepositRao, 10)
+		// A requirement is known only once the audit has priced it: an audit decided
+		// as unavailable or invalid says nothing about what the operator owes.
+		if result.decided && ok && 0 < amount.Sign() {
+			latest[result.noId], decided = amount, true
+		}
+	}
+	if decided {
+		run.afterPublish(func() { self.campaign.remember(latest) })
+	}
+	required := new(big.Int)
+	for _, amount := range latest {
+		required.Add(required, amount)
+	}
+	if required.Sign() == 0 {
+		return []finding{subnetHealthy(subnetDepositsFamily, subnetCampaignHeadroomClass, target)}, nil
+	}
+	requiredEpoch := state.currentEpoch
+	coordinator := stabi.NewSTCoordinator()
+	calls := []subnetEvmCall{{to: state.coordinator, data: coordinator.PackCampaignReserved()}}
+	err := checkpoint.evmReader.callBatch(ctx, calls, checkpoint.evm)
+	if canceled := subnetCanceled(ctx); canceled != nil {
+		return nil, canceled
+	}
+	var reserved *big.Int
+	if err == nil && calls[0].err == nil {
+		reserved, err = coordinator.UnpackCampaignReserved(calls[0].output)
+	}
+	if err != nil || calls[0].err != nil || reserved == nil {
+		return []finding{subnetUnknown(subnetDepositsFamily, subnetCampaignHeadroomClass, target, "campaign-reserved-unavailable", subnetTransientSustain, "the coordinator's campaignReserved at the agreed checkpoint")}, nil
+	}
+	epochs := subnetCampaignEpochsLeft(state.policies, state.currentEpoch, reserved, required, subnetCampaignWarnEpochs)
+	if subnetCampaignWarnEpochs <= epochs {
+		return []finding{subnetHealthy(subnetDepositsFamily, subnetCampaignHeadroomClass, target)}, nil
+	}
+	tier, sustain, invariant := tierWarn, subnetConfigurationSustain, fmt.Sprintf("campaign-headroom>=%d-epochs", subnetCampaignWarnEpochs)
+	if epochs < subnetCampaignPageEpochs {
+		tier, sustain, invariant = tierPage, subnetProvedSustain, fmt.Sprintf("campaign-headroom>=%d-epochs", subnetCampaignPageEpochs)
+	}
+	return []finding{subnetDecided(subnetDepositsFamily, subnetCampaignHeadroomClass, target, "", run.scope("complete", "coordinator-campaign-reserved"), subnetDecision{
+		state: "violated",
+		issue: subnetReplayIssue{
+			tier: tier, sustain: sustain,
+			invariant: invariant, expected: fmt.Sprintf("at-least-%d-epochs", subnetCampaignWarnEpochs), observed: fmt.Sprintf("%d-epochs", epochs),
+			symptom:   "The coordinator's campaign deposit cap is close to used up",
+			mechanism: "campaignDepositCapRao is a lifetime limit on the reserve every deposit adds to, and campaignReserved never goes down. Once a deposit would pass it, the deposit reverts, and validators give that pool no weight for the epoch.",
+			baseline:  fmt.Sprintf("The campaign cap less campaignReserved covers at least %d epochs at the latest required deposit, summed over the operators, under the version in force at each epoch.", subnetCampaignWarnEpochs),
+			action:    "The owner schedules a coordinator policy version with a higher campaign cap, effective before the headroom runs out. Lower prices only by a signed entry; never let the cap run out with a price in force.",
+			verify:    "A fresh run shows the headroom at or above the warning level, or a scheduled version raising the cap in time.",
+		},
+		evidence: fmt.Sprintf("Checkpoint EVM height %d; the operators' latest required deposits as of epoch %d. Amounts stay private.", checkpoint.evm.number, requiredEpoch),
+		details:  fmt.Sprintf("epochs_left=%d", epochs),
+	})}, nil
+}
+
+// The price sheet itself: a file that does not verify pages at once, because
+// operators and validators may then disagree on the rates. One that cannot be read is
+// unknown until the last verified copy grows stale. Whether a signed cap fits the
+// coordinator's is the chain family's deposit cap rule (subnetDepositCapsStop), which
+// judges each entry against the version in force at its own epoch.
+func subnetPriceSheetFindings(run *subnetRun, checkpoint *subnetCheckpoint, sheet subnetPriceSheetRead) []finding {
+	if !sheet.pinned {
+		return nil
+	}
+	target := "subnet-deposits/price-sheet"
+	evidence := fmt.Sprintf("Checkpoint height %d. The signed entries are compared in memory; the file's address and contents are not rendered.", checkpoint.number)
+	findings := []finding{}
+	switch {
+	case sheet.bad:
+		findings = append(findings, subnetDecided(subnetDepositsFamily, subnetPriceSheetClass, target, "", run.scope("complete", "published-price-sheet"), subnetDecision{
+			state: "violated",
+			issue: subnetReplayIssue{
+				tier: tierPage, sustain: subnetProvedSustain,
+				invariant: "published-price-sheet-verifies", expected: "every-entry-signed-by-the-pinned-signer-and-extending-the-last-verified", observed: sheet.reason,
+				symptom:   "The published demand deposit price sheet does not verify",
+				mechanism: "A file is served at the published address that does not parse, carries an entry not signed by the deployment's pinned signer, or drops or changes a signed entry. Readers keep the last verified sheet, so a deposit is not paid from it, but a reader with no verified copy cannot price at all, and a real new entry may be hidden behind it.",
+				baseline:  "The published file parses and every entry verifies under the pinned signer, keeping every entry already verified.",
+				action:    "Treat the site as possibly compromised until the file is explained; publish the correctly signed file. Never sign to match a file you did not write.",
+				verify:    "The published file verifies on a fresh run.",
+			},
+			evidence: evidence,
+		}))
+	case sheet.reason != "" && sheet.sheet != nil && subnetPriceSheetStaleAfter < run.started.Sub(sheet.lastVerified):
+		findings = append(findings, subnetDecided(subnetDepositsFamily, subnetPriceSheetClass, target, "stale", run.scope("complete", "published-price-sheet"), subnetDecision{
+			state: "stale",
+			issue: subnetReplayIssue{
+				tier: tierWarn, sustain: subnetConfigurationSustain,
+				invariant: "published-price-sheet-fresh", expected: fmt.Sprintf("read-within-%s", subnetPriceSheetStaleAfter), observed: sheet.reason,
+				symptom:   "The published demand deposit price sheet has not been readable for hours",
+				mechanism: "Readers keep pricing from the last verified sheet while the published address is down, so nothing stops, but a new entry published meanwhile reaches no operator or validator.",
+				baseline:  "The published file is readable at every cadence.",
+				action:    "Restore the published address. Do not schedule a new price until readers can see it.",
+				verify:    "The published file reads and verifies on a fresh run.",
+			},
+			evidence: evidence,
+		}))
+	case sheet.reason != "":
+		findings = append(findings, subnetUnknown(subnetDepositsFamily, subnetPriceSheetClass, target, sheet.reason, subnetTransientSustain, "the published price sheet"))
+	default:
+		findings = append(findings, subnetHealthy(subnetDepositsFamily, subnetPriceSheetClass, target))
+	}
+	return findings
+}
+
+// One operator's vault2 pools at the checkpoint. A failed read is not an absent v2.
+func readSubnetDepositV2Pools(ctx context.Context, checkpoint *subnetCheckpoint, vault common.Address, operators []uint64) (map[uint64]stabi.ISTSettlementVault2Pool, bool, error) {
+	binding := stabi.NewSTSettlementVault2()
+	calls := make([]subnetEvmCall, len(operators))
+	for i, noId := range operators {
+		calls[i] = subnetEvmCall{to: vault, data: binding.PackPools(new(big.Int).SetUint64(noId))}
+	}
+	if err := checkpoint.evmReader.callBatch(ctx, calls, checkpoint.evm); err != nil {
+		if canceled := subnetCanceled(ctx); canceled != nil {
+			return nil, false, canceled
+		}
+		return nil, false, nil
+	}
+	pools := map[uint64]stabi.ISTSettlementVault2Pool{}
+	for i, noId := range operators {
+		if calls[i].err != nil {
+			return nil, false, nil
+		}
+		pool, err := binding.UnpackPools(calls[i].output)
+		if err != nil {
+			return nil, false, nil
+		}
+		pools[noId] = pool
+	}
+	return pools, true, nil
+}
+
+// One read of an operator's usage statements for an epoch at every origin. Statement
+// is the one the audit uses. Absent means every origin answered and none holds one. A
+// nonempty status is the audit's verdict; otherwise reason says why nothing is known.
+type subnetUsageStatementRead struct {
+	statement *usage.Statement
+	absent    bool
+	status    string
+	reason    string
+}
+
+// The evidence routes' history answer.
+type subnetUsageHistory struct {
+	Schema  string `json:"schema"`
+	Objects []struct {
+		Key string `json:"key"`
+	} `json:"objects"`
+	More bool `json:"more"`
+}
+
+// Reads the operator's statements through both origins. A statement counts only if
+// it verifies under the reviewed artifact signer and names this deployment, operator,
+// epoch and its finalized boundaries. Two that verify for the same chunks with
+// different totals equivocate. Two for different chunks are a rebuild, which only the
+// committed header can choose between, and so unknown here: validators read the
+// ledger's rows, and this reader does not repeat that.
+func readSubnetUsageStatement(ctx context.Context, run *subnetRun, noId, epoch uint64, signer common.Address, start, end subnetEvmBlock) (subnetUsageStatementRead, error) {
+	deployment := run.settings.Deployment
+	runId := usage.RunID(noId, epoch)
+	found := map[string]*usage.Statement{}
+	invalid := false
+	answered := 0
+	for _, origin := range run.settings.ApiOrigins {
+		raw, _, err := readSubnetApi(ctx, run, origin, "/sn/evidence/history", url.Values{"deployment_id": []string{deployment.DeploymentId}, "netuid": []string{fmt.Sprint(deployment.Netuid)}, "kind": []string{usage.EvidenceKind}, "run_id": []string{runId}, "limit": []string{fmt.Sprint(maximumSubnetUsageObjects)}}, maximumSubnetUsageHistoryBytes)
+		if canceled := subnetCanceled(ctx); canceled != nil {
+			return subnetUsageStatementRead{}, canceled
+		}
+		if err != nil {
+			continue
+		}
+		var history subnetUsageHistory
+		if err := json.Unmarshal(raw, &history); err != nil || history.More || len(history.Objects) > maximumSubnetUsageObjects {
+			invalid = true
+			continue
+		}
+		complete := true
+		for _, object := range history.Objects {
+			contentHash := "sha256:" + strings.TrimSuffix(filepath.Base(object.Key), ".json")
+			if _, seen := found[contentHash]; seen {
+				continue
+			}
+			raw, etag, err := readSubnetApi(ctx, run, origin, "/sn/evidence", url.Values{"hash": []string{contentHash}}, maximumSubnetUsageEnvelopeBytes)
+			if canceled := subnetCanceled(ctx); canceled != nil {
+				return subnetUsageStatementRead{}, canceled
+			}
+			if err != nil {
+				complete = false
+				continue
+			}
+			statement, err := decodeSubnetUsageEnvelope(raw, etag, contentHash, runId, deployment)
+			if err == nil {
+				err = checkSubnetUsageStatement(statement, deployment, noId, epoch, signer, start, end)
+			}
+			if err != nil {
+				invalid = true
+				continue
+			}
+			found[contentHash] = statement
+		}
+		if complete {
+			answered++
+		}
+	}
+	var chosen *usage.Statement
+	for _, statement := range found {
+		switch {
+		case chosen == nil:
+			chosen = statement
+		case strings.Join(chosen.ProviderChunks, ",") != strings.Join(statement.ProviderChunks, ","):
+			return subnetUsageStatementRead{reason: "usage-statement-rebuilt"}, nil
+		case chosen.TotalUsageBytes != statement.TotalUsageBytes || chosen.TotalUsers != statement.TotalUsers || chosen.ProviderRows != statement.ProviderRows:
+			return subnetUsageStatementRead{status: validator.DepositAuditEquivocation}, nil
+		}
+	}
+	switch {
+	case chosen != nil:
+		return subnetUsageStatementRead{statement: chosen}, nil
+	case invalid:
+		return subnetUsageStatementRead{status: validator.DepositAuditInvalid}, nil
+	case answered == len(run.settings.ApiOrigins):
+		return subnetUsageStatementRead{absent: true}, nil
+	}
+	return subnetUsageStatementRead{reason: "usage-statement-unavailable"}, nil
+}
+
+// The evidence envelope only routes a statement; the statement's own signature
+// authenticates what the audit uses.
+func decodeSubnetUsageEnvelope(raw []byte, etag, contentHash, runId string, deployment SubnetDeploymentIdentity) (*usage.Statement, error) {
+	var envelope struct {
+		DeploymentID string          `json:"deployment_id"`
+		Netuid       uint16          `json:"netuid"`
+		Kind         string          `json:"kind"`
+		RunID        string          `json:"run_id"`
+		Payload      json.RawMessage `json:"payload"`
+		ContentHash  string          `json:"content_hash"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return nil, err
+	}
+	if envelope.DeploymentID != deployment.DeploymentId || envelope.Netuid != deployment.Netuid || envelope.Kind != usage.EvidenceKind || envelope.RunID != runId || !strings.EqualFold(envelope.ContentHash, contentHash) || etag != `"`+envelope.ContentHash+`"` {
+		return nil, errors.New("usage statement envelope is outside the requested identity")
+	}
+	return usage.Decode(envelope.Payload)
+}
+
+func checkSubnetUsageStatement(statement *usage.Statement, deployment SubnetDeploymentIdentity, noId, epoch uint64, signer common.Address, start, end subnetEvmBlock) error {
+	if err := statement.Verify(signer); err != nil {
+		return err
+	}
+	if statement.DeploymentID != deployment.DeploymentId || statement.ChainID != deployment.ChainId || statement.Netuid != deployment.Netuid || statement.Coordinator != deployment.coordinatorAddress() || statement.VaultV2 != common.HexToAddress(deployment.VaultV2) || statement.NoID != noId || statement.Epoch != epoch ||
+		!strings.EqualFold(statement.GenesisHash, deployment.GenesisHash) || !strings.EqualFold(statement.PolicyHash, deployment.PolicyHash) {
+		return errors.New("usage statement deployment identity mismatch")
+	}
+	if statement.Start.Number != start.number || statement.End.Number != end.number || !strings.EqualFold(statement.Start.Hash, start.hash.Hex()) || !strings.EqualFold(statement.End.Hash, end.hash.Hex()) {
+		return errors.New("usage statement finalized boundary mismatch")
+	}
+	return nil
+}
+
+// The same exact formula as validator.EvaluateDepositArtifact, on a verified statement.
+func subnetEvaluateUsageStatement(statement *usage.Statement, epoch, source, noId uint64, observed, conviction *big.Int, policy protocol.DepositPolicy) validator.DepositAudit {
+	audit := validator.FailedDepositAudit(epoch, source, noId, observed, conviction, validator.DepositAuditMismatch, nil)
+	required, tier, err := protocol.RequiredDepositRao(statement.TotalUsageBytes, statement.TotalUsers, conviction, policy)
+	if err != nil {
+		audit.Status, audit.Error = validator.DepositAuditInvalid, fmt.Sprintf("canonical deposit formula: %v", err)
+		return audit
+	}
+	audit.UsageBytes, audit.Users = statement.TotalUsageBytes, statement.TotalUsers
+	audit.RateNumeratorRaoPerGiB, audit.RateNumeratorRaoPerUser, audit.RateDenominator = tier.RateNumeratorRaoPerGiB, tier.RateNumeratorRaoPerUser, tier.RateDenominator
+	audit.RequiredDepositRao = required.String()
+	if observed.Cmp(required) != 0 {
+		audit.Error = "observed deposit does not equal the signed-usage requirement"
+		return audit
+	}
+	audit.Status, audit.Compliant, audit.Disposition = validator.DepositAuditCompliant, true, "pool_weight_eligible"
+	return audit
+}
+
+// A statement expected and missing after the source's commit deadline. It pages while
+// a price is in force, because the pool then has no weight. Ahead of a scheduled price
+// it warns, because the first priced deposit will need the same pipeline.
+func subnetUsageStatementFinding(run *subnetRun, checkpoint *subnetCheckpoint, target string, read subnetUsageStatementRead, deadline uint64, priced bool) finding {
+	if read.reason != "" {
+		return subnetUnknown(subnetDepositsFamily, subnetUsageStatementClass, target, read.reason, subnetTransientSustain, "the operator's signed usage statement at an enrolled API origin")
+	}
+	if !read.absent || checkpoint.evm.number <= deadline {
+		return subnetHealthy(subnetDepositsFamily, subnetUsageStatementClass, target)
+	}
+	tier, sustain := tierWarn, subnetConfigurationSustain
+	if priced {
+		tier, sustain = tierPage, subnetProvedSustain
+	}
+	return subnetDecided(subnetDepositsFamily, subnetUsageStatementClass, target, "", run.scope("complete", "operator-usage-statement"), subnetDecision{
+		state: "violated",
+		issue: subnetReplayIssue{
+			tier: tier, sustain: sustain,
+			invariant: "usage-statement-published-by-root-deadline", expected: "published", observed: "absent",
+			symptom:   "An operator's usage statement is missing after its epoch's commit deadline",
+			mechanism: "A settlement v2 source epoch has no signed payout artifact, so its usage statement is the only source of the next deposit's size. Without one the operator's deposit task waits and validators give the pool zero weight. The statement needs the epoch's users, captured at the boundary, and its provider rows, recorded when its root is built.",
+			baseline:  "Every settlement v2 epoch's statement is published by its commit deadline, at any price.",
+			action:    "Check the taskworker's usage steps and the epoch's provider rows, including an unrecoverable declaration or a pending rebuild. Do not sign a statement by hand.",
+			verify:    "The statement reads and verifies at both origins on a fresh run.",
+		},
+		evidence: fmt.Sprintf("Checkpoint EVM height %d; commit deadline %d.", checkpoint.evm.number, deadline),
+	})
+}
+
+// A priced deposit still unpaid hours after its source totals exist. Its pool has had
+// no weight all that time, and this is the signal that it is not a passing delay.
+func subnetDepositLandingFinding(run *subnetRun, checkpoint *subnetCheckpoint, target string, audit validator.DepositAudit, observed *big.Int, totalsAt uint64) finding {
+	if audit.Status != validator.DepositAuditMismatch || observed.Sign() != 0 || checkpoint.evm.number <= totalsAt+subnetDepositLandingGraceBlocks {
+		return subnetHealthy(subnetDepositsFamily, subnetDepositLandingClass, target)
+	}
+	return subnetDecided(subnetDepositsFamily, subnetDepositLandingClass, target, "", run.scope("complete", "operator-deposit-counter"), subnetDecision{
+		state: "violated",
+		issue: subnetReplayIssue{
+			tier: tierPage, sustain: subnetProvedSustain,
+			invariant: "priced-deposit-lands-after-its-totals", expected: fmt.Sprintf("landed-within-%d-blocks", subnetDepositLandingGraceBlocks), observed: "unpaid",
+			symptom:   "A priced demand deposit has not landed hours after its source totals existed",
+			mechanism: "The operator owes a deposit, its source totals are published, and the epoch's deposit counter is still zero. Until it lands validators give the pool zero weight at every steering pass. The usual causes are a refused conversion, an empty wallet, the price guard, or a blocked deposit key.",
+			baseline:  "An operator's deposit lands within hours of its source totals existing.",
+			action:    "Read `bringyourctl st status` and `st demand-status` for the refusal, and restore what it names. Do not send a deposit by hand of a size other than the one owed.",
+			verify:    "The epoch's deposit counter equals the requirement on a fresh run.",
+		},
+		evidence: fmt.Sprintf("Checkpoint EVM height %d; source totals seen by block %d. Required and observed amounts stay private.", checkpoint.evm.number, totalsAt),
+	})
 }
 
 // After the audit's native cycle, every applied validator row gives a

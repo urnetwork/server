@@ -913,6 +913,8 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	[]snMainnetMigrationContract{competitionJobReevaluationMigrationContract},
 	// the usage archive's export ledger, versioned by its position
 	[]snMainnetMigrationContract{usageArchiveExportLedgerMigrationContract},
+	// the demand deposit funder's state; its version follows the migration's position
+	[]snMainnetMigrationContract{stDemandMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an

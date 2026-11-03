@@ -33,13 +33,14 @@ const (
 	subnetValidatorEligibilityClass = "subnet-validator-eligibility"
 	subnetFleetBindingInvalidClass  = "subnet-fleet-binding-invalid"
 	subnetCommitmentMirrorLagClass  = "subnet-commitment-mirror-lag"
+	subnetDepositHotkeyOwnerClass   = "subnet-deposit-hotkey-owner"
 )
 
 var subnetIdentityFamily = subnetFamily{
 	number: "22.2", key: "subnet-identity", probeId: "subnet/identity",
 	title:   "pool registration, validator identity and fleet ownership",
-	classes: []string{subnetPoolCustodyIdentityClass, subnetValidatorEligibilityClass, subnetFleetBindingInvalidClass, subnetCommitmentMirrorLagClass},
-	sources: "the agreed finalized checkpoint, the coordinator operator census and vault pools, native Keys, Uids, Owner, ValidatorPermit, TotalHotkeyAlpha and StakeThreshold, native fleet commitments, coordinator commitment mirrors, FleetBound transactions over a bounded frontier, and the reviewed operator and validator census",
+	classes: []string{subnetPoolCustodyIdentityClass, subnetValidatorEligibilityClass, subnetFleetBindingInvalidClass, subnetCommitmentMirrorLagClass, subnetDepositHotkeyOwnerClass},
+	sources: "the agreed finalized checkpoint, the coordinator operator census and vault pools, native Keys, Uids, Owner, ValidatorPermit, TotalHotkeyAlpha and StakeThreshold, native fleet commitments, coordinator commitment mirrors, FleetBound transactions over a bounded frontier, the reviewed operator and validator census and policy document, and the published price sheet when a deposit hotkey has no owner",
 }
 
 func NewSubnetIdentitySignal() Signal {
@@ -55,10 +56,11 @@ type subnetIdentityProbe struct {
 	runtimes    *subnetRuntimeCache
 	bindingLogs *subnetLogFrontier
 	latch       *subnetReplayLatch
+	sheet       *subnetPriceSheetMemory
 }
 
 func newSubnetIdentityProbe() *subnetIdentityProbe {
-	return &subnetIdentityProbe{runtimes: newSubnetRuntimeCache(), bindingLogs: newSubnetLogFrontier(), latch: newSubnetReplayLatch()}
+	return &subnetIdentityProbe{runtimes: newSubnetRuntimeCache(), bindingLogs: newSubnetLogFrontier(), latch: newSubnetReplayLatch(), sheet: &subnetPriceSheetMemory{}}
 }
 
 func (*subnetIdentityProbe) id() string               { return "subnet/identity" }
@@ -79,6 +81,11 @@ func (self *subnetIdentityProbe) observe(ctx context.Context, run *subnetRun) ([
 	if err != nil {
 		return nil, err
 	}
+	owners, err := self.observeDepositHotkeyOwners(ctx, run, checkpoint, state)
+	if err != nil {
+		return nil, err
+	}
+	findings = append(findings, owners...)
 	validators, err := observeSubnetValidatorEligibility(ctx, run, checkpoint)
 	if err != nil {
 		return nil, err
@@ -275,6 +282,119 @@ func observeSubnetPoolCustody(ctx context.Context, run *subnetRun, checkpoint *s
 		findings = append(findings, subnetCustodyViolation(run.scope("complete", "coordinator-vault-and-native-registry"), "subnet-identity/escrow", escrowReasons, fmt.Sprintf("Checkpoint height %d; escrow registered=%t.", checkpoint.number, state.escrowRegistered)))
 	}
 	return findings, nil
+}
+
+// Each active operator's deposit hotkey is owned by its deposit signer's mirror
+// coldkey, the owner the operator associates by hand. Nobody else may hold it: a squat
+// or a swap pages at any price. Unset, staking it fails with HotKeyAccountNotExists,
+// so every priced deposit would fail: that pages once a priced entry is in force or
+// scheduled, and warns before. Only that case reads the sheet. An operator without a
+// deposit hotkey has nothing to check. One whose views failed is already reported.
+func (self *subnetIdentityProbe) observeDepositHotkeyOwners(ctx context.Context, run *subnetRun, checkpoint *subnetCheckpoint, state *subnetDeploymentState) ([]finding, error) {
+	type ownerCheck struct {
+		operator *subnetOperatorState
+		owner    types.AccountID
+		read     *subnetStorageRead
+	}
+	checks := []*ownerCheck{}
+	reads := []*subnetStorageRead{}
+	for _, noId := range state.operatorIds {
+		operator := state.operators[noId]
+		if operator.versionErr != nil || !operator.version.Active || operator.version.DepositHotkey == ([32]byte{}) || operator.version.DepositSigner == (common.Address{}) {
+			continue
+		}
+		check := &ownerCheck{operator: operator}
+		check.read = &subnetStorageRead{pallet: "SubtensorModule", item: "Owner", args: [][]byte{operator.version.DepositHotkey[:]}, value: &check.owner}
+		checks = append(checks, check)
+		reads = append(reads, check.read)
+	}
+	if len(reads) == 0 {
+		return nil, nil
+	}
+	findings := []finding{}
+	if err := subnetReadStorageBatch(ctx, checkpoint.chain, checkpoint.nativeHash, reads); err != nil {
+		if canceled := subnetCanceled(ctx); canceled != nil {
+			return nil, canceled
+		}
+		for _, check := range checks {
+			findings = append(findings, subnetUnknown(subnetIdentityFamily, subnetDepositHotkeyOwnerClass, subnetOperatorTarget(check.operator.noId), "native-"+subnetReadReason(err), subnetTransientSustain, "native Owner of this operator's deposit hotkey"))
+		}
+		return findings, nil
+	}
+	priced, known := false, false
+	for _, check := range checks {
+		target := subnetOperatorTarget(check.operator.noId)
+		if check.read.err != nil {
+			findings = append(findings, subnetUnknown(subnetIdentityFamily, subnetDepositHotkeyOwnerClass, target, "native-"+subnetReadReason(check.read.err), subnetTransientSustain, "native Owner of this operator's deposit hotkey"))
+			continue
+		}
+		owner := [32]byte(check.owner)
+		if check.read.present && owner == subnetMirroredColdkey(check.operator.version.DepositSigner) {
+			findings = append(findings, subnetHealthy(subnetIdentityFamily, subnetDepositHotkeyOwnerClass, target))
+			continue
+		}
+		evidence := fmt.Sprintf("Checkpoint height %d; operator %d. Hotkeys and coldkeys are compared in memory and not rendered.", checkpoint.number, check.operator.noId)
+		if check.read.present && owner != ([32]byte{}) {
+			findings = append(findings, subnetDecided(subnetIdentityFamily, subnetDepositHotkeyOwnerClass, target, "", run.scope("complete", "native-owner-and-coordinator-operator"), subnetDecision{
+				state: "violated",
+				issue: subnetReplayIssue{
+					tier: tierPage, sustain: subnetProvedSustain,
+					invariant: "deposit-hotkey-owned-by-signer-mirror", expected: "deposit-signer-mirror-coldkey", observed: "foreign-owner",
+					symptom:   "A deposit hotkey is owned by a coldkey other than its deposit signer's mirror",
+					mechanism: "Native Owner of the operator's deposit hotkey names another coldkey, from a squat before the association or a later swap. Whoever holds it takes the hotkey's delegate and childkey take on the deposit's stake, and can change how that stake behaves. The deposit task's conversion then refuses with 'the deposit hotkey cannot take stake' if the hotkey has stopped taking stake.",
+					baseline:  "Native Owner of every deposit hotkey is its deposit signer's EVM mirror coldkey.",
+					action:    "Stop conversions and investigate the association's history before anything more stakes on this hotkey; a replacement hotkey needs the coordinator's operator rotation.",
+					verify:    "Native Owner of the deposit hotkey is the deposit signer's mirror on a fresh run.",
+				},
+				evidence: evidence,
+			}))
+			continue
+		}
+		if !known {
+			inForce, err := self.depositPriceDue(ctx, run, state)
+			if err != nil {
+				return nil, err
+			}
+			priced, known = inForce, true
+		}
+		tier, sustain := tierWarn, subnetConfigurationSustain
+		if priced {
+			tier, sustain = tierPage, subnetProvedSustain
+		}
+		findings = append(findings, subnetDecided(subnetIdentityFamily, subnetDepositHotkeyOwnerClass, target, "", run.scope("complete", "native-owner-and-signed-price"), subnetDecision{
+			state: "violated",
+			issue: subnetReplayIssue{
+				tier: tier, sustain: sustain,
+				invariant: "deposit-hotkey-associated", expected: "deposit-signer-mirror-coldkey", observed: "unset",
+				symptom:   "A deposit hotkey has no owner",
+				mechanism: "Native Owner of the operator's deposit hotkey is unset. Staking on it fails with HotKeyAccountNotExists, so every priced deposit from this signer would fail, with the deposit task's conversion refusing as 'the deposit hotkey cannot take stake', and anyone can take the hotkey first.",
+				baseline:  "Native Owner of every deposit hotkey is its deposit signer's EVM mirror coldkey before any price is in force or scheduled.",
+				action:    "The operator's deposit signer associates the hotkey from its mirror coldkey. The deposit engine does not send this.",
+				verify:    "Native Owner of the deposit hotkey is the deposit signer's mirror on a fresh run.",
+			},
+			evidence: evidence,
+		}))
+	}
+	return findings, nil
+}
+
+// Whether a price is in force or scheduled, for an unset deposit hotkey. An unknown
+// answer, with no reviewed policy document or sheet to read, does not page.
+func (self *subnetIdentityProbe) depositPriceDue(ctx context.Context, run *subnetRun, state *subnetDeploymentState) (bool, error) {
+	document, ok := run.settings.policyDocumentBytes()
+	if !ok {
+		return false, nil
+	}
+	policy, err := protocol.ParsePolicy(document)
+	if err != nil {
+		return false, nil
+	}
+	sheet, err := self.sheet.read(ctx, run)
+	if err != nil {
+		return false, err
+	}
+	inForce, scheduled := subnetDepositPriced(sheet.sheet, state.currentEpoch, policy.Deposit)
+	return inForce || scheduled, nil
 }
 
 func subnetCustodyViolation(scope subnetReplayScope, target string, reasons []string, evidence string) finding {

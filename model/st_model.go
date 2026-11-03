@@ -59,6 +59,9 @@ const (
 	StPublishStatusFailed    = "failed"
 	// the write was found already applied on chain; no tx was sent
 	StPublishStatusSkipped = "skipped"
+	// the write can never succeed for this epoch: nothing was sent, and nothing
+	// retries it until the next epoch
+	StPublishStatusRefused = "refused"
 )
 
 // StDeploymentKey is the durable chain identity for coordinator-owned mirror

@@ -11297,4 +11297,10 @@ var migrations = []any{
 	// exporter registers copies; the taskworker that drops weeks early reads
 	// it only while the export control is on.
 	providerUsageArchiveExportLedgerMigration,
+
+	// The demand deposit's durable state (sn/demand, st_demand_schema.go): the
+	// funder's state and events, the last verified price sheet and each settlement
+	// v2 epoch's usage statement. New tables, and the usage statement is written at
+	// zero price too. Apply before deploying the taskworker that writes them.
+	newSqlMigration(stDemandSchemaSql),
 }

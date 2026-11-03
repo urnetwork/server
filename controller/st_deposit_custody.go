@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -21,6 +22,8 @@ import (
 	"github.com/urfoundation/sn/protocol"
 	"github.com/urfoundation/sn/ss58"
 	"github.com/urfoundation/sn/stabi"
+	"github.com/urnetwork/glog"
+	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 )
 
@@ -272,10 +275,15 @@ func (self *CoreStClient) validateDepositAttempt(ctx context.Context, client *et
 	if self.coordinator == nil || self.cfg == nil || self.cfg.DepositKey == nil || kind != model.StTxAttemptExecution || !strings.EqualFold(intent.FromAddress, crypto.PubkeyToAddress(self.cfg.DepositKey.PublicKey).Hex()) {
 		return nil
 	}
-	// Besides deposits, the deposit key signs exactly one execution: the
-	// configured phase C sweep's v1 close (st_v1_sweep.go), so that close
-	// never waits behind the root key's nonce sequence.
+	// Besides deposits, the deposit key signs the configured phase C sweep's v1
+	// close (st_v1_sweep.go), so that close never waits behind the root key's
+	// nonce sequence, and the conversion that funds its own deposits.
 	if self.v1SweepCloseIntent(intent) {
+		return nil
+	}
+	// The conversion's own transactions are checked by their form alone; they
+	// cannot move value out of the wallet (st_demand.go).
+	if self.demandCallIntent(intent) {
 		return nil
 	}
 	state, err := self.readDepositCustody(ctx, client, nil)
@@ -311,6 +319,13 @@ func (self *CoreStClient) validateDepositAttempt(ctx context.Context, client *et
 		if state.staged.Cmp(new(big.Int).Add(amount, big.NewInt(stDepositReserveAllowanceRao))) < 0 {
 			return errors.New("st: deposit staging lacks principal plus exact reserve rounding allowance")
 		}
+		// Custody reads the finalized head, which lags. Once the latest block has
+		// reached the deadline, a signature or a fee replacement could only revert, so
+		// none is made: the intent waits for the expiry handling above, which signs
+		// its reserved bytes once the deadline has passed at the finalized head.
+		if err := self.requireDepositDeadlineOpen(ctx, state.boundary.Epoch, state.deadline); err != nil {
+			return err
+		}
 		operation = fmt.Sprintf("deposit:%d:%d:%s", state.boundary.Epoch, self.cfg.NoId, state.nonce)
 	} else {
 		return errors.New("st: deposit custody key cannot sign an unrelated execution intent")
@@ -320,6 +335,190 @@ func (self *CoreStClient) validateDepositAttempt(ctx context.Context, client *et
 		return errors.New("st: retained deposit intent belongs to another immutable operation")
 	}
 	return nil
+}
+
+// stDepositStagingMargin is how long before the deposit's deadline a new staging
+// transfer may still be reserved. The transfer and the deposit that follows it must
+// both finish inside the epoch: a dead worker's task is claimed again within 5 minutes
+// (task.TaskLeaseTimeout), and each send then waits up to stWaitFinalizedTimeout, 8
+// minutes, for finality, its fee replacements included. That is 21 minutes, 105
+// blocks at 12 seconds; the rest covers the finality lag of custody's reads and one
+// more lost send. The cost is small: a deposit this late buys the pool weight for
+// under half an hour of a seven-day epoch.
+const stDepositStagingMargin = 30 * time.Minute
+
+// stDepositStagingMarginBlocks is stDepositStagingMargin at the deployment's cadence.
+func stDepositStagingMarginBlocks(cfg *StConfig) uint64 {
+	return uint64(stDepositStagingMargin/time.Second) / uint64(stLedgerV2BlockSeconds(cfg))
+}
+
+// depositDeadlineOpen reports whether a transaction sent now, with margin blocks
+// still to go after it, can make the deposit's deadline: the block after the latest
+// and the margin are inside it. Custody's finalized read lags the latest block, and a
+// send executes in a later block than either.
+func (self *CoreStClient) depositDeadlineOpen(ctx context.Context, deadline uint64, margin uint64) (bool, error) {
+	latest, err := self.LedgerV2LatestBlock(ctx)
+	if err != nil {
+		return false, err
+	}
+	return margin < deadline && latest < deadline-margin, nil
+}
+
+// requireDepositDeadlineOpen keeps a deposit's sends inside its epoch: end - 1 is
+// the last block any of them may land in, and past that nothing is sent.
+func (self *CoreStClient) requireDepositDeadlineOpen(ctx context.Context, epoch uint64, deadline uint64) error {
+	open, err := self.depositDeadlineOpen(ctx, deadline, 0)
+	if err != nil {
+		return err
+	}
+	if !open {
+		return fmt.Errorf("st: epoch %d deposit deadline, block %d, has reached the latest block; nothing is sent", epoch, deadline)
+	}
+	return nil
+}
+
+// depositStagingCloses is when the staging window of a deposit deadline closes, at the
+// deployment's cadence from the latest block, or an error when it already has. A
+// conversion runs under this as its deadline, so none starts what staging could not
+// use in time.
+func (self *CoreStClient) depositStagingCloses(ctx context.Context, epoch uint64, deadline uint64) (time.Time, error) {
+	if err := self.requireDepositStagingOpen(ctx, epoch, deadline); err != nil {
+		return time.Time{}, err
+	}
+	latest, err := self.LedgerV2LatestBlock(ctx)
+	if err != nil {
+		return time.Time{}, err
+	}
+	margin := stDepositStagingMarginBlocks(self.cfg)
+	if deadline <= margin || deadline-margin <= latest {
+		return time.Time{}, fmt.Errorf("st: epoch %d staging stops %d blocks before the deposit deadline, block %d; nothing is reserved", epoch, margin, deadline)
+	}
+	return server.NowUtc().Add(time.Duration(deadline-margin-latest) * time.Duration(stLedgerV2BlockSeconds(self.cfg)) * time.Second), nil
+}
+
+// requireDepositStagingOpen reserves no staging transfer too close to the epoch's end
+// for it and its deposit to finish.
+func (self *CoreStClient) requireDepositStagingOpen(ctx context.Context, epoch uint64, deadline uint64) error {
+	margin := stDepositStagingMarginBlocks(self.cfg)
+	open, err := self.depositDeadlineOpen(ctx, deadline, margin)
+	if err != nil {
+		return err
+	}
+	if !open {
+		return fmt.Errorf("st: epoch %d staging stops %d blocks before the deposit deadline, block %d; nothing is reserved", epoch, margin, deadline)
+	}
+	return nil
+}
+
+// How far back a retained staging's epoch and deposit nonce are looked for. An intent
+// names them only through its logical key, a digest, so finding them is what proves
+// which operation it belongs to. A staging stranded longer than this is left refused.
+const (
+	stDepositStagingSearchEpochs = 128
+	stDepositStagingSearchNonces = 64
+)
+
+// stDepositStagingRolled reports whether logicalKey is a staging transfer of an
+// earlier epoch or deposit nonce than the current ones. Both only go up, so such an
+// operation can never be the current one again. A key that matches none of them says
+// nothing: it may be the current operation, or one this endpoint's lagging view has
+// not reached.
+func stDepositStagingRolled(cfg *StConfig, logicalKey string, epoch uint64, nonce *big.Int) bool {
+	for e := range min(epoch, stDepositStagingSearchEpochs-1) + 1 {
+		for n := range int64(stDepositStagingSearchNonces) {
+			back := new(big.Int).Sub(nonce, big.NewInt(n))
+			if back.Sign() < 0 {
+				break
+			}
+			if e == 0 && n == 0 {
+				continue
+			}
+			key, err := stTransactionLogicalKey(cfg, fmt.Sprintf("deposit-fund:%d:%d:%s", epoch-e, cfg.NoId, back))
+			if err == nil && key == logicalKey {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// depositStagingShape reports whether intent is this deployment's own staging
+// transfer from the deposit key, in the canonical form custody admits.
+func (self *CoreStClient) depositStagingShape(intent *model.StTransactionIntent, from common.Address) bool {
+	if self.cfg == nil || self.cfg.DepositKey == nil || intent == nil || from != crypto.PubkeyToAddress(self.cfg.DepositKey.PublicKey) ||
+		intent.Profile != self.cfg.Profile || intent.DeploymentId != self.cfg.DeploymentId || intent.DeploymentKey != self.cfg.DeploymentKey() || intent.ChainId != self.cfg.ChainId ||
+		!strings.EqualFold(intent.GenesisHash, hexutil.Encode(self.cfg.GenesisHash[:])) || !strings.EqualFold(intent.FromAddress, from.Hex()) ||
+		!strings.EqualFold(intent.ToAddress, stStakingPrecompileAddress.Hex()) || len(intent.Calldata) != 164 ||
+		!strings.EqualFold(intent.CalldataHash, crypto.Keccak256Hash(intent.Calldata).Hex()) {
+		return false
+	}
+	canonical, err := stPackTransferStake(ss58.EvmMirrorPubkey(self.cfg.ContractAddress), self.cfg.DepositHotkey, self.cfg.Netuid, new(big.Int).SetBytes(intent.Calldata[132:164]))
+	return err == nil && bytes.Equal(canonical, intent.Calldata)
+}
+
+// turnedDepositStaging reports a staging transfer whose retirement has already been
+// made durable: its first reservation is the cancellation, with no attempt recorded,
+// as a process that stopped between the turn and the cancellation's signature leaves
+// it. Only the pure shape of the intent is checked, so a custody read that fails, or a
+// key past retireRolledDepositStaging's search, cannot leave the deposit key stuck
+// behind a decision already made.
+func (self *CoreStClient) turnedDepositStaging(ctx context.Context, intent *model.StTransactionIntent, from common.Address) (bool, error) {
+	if !self.depositStagingShape(intent, from) {
+		return false, nil
+	}
+	pending, err := model.GetPendingStTransactionGasReservation(ctx, intent.IntentId)
+	if err != nil {
+		return false, err
+	}
+	return pending != nil && pending.Attempt == 1 && pending.Kind == model.StTxAttemptCancellation, nil
+}
+
+// retireRolledDepositStaging frees the deposit key of a staging transfer reserved but
+// never signed before its epoch rolled, the process having stopped in between. Custody
+// refuses to sign it, and signing it would move stake for a deposit that is over, so
+// without this every later send of the key stops at it. It reports whether intent is
+// such a transfer, which the caller cancels, turning its unsigned execution reservation
+// into that cancellation first. The caller has seen that the intent has no attempt; an
+// intent with one is never touched. A custody read that fails proves nothing, and
+// leaves the intent as it is.
+func (self *CoreStClient) retireRolledDepositStaging(ctx context.Context, client *ethclient.Client, intent *model.StTransactionIntent, from common.Address) (bool, error) {
+	if self.coordinator == nil || self.vault == nil || !self.depositStagingShape(intent, from) {
+		return false, nil
+	}
+	state, err := self.readDepositCustody(ctx, client, nil)
+	if err != nil {
+		glog.Infof("[st]retained staging intent %s nonce %d not assessed: %s\n", intent.IntentKey, intent.Nonce, stScrubEndpoints(err.Error()))
+		return false, nil
+	}
+	if !stDepositStagingRolled(self.cfg, intent.LogicalKey, state.boundary.Epoch, state.nonce) {
+		return false, nil
+	}
+	gasPolicy, gasAuthority, err := self.operatorGasAdmission(ctx, from)
+	if err != nil {
+		return false, err
+	}
+	if gasPolicy != nil {
+		pending, err := model.GetPendingStTransactionGasReservation(ctx, intent.IntentId)
+		if err != nil {
+			return false, err
+		}
+		if pending != nil && pending.Kind == model.StTxAttemptExecution {
+			to, calldata, gasLimit, err := stTransactionAttemptPayload(intent, from, model.StTxAttemptCancellation)
+			if err != nil {
+				return false, err
+			}
+			envelope, err := self.transactionEnvelope(ctx, client, intent, from, to, calldata, gasLimit, nil, model.StTxAttemptCancellation, gasPolicy)
+			if err != nil {
+				return false, err
+			}
+			unsigned := envelope.transaction(new(big.Int).SetUint64(intent.ChainId), intent.Nonce, to, calldata)
+			if _, err := model.RetireStTransactionGasExecution(ctx, gasPolicy, gasAuthority, intent.IntentId, unsigned); err != nil {
+				return false, err
+			}
+		}
+	}
+	glog.Errorf("[st]retiring unsigned staging intent %s nonce %d: its epoch or deposit nonce has passed (epoch %d, deposit nonce %s); nothing was signed\n", intent.IntentKey, intent.Nonce, state.boundary.Epoch, state.nonce)
+	return true, nil
 }
 
 // Reconciliation finishes before sizing new funding. An already completed
@@ -336,6 +535,9 @@ func (self *CoreStClient) stageDepositPrincipal(ctx context.Context, epoch uint6
 		}
 		amount, err := stDepositFundingAmount(principal, state.staged)
 		if err != nil || amount.Sign() == 0 {
+			return "", common.Address{}, nil, err
+		}
+		if err := self.requireDepositStagingOpen(ctx, epoch, state.deadline); err != nil {
 			return "", common.Address{}, nil, err
 		}
 		operation := fmt.Sprintf("deposit-fund:%d:%d:%s", epoch, self.cfg.NoId, state.nonce)
