@@ -11288,4 +11288,10 @@ var migrations = []any{
 	// Audited single-use evaluator recovery; legacy cycle-zero writers remain
 	// compatible. Deploy compatible API/worker before authorizing any cycle.
 	competitionJobReevaluationMigration,
+
+	// The demand deposit's durable state (sn/demand, st_demand_schema.go): the
+	// funder's state and events, the last verified price sheet and each settlement
+	// v2 epoch's usage statement. New tables, and the usage statement is written at
+	// zero price too. Apply before deploying the taskworker that writes them.
+	newSqlMigration(stDemandSchemaSql),
 }
