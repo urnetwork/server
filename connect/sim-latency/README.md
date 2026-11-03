@@ -118,7 +118,7 @@ See:
 
 - [`evaluator/PATCH-SURFACE.md`](evaluator/PATCH-SURFACE.md) for the current
   ten-repository mono-root patch format and protected instrument boundary;
-- [`EPOCH-1-SOURCE.md`](EPOCH-1-SOURCE.md) for exact production epoch-1 commits
+- [`EPOCH-SOURCE.md`](EPOCH-SOURCE.md) for exact branches and commits by epoch
   and the distinction between canonical and raw source-lock hashes;
 - [`OFFICIAL-RUN.md`](OFFICIAL-RUN.md) for the evaluator and artifact contract;
 - [`PLAYBOOK.md`](PLAYBOOK.md) for live deployment and epoch operation;

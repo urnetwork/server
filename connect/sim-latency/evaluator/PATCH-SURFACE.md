@@ -3,7 +3,7 @@
 Updated 2026-11-02; replaces the August single-file development policy.
 The authoritative advertised surface is `patch_policy` in
 [`GET /competition/info`](https://api.bringyour.com/competition/info).
-Use the [source commits frozen for the round](../EPOCH-1-SOURCE.md), not moving `main`.
+Use the [source commits frozen for the round](../EPOCH-SOURCE.md), not moving `main`.
 
 ## Editable surface
 
