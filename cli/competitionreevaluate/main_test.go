@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -92,6 +93,7 @@ func TestRecoveryPrivateLeafRejectsDirectoryAndInvalidBounds(t *testing.T) {
 // Unknown fields and duplicate keys, including nested ones inside a raw JSON
 // snapshot, cannot be normalized away into a seemingly authenticated request.
 func TestRecoveryDocumentRejectsAmbiguousAuthority(t *testing.T) {
+	limits := defaultRecoverySettings()
 	for _, content := range []string{
 		`{"schema":1,"schema":2}`,
 		`{"schema":1,"unknown":true}`,
@@ -103,15 +105,139 @@ func TestRecoveryDocumentRejectsAmbiguousAuthority(t *testing.T) {
 			Schema   int            `json:"schema"`
 			Snapshot map[string]int `json:"snapshot,omitempty"`
 		}
-		if err := decodeRecoveryDocument([]byte(content), &value); err == nil {
+		if err := decodeRecoveryDocument([]byte(content), &value, limits.DocumentBytes); err == nil {
 			t.Fatalf("ambiguous document admitted: %s", content)
 		}
 	}
 	var accepted struct {
 		Schema int `json:"schema"`
 	}
-	if err := decodeRecoveryDocument([]byte("{\"schema\":1}\n"), &accepted); err != nil || accepted.Schema != 1 {
+	if err := decodeRecoveryDocument([]byte("{\"schema\":1}\n"), &accepted, limits.DocumentBytes); err != nil || accepted.Schema != 1 {
 		t.Fatalf("strict document refused: %+v error=%v", accepted, err)
+	}
+}
+
+// Case aliases cannot name the same typed authority field twice, including
+// nested typed objects and Unicode spellings folded by encoding/json.
+func TestRecoveryDocumentRejectsCaseAliasedProtocolKeys(t *testing.T) {
+	limits := defaultRecoverySettings()
+	for _, content := range []string{
+		`{"Schema":1}`,
+		`{"schema":1,"Schema":2}`,
+		`{"SCHEMA":1,"schema":2}`,
+		`{"ſchema":1}`,
+		`{"expected_terminal_Snapshot":{"G1":1}}`,
+		`{"expected_terminal_snapshot":{},"Expected_terminal_snapshot":{}}`,
+	} {
+		var auth model.CompetitionJobReevaluationAuthorization
+		if err := decodeRecoveryDocument([]byte(content), &auth, limits.DocumentBytes); err == nil {
+			t.Fatalf("case-aliased authority admitted: %s", content)
+		}
+	}
+	for _, content := range []string{
+		`{"runtime":{"Schema":1}}`,
+		`{"runtime":{"schema":1,"Schema":2}}`,
+		`{"runtime":{"expected_terminal_snapshot":{"G1":1}}}`,
+	} {
+		var envelope struct {
+			Runtime model.CompetitionJobReevaluationRuntime `json:"runtime"`
+		}
+		if err := decodeRecoveryDocument([]byte(content), &envelope, limits.DocumentBytes); err == nil {
+			t.Fatalf("nested typed authority admitted a case alias or data-map escape: %s", content)
+		}
+	}
+	var accepted struct {
+		Runtime model.CompetitionJobReevaluationRuntime `json:"runtime"`
+	}
+	if err := decodeRecoveryDocument([]byte(`{"runtime":{"schema":1}}`), &accepted, limits.DocumentBytes); err != nil || accepted.Runtime.Schema != 1 {
+		t.Fatalf("exact nested protocol field refused: %+v error=%v", accepted, err)
+	}
+}
+
+// The exact root raw snapshot is data, not a typed protocol. Preserve both
+// case-distinct keys and exact numeric tokens without weakening duplicates.
+func TestRecoveryDocumentPreservesCaseSensitiveSnapshotData(t *testing.T) {
+	limits := defaultRecoverySettings()
+	snapshot := `{"score_json":{"gates":{"G1":{"passed":true},"g1":{"passed":false}},"diagnostics":{"Schema":1,"schema":2,"samples":9007199254740993,"magnitude":1e400}}}`
+	content := `{"schema":1,"expected_terminal_snapshot":` + snapshot + `}`
+	var auth model.CompetitionJobReevaluationAuthorization
+	if err := decodeRecoveryDocument([]byte(content), &auth, limits.DocumentBytes); err != nil || auth.Schema != 1 || !bytes.Equal(auth.ExpectedTerminalSnapshot, []byte(snapshot)) {
+		t.Fatalf("case-sensitive raw snapshot changed or was refused: snapshot=%s error=%v", auth.ExpectedTerminalSnapshot, err)
+	}
+	var stored struct {
+		ScoreJson struct {
+			Gates map[string]struct {
+				Passed bool `json:"passed"`
+			} `json:"gates"`
+			Diagnostics map[string]json.Number `json:"diagnostics"`
+		} `json:"score_json"`
+	}
+	if err := json.Unmarshal(auth.ExpectedTerminalSnapshot, &stored); err != nil {
+		t.Fatal(err)
+	}
+	if len(stored.ScoreJson.Gates) != 2 || !stored.ScoreJson.Gates["G1"].Passed || stored.ScoreJson.Gates["g1"].Passed ||
+		stored.ScoreJson.Diagnostics["Schema"] != json.Number("1") || stored.ScoreJson.Diagnostics["schema"] != json.Number("2") ||
+		stored.ScoreJson.Diagnostics["samples"] != json.Number("9007199254740993") || stored.ScoreJson.Diagnostics["magnitude"] != json.Number("1e400") {
+		t.Fatalf("snapshot data lost distinct keys or numeric precision: %+v", stored.ScoreJson)
+	}
+	for _, content := range []string{
+		`{"expected_terminal_snapshot":{"G1":1,"G1":2}}`,
+		`{"expected_terminal_snapshot":{"G1":1,"\u00471":2}}`,
+	} {
+		var auth model.CompetitionJobReevaluationAuthorization
+		if err := decodeRecoveryDocument([]byte(content), &auth, limits.DocumentBytes); err == nil {
+			t.Fatalf("raw snapshot duplicate was admitted: %s", content)
+		}
+	}
+	var runtime model.CompetitionJobReevaluationRuntime
+	if err := decodeRecoveryDocument([]byte(content), &runtime, limits.DocumentBytes); err == nil {
+		t.Fatal("snapshot data exception admitted an unknown runtime protocol field")
+	}
+}
+
+// The data-map exception does not relax document, encoding, depth or byte
+// limits; the nesting boundary counts the enclosing authorization object.
+func TestRecoveryDocumentRejectsMalformedOrUnboundedObjects(t *testing.T) {
+	limits := defaultRecoverySettings()
+	largeContent := `{"expected_terminal_snapshot":{"value":"` + strings.Repeat("a", int(limits.DocumentBytes)) + `"}}`
+	for _, content := range []string{
+		`null`, `[]`, `true`, `3`, `"synthetic"`,
+		`{"schema":1} {"schema":2}`, `{"schema":1`,
+		"{\"expected_terminal_snapshot\":{\"value\":\"\xff\"}}",
+		`{"expected_terminal_snapshot":{"nested":` + strings.Repeat("[", 63) + `0` + strings.Repeat("]", 63) + `}}`,
+		largeContent,
+	} {
+		var auth model.CompetitionJobReevaluationAuthorization
+		if err := decodeRecoveryDocument([]byte(content), &auth, limits.DocumentBytes); err == nil {
+			t.Fatalf("malformed or unbounded document was admitted: bytes=%d", len(content))
+		}
+	}
+	content := `{"expected_terminal_snapshot":{"nested":` + strings.Repeat("[", 62) + `0` + strings.Repeat("]", 62) + `}}`
+	var auth model.CompetitionJobReevaluationAuthorization
+	if err := decodeRecoveryDocument([]byte(content), &auth, limits.DocumentBytes); err != nil || len(auth.ExpectedTerminalSnapshot) == 0 {
+		t.Fatalf("bounded data-map document was refused: error=%v", err)
+	}
+	smallContent := []byte(`{"schema":1}`)
+	smallLimits := limits
+	smallLimits.DocumentBytes = int64(len(smallContent))
+	var smallAuth model.CompetitionJobReevaluationAuthorization
+	if err := decodeRecoveryDocument(smallContent, &smallAuth, smallLimits.DocumentBytes); err != nil || smallAuth.Schema != 1 {
+		t.Fatalf("exact custom small document limit was refused: error=%v", err)
+	}
+	smallLimits.DocumentBytes--
+	if err := decodeRecoveryDocument(smallContent, &smallAuth, smallLimits.DocumentBytes); err == nil {
+		t.Fatal("document one byte over its owner's custom limit was admitted")
+	}
+	for _, limit := range []int64{0, -1} {
+		if err := decodeRecoveryDocument(smallContent, &smallAuth, limit); err == nil {
+			t.Fatal("non-positive owner document limit was admitted")
+		}
+	}
+	largeLimits := limits
+	largeLimits.DocumentBytes = int64(len(largeContent))
+	var largeAuth model.CompetitionJobReevaluationAuthorization
+	if err := decodeRecoveryDocument([]byte(largeContent), &largeAuth, largeLimits.DocumentBytes); err != nil || int64(len(largeAuth.ExpectedTerminalSnapshot)) <= limits.DocumentBytes {
+		t.Fatalf("explicit raised owner limit was replaced with the default: error=%v", err)
 	}
 }
 
@@ -126,6 +252,7 @@ func TestRecoveryFileRequiresCanonicalAbsolutePaths(t *testing.T) {
 
 // Raw file identity must not be confused with canonical document identity.
 func TestRecoveryRawDocumentPinDiffersFromSemanticIdentity(t *testing.T) {
+	limits := defaultRecoverySettings()
 	first := []byte(`{"schema":1}`)
 	second := []byte("{ \"schema\" : 1 }\n")
 	firstSha, secondSha := sha256.Sum256(first), sha256.Sum256(second)
@@ -138,7 +265,7 @@ func TestRecoveryRawDocumentPinDiffersFromSemanticIdentity(t *testing.T) {
 	var a, b struct {
 		Schema int `json:"schema"`
 	}
-	if decodeRecoveryDocument(first, &a) != nil || decodeRecoveryDocument(second, &b) != nil || a != b {
+	if decodeRecoveryDocument(first, &a, limits.DocumentBytes) != nil || decodeRecoveryDocument(second, &b, limits.DocumentBytes) != nil || a != b {
 		t.Fatal("valid semantic documents did not retain identical meaning")
 	}
 }

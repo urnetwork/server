@@ -19,6 +19,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
@@ -154,18 +155,28 @@ func recoveryFileDigestMatches(content []byte, expected string) bool {
 	return len(expected) == 64 && hex.EncodeToString(digest[:]) == expected
 }
 
-// Duplicate keys and unknown fields both refuse authority. Canonical hashing
-// alone cannot detect a duplicate discarded by encoding/json.
-func decodeRecoveryDocument(content []byte, result any) error {
+// Typed keys remain exact lowercase authority fields. Only the root terminal
+// snapshot's descendants are case-sensitive data; duplicates still refuse.
+func decodeRecoveryDocument(content []byte, result any, limit int64) error {
+	if limit <= 0 || !utf8.Valid(content) || int64(len(content)) > limit {
+		return errors.New("private document encoding or size rejected")
+	}
 	decoder := json.NewDecoder(bytes.NewReader(content))
 	decoder.UseNumber()
-	var value func() error
-	value = func() error {
+	var value func(int, bool) error
+	value = func(depth int, snapshotData bool) error {
+		if 64 < depth {
+			return errors.New("private document nesting exceeds limit")
+		}
 		token, err := decoder.Token()
 		if err != nil {
 			return err
 		}
-		if delimiter, ok := token.(json.Delim); ok {
+		delimiter, container := token.(json.Delim)
+		if depth == 0 && (!container || delimiter != '{') {
+			return errors.New("private document must be an object")
+		}
+		if container {
 			switch delimiter {
 			case '{':
 				seen := map[string]bool{}
@@ -178,31 +189,45 @@ func decodeRecoveryDocument(content []byte, result any) error {
 					if !ok || seen[name] {
 						return errors.New("duplicate private document field")
 					}
+					if !snapshotData {
+						for _, character := range name {
+							if character != '_' && (character < 'a' || 'z' < character) && (character < '0' || '9' < character) {
+								return errors.New("private protocol field is not exact lowercase")
+							}
+						}
+					}
 					seen[name] = true
-					if err := value(); err != nil {
+					childSnapshotData := snapshotData || depth == 0 && name == "expected_terminal_snapshot"
+					if err := value(depth+1, childSnapshotData); err != nil {
 						return err
 					}
 				}
+				if end, err := decoder.Token(); err != nil || end != json.Delim('}') {
+					return errors.New("private document object is malformed")
+				}
 			case '[':
 				for decoder.More() {
-					if err := value(); err != nil {
+					if err := value(depth+1, snapshotData); err != nil {
 						return err
 					}
+				}
+				if end, err := decoder.Token(); err != nil || end != json.Delim(']') {
+					return errors.New("private document array is malformed")
 				}
 			default:
 				return errors.New("unexpected private document delimiter")
 			}
-			_, err = decoder.Token()
 		}
-		return err
+		return nil
 	}
-	if err := value(); err != nil {
+	if err := value(0, false); err != nil {
 		return errors.New("private document JSON rejected")
 	}
 	if _, err := decoder.Token(); err != io.EOF {
 		return errors.New("private document has trailing content")
 	}
 	decoder = json.NewDecoder(bytes.NewReader(content))
+	decoder.UseNumber()
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(result); err != nil {
 		return errors.New("private document fields rejected")
@@ -252,7 +277,7 @@ func runRecovery(args []string, output io.Writer) error {
 	}
 	var auth model.CompetitionJobReevaluationAuthorization
 	var runtime model.CompetitionJobReevaluationRuntime
-	if decodeRecoveryDocument(authContent, &auth) != nil || decodeRecoveryDocument(runtimeContent, &runtime) != nil {
+	if decodeRecoveryDocument(authContent, &auth, limits.DocumentBytes) != nil || decodeRecoveryDocument(runtimeContent, &runtime, limits.DocumentBytes) != nil {
 		return errors.New("reevaluation documents rejected")
 	}
 	token, err := readRecoveryFile(*tokenPath, "", limits.TokenBytes)
